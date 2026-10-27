@@ -103,12 +103,15 @@ type rig struct {
 
 // keyProxy is the upstream the router is given: the part of the box that
 // holds the provider keys. The router sends it "/<provider><path>" with no
-// credential; it refuses an ungranted provider and a private machine's
-// remote image with the denial mark, and otherwise forwards the call to the
-// provider's host with that provider's key on the wire.
+// credential; it refuses an ungranted provider, a private machine's remote
+// image and a machine past its request cap (429) with the denial mark, and
+// otherwise forwards the call to the provider's host with that provider's
+// key on the wire.
 type keyProxy struct {
 	r    *rig
 	keys map[string]string
+	cap  int            // requests a machine may send in all; 0 is no cap
+	sent map[string]int // requests forwarded per machine
 }
 
 var providerHost = map[string]string{"openai": hostOpenAI, "anthropic": hostAnthropic}
@@ -121,23 +124,31 @@ func (k *keyProxy) HandlerFor(machine, label string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		name, path, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, "/"), "/")
 		host, key := providerHost[name], k.keys[name]
-		deny := func(why string) {
+		deny := func(status int, why string) {
 			w.Header().Set(deniedHeader, "1")
-			http.Error(w, "egress denied: "+why, http.StatusForbidden)
+			http.Error(w, "egress denied: "+why, status)
 		}
 		k.r.mu.Lock()
 		granted := false
 		for _, g := range k.r.grants[machine] {
 			granted = granted || g == name
 		}
+		capped := k.cap > 0 && k.sent[machine] >= k.cap
+		if granted && !capped {
+			k.sent[machine]++
+		}
 		k.r.mu.Unlock()
 		if host == "" || !granted {
-			deny("provider not granted")
+			deny(http.StatusForbidden, "provider not granted")
+			return
+		}
+		if capped {
+			deny(http.StatusTooManyRequests, "request cap reached")
 			return
 		}
 		body, _ := io.ReadAll(req.Body)
 		if label != LabelPublic && bytes.Contains(body, []byte(`"url":"http`)) {
-			deny("remote image source for private data")
+			deny(http.StatusForbidden, "remote image source for private data")
 			return
 		}
 		out := req.Clone(req.Context())
@@ -182,6 +193,7 @@ type rigOpts struct {
 	privateOK map[string]bool
 	// privateAllowed is Config.PrivateAllowed (P2-2w c4e).
 	privateAllowed func(string) bool
+	cap            int // keyProxy's per-machine request cap
 	maxOut         int
 }
 
@@ -200,7 +212,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	}
 	r := &rig{up: up, keys: keys, now: time.Unix(1_790_000_000, 0), grants: o.grants, labels: o.labels}
 	label := func(m string) string { return r.labels[m] }
-	r.px = &keyProxy{r: r, keys: keys}
+	r.px = &keyProxy{r: r, keys: keys, cap: o.cap, sent: map[string]int{}}
 	var err error
 	r.router, err = New(Config{
 		Providers: []Provider{OpenAI(), Anthropic()},
@@ -648,6 +660,40 @@ func (r *rig) lastDecision() Decision {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.decisions[len(r.decisions)-1]
+}
+
+// CAP-9: one machine's own proxy limits never cool a route for another
+// machine; the denial goes to that machine's guest as an OpenAI error.
+func TestProxyLimitsStayPerMachine(t *testing.T) {
+	r := newRig(t, rigOpts{
+		grants: map[string][]string{"a": {"openai", "anthropic"}, "b": {"openai", "anthropic"}},
+		labels: map[string]string{"a": LabelPublic, "b": LabelPublic},
+		cap:    1,
+	})
+	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
+	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
+	if w := r.do(t, "a", simpleChat); w.Code != 200 {
+		t.Fatalf("first call %d", w.Code)
+	}
+	w := r.do(t, "a", simpleChat)
+	if w.Code != 429 || r.up.count(hostOpenAI) != 0 {
+		t.Fatalf("capped machine: %d, openai=%d", w.Code, r.up.count(hostOpenAI))
+	}
+	var e struct {
+		Error struct{ Type, Message string }
+	}
+	if json.Unmarshal(w.Body.Bytes(), &e) != nil || e.Error.Type != "rate_limit_error" || !strings.Contains(e.Error.Message, "request cap") {
+		t.Fatalf("guest error %s", w.Body)
+	}
+	if d := r.lastDecision(); d.Outcome != Denied || d.Reason != "egress denied" {
+		t.Fatalf("decision %+v", d)
+	}
+	if w := r.do(t, "b", simpleChat); w.Code != 200 || completionText(t, w) != "Checking the weather." || r.up.count(hostAnthropic) != 2 {
+		t.Fatalf("other machine: %d anthropic=%d", w.Code, r.up.count(hostAnthropic))
+	}
+	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 0 || st.Calls != 2 {
+		t.Fatalf("proxy denial counted against the route: %+v", st)
+	}
 }
 
 // OP-8 groundwork: served calls report the provider's usage, cache tokens
