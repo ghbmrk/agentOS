@@ -13,12 +13,16 @@ import (
 // real PCs; this is the provisional value until then.
 const WaitMinutes = 3
 
-// BoxAddr is the box's address on its own Wi-Fi, the same in every image,
-// and BoxPage the local UI's address printed on the card, so the owner can
-// always get back to it (status, STOP, RESUME, sign-in).
+// PageName is the owner page's name (pageca.DefaultName and
+// localui.DefaultPageName; a test holds the three equal), and BoxPage the
+// page's address printed on the card and the claim sticker, so the owner can
+// always get back to it (status, STOP, RESUME, sign-in). It is HTTPS on the
+// name: the enforcer installs the core's authority before the claim (§12.1
+// step 4), and the plain listener's redirect keeps only the path (CH-9,
+// D-178; the core has no access point address).
 const (
-	BoxAddr = "10.42.0.1"
-	BoxPage = "http://" + BoxAddr + "/"
+	PageName = "agentos.internal"
+	BoxPage  = "https://" + PageName + "/"
 )
 
 // QuickStart is the card's quick-start, at most five steps (ONB-7).

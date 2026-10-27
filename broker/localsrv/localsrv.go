@@ -92,10 +92,9 @@ type Config struct {
 	// page's (#3006); an account not listed refuses both ops. The one that
 	// is also an AccountPlanner answers OpAccountPlan.
 	Accounts map[string]AccountSignIn
-	// Page is the page authority (OpenPage) that certifies the page's
-	// serving key (OpCertify, #3153); nil is none, and the page serves
-	// HTTP only.
-	Page *Page
+	// Certify is the kernel's certify, which signs the page's serving key
+	// (OpCertify, CH-9); nil is none, and the page serves HTTP only.
+	Certify Certifier
 	// Passkeys, when set, serves the passkey ops (#2779a; agentosd's
 	// -passkey-rp-id); nil leaves them unregistered.
 	Passkeys Passkeys

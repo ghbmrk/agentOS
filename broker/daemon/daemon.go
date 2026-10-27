@@ -221,6 +221,9 @@ type PageSocket struct {
 	// Passkeys serves the page's passkey ops on the kernel's owner seam
 	// (#2779a); nil leaves them unregistered.
 	Passkeys localsrv.Passkeys
+	// Certify is the kernel's certify, which signs the page's serving key
+	// (CH-9, MIG-4-recovery-f2); nil serves the page over HTTP only.
+	Certify localsrv.Certifier
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -487,6 +490,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.PlanSignIn = cfg.PageSocket.PlanSignIn
 		lcfg.Accounts = cfg.PageSocket.Accounts
 		lcfg.Passkeys = cfg.PageSocket.Passkeys
+		lcfg.Certify = cfg.PageSocket.Certify
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}

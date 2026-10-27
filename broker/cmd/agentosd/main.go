@@ -632,6 +632,9 @@ func main() {
 		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID)
 	}
 	if seat != nil {
+		if cfg.PageSocket != nil {
+			cfg.PageSocket.Certify = pageCertify{*seat}
+		}
 		cfg.Kernel = storedKernel{*seat, kernelStore}
 		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)
 	}
