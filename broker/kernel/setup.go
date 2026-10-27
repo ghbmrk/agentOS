@@ -95,7 +95,16 @@ func (k *Kernel) Box() ed25519.PublicKey { return slices.Clone(k.log.cfg.Pub) }
 // is the log's first entry and anchors before it returns; from then on the
 // kernel serves as any other. The owner channel authenticates the caller as
 // the phone setup paired (CH-9, HW-10), as for every owner action.
-func (k *Kernel) Setup(now int64, f FirstAnchors) error {
+func (k *Kernel) Setup(now int64, f FirstAnchors) error { return k.SetupWithEdge(now, f, nil) }
+
+// SetupWithEdge is Setup on a box whose link port captured a first edge key
+// before the Owner Card confirm (HW-15, brief EDGE-link-core decision 3):
+// the key is logged right after the anchors, as the log's second entry, and
+// no later step logs a first key. A nil edge logs none.
+func (k *Kernel) SetupWithEdge(now int64, f FirstAnchors, edge ed25519.PublicKey) error {
+	if edge != nil && !edgeKey(edge) {
+		return ErrEdgeKey
+	}
 	if !k.s.SetupOpen() {
 		return ErrSetupClosed
 	}
@@ -108,7 +117,10 @@ func (k *Kernel) Setup(now int64, f FirstAnchors) error {
 			return ErrSetupKeys
 		}
 	}
-	return k.owner(now, TAnchorsSet, f)
+	if err := k.owner(now, TAnchorsSet, f); err != nil || edge == nil {
+		return err
+	}
+	return k.edgeFirst(now, edge)
 }
 
 // applySetup folds the setup entry: only as the log's first, on a box whose
@@ -122,5 +134,6 @@ func (s *State) applySetup(e Entry) error {
 		return fmt.Errorf("entry %d %s: setup is not this log's first entry or not two keys: %w", e.Seq, e.Type, ErrCorrupt)
 	}
 	s.Anchors = slices.Clone(f.Anchors)
+	s.edge.setup = true
 	return nil
 }
