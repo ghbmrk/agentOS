@@ -182,10 +182,23 @@ func admitPort1(sys, iface, file string, nft func(script string) error, wait fun
 	if err := nft(script); err != nil {
 		return "", errors.New("could not open the page's ports on port 1 " + p + " in the inbound firewall: " + err.Error())
 	}
-	if err := os.WriteFile(file, []byte(p+"\n"), 0o644); err != nil {
+	// Root writes into the page user's runtime directory: a fresh file,
+	// never through a link left there. The unit's UMask=0077 binds `+`
+	// commands too, so the mode is set on the open file: the page reads it
+	// as another uid (#3382 L3 1, Security 1).
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
 		return "", err
 	}
-	return p, nil
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return "", err
+	}
+	if _, err := f.WriteString(p + "\n"); err != nil {
+		f.Close()
+		return "", err
+	}
+	return p, f.Close()
 }
 
 // runNft loads script with one nft -f, a single transaction.

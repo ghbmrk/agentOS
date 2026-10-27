@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -979,6 +980,21 @@ func TestAdmitPort1LoadsTheSetAndHandsOverTheName(t *testing.T) {
 	if got, err := servedPort1(sys, "", file); err != nil || got != "eth0" {
 		t.Fatalf("the page serves on %q, %v", got, err)
 	}
+	// The file is made fresh, never written through a link or over an old one.
+	if _, err := admitPort1(sys, "eth0", file, nft, now); err == nil {
+		t.Fatal("wrote over an existing hand-over file")
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "target"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admitPort1(sys, "eth0", link, nft, now); err == nil {
+		t.Fatal("wrote through a symlink")
+	}
+	loaded = loaded[:1]
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
 	// A unit naming port 1 (the harness's veth) is admitted under that name.
 	if p, err := admitPort1(sys, "enowner0", file, nft, now); err != nil || p != "enowner0" {
 		t.Fatalf("named port 1: %q, %v", p, err)
@@ -1066,5 +1082,49 @@ func TestUnitAdmitsPort1AsRootAndClosesOnStop(t *testing.T) {
 	}
 	if close := strings.TrimPrefix(set["ExecStopPost"][0], "+/usr/sbin/nft ") + "\n"; close != netguard.InboundPageClose {
 		t.Errorf("the stop runs %q, not netguard.InboundPageClose %q", close, netguard.InboundPageClose)
+	}
+}
+
+// #3382 L3 1, Security 1: the unit's UMask=0077 binds the root step too,
+// so the hand-over file's mode is set explicitly: the page, another uid,
+// can read it. Run as root, it also reads it back as nobody.
+// REQ: CH-9, HW-12
+func TestAdmitPort1HandOverIsReadableUnderTheUnitsUmask(t *testing.T) {
+	sys, add := fakeLinks(t)
+	add("eth0", "pci0000:00/0000:00:1c.0/0000:01:00.0", false)
+	// Not under t.TempDir, whose parent another uid cannot traverse.
+	dir, err := os.MkdirTemp("", "port1-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "port1")
+	old := syscall.Umask(0o077)
+	_, err = admitPort1(sys, "", file, func(string) error { return nil }, func() bool { return true })
+	syscall.Umask(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Fatalf("hand-over file mode %v, want -rw-r--r--", fi.Mode())
+	}
+	if os.Geteuid() != 0 {
+		return
+	}
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip("no cat")
+	}
+	cmd := exec.Command(cat, file)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
+	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "eth0\n" {
+		t.Fatalf("another uid reads %q, %v", out, err)
 	}
 }

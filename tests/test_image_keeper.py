@@ -272,6 +272,16 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(self.v(), ["agentos-boot-report.service: ExecStartPre=+/usr/bin/true runs with full privileges, "
                                     "outside its device policy and namespace (STO-2c)"])
         self.assertEqual(check.FULL_PRIVILEGE_EXEMPT, ("agentos-egress.service",))
+        # HW12-port1-set: the page's unit runs exactly its two firewall commands as root, and nothing else.
+        self.assertEqual([(u, k) for u, k, _ in check.FULL_PRIVILEGE_COMMANDS],
+                         [("agentos-localui.service", "ExecStartPre"), ("agentos-localui.service", "ExecStopPost")])
+        self.add("agentos-localui.service", "Service", "ExecStartPost=+/usr/bin/true")
+        self.assertIn("agentos-localui.service: ExecStartPost=+/usr/bin/true runs with full privileges, "
+                      "outside its device policy and namespace (STO-2c)", self.v())
+        self.edit("agentos-localui.service", "+/usr/sbin/nft flush set inet agentos_inbound page",
+                  "+/usr/sbin/nft flush ruleset")
+        self.assertIn("agentos-localui.service: ExecStopPost=+/usr/sbin/nft runs with full privileges, "
+                      "outside its device policy and namespace (STO-2c)", self.v())
 
     # #2899: the unlock unit.
 
