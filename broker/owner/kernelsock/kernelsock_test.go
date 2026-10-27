@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -714,5 +715,89 @@ func TestCertifyReachesTheKernel(t *testing.T) {
 	}
 	if noAuthorityText != proc.ErrNoAuthority.Error() || pageRestoreText != proc.ErrPageRestore.Error() {
 		t.Fatal("the refusals' texts are not the kernel's")
+	}
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r1 (#3391): a hardware key's tap over RotateMsg gets an
+// approval the store's head key signed, and the same approval switches
+// the kernel to the new recipient; a phone passkey's tap is ErrRotateSig,
+// a spent approval ErrApprovalStale and an expired one ErrApprovalExpired,
+// here as this package's own errors, so the texts stay the kernel's.
+func TestRecoveryRotateReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	if approvalStaleText != proc.ErrApprovalStale.Error() || approvalExpiredText != handoff.ErrApprovalExpired.Error() {
+		t.Fatal("the rotation refusals' texts are not the kernel's")
+	}
+	ctx := context.Background()
+	as := anchorSigners(t)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcp := func(b byte) backup.Recipient {
+		r, err := backup.RecipientFor(bytes.Repeat([]byte{b}, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r1, r2 := rcp(9), rcp(10)
+	data := t.TempDir()
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(data, "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: pub, Sign: priv, Anchors: publics(as),
+		KeyDir: filepath.Join(data, "keys"), BackupDir: filepath.Join(data, "backups"), Recipient: append(r1.X, r1.EK...),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	if !bytes.Equal(RotateMsg(r1.ID(), r2.ID()), key.CosignMsg(kernel.RecoveryRotateHash(r1.ID(), r2.ID()))) {
+		t.Fatal("RotateMsg is not the rotation's cosign message")
+	}
+	sign := func(s key.Ed25519Signer, old, next string) key.Cosign {
+		return key.Cosign{By: s.Public(), Sig: s.Sign(RotateMsg(old, next))}
+	}
+	phone := anchorSigners(t)[0] // a key the kernel holds as no anchor
+	if _, err := o.RecoveryRotate(ctx, r2.ID(), sign(phone, r1.ID(), r2.ID())); !errors.As(err, new(Refused)) || !errors.Is(err, ErrRotateSig) {
+		t.Fatalf("a key that is no anchor: %v", err)
+	}
+	a, err := o.RecoveryRotate(ctx, r2.ID(), sign(as[0], r1.ID(), r2.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := handoff.VerifyApproval(pub, a, time.Now().UnixMilli()); err != nil || got.Old != r1.ID() || got.Next != r2.ID() {
+		t.Fatalf("approval %+v, %v", got, err)
+	}
+	expired, err := handoff.SignApproval(priv, handoff.Approval{Route: handoff.RouteCard, Old: r1.ID(), Next: r2.ID(), Expires: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := append(bytes.Clone(r2.X), r2.EK...)
+	if err := o.SwitchRecipient(ctx, wire, expired); !errors.Is(err, ErrApprovalExpired) {
+		t.Fatalf("an expired approval: %v", err)
+	}
+	if err := o.SwitchRecipient(ctx, wire, a); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := o.Backups(ctx); err != nil || v.Recipient != r2.ID() {
+		t.Fatalf("after the switch: %+v %v", v, err)
+	}
+	r3 := rcp(11)
+	spent, err := handoff.SignApproval(priv, handoff.Approval{Route: handoff.RouteCard, Old: r1.ID(), Next: r3.ID(), Expires: time.Now().Add(time.Hour).UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SwitchRecipient(ctx, append(bytes.Clone(r3.X), r3.EK...), spent); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("an approval from before the switch: %v", err)
 	}
 }

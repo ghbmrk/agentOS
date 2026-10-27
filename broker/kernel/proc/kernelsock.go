@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
@@ -172,6 +173,20 @@ type (
 		Confirmation kernel.Confirmation `json:"confirmation"`
 		Err          string              `json:"err,omitempty"`
 	}
+	// rotateArgs is a rotation an anchor signed: next is the new key's
+	// recipient ID, "" when the card is lost.
+	rotateArgs struct {
+		Next   string     `json:"next"`
+		Cosign key.Cosign `json:"cosign"`
+	}
+	approvalRead struct {
+		Approval []byte `json:"approval"`
+	}
+	// recipientArgs is the new recipient in its wire form and its approval.
+	recipientArgs struct {
+		Recipient []byte `json:"recipient"`
+		Approval  []byte `json:"approval"`
+	}
 	none struct{}
 )
 
@@ -272,6 +287,26 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return r, nil
 	},
 	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
+	// Recovery-key rotation (REC-4, D-201): the anchor's tap gets a
+	// head-signed approval; the recipient switches only on one.
+	"recoveryrotate": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a rotateArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		b, err := h.RecoveryRotate(now, a.Next, a.Cosign)
+		if err != nil {
+			return nil, err
+		}
+		return approvalRead{b}, nil
+	},
+	"recipient": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a recipientArgs
+		if err := json.Unmarshal(raw, &a); err != nil || len(a.Approval) > handoff.MaxApproval {
+			return nil, ErrArgs
+		}
+		return nil, h.SwitchRecipient(now, a.Recipient, a.Approval)
+	},
 	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var f kernel.FirstAnchors
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -482,6 +517,7 @@ func init() {
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
 		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased,
+		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
@@ -690,6 +726,22 @@ func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t)
 
 // Backups is the recipient's ID, every destination and every kept backup.
 func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
+
+// RecoveryRotate asks for a recovery-key approval on an anchor's signature
+// c over kernel.RecoveryRotateHash(old, next), old the recipient the
+// kernel holds (Backups' Recipient): next is the new key's recipient ID,
+// or "" when the card is lost. The approval is handoff.Approval's form.
+func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
+	var r approvalRead
+	err := o.Call("recoveryrotate", rotateArgs{next, c}, &r)
+	return r.Approval, err
+}
+
+// SwitchRecipient makes r, in its wire form, the backup recipient, on the
+// card-route approval RecoveryRotate gave for it.
+func (o Owner) SwitchRecipient(r, approval []byte) error {
+	return o.Call("recipient", recipientArgs{r, approval}, nil)
+}
 
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {

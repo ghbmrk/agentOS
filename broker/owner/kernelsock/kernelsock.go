@@ -288,6 +288,12 @@ func typed(err error) error {
 		return fmt.Errorf("%w (%w)", ErrTargetExists, r)
 	case kernel.ErrNoTarget.Error():
 		return fmt.Errorf("%w (%w)", ErrNoTarget, r)
+	case kernel.ErrRotateSig.Error():
+		return fmt.Errorf("%w (%w)", ErrRotateSig, r)
+	case approvalStaleText:
+		return fmt.Errorf("%w (%w)", ErrApprovalStale, r)
+	case approvalExpiredText:
+		return fmt.Errorf("%w (%w)", ErrApprovalExpired, r)
 	}
 	return err
 }
@@ -417,6 +423,64 @@ func (o Owner) Backups(ctx context.Context) (BackupsView, error) {
 	var v BackupsView
 	err := typed(o.call(ctx, "backups", nil, &v))
 	return v, err
+}
+
+// Recovery-key rotation (REC-4, BAK-1, D-201): the kernel checks the
+// hardware key's tap and answers an approval, which the keeper's one-shot
+// verifies with the store's head key; once the keeper has written the new
+// recipient, the kernel switches to it on the same approval. The approval
+// is opaque here: the owner side only carries it.
+
+// The kernel's refusals of a rotation, matched by its words. Each still
+// wraps the Refused, so errors.As finds the kernel's own words too.
+var (
+	// ErrRotateSig: no hardware key signed this rotation (kernel.ErrRotateSig).
+	ErrRotateSig = errors.New("kernelsock: the kernel refused: no hardware key signed that recovery-key change")
+	// ErrApprovalStale: the approval names another recipient than the
+	// kernel's: used already, or another rotation's.
+	ErrApprovalStale = errors.New("kernelsock: the kernel refused: that approval is for another recipient")
+	// ErrApprovalExpired: the approval's time is over; ask for another.
+	ErrApprovalExpired = errors.New("kernelsock: the kernel refused: that approval has expired")
+)
+
+// approvalStaleText and approvalExpiredText are kernel/proc
+// ErrApprovalStale's and handoff.ErrApprovalExpired's texts;
+// TestRecoveryRotateReachesTheKernel keeps them the same.
+const (
+	approvalStaleText   = "run: that recovery-key approval is for another recipient than mine; ask again"
+	approvalExpiredText = "handoff: the recovery-key approval has expired; ask again"
+)
+
+// RotateMsg is the message a hardware key signs to rotate the backup
+// recipient old (BackupsView.Recipient, "" when there is none) to next,
+// the new key's recipient ID, or "" when the card is lost:
+// key.CosignMsg(kernel.RecoveryRotateHash(old, next)).
+func RotateMsg(old, next string) []byte { return key.CosignMsg(kernel.RecoveryRotateHash(old, next)) }
+
+// RecoveryRotate asks the kernel for an approval of rotating to next on a
+// hardware key's signature c over RotateMsg(old, next). A signature over
+// another change, or a phone passkey's, is ErrRotateSig.
+func (o Owner) RecoveryRotate(ctx context.Context, next string, c key.Cosign) ([]byte, error) {
+	var r struct {
+		Approval []byte `json:"approval"`
+	}
+	err := typed(o.call(ctx, "recoveryrotate", struct {
+		Next   string     `json:"next"`
+		Cosign key.Cosign `json:"cosign"`
+	}{next, c}, &r))
+	return r.Approval, err
+}
+
+// SwitchRecipient makes recipient, in its wire form (X25519 key, then
+// ML-KEM-768 encapsulation key), the one every later backup seals to, on
+// the card-route approval RecoveryRotate gave for it. A retry after it took
+// effect succeeds; an approval used for another recipient is
+// ErrApprovalStale, one past its time ErrApprovalExpired.
+func (o Owner) SwitchRecipient(ctx context.Context, recipient, approval []byte) error {
+	return typed(o.call(ctx, "recipient", struct {
+		Recipient []byte `json:"recipient"`
+		Approval  []byte `json:"approval"`
+	}{recipient, approval}, nil))
 }
 
 // The page's serving certificate (CH-9, MIG-4-recovery-f1): the kernel

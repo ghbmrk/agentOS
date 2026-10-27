@@ -592,3 +592,95 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 		t.Fatalf("first edge entry is not a copy: %v", err)
 	}
 }
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r1 (#3391): an approval round-trips under the head key
+// and binds its route, old, next and expiry; one under another head key,
+// edited in any byte, cut, padded, past its time or out of shape refuses.
+func TestApprovalRoundTripAndBounds(t *testing.T) {
+	pub, priv := gen(3)
+	otherPub, otherPriv := gen(4)
+	old, next := strings.Repeat("0a", 16), strings.Repeat("1b", 16)
+	card := Approval{Route: RouteCard, Old: old, Next: next, Expires: 5000}
+	for _, a := range []Approval{card, {Route: RouteCard, Next: next, Expires: 5000}, {Route: RouteLost, Old: old, Expires: 5000}, {Route: RouteLost, Expires: 1}} {
+		b, err := SignApproval(priv, a)
+		if err != nil {
+			t.Fatalf("%+v: %v", a, err)
+		}
+		if len(b) > MaxApproval {
+			t.Fatalf("%+v: %d bytes, over MaxApproval", a, len(b))
+		}
+		if got, err := VerifyApproval(pub, b, a.Expires-1); err != nil || got != a {
+			t.Fatalf("%+v: verified %+v, %v", a, got, err)
+		}
+		if _, err := VerifyApproval(pub, b, a.Expires); !errors.Is(err, ErrApprovalExpired) {
+			t.Fatalf("%+v at its expiry: %v", a, err)
+		}
+		if _, err := VerifyApproval(otherPub, b, 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%+v under another head key: %v", a, err)
+		}
+	}
+	b, err := SignApproval(priv, card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range b {
+		e := bytes.Clone(b)
+		e[i] ^= 1
+		if got, err := VerifyApproval(pub, e, 0); err == nil {
+			t.Fatalf("byte %d edited: verified %+v", i, got)
+		}
+	}
+	for name, e := range map[string][]byte{
+		"empty":   nil,
+		"cut":     b[:len(b)-1],
+		"no sig":  b[:len(b)-ed25519.SignatureSize],
+		"padded":  append(bytes.Clone(b), 0),
+		"long":    bytes.Repeat([]byte{'a'}, MaxApproval+1),
+		"tagless": b[len(approvalTag):],
+	} {
+		if _, err := VerifyApproval(pub, e, 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A body re-signed by the right key but out of shape still refuses:
+	// the parser, not only the signature, holds the form.
+	resign := func(body []byte) []byte { return append(bytes.Clone(body), ed25519.Sign(priv, body)...) }
+	body := card.body()
+	for name, e := range map[string][]byte{
+		"version 2":   append(append([]byte(approvalTag), 2), body[len(approvalTag)+1:]...),
+		"route c":     append(append([]byte(approvalTag), approvalV, 'c'), body[len(approvalTag)+2:]...),
+		"old overrun": append(append([]byte(approvalTag), approvalV, 'a', 200), body[len(approvalTag)+3:]...),
+		"trailing":    append(bytes.Clone(body), 0),
+	} {
+		if _, err := VerifyApproval(pub, resign(e), 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	for name, a := range map[string]Approval{
+		"card, no next":    {Route: RouteCard, Old: old},
+		"card, next = old": {Route: RouteCard, Old: old, Next: old},
+		"lost, a next":     {Route: RouteLost, Old: old, Next: next},
+		"no route":         {Old: old, Next: next},
+		"upper hex":        {Route: RouteCard, Old: strings.ToUpper(old), Next: next},
+		"short id":         {Route: RouteCard, Old: old[:30], Next: next},
+	} {
+		if _, err := SignApproval(priv, a); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s signed: %v", name, err)
+		}
+		if _, err := VerifyApproval(pub, resign(a.bodyUnchecked()), 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s verified: %v", name, err)
+		}
+	}
+	if _, err := SignApproval(otherPriv[:10], card); !errors.Is(err, ErrApproval) {
+		t.Fatalf("a short head key: %v", err)
+	}
+}
+
+// bodyUnchecked is body for any route byte, "" written as a zero byte.
+func (a Approval) bodyUnchecked() []byte {
+	if a.Route == "" {
+		a.Route = "\x00"
+	}
+	return a.body()
+}

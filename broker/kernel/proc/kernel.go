@@ -87,6 +87,10 @@ type Kernel struct {
 	firstEdge ed25519.PublicKey
 	link      ed25519.PrivateKey
 	clock     func() int64 // KernelConfig's
+	// head is KernelConfig's Sign, the store's head key: it signs the
+	// recovery-key approvals the root steps verify (handoff.Approval).
+	// Set at open and never changed.
+	head ed25519.PrivateKey
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -130,7 +134,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock, head: cfg.Sign}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		if err == nil {
