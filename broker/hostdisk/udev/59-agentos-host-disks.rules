@@ -32,6 +32,12 @@
 #   root:root 0600      no other uid (services, agent machines, executors)
 #                       can open the node (":=" so no later rule widens it;
 #                       the 72 file strips the uaccess tag 70-uaccess adds).
+#   RUN host-disk-unlink
+#                       removes the /dev/disk links the initrd's udev made
+#                       for it: the initrd has none of these rules, and udev
+#                       here no longer knows of those links, so it never
+#                       removes them (HOST-1a part 2, seen on #3306's CI
+#                       boot). The image installs it in /usr/lib/agentos.
 #
 # Numbered 59: before 60-persistent-storage, which honors the flag.
 
@@ -49,6 +55,7 @@ GOTO="agentos_host_disks_end"
 
 LABEL="agentos_host_disk"
 ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}="1", ENV{SYSTEMD_READY}="0", ENV{UDISKS_IGNORE}="1", ENV{UDISKS_AUTO}="0", ENV{UDISKS_SYSTEM}="1", OWNER:="root", GROUP:="root", MODE:="0600"
+RUN+="/usr/lib/agentos/host-disk-unlink %k"
 KERNEL=="dm-*", ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}="1", ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"
 
 LABEL="agentos_host_disks_end"

@@ -71,7 +71,7 @@ func TestTheKernelProcessOpensContent(t *testing.T) {
 	if r := h.Content(); len(r.Missing)+len(r.Unnamed) != 0 {
 		t.Fatalf("a restart reports %+v", r)
 	}
-	if err := h.With(func(k *kernel.Kernel) error { _, err := k.Erase(1000, sub); return err }); err != nil {
+	if _, err := h.Erase(1000, sub); err != nil {
 		t.Fatalf("erase after a restart: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(keyDir, sub+keyExt)); !errors.Is(err, os.ErrNotExist) {
@@ -108,7 +108,7 @@ func TestAStartReappliesErasesAndReports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.With(func(k *kernel.Kernel) error { _, err := k.Erase(1000, gone); return err }); err != nil {
+	if _, err := h.Erase(1000, gone); err != nil {
 		t.Fatal(err)
 	}
 	h.Close()

@@ -295,27 +295,13 @@ form { margin: .6em 0 1.2em; }
 {{end}}{{end}}
 {{template "foot"}}{{end}}
 
-{{define "wifi"}}<form method="post" action="/setup/network">
-<label>Your home Wi-Fi{{if .}}<select name="ssid"><option value="" disabled selected>Choose your network</option>{{range .}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
-<label>Not listed? Type its name<input type="text" name="other" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false">{{else}}<input type="text" name="ssid" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required>{{end}}</label>
-<label>Its password<input type="text" name="password" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
-<button>Join</button>
-</form>
-{{end}}
-
 {{define "setup"}}{{template "head" .Refresh}}
 <h1>Set up AgentOS</h1>
 <p class="muted">Box: {{phase .Progress.Phase}}</p>
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
-{{with .Note}}<p class="err" id="uplink">{{.}}</p>{{end}}
 
-{{if eq .Step "network"}}
-<h2>1. Home network</h2>
-{{template "wifi" .Networks}}
-<form method="post" action="/setup/network"><input type="hidden" name="ethernet" value="1"><button class="plain">I plugged in an Ethernet cable</button></form>
-
-{{else if eq .Step "number"}}
-<h2>2. Text your box</h2>
+{{if eq .Step "number"}}
+<h2>1. Text your box</h2>
 {{if not .CanText}}<p>Pairing is not available yet: I cannot send texts right now. Check that the SIM is in the modem and the modem is plugged in, then reload this page.</p>
 {{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
 {{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
@@ -327,11 +313,9 @@ form { margin: .6em 0 1.2em; }
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
 </details>
 {{if .SMSLink}}<p><a href="/setup">I sent it</a></p>{{end}}{{end}}
-{{if .Rejoin}}<h2>Home Wi-Fi again</h2>
-{{template "wifi" .Networks}}{{end}}
 
 {{else if eq .Step "claim"}}
-<h2>2. Text your box</h2>
+<h2>1. Text your box</h2>
 <p>Your number ({{.Paired}}) is paired. I texted you a page code; type it here to continue on this phone.</p>
 <form method="post" action="/setup/claim"><label>Page code<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Continue</button></form>
 {{template "restart" true}}
@@ -343,7 +327,7 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
-<h2>3. Add approval codes</h2>
+<h2>2. Add approval codes</h2>
 {{with .Replace}}<p class="err">{{.}}</p>{{end}}
 {{if .CodesUnavailable}}
 {{else if .CodesEnrolled}}<p>Approval codes are already set up. If you no longer have the code generator, replace it with your recovery key after setup.</p>
@@ -357,24 +341,24 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/codes"><label>Type the 6-digit code it shows<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label><button>Confirm</button></form>
 {{end}}
 {{else if eq .Step "card"}}
-<h2>4. Owner Card</h2>
+<h2>3. Owner Card</h2>
 <p>Your Owner Card holds your vault passphrase and recovery key. Print it or save it, then type the word and group I ask for. Once you confirm, I keep no copy of it.</p>
 <p class="muted">{{.CardRestart}}</p>
 <p><a class="button" href="/setup/card">Show my Owner Card</a></p>
 
 {{else if eq .Step "recovery"}}
-<h2>5. Recovery sheet</h2>
+<h2>4. Recovery sheet</h2>
 <p>Tear the recovery key sheet off your card and store it somewhere safe, apart from the drive. You will rarely need it.</p>
 <form method="post" action="/setup/recovery"><label><input type="checkbox" name="stored" value="1"> I stored the recovery sheet</label><br><button>Continue</button></form>
 
 {{else if eq .Step "host"}}
-<h2>6. This PC</h2>
+<h2>5. This PC</h2>
 <p>This PC becomes your box's trusted PC, so it restarts by itself after a power cut.</p>
 <form method="post" action="/setup/host"><label><input type="checkbox" name="not_mine" value="1"> This is not my PC</label><br><button>Continue</button></form>
 {{with .Defaults}}<p class="muted">Defaults: {{.}} Change them any time by text or here.</p>{{end}}
 
 {{else if eq .Step "ai"}}
-<h2>7. Connect AI</h2>
+<h2>6. Connect AI</h2>
 {{if not .Progress.Updated}}{{if eq .Progress.Phase "offline"}}<p>I am offline, so I am running the version I shipped with. I update when I am next online, and this step opens after that.</p>
 {{else}}<p>I am updating to the latest version first. This step opens when it finishes.</p>{{end}}
 {{else}}<p class="muted">One is enough. You can add more later.</p>
@@ -401,7 +385,7 @@ func phaseText(p string) string {
 	return "starting"
 }
 
-// pagesFor returns the page set with this box's address in the footer, so
+// pagesFor returns the page set with the page's name in the footer, so
 // the owner always sees where the box page lives.
 func pagesFor(host string) *template.Template {
 	return template.Must(tmpl.Clone()).Funcs(template.FuncMap{"boxhost": func() string { return host }})

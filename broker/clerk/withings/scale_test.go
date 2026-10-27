@@ -27,6 +27,8 @@ type fakeScale struct {
 	// reply to the next request (its own requests, or garbage).
 	after [][]byte
 	mtu   int
+	// battery is the BATTERY reply's value; nil is 87.
+	battery []byte
 
 	mu      sync.Mutex
 	written [][]byte
@@ -121,7 +123,11 @@ func (f *fakeScale) Write(_ context.Context, frame []byte) error {
 		}
 		f.emit(message{cmdProbe, []tlv{{tChallengeResponse, str(mine)}, {tProbeReply, f.probeReply()}}})
 	case cmdBattery:
-		f.emit(message{cmdBattery, []tlv{{tBattery, u16(87)}}})
+		b := f.battery
+		if b == nil {
+			b = u16(87)
+		}
+		f.emit(message{cmdBattery, []tlv{{tBattery, b}}})
 	case cmdConnectReason:
 		f.emit(message{cmdConnectReason, []tlv{{tConnectReason, u16(2)}}})
 	case cmdStoredMeasure:

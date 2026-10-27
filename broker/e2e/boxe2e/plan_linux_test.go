@@ -17,13 +17,13 @@ import (
 
 // REQ: HW-10, CRED-5
 
-// fakeBox is the setup page at step 7 as #1264 is expected to serve it,
+// fakeBox is the setup page at step 6 as #1264 is expected to serve it,
 // with the vault's device-code sign-in played against the stub: the
 // sign-in starts on the owner's post and completes on a reload once the
 // owner approved the code at the provider.
 type fakeBox struct {
 	stub  *codexstub.Stub
-	offer bool   // step 7 offers the codex sign-in
+	offer bool   // step 6 offers the codex sign-in
 	host  string // the link's host
 	leak  bool   // the status page shows an issued token
 	stray bool   // the box makes a call the provider refuses
@@ -73,11 +73,11 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		link := "https://" + f.host + "/codex/device"
-		w.Write([]byte(`<h2>7. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>` +
+		w.Write([]byte(`<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>` +
 			`<p>Open <a href="` + link + `">` + link + `</a> and enter <span class="mono">` + f.dev["user_code"] + `</span>.</p>` +
 			`<p>This code is from OpenAI.</p><p><a href="/setup">I signed in</a></p>`))
 	case r.URL.Path == "/setup":
-		page := `<h2>7. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
+		page := `<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
 		if f.noRun {
 			page += `<p class="err">Could not start sign-in with that provider. Try again.</p>`
 		}

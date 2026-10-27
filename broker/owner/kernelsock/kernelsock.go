@@ -269,6 +269,10 @@ func typed(err error) error {
 		return ErrAnchor
 	case setupOnlyText:
 		return ErrSetupOnly
+	case noAuthorityText:
+		return ErrNoAuthority
+	case pageRestoreText:
+		return ErrPageRestore
 	}
 	return err
 }
@@ -308,4 +312,114 @@ func (o Owner) Anchors(ctx context.Context) ([]key.PublicKey, error) {
 	var a []key.PublicKey
 	err := typed(o.call(ctx, "anchors", nil, &a))
 	return a, err
+}
+
+// Backups (BAK-1, MIG-4-recovery-e3): the kernel holds the destinations and
+// writes, reads back and verifies each backup itself; the owner side
+// triggers, chooses and tells. The frames are kernel/proc's.
+
+// BackupView is a kept backup: its recipient only by ID, and whether the
+// kernel read it back whole.
+type BackupView struct {
+	Target     string `json:"target"`
+	BackupID   string `json:"backup_id"`
+	Recipient  string `json:"recipient"`
+	Created    int64  `json:"created"`
+	Generation uint64 `json:"generation"`
+	Verified   bool   `json:"verified"`
+	Pending    bool   `json:"pending,omitempty"` // its table may be out, but it never finished
+}
+
+// TargetView is a destination; Rewritable is false for an append-only one,
+// where an erase cannot drop a key table.
+type TargetView struct {
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Locator    string `json:"locator"`
+	AppendOnly bool   `json:"append_only"`
+	Removed    bool   `json:"removed"`
+	Rewritable bool   `json:"rewritable"`
+}
+
+// BackupsView is the current recipient's ID ("" when the store holds none,
+// so no backup can be taken), every destination and every kept backup.
+type BackupsView struct {
+	Recipient string       `json:"recipient"`
+	Targets   []TargetView `json:"targets"`
+	Backups   []BackupView `json:"backups"`
+}
+
+// Taken is one destination's outcome of a backup: the backup kept for it
+// (Reused when the last one was recent and verified), or why none was
+// written.
+type Taken struct {
+	Target string      `json:"target"`
+	Backup *BackupView `json:"backup,omitempty"`
+	Reused bool        `json:"reused,omitempty"`
+	Error  string      `json:"error,omitempty"`
+}
+
+// BackupTarget adds a destination on a hardware key's signature over
+// kernel.BackupTargetHash(n, t), n the destinations added so far.
+func (o Owner) BackupTarget(ctx context.Context, t kernel.BackupTarget, c key.Cosign) error {
+	return typed(o.call(ctx, "backuptarget", struct {
+		Target kernel.BackupTarget `json:"target"`
+		Cosign key.Cosign          `json:"cosign"`
+	}{t, c}, nil))
+}
+
+// Untarget stops new backups to a destination; its backups keep their
+// erase reach.
+func (o Owner) Untarget(ctx context.Context, name string) error {
+	return typed(o.call(ctx, "untarget", struct {
+		Name string `json:"name"`
+	}{name}, nil))
+}
+
+// Backup takes one backup now to every current destination.
+func (o Owner) Backup(ctx context.Context) ([]Taken, error) {
+	var t []Taken
+	err := typed(o.call(ctx, "backup", nil, &t))
+	return t, err
+}
+
+// Backups reads the recipient's ID, the destinations and the kept backups.
+func (o Owner) Backups(ctx context.Context) (BackupsView, error) {
+	var v BackupsView
+	err := typed(o.call(ctx, "backups", nil, &v))
+	return v, err
+}
+
+// The page's serving certificate (CH-9, MIG-4-recovery-f1): the kernel
+// holds the page authority and signs the page's serving key for the page
+// name only; the authority's key never leaves the kernel's process.
+
+// ErrNoAuthority: the kernel holds no page authority, so the page serves
+// HTTP only.
+var ErrNoAuthority = errors.New("kernelsock: the kernel holds no page authority")
+
+// ErrPageRestore: the box is claimed but its kernel holds no page
+// authority; it must be restored, never given a new one.
+var ErrPageRestore = errors.New("kernelsock: the claimed box has no page authority; restore it")
+
+// noAuthorityText and pageRestoreText are kernel/proc ErrNoAuthority's and
+// ErrPageRestore's texts; TestCertifyReachesTheKernel keeps them the same.
+const (
+	noAuthorityText = "run: my store holds no page authority, so I certify no page key"
+	pageRestoreText = "run: I am claimed but hold no page authority; restore me from a backup"
+)
+
+// Certify asks the kernel to sign pub, the page's serving public key in
+// PKIX DER (ECDSA P-256 only), and returns the leaf and the authority's
+// certificate, both DER. A setup-only kernel serves it, since setup's
+// passkeys are made on the page.
+func (o Owner) Certify(ctx context.Context, pub []byte) (leaf, authority []byte, err error) {
+	var c struct {
+		Leaf      []byte `json:"leaf"`
+		Authority []byte `json:"authority"`
+	}
+	err = typed(o.call(ctx, "certify", struct {
+		Key []byte `json:"key"`
+	}{pub}, &c))
+	return c.Leaf, c.Authority, err
 }

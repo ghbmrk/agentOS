@@ -141,7 +141,7 @@ func lineRig(t *testing.T) (*rig, *fakeVault, *fakeLine) {
 	fv := newFakeVault(r.card.VaultPassphrase)
 	fv.state = "open"
 	fl := &fakeLine{now: r.clock}
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Vault: fv, SecondLine: fl, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		t.Fatal(err)
@@ -340,7 +340,7 @@ func TestNoSecondLineWithoutItsSocket(t *testing.T) {
 	if w := r.do("GET", "/second-line/", nil); w.Code != http.StatusNotFound {
 		t.Fatalf("page served: %d", w.Code)
 	}
-	if _, err := New(Config{AP: testAP(), Hooks: r.hooks, Store: &MemStore{}, SecondLine: &fakeLine{}, Now: time.Now}); err == nil {
+	if _, err := New(Config{Page: testPage(), Hooks: r.hooks, Store: &MemStore{}, SecondLine: &fakeLine{}, Now: time.Now}); err == nil {
 		t.Fatal("a second line without the vault socket")
 	}
 }

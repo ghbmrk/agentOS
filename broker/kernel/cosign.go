@@ -1,7 +1,9 @@
 package kernel
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +47,18 @@ func PlanHash(p Plan) [32]byte {
 // LineHash names the change of the line to percent, as the n-th line change.
 func LineHash(n int, percent int64) [32]byte {
 	return sha256.Sum256([]byte(fmt.Sprintf("agentos.line.v1\x00%d\x00%d", n, percent)))
+}
+
+// EdgeEnrollHash names enrolling edge under the core's head key as the n-th
+// edge change (State.EdgeChanges), replacing replaces (nil if none is live),
+// so a signature over one enrolment never replays as another, nor after a
+// cut or a revoke.
+func EdgeEnrollHash(n int, head, edge, replaces ed25519.PublicKey) [32]byte {
+	m := binary.BigEndian.AppendUint64([]byte(DomainEdgeEnroll), uint64(n))
+	for _, k := range [][]byte{head, edge, replaces} {
+		m = append(binary.BigEndian.AppendUint16(m, uint16(len(k))), k...)
+	}
+	return sha256.Sum256(m)
 }
 
 // power is what one holder can do at one clerk: the verbs its grants reach

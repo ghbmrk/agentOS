@@ -107,7 +107,6 @@ type rig struct {
 	asks    []string
 	forgets []string
 	adopted []string
-	rotated int
 }
 
 func newRig(t *testing.T) *rig {
@@ -153,10 +152,6 @@ func newRig(t *testing.T) *rig {
 			}
 			r.forgets = append(r.forgets, goal)
 			return "Asked."
-		},
-		RotateAPNet: func() error {
-			r.rotated++
-			return nil
 		},
 		PlanSignIn: &fakePlanSignIn{ready: true, link: "https://auth.openai.com/codex/device"}})
 	r.ops = r.srv.Ops()
@@ -226,7 +221,6 @@ func tokenOps(tok string) map[string]any {
 		localapi.OpSIM:             localapi.AdoptSIM{Token: tok, SIM: simTag, Code: good},
 		localapi.OpForgetTasks:     localapi.Auth{Token: tok},
 		localapi.OpForget:          localapi.Forget{Token: tok, ID: "owner:a"},
-		localapi.OpRotateAPNet:     localapi.Auth{Token: tok},
 		localapi.OpPlanSignInReady: localapi.Auth{Token: tok},
 		localapi.OpPlanSignIn:      localapi.PlanSignInStart{Token: tok, Code: good},
 		localapi.OpAccountBegin:    localapi.AccountBegin{Token: tok, Account: "gmail", Use: "watch"},
@@ -263,8 +257,8 @@ func TestEveryOpButTheOpenOnesNeedsAToken(t *testing.T) {
 			t.Errorf("%s with no args: %v", op, err)
 		}
 	}
-	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 || r.rotated != 0 {
-		t.Fatalf("reached the channel: %v %v %v %v %d", r.own.answers, r.follows, r.adopted, r.forgets, r.rotated)
+	if len(r.own.answers) != 0 || len(r.follows) != 0 || len(r.adopted) != 0 || len(r.forgets) != 0 {
+		t.Fatalf("reached the channel: %v %v %v %v", r.own.answers, r.follows, r.adopted, r.forgets)
 	}
 	for op := range open {
 		if op == localapi.OpCertify {

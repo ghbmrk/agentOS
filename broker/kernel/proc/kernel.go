@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // KernelConfig is what the kernel process starts from. The log key and the
@@ -32,6 +33,23 @@ type KernelConfig struct {
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
 	KeyDir string
+	// BackupDir is where the kernel keeps its backups' records, sealed
+	// under Key (MIG-4-recovery-e3); it needs a KeyDir. "" keeps backups
+	// off; only tests start a kernel so.
+	BackupDir string
+	// Recipient is the backup recipient in its wire form
+	// (handoff.KernelKeys.Recipient); none refuses every backup.
+	Recipient []byte
+	// PageCA is the page authority in pageca.Marshal's form
+	// (handoff.KernelKeys.PageCA); none certifies no page key (Certify).
+	PageCA []byte
+	// FirstEdge is the edge key the link port captured before the Owner
+	// Card confirm (handoff.KernelKeys.FirstEdge), which setup logs as the
+	// first edge key (Kernel.Setup); none logs none.
+	FirstEdge ed25519.PublicKey
+	// LinkKey is the core's link key (handoff.KernelKeys.LinkKey), which
+	// only the kernel holds (HW-15); none on a box enrolled before it.
+	LinkKey ed25519.PrivateKey
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -45,6 +63,18 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
+	// bk is the backups (backup.go); nil with no BackupDir.
+	bk *backups
+	// reseals is every backup re-seal running (reseal).
+	reseals sync.WaitGroup
+	// page is the page authority (CH-9); nil when the store holds none.
+	// Set at open and never changed, so it is read without the lock.
+	page *pageca.Authority
+	// firstEdge and link are KernelConfig's, set at open and never
+	// changed. Nothing reads link yet: the link's handshake signer is
+	// EDGE-link-core-c2's, and it never goes into a backup (BAK-1).
+	firstEdge ed25519.PublicKey
+	link      ed25519.PrivateKey
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -58,6 +88,13 @@ type Kernel struct {
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
+	}
+	var page *pageca.Authority
+	if len(cfg.PageCA) > 0 {
+		var err error
+		if page, err = pageca.Unmarshal(cfg.PageCA); err != nil {
+			return nil, fmt.Errorf("run: the page authority: %w", err)
+		}
 	}
 	st, err := OpenFileStore(cfg.Log)
 	if err != nil {
@@ -81,7 +118,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	h := &Kernel{k: k, store: st, clerks: clerks}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		if err == nil {
@@ -91,6 +128,16 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			st.Close()
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
+		if cfg.BackupDir != "" {
+			if h.bk, err = openBackups(cfg, keys, k, now); err != nil {
+				st.Close()
+				return nil, fmt.Errorf("run: the backups: %w", err)
+			}
+			k.OpenBackups(h.bk.set)
+		}
+	} else if cfg.BackupDir != "" {
+		st.Close()
+		return nil, errors.New("run: backups need the subject-key table")
 	}
 	return h, nil
 }
@@ -99,12 +146,20 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
-// Tick runs every plan as far as now allows. It takes the due calls under the
+// Tick starts the backup re-seals due (reseal) without waiting for them,
+// then runs every plan as far as now allows. It takes the due calls under the
 // lock, then for each one, under the lock again, makes the kernel's last
 // check (kernel.Send) and takes the call's view, makes the call without the
 // lock, and logs its answer under it. A STOP or revoke logged while an
 // earlier call hangs stops every later one (KRN-7).
 func (h *Kernel) Tick(now int64) error {
+	// A backup that gives an erased subject's key is re-sealed here, and
+	// one whose re-seal failed retried with its backoff: kernel.Tick,
+	// which would, runs clerk calls under the lock and is not this
+	// process's (#3311 L3 on 6e14b28).
+	if _, err := h.reseal(now); err != nil {
+		return err
+	}
 	for n := 0; n < 4*kernel.MaxSteps; n++ {
 		var due []kernel.Call
 		err := h.With(func(k *kernel.Kernel) (err error) {
@@ -142,6 +197,46 @@ func (h *Kernel) Tick(now int64) error {
 		}
 	}
 	return nil
+}
+
+// reseal hands out every backup re-seal due (kernel.Reseals) and runs each
+// on its own goroutine: its I/O at the target without the lock, so a hung
+// target holds only its own re-seal, never STOP or another backup (KRN-7,
+// #3317), then its commit under the lock. The WaitGroup is done once they
+// are.
+func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
+	var due []*kernel.Reseal
+	if err := h.With(func(k *kernel.Kernel) error { due = k.Reseals(now); return nil }); err != nil {
+		return nil, err
+	}
+	wg := new(sync.WaitGroup)
+	for _, r := range due {
+		h.reseals.Add(1)
+		wg.Go(func() {
+			defer h.reseals.Done()
+			r.Run()
+			h.With(func(k *kernel.Kernel) error { k.Resealed(now, r); return nil })
+		})
+	}
+	return wg, nil
+}
+
+// Erase erases subject (kernel.Erase), then re-seals every backup that
+// gave its key and waits for those re-seals, which run without the lock,
+// so a hung target delays this reply but never STOP. It returns what the
+// erase has reached then.
+func (h *Kernel) Erase(now int64, subject string) (kernel.Confirmation, error) {
+	var c kernel.Confirmation
+	err := h.With(func(k *kernel.Kernel) (err error) { c, err = k.Erase(now, subject); return err })
+	if c.Subject == "" {
+		return c, err
+	}
+	wg, rerr := h.reseal(now)
+	if rerr == nil {
+		wg.Wait()
+		rerr = h.With(func(k *kernel.Kernel) error { c = k.Confirm(c); return nil })
+	}
+	return c, errors.Join(err, rerr)
 }
 
 // With runs fn on the kernel under the lock. The owner and planner sides

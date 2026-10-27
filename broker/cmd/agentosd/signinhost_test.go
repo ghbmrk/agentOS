@@ -48,7 +48,8 @@ type signInBox struct {
 	exited    map[string]bool
 	destroyed []string
 	createErr error
-	created   chan string // each create, once it returns
+	stuck     map[string]bool // machines whose destroy fails
+	created   chan string     // each create, once it returns
 }
 
 func newSignInBox(cli func(string) string) *signInBox {
@@ -113,6 +114,10 @@ func (b *signInBox) Exec(_ context.Context, id string, c vm.Command, _ time.Dura
 
 func (b *signInBox) Destroy(_ context.Context, id string) error {
 	b.mu.Lock()
+	if b.stuck[id] {
+		b.mu.Unlock()
+		return errors.New("the runtime did not stop")
+	}
 	_, ok := b.mounts[id]
 	if ok {
 		b.destroyed = append(b.destroyed, id)
@@ -124,6 +129,17 @@ func (b *signInBox) Destroy(_ context.Context, id string) error {
 	}
 	b.routes.Close(id)
 	return nil
+}
+
+func (b *signInBox) Machines() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for id := range b.mounts {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (b *signInBox) gone(id string) bool {
@@ -535,6 +551,43 @@ func TestSignInStopDestroysTheMachine(t *testing.T) {
 	}
 }
 
+// A crash during a sign-in or a plan run leaves its provider worker
+// reloaded Stopped with its placeholder seed; the sweep at start destroys
+// every provider worker and no other machine, and one that will not go
+// stops none of the rest (#3249, #3308).
+func TestStartSweepDestroysLeftoverProviderWorkers(t *testing.T) {
+	// REQ: PLN-6
+	box := newSignInBox(func(string) string { return "" })
+	h := newSignInHost(t, box, nil)
+	left := []string{signInPrefix + "aaaaaa", vm.ProviderPrefix + "bbbbbb", signInPrefix + "cccccc", vm.ProviderPrefix + "dddddd"}
+	kept := []string{vm.WorkerPrefix + "0a1b2c3d-pw-x", "agent-1", "signin-agent", "xpw-a1b2c3"}
+	box.mu.Lock()
+	for _, id := range append(slices.Clone(left), kept...) {
+		box.mounts[id] = ""
+	}
+	box.stuck = map[string]bool{left[1]: true}
+	box.mu.Unlock()
+
+	h.Sweep()
+	for _, id := range []string{left[0], left[2], left[3]} {
+		if !box.gone(id) {
+			t.Fatalf("the sweep left %s", id)
+		}
+	}
+	for _, id := range append([]string{left[1]}, kept...) {
+		if box.gone(id) {
+			t.Fatalf("the sweep destroyed %s", id)
+		}
+	}
+	box.mu.Lock()
+	delete(box.stuck, left[1])
+	box.mu.Unlock()
+	h.Sweep() // the next start takes the one that would not go
+	if !box.gone(left[1]) {
+		t.Fatal("a second sweep left the stuck machine")
+	}
+}
+
 // oneAddr resolves every name to one address.
 type oneAddr netip.Addr
 
@@ -637,5 +690,33 @@ func TestSignInSockSpeaksTheHostsWire(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("a refused start left %v", ents)
+	}
+}
+
+// The provider-worker sweep is pinned in main.go: it runs once the
+// manager is open and given to the host, before -signin-sock is served
+// and before the provider runner can start a plan run, and setup's
+// sign-in machines are closed before that manager opens, so no worker
+// it destroys has a live owner (#3308).
+func TestProviderSweepRunsBeforeAnyProviderWorker(t *testing.T) {
+	// REQ: PLN-6
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	sweep := strings.Index(s, "\t\t\tsignIns.Sweep()\n")
+	if sweep < 0 || strings.Count(s, "signIns.Sweep()") != 1 {
+		t.Fatal("main.go does not call signIns.Sweep() exactly once")
+	}
+	for _, before := range []string{"\tsignInHost.Close(cctx)\n", "\tm, err := vm.Open(ctx, vmc)\n", "\tsignIns.M = m\n"} {
+		if i := strings.Index(s, before); i < 0 || i > sweep {
+			t.Fatalf("%q at %d, not before the sweep at %d", before, i, sweep)
+		}
+	}
+	for _, later := range []string{"serveSignIns(", "providerRunner(m,"} {
+		if i := strings.Index(s, later); i < 0 || i < sweep {
+			t.Fatalf("%q at %d, not after the sweep at %d", later, i, sweep)
+		}
 	}
 }

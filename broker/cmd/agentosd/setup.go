@@ -11,15 +11,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
 	"github.com/ghbmrk/agentos/broker/modemlink"
-	"github.com/ghbmrk/agentos/broker/netjoin"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -35,12 +32,6 @@ type setupMode struct {
 	OwnerState string // the owner channel's state file
 	Enroll     localsrv.Enroller
 	Progress   func() localapi.SetupProgress
-	// NetJoin is the netjoin helper's socket (P2-2w c3; Security L8);
-	// empty, the page's network step answers its one error.
-	NetJoin string
-	// Seen is told each join's answer (the uplink's never-online wait,
-	// P2-2w c4); nil is told nothing.
-	Seen func(netjoin.Code)
 	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
 	// §8.1 pairing, CH-12): setup serves its ops on owner.sock to the
 	// bridge's uid (ModemUID, ModemGID) only, and only until finish, so
@@ -64,13 +55,6 @@ type setupMode struct {
 	// net/http), so the step is built with the page and handed in here; a
 	// nil Card fails closed.
 	Card func() (cardHold, error)
-	// APNet is where the page's report of the card's network is written
-	// (OpSetupAPNet, #1185) for agentos-ap; empty, the op is not served.
-	APNet string
-	// SetupNet is the preloaded box's setup network (claim.SetupNetPath),
-	// which the claim rotates (OpSetupWiFi, HW-10, #1692); empty, neither
-	// setup Wi-Fi op is served.
-	SetupNet string
 	// SignIn starts a plan route's device-code sign-in at setup (c4e2b,
 	// ONB-3); nil offers no plan sign-in.
 	SignIn localsrv.SignIn
@@ -111,26 +95,6 @@ func (c *pageCard) report() {
 	c.mu.Unlock()
 }
 
-// apNetOp is OpSetupAPNet: it writes the card's network to path, 0600,
-// replacing any earlier report, and logs nothing of it (ARC-1). Only a
-// network the card prints is taken.
-func apNetOp(path string) sockets.Handler {
-	return func(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-		var r localapi.SetupAPNet
-		if json.Unmarshal(args, &r) != nil {
-			return nil, sockets.Code(localapi.ErrBadArgs)
-		}
-		b, err := apnet.Network{SSID: r.SSID, Password: r.Password}.Marshal()
-		if err != nil {
-			return nil, sockets.Code(localapi.ErrBadArgs)
-		}
-		if durable.WriteFile(path, b, 0o600) != nil {
-			return nil, sockets.Code(localapi.ErrFailed)
-		}
-		return nil, nil
-	}
-}
-
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
 // missing; setup stays closed rather than letting the page pick an owner.
 var errOwnedWithoutRecord = errors.New("setup: the owner channel has state but the setup record says setup never finished; recover the record rather than reopen setup")
@@ -162,8 +126,6 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 	m.bridgeDir()
 	finished := make(chan string, 1)
 	cfg := localsrv.SetupConfig{Record: m.Record, Enroll: m.Enroll, Progress: m.Progress,
-		Join:      joiner(m.NetJoin, m.Seen),
-		Networks:  scanner(m.NetJoin),
 		Providers: providersOf(m.Enroll),
 		SignIn:    m.SignIn,
 		Finished:  func(owner string) { finished <- owner }}
@@ -183,15 +145,6 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 			return nil, sockets.Code(errCardPending)
 		}
 		return finish(ctx, p, args)
-	}
-	if page {
-		if m.APNet != "" {
-			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
-		}
-		// Served with an empty -setup-net too, answering "no setup
-		// wifi": the page reads a missing op as a fault (#1692).
-		ops[localapi.OpSetupWiFiName] = setupWiFiNameOp(m.SetupNet)
-		ops[localapi.OpSetupWiFi] = setupWiFiOp(m.SetupNet)
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -361,45 +314,4 @@ func providerErr(err error) error {
 		return localsrv.ProviderRefused
 	}
 	return enrollErr(err)
-}
-
-// errNotJoined is every join that did not end joined or saved. It
-// carries nothing of the request (CRED-1).
-var errNotJoined = errors.New("setup: the home network was not joined")
-
-// scanner is setup's list of home networks from the netjoin helper's
-// socket (P2-2w c4b); nil with no socket.
-func scanner(path string) func(context.Context) ([]string, error) {
-	if path == "" {
-		return nil
-	}
-	return netjoin.Client{Path: path}.Networks
-}
-
-// joiner is setup's join through the netjoin helper's socket: joined and
-// saved succeed, failed (a D-Bus or NetworkManager error, such as no
-// NetworkManager) is localsrv.JoinUnavailable (#1429), and every other
-// answer or no answer is errNotJoined. With no
-// socket it is nil, and localsrv answers not joined. seen, if set, is
-// told each answer.
-func joiner(path string, seen func(netjoin.Code)) func(context.Context, string, string) error {
-	if path == "" {
-		return nil
-	}
-	c := netjoin.Client{Path: path}
-	return func(ctx context.Context, ssid, password string) error {
-		code, err := c.Join(ctx, ssid, password)
-		if err == nil && seen != nil {
-			seen(code)
-		}
-		switch {
-		case err != nil:
-			return errNotJoined
-		case code == netjoin.Joined, code == netjoin.Saved:
-			return nil
-		case code == netjoin.Failed:
-			return localsrv.JoinUnavailable
-		}
-		return errNotJoined
-	}
 }

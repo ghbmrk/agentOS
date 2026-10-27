@@ -18,7 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
-// REQ: CLK-1, LOG-2, KRN-2
+// REQ: CLK-1, LOG-2, KRN-2, BAK-1
 
 var good = []string{
 	"-log", "/var/lib/agentos-kernel/log", "-anchor-dir", "/var/lib/agentos-kernel/anchor",
@@ -26,6 +26,7 @@ var good = []string{
 	"-meter-sock", "/run/agentos-kernel/meter.sock", "-meter-uid", "982",
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
 	"-clerk", "mail=/run/agentos-mail/kernel.sock,984",
+	"-backup-dir", "/var/lib/agentos-kernel/backups",
 	"-keys-dir", "/var/lib/agentos-kernel/keys",
 }
 
@@ -71,6 +72,21 @@ func TestTheKernelNeedsItsKeyTable(t *testing.T) {
 	}
 }
 
+// BAK-1, LOG-4 (MIG-4-recovery-e3): an erase must reach every backup taken
+// before, so the backups' records directory is required, and absolute.
+func TestTheKernelNeedsItsBackupDir(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.BackupDir != "/var/lib/agentos-kernel/backups" {
+		t.Fatalf("parse: %q %v", c.BackupDir, err)
+	}
+	i := slices.Index(good, "-backup-dir")
+	for _, bad := range [][]string{slices.Delete(slices.Clone(good), i, i+2), append(slices.Clone(good), "-backup-dir", "backups")} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
+		}
+	}
+}
+
 // LOG-2: with no TPM connection there is no counter to anchor the log,
 // and the kernel does not start: not on a closed descriptor, a file on the
 // drive or a pipe standing in for the TPM.
@@ -103,6 +119,7 @@ func handoffPipe(t *testing.T) *os.File {
 		Head:    ed25519.NewKeyFromSeed(make([]byte, 32)),
 		Counter: handoff.Counter{SRK: []byte{1}, Handle: 0x01800000, Name: []byte{2}, Auth: []byte("a")},
 		Anchors: []key.PublicKey{key.Ed25519(make([]byte, 32))},
+		Slot:    handoff.SlotTPM,
 	}
 	b, err := k.Marshal()
 	if err != nil {

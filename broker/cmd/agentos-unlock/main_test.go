@@ -38,6 +38,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -271,6 +272,7 @@ func (r *rig) mainConfig() proc.MainConfig {
 	c := proc.MainConfig{
 		Log:       filepath.Join(r.dir, "k", "log"),
 		KeyDir:    filepath.Join(r.dir, "k", "keys"),
+		BackupDir: filepath.Join(r.dir, "k", "backups"),
 		OwnerSock: filepath.Join(r.dir, "k", "owner.sock"), OwnerUID: r.ownerUID,
 		MeterSock: filepath.Join(r.dir, "k", "meter.sock"), MeterUID: r.meterUID,
 		Tick: 50 * time.Millisecond,
@@ -757,7 +759,7 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
 	b, err := unlock(c, storePins(r.store))
 	must(t, err)
-	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}}.Marshal()
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}, Slot: handoff.SlotTPM}.Marshal()
 	must(t, err)
 	if !bytes.Equal(b, want) {
 		t.Fatal("the hand-off is not the store's keys")
@@ -880,4 +882,161 @@ func (w webauthn) Sign(msg []byte) []byte {
 	s, _ := ecdsa.SignASN1(rand.Reader, w.p, h[:])
 	b, _ := key.AssertionSig(key.Assertion{AuthenticatorData: ad, ClientDataJSON: cd, Signature: s})
 	return b
+}
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: the unlock step hands the kernel the store's page
+// authority, and the kernel it becomes holds it. A store enrolled before
+// f1 has none: it hands none and its kernel still starts, saying it
+// certifies no page key. An entry that does not read hands nothing.
+func TestUnlockHandsThePageCA(t *testing.T) {
+	r := newRig(t, true)
+	a, err := pageca.New(pageca.DefaultName, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	must(t, err)
+	v, err := pageca.Marshal(a)
+	must(t, err)
+	put := func(v []byte) {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		if v == nil {
+			must(t, st.Delete(handoff.PageCAEntry))
+		} else {
+			must(t, st.Put(handoff.PageCAEntry, v))
+		}
+		st.Close()
+	}
+	handed := func() handoff.KernelKeys {
+		t.Helper()
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		b, err := unlock(role.Config(), role.pins)
+		must(t, err)
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		clear(b)
+		k, err := handoff.ReadKeys(pr)
+		must(t, err)
+		return k
+	}
+	put(v)
+	if k := handed(); !bytes.Equal(k.PageCA, v) || len(k.Anchors) != 2 {
+		t.Fatal("the hand-off's page authority is not the store's")
+	}
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if strings.Contains(out.String(), proc.ErrNoAuthority.Error()) {
+		t.Fatalf("the kernel said it has no page authority:\n%s", out)
+	}
+
+	put(nil)
+	if k := handed(); k.PageCA != nil || len(k.Anchors) != 2 {
+		t.Fatal("no entry: handed an authority")
+	}
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	if !strings.Contains(out.String(), proc.ErrNoAuthority.Error()) {
+		t.Fatalf("a kernel without a page authority did not say so:\n%s", out)
+	}
+
+	bad := bytes.Clone(v)
+	bad[len(bad)/2] ^= 1
+	for name, e := range map[string][]byte{"damaged": bad, "short": v[:len(v)-1], "spaced": append(bytes.Clone(v), ' ')} {
+		put(e)
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		if _, err := unlock(role.Config(), role.pins); err == nil || !strings.Contains(err.Error(), "page authority") {
+			t.Errorf("%s entry: got %v", name, err)
+		}
+	}
+}
+
+// REQ: HW-15, REC-2
+// EDGE-link-core-b: the hand-off names the slot that opened the store, so
+// the kernel can cut the edge at a start that is not by this PC's tpm slot
+// (§12.2), and carries the store's link key and first edge key. A store
+// with neither entry hands none and its kernel still starts; an entry that
+// does not read hands nothing.
+// Revert mutant: `k.Slot = handoff.SlotPassphrase` set to SlotTPM (the
+// passphrase unlock then hands "tpm").
+func TestUnlockHandsTheSlot(t *testing.T) {
+	r := newRig(t, true)
+	phrase := []byte("correct horse battery staple")
+	edit := func(f func(st *seal.Store)) {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		f(st)
+		st.Close()
+	}
+	edit(func(st *seal.Store) {
+		_, err := st.AddSlot(seal.Passphrase{Phrase: phrase})
+		must(t, err)
+	})
+	handed := func(pass []byte) (handoff.KernelKeys, error) {
+		t.Helper()
+		r.reboot() // each unlock caps the tpm slot (#2977)
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		c := role.Config()
+		c.passphrase = pass
+		b, err := unlock(c, role.pins)
+		if err != nil {
+			return handoff.KernelKeys{}, err
+		}
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		clear(b)
+		return handoff.ReadKeys(pr)
+	}
+	k, err := handed(nil)
+	if err != nil || k.Slot != handoff.SlotTPM || k.LinkKey != nil || k.FirstEdge != nil {
+		t.Fatalf("a tpm unlock of a store with neither entry: slot %q, link %v, edge %x, %v", k.Slot, k.LinkKey != nil, k.FirstEdge, err)
+	}
+	if k, err = handed(phrase); err != nil || k.Slot != handoff.SlotPassphrase {
+		t.Fatalf("a passphrase unlock: slot %q, %v", k.Slot, err)
+	}
+	if _, err := handed([]byte("wrong")); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("a wrong passphrase: got %v", err)
+	}
+
+	link := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	edge := gen(8)
+	edit(func(st *seal.Store) {
+		must(t, st.Put(handoff.LinkKeyEntry, link.Seed()))
+		must(t, st.Put(handoff.FirstEdgeEntry, edge))
+	})
+	for _, pass := range [][]byte{nil, phrase} {
+		if k, err := handed(pass); err != nil || !k.LinkKey.Equal(link) || !k.FirstEdge.Equal(edge) {
+			t.Fatalf("the store's link keys (passphrase %v): %v", pass != nil, err)
+		}
+	}
+	// The kernel the unlock step becomes starts on them.
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+
+	for name, e := range map[string]struct {
+		entry string
+		v     []byte
+		says  string
+	}{
+		"short link key":  {handoff.LinkKeyEntry, link.Seed()[:31], "link key"},
+		"whole link key":  {handoff.LinkKeyEntry, link, "link key"},
+		"long first edge": {handoff.FirstEdgeEntry, append(bytes.Clone(edge), 0), "first edge"},
+	} {
+		edit(func(st *seal.Store) {
+			must(t, st.Put(handoff.LinkKeyEntry, link.Seed()))
+			must(t, st.Put(handoff.FirstEdgeEntry, edge))
+			must(t, st.Put(e.entry, e.v))
+		})
+		if _, err := handed(nil); err == nil || !strings.Contains(err.Error(), e.says) {
+			t.Errorf("%s entry: got %v", name, err)
+		}
+	}
 }

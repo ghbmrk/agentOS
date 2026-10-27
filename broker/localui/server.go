@@ -20,7 +20,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,9 +31,10 @@ import (
 
 // Config configures a Server.
 type Config struct {
-	// AP is the access point the UI is served on. Its address is the only
-	// host name the UI answers to, and only its subnet may connect.
-	AP APConfig
+	// Page is where the page is served: port 1's interface and the page
+	// name (CH-9, D-178). Plain HTTP answers that name or the address a
+	// connection reached; only private home sources may connect.
+	Page Page
 	// Port is UIPort when zero.
 	Port int
 	// Hooks connect setup to the rest of the box.
@@ -75,10 +75,6 @@ type Config struct {
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
 	Claim BoxClaim
-	// SetupWiFi, when set with Claim, is the preloaded box's setup network
-	// (HW-10, #1692): after the claim, the claimant is shown a new Wi-Fi
-	// password at /claim/wifi and setup waits until it is committed.
-	SetupWiFi SetupWiFi
 	// Card, when set, is the first-boot Owner Card step (HW-1,
 	// firstboot.CardStep): after approval codes setup shows the card at
 	// /setup/card to the phone that paired, and neither the recovery
@@ -92,14 +88,8 @@ type Config struct {
 	// rotation's new parts are shown at /rotate/card to a signed-in phone
 	// until the owner confirms or cancels them.
 	Rotation RotationCard
-	// Station, when set, reports whether the box has a Wi-Fi device
-	// beside the access point that can join a home network
-	// (StationDevice). Without one a saved home Wi-Fi never comes
-	// online, so the never-online note names Ethernet only and offers no
-	// rejoin (CH-12; P2-2w c4 r1). Nil assumes one.
-	Station func() bool
 	// HTTPS: the HTTPS listener serves this Server too, so a request on
-	// the plain listener for the page name (AP.PageName) is sent there
+	// the plain listener for the page name (Page.PageName) is sent there
 	// (#3153). Unset, the plain listener serves the page name itself.
 	HTTPS bool
 	// PageRestore: agentosd answered that the box's page authority is
@@ -111,10 +101,9 @@ type Config struct {
 
 // Server is the local UI.
 type Server struct {
-	cfg  Config
-	host string
-	mux  *http.ServeMux
-	// pages carry this box's address in their footer.
+	cfg Config
+	mux *http.ServeMux
+	// pages carry the page's name in their footer.
 	pages *template.Template
 	// formKey binds Approvals forms to a phone and a request; pageWrong
 	// lists each phone's recent wrong approval codes (PageWrongPerMinute),
@@ -144,8 +133,6 @@ type Server struct {
 	// claimWait holds a slot for each claim post running or waiting
 	// (claimQueue + 1); claimRun admits one at a time (claimTurn).
 	claimWait, claimRun chan struct{}
-	// claimWiFi is the claim's Wi-Fi step (claimWiFiPage).
-	claimWiFi *claimWiFi
 	// vaultTries and vaultAll are the unlock attempts in the last hour,
 	// per phone address and in all (vaultTry).
 	vaultTries map[string][]time.Time
@@ -160,12 +147,10 @@ const MaxSessions = 16
 
 const cookieName = "agentos_session"
 
-// New returns a Server. It refuses an access point configuration that
-// could expose the UI beyond the box's Wi-Fi (CH-9). The page never
-// reads the access point's name or password, so only ValidateServe
-// applies, with or without setup (P2-2w c4).
+// New returns a Server. It refuses a page configuration that could expose
+// the UI beyond port 1 (CH-9).
 func New(cfg Config) (*Server, error) {
-	if err := cfg.AP.ValidateServe(); err != nil {
+	if err := cfg.Page.Validate(); err != nil {
 		return nil, err
 	}
 	if (cfg.Hooks == nil) != (cfg.Store == nil) {
@@ -205,13 +190,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
-	host := cfg.AP.Addr.Addr().String()
-	if cfg.Port != 80 {
-		host = net.JoinHostPort(host, strconv.Itoa(cfg.Port))
-	}
-	s := &Server{cfg: cfg, host: host, mux: http.NewServeMux(), pages: pagesFor(host), scanning: make(chan struct{}, 1),
-		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1),
-		claimWiFi: &claimWiFi{}}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), pages: pagesFor(cfg.Page.pageName()), scanning: make(chan struct{}, 1),
+		claimWait: make(chan struct{}, claimQueue+1), claimRun: make(chan struct{}, 1)}
 	s.formKey = make([]byte, 32)
 	if _, err := io.ReadFull(cfg.Rand, s.formKey); err != nil {
 		return nil, err
@@ -268,9 +248,6 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Claim != nil {
 		s.mux.HandleFunc("/claim", s.claimPage)
-		if s.cfg.SetupWiFi != nil {
-			s.mux.HandleFunc("/claim/wifi", s.claimWiFiPage)
-		}
 	}
 	if s.cfg.Rotation != nil {
 		s.mux.Handle("/rotate/card", s.signedIn(http.HandlerFunc(s.rotationCard)))
@@ -360,11 +337,10 @@ const hstsAge = "max-age=63072000"
 
 // ServeHTTP applies the CH-9 and CH-7 guards to every request, then routes.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// CH-9: only clients on the access point's subnet. The listener is
-	// already bound to the access point interface; this is the second
+	// CH-9: only private home sources, never the box itself. The
+	// listener is already bound to port 1's interface; this is the second
 	// check.
-	ap, err := netip.ParseAddrPort(r.RemoteAddr)
-	if err != nil || !s.cfg.AP.Addr.Masked().Contains(ap.Addr().Unmap()) || ap.Addr().Unmap() == s.cfg.AP.Addr.Addr() {
+	if !homeSource(r) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
@@ -378,7 +354,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// HTTPS answers the page name only: never a redirect, so a
 		// DNS-rebound name gets nothing (#3153). SNI was checked at the
 		// handshake (PageTLS.Config).
-		if !s.isPageHost(r.Host, HTTPSPort) || r.TLS.ServerName != s.cfg.AP.pageName() {
+		if !s.isPageHost(r.Host, HTTPSPort) || r.TLS.ServerName != s.cfg.Page.pageName() {
 			http.Error(w, "Misdirected request", http.StatusMisdirectedRequest)
 			return
 		}
@@ -391,19 +367,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
 				return
 			}
-			http.Redirect(w, r, "https://"+s.cfg.AP.pageName()+safeNext(r.URL.Path), http.StatusFound)
+			http.Redirect(w, r, "https://"+s.cfg.Page.pageName()+safeNext(r.URL.Path), http.StatusFound)
 			return
 		}
 		// No HTTPS: the plain listener serves the page name as it is.
-	} else if r.Host != s.host {
-		// Any other host name is a phone's captive-portal check, or a page
-		// trying to reach the box through DNS rebinding: send it to the
-		// box's own address, and never act on it (ONB-5).
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		http.Redirect(w, r, "http://"+s.host+"/", http.StatusFound)
+	} else if r.Host == "" || r.Host != reachedHost(r) {
+		// Any other host name, IP literals of other addresses included, is a page trying to reach the box through
+		// DNS rebinding, or a captive-portal check: the core runs no
+		// captive portal (ONB-5, D-178), so it is never redirected, and
+		// never acted on.
+		http.Error(w, "Misdirected request", http.StatusMisdirectedRequest)
 		return
 	}
 	if r.Method == http.MethodPost && !s.sameOrigin(r) {
@@ -432,17 +405,17 @@ func (s *Server) sameOrigin(r *http.Request) bool {
 // else http:// and the host ServeHTTP admitted.
 func (s *Server) origin(r *http.Request) string {
 	if r.TLS != nil {
-		return "https://" + s.cfg.AP.pageName()
+		return "https://" + s.cfg.Page.pageName()
 	}
 	if s.isPageHost(r.Host, s.cfg.Port) {
 		return "http://" + r.Host
 	}
-	return "http://" + s.host
+	return "http://" + reachedHost(r)
 }
 
 // isPageHost: host is the page name, with the listener's port or none.
 func (s *Server) isPageHost(host string, port int) bool {
-	name := s.cfg.AP.pageName()
+	name := s.cfg.Page.pageName()
 	return host == name || host == net.JoinHostPort(name, strconv.Itoa(port))
 }
 
@@ -891,7 +864,13 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/vcard; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="AgentOS.vcf"`)
-	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:AgentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+s.host+"/\r\nEND:VCARD\r\n")
+	// The page's name may not resolve on a home network yet; until HTTPS is
+	// up, the card links the address this phone reached (WIFI-del-a3).
+	page := s.cfg.Page.pageName()
+	if h := reachedHost(r); !s.cfg.HTTPS && r.TLS == nil && h != "" {
+		page = h
+	}
+	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:agentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
 }
 
 var msgs = map[string]string{

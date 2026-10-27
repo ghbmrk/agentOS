@@ -3,12 +3,15 @@
 // log key, the head key and the owner's anchors on descriptor 3:
 //
 //	agentos-kernel -log /var/lib/agentos-kernel/log -keys-dir /var/lib/agentos-kernel/keys \
+//	    -backup-dir /var/lib/agentos-kernel/backups \
 //	    -owner-sock /run/agentos-kernel/owner.sock -owner-uid 981 \
 //	    -meter-sock /run/agentos-kernel/meter.sock -meter-uid 982 \
 //	    -clerk exit=/run/agentos-exit/kernel.sock,983
 //
 // It opens the subject-key table in -keys-dir, sealed under the log key, so
-// content opens and every logged erase is re-applied at start (KRN-erase).
+// content opens and every logged erase is re-applied at start (KRN-erase),
+// and its backups' records in -backup-dir, so an erase reaches every
+// backup taken before (BAK-1, LOG-4).
 // It refuses to run as root or as any peer's uid, makes itself non-dumpable,
 // serves the owner side and the model clerk's meter on their sockets, and
 // runs plans every second. It holds no credential and never the store key.
@@ -82,6 +85,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}}}
 	fs.StringVar(&c.Log, "log", "", "the log file")
 	fs.StringVar(&c.KeyDir, "keys-dir", "", "the subject-key table's directory, beside the log")
+	fs.StringVar(&c.BackupDir, "backup-dir", "", "the backups' records directory, beside the log")
 	fs.StringVar(&c.AnchorDir, "anchor-dir", "", "the log anchor's directory, beside the log")
 	fs.StringVar(&c.OwnerSock, "owner-sock", "", "the owner side's socket")
 	fs.IntVar(&c.OwnerUID, "owner-uid", -1, "the owner side's uid, the only peer on owner-sock")
@@ -102,6 +106,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("an absolute -anchor-dir is required")
 	case !filepath.IsAbs(c.KeyDir):
 		return c, errors.New("an absolute -keys-dir is required")
+	case !filepath.IsAbs(c.BackupDir):
+		return c, errors.New("an absolute -backup-dir is required")
 	case c.Up != "" && !filepath.IsAbs(c.Up):
 		return c, errors.New("-up must be an absolute path")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:

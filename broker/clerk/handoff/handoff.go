@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // KeyFD is the descriptor the kernel main reads its keys from.
@@ -67,7 +68,41 @@ const recipientXLen = 32
 // from this one.
 const recipientTag = "agentos-backup-recipient/v1\n"
 
-const handoffTag = "agentos-kernel-keys/v4\n"
+const handoffTag = "agentos-kernel-keys/v6\n"
+
+// PageCAEntry is the sealed store's entry holding the page authority
+// (CH-9, MIG-4-recovery-f1): pageca.Marshal's form, its certificate and
+// private key. Enrollment makes it; the unlock step hands it to the kernel,
+// which certifies the page's serving keys and writes it into every backup.
+// agentosd never holds it (KRN-2, CLK-1).
+const PageCAEntry = "kernel/page-ca"
+
+// LinkKeyEntry is the sealed store's entry holding the core's link key
+// (HW-15, brief EDGE-link-core decision 4): a 32-byte Ed25519 seed that
+// enrollment generates. The unlock step hands it to the kernel, which signs
+// the link's TLS handshakes with it, so the link process never holds it. It
+// is never backed up (BAK-1): a restore enrolls again and makes a new one.
+const LinkKeyEntry = "kernel/link-key"
+
+// FirstEdgeEntry is the sealed store's entry holding the edge key the link
+// port captured before the Owner Card confirm (HW-15, decision 3): a 32-byte
+// Ed25519 public key. Only enrollment writes it, and never at a restore's;
+// the kernel logs it at setup as the first edge key.
+const FirstEdgeEntry = "kernel/first-edge"
+
+// The slots the unlock step can open the store by (KernelKeys.Slot): the
+// slot's kind. Only SlotTPM is this PC's own; a start by any other slot is
+// an unknown host's (§12.2) as far as the edge is concerned, and the kernel
+// cuts the live edge (kernel.EdgeCut).
+const (
+	SlotTPM        = "tpm"
+	SlotPassphrase = "passphrase"
+	SlotRecovery   = "recovery"
+)
+
+// MaxSlot bounds the slot's name on the wire, as kernel.MaxSlot bounds the
+// one an edge.cut names.
+const MaxSlot = 64
 
 // anchorsTag starts AnchorsEntry's versioned form. A first-form value reads
 // as it only if its first key starts with these bytes; only enrollment
@@ -80,10 +115,11 @@ const anchorsTag, anchorsTagStem = "agentos-anchors/v1\n", "agentos-anchors/"
 const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 
 // maxHandoff is the longest hand-off: the tag, the log key, the head seed,
-// the counter, the recipient with its length, the count and MaxAnchors
-// ES256 keys, under 8 KiB. It is far below a pipe's 64 KiB buffer, so the
+// the counter, the recipient and the page authority with their lengths, the
+// link key, the first edge key and the slot with theirs, the count and
+// MaxAnchors ES256 keys. It is far below a pipe's 64 KiB buffer, so the
 // unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 2 + RecipientLen + 1 + MaxAnchors*maxAnchor
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -98,13 +134,21 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // none when the store holds none (the kernel then starts setup-only and
 // takes them into its log, kernel.Setup), and the backup recipient, empty
 // when the store holds none (a box enrolled before MIG-4-recovery-e1; the
-// kernel then takes no backup).
+// kernel then takes no backup), and the page authority, none when the
+// store holds none (the kernel then certifies nothing). Then the link key
+// and the first edge key, each none when the store holds none (a box
+// enrolled before EDGE-link-core-b, or a restore's, which holds no first
+// key), and the slot that opened the store, which is always named.
 type KernelKeys struct {
 	Log       [32]byte
 	Head      ed25519.PrivateKey
 	Counter   Counter
 	Anchors   []key.PublicKey
-	Recipient []byte // RecipientLen bytes or none (RecipientEntry)
+	Recipient []byte             // RecipientLen bytes or none (RecipientEntry)
+	PageCA    []byte             // pageca.Marshal's form or none (PageCAEntry)
+	LinkKey   ed25519.PrivateKey // none or a whole key (LinkKeyEntry)
+	FirstEdge ed25519.PublicKey  // none or PublicKeySize bytes (FirstEdgeEntry)
+	Slot      string             // SlotTPM, or another slot's kind
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -167,6 +211,54 @@ func validRecipient(r []byte) bool {
 	}
 	_, err := mlkem.NewEncapsulationKey768(r[recipientXLen:])
 	return err == nil
+}
+
+// ParsePageCA reads PageCAEntry's value, refusing one that is not a page
+// authority's sealed form. The result is a copy of b; the caller wipes it.
+func ParsePageCA(b []byte) ([]byte, error) {
+	if !validPageCA(b) {
+		return nil, ErrHandoff
+	}
+	return bytes.Clone(b), nil
+}
+
+// validPageCA: b is 1 to pageca.MaxSealed bytes that open as an authority.
+func validPageCA(b []byte) bool {
+	if len(b) == 0 || len(b) > pageca.MaxSealed {
+		return false
+	}
+	_, err := pageca.Unmarshal(b)
+	return err == nil
+}
+
+// ParseLinkKey reads LinkKeyEntry's value, an Ed25519 seed, as the key.
+func ParseLinkKey(b []byte) (ed25519.PrivateKey, error) {
+	if len(b) != ed25519.SeedSize {
+		return nil, ErrHandoff
+	}
+	return ed25519.NewKeyFromSeed(b), nil
+}
+
+// ParseFirstEdge reads FirstEdgeEntry's value. The result is a copy of b.
+func ParseFirstEdge(b []byte) (ed25519.PublicKey, error) {
+	if len(b) != ed25519.PublicKeySize {
+		return nil, ErrHandoff
+	}
+	return bytes.Clone(b), nil
+}
+
+// validSlot: s is 1 to MaxSlot printable ASCII bytes with no space, so it
+// is a name kernel.EdgeCut takes.
+func validSlot(s string) bool {
+	if len(s) == 0 || len(s) > MaxSlot {
+		return false
+	}
+	for _, c := range []byte(s) {
+		if c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // ParseAnchors reads AnchorsEntry's value: 1 to MaxAnchors distinct keys,
@@ -247,7 +339,9 @@ func parseAnchors(b []byte, n int) ([]key.PublicKey, error) {
 // Marshal encodes k for the pipe. The caller wipes the result.
 func (k KernelKeys) Marshal() ([]byte, error) {
 	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors ||
-		len(k.Recipient) != 0 && !validRecipient(k.Recipient) {
+		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(k.PageCA) != 0 && !validPageCA(k.PageCA) ||
+		len(k.LinkKey) != 0 && len(k.LinkKey) != ed25519.PrivateKeySize ||
+		len(k.FirstEdge) != 0 && len(k.FirstEdge) != ed25519.PublicKeySize || !validSlot(k.Slot) {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
@@ -263,6 +357,19 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.Counter.Auth...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(k.Recipient)))
 	b = append(b, k.Recipient...)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(k.PageCA)))
+	b = append(b, k.PageCA...)
+	var seed []byte
+	if len(k.LinkKey) != 0 {
+		seed = k.LinkKey.Seed()
+	}
+	b = append(b, byte(len(seed)))
+	b = append(b, seed...)
+	clear(seed)
+	b = append(b, byte(len(k.FirstEdge)))
+	b = append(b, k.FirstEdge...)
+	b = append(b, byte(len(k.Slot)))
+	b = append(b, k.Slot...)
 	out, err := appendAnchors(b, k.Anchors)
 	if err != nil {
 		clear(b)
@@ -278,6 +385,10 @@ func (k *KernelKeys) Wipe() {
 	k.Head = nil
 	clear(k.Counter.Auth)
 	k.Counter.Auth = nil
+	clear(k.PageCA)
+	k.PageCA = nil
+	clear(k.LinkKey)
+	k.LinkKey = nil
 }
 
 // ReadKeys reads the hand-off from f and closes it. f must be a pipe, so a
@@ -308,6 +419,18 @@ func field(b []byte) (f, rest []byte, ok bool) {
 	return b[1 : 1+int(b[0])], b[1+int(b[0]):], true
 }
 
+// optional takes a one-byte length and a field of exactly n bytes, or of
+// none, off b.
+func optional(b []byte, n int) (f, rest []byte, ok bool) {
+	switch {
+	case len(b) >= 1 && b[0] == 0:
+		return nil, b[1:], true
+	case len(b) >= 1+n && int(b[0]) == n:
+		return b[1 : 1+n], b[1+n:], true
+	}
+	return nil, nil, false
+}
+
 func parseKeys(b []byte) (KernelKeys, error) {
 	o := len(handoffTag) + 32 + ed25519.SeedSize
 	if len(b) < o || len(b) > maxHandoff || string(b[:len(handoffTag)]) != handoffTag {
@@ -333,7 +456,28 @@ func parseKeys(b []byte) (KernelKeys, error) {
 			return KernelKeys{}, ErrHandoff
 		}
 	}
-	if rest = rest[2+len(rcp):]; len(rest) < 1 {
+	if rest = rest[2+len(rcp):]; len(rest) < 2 {
+		return KernelKeys{}, ErrHandoff
+	}
+	// None: the store has no page authority, so the kernel certifies none.
+	var ca []byte
+	if n := int(binary.BigEndian.Uint16(rest)); n != 0 {
+		if ca = rest[2:min(2+n, len(rest))]; len(ca) != n || !validPageCA(ca) {
+			return KernelKeys{}, ErrHandoff
+		}
+	}
+	rest = rest[2+len(ca):]
+	// None: the store has no link key or no first edge key.
+	seed, rest, ok := optional(rest, ed25519.SeedSize)
+	if !ok {
+		return KernelKeys{}, ErrHandoff
+	}
+	edge, rest, ok := optional(rest, ed25519.PublicKeySize)
+	if !ok || len(rest) < 1 || len(rest) < 1+int(rest[0]) {
+		return KernelKeys{}, ErrHandoff
+	}
+	slot := string(rest[1 : 1+int(rest[0])])
+	if rest = rest[1+int(rest[0]):]; !validSlot(slot) || len(rest) < 1 {
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: the store has no anchors yet, so the kernel starts setup-only.
@@ -341,7 +485,10 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if err != nil {
 		return KernelKeys{}, err
 	}
-	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp)}
+	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: bytes.Clone(ca), FirstEdge: bytes.Clone(edge), Slot: slot}
+	if seed != nil {
+		k.LinkKey = ed25519.NewKeyFromSeed(seed)
+	}
 	o = len(handoffTag)
 	copy(k.Log[:], b[o:o+32])
 	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])

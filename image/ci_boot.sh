@@ -125,21 +125,23 @@ EOF
 }
 
 # A host PC's own disk (ONB-2, HW-8): a GPT with its own ESP, a data partition, Linux swap and an
-# ext4 filesystem, each holding a synthetic canary, built without loop devices or mounts. It sits
+# ext4 filesystem, each holding a synthetic canary and a label (HOSTLABEL, hostlabel; partitions
+# named host*) the box must not record, built without loop devices or mounts. It sits
 # beside the drive on the first boot, the one that grows root and writes the drive's GUIDs, and the
 # box may read its partition table and nothing else, so it must come out byte-identical.
 host_disk() {
 	h=$1 t=$(mktemp -d "$W/host.XXXXXX")
 	rm -f "$h"; truncate -s 256M "$h"
-	printf '%s\n' 'label: gpt' 'size=64M, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B' \
-		'size=64M, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7' 'size=32M, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F' \
-		'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4' | sfdisk -q "$h"
+	printf '%s\n' 'label: gpt' 'size=64M, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=hostesp' \
+		'size=64M, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=hostdata' \
+		'size=32M, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F, name=hostswap' \
+		'type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name=hostroot' | sfdisk -q "$h"
 	echo agentos-ci-canary-host-disk >"$t/canary"
 	for fs in esp data; do
-		mkfs.vfat -C "$t/$fs" 65536 >/dev/null; mcopy -i "$t/$fs" "$t/canary" ::/canary
+		mkfs.vfat -n HOSTLABEL -C "$t/$fs" 65536 >/dev/null; mcopy -i "$t/$fs" "$t/canary" ::/canary
 	done
-	truncate -s 32M "$t/swap"; truncate -s 64M "$t/ext4"; mkswap -q "$t/swap"
-	mkdir "$t/root"; cp "$t/canary" "$t/root/"; mkfs.ext4 -q -F -d "$t/root" "$t/ext4"
+	truncate -s 32M "$t/swap"; truncate -s 64M "$t/ext4"; mkswap -q -L hostlabel "$t/swap"
+	mkdir "$t/root"; cp "$t/canary" "$t/root/"; mkfs.ext4 -q -F -L hostlabel -d "$t/root" "$t/ext4"
 	n=0
 	sfdisk -d "$h" | sed -n 's/.*start= *\([0-9]*\).*/\1/p' | while read -r start; do
 		n=$((n + 1)); f=$(echo esp data swap ext4 | cut -d' ' -f$n)
@@ -153,6 +155,13 @@ copy "$D"
 H=$W/host.raw
 host_disk "$H"
 host_before=$(sha256sum <"$H")
+# And a host PC's USB disk, the same layout, on QEMU's xHCI (HOST-1a, hostdisk H11, H12): hidden and
+# never mounted like the internal one. Only its bytes after the boot are read here, so QEMU's
+# usb-storage read faults (S7, above) cannot pass or fail it.
+U=$W/usb.raw
+host_disk "$U"
+usb_before=$(sha256sum <"$U")
+USB=" -device qemu-xhci,id=xhci -drive if=none,id=usb,format=raw,file=$U -device usb-storage,bus=xhci.0,drive=usb,removable=on"
 before=$(stat -c %s "$IMG")
 # NetworkManager runs and manages nothing, and polkit answers for the join helper only (#936, I17,
 # I21). The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
@@ -216,18 +225,79 @@ EOS
 }
 NX_UNIT="[Unit]\nDescription=agentOS noexec check (CI only)\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=120\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(noexec_check | base64 -w0) | base64 -d | sh'\n"
 NX_EXTRA="$(nm_cred systemd.extra-unit.agentos-noexec-check.service "$NX_UNIT")"
-# One multi-user.target drop-in starts both checks: systemd reads a credential name once, so a
+# The host disks stay hidden (HW-8, HOST-1a; hostdisk ASSUMPTIONS H8, H11): the rules classed the
+# root's disk as the drive and every other disk, the USB one included, as a host disk; no host node
+# is ready for a mount unit or open to any uid but root, and udev recorded no label, UUID or
+# partition name for one, so no /dev/disk link names it; the helper lists both disks by bus; every
+# SCSI and NVMe passthrough node is root-only. Passed the same way as the NetworkManager check.
+hostdisk_check() {
+	cat <<'EOS'
+say() { echo "agentos-hostdisk: $*"; }
+prop() { udevadm info -q property -n "$1" 2>/dev/null | sed -n "s/^$2=//p"; }
+n=0
+until [ "$(lsblk -dnro TRAN | grep -c usb)" -ge 1 ] || [ $n -ge 60 ]; do n=$((n + 1)); sleep 1; done
+udevadm settle --timeout=60
+rootdisk=$(lsblk -snrpo NAME,TYPE "/dev/block/$(findmnt -rno MAJ:MIN / | tr -d ' ')" | awk '$2 == "disk" { print $1 }')
+[ "$(prop "$rootdisk" AGENTOS_DISK)" = drive ] && say "drive is the root disk" ||
+	say "FAIL root disk ${rootdisk:-unknown} is $(prop "$rootdisk" AGENTOS_DISK)"
+nodes= bad=
+for d in $(lsblk -dnrpo NAME,TYPE | awk '$2 == "disk" { print $1 }'); do
+	[ "$d" = "$rootdisk" ] && continue
+	for x in $(lsblk -nrpo NAME "$d"); do
+		nodes="$nodes $x"
+		[ "$(prop "$x" AGENTOS_DISK)" = host ] || bad="$bad $x:class=$(prop "$x" AGENTOS_DISK)"
+		[ "$(prop "$x" SYSTEMD_READY)" = 0 ] || bad="$bad $x:ready"
+		[ "$(stat -c '%U:%G %a' "$x")" = "root:root 600" ] || bad="$bad $x:$(stat -c '%U:%G:%a' "$x")"
+		udevadm info -q property -n "$x" | grep -qE '^ID_(FS_LABEL|FS_UUID|PART_ENTRY_NAME|PART_ENTRY_UUID|PART_TABLE_UUID)=' &&
+			bad="$bad $x:ids"
+	done
+done
+[ -n "$nodes" ] && [ -z "$bad" ] && say "every host node hidden" || say "FAIL host nodes:${bad:- none found}"
+links=
+for l in /dev/disk/by-*/*; do
+	[ -e "$l" ] || continue
+	t=$(readlink -f "$l")
+	for x in $nodes; do [ "$t" = "$x" ] && links="$links $l"; done
+	case ${l##*/} in HOSTLABEL | hostlabel | host*) links="$links $l" ;; esac
+done
+[ -z "$links" ] && say "no label or link names a host disk" || say "FAIL links:$links"
+buses=$(/usr/lib/agentos/agentos-hostdisk list | sed -n 's/^ *"bus": "\([a-z]*\)".*/\1/p' | sort | tr '\n' ' ')
+say "host disks ${buses% }"
+c=0 open=
+for x in /dev/sg* /dev/bsg/* /dev/ng* /dev/nvme[0-9] /dev/nvme[0-9][0-9]; do
+	[ -c "$x" ] || continue
+	c=$((c + 1))
+	[ "$(stat -c '%U:%G %a' "$x")" = "root:root 600" ] || open="$open $x:$(stat -c '%U:%G:%a' "$x")"
+done
+# At least the USB disk's own bsg node, so the line proves the 72 rule on a real udev.
+if [ "$c" -lt 1 ]; then say "FAIL no passthrough node found"
+elif [ -z "$open" ]; then say "passthrough nodes root-only ($c)"
+else say "FAIL passthrough nodes:$open"; fi
+say done
+EOS
+}
+HD_UNIT="[Unit]\nDescription=agentOS host disk check (CI only)\nAfter=systemd-udev-trigger.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=180\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'echo $(hostdisk_check | base64 -w0) | base64 -d | sh'\n"
+HD_EXTRA="$(nm_cred systemd.extra-unit.agentos-hostdisk-check.service "$HD_UNIT")"
+# One multi-user.target drop-in starts every check: systemd reads a credential name once, so a
 # second systemd.unit-dropin.multi-user.target would be dropped, and its check never run (#2875).
-CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service\n')"
+CHECKS_WANTED="$(nm_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-nm-check.service agentos-noexec-check.service agentos-hostdisk-check.service\n')"
 
 # Forwards from the host to box ports 22, 80, 443, 18789 and 5355 (resolved's LLMNR): each must be
-# dropped (I11, I19). The LAN NIC carries the same probe over IPv6 (#1457).
-EXTRA="$NM_EXTRA$NX_EXTRA$CHECKS_WANTED" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
+# dropped (I11, I19), except the owner page's 80 and 443, which the inbound table admits from
+# private sources such as QEMU's 10.0.2.2 (CH-9, D-178, WIFI-del-a3). The LAN NIC carries the same
+# probe over IPv6 (#1457), where every port is dropped.
+EXTRA="$NM_EXTRA$NX_EXTRA$HD_EXTRA$CHECKS_WANTED$USB" NIC="user,model=virtio-net-pci,hostfwd=tcp:127.0.0.1:18022-:22,hostfwd=tcp:127.0.0.1:18080-:80,hostfwd=tcp:127.0.0.1:18443-:443,hostfwd=tcp:127.0.0.1:18789-:18789,hostfwd=tcp:127.0.0.1:15355-:5355" \
 	LAN="socket,model=virtio-net-pci,listen=127.0.0.1:18600" PROBE6="127.0.0.1:18600 22 80 443 18789 5355" \
 	PROBE="18022:22 18080:80 18443:443 18789:18789 15355:5355" boot "$W/console.log" "$D" "$H"
-for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
+for want in "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off hostdisk=ok" "agentos-boot: bless=good" "agentos-drive-id: assigned"; do
 	has "$W/console.log" "$want"
 done
+for want in "agentos-hostdisk: drive is the root disk" "agentos-hostdisk: host disks usb virtio" \
+	"agentos-hostdisk: every host node hidden" "agentos-hostdisk: no label or link names a host disk" \
+	"agentos-hostdisk: passthrough nodes root-only" "agentos-hostdisk: done"; do
+	has "$W/console.log" "$want"
+done
+hasnt "$W/console.log" "agentos-hostdisk: FAIL"
 # NetworkManager is up and manages no device; polkit lets the join helper write system connections
 # and no other user; nothing is on the drive. The health line above still reads forward=off
 # inbound=drop, and the probes below find every port dropped (DEV-2).
@@ -253,8 +323,9 @@ fi
 # The host disk is not the boot drive (drive-id saw one boot partition), nothing wrote to it, and
 # the guest reports no mount or swap on it (a read-only mount leaves the bytes unchanged, IMG-1-1).
 [ "$(sha256sum <"$H")" = "$host_before" ] && echo "ok   host disk unchanged" || { echo "MISS host disk unchanged"; fail=1; }
+[ "$(sha256sum <"$U")" = "$usb_before" ] && echo "ok   USB host disk unchanged" || { echo "MISS USB host disk unchanged"; fail=1; }
 disks_none "$W/console.log" "agentos-disks:"
-rm -f "$H"
+rm -f "$H" "$U"
 # Root carries project quotas, so each agent machine writes under its own hard quota (RES-4, #1386),
 # and the agentosd command systemd loaded ends -disk-quota on (flag=on).
 has "$W/console.log" "agentos-quota: root=ext4 prjquota flag=on"
@@ -269,12 +340,17 @@ if grep -a "agentos-uplink: " "$W/console.log" | grep -qF " 10.0.2.15/"; then
 else
 	echo "MISS agentos-uplink: <if> 10.0.2.15/ (the forwards' target)"; fail=1
 fi
-# The host's connections through the forwards reach the box's leased address and get no answer.
+# The host's connections through the forwards reach the box's leased address and get no answer,
+# but on the page's ports, which answer (a listener, or a reset while the page has none): the
+# in-boot positive control that the probe reaches a port the box holds open.
 cat "$W/console.log.probe" 2>/dev/null || true
-for port in 22 80 443 18789; do
+for port in 22 18789; do
 	has "$W/console.log.probe" "agentos-probe: $port dropped"
 done
 has "$W/console.log.probe" "agentos-probe: 5355 dropped"
+for port in 80 443; do
+	has "$W/console.log.probe" "agentos-probe: $port answered"
+done
 # Over IPv6 on the LAN NIC: the box answers neighbour discovery at its link-local and SLAAC
 # addresses (the probe reaches it there), and no port answers at either.
 cat "$W/console.log.probe6" 2>/dev/null || true

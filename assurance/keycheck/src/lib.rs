@@ -1025,4 +1025,36 @@ mod tests {
         assert!(r.contains(REVOKED) && r.contains(EXPIRED));
         assert!(v.spend("t1", -1, &Context::default()).contains(MALFORMED));
     }
+
+    /// The Ed25519 edge vectors (#3357): malleable S, small- and mixed-order
+    /// points and non-canonical encodings, each with the verdict Go's
+    /// crypto/ed25519 gives. broker/test/keydiff checks the same file in Go.
+    #[test]
+    fn signed_gives_every_edge_vector_its_verdict() {
+        let unhex = |s: &str| -> Vec<u8> {
+            (0..s.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        let (mut n, mut admitted) = (0, 0);
+        for line in include_str!("../testdata/ed25519-edges.txt").lines() {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split(' ').collect();
+            assert_eq!(f.len(), 5, "{line}");
+            let want = f[4] == "true";
+            assert!(want || f[4] == "false", "{line}");
+            assert_eq!(
+                signed(&unhex(f[1]), &unhex(f[2]), &unhex(f[3])),
+                want,
+                "{}",
+                f[0]
+            );
+            n += 1;
+            admitted += usize::from(want);
+        }
+        assert_eq!((n, admitted), (25, 14));
+    }
 }

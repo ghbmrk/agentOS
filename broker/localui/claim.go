@@ -63,7 +63,7 @@ func (s *Server) claimGate(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	if s.isClaimant(r) {
-		return s.claimWiFiGate(w, r)
+		return false
 	}
 	w.WriteHeader(http.StatusForbidden)
 	s.render(w, "claimbox", claimView{Claimed: true, Reinstall: s.cfg.Claim.Status().Reinstall})
@@ -98,12 +98,6 @@ func (s *Server) claimPage(w http.ResponseWriter, r *http.Request) {
 		if tok != "" {
 			setCookie(w, r, &http.Cookie{Name: claimCookie, Value: tok, Path: "/", MaxAge: int(SetupCookieFor.Seconds()),
 				HttpOnly: true, SameSite: http.SameSiteStrictMode})
-		}
-		if err == nil && s.cfg.SetupWiFi != nil {
-			// The claim's answer is the new setup Wi-Fi password and its
-			// QR (HW-10, #1692).
-			http.Redirect(w, r, "/claim/wifi", http.StatusSeeOther)
-			return
 		}
 		if err == nil {
 			http.Redirect(w, r, "/setup", http.StatusSeeOther)

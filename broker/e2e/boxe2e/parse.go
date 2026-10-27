@@ -124,18 +124,6 @@ func deviceOffer(page []byte, provider string) bool {
 		html.EscapeString(provider)+`">`))
 }
 
-var wifiRe = regexp.MustCompile(`New password: <span class="mono">([^<]*)</span>`)
-
-// wifiPassword reads the new setup Wi-Fi password from the claim's Wi-Fi
-// step, as the owner saves it before switching.
-func wifiPassword(page []byte) (string, bool) {
-	m := wifiRe.FindSubmatch(page)
-	if m == nil {
-		return "", false
-	}
-	return html.UnescapeString(string(m[1])), true
-}
-
 var deviceRe = regexp.MustCompile(`<p>Open <a href="([^"]*)">[^<]*</a> and enter <span class="mono">([^<]*)</span>\.</p>`)
 
 // deviceLink reads the provider's sign-in link and the code to enter there

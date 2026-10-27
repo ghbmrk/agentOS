@@ -5,7 +5,10 @@ package main
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +19,7 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -23,7 +27,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -57,7 +63,7 @@ func newBox(t *testing.T) *box {
 	b.c = config{
 		state: state, anchorDir: filepath.Join(kdir, "anchor"), log: filepath.Join(kdir, "log"),
 		host: "Test PC", passphrase: pf, recovery: rf, pcrs: testPCRs,
-		kernelUID: os.Getuid(), kernelGID: os.Getgid(),
+		kernelUID: os.Getuid(), kernelGID: os.Getgid(), built: testBuilt,
 	}
 	return b
 }
@@ -282,6 +288,51 @@ func TestEnrollStoresTheBackupRecipient(t *testing.T) {
 	other[0] ^= 1
 	if get(backup.RecipientFor(other)).ID() == want.ID() {
 		t.Fatal("two recovery keys share a recipient")
+	}
+}
+
+// testBuilt stands for the image's build time.
+var testBuilt = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: enrollment makes the page authority and keeps it in
+// the store, for the unlock step to hand the kernel: an authority for the
+// page name only, whose certificate opens with its key, dated from the
+// build time and never the clock. Without a build time it makes no store.
+func TestEnrollStoresThePageAuthority(t *testing.T) {
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	v, ok, err := b.enrolled().Get(handoff.PageCAEntry)
+	if err != nil || !ok {
+		t.Fatalf("no page authority in the store: %v", err)
+	}
+	a, err := pageca.Unmarshal(get(handoff.ParsePageCA(v)))
+	if err != nil || a.Name() != pageca.DefaultName {
+		t.Fatalf("the store's authority does not open for the page name: %v", err)
+	}
+	cert := get(x509.ParseCertificate(a.Certificate()))
+	if !cert.NotBefore.Equal(testBuilt.Add(-24*time.Hour)) || len(cert.PermittedDNSDomains) != 1 || !cert.IsCA {
+		t.Fatalf("the authority is not the page's, from the build time: %v %v", cert.NotBefore, cert.PermittedDNSDomains)
+	}
+	if a.Fingerprint() != pageca.Fingerprint(cert.Raw) {
+		t.Fatal("no fingerprint to print")
+	}
+	// A leaf it issues verifies under it for the page name.
+	pk := get(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+	leaf := get(x509.ParseCertificate(get(a.Issue(get(x509.MarshalPKIXPublicKey(&pk.PublicKey)), testBuilt.Add(48*time.Hour), nil))))
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: pageca.DefaultName, Roots: pool, CurrentTime: testBuilt.Add(72 * time.Hour)}); err != nil {
+		t.Fatalf("the authority's leaf does not verify: %v", err)
+	}
+
+	z := newBox(t)
+	z.c.built = time.Time{}
+	if err := enroll(z.c, z.sw.TPM()); err == nil {
+		t.Fatal("enrolled with no build time")
+	}
+	if ok, _ := exists(z.c.storePath()); ok {
+		t.Fatal("a store without a page authority is in place")
 	}
 }
 
@@ -808,4 +859,110 @@ func TestAnchorDirIsNotRedirected(t *testing.T) {
 			t.Fatalf("enrollment removed a file through the symlink: %v", err)
 		}
 	})
+}
+
+// writeCapture writes the link port's capture of a hello by the edge key
+// seeded with seed, as agentos-link's pre-store mode would, and points the
+// box's enrollment at it.
+func (b *box) writeCapture(seed byte) ed25519.PublicKey {
+	b.t.Helper()
+	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{seed}, ed25519.SeedSize))
+	nonce := bytes.Repeat([]byte{0x6e}, 32)
+	v := append(append(bytes.Clone(priv.Public().(ed25519.PublicKey)), nonce...), ed25519.Sign(priv, kernel.HelloMsg(nonce))...)
+	if b.c.firstEdge == "" {
+		b.c.firstEdge = filepath.Join(b.t.TempDir(), "first-edge")
+	}
+	noErr(b.t, os.WriteFile(b.c.firstEdge, v, 0o600))
+	return priv.Public().(ed25519.PublicKey)
+}
+
+func gone(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the capture file is still there: %v", err)
+	}
+}
+
+// REQ: HW-15, BAK-1
+// EDGE-link-core-b: enrollment makes the core's link key and keeps it in
+// the store only, and takes the first edge key the link port captured: the
+// store holds it and the capture file is gone. A capture that is
+// malformed, badly signed, or writable by anyone but root stores no first
+// key, is removed too, and enrollment still finishes. No capture file
+// stores none.
+// Revert mutants: `ed25519.Verify` dropped from readCapture (the badly
+// signed capture stores a key); commitAndDrop's Remove dropped (the file
+// stays).
+func TestEnrollMakesALinkKeyAndTakesTheFirstEdge(t *testing.T) {
+	b := newBox(t)
+	edge := b.writeCapture(8)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	st := b.enrolled()
+	seed, ok, err := st.Get(handoff.LinkKeyEntry)
+	if err != nil || !ok {
+		t.Fatalf("no link key in the store: %v", err)
+	}
+	if _, err := handoff.ParseLinkKey(seed); err != nil {
+		t.Fatalf("the link key does not read: %v", err)
+	}
+	v, ok, err := st.Get(handoff.FirstEdgeEntry)
+	if err != nil || !ok || !bytes.Equal(v, edge) {
+		t.Fatalf("the store's first edge is %x, want the captured %x (%v)", v, edge, err)
+	}
+	gone(t, b.c.firstEdge)
+
+	// A second box makes another link key: each enrollment its own.
+	o := newBox(t)
+	noErr(t, enroll(o.c, o.sw.TPM()))
+	if other, _, _ := o.enrolled().Get(handoff.LinkKeyEntry); bytes.Equal(other, seed) {
+		t.Fatal("two enrollments made one link key")
+	}
+	if _, ok, _ := o.enrolled().Get(handoff.FirstEdgeEntry); ok {
+		t.Fatal("no capture stored a first edge")
+	}
+
+	for name, spoil := range map[string]func(path string){
+		"short":     func(p string) { noErr(t, os.WriteFile(p, []byte("hello"), 0o600)) },
+		"long":      func(p string) { noErr(t, os.WriteFile(p, append(get(os.ReadFile(p)), 0), 0o600)) },
+		"bad sig":   func(p string) { v := get(os.ReadFile(p)); v[len(v)-1] ^= 1; noErr(t, os.WriteFile(p, v, 0o600)) },
+		"other key": func(p string) { v := get(os.ReadFile(p)); v[0] ^= 1; noErr(t, os.WriteFile(p, v, 0o600)) },
+		"writable":  func(p string) { noErr(t, os.Chmod(p, 0o622)) },
+		"symlink": func(p string) {
+			real := p + ".real"
+			noErr(t, os.Rename(p, real))
+			noErr(t, os.Symlink(real, p))
+		},
+	} {
+		x := newBox(t)
+		x.writeCapture(8)
+		spoil(x.c.firstEdge)
+		if err := enroll(x.c, x.sw.TPM()); err != nil {
+			t.Fatalf("%s capture: enrollment did not finish: %v", name, err)
+		}
+		if _, ok, _ := x.enrolled().Get(handoff.FirstEdgeEntry); ok {
+			t.Errorf("%s capture: stored a first edge", name)
+		}
+		gone(t, x.c.firstEdge)
+	}
+}
+
+// REQ: HW-15, REC-2
+// EDGE-link-core-b: a restore's enrollment removes a capture file it finds
+// and stores no first edge key, so a restored box trusts no edge until the
+// owner's page step; it still makes a new link key.
+// Revert mutant: `|| c.restore` dropped from putLinkKeys (the restore
+// stores the captured key).
+func TestRestoreEnrollStoresNoFirstEdge(t *testing.T) {
+	b := newBox(t)
+	b.writeCapture(8)
+	b.c.restore = true
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	st := b.enrolled()
+	if _, ok, _ := st.Get(handoff.FirstEdgeEntry); ok {
+		t.Fatal("a restore's enrollment stored a first edge")
+	}
+	if _, ok, _ := st.Get(handoff.LinkKeyEntry); !ok {
+		t.Fatal("a restore's enrollment made no link key")
+	}
+	gone(t, b.c.firstEdge)
 }

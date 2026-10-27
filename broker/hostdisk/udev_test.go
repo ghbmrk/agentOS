@@ -31,6 +31,7 @@ type udevDev struct {
 	tags                      map[string]bool
 	links                     []string
 	written                   []string // what a stock rule would write: md, LVM, bcache
+	run                       []string // RUN+= programs, %k expanded
 }
 
 type udevKV struct{ key, op, val string }
@@ -127,6 +128,8 @@ func runRules(t *testing.T, rules [][]udevKV, d *udevDev, classify func(string) 
 				}
 			case strings.HasPrefix(kv.key, "ENV{") && kv.op == "=":
 				d.env[kv.key[4:len(kv.key)-1]] = kv.val
+			case kv.key == "RUN" && kv.op == "+=":
+				d.run = append(d.run, strings.ReplaceAll(kv.val, "%k", d.kernel))
 			case kv.key == "TAG" && kv.op == "-=":
 				delete(d.tags, kv.val)
 			case kv.key == "TAG" && kv.op == "+=":
@@ -367,6 +370,15 @@ func TestUdevRuleHidesHostDisks(t *testing.T) {
 		}
 		if got := outcomeOf(c.dev); got != c.want {
 			t.Errorf("%s: %v, want %v (%+v)", c.dev.kernel, got, c.want, c.dev)
+		}
+		// HOST-1a part 2: a hidden device's links from the initrd, which
+		// has no host-disk rules, are removed; no other device runs it.
+		var wantRun []string
+		if c.want == hiddenFully {
+			wantRun = []string{"/usr/lib/agentos/host-disk-unlink " + c.dev.kernel}
+		}
+		if strings.Join(c.dev.run, "|") != strings.Join(wantRun, "|") {
+			t.Errorf("%s: RUN %q, want %q", c.dev.kernel, c.dev.run, wantRun)
 		}
 		// An unknown device's own type stays (99-systemd and 64-btrfs
 		// route on it).

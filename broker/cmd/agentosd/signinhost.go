@@ -87,6 +87,7 @@ type signInMachines interface {
 	CreateProviderWorker(ctx context.Context, id string, s vm.Spec, seed map[string][]byte) (vm.Machine, error)
 	Exec(ctx context.Context, id string, c vm.Command, timeout time.Duration) (vm.ExecResult, error)
 	Destroy(ctx context.Context, id string) error
+	Machines() []string
 }
 
 // The host's refusals, sockets.Codes so the clerk gets their text.
@@ -454,6 +455,23 @@ func (h *signInHost) watch(guest string, r *signInRun, lease, wall time.Duration
 				h.stop(guest, r)
 				return
 			}
+		}
+	}
+}
+
+// Sweep destroys every provider worker the machine manager holds, sign-in
+// and plan-run alike, before any sign-in is served or plan run starts: a
+// worker left by a crash is reloaded Stopped with its placeholder seed,
+// and nothing else ever destroys it (#3249, #3308, CAP-8). None has a
+// live owner yet: setup's sign-in machines are closed before agentosd
+// opens its own, and the provider runner is wired after the sweep
+// (TestProviderSweepRunsBeforeAnyProviderWorker). Destroying one closes
+// its route, if it has one. A failed destroy is logged and the rest go
+// on; the next start retries it.
+func (h *signInHost) Sweep() {
+	for _, id := range h.M.Machines() {
+		if strings.HasPrefix(id, vm.ProviderPrefix) {
+			h.destroy("sweep", id)
 		}
 	}
 }

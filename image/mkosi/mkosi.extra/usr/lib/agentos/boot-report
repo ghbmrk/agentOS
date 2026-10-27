@@ -43,7 +43,7 @@ esac
 # a quoted word or a second command would add. Parsers that allowed variations were bypassed three
 # review rounds running, so nothing varies (Security #2110 re-sign 3). Anything else reads overridden.
 x=$(systemctl show -P ExecStart agentosd.service 2>/dev/null) || x=
-c='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui -netjoin-sock /run/agentos-netjoin/netjoin.sock -kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel -kernel-owner-uid @uid:agentos-owner -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw -image codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on'
+c='/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui -kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel -kernel-owner-uid @uid:agentos-owner -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw -image codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on'
 t=${x#"{ path=/usr/lib/agentos/with-uids ; argv[]=$c ; ignore_errors="}
 case $x in
 "$t") case $x in *"argv[]="*) f=overridden ;; *) f=unknown ;; esac ;;

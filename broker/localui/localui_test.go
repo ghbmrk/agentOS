@@ -10,6 +10,7 @@ import (
 	"html"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -40,12 +41,31 @@ func testAP() APConfig {
 		SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"}
 }
 
+func testPage() Page { return Page{Iface: "eth0"} }
+
+// The box's own addresses in these tests: the one the phone reaches and
+// another on a second port.
+func init() {
+	ownAddrs = func() ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("192.168.50.2"), netip.MustParseAddr("172.20.0.9")}, nil
+	}
+}
+
+// boxReached is the address a phone's connection reaches on the box's
+// port 1.
+var boxReached = &net.TCPAddr{IP: net.IPv4(10, 42, 0, 1), Port: 80}
+
+// reaching is r as the server sees it on port 1: its connection reached
+// boxReached.
+func reaching(r *http.Request) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, boxReached))
+}
+
 // fakeHooks stands in for the uplink, modem, vault, host trust and provider
 // adapters.
 type fakeHooks struct {
 	mu           sync.Mutex
 	progress     Progress
-	joined       string
 	sent         []modem.SMS
 	now          func() time.Time
 	seed         []byte // the vault's sealed code-generator seed
@@ -69,8 +89,6 @@ type fakeHooks struct {
 	unavailable bool
 	noTexts     bool            // the box cannot text: BoxNumber answers "", false
 	keyErr      error           // ConnectAPIKey's answer when set; nothing is stored
-	joinErr     error           // JoinNetwork's answer when set; nothing is joined
-	joins       int             // JoinNetwork calls
 	deviceErr   error           // StartDeviceCode's answer when set
 	deviceLink  string          // StartDeviceCode's link when set
 	privateErr  error           // SetPrivateOK's answer when set; nothing is recorded
@@ -86,18 +104,6 @@ type fakeHooks struct {
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
-func (f *fakeHooks) Networks() []string { return []string{"Home", "Neighbor"} }
-func (f *fakeHooks) JoinNetwork(ssid, pw string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.joins++
-	if f.joinErr != nil {
-		return f.joinErr
-	}
-	f.joined = ssid
-	f.progress.Online = true
-	return nil
-}
 func (f *fakeHooks) BoxNumber() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -285,10 +291,6 @@ type rig struct {
 	owned OwnerCard
 	// rot, when set, is the server's card rotation.
 	rot RotationCard
-	// handOffs counts the rotated Wi-Fi hand-offs agentosd took, under
-	// mu; wifiErr fails them (#1191).
-	handOffs int
-	wifiErr  error
 }
 
 func newRig(t *testing.T) *rig {
@@ -311,7 +313,7 @@ func (r *rig) open(st SetupStore) *Server {
 	if r.via != nil {
 		h = r.via
 	}
-	s, err := New(Config{AP: testAP(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned, Rotation: r.rot,
+	s, err := New(Config{Page: testPage(), Hooks: h, SetupSecret: r.card.SetupSecret, Store: st, Card: r.owned, Rotation: r.rot,
 		Defaults: "spend cap $20 a day; payments need approval.", Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		r.t.Fatal(err)
@@ -342,7 +344,7 @@ func (r *rig) do(method, path string, form url.Values, mod ...func(*http.Request
 		m(req)
 	}
 	w := httptest.NewRecorder()
-	r.srv.ServeHTTP(w, req)
+	r.srv.ServeHTTP(w, reaching(req))
 	r.jar.SetCookies(u, w.Result().Cookies())
 	r.mu.Lock()
 	r.seen = append(r.seen, w.Body.String())
@@ -436,11 +438,12 @@ func (r *rig) runSetupToHost() {
 	if loc := r.do("GET", "/", nil).Header().Get("Location"); loc != "/setup" {
 		t.Fatalf("root before setup: %q", loc)
 	}
-	// Home network.
-	if !strings.Contains(r.get("/setup"), "Home network") {
-		t.Fatal("network step not first")
+	// The number step is first: the box's uplink is its cable to the
+	// enforcer, so setup has no network step (D-178).
+	if page := r.get("/setup"); !strings.Contains(page, "1. Text your box") || strings.Contains(page, "Wi-Fi") {
+		t.Fatalf("number step not first: %s", page)
 	}
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	r.hooks.progress.Online = true
 	// Text my box: the sms: link carries the box's number and a pairing code.
 	page := html.UnescapeString(r.get("/setup"))
 	m := regexp.MustCompile(`href="sms:(\+[0-9]+)\?&body=PAIR%20([A-Z2-9]{8})"`).FindStringSubmatch(page)
@@ -523,7 +526,7 @@ func TestSetupResumesAfterRestart(t *testing.T) {
 	st := &MemStore{}
 	r.srv = r.open(st)
 	r.get("/setup")
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}})
+	r.hooks.progress.Online = true
 	page := r.get("/setup")
 	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(page)[1]
 	r.srv.OfferText(ownerNum, "pair "+strings.ToLower(code)+".")
@@ -725,29 +728,8 @@ func TestLocalUnlockClearsChallengeModeAndResume(t *testing.T) {
 
 // REQ: CH-9, CH-7
 
-// CH-9: the local UI answers only clients on the access point's subnet.
-func TestOnlyAccessPointClientsReachTheUI(t *testing.T) {
-	r := newRig(t)
-	for _, from := range []string{"192.168.1.50:4000", "10.42.1.5:4000", "8.8.8.8:4000", "10.42.0.1:4000", "[::1]:4000", "garbage"} {
-		w := r.do("GET", "/status", nil, func(q *http.Request) { q.RemoteAddr = from })
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("request from %s: %d", from, w.Code)
-		}
-	}
-	for _, bad := range []APConfig{
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("0.0.0.0/0"), SSID: "x", Password: "12345678"},
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("203.0.113.1/24"), SSID: "x", Password: "12345678"},
-		{Iface: "wlan0", Addr: netip.MustParsePrefix("10.42.0.1/8"), SSID: "x", Password: "12345678"},
-		{Iface: "", Addr: netip.MustParsePrefix("10.42.0.1/24"), SSID: "x", Password: "12345678"},
-	} {
-		if _, err := New(Config{AP: bad, Hooks: r.hooks, Store: &MemStore{}}); err == nil {
-			t.Fatalf("accepted %+v", bad)
-		}
-	}
-}
-
-// The listener is bound to the access point interface: binding to an
-// interface that does not exist fails rather than falling back to every
+// The listener is bound to port 1's interface: binding to an interface
+// that does not exist fails rather than falling back to every
 // interface.
 func TestListenerIsBoundToTheInterface(t *testing.T) {
 	if _, err := listenOn(context.Background(), "agentosnope0", "127.0.0.1:0"); err == nil {
@@ -767,29 +749,29 @@ func TestListenerIsBoundToTheInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if _, err := Listen(context.Background(), APConfig{Iface: "lo", Addr: netip.MustParsePrefix("127.0.0.1/8")}, 0); err == nil {
-		t.Fatal("Listen accepted a loopback access point")
+	if _, err := Listen(context.Background(), Page{Iface: "lo"}, 0); err == nil {
+		t.Fatal("Listen accepted loopback as port 1")
 	}
 }
 
 // Captive-portal checks and DNS-rebinding requests (any other host name)
-// are redirected to the box and never act; cross-site posts are refused.
+// are refused and never act (ONB-5, D-178); cross-site posts are refused.
 func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 	r := newRig(t)
 	for _, u := range []string{"http://captive.apple.com/hotspot-detect.html", "http://connectivitycheck.gstatic.com/generate_204", "http://evil.example/status"} {
 		req := httptest.NewRequest("GET", u, nil)
 		req.RemoteAddr = phoneIP
 		w := httptest.NewRecorder()
-		r.srv.ServeHTTP(w, req)
-		if w.Code != http.StatusFound || w.Header().Get("Location") != "http://10.42.0.1/" {
+		r.srv.ServeHTTP(w, reaching(req))
+		if w.Code != http.StatusMisdirectedRequest || w.Header().Get("Location") != "" {
 			t.Fatalf("%s: %d %s", u, w.Code, w.Header().Get("Location"))
 		}
 	}
 	req := httptest.NewRequest("POST", "http://evil.example/stop", nil)
 	req.RemoteAddr = phoneIP
 	w := httptest.NewRecorder()
-	r.srv.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
+	r.srv.ServeHTTP(w, reaching(req))
+	if w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("foreign-host POST: %d", w.Code)
 	}
 	r.runSetup()
@@ -1131,18 +1113,17 @@ func TestSetupClosesAfterLateFinishErrorAndStaysClosed(t *testing.T) {
 	}
 }
 
-// The owner can always find the box page: its address is in every page's
-// footer and in the contact card.
+// The owner can always find the box page: its name is in every page's
+// footer, and the contact card links it (WIFI-del-a3).
 func TestBoxPageAddressIsShown(t *testing.T) {
 	r := newRig(t)
-	if !strings.Contains(r.get("/status"), "http://10.42.0.1/") {
-		t.Fatal("no box page address in the footer")
+	if !strings.Contains(r.get("/status"), "http://"+DefaultPageName+"/") {
+		t.Fatal("no box page name in the footer")
 	}
+	// Until HTTPS is up the name may not resolve, so the card links the
+	// address the phone reached.
 	if !strings.Contains(r.get("/box.vcf"), "URL:http://10.42.0.1/") {
-		t.Fatal("no box page address in the contact card")
-	}
-	if card.BoxPage != "http://"+testAP().Addr.Addr().String()+"/" {
-		t.Fatal("card and access point disagree on the box page")
+		t.Fatal("no reached address in the contact card")
 	}
 }
 

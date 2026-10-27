@@ -1,6 +1,6 @@
-# agentOS Wi-Fi page (P2-2w). Installed by the image (P2-1, image/build.sh)
+# agentOS owner page (P2-2w). Installed by the image (P2-1, image/build.sh)
 # to /usr/lib/systemd/system/. It decodes untrusted forms and photos from any
-# phone on the access point, so it runs as its own user, with no key and
+# phone on the Owner network, so it runs as its own user, with no key and
 # none of the broker's or the vault's state: agentosd's localui.sock decides
 # every owner action (Security L1, L5 on the P2-2w plan), and the vault
 # process's unlock.sock every vault step. It does hold one authority: on a
@@ -8,7 +8,7 @@
 # codes, HW-10) and checks the claim against it, and it keeps the Owner Card
 # step's latch (#1270). Both live in its own state directory.
 [Unit]
-Description=agentOS Wi-Fi page
+Description=agentOS owner page
 After=agentosd.service agentos-egress.service agentos-localui-claim.service
 # Requires=, not Wants=, on the claim hand-over: if the move fails, the page
 # must not start without its claim state, or a preloaded box would serve
@@ -24,15 +24,19 @@ Group=agentos-localui
 # (agentos-localui-claim.service).
 StateDirectory=agentos-localui
 StateDirectoryMode=0700
-ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface wlan0 -addr 10.42.0.1/24 \
+# The page serves on port 1, the core's cable to the enforcer (CH-9, HW-12, D-178): an empty
+# -iface is the one fixed PCI Ethernet port, read from sysfs, never from routes a peer could set;
+# with none or several, the page serves nothing (localui.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
+# name another (broker/e2e/boxe2e).
+ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface ${AGENTOS_PAGE_IFACE} \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \
         -card-latch /var/lib/agentos-localui/card-latch.json
 Restart=always
 RestartSec=5
-# The access point may come up after the page: listening fails until it
-# does, and the unit restarts.
+# A box without exactly one fixed PCI Ethernet port serves no page: it
+# exits, and the unit restarts it.
 
-# Port 80, and SO_BINDTODEVICE to the access point's interface (CH-9).
+# Port 80, and SO_BINDTODEVICE to port 1's interface (CH-9).
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
 NoNewPrivileges=yes
@@ -66,10 +70,12 @@ RemoveIPC=yes
 # heap's soft limit sits under it (memoryLimit).
 MemoryMax=512M
 
-# Network: the access point's clients only, and agentosd's Unix socket.
+# Network: private home sources only (the enforcer routes the Owner network
+# and its admin port to port 1 from another subnet; WIFI-del-a3), and
+# agentosd's Unix socket.
 RestrictAddressFamilies=AF_UNIX AF_INET
 IPAddressDeny=any
-IPAddressAllow=10.42.0.0/24
+IPAddressAllow=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
 # None of the broker's state (L18). The mask binds every command of this
 # unit, `+` ones too, so agentos-localui-claim.service, a unit of its own,
 # moves the claim state to the page's own directory, which stays writable.

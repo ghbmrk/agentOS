@@ -91,11 +91,7 @@ func TestTheCardRoutesSitBehindTheHostCheck(t *testing.T) {
 				r.Host = "box.attacker.example"
 				r.Header.Set("Origin", "http://box.attacker.example")
 			})
-			want := http.StatusFound
-			if method == "POST" {
-				want = http.StatusForbidden
-			}
-			if rec.Code != want || cr.cardText(rec.Body.String()) {
+			if rec.Code != http.StatusMisdirectedRequest || cr.cardText(rec.Body.String()) {
 				t.Fatalf("%s %s from another host: %d %q", method, path, rec.Code, rec.Body.String())
 			}
 		}
@@ -177,7 +173,7 @@ func (heldCard) Hold() error            { return firstboot.ErrCardPending }
 func TestFinishWaitsForTheCard(t *testing.T) {
 	r := newRig(t)
 	r.owned = heldCard{}
-	st := &MemStore{s: SetupState{Network: true, Owner: ownerNum, Device: "x", Codes: true, Recovery: true, Host: true}}
+	st := &MemStore{s: SetupState{Owner: ownerNum, Device: "x", Codes: true, Recovery: true, Host: true}}
 	r.srv = r.open(st)
 	r.hooks.connected = true
 	r.srv.setup.maybeFinish()

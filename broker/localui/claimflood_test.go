@@ -33,7 +33,7 @@ func newFloodRig(t *testing.T) (*rig, *slowClaim) {
 	t.Helper()
 	r := newRig(t)
 	c := &slowClaim{gate: make(chan struct{})}
-	s, err := New(Config{AP: testAP(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
+	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Claim: c, Now: r.clock, Rand: r.srv.cfg.Rand})
 	if err != nil {
 		t.Fatal(err)

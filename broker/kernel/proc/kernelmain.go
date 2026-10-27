@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -28,6 +29,7 @@ type MainConfig struct {
 	MeterUID  int    // the model clerk's uid, its only peer
 	Clerks    map[string]Remote
 	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
+	BackupDir string // the backups' records (KernelConfig.BackupDir)
 	// Peers are the uids this process must not run as: every peer above
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
@@ -65,6 +67,58 @@ var ErrLogKey = errors.New("run: the log does not open under my store's key; I s
 // rotation, which stores one (REC-4).
 var ErrNoRecipient = errors.New("run: my store holds no backup recipient, so I take no backup until you rotate your recovery key")
 
+// ErrNoAuthority: the unlock step handed no page authority, so the kernel
+// certifies no page key and the page serves HTTP only (CH-9). On a box not
+// yet set up the fix is a new enrollment; on a claimed one, ErrPageRestore.
+var ErrNoAuthority = errors.New("run: my store holds no page authority, so I certify no page key")
+
+// ErrPageRestore: a claimed box has no page authority. A new one is never
+// made, since the Owner Card carries the old fingerprint: the box must be
+// restored from a backup, which carries it (CH-9, BAK-1).
+var ErrPageRestore = errors.New("run: I am claimed but hold no page authority; restore me from a backup")
+
+// maxPageKey bounds a page key to certify: a P-256 key in PKIX DER is 91
+// bytes.
+const maxPageKey = 128
+
+// Certified is the certify call's answer: the page's serving certificate
+// and the authority's, both DER.
+type Certified struct {
+	Leaf      []byte `json:"leaf"`
+	Authority []byte `json:"authority"`
+}
+
+// Certify signs the page's serving key (PKIX DER, ECDSA P-256 only) for the
+// page name only (pageca.Authority.Issue) at now, Unix milliseconds. With
+// no authority it answers ErrNoAuthority, or ErrPageRestore once setup has
+// logged the owner's keys. The key the authority signs with never leaves
+// the kernel process; the call takes the lock only to read the claim.
+func (h *Kernel) Certify(now int64, pub []byte) (Certified, error) {
+	if h.page == nil {
+		claimed := false
+		h.With(func(k *kernel.Kernel) error { claimed = len(k.State().Anchors) > 0; return nil })
+		if claimed {
+			return Certified{}, ErrPageRestore
+		}
+		return Certified{}, ErrNoAuthority
+	}
+	if len(pub) == 0 || len(pub) > maxPageKey {
+		return Certified{}, pageca.ErrKey
+	}
+	leaf, err := h.page.Issue(pub, time.UnixMilli(now), nil)
+	if err != nil {
+		return Certified{}, err
+	}
+	return Certified{Leaf: leaf, Authority: h.page.Certificate()}, nil
+}
+
+// Setup is the setup step (kernel.Setup) on this box: it logs the owner's
+// first anchors and, right after them, the first edge key the store
+// handed, if any (HW-15, brief EDGE-link-core decision 3).
+func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
+	return h.With(func(k *kernel.Kernel) error { return k.SetupWithEdge(now, f, h.firstEdge) })
+}
+
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
@@ -75,6 +129,9 @@ var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's dire
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if cfg.KeyDir == "" {
 		return ErrNoKeyTable
+	}
+	if cfg.BackupDir == "" {
+		return ErrNoBackupDir
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
@@ -88,21 +145,41 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err := checkLogKey(cfg.Log, keys.Log); err != nil {
 		return err
 	}
-	// The backup recipient is kept for the backup calls (MIG-4-recovery-e3);
-	// a store enrolled before it holds none, and no backup can be taken.
+	// A store enrolled before the backup recipient holds none, and the
+	// backup call refuses (MIG-4-recovery-e3).
 	if len(keys.Recipient) == 0 {
 		fmt.Fprintln(os.Stderr, ErrNoRecipient)
+	}
+	// One enrolled before the page authority holds none, and certify
+	// refuses (MIG-4-recovery-f1).
+	if len(keys.PageCA) == 0 {
+		fmt.Fprintln(os.Stderr, ErrNoAuthority)
+	}
+	// A start not by this PC's tpm slot trusts no edge (§12.2, HW-15
+	// "move"): not a first key setup would log, nor the live one, which it
+	// cuts below.
+	moved := keys.Slot != handoff.SlotTPM
+	first := keys.FirstEdge
+	if moved {
+		first = nil
 	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
+		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
+		FirstEdge: first, LinkKey: keys.LinkKey,
 	}, clock())
 	if err != nil {
 		return err
 	}
 	defer h.Close()
+	if moved {
+		if err := h.With(func(k *kernel.Kernel) error { return k.EdgeCut(clock(), keys.Slot) }); err != nil {
+			return fmt.Errorf("run: cut the edge at a start by my %s slot: %w", keys.Slot, err)
+		}
+	}
 	// Counts only, on stderr: no owner call reports the subjects yet.
 	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
 		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))

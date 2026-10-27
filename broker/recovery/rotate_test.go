@@ -210,7 +210,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// A rotation that leaves out an owed part is refused, so the lost
 	// card's grid and setup secret cannot stay valid (L3 F3 on #64).
-	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}, {PartPassphrase, PartRecovery, PartSetup, PartGrid}} {
+	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}, {PartPassphrase, PartRecovery, PartSetup}} {
 		if _, err := x.rotate(parts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
 			t.Fatalf("rotating %v while parts are owed: %v", parts, err)
 		}

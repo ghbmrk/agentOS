@@ -6,9 +6,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -87,8 +87,7 @@ func startClaimSetup(t *testing.T, b *claimBox) *claimSetup {
 	fb := <-cs.fb
 	setupCall(t, cs.m)
 	ui, err := localui.New(localui.Config{
-		AP: localui.APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-			SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"},
+		Page:  localui.Page{Iface: "eth0"},
 		Port:  80,
 		Hooks: localui.AgentosdSetup{Owner: localui.Socket{Path: filepath.Join(cs.m.Dir, localapi.Socket)}},
 		Store: &localui.MemStore{},
@@ -123,6 +122,8 @@ func (p *phone) do(t *testing.T, s *localui.Server, method, path string, form ur
 	}
 	req := httptest.NewRequest(method, "http://10.42.0.1"+path, body)
 	req.RemoteAddr = p.ip
+	// The connection reached the box at 10.42.0.1 on port 1 (WIFI-del-a3).
+	req = req.WithContext(context.WithValue(req.Context(), http.LocalAddrContextKey, &net.TCPAddr{IP: net.IPv4(10, 42, 0, 1), Port: 80}))
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -154,14 +155,14 @@ func TestAPreloadedBoxServesOnlyTheClaimScreen(t *testing.T) {
 			t.Fatalf("GET %s before the claim: %d %q", p, w.Code, w.Header().Get("Location"))
 		}
 	}
-	if w := owner.do(t, cs.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {
+	if w := owner.do(t, cs.ui, "POST", "/setup/number", url.Values{"number": {"+15550100100"}}); w.Code != http.StatusForbidden {
 		t.Fatalf("setup post before the claim: %d", w.Code)
 	}
 	foreign := func(q *http.Request) { q.Host = "attacker.example" }
 	if w := owner.do(t, cs.ui, "GET", "/claim", nil, foreign); w.Code == http.StatusOK {
 		t.Fatalf("/claim under a foreign Host: %d", w.Code)
 	}
-	if w := owner.do(t, cs.ui, "POST", "/claim", url.Values{"code": {b.code}}, foreign); w.Code != http.StatusForbidden {
+	if w := owner.do(t, cs.ui, "POST", "/claim", url.Values{"code": {b.code}}, foreign); w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("claim under a foreign Host: %d", w.Code)
 	}
 	if st := cs.firstBoot().Claim.Status(); st.Claimed || st.TriesLeft != claim.MaxWrong {
@@ -216,7 +217,7 @@ func TestALostClaimStateRoutesToReinstall(t *testing.T) {
 				t.Fatalf("GET %s on a reinstall box points at a claiming phone: %s", path, body)
 			}
 		}
-		if w := p.do(t, cs2.ui, "POST", "/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}}); w.Code != http.StatusForbidden {
+		if w := p.do(t, cs2.ui, "POST", "/setup/number", url.Values{"number": {"+15550100100"}}); w.Code != http.StatusForbidden {
 			t.Fatalf("setup post: %d", w.Code)
 		}
 		w := p.do(t, cs2.ui, "POST", "/claim", url.Values{"code": {b.code}})

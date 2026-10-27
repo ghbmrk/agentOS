@@ -5,7 +5,7 @@
 // one-shot unit and reads its console lines (report.go).
 //
 // It changes the booted system only in ways a test VM allows: a veth pair
-// stands in for the access point's wlan0 with the phone in its own network
+// stands in for the core's port 1 with the phone in its own network
 // namespace, and agentos-modem is pointed (by a drop-in from ci_boot.sh) at
 // a sysfs tree whose AT port is a pseudo-terminal behind the AT simulator.
 // It prints no claim code, card value, recovery key, code-generator seed,
@@ -54,6 +54,9 @@ const (
 	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
+	// pageDropIn names the page's interface (agentos-localui.service's
+	// AGENTOS_PAGE_IFACE).
+	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
 )
 
 func main() {
@@ -137,10 +140,13 @@ func run(name string, args ...string) error {
 	return nil
 }
 
-// harness puts the phone on the box's Wi-Fi: a veth pair whose box end is
-// wlan0 at the access point's address, its other end in the phone's
-// namespace, and wlan0 in the inbound exempt set as ap-exempt would add it.
-// QEMU has no radio, so agentos-ap is stopped first. It also serves the
+// harness puts the phone on the Owner network: a veth pair whose box end,
+// enowner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
+// namespace. The page reaches it only through the image's inbound rule for
+// the page's ports from private sources on en* links (WIFI-del-a3); a drop-in names
+// enowner0 as the page's interface, since Port1 takes only a fixed PCI port,
+// and the page restarts on it. agentos-ap, which the image still
+// ships until WIFI-del-b, is stopped first. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
 	if err := checkVaultBuild(); err != nil {
@@ -154,14 +160,24 @@ func (d *driver) harness() error {
 	for _, c := range [][]string{
 		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},
-		{"ip", "link", "add", "wlan0", "type", "veth", "peer", "name", "phone0", "netns", netns},
-		{"ip", "addr", "add", "10.42.0.1/24", "dev", "wlan0"},
-		{"ip", "link", "set", "wlan0", "up"},
+		{"ip", "link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
+		{"ip", "addr", "add", "10.42.0.1/24", "dev", "enowner0"},
+		{"ip", "link", "set", "enowner0", "up"},
 		{"ip", "-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
 		{"ip", "-n", netns, "link", "set", "phone0", "up"},
 		{"ip", "-n", netns, "link", "set", "lo", "up"},
-		{"nft", "add", "element", "inet", "agentos_inbound", "exempt", `{ "wlan0" }`},
 	} {
+		if err := run(c[0], c[1:]...); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(pageDropIn), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
+		return err
+	}
+	for _, c := range [][]string{{"systemctl", "daemon-reload"}, {"systemctl", "restart", "agentos-localui.service"}} {
 		if err := run(c[0], c[1:]...); err != nil {
 			return err
 		}
@@ -312,47 +328,11 @@ func (d *driver) claim() error {
 	if err != nil {
 		return err
 	}
-	if st != http.StatusSeeOther || (loc != "/setup" && loc != "/claim/wifi") {
+	if st != http.StatusSeeOther || loc != "/setup" {
 		return fmt.Errorf("POST /claim %d %q", st, loc)
-	}
-	if loc == "/claim/wifi" {
-		if err := d.claimWiFi(); err != nil {
-			return err
-		}
 	}
 	if ok, err := claim.Claimed(change.FileStore{Path: claimDst}); err != nil || !ok {
 		return fmt.Errorf("claim state after the claim: claimed=%v err=%v", ok, err)
-	}
-	return nil
-}
-
-// claimWiFi takes the claim's Wi-Fi step (HW-10) as an owner does: save
-// the new password the page shows, type its last four characters back,
-// and switch. The box's setup network may restart; the phone reaches the
-// page over the uplink, so setup carries on.
-func (d *driver) claimWiFi() error {
-	st, loc, b, err := d.get("/claim/wifi")
-	if err != nil {
-		return err
-	}
-	if st == http.StatusSeeOther && loc == "/setup" {
-		// No setup network to rotate: seal() writes only the claim
-		// state, so the page skips the step (ErrNoSetupWiFi).
-		return nil
-	}
-	pw, ok := wifiPassword(b)
-	if st != http.StatusOK || !ok || len(pw) < 4 {
-		return fmt.Errorf("GET /claim/wifi %d %q shows no new password: %s", st, loc, heading(b))
-	}
-	st, loc, err = d.post("/claim/wifi", url.Values{"last": {pw[len(pw)-4:]}})
-	if err != nil {
-		return err
-	}
-	if st != http.StatusOK && (st != http.StatusSeeOther || loc != "/setup") {
-		return fmt.Errorf("POST /claim/wifi %d %q", st, loc)
-	}
-	if st, loc, _, err := d.get("/setup"); err != nil || st == http.StatusSeeOther && loc == "/claim/wifi" {
-		return fmt.Errorf("setup still waits on the Wi-Fi step: GET /setup %d %q %v", st, loc, err)
 	}
 	return nil
 }
@@ -426,9 +406,9 @@ func (d *driver) waitStep(n string, limit time.Duration) ([]byte, error) {
 	return b, err
 }
 
-// smsPair plugs the simulated modem in, waits for the text-your-box step
-// (taking the network step over Ethernet if the box asks), texts PAIR from
-// the phone's line, and waits for the box's reply and the next step.
+// smsPair plugs the simulated modem in, waits for the text-your-box step,
+// texts PAIR from the phone's line, and waits for the box's reply and the
+// next step.
 func (d *driver) smsPair() error {
 	u, err := user.Lookup("agentos-modem")
 	if err != nil {
@@ -450,7 +430,6 @@ func (d *driver) smsPair() error {
 	phone := d.carrier.Line(phoneNum)
 	var num, code string
 	var last []byte
-	tookNetwork := false
 	if err := until(3*time.Minute, func() (bool, error) {
 		b, err := d.page()
 		if err != nil {
@@ -460,12 +439,6 @@ func (d *driver) smsPair() error {
 		var ok bool
 		if num, code, ok = smsLink(b); ok {
 			return true, nil
-		}
-		if strings.HasPrefix(heading(b), `"1. `) && !tookNetwork {
-			tookNetwork = true
-			if st, _, err := d.post("/setup/network", url.Values{"ethernet": {"1"}}); err != nil || st != http.StatusSeeOther {
-				return false, fmt.Errorf("POST /setup/network %d %v", st, err)
-			}
 		}
 		return false, fmt.Errorf("no text link %s", where(b))
 	}); err != nil {
@@ -485,7 +458,7 @@ func (d *driver) smsPair() error {
 	case <-time.After(2 * time.Minute):
 		return errors.New("no reply text reached the phone")
 	}
-	b, err := d.waitStep("3", 2*time.Minute)
+	b, err := d.waitStep("2", 2*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -505,7 +478,7 @@ func (d *driver) codes() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/codes %d %v", st, err)
 	}
-	_, err = d.waitStep("4", time.Minute)
+	_, err = d.waitStep("3", time.Minute)
 	return err
 }
 
@@ -546,7 +519,7 @@ func (d *driver) card() error {
 	if err := json.Unmarshal(b, &latch); err != nil || !latch.Confirmed {
 		return fmt.Errorf("card latch not confirmed (err %v)", err)
 	}
-	_, err = d.waitStep("5", time.Minute)
+	_, err = d.waitStep("4", time.Minute)
 	return err
 }
 
@@ -555,7 +528,7 @@ func (d *driver) recovery() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/recovery %d %v", st, err)
 	}
-	_, err = d.waitStep("6", time.Minute)
+	_, err = d.waitStep("5", time.Minute)
 	return err
 }
 
@@ -564,7 +537,7 @@ func (d *driver) host() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/host %d %v", st, err)
 	}
-	_, err = d.waitStep("7", time.Minute)
+	_, err = d.waitStep("6", time.Minute)
 	if err != nil {
 		logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager",
 			"-u", "agentos-localui.service").Output()
@@ -576,7 +549,7 @@ func (d *driver) host() error {
 }
 
 // guestTask is the model-backed guest task on the Codex plan route. It
-// first signs in to the plan at step 7, which finishes setup, then runs
+// first signs in to the plan at step 6, which finishes setup, then runs
 // one task through provider_run as the agent machine's guest
 // (providerTask, ASSUMPTIONS E12).
 func (d *driver) guestTask() error {
@@ -786,7 +759,7 @@ func chunked(log string, secrets []string) string {
 	return strings.Join(out, "\n")
 }
 
-// planSignIn is the owner signing in to the Codex plan at step 7, as the
+// planSignIn is the owner signing in to the Codex plan at step 6, as the
 // page offers it once agentosd serves the device-code sign-in (#1264): the
 // owner ticks private content, presses sign in, opens the link the page
 // shows on the provider's own host and enters its code there (the stub's
@@ -809,14 +782,14 @@ func (d *driver) planSignIn() error {
 		}
 		return bytes.Contains(pg, []byte(aiOpen)), errors.New(where(pg))
 	})
-	// aiOpen is on step 7 whenever the first-boot update has finished,
-	// whatever providers it lists, so a timeout here means step 7 never
+	// aiOpen is on step 6 whenever the first-boot update has finished,
+	// whatever providers it lists, so a timeout here means step 6 never
 	// opened or the page kept failing: a product failure, not XFAIL.
 	if err != nil {
-		return fmt.Errorf("step 7 did not open: %w", err)
+		return fmt.Errorf("step 6 did not open: %w", err)
 	}
 	if !deviceOffer(pg, route.Provider) {
-		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
+		return errors.New(notDriven + " step 6 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
 	}
 	if d.stub == nil {
 		return errors.New("no plan stub")
@@ -839,7 +812,7 @@ func (d *driver) planSignIn() error {
 		// case where #809 and #1877 land first (ASSUMPTIONS E11).
 		image := provagent.Builtins()[route.Provider].Image
 		if has, err := d.hasImage(image); err == nil && !has {
-			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
+			return errors.New(notDriven + " step 6's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
 		}
 		return errors.New("no sign-in link after sign in " + where(pg) + "; " + d.signInDiag(out))
 	}
