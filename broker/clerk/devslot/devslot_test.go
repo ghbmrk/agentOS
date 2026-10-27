@@ -606,28 +606,86 @@ func TestConformanceRejectsBadFixtures(t *testing.T) {
 		want string
 		// detail, if set, must be in the problem's detail.
 		detail string
+		// listing, if set, replaces the listing of pkgs.
+		listing string
 	}{
-		{"undeclared shape", extra{[]byte{0x05, 1}}, nil, "undeclared-write", ""},
-		{"canary leak", leaker{}, nil, "canary", ""},
-		{"panicking parser", trusting{}, nil, "panic", ""},
-		{"unchecked index after the opcode", peeking{}, nil, "panic", ""},
-		{"canary base64 at another alignment, split", shifted{}, nil, "canary", ""},
-		{"tls socket", fixture.Driver{}, []string{pkg + "/testdata/tlsdriver"}, "imports", "crypto/tls"},
-		{"file read through a template", fixture.Driver{}, []string{pkg + "/testdata/filedriver"}, "imports", "text/template"},
-		{"socket under a build tag", fixture.Driver{}, []string{pkg + "/testdata/tagdriver"}, "imports", "tagdriver has source other than plain Go files"},
-		{"no listing", fixture.Driver{}, nil, "imports", "no go list listing"},
-		{"assembly", fixture.Driver{}, []string{pkg + "/testdata/asmdriver"}, "imports", "trap_amd64.s"},
-		{"linkname", fixture.Driver{}, []string{pkg + "/testdata/linkdriver"}, "imports", "//go:linkname"},
-		{"repository tooling", fixture.Driver{}, []string{pkg + "/testdata/confexec"}, "imports", "conformance, which is not the slot"},
-		{"own socket", fixture.Driver{}, []string{pkg + "/testdata/netdriver"}, "imports", "imports net"},
+		{"undeclared shape", extra{[]byte{0x05, 1}}, nil, "undeclared-write", "", ""},
+		{"canary leak", leaker{}, nil, "canary", "", ""},
+		{"panicking parser", trusting{}, nil, "panic", "", ""},
+		{"unchecked index after the opcode", peeking{}, nil, "panic", "", ""},
+		{"canary base64 at another alignment, split", shifted{}, nil, "canary", "", ""},
+		{"tls socket", fixture.Driver{}, []string{pkg + "/testdata/tlsdriver"}, "imports", "crypto/tls", ""},
+		{"file read through a template", fixture.Driver{}, []string{pkg + "/testdata/filedriver"}, "imports", "text/template", ""},
+		{"socket under a build tag", fixture.Driver{}, []string{pkg + "/testdata/tagdriver"}, "imports", "tagdriver has source other than plain Go files", ""},
+		{"no listing", fixture.Driver{}, nil, "imports", "no go list listing", ""},
+		{"assembly", fixture.Driver{}, []string{pkg + "/testdata/asmdriver"}, "imports", "trap_amd64.s", ""},
+		{"linkname", fixture.Driver{}, []string{pkg + "/testdata/linkdriver"}, "imports", "//go:linkname", ""},
+		{"repository tooling", fixture.Driver{}, []string{pkg + "/testdata/confexec"}, "imports", "conformance, which is not the slot", ""},
+		{"own socket", fixture.Driver{}, []string{pkg + "/testdata/netdriver"}, "imports", "imports net", ""},
+		{"race detector hidden", fixture.Driver{}, []string{pkg + "/testdata/noracedriver"}, "imports", "//go:norace", ""},
+		{"system library at exec", fixture.Driver{}, []string{pkg + "/testdata/cgodyndriver"}, "imports", "//go:cgo_import_dynamic", ""},
+		{"listing of another package", fixture.Driver{}, []string{"bytes"}, "imports", "does not list the driver's package " + pkg + "/testdata/fixture", ""},
+		{"listing entry with no path", fixture.Driver{}, nil, "imports", "no import path", "{}"},
+		{"null listing", fixture.Driver{}, nil, "imports", "no import path", "null"},
+		{"incomplete listing", fixture.Driver{}, nil, "imports", "could not load " + pkg + "/testdata/fixture",
+			`{"ImportPath": "` + pkg + `/testdata/fixture", "Incomplete": true}`},
+		{"wide shape", leaker{}, nil, "wide-shape", "dump leaves 63 bytes free", ""},
 	}
 	for _, c := range cases {
-		ps := conformance.Check(c.drv, config(t, c.pkgs...))
+		cfg := config(t, c.pkgs...)
+		if c.listing != "" {
+			cfg.Listing = []byte(c.listing)
+		}
+		ps := conformance.Check(c.drv, cfg)
 		if !slices.ContainsFunc(ps, func(p conformance.Problem) bool {
 			return p.Kind == c.want && strings.Contains(p.Detail, c.detail)
 		}) {
 			t.Errorf("%s: problems %v; want a %s problem", c.name, ps, c.want)
 		}
+	}
+}
+
+// wildcard declares the shape the #3356 reviews found: no prefix and the
+// whole write range, under the read operation.
+type wildcard struct{ fixture.Driver }
+
+func (wildcard) Declare() devslot.Declaration {
+	d := fixture.Declaration()
+	d.Shapes = append(d.Shapes, devslot.Shape{Name: "any", Channel: "control", Kind: devslot.GATTWrite, Min: 1, Max: devslot.CapWrite})
+	d.Operations[0].Shapes = append(d.Operations[0].Shapes, "any")
+	return d
+}
+
+// A shape that leaves more than MaxFreeTail bytes free after its prefix fails
+// the suite until the driver's tests name it as reviewed, and naming it
+// clears only that shape (DEV-4, DEVSLOT-a-4).
+func TestConformanceReportsWideShapes(t *testing.T) {
+	cfg := config(t, pkg+"/testdata/fixture")
+	wide := func(ps []conformance.Problem) []string {
+		var ds []string
+		for _, p := range ps {
+			if p.Kind == "wide-shape" {
+				ds = append(ds, p.Detail)
+			}
+		}
+		return ds
+	}
+	ds := wide(conformance.Check(wildcard{}, cfg))
+	if len(ds) != 1 || !strings.HasPrefix(ds[0], fmt.Sprintf("any leaves %d bytes free after its 0-byte prefix", devslot.CapWrite)) {
+		t.Fatalf("wildcard shape: wide-shape problems %q; want one naming any", ds)
+	}
+	// The fixture's answer shape leaves exactly MaxFreeTail bytes: at the
+	// bound, not over it.
+	if ds := wide(conformance.Check(fixture.Driver{}, cfg)); len(ds) != 0 {
+		t.Errorf("fixture: wide-shape problems %q at the bound", ds)
+	}
+	cfg.Wide = []string{"answer"}
+	if ds := wide(conformance.Check(wildcard{}, cfg)); len(ds) != 1 {
+		t.Errorf("naming another shape cleared any: %q", ds)
+	}
+	cfg.Wide = []string{"any"}
+	if ds := wide(conformance.Check(wildcard{}, cfg)); len(ds) != 0 {
+		t.Errorf("reviewed wildcard still fails: %q", ds)
 	}
 }
 
