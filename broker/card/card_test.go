@@ -55,14 +55,11 @@ func TestGenerateStrengthAndUniqueness(t *testing.T) {
 		}
 	}
 	bits := func(s string) float64 { return float64(len(strings.ReplaceAll(s, "-", ""))) * 5 }
-	if bits(a.WiFiPassword) < 80 || bits(a.SetupSecret) < 128 || bits(a.RecoveryKey)*32/40 < 160 || len(a.GridSeed) < 32 {
+	if bits(a.SetupSecret) < 128 || bits(a.RecoveryKey)*32/40 < 160 || len(a.GridSeed) < 32 {
 		t.Fatalf("weak secret: %+v", a)
 	}
-	if len(a.WiFiPassword) < 8 || len(a.WiFiPassword) > 63 {
-		t.Fatalf("Wi-Fi password length %d outside WPA's 8-63", len(a.WiFiPassword))
-	}
-	for _, p := range [][2]string{{a.WiFiPassword, b.WiFiPassword}, {a.SetupSecret, b.SetupSecret},
-		{a.VaultPassphrase, b.VaultPassphrase}, {a.RecoveryKey, b.RecoveryKey}, {a.WiFiName, b.WiFiName}} {
+	for _, p := range [][2]string{{a.SetupSecret, b.SetupSecret},
+		{a.VaultPassphrase, b.VaultPassphrase}, {a.RecoveryKey, b.RecoveryKey}} {
 		if p[0] == p[1] {
 			t.Fatalf("two cards share %q", p[0])
 		}
@@ -145,7 +142,7 @@ func TestWiFiQRPayloadEscapes(t *testing.T) {
 }
 
 // ONB-7: the card is the manual. A quick-start of at most five steps, and a
-// "nothing happened" side with the Wi-Fi name, how long to wait, and boot
+// "nothing happened" side with how long to wait, the WPA3 note, and boot
 // keys for major PC brands. ONB-1: the printable page needs nothing but
 // itself (no external fetch).
 func TestRenderedCardIsTheManual(t *testing.T) {
@@ -163,9 +160,9 @@ func TestRenderedCardIsTheManual(t *testing.T) {
 			t.Fatalf("quick-start step missing: %q", s)
 		}
 	}
-	for _, want := range []string{"Nothing happened?", c.WiFiName, htmlEsc(c.WiFiPassword), c.SetupCode, c.SetupSecret,
+	for _, want := range []string{"Nothing happened?", c.SetupCode, c.SetupSecret,
 		c.VaultPassphrase, c.RecoveryKey, "Dell", "HP", "Lenovo", "ASUS", "Acer",
-		"minutes", "apart from the drive", "<svg", "Box page: <span class=\"mono\">" + BoxPage, "Wi-Fi joined but no page?",
+		"minutes", "apart from the drive", "<svg", "Box page: <span class=\"mono\">" + BoxPage, "On the Owner network but no page?", "Phone won't join: it needs WPA3.",
 		"apart from me and from this card", "Reset secret", "tap Copy",
 		"I cannot print this again, so keep this sheet.", "I cannot print this again; keep the card."} {
 		if !strings.Contains(page, want) {

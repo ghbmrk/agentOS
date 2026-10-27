@@ -10,10 +10,10 @@ import (
 
 // REQ: CRED-7
 
-// ROTATE-card-atomic (#1440): the card's Wi-Fi password and setup secret
-// are their own vault entries so the redactor, which matches whole values,
-// covers them in agent-bound output. Storing a card must change the card
-// and those entries together. A save failing or the box crashing at any
+// ROTATE-card-atomic (#1440): the card's setup secret is its own vault
+// entry so the redactor, which matches whole values,
+// covers it in agent-bound output. Storing a card must change the card
+// and that entry together. A save failing or the box crashing at any
 // save boundary of setup or a rotation leaves the vault, in memory and as
 // reopened from the drive, with entries matching the card it holds.
 
@@ -35,8 +35,8 @@ func (f *failingCounter) Read(ref, auth []byte) (uint64, error) {
 	return f.pcCounter.Read(ref, auth)
 }
 
-// cardCovered checks that v holds a card whose Wi-Fi password and setup
-// secret are each a whole entry value, so the redactor covers them.
+// cardCovered checks that v holds a card whose setup secret is a whole
+// entry value, so the redactor covers it.
 func cardCovered(t *testing.T, v *vault.Vault, at string) Card {
 	t.Helper()
 	c, err := (&Box{V: v}).LoadCard()
@@ -47,7 +47,7 @@ func cardCovered(t *testing.T, v *vault.Vault, at string) Card {
 	if err != nil {
 		t.Fatalf("%s: %v", at, err)
 	}
-	for name, s := range map[string]string{"wifi": c.WiFiPassword, "setup": c.SetupSecret} {
+	for name, s := range map[string]string{"setup": c.SetupSecret} {
 		out := r.Redact([]byte("the card says " + s + "."))
 		if bytes.Contains(out, []byte(s)) {
 			t.Fatalf("%s: card %s secret not redacted", at, name)
@@ -57,7 +57,7 @@ func cardCovered(t *testing.T, v *vault.Vault, at string) Card {
 }
 
 func TestRotationCardStaysRedactedAtEverySaveBoundary(t *testing.T) {
-	parts := []Part{PartWiFi, PartSetup}
+	parts := []Part{PartSetup, PartGrid}
 	for n := 1; ; n++ {
 		if n > 50 {
 			t.Fatal("rotation never finished")
@@ -79,7 +79,7 @@ func TestRotationCardStaysRedactedAtEverySaveBoundary(t *testing.T) {
 		onDrive := cardCovered(t, v, "reopened")
 		v.Close()
 		if err == nil {
-			if got.WiFiPassword != next.WiFiPassword || got.SetupSecret != next.SetupSecret {
+			if got.SetupSecret != next.SetupSecret || !bytes.Equal(got.GridSeed, next.GridSeed) {
 				t.Fatal("rotation finished without the new card")
 			}
 			if n == 1 {
@@ -90,10 +90,10 @@ func TestRotationCardStaysRedactedAtEverySaveBoundary(t *testing.T) {
 		if !errors.Is(err, errCounterGone) {
 			t.Fatalf("save %d: %v", n, err)
 		}
-		// Wi-Fi and setup rotate without a slot write, so a failed
+		// Setup and grid rotate without a slot write, so a failed
 		// rotation keeps the old card whole.
 		for _, c := range []Card{got, onDrive} {
-			if c.WiFiPassword != before.WiFiPassword || c.SetupSecret != before.SetupSecret {
+			if c.SetupSecret != before.SetupSecret || !bytes.Equal(c.GridSeed, before.GridSeed) {
 				t.Fatalf("save %d: card changed by a failed rotation", n)
 			}
 		}

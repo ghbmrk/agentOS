@@ -143,8 +143,8 @@ func TestBeginTakesTheDownloadRouteOnlyWhenConfigured(t *testing.T) {
 	if _, err := fb.Claim.Claim("CANA-RYCL-AXMC-KDE2"); !errors.Is(err, claim.ErrAlreadyClaimed) {
 		t.Fatalf("claim on a box with no claim state: %v", err)
 	}
-	if l, _ := b.latch.Load(); b.resets != 0 || b.shown.WiFiName != "" || len(l) != 0 {
-		t.Fatalf("resets %d, card %q, latch %q", b.resets, b.shown.WiFiName, l)
+	if l, _ := b.latch.Load(); b.resets != 0 || b.shown.SetupSecret != "" || len(l) != 0 {
+		t.Fatalf("resets %d, card drawn %v, latch %q", b.resets, b.shown.SetupSecret != "", l)
 	}
 }
 

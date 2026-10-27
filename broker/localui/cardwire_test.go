@@ -66,7 +66,7 @@ func (cr *cardRig) answers() (string, string) {
 // cardText reports whether body holds any of the card's secrets.
 func (cr *cardRig) cardText(body string) bool {
 	c := cr.shown
-	for _, v := range []string{c.VaultPassphrase, c.RecoveryKey, c.SetupSecret, c.SetupCode, c.WiFiPassword} {
+	for _, v := range []string{c.VaultPassphrase, c.RecoveryKey, c.SetupSecret, c.SetupCode} {
 		if strings.Contains(body, v) {
 			return true
 		}

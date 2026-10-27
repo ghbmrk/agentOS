@@ -89,7 +89,7 @@ var refusedCodes = map[string]any{"error": "no code generator is confirmed", "re
 func TestTheCardOpsGoOverTheUnlockSocket(t *testing.T) {
 	f, u := newFakeUnlock(t)
 	ctx := context.Background()
-	c := &card.Card{WiFiName: "AgentOS-CANARY", WiFiPassword: "canary-wifi", SetupSecret: "canary-secret",
+	c := &card.Card{SetupSecret: "canary-secret",
 		SetupCode: "canary-code", VaultPassphrase: "canary pass phrase", GridSeed: []byte{1, 2, 3}, RecoveryKey: "CANA-RY00"}
 	f.set("/card/provision", 200, map[string]any{"ok": true})
 	if err := u.ProvisionCard(ctx, c); err != nil {
@@ -99,7 +99,7 @@ func TestTheCardOpsGoOverTheUnlockSocket(t *testing.T) {
 	if err := json.Unmarshal(f.body("/card/provision"), &got); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]any{"wifi_name": c.WiFiName, "wifi_password": c.WiFiPassword, "setup_secret": c.SetupSecret,
+	want := map[string]any{"setup_secret": c.SetupSecret,
 		"setup_code": c.SetupCode, "vault_passphrase": c.VaultPassphrase, "grid_seed": "AQID", "recovery_key": c.RecoveryKey}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("provision body %v, want %v", got, want)

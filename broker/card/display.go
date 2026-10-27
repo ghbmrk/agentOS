@@ -39,7 +39,7 @@ var ErrInEffect = errors.New("card: part of this card is already in effect")
 // inEffectProblem is the page's note once part of the card is in effect:
 // it names the one step that finishes the rotation (CH-12). It holds in
 // every partial state: some parts may still be the current card's (the
-// Wi-Fi password, setup secret and grid take effect last, and a failed
+// setup secret and grid take effect last, and a failed
 // recovery-key write leaves the old key in effect), so the owner keeps
 // both cards and finishes with whichever one opens the drive; the next
 // rotation must replace every part this one rotated (#1090 review F3).
@@ -58,9 +58,9 @@ func (n *Noted) Error() string { return n.Err.Error() }
 func (n *Noted) Unwrap() error { return n.Err }
 
 // Parts are the card secrets a rotation replaces (REC-4).
-type Parts struct{ WiFi, Setup, Passphrase, Grid, Recovery bool }
+type Parts struct{ Setup, Passphrase, Grid, Recovery bool }
 
-func (p Parts) any() bool { return p.WiFi || p.Setup || p.Passphrase || p.Grid || p.Recovery }
+func (p Parts) any() bool { return p.Setup || p.Passphrase || p.Grid || p.Recovery }
 
 // Answers are the values typed back from the printed or saved card. Word
 // and Group are a passphrase word and a recovery key group; Check is the
@@ -73,7 +73,6 @@ type checkKind int
 
 const (
 	checkNone  checkKind = iota
-	checkWiFi            // last four symbols of the Wi-Fi password
 	checkSetup           // the setup code
 	checkGrid            // the grid check code
 )
@@ -95,15 +94,11 @@ type DisplayConfig struct {
 	// only, never card text.
 	Journal func(event string)
 	// Rotate, when set, makes a rotation display (REC-4): the card carries
-	// new values for these parts only (the rest are blank, the Wi-Fi name
-	// kept), the sheet shows only them, and the confirm asks for a word
+	// new values for these parts only (the rest are blank), the sheet
+	// shows only them, and the confirm asks for a word
 	// of a new passphrase, a group of a new recovery key, or else one
 	// check value of the new parts.
 	Rotate *Parts
-	// WiFiName is the box's current access point name, which a rotation
-	// keeps and prints beside a new Wi-Fi password; needed when Rotate
-	// has WiFi.
-	WiFiName string
 	// Discarded, when set, runs once when the display discards an
 	// unconfirmed card: the page's cancel, or a provisioner's ErrDiscard.
 	// A rotation's wire cancels the vault's pending rotation here, so the
@@ -162,9 +157,6 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	if cfg.Rotate != nil && !cfg.Rotate.any() {
 		return nil, errors.New("card: a rotation needs at least one part")
 	}
-	if cfg.Rotate != nil && cfg.Rotate.WiFi && cfg.WiFiName == "" {
-		return nil, errors.New("card: a Wi-Fi rotation needs the current Wi-Fi name")
-	}
 	c, err := cfg.Generate(cfg.Rand)
 	if err != nil {
 		return nil, err
@@ -179,11 +171,8 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	if cfg.Rotate != nil {
 		ask, d.rotate = *cfg.Rotate, true
 		keepParts(c, ask)
-		c.WiFiName = cfg.WiFiName
 		switch {
 		case ask.Passphrase || ask.Recovery:
-		case ask.WiFi:
-			d.check = checkWiFi
 		case ask.Setup:
 			d.check = checkSetup
 		default:
@@ -209,9 +198,6 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 
 // keepParts blanks every secret of c a rotation of p does not replace.
 func keepParts(c *Card, p Parts) {
-	if !p.WiFi {
-		c.WiFiPassword = ""
-	}
 	if !p.Setup {
 		c.SetupSecret, c.SetupCode = "", ""
 	}
@@ -244,8 +230,6 @@ func (d *Display) Prompt() string {
 		return fmt.Sprintf("Type word %d of your new vault passphrase.", d.word+1)
 	case d.group >= 0:
 		return fmt.Sprintf("Type group %d of your new recovery key.", d.group+1)
-	case d.check == checkWiFi:
-		return "Type the last four characters of your new Wi-Fi password."
 	case d.check == checkSetup:
 		return "Type your new setup code."
 	}
@@ -267,9 +251,9 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 	var ctl bytes.Buffer
 	v := struct {
 		Prompt, Problem    string
-		Rotate, RotateWiFi bool
+		Rotate             bool
 		Word, Group, Check bool
-	}{d.Prompt(), problem, d.rotate, d.rotate && d.c.WiFiPassword != "", d.word >= 0, d.group >= 0, d.check != checkNone}
+	}{d.Prompt(), problem, d.rotate, d.word >= 0, d.group >= 0, d.check != checkNone}
 	if err := controlsTmpl.Execute(&ctl, v); err != nil {
 		return nil, err
 	}
@@ -312,9 +296,6 @@ func (d *Display) ConfirmAnswers(a Answers) error {
 		match([]byte(Normalize(a.Group)), []byte(Normalize(strings.Split(d.c.RecoveryKey, "-")[d.group])))
 	}
 	switch d.check {
-	case checkWiFi:
-		w := Normalize(d.c.WiFiPassword)
-		match([]byte(Normalize(a.Check)), []byte(w[len(w)-4:]))
 	case checkSetup:
 		match([]byte(Normalize(a.Check)), []byte(Normalize(d.c.SetupCode)))
 	case checkGrid:
@@ -550,9 +531,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
 <p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
-{{if not .Rotate}}<p><b>When you confirm, my Wi-Fi becomes the one on your card.</b> If this page stops loading, join that Wi-Fi with your card's Wi-Fi QR code, or its name and password, then reload this page.</p>
-{{end}}{{if .RotateWiFi}}<p><b>When you confirm, my Wi-Fi switches to the new password on this card.</b> Your phone drops off it: rejoin with this card's Wi-Fi QR code, or its name and password, then reload this page.</p>
-{{end}}<form method="post">
+<form method="post">
 <p>{{.Prompt}}</p>
 {{if .Problem}}<p role="alert"><b>{{.Problem}}</b></p>{{end}}
 <p>{{if .Word}}<label>Word <input name="word" autocomplete="off" autocapitalize="none" spellcheck="false"></label>

@@ -47,7 +47,7 @@ func (f *fakeRotVault) BeginRotation(_ context.Context, b RotationBegin) (Rotati
 	if f.beginErr != nil {
 		return RotationStarted{}, f.beginErr
 	}
-	return RotationStarted{Parts: b.Parts, WiFiName: "AgentOS-TEST", Expires: f.expires}, nil
+	return RotationStarted{Parts: b.Parts, Expires: f.expires}, nil
 }
 
 func (f *fakeRotVault) CommitRotation(_ context.Context, id string, c card.Card) (RotationResult, error) {
@@ -172,7 +172,7 @@ func TestRotationStartsOnTheBoxPageAndCommitsTheShownParts(t *testing.T) {
 		t.Fatal("not committed once")
 	}
 	got := x.v.committed[0]
-	if got.RecoveryKey != x.gen.RecoveryKey || got.WiFiPassword != "" || got.VaultPassphrase != "" || got.SetupSecret != "" || got.GridSeed != nil {
+	if got.RecoveryKey != x.gen.RecoveryKey || got.VaultPassphrase != "" || got.SetupSecret != "" || got.GridSeed != nil {
 		t.Fatal("the commit carried other than the shown parts")
 	}
 	done := x.get("/rotate/done")
@@ -325,7 +325,7 @@ func TestRotationBeginWithNoAnswerIsCancelled(t *testing.T) {
 	for _, e := range []error{errors.New("synthetic: connection reset"), &VaultError{http.StatusBadGateway, "internal error"}} {
 		x := newWireRig(t)
 		x.v.beginErr = e
-		if err := x.r.Start(context.Background(), RotationBegin{Recovery: "SYNTH-RK", Parts: card.Parts{WiFi: true}}); err == nil {
+		if err := x.r.Start(context.Background(), RotationBegin{Recovery: "SYNTH-RK", Parts: card.Parts{Setup: true}}); err == nil {
 			t.Fatal("start succeeded")
 		}
 		if len(x.v.cancelIDs) != 1 || x.v.cancelIDs[0] != x.v.begun[0].ID {
@@ -334,7 +334,7 @@ func TestRotationBeginWithNoAnswerIsCancelled(t *testing.T) {
 	}
 	x := newWireRig(t)
 	x.v.beginErr = &VaultError{http.StatusForbidden, "wrong code"}
-	_ = x.r.Start(context.Background(), RotationBegin{Code: "000000", Parts: card.Parts{WiFi: true}})
+	_ = x.r.Start(context.Background(), RotationBegin{Code: "000000", Parts: card.Parts{Setup: true}})
 	if len(x.v.cancelIDs) != 0 {
 		t.Fatal("a refused begin was cancelled")
 	}

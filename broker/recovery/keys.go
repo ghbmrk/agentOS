@@ -143,7 +143,7 @@ func AuditNeedles(b *Box, rk RecoveryKey, passphrase string) ([]Needle, error) {
 		out = append(out, Needle{Name: "vault entry " + e.Name, Value: []byte(s.Reveal()), Text: true})
 	}
 	if c, err := b.LoadCard(); err == nil {
-		for name, v := range map[string]string{"Wi-Fi password": c.WiFiPassword, "setup secret": c.SetupSecret} {
+		for name, v := range map[string]string{"setup secret": c.SetupSecret} {
 			if len(v) >= minPattern {
 				out = append(out, Needle{Name: name, Value: []byte(v), Text: true})
 			}

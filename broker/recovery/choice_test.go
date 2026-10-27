@@ -131,8 +131,8 @@ func TestBadBackupChoicesAreRefused(t *testing.T) {
 		{Kind: BackupUpload, Destination: "owner\uff1aCANARY\uff20nas"},
 		{Kind: BackupUpload, Destination: "nas/backups?token=CANARY"},
 		{Kind: BackupUpload, Destination: "nas/backups#access_token=CANARY"},
-		// Nor a value the vault holds, such as the card's Wi-Fi password.
-		{Kind: BackupDrive, Destination: x.card.WiFiPassword},
+		// Nor a value the vault holds, such as the card's setup secret.
+		{Kind: BackupDrive, Destination: x.card.SetupSecret},
 	} {
 		if _, err := ChooseBackup(x.b, c, tier4, t0); !errors.Is(err, ErrBadBackupChoice) {
 			t.Fatalf("%+v: %v", c, err)
