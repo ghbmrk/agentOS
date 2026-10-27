@@ -27,7 +27,7 @@ func TestEveryCardNetworkIsValidAndRoundTrips(t *testing.T) {
 		return string(b)
 	}
 	for i := 0; i < 50; i++ {
-		n := Network{SSID: "AgentOS-" + syms(4), Password: strings.Join([]string{syms(4), syms(4), syms(4), syms(4)}, "-")}
+		n := Network{SSID: Prefix + syms(4), Password: strings.Join([]string{syms(4), syms(4), syms(4), syms(4)}, "-")}
 		b, err := n.Marshal()
 		if err != nil {
 			t.Fatalf("a generated card's network refused: %v", err)

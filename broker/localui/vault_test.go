@@ -965,4 +965,4 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 // oldCardWiFiQR stands for the Wi-Fi code on an Owner Card printed before
 // WIFI-del-e (#3365): the card no longer has one, but the scan still skips
 // it beside the passphrase code. Synthetic.
-var oldCardWiFiQR = card.WiFiQR("AgentOS-OLD1", "SYNT-HETI-COLD-CARD")
+var oldCardWiFiQR = card.WiFiQR("SYNTH-OLD1", "SYNT-HETI-COLD-CARD")

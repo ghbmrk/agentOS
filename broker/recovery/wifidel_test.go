@@ -82,7 +82,7 @@ func TestRotationHasNoWiFiPart(t *testing.T) {
 // still decodes (the strict decode would otherwise lock the box out of
 // its own card), the Wi-Fi is dropped, and a newly encoded card has none.
 func TestAStoredCardWithWiFiStillDecodes(t *testing.T) {
-	old := []byte(`{"WiFiName":"AgentOS-OLD1","WiFiPassword":"SYNT-HETI-COLD-CARD","SetupSecret":"SYNTHETIC-SETUP","SetupCode":"SYNT-CODE","GridSeed":"AQID"}`)
+	old := []byte(`{"WiFiName":"SYNTH-OLD1","WiFiPassword":"SYNT-HETI-COLD-CARD","SetupSecret":"SYNTHETIC-SETUP","SetupCode":"SYNT-CODE","GridSeed":"AQID"}`)
 	c, err := DecodeCard(old)
 	if err != nil {
 		t.Fatalf("an old stored card: %v", err)
@@ -104,7 +104,7 @@ func TestAStoredCardWithWiFiStillDecodes(t *testing.T) {
 	}
 	// A box whose vault holds such a card still loads it and rotates.
 	x := newBox(t)
-	must(t, x.b.V.Put(CardName, KindCard, []byte(`{"WiFiName":"AgentOS-OLD1","WiFiPassword":"SYNT-HETI-COLD-CARD","SetupSecret":"`+x.card.SetupSecret+`","SetupCode":"`+x.card.SetupCode+`","GridSeed":null}`)))
+	must(t, x.b.V.Put(CardName, KindCard, []byte(`{"WiFiName":"SYNTH-OLD1","WiFiPassword":"SYNT-HETI-COLD-CARD","SetupSecret":"`+x.card.SetupSecret+`","SetupCode":"`+x.card.SetupCode+`","GridSeed":null}`)))
 	if _, err := x.b.LoadCard(); err != nil {
 		t.Fatalf("load an old card: %v", err)
 	}
