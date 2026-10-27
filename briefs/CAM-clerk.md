@@ -74,7 +74,7 @@ Failure path: a spoofed node feeds the core, the client key leaks, a hostile str
 
 ## Scope
 
-(a) `broker/clerk/camera/`. (b) `broker/cmd/agentos-camdecode/`, the decoder sandbox image files, `broker/clerk/camera/decode.go`, vendored or pinned libavcodec and `NOTICE`. (c) `broker/clerk/camera/store.go`. (d) `broker/cmd/agentos-camera/`, its unit and sysusers line, the local-page step in `broker/localui`, `broker/e2e`. Guard files: `tools/trusted_base_parsers.txt` (`parser .../broker/clerk/camera -- frame headers and status from camera nodes`; `agentos-camdecode` runs in the sandbox), `broker/core/core.txt` (`wiring cmd/agentos-camera`), each with its PR body line. Each part runs `python3 tools/premerge.py --needs-mark`; where it prints `mark`, the part owes the separate Security accept (D-137).
+(a) `broker/clerk/camera/`, `broker/loops/plainname.go` (a line for `FuzzStatusFrame`). (b) `broker/cmd/agentos-camdecode/`, the decoder sandbox image files, `broker/clerk/camera/decode.go`, vendored or pinned libavcodec and `NOTICE`, `broker/loops/plainname.go` (lines for `FuzzThermalFrame` and `FuzzH264Feed`). The plain-name file is shared with CAM-node (a), so parts that edit it run serially (D-111). (c) `broker/clerk/camera/store.go`. (d) `broker/cmd/agentos-camera/`, its unit and sysusers line, the local-page step in `broker/localui`, `broker/e2e`. Guard files: `tools/trusted_base_parsers.txt` (`parser .../broker/clerk/camera -- frame headers and status from camera nodes`; `agentos-camdecode` runs in the sandbox), `broker/core/core.txt` (`wiring cmd/agentos-camera`), each with its PR body line. Each part runs `python3 tools/premerge.py --needs-mark`; where it prints `mark`, the part owes the separate Security accept (D-137).
 
 ## Estimate
 
