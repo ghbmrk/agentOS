@@ -43,7 +43,14 @@ var ErrInEffect = errors.New("card: part of this card is already in effect")
 // recovery-key write leaves the old key in effect), so the owner keeps
 // both cards and finishes with whichever one opens the drive; the next
 // rotation must replace every part this one rotated (#1090 review F3).
-const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my box page, using the passphrase or recovery key from whichever card works."
+const inEffectProblem = "Part of your new card is already in effect, but I could not finish. Keep the new card, and your current one if you still have it. Finish now: start a new card from my Wi-Fi page, using the passphrase or recovery key from whichever card works."
+
+// cancelledGone and confirmedGone answer a display whose card was erased,
+// naming the page as the owner texts do (CH-12).
+const (
+	cancelledGone = "This new card was cancelled and erased; your current card stays in effect. Start again from my Wi-Fi page."
+	confirmedGone = "You confirmed your Owner Card, so I keep no copy of it. If you lose it, you can replace it with a new card from my Wi-Fi page."
+)
 
 // Noted wraps a Provision error with a fixed note that the page adds to
 // the owner's text once the card is in effect (REC-4): Err decides the
@@ -508,10 +515,10 @@ func (d *Display) gone(w http.ResponseWriter) {
 		return
 	}
 	if discarded {
-		http.Error(w, "This new card was cancelled and erased; your current card stays in effect. Start again from my box page.", http.StatusGone)
+		http.Error(w, cancelledGone, http.StatusGone)
 		return
 	}
-	http.Error(w, "You confirmed your Owner Card, so I keep no copy of it. If you lose it, you can replace it with a new card from my box page.", http.StatusGone)
+	http.Error(w, confirmedGone, http.StatusGone)
 }
 
 // sameOrigin refuses a POST another site's page sends: an Origin header,

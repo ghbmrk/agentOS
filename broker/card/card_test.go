@@ -162,7 +162,7 @@ func TestRenderedCardIsTheManual(t *testing.T) {
 	}
 	for _, want := range []string{"Nothing happened?", c.SetupCode, c.SetupSecret,
 		c.VaultPassphrase, c.RecoveryKey, "Dell", "HP", "Lenovo", "ASUS", "Acer",
-		"minutes", "apart from the drive", "<svg", "Box page: <span class=\"mono\">" + BoxPage, "On the Owner network but no page?", "Phone won't join: it needs WPA3.",
+		"minutes", "apart from the drive", "<svg", "Wi-Fi page: <span class=\"mono\">" + BoxPage, "On the Owner network but no page?", "Phone won't join: it needs WPA3.",
 		"apart from me and from this card", "Reset secret", "tap Copy",
 		"I cannot print this again, so keep this sheet.", "I cannot print this again; keep the card."} {
 		if !strings.Contains(page, want) {

@@ -241,7 +241,7 @@ func parseID(s string) ([idLen]byte, error) {
 // another backup. It does not drop erased subjects: OpenContent deletes
 // the key of every subject the restored log has erased (D-167).
 func UnwrapTable(r io.Reader, rk []byte, backupID string, dst kernel.Keys) (int, error) {
-	h, body, err := openFrom(r, rk, KindKeyTable)
+	h, _, body, err := openFrom(r, rk, KindKeyTable)
 	if err != nil {
 		return 0, err
 	}

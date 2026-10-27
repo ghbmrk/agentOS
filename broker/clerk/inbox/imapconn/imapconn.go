@@ -171,6 +171,10 @@ func Handle(c *client.Client, q imapwire.Request) (r imapwire.Response) {
 		if err = selectAt(c, q.Folder, true, q.Validity); err == nil {
 			r.Heads, err = planHeads(c, q.UIDs)
 		}
+	case imapwire.OpAddrHeads:
+		if err = selectAt(c, q.Folder, true, q.Validity); err == nil {
+			r.Heads, r.Long, err = addrHeads(c, q.Folder, q.UIDs)
+		}
 	case imapwire.OpAppend:
 		err = c.Append(q.Folder, q.Flags, q.Date, bytes.NewBuffer(q.Raw))
 	default:
@@ -305,22 +309,62 @@ const (
 // for its Subject (OpSubject) within the batch's budget and timeout. A searched message that did not answer is searched for again,
 // and only one the owner deleted or marked unread since is let go.
 func seenBatch(c *client.Client, folder string, uids []uint32) ([]imapwire.Head, *imapwire.LongHeaderError, error) {
-	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, HeadMax + 1},
-		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: []string{"From", "Message-Id"}}}
-	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
-	want := make(map[uint32]bool, len(uids))
+	out, want, long, err := headBatch(c, folder, uids, "From", "Message-Id")
+	if err != nil || long != nil {
+		return out, long, err
+	}
+	if len(want) > 0 {
+		left, err := readUIDs(c, want)
+		if err != nil {
+			return out, nil, err
+		}
+		if len(left) > 0 {
+			return out, nil, imapwire.ErrUnanswered
+		}
+	}
+	return out, nil, nil
+}
+
+// addrHeads reads the From, To and Cc headers of uids in the selected
+// folder, with BODY.PEEK[HEADER.FIELDS (FROM TO CC)] so nothing is marked
+// read, and each one's INTERNALDATE: what the clerk's history and contacts
+// are read from (MAIL-world-b1). Bounded as a Seen batch is: a header
+// longer than HeadMax ends the batch (ErrLongHeader, naming the mail). Any
+// UID that did not answer fails it (ErrUnanswered), gone or not: the caller
+// listed these UIDs, and a history missing a mail is a partial answer.
+func addrHeads(c *client.Client, folder string, uids []uint32) ([]imapwire.Head, *imapwire.LongHeaderError, error) {
+	out, want, long, err := headBatch(c, folder, uids, "From", "To", "Cc")
+	if err != nil || long != nil {
+		return out, long, err
+	}
+	if len(want) > 0 {
+		return out, nil, imapwire.ErrUnanswered
+	}
+	return out, nil, nil
+}
+
+// headBatch fetches the header fields of uids in the selected folder by
+// BODY.PEEK, each with its INTERNALDATE, in the order the server sends
+// them, and the UIDs that sent none. As in fetch: one header per requested
+// UID, so a server that repeats or invents messages adds nothing. A header
+// longer than HeadMax ends the batch and is named by long, with
+// ErrLongHeader.
+func headBatch(c *client.Client, folder string, uids []uint32, fields ...string) (out []imapwire.Head, want map[uint32]bool, long *imapwire.LongHeaderError, err error) {
+	want = make(map[uint32]bool, len(uids))
 	for _, u := range uids {
 		want[u] = true
 	}
+	if len(uids) == 0 {
+		return nil, want, nil, nil
+	}
+	sec := &imap.BodySectionName{Peek: true, Partial: []int{0, HeadMax + 1},
+		BodyPartName: imap.BodyPartName{Specifier: imap.HeaderSpecifier, Fields: fields}}
+	items := []imap.FetchItem{imap.FetchUid, imap.FetchInternalDate, sec.FetchItem()}
 	set := new(imap.SeqSet)
 	set.AddNum(uids...)
 	ch := make(chan *imap.Message, 16)
 	done := make(chan error, 1)
 	go func() { done <- c.UidFetch(set, items, ch) }()
-	// As in fetch: one header per requested UID, so a server that repeats
-	// or invents messages adds nothing.
-	var out []imapwire.Head
-	var long *imapwire.LongHeaderError
 	for m := range ch {
 		if long != nil || !want[m.Uid] {
 			continue
@@ -340,21 +384,12 @@ func seenBatch(c *client.Client, folder string, uids []uint32) ([]imapwire.Head,
 		}
 	}
 	if err := <-done; err != nil {
-		return out, nil, err
+		return out, want, nil, err
 	}
 	if long != nil {
-		return out, long, imapwire.ErrLongHeader
+		return out, want, long, imapwire.ErrLongHeader
 	}
-	if len(want) > 0 {
-		left, err := readUIDs(c, want)
-		if err != nil {
-			return out, nil, err
-		}
-		if len(left) > 0 {
-			return out, nil, imapwire.ErrUnanswered
-		}
-	}
-	return out, nil, nil
+	return out, want, nil, nil
 }
 
 // dates is the INTERNALDATE of each of uids in the selected folder: what

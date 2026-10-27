@@ -58,7 +58,7 @@ func TestLoopsOffStopsWorkPickedBeforeIt(t *testing.T) {
 	go func() { r.s.Tick(context.Background()); close(done) }()
 	<-src.picked // tick read the settings (on) and picked the job
 	req, _ := ParseText("LOOPS OFF")
-	must(t, r.s.Set(context.Background(), req))
+	must(t, r.s.Set(context.Background(), req, true))
 	close(src.hold)
 	<-done
 	if ran.Load() {

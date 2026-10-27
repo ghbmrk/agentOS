@@ -150,7 +150,7 @@ func sealBytes(t *testing.T, r Recipient, kind string, id [idLen]byte, gen uint6
 
 // openBytes opens obj fully, returning its body.
 func openBytes(obj, rk []byte, kind string) ([]byte, error) {
-	_, r, err := openFrom(bytes.NewReader(obj), rk, kind)
+	_, _, r, err := openFrom(bytes.NewReader(obj), rk, kind)
 	if err != nil {
 		return nil, err
 	}

@@ -255,6 +255,28 @@ class PremergeTest(unittest.TestCase):
                 self.commit("resolve")
                 self.assertEqual(self.check(reviewed), want)
 
+    def test_a_row_the_pr_doubled_and_main_deleted_keeps_one_copy(self):
+        # #3441: gone and cut were sets, so main's delete of R dropped the PR's added copy too.
+        table = "\n| Name | x |\n|---|---|\n"
+        reviewed = self.union_merge(table + "| S | s |\n", table + "| R | r |\n| R | r |\n", base_rows=table + "| R | r |\n")
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| R |"), 2, "the union driver was meant to keep both")
+        for rows, want in (("| R | r |\n| S | s |\n", []), ("| S | s |\n| R | r |\n", []),
+                           ("| S | s |\n", ["ASSUMPTIONS.md"]), ("| R | r |\n| R | r |\n| S | s |\n", ["ASSUMPTIONS.md"])):
+            with self.subTest(rows=rows):
+                self.write("ASSUMPTIONS.md", self.UNION + table + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), want)
+
+    def test_a_union_replay_that_keeps_a_row_only_main_deleted_is_changed(self):
+        # #3441: _stale read only the rows the PR dropped, so a replay keeping L-2, which main deleted, read same.
+        reviewed = self.union_merge("| B-1 | bak |\n", "| L-1 | edge new |\n| L-2 | b |\n",
+                                    base_rows="| L-1 | edge old |\n| L-2 | b |\n")
+        self.assertIn("| L-2 | b |", self.read("ASSUMPTIONS.md"), "the union driver was meant to keep L-2")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge new |\n| B-1 | bak |\n")
+        self.commit("drop the row main deleted")
+        self.assertEqual(self.check(reviewed), [])
+
     def test_a_stale_row_kept_after_main_rows_or_a_prose_line_dropped_is_changed(self):
         # #3401 lens delta: pins the moved form's drop of a stale row with no PR edit, and the all-rows hunk guard.
         reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| N-1 | new |\n")

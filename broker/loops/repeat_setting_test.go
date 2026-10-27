@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
 )
 
-// REQ: OP-2, OP-5
+// REQ: HLD-4
 
 // failingStore fails the save numbered failAt (counted from 1).
 type failingStore struct {
@@ -26,10 +25,9 @@ func (f *failingStore) Save(b []byte) error {
 	return f.MemStore.Save(b)
 }
 
-// P6 (journal B8): an owner setting has fixed params, so every LOOPS OFF
-// is the same effect. One whose save failed (not_applied) must not stop
-// every later one once another went: a setting made after the effect
-// went is a new send. The same holds for LOOPS ON, which widens.
+// P6: an owner setting whose save failed does not stop the same setting
+// sent again. LOOPS ON (a widening) rolls back and applies when sent again;
+// LOOPS OFF (a narrowing) stays in effect unsaved, and sent again it saves.
 func TestP6RepeatedOwnerSettingAfterAFailedOne(t *testing.T) {
 	for _, first := range []string{"LOOPS OFF", "LOOPS ON"} {
 		t.Run(first, func(t *testing.T) {
@@ -41,26 +39,21 @@ func TestP6RepeatedOwnerSettingAfterAFailedOne(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			eng, err := journal.Open(&journal.MemStore{}, s, map[string]journal.Executor{Executor: s},
-				func(x string) string { return x }, journal.WithClock(clk.now))
-			if err != nil {
-				t.Fatal(err)
-			}
-			s.Attach(eng)
 			set := func(text string) error {
 				t.Helper()
 				r, ok := ParseText(text)
 				if !ok {
 					t.Fatalf("parse %q", text)
 				}
-				return s.Set(ctx, r)
+				return s.Set(ctx, r, true)
 			}
 			other := map[string]string{"LOOPS OFF": "LOOPS ON", "LOOPS ON": "LOOPS OFF"}[first]
-			// Set saves its sequence, then the executor saves the setting:
-			// fail the second.
-			st.failAt = st.n + 2
+			if first == "LOOPS ON" {
+				must(t, set("LOOPS OFF"))
+			}
+			st.failAt = st.n + 1
 			if err := set(first); err == nil {
-				t.Fatalf("%s with a failing save went", first)
+				t.Fatalf("%s with a failing save reported saved", first)
 			}
 			for i, text := range []string{first, other, first, other, first} {
 				if err := set(text); err != nil {

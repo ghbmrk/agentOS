@@ -216,8 +216,9 @@ var learningPlane = map[string]struct {
 	// before adoption (ADP-8b); verb is standard library only.
 	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
 	// loops reads its spare envelope's spend from the kernel's log and
-	// derives the narrower spare keys (MIG-4-spend-m).
-	"loops": {[]string{"change", "journal", "kernel", "kernel/key", "owner", "skill/format"}, forbiddenStd},
+	// derives the narrower spare keys (MIG-4-spend-m). Its settings apply
+	// with no journal (#2786); privfile.ErrUnsynced is its Store contract.
+	"loops": {[]string{"change", "kernel", "kernel/key", "kernel/privfile", "skill/format"}, forbiddenStd},
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.
 	"skill/format": {nil, forbiddenStd},
