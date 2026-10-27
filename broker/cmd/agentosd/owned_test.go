@@ -39,7 +39,7 @@ func TestMarkOwned(t *testing.T) {
 // The loader's three files share one directory, the only one under
 // /var/lib/agentos its unit binds in (#2626).
 func TestLoaderFilesShareItsDirectory(t *testing.T) {
-	for _, p := range []string{apnet.Path, apnet.Owned, claim.SetupNetPath, defaultSetupNet} {
+	for _, p := range []string{apnet.Path, apnet.Owned, claim.SetupNetPath} {
 		if filepath.Dir(p) != apnet.Dir {
 			t.Errorf("%s is not in %s", p, apnet.Dir)
 		}

@@ -35,9 +35,7 @@ type Setup struct {
 	rec     SetupRecord
 	closed  bool
 	enrolls []time.Time
-	joins   []time.Time
 	keys    []time.Time
-	scans   []time.Time
 	texts   []time.Time
 	signins []time.Time
 }
@@ -55,12 +53,6 @@ type SetupConfig struct {
 	// Finished is called once, after finish is recorded, with the owner's
 	// number. It must not block.
 	Finished func(owner string)
-	// Join has the netjoin helper join the home Wi-Fi (P2-2w c3;
-	// Security L8): nil when it joined or saved the network, an error
-	// otherwise. JoinUnavailable answers ErrJoinUnavailable, any other
-	// error, or nil Join, answers ErrNotJoined. The
-	// password goes nowhere else: not the record, not an error, not a log.
-	Join func(ctx context.Context, ssid, password string) error
 	// Providers is the vault process's provider setup (P2-2w c4e). Nil
 	// lists no provider and refuses every key.
 	Providers Providers
@@ -68,9 +60,6 @@ type SetupConfig struct {
 	// it is not Ready for, lists that provider without device code and
 	// refuses its sign-in.
 	SignIn SignIn
-	// Networks lists the home networks the helper sees (P2-2w c4b).
-	// Nil Networks, or an error, answers an empty list.
-	Networks func(ctx context.Context) ([]string, error)
 	// Line is the owner line's modem bridge while setup runs (P2-2w c4c;
 	// modemlink.SetupLine); nil answers that setup cannot text.
 	Line SetupLine
@@ -105,14 +94,6 @@ var (
 
 // EnrollsPerMinute bounds new seeds: each enroll writes one to the vault.
 const EnrollsPerMinute = 6
-
-// JoinsPerMinute bounds join tries: each one writes NetworkManager's
-// stored connection (Security L6.4).
-const JoinsPerMinute = 6
-
-// ScansPerMinute bounds network lists: each one has the helper read
-// NetworkManager's access points.
-const ScansPerMinute = 20
 
 // SetupRecord is setup's durable record. It holds no secret.
 type SetupRecord struct {
@@ -177,14 +158,8 @@ var (
 	errNotEnrolled  = sockets.Code(localapi.ErrNotEnrolled)
 	errUnavailable  = sockets.Code(localapi.ErrEnrollUnavailable)
 	errCardPending  = sockets.Code(localapi.ErrCardPending)
-	errNotJoined    = sockets.Code(localapi.ErrNotJoined)
-	errNoJoin       = sockets.Code(localapi.ErrJoinUnavailable)
 	errAnswerOwed   = sockets.Code(localapi.ErrAnswerOwed)
 )
-
-// JoinUnavailable: the box cannot join Wi-Fi at all, so the page should
-// not ask for the password again (#1429).
-var JoinUnavailable = errors.New("home Wi-Fi join unavailable")
 
 // NewSetup reads the record; one that cannot be read closes setup.
 func NewSetup(cfg SetupConfig) *Setup {
@@ -218,8 +193,6 @@ func (s *Setup) Ops() map[string]sockets.Handler {
 		localapi.OpSetupEnroll:   s.open(s.enroll),
 		localapi.OpSetupConfirm:  s.open(s.confirm),
 		localapi.OpSetupFinish:   s.open(s.finish),
-		localapi.OpSetupJoin:     s.open(s.join),
-		localapi.OpSetupNetworks: s.open(s.networks),
 		localapi.OpSetupLine:     s.open(s.line),
 		localapi.OpSetupSend:     s.open(s.send),
 		localapi.OpSetupInbound:  s.open(s.inbound),
@@ -293,53 +266,6 @@ func (s *Setup) allow(tries *[]time.Time, n int) bool {
 	}
 	*tries = append(kept, now)
 	return true
-}
-
-// join hands the home network to the helper (P2-2w c3). agentosd checks
-// the shape only (Security L8.8); the helper checks the exact rule. No
-// lock is held across the call, which can take up to the helper's wait.
-func (s *Setup) join(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	var a localapi.Join
-	if err := decode(args, &a); err != nil {
-		return nil, err
-	}
-	if !s.allow(&s.joins, JoinsPerMinute) {
-		return nil, errLimited
-	}
-	if len(a.SSID) == 0 || len(a.SSID) > localapi.MaxSSID ||
-		len(a.Password) < localapi.MinPassword || len(a.Password) > localapi.MaxPassword {
-		return nil, errBadArgs
-	}
-	if s.cfg.Join == nil {
-		return nil, errNotJoined
-	}
-	if err := s.cfg.Join(ctx, a.SSID, a.Password); errors.Is(err, JoinUnavailable) {
-		return nil, errNoJoin
-	} else if err != nil {
-		return nil, errNotJoined
-	}
-	return struct{}{}, nil
-}
-
-// networks relays the helper's list of home networks (P2-2w c4b). Past
-// ScansPerMinute, with no helper or on its error, the list is empty: the
-// page then takes a typed name.
-func (s *Setup) networks(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	if err := decode(args, &struct{}{}); err != nil {
-		return nil, err
-	}
-	none := localapi.Networks{SSIDs: []string{}}
-	if s.cfg.Networks == nil || !s.allow(&s.scans, ScansPerMinute) {
-		return none, nil
-	}
-	l, err := s.cfg.Networks(ctx)
-	if err != nil || l == nil {
-		return none, nil
-	}
-	if len(l) > localapi.MaxNetworks {
-		l = l[:localapi.MaxNetworks]
-	}
-	return localapi.Networks{SSIDs: l}, nil
 }
 
 func (s *Setup) confirm(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {

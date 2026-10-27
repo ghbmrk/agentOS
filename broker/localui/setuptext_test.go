@@ -94,7 +94,7 @@ func textRig(t *testing.T, noNumber ...bool) (*rig, *textLine, AgentosdSetup) {
 	r.via = viaLine{viaAgentosd{r.hooks, a}}
 	r.srv = r.open(&MemStore{})
 	r.get("/setup")
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	r.hooks.progress.Online = true
 	return r, line, a
 }
 
@@ -107,7 +107,7 @@ func TestTheNumberStepSaysPlainlyWhenTheBoxCannotText(t *testing.T) {
 	r.hooks.noTexts = true
 	r.hooks.mu.Unlock()
 	r.get("/setup")
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	r.hooks.progress.Online = true
 	page := r.get("/setup")
 	if !strings.Contains(page, "Pairing is not available yet: I cannot send texts right now.") ||
 		strings.Contains(page, "sms:") || strings.Contains(page, `action="/setup/number"`) || strings.Contains(page, "I sent it") {

@@ -22,9 +22,7 @@ import (
 // enrollment it saw the vault confirm. The code seed is made in the vault
 // process (egress K17) and only passes through this page.
 //
-// JoinNetwork goes through agentosd to its netjoin helper (P2-2w c3;
-// Security L8), and Networks asks it for the networks in range (P2-2w
-// c4b). Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
+// Providers, ConnectAPIKey and SetPrivateOK go through agentosd to
 // the vault process (P2-2w c4e; CRED-5, CAP-9). BoxNumber, Send and
 // PairTexts go through agentosd to the modem bridge (P2-2w c4c; §8.1,
 // CH-12): agentosd sends only setup's fixed texts and passes on only PAIR
@@ -76,16 +74,6 @@ func (a AgentosdSetup) Wait(ctx context.Context, every time.Duration) error {
 	}
 }
 
-// Networks is the home networks agentosd's helper sees, or none: an
-// error or a list over the bound gives the typed-name step.
-func (a AgentosdSetup) Networks() []string {
-	var n localapi.Networks
-	if a.call(localapi.OpSetupNetworks, nil, &n) != nil || len(n.SSIDs) == 0 || len(n.SSIDs) > localapi.MaxNetworks {
-		return nil
-	}
-	return n.SSIDs
-}
-
 func (a AgentosdSetup) Progress() Progress {
 	var p localapi.SetupProgress
 	if a.call(localapi.OpSetupProgress, nil, &p) != nil {
@@ -96,7 +84,7 @@ func (a AgentosdSetup) Progress() Progress {
 	default:
 		return Progress{Phase: "booting"}
 	}
-	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online, NeverOnline: p.NeverOnline}
+	return Progress{Phase: p.Phase, Updated: p.Updated, Online: p.Online}
 }
 
 func (a AgentosdSetup) EnrollCode() (string, error) {
@@ -150,21 +138,6 @@ func (a AgentosdSetup) finish(owner string, card bool) error {
 	}
 	if refused(err, localapi.ErrAnswerOwed) {
 		return ErrAnswerOwed
-	}
-	return err
-}
-
-// JoinNetwork has agentosd's helper write the home Wi-Fi connection. It
-// waits up to localapi.JoinTimeout, longer than agentosd's own call to the
-// helper (Security L8.4). A box that cannot join Wi-Fi at all answers
-// ErrWiFiUnavailable (#1429); any other error shows the page's one network
-// error.
-func (a AgentosdSetup) JoinNetwork(ssid, password string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), localapi.JoinTimeout)
-	defer cancel()
-	err := a.Owner.Call(ctx, localapi.OpSetupJoin, localapi.Join{SSID: ssid, Password: password}, nil)
-	if refused(err, localapi.ErrJoinUnavailable) {
-		return fmt.Errorf("%w (%w)", ErrWiFiUnavailable, err)
 	}
 	return err
 }

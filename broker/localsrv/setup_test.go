@@ -92,10 +92,6 @@ type setupRig struct {
 	now      time.Time
 	finished []string
 	s        *Setup
-	// joins records each SSID and password the helper was handed;
-	// joinErr is its answer.
-	joins   [][2]string
-	joinErr error
 }
 
 func newSetupRig(t *testing.T) *setupRig {
@@ -113,11 +109,7 @@ func (r *setupRig) start() {
 			return localapi.SetupProgress{Phase: "ready", Updated: true, Online: true}
 		},
 		Finished: func(owner string) { r.finished = append(r.finished, owner) },
-		Join: func(_ context.Context, ssid, password string) error {
-			r.joins = append(r.joins, [2]string{ssid, password})
-			return r.joinErr
-		},
-		Now: func() time.Time { return r.now },
+		Now:      func() time.Time { return r.now },
 	})
 }
 
@@ -177,7 +169,6 @@ func TestSetupOpsAreRefusedForGoodOnceFinishIsRecorded(t *testing.T) {
 		localapi.OpSetupEnroll:   nil,
 		localapi.OpSetupConfirm:  localapi.Confirm{Code: good},
 		localapi.OpSetupFinish:   localapi.Finish{Owner: "+15550100199"},
-		localapi.OpSetupJoin:     localapi.Join{SSID: "home", Password: canaryPSK},
 		localapi.OpSetupSend:     localapi.SetupSend{To: "+15550100199", Text: "Could not save your number. Try again."},
 	}
 	check := func(when string) {
@@ -193,8 +184,8 @@ func TestSetupOpsAreRefusedForGoodOnceFinishIsRecorded(t *testing.T) {
 	if got, ok := r.s.Owner(); !ok || got != "+15550100100" {
 		t.Fatalf("owner %q %v", got, ok)
 	}
-	if len(r.finished) != 1 || r.vault.enrolls != 1 || r.vault.confirms != 1 || len(r.joins) != 0 {
-		t.Fatalf("finished %v, enrolls %d, confirms %d, joins %d", r.finished, r.vault.enrolls, r.vault.confirms, len(r.joins))
+	if len(r.finished) != 1 || r.vault.enrolls != 1 || r.vault.confirms != 1 {
+		t.Fatalf("finished %v, enrolls %d, confirms %d", r.finished, r.vault.enrolls, r.vault.confirms)
 	}
 	b, _ := os.ReadFile(r.path)
 	if strings.Contains(string(b), "CANARY") {

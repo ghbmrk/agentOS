@@ -45,7 +45,6 @@ func testAP() APConfig {
 type fakeHooks struct {
 	mu           sync.Mutex
 	progress     Progress
-	joined       string
 	sent         []modem.SMS
 	now          func() time.Time
 	seed         []byte // the vault's sealed code-generator seed
@@ -69,8 +68,6 @@ type fakeHooks struct {
 	unavailable bool
 	noTexts     bool            // the box cannot text: BoxNumber answers "", false
 	keyErr      error           // ConnectAPIKey's answer when set; nothing is stored
-	joinErr     error           // JoinNetwork's answer when set; nothing is joined
-	joins       int             // JoinNetwork calls
 	deviceErr   error           // StartDeviceCode's answer when set
 	deviceLink  string          // StartDeviceCode's link when set
 	privateErr  error           // SetPrivateOK's answer when set; nothing is recorded
@@ -86,18 +83,6 @@ type fakeHooks struct {
 }
 
 func (f *fakeHooks) Progress() Progress { f.mu.Lock(); defer f.mu.Unlock(); return f.progress }
-func (f *fakeHooks) Networks() []string { return []string{"Home", "Neighbor"} }
-func (f *fakeHooks) JoinNetwork(ssid, pw string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.joins++
-	if f.joinErr != nil {
-		return f.joinErr
-	}
-	f.joined = ssid
-	f.progress.Online = true
-	return nil
-}
 func (f *fakeHooks) BoxNumber() (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -436,11 +421,12 @@ func (r *rig) runSetupToHost() {
 	if loc := r.do("GET", "/", nil).Header().Get("Location"); loc != "/setup" {
 		t.Fatalf("root before setup: %q", loc)
 	}
-	// Home network.
-	if !strings.Contains(r.get("/setup"), "Home network") {
-		t.Fatal("network step not first")
+	// The number step is first: the box's uplink is its cable to the
+	// enforcer, so setup has no network step (D-178).
+	if page := r.get("/setup"); !strings.Contains(page, "1. Text your box") || strings.Contains(page, "Wi-Fi") {
+		t.Fatalf("number step not first: %s", page)
 	}
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	r.hooks.progress.Online = true
 	// Text my box: the sms: link carries the box's number and a pairing code.
 	page := html.UnescapeString(r.get("/setup"))
 	m := regexp.MustCompile(`href="sms:(\+[0-9]+)\?&body=PAIR%20([A-Z2-9]{8})"`).FindStringSubmatch(page)
@@ -523,7 +509,7 @@ func TestSetupResumesAfterRestart(t *testing.T) {
 	st := &MemStore{}
 	r.srv = r.open(st)
 	r.get("/setup")
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"x"}})
+	r.hooks.progress.Online = true
 	page := r.get("/setup")
 	code := regexp.MustCompile(`PAIR%20([A-Z2-9]{8})`).FindStringSubmatch(page)[1]
 	r.srv.OfferText(ownerNum, "pair "+strings.ToLower(code)+".")

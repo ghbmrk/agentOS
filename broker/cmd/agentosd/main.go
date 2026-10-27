@@ -241,7 +241,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
-	var keptPath, setupRecord, netjoinSock, apNetPath, setupNetPath, ownedPath string
+	var keptPath, setupRecord, apNetPath, ownedPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -297,9 +297,7 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
-	flag.StringVar(&netjoinSock, "netjoin-sock", "", "the netjoin helper's socket (agentos-netjoin, P2-2w c3): setup's network step writes the home Wi-Fi through it; empty, that step answers not joined")
 	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
-	flag.StringVar(&setupNetPath, "setup-net", defaultSetupNet, "a preloaded box's setup network (HW-10, #1692): the claim rotates its password here, root-only, for agentos-ap; empty, it is not rotated")
 	flag.StringVar(&ownedPath, "owned", apnet.Owned, "the owned marker (#2626): made once the owner's number is known, for agentos-ap, which cannot see the owner state; empty, it is not made")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
@@ -425,10 +423,9 @@ func main() {
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
 	if cfg.OwnerNumber == "" {
-		up := newUplink()
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
-			OwnerState: cfg.OwnerState, Progress: up.progress, Seen: up.seen, NetJoin: netjoinSock,
-			Card: pageCardStep, APNet: apNetPath, SetupNet: setupNetPath}
+			OwnerState: cfg.OwnerState, Progress: progressOf(routeOnline),
+			Card: pageCardStep, APNet: apNetPath}
 		if modemBridge {
 			// The box texts its setup and pairing texts on its own line
 			// (P2-2w c4c), and records the SIM it finds as that line's.
