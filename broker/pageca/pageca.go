@@ -2,12 +2,12 @@
 // CH-9, HW-1, §19 risk 30): a self-signed ECDSA P-256 root whose critical
 // name constraint admits exactly one DNS name, the owner page's, and no
 // subdomain or IP address, so a phone that installs it trusts it for that
-// page and nothing else. Its key never leaves agentosd: the web-facing page
-// (agentos-localui) makes its own serving key and asks agentosd to certify
-// it (localsrv certify, localapi.OpCertify).
+// page and nothing else. The kernel holds it from the sealed store and its
+// key never leaves the kernel: the web-facing page (agentos-localui) makes
+// its own serving key and asks agentosd to certify it (localapi.OpCertify),
+// which forwards to the kernel's certify (MIG-4-recovery-f2).
 //
-// It imports the standard library and kernel/privfile only, and defines its
-// own Sealer (clerk.Sealer's method set), since clerk links crypto/tls and
+// It imports the standard library only, since clerk links crypto/tls and
 // net/http, which agentosd's control path may not depend on (ARC-2).
 package pageca
 
