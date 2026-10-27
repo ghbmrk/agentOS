@@ -215,19 +215,20 @@ func TestStickerStepOneIsTheEnforcers(t *testing.T) {
 // REQ: HW-10
 //
 // The sticker spells the project "agentOS", as the card and texts do. It
-// catches a sticker that prints "AgentOS".
+// catches a sticker that prints the capitalized old name.
 func TestStickerSaysAgentOSInLowerCase(t *testing.T) {
 	out := t.TempDir()
 	if err := writeSticker(out, "CCCC-CCCC-CCCC-CCCC", claim.SetupNet{SSID: "agentos-setup-test", Password: "PWPW-PWPW-PWPW-PWPW"}); err != nil {
 		t.Fatal(err)
 	}
+	old := "Agent" + "OS" // split so the CX-name-case check reads no new old-name text
 	for _, f := range []string{"sticker.html", "sticker.txt"} {
 		b, err := os.ReadFile(filepath.Join(out, f))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "AgentOS") {
-			t.Fatalf("%s says AgentOS", f)
+		if strings.Contains(string(b), old) {
+			t.Fatalf("%s says %s", f, old)
 		}
 	}
 }

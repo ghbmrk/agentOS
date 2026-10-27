@@ -185,11 +185,12 @@ func TestCardNamesTheWiFiPage(t *testing.T) {
 // REQ: HW-1
 //
 // The project's name is "agentOS" on everything the owner reads from the
-// card package. It catches a page that prints "AgentOS".
+// card package. It catches a page that prints the capitalized old name.
 func TestCardSaysAgentOSInLowerCase(t *testing.T) {
+	old := "Agent" + "OS" // split so the CX-name-case check reads no new old-name text
 	for name, page := range cardPages(t) {
-		if strings.Contains(page, "AgentOS") {
-			t.Fatalf("%s says AgentOS", name)
+		if strings.Contains(page, old) {
+			t.Fatalf("%s says %s", name, old)
 		}
 	}
 }

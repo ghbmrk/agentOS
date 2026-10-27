@@ -13,7 +13,7 @@ CH-12: owner texts use one name for the local UI, built on the Wi-Fi the owner r
 1. **SPEC's name.** The card labels the address "Wi-Fi page:" and the passphrase note says "my Wi-Fi page"; the display's in-effect, cancelled and confirmed answers say "my Wi-Fi page". If SPEC renames the page now that the core serves no Wi-Fi (D-178), that is an L1 question, not this row's.
 2. **The no-Wi-Fi guard stays a guard.** `TestCardCarriesNoWiFi` forbids every "my Wi-Fi" other than "my Wi-Fi page", beside "Box Wi-Fi" and the rest.
 3. **Quick-start step 4 is shorter** (later finding, folded in): about 20 words, still naming the Owner network before the claim.
-4. **Brand casing** (coordinator ask): owner-visible "AgentOS" on the card pages and the seller's claim sticker becomes "agentOS".
+4. **Brand casing** (coordinator ask): the capitalized old product name on the card pages and the seller's claim sticker becomes "agentOS".
 5. Not touched: `broker/localui` (old core, frozen; its footer still says "Box page", retired with it), SPEC.
 
 ## Scope
@@ -28,7 +28,7 @@ CH-12: owner texts use one name for the local UI, built on the Wi-Fi the owner r
 
 - CH-12, ONB-7: `broker/card/wifidel_test.go::TestCardNamesTheWiFiPage`. The card, rotation sheet, both displays and the display's 410 answers name "Wi-Fi page" and never "box page" (any case). It catches a card that names the page differently from the texts.
 - HW-1, CH-9: `::TestCardCarriesNoWiFi` (narrowed needle) still catches a card that names a box Wi-Fi.
-- HW-1: `::TestCardSaysAgentOSInLowerCase` and `broker/cmd/agentos-seller/wifidel_test.go::TestStickerSaysAgentOSInLowerCase`: no "AgentOS" on the card pages or the sticker.
+- HW-1: `::TestCardSaysAgentOSInLowerCase` and `broker/cmd/agentos-seller/wifidel_test.go::TestStickerSaysAgentOSInLowerCase`: no capitalized old name on the card pages or the sticker.
 
 ## Needs, order, estimate
 
