@@ -26,6 +26,17 @@ esp=$(cat "$v" | od -An -v -c -j4 | tr -s ' ' '\n' | grep -vx '\\0' | tr -d '\n'
 printf '%s\n' "$esp" | grep -qxE '[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}' ||
 	fail "the boot loader's partition GUID is unreadable ($(cat "$v" | wc -c) bytes: $(cat "$v" | od -An -v -tx1 -N40 | tr -s ' \n' ' '))"
 parts=$(lsblk -rno NAME,PKNAME,PARTUUID)
+# A host disk's partitions show no PARTUUID: the 59 host-disk rule keeps blkid off them (HOST-1a), and
+# lsblk reads udev's record. Each such disk's own table is read instead, read-only, so a second
+# agentOS drive attached beside this one still counts. A partition is a row whose sysfs entry has a
+# partition number; a dm device's row names a partition as its parent and has none.
+for d in $(printf '%s\n' "$parts" | awk 'NF == 2 { print $1, $2 }' | while read -r p pk; do
+	[ -r "$R/sys/class/block/$p/partition" ] && echo "$pk"
+done | sort -u); do
+	parts="$parts
+$(sfdisk -d "/dev/$d" 2>/dev/null | awk -v d="$d" '$2 == ":" && match($0, /uuid=[0-9A-Fa-f-]+/) {
+		print substr($1, 6), d, tolower(substr($0, RSTART + 5, RLENGTH - 5)) }')"
+done
 hits=$(printf '%s\n' "$parts" | awk -v u="$esp" '$3 == u { print $1 " " $2 }' | sort -u)
 n=$(printf '%s' "$hits" | grep -c . || true)
 rec=$R/run/agentos-drive-id

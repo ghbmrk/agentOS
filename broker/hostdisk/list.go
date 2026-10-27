@@ -356,6 +356,12 @@ func (s System) Classify(name string) Class {
 	return ClassHost
 }
 
+// DriveHealth is HostDisks().Health, for the boot health check: it opens
+// no disk but the one under the running root.
+func (s System) DriveHealth() Health {
+	return s.fill().findDrive().health
+}
+
 // ClassifyEnv is the udev helper's output line for a device.
 func (s System) ClassifyEnv(name string) string {
 	return "AGENTOS_DISK=" + string(s.Classify(name)) + "\n"

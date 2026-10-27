@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,13 +20,15 @@ import (
 )
 
 // stubHost answers SignInSock's calls as agentosd's -signin-sock would,
-// recording each; cmd/agentosd's TestSignInSockSpeaksTheHostsWire serves
-// the real one.
+// recording each, and makes and removes routes in dir as agentosd does;
+// cmd/agentosd's TestSignInSockSpeaksTheHostsWire serves the real one.
 type stubHost struct {
+	dir   string
 	mu    sync.Mutex
 	calls []string
 	args  []signInArgs
 	fail  map[string]error
+	route string // signinroute's answer, if not dir/guest
 }
 
 func (s *stubHost) serve(t *testing.T) string {
@@ -47,7 +50,19 @@ func (s *stubHost) serve(t *testing.T) string {
 			if err != nil {
 				return nil, err
 			}
-			if op == "signinread" {
+			switch op {
+			case "signinroute":
+				route := filepath.Join(s.dir, a.Guest)
+				os.Mkdir(route, 0o700)
+				s.mu.Lock()
+				if s.route != "" {
+					route = s.route
+				}
+				s.mu.Unlock()
+				return json.Marshal(signInRoute{Route: route})
+			case "signinstop":
+				os.RemoveAll(filepath.Join(s.dir, a.Guest))
+			case "signinread":
 				return json.Marshal(signInRead{Printed: "code", Exited: false})
 			}
 			return nil, nil
@@ -56,15 +71,16 @@ func (s *stubHost) serve(t *testing.T) string {
 	return sock
 }
 
-// Start serves the guest's endpoint in its own route directory, 0700, and
-// names that directory to agentosd; Read relays signinread, a failed read
-// ends the sign-in; Stop has agentosd destroy the machine and removes the
-// route. A refused start leaves no route.
+// Start has agentosd make the guest's route, serves the guest's endpoint
+// in it and asks agentosd to start the CLI; Read relays signinread, a
+// failed read ends the sign-in; Stop has agentosd destroy the machine and
+// remove the route. A refused start, or a route agentosd names that is not
+// the guest's, ends with signinstop.
 func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 	login, _ := planLoginAt(t, plan.Permitted, tokenProvider(new(atomic.Int32), nil))
-	host := &stubHost{fail: map[string]error{}}
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
-	s := SignInSock{Host: proc.Conn{Socket: host.serve(t), UID: os.Getuid()}, Dir: dir, Login: login, SandboxUID: os.Getuid()}
+	host := &stubHost{dir: dir, fail: map[string]error{}}
+	s := SignInSock{Host: proc.Conn{Socket: host.serve(t), UID: os.Getuid()}, Login: login, SandboxUID: os.Getuid()}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -73,10 +89,6 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	route := filepath.Join(dir, "signin-1")
-	fi, err := os.Stat(route)
-	if err != nil || !fi.IsDir() || fi.Mode().Perm() != 0o700 {
-		t.Fatalf("route: %v %v", fi, err)
-	}
 	if _, err := os.Stat(filepath.Join(route, SignInRouteSocket)); err != nil {
 		t.Fatalf("no endpoint in the route: %v", err)
 	}
@@ -94,23 +106,33 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 		t.Fatalf("the route stayed: %v", err)
 	}
 	host.mu.Lock()
-	want := []string{"signinstart", "signinread", "signinread", "signinstop"}
-	if len(host.calls) != len(want) || host.args[0] != (signInArgs{"signin-1", route}) || host.args[3] != (signInArgs{Guest: "signin-1"}) {
+	want := []string{"signinroute", "signinstart", "signinread", "signinread", "signinstop"}
+	if !slices.Equal(host.calls, want) || slices.ContainsFunc(host.args, func(a signInArgs) bool { return a != signInArgs{Guest: "signin-1"} }) {
 		t.Fatalf("calls %v %+v", host.calls, host.args)
 	}
-	for i := range want {
-		if host.calls[i] != want[i] {
-			t.Fatalf("calls %v", host.calls)
-		}
-	}
+	host.calls = nil
 	host.fail["signinstart"] = errors.New("signin: the sign-in machine did not start")
 	host.mu.Unlock()
 
 	if _, err := s.Start(ctx, "signin-2"); err == nil {
 		t.Fatal("a refused start returned a worker")
 	}
+	host.mu.Lock()
+	delete(host.fail, "signinstart")
+	host.route = filepath.Join(dir, "elsewhere")
+	host.mu.Unlock()
+	if _, err := s.Start(ctx, "signin-3"); err == nil {
+		t.Fatal("a route not named for the guest was served")
+	}
+	host.mu.Lock()
+	if !slices.Equal(host.calls, []string{"signinroute", "signinstart", "signinstop", "signinroute", "signinstop"}) {
+		t.Fatalf("calls %v", host.calls)
+	}
+	host.route = ""
+	host.fail["signinroute"] = errors.New("signin: a guest is lowercase letters, digits and dashes, at most 64")
+	host.mu.Unlock()
 	if _, err := s.Start(ctx, "../x"); err == nil {
-		t.Fatal("a guest outside Dir started")
+		t.Fatal("a refused route started")
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("left %v", ents)

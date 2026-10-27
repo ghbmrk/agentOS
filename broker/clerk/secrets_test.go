@@ -214,6 +214,38 @@ func TestSecretsLoginOpensPerConnection(t *testing.T) {
 	}
 }
 
+// DeviceKey opens only a static slot under DeviceSlots, at each call, and
+// wipes the key it lent once fn returns.
+func TestSecretsDeviceKeyOpensOnlyADeviceSlot(t *testing.T) {
+	s := clerk.NewSecrets(sealer(t), nil)
+	open := s.DeviceKey("device/scale")
+	if err := open(func([]byte) error { return nil }); err == nil {
+		t.Fatal("DeviceKey opened a missing slot")
+	}
+	_ = s.Put("device/scale", clerk.KindStatic, []byte("canary-kl-0001"))
+	var lent []byte
+	if err := open(func(k []byte) error {
+		if string(k) != "canary-kl-0001" {
+			t.Fatalf("key %q", k)
+		}
+		lent = k
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(lent, make([]byte, len(lent))) {
+		t.Fatal("the lent key was not wiped after fn returned")
+	}
+	_ = s.Put("device/scale", clerk.KindGrant, []byte("canary-grant-0002"))
+	if err := open(func([]byte) error { t.Fatal("opened a grant"); return nil }); err == nil {
+		t.Fatal("DeviceKey opened a grant slot")
+	}
+	_ = s.Put("mail/a", clerk.KindStatic, []byte("canary-pass-0002"))
+	if err := s.DeviceKey("mail/a")(func([]byte) error { t.Fatal("opened a mail slot"); return nil }); err == nil {
+		t.Fatal("DeviceKey opened a slot outside DeviceSlots")
+	}
+}
+
 // RemovePrefix drops every slot under the prefix but the one kept, in one
 // write, leaves the store as it was when the write fails, and writes nothing
 // when nothing matches.

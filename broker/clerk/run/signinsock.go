@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -16,18 +15,17 @@ import (
 // (MIG-4-untrusted-exit-b1, #2780(b), PLN-5, CLK-7): agentosd runs each
 // sign-in CLI in a machine of its own whose only mount out is the guest's
 // route directory, in which this process serves that guest's plan
-// endpoint. Start makes the directory under Dir, serves the endpoint in it
-// (ListenPlan, ServePlan) and asks agentosd to start the machine; Stop
-// asks agentosd to destroy it and closes the endpoint. agentosd's
+// endpoint. Start has agentosd make the directory (signinroute), serves
+// the endpoint in it (ListenPlan, ServePlan) and asks agentosd to start
+// the machine; Stop asks agentosd to destroy it and remove the directory,
+// and closes the endpoint. agentosd makes each route in a directory this
+// process cannot write, so this process cannot swap the route for another
+// path between agentosd's check and the mount (#3248 Security 1). agentosd's
 // signinhost.go is the other side; TestSignInSockSpeaksTheHostsWire, in
 // cmd/agentosd, serves it to this client.
 type SignInSock struct {
 	// Host is agentosd's -signin-sock, called only on agentosd's uid.
-	Host proc.Conn
-	// Dir holds each sign-in guest's route directory; it is this
-	// process's alone (agentosd checks each route is a directory owned by
-	// this uid that no group or other may write, with no link on the way).
-	Dir   string
+	Host  proc.Conn
 	Login *plan.Login
 	// SandboxUID is the uid the sign-in machine's connections to its
 	// endpoint arrive as: agentosd's sandbox host, not the guest's own,
@@ -42,7 +40,10 @@ const SignInRouteSocket = "route.sock"
 
 type signInArgs struct {
 	Guest string `json:"guest"`
-	Route string `json:"route,omitempty"`
+}
+
+type signInRoute struct {
+	Route string `json:"route"`
 }
 
 type signInRead struct {
@@ -67,28 +68,29 @@ func within(ctx context.Context, c proc.Conn) (proc.Conn, error) {
 	return c, nil
 }
 
-// Start serves guest's endpoint in a fresh route directory and has
-// agentosd start the sign-in CLI on it.
+// Start has agentosd make guest's route afresh, serves guest's endpoint in
+// it and has agentosd start the sign-in CLI on it.
 func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, error) {
 	c, err := within(ctx, s.Host)
 	if err != nil {
 		return nil, err
 	}
-	route := filepath.Join(s.Dir, guest)
-	if filepath.Dir(route) != filepath.Clean(s.Dir) {
-		return nil, errors.New("run: a sign-in guest names one directory")
-	}
-	if err := os.Mkdir(route, 0o700); err != nil {
+	var r signInRoute
+	if err := c.Call("signinroute", signInArgs{Guest: guest}, &r); err != nil {
 		return nil, err
 	}
-	ln, err := ListenPlan(filepath.Join(route, SignInRouteSocket), s.SandboxUID)
+	err = errors.New("run: agentosd named a route that is not the guest's")
+	var ln net.Listener
+	if filepath.IsAbs(r.Route) && filepath.Base(r.Route) == guest {
+		ln, err = ListenPlan(filepath.Join(r.Route, SignInRouteSocket), s.SandboxUID)
+	}
 	if err != nil {
-		os.RemoveAll(route)
+		(&signInSockWorker{s: s, guest: guest}).Stop()
 		return nil, err
 	}
-	go ServePlan(ln, PlanGuest{Login: s.Login, Guest: guest})
-	w := &signInSockWorker{s: s, guest: guest, route: route, ln: ln}
-	if err := c.Call("signinstart", signInArgs{Guest: guest, Route: route}, nil); err != nil {
+	go servePlan(ln, PlanGuest{Login: s.Login, Guest: guest})
+	w := &signInSockWorker{s: s, guest: guest, ln: ln}
+	if err := c.Call("signinstart", signInArgs{Guest: guest}, nil); err != nil {
 		// A lost answer may have started it: stop is idempotent.
 		w.Stop()
 		return nil, err
@@ -99,8 +101,7 @@ func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, erro
 type signInSockWorker struct {
 	s     SignInSock
 	guest string
-	route string
-	ln    net.Listener
+	ln    net.Listener // nil once the endpoint did not open
 }
 
 // Read asks agentosd what the CLI printed. A call that fails reads as an
@@ -118,13 +119,15 @@ func (w *signInSockWorker) Read(ctx context.Context) (string, bool) {
 	return r.Printed, r.Exited
 }
 
-// Stop has agentosd destroy the machine, then closes the endpoint.
+// Stop has agentosd destroy the machine and remove the route, then closes
+// the endpoint.
 func (w *signInSockWorker) Stop() {
 	c := w.s.Host
 	if c.Timeout == 0 {
 		c.Timeout = 45 * time.Second
 	}
 	c.Call("signinstop", signInArgs{Guest: w.guest}, nil)
-	w.ln.Close()
-	os.RemoveAll(w.route)
+	if w.ln != nil {
+		w.ln.Close()
+	}
 }

@@ -1,0 +1,20 @@
+#!/bin/sh
+# host-disk-unlink NAME: remove every /dev/disk/by-*/ link that points at the host disk or partition
+# NAME (HW-8, HOST-1a part 2). 59-agentos-host-disks.rules runs it for each device it hides. The
+# initrd has none of the host-disk rules, so its udev links a host disk by label, partition label,
+# UUID and disk sequence; udev in the main system no longer knows of those links and never removes
+# them (#3306's CI boot found them). Only links directly in a by-* directory are removed, and no
+# link is followed: a target is compared as written, made absolute and normalised. Prints nothing.
+# AGENTOS_DEV exists for tests/test_image.py.
+dev=${AGENTOS_DEV:-/dev}
+# A kernel name, as udev's %k spells it ("!" as "/"); no segment may start with a dot.
+case ${1:-} in '' | *[!A-Za-z0-9_.:!/-]* | .* | */.*) exit 1 ;; esac
+node=$dev/$(printf '%s' "$1" | tr '!' '/')
+for l in "$dev"/disk/by-*/*; do
+	d=${l%/*}
+	[ -L "$l" ] && [ -d "$d" ] && [ ! -L "$d" ] || continue
+	t=$(readlink "$l") || continue
+	case $t in /*) ;; *) t=$d/$t ;; esac
+	[ "$(realpath -m -s -- "$t")" = "$node" ] && rm -f -- "$l"
+done
+exit 0

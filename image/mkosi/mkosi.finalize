@@ -310,7 +310,7 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root) + networkmanager_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + noexec_violations(root) + keeper_violations(root))
+            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1740,6 +1740,23 @@ def tree_stat(root, rel):
         return tree_chase(str(root), rel)[1]
     except OSError:
         return None
+
+
+# HOST-1a part 2 (hostdisk H11, Security R1 on #172): nothing on the box assembles, activates or
+# registers a disk's volumes, each of which can write it (an LVM activation, an array's resync, a
+# bcache registration, a ZFS import, whose scan ignores udev), and nothing automounts one. Their udev
+# rules are kept out by exec.allow; the tools themselves are refused here, wherever the box would run
+# them from. initrd/mkosi.finalize holds the same two lists for the initrd (tests/test_image.py checks).
+ASSEMBLY_TOOLS = ("lvm", "pvscan", "vgchange", "lvchange", "mdadm", "mdmon", "dmraid", "make-bcache", "bcache-register",
+                  "probe-bcache", "zpool", "zfs", "multipath", "multipathd", "udisksd", "automount")
+ASSEMBLY_DIRS = ("usr/sbin", "usr/bin", "usr/lib/udev", "usr/libexec/udisks2", "usr/lib/udisks2")
+ASSEMBLY_RULES = re.compile(r"lvm|md-raid|mdadm|bcache|multipath|mpath|zfs|zvol|udisks|dmraid")
+
+
+def assembly_violations(root):
+    """HOST-1a: every ASSEMBLY_TOOLS command in the tree, as the booted image resolves it."""
+    return ["%s/%s: assembles, activates or mounts a disk's volumes; the box ships none (HW-8, HOST-1a)" % (d, n)
+            for d in ASSEMBLY_DIRS for n in ASSEMBLY_TOOLS if tree_stat(root, d + "/" + n) is not None]
 
 
 def radio_violations(root):

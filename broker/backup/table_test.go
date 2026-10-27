@@ -10,14 +10,11 @@ import (
 	"errors"
 	"maps"
 	"math"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
-	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // spyKeys fails the test on any write to the live table, and can hide a
@@ -158,9 +155,6 @@ func TestTableNeverUsesTheLogKey(t *testing.T) {
 	must(t, err)
 	logAEAD, err := cipher.NewGCM(b)
 	must(t, err)
-	dir := filepath.Join(t.TempDir(), "keys")
-	fk, err := proc.OpenFileKeys(dir, logKeyCanary)
-	must(t, err)
 	for _, gen := range []uint64{rec.Generation, rec2.Generation} {
 		obj, err := tg.GetTable(rec.BackupID, gen)
 		if err != nil {
@@ -177,11 +171,9 @@ func TestTableNeverUsesTheLogKey(t *testing.T) {
 				}
 			}
 		}
-		// As a FileKeys file, the table does not open either.
-		must(t, os.WriteFile(filepath.Join(dir, subs[2]+".key"), obj, 0o600))
-		if _, _, err := fk.Get(subs[2]); err == nil {
-			t.Fatal("a table object opens as a FileKeys key")
-		}
+		// At offset 0 the loop above is FileKeys's own open; since the
+		// kernel process links this package, a real FileKeys is tried in
+		// kernel/proc (TestABackupTableIsNoKeyFile).
 	}
 }
 
@@ -446,8 +438,10 @@ func TestUnwrapIntoAFreshFileKeys(t *testing.T) {
 
 	obj, err := tg.GetTable(rec.BackupID, rec.Generation)
 	must(t, err)
-	fk, err := proc.OpenFileKeys(filepath.Join(t.TempDir(), "keys"), logKeyCanary)
-	must(t, err)
+	// Into kernel.MemKeys: this package's tests cannot link kernel/proc,
+	// which links it; kernel/proc's TestARestoreUnwrapsIntoFreshFileKeys
+	// unwraps into a real FileKeys.
+	fk := kernel.NewMemKeys()
 	n, err := UnwrapTable(bytes.NewReader(obj), rk1, m.BackupID, fk)
 	if err != nil || n != 3 {
 		t.Fatalf("UnwrapTable: %d, %v", n, err)

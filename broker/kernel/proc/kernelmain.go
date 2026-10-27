@@ -28,6 +28,7 @@ type MainConfig struct {
 	MeterUID  int    // the model clerk's uid, its only peer
 	Clerks    map[string]Remote
 	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
+	BackupDir string // the backups' records (KernelConfig.BackupDir)
 	// Peers are the uids this process must not run as: every peer above
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
@@ -76,6 +77,9 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if cfg.KeyDir == "" {
 		return ErrNoKeyTable
 	}
+	if cfg.BackupDir == "" {
+		return ErrNoBackupDir
+	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
 	}
@@ -88,8 +92,8 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if err := checkLogKey(cfg.Log, keys.Log); err != nil {
 		return err
 	}
-	// The backup recipient is kept for the backup calls (MIG-4-recovery-e3);
-	// a store enrolled before it holds none, and no backup can be taken.
+	// A store enrolled before the backup recipient holds none, and the
+	// backup call refuses (MIG-4-recovery-e3).
 	if len(keys.Recipient) == 0 {
 		fmt.Fprintln(os.Stderr, ErrNoRecipient)
 	}
@@ -98,6 +102,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
+		BackupDir: cfg.BackupDir, Recipient: keys.Recipient,
 	}, clock())
 	if err != nil {
 		return err

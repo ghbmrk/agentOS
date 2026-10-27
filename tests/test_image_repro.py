@@ -170,7 +170,8 @@ class InitrdConfigTest(unittest.TestCase):
         conf = (MK / "initrd/mkosi.conf").read_text()
         body = conf[conf.index("RemoveFiles="):]
         entries = [ln.strip() for ln in body.splitlines()[1:] if ln.startswith((" ", "\t")) and ln.strip()]
-        self.assertEqual(entries, ["/var/log/*.log", "/var/cache/ldconfig/aux-cache"])
+        # The lvm2 files after these are HOST-1a's (tests/test_image.py HostDiskImageTest).
+        self.assertEqual(entries[:2], ["/var/log/*.log", "/var/cache/ldconfig/aux-cache"])
 
 
 def compare_step():
