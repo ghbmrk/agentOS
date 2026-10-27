@@ -29,21 +29,32 @@ func newFakeBackups(subs map[string][]string) *fakeBackups {
 
 func (f *fakeBackups) List() []string             { return slices.Sorted(maps.Keys(f.subs)) }
 func (f *fakeBackups) Subjects(b string) []string { return f.subs[b] }
-func (f *fakeBackups) Reseal(b string, keys kernel.Keys, s *kernel.State) error {
-	f.reseals[b]++
-	if err := f.fail[b]; err != nil {
-		return err
-	}
+func (f *fakeBackups) Prepare(b string, keys kernel.Keys, s *kernel.State) (kernel.ResealIO, error) {
 	if keys == nil {
-		return errors.New("no key table")
+		return nil, errors.New("no key table")
 	}
-	if !f.lie {
-		f.subs[b] = slices.DeleteFunc(slices.Clone(f.subs[b]), func(sub string) bool {
-			r, ok := s.Recall(sub)
-			return !ok || r.Erased
-		})
-	}
-	return nil
+	keep := slices.DeleteFunc(slices.Clone(f.subs[b]), func(sub string) bool {
+		r, ok := s.Recall(sub)
+		return !ok || r.Erased
+	})
+	return func() func() error {
+		f.reseals[b]++
+		err := f.fail[b]
+		return func() error {
+			if err == nil && !f.lie {
+				f.subs[b] = keep
+			}
+			return err
+		}
+	}, nil
+}
+
+// erase erases s as the kernel process does: the erase, then each backup
+// re-seal it made due, then the confirmation again.
+func (r *erig) erase(now int64, s string) (kernel.Confirmation, error) {
+	c, err := r.k.Erase(now, s)
+	r.k.ResealBackups(now)
+	return r.k.Confirm(c), err
 }
 
 // An erase re-seals every backup that held the subject and names the ones
@@ -56,8 +67,8 @@ func TestEraseNamesTheBackupsItResealed(t *testing.T) {
 	r.seal(s, "mail", "message", "a")
 	b := newFakeBackups(map[string][]string{"b1": {other, s}, "b2": {s}, "b3": {other}})
 	b.fail["b2"] = errAppendOnly
-	r.k.OpenBackups(b, 3)
-	c, err := r.k.Erase(3, s)
+	r.k.OpenBackups(b)
+	c, err := r.erase(3, s)
 	must(t, err)
 	want := kernel.Confirmation{Subject: s, Confirmed: []string{kernel.KeyTable, "mail"},
 		Resealed: []string{"b1"}, StillHeld: []kernel.BackupHold{{Backup: "b2", Why: "append-only"}}}
@@ -75,7 +86,7 @@ func TestEraseNamesTheBackupsItResealed(t *testing.T) {
 func TestEraseWithoutABackupListSaysSo(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
-	c, err := r.k.Erase(3, s)
+	c, err := r.erase(3, s)
 	must(t, err)
 	if !c.BackupsUnknown || c.Resealed != nil || c.StillHeld != nil {
 		t.Fatalf("confirmation %+v", c)
@@ -89,8 +100,8 @@ func TestAResealThatDidNotTakeIsStillHeld(t *testing.T) {
 	s := r.open()
 	b := newFakeBackups(map[string][]string{"b1": {s}})
 	b.lie = true
-	r.k.OpenBackups(b, 3)
-	c, err := r.k.Erase(3, s)
+	r.k.OpenBackups(b)
+	c, err := r.erase(3, s)
 	must(t, err)
 	if c.Resealed != nil || len(c.StillHeld) != 1 || c.StillHeld[0].Backup != "b1" {
 		t.Fatalf("confirmation %+v", c)
@@ -107,13 +118,13 @@ func TestADownBackupBacksOffLikeAStore(t *testing.T) {
 	s, s2 := r.open(), r.open()
 	b := newFakeBackups(map[string][]string{"b1": {s, s2}})
 	b.fail["b1"] = errDown
-	r.k.OpenBackups(b, 10)
-	c, err := r.k.Erase(10, s)
+	r.k.OpenBackups(b)
+	c, err := r.erase(10, s)
 	must(t, err)
 	if !reflect.DeepEqual(c.StillHeld, []kernel.BackupHold{{Backup: "b1", Why: errDown.Error()}}) || b.reseals["b1"] != 1 {
 		t.Fatalf("confirmation %+v after %d re-seals", c, b.reseals["b1"])
 	}
-	c, err = r.k.Erase(11, s2)
+	c, err = r.erase(11, s2)
 	must(t, err)
 	if !reflect.DeepEqual(c.StillHeld, []kernel.BackupHold{{Backup: "b1", Why: errDown.Error()}}) || b.reseals["b1"] != 1 {
 		t.Fatalf("while backing off: confirmation %+v after %d re-seals", c, b.reseals["b1"])
@@ -137,7 +148,8 @@ func TestADownBackupBacksOffLikeAStore(t *testing.T) {
 	delete(b.fail, "b1")
 	before := b.reseals["b1"]
 	r.boot()
-	r.k.OpenBackups(b, at+1)
+	r.k.OpenBackups(b)
+	must(t, r.k.Tick(at+1))
 	if b.reseals["b1"] != before+1 || len(b.subs["b1"]) != 0 {
 		t.Fatalf("a restart did not re-seal at once: %d asks, b1 gives %v", b.reseals["b1"]-before, b.subs["b1"])
 	}
@@ -148,8 +160,8 @@ func TestADownBackupBacksOffLikeAStore(t *testing.T) {
 }
 
 // An erase logged while content was closed reaches the backups once it
-// opens: the confirmation names them as held, and OpenContent's start
-// re-seals them.
+// opens: the confirmation names them as held, and the first Tick after
+// OpenContent re-seals them.
 func TestAnEraseBeforeContentOpensReachesTheBackupsAtStart(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
@@ -158,14 +170,48 @@ func TestAnEraseBeforeContentOpensReachesTheBackupsAtStart(t *testing.T) {
 	r.k, err = kernel.Boot(l, nil, nil, 0)
 	must(t, err)
 	b := newFakeBackups(map[string][]string{"b1": {s}})
-	r.k.OpenBackups(b, 3)
-	c, err := r.k.Erase(3, s)
+	r.k.OpenBackups(b)
+	c, err := r.erase(3, s)
 	if !errors.Is(err, kernel.ErrContentClosed) || len(c.StillHeld) != 1 || b.reseals["b1"] != 0 {
 		t.Fatalf("erase before OpenContent: %+v, %v, %d re-seals", c, err, b.reseals["b1"])
 	}
 	_, err = r.k.OpenContent(r.keys, map[string]kernel.ContentStore{"mail": r.mail, "notes": r.notes}, 4)
 	must(t, err)
+	must(t, r.k.Tick(5))
 	if len(b.subs["b1"]) != 0 {
-		t.Fatalf("b1 still gives %v after OpenContent", b.subs["b1"])
+		t.Fatalf("b1 still gives %v after OpenContent and a Tick", b.subs["b1"])
+	}
+}
+
+// KRN-7 (#3317): the kernel never runs a re-seal's I/O under its caller's
+// lock. Erase and OpenBackups only name the backups; Reseals hands each
+// out once until Resealed has it back, so a second caller does not
+// re-seal it alongside; and a re-seal handed back without running backs
+// off. An erase that re-sealed in place fails here.
+func TestAResealRunsOnlyWhereItsHolderRunsIt(t *testing.T) {
+	r := newErig(t)
+	s, s2 := r.open(), r.open()
+	b := newFakeBackups(map[string][]string{"b1": {s}, "b2": {s2}})
+	r.k.OpenBackups(b)
+	c, err := r.k.Erase(3, s)
+	must(t, err)
+	if b.reseals["b1"] != 0 || len(c.StillHeld) != 1 || c.StillHeld[0].Backup != "b1" {
+		t.Fatalf("the erase: %+v after %d re-seals", c, b.reseals["b1"])
+	}
+	due := r.k.Reseals(3)
+	if len(due) != 1 || due[0].Backup != "b1" || len(r.k.Reseals(3)) != 0 {
+		t.Fatalf("handed out %v, then again before it was back", due)
+	}
+	due[0].Run()
+	r.k.Resealed(3, due[0])
+	if c = r.k.Confirm(c); !slices.Equal(c.Resealed, []string{"b1"}) || c.StillHeld != nil {
+		t.Fatalf("after the re-seal: %+v", c)
+	}
+	_, err = r.k.Erase(4, s2)
+	must(t, err)
+	due = r.k.Reseals(4)
+	r.k.Resealed(4, due[0])
+	if b.reseals["b2"] != 0 || len(r.k.Reseals(4)) != 0 || len(r.k.Reseals(4+kernel.RetryMin)) != 1 {
+		t.Fatal("a re-seal handed back without running did not back off")
 	}
 }
