@@ -59,6 +59,8 @@ Part (a), in `broker/clerk/devslot/`:
 
 Part (b): `TestHostStartsOnlyManifestDrivers` (a binary that is unlisted or has the wrong hash is refused and logged), `TestStatusNamesDriverCommits`, and a `finish_image` test showing that the public build's manifest lists no drivers and a build with one lists its name, repository, commit and hash.
 
+**Guard files:** part (a) adds `broker/clerk/devslot/`. It is under `broker/clerk/`, which is on the G2 list, and `tools/risk_tier.py` classes an unnamed broker package tier A, so the package needs no guard edit if it imports only the standard library, `broker/kernel/key` and `broker/clerk`. If it imports anything else, `broker/daemon/arc2_test.go` is pre-approved. Part (b) names its own guard files.
+
 Failure path: private code runs on the box unnamed or unreviewed, a driver gains a verb, a socket or another slot's key, or vendor code or a secret reaches the enforcer.
 
 ## Scope
