@@ -45,11 +45,11 @@ const (
 // yet say a later box version adds them, as modelNoGrant does; the
 // choice page (e4b) rewords them to name itself.
 const (
-	backupUnread   = "Backups: I cannot check them now, so this box may be your only copy; restart me."
-	backupNoKey    = "Backups: cannot start, this box has no backup key yet; a later box version adds it."
-	backupNoTarget = "Backups: none, so this box is the only copy of your data; a later box version adds this."
-	backupNotYet   = "Backups: none checked yet, so this box is the only copy of your data; I keep trying."
-	backupFailed   = "Backups: the last one failed, so this box is the only copy of your data; check the drive."
+	backupUnread   = "Backups: I cannot check them now, so I may hold the only copy of your data; restart me."
+	backupNoKey    = "Backups: cannot start, I have no backup key yet; a later box version adds it."
+	backupNoTarget = "Backups: none, so I hold the only copy of your data; a later box version adds this."
+	backupNotYet   = "Backups: none checked yet, so I hold the only copy of your data; I keep trying."
+	backupFailed   = "Backups: the last one failed, so I hold the only copy of your data; check the drive."
 	backupOnePlace = "Backups: only one place holds them, so one fire or theft can take all; add a second."
 )
 
