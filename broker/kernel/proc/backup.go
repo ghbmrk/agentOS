@@ -152,6 +152,9 @@ type backups struct {
 	kept      []Kept
 	set       *backup.Set
 	run       sync.Mutex // one backup at a time
+	// writing is the backup call writing now, if any; guarded by the
+	// kernel's lock (#3338).
+	writing *backupWrite
 	// For tests only: hook runs as each section opens, wrap, when set,
 	// wraps every target, and saveErr, when set, fails every save.
 	hook    func()
@@ -438,6 +441,16 @@ type liveSet map[string]bool
 
 func (l liveSet) Recall(s string) (kernel.Recall, bool) { return kernel.Recall{Subject: s}, l[s] }
 
+// backupWrite is a backup call between its snapshot and the end of its writes:
+// the subjects live at the snapshot, the backup IDs added to the Set so
+// far, and done, closed once the writes are over. An erase of a subject in
+// live waits for done, then names ids (#3338).
+type backupWrite struct {
+	live liveSet
+	ids  []string
+	done chan struct{}
+}
+
 // backupSnap is what one backup call writes: the log's first n bytes and the
 // live keys, both read under the kernel's lock (brief decision 7).
 type backupSnap struct {
@@ -541,13 +554,25 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 			return ErrNoBackupTarget
 		}
 		if len(write) > 0 {
-			snap, err = h.snap()
+			if snap, err = h.snap(); err == nil {
+				bk.writing = &backupWrite{live: snap.live, done: make(chan struct{})}
+			}
 		}
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
+	// The writes end here on every path, before the closing re-seal.
+	over := sync.OnceFunc(func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if w := bk.writing; w != nil {
+			bk.writing = nil
+			close(w.done)
+		}
+	})
+	defer over()
 	done := map[int]string{} // out's index: the backup ID written there
 	for _, t := range write {
 		id, err := h.writeOne(t, snap, now)
@@ -560,6 +585,7 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 		}
 		out = append(out, tk)
 	}
+	over()
 	if len(done) == 0 {
 		return out, nil
 	}
@@ -626,7 +652,13 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 		}
 		p.id = id
 		p.inflight.Store(true)
-		return bk.set.Add(inFlight{bk.target(p.t), &p.inflight}, rec)
+		if err := bk.set.Add(inFlight{bk.target(p.t), &p.inflight}, rec); err != nil {
+			return err
+		}
+		if bk.writing != nil {
+			bk.writing.ids = append(bk.writing.ids, id)
+		}
+		return nil
 	})
 	if err != nil {
 		return err

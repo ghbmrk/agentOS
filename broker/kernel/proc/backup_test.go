@@ -752,7 +752,9 @@ func (e eraseBeforePut) PutTable(id string, gen uint64, b []byte) error {
 // LOG-4 (#3311 L3 and Security on 6ef6bef): an erase that runs while a
 // backup's first key table is on its way names the backup held, never
 // re-sealed, and the table that then lands is re-sealed at once, so no
-// table at the target gives the erased key.
+// table at the target gives the erased key. The erase is the kernel's,
+// and a Tick's re-seal meets the in-flight table: the process's Erase
+// waits for the write (#3338, TestAnEraseDuringABackupWriteNamesIt).
 func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	gone, live := b.subject(), b.subject()
@@ -760,10 +762,14 @@ func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
 	var conf kernel.Confirmation
 	var fire func()
 	fire = func() {
-		var err error
-		if conf, err = b.h.Erase(b.now, gone); err != nil {
+		if err := b.h.With(func(k *kernel.Kernel) (err error) { conf, err = k.Erase(b.now, gone); return err }); err != nil {
 			t.Error(err)
 		}
+		if err := b.h.Tick(b.now); err != nil {
+			t.Error(err)
+		}
+		b.h.reseals.Wait()
+		b.h.With(func(k *kernel.Kernel) error { conf = k.Confirm(conf); return nil })
 	}
 	b.h.bk.wrap = func(t backup.Target) backup.Target { return eraseBeforePut{t, &fire} }
 	taken := b.backup()
@@ -819,8 +825,9 @@ func TestTickRetriesAFailedReseal(t *testing.T) {
 	gone, live := b.subject(), b.subject()
 	dir := b.addTarget("drive", false)
 	var fire func()
+	// The kernel's erase: the process's waits for the write (#3338).
 	fire = func() {
-		b.h.Erase(b.now, gone)
+		b.h.With(func(k *kernel.Kernel) error { _, err := k.Erase(b.now, gone); return err })
 	}
 	fail := true
 	b.h.bk.wrap = func(tg backup.Target) backup.Target { return failRewrap{tg, &fire, &fail} }
@@ -1372,5 +1379,59 @@ func TestRebuildIgnoresDeletedKeyFiles(t *testing.T) {
 	}
 	if !slices.ContainsFunc(c.StillHeld, func(h kernel.BackupHold) bool { return h.Backup == b2 && h.Why != "" }) || slices.Contains(c.Resealed, b2) {
 		t.Fatalf("the erase's confirmation: %+v, want %s held", c, b2)
+	}
+}
+
+// REQ: LOG-4
+// #3338 (Security finding 1 on #3332; adopts the probe
+// TestSecProbeEraseBeforeTheFirstPutNamesNothing): an erase that lands
+// while a backup is being written, after its snapshot took the subject
+// and before the backup is in the Set, waits for the write and names that
+// backup, which it then re-seals. The erase runs on its own goroutine,
+// since it waits for the write the hook is part of. Mutant: skip the wait
+// for the write, so the reply names no backup.
+func TestAnEraseDuringABackupWriteNamesIt(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone, live := b.subject(), b.subject()
+	dir := b.addTarget("drive", false)
+	var cs <-chan kernel.Confirmation
+	b.h.bk.hook = func() {
+		if cs == nil {
+			cs, _ = erasing(t, b, gone)
+		}
+	}
+	id := b.backup()[0].Backup.BackupID
+	c := reply(t, cs)
+	if !slices.Equal(c.Resealed, []string{id}) || len(c.StillHeld) != 0 {
+		t.Fatalf("the erase during the write: %+v", c)
+	}
+	if gives(t, dir, id, gone) || !gives(t, dir, id, live) {
+		t.Fatal("the new backup's table at the target still gives the erased key")
+	}
+}
+
+// REQ: LOG-4
+// #3338: a write that fails before its first table goes out added no
+// backup, so an erase waiting on it names none and returns, and nothing at
+// the target gives the key.
+func TestAnEraseOverAFailedWriteNamesNothing(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	gone := b.subject()
+	dir := b.addTarget("drive", false)
+	b.h.bk.saveErr = func() error { return errors.New("synthetic: the records file is not saved") }
+	var cs <-chan kernel.Confirmation
+	b.h.bk.hook = func() {
+		if cs == nil {
+			cs, _ = erasing(t, b, gone)
+		}
+	}
+	if tk := b.backup(); tk[0].Error == "" || tk[0].Backup != nil {
+		t.Fatalf("the write did not fail before its first put: %+v", tk)
+	}
+	if c := reply(t, cs); len(c.Resealed) != 0 || len(c.StillHeld) != 0 {
+		t.Fatalf("the erase over a failed write: %+v", c)
+	}
+	if ents, _ := filepath.Glob(filepath.Join(dir, "*.table.*")); len(ents) != 0 {
+		t.Fatalf("a key table went out: %v", ents)
 	}
 }
