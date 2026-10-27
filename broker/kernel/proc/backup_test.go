@@ -357,8 +357,8 @@ func TestEraseResealsAKeptBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.restart()
-	var c kernel.Confirmation
-	if err := b.h.With(func(k *kernel.Kernel) (err error) { c, err = k.Erase(b.now, gone); return err }); err != nil {
+	c, err := b.h.Erase(b.now, gone)
+	if err != nil {
 		t.Fatal(err)
 	}
 	ids := []string{taken[0].Backup.BackupID, taken[1].Backup.BackupID}
@@ -456,8 +456,7 @@ func TestAppendOnlyTargetReportedUnrewritable(t *testing.T) {
 	if len(v.Targets) != 1 || v.Targets[0].Rewritable || !v.Targets[0].AppendOnly {
 		t.Fatalf("an append-only target: %+v", v.Targets)
 	}
-	var c kernel.Confirmation
-	b.h.With(func(k *kernel.Kernel) (err error) { c, err = k.Erase(b.now, sub); return err })
+	c, _ := b.h.Erase(b.now, sub)
 	if len(c.StillHeld) != 1 || c.StillHeld[0].Backup != taken[0].Backup.BackupID || len(c.Resealed) != 0 {
 		t.Fatalf("an erase at an append-only target: %+v", c)
 	}
@@ -559,7 +558,7 @@ func TestARestoreUnwrapsIntoFreshFileKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := b.h.With(func(k *kernel.Kernel) error { _, err := k.Erase(b.now, gone); return err }); err != nil {
+	if _, err := b.h.Erase(b.now, gone); err != nil {
 		t.Fatal(err)
 	}
 	later := b.logBytes()
@@ -669,8 +668,8 @@ func TestNoTableGoesOutWithoutAKeptRecord(t *testing.T) {
 			if len(v.Backups) != 1 || v.Backups[0].BackupID != ids[0] || v.Backups[0].Verified || !v.Backups[0].Pending {
 				t.Fatalf("kept after a restart: %+v", v.Backups)
 			}
-			var conf kernel.Confirmation
-			if err := b.h.With(func(k *kernel.Kernel) (err error) { conf, err = k.Erase(b.now, gone); return err }); err != nil {
+			conf, err := b.h.Erase(b.now, gone)
+			if err != nil {
 				t.Fatal(err)
 			}
 			if !slices.Equal(conf.Resealed, ids) || len(conf.StillHeld) != 0 {
@@ -756,7 +755,8 @@ func TestAnEraseWhileATableIsOnItsWay(t *testing.T) {
 	var conf kernel.Confirmation
 	var fire func()
 	fire = func() {
-		if err := b.h.With(func(k *kernel.Kernel) (err error) { conf, err = k.Erase(b.now, gone); return err }); err != nil {
+		var err error
+		if conf, err = b.h.Erase(b.now, gone); err != nil {
 			t.Error(err)
 		}
 	}
@@ -815,7 +815,7 @@ func TestTickRetriesAFailedReseal(t *testing.T) {
 	dir := b.addTarget("drive", false)
 	var fire func()
 	fire = func() {
-		b.h.With(func(k *kernel.Kernel) (err error) { _, err = k.Erase(b.now, gone); return err })
+		b.h.Erase(b.now, gone)
 	}
 	fail := true
 	b.h.bk.wrap = func(tg backup.Target) backup.Target { return failRewrap{tg, &fire, &fail} }
@@ -846,4 +846,5 @@ func (b *bbox) tick() {
 	if err := b.h.Tick(b.now); err != nil {
 		b.t.Fatal(err)
 	}
+	b.h.reseals.Wait()
 }

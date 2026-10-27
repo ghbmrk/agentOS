@@ -12,8 +12,9 @@ import (
 // Set is the box's older backups as an erase reaches them (D-168): it is
 // the kernel's Backups, each backup named by its BackupID. Save persists a
 // Record a Rewrap returned, and until it returns nil the Set keeps the old
-// Record, so the next Reseal rewraps again. The kernel calls a Set under
-// its lock; it is not safe for other concurrent use.
+// Record, so the next re-seal rewraps again. The kernel calls a Set, and
+// a re-seal's commit, under its lock; only the re-seal's I/O runs without
+// it.
 type Set struct {
 	save    func(Record) error
 	backups map[string]*member
@@ -55,24 +56,34 @@ func (s *Set) Subjects(backup string) []string {
 	return nil
 }
 
-// Reseal rewraps backup's key table without the subjects st has erased,
-// saving the new Record before it uses it. It returns nil once the target
-// lists only a table without them (Rewrote, Unchanged), and otherwise the
-// Result and its cause. When the new table is up but an older one remains
-// (OldNotDeleted), the saved Record keeps the older table's subjects too,
-// so the erased ones still read as given and the next Reseal, after a
-// restart as well, writes and drops again.
-func (s *Set) Reseal(backup string, keys kernel.Keys, st *kernel.State) error {
+// Prepare takes, under the kernel's lock, what re-sealing backup's key
+// table without the subjects st has erased needs, and returns the
+// re-seal's I/O at its target, which runs without the lock (KRN-7,
+// #3317). Its commit, under the lock, saves the new Record before the Set
+// uses it, and returns nil once the target lists only a table without
+// them (Rewrote, Unchanged), and otherwise the Result and its cause. When
+// the new table is up but an older one remains (OldNotDeleted), the saved
+// Record keeps the older table's subjects too, so the erased ones still
+// read as given and the next re-seal, after a restart as well, writes and
+// drops again. The kernel hands out one re-seal of a backup at a time.
+func (s *Set) Prepare(backup string, keys kernel.Keys, st *kernel.State) (kernel.ResealIO, error) {
 	m := s.backups[backup]
 	if m == nil {
-		return ErrNoBackup
+		return nil, ErrNoBackup
 	}
-	next, out := Rewrap(m.t, m.rec, keys, st)
+	t, rec, sl := m.t, m.rec, snapshot(m.rec, keys, st)
+	return func() func() error {
+		next, out := sl.rewrap(t, rec)
+		return func() error { return s.commit(m, rec, next, out) }
+	}, nil
+}
+
+func (s *Set) commit(m *member, rec, next Record, out Outcome) error {
 	if out.Result == OldNotDeleted {
-		next.Subjects = slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(m.rec.Subjects), next.Subjects...))))
+		next.Subjects = slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(rec.Subjects), next.Subjects...))))
 	}
 	// Rewrap returns a new Record only with a new generation.
-	if next.Generation != m.rec.Generation {
+	if next.Generation != rec.Generation {
 		if err := s.save(next); err != nil {
 			return fmt.Errorf("backup: the re-sealed backup's record is not saved: %w", err)
 		}

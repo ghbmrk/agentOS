@@ -1,7 +1,6 @@
 package localui
 
 import (
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,25 +85,11 @@ func TestTheNumberStepNamesTheSIMAndModemWhenItCannotText(t *testing.T) {
 	r.hooks.noTexts = true
 	r.hooks.mu.Unlock()
 	r.get("/setup")
-	r.post("/setup/network", url.Values{"ssid": {"Home"}, "password": {"home-pass"}})
+	r.hooks.progress.Online = true
 	page := r.get("/setup")
 	for _, w := range []string{"Pairing is not available yet", "the SIM is in the modem", "the modem is plugged in", "reload this page"} {
 		if !strings.Contains(page, w) {
 			t.Fatalf("number step with no texts lacks %q: %s", w, page)
 		}
-	}
-}
-
-// #1281 (ONB-3): the network list opens on a disabled placeholder, so no
-// network is preselected; submitting it unchanged joins nothing.
-func TestTheNetworkListPreselectsNothing(t *testing.T) {
-	r := newRig(t)
-	page := r.get("/setup")
-	if !strings.Contains(page, `<select name="ssid"><option value="" disabled selected>Choose your network</option>`) {
-		t.Fatalf("network list without a placeholder first: %s", page)
-	}
-	r.post("/setup/network", url.Values{"other": {""}, "password": {"home-pass"}})
-	if r.hooks.joined != "" {
-		t.Fatalf("joined %q with nothing chosen", r.hooks.joined)
 	}
 }

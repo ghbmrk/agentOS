@@ -135,6 +135,25 @@ type Outcome struct {
 // returns the new Record once the new table is confirmed, and rec
 // otherwise; the caller persists what it returns.
 func Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Outcome) {
+	return snapshot(rec, keys, state).rewrap(t, rec)
+}
+
+// sealing is what a Rewrap reads from the kernel: taken under its lock,
+// so that the I/O at the target after runs without it (KRN-7, #3317).
+type sealing struct {
+	erased bool    // a listed subject is erased
+	es     []entry // the keys of the listed subjects still live
+	err    error   // reading them failed
+}
+
+func snapshot(rec Record, keys kernel.Keys, state Recaller) sealing {
+	keep := slices.DeleteFunc(slices.Clone(rec.Subjects), func(s string) bool { return !live(state, s) })
+	es, err := liveEntries(keep, keys, state)
+	return sealing{len(keep) != len(rec.Subjects), es, err}
+}
+
+// rewrap is Rewrap's work at the target, from what s took.
+func (s sealing) rewrap(t Target, rec Record) (Record, Outcome) {
 	id, err := parseID(rec.BackupID)
 	if err != nil {
 		return rec, Outcome{Offline, err}
@@ -143,9 +162,8 @@ func Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Out
 	if err != nil {
 		return rec, Outcome{Offline, err}
 	}
-	erased := slices.ContainsFunc(rec.Subjects, func(s string) bool { return !live(state, s) })
 	current := slices.Contains(gens, rec.Generation)
-	if !erased && current {
+	if !s.erased && current {
 		if len(gens) == 1 {
 			return rec, Outcome{Result: Unchanged}
 		}
@@ -158,11 +176,10 @@ func Rewrap(t Target, rec Record, keys kernel.Keys, state Recaller) (Record, Out
 	if t.AppendOnly() {
 		return rec, Outcome{Result: AppendOnly}
 	}
-	keep := slices.DeleteFunc(slices.Clone(rec.Subjects), func(s string) bool { return !live(state, s) })
-	es, err := liveEntries(keep, keys, state)
-	if err != nil {
-		return rec, Outcome{LiveKeyMissing, err}
+	if s.err != nil {
+		return rec, Outcome{LiveKeyMissing, s.err}
 	}
+	es := s.es
 	top := max(rec.Generation, slices.Max(append(slices.Clone(gens), 0)))
 	if top == math.MaxUint64 {
 		return rec, Outcome{GenerationSpent, fmt.Errorf("backup: generation %d is the last", top)}

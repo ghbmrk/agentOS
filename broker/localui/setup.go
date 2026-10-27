@@ -32,23 +32,10 @@ type Progress struct {
 	// Updated is true once the first-boot update (UPD-3) has finished or
 	// was not needed. Only AI and account connection wait for it.
 	Updated bool
-	// Online is true when the box has an uplink. Ethernet makes the
-	// network step a no-op.
+	// Online is true when the box has an uplink: its cable to the
+	// enforcer (HW-12, D-178).
 	Online bool
-	// NeverOnline: the home Wi-Fi was saved but the box has not got
-	// online with it (netjoin L8.4, P2-2w c4). Setup continues with a
-	// note.
-	NeverOnline bool
 }
-
-// The never-online notes (CH-12): before pairing the owner can still
-// rejoin, after it only Ethernet helps. With no station device (#936)
-// a rejoin cannot help either, so the Ethernet note shows before
-// pairing too (P2-2w c4 r1).
-const (
-	neverOnlineNote       = "I saved your home Wi-Fi but have not got online with it. Setup can continue. Check the Wi-Fi name and password below and join again, or plug in an Ethernet cable."
-	neverOnlinePairedNote = "I saved your home Wi-Fi but have not got online with it. Setup can continue, and AI waits until I am online. Plug in an Ethernet cable to get online now."
-)
 
 // Provider is an AI provider setup can connect (§8.1 step 6).
 type Provider struct {
@@ -84,11 +71,6 @@ type privateBox struct {
 // adapters); setup only sequences them.
 type Hooks interface {
 	Progress() Progress
-	// Networks lists home Wi-Fi networks in range.
-	Networks() []string
-	// JoinNetwork joins a home Wi-Fi network. The password is the home
-	// network's, typed here, and goes nowhere else.
-	JoinNetwork(ssid, password string) error
 	// BoxNumber is the SIM's number, e.g. +15550000100, and whether the
 	// box can text (P2-2w c4c). While it cannot, the number step says
 	// pairing is not available yet; while it can but the SIM does not
@@ -141,8 +123,7 @@ type Hooks interface {
 // SetupState is setup's durable progress. It holds no secret: the code
 // seed is made in the vault process (Hooks.EnrollCode).
 type SetupState struct {
-	Network bool   `json:"network"`
-	Owner   string `json:"owner,omitempty"`
+	Owner string `json:"owner,omitempty"`
 	// Device is the SHA-256 of the setup cookie of the phone that paired:
 	// once the owner's number is known, only that phone continues setup.
 	// "" with an owner set means the pairing came by the card's setup
@@ -292,24 +273,10 @@ var (
 	ErrCodesUnavailable = errors.New("code-generator enrollment unavailable")
 )
 
-// ErrWiFiUnavailable: the box cannot join Wi-Fi at all (no
-// NetworkManager, or another error no password can fix), as JoinNetwork
-// reports it (#1429).
-var ErrWiFiUnavailable = errors.New("Wi-Fi join unavailable")
-
 // ErrAnswerOwed: agentosd holds an owner's private-content answer the
 // vault has not confirmed, so it will not finish setup (#1544), as Finish
 // reports it.
 var ErrAnswerOwed = errors.New("a private-content answer is not saved yet")
-
-// noWiFiJoin is the network step's error when the box cannot join Wi-Fi:
-// no station device beside the access point, or ErrWiFiUnavailable. It
-// names the network step's Ethernet button rather than the password
-// (#1429, UX U-1 on #1407).
-const (
-	ethernetButton = "I plugged in an Ethernet cable"
-	noWiFiJoin     = "I cannot join Wi-Fi yet. Plug in an Ethernet cable, then tap \"" + ethernetButton + "\"."
-)
 
 // The vault process's answers to an API key, as Hooks report them
 // (ONB-3, #1265). The page shows each its own text.
@@ -446,8 +413,6 @@ func (u *setup) stepLocked(p Progress) string {
 	switch {
 	case u.st.Done:
 		return "done"
-	case u.st.Owner == "" && !u.st.Network && !p.Online:
-		return "network"
 	case u.st.Owner == "":
 		return "number"
 	case !u.st.Codes:
@@ -512,7 +477,6 @@ func (u *setup) routes(mux *http.ServeMux) {
 		mux.HandleFunc("/setup/card", u.card)
 	}
 	for path, f := range map[string]func(*http.Request, string) error{
-		"/setup/network":     u.network,
 		"/setup/number":      u.number,
 		"/setup/number-code": u.numberCode,
 		"/setup/claim":       u.claim,
@@ -557,14 +521,9 @@ func (u *setup) routes(mux *http.ServeMux) {
 }
 
 type setupView struct {
-	Step     string
-	Progress Progress
-	Err      string
-	// Note is the never-online note; Rejoin adds the network form to
-	// the number step.
-	Note      string
-	Rejoin    bool
-	Networks  []string
+	Step      string
+	Progress  Progress
+	Err       string
 	BoxNumber string
 	CanText   bool
 	SMSLink   template.URL
@@ -644,13 +603,6 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 	if u.st.ReplaceCodes {
 		v.Replace = replaceCodesNote
 	}
-	noStation := p.NeverOnline && u.s.cfg.Station != nil && !u.s.cfg.Station()
-	if p.NeverOnline {
-		v.Note = neverOnlineNote
-		if u.st.Owner != "" || noStation {
-			v.Note = neverOnlinePairedNote
-		}
-	}
 	if u.st.Owner != "" {
 		v.Paired = mask(u.st.Owner)
 	}
@@ -683,16 +635,11 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch v.Step {
-	case "network":
-		v.Networks = u.s.cfg.Hooks.Networks()
 	case "number":
 		n, ok := u.s.cfg.Hooks.BoxNumber()
 		v.CanText = ok
 		if ok && phoneRe.MatchString(n) {
 			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
-		}
-		if p.NeverOnline && !noStation {
-			v.Rejoin, v.Networks = true, u.s.cfg.Hooks.Networks()
 		}
 	case "codes":
 		if v.CodesShown {
@@ -796,37 +743,6 @@ func otpSecret(link string) (string, bool) {
 }
 
 var otpSecretRe = regexp.MustCompile(`^[A-Z2-7]{16,64}$`)
-
-func (u *setup) network(r *http.Request, _ string) error {
-	ssid, pw := r.PostFormValue("ssid"), r.PostFormValue("password")
-	if o := r.PostFormValue("other"); o != "" {
-		ssid = o // a name typed because the list missed it
-	}
-	u.mu.Lock()
-	paired := u.st.Owner != ""
-	u.mu.Unlock()
-	if paired {
-		return nil // the network step is over once the number is known
-	}
-	if r.PostFormValue("ethernet") == "" {
-		if ssid == "" {
-			return errors.New("Choose your home Wi-Fi.")
-		}
-		if u.s.cfg.Station != nil && !u.s.cfg.Station() {
-			return errors.New(noWiFiJoin)
-		}
-		if err := u.s.cfg.Hooks.JoinNetwork(ssid, pw); errors.Is(err, ErrWiFiUnavailable) {
-			return errors.New(noWiFiJoin)
-		} else if err != nil {
-			return errors.New("Could not join that Wi-Fi. Check the password and try again.")
-		}
-	} else if !u.s.cfg.Hooks.Progress().Online {
-		return errors.New("No Ethernet connection found. Plug in a cable, or choose your Wi-Fi.")
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.save(func(s *SetupState) { s.Network = true })
-}
 
 // OfferText takes a text that reached the box before it has an owner. A
 // text of the form "PAIR <code>" makes its sender the owner's number, and

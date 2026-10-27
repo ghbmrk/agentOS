@@ -89,7 +89,6 @@ func main() {
 	defer stop()
 	fb.VaultSock = vaultSock
 	cfg := config(localui.APConfig{Iface: iface, Addr: ap, PageName: pageName}, port, sock, vaultSock, held)
-	cfg.Station = station(sysClassNet, iface)
 	if connectGmail {
 		connect(&cfg, sock)
 	}
@@ -141,17 +140,6 @@ func passkeys(cfg *localui.Config, sock, rpID string) {
 	cfg.PasskeyRPID = rpID
 }
 
-// sysClassNet is the kernel's list of network interfaces; the unit's
-// sandbox leaves it readable.
-const sysClassNet = "/sys/class/net"
-
-// station reports, each time setup asks, whether a Wi-Fi device other
-// than the access point's can join the home network (P2-2w c4 r1): one
-// may appear after boot, such as a USB adapter.
-func station(netClass, iface string) func() bool {
-	return func() bool { return localui.StationDevice(netClass, iface) }
-}
-
 // withFirstBoot runs firstboot.Begin and gives the page its steps: the
 // claim screen (nil on the download route), the card step, its confirm
 // reported in agentosd's finish, and the card step's rerun when that
@@ -166,11 +154,6 @@ func withFirstBoot(cfg localui.Config, box firstboot.BoxConfig, void *localui.Co
 	}
 	cfg.Card, cfg.CodesVoid = fb.Card, void
 	if h, ok := cfg.Hooks.(localui.AgentosdSetup); ok {
-		if fb.Route == firstboot.RouteClaim {
-			// The claim replaces the sticker's Wi-Fi password (HW-10,
-			// #1692); agentosd answers no setup network when it has none.
-			cfg.SetupWiFi = h
-		}
 		cfg.Hooks = localui.CardFinish{AgentosdSetup: h, Card: fb.Card, Again: fb.Again}
 	}
 	return cfg, fb.Route, nil

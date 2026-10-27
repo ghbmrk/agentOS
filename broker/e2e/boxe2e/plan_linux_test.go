@@ -73,11 +73,11 @@ func (f *fakeBox) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		link := "https://" + f.host + "/codex/device"
-		w.Write([]byte(`<h2>7. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>` +
+		w.Write([]byte(`<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>` +
 			`<p>Open <a href="` + link + `">` + link + `</a> and enter <span class="mono">` + f.dev["user_code"] + `</span>.</p>` +
 			`<p>This code is from OpenAI.</p><p><a href="/setup">I signed in</a></p>`))
 	case r.URL.Path == "/setup":
-		page := `<h2>7. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
+		page := `<h2>6. Connect AI</h2><p class="muted">One is enough. You can add more later.</p><h3>ChatGPT</h3>`
 		if f.noRun {
 			page += `<p class="err">Could not start sign-in with that provider. Try again.</p>`
 		}

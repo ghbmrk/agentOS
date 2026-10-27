@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/backup"
@@ -139,8 +140,7 @@ type backups struct {
 	guard     []string // the kernel's own data folders, resolved
 	kept      []Kept
 	set       *backup.Set
-	inflight  map[string]bool // backups whose first key table is on its way
-	run       sync.Mutex      // one backup at a time
+	run       sync.Mutex // one backup at a time
 	// For tests only: hook runs as each section opens, wrap, when set,
 	// wraps every target, and saveErr, when set, fails every save.
 	hook    func()
@@ -165,7 +165,7 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, st *kernel.State) (*backups
 	if err != nil {
 		return nil, err
 	}
-	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, keys: keys, inflight: map[string]bool{}}
+	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, keys: keys}
 	if len(cfg.Recipient) > 0 {
 		x, ek, err := handoff.SplitRecipient(cfg.Recipient)
 		if err != nil {
@@ -494,12 +494,17 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 				out[j].Backup = &v
 			}
 		}
-		// A subject erased since the snapshot is in a new table: re-seal
-		// it at once (OpenBackups re-seals every backup giving an erased
-		// subject's key).
-		k.OpenBackups(bk.set, now)
 		return nil
 	})
+	if err != nil {
+		return out, err
+	}
+	// A subject erased since the snapshot is in a new table: re-seal it
+	// at once, without the lock.
+	wg, err := h.reseal(now)
+	if err == nil {
+		wg.Wait()
+	}
 	return out, err
 }
 
@@ -522,6 +527,8 @@ type pendingPut struct {
 	t   kernel.BackupTarget
 	rec backup.Record // the pending Record, less its ID and generation
 	id  string        // set once the pending Record is saved
+	// inflight is set while the first key table is on its way.
+	inflight atomic.Bool
 }
 
 func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
@@ -535,8 +542,8 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 			return fmt.Errorf("run: the backup's record is not saved, so nothing went out: %w", err)
 		}
 		p.id = id
-		bk.inflight[id] = true
-		return bk.set.Add(inFlight{bk.target(p.t), bk, id}, rec)
+		p.inflight.Store(true)
+		return bk.set.Add(inFlight{bk.target(p.t), &p.inflight}, rec)
 	})
 	if err != nil {
 		return err
@@ -544,18 +551,10 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 	perr := p.Target.PutTable(id, gen, b)
 	// An erase while the table was on its way named the backup held (the
 	// Set's target refused while in flight); now that the put is over,
-	// re-seal it at once, and Tick retries it if that fails (#3311 L3 and
-	// Security on 6ef6bef).
-	p.h.With(func(k *kernel.Kernel) error {
-		delete(bk.inflight, id)
-		if slices.ContainsFunc(bk.set.Subjects(id), func(s string) bool {
-			r, ok := k.State().Recall(s)
-			return !ok || r.Erased
-		}) {
-			bk.set.Reseal(id, bk.keys, k.State())
-		}
-		return nil
-	})
+	// Backup re-seals it at once, and Tick retries it if that fails
+	// (#3311 L3 and Security on 6ef6bef).
+	p.inflight.Store(false)
+	p.h.With(func(k *kernel.Kernel) error { k.RetryBackup(id); return nil })
 	return perr
 }
 
@@ -565,8 +564,7 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 // land beside, still giving the erased key.
 type inFlight struct {
 	backup.Target
-	bk *backups
-	id string
+	on *atomic.Bool
 }
 
 // ErrInFlight: a backup's first key table is still on its way to its
@@ -574,7 +572,7 @@ type inFlight struct {
 var ErrInFlight = errors.New("run: this backup's key table is still on its way; I re-seal it once it lands")
 
 func (f inFlight) busy() error {
-	if f.bk.inflight[f.id] {
+	if f.on.Load() {
 		return ErrInFlight
 	}
 	return nil

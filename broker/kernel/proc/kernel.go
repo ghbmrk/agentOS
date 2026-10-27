@@ -54,6 +54,8 @@ type Kernel struct {
 	content kernel.ContentReport
 	// bk is the backups (backup.go); nil with no BackupDir.
 	bk *backups
+	// reseals is every backup re-seal running (reseal).
+	reseals sync.WaitGroup
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -105,7 +107,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 				st.Close()
 				return nil, fmt.Errorf("run: the backups: %w", err)
 			}
-			k.OpenBackups(h.bk.set, now)
+			k.OpenBackups(h.bk.set)
 		}
 	} else if cfg.BackupDir != "" {
 		st.Close()
@@ -118,21 +120,19 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
-// Tick retries the re-seals of backups that failed, then runs every plan
-// as far as now allows. It takes the due calls under the
+// Tick starts the backup re-seals due (reseal) without waiting for them,
+// then runs every plan as far as now allows. It takes the due calls under the
 // lock, then for each one, under the lock again, makes the kernel's last
 // check (kernel.Send) and takes the call's view, makes the call without the
 // lock, and logs its answer under it. A STOP or revoke logged while an
 // earlier call hangs stops every later one (KRN-7).
 func (h *Kernel) Tick(now int64) error {
-	// A backup whose re-seal failed is retried here, with its backoff
-	// (kernel.OpenBackups re-seals every backup giving an erased subject's
-	// key): kernel.Tick, which would, runs clerk calls under the lock and
-	// is not this process's (#3311 L3 on 6e14b28).
-	if h.bk != nil {
-		if err := h.With(func(k *kernel.Kernel) error { k.OpenBackups(h.bk.set, now); return nil }); err != nil {
-			return err
-		}
+	// A backup that gives an erased subject's key is re-sealed here, and
+	// one whose re-seal failed retried with its backoff: kernel.Tick,
+	// which would, runs clerk calls under the lock and is not this
+	// process's (#3311 L3 on 6e14b28).
+	if _, err := h.reseal(now); err != nil {
+		return err
 	}
 	for n := 0; n < 4*kernel.MaxSteps; n++ {
 		var due []kernel.Call
@@ -171,6 +171,46 @@ func (h *Kernel) Tick(now int64) error {
 		}
 	}
 	return nil
+}
+
+// reseal hands out every backup re-seal due (kernel.Reseals) and runs each
+// on its own goroutine: its I/O at the target without the lock, so a hung
+// target holds only its own re-seal, never STOP or another backup (KRN-7,
+// #3317), then its commit under the lock. The WaitGroup is done once they
+// are.
+func (h *Kernel) reseal(now int64) (*sync.WaitGroup, error) {
+	var due []*kernel.Reseal
+	if err := h.With(func(k *kernel.Kernel) error { due = k.Reseals(now); return nil }); err != nil {
+		return nil, err
+	}
+	wg := new(sync.WaitGroup)
+	for _, r := range due {
+		h.reseals.Add(1)
+		wg.Go(func() {
+			defer h.reseals.Done()
+			r.Run()
+			h.With(func(k *kernel.Kernel) error { k.Resealed(now, r); return nil })
+		})
+	}
+	return wg, nil
+}
+
+// Erase erases subject (kernel.Erase), then re-seals every backup that
+// gave its key and waits for those re-seals, which run without the lock,
+// so a hung target delays this reply but never STOP. It returns what the
+// erase has reached then.
+func (h *Kernel) Erase(now int64, subject string) (kernel.Confirmation, error) {
+	var c kernel.Confirmation
+	err := h.With(func(k *kernel.Kernel) (err error) { c, err = k.Erase(now, subject); return err })
+	if c.Subject == "" {
+		return c, err
+	}
+	wg, rerr := h.reseal(now)
+	if rerr == nil {
+		wg.Wait()
+		rerr = h.With(func(k *kernel.Kernel) error { c = k.Confirm(c); return nil })
+	}
+	return c, errors.Join(err, rerr)
 }
 
 // With runs fn on the kernel under the lock. The owner and planner sides

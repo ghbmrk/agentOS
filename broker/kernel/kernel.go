@@ -290,8 +290,10 @@ type Kernel struct {
 	keys   Keys
 	stores map[string]ContentStore
 	retry  map[eraseRef]backoff // deletes and re-seals backing off (erase.go)
-	// The older backups, from OpenBackups (erase.go).
-	backups Backups
+	// The older backups, from OpenBackups, and those whose re-seal Reseals
+	// handed out and Resealed has not had back (erase.go).
+	backups   Backups
+	resealing map[string]bool
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")
@@ -848,7 +850,8 @@ func sendCheck(s *State, p *PlanState, st *StepState, i int, now int64) *key.Ref
 	return v.Authorize(p.Plan.Step(i), key.Context{Now: now, Changes: &s.Changes, Ledger: s.LedgerBefore(st.DispatchSeq)})
 }
 
-// Tick retries the erases not yet confirmed, then runs every active plan as
+// Tick retries the erases not yet confirmed and the backup re-seals due
+// (ResealBackups), then runs every active plan as
 // far as the clock allows, calling the in-process clerks it was booted with
 // as it goes. A step that cannot move
 // yet is left for a later Tick.
@@ -857,6 +860,7 @@ func (k *Kernel) Tick(now int64) error {
 		if err := k.confirmErases(now); err != nil {
 			return err
 		}
+		k.ResealBackups(now)
 	}
 	for n := 0; n < 4*MaxSteps; n++ {
 		cs, err := k.Calls(now)
