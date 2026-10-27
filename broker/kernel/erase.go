@@ -730,7 +730,7 @@ func (k *Kernel) Reseals(now int64) []*Reseal {
 	var out []*Reseal
 	for _, b := range k.backups.List() {
 		ref := eraseRef{store: b}
-		if k.resealing[b] || k.held(ref, now) || !slices.ContainsFunc(k.backups.Subjects(b), k.s.erased) {
+		if _, out := k.resealing[b]; out || k.held(ref, now) || !slices.ContainsFunc(k.backups.Subjects(b), k.s.erased) {
 			continue
 		}
 		io, err := k.backups.Prepare(b, k.keys, k.s)
@@ -741,21 +741,23 @@ func (k *Kernel) Reseals(now int64) []*Reseal {
 		if k.resealing == nil {
 			k.resealing = map[string]bool{}
 		}
-		k.resealing[b] = true
+		k.resealing[b] = false
 		out = append(out, &Reseal{Backup: b, io: io})
 	}
 	return out
 }
 
-// Resealed commits r, which Run has run, and backs its backup off if that
-// fails.
+// Resealed commits r, which Run has run, and backs its backup off from
+// now, the time Run finished, if that fails, unless RetryBackup ran
+// while r was out (#3339).
 func (k *Kernel) Resealed(now int64, r *Reseal) {
+	moved := k.resealing[r.Backup]
 	delete(k.resealing, r.Backup)
 	ref, err := eraseRef{store: r.Backup}, errNotRun
 	if r.commit != nil {
 		err = r.commit()
 	}
-	if err != nil {
+	if err != nil && !moved {
 		k.failed(ref, now, err)
 		return
 	}
@@ -763,8 +765,14 @@ func (k *Kernel) Resealed(now int64, r *Reseal) {
 }
 
 // RetryBackup drops backup's backoff, so the next Reseals hands it out: its
-// destination has changed since the re-seal that failed.
-func (k *Kernel) RetryBackup(backup string) { delete(k.retry, eraseRef{store: backup}) }
+// destination has changed since the re-seal that failed, or since the one
+// out now, whose failure then sets none.
+func (k *Kernel) RetryBackup(backup string) {
+	delete(k.retry, eraseRef{store: backup})
+	if _, out := k.resealing[backup]; out {
+		k.resealing[backup] = true
+	}
+}
 
 // ResealBackups runs every re-seal due in place, for a caller that holds
 // no lock other callers wait on (Tick).

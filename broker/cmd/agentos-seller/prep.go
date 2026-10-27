@@ -24,13 +24,13 @@ type prepConfig struct {
 	Rand             io.Reader // crypto/rand.Reader when nil
 }
 
-// stateTemp and netTemp are the sealed files' names in Out while debugfs
-// copies them in. The state holds the salted verifier only, never the
-// code; the setup file holds the setup network, which the sticker prints.
-const (
-	stateTemp = ".claim-state"
-	netTemp   = ".setup-net"
-)
+// stateTemp is the sealed state's name in Out while debugfs copies it
+// in. The state holds the salted verifier only, never the code.
+const stateTemp = ".claim-state"
+
+// enforcerNetFile, in Out, hands the setup network the sticker prints to
+// the enforcer's preload (D-178): the core serves no network.
+const enforcerNetFile = "enforcer-setup-net.json"
 
 // sealed is one file sealInto writes, root:root 0600.
 type sealed struct {
@@ -104,24 +104,25 @@ func prep(c prepConfig) (err error) {
 	if err != nil {
 		return err
 	}
-	// The setup network the phone joins before the card exists (§8.1,
-	// CTRL-claim-ap): per box, drawn apart from the code.
-	setup, err := claim.NewSetupNet(c.Rand)
-	if err != nil {
-		return err
-	}
-	netFile, err := setup.Marshal()
-	if err != nil {
-		return err
-	}
-	files := []sealed{{claim.StatePath, stateTemp, state}, {claim.SetupNetPath, netTemp, netFile}}
+	files := []sealed{{claim.StatePath, stateTemp, state}}
 	if err := sealInto(box, off, c.Out, files, missing); err != nil {
 		return err
 	}
 	if err := checkSealed(box, off, files, code, missing); err != nil {
 		return err
 	}
-	logf("sealed a claim state and a setup network into %s at %s", box, path.Dir(claim.StatePath))
+	logf("sealed a claim state into %s at %s", box, path.Dir(claim.StatePath))
+
+	// The enforcer's setup network, which the phone joins first (D-178,
+	// §12.1 step 1): per box, drawn apart from the code, handed to the
+	// enforcer and printed on the sticker, never sealed into the core.
+	setup, err := claim.NewSetupNet(c.Rand)
+	if err != nil {
+		return err
+	}
+	if err := writeEnforcerNet(c.Out, setup); err != nil {
+		return err
+	}
 
 	sum, err := fileSum(box)
 	if err != nil {
@@ -133,8 +134,18 @@ func prep(c prepConfig) (err error) {
 	if err := writeSticker(c.Out, code, setup); err != nil {
 		return err
 	}
-	logf("wrote %s: run agentos-seller write with box.raw, print sticker.html at 100%%, then delete the directory", c.Out)
+	logf("wrote %s: run agentos-seller write with box.raw, print sticker.html at 100%%, load %s into the enforcer, then delete the directory", c.Out, enforcerNetFile)
 	return nil
+}
+
+// writeEnforcerNet writes the setup network for the enforcer's preload,
+// 0600, refusing an existing file.
+func writeEnforcerNet(dir string, net claim.SetupNet) error {
+	b, err := net.Marshal()
+	if err != nil {
+		return err
+	}
+	return writeNew(filepath.Join(dir, enforcerNetFile), b)
 }
 
 // rootOffset is the byte offset of the image's root file system: the one
@@ -212,13 +223,12 @@ func lookup(image string, off int64, p string) (entry, bool, error) {
 }
 
 // sealDirs are the directories the sealed files go in, each in its
-// parent: the claim state's, and the access point loader's (apnet.Dir,
-// #2626), which holds the setup network.
-var sealDirs = []string{path.Dir(claim.StatePath), path.Dir(claim.SetupNetPath)}
+// parent: only the claim state's.
+var sealDirs = []string{path.Dir(claim.StatePath)}
 
 // preflight refuses an image without /var/lib or that already holds a
-// claim state or a setup network, and reports which of sealDirs it lacks,
-// in order. Once one is missing, so is every one below it.
+// claim state, and reports which of sealDirs it lacks, in order. Once one
+// is missing, so is every one below it.
 func preflight(image string, off int64) ([]string, error) {
 	lib, ok, err := lookup(image, off, "/var/lib")
 	if err != nil {
@@ -245,14 +255,11 @@ func preflight(image string, off int64) ([]string, error) {
 			return nil, fmt.Errorf("%s: %s is not a directory", image, dir)
 		}
 	}
-	for p, what := range map[string]string{claim.StatePath: "a claim state", claim.SetupNetPath: "a setup network"} {
-		if slices.Contains(missing, path.Dir(p)) {
-			continue
-		}
-		if _, held, err := lookup(image, off, p); err != nil {
+	if !slices.Contains(missing, path.Dir(claim.StatePath)) {
+		if _, held, err := lookup(image, off, claim.StatePath); err != nil {
 			return nil, err
 		} else if held {
-			return nil, fmt.Errorf("%s already holds %s", image, what)
+			return nil, fmt.Errorf("%s already holds a claim state", image)
 		}
 	}
 	return missing, nil
@@ -298,8 +305,7 @@ func sealInto(box string, off int64, tmpDir string, files []sealed, missing []st
 }
 
 // checkSealed reads the files back: owner and mode, the bytes, a clean
-// file system, a state the box opens unclaimed and the code claims, and a
-// setup network the box parses.
+// file system, and a state the box opens unclaimed and the code claims.
 func checkSealed(box string, off int64, files []sealed, code string, missing []string) error {
 	want := map[string]string{}
 	for _, f := range files {
@@ -327,9 +333,6 @@ func checkSealed(box string, off int64, files []sealed, code string, missing []s
 			return fmt.Errorf("%s does not read back as written", f.path)
 		}
 		read[f.path] = got
-	}
-	if _, err := claim.ParseSetupNet(read[claim.SetupNetPath]); err != nil {
-		return fmt.Errorf("the sealed setup network does not parse: %w", err)
 	}
 	got := read[claim.StatePath]
 	if out, err := tool(childproc.Options{}, "e2fsck", "-fn", fsSpec(box, off)).CombinedOutput(); err != nil {

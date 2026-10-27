@@ -428,7 +428,7 @@ func putLinkKeys(c config, st *seal.Store) error {
 	if c.firstEdge == "" || c.restore {
 		return nil
 	}
-	edge, err := readCapture(c.firstEdge)
+	edge, err := readCapture(c.firstEdge, os.Geteuid())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -448,10 +448,11 @@ const captureLen = ed25519.PublicKeySize + 32 + ed25519.SignatureSize
 var errCapture = errors.New("the first edge's capture is not one valid hello in a file only I can write")
 
 // readCapture reads the capture file at path and returns its key, once its
-// hello verifies. The file must be a regular file of root's (this
-// process's euid) that no one else can write, and exactly captureLen
-// bytes.
-func readCapture(path string) (ed25519.PublicKey, error) {
+// hello verifies and the key is not of small order (kernel.SmallOrder:
+// anyone can sign for one). The file must be a regular file of owner's
+// (root: this process's euid) that no one else can write, and exactly
+// captureLen bytes.
+func readCapture(path string, owner int) (ed25519.PublicKey, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -465,7 +466,7 @@ func readCapture(path string) (ed25519.PublicKey, error) {
 		return nil, errCapture
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || !fi.Mode().IsRegular() || int(st.Uid) != os.Geteuid() || fi.Mode().Perm()&0o022 != 0 {
+	if !ok || !fi.Mode().IsRegular() || int(st.Uid) != owner || fi.Mode().Perm()&0o022 != 0 {
 		return nil, errCapture
 	}
 	b, err := io.ReadAll(io.LimitReader(f, captureLen+1))
@@ -474,7 +475,7 @@ func readCapture(path string) (ed25519.PublicKey, error) {
 	}
 	edge := ed25519.PublicKey(b[:ed25519.PublicKeySize])
 	nonce, sig := b[ed25519.PublicKeySize:ed25519.PublicKeySize+32], b[ed25519.PublicKeySize+32:]
-	if !ed25519.Verify(edge, kernel.HelloMsg(nonce), sig) {
+	if kernel.SmallOrder(edge) || !ed25519.Verify(edge, kernel.HelloMsg(nonce), sig) {
 		return nil, errCapture
 	}
 	return edge, nil

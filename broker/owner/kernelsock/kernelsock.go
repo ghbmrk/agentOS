@@ -257,8 +257,17 @@ var ErrSetupOnly = errors.New("kernelsock: the kernel is waiting for setup")
 // keeps the two the same.
 const setupOnlyText = "run: I am waiting for setup; I take only your two hardware keys until then"
 
-// typed is err as ErrAnchor or ErrSetupOnly when the kernel's words are
-// exactly that refusal's, else err.
+// The kernel's refusals of a backup destination change, matched by its
+// words (kernel.ErrTargetSig, ErrTargetExists, ErrNoTarget). Each still
+// wraps the Refused, so errors.As finds the kernel's own words too.
+var (
+	ErrTargetSig    = errors.New("kernelsock: the kernel refused: no hardware key signed that destination")
+	ErrTargetExists = errors.New("kernelsock: the kernel refused: that destination name is taken")
+	ErrNoTarget     = errors.New("kernelsock: the kernel refused: no such current destination")
+)
+
+// typed is err as ErrAnchor, ErrSetupOnly or a destination refusal when
+// the kernel's words are exactly that refusal's, else err.
 func typed(err error) error {
 	var r Refused
 	if !errors.As(err, &r) {
@@ -273,6 +282,12 @@ func typed(err error) error {
 		return ErrNoAuthority
 	case pageRestoreText:
 		return ErrPageRestore
+	case kernel.ErrTargetSig.Error():
+		return fmt.Errorf("%w (%w)", ErrTargetSig, r)
+	case kernel.ErrTargetExists.Error():
+		return fmt.Errorf("%w (%w)", ErrTargetExists, r)
+	case kernel.ErrNoTarget.Error():
+		return fmt.Errorf("%w (%w)", ErrNoTarget, r)
 	}
 	return err
 }
@@ -359,8 +374,22 @@ type Taken struct {
 	Error  string      `json:"error,omitempty"`
 }
 
+// Target is a destination as the owner adds it, so the owner side builds
+// one without linking the kernel (ARC-2's control path).
+type Target = kernel.BackupTarget
+
+// KindDir is a mounted directory, such as a second local drive.
+const KindDir = kernel.KindDir
+
+// TargetMsg is the message a hardware key signs to add t as destination n,
+// n the destinations added so far, removed ones included:
+// key.CosignMsg(kernel.BackupTargetHash(n, t)).
+func TargetMsg(n int, t Target) []byte { return key.CosignMsg(kernel.BackupTargetHash(n, t)) }
+
 // BackupTarget adds a destination on a hardware key's signature over
-// kernel.BackupTargetHash(n, t), n the destinations added so far.
+// kernel.BackupTargetHash(n, t), n the destinations added so far. A
+// signature over another add is ErrTargetSig, a name used before
+// ErrTargetExists; the kernel's other refusals are of the place.
 func (o Owner) BackupTarget(ctx context.Context, t kernel.BackupTarget, c key.Cosign) error {
 	return typed(o.call(ctx, "backuptarget", struct {
 		Target kernel.BackupTarget `json:"target"`
@@ -369,7 +398,7 @@ func (o Owner) BackupTarget(ctx context.Context, t kernel.BackupTarget, c key.Co
 }
 
 // Untarget stops new backups to a destination; its backups keep their
-// erase reach.
+// erase reach. One not current is ErrNoTarget.
 func (o Owner) Untarget(ctx context.Context, name string) error {
 	return typed(o.call(ctx, "untarget", struct {
 		Name string `json:"name"`

@@ -215,3 +215,30 @@ func TestAResealRunsOnlyWhereItsHolderRunsIt(t *testing.T) {
 		t.Fatal("a re-seal handed back without running did not back off")
 	}
 }
+
+// LOG-4 (#3339 item 1, #3378 Security finding 2): a re-seal out when its
+// backup's destination changes (RetryBackup, once a first key table
+// lands) sets no backoff if it fails, so the next Reseals hands it out at
+// once; a later failure backs off again. Mutant: back off on that
+// failure, and the erase's own re-seal skips the backup until RetryMin.
+func TestAResealOutAcrossRetryBackupSetsNoBackoff(t *testing.T) {
+	r := newErig(t)
+	s := r.open()
+	b := newFakeBackups(map[string][]string{"b1": {s}})
+	r.k.OpenBackups(b)
+	_, err := r.k.Erase(3, s)
+	must(t, err)
+	b.fail["b1"] = errors.New("still on its way")
+	due := r.k.Reseals(3)
+	due[0].Run()
+	r.k.RetryBackup("b1")
+	r.k.Resealed(3, due[0])
+	if due = r.k.Reseals(3); len(due) != 1 {
+		t.Fatal("the backup backed off on a re-seal that failed while its destination changed")
+	}
+	due[0].Run()
+	r.k.Resealed(3, due[0])
+	if len(r.k.Reseals(3)) != 0 {
+		t.Fatal("a failure with no destination change since did not back off")
+	}
+}

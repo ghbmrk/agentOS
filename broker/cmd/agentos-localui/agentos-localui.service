@@ -9,12 +9,12 @@
 # step's latch (#1270). Both live in its own state directory.
 [Unit]
 Description=agentOS owner page
-After=agentosd.service agentos-egress.service agentos-localui-claim.service
+After=agentosd.service agentos-egress.service agentos-localui-claim.service agentos-inbound.service
 # Requires=, not Wants=, on the claim hand-over: if the move fails, the page
 # must not start without its claim state, or a preloaded box would serve
 # setup without the sticker code. A hand-over skipped by its condition
 # (already moved, or a download box) still counts as success.
-Requires=agentosd.service agentos-localui-claim.service
+Requires=agentosd.service agentos-localui-claim.service agentos-inbound.service
 Wants=agentos-egress.service
 
 [Service]
@@ -28,9 +28,19 @@ StateDirectoryMode=0700
 # -iface is the one fixed PCI Ethernet port, read from sysfs, never from routes a peer could set;
 # with none or several, the page serves nothing (localui.Port1). AGENTOS_PAGE_IFACE, unset on the image, lets a test harness
 # name another (broker/e2e/boxe2e).
+# The inbound firewall boots with the page's ports closed on every link (an empty page set,
+# netguard InboundPageSet). Before each start, one step runs as root (+) with the page's own
+# choice of port 1: it refuses a radio or a missing link, makes port 1 the set's only element and
+# hands its name to the page through the runtime directory; the page serves only if that is its
+# port 1. Every stop, failed starts included, empties the set (HW12-port1-set).
+RuntimeDirectory=agentos-localui
+RuntimeDirectoryMode=0700
+ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -iface ${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1
 ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface ${AGENTOS_PAGE_IFACE} \
+        -port1-file /run/agentos-localui/port1 \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \
         -card-latch /var/lib/agentos-localui/card-latch.json
+ExecStopPost=+/usr/sbin/nft flush set inet agentos_inbound page
 Restart=always
 RestartSec=5
 # A box without exactly one fixed PCI Ethernet port serves no page: it

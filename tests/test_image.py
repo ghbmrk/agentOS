@@ -2502,7 +2502,7 @@ class ConfFilesTest(unittest.TestCase):
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private", "run/agentos-egress")))
+            "var/lib/private", "run/agentos-egress", "run/agentos-localui")))
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
@@ -5210,9 +5210,10 @@ class UplinkTest(unittest.TestCase):
             fwd = "%d:%d" % (18000 + guest % 1000, guest)
             self.assertTrue("hostfwd=tcp:127.0.0.1:%d-:%d" % (18000 + guest % 1000, guest) in s, fwd)
             self.assertTrue(fwd in re.search(r'PROBE="([^"]*)" boot "\$W/console.log"', s).group(1), fwd)
-        self.assertTrue("for port in 22 18789; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
-        # The owner page's ports answer from QEMU's private 10.0.2.2 (CH-9, D-178, WIFI-del-a3).
-        self.assertTrue("for port in 80 443; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port answered\"" in s)
+        # The owner page's ports too: with two NICs the page names no port 1, so the inbound table's
+        # page set stays empty (CH-9, D-178, HW12-port1-set).
+        self.assertTrue("for port in 22 80 443 18789 5355; do\n\thas \"$W/console.log.probe\" \"agentos-probe: $port dropped\"" in s)
+        self.assertNotIn("agentos-probe: $port answered", s)
 
     def test_boot_test_plugs_in_a_cable_once(self):
         s = (IMG / "ci_boot.sh").read_text()

@@ -2,9 +2,12 @@ package kernel
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"math/big"
+	"slices"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -42,7 +45,7 @@ const (
 )
 
 var (
-	// ErrEdgeKey refuses a key that is not an Ed25519 public key.
+	// ErrEdgeKey refuses a key that is not an Ed25519 public key of more than small order.
 	ErrEdgeKey = errors.New("kernel: not an edge key")
 	// ErrEdgeSig refuses an enrolment no hardware key signed over EdgeEnrollHash.
 	ErrEdgeSig = errors.New("kernel: a new edge needs your hardware key's signature")
@@ -96,7 +99,49 @@ type edgeState struct {
 // connection's exporter value.
 func HelloMsg(nonce []byte) []byte { return append([]byte(DomainEdgeHello), nonce...) }
 
-func edgeKey(k []byte) bool { return len(k) == ed25519.PublicKeySize }
+func edgeKey(k []byte) bool { return len(k) == ed25519.PublicKeySize && !SmallOrder(k) }
+
+// SmallOrder reports whether k encodes one of Ed25519's eight points of
+// order dividing 8, in any encoding. ed25519.Verify takes such a key, and
+// anyone can sign for it (the identity key, with R the identity and S
+// zero, verifies over any message), so it proves no hello (#3364). The
+// point's y maps to the Montgomery u = (1+y)/(1-y) (the identity has no
+// u), and X25519, whose scalars are multiples of 8, gives the all-zero
+// value, which crypto/ecdh refuses, for exactly those u.
+func SmallOrder(k []byte) bool {
+	if len(k) != ed25519.PublicKeySize {
+		return false
+	}
+	le := bytes.Clone(k)
+	le[31] &= 0x7f
+	slices.Reverse(le)
+	y := new(big.Int).Mod(new(big.Int).SetBytes(le), fieldP)
+	d := new(big.Int).Sub(big.NewInt(1), y)
+	if d.Mod(d, fieldP).Sign() == 0 {
+		return true
+	}
+	u := new(big.Int).Add(big.NewInt(1), y)
+	u.Mul(u, d.ModInverse(d, fieldP)).Mod(u, fieldP)
+	ub := u.FillBytes(make([]byte, 32))
+	slices.Reverse(ub)
+	pub, err := ecdh.X25519().NewPublicKey(ub)
+	if err != nil {
+		return true
+	}
+	_, err = orderProbe.ECDH(pub)
+	return err != nil
+}
+
+var (
+	fieldP     = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 255), big.NewInt(19))
+	orderProbe = func() *ecdh.PrivateKey {
+		k, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x5a}, 32))
+		if err != nil {
+			panic(err)
+		}
+		return k
+	}()
+)
 
 // LiveEdge is the edge key the core at head trusts: the last enrolment's,
 // when it was made under head and no revoke or cut came after it.

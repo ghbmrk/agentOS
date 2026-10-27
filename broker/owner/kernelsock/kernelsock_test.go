@@ -613,8 +613,20 @@ func TestBackupsReachTheKernel(t *testing.T) {
 	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
 
 	tg := kernel.BackupTarget{Name: "drive", Kind: kernel.KindDir, Locator: t.TempDir()}
-	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(1, tg))); !errors.As(err, new(Refused)) {
+	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(1, tg))); !errors.As(err, new(Refused)) || !errors.Is(err, ErrTargetSig) {
 		t.Fatalf("a signature over another add: %v", err)
+	}
+	// Unsigned, the kernel checks the place first (MIG-4-recovery-e4b's
+	// Begin): a good one is ErrTargetSig, one it cannot reach is not.
+	if err := o.BackupTarget(ctx, tg, key.Cosign{}); !errors.Is(err, ErrTargetSig) {
+		t.Fatalf("unsigned: %v", err)
+	}
+	gone := kernel.BackupTarget{Name: "gone", Kind: kernel.KindDir, Locator: filepath.Join(t.TempDir(), "absent")}
+	if err := o.BackupTarget(ctx, gone, key.Cosign{}); !errors.As(err, new(Refused)) || errors.Is(err, ErrTargetSig) {
+		t.Fatalf("unsigned, a place it cannot reach: %v", err)
+	}
+	if !bytes.Equal(TargetMsg(0, tg), key.CosignMsg(kernel.BackupTargetHash(0, tg))) {
+		t.Fatal("TargetMsg is not the add's cosign message")
 	}
 	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(0, tg))); err != nil {
 		t.Fatal(err)
@@ -627,8 +639,14 @@ func TestBackupsReachTheKernel(t *testing.T) {
 	if err != nil || v.Recipient != rcp.ID() || len(v.Targets) != 1 || !v.Targets[0].Rewritable || len(v.Backups) != 1 || *taken[0].Backup != v.Backups[0] {
 		t.Fatalf("backups: %+v %v", v, err)
 	}
+	if err := o.BackupTarget(ctx, tg, key.Approve(as[1], kernel.BackupTargetHash(1, tg))); !errors.Is(err, ErrTargetExists) {
+		t.Fatalf("a name used before: %v", err)
+	}
 	if err := o.Untarget(ctx, "drive"); err != nil {
 		t.Fatal(err)
+	}
+	if err := o.Untarget(ctx, "drive"); !errors.Is(err, ErrNoTarget) {
+		t.Fatalf("removed twice: %v", err)
 	}
 	if v, err = o.Backups(ctx); err != nil || !v.Targets[0].Removed || len(v.Backups) != 1 {
 		t.Fatalf("after the removal: %+v %v", v, err)

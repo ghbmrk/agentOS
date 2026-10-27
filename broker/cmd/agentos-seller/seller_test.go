@@ -16,7 +16,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -224,7 +223,7 @@ func dump(t *testing.T, img string, off int64, path string) []byte {
 	return b
 }
 
-var codeLineRe = regexp.MustCompile(`(?m)^AgentOS claim code: ([A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4})$`)
+var codeLineRe = regexp.MustCompile(`(?m)^agentOS claim code: ([A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4})$`)
 
 // Acceptance 1: an image that fails a check gets no box image and no
 // sticker.
@@ -232,10 +231,8 @@ func TestPrepRefuses(t *testing.T) {
 	needTools(t)
 	good := standardDisk(t, rootTree)
 	held := map[string]string{"var/lib/agentos/claim.json": `{"salt":"AAAA"}`}
-	heldNet := map[string]string{"var/lib/agentos/ap/setup-net.json": `{}`}
 	for k, v := range rootTree {
 		held[k] = v
-		heldNet[k] = v
 	}
 	cases := map[string]func() (string, string){
 		"checksum mismatch": func() (string, string) {
@@ -267,9 +264,6 @@ func TestPrepRefuses(t *testing.T) {
 		},
 		"already holds a claim state": func() (string, string) {
 			return writeImage(t, standardDisk(t, held))
-		},
-		"already holds a setup network": func() (string, string) {
-			return writeImage(t, standardDisk(t, heldNet))
 		},
 		"no /var/lib": func() (string, string) {
 			return writeImage(t, standardDisk(t, map[string]string{"etc/hostname": "x\n"}))
@@ -327,10 +321,8 @@ func TestPrepSealsOneState(t *testing.T) {
 		}
 	}
 	want := map[string]bool{
-		"/var/lib/agentos 040700 0:0":      true,
-		apnet.Dir + " 040700 0:0":          true,
-		claim.StatePath + " 100600 0:0":    true,
-		claim.SetupNetPath + " 100600 0:0": true,
+		"/var/lib/agentos 040700 0:0":   true,
+		claim.StatePath + " 100600 0:0": true,
 	}
 	if len(added) != len(want) {
 		t.Fatalf("added %v, want %v", added, want)
@@ -404,7 +396,7 @@ func TestPrepSealsOneState(t *testing.T) {
 			t.Errorf("%s mode %v, want 0600", e.Name(), fi.Mode().Perm())
 		}
 	}
-	for _, n := range []string{"box.raw", "SHA256SUMS", "sticker.txt", "sticker.html"} {
+	for _, n := range []string{"box.raw", "SHA256SUMS", "sticker.txt", "sticker.html", enforcerNetFile} {
 		if !names[n] {
 			t.Errorf("no %s in %v", n, names)
 		}
@@ -431,34 +423,20 @@ func TestPrepSealsOneState(t *testing.T) {
 		t.Fatal("sticker.html lacks the claim QR")
 	}
 
-	// The setup network the phone joins before the card exists (CH-7, §8.1
-	// step 4): sealed beside the claim state, root-owned 0600, and printed
-	// on the sticker as its name, password and Wi-Fi QR.
-	net, err := claim.ParseSetupNet(dump(t, box, off, claim.SetupNetPath))
+	// The enforcer's setup network (D-178) is never on the core's image:
+	// its password appears nowhere in box.raw.
+	nb, err := os.ReadFile(filepath.Join(out, enforcerNetFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if net.Password == code || claim.Normalize(net.Password)[:claim.PrefixSymbols] == claim.Normalize(code)[:claim.PrefixSymbols] {
-		t.Fatal("the setup password is the claim code")
-	}
-	wq, err := card.QRSVG(card.WiFiQR(net.SSID, net.Password))
+	net, err := claim.ParseSetupNet(nb)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range [][]byte{[]byte(wq), []byte(net.SSID), []byte(net.Password)} {
-		if !bytes.Contains(html, want) {
-			t.Fatalf("sticker.html lacks %.60q", want)
+	for _, form := range []string{net.Password, claim.Normalize(net.Password)} {
+		if bytes.Contains(raw, []byte(form)) {
+			t.Fatalf("box image holds the setup password as %q", form)
 		}
-	}
-	for _, want := range []string{"Wi-Fi network: " + net.SSID + "\n", "Wi-Fi password: " + net.Password + "\n"} {
-		if !strings.Contains(string(txt), want) {
-			t.Fatalf("sticker.txt lacks %q: %q", want, txt)
-		}
-	}
-	// The password is on the box only in the setup file (SAE needs it in
-	// the clear), never in the claim state.
-	if bytes.Contains(dump(t, box, off, claim.StatePath), []byte(claim.Normalize(net.Password))) {
-		t.Fatal("the claim state holds the setup password")
 	}
 
 	// A second prep of the prepared image is refused: it holds a state.
@@ -621,8 +599,8 @@ func TestUsage(t *testing.T) {
 
 // #1270 (HW-10): the files the seller seals route the box to the claim on
 // the shipped image, which is not the download's (BoxConfig.Download
-// unset): the claim screen first and the sticker's setup network, never
-// the download path's pairing.
+// unset): the claim screen first, never the download path's pairing. The
+// core holds no setup network (D-178): the enforcer serves it.
 func TestASealedBoxRoutesToTheClaim(t *testing.T) {
 	needTools(t)
 	img, sums := writeImage(t, standardDisk(t, rootTree))
@@ -635,19 +613,15 @@ func TestASealedBoxRoutesToTheClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var state, setup, latch change.MemStore
+	var state, latch change.MemStore
 	if err := state.Save(dump(t, box, off, claim.StatePath)); err != nil {
 		t.Fatal(err)
 	}
-	if err := setup.Save(dump(t, box, off, claim.SetupNetPath)); err != nil {
-		t.Fatal(err)
-	}
 	fb, err := firstboot.Begin(firstboot.BoxConfig{
-		Claim:    claim.Config{Store: &state, BootID: func() (string, error) { return "boot-1", nil }},
-		Latch:    &latch,
-		SetupNet: &setup,
-		Reset:    func() error { return nil },
-		Card:     card.DisplayConfig{Provision: func(*card.Card) error { return nil }},
+		Claim: claim.Config{Store: &state, BootID: func() (string, error) { return "boot-1", nil }},
+		Latch: &latch,
+		Reset: func() error { return nil },
+		Card:  card.DisplayConfig{Provision: func(*card.Card) error { return nil }},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -655,8 +629,8 @@ func TestASealedBoxRoutesToTheClaim(t *testing.T) {
 	if fb.Route != firstboot.RouteClaim || fb.Claim == nil || fb.Claim.Status().Claimed {
 		t.Fatalf("route %q, claim %+v", fb.Route, fb.Claim)
 	}
-	if n, err := fb.Network(); err != nil || n == nil {
-		t.Fatalf("setup network %v, %v", n, err)
+	if n, err := fb.Network(); err != nil || n != nil {
+		t.Fatalf("setup network %v, %v; want none on the core", n, err)
 	}
 }
 

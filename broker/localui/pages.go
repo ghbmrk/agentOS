@@ -41,6 +41,7 @@ form { margin: .6em 0 1.2em; }
 {{if .Restore}}<p class="err">My secure page certificate is missing. Restore me from my backup to use the secure page and passkeys.</p>{{end}}
 {{if .HasOwner}}
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
+{{range .Owner.Backups}}<p class="err">{{.}}</p>{{end}}{{if and .Owner.Backups .SignedIn .Backups}}<p><a href="/backups/">Backups</a></p>{{end}}
 {{if or .Owner.Challenged .Owner.LowLocked}}<p>Approvals by text are paused after wrong codes. Sign in here to turn them back on.</p>{{end}}
 {{if .Owner.Stopped}}
 <form method="post" action="/resume">{{if or (not .SignedIn) .AskCode}}<label>Code from your code generator<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required></label>{{end}}<button>RESUME</button></form>

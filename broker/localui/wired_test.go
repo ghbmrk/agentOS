@@ -226,3 +226,49 @@ func TestPageRefusesABadInterface(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// HW12-port1-set (CH-9): a port 1 named on the unit opens the page's
+// firewall rule only if it is a wired Ethernet link on this box: a radio,
+// a missing link, a non-Ethernet link, loopback or a malformed name is
+// refused with a reason that names it. A root-made veth (the harness's)
+// and a kernel eth* name pass.
+// REQ: CH-9
+func TestWiredRefusesRadiosAndMissingLinks(t *testing.T) {
+	type nic = struct {
+		dev, typ string
+		radio    bool
+	}
+	sys := sysNet(t, map[string]nic{
+		"eth0":     {"pci0000:00/0000:00:1f.6", "1", false},
+		"enowner0": {"virtual", "1", false},
+		"wlan0":    {"pci0000:00/0000:00:14.3", "1", true},
+		"wwan0":    {"pci0000:00/0000:00:1b.0/0000:01:00.0", "65534", false},
+		"lo":       {"virtual", "772", false},
+	})
+	for _, ok := range []string{"eth0", "enowner0"} {
+		if err := Wired(sys, ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for name, why := range map[string]string{
+		"wlan0":   "radio",
+		"wwan0":   "not Ethernet",
+		"enp9s0":  "not a link",
+		"lo":      "not an interface name",
+		"":        "not an interface name",
+		"a b":     "not an interface name",
+		"../eth0": "not an interface name",
+	} {
+		err := Wired(sys, name)
+		if err == nil || !strings.Contains(err.Error(), why) {
+			t.Errorf("%q: %v, want an error saying %q", name, err, why)
+		}
+	}
+	// A wireless directory, not only phy80211, marks a radio.
+	if err := os.Mkdir(filepath.Join(sys, "class", "net", "eth0", "wireless"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Wired(sys, "eth0"); err == nil {
+		t.Error("eth0 with a wireless directory passed")
+	}
+}
