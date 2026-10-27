@@ -2,6 +2,7 @@ package kernel
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 
@@ -43,13 +44,16 @@ func (d derived) String() string { return d.typ + " " + string(d.body) }
 // enter (KRN-1). So a log prefix reproduces every decision in it, and the
 // first that differs is returned as a *Divergence. A decision the kernel
 // should have logged and did not is not seen: a tick that logs nothing
-// leaves no entry.
-func Rederive(anchors []key.PublicKey, es []Entry) (Rederived, error) {
+// leaves no entry. head is the running core's head key: an edge candidate
+// of the key live at head is not one the kernel logs. Entries written under
+// an earlier head key (before a restore) see no live key at head, so they
+// get the fold's checks only and never diverge falsely.
+func Rederive(anchors []key.PublicKey, head ed25519.PublicKey, es []Entry) (Rederived, error) {
 	s := NewState(anchors)
 	out := Rederived{Checked: map[string]int{}, Recorded: map[string]int{}}
 	var refused *derived // the cancel a refused send may log next
 	for _, e := range es {
-		cands, decision := derive(s, e, refused)
+		cands, decision := derive(s, e, head, refused)
 		if decision {
 			if !matches(cands, e) {
 				d := &Divergence{Seq: e.Seq, Type: e.Type, Logged: derived{e.Type, e.Body}.String(), Derived: "nothing"}
@@ -86,7 +90,7 @@ func entry(typ string, body any) derived {
 
 // derive gives the entries the kernel could log in e's place from s at e.At,
 // and whether e is a decision at all.
-func derive(s *State, e Entry, refused *derived) ([]derived, bool) {
+func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]derived, bool) {
 	var ref struct {
 		Plan string `json:"plan"`
 		Code string `json:"code"`
@@ -116,8 +120,8 @@ func derive(s *State, e Entry, refused *derived) ([]derived, bool) {
 		}
 		return nil, true
 	case TEdgeEnrolled, TEdgeCandidate:
-		if s.edgeDecision(e) {
-			return []derived{{e.Type, e.Body}}, true
+		if d, ok := s.edgeDecision(e, head); ok {
+			return []derived{d}, true
 		}
 		return nil, true
 	}

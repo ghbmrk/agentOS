@@ -46,7 +46,7 @@ func mixed(t *testing.T) *rig {
 
 func rederives(t *testing.T, r *rig) kernel.Rederived {
 	t.Helper()
-	got, err := kernel.Rederive(r.anchors(), r.k.Log().Entries())
+	got, err := kernel.Rederive(r.anchors(), r.k.Box(), r.k.Log().Entries())
 	must(t, err)
 	return got
 }
@@ -130,7 +130,7 @@ func TestRederiveFindsATamperedDecision(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			bad := append([]kernel.Entry(nil), es...)
 			bad[tc.i] = tc.to(bad[tc.i])
-			_, err := kernel.Rederive(r.anchors(), bad)
+			_, err := kernel.Rederive(r.anchors(), r.k.Box(), bad)
 			var d *kernel.Divergence
 			if !errors.As(err, &d) || d.Seq != es[tc.i].Seq {
 				t.Fatalf("want a divergence at seq %d, got %v", es[tc.i].Seq, err)

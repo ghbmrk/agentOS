@@ -86,6 +86,7 @@ type edgeState struct {
 	setup   bool            // the log's first entry was anchors.set
 	changes int             // edge.enrolled, edge.revoked and edge.cut entries
 	live    *edgeEnrolled   // the last enrolment, unless revoked or cut since
+	last    *edgeEnrolled   // the last enrolment, at any head, cut or not
 	revoked map[string]bool // every key revoked or replaced, at any head
 	cand    *edgeCandidate  // the latest candidate
 	candAt  int64
@@ -117,6 +118,18 @@ func (s *State) PendingEdge(head ed25519.PublicKey) ed25519.PublicKey {
 		return nil
 	}
 	return bytes.Clone(c.Key)
+}
+
+// EdgeReplaces is the key an enrolment of k replaces and revokes: the last
+// enrolment's, if it is not revoked and not k, whatever head key it was made
+// under and whether a cut came after it (HW-15). So after a restore or a
+// cut, enrolling another edge still cuts the old key for good, and
+// re-enrolling the same edge revokes nothing.
+func (s *State) EdgeReplaces(k ed25519.PublicKey) ed25519.PublicKey {
+	if l := s.edge.last; l != nil && !s.EdgeRevoked(l.Key) && !l.Key.Equal(k) {
+		return bytes.Clone(l.Key)
+	}
+	return nil
 }
 
 // EdgeChanges is how many edge enrolments, revokes and cuts the log holds:
@@ -158,7 +171,7 @@ func (s *State) enrollOK(b edgeEnrolled) error {
 	if !s.PendingEdge(b.Head).Equal(b.Key) {
 		return ErrEdgeCandidate
 	}
-	if !s.LiveEdge(b.Head).Equal(b.Replaces) || !key.In(s.Anchors, b.Sig.By) ||
+	if !s.EdgeReplaces(b.Key).Equal(b.Replaces) || !key.In(s.Anchors, b.Sig.By) ||
 		!b.Sig.Over(EdgeEnrollHash(s.edge.changes, b.Head, b.Key, b.Replaces)) {
 		return ErrEdgeSig
 	}
@@ -172,18 +185,24 @@ func (s *State) firstOK(e Entry, b edgeEnrolled) bool {
 		edgeKey(b.Key) && edgeKey(b.Head) && len(b.Replaces) == 0
 }
 
-// edgeDecision reports whether the state before e gives e: an enrolment or
-// a candidate the kernel would log (Rederive).
-func (s *State) edgeDecision(e Entry) bool {
+// edgeDecision is the entry the state before e gives in e's place, when the
+// kernel under head would log e at all (Rederive): an enrolment, or a
+// candidate whose key is not live at head. The body is re-encoded from the
+// decoded one, so a body the kernel would not have written diverges.
+func (s *State) edgeDecision(e Entry, head ed25519.PublicKey) (derived, bool) {
 	switch e.Type {
 	case TEdgeEnrolled:
 		b, err := body[edgeEnrolled](e)
-		return err == nil && (s.firstOK(e, b) || s.enrollOK(b) == nil)
+		if err == nil && (s.firstOK(e, b) || s.enrollOK(b) == nil) {
+			return entry(e.Type, b), true
+		}
 	case TEdgeCandidate:
 		b, err := body[edgeCandidate](e)
-		return err == nil && s.candidateOK(b, e.At) == nil
+		if err == nil && s.candidateOK(b, e.At) == nil && !s.LiveEdge(head).Equal(b.Key) {
+			return entry(e.Type, b), true
+		}
 	}
-	return false
+	return derived{}, false
 }
 
 func (s *State) revoke(k ed25519.PublicKey) {
@@ -216,7 +235,7 @@ func (s *State) applyEdge(e Entry) error {
 		if len(b.Replaces) != 0 {
 			s.revoke(b.Replaces)
 		}
-		s.edge.live = &b
+		s.edge.live, s.edge.last = &b, &b
 		s.edge.changes++
 	case TEdgeCandidate:
 		b, err := body[edgeCandidate](e)
@@ -255,6 +274,12 @@ func (k *Kernel) edgeFirst(now int64, edge ed25519.PublicKey) error {
 // LiveEdge is the edge key this core trusts now.
 func (k *Kernel) LiveEdge() ed25519.PublicKey { return k.s.LiveEdge(k.log.cfg.Pub) }
 
+// EdgeReplaces is the key enrolling edge would revoke (State.EdgeReplaces):
+// the page step shows it and the hardware key signs over it.
+func (k *Kernel) EdgeReplaces(edge ed25519.PublicKey) ed25519.PublicKey {
+	return k.s.EdgeReplaces(edge)
+}
+
 // EdgeCandidate logs a hello the link process read on the link port: the
 // edge's key, the connection's exporter value and the key's signature over
 // HelloMsg. Only the link process's uid reaches it (kernel process). The
@@ -274,10 +299,11 @@ func (k *Kernel) EdgeCandidate(now int64, edge ed25519.PublicKey, nonce, sig []b
 
 // EdgeEnroll is the owner-page step: it makes edge, which must be the
 // pending candidate, live on an anchor's signature c over
-// EdgeEnrollHash(State.EdgeChanges(), Box(), edge, LiveEdge()), revoking
-// the live key in the same entry. It is a widening, so it anchors.
+// EdgeEnrollHash(State.EdgeChanges(), Box(), edge, EdgeReplaces(edge)),
+// revoking the last enrolled key in the same entry, after a restore or a cut
+// too. It is a widening, so it anchors.
 func (k *Kernel) EdgeEnroll(now int64, edge ed25519.PublicKey, c key.Cosign) error {
-	b := edgeEnrolled{Key: edge, Head: k.Box(), Replaces: k.LiveEdge(), Sig: c}
+	b := edgeEnrolled{Key: edge, Head: k.Box(), Replaces: k.s.EdgeReplaces(edge), Sig: c}
 	if err := k.s.enrollOK(b); err != nil {
 		return err
 	}

@@ -101,7 +101,7 @@ func (r *erig) replays() {
 	if !reflect.DeepEqual(re, r.k.State()) {
 		r.t.Fatal("replay differs from the live state (LOG-1)")
 	}
-	_, err = kernel.Rederive(nil, r.k.Log().Entries())
+	_, err = kernel.Rederive(nil, r.k.Box(), r.k.Log().Entries())
 	must(r.t, err)
 }
 
