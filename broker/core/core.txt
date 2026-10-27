@@ -179,10 +179,6 @@ allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Appen
 allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
 allow recall journal.MemStore.Rewrite -- shape only: as journal.FileStore.Append
 
-# The home Wi-Fi helper (P2-2w c3) runs as its own user with no capabilities
-# and serves one socket, to agentosd only (Security L8.1).
-allow cmd/agentos-netjoin sockets.Server.* -- the helper serves its own socket to agentosd only (Security L8.1, P2-2w c3)
-
 # agentosd's client of the mail clerk's owner socket (#3006) reads the
 # serving peer's uid (SO_PEERCRED) before it writes a frame, as kernel/proc's
 # Conn does; the read changes nothing.

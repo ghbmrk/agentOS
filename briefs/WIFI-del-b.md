@@ -31,3 +31,20 @@ NetworkManager, wpasupplicant and polkitd stay in this slice: the issue's row do
 **Guard files:** `.github/workflows/` and `image/mkosi/exec.allow` may be gate files; the builder runs `premerge.py --needs-mark` and states the result.
 
 **Estimate:** about 120k tokens, one session, mostly deletion. Checkpoint at 120k.
+
+## b2: the code goes (#3235, after #3399, #3402 and #3440)
+
+Built 2026-10-27 against main at 111cdd0, in the serial `cmd/agentosd` slot (D-111). b1 left nothing in the image that runs the access point or the join helper. b2 deletes the code that still built them, and what read their files:
+- `broker/cmd/agentos-ap`, `broker/cmd/agentos-netjoin`, `broker/apnet` and `broker/netjoin`. That drops godbus (D-108) and mdlayher/genetlink and netlink (D-144) from `go.mod` and `vendor/`.
+- localui's access point (`ap.go`, `apexempt.go`, `aphost.go`, `aploader.go`, `hostapd.go`, `stationiface.go`, `testdata/`, and their tests). The page's port and name constants and three validators that the wired page still uses move to `pagename.go`.
+- agentosd's owned marker (`owned.go`, `-owned`).
+- firstboot's setup network (`BoxConfig.SetupNet`, `Network`, `SetupNetwork`, `CardConfirmed`). The core keeps none since WIFI-del-d, so a box with no claim state routes to reinstall unless it is the download's.
+- `claim.SetupNet.Rotate`, with `ErrRotated` and `NewSetupPassword`. `SetupNet` stays for the seller's hand-off to the enforcer, and `SetupNetPath` stays only as the path the seller's test checks prep leaves empty.
+- The image's `ap-exempt` script, `agentos-ap-exempt@.service` and the `/var/lib/agentos/ap` tmpfiles line. The tree check now refuses anything in `/var/lib/agentos`, an empty `ap` directory included.
+- The lists that named them: `broker/core/core.txt`, the ARC-2 and launcher tests, `durable/stores.txt`, `tools/g1_scope_g2.txt` and `tests/test_g1_scope.py`'s binaries, `tools/risk_tier.py` with OPERATING §3's tier-A list (a test holds the two equal), `tools/trusted_base_parsers.txt`, `image.yml`'s path filter, `assurance/dependencies.json`, the legacy ASSUMPTIONS IDs and the product-name baseline.
+
+The vault's Wi-Fi reads (comment 6431950367) went with WIFI-del-e (#3402: `committedwifi.go`, the card vault's Wi-Fi part). b2 leaves localui's `ErrWiFiQR` scan answer in place: it is a refusal, not a read.
+
+**Acceptance tests:** `tests/test_wifidel_b2.py::TestNoAccessPointCode`, whose five tests each catch one piece coming back. Updated: `tests/test_image.py` (the tree check on `/var/lib/agentos`; `ApExemptTest` deleted), `tests/test_inbound_netns.py` (`AccessPointThroughTheDrop` deleted), `tests/test_image_noexec.py`, `tests/test_image_keeper.py`, and `broker/firstboot` (the setup-network tests deleted).
+
+**Guard files:** `broker/core/core.txt`, `tools/risk_tier.py`, `tools/g1_scope_g2.txt`, `tests/test_g1_scope.py` and `.github/workflows/image.yml`, so this is a gate-file PR (`premerge.py --needs-mark`).

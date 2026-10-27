@@ -78,8 +78,7 @@ def core_list(path=CORE_LIST):
 # with docs/OPERATING.md §3.
 TIER_A_BROKER = {
     # (a) a credential or secret
-    "apnet",                      # the Owner Card's Wi-Fi password
-    "browser", "netjoin", "tpmseal",
+    "browser", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner

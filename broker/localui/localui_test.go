@@ -36,11 +36,6 @@ const (
 	apiCanary = "sk-synthetic-CANARY-9f3b2c71d0e44a8b"
 )
 
-func testAP() APConfig {
-	return APConfig{Iface: "wlan0", Uplink: "eth0", Addr: netip.MustParsePrefix("10.42.0.1/24"),
-		SSID: "AgentOS-7K3M", Password: "ABCD-EFGH-JKLM-NPQR"}
-}
-
 func testPage() Page { return Page{Iface: "eth0"} }
 
 // The box's own addresses in these tests: the one the phone reaches and

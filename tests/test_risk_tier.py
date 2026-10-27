@@ -327,11 +327,6 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual(sorted(rt.TIER_B_BROKER - dirs), [])
         self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring)), [])
 
-    # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
-    def test_netjoin_is_tier_a(self):
-        self.assertIn("netjoin", rt.TIER_A_BROKER)
-        self.assertEqual(rt.tier_of("broker/netjoin/join.go")[0], "A")
-
     # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
     def test_merge_gate_tools_tests_and_lens_rules_are_a(self):
         # Security on #1953: paths that left premerge's Mark-only list keep the full review.
