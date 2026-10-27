@@ -10,9 +10,10 @@ Replays the reviewed commit onto the base content `head` carries (`git merge-tre
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
-keeping both sides' rows verbatim, either side first (#3224, #3233). A replay file that fails a cheap gate never reads same as is:
-a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row `merge=union` brought back
-(in the merge base and main, not in the reviewed commit); a head that drops exactly those rows, or moves the PR's row of that ID to main's spot, reads same (#3400). Main merged into the branch therefore reads as same, even next
+keeping both sides' rows verbatim, either side first (#3224, #3233). A replay file that fails a cheap gate never reads
+same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
+`merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
+hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401). Main merged into the branch therefore reads as same, even next
 to a PR hunk, while any other change reads as changed: a later push, a moved hunk, a side branch merged
 in, or a merge resolution that edits a PR line. Not a diff fingerprint: diff context lines carry
 neighbouring base changes (#1580, #1592), and a -U0 diff reads a hunk moved elsewhere as same. Not
@@ -49,8 +50,10 @@ import importlib.util
 import json
 import pathlib
 import re
+import secrets
 import subprocess
 import sys
+import tempfile
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
@@ -230,24 +233,53 @@ def _broken(cwd, tree, path, reviewed, onto):
 
 
 def _stale_dropped(cwd, tree, head, path, reviewed, onto):
-    """True when an ASSUMPTIONS.md replay brought rows back (`_stale`) and `head` is the replay with exactly those
-    rows dropped, or each replaced by the replay's other row of its ID (the PR's edit, moved to main's spot), with
-    no duplicate ID left: the three-way merge `merge=union` should have made (#3400; e842a58 on #3369 moved it)."""
+    """True when an ASSUMPTIONS.md replay conflicts without `merge=union` (.gitattributes) only in hunks of table
+    rows, and `head` is that merge with each hunk resolved as the PR's rows plus main's, less each row the merge base
+    and main share but the PR dropped (the stale rows the union kept, #3369, #1912), or as main's rows with each such
+    row replaced by the PR's row of its ID, the rest of the PR's rows after them (e842a58 on #3369). Every hunk the
+    same way, no duplicate ID left. A row never leaves its hunk, so nothing moves to another table (#3401)."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return False
-    text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
-    stale = _stale(cwd, text, path, reviewed, onto)
-    if not stale:
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1:
         return False
-    lines = text.splitlines(keepends=True)
+    texts = [_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto)]
+    mark = secrets.token_hex(16)  # labels no file can carry, so its text never reads as a marker
+    with tempfile.TemporaryDirectory() as d:
+        names = [pathlib.Path(d, n) for n in ("pr", "base", "main")]
+        for n, t in zip(names, texts):
+            n.write_bytes(t)
+        merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)), *map(str, names)],
+                                capture_output=True).stdout
     key = lambda line: FIRST_CELL.match(line) and FIRST_CELL.match(line).group(1)
-    dropped = [line for line in lines if line.rstrip(b"\r\n") not in stale]
-    edits = {key(line): line for line in dropped if key(line) in {key(s) for s in stale}}
-    moved = [edits.get(key(line), b"") if line.rstrip(b"\r\n") in stale else line
-             for line in lines if line not in edits.values()]
+    out, hunk, side, conflicts = ([], []), None, 0, 0
+    for line in merged.splitlines(keepends=True):
+        bare = line.rstrip(b"\r\n")
+        if hunk is None:
+            if bare == f"<<<<<<< {mark}0".encode():
+                hunk, side = ([], [], []), 0
+            else:
+                for o in out:
+                    o.append(line)
+        elif bare == f"||||||| {mark}1".encode() and side == 0:
+            side = 1
+        elif bare == b"=======" and side == 1:
+            side = 2
+        elif bare == f">>>>>>> {mark}2".encode() and side == 2:
+            pr, base, main = hunk
+            gone = {x for x in base if x in main and x not in pr}
+            edit = {key(x): x for x in pr if key(x) in {key(g) for g in gone}}
+            out[0].extend(pr + [x for x in main if x not in gone])
+            moved = [edit.get(key(x), b"") if x in gone else x for x in main]
+            out[1].extend(moved + [x for x in pr if x not in edit.values()])
+            hunk, conflicts = None, conflicts + 1
+        elif FIRST_CELL.match(line):
+            hunk[side].append(line)
+        else:
+            return False  # a hunk that is not all table rows, or a marker out of order
     want = _git(cwd, "show", f"{head}:{path}", ok=(0, 128))
-    return (want in (b"".join(dropped), b"".join(moved)) and not _duplicate_id(want)
-            and _same_mode(cwd, tree, head, path))
+    return (hunk is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
+            and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
 
 
 def _appends_kept(cwd, tree, head, path, reviewed, onto):
@@ -281,7 +313,7 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
         else:
             return False
     return (block is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
-            and _same_mode(cwd, tree, head, path))
+            and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):

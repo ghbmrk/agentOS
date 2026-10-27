@@ -201,6 +201,54 @@ class PremergeTest(unittest.TestCase):
                 self.commit("another resolution")
                 self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    def test_a_head_that_undoes_a_pr_move_to_another_table_is_changed(self):
+        # #3401 L3: the PR moves L-1 to the Retired table; putting it back at main's spot is not the union's hunk.
+        retired = "\n## Retired\n\n| ID | A |\n|---|---|\n| R-1 | old |\n"
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n" + retired,
+                                    retired + "| L-1 | edge new |\n", base_rows="| L-1 | edge old |\n" + retired)
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n| L-1 | edge new |\n" + retired)
+        self.commit("move it back")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_head_that_drops_main_copy_of_a_stale_row_elsewhere_is_changed(self):
+        # #3401 Security P3: the stale row's text was matched file-wide, so main's copy in another table went too.
+        other = "\n## Other\n\n| Name | x |\n|---|---|\n| L-1 | edge old |\n"
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n" + other, "| L-1 | edge new |\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge new |\n| B-1 | bak |\n" + other.replace("| L-1 | edge old |\n", ""))
+        self.commit("drop both")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
+        # #3401 Security P6: a row the reviewer read as inert, inside an HTML comment, moved into the live table.
+        draft = "\n<!-- draft:\n| X | y |\n| L-1 | edge new |\n-->\n"
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", draft)
+        self.write("ASSUMPTIONS.md", self.UNION + draft.replace("| L-1 | edge new |\n", "") + "| B-1 | bak |\n| L-1 | edge new |\n")
+        self.commit("make it live")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_stale_row_dropped_is_changed_with_another_duplicate_id_or_a_mode_flip(self):
+        # #3401 potency: each guard of the exemption is pinned, so reverting one fails here.
+        far = "".join(f"| F-{i} | f |\n" for i in range(6))
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n" + far + "| X-1 | main |\n",
+                                    "| X-1 | mine |\n| L-1 | edge new |\n" + far, base_rows="| L-1 | edge old |\n" + far)
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| X-1 |"), 2, "both sides were meant to add X-1 cleanly")
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| L-1 | edge old |\n", ""))
+        self.commit("drop the stale row, keep both X-1")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        self.setUp()
+        reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| L-1 | edge new |\n")
+        self.write("ASSUMPTIONS.md", self.UNION + "| B-1 | bak |\n| L-1 | edge new |\n")
+        self.commit("drop the stale row")
+        self.assertEqual(self.check(reviewed), [])
+        self.chmod_commit("ASSUMPTIONS.md")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_decisions_rows_both_appended_under_one_id_are_changed(self):
+        # #3401 L3: the appended-rows exemption kept two D-9 rows as `same`; doclint fails that head.
+        reviewed = self.decisions_conflict(main="| D-1 | base |\n| D-9 | main |\n", pr="| D-1 | base |\n| D-9 | mine |\n")
+        self.resolve("DECISIONS.md", "| D-9 | mine |\n| D-9 | main |\n")
+        self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
     def test_a_union_merge_that_brings_back_a_deleted_row_is_changed(self):
         # #1912: the PR deleted a row main left alone; the union keeps it without any duplicate ID.
         reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "", base_rows="| L-1 | edge old |\n")
