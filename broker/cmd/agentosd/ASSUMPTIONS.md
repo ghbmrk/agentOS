@@ -421,7 +421,7 @@ Mark chose option A on #3136 (roll back at start; Decisions 8, 2026-10-25). `rec
 
 ## Backups: the choice page and the notice on the pages (MIG-4-recovery-e4b, #3390)
 
-| ID | Assumption | Rests on | If wrong |
+| ID | Assumption | Source | If wrong |
 |---|---|---|---|
 | MIG-4-recovery-e4b-1 | **The kernel checks the place before the tap.** `Begin` asks the kernel to add the destination with no signature: the kernel checks the directory and the shape before the signature (`kernel/proc` `AddBackupTarget`, then `targetOK`), so its refusal for want of one (`kernelsock.ErrTargetSig`) says the place is good, and any other refusal is shown as a place it cannot use before the owner taps. agentosd copies no shape rule of the kernel's. An unsigned add the kernel takes is logged and offered no tap. | kernel e2/e3 check order; HW-17 | A kernel that checked the signature first would make every `Begin` look good; the add after the tap still refuses a bad place, with ErrBackupPlace. |
 | MIG-4-recovery-e4b-2 | **The challenge binds the count, and the page carries it.** The hardware key signs `kernelsock.TargetMsg(n, t)`, n the destinations the kernel has added (removed ones included, `len(BackupsView.Targets)`). `Add` takes n from the page and refuses one other than the kernel's as stale, so a page cannot carry a tap over to another add, and two pages adding at once get one add and one stale. agentosd keeps no begun state. | kernel `BackupTargetHash` | A count read between two adds gives a stale tap; the owner starts again. |
