@@ -67,18 +67,15 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-c | MIG-4-recovery-c: compromised restore switch regenerates store, kernel and holder keys and the page CA, texts and prints the new fingerprint, revokes and re-consents at providers, rotates Owner Card secrets; ordinary restores keep the CA (REC-5, CH-9). | MIG-4-recovery-b (#3186), #3172 | queued (release; sub A; tier A; slice c of #2865) |
 | MIG-4-untrusted-reconnect-a2 | Announce a passkey enrolment on the owner channel: the new key's fingerprint and the hardware key that signed it. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
 | MIG-4-untrusted-reconnect-a3 | Passkey Finish follow-ups from the #3229 L3: a deterministic race test, and a retry challenge the server holds. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
-| MIG-4-recovery-e4 | MIG-4-recovery-e4: owner-side backup choice page (anchor-signed add), daily and at-once schedule, and the only-copy notice with one-target and not-append-only lines on status, choice page and digest (BAK-1, BAK-2). | MIG-4-recovery-e3 (#3251); agentosd serial | queued (release; sub A; tier A; slice e4 of #2865) |
+| MIG-4-recovery-e4 | MIG-4-recovery-e4: owner-side backup choice page (anchor-signed add), daily and at-once schedule, and the only-copy notice with one-target and not-append-only lines on status, choice page and digest (BAK-1, BAK-2). | MIG-4-recovery-e3 (#3251); agentosd serial | building (release; sub A; tier A; slice e4 of #2865) |
 | MIG-4-guest-result-codes | The guest's step-result filter passes only known clerk result codes, an allowlist by value rather than by shape (MIG-4-guest-result-codes, #3259 Security item 1). | none | queued (tier A) |
 | MIG-4-untrusted-exit-b2b-links | Put -signin-routes on a tmpfs of its own (or require fs.protected_hardlinks=1) before b2b's unit sets -signin-sock (#3282 Security 1). | #2780 b2b | queued (release; tier A) |
-| MIG-4-recovery-f2 | MIG-4-recovery-f2: agentosd stops holding the page CA; the page's certify forwards to the kernel (CH-9). | MIG-4-recovery-f1 (#3253) | queued (release; tier A; slice f2 of #3253) |
-| EDGE-link-core-b | EDGE-link-core-b: the core's link key, the first edge key and the unlock slot reach the kernel (HW-15, REC-2). | EDGE-link-core (#3290), MIG-4-recovery-e3 (#3251), MIG-4-recovery-f1 (#3253) | building (release; tier A; slice b of #3290) |
 | EDGE-link-core-c1 | EDGE-link-core-c1: the edge link library: strict framing by kind, origin and length, and pinned TLS 1.3 (HW-15, HW-17). | brief (#3290) | building (release; tier A; slice c1 of #3290) |
 | EDGE-link-core-c2 | EDGE-link-core-c2: agentos-link, the link process on the core's dedicated port; kernel calls for link signing and edge keys (HW-15, HW-16). | EDGE-link-core (#3290), EDGE-link-core-b, EDGE-link-core-c1 | queued (release; tier A; slice c2 of #3290) |
 | EDGE-link-core-d | EDGE-link-core-d: the owner page's edge step, the tamper alert and the edge status lines (HW-15, REC-2). | EDGE-link-core-c2 | queued (release; tier A; slice d of #3290) |
-| BAK-records-fresh | [BAK-records-fresh: the log names every backup (backup.taken), so a rolled-back or deleted backup records file cannot hide one from an erase (LOG-4, BAK-1).](briefs/BAK-records-fresh.md) | #3311 (merged); serial after MIG-4-recovery-f1 (#3253) and KRN-reseal-unlocked (#3317), same files | building (release; sub A; tier A; found reviewing #3311) |
 | MIG-4-untrusted-exit-b1-sweep-f2 | MIG-4-untrusted-exit-b1-sweep-f2: vm.load removes a provider or worker machine directory a crash left without meta.json, so no placeholder seed stays at rest (CAP-8). | MIG-4-untrusted-exit-b1-sweep-f1 (#3308) | queued (later; tier A) |
-| KRN-reseal-confirm | [KRN-reseal-confirm: an erase's confirmation names every backup that can still give the key: it waits for a running re-seal it names and for a backup still being written, and Close's handling of a hung re-seal is documented (LOG-4, KRN-7; #3332 release findings).](briefs/KRN-reseal-confirm.md) | #3332 (merged); serial with BAK-records-fresh (#3316) on kernel/proc/backup.go | queued (release; sub A kernel lane; tier A; trusted-core growth under D-159) |
 | EDGE-link-core-b2 | EDGE-link-core-b2: refuse small-order edge keys in the kernel and enrollment; the unknown-host cut's slot and error, and the capture owner check, each get a killing test (HW-15). | EDGE-link-core-b (#3295), a2 (#3345), needs brief | building (release; tier A; follow-up of slice b, reviews on #3359) |
+| MIG-4-recovery-e4b | MIG-4-recovery-e4b: backup choice page (anchor-signed add, unsigned removal) and the only-copy, one-place and not-append-only lines on the status and choice pages (BAK-1, BAK-2). | MIG-4-recovery-e4a (#3252); agentosd serial | queued (release; tier A; slice e4b of #2865) |
 
 ## Harness and operating model
 
@@ -201,13 +198,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-shadow-run | Shadow week wiring and run: the mail clerk's process runs the slice read-only over Synthetic, keeps the Shadow log sealed, reads back daily, shows the agreement line in STATUS; then seven days on the owner's real mailbox (EVL-2, D-152). | TN-shadow (#2878); G1 on the M6 Ultra; #3059 | queued (release; sub A; tier A; after G1) |
 | TN-account-plan-guests | Unconnected accounts listed to guests through `resources` as "exists, not connected", service name and kind only, private content (PLN-7, PLN-3). | #3189; a `resources` server | queued (release; tier A) |
 | TN-alert-guard-a22 | A22 contract run: confirm Gmail's own Received protocol on SMTP, POP, import and insert mail, which the alert guard's provider-hop rule rests on (TN-alert-guard-forged-ar). | #3201 | queued (release; tier A) |
-| WIFI-del-a | Delete the core's access point, Wi-Fi join and captive passthrough (D-178): agentos-ap, agentos-netjoin, apnet, netjoin, localui's AP loader, hostapd, station and claim-Wi-Fi code, agentosd's AP, rotation, uplink and setup-Wi-Fi wiring, and setup's home-network step; the core's uplink is its cable to the enforcer | #3233, the cmd/agentosd chain (#3175) | building (tier A; brief to write) |
-| WIFI-del-b | Image and CI side of D-178: remove hostapd, dnsmasq-base, the Wi-Fi firmware, agentos-ap.service, agentos-netjoin.service and their polkit and D-Bus files from the image and exec.allow, drop CI's hostapd step, and move image/ci_boot.sh's mac80211_hwsim and NetworkManager checks to the wired uplink | WIFI-del-a (#3234) | queued (tier A; brief to write) |
+| WIFI-del-b | Image and CI side of D-178: remove hostapd, dnsmasq-base, the Wi-Fi firmware, agentos-ap.service, agentos-netjoin.service and their polkit and D-Bus files from the image and exec.allow, drop CI's hostapd step, and move image/ci_boot.sh's mac80211_hwsim and NetworkManager checks to the wired uplink | WIFI-del-a (#3234) | building (tier A; brief to write) |
 | TN-account-plan-imap-scope | IMAP account plan folder scope: i10 wording covers shared-namespace APPEND (or skip non-personal namespaces); spam on servers without SPECIAL-USE recorded or excluded. | #3247 | queued (later; tier A) |
-| WIFI-del-offline-note | Setup's offline text names the core's cable to the enforcer (D-178, #3326 UX 1). | WIFI-del-a1 (#3326) | queued (release; tier B) |
 | WIFI-del-c | The claim sticker and Owner Card name the page by the core's name, not the access point's 10.42.0.1 (D-178, release finding from WIFI-del-a3) | #3234 a3 | building (tier A; brief to write) |
 | WIFI-del-d | The claim sticker's step 1 is the enforcer's setup network, and the seller stops sealing one for the core (D-178, release finding from WIFI-del-c) | #3349, the enforcer's preload path | queued (tier A; brief to write) |
 | WIFI-del-e | The Owner Card drops its Box Wi-Fi section, Wi-Fi QR and the rotation's Wi-Fi part, and its quick-start starts from the enforcer's setup network (D-178, split from WIFI-del-d) | WIFI-del-b (#3235), #3355 | queued (release; tier A; brief to write) |
+| HW12-port1-set | The page's firewall rule admits only port 1's interface (a named set, not `en*`), and Port1 refuses a name the rule cannot admit, saying why (HW-12, CH-9; #3350 release findings). | WIFI-del-a3 (#3350) | building (release; tier A; brief to write) |
+| WIFI-del-nm | Remove NetworkManager, wpasupplicant and polkitd from the image (D-178): their only job was the home Wi-Fi station (#936), which WIFI-del-b removed; drop their packages, conf.d file, unit drop-ins, exec.allow entries, mkosi.finalize's networkmanager and nm_unit checks, tests/test_image_nm.py and ci_boot.sh's NetworkManager check | WIFI-del-b (#3235) | queued (tier A; brief to write) |
 
 ## Devices, hardware and image (SPEC §13-14)
 
@@ -274,9 +271,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DEV-withings-ble-e | Export the Withings cloud history once after the first good local read (PLN-3; part e of #3272) | #3272 parts b, c, d | queued(tier A; lane primary; brief briefs/DEV-withings-ble.md) |
 | CLK-phone | CLK-phone: Wi-Fi-only Android phone (GrapheneOS Pixel) on the core by USB, driven by adb and UI automation with the browser clerk's protections: screenshot-checked steps, app allowlist, per-app keys, approval for money and deletion; traffic only via declared routes and the enforcer; iPhone excluded (later; CLK-5, NET-2) | browser clerk, enforcer, STO-2 | queued(tier A; lane primary; later; brief to write; Mark 2026-10-26) |
 | DEV-homekit | HomeKit (HAP) device clerk: local pairing by setup code, pinned accessory key, service/characteristic operations; first target the owner's T10 Pro thermostats (DEV-1, DEV-3, DEV-4, DEV-10; D-182) | brief; #3258; enforcer hardware for live tests | queued(tier A; brief briefs/DEV-homekit.md) |
-| DEVSLOT-drivers | DEVSLOT-drivers: a defined device-driver slot so the core and enforcer load private vendor drivers under the same review rules; L1 spec diff rewords the Withings references under DEV-12/D-184 to the slot (DEV-1, DEV-4, DEV-12, KRN-2; brief to write) | device clerk base | building(tier A; lane primary; brief to write; Mark 2026-10-26) |
+| DEVSLOT-drivers | DEVSLOT-drivers: a defined device-driver slot so the core and enforcer load private vendor drivers under the same review rules; L1 spec diff rewords the Withings references under DEV-12/D-184 to the slot (DEV-1, DEV-4, DEV-12, KRN-2; brief to write) | device clerk base | queued(tier A; lane primary; brief to write; Mark 2026-10-26) |
 | DEVSLOT-withings-move | DEVSLOT-withings-move: remove broker/clerk/withings; the code moves to private ghbmrk/agentos-private as fresh files, running until the slot has merged (DEV-12, KRN-2) | DEVSLOT-drivers, #3276 | queued(tier A; lane primary; after the slot merges; Mark 2026-10-26) |
-| DEVSLOT-shapes | DEVSLOT-shapes: report or refuse wildcard driver wire shapes in the slot's conformance suite; part-b notes from #3356 reviews (DEV-4, DEV-8) | #3356 | queued(tier A; lane primary; class:release from #3356 reviews) |
+| DEVSLOT-tails | DEVSLOT-tails: unprefixed driver shapes count as wide; a go list listing missing a dependency fails (DEV-4, DEVSLOT-a-4, a-7) | #3371 | building(tier A; lane primary; class:release from #3371 reviews) |
 
 ## Model routes and the Codex lane
 
@@ -367,7 +364,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-2 split doc | KRN-2 split doc: LANES.md's owner seam names `run.Kernel.With` in broker/clerk/run; it is now `kernelproc.Kernel.With` (found on KRN-2 split). | KRN-2 | queued (later) |
 | TN-graph-brake | TN-graph `bounded` accepts a held brake only when turning it off is itself delayed or the witness watches the brake (KRN-11; #3193 Security 4, Potency 2). | TN-graph (#2857) | queued (later; tier A) |
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
-| KRN-reseal-backoff | A re-seal's backoff after an in-flight refusal, and from its finish rather than its hand-out (#3332 later findings) | #3332 | queued (later) |
+| KRN-reseal-backoff | A re-seal's backoff after an in-flight refusal, and from its finish rather than its hand-out; adopt the process-level erase-while-table-in-flight probe (#3332 later findings, #3378 Security 1) | #3332 | building (release) |
+| PAGE-seam-test | A test pins daemon.Run's page-socket seams (Certify, Passkeys) to localsrv, so dropping the page-to-kernel wiring fails (#3380 Potency; CH-9) | #3380 | building (release; tier A; size S) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -383,4 +381,5 @@ issue #3227: body has no board-row block
 issue #3274: body has no board-row block
 issue #3313: body has no board-row block
 issue #3325: body has no board-row block
+issue #3391: body has no board-row block
 ```
