@@ -269,6 +269,10 @@ func typed(err error) error {
 		return ErrAnchor
 	case setupOnlyText:
 		return ErrSetupOnly
+	case noAuthorityText:
+		return ErrNoAuthority
+	case pageRestoreText:
+		return ErrPageRestore
 	}
 	return err
 }
@@ -384,4 +388,38 @@ func (o Owner) Backups(ctx context.Context) (BackupsView, error) {
 	var v BackupsView
 	err := typed(o.call(ctx, "backups", nil, &v))
 	return v, err
+}
+
+// The page's serving certificate (CH-9, MIG-4-recovery-f1): the kernel
+// holds the page authority and signs the page's serving key for the page
+// name only; the authority's key never leaves the kernel's process.
+
+// ErrNoAuthority: the kernel holds no page authority, so the page serves
+// HTTP only.
+var ErrNoAuthority = errors.New("kernelsock: the kernel holds no page authority")
+
+// ErrPageRestore: the box is claimed but its kernel holds no page
+// authority; it must be restored, never given a new one.
+var ErrPageRestore = errors.New("kernelsock: the claimed box has no page authority; restore it")
+
+// noAuthorityText and pageRestoreText are kernel/proc ErrNoAuthority's and
+// ErrPageRestore's texts; TestCertifyReachesTheKernel keeps them the same.
+const (
+	noAuthorityText = "run: my store holds no page authority, so I certify no page key"
+	pageRestoreText = "run: I am claimed but hold no page authority; restore me from a backup"
+)
+
+// Certify asks the kernel to sign pub, the page's serving public key in
+// PKIX DER (ECDSA P-256 only), and returns the leaf and the authority's
+// certificate, both DER. A setup-only kernel serves it, since setup's
+// passkeys are made on the page.
+func (o Owner) Certify(ctx context.Context, pub []byte) (leaf, authority []byte, err error) {
+	var c struct {
+		Leaf      []byte `json:"leaf"`
+		Authority []byte `json:"authority"`
+	}
+	err = typed(o.call(ctx, "certify", struct {
+		Key []byte `json:"key"`
+	}{pub}, &c))
+	return c.Leaf, c.Authority, err
 }

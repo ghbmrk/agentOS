@@ -12,6 +12,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net"
@@ -27,6 +28,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // testOwnerUID stands in for agentos-owner: a uid no test process runs as.
@@ -630,5 +632,69 @@ func TestBackupsReachTheKernel(t *testing.T) {
 	}
 	if v, err = o.Backups(ctx); err != nil || !v.Targets[0].Removed || len(v.Backups) != 1 {
 		t.Fatalf("after the removal: %+v %v", v, err)
+	}
+}
+
+// REQ: CH-9
+// MIG-4-recovery-f1: the page's serving key reaches the kernel, which
+// signs it with the authority only it holds; a kernel with none answers
+// ErrNoAuthority before setup and ErrPageRestore once claimed, here as
+// this package's own errors, so the texts stay the kernel's.
+func TestCertifyReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	a, err := pageca.New(pageca.DefaultName, time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, err := pageca.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(pageCA []byte, anchors []key.PublicKey) Owner {
+		pub, priv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, err := proc.OpenKernel(proc.KernelConfig{
+			Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: pub, Sign: priv,
+			Anchors: anchors, PageCA: pageCA,
+		}, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { h.Close() })
+		path := filepath.Join(runDir(t), "owner.sock")
+		ln, err := proc.ListenKernel(path, testOwnerUID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+		return Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+	}
+	sk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&sk.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, auth, err := serve(ca, nil).Certify(ctx, der)
+	if err != nil || !bytes.Equal(auth, a.Certificate()) {
+		t.Fatalf("certify: %v", err)
+	}
+	if c, err := x509.ParseCertificate(leaf); err != nil || len(c.DNSNames) != 1 || c.DNSNames[0] != pageca.DefaultName {
+		t.Fatalf("the leaf: %v", err)
+	}
+	if _, _, err := serve(nil, nil).Certify(ctx, der); !errors.Is(err, ErrNoAuthority) {
+		t.Fatalf("no authority: %v", err)
+	}
+	if _, _, err := serve(nil, publics(anchorSigners(t))).Certify(ctx, der); !errors.Is(err, ErrPageRestore) {
+		t.Fatalf("claimed with no authority: %v", err)
+	}
+	if noAuthorityText != proc.ErrNoAuthority.Error() || pageRestoreText != proc.ErrPageRestore.Error() {
+		t.Fatal("the refusals' texts are not the kernel's")
 	}
 }

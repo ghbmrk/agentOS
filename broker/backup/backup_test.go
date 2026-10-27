@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -35,7 +34,7 @@ func readAll(t *testing.T, obj, rk []byte) (Manifest, map[string][]byte, []byte)
 	return m, got, plain
 }
 
-func TestManifestCarriesPageCAAndEdgeOnly(t *testing.T) {
+func TestManifestCarriesPageCAOnly(t *testing.T) {
 	r := newRig(t)
 	sub := r.open()
 	r.seal(sub, "hello")
@@ -45,11 +44,10 @@ func TestManifestCarriesPageCAAndEdgeOnly(t *testing.T) {
 	rec, obj := r.backup(rcp, tg)
 
 	m, secs, plain := readAll(t, obj, rk1)
-	if string(m.PageCA) != "page-ca-canary" || string(m.EdgeKey) != "edge-key-canary" ||
-		!reflect.DeepEqual(m.RevokedEdge, in.RevokedEdge) {
-		t.Fatalf("manifest lost the page CA, edge key or revoked record: %+v", m)
+	if string(m.PageCA) != "page-ca-canary" || rec.PageCA != "CAFE F00D" {
+		t.Fatalf("manifest or record lost the page CA: %+v %q", m, rec.PageCA)
 	}
-	if m.BackupID != rec.BackupID || m.Recipient != rcp.ID() || m.Created != in.Created || m.Version != 1 {
+	if m.BackupID != rec.BackupID || m.Recipient != rcp.ID() || m.Created != in.Created || m.Version != manifestVersion {
 		t.Fatalf("manifest header fields: %+v", m)
 	}
 	if !bytes.Equal(secs["log"], r.log.B) || len(m.Sections) != 2 || m.Sections[1].Name != "content/mail" {
@@ -223,6 +221,74 @@ func TestOpenRefusesTrailingBytesAndATableGeneration(t *testing.T) {
 	for _, gen := range []uint64{1, firstGeneration + 1} {
 		if _, _, err := Open(bytes.NewReader(contentObject(t, rcp, gen, m, []byte("logged"), nil)), rk1); !errors.Is(err, ErrHeader) {
 			t.Errorf("generation %d: %v, want ErrHeader", gen, err)
+		}
+	}
+}
+
+// REQ: BAK-1, HW-15
+// MIG-4-recovery-f1 decision 4: the edge key and its revocations are log
+// entries, so the manifest has no copy of them that could disagree with
+// the log. The new version has neither field and refuses one that names
+// them; a version 1 backup, which had both, still opens, and they are
+// dropped unread.
+func TestManifestHasNoEdgeFields(t *testing.T) {
+	r := newRig(t)
+	sub := r.open()
+	r.seal(sub, "hello")
+	rcp := recipient(t, rk1)
+	rec, obj := r.backup(rcp, &MemTarget{})
+	full, err := openBytes(obj, rk1, KindContent)
+	must(t, err)
+	n := binary.BigEndian.Uint32(full)
+	var raw map[string]json.RawMessage
+	must(t, json.Unmarshal(full[4:4+n], &raw))
+	for _, f := range []string{"edge_key", "revoked_edge"} {
+		if _, ok := raw[f]; ok {
+			t.Errorf("the manifest has %s", f)
+		}
+	}
+	if string(raw["version"]) != "2" {
+		t.Fatalf("manifest version %s, want 2", raw["version"])
+	}
+
+	// craft seals a manifest of version v, with the edge fields when edge
+	// is set, before the rig's sections, as Write would.
+	in := r.input(rcp)
+	craft := func(v int, edge bool) []byte {
+		id, err := parseID(rec.BackupID)
+		must(t, err)
+		m := map[string]any{"version": v, "backup_id": rec.BackupID, "created": in.Created,
+			"recipient": rcp.ID(), "page_ca": in.PageCA}
+		if edge {
+			m["edge_key"], m["revoked_edge"] = []byte("edge-key-canary"), [][]byte{[]byte("revoked-fp-1")}
+		}
+		var secs []Section
+		var body []byte
+		for _, s := range in.Sections {
+			var b bytes.Buffer
+			n, sum, err := hashSource(s, &b)
+			must(t, err)
+			secs, body = append(secs, Section{Name: s.Name, Length: n, SHA256: sum}), append(body, b.Bytes()...)
+		}
+		m["sections"] = secs
+		mb, err := json.Marshal(m)
+		must(t, err)
+		var out bytes.Buffer
+		sw, err := sealTo(&out, rcp, header{kind: KindContent, backupID: id})
+		must(t, err)
+		_, err = sw.Write(append(binary.BigEndian.AppendUint32(nil, uint32(len(mb))), append(mb, body...)...))
+		must(t, err)
+		must(t, sw.Close())
+		return out.Bytes()
+	}
+	old, got, _ := readAll(t, craft(1, true), rk1)
+	if old.Version != 1 || string(old.PageCA) != "page-ca-canary" || !bytes.Equal(got["log"], r.log.B) {
+		t.Fatalf("a version 1 backup does not open: %+v", old)
+	}
+	readAll(t, craft(1, false), rk1) // version 1 without the fields opens too
+	for name, obj := range map[string][]byte{"v2 with edge fields": craft(2, true), "v3": craft(3, false)} {
+		if _, _, err := Open(bytes.NewReader(obj), rk1); err == nil {
+			t.Errorf("%s opened", name)
 		}
 	}
 }
