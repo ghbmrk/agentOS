@@ -120,8 +120,8 @@ func TestSMSLinkAndOTPSeed(t *testing.T) {
 // Details on the console carry headings only, never a value from a page.
 func TestHeadingIsSanitized(t *testing.T) {
 	for page, want := range map[string]string{
-		`<h1>Set up AgentOS</h1><h2>3. Owner Card</h2><p class="mono">SECRET</p>`: `"3. Owner Card"`,
-		`<h1>Claim <b>AgentOS</b></h1>`:                                           `"Claim AgentOS"`,
+		`<h1>Set up agentOS</h1><h2>3. Owner Card</h2><p class="mono">SECRET</p>`: `"3. Owner Card"`,
+		`<h1>Claim <b>agentOS</b></h1>`:                                           `"Claim agentOS"`,
 		`<h1>Bad <script>&lt;x&gt;</script></h1>`:                                 `"Bad x"`,
 		`plain`: `"(no heading)"`,
 	} {
