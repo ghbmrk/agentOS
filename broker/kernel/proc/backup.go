@@ -35,7 +35,10 @@ import (
 // so a lying owner side cannot mark one. It keeps every backup's Record in
 // one file in its backup directory, sealed under the log key, and at start
 // builds the backup.Set an erase re-seals through (LOG-4, D-168, #3188),
-// removed targets included. The owner side only triggers, chooses and tells.
+// removed targets included. The log names every backup (backup.taken)
+// before its key table leaves, so at start the Set is the union of the log
+// and that file, and a rolled-back file hides none (#3316). The owner side
+// only triggers, chooses and tells.
 
 var (
 	// ErrBackupsOff: the kernel was started with no backup directory (tests
@@ -75,11 +78,17 @@ func recordsAAD() []byte { return []byte("agentos.backup.records.v1") }
 // before the table leaves, so a table never reaches a target without a
 // kept Record (LOG-4); its Record lacks only the content and table sums,
 // which an erase does not use. One that never finished stays pending and
-// unverified, and in the Set.
+// unverified, and in the Set. Upto is the log head's sequence number in
+// the backup's snapshot, as its backup.taken names it. Rebuilt is a
+// pending backup the start rebuilt from its backup.taken because the
+// records file lacked it: its Subjects are every subject opened at or
+// below Upto, whatever the key table holds.
 type Kept struct {
 	Target   string        `json:"target"`
 	Verified bool          `json:"verified"`
 	Pending  bool          `json:"pending,omitempty"`
+	Rebuilt  bool          `json:"rebuilt,omitempty"`
+	Upto     uint64        `json:"upto,omitempty"`
 	Record   backup.Record `json:"record"`
 }
 
@@ -93,6 +102,7 @@ type BackupView struct {
 	Generation uint64 `json:"generation"`
 	Verified   bool   `json:"verified"`
 	Pending    bool   `json:"pending,omitempty"`
+	Rebuilt    bool   `json:"rebuilt,omitempty"`
 }
 
 // TargetView is a destination as the owner side reads it. Rewritable is
@@ -127,7 +137,7 @@ type Taken struct {
 
 func (k Kept) view() BackupView {
 	return BackupView{Target: k.Target, BackupID: k.Record.BackupID, Recipient: k.Record.Recipient.ID(),
-		Created: k.Record.Created, Generation: k.Record.Generation, Verified: k.Verified, Pending: k.Pending}
+		Created: k.Record.Created, Generation: k.Record.Generation, Verified: k.Verified, Pending: k.Pending, Rebuilt: k.Rebuilt}
 }
 
 // backups is the kernel process's backup state. Every field but run, and
@@ -150,8 +160,10 @@ type backups struct {
 }
 
 // openBackups opens the records in dir under logKey, made 0700 if missing,
-// and builds the Set from them and the logged targets.
-func openBackups(cfg KernelConfig, keys kernel.Keys, st *kernel.State) (*backups, error) {
+// and builds the Set from them, the logged backups and the logged targets.
+// It runs before k is shared, so it takes no lock.
+func openBackups(cfg KernelConfig, keys kernel.Keys, k *kernel.Kernel, now int64) (*backups, error) {
+	st := k.State()
 	if err := os.Mkdir(cfg.BackupDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
 	}
@@ -187,21 +199,85 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, st *kernel.State) (*backups
 	if bk.kept, err = bk.load(); err != nil {
 		return nil, err
 	}
-	bk.set = backup.NewSet(bk.saveRecord)
 	targets := map[string]kernel.KeptTarget{}
 	for _, t := range st.BackupTargets() {
 		targets[t.Name] = t
 	}
 	for _, kp := range bk.kept {
-		t, ok := targets[kp.Target]
-		if !ok {
+		if _, ok := targets[kp.Target]; !ok {
 			return nil, fmt.Errorf("%w: a record names target %q, which the log never added", ErrRecordsFile, kp.Target)
 		}
-		if err := bk.set.Add(bk.target(t.BackupTarget), kp.Record); err != nil {
+	}
+	if err := bk.union(k, now); err != nil {
+		return nil, err
+	}
+	bk.set = backup.NewSet(bk.saveRecord)
+	for _, kp := range bk.kept {
+		if err := bk.set.Add(bk.target(targets[kp.Target].BackupTarget), kp.Record); err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrRecordsFile, err)
 		}
 	}
 	return bk, nil
+}
+
+// taken is the backup.taken that names kp, its snapshot at upto.
+func taken(target string, rec backup.Record, upto uint64) kernel.BackupTaken {
+	return kernel.BackupTaken{BackupID: rec.BackupID, Target: target, Created: rec.Created, Upto: upto,
+		Recipient: kernel.BackupRecipient{X: rec.Recipient.X, EK: rec.Recipient.EK}}
+}
+
+// union makes kept and the log name the same backups (brief decisions 3
+// and 4). A kept record the log does not name (the log lost its entry, or
+// the record predates backup.taken) is logged, at its Upto, or at the head
+// when it has none, a superset of its subjects. A logged backup kept lacks
+// (the records file was rolled back or deleted, or the start came between
+// the entry and the save) is rebuilt as a pending backup. A record is never
+// dropped, so the Set only grows.
+func (bk *backups) union(k *kernel.Kernel, now int64) error {
+	st := k.State()
+	logged := map[string]bool{}
+	for _, b := range st.BackupsTaken() {
+		logged[b.BackupID] = true
+	}
+	dirty := false
+	for i := range bk.kept {
+		kp := &bk.kept[i]
+		if logged[kp.Record.BackupID] {
+			continue
+		}
+		if kp.Upto == 0 {
+			kp.Upto, dirty = uint64(k.Log().Len()), true
+		}
+		// The entry is not a widening, so an anchor error leaves it logged.
+		err := k.BackupTaken(now, taken(kp.Target, kp.Record, kp.Upto))
+		if err != nil && !slices.ContainsFunc(st.BackupsTaken(), func(b kernel.BackupTaken) bool { return b.BackupID == kp.Record.BackupID }) {
+			return fmt.Errorf("%w: backup %s is not in my log and I cannot log it: %w", ErrRecordsFile, kp.Record.BackupID, err)
+		}
+		logged[kp.Record.BackupID] = true
+	}
+	have := map[string]bool{}
+	for _, kp := range bk.kept {
+		have[kp.Record.BackupID] = true
+	}
+	for _, b := range st.BackupsTaken() {
+		if have[b.BackupID] {
+			continue
+		}
+		// Every subject opened by the snapshot, whatever the key table
+		// holds now: the key files sit beside records and may be deleted
+		// with it, and a live one whose key is missing makes the re-seal
+		// fail, so an erase names the backup held instead of skipping it.
+		subs := st.SubjectsUpto(b.Upto)
+		bk.kept = append(bk.kept, Kept{Target: b.Target, Pending: true, Rebuilt: true, Upto: b.Upto, Record: backup.Record{
+			BackupID: b.BackupID, Recipient: backup.Recipient{X: b.Recipient.X, EK: b.Recipient.EK},
+			Created: b.Created, Subjects: subs}})
+		have[b.BackupID], dirty = true, true
+	}
+	if dirty {
+		// Unsaved, the next start rebuilds and logs the same again.
+		_ = bk.save()
+	}
+	return nil
 }
 
 func (bk *backups) load() ([]Kept, error) {
@@ -366,6 +442,7 @@ func (l liveSet) Recall(s string) (kernel.Recall, bool) { return kernel.Recall{S
 // live keys, both read under the kernel's lock (brief decision 7).
 type backupSnap struct {
 	n    int64
+	upto uint64 // the log head's sequence number at n
 	keys *kernel.MemKeys
 	live liveSet
 }
@@ -375,7 +452,7 @@ func (h *Kernel) snap() (backupSnap, error) {
 	if err != nil {
 		return backupSnap{}, err
 	}
-	s := backupSnap{n: n, keys: kernel.NewMemKeys(), live: liveSet{}}
+	s := backupSnap{n: n, upto: uint64(h.k.Log().Len()), keys: kernel.NewMemKeys(), live: liveSet{}}
 	subs, err := h.bk.keys.List()
 	if err != nil {
 		return backupSnap{}, err
@@ -519,25 +596,30 @@ func (bk *backups) find(id string) int {
 	return -1
 }
 
-// pendingPut is a target that, before a key table goes out, saves the
-// backup as pending under the kernel's lock and adds it to the Set, and
-// sends nothing when that save fails (Security fix-list 1 on #3311).
+// pendingPut is a target that, before a key table goes out, logs and
+// anchors the backup's backup.taken, then saves it as pending, under the
+// kernel's lock, and adds it to the Set, and sends nothing when any of
+// those fails (Security fix-list 1 on #3311, #3316).
 type pendingPut struct {
 	backup.Target
-	h   *Kernel
-	t   kernel.BackupTarget
-	rec backup.Record // the pending Record, less its ID and generation
-	id  string        // set once the pending Record is saved
+	h    *Kernel
+	t    kernel.BackupTarget
+	rec  backup.Record // the pending Record, less its ID and generation
+	upto uint64        // the snapshot's log head
+	id   string        // set once the pending Record is saved
 	// inflight is set while the first key table is on its way.
 	inflight atomic.Bool
 }
 
 func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 	bk := p.h.bk
-	err := p.h.With(func(*kernel.Kernel) error {
+	err := p.h.With(func(k *kernel.Kernel) error {
 		rec := p.rec
 		rec.BackupID, rec.Generation = id, gen
-		bk.kept = append(bk.kept, Kept{Target: p.t.Name, Pending: true, Record: rec})
+		if err := k.BackupTaken(rec.Created, taken(p.t.Name, rec, p.upto)); err != nil {
+			return fmt.Errorf("run: the backup is not in my log, so nothing went out: %w", err)
+		}
+		bk.kept = append(bk.kept, Kept{Target: p.t.Name, Pending: true, Upto: p.upto, Record: rec})
 		if err := bk.save(); err != nil {
 			bk.kept = bk.kept[:len(bk.kept)-1]
 			return fmt.Errorf("run: the backup's record is not saved, so nothing went out: %w", err)
@@ -636,7 +718,7 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 		defer clear(ca)
 		caPrint = h.page.Fingerprint()
 	}
-	pp := &pendingPut{Target: tg, h: h, t: t, rec: backup.Record{Recipient: *bk.recipient, Created: now,
+	pp := &pendingPut{Target: tg, h: h, t: t, upto: snap.upto, rec: backup.Record{Recipient: *bk.recipient, Created: now,
 		Subjects: slices.Sorted(maps.Keys(snap.live)), PageCA: caPrint}}
 	rec, err := backup.Write(f, pp, backup.Input{
 		Recipient: *bk.recipient, Created: now, PageCA: ca, PageCAFingerprint: caPrint,

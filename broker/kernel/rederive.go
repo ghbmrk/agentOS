@@ -140,7 +140,7 @@ var recorded = map[string]bool{
 	TSpendExtend: true, TPoolRead: true, TReserveUp: true, TReserveDown: true,
 	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
 	TSubjectOpened: true, TContentStored: true, TSubjectErased: true, TEraseConfirmed: true,
-	TBackupTarget: true, TBackupUntarget: true, TEdgeRevoked: true, TEdgeCut: true,
+	TBackupTarget: true, TBackupUntarget: true, TBackupTaken: true, TEdgeRevoked: true, TEdgeCut: true,
 }
 
 // decision is decide's entry for a pending plan.
