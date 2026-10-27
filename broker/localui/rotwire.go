@@ -83,8 +83,7 @@ func newRotationID() (string, error) {
 
 // RotationStarted is the vault process's held rotation.
 type RotationStarted struct {
-	Parts    card.Parts
-	WiFiName string
+	Parts card.Parts
 	// Lost: the rotation replaces a lost card (every part).
 	Lost    bool
 	Expires time.Time
@@ -203,7 +202,6 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 	}
 	parts := st.Parts
 	d, err := card.NewDisplay(card.DisplayConfig{Generate: r.Generate, Journal: r.Journal, Rotate: &parts,
-		WiFiName:  st.WiFiName,
 		Provision: func(c *card.Card) error { return r.provision(id, c) },
 		Discarded: func() { r.cancel(id) }})
 	if err != nil {
@@ -346,12 +344,10 @@ func (r *Rotation) takeResult(req *http.Request) *RotationResult {
 }
 
 // partNames are the vault process's names for the card parts.
-var partNames = []string{"wifi", "setup", "passphrase", "grid", "recovery"}
+var partNames = []string{"setup", "passphrase", "grid", "recovery"}
 
 func partSet(p *card.Parts, name string) bool {
 	switch name {
-	case "wifi":
-		p.WiFi = true
 	case "setup":
 		p.Setup = true
 	case "passphrase":
@@ -368,7 +364,7 @@ func partSet(p *card.Parts, name string) bool {
 
 func partList(p card.Parts) []string {
 	var out []string
-	for i, on := range []bool{p.WiFi, p.Setup, p.Passphrase, p.Grid, p.Recovery} {
+	for i, on := range []bool{p.Setup, p.Passphrase, p.Grid, p.Recovery} {
 		if on {
 			out = append(out, partNames[i])
 		}
@@ -379,11 +375,10 @@ func partList(p card.Parts) []string {
 // BeginRotation implements RotationVault.
 func (u *UnlockClient) BeginRotation(ctx context.Context, b RotationBegin) (RotationStarted, error) {
 	var out struct {
-		ID       string   `json:"id"`
-		Parts    []string `json:"parts"`
-		WiFiName string   `json:"wifi_name"`
-		Lost     bool     `json:"lost"`
-		Expires  string   `json:"expires"`
+		ID      string   `json:"id"`
+		Parts   []string `json:"parts"`
+		Lost    bool     `json:"lost"`
+		Expires string   `json:"expires"`
 	}
 	err := u.do(ctx, http.MethodPost, "/rotate/begin", struct {
 		ID         string   `json:"id"`
@@ -399,7 +394,7 @@ func (u *UnlockClient) BeginRotation(ctx context.Context, b RotationBegin) (Rota
 	if out.ID != b.ID {
 		return RotationStarted{}, errors.New("vault: the rotation begun is not the one asked for")
 	}
-	st := RotationStarted{WiFiName: out.WiFiName, Lost: out.Lost}
+	st := RotationStarted{Lost: out.Lost}
 	for _, n := range out.Parts {
 		if !partSet(&st.Parts, n) {
 			return RotationStarted{}, fmt.Errorf("vault: unknown card part %q", n)
@@ -419,13 +414,12 @@ func (u *UnlockClient) CommitRotation(ctx context.Context, id string, c card.Car
 	}
 	err := u.do(ctx, http.MethodPost, "/rotate/commit", struct {
 		ID              string `json:"id"`
-		WiFiPassword    string `json:"wifi_password,omitempty"`
 		SetupSecret     string `json:"setup_secret,omitempty"`
 		SetupCode       string `json:"setup_code,omitempty"`
 		VaultPassphrase string `json:"vault_passphrase,omitempty"`
 		GridSeed        []byte `json:"grid_seed,omitempty"`
 		RecoveryKey     string `json:"recovery_key,omitempty"`
-	}{id, c.WiFiPassword, c.SetupSecret, c.SetupCode, c.VaultPassphrase, c.GridSeed, c.RecoveryKey}, &out)
+	}{id, c.SetupSecret, c.SetupCode, c.VaultPassphrase, c.GridSeed, c.RecoveryKey}, &out)
 	if err != nil {
 		return RotationResult{}, err
 	}
@@ -556,9 +550,9 @@ func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotati
 		b.Starter = tokenKey(tok)
 	}
 	for _, n := range r.PostForm["parts"] {
-		// The core runs no access point (CH-9, D-178): no card part puts
-		// a Wi-Fi password on the air, so none is replaced.
-		if n == "wifi" || !partSet(&b.Parts, n) {
+		// The core runs no access point (CH-9, D-178): the card has no
+		// Wi-Fi part, so "wifi" is an unknown part like any other.
+		if !partSet(&b.Parts, n) {
 			w.WriteHeader(http.StatusBadRequest)
 			s.render(w, "rotate", rotateView{Err: "Choose the card parts to replace."})
 			return

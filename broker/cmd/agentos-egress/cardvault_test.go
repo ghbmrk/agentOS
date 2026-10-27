@@ -129,7 +129,7 @@ func newCard(t *testing.T) recovery.Card {
 }
 
 func provisionBody(c recovery.Card) map[string]any {
-	return map[string]any{"wifi_name": c.WiFiName, "wifi_password": c.WiFiPassword, "setup_secret": c.SetupSecret,
+	return map[string]any{"setup_secret": c.SetupSecret,
 		"setup_code": c.SetupCode, "vault_passphrase": c.VaultPassphrase, "grid_seed": c.GridSeed, "recovery_key": c.RecoveryKey}
 }
 
@@ -172,7 +172,7 @@ func TestProvisionCarriesTheCodeSeedIntoTheCardsVault(t *testing.T) {
 		t.Fatalf("provision: %d %v", code, out)
 	}
 	for _, v := range out {
-		if s, _ := v.(string); s != "" && strings.Contains(card.VaultPassphrase+card.RecoveryKey+card.WiFiPassword+card.SetupSecret, s) {
+		if s, _ := v.(string); s != "" && strings.Contains(card.VaultPassphrase+card.RecoveryKey+card.SetupSecret, s) {
 			t.Fatal("the answer echoes the card")
 		}
 	}
@@ -183,7 +183,7 @@ func TestProvisionCarriesTheCodeSeedIntoTheCardsVault(t *testing.T) {
 		!hasKind(x.c.v, SetupOpenName, KindSetupOpen) {
 		t.Fatal("the setup vault's entries did not carry into the card's vault")
 	}
-	if got, err := (&recovery.Box{V: x.c.v}).LoadCard(); err != nil || got.SetupSecret != card.SetupSecret || got.WiFiPassword != card.WiFiPassword {
+	if got, err := (&recovery.Box{V: x.c.v}).LoadCard(); err != nil || got.SetupSecret != card.SetupSecret {
 		t.Fatalf("card not stored: %v", err)
 	}
 

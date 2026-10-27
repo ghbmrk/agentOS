@@ -18,8 +18,6 @@ import (
 
 func cardPart(c Card, p Part) string {
 	switch p {
-	case PartWiFi:
-		return c.WiFiPassword
 	case PartSetup:
 		return c.SetupSecret + c.SetupCode
 	case PartPassphrase:
@@ -51,13 +49,10 @@ func TestEveryCardSecretRotatesAloneAsATier4Action(t *testing.T) {
 				t.Errorf("rotating %s: %s is on the new card", p, q)
 			}
 		}
-		if nc.WiFiName != x.card.WiFiName {
-			t.Errorf("rotating %s renamed the Wi-Fi", p)
-		}
 		stored, err := x.b.LoadCard()
 		must(t, err)
 		switch p {
-		case PartWiFi, PartSetup, PartGrid:
+		case PartSetup, PartGrid:
 			if cardPart(stored, p) != cardPart(nc.Card, p) {
 				t.Errorf("rotating %s: vault card not updated", p)
 			}
@@ -99,7 +94,7 @@ func TestReplacingAFactorNeedsAFactorThatOpensTheDrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Parts that rewrite no slot need no factor.
-	_, err = x.rotate([]Part{PartWiFi, PartGrid}, Auth{Code: true, Local: true}, Proof{})
+	_, err = x.rotate([]Part{PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{})
 	must(t, err)
 }
 
@@ -111,21 +106,21 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	keys, _ := os.ReadFile(x.b.KeysPath)
 	p, err := BeginRotate(x.b, AllParts, Auth{Recovery: x.rk}, Proof{}, t0)
 	must(t, err)
-	if fmt.Sprint(p.Parts()) != fmt.Sprint(AllParts) || p.WiFiName() != x.card.WiFiName {
-		t.Fatalf("pending parts %v, Wi-Fi name kept %v", p.Parts(), p.WiFiName() == x.card.WiFiName)
+	if fmt.Sprint(p.Parts()) != fmt.Sprint(AllParts) {
+		t.Fatalf("pending parts %v", p.Parts())
 	}
 	unchanged := func(what string) {
 		t.Helper()
 		now, _ := os.ReadFile(x.b.KeysPath)
 		stored, _ := x.b.LoadCard()
-		if !bytes.Equal(keys, now) || stored.WiFiPassword != x.card.WiFiPassword {
+		if !bytes.Equal(keys, now) || stored.SetupSecret != x.card.SetupSecret {
 			t.Fatalf("%s changed the drive", what)
 		}
 	}
 	unchanged("beginning a rotation")
 	next := newParts(p)
 	bad := map[string]Card{
-		"a missing part":      trimParts(next, []Part{PartWiFi, PartSetup, PartPassphrase, PartGrid}),
+		"a missing part":      trimParts(next, []Part{PartSetup, PartPassphrase, PartGrid}),
 		"a malformed key":     func() Card { c := next; c.RecoveryKey = "NOT-A-KEY"; return c }(),
 		"a half setup secret": func() Card { c := next; c.SetupCode = ""; return c }(),
 	}
@@ -137,7 +132,7 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	}
 	nc, err := p.Commit(x.b, next, t0.Add(time.Minute))
 	must(t, err)
-	if nc.RecoveryKey != next.RecoveryKey || nc.WiFiName != x.card.WiFiName {
+	if nc.RecoveryKey != next.RecoveryKey {
 		t.Fatal("committed card is not the one confirmed")
 	}
 	if _, err := p.Commit(x.b, next, t0); !errors.Is(err, ErrPendingLapsed) {
@@ -148,7 +143,7 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Recovery: nk}, Proof{}, t0)
 	must(t, err)
 	extra := newParts(q)
-	extra.WiFiPassword = next.WiFiPassword
+	extra.SetupSecret, extra.SetupCode = next.SetupSecret, next.SetupCode
 	if _, err := q.Commit(x.b, extra, t0); !errors.Is(err, ErrNextCard) {
 		t.Fatalf("extra part: %v", err)
 	}
@@ -157,7 +152,7 @@ func TestRotationTakesEffectOnlyWhenTheOwnerHasTheNewCard(t *testing.T) {
 	if _, err := q.Commit(x.b, newParts(q), t0); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("after cancel: %v", err)
 	}
-	r, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Recovery: nk}, Proof{}, t0)
+	r, err := BeginRotate(x.b, []Part{PartSetup}, Auth{Recovery: nk}, Proof{}, t0)
 	must(t, err)
 	if _, err := r.Commit(x.b, newParts(r), t0.Add(PendingTTL+time.Second)); !errors.Is(err, ErrPendingLapsed) {
 		t.Fatalf("after the time limit: %v", err)
@@ -182,7 +177,7 @@ func (f failing) KEK(s vault.Slot) ([]byte, error) {
 func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	x := newBox(t)
 	orig, _ := os.ReadFile(x.b.KeysPath)
-	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true},
+	p, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true},
 		Proof{Host: func() vault.Factor { return failing{Factor(x.rk), x.b.KeysPath, orig} }}, t0)
 	must(t, err)
 	next := newParts(p)
@@ -190,7 +185,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	if !errors.Is(err, ErrCardNotStored) {
 		t.Fatalf("partial rotation: %v", err)
 	}
-	if nc.VaultPassphrase != next.VaultPassphrase || nc.RecoveryKey != "" || nc.WiFiPassword != "" {
+	if nc.VaultPassphrase != next.VaultPassphrase || nc.RecoveryKey != "" || nc.SetupSecret != "" {
 		t.Fatal("returned card does not match what is in effect")
 	}
 	if _, err := vault.OpenSealed(x.b.VaultPath, x.b.KeysPath, vault.Passphrase(nc.VaultPassphrase)); err != nil {
@@ -198,10 +193,10 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// The unfinished rotation is recorded: no backup is sealed to the
 	// key it was replacing until a rotation covering it completes.
-	// What the lost-card rotation owes: every part it rotated (the Wi-Fi
-	// password, setup secret and grid were never stored; #1090 review F3),
+	// What the lost-card rotation owes: every part it rotated (the setup
+	// secret and grid were never stored; #1090 review F3),
 	// and the re-encryption.
-	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[wifi setup passphrase grid recovery refresh]" {
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[setup passphrase grid recovery refresh]" {
 		t.Fatalf("unfinished rotation not recorded: %v %v", parts, ok)
 	}
 	var buf bytes.Buffer
@@ -210,7 +205,7 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	}
 	// A rotation that leaves out an owed part is refused, so the lost
 	// card's grid and setup secret cannot stay valid (L3 F3 on #64).
-	for _, parts := range [][]Part{{PartWiFi}, {PartPassphrase, PartRecovery}, {PartPassphrase, PartRecovery, PartSetup}} {
+	for _, parts := range [][]Part{{PartGrid}, {PartPassphrase, PartRecovery}, {PartPassphrase, PartRecovery, PartSetup}} {
 		if _, err := x.rotate(parts, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}); !errors.Is(err, ErrRotationOwed) {
 			t.Fatalf("rotating %v while parts are owed: %v", parts, err)
 		}
@@ -218,12 +213,12 @@ func TestAPartialRotationReturnsWhatIsInEffect(t *testing.T) {
 	// Nor does Refresh pay what the slots owe.
 	_, err = Refresh(x.b, Auth{Code: true, Local: true}, x.rk, []byte(nc.VaultPassphrase), nil, t0)
 	must(t, err)
-	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[wifi setup passphrase grid recovery]" {
+	if parts, _ := RotationUnfinished(x.b); fmt.Sprint(parts) != "[setup passphrase grid recovery]" {
 		t.Fatalf("after Refresh: %v", parts)
 	}
 	// Finishing it clears the marker, and backups resume under the new key.
 	// The finishing rotation has the card, but shows the lost-card notes.
-	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid, PartWiFi}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
+	fin, err := BeginRotate(x.b, []Part{PartPassphrase, PartRecovery, PartSetup, PartGrid}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk}, t0)
 	must(t, err)
 	if !fin.Lost() {
 		t.Fatal("a rotation finishing a lost-card one is not shown as lost")
@@ -288,14 +283,14 @@ func TestPendingWipesTheTypedPassphrase(t *testing.T) {
 	x := newBox(t)
 	x.withPassphrase()
 	typed := []byte(x.card.VaultPassphrase)
-	p, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
+	p, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
 	must(t, err)
 	held := p.proof.Passphrase
 	p.Cancel()
 	if p.proof.Passphrase != nil || bytes.Count(held, []byte{0}) != len(held) {
 		t.Fatal("cancelled rotation kept the passphrase")
 	}
-	q, err := BeginRotate(x.b, []Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
+	q, err := BeginRotate(x.b, []Part{PartGrid}, Auth{Code: true, Local: true}, Proof{Passphrase: typed}, t0)
 	must(t, err)
 	held = q.proof.Passphrase
 	q.Commit(x.b, newParts(q), t0.Add(PendingTTL+time.Second))
@@ -325,8 +320,8 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 	x.withPassphrase()
 	nc, err := x.rotate(AllParts, Auth{Recovery: x.rk}, Proof{})
 	must(t, err)
-	for _, p := range []string{nc.WiFiPassword, nc.SetupSecret, nc.VaultPassphrase, nc.RecoveryKey} {
-		for _, o := range []string{x.card.WiFiPassword, x.card.SetupSecret, x.card.VaultPassphrase, x.card.RecoveryKey} {
+	for _, p := range []string{nc.SetupSecret, nc.VaultPassphrase, nc.RecoveryKey} {
+		for _, o := range []string{x.card.SetupSecret, x.card.VaultPassphrase, x.card.RecoveryKey} {
 			if p == "" || p == o {
 				t.Fatal("rotate-all kept a value")
 			}
@@ -346,11 +341,11 @@ func TestRotateEverythingWithTheRecoveryKey(t *testing.T) {
 		t.Fatalf("owner state after a new grid: %+v %v", st, err)
 	}
 	for _, s := range []string{nc.String(), nc.GoString(), fmt.Sprintf("%v %+v", nc, nc)} {
-		if strings.Contains(s, nc.VaultPassphrase) || strings.Contains(s, nc.WiFiPassword) {
+		if strings.Contains(s, nc.VaultPassphrase) || strings.Contains(s, nc.SetupSecret) {
 			t.Fatalf("card formats a secret: %q", s)
 		}
 	}
-	if len(DoneNotes(AllParts, false)) != 5 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card still opens backups") {
+	if len(DoneNotes(AllParts, false)) != 4 || !strings.HasPrefix(DoneNotes(AllParts, true)[0], "Your lost card still opens backups") {
 		t.Fatal("done page notes")
 	}
 }
@@ -437,18 +432,18 @@ func TestReservedEntriesOfAnotherKindFailClosed(t *testing.T) {
 
 func TestCardSecretsAreRedactedFromAgentOutput(t *testing.T) {
 	x := newBox(t)
-	nc, err := x.rotate([]Part{PartWiFi}, Auth{Code: true, Local: true}, Proof{})
+	nc, err := x.rotate([]Part{PartSetup}, Auth{Code: true, Local: true}, Proof{})
 	must(t, err)
 	red, err := x.b.V.Redactor()
 	must(t, err)
-	for _, v := range []string{nc.WiFiPassword, x.card.SetupSecret} {
+	for _, v := range []string{nc.SetupSecret} {
 		out := string(red.Redact([]byte("the agent saw " + v + " somewhere")))
 		if strings.Contains(out, v) {
 			t.Fatalf("card secret not redacted: %q", out)
 		}
 	}
-	// The rotated-out Wi-Fi password is no longer a vault value.
-	if s, ok := x.b.V.Secret(CardName + "-wifi"); !ok || s.Reveal() != nc.WiFiPassword {
+	// The rotated-out setup secret is no longer a vault value.
+	if s, ok := x.b.V.Secret(CardName + "-setup"); !ok || s.Reveal() != nc.SetupSecret {
 		t.Fatal("card part entry not updated")
 	}
 }

@@ -15,12 +15,19 @@ func TestEveryCardNetworkIsValidAndRoundTrips(t *testing.T) {
 	if alphabet != card.Alphabet {
 		t.Fatal("apnet's alphabet drifted from the card's")
 	}
-	for i := 0; i < 50; i++ {
-		c, err := card.Generate(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
+	// The card no longer carries a network (WIFI-del-e, #3365): these are
+	// drawn as the card drew them, a four-symbol name and a 16-symbol
+	// password in groups of four.
+	syms := func(k int) string {
+		b := make([]byte, k)
+		rand.Read(b)
+		for i := range b {
+			b[i] = card.Alphabet[b[i]&31]
 		}
-		n := Network{SSID: c.WiFiName, Password: c.WiFiPassword}
+		return string(b)
+	}
+	for i := 0; i < 50; i++ {
+		n := Network{SSID: "AgentOS-" + syms(4), Password: strings.Join([]string{syms(4), syms(4), syms(4), syms(4)}, "-")}
 		b, err := n.Marshal()
 		if err != nil {
 			t.Fatalf("a generated card's network refused: %v", err)

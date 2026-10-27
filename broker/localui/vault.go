@@ -190,16 +190,13 @@ func (u *UnlockClient) Confirm(ctx context.Context, ticket, code string, keepTru
 // ErrCodesUnconfirmed.
 func (u *UnlockClient) ProvisionCard(ctx context.Context, c *card.Card) error {
 	_, err := u.call(ctx, http.MethodPost, "/card/provision", provisionRequest{
-		WiFiName: c.WiFiName, WiFiPassword: c.WiFiPassword, SetupSecret: c.SetupSecret,
-		SetupCode: c.SetupCode, VaultPassphrase: c.VaultPassphrase, GridSeed: c.GridSeed,
+		SetupSecret: c.SetupSecret, SetupCode: c.SetupCode, VaultPassphrase: c.VaultPassphrase, GridSeed: c.GridSeed,
 		RecoveryKey: c.RecoveryKey})
 	return err
 }
 
 // provisionRequest is egress's /card/provision body.
 type provisionRequest struct {
-	WiFiName        string `json:"wifi_name"`
-	WiFiPassword    string `json:"wifi_password"`
 	SetupSecret     string `json:"setup_secret"`
 	SetupCode       string `json:"setup_code"`
 	VaultPassphrase string `json:"vault_passphrase"`

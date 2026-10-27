@@ -77,11 +77,10 @@ func newWireRig(t *testing.T) *wireRig {
 	return x
 }
 
-// wifiCheck is the confirm a Wi-Fi rotation asks for: the new password's
-// last four symbols.
-func (x *wireRig) wifiCheck() card.Answers {
-	w := card.Normalize(x.gen.WiFiPassword)
-	return card.Answers{Check: w[len(w)-4:]}
+// setupCheck is the confirm a setup rotation asks for: the new setup
+// code.
+func (x *wireRig) setupCheck() card.Answers {
+	return card.Answers{Check: x.gen.SetupCode}
 }
 
 func (x *wireRig) recoveryGroup() card.Answers {
@@ -94,14 +93,14 @@ func (x *wireRig) recoveryGroup() card.Answers {
 func TestTheLocalPageRotatesOverTheUnlockSocket(t *testing.T) {
 	x := newWireRig(t)
 	ctx := context.Background()
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := x.r.Display().ConfirmAnswers(x.wifiCheck()); err != nil {
+	if err := x.r.Display().ConfirmAnswers(x.setupCheck()); err != nil {
 		t.Fatal(err)
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.gen.WiFiPassword || got.WiFiName != x.card.WiFiName {
-		t.Fatal("the drive does not hold the confirmed Wi-Fi password")
+	if got := x.stored(t, x.rk); got.SetupSecret != x.gen.SetupSecret || got.SetupCode != x.gen.SetupCode {
+		t.Fatal("the drive does not hold the confirmed setup secret")
 	}
 }
 
@@ -112,17 +111,17 @@ func TestTheLocalPageRotatesOverTheUnlockSocket(t *testing.T) {
 func TestTheLocalPagesProvisionerMapsTheSocketsRefusals(t *testing.T) {
 	x := newWireRig(t)
 	ctx := context.Background()
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
 	x.clk.add(recovery.PendingTTL + time.Second)
-	if err := x.r.Display().ConfirmAnswers(x.wifiCheck()); !errors.Is(err, card.ErrDiscard) {
+	if err := x.r.Display().ConfirmAnswers(x.setupCheck()); !errors.Is(err, card.ErrDiscard) {
 		t.Fatalf("lapsed: %v", err)
 	}
 	if _, err := x.r.Display().Page(); err == nil {
 		t.Fatal("a lapsed rotation kept its card")
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != x.card.SetupSecret {
 		t.Fatal("a lapsed rotation changed the card")
 	}
 
@@ -145,7 +144,7 @@ func TestTheLocalPagesProvisionerMapsTheSocketsRefusals(t *testing.T) {
 func TestTheLocalPagesCancelDropsThePendingRotation(t *testing.T) {
 	x := newWireRig(t)
 	ctx := context.Background()
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
 	if x.c.rot.p == nil {
@@ -183,18 +182,18 @@ func gone(err error) bool {
 func TestAStaleRotationsOpsCannotTouchTheNewerOne(t *testing.T) {
 	x := newWireRig(t)
 	ctx := context.Background()
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
 	a := x.ids.last()
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
 	b := x.ids.last()
 	if x.pendingID() != b || a == b {
 		t.Fatal("the newer rotation is not the one waiting")
 	}
-	if _, err := x.u.CommitRotation(ctx, a, card.Card{WiFiPassword: synthetic(t, "wifi-late-")}); !gone(err) {
+	if _, err := x.u.CommitRotation(ctx, a, card.Card{SetupSecret: synthetic(t, "setup-late-"), SetupCode: "LATE-CODE"}); !gone(err) {
 		t.Fatalf("late commit: %v", err)
 	}
 	if err := x.u.CancelRotation(ctx, a); !gone(err) {
@@ -203,13 +202,13 @@ func TestAStaleRotationsOpsCannotTouchTheNewerOne(t *testing.T) {
 	if x.pendingID() != b {
 		t.Fatal("a stale op dropped the newer rotation")
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.card.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != x.card.SetupSecret {
 		t.Fatal("a late commit changed the card")
 	}
-	if err := x.r.Display().ConfirmAnswers(x.wifiCheck()); err != nil {
+	if err := x.r.Display().ConfirmAnswers(x.setupCheck()); err != nil {
 		t.Fatal(err)
 	}
-	if got := x.stored(t, x.rk); got.WiFiPassword != x.gen.WiFiPassword {
+	if got := x.stored(t, x.rk); got.SetupSecret != x.gen.SetupSecret {
 		t.Fatal("the newer rotation's commit did not land")
 	}
 }
@@ -219,20 +218,20 @@ func TestAStaleRotationsOpsCannotTouchTheNewerOne(t *testing.T) {
 // it arrives late, so it cannot drop the rotation waiting meanwhile.
 func TestABeginWithNoAnswerIsCancelledByItsID(t *testing.T) {
 	x := newWireRig(t)
-	if _, err := x.u.BeginRotation(context.Background(), localui.RotationBegin{ID: newRotationID(), Code: x.next(), Parts: card.Parts{WiFi: true}}); err != nil {
+	if _, err := x.u.BeginRotation(context.Background(), localui.RotationBegin{ID: newRotationID(), Code: x.next(), Parts: card.Parts{Setup: true}}); err != nil {
 		t.Fatal(err)
 	}
 	waiting := x.pendingID()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the begin gets no answer
-	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{WiFi: true}}); err == nil {
+	if err := x.r.Start(ctx, localui.RotationBegin{Code: x.next(), Parts: card.Parts{Setup: true}}); err == nil {
 		t.Fatal("a begin with no answer started")
 	}
 	lost := x.ids.last()
 	if x.pendingID() != waiting {
 		t.Fatal("the cancel of a lost begin dropped the waiting rotation")
 	}
-	_, err := x.u.BeginRotation(context.Background(), localui.RotationBegin{ID: lost, Code: x.next(), Parts: card.Parts{WiFi: true}})
+	_, err := x.u.BeginRotation(context.Background(), localui.RotationBegin{ID: lost, Code: x.next(), Parts: card.Parts{Setup: true}})
 	if !gone(err) {
 		t.Fatalf("the lost begin, arriving late: %v", err)
 	}

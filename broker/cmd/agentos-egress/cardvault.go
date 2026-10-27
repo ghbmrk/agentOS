@@ -270,8 +270,6 @@ func (c *custody) syncMarksLocked(v *vault.Vault) {
 
 // provisionRequest is the confirmed card as the card step sends it.
 type provisionRequest struct {
-	WiFiName        string `json:"wifi_name"`
-	WiFiPassword    string `json:"wifi_password"`
 	SetupSecret     string `json:"setup_secret"`
 	SetupCode       string `json:"setup_code"`
 	VaultPassphrase string `json:"vault_passphrase"`
@@ -286,8 +284,7 @@ func cardRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWriter, *
 		if !read(w, r, &req) {
 			return
 		}
-		err := c.provisionCard(recovery.Card{WiFiName: req.WiFiName, WiFiPassword: req.WiFiPassword,
-			SetupSecret: req.SetupSecret, SetupCode: req.SetupCode, VaultPassphrase: req.VaultPassphrase,
+		err := c.provisionCard(recovery.Card{SetupSecret: req.SetupSecret, SetupCode: req.SetupCode, VaultPassphrase: req.VaultPassphrase,
 			GridSeed: req.GridSeed, RecoveryKey: req.RecoveryKey})
 		if err != nil {
 			fail(w, err)

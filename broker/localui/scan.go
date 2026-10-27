@@ -42,9 +42,9 @@ const (
 
 // ScanPassphrase reads the vault passphrase from a photo of the Owner Card
 // (CRED-8: scanned on the local page). The page has no script and plain
-// HTTP gets no live camera, so the phone uploads a photo instead. The card
-// carries two QR codes, the Wi-Fi join code and the passphrase; the photo
-// may hold either or both. A payload with a URI scheme (WIFI:, otpauth:,
+// HTTP gets no live camera, so the phone uploads a photo instead. A card
+// printed before WIFI-del-e (#3365) carries a Wi-Fi join code beside the
+// passphrase code; the photo may hold either or both. A payload with a URI scheme (WIFI:, otpauth:,
 // http:) is never the passphrase, which is words only.
 func ScanPassphrase(photo []byte) (string, error) {
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(photo))
