@@ -232,12 +232,19 @@ var learningPlane = map[string]struct {
 
 // The edge link's codec, hello and TLS configurations (EDGE-link-core c1,
 // #3296): the standard library only, and no socket, process or kernel
-// import of its own; the link process (agentos-link) owns those.
+// import of its own; the link process (agentos-link) owns those. The link
+// process (c2, #3297) links the codec, the kernel's pure edge helpers
+// (SmallOrder, HelloMsg) and the socket peer check, and no kernel process
+// code: it reaches the kernel only over its link socket. It listens (net,
+// syscall, x/sys/unix for SO_BINDTODEVICE) and starts one child, itself,
+// as the pre-store hello reader, through childproc; it opens no network
+// client.
 var edgeLink = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"edgelink": {nil, forbiddenStd},
+	"edgelink":         {nil, forbiddenStd},
+	"cmd/agentos-link": {[]string{"edgelink", "kernel", "sockets", "childproc", "golang.org/x/sys/unix"}, []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

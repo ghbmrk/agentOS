@@ -110,6 +110,7 @@ allow broker/cmd/agentos-holder/
 allow broker/cmd/agentos-hostdisk/
 allow broker/cmd/agentos-infer/
 allow broker/cmd/agentos-kernel/
+allow broker/cmd/agentos-link/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
 allow broker/cmd/agentos-netjoin/

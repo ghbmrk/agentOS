@@ -43,6 +43,10 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The core's end of the edge link (EDGE-link-core c2, #3297; HW-15, HW-16): the
+# link port's process, which asks the kernel about each edge key and signs its
+# handshakes through the kernel; it holds no key.
+wiring cmd/agentos-link
 # The kernel's process (MIG-4-run, #2682): it opens the log, boots the
 # kernel, and carries each call to a clerk's socket. It links no clerk's code
 # (KRN-2 split, #2892).
