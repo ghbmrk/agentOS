@@ -416,17 +416,6 @@ jobs:
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
-      - name: hostapd runs as its own user (#1426)
-        # As agentos-ap.service runs: root with its bounding set (no CAP_CHOWN, no
-        # CAP_DAC_OVERRIDE), no_new_privs, and hostapd's group as a supplementary
-        # group. The stub hostapd must report uid 61426 with NET_ADMIN and NET_RAW only.
-        working-directory: broker
-        run: |
-          go test -c -o /tmp/localui.test ./localui
-          sudo setpriv --no-new-privs --groups 61426 --inh-caps=-all \
-            --bounding-set=-all,+net_admin,+net_raw,+net_bind_service,+setuid,+setgid,+kill,+dac_read_search,+setpcap \
-            env AGENTOS_REQUIRE_APUSER=1 /tmp/localui.test -test.count=1 -test.v \
-            -test.run '^TestHostapdChildRunsAsItsOwnUser$'
       - name: agentosd calls the kernel as the owner side (#2682)
         # As agentosd.service runs: root with no_new_privs. Each call takes the owner side's uid on
         # one thread and gives it back; the tests skip off root, so the step fails unless they ran.

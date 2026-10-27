@@ -396,22 +396,18 @@ class ImageFilesTest(unittest.TestCase):
         self.assertNotIn("/usr/lib/udev/rules.d/85-nm-unmanaged.rules", rm)
 
     # REQ: ONB-3, DEV-2
-    def test_only_the_netjoin_rule_answers_yes(self):
-        # The rule is installed by build.sh from broker/cmd/agentos-netjoin; nothing else may ship
-        # one under a polkit rules directory.
-        rules = [ROOT / "broker/cmd/agentos-netjoin/50-agentos-netjoin.rules"]
-        rules += [p for p in MK.rglob("*.rules") if "polkit-1" in p.parts]
-        self.assertTrue(all("netjoin" in p.name for p in rules), rules)
-        self.assertIn("polkit-1/rules.d/50-agentos-netjoin.rules", (IMG / "build.sh").read_text())
-        for p in rules:
-            self.assertEqual(len(re.findall(r"polkit\.Result\.YES", p.read_text())), 1, p)
+    def test_no_agentos_polkit_rule_ships(self):
+        # The home Wi-Fi helper's rule went with the helper (D-178): the image ships no polkit rule
+        # of its own, so nothing grants a NetworkManager call.
+        self.assertEqual([p for p in MK.rglob("*") if "polkit-1" in p.parts], [])
+        self.assertNotIn("polkit-1", (IMG / "build.sh").read_text())
 
     # REQ: ONB-3, DEV-2
     def test_ci_boot_checks_networkmanager_on_the_first_boot(self):
         t = (IMG / "ci_boot.sh").read_text()
         for needle in ("NetworkManager.service", "nmcli -t -f DEVICE,STATE device", "systemctl --failed",
                        "inbound=drop swap=off dumps=off forward=off", "pkcheck", "org.freedesktop.NetworkManager.settings.modify.system",
-                       "agentos-netjoin", "/etc/NetworkManager/system-connections"):
+                       "/etc/NetworkManager/system-connections"):
             self.assertIn(needle, t)
 
     # REQ: ONB-3, DEV-2, STO-2

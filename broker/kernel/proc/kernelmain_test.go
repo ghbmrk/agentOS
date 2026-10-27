@@ -3,6 +3,7 @@ package proc
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -137,6 +138,47 @@ func (m *mainBox) read() ([]string, ed25519.PublicKey) {
 	return types, live
 }
 
+// bootFails runs the kernel process as boot does and wants it to stop
+// with an error before it comes up.
+func (m *mainBox) bootFails(slot string, first ed25519.PublicKey) error {
+	t := m.t
+	t.Helper()
+	os.Remove(m.cfg.Up)
+	keys := handoff.KernelKeys{Log: [32]byte{7}, Head: headPriv, Slot: slot, FirstEdge: first}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunKernel(ctx, m.cfg, keys, anchor(t, m.cfg.Log))
+	if _, up := os.Stat(m.cfg.Up); err == nil || up == nil {
+		t.Fatalf("a start by slot %q came up (%v)", slot, err)
+	}
+	return err
+}
+
+// cutSlot is the slot the log's last edge.cut names, or "" with none.
+func (m *mainBox) cutSlot() string {
+	t := m.t
+	t.Helper()
+	h, err := OpenKernel(KernelConfig{Log: m.cfg.Log, Anchor: anchor(t, m.cfg.Log), Key: [32]byte{7}, Pub: headPub, Sign: headPriv}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	var slot string
+	h.With(func(k *kernel.Kernel) error {
+		for _, e := range k.Log().Entries() {
+			if e.Type == kernel.TEdgeCut {
+				var b struct{ Slot string }
+				if err := json.Unmarshal(e.Body, &b); err != nil {
+					t.Fatal(err)
+				}
+				slot = b.Slot
+			}
+		}
+		return nil
+	})
+	return slot
+}
+
 func setupAnchors() kernel.FirstAnchors {
 	return kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv))
 }
@@ -180,9 +222,13 @@ func TestSetupLogsTheFirstEdge(t *testing.T) {
 // slot (§12.2) logs edge.cut naming the slot, and the edge stays cut on
 // the next start by the tpm slot. A pending first key handed at such a
 // start is not logged at setup either.
+// The cut names the slot that opened the store, and a cut the kernel
+// refuses (a slot out of shape) starts no kernel (b2, #3364).
 // Revert mutants: `moved` always false (the passphrase start cuts nothing),
 // or true only for SlotPassphrase (the recovery start cuts nothing);
-// `first = nil` dropped (the moved box's setup logs the first key).
+// `first = nil` dropped (the moved box's setup logs the first key);
+// `EdgeCut(clock(), "x")` for `keys.Slot` (the cut names another slot);
+// EdgeCut's error ignored (the bad slot's start comes up).
 func TestUnknownHostCutsTheEdge(t *testing.T) {
 	edge, _ := gen(8)
 	m := newMainBox(t)
@@ -196,6 +242,9 @@ func TestUnknownHostCutsTheEdge(t *testing.T) {
 	types, live := m.read()
 	if types[len(types)-1] != kernel.TEdgeCut || live != nil {
 		t.Fatalf("a passphrase start left the edge live: %v, %x", types, live)
+	}
+	if got := m.cutSlot(); got != handoff.SlotPassphrase {
+		t.Fatalf("the cut names slot %q, want %q", got, handoff.SlotPassphrase)
 	}
 	_, stop = m.boot(handoff.SlotTPM, edge)
 	stop()
@@ -220,6 +269,23 @@ func TestUnknownHostCutsTheEdge(t *testing.T) {
 	stop()
 	if types, live := r.read(); types[len(types)-1] != kernel.TEdgeCut || live != nil {
 		t.Fatalf("a recovery start left the edge live: %v, %x", types, live)
+	}
+	if got := r.cutSlot(); got != handoff.SlotRecovery {
+		t.Fatalf("the cut names slot %q, want %q", got, handoff.SlotRecovery)
+	}
+
+	// A cut the kernel refuses starts no kernel, and the edge stays live.
+	f := newMainBox(t)
+	o, stop = f.boot(handoff.SlotTPM, edge)
+	if err := o.Setup(setupAnchors()); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if err := f.bootFails("no slot", edge); !errors.Is(err, kernel.ErrEdgeSlot) {
+		t.Fatalf("a start by a slot out of shape: %v", err)
+	}
+	if types, live := f.read(); slicesContain(types, kernel.TEdgeCut) || !live.Equal(edge) {
+		t.Fatalf("a refused cut logged %v, live %x", types, live)
 	}
 
 	n := newMainBox(t)

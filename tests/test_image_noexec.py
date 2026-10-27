@@ -61,7 +61,7 @@ class NoExecTreeTest(unittest.TestCase):
     def test_every_shipped_service_but_agentosd_is_checked(self):
         names = {rel.rsplit("/", 1)[1] for rel in shipped_units() if rel.endswith(".service")}
         self.assertIn("agentos-reboot.service", names)
-        self.assertIn("agentos-ap.service", names)
+        self.assertNotIn("agentos-ap.service", names)
         self.assertIn("agentos-ap-exempt@.service", names)
         self.assertEqual(check.NOEXEC_EXEMPT, ("agentosd.service",))
         for name in sorted(names - set(check.NOEXEC_EXEMPT)):

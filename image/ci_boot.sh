@@ -163,8 +163,8 @@ host_disk "$U"
 usb_before=$(sha256sum <"$U")
 USB=" -device qemu-xhci,id=xhci -drive if=none,id=usb,format=raw,file=$U -device usb-storage,bus=xhci.0,drive=usb,removable=on"
 before=$(stat -c %s "$IMG")
-# NetworkManager runs and manages nothing, and polkit answers for the join helper only (#936, I17,
-# I21). The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
+# NetworkManager runs and manages nothing, and polkit lets no one write a connection (#936, I21;
+# the join helper is gone, D-178). The first boot runs this check as a unit passed as an SMBIOS credential, ordered before the
 # boot report so its lines are on the console by then; the image itself is unchanged. The script
 # rides inside the unit as base64, which holds no character systemd or the shell would expand.
 nm_check() {
@@ -178,7 +178,6 @@ if [ -n "$dev" ] && [ -z "$(echo "$dev" | grep -v ':unmanaged$')" ]; then say "e
 if [ -z "$(systemctl --failed --no-legend)" ]; then say "no failed units"; else say "FAIL failed units: $(systemctl --failed --no-legend | cut -d' ' -f1-2)"; fi
 if [ -z "$(ls -A /etc/NetworkManager/system-connections 2>/dev/null)" ]; then say "no connection file on the drive"; else say "FAIL a connection file is on the drive"; fi
 act=org.freedesktop.NetworkManager.settings.modify.system
-runuser -u agentos-netjoin -- sh -c "exec pkcheck --action-id $act --process \$\$" && say "pkcheck yes for agentos-netjoin" || say "FAIL pkcheck no for agentos-netjoin"
 runuser -u nobody -- sh -c "exec pkcheck --action-id $act --process \$\$" && say "FAIL pkcheck yes for nobody" || say "pkcheck no for nobody"
 say done
 EOS
@@ -298,11 +297,11 @@ for want in "agentos-hostdisk: drive is the root disk" "agentos-hostdisk: host d
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-hostdisk: FAIL"
-# NetworkManager is up and manages no device; polkit lets the join helper write system connections
-# and no other user; nothing is on the drive. The health line above still reads forward=off
+# NetworkManager is up and manages no device; polkit lets no user write system connections;
+# nothing is on the drive. The health line above still reads forward=off
 # inbound=drop, and the probes below find every port dropped (DEV-2).
 for want in "agentos-nm: NetworkManager.service active" "agentos-nm: every device unmanaged" "agentos-nm: no failed units" \
-	"agentos-nm: no connection file on the drive" "agentos-nm: pkcheck yes for agentos-netjoin" "agentos-nm: pkcheck no for nobody" "agentos-nm: done"; do
+	"agentos-nm: no connection file on the drive" "agentos-nm: pkcheck no for nobody" "agentos-nm: done"; do
 	has "$W/console.log" "$want"
 done
 hasnt "$W/console.log" "agentos-nm: FAIL"
@@ -496,210 +495,9 @@ got=$(entries "$F" | tr '\n' ' ')
 	{ echo "MISS entries agentos_0.conf $base+0-3.conf (got $got)"; fail=1; }
 rm -f "$F" "$W/prev.conf"
 
-# The station beside the access point (#936 r4b, image/ASSUMPTIONS.md P2-2w-c3-r4b-2-I1): a fresh copy boots
-# with mac80211_hwsim's two radios. wlan0 stands in for the box's; wlan1's radio is moved into its
-# own network namespace before the loader starts (the loader takes every radio it sees, I16), and a
-# test WPA2 access point with a synthetic name and password runs there. The image ships no iw, so
-# the host's goes in on a read-only 9p share beside the guest's two scripts; the units ride as
-# SMBIOS credentials like e2e/'s, so the image itself is unchanged. The join is CI's own, through
-# nmcli as root with an in-memory connection: the product's helper still answers failed until the
-# sealed store (#935). Its lines go to the console as "agentos-hwsim: ..."; a NOTE line reports and
-# checks nothing.
-HWSIM_PSK=agentos-ci-canary-hwsim-psk
-hwsim_setup() {
-	cat <<'EOS'
-say() { echo "agentos-hwsim: $*"; }
-modprobe mac80211_hwsim radios=2 || say "FAIL modprobe mac80211_hwsim"
-n=0
-until [ -e /sys/class/net/wlan0/phy80211 ] && [ -e /sys/class/net/wlan1/phy80211 ] || [ $n -ge 30 ]; do n=$((n + 1)); sleep 1; done
-phy=$(cat /sys/class/net/wlan1/phy80211/name 2>/dev/null)
-# The seller seals the sticker's setup network before the box ships (agentos-seller, HW-10); CI's
-# image has none, and without it the loader serves nothing. A synthetic one, root's 0600, once.
-# The name must carry claim.SetupSSIDPrefix, the old product name: it is written as a JSON escape so
-# this file adds no product text (tests/test_product_name.py).
-f=/var/lib/agentos/ap/setup-net.json
-[ -e $f ] || (umask 077 && printf '%s' '{"ssid":"\u0041gentOS-Setup-CTST","password":"CANA-RYHW-SMC2-TEST"}' >$f)
-if [ -s $f ]; then say "setup network sealed"; else say "FAIL sealing the setup network"; fi
-ip netns add hwsimap
-if [ -n "$phy" ] && /run/agentos-hwsim/share/iw phy "$phy" set netns name hwsimap && [ ! -e /sys/class/net/wlan1 ]; then
-	say "test radio in its own namespace"
-else
-	say "FAIL moving the test radio into its own namespace"
-fi
-EOS
-}
-hwsim_check() {
-	cat <<'EOS'
-say() { echo "agentos-hwsim: $*"; }
-S=/run/agentos-hwsim/share R=/run/agentos-hwsim
-IW=$S/iw SSID=agentos-ci-hwsim PSK=$(cat $S/psk) NAME=box.hwsim.agentos-ci.test
-ns() { ip netns exec hwsimap "$@"; }
-# until N CMD...: run CMD each second until it succeeds or N seconds pass.
-until_ok() { t=$1; shift; i=0; until "$@" || [ $i -ge "$t" ]; do i=$((i + 1)); sleep 1; done; "$@"; }
-box_channel() { $IW dev wlan0 info 2>/dev/null | sed -n 's/.*channel \([0-9]*\) .*/\1/p'; }
-ap_up() { $IW dev wlan0 info 2>/dev/null | grep -q "type AP" && [ -n "$(box_channel)" ]; }
-sta() { [ -e /sys/class/net/wlsta0 ]; }
-joined() { nmcli -g GENERAL.STATE device show wlsta0 2>/dev/null | grep -q '^100'; }
-unjoined() { ! joined; }
-# The interfaces on wlan0's radio: wlan0 and wlsta0, never a second station.
-radio_ifs() { cat /sys/class/net/*/phy80211/name 2>/dev/null | grep -cx "$(cat /sys/class/net/wlan0/phy80211/name)"; }
-managed() { nmcli -t -f DEVICE,STATE device 2>/dev/null | grep -v ':unmanaged$' | cut -d: -f1 | tr '\n' ' '; }
-only_sta() { [ "$(managed)" = "wlsta0 " ]; }
-not_exempt() { ! nft list set inet agentos_inbound exempt 2>/dev/null | grep -q wlsta0; }
-logged() { journalctl -b -u agentos-ap -o cat 2>/dev/null | grep -c "$1"; }
-served_again() { [ "$(logged "serving the")" -gt "$served" ]; }
-same_station() { [ "$(cat /sys/class/net/wlsta0/ifindex 2>/dev/null)" = "$idx" ]; }
-check() { if "$@"; then say "$MSG"; else say "FAIL $MSG"; fi; }
-# test_ap CHANNEL: the test access point, with DHCP and DNS, (re)started on CHANNEL.
-test_ap() {
-	for p in hostapd dnsmasq; do [ -f $R/$p.pid ] && kill "$(cat $R/$p.pid)" 2>/dev/null; rm -f $R/$p.pid; done
-	sleep 1
-	printf '%s\n' interface=wlan1 driver=nl80211 "ssid=$SSID" hw_mode=g "channel=$1" wpa=2 \
-		wpa_key_mgmt=WPA-PSK rsn_pairwise=CCMP "wpa_passphrase=$PSK" >$R/ap.conf
-	chmod 0600 $R/ap.conf
-	ns hostapd -B -P $R/hostapd.pid $R/ap.conf >/dev/null 2>&1
-	ns dnsmasq --interface=wlan1 --bind-interfaces --listen-address=192.168.77.1 --no-resolv --no-hosts \
-		--dhcp-range=192.168.77.10,192.168.77.50,255.255.255.0,1h --address=/$NAME/192.168.77.1 \
-		--dhcp-leasefile=$R/leases --pid-file=$R/dnsmasq.pid --user=root --group=root >/dev/null 2>&1
-	until_ok 20 ns sh -c '[ "$(cat /sys/class/net/wlan1/operstate)" = up ]'
-}
-# join NAME IPV4: an in-memory connection to the test access point on wlsta0, activated.
-join() {
-	nmcli connection add save no type wifi ifname wlsta0 con-name "$1" ssid "$SSID" wifi-sec.key-mgmt wpa-psk \
-		wifi-sec.psk "$PSK" ipv4.method "$2" ipv6.method disabled connection.autoconnect "$3" >/dev/null 2>&1
-	nmcli --wait 60 connection up "$1" >/dev/null 2>&1
-}
-nopsk() {
-	MSG="the PSK is in no journal line"; check [ "$(journalctl -b -o cat 2>/dev/null | grep -cF "$PSK")" = 0 ]
-	MSG="the PSK is in no file on the drive"
-	check [ -z "$(grep -rlsF "$PSK" /etc /var /root /home /srv /opt /usr/local 2>/dev/null)" ]
-}
-
-MSG="wlsta0 exists"; check until_ok 180 sta
-MSG="the box's access point serves"; check until_ok 120 ap_up
-# Why not, when it does not: the loader logs no network name or password (I16), nor does iw's info.
-if ! ap_up; then
-	journalctl -b -u agentos-ap -o cat 2>/dev/null | grep -v "agentos-ap: station: " | tail -30 | while read -r l; do say "NOTE loader| $l"; done
-	say "NOTE loader station errors=$(logged "agentos-ap: station: ")"
-	journalctl -b -u agentos-ap -o cat 2>/dev/null | grep "agentos-ap: station: " | sort | uniq -c | while read -r l; do say "NOTE loader| $l"; done
-	$IW dev 2>/dev/null | while read -r l; do say "NOTE iw| $l"; done
-	say "NOTE agentos-ap $(systemctl is-active agentos-ap.service) restarts=$(systemctl show -p NRestarts --value agentos-ap.service)"
-fi
-MSG="wlsta0 on the box's radio"; check [ "$(cat /sys/class/net/wlsta0/phy80211/name 2>/dev/null)" = "$(cat /sys/class/net/wlan0/phy80211/name)" ]
-MSG="one station on the radio"; check [ "$(radio_ifs)" = 2 ]
-MSG="NetworkManager manages only wlsta0"; check until_ok 30 only_sta
-only_sta || say "NOTE managed devices: $(managed)"
-MSG="wlsta0 not exempt from the inbound drop"; check not_exempt
-MSG="the loader logged the station allowed"; check [ "$(logged "station wlsta0 beside wlan0 on allowed")" -gt 0 ]
-
-if [ "$(cat $S/mode)" = reboot ]; then
-	MSG="no saved network after the reboot"; check [ -z "$(nmcli -t -f NAME connection show 2>/dev/null)" ]
-	MSG="wlsta0 not joined after the reboot"; check unjoined
-	nopsk
-	say done
-	exit 0
-fi
-
-ns ip link set lo up
-ns ip addr add 192.168.77.1/24 dev wlan1
-# #2629: on a radio with one channel, a station join on another channel than the access point's.
-# What happens is reported, not checked: the brief's follow assumes the join succeeds first.
-box=$(box_channel); off=1; [ "$box" = 1 ] && off=11
-test_ap $off
-if join ci-off disabled no; then r=joined; else r=refused; fi
-sleep 8
-say "NOTE single-channel join on channel $off beside the access point on $box: $r; access point moves=$(logged "moving the access point"), now on $(box_channel)"
-journalctl -b -k -o cat 2>/dev/null | grep -a "wlsta0" | tail -6 | while read -r l; do say "NOTE kernel| $l"; done
-nmcli connection delete ci-off >/dev/null 2>&1
-until_ok 20 unjoined
-
-# The join the brief's matrix needs, on the access point's own channel.
-test_ap "$(box_channel)"
-MSG="station joined"; check join ci-same auto yes
-addr=$(ip -4 -o addr show dev wlsta0 | awk '{ print $4 }' | cut -d/ -f1 | head -1)
-MSG="station has a lease"; check [ -n "$addr" ]
-MSG="DNS resolves over the station"
-check sh -c "resolvectl query $NAME 2>/dev/null | grep -q '192.168.77.1.*link: wlsta0'"
-MSG="the box's access point stays up"; check ap_up
-MSG="station reaches the test network"; check timeout 5 bash -c 'exec 3<>/dev/tcp/192.168.77.1/53'
-for port in 22 80 443 18789 5355; do
-	ns timeout 4 bash -c "exec 3<>/dev/tcp/$addr/$port" 2>/dev/null
-	rc=$?
-	if [ $rc = 124 ]; then say "probe $port dropped"; else say "FAIL probe $port answered (rc=$rc)"; fi
-done
-
-# Loader restart: wlsta0 survives, is not duplicated, and stays joined; the access point comes back.
-# The restart must succeed and the loader must log serving anew, or the checks below read the old state.
-idx=$(cat /sys/class/net/wlsta0/ifindex)
-served=$(logged "serving the")
-MSG="the loader restart succeeded"; check systemctl restart agentos-ap.service
-MSG="the restarted loader logged serving"; check until_ok 120 served_again
-MSG="after the loader restart, the box's access point serves again"; check until_ok 60 ap_up
-MSG="wlsta0 survived the loader restart"; check same_station
-MSG="after the loader restart, one station on the radio"; check [ "$(radio_ifs)" = 2 ]
-MSG="the station stayed joined after the loader restart"; check until_ok 60 joined
-
-# Helper restart: no change to wlsta0 or the connection.
-MSG="the helper restart succeeded"; check systemctl restart agentos-netjoin.service
-sleep 3
-MSG="the helper restart left the station"; check eval 'same_station && joined'
-nopsk
-say done
-EOS
-}
-hwsim_cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(printf '%b' "$2" | base64 -w0)"; }
-HWSIM_UNITS="$(hwsim_cred systemd.extra-unit.agentos-hwsim-setup.service "[Unit]\nDescription=agentOS hwsim radios (CI only)\nAfter=systemd-udevd.service systemd-tmpfiles-setup.service\nBefore=agentos-ap.service NetworkManager.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/mkdir -p /run/agentos-hwsim/share\nExecStart=/bin/mount -t 9p -o trans=virtio,version=9p2000.L,ro hwsim /run/agentos-hwsim/share\nExecStart=/bin/sh /run/agentos-hwsim/share/setup.sh\n")"
-HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred systemd.extra-unit.agentos-hwsim-check.service "[Unit]\nDescription=agentOS station check (CI only)\nRequires=agentos-hwsim-setup.service\nAfter=agentos-hwsim-setup.service agentos-ap.service NetworkManager.service agentos-netjoin.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=900\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/bash /run/agentos-hwsim/share/check.sh\n")"
-# The image's main-side mask (agentos-.service.d/50-main-side.conf, STO-2c) gives every agentos-*
-# unit its own mount namespace, so this unit's 9p mount would reach neither its next command nor the
-# check: a named drop-in that sorts after the mask lifts it for this CI-only unit (debug-generator's
-# "~NAME" credential suffix names the drop-in file).
-HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred 'systemd.unit-dropin.agentos-hwsim-setup.service~99-ci-unmask' '[Service]\nInaccessiblePaths=\n')"
-HWSIM_UNITS="$HWSIM_UNITS$(hwsim_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=agentos-hwsim-setup.service agentos-hwsim-check.service\n')"
-# The host's iw, or Ubuntu's package unpacked without installing it (apt verifies it).
-hwsim_iw() {
-	command -v iw && return
-	t=$(mktemp -d "$W/iw.XXXXXX")
-	(cd "$t" && apt-get download -q iw >/dev/null 2>&1) && dpkg-deb -x "$t"/iw_*.deb "$t/x" && ls "$t/x/usr/sbin/iw" "$t/x/sbin/iw" 2>/dev/null | head -1
-}
-HS=$W/hwsim-share
-rm -rf "$HS"; mkdir -p "$HS"
-iw=$(hwsim_iw || true)
-if [ -n "$iw" ] && cp "$iw" "$HS/iw"; then echo "ok   iw for the hwsim boot: $iw"; else echo "MISS iw for the hwsim boot"; fail=1; fi
-hwsim_setup >"$HS/setup.sh"; hwsim_check >"$HS/check.sh"; printf '%s' "$HWSIM_PSK" >"$HS/psk"; echo first >"$HS/mode"
-HWSIM_EXTRA="-virtfs local,path=$HS,mount_tag=hwsim,security_model=none,readonly=on$HWSIM_UNITS"
-copy "$W/hwsim.raw"
-EXTRA="$HWSIM_EXTRA" boot "$W/console-hwsim.log" "$W/hwsim.raw"
-grep -a "agentos-hwsim: NOTE" "$W/console-hwsim.log" | guest_echo || true
-for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
-	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
-	"the loader logged the station allowed" "station joined" "station has a lease" "DNS resolves over the station" \
-	"the box's access point stays up" "station reaches the test network" "probe 22 dropped" "probe 80 dropped" \
-	"probe 443 dropped" "probe 18789 dropped" "probe 5355 dropped" "the loader restart succeeded" \
-	"the restarted loader logged serving" "after the loader restart, the box's access point serves again" \
-	"wlsta0 survived the loader restart" "after the loader restart, one station on the radio" \
-	"the station stayed joined after the loader restart" "the helper restart succeeded" "the helper restart left the station" \
-	"the PSK is in no journal line" "the PSK is in no file on the drive" "done"; do
-	has "$W/console-hwsim.log" "agentos-hwsim: $want"
-done
-hasnt "$W/console-hwsim.log" "agentos-hwsim: FAIL"
-hasnt "$W/console-hwsim.log" "$HWSIM_PSK"
-has "$W/console-hwsim.log" "agentos-health: PASS secure_boot=on usr=verity inbound=drop swap=off dumps=off forward=off"
-# The reboot: wlsta0 comes back, and with no sealed store there is no saved network.
-echo reboot >"$HS/mode"
-TMO=600 EXTRA="$HWSIM_EXTRA" boot "$W/console-hwsim-reboot.log" "$W/hwsim.raw"
-for want in "setup network sealed" "test radio in its own namespace" "wlsta0 exists" "the box's access point serves" "wlsta0 on the box's radio" \
-	"one station on the radio" "NetworkManager manages only wlsta0" "wlsta0 not exempt from the inbound drop" \
-	"no saved network after the reboot" "wlsta0 not joined after the reboot" "the PSK is in no file on the drive" "done"; do
-	has "$W/console-hwsim-reboot.log" "agentos-hwsim: $want"
-done
-hasnt "$W/console-hwsim-reboot.log" "agentos-hwsim: FAIL"
-has "$W/console-hwsim-reboot.log" "agentos-health: PASS secure_boot=on usr=verity"
-rm -rf "$W/hwsim.raw" "$HS"
-
 # A21 in QEMU (#3117, broker/clerk/inbox/ASSUMPTIONS.md MIG-3-1). With SLICE set to a directory
 # holding a static cmd/slice, a fresh copy boots under Secure Boot and a CI-only unit, passed as an
-# SMBIOS credential like the hwsim units, runs the slice twice over every request slice_boot.py
+# SMBIOS credential like the e2e units, runs the slice twice over every request slice_boot.py
 # wrote, from a read-only 9p share, with no network (PrivateNetwork=yes: the one-click POSTs are
 # recorded, never sent). Outcomes go to a second, writable share; the host then runs the eval
 # harness over them (slice_boot.py check), so the pass is the harness's, never the guest's word.
@@ -817,7 +615,7 @@ if [ -n "${E2E:-}" ]; then
 	cred() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$HERE/e2e/$2")"; }
 	copy "$W/e2e.raw" 24G
 	# agentos-e2e-seal's 9p mount must reach the host for agentos-e2e: its drop-in lifts the main-side
-	# mask, as for agentos-hwsim-setup.
+	# mask (agentos-.service.d/50-main-side.conf).
 	# A host disk beside the drive here too: setup's services and the agent machines run on this boot.
 	H2=$W/host-e2e.raw
 	host_disk "$H2"

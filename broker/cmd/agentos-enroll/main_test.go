@@ -966,3 +966,38 @@ func TestRestoreEnrollStoresNoFirstEdge(t *testing.T) {
 	}
 	gone(t, b.c.firstEdge)
 }
+
+// REQ: HW-15
+// EDGE-link-core-b2 (#3364): the capture is taken only from a file its
+// owner uid holds, and never for a small-order key, whose hello anyone can
+// forge (the identity key, with R the identity and S zero, verifies over
+// any nonce). The owner is a parameter so a plain-user test sees the check
+// refuse a file of another uid's; enrollment passes its euid, root.
+// Revert mutants: `int(st.Uid) != owner` made false (the other uid's file is
+// taken); `kernel.SmallOrder(edge) ||` dropped (the forged capture is
+// taken).
+func TestCaptureIsTheOwnersAndNoSmallOrderKey(t *testing.T) {
+	dir := t.TempDir()
+	priv := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize))
+	nonce := bytes.Repeat([]byte{0x6e}, 32)
+	real := filepath.Join(dir, "real")
+	noErr(t, os.WriteFile(real, append(append(bytes.Clone(priv.Public().(ed25519.PublicKey)), nonce...), ed25519.Sign(priv, kernel.HelloMsg(nonce))...), 0o600))
+	if k, err := readCapture(real, os.Geteuid()); err != nil || !k.Equal(priv.Public()) {
+		t.Fatalf("the owner's capture was not taken: %x, %v", k, err)
+	}
+	if k, err := readCapture(real, os.Geteuid()+1); !errors.Is(err, errCapture) || k != nil {
+		t.Fatalf("another uid's capture was taken: %x, %v", k, err)
+	}
+
+	identity := make([]byte, ed25519.PublicKeySize)
+	identity[0] = 1
+	forged := append(bytes.Clone(identity), make([]byte, 32)...)
+	if !ed25519.Verify(identity, kernel.HelloMsg(nonce), forged) {
+		t.Fatal("the identity key's forged hello no longer verifies: the premise moved")
+	}
+	small := filepath.Join(dir, "small")
+	noErr(t, os.WriteFile(small, append(append(bytes.Clone(identity), nonce...), forged...), 0o600))
+	if k, err := readCapture(small, os.Geteuid()); !errors.Is(err, errCapture) || k != nil {
+		t.Fatalf("a small-order capture was taken: %x, %v", k, err)
+	}
+}

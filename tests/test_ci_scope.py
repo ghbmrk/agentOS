@@ -558,7 +558,7 @@ class WiringTest(unittest.TestCase):
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
         run = "          python3 -I ../tools/require_ran.py"
         rc = '          [ "$rc" -eq 0 ]\n'
-        hostapd = "      - name: hostapd runs as its own user"
+        nxt = "      - name: agentosd calls the kernel as the owner side"
         job = "\n  machines:\n"
         # Each edit, as (old, new) applied once, stops the step failing on a skipped or missing test.
         edits = {
@@ -575,7 +575,7 @@ class WiringTest(unittest.TestCase):
             "or-true group": (rc0, "          { true || {\n" + rc0),
             "comment after a continuation": (go, go.replace(" \\\n", " \\\n          #\n")),
             "step continue-on-error": (step, step.replace("        run: |", "        continue-on-error: true\n        run: |")),
-            "step continue-on-error last": ("\n" + hostapd, "\n        continue-on-error: true\n" + hostapd),
+            "step continue-on-error last": ("\n" + nxt, "\n        continue-on-error: true\n" + nxt),
             "step shell without -e": (step, step.replace("        run: |", "        shell: bash {0}\n        run: |")),
             "step if": (step, step.replace("        working", "        if: false\n        working")),
             "job continue-on-error": (job, job + "    continue-on-error: true\n"),

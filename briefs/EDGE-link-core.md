@@ -1,6 +1,6 @@
 # EDGE-link-core: the core side of the edge link, with edge keys as kernel log entries (HW-15, HW-17, REC-2, BAK-1), split into a to d
 
-Work item: #3290, found designing #3253 (the f brief on #3269, `briefs/MIG-4-recovery-f.md` once it merges, decisions 4 and 5). Tier A. The row crosses four trust zones (the kernel log, enrollment and unlock, a new process that parses bytes from another box, the owner side), so it splits here. Each slice is its own work item and session: a (#3290), a2 (#3345, the follow-up of a), b (#3295), c1 (#3296), c2 (#3297) and d (#3298). This file is the brief for all of them; each builder reads the shared part and its own section.
+Work item: #3290, found designing #3253 (the f brief on #3269, `briefs/MIG-4-recovery-f.md` once it merges, decisions 4 and 5). Tier A. The row crosses four trust zones (the kernel log, enrollment and unlock, a new process that parses bytes from another box, the owner side), so it splits here. Each slice is its own work item and session: a (#3290), a2 (#3345, the follow-up of a), b (#3295), b2 (#3364, the follow-up of b), c1 (#3296), c2 (#3297) and d (#3298). This file is the brief for all of them; each builder reads the shared part and its own section.
 
 **Decided (Mark, 2026-10-26, Decisions 8 card, "A"):** a hardware key's assertion signs a later or replacement edge key; it is live at once, with no KEY-4 hold, and the old key is cut in the same step, as `Enroll` and e2's backup target already work. The other options were a phone passkey with KEY-4's hold, or a phone passkey at once. KEY-4 names no such case, so an L1 spec-diff owes the exception ("SPEC change owed" below); slices a and d wait on it.
 
@@ -102,6 +102,24 @@ Follow-up of a, from Security's release points 9 and 10 on #3341 (comment 643239
 **Needs:** a; e3 (#3251) and f1 (#3253) edit the same files (D-111): start after both merge. **Guard files:** none. **Gate:** D-159 row, if the trusted core grows.
 **Estimate:** 60k tokens.
 
+## b2: small-order edge keys, and killing tests for b's cut and capture checks (#3364)
+
+Follow-up of b, from its reviews on #3359: L3 points 1 and 2 (comment 6433663497) and Security point 1 (comment 6433666388). The PR body carries `Defect: EDGE-link-core-b`.
+
+**Decisions.**
+1. **A small-order key is no edge key.** Go's `ed25519.Verify` takes the eight points of order dividing 8 in any encoding, and anyone can sign for one (the identity key, with R the identity and S zero, verifies over any message). `kernel.SmallOrder(k)` refuses them with no new dependency: it maps y to the Montgomery u = (1+y)/(1-y) and relies on crypto/ecdh refusing X25519's all-zero output, which X25519's multiple-of-8 scalars give for exactly the low-order u. `edgeKey` adds it, so `EdgeCandidate`, `EdgeEnroll`, `EdgeRevoke`, `SetupWithEdge` and the fold all refuse one with `ErrEdgeKey`; enrollment's `readCapture` refuses one too. Not an exploit path today (only whoever is on the cable before the confirm can plant one, and that person is the first edge anyway, residual risk 1), so it is `later`, built here because it is one function.
+2. **The capture owner is a parameter.** `readCapture(path, owner)` checks the file's uid against `owner`; enrollment passes its euid (root). A plain-user test then sees a file of another uid refused, which it cannot set up by chown. So c2 must write the capture file as root (mode 0600), or enrollment takes no first key.
+3. **The cut's slot and error are tested where they happen**, in the kernel process (`kernelmain.go` is unchanged): the logged `edge.cut` names the slot that opened the store, and a cut the kernel refuses starts no kernel.
+
+**Scope:** `broker/kernel/edge.go` (+test), `broker/kernel/ASSUMPTIONS.md`, `broker/kernel/proc/kernelmain_test.go`, `broker/cmd/agentos-enroll/main.go` (+test), `broker/clerk/handoff/ASSUMPTIONS.md`.
+**Requirement IDs:** HW-15, HW-17.
+**Acceptance tests** (each comment names its one-line revert mutant, decision 9):
+- `kernel/edge_test.go::TestSmallOrderEdgeKeysRefuse`: all 14 small-order encodings (libsodium's list, each order checked by repeated addition) refuse at `EdgeCandidate` (with the identity key's forged hello), `EdgeEnroll` and `SetupWithEdge`, logging nothing; generated keys pass. Mutant: `edgeKey` back to the length check.
+- `cmd/agentos-enroll/main_test.go::TestCaptureIsTheOwnersAndNoSmallOrderKey`: a file of another uid, and a forged small-order capture, are refused. Mutants: the uid check made false; `kernel.SmallOrder(edge) ||` dropped.
+- `kernel/proc/kernelmain_test.go::TestUnknownHostCutsTheEdge` (extended): the cut names `passphrase` or `recovery`, as the slot was; a slot out of shape returns `ErrEdgeSlot`, never comes up, and leaves the edge live. Mutants: `EdgeCut(clock(), "x")`; EdgeCut's error ignored.
+**Needs:** b (#3359) and a2 (#3347) merged. **Guard files:** none. **Gate:** trusted-core growth: a D-159 row citing HW-15 and REC-2 as the approved design, merged first.
+**Estimate:** 40k tokens.
+
 ## c1: the link library (#3296)
 
 **Scope:** new package `broker/edgelink` (+tests and a fuzz test): the frame codec of decision 6 (`ReadFrame` for one direction, `WriteFrame`), the kind table with caps, directions and labels, the hello of decision 5 (`SignHello`, `VerifyHello` over the exporter value), and the TLS configurations of decision 5 taking a `crypto.Signer`. No socket, no process, no kernel import. `broker/edgelink/ASSUMPTIONS.md`.
@@ -121,7 +139,7 @@ Follow-up of a, from Security's release points 9 and 10 on #3341 (comment 643239
 **Scope:** new `broker/cmd/agentos-link` (+tests): the pre-store mode (decision 3's capture), the served mode (the listener bound to the link interface, the handshake through `edgelink`, `edgekey` at each handshake and on the close ticker, the candidate of decision 8, the consumer socket of decision 7); the kernel calls `linksign`, `edgekey`, `edgecandidate` (reported by the link uid only) and `edgeenroll`, `edgerevoke` (owner socket) in `kernel/proc/kernelsock.go` (+test) and their client methods in `broker/owner/kernelsock`; the link unit and its interface's input rule in the image's unit files; `broker/core/core.txt` (`wiring cmd/agentos-link`).
 **Requirement IDs:** HW-15, HW-16 (no other connection from the edge), HW-17.
 **Acceptance tests:**
-- `cmd/agentos-link/capture_test.go::TestFirstHelloWinsOnlyBeforeTheStore`: the first valid hello is written; a second, a badly signed one, or any hello once the store exists, is not.
+- `cmd/agentos-link/capture_test.go::TestFirstHelloWinsOnlyBeforeTheStore`: the first valid hello is written, as root with mode 0600 (b2 decision 2: enrollment takes no other); a second, a badly signed one, a small-order key's, or any hello once the store exists, is not.
 - `cmd/agentos-link/link_test.go::TestOnlyTheLiveEdgeIsServed`: the live key's items arrive on the consumer socket with the kind's label; any other key gets one hello read, reported and closed, with no item delivered; a non-hello frame from it, a second frame, or no hello within 5 seconds closes with a fault count; a revoked key's hello is not reported; `edgekey` is asked on every connection.
 - `::TestRevokeClosesTheConnection`: an `edge.revoked` closes an open connection within a second.
 - `::TestBadFrameClosesAndCounts`: a bad frame from the live edge closes the connection and adds one fault count, with no content in the log.

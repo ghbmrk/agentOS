@@ -145,8 +145,7 @@ func run(name string, args ...string) error {
 // namespace. The page reaches it only through the image's inbound rule for
 // the page's ports on port 1 (HW12-port1-set); a drop-in names enowner0 as
 // the page's interface, since Port1 takes only a fixed PCI port, and the
-// page restarts on it, its unit's root step opening those ports there. agentos-ap, which the image still
-// ships until WIFI-del-b, is stopped first. It also serves the
+// page restarts on it, its unit's root step opening those ports there. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
 	if err := checkVaultBuild(); err != nil {
@@ -158,7 +157,6 @@ func (d *driver) harness() error {
 	}
 	d.stub = stub
 	for _, c := range [][]string{
-		{"systemctl", "stop", "agentos-ap.service"},
 		{"ip", "netns", "add", netns},
 		{"ip", "link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
 		{"ip", "addr", "add", "10.42.0.1/24", "dev", "enowner0"},

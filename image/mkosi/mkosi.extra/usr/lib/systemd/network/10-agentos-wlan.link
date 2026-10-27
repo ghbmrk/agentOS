@@ -1,7 +1,0 @@
-# Wireless interfaces keep the kernel's wlanN names, so the access point loader's -iface wlan0
-# and the Wi-Fi page's -iface wlan0 name the box's radio (P2-1).
-[Match]
-Type=wlan
-
-[Link]
-NamePolicy=keep kernel

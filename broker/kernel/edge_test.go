@@ -3,7 +3,9 @@ package kernel_test
 // REQ: HW-15, HW-17, REC-2, KRN-1, KEY-7
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -605,4 +607,75 @@ func TestCutThenAnotherEdgeRevokesTheOld(t *testing.T) {
 		t.Fatalf("the cut key's hello: %v", err)
 	}
 	edgeReplays(r, r.anchors())
+}
+
+// smallOrder is every encoding of Ed25519's eight points of order dividing
+// 8 (orders 1, 2, 4 and 8), the non-canonical y = p and y = p+1 and both
+// sign bits included: libsodium's list, each order checked by repeated
+// addition when it was written.
+var smallOrder = []string{
+	"0100000000000000000000000000000000000000000000000000000000000000",
+	"0100000000000000000000000000000000000000000000000000000000000080",
+	"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	"0000000000000000000000000000000000000000000000000000000000000000",
+	"0000000000000000000000000000000000000000000000000000000000000080",
+	"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+	"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+	"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+}
+
+// REQ: HW-15, HW-17
+// EDGE-link-core-b2 (#3364): a small-order key is no edge key. Go's
+// ed25519.Verify takes one, and anyone can sign for it: the identity key,
+// with R the identity and S zero, verifies over any hello. So
+// EdgeCandidate, EdgeEnroll and SetupWithEdge refuse every small-order
+// encoding with ErrEdgeKey and log nothing, while real keys pass.
+// Mutant: edgeKey back to the length check alone (the forged hello logs a
+// candidate, and each call answers another error or none).
+func TestSmallOrderEdgeKeysRefuse(t *testing.T) {
+	identity := make([]byte, ed25519.PublicKeySize)
+	identity[0] = 1
+	forged := append(bytes.Clone(identity), make([]byte, 32)...)
+	n := make([]byte, kernel.HelloNonce)
+	if !ed25519.Verify(identity, kernel.HelloMsg(n), forged) {
+		t.Fatal("the identity key's forged hello no longer verifies: the premise moved")
+	}
+	for _, h := range smallOrder {
+		k, err := hex.DecodeString(h)
+		must(t, err)
+		if !kernel.SmallOrder(k) {
+			t.Errorf("%s: not small order", h)
+		}
+		r := newRig(t)
+		before := r.k.Log().Len()
+		if err := r.k.EdgeCandidate(1, k, n, forged); !errors.Is(err, kernel.ErrEdgeKey) {
+			t.Errorf("%s: candidate %v", h, err)
+		}
+		if err := r.k.EdgeEnroll(1, k, enrolSig(r, r.owner, pair{pub: k})); !errors.Is(err, kernel.ErrEdgeKey) {
+			t.Errorf("%s: enrol %v", h, err)
+		}
+		if l := r.k.Log().Len(); l != before {
+			t.Errorf("%s: logged %d entries", h, l-before)
+		}
+		s := newSetupRig(t)
+		if err := s.k.SetupWithEdge(1, s.first(), k); !errors.Is(err, kernel.ErrEdgeKey) || s.k.Log().Len() != 0 {
+			t.Errorf("%s: setup %v, %d entries", h, err, s.k.Log().Len())
+		}
+	}
+	for seed := byte(1); seed < 65; seed++ {
+		if kernel.SmallOrder(gen(seed).pub) {
+			t.Fatalf("a generated key %d reads as small order", seed)
+		}
+	}
+	r := newRig(t)
+	enrol(r, 1, gen(59), 1)
+	if !live(r).Equal(gen(59).pub) {
+		t.Fatal("a real key no longer enrols")
+	}
 }

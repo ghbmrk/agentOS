@@ -637,6 +637,11 @@ func main() {
 		}
 		cfg.Kernel = storedKernel{*seat, kernelStore}
 		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)
+		// Backups (BAK-1, e4a): daily and at once, and STATUS's
+		// only-copy notice until the kernel verifies one.
+		bs := newBackupSchedule(*seat)
+		bs.wire(&cfg)
+		go bs.run(ctx, backupCheckEvery)
 	}
 	// The local inference service runs beside the broker, never in its
 	// control path: it is started here and never waited on (INF-1, DEP-1).
