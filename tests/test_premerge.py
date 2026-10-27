@@ -247,8 +247,9 @@ class PremergeTest(unittest.TestCase):
         # #3401 L3 delta: main deleted L-2 next to the PR's edit; the union kept it, and so did the exemption.
         reviewed = self.union_merge("| B-1 | bak |\n| L-1 | edge old |\n", "| L-1 | edge new |\n| L-2 | b |\n",
                                     base_rows="| L-1 | edge old |\n| L-2 | b |\n")
-        for rows, want in (("| L-1 | edge new |\n| B-1 | bak |\n", []),
-                           ("| L-1 | edge new |\n| L-2 | b |\n| B-1 | bak |\n", ["ASSUMPTIONS.md"])):
+        for rows, want in (("| L-1 | edge new |\n| B-1 | bak |\n", []), ("| B-1 | bak |\n| L-1 | edge new |\n", []),
+                           ("| L-1 | edge new |\n| L-2 | b |\n| B-1 | bak |\n", ["ASSUMPTIONS.md"]),
+                           ("| B-1 | bak |\n| L-1 | edge new |\n| L-2 | b |\n", ["ASSUMPTIONS.md"])):  # both forms
             with self.subTest(rows=rows):
                 self.write("ASSUMPTIONS.md", self.UNION + rows)
                 self.commit("resolve")
