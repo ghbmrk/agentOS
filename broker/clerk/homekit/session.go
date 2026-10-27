@@ -62,6 +62,7 @@ type Session struct {
 	// pending holds event values until the lock is released, so OnEvent
 	// may call back into the session (#3325 item 1).
 	pending []Value
+	dropped int // event values past maxPending
 }
 
 func newSession(conn io.ReadWriter, host string, shared []byte, opt Options) (*Session, error) {
@@ -147,10 +148,21 @@ func (s *Session) deliver(body []byte) {
 		return
 	}
 	for _, v := range vals {
-		if c := s.chars[v.ID]; c != nil && c.can("ev") && len(s.pending) < maxPending {
-			s.pending = append(s.pending, v)
+		if c := s.chars[v.ID]; c != nil && c.can("ev") {
+			if len(s.pending) < maxPending {
+				s.pending = append(s.pending, v)
+			} else {
+				s.dropped++
+			}
 		}
 	}
+}
+
+// Dropped is how many event values were dropped past maxPending.
+func (s *Session) Dropped() int {
+	s.mu.Lock()
+	defer s.unlock()
+	return s.dropped
 }
 
 // unlock releases the session and only then passes queued events to

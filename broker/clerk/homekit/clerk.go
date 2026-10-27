@@ -242,9 +242,10 @@ type Link struct {
 	// or cleared under another's (#3335 L3).
 	stepMu sync.Mutex
 
-	mu     sync.Mutex
-	queue  []Value // events waiting for flush
-	failed int     // events the bus refused
+	mu      sync.Mutex
+	queue   []Value // events waiting for flush
+	failed  int     // events the bus refused
+	dropped int     // events past the queue's cap
 }
 
 // Close ends the session; a blocked exchange ends at once.
@@ -359,6 +360,8 @@ func (l *Link) onEvent(vals []Value) {
 	for _, v := range vals {
 		if len(l.queue) < maxPending {
 			l.queue = append(l.queue, v)
+		} else {
+			l.dropped++
 		}
 	}
 }
@@ -406,6 +409,14 @@ func (l *Link) emit(vals []Value) int {
 }
 
 // Refused is how many values the bus refused on this link.
+// Dropped is how many event values were dropped past a queue's cap, on the
+// session or on this link (#3335 Security).
+func (l *Link) Dropped() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.dropped + l.s.Dropped()
+}
+
 func (l *Link) Refused() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

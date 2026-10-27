@@ -703,3 +703,44 @@ func TestEmitMayCallBackIntoLink(t *testing.T) {
 		t.Fatal("deadlock: Emit calling back into the Link during event delivery")
 	}
 }
+
+func TestDroppedEventsAreCounted(t *testing.T) {
+	acc := newFakeAccessory(t)
+	c, _ := newClerk(t, acc, &bus{})
+	l, err := c.Open(context.Background(), connectOne(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	vals := make([]Value, maxPending+76)
+	for i := range vals {
+		vals[i] = Value{ID{1, 11}, 20.0}
+	}
+	l.onEvent(vals)
+	if l.Dropped() != 76 {
+		t.Fatalf("link dropped %d, want 76", l.Dropped())
+	}
+	// The session's own queue counts its drops too.
+	l.s.mu.Lock()
+	for i := 0; i < maxPending/maxChars+1; i++ {
+		l.s.deliver(valuesFor(maxChars))
+	}
+	l.s.pending = nil
+	l.s.mu.Unlock()
+	if l.Dropped() != 76+maxChars {
+		t.Fatalf("dropped %d, want %d", l.Dropped(), 76+maxChars)
+	}
+}
+
+func valuesFor(n int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"characteristics":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"aid":1,"iid":11,"value":20}`)
+	}
+	b.WriteString(`]}`)
+	return []byte(b.String())
+}

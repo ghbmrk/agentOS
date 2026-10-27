@@ -59,13 +59,13 @@ Part (b1), in `broker/clerk/homekit/clerk_test.go`:
 - `TestConnectPinsAndOpensThermostat`: connect by code pins the accessory key; open subscribes, polls typed private events and writes only declared values.
 - `TestConnectWithWrongCodePinsNothing`: one dial, one try, nothing paired.
 - `TestIdentityMismatchTurnsDeviceOff`: a spoofed key turns the device off with a KRN-7 line; nothing is read or written and the device is not dialed again.
-- `TestOnlyLocalAddressesAreDialed`, `TestHungAccessoryTimesOut`, `TestEventHandlerMayCallBackIntoSession`, `TestBridgeThermostatsResolveByAID`, `TestFindRefusesAmbiguousService`, `TestOwnerConfirmsBounds`, `TestBusRefusalIsCounted`, `TestControllerKeyNeverLeavesClerk`, `TestConcurrentStepsAreEachBounded`, `TestEmitMayCallBackIntoLink`, `TestConnectKeepsThePinWhenResolveFails`, `FuzzSessionRoundTrip`.
+- `TestOnlyLocalAddressesAreDialed`, `TestHungAccessoryTimesOut`, `TestEventHandlerMayCallBackIntoSession`, `TestBridgeThermostatsResolveByAID`, `TestFindRefusesAmbiguousService`, `TestOwnerConfirmsBounds`, `TestBusRefusalIsCounted`, `TestControllerKeyNeverLeavesClerk`, `TestConcurrentStepsAreEachBounded`, `TestEmitMayCallBackIntoLink`, `TestDroppedEventsAreCounted`, `TestConnectKeepsThePinWhenResolveFails`, `FuzzSessionRoundTrip`.
 
 Failure path: the controller key leaks, a spoofed accessory gets commands, or the heating or cooling mode changes without the owner's code-generator code (CH-10).
 
 ## Scope
 
-`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, any test-only vendored accessory and its tree, `NOTICE`, this brief.
+`broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, `broker/loops/plainname.go` (one owner-words line per fuzz target), any test-only vendored accessory and its tree, `NOTICE`, this brief.
 
 ## Estimate
 
