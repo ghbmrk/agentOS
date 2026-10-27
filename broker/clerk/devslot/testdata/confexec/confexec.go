@@ -1,5 +1,5 @@
 // Package confexec is a bad test driver: it imports the conformance suite,
-// which runs go list, so through it a driver could run a process. The suite
+// test tooling that reads files, and none of a driver's business. The suite
 // must fail any import of this repository other than the slot.
 package confexec
 
@@ -11,10 +11,10 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/devslot/testdata/fixture"
 )
 
-// Driver is the fixture driver plus a go list run.
+// Driver is the fixture driver plus a run of the suite.
 type Driver struct{ fixture.Driver }
 
 func (d Driver) Run(ctx context.Context, op string, l devslot.Link, sec devslot.Secrets) ([]devslot.Reading, error) {
-	conformance.Check(d.Driver, conformance.Config{Packages: []string{"std"}})
+	conformance.Check(d.Driver, conformance.Config{})
 	return d.Driver.Run(ctx, op, l, sec)
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -310,7 +311,7 @@ func TestLinkReachesOnlyPinnedDevice(t *testing.T) {
 			}
 		}
 	}
-	if ps := conformance.Check(fixture.Driver{}, config(pkg+"/testdata/fixture")); len(ps) != 0 {
+	if ps := conformance.Check(fixture.Driver{}, config(t, pkg+"/testdata/fixture")); len(ps) != 0 {
 		t.Errorf("fixture fails the suite: %v", ps)
 	}
 }
@@ -489,10 +490,23 @@ func TestSecretsOpenOnlyOwnSlot(t *testing.T) {
 	}
 }
 
-func config(pkgs ...string) conformance.Config {
+// config lists pkgs as a driver repository's CI would, for the target the
+// image builds (the suite itself starts no process).
+func config(t *testing.T, pkgs ...string) conformance.Config {
+	t.Helper()
+	var listing []byte
+	if len(pkgs) > 0 {
+		cmd := exec.Command("go", append([]string{"list", "-deps", "-json"}, pkgs...)...)
+		cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list %v: %v", pkgs, err)
+		}
+		listing = out
+	}
 	return conformance.Config{
 		NewDevice: func(k []byte) conformance.Device { return &fake.Device{Key: k, Temps: []int16{2150, 2160}} },
-		Packages:  pkgs,
+		Listing:   listing,
 		Seed:      1,
 	}
 }
@@ -582,7 +596,7 @@ func (trusting) Run(ctx context.Context, op string, l devslot.Link, sec devslot.
 }
 
 func TestConformanceRejectsBadFixtures(t *testing.T) {
-	if ps := conformance.Check(fixture.Driver{}, config(pkg+"/testdata/fixture")); len(ps) != 0 {
+	if ps := conformance.Check(fixture.Driver{}, config(t, pkg+"/testdata/fixture")); len(ps) != 0 {
 		t.Fatalf("the good fixture fails: %v", ps)
 	}
 	cases := []struct {
@@ -601,13 +615,14 @@ func TestConformanceRejectsBadFixtures(t *testing.T) {
 		{"tls socket", fixture.Driver{}, []string{pkg + "/testdata/tlsdriver"}, "imports", "crypto/tls"},
 		{"file read through a template", fixture.Driver{}, []string{pkg + "/testdata/filedriver"}, "imports", "text/template"},
 		{"socket under a build tag", fixture.Driver{}, []string{pkg + "/testdata/tagdriver"}, "imports", "tagdriver has source other than plain Go files"},
+		{"no listing", fixture.Driver{}, nil, "imports", "no go list listing"},
 		{"assembly", fixture.Driver{}, []string{pkg + "/testdata/asmdriver"}, "imports", "trap_amd64.s"},
 		{"linkname", fixture.Driver{}, []string{pkg + "/testdata/linkdriver"}, "imports", "//go:linkname"},
 		{"repository tooling", fixture.Driver{}, []string{pkg + "/testdata/confexec"}, "imports", "conformance, which is not the slot"},
 		{"own socket", fixture.Driver{}, []string{pkg + "/testdata/netdriver"}, "imports", "imports net"},
 	}
 	for _, c := range cases {
-		ps := conformance.Check(c.drv, config(c.pkgs...))
+		ps := conformance.Check(c.drv, config(t, c.pkgs...))
 		if !slices.ContainsFunc(ps, func(p conformance.Problem) bool {
 			return p.Kind == c.want && strings.Contains(p.Detail, c.detail)
 		}) {

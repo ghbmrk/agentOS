@@ -17,13 +17,14 @@ import (
 	"math/rand/v2"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk/devslot"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
 // Frame is one frame a fake device sends on a declared channel.
@@ -45,9 +46,12 @@ type Device interface {
 type Config struct {
 	// NewDevice builds a fresh fake device holding key.
 	NewDevice func(key []byte) Device
-	// Packages are the driver's import paths for the imports check; none
-	// skips it (only this repository's own tests do that).
-	Packages []string
+	// Listing is the output of `go list -deps -json` over the driver's
+	// packages, its main included, run by the driver repository's CI with
+	// the image's target (GOOS=linux, its GOARCH, CGO_ENABLED=0, its tags).
+	// The suite starts no process itself (only childproc starts one here).
+	// An empty listing fails the imports check.
+	Listing []byte
 	// Iterations is how many fuzzed runs each operation gets (default 300).
 	Iterations int
 	// Seed seeds the fuzzer, so a failure repeats.
@@ -121,10 +125,8 @@ func Check(drv devslot.Driver, cfg Config) []Problem {
 			}
 		}
 	}
-	for _, pkg := range cfg.Packages {
-		for _, b := range bannedImports(pkg) {
-			add("imports", "%s", b)
-		}
+	for _, b := range bannedImports(cfg.Listing) {
+		add("imports", "%s", b)
 	}
 	return ps
 }
@@ -301,15 +303,17 @@ func (h *harness) leak(err error) string {
 
 // slotSide is the only code from this repository a driver may link: the
 // slot and the key library. Everything else it links is held to the rules
-// in bannedImports. This package is not on it: it runs go list, so drivers
-// use it from their _test.go files only, which go list -deps does not walk.
+// in bannedImports. This package is not on it: it is test tooling, so
+// drivers use it from their _test.go files only, which go list -deps does not
+// walk.
 var slotSide = map[string]bool{
-	"github.com/ghbmrk/agentos/broker/clerk/devslot": true,
-	"github.com/ghbmrk/agentos/broker/kernel/key":    true,
+	reflect.TypeFor[devslot.Slot]().PkgPath(): true,
+	reflect.TypeFor[key.Verb]().PkgPath():     true,
 }
 
-// thisRepo prefixes this repository's packages.
-const thisRepo = "github.com/ghbmrk/agentos/"
+// thisRepo prefixes this repository's packages, read from the slot's own
+// path so no host name is written here.
+var thisRepo = strings.TrimSuffix(reflect.TypeFor[devslot.Slot]().PkgPath(), "broker/clerk/devslot")
 
 // allowedStd is every standard package driver code may import: framing,
 // encoding, hashing and crypto primitives, and the language's own helpers.
@@ -353,8 +357,8 @@ func (p listed) other() []string {
 }
 
 // bannedImports is a lint over the driver's source, not its boundary: the
-// boundary is the sealed per-driver process (part b). For pkg and every
-// non-standard package it links, other than slotSide, it fails:
+// boundary is the sealed per-driver process (part b). For every non-standard
+// package in the listing other than slotSide, it fails:
 //   - any source but plain Go files: assembly, syso objects, C and the other
 //     cgo kinds, and Go or other files the build skipped (a build tag or
 //     another target), since each can reach the kernel with no import;
@@ -362,17 +366,16 @@ func (p listed) other() []string {
 //   - a standard import off allowedStd;
 //   - an import of any other package of this repository (its tooling, this
 //     package among them, can run processes).
-func bannedImports(pkg string) []string {
-	out, err := exec.Command("go", "list", "-deps", "-json", pkg).Output()
-	if err != nil {
-		return []string{fmt.Sprintf("go list %s: %v", pkg, err)}
+func bannedImports(out []byte) []string {
+	if len(bytes.TrimSpace(out)) == 0 {
+		return []string{"no go list listing of the driver's packages"}
 	}
 	var pkgs []listed
 	std := map[string]bool{}
 	for d := json.NewDecoder(bytes.NewReader(out)); d.More(); {
 		var p listed
 		if err := d.Decode(&p); err != nil {
-			return []string{fmt.Sprintf("go list %s: %v", pkg, err)}
+			return []string{fmt.Sprintf("go list listing: %v", err)}
 		}
 		if p.Standard {
 			std[p.ImportPath] = true
