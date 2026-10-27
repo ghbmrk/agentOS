@@ -34,13 +34,7 @@ DROP = {
     "liblastlog2-2": ("util-linux", "only lslogins links it, an account-listing tool for a person at a shell; the box has no login"),
     "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
     "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
-    "passwd": ("shadow", "useradd and the other account tools; only maintainer scripts run them, and systemd-sysusers makes the box's users"),
-    "login.defs": ("shadow", "the account tools' settings; without it systemd-sysusers keeps its built-in id ranges, and the box has no login"),
-    "adduser": ("adduser", "a front end to useradd that only maintainer scripts run"),
-    "libsemanage2": ("libsemanage", "only useradd, userdel and usermod link it"),
-    "libsemanage-common": ("libsemanage", "only libsemanage2 reads it"),
-    "libsepol2": ("libsepol", "only libsemanage2 links it"),
-    "libbz2-1.0": ("bzip2", "only libsemanage2 and dpkg-deb link it; the box unpacks no package"),
+    "libbz2-1.0": ("bzip2", "only dpkg-deb links it; the box unpacks no package"),
 }
 # Dropped packages whose source the box still runs other packages of, so the source's image
 # records stay (tests/test_image_drop.py).
@@ -68,8 +62,6 @@ PERL_TOOLS = {
     "libpam-runtime": "pam-auth-update, pam_getenv",
     "linux-base": "the kernel package's install hooks",
     "openssl": "c_rehash, CA.pl, tsget.pl",
-    "sgml-base": "SGML catalog tools (maintainer scripts)",
-    "xml-core": "XML catalog tools (maintainer scripts)",
 }
 ET_EXEC, ET_DYN, EM_X86_64 = 2, 3, 62
 PT_LOAD, PT_DYNAMIC = 1, 2

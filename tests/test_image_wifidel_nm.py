@@ -55,12 +55,20 @@ class TestImageShipsNoWiFiClient(unittest.TestCase):
         self.assertEqual([ln for ln in tmpfiles.splitlines() if not ln.startswith("#") and NM.search(ln)], [])
         # Nor the packages' forced drops, which only NetworkManager's plugins and nmtui needed.
         self.assertEqual([p for p in drop.FILES if re.search(r"NetworkManager|nmtui", p)], [])
-        for p in ("libbluetooth3", "libmm-glib0", "libnewt0.52", "libslang2"):
+        # Nor what only polkitd pulled in (the account tools; sgml-base and xml-core's perl): dpkg-query -L
+        # on a package that is not installed fails the build (#3440 build (b)).
+        for p in ("libbluetooth3", "libmm-glib0", "libnewt0.52", "libslang2", "passwd", "login.defs", "adduser",
+                  "libsemanage2", "libsemanage-common", "libsepol2"):
             self.assertNotIn(p, drop.DROP)
-        # And no advisory record accepts a source the image no longer ships. policykit-1's stay while
-        # its library may: an unused record only warns, a missing one fails the scan.
+        for p in ("sgml-base", "xml-core"):
+            self.assertNotIn(p, drop.PERL_TOOLS)
+        # And no advisory record accepts a source the image no longer ships: NetworkManager's and
+        # wpasupplicant's own, polkitd's, what only they linked, and b1's radio firmware (#3440's build
+        # installs none).
         records = json.loads((ROOT / "assurance/vulncheck.json").read_text())["accepted"]
-        self.assertEqual([r["id"] for r in records if r.get("package") in ("network-manager", "wpa")], [])
+        gone = ("network-manager", "wpa", "policykit-1", "duktape", "glib2.0", "curl", "brotli", "cyrus-sasl2",
+                "nghttp2", "openldap", "rtmpdump", "gnutls28", "p11-kit", "firmware-nonfree")
+        self.assertEqual([r["id"] for r in records if r.get("package") in gone], [])
 
     def test_tree_check_refuses_a_wifi_client(self):
         self.assertEqual(check.violations(self.root), [])
