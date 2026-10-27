@@ -384,35 +384,35 @@ func TestEnrollRefusesAMismatchedAuthority(t *testing.T) {
 	otherPair := get(os.ReadFile(other.staged))
 	for _, c := range []struct {
 		name string
-		bend func(s staging)
+		bend func(t *testing.T, s staging)
 		want error
 	}{
-		{"a key that is not the certificate's", func(s staging) {
+		{"a key that is not the certificate's", func(t *testing.T, s staging) {
 			var mine, theirs struct{ Cert, Key []byte }
 			noErr(t, json.Unmarshal(get(os.ReadFile(s.staged)), &mine))
 			noErr(t, json.Unmarshal(otherPair, &theirs))
 			v, _ := json.Marshal(map[string][]byte{"cert": mine.Cert, "key": theirs.Key})
 			rewrite(t, s.staged, v, 0o600)
 		}, errPageCARead},
-		{"a published certificate one byte off", func(s staging) {
+		{"a published certificate one byte off", func(t *testing.T, s staging) {
 			v := get(os.ReadFile(s.published))
 			v[len(v)-1] ^= 1
 			rewrite(t, s.published, v, 0o644)
 		}, errPageCAPair},
-		{"another authority's pair", func(s staging) { rewrite(t, s.staged, otherPair, 0o600) }, errPageCAPair},
-		{"a pair that fails pageca's load checks", func(s staging) { rewrite(t, s.staged, []byte(`{"cert":"","key":""}`), 0o600) }, errPageCARead},
-		{"a group-writable certificate", func(s staging) { noErr(t, os.Chmod(s.published, 0o664)) }, errPublished},
-		{"a certificate that is not root's", func(s staging) {
+		{"another authority's pair", func(t *testing.T, s staging) { rewrite(t, s.staged, otherPair, 0o600) }, errPageCAPair},
+		{"a pair that fails pageca's load checks", func(t *testing.T, s staging) { rewrite(t, s.staged, []byte(`{"cert":"","key":""}`), 0o600) }, errPageCARead},
+		{"a group-writable certificate", func(t *testing.T, s staging) { noErr(t, os.Chmod(s.published, 0o664)) }, errPublished},
+		{"a certificate that is not root's", func(t *testing.T, s staging) {
 			if os.Geteuid() != 0 {
 				t.Skip("needs root to give the file away")
 			}
 			noErr(t, os.Chown(s.published, 1, 1))
 		}, errPublished},
-		{"no published certificate", func(s staging) { noErr(t, os.Remove(s.published)) }, os.ErrNotExist},
+		{"no published certificate", func(t *testing.T, s staging) { noErr(t, os.Remove(s.published)) }, os.ErrNotExist},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := newBox(t)
-			c.bend(b.staged())
+			c.bend(t, b.staged())
 			files, idx := b.files(), nv(t, b.sw.TPM())
 			if err := enroll(b.c, b.sw.TPM()); !errors.Is(err, c.want) {
 				t.Fatalf("got %v, want %v", err, c.want)
