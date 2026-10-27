@@ -2,8 +2,9 @@
 // point 5). A driver's repository runs it at the pinned commit of this one:
 // the declaration passes devslot.Check, a clean run against the driver's fake
 // device writes only declared shapes, a canary key never leaves the driver,
-// every parser survives bounded, mutated and random replies, and the driver's
-// code imports only allowed standard packages (allowedStd).
+// every parser survives bounded, mutated and random replies, no write shape
+// leaves more than MaxFreeTail bytes free unless the driver's tests name it,
+// and the driver's code imports only allowed standard packages (allowedStd).
 package conformance
 
 import (
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -50,8 +52,14 @@ type Config struct {
 	// packages, its main included, run by the driver repository's CI with
 	// the image's target (GOOS=linux, its GOARCH, CGO_ENABLED=0, its tags).
 	// The suite starts no process itself (only childproc starts one here).
-	// An empty listing fails the imports check.
+	// An empty listing, or one without the driver's own package, fails the
+	// imports check. A forged or partial listing passes, so the driver
+	// repository's review checks the CI command that makes it.
 	Listing []byte
+	// Wide names the shapes whose free tail is over MaxFreeTail and that the
+	// driver repository's review has judged: the diff that adds a name here
+	// is what that review reads. Every other wide shape fails.
+	Wide []string
 	// Iterations is how many fuzzed runs each operation gets (default 300).
 	Iterations int
 	// Seed seeds the fuzzer, so a failure repeats.
@@ -60,11 +68,18 @@ type Config struct {
 
 // Problem is one way a driver fails the suite.
 type Problem struct {
-	Kind   string // declaration, clean-run, undeclared-write, canary, panic, imports
+	Kind   string // declaration, wide-shape, clean-run, undeclared-write, canary, panic, imports
 	Detail string
 }
 
 func (p Problem) String() string { return p.Kind + ": " + p.Detail }
+
+// MaxFreeTail is the most bytes a write shape may leave free after its
+// prefix (Max - len(Prefix)) without being named in Config.Wide: room for an
+// argument or a short tag. A wider shape is a channel to the device that
+// could carry any command under its operation's verb, such as an actuate
+// frame under a read (DEV-4), so a reviewer must judge it.
+const MaxFreeTail = 8
 
 // Canary is the key the suite lends: synthetic, and found in nothing.
 var Canary = []byte("agentos-devslot-canary-key-00001")
@@ -87,6 +102,12 @@ func Check(drv devslot.Driver, cfg Config) []Problem {
 	if err := devslot.Check(d, pin); err != nil {
 		add("declaration", "%v", err)
 		return ps
+	}
+	for _, sh := range d.Shapes {
+		if free := sh.Max - len(sh.Prefix); free > MaxFreeTail && !slices.Contains(cfg.Wide, sh.Name) {
+			add("wide-shape", "%s leaves %d bytes free after its %d-byte prefix (over %d); name it in Config.Wide once reviewed",
+				sh.Name, free, len(sh.Prefix), MaxFreeTail)
+		}
 	}
 	if cfg.NewDevice == nil {
 		add("clean-run", "no fake device")
@@ -125,10 +146,19 @@ func Check(drv devslot.Driver, cfg Config) []Problem {
 			}
 		}
 	}
-	for _, b := range bannedImports(cfg.Listing) {
+	for _, b := range bannedImports(cfg.Listing, driverPkg(drv)) {
 		add("imports", "%s", b)
 	}
 	return ps
+}
+
+// driverPkg is the package that defines drv's type.
+func driverPkg(drv devslot.Driver) string {
+	t := reflect.TypeOf(drv)
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.PkgPath()
 }
 
 func pinFor(l devslot.LinkKind) devslot.Pin {
@@ -335,10 +365,16 @@ func init() {
 	}
 }
 
+// directive finds every //go: directive name, anywhere in a file, so none
+// hides in a column or a block.
+var directive = regexp.MustCompile(`//go:([A-Za-z0-9_]*)`)
+
 // listed is the part of go list's JSON the check reads.
 type listed struct {
 	ImportPath string
 	Standard   bool
+	Incomplete bool
+	Error      *struct{ Err string }
 	Dir        string
 	GoFiles    []string
 	Imports    []string
@@ -362,28 +398,46 @@ func (p listed) other() []string {
 //   - any source but plain Go files: assembly, syso objects, C and the other
 //     cgo kinds, and Go or other files the build skipped (a build tag or
 //     another target), since each can reach the kernel with no import;
-//   - a //go:linkname directive in a Go file;
+//   - any //go: directive in a Go file but //go:build (linkname reaches
+//     runtime internals, norace hides data races from the race detector,
+//     cgo_import_dynamic loads system libraries at exec);
 //   - a standard import off allowedStd;
 //   - an import of any other package of this repository (its tooling, this
 //     package among them, can run processes).
-func bannedImports(out []byte) []string {
+//
+// It also fails a listing without drvPkg, an entry without an import path,
+// and an entry go list marked incomplete or in error, so an honest slip in
+// the CI command reads as a failure, not as a clean driver.
+func bannedImports(out []byte, drvPkg string) []string {
 	if len(bytes.TrimSpace(out)) == 0 {
 		return []string{"no go list listing of the driver's packages"}
 	}
 	var pkgs []listed
+	var bad []string
 	std := map[string]bool{}
+	found := false
 	for d := json.NewDecoder(bytes.NewReader(out)); d.More(); {
 		var p listed
 		if err := d.Decode(&p); err != nil {
 			return []string{fmt.Sprintf("go list listing: %v", err)}
 		}
+		switch {
+		case p.ImportPath == "":
+			bad = append(bad, "go list listing has an entry with no import path")
+			continue
+		case p.Incomplete || p.Error != nil:
+			bad = append(bad, "go list could not load "+p.ImportPath)
+		}
+		found = found || (p.ImportPath == drvPkg && !p.Standard)
 		if p.Standard {
 			std[p.ImportPath] = true
 		} else if !slotSide[p.ImportPath] {
 			pkgs = append(pkgs, p)
 		}
 	}
-	var bad []string
+	if !found {
+		bad = append(bad, "go list listing does not list the driver's package "+drvPkg)
+	}
 	for _, p := range pkgs {
 		if o := p.other(); len(o) > 0 {
 			bad = append(bad, p.ImportPath+" has source other than plain Go files: "+strings.Join(o, ", "))
@@ -394,8 +448,10 @@ func bannedImports(out []byte) []string {
 				bad = append(bad, p.ImportPath+": "+f+" unreadable")
 				continue
 			}
-			if bytes.Contains(b, []byte("//go:linkname")) {
-				bad = append(bad, p.ImportPath+": "+f+" has a //go:linkname directive")
+			for _, m := range directive.FindAllSubmatch(b, -1) {
+				if string(m[1]) != "build" {
+					bad = append(bad, p.ImportPath+": "+f+" has a //go:"+string(m[1])+" directive")
+				}
 			}
 		}
 		for _, imp := range p.Imports {

@@ -70,3 +70,16 @@ This PR: this brief and the D-189 row in `DECISIONS.md`. Part (a): `broker/clerk
 ## Estimate
 
 Part (a): one session, about 100k tokens, strongest model. Part (b): one session, about 120k tokens, after the device clerk host.
+
+## Follow-up: DEVSLOT-shapes (#3363)
+
+Release findings from the #3356 reviews (L3 6433450345 point 4, Security 6433469158 point 4, Security 6433764278 points 1-3, L3 6434260250, Security 6434263759 points 1-3). Scope: `broker/clerk/devslot/` only. Tier A (the public contract, point 5).
+
+- **Wide shapes.** The suite fails a shape whose free tail (`Max - len(Prefix)`) is over `MaxFreeTail` (8 bytes, room for an argument or a short tag) unless the driver's tests name it in `Config.Wide`. The private review then sees each wide shape in the diff that adds its name. `Check` still accepts an empty prefix, because length-prefixed TCP framing needs a variable first byte.
+- **The listing names the driver.** The suite fails a listing that lacks the driver type's package, an entry with no import path, and an entry go list marked incomplete or in error. DEVSLOT-a-7 says a forged or partial listing still passes, so the private review checks the CI command that makes it.
+- **Directives.** The suite fails every `//go:` directive in driver Go files except `//go:build`. That covers `linkname`, `norace` (which hides races from the race detector) and `cgo_import_dynamic` (which loads a system library at exec).
+- **Standard input.** DEVSLOT-a-7 says `fmt` can read standard input, and that the sealed process gets none.
+
+Part b notes (L3 6, Security 7 and 8, Potency 1, the stdin point) go into part b's brief update, not this row.
+
+Acceptance tests: `TestConformanceReportsWideShapes`; `TestConformanceRejectsBadFixtures` cases "race detector hidden", "system library at exec", "listing of another package", "listing entry with no path", "null listing", "incomplete listing" and "wide shape".
