@@ -442,7 +442,7 @@ func (d *driver) smsPair() error {
 	case <-time.After(2 * time.Minute):
 		return errors.New("no reply text reached the phone")
 	}
-	b, err := d.waitStep("3", 2*time.Minute)
+	b, err := d.waitStep("2", 2*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -462,7 +462,7 @@ func (d *driver) codes() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/codes %d %v", st, err)
 	}
-	_, err = d.waitStep("4", time.Minute)
+	_, err = d.waitStep("3", time.Minute)
 	return err
 }
 
@@ -503,7 +503,7 @@ func (d *driver) card() error {
 	if err := json.Unmarshal(b, &latch); err != nil || !latch.Confirmed {
 		return fmt.Errorf("card latch not confirmed (err %v)", err)
 	}
-	_, err = d.waitStep("5", time.Minute)
+	_, err = d.waitStep("4", time.Minute)
 	return err
 }
 
@@ -512,7 +512,7 @@ func (d *driver) recovery() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/recovery %d %v", st, err)
 	}
-	_, err = d.waitStep("6", time.Minute)
+	_, err = d.waitStep("5", time.Minute)
 	return err
 }
 
@@ -521,7 +521,7 @@ func (d *driver) host() error {
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST /setup/host %d %v", st, err)
 	}
-	_, err = d.waitStep("7", time.Minute)
+	_, err = d.waitStep("6", time.Minute)
 	if err != nil {
 		logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager",
 			"-u", "agentos-localui.service").Output()
@@ -533,7 +533,7 @@ func (d *driver) host() error {
 }
 
 // guestTask is the model-backed guest task on the Codex plan route. It
-// first signs in to the plan at step 7, which finishes setup, then runs
+// first signs in to the plan at step 6, which finishes setup, then runs
 // one task through provider_run as the agent machine's guest
 // (providerTask, ASSUMPTIONS E12).
 func (d *driver) guestTask() error {
@@ -743,7 +743,7 @@ func chunked(log string, secrets []string) string {
 	return strings.Join(out, "\n")
 }
 
-// planSignIn is the owner signing in to the Codex plan at step 7, as the
+// planSignIn is the owner signing in to the Codex plan at step 6, as the
 // page offers it once agentosd serves the device-code sign-in (#1264): the
 // owner ticks private content, presses sign in, opens the link the page
 // shows on the provider's own host and enters its code there (the stub's
@@ -766,14 +766,14 @@ func (d *driver) planSignIn() error {
 		}
 		return bytes.Contains(pg, []byte(aiOpen)), errors.New(where(pg))
 	})
-	// aiOpen is on step 7 whenever the first-boot update has finished,
-	// whatever providers it lists, so a timeout here means step 7 never
+	// aiOpen is on step 6 whenever the first-boot update has finished,
+	// whatever providers it lists, so a timeout here means step 6 never
 	// opened or the page kept failing: a product failure, not XFAIL.
 	if err != nil {
-		return fmt.Errorf("step 7 did not open: %w", err)
+		return fmt.Errorf("step 6 did not open: %w", err)
 	}
 	if !deviceOffer(pg, route.Provider) {
-		return errors.New(notDriven + " step 7 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
+		return errors.New(notDriven + " step 6 offers no " + route.Provider + " sign-in (#1264; gate: #809, #1877; image: #1721) " + where(pg))
 	}
 	if d.stub == nil {
 		return errors.New("no plan stub")
@@ -796,7 +796,7 @@ func (d *driver) planSignIn() error {
 		// case where #809 and #1877 land first (ASSUMPTIONS E11).
 		image := provagent.Builtins()[route.Provider].Image
 		if has, err := d.hasImage(image); err == nil && !has {
-			return errors.New(notDriven + " step 7's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
+			return errors.New(notDriven + " step 6's " + route.Provider + " sign-in cannot start: agentosd registers no " + image + " image (#1721) " + where(pg))
 		}
 		return errors.New("no sign-in link after sign in " + where(pg) + "; " + d.signInDiag(out))
 	}
