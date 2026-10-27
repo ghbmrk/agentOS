@@ -2577,7 +2577,8 @@ class ConfFilesTest(unittest.TestCase):
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private", "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")))
+            "var/lib/private", "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap",
+            "run/agentos-localui")))
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is

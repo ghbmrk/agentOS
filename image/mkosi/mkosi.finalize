@@ -148,10 +148,10 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 # #1702: directories a service user or a login user owns on the box. agentos-localui serves the
 # LAN-facing setup page from var/lib/agentos-localui, the vault's user from var/lib/agentos-egress;
 # DynamicUser services live under var/lib/private, and people under home and run/user; the egress,
-# netjoin and ap units' RuntimeDirectory= lives under run.
+# netjoin, ap and localui units' RuntimeDirectory= lives under run.
 # A link into one is refused like one into WORLD_WRITABLE.
 SERVICE_DIRS = ("var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user", "var/lib/private",
-                "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap")
+                "run/agentos-egress", "run/agentos-netjoin", "run/agentos-ap", "run/agentos-localui")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
 # makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
