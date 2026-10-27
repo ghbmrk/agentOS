@@ -112,7 +112,6 @@ type clerkRig struct {
 	clk     *guardClock
 	alerts  []string
 	pending string
-	recs    string
 	x       *follow.Executor
 	c       *followclerk.Clerk
 	k       *kernel.Kernel
@@ -133,10 +132,6 @@ func newClerkRig(t *testing.T) *clerkRig {
 	}
 	r.store, r.st = st, &countStore{Store: st}
 	r.pending = filepath.Join(st.Dir, "follow-alert")
-	r.recs = t.TempDir()
-	if err := os.Chmod(r.recs, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	opub, opriv := seedKey(1)
 	bpub, bpriv := seedKey(12)
 	r.anchors = []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
@@ -165,11 +160,7 @@ func (r *clerkRig) restart() (*follow.Executor, *followclerk.Clerk) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	c, err := followclerk.New(x, r.anchors, r.recs)
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	return x, c
+	return x, followclerk.New(x, r.anchors)
 }
 
 func (r *clerkRig) now() int64 { return r.clk.at.UnixMilli() }
@@ -359,9 +350,9 @@ func TestFollowOnceAcrossCrash(t *testing.T) {
 	}
 }
 
-// KRN-8: the probe answers from the box and the clerk's record, not the
-// process. A step the clerk has no record of beginning is unknown, never
-// notdone, and so is a root under a name the box does not hold it under.
+// KRN-8: the probe answers from the box, not the process, and answers only
+// done or unknown: a step the box does not show is unknown, never notdone,
+// and so is a root under a name the box does not hold it under.
 func TestProbeReadsTheBoxNotTheProcess(t *testing.T) {
 	r := newClerkRig(t)
 	d := r.describe(r.fork)
@@ -532,11 +523,9 @@ func (s *flakyStore) FollowFork(root []byte, links [][]byte, shipped []byte, app
 }
 
 // KRN-8, security 1 round 2 on #3444: the box goes to fork A but the clerk
-// cannot tell, so p1 is unknown with its record saying the box followed the
-// project before. The owner then switches back to the project. The box now
-// follows what it did before p1 began, yet p1 must not be sent again: the
-// switch back dropped p1's record, so p1 stays unknown and the box stays
-// on the project.
+// cannot tell, so p1 is unknown. The owner then switches back to the
+// project. The box now follows what it did before p1 began, yet p1 must not
+// be sent again: it stays unknown and the box stays on the project.
 func TestSwitchBackIsNeverUndoneByAnEarlierSwitch(t *testing.T) {
 	r := newClerkRig(t)
 	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1, land: true})
@@ -567,8 +556,8 @@ func (s *flakyStore) TrustedRoot() ([]byte, error) {
 }
 
 // KRN-8: the same when the clerk itself could not tell whether the first
-// switch landed: its record says what the box followed before, and a box
-// that has moved on since is unknown, never a reason to switch again.
+// switch landed: a box that has moved on since is unknown, never a reason
+// to switch again.
 func TestUnknownSwitchNeverReplaysOverALaterOne(t *testing.T) {
 	r := newClerkRig(t)
 	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
@@ -597,24 +586,79 @@ func (r *clerkRig) flaky(st follow.Store) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	if r.c, err = followclerk.New(r.x, r.anchors, r.recs); err != nil {
-		r.t.Fatal(err)
-	}
+	r.c = followclerk.New(r.x, r.anchors)
 	r.boot(r.c)
 }
 
-// KRN-8: a switch the clerk began but that never landed (the box still
-// follows what it did just before) is notdone, so the kernel sends it again
-// and it lands once.
-func TestSwitchThatNeverLandedIsSentAgain(t *testing.T) {
+// KRN-8, step back on #3444: a switch that never landed and whose answer
+// the clerk could not give is not sent again on the clerk's word. It parks,
+// the box unchanged, and runs once more only on the owner's RETRY.
+func TestSwitchThatNeverLandedWaitsForRetry(t *testing.T) {
 	r := newClerkRig(t)
 	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
 	d := r.describe(r.fork)
 	if st := r.run(r.approved("p1", d, "Acme Fork")); st.Phase != kernel.PUnknown {
 		t.Fatalf("first try %+v", st)
 	}
-	if s := r.probeAll("p1"); s.Phase != kernel.PDone || !r.trusts(r.fork) || r.st.switches != 2 {
+	if s := r.probeAll("p1"); s.Phase != kernel.PParked || r.trusts(r.fork) || r.st.switches != 1 {
 		t.Fatalf("%+v switches %d", s, r.st.switches)
+	}
+	if err := r.k.Retry(r.now(), "p1", 0); err != nil {
+		t.Fatal(err)
+	}
+	if s := r.probeAll("p1"); s.Phase != kernel.PDone || !r.trusts(r.fork) || r.st.switches != 2 {
+		t.Fatalf("after RETRY %+v switches %d", s, r.st.switches)
+	}
+}
+
+// KRN-8, security delta on #3444 (DSP2): p1 never lands and the clerk
+// cannot tell; the owner then approves fork B and then the switch back.
+// The box is where it was before p1, yet p1 is never sent again.
+func TestEarlierSwitchNeverRedoneAfterTwoLaterOnes(t *testing.T) {
+	r := newClerkRig(t)
+	r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
+	if st := r.run(r.approved("p1", r.describe(r.fork), "Acme Fork")); st.Phase != kernel.PUnknown {
+		t.Fatalf("p1 %+v", st)
+	}
+	forkB := rootOf(t)
+	r.clk.at = r.clk.at.Add(time.Millisecond)
+	if st := r.run(r.approved("p3", r.describe(forkB), "Beta")); st.Phase != kernel.PDone {
+		t.Fatalf("p3 %+v", st)
+	}
+	r.clk.at = r.clk.at.Add(time.Millisecond)
+	if st := r.run(r.approved("p4", r.describe(r.shipped), "")); st.Phase != kernel.PDone || !r.trusts(r.shipped) {
+		t.Fatalf("p4 %+v", st)
+	}
+	if s := r.probeAll("p1"); s.Phase != kernel.PParked {
+		t.Fatalf("p1 settled as %+v", s)
+	}
+	if !r.trusts(r.shipped) || r.st.switches != 3 {
+		t.Fatalf("p1 ran after the owner's later switches: switches %d", r.st.switches)
+	}
+}
+
+// KRN-8, security delta 2 on #3444: p1 never lands and the clerk cannot
+// tell. The owner approves the switch back (a cancel), which the box
+// already holds, so it is answered "already" without switching. p1 is
+// still never sent again, before or after a restart.
+func TestApprovalAlreadyInEffectIsNeverUndone(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		r := newClerkRig(t)
+		r.flaky(&flakyStore{countStore: r.st, fail: 1, blind: 1})
+		if st := r.run(r.approved("p1", r.describe(r.fork), "Acme Fork")); st.Phase != kernel.PUnknown || r.trusts(r.fork) {
+			t.Fatalf("p1 %+v", st)
+		}
+		r.clk.at = r.clk.at.Add(time.Millisecond)
+		if st := r.run(r.approved("p2", r.describe(r.shipped), "")); st.Phase != kernel.PDone || !strings.HasPrefix(st.Detail, "already") {
+			t.Fatalf("p2 %+v", st)
+		}
+		if restart {
+			_, c := r.restart()
+			r.boot(c)
+		}
+		if s := r.probeAll("p1"); s.Phase != kernel.PParked || r.trusts(r.fork) || r.st.switches != 1 {
+			t.Fatalf("restart %v: p1 %+v switches %d", restart, s, r.st.switches)
+		}
 	}
 }
 
