@@ -179,7 +179,6 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"unpause": act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
 	"stop":    act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
 	"resume":  act(func(k *kernel.Kernel, now int64, a resumeArgs) error { return k.Resume(now, a.Stops) }),
-	"setup":   act(func(k *kernel.Kernel, now int64, f kernel.FirstAnchors) error { return k.Setup(now, f) }),
 	"setupinfo": func(k *kernel.Kernel, _ int64, _ json.RawMessage) (any, error) {
 		return SetupInfo{Open: k.State().SetupOpen(), Box: k.Box()}, nil
 	},
@@ -216,6 +215,13 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	},
 	"backup":  func(h *Kernel, now int64, _ json.RawMessage) (any, error) { return h.Backup(now) },
 	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
+	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var f kernel.FirstAnchors
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, ErrArgs
+		}
+		return nil, h.Setup(now, f)
+	},
 	"certify": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var a certifyArgs
 		if err := json.Unmarshal(raw, &a); err != nil {

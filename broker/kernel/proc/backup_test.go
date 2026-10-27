@@ -5,6 +5,7 @@ package proc
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -896,5 +897,70 @@ func TestBackupCarriesThePageCA(t *testing.T) {
 	defer nf.Close()
 	if nm, _, err := backup.Open(nf, testRK); err != nil || nm.PageCA != nil || n.h.bk.kept[0].Record.PageCA != "" {
 		t.Fatalf("a kernel with no authority wrote one: %v", err)
+	}
+}
+
+// REQ: BAK-1, HW-15
+// EDGE-link-core-b: a kernel holding the core's link key writes no part of
+// it into a backup: neither the manifest, the log section nor a key table
+// holds an 8-byte run of its seed or its private key (BAK-1 "never the
+// kernel's keys"; a restore enrolls again and makes a new one).
+// Mutant: writeOne's `PageCA: ca` as `PageCA: h.link.Seed()` (the manifest
+// then holds the seed).
+func TestBackupHoldsNoLinkKey(t *testing.T) {
+	_, link := gen(9)
+	b := newBBox(t, recipientWire(t, testRK))
+	b.cfg.LinkKey = link
+	b.restart()
+	b.subject()
+	dir := b.addTarget("drive", false)
+	taken := b.backup()
+	if len(taken) != 1 || taken[0].Backup == nil || !taken[0].Backup.Verified {
+		t.Fatalf("backup: %+v", taken)
+	}
+	id := taken[0].Backup.BackupID
+	f := mustOpen(t, filepath.Join(dir, id+".content"))
+	defer f.Close()
+	m, secs, err := backup.Open(f, testRK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain [][]byte
+	plain = append(plain, []byte(fmt.Sprintf("%+v", m)), m.PageCA)
+	for {
+		_, r, err := secs.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		sec, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain = append(plain, sec)
+	}
+	tables, err := filepath.Glob(filepath.Join(dir, id+".table.*"))
+	if err != nil || len(tables) == 0 {
+		t.Fatalf("tables: %v %v", tables, err)
+	}
+	for _, p := range append(tables, filepath.Join(dir, id+".content")) {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plain = append(plain, raw)
+	}
+	_, keys := openBackup(t, dir, id, testRK)
+	for _, k := range keys.M {
+		plain = append(plain, k[:])
+	}
+	for _, raw := range plain {
+		for i := 0; i+8 <= len(link); i++ {
+			if bytes.Contains(raw, link[i:i+8]) {
+				t.Fatalf("the backup holds the link key's bytes %d to %d", i, i+8)
+			}
+		}
 	}
 }

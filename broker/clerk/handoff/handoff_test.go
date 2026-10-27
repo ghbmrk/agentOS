@@ -53,7 +53,7 @@ var (
 )
 
 func testKeys() KernelKeys {
-	return KernelKeys{Log: [32]byte{9}, Head: headPriv, Counter: testCounter(), Anchors: anchors}
+	return KernelKeys{Log: [32]byte{9}, Head: headPriv, Counter: testCounter(), Anchors: anchors, Slot: SlotTPM}
 }
 
 func testCounter() Counter {
@@ -115,7 +115,9 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	v3 := bytes.Clone(good)
 	v3[len(handoffTag)-2] = '3' // a v3 hand-off, which carried no recipient
 	v4 := bytes.Clone(good)
-	v4[len(handoffTag)-2] = '4'                          // a v4 hand-off, which carried no page authority
+	v4[len(handoffTag)-2] = '4' // a v4 hand-off, which carried no page authority
+	v5 := bytes.Clone(good)
+	v5[len(handoffTag)-2] = '5'                          // a v5 hand-off, which carried no link key, first edge or slot
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -145,7 +147,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -274,7 +276,7 @@ func TestEncodeAnchorsRoundTrips(t *testing.T) {
 // #2905 open point 2: a store with no anchors yet hands over none, and the
 // kernel starts setup-only. A count of none with keys after it is refused.
 func TestNoAnchorsStartsSetupOnly(t *testing.T) {
-	b, err := (KernelKeys{Head: headPriv, Counter: testCounter()}).Marshal()
+	b, err := (KernelKeys{Head: headPriv, Counter: testCounter(), Slot: SlotTPM}).Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,4 +505,90 @@ func get(t *testing.T, f func() ([]byte, error)) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// REQ: HW-15, REC-2, BAK-1
+// EDGE-link-core-b: the link key, the first edge key and the slot cross
+// whole, after the page authority, and a store with neither key hands
+// none. Each is size-bounded: a wrong length, a field running past the end,
+// or a slot that is empty, long or not printable is refused at both ends.
+// Revert mutants: `optional` taking any length (the "edge 31" wire passes);
+// `validSlot` dropped from Marshal (the empty-slot marshal passes).
+func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
+	_, link := gen(7)
+	edge, _ := gen(8)
+	keys := testKeys()
+	keys.PageCA, keys.LinkKey, keys.FirstEdge, keys.Slot = testPageCA(t), link, edge, SlotPassphrase
+	b, err := keys.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ReadKeys(pipeWith(t, b))
+	if err != nil || !k.LinkKey.Equal(link) || !k.FirstEdge.Equal(edge) || k.Slot != SlotPassphrase || !bytes.Equal(k.PageCA, keys.PageCA) || len(k.Anchors) != len(anchors) {
+		t.Fatalf("the link keys did not survive the hand-off: %v", err)
+	}
+	k.Wipe()
+	if k.LinkKey != nil {
+		t.Fatal("Wipe left the link key")
+	}
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.LinkKey != nil || k.FirstEdge != nil || k.Slot != SlotTPM {
+		t.Fatalf("no link keys: %v", err)
+	}
+
+	// The link key's length sits after the page authority.
+	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
+	if b[o] != ed25519.SeedSize || !bytes.Equal(b[o+1:o+33], link.Seed()) {
+		t.Fatalf("link key not at %d", o)
+	}
+	e := o + 1 + 32
+	s := e + 1 + 32
+	splice := func(at, skip int, with ...byte) []byte {
+		w := bytes.Clone(b[:at])
+		w = append(w, with...)
+		return append(w, b[at+skip:]...)
+	}
+	for name, w := range map[string][]byte{
+		"link 31":     splice(o, 1+32, append([]byte{31}, link.Seed()[:31]...)...),
+		"link 33":     splice(o, 1+32, append([]byte{33}, append(link.Seed(), 0)...)...),
+		"edge 31":     splice(e, 1+32, append([]byte{31}, edge[:31]...)...),
+		"edge 64":     splice(e, 1, 64),
+		"slot empty":  splice(s, 1+len(SlotPassphrase), 0),
+		"slot space":  splice(s, 1+len(SlotPassphrase), 3, 't', ' ', 'm'),
+		"slot long":   splice(s, 1+len(SlotPassphrase), append([]byte{MaxSlot + 1}, bytes.Repeat([]byte{'a'}, MaxSlot+1)...)...),
+		"slot past":   splice(s, 1, 0xff),
+		"no slot":     b[:s],
+		"no edge":     b[:e],
+		"no link key": b[:o],
+	} {
+		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
+			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for name, mod := range map[string]func(*KernelKeys){
+		"short link key": func(k *KernelKeys) { k.LinkKey = link[:32] },
+		"short edge":     func(k *KernelKeys) { k.FirstEdge = edge[:31] },
+		"empty slot":     func(k *KernelKeys) { k.Slot = "" },
+		"long slot":      func(k *KernelKeys) { k.Slot = strings.Repeat("a", MaxSlot+1) },
+		"control slot":   func(k *KernelKeys) { k.Slot = "tpm\n" },
+	} {
+		k := testKeys()
+		mod(&k)
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for _, v := range [][]byte{nil, make([]byte, 31), make([]byte, 33), make([]byte, 64)} {
+		if _, err := ParseLinkKey(v); !errors.Is(err, ErrHandoff) {
+			t.Errorf("link key entry of %d bytes read", len(v))
+		}
+		if _, err := ParseFirstEdge(v); !errors.Is(err, ErrHandoff) && len(v) != 32 {
+			t.Errorf("first edge entry of %d bytes read", len(v))
+		}
+	}
+	if got, err := ParseLinkKey(link.Seed()); err != nil || !got.Equal(link) {
+		t.Fatalf("link key entry: %v", err)
+	}
+	if got, err := ParseFirstEdge(edge); err != nil || !got.Equal(edge) || &got[0] == &edge[0] {
+		t.Fatalf("first edge entry is not a copy: %v", err)
+	}
 }

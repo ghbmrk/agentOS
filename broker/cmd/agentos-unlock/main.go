@@ -20,6 +20,7 @@ package main
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -75,6 +76,12 @@ type config struct {
 	// dropTo replaces drop in tests that run as a plain user, who cannot
 	// shed supplementary groups; the command line never sets it.
 	dropTo func(uid, gid int) error
+	// passphrase, when set, opens the store by its passphrase slot instead
+	// of this PC's tpm slot, and the hand-off names that slot, so the
+	// kernel cuts the edge (§12.2, HW-15 "move"). Only tests set it: no
+	// flag takes it until the unknown-host unlock is built (ASSUMPTIONS
+	// EDGE-link-core-b-3).
+	passphrase []byte
 }
 
 func parse(args []string, stderr io.Writer) (config, error) {
@@ -118,18 +125,26 @@ func unlockAndExec(c config, pins pinSource) error {
 }
 
 // unlock opens the store through this PC's tpm slot and returns the
-// kernel's hand-off. The store is closed, its key wiped, before it returns.
+// kernel's hand-off, which names the slot that opened it. The store is
+// closed, its key wiped, before it returns.
 func unlock(c config, pins pinSource) ([]byte, error) {
 	t, err := openTPM(c.tpm)
 	if err != nil {
 		return nil, err
 	}
 	defer t.Close()
-	pk, anchor, err := pins(t)
-	if err != nil {
-		return nil, err
+	var k handoff.KernelKeys
+	defer k.Wipe()
+	var f seal.Factor = seal.Passphrase{Phrase: c.passphrase}
+	k.Slot = handoff.SlotPassphrase
+	if c.passphrase == nil {
+		pk, anchor, err := pins(t)
+		if err != nil {
+			return nil, err
+		}
+		f, k.Slot = seal.TPM{TPM: t, PolicyKey: pk, Anchor: anchor}, handoff.SlotTPM
 	}
-	st, err := seal.Unlock(c.store, seal.TPM{TPM: t, PolicyKey: pk, Anchor: anchor})
+	st, err := seal.Unlock(c.store, f)
 	if err != nil {
 		return nil, fmt.Errorf("agentos-unlock: %w", err)
 	}
@@ -141,8 +156,6 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if err := tpmseal.Cap(t, tpmSelections(st)); err != nil {
 		return nil, fmt.Errorf("agentos-unlock: lock my tpm slot for the rest of this boot: %w", err)
 	}
-	var k handoff.KernelKeys
-	defer k.Wipe()
 	if k.Log, err = st.LogKey(); err != nil {
 		return nil, err
 	}
@@ -188,6 +201,9 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 			return nil, fmt.Errorf("agentos-unlock: the page authority in my store: %w", err)
 		}
 	}
+	if k.LinkKey, k.FirstEdge, err = linkKeys(st); err != nil {
+		return nil, err
+	}
 	if k.Counter, err = counter(st); err != nil {
 		return nil, err
 	}
@@ -197,6 +213,37 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	return k.Marshal()
+}
+
+// linkKeys reads the core's link key and the first edge key from the store
+// (HW-15). A store enrolled before EDGE-link-core-b holds neither, and a
+// restore's holds no first key: each missing entry hands none, and the
+// kernel still starts. An entry that is there must read.
+func linkKeys(st *seal.Store) (ed25519.PrivateKey, ed25519.PublicKey, error) {
+	var link ed25519.PrivateKey
+	raw, ok, err := st.Get(handoff.LinkKeyEntry)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ok {
+		link, err = handoff.ParseLinkKey(raw)
+		clear(raw)
+		if err != nil {
+			return nil, nil, fmt.Errorf("agentos-unlock: the link key in my store: %w", err)
+		}
+	}
+	var edge ed25519.PublicKey
+	if raw, ok, err = st.Get(handoff.FirstEdgeEntry); err != nil {
+		clear(link)
+		return nil, nil, err
+	}
+	if ok {
+		if edge, err = handoff.ParseFirstEdge(raw); err != nil {
+			clear(link)
+			return nil, nil, fmt.Errorf("agentos-unlock: the first edge key in my store: %w", err)
+		}
+	}
+	return link, edge, nil
 }
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot

@@ -112,6 +112,13 @@ func (h *Kernel) Certify(now int64, pub []byte) (Certified, error) {
 	return Certified{Leaf: leaf, Authority: h.page.Certificate()}, nil
 }
 
+// Setup is the setup step (kernel.Setup) on this box: it logs the owner's
+// first anchors and, right after them, the first edge key the store
+// handed, if any (HW-15, brief EDGE-link-core decision 3).
+func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
+	return h.With(func(k *kernel.Kernel) error { return k.SetupWithEdge(now, f, h.firstEdge) })
+}
+
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
@@ -148,17 +155,31 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if len(keys.PageCA) == 0 {
 		fmt.Fprintln(os.Stderr, ErrNoAuthority)
 	}
+	// A start not by this PC's tpm slot trusts no edge (§12.2, HW-15
+	// "move"): not a first key setup would log, nor the live one, which it
+	// cuts below.
+	moved := keys.Slot != handoff.SlotTPM
+	first := keys.FirstEdge
+	if moved {
+		first = nil
+	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
+		FirstEdge: first, LinkKey: keys.LinkKey,
 	}, clock())
 	if err != nil {
 		return err
 	}
 	defer h.Close()
+	if moved {
+		if err := h.With(func(k *kernel.Kernel) error { return k.EdgeCut(clock(), keys.Slot) }); err != nil {
+			return fmt.Errorf("run: cut the edge at a start by my %s slot: %w", keys.Slot, err)
+		}
+	}
 	// Counts only, on stderr: no owner call reports the subjects yet.
 	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
 		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
