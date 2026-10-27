@@ -51,6 +51,9 @@ wiring kernel/proc
 # file and answers the kernel's calls over kernel/proc's wire.
 wiring clerk/run
 core clerk/inbox
+# The clerk check path (MIG-4-adapters-f2, #3430): net-free, so agentosd can
+# host a clerk with it.
+core clerk/check
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived
 # from it. Only the unlock step (STO-2b) opens it.
 core clerk/seal
@@ -71,8 +74,8 @@ wiring cmd/agentos-clerk-mail
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
 open kernel.Normalize
-open clerk.Check
-open clerk.Verify
+open clerk/check.Check
+open clerk/check.Verify
 # A pure read of the log's view: the live approval of the task a key serves
 # on one site, for a clerk to cover a request with (CLK-3, #2711).
 open kernel.TaskApproved

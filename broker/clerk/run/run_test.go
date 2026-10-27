@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -144,8 +144,8 @@ func TestCallRunsOnlyAStepTheLogHasInFlight(t *testing.T) {
 		res = b.remote.Clerk(b.cfg.Anchors).Do(kernel.Request{Plan: p, Index: 0}, k.State())
 		return nil
 	})
-	if res.Outcome != "failed" || res.Detail != clerk.RDispatch {
-		t.Fatalf("replayed request: %+v, want failed %s", res, clerk.RDispatch)
+	if res.Outcome != "failed" || res.Detail != check.RDispatch {
+		t.Fatalf("replayed request: %+v, want failed %s", res, check.RDispatch)
 	}
 	// A plan the log never saw, signed by the holder, is refused the same way.
 	ps := kernel.PlanStep{Verb: key.Post, Clerk: "web", Args: map[string]string{"to": "mallory", "msg": "x"}, Content: "text", Labels: []string{"public"}}
@@ -154,8 +154,8 @@ func TestCallRunsOnlyAStepTheLogHasInFlight(t *testing.T) {
 		res = b.remote.Clerk(b.cfg.Anchors).Do(kernel.Request{Plan: forged, Index: 0}, k.State())
 		return nil
 	})
-	if res.Outcome != "failed" || res.Detail != clerk.RDispatch {
-		t.Fatalf("unlogged plan: %+v, want failed %s", res, clerk.RDispatch)
+	if res.Outcome != "failed" || res.Detail != check.RDispatch {
+		t.Fatalf("unlogged plan: %+v, want failed %s", res, check.RDispatch)
 	}
 	if h := w.hits(t); len(h) != 1 {
 		t.Fatalf("provider saw %q after refused requests, want the one post", h)
