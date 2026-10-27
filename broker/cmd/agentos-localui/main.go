@@ -48,7 +48,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime/debug"
 	"strings"
@@ -56,6 +55,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -203,8 +203,7 @@ func admitPort1(sys, iface, file string, nft func(script string) error, wait fun
 
 // runNft loads script with one nft -f, a single transaction.
 func runNft(script string) error {
-	cmd := exec.Command("/usr/sbin/nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(script)
+	cmd := childproc.Command(context.Background(), childproc.NewEnv(), childproc.Options{Stdin: strings.NewReader(script)}, "/usr/sbin/nft", "-f", "-")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return errors.New(strings.TrimSpace(string(out)) + " (" + err.Error() + ")")
 	}
