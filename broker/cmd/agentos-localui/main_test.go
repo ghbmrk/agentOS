@@ -860,3 +860,49 @@ func TestPasskeyRPIDRefusedOverPlainHTTP(t *testing.T) {
 		t.Fatalf("over HTTPS: %v", err)
 	}
 }
+
+// Security 4 on 713fd31: a fixed port that appears after the page chose
+// port 1 (a driver probing late) stops the page, so its restart refuses
+// rather than staying bound to a port chosen from half the hardware.
+// REQ: CH-9, HW-15
+func TestPageStopsWhenPort1Changes(t *testing.T) {
+	sys := t.TempDir()
+	add := func(name, dev string) {
+		t.Helper()
+		dir := filepath.Join(sys, "devices", dev, "net", name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "type"), []byte("1\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(sys, "class", "net"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join("..", "..", "devices", dev, "net", name), filepath.Join(sys, "class", "net", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("enp1s0", "pci0000:00/0000:00:1c.0/0000:01:00.0")
+	p, err := localui.Port1(sys)
+	if err != nil || p != "enp1s0" {
+		t.Fatalf("port 1: %q, %v", p, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { watchPort1(ctx, cancel, sys, p, 5*time.Millisecond); close(done) }()
+	time.Sleep(30 * time.Millisecond)
+	if ctx.Err() != nil {
+		t.Fatal("the page stopped while port 1 was unchanged")
+	}
+	add("enp2s0", "pci0000:00/0000:00:1c.1/0000:02:00.0")
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a second fixed port did not stop the page")
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the watcher returned without stopping the page")
+	}
+}

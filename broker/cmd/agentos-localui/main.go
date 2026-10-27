@@ -80,6 +80,8 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 	debug.SetMemoryLimit(memoryLimit)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if iface == "" {
 		// Port 1 from the hardware, never from routes a peer could set.
 		p, err := localui.Port1("/sys")
@@ -87,9 +89,8 @@ func main() {
 			log.Fatal(err)
 		}
 		iface = p
+		go watchPort1(ctx, stop, "/sys", p, port1Recheck)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	fb.VaultSock = vaultSock
 	cfg := config(localui.Page{Iface: iface, PageName: pageName}, port, sock, vaultSock, held)
 	if connectGmail {
@@ -100,6 +101,30 @@ func main() {
 	}
 	if err := run(ctx, cfg, sock, fb); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// port1Recheck is how often the page reads sysfs again for port 1.
+const port1Recheck = 10 * time.Second
+
+// watchPort1 stops the page once port 1 is no longer the one it chose:
+// a driver that probed after the page started, or a port hot-plugged
+// later, makes Port1 refuse or name another, and the unit's restart then
+// serves nothing until one fixed port is left (Security 4 on 713fd31).
+func watchPort1(ctx context.Context, stop func(), sys, chosen string, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if p, err := localui.Port1(sys); err != nil || p != chosen {
+			log.Print("port 1 changed; stopping so the unit picks again")
+			stop()
+			return
+		}
 	}
 }
 

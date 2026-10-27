@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,37 +46,65 @@ func sysNet(t *testing.T, ifaces map[string]struct {
 	return root
 }
 
-// WIFI-del-a3 (CH-9, HW-15; L3, Security and Potency blocker on f778fcf):
-// port 1 is chosen from what the hardware fixes, never from DHCP or the
-// routes, so the edge's USB cable or port 2 cannot become the page's port
-// by handing the box the only default route while port 1 has no lease.
-// It is the PCI Ethernet port at the lowest device path; USB adapters,
-// Thunderbolt networking, radios, virtual links and non-Ethernet links are
-// never it. It catches a page that serves on a port a peer picked.
+// WIFI-del-a3 (CH-9, HW-15, HW-12; review blockers on f778fcf and
+// 713fd31): port 1 comes from what the hardware fixes, never from DHCP or
+// routes, and never from a guess. The one fixed PCI Ethernet port is port
+// 1; a USB adapter (the edge's cable), Thunderbolt networking, a PCIe NIC
+// tunnelled through a dock (under a removable device), a radio, a virtual
+// or non-Ethernet link never is; and two or three fixed ports, with port 1
+// at any position among them, are refused, since nothing says which jack
+// goes to the enforcer. It catches a page bound to the edge's cable or
+// port 2.
 func TestPort1IsFixedByHardwareNotRoutes(t *testing.T) {
 	type nic = struct {
 		dev, typ string
 		radio    bool
 	}
-	edge := nic{"pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", "1", false}
-	port2 := nic{"pci0000:00/0000:00:1c.4/0000:03:00.0", "1", false}
-	port1 := nic{"pci0000:00/0000:00:1c.0/0000:02:00.0", "1", false}
-	full := map[string]nic{
-		"enx001122334455": edge,
-		"enp3s0":          port2,
-		"enp2s0":          port1,
+	i219 := nic{"pci0000:00/0000:00:1f.6", "1", false}
+	edgeUSB := nic{"pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0", "1", false}
+	onboard1c0 := nic{"pci0000:00/0000:00:1c.0/0000:01:00.0", "1", false}
+	onboard1c1 := nic{"pci0000:00/0000:00:1c.1/0000:02:00.0", "1", false}
+	dock := nic{"pci0000:00/0000:00:07.0/0000:20:00.0/0000:21:01.0/0000:2c:00.0", "1", false}
+	others := map[string]nic{
+		"enx001122334455": edgeUSB,
 		"thunderbolt0":    {"pci0000:00/0000:00:0d.2/domain0/0-0/0-1/0-1.0", "1", false},
 		"wlan0":           {"pci0000:00/0000:00:14.3", "1", true},
 		"veth9":           {"virtual", "1", false},
 		"lo":              {"virtual", "772", false},
 		"wwan0":           {"pci0000:00/0000:00:1b.0/0000:01:00.0", "65534", false},
+		"enp44s0":         dock,
 	}
-	if got, err := Port1(sysNet(t, full)); got != "enp2s0" || err != nil {
-		t.Fatalf("port 1: %q, %v", got, err)
+	with := func(m map[string]nic) map[string]nic {
+		out := map[string]nic{}
+		for k, v := range others {
+			out[k] = v
+		}
+		for k, v := range m {
+			out[k] = v
+		}
+		return out
 	}
-	// With only the edge's USB adapter and a radio, there is no port 1.
-	if got, err := Port1(sysNet(t, map[string]nic{"enx001122334455": edge, "wlan0": full["wlan0"]})); err == nil {
-		t.Fatalf("a USB adapter or a radio became port 1: %q", got)
+	// The dock's tunnel: the kernel marks the device below the USB4 root
+	// port removable.
+	tree := func(m map[string]nic) string {
+		root := sysNet(t, m)
+		if err := os.WriteFile(filepath.Join(root, "devices", "pci0000:00/0000:00:07.0/0000:20:00.0", "removable"), []byte("removable\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	if got, err := Port1(tree(with(map[string]nic{"enp0s31f6": i219}))); got != "enp0s31f6" || err != nil {
+		t.Fatalf("one fixed port beside a dock, the edge's adapter and the rest: %q, %v", got, err)
+	}
+	for name, m := range map[string]map[string]nic{
+		"two fixed ports, port 1 sorting last":    {"enp0s31f6": i219, "enp1s0": onboard1c0},
+		"two fixed ports, port 1 sorting first":   {"enp1s0": onboard1c0, "enp2s0": onboard1c1},
+		"three fixed ports (edge on an onboard)":  {"enp0s31f6": i219, "enp1s0": onboard1c0, "enp2s0": onboard1c1},
+		"no fixed port: only adapters and radios": {},
+	} {
+		if got, err := Port1(tree(with(m))); err == nil {
+			t.Errorf("%s: chose %q", name, got)
+		}
 	}
 	if got, err := Port1(t.TempDir()); err == nil {
 		t.Fatalf("no sysfs tree named %q", got)
@@ -88,6 +117,23 @@ func TestPort1IsFixedByHardwareNotRoutes(t *testing.T) {
 	if strings.Contains(string(src), "/proc/net/route") || !strings.Contains(string(src), "localui.Port1(") {
 		t.Fatal("agentos-localui does not pick port 1 with Port1")
 	}
+}
+
+// Security blocker 1 on 713fd31: the box's own addresses are read without
+// netlink, which the page's unit refuses (RestrictAddressFamilies=AF_UNIX
+// AF_INET), so the real boxAddrs, not the tests' stand-in, must list
+// loopback here. It catches a page that refuses every request on the box.
+func TestBoxAddrsListsLoopbackWithoutNetlink(t *testing.T) {
+	as, err := boxAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range as {
+		if a == netip.MustParseAddr("127.0.0.1") {
+			return
+		}
+	}
+	t.Fatalf("loopback not among %v", as)
 }
 
 // reachedOn is a request whose connection reached box, from the phone at

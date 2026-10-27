@@ -44,19 +44,21 @@ func (p Page) Validate() error {
 }
 
 // Port1 is port 1's interface, read from the sysfs tree at sys (/sys on
-// the box): the Ethernet interface (type 1, no radio) whose device sits on
-// the PCI bus at the lowest device path, leaving out virtual links, USB
-// adapters (the edge's link cable, HW-15) and Thunderbolt or USB4
-// networking (port 2's alternative, HW-12). It reads only what the box's
-// hardware fixes, never DHCP or route state a peer on another port could
-// set (WIFI-del-a3, CH-9). None is an error: the page serves nothing
-// rather than guess.
+// the box): the one Ethernet interface (type 1, no radio) on a fixed PCI
+// device, leaving out virtual links, USB adapters (the edge's link cable,
+// HW-15), Thunderbolt or USB4 networking and any device under a removable
+// one, such as a PCIe NIC tunnelled through a dock (port 2's alternative,
+// HW-12). It reads only what the box's hardware fixes, never DHCP or route
+// state a peer on another port could set (WIFI-del-a3, CH-9). None, or
+// more than one, is an error: nothing in sysfs says which jack the owner
+// cabled to the enforcer, so a box with two fixed ports needs -iface (or a
+// board's .link name) and the page serves nothing rather than guess.
 func Port1(sys string) (string, error) {
 	ents, err := os.ReadDir(filepath.Join(sys, "class", "net"))
 	if err != nil {
 		return "", err
 	}
-	found, at := "", ""
+	var found []string
 	for _, e := range ents {
 		dir := filepath.Join(sys, "class", "net", e.Name())
 		path, err := filepath.EvalSymlinks(dir)
@@ -64,7 +66,7 @@ func Port1(sys string) (string, error) {
 			continue
 		}
 		dev := filepath.Dir(filepath.Dir(path)) // .../<device>/net/<name>
-		if !onPCIOnly(dev) {
+		if !onPCIOnly(dev) || removable(dev) {
 			continue
 		}
 		if t, err := os.ReadFile(filepath.Join(dir, "type")); err != nil || strings.TrimSpace(string(t)) != "1" {
@@ -73,14 +75,26 @@ func Port1(sys string) (string, error) {
 		if exists(filepath.Join(dir, "wireless")) || exists(filepath.Join(dir, "phy80211")) {
 			continue
 		}
-		if found == "" || dev < at {
-			found, at = e.Name(), dev
+		found = append(found, e.Name())
+	}
+	switch len(found) {
+	case 0:
+		return "", errors.New("localui: no fixed PCI Ethernet port to serve the page on")
+	case 1:
+		return found[0], nil
+	}
+	return "", errors.New("localui: more than one fixed Ethernet port (" + strings.Join(found, ", ") + "); name port 1 with -iface")
+}
+
+// removable: dev or a device above it says it is removable (the kernel's
+// removable attribute: a Thunderbolt or USB4 tunnel, an ExpressCard).
+func removable(dev string) bool {
+	for d := dev; filepath.Base(d) != "devices" && d != filepath.Dir(d); d = filepath.Dir(d) {
+		if b, err := os.ReadFile(filepath.Join(d, "removable")); err == nil && strings.TrimSpace(string(b)) == "removable" {
+			return true
 		}
 	}
-	if found == "" {
-		return "", errors.New("localui: no PCI Ethernet port to serve the page on")
-	}
-	return found, nil
+	return false
 }
 
 // onPCIOnly: dev is under a PCI root and under no USB, Thunderbolt or
@@ -132,7 +146,7 @@ func homeSource(r *http.Request) bool {
 	if !a.Is4() || !a.IsPrivate() || a == box.Addr() {
 		return false
 	}
-	own, err := boxAddrs()
+	own, err := ownAddrs()
 	if err != nil {
 		return false
 	}
@@ -144,20 +158,8 @@ func homeSource(r *http.Request) bool {
 	return true
 }
 
-// boxAddrs lists the box's own addresses; a test replaces it.
-var boxAddrs = func() ([]netip.Addr, error) {
-	as, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]netip.Addr, 0, len(as))
-	for _, a := range as {
-		if p, err := netip.ParsePrefix(a.String()); err == nil {
-			out = append(out, p.Addr())
-		}
-	}
-	return out, nil
-}
+// ownAddrs lists the box's own addresses (boxAddrs); a test replaces it.
+var ownAddrs = boxAddrs
 
 // reachedHost is the plain listener's IP-literal host for r: the address
 // its connection reached, with the port unless it is 80. "" when unknown.

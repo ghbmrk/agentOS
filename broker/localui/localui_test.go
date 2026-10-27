@@ -46,7 +46,7 @@ func testPage() Page { return Page{Iface: "eth0"} }
 // The box's own addresses in these tests: the one the phone reaches and
 // another on a second port.
 func init() {
-	boxAddrs = func() ([]netip.Addr, error) {
+	ownAddrs = func() ([]netip.Addr, error) {
 		return []netip.Addr{netip.MustParseAddr("10.42.0.1"), netip.MustParseAddr("192.168.50.2"), netip.MustParseAddr("172.20.0.9")}, nil
 	}
 }
