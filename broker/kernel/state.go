@@ -87,7 +87,7 @@ var schema = map[string]int{
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1,
-	TBackupTarget: 1, TBackupUntarget: 1,
+	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1,
 }
 
@@ -1130,7 +1130,7 @@ func (s *State) Apply(e Entry) error {
 		return s.applyTask(e)
 	case TSubjectOpened, TContentStored, TSubjectErased, TEraseConfirmed:
 		return s.applyErase(e)
-	case TBackupTarget, TBackupUntarget:
+	case TBackupTarget, TBackupUntarget, TBackupTaken:
 		return s.applyBackup(e)
 	case TEdgeEnrolled, TEdgeCandidate, TEdgeRevoked, TEdgeCut:
 		return s.applyEdge(e)

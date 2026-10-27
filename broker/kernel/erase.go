@@ -142,6 +142,7 @@ type (
 	}
 	subjectState struct {
 		opened    int64
+		seq       uint64 // of its subject.opened
 		keyID     string
 		items     []Item
 		erased    bool
@@ -192,7 +193,7 @@ func (s *State) applyErase(e Entry) error {
 			return err
 		}
 		if ValidSubject(b.Subject) && s.subjects[b.Subject] == nil {
-			s.subjects[b.Subject] = &subjectState{opened: e.At, keyID: b.KeyID}
+			s.subjects[b.Subject] = &subjectState{opened: e.At, seq: e.Seq, keyID: b.KeyID}
 		}
 	case TContentStored:
 		b, err := body[contentStored](e)

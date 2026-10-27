@@ -30,7 +30,7 @@ Work item: #3316, release finding 1 of #3311's L3 review (comment 6429067559; AS
 
 `broker/kernel/backuptarget.go` (entry, fold, `Kernel.BackupTaken`, `State().BackupsTaken()`, a helper for subjects opened at or below a sequence number), `broker/kernel/state.go` (the schema line only), `broker/kernel/rederive.go` (`recorded`), `broker/kernel/erase.go` (the sequence number at which each subject was opened: one field and its assignment), `broker/kernel/backuptarget_test.go`, `broker/kernel/proc/backup.go` (decisions 1, 3 and 4; `Kept.Upto`, `Kept.Rebuilt`, `BackupView.Rebuilt`), `broker/kernel/proc/backup_test.go`, both packages' `ASSUMPTIONS.md` (rewrite MIG-4-recovery-e3-b's limit), and this brief.
 
-**Requirement IDs:** LOG-4, BAK-1, LOG-1.
+**Requirement IDs:** LOG-4, BAK-1, LOG-1, LOG-5.
 
 **Acceptance tests:**
 - LOG-4, the issue's failure path: `kernel/proc/backup_test.go::TestRolledBackRecordsStillReachEveryBackup`. Take B1, copy `records`, take B2 giving subject S, put the copy back, restart, erase S: B2's table at the target no longer gives S, and the confirmation lists B2 in `Resealed`. Catches the rollback hiding B2.

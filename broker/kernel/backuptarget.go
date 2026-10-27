@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path"
 	"slices"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -24,6 +25,7 @@ import (
 const (
 	TBackupTarget   = "backup.target"
 	TBackupUntarget = "backup.untarget"
+	TBackupTaken    = "backup.taken"
 )
 
 // Target kinds are a closed set: the storage adapter row adds its own.
@@ -59,7 +61,38 @@ type BackupTarget struct {
 type KeptTarget struct {
 	BackupTarget
 	Removed bool
+	taken   []BackupTaken // the backups logged to it, in log order
 }
+
+// Sizes of a backup recipient's public keys: X25519 and ML-KEM-768's
+// encapsulation key (broker/backup.Recipient).
+const (
+	RecipientXLen  = 32
+	RecipientEKLen = 1184
+)
+
+// BackupRecipient is a backup's public recipient, as broker/backup.Recipient.
+type BackupRecipient struct {
+	X  []byte `json:"x"`
+	EK []byte `json:"ek"`
+}
+
+// BackupTaken names one backup before its key table leaves (LOG-4,
+// BAK-1), so a rolled-back records file cannot hide it from an erase.
+// Upto is the log head's sequence number in the backup's snapshot: the
+// subjects its first table can give are those opened at or below it.
+// Recipient is in full, since a backup from before a recovery-key rotation
+// re-seals to its own. It grants nothing, so it is not a widening.
+type BackupTaken struct {
+	BackupID  string          `json:"backup_id"`
+	Target    string          `json:"target"`
+	Recipient BackupRecipient `json:"recipient"`
+	Created   int64           `json:"created"`
+	Upto      uint64          `json:"upto"`
+}
+
+// ErrBackupTaken refuses a backup.taken the fold would not keep.
+var ErrBackupTaken = errors.New("kernel: not a backup I can log")
 
 type (
 	backupTarget struct {
@@ -113,6 +146,52 @@ func (s *State) TargetsAdded() int { return len(s.targets) }
 // BackupTargets lists every target in the order added, removed ones marked.
 func (s *State) BackupTargets() []KeptTarget { return slices.Clone(s.targets) }
 
+// BackupsTaken lists every logged backup, by target in the order added,
+// then in log order.
+func (s *State) BackupsTaken() []BackupTaken {
+	var out []BackupTaken
+	for _, t := range s.targets {
+		out = append(out, t.taken...)
+	}
+	return out
+}
+
+// SubjectsUpto is every subject opened at or below seq, erased or not, sorted.
+func (s *State) SubjectsUpto(seq uint64) []string {
+	var out []string
+	for sub, st := range s.subjects {
+		if st.seq <= seq {
+			out = append(out, sub)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// backupID reports whether id is a backup ID as broker/backup draws them:
+// 16 bytes, lowercase hex.
+func backupID(id string) bool {
+	return len(id) == 32 && strings.Trim(id, "0123456789abcdef") == ""
+}
+
+// takenOK is the check a backup.taken at seq passes, live and on replay: a
+// target the log added (removed or not), a backup ID not yet logged,
+// recipient keys of their size, and a snapshot before the entry itself.
+func (s *State) takenOK(b BackupTaken, seq uint64) error {
+	if s.target(b.Target) == nil || !backupID(b.BackupID) || len(b.Recipient.X) != RecipientXLen ||
+		len(b.Recipient.EK) != RecipientEKLen || b.Upto >= seq {
+		return ErrBackupTaken
+	}
+	for _, t := range s.targets {
+		for _, k := range t.taken {
+			if k.BackupID == b.BackupID {
+				return ErrBackupTaken
+			}
+		}
+	}
+	return nil
+}
+
 func (s *State) target(name string) *KeptTarget {
 	for i := range s.targets {
 		if s.targets[i].Name == name {
@@ -156,6 +235,15 @@ func (s *State) applyBackup(e Entry) error {
 		if t := s.target(b.Name); t != nil {
 			t.Removed = true
 		}
+	case TBackupTaken:
+		b, err := body[BackupTaken](e)
+		if err != nil {
+			return err
+		}
+		if s.takenOK(b, e.Seq) == nil {
+			t := s.target(b.Target)
+			t.taken = append(t.taken, b)
+		}
 	}
 	return nil
 }
@@ -177,4 +265,15 @@ func (k *Kernel) Untarget(now int64, name string) error {
 		return ErrNoTarget
 	}
 	return k.owner(now, TBackupUntarget, backupUntarget{name})
+}
+
+// BackupTaken logs b before its key table leaves, then anchors the head,
+// so a log rollback the anchor catches cannot drop it (LOG-4). The entry
+// is not a widening, so Open keeps it unanchored too: an anchor error
+// leaves it logged.
+func (k *Kernel) BackupTaken(now int64, b BackupTaken) error {
+	if err := k.s.takenOK(b, uint64(k.log.Len())+1); err != nil {
+		return err
+	}
+	return k.owner(now, TBackupTaken, b)
 }

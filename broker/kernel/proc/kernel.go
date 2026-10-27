@@ -129,7 +129,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			return nil, fmt.Errorf("run: the subject-key table: %w", err)
 		}
 		if cfg.BackupDir != "" {
-			if h.bk, err = openBackups(cfg, keys, k.State()); err != nil {
+			if h.bk, err = openBackups(cfg, keys, k, now); err != nil {
 				st.Close()
 				return nil, fmt.Errorf("run: the backups: %w", err)
 			}

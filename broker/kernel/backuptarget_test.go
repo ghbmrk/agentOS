@@ -1,9 +1,12 @@
 package kernel_test
 
-// REQ: BAK-1, HW-16, HW-17
+// REQ: BAK-1, HW-16, HW-17, LOG-1, LOG-4, LOG-5
 
 import (
+	"bytes"
 	"errors"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,5 +197,124 @@ func TestTargetsReplay(t *testing.T) {
 	must(t, err)
 	if len(re.BackupTargets()) != 2 || re.TargetsAdded() != 2 {
 		t.Fatalf("a logged unsigned or misshapen target took effect: %+v", re.BackupTargets())
+	}
+}
+
+// taken is a well-formed backup.taken of id at target, recipient fill.
+func taken(id, target string, fill byte, upto uint64) kernel.BackupTaken {
+	return kernel.BackupTaken{BackupID: id, Target: target, Created: 5, Upto: upto, Recipient: kernel.BackupRecipient{
+		X: bytes.Repeat([]byte{fill}, kernel.RecipientXLen), EK: bytes.Repeat([]byte{fill}, kernel.RecipientEKLen)}}
+}
+
+func bid(c string) string { return strings.Repeat(c, 32) }
+
+// LOG-5: backup.taken is a known type at version 1 and not a widening, so
+// Open keeps it unanchored; it is logged and anchored at once. An unknown
+// target, a duplicate or malformed ID, short recipient keys and a snapshot
+// not before the entry are each refused live, and fold to nothing when
+// written past the kernel.
+func TestBackupTakenIsKnownAndNotWidening(t *testing.T) {
+	r := newRig(t)
+	if !kernel.Known(kernel.TBackupTaken, 1) || kernel.Known(kernel.TBackupTaken, 2) || kernel.Widening(kernel.TBackupTaken) {
+		t.Fatal("backup.taken must be known at v1 only, and not a widening")
+	}
+	d := drive("usb")
+	must(t, r.k.BackupTarget(1, d, target(r, r.owner, d)))
+	head := uint64(r.k.Log().Len())
+	b1 := taken(bid("a"), "usb", 1, head)
+	must(t, r.k.BackupTaken(2, b1))
+	es := r.k.Log().Entries()
+	if last := es[len(es)-1]; last.Type != kernel.TBackupTaken || last.V != 1 {
+		t.Fatalf("logged %s v%d", last.Type, last.V)
+	}
+	if h, ok := r.anchor.Latest(); !ok || h.Seq != uint64(len(es)) {
+		t.Fatal("a logged backup is not anchored at once")
+	}
+
+	short := taken(bid("c"), "usb", 1, head)
+	short.Recipient.EK = short.Recipient.EK[:100]
+	shortX := taken(bid("d"), "usb", 1, head)
+	shortX.Recipient.X = nil
+	bad := map[string]kernel.BackupTaken{
+		"unknown target": taken(bid("b"), "nas", 1, head),
+		"duplicate id":   taken(bid("a"), "usb", 2, head),
+		"malformed id":   taken("not-a-backup-id", "usb", 1, head),
+		"uppercase id":   taken(bid("A"), "usb", 1, head),
+		"short ek":       short,
+		"short x":        shortX,
+		"snapshot ahead": taken(bid("e"), "usb", 1, uint64(r.k.Log().Len())+1),
+	}
+	for name, b := range bad {
+		n := r.k.Log().Len()
+		if err := r.k.BackupTaken(3, b); !errors.Is(err, kernel.ErrBackupTaken) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if r.k.Log().Len() != n {
+			t.Fatalf("%s: a refused backup logged", name)
+		}
+	}
+	// Written past the kernel, each folds to nothing.
+	for name, b := range bad {
+		if name == "snapshot ahead" {
+			b.Upto = uint64(r.k.Log().Len()) + 1 // its own sequence number
+		}
+		_, err := r.k.Log().Append(4, kernel.TBackupTaken, 1, b)
+		must(t, err)
+	}
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if got := re.BackupsTaken(); len(got) != 1 || !reflect.DeepEqual(got[0], b1) {
+		t.Fatalf("after replay: %d backups taken, want only %s", len(got), b1.BackupID)
+	}
+
+	// Unanchored, it survives Open: a crash after the write keeps it.
+	r.anchor.down = true
+	b2 := taken(bid("f"), "usb", 3, uint64(r.k.Log().Len()))
+	if err := r.k.BackupTaken(5, b2); err == nil {
+		t.Fatal("an unanchored backup.taken must report the anchor")
+	}
+	r.anchor.down = false
+	r.boot(6)
+	if got := r.k.State().BackupsTaken(); len(got) != 2 || got[1].BackupID != b2.BackupID {
+		t.Fatalf("an unanchored backup.taken dropped at restart: %d taken", len(got))
+	}
+	if _, err := kernel.Rederive(r.anchors(), r.head.pub, r.k.Log().Entries()); err != nil {
+		t.Fatalf("rederive: %v", err)
+	}
+}
+
+// LOG-1: the logged backups and the subjects opened at or below a sequence
+// number are a projection of the log: a replay from empty equals the live
+// state, at a removed target too.
+func TestBackupsTakenRebuildFromEmpty(t *testing.T) {
+	r := newRig(t)
+	_, err := r.k.OpenContent(kernel.NewMemKeys(), map[string]kernel.ContentStore{}, 1)
+	must(t, err)
+	a, b := drive("usb"), drive("nas")
+	must(t, r.k.BackupTarget(1, a, target(r, r.owner, a)))
+	must(t, r.k.BackupTarget(1, b, target(r, r.owner, b)))
+	s1, err := r.k.OpenSubject(2)
+	must(t, err)
+	upto := uint64(r.k.Log().Len())
+	must(t, r.k.BackupTaken(3, taken(bid("1"), "nas", 1, upto)))
+	must(t, r.k.BackupTaken(3, taken(bid("2"), "usb", 1, upto)))
+	s2, err := r.k.OpenSubject(4)
+	must(t, err)
+	must(t, r.k.Untarget(5, "usb"))
+	must(t, r.k.BackupTaken(6, taken(bid("3"), "usb", 2, uint64(r.k.Log().Len()))))
+	if got := r.k.State().SubjectsUpto(upto); !reflect.DeepEqual(got, []string{s1}) {
+		t.Fatalf("subjects at or below %d: %v, want only %s", upto, got, s1)
+	}
+	if got := r.k.State().SubjectsUpto(uint64(r.k.Log().Len())); len(got) != 2 || !slices.Contains(got, s2) {
+		t.Fatalf("subjects at the head: %v", got)
+	}
+	live := r.k.State().BackupsTaken()
+	if len(live) != 3 {
+		t.Fatalf("live backups taken: %d, want 3", len(live))
+	}
+	re, err := kernel.Replay(r.anchors(), r.k.Log().Entries())
+	must(t, err)
+	if !reflect.DeepEqual(re.BackupsTaken(), live) || !reflect.DeepEqual(re.SubjectsUpto(upto), r.k.State().SubjectsUpto(upto)) {
+		t.Fatal("a replay from empty differs from the live state")
 	}
 }
