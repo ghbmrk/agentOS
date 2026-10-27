@@ -30,22 +30,25 @@ const (
 
 const (
 	magic     = "AGOSBAK1"
-	version   = 1
+	version   = 2
 	idLen     = 16
 	chunkSize = 64 << 10
 	tagSize   = 16
-	// headerLen is magic, version, kind, backup ID, generation, recipient
-	// ID, the ephemeral X25519 key and the ML-KEM ciphertext.
-	headerLen = len(magic) + 1 + 1 + idLen + 8 + idLen + 32 + mlkem.CiphertextSize768
+	// headerLen is magic, version, kind, backup ID, generation, the
+	// ephemeral X25519 key and the ML-KEM ciphertext. It names no
+	// recipient (#3446): a recipient ID in the clear would let one guess at
+	// the recovery key be checked against every install's uploads by one
+	// lookup, where without it each object costs its own key agreement.
+	// Version 1 had the ID after the generation; it is refused.
+	headerLen = len(magic) + 1 + 1 + idLen + 8 + 32 + mlkem.CiphertextSize768
 	// minRK is the shortest recovery key accepted; the card's is 20 bytes.
 	minRK = 16
 )
 
 var (
-	ErrShortKey  = errors.New("backup: a recovery key is at least 16 bytes")
-	ErrRecipient = errors.New("backup: the object is sealed to another recovery key")
-	ErrHeader    = errors.New("backup: not a backup object of the expected kind and version")
-	ErrOpen      = errors.New("backup: the object does not open: changed, truncated, reordered or extended")
+	ErrShortKey = errors.New("backup: a recovery key is at least 16 bytes")
+	ErrHeader   = errors.New("backup: not a backup object of the expected kind and version")
+	ErrOpen     = errors.New("backup: the object does not open: sealed to another recovery key, or changed, truncated, reordered or extended")
 )
 
 var kindCode = map[string]byte{KindContent: 1, KindKeyTable: 2}
@@ -59,6 +62,8 @@ type Recipient struct {
 }
 
 // ID names the recipient: the first 16 bytes of SHA-256 over both keys, hex.
+// It is for the box's own records and the sealed manifest, never an
+// object's clear header (#3446).
 func (r Recipient) ID() string { id := r.id(); return hex.EncodeToString(id[:]) }
 
 func (r Recipient) id() [idLen]byte {
@@ -118,12 +123,11 @@ func RecipientFor(rk []byte) (Recipient, error) {
 
 // header is an object's clear header, the AAD of every chunk.
 type header struct {
-	kind      string
-	backupID  [idLen]byte
-	gen       uint64
-	recipient [idLen]byte
-	eph       [32]byte
-	ctM       [mlkem.CiphertextSize768]byte
+	kind     string
+	backupID [idLen]byte
+	gen      uint64
+	eph      [32]byte
+	ctM      [mlkem.CiphertextSize768]byte
 }
 
 func (h *header) encode() []byte {
@@ -132,7 +136,6 @@ func (h *header) encode() []byte {
 	b = append(b, version, kindCode[h.kind])
 	b = append(b, h.backupID[:]...)
 	b = binary.BigEndian.AppendUint64(b, h.gen)
-	b = append(b, h.recipient[:]...)
 	b = append(b, h.eph[:]...)
 	return append(b, h.ctM[:]...)
 }
@@ -154,7 +157,6 @@ func parseHeader(b []byte) (header, error) {
 	b = b[1:]
 	b = b[copy(h.backupID[:], b):]
 	h.gen, b = binary.BigEndian.Uint64(b), b[8:]
-	b = b[copy(h.recipient[:], b):]
 	b = b[copy(h.eph[:], b):]
 	copy(h.ctM[:], b)
 	return h, nil
@@ -208,7 +210,7 @@ type sealer struct {
 }
 
 // sealTo writes h's header to w, sealed to r, and returns the body writer.
-// h.eph, h.ctM and h.recipient are filled here.
+// h.eph and h.ctM are filled here.
 func sealTo(w io.Writer, r Recipient, h header) (io.WriteCloser, error) {
 	rx, ek, err := r.keys()
 	if err != nil {
@@ -225,7 +227,6 @@ func sealTo(w io.Writer, r Recipient, h header) (io.WriteCloser, error) {
 	ssM, ctM := ek.Encapsulate()
 	copy(h.eph[:], eph.PublicKey().Bytes())
 	copy(h.ctM[:], ctM)
-	h.recipient = r.id()
 	key, err := combine(ssM, ssX, h.kind, ctM, h.eph[:], r.X, r.EK)
 	if err != nil {
 		return nil, err
@@ -289,54 +290,51 @@ type opener struct {
 	last bool
 }
 
-// openFrom reads an object's header, refuses another kind or recipient,
-// and checks the first chunk before returning, so a changed header byte
-// fails here.
-func openFrom(r io.Reader, rk []byte, kind string) (header, io.Reader, error) {
+// openFrom reads an object's header, refuses another kind, and checks the
+// first chunk before returning, so a changed header byte or another
+// recovery key fails here (ErrOpen). It returns the recipient rk derives.
+func openFrom(r io.Reader, rk []byte, kind string) (header, Recipient, io.Reader, error) {
 	hb := make([]byte, headerLen)
 	if _, err := io.ReadFull(r, hb); err != nil {
-		return header{}, nil, ErrHeader
+		return header{}, Recipient{}, nil, ErrHeader
 	}
 	h, err := parseHeader(hb)
 	if err != nil {
-		return header{}, nil, err
+		return header{}, Recipient{}, nil, err
 	}
 	if h.kind != kind {
-		return header{}, nil, ErrHeader
+		return header{}, Recipient{}, nil, ErrHeader
 	}
 	x, dk, err := privateHalves(rk)
 	if err != nil {
-		return header{}, nil, err
+		return header{}, Recipient{}, nil, err
 	}
 	rcp := Recipient{X: x.PublicKey().Bytes(), EK: dk.EncapsulationKey().Bytes()}
-	if rcp.id() != h.recipient {
-		return header{}, nil, ErrRecipient
-	}
 	ephPub, err := ecdh.X25519().NewPublicKey(h.eph[:])
 	if err != nil {
-		return header{}, nil, ErrOpen
+		return header{}, Recipient{}, nil, ErrOpen
 	}
 	ssX, err := x.ECDH(ephPub)
 	if err != nil {
-		return header{}, nil, ErrOpen
+		return header{}, Recipient{}, nil, ErrOpen
 	}
 	ssM, err := dk.Decapsulate(h.ctM[:])
 	if err != nil {
-		return header{}, nil, ErrOpen
+		return header{}, Recipient{}, nil, ErrOpen
 	}
 	key, err := combine(ssM, ssX, kind, h.ctM[:], h.eph[:], rcp.X, rcp.EK)
 	if err != nil {
-		return header{}, nil, err
+		return header{}, Recipient{}, nil, err
 	}
 	a, err := newGCM(key)
 	if err != nil {
-		return header{}, nil, err
+		return header{}, Recipient{}, nil, err
 	}
 	o := &opener{r: r, aead: a, aad: hb, buf: make([]byte, chunkSize+tagSize+1)}
 	if err := o.next(); err != nil {
-		return header{}, nil, err
+		return header{}, Recipient{}, nil, err
 	}
-	return h, o, nil
+	return h, rcp, o, nil
 }
 
 // next opens the following chunk. It reads one byte past a full chunk to
