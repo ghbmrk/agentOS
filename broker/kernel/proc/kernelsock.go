@@ -92,6 +92,13 @@ type (
 		Plan  string `json:"plan"`
 		Index int    `json:"index"`
 	}
+	// retryArgs names the dispatch attempt the owner's RETRY was asked
+	// about, which the kernel refuses once it moved (CH-10).
+	retryArgs struct {
+		Plan    string `json:"plan"`
+		Index   int    `json:"index"`
+		Attempt int    `json:"attempt"`
+	}
 	issueArgs struct {
 		Cosigns []key.Cosign `json:"cosigns"`
 		Keys    []key.Key    `json:"keys"`
@@ -194,7 +201,7 @@ type (
 // control, question, cmd/agentosd): the owner seam's actions and its reads.
 var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"submit": act(func(k *kernel.Kernel, now int64, p kernel.Plan) error { return k.Submit(now, p) }),
-	"retry":  act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Retry(now, a.Plan, a.Index) }),
+	"retry":  act(func(k *kernel.Kernel, now int64, a retryArgs) error { return k.Retry(now, a.Plan, a.Index, a.Attempt) }),
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
 	"undo":   act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Undo(now, a.Plan, a.Index) }),
 	"enroll": act(func(k *kernel.Kernel, now int64, e key.Enrollment) error { return k.Enroll(now, e) }),
@@ -511,7 +518,7 @@ var (
 func init() {
 	wireList = []error{
 		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
-		kernel.ErrNotUnenrolled,
+		kernel.ErrNotUnenrolled, kernel.ErrRetryMoved,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
@@ -627,8 +634,8 @@ func asRefusal(err error) *key.Refusal {
 type Owner struct{ Conn }
 
 func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
-func (o Owner) Retry(plan string, index int) error {
-	return o.Call("retry", stepArgs{plan, index}, nil)
+func (o Owner) Retry(plan string, index, attempt int) error {
+	return o.Call("retry", retryArgs{plan, index, attempt}, nil)
 }
 func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan: plan}, nil) }
 func (o Owner) Undo(plan string, index int) error {

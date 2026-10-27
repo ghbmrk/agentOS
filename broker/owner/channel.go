@@ -109,8 +109,10 @@ type Config struct {
 	// Retry lists the effects the digest named as unclear and not retried
 	// (OP-2), as items to ask about when the owner texts RETRY. Each
 	// item's Ref comes back in Decide; the caller retries only an
-	// approved one. Nil: nothing to retry.
-	Retry func() []Item
+	// approved one. An error is a part of the box whose waiting effects
+	// could not be read; the items are the rest, and RETRY says so
+	// rather than "Nothing to retry." (KRN-7). Nil: nothing to retry.
+	Retry func() ([]Item, error)
 	// OwnerName is the owner's own name, "" when unknown; the box's name
 	// may not be it (CH-21).
 	OwnerName string
@@ -1260,12 +1262,32 @@ func (c *Channel) Run(ctx context.Context) error {
 // be texted. It returns the reply, "" once every request is on its way.
 func (c *Channel) askRetry() string {
 	var items []Item
+	var unread error
 	if c.cfg.Retry != nil {
-		items = c.cfg.Retry()
+		items, unread = c.cfg.Retry()
+	}
+	if unread != nil {
+		if len(items) == 0 {
+			return retryUnread
+		}
+		if reply := c.askRetryItems(items); reply != "" {
+			return reply + " " + retryUnread
+		}
+		return retryUnread
 	}
 	if len(items) == 0 {
 		return "Nothing to retry."
 	}
+	return c.askRetryItems(items)
+}
+
+// retryUnread is RETRY's line while part of the box cannot say what is
+// waiting: it may hold effects to retry, so "Nothing to retry." would be
+// untrue (KRN-7).
+const retryUnread = "Part of me is not answering, so I could not check every action to retry. Text RETRY again later."
+
+// askRetryItems asks about each of items, as askRetry says.
+func (c *Channel) askRetryItems(items []Item) string {
 	if len(items) > 20 {
 		items = items[:20]
 	}

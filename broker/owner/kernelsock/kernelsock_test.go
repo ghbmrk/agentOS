@@ -330,14 +330,14 @@ func TestStatusAndRetryReachTheKernel(t *testing.T) {
 		t.Fatalf("status: %+v, %v", s, err)
 	}
 	var r Refused
-	if err := o.Retry(ctx, "p1", 0); !errors.As(err, &r) || r.Text != kernel.ErrNotParked.Error() {
+	if err := o.Retry(ctx, "p1", 0, 1); !errors.As(err, &r) || r.Text != kernel.ErrNotParked.Error() {
 		t.Fatalf("a RETRY of no parked step: %v", err)
 	}
 	s := setupKernel(t)
 	if st, err := s.Status(ctx); err != nil || len(st) != 0 {
 		t.Fatalf("a setup-only kernel's status: %+v, %v", st, err)
 	}
-	if err := s.Retry(ctx, "p1", 0); !errors.As(err, &r) {
+	if err := s.Retry(ctx, "p1", 0, 1); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's RETRY: %v", err)
 	}
 }
@@ -376,11 +376,11 @@ func capturingKernel(t *testing.T) (string, <-chan string) {
 func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 	needRoot(t)
 	path, lines := capturingKernel(t)
-	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2); err != nil {
+	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2, 3); err != nil {
 		t.Fatal(err)
 	}
 	want := <-lines
-	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2); err != nil {
+	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2, 3); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-lines; got != want {
@@ -393,14 +393,14 @@ func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 func TestStatusReadsTheKernelsFrame(t *testing.T) {
 	needRoot(t)
 	u := []kernel.Unsettled{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: kernel.PParked, Checks: 6,
-		Detail: "no answer", Retry: true, SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
+		Detail: "no answer", Retry: true, SentAt: 1760364120000, Attempt: 2, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
 	b, err := json.Marshal(map[string]any{"result": u})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := cannedKernel(t, string(b)).Status(context.Background())
 	want := []Step{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: PhaseParked, Detail: "no answer", Retry: true,
-		SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
+		SentAt: 1760364120000, Attempt: 2, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("status reads %+v, %v; want %+v", got, err, want)
 	}

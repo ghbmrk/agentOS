@@ -205,8 +205,9 @@ func (r *retrier) waiting() []journal.ParkedIntent {
 
 // items lists the waiting effects as owner-channel items (Config Retry),
 // at most retryMax, and keeps the line each asks about under a ref new
-// to this ask.
-func (r *retrier) items() []ownerch.Item {
+// to this ask. Its error is a kernel whose steps could not be read, so
+// RETRY says part of the box is not answering (KRN-7).
+func (r *retrier) items() ([]ownerch.Item, error) {
 	ps := r.waiting()
 	if len(ps) > retryMax {
 		ps = ps[:retryMax]
@@ -220,7 +221,8 @@ func (r *retrier) items() []ownerch.Item {
 		lines[ref] = retryAsk{id: p.Intent.ID, attempt: p.Attempt, line: l, notDone: p.NotDone}
 		items = append(items, l.Shown)
 	}
-	for _, s := range r.kernelParked(retryMax - len(items)) {
+	parked, unread := r.kernelParked(retryMax - len(items))
+	for _, s := range parked {
 		a := kernelAsk(s, r.currency)
 		lines[a.line.Shown.Ref] = a
 		items = append(items, a.line.Shown)
@@ -230,26 +232,34 @@ func (r *retrier) items() []ownerch.Item {
 		r.lines[ref] = l
 	}
 	r.mu.Unlock()
-	return items
+	return items, unread
 }
 
 // kernelParked lists up to n steps the kernel holds parked for the owner's
-// RETRY, in its order. A kernel that cannot be read offers none: RETRY
-// then offers the journal's alone, and the next RETRY asks again.
-func (r *retrier) kernelParked(n int) []KernelStep {
+// RETRY, in its order. A kernel that cannot be read offers none and
+// returns its error: RETRY then offers the journal's alone, says so, and
+// the next RETRY asks again. A kernel waiting for setup holds no steps, as
+// STATUS reads it (bothStops), so that is no error.
+func (r *retrier) kernelParked(n int) ([]KernelStep, error) {
 	if r.k == nil || n <= 0 {
-		return nil
+		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(r.ctx, kernelFor)
 	defer cancel()
-	steps, _ := r.k.Status(ctx)
+	steps, err := r.k.Status(ctx)
+	if err != nil {
+		if open, oerr := r.k.SetupOpen(ctx); oerr == nil && open {
+			return nil, nil
+		}
+		return nil, err
+	}
 	var out []KernelStep
 	for _, s := range steps {
 		if s.Retry && len(out) < n {
 			out = append(out, s)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // kernelItem is the line RETRY asks about for a parked kernel step, with
@@ -390,7 +400,10 @@ func (r *retrier) runKernel(req string, a retryAsk, page bool) {
 		err = grants.ErrRetryNotConfirmed
 	} else {
 		ctx, cancel := context.WithTimeout(r.ctx, kernelFor)
-		err = r.k.Retry(ctx, a.step.Plan, a.step.Index)
+		// The attempt is the one the ask read, never re-read now: an
+		// older ask whose step was sent again since is the kernel's to
+		// refuse (CH-10).
+		err = r.k.Retry(ctx, a.step.Plan, a.step.Index, a.step.Attempt)
 		cancel()
 	}
 	var text string
@@ -424,6 +437,8 @@ func kernelRefusal(err error) string {
 		return "it could not be started"
 	case strings.Contains(rf.Text, "no parked step"):
 		return "it is no longer waiting for a retry"
+	case strings.Contains(rf.Text, "retried since that ask"):
+		return "it was sent again since I asked you"
 	case strings.Contains(rf.Text, "stopped"):
 		return "STOP is on"
 	}

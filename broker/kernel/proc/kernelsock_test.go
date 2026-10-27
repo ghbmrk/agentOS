@@ -67,7 +67,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if err := o.Extend(b.key, "o1"); !errors.As(err, &rf) || rf.Code != kernel.CNotHeld {
 		t.Fatalf("extend of an unheld plan: %v, want refusal %s", err, kernel.CNotHeld)
 	}
-	if err := o.Retry("o1", 0); !errors.Is(err, kernel.ErrNotParked) {
+	if err := o.Retry("o1", 0, 1); !errors.Is(err, kernel.ErrNotParked) {
 		t.Fatalf("retry of an unparked step: %v", err)
 	}
 	ver, err := kernel.VerifyPlan(p, anchors)
@@ -530,7 +530,11 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
 		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
 		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
-		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0) }},
+		// The retry call carries the attempt the ask named: an older one is
+		// the kernel's refusal on both sides, the parked attempt (1) is sent
+		// (CH-10).
+		{name: "retry moved", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 0) }},
+		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 1) }},
 		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
 		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Pools, nil }},
 		{name: "anchors", op: "anchors", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Anchors() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Anchors, nil }},
@@ -577,7 +581,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// Refused on both kernels by design: the admission past the cap, the
 	// pool at its reserve, and setup on a box that has its anchors (the
 	// setup-only tests take it on a fresh one). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true, "retry moved": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {

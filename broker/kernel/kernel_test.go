@@ -848,7 +848,7 @@ func TestStatusListsUnsettledSteps(t *testing.T) {
 	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	must(t, r.tick(0))
 	want := kernel.Unsettled{Plan: "p1", Verb: key.Trash, Clerk: "mail", Phase: kernel.PUnknown, Detail: "no answer",
-		Recipient: "m1", PlanStatus: kernel.SActive}
+		Recipient: "m1", PlanStatus: kernel.SActive, Attempt: 1}
 	if got := r.k.State().Status(); len(got) != 1 || got[0] != want {
 		t.Fatalf("status %+v, want %+v", got, want)
 	}
@@ -875,8 +875,16 @@ func TestStatusCarriesTheRetryTierFacts(t *testing.T) {
 	r.plan("p1", ck, kernel.PlanStep{Verb: key.Buy, Clerk: "mail", Args: map[string]string{"to": "shop", "amount": "500", "item": "lamp"}})
 	must(t, r.tick(0))
 	got := r.k.State().Status()
-	if len(got) != 1 || !got[0].Money || got[0].Amount != 500 || got[0].Recipient != "shop" {
+	if len(got) != 1 || !got[0].Money || got[0].Amount != 500 || got[0].Recipient != "shop" || got[0].Attempt != 1 {
 		t.Fatalf("status %+v", got)
+	}
+	// The attempt a RETRY ask names moves with every redo (CH-10).
+	p := newRig(t)
+	at := p.park(p.ck)
+	must(t, p.k.Retry(at+1, "p1", 0, 1))
+	must(t, p.k.Answer(at+2, p.calls(at+2, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
+	if s := p.k.State().Status(); len(s) != 1 || s[0].Phase != kernel.PParked || s[0].Attempt != 2 {
+		t.Fatalf("after one retry and re-park: %+v", s)
 	}
 }
 
@@ -886,7 +894,7 @@ func TestRetryRedispatchesAParkedStep(t *testing.T) {
 	r := newRig(t)
 	at := r.park(r.ck)
 	r.mail.Fault = func(string, kernel.Request) string { return clerk.FaultDrop }
-	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.k.Retry(at+1, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.tick(at+2))
 	must(t, r.tick(at+2+kernel.ProbeEvery)) // one check: the retry starts the count again
 	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PUnknown {
@@ -932,7 +940,7 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 		at := r.park(r.ck)
 		must(t, narrow(r, at+1))
 		n := r.k.Log().Len()
-		if err := r.k.Retry(at+2, "p1", 0); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
+		if err := r.k.Retry(at+2, "p1", 0, r.phase("p1").Attempt); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
 			t.Fatalf("%s before: retry %v", name, err)
 		}
 		must(t, r.tick(at+3))
@@ -942,7 +950,7 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 		parked(r, "before")
 		r = newRig(t)
 		at = r.park(r.ck)
-		must(t, r.k.Retry(at+1, "p1", 0))
+		must(t, r.k.Retry(at+1, "p1", 0, r.phase("p1").Attempt))
 		must(t, narrow(r, at+2))
 		must(t, r.tick(at+3))
 		if r.status("p1") != kernel.SCancelled {
@@ -955,7 +963,7 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 	// cancel then gives its charge back.
 	r := newRig(t)
 	at := r.park(r.ck)
-	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.k.Retry(at+1, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "unknown"}))
 	must(t, r.k.Cancel(at+3, "p1"))
 	pr := at + 2 + kernel.ProbeEvery
@@ -972,7 +980,7 @@ func TestRetryRunsTheKeyChecksAgain(t *testing.T) {
 func TestARetriedStepThatFailsParksAgain(t *testing.T) {
 	r := newRig(t)
 	at := r.park(r.ck)
-	must(t, r.k.Retry(at+1, "p1", 0))
+	must(t, r.k.Retry(at+1, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
 	if st := r.phase("p1"); st.Phase != kernel.PParked || r.status("p1") != kernel.SActive || len(r.k.State().Ledger().Uses(r.ck.Tip())) != 1 {
 		t.Fatalf("phase %s, status %s after a failed redo", st.Phase, r.status("p1"))
@@ -981,7 +989,7 @@ func TestARetriedStepThatFailsParksAgain(t *testing.T) {
 		t.Fatalf("STATUS %+v", s)
 	}
 	r.replays()
-	must(t, r.k.Retry(at+3, "p1", 0))
+	must(t, r.k.Retry(at+3, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.tick(at+4))
 	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
 		t.Fatalf("second retry: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
@@ -1005,7 +1013,7 @@ func TestRetryRefusesAMissingClerk(t *testing.T) {
 	r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{}, at+1)
 	must(t, err)
 	n := r.k.Log().Len()
-	if err := r.k.Retry(at+2, "p1", 0); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
+	if err := r.k.Retry(at+2, "p1", 0, r.phase("p1").Attempt); !errors.Is(err, kernel.ErrRetryRefused) || r.k.Log().Len() != n {
 		t.Fatalf("retry %v, log %d -> %d", err, n, r.k.Log().Len())
 	}
 	if r.status("p1") != kernel.SActive || r.phase("p1").Phase != kernel.PParked {
@@ -1019,7 +1027,7 @@ func TestRetryUnderAPauseRunsOnResume(t *testing.T) {
 	r := newRig(t)
 	at := r.park(r.ck)
 	must(t, r.k.Pause(at+1, r.ck.Tip()))
-	must(t, r.k.Retry(at+2, "p1", 0))
+	must(t, r.k.Retry(at+2, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.tick(at+3))
 	if r.status("p1") != kernel.SActive || len(r.mail.Effects()) != 0 {
 		t.Fatalf("under the pause: status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
@@ -1053,7 +1061,7 @@ func TestRetryRefusesAStepThatIsNotParked(t *testing.T) {
 		index int
 	}{{r, "p1", 0}, {r, "p2", 0}, {r, "p2", 1}, {r, "nope", 0}, {c, "p1", 0}} {
 		n := x.r.k.Log().Len()
-		if err := x.r.k.Retry(at+2, x.plan, x.index); !errors.Is(err, kernel.ErrNotParked) || x.r.k.Log().Len() != n {
+		if err := x.r.k.Retry(at+2, x.plan, x.index, 1); !errors.Is(err, kernel.ErrNotParked) || x.r.k.Log().Len() != n {
 			t.Fatalf("retry %s/%d: %v, log %d -> %d", x.plan, x.index, err, n, x.r.k.Log().Len())
 		}
 	}
@@ -1065,7 +1073,7 @@ func TestUnanchoredRetryDoesNotSurviveReboot(t *testing.T) {
 	r := newRig(t)
 	at := r.park(r.ck)
 	r.anchor.down = true
-	if err := r.k.Retry(at+1, "p1", 0); err == nil {
+	if err := r.k.Retry(at+1, "p1", 0, r.phase("p1").Attempt); err == nil {
 		t.Fatal("an unconfirmed retry must report it")
 	}
 	if err := r.tick(at + 2); err == nil {
@@ -1076,6 +1084,52 @@ func TestUnanchoredRetryDoesNotSurviveReboot(t *testing.T) {
 	must(t, r.tick(at+4))
 	if ph := r.k.State().Plans["p1"].Steps[0].Phase; ph != kernel.PParked || len(r.mail.Effects()) != 0 {
 		t.Fatalf("phase %s, %d effects after an unconfirmed retry", ph, len(r.mail.Effects()))
+	}
+}
+
+// REQ: CH-10, KRN-8
+
+// A RETRY is bound to the dispatch attempt it asked about (CH-10, KRN-8):
+// two asks read the same attempt; the first retry is sent, fails and parks
+// again; the second, older ask is then refused, logs nothing, and the step
+// stays parked. Revert mutant: drop the attempt check in Kernel.Retry, and
+// the older ask sends the step a third time.
+func TestARetryOfAMovedStepIsRefused(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.ck)
+	first, second := r.k.State().Status()[0].Attempt, r.k.State().Status()[0].Attempt
+	must(t, r.k.Retry(at+1, "p1", 0, first))
+	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
+	n := r.k.Log().Len()
+	if err := r.k.Retry(at+3, "p1", 0, second); !errors.Is(err, kernel.ErrRetryMoved) || r.k.Log().Len() != n {
+		t.Fatalf("older ask: retry %v, log %d -> %d", err, n, r.k.Log().Len())
+	}
+	must(t, r.tick(at+4))
+	if st := r.phase("p1"); st.Phase != kernel.PParked || st.Attempt != 2 || len(r.mail.Effects()) != 0 {
+		t.Fatalf("phase %s attempt %d, %d effects after a refused older ask", st.Phase, st.Attempt, len(r.mail.Effects()))
+	}
+	r.replays()
+}
+
+// The attempt a RETRY names is rebuilt by replay, so an ask made before a
+// restart still binds after it (KRN-8, KRN-1). Revert mutant: keep the
+// attempt outside the log, and after the reboot the old ask is accepted.
+func TestRetryAttemptSurvivesReboot(t *testing.T) {
+	r := newRig(t)
+	at := r.park(r.ck)
+	must(t, r.k.Retry(at+1, "p1", 0, 1))
+	must(t, r.k.Answer(at+2, r.calls(at+2, 1)[0], kernel.Result{Outcome: "failed", Detail: "too-large"}))
+	r.boot(at + 3)
+	if s := r.k.State().Status(); len(s) != 1 || s[0].Attempt != 2 {
+		t.Fatalf("after a reboot: %+v", s)
+	}
+	if err := r.k.Retry(at+4, "p1", 0, 1); !errors.Is(err, kernel.ErrRetryMoved) {
+		t.Fatalf("old ask after a reboot: %v", err)
+	}
+	must(t, r.k.Retry(at+5, "p1", 0, 2))
+	must(t, r.tick(at+6))
+	if r.status("p1") != kernel.SDone || len(r.mail.Effects()) != 1 {
+		t.Fatalf("status %s, %d effects", r.status("p1"), len(r.mail.Effects()))
 	}
 }
 
@@ -1175,7 +1229,7 @@ func TestStatusNamesWhenTheStepWasFirstSent(t *testing.T) {
 		t.Fatalf("a parked step: %+v, want sent at %d", got, sent)
 	}
 	at += kernel.ProbeEvery
-	must(t, r.k.Retry(at, "p1", 0))
+	must(t, r.k.Retry(at, "p1", 0, r.phase("p1").Attempt))
 	must(t, r.tick(at))
 	got := r.k.State().Status()
 	if len(got) != 1 || r.k.State().Plans["p1"].Steps[0].Attempt != 2 || got[0].SentAt != sent {

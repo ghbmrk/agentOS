@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/daemon"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -129,5 +130,13 @@ func TestTheKernelsAnswersInTheOwnerCommandsTerms(t *testing.T) {
 	}
 	if kernelErr(nil) != nil {
 		t.Fatal("success read as a failure")
+	}
+	// A RETRY's attempt crosses the conversion, and the kernel's refusal of
+	// a moved one keeps the words daemon's kernelRefusal matches (CH-10).
+	if s := daemon.KernelStep(kernelsock.Step{Plan: "p1", Attempt: 2}); s.Attempt != 2 {
+		t.Fatalf("attempt %d after the conversion", s.Attempt)
+	}
+	if err := kernelErr(kernelsock.Refused{Text: kernel.ErrRetryMoved.Error()}); !errors.As(err, &r) || !strings.Contains(r.Text, "retried since that ask") {
+		t.Fatalf("a moved retry: %v", err)
 	}
 }

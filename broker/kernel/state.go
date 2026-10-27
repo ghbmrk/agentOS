@@ -706,6 +706,9 @@ type Unsettled struct {
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
 	SentAt int64  // when it was first sent (unix ms), which a RETRY line names (#3079)
+	// The step's dispatch attempt: a RETRY names it, and the kernel refuses
+	// one asked about an attempt since sent again (CH-10).
+	Attempt int
 	// What the owner's RETRY tier is judged on (CH-10, CH-11), from the
 	// plan's own step: its spend, whether its verb moves money (always
 	// the high tier), and its recipient.
@@ -730,7 +733,7 @@ func (s *State) Status() []Unsettled {
 			}
 			ks := p.Plan.Step(i)
 			out = append(out, Unsettled{Plan: id, Index: i, Verb: ks.Verb, Clerk: ks.Clerk,
-				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt,
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt, Attempt: st.Attempt,
 				Amount: ks.Amount, Money: slices.Contains(key.ArgNames(ks.Verb), key.ArgAmount), Recipient: ks.Recipient,
 				PlanStatus: p.Status, Cancel: p.Cancel, CancelDetail: p.CancelDetail})
 		}
