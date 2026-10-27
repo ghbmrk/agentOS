@@ -17,7 +17,7 @@ So the spec diff adds text rather than rewording it. The text is needed because 
 - HW-10 gives one signed image downloaded from the project's GitHub releases.
 - DEV-12 says an encoder the clerk lacks "ships only as a box update (DEP-4) through §8 and its review".
 
-A private driver is all three things: trusted code, part of an image, and an encoder shipped as a box update. The spec has to say how such a driver is named, measured and reviewed. The addition is about 90 words, so it carries `Word-budget: D-189` unless the spec builder can retire as many words without changing meaning (see part (s)).
+A private driver is all three things: trusted code, part of an image, and an encoder shipped as a box update. The spec has to say how such a driver is named, measured and reviewed. The addition is about 90 words, so it carries `Word-budget: D-189` once Mark's approval is recorded there (point 6), unless the spec builder can retire as many words without changing meaning (see part (s)).
 
 ## Design points settled here (recommendations, flagged for the reviews)
 
@@ -31,7 +31,7 @@ A private driver is all three things: trusted code, part of an image, and an enc
    - Every private PR gets a fresh L3 review, and tier A PRs also get a Security review. Reviewers are sessions with ghbmrk/agentos-private added, using this repo's reviewer skill at the pinned commit.
    - The private repo keeps its own `trusted_base_parsers.txt`, and each parser it adds needs a `Trusted-base: parsers --` line, as here. The image manifest records each driver's parser count, so the KRN-2 measure covers drivers too.
    - Reviewers of public PRs see only the slot and the suite. That is the public contract, and any change to it is tier A here.
-6. **D-189 records the rule and approves the spec words.** `tools/word_budget.py` accepts a waiver only from a row that is active on the base and names the spec PR by number. So: open the spec PR first, then append its `#number` to D-189 in a one-line tier C PR, merge that, and re-run `word-budget`. If the L3 review of this brief judges the relayed tap insufficient as Mark's approval of the addition, its verdict says so, and the coordinator puts a confirmation card in Decisions.
+6. **D-189 records the rule; Mark's approval of the spec words is still owed.** L3 on #3330 found that the relayed tap supports the policy but not the approval of about 90 SPEC words, so a confirmation card goes to Decisions. Once Mark taps, the row gains that tap and the spec PR's number. `tools/word_budget.py` accepts a waiver only from a row that is active on the base and names the spec PR by number. So: open the spec PR first, then add the tap and its `#number` to D-189 in a one-line tier C PR, merge that, and re-run `word-budget`. If Mark declines, part (s) retires as many words as it adds.
 
 ## Spec text for part (s) (a draft; the L1 builder owns the final wording)
 
