@@ -43,6 +43,10 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The core's end of the edge link (EDGE-link-core c2, #3297; HW-15, HW-16): the
+# link port's process, which asks the kernel about each edge key and signs its
+# handshakes through the kernel; it holds no key.
+wiring cmd/agentos-link
 # The kernel's process (MIG-4-run, #2682): it opens the log, boots the
 # kernel, and carries each call to a clerk's socket. It links no clerk's code
 # (KRN-2 split, #2892).
@@ -161,13 +165,6 @@ allow change journal.Engine.Authorize -- change.Journal (also loops.Journal) mov
 allow change journal.Engine.Dispatch -- change.Journal (also loops.Journal) dispatches the intent it submitted once authorized
 allow change grants.Gate.Authorize -- change.Journal is the grants gate on the box; same as journal.Engine.Authorize
 allow change grants.Gate.Dispatch -- change.Journal is the grants gate on the box; same as journal.Engine.Dispatch
-allow recalltool journal.Engine.Authorize -- recalltool moves the erase intent it submitted through policy
-allow recalltool grants.Gate.Authorize -- recalltool's journal is the grants gate on the box; same as journal.Engine.Authorize
-allow recalltool journal.Engine.Erase -- the owner's FORGET erases the journal records it names (recalltool.Journal)
-allow recalltool grants.Gate.Withdraw -- FORGET withdraws an owner question about an erased intent as superseded (recalltool.Withdrawer)
-allow photo/keep journal.Engine.Authorize -- the photo store moves the receipt, delivery and deletion intents it submitted through policy (keep.Journal)
-allow photo/keep journal.Engine.Dispatch -- the photo store dispatches the intent it submitted once authorized (keep.Journal)
-allow photo/keep journal.Engine.Erase -- an owner photo deletion or expiry erases the photo's intents' content (CAP-3, keep.Journal)
 allow daemon/journalowner journal.Engine.Stop -- the owner's STOP text, mapped onto control.Engine until #2783 (c) (#2778)
 allow daemon/journalowner journal.Engine.Resume -- the owner's code-checked RESUME text, mapped onto control.Engine until #2783 (c) (#2778)
 allow control guest.OwnerAgent.Deliver -- owner chat goes to the owner's agent machine (control.Agent)

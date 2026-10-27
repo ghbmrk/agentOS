@@ -69,6 +69,7 @@ parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and ma
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-link -- the edge's TLS handshakes and hellos, and the consumer's JSON lines
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)

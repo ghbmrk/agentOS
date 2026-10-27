@@ -45,6 +45,29 @@ TOOLSH = CODEX / "agentos-toolsh"
 LAUNCH = CODEX / "launch.json"
 STUB_CLI = ROOT / "tests/codex_worker/stub_cli.py"
 STUB_TOOL = ROOT / "tests/codex_worker/stub_tool.py"
+# bwrap's launcher opens /proc/<pid>/ns for the child it clones, by the child's pid in the
+# launcher's own namespace. Under a /proc from an outer namespace that number names whatever has
+# it there, and where nothing does, bwrap dies before its tool starts (#1616). Under the host's
+# /proc that turned on which low pids the CI runner had free, so it failed on some runners only.
+# So the pid-namespace worker brings its own outer namespace: its sleepers hold every pid below
+# PIDNS_HELD while the command runs in a nested namespace whose pids start at 1 and stay far
+# below it. The fresh /proc is mounted by hand: bwrap's --proc adds read-only mounts over parts
+# of it, and the kernel then refuses the tool's own /proc in its user namespace. It runs after
+# the sleepers, so its short-lived pid lands above the held range.
+PIDNS_HELD = 128
+PIDNS_LAUNCH = f"""held=
+i=1
+while [ "$i" -lt {PIDNS_HELD} ]; do
+	sleep 600 </dev/null >/dev/null 2>&1 &
+	held="$held $!"
+	i=$((i + 1))
+done
+mount -t proc proc /proc || exit 125
+"$0" "$@"
+rc=$?
+kill $held
+exit $rc
+"""
 FAKE_ENDPOINT = ROOT / "tests/codex_worker/fake_endpoint.py"
 BWRAP = "/usr/bin/bwrap"
 FORWARDER = "http://127.0.0.1:18432"
@@ -540,7 +563,14 @@ class ToolSandboxTest(unittest.TestCase):
         self.addCleanup(self.fwd.close)
 
     def worker(self, *command, toolsh=TOOLSH, codex_home=True, chdir=WORK, extra=(),
-               deadline=60):
+               deadline=60, pidns=False):
+        if pidns:
+            # A worker in its own pid namespace that still mounts a /proc from outside it (see
+            # PIDNS_LAUNCH): the outer bwrap's namespace holds its low pids, and an inner bwrap
+            # takes the namespace the command runs in, keeping the outer one's /proc.
+            command = ("/bin/sh", "-c", PIDNS_LAUNCH, BWRAP, "--dev-bind", "/", "/",
+                       "--unshare-pid", "--", *command)
+            extra = ("--unshare-pid", *extra)
         argv = [
             BWRAP, "--dev-bind", "/", "/",
             "--tmpfs", "/run", "--bind", str(self.run_dir), "/run/agentos",
@@ -577,7 +607,10 @@ class ToolSandboxTest(unittest.TestCase):
                            if "bwrap" in line or "stub" in line or "agentos" in line)
         except (OSError, subprocess.SubprocessError) as e:
             ps = f"(no process listing: {e})"
-        os.killpg(p.pid, 9)
+        try:
+            os.killpg(p.pid, 9)
+        except ProcessLookupError:
+            pass  # the whole group exited after the deadline; the report still stands
         try:
             _, err = p.communicate(timeout=10)
         except subprocess.TimeoutExpired:
@@ -608,13 +641,14 @@ class ToolSandboxTest(unittest.TestCase):
         bad.chmod(0o755)
         return bad
 
-    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=(), skip_outlives=False):
+    def run_worker(self, toolsh=TOOLSH, codex_home=True, extra=(), skip_outlives=False,
+                   pidns=False):
         flag = ("--skip-outlives",) if skip_outlives else ()
         # The outlives probe may wait stub_cli's BEAT_WAIT for its tool on top of the earlier
         # phases, so the deadline leaves room for both.
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
                         *flag, toolsh=toolsh, codex_home=codex_home, extra=extra,
-                        deadline=120)
+                        deadline=120, pidns=pidns)
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads(r.stdout)
 
@@ -842,19 +876,18 @@ echo "func=$?"
 
     # REQ: CRED-5, A14 (CODEX-sandbox-root-1)
     def test_descriptors_closed_in_a_pid_namespace_with_the_hosts_proc(self):
-        # The CLI may itself run in a pid namespace that still mounts the host's /proc: there $$
-        # names some other process, so a loop over /proc/$$/fd closes the wrong descriptors (or
-        # none). /proc/self is the wrapper's own whatever the namespace.
-        pidns = ("--unshare-pid",)
-        self.assert_contained(self.run_worker(extra=pidns)["tool"])
+        # The CLI may itself run in a pid namespace that still mounts an outer /proc, such as
+        # the host's: there $$ names some other process, so a loop over /proc/$$/fd closes the
+        # wrong descriptors (or none). /proc/self is the wrapper's own whatever the namespace.
+        self.assert_contained(self.run_worker(pidns=True)["tool"])
         bad = self.mutant("toolsh-pid",
                           ("[ -d /proc/self/fd ]", '[ -d "/proc/$$/fd" ]'),
                           ("for fd in /proc/self/fd/*", 'for fd in "/proc/$$"/fd/*'))
-        # The mutant run asks only about descriptors; its refused wrapper never starts the
-        # beat, so the outlives probe would just wait out its BEAT_WAIT (A4).
-        tool = self.run_worker(toolsh=bad, extra=pidns, skip_outlives=True)["tool"]
-        self.assertFalse(tool["exit"] == 0 and tool["fds"] == [],
-                         "the $$ mutant must leak descriptors or refuse")
+        # The mutant run asks only about descriptors (A4). Its $$ names one of the outer
+        # namespace's sleepers, which holds nothing above 2, so it closes nothing.
+        tool = self.run_worker(toolsh=bad, skip_outlives=True, pidns=True)["tool"]
+        self.assertEqual(tool["exit"], 0, tool)
+        self.assertNotEqual(tool["fds"], [], "the $$ mutant must leak the CLI's descriptors")
 
     # REQ: CRED-5, A14 (CODEX-sandbox-root-3)
     def test_a_wrapper_killed_before_its_tool_starts_neither_holds_the_worker_nor_passes(self):
@@ -865,7 +898,7 @@ echo "func=$?"
                             ('exec "$BWRAP" \\', 'case "$*" in *" beat") sleep 600 ;; esac\n'
                                                    'exec "$BWRAP" \\'))
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
-                        "--beat-wait=2", toolsh=stuck, extra=("--unshare-pid",))
+                        "--beat-wait=2", toolsh=stuck, pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
         self.assertIsNone(tool["outlives"], tool)
@@ -879,7 +912,7 @@ echo "func=$?"
         # still runs, and the result carries no outlives verdict, so assert_contained fails it:
         # a run that must prove containment cannot skip the check unnoticed.
         r = self.worker(sys.executable, "-I", str(STUB_CLI), str(self.fwd.port), self.canary,
-                        "--skip-outlives", extra=("--unshare-pid",))
+                        "--skip-outlives", pidns=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         tool = json.loads(r.stdout)["tool"]
         self.assertEqual((tool["exit"], tool["fds"]), (0, []), tool)
