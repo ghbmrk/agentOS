@@ -20,6 +20,7 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // KeyFD is the descriptor the kernel main reads its keys from.
@@ -67,7 +68,14 @@ const recipientXLen = 32
 // from this one.
 const recipientTag = "agentos-backup-recipient/v1\n"
 
-const handoffTag = "agentos-kernel-keys/v4\n"
+const handoffTag = "agentos-kernel-keys/v5\n"
+
+// PageCAEntry is the sealed store's entry holding the page authority
+// (CH-9, MIG-4-recovery-f1): pageca.Marshal's form, its certificate and
+// private key. Enrollment makes it; the unlock step hands it to the kernel,
+// which certifies the page's serving keys and writes it into every backup.
+// agentosd never holds it (KRN-2, CLK-1).
+const PageCAEntry = "kernel/page-ca"
 
 // anchorsTag starts AnchorsEntry's versioned form. A first-form value reads
 // as it only if its first key starts with these bytes; only enrollment
@@ -83,7 +91,7 @@ const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 // the counter, the recipient with its length, the count and MaxAnchors
 // ES256 keys, under 8 KiB. It is far below a pipe's 64 KiB buffer, so the
 // unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 2 + RecipientLen + 1 + MaxAnchors*maxAnchor
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -98,13 +106,15 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // none when the store holds none (the kernel then starts setup-only and
 // takes them into its log, kernel.Setup), and the backup recipient, empty
 // when the store holds none (a box enrolled before MIG-4-recovery-e1; the
-// kernel then takes no backup).
+// kernel then takes no backup), and the page authority, none when the
+// store holds none (the kernel then certifies nothing).
 type KernelKeys struct {
 	Log       [32]byte
 	Head      ed25519.PrivateKey
 	Counter   Counter
 	Anchors   []key.PublicKey
 	Recipient []byte // RecipientLen bytes or none (RecipientEntry)
+	PageCA    []byte // pageca.Marshal's form or none (PageCAEntry)
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -166,6 +176,24 @@ func validRecipient(r []byte) bool {
 		return false
 	}
 	_, err := mlkem.NewEncapsulationKey768(r[recipientXLen:])
+	return err == nil
+}
+
+// ParsePageCA reads PageCAEntry's value, refusing one that is not a page
+// authority's sealed form. The result is a copy of b; the caller wipes it.
+func ParsePageCA(b []byte) ([]byte, error) {
+	if !validPageCA(b) {
+		return nil, ErrHandoff
+	}
+	return bytes.Clone(b), nil
+}
+
+// validPageCA: b is 1 to pageca.MaxSealed bytes that open as an authority.
+func validPageCA(b []byte) bool {
+	if len(b) == 0 || len(b) > pageca.MaxSealed {
+		return false
+	}
+	_, err := pageca.Unmarshal(b)
 	return err == nil
 }
 
@@ -247,7 +275,7 @@ func parseAnchors(b []byte, n int) ([]key.PublicKey, error) {
 // Marshal encodes k for the pipe. The caller wipes the result.
 func (k KernelKeys) Marshal() ([]byte, error) {
 	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors ||
-		len(k.Recipient) != 0 && !validRecipient(k.Recipient) {
+		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(k.PageCA) != 0 && !validPageCA(k.PageCA) {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
@@ -263,6 +291,8 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.Counter.Auth...)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(k.Recipient)))
 	b = append(b, k.Recipient...)
+	b = binary.BigEndian.AppendUint16(b, uint16(len(k.PageCA)))
+	b = append(b, k.PageCA...)
 	out, err := appendAnchors(b, k.Anchors)
 	if err != nil {
 		clear(b)
@@ -278,6 +308,8 @@ func (k *KernelKeys) Wipe() {
 	k.Head = nil
 	clear(k.Counter.Auth)
 	k.Counter.Auth = nil
+	clear(k.PageCA)
+	k.PageCA = nil
 }
 
 // ReadKeys reads the hand-off from f and closes it. f must be a pipe, so a
@@ -333,7 +365,17 @@ func parseKeys(b []byte) (KernelKeys, error) {
 			return KernelKeys{}, ErrHandoff
 		}
 	}
-	if rest = rest[2+len(rcp):]; len(rest) < 1 {
+	if rest = rest[2+len(rcp):]; len(rest) < 2 {
+		return KernelKeys{}, ErrHandoff
+	}
+	// None: the store has no page authority, so the kernel certifies none.
+	var ca []byte
+	if n := int(binary.BigEndian.Uint16(rest)); n != 0 {
+		if ca = rest[2:min(2+n, len(rest))]; len(ca) != n || !validPageCA(ca) {
+			return KernelKeys{}, ErrHandoff
+		}
+	}
+	if rest = rest[2+len(ca):]; len(rest) < 1 {
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: the store has no anchors yet, so the kernel starts setup-only.
@@ -341,7 +383,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if err != nil {
 		return KernelKeys{}, err
 	}
-	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp)}
+	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: bytes.Clone(ca)}
 	o = len(handoffTag)
 	copy(k.Log[:], b[o:o+32])
 	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])

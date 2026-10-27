@@ -105,10 +105,9 @@ func (r *rig) input(rcp Recipient) Input {
 	for h, ct := range r.mail.M {
 		mail = append(append(mail, h[:]...), ct...)
 	}
-	return Input{Recipient: rcp, Created: 1700000000, PageCA: []byte("page-ca-canary"), EdgeKey: []byte("edge-key-canary"),
-		RevokedEdge: [][]byte{[]byte("revoked-fp-1"), []byte("revoked-fp-2")},
-		Sections:    []Source{src("log", logBytes), src("content/mail", mail)},
-		Keys:        r.keys, State: r.k.State()}
+	return Input{Recipient: rcp, Created: 1700000000, PageCA: []byte("page-ca-canary"), PageCAFingerprint: "CAFE F00D",
+		Sections: []Source{src("log", logBytes), src("content/mail", mail)},
+		Keys:     r.keys, State: r.k.State()}
 }
 
 func (r *rig) backup(rcp Recipient, t Target) (Record, []byte) {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -141,6 +142,10 @@ type (
 		Target kernel.BackupTarget `json:"target"`
 		Cosign key.Cosign          `json:"cosign"`
 	}
+	// certifyArgs is the page's serving public key, PKIX DER.
+	certifyArgs struct {
+		Key []byte `json:"key"`
+	}
 	untargetArgs struct {
 		Name string `json:"name"`
 	}
@@ -211,6 +216,13 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	},
 	"backup":  func(h *Kernel, now int64, _ json.RawMessage) (any, error) { return h.Backup(now) },
 	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
+	"certify": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a certifyArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		return h.Certify(now, a.Key)
+	},
 }}
 
 // MeterSide is the model clerk's table (clerk/model, #2572): the metering
@@ -290,8 +302,9 @@ type SetupInfo struct {
 }
 
 // setupOps are the only calls a kernel with no anchors serves: the setup
-// step, what it signs over, and STATUS (#2905 open point 2).
-var setupOps = map[string]bool{"owner/setup": true, "owner/setupinfo": true, "owner/status": true}
+// step, what it signs over, STATUS (#2905 open point 2), and the page's
+// serving certificate, since setup's passkeys are made on that page (CH-9).
+var setupOps = map[string]bool{"owner/setup": true, "owner/setupinfo": true, "owner/status": true, "owner/certify": true}
 
 // ErrSetupOnly refuses every other call until setup has logged the owner's
 // hardware keys.
@@ -402,7 +415,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		ErrNoRecipient, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
+		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
 		wireErrors[e.Error()] = e
@@ -610,6 +623,12 @@ func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t)
 
 // Backups is the recipient's ID, every destination and every kept backup.
 func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
+
+// Certify signs the page's serving key, PKIX DER (Kernel.Certify).
+func (o Owner) Certify(pub []byte) (c Certified, err error) {
+	err = o.Call("certify", certifyArgs{pub}, &c)
+	return
+}
 
 // Meter is the metering seam over the kernel process's meter socket: a
 // model.Ledger for the model clerk's process. The now each method takes is

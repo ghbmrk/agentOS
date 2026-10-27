@@ -174,6 +174,20 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 			return nil, fmt.Errorf("agentos-unlock: the backup recipient in my store: %w", err)
 		}
 	}
+	// The page authority (CH-9). A store enrolled before
+	// MIG-4-recovery-f1 has none and hands none: its kernel still starts,
+	// and certifies no page key. An entry that is there must read.
+	raw, ok, err = st.Get(handoff.PageCAEntry)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		k.PageCA, err = handoff.ParsePageCA(raw)
+		clear(raw)
+		if err != nil {
+			return nil, fmt.Errorf("agentos-unlock: the page authority in my store: %w", err)
+		}
+	}
 	if k.Counter, err = counter(st); err != nil {
 		return nil, err
 	}

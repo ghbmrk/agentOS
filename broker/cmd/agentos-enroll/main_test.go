@@ -5,7 +5,9 @@ package main
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +18,7 @@ import (
 	"slices"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-tpm/tpm2"
 	"github.com/google/go-tpm/tpm2/transport"
@@ -24,6 +27,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
 )
@@ -57,7 +61,7 @@ func newBox(t *testing.T) *box {
 	b.c = config{
 		state: state, anchorDir: filepath.Join(kdir, "anchor"), log: filepath.Join(kdir, "log"),
 		host: "Test PC", passphrase: pf, recovery: rf, pcrs: testPCRs,
-		kernelUID: os.Getuid(), kernelGID: os.Getgid(),
+		kernelUID: os.Getuid(), kernelGID: os.Getgid(), built: testBuilt,
 	}
 	return b
 }
@@ -282,6 +286,51 @@ func TestEnrollStoresTheBackupRecipient(t *testing.T) {
 	other[0] ^= 1
 	if get(backup.RecipientFor(other)).ID() == want.ID() {
 		t.Fatal("two recovery keys share a recipient")
+	}
+}
+
+// testBuilt stands for the image's build time.
+var testBuilt = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+
+// REQ: CH-9, BAK-1
+// MIG-4-recovery-f1: enrollment makes the page authority and keeps it in
+// the store, for the unlock step to hand the kernel: an authority for the
+// page name only, whose certificate opens with its key, dated from the
+// build time and never the clock. Without a build time it makes no store.
+func TestEnrollStoresThePageAuthority(t *testing.T) {
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	v, ok, err := b.enrolled().Get(handoff.PageCAEntry)
+	if err != nil || !ok {
+		t.Fatalf("no page authority in the store: %v", err)
+	}
+	a, err := pageca.Unmarshal(get(handoff.ParsePageCA(v)))
+	if err != nil || a.Name() != pageca.DefaultName {
+		t.Fatalf("the store's authority does not open for the page name: %v", err)
+	}
+	cert := get(x509.ParseCertificate(a.Certificate()))
+	if !cert.NotBefore.Equal(testBuilt.Add(-24*time.Hour)) || len(cert.PermittedDNSDomains) != 1 || !cert.IsCA {
+		t.Fatalf("the authority is not the page's, from the build time: %v %v", cert.NotBefore, cert.PermittedDNSDomains)
+	}
+	if a.Fingerprint() != pageca.Fingerprint(cert.Raw) {
+		t.Fatal("no fingerprint to print")
+	}
+	// A leaf it issues verifies under it for the page name.
+	pk := get(ecdsa.GenerateKey(elliptic.P256(), rand.Reader))
+	leaf := get(x509.ParseCertificate(get(a.Issue(get(x509.MarshalPKIXPublicKey(&pk.PublicKey)), testBuilt.Add(48*time.Hour), nil))))
+	pool := x509.NewCertPool()
+	pool.AddCert(cert)
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: pageca.DefaultName, Roots: pool, CurrentTime: testBuilt.Add(72 * time.Hour)}); err != nil {
+		t.Fatalf("the authority's leaf does not verify: %v", err)
+	}
+
+	z := newBox(t)
+	z.c.built = time.Time{}
+	if err := enroll(z.c, z.sw.TPM()); err == nil {
+		t.Fatal("enrolled with no build time")
+	}
+	if ok, _ := exists(z.c.storePath()); ok {
+		t.Fatal("a store without a page authority is in place")
 	}
 }
 

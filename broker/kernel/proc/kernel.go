@@ -16,6 +16,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // KernelConfig is what the kernel process starts from. The log key and the
@@ -39,6 +40,9 @@ type KernelConfig struct {
 	// Recipient is the backup recipient in its wire form
 	// (handoff.KernelKeys.Recipient); none refuses every backup.
 	Recipient []byte
+	// PageCA is the page authority in pageca.Marshal's form
+	// (handoff.KernelKeys.PageCA); none certifies no page key (Certify).
+	PageCA []byte
 }
 
 // Kernel is the kernel process's one kernel: every call to it goes through
@@ -56,6 +60,9 @@ type Kernel struct {
 	bk *backups
 	// reseals is every backup re-seal running (reseal).
 	reseals sync.WaitGroup
+	// page is the page authority (CH-9); nil when the store holds none.
+	// Set at open and never changed, so it is read without the lock.
+	page *pageca.Authority
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -69,6 +76,13 @@ type Kernel struct {
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
+	}
+	var page *pageca.Authority
+	if len(cfg.PageCA) > 0 {
+		var err error
+		if page, err = pageca.Unmarshal(cfg.PageCA); err != nil {
+			return nil, fmt.Errorf("run: the page authority: %w", err)
+		}
 	}
 	st, err := OpenFileStore(cfg.Log)
 	if err != nil {
@@ -92,7 +106,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
-	h := &Kernel{k: k, store: st, clerks: clerks}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		if err == nil {

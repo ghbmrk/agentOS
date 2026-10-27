@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // Backups on the running box (BAK-1, MIG-4-recovery-e3). The kernel process
@@ -623,11 +624,23 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	tg := bk.target(t)
+	// The page authority goes in every backup, so a restore brings back
+	// the fingerprint the Owner Card prints, and the kept Record names it,
+	// so restore refuses a backup whose authority is another (CH-9, BAK-1).
+	var ca []byte
+	var caPrint string
+	if h.page != nil {
+		if ca, err = pageca.Marshal(h.page); err != nil {
+			return "", err
+		}
+		defer clear(ca)
+		caPrint = h.page.Fingerprint()
+	}
 	pp := &pendingPut{Target: tg, h: h, t: t, rec: backup.Record{Recipient: *bk.recipient, Created: now,
-		Subjects: slices.Sorted(maps.Keys(snap.live))}}
+		Subjects: slices.Sorted(maps.Keys(snap.live)), PageCA: caPrint}}
 	rec, err := backup.Write(f, pp, backup.Input{
-		Recipient: *bk.recipient, Created: now, Sections: []backup.Source{bk.logSource(snap.n)},
-		Keys: snap.keys, State: snap.live,
+		Recipient: *bk.recipient, Created: now, PageCA: ca, PageCAFingerprint: caPrint,
+		Sections: []backup.Source{bk.logSource(snap.n)}, Keys: snap.keys, State: snap.live,
 	})
 	if err == nil {
 		err = f.Sync()
