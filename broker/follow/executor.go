@@ -2,7 +2,7 @@ package follow
 
 // The journal executor for meta.update.follow, kept only while agentosd
 // still routes the page's grants.FollowIntent through the journal. f2
-// (#3430) wires the follow clerk (clerk.go) in agentosd and deletes this
+// (#3430) wires the follow clerk (followclerk) and deletes this
 // file; nothing else in the package imports journal or grants
 // (TestOnlyTheExecutorImportsTheOldCore).
 
@@ -26,8 +26,8 @@ func parse(in journal.Intent) (digest, name, why string) {
 	return digest, name, ""
 }
 
-var results = map[switched]journal.Result{
-	notSwitched: journal.ResultNotApplied, switchedOK: journal.ResultSucceeded, switchedUnknown: journal.ResultUnknown,
+var results = map[Switched]journal.Result{
+	NotSwitched: journal.ResultNotApplied, SwitchedOK: journal.ResultSucceeded, SwitchedUnknown: journal.ResultUnknown,
 }
 
 // Execute switches to the held root the intent's digest names.
@@ -36,7 +36,7 @@ func (x *Executor) Execute(ctx context.Context, in journal.Intent, _ int) journa
 	if why != "" {
 		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: why}
 	}
-	s, ev := x.switchTo(ctx, digest, name)
+	s, ev := x.Switch(ctx, digest, name)
 	return journal.Outcome{Result: results[s], Evidence: ev}
 }
 
@@ -47,9 +47,9 @@ func (x *Executor) Reconcile(ctx context.Context, in journal.Intent, _ int) jour
 	if why != "" {
 		return journal.Outcome{Result: journal.ResultUnknown, Evidence: why}
 	}
-	s, ev := x.settled(digest, name)
-	if s == switchedOK {
-		ev += x.alert(ctx, name, x.latest(ctx))
+	s, ev := x.Settled(digest, name)
+	if s == SwitchedOK {
+		ev += x.Realert(ctx, name)
 	}
 	return journal.Outcome{Result: results[s], Evidence: ev}
 }

@@ -1,18 +1,24 @@
-package follow
+package follow_test
 
 // REQ: UPD-2, UPD-8, CH-10, KRN-4, KRN-8
 
 import (
+	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"go/parser"
 	"go/token"
-	"math/rand/v2"
+	mrand "math/rand/v2"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clock"
+	"github.com/ghbmrk/agentos/broker/follow"
+	"github.com/ghbmrk/agentos/broker/follow/followclerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/maintain"
@@ -24,6 +30,55 @@ func seedKey(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
 	s[0] = seed
 	p := ed25519.NewKeyFromSeed(s)
 	return p.Public().(ed25519.PublicKey), p
+}
+
+// Synthetic keys only: every update key is generated per test.
+func newKey(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	_, k, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
+// rootOf is a fresh 2-of-2 repository's first root.
+func rootOf(t *testing.T) []byte {
+	t.Helper()
+	r1, r2 := newKey(t), newKey(t)
+	pub := func(ks ...ed25519.PrivateKey) []ed25519.PublicKey {
+		var out []ed25519.PublicKey
+		for _, k := range ks {
+			out = append(out, k.Public().(ed25519.PublicKey))
+		}
+		return out
+	}
+	dir := filepath.Join(t.TempDir(), "repo")
+	repo, err := update.Init(dir, update.RootConfig{Root: pub(r1, r2), Targets: pub(r1, r2),
+		Snapshot: pub(newKey(t)), Timestamp: pub(newKey(t)), RootThreshold: 2, TargetsThreshold: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []ed25519.PrivateKey{r1, r2} {
+		if err := repo.Sign("root", k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "staged", "root.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+type guardClock struct {
+	at    time.Time
+	calls int
+}
+
+func (c *guardClock) Latest(context.Context) (time.Time, clock.Status) {
+	c.calls++
+	return c.at, clock.Status{State: clock.Agreed}
 }
 
 // countStore counts the switches that reach the update store.
@@ -42,14 +97,22 @@ func (s *countStore) FollowProject(root []byte, links [][]byte, shipped []byte, 
 	return s.Store.FollowProject(root, links, shipped, approved, o)
 }
 
-// clerkRig is the follow rig's clerk under a kernel whose log holds the
-// owner's root for change-account on the follow clerk, granted a hold
-// before the test, and the owner's enrolled phone passkey, which taps
-// approvals. The kernel's times are the rig's guard clock, so the clerk's
-// own clock (Latest) agrees with the step it was handed.
+// clerkRig is a follow clerk over a fresh update store under a kernel whose
+// log holds the owner's root for change-account on the follow clerk,
+// granted a hold before the test, and the owner's enrolled phone passkey,
+// which taps approvals. The kernel's times are the guard clock's, so the
+// clerk's own clock (Latest) agrees with the step it was handed.
 type clerkRig struct {
-	*rig
+	t       *testing.T
+	shipped []byte
+	fork    []byte
+	store   *update.Store
 	st      *countStore
+	clk     *guardClock
+	alerts  []string
+	pending string
+	x       *follow.Executor
+	c       *followclerk.Clerk
 	k       *kernel.Kernel
 	mem     *kernel.MemStore
 	anc     *kernel.MemAnchor
@@ -60,16 +123,21 @@ type clerkRig struct {
 
 func newClerkRig(t *testing.T) *clerkRig {
 	t.Helper()
-	r := &clerkRig{rig: newRig(t), mem: &kernel.MemStore{}, anc: &kernel.MemAnchor{}}
-	r.st = &countStore{Store: r.store}
-	r.x = r.with(r.st)
+	r := &clerkRig{t: t, clk: &guardClock{at: time.Now().Add(time.Hour)}, mem: &kernel.MemStore{}, anc: &kernel.MemAnchor{}}
+	r.shipped, r.fork = rootOf(t), rootOf(t)
+	st, err := update.InitStore(filepath.Join(t.TempDir(), "box"), r.shipped, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.store, r.st = st, &countStore{Store: st}
+	r.pending = filepath.Join(st.Dir, "follow-alert")
 	opub, opriv := seedKey(1)
 	bpub, bpriv := seedKey(12)
 	r.anchors = []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
-	r.x.cfg.Anchors = r.anchors
-	r.boot(r.x)
+	r.x, r.c = r.restart()
+	r.boot(r.c)
 	at := r.now() - kernel.GrantHold
-	r.root = key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: ClerkName, Verbs: []key.Verb{key.ChangeAccount}, Serial: "r1"})
+	r.root = key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: followclerk.Name, Verbs: []key.Verb{key.ChangeAccount}, Serial: "r1"})
 	batch := []key.Key{r.root}
 	if err := r.k.Issue(at, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
@@ -82,25 +150,47 @@ func newClerkRig(t *testing.T) *clerkRig {
 	return r
 }
 
+// restart is the clerk as a process restarted over the same store would
+// have it: holding nothing the page described before.
+func (r *clerkRig) restart() (*follow.Executor, *followclerk.Clerk) {
+	r.t.Helper()
+	x, err := follow.New(follow.Config{Store: r.st, Shipped: r.shipped, Clock: r.clk, Pending: r.pending,
+		Alert: func(_ context.Context, text string) error { r.alerts = append(r.alerts, text); return nil }})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return x, followclerk.New(x, r.anchors)
+}
+
 func (r *clerkRig) now() int64 { return r.clk.at.UnixMilli() }
 
 // boot (re)starts the kernel over the rig's log with c as its follow clerk.
 func (r *clerkRig) boot(c kernel.Clerk) {
 	r.t.Helper()
 	kpub, kpriv := seedKey(3)
-	l, err := kernel.Open(kernel.Config{Store: r.mem, Anchor: r.anc, Pub: kpub, Sign: kpriv, Rand: rand.NewChaCha8([32]byte{1})})
+	l, err := kernel.Open(kernel.Config{Store: r.mem, Anchor: r.anc, Pub: kpub, Sign: kpriv, Rand: mrand.NewChaCha8([32]byte{1})})
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	if r.k, err = kernel.Boot(l, r.anchors, map[string]kernel.Clerk{ClerkName: c}, r.now()); err != nil {
+	if r.k, err = kernel.Boot(l, r.anchors, map[string]kernel.Clerk{followclerk.Name: c}, r.now()); err != nil {
 		r.t.Fatal(err)
 	}
+}
+
+// describe is the page showing root to the owner.
+func (r *clerkRig) describe(root []byte) string {
+	r.t.Helper()
+	sum, err := r.x.Describe(context.Background(), root)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return sum.Digest
 }
 
 // approved is the owner's tap on the page: the phone passkey signs the plan
 // of this one switch under the bare root (CH-10 tier 4).
 func (r *clerkRig) approved(id, digest, name string) kernel.Plan {
-	return kernel.SignPlan(kernel.Plan{ID: id, Key: r.root, Steps: []kernel.PlanStep{PlanStep(digest, name)}}, r.phone)
+	return kernel.SignPlan(kernel.Plan{ID: id, Key: r.root, Steps: []kernel.PlanStep{followclerk.Step(digest, name)}}, r.phone)
 }
 
 func (r *clerkRig) submit(p kernel.Plan) {
@@ -119,9 +209,18 @@ func (r *clerkRig) run(p kernel.Plan) kernel.StepState {
 	return r.k.State().Plans[p.ID].Steps[0]
 }
 
+func (r *clerkRig) trusts(root []byte) bool {
+	r.t.Helper()
+	b, err := r.store.TrustedRoot()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return string(b) == string(root)
+}
+
 func (r *clerkRig) unchanged() {
 	r.t.Helper()
-	if !r.trusts(r.shipped) || len(r.alerts) != 0 {
+	if !r.trusts(r.shipped) || len(r.alerts) != 0 || r.st.switches != 0 {
 		r.t.Fatalf("switched or alerted: alerts %q", r.alerts)
 	}
 	if src, _ := r.store.Following(); src != (update.Followed{}) {
@@ -138,7 +237,7 @@ func TestFollowsOnlyTheShownDigest(t *testing.T) {
 	d := r.describe(shown)
 	// The page's buffer is overwritten with another root after the owner
 	// saw it: the clerk holds its own copy.
-	other := rootOf(t, newKey(t), newKey(t))
+	other := rootOf(t)
 	copy(shown, other)
 	// A root the page never showed, named by its own digest, is refused.
 	od, err := update.RootDigest(other)
@@ -170,19 +269,19 @@ func TestLookAlikeProjectNameRefused(t *testing.T) {
 		"the AgentOS project", "THE AGENTOS PROJECT", "AgentOS Project", "agentos project fork",
 		"the AgentÖS project", "the аgentOS project", // Cyrillic а
 		"the AgentOS​project", "AgentOSProject", "the Agent0S project", "the ΑgentOS Ρroject", // Greek Α, Ρ
-		"", " Acme", "Acme ", "Acme 123456", "Acme\nFork", "Acme‮Fork", strings.Repeat("a", MaxName+1),
+		"", " Acme", "Acme ", "Acme 123456", "Acme\nFork", "Acme‮Fork", strings.Repeat("a", follow.MaxName+1),
 	} {
-		if NameOK(n) {
+		if follow.NameOK(n) {
 			t.Errorf("%q admitted", n)
 		}
 	}
-	for _, n := range []string{"Acme Fork", "AgentOS Community", "My builds 2026", "Projet Agé", strings.Repeat("a", MaxName)} {
-		if !NameOK(n) {
+	for _, n := range []string{"Acme Fork", "AgentOS Community", "My builds 2026", "Projet Agé", strings.Repeat("a", follow.MaxName)} {
+		if !follow.NameOK(n) {
 			t.Errorf("%q refused", n)
 		}
 	}
 	r := newClerkRig(t)
-	if st := r.run(r.approved("p1", r.describe(r.fork), "The AgentOS Project")); st.Phase != kernel.PFailed || st.Detail != RMalformed {
+	if st := r.run(r.approved("p1", r.describe(r.fork), "The AgentOS Project")); st.Phase != kernel.PFailed || st.Detail != followclerk.RMalformed {
 		t.Fatalf("%+v", st)
 	}
 	r.unchanged()
@@ -200,6 +299,8 @@ func TestExpiredRootRefusedByGuardClock(t *testing.T) {
 	if st.Phase != kernel.PFailed || !strings.Contains(st.Detail, "expired") || r.clk.calls == calls {
 		t.Fatalf("followed a root expired by Latest: %+v", st)
 	}
+	// The store judged it at Latest and refused it.
+	r.st.switches = 0
 	r.unchanged()
 }
 
@@ -215,16 +316,16 @@ func TestFollowOnceAcrossCrash(t *testing.T) {
 	if err != nil || len(cs) != 1 || cs[0].Kind != kernel.ActDispatch {
 		t.Fatalf("calls %+v %v", cs, err)
 	}
-	if res := r.x.Do(cs[0].Req, r.k.State()); res.Outcome != "ok" || r.st.switches != 1 {
+	if res := r.c.Do(cs[0].Req, r.k.State()); res.Outcome != "ok" || r.st.switches != 1 {
 		t.Fatalf("%+v", res)
 	}
 	// Asked again while the step is still in flight, the clerk finds the
 	// switch made and does not make it again.
-	if res := r.x.Do(cs[0].Req, r.k.State()); res.Outcome != "ok" || r.st.switches != 1 {
+	if res := r.c.Do(cs[0].Req, r.k.State()); res.Outcome != "ok" || r.st.switches != 1 {
 		t.Fatalf("second ask %+v switches %d", res, r.st.switches)
 	}
 	// The kernel restarts before it logs the answer.
-	r.boot(r.x)
+	r.boot(r.c)
 	r.alerts = nil
 	// The probe is due a while after the restart.
 	r.clk.at = r.clk.at.Add(time.Duration(r.k.State().Plans[p.ID].Steps[0].NextProbe-r.now()) * time.Millisecond)
@@ -238,11 +339,11 @@ func TestFollowOnceAcrossCrash(t *testing.T) {
 		t.Fatalf("alert not re-sent once: %q", r.alerts)
 	}
 	// A request replayed to the clerk changes nothing more.
-	if res := r.x.Do(cs[0].Req, r.k.State()); res.Outcome != "failed" || r.st.switches != 1 {
+	if res := r.c.Do(cs[0].Req, r.k.State()); res.Outcome != "failed" || r.st.switches != 1 {
 		t.Fatalf("replay %+v switches %d", res, r.st.switches)
 	}
 	// A clerk restarted with nothing held reads the same from the store.
-	fresh := r.with(r.st)
+	_, fresh := r.restart()
 	if res := fresh.Probe(cs[0].Req, r.k.State()); res.Outcome != "done" || r.st.switches != 1 {
 		t.Fatalf("fresh probe %+v", res)
 	}
@@ -255,17 +356,17 @@ func TestProbeReadsTheBoxNotTheProcess(t *testing.T) {
 	r := newClerkRig(t)
 	d := r.describe(r.fork)
 	req := kernel.Request{Plan: r.approved("p1", d, "Acme Fork")}
-	if res := r.x.Probe(req, nil); res.Outcome != "notdone" || len(r.alerts) != 0 {
+	if res := r.c.Probe(req, nil); res.Outcome != "notdone" || len(r.alerts) != 0 {
 		t.Fatalf("%+v", res)
 	}
 	if st := r.run(r.approved("p2", d, "Acme Fork")); st.Phase != kernel.PDone {
 		t.Fatalf("%+v", st)
 	}
-	if res := r.x.Probe(kernel.Request{Plan: r.approved("p3", d, "Other")}, nil); res.Outcome != "unknown" {
+	if res := r.c.Probe(kernel.Request{Plan: r.approved("p3", d, "Other")}, nil); res.Outcome != "unknown" {
 		t.Fatalf("other name %+v", res)
 	}
 	sd, _ := update.RootDigest(r.shipped)
-	if res := r.x.Probe(kernel.Request{Plan: r.approved("p4", sd, "Acme Fork")}, nil); res.Outcome != "unknown" {
+	if res := r.c.Probe(kernel.Request{Plan: r.approved("p4", sd, "Acme Fork")}, nil); res.Outcome != "unknown" {
 		t.Fatalf("other root %+v", res)
 	}
 }
@@ -287,26 +388,27 @@ func TestStepWithoutOwnerApprovalRefused(t *testing.T) {
 	if err := r.k.Issue(r.now()-kernel.GrantHold, []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}, batch...); err != nil {
 		t.Fatal(err)
 	}
-	p := kernel.SignPlan(kernel.Plan{ID: "standing", Key: ck, Steps: []kernel.PlanStep{PlanStep(d, "Acme")}}, hpriv)
-	if st := r.run(p); st.Phase != kernel.PFailed || st.Detail != ROwner {
+	p := kernel.SignPlan(kernel.Plan{ID: "standing", Key: ck, Steps: []kernel.PlanStep{followclerk.Step(d, "Acme")}}, hpriv)
+	if st := r.run(p); st.Phase != kernel.PFailed || st.Detail != followclerk.ROwner {
 		t.Fatalf("standing key: %+v", st)
 	}
 	// A plan the owner did not sign never reaches the clerk's switch.
 	forged := r.approved("forged", d, "Acme")
-	forged.Steps[0].Args[ArgName] = "Other"
+	forged.Steps[0].Args[followclerk.ArgName] = "Other"
 	if err := r.k.Submit(r.now(), forged); err == nil {
 		if err := r.k.Tick(r.now()); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if res := r.x.Do(kernel.Request{Plan: forged}, r.k.State()); res.Outcome != "failed" {
+	if res := r.c.Do(kernel.Request{Plan: forged}, r.k.State()); res.Outcome != "failed" {
 		t.Fatalf("forged %+v", res)
 	}
 	r.unchanged()
 }
 
 // The journal executor is the only old-core user left in the package, until
-// f2 (#3430) deletes it with the agentosd wiring.
+// f2 (#3430) deletes it with the agentosd wiring; the clerk's checks live in
+// followclerk.
 func TestOnlyTheExecutorImportsTheOldCore(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
@@ -322,7 +424,9 @@ func TestOnlyTheExecutorImportsTheOldCore(t *testing.T) {
 		}
 		for _, im := range af.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
-			for _, old := range []string{"/broker/journal", "/broker/grants"} {
+			// broker/clerk links the network exit, which agentosd, serving
+			// Describe, must not (followclerk holds it).
+			for _, old := range []string{"/broker/journal", "/broker/grants", "/broker/clerk"} {
 				if strings.HasSuffix(p, old) {
 					t.Errorf("%s imports %s", f, p)
 				}
