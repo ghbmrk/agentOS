@@ -85,10 +85,6 @@ type Config struct {
 	// op.
 	ForgetTasks func(unlocked bool) localapi.ForgetTasks
 	Forget      func(ctx context.Context, goal string, unlocked bool) string
-	// RotateAPNet writes the network the vault process holds for a
-	// committed Wi-Fi rotation for agentos-ap (#1191, #1522); the page
-	// supplies nothing but its session. Nil refuses the op.
-	RotateAPNet func() error
 	// PlanSignIn signs a signed-out plan in again after setup (#1264);
 	// nil offers nothing.
 	PlanSignIn PlanSignIn
@@ -183,7 +179,6 @@ func (s *Server) ops() map[string]sockets.Handler {
 		localapi.OpForgetTasks: s.forgetTasks,
 		localapi.OpForget:      s.forget,
 		// A rotated Wi-Fi password needs a session (#1191).
-		localapi.OpRotateAPNet: s.rotateAPNet,
 		// Signing the plan in again needs a session, then always a code
 		// (#1264, CRED-5).
 		localapi.OpPlanSignInReady: s.planSignInReady,
@@ -589,25 +584,6 @@ func (s *Server) forget(ctx context.Context, _ sockets.Peer, args json.RawMessag
 		return nil, errFailed
 	}
 	return localapi.Text{Text: s.cfg.Forget(ctx, in.ID, st.Unlocked)}, nil
-}
-
-// rotateAPNet puts a committed card rotation's Wi-Fi network on the air
-// (REC-4, #1191). The page sends only its session: the hook takes the
-// network once from the vault process (#1522), so a session alone, with
-// no Wi-Fi commit behind it, changes nothing.
-func (s *Server) rotateAPNet(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-	var in localapi.Auth
-	err := decode(args, &in)
-	if _, ok := s.live(in.Token); !ok {
-		return nil, errUnauthorized
-	}
-	if err != nil {
-		return nil, errBadArgs
-	}
-	if s.cfg.RotateAPNet == nil || s.cfg.RotateAPNet() != nil {
-		return nil, errFailed
-	}
-	return struct{}{}, nil
 }
 
 func lowerHex(v string, n int) bool {

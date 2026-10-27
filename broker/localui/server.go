@@ -380,14 +380,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// No HTTPS: the plain listener serves the page name as it is.
 	} else if r.Host != s.host {
-		// Any other host name is a phone's captive-portal check, or a page
-		// trying to reach the box through DNS rebinding: send it to the
-		// box's own address, and never act on it (ONB-5).
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		http.Redirect(w, r, "http://"+s.host+"/", http.StatusFound)
+		// Any other host name is a page trying to reach the box through
+		// DNS rebinding, or a captive-portal check: the core runs no
+		// captive portal (ONB-5, D-178), so it is never redirected, and
+		// never acted on.
+		http.Error(w, "Misdirected request", http.StatusMisdirectedRequest)
 		return
 	}
 	if r.Method == http.MethodPost && !s.sameOrigin(r) {

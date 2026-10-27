@@ -11,10 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/bridgeproto"
 	"github.com/ghbmrk/agentos/broker/daemon"
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/modelroute"
@@ -57,9 +55,6 @@ type setupMode struct {
 	// net/http), so the step is built with the page and handed in here; a
 	// nil Card fails closed.
 	Card func() (cardHold, error)
-	// APNet is where the page's report of the card's network is written
-	// (OpSetupAPNet, #1185) for agentos-ap; empty, the op is not served.
-	APNet string
 	// SignIn starts a plan route's device-code sign-in at setup (c4e2b,
 	// ONB-3); nil offers no plan sign-in.
 	SignIn localsrv.SignIn
@@ -98,26 +93,6 @@ func (c *pageCard) report() {
 	c.mu.Lock()
 	c.confirmed = true
 	c.mu.Unlock()
-}
-
-// apNetOp is OpSetupAPNet: it writes the card's network to path, 0600,
-// replacing any earlier report, and logs nothing of it (ARC-1). Only a
-// network the card prints is taken.
-func apNetOp(path string) sockets.Handler {
-	return func(_ context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
-		var r localapi.SetupAPNet
-		if json.Unmarshal(args, &r) != nil {
-			return nil, sockets.Code(localapi.ErrBadArgs)
-		}
-		b, err := apnet.Network{SSID: r.SSID, Password: r.Password}.Marshal()
-		if err != nil {
-			return nil, sockets.Code(localapi.ErrBadArgs)
-		}
-		if durable.WriteFile(path, b, 0o600) != nil {
-			return nil, sockets.Code(localapi.ErrFailed)
-		}
-		return nil, nil
-	}
 }
 
 // errOwnedWithoutRecord: the owner channel has state but setup's record is
@@ -170,11 +145,6 @@ func (m setupMode) run(ctx context.Context) (string, error) {
 			return nil, sockets.Code(errCardPending)
 		}
 		return finish(ctx, p, args)
-	}
-	if page {
-		if m.APNet != "" {
-			ops[localapi.OpSetupAPNet] = apNetOp(m.APNet)
-		}
 	}
 	sctx, stop := context.WithCancel(ctx)
 	defer stop()

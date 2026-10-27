@@ -265,7 +265,10 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	}
 	// An unfinished rotation's parts are owed: the next rotation replaces
 	// them all, so a lost card's grid and setup secret cannot be left
-	// valid by a narrower one (L3 F3 on #64).
+	// valid by a narrower one (L3 F3 on #64). The Wi-Fi password is not
+	// owed: the core runs no access point (CH-9, D-178), and the page
+	// offers no Wi-Fi part, so owing it would refuse every rotation on a
+	// box whose mark is unreadable or names it (WIFI-del-a2).
 	lostMark := false
 	if m, ok, err := readMark(b); ok && (err != nil || m.Lost) {
 		lostMark = true
@@ -273,7 +276,7 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	if owed, ok := RotationUnfinished(b); ok {
 		var missing []string
 		for _, q := range owed {
-			if q != PartRefresh && !set[q] {
+			if q != PartRefresh && q != PartWiFi && !set[q] {
 				missing = append(missing, string(q))
 			}
 		}
@@ -533,6 +536,12 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 	}
 	for q := range p.parts {
 		finished = append(finished, q)
+	}
+	// Any finished rotation settles an owed Wi-Fi part, which nothing
+	// asks for any more (CH-9, D-178), so the mark clears and Backup
+	// resumes.
+	if !p.parts[PartWiFi] {
+		finished = append(finished, PartWiFi)
 	}
 	if err := clearRotation(b, finished); err != nil {
 		return fail(err)

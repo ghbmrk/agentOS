@@ -270,10 +270,6 @@ type rig struct {
 	owned OwnerCard
 	// rot, when set, is the server's card rotation.
 	rot RotationCard
-	// handOffs counts the rotated Wi-Fi hand-offs agentosd took, under
-	// mu; wifiErr fails them (#1191).
-	handOffs int
-	wifiErr  error
 }
 
 func newRig(t *testing.T) *rig {
@@ -759,7 +755,7 @@ func TestListenerIsBoundToTheInterface(t *testing.T) {
 }
 
 // Captive-portal checks and DNS-rebinding requests (any other host name)
-// are redirected to the box and never act; cross-site posts are refused.
+// are refused and never act (ONB-5, D-178); cross-site posts are refused.
 func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 	r := newRig(t)
 	for _, u := range []string{"http://captive.apple.com/hotspot-detect.html", "http://connectivitycheck.gstatic.com/generate_204", "http://evil.example/status"} {
@@ -767,7 +763,7 @@ func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 		req.RemoteAddr = phoneIP
 		w := httptest.NewRecorder()
 		r.srv.ServeHTTP(w, req)
-		if w.Code != http.StatusFound || w.Header().Get("Location") != "http://10.42.0.1/" {
+		if w.Code != http.StatusMisdirectedRequest || w.Header().Get("Location") != "" {
 			t.Fatalf("%s: %d %s", u, w.Code, w.Header().Get("Location"))
 		}
 	}
@@ -775,7 +771,7 @@ func TestForeignHostsAndCrossSitePosts(t *testing.T) {
 	req.RemoteAddr = phoneIP
 	w := httptest.NewRecorder()
 	r.srv.ServeHTTP(w, req)
-	if w.Code != http.StatusForbidden {
+	if w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("foreign-host POST: %d", w.Code)
 	}
 	r.runSetup()

@@ -213,10 +213,6 @@ type PageSocket struct {
 	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
 	// refuses both ops.
 	Forget PageForget
-	// RotateAPNet writes a rotated card's Wi-Fi network for agentos-ap
-	// (REC-4, #1191), taking it from the vault process's hold of the
-	// latest Wi-Fi commit (#1522); nil refuses the op.
-	RotateAPNet func() error
 	// PlanSignIn signs a signed-out plan in again from the page (#1264).
 	PlanSignIn localsrv.PlanSignIn
 	// Accounts are the account clerks' sign-ins the Connect page reaches,
@@ -488,7 +484,6 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 			Paused: func() []localapi.PausedGrant { return pausedGrants(gate) }, AskResume: func(ctx context.Context, id, pause string) (string, error) {
 				return askResume(ctx, gate, id, pause)
 			}}
-		lcfg.RotateAPNet = cfg.PageSocket.RotateAPNet
 		lcfg.PlanSignIn = cfg.PageSocket.PlanSignIn
 		lcfg.Accounts = cfg.PageSocket.Accounts
 		lcfg.Passkeys = cfg.PageSocket.Passkeys

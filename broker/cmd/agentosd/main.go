@@ -241,7 +241,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
-	var keptPath, setupRecord, apNetPath, ownedPath string
+	var keptPath, setupRecord, ownedPath string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -297,7 +297,6 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
-	flag.StringVar(&apNetPath, "ap-net", apnet.Path, "the card's Wi-Fi network (#1185): setup writes the page's report of it here, root-only, for agentos-ap to serve at the confirm; empty, it is not taken")
 	flag.StringVar(&ownedPath, "owned", apnet.Owned, "the owned marker (#2626): made once the owner's number is known, for agentos-ap, which cannot see the owner state; empty, it is not made")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
@@ -376,7 +375,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("-localui-uid %d: group %q: %v", localUIUID, u.Gid, err)
 		}
-		cfg.PageSocket = pageSocket(localUIUID, gid, apNetPath, verifySocket)
+		cfg.PageSocket = &daemon.PageSocket{UID: localUIUID, GID: &gid}
 		if cfg.PageSocket.Accounts, err = pageAccounts(mailOwner, mailUID, localUIUID, cfg.ModemUID); err != nil {
 			log.Fatal(err)
 		}
@@ -425,7 +424,7 @@ func main() {
 	if cfg.OwnerNumber == "" {
 		m := setupMode{Dir: cfg.SocketDir, Page: cfg.PageSocket, Record: localsrv.FileRecord{Path: setupRecord},
 			OwnerState: cfg.OwnerState, Progress: progressOf(routeOnline),
-			Card: pageCardStep, APNet: apNetPath}
+			Card: pageCardStep}
 		if modemBridge {
 			// The box texts its setup and pairing texts on its own line
 			// (P2-2w c4c), and records the SIM it finds as that line's.
@@ -762,12 +761,6 @@ func main() {
 	}
 	if line != nil {
 		go line.run(ctx)
-	}
-	// The owner hears once when the access point keeps failing on the
-	// card's network (#1525).
-	if apNetPath != "" {
-		go watchAPUp(ctx, apNetPath, informOwner(d.Owner))
-		go watchCommittedWiFi(ctx, apNetPath, verifySocket) // #1696
 	}
 	// What is off, in the box log too (OP-9).
 	logCapLines(capLines)
