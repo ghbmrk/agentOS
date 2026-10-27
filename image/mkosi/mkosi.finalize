@@ -22,12 +22,15 @@ reach into a directory anyone on the box can write (#1543). Every udev rules fil
 modules-load.d file must be on exec.allow by its hash (#1556). And nothing writable may execute
 (UPD-10): every agentos service sets NoExecPaths=/ with ExecPaths= on /usr alone, and every fstab line
 and mount unit is noexec. The keeper (STO-2c, D-154): only its units reach the TPM or its state, and
-its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897).
+its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897). A device driver
+(DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
+DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import stat
@@ -289,7 +292,8 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root))
+            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root)
+            + driver_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1192,6 +1196,8 @@ def namespace_mount_violations(name, files):
                 parts = w.lstrip("-+").split(":")
                 target = parts[1] if key in ("BindPaths", "BindReadOnlyPaths", "MountImages") and len(parts) > 1 else parts[0]
                 norm = "/" + "/".join(x for x in target.split("/") if x not in ("", "."))
+                if key == "BindReadOnlyPaths" and self_bind(files, w):
+                    continue
                 if ".." in norm.split("/") or any(norm == u or norm.startswith(u + "/") for u in (EXEC_ONLY,) + USR_ALIASES):
                     out.append("%s: %s=%s mounts under %s, which executes (UPD-10)" % (name, key, w, EXEC_ONLY))
                 if key == "TemporaryFileSystem":
@@ -1203,6 +1209,21 @@ def namespace_mount_violations(name, files):
         out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
     return out
 
+
+def self_bind(files, word):
+    """DEVSLOT-image: whether BindReadOnlyPaths= WORD binds a regular file under /usr onto itself, every
+    step to it a directory and the file not a link, so the mount shows the verity file where it already
+    is and adds nothing that executes (a driver's binary inside its TemporaryFileSystem=/:ro)."""
+    if word[:1] in "-+" or ":" in word or not word.startswith(EXEC_ONLY + "/") or not files:
+        return False
+    rel = word.lstrip("/")
+    if rel != "/".join(x for x in rel.split("/") if x not in ("", ".", "..")):
+        return False
+    try:
+        st = tree_lstat(files[0].root, rel)
+    except OSError:
+        return False
+    return st is not None and stat.S_ISREG(st.st_mode)
 
 def noexec_violations(root):
     """UPD-10: each agentos service the tree ships but NOEXEC_EXEMPT, with every drop-in systemd
@@ -2622,6 +2643,213 @@ def resolved_violations(root):
     return [m for f in conf for m in byte_violations(f)] + [
         "50-agentos-uplink.conf: resolved %s is %s; must be no" % (key, v)
         for key in ("LLMNR", "MulticastDNS") for v in [ini_last(conf, "Resolve", key)] if v != "no"]
+
+
+# DEVSLOT-image (DEV-1, KRN-2, RES-2, D-189): a device driver is one vendor's protocol code built in a
+# private repository. It ships only under /usr (verity), listed in drivers.json with its hash, and it
+# runs only under units rendered from DRIVER_TEMPLATE for its name: one socket-activated, sandboxed
+# process per operation (briefs/DEVSLOT-drivers.md, part b, point 1). The public build lists none.
+DRIVERS_JSON = "usr/lib/agentos/drivers.json"
+DRIVERS_DIR = "usr/lib/agentos/drivers"
+# The driver's name: devslot's name alphabet, short enough that agentos-drv-NAME is a valid user name
+# (systemd's limit is 31 bytes).
+DRIVER_NAME = re.compile(r"[a-z][a-z0-9-]{0,18}\Z")
+DRIVER_KEYS = ("name", "repository", "commit", "sha256", "declaration", "classes", "measure")
+DRIVER_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\Z")
+HEX40, HEX64 = re.compile(r"[0-9a-f]{40}\Z"), re.compile(r"[0-9a-f]{64}\Z")
+# tools/trusted_base.py's measure of the driver's tree at its pinned commit (KRN-2, part b point 5).
+DRIVER_MEASURE = ("lines", "deps", "parsers")
+# What only the template may name: the drivers' users and their sockets.
+DRIVER_MARKS = (b"agentos-drv-", b"/run/agentos-drivers")
+# The one public template, rendered for each listed driver by image/finish_image.py and re-rendered
+# here to compare. The caps are within RES-2: MemoryMax times MaxConnections is the driver's whole
+# memory, so systemd's default of 64 connections is never relied on; RuntimeMaxSec is the backstop
+# for the host's operation deadline, so PID 1 kills a hung operation.
+DRIVER_TEMPLATE = (
+    ("usr/lib/systemd/system/agentos-driver-{name}.socket", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+[Unit]
+Description=agentOS device driver {name}: one connection per operation
+
+[Socket]
+ListenStream=/run/agentos-drivers/{name}.sock
+Accept=yes
+SocketUser=agentos-devices
+SocketGroup=agentos-devices
+SocketMode=0600
+DirectoryMode=0711
+MaxConnections=2
+"""),
+    ("usr/lib/systemd/system/agentos-driver-{name}@.service", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+# systemd seals the process before exec, so no driver code (a package init included) runs outside it.
+# The operation's connection is descriptor 3.
+[Unit]
+Description=agentOS device driver {name}: one operation
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/lib/agentos/drivers/{name}/driver
+User=agentos-drv-{name}
+Group=agentos-drv-{name}
+StandardInput=null
+StandardOutput=null
+StandardError=null
+RestrictAddressFamilies=none
+PrivateNetwork=yes
+IPAddressDeny=any
+TemporaryFileSystem=/:ro
+BindReadOnlyPaths=/usr/lib/agentos/drivers/{name}/driver
+ProcSubset=pid
+ProtectProc=invisible
+PrivateDevices=yes
+NoExecPaths=/
+ExecPaths=/usr/lib/agentos/drivers/{name}/driver
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged @resources
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+LimitCORE=0
+MemoryMax=48M
+TasksMax=16
+CPUQuota=25%
+RuntimeMaxSec=120
+"""),
+    ("usr/lib/sysusers.d/agentos-driver-{name}.conf", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+u agentos-drv-{name} - "agentOS device driver {name}" - -
+"""),
+)
+
+
+def driver_units(name):
+    """{path in the tree: content} of DRIVER_TEMPLATE rendered for driver NAME."""
+    return {rel.replace("{name}", name): text.replace("{name}", name) for rel, text in DRIVER_TEMPLATE}
+
+
+def driver_entry_refusal(e):
+    """Why drivers.json entry E is malformed, or None: exactly DRIVER_KEYS; a name on DRIVER_NAME; the
+    private repository as owner/name; a full commit; the binary's SHA-256; the canonical declaration;
+    the class row, one DEV-4 class per declared operation and no other (part b point 4); and the
+    measure's three counts. The declaration's meaning is devslot.Check's, run at build."""
+    if not isinstance(e, dict) or sorted(e) != sorted(DRIVER_KEYS):
+        return "an entry has exactly the keys %s" % ", ".join(DRIVER_KEYS)
+    if not isinstance(e["name"], str) or not DRIVER_NAME.match(e["name"]):
+        return "driver name %r is off the alphabet %s" % (e["name"], DRIVER_NAME.pattern)
+    n = e["name"]
+    for k, pat in (("repository", DRIVER_REPO), ("commit", HEX40), ("sha256", HEX64)):
+        if not isinstance(e[k], str) or not pat.match(e[k]):
+            return "driver %s: %s %r is not %s" % (n, k, e[k], pat.pattern)
+    d = e["declaration"]
+    ops = d.get("Operations") if isinstance(d, dict) else None
+    if not isinstance(ops, list) or not all(isinstance(o, dict) and isinstance(o.get("Name"), str) for o in ops):
+        return "driver %s: the declaration lists no operations" % n
+    c = e["classes"]
+    if (not isinstance(c, dict) or sorted(c) != sorted(o["Name"] for o in ops)
+            or not all(isinstance(v, str) and v for v in c.values())):
+        return "driver %s: the class row names one class for each declared operation and no other" % n
+    m = e["measure"]
+    if (not isinstance(m, dict) or sorted(m) != sorted(DRIVER_MEASURE)
+            or not all(type(v) is int and v >= 0 for v in m.values())):
+        return "driver %s: the measure is the counts %s" % (n, ", ".join(DRIVER_MEASURE))
+    return None
+
+
+def driver_entries(root):
+    """(drivers.json's entries, refusals). No drivers.json is no drivers."""
+    try:
+        if tree_lstat(root, DRIVERS_JSON) is None:
+            return [], []
+        doc = json.loads(Conf(root, DRIVERS_JSON).content())
+    except (OSError, ValueError) as e:
+        return [], ["%s: unreadable (%s); the tree check never passes what it cannot read (DEVSLOT-image)"
+                    % (DRIVERS_JSON, getattr(e, "strerror", None) or e)]
+    if not isinstance(doc, dict) or sorted(doc) != ["drivers"] or not isinstance(doc["drivers"], list):
+        return [], ['%s: must be {"drivers": [...]} (DEVSLOT-image)' % DRIVERS_JSON]
+    entries, out, seen = [], [], set()
+    for e in doc["drivers"]:
+        bad = driver_entry_refusal(e)
+        if bad is None and e["name"] in seen:
+            bad = "driver %s is listed twice" % e["name"]
+        if bad:
+            out.append("%s: %s (DEVSLOT-image)" % (DRIVERS_JSON, bad))
+            continue
+        seen.add(e["name"])
+        entries.append(e)
+    return entries, out
+
+
+def driver_violations(root):
+    """DEVSLOT-image: every file under DRIVERS_DIR is a listed driver's binary with its listed hash
+    (mode 0755), every listed driver's binary and units are there, each unit is the template rendered
+    for its name, and no other file in a unit or sysusers.d directory names a driver unit, a driver's
+    user or the drivers' sockets."""
+    root = str(root)
+    entries, out = driver_entries(root)
+    bins = {"%s/%s/driver" % (DRIVERS_DIR, e["name"]): e["sha256"] for e in entries}
+    dirs = {DRIVERS_DIR} | {"%s/%s" % (DRIVERS_DIR, e["name"]) for e in entries}
+    rendered = {}
+    for e in entries:
+        rendered.update(driver_units(e["name"]))
+    try:
+        top = tree_lstat(root, DRIVERS_DIR)
+    except OSError as e:
+        top = None
+        out.append("%s: unreadable (%s) (DEVSLOT-image)" % (DRIVERS_DIR, e.strerror))
+    found = set()
+    if top is not None and not stat.S_ISDIR(top.st_mode):
+        out.append("%s: not a directory (DEVSLOT-image)" % DRIVERS_DIR)
+    elif top is not None:
+        for rel, st in tree_walk(root, DRIVERS_DIR):
+            if rel in dirs and stat.S_ISDIR(st.st_mode):
+                continue
+            if rel not in bins or not stat.S_ISREG(st.st_mode):
+                out.append("%s: not a driver drivers.json lists with its hash (DEVSLOT-image)" % rel)
+                continue
+            found.add(rel)
+            try:
+                got = hashlib.sha256(Conf(root, rel).content()).hexdigest()
+            except OSError as e:
+                out.append("%s: unreadable (%s) (DEVSLOT-image)" % (rel, e.strerror))
+                continue
+            if got != bins[rel]:
+                out.append("%s: sha256 %s, but drivers.json lists %s (DEVSLOT-image)" % (rel, got, bins[rel]))
+            if stat.S_IMODE(st.st_mode) != 0o755:
+                out.append("%s: mode %04o; a driver is 0755 (DEVSLOT-image)" % (rel, stat.S_IMODE(st.st_mode)))
+    out += ["%s: listed in drivers.json but not in the image (DEVSLOT-image)" % rel for rel in sorted(set(bins) - found)]
+    for rel, text in sorted(rendered.items()):
+        try:
+            got = Conf(root, rel).content() if tree_lstat(root, rel) is not None else None
+        except OSError as e:
+            out.append("%s: unreadable (%s) (DEVSLOT-image)" % (rel, e.strerror))
+            continue
+        if got != text.encode():
+            out.append("%s: %s the template rendered for its name (DEVSLOT-image)"
+                       % (rel, "missing; must be" if got is None else "differs from"))
+    for d in UNIT_PATHS + conf_paths("sysusers.d"):
+        try:
+            if tree_lstat(root, d) is None:
+                continue
+        except OSError:
+            continue
+        for rel, st in tree_walk(root, d):
+            if rel in rendered or stat.S_ISDIR(st.st_mode):
+                continue
+            if rel.rsplit("/", 1)[-1].startswith("agentos-driver-") or "/agentos-driver-" in rel[len(d):]:
+                out.append("%s: a driver unit, drop-in or user file outside the template (DEVSLOT-image)" % rel)
+                continue
+            try:
+                path, tst = tree_chase(root, rel)
+                data = Conf(root, path).content() if tst is not None and stat.S_ISREG(tst.st_mode) else b""
+            except OSError:
+                continue
+            if any(m in data for m in DRIVER_MARKS):
+                out.append("%s: names a driver's user or the drivers' sockets outside the template (DEVSLOT-image)" % rel)
+    return out
 
 
 def has_key(root, rel):

@@ -7,14 +7,19 @@ falls back once they run out, and systemd-bless-boot drops the counter after age
 passes (boot-complete.target). The entry's usrhash= names the /usr verity root hash, so the
 entry and the /usr partitions are one release: the build verifies the split /usr partition and
 its hash tree against that hash with veritysetup, and the manifest records both.
-Uses mtools on the raw image, so no loop devices or mounts are needed.
-Usage: finish_image.py OUTDIR VERSION"""
+Uses mtools on the raw image, so no loop devices or mounts are needed. Before mkosi runs, it also
+stages the build's device drivers into the image tree (DEVSLOT-image), and the manifest carries
+their list.
+Usage: finish_image.py OUTDIR VERSION [DRIVERS_JSON]; finish_image.py --stage-drivers DRIVERS STAGE CHECKER"""
 import errno
 import hashlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 import pathlib
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -424,9 +429,9 @@ def check_initrd(path, data):
         sys.exit("initrd %s could bring up Bluetooth (#1475): %s" % (path, bad))
 
 
-def manifest(version, roothash, entry_name, entry_text, files, boot=None):
-    """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, and the
-    sha256 of the kernel and initrd that entry boots."""
+def manifest(version, roothash, entry_name, entry_text, files, boot=None, drivers=None):
+    """The release (UPD-1a): /usr verity root hash plus the boot entry that mounts it, the
+    sha256 of the kernel and initrd that entry boots, and drivers.json's list (DEVSLOT-image)."""
     if usrhash(entry_text) != roothash:
         raise ValueError("entry usrhash %s != /usr root hash %s" % (usrhash(entry_text), roothash))
     return {
@@ -436,6 +441,7 @@ def manifest(version, roothash, entry_name, entry_text, files, boot=None):
                        "sha256": hashlib.sha256(entry_text.encode()).hexdigest()},
         "boot": boot or {},
         "files": files,
+        "drivers": drivers or [],
     }
 
 
@@ -464,8 +470,9 @@ def sha256(path):
     return h.hexdigest()
 
 
-def main(out, version):
+def main(out, version, drivers_json=None):
     out = pathlib.Path(out)
+    drivers = json.loads(pathlib.Path(drivers_json).read_text())["drivers"] if drivers_json else []
     img = out / ("agentos_%s.raw" % version)
     fs = "%s@@%d" % (img, esp_offset(str(img)))
     names = subprocess.check_output(["mdir", "-i", fs, "-b", "::/loader/entries"], text=True).split()
@@ -514,10 +521,115 @@ def main(out, version):
                  "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
-    m = manifest(version, roothash, name, text, files, boot)
+    m = manifest(version, roothash, name, text, files, boot, drivers)
     (out / ("agentos_%s.release.json" % version)).write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
     print(json.dumps(m, indent=2, sort_keys=True))
 
 
+# DEVSLOT-image (DEV-1, KRN-2, D-189): what each <name>/ in the build's drivers directory holds,
+# and its entry.json's keys. The units and drivers.json's entry rules are mkosi.finalize's, which
+# checks the tree the build makes from them.
+DRIVER_FILES = ("driver", "entry.json")
+DRIVER_ENTRY_KEYS = ("repository", "commit", "declaration", "classes", "measure")
+ET_EXEC, EM_X86_64, PT_DYNAMIC, PT_INTERP = 2, 62, 2, 3
+
+
+def finalize_module():
+    """mkosi.finalize as a module: the driver template and drivers.json's entry rules."""
+    path = pathlib.Path(__file__).resolve().parent / "mkosi" / "mkosi.finalize"
+    loader = importlib.machinery.SourceFileLoader("image_check", str(path))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("image_check", loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def static_refusal(data):
+    """Why DATA is not a static x86-64 executable, or None (part b point 1, Security 6433764278
+    point 2): a dynamically linked binary has the system's loader and libraries run its code at exec,
+    outside anything this repository reviews. A fixed-address executable (ET_EXEC) with no PT_INTERP
+    and no PT_DYNAMIC program header is what CGO_ENABLED=0 go build makes."""
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return "not a 64-bit little-endian ELF file"
+    e_type, e_machine = struct.unpack_from("<HH", data, 16)
+    if e_machine != EM_X86_64:
+        return "not an x86-64 executable"
+    if e_type != ET_EXEC:
+        return "not a fixed-address executable (ELF type %d); only a static binary ships" % e_type
+    phoff, = struct.unpack_from("<Q", data, 32)
+    phentsize, phnum = struct.unpack_from("<HH", data, 54)
+    if phentsize != 56 or not phnum or phoff + 56 * phnum > len(data):
+        return "malformed program headers"
+    for i in range(phnum):
+        p_type, = struct.unpack_from("<I", data, phoff + 56 * i)
+        if p_type in (PT_DYNAMIC, PT_INTERP):
+            return "dynamically linked (%s); only a static binary ships" % ("PT_INTERP" if p_type == PT_INTERP else "PT_DYNAMIC")
+    return None
+
+
+def driver_entry(src, name, checker, check):
+    """drivers.json's entry for driver directory SRC/NAME; ValueError for anything the build refuses."""
+    d = pathlib.Path(src) / name
+    if not check.DRIVER_NAME.match(name):
+        raise ValueError("driver name %r is off the alphabet %s" % (name, check.DRIVER_NAME.pattern))
+    if d.is_symlink() or not d.is_dir():
+        raise ValueError("driver %s: not a directory" % name)
+    if sorted(os.listdir(d)) != sorted(DRIVER_FILES):
+        raise ValueError("driver %s: holds %s; must hold exactly %s" % (name, sorted(os.listdir(d)), ", ".join(DRIVER_FILES)))
+    for f in DRIVER_FILES:
+        if not stat.S_ISREG(os.lstat(d / f).st_mode):
+            raise ValueError("driver %s: %s is not a regular file" % (name, f))
+    try:
+        e = json.loads((d / "entry.json").read_text())
+    except ValueError as err:
+        raise ValueError("driver %s: entry.json: %s" % (name, err))
+    if not isinstance(e, dict) or sorted(e) != sorted(DRIVER_ENTRY_KEYS):
+        raise ValueError("driver %s: entry.json has exactly the keys %s" % (name, ", ".join(DRIVER_ENTRY_KEYS)))
+    data = (d / "driver").read_bytes()
+    bad = static_refusal(data)
+    if bad:
+        raise ValueError("driver %s: %s" % (name, bad))
+    r = subprocess.run(checker, input=json.dumps({"declaration": e["declaration"], "classes": e["classes"]}).encode(),
+                       capture_output=True)
+    if r.returncode != 0:
+        raise ValueError("driver %s: %s" % (name, r.stderr.decode(errors="replace").strip()))
+    entry = {"name": name, "repository": e["repository"], "commit": e["commit"],
+             "sha256": hashlib.sha256(data).hexdigest(), "declaration": json.loads(r.stdout),
+             "classes": e["classes"], "measure": e["measure"]}
+    bad = check.driver_entry_refusal(entry)
+    if bad:
+        raise ValueError(bad)
+    return entry, data
+
+
+def stage_drivers(src, stage, checker):
+    """Stage the drivers in directory SRC (none if SRC is empty) into the image tree STAGE: each binary
+    under usr/lib/agentos/drivers/<name>/, its units and user from mkosi.finalize's template, and
+    drivers.json. CHECKER is the drivercheck command (devslot.Check). Returns drivers.json's list;
+    ValueError for anything the build refuses."""
+    check = finalize_module()
+    stage = pathlib.Path(stage)
+    entries = []
+    for name in sorted(os.listdir(src)) if src else []:
+        entry, data = driver_entry(src, name, checker, check)
+        entries.append(entry)
+        b = stage / check.DRIVERS_DIR / name / "driver"
+        b.parent.mkdir(parents=True, exist_ok=True)
+        b.write_bytes(data)
+        b.chmod(0o755)
+        for rel, text in check.driver_units(name).items():
+            (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+            (stage / rel).write_text(text)
+    j = stage / check.DRIVERS_JSON
+    j.parent.mkdir(parents=True, exist_ok=True)
+    j.write_text(json.dumps({"drivers": entries}, indent=2, sort_keys=True) + "\n")
+    return entries
+
+
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    if sys.argv[1:2] == ["--stage-drivers"] and len(sys.argv) == 5:
+        try:
+            stage_drivers(sys.argv[2], sys.argv[3], [sys.argv[4]])
+        except (ValueError, OSError) as e:
+            sys.exit("drivers refused (DEVSLOT-image): %s" % e)
+    else:
+        main(*sys.argv[1:4])

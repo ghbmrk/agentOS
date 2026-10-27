@@ -5,9 +5,12 @@
 # Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, mtools, erofs-utils, dosfstools, cryptsetup-bin,
 # debian-archive-keyring.
 #
-# Usage: build.sh [OUT [VERSION]]
+# Usage: build.sh [OUT [VERSION [DRIVERS]]]
 # Output in OUT: agentos_VERSION.raw (the whole drive), the release (agentos_VERSION.usr.raw,
 # .usr-verity.raw, the boot entry, .release.json), the package manifest, and SHA256SUMS.
+# DRIVERS (DEVSLOT-image, D-189), optional: a directory of device drivers built in a private
+# repository, each <name>/ holding a static `driver` binary and its entry.json (repository, commit,
+# declaration, class row, measure). The public release build passes none and ships none.
 #
 # Reproducibility: every input is pinned (Debian snapshot, gVisor and Node by hash, OpenClaw by
 # lockfile, Go with -trimpath), file times are clamped to the commit time, and partition and
@@ -15,7 +18,7 @@
 # root hash. VERSION defaults to the commit time, so releases sort in commit order.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
-OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}
+OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH
 VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}
 GVISOR=release-20260928.0
@@ -71,10 +74,17 @@ install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/u
 for r in 59-agentos-host-disks 64-agentos-host-disks-assembly 72-agentos-host-disks-late; do
 	install -D -m 0644 "$REPO/broker/hostdisk/udev/$r.rules" "$STAGE/usr/lib/udev/rules.d/$r.rules"
 done
+# Device drivers (DEVSLOT-image): each declaration passes devslot.Check (image/drivercheck, built
+# for this step and never shipped), each binary is static, and each gets the units and user that
+# mkosi.finalize's template renders for its name; drivers.json lists them, and mkosi.finalize
+# refuses a tree that differs from it.
+(cd "$HERE/drivercheck" && CGO_ENABLED=0 go build -trimpath -o "$OUT/drivercheck" .)
+python3 "$HERE/finish_image.py" --stage-drivers "$DRIVERS" "$STAGE" "$OUT/drivercheck"
+rm -f "$OUT/drivercheck"
 chmod -R u+w,go-w "$STAGE"
 
 $MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build
-python3 "$HERE/finish_image.py" "$OUT" "$VERSION"
+python3 "$HERE/finish_image.py" "$OUT" "$VERSION" "$STAGE/usr/lib/agentos/drivers.json"
 rm -rf "$STAGE"
 # The initrds the release's entry boots, copied out of the ESP to OUT/initrd/ under their ESP paths:
 # image.yml's reproduce job compares two runners' copies member by member (IMG-2).
