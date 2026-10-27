@@ -12,7 +12,7 @@
 # old entry). With the image tree at hand:
 #   python3 image/mkosi/mkosi.finalize --exec-allowlist ROOT > image/mkosi/exec.allow
 etc/modules-load.d/modules.conf	sha256:c0d37c5c430cb5c978a4ea00e42ddc4551b04f76352d149d6be5d5b65346df65
-usr/lib/modprobe.d/agentos-no-bluetooth.conf	sha256:8e276ae184649030b6c135c7634444d955b4c10818050973d8e24cbfa67b3413
+usr/lib/modprobe.d/agentos-no-bluetooth.conf	sha256:31cfea974ef954d2f75240cd117f0003f5c7b74bb5df2d520020d3c613a0b69c
 usr/lib/modprobe.d/aliases.conf	sha256:0ffc97a5b69113438c1b7e162ef6871e197e24973f359bfbeef448b089bd67e5
 usr/lib/modprobe.d/fbdev-blacklist.conf	sha256:e99b6166cf309aa1cbbd296d9fbf93af567148c7316c8d5d7a057cf3e85113ea
 usr/lib/modprobe.d/systemd.conf	sha256:e5a3958cbd3684b63f3cada6604469cc56f727b106d5524daf5aefa6935a48ce
@@ -77,7 +77,6 @@ usr/lib/udev/rules.d/85-nm-unmanaged.rules	sha256:afce2a870bf2cefb2b52214ed959d0
 usr/lib/udev/rules.d/90-iocost.rules	sha256:39b1d6239c29d1a42fd4d8563ce55916958590021b947c534a630c80b7952815
 usr/lib/udev/rules.d/95-dm-notify.rules	sha256:d24e725fc78306ff2355eb91e4eebcc7dc9388d54dc27d20d6fe6f695054d536
 usr/lib/udev/rules.d/99-systemd.rules	sha256:d63ba2ea309aadf7794a5f84b0f394c2e48fe630640aa37e9963cd9d1b769d89
-usr/share/polkit-1/rules.d/50-agentos-netjoin.rules	sha256:c1f261462ba79c98d5d4ed24da7348f7153c70a3f68a24eeca89a5fe5aa24906
 usr/share/polkit-1/rules.d/50-default.rules	sha256:29f073ed9a8a6996b62f718e2bec962d5c84d311d23bb874830b4f9887eeabbf
 usr/share/polkit-1/rules.d/org.freedesktop.NetworkManager.rules	sha256:c9c419a58f716c4de1f469a362dbb00745c0d35ae3077857b03168bdd9b06ee0
 usr/share/polkit-1/rules.d/systemd-networkd.rules	sha256:f199e386a9297858331b00df07ed0b0ee5fcf4bea67f6c0bccc8a92b7e310bbd
@@ -93,8 +92,6 @@ usr/share/polkit-1/actions/org.freedesktop.resolve1.policy	sha256:4fb86aa726ab11
 usr/share/polkit-1/actions/org.freedesktop.systemd1.policy	sha256:05b867df07111f0693828fce4db65e6d14d653244952f7a598f4a4b600164d3b
 usr/share/polkit-1/actions/org.freedesktop.timedate1.policy	sha256:e369f5176cd8a272df31b6eab5b24702c6491d20d5e02bb0a2144b8f5e69d3dd
 usr/share/polkit-1/actions/org.freedesktop.timesync1.policy	sha256:d545cfcf0ae8fc7a79281a8aa093009275dafb81c0d5231a99d8f9e454ecb3ce
-usr/share/dbus-1/system.d/agentos-netjoin.conf	sha256:126ce0d6c16a0502f35f93bc3aa96344d5cec851c90724ff6847cf1a723ab746
-usr/share/dbus-1/system.d/dnsmasq.conf	sha256:2eb414d1116632ce2c42fc28c0b937b8e0530beb4fec67c35b783e31e56e6534
 usr/share/dbus-1/system.d/nm-dispatcher.conf	sha256:01f2698c4100942dc890a6822b1db936384ef50875035b2bc25914e7d3adff03
 usr/share/dbus-1/system.d/nm-priv-helper.conf	sha256:05047b466bf2edd606638c8ecc6f4911694c5de599e953c247fd33ca275d0de6
 usr/share/dbus-1/system.d/org.freedesktop.NetworkManager.conf	sha256:b1585b5ef00dcdb47c6fb45994c47f656ca5d78ca00d79fbe2e1a745be42bb32

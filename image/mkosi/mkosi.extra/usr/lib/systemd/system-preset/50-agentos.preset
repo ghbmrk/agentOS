@@ -8,10 +8,8 @@ enable agentosd.path
 enable agentos-egress.service
 enable agentos-egress-setup.path
 enable agentos-localui.service
-enable agentos-ap.service
 enable agentos-modem.service
 enable agentos-modem-env.path
-enable agentos-netjoin.service
 enable agentos-drive-id.service
 # The weekly reboot (UPD-10).
 enable agentos-reboot.timer
@@ -23,8 +21,6 @@ enable agentos-keeper-enroll.service
 enable agentos-keeper-kernel.service
 # Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
 disable nftables.service
-# Debian's hostapd.service would serve /etc/hostapd/hostapd.conf on the radio; agentos-ap runs hostapd.
-disable hostapd.service
 # NetworkManager runs for the station only (50-agentos.conf); no join is enabled before the sealed store.
 enable NetworkManager.service
 # Nothing waits on a Wi-Fi join to finish booting, and no dispatcher script ships.

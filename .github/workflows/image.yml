@@ -31,7 +31,6 @@ on:
       - "broker/cmd/agentos-localui/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
-      - "broker/cmd/agentos-ap/**"
       # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
       # eval set (PLAN: A21 runs on every change to the kernel or clerks).
       - "broker/kernel/**"
@@ -63,7 +62,6 @@ on:
       - "broker/cmd/agentos-localui/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
-      - "broker/cmd/agentos-ap/**"
       # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
       # eval set (PLAN: A21 runs on every change to the kernel or clerks).
       - "broker/kernel/**"

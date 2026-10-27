@@ -114,14 +114,14 @@ class KeeperTreeTest(unittest.TestCase):
                        ("BindPaths", "-/var/lib/agentos-store"), ("ReadWritePaths", "/var/lib/agentos-kernel"),
                        ("BindReadOnlyPaths", "/var/lib/agentos/../agentos-store:/x")):
             with self.subTest(key):
-                good = self.unit("agentos-netjoin.service").read_text()
-                self.add("agentos-netjoin.service", "Service", "%s=%s" % (key, w))
-                self.assertIn("agentos-netjoin.service: %s=%s reaches the keeper's state (D-154)" % (key, w), self.v())
-                self.unit("agentos-netjoin.service").write_text(good)
+                good = self.unit("agentos-modem.service").read_text()
+                self.add("agentos-modem.service", "Service", "%s=%s" % (key, w))
+                self.assertIn("agentos-modem.service: %s=%s reaches the keeper's state (D-154)" % (key, w), self.v())
+                self.unit("agentos-modem.service").write_text(good)
         # Each assignment adds to the list: a later one does not hide an earlier one (#2981).
-        write(self.root, SYSTEM + "agentos-netjoin.service.d/99-x.conf",
+        write(self.root, SYSTEM + "agentos-modem.service.d/99-x.conf",
               "[Service]\nBindPaths=/var/lib/agentos-store:/x\nBindPaths=/srv/y\n")
-        self.assertEqual(self.v(), ["agentos-netjoin.service: BindPaths=/var/lib/agentos-store:/x reaches the keeper's "
+        self.assertEqual(self.v(), ["agentos-modem.service: BindPaths=/var/lib/agentos-store:/x reaches the keeper's "
                                     "state (D-154)"])
 
     def test_the_mask_holds_from_the_first_boot(self):
@@ -249,8 +249,8 @@ class KeeperTreeTest(unittest.TestCase):
     def test_no_unit_or_user_is_in_a_tpm_group(self):
         for key in ("SupplementaryGroups=tss", "Group=agentos-egress", "User=agentos-egress"):
             with self.subTest(key):
-                d = write(self.root, SYSTEM + "agentos-netjoin.service.d/99-x.conf", "[Service]\n%s\n" % key)
-                self.assertEqual(self.v(), ["agentos-netjoin.service: %s can open the TPM (#2889)" % key])
+                d = write(self.root, SYSTEM + "agentos-modem.service.d/99-x.conf", "[Service]\n%s\n" % key)
+                self.assertEqual(self.v(), ["agentos-modem.service: %s can open the TPM (#2889)" % key])
                 d.unlink()
         sysusers = self.root / "usr/lib/sysusers.d/agentos-setup.conf"
         good = sysusers.read_text()
@@ -495,9 +495,9 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
         self.assertNotIn("my store holds none of your hardware keys", ci)
         self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
-        # The CI units whose mounts outlive one command lift the main-side mask in a drop-in that
+        # The CI unit whose mounts outlive one command lifts the main-side mask in a drop-in that
         # sorts after it.
-        for unit in ("agentos-hwsim-setup.service", "agentos-e2e-seal.service"):
+        for unit in ("agentos-e2e-seal.service",):
             self.assertIn("'systemd.unit-dropin.%s~99-ci-unmask' '[Service]\\nInaccessiblePaths=\\n'" % unit, ci)
         self.assertLess("50-main-side.conf", "99-ci-unmask.conf")
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()

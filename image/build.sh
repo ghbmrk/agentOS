@@ -24,10 +24,10 @@ GVISOR_SHA512=c8d3a9fd4d4c4f5b8ff213caa4517356be128d18659ec4cde37828fe797f61a972
 mkdir -p "$OUT"
 STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
-# The broker, the vault process, the Wi-Fi page, the access point loader,
-# the modem bridge, the home Wi-Fi helper, the keeper: enrollment, the unlock step and the
-# kernel (STO-2c), and the host-disk helper the udev rules below run (HOST-1a), static and path-free.
-for cmd in agentosd agentos-egress agentos-localui agentos-ap agentos-modem agentos-netjoin \
+# The broker, the vault process, the owner page, the modem bridge, the keeper: enrollment, the
+# unlock step and the kernel (STO-2c), and the host-disk helper the udev rules below run (HOST-1a),
+# static and path-free. No access point or Wi-Fi join (D-178).
+for cmd in agentosd agentos-egress agentos-localui agentos-modem \
 	agentos-enroll agentos-unlock agentos-kernel agentos-hostdisk; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
@@ -63,14 +63,8 @@ install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/gu
 # Each setup service's unit lives beside its command (localui ASSUMPTIONS L26).
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui-claim.service" "$STAGE/usr/lib/systemd/system/agentos-localui-claim.service"
-install -D -m 0644 "$REPO/broker/cmd/agentos-ap/agentos-ap.service" "$STAGE/usr/lib/systemd/system/agentos-ap.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-modem/agentos-modem.service" "$STAGE/usr/lib/systemd/system/agentos-modem.service"
-install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.service" "$STAGE/usr/lib/systemd/system/agentos-netjoin.service"
-# The home Wi-Fi helper's NetworkManager grant, and the rule that gives
-# qualified modems' nodes to the bridge's user.
-install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/50-agentos-netjoin.rules" "$STAGE/usr/share/polkit-1/rules.d/50-agentos-netjoin.rules"
-# Its system bus policy: NetworkManager sees only the helper's own calls.
-install -D -m 0644 "$REPO/broker/cmd/agentos-netjoin/agentos-netjoin.conf" "$STAGE/usr/share/dbus-1/system.d/agentos-netjoin.conf"
+# The rule that gives qualified modems' nodes to the bridge's user.
 install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"
 # The host PC's disks stay hidden, unassembled and root-only (HW-8, HOST-1a; hostdisk ASSUMPTIONS
 # H8, H11): in the main system only, never the initrd.
