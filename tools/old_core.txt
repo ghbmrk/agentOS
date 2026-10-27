@@ -7,7 +7,6 @@ broker/journal
 broker/grants
 broker/vault
 broker/recall
-broker/recalltool
 broker/egress
 broker/holder
 broker/checker

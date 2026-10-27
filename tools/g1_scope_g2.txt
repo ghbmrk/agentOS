@@ -40,9 +40,6 @@
 
 freeze on
 since 2026-10-17T17:06:19Z
-# #3310 (EDGE-link-core c1, #3296): its new broker/edgelink/ is added here by #3310 itself,
-# which main cannot carry until the directory exists. Remove once it merges.
-exempt-pr 3310
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
@@ -50,6 +47,10 @@ allow evals/slice-inbox/
 # #3460 (EDGE-link-core c2a, #3297): its new broker/cmd/agentos-link/ is added here by #3460
 # itself, which main cannot carry until the directory exists (D-198). Remove once it merges.
 exempt-pr 3460
+# #3435 (MIG-4-adapters-i, #3433): ports broker/cmd/agentos-a8scan/ from the old vault to the
+# sealed store, which the G2 list does not name; work under way before the freeze (D-198).
+# Remove once it merges.
+exempt-pr 3435
 
 # Project machinery and records.
 allow .claude/
@@ -178,7 +179,6 @@ allow broker/provagent/
 allow broker/question/
 allow broker/quota/
 allow broker/recall/
-allow broker/recalltool/
 allow broker/recovery/
 allow broker/reversible/
 allow broker/route/

@@ -89,8 +89,6 @@ var controlPath = map[string][]string{
 	// clock imports golang.org/x/sys/unix (adjtimex), so it has no entry
 	// below, whose rules refuse third-party imports; TestAgentosdLinks-
 	// NoInference holds it instead, through netOK.
-	// It opens recall (recalltool) once the vault process hands over the
-	// identity key, and serves the recall tools on the guest plane.
 	// It serves the worker-machine tools (workers, CAP-8) on the live guest
 	// plane. It opens the machines' disk quotas (quota, RES-4); quota
 	// imports golang.org/x/sys/unix, so like clock it is held by
@@ -119,7 +117,7 @@ var controlPath = map[string][]string{
 	// imports golang.org/x/sys/unix, so like clock it has no entry below.
 	// It keeps the guests' plan holder key with kernel/privfile and narrows
 	// the owner's grant per machine with kernel/key (#3087).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "recalltool", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -185,9 +183,8 @@ var guestPlane = map[string]struct {
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).
-	"recall":     {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"events":     {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"recalltool": {[]string{"recall", "events", "journal", "guesterr"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"recall": {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"events": {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
