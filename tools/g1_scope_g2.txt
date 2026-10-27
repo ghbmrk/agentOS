@@ -47,6 +47,9 @@ exempt-pr 3310
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
+# #3460 (EDGE-link-core c2a, #3297): its new broker/cmd/agentos-link/ is added here by #3460
+# itself, which main cannot carry until the directory exists (D-198). Remove once it merges.
+exempt-pr 3460
 
 # Project machinery and records.
 allow .claude/
