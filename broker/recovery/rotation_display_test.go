@@ -397,15 +397,16 @@ func TestAPartialWriteOwesEveryRotatedPart(t *testing.T) {
 	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[wifi setup grid recovery refresh]" {
 		t.Fatalf("owed after a partial write: %v %v", parts, ok)
 	}
-	// A rotation that leaves out Wi-Fi, setup or grid is refused.
+	// A rotation that leaves out setup or grid is refused; Wi-Fi is not
+	// owed (WIFI-del-a2).
 	for _, parts := range [][]Part{
 		{PartRecovery},
-		{PartSetup, PartGrid, PartRecovery},
+		{PartGrid, PartRecovery},
 		{PartWiFi, PartGrid, PartRecovery},
 		{PartWiFi, PartSetup, PartRecovery},
 	} {
 		if _, err := BeginRotate(x.b, parts, Auth{Code: true, Local: true}, Proof{Recovery: nk}, t0); !errors.Is(err, ErrRotationOwed) {
-			t.Fatalf("rotating %v while Wi-Fi, setup and grid are owed: %v", parts, err)
+			t.Fatalf("rotating %v while setup and grid are owed: %v", parts, err)
 		}
 	}
 
