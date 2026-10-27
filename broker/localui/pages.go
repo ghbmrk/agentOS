@@ -31,10 +31,13 @@ form { margin: .6em 0 1.2em; }
 </style></head><body>{{end}}
 {{define "foot"}}<p class="muted">Box page: <span class="mono">http://{{boxhost}}/</span></p></body></html>{{end}}
 
+{{define "offline"}}{{if eq .Progress.Phase "offline"}}<p>Check the cable from my port 1 to your home control box.</p>{{end}}{{end}}
+
 {{define "status"}}{{template "head" .Refresh}}
 <h1>AgentOS</h1>
 {{with .Msg}}<p class="ok">{{.}}</p>{{end}}
 <p>Box: <b>{{phase .Progress.Phase}}</b></p>
+{{template "offline" .}}
 {{if .Restore}}<p class="err">My secure page certificate is missing. Restore me from my backup to use the secure page and passkeys.</p>{{end}}
 {{if .HasOwner}}
 <p>Actions: <b>{{if .Owner.Stopped}}stopped{{else}}running{{end}}</b></p>
@@ -298,6 +301,7 @@ form { margin: .6em 0 1.2em; }
 {{define "setup"}}{{template "head" .Refresh}}
 <h1>Set up AgentOS</h1>
 <p class="muted">Box: {{phase .Progress.Phase}}</p>
+{{template "offline" .}}
 {{with .Err}}<p class="err">{{.}}</p>{{end}}
 
 {{if eq .Step "number"}}
