@@ -6,6 +6,7 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -97,11 +98,13 @@ func backupText(err error) string {
 }
 
 // backupsView is the Backups page in one of its steps: the list, or the
-// hardware key's tap over the place it shows.
+// hardware key's tap over the place it shows, or the confirm before
+// stopping one.
 type backupsView struct {
 	RP     string
 	Choice localapi.BackupChoice
-	// Step is "" or "tap".
+	// Step is "", "tap" or "stop". On the list, Place refills the add
+	// form after a refusal.
 	Step  string
 	Place localapi.BackupPlace
 	N     int
@@ -111,6 +114,8 @@ type backupsView struct {
 }
 
 // formPlace is the destination the add form names: a second local drive.
+// The folder is cleaned as the kernel wants it (a trailing slash or ".."
+// would be refused); the tap step shows the cleaned folder the key signs.
 func formPlace(f map[string][]string) localapi.BackupPlace {
 	get := func(k string) string {
 		if v := f[k]; len(v) > 0 {
@@ -118,7 +123,11 @@ func formPlace(f map[string][]string) localapi.BackupPlace {
 		}
 		return ""
 	}
-	return localapi.BackupPlace{Name: get("name"), Kind: localapi.BackupKindDir, Locator: get("locator"), AppendOnly: get("append") == "1"}
+	loc := get("locator")
+	if loc != "" {
+		loc = path.Clean(loc)
+	}
+	return localapi.BackupPlace{Name: get("name"), Kind: localapi.BackupKindDir, Locator: loc, AppendOnly: get("append") == "1"}
 }
 
 // backupsPage serves /backups/ behind sign-in (CH-7): the only-copy
@@ -164,7 +173,7 @@ func (s *Server) backupsPage(w http.ResponseWriter, r *http.Request) {
 		p := formPlace(f)
 		b, err := s.cfg.Backups.BackupBegin(ctx, tok, p)
 		if err != nil {
-			v.Err = backupText(err)
+			v.Err, v.Place = backupText(err), p
 			break
 		}
 		list()
@@ -193,12 +202,25 @@ func (s *Server) backupsPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			v.Err = backupText(err)
+			v.Err, v.Place = backupText(err), p
 			break
 		}
 		v.Done = "Added. I take its first backup within a minute, and check it by reading it back."
 	case "remove":
-		if err := s.cfg.Backups.BackupRemove(ctx, tok, f.Get("name")); err != nil {
+		// A stopped name is never used again, so stopping asks once more.
+		name := f.Get("name")
+		if f.Get("confirm") != "1" {
+			list()
+			v.Step, v.Place = "stop", localapi.BackupPlace{Name: name}
+			for _, p := range v.Choice.Places {
+				if p.Name == name {
+					v.Place = p
+				}
+			}
+			s.render(w, "backups", v)
+			return
+		}
+		if err := s.cfg.Backups.BackupRemove(ctx, tok, name); err != nil {
 			v.Err = backupText(err)
 			break
 		}
@@ -234,6 +256,11 @@ func init() {
 <form method="post" action="/backups/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="add"><input type="hidden" name="ch" value="{{.Challenge}}"><input type="hidden" name="n" value="{{.N}}"><input type="hidden" name="name" value="{{.Place.Name}}"><input type="hidden" name="locator" value="{{.Place.Locator}}">{{if .Place.AppendOnly}}<input type="hidden" name="append" value="1">{{end}}<input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key to add it</button></p>
 <p><a href="/backups/">Cancel</a></p>
+{{else if eq .Step "stop"}}
+<h2>Stop backups here?</h2>
+<p>I take no new backups at <strong>{{.Place.Name}}</strong>{{with .Place.Locator}} <span class="mono">{{.}}</span>{{end}}; the ones already there stay. The name <strong>{{.Place.Name}}</strong> can never be used again: adding this drive back takes a new name and a hardware key's tap.</p>
+<form method="post" action="/backups/"><input type="hidden" name="step" value="remove"><input type="hidden" name="name" value="{{.Place.Name}}"><input type="hidden" name="confirm" value="1"><button>Stop backups here</button></form>
+<p><a href="/backups/">Cancel</a></p>
 {{else}}
 <h2>Where backups go</h2>
 {{range .Choice.Places}}<p><strong>{{.Name}}</strong> <span class="mono">{{.Locator}}</span><br><span class="muted">{{if .AppendOnly}}keeps old copies{{else}}keeps no old copies{{end}}; {{if .Newest}}newest checked backup {{backupday .Newest}}{{else}}no checked backup yet{{end}}</span></p>
@@ -242,9 +269,9 @@ func init() {
 <h2>Add a second drive</h2>
 <p>Plug a drive into me, then name it and give the folder on it. Your hardware key signs the place before I send anything there.</p>
 <form method="post" action="/backups/"><input type="hidden" name="step" value="begin">
-<label>Name<input type="text" name="name" maxlength="64" required placeholder="drive2"></label>
-<label>Folder<input type="text" name="locator" maxlength="1024" required placeholder="/media/drive2/agentos"></label>
-<label><input type="checkbox" name="append" value="1"> This drive keeps old copies (it cannot be wiped)</label>
+<label>Name<input type="text" name="name" maxlength="64" required placeholder="drive2" value="{{.Place.Name}}"></label>
+<label>Folder<input type="text" name="locator" maxlength="1024" required placeholder="/media/drive2/agentos" value="{{.Place.Locator}}"></label>
+<label><input type="checkbox" name="append" value="1"{{if .Place.AppendOnly}} checked{{end}}> This drive keeps old copies (it cannot be wiped)</label>
 <p><button>Continue</button></p></form>
 {{end}}
 <script>{{passkeyjs}}</script>

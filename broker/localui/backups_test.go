@@ -194,18 +194,30 @@ func TestBackupPageAddsOnAHardwareKeyTap(t *testing.T) {
 	}
 }
 
-// Stopping a place needs no tap; every refusal shows fixed words.
+// Stopping a place needs no tap but asks once more first, since a stopped
+// name is never used again (BAK-1); every refusal shows fixed words.
 func TestBackupPageRemovesAndWordsEachRefusal(t *testing.T) {
 	r, fb := backupRig(t)
 	r.signIn()
-	p := r.post("/backups/", url.Values{"step": {"remove"}, "name": {"drive2"}}).Body.String()
+	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"remove"}, "name": {"drive2"}}).Body.String())
+	for _, want := range []string{"Stop backups here?", "<strong>drive2</strong>", "/media/drive2/agentos", "can never be used again",
+		`name="confirm" value="1"`, `name="name" value="drive2"`, `href="/backups/">Cancel`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("confirm step lacks %q", want)
+		}
+	}
+	if len(fb.removed) != 0 || strings.Contains(p, "Stopped.") {
+		t.Fatalf("one click stopped a place: %v", fb.removed)
+	}
+	stop := url.Values{"step": {"remove"}, "name": {"drive2"}, "confirm": {"1"}}
+	p = r.post("/backups/", stop).Body.String()
 	if len(fb.removed) != 1 || fb.removed[0] != "drive2" || !strings.Contains(p, "Stopped.") {
 		t.Fatalf("removed %v\n%s", fb.removed, p)
 	}
 	seen := map[string]bool{}
 	for _, c := range append(append([]string{}, localapi.BackupCodes...), "kernel: a backup destination needs your hardware key's signature") {
 		fb.err = Refused(c)
-		p = html.UnescapeString(r.post("/backups/", url.Values{"step": {"remove"}, "name": {"drive2"}}).Body.String())
+		p = html.UnescapeString(r.post("/backups/", stop).Body.String())
 		txt := backupText(Refused(c))
 		if !strings.Contains(p, txt) || strings.Contains(p, "kernel:") {
 			t.Fatalf("%s:\n%s", c, p)
@@ -217,12 +229,62 @@ func TestBackupPageRemovesAndWordsEachRefusal(t *testing.T) {
 	}
 }
 
+// A typed folder is cleaned before it reaches agentosd, so a trailing
+// slash or ".." does not meet the kernel's path.Clean refusal, and the tap
+// step shows the cleaned folder the key signs (BAK-1).
+func TestBackupPageCleansTheTypedFolder(t *testing.T) {
+	r, fb := backupRig(t)
+	r.signIn()
+	for typed, want := range map[string]string{"/media/drive3/agentos/": "/media/drive3/agentos",
+		"/media/drive3//x/../agentos/.": "/media/drive3/agentos", "": ""} {
+		fb.begun = nil
+		p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {"drive3"}, "locator": {typed}}).Body.String())
+		if len(fb.begun) != 1 || fb.begun[0].Locator != want {
+			t.Fatalf("%q began %+v", typed, fb.begun)
+		}
+		if want != "" && !strings.Contains(p, `<span class="mono">`+want+`</span>`) {
+			t.Fatalf("%q: tap step lacks the cleaned folder", typed)
+		}
+	}
+}
+
+// A refused begin or add keeps the typed name, folder and old-copies box
+// in the add form, so the owner fixes one field rather than retyping all.
+func TestBackupPageKeepsTypedFieldsOnARefusal(t *testing.T) {
+	r, fb := backupRig(t)
+	r.signIn()
+	fb.err = Refused(localapi.ErrBackupNameTaken)
+	p := html.UnescapeString(r.post("/backups/", url.Values{"step": {"begin"}, "name": {"drive3"}, "locator": {"/media/drive3/agentos"}, "append": {"1"}}).Body.String())
+	for _, want := range []string{backupText(fb.err), `name="name" maxlength="64" required placeholder="drive2" value="drive3"`,
+		`value="/media/drive3/agentos"`, `name="append" value="1" checked`} {
+		if !strings.Contains(p, want) {
+			t.Errorf("refused begin lacks %q", want)
+		}
+	}
+	fb.err = Refused(localapi.ErrBackupStale)
+	ch := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	p = html.UnescapeString(r.post("/backups/", url.Values{"step": {"add"}, "name": {"drive3"}, "locator": {"/media/drive3/agentos"}, "n": {"3"}, "ch": {ch},
+		"ad": {"YQ=="}, "cd": {"YQ=="}, "sig": {"YQ=="}}).Body.String())
+	if !strings.Contains(p, backupText(fb.err)) || !strings.Contains(p, `value="drive3"`) || strings.Contains(p, `value="1" checked`) {
+		t.Fatalf("refused add:\n%s", p)
+	}
+	// A plain visit, and a done add, leave the form empty.
+	fb.err = nil
+	for _, p := range []string{r.get("/backups/"), r.post("/backups/", url.Values{"step": {"add"}, "name": {"drive3"}, "locator": {"/m"}, "n": {"3"},
+		"ad": {"YQ=="}, "cd": {"YQ=="}, "sig": {"YQ=="}}).Body.String()} {
+		if strings.Contains(p, `value="drive3"`) || !strings.Contains(p, `placeholder="drive2" value=""`) {
+			t.Fatalf("form not empty:\n%s", p)
+		}
+	}
+}
+
 // The page's one script is the passkey page's, admitted by its CSP hash.
 func TestBackupScriptMatchesItsCSPHash(t *testing.T) {
 	r, _ := backupRig(t)
 	r.signIn()
 	for _, w := range []*httptest.ResponseRecorder{r.do("GET", "/backups/", nil),
-		r.post("/backups/", url.Values{"step": {"begin"}, "name": {"d"}, "locator": {"/m"}})} {
+		r.post("/backups/", url.Values{"step": {"begin"}, "name": {"d"}, "locator": {"/m"}}),
+		r.post("/backups/", url.Values{"step": {"remove"}, "name": {"drive2"}})} {
 		page := w.Body.String()
 		m := regexp.MustCompile(`(?s)<script>(.*?)</script>`).FindAllStringSubmatch(page, -1)
 		if len(m) != 1 || m[0][1] != passkeyJS {
