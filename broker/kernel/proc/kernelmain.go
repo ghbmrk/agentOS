@@ -169,7 +169,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
-		FirstEdge: first, LinkKey: keys.LinkKey,
+		FirstEdge: first, LinkKey: keys.LinkKey, Clock: clock,
 	}, clock())
 	if err != nil {
 		return err

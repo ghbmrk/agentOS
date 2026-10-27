@@ -667,7 +667,8 @@ func (p *pendingPut) PutTable(id string, gen uint64, b []byte) error {
 	// An erase while the table was on its way named the backup held (the
 	// Set's target refused while in flight); now that the put is over,
 	// Backup re-seals it at once, and Tick retries it if that fails
-	// (#3311 L3 and Security on 6ef6bef).
+	// (#3311 L3 and Security on 6ef6bef); a re-seal out across the put
+	// that fails sets no backoff (#3339).
 	p.inflight.Store(false)
 	p.h.With(func(k *kernel.Kernel) error { k.RetryBackup(id); return nil })
 	return perr
