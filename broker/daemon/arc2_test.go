@@ -230,6 +230,16 @@ var learningPlane = map[string]struct {
 	"corpus": {[]string{"control", "loops", "owner"}, forbiddenStd},
 }
 
+// The edge link's codec, hello and TLS configurations (EDGE-link-core c1,
+// #3296): the standard library only, and no socket, process or kernel
+// import of its own; the link process (agentos-link) owns those.
+var edgeLink = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"edgelink": {nil, forbiddenStd},
+}
+
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
 // stdExceptions are the forbidden standard packages a control-path package
@@ -260,6 +270,9 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	}
 	for pkg, rule := range learningPlane {
 		checkImports(t, pkg, rule.allowed, rule.forbid, stdExceptions[pkg])
+	}
+	for pkg, rule := range edgeLink {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
 }
 

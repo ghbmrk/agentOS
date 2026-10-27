@@ -47,6 +47,7 @@ var fuzzNames = map[string]string{
 	"vault.FuzzSlots":               "the check that opens the vault only for an enrolled key",
 	"update.FuzzParseAttestation":   "the check that reads update attestations",
 	"withings.FuzzReassemble":       "the check that reads your scale's Bluetooth replies",
+	"edgelink.FuzzReadFrame":        "the check that reads what the edge box sends",
 	"homekit.FuzzTLV8":              "the check that reads a HomeKit device's pairing replies",
 	"homekit.FuzzSessionFrame":      "the check that reads a HomeKit device's encrypted messages",
 	"homekit.FuzzResponse":          "the check that reads a HomeKit device's answers and alerts",

@@ -141,6 +141,7 @@ allow broker/clock/
 allow broker/control/
 allow broker/daemon/
 allow broker/durable/
+allow broker/edgelink/
 allow broker/egress/
 allow broker/events/
 allow broker/firstboot/
