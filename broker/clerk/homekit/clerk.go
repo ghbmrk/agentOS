@@ -19,6 +19,10 @@ const DefaultTimeout = 10 * time.Second
 // off until the owner pairs it again with its HomeKit code (DEV-3).
 var ErrDeviceOff = errors.New("homekit: device is off until the owner pairs it again")
 
+// ErrUnresolved: the accessory is paired, but its thermostats are not yet
+// resolved; the Device keeps the pin, and Resolve runs again later.
+var ErrUnresolved = errors.New("homekit: paired, thermostats not resolved")
+
 // Device is what the host keeps for one paired thermostat. None of it is
 // secret: the controller key stays in the sealed store. The clerk sets Off
 // on an identity mismatch and Bounds when the owner confirms them.
@@ -122,41 +126,58 @@ func (c *Clerk) dial(ctx context.Context, addr string) (net.Conn, func(), error)
 }
 
 // Connect is the tier-4 connect step (DEV-10, CH-3): one pair-setup with the
-// HomeKit code the owner typed on the local page, then a pair-verify that
-// resolves the thermostats behind the pin. It returns one Device per
-// thermostat accessory, named name, name-2 and on. It makes one attempt
-// (HK-5); a wrong code pins nothing.
+// HomeKit code the owner typed on the local page, then Resolve. It makes one
+// attempt (HK-5); a wrong code pins nothing and returns no Device.
+//
+// Once pair-setup succeeds the accessory holds the box as its controller,
+// so the pin must not be lost: if Resolve then fails, Connect returns the
+// pinned Device with AID 0 and an error wrapping ErrUnresolved. The host
+// keeps that Device and calls Resolve again later.
 func (c *Clerk) Connect(ctx context.Context, name, addr, code string) ([]Device, error) {
 	conn, done, err := c.dial(ctx, addr)
 	if err != nil {
 		return nil, err
 	}
-	opt := Options{Logf: c.logf()}
-	pin, err := PairSetup(conn, addr, code, c.Keys, opt)
+	pin, err := PairSetup(conn, addr, code, c.Keys, Options{Logf: c.logf()})
 	done()
 	conn.Close()
 	if err != nil {
 		return nil, err
 	}
 	d := Device{Name: name, Addr: addr, Pin: pin}
-	l, err := c.open(ctx, &d, false)
+	out, err := c.Resolve(ctx, &d)
 	if err != nil {
-		return nil, err
+		return []Device{d}, err
+	}
+	return out, nil
+}
+
+// Resolve opens a pinned session with d and returns one Device per
+// thermostat accessory behind the pin (a bridge exposes one per `aid`),
+// named d.Name, d.Name-2 and on. Any failure wraps ErrUnresolved; a key
+// mismatch also turns d off (Open).
+func (c *Clerk) Resolve(ctx context.Context, d *Device) ([]Device, error) {
+	if d.Off {
+		return nil, fmt.Errorf("%w: %w", ErrUnresolved, ErrDeviceOff)
+	}
+	l, err := c.open(ctx, d, false)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnresolved, err)
 	}
 	defer l.Close()
 	aids := l.s.Accessories(ServiceThermostat)
 	if len(aids) == 0 {
-		c.log("homekit: accessory %s offers no thermostat", pin.AccessoryID)
-		return nil, fmt.Errorf("%w: accessory offers no thermostat", ErrRefused)
+		c.log("homekit: accessory %s offers no thermostat", d.Pin.AccessoryID)
+		return nil, fmt.Errorf("%w: %w: accessory offers no thermostat", ErrUnresolved, ErrRefused)
 	}
 	out := make([]Device, len(aids))
 	for i, aid := range aids {
-		out[i] = Device{Name: name, Addr: addr, Pin: pin, AID: aid}
+		out[i] = Device{Name: d.Name, Addr: d.Addr, Pin: d.Pin, AID: aid}
 		if i > 0 {
-			out[i].Name = fmt.Sprintf("%s-%d", name, i+1)
+			out[i].Name = fmt.Sprintf("%s-%d", d.Name, i+1)
 		}
 	}
-	c.log("homekit: paired %s with accessory %s, %d thermostats", name, pin.AccessoryID, len(out))
+	c.log("homekit: paired %s with accessory %s, %d thermostats", d.Name, d.Pin.AccessoryID, len(out))
 	return out, nil
 }
 
@@ -175,6 +196,9 @@ func (c *Clerk) logf() func(string, ...any) {
 func (c *Clerk) Open(ctx context.Context, d *Device) (*Link, error) {
 	if d.Off {
 		return nil, ErrDeviceOff
+	}
+	if d.AID == 0 {
+		return nil, ErrUnresolved
 	}
 	return c.open(ctx, d, true)
 }
@@ -214,6 +238,10 @@ type Link struct {
 	conn net.Conn
 	s    *Session
 
+	// stepMu serializes exchanges, so one step's deadline is never set
+	// or cleared under another's (#3335 L3).
+	stepMu sync.Mutex
+
 	mu     sync.Mutex
 	failed int // events the bus refused
 }
@@ -221,8 +249,12 @@ type Link struct {
 // Close ends the session; a blocked exchange ends at once.
 func (l *Link) Close() error { return l.s.Close() }
 
-// step bounds one exchange by the clerk's Timeout.
+// step bounds one exchange by the clerk's Timeout. Steps run one at a time:
+// a step waits at most for the one before it, which its own deadline
+// bounds. Every exchange on a Link goes through step.
 func (l *Link) step(fn func() error) error {
+	l.stepMu.Lock()
+	defer l.stepMu.Unlock()
 	l.conn.SetDeadline(time.Now().Add(l.c.timeout()))
 	defer l.conn.SetDeadline(time.Time{})
 	return fn()
@@ -271,11 +303,12 @@ func (l *Link) Poll() (int, error) {
 
 // Config takes the accessory's TXT c# and re-resolves when it changed.
 func (l *Link) Config(c int) error {
-	err := l.step(func() error { return l.s.ConfigNumber(c) })
-	if err == nil {
-		err = l.step(l.subscribe)
-	}
-	return err
+	return l.step(func() error {
+		if err := l.s.ConfigNumber(c); err != nil {
+			return err
+		}
+		return l.subscribe()
+	})
 }
 
 // Write sets one thermostat characteristic by type, after the kernel

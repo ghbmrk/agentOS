@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -258,7 +259,7 @@ func TestOnlyLocalAddressesAreDialed(t *testing.T) {
 		if _, err := c.Connect(context.Background(), "hall", addr, testCode); !errors.Is(err, ErrRefused) {
 			t.Fatalf("%q: %v", addr, err)
 		}
-		dev := &Device{Name: "hall", Addr: addr}
+		dev := &Device{Name: "hall", Addr: addr, AID: 1}
 		if _, err := c.Open(context.Background(), dev); !errors.Is(err, ErrRefused) {
 			t.Fatalf("open %q: %v", addr, err)
 		}
@@ -568,5 +569,98 @@ func TestControllerKeyNeverLeavesClerk(t *testing.T) {
 	}
 	if len(events) == 0 || len(lines) < 4 || out.Len() < 2000 {
 		t.Fatalf("too little output captured (%d events, %d lines, %d bytes)", len(events), len(lines), out.Len())
+	}
+}
+
+type slowConn struct {
+	net.Conn
+	slow, stall *atomic.Bool
+}
+
+func (s slowConn) Read(p []byte) (int, error) {
+	if s.slow.Load() {
+		time.Sleep(100 * time.Millisecond)
+	}
+	return s.Conn.Read(p)
+}
+
+// Write swallows bytes while stalled: the accessory never sees the request.
+func (s slowConn) Write(p []byte) (int, error) {
+	if s.stall.Load() {
+		return len(p), nil
+	}
+	return s.Conn.Write(p)
+}
+
+// Concurrent steps each keep their own deadline: Poll finishing must not
+// clear the deadline of a Config waiting on a hung accessory (#3335 L3
+// probe, /mnt/project-files/builds/2026-10-27-pr3335-concurrent-step-deadline_test.go).
+func TestConcurrentStepsAreEachBounded(t *testing.T) {
+	acc := newFakeAccessory(t)
+	c, _ := newClerk(t, acc, &bus{})
+	inner := c.Dial
+	var slow, stall atomic.Bool
+	c.Dial = func(ctx context.Context, addr string) (net.Conn, error) {
+		cn, err := inner(ctx, addr)
+		return slowConn{cn, &slow, &stall}, err
+	}
+	dev := connectOne(t, c)
+	l, err := c.Open(context.Background(), dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	c.Timeout = 300 * time.Millisecond
+	slow.Store(true)
+	aDone := make(chan error, 1)
+	go func() { _, err := l.Poll(); aDone <- err }()
+	time.Sleep(30 * time.Millisecond)
+	bDone := make(chan error, 1)
+	go func() { bDone <- l.Config(9999) }()
+	time.Sleep(30 * time.Millisecond)
+	stall.Store(true)
+	slow.Store(false)
+	<-aDone
+	select {
+	case err := <-bDone:
+		t.Logf("bounded: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Config against a hung accessory was not bounded by Timeout: Poll's step cleared its deadline")
+	}
+}
+
+// infoOnlyJSON is an accessory with no thermostat service.
+const infoOnlyJSON = `{"accessories":[{"aid":1,"services":[
+ {"iid":1,"type":"3E","characteristics":[{"iid":2,"type":"23","perms":["pr"],"format":"string","value":"Bridge"}]}]}]}`
+
+func TestConnectKeepsThePinWhenResolveFails(t *testing.T) {
+	acc := newFakeAccessory(t)
+	acc.accJSON = infoOnlyJSON
+	c, _ := newClerk(t, acc, &bus{})
+	devs, err := c.Connect(context.Background(), "hall", testAddr, testCode)
+	if !errors.Is(err, ErrUnresolved) || len(devs) != 1 || !devs[0].Pin.Valid() || devs[0].AID != 0 {
+		t.Fatalf("connect after a failed resolve: %+v %v", devs, err)
+	}
+	d := devs[0]
+	if _, err := c.Open(context.Background(), &d); !errors.Is(err, ErrUnresolved) {
+		t.Fatalf("open of an unresolved device: %v", err)
+	}
+	acc.mu.Lock()
+	acc.accJSON = ""
+	acc.mu.Unlock()
+	out, err := c.Resolve(context.Background(), &d)
+	if err != nil || len(out) != 1 || out[0].AID != 1 || !bytes.Equal(out[0].Pin.LTPK, d.Pin.LTPK) {
+		t.Fatalf("resolve later: %+v %v", out, err)
+	}
+	l, err := c.Open(context.Background(), &out[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	acc.mu.Lock()
+	tries := acc.tries
+	acc.mu.Unlock()
+	if tries != 1 {
+		t.Fatalf("%d pair-setup attempts, want 1", tries)
 	}
 }
