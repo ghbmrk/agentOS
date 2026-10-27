@@ -143,9 +143,9 @@ func run(name string, args ...string) error {
 // harness puts the phone on the Owner network: a veth pair whose box end,
 // enowner0, stands in for port 1 (CH-9, D-178), its other end in the phone's
 // namespace. The page reaches it only through the image's inbound rule for
-// the page's ports from private sources on en* links (WIFI-del-a3); a drop-in names
-// enowner0 as the page's interface, since Port1 takes only a fixed PCI port,
-// and the page restarts on it. It also serves the
+// the page's ports on port 1 (HW12-port1-set); a drop-in names enowner0 as
+// the page's interface, since Port1 takes only a fixed PCI port, and the
+// page restarts on it, its unit's root step opening those ports there. It also serves the
 // Codex plan stub and checks the vault process is the build that reaches it.
 func (d *driver) harness() error {
 	if err := checkVaultBuild(); err != nil {

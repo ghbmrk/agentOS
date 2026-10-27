@@ -157,10 +157,10 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 # #1702: directories a service user or a login user owns on the box. agentos-localui serves the
 # LAN-facing setup page from var/lib/agentos-localui, the vault's user from var/lib/agentos-egress;
 # DynamicUser services live under var/lib/private, and people under home and run/user; the egress
-# unit's RuntimeDirectory= lives under run.
+# and localui units' RuntimeDirectory= lives under run.
 # A link into one is refused like one into WORLD_WRITABLE.
 SERVICE_DIRS = ("var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user", "var/lib/private",
-                "run/agentos-egress")
+                "run/agentos-egress", "run/agentos-localui")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
 # makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
@@ -1352,6 +1352,13 @@ TPM_DEVICE_GROUPS = ("tpm", "tpmrm", "misc")
 # Units whose commands may run with full privileges ("+"), outside the namespace and device policy:
 # the old core's vault process (its drive-id and egress-setup steps, image/ASSUMPTIONS.md I14).
 FULL_PRIVILEGE_EXEMPT = ("agentos-egress.service",)
+# Single "+" commands a unit may run, exactly as written (HW12-port1-set): the page's unit opens and
+# closes its ports in the inbound firewall as root. Neither opens a device or reads the keeper's state.
+FULL_PRIVILEGE_COMMANDS = (
+    ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-localui -admit-port1 -iface "
+     "${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1"),
+    ("agentos-localui.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound page"),
+)
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
@@ -1451,7 +1458,7 @@ def keeper_violations(root):
       NOEXEC_EXEMPT sets PrivateDevices=yes or DevicePolicy=closed or strict. No unit but those runs
       in a TPM_GROUPS group, and no sysusers.d line puts a user in one. No command runs with full
       privileges ("+" or PermissionsStartOnly=yes, outside the namespace and device policy) but
-      FULL_PRIVILEGE_EXEMPT's.
+      FULL_PRIVILEGE_EXEMPT's and the exact FULL_PRIVILEGE_COMMANDS.
     - #2899: an UNLOCK_UNITS unit is given no descriptor past 2 (no Sockets=, OpenFile=, descriptor
       store, or .socket unit that starts it), sets NoNewPrivileges=yes and no AmbientCapabilities= or
       SecureBits=.
@@ -1529,7 +1536,8 @@ def keeper_unit_violations(name, files):
     for key in EXEC_KEYS:
         for v in ini_entries(files, "Service", key):
             prefix = re.match(r"[-@:+!|]*", v).group(0)
-            if "+" in prefix and name not in FULL_PRIVILEGE_EXEMPT:
+            if "+" in prefix and name not in FULL_PRIVILEGE_EXEMPT and \
+                    (name, key, " ".join(v.split())) not in FULL_PRIVILEGE_COMMANDS:
                 out.append("%s: %s=%s runs with full privileges, outside its device policy and namespace (STO-2c)"
                            % (name, key, v.split()[0]))
     allows = [v.split()[0] for v in ini_entries(files, "Service", "DeviceAllow")]

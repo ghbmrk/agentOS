@@ -111,7 +111,8 @@ class CiBoot(unittest.TestCase):
     def test_llmnr_is_forwarded_and_probed(self):
         self.assertIn("hostfwd=tcp:127.0.0.1:15355-:5355", self.sh)
         self.assertIn("15355:5355\" boot \"$W/console.log\"", self.sh)
-        self.assertIn('has "$W/console.log.probe" "agentos-probe: 5355 dropped"', self.sh)
+        self.assertIn("for port in 22 80 443 18789 5355; do\n"
+                      '\thas "$W/console.log.probe" "agentos-probe: $port dropped"', self.sh)
 
     def test_ipv6_probe_runs_on_a_second_nic_at_both_scopes(self):
         self.assertIn('${LAN:+-nic "$LAN"}', self.sh)

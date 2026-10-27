@@ -49,7 +49,10 @@ type Inbound struct {
 	// Discovery is the passive-discovery allow hook.
 	Discovery []DiscoveryPort
 	// Page admits the owner page's TCP 80 and 443 from RFC 1918 sources on
-	// en* (Ethernet) interfaces only, not ap0 (CH-9, D-178; WIFI-del-a3-1).
+	// the interface in the page set only: port 1, which the page's unit
+	// puts there as root (InboundPageAdmit) and takes out when the page
+	// stops. The set is empty as rendered, so the page's ports are dropped
+	// on every link until then (CH-9, D-178, HW-12; HW12-port1-set).
 	Page bool
 }
 
@@ -104,6 +107,25 @@ func InboundExemptRemove(iface string) (string, error) {
 	return "add element " + el + "\ndelete element " + el + "\n", nil
 }
 
+// InboundPageSet is the named set of the one interface the page's ports
+// are open on (Page).
+const InboundPageSet = "page"
+
+// InboundPageAdmit renders the nft script that makes iface the page set's
+// only element: a flush then an add in one nft -f transaction, so the set
+// never holds two names, or none while it is being replaced. It refuses
+// "lo" and any name ifaceRe refuses.
+func InboundPageAdmit(iface string) (string, error) {
+	if !ifaceRe.MatchString(iface) || iface == "lo" {
+		return "", fmt.Errorf("netguard: %q is not an interface the page may serve on", iface)
+	}
+	return InboundPageClose + fmt.Sprintf("add element inet %s %s { %q }\n", InboundTable, InboundPageSet, iface), nil
+}
+
+// InboundPageClose is the nft script that empties the page set, closing
+// the page's ports on every link.
+const InboundPageClose = "flush set inet " + InboundTable + " " + InboundPageSet + "\n"
+
 // InboundRules renders the nftables ruleset that drops every connection the
 // home network opens to a box port (DEV-2 In), on every interface: one the
 // box has not named yet (a USB tether, a second NIC) is dropped too. It
@@ -112,8 +134,9 @@ func InboundExemptRemove(iface string) (string, error) {
 // DEV-2 does not count as connections (router advertisements from a
 // link-local source, neighbour solicitations and advertisements from any
 // source as RFC 4861 allows, all with hop limit 255 so none was routed in;
-// DHCPv4 and DHCPv6 replies from their server ports); the page's ports
-// (Page); the listed devices and discovery ports; and drops the rest.
+// DHCPv4 and DHCPv6 replies from their server ports); the page's ports on
+// the interface in the page set (Page); the listed devices and discovery
+// ports; and drops the rest.
 //
 // The box routes nothing (image I21), so the table also drops every
 // forwarded packet, IPv4 and IPv6, unless it enters or leaves an exempt
@@ -142,6 +165,11 @@ func InboundRules(c Inbound) (string, error) {
 	line("    type ifname")
 	line("    elements = { %s }", strings.Join(names, ", "))
 	line("  }")
+	if c.Page {
+		line("  set %s {", InboundPageSet)
+		line("    type ifname")
+		line("  }")
+	}
 	line("  chain input {")
 	line("    type filter hook input priority filter; policy accept;")
 	line("    iifname @%s accept", InboundExemptSet)
@@ -151,7 +179,7 @@ func InboundRules(c Inbound) (string, error) {
 	line("    udp sport 67 udp dport 68 accept")
 	line("    ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept")
 	if c.Page {
-		line(`    iifname "en*" ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept`)
+		line("    iifname @%s ip saddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } tcp dport { 80, 443 } accept", InboundPageSet)
 	}
 	for _, d := range c.Devices {
 		ports := make([]string, len(d.TCPPorts))
