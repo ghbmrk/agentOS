@@ -11,7 +11,7 @@ CH-12: owner texts use one name for the local UI, built on the Wi-Fi the owner r
 ## Decisions
 
 1. **SPEC's name.** The card labels the address "Wi-Fi page:" and the passphrase note says "my Wi-Fi page"; the display's in-effect, cancelled and confirmed answers say "my Wi-Fi page". If SPEC renames the page now that the core serves no Wi-Fi (D-178), that is an L1 question, not this row's.
-2. **The no-Wi-Fi guard stays a guard.** `TestCardCarriesNoWiFi`'s "my Wi-Fi" needle narrows to "my Wi-Fi becomes" and "my Wi-Fi switches" (the first-boot lines WIFI-del-e removed), beside "Box Wi-Fi" and the rest.
+2. **The no-Wi-Fi guard stays a guard.** `TestCardCarriesNoWiFi` forbids every "my Wi-Fi" other than "my Wi-Fi page", beside "Box Wi-Fi" and the rest.
 3. **Quick-start step 4 is shorter** (later finding, folded in): about 20 words, still naming the Owner network before the claim.
 4. **Brand casing** (coordinator ask): owner-visible "AgentOS" on the card pages and the seller's claim sticker becomes "agentOS".
 5. Not touched: `broker/localui` (old core, frozen; its footer still says "Box page", retired with it), SPEC.

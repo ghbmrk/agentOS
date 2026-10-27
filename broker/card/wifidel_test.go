@@ -44,8 +44,8 @@ var allParts = Parts{Setup: true, Passphrase: true, Grid: true, Recovery: true}
 // so neither the card nor a rotation of every part prints a "Box Wi-Fi"
 // section, a Wi-Fi QR payload or a Wi-Fi password, and the display never
 // says the box's Wi-Fi switches. It catches a card that still names a
-// network no device serves. The needles name a box Wi-Fi, not "my Wi-Fi
-// page", which is the local page's name (CH-12, WIFI-del-f).
+// network no device serves. Any "my Wi-Fi" other than "my Wi-Fi page",
+// the local page's name (CH-12, WIFI-del-f), names a box Wi-Fi.
 func TestCardCarriesNoWiFi(t *testing.T) {
 	c := mustGen(t, 8)
 	full, err := HTML(c)
@@ -66,10 +66,13 @@ func TestCardCarriesNoWiFi(t *testing.T) {
 	}
 	pages := map[string]string{"card": string(full), "rotation": string(rot), "display": string(first), "rotation display": string(rotPage)}
 	for name, page := range pages {
-		for _, bad := range []string{"Box Wi-Fi", "WIFI:", "Wi-Fi password", "my Wi-Fi becomes", "my Wi-Fi switches", "Wi-Fi QR", "look for the Wi-Fi"} {
+		for _, bad := range []string{"Box Wi-Fi", "WIFI:", "Wi-Fi password", "Wi-Fi QR", "look for the Wi-Fi"} {
 			if strings.Contains(page, bad) {
 				t.Fatalf("%s still carries %q", name, bad)
 			}
+		}
+		if strings.Contains(strings.ReplaceAll(page, "my Wi-Fi page", ""), "my Wi-Fi") {
+			t.Fatalf("%s names a box Wi-Fi other than my Wi-Fi page", name)
 		}
 	}
 	if _, ok := reflect.TypeOf(Card{}).FieldByName("WiFiPassword"); ok {
