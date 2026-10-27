@@ -1,6 +1,6 @@
 # MIG-4-untrusted-change (b): the change pipeline, split into c1 to c4
 
-Work item #2785, part (b). Part (a), deleting the skill compiler, merged as #2807. Tier A. Written 2026-10-27 against main at dbd714e.
+Work item #2785, part (b). Part (a), deleting the skill compiler, merged as #2807. The slices are tier A; this brief itself is tier C. Written 2026-10-27 against main at dbd714e.
 
 ## What main shows
 
@@ -36,19 +36,21 @@ Deletion runs leaves first, so every PR compiles and every workflow stays green.
 - Update `maintain/ASSUMPTIONS.md`: rows for the deleted loop are struck with "deleted (#2785 c1)".
 - UPD-4 and UPD-5 lose an unwired implementation. Their real home is the update path on the kernel (#2579 or a successor). The PR names this.
 
-**(c2) the loops side: #2786.** That row's brief adds one acceptance item: `loops` imports no `change` name (direct or test), `grants/loops_test.go` goes with whatever of `loops` it tests, and `broker/daemon/arc2_test.go`'s `loops` entry drops `change`. #3310 holds `loops/plainname.go`, so c2 starts when #3310 lands.
+**(c2) the loops side: #2786.** That row's brief adds one acceptance item: `loops` imports no `change` name (direct or test), `grants/loops_test.go` goes with whatever of `loops` it tests, and `broker/daemon/arc2_test.go`'s `loops` entry drops `change`. #3310 holds `loops/plainname.go`, so c2 starts when #3310 lands. `cmd/agentosd/learnstate.go` calls `loops.ParseText` in production, so #2786 also needs the `cmd/agentosd` slot, and its brief says whether `corpus` and `probecmd` (which import `loops`, and which only `loops` tests import) go too.
 
 **(c3) MIG-4-untrusted-change-c3: delete the engine.** No `cmd/agentosd`. Gate files likely (`grants` is in core.txt), so a Security accept is needed.
 - `broker/change/`: delete every file except `store.go`, `doc.go` and `ASSUMPTIONS.md`. Keep `const Executor = "change"` in `doc.go` until c4, because `cmd/agentosd` names it. `store.go` keeps its `durable` import until c4. `doc.go` and `ASSUMPTIONS.md` shrink to the store. The package then imports neither `journal` nor `verb`.
 - `broker/grants`: delete `Config.Changes`, the `Changes` interface, `evaluateChange`, and the `Decided` call. `meta.change.*` intents fall to the gate's default deny, with the fixed reason they get today when `Changes` is nil. Delete `change_test.go`. In `guestreason_test.go`, `pageresult_test.go` and `noticeclass_test.go`, delete only the cases that build a pipeline.
+- `broker/core/core.txt`: drop the four `allow change …` lines (`change.Journal`, which this slice deletes). Without that, `TestEveryCoreListEntryExists` fails once the package is gone.
+- `tools/assumptions_legacy_ids.txt`: strike the `broker/change/ASSUMPTIONS.md C1` to `C9` lines for the rows this slice removes.
 - `broker/apply`: tests use local constants or strings for `WhySecurity` and `ErrNotStaged`; the comments drop the `change.` names.
 - `broker/daemon/arc2_test.go`: `change`'s allowed imports shrink to what `store.go` needs (`durable` is not listed there, so `change` probably goes to `nil`). `tools/g1_scope_g2.txt` keeps `allow broker/change/`, since the package remains.
 
-**(c4) MIG-4-untrusted-change-c4: the store leaves `change`, and `change` is deleted.** Needs the `cmd/agentosd` slot.
+**(c4) MIG-4-untrusted-change-c4: the store leaves `change`, and `change` is deleted.** Needs the `cmd/agentosd` slot. Gate files (`image.yml`, the trusted-base registry), so it needs a Security accept.
 - Move `store.go` into a new leaf package, `broker/filestore` (`Store`, `Mem`, `File`, `Content`, `MemContent`, `DirContent`), and update every importer listed above. Its atomic write is the one #2577 keeps:
   - if #2577 has merged, the store uses what replaced `durable`;
   - otherwise it uses `kernel/privfile.WriteAtomic` (same steps: write, fsync, rename, fsync the directory), and callers that test `durable.ErrDirSync` on a store save switch to `privfile.ErrUnsynced`. With `loops` gone, that is only `localui`.
-- Delete `broker/change` and `registerRetired`'s `change.Executor` entry. Replace `change` with `filestore` in the guard files: `broker/daemon/arc2_test.go` (the `change` entry, and `cmd/agentosd`'s list) and `tools/g1_scope_g2.txt`.
+- Delete `broker/change` and `registerRetired`'s `change.Executor` entry. Replace `change` with `filestore` in the guard files: `broker/daemon/arc2_test.go` (the `change` entry, and `cmd/agentosd`'s list), `tools/g1_scope_g2.txt`, `tools/trusted_base_parsers.txt` (the `broker/change` parser line, with a reason that fits the store), and `.github/workflows/image.yml` (`broker/change/**` in both the pull_request and push path filters, which becomes `broker/filestore/**`, so the image e2e still runs when the store changes).
 
 ## Requirements and acceptance tests
 
@@ -58,7 +60,7 @@ Deletion runs leaves first, so every PR compiles and every workflow stays green.
 - **c4:** `go vet ./...`; `go test ./filestore/... ./claim/... ./firstboot/... ./localui/... ./cmd/...`; `filestore/store_test.go` carries `store.go`'s existing tests over (OP-4: a crash leaves the old or the new content).
 - **All:** `tools/trace.py --ratchet` passes. The PR body lists the packages taken off the old core (for #2577's count) and the docs/migration/cases.md §7 rows it retires.
 
-**Guard files:** c1 `.github/workflows/assurance.yml` (a gate file). c3 changes `broker/daemon/arc2_test.go`'s `change` entry. c4 adds `broker/filestore`: its `g1_scope_g2.txt` line and its `arc2_test.go` entry (standard library and `kernel/privfile` or `durable`'s successor only). `tools/risk_tier.py` names neither `change` nor the new package, so leave it unless `risk_tier.py` asks. All of these are pre-approved in each slice's scope.
+**Guard files:** c1 `.github/workflows/assurance.yml` (a gate file). c3 changes `broker/daemon/arc2_test.go`'s `change` entry, `broker/core/core.txt` and `tools/assumptions_legacy_ids.txt`. c4 adds `broker/filestore`: its `g1_scope_g2.txt` line, its `arc2_test.go` entry (standard library and `kernel/privfile` or `durable`'s successor only), its `tools/trusted_base_parsers.txt` line and its `.github/workflows/image.yml` path filters. `tools/risk_tier.py` names neither `change` nor the new package, so leave it unless `risk_tier.py` asks. All of these are pre-approved in each slice's scope.
 
 **Usage:** c1 about 60k, c3 about 100k (mostly deletion; the grants edits need care), c4 about 80k.
 
