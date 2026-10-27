@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ type backupFake struct {
 	fail    error  // the call's error
 	failOne string // a Taken.Error for every destination
 	unver   bool   // backups written but not verified
+	unkept  bool   // the call claims verified backups the view never shows
 	readErr error
 }
 
@@ -44,7 +46,9 @@ func (k *backupFake) Backup(context.Context) ([]kernelsock.Taken, error) {
 		}
 		b := kernelsock.BackupView{Target: t.Name, BackupID: t.Name + itoaTest(k.calls), Recipient: k.v.Recipient,
 			Created: k.now().UnixMilli(), Verified: !k.unver}
-		k.v.Backups = append(k.v.Backups, b)
+		if !k.unkept {
+			k.v.Backups = append(k.v.Backups, b)
+		}
 		out = append(out, kernelsock.Taken{Target: t.Name, Backup: &b})
 	}
 	return out, nil
@@ -61,14 +65,15 @@ func rig(v kernelsock.BackupsView) (*backupSchedule, *backupFake, *time.Time) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	k := &backupFake{v: v, now: func() time.Time { return now }}
 	s := newBackupSchedule(k)
-	s.Now = k.now
+	s.Now, s.started = k.now, now.Add(-backupStartGrace)
 	return s, k, &now
 }
 
 // TestBackupLinesAreOwnerWorded: every STATUS line reads as one.
 func TestBackupLinesAreOwnerWorded(t *testing.T) {
-	for _, l := range []string{backupUnread, backupNoKey, backupNoTarget, backupNotYet, backupFailed, backupOnePlace,
-		backupWipeable(1), backupWipeable(2), backupWipeable(12)} {
+	for _, l := range []string{backupStarting, backupUnread, backupNoKey, backupNoTarget, backupNotYet, backupFailed, backupOnePlace,
+		backupWipeable(1), backupWipeable(2), backupWipeable(12), backupLastFailed(time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC).UnixMilli()),
+		backupPageLastFailed, backupPageWipeable} {
 		if err := ownerWorded(l); err != nil {
 			t.Errorf("%q: %v", l, err)
 		}
@@ -273,5 +278,126 @@ func TestBackoffAfterAFailure(t *testing.T) {
 	}
 	if backoff(100) != backupRetryMax {
 		t.Fatalf("backoff not capped: %v", backoff(100))
+	}
+}
+
+// Release points from the reviews of #3392 (e4a), carried by e4b (#3390).
+
+// A kernel that answered setup-only and then went unreachable reads as
+// unread, not as silence (Security 6441653053 point 1).
+func TestSetupOnlyThenUnreachableIsUnread(t *testing.T) {
+	ctx := context.Background()
+	s, k, _ := rig(kernelsock.BackupsView{})
+	k.readErr = kernelsock.ErrSetupOnly
+	s.tick(ctx)
+	if l := s.lines(); len(l) != 0 {
+		t.Fatalf("setup-only: %q", l)
+	}
+	k.readErr = kernelsock.ErrUnreachable
+	s.tick(ctx)
+	if got := s.onlyCopyNote(); got != backupUnread {
+		t.Fatalf("unreachable after setup-only: %q", got)
+	}
+}
+
+// A call that claims verified backups the read after does not show still
+// backs off, so agentosd does not call backup every minute (Security
+// 6441653053 point 2).
+func TestBackoffHoldsWhenTheViewDisagrees(t *testing.T) {
+	ctx := context.Background()
+	s, k, now := rig(kernelsock.BackupsView{Recipient: "r1", Targets: []kernelsock.TargetView{driveAt("a", true)}})
+	k.unkept = true
+	s.tick(ctx)
+	if k.calls != 1 || s.fails != 1 {
+		t.Fatalf("first: %d calls, %d fails", k.calls, s.fails)
+	}
+	*now = now.Add(backupCheckEvery)
+	s.tick(ctx)
+	if k.calls != 1 {
+		t.Fatalf("called again inside the backoff: %d", k.calls)
+	}
+	// A read after the call that fails is no proof either.
+	s, k, _ = rig(kernelsock.BackupsView{Recipient: "r1", Targets: []kernelsock.TargetView{driveAt("a", true)}})
+	k2 := &flakyAfterCall{backupFake: k}
+	s.K = k2
+	s.tick(ctx)
+	if k.calls != 1 || s.fails != 1 {
+		t.Fatalf("unread after the call: %d calls, %d fails", k.calls, s.fails)
+	}
+}
+
+// flakyAfterCall answers reads until a backup call, then none.
+type flakyAfterCall struct{ *backupFake }
+
+func (k *flakyAfterCall) Backups(ctx context.Context) (kernelsock.BackupsView, error) {
+	if k.calls > 0 {
+		return kernelsock.BackupsView{}, kernelsock.ErrUnreachable
+	}
+	return k.backupFake.Backups(ctx)
+}
+
+// tookAll's guards, one case each (L3/Potency 6441659912 point 1).
+func TestTookAllNeedsEveryBackupVerifiedAndFinished(t *testing.T) {
+	ok := &kernelsock.BackupView{Verified: true}
+	for name, c := range map[string]struct {
+		taken []kernelsock.Taken
+		want  bool
+	}{
+		"empty":                 {nil, false},
+		"error beside a backup": {[]kernelsock.Taken{{Target: "a", Backup: ok, Error: "read-back differs"}}, false},
+		"verified but pending":  {[]kernelsock.Taken{{Target: "a", Backup: &kernelsock.BackupView{Verified: true, Pending: true}}}, false},
+		"no backup":             {[]kernelsock.Taken{{Target: "a"}}, false},
+		"unverified":            {[]kernelsock.Taken{{Target: "a", Backup: &kernelsock.BackupView{}}}, false},
+		"one of two failed":     {[]kernelsock.Taken{{Target: "a", Backup: ok}, {Target: "b", Error: "full"}}, false},
+		"all verified":          {[]kernelsock.Taken{{Target: "a", Backup: ok}, {Target: "b", Backup: ok}}, true},
+	} {
+		if got := tookAll(c.taken); got != c.want {
+			t.Errorf("%s: %v", name, got)
+		}
+	}
+}
+
+// Once an older backup counts, a later failure keeps a line naming the
+// newest that counts (L3/UX 6441659912 point 2); the status page has it in
+// fixed words.
+func TestALaterFailureKeepsALine(t *testing.T) {
+	ctx := context.Background()
+	s, k, now := rig(kernelsock.BackupsView{Recipient: "r1", Targets: []kernelsock.TargetView{driveAt("a", true), driveAt("b", true)}})
+	s.tick(ctx)
+	first := now.UnixMilli()
+	if len(s.lines()) != 0 {
+		t.Fatalf("after a verified backup: %q", s.lines())
+	}
+	*now = now.Add(backupDaily)
+	k.failOne = "the drive is full"
+	s.tick(ctx)
+	if got := s.lines(); !slices.Equal(got, []string{backupLastFailed(first)}) {
+		t.Fatalf("after a failure: %q", got)
+	}
+	if got := s.pageLines(); !slices.Equal(got, []string{backupPageLastFailed}) {
+		t.Fatalf("status page after a failure: %q", got)
+	}
+	k.failOne = ""
+	*now = now.Add(backoff(1))
+	s.tick(ctx)
+	if got := s.lines(); len(got) != 0 {
+		t.Fatalf("after the retry took: %q", got)
+	}
+}
+
+// In the first moments of a start the unread line says I keep trying;
+// "restart me" is for a failure that persists (L3/UX 6441659912 point 3).
+func TestUnreadAtStartKeepsTrying(t *testing.T) {
+	ctx := context.Background()
+	s, k, now := rig(kernelsock.BackupsView{})
+	s.started = *now
+	k.readErr = kernelsock.ErrUnreachable
+	s.tick(ctx)
+	if got := s.onlyCopyNote(); got != backupStarting {
+		t.Fatalf("at start: %q", got)
+	}
+	*now = now.Add(backupStartGrace)
+	if got := s.onlyCopyNote(); got != backupUnread {
+		t.Fatalf("after the grace: %q", got)
 	}
 }

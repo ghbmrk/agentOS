@@ -1,8 +1,10 @@
 package card
 
 import (
+	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/sha256"
+	"errors"
 	"strings"
 )
 
@@ -42,27 +44,72 @@ func RecoveryKeyText(b [recoveryKeyBytes]byte) string {
 	return s.String()
 }
 
+// StoreKeyLen is the length of the key the sealed store's recovery slot
+// and the backups' recipient take (seal.RecoveryLen, backup.RecipientFor).
+const StoreKeyLen = 32
+
+// ErrRecoveryKey: the text is not a card recovery key, or a group fails
+// its check symbol.
+var ErrRecoveryKey = errors.New("card: not a recovery key, or a group is mistyped")
+
+// StoreRecoveryKey reads a typed or printed recovery key and returns the
+// StoreKeyLen-byte key the sealed store's recovery slot and the backups
+// are sealed to (MIG-4-recovery-len, #3406): HKDF-SHA256 of the card's 160
+// bits, info "agentos.card.store-recovery.v1". The card keeps its 40
+// symbols, so every card already printed opens the slot; the slot keeps
+// its 32 bytes, at the card's 160 bits of strength.
+func StoreRecoveryKey(s string) ([]byte, error) {
+	b, ok := parseRecoveryKey(s)
+	if !ok {
+		return nil, ErrRecoveryKey
+	}
+	k, err := hkdf.Key(sha256.New, b[:], nil, "agentos.card.store-recovery.v1", StoreKeyLen)
+	clear(b[:])
+	if err != nil {
+		return nil, err
+	}
+	return k, nil
+}
+
 // recoveryKeyOK reports whether s is a recovery key whose every group
 // passes its check symbol.
 func recoveryKeyOK(s string) bool {
+	b, ok := parseRecoveryKey(s)
+	clear(b[:])
+	return ok
+}
+
+// parseRecoveryKey is RecoveryKeyText's inverse, after Normalize.
+func parseRecoveryKey(s string) (b [recoveryKeyBytes]byte, ok bool) {
 	n := Normalize(s)
 	if len(n) != recoveryGroups*(recoveryGroupKey+1) {
-		return false
+		return b, false
 	}
+	var acc uint64
+	bits, j := 0, 0
 	for g := 0; g < recoveryGroups; g++ {
 		grp := make([]byte, recoveryGroupKey+1)
 		for i := range grp {
 			k := strings.IndexByte(Alphabet, n[g*(recoveryGroupKey+1)+i])
 			if k < 0 {
-				return false
+				return [recoveryKeyBytes]byte{}, false
 			}
 			grp[i] = byte(k)
 		}
 		if checkSymbol(grp[:recoveryGroupKey]) != grp[recoveryGroupKey] {
-			return false
+			return [recoveryKeyBytes]byte{}, false
+		}
+		for _, v := range grp[:recoveryGroupKey] {
+			acc = acc<<5 | uint64(v)
+			bits += 5
+			if bits >= 8 {
+				bits -= 8
+				b[j] = byte(acc >> bits)
+				j++
+			}
 		}
 	}
-	return true
+	return b, true
 }
 
 // checkSymbol is sum(a^(i+1) * s_i) over GF(32) (x^5 + x^2 + 1, a = x):
