@@ -821,4 +821,11 @@ func TestNoSideReadsSealedContent(t *testing.T) {
 			t.Fatalf("a label of %d bytes: %v", len(bad), err)
 		}
 	}
+	// LOG-4 (#3443): a blank label would find every blank-labelled subject,
+	// and invalid UTF-8 would cross as U+FFFD; neither reaches a match.
+	for bad, want := range map[string]error{"   ": kernel.ErrLabel, "\t\n": kernel.ErrLabel, "\xff": ErrArgs} {
+		if found, _, err := o.Named(bad); !errors.Is(err, want) || found != nil {
+			t.Fatalf("named %q: %v, %v; want %v", bad, found, err, want)
+		}
+	}
 }
