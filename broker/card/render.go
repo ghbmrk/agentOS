@@ -8,8 +8,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// WaitMinutes is how long the card tells the owner to wait for the box's
-// Wi-Fi after power-on. ONB-4's frozen target is set from S1's timings on
+// WaitMinutes is how long the card tells the owner to wait after power-on
+// before joining the enforcer's setup network. ONB-4's frozen target is set from S1's timings on
 // real PCs; this is the provisional value until then.
 const WaitMinutes = 3
 
@@ -25,12 +25,14 @@ const (
 	BoxPage  = "https://" + PageName + "/"
 )
 
-// QuickStart is the card's quick-start, at most five steps (ONB-7).
+// QuickStart is the card's quick-start, at most five steps (ONB-7). It
+// starts from the enforcer's setup network (§12.1 steps 1 and 4, D-178):
+// the core serves no Wi-Fi, and the claim follows on the Owner network.
 var QuickStart = []string{
-	"Put the SIM in the modem. Plug the drive and the modem into the back of the PC.",
+	"Put the SIM in the modem. Plug the modem into the PC, and the PC's cable into the enforcer.",
 	"Turn the PC on. Often no screen or keyboard is needed. Your PC's own disks are left untouched.",
-	fmt.Sprintf("Wait %d minutes, then point your phone's camera at the Wi-Fi code.", WaitMinutes),
-	"Join the Wi-Fi. The setup page opens by itself; follow it.",
+	fmt.Sprintf("Wait %d minutes, then point your phone's camera at the setup Wi-Fi code on the claim sticker or the flasher, and join the enforcer's setup network.", WaitMinutes),
+	"The enforcer's page opens by itself and gives you your Owner network. Rejoin on the Owner network, then scan the claim code; the setup page opens by itself; follow it.",
 	"Done. Text your box any time. Text HELP for commands.",
 }
 
@@ -61,14 +63,14 @@ type gridRow struct {
 
 type view struct {
 	*Card
-	WiFiQR, PassQR template.HTML
-	QuickStart     []string
-	BootKeys       []BootKey
-	WaitMinutes    int
-	BoxPage        string
-	GridCols       []string
-	Grid           []gridRow
-	GridCheck      string
+	PassQR      template.HTML
+	QuickStart  []string
+	BootKeys    []BootKey
+	WaitMinutes int
+	BoxPage     string
+	GridCols    []string
+	Grid        []gridRow
+	GridCheck   string
 }
 
 // HTML renders the card as a printable page: the card itself (front and
@@ -78,15 +80,11 @@ func HTML(c *Card) ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	wq, err := QRSVG(WiFiQR(c.WiFiName, c.WiFiPassword))
-	if err != nil {
-		return nil, err
-	}
 	pq, err := QRSVG(c.VaultPassphrase)
 	if err != nil {
 		return nil, err
 	}
-	v := view{Card: c, WiFiQR: wq, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes, BoxPage: BoxPage,
+	v := view{Card: c, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes, BoxPage: BoxPage,
 		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}, GridCheck: GridCheck(c.GridSeed)}
 	labels := owner.GridLabels()
 	for r := 0; r < 10; r++ {
@@ -109,11 +107,6 @@ func HTML(c *Card) ([]byte, error) {
 func rotationHTML(c *Card, p Parts) ([]byte, error) {
 	v := rotView{view: view{Card: c, BoxPage: BoxPage}, Parts: p}
 	var err error
-	if p.WiFi {
-		if v.WiFiQR, err = QRSVG(WiFiQR(c.WiFiName, c.WiFiPassword)); err != nil {
-			return nil, err
-		}
-	}
 	if p.Passphrase {
 		if v.PassQR, err = QRSVG(c.VaultPassphrase); err != nil {
 			return nil, err
@@ -166,15 +159,9 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 <div class="card">
 <h1>AgentOS Owner Card: new parts</h1>
 <p class="note">These replace the same parts of your Owner Card. The parts not on this page stay as on your current card. Keep it like a passport, apart from the drive.</p>
+<p class="note">Box page: <span class="mono">{{.BoxPage}}</span></p>
 </div>
-{{if .Parts.WiFi}}<div class="card"><div class="row">
-{{.WiFiQR}}
-<div><h2>Box Wi-Fi</h2>
-<p>Name: <span class="mono big">{{.WiFiName}}</span><br>
-Password: <span class="mono big">{{.WiFiPassword}}</span></p>
-<p class="note">Your devices will need the new password. Box page: <span class="mono">{{.BoxPage}}</span></p></div>
-</div></div>
-{{end}}{{if .Parts.Setup}}<div class="card">
+{{if .Parts.Setup}}<div class="card">
 <h2>Setup code</h2>
 <p><span class="mono big">{{.SetupCode}}</span> <span class="note">(text it to your box if the setup page asks)</span></p>
 <h2>Reset secret</h2>
@@ -234,23 +221,17 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 <div class="card">
 <h1>AgentOS Owner Card</h1>
 <p class="note">Keep this card like a passport, apart from the drive. Anyone with both can read your data.</p>
-<div class="row">
-{{.WiFiQR}}
-<div>
-<h2>Box Wi-Fi</h2>
-<p>Name: <span class="mono big">{{.WiFiName}}</span><br>
-Password: <span class="mono big">{{.WiFiPassword}}</span></p>
 <p>Box page: <span class="mono">{{.BoxPage}}</span></p>
 <h2>Quick start</h2>
 <ol>{{range .QuickStart}}<li>{{.}}</li>{{end}}</ol>
-</div></div>
 </div>
 
 <div class="card">
 <h2>Nothing happened?</h2>
-<p>Wait {{.WaitMinutes}} minutes after turning the PC on, then look for the Wi-Fi <span class="mono">{{.WiFiName}}</span>.
-Wi-Fi joined but no page? Open <span class="mono">{{.BoxPage}}</span> in your browser.
-If the Wi-Fi never appears, the PC did not start from the drive. For this one start you need a screen and keyboard: turn the PC off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
+<p>Wait {{.WaitMinutes}} minutes after turning the PC on. The enforcer's page opens when you join its setup network.
+On the Owner network but no page? Open <span class="mono">{{.BoxPage}}</span> in your browser.
+Phone won't join: it needs WPA3.
+If the setup page never opens, the PC did not start from the drive. For this one start you need a screen and keyboard: turn the PC off, then on, and press its boot key until a menu appears; choose the USB drive.</p>
 <table class="keys">{{range .BootKeys}}<tr><td>{{.Brand}}</td><td>{{.Key}}</td></tr>{{end}}</table>
 </div>
 
@@ -261,7 +242,7 @@ If the Wi-Fi never appears, the PC did not start from the drive. For this one st
 <div class="row">
 {{.PassQR}}
 <div><p class="mono big">{{.VaultPassphrase}}</p>
-<p class="note">Only for starting me on a PC I do not know: type it on my Wi-Fi page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
+<p class="note">Only for starting me on a PC I do not know: type it on my box page, or scan this code with your phone's camera, tap Copy, and paste it there. Never send it by text or say it on a call.
 If this drive was out of your hands, unlock it only on your trusted PC.
 I cannot print this again; keep the card.</p></div>
 </div>

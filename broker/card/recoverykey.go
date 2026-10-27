@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -49,19 +50,37 @@ func RecoveryKeyText(b [recoveryKeyBytes]byte) string {
 const StoreKeyLen = 32
 
 // ErrRecoveryKey: the text is not a card recovery key, or a group fails
-// its check symbol.
+// its check symbol. A mistyped group is a *MistypedError, which is also
+// ErrRecoveryKey (errors.Is).
 var ErrRecoveryKey = errors.New("card: not a recovery key, or a group is mistyped")
+
+// MistypedError is a recovery key of the right length whose group Group
+// (1 to 8, as printed) fails its check symbol or holds a symbol the card
+// never prints, so the restore and rotation pages can say which group to
+// retype (REC-1, REC-4).
+type MistypedError struct{ Group int }
+
+func (e *MistypedError) Error() string {
+	return fmt.Sprintf("card: group %d of the recovery key looks mistyped; check it against the card", e.Group)
+}
+
+// Is makes every MistypedError an ErrRecoveryKey.
+func (e *MistypedError) Is(target error) bool { return target == ErrRecoveryKey }
 
 // StoreRecoveryKey reads a typed or printed recovery key and returns the
 // StoreKeyLen-byte key the sealed store's recovery slot and the backups
 // are sealed to (MIG-4-recovery-len, #3406): HKDF-SHA256 of the card's 160
 // bits, info "agentos.card.store-recovery.v1". The card keeps its 40
 // symbols, so every card already printed opens the slot; the slot keeps
-// its 32 bytes, at the card's 160 bits of strength.
+// its 32 bytes, at the card's 160 bits of strength. A refusal is
+// ErrRecoveryKey, or a *MistypedError naming the group. The caller owns
+// the returned slice and must clear it once the slot or backup is open;
+// the card's 160 bits are cleared here. s itself is a Go string and
+// cannot be wiped (ASSUMPTIONS C13).
 func StoreRecoveryKey(s string) ([]byte, error) {
-	b, ok := parseRecoveryKey(s)
-	if !ok {
-		return nil, ErrRecoveryKey
+	b, err := parseRecoveryKey(s)
+	if err != nil {
+		return nil, err
 	}
 	k, err := hkdf.Key(sha256.New, b[:], nil, "agentos.card.store-recovery.v1", StoreKeyLen)
 	clear(b[:])
@@ -74,30 +93,36 @@ func StoreRecoveryKey(s string) ([]byte, error) {
 // recoveryKeyOK reports whether s is a recovery key whose every group
 // passes its check symbol.
 func recoveryKeyOK(s string) bool {
-	b, ok := parseRecoveryKey(s)
+	b, err := parseRecoveryKey(s)
 	clear(b[:])
-	return ok
+	return err == nil
 }
 
-// parseRecoveryKey is RecoveryKeyText's inverse, after Normalize.
-func parseRecoveryKey(s string) (b [recoveryKeyBytes]byte, ok bool) {
+// parseRecoveryKey is RecoveryKeyText's inverse, after Normalize. Text of
+// the wrong length is ErrRecoveryKey; a group with a bad symbol or check
+// is a *MistypedError. The per-group symbols live in one stack array,
+// cleared with the bit accumulator before return.
+func parseRecoveryKey(s string) (b [recoveryKeyBytes]byte, err error) {
 	n := Normalize(s)
 	if len(n) != recoveryGroups*(recoveryGroupKey+1) {
-		return b, false
+		return b, ErrRecoveryKey
 	}
+	var grp [recoveryGroupKey + 1]byte
 	var acc uint64
+	defer func() { clear(grp[:]); acc = 0 }()
 	bits, j := 0, 0
 	for g := 0; g < recoveryGroups; g++ {
-		grp := make([]byte, recoveryGroupKey+1)
 		for i := range grp {
 			k := strings.IndexByte(Alphabet, n[g*(recoveryGroupKey+1)+i])
 			if k < 0 {
-				return [recoveryKeyBytes]byte{}, false
+				clear(b[:])
+				return b, &MistypedError{Group: g + 1}
 			}
 			grp[i] = byte(k)
 		}
 		if checkSymbol(grp[:recoveryGroupKey]) != grp[recoveryGroupKey] {
-			return [recoveryKeyBytes]byte{}, false
+			clear(b[:])
+			return b, &MistypedError{Group: g + 1}
 		}
 		for _, v := range grp[:recoveryGroupKey] {
 			acc = acc<<5 | uint64(v)
@@ -109,7 +134,7 @@ func parseRecoveryKey(s string) (b [recoveryKeyBytes]byte, ok bool) {
 			}
 		}
 	}
-	return b, true
+	return b, nil
 }
 
 // checkSymbol is sum(a^(i+1) * s_i) over GF(32) (x^5 + x^2 + 1, a = x):

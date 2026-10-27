@@ -32,7 +32,7 @@ func (x *box) needles(c Card) []Needle {
 	if c.VaultPassphrase != "" {
 		out = append(out, Needle{Name: "vault passphrase", Value: []byte(c.VaultPassphrase), Text: true})
 	}
-	for _, v := range []string{c.WiFiPassword, c.SetupSecret} {
+	for _, v := range []string{c.SetupSecret} {
 		if v != "" {
 			out = append(out, Needle{Name: "card secret", Value: []byte(v), Text: true})
 		}
@@ -59,7 +59,7 @@ func TestNoKeySeedOrGridMaterialInAnyPlaintextOnTheDriveOrInBackups(t *testing.T
 	oldSeed := x.vaultSeed()
 	_, err = ReEnroll(x.b, x.rk, true, nil)
 	must(t, err)
-	after, err := x.rotate([]Part{PartWiFi, PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
+	after, err := x.rotate([]Part{PartGrid, PartPassphrase}, Auth{Code: true, Local: true}, Proof{Recovery: x.rk})
 	must(t, err)
 
 	needles := append(x.needles(before), x.needles(after.Card)...)

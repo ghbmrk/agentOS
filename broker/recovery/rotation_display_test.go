@@ -50,8 +50,7 @@ func (x *box) rotateOnDisplay(parts []Part, proof Proof) *rotWire {
 	w := &rotWire{t: x.t, x: x, p: p, now: t0}
 	rot := cardParts(p.Parts())
 	w.d, err = card.NewDisplay(card.DisplayConfig{
-		Rotate:   &rot,
-		WiFiName: p.WiFiName(),
+		Rotate: &rot,
 		Generate: func(r io.Reader) (*card.Card, error) {
 			c, err := card.Generate(r)
 			if err == nil {
@@ -72,8 +71,6 @@ func cardParts(ps []Part) card.Parts {
 	var out card.Parts
 	for _, q := range ps {
 		switch q {
-		case PartWiFi:
-			out.WiFi = true
 		case PartSetup:
 			out.Setup = true
 		case PartPassphrase:
@@ -88,7 +85,7 @@ func cardParts(ps []Part) card.Parts {
 }
 
 func (w *rotWire) provision(c *card.Card) error {
-	next := Card{WiFiName: c.WiFiName, WiFiPassword: c.WiFiPassword, SetupSecret: c.SetupSecret, SetupCode: c.SetupCode,
+	next := Card{SetupSecret: c.SetupSecret, SetupCode: c.SetupCode,
 		VaultPassphrase: c.VaultPassphrase, GridSeed: bytes.Clone(c.GridSeed), RecoveryKey: c.RecoveryKey}
 	d, err := w.p.Commit(w.x.b, next, w.now)
 	switch {
@@ -126,9 +123,6 @@ func (w *rotWire) answers(right bool) card.Answers {
 	}
 	if wd == 0 && g == 0 {
 		switch {
-		case w.gen.WiFiPassword != "":
-			n := card.Normalize(w.gen.WiFiPassword)
-			a.Check = n[len(n)-4:]
 		case w.gen.SetupCode != "":
 			a.Check = w.gen.SetupCode
 		default:
@@ -251,7 +245,7 @@ func TestAnAbortedRotationKeepsTheOldKey(t *testing.T) {
 	for _, how := range []string{"cancel", "lapse", "restart"} {
 		t.Run(how, func(t *testing.T) {
 			x := newBox(t)
-			w := x.rotateOnDisplay([]Part{PartRecovery, PartWiFi}, Proof{Recovery: x.rk})
+			w := x.rotateOnDisplay([]Part{PartRecovery, PartSetup}, Proof{Recovery: x.rk})
 			nk := w.newKey()
 			switch how {
 			case "cancel":
@@ -286,8 +280,8 @@ func TestAnAbortedRotationKeepsTheOldKey(t *testing.T) {
 			}
 			cur, err := x.b.LoadCard()
 			must(t, err)
-			if cur.WiFiPassword != x.card.WiFiPassword {
-				t.Fatal("an aborted rotation changed the Wi-Fi password")
+			if cur.SetupSecret != x.card.SetupSecret {
+				t.Fatal("an aborted rotation changed the setup secret")
 			}
 			x.noKeyText(x.card.RecoveryKey, w.gen.RecoveryKey)
 			// The old card still rotates.
@@ -365,14 +359,14 @@ func TestACrashMidRotationLeavesOneValidKey(t *testing.T) {
 	x.noKeyText(x.card.RecoveryKey, w.gen.RecoveryKey, w2.gen.RecoveryKey)
 }
 
-// A partial write leaves the Wi-Fi password, setup secret and grid as
-// the current card's, since they are stored only after the slots. Every
-// rotated part stays owed, so the next rotation must replace them all and
-// the new card's Wi-Fi password cannot be dropped by a narrower one
-// (#1090 review F3).
+// A partial write leaves the setup secret and grid as the current
+// card's, since they are stored only after the slots. Every rotated part
+// stays owed, so the next rotation must replace them all and the new
+// card's setup secret cannot be dropped by a narrower one (#1090 review
+// F3).
 func TestAPartialWriteOwesEveryRotatedPart(t *testing.T) {
 	x := newBox(t)
-	w := x.rotateOnDisplay([]Part{PartWiFi, PartSetup, PartGrid, PartRecovery}, Proof{Recovery: x.rk})
+	w := x.rotateOnDisplay([]Part{PartSetup, PartGrid, PartRecovery}, Proof{Recovery: x.rk})
 	nk := w.newKey()
 	crashed := errors.New("crash")
 	crashPoint = func(step string) error {
@@ -391,19 +385,17 @@ func TestAPartialWriteOwesEveryRotatedPart(t *testing.T) {
 	}
 	cur, err := x.b.LoadCard()
 	must(t, err)
-	if cur.WiFiPassword != x.card.WiFiPassword || cur.SetupSecret != x.card.SetupSecret || !bytes.Equal(cur.GridSeed, x.card.GridSeed) {
-		t.Fatal("Wi-Fi, setup or grid took effect before the slots finished")
+	if cur.SetupSecret != x.card.SetupSecret || !bytes.Equal(cur.GridSeed, x.card.GridSeed) {
+		t.Fatal("setup or grid took effect before the slots finished")
 	}
-	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[wifi setup grid recovery refresh]" {
+	if parts, ok := RotationUnfinished(x.b); !ok || fmt.Sprint(parts) != "[setup grid recovery refresh]" {
 		t.Fatalf("owed after a partial write: %v %v", parts, ok)
 	}
-	// A rotation that leaves out setup or grid is refused; Wi-Fi is not
-	// owed (WIFI-del-a2).
+	// A rotation that leaves out setup or grid is refused.
 	for _, parts := range [][]Part{
 		{PartRecovery},
 		{PartGrid, PartRecovery},
-		{PartWiFi, PartGrid, PartRecovery},
-		{PartWiFi, PartSetup, PartRecovery},
+		{PartSetup, PartRecovery},
 	} {
 		if _, err := BeginRotate(x.b, parts, Auth{Code: true, Local: true}, Proof{Recovery: nk}, t0); !errors.Is(err, ErrRotationOwed) {
 			t.Fatalf("rotating %v while setup and grid are owed: %v", parts, err)
@@ -411,17 +403,17 @@ func TestAPartialWriteOwesEveryRotatedPart(t *testing.T) {
 	}
 
 	// The finishing rotation covers them all, and its new values take
-	// effect: the Wi-Fi password the owner now holds is the box's.
-	w2 := x.rotateOnDisplay([]Part{PartWiFi, PartSetup, PartGrid, PartRecovery}, Proof{Recovery: nk})
+	// effect: the setup secret the owner now holds is the box's.
+	w2 := x.rotateOnDisplay([]Part{PartSetup, PartGrid, PartRecovery}, Proof{Recovery: nk})
 	must(t, w2.d.ConfirmAnswers(w2.answers(true)))
 	if _, ok := RotationUnfinished(x.b); ok {
 		t.Fatal("marker left after the finishing rotation")
 	}
 	cur, err = x.b.LoadCard()
 	must(t, err)
-	if cur.WiFiPassword != w2.gen.WiFiPassword || cur.SetupSecret != w2.gen.SetupSecret || cur.SetupCode != w2.gen.SetupCode ||
+	if cur.SetupSecret != w2.gen.SetupSecret || cur.SetupCode != w2.gen.SetupCode ||
 		!bytes.Equal(cur.GridSeed, w2.gen.GridSeed) {
-		t.Fatal("the finishing rotation's Wi-Fi, setup or grid is not in effect")
+		t.Fatal("the finishing rotation's setup or grid is not in effect")
 	}
 	if x.opens(nk) || !x.opens(w2.newKey()) {
 		t.Fatal("after finishing, not exactly the newest key opens")

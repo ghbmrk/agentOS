@@ -45,7 +45,7 @@ func testGen(r io.Reader) (*Card, error) {
 	}
 	seed := make([]byte, 32)
 	io.ReadFull(r, seed)
-	return &Card{WiFiName: "AgentOS-" + sym(4), WiFiPassword: sym(16), SetupSecret: sym(26), SetupCode: sym(8),
+	return &Card{SetupSecret: sym(26), SetupCode: sym(8),
 		VaultPassphrase: strings.Join(ws, " "), GridSeed: seed, RecoveryKey: rk.Text()}, nil
 }
 
@@ -201,10 +201,7 @@ func trimParts(c Card, parts []Part) Card {
 	for _, q := range parts {
 		set[q] = true
 	}
-	out := Card{WiFiName: c.WiFiName}
-	if set[PartWiFi] {
-		out.WiFiPassword = c.WiFiPassword
-	}
+	var out Card
 	if set[PartSetup] {
 		out.SetupSecret, out.SetupCode = c.SetupSecret, c.SetupCode
 	}

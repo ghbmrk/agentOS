@@ -87,7 +87,7 @@ func (b *boot) provision(c *card.Card) error {
 	b.v = v
 	b.t.Cleanup(func() { v.Close() })
 	box := &recovery.Box{VaultPath: filepath.Join(eg, "vault"), KeysPath: filepath.Join(eg, "vault.keys"), V: v}
-	return recovery.Provision(box, recovery.Card{WiFiName: c.WiFiName, WiFiPassword: c.WiFiPassword, SetupSecret: c.SetupSecret,
+	return recovery.Provision(box, recovery.Card{SetupSecret: c.SetupSecret,
 		SetupCode: c.SetupCode, VaultPassphrase: c.VaultPassphrase, GridSeed: c.GridSeed, RecoveryKey: c.RecoveryKey},
 		vault.Passphrase(c.VaultPassphrase))
 }
@@ -97,17 +97,13 @@ func (b *boot) answers() (string, string) {
 	return strings.Fields(b.shown.VaultPassphrase)[w-1], strings.Split(b.shown.RecoveryKey, "-")[g-1]
 }
 
-// needles are the card's secrets as the A8 scanner looks for them. The
-// Wi-Fi password is included: this partition has no hostapd file, so
-// nothing may hold it in plaintext (on a real box ARC-1 keeps it root-only
-// in hostapd's file; ASSUMPTIONS.md F11).
+// needles are the card's secrets as the A8 scanner looks for them.
 func needles(c *card.Card) []recovery.Needle {
 	return []recovery.Needle{
 		{Name: "passphrase", Value: []byte(c.VaultPassphrase), Text: true},
 		{Name: "recovery key", Value: []byte(c.RecoveryKey), Text: true},
 		{Name: "setup secret", Value: []byte(c.SetupSecret), Text: true},
 		{Name: "setup code", Value: []byte(c.SetupCode), Text: true},
-		{Name: "wifi password", Value: []byte(c.WiFiPassword), Text: true},
 		{Name: "grid seed", Value: c.GridSeed},
 	}
 }
@@ -297,7 +293,6 @@ func TestCardStepTwoBootsDiffer(t *testing.T) {
 	a, b := bootImage(t, flash()), bootImage(t, flash())
 	ca, cb := a.shown, b.shown
 	for name, pair := range map[string][2]string{
-		"wifi name": {ca.WiFiName, cb.WiFiName}, "wifi password": {ca.WiFiPassword, cb.WiFiPassword},
 		"setup secret": {ca.SetupSecret, cb.SetupSecret}, "setup code": {ca.SetupCode, cb.SetupCode},
 		"passphrase": {ca.VaultPassphrase, cb.VaultPassphrase}, "recovery key": {ca.RecoveryKey, cb.RecoveryKey},
 		"grid seed": {string(ca.GridSeed), string(cb.GridSeed)},

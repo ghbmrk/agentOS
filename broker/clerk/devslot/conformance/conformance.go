@@ -3,8 +3,9 @@
 // the declaration passes devslot.Check, a clean run against the driver's fake
 // device writes only declared shapes, a canary key never leaves the driver,
 // every parser survives bounded, mutated and random replies, no write shape
-// leaves more than MaxFreeTail bytes free unless the driver's tests name it,
-// and the driver's code imports only allowed standard packages (allowedStd).
+// is unprefixed or leaves more than MaxFreeTail bytes free unless the
+// driver's tests name it, and the driver's code imports only allowed standard
+// packages (allowedStd).
 package conformance
 
 import (
@@ -53,10 +54,11 @@ type Config struct {
 	// the image's target (GOOS=linux, its GOARCH, CGO_ENABLED=0, its tags).
 	// The suite starts no process itself (only childproc starts one here).
 	// An empty listing, or one without the driver's own package, fails the
-	// imports check. A forged or partial listing passes, so the driver
-	// repository's review checks the CI command that makes it.
+	// imports check, as does one missing an import of a listed driver
+	// package (a listing made without -deps). A forged listing passes, so
+	// the driver repository's review checks the CI command that makes it.
 	Listing []byte
-	// Wide names the shapes whose free tail is over MaxFreeTail and that the
+	// Wide names the shapes with no prefix or a free tail over MaxFreeTail that the
 	// driver repository's review has judged: the diff that adds a name here
 	// is what that review reads. Every other wide shape fails.
 	Wide []string
@@ -78,7 +80,9 @@ func (p Problem) String() string { return p.Kind + ": " + p.Detail }
 // prefix (Max - len(Prefix)) without being named in Config.Wide: room for an
 // argument or a short tag. A wider shape is a channel to the device that
 // could carry any command under its operation's verb, such as an actuate
-// frame under a read (DEV-4), so a reviewer must judge it.
+// frame under a read (DEV-4), so a reviewer must judge it. A shape with no
+// prefix is wide at any length: it admits every short command, and on a
+// stream its writes join into any sequence, since the limit is per write.
 const MaxFreeTail = 8
 
 // Canary is the key the suite lends: synthetic, and found in nothing.
@@ -104,7 +108,14 @@ func Check(drv devslot.Driver, cfg Config) []Problem {
 		return ps
 	}
 	for _, sh := range d.Shapes {
-		if free := sh.Max - len(sh.Prefix); free > MaxFreeTail && !slices.Contains(cfg.Wide, sh.Name) {
+		if slices.Contains(cfg.Wide, sh.Name) {
+			continue
+		}
+		switch free := sh.Max - len(sh.Prefix); {
+		case len(sh.Prefix) == 0:
+			add("wide-shape", "%s has no prefix, so any frame of up to %d bytes passes; name it in Config.Wide once reviewed",
+				sh.Name, sh.Max)
+		case free > MaxFreeTail:
 			add("wide-shape", "%s leaves %d bytes free after its %d-byte prefix (over %d); name it in Config.Wide once reviewed",
 				sh.Name, free, len(sh.Prefix), MaxFreeTail)
 		}
@@ -406,7 +417,8 @@ func (p listed) other() []string {
 //     package among them, can run processes).
 //
 // It also fails a listing without drvPkg, an entry without an import path,
-// and an entry go list marked incomplete or in error, so an honest slip in
+// an entry go list marked incomplete or in error, and a listing that lacks an
+// import of one of those packages (made without -deps), so an honest slip in
 // the CI command reads as a failure, not as a clean driver.
 func bannedImports(out []byte, drvPkg string) []string {
 	if len(bytes.TrimSpace(out)) == 0 {
@@ -416,6 +428,7 @@ func bannedImports(out []byte, drvPkg string) []string {
 	var bad []string
 	std := map[string]bool{}
 	found := false
+	all := map[string]bool{}
 	for d := json.NewDecoder(bytes.NewReader(out)); d.More(); {
 		var p listed
 		if err := d.Decode(&p); err != nil {
@@ -428,6 +441,7 @@ func bannedImports(out []byte, drvPkg string) []string {
 		case p.Incomplete || p.Error != nil:
 			bad = append(bad, "go list could not load "+p.ImportPath)
 		}
+		all[p.ImportPath] = true
 		found = found || (p.ImportPath == drvPkg && !p.Standard)
 		if p.Standard {
 			std[p.ImportPath] = true
@@ -456,6 +470,8 @@ func bannedImports(out []byte, drvPkg string) []string {
 		}
 		for _, imp := range p.Imports {
 			switch {
+			case !all[imp] && imp != "C":
+				bad = append(bad, "go list listing lacks "+imp+", which "+p.ImportPath+" imports (list with -deps)")
 			case strings.HasPrefix(imp, thisRepo) && !slotSide[imp]:
 				bad = append(bad, p.ImportPath+" imports "+imp+", which is not the slot")
 			case (std[imp] || imp == "C" || !strings.Contains(strings.SplitN(imp, "/", 2)[0], ".")) && !allowedStd[imp]:

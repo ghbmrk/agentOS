@@ -99,6 +99,7 @@ TIER_A_BROKER = {
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     "infer",                      # INFER-SVC: its jail and reply checks keep private text on the box and untrusted output out of recall; covers infer/supervise
+    "edgelink",                   # parses every frame and hello from the edge, and pins the link's TLS (HW-15, #3296)
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check

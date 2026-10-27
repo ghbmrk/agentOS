@@ -19,7 +19,6 @@ import (
 type Part string
 
 const (
-	PartWiFi       Part = "wifi"
 	PartSetup      Part = "setup"
 	PartPassphrase Part = "passphrase"
 	PartGrid       Part = "grid"
@@ -28,13 +27,17 @@ const (
 
 // AllParts is every card secret, for setup's one-line "replace everything
 // on this card" offer for kits others may have handled (REC-4).
-var AllParts = []Part{PartWiFi, PartSetup, PartPassphrase, PartGrid, PartRecovery}
+var AllParts = []Part{PartSetup, PartPassphrase, PartGrid, PartRecovery}
+
+// partWiFi is the Wi-Fi part a rotation mark written before WIFI-del-a2
+// may still owe. The card has no Wi-Fi (CH-9, D-178, WIFI-del-e): the mark's
+// Wi-Fi part is never required or reported, and any finished rotation
+// settles it (WIFI-del-a2-1).
+const partWiFi Part = "wifi"
 
 // Card holds one Owner Card's values, field for field as card.Card (P2-2),
 // which generates and prints them.
 type Card struct {
-	WiFiName        string
-	WiFiPassword    string
 	SetupSecret     string
 	SetupCode       string
 	VaultPassphrase string
@@ -55,10 +58,12 @@ type Generator func(io.Reader) (*Card, error)
 // on. The vault passphrase and the recovery key are never stored, so one
 // vault read (a compromised vault process, or a TPM unlock and one code)
 // yields no factor that opens copies of the drive or backups, or that
-// survives rotating it.
+// survives rotating it. The card has no Wi-Fi since WIFI-del-e (#3365);
+// a card stored before then still carries the Wi-Fi fields, which are read
+// and dropped (a strict decode would lock the box out of its own card).
 type storedCard struct {
-	WiFiName     string
-	WiFiPassword string
+	WiFiName     string `json:",omitempty"`
+	WiFiPassword string `json:",omitempty"`
 	SetupSecret  string
 	SetupCode    string
 	GridSeed     []byte
@@ -67,7 +72,7 @@ type storedCard struct {
 // EncodeCard is the form the vault stores: the card without its vault
 // passphrase and recovery key. Only the vault holds it (CRED-1).
 func EncodeCard(c Card) ([]byte, error) {
-	return json.Marshal(storedCard{c.WiFiName, c.WiFiPassword, c.SetupSecret, c.SetupCode, c.GridSeed})
+	return json.Marshal(storedCard{SetupSecret: c.SetupSecret, SetupCode: c.SetupCode, GridSeed: c.GridSeed})
 }
 
 // DecodeCard reads EncodeCard's output.
@@ -78,7 +83,7 @@ func DecodeCard(b []byte) (Card, error) {
 	if err := d.Decode(&s); err != nil {
 		return Card{}, err
 	}
-	return Card{WiFiName: s.WiFiName, WiFiPassword: s.WiFiPassword, SetupSecret: s.SetupSecret, SetupCode: s.SetupCode, GridSeed: s.GridSeed}, nil
+	return Card{SetupSecret: s.SetupSecret, SetupCode: s.SetupCode, GridSeed: s.GridSeed}, nil
 }
 
 // Provision adds the recovery slot, the backup keys, and the card's
@@ -117,8 +122,10 @@ func storeCard(b *Box, c Card) error {
 	// which matches whole values, covers it in agent-bound output (CRED-7).
 	// The card and its parts go in one write, so no failure or crash
 	// between writes leaves a card secret that no entry matches (#1440).
+	// A "wifi" part entry stored before WIFI-del-e is left as it is: it
+	// still redacts a value that was printed.
 	items := []vault.Item{{Name: CardName, Kind: KindCard, Value: enc}}
-	for _, part := range []struct{ name, v string }{{"wifi", c.WiFiPassword}, {"setup", c.SetupSecret}} {
+	for _, part := range []struct{ name, v string }{{"setup", c.SetupSecret}} {
 		if len(part.v) < vault.MinValueLen {
 			return fmt.Errorf("recovery: card %s too short", part.name)
 		}
@@ -141,12 +148,11 @@ const PendingTTL = 30 * time.Minute
 // card the owner has not typed back from. A cancelled display calls
 // Cancel. It lapses after PendingTTL.
 type Pending struct {
-	mu       sync.Mutex
-	parts    map[Part]bool
-	wifiName string
-	proof    Proof
-	expires  time.Time
-	done     bool
+	mu      sync.Mutex
+	parts   map[Part]bool
+	proof   Proof
+	expires time.Time
+	done    bool
 	// lostMark: an unfinished lost-card rotation this one finishes.
 	lostMark bool
 }
@@ -162,10 +168,6 @@ func (p *Pending) Parts() []Part {
 	}
 	return out
 }
-
-// WiFiName is the box's access point name, which a rotation keeps and
-// the display prints beside a new Wi-Fi password. It is not secret.
-func (p *Pending) WiFiName() string { return p.wifiName }
 
 // Cancel ends a rotation the owner did not confirm: nothing changed, and
 // the typed passphrase is wiped. Commit afterwards is ErrPendingLapsed.
@@ -188,10 +190,6 @@ var ErrRotationOwed = errors.New("recovery: an earlier rotation did not finish")
 // ErrWrongPassphrase is a typed vault passphrase that does not open the
 // drive.
 var ErrWrongPassphrase = errors.New("recovery: that vault passphrase does not open the drive; check it against the card")
-
-// LostCardWiFiNote goes beside the Wi-Fi part on a lost-card rotation,
-// which the page ticks in advance but the owner may untick.
-const LostCardWiFiNote = "Whoever finds your card could join my Wi-Fi. Your devices will need the new password."
 
 // ErrNeedPassphrase is a recovery-key rotation, with the card in hand, on
 // a drive with a passphrase slot but no passphrase given: re-encryption
@@ -257,7 +255,7 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	set := map[Part]bool{}
 	for _, p := range parts {
 		switch p {
-		case PartWiFi, PartSetup, PartPassphrase, PartGrid, PartRecovery:
+		case PartSetup, PartPassphrase, PartGrid, PartRecovery:
 			set[p] = true
 		default:
 			return nil, fmt.Errorf("recovery: unknown card part %q", p)
@@ -265,10 +263,10 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	}
 	// An unfinished rotation's parts are owed: the next rotation replaces
 	// them all, so a lost card's grid and setup secret cannot be left
-	// valid by a narrower one (L3 F3 on #64). The Wi-Fi password is not
-	// owed: the core runs no access point (CH-9, D-178), and the page
-	// offers no Wi-Fi part, so owing it would refuse every rotation on a
-	// box whose mark is unreadable or names it (WIFI-del-a2).
+	// valid by a narrower one (L3 F3 on #64). RotationUnfinished never
+	// reports a Wi-Fi part: the card has none (CH-9, D-178), so owing it
+	// would refuse every rotation on a box whose mark names it
+	// (WIFI-del-a2).
 	lostMark := false
 	if m, ok, err := readMark(b); ok && (err != nil || m.Lost) {
 		lostMark = true
@@ -276,7 +274,7 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	if owed, ok := RotationUnfinished(b); ok {
 		var missing []string
 		for _, q := range owed {
-			if q != PartRefresh && q != PartWiFi && !set[q] {
+			if q != PartRefresh && !set[q] {
 				missing = append(missing, string(q))
 			}
 		}
@@ -308,21 +306,18 @@ func BeginRotate(b *Box, parts []Part, auth Auth, proof Proof, now time.Time) (*
 	if set[PartRecovery] && !set[PartPassphrase] && len(proof.Passphrase) == 0 && hasSlot(b, vault.SlotPassphrase) {
 		return nil, ErrNeedPassphrase
 	}
-	cur, err := b.LoadCard()
-	if err != nil {
+	if _, err := b.LoadCard(); err != nil {
 		return nil, err
 	}
 	// Pending keeps its own copy of a typed passphrase, wiped when done.
 	proof.Passphrase = append([]byte(nil), proof.Passphrase...)
-	return &Pending{parts: set, wifiName: cur.WiFiName, proof: proof, expires: now.Add(PendingTTL), lostMark: lostMark}, nil
+	return &Pending{parts: set, proof: proof, expires: now.Add(PendingTTL), lostMark: lostMark}, nil
 }
 
 // checkNext reports whether next carries a well-formed value for each
-// rotated part and nothing for the others (the Wi-Fi name is ignored:
-// the box keeps its own).
+// rotated part and nothing for the others.
 func (p *Pending) checkNext(next Card) error {
 	has := map[Part]bool{
-		PartWiFi:       next.WiFiPassword != "",
 		PartSetup:      next.SetupSecret != "" || next.SetupCode != "",
 		PartPassphrase: next.VaultPassphrase != "",
 		PartGrid:       len(next.GridSeed) > 0,
@@ -335,9 +330,6 @@ func (p *Pending) checkNext(next Card) error {
 	}
 	if p.parts[PartSetup] && (next.SetupSecret == "" || next.SetupCode == "") {
 		return fmt.Errorf("%w: %s", ErrNextCard, PartSetup)
-	}
-	if p.parts[PartWiFi] && len(strings.ReplaceAll(next.WiFiPassword, "-", "")) < 4 {
-		return fmt.Errorf("%w: %s", ErrNextCard, PartWiFi)
 	}
 	if p.parts[PartRecovery] {
 		if _, err := ParseRecoveryKey(next.RecoveryKey); err != nil {
@@ -377,9 +369,8 @@ func GridCheck(seed []byte) string {
 // effect; the display calls it from its Provision step, once the owner
 // has typed back values from the saved card (HW-1). The passphrase and recovery slots are rewritten first,
 // then the backup key (bound to the new recovery slot), then the card's
-// stored values. The caller applies a new Wi-Fi password to the access
-// point last, with a note that devices must rejoin, and after a new grid
-// clears spent cells (EndSession). If a step fails after the first slot
+// stored values. After a new grid the caller clears spent cells
+// (EndSession). If a step fails after the first slot
 // is rewritten, Commit returns the parts already in effect with
 // ErrCardNotStored, and every rotated part stays owed in the rotation
 // marker, so the next rotation must replace them all. Rotation protects only against copies made
@@ -412,7 +403,7 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 	if err != nil {
 		return Done{}, err
 	}
-	in := Card{WiFiName: cur.WiFiName}
+	var in Card
 	wrote := false
 	var done Done
 	fail := func(err error) (Done, error) {
@@ -432,7 +423,7 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 		}
 	}
 	// Everything this commit owes once its first slot is written: every
-	// rotated part, since Wi-Fi, setup and grid take effect only at
+	// rotated part, since setup and grid take effect only at
 	// storeCard after the slots, so a finishing rotation must replace them
 	// too (#1090 review F3); a lost card's setup secret and grid; and the
 	// re-encryption.
@@ -518,9 +509,6 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 		}
 	}
 	stored := cur
-	if p.parts[PartWiFi] {
-		stored.WiFiPassword = next.WiFiPassword
-	}
 	if p.parts[PartSetup] {
 		stored.SetupSecret, stored.SetupCode = next.SetupSecret, next.SetupCode
 	}
@@ -537,16 +525,14 @@ func (p *Pending) Commit(b *Box, next Card, now time.Time) (Done, error) {
 	for q := range p.parts {
 		finished = append(finished, q)
 	}
-	// Any finished rotation settles an owed Wi-Fi part, which nothing
-	// asks for any more (CH-9, D-178), so the mark clears and Backup
-	// resumes.
-	if !p.parts[PartWiFi] {
-		finished = append(finished, PartWiFi)
-	}
+	// Any finished rotation settles an owed Wi-Fi part from before
+	// WIFI-del-a2, which nothing asks for any more (CH-9, D-178), so the
+	// mark clears and Backup resumes.
+	finished = append(finished, partWiFi)
 	if err := clearRotation(b, finished); err != nil {
 		return fail(err)
 	}
-	in.WiFiPassword, in.SetupSecret, in.SetupCode, in.GridSeed = next.WiFiPassword, next.SetupSecret, next.SetupCode, next.GridSeed
+	in.SetupSecret, in.SetupCode, in.GridSeed = next.SetupSecret, next.SetupCode, next.GridSeed
 	done.Card = in
 	return done, nil
 }
@@ -800,8 +786,6 @@ func DoneNotes(parts []Part, lost bool) []string {
 			}
 		case PartPassphrase:
 			out = append(out, "Copies of the drive made before now still open with the old passphrase. Destroy the old card's passphrase sheet.")
-		case PartWiFi:
-			out = append(out, "My Wi-Fi password changes now. Rejoin with the new card.")
 		case PartGrid:
 			out = append(out, "Destroy the old grid. Its cells no longer work.")
 		}
@@ -946,11 +930,19 @@ func containsPart(ps []Part, p Part) bool {
 
 // RotationUnfinished reports the parts an unfinished rotation still owes,
 // for the local page to resume it; PartRefresh asks for Finish securing
-// the box (Refresh). An unreadable marker owes everything.
+// the box (Refresh). An unreadable marker owes everything. A Wi-Fi part
+// from before WIFI-del-a2 is never reported: nothing can replace it, and a
+// mark that owes only it owes nothing.
 func RotationUnfinished(b *Box) ([]Part, bool) {
 	m, ok, err := readMark(b)
 	if err != nil {
 		return append(append([]Part(nil), AllParts...), PartRefresh), true
 	}
-	return m.Parts, ok
+	var owed []Part
+	for _, q := range m.Parts {
+		if q != partWiFi {
+			owed = append(owed, q)
+		}
+	}
+	return owed, ok && len(owed) > 0
 }

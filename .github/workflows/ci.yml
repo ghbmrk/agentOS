@@ -430,6 +430,17 @@ jobs:
             github.com/ghbmrk/agentos/broker/owner/kernelsock.TestOnlyTheKernelsUIDIsCalled \
             github.com/ghbmrk/agentos/broker/owner/kernelsock.TestNoThreadKeepsTheOwnerSidesUID || exit 1
           [ "$rc" -eq 0 ]
+      - name: the mail clerk's process under its own uid (MAIL-main-a)
+        # Root runs the built main as nobody with distinct peers: the owner side is served, every other
+        # peer refused, and the process is non-dumpable. The test skips off root, so the step fails unless it ran.
+        working-directory: broker
+        run: |
+          rc=0
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            go test -count=1 -json -run '^TestRealMailClerkAsRoot$' ./cmd/agentos-clerk-mail > /tmp/clerk-mail-test.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/clerk-mail-test.json \
+            github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail.TestRealMailClerkAsRoot || exit 1
+          [ "$rc" -eq 0 ]
       - name: OpenClaw guest under gVisor (P1-7)
         # Real OpenClaw, pinned by version and hash, as an agent machine with
         # only its broker socket; a scripted model stands in for a provider.

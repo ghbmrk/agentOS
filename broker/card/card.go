@@ -1,8 +1,9 @@
 // Package card generates and prints the Owner Card (SPEC §3.1, PLAN P2-2):
-// the box's Wi-Fi name and password with a QR code that joins it, the setup
-// secret and its short setup code, the vault passphrase with its QR code,
+// the setup secret and its short setup code, the vault passphrase with its QR code,
 // and two detachable sheets, the paper approval-code grid (CH-4) and the
-// recovery key (REC-1). The card is also the manual (ONB-7).
+// recovery key (REC-1). The card is also the manual (ONB-7). It carries no
+// Wi-Fi: the core serves none, and only the enforcer holds the Owner
+// network's password (CH-9, D-178).
 //
 // Generation and printing need nothing outside this package: no network, no
 // service (ONB-1, DEP-2). Provisioning the drive from a card (vault slots,
@@ -30,10 +31,6 @@ const Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 const (
 	// PassphraseWords from the 7,776-word list: 90 bits, above §3.1's 80.
 	PassphraseWords = 7
-	// wifiSymbols: 80 bits. With WPA3-SAE an offline guess is not
-	// possible; 80 bits also holds under the WPA2 opt-in (CH-7), whose
-	// handshake can be attacked offline.
-	wifiSymbols = 16
 	// setupSymbols: 130 bits.
 	setupSymbols = 26
 	// setupCodeSymbols: 40 bits, guessable only online through the box's
@@ -42,15 +39,11 @@ const (
 	// The recovery key is 160 bits, printed as 40 symbols with checks
 	// (recoverykey.go).
 	gridSeedBytes = 32
-	nameSymbols   = 4
 )
 
 // Card holds one Owner Card's values. Everything but GridSeed is printed;
 // the grid is printed as its cells (owner.GridCell).
 type Card struct {
-	// WiFiName is the box's access point name (CH-7). Not secret.
-	WiFiName        string
-	WiFiPassword    string
 	SetupSecret     string
 	SetupCode       string
 	VaultPassphrase string
@@ -62,14 +55,6 @@ type Card struct {
 // production (crypto/rand.Reader).
 func Generate(r io.Reader) (*Card, error) {
 	sym := func(n int) (string, error) { return symbols(r, n) }
-	name, err := sym(nameSymbols)
-	if err != nil {
-		return nil, err
-	}
-	wifi, err := sym(wifiSymbols)
-	if err != nil {
-		return nil, err
-	}
 	setup, err := sym(setupSymbols)
 	if err != nil {
 		return nil, err
@@ -87,8 +72,6 @@ func Generate(r io.Reader) (*Card, error) {
 		return nil, err
 	}
 	c := &Card{
-		WiFiName:        "AgentOS-" + name,
-		WiFiPassword:    group(wifi, 4),
 		SetupSecret:     group(setup, 4),
 		VaultPassphrase: pass,
 		GridSeed:        seed,
@@ -112,16 +95,8 @@ func (c *Card) Validate() error {
 		}
 		return nil
 	}
-	if !strings.HasPrefix(c.WiFiName, "AgentOS-") {
-		return errors.New("card: Wi-Fi name")
-	}
-	for _, e := range []error{
-		check("Wi-Fi password", c.WiFiPassword, wifiSymbols),
-		check("setup secret", c.SetupSecret, setupSymbols),
-	} {
-		if e != nil {
-			return e
-		}
+	if err := check("setup secret", c.SetupSecret, setupSymbols); err != nil {
+		return err
 	}
 	if !recoveryKeyOK(c.RecoveryKey) {
 		return errors.New("card: recovery key format or check symbols")
@@ -226,7 +201,8 @@ func group(s string, n int) string {
 }
 
 // WiFiQR is the standard Wi-Fi joining payload phone cameras read. T:WPA
-// covers WPA2 and WPA3 networks on current iOS and Android.
+// covers WPA2 and WPA3 networks on current iOS and Android. The card prints
+// none; the claim sticker uses it for the enforcer's setup network.
 func WiFiQR(ssid, password string) string {
 	esc := strings.NewReplacer(`\`, `\\`, `;`, `\;`, `,`, `\,`, `:`, `\:`, `"`, `\"`)
 	return "WIFI:T:WPA;S:" + esc.Replace(ssid) + ";P:" + esc.Replace(password) + ";;"

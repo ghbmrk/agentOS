@@ -68,7 +68,7 @@ func (x *rig) answers() (string, string) {
 
 // secrets are the card's printed and stored secret values.
 func secrets(c *Card) map[string]string {
-	return map[string]string{"wifi": c.WiFiPassword, "setup secret": c.SetupSecret, "setup code": c.SetupCode,
+	return map[string]string{"setup secret": c.SetupSecret, "setup code": c.SetupCode,
 		"passphrase": c.VaultPassphrase, "recovery key": c.RecoveryKey, "grid seed": fmt.Sprintf("%x", c.GridSeed),
 		"grid check": GridCheck(c.GridSeed)}
 }
@@ -200,9 +200,6 @@ func TestDisplayFreshCards(t *testing.T) {
 			t.Fatalf("two displays share the %s", name)
 		}
 	}
-	if a.gen.WiFiName == b.gen.WiFiName {
-		t.Fatal("two displays share the Wi-Fi name")
-	}
 }
 
 func TestNewDisplayNeedsProvision(t *testing.T) {
@@ -323,34 +320,5 @@ func TestCardFormatsRedacted(t *testing.T) {
 		if strings.Contains(s, v) {
 			t.Fatalf("card formats its %s", name)
 		}
-	}
-}
-
-// #1185: at the confirm the box's Wi-Fi switches to the card's, so the
-// first card's page tells the phone to rejoin with the card's Wi-Fi QR
-// code before it confirms. A rotation's page does not: the switch is the
-// first card's only.
-func TestTheCardPageSaysToRejoinWithTheCardsWiFi(t *testing.T) {
-	const rejoin = "join that Wi-Fi with your card's Wi-Fi QR code"
-	x := newRig(t)
-	body := do(t, x.d.Handler(paired, "/setup"), "GET", "/card", nil, true, nil).Body.String()
-	at, confirm := strings.Index(body, rejoin), strings.Index(body, `type="submit">Confirm`)
-	if at < 0 || confirm < 0 || at > confirm {
-		t.Fatalf("the rejoin text is missing or after the confirm (%d, %d)", at, confirm)
-	}
-	y := newRotRig(t, Parts{WiFi: true})
-	if body := do(t, y.d.Handler(paired, "/home"), "GET", "/rotate/card", nil, true, nil).Body.String(); strings.Contains(body, rejoin) {
-		t.Fatal("a rotation's page tells the phone to rejoin")
-	}
-}
-
-// #1526 U-1: a Wi-Fi rotation's page says to rejoin and reload this page,
-// which re-requests the done page; Home does not offer that page again.
-func TestTheWiFiRotationPageSaysToReload(t *testing.T) {
-	y := newRotRig(t, Parts{WiFi: true})
-	body := do(t, y.d.Handler(paired, "/rotate/done"), "GET", "/rotate/card", nil, true, nil).Body.String()
-	const want = "Your phone drops off it: rejoin with this card's Wi-Fi QR code, or its name and password, then reload this page."
-	if !strings.Contains(body, want) || strings.Contains(body, "open my box page again") {
-		t.Fatalf("rotation rejoin text: %s", body)
 	}
 }

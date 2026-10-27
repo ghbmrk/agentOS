@@ -56,10 +56,6 @@ type rotation struct {
 	// dead are IDs cancelled while not waiting (most recent last), so a
 	// begin arriving after its own cancel is refused.
 	dead []string
-	// wifi is the network the latest Wi-Fi commit put in effect, for
-	// agentosd to take once over the verify socket (#1522). drop leaves
-	// it: a commit drops its rotation and then holds this.
-	wifi *heldWiFi
 }
 
 // maxDead bounds rotation.dead: the page cancels at most one begin it
@@ -111,11 +107,10 @@ func (r *rotation) drop() {
 }
 
 // rotateCommit is the new card's rotated parts, as the display sends
-// them; the Wi-Fi name never changes, so it is not sent.
+// them.
 type rotateCommit struct {
 	// ID is the rotation's ID, from its begin.
 	ID              string `json:"id"`
-	WiFiPassword    string `json:"wifi_password,omitempty"`
 	SetupSecret     string `json:"setup_secret,omitempty"`
 	SetupCode       string `json:"setup_code,omitempty"`
 	VaultPassphrase string `json:"vault_passphrase,omitempty"`
@@ -124,7 +119,7 @@ type rotateCommit struct {
 }
 
 func (n rotateCommit) card() recovery.Card {
-	return recovery.Card{WiFiPassword: n.WiFiPassword, SetupSecret: n.SetupSecret, SetupCode: n.SetupCode,
+	return recovery.Card{SetupSecret: n.SetupSecret, SetupCode: n.SetupCode,
 		VaultPassphrase: n.VaultPassphrase, GridSeed: n.GridSeed, RecoveryKey: n.RecoveryKey}
 }
 
@@ -132,7 +127,7 @@ var (
 	errNoCard          = uerr(http.StatusConflict, "I keep no Owner Card, so there is nothing to rotate")
 	errNoRotation      = uerr(http.StatusGone, "no new card is waiting; nothing changed, start again")
 	errRotationLapsed  = uerr(http.StatusGone, "this new card has lapsed; nothing changed, start again")
-	errRotationParts   = uerr(http.StatusBadRequest, "choose the card parts to replace: wifi, setup, passphrase, grid, recovery")
+	errRotationParts   = uerr(http.StatusBadRequest, "choose the card parts to replace: setup, passphrase, grid, recovery")
 	errRotationID      = uerr(http.StatusBadRequest, "this request names no rotation; start again")
 	errRotationGone    = uerr(http.StatusGone, "this new card was cancelled; nothing changed, start again")
 	errWrongRecovery   = uerr(http.StatusForbidden, "that recovery key does not open this drive")
@@ -213,7 +208,7 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 	for _, s := range req.Parts {
 		p := recovery.Part(s)
 		switch p {
-		case recovery.PartWiFi, recovery.PartSetup, recovery.PartPassphrase, recovery.PartGrid, recovery.PartRecovery:
+		case recovery.PartSetup, recovery.PartPassphrase, recovery.PartGrid, recovery.PartRecovery:
 		default:
 			return nil, errRotationParts
 		}
@@ -231,7 +226,6 @@ func (c *custody) beginRotation(req rotateBegin) (*recovery.Pending, error) {
 		return nil, errRotationGone
 	}
 	r.drop()
-	r.wifi = nil
 	b, err := c.rotBox()
 	if err != nil {
 		return nil, err
@@ -314,14 +308,7 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		r.drop()
 		return recovery.Done{}, nil, false, errNoRotation
 	}
-	parts, lost, ssid := p.Parts(), p.Lost(), p.WiFiName()
-	// Both a clean commit and one that stopped after a slot (409) show
-	// the new card as in effect, so both hold its Wi-Fi network.
-	hold := func() {
-		if slices.Contains(parts, recovery.PartWiFi) {
-			r.wifi = &heldWiFi{ssid: ssid, password: next.WiFiPassword, until: c.now().Add(wifiHold)}
-		}
-	}
+	parts, lost := p.Parts(), p.Lost()
 	done, err := p.Commit(r.box, next.card(), c.now())
 	switch {
 	case err == nil:
@@ -332,7 +319,6 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		return recovery.Done{}, nil, false, errRotationLapsed
 	case errors.Is(err, recovery.ErrCardNotStored):
 		r.drop()
-		hold()
 		c.notify(noteRotationPartly)
 		return recovery.Done{}, nil, false, errCardInEffect
 	default:
@@ -342,40 +328,12 @@ func (c *custody) commitRotation(next rotateCommit) (recovery.Done, []recovery.P
 		return recovery.Done{}, nil, false, errNoRotation
 	}
 	r.drop()
-	hold()
 	names := make([]string, len(parts))
 	for i, q := range parts {
 		names[i] = string(q)
 	}
 	c.notify("the Owner Card was replaced on the local page: " + strings.Join(names, ", "))
 	return done, parts, lost, nil
-}
-
-// heldWiFi is a committed rotation's Wi-Fi network, waiting for
-// agentosd to write it to ap-net.json (#1522).
-type heldWiFi struct {
-	ssid, password string
-	until          time.Time
-}
-
-// wifiHold is how long a committed Wi-Fi network waits for agentosd. The
-// page hands off right after the commit's reply, so minutes are ample.
-const wifiHold = 5 * time.Minute
-
-// takeRotatedWiFi gives the network the latest Wi-Fi commit put in
-// effect, once, and only while it has not lapsed: it is agentosd's
-// one-shot permit to rewrite ap-net.json (#1522), so a page session alone
-// cannot change the access point's network.
-func (c *custody) takeRotatedWiFi() (ssid, password string, ok bool) {
-	r := &c.rot
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	w := r.wifi
-	r.wifi = nil
-	if w == nil || c.now().After(w.until) {
-		return "", "", false
-	}
-	return w.ssid, w.password, true
 }
 
 // cancelRotation drops the pending rotation named id (the display's
@@ -469,7 +427,7 @@ func rotationRoutes(mux *http.ServeMux, c *custody, read func(http.ResponseWrite
 		for _, q := range p.Parts() {
 			parts = append(parts, string(q))
 		}
-		reply(w, http.StatusOK, map[string]any{"id": req.ID, "parts": parts, "wifi_name": p.WiFiName(), "lost": p.Lost(),
+		reply(w, http.StatusOK, map[string]any{"id": req.ID, "parts": parts, "lost": p.Lost(),
 			"expires": c.now().Add(recovery.PendingTTL).UTC().Format(time.RFC3339)})
 	})
 	mux.HandleFunc("/rotate/commit", func(w http.ResponseWriter, r *http.Request) {

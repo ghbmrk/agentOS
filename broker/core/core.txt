@@ -63,6 +63,10 @@ wiring cmd/agentos-kernel
 # store, its slots, the log's counter anchor and the TPM pins, and rotates the
 # policy key or deletes the store later.
 wiring cmd/agentos-enroll
+# The mail clerk's process (MAIL-main-a, #3417): its key from the kernel on
+# descriptor 3, the owner's anchors from a file only root writes (D-146), and
+# the kernel's, the owner side's and the planner's sockets.
+wiring cmd/agentos-clerk-mail
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.

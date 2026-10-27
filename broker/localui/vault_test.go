@@ -290,7 +290,7 @@ func TestScanPassphraseFromCardPhoto(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wifi := card.WiFiQR(c.WiFiName, c.WiFiPassword)
+	wifi := oldCardWiFiQR
 	// The whole card: the Wi-Fi code is skipped, the passphrase found.
 	got, err := ScanPassphrase(cardPhoto(t, wifi, c.VaultPassphrase))
 	if err != nil || got != c.VaultPassphrase {
@@ -355,7 +355,7 @@ func TestVaultUnlockByPhotoThenCode(t *testing.T) {
 		t.Fatal("sign-in page does not link the vault unlock")
 	}
 
-	wifi := card.WiFiQR(r.card.WiFiName, r.card.WiFiPassword)
+	wifi := oldCardWiFiQR
 	res := r.upload(cardPhoto(t, wifi, r.card.VaultPassphrase), "")
 	if res.Code != http.StatusSeeOther || res.Location != "/unlock/vault" {
 		t.Fatalf("passphrase post: %d %s\n%s", res.Code, res.Location, res.Body)
@@ -408,7 +408,7 @@ func TestVaultUnlockByPhotoThenCode(t *testing.T) {
 func TestVaultUnlockByTypedWords(t *testing.T) {
 	r, fv := vaultRig(t)
 	// The photo holds only the Wi-Fi code; the typed words are used.
-	res := r.upload(cardPhoto(t, card.WiFiQR(r.card.WiFiName, r.card.WiFiPassword)), "  "+strings.ToUpper(r.card.VaultPassphrase)+" ")
+	res := r.upload(cardPhoto(t, oldCardWiFiQR), "  "+strings.ToUpper(r.card.VaultPassphrase)+" ")
 	if res.Code != http.StatusSeeOther || len(fv.unlocks) != 1 {
 		t.Fatalf("typed: %d %v\n%s", res.Code, fv.unlocks, res.Body)
 	}
@@ -421,7 +421,7 @@ func TestVaultUnlockByTypedWords(t *testing.T) {
 // page.
 func TestVaultUnlockRefusals(t *testing.T) {
 	r, fv := vaultRig(t)
-	wifi := card.WiFiQR(r.card.WiFiName, r.card.WiFiPassword)
+	wifi := oldCardWiFiQR
 	cases := []struct {
 		photo []byte
 		typed string
@@ -961,3 +961,8 @@ func TestVaultInterruptedPassphraseChange(t *testing.T) {
 		t.Fatalf("other phone:\n%s", page)
 	}
 }
+
+// oldCardWiFiQR stands for the Wi-Fi code on an Owner Card printed before
+// WIFI-del-e (#3365): the card no longer has one, but the scan still skips
+// it beside the passphrase code. Synthetic.
+var oldCardWiFiQR = card.WiFiQR("SYNTH-OLD1", "SYNT-HETI-COLD-CARD")
