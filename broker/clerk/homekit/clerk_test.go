@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // REQ: DEV-3, DEV-4, DEV-5, DEV-8, DEV-10, CLK-1, NET-2, A16
@@ -82,6 +85,21 @@ type dials struct {
 	n     int
 	addrs []string
 	taps  []*tapConn
+	wrap  func(net.Conn) net.Conn
+}
+
+// setupKey keys the test's guard pin for testAddr before pair-setup.
+var setupKey = sha256.Sum256([]byte("homekit-test-setup-pin"))
+
+// guardFor is a guard whose final connect is connect and that pins testAddr
+// as a device, as the host does for the connect step.
+func guardFor(t *testing.T, connect func(ctx context.Context, addr string) (net.Conn, error)) *netguard.Policy {
+	t.Helper()
+	g := netguard.New(netguard.Config{Connect: func(ctx context.Context, _, addr string) (net.Conn, error) { return connect(ctx, addr) }})
+	if err := g.SetPins([]netguard.Pin{{Kind: netguard.PinDevice, Addr: netip.MustParseAddrPort(testAddr), Key: setupKey}}); err != nil {
+		t.Fatal(err)
+	}
+	return g
 }
 
 // newClerk is a clerk over the sealed store whose dial reaches acc.
@@ -92,15 +110,19 @@ func newClerk(t *testing.T, acc *fakeAccessory, b *bus) (*Clerk, *dials) {
 		t.Fatal(err)
 	}
 	d := &dials{}
-	c := &Clerk{Keys: kh, Emit: b.emit, Log: b.log, Dial: func(ctx context.Context, addr string) (net.Conn, error) {
+	c := &Clerk{Keys: kh, Emit: b.emit, Log: b.log, Guard: guardFor(t, func(ctx context.Context, addr string) (net.Conn, error) {
 		tap := acc.connect(t)
 		d.mu.Lock()
 		d.n++
 		d.addrs = append(d.addrs, addr)
 		d.taps = append(d.taps, tap)
+		wrap := d.wrap
 		d.mu.Unlock()
+		if wrap != nil {
+			return wrap(tap), nil
+		}
 		return tap, nil
-	}}
+	})}
 	return c, d
 }
 
@@ -279,12 +301,12 @@ func TestHungAccessoryTimesOut(t *testing.T) {
 	b := &bus{}
 	kh, _ := NewSealedKeyHolder(sealedStore(t, nil).DeviceKey(ctrlSlot))
 	var peers []net.Conn
-	c := &Clerk{Keys: kh, Emit: b.emit, Timeout: 50 * time.Millisecond, Dial: func(context.Context, string) (net.Conn, error) {
+	c := &Clerk{Keys: kh, Emit: b.emit, Timeout: 50 * time.Millisecond, Guard: guardFor(t, func(context.Context, string) (net.Conn, error) {
 		a, p := net.Pipe()
 		peers = append(peers, p)
 		t.Cleanup(func() { a.Close(); p.Close() })
 		return a, nil
-	}}
+	})}
 	start := time.Now()
 	if _, err := c.Connect(context.Background(), "hall", testAddr, testCode); err == nil {
 		t.Fatal("connect to a silent peer succeeded")
@@ -316,7 +338,7 @@ func TestHungAccessoryTimesOut(t *testing.T) {
 		t.Fatalf("poll took %v", time.Since(start))
 	}
 
-	l2, err := (&Clerk{Keys: c2.Keys, Dial: c2.Dial, Emit: b.emit}).Open(context.Background(), dev)
+	l2, err := (&Clerk{Keys: c2.Keys, Guard: c2.Guard, Emit: b.emit}).Open(context.Background(), dev)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,11 +537,11 @@ func TestControllerKeyNeverLeavesClerk(t *testing.T) {
 	acc := newFakeAccessory(t)
 	b := &bus{}
 	var taps []*tapConn
-	c := &Clerk{Keys: kh, Emit: b.emit, Log: b.log, Dial: func(context.Context, string) (net.Conn, error) {
+	c := &Clerk{Keys: kh, Emit: b.emit, Log: b.log, Guard: guardFor(t, func(context.Context, string) (net.Conn, error) {
 		tap := acc.connect(t)
 		taps = append(taps, tap)
 		return tap, nil
-	}}
+	})}
 	var out bytes.Buffer
 	note := func(err error) {
 		if err != nil {
@@ -597,13 +619,9 @@ func (s slowConn) Write(p []byte) (int, error) {
 // probe, /mnt/project-files/builds/2026-10-27-pr3335-concurrent-step-deadline_test.go).
 func TestConcurrentStepsAreEachBounded(t *testing.T) {
 	acc := newFakeAccessory(t)
-	c, _ := newClerk(t, acc, &bus{})
-	inner := c.Dial
+	c, d := newClerk(t, acc, &bus{})
 	var slow, stall atomic.Bool
-	c.Dial = func(ctx context.Context, addr string) (net.Conn, error) {
-		cn, err := inner(ctx, addr)
-		return slowConn{cn, &slow, &stall}, err
-	}
+	d.wrap = func(cn net.Conn) net.Conn { return slowConn{cn, &slow, &stall} }
 	dev := connectOne(t, c)
 	l, err := c.Open(context.Background(), dev)
 	if err != nil {
@@ -743,4 +761,43 @@ func valuesFor(n int) []byte {
 	}
 	b.WriteString(`]}`)
 	return []byte(b.String())
+}
+
+func TestDialsGoThroughTheGuard(t *testing.T) {
+	acc := newFakeAccessory(t)
+	c, d := newClerk(t, acc, &bus{})
+	// No pin for the address: denied before any connect.
+	c.Guard.SetPins(nil)
+	if _, err := c.Connect(context.Background(), "hall", testAddr, testCode); !errors.Is(err, netguard.ErrDenied) {
+		t.Fatalf("unpinned address: %v", err)
+	}
+	// A pin of another kind does not admit a device dial.
+	c.Guard.SetPins([]netguard.Pin{{Kind: netguard.PinBackup, Addr: netip.MustParseAddrPort(testAddr), Key: setupKey}})
+	if _, err := c.Connect(context.Background(), "hall", testAddr, testCode); !errors.Is(err, netguard.ErrDenied) {
+		t.Fatalf("backup pin admitted a device dial: %v", err)
+	}
+	if d.n != 0 || acc.tries != 0 {
+		t.Fatalf("%d connects, %d tries through a refusing guard", d.n, acc.tries)
+	}
+	// After pairing, the device's own pin is the only one needed.
+	c.Guard.SetPins([]netguard.Pin{{Kind: netguard.PinDevice, Addr: netip.MustParseAddrPort(testAddr), Key: setupKey}})
+	dev := connectOne(t, c)
+	gp, err := dev.GuardPin()
+	if err != nil || gp.Kind != netguard.PinDevice || gp.Addr.String() != testAddr || gp.Key != sha256.Sum256(dev.Pin.LTPK) {
+		t.Fatalf("guard pin %+v: %v", gp, err)
+	}
+	c.Guard.SetPins([]netguard.Pin{gp})
+	l, err := c.Open(context.Background(), dev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Close()
+	if _, err := (Device{Addr: testAddr}).GuardPin(); !errors.Is(err, ErrRefused) {
+		t.Fatalf("guard pin of an unpaired device: %v", err)
+	}
+	// No guard, no dial.
+	c.Guard = nil
+	if _, err := c.Open(context.Background(), dev); !errors.Is(err, ErrRefused) {
+		t.Fatalf("open with no guard: %v", err)
+	}
 }

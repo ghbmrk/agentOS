@@ -2,6 +2,7 @@ package homekit
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -9,6 +10,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // DefaultTimeout bounds each dial and each exchange with an accessory
@@ -41,6 +44,18 @@ type Device struct {
 	Off    bool
 }
 
+// GuardPin is the guard's pin for a paired device (DEV-2 exception 3): its
+// address, keyed by the SHA-256 of the pinned accessory key. The host sets
+// it on the Guard; before pair-setup no accessory key exists, so the pin
+// the host sets for the connect step is the host's (b2, HK-21).
+func (d Device) GuardPin() (netguard.Pin, error) {
+	ap, err := netip.ParseAddrPort(d.Addr)
+	if err != nil || !d.Pin.Valid() {
+		return netguard.Pin{}, fmt.Errorf("%w: device has no pinned address and key", ErrRefused)
+	}
+	return netguard.Pin{Kind: netguard.PinDevice, Addr: ap, Key: sha256.Sum256(d.Pin.LTPK)}, nil
+}
+
 // Label is an event's data-flow label: always private (PLN-3).
 const Label = "private"
 
@@ -61,8 +76,10 @@ type Event struct {
 // (ThermostatRows); the clerk performs only what the kernel admitted.
 type Clerk struct {
 	Keys KeyHolder
-	// Dial reaches one pinned address; nil dials TCP with Timeout.
-	Dial func(ctx context.Context, addr string) (net.Conn, error)
+	// Guard is the home-network address guard (DEV-2): every dial goes
+	// through it with PurposeDevice, so it reaches only an address the host
+	// pinned as a PinDevice (GuardPin). Nil dials nothing.
+	Guard *netguard.Policy
 	// Timeout bounds each dial and exchange; 0 is DefaultTimeout.
 	Timeout time.Duration
 	// Emit puts one event on the bus.
@@ -110,13 +127,11 @@ func (c *Clerk) dial(ctx context.Context, addr string) (net.Conn, func(), error)
 		return nil, nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout())
-	var conn net.Conn
-	var err error
-	if c.Dial != nil {
-		conn, err = c.Dial(ctx, addr)
-	} else {
-		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if c.Guard == nil {
+		cancel()
+		return nil, nil, fmt.Errorf("%w: no network guard", ErrRefused)
 	}
+	conn, err := c.Guard.DialContext(netguard.WithPurpose(ctx, netguard.PurposeDevice), "tcp", addr)
 	if err != nil {
 		cancel()
 		return nil, nil, err
