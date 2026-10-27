@@ -6,6 +6,8 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -554,5 +556,53 @@ func TestPassphraseFormsAndSlotKeys(t *testing.T) {
 	os.Remove(filepath.Join(d.esp(), "leak.bin"))
 	if _, err := run(d.store, d.rk, d.rkText, "another synthetic passphrase", shippedClerks, []string{d.esp()}, &out); err != nil || !strings.Contains(out.String(), "skip passphrase slot key") {
 		t.Errorf("a wrong passphrase: %v\n%s", err, out.String())
+	}
+}
+
+// The tool's own reading of the card format gives the key card gives, for
+// any key and however it is typed; a mistyped group is refused by both and
+// named the same; a passphrase splits into the words card's normal form
+// holds.
+func TestCardFormatMatchesCard(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		var b [20]byte
+		rand.Read(b[:])
+		text := card.RecoveryKeyText(b)
+		for _, typed := range []string{text, strings.ToLower(strings.ReplaceAll(text, "-", " ")), strings.ReplaceAll(text, "-", "")} {
+			want, err := card.StoreRecoveryKey(typed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := storeRecoveryKey(typed)
+			if err != nil || !bytes.Equal(got, want) {
+				t.Fatalf("%q: a8scan reads %x, card %x (%v)", typed, got, want, err)
+			}
+			printed, bits, _ := cardKey(typed)
+			if printed != text || !bytes.Equal(bits, b[:]) {
+				t.Fatalf("%q: printed %q, bits %x", typed, printed, bits)
+			}
+		}
+		// One symbol changed in group g.
+		g := i % 8
+		pos := g*6 + i%5
+		sym := strings.IndexByte(cardAlphabet, text[pos])
+		bad := text[:pos] + string(cardAlphabet[(sym+1+i%31)%32]) + text[pos+1:]
+		_, cerr := card.StoreRecoveryKey(bad)
+		var me *card.MistypedError
+		_, err := storeRecoveryKey(bad)
+		if !errors.As(cerr, &me) || err == nil || !strings.Contains(err.Error(), fmt.Sprintf("group %d ", me.Group)) {
+			t.Fatalf("%q: card %v, a8scan %v", bad, cerr, err)
+		}
+	}
+	if cardAlphabet != card.Alphabet {
+		t.Fatal("the card alphabet differs")
+	}
+	for _, p := range []string{"Synthetic  Passphrase\twords HERE", " a  b "} {
+		if strings.Join(strings.Fields(strings.ToLower(p)), " ") != card.NormalizePassphrase(p) {
+			t.Fatalf("%q: passphrase words differ from card's normal form", p)
+		}
+	}
+	if _, err := storeRecoveryKey(strings.Repeat("A", 64)); err == nil {
+		t.Fatal("64 symbols read as a card key")
 	}
 }

@@ -10,7 +10,8 @@
 //	agentos-a8scan -store /var/lib/agentos-store/store [-clerk NAME]... TARGET...
 //
 // The recovery key as the Owner Card prints it (40 symbols in eight
-// groups, read through card.StoreRecoveryKey as the unlock path does) and
+// groups, read to the same key as card.StoreRecoveryKey, as the unlock path
+// does) and
 // optionally the passphrase are read from standard input with echo off,
 // never from the command line; the store holds neither, so the scan
 // learns them only from the owner. Each TARGET is a block device or file
@@ -47,7 +48,6 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
@@ -73,7 +73,7 @@ func main() {
 	}
 	in := bufio.NewReader(os.Stdin)
 	line := strings.TrimSpace(readSecret(in, "Recovery key (as on the card): "))
-	rk, err := card.StoreRecoveryKey(line)
+	rk, err := storeRecoveryKey(line)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func readSecret(in *bufio.Reader, prompt string) string {
 	return line
 }
 
-// run opens the store at sp with the recovery key rk (card.StoreRecoveryKey
+// run opens the store at sp with the recovery key rk (storeRecoveryKey
 // of the card text rkText), plants and checks every needle, the sealer keys
 // of clerks among them, and scans targets. It returns the number of
 // findings; an error means no scan result.
@@ -281,47 +281,100 @@ var storePurposes = map[string]string{
 	"anchor":  "", // the TPM unlock's anchor: not secret (seal.go, anchor)
 }
 
-// cardKey reads the card text rkText, already accepted by
-// card.StoreRecoveryKey, as the card prints it (eight dashed groups of
-// five, upper case) and as the 160 bits its groups carry, decoded here from
-// the printed format alone, so the needle does not come from the code the
-// scan audits. It refuses unless card.RecoveryKeyText prints those bits
-// back as the same text.
-func cardKey(rkText string) (printed string, bits []byte, err error) {
-	n := card.Normalize(rkText)
-	const groups, group = 8, 5
-	if len(n) != groups*group {
-		return "", nil, errors.New("the recovery key is not 40 symbols")
+// The Owner Card's recovery key format (broker/card, recoverykey.go), read
+// here from the format alone rather than by linking card, which would bring
+// its QR encoder into this tool (tools/trusted_base_parsers.txt);
+// TestCardFormatMatchesCard holds the two readings equal. 160 bits as 32
+// symbols of cardAlphabet in eight groups of four, each group followed by
+// one check symbol.
+const (
+	cardAlphabet  = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	cardGroups    = 8
+	cardGroup     = 5 // four key symbols and a check symbol
+	cardStoreInfo = "agentos.card.store-recovery.v1"
+)
+
+// storeRecoveryKey is card.StoreRecoveryKey: the store's recovery factor,
+// HKDF-SHA256 of the card's 160 bits.
+func storeRecoveryKey(rkText string) ([]byte, error) {
+	_, bits, err := cardKey(rkText)
+	if err != nil {
+		return nil, err
 	}
-	var b [20]byte
+	defer clear(bits)
+	return hkdf.Key(sha256.New, bits, nil, cardStoreInfo, seal.RecoveryLen)
+}
+
+// cardKey reads the card text rkText as the card prints it (eight dashed
+// groups of five, upper case) and as the 160 bits its groups carry. It
+// refuses text of the wrong length, and names the group whose symbol or
+// check symbol is wrong.
+func cardKey(rkText string) (printed string, bits []byte, err error) {
+	n := strings.Map(func(r rune) rune {
+		if r == ' ' || r == '-' || r == '\t' {
+			return -1
+		}
+		return r
+	}, strings.ToUpper(rkText))
+	if len(n) != cardGroups*cardGroup {
+		return "", nil, errors.New("the recovery key is not the card's 40 symbols")
+	}
+	b := make([]byte, 20)
 	var acc uint64
 	nb, j := 0, 0
-	for i := 0; i < len(n); i++ {
-		if i%group == group-1 {
-			continue // the group's check symbol
-		}
-		v := strings.IndexByte(card.Alphabet, n[i])
-		if v < 0 {
-			return "", nil, errors.New("the recovery key holds a symbol the card never prints")
-		}
-		acc = acc<<5 | uint64(v)
-		nb += 5
-		if nb >= 8 {
-			nb -= 8
-			b[j] = byte(acc >> nb)
-			j++
-		}
-	}
-	gs := make([]string, groups)
+	gs := make([]string, cardGroups)
 	for g := range gs {
-		gs[g] = n[g*group : (g+1)*group]
+		gs[g] = n[g*cardGroup : (g+1)*cardGroup]
+		var v [cardGroup]byte
+		for i := range v {
+			k := strings.IndexByte(cardAlphabet, gs[g][i])
+			if k < 0 {
+				clear(b)
+				return "", nil, fmt.Errorf("group %d of the recovery key looks mistyped; check it against the card", g+1)
+			}
+			v[i] = byte(k)
+		}
+		if cardCheck(v[:cardGroup-1]) != v[cardGroup-1] {
+			clear(b)
+			return "", nil, fmt.Errorf("group %d of the recovery key looks mistyped; check it against the card", g+1)
+		}
+		for _, x := range v[:cardGroup-1] {
+			acc = acc<<5 | uint64(x)
+			nb += 5
+			if nb >= 8 {
+				nb -= 8
+				b[j] = byte(acc >> nb)
+				j++
+			}
+		}
 	}
-	printed = strings.Join(gs, "-")
-	if card.RecoveryKeyText(b) != printed {
-		clear(b[:])
-		return "", nil, errors.New("the recovery key's bits do not print back as the card text; refusing to scan")
+	return strings.Join(gs, "-"), b, nil
+}
+
+// cardCheck is the card's check symbol, sum(a^(i+1) * s_i) over GF(32)
+// (x^5 + x^2 + 1, a = x).
+func cardCheck(grp []byte) byte {
+	var c, w byte = 0, 1
+	for _, v := range grp {
+		w = gf32Mul(w, 2)
+		c ^= gf32Mul(w, v)
 	}
-	return printed, b[:], nil
+	return c
+}
+
+func gf32Mul(a, b byte) byte {
+	var p byte
+	for b > 0 {
+		if b&1 != 0 {
+			p ^= a
+		}
+		b >>= 1
+		a <<= 1
+		if a&32 != 0 {
+			a ^= 0x25
+		}
+	}
+	return p
 }
 
 // cardWindow is the shortest run of consecutive card groups the scan looks
@@ -356,8 +409,7 @@ func cardForms(printed string) [][]byte {
 // single spaces), and its words joined by nothing, a dash or an underscore,
 // in lower and upper case and as UTF-16.
 func passphraseForms(p string) [][]byte {
-	n := card.NormalizePassphrase(p)
-	words := strings.Fields(n)
+	words := strings.Fields(strings.ToLower(p))
 	var out [][]byte
 	for _, sep := range []string{" ", "", "-", "_"} {
 		t := strings.Join(words, sep)
