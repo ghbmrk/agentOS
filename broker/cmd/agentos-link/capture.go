@@ -123,6 +123,8 @@ func firstHello(ln net.Listener, cfg *tls.Config, log io.Writer, wait time.Durat
 	stop := make(chan struct{})
 	defer close(stop)
 	errs := make(chan error, 1)
+	slots := newSlots()
+	refused := 0
 	go func() {
 		for {
 			raw, err := ln.Accept()
@@ -130,7 +132,14 @@ func firstHello(ln net.Listener, cfg *tls.Config, log io.Writer, wait time.Durat
 				errs <- err
 				return
 			}
+			if !slots.take() {
+				raw.Close()
+				refused++
+				fmt.Fprintf(log, "agentos-link: refused a connection before the store over the handshake cap (%d so far)\n", refused)
+				continue
+			}
 			go func() {
+				defer slots.give()
 				conn, key, err := handshake(raw, cfg)
 				defer conn.Close()
 				if err == nil {

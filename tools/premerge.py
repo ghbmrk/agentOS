@@ -47,6 +47,7 @@ prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..
 bot's output. Otherwise it
 prints `not-bot <files>` and exits 1. The caller checks that the branch is this repository's, not a fork's.
 """
+import collections
 import importlib.util
 import json
 import pathlib
@@ -212,16 +213,15 @@ def _duplicate_id(text):
 
 def _stale(cwd, text, path, reviewed, onto):
     """The table rows of an ASSUMPTIONS.md replay `text` that `merge=union` (.gitattributes) brought back: each is
-    in the merge base and in `onto` verbatim but not in the reviewed commit, so the PR edited or deleted it and
-    main left it alone (#3369, #1912). Empty for any other file or a criss-cross merge."""
+    in the merge base verbatim and in only one of `onto` and the reviewed commit, so one side edited or deleted it
+    and the other left it alone (#3369, #1912, #3441). Empty for any other file or a criss-cross merge."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return set()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
         return set()
     mb, kept, pr = (set(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines()) for t in (bases[0], onto, reviewed))
-    return {line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb and line in kept
-            and line not in pr}
+    return {line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb and (line in kept) != (line in pr)}
 
 
 def _broken(cwd, tree, path, reviewed, onto):
@@ -231,6 +231,17 @@ def _broken(cwd, tree, path, reviewed, onto):
         return False
     text = _git(cwd, "show", f"{tree}:{path}", ok=(0, 128))
     return _duplicate_id(text) or bool(_stale(cwd, text, path, reviewed, onto))
+
+
+def _less(rows, drop):
+    """`rows` less the first drop[x] copies of each row x, in order: a multiset difference."""
+    drop, out = drop.copy(), []
+    for x in rows:
+        if drop[x] > 0:
+            drop[x] -= 1
+        else:
+            out.append(x)
+    return out
 
 
 def _stale_dropped(cwd, tree, head, path, reviewed, onto):
@@ -269,12 +280,16 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
             side = 2
         elif bare == f">>>>>>> {mark}2".encode() and side == 2:
             pr, base, main = hunk
-            gone = {x for x in base if x in main and x not in pr}
-            cut = {x for x in base if x in pr and x not in main}  # main deleted it: the union kept it too (#3401 L3)
-            edit = {key(x): x for x in pr if key(x) in {key(g) for g in gone}}
-            out[0].extend([x for x in pr if x not in cut] + [x for x in main if x not in gone])
-            moved = [edit.get(key(x), b"") if x in gone else x for x in main]
-            out[1].extend(moved + [x for x in pr if x not in edit.values() and x not in cut])
+            n = [collections.Counter(h) for h in hunk]  # copies, not set membership: a row can repeat (#3441)
+            gone = collections.Counter({x: min(n[2][x], c - n[0][x]) for x, c in n[1].items() if c > n[0][x]})
+            cut = collections.Counter({x: min(n[0][x], c - n[2][x]) for x, c in n[1].items() if c > n[2][x]})  # main deleted it: the union kept it too (#3401 L3)
+            edit = {key(x): x for x in pr if key(x) in {key(g) for g in +gone}}
+            out[0].extend(_less(pr, cut) + _less(main, gone))
+            left, moved = gone.copy(), []
+            for x in main:
+                moved.append(edit.get(key(x), b"") if left[x] > 0 else x)
+                left[x] -= 1
+            out[1].extend(moved + _less([x for x in pr if x not in edit.values()], cut))
             out[2].extend(pr + main)
             hunk, conflicts = None, conflicts + 1
         elif FIRST_CELL.match(line):
