@@ -197,7 +197,7 @@ func TestClaimIsOnlyOnTheBoxsWiFi(t *testing.T) {
 	if w := r.do("GET", "/claim", nil, foreign); w.Code == 200 {
 		t.Fatalf("GET with a foreign Host: %d", w.Code)
 	}
-	if w := r.do("POST", "/claim", url.Values{"code": {"AAAA-BBBB-CCCC-DDDD"}}, foreign); w.Code != 403 {
+	if w := r.do("POST", "/claim", url.Values{"code": {"AAAA-BBBB-CCCC-DDDD"}}, foreign); w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("POST with a foreign Host: %d", w.Code)
 	}
 	r.ip = "192.168.1.20:40000"

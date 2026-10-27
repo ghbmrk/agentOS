@@ -157,7 +157,7 @@ func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
 		`<p>Open <a href="{{index $d 0}}">{{index $d 0}}</a> and enter <span class="mono">{{index $d 1}}</span>.</p>`,
 	} {
 		if !bytes.Contains(src, []byte(frag)) {
-			t.Errorf("localui's step 7 no longer has %q", frag)
+			t.Errorf("localui's step 6 no longer has %q", frag)
 		}
 	}
 	page := []byte(`<form method="post" action="/setup/ai-device"><input type="hidden" name="provider" value="codex"><button>`)

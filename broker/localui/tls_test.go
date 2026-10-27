@@ -358,11 +358,12 @@ func TestHTTPRedirectsThePageNameToHTTPS(t *testing.T) {
 				t.Errorf("HTTPS down: %d %q", w.Code, w.Header().Get("Location"))
 			}
 		}
-		// The box's address and the captive answers are as before (L6).
+		// The box's address is as before (L6), and a captive-portal
+		// check is refused, never redirected (ONB-5, D-178).
 		if w := do("GET", "10.42.0.1", "/status"); w.Code != http.StatusOK {
 			t.Errorf("the box's address: %d", w.Code)
 		}
-		if w := do("GET", "captive.apple.com", "/hotspot-detect.html"); w.Code != http.StatusFound || w.Header().Get("Location") != "http://10.42.0.1/" {
+		if w := do("GET", "captive.apple.com", "/hotspot-detect.html"); w.Code != http.StatusMisdirectedRequest || w.Header().Get("Location") != "" {
 			t.Errorf("captive check: %d %q", w.Code, w.Header().Get("Location"))
 		}
 	}

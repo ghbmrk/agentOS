@@ -15,20 +15,7 @@ func (r *rig) page(o localsrv.Owner) Owner {
 	r.served = &swapOwner{o}
 	return InProcess(localsrv.New(localsrv.Config{Owner: r.served, Now: r.clock,
 		Paused:    func() []localapi.PausedGrant { return r.paused.grants },
-		AskResume: r.paused.ask, RotateAPNet: r.rotateAPNet}).Ops())
-}
-
-// rotateAPNet stands in for agentosd's writer of a rotated card's Wi-Fi
-// network (#1191), which takes the network from the vault process
-// (#1522): it counts the hand-offs, or fails with wifiErr.
-func (r *rig) rotateAPNet() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.wifiErr != nil {
-		return r.wifiErr
-	}
-	r.handOffs++
-	return nil
+		AskResume: r.paused.ask}).Ops())
 }
 
 // fakePaused stands in for the gate's paused grants (W5a-resume): an ask

@@ -193,7 +193,7 @@ func guestSock(t *testing.T, g *fakeGuest) string {
 	return sock
 }
 
-// signedIn is a driver past step 7's sign-in, with the agent machine's
+// signedIn is a driver past step 6's sign-in, with the agent machine's
 // guest plane played by a fakeGuest in mode.
 func signedIn(t *testing.T, mode string) (*driver, *fakeBox) {
 	f := &fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com"}

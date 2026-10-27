@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -383,30 +382,4 @@ func (c CardFinish) Finish(owner string) error {
 		return fmt.Errorf("localui: making the Owner Card again: %w", aerr)
 	}
 	return ErrCardAgain
-}
-
-// APNet reports the card's Wi-Fi network to agentosd, which writes it for
-// agentos-ap to serve at the confirm (#1185). The password goes only
-// there (CRED-1).
-func (a AgentosdSetup) APNet(ssid, password string) error {
-	return a.call(localapi.OpSetupAPNet, localapi.SetupAPNet{SSID: ssid, Password: password}, nil)
-}
-
-// NetReporter takes the card's Wi-Fi network; AgentosdSetup is one.
-type NetReporter interface {
-	APNet(ssid, password string) error
-}
-
-// ServeCardNet is the card step's Provision with the card's network
-// reported first (#1185): the confirm latches only after both, so
-// agentos-ap has the network to switch to when it sees the latch. A
-// report that fails fails the provision, and the card stays shown for a
-// retry.
-func ServeCardNet(provision func(*card.Card) error, a NetReporter) func(*card.Card) error {
-	return func(c *card.Card) error {
-		if err := a.APNet(c.WiFiName, c.WiFiPassword); err != nil {
-			return fmt.Errorf("localui: reporting the card's Wi-Fi: %w", err)
-		}
-		return provision(c)
-	}
 }

@@ -59,13 +59,6 @@ const (
 	// approves it with a code like any forget (W3-forget-b3r, CAP-3).
 	OpForgetTasks = "page_forget_tasks"
 	OpForget      = "page_forget"
-	// OpRotateAPNet asks agentosd to put a just-committed card rotation's
-	// Wi-Fi network on the air (REC-4, #1191): agentosd takes the network
-	// once from the vault process's hold (#1522), never from the page,
-	// rewrites the card's network root-only (apnet.Path, ARC-1) under the
-	// same name, and agentos-ap serves it (Down then Up). It needs a
-	// session (Auth) and nothing else.
-	OpRotateAPNet = "page_rotate_ap_net"
 	// OpPlanSignInReady (Auth) answers a PlanSignIn: whether the owner's
 	// plan is signed out and its sign-in may start (ONB-3, ONB-9, #1264),
 	// and the link and code of a sign-in the page started that still waits,
@@ -110,7 +103,7 @@ const (
 )
 
 // Ops lists every op, for the disjointness test.
-var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpRotateAPNet, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpAccountPlan, OpCertify}
+var Ops = []string{OpStatus, OpStop, OpGridCell, OpSignIn, OpSignOut, OpSession, OpLines, OpLine, OpResume, OpRequests, OpAnswer, OpWaiting, OpFollowRoot, OpFollow, OpPaused, OpAskResume, OpSIM, OpForgetTasks, OpForget, OpPlanSignInReady, OpPlanSignIn, OpAccountBegin, OpAccountFinish, OpAccountPlan, OpCertify}
 
 // Fixed refusals, sent as sockets codes.
 const (

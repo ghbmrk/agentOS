@@ -2,13 +2,8 @@ package main
 
 import (
 	"context"
-	crand "crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"io"
 	mrand "math/rand"
 	"net"
@@ -23,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -565,66 +559,6 @@ func TestCardHooksStillPairTexts(t *testing.T) {
 		PairTexts(context.Context, *localui.Server, time.Duration)
 	}); !ok {
 		t.Fatal("CardFinish hooks do not start the PAIR text loop")
-	}
-}
-
-// #1185: on agentosd's setup the card step reports the card's network
-// before it provisions, so agentos-ap has it at the confirm.
-func TestTheCardStepReportsTheCardsNetwork(t *testing.T) {
-	var calls []string
-	hooks := localui.AgentosdSetup{Owner: localui.InProcess{
-		localapi.OpSetupAPNet: func(context.Context, sockets.Peer, json.RawMessage) (any, error) {
-			calls = append(calls, "report")
-			return struct{}{}, nil
-		}}}
-	box := firstboot.BoxConfig{Card: card.DisplayConfig{Provision: func(*card.Card) error {
-		calls = append(calls, "provision")
-		return nil
-	}}}
-	c, err := card.Generate(crand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := withCardNet(hooks, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[report provision]" {
-		t.Fatalf("%v, calls %v", err, calls)
-	}
-	calls = nil
-	if err := withCardNet(nil, box).Card.Provision(c); err != nil || fmt.Sprint(calls) != "[provision]" {
-		t.Fatalf("without agentosd: %v, calls %v", err, calls)
-	}
-}
-
-// Production wiring (#1185): withFirstBoot hands firstboot.Begin the box
-// wrapped by withCardNet, so the page's card step reports the network
-// before it provisions.
-func TestFirstBootWiresTheCardNetwork(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	wired := false
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "withFirstBoot" {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			c, ok := n.(*ast.CallExpr)
-			if !ok || len(c.Args) != 1 {
-				return true
-			}
-			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Begin" {
-				if in, ok := c.Args[0].(*ast.CallExpr); ok {
-					if id, ok := in.Fun.(*ast.Ident); ok && id.Name == "withCardNet" {
-						wired = true
-					}
-				}
-			}
-			return true
-		})
-	}
-	if !wired {
-		t.Fatal("withFirstBoot does not pass firstboot.Begin the box through withCardNet")
 	}
 }
 

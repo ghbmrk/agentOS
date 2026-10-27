@@ -161,7 +161,7 @@ func TestAPreloadedBoxServesOnlyTheClaimScreen(t *testing.T) {
 	if w := owner.do(t, cs.ui, "GET", "/claim", nil, foreign); w.Code == http.StatusOK {
 		t.Fatalf("/claim under a foreign Host: %d", w.Code)
 	}
-	if w := owner.do(t, cs.ui, "POST", "/claim", url.Values{"code": {b.code}}, foreign); w.Code != http.StatusForbidden {
+	if w := owner.do(t, cs.ui, "POST", "/claim", url.Values{"code": {b.code}}, foreign); w.Code != http.StatusMisdirectedRequest {
 		t.Fatalf("claim under a foreign Host: %d", w.Code)
 	}
 	if st := cs.firstBoot().Claim.Status(); st.Claimed || st.TriesLeft != claim.MaxWrong {

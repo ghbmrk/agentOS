@@ -60,14 +60,6 @@ const (
 	// the box and starts with PAIR, and answers it, or nothing. Each text
 	// is answered once; the page offers it to setup (§8.1 pairing).
 	OpSetupInbound = "page_setup_inbound"
-	// OpSetupAPNet reports the card's Wi-Fi name and password before the
-	// confirm latches (CTRL-claim-ap u1, #1185): agentosd writes them
-	// root-only (apnet.Path, ARC-1) and agentos-ap serves that network at
-	// the confirm and every later start, in place of the setup network.
-	// Only a network the card prints is taken (ErrBadArgs); a report
-	// replaces the last, as a reset card makes a new one. It is served
-	// in page mode.
-	OpSetupAPNet = "page_setup_ap_net"
 )
 
 // SetupOps lists setup's ops, for the disjointness test.
@@ -176,17 +168,6 @@ type Confirm struct {
 type Confirmed struct {
 	OK bool `json:"ok"`
 }
-
-// SetupAPNet is the card's Wi-Fi network (OpSetupAPNet). The password is
-// the access point's (CRED-1): it goes only to agentos-ap's file.
-type SetupAPNet struct {
-	SSID     string `json:"ssid"`
-	Password string `json:"password"`
-}
-
-// String and GoString keep the password out of logs.
-func (SetupAPNet) String() string   { return "[card Wi-Fi network]" }
-func (SetupAPNet) GoString() string { return "[card Wi-Fi network]" }
 
 // Finish carries the owner's number, E.164, and Card, the page's report
 // that its Owner Card step is confirmed and provisioned (HW-1, #1115).

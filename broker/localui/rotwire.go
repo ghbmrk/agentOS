@@ -130,12 +130,8 @@ type Rotation struct {
 	// display's lock, then mu.
 	postMu    sync.Mutex
 	confirmer string // under postMu: the posting session's tokenKey
-	// wifi, under postMu and mu, has agentosd put a committed Wi-Fi
-	// password on the air with the posting session's token (#1191); the
-	// network comes from the vault process, not the page (#1522).
-	wifi func() error
-	mu   sync.Mutex
-	d    *card.Display
+	mu        sync.Mutex
+	d         *card.Display
 	// starter is d's starting session's tokenKey (#1338); empty serves d
 	// to no session.
 	starter string
@@ -231,15 +227,9 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	ctx, cancel := context.WithTimeout(context.Background(), commitTimeout)
 	defer cancel()
 	res, err := r.v.CommitRotation(ctx, id, *c)
-	r.mu.Lock()
-	wifi := r.wifi
-	r.mu.Unlock()
 	var ve *VaultError
 	switch {
 	case err == nil:
-		if c.WiFiPassword != "" {
-			res = withWiFiNote(res, handOffWiFi(wifi, c))
-		}
 		r.mu.Lock()
 		if r.gen == gen && r.confirmer != "" {
 			r.res, r.resOwner, r.resUntil = &res, r.confirmer, r.resultUntilLocked()
@@ -249,9 +239,8 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	case errors.As(err, &ve) && ve.Status == http.StatusGone:
 		return fmt.Errorf("%w: %s", card.ErrDiscard, ve.Msg)
 	case errors.As(err, &ve) && ve.Status == http.StatusConflict:
-		// The owner keeps this card (card.ErrInEffect): its Wi-Fi goes on
-		// the air, so a lost old card stops joining (#1191).
-		return inEffect(fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg), wifi, c)
+		// The owner keeps this card (card.ErrInEffect).
+		return fmt.Errorf("%w: %s", card.ErrInEffect, ve.Msg)
 	case errors.As(err, &ve) && ve.Status < http.StatusInternalServerError:
 		return err // refused before anything was written; kept for a retry
 	}
@@ -260,49 +249,7 @@ func (r *Rotation) provision(id string, c *card.Card) error {
 	// effect. The owner keeps both cards (card.ErrInEffect's text) and the
 	// vault's rotation, if still waiting, is dropped (#1090 R2).
 	r.cancel(id)
-	return inEffect(fmt.Errorf("%w: %v", card.ErrInEffect, err), wifi, c)
-}
-
-// wifiKeptInEffect is the note an in-effect card's page adds when its
-// Wi-Fi password could not go on the air (#1523, REC-4). It asks for the
-// Wi-Fi part on the next card: after no answer the vault may owe nothing,
-// so a next card without it would leave the old password on the air
-// (#1614 U-1).
-const wifiKeptInEffect = "My Wi-Fi may still use your old card's password: I could not switch it. Join it with your old card for now, and include the Wi-Fi password when you start your next card."
-
-// inEffect hands off the Wi-Fi of a card the owner keeps (err wraps
-// card.ErrInEffect) and adds the note that says whether it switched
-// (#1614 U-2): a hand-off that took the vault's network proves the card's
-// Wi-Fi was committed.
-func inEffect(err error, wifi func() error, c *card.Card) error {
-	if c.WiFiPassword == "" {
-		return err
-	}
-	if handOffWiFi(wifi, c) {
-		return &card.Noted{Err: err, Note: wifiSwitchedNote}
-	}
-	return &card.Noted{Err: err, Note: wifiKeptInEffect}
-}
-
-// handOffWiFi has agentosd write the card's Wi-Fi network for the access
-// point (#1191), once the vault process committed the card or may have
-// (card.ErrInEffect: the owner keeps it); a card it refused leaves the old
-// password on the air. It reports whether the access point switches.
-func handOffWiFi(wifi func() error, c *card.Card) bool {
-	return c.WiFiPassword != "" && wifi != nil && wifi() == nil
-}
-
-// wifiSwitchedNote tells the owner the Wi-Fi switched and how to rejoin.
-const wifiSwitchedNote = "My Wi-Fi now uses your new card's password. Your phone may drop off now: rejoin with the Wi-Fi QR code on your new card."
-
-// withWiFiNote adds to a committed rotation's notes what its Wi-Fi does.
-func withWiFiNote(res RotationResult, switched bool) RotationResult {
-	note := "My Wi-Fi still uses your old card's password: I could not switch it. Join it with your old card for now, and replace the Wi-Fi password again from Replace Owner Card parts on Home."
-	if switched {
-		note = wifiSwitchedNote
-	}
-	res.Notes = append(append([]string(nil), res.Notes...), note)
-	return res
+	return fmt.Errorf("%w: %v", card.ErrInEffect, err)
 }
 
 // cancel drops the vault process's pending rotation id (#1090 R2, S-R1);
@@ -319,9 +266,8 @@ func (r *Rotation) cancel(id string) {
 // serveCard serves the display d to the session posting r, with the
 // display's own checks (signedIn is the session check), only when that
 // session started d (#1338); any other request is sent home. A post holds
-// postMu so that provision binds the result to its session. wifi hands a
-// committed Wi-Fi password to agentosd as that session (#1191).
-func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, wifi func(r *http.Request) error, next string, w http.ResponseWriter, r *http.Request) {
+// postMu so that provision binds the result to its session.
+func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) bool, next string, w http.ResponseWriter, r *http.Request) {
 	if !rot.startedBy(d, r) {
 		http.Redirect(w, r, "/home", http.StatusSeeOther)
 		return
@@ -336,9 +282,8 @@ func (rot *Rotation) serveCard(d *card.Display, signedIn func(*http.Request) boo
 	rot.confirmer = ""
 	if tok := cookieToken(r); tok != "" {
 		rot.confirmer = tokenKey(tok)
-		rot.setWiFi(func() error { return wifi(r) })
 	}
-	defer func() { rot.confirmer = ""; rot.setWiFi(nil) }()
+	defer func() { rot.confirmer = "" }()
 	h.ServeHTTP(w, r)
 }
 
@@ -349,12 +294,6 @@ func (rot *Rotation) startedBy(d *card.Display, r *http.Request) bool {
 	rot.mu.Lock()
 	defer rot.mu.Unlock()
 	return d != nil && d == rot.d && tok != "" && rot.starter != "" && tokenKey(tok) == rot.starter
-}
-
-func (rot *Rotation) setWiFi(f func() error) {
-	rot.mu.Lock()
-	rot.wifi = f
-	rot.mu.Unlock()
 }
 
 // voidLocked drops the result and voids any commit still waiting for its
@@ -561,8 +500,7 @@ func init() {
 <form method="post" action="/rotate/show"><label>Recovery key<input type="password" name="recovery" autocomplete="off"></label><button>Show the new code generator</button></form>
 {{end}}<p>I make new values for the parts you choose and show them for you to print. Nothing changes until you confirm the new card.</p>
 <form method="post" action="/rotate/">
-<p><label><input type="checkbox" name="parts" value="wifi"> Wi-Fi password</label><br>
-<label><input type="checkbox" name="parts" value="setup"> Setup secret and code generator</label><br>
+<p><label><input type="checkbox" name="parts" value="setup"> Setup secret and code generator</label><br>
 <label><input type="checkbox" name="parts" value="passphrase"> Vault passphrase</label><br>
 <label><input type="checkbox" name="parts" value="grid"> Code grid</label><br>
 <label><input type="checkbox" name="parts" value="recovery"> Recovery key</label></p>
@@ -618,7 +556,9 @@ func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotati
 		b.Starter = tokenKey(tok)
 	}
 	for _, n := range r.PostForm["parts"] {
-		if !partSet(&b.Parts, n) {
+		// The core runs no access point (CH-9, D-178): no card part puts
+		// a Wi-Fi password on the air, so none is replaced.
+		if n == "wifi" || !partSet(&b.Parts, n) {
 			w.WriteHeader(http.StatusBadRequest)
 			s.render(w, "rotate", rotateView{Err: "Choose the card parts to replace."})
 			return

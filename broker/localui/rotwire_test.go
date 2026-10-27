@@ -205,9 +205,9 @@ func TestRotationCancelReachesTheVault(t *testing.T) {
 	if _, c, n := x.v.n(); n != 1 || c != 0 {
 		t.Fatalf("cancel reached the vault %d times, %d commits", n, c)
 	}
-	x.start(t, url.Values{"parts": {"wifi", "grid"}, "code": {"123456"}})
+	x.start(t, url.Values{"parts": {"setup", "grid"}, "code": {"123456"}})
 	first := x.r.Display()
-	x.start(t, url.Values{"parts": {"wifi"}, "code": {"234567"}})
+	x.start(t, url.Values{"parts": {"setup"}, "code": {"234567"}})
 	if _, err := first.Page(); err == nil {
 		t.Fatal("a replaced rotation kept its display")
 	}
@@ -275,7 +275,7 @@ func TestRotationCommitWithNoAnswerIsInEffect(t *testing.T) {
 func TestRotationStartRefusals(t *testing.T) {
 	x := newWireRig(t)
 	x.v.beginErr = &VaultError{http.StatusForbidden, "wrong code; 2 tries left"}
-	w := x.post("/rotate/", url.Values{"parts": {"wifi"}, "code": {"000000"}})
+	w := x.post("/rotate/", url.Values{"parts": {"setup"}, "code": {"000000"}})
 	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "wrong code; 2 tries left") || x.r.Display() != nil {
 		t.Fatalf("refused start: %d %s", w.Code, w.Body.String())
 	}

@@ -390,9 +390,9 @@ func (d *driver) waitStep(n string, limit time.Duration) ([]byte, error) {
 	return b, err
 }
 
-// smsPair plugs the simulated modem in, waits for the text-your-box step
-// (taking the network step over Ethernet if the box asks), texts PAIR from
-// the phone's line, and waits for the box's reply and the next step.
+// smsPair plugs the simulated modem in, waits for the text-your-box step,
+// texts PAIR from the phone's line, and waits for the box's reply and the
+// next step.
 func (d *driver) smsPair() error {
 	u, err := user.Lookup("agentos-modem")
 	if err != nil {
