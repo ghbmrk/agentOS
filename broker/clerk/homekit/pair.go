@@ -9,15 +9,19 @@ import (
 	"io"
 	"math/big"
 	"strings"
+	"time"
 )
 
 const pairingTLV = "application/pairing+tlv8"
 
 // Options are the session's hooks. Logf receives no key material: lines
-// name the step and the accessory ID only.
+// name the step and the accessory ID only. OnEvent runs after the session
+// call that received the event has released the session. Timeout, when
+// set and the connection takes deadlines, bounds each request's round trip.
 type Options struct {
 	Logf    func(format string, args ...any)
 	OnEvent func([]Value)
+	Timeout time.Duration
 }
 
 func (o Options) logf(format string, args ...any) {

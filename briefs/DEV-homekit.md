@@ -32,7 +32,7 @@ HAP facts the code rests on (HAP non-commercial spec, R2+): pair-setup is SRP-6a
 ## Split
 
 - **(a)** Protocol package `broker/clerk/homekit/`: TLV8 codec, SRP-6a, pair-setup and pair-verify against an injected key holder, the encrypted session, `/accessories` and `/characteristics` read and write, the thermostat class rows, fuzz targets. Synthetic accessory in tests. If the session nears 150k tokens, cut at (a1) TLV8, SRP, pair-setup and pair-verify, and (a2) the session, characteristics and class rows.
-- **(b)** Core-side clerk: controller key in the sealed store (STO-2, CLK-1), the tier-4 local-page connect step taking the HomeKit code, pinning, bounds confirmation, events onto the bus. Needs STO-2 and the device-clerk host.
+- **(b)** Core-side clerk, in two parts: **(b1)** #3331, the clerk library in `broker/clerk/homekit/`: controller key in the sealed store (STO-2, CLK-1), pinning, bounds confirmation, events onto the bus through a function; **(b2)** the tier-4 local-page connect step taking the HomeKit code (sub B's lane) and the device-clerk host shared with #3321.
 - **(c)** Live: pair the four T10 Pros behind the enforcer and confirm they hold schedules with Resideo blocked. Needs the enforcer (Protectli V1410, not arrived).
 
 ## Acceptance tests

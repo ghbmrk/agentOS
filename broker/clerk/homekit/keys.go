@@ -16,11 +16,15 @@ type KeyHolder interface {
 	Sign(msg []byte) ([]byte, error)
 }
 
-// MemoryKeyHolder keeps the key in memory. It is for tests and for a holder
-// part b wraps; it prints and marshals no field.
+// MemoryKeyHolder keeps the key in memory, for tests; the clerk uses
+// SealedKey. It prints and marshals no field, and the key is captured in a
+// signing function, never a field, so even a struct holding the holder by
+// value, printed with any verb, shows only a function address (#3325
+// item 4).
 type MemoryKeyHolder struct {
 	id   string
-	priv ed25519.PrivateKey
+	pub  ed25519.PublicKey
+	sign func(msg []byte) []byte
 }
 
 // NewMemoryKeyHolder builds a holder from a 32-byte seed.
@@ -31,14 +35,16 @@ func NewMemoryKeyHolder(id string, seed []byte) (*MemoryKeyHolder, error) {
 	if err := checkPairingID(id); err != nil {
 		return nil, err
 	}
-	return &MemoryKeyHolder{id: id, priv: ed25519.NewKeyFromSeed(seed)}, nil
+	priv := ed25519.NewKeyFromSeed(seed)
+	return &MemoryKeyHolder{id: id, pub: priv.Public().(ed25519.PublicKey),
+		sign: func(msg []byte) []byte { return ed25519.Sign(priv, msg) }}, nil
 }
 
 func (k *MemoryKeyHolder) PairingID() string { return k.id }
 func (k *MemoryKeyHolder) PublicKey() ed25519.PublicKey {
-	return append(ed25519.PublicKey(nil), k.priv.Public().(ed25519.PublicKey)...)
+	return append(ed25519.PublicKey(nil), k.pub...)
 }
-func (k *MemoryKeyHolder) Sign(msg []byte) ([]byte, error) { return ed25519.Sign(k.priv, msg), nil }
+func (k *MemoryKeyHolder) Sign(msg []byte) ([]byte, error) { return k.sign(msg), nil }
 
 // Format prints no field, whatever the verb.
 func (k MemoryKeyHolder) Format(f fmt.State, _ rune) {

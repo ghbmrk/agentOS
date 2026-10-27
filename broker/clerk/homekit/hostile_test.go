@@ -237,6 +237,12 @@ func TestPairVerifyRefusesBytesAfterM4(t *testing.T) {
 // send any framing a hostile accessory could.
 func hostilePeer(t *testing.T, opt Options, answer func(req *http.Request, n int) string) (*Session, *tapConn) {
 	t.Helper()
+	return peerWith(t, opt, hostileAccessories, answer)
+}
+
+// peerWith is hostilePeer serving accessories as its /accessories.
+func peerWith(t *testing.T, opt Options, accessories string, answer func(req *http.Request, n int) string) (*Session, *tapConn) {
+	t.Helper()
 	c, p := net.Pipe()
 	t.Cleanup(func() { c.Close(); p.Close() })
 	shared := make([]byte, 32)
@@ -257,7 +263,7 @@ func hostilePeer(t *testing.T, opt Options, answer func(req *http.Request, n int
 				return
 			}
 			io.ReadAll(req.Body)
-			out := hapResp(200, hostileAccessories)
+			out := hapResp(200, accessories)
 			if req.URL.Path != "/accessories" {
 				out = answer(req, n)
 			}

@@ -70,6 +70,16 @@ func TestSRPVectors(t *testing.T) {
 		}
 		return b
 	}
+	// PAD() must be pinned on wire values that start with a zero byte
+	// (#3325 item 8).
+	zeroA, zeroB := false, false
+	for _, v := range vs.Vectors {
+		zeroA = zeroA || strings.HasPrefix(v["A"], "00")
+		zeroB = zeroB || strings.HasPrefix(v["B"], "00")
+	}
+	if !zeroA || !zeroB {
+		t.Fatalf("no vector with a zero-led A (%v) or B (%v)", zeroA, zeroB)
+	}
 	for _, v := range vs.Vectors {
 		t.Run(v["name"], func(t *testing.T) {
 			a, _ := new(big.Int).SetString(v["a"], 16)
@@ -146,11 +156,11 @@ func TestPairSetupAndVerifyWithSyntheticAccessory(t *testing.T) {
 	if !bytes.Equal(acc.ctrls[kh.PairingID()], kh.PublicKey()) {
 		t.Fatal("accessory did not receive the controller's public key")
 	}
-	cur, ok := s.Find(ServiceThermostat, CharCurrentTemperature)
+	cur, ok := s.Find(1, ServiceThermostat, CharCurrentTemperature)
 	if !ok || cur.ID != (ID{1, 11}) {
 		t.Fatalf("current temperature not resolved: %+v", cur)
 	}
-	if _, ok := s.Find(ServiceThermostat, CharCurrentHeatingCoolingState); !ok {
+	if _, ok := s.Find(1, ServiceThermostat, CharCurrentHeatingCoolingState); !ok {
 		t.Fatal("full-form type not normalized")
 	}
 	if err := s.Subscribe(cur.ID); err != nil {
@@ -166,7 +176,7 @@ func TestPairSetupAndVerifyWithSyntheticAccessory(t *testing.T) {
 	if len(events) != 1 || events[0][0].ID != cur.ID {
 		t.Fatalf("event not delivered: %v", events)
 	}
-	tgt, _ := s.Find(ServiceThermostat, CharTargetTemperature)
+	tgt, _ := s.Find(1, ServiceThermostat, CharTargetTemperature)
 	if err := s.Write(tgt.ID, 21.5); err != nil {
 		t.Fatal(err)
 	}
@@ -383,9 +393,9 @@ func TestThermostatClasses(t *testing.T) {
 func TestOnlyDeclaredWrites(t *testing.T) {
 	acc := newFakeAccessory(t)
 	_, s, c := pairAndVerify(t, acc, newHolder(t), Options{})
-	tgt, _ := s.Find(ServiceThermostat, CharTargetTemperature)
-	mode, _ := s.Find(ServiceThermostat, CharTargetHeatingCoolingState)
-	cur, _ := s.Find(ServiceThermostat, CharCurrentTemperature)
+	tgt, _ := s.Find(1, ServiceThermostat, CharTargetTemperature)
+	mode, _ := s.Find(1, ServiceThermostat, CharTargetHeatingCoolingState)
+	cur, _ := s.Find(1, ServiceThermostat, CharCurrentTemperature)
 	for name, w := range map[string]struct {
 		id ID
 		v  any

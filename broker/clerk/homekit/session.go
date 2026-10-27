@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Bounds on /accessories (a HAP bridge holds at most 150 accessories).
@@ -46,17 +48,21 @@ type Value struct {
 }
 
 // Session is one encrypted session with a verified accessory. Its first
-// error ends it; open another with Verify.
+// error ends it; open another with Verify. Events that arrive while a call
+// waits for its response go to Options.OnEvent once the call has released
+// the session, so a callback may call back into it.
 type Session struct {
-	mu     sync.Mutex
-	raw    io.ReadWriter
-	host   string
-	w      io.Writer
-	br     *bufio.Reader
-	err    error
-	opt    Options
-	chars  map[ID]*Characteristic
-	config int
+	mu      sync.Mutex
+	closing atomic.Bool
+	events  [][]Value // held for OnEvent until the lock is released
+	raw     io.ReadWriter
+	host    string
+	w       io.Writer
+	br      *bufio.Reader
+	err     error
+	opt     Options
+	chars   map[ID]*Characteristic
+	config  int
 }
 
 func newSession(conn io.ReadWriter, host string, shared []byte, opt Options) (*Session, error) {
@@ -77,15 +83,51 @@ func newSession(conn io.ReadWriter, host string, shared []byte, opt Options) (*S
 	}, nil
 }
 
-// Close ends the session.
+// lock and unlock guard the session; unlock hands the events held during
+// the call to OnEvent after releasing the lock (#3325 item 1).
+func (s *Session) lock() { s.mu.Lock() }
+
+func (s *Session) unlock() {
+	evs := s.events
+	s.events = nil
+	s.mu.Unlock()
+	for _, e := range evs {
+		s.opt.OnEvent(e)
+	}
+}
+
+type deadliner interface{ SetDeadline(time.Time) error }
+
+// Close ends the session. It closes the connection before taking the lock,
+// so a call blocked reading from the accessory ends at once with ErrClosed
+// instead of holding Close (#3325 item 3).
 func (s *Session) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.closing.Store(true)
+	if c, ok := s.raw.(io.Closer); ok {
+		c.Close()
+	} else if d, ok := s.raw.(deadliner); ok {
+		d.SetDeadline(time.Unix(1, 0))
+	}
+	s.lock()
+	defer s.unlock()
 	s.fail(ErrClosed)
 	return nil
 }
 
+// end fails the session with err and returns what the caller sees: the
+// error, or ErrClosed when Close cut the call short.
+func (s *Session) end(err error) error {
+	s.fail(err)
+	if s.closing.Load() {
+		return ErrClosed
+	}
+	return err
+}
+
 func (s *Session) fail(err error) {
+	if s.closing.Load() {
+		err = ErrClosed
+	}
 	if s.err == nil {
 		s.err = err
 		s.opt.logf("homekit: session with %s ended: %v", s.host, err)
@@ -95,43 +137,44 @@ func (s *Session) fail(err error) {
 	}
 }
 
-// do sends one request and returns its response, passing any events that
-// arrive first to OnEvent. Any transport or framing error ends the session.
+// do sends one request and returns its response, holding any events that
+// arrive first for OnEvent. Any transport or framing error ends the
+// session; with Options.Timeout, so does an accessory that does not answer
+// in time.
 func (s *Session) do(method, path string, body []byte) (*response, error) {
 	if s.err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrClosed, s.err)
+	}
+	if d, ok := s.raw.(deadliner); ok && s.opt.Timeout > 0 {
+		d.SetDeadline(time.Now().Add(s.opt.Timeout))
+		defer d.SetDeadline(time.Time{})
 	}
 	ct := ""
 	if body != nil {
 		ct = "application/hap+json"
 	}
 	if err := writeRequest(s.w, method, path, s.host, ct, body); err != nil {
-		s.fail(err)
-		return nil, err
+		return nil, s.end(err)
 	}
 	for i := 0; i < maxEventsWait; i++ {
 		r, err := readResponse(s.br)
 		if err != nil {
-			s.fail(err)
-			return nil, err
+			return nil, s.end(err)
 		}
 		if !r.event {
 			if r.status >= 300 && r.status < 400 {
-				err := fmt.Errorf("%w: redirect refused", ErrProtocol)
-				s.fail(err)
-				return nil, err
+				return nil, s.end(fmt.Errorf("%w: redirect refused", ErrProtocol))
 			}
 			return r, nil
 		}
-		s.deliver(r.body)
+		s.hold(r.body)
 	}
-	err := fmt.Errorf("%w: over %d events before a response", ErrProtocol, maxEventsWait)
-	s.fail(err)
-	return nil, err
+	return nil, s.end(fmt.Errorf("%w: over %d events before a response", ErrProtocol, maxEventsWait))
 }
 
-// deliver passes an event's values for resolved characteristics on.
-func (s *Session) deliver(body []byte) {
+// hold keeps an event's values for resolved characteristics that offer
+// events, for unlock to pass on.
+func (s *Session) hold(body []byte) {
 	vals, err := parseValues(body)
 	if err != nil || s.opt.OnEvent == nil {
 		return
@@ -143,14 +186,14 @@ func (s *Session) deliver(body []byte) {
 		}
 	}
 	if len(out) > 0 {
-		s.opt.OnEvent(out)
+		s.events = append(s.events, out)
 	}
 }
 
 // Resolve reads /accessories and replaces the resolved characteristics.
 func (s *Session) Resolve() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	return s.resolve()
 }
 
@@ -172,8 +215,8 @@ func (s *Session) resolve() error {
 
 // ConfigNumber takes the TXT record's c# and re-resolves when it changed.
 func (s *Session) ConfigNumber(c int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	if s.chars != nil && c == s.config {
 		return nil
 	}
@@ -186,8 +229,8 @@ func (s *Session) ConfigNumber(c int) error {
 
 // Characteristic returns the resolved characteristic, if any.
 func (s *Session) Characteristic(id ID) (Characteristic, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil {
 		return Characteristic{}, false
@@ -195,22 +238,32 @@ func (s *Session) Characteristic(id ID) (Characteristic, bool) {
 	return *c, true
 }
 
-// Find returns the resolved characteristic of type typ in service svc.
-func (s *Session) Find(svc, typ string) (Characteristic, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Find returns the resolved characteristic of type typ in service svc on
+// accessory aid. A bridge exposes one accessory per device, so the aid names
+// the device; an aid with two matches is ambiguous and finds nothing
+// (#3325 item 2).
+func (s *Session) Find(aid uint64, svc, typ string) (Characteristic, bool) {
+	s.lock()
+	defer s.unlock()
+	var found *Characteristic
 	for _, c := range s.chars {
-		if c.Service == svc && c.Type == typ {
-			return *c, true
+		if c.AID == aid && c.Service == svc && c.Type == typ {
+			if found != nil {
+				return Characteristic{}, false
+			}
+			found = c
 		}
 	}
-	return Characteristic{}, false
+	if found == nil {
+		return Characteristic{}, false
+	}
+	return *found, true
 }
 
 // Read reads resolved, readable characteristics.
 func (s *Session) Read(ids ...ID) ([]Value, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	if len(ids) == 0 || len(ids) > maxChars {
 		return nil, fmt.Errorf("%w: read of %d characteristics", ErrRefused, len(ids))
 	}
@@ -245,8 +298,8 @@ func (s *Session) Read(ids ...ID) ([]Value, error) {
 // Write checks value against the resolved characteristic's permissions,
 // format and declared range or enumeration, and only then frames it.
 func (s *Session) Write(id ID, value any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil {
 		return fmt.Errorf("%w: %d.%d is not a resolved characteristic", ErrRefused, id.AID, id.IID)
@@ -263,8 +316,8 @@ func (s *Session) Write(id ID, value any) error {
 
 // Subscribe asks for events on a resolved characteristic that offers them.
 func (s *Session) Subscribe(id ID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lock()
+	defer s.unlock()
 	c := s.chars[id]
 	if c == nil || !c.can("ev") {
 		return fmt.Errorf("%w: %d.%d offers no events", ErrRefused, id.AID, id.IID)

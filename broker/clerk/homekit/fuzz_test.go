@@ -85,3 +85,38 @@ func FuzzAccessoriesJSON(f *testing.F) {
 		}
 	})
 }
+
+// FuzzSessionRoundTrip passes accessory bytes through a real session
+// cipher, so every input clears the AEAD and reaches the response parser
+// (#3325 item 5): frameWriter, then frameReader, then readResponse.
+func FuzzSessionRoundTrip(f *testing.F) {
+	f.Add([]byte("HTTP/1.1 200 OK\r\nContent-Type: application/hap+json\r\nContent-Length: 2\r\n\r\n{}"))
+	f.Add([]byte("EVENT/1.0 200 OK\r\nContent-Length: 47\r\n\r\n{\"characteristics\":[{\"aid\":1,\"iid\":2,\"value\":1}]}HTTP/1.1 204 No Content\r\n\r\n"))
+	f.Add([]byte("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n0\r\n\r\n"))
+	f.Add(bytes.Repeat([]byte("x"), 3000))
+	key := bytes.Repeat([]byte{0x5a}, 32)
+	f.Fuzz(func(t *testing.T, b []byte) {
+		wc, _ := newFrameCipher(key)
+		rc, _ := newFrameCipher(key)
+		var wire bytes.Buffer
+		if _, err := (&frameWriter{w: &wire, c: wc}).Write(b); err != nil {
+			return
+		}
+		plain, err := io.ReadAll(&frameReader{r: bytes.NewReader(wire.Bytes()), c: rc})
+		if err != nil || !bytes.Equal(plain, b) {
+			t.Fatalf("round trip: %v, %d of %d bytes back", err, len(plain), len(b))
+		}
+		rc2, _ := newFrameCipher(key)
+		br := bufio.NewReaderSize(&frameReader{r: bytes.NewReader(wire.Bytes()), c: rc2}, readBufSize)
+		for i := 0; i < 4; i++ {
+			r, err := readResponse(br)
+			if err != nil {
+				return
+			}
+			if len(r.body) > maxBody || r.status < 200 || r.status >= 600 {
+				t.Fatalf("status %d, body of %d bytes", r.status, len(r.body))
+			}
+			parseValues(r.body)
+		}
+	})
+}
