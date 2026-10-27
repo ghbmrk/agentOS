@@ -324,10 +324,19 @@ func TestTakesTheCardsTypedKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gs := strings.Split(d.rkText, "-")
 	for form, leak := range map[string][]byte{
 		"printed":        []byte(d.rkText),
 		"undashed lower": []byte(strings.ToLower(strings.ReplaceAll(d.rkText, "-", ""))),
 		"utf-16":         utf16le(d.rkText),
+		// #3500 Security blocker 1: spaced, and in part.
+		"spaced upper":       []byte(strings.ReplaceAll(d.rkText, "-", " ")),
+		"spaced lower":       []byte(strings.ToLower(strings.ReplaceAll(d.rkText, "-", " "))),
+		"seven groups":       []byte(strings.Join(gs[:7], "-")),
+		"last seven spaced":  []byte(strings.Join(gs[1:], " ")),
+		"three groups lower": []byte(strings.ToLower(strings.Join(gs[3:6], " "))),
+		"three groups bare":  []byte(strings.Join(gs[5:], "")),
+		"three groups utf16": utf16le(strings.Join(gs[2:5], " ")),
 	} {
 		os.WriteFile(filepath.Join(d.esp(), "leak.bin"), append([]byte("x"), leak...), 0o600)
 		out.Reset()
@@ -497,5 +506,53 @@ func TestBinaryEntryFragmentsAndShortPassphrase(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "skip passphrase (shorter than") {
 		t.Errorf("a short passphrase was dropped silently\n%s", out.String())
+	}
+}
+
+// A passphrase is found as the store reads it (card.NormalizePassphrase)
+// and with other spacing (#3500 Security release 2), and the slots'
+// key-wrapping keys are needles (release 4): with the store file, either
+// unwraps the data key.
+func TestPassphraseFormsAndSlotKeys(t *testing.T) {
+	d := newDrive(t)
+	pass := "Synthetic  Passphrase words HERE"
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddSlot(seal.Passphrase{Phrase: []byte(pass)}); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	raw, _ := os.ReadFile(d.store)
+	key, _, rkek, err := unwrapSlot(raw, seal.KindRecovery, recoveryKEK(d.rk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, _, pkek, err := unwrapSlot(raw, seal.KindPassphrase, passphraseKEK([]byte(pass)))
+	if err != nil || !bytes.Equal(pk, key) {
+		t.Fatalf("the passphrase slot does not unwrap the store key: %v", err)
+	}
+	for _, c := range []struct {
+		want string
+		leak []byte
+	}{
+		{"passphrase", []byte("synthetic passphrase words here")},
+		{"passphrase", []byte("SYNTHETIC-PASSPHRASE-WORDS-HERE")},
+		{"passphrase", []byte("syntheticpassphrasewordshere")},
+		{"recovery slot key", rkek},
+		{"passphrase slot key", []byte(hex.EncodeToString(pkek))},
+	} {
+		os.WriteFile(filepath.Join(d.esp(), "leak.bin"), append([]byte("x"), c.leak...), 0o600)
+		var out bytes.Buffer
+		if n, err := run(d.store, d.rk, d.rkText, pass, shippedClerks, []string{d.esp()}, &out); err != nil || n == 0 || !strings.Contains(out.String(), "FIND "+c.want+" at") {
+			t.Errorf("%s (%q): %d, %v\n%s", c.want, c.leak, n, err, out.String())
+		}
+	}
+	// A passphrase that opens no slot is reported, not used.
+	var out bytes.Buffer
+	os.Remove(filepath.Join(d.esp(), "leak.bin"))
+	if _, err := run(d.store, d.rk, d.rkText, "another synthetic passphrase", shippedClerks, []string{d.esp()}, &out); err != nil || !strings.Contains(out.String(), "skip passphrase slot key") {
+		t.Errorf("a wrong passphrase: %v\n%s", err, out.String())
 	}
 }
