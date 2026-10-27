@@ -65,11 +65,14 @@ type Shape struct {
 }
 
 // Operation is one declared device operation, its verb (DEV-4) and the
-// shapes it may write.
+// shapes it may write. A Subscribe operation is a read that stays up and
+// reports each reading as it arrives, through Link.Report, until the host
+// ends it (DEVSLOT-subscribe-1).
 type Operation struct {
-	Name   string
-	Verb   key.Verb
-	Shapes []string
+	Name      string
+	Verb      key.Verb
+	Shapes    []string
+	Subscribe bool `json:",omitempty"`
 }
 
 // Declaration is a driver's DEV-1 declaration, as data. It names no address:
@@ -104,6 +107,7 @@ const (
 	CapRead     = 65540 // one frame read
 	CapWrite    = 4096  // one frame written
 	CapReadings = 1024  // readings per operation
+	CapKinds    = 32    // reading kinds, each its own DEV-8 window (DEVSLOT-host-lib-8)
 )
 
 // devVerbs is DEV-4's verb list: read, actuate, actuate-physical, present,
@@ -205,11 +209,17 @@ func Check(d Declaration, p Pin, home ...netip.Prefix) error {
 		if !devVerbs[o.Verb] {
 			return refuse("operation %s: verb %q is not a DEV-4 verb", o.Name, o.Verb)
 		}
+		if o.Subscribe && o.Verb != key.Read {
+			return refuse("operation %s: a subscription is a read", o.Name)
+		}
 		for _, s := range o.Shapes {
 			if !shapes[s] {
 				return refuse("operation %s: undeclared shape", o.Name)
 			}
 		}
+	}
+	if len(d.Readings) > CapKinds {
+		return refuse("more than %d reading kinds", CapKinds)
 	}
 	kinds := map[string]bool{}
 	for _, k := range d.Readings {
@@ -243,7 +253,9 @@ func checkPin(l LinkKind, p Pin, home netip.Prefix) error {
 // broadcast, a unique-local or link-local IPv6 address, or a global IPv6
 // address inside home, the uplink's enclosing /56. Never the internet, the
 // box itself, or a broadcast or multicast group. A v4-mapped address is
-// judged as its IPv4 address.
+// judged as its IPv4 address. A home that overlaps a prefix that carries
+// IPv4 addresses (NAT64, 6to4, Teredo) holds no home address, and neither
+// does such a prefix, since its addresses reach the IPv4 internet.
 func homeAddr(a netip.Addr, home netip.Prefix) bool {
 	a = a.Unmap()
 	if !a.IsValid() || a.IsLoopback() || a.IsMulticast() || a.IsUnspecified() {
@@ -257,8 +269,26 @@ func homeAddr(a netip.Addr, home netip.Prefix) bool {
 	if a.IsPrivate() || a.IsLinkLocalUnicast() {
 		return true
 	}
-	return home.IsValid() && home.Bits() == 56 && home.Addr().Is6() && !home.Addr().Is4In6() &&
-		home.Addr().IsGlobalUnicast() && !home.Addr().IsPrivate() && a.IsGlobalUnicast() && home.Contains(a.WithZone(""))
+	if !home.IsValid() || home.Bits() != 56 || !home.Addr().Is6() || home.Addr().Is4In6() ||
+		!home.Addr().IsGlobalUnicast() || home.Addr().IsPrivate() || !a.IsGlobalUnicast() || !home.Contains(a.WithZone("")) {
+		return false
+	}
+	for _, t := range translated {
+		if t.Overlaps(home) || t.Contains(a.WithZone("")) {
+			return false
+		}
+	}
+	return true
+}
+
+// translated are the IPv6 prefixes whose addresses carry IPv4 ones: NAT64's
+// well-known and local-use prefixes (RFC 6052, RFC 8215), 6to4 (RFC 3056)
+// and Teredo (RFC 4380).
+var translated = []netip.Prefix{
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
 }
 
 // shared is RFC 6598's shared address space, which a carrier-grade NAT or

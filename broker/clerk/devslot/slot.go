@@ -21,10 +21,13 @@ type Driver interface {
 // Link is the driver's only reach: its pinned device's declared channels.
 // Write sends a frame only if it is one of the running operation's shapes;
 // Read returns the next frame from the pinned device and the channel it came
-// on.
+// on. Report, in a subscription only, puts one reading on the bus at once;
+// a subscription's Run returns no readings, and returns nil once Read fails
+// because the operation has ended.
 type Link interface {
 	Write(ctx context.Context, ch string, frame []byte) error
 	Read(ctx context.Context) (ch string, frame []byte, err error)
+	Report(r Reading) error
 }
 
 // Target is where a frame goes or came from, as the host's transport sees
@@ -169,7 +172,8 @@ func (s *Slot) log(msg string) {
 
 // Do runs op and puts its readings on the bus. It returns how many it put.
 // Readings are all checked before any is emitted, so a refused one emits
-// none.
+// none. A subscription's readings go out one by one through Report as they
+// arrive, so a refusal stops the rest but not those already out.
 func (s *Slot) Do(ctx context.Context, op string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,31 +184,41 @@ func (s *Slot) Do(ctx context.Context, op string) (int, error) {
 	}
 	o := s.d.Operations[i]
 	runCtx, cancel := context.WithCancel(ctx)
-	l := &link{d: &s.d, op: o, env: &s.env, run: runCtx}
+	l := &link{s: s, d: &s.d, op: o, env: &s.env, run: runCtx}
 	rs, err := s.run(ctx, o.Name, l)
 	refused := l.close(cancel)
 	if refused != nil {
 		s.log("devslot: " + s.d.Device + " " + o.Name + ": " + refused.Error())
-		return 0, refused
+		return l.reported, refused
 	}
 	if err != nil {
 		s.log("devslot: " + s.d.Device + " " + o.Name + ": " + err.Error())
-		return 0, err
+		return l.reported, err
+	}
+	if o.Subscribe {
+		if len(rs) > 0 {
+			s.log("devslot: " + s.d.Device + " " + o.Name + ": readings refused")
+			return l.reported, ErrReading
+		}
+		return l.reported, nil
 	}
 	if err := s.checkReadings(rs); err != nil {
 		s.log("devslot: " + s.d.Device + " " + o.Name + ": readings refused")
 		return 0, err
 	}
-	unverified := s.d.Link != TCP
 	for n, r := range rs {
-		// UTC drops the driver's *time.Location, whose name is free text.
-		r.Time = r.Time.UTC().Round(0)
-		ev := Event{Device: s.d.Device, Op: o.Name, Label: Label, Unverified: unverified, Reading: r}
-		if err := s.env.Emit(ev); err != nil {
+		if err := s.env.Emit(s.event(o, r)); err != nil {
 			return n, err
 		}
 	}
 	return len(rs), nil
+}
+
+// event is r as op's event.
+func (s *Slot) event(o Operation, r Reading) Event {
+	// UTC drops the driver's *time.Location, whose name is free text.
+	r.Time = r.Time.UTC().Round(0)
+	return Event{Device: s.d.Device, Op: o.Name, Label: Label, Unverified: s.d.Link != TCP, Reading: r}
 }
 
 // run calls the driver, turning a panic or an error into a fixed error.
@@ -226,11 +240,16 @@ func (s *Slot) checkReadings(rs []Reading) error {
 		return ErrReading
 	}
 	for _, r := range rs {
-		if !slices.Contains(s.d.Readings, r.Kind) || r.Exp < -18 || r.Exp > 18 {
+		if !s.declared(r) {
 			return ErrReading
 		}
 	}
 	return nil
+}
+
+// declared is whether r is a declared kind with an exponent in [-18, 18].
+func (s *Slot) declared(r Reading) bool {
+	return slices.Contains(s.d.Readings, r.Kind) && r.Exp >= -18 && r.Exp <= 18
 }
 
 // link is the driver's Link and key handle for one operation. When Run
@@ -238,6 +257,7 @@ func (s *Slot) checkReadings(rs []Reading) error {
 // gets ErrClosed, so it can neither replay the operation's shapes with no
 // operation running nor open the key again (CLK-1, DEV-4).
 type link struct {
+	s   *Slot
 	d   *Declaration
 	op  Operation
 	env *Env
@@ -247,6 +267,9 @@ type link struct {
 	mu       sync.Mutex
 	done     bool
 	refused  error // the first refusal; the operation then fails with it
+	// emu puts one reported reading on the bus at a time.
+	emu      sync.Mutex
+	reported int
 }
 
 // enter admits one call while the operation runs.
@@ -336,6 +359,27 @@ func (l *link) Read(ctx context.Context) (string, []byte, error) {
 		return "", nil, l.refuse(ErrTooLarge)
 	}
 	return c.Name, slices.Clone(frame), nil
+}
+
+// Report puts r on the bus at once, in a subscription only. A reading the
+// declaration does not allow, or a Report in any other operation, is
+// refused and fails the operation; the readings reported before it stand,
+// since each was checked alone.
+func (l *link) Report(r Reading) error {
+	if err := l.enter(); err != nil {
+		return err
+	}
+	defer l.inflight.Done()
+	if !l.op.Subscribe || !l.s.declared(r) {
+		return l.refuse(ErrReading)
+	}
+	l.emu.Lock()
+	defer l.emu.Unlock()
+	if err := l.env.Emit(l.s.event(l.op, r)); err != nil {
+		return ErrDriver
+	}
+	l.reported++
+	return nil
 }
 
 // Serve runs drv for its host: it checks the declaration, then runs each
