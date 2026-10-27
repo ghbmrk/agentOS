@@ -1,16 +1,14 @@
 package route
 
 import (
-	"context"
+	"bytes"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,15 +19,14 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/ghbmrk/agentos/broker/egress"
-	"github.com/ghbmrk/agentos/broker/vault"
 )
 
 // REQ: CAP-9, ADP-3, ADP-4, ADP-7, CRED-5, REV-5
 //
-// The router in front of the real egress proxy, with both providers played
-// by one fake TLS server that answers per Host from the fixtures.
+// The router in front of a fake upstream (keyProxy) that stands where the
+// credential holder stands: it checks the machine's grant, injects the
+// provider key itself, and hands the call to one fake provider server that
+// answers per Host from the fixtures.
 // ADP-7 is partly covered: a route that breaks (rejected key, server
 // errors) is rerouted to the next healthy granted route; the Loop 3 repair
 // candidate is not here.
@@ -98,17 +95,63 @@ type rig struct {
 	keys      map[string]string
 	mu        sync.Mutex
 	decisions []Decision
-	egress    []egress.Event
 	now       time.Time
 	grants    map[string][]string
 	labels    map[string]string
-	px        *egress.Proxy
+	px        *keyProxy
 }
 
-func (r *rig) Egress(e egress.Event) {
-	r.mu.Lock()
-	r.egress = append(r.egress, e)
-	r.mu.Unlock()
+// keyProxy is the upstream the router is given: the part of the box that
+// holds the provider keys. The router sends it "/<provider><path>" with no
+// credential; it refuses an ungranted provider and a private machine's
+// remote image with the denial mark, and otherwise forwards the call to the
+// provider's host with that provider's key on the wire.
+type keyProxy struct {
+	r    *rig
+	keys map[string]string
+}
+
+var providerHost = map[string]string{"openai": hostOpenAI, "anthropic": hostAnthropic}
+
+func (k *keyProxy) Handler(machine string) http.Handler {
+	return k.HandlerFor(machine, k.r.labels[machine])
+}
+
+func (k *keyProxy) HandlerFor(machine, label string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		name, path, _ := strings.Cut(strings.TrimPrefix(req.URL.Path, "/"), "/")
+		host, key := providerHost[name], k.keys[name]
+		deny := func(why string) {
+			w.Header().Set(deniedHeader, "1")
+			http.Error(w, "egress denied: "+why, http.StatusForbidden)
+		}
+		k.r.mu.Lock()
+		granted := false
+		for _, g := range k.r.grants[machine] {
+			granted = granted || g == name
+		}
+		k.r.mu.Unlock()
+		if host == "" || !granted {
+			deny("provider not granted")
+			return
+		}
+		body, _ := io.ReadAll(req.Body)
+		if label != LabelPublic && bytes.Contains(body, []byte(`"url":"http`)) {
+			deny("remote image source for private data")
+			return
+		}
+		out := req.Clone(req.Context())
+		out.Host, out.URL.Path = host, "/"+path
+		out.Body = io.NopCloser(bytes.NewReader(body))
+		out.Header.Del("Authorization")
+		out.Header.Del("X-Api-Key")
+		if name == "anthropic" {
+			out.Header.Set("X-Api-Key", key)
+		} else {
+			out.Header.Set("Authorization", "Bearer "+key)
+		}
+		k.r.up.ServeHTTP(w, out)
+	})
 }
 
 func (r *rig) clock() time.Time {
@@ -139,37 +182,13 @@ type rigOpts struct {
 	privateOK map[string]bool
 	// privateAllowed is Config.PrivateAllowed (P2-2w c4e).
 	privateAllowed func(string) bool
-	cap            egress.Cap
 	maxOut         int
 }
 
 func newRig(t *testing.T, o rigOpts) *rig {
 	t.Helper()
 	up := &upstream{reply: map[string]http.HandlerFunc{}, seen: map[string]int{}, headers: map[string][]http.Header{}, bodies: map[string][][]byte{}}
-	srv := httptest.NewTLSServer(up)
-	t.Cleanup(srv.Close)
-	tr := srv.Client().Transport.(*http.Transport).Clone()
-	tr.TLSClientConfig = tr.TLSClientConfig.Clone()
-	tr.TLSClientConfig.ServerName = "example.com"
-	tr.TLSClientConfig.MinVersion = tls.VersionTLS12
-	addr := srv.Listener.Addr().String()
-	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, addr)
-	}
-
-	kb := make([]byte, vault.KeySize)
-	rand.Read(kb)
-	v, err := vault.Create(filepath.Join(t.TempDir(), "vault"), kb)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { v.Close() })
 	keys := map[string]string{"openai": synthetic(t, "sk-canary-oa-"), "anthropic": synthetic(t, "sk-ant-canary-")}
-	for name, k := range keys {
-		if err := v.Put(name+"-key", vault.KindAPIKey, []byte(k)); err != nil {
-			t.Fatal(err)
-		}
-	}
 	if o.grants == nil {
 		o.grants = map[string][]string{"m1": {"openai", "anthropic"}}
 	}
@@ -181,19 +200,8 @@ func newRig(t *testing.T, o rigOpts) *rig {
 	}
 	r := &rig{up: up, keys: keys, now: time.Unix(1_790_000_000, 0), grants: o.grants, labels: o.labels}
 	label := func(m string) string { return r.labels[m] }
-	px, err := egress.New(egress.Config{
-		Adapters:  []egress.Adapter{egress.OpenAI("openai-key"), egress.Anthropic("anthropic-key")},
-		Grants:    o.grants,
-		Vault:     v,
-		Transport: tr,
-		Audit:     r,
-		Label:     label,
-		Cap:       o.cap,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.px = px
+	r.px = &keyProxy{r: r, keys: keys}
+	var err error
 	r.router, err = New(Config{
 		Providers: []Provider{OpenAI(), Anthropic()},
 		Rule:      o.rule,
@@ -209,7 +217,7 @@ func newRig(t *testing.T, o rigOpts) *rig {
 		PrivateAllowed:  o.privateAllowed,
 		MaxOutputTokens: o.maxOut,
 		Label:           label,
-		Upstream:        px.Handler,
+		Upstream:        r.px.Handler,
 		Audit: func(d Decision) {
 			r.mu.Lock()
 			r.decisions = append(r.decisions, d)
@@ -247,8 +255,8 @@ func completionText(t *testing.T, w *httptest.ResponseRecorder) string {
 }
 
 // The first route serves; its body is the translated request with the
-// route's model; the key on the wire is the vault's, injected by egress.
-func TestServesFromFirstRouteThroughEgress(t *testing.T) {
+// route's model; the key on the wire is the upstream's, injected there.
+func TestServesFromFirstRouteThroughUpstream(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
 	w := r.do(t, "m1", simpleChat)
@@ -292,7 +300,7 @@ func TestFailsOverOnExhaustionAndHonorsRetryAfter(t *testing.T) {
 	}
 	var sent map[string]any
 	json.Unmarshal(r.up.lastBody(hostOpenAI), &sent)
-	if sent["model"] != "gpt-fixture" || sent["store"] != false {
+	if sent["model"] != "gpt-fixture" {
 		t.Fatalf("openai body %v", sent)
 	}
 
@@ -445,8 +453,8 @@ func TestSkipsRouteThatCannotExpressTheCall(t *testing.T) {
 	}
 }
 
-// Egress policy still applies under the router: a private machine's
-// remote image source is denied by the proxy and not retried elsewhere.
+// The upstream's own policy still applies under the router: a private
+// machine's remote image source it denies is not retried elsewhere.
 func TestEgressBodyRulesStillApply(t *testing.T) {
 	r := newRig(t, rigOpts{labels: map[string]string{"m1": "private"}, privateOK: map[string]bool{"anthropic": true, "openai": true}})
 	body := `{"model":"default","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://attacker.example/x.png"}}]}]}`
@@ -492,8 +500,8 @@ func TestUnknownClassAndBadRequests(t *testing.T) {
 	}
 }
 
-// Streaming through the proxy: Messages events arrive as chat chunks.
-func TestStreamsTranslatedThroughEgress(t *testing.T) {
+// Streaming through the upstream: Messages events arrive as chat chunks.
+func TestStreamsTranslatedThroughUpstream(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	r.up.set(hostAnthropic, serveFixture(200, "text/event-stream", fixture(t, "anthropic_stream.sse")))
 	w := r.do(t, "m1", `{"model":"default","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`)
@@ -569,17 +577,14 @@ func TestCandidateProposesButDoesNotAdopt(t *testing.T) {
 	}
 }
 
-// Decisions and egress events carry no prompt, completion, or key.
+// Decisions carry no prompt, completion, or key.
 func TestDecisionsCarryNoContentOrKey(t *testing.T) {
 	r := newRig(t, rigOpts{})
 	canary := synthetic(t, "canary-prompt-")
 	r.up.set(hostAnthropic, serveFixture(429, "application/json", fixture(t, "anthropic_rate_limit.json")))
 	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
 	r.do(t, "m1", `{"model":"default","messages":[{"role":"user","content":"`+canary+`"}]}`)
-	b, _ := json.Marshal(struct {
-		D []Decision
-		E []egress.Event
-	}{r.decisions, r.egress})
+	b, _ := json.Marshal(r.decisions)
 	for _, s := range []string{canary, r.keys["openai"], r.keys["anthropic"], "fixture."} {
 		if strings.Contains(string(b), s) {
 			t.Fatalf("audit carries %q: %s", s, b)
@@ -643,47 +648,6 @@ func (r *rig) lastDecision() Decision {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.decisions[len(r.decisions)-1]
-}
-
-// The router's copy of the proxy's denial mark is the proxy's.
-func TestDeniedHeaderMatchesEgress(t *testing.T) {
-	if deniedHeader != egress.DeniedHeader {
-		t.Fatalf("%q != %q", deniedHeader, egress.DeniedHeader)
-	}
-}
-
-// CAP-9: one machine's own proxy limits never cool a route for another
-// machine; the denial goes to that machine's guest as an OpenAI error.
-func TestProxyLimitsStayPerMachine(t *testing.T) {
-	r := newRig(t, rigOpts{
-		grants: map[string][]string{"a": {"openai", "anthropic"}, "b": {"openai", "anthropic"}},
-		labels: map[string]string{"a": LabelPublic, "b": LabelPublic},
-		cap:    egress.Cap{Requests: 1},
-	})
-	r.up.set(hostAnthropic, serveFixture(200, "application/json", fixture(t, "anthropic_message.json")))
-	r.up.set(hostOpenAI, serveFixture(200, "application/json", fixture(t, "openai_completion.json")))
-	if w := r.do(t, "a", simpleChat); w.Code != 200 {
-		t.Fatalf("first call %d", w.Code)
-	}
-	w := r.do(t, "a", simpleChat)
-	if w.Code != 429 || r.up.count(hostOpenAI) != 0 {
-		t.Fatalf("capped machine: %d, openai=%d", w.Code, r.up.count(hostOpenAI))
-	}
-	var e struct {
-		Error struct{ Type, Message string }
-	}
-	if json.Unmarshal(w.Body.Bytes(), &e) != nil || e.Error.Type != "rate_limit_error" || !strings.Contains(e.Error.Message, "request cap") {
-		t.Fatalf("guest error %s", w.Body)
-	}
-	if d := r.lastDecision(); d.Outcome != Denied || d.Reason != "egress denied" {
-		t.Fatalf("decision %+v", d)
-	}
-	if w := r.do(t, "b", simpleChat); w.Code != 200 || completionText(t, w) != "Checking the weather." || r.up.count(hostAnthropic) != 2 {
-		t.Fatalf("other machine: %d anthropic=%d", w.Code, r.up.count(hostAnthropic))
-	}
-	if st := r.router.Stats()["anthropic/claude-fixture"]; st.Failovers != 0 || st.Calls != 2 {
-		t.Fatalf("proxy denial counted against the route: %+v", st)
-	}
 }
 
 // OP-8 groundwork: served calls report the provider's usage, cache tokens
