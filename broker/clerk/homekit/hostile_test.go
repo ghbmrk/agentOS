@@ -485,16 +485,25 @@ func TestAccessoriesJSONBounds(t *testing.T) {
 }
 
 // A 1xx interim reply is refused, ending the session, instead of being
-// taken as the answer and knocking the stream out of step (#3325 item 7).
+// taken as the answer and knocking the stream out of step (#3325 item 7),
+// whether or not it carries a body length.
 // REQ: DEV-1, KRN-2
 func TestInterimReplyIsRefused(t *testing.T) {
-	s, _ := hostilePeer(t, Options{}, func(*http.Request, int) string {
-		return "HTTP/1.1 100 Continue\r\n\r\n" + hapResp(200, valuesBody(idEv))
-	})
-	if _, err := s.Read(idEv); !errors.Is(err, ErrProtocol) {
-		t.Fatalf("1xx reply: %v", err)
-	}
-	if _, err := s.Read(idEv); !errors.Is(err, ErrClosed) {
-		t.Fatalf("session open after a 1xx reply: %v", err)
+	for name, interim := range map[string]string{
+		"bare":    "HTTP/1.1 100 Continue\r\n\r\n",
+		"length":  "HTTP/1.1 100 Continue\r\nContent-Length: 2\r\n\r\n{}",
+		"chunked": "HTTP/1.1 103 Early Hints\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, _ := hostilePeer(t, Options{}, func(*http.Request, int) string {
+				return interim + hapResp(200, valuesBody(idEv))
+			})
+			if _, err := s.Read(idEv); !errors.Is(err, ErrProtocol) {
+				t.Fatalf("1xx reply: %v", err)
+			}
+			if _, err := s.Read(idEv); !errors.Is(err, ErrClosed) {
+				t.Fatalf("session open after a 1xx reply: %v", err)
+			}
+		})
 	}
 }
