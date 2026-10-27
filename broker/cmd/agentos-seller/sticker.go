@@ -29,13 +29,13 @@ body { font-family: sans-serif; margin: 0 }
 .label { font: 2.8mm sans-serif; margin-top: 2mm }
 </style></head>
 <body><div class="sticker">
-<div class="step">1. Join this Wi-Fi</div>
+<div class="step">1. Join the enforcer's setup Wi-Fi</div>
 {{.WiFiQR}}
 <div class="net">{{.SSID}}</div>
 <div class="label">Wi-Fi password</div>
 <div class="code">{{.Password}}</div>
-<div class="hint">Scan, or join network {{.SSID}} with this password.</div>
-<div class="step">2. Claim this AgentOS box</div>
+<div class="hint">Scan, or join network {{.SSID}} with this password. The enforcer's page opens and gives your phone the Owner network.</div>
+<div class="step">2. Back on the Owner network, claim this agentOS box</div>
 {{.QR}}
 <div class="label">Claim code</div>
 <div class="code">{{.Code}}</div>
@@ -44,8 +44,9 @@ body { font-family: sans-serif; margin: 0 }
 `))
 
 // writeSticker writes the sticker, 0600: the only files that hold the
-// code (HW-1). It also prints the setup network, which the phone joins
-// first to reach the claim page (§8.1, CTRL-claim-ap).
+// code (HW-1). Step 1 is the enforcer's setup network, which opens only
+// the enforcer's page; step 2 claims once the phone is back on the Owner
+// network (D-178, §12.1 steps 1 and 4).
 func writeSticker(dir, code string, net claim.SetupNet) error {
 	qr, err := card.QRSVG(claimURL(code))
 	if err != nil {
@@ -65,7 +66,10 @@ func writeSticker(dir, code string, net claim.SetupNet) error {
 	if err := writeNew(filepath.Join(dir, "sticker.html"), b.Bytes()); err != nil {
 		return err
 	}
-	txt := fmt.Sprintf("Wi-Fi network: %s\nWi-Fi password: %s\nAgentOS claim code: %s\nClaim page: %s\n",
+	txt := fmt.Sprintf("1. Join the enforcer's setup Wi-Fi; its page gives your phone the Owner network.\n"+
+		"Wi-Fi network: %s\nWi-Fi password: %s\n"+
+		"2. Back on the Owner network, claim this agentOS box.\n"+
+		"agentOS claim code: %s\nClaim page: %s\n",
 		net.SSID, net.Password, code, claimURL(code))
 	return writeNew(filepath.Join(dir, "sticker.txt"), []byte(txt))
 }
