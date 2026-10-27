@@ -252,7 +252,7 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
         for n, t in zip(names, texts):
             n.write_bytes(t)
         merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)), *map(str, names)],
-                                capture_output=True).stdout
+                                cwd=cwd, capture_output=True).stdout
     key = lambda line: FIRST_CELL.match(line) and FIRST_CELL.match(line).group(1)
     out, hunk, side, conflicts = ([], [], []), None, 0, 0  # resolutions 0 and 1; 2 is the union, to match the replay
     for line in merged.splitlines(keepends=True):
