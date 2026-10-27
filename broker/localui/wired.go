@@ -100,7 +100,7 @@ func Wired(sys, name string) error {
 	t, err := os.ReadFile(filepath.Join(dir, "type"))
 	switch {
 	case err != nil:
-		return errors.New("localui: port 1 " + name + " is not a link on this box")
+		return errors.New("localui: port 1 " + name + " is not a link I have")
 	case strings.TrimSpace(string(t)) != "1":
 		return errors.New("localui: port 1 " + name + " is not Ethernet")
 	case exists(filepath.Join(dir, "wireless")) || exists(filepath.Join(dir, "phy80211")):
