@@ -447,3 +447,29 @@ func helloBody(edge pair, nonce byte) map[string]any {
 func entryAt(t *testing.T, seq uint64, at int64, typ string, body any) kernel.Entry {
 	return kernel.Entry{Seq: seq, At: at, Type: typ, V: 1, Body: mustJSON(t, body)}
 }
+
+// An anchor-signed enrolment written past the kernel whose replaces is not
+// the live key folds to nothing and diverges, so a forged entry cannot
+// leave the old key live and unrevoked beside the new one (L3 probe on
+// #3341). Mutant: drop `!s.LiveEdge(b.Head).Equal(b.Replaces) ||` from
+// enrollOK and the forged enrolment folds.
+func TestEnrollReplacesOnlyTheLiveKey(t *testing.T) {
+	r := newRig(t)
+	old, next := gen(41), gen(42)
+	enrol(r, 1, old, 1)
+	must(t, candidate(r, 70_000, next, 2))
+	s := r.k.State()
+	sig := key.Approve(r.owner.pass, kernel.EdgeEnrollHash(s.EdgeChanges(), r.k.Box(), next.pub, nil))
+	es := r.k.Log().Entries()
+	forged := entryAt(t, s.Seq+1, 70_001, kernel.TEdgeEnrolled, map[string]any{"key": []byte(next.pub), "head": []byte(r.head.pub), "sig": sig})
+	all := append(es[:len(es):len(es)], forged)
+	st, err := kernel.Replay(r.anchors(), all)
+	must(t, err)
+	if !st.LiveEdge(r.head.pub).Equal(old.pub) || st.EdgeRevoked(old.pub) {
+		t.Fatalf("an enrolment replacing nothing folded: live %x, old revoked %v", st.LiveEdge(r.head.pub), st.EdgeRevoked(old.pub))
+	}
+	var d *kernel.Divergence
+	if _, err := kernel.Rederive(r.anchors(), all); !errors.As(err, &d) || d.Seq != s.Seq+1 {
+		t.Fatalf("got %v, want a divergence at %d", err, s.Seq+1)
+	}
+}
