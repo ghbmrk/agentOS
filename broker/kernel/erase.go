@@ -29,6 +29,9 @@ const (
 	TContentStored  = "content.stored"
 	TSubjectErased  = "subject.erased"
 	TEraseConfirmed = "erase.confirmed"
+	// TContentRead records that an agent session's lineage was given a
+	// sealed item (ReadFor), so an erase can rewind it (D-169).
+	TContentRead = "content.read"
 )
 
 // ClassLabel is the class of a subject's name: recall by name opens the
@@ -90,6 +93,7 @@ var (
 	ErrStore         = errors.New("kernel: no content store by that name, or no such class")
 	ErrSubjectKey    = errors.New("kernel: the subject's data key is missing, or not the one its subject.opened names")
 	ErrItem          = errors.New("kernel: no readable item by that hash")
+	ErrLineage       = errors.New("kernel: a lineage is 1 to 128 bytes of plain text")
 )
 
 // ValidSubject reports whether s is a subject ID as OpenSubject draws them:
@@ -140,6 +144,10 @@ type (
 		Subject string `json:"subject"`
 		Store   string `json:"store"`
 	}
+	contentRead struct {
+		Hash    Hash   `json:"hash"`
+		Lineage string `json:"lineage"`
+	}
 	subjectState struct {
 		opened    int64
 		seq       uint64 // of its subject.opened
@@ -149,6 +157,7 @@ type (
 		erasedAt  int64
 		stores    []string // the stores that held items at the erase
 		confirmed map[string]bool
+		reads     map[string]int64 // each lineage that read an item, at its first read
 	}
 	itemOf struct {
 		subject string
@@ -225,8 +234,52 @@ func (s *State) applyErase(e Entry) error {
 				delete(s.owing, b.Subject)
 			}
 		}
+	case TContentRead:
+		b, err := body[contentRead](e)
+		if err != nil {
+			return err
+		}
+		if it, ok := s.items[b.Hash]; ok && validLineage(b.Lineage) {
+			st := s.subjects[it.subject]
+			if st.reads == nil {
+				st.reads = map[string]int64{}
+			}
+			if _, ok := st.reads[b.Lineage]; !ok {
+				st.reads[b.Lineage] = e.At
+			}
+		}
 	}
 	return nil
+}
+
+// validLineage reports whether s can name an agent session's lineage
+// (vm.Machine.Lineage): short, plain text.
+func validLineage(s string) bool { return s != "" && len(s) <= 128 && utf8.ValidString(s) && shown(s) }
+
+// ErasedRead is a lineage that read an item of an erased subject, and
+// when it first did: what an erase rewinds (D-169).
+type ErasedRead struct {
+	Subject string `json:"subject"`
+	Lineage string `json:"lineage"`
+	First   int64  `json:"first"`
+}
+
+// ErasedReads lists, for every erased subject, each lineage that read one
+// of its items and the time of its first such read, by subject then
+// lineage. It is a projection of the log, so it survives a restart and
+// rebuilds from empty (LOG-1).
+func (s *State) ErasedReads() []ErasedRead {
+	var out []ErasedRead
+	for _, sub := range slices.Sorted(maps.Keys(s.subjects)) {
+		st := s.subjects[sub]
+		if !st.erased {
+			continue
+		}
+		for _, l := range slices.Sorted(maps.Keys(st.reads)) {
+			out = append(out, ErasedRead{sub, l, st.reads[l]})
+		}
+	}
+	return out
 }
 
 // Recall is what the box knows about a subject (LOG-4): while it is live,
@@ -453,7 +506,39 @@ func (k *Kernel) Read(h Hash) ([]byte, error) {
 	return pt, nil
 }
 
-// Named lists the live subjects one of whose labels reads label, and
+// ReadFor opens the item named h for an agent session of lineage: the only
+// way sealed content may reach one (LOG-4, D-169). It logs content.read
+// first, so a delivery always leaves a record an erase can rewind; when the
+// entry is not written nothing is returned. An erased or unknown item is
+// refused before anything is logged.
+func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
+	if !validLineage(lineage) {
+		return nil, ErrLineage
+	}
+	it, ok := k.s.items[h]
+	if !ok {
+		if k.keys == nil {
+			return nil, ErrContentClosed
+		}
+		return nil, ErrItem
+	}
+	if _, _, err := k.subjectKey(it.subject); err != nil {
+		return nil, err
+	}
+	if _, err := k.emit(now, TContentRead, contentRead{h, lineage}); err != nil {
+		return nil, err
+	}
+	return k.Read(h)
+}
+
+// sameLabel compares labels after folding case and collapsing runs of
+// whitespace, so "alice  smith" reads "Alice Smith". Fuzzier matching is
+// later (PLN-7).
+func sameLabel(a, b string) bool {
+	return strings.EqualFold(strings.Join(strings.Fields(a), " "), strings.Join(strings.Fields(b), " "))
+}
+
+// Named lists the live subjects one of whose labels reads label (sameLabel), and
 // apart from them those with a label that could not be read (a missing key,
 // a store down), so one fault does not hide every other subject. Before
 // OpenContent it returns ErrContentClosed and no subjects, since none could
@@ -473,7 +558,7 @@ func (k *Kernel) Named(label string) (found, unread []string, err error) {
 				bad = true
 				continue
 			}
-			if string(pt) == label {
+			if sameLabel(string(pt), label) {
 				found = append(found, sub)
 				bad = false
 				break
