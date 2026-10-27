@@ -315,13 +315,15 @@ func kernelCall(t *testing.T, sock string) map[string]string {
 	return a
 }
 
+// errNoDial wraps a dial that failed, which is no refusal by the clerk.
+var errNoDial = errors.New("no connection to the socket")
+
 // kernelAnswer sends the kernel's wire a do with an empty view and reads the
-// answer's line; a socket that closes unanswered gives no bytes and io.EOF,
-// or a reset when it closes with the call unread.
+// answer's line; a socket that closes unanswered gives no bytes and an error.
 func kernelAnswer(sock string) ([]byte, error) {
 	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errNoDial, err)
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
@@ -450,7 +452,9 @@ func TestRealMailClerkAsRoot(t *testing.T) {
 	// The kernel's wire answers a do it accepts (no-account here) and
 	// closes on any other call unanswered, so only a do tells the uid
 	// binding apart from the call table.
-	if a, err := kernelAnswer(filepath.Join(sockets, "k.sock")); len(a) != 0 || !errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET) {
+	// A refused peer may see EOF, a reset or a broken pipe: any error
+	// after the dial, with no answer byte, is a refusal.
+	if a, err := kernelAnswer(filepath.Join(sockets, "k.sock")); len(a) != 0 || err == nil || errors.Is(err, errNoDial) {
 		t.Errorf("the kernel's socket answered root's do: %q, %v", a, err)
 	}
 	st, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", cmd.Process.Pid))
