@@ -251,15 +251,6 @@ func rejectReason(c string) string {
 	return reasonRejected
 }
 
-// code is s when it is a fixed code, a lowercase name; anything else, such
-// as a browser clerk's page snapshot, never reaches the guest (PLN-1).
-func code(s string) string {
-	if !nameRE.MatchString(s) {
-		return ""
-	}
-	return s
-}
-
 // label is the machine's data label, failing closed.
 func (p *Plane) label(machine string) string {
 	if p.cfg.Label != nil {
