@@ -44,7 +44,8 @@ var allParts = Parts{Setup: true, Passphrase: true, Grid: true, Recovery: true}
 // so neither the card nor a rotation of every part prints a "Box Wi-Fi"
 // section, a Wi-Fi QR payload or a Wi-Fi password, and the display never
 // says the box's Wi-Fi switches. It catches a card that still names a
-// network no device serves.
+// network no device serves. The needles name a box Wi-Fi, not "my Wi-Fi
+// page", which is the local page's name (CH-12, WIFI-del-f).
 func TestCardCarriesNoWiFi(t *testing.T) {
 	c := mustGen(t, 8)
 	full, err := HTML(c)
@@ -65,7 +66,7 @@ func TestCardCarriesNoWiFi(t *testing.T) {
 	}
 	pages := map[string]string{"card": string(full), "rotation": string(rot), "display": string(first), "rotation display": string(rotPage)}
 	for name, page := range pages {
-		for _, bad := range []string{"Box Wi-Fi", "WIFI:", "Wi-Fi password", "my Wi-Fi", "Wi-Fi QR", "look for the Wi-Fi"} {
+		for _, bad := range []string{"Box Wi-Fi", "WIFI:", "Wi-Fi password", "my Wi-Fi becomes", "my Wi-Fi switches", "Wi-Fi QR", "look for the Wi-Fi"} {
 			if strings.Contains(page, bad) {
 				t.Fatalf("%s still carries %q", name, bad)
 			}
@@ -118,6 +119,74 @@ func TestQuickStartStartsFromTheEnforcer(t *testing.T) {
 	for _, want := range append([]string{"it needs WPA3"}, QuickStart...) {
 		if !strings.Contains(string(page), htmlEsc(want)) {
 			t.Fatalf("card lacks %q", want)
+		}
+	}
+}
+
+// cardPages renders every page the owner reads from the card package: the
+// card, a rotation sheet of every part, and both displays.
+func cardPages(t *testing.T) map[string]string {
+	t.Helper()
+	c := mustGen(t, 10)
+	full, err := HTML(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rot, err := rotationHTML(c, allParts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := newRig(t).d.Page()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotPage, err := newRotRig(t, allParts).d.Page()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{"card": string(full), "rotation": string(rot), "display": string(first), "rotation display": string(rotPage)}
+}
+
+// REQ: CH-12, ONB-7
+//
+// WIFI-del-f (#3404): the card names the local page as the owner texts and
+// SPEC do, "my Wi-Fi page" (CH-12: one name for the local UI). The card
+// and rotation sheet label its address "Wi-Fi page:", and no card page or
+// display answer says "box page". It catches a card that sends the owner
+// to a page the texts call by another name.
+func TestCardNamesTheWiFiPage(t *testing.T) {
+	pages := cardPages(t)
+	pages["in effect"] = inEffectProblem
+	pages["cancelled"] = cancelledGone
+	pages["confirmed"] = confirmedGone
+	for name, page := range pages {
+		if strings.Contains(strings.ToLower(page), "box page") {
+			t.Fatalf("%s still says box page", name)
+		}
+	}
+	for _, name := range []string{"card", "rotation"} {
+		if !strings.Contains(pages[name], `Wi-Fi page: <span class="mono">`+BoxPage) {
+			t.Fatalf("%s does not label the address as the Wi-Fi page", name)
+		}
+	}
+	for _, name := range []string{"in effect", "cancelled", "confirmed"} {
+		if !strings.Contains(pages[name], "my Wi-Fi page") {
+			t.Fatalf("%s answer does not name my Wi-Fi page: %q", name, pages[name])
+		}
+	}
+	if !strings.Contains(pages["card"], "type it on my Wi-Fi page") {
+		t.Fatal("the passphrase note does not name my Wi-Fi page")
+	}
+}
+
+// REQ: HW-1
+//
+// The project's name is "agentOS" on everything the owner reads from the
+// card package. It catches a page that prints "AgentOS".
+func TestCardSaysAgentOSInLowerCase(t *testing.T) {
+	for name, page := range cardPages(t) {
+		if strings.Contains(page, "AgentOS") {
+			t.Fatalf("%s says AgentOS", name)
 		}
 	}
 }

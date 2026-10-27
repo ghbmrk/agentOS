@@ -211,3 +211,23 @@ func TestStickerStepOneIsTheEnforcers(t *testing.T) {
 		t.Fatalf("sticker.txt order wrong: %q", txt)
 	}
 }
+
+// REQ: HW-10
+//
+// The sticker spells the project "agentOS", as the card and texts do. It
+// catches a sticker that prints "AgentOS".
+func TestStickerSaysAgentOSInLowerCase(t *testing.T) {
+	out := t.TempDir()
+	if err := writeSticker(out, "CCCC-CCCC-CCCC-CCCC", claim.SetupNet{SSID: "agentos-setup-test", Password: "PWPW-PWPW-PWPW-PWPW"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"sticker.html", "sticker.txt"} {
+		b, err := os.ReadFile(filepath.Join(out, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), "AgentOS") {
+			t.Fatalf("%s says AgentOS", f)
+		}
+	}
+}
