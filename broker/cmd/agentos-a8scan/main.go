@@ -3,13 +3,14 @@
 // (STO-2) with the recovery key, as the unlock path does, and scans a
 // drive's plaintext partitions, or any files and directories, for the
 // store's data key, the keys derived from it (the log key, the head key,
-// the MAC and entries keys) and every sealed secret, in raw, hex, base64
-// and base32 forms at every alignment. It also checks that the store holds
+// the MAC and entries keys, each clerk's sealer key) and every sealed
+// secret, in raw, hex, base64 and base32 forms at every alignment. It also checks that the store holds
 // only TPM, passphrase and recovery slots.
 //
-//	agentos-a8scan -store /var/lib/agentos-store/store TARGET...
+//	agentos-a8scan -store /var/lib/agentos-store/store [-clerk NAME]... TARGET...
 //
-// The recovery key (64 hex digits, the store's recovery factor) and
+// The recovery key as the Owner Card prints it (40 symbols in eight
+// groups, read through card.StoreRecoveryKey as the unlock path does) and
 // optionally the passphrase are read from standard input with echo off,
 // never from the command line; the store holds neither, so the scan
 // learns them only from the owner. Each TARGET is a block device or file
@@ -40,26 +41,40 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 	"unsafe"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
+
+// shippedClerks are the clerks whose sealer keys are needles without a
+// -clerk flag: every clerk main the image ships (cmd/agentos-clerk-*).
+var shippedClerks = []string{"mail"}
+
+type clerkList []string
+
+func (c *clerkList) String() string     { return strings.Join(*c, ",") }
+func (c *clerkList) Set(v string) error { *c = append(*c, v); return nil }
 
 func main() {
 	log.SetFlags(0)
 	sp := flag.String("store", "", "the drive's sealed store file")
+	var clerks clerkList
+	flag.Var(&clerks, "clerk", "a clerk whose sealer key is a needle, besides the shipped ones (repeatable)")
 	flag.Parse()
 	if *sp == "" || flag.NArg() == 0 {
-		log.Fatal("usage: agentos-a8scan -store FILE TARGET... (recovery key on stdin)")
+		log.Fatal("usage: agentos-a8scan -store FILE [-clerk NAME]... TARGET... (recovery key on stdin)")
 	}
 	in := bufio.NewReader(os.Stdin)
-	line := strings.TrimSpace(readSecret(in, "Recovery key: "))
-	rk, err := hex.DecodeString(line)
-	if err != nil || len(rk) != seal.RecoveryLen {
-		log.Fatalf("the recovery key is not %d bytes of hex", seal.RecoveryLen)
+	line := strings.TrimSpace(readSecret(in, "Recovery key (as on the card): "))
+	rk, err := card.StoreRecoveryKey(line)
+	if err != nil {
+		log.Fatal(err)
 	}
 	pass := strings.TrimRight(readSecret(in, "Passphrase (Enter to skip): "), "\r\n")
-	n, err := run(*sp, rk, line, pass, flag.Args(), os.Stdout)
+	n, err := run(*sp, rk, line, pass, append(clerks, shippedClerks...), flag.Args(), os.Stdout)
 	clear(rk)
 	if err != nil {
 		log.Fatal(err)
@@ -88,10 +103,11 @@ func readSecret(in *bufio.Reader, prompt string) string {
 	return line
 }
 
-// run opens the store at sp with the recovery key rk (typed as rkText),
-// plants and checks every needle, and scans targets. It returns the number
-// of findings; an error means no scan result.
-func run(sp string, rk []byte, rkText, passphrase string, targets []string, out io.Writer) (int, error) {
+// run opens the store at sp with the recovery key rk (card.StoreRecoveryKey
+// of the card text rkText), plants and checks every needle, the sealer keys
+// of clerks among them, and scans targets. It returns the number of
+// findings; an error means no scan result.
+func run(sp string, rk []byte, rkText, passphrase string, clerks, targets []string, out io.Writer) (int, error) {
 	st, err := seal.Unlock(sp, seal.Recovery{Key: rk})
 	if err != nil {
 		return 0, fmt.Errorf("the recovery key does not open this store: %w", err)
@@ -106,7 +122,7 @@ func run(sp string, rk []byte, rkText, passphrase string, targets []string, out 
 		}
 	}
 	fmt.Fprintln(out, "ok   store slots: only TPM, passphrase and recovery")
-	needles, err := storeNeedles(sp, st, rk, rkText, passphrase, out)
+	needles, err := storeNeedles(sp, st, rk, rkText, passphrase, clerks, out)
 	if err != nil {
 		return 0, err
 	}
@@ -155,10 +171,11 @@ func run(sp string, rk []byte, rkText, passphrase string, targets []string, out 
 // storeNeedles lists every secret A8's scan must not find in plaintext: the
 // store's data key (unwrapped from the recovery slot by this tool's own
 // reading of the file format, so the scan does not take the key from the
-// code it audits) and the keys derived from it, every sealed secret, and
-// the factors the store never holds, as typed: the recovery key and, when
-// given, the passphrase.
-func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase string, out io.Writer) ([]Needle, error) {
+// code it audits) and the keys derived from it (storePurposes), every
+// sealed secret, and the factors the store never holds: the recovery key
+// as the slot takes it, as the card prints it and as the card's 160 bits,
+// and, when given, the passphrase.
+func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase string, clerks []string, out io.Writer) ([]Needle, error) {
 	raw, err := os.ReadFile(sp)
 	if err != nil {
 		return nil, err
@@ -187,6 +204,14 @@ func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase strin
 		{Name: "log key", Value: lk[:]},
 		{Name: "head key", Value: hk.Seed()},
 	}
+	seen := map[string]bool{}
+	for _, c := range clerks {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		ns = append(ns, Needle{Name: "sealer key of clerk " + c, Value: derive(key, id, "sealer/"+c)})
+	}
 	for _, name := range st.Entries() {
 		v, ok, err := st.Get(name)
 		if err != nil {
@@ -199,17 +224,95 @@ func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase strin
 			fmt.Fprintf(out, "skip store entry %s (shorter than %d bytes)\n", name, minPattern)
 			continue
 		}
-		ns = append(ns, Needle{Name: "store entry " + name, Value: v, Text: true})
+		// Only printable text gets the text forms; a binary secret gets
+		// the raw and hex fragments instead.
+		ns = append(ns, Needle{Name: "store entry " + name, Value: v, Text: printable(v)})
 	}
 	ns = append(ns, Needle{Name: "recovery key", Value: append([]byte(nil), rk...)})
-	// Typed as hex, the key's text is already among its hex forms.
-	if !strings.EqualFold(rkText, hex.EncodeToString(rk)) {
-		ns = append(ns, Needle{Name: "recovery key text", Value: []byte(rkText), Text: true})
+	printed, bits, err := cardKey(rkText)
+	if err != nil {
+		return nil, err
 	}
-	if len(passphrase) >= minPattern {
+	ns = append(ns,
+		Needle{Name: "recovery key text", Value: []byte(printed), Text: true},
+		Needle{Name: "recovery key bits", Value: bits})
+	switch {
+	case len(passphrase) >= minPattern:
 		ns = append(ns, Needle{Name: "passphrase", Value: []byte(passphrase), Text: true})
+	case passphrase != "":
+		fmt.Fprintf(out, "skip passphrase (shorter than %d bytes)\n", minPattern)
 	}
 	return ns, nil
+}
+
+// storePurposes names every purpose seal derives a key for under the store
+// key, with the needle that covers it, or "" for the one value that is not
+// secret. TestEveryStorePurposeIsANeedle fails on a purpose seal.go gains
+// that this list lacks, so a new derived key cannot go unscanned.
+var storePurposes = map[string]string{
+	"mac":     "store MAC key",
+	"entries": "store entries key",
+	"log":     "log key",
+	"head":    "head key",
+	"sealer/": "sealer key of clerk ",
+	"anchor":  "", // the TPM unlock's anchor: not secret (seal.go, anchor)
+}
+
+// cardKey reads the card text rkText, already accepted by
+// card.StoreRecoveryKey, as the card prints it (eight dashed groups of
+// five, upper case) and as the 160 bits its groups carry, decoded here from
+// the printed format alone, so the needle does not come from the code the
+// scan audits. It refuses unless card.RecoveryKeyText prints those bits
+// back as the same text.
+func cardKey(rkText string) (printed string, bits []byte, err error) {
+	n := card.Normalize(rkText)
+	const groups, group = 8, 5
+	if len(n) != groups*group {
+		return "", nil, errors.New("the recovery key is not 40 symbols")
+	}
+	var b [20]byte
+	var acc uint64
+	nb, j := 0, 0
+	for i := 0; i < len(n); i++ {
+		if i%group == group-1 {
+			continue // the group's check symbol
+		}
+		v := strings.IndexByte(card.Alphabet, n[i])
+		if v < 0 {
+			return "", nil, errors.New("the recovery key holds a symbol the card never prints")
+		}
+		acc = acc<<5 | uint64(v)
+		nb += 5
+		if nb >= 8 {
+			nb -= 8
+			b[j] = byte(acc >> nb)
+			j++
+		}
+	}
+	gs := make([]string, groups)
+	for g := range gs {
+		gs[g] = n[g*group : (g+1)*group]
+	}
+	printed = strings.Join(gs, "-")
+	if card.RecoveryKeyText(b) != printed {
+		clear(b[:])
+		return "", nil, errors.New("the recovery key's bits do not print back as the card text; refusing to scan")
+	}
+	return printed, b[:], nil
+}
+
+// printable reports whether v is UTF-8 text with no control characters
+// other than tab and newline.
+func printable(v []byte) bool {
+	if !utf8.Valid(v) {
+		return false
+	}
+	for _, r := range string(v) {
+		if unicode.IsControl(r) && r != '\t' && r != '\n' && r != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 // storeLabel is seal's HKDF and associated-data prefix (seal.go, label).
