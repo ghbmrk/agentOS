@@ -76,6 +76,7 @@ Work item: #3191, slice e of #2865. Tier A. The row is M to L and crosses four t
 **Requirement IDs:** BAK-1, BAK-2 (the notice's one-target and append-only lines).
 **Acceptance tests:** the matrix rows marked e4, each a test in the touched package: notice present with no target, with no verified backup, after a recipient change, and when the kernel reports no recipient; a one-target line and a not-append-only line; gone after a verified backup on two append-only targets; one backup a day; at once after a recipient change; backoff after a failure.
 **Needs:** e3. **Estimate:** 100k tokens.
+**Split at build time (two sessions, D-111 serial):** e4a (#3252), the schedule and the STATUS lines, `broker/cmd/agentosd` only; e4b, the choice page with its hardware-key tap and the notice on the status and choice pages (`broker/localapi`, `broker/localsrv`, `broker/localui`, `broker/cmd/agentosd`), its own row. The daily digest is gone (DRB-1), so STATUS carries the digest's part of the notice.
 
 ## Unowned gaps (not in e1 to e4)
 
