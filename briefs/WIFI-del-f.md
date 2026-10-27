@@ -1,6 +1,6 @@
 # WIFI-del-f: the Owner Card names the local page "my Wi-Fi page", as the owner texts do
 
-Board section: Identity, onboarding and setup (SPEC §11-12). Work item #3404, UX release finding 1 on #3402 (WIFI-del-e, comment 6444057962). CH-12, ONB-7, HW-1. Tier B.
+Board section: Identity, onboarding and setup (SPEC §11-12). Work item #3404, UX release finding 1 on #3402 (WIFI-del-e, comment 6444057962). CH-12, ONB-7, HW-1. Tier A by path (`risk_tier.py`: `broker/card`), though the row says B; the build ran on the strongest model.
 
 ## The gap
 
@@ -37,5 +37,5 @@ CH-12: owner texts use one name for the local UI, built on the Wi-Fi the owner r
 ## Board row
 
 ```board-row
-{"section": "Identity, onboarding and setup (SPEC §11-12)", "cells": ["[WIFI-del-f: the Owner Card names the local page as the owner texts do (\"my Wi-Fi page\"), and the card test's no-Wi-Fi needle stops forbidding that name (CH-12, ONB-7; UX finding 1 on #3402).](briefs/WIFI-del-f.md)", "WIFI-del-e (#3365)"], "rest": " (release; tier B)"}
+{"section": "Identity, onboarding and setup (SPEC §11-12)", "cells": ["[WIFI-del-f: the Owner Card names the local page as the owner texts do (\"my Wi-Fi page\"), and the card test's no-Wi-Fi needle stops forbidding that name (CH-12, ONB-7; UX finding 1 on #3402).](briefs/WIFI-del-f.md)", "WIFI-del-e (#3365)"], "rest": " (release; tier A)"}
 ```
