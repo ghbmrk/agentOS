@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// REQ: KRN-2, ARC-2
+// REQ: KRN-2
 
 // The check path links no network code, so agentosd, whose graph holds no
 // network client (daemon.TestAgentosdLinksNoInference), can host a clerk
