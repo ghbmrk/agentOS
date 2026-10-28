@@ -1,7 +1,8 @@
 """Tests for tools/root_tests.py: every root-gated Go test runs in a root CI step (CI-root-go, #3539),
-one whose skip or failure fails CI (CI-root-go-2, #3541).
+one whose skip or failure fails CI (CI-root-go-2, #3541), and every go command of the generated step
+under no_new_privs (CI-root-go-4, #3571).
 
-No SPEC requirement IDs: CI tooling (issues #3539, #3541). All data is synthetic.
+No SPEC requirement IDs: CI tooling (issues #3539, #3541, #3549, #3571, #3572). All data is synthetic.
 """
 import pathlib
 import sys
@@ -167,6 +168,23 @@ class GatedTest(unittest.TestCase):
                    "q/b_test.go": HELPERS.replace("package p", "package q")}) as d:
             self.assertIn("TestX", root_tests.gated(d)[f"{M}/q"])
 
+    def test_a_test_both_gated_and_root_skipping_is_reported(self):
+        # #3549: calls match by bare name, so a method named like a root-gated helper that skips as
+        # root drops the test from both kinds of job; it is reported, not dropped.
+        collide = ("package c\n\nfunc setup(t *testing.T) {\n\tneedRoot(t)\n}\n\n"
+                   "func (h *h) setup() {\n\tif os.Geteuid() == 0 {\n\t\th.t.Skip(\"as root\")\n\t}\n}\n\n"
+                   "func TestCollides(t *testing.T) {\n\tsetup(t)\n}\n")
+        mixed = {}
+        with tree({"c/c_test.go": collide + HELPERS.replace("package p", "")}) as d:
+            found = root_tests.gated(d, mixed)
+        self.assertNotIn("TestCollides", found[f"{M}/c"])
+        self.assertEqual(mixed, {f"{M}/c": ["TestBranchesThenSkipsAsRoot", "TestCollides"]})
+        self.assertEqual(root_tests.problems(found, [], True, {}, mixed), [
+            f"{M}/c.TestBranchesThenSkipsAsRoot: root-gated, and skips as root, so no CI job runs all of it",
+            f"{M}/c.TestCollides: root-gated, and skips as root, so no CI job runs all of it"])
+        why = {f"{M}/c.TestCollides": "x", f"{M}/c.TestBranchesThenSkipsAsRoot": "y"}
+        self.assertEqual(root_tests.problems(found, [], True, why, mixed), [])
+
 
 class RunsTest(unittest.TestCase):
     def test_reads_root_go_test_lines(self):
@@ -251,6 +269,8 @@ class RunsTest(unittest.TestCase):
 
     def test_generated_step(self):
         self.assertTrue(root_tests.generated_step(STEPS))
+        self.assertEqual(root_tests.step_faults(STEPS), [])
+        self.assertIsNone(root_tests.step_faults(STEPS.replace("Root-gated Go tests", "Other")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("require_ran.py $names", "cat")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("sudo setpriv --no-new-privs env go", "env go")))
         # #3542: as agentosd.service runs (NoNewPrivileges=yes; L7-6), so a uid change that works
@@ -261,6 +281,56 @@ class RunsTest(unittest.TestCase):
             "          python3 -I ../tools/require_ran.py $names",
             "          sudo env go test -run x ./y > o.json\n          python3 -I ../tools/require_ran.py $names")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("Root-gated Go tests", "Other")))
+        # Comments never run, and a guarded line may keep its tail across a continuation.
+        self.assertTrue(root_tests.generated_step(STEPS.replace(
+            "          python3 -I ../tools/require_ran.py $names", "          # sudo env go test ./y\n"
+            "          python3 -I ../tools/require_ran.py $names")))
+
+    GUARDED = "sudo setpriv --no-new-privs env go"
+
+    def test_each_simple_command_of_the_generated_step_runs_go_with_no_new_privs(self):
+        # #3571: the guard reads each simple command, not the line's first words.
+        for op in (";", "&&", "||", "|", "&", ";;", "|&", "\\\n            ;"):
+            with self.subTest(op=op):
+                self.assertFalse(root_tests.generated_step(STEPS.replace(
+                    self.GUARDED, f"sudo setpriv --no-new-privs true {op} sudo env go")))
+        self.assertFalse(root_tests.generated_step(STEPS.replace(
+            "\n          python3 -I ../tools/require_ran.py $names",
+            "\n          sudo setpriv --no-new-privs true#; sudo env go test ./y > o.json"
+            "\n          python3 -I ../tools/require_ran.py $names")), "# inside a word starts no comment")
+        self.assertFalse(root_tests.generated_step(STEPS.replace(
+            self.GUARDED, "sudo setpriv --no-new-privs true; (sudo env go")))
+
+    def test_a_respelled_go_needs_no_new_privs_too(self):
+        # #3571: a go test without the literal `go test` is still a go command.
+        plain = "\n          sudo env {} -run x ./y > o.json\n"
+        for go in ("go  test", "\"go\" test", "g\\o test", "/usr/local/go/bin/go test", "$GO test",
+                   '"${GO}" test', "sh -c 'go test'", "eval \"$CMD\"", "x=$(sudo env go test ./y)",
+                   "x=`go test ./y`", "cat <(go test ./y)"):
+            with self.subTest(go=go):
+                cut = STEPS.replace("\n          python3 -I ../tools/require_ran.py $names", plain.format(go)
+                                    + "          python3 -I ../tools/require_ran.py $names")
+                self.assertFalse(root_tests.generated_step(cut), cut)
+        # An expansion is in command position after a keyword, an assignment or a redirection.
+        for go in ("! $GO test ./y", "do $GO test ./y", "GOFLAGS=x $GO test ./y", "2> e.log $GO test ./y"):
+            with self.subTest(go=go):
+                cut = STEPS.replace("\n          python3 -I ../tools/require_ran.py $names", f"\n          {go}\n"
+                                    + "          python3 -I ../tools/require_ran.py $names")
+                self.assertFalse(root_tests.generated_step(cut), cut)
+        self.assertFalse(root_tests.generated_step(STEPS.replace(
+            "-run \"$pat\"", "-run \"$pat")), "a line the check cannot read fails")
+
+    def test_a_lost_wrapper_is_named(self):
+        # #3572: the problem names the missing prefix, not every generated-step test as unrun.
+        cut = STEPS.replace(self.GUARDED, "sudo env go")
+        found = {K: ["TestEdgeEnroll"]}
+        probs = root_tests.check(found, root_tests.root_runs(cut), cut, {})
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("`sudo env go test -json", probs[0])
+        self.assertIn("without `sudo setpriv --no-new-privs`", probs[0])
+        cut = STEPS.replace("Root-gated Go tests", "Other")
+        self.assertEqual(root_tests.check(found, root_tests.root_runs(cut), cut, {}),
+                         [f"{K}.TestEdgeEnroll: root-gated, and no root step in ci.yml runs it"])
 
 
 class CheckTest(unittest.TestCase):
@@ -292,7 +362,10 @@ class RepoTest(unittest.TestCase):
 
     def test_repo_passes(self):
         self.assertEqual(root_tests.main([]), 0)
-        self.assertTrue(root_tests.generated_step(CI))
+        self.assertEqual(root_tests.step_faults(CI), [])
+        mixed = {}
+        root_tests.gated(mixed=mixed)
+        self.assertEqual(mixed, {})
 
     def test_kernelsock_root_tests_run_as_root(self):
         # #3536: owner/kernelsock's wire tests skip off root; every one of them must be in a root step.

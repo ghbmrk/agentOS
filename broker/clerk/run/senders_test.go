@@ -38,6 +38,13 @@ type sendersRig struct {
 // over it; edit, if given, changes the config first.
 func newSendersRig(t *testing.T, srv *imaptest.Server, edit func(*MailConfig)) *sendersRig {
 	t.Helper()
+	return newSendersRigCtx(t, t.Context(), srv, edit)
+}
+
+// newSendersRigCtx is newSendersRig with a host that runs until ctx ends.
+// It opens only that host, so no other worker's steps are counted.
+func newSendersRigCtx(t *testing.T, ctx context.Context, srv *imaptest.Server, edit func(*MailConfig)) *sendersRig {
+	t.Helper()
 	dir := shortDir(t)
 	sec, err := OpenSecrets(dir, testSealer())
 	if err != nil {
@@ -52,13 +59,8 @@ func newSendersRig(t *testing.T, srv *imaptest.Server, edit func(*MailConfig)) *
 	if edit != nil {
 		edit(&r.cfg)
 	}
-	r.open(t)
+	r.openCtx(t, ctx)
 	return r
-}
-
-// open opens a host over the rig's directory, until ctx ends.
-func (r *sendersRig) open(t *testing.T) {
-	r.openCtx(t, t.Context())
 }
 
 func (r *sendersRig) openCtx(t *testing.T, ctx context.Context) {
@@ -74,11 +76,22 @@ func (r *sendersRig) openCtx(t *testing.T, ctx context.Context) {
 	r.h = NewMailHost(ctx, r.dir, r.sec, c)
 }
 
-// full waits until the world gives history.
+// full waits until the world gives history, then until the host is idle.
 func (r *sendersRig) full(t *testing.T) inbox.World {
 	t.Helper()
 	eventually(t, "the senders read through", func() bool { return r.h.world().History != nil })
+	r.idle()
 	return r.h.world()
+}
+
+// idle waits until no read or step of the host is in flight. A step keeps
+// its result in the world before it is counted, both under h.mu, and the
+// world takes no h.mu: so once the world shows a step's result, the step
+// is counted only after h.mu is taken.
+func (r *sendersRig) idle() {
+	r.h.mu.Lock()
+	r.h.idle()
+	r.h.mu.Unlock()
 }
 
 // blank fails unless the world has none of the three fields.
@@ -278,14 +291,13 @@ func TestSenderRecordIsSealedAndIncremental(t *testing.T) {
 		srv.DeliverAt("INBOX", day(i), mailFrom(fmt.Sprintf("s%d@old.test", i), fmt.Sprintf("<o%d@old.test>", i)))
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	r := newSendersRig(t, srv, func(c *MailConfig) { c.stepMax = 1 })
-	r.h = nil
-	r.openCtx(t, ctx) // a host this test stops
+	r := newSendersRigCtx(t, ctx, srv, func(c *MailConfig) { c.stepMax = 1 }) // a host this test stops
 	r.full(t)
 	n := r.steps.Load()
 	srv.DeliverAt("INBOX", day(9), mailFrom("new@new.test", "<n1@new.test>"))
 	r.h.listing(true) // a mail read
 	eventually(t, "the new sender", func() bool { return slices.Contains(r.h.world().KnownSenders, "new@new.test") })
+	r.idle()
 	if got := r.steps.Load(); got != n+1 || r.more.Load() {
 		t.Fatalf("one new mail at one mail a step: %d steps, more %v; want 1 step and none left", got-n, r.more.Load())
 	}
