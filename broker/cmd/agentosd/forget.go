@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -405,11 +404,12 @@ func openEraseRewind(path string, logf func(string, ...any)) *eraseRewind {
 		w.bad = true
 	default:
 		if err := json.Unmarshal(data, &w.settled); err != nil {
-			// A corrupt record is set aside, so every reader of erased
+			// A corrupt record is set aside (a durable copy; the next save
+			// replaces the original), so every reader of erased
 			// content is rewound again (fails closed: later work goes too)
-			// and the owner told; kept if it cannot be moved.
+			// and the owner told; kept as it is if it cannot be copied.
 			w.settled = nil
-			if rerr := durable.Rename(path, path+".corrupt"); rerr != nil {
+			if rerr := writeSynced(path+".corrupt", data); rerr != nil {
 				logf("%s corrupt and not set aside, every agent contained: %v; %v", path, err, rerr)
 				w.bad = true
 			} else {
