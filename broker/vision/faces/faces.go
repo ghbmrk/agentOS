@@ -92,8 +92,8 @@ const (
 // 6459973175 point 3). Its digest is part of what the anchor signs, so a
 // page that showed other words gets a signature Enrol refuses.
 const ConsentNotice = "Enrolling someone else's face may need their consent under local law. " +
-	"Their face template stays on this box, sealed, until you remove them, and erasing them destroys it. " +
-	"Backups don't keep templates yet, so after a restore they show as unknown until you enrol them again."
+	"I keep their face template sealed until you remove them, and erasing them destroys it. " +
+	"My backups don't keep templates yet, so after a restore they show as unknown until you enrol them again."
 
 // Errors a caller tells apart.
 var (
