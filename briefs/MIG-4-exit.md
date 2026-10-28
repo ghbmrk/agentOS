@@ -18,7 +18,7 @@ Work item #2571. Tier A. Written 2026-10-28 against main at ed2f1af. Each slice 
 | second line: texting and calling accounts (`smsaccount.go`, `sipaccount.go`, sms.sock, sign.sock) | `localui/secondline.go`, `modem/sipline`, `cmd/agentosd/secondline.go` | a second-line clerk (CLK-8), which no row builds | Decision 2 |
 | mailbox (`mailaccount.go`) | none | the mail clerk | #3679 |
 | owner pins: backup target, private hosted route, compute host (`netpins.go`) | none outside the process's own CLI | the kernel's backup targets (`kernel/backuptarget.go`); declared endpoints (HW-16, HW-17) | d1 |
-| recall key (`/recall-key`) | `modelroute.RecallKey` | gone with `recall` (#3425) | #3425 or m2 |
+| recall key (`/recall-key`) | none: `modelroute.RecallKey` has no caller | gone with `recall` (#3425) | d1 (the type goes with `modelroute`) |
 
 **Other importers still to clear** (from the LANES.md importer command): `e2e/boxe2e/codexstub` and `e2e` (#3431 and #3432, MIG-4-adapters g and h); `firstboot/card_test.go` (#2571 comment 6445257843: this row ports it); `vault/planlogin_redact_test.go` (goes with `vault`); `smsapi/imports_test.go` names `broker/vault` only as a string.
 
@@ -51,12 +51,12 @@ Work item #2571. Tier A. Written 2026-10-28 against main at ed2f1af. Each slice 
 
 ## m2 (#3681): agentosd's model route and setup's AI step onto the model clerk
 
-**Scope (agentosd slot):** `broker/cmd/agentosd/main.go` (drop `-egress`, `-routing`, and `-worker-routes` if #2780 b3 left it; wire the model clerk's sockets), the guest model route (`gcfg.Model`) and setup's provider step (`setup.go`, `capoff.go` where they call `modelroute`), `broker/modelroute/` (delete the vault-process clients: `providers.go`, `routing.go`, `state.go`, `workerroutes.go`, the model.sock forward; keep only what the route to the clerk needs, or delete the package), their tests, `broker/cmd/agentosd/ASSUMPTIONS.md`.
+**Scope (agentosd slot):** `broker/cmd/agentosd/main.go` (drop `-egress`, `-routing`, and `-worker-routes` if #2780 b3 left it; wire the model clerk's sockets; `-owner-verify`, `-notice-socket` and the `secondLine` wiring stay for c3), the guest model route (`gcfg.Model`) and setup's provider step (`setup.go`, `capoff.go` where they call `modelroute`), agentosd's calls into `broker/modelroute/` (agentosd stops importing it; the package itself stays, since `cmd/agentos-egress` compiles against its wire types until d1 deletes both), their tests, `broker/cmd/agentosd/ASSUMPTIONS.md`.
 **Do:** agentosd turns the guest's HTTP into the typed frame m1 serves (the parsing stays on the untrusted side) and calls the clerk with the run's kernel plan; setup's API-key step calls m1's owner calls. Folds MIG-4-adapters-d (#3427) if that has not merged: it edits the same `modelroute` files and `main.go` line.
 **Needs:** m1; #2780 b3 (it holds the slot and removes `providerRunner`); b2b-unit (#2780) so the clerk runs on the image; #3427 or its fold.
 **Requirement IDs:** PLN-5 (model access only through the model clerk), CLK-7, ONB-3 (setup's AI step).
 **Guard files:** none expected; `image.yml` runs on agentosd changes.
-**Acceptance tests:** `broker/cmd/agentosd/modelroute_test.go::TestGuestModelCallGoesThroughTheModelClerk` (a guest's call reaches a fake provider only through the clerk's socket and is metered on the kernel plan; catches a path that still dials model.sock), `::TestSetupAPIKeyStepStoresInTheClerk`; `go list -deps ./cmd/agentosd` names no `modelroute` client of `/run/agentos-egress`; `grep -c agentos-egress broker/cmd/agentosd/main.go` prints 0 for the model flags; `image.yml` green.
+**Acceptance tests:** `broker/cmd/agentosd/modelroute_test.go::TestGuestModelCallGoesThroughTheModelClerk` (a guest's call reaches a fake provider only through the clerk's socket and is metered on the kernel plan; catches a path that still dials model.sock), `::TestSetupAPIKeyStepStoresInTheClerk`; agentosd's model route and setup step call no `modelroute` function, and `go build ./cmd/agentos-egress` still passes (catches a deleted wire type the vault process names); `grep -c agentos-egress broker/cmd/agentosd/main.go` prints 0 for the model flags; `image.yml` green.
 **Size:** M.
 
 ## c1 (#3682): the kernel admits a code approval
@@ -81,18 +81,18 @@ The kernel has no notion of an approval code: `kernel`, `kernel/key` and `owner/
 
 ## c3 (#3684): the owner channel and setup check codes with the checker
 
-**Scope (agentosd slot):** `broker/cmd/agentosd/main.go` (`-owner-verify` and `-notice-socket` replaced by the checker's verify socket; `m.Enroll` onto c2's enrolment), `broker/cmd/agentosd/noticepull.go` (delete; the checker's lockout reaches STATUS through the verifier's errors), the `owner.Verifier` adapter in `main.go`, `broker/modelroute/verify.go` (delete), `broker/owner/notice/noticesock/` (delete; its only server is the vault process), their tests.
-**Needs:** c2 and its unit on the image; the agentosd slot.
+**Scope (agentosd slot):** `broker/cmd/agentosd/main.go` (`-owner-verify` and `-notice-socket` replaced by the checker's verify socket; `m.Enroll` onto c2's enrolment), `broker/cmd/agentosd/noticepull.go` (delete; the checker's lockout reaches STATUS through the verifier's errors), the `owner.Verifier` adapter in `main.go`, `broker/owner/notice/noticesock/` (delete; agentosd is its only importer) with its entries in `broker/daemon/inference_test.go` and `broker/daemon/arc2_test.go`, and, under Decision 2, `broker/cmd/agentosd/secondline.go` with its `secondLine` wiring in `main.go` (it is built from the same verifier), their tests. `broker/modelroute/verify.go` stays: the vault process compiles against its types until d1. After c3, `go list -deps ./cmd/agentosd` names no `modelroute`.
+**Needs:** c2 and its unit on the image; m2 (both edit `main.go`; m2 goes first); Decision 2 (if it is declined, the second-line clerk's caller slice replaces `secondline.go` before c3); the agentosd slot.
 **Requirement IDs:** CH-4, CH-14 (a session unlocked by a code), CH-17 (keypad codes reach the same check).
-**Guard files:** `tools/trusted_base_parsers.txt` (the `noticesock` line).
-**Acceptance tests:** `broker/cmd/agentosd/verify_test.go::TestOwnerCodeApprovesThroughTheChecker` (a texted code approves exactly the pending batch through the kernel; catches a path that still calls verify.sock), `::TestCheckerDownRefusesHighTierCodes`.
+**Guard files:** `tools/trusted_base_parsers.txt` (the `noticesock` line) and `broker/daemon/arc2_test.go` (Security accept).
+**Acceptance tests:** `broker/cmd/agentosd/verify_test.go::TestOwnerCodeApprovesThroughTheChecker` (a texted code approves exactly the pending batch through the kernel; catches a path that still calls verify.sock), `::TestCheckerDownRefusesHighTierCodes`; `go build ./cmd/agentos-egress` still passes.
 **Size:** M.
 
 ## p (#3685): the local page off the unlock socket
 
-**Scope:** `broker/localui/vault.go`, `providers.go` (onto m1's owner calls), `secondline.go` (delete under Decision 2), the pages and routes in `pages.go` and `server.go` that only these serve, `broker/localui/rotwire.go` and the card provision and reset calls in `vault.go`, unless #3409 and #3410 already removed them, `broker/cmd/agentos-localui/main.go` flags (`-vault-sock`), `broker/modem/sipline/signer.go` and `cmd/agentosd/secondline.go` (Decision 2; the latter in the agentosd slot, or left to d1 if the slot is busy), tests, `broker/localui/ASSUMPTIONS.md`.
+**Scope:** `broker/localui/vault.go`, `providers.go` (onto m1's owner calls), `secondline.go` (delete under Decision 2), the pages and routes in `pages.go` and `server.go` that only these serve, `broker/localui/rotwire.go` and the card provision and reset calls in `vault.go`, unless #3409 and #3410 already removed them, `broker/cmd/agentos-localui/main.go` flags (`-vault-sock`), `broker/modem/sipline/signer.go` (Decision 2; agentosd's second-line code is c3's), tests, `broker/localui/ASSUMPTIONS.md`.
 **Do:** the trusted host unlocks at boot (`agentos-unlock`) and the setup vault is gone, so the unlock, trust, boot-PIN and setup-host pages are deleted, not ported; the unknown-host unlock page is #3358's, which this slice does not wait for, since the old page unlocks only the old vault.
-**Needs:** #3624 (holds `localui/server.go`, `setup.go`, `rotwire.go`, `firstboot.go` and `cmd/agentos-localui/main.go`); #3409 and #3410 for the rotation pages; m1 for the providers page; Decision 2.
+**Needs:** #3679 (both edit `localui/imports_test.go`); #3624 (holds `localui/server.go`, `setup.go`, `rotwire.go`, `firstboot.go` and `cmd/agentos-localui/main.go`); #3409 and #3410 for the rotation pages; m1 for the providers page; Decision 2.
 **Requirement IDs:** STO-2, PLN-3, REC-4 (the old rotation route is gone and the new one is the page's).
 **Guard files:** none expected.
 **Acceptance tests:** `broker/localui/imports_test.go::TestPageDialsNoVaultProcess` (no route of the page reaches `/run/agentos-egress`), `broker/localui/providers_test.go::TestPrivateAnswerChangesTheClerkRoute` (allowing needs a code, as now).
@@ -100,11 +100,11 @@ The kernel has no notion of an approval code: `kernel`, `kernel/key` and `owner/
 
 ## d1 (#3686): delete the vault process and its units
 
-**Scope:** delete `broker/cmd/agentos-egress/`, `broker/cmd/agentos-holder/`, `broker/egress/cmd/agentos-codex-forwarder/`; `image/`: `agentos-egress.service`, `agentos-egress-setup.path` and `.service`, `usr/lib/agentos/egress-setup`, the egress lines in `50-agentos.preset`, `60-agentos-tpm.rules`, `agentos-setup.conf` sysusers, `mkosi.finalize`, `build.sh`'s command list, `image/e2e/agentos-egress.conf` and its `ci_boot.sh` drop-in, `agentosd.service`'s `After`/`Wants`; `.github/workflows/image.yml` (the egress paths and the e2e egress build); `broker/core/core.txt` (`wiring cmd/agentos-egress`, `-holder`); `broker/durable/stores.txt` (the `cmd/agentos-egress` line); `tools/ci_split.py`, `tools/trusted_base_parsers.txt`, `tools/g1_scope_g2.txt` entries for the deleted mains; #1393 closed as moot.
+**Scope:** delete `broker/cmd/agentos-egress/`, `broker/cmd/agentos-holder/`, `broker/egress/cmd/agentos-codex-forwarder/`; `image/`: `agentos-egress.service`, `agentos-egress-setup.path` and `.service`, `usr/lib/agentos/egress-setup`, the egress lines in `50-agentos.preset`, `60-agentos-tpm.rules`, `agentos-setup.conf` sysusers, `mkosi.finalize`, `build.sh`'s command list, `image/e2e/agentos-egress.conf` and its `ci_boot.sh` drop-in, `agentosd.service`'s `After`/`Wants`; `.github/workflows/image.yml` (the egress paths and the e2e egress build); `broker/core/core.txt` (`wiring cmd/agentos-egress`, `-holder`); `broker/durable/stores.txt` (the `cmd/agentos-egress` line); delete `broker/modelroute/` (after m2 and c3 its only importer is the vault process; `tools/ci_split.py` and `tools/trusted_base_parsers.txt` entries for it); `tools/ci_split.py`, `tools/trusted_base_parsers.txt`, `tools/g1_scope_g2.txt` entries for the deleted mains; #1393 closed as moot.
 **Needs:** m2, c3, p, #3679, #2780 b3, #3431 (MIG-4-adapters-g: the stub off `egress`); the image queue (#3640, #3642 hold `build.sh`, `ci_boot.sh`, `mkosi.finalize`, `image.yml` now).
 **Requirement IDs:** CLK-1 (no credential outside its clerk), ONB-3 (setup still reaches a frontier source in the image run).
 **Guard files:** `core.txt`, `image.yml`, the `tools/` lists (Security accept).
-**Acceptance tests:** the image job's e2e boot passes with no `agentos-egress` unit (`console-e2e.log` verdict line); `tests/` image unit checks find no unit naming `/run/agentos-egress`; `grep -rn agentos-egress image broker --include=*.go --include=*.service` finds only history comments.
+**Acceptance tests:** the image job's e2e boot passes with no `agentos-egress` unit (`console-e2e.log` verdict line); `tests/` image unit checks find no unit naming `/run/agentos-egress`; `grep -rn agentos-egress image broker --include=*.go --include=*.service` finds only history comments; `go list ./... | grep -c broker/modelroute` prints 0.
 **Size:** M.
 
 ## d2 (#3687): delete the four packages
@@ -120,7 +120,7 @@ The kernel has no notion of an approval code: `kernel`, `kernel/key` and `owner/
 
 1. Now, in parallel: #3679; m1; c1 (after Decision 1).
 2. c2 after c1. m2 after m1, #2780 b3 and b2b-unit. c3 after c2. These two are agentosd-slot rows: m2 joins the slot queue after #2780 b3, c3 after m2.
-3. p after #3624, #3409, #3410 and m1.
+3. p after #3679, #3624, #3409, #3410 and m1.
 4. d1 after m2, c3, p, #3679 and #3431, in the image queue.
 5. d2 after d1 and #3432. Then #2577 (MIG-4-log) and #3425 lose this row as a blocker.
 
