@@ -1,8 +1,8 @@
-// Package infer is agentosd's side of the local inference service
+// Package infer is the client side of the local inference service
 // (INFER-SVC): the wire types, their bounds and error causes, and the
 // client that dials the service's unix socket. The service is untrusted
-// (SPEC §4): every reply is checked before a vector leaves this package,
-// and anything malformed is Unavailable, never data (INF-2).
+// (SPEC §4): every reply is checked before a vector or text leaves this
+// package, and anything malformed is Unavailable, never data (INF-2).
 //
 // The package imports the standard library only and starts nothing; the
 // service process is started by infer/supervise (ARC-2, INF-5).
@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Bounds both sides enforce (INF-2).
@@ -32,12 +33,21 @@ const (
 	maxDetail = 200
 	// DefaultTimeout is a call's deadline when Client.Timeout is zero.
 	DefaultTimeout = 2 * time.Second
+
+	// Generate's bounds (PLN-7 local route, INFER-SVC G1).
+	MaxPrompt   = 32 << 10 // bytes in one prompt
+	MaxOut      = 1024     // most tokens a generate request may ask for
+	MaxGenerate = 16 << 10 // bytes in one generate reply's text
+	// DefaultGenerateTimeout is a generate call's deadline when
+	// Client.GenerateTimeout is zero.
+	DefaultGenerateTimeout = 120 * time.Second
 )
 
 // Ops a request names.
 const (
-	OpHello = "hello"
-	OpEmbed = "embed"
+	OpHello    = "hello"
+	OpEmbed    = "embed"
+	OpGenerate = "generate"
 )
 
 // StateReady is the only state a hello reply may carry.
@@ -67,8 +77,10 @@ func (c Cause) Known() bool {
 
 // Request is one request line.
 type Request struct {
-	Op    string   `json:"op"`
-	Texts []string `json:"texts,omitempty"`
+	Op     string   `json:"op"`
+	Texts  []string `json:"texts,omitempty"`
+	Prompt string   `json:"prompt,omitempty"`
+	MaxOut int      `json:"max_out,omitempty"`
 }
 
 // Check enforces the request bounds; the error is a BadRequest *Error that
@@ -76,11 +88,16 @@ type Request struct {
 func (r Request) Check() error {
 	switch r.Op {
 	case OpHello:
-		if r.Texts != nil {
-			return &Error{Cause: BadRequest, Detail: "hello takes no texts"}
+		if r.Texts != nil || r.Prompt != "" || r.MaxOut != 0 {
+			return &Error{Cause: BadRequest, Detail: "hello takes no arguments"}
 		}
 		return nil
+	case OpGenerate:
+		return r.checkGenerate()
 	case OpEmbed:
+		if r.Prompt != "" || r.MaxOut != 0 {
+			return &Error{Cause: BadRequest, Detail: "embed takes texts only"}
+		}
 	default:
 		return &Error{Cause: BadRequest, Detail: "unknown op"}
 	}
@@ -95,26 +112,60 @@ func (r Request) Check() error {
 	return nil
 }
 
+func (r Request) checkGenerate() error {
+	if r.Texts != nil {
+		return &Error{Cause: BadRequest, Detail: "generate takes a prompt, not texts"}
+	}
+	if r.Prompt == "" || len(r.Prompt) > MaxPrompt {
+		return &Error{Cause: BadRequest, Detail: fmt.Sprintf("prompt is %d bytes, want 1 to %d", len(r.Prompt), MaxPrompt)}
+	}
+	if r.MaxOut < 1 || r.MaxOut > MaxOut {
+		return &Error{Cause: BadRequest, Detail: fmt.Sprintf("max_out %d, want 1 to %d", r.MaxOut, MaxOut)}
+	}
+	return nil
+}
+
 // Reply is one reply line. Which fields are set says which reply it is:
-// hello (Model, SHA256, Dim, State), embed (SHA256, Dim, Vectors) or an
-// error (Error, Detail).
+// hello (Model, SHA256, Dim, State, Ops), embed (SHA256, Dim, Vectors),
+// generate (SHA256, Text) or an error (Error, Detail). Text is a pointer so
+// that an empty generation is told apart from a reply that has none.
 type Reply struct {
 	Model   string      `json:"model,omitempty"`
 	SHA256  string      `json:"sha256,omitempty"`
 	Dim     int         `json:"dim,omitempty"`
 	State   string      `json:"state,omitempty"`
+	Ops     []string    `json:"ops,omitempty"`
 	Vectors [][]float32 `json:"vectors,omitempty"`
+	Text    *string     `json:"text,omitempty"`
 	Error   Cause       `json:"error,omitempty"`
 	Detail  string      `json:"detail,omitempty"`
 }
 
 // Info is what the service says about its model: its name, the SHA-256 of
-// the file it loaded, and the length of every vector.
+// the file it loaded, the length of every vector (0 when the model serves
+// no embed op) and whether it serves generate.
 type Info struct {
-	Model  string
-	SHA256 string
-	Dim    int
+	Model    string
+	SHA256   string
+	Dim      int
+	Generate bool
 }
+
+// Ops is the ops list a hello reply carries for in.
+func (in Info) Ops() []string {
+	var ops []string
+	if in.Dim > 0 {
+		ops = append(ops, OpEmbed)
+	}
+	if in.Generate {
+		ops = append(ops, OpGenerate)
+	}
+	return ops
+}
+
+// ValidText reports a generate reply's text as valid UTF-8 within
+// MaxGenerate bytes.
+func ValidText(s string) bool { return len(s) <= MaxGenerate && utf8.ValidString(s) }
 
 // Error is a call's failure, with one of the four causes.
 type Error struct {
