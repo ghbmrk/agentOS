@@ -98,9 +98,9 @@ func (h *Holder) returnLocked(why string) error {
 // fence bounds it, not the vision: a target outside the boundary leads the
 // aircraft to the fence, and the breach returns it (brief decision 9).
 func (h *Holder) Follow(target Point) error {
-	// Leaving AUTO goes on a heartbeat the aircraft signed after it took this
-	// call's request: one merely received late can predate a return it started
-	// since, and ArduPilot starts a low-battery return once. It is asked for
+	// Leaving AUTO goes on a heartbeat the aircraft signed after this call
+	// began (Link.FreshHeartbeat): one merely received late can predate a
+	// return it started since, and ArduPilot starts a low-battery return once. It is asked for
 	// outside the lock, so a return never waits behind it.
 	var fresh *Heartbeat
 	if hb, ok := h.link.LastHeartbeat(); !ok || hb.CustomMode != ModeGuided {

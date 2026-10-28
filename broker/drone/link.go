@@ -363,17 +363,37 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 		Armed: l.hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.hbAt}, true
 }
 
-// FreshHeartbeat asks the aircraft for its heartbeat and returns one it
-// signed after it took the request (the reply's timestamp is at or above the
-// request's), so not a heartbeat that was held in transit.
+// FreshHeartbeat returns a heartbeat the aircraft signed after this call:
+// it anchors afresh (a signed TIMESYNC echoing a new random nonce) and takes
+// the first heartbeat on that stream strictly above the echo, which the
+// aircraft signed after it, as its clock moves up a unit a frame. Unlike a
+// reply at or above the request's timestamp, this holds whichever clock is
+// ahead, so no heartbeat held in transit passes.
 func (l *Link) FreshHeartbeat() (Heartbeat, error) {
-	got, err := l.request(&common.MessageHeartbeat{})
-	if err != nil {
-		return Heartbeat{}, err
+	l.req.Lock()
+	defer l.req.Unlock()
+	var last error
+	for try := 0; try < 3; try++ {
+		if last = l.anchorLocked(3 * time.Second); last != nil {
+			continue
+		}
+		l.smu.Lock()
+		a := *l.anchor
+		l.smu.Unlock()
+		var got received
+		got, last = l.roundTrip(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
+			Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageHeartbeat{}).GetID())},
+			func(got received, _ uint64) bool {
+				_, ok := got.msg.(*common.MessageHeartbeat)
+				return ok && got.linkID == a.linkID && got.ts > a.ts
+			}, 3*time.Second)
+		if last == nil {
+			hb := got.msg.(*common.MessageHeartbeat)
+			return Heartbeat{CustomMode: hb.CustomMode,
+				Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+		}
 	}
-	hb := got.(*common.MessageHeartbeat)
-	return Heartbeat{CustomMode: hb.CustomMode,
-		Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+	return Heartbeat{}, fmt.Errorf("drone: no fresh heartbeat from the aircraft: %w", last)
 }
 
 // WaitHeartbeat waits for a signed heartbeat newer than after, anchoring

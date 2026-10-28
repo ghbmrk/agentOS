@@ -29,6 +29,7 @@ type scripted struct {
 	ts     uint64
 	hello  bool
 	beat   bool
+	relay  func() // run before it answers a heartbeat request: a relay's held frames
 	rc     bool
 	params map[string]float32
 	pos    Point    // the aircraft's reported position
@@ -77,7 +78,7 @@ func (a *scripted) run() {
 			continue // signed more than a minute behind the aircraft's clock
 		}
 		a.ts = max(a.ts, ts)
-		beat, rc, params, pos, mode := a.beat, a.rc, a.params, a.pos, a.mode
+		beat, rc, params, pos, mode, relay := a.beat, a.rc, a.params, a.pos, a.mode, a.relay
 		a.mu.Unlock()
 		switch m := fr.GetMessage().(type) {
 		case *common.MessageTimesync:
@@ -96,6 +97,9 @@ func (a *scripted) run() {
 				}
 				a.send(st)
 			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageHeartbeat{}).GetID():
+				if relay != nil {
+					relay()
+				}
 				a.send(&common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, CustomMode: mode,
 					BaseMode: common.MAV_MODE_FLAG_SAFETY_ARMED | common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED})
 			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageGlobalPositionInt{}).GetID():
@@ -289,29 +293,28 @@ func TestFollowNeverOverridesAReturn(t *testing.T) {
 }
 
 // REQ: NET-2
-// TestFollowLeavesAutoOnlyOnAFreshHeartbeat: a heartbeat in AUTO that the
-// aircraft signed before it started its own return, held in transit and
-// delivered while follow runs, does not take the aircraft to GUIDED: follow
-// leaves AUTO only on a heartbeat signed after the aircraft took its request,
-// which shows the return, so follow is refused and the flight ends.
+// TestFollowLeavesAutoOnlyOnAFreshHeartbeat: an aircraft whose clock is
+// ahead of the key-holder's (as after a boot) signs a heartbeat in AUTO, then
+// starts its own return; a relay holds that heartbeat and delivers it as the
+// answer to follow's request, signed above the request's timestamp. Follow
+// does not take it: it leaves AUTO only on a heartbeat signed after a fresh
+// TIMESYNC echo, which shows the return, so follow is refused and the flight
+// ends.
 func TestFollowLeavesAutoOnlyOnAFreshHeartbeat(t *testing.T) {
 	a := &scripted{pos: at(0, 120), mode: ModeAuto, beat: true}
 	h := scriptedFlight(t, a, "deer")
+	a.set(func(a *scripted) { a.ts = uint64(time.Since(signatureEpoch)/tsUnit) + uint64(50*time.Second/tsUnit) })
 	if _, err := h.link.FreshHeartbeat(); err != nil {
 		t.Fatal(err)
 	}
-	// The aircraft signs a heartbeat in AUTO that is held, starts its return,
-	// and its periodic heartbeats are lost.
+	// Frames the aircraft signs from here are held: five, then the heartbeat.
 	a.mu.Lock()
-	a.ts++
+	a.ts += 6
 	held := signedFrame(t, a.k, 1, 1, 0, a.ts, &common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR,
 		CustomMode: ModeAuto, BaseMode: common.MAV_MODE_FLAG_SAFETY_ARMED | common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED})
 	a.beat, a.mode = false, ModeRTL
+	a.relay = func() { a.far.Write(held) }
 	a.mu.Unlock()
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		a.far.Write(held)
-	}()
 	if err := h.Follow(at(0, 100)); err == nil {
 		t.Fatal("follow took the aircraft out of its own return")
 	}
