@@ -51,10 +51,13 @@ type MailHost struct {
 
 	planned planState // setup's account plan (accountPlan)
 
-	stepping chan struct{} // the worker's step in flight (planSenders); setup and removal wait for it
-	kick     chan struct{} // wakes the worker; buffered, sent to without blocking
-	ws       worldState    // the host's own world's sources (world.go)
-	own      bool          // the world is the host's own: each read's clerk is bound to its account (worldAt)
+	stepping   chan struct{}  // the worker's step in flight (planSenders); setup and removal wait for it
+	kick       chan struct{}  // wakes the worker; buffered, sent to without blocking
+	ws         worldState     // the host's own world's sources (world.go)
+	srec       *sealedSenders // the senders record of the account at srecAt, between steps (senders.go)
+	srecAt     int64
+	sendersWhy string // why the last senders step failed (trouble); "" if it did not
+	own        bool   // the world is the host's own: each read's clerk is bound to its account (worldAt)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -247,10 +250,18 @@ func (h *MailHost) idle() {
 func (h *MailHost) changed() {
 	h.changes++
 	h.ws.reset(h.changes)
+	h.srec = nil
 	h.wake()
 	h.cur, h.why, h.checkWhy, h.stop = nil, "", "", nil
 	h.mark, h.day = nil, ""
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
+}
+
+// wrote is the test seam right after a setter's write (MailConfig.wrote).
+func (h *MailHost) wrote() {
+	if h.cfg.wrote != nil {
+		h.cfg.wrote()
+	}
 }
 
 // notify adds a notice. A warm-up notice already waiting keeps its place
@@ -328,6 +339,11 @@ func (h *MailHost) status() OwnerStatus {
 	why := cmp.Or(h.why, h.checkWhy)
 	if why != "" {
 		st.Lines = append(st.Lines, why)
+	}
+	// While a sign-in failure stops the clerk, h.why gives the owner's step
+	// and the worker waits for it: the senders line would promise a retry.
+	if l := sendersLine(h.ws.sendersNow(), h.sendersWhy); h.own && h.cur != nil && h.stop == nil && l != "" {
+		st.Lines = append(st.Lines, l)
 	}
 	if h.cur != nil && len(h.cur.Status.Lines) > 0 {
 		if why != "" {
@@ -430,12 +446,16 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		if replacing {
 			release = h.holdGmail(prev) // a Gmail account's grant, given back once SetMail drops it (A22)
 		}
+		end := h.ws.writing() // until the change is told (#3538)
 		err = SetMail(h.dir, h.sec, a.Settings, a.Password)
+		h.wrote()
 		release()
 		if !h.setUp(slotOf(a.Settings)) {
+			end()
 			return nil, err // the account before, and its grant, stand
 		}
 		h.changed()
+		end()
 		if replacing {
 			h.notify(false, noteMailReplaced)
 		}
@@ -452,12 +472,16 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		if removing {
 			release = h.holdGmail(prev) // a Gmail account's grant, given back once RemoveMail drops it (A22)
 		}
+		end := h.ws.writing()
 		err = RemoveMail(h.dir, h.sec)
+		h.wrote()
 		release()
 		if err != nil {
+			end()
 			return nil, err
 		}
 		h.changed()
+		end()
 		if removing {
 			h.notify(false, noteMailRemoved)
 		}

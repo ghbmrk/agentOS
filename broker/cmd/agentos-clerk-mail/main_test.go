@@ -1,6 +1,6 @@
 package main
 
-// REQ: CLK-1, CLK-2, KRN-2
+// REQ: CLK-1, CLK-2, KRN-2, PLN-2, CLK-7
 
 // Run as root, TestRealMailClerkAsRoot runs this test binary as the real
 // process under nobody's uid, so its uid checks are the real ones; CI's root
@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -28,6 +29,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/readerwire"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -372,6 +374,106 @@ func TestNoReaderClassesNothing(t *testing.T) {
 	got := inbox.Read(context.Background(), ask, []inbox.Mail{{Raw: []byte("Subject: x\r\n\r\nspam")}})
 	if len(got) != 1 || got[0].Class != "" {
 		t.Fatalf("a mail classed with no reader: %+v", got)
+	}
+}
+
+// The reader's flags: both or neither, an absolute path, and a uid of the
+// reader's own, never root's.
+func TestReaderFlags(t *testing.T) {
+	r := func(sock, uid string) []string {
+		return append(slices.Clone(good), "-reader-sock", sock, "-reader-uid", uid)
+	}
+	c, err := parse(r("/run/agentos-reader/reader.sock", "984"), io.Discard)
+	if err != nil || c.readerSock != "/run/agentos-reader/reader.sock" || c.readerUID != 984 {
+		t.Fatalf("parse = %+v, %v", c, err)
+	}
+	bad := map[string][]string{
+		"relative path":      r("reader.sock", "984"),
+		"root":               r("/run/r.sock", "0"),
+		"negative":           r("/run/r.sock", "-2"),
+		"the kernel's":       r("/run/r.sock", "980"),
+		"the planner's":      r("/run/r.sock", "982"),
+		"the owner side's":   append(with("-owner-uid", "983"), "-reader-sock", "/run/r.sock", "-reader-uid", "983"),
+		"a socket alone":     append(slices.Clone(good), "-reader-sock", "/run/r.sock"),
+		"a uid alone":        append(slices.Clone(good), "-reader-uid", "984"),
+		"a root uid alone":   append(slices.Clone(good), "-reader-uid", "0"),
+		"an empty socket":    r("", "984"),
+		"no uid with socket": r("/run/r.sock", "-1"),
+	}
+	for name, args := range bad {
+		if _, err := parse(args, io.Discard); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Without the flags the read fails closed.
+	if _, err := reader(config{})(context.Background(), "x"); !errors.Is(err, errNoReader) {
+		t.Errorf("no reader: %v", err)
+	}
+}
+
+// CLK-7: two reads of the same mails over the real frame ask the reader once
+// per distinct mail; a failed call is asked again at the next read.
+func TestTheReaderIsAskedOncePerMail(t *testing.T) {
+	sock := filepath.Join(shortDir(t), "r.sock")
+	ln, err := readerwire.Listen(sock, os.Getuid())
+	must(t, err)
+	defer ln.Close()
+	var calls, fails atomic.Int32
+	go readerwire.Serve(ln, func(_ context.Context, p string) (string, error) {
+		calls.Add(1)
+		// The first ask for the third mail gets a reply past the frame's
+		// bound: that mail fails, and the reader is not paused.
+		if strings.HasSuffix(p, "three") && fails.Add(1) == 1 {
+			return strings.Repeat("spam", 20), nil
+		}
+		return "bulk", nil
+	})
+	// Built by hand, since parse refuses a root reader and CI runs this as root too.
+	ask := reader(config{readerSock: sock, readerUID: os.Getuid()})
+	mails := []inbox.Mail{{Raw: []byte("Subject: a\r\n\r\none")}, {Raw: []byte("Subject: b\r\n\r\ntwo")}, {Raw: []byte("Subject: a\r\n\r\none")}, {Raw: []byte("Subject: c\r\n\r\nthree")}}
+	got := inbox.Read(context.Background(), ask, mails)
+	if n := calls.Load(); n != 3 || got[0].Class != "bulk" || got[2].Class != "bulk" || got[3].Class != "" {
+		t.Fatalf("first read: %d calls, classes %q %q %q %q", n, got[0].Class, got[1].Class, got[2].Class, got[3].Class)
+	}
+	got = inbox.Read(context.Background(), ask, mails)
+	if n := calls.Load(); n != 4 || got[3].Class != "bulk" {
+		t.Fatalf("second read: %d calls in all, the failed mail classed %q", n, got[3].Class)
+	}
+	inbox.Read(context.Background(), ask, mails)
+	if n := calls.Load(); n != 4 {
+		t.Fatalf("third read: %d calls in all", n)
+	}
+}
+
+// The cache keeps at most its bound, evicting the least recently used, and
+// never keeps a failure.
+func TestTheCacheEvictsTheLeastRecentlyUsed(t *testing.T) {
+	var asked []string
+	fail := true
+	ask := cache(func(_ context.Context, p string) (string, error) {
+		asked = append(asked, p)
+		if p == "f" && fail {
+			return "", errors.New("down")
+		}
+		return "r-" + p, nil
+	}, 2)
+	for _, p := range []string{"a", "b", "a", "c", "a", "b", "f", "f"} {
+		ask(context.Background(), p)
+	}
+	fail = false
+	if r, err := ask(context.Background(), "f"); r != "r-f" || err != nil {
+		t.Fatalf("f after a failure: %q, %v", r, err)
+	}
+	// a, b, (a hit), c evicts b, (a hit), b evicts c, f fails twice, f.
+	if want := "a b c b f f f"; strings.Join(asked, " ") != want {
+		t.Fatalf("asked %q, want %q", strings.Join(asked, " "), want)
+	}
+}
+
+// The longest prompt inbox.Read sends fits the frame.
+func TestPromptFitsTheFrame(t *testing.T) {
+	if inbox.MaxPrompt > readerwire.MaxPrompt {
+		t.Fatalf("inbox.MaxPrompt %d is past readerwire.MaxPrompt %d", inbox.MaxPrompt, readerwire.MaxPrompt)
 	}
 }
 

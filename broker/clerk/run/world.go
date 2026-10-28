@@ -1,6 +1,7 @@
 package run
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net"
@@ -19,8 +20,9 @@ import (
 // PlanSenders read, which the worker runs, that the accounts table matches.
 // A read's clerk judges in the world of the account it was opened for. DKIM keys are the read's own
 // (MailConfig.DKIM), and LastOpened the clerk's record, as before. History,
-// KnownSenders and Contacts are slice b2's; until then they are empty, so
-// VRB-2 stops at no-history.
+// KnownSenders and Contacts come from the worker's senders read (senders.go,
+// MAIL-world-b2): until it is through once, while it is past a bound, and
+// after a step fails they are empty, so VRB-2 stops at no-history.
 
 // sendersEvery is how often the worker reads the alert senders again,
 // besides after start and each change of account. A var for tests.
@@ -36,6 +38,15 @@ type worldState struct {
 	set     *MailSettings // those settings; nil: no account
 	domains []string      // the PlanSenders domains read for changes
 	got     bool          // domains were read for changes
+	writes  int           // settings writes in flight (writing)
+	gen     int64         // moves at each write's start and end, so a read that spans one is not kept
+
+	sread    sendersState     // how far the senders read is for changes
+	hist     []inbox.Delivery // its History, KnownSenders and Contacts once full
+	known    []string
+	contacts []string
+
+	load func(dir string) (MailSettings, error) // readMail; tests may wrap it
 }
 
 // reset follows a change of account to changes: nothing read for the
@@ -44,6 +55,27 @@ func (ws *worldState) reset(changes int64) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	ws.changes, ws.read, ws.set, ws.domains, ws.got = changes, false, nil, nil, false
+	ws.sread, ws.hist, ws.known, ws.contacts = sendersReading, nil, nil, nil
+}
+
+// writing marks a settings write in flight until the end it returns is
+// called, after the change of account (changed) or its failure: a setter
+// calls it, with h.mu held, before it writes the settings file (#3538).
+// Meanwhile the file may already be the next account's while h.changes is
+// still the old one's, so no snapshot reads the file: one with the settings
+// cached keeps them, and one without has no account (the guard is off).
+// A read that began before and ends after is not kept either.
+func (ws *worldState) writing() (end func()) {
+	ws.mu.Lock()
+	ws.writes++
+	ws.gen++
+	ws.mu.Unlock()
+	return func() {
+		ws.mu.Lock()
+		ws.writes--
+		ws.gen++
+		ws.mu.Unlock()
+	}
 }
 
 // snapshot is what the world for the account at changes at is built from,
@@ -51,26 +83,37 @@ func (ws *worldState) reset(changes int64) {
 // its settings, cached until the next change (a read that a change overtook
 // is not kept, and a file that does not load is read again each time and
 // gives no account meanwhile), and the domains of its last completed
-// senders read (got false until one has). With at < 0 it is the account as
-// it is now. ok is false with no account, or once a change has overtaken
-// at, so a world bound to an old account carries none of the new one's.
-func (ws *worldState) snapshot(dir string, at int64) (s MailSettings, domains []string, got, ok bool) {
+// senders read (got false until one has), and the senders read's fields
+// (full false until it gives them). With at < 0 it is the account as it is
+// now. ok is false with no account, or once a change has overtaken at, so a
+// world bound to an old account carries none of the new one's.
+func (ws *worldState) snapshot(dir string, at int64) (sn snap, ok bool) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	for {
 		now := ws.changes
 		if at >= 0 && at != now {
-			return MailSettings{}, nil, false, false
+			return snap{}, false
 		}
 		if !ws.read {
+			if ws.writes > 0 {
+				return snap{}, false
+			}
+			load, gen := ws.load, ws.gen
+			if load == nil {
+				load = readMail
+			}
 			ws.mu.Unlock()
-			r, err := readMail(dir)
+			r, err := load(dir)
 			ws.mu.Lock()
 			if ws.changes != now {
 				continue // a change overtook the read: not kept, nor used
 			}
+			if ws.gen != gen {
+				return snap{}, false // a write spanned the read
+			}
 			if err != nil && !errors.Is(err, ErrNoMailAccount) {
-				return MailSettings{}, nil, false, false
+				return snap{}, false
 			}
 			ws.read, ws.set = true, nil
 			if err == nil {
@@ -78,10 +121,23 @@ func (ws *worldState) snapshot(dir string, at int64) (s MailSettings, domains []
 			}
 		}
 		if ws.set == nil {
-			return MailSettings{}, nil, false, false
+			return snap{}, false
 		}
-		return *ws.set, append([]string(nil), ws.domains...), ws.got, true
+		return snap{set: *ws.set, domains: append([]string(nil), ws.domains...), got: ws.got,
+			full: ws.sread == sendersFull, hist: ws.hist, known: ws.known, contacts: ws.contacts}, true
 	}
+}
+
+// snap is one snapshot's sources: the settings, the PlanSenders domains,
+// and the senders read's fields, shared and never written once kept.
+type snap struct {
+	set      MailSettings
+	domains  []string
+	got      bool
+	full     bool
+	hist     []inbox.Delivery
+	known    []string
+	contacts []string
 }
 
 // keep records the domains a senders read gave for the account at changes.
@@ -91,6 +147,23 @@ func (ws *worldState) keep(changes int64, domains []string) {
 	if ws.changes == changes {
 		ws.domains, ws.got = append([]string{}, domains...), true
 	}
+}
+
+// keepSenders records a senders step's state for the account at changes,
+// and its fields when full.
+func (ws *worldState) keepSenders(changes int64, st sendersState, hist []inbox.Delivery, known, contacts []string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	if ws.changes == changes {
+		ws.sread, ws.hist, ws.known, ws.contacts = st, hist, known, contacts
+	}
+}
+
+// sendersNow is how far the senders read is for the account as it is now.
+func (ws *worldState) sendersNow() sendersState {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+	return ws.sread
 }
 
 // senders is the domains of the last completed senders read for the
@@ -118,10 +191,11 @@ func (h *MailHost) worldAt(at int64) inbox.World {
 		now = h.cfg.now
 	}
 	w := inbox.World{Today: now().UTC().Format(time.DateOnly)}
-	s, d, got, ok := h.ws.snapshot(h.dir, at)
+	sn, ok := h.ws.snapshot(h.dir, at)
 	if !ok {
 		return w
 	}
+	s := sn.set
 	tables := inbox.Shipped
 	if h.cfg.tables != nil {
 		tables = h.cfg.tables
@@ -129,8 +203,11 @@ func (h *MailHost) worldAt(at int64) inbox.World {
 	w.ProviderTable = tables.Table()
 	auth, security := tables.For(s.API, imapHost(s))
 	w.AuthServ = auth
-	if got && auth != "" {
-		w.AlertSenders = append(security, d...)
+	if sn.got && auth != "" {
+		w.AlertSenders = append(security, sn.domains...)
+	}
+	if sn.full {
+		w.History, w.KnownSenders, w.Contacts = sn.hist, sn.known, sn.contacts
 	}
 	return w
 }
@@ -165,26 +242,42 @@ func imapHost(s MailSettings) string {
 // work is the host's one background worker, until h.ctx ends: it runs the
 // senders read after start and after each change of account (a kick from
 // changed or refresh, which also retries a read that failed), and again
-// every sendersEvery. It pauses while a sign-in failure stops the clerk.
+// every sendersEvery. Beside it, it steps the senders read (readSenders):
+// after each kick, so once the first read is through it reads what arrived
+// at each mail read, and every sendersPause while a step leaves more to read;
+// a kick while a pause runs waits for it, so steps stay that far apart. It
+// pauses while a sign-in failure stops the clerk.
 func (h *MailHost) work() {
 	tick := time.NewTicker(sendersEvery)
 	defer tick.Stop()
+	var step <-chan time.Time // the pause before the next step; nil: none
 	for {
-		again := false
+		again, plan := false, true
 		select {
 		case <-h.ctx.Done():
 			return
 		case <-h.kick:
 		case <-tick.C:
 			again = true
+		case <-step:
+			plan, step = false, nil
 		}
 		h.mu.Lock()
+		more := false
 		if h.ctx.Err() == nil && h.stop == nil {
 			if _, err := readMail(h.dir); err == nil {
-				_, _ = h.planSenders(again)
+				if plan {
+					_, _ = h.planSenders(again)
+				}
+				if step == nil {
+					more = h.readSenders()
+				}
 			}
 		}
 		h.mu.Unlock()
+		if more {
+			step = time.After(cmp.Or(h.cfg.pause, sendersPause))
+		}
 	}
 }
 
