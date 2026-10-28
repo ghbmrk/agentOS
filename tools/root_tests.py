@@ -25,7 +25,11 @@ control flow, sets a trap, defines a function or exits or returns 0.
 The generated step runs every package --plan prints as root with no_new_privs, as agentosd.service
 runs (#3542), and fails unless each listed test ran and passed, with no skip (tools/require_ran.py),
 so a new root-gated test is run as root by default and a test that cannot run on the runner has to
-be listed in EXEMPT with its reason.
+be listed in EXEMPT with its reason. The check reads that step's run lines as shell words (#3571):
+every simple command that may run go (a `go` word, one ending `/go`, a quoted script holding one,
+an expansion in command position, `eval` or `source`) must begin `sudo setpriv --no-new-privs`, and
+a line it cannot read, or one with command or process substitution, fails it. A test both
+root-gated and root-skipping runs fully in no job, so it is reported too (#3549).
 """
 import os
 import re
@@ -85,8 +89,9 @@ def _closure(bodies, seed):
     return out
 
 
-def gated(broker=BROKER):
-    """{package import path: sorted root-gated test names}."""
+def gated(broker=BROKER, mixed=None):
+    """{package import path: sorted root-gated test names}; the tests that also skip as root go in
+    mixed, in the same form, when it is given (#3549)."""
     found = {}
     for d, subdirs, files in os.walk(broker):
         subdirs[:] = sorted(s for s in subdirs if s not in ("vendor", "testdata") and not s.startswith((".", "_")))
@@ -99,16 +104,21 @@ def gated(broker=BROKER):
         marks = {n: uid_gates(b) for n, b in bodies.items()}
         gate = _closure(bodies, {n for n, (g, _) in marks.items() if g})
         root_skip = _closure(bodies, {n for n, (_, r) in marks.items() if r})
+        rel = os.path.relpath(d, broker).replace(os.sep, "/")
+        pkg = MODULE if rel == "." else f"{MODULE}/{rel}"
         tests = sorted(n for n in gate - root_skip if TEST.match(n))
         if tests:
-            rel = os.path.relpath(d, broker).replace(os.sep, "/")
-            found[MODULE if rel == "." else f"{MODULE}/{rel}"] = tests
+            found[pkg] = tests
+        both = sorted(n for n in gate & root_skip if TEST.match(n))
+        if both and mixed is not None:
+            mixed[pkg] = both
     return found
 
 
-def _steps(ci_text):
+def _steps(ci_text, comments=False):
     """[(name, keys, run lines)] for each step in ci.yml; run lines are joined across `\\` and
-    stripped of comments, since a comment never runs (#3540 Security review)."""
+    stripped of comments, since a comment never runs (#3540 Security review). With comments, only
+    whole-line comments are dropped, and a `#` later in a line is left to the caller."""
     out, lines, i = [], ci_text.split("\n"), 0
     while i < len(lines):
         m = re.match(r"^(\s*)- ([A-Za-z][\w-]*):(.*)$", lines[i])
@@ -142,7 +152,10 @@ def _steps(ci_text):
                     n += 1
                     cmd = cmd.rstrip()[:-1] + " " + raw[n].strip()
                 n += 1
-                cmd = "" if cmd.lstrip().startswith("#") else re.split(r"(?:^|\s)#", cmd, maxsplit=1)[0]
+                if cmd.lstrip().startswith("#"):
+                    cmd = ""
+                elif not comments:
+                    cmd = re.split(r"(?:^|\s)#", cmd, maxsplit=1)[0]
                 if cmd.strip():
                     run.append(cmd.strip())
         out.append((name, keys, run))
@@ -152,9 +165,11 @@ def _steps(ci_text):
 PUNCT = {"<", ">", "|", "||", "&", "&&", ";", ";;", ">>", "2>", "(", ")"}
 
 
-def _words(cmd):
+def _words(cmd, comments=True):
     lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
     lex.whitespace_split = True
+    if not comments:
+        lex.commenters = ""  # shlex starts a comment at a `#` inside a word, where the shell does not
     try:
         return list(lex)
     except ValueError:
@@ -276,15 +291,18 @@ def plan(found, runs, exempt=EXEMPT):
     return out
 
 
-def problems(found, runs, generated, exempt=EXEMPT):
+def problems(found, runs, generated, exempt=EXEMPT, mixed=None):
     """Why a root-gated test could go unrun as root; empty when each is covered or exempt."""
-    out = []
+    out, mixed = [], mixed or {}
+    for pkg, tests in sorted(mixed.items()):
+        out += [f"{pkg}.{t}: root-gated, and skips as root, so no CI job runs all of it"
+                for t in tests if f"{pkg}.{t}" not in exempt]
     if not generated:
         for pkg, tests in sorted(found.items()):
             for t in tests:
                 if not covered(pkg, t, runs) and f"{pkg}.{t}" not in exempt:
                     out.append(f"{pkg}.{t}: root-gated, and no root step in ci.yml runs it")
-    names = {f"{p}.{t}" for p, ts in found.items() for t in ts}
+    names = {f"{p}.{t}" for f in (found, mixed) for p, ts in f.items() for t in ts}
     for name, why in sorted(exempt.items()):
         if name not in names:
             out.append(f"{name}: EXEMPT names no root-gated test")
@@ -293,24 +311,86 @@ def problems(found, runs, generated, exempt=EXEMPT):
     return out
 
 
+NNP = ["sudo", "setpriv", "--no-new-privs"]
+REDIRECT = {"<", ">", ">>", "<<", "<<<", "<>", ">|", "<&", ">&", "&>", "&>>"}
+KEYWORDS = {"!", "{", "}", "do", "done", "then", "else", "elif", "fi", "if", "while", "until", "time"}
+WRAPPERS = {"sudo", "env", "exec", "command", "builtin", "nohup", "nice", "ionice", "timeout", "xargs", "setpriv",
+            "stdbuf", "chroot", "unshare", "nsenter", "su", "runuser", "doas", "sh", "bash", "dash"}
+GOWORD = re.compile(r"(?:^|[\s/;&|(])go(?:$|[\s;&|)])")
+
+
+def _simple(words):
+    """The simple commands of a line's shell words: split at every control operator."""
+    out = [[]]
+    for w in words:
+        if w and set(w) <= set("();<>|&") and w not in REDIRECT:
+            out.append([])
+        else:
+            out[-1].append(w)
+    return [c for c in out if c]
+
+
+def _may_run_go(cmd):
+    """Whether a simple command may run go: a word that is or ends in go, or a quoted script with a
+    go word; an expansion in command position, or anywhere after a command that runs its arguments;
+    or eval or source."""
+    i = 0
+    while i < len(cmd) and (cmd[i] in KEYWORDS or re.match(r"^[A-Za-z_]\w*=", cmd[i])
+                            or cmd[i] in REDIRECT or cmd[i].isdigit() and i + 1 < len(cmd) and cmd[i + 1] in REDIRECT):
+        i += 2 if cmd[i] in REDIRECT else 1
+    head = cmd[i] if i < len(cmd) else ""
+    return ("$" in head or head in ("eval", "source", ".") or any(GOWORD.search(w) for w in cmd)
+            or head in WRAPPERS and any("$" in w for w in cmd[i:]))
+
+
+def step_faults(ci_text):
+    """None when ci.yml has no generated step; else why it may not run --plan's packages through
+    require_ran with each go command as root under no_new_privs, as agentosd.service runs
+    (NoNewPrivileges=yes; #3542, #3571). Empty when it does."""
+    steps = [(n, run) for n, _, run in _steps(ci_text, comments=True) if n.startswith(GENERATED)]
+    if not steps:
+        return None
+    out, runs_go = [], False
+    for name, run in steps:
+        body = "\n".join(run)
+        if "root_tests.py --plan" not in body or "require_ran.py" not in body:
+            out.append(f"{name}: no longer runs root_tests.py --plan's packages through require_ran.py")
+        for line in run:
+            words = _words(line, comments=False)
+            if words is None or re.search(r"\$\(|`|[<>]\(", line):
+                out.append(f"{name}: `{line}` is shell this check cannot read; keep each go command plain")
+                continue
+            for cmd in _simple(words):
+                if not _may_run_go(cmd):
+                    continue
+                if cmd[:3] != NNP:
+                    out.append(f"{name}: `{line}` runs go without `sudo setpriv --no-new-privs` in front, "
+                               "so its tests do not run as agentosd.service runs (NoNewPrivileges=yes; #3542)")
+                    break
+                runs_go = True
+    if not runs_go and not out:
+        out.append(f"{steps[0][0]}: runs no `sudo setpriv --no-new-privs` go test")
+    return out
+
+
 def generated_step(ci_text):
-    """True when ci.yml has the generated step and it runs --plan's packages through require_ran,
-    each `go test` as root with no_new_privs, as agentosd.service runs (NoNewPrivileges=yes; #3542)."""
-    i = ci_text.find(f"- name: {GENERATED}")
-    if i < 0:
-        return False
-    nxt = ci_text.find("\n      - ", i + 1)
-    body = ci_text[i: nxt if nxt >= 0 else len(ci_text)]
-    tests = [ln.split() for ln in body.replace("\\\n", " ").splitlines() if "go test" in ln and not ln.lstrip().startswith("#")]
-    return ("root_tests.py --plan" in body and "require_ran.py" in body and bool(tests)
-            and all(w[:3] == ["sudo", "setpriv", "--no-new-privs"] for w in tests))
+    """True when ci.yml has the generated step and each of its go commands runs as root with no_new_privs."""
+    return step_faults(ci_text) == []
+
+
+def check(found, runs, ci_text, exempt=EXEMPT, mixed=None):
+    """Every problem: a fault of the generated step is named once (#3572), in place of one line per
+    test that step should run."""
+    faults = step_faults(ci_text)
+    return (faults or []) + problems(found, runs, faults is not None, exempt, mixed)
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     with open(CI, encoding="utf-8") as f:
         ci = f.read()
-    found, runs = gated(), root_runs(ci)
+    mixed = {}
+    found, runs = gated(mixed=mixed), root_runs(ci)
     if argv == ["--plan"]:
         for pkg, pat, tests in plan(found, runs):
             print(pkg, pat, *(f"{pkg}.{t}" for t in tests))
@@ -318,7 +398,7 @@ def main(argv=None):
     if argv:
         print(__doc__, file=sys.stderr)
         return 2
-    probs = problems(found, runs, generated_step(ci))
+    probs = check(found, runs, ci, mixed=mixed)
     for p in probs:
         print(f"::error::{p}", file=sys.stderr)
     if not probs:
