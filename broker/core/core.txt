@@ -196,6 +196,12 @@ allow localsrv/accountsock sockets.PeerUID -- reads the mail clerk's uid before 
 # peer's uid before it writes a frame, as kernel/proc's Conn does.
 allow owner/kernelsock sockets.PeerUID -- reads the kernel's uid before an owner seam frame is sent (#2682, D-154)
 
+# The mail clerk's quarantined read (MAIL-reader-sock-a, #3421): its end
+# reads the reader's uid before a mail's text is sent, and the reader's end
+# admits only the mail clerk's uid, as kernel/proc's wire does.
+allow clerk/readerwire sockets.PeerUID -- reads the reader's uid before a mail's text is sent (#3421, D-154)
+allow clerk/readerwire sockets.ListenPeers -- the reader's socket admits only the mail clerk's uid (#3421, D-154)
+
 # A plan route's declaration (hosts, paths, kinds) is a pure value: the
 # in-image e2e stand-in provider (#1701, boxe2e E10) answers exactly its
 # endpoints. Building the route (egress.NewWorkerRoute) stays a write path.
