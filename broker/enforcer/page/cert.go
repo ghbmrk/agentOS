@@ -12,16 +12,24 @@ import (
 	"time"
 )
 
-// CertLife is how long NewCert's certificates last.
-const CertLife = 10 * 365 * 24 * time.Hour
+// RootLife is how long the root lasts; LeafLife how long each page
+// certificate lasts, inside Apple's 825-day cap for TLS server
+// certificates, which holds even under an owner-installed root. Renew
+// issues a new leaf once the old one has less than RenewBefore left.
+const (
+	RootLife    = 10 * 365 * 24 * time.Hour
+	LeafLife    = 397 * 24 * time.Hour
+	RenewBefore = 30 * 24 * time.Hour
+)
 
 // Cert is the page's TLS identity (NET-4 Passkey rules): a root the owner's
 // phone may trust that is limited, by a critical name constraint, to the
 // enforcer's own local name, and the page's certificate under it. A root
 // that leaked could vouch for no other site.
 type Cert struct {
-	Root []byte // DER, for the phone to install
-	Leaf tls.Certificate
+	Root    []byte // DER, for the phone to install
+	RootKey crypto.Signer
+	Leaf    tls.Certificate
 }
 
 // NewCert makes a fresh Cert for name. The daemon keeps it in the
@@ -35,7 +43,30 @@ func NewCert(name string, now time.Time) (Cert, error) {
 	if err != nil {
 		return Cert{}, err
 	}
-	return Cert{Root: root.Raw, Leaf: leaf}, nil
+	return Cert{Root: root.Raw, RootKey: rootKey, Leaf: leaf}, nil
+}
+
+// Renew is c with a fresh leaf for name if the current one has less than
+// RenewBefore left at now, and c unchanged otherwise. The root stays, so
+// the phone keeps trusting the page. The daemon calls it daily (slice l).
+func (c Cert) Renew(name string, now time.Time) (Cert, error) {
+	leaf, err := x509.ParseCertificate(c.Leaf.Certificate[0])
+	if err != nil {
+		return c, err
+	}
+	if leaf.NotAfter.Sub(now) >= RenewBefore {
+		return c, nil
+	}
+	root, err := x509.ParseCertificate(c.Root)
+	if err != nil {
+		return c, err
+	}
+	l, err := issue(root, c.RootKey, name, now)
+	if err != nil {
+		return c, err
+	}
+	c.Leaf = l
+	return c, nil
 }
 
 func newRoot(name string, now time.Time) (*x509.Certificate, crypto.Signer, error) {
@@ -47,7 +78,7 @@ func newRoot(name string, now time.Time) (*x509.Certificate, crypto.Signer, erro
 		SerialNumber:                serial(),
 		Subject:                     pkix.Name{CommonName: name + " enforcer root"},
 		NotBefore:                   now.Add(-time.Hour),
-		NotAfter:                    now.Add(CertLife),
+		NotAfter:                    now.Add(RootLife),
 		KeyUsage:                    x509.KeyUsageCertSign,
 		BasicConstraintsValid:       true,
 		IsCA:                        true,
@@ -73,7 +104,7 @@ func issue(root *x509.Certificate, rootKey crypto.Signer, name string, now time.
 		Subject:      pkix.Name{CommonName: name},
 		DNSNames:     []string{name},
 		NotBefore:    now.Add(-time.Hour),
-		NotAfter:     now.Add(CertLife),
+		NotAfter:     now.Add(LeafLife),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}

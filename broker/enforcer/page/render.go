@@ -39,6 +39,9 @@ func Describe(old, next policy.Document) []string {
 			if d.Isolated {
 				add("Keep %s isolated: it reaches nothing.", d.ID)
 			}
+			if d.Secure != "" {
+				add("Let %s's command %s apply at once, with no passkey.", d.ID, d.Secure)
+			}
 			add("Label %s %s.", d.ID, labelWords(d.Label))
 			continue
 		}

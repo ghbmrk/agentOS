@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -720,4 +721,150 @@ func template_escape(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// NET-4 Passkey rules: the diff the owner signs shows every field of the
+// document it commits to. Each field of an added device, and each change
+// to a field of a device, pair, rule or hold already there, changes the
+// rendered diff, so the core cannot slip a value past the screen (such as
+// a new lock whose at-once command is "unlock", L3 on #3746). A field
+// added to the document without a row here fails.
+func TestEveryFieldRendered(t *testing.T) {
+	devs := map[string]func(d *policy.Device){
+		"ID":          func(d *policy.Device) { d.ID = "other" },
+		"Network":     func(d *policy.Device) { d.Network = policy.NetHousehold },
+		"WiFi":        func(d *policy.Device) { d.WiFi = "vlan999" },
+		"Allow":       func(d *policy.Device) { d.Allow = []string{"z.example"} },
+		"VendorCloud": func(d *policy.Device) { d.VendorCloud = !d.VendorCloud },
+		"Isolated":    func(d *policy.Device) { d.Isolated = !d.Isolated },
+		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Secure = "" },
+		"Secure":      func(d *policy.Device) { d.Secure = "unlock" },
+		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
+	}
+	docs := map[string]func(d *policy.Document){
+		"Version":      nil, // the page picks it; it is in the serial, not the diff
+		"Destinations": func(d *policy.Document) { d.Destinations = append(d.Destinations, "z.example") },
+		"Devices":      nil, // the device rows above
+		"Pairs":        func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
+		"Standing":     func(d *policy.Document) { d.Standing[0].ToMS++ },
+		"Holds":        func(d *policy.Document) { d.Holds = append(d.Holds, policy.Hold{Device: "tv", Kind: policy.HoldFix}) },
+		"Drone":        func(d *policy.Document) { d.Drone = "ab" },
+	}
+	rules := map[string]func(r *policy.StandingRule){
+		"ID": func(r *policy.StandingRule) { r.ID = "other" }, "Device": func(r *policy.StandingRule) { r.Device = "cam" },
+		"Action": func(r *policy.StandingRule) { r.Action = "unlock" }, "FromMS": func(r *policy.StandingRule) { r.FromMS-- },
+		"ToMS": func(r *policy.StandingRule) { r.ToMS++ },
+	}
+	pairs := map[string]func(p *policy.Pair){
+		"A": func(p *policy.Pair) { p.A = "tv" }, "B": func(p *policy.Pair) { p.B = "tv" },
+	}
+	holds := map[string]func(h *policy.Hold){
+		"Device": func(h *policy.Hold) { h.Device = "tv" }, "Kind": func(h *policy.Hold) { h.Kind = policy.HoldFix },
+	}
+	for ty, m := range map[reflect.Type][]string{
+		reflect.TypeOf(policy.Device{}): keys(devs), reflect.TypeOf(policy.Document{}): keys(docs),
+		reflect.TypeOf(policy.StandingRule{}): keys(rules), reflect.TypeOf(policy.Pair{}): keys(pairs),
+		reflect.TypeOf(policy.Hold{}): keys(holds),
+	} {
+		var fields []string
+		for i := range ty.NumField() {
+			fields = append(fields, ty.Field(i).Name)
+		}
+		slices.Sort(fields)
+		if !slices.Equal(fields, m) {
+			t.Errorf("%s has fields %v; this test covers %v", ty.Name(), fields, m)
+		}
+	}
+
+	base := edit(1, func(d *policy.Document) {
+		d.Pairs = []policy.Pair{{A: "cam", B: "lock"}}
+		d.Standing = []policy.StandingRule{{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: 1000, ToMS: 2000}}
+		d.Holds = []policy.Hold{{Device: "cam", Kind: policy.HoldFirmware}}
+	})
+	differs := func(name string, a, b policy.Document) {
+		if _, err := policy.Encode(b); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if slices.Equal(Describe(base, a), Describe(base, b)) {
+			t.Errorf("%s: the diff does not show it: %q", name, Describe(base, b))
+		}
+	}
+	// A device added with each field set, against the same device without.
+	nw := policy.Device{ID: "new", Network: policy.NetDevices, Allow: []string{"n.example"}, VendorCloud: true}
+	added := func(f func(*policy.Device)) policy.Document {
+		d := clone(base)
+		v := nw
+		v.Allow = slices.Clone(v.Allow)
+		if f != nil {
+			f(&v)
+		}
+		d.Devices = append(d.Devices, v)
+		return d
+	}
+	for name, f := range devs {
+		differs("a new device's "+name, added(nil), added(f))
+	}
+	// Each field changed on a device, pair, rule or hold already there.
+	for name, f := range devs {
+		if name == "ID" {
+			continue // a rename is a removal and an addition, both shown
+		}
+		differs("the lock's "+name, base, func() policy.Document { d := clone(base); f(dev(&d, "lock")); return d }())
+	}
+	for name, f := range docs {
+		if f != nil {
+			differs("the document's "+name, base, func() policy.Document { d := clone(base); f(&d); return d }())
+		}
+	}
+	for name, f := range rules {
+		differs("the rule's "+name, base, func() policy.Document { d := clone(base); f(&d.Standing[0]); return d }())
+	}
+	for name, f := range pairs {
+		differs("the pair's "+name, base, func() policy.Document { d := clone(base); f(&d.Pairs[0]); return d }())
+	}
+	for name, f := range holds {
+		differs("the hold's "+name, base, func() policy.Document { d := clone(base); f(&d.Holds[0]); return d }())
+	}
+}
+
+func keys[V any](m map[string]V) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// NET-4: the page's certificate lasts no more than Apple's 825 days, and
+// Renew issues a new one under the same root before it runs out.
+func TestLeafLifeAndRenewal(t *testing.T) {
+	now := time.Now()
+	c, err := NewCert(rp, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(c.Leaf.Certificate[0])
+	if leaf.NotAfter.Sub(leaf.NotBefore) > 825*24*time.Hour {
+		t.Errorf("the leaf lasts %v", leaf.NotAfter.Sub(leaf.NotBefore))
+	}
+	same, err := c.Renew(rp, now)
+	if err != nil || !bytes.Equal(same.Leaf.Certificate[0], c.Leaf.Certificate[0]) {
+		t.Errorf("renewed a fresh leaf: %v", err)
+	}
+	late := leaf.NotAfter.Add(-RenewBefore / 2)
+	r, err := c.Renew(rp, late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nl, _ := x509.ParseCertificate(r.Leaf.Certificate[0])
+	pool := x509.NewCertPool()
+	root, _ := x509.ParseCertificate(c.Root)
+	pool.AddCert(root)
+	if bytes.Equal(r.Leaf.Certificate[0], c.Leaf.Certificate[0]) || !bytes.Equal(r.Root, c.Root) {
+		t.Error("no new leaf, or a new root")
+	}
+	if _, err := nl.Verify(x509.VerifyOptions{Roots: pool, DNSName: rp, CurrentTime: leaf.NotAfter.Add(time.Hour)}); err != nil {
+		t.Errorf("the renewed leaf: %v", err)
+	}
 }
