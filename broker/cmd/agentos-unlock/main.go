@@ -24,11 +24,20 @@
 // setup put them in the kernel's log, its clerks/anchors entry, which this
 // step copies from the log's first entry at the first boot that finds one
 // (#2995).
+//
+// With -recovery-request, it also carries out the owner's lost-card request
+// (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
+// the kernel approved for the store's current backup recipient makes a new
+// recovery key, replaces the recovery slot and the recipient with it in one
+// write, and hands the key to the kernel, which shows it on the owner's
+// page. A request that is not one is ignored, with one line on stderr, and
+// the box starts as ever.
 package main
 
 import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -40,12 +49,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
+	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -86,7 +97,10 @@ type config struct {
 	// file, from whose first entry the step pins the anchors (#2995); ""
 	// for both writes no file.
 	clerkAnchors, log string
-	args              []string // the kernel main's, after --
+	// request is the owner's lost-card request file (D-201 route B), an
+	// absolute path; "" reads none.
+	request string
+	args    []string // the kernel main's, after --
 	// dropTo replaces drop in tests that run as a plain user, who cannot
 	// shed supplementary groups; the command line never sets it.
 	dropTo func(uid, gid int) error
@@ -109,6 +123,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.gid, "gid", -1, "the kernel's gid")
 	fs.StringVar(&c.clerkAnchors, "clerk-anchors", "", "the clerks' anchors file, an absolute path; none without it")
 	fs.StringVar(&c.log, "log", "", "the kernel's log file, an absolute path, with -clerk-anchors")
+	fs.StringVar(&c.request, "recovery-request", "", "the owner's lost-card request file, an absolute path; none without it")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -122,6 +137,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-clerk-anchors and -log come together")
 	case c.clerkAnchors != "" && (!filepath.IsAbs(c.clerkAnchors) || !filepath.IsAbs(c.log)):
 		return c, errors.New("-clerk-anchors and -log are absolute paths")
+	case c.request != "" && !filepath.IsAbs(c.request):
+		return c, errors.New("-recovery-request is an absolute path")
 	}
 	return c, nil
 }
@@ -164,6 +181,14 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		}
 		f, k.Slot = seal.TPM{TPM: t, PolicyKey: pk, Anchor: anchor}, handoff.SlotTPM
 	}
+	// The lost-card route only on a boot that opened this PC's tpm slot:
+	// one opened by a card factor has the card (route A).
+	var request []byte
+	if k.Slot == handoff.SlotTPM && c.request != "" {
+		var release func()
+		request, release = takeRequest(c)
+		defer release()
+	}
 	st, err := seal.Unlock(c.store, f)
 	if err != nil {
 		return nil, fmt.Errorf("agentos-unlock: %w", err)
@@ -181,6 +206,14 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	}
 	if k.Head, err = st.HeadKey(); err != nil {
 		return nil, err
+	}
+	if request != nil {
+		k.NewRecovery, err = lostCard(st, request, k.Head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the recovery key you hold: your lost-card request: %v\n", err)
+		} else if err := os.Remove(c.request); err != nil {
+			fmt.Fprintf(os.Stderr, "agentos-unlock: remove the lost-card request I carried out: %v\n", err)
+		}
 	}
 	// A store with no anchors hands over none: the kernel starts setup-only
 	// and takes the owner's hardware keys as its log's first entry (#2905
@@ -243,6 +276,149 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 		return nil, err
 	}
 	return k.Marshal()
+}
+
+// maxRequest bounds the lost-card request file, which holds one
+// handoff.Approval (handoff.MaxApproval bytes).
+const maxRequest = 4 << 10
+
+// The reasons a lost-card request is not carried out, for stderr. None
+// changes the store.
+var (
+	errNotLost = errors.New("the kernel approved it for the card route, not the lost-card route")
+	errStale   = errors.New("it is for another backup recipient than my store's; ask again")
+)
+
+// takeRequest reads the lost-card request at c.request and, if there is
+// one, takes the store's write lock, the lock agentos-enroll takes on the
+// store's directory (ASSUMPTIONS MIG-4-recovery-r2-2), so no other writer
+// changes the store between this step's open and its write. The caller
+// releases it after closing the store. No request, or one that does not
+// read, is nil, said on stderr unless the file is not there.
+func takeRequest(c config) ([]byte, func()) {
+	b, err := readRequest(c.request)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, func() {}
+	}
+	if err == nil {
+		var release func()
+		if release, err = lockStore(filepath.Dir(c.store)); err == nil {
+			return b, release
+		}
+	}
+	fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the recovery key you hold: your lost-card request: %v\n", err)
+	return nil, func() {}
+}
+
+// readRequest reads path: a regular file, never through a link, nor a FIFO
+// put there to hold this root step, of at most maxRequest bytes. Its
+// integrity is the head key's signature, which lostCard checks.
+func readRequest(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a file", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxRequest+1))
+	if err == nil && len(b) > maxRequest {
+		err = fmt.Errorf("%s is over %d bytes", path, maxRequest)
+	}
+	return b, err
+}
+
+// lockStore takes an exclusive flock on dir, waiting for it, and returns
+// its release.
+func lockStore(dir string) (func(), error) {
+	fd, err := syscall.Open(dir, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: dir, Err: err}
+	}
+	if err := syscall.Flock(fd, syscall.LOCK_EX); err != nil {
+		syscall.Close(fd)
+		return nil, &os.PathError{Op: "lock", Path: dir, Err: err}
+	}
+	return func() { syscall.Close(fd) }, nil
+}
+
+// lostCard carries out request, a lost-card approval (handoff.Approval,
+// route B) the kernel signed with head, the store's head key, for the
+// backup recipient st holds now ("" for none): it makes a new recovery
+// key and puts it in st's one recovery slot, and its recipient in
+// RecipientEntry, in one write (seal.Store.ReplaceAndPut), and returns the
+// key. Any error changes nothing. Once the recipient has changed the
+// request no longer matches, so it is carried out at most once.
+func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64) ([]byte, error) {
+	a, err := handoff.VerifyApproval(head, request, now)
+	if err != nil {
+		return nil, err
+	}
+	if a.Route != handoff.RouteLost {
+		return nil, errNotLost
+	}
+	old, err := storeRecipientID(st)
+	if err != nil {
+		return nil, err
+	}
+	if a.Old != old {
+		return nil, errStale
+	}
+	var slot []string
+	for _, sl := range st.Slots() {
+		if sl.Kind == seal.KindRecovery {
+			slot = append(slot, sl.ID)
+		}
+	}
+	if len(slot) != 1 {
+		return nil, fmt.Errorf("my store holds %d recovery slots, not one", len(slot))
+	}
+	rec := make([]byte, seal.RecoveryLen)
+	rand.Read(rec)
+	next, err := backup.RecipientFor(rec)
+	var v []byte
+	if err == nil {
+		v, err = handoff.EncodeRecipient(next.X, next.EK)
+	}
+	if err != nil {
+		clear(rec)
+		return nil, err
+	}
+	// A directory sync that fails after the rename still leaves the new
+	// slot and recipient in place (seal.Store.commit): only the new key
+	// opens the store, so it is handed on.
+	id, err := st.ReplaceAndPut(slot[0], seal.Recovery{Key: rec}, handoff.RecipientEntry, v)
+	if id == "" {
+		clear(rec)
+		return nil, err
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the new recovery key is in place; my store's directory sync failed: %v\n", err)
+	}
+	return rec, nil
+}
+
+// storeRecipientID is the ID of the backup recipient st holds, or "" for a
+// store enrolled before MIG-4-recovery-e1, which holds none.
+func storeRecipientID(st *seal.Store) (string, error) {
+	v, ok, err := st.Get(handoff.RecipientEntry)
+	if err != nil || !ok {
+		return "", err
+	}
+	w, err := handoff.ParseRecipient(v)
+	if err != nil {
+		return "", fmt.Errorf("the backup recipient in my store: %w", err)
+	}
+	x, ek, err := handoff.SplitRecipient(w)
+	if err != nil {
+		return "", fmt.Errorf("the backup recipient in my store: %w", err)
+	}
+	return backup.Recipient{X: x, EK: ek}.ID(), nil
 }
 
 // linkKeys reads the core's link key and the first edge key from the store

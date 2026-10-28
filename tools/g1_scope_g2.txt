@@ -64,6 +64,13 @@ exempt-pr 3557
 # #3562 (DRONE-sim a, #3516): broker/drone/ and broker/cmd/agentos-drone/, which the G2
 # list does not name (D-198). Remove once #3562 merges.
 exempt-pr 3562
+# #3568 (MIG-4-untrusted-exit-b2b, #2780): the new broker/cmd/agentos-clerk-model/, which the G2
+# list does not name (D-198). Remove once #3568 merges.
+exempt-pr 3568
+
+# #3583 (CAM-server b1, #3513 part b): the new broker/camnode/, the camera node's server and
+# secure-element driver, which the G2 list does not name (D-198). Remove once #3583 merges.
+exempt-pr 3583
 
 # Project machinery and records.
 allow .claude/
