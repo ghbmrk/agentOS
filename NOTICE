@@ -17,7 +17,7 @@ Camera video decoder (built from source, linked statically, not in this reposito
   version 2.1 or later, Copyright (c) the FFmpeg developers. Configured with
   the H.264 decoder alone and no GPL parts; linked into agentos-camdecode,
   which runs only inside a camera's decoder sandbox.
-  broker/cmd/agentos-camdecode/libavcodec.sh downloads the release tarball
+  image/libavcodec.sh downloads the release tarball
   (https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz), checks its SHA-256 and
   builds it, so anyone can rebuild the library and relink the program from
   this repository's source. The image carries the licence text at

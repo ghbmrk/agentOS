@@ -37,7 +37,7 @@ cd "$work/ffmpeg-$FFMPEG"
 	--disable-everything --enable-decoder=h264 \
 	--disable-programs --disable-doc --disable-avdevice --disable-avformat --disable-avfilter \
 	--disable-swscale --disable-swresample --disable-network --disable-autodetect \
-	--disable-pthreads --disable-x86asm --disable-debug >/dev/null
+	--disable-pthreads --disable-x86asm --disable-inline-asm --disable-debug >/dev/null
 make -j"$(nproc)" >/dev/null
 make install DESTDIR="$DEST" >/dev/null
 install -D -m 0644 COPYING.LGPLv2.1 "$DEST/opt/agentos-libavcodec/share/COPYING.LGPLv2.1"

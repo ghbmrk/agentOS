@@ -61,7 +61,7 @@ chmod 0755 "$PHOTO/agentos-photo"
 # clerk runs it read-only in one long-running sandbox per streaming camera (gvisor.Stream.Root).
 CAMDECODE=$STAGE/usr/lib/agentos/images/camdecode
 mkdir -p "$CAMDECODE/proc" "$CAMDECODE/dev" "$CAMDECODE/sys"
-sh "$REPO/broker/cmd/agentos-camdecode/libavcodec.sh" "$OUT/libavcodec"
+sh "$HERE/libavcodec.sh" "$OUT/libavcodec"
 (cd "$REPO/broker" && CGO_ENABLED=1 PKG_CONFIG_PATH="$OUT/libavcodec/opt/agentos-libavcodec/lib/pkgconfig" \
 	PKG_CONFIG_SYSROOT_DIR="$OUT/libavcodec" go build -tags libavcodec,netgo,osusergo -trimpath \
 	-ldflags='-s -w -buildid= -linkmode=external -extldflags=-static' \

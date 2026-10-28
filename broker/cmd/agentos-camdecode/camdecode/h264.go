@@ -3,7 +3,7 @@
 package camdecode
 
 // The H.264 decoder (CAM-clerk part b2, #3514): libavcodec built with its
-// H.264 decoder alone (libavcodec.sh), linked statically into
+// H.264 decoder alone (image/libavcodec.sh), linked statically into
 // agentos-camdecode. Only this file touches C. It decodes on one thread,
 // logs nothing, and refuses a stream whose coded size exceeds the declared
 // shape's, beyond alignment padding, before the decoder allocates for it
