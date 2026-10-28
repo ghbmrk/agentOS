@@ -183,13 +183,25 @@ PREMERGE_LINES = [
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
     '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
     '            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }',
+    "          bwfs='[]' bruns='[]'",
+    '          if base=$(gh api "repos/$REPO/compare/main...$HEAD_SHA" --jq .merge_base_commit.sha) && echo "$base" | grep -Eqx \'[0-9a-f]{40}\'; then',
+    '            bwfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$base&per_page=100" --jq \'.workflow_runs[]\' \\',
+    '              | jq -cs \'group_by(.workflow_id) | map(max_by(.id) | select(.status == "completed"',
+    '                          and (.conclusion | IN("success", "skipped", "neutral") | not)) | .name)\') || bwfs=\'[]\'',
+    '            bruns=$(gh api --paginate "repos/$REPO/commits/$base/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
+    '              | jq -cs \'group_by(.name) | map(max_by(.id) | select(.status == "completed"',
+    '                          and (.conclusion | IN("success", "skipped", "neutral") | not)) | .name)\') || bruns=\'[]\'',
+    '          fi',
+    '          echo "excused as failed on the merge base: $bwfs $bruns"',
     '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
-    '            | jq -rs \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
-    '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            | jq -rs --argjson base "$bwfs" \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
+    '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
+    '                      | select(.status != "completed" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
     '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
-    '            | jq -r --argjson suite "$suite" \'select(.check_suite.id != $suite)',
-    '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            | jq -r --argjson suite "$suite" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
+    '                  | select(.status != "completed" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
     '          stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq \'.statuses[] | select(.state != "success") | .context\') \\',
     '            || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }',
@@ -678,6 +690,11 @@ STUB_MERGE_GH = r"""#!/bin/sh
 echo "$*" >> "$STUBS/calls"
 case "$*" in
   "api repos/o/r/actions/runs/41 --jq .check_suite_id") [ "$READ" = suite ] && exit 1; echo 99 ;;
+  "api repos/o/r/compare/main..."*" --jq .merge_base_commit.sha") [ "$READ" = base ] && exit 1; echo "$BASE" ;;
+  "api --paginate repos/o/r/actions/runs?head_sha=$BASE&per_page=100 --jq .workflow_runs[]") [ "$READ" = bwfs ] && exit 1
+     printf '%s' "$BWFS" | "$REAL_JQ" -c "$5" ;;
+  "api --paginate repos/o/r/commits/$BASE/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = bruns ] && exit 1
+     printf '%s' "$BRUNS" | "$REAL_JQ" -c "$5" ;;
   "api --paginate repos/o/r/actions/runs?head_sha="*"&per_page=100 --jq .workflow_runs[]") [ "$READ" = wfs ] && exit 1
      printf '%s' "$WFS" | "$REAL_JQ" -c "$5" ;;
   "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = fail ] && exit 1
@@ -689,8 +706,8 @@ esac
 """
 
 
-def run_(name, status="completed", conclusion="success", suite=1):
-    return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
+def run_(name, status="completed", conclusion="success", suite=1, id=1):
+    return {"name": name, "id": id, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
 def wf_(name, id=1, status="completed", conclusion="success", path=None):
@@ -707,7 +724,7 @@ class MergeRunTest(unittest.TestCase):
                 wf_("premerge", status="in_progress", conclusion=None)]
 
     def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
-                  token="synthetic-bot", sha=SHA):
+                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base="c" * 40):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -718,6 +735,8 @@ class MergeRunTest(unittest.TestCase):
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
                    "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
                    "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
+                   "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}),
+                   "BWFS": json.dumps({"workflow_runs": list(base_wfs)}),
                    "STATUSES": json.dumps({"statuses": [{"context": c, "state": st} for c, st in statuses]})}
             proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
@@ -758,6 +777,37 @@ class MergeRunTest(unittest.TestCase):
             self.assertIn(bad["name"], out)
         for st in ("pending", "failure", "error"):
             self.assertEqual(self.run_merge(statuses=(("premerge", "success"), ("ext", st)))[:2], (0, []), st)
+
+    def test_a_failure_the_merge_base_had_is_excused(self):
+        # PREMERGE-inherited (#3532): #3503's head branched from a main commit whose vulncheck was red, so its
+        # own vulncheck stayed red after main's fix; the same failure on the merge base is not the PR's.
+        red_wf, red_run = wf_("vulncheck", id=5, conclusion="failure"), run_("vulncheck", conclusion="failure")
+        base_wf, base_run = wf_("vulncheck", id=2, conclusion="failure"), run_("vulncheck", id=3, conclusion="failure")
+        merged = (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA])
+        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], wfs=self.WF_GREEN + [red_wf],
+                                        base_runs=[base_run], base_wfs=[base_wf])[:2], merged)
+        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], base_runs=[base_run])[:2], merged)
+        held = [
+            # the base was green, or never ran it (a pull_request_target workflow), or a rerun on the base passed
+            dict(runs=self.GREEN + [red_run], base_runs=[run_("vulncheck")]),
+            dict(runs=self.GREEN + [red_run]),
+            dict(runs=self.GREEN + [red_run], base_runs=[base_run, run_("vulncheck", id=4)]),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf, wf_("vulncheck", id=3)]),
+            # a different check failed on the base, or the base's run is still going
+            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_runs=[base_run]),
+            dict(runs=self.GREEN + [red_run], base_runs=[run_("vulncheck", status="in_progress", conclusion=None)]),
+            # an unfinished run on the head is never excused, nor a status
+            dict(runs=self.GREEN + [run_("vulncheck", status="queued", conclusion=None)], base_runs=[base_run]),
+            dict(wfs=self.WF_GREEN + [wf_("vulncheck", id=5, status="in_progress", conclusion=None)], base_wfs=[base_wf]),
+            dict(statuses=(("premerge", "success"), ("vulncheck", "failure")), base_runs=[run_("vulncheck", conclusion="failure")]),
+            # an unreadable base excuses nothing
+            dict(runs=self.GREEN + [red_run], base_runs=[base_run], read="base"),
+            dict(runs=self.GREEN + [red_run], base_runs=[base_run], read="bruns"),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf], read="bwfs"),
+            dict(runs=self.GREEN + [red_run], base_runs=[base_run], base="c" * 39),
+        ]
+        for kw in held:
+            self.assertEqual(self.run_merge(**kw)[:2], (0, []), kw)
 
     def test_refusals_and_unreadable_checks_warn_without_red(self):
         # A comment-time run attaches to main's head, so a refusal must not read as main breaking (#1946).
