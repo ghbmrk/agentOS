@@ -419,7 +419,11 @@ type keyArgs struct {
 // serveKeyCall answers the owner side's API-key calls: apikeyset stores a
 // provider's key and its private-data label, apikeyprivate changes only the
 // label, apikeyremove removes the key, and apikeystate lists every declared
-// provider's key without it (CLK-1). An error names no value.
+// provider's key without it (CLK-1), with whether it serves any call. Every
+// call is private (PLN-3), so a key not allowed private data serves none:
+// setup and the providers page say so ("This key is not used until you let
+// it see your private content") rather than offer it as a public-only
+// route. An error names no value.
 func serveKeyCall(a *model.APIs, op string, raw json.RawMessage) (json.RawMessage, error) {
 	var k keyArgs
 	if a == nil || json.Unmarshal(raw, &k) != nil {
@@ -486,7 +490,8 @@ func (o PlanOwner) SetKey(provider, key string, private bool) error {
 	return o.Call("apikeyset", keyArgs{provider, key, private}, nil)
 }
 
-// SetPrivate changes only the private-data label of provider's key.
+// SetPrivate changes only the private-data label of provider's key. A key
+// not allowed private data serves no call (KeyState.Serves).
 func (o PlanOwner) SetPrivate(provider string, private bool) error {
 	return o.Call("apikeyprivate", keyArgs{Provider: provider, Private: private}, nil)
 }

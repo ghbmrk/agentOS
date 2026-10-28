@@ -14,7 +14,8 @@
       "tools_key": "tools",
       "tool_types": ["", "custom"],
       "source_types": ["base64", "text", "content"],
-      "opaque_keys": ["input_schema", "input"]
+      "tool_opaque": ["input_schema"],
+      "block_opaque": {"tool_use": ["input"]}
     },
     "usage_in": [
       {"path": ["usage", "input_tokens"], "weight": 1},

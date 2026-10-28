@@ -92,17 +92,22 @@ type APIOp struct {
 // carry and those it must; the key naming the model, which must be the
 // route's; the key bounding output tokens; the key listing tools, whose
 // "type" must be one of ToolTypes ("" for none given), so only tools the
-// caller runs itself are declared; and the types a content "source" may
-// have, so the provider never fetches an address or a stored file.
+// caller runs itself are declared; and the types a "source" may have, so
+// the provider never fetches an address or a stored file. Every object's
+// "source" is checked, except under a key declared opaque for its parent:
+// ToolOpaque names the keys of a tools entry (its input schema), and
+// BlockOpaque, per block type, the keys of a block of that type (a tool
+// call's arguments), whose values are the caller's own data.
 type APIBody struct {
-	Keys        []string `json:"keys"`
-	Required    []string `json:"required"`
-	ModelKey    string   `json:"model_key"`
-	MaxOutKey   string   `json:"max_out_key"`
-	ToolsKey    string   `json:"tools_key,omitempty"`
-	ToolTypes   []string `json:"tool_types,omitempty"`
-	SourceTypes []string `json:"source_types"`
-	OpaqueKeys  []string `json:"opaque_keys,omitempty"`
+	Keys        []string            `json:"keys"`
+	Required    []string            `json:"required"`
+	ModelKey    string              `json:"model_key"`
+	MaxOutKey   string              `json:"max_out_key"`
+	ToolsKey    string              `json:"tools_key,omitempty"`
+	ToolTypes   []string            `json:"tool_types,omitempty"`
+	SourceTypes []string            `json:"source_types"`
+	ToolOpaque  []string            `json:"tool_opaque,omitempty"`
+	BlockOpaque map[string][]string `json:"block_opaque,omitempty"`
 }
 
 // UsageField is one usage figure in an answer, by its path of object keys.
@@ -167,9 +172,9 @@ var (
 	hostRE   = regexp.MustCompile(`\A[a-z0-9.-]+(?::[0-9]{1,5})?\z`)
 	pathRE   = regexp.MustCompile(`\A(?:/[A-Za-z0-9._-]+)+\z`)
 	headerRE = regexp.MustCompile(`\A[A-Z][A-Za-z0-9-]{0,63}\z`)
-	// A key is printable ASCII with no space, quote or backslash, so the
-	// clerk's own JSON encoding of an answer spells it unescaped.
-	keyRE = regexp.MustCompile(`\A[\x21\x23-\x5b\x5d-\x7e]{8,512}\z`)
+	// A key is letters, digits and ._~+/=:- only, so the clerk's own JSON
+	// encoding of an answer, HTML escaping included, spells it unescaped.
+	keyRE = regexp.MustCompile(`\A[A-Za-z0-9._~+/=:-]{8,512}\z`)
 )
 
 // keyHeaders may carry the key; none is a header remotes commonly log.
@@ -224,6 +229,17 @@ func (d *APIDeclaration) validate() error {
 		if !slices.Contains(b.Keys, k) {
 			return fmt.Errorf("model: %s: body key %q is not declared", d.Provider, k)
 		}
+	}
+	if len(b.ToolOpaque) > 0 && b.ToolsKey == "" {
+		return fmt.Errorf("model: %s: tool-opaque keys need a tools key", d.Provider)
+	}
+	for t, ks := range b.BlockOpaque {
+		if t == "" || slices.Contains(ks, "source") || slices.Contains(ks, "content") {
+			return fmt.Errorf("model: %s: block %q: an opaque key is never source or content", d.Provider, t)
+		}
+	}
+	if slices.Contains(b.ToolOpaque, "source") {
+		return fmt.Errorf("model: %s: a tools entry's source is never opaque", d.Provider)
 	}
 	if b.ToolsKey != "" && (!slices.Contains(b.Keys, b.ToolsKey) || len(b.ToolTypes) == 0) {
 		return fmt.Errorf("model: %s: the tools key needs its types", d.Provider)
@@ -432,7 +448,25 @@ func (ar apiRoute) check(body []byte) ([]byte, int64, int64, string) {
 			}
 		}
 	}
-	sourced, rule := sources(obj, b.SourceTypes, b.OpaqueKeys, 0)
+	sourced, rule := false, ""
+	for k, e := range obj {
+		var s bool
+		if tools, ok := e.([]any); ok && k == b.ToolsKey {
+			for _, t := range tools {
+				s, rule = b.sources(t, b.ToolOpaque, 1)
+				sourced = sourced || s
+				if rule != "" {
+					break
+				}
+			}
+		} else {
+			s, rule = b.sources(e, nil, 1)
+			sourced = sourced || s
+		}
+		if rule != "" {
+			break
+		}
+	}
 	if rule != "" {
 		return nil, 0, 0, rule
 	}
@@ -453,33 +487,32 @@ func (ar apiRoute) check(body []byte) ([]byte, int64, int64, string) {
 	return checked, in, maxOut, ""
 }
 
-// sources walks v for content blocks: an object with a string "type" is
-// one, and its "source", if any, must be an object of a declared type. The
-// values under an opaque key (a tool's input schema, a tool call's
-// arguments) are the caller's own data, which the provider fetches nothing
-// for, so they are not walked. It reports whether any source was seen.
-func sources(v any, types, opaque []string, depth int) (bool, string) {
+// sources walks v: every object's "source" must be an object of a
+// declared type. skip names keys of v itself that are not walked (a tools
+// entry's opaque keys), and a block's declared opaque keys are not walked
+// either; neither is skipped by name anywhere else. It reports whether any
+// source was seen.
+func (b *APIBody) sources(v any, skip []string, depth int) (bool, string) {
 	if depth > maxDepth {
 		return false, ruleDepth
 	}
 	seen := false
 	switch v := v.(type) {
 	case map[string]any:
-		if _, block := v["type"].(string); block {
-			if s, ok := v["source"]; ok {
-				sm, ok := s.(map[string]any)
-				t, _ := sm["type"].(string)
-				if !ok || !slices.Contains(types, t) {
-					return false, ruleSource
-				}
-				seen = true
+		if s, ok := v["source"]; ok {
+			sm, ok := s.(map[string]any)
+			t, _ := sm["type"].(string)
+			if !ok || !slices.Contains(b.SourceTypes, t) {
+				return false, ruleSource
 			}
+			seen = true
 		}
+		t, _ := v["type"].(string)
 		for k, e := range v {
-			if slices.Contains(opaque, k) {
+			if slices.Contains(skip, k) || slices.Contains(b.BlockOpaque[t], k) {
 				continue
 			}
-			s, rule := sources(e, types, opaque, depth+1)
+			s, rule := b.sources(e, nil, depth+1)
 			if rule != "" {
 				return false, rule
 			}
@@ -487,7 +520,7 @@ func sources(v any, types, opaque []string, depth int) (bool, string) {
 		}
 	case []any:
 		for _, e := range v {
-			s, rule := sources(e, types, opaque, depth+1)
+			s, rule := b.sources(e, nil, depth+1)
 			if rule != "" {
 				return false, rule
 			}
@@ -554,14 +587,15 @@ func (a *APIs) send(ar apiRoute, path string, body, key []byte) ([]byte, Usage, 
 	}
 	// The answer crosses as the clerk's own encoding of what it decoded,
 	// so no escape in the provider's text can spell the key past Redact.
+	// The encoding escapes HTML as the socket's own would, so the socket
+	// changes nothing after Redact, and is bounded again: escaping can
+	// grow an answer past what the planner reads.
+	u := ar.d.usage(v)
 	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
-	enc.SetEscapeHTML(false)
-	if enc.Encode(v) != nil {
-		return nil, Usage{}, &APIError{DAnswer}
+	if json.NewEncoder(&out).Encode(v) != nil || out.Len() > maxAnswer {
+		return nil, u, &APIError{DAnswer}
 	}
-	reply := Redact(bytes.TrimSuffix(out.Bytes(), []byte("\n")), key)
-	return reply, ar.d.usage(v), nil
+	return Redact(bytes.TrimSuffix(out.Bytes(), []byte("\n")), key), u, nil
 }
 
 // usage is the answer's reported usage, or none if a required figure is
@@ -628,12 +662,15 @@ func Redact(b, key []byte) []byte {
 }
 
 // KeyState is one provider's key as the owner's page shows it: whether a
-// key is set and whether its routes may see private data (PLN-3). The key
-// itself never leaves the clerk (CLK-1).
+// key is set, whether its routes may see private data (PLN-3), and whether
+// they serve any call. Every call is private, so a key not allowed private
+// data serves none: the page says so, rather than offering it as a
+// public-only route. The key itself never leaves the clerk (CLK-1).
 type KeyState struct {
 	Provider string `json:"provider"`
 	Set      bool   `json:"set"`
 	Private  bool   `json:"private"`
+	Serves   bool   `json:"serves"`
 }
 
 // State lists every declared provider's key.
@@ -645,14 +682,14 @@ func (a *APIs) State() ([]KeyState, error) {
 	var out []KeyState
 	for p := range a.decls {
 		e, ok := set[p]
-		out = append(out, KeyState{Provider: p, Set: ok, Private: ok && e})
+		out = append(out, KeyState{Provider: p, Set: ok, Private: ok && e, Serves: ok && e})
 	}
 	slices.SortFunc(out, func(x, y KeyState) int { return strings.Compare(x.Provider, y.Provider) })
 	return out, nil
 }
 
 // ErrKeyForm is a key that is not a declared provider's or not of a key's
-// form: printable ASCII with no space, quote or backslash, 8 to 512 bytes.
+// form: 8 to 512 letters, digits or ._~+/=:- characters.
 var ErrKeyForm = errors.New("model: not a declared provider, or not a key's form")
 
 // SetKey stores provider's key and whether its routes may see private

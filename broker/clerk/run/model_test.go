@@ -366,7 +366,7 @@ func TestModelReplyCarriesNoKey(t *testing.T) {
 		t.Fatalf("a refused key: %v", err)
 	}
 	st, err := f.apis.State()
-	if err != nil || len(st) != 1 || !st[0].Set || !st[0].Private {
+	if err != nil || len(st) != 1 || !st[0].Set || !st[0].Private || !st[0].Serves {
 		t.Fatalf("state %+v, %v", st, err)
 	}
 	if b, _ := json.Marshal(st); strings.Contains(string(b), apiKeyCanary) {
@@ -403,6 +403,10 @@ func TestPrivateCallRefusedOnARouteNotAllowedPrivate(t *testing.T) {
 	}
 	if f.hits.Load() != 0 || len(f.l.amount) != 0 {
 		t.Fatalf("a refused call reached the provider (%d) or was metered (%v)", f.hits.Load(), f.l.amount)
+	}
+	// The owner's page is told such a key serves nothing (#3705 UX 9).
+	if st, err := f.apis.State(); err != nil || !st[0].Set || st[0].Private || st[0].Serves {
+		t.Fatalf("a key not allowed private data: %+v, %v", st, err)
 	}
 	if err := f.apis.SetPrivate("anthropic", true); err != nil {
 		t.Fatal(err)

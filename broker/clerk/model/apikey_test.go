@@ -126,6 +126,8 @@ func TestABadDeclarationIsRefused(t *testing.T) {
 		"a streamed body":               func(d *model.APIDeclaration) { d.Body.Keys = append(d.Body.Keys, "stream") },
 		"a server-side tool source":     func(d *model.APIDeclaration) { d.Body.Keys = append(d.Body.Keys, "mcp_servers") },
 		"a host with a path":            func(d *model.APIDeclaration) { d.Host = "api.example.com/v1" },
+		"an opaque content key":         func(d *model.APIDeclaration) { d.Body.BlockOpaque = map[string][]string{"tool_result": {"content"}} },
+		"an opaque source key":          func(d *model.APIDeclaration) { d.Body.ToolOpaque = []string{"source"} },
 		"a path with an escape":         func(d *model.APIDeclaration) { d.Ops = []model.APIOp{{Name: "x", Path: "/v1/%2e%2e"}} },
 		"a repeated route":              func(d *model.APIDeclaration) { d.Models = append(d.Models, d.Models[0]) },
 		"a negative price": func(d *model.APIDeclaration) {
@@ -243,8 +245,33 @@ func TestOnlyContentBlocksHaveSources(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	nested := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":[{"type":"image","source":{"type":"url","url":"https://x.test/a.png"}}]}]}]}`
-	if _, err := a.Call(c, 0, "t", "r", "messages", []byte(nested)); err == nil || err.Error() != "model: body source" {
-		t.Fatalf("an image by address inside a tool result: %v", err)
+	// Every object's source is checked, and an opaque key is skipped only
+	// on its declared parent (#3705 L3 7): never by its name alone.
+	for name, body := range map[string]string{
+		"an image by address inside a tool result":     `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":[{"type":"image","source":{"type":"url","url":"https://x.test/a.png"}}]}]}]}`,
+		"a source in an object with no type":           `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"source":{"type":"url","url":"https://x.test"}}]}]}`,
+		"an input key on a block that is no tool call": `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"x","input":{"type":"image","source":{"type":"url","url":"https://x.test"}}}]}]}`,
+		"an input_schema key outside a tools entry":    `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"text","text":"x","input_schema":{"type":"image","source":{"type":"url","url":"https://x.test"}}}]}]}`,
+		"a system block by address":                    `{"model":"m","max_tokens":8,"system":[{"type":"image","source":{"type":"url","url":"https://x.test"}}],"messages":[]}`,
+		"a stored file inside a document's content":    `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"content","content":[{"type":"image","source":{"type":"file","file_id":"f"}}]}}]}]}`,
+		"a tools entry's own source":                   `{"model":"m","max_tokens":8,"messages":[],"tools":[{"name":"f","input_schema":{"type":"object"},"source":{"type":"url","url":"https://x.test"}}]}`,
+	} {
+		if _, err := a.Call(c, 0, "t", "r", "messages", []byte(body)); err == nil || err.Error() != "model: body source" {
+			t.Errorf("%s: %v, want a source refusal", name, err)
+		}
+	}
+}
+
+// An answer under the read bound that its re-encoding grows past it (HTML
+// escaping spells each < in six bytes) is refused, not sent on to read as
+// lost on the planner's side, and is metered at the usage it reported
+// (#3705 L3 8).
+func TestAnAnswerGrownPastTheBoundIsRefused(t *testing.T) {
+	a, c, l := apiRig(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"t":"%s","usage":{"input_tokens":2,"output_tokens":3}}`, strings.Repeat("<", 1<<20))
+	}, nil)
+	_, err := a.Call(c, 0, "t", "r", "messages", []byte(`{"model":"m","max_tokens":8,"messages":[]}`))
+	if err == nil || err.Error() != "model: "+model.DAnswer || len(l.metered) != 1 || l.metered[0] != 5 {
+		t.Fatalf("a grown answer: %v, metered %v", err, l.metered)
 	}
 }
