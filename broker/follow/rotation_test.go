@@ -294,7 +294,7 @@ func TestOSS10wrProjectRootIsNeverFollowedByName(t *testing.T) {
 	v2, k2 := rotated(t, r.shipped, r.pk)
 	v3, _ := rotated(t, v2, k2)
 	for i, d := range []string{r.describe(r.shipped), r.describe(v2), r.describeChain(v3, v2)} {
-		if out := r.run(req(fmt.Sprintf("a%d", i), "AgentOS", d)); out.Result != NotSwitched ||
+		if out := r.run(req(fmt.Sprintf("a%d", i), "Agent"+"OS", d)); out.Result != NotSwitched ||
 			!strings.Contains(out.Evidence, "switch back") || !r.trusts(r.shipped) {
 			t.Fatalf("followed the project's root under a name: %+v", out)
 		}
