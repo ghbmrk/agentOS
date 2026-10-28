@@ -111,7 +111,7 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 		return OneShotResult{}, err
 	}
 	errLog := filepath.Join(dir, "runsc.err")
-	g, err := oneShotGroup(o)
+	g, err := sandboxGroup(o.Cgroup, "oneshot-"+o.Name, o.MemBytes)
 	if err != nil {
 		return OneShotResult{}, err
 	}
@@ -165,15 +165,15 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 	return res, err
 }
 
-// oneShotGroup makes the run's cgroup under o.Cgroup, first emptying and
-// removing one an earlier run left. Its memory.high is its memory.max, so
-// a run over the cap is killed rather than slowed until the deadline.
-func oneShotGroup(o OneShot) (*cgroup.Group, error) {
-	parent, err := cgroup.Open(o.Cgroup)
+// sandboxGroup makes a one-shot or stream sandbox's cgroup, name, under
+// parent, first emptying and removing one an earlier run left. Its
+// memory.high is its memory.max, so a run over the cap is killed rather
+// than slowed until the deadline.
+func sandboxGroup(parentPath, name string, mem int64) (*cgroup.Group, error) {
+	parent, err := cgroup.Open(parentPath)
 	if err != nil {
 		return nil, err
 	}
-	name := "oneshot-" + o.Name
 	stale := &cgroup.Group{Path: filepath.Join(parent.Path, name)}
 	if _, err := os.Stat(stale.Path); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), oneShotCleanup)
@@ -181,7 +181,7 @@ func oneShotGroup(o OneShot) (*cgroup.Group, error) {
 		cancel()
 		stale.Remove()
 	}
-	return parent.Child(name, cgroup.Limits{MaxBytes: o.MemBytes, HighBytes: o.MemBytes, CPUWeight: 100, IOWeight: 100, Pids: oneShotPids})
+	return parent.Child(name, cgroup.Limits{MaxBytes: mem, HighBytes: mem, CPUWeight: 100, IOWeight: 100, Pids: oneShotPids})
 }
 
 // startIn sets opts so runsc starts in the cgroup at path: clone3 places
