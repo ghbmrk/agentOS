@@ -87,7 +87,7 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 	if err := os.Remove(contentDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if err := os.Rename(stage, contentDir); err != nil {
+	if err := os.Rename(stage, contentDir); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot link it; a restore's staging, not a lifecycle, and the parent is synced next
 		return err
 	}
 	return privfile.SyncDir(parent)
