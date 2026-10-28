@@ -296,6 +296,27 @@ func TestRecoveryRefusalsKeepOrDrop(t *testing.T) {
 	if !strings.Contains(p, "Keep both cards") || r.srv.recovery.p != nil {
 		t.Fatalf("stale after no answer:\n%s", p)
 	}
+	// A recovery-key factor the first, unanswered call already retired
+	// reads as factor on the retry: still "keep both", never "nothing
+	// changed" (L3 6464454818 on #3605).
+	r.factor(map[string]string{"recovery": r.card.RecoveryKey})
+	r.confirm(false)
+	r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
+	r.post("/recovery/", tapForm)
+	for _, e := range []string{localapi.ErrRecoveryFactor, localapi.ErrRecoverySetup, localapi.ErrUnauthorized} {
+		if e != localapi.ErrRecoveryFactor {
+			r.factor(map[string]string{"recovery": r.card.RecoveryKey})
+			r.confirm(false)
+			r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
+			r.post("/recovery/", tapForm)
+		}
+		r.f.rotateErr = Refused(e)
+		p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
+		if !strings.Contains(p, recoveryUnsureDropText) || strings.Contains(p, "Nothing changed") || strings.Contains(p, "Destroy the new card") {
+			t.Fatalf("%s after no answer:\n%s", e, p)
+		}
+	}
+	r.f.rotateErr = Refused(localapi.ErrRecoveryStale)
 	start()
 	p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
 	if !strings.Contains(p, "Something changed since you started") {

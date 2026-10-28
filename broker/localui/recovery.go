@@ -216,11 +216,12 @@ func recoveryWrongTap(err error) bool {
 
 // The page's fixed lines.
 const (
-	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I take a backup sealed to the new key within a minute."
-	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I finish moving backups to the new key within a few minutes."
-	recoveryUnsureText  = "I couldn't tell whether that finished. Keep both cards for now: if your new card took effect, the old one no longer opens my store. Try the tap again."
-	recoveryCancelText  = "Cancelled. Nothing changed: your current card stays in effect."
-	recoveryExpiredText = "That replacement took too long and was dropped. Nothing changed: your current card stays in effect. Start again."
+	recoveryDoneText       = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I take a backup sealed to the new key within a minute."
+	recoveryLaterText      = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I finish moving backups to the new key within a few minutes."
+	recoveryUnsureText     = "I couldn't tell whether that finished. Keep both cards for now: if your new card took effect, the old one no longer opens my store. Try the tap again."
+	recoveryUnsureDropText = "I can't tell whether your new card took effect. Keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
+	recoveryCancelText     = "Cancelled. Nothing changed: your current card stays in effect."
+	recoveryExpiredText    = "That replacement took too long and was dropped. Nothing changed: your current card stays in effect. Start again."
 )
 
 // recoveryView is the page in one of its steps: "" the factor, "tap" the
@@ -443,8 +444,12 @@ func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending)
 	tried := p.tried
 	s.recovery.mu.Unlock()
 	s.recoveryDrop(p)
-	if tried && refused(err, localapi.ErrRecoveryStale) {
-		return "I can't tell whether your new card took effect. Keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure.", ""
+	// After a call with no answer the keeper may have written, so any
+	// refusal but the tap's, busy and limited (answered above) may only
+	// say the store moved on: the old key no longer opening it reads as
+	// factor, the recipient changed as stale. Never "nothing changed".
+	if tried {
+		return recoveryUnsureDropText, ""
 	}
 	return recoveryText(err), ""
 }
