@@ -67,7 +67,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.dir, "dir", "", "the clerk's own state directory, closed to every other uid; it holds the sealed plan login")
 	fs.StringVar(&c.ownerSock, "owner-sock", "", "the socket agentosd calls the plan route's owner calls on")
 	fs.StringVar(&c.signInSock, "signin-sock", "", "agentosd's -signin-sock, where each plan sign-in's machine is started, read and stopped")
-	fs.IntVar(&c.agentosdUID, "agentosd-uid", -1, "agentosd's uid (root on the box): the only peer on owner-sock and signin-sock, and the sign-in machines' host")
+	fs.IntVar(&c.agentosdUID, "agentosd-uid", -1, "agentosd's uid, root in the image: the only peer on owner-sock and signin-sock, and the host of the sign-in machines")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
