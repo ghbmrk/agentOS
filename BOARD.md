@@ -116,7 +116,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian | Reduce the image's unfixed Debian advisories by dropping packages it does not need; rebuild when Debian ships fixes (EVL-5 findings from TN-vulncheck-2). | #2886 | queued (release; tier A) |
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
 | CODEX-toolsh-outer-proc | CODEX-toolsh-outer-proc: agentos-toolsh fails at random in a pid namespace with an outer /proc (bwrap's /proc lookup); fail-closed. Serves CRED-5, A14 (later; from CODEX-pidns-cause) | CODEX-pidns-cause (#1616) | queued (later; from CODEX-pidns-cause) |
-| CI-vulncheck-install-retry | CI-vulncheck-install-retry: the vulncheck and image-vulncheck jobs retry their osv-scanner and govulncheck installs, failing closed after three tries. | vulncheck (D-137 gate) | building (release; tier A; size S; from #3746 and #3747 CI) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -318,7 +317,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-d-preauth | ENF-d-preauth: unauthenticated hellos drop, never pause the enforcer channel (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666, #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 
 ## Model routes and the Codex lane
 
