@@ -1,0 +1,68 @@
+# The camera node's one service (CAM-node part c; broker/cmd/agentos-camnode). Every flag is
+# fixed here; the board's drop-in (agentos-camnode.service.d/board.conf) adds the devices only
+# that board has. It runs under its own uid, with the stream socket systemd passes as its only
+# socket and a network namespace of its own, so it can accept but never dial.
+[Unit]
+Description=agentOS camera node
+Requires=agentos-camnode.socket var-lib-camnode.mount run-camboot.mount
+After=agentos-camnode.socket var-lib-camnode.mount run-camboot.mount systemd-tmpfiles-setup.service
+Requires=dev-camnode-element.device dev-camnode-slot\x2da.device dev-camnode-slot\x2db.device dev-camnode-button.device
+After=dev-camnode-element.device dev-camnode-slot\x2da.device dev-camnode-slot\x2db.device dev-camnode-button.device
+# A trial image that never starts is not kept: three failed starts restart the board with no
+# tryboot flag, so the bootloader returns to the old slot (camnode ASSUMPTIONS CAM-b2-2).
+StartLimitIntervalSec=120
+StartLimitBurst=3
+FailureAction=reboot
+
+[Service]
+Type=simple
+User=camnode
+Group=camnode
+ExecStart=/usr/bin/agentos-camnode \
+	-release /usr/share/agentos/camnode-release.pub \
+	-element /dev/camnode/element \
+	-store /var/lib/camnode/bundles \
+	-slots /var/lib/camnode/slots \
+	-autoboot /run/camboot/autoboot.txt \
+	-slot-a /dev/camnode/slot-a -part-a 2 \
+	-slot-b /dev/camnode/slot-b -part-b 3 \
+	-button /dev/camnode/button \
+	-encoder /usr/libexec/camnode/encoder \
+	-resolutions 1920x1080,1280x720 \
+	$CAMNODE_BOARD_FLAGS
+Restart=on-failure
+RestartSec=2
+
+AmbientCapabilities=CAP_SYS_BOOT
+CapabilityBoundingSet=CAP_SYS_BOOT
+NoNewPrivileges=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+DevicePolicy=closed
+DeviceAllow=/dev/camnode/element rw
+DeviceAllow=/dev/camnode/slot-a rw
+DeviceAllow=/dev/camnode/slot-b rw
+DeviceAllow=/dev/camnode/button r
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/camnode /run/camboot
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @reboot
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

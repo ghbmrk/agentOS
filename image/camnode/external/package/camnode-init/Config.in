@@ -1,0 +1,8 @@
+config BR2_PACKAGE_CAMNODE_INIT
+	bool "camnode-init"
+	depends on BR2_INIT_SYSTEMD
+	help
+	  The camera node's first process: puts the booted slot's root
+	  under dm-verity, reads it whole, mounts it read-only and
+	  starts systemd. Installs the initramfs that holds it into
+	  the images directory.

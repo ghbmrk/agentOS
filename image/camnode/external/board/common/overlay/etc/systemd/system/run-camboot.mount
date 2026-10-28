@@ -1,0 +1,17 @@
+# The bootloader's partition, which holds autoboot.txt (camnode ASSUMPTIONS CAM-bin-2). Only
+# agentos-camnode writes it; nothing on it executes. Mounted sync: vfat otherwise leaves the FAT
+# and the directory entry of a renamed file to be written later, and a power cut between them
+# leaves a selector whose autoboot.txt the bootloader cannot read (seen in the end-to-end test).
+[Unit]
+Description=Camera node boot selector partition
+Requires=dev-camnode-autoboot.device
+After=dev-camnode-autoboot.device
+
+[Mount]
+What=/dev/camnode/autoboot
+Where=/run/camboot
+Type=vfat
+Options=nosuid,nodev,noexec,noatime,sync,uid=990,gid=990,umask=0077
+
+[Install]
+WantedBy=local-fs.target
