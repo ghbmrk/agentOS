@@ -94,9 +94,8 @@ func TestCompileRefuses(t *testing.T) {
 		"mapped ISP": func(_ *policy.Document, l *Layout) {
 			l.ISP = []netip.Prefix{netip.MustParsePrefix("::ffff:192.168.1.0/120")}
 		},
-		"v6 edge gateway 4": func(_ *policy.Document, l *Layout) { l.EdgeGateway6 = netip.MustParseAddr("10.0.0.1") },
-		"page is channel":   func(_ *policy.Document, l *Layout) { l.ChannelPort = l.PagePort },
-		"bad document":      func(d *policy.Document, _ *Layout) { d.Devices[0].Network = "attic" },
+		"page is channel": func(_ *policy.Document, l *Layout) { l.ChannelPort = l.PagePort },
+		"bad document":    func(d *policy.Document, _ *Layout) { d.Devices[0].Network = "attic" },
 	}
 	for name, mut := range cases {
 		d, l := fixturePolicy(), fixtureLayout()

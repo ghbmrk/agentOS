@@ -262,9 +262,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line(`iif "lo" accept`)
 	// The edge's segment hears nothing (NET-2 Segments): no DHCP, DNS, NTP,
 	// mDNS, page or other listener, before any other rule can answer it.
-	if l.EdgeGateway6.IsValid() {
-		w.line("iifname " + edge + " icmpv6 type nd-neighbor-solicit icmpv6 taddr " + l.EdgeGateway6.String() + " accept")
-	}
 	w.line("iifname " + edge + " counter name " + q(EdgeIn) + " drop")
 	w.line("ct state invalid drop")
 	w.line("ct state established,related accept")
@@ -360,9 +357,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 
 	w.open("chain output")
 	w.line("type filter hook output priority filter; policy accept;")
-	if l.EdgeGateway6.IsValid() {
-		w.line("oifname " + edge + " icmpv6 type nd-neighbor-advert ip6 saddr " + l.EdgeGateway6.String() + " accept")
-	}
 	w.line("oifname " + edge + " drop")
 	w.close()
 

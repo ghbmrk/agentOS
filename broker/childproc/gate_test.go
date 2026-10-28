@@ -36,9 +36,16 @@ var exempt = map[string]string{
 	// The enforcer shares no code with agentOS, childproc included (ENF
 	// decision 1, broker/daemon/arc2_test.go), so its firewall loader runs
 	// nft itself: one fixed absolute binary, an empty environment, the
-	// ruleset on stdin (ENF decision 4). arc2_test.go lets no other
-	// enforcer package link it.
+	// ruleset on stdin (ENF decision 4). Only the enforcer may import it
+	// (within), and arc2_test.go lets no other enforcer package link it.
 	"enforcer/nft/load": "the enforcer's firewall loader runs nft -f; enforcer code cannot import childproc (ENF-e)",
+}
+
+// within names the exempt packages, by the same key, that are cut only
+// from the paths of importers under one directory; any other importer
+// reaches os/exec through them and fails the gate (#3754 Security 1).
+var within = map[string]string{
+	"enforcer/nft/load": "enforcer",
 }
 
 // inPlace names the packages, by the same key as exempt, that may name
@@ -67,7 +74,7 @@ const module = "github.com/ghbmrk/agentos/broker"
 
 func TestOnlyChildprocStartsAProcess(t *testing.T) {
 	start := time.Now()
-	bad := gate(t, "..", module, exempt, inPlace)
+	bad := gate(t, "..", module, exempt, within, inPlace)
 	if len(bad) > 0 {
 		t.Fatalf("a package outside childproc can start a process (P3-4b-3r-env-r8; start children through childproc):\n%s", strings.Join(bad, "\n"))
 	}
@@ -89,9 +96,10 @@ type node struct {
 // each violation of brief D3: a non-standard package that reaches
 // os/exec once childproc and the exempt packages are cut from the graph,
 // or a non-test file that names a launcher selector; and each exemption
-// that is no longer needed. A file no linux/amd64 build includes is held
+// that is no longer needed. An exempt package within names is cut only
+// from its importers under that directory. A file no linux/amd64 build includes is held
 // to both rules too, by its own imports, and reported "(not built)".
-func gate(t *testing.T, dir, mod string, exempt, inPlace map[string]string) []string {
+func gate(t *testing.T, dir, mod string, exempt, within, inPlace map[string]string) []string {
 	t.Helper()
 	// The graph is the union over both cgo settings: the shipped
 	// binaries build with CGO_ENABLED=0 (image/build.sh) and CI's race
@@ -196,6 +204,15 @@ func gate(t *testing.T, dir, mod string, exempt, inPlace map[string]string) []st
 		return p
 	}
 	cut := func(p string) bool { return p == mod+"/childproc" || exempt[key(p)] != "" }
+	// cutFrom: whether the edge from importer to p is cut.
+	cutFrom := func(importer, p string) bool {
+		d, ok := within[key(p)]
+		if !ok || !cut(p) {
+			return cut(p)
+		}
+		k := key(importer)
+		return k == d || strings.HasPrefix(k, d+"/")
+	}
 	imports := map[string][]string{}
 	for _, n := range nodes {
 		imports[n.path] = n.imports
@@ -213,7 +230,7 @@ func gate(t *testing.T, dir, mod string, exempt, inPlace map[string]string) []st
 			return via[p]
 		}
 		for _, im := range imports[p] {
-			if cut(im) {
+			if cutFrom(p, im) {
 				continue
 			}
 			if r := visit(im); r != nil {
@@ -257,7 +274,7 @@ func gate(t *testing.T, dir, mod string, exempt, inPlace map[string]string) []st
 				switch {
 				case im == "os/exec":
 					found = append(found, name+": imports os/exec")
-				case !cut(im) && visit(im) != nil:
+				case !cutFrom(n.path, im) && visit(im) != nil:
 					found = append(found, name+": imports "+im+", which reaches os/exec")
 				}
 			}
@@ -491,7 +508,7 @@ func TestGateCatchesAChildStartedOutsideChildproc(t *testing.T) {
 		"old/o.go":  "package old\nimport \"os/exec\"\nfunc O() { exec.Command(\"x\").Run() }\n",
 		"user/u.go": "package user\nimport \"example.com/m/old\"\nfunc U() { old.O() }\n",
 	})
-	got := gate(t, root, "example.com/m", map[string]string{"old": "moves later", "stale": "gone"}, nil)
+	got := gate(t, root, "example.com/m", map[string]string{"old": "moves later", "stale": "gone"}, nil, nil)
 	want := []string{
 		"example.com/m/a: reaches os/exec",
 		"example.com/m/b: reaches os/exec (example.com/m/b -> example.com/m/a -> os/exec)",
@@ -554,7 +571,7 @@ func TestInPlaceAllowsOneExecAndNoChild(t *testing.T) {
 		"runner/r.go":    "package runner\nimport \"os/exec\"\nfunc R() { exec.Command(\"/bin/sh\").Run() }\n",
 	})
 	allow := map[string]string{"once": "r", "child": "r", "fork": "r", "twice": "r", "via": "r", "stale": "r"}
-	got := gate(t, root, "example.com/m", nil, allow)
+	got := gate(t, root, "example.com/m", nil, nil, allow)
 	want := []string{
 		"example.com/m/child: reaches os/exec",
 		"example.com/m/fork/zz.go:3: names syscall.ForkExec",
@@ -570,6 +587,45 @@ func TestInPlaceAllowsOneExecAndNoChild(t *testing.T) {
 	for _, g := range got {
 		if strings.HasPrefix(g, "example.com/m/once") {
 			t.Errorf("reported, but passes: %s", g)
+		}
+	}
+	if t.Failed() {
+		t.Logf("got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// #3754 Security 1: an exemption scoped to one directory is cut from its
+// importers there only. An importer outside it, directly, through a
+// package outside it, or from a file no build includes, reaches os/exec.
+func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
+	root := fixture(t, map[string]string{
+		"go.mod":         "module example.com/m\n\ngo 1.25\n",
+		"childproc/c.go": childprocFixture,
+		"enf/load/l.go":  "package load\nimport \"os/exec\"\nfunc Load() error { return exec.Command(\"/nft\").Run() }\n",
+		"enf/main/m.go":  "package main\nimport \"example.com/m/enf/load\"\nfunc main() { load.Load() }\n",
+		"kernel/k.go":    "package kernel\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
+		"enfx/x.go":      "package enfx\nimport \"example.com/m/enf/load\"\nvar _ = load.Load\n",
+		"enf/via/v.go":   "package via\nimport \"example.com/m/kernel\"\n",
+		"tag/t.go":       "package tag\n",
+		"tag/u.go":       "//go:build sometag\n\npackage tag\nimport _ \"example.com/m/enf/load\"\n",
+	})
+	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf"}, nil)
+	want := []string{
+		"example.com/m/kernel: reaches os/exec (example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
+		"example.com/m/enfx: reaches os/exec",
+		"example.com/m/enf/via: reaches os/exec (example.com/m/enf/via -> example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
+		"example.com/m/tag/u.go (not built): imports example.com/m/enf/load, which reaches os/exec",
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
+			t.Errorf("not reported: %s", w)
+		}
+	}
+	for _, g := range got {
+		for _, ok := range []string{"/enf/load", "/enf/main"} {
+			if strings.HasPrefix(g, "example.com/m"+ok+":") || strings.HasPrefix(g, "example.com/m"+ok+"/") {
+				t.Errorf("reported, but passes: %s", g)
+			}
 		}
 	}
 	if t.Failed() {

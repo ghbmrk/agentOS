@@ -34,10 +34,10 @@ type Layout struct {
 	// address included: no segment reaches them (NET-1).
 	ISP []netip.Prefix
 	// EdgeGateway is the enforcer's one address on the edge's segment, the
-	// only one it answers ARP for there (NET-2 Segments). EdgeGateway6, if
-	// valid, is the same for neighbour discovery.
+	// only one it answers ARP for there (NET-2 Segments). The edge's
+	// segment is IPv4 only: the enforcer answers no neighbour discovery
+	// there and forwards no IPv6 from it.
 	EdgeGateway  netip.Addr
-	EdgeGateway6 netip.Addr
 	PagePort     uint16 // the enforcer's page (Owner and admin port only)
 	ChannelPort  uint16 // the kernel's enforcer channel (core only)
 	CorePagePort uint16 // the core's owner page (Owner and admin port only)
@@ -80,9 +80,6 @@ func (l Layout) Check() error {
 		if !p.IsValid() || p.Addr().Is4In6() || p.Addr().Zone() != "" {
 			return fmt.Errorf("%w: ISP prefix %v", ErrLayout, p)
 		}
-	}
-	if l.EdgeGateway6.IsValid() && (!l.EdgeGateway6.Is6() || l.EdgeGateway6.Is4In6() || l.EdgeGateway6.Zone() != "") {
-		return fmt.Errorf("%w: edge gateway %v", ErrLayout, l.EdgeGateway6)
 	}
 	if l.PagePort == 0 || l.ChannelPort == 0 || l.CorePagePort == 0 || l.PagePort == l.ChannelPort {
 		return fmt.Errorf("%w: ports", ErrLayout)
