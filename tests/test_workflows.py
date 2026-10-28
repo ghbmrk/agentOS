@@ -122,6 +122,7 @@ PREMERGE_LINES = [
     '          private-key: ${{ secrets.PREMERGE_APP_KEY }}',
     '          permission-statuses: write',
     '      - name: Premerge (base copy of tools/premerge.py)',
+    '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        id: gate',
     '        env:',
     '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
@@ -173,6 +174,7 @@ PREMERGE_LINES = [
     '    permissions: {}',
     '    steps:',
     '      - name: Merge the accepted head once every check on it is green',
+    '        shell: bash # -eo pipefail: GitHub\'s default `bash -e` lets a failed read piped into jq pass',
     '        env:',
     '          GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}',
     '          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}',
@@ -183,13 +185,26 @@ PREMERGE_LINES = [
     '          echo "$HEAD_SHA" | grep -Eqx \'[0-9a-f]{40}\'',
     '          suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx \'[0-9]+\' \\',
     '            || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }',
+    "          bwfs='[]' bruns='[]'",
+    '          if base=$(gh api "repos/$REPO/compare/main...$HEAD_SHA" --jq .merge_base_commit.sha) && echo "$base" | grep -Eqx \'[0-9a-f]{40}\'; then',
+    '            bw=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$base&per_page=100" --jq \'.workflow_runs[]\' \\',
+    '              | jq -cs \'map(select(.head_branch == "main" and (.event | IN("push", "schedule")))) | group_by(.workflow_id)',
+    '                        | map(max_by(.id) | select(.run_attempt == 1 and .conclusion == "failure"))\') || bw=\'[]\'',
+    '            bwfs=$(printf \'%s\' "$bw" | jq -c \'map(.name)\') || bwfs=\'[]\'',
+    '            bruns=$(printf \'%s\' "$bw" | jq -r \'.[].id\' | while read -r id; do',
+    '                      echo "$id" | grep -Eqx \'[0-9]+\' && gh api --paginate "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=100" --jq \'.jobs[]\' || exit 1',
+    '                    done | jq -cs \'map(select(.conclusion == "failure") | .name) | unique\') || bruns=\'[]\'',
+    '          fi',
+    '          echo "excused as failed on the merge base: $bwfs $bruns"',
     '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
-    '            | jq -rs \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
-    '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            | jq -rs --argjson base "$bwfs" \'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)',
+    '                      | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
+    '                      | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }',
     '          runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
-    '            | jq -r --argjson suite "$suite" \'select(.check_suite.id != $suite)',
-    '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not)) | .name\') \\',
+    '            | jq -r --argjson suite "$suite" --argjson base "$bruns" \'select(.check_suite.id != $suite)',
+    '                  | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))',
+    '                  | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name\') \\',
     '            || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }',
     '          stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq \'.statuses[] | select(.state != "success") | .context\') \\',
     '            || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }',
@@ -583,6 +598,24 @@ def premerge_script():
     return run_block(lines, lines.index("        run: |") + 1)
 
 
+def step_argv(lines, run):
+    # GitHub runs a step with no `shell:` as `bash -e {0}`, and `shell: bash` as
+    # `bash --noprofile --norc -eo pipefail {0}`; the tests run a step the way the runner would.
+    start = max(i for i in range(run) if lines[i].startswith("      - "))
+    shell = [l.split("#")[0].split(":", 1)[1].strip() for l in lines[start:run] if l.strip().startswith("shell:")]
+    return {(): ["bash", "-e"], ("bash",): ["bash", "--noprofile", "--norc", "-eo", "pipefail"]}[tuple(shell)]
+
+
+def gate_argv():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    return step_argv(lines, lines.index("        run: |"))
+
+
+def merge_argv():
+    lines = (WORKFLOWS / "premerge.yml").read_text().split("\n")
+    return step_argv(lines, lines.index("        run: |", lines.index("  merge:")))
+
+
 def run_block(lines, start):
     end = next((i for i in range(start, len(lines)) if lines[i].strip() and not lines[i].startswith("          ")), len(lines))
     return "\n".join(l[10:] for l in lines[start:end]) + "\n"
@@ -612,7 +645,7 @@ class PremergeRunTest(unittest.TestCase):
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
                    "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state}
             # The runner's default `run` shell.
-            proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
+            proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
             if tokens is not None:
@@ -678,6 +711,13 @@ STUB_MERGE_GH = r"""#!/bin/sh
 echo "$*" >> "$STUBS/calls"
 case "$*" in
   "api repos/o/r/actions/runs/41 --jq .check_suite_id") [ "$READ" = suite ] && exit 1; echo 99 ;;
+  "api repos/o/r/compare/main..."*" --jq .merge_base_commit.sha") [ "$READ" = base ] && exit 1; echo "$BASE" ;;
+  "api --paginate repos/o/r/actions/runs?head_sha=$BASE&per_page=100 --jq .workflow_runs[]") [ "$READ" = bwfs ] && exit 1
+     printf '%s' "$BWFS" | "$REAL_JQ" -c "$5" ;;
+  "api --paginate repos/o/r/commits/$BASE/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = bruns ] && exit 1
+     printf '%s' "$BRUNS" | "$REAL_JQ" -c "$5" ;;
+  "api --paginate repos/o/r/actions/runs/"*"/attempts/1/jobs?per_page=100 --jq .jobs[]") [ "$READ" = bjobs ] && exit 1
+     id=${3#repos/o/r/actions/runs/}; printf '%s' "$BJOBS" | "$REAL_JQ" -c --arg id "${id%%/*}" '.[$id] // [] | .[]' ;;
   "api --paginate repos/o/r/actions/runs?head_sha="*"&per_page=100 --jq .workflow_runs[]") [ "$READ" = wfs ] && exit 1
      printf '%s' "$WFS" | "$REAL_JQ" -c "$5" ;;
   "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = fail ] && exit 1
@@ -689,13 +729,14 @@ esac
 """
 
 
-def run_(name, status="completed", conclusion="success", suite=1):
-    return {"name": name, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
+def run_(name, status="completed", conclusion="success", suite=1, id=1):
+    return {"name": name, "id": id, "status": status, "conclusion": conclusion, "check_suite": {"id": suite}}
 
 
-def wf_(name, id=1, status="completed", conclusion="success", path=None):
+def wf_(name, id=1, status="completed", conclusion="success", path=None, event="push", branch="main", attempt=1, suite=1):
     return {"name": name, "id": id, "workflow_id": hash(name) % 1000, "status": status, "conclusion": conclusion,
-            "path": path or ".github/workflows/%s.yml" % name}
+            "path": path or ".github/workflows/%s.yml" % name, "event": event, "head_branch": branch,
+            "run_attempt": attempt, "check_suite_id": suite}
 
 
 class MergeRunTest(unittest.TestCase):
@@ -707,7 +748,7 @@ class MergeRunTest(unittest.TestCase):
                 wf_("premerge", status="in_progress", conclusion=None)]
 
     def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
-                  token="synthetic-bot", sha=SHA):
+                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -718,8 +759,10 @@ class MergeRunTest(unittest.TestCase):
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
                    "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
                    "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
+                   "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}), "BJOBS": json.dumps(base_jobs or {}),
+                   "BWFS": json.dumps({"workflow_runs": list(base_wfs)}),
                    "STATUSES": json.dumps({"statuses": [{"context": c, "state": st} for c, st in statuses]})}
-            proc = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(stubs / "run.sh")],
+            proc = subprocess.run(merge_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             calls = (stubs / "calls").read_text().splitlines() if (stubs / "calls").exists() else []
         return proc.returncode, [c for c in calls if c.startswith("api -X PUT")], proc.stdout
@@ -758,6 +801,56 @@ class MergeRunTest(unittest.TestCase):
             self.assertIn(bad["name"], out)
         for st in ("pending", "failure", "error"):
             self.assertEqual(self.run_merge(statuses=(("premerge", "success"), ("ext", st)))[:2], (0, []), st)
+
+    def test_a_failure_the_merge_base_had_is_excused(self):
+        # PREMERGE-inherited (#3532): #3503's head branched from a main commit whose vulncheck was red, so its
+        # own vulncheck stayed red after main's fix; the same failure on the merge base is not the PR's.
+        red_wf, red_run = wf_("vulncheck", id=5, conclusion="failure"), run_("vulncheck", conclusion="failure")
+        base_wf, failed_job = wf_("vulncheck", id=2, conclusion="failure", suite=8), {"name": "vulncheck", "conclusion": "failure"}
+        jobs = {"2": [{"name": "scope / scope", "conclusion": "success"}, failed_job]}
+        merged = (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA])
+        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], wfs=self.WF_GREEN + [red_wf],
+                                        base_wfs=[base_wf], base_jobs=jobs)[:2], merged)
+        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs)[:2], merged)
+        sched = wf_("vulncheck", id=2, conclusion="failure", suite=8, event="schedule")
+        self.assertEqual(self.run_merge(wfs=self.WF_GREEN + [red_wf], base_wfs=[sched])[:2], merged)
+        held = [
+            # the base's job passed, or the base never ran it (a pull_request_target workflow), or a later run passed
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": "success"}]}),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf]),
+            dict(runs=self.GREEN + [red_run], base_jobs=jobs),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf, wf_("vulncheck", id=3, suite=9)]),
+            # a different job failed on the base, or the base's job is still going or was cancelled
+            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_wfs=[base_wf], base_jobs=jobs),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": None}]}),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": "cancelled"}]}),
+            # #3533 Security review: a cancelled base run, a rerun, or a run main did not push or schedule excuses nothing
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="cancelled")]),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", attempt=2)]),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", event="workflow_dispatch")]),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", branch="side")]),
+            # #3533 delta reviews: a check run any branch workflow posts on the base sha, even one GitHub files in
+            # main's failed run's suite, is not one of that run's jobs and excuses nothing
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": []},
+                 base_runs=[run_("vulncheck", id=9, conclusion="failure", suite=8)]),
+            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_wfs=[base_wf], base_jobs=jobs,
+                 base_runs=[run_("broker-race", id=9, conclusion="failure", suite=8)]),
+            dict(runs=self.GREEN + [red_run], base_runs=[run_("vulncheck", id=9, conclusion="failure", suite=777)]),
+            # only a head failure is excused: an unfinished or cancelled head run never is, nor a status
+            dict(runs=self.GREEN + [run_("vulncheck", status="queued", conclusion=None)], base_wfs=[base_wf], base_jobs=jobs),
+            dict(runs=self.GREEN + [run_("vulncheck", conclusion="cancelled")], base_wfs=[base_wf], base_jobs=jobs),
+            dict(wfs=self.WF_GREEN + [wf_("vulncheck", id=5, status="in_progress", conclusion=None)], base_wfs=[base_wf]),
+            dict(statuses=(("premerge", "success"), ("vulncheck", "failure")), base_wfs=[base_wf], base_jobs=jobs),
+            # an unreadable base excuses nothing
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="base"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="bjobs"),
+            dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf], read="bwfs"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="bwfs"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, base="c" * 39),
+            dict(runs=self.GREEN + [red_run], base_wfs=[wf_("vulncheck", id="2/x", conclusion="failure")], base_jobs=jobs),
+        ]
+        for kw in held:
+            self.assertEqual(self.run_merge(**kw)[:2], (0, []), kw)
 
     def test_refusals_and_unreadable_checks_warn_without_red(self):
         # A comment-time run attaches to main's head, so a refusal must not read as main breaking (#1946).
