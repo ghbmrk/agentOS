@@ -1,6 +1,6 @@
 # ENF: the enforcer (NET-2 to NET-7, STO-4)
 
-Board section: Devices, hardware and image (SPEC §13-14). D-178 (the enforcer is standard), D-190 (drones). SPEC NET-1 to NET-7, STO-4, STO-1 (head copies), STO-5, DEV-2 (the enforcer channel exception), A18, A19's home-control clauses, G6. Tier A throughout (KRN-2 puts the enforcer in the trusted base, STO-4 reviews it at the kernel's tier). Strongest model for every slice. Seventeen slices, each one session, each its own work item (#3658 to #3675, listed under **Slices**).
+Board section: Devices, hardware and image (SPEC §13-14). D-178 (the enforcer is standard), D-190 (drones). SPEC NET-1 to NET-7, STO-4, STO-1 (head copies), STO-5, DEV-2 (the enforcer channel exception), A18, A19's home-control clauses, G6. Tier A throughout (KRN-2 puts the enforcer in the trusted base, STO-4 reviews it at the kernel's tier). Strongest model for every slice. Eighteen slices, each one session, each its own work item (#3658 to #3675 and #3702, listed under **Slices**).
 
 ## The gap
 
@@ -27,10 +27,10 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 3. **The tightening classifier is a pure function over two documents.** `Classify(old, new)` returns tightening (with which closed-list kind and device) or loosening; a change that mixes both is a loosening. Every path that applies a change goes through it.
 4. **Firewall: nftables text, loaded atomically.** Slice e compiles the policy into one nft ruleset text (golden-file tested) and one small loader package, the only enforcer package allowed `os/exec`, runs `nft -f` to replace it atomically. A ruleset that fails to load leaves the previous one (P5).
 5. **DNS and DHCP: dnsmasq, generated.** The enforcer's resolver for the core's list and for Devices uses dnsmasq's `nftset=` so only addresses its own resolver returned enter the allow sets (NET-2 The core's list). DHCP and DNS run only on the networks NET-2 Hardening lists; the edge's segment gets no listener at all. mDNS for signed pairs and the Wake-on-LAN relay are small Go services, since a general reflector is forbidden (NET-3).
-6. **Radios run as confined processes behind one narrow interface (NET-2 Confined radio stacks).** BLE uses BlueZ (decided in briefs/DEV-withings-ble.md). Zigbee, Thread and the controller for Matter and lock devices are chosen by slice j's spike, which writes them into this brief; no slice adds a radio stack before that.
+6. **Radios run as confined processes behind one narrow interface (NET-2 Confined radio stacks).** BLE uses BlueZ (decided in briefs/DEV-withings-ble.md). Slice j's spike (`spikes/ENF-radio/README.md`) chose the rest: Thread is OpenThread's `ot-daemon` with border routing, SRP server and advertising proxy and its own mDNS (no `otbr-agent`); the Matter controller, which also drives Matter-over-Thread locks, is matter.js; Zigbee, including Zigbee locks, is zigbee-herdsman with its converters (pending Mark, question 3, since matter.js and herdsman add Node.js to the image). Each runs as its own unprivileged user with no-new-privileges and the spike's seccomp deny list: Zigbee in an empty network namespace with no IP or netlink sockets; `ot-daemon` and the Matter controller together in a user-owned network namespace holding only lo, `wpan0` and a dummy `infra0`. BLE commissioning of Matter devices is a declared op of the BLE process, never raw HCI. No Z-Wave (SPEC NET-2 names only Zigbee, Thread and Bluetooth).
 7. **The enforcer image reuses the core's image pipeline, with its own key and feed** (pending Mark, question 1). A separate mkosi profile under `image/enforcer/`: Debian packages, `/usr` read-only on dm-verity in A/B slots, Secure Boot, boot counting and rollback, as `image/README.md` already does for the core, signed with an enforcer-only key and published on its own release feed, so neither box updates the other.
 8. **Per-device Wi-Fi identity is a per-device VLAN** (pending Mark, question 2). The enforcer generates each Devices password and the access point's hostapd `wpa_psk_file` maps it to that device's own VLAN; the enforcer pushes the file over the wired admin port and never shows it to the core. The enforcer then identifies a device by its VLAN tag, not by anything the access point reports.
-9. **Hardware.** The enforcer is the Protectli V1410 already named in briefs/DEV-homekit.md and briefs/DEV-withings-ble.md, with USB radios chosen by slice j, and one OpenWrt access point with VLAN support. Every acceptance test below runs in CI or a VM; live runs are later rows' work.
+9. **Hardware.** The enforcer is the Protectli V1410 already named in briefs/DEV-homekit.md and briefs/DEV-withings-ble.md, with USB radios chosen by slice j: an nRF52840 Dongle running OpenThread RCP firmware built from source, an EFR32MG21 or MG24 dongle running Silicon Labs' EmberZNet NCP firmware pinned by hash, and a btusb Bluetooth dongle; only their USB IDs are authorised. One OpenWrt access point with VLAN support. Every acceptance test below runs in CI or a VM; live runs are later rows' work.
 
 ## Code layout
 
@@ -47,6 +47,8 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 | `broker/enforcer/alert/`, `broker/enforcer/heads/` | h | Texts and calls, the light, head copies and revocations |
 | `broker/enforcer/traffic/` | i | Per-device summaries |
 | `broker/enforcer/radio/` | k | Confined radio process host and BLE |
+| `broker/enforcer/radio/thread/`, `broker/enforcer/radio/matter/`, `broker/enforcer/radio/zigbee/` | r | The three stacks' launchers, configs and declared-op adapters |
+| `broker/enforcer/locks/` | q | Lock and safety-device rules over the radio interface |
 | `broker/cmd/agentos-enforcer/` | l | The daemon: wiring and the lifecycle matrix |
 | `image/enforcer/`, `.github/workflows/enforcer-image.yml` | m | The signed image and its CI boot |
 | `broker/e2e/enforcer/` | n | A18 in VMs |
@@ -237,16 +239,34 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 ### ENF-q (#3675): locks and safety devices on the radios (NET-6, NET-4 Standing rules, DEV-5)
 
-**Scope:** set by ENF-j.
-**Builds:** unlock or disarm only by an assertion naming the lock, action and short window, once; an unusual-time unlock needs a second assertion; relock after the owner-set interval; visitor codes from standing rules; the safety-device drivers on the stacks ENF-j chose.
-**Acceptance tests:** the A18 Locks sentences, one test each, named by ENF-j.
-**Size:** about 130k (split by ENF-j if larger). **Depends on:** ENF-b, ENF-d, ENF-j, ENF-k.
+**Scope:** `broker/enforcer/locks/` (new). Stack-independent: it drives locks and safety devices only through slice k's radio interface, tested against a fake radio.
+**Builds:** unlock or disarm only by an assertion naming the lock, action and short window, once; an unusual-time unlock needs a second assertion; relock after the owner-set interval; visitor codes from standing rules, set as the lock's own PIN-code schedule (Door Lock cluster, Matter and Zigbee alike); a routine unlock logged, an unusual-time one texted.
+**Acceptance tests (the A18 Locks sentences):**
+1. A18: `locks::TestVisitorCodeOnlyInsideWindow`.
+2. A18: `locks::TestUnusualTimeNeedsSecondAssertion` and `locks::TestTextReplyIsNotSecondAssertion`.
+3. A18: `locks::TestStandingRuleUnlockNoAsk`, `locks::TestUnlockOutsideRuleRefused` and `locks::TestCoreCannotWidenRule`.
+4. A18: `locks::TestReplayedAssertionRefused`, `locks::TestAssertionForOtherLockOrActionRefused` and `locks::TestRelocksAfterInterval`.
+5. A18: `locks::TestRoutineUnlockLoggedNotTexted`.
+6. A18: `locks::TestFrozenDeviceIsolated`.
+**Size:** about 100k. **Depends on:** ENF-b, ENF-d, ENF-k.
+
+### ENF-r (#3702): the radio stacks (NET-2 Confined radio stacks)
+
+**Scope:** `broker/enforcer/radio/thread/`, `broker/enforcer/radio/matter/`, `broker/enforcer/radio/zigbee/` (new), each with its pinned lockfile or build pin; the image packages are slice m's.
+**Builds:** each stack's launcher on slice k's host, with the spike's profiles (`spikes/ENF-radio/run.sh` becomes a Go test), and a small adapter per stack exposing only declared ops: reads, lock and relock, unlock and PIN-code schedules for slice q, the one named secure-direction command, and pairing. The Matter process's BLE commissioning goes through the BLE process. Defers to question 3: on B it builds Thread and Matter only, with a C++ controller on the Matter SDK.
+**Acceptance tests:**
+1. NET-2: `radio::TestStacksConfined`: each stack's process sees only its own interfaces, cannot read the policy store and holds the spike's seccomp profile. Catches a stack run unconfined.
+2. NET-2: `radio::TestStackOnlyDeclaredOps` for each of the three. Catches a wide adapter.
+3. NET-2: `radio::TestSrpReachesController`: a simulated Thread node's SRP registration is resolvable by the Matter process inside the namespace, with no LAN interface. Catches the spike's one unverified inference.
+**Size:** about 130k; split per stack if larger. **Depends on:** ENF-k, question 3.
 
 ## Questions for Decisions (also on the work items)
 
 1. **Enforcer image base (ENF-m).** A: reuse the core's mkosi pipeline (Debian, dm-verity A/B, Secure Boot) with an enforcer-only signing key and feed (recommended: it already meets NET-2 Hardening and is reviewed; SPEC's "OpenWrt-class" reads as small and router-like). B: an OpenWrt x86 build (literal reading; needs new work for verified boot and A/B). C: Buildroot.
 2. **Per-device Wi-Fi identity (ENF-e, ENF-g).** A: per-device PSK mapped to a per-device VLAN in the AP's hostapd file, pushed by the enforcer (recommended: identity is the VLAN tag the enforcer sees; no new service). B: the enforcer as a RADIUS server, AP holds no device passwords (one more service and dependency). C: one Devices VLAN and the AP's key-id events (trusts what the AP reports).
 
+3. **Radio runtime (ENF-j, ENF-r; #3668).** A: Node.js for Zigbee (zigbee-herdsman) and Matter (matter.js), one runtime, each stack in its own confined process (recommended: both maintained and the bases of the largest open home stacks; about 315 MB in the image). B: no runtime, Thread and Matter only through the C++ Matter SDK, Zigbee later. C: Python (zigpy) plus the C++ SDK. Measurements in `spikes/ENF-radio/README.md`.
+
 ## Usage
 
-Seventeen sessions of 80k to 130k each. Parallel after ENF-a: b, d, e, j at once (disjoint scopes); then c, f, g, h, i, k, o; then l, m, n; p and q last.
+Eighteen sessions of 80k to 130k each. Parallel after ENF-a: b, d, e, j at once (disjoint scopes); then c, f, g, h, i, k, o; then l, m, n; p, q and r last.
