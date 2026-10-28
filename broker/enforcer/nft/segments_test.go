@@ -211,6 +211,11 @@ func TestEdgeSegmentSilent(t *testing.T) {
 	}
 	ps = append(ps, probe{from: "edge", addr: "10.60.0.255", port: 67, udp: true, why: "DHCP broadcast"})
 	h.expect(ps...)
+	if h.v6 {
+		h.settled(nil)
+		h.settled(h.hosts["core"])
+		h.settled(h.hosts["edge"])
+	}
 	if h.v6 && !dhcpv6(t, h.hosts["core"]) {
 		t.Fatal("control: a DHCPv6 solicit from the core's segment was not answered")
 	}

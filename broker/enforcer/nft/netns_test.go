@@ -366,6 +366,9 @@ func (h *home) listen(x *host) {
 				if err != nil {
 					h.t.Fatalf("listen %s %d: %v", nw, p, err)
 				}
+				if x == nil && nw == "udp6" && p == 547 {
+					h.joinDHCPv6(pc)
+				}
 				h.t.Cleanup(func() { pc.Close() })
 				go func() {
 					buf := make([]byte, 1500)
@@ -493,4 +496,51 @@ func (h *home) counter(name string) int {
 	}
 	n, _ := strconv.Atoi(m[1])
 	return n
+}
+
+// joinDHCPv6 makes the enforcer's echo listener on port 547 a member of
+// All_DHCP_Relay_Agents_and_Servers (ff02::1:2) on the core's and the
+// edge's segments, as a DHCPv6 server would be, so a Solicit reaches it
+// unless the ruleset drops it.
+func (h *home) joinDHCPv6(pc net.PacketConn) {
+	raw, err := pc.(*net.UDPConn).SyscallConn()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	l := fixtureLayout()
+	for _, name := range []string{l.Core, l.Edge} {
+		ifi, err := net.InterfaceByName(name)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		mreq := &unix.IPv6Mreq{Interface: uint32(ifi.Index)}
+		copy(mreq.Multiaddr[:], net.ParseIP("ff02::1:2").To16())
+		var serr error
+		if err := raw.Control(func(fd uintptr) {
+			serr = unix.SetsockoptIPv6Mreq(int(fd), unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq)
+		}); err != nil || serr != nil {
+			h.t.Fatalf("join ff02::1:2 on %s: %v %v", name, err, serr)
+		}
+	}
+}
+
+// settled waits until no IPv6 address is tentative in x's namespace (nil:
+// the enforcer's), so a link-local probe has a source and a reply has a
+// sender.
+func (h *home) settled(x *host) {
+	for i := 0; ; i++ {
+		var out string
+		if x == nil {
+			out = run(h.t, "ip", "-6", "addr", "show", "tentative")
+		} else {
+			out = h.in(x, "ip", "-6", "addr", "show", "tentative")
+		}
+		if strings.TrimSpace(out) == "" {
+			return
+		}
+		if i > 100 {
+			h.t.Fatalf("addresses still tentative: %s", out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
