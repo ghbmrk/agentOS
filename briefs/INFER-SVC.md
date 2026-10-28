@@ -1,10 +1,49 @@
 # INFER-SVC: The local inference service, with an embedding call
 
+**Acceptance tests:** each slice's tests are named under its slice below (E1 to E3); the first PR's INF-* tests are listed in the original brief further down and have merged.
+
+## Embeddings-only re-scope (2026-10-28, at main 688d522; D-225)
+
+**Decisions.** Mark answered the two questions of the PLN-7 re-scope draft (#3657, closed unmerged): Q1 "B, embeddings only" (the local model ships as an embedding model, with no local generative route for now) and Q2 "A, Apache-2.0 model". D-225 records both. This section supersedes the original brief below wherever they differ.
+
+**What stands.** The first PR at the original split merged (#2285, #2503, #2508): `broker/infer` (protocol, client), `broker/infer/supervise`, `broker/cmd/agentos-infer` against a fake runtime (`runtime_none.go`), the agentosd wiring (`broker/cmd/agentosd/infer.go`, `-infer` off), the guard entries, the risk class and the G2 list lines (INFER-A1). INF-1, INF-2, INF-4, INF-5, INF-6 and INF-8 stand as built. The protocol keeps the ops `hello` and `embed` only.
+
+**What changes.**
+- **No generate op.** #3696 (G1 of the draft, #3650) auto-merged at 16:09Z before the hold; this brief's PR reverts its merge 983d6a3, so neither the service nor the client carries `generate`, and #3650 closes as not planned. INFER-route (#3652) and INFER-wire (#3653) close as not planned. A later generative route starts from a fresh row; #3657's G1 to G3 text and a revert of this revert are its starting point. Revert rather than keep unused: kept, the op would be reachable the moment any model that serves generate loaded, and it would carry two assumptions (INFER-A9, INFER-A10) and about 600 lines with no caller.
+- **The model.** One Apache-2.0 embedding model, by default Qwen3-Embedding-0.6B from its publisher's GGUF release at Q8_0 (about 640 MB, 1024 dims, last-token pooling), replacing INF-3's EmbeddingGemma and its 768 dims. E2 reads the licence of the exact file it pins and stops if it is not Apache-2.0 (INFER-A4). [Inference: size, dims and licence are from the model card as of mid-2026.] A smaller Apache-2.0 embedder is the builder's call at E2 only if the 0.6B model fails INF-7 on the N95; the PR says which and why.
+- **The consumer.** RECALL-EMB (#1134, `broker/recall`) is old core being deleted. The consumer is a new-core retrieve pass (LOG-4 embedding search, CAP-13), which has no row yet; that row picks the clerk that dials the socket and gives it access (the draft's G3 pattern). Until it lands, the image ships the model with `-infer` off, so the cost is disk only, with no memory held at boot.
+
+**Out of scope here:** any generative route, the retrieve pass and its index, the clerk-side wiring and peer socket access, accelerator leases (RES-3, budget R8), STATUS lines.
+
+### Slices (one session each, serial: each shares `broker/infer/ASSUMPTIONS.md` with the next)
+
+Every slice is tier A (strongest model). Re-check D-111 at claim.
+
+**E1 INFER-llama, #3654** (G4 of the draft, embed only). Startable when the session's network allows github.com/ggml-org/llama.cpp releases and huggingface.co (#3654 comment 6474217823: releases answered 403). Usage estimate 70k.
+- `broker/cmd/agentos-infer/runtime_llamacpp.go`: drives `llama-server` from a pinned llama.cpp release as the service's child, in embedding mode with last-token pooling, two slots of 2048 tokens (INFER-A6), on a unix socket in the service's private directory or on 127.0.0.1 inside the service's own empty network namespace (INFER-A3); CPU only. `Load` starts it on the model file and reads the dim; `Embed` maps to its embedding endpoint with the service's bounds and `CallTimeout`. The service stays `CGO_ENABLED=0`; the runtime is a separate executable, never linked. Build tags select the adapter: `runtime_none.go` by default, `runtime_llamacpp.go` under `infer_llamacpp`.
+- Tests: `TestRealRuntimeEmbed` (`real_test.go`, tag `infer_real`, server and model paths from env): 1024 finite floats per text, identical across two calls, hash equal to the pin. CI compiles it (`go vet -tags infer_real,infer_llamacpp`); the image machine test runs it after E2. A fake-`llama-server` test (a Go test binary on the same endpoint) covers the adapter's error mapping in CI: crash, hang past `CallTimeout`, malformed JSON, wrong vector count or dim.
+- Files: `broker/cmd/agentos-infer/runtime_llamacpp.go`, `runtime_llamacpp_test.go`, `real_test.go`, `runtime_none.go` (build tag line), `broker/infer/ASSUMPTIONS.md`.
+
+**E2 INFER-image, #3655** (G5 of the draft). After E1, in the `image/build.sh` serial queue. Same network need as E1. Usage estimate 60k.
+- `image/build.sh`: build `llama-server` from the pinned release tarball, hash-checked (the `libavcodec.sh` pattern), static or with its libraries in a private directory, CPU only; install the model file, hash-pinned, read-only, root-owned (INFER-A2). `agentos-setup.conf`: the `agentos-infer` user. `agentosd.service`: `-infer-uid @uid:agentos-infer -infer-model ... -infer-model-sha256 ...`, with `-infer` itself left off until the retrieve row turns it on. `NOTICE` and `/usr/share/licenses/`: llama.cpp (MIT) and the model's Apache-2.0 text.
+- Tests: `tests/test_image_*.py` (the builder picks the existing file that checks `build.sh` pins, or adds `test_image_infer.py`): both pins are 64-hex SHA-256 values the build checks, the licence file is installed, and the unit does not pass `-infer`. The image machine test runs E1's `real_test.go` against the installed files, starting the service itself.
+- Files: `image/build.sh`, `image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service`, `image/mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf`, `NOTICE`, the image test, `broker/infer/ASSUMPTIONS.md`.
+
+**E3 INFER-floor, #3656** (INF-7). Hardware track: the N95 with E2's image and the service started by hand. `broker/cmd/agentos-infer/n95_test.go`, tag `n95`: RSS idle and peak over two concurrent batches of 64 texts of 512 tokens, cold start (spawn to `ready`), single-text embed p50 and p95 at 64 and 512 tokens, and batch-of-32 throughput. Limits: peak RSS at most 1.6 GB (the 2.0 GB leaf less headroom; INFER-A6), cold start at most 15 s. The original 200 ms p95 came from RECALL-EMB's EMB-5, old core; E3 records the latency figures and the retrieve row sets its limit from them. Limits are tightened from the first measurement, never loosened without a PR note. Files: `n95_test.go`, `broker/infer/ASSUMPTIONS.md`.
+
+**Order.** E1, then E2 in the image queue, then E3 on the hardware track.
+
+---
+
+## Original brief (2026-10-17; first PR built, kept for the INF-* IDs)
+
+Superseded by the re-scope above wherever they differ: its consumer (RECALL-EMB, `broker/recall`), its `modelroute` references, its model choice and its split.
+
 Board row: issue #2217 (section Phase 3: compounding). Class: release. Tier: A (`tools/risk_tier.py` prints A for the planned paths: `broker/cmd/...` is wiring, `image/` builds what ships, and a new broker package is A until classed; this brief itself is docs-only). Builder: strongest model. Usage estimate: 110k tokens, checkpoint at 80k; split at the checkpoint if the runtime build (INF-3) is not green by then (INF-1, INF-2, INF-4, INF-5 against the fake runtime as one PR; INF-3 and INF-7 as the second). Needs: the runtime decision below (Q1; the builder proceeds on the recommended default if no answer has landed), and the G2 freeze: `tools/g1_scope.py` reports `broker/infer/` and `broker/cmd/agentos-infer/` outside `tools/g1_scope_g2.txt`, so the build starts only after a separate Mark-merged PR adds them to that list (or G2 passes); its first line cites this brief. Unblocks RECALL-EMB (#1134). Brief only for INF-7: the N95 step needs the hardware, so a builder with no N95 ships the code and CI tests, leaves the row `state:building` with that step open, and says so in the PR (OPERATING §5 hand-off).
 
 **Why (facts, verified at main 912250c).** SPEC §4 lists Local inference as an untrusted service ("small model, speech, embeddings, leverage passes for the main route (CAP-13); uses accelerators when present"), but nothing runs one: `broker/cmd/agentosd/main.go:586` says "No local inference service exists yet to take leases (budget R8)". `broker/budget/budget.go:141` already creates the `inference` cgroup component at `InferenceMB` (default 2048, RES-2) with nothing placed in it. `broker/daemon/inference_test.go` (`TestAgentosdLinksNoInference`, ARC-2) forbids agentosd from linking `route`, `egress`, `cmd/agentos-egress`, any provider SDK, any HTTP client but `modelroute`'s, and any non-unix socket. RECALL-EMB (#2216) needs a service that takes texts and returns vectors with the model file hash, reporting `missing`, `corrupt` or `unavailable`, and must not reach it through `modelroute` (the vault process's credentialed egress, REV-6).
 
-## Requirements (from SPEC.md)
+### Requirements (from SPEC.md)
 
 - **ARC-2** the broker's control path never invokes inference: the model runs in its own process, agentosd holds only a client. **RES-2** per-component cgroup budget, local inference 2.0 GB. **RES-3** the identical service runs on CPU with no accelerator; nothing in the broker depends on one. **REV-6** private content, embeddings included, stays off hosted routes. **CAP-13** the retrieve pass is local. **HW-4** every acceptance test passes at the floor (N95, 8 GB, no accelerator). **DEP-1** boot, owner control and recovery never need inference.
 
@@ -54,29 +93,29 @@ All of these are pre-approved here. The PR is still tier A, and Mark merges it (
 - No `broker` function or method is named `Dial`, `DialTimeout`, `DialContext` or `Listen` unless it is a real unix dial. `sourceUse` checks every call by those names, so the client's API is `Client{Path}` with methods, never `infer.Dial(path)`.
 - The dial is `(&net.Dialer{}).DialContext(ctx, "unix", c.Path)`, as `netjoin` and `mail/mailsock` do: a literal, with the address read from a field.
 
-## Design
+### Design
 
 - `broker/infer`: `proto.go` (wire types, bounds, causes), `client.go` (`Client{Path}` with `Hello(ctx)` and `Embed(ctx, texts) ([][]float32, Info, error)` where the error carries one of the four causes). RECALL-EMB's `ServiceEmbedder` uses this client; its arc2 entry allows `infer` besides `recall` (amended in `briefs/RECALL-EMB.md` by this brief's PR).
 - `broker/infer/supervise`: `Start(ctx, Options)` creates the socket directory and listener, builds the `childproc.Options` (cgroup FD, namespaces, uid and gid, `ExtraFiles: [listener]`, `KillGroup`), starts the child from a goroutine locked to its thread that sets no_new_privs first and exits still locked (the `loop7.go:1011` `startNoNewPrivs` pattern, reimplemented), runs the restart loop, and exposes `State()`. agentosd calls it after the budget groups exist and never waits on it.
 - `broker/cmd/agentos-infer`: `main.go` takes the listener from fd 3, the model path, the pin and the runtime path from flags; hashes and loads; serves one connection per goroutine with a small concurrency cap (2, config) so a burst queues rather than multiplying memory. The runtime adapter is one file (`runtime_<name>.go`) behind a two-method interface (`Load(path) (dim, error)`, `Embed(texts) ([][]float32, error)`), so Q1 changes one file.
 - Image: `image/build.sh` builds or installs the runtime and the model at pinned versions and hashes (default per Q1 and Q2), installs `agentos-infer`, and adds the `agentos-infer` user to `agentos-setup.conf`; `agentosd.service` gains `-infer-uid @uid:agentos-infer`. Go stays `CGO_ENABLED=0`: with the default runtime the C++ code is a separate executable, not linked.
 
-## Open questions for Mark (the coordinator posts them as a Decisions card)
+### Open questions for Mark (the coordinator posts them as a Decisions card)
 
 - **Q1 Model runtime.** Recommended: **llama.cpp** (`llama-server` in embedding mode, built from a pinned upstream release in the image, driven by `agentos-infer` over a private unix socket or stdio). MIT, runs EmbeddingGemma from GGUF at q8 on CPU, and has a Vulkan backend for a later iGPU lease (RES-3) with the same service. Alternative: **ONNX Runtime** (MIT, also strong on CPU, but its Go use needs cgo or a C++ shim of our own, and its accelerator story on Intel iGPU is OpenVINO, a second large dependency). Rejected: pure-Go inference (no maintained implementation of this model; a new component where reuse works). Answer: llama.cpp or onnx.
 - **Q2 Model delivery.** Recommended: **in the image**, pinned by hash (about 300 MB at q8; no first-boot fetch, no new egress path, updates ride the signed image). Alternative: fetched on first use through the update channel (smaller image, but a fetch path and a "not yet downloaded" state). Answer: image or fetch.
 
-## Assumptions (recorded in `broker/infer/ASSUMPTIONS.md`, new)
+### Assumptions (recorded in `broker/infer/ASSUMPTIONS.md`, new)
 
 - [Inference] The chosen runtime can serve embeddings without opening a TCP port (unix socket or stdio); if only TCP works, it binds 127.0.0.1 inside the child's own network namespace after the service brings loopback up, which still reaches nothing outside (INF-6 test unchanged).
 - The model's licence permits shipping it in the image (RECALL-EMB's assumption; verify before building, else stop and escalate).
 - A user namespace with a one-uid map is available to agentosd on the target kernel, as loop7's jail already requires.
 - 2 concurrent requests at batch 64 fit the 2.0 GB leaf with the 1.0 GB embedder figure; INF-7 confirms or the cap drops.
 
-## Out of scope
+### Out of scope
 
 Accelerator leases and the iGPU backend (R8 stays open), other passes (reduce, speech, small model), the recall embedder and its STATUS line (RECALL-EMB), a compute host, `tools/ASSUMPTIONS.md`.
 
-## Scope
+### Scope
 
 `broker/infer/**` (new: `proto.go`, `client.go`, `client_test.go`, `ASSUMPTIONS.md`, `supervise/supervise.go`, `supervise/supervise_test.go`), `broker/cmd/agentos-infer/**` (new: `main.go`, `runtime_*.go`, tests, `real_test.go`, `n95_test.go`, the fake runtime under `testdata/` or an internal test helper), the agentosd wiring in `broker/cmd/agentosd` (flags `-infer`, `-infer-socket`, `-infer-uid`, `-infer-model`, `-infer-model-sha256`, the supervisor start, and the comment at `main.go:586` corrected), `broker/daemon/arc2_test.go` and `broker/daemon/inference_test.go` (the entries under Guard files only: the `cmd/agentosd` list and `guestPlane["infer"]`, `forbidden` and its self-check, `unixDialers["infer"]`, and the `netOK` entries for `infer` and `infer/supervise`), `tools/risk_tier.py` (the class above only), `image/build.sh`, `image/mkosi/mkosi.extra/usr/lib/systemd/system/agentosd.service` (the one flag), the `agentos-setup.conf` user line, `briefs/INFER-SVC.md`, and `tests/test_g1_scope.py` (delete the `not_yet` set in `test_every_entry_exists`; the test fails once the two directories exist). `broker/go.mod` and `go.sum` only if the runtime adapter needs a module (it should not). `tools/g1_scope_g2.txt` is touched only by the separate first PR named under Needs.
