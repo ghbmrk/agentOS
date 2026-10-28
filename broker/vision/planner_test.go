@@ -51,10 +51,11 @@ func TestPlannerCannotMatchUnknown(t *testing.T) {
 	}
 }
 
-// Part (c) offers planners nothing: every ask is refused until part (b)
-// declares its track-level outputs.
-func TestNoPlannerOpsYet(t *testing.T) {
-	if len(PlannerOps) != 0 {
-		t.Fatalf("planner ops %v, but none is built", PlannerOps)
+// Part (b) offers planners one ask, "count", whose answer is a Count
+// (VIS-A18): cmd/agentos-vision's TestNoCaptureLeavesVIS checks that it
+// can carry no capture.
+func TestPlannerOpsAreCountOnly(t *testing.T) {
+	if !reflect.DeepEqual(PlannerOps, []string{"count"}) {
+		t.Fatalf("planner ops %v, want count only", PlannerOps)
 	}
 }

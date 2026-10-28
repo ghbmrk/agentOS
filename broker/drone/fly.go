@@ -105,7 +105,9 @@ func (h *Holder) Follow(target Point) error {
 	// or else on one the aircraft signed after this call began
 	// (Link.FreshHeartbeat): one merely received late can predate a return it
 	// started since, and ArduPilot starts a low-battery return once. It is
-	// asked for outside the lock, so a return never waits behind it.
+	// asked for outside h.mu, and it holds the link's request lock one try at
+	// a time, letting a waiting return go before its next try, so a return
+	// waits behind at most one try (two freshTimeouts), never all three.
 	hb, ok := h.link.LastHeartbeat()
 	if !ok || hb.CustomMode != ModeGuided || time.Since(hb.At) > followHeartbeatAge {
 		f, err := h.link.FreshHeartbeat()

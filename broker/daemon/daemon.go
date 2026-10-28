@@ -10,8 +10,6 @@ package daemon
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -167,6 +165,11 @@ type Config struct {
 	// Kernel, when set, is the kernel's owner seam: STOP, RESUME, STATUS
 	// and RETRY reach it too (#2783). Nil: no kernel.
 	Kernel KernelOwner
+	// KernelRetryLines, by clerk name, read the box at each RETRY ask
+	// about that clerk's parked step: the line's object and detail, in
+	// place of the clerk's name. A retried step may undo what replaced it
+	// since, so the line says what holds now (the follow clerk's, #3430).
+	KernelRetryLines map[string]func() (object, detail string)
 	// Currency is the household's one currency, an ISO 4217 code such as
 	// "EUR": a kernel step's amount is in its minor units, and a RETRY line
 	// names it in this currency (#3079, Mark's card
@@ -204,10 +207,11 @@ type PageSocket struct {
 	// owner's code is checked (modemlink.Link.Adopt, P2-2w d2b); nil
 	// without the modem bridge, which refuses the op.
 	AdoptSIM func(tag string) error
-	// DescribeRoot, when set, serves changing where updates come from on
-	// the page (OSS-10, follow.Executor.Describe): the page's request is
-	// then submitted to the gate as a follow intent, which the broker
-	// executor named grants.FollowExecutor must run. Nil refuses both ops.
+	// DescribeRoot, when set, shows on the page what following a root the
+	// owner brought would change (OSS-10, follow.Executor.Describe); nil
+	// refuses the op. The page's request to follow it is refused until it
+	// reaches the kernel as the owner's own plan (MIG-4-adapters-f2b2,
+	// #3430): the follow clerk runs the switch, never the journal.
 	DescribeRoot func(ctx context.Context, root []byte, chain [][]byte) (localapi.RootSummary, error)
 	// Forget, when set, lists the owner's recent tasks on the page and
 	// asks to forget one through FORGET's own ask (W3-forget-b3r); nil
@@ -239,17 +243,6 @@ type PageForget interface {
 	PageTasks(unlocked bool) localapi.ForgetTasks
 	PageForget(ctx context.Context, goal string, unlocked bool) string
 }
-
-// The page's fixed replies to a follow request: the gate's reason is not
-// shown (L3 SHOULD 3 on #148).
-const (
-	FollowAsked   = "Asked. Approve it on the Approvals page with a code from your code generator; nothing changes until you do."
-	FollowRefused = "Not asked: I refused this request."
-)
-
-// FollowRefusedName is the reply to a name the gate does not admit.
-var FollowRefusedName = fmt.Sprintf("Not asked: use a name of at most %d characters and %d digits, with no spaces at either end, that doesn't start %q.",
-	grants.MaxFollowName, grants.MaxFollowDigits, grants.ReservedFollowName)
 
 // Daemon is a running broker.
 type Daemon struct {
@@ -316,9 +309,6 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	}
 	if cfg.Auth == nil {
 		cfg.Auth = ownerOnly{cfg.OwnerNumber}
-	}
-	if cfg.PageSocket != nil && cfg.PageSocket.DescribeRoot != nil && cfg.BrokerExecutors[grants.FollowExecutor] == nil {
-		return nil, fmt.Errorf("daemon: following a root on the page needs the broker executor %q", grants.FollowExecutor)
 	}
 	seen := map[string]bool{}
 	for _, id := range cfg.Machines {
@@ -414,7 +404,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 	handle := h.Handle
 	var ch *ownerch.Channel
 	rt := newRetrier(ctx, eng, gate)
-	rt.k, rt.currency = cfg.Kernel, cfg.Currency
+	rt.k, rt.currency, rt.kernelLines = cfg.Kernel, cfg.Currency, cfg.KernelRetryLines
 	if cfg.OwnerState != "" {
 		if ch, err = ownerch.New(ownerch.Config{
 			Owner: cfg.OwnerNumber, Modem: cfg.Modem, Engine: owned, Agent: cfg.Agent,
@@ -503,9 +493,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}
-		if cfg.PageSocket.DescribeRoot != nil {
-			lcfg.DescribeRoot, lcfg.Follow = cfg.PageSocket.DescribeRoot, pageFollow(gate)
-		}
+		lcfg.DescribeRoot = cfg.PageSocket.DescribeRoot
 		ui := localsrv.New(lcfg)
 		uid := cfg.PageSocket.UID
 		eps = append(eps, sockets.Endpoint{
@@ -690,38 +678,6 @@ func askResume(ctx context.Context, g *grants.Gate, id, pause string) (string, e
 		return "", err
 	}
 	return "Asked to resume " + id + ". It shows under Approvals shortly; approve it there with a code from your code generator.", nil
-}
-
-// pageFollow submits the page's request to follow a held root: a follow
-// intent under a fresh nonce, which the gate asks of the owner on the page
-// at the high tier (GR26).
-func pageFollow(g *grants.Gate) func(ctx context.Context, name, digest string) (string, error) {
-	return func(ctx context.Context, name, digest string) (string, error) {
-		in := grants.FollowIntent(followNonce(), name, digest)
-		st, err := g.Submit(in)
-		if err == nil && st.State == journal.Pending {
-			st, err = g.Authorize(ctx, in.ID)
-		}
-		switch {
-		case err != nil:
-			return "", err
-		case st.State == journal.Pending:
-			return FollowAsked, nil
-		case st.State == journal.Denied && name != "" && !grants.FollowNameOK(name):
-			return FollowRefusedName, nil
-		case st.State == journal.Denied:
-			return FollowRefused, nil
-		}
-		return "", errors.New("daemon: follow request " + string(st.State))
-	}
-}
-
-// followNonce is 16 random bytes in lower-case hex, the form
-// grants.FollowID admits (OSS-10w L3).
-func followNonce() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b) // crypto/rand.Read never fails (Go 1.24)
-	return hex.EncodeToString(b)
 }
 
 // KernelOwner is the kernel's owner seam as the owner commands call it

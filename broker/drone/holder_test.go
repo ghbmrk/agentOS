@@ -31,6 +31,7 @@ type scripted struct {
 	beat   bool
 	relay  func() // run before it answers a heartbeat request: a relay's held frames
 	deaf   bool   // it never answers a heartbeat request
+	hbReqs int    // the heartbeat requests it has received
 	rc     bool
 	params map[string]float32
 	pos    Point    // the aircraft's reported position
@@ -79,6 +80,10 @@ func (a *scripted) run() {
 			continue // signed more than a minute behind the aircraft's clock
 		}
 		a.ts = max(a.ts, ts)
+		if m, ok := fr.GetMessage().(*common.MessageCommandLong); ok && m.Command == common.MAV_CMD_REQUEST_MESSAGE &&
+			uint32(m.Param1) == (&common.MessageHeartbeat{}).GetID() {
+			a.hbReqs++
+		}
 		beat, rc, params, pos, mode, relay, deaf := a.beat, a.rc, a.params, a.pos, a.mode, a.relay, a.deaf
 		a.mu.Unlock()
 		switch m := fr.GetMessage().(type) {
@@ -370,6 +375,51 @@ func TestFollowStopsWhenHeartbeatsStop(t *testing.T) {
 	time.Sleep(followHeartbeatAge + 500*time.Millisecond)
 	if err := h.Follow(at(0, 100)); err == nil {
 		t.Fatal("follow went on with no recent heartbeat")
+	}
+}
+
+// REQ: NET-2
+// TestReturnWaitsOneFreshTry: while a follow's fresh-heartbeat requests go
+// unanswered, a core return started during the first try goes to the
+// aircraft before the second try's request, within one try, and the follow
+// is then refused (ASSUMPTIONS.md DRONE-sim-21).
+func TestReturnWaitsOneFreshTry(t *testing.T) {
+	a := &scripted{pos: at(0, 120), mode: ModeAuto, deaf: true}
+	h := scriptedFlight(t, a, "deer")
+	followed := make(chan error, 1)
+	go func() { followed <- h.Follow(at(0, 100)) }()
+	for deadline := time.Now().Add(freshTimeout); ; time.Sleep(5 * time.Millisecond) {
+		var n int
+		a.set(func(a *scripted) { n = a.hbReqs })
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("follow sent no heartbeat request")
+		}
+	}
+	start := time.Now()
+	if err := h.Return("test"); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > freshTimeout+time.Second {
+		t.Errorf("the return waited %v behind a failing follow, want at most one try (%v)", took, freshTimeout)
+	}
+	var n int
+	a.set(func(a *scripted) { n = a.hbReqs })
+	if n != 1 {
+		t.Errorf("the aircraft had %d heartbeat requests before the return, want 1: the return waited past a try", n)
+	}
+	select {
+	case err := <-followed:
+		t.Fatalf("follow ended before the return was sent: %v", err)
+	default:
+	}
+	if err := <-followed; err == nil {
+		t.Fatal("follow went on with no fresh heartbeat")
+	}
+	if got := a.modesAsked(); len(got) != 1 || got[0] != ModeRTL {
+		t.Fatalf("modes asked %v, want RTL once", got)
 	}
 }
 

@@ -115,7 +115,10 @@ var controlPath = map[string][]string{
 	// the owner's grant per machine with kernel/key (#3087). It derives a
 	// new recovery key's backup recipient with backup, pure crypto over
 	// the kernel's types, for the Recovery key page (REC-4 r4a, #3409).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup"},
+	// It hosts the follow clerk on kernel/proc's clerk socket, under the
+	// owner's anchors read with clerk/handoff (#3430); kernel/proc serves
+	// and dials only unix sockets (netOK in inference_test.go).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -279,8 +282,10 @@ var enforcer = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"enforcer":        {nil, droneForbid},
-	"enforcer/policy": {[]string{"kernel/key"}, droneForbid},
+	"enforcer":         {nil, droneForbid},
+	"enforcer/policy":  {[]string{"kernel/key"}, droneForbid},
+	"enforcer/wire":    {nil, droneForbid},
+	"enforcer/channel": {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}

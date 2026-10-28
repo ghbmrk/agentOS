@@ -12,22 +12,10 @@ import (
 // UI's own process links it: neither agentosd (ARC-2) nor the vault
 // process may contain gozxing, its x/text and x/xerrors (the standard
 // library's own vendor/golang.org/x/text copy is not ours), or this
-// package (#50 security C2, L15). The vault process serves the mailbox
-// (egress K18), whose IMAP client and message types bring x/text in, so
-// there x/text may enter only through those two importers: any other
-// importer, the decoder's included, fails. agentosd links mail for the
-// organize adapter (SR3-mail-w2 W2-f), so there mail alone may bring it.
+// package (#50 security C2, L15). Neither links the old mailbox any more
+// (#3679; the mail clerk holds it), so neither may import x/text at all.
 func TestDaemonAndVaultProcessLinkNoScanner(t *testing.T) {
-	textVia := map[string]map[string]bool{
-		"../cmd/agentosd": {
-			"github.com/ghbmrk/agentos/broker/mail": true,
-		},
-		"../cmd/agentos-egress": {
-			"github.com/emersion/go-imap/utf7":      true,
-			"github.com/ghbmrk/agentos/broker/mail": true,
-		},
-	}
-	for cmd, via := range textVia {
+	for _, cmd := range []string{"../cmd/agentosd", "../cmd/agentos-egress"} {
 		out, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", cmd).CombinedOutput()
 		if err != nil {
 			t.Fatalf("go list %s: %v\n%s", cmd, err, out)
@@ -38,7 +26,7 @@ func TestDaemonAndVaultProcessLinkNoScanner(t *testing.T) {
 			if strings.Contains(p, "gozxing") || strings.HasSuffix(p, "/broker/localui") || strings.HasPrefix(p, "golang.org/x/xerrors") {
 				t.Errorf("%s links %s", cmd, p)
 			}
-			if strings.HasPrefix(p, "golang.org/x/text") || via[p] {
+			if strings.HasPrefix(p, "golang.org/x/text") {
 				continue
 			}
 			for _, imp := range f[1:] {

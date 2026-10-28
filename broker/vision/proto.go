@@ -114,11 +114,15 @@ const (
 	Coyote        Class = "coyote"
 	Bear          Class = "bear"
 	UnknownAnimal Class = "unknown-animal"
+	// Drone is an aircraft: the household's own drone, whose camera
+	// fixes the GPS cross-check weighs (part b, VIS-A24). It is never
+	// fused, zoned or counted.
+	Drone Class = "drone"
 )
 
 // classes is the whole list, in order; unexported, so no caller can widen
 // it.
-var classes = []Class{Person, Vehicle, Dog, Cat, Bird, Deer, Fox, Coyote, Bear, UnknownAnimal}
+var classes = []Class{Person, Vehicle, Dog, Cat, Bird, Deer, Fox, Coyote, Bear, UnknownAnimal, Drone}
 
 // Classes returns the fixed list of classes.
 func Classes() []Class { return append([]Class(nil), classes...) }
