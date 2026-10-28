@@ -25,8 +25,9 @@ amends the list in its own reviewed PR: the check reads the base copy of the lis
 
 The g1-freeze workflow runs the BASE commit's copy of this file and its lists, so a PR
 cannot widen a list, flip a switch, move `since` or exempt itself in the same change.
-An unreadable list or time fails closed. Standard library only, so the base copy runs on
-its own.
+An unreadable list or time fails closed, as does a list holding any character other than
+printable ASCII and "\n", so every line reads as a diff shows it. Standard library only, so
+the base copy runs on its own.
 
 Usage:
   tools/g1_scope.py --git BASE HEAD [--pr N] [--pr-created ISO-TIME --timeline FILE]
@@ -87,7 +88,13 @@ def parse_list(text, name=GATES[0][1]):
     """Return (freeze_on, since, allow, frozen_imports, exempt_prs). Raises ListError on any doubt.
     name is the list's file name, for messages."""
     freeze, since, allow, frozen, prs = None, None, [], [], set()
-    for n, line in enumerate(text.splitlines(), 1):
+    # Printable ASCII and "\n" only, comments included: a lookalike digit (strptime and
+    # isdigit read "1\u0665" as 15) or a line break git does not split on (str.splitlines
+    # also splits on "\r", U+2028 and others) could make a line mean other than it shows.
+    for n, line in enumerate(text.split("\n"), 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            raise ListError(f"{name}:{n}: character {bad[0]!r} outside printable ASCII")
         w = line.split("#", 1)[0].split()
         if not w:
             continue

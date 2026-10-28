@@ -36,12 +36,12 @@
 # Migration step 4 (D-139; docs/LANES.md port map, "Sub B, untrusted side"): the ports in
 # #2578 (#2776-#2790) delete old-core use from the untrusted directories, so the ones above
 # that the port map names are listed after all. D-098 still bars new rows and follow-ups
-# there (OPERATING §5, "Scope freeze"); this list no longer enforces it for them.
+# there (OPERATING section 5, "Scope freeze"); this list no longer enforces it for them.
 
 freeze on
 since 2026-10-17T17:06:19Z
 # The inbox eval set (#2527, merged as #2545): evals/slice-inbox/ is sub B's directory until
-# migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
+# migration step 4 (D-139; PLAN.md section 3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 

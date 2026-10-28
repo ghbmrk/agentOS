@@ -148,6 +148,26 @@ class CheckTest(unittest.TestCase):
         with self.assertRaises(g.ListError):
             run(["x"], created="yesterday")
 
+    def test_lists_are_printable_ascii_lines(self):  # G1-freeze-e (#3665)
+        # A line break git does not see turns a comment into a live line: a diff shows one
+        # comment line, while splitlines() also read the line after the hidden break.
+        for brk in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "):
+            for bad in (ON + "# note" + brk + "exempt-pr 99\n",
+                        ON + "# note" + brk + "allow broker/\n",
+                        "freeze on\n# note" + brk + S,
+                        S + "# note" + brk + "freeze off\n"):
+                with self.assertRaises(g.ListError, msg=repr(bad)):
+                    g.parse_list(bad)
+        # Lookalike digits: strptime read 1٥ (Arabic-Indic five, shown like 0) as 15.
+        for since in ("2026-10-1٥T19:55:00Z", "٢026-10-14T19:55:00Z", "2026-10-1５T19:55:00Z"):
+            with self.assertRaises(g.ListError, msg=since):
+                g.parse_list("freeze on\nsince " + since + "\n")
+        # Anything else outside printable ASCII and "\n" fails closed too, comments included.
+        for bad in (ON + "\tallow x/\n", ON + "# ‮on\n", ON + "# ​\n", ON + "# §\n", ON + "\x00\n"):
+            with self.assertRaises(g.ListError, msg=repr(bad)):
+                g.parse_list(bad)
+        self.assertTrue(g.parse_list(ON + "# OPERATING section 5 ~!@$%^&*()\n")[0])
+
     def test_cli_on_a_git_range(self):  # G1-freeze-a, -b, -e
         if not shutil.which("git"):
             self.skipTest("no git")
