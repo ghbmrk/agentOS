@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // REQ: CLK-1, LOG-2, KRN-2, BAK-1
@@ -55,6 +56,31 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
 		}
+	}
+}
+
+// REQ: CLK-1
+// MAIL-keys: -clerk-key names a clerk, its key socket and the one unit the
+// kernel hands that clerk's key to; each part is checked and a clerk is
+// named once.
+func TestClerkKeyFlags(t *testing.T) {
+	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/clerk-mail.key,agentos-keeper-mail.service",
+		"-clerk-key", "driver-hue=/run/agentos-kernel/clerk-driver-hue.key,agentos-driver@hue.service"), io.Discard)
+	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/clerk-mail.key", Unit: "agentos-keeper-mail.service"}) ||
+		c.ClerkKeys["driver-hue"].Unit != "agentos-driver@hue.service" {
+		t.Fatalf("parse: %+v %v", c.ClerkKeys, err)
+	}
+	for _, bad := range []string{
+		"mail=/k,agentos-keeper-mail.service,x", "Mail=/k,agentos-keeper-mail.service", "mail=k,agentos-keeper-mail.service",
+		"mail=/k,agentos-keeper-mail", "mail=/k", "=/k,a.service", "mail=/k,a b.service", "mail=/k,../a.service",
+	} {
+		if _, err := parse(append(slices.Clone(good), "-clerk-key", bad), io.Discard); err == nil {
+			t.Errorf("-clerk-key %q accepted", bad)
+		}
+	}
+	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,a.service", "-clerk-key", "mail=/b,b.service")
+	if _, err := parse(twice, io.Discard); err == nil {
+		t.Error("a clerk's key given twice was accepted")
 	}
 }
 
@@ -178,7 +204,7 @@ func unread(t *testing.T, r *os.File) {
 
 // KRN-2 (#2892): the kernel's process links no clerk's code, so no mail or
 // model parser is in it: of broker/clerk it links only the unlock step's
-// hand-off, and no IMAP library or the golang.org/x/net and x/text modules the
+// hand-off and the clerks' key hand-off (MAIL-keys), and no IMAP library or the golang.org/x/net and x/text modules the
 // mail clerk brings (the standard library's vendored copies are its own).
 func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
@@ -187,7 +213,7 @@ func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
 	}
 	const clerk = "github.com/ghbmrk/agentos/broker/clerk"
 	for _, p := range strings.Fields(string(out)) {
-		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" ||
+		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" && p != clerk+"/clerkkey" ||
 			strings.HasPrefix(p, "github.com/emersion/") || strings.HasPrefix(p, "golang.org/x/net/") || strings.HasPrefix(p, "golang.org/x/text/") {
 			t.Errorf("agentos-kernel links %s", p)
 		}

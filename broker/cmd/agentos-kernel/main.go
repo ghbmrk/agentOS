@@ -7,7 +7,8 @@
 //	    -owner-sock /run/agentos-kernel/owner.sock -owner-uid 981 \
 //	    -meter-sock /run/agentos-kernel/meter.sock -meter-uid 982 \
 //	    -link-sock /run/agentos-kernel/link.sock -link-uid 980 \
-//	    -clerk exit=/run/agentos-exit/kernel.sock,983
+//	    -clerk exit=/run/agentos-exit/kernel.sock,983 \
+//	    -clerk-key mail=/run/agentos-kernel/clerk-mail.key,agentos-keeper-mail.service
 //
 // It opens the subject-key table in -keys-dir, sealed under the log key, so
 // content opens and every logged erase is re-applied at start (KRN-erase),
@@ -15,8 +16,9 @@
 // backup taken before (BAK-1, LOG-4).
 // It refuses to run as root or as any peer's uid, makes itself non-dumpable,
 // serves the owner side and the model clerk's meter on their sockets, and
-// agentos-link on its own when -link-sock is given (EDGE-link-core c2b), and
-// runs plans every second. It holds no credential and never the store key.
+// agentos-link on its own when -link-sock is given (EDGE-link-core c2b),
+// hands each -clerk-key clerk its key at every start of that clerk's unit
+// (MAIL-keys), and runs plans every second. It holds no credential and never the store key.
 // Its log anchor is the TPM counter enrollment defined (LOG-2, STO-1): the
 // signed head lives in -anchor-dir and the counter numbers its writes, so a
 // drive rolled back, log and anchor together, is refused at start.
@@ -38,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -75,6 +78,24 @@ func (c clerks) Set(v string) error {
 	return nil
 }
 
+type keyClerks map[string]proc.KeyClerk
+
+func (c keyClerks) String() string { return fmt.Sprint(map[string]proc.KeyClerk(c)) }
+
+// Set reads name=socket,unit.
+func (c keyClerks) Set(v string) error {
+	name, rest, ok := strings.Cut(v, "=")
+	sock, unit, ok2 := strings.Cut(rest, ",")
+	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || !proc.ValidUnit(unit) {
+		return errors.New("a clerk's key socket is name=/abs/socket,unit.service")
+	}
+	if _, dup := c[name]; dup {
+		return fmt.Errorf("clerk %q's key given twice", name)
+	}
+	c[name] = proc.KeyClerk{Socket: sock, Unit: unit}
+	return nil
+}
+
 // config is the kernel process's: proc.MainConfig and the anchor's
 // directory.
 type config struct {
@@ -85,7 +106,7 @@ type config struct {
 func parse(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("agentos-kernel", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}}}
+	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}, ClerkKeys: map[string]proc.KeyClerk{}}}
 	fs.StringVar(&c.Log, "log", "", "the log file")
 	fs.StringVar(&c.KeyDir, "keys-dir", "", "the subject-key table's directory, beside the log")
 	fs.StringVar(&c.BackupDir, "backup-dir", "", "the backups' records directory, beside the log")
@@ -97,6 +118,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.LinkSock, "link-sock", "", "agentos-link's socket; none without it")
 	fs.IntVar(&c.LinkUID, "link-uid", -1, "agentos-link's uid, the only peer on link-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
+	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,unit (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
 	if err := fs.Parse(args); err != nil {

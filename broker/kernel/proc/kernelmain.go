@@ -31,9 +31,12 @@ type MainConfig struct {
 	MeterUID  int    // the model clerk's uid, its only peer
 	// LinkSock is LinkSide's socket, "" for none (a box with no edge
 	// link); LinkUID is agentos-link's uid, its only peer.
-	LinkSock  string
-	LinkUID   int
-	Clerks    map[string]Remote
+	LinkSock string
+	LinkUID  int
+	Clerks   map[string]Remote
+	// ClerkKeys are the clerks the kernel hands their keys to, at each
+	// start of their units, by name (MAIL-keys): none without the flag.
+	ClerkKeys map[string]KeyClerk
 	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
 	BackupDir string // the backups' records (KernelConfig.BackupDir)
 	// Peers are the uids this process must not run as: every peer above
@@ -169,7 +172,8 @@ var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's dire
 
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
 // opens the log and the subject-key table under keys, serves OwnerSide,
-// MeterSide and, given its socket, LinkSide, and runs plans every Tick until ctx ends. anchor is where
+// MeterSide and, given its socket, LinkSide, hands each of ClerkKeys its
+// key at each start of its unit, and runs plans every Tick until ctx ends. anchor is where
 // signed heads go (LOG-2).
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if cfg.KeyDir == "" {
@@ -177,6 +181,9 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	if cfg.BackupDir == "" {
 		return ErrNoBackupDir
+	}
+	if len(cfg.ClerkKeys) > 0 && keys.ClerkRoot == ([32]byte{}) {
+		return errors.New("run: I hand clerks their keys, but the unlock step handed me no clerk root key")
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
@@ -238,7 +245,21 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if cfg.LinkSock != "" {
 		sides = append(sides, served{cfg.LinkSock, cfg.LinkUID, LinkSide})
 	}
-	errs := make(chan error, len(sides))
+	errs := make(chan error, len(sides)+len(cfg.ClerkKeys))
+	if len(cfg.ClerkKeys) > 0 {
+		root := keys.ClerkRoot // the kernel's copy, for its whole life
+		defer clear(root[:])
+		for name, kc := range cfg.ClerkKeys {
+			ln, err := ListenClerkKey(kc.Socket)
+			if err != nil {
+				return err
+			}
+			defer ln.Close()
+			go func() {
+				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Unit, &root))
+			}()
+		}
+	}
 	for _, s := range sides {
 		ln, err := ListenKernel(s.path, s.uid)
 		if err != nil {
