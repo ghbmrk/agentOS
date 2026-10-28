@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -153,7 +153,7 @@ func TestPostIsRefusedUnsent(t *testing.T) {
 	if err := r.k.Tick(3 * hour); err != nil {
 		t.Fatal(err)
 	}
-	if s := r.step("p1"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
+	if s := r.step("p1"); s.Phase != kernel.PFailed || s.Detail != check.RClaim {
 		t.Fatalf("p1: phase %s (%s)", s.Phase, s.Detail)
 	}
 	if s := r.step("p2"); s.Phase != kernel.PFailed || s.Detail != "unapproved" {
@@ -240,8 +240,8 @@ func TestClerkRefusesWhatTheKeyDoesNot(t *testing.T) {
 	for want, req := range map[string]kernel.Request{
 		key.RClerk:        {Plan: plan("p1", r.root, other)},
 		kernel.CUngranted: {Plan: plan("p2", ghost, safe)},
-		clerk.RDispatch:   {Plan: plan("p3", r.root, safe)},
-		clerk.RClaim:      {Plan: plan("p4", r.root, labelled)},
+		check.RDispatch:   {Plan: plan("p3", r.root, safe)},
+		check.RClaim:      {Plan: plan("p4", r.root, labelled)},
 	} {
 		if res := r.c.Do(req, r.k.State()); res.Outcome != "failed" || res.Detail != want {
 			t.Fatalf("want %s: %+v", want, res)

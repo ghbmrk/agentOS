@@ -18,6 +18,7 @@ root kernel
 root kernel/key
 root cmd/agentos-kernel
 root clerk
+root clerk/check
 root clerk/seal
 root cmd/agentos-unlock
 root backup

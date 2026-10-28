@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -216,7 +216,7 @@ func TestToAloneReleasesNothing(t *testing.T) {
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
 	r.run(t, 2, "bare", r.root, post(a.To, pressOrder))
-	if s := r.step("bare"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
+	if s := r.step("bare"); s.Phase != kernel.PFailed || s.Detail != check.RClaim {
 		t.Fatalf("no print: phase %s (%s)", s.Phase, s.Detail)
 	}
 	// A standing key, here the root, covers no submit, print or not.
@@ -610,7 +610,7 @@ func TestRetryOfAnErroredSubmitSendsOnceMore(t *testing.T) {
 		t.Fatalf("phase %s", s.Phase)
 	}
 	now := 3 + int64(kernel.MaxChecks+2)*kernel.ProbeEvery
-	if err := r.k.Retry(now, "buy", 0); err != nil {
+	if err := r.k.Retry(now, "buy", 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.k.Tick(now); err != nil {
@@ -637,7 +637,7 @@ func TestOtherClaimIsNotAChangedPage(t *testing.T) {
 	s := submitStep(a, pressOrder)
 	s.Labels = []string{"synth"}
 	res := r.c.Do(kernel.Request{Plan: plan("x", r.approve(t, a.Print), s)}, r.k.State())
-	if res.Detail != clerk.RClaim {
+	if res.Detail != check.RClaim {
 		t.Fatalf("got %+v", res)
 	}
 }

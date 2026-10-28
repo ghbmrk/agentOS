@@ -1637,7 +1637,8 @@ func TestASwitchWaitsForABackupBeingWritten(t *testing.T) {
 	b.addTarget("drive", false)
 	rk2 := bytes.Repeat([]byte{0x6b}, 32)
 	card := b.rotate(recipientID(t, rk2))
-	started, release := make(chan struct{}), make(chan struct{})
+	// started is buffered so the hook's send never depends on the test already waiting.
+	started, release := make(chan struct{}, 1), make(chan struct{})
 	b.h.bk.hook = func() {
 		select {
 		case started <- struct{}{}:

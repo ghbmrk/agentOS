@@ -267,6 +267,20 @@ class PremergeTest(unittest.TestCase):
                 self.commit("resolve")
                 self.assertEqual(self.check(reviewed), want)
 
+    def test_a_union_replay_that_keeps_a_copy_of_a_deleted_duplicate_is_changed(self):
+        # #3502: _stale read rows as a set, so the replay's second R, a copy the PR deleted, read same.
+        table = "\n| Name | x |\n|---|---|\n"
+        reviewed = self.union_merge(table + "| R | r |\n| R | r |\n| Q | qm |\n", table + "| R | r |\n| Q | qp |\n",
+                                    base_rows=table + "| R | r |\n| R | r |\n| Q | q |\n")
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| R |"), 2, "the union driver was meant to keep both")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        for rows, want in (("| R | r |\n| Q | qp |\n| Q | qm |\n", []),
+                           ("| R | r |\n| R | r |\n| Q | qp |\n| Q | qm |\n", ["ASSUMPTIONS.md"])):
+            with self.subTest(rows=rows):
+                self.write("ASSUMPTIONS.md", self.UNION + table + rows)
+                self.commit("resolve")
+                self.assertEqual(self.check(reviewed), want)
+
     def test_a_union_replay_that_keeps_a_row_only_main_deleted_is_changed(self):
         # #3441: _stale read only the rows the PR dropped, so a replay keeping L-2, which main deleted, read same.
         reviewed = self.union_merge("| B-1 | bak |\n", "| L-1 | edge new |\n| L-2 | b |\n",

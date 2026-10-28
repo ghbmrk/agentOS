@@ -18,7 +18,7 @@ import (
 )
 
 // Mailbox is where the clerk's effects land. Do calls it only after the
-// step passed the clerk's one check (clerk.Check) and the clerk's own rules,
+// step passed the clerk's one check (check.Check) and the clerk's own rules,
 // so nothing reaches a mailbox that the kernel did not dispatch. Each method
 // acts on one mail by the id the clerk read it under and confirms the effect
 // before it returns nil. A NotDone error means nothing changed; any other

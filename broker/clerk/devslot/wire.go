@@ -24,6 +24,9 @@ import (
 //	driver: reading {Kind, Value, Exp, Time}
 //	driver: done {Err}
 //
+// In a subscription the driver sends each reading as it arrives, and the
+// host ends the connection at the subscription's deadline.
+//
 // Every message is a 4-byte big-endian length and that many bytes of JSON.
 // The host re-checks each message against its own copy of the declaration,
 // so nothing the driver's process says is trusted (DEVSLOT-host-lib-4).

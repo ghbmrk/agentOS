@@ -736,7 +736,9 @@ type KernelOwner interface {
 	Status(context.Context) ([]KernelStep, error)
 	// Retry returns KernelRefused for the kernel's refusal and
 	// ErrKernelLost for an answer that never came.
-	Retry(ctx context.Context, plan string, index int) error
+	// attempt is the step's Attempt as the RETRY ask read it; the kernel
+	// refuses one sent again since (CH-10).
+	Retry(ctx context.Context, plan string, index, attempt int) error
 }
 
 // KernelStep is a step the kernel's log has not settled
@@ -752,6 +754,9 @@ type KernelStep struct {
 	Detail string
 	Retry  bool  // the owner may RETRY it
 	SentAt int64 // when it was first sent (unix ms), which RETRY names
+	// Attempt is the step's dispatch attempt, which a RETRY ask binds to
+	// (CH-10).
+	Attempt int
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount     int64

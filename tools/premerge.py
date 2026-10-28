@@ -212,16 +212,19 @@ def _duplicate_id(text):
 
 
 def _stale(cwd, text, path, reviewed, onto):
-    """The table rows of an ASSUMPTIONS.md replay `text` that `merge=union` (.gitattributes) brought back: each is
-    in the merge base verbatim and in only one of `onto` and the reviewed commit, so one side edited or deleted it
-    and the other left it alone (#3369, #1912, #3441). Empty for any other file or a criss-cross merge."""
+    """The table rows of an ASSUMPTIONS.md replay `text` that `merge=union` (.gitattributes) brought back, counted
+    in copies: of a row in the merge base verbatim, the copies beyond the merge's own (`onto`'s plus the reviewed
+    commit's, less the base's), so a copy one side edited or deleted and the other left alone (#3369, #1912, #3441,
+    #3502). Empty for any other file or a criss-cross merge."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
-        return set()
+        return collections.Counter()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
-        return set()
-    mb, kept, pr = (set(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines()) for t in (bases[0], onto, reviewed))
-    return {line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb and (line in kept) != (line in pr)}
+        return collections.Counter()
+    mb, kept, pr = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines())
+                    for t in (bases[0], onto, reviewed))
+    rows = collections.Counter(line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb)
+    return +collections.Counter({x: n - max(kept[x] + pr[x] - mb[x], 0) for x, n in rows.items()})
 
 
 def _broken(cwd, tree, path, reviewed, onto):

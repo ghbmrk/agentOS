@@ -28,6 +28,9 @@ type Needle struct {
 	// Text marks a printed secret (passphrase, recovery key text): it is
 	// also looked for without dashes, in lower case, and as UTF-16.
 	Text bool
+	// Forms are further literal forms of the secret (spacings, runs of a
+	// printed key's groups), each looked for as given.
+	Forms [][]byte
 }
 
 // Finding is one match. It never carries the value.
@@ -90,6 +93,9 @@ func NewScanner(needles []Needle) (*Scanner, error) {
 				add([]byte(alt), nd.Name, "text form")
 			}
 			add(utf16le(t), nd.Name, "utf-16")
+			for _, f := range nd.Forms {
+				add(f, nd.Name, "text form")
+			}
 		} else if len(v) > fragment {
 			for i := 0; i+fragment <= len(v); i += 4 {
 				add(v[i:i+fragment], nd.Name, "raw fragment")
