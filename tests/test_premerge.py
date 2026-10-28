@@ -237,6 +237,12 @@ class PremergeTest(unittest.TestCase):
         base = "\n| C |\nx\n| C |\n| A |\n| A |\n| D |\n\n"
         reviewed = self.union_merge(base + "| B |\n", "\n| C |\nx\n| A |\n", base_rows=base)
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        self.setUp()  # #3587 L3: here merge-file's conflicts alone count no row, so only the replay check reads it
+        reviewed = self.union_merge("\n| A |\n| B |\n| A |\n", "\n| B |\n| A |\n", base_rows="\n| B |\n| C |\n| A |\n")
+        tree = premerge._replayed(self.r, reviewed, git(self.r, "merge-base", "main", "HEAD"))
+        self.write("ASSUMPTIONS.md", git(self.r, "show", f"{tree}:ASSUMPTIONS.md") + "\n")
+        self.commit("keep the replay")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
     def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
         # #3401 Security P6: a row the reviewer read as inert, inside an HTML comment, moved into the live table.
