@@ -310,6 +310,13 @@ func (s *State) Recall(subject string) (Recall, bool) {
 	return r, true
 }
 
+// ItemStore is the store the item named h is in, if the log names one: a
+// content clerk reads only its own store's items (KRN-content).
+func (s *State) ItemStore(h Hash) (string, bool) {
+	it, ok := s.items[h]
+	return it.Store, ok
+}
+
 // Unerased is an erased subject some store has not confirmed deleting.
 type Unerased struct {
 	Subject string   `json:"subject"`

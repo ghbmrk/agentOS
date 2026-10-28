@@ -779,17 +779,18 @@ func get[T any](t *testing.T, f func() (T, error)) T {
 	return v
 }
 
-// No socket hands sealed plaintext to anyone (CH-25, #3160 Security): no
-// side has read or readfor, only the owner side has the erase calls, and a
-// named answer carries subject IDs, never a label's text.
+// No socket hands sealed plaintext to anyone but a content clerk (CH-25,
+// #3160 Security; KRN-content): only a content side has readfor, and no
+// side has read; only the owner side has the erase calls, and a named
+// answer carries subject IDs, never a label's text.
 func TestNoSideReadsSealedContent(t *testing.T) {
 	content := []string{"named", "recall", "erase", "unerased", "erasedreads"}
-	for _, side := range []Side{OwnerSide, MeterSide} {
-		for _, op := range []string{"read", "readfor", "open", "content"} {
+	for _, side := range []Side{OwnerSide, MeterSide, LinkSide, ContentSide("vision")} {
+		for _, op := range []string{"read", "readfor", "open", "content", "opensubject", "seal"} {
 			_, a := side.ops[op]
 			_, b := side.procOps[op]
-			if a || b {
-				t.Fatalf("the %s side serves %s", side.name, op)
+			if (a || b) != (side.name == "content" && (op == "readfor" || op == "opensubject" || op == "seal")) {
+				t.Fatalf("the %s side serves %s: %v", side.name, op, a || b)
 			}
 		}
 		for _, op := range content {
