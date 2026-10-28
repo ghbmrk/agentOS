@@ -381,6 +381,7 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 			select {
 			case r := <-done:
 				wipe(r.v) // a late template is zeroed too
+				fmt.Fprintln(s.log, "vision: a late runtime answer was discarded")
 			case <-time.After(3 * s.cfg.CallTimeout):
 				fmt.Fprintln(s.log, "vision: runtime call stuck after the reload; exiting")
 				s.stuck()
