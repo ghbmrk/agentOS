@@ -49,16 +49,6 @@ github.com/gobwas/pool/pbytes
 ## explicit; go 1.15
 github.com/gobwas/ws
 github.com/gobwas/ws/wsutil
-# github.com/godbus/dbus/v5 v5.1.0
-## explicit; go 1.12
-github.com/godbus/dbus/v5
-# github.com/google/go-cmp v0.7.0
-## explicit; go 1.21
-github.com/google/go-cmp/cmp
-github.com/google/go-cmp/cmp/internal/diff
-github.com/google/go-cmp/cmp/internal/flags
-github.com/google/go-cmp/cmp/internal/function
-github.com/google/go-cmp/cmp/internal/value
 # github.com/google/go-containerregistry v0.20.7
 ## explicit; go 1.24.0
 github.com/google/go-containerregistry/pkg/name
@@ -91,18 +81,6 @@ github.com/makiuchi-d/gozxing/qrcode
 github.com/makiuchi-d/gozxing/qrcode/decoder
 github.com/makiuchi-d/gozxing/qrcode/detector
 github.com/makiuchi-d/gozxing/qrcode/encoder
-# github.com/mdlayher/genetlink v1.4.0
-## explicit; go 1.25.0
-github.com/mdlayher/genetlink
-github.com/mdlayher/genetlink/genltest
-# github.com/mdlayher/netlink v1.9.0
-## explicit; go 1.24.0
-github.com/mdlayher/netlink
-github.com/mdlayher/netlink/nlenc
-github.com/mdlayher/netlink/nltest
-# github.com/mdlayher/socket v0.6.0
-## explicit; go 1.25.0
-github.com/mdlayher/socket
 # github.com/opencontainers/go-digest v1.0.0
 ## explicit; go 1.13
 github.com/opencontainers/go-digest
@@ -162,12 +140,10 @@ golang.org/x/crypto/salsa20/salsa
 golang.org/x/crypto/scrypt
 # golang.org/x/net v0.62.0
 ## explicit; go 1.26.0
-golang.org/x/net/bpf
 golang.org/x/net/idna
 golang.org/x/net/publicsuffix
 # golang.org/x/sync v0.24.0
 ## explicit; go 1.26.0
-golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
 golang.org/x/sync/singleflight
 # golang.org/x/sys v0.49.0

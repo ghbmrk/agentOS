@@ -78,8 +78,7 @@ def core_list(path=CORE_LIST):
 # with docs/OPERATING.md §3.
 TIER_A_BROKER = {
     # (a) a credential or secret
-    "apnet",                      # the Owner Card's Wi-Fi password
-    "browser", "netjoin", "tpmseal",
+    "browser", "tpmseal",
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     "drone",                      # the MAVLink signing key and the flight policy; also (b): it alone arms the aircraft (NET-2, #3516)
@@ -100,7 +99,9 @@ TIER_A_BROKER = {
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     "infer",                      # INFER-SVC: its jail and reply checks keep private text on the box and untrusted output out of recall; covers infer/supervise
+    "vision",                     # VIS-core: its reply checks keep templates and capture inside the vision service; covers vision/supervise
     "edgelink",                   # parses every frame and hello from the edge, and pins the link's TLS (HW-15, #3296)
+    "camwire",                    # parses every camera frame and verifies the owner-signed settings and images a camera takes (NET-2, NET-4, #3513)
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check

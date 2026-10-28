@@ -28,6 +28,7 @@ var good = []string{
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
 	"-clerk", "mail=/run/agentos-mail/kernel.sock,984",
 	"-backup-dir", "/var/lib/agentos-kernel/backups",
+	"-content-dir", "/var/lib/agentos-kernel/content",
 	"-keys-dir", "/var/lib/agentos-kernel/keys",
 }
 
@@ -247,6 +248,47 @@ func TestTheLinkSocketIsTheLinksAlone(t *testing.T) {
 	} {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad[len(good):])
+		}
+	}
+}
+
+// REQ: LOG-4, CLK-1
+// KRN-content: -content-dir is required and absolute, and each -content
+// clerk's socket admits a uid that is its own: never the owner side's, the
+// model clerk's, the link's or another content clerk's, since that socket
+// hands out its store's plaintext. A clerk the kernel calls may share it.
+// Revert mutants: the shared-uid check dropped; the store-name check
+// dropped; -content-dir not required.
+func TestEachContentSocketIsItsClerksAlone(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.ContentDir != "/var/lib/agentos-kernel/content" || len(c.Content) != 0 {
+		t.Fatalf("no content flags: %+v, %v", c.MainConfig, err)
+	}
+	i := slices.Index(good, "-content-dir")
+	for _, bad := range [][]string{slices.Delete(slices.Clone(good), i, i+2), append(slices.Clone(good), "-content-dir", "content")} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
+		}
+	}
+	with := append(slices.Clone(good), "-content", "vision=/run/agentos-kernel/vision.sock,985", "-content", "mail=/run/agentos-kernel/mail.sock,984")
+	if c, err = parse(with, io.Discard); err != nil || c.Content["vision"].UID != 985 || c.Content["mail"].Socket != "/run/agentos-kernel/mail.sock" || !slices.Contains(c.Peers, 985) {
+		t.Fatalf("content flags: %+v, %v", c.MainConfig, err)
+	}
+	link := []string{"-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "980"}
+	for _, bad := range [][]string{
+		{"-content", "vision=/run/v.sock,981"},
+		{"-content", "vision=/run/v.sock,982"},
+		append(slices.Clone(link), "-content", "vision=/run/v.sock,980"),
+		{"-content", "vision=/run/v.sock,985", "-content", "photos=/run/p.sock,985"},
+		{"-content", "vision=/run/v.sock,985", "-content", "vision=/run/w.sock,986"},
+		{"-content", "Vision=/run/v.sock,985"},
+		{"-content", "../keys=/run/v.sock,985"},
+		{"-content", "key-table=/run/v.sock,985"},
+		{"-content", "vision=v.sock,985"},
+		{"-content", "vision=/run/v.sock,0"},
+	} {
+		if _, err := parse(append(slices.Clone(good), bad...), io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
 		}
 	}
 }

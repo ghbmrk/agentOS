@@ -18,9 +18,7 @@ import (
 // counts its resets.
 type startBox struct {
 	claim, latch change.MemStore
-	setup        change.MemStore // the seller's setup network; empty on a download box
-	setupStore   Store           // replaces setup when set
-	download     bool            // the image is the download's (BoxConfig.Download)
+	download     bool // the image is the download's (BoxConfig.Download)
 	vault        bool
 	resets       int
 	shown        card.Card
@@ -28,14 +26,9 @@ type startBox struct {
 
 func (b *startBox) begin(t *testing.T) (*FirstBoot, error) {
 	t.Helper()
-	var setup Store = &b.setup
-	if b.setupStore != nil {
-		setup = b.setupStore
-	}
 	return Begin(BoxConfig{
 		Claim:    claim.Config{Store: &b.claim, BootID: func() (string, error) { return "boot-1", nil }},
 		Latch:    &b.latch,
-		SetupNet: setup,
 		Download: b.download,
 		Reset:    func() error { b.resets++; b.vault = false; return nil },
 		Card: card.DisplayConfig{

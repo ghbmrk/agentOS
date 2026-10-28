@@ -1,2 +1,0 @@
-add element inet agentos_inbound exempt { "ap0" }
-delete element inet agentos_inbound exempt { "ap0" }

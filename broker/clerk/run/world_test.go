@@ -63,15 +63,17 @@ func ownConfig(c MailConfig) MailConfig {
 	return c
 }
 
-// eventually fails unless ok holds within a few seconds.
+// eventually fails unless ok holds within a few seconds (more under the
+// race detector: raceScale).
 func eventually(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+	within := raceScale * 5 * time.Second
+	for end := time.Now().Add(within); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
 		if ok() {
 			return
 		}
 	}
-	t.Fatalf("%s: not within 5s", what)
+	t.Fatalf("%s: not within %v", what, within)
 }
 
 // gate is a senders wrap whose first read waits for open; later reads fail

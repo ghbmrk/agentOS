@@ -42,10 +42,6 @@ var controlPath = map[string][]string{
 	"owner":               {"boxname", "control", "kernel/privfile", "modem"},
 	"modem":               {},
 	"boxname":             {}, // CH-21 name check, for NAME
-	// The card's Wi-Fi network file (#1185): agentosd writes what the page
-	// reports for agentos-ap to serve; standard library only, so agentosd
-	// still links neither card nor claim.
-	"apnet": {},
 	// The modem bridge's contract and agentosd's end of it (P2-3w): types
 	// and an in-process queue; the bridge's client is bridgeclient.
 	"bridgeproto": {},
@@ -54,7 +50,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"apnet", "kernel/privfile", "localapi", "owner", "pageca", "sockets"},
+	"localsrv": {"kernel/privfile", "localapi", "owner", "pageca", "sockets"},
 	// The owner page's authority (#3153): the standard library's crypto
 	// and the private-file helpers; its Sealer is clerk.Sealer's method
 	// set, so it links no clerk (which brings crypto/tls and net/http).
@@ -72,7 +68,7 @@ var controlPath = map[string][]string{
 	// step is tiered by (#2783 b): a pure library, held to the control
 	// path's rules.
 	"kernel/key": {},
-	"daemon":     {"journal", "journal/check", "control", "daemon/journalowner", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "apnet", "kernel/key"},
+	"daemon":     {"journal", "journal/check", "control", "daemon/journalowner", "admission", "sockets", "owner", "modem", "grants", "localapi", "localsrv", "kernel/key"},
 	// The composition root also opens the machine plane (below) and hands
 	// it to admission as a Preempter, and serves the guest plane (below)
 	// on each machine's socket.
@@ -117,7 +113,7 @@ var controlPath = map[string][]string{
 	// imports golang.org/x/sys/unix, so like clock it has no entry below.
 	// It keeps the guests' plan holder key with kernel/privfile and narrows
 	// the owner's grant per machine with kernel/key (#3087).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -180,6 +176,12 @@ var guestPlane = map[string]struct {
 	// through golang.org/x/sys/unix, and TestAgentosdLinksNoInference
 	// holds its imports.
 	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
+	// The camera vision service's protocol and client (VIS-svc), as
+	// infer's: the standard library only, dialing the service's unix
+	// socket. Its supervisor wraps infer/supervise's jail and holds no
+	// socket, process or system call of its own.
+	"vision":           {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"vision/supervise": {[]string{"cgroup", "infer/supervise"}, forbiddenStd},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).
