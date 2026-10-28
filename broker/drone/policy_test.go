@@ -206,3 +206,41 @@ func TestDeriveIsTheSignedLimits(t *testing.T) {
 		}
 	}
 }
+
+// REQ: NET-4
+// TestStoredPolicyReloads: the policy in force is recorded before its upload
+// and a key-holder restarted on the same state directory loads it, so the
+// version rule survives a restart; a tampered record stops the holder.
+func TestStoredPolicyReloads(t *testing.T) {
+	owner := testOwner(t, 1)
+	pub := owner.Public().(ed25519.PublicKey)
+	h, _, dir := fakeHolder(t, pub)
+	if err := h.Load(signPolicy(t, testPolicy(), owner)); err == nil {
+		t.Fatal("a load with no aircraft answering succeeded")
+	}
+	k, _ := NewKey(nil)
+	near, far := net.Pipe()
+	defer near.Close()
+	defer far.Close()
+	l, err := Dial(near, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := NewHolder(l, pub, dir, nil)
+	if err != nil {
+		t.Fatalf("restarting on the recorded policy: %v", err)
+	}
+	if p := h2.Policy(); p == nil || p.Version != 3 {
+		t.Fatalf("restarted holder's policy = %+v", p)
+	}
+	older := testPolicy()
+	older.Version = 2
+	if err := h2.Load(signPolicy(t, older, owner)); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Errorf("an older version after a restart: %v", err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, policyFile))
+	os.WriteFile(filepath.Join(dir, policyFile), bytes.Replace(b, []byte(`"ceiling_m":60`), []byte(`"ceiling_m":90`), 1), 0o600)
+	if _, err := NewHolder(l, pub, dir, nil); err == nil {
+		t.Error("a tampered stored policy was accepted")
+	}
+}

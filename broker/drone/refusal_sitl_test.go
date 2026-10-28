@@ -50,7 +50,8 @@ func count(kind common.MAV_MISSION_TYPE, n uint16) *common.MessageMissionCount {
 // commands, a parameter write, mission, fence and rally uploads and clears,
 // a MAVLink FTP write, a re-key, a reboot and an RC override.
 func attacks() []attack {
-	far := itemMsg(MissionMission, 0, Item{Command: uint16(common.MAV_CMD_NAV_WAYPOINT), Lat: e7(at(500, 500).Lat), Lon: e7(at(500, 500).Lon), AltM: 100})
+	home := itemMsg(MissionMission, 0, Item{Command: uint16(common.MAV_CMD_NAV_WAYPOINT), Lat: e7(testDock.Lat), Lon: e7(testDock.Lon)})
+	far := itemMsg(MissionMission, 1, Item{Command: uint16(common.MAV_CMD_NAV_WAYPOINT), Lat: e7(at(500, 500).Lat), Lon: e7(at(500, 500).Lon), AltM: 100})
 	fenceVertex := itemMsg(MissionFence, 0, Item{Command: cmdFenceInclusion, Param1: 3, Lat: e7(at(5000, 0).Lat), Lon: e7(at(5000, 0).Lon)})
 	rally := itemMsg(MissionRally, 0, Item{Command: cmdRallyPoint, Lat: e7(at(300, 300).Lat), Lon: e7(at(300, 300).Lon), AltM: 50})
 	var badKey [32]uint8
@@ -65,7 +66,7 @@ func attacks() []attack {
 		{"parameter write FENCE_ENABLE 0", []message.Message{paramSet("FENCE_ENABLE", 0)}},
 		{"parameter write SCR_ENABLE 1", []message.Message{paramSet("SCR_ENABLE", 1)}},
 		{"parameter write MAV1_OPTIONS 1 (signing off)", []message.Message{paramSet("MAV1_OPTIONS", 1)}},
-		{"mission upload", []message.Message{count(MissionMission, 1), far}},
+		{"mission upload", []message.Message{count(MissionMission, 2), home, far}},
 		{"fence upload (one far vertex)", []message.Message{count(MissionFence, 1), fenceVertex}},
 		{"fence clear (count 0)", []message.Message{count(MissionFence, 0)}},
 		{"fence and rally clear (CLEAR_ALL)", []message.Message{

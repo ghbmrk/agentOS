@@ -97,7 +97,7 @@ func (h *Holder) Load(env []byte) error {
 		h.log.Printf("drone: policy refused: %v", err)
 		return err
 	}
-	if err := writeAtomic(filepath.Join(h.state, policyFile), p.Raw()); err != nil {
+	if err := writeAtomic(filepath.Join(h.state, policyFile), env); err != nil {
 		return err
 	}
 	plan := Derive(p)

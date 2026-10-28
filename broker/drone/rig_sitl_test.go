@@ -150,6 +150,10 @@ func (r *rig) snapshot() aircraft {
 	if a.Mission, err = r.link.Download(MissionMission); err != nil {
 		r.t.Fatal(err)
 	}
+	if len(a.Mission) > 0 {
+		// Item 0 is home, which the aircraft sets itself at its first GPS fix.
+		a.Mission = a.Mission[1:]
+	}
 	hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second)
 	if err != nil {
 		r.t.Fatal(err)
