@@ -1,6 +1,9 @@
 package camera
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // Label is every event's data-flow label (PLN-3).
 const Label = "private"
@@ -67,9 +70,9 @@ func (c *Clerk) emit(e Event) error {
 	c.lmu.Lock()
 	defer c.lmu.Unlock()
 	now := c.cfg.Now()
-	if err := c.flush(now); err != nil {
-		return err
-	}
+	// A failed flush keeps its counts for the next one and does not cost
+	// this event its place.
+	ferr := c.flush(now)
 	k := wkey{e.Camera, e.Kind}
 	w := c.win[k]
 	if w == nil {
@@ -82,11 +85,11 @@ func (c *Clerk) emit(e Event) error {
 	}
 	if w.n < c.cfg.Limit.Burst {
 		w.n++
-		return c.cfg.Events.Emit(e)
+		return errors.Join(ferr, c.cfg.Events.Emit(e))
 	}
 	w.dropped++
 	w.last = e
-	return nil
+	return ferr
 }
 
 // Flush emits the coalesced events of windows that have ended. The host
@@ -104,16 +107,16 @@ func (c *Clerk) flush(now time.Time) error {
 		if !w.open || now.Sub(w.start) < c.cfg.Limit.Window {
 			continue
 		}
-		w.open = false
 		if w.dropped == 0 {
+			w.open = false
 			continue
 		}
 		ev := w.last
 		ev.Coalesced = w.dropped
-		w.dropped, w.last = 0, Event{}
 		if err := c.cfg.Events.Emit(ev); err != nil {
 			return err
 		}
+		w.open, w.dropped, w.last = false, 0, Event{}
 	}
 	return nil
 }

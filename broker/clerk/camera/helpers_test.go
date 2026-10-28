@@ -60,6 +60,7 @@ type synth struct {
 	addrs []string
 	serve func(n int, c *tls.Conn)
 	wrong atomic.Int32 // connections whose client key was not the core's
+	max   uint16       // the highest TLS version the node offers; 0 is 1.3
 }
 
 func newCert(t testing.TB) (tls.Certificate, [32]byte) {
@@ -113,7 +114,8 @@ func (s *synth) handle(n int, raw net.Conn) {
 	defer raw.Close()
 	tc := tls.Server(raw, &tls.Config{
 		Certificates: []tls.Certificate{s.cert},
-		MinVersion:   tls.VersionTLS13,
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   s.max,
 		ClientAuth:   tls.RequireAnyClientCert,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			pub, ok := cs.PeerCertificates[0].PublicKey.(*ecdsa.PublicKey)

@@ -120,6 +120,7 @@ var (
 	ErrSilent     = errors.New("camera: node silent")
 	ErrStream     = errors.New("camera: stream fault")
 	errMismatch   = errors.New("camera: node key does not match its pin")
+	errRepinned   = errors.New("camera: re-pinned since this stream was dialed")
 )
 
 var idRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
@@ -137,15 +138,19 @@ type Clerk struct {
 }
 
 type node struct {
-	pin    Node
-	off    bool
-	busy   bool
-	cancel context.CancelFunc // ends the running attempt
-	last   time.Time          // the last frame, or the start of the run
-	silent bool
-	frames uint64
-	status camwire.Status
-	has    bool
+	// deliver is held across a frame's check and its hand-off to the sink,
+	// and by every owner change, so no frame reaches the sink once
+	// SetCapture, Repin or Remove has returned. Taken before c.mu.
+	deliver sync.Mutex
+	pin     Node
+	off     bool
+	busy    bool
+	cancel  context.CancelFunc // ends the running attempt
+	last    time.Time          // the last frame, or the start of the run
+	silent  bool
+	frames  uint64
+	status  camwire.Status
+	has     bool
 }
 
 // New checks cfg and returns a clerk with no cameras.
@@ -206,13 +211,7 @@ func (c *Clerk) Add(n Node) error {
 
 // Remove disconnects a camera: its stream ends and it is dialed no more.
 func (c *Clerk) Remove(id string) {
-	c.mu.Lock()
-	n := c.nodes[id]
-	delete(c.nodes, id)
-	c.mu.Unlock()
-	if n != nil && n.cancel != nil {
-		n.cancel()
-	}
+	c.change(id, func(*node) { delete(c.nodes, id) })
 	c.lmu.Lock()
 	c.order = slices.DeleteFunc(c.order, func(k wkey) bool {
 		if k.camera == id {
@@ -248,9 +247,16 @@ func (c *Clerk) Repin(id string, k [32]byte) error {
 
 func (c *Clerk) change(id string, fn func(*node)) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	n := c.nodes[id]
+	c.mu.Unlock()
 	if n == nil {
+		return ErrUnknown
+	}
+	n.deliver.Lock()
+	defer n.deliver.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.nodes[id] != n {
 		return ErrUnknown
 	}
 	fn(n)
@@ -347,8 +353,10 @@ func (c *Clerk) loop(ctx context.Context, id string, want Mode) error {
 func (c *Clerk) stream(ctx context.Context, n *node, pin Node) (got bool, err error) {
 	conn, err := c.dial(ctx, pin)
 	if errors.Is(err, errMismatch) {
-		c.turnOff(n, pin.ID)
-		return false, ErrOff
+		if c.turnOff(n, pin) {
+			return false, ErrOff
+		}
+		return false, errRepinned
 	}
 	if err != nil {
 		c.gap(n, pin)
@@ -421,12 +429,33 @@ func (c *Clerk) serve(n *node, r io.Reader, pin Node) (got bool, err error) {
 			c.event(pin.ID, Recovered)
 		}
 		if f.Type == camwire.TypeVideo || f.Type == camwire.TypeThermal {
-			if err := c.cfg.Frames.Frame(pin.ID, f); err != nil {
-				c.log(pin.ID, "stream ended: the decoder refused a frame")
-				return got, ErrStream
+			if err := c.hand(n, pin, f); err != nil {
+				return got, err
 			}
 		}
 	}
+}
+
+// hand passes f to the sink only while the owner's settings still allow
+// the stream it came on: the same node, not off, the same capture mode and
+// the pin it was dialed with. A frame read before a revocation is dropped.
+func (c *Clerk) hand(n *node, pin Node, f camwire.Frame) error {
+	n.deliver.Lock()
+	defer n.deliver.Unlock()
+	c.mu.Lock()
+	err := c.ready(pin.ID, n, pin.Capture)
+	if err == nil && n.pin.Key != pin.Key {
+		err = errRepinned
+	}
+	c.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := c.cfg.Frames.Frame(pin.ID, f); err != nil {
+		c.log(pin.ID, "stream ended: the decoder refused a frame")
+		return ErrStream
+	}
+	return nil
 }
 
 // gap is a stream that ended or never started: the node is silent once
@@ -452,13 +481,24 @@ func (c *Clerk) markSilent(n *node, id string) {
 }
 
 // turnOff is DEV-3's refusal: the node is off and dialed no more until
-// the owner re-pins it, and the loss is logged and in STATUS (KRN-7).
-func (c *Clerk) turnOff(n *node, id string) {
+// the owner re-pins it, and the loss is logged and in STATUS (KRN-7). It
+// reports false, and changes nothing, when the owner re-pinned the node
+// after pin was dialed.
+func (c *Clerk) turnOff(n *node, pin Node) bool {
+	id := pin.ID
 	c.mu.Lock()
-	n.off = true
+	// A re-pin that landed after this handshake is the owner's newer word.
+	stale := n.pin.Key != pin.Key
+	if !stale {
+		n.off = true
+	}
 	c.mu.Unlock()
+	if stale {
+		return false
+	}
 	c.log(id, "off: its key does not match the pin; re-pin it on the local page (KRN-7)")
 	c.event(id, KeyRefused)
+	return true
 }
 
 func (c *Clerk) event(id string, k Kind) {
@@ -497,7 +537,7 @@ func (c *Clerk) Status() []string {
 			s = "off: its key does not match the pin; re-pin it on the local page"
 		case n.pin.Capture == Off:
 			s = "capture off"
-		case n.busy && n.silent:
+		case n.silent:
 			s = "silent"
 		case n.busy:
 			s = fmt.Sprintf("streaming, %d frames", n.frames)

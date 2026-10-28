@@ -3,6 +3,7 @@ package camera
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -120,20 +121,7 @@ func TestNoStreamBeforeTurnOn(t *testing.T) {
 		t.Fatalf("frames = %v, %v", r.fr.f[0].Type, r.fr.f[1].Type)
 	}
 
-	// Turning capture off ends a running stream at once.
-	r.c.SetCapture(testID, Continuous)
-	done := make(chan error, 1)
-	go func() { done <- r.c.Run(context.Background(), testID) }()
-	waitFor(t, "streaming", func() bool { return r.fr.len() >= 4 })
-	r.c.SetCapture(testID, Off)
-	select {
-	case err := <-done:
-		if !errors.Is(err, ErrCaptureOff) {
-			t.Fatalf("Run after turn-off = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("turning capture off did not end the stream")
-	}
+	// Turning capture off on a live stream: TestOwnerChangeEndsLiveStream.
 }
 
 // REQ: CLK-1, A16
@@ -432,3 +420,86 @@ func TestConfigAndAdmission(t *testing.T) {
 }
 
 var _ net.Conn = (*tlsConn)(nil)
+
+// REQ: DEV-3, DEV-7
+
+// TestOwnerChangeEndsLiveStream: on a node that never stops sending, and
+// on one that has gone quiet well inside its interval, turning capture off,
+// re-pinning and removing each end the stream at once, and no frame
+// reaches the decoder once the call has returned. Revert mutants: change
+// without its cancel leaves the quiet stream open; hand without its
+// re-check delivers frames read before the change.
+func TestOwnerChangeEndsLiveStream(t *testing.T) {
+	_, other := newCert(t)
+	for name, tc := range map[string]struct {
+		change func(*Clerk) error
+		want   error
+	}{
+		"turn off": {func(c *Clerk) error { return c.SetCapture(testID, Off) }, ErrCaptureOff},
+		"re-pin":   {func(c *Clerk) error { return c.Repin(testID, other) }, ErrOff},
+		"remove":   {func(c *Clerk) error { c.Remove(testID); return nil }, ErrUnknown},
+	} {
+		for _, quiet := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s quiet=%v", name, quiet), func(t *testing.T) {
+				r := newRig(t, func(_ *Config, n *Node) { n.Interval = time.Hour })
+				r.node.serve = func(_ int, c *tlsConn) {
+					for i := 0; !quiet || i < 50; i++ {
+						if err := camwire.WriteFrame(c, camwire.ToCore, lepton, video()); err != nil {
+							return
+						}
+					}
+					hold(c)
+				}
+				done := make(chan error, 1)
+				go func() { done <- r.c.Run(context.Background(), testID) }()
+				waitFor(t, "streaming", func() bool { return r.fr.len() >= 50 })
+				if err := tc.change(r.c); err != nil {
+					t.Fatal(err)
+				}
+				at := r.fr.len()
+				select {
+				case err := <-done:
+					if !errors.Is(err, tc.want) {
+						t.Fatalf("Run = %v, want %v", err, tc.want)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("the stream kept running after the change")
+				}
+				if after := r.fr.len() - at; after != 0 {
+					t.Fatalf("%d frames reached the decoder after the change returned", after)
+				}
+			})
+		}
+	}
+}
+
+// TestNodeOfferingTLS12Refused: a node that offers only TLS 1.2 is not
+// streamed, and the client key signs nothing for it. Revert mutant: dial
+// without MinVersion streams it.
+func TestNodeOfferingTLS12Refused(t *testing.T) {
+	r := newRig(t)
+	r.node.max = tls.VersionTLS12
+	r.node.serve = func(_ int, c *tlsConn) { write(c, video()); hold(c) }
+	lends := r.store.lends.Load()
+	stop := r.start(func(ctx context.Context) error { return r.c.Run(ctx, testID) })
+	waitFor(t, "a failed handshake", func() bool { return strings.Contains(r.log.all(), "camera porch: handshake failed") })
+	stop()
+	if r.fr.len() != 0 || r.store.lends.Load() != lends {
+		t.Fatal("a TLS 1.2 node was streamed or got a signature")
+	}
+}
+
+// TestRepinDuringMismatchKeepsNewPin: a key mismatch on a stream dialed
+// with the old pin does not turn off a node the owner re-pinned since.
+func TestRepinDuringMismatchKeepsNewPin(t *testing.T) {
+	r := newRig(t)
+	_, other := newCert(t)
+	dialed := r.c.nodes[testID].pin
+	r.c.Repin(testID, other)
+	if r.c.turnOff(r.c.nodes[testID], dialed) {
+		t.Fatal("a stale mismatch turned the node off")
+	}
+	if r.c.nodes[testID].off || len(r.ev.of(KeyRefused)) != 0 {
+		t.Fatal("the re-pinned node is off")
+	}
+}
