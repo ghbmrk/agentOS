@@ -7,7 +7,7 @@
 # workflow print the asset's hash and fail, which is how the first pin is taken (the hash of
 # a file downloaded in CI, never a value typed from memory).
 llama_url=https://github.com/ggml-org/llama.cpp/releases/download/b11900/llama-b11900-bin-ubuntu-x64.tar.gz
-llama_sha256=unpinned
+llama_sha256=3effcc3009af64d6f30c217827d7982b3934577d282feb243b11fb6789ed124e
 # Test models, Apache-2.0, at the Hugging Face revisions below. The SHA-256 is the LFS object id
 # Hugging Face publishes for the file, read from its API on 2026-10-28. They test the adapter;
 # the model the image ships is G5's (INFER-A4).
