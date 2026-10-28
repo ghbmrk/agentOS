@@ -129,7 +129,8 @@ STEPS = f"""      - name: Machine tests as root
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
         run: |
           python3 -I ../tools/root_tests.py --plan > "$RUNNER_TEMP/root-plan"
-          sudo env go test -json -run "$pat" "$pkg" > out.json
+          sudo setpriv --no-new-privs env go test -json -run "$pat" "$pkg" \\
+            > out.json
           python3 -I ../tools/require_ran.py $names < out.json
       - name: After
         run: true
@@ -251,7 +252,14 @@ class RunsTest(unittest.TestCase):
     def test_generated_step(self):
         self.assertTrue(root_tests.generated_step(STEPS))
         self.assertFalse(root_tests.generated_step(STEPS.replace("require_ran.py $names", "cat")))
-        self.assertFalse(root_tests.generated_step(STEPS.replace("sudo env go", "env go")))
+        self.assertFalse(root_tests.generated_step(STEPS.replace("sudo setpriv --no-new-privs env go", "env go")))
+        # #3542: as agentosd.service runs (NoNewPrivileges=yes; L7-6), so a uid change that works
+        # only as plain root fails CI.
+        self.assertFalse(root_tests.generated_step(STEPS.replace("setpriv --no-new-privs ", "")))
+        self.assertFalse(root_tests.generated_step(STEPS.replace("--no-new-privs", "--reuid=0")))
+        self.assertFalse(root_tests.generated_step(STEPS.replace(
+            "          python3 -I ../tools/require_ran.py $names",
+            "          sudo env go test -run x ./y > o.json\n          python3 -I ../tools/require_ran.py $names")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("Root-gated Go tests", "Other")))
 
 
