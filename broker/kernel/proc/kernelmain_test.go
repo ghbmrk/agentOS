@@ -78,7 +78,7 @@ func newMainBox(t *testing.T) *mainBox {
 	return &mainBox{t: t, dir: dir, cfg: MainConfig{
 		Log: filepath.Join(dir, "log"), OwnerSock: filepath.Join(dir, "o.sock"), OwnerUID: os.Getuid(),
 		MeterSock: filepath.Join(dir, "m.sock"), MeterUID: os.Getuid(),
-		KeyDir: filepath.Join(dir, "keys"), BackupDir: filepath.Join(dir, "backups"), Up: filepath.Join(dir, "up"),
+		KeyDir: filepath.Join(dir, "keys"), ContentDir: filepath.Join(dir, "content"), BackupDir: filepath.Join(dir, "backups"), Up: filepath.Join(dir, "up"),
 	}}
 }
 
@@ -306,4 +306,34 @@ func slicesContain(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// REQ: HW-15, HW-16
+// EDGE-link-core-c2b: given -link-sock, the kernel process serves LinkSide
+// there before it marks itself up, and only setup opens it, as the owner
+// side's calls; a store with no link key refuses to sign. Without it no
+// link socket exists. Revert mutant: RunKernel's LinkSock append dropped
+// (the link's call is unreachable).
+func TestTheKernelServesTheLinkSocket(t *testing.T) {
+	m := newMainBox(t)
+	m.cfg.LinkSock, m.cfg.LinkUID = filepath.Join(m.dir, "l.sock"), os.Getuid()
+	o, stop := m.boot(handoff.SlotTPM, nil)
+	defer stop()
+	link := Conn{Socket: m.cfg.LinkSock, UID: os.Getuid(), Timeout: 10 * time.Second}
+	if err := link.Call("linkkey", nil, nil); !errors.Is(err, ErrSetupOnly) {
+		t.Fatalf("linkkey before setup: %v, want ErrSetupOnly", err)
+	}
+	if err := o.Setup(setupAnchors()); err != nil {
+		t.Fatal(err)
+	}
+	if err := link.Call("linksign", signArgs{cvInput(32)}, nil); !errors.Is(err, ErrNoLinkKey) {
+		t.Fatalf("linksign with no link key: %v, want ErrNoLinkKey", err)
+	}
+
+	n := newMainBox(t)
+	_, stop2 := n.boot(handoff.SlotTPM, nil)
+	defer stop2()
+	if _, err := os.Stat(filepath.Join(n.dir, "l.sock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a kernel with no -link-sock made one: %v", err)
+	}
 }

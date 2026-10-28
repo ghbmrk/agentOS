@@ -26,7 +26,6 @@ follow debt debt:#1947
 guest debt debt:#1947
 journal journal
 meter debt debt:#1947
-photo/keep content
 recall content
 recovery debt debt:#1947
 update debt debt:audit-2.4

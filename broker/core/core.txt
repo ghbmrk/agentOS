@@ -43,6 +43,10 @@ wiring cmd/agentos-egress
 wiring cmd/agentos-holder
 wiring cmd/agentos-checker
 wiring cmd/agentos-a8scan
+# The core's end of the edge link (EDGE-link-core c2, #3297; HW-15, HW-16): the
+# link port's process, which asks the kernel about each edge key and signs its
+# handshakes through the kernel; it holds no key.
+wiring cmd/agentos-link
 # The kernel's process (MIG-4-run, #2682): it opens the log, boots the
 # kernel, and carries each call to a clerk's socket. It links no clerk's code
 # (KRN-2 split, #2892).
@@ -51,6 +55,9 @@ wiring kernel/proc
 # file and answers the kernel's calls over kernel/proc's wire.
 wiring clerk/run
 core clerk/inbox
+# The clerk check path (MIG-4-adapters-f2, #3430): net-free, so agentosd can
+# host a clerk with it.
+core clerk/check
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived
 # from it. Only the unlock step (STO-2b) opens it.
 core clerk/seal
@@ -67,12 +74,15 @@ wiring cmd/agentos-enroll
 # descriptor 3, the owner's anchors from a file only root writes (D-146), and
 # the kernel's, the owner side's and the planner's sockets.
 wiring cmd/agentos-clerk-mail
+# The model clerk's process (MIG-4-untrusted-exit-b2b, #2780): its key from the
+# kernel on descriptor 3, the plan login's sealed slot, and agentosd's sockets.
+wiring cmd/agentos-clerk-model
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
 open kernel.Normalize
-open clerk.Check
-open clerk.Verify
+open clerk/check.Check
+open clerk/check.Verify
 # A pure read of the log's view: the live approval of the task a key serves
 # on one site, for a clerk to cover a request with (CLK-3, #2711).
 open kernel.TaskApproved
@@ -80,6 +90,10 @@ open kernel.TaskApproved
 # the owner side builds the challenge a hardware key signs; the kernel
 # recomputes it and checks the cosign against its own anchors.
 open kernel.BackupTargetHash
+# A pure hash naming one recovery-key rotation (REC-4, MIG-4-recovery-r1,
+# D-201): the owner side builds the challenge a hardware key signs; the
+# kernel recomputes it and checks the cosign against its own anchors.
+open kernel.RecoveryRotateHash
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
@@ -157,13 +171,6 @@ allow change journal.Engine.Authorize -- change.Journal (also loops.Journal) mov
 allow change journal.Engine.Dispatch -- change.Journal (also loops.Journal) dispatches the intent it submitted once authorized
 allow change grants.Gate.Authorize -- change.Journal is the grants gate on the box; same as journal.Engine.Authorize
 allow change grants.Gate.Dispatch -- change.Journal is the grants gate on the box; same as journal.Engine.Dispatch
-allow recalltool journal.Engine.Authorize -- recalltool moves the erase intent it submitted through policy
-allow recalltool grants.Gate.Authorize -- recalltool's journal is the grants gate on the box; same as journal.Engine.Authorize
-allow recalltool journal.Engine.Erase -- the owner's FORGET erases the journal records it names (recalltool.Journal)
-allow recalltool grants.Gate.Withdraw -- FORGET withdraws an owner question about an erased intent as superseded (recalltool.Withdrawer)
-allow photo/keep journal.Engine.Authorize -- the photo store moves the receipt, delivery and deletion intents it submitted through policy (keep.Journal)
-allow photo/keep journal.Engine.Dispatch -- the photo store dispatches the intent it submitted once authorized (keep.Journal)
-allow photo/keep journal.Engine.Erase -- an owner photo deletion or expiry erases the photo's intents' content (CAP-3, keep.Journal)
 allow daemon/journalowner journal.Engine.Stop -- the owner's STOP text, mapped onto control.Engine until #2783 (c) (#2778)
 allow daemon/journalowner journal.Engine.Resume -- the owner's code-checked RESUME text, mapped onto control.Engine until #2783 (c) (#2778)
 allow control guest.OwnerAgent.Deliver -- owner chat goes to the owner's agent machine (control.Agent)
@@ -187,6 +194,12 @@ allow localsrv/accountsock sockets.PeerUID -- reads the mail clerk's uid before 
 # agentosd's client of the kernel's owner socket (#2682) reads the serving
 # peer's uid before it writes a frame, as kernel/proc's Conn does.
 allow owner/kernelsock sockets.PeerUID -- reads the kernel's uid before an owner seam frame is sent (#2682, D-154)
+
+# The mail clerk's quarantined read (MAIL-reader-sock-a, #3421): its end
+# reads the reader's uid before a mail's text is sent, and the reader's end
+# admits only the mail clerk's uid, as kernel/proc's wire does.
+allow clerk/readerwire sockets.PeerUID -- reads the reader's uid before a mail's text is sent (#3421, D-154)
+allow clerk/readerwire sockets.ListenPeers -- the reader's socket admits only the mail clerk's uid (#3421, D-154)
 
 # A plan route's declaration (hosts, paths, kinds) is a pure value: the
 # in-image e2e stand-in provider (#1701, boxe2e E10) answers exactly its

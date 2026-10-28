@@ -687,3 +687,22 @@ func TestNamedFoldsCaseAndSpace(t *testing.T) {
 		}
 	}
 }
+
+// A blank or invalid-UTF-8 query is ErrLabel and finds nothing: "   " would
+// fold to "" and match every blank label, and "\xff" a U+FFFD one (LOG-4,
+// #3443; the Security probe on #3438).
+func TestNamedRefusesBlankAndInvalidQuery(t *testing.T) {
+	r := newErig(t)
+	blank, odd, alice := r.open(), r.open(), r.open()
+	r.seal(blank, "mail", kernel.ClassLabel, " ")
+	r.seal(odd, "mail", kernel.ClassLabel, "\uFFFD")
+	r.seal(alice, "mail", kernel.ClassLabel, "Alice")
+	for _, q := range []string{"", "   ", "\t\n", "\xff", "Alice\xff"} {
+		if got, unread, err := r.k.Named(q); !errors.Is(err, kernel.ErrLabel) || got != nil || unread != nil {
+			t.Errorf("named %q: %v %v %v, want ErrLabel", q, got, unread, err)
+		}
+	}
+	if got, _, err := r.k.Named("\uFFFD"); err != nil || !slices.Equal(got, []string{odd}) {
+		t.Errorf("a typed U+FFFD label: %v %v", got, err)
+	}
+}

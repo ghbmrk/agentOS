@@ -46,7 +46,7 @@ recovery key is never typed into another computer.
 | 7 | Remove PC-U as a trusted host. Restart. | Asks for the passphrase and code again. | | |
 | 8 | Move the drive back to PC-T and restart. | Comes up with no input. | | |
 | 9 | Create two pre-allowances on the Wi-Fi page (G1, G2). Press **Back up now** and pick the USB stick. Then text `REVOKE G1`. | Backup reports done with its date; G1 revoked. | | |
-| 10 | With the USB stick still attached, press **Scan drive (A8)** on the Wi-Fi page and type the recovery key and the passphrase from the card. It runs `agentos-a8scan` over every partition of the box drive, read-only, and over the USB stick. | Each target: "nothing found"; the control line and key-slot line say ok. | | |
+| 10 | With the USB stick still attached, press **Scan drive (A8)** on the Wi-Fi page and type the recovery key and the passphrase from the card. It runs `agentos-a8scan -store /var/lib/agentos-store/store` over every partition of the box drive, read-only, and over the USB stick. | Each target: "nothing found"; the control line and store-slots line say ok. | | |
 | 11 | Press **Restore** on the Wi-Fi page, pick the USB stick and the spare drive, and type the recovery key. Boot the spare drive on PC-T. | Not trusted: asks for passphrase and code. After unlock, a text: "Box restored from a backup made DATE. Pre-allowances and today's budget are paused until you review them on the box page (one step)." | | |
 | 12 | Before re-confirming, ask the agent for something G2 covers. | It asks for approval instead of running. | | |
 | 13 | On the Wi-Fi page, re-confirm G2 only (code plus confirm). Ask again for G1's and G2's actions. | G2 runs; G1 asks (it stays revoked). The page also offered Keep all and Start budgets fresh. | | |

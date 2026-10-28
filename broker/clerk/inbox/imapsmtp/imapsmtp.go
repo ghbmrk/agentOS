@@ -517,22 +517,28 @@ func (s *Store) Seen(ctx context.Context, folder string, each func(header []byte
 			case bad != nil:
 				return stand{bad}
 			case r.Err == codeLong:
-				if r.Long == nil || !want[r.Long.UID] {
-					return errLied
-				}
-				lh := &LongHeaderError{Folder: folder, Arrived: r.Long.Arrived, UID: r.Long.UID}
-				// The subject read shares the batch's window: one that times
-				// out or fails leaves it empty, and the error stands.
-				if q, err := x.do(imapwire.Request{Op: imapwire.OpSubject, Folder: folder, UIDs: []uint32{lh.UID}}, 0, read); err == nil {
-					lh.Subject = subjectOf(q.Subject)
-				}
-				return stand{lh}
+				return x.longHeader(folder, r.Long, want)
 			case err != nil:
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// longHeader is the LongHeaderError a batch of folder ended on, named by
+// its Subject, or errLied for a mail the batch did not ask for or still
+// owes. The subject read shares the batch's window: one that times out or
+// fails leaves it empty, and the error stands.
+func (x *session) longHeader(folder string, l *imapwire.LongHeaderError, want map[uint32]bool) error {
+	if l == nil || !want[l.UID] {
+		return errLied
+	}
+	lh := &LongHeaderError{Folder: folder, Arrived: l.Arrived, UID: l.UID}
+	if q, err := x.do(imapwire.Request{Op: imapwire.OpSubject, Folder: folder, UIDs: []uint32{lh.UID}}, 0, read); err == nil {
+		lh.Subject = subjectOf(q.Subject)
+	}
+	return stand{lh}
 }
 
 // subjectOf is a Subject the connection answered, as the owner may see it:

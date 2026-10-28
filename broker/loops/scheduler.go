@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -87,22 +86,27 @@ type Digester interface {
 	Digest() []string
 }
 
-// Journal is the part of the intent engine (or the policy gate in front of
-// it) the scheduler uses for its settings intents.
-type Journal = change.Journal
+// Store keeps the scheduler's saved settings. Save returns an error
+// wrapping privfile.ErrUnsynced when the new form is in place but the
+// directory sync failed; the scheduler counts that as saved. No production
+// store exists while agentosd wires no scheduler; the row that wires it
+// again adds one over privfile.WriteAtomic, as owner/state.go does.
+// change.MemStore is one for tests. change.FileStore is not one for
+// production: it returns durable.ErrDirSync, which counts as a failed save.
+type Store interface {
+	Load() ([]byte, error)
+	Save([]byte) error
+}
 
 // Config configures New.
 type Config struct {
-	Store change.Store
+	Store Store
 	// Spare is the spare envelope (LOOP-2): a key of its own, never the
 	// guests', that every loop model call is charged to (replay, clean
 	// room). Its day cap is set from the owner's setting; Loop code has no
 	// other handle on it.
 	Spare   *Spare
 	Sources []Source
-	// Journal is where settings intents go; set it with Attach when the
-	// engine is built after the scheduler.
-	Journal Journal
 	// Busy reports that foreground or accepted work needs the box (RES-1,
 	// from admission). No loop work starts while it is true. Nil: never.
 	Busy func() bool
@@ -152,11 +156,15 @@ type Config struct {
 	Logf     func(format string, args ...any)
 }
 
-// Scheduler runs loop work in spare capacity. It is the journal executor
-// and policy for loop settings (Executor, Check).
+// Scheduler runs loop work in spare capacity and holds the owner's loop
+// settings (Set).
 type Scheduler struct {
 	cfg  Config
 	wake chan struct{}
+
+	// budgetMu orders spare budget changes (setBudget). Nothing else takes
+	// it, so Settings, Narrows and the run loop never wait on the passkey.
+	budgetMu sync.Mutex
 
 	mu         sync.Mutex
 	st         state
@@ -274,10 +282,6 @@ func New(cfg Config) (*Scheduler, error) {
 	} else if err := json.Unmarshal(b, &s.st); err != nil {
 		return nil, fmt.Errorf("loops: saved state: %v", err)
 	}
-	if s.st.Applied == nil {
-		s.st.Applied = map[string]bool{}
-	}
-	s.orderLocked()
 	if err := cfg.Spare.SetCap(SpareCap(s.st.Settings.SpareCalls, cfg.Spare.OutPerM)); err != nil {
 		return nil, err
 	}
@@ -288,10 +292,6 @@ func New(cfg Config) (*Scheduler, error) {
 	}
 	return s, nil
 }
-
-// Attach gives the scheduler the journal (or gate) its settings intents go
-// through; the engine needs the scheduler as an executor first.
-func (s *Scheduler) Attach(j Journal) { s.cfg.Journal = j }
 
 // Wake tells a sleeping scheduler that something new arrived: an owner
 // outcome, a new release, the box going idle or online. Parked loops are
@@ -678,8 +678,6 @@ func (s *Scheduler) Digest() []string {
 	}
 	return out
 }
-
-var _ journal.Executor = (*Scheduler)(nil)
 
 // EvalReserve is the share of the spare budget kept for replay evaluation
 // while evaluation work runs (LOOP-5's separate evaluation budget; the

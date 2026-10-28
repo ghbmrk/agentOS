@@ -603,7 +603,7 @@ func TestSwitchThatNeverLandedWaitsForRetry(t *testing.T) {
 	if s := r.probeAll("p1"); s.Phase != kernel.PParked || r.trusts(r.fork) || r.st.switches != 1 {
 		t.Fatalf("%+v switches %d", s, r.st.switches)
 	}
-	if err := r.k.Retry(r.now(), "p1", 0); err != nil {
+	if err := r.k.Retry(r.now(), "p1", 0, 1); err != nil {
 		t.Fatal(err)
 	}
 	if s := r.probeAll("p1"); s.Phase != kernel.PDone || !r.trusts(r.fork) || r.st.switches != 2 {

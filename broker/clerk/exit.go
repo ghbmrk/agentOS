@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/netguard"
@@ -387,7 +388,7 @@ func (x *Exit) Facts(s key.Step) (string, []string, int64) {
 	if !ok {
 		return "", nil, 0
 	}
-	return op.Content, op.Labels, Amount(s)
+	return op.Content, op.Labels, check.Amount(s)
 }
 
 // Do checks the step first, every time, then sends it once per idempotency
@@ -426,7 +427,7 @@ func (x *Exit) Do(r kernel.Request, v kernel.View) kernel.Result {
 
 // check is the clerk's own authorization, run before every send.
 func (x *Exit) check(r kernel.Request, v kernel.View) (kernel.Result, bool) {
-	if rf := Check(x.anchors, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
+	if rf := check.Check(x.anchors, x.name, x.Facts, x.clock.Now(), r, v); rf != nil {
 		return kernel.Result{Outcome: "failed", Detail: rf.Code}, false
 	}
 	return kernel.Result{}, true

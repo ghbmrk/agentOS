@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -228,7 +229,7 @@ func TestClerkRunsOnlyWhatTheHolderSigned(t *testing.T) {
 	outside := f.req
 	outside.Index = 1
 	for name, r := range map[string]kernel.Request{"swapped step": swapped, "stranger": stranger, "unsigned": unsigned, "index outside the plan": outside} {
-		if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
+		if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, 1, r, f.view()); rf == nil {
 			t.Errorf("%s: accepted", name)
 		}
 		if res := f.mail.Do(r, f.view()); res.Outcome != "failed" {
@@ -250,20 +251,20 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	other := stepOf(key.Trash)
 	other.Args["target"] = "y"
 	twin := kernel.SignPlan(kernel.Plan{ID: "p1", Key: f.root, Steps: []kernel.PlanStep{other}}, hpubPriv())
-	check := func(r kernel.Request) *key.Refusal {
-		return clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, f.k.State())
+	checkAt := func(r kernel.Request) *key.Refusal {
+		return check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, f.k.State())
 	}
 	var during [2]*key.Refusal
 	f.mail.Fault = func(op string, _ kernel.Request) string {
 		if op == "do" { // the kernel has the step in flight now
-			during = [2]*key.Refusal{check(kernel.Request{Plan: admitted}), check(kernel.Request{Plan: twin})}
+			during = [2]*key.Refusal{checkAt(kernel.Request{Plan: admitted}), checkAt(kernel.Request{Plan: twin})}
 		}
 		return clerk.FaultNone
 	}
 	if err := f.k.Submit(1, admitted); err != nil {
 		t.Fatal(err)
 	}
-	if rf := check(kernel.Request{Plan: admitted}); rf == nil || rf.Code != clerk.RDispatch {
+	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code != check.RDispatch {
 		t.Fatalf("an admitted step not yet dispatched: %v", rf)
 	}
 	if err := f.k.Tick(1); err != nil {
@@ -272,10 +273,10 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 	if during[0] != nil {
 		t.Fatalf("the step in flight was refused: %v", during[0])
 	}
-	if during[1] == nil || during[1].Code != clerk.RDispatch {
+	if during[1] == nil || during[1].Code != check.RDispatch {
 		t.Fatalf("another plan under the logged id passed: %v", during[1])
 	}
-	if rf := check(kernel.Request{Plan: admitted}); rf == nil || rf.Code != clerk.RDispatch {
+	if rf := checkAt(kernel.Request{Plan: admitted}); rf == nil || rf.Code != check.RDispatch {
 		t.Fatalf("a settled step redelivered: %v", rf)
 	}
 	if n := len(f.mail.Effects()); n != 1 {
@@ -287,12 +288,12 @@ func TestClerkRefusesAStepTheLogDoesNotHaveInFlight(t *testing.T) {
 // every step rather than take the planner's word (KEY-2, CLK-2).
 func TestClerkWithoutFactsRefuses(t *testing.T) {
 	f := setup(t, key.Trash)
-	if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != clerk.RClaim {
+	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", nil, f.now, f.req, f.view()); rf == nil || rf.Code != check.RClaim {
 		t.Fatalf("a clerk with no facts passed a step: %v", rf)
 	}
 	claim := stepOf(key.Trash)
 	claim.Content = "invoice"
-	if r := f.mail.Do(f.request("i2", f.root, claim), f.view()); r.Outcome != "failed" || r.Detail != clerk.RClaim || len(f.mail.Effects()) != 0 {
+	if r := f.mail.Do(f.request("i2", f.root, claim), f.view()); r.Outcome != "failed" || r.Detail != check.RClaim || len(f.mail.Effects()) != 0 {
 		t.Fatalf("a claim the mailbox does not read was taken as given: %+v", r)
 	}
 }
@@ -315,7 +316,7 @@ func TestClerkRefusesARootNoAnchorVouchesForWhateverTheViewSays(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.request("i9", forged, stepOf(key.Trash))
-	if rf := clerk.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
+	if rf := check.Check([]key.PublicKey{key.Ed25519(opubOf())}, "mail", f.mail.Facts, f.now, r, lying{f.view()}); rf == nil || rf.Code != kernel.CKey {
 		t.Fatalf("a forged root a lying view vouches for: %v", rf)
 	}
 	if res := f.mail.Do(r, lying{f.view()}); res.Outcome != "failed" || len(f.mail.Effects()) != 0 {
@@ -345,13 +346,13 @@ func TestClerkRefusesAVeryLargeOneOffWithoutASecondPasskey(t *testing.T) {
 		f.plans[id] = p
 		return kernel.Request{Plan: p}
 	}
-	if rf := clerk.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o1"), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+	if rf := check.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o1"), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
 		t.Fatalf("a one-off past the line, alone: %v", rf)
 	}
-	if rf := clerk.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o2", bpriv), strict{f.view()}); rf != nil {
+	if rf := check.Check(anchors, "mail", f.mail.Facts, f.now, oneOff("o2", bpriv), strict{f.view()}); rf != nil {
 		t.Fatalf("a one-off the second hardware key co-signed: %v", rf)
 	}
-	if rf := clerk.Check(anchors[:1], "mail", f.mail.Facts, f.now, oneOff("o3", bpriv), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
+	if rf := check.Check(anchors[:1], "mail", f.mail.Facts, f.now, oneOff("o3", bpriv), strict{f.view()}); rf == nil || rf.Code != kernel.CCosign {
 		t.Fatalf("a co-signer the clerk's anchors do not know: %v", rf)
 	}
 }
@@ -376,16 +377,16 @@ func TestClerkVerifyReturnsTheChainItChecked(t *testing.T) {
 		k       key.Key
 		byOwner bool
 	}{{"v1", approved, true}, {"v2", own, false}} {
-		ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request(c.id, c.k, stepOf(key.Trash)), f.view())
+		ver, rf := check.Verify(anchors, "mail", f.mail.Facts, f.now, f.request(c.id, c.k, stepOf(key.Trash)), f.view())
 		if rf != nil || ver.ByOwner != c.byOwner {
 			t.Fatalf("%s: %v, by owner %v", c.id, rf, ver != nil && ver.ByOwner)
 		}
 	}
 	// Refused before the key is checked, and after it verified.
-	if ver, rf := clerk.Verify(anchors, "web", f.mail.Facts, f.now, f.req, f.view()); rf == nil || ver != nil {
+	if ver, rf := check.Verify(anchors, "web", f.mail.Facts, f.now, f.req, f.view()); rf == nil || ver != nil {
 		t.Fatal("a step for another clerk returns no chain")
 	}
-	if ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("v3", approved, stepOf(key.Send)), f.view()); rf == nil || ver != nil {
+	if ver, rf := check.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("v3", approved, stepOf(key.Send)), f.view()); rf == nil || ver != nil {
 		t.Fatal("a verb the key lacks returns no chain")
 	}
 }
@@ -417,7 +418,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ver, rf := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("c1", served, stepOf(key.Trash)), f.view())
+	ver, rf := check.Verify(anchors, "mail", f.mail.Facts, f.now, f.request("c1", served, stepOf(key.Trash)), f.view())
 	if rf != nil || ver.Limits.Task != "t1" {
 		t.Fatalf("a plan in a live task: %v", rf)
 	}
@@ -445,7 +446,7 @@ func TestClerkReadsATaskApprovalOnItsOwnClock(t *testing.T) {
 	if _, ok := kernel.TaskApproved(f.view(), anchors, ver, a.Site, 1+kernel.TaskTimeout); ok {
 		t.Fatal("an approval past its task's timeout on the clerk's clock")
 	}
-	plain, _ := clerk.Verify(anchors, "mail", f.mail.Facts, f.now, f.req, f.view())
+	plain, _ := check.Verify(anchors, "mail", f.mail.Facts, f.now, f.req, f.view())
 	if _, ok := kernel.TaskApproved(f.view(), anchors, plain, a.Site, f.now); ok {
 		t.Fatal("a key with no task is covered")
 	}

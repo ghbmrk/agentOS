@@ -69,8 +69,9 @@ var gPagesMax = searchMax / 500
 // labels, send, history, the reads of filters, forwarding and
 // auto-forwarding, and the profile; and the list of read mail that Opened
 // pages through, its query a constant (#2925); and the account plan's list
-// of all mail but spam and trash and its get of From and
-// Authentication-Results (TN-account-plan). The grant gmail.modify allows more
+// of all mail but spam and trash and its get of From,
+// Authentication-Results, To and Cc (TN-account-plan), which the senders
+// read uses too (MAIL-world-b2). The grant gmail.modify allows more
 // (permanent deletion needs the full-mail scope and settings writes
 // gmail.settings.*, which the box never asks for); this list is narrower
 // still.
@@ -118,7 +119,7 @@ func GmailCalls(base, slot string) []clerk.Call {
 		readNext,
 		get(gPlanList, "/messages?maxResults="+gListLimit, gPageMax),
 		planNext,
-		get(gPlanMetadata, "/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results", gPageMax, "id"),
+		get(gPlanMetadata, "/messages/{id}?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results&metadataHeaders=To&metadataHeaders=Cc", gPageMax, "id"),
 	}
 }
 
@@ -605,8 +606,9 @@ func (g *Gmail) Mark(ctx context.Context) (Mark, error) {
 // gHeaders is a metadata get's answer: the From and Message-ID header
 // fields and the arrival, in milliseconds since the epoch.
 type gHeaders struct {
-	ID       string `json:"id"`
-	Internal string `json:"internalDate"`
+	ID       string   `json:"id"`
+	Internal string   `json:"internalDate"`
+	Labels   []string `json:"labelIds"`
 	Payload  struct {
 		Headers []struct {
 			Name  string `json:"name"`
@@ -697,4 +699,97 @@ func (g *Gmail) Opened(ctx context.Context, today string, log SeenLog) (map[stri
 	}
 	got, kept := o.result()
 	return got, kept, nil
+}
+
+// gmailSource is the senders record's one source for a Gmail account.
+const gmailSource = "gmail"
+
+// gmailSlack is how far before a finished pass's newest mail a later pass
+// reads, since the listing's newest-first order is by arrival only roughly.
+// Reading a mail twice changes nothing.
+const gmailSlack = uint64(time.Hour / time.Millisecond)
+
+// SendersStep is Live.SendersStep over Gmail's declared plan calls: the
+// listing of every mail but spam and trash, newest first, and each one's
+// From, To and Cc with its internalDate and labels. A mail in INBOX, or in
+// none of SPAM, TRASH, DRAFT and SENT, is delivered; one in SENT (and not
+// INBOX) gives its To and Cc. The first pass pages through the whole
+// listing, at most limit mails a step, its page kept in r; it is through when
+// the listing ends. Each later pass reads from the newest mail down to
+// gmailSlack before the last pass's newest. A mail gone between the list
+// and the get, or whose headers pass gPageMax, is passed over. A page Gmail
+// refuses starts the pass again (a page token can expire); any failure ends
+// the step with its error, and the mails read before it keep their place.
+func (g *Gmail) SendersStep(ctx context.Context, r *SendersRecord, limit int) (more bool, err error) {
+	r.init()
+	r.keepOnly(func(name string) bool { return name == gmailSource })
+	src := r.Sources[gmailSource]
+	defer func() { r.Sources[gmailSource] = src }()
+	n, stop := 0, uint64(0)
+	if src.Through && src.High > gmailSlack {
+		stop = src.High - gmailSlack
+	}
+	for n < limit {
+		var l struct {
+			Messages []struct {
+				ID string `json:"id"`
+			} `json:"messages"`
+			Next string `json:"nextPageToken"`
+		}
+		name, args := gPlanList, map[string]string{}
+		if src.Page != "" {
+			name, args = gPlanListNext, map[string]string{"page": src.Page}
+		}
+		if _, err := g.call(ctx, name, args, &l); err != nil {
+			if src.Page != "" && errors.Is(err, nRefused) {
+				src.Page, src.Top = "", 0
+			}
+			return false, err
+		}
+		var got heads
+		ended := l.Next == "" || len(l.Messages) == 0
+		for _, m := range l.Messages {
+			if !gmailID.MatchString(m.ID) {
+				return false, errors.New("inbox: gmail: a message id outside Gmail's form")
+			}
+			var h gHeaders
+			ans, bad := g.api.Call(ctx, gPlanMetadata, map[string]string{"id": m.ID})
+			if bad == clerk.DTooLarge || bad == "" && ans.Status == http.StatusNotFound {
+				continue
+			}
+			if _, err := g.answer(ans, bad, &h); err != nil {
+				return false, err
+			}
+			ms, err := strconv.ParseUint(h.Internal, 10, 64)
+			if h.ID != m.ID || err != nil || ms == 0 {
+				return false, errors.New("inbox: gmail: a mail's headers that do not name it or its arrival")
+			}
+			if ms < stop {
+				ended = true
+				break
+			}
+			src.Top = max(src.Top, ms)
+			var head []byte
+			for _, f := range h.Payload.Headers {
+				head = append(append(append(append(head, f.Name...), ": "...), unfold.Replace(f.Value)...), "\r\n"...)
+			}
+			in := slices.Contains(h.Labels, "INBOX")
+			switch {
+			case slices.Contains(h.Labels, "SPAM") || slices.Contains(h.Labels, "TRASH") || slices.Contains(h.Labels, "DRAFT"):
+			case !in && slices.Contains(h.Labels, "SENT"):
+				got.wrote(head)
+			default:
+				got.delivered(head, time.UnixMilli(int64(ms)))
+			}
+		}
+		got.into(r)
+		n += len(l.Messages)
+		if ended {
+			src.Through, src.High = true, max(src.High, src.Top)
+			src.Page, src.Top = "", 0
+			return false, nil
+		}
+		src.Page = l.Next
+	}
+	return true, nil
 }

@@ -367,7 +367,7 @@ func (g *Gate) submit(ctx context.Context, raw []byte, to, print string, retry b
 // and is approved per step (VRB-1, CLK-5 "Secret screens"). Another task's
 // approval never reaches here: the clerk reads only the approval of the
 // task its key serves (kernel.TaskApproved). A readable value over a limit
-// is the key's to refuse (clerk.Verify). The clerk fills no credential or
+// is the key's to refuse (check.Verify). The clerk fills no credential or
 // card and refuses any step claiming a flow label (C4), so no fill or
 // private entry can follow the approval yet.
 func asksAgain(a Approval, tc cover) string {

@@ -19,6 +19,7 @@ package kernelsock
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,6 +189,9 @@ type Step struct {
 	Detail string // the clerk's last answer, which the kernel bounds
 	Retry  bool   // the owner may RETRY it
 	SentAt int64  // when it was first sent (unix ms), which RETRY names
+	// Attempt is the step's dispatch attempt; a RETRY sends it back, and
+	// the kernel refuses one asked about an attempt since sent again (CH-10).
+	Attempt int
 	// What the owner's RETRY tier is judged on (CH-10, CH-11): the step's
 	// spend in minor units, whether its verb moves money, its recipient.
 	Amount    int64
@@ -215,17 +219,19 @@ func (o Owner) Status(ctx context.Context) ([]Step, error) {
 	return s, err
 }
 
-// stepArgs is kernel/proc's stepArgs.
-type stepArgs struct {
-	Plan  string `json:"plan"`
-	Index int    `json:"index"`
+// retryArgs is kernel/proc's retryArgs.
+type retryArgs struct {
+	Plan    string `json:"plan"`
+	Index   int    `json:"index"`
+	Attempt int    `json:"attempt"`
 }
 
 // Retry logs the owner's RETRY of a parked step and anchors it (KRN-7): the
 // kernel sends it again on a later tick, under every check it would make
-// now. It refuses a step that is not parked, or one it would not send now.
-func (o Owner) Retry(ctx context.Context, plan string, index int) error {
-	return o.call(ctx, "retry", stepArgs{plan, index}, nil)
+// now. It refuses a step that is not parked, one it would not send now, or
+// one sent again since the ask that read attempt (kernel.ErrRetryMoved).
+func (o Owner) Retry(ctx context.Context, plan string, index, attempt int) error {
+	return o.call(ctx, "retry", retryArgs{plan, index, attempt}, nil)
 }
 
 // Submit logs a guest's plan on the kernel, which decides it at once (PLN-5
@@ -288,6 +294,14 @@ func typed(err error) error {
 		return fmt.Errorf("%w (%w)", ErrTargetExists, r)
 	case kernel.ErrNoTarget.Error():
 		return fmt.Errorf("%w (%w)", ErrNoTarget, r)
+	case kernel.ErrRotateSig.Error():
+		return fmt.Errorf("%w (%w)", ErrRotateSig, r)
+	case approvalStaleText:
+		return fmt.Errorf("%w (%w)", ErrApprovalStale, r)
+	case approvalExpiredText:
+		return fmt.Errorf("%w (%w)", ErrApprovalExpired, r)
+	case noRecoveryCardText:
+		return ErrNoRecoveryCard
 	}
 	return err
 }
@@ -327,6 +341,26 @@ func (o Owner) Anchors(ctx context.Context) ([]key.PublicKey, error) {
 	var a []key.PublicKey
 	err := typed(o.call(ctx, "anchors", nil, &a))
 	return a, err
+}
+
+// EdgeEnroll is the owner-page step (HW-15, EDGE-link-core decision 8): it
+// makes edge, the candidate the link port logged, the live edge on a
+// hardware key's signature c over kernel.EdgeEnrollHash, revoking the edge
+// it replaces. The kernel refuses another key, or another signature, in its
+// own words.
+func (o Owner) EdgeEnroll(ctx context.Context, edge ed25519.PublicKey, c key.Cosign) error {
+	return typed(o.call(ctx, "edgeenroll", struct {
+		Key    ed25519.PublicKey `json:"key"`
+		Cosign key.Cosign        `json:"cosign"`
+	}{edge, c}, nil))
+}
+
+// EdgeRevoke cuts edge for good, with no replacement; its connection closes
+// within a second.
+func (o Owner) EdgeRevoke(ctx context.Context, edge ed25519.PublicKey) error {
+	return typed(o.call(ctx, "edgerevoke", struct {
+		Key ed25519.PublicKey `json:"key"`
+	}{edge}, nil))
 }
 
 // Backups (BAK-1, MIG-4-recovery-e3): the kernel holds the destinations and
@@ -417,6 +451,92 @@ func (o Owner) Backups(ctx context.Context) (BackupsView, error) {
 	var v BackupsView
 	err := typed(o.call(ctx, "backups", nil, &v))
 	return v, err
+}
+
+// Recovery-key rotation (REC-4, BAK-1, D-201): the kernel checks the
+// hardware key's tap and answers an approval, which the keeper's one-shot
+// verifies with the store's head key; once the keeper has written the new
+// recipient, the kernel switches to it on the same approval. The approval
+// is opaque here: the owner side only carries it.
+
+// The kernel's refusals of a rotation, matched by its words. Each still
+// wraps the Refused, so errors.As finds the kernel's own words too.
+var (
+	// ErrRotateSig: no hardware key signed this rotation (kernel.ErrRotateSig).
+	ErrRotateSig = errors.New("kernelsock: the kernel refused: no hardware key signed that recovery-key change")
+	// ErrApprovalStale: the approval names another recipient than the
+	// kernel's: used already, or another rotation's.
+	ErrApprovalStale = errors.New("kernelsock: the kernel refused: that approval is for another recipient")
+	// ErrApprovalExpired: the approval's time is over; ask for another.
+	ErrApprovalExpired = errors.New("kernelsock: the kernel refused: that approval has expired")
+)
+
+// approvalStaleText and approvalExpiredText are kernel/proc
+// ErrApprovalStale's and handoff.ErrApprovalExpired's texts;
+// TestRecoveryRotateReachesTheKernel keeps them the same.
+const (
+	approvalStaleText   = "run: that recovery-key approval is for another recipient than mine; ask again"
+	approvalExpiredText = "handoff: the recovery-key approval has expired; ask again"
+)
+
+// RotateMsg is the message a hardware key signs to rotate the backup
+// recipient old (BackupsView.Recipient, "" when there is none) to next,
+// the new key's recipient ID, or "" when the card is lost:
+// key.CosignMsg(kernel.RecoveryRotateHash(old, next)).
+func RotateMsg(old, next string) []byte { return key.CosignMsg(kernel.RecoveryRotateHash(old, next)) }
+
+// RecoveryRotate asks the kernel for an approval of rotating to next on a
+// hardware key's signature c over RotateMsg(old, next). A signature over
+// another change, or a phone passkey's, is ErrRotateSig.
+func (o Owner) RecoveryRotate(ctx context.Context, next string, c key.Cosign) ([]byte, error) {
+	var r struct {
+		Approval []byte `json:"approval"`
+	}
+	err := typed(o.call(ctx, "recoveryrotate", struct {
+		Next   string     `json:"next"`
+		Cosign key.Cosign `json:"cosign"`
+	}{next, c}, &r))
+	return r.Approval, err
+}
+
+// SwitchRecipient makes recipient, in its wire form (X25519 key, then
+// ML-KEM-768 encapsulation key), the one every later backup seals to, on
+// the card-route approval RecoveryRotate gave for it. A retry after it took
+// effect succeeds; an approval used for another recipient is
+// ErrApprovalStale, one past its time ErrApprovalExpired.
+func (o Owner) SwitchRecipient(ctx context.Context, recipient, approval []byte) error {
+	return typed(o.call(ctx, "recipient", struct {
+		Recipient []byte `json:"recipient"`
+		Approval  []byte `json:"approval"`
+	}{recipient, approval}, nil))
+}
+
+// The lost-card route (REC-4, D-201 route B, MIG-4-recovery-r3): after the
+// restart, the kernel holds the recovery key the unlock step made, for the
+// page to show on the new card, until the owner confirms that card.
+
+// ErrNoRecoveryCard: the kernel holds no new recovery key: none was made
+// at this boot, the card was confirmed, or the kernel restarted since.
+var ErrNoRecoveryCard = errors.New("kernelsock: the kernel holds no new recovery key")
+
+// noRecoveryCardText is kernel/proc ErrNoRecoveryCard's text;
+// TestRecoveryCardReachesTheKernel keeps them the same.
+const noRecoveryCardText = "run: I hold no new recovery key to show; if you have not written down the new card, ask for one again"
+
+// RecoveryCard is the recovery key the unlock step made at this boot, 32
+// bytes, or ErrNoRecoveryCard.
+func (o Owner) RecoveryCard(ctx context.Context) ([]byte, error) {
+	var r struct {
+		Key []byte `json:"key"`
+	}
+	err := typed(o.call(ctx, "recoverycard", nil, &r))
+	return r.Key, err
+}
+
+// RecoveryCardDone has the kernel wipe the new recovery key, once the
+// owner has confirmed the card. Done twice is not an error.
+func (o Owner) RecoveryCardDone(ctx context.Context) error {
+	return typed(o.call(ctx, "recoverycarddone", nil, nil))
 }
 
 // The page's serving certificate (CH-9, MIG-4-recovery-f1): the kernel

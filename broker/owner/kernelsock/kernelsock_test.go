@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -329,14 +330,14 @@ func TestStatusAndRetryReachTheKernel(t *testing.T) {
 		t.Fatalf("status: %+v, %v", s, err)
 	}
 	var r Refused
-	if err := o.Retry(ctx, "p1", 0); !errors.As(err, &r) || r.Text != kernel.ErrNotParked.Error() {
+	if err := o.Retry(ctx, "p1", 0, 1); !errors.As(err, &r) || r.Text != kernel.ErrNotParked.Error() {
 		t.Fatalf("a RETRY of no parked step: %v", err)
 	}
 	s := setupKernel(t)
 	if st, err := s.Status(ctx); err != nil || len(st) != 0 {
 		t.Fatalf("a setup-only kernel's status: %+v, %v", st, err)
 	}
-	if err := s.Retry(ctx, "p1", 0); !errors.As(err, &r) {
+	if err := s.Retry(ctx, "p1", 0, 1); !errors.As(err, &r) {
 		t.Fatalf("a setup-only kernel's RETRY: %v", err)
 	}
 }
@@ -375,11 +376,11 @@ func capturingKernel(t *testing.T) (string, <-chan string) {
 func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 	needRoot(t)
 	path, lines := capturingKernel(t)
-	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2); err != nil {
+	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).Retry("plan:7", 2, 3); err != nil {
 		t.Fatal(err)
 	}
 	want := <-lines
-	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2); err != nil {
+	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).Retry(context.Background(), "plan:7", 2, 3); err != nil {
 		t.Fatal(err)
 	}
 	if got := <-lines; got != want {
@@ -392,14 +393,14 @@ func TestRetrySendsTheKernelsOwnCall(t *testing.T) {
 func TestStatusReadsTheKernelsFrame(t *testing.T) {
 	needRoot(t)
 	u := []kernel.Unsettled{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: kernel.PParked, Checks: 6,
-		Detail: "no answer", Retry: true, SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
+		Detail: "no answer", Retry: true, SentAt: 1760364120000, Attempt: 2, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: kernel.SActive}}
 	b, err := json.Marshal(map[string]any{"result": u})
 	if err != nil {
 		t.Fatal(err)
 	}
 	got, err := cannedKernel(t, string(b)).Status(context.Background())
 	want := []Step{{Plan: "p9", Index: 3, Verb: "pay", Clerk: "bank", Phase: PhaseParked, Detail: "no answer", Retry: true,
-		SentAt: 1760364120000, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
+		SentAt: 1760364120000, Attempt: 2, Amount: 1200, Money: true, Recipient: "acct-4417", PlanStatus: PlanActive}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("status reads %+v, %v; want %+v", got, err, want)
 	}
@@ -714,5 +715,202 @@ func TestCertifyReachesTheKernel(t *testing.T) {
 	}
 	if noAuthorityText != proc.ErrNoAuthority.Error() || pageRestoreText != proc.ErrPageRestore.Error() {
 		t.Fatal("the refusals' texts are not the kernel's")
+	}
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r1 (#3391): a hardware key's tap over RotateMsg gets an
+// approval the store's head key signed, and the same approval switches
+// the kernel to the new recipient; a phone passkey's tap is ErrRotateSig,
+// a spent approval ErrApprovalStale and an expired one ErrApprovalExpired,
+// here as this package's own errors, so the texts stay the kernel's.
+func TestRecoveryRotateReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	if approvalStaleText != proc.ErrApprovalStale.Error() || approvalExpiredText != handoff.ErrApprovalExpired.Error() {
+		t.Fatal("the rotation refusals' texts are not the kernel's")
+	}
+	ctx := context.Background()
+	as := anchorSigners(t)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rcp := func(b byte) backup.Recipient {
+		r, err := backup.RecipientFor(bytes.Repeat([]byte{b}, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	r1, r2 := rcp(9), rcp(10)
+	data := t.TempDir()
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(data, "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: pub, Sign: priv, Anchors: publics(as),
+		KeyDir: filepath.Join(data, "keys"), BackupDir: filepath.Join(data, "backups"), Recipient: append(r1.X, r1.EK...),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	if !bytes.Equal(RotateMsg(r1.ID(), r2.ID()), key.CosignMsg(kernel.RecoveryRotateHash(r1.ID(), r2.ID()))) {
+		t.Fatal("RotateMsg is not the rotation's cosign message")
+	}
+	sign := func(s key.Ed25519Signer, old, next string) key.Cosign {
+		return key.Cosign{By: s.Public(), Sig: s.Sign(RotateMsg(old, next))}
+	}
+	phone := anchorSigners(t)[0] // a key the kernel holds as no anchor
+	if _, err := o.RecoveryRotate(ctx, r2.ID(), sign(phone, r1.ID(), r2.ID())); !errors.As(err, new(Refused)) || !errors.Is(err, ErrRotateSig) {
+		t.Fatalf("a key that is no anchor: %v", err)
+	}
+	a, err := o.RecoveryRotate(ctx, r2.ID(), sign(as[0], r1.ID(), r2.ID()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := handoff.VerifyApproval(pub, a, time.Now().UnixMilli()); err != nil || got.Old != r1.ID() || got.Next != r2.ID() {
+		t.Fatalf("approval %+v, %v", got, err)
+	}
+	expired, err := handoff.SignApproval(priv, handoff.Approval{Route: handoff.RouteCard, Old: r1.ID(), Next: r2.ID(), Expires: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := append(bytes.Clone(r2.X), r2.EK...)
+	if err := o.SwitchRecipient(ctx, wire, expired); !errors.Is(err, ErrApprovalExpired) {
+		t.Fatalf("an expired approval: %v", err)
+	}
+	if err := o.SwitchRecipient(ctx, wire, a); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := o.Backups(ctx); err != nil || v.Recipient != r2.ID() {
+		t.Fatalf("after the switch: %+v %v", v, err)
+	}
+	r3 := rcp(11)
+	spent, err := handoff.SignApproval(priv, handoff.Approval{Route: handoff.RouteCard, Old: r1.ID(), Next: r3.ID(), Expires: time.Now().Add(time.Hour).UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SwitchRecipient(ctx, append(bytes.Clone(r3.X), r3.EK...), spent); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("an approval from before the switch: %v", err)
+	}
+}
+
+// REQ: HW-15
+// EDGE-link-core-c2b: the page step's enrolment and the owner's cut reach
+// the real OwnerSide on the written-out wire: the candidate the link port
+// logged is enrolled on a hardware key's signature and is live, a key the
+// link never logged is the kernel's refusal, and a revoke cuts it.
+// Revert mutants: a call or argument name changed here (the kernel answers
+// "no call" or ErrArgs).
+func TestEdgeEnrollAndRevokeReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	as := anchorSigners(t)
+	head, headPriv, _ := ed25519.GenerateKey(nil)
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: head, Sign: headPriv, Anchors: publics(as),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	edge, edgePriv, _ := ed25519.GenerateKey(nil)
+	other, _, _ := ed25519.GenerateKey(nil)
+	nonce := make([]byte, kernel.HelloNonce)
+	sig := func(k ed25519.PublicKey) (c key.Cosign) {
+		h.With(func(kk *kernel.Kernel) error {
+			c = key.Approve(as[0], kernel.EdgeEnrollHash(kk.State().EdgeChanges(), kk.Box(), k, kk.EdgeReplaces(k)))
+			return nil
+		})
+		return c
+	}
+	live := func() (k ed25519.PublicKey) {
+		h.With(func(kk *kernel.Kernel) error { k = kk.LiveEdge(); return nil })
+		return k
+	}
+	if err := h.With(func(k *kernel.Kernel) error {
+		return k.EdgeCandidate(time.Now().UnixMilli(), edge, nonce, ed25519.Sign(edgePriv, kernel.HelloMsg(nonce)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var r Refused
+	if err := o.EdgeEnroll(ctx, other, sig(other)); !errors.As(err, &r) || r.Text != kernel.ErrEdgeCandidate.Error() {
+		t.Fatalf("enrolling a key the link never logged: %v", err)
+	}
+	if err := o.EdgeEnroll(ctx, edge, sig(edge)); err != nil || !live().Equal(edge) {
+		t.Fatalf("enrolling the candidate: %v, live %x", err, live())
+	}
+	if err := o.EdgeRevoke(ctx, edge); err != nil || live() != nil {
+		t.Fatalf("revoking it: %v, live %x", err, live())
+	}
+	if err := o.EdgeRevoke(ctx, edge); !errors.As(err, &r) || r.Text != kernel.ErrEdgeRevoked.Error() {
+		t.Fatalf("revoking it again: %v", err)
+	}
+}
+
+// REQ: REC-4
+// MIG-4-recovery-r3: after a lost-card restart, the page reads the new
+// recovery key from the real OwnerSide on the written-out wire until it
+// confirms the card; then the kernel holds none, which reads as
+// ErrNoRecoveryCard, and confirming again changes nothing.
+// Revert mutants: a call name changed here (the kernel answers "no call");
+// noRecoveryCardText changed (the text check fails).
+func TestRecoveryCardReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	if noRecoveryCardText != proc.ErrNoRecoveryCard.Error() {
+		t.Fatal("the no-card refusal's text is not the kernel's")
+	}
+	ctx := context.Background()
+	as := anchorSigners(t)
+	head, headPriv, _ := ed25519.GenerateKey(nil)
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: head, Sign: headPriv, Anchors: publics(as),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("no card made at this boot: %v", err)
+	}
+	rec := bytes.Repeat([]byte{0x42}, handoff.RecoveryLen)
+	h.HoldRecoveryCard(bytes.Clone(rec))
+	if got, err := o.RecoveryCard(ctx); err != nil || !bytes.Equal(got, rec) {
+		t.Fatalf("the card: %x, %v", got, err)
+	}
+	for range 2 {
+		if err := o.RecoveryCardDone(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after the confirm: %v", err)
 	}
 }

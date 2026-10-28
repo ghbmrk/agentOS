@@ -4,6 +4,7 @@ package backup
 
 import (
 	"bytes"
+	"crypto/mlkem"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -13,12 +14,11 @@ var testID = [idLen]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
 // Offsets of the header fields.
 const (
-	offKind      = len(magic) + 1
-	offID        = offKind + 1
-	offGen       = offID + idLen
-	offRecipient = offGen + 8
-	offEph       = offRecipient + idLen
-	offCtM       = offEph + 32
+	offKind = len(magic) + 1
+	offID   = offKind + 1
+	offGen  = offID + idLen
+	offEph  = offGen + 8
+	offCtM  = offEph + 32
 )
 
 func TestOpenNeedsBothSecrets(t *testing.T) {
@@ -81,8 +81,8 @@ func TestKindAndHeaderAreBound(t *testing.T) {
 			t.Errorf("opens with header byte %d changed", i)
 		}
 	}
-	// Named fields, for the record: backup ID, generation, recipient.
-	for _, off := range []int{offID, offGen + 7, offRecipient} {
+	// Named fields, for the record: backup ID, generation.
+	for _, off := range []int{offID, offGen + 7} {
 		bad := bytes.Clone(tb)
 		bad[off] ^= 0x80
 		if _, err := openBytes(bad, rk1, KindKeyTable); err == nil {
@@ -158,8 +158,8 @@ func TestRecipientIsDerivedAndPublicOnly(t *testing.T) {
 		t.Fatal("two recovery keys give one recipient")
 	}
 	obj := sealBytes(t, a, KindContent, testID, 0, []byte("x"))
-	if _, err := openBytes(obj, rk2, KindContent); !errors.Is(err, ErrRecipient) {
-		t.Fatalf("another recovery key: %v, want ErrRecipient", err)
+	if _, err := openBytes(obj, rk2, KindContent); !errors.Is(err, ErrOpen) {
+		t.Fatalf("another recovery key: %v, want ErrOpen", err)
 	}
 	if _, err := RecipientFor(rk1[:15]); !errors.Is(err, ErrShortKey) {
 		t.Fatalf("a 15-byte recovery key: %v", err)
@@ -179,5 +179,33 @@ func TestRecipientIsDerivedAndPublicOnly(t *testing.T) {
 	must(t, json.Unmarshal(enc, &back))
 	if back.ID() != a.ID() {
 		t.Fatal("the recipient does not survive its encoding")
+	}
+}
+
+// #3446: the clear header names no recipient, so a guess at the recovery
+// key cannot be checked against many installs' uploads by one lookup. Two
+// objects sealed to two recovery keys have the same header apart from the
+// per-object ephemeral key and ML-KEM ciphertext, and no object holds the
+// recipient's ID or public keys.
+func TestTheHeaderNamesNoRecipient(t *testing.T) {
+	a, b := recipient(t, rk1), recipient(t, rk2)
+	oa := sealBytes(t, a, KindKeyTable, testID, 3, []byte("x"))
+	ob := sealBytes(t, b, KindKeyTable, testID, 3, []byte("x"))
+	fixed := headerLen - 32 - mlkem.CiphertextSize768
+	if fixed != offEph || !bytes.Equal(oa[:fixed], ob[:fixed]) {
+		t.Fatal("the header's fixed fields depend on the recipient")
+	}
+	id := a.id()
+	for name, v := range map[string][]byte{"ID": id[:], "hex ID": []byte(a.ID()), "X25519 key": a.X, "ML-KEM key prefix": a.EK[:16]} {
+		if bytes.Contains(oa, v) {
+			t.Errorf("the object holds the recipient's %s", name)
+		}
+	}
+	// An object in the old layout, with the recipient ID in its header, is
+	// refused, not read.
+	old := bytes.Clone(oa)
+	old[len(magic)] = 1
+	if _, err := openBytes(old, rk1, KindKeyTable); !errors.Is(err, ErrHeader) {
+		t.Fatalf("a version 1 header: %v, want ErrHeader", err)
 	}
 }

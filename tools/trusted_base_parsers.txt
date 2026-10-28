@@ -17,12 +17,14 @@ inert  github.com/ghbmrk/agentos/broker/accel -- reads the host's own device fil
 inert  github.com/ghbmrk/agentos/broker/admission -- in-process admission arithmetic
 parser github.com/ghbmrk/agentos/broker/backup -- backup objects and key tables read back from a backup target
 inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup budgets
+parser github.com/ghbmrk/agentos/broker/camwire -- frames, settings bundles and image manifests from a camera node or the enforcer, and the owner's passkey assertions
 inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup files
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
 parser github.com/ghbmrk/agentos/broker/clerk/accounts -- senders from the owner's mail provider, for the account plan (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/clerk/clerkkey -- a clerk's key hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail -- process entry; reads its key hand-off and the anchors file (uncertain; classed parser)
+inert  github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model -- process entry; hands its key hand-off to clerkkey and its sealed slot's bytes to clerk/plan, which decode them; decodes only its flags
 inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own configuration
 inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
@@ -31,6 +33,8 @@ inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its 
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
 inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/infer/supervise -- starts the inference service; decodes nothing
+parser github.com/ghbmrk/agentos/broker/vision -- replies from the untrusted vision service
+inert  github.com/ghbmrk/agentos/broker/vision/supervise -- starts the vision service; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/journal -- reads its own write-ahead journal
 inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's own records
 inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records
@@ -57,6 +61,9 @@ parser github.com/ghbmrk/agentos/broker/change -- change proposals from loops an
 parser github.com/ghbmrk/agentos/broker/checker -- owner codes and approval requests (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/claim -- the claim code a phone presents
 parser github.com/ghbmrk/agentos/broker/clerk -- a clerk's sealed Secrets file and its providers' replies
+inert github.com/ghbmrk/agentos/broker/clerk/check -- checks a request the kernel already decoded against the key chain; decodes no bytes itself
+parser github.com/ghbmrk/agentos/broker/clerk/devhost -- a device driver's wire messages and the device's frames (DEVSLOT-drivers b2a)
+parser github.com/ghbmrk/agentos/broker/clerk/devslot -- the driver wire's messages, from the host or a driver's process (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server responses, in the mail clerk's connection process (go-imap; #2937 gap 2)
@@ -64,10 +71,12 @@ parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- pre-auth lines a
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire -- typed frames from the IMAP connection process
 parser github.com/ghbmrk/agentos/broker/clerk/model -- model providers' replies
 parser github.com/ghbmrk/agentos/broker/clerk/plan -- a plan CLI guest's requests and its provider's answers, in the model clerk's process
+parser github.com/ghbmrk/agentos/broker/clerk/readerwire -- the reader process's answers, in the mail clerk's process
 parser github.com/ghbmrk/agentos/broker/clerk/run -- calls on the clerks' and mail sockets
 parser github.com/ghbmrk/agentos/broker/clerk/seal -- the sealed store file on the drive
 parser github.com/ghbmrk/agentos/broker/clock -- time sources (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-a8scan -- drive contents it scans
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-link -- the edge's TLS handshakes and hellos, and the consumer's JSON lines
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-checker -- process entry (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-egress -- HTTP from guests' model routes and provider replies
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-holder -- process entry (uncertain; classed parser)

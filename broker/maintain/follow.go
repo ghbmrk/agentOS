@@ -1,3 +1,8 @@
+// Package maintain holds the owner wording for following a fork (OSS-9,
+// OSS-10). Its update loop (Loop 3) was deleted unwired in #2785 c1; the
+// update path's rebuild on the kernel is #2579's.
+//
+// Assumptions are listed in ASSUMPTIONS.md next to this file.
 package maintain
 
 import (

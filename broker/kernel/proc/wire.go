@@ -51,7 +51,7 @@ type answer struct {
 }
 
 // snapshot is the log's view of one request, as of the call: everything
-// clerk.Check reads, for this request's chain only.
+// check.Check reads, for this request's chain only.
 type snapshot struct {
 	Dispatch   *kernel.Dispatch     `json:"dispatch"` // nil: the step is not in flight
 	Grants     map[key.ID]int64     `json:"grants"`   // grant live-from, per chain ID granted
@@ -179,9 +179,9 @@ type uses map[key.ID][]key.Use
 func (u uses) Uses(id key.ID) []key.Use { return u[id] }
 
 // covers reports whether s carries the ledger for every scope the request's
-// chain charges, checked the way clerk.Check verifies it. A view that leaves
+// chain charges, checked the way check.Check verifies it. A view that leaves
 // one out would read as unspent, so the clerk refuses rather than act on it.
-// A plan that does not verify here fails clerk.Check anyway.
+// A plan that does not verify here fails check.Check anyway.
 func (s *snapshot) covers(anchors []key.PublicKey, r kernel.Request) bool {
 	if s.Dispatch == nil {
 		return true

@@ -5,6 +5,7 @@ package proc
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
@@ -22,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
@@ -67,7 +69,7 @@ func TestOwnerSocketServesTheSeam(t *testing.T) {
 	if err := o.Extend(b.key, "o1"); !errors.As(err, &rf) || rf.Code != kernel.CNotHeld {
 		t.Fatalf("extend of an unheld plan: %v, want refusal %s", err, kernel.CNotHeld)
 	}
-	if err := o.Retry("o1", 0); !errors.Is(err, kernel.ErrNotParked) {
+	if err := o.Retry("o1", 0, 1); !errors.Is(err, kernel.ErrNotParked) {
 		t.Fatalf("retry of an unparked step: %v", err)
 	}
 	ver, err := kernel.VerifyPlan(p, anchors)
@@ -446,6 +448,8 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	phone, phonePriv := gen(8)
+	edge, edgePriv := gen(45)
+	hi := edgeHello(edgePriv, 1)
 	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
 	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(key.Ed25519Signer(phonePriv), kernel.TaskHash("t1", 0, "shop.test", "r"))}
 	for _, b := range []*box{direct, sock} {
@@ -454,6 +458,10 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 				return err
 			}
 			if err := k.Issue(at-kernel.GrantHold, ecos, eroot, ext); err != nil {
+				return err
+			}
+			// The edge on the cable, for the page step's calls.
+			if err := k.EdgeCandidate(at, hi.Key, hi.Nonce, hi.Sig); err != nil {
 				return err
 			}
 			return k.OpenTask(at, "t1")
@@ -530,7 +538,11 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "changes", op: "changes", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Changes() }, call: func(k *kernel.Kernel) (any, error) { return *k.State().ChangesView(), nil }},
 		{name: "resume", op: "resume", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Resume(1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Resume(now(), 1) }}, // the one STOP above
 		{name: "status", op: "status", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Status() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Status(), nil }},
-		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0) }},
+		// The retry call carries the attempt the ask named: an older one is
+		// the kernel's refusal on both sides, the parked attempt (1) is sent
+		// (CH-10).
+		{name: "retry moved", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 0) }},
+		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 1) }},
 		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
 		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Pools, nil }},
 		{name: "anchors", op: "anchors", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Anchors() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Anchors, nil }},
@@ -567,6 +579,10 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "revoke", op: "revoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Revoke(ver.ID()) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Revoke(now(), ver.ID()) }},
 		{name: "cancel", op: "cancel", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Cancel("p1") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Cancel(now(), "p1") }},
 		{name: "untarget", op: "untarget", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Untarget("none") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Untarget(now(), "none") }},
+		{name: "edgeenroll", op: "edgeenroll", sock: func(o Owner, _ Meter) (any, error) { return nil, o.EdgeEnroll(edge, edgeEnrollSig(sock, edge)) }, call: func(k *kernel.Kernel) (any, error) {
+			return nil, k.EdgeEnroll(now(), edge, key.Approve(key.Ed25519Signer(ownerPriv), kernel.EdgeEnrollHash(k.State().EdgeChanges(), k.Box(), edge, k.EdgeReplaces(edge))))
+		}},
+		{name: "edgerevoke", op: "edgerevoke", sock: func(o Owner, _ Meter) (any, error) { return nil, o.EdgeRevoke(edge) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.EdgeRevoke(now(), edge) }},
 		{name: "setupinfo", op: "setupinfo", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SetupInfo() }, call: func(k *kernel.Kernel) (any, error) { return SetupInfo{k.State().SetupOpen(), k.Box()}, nil }},
 		{name: "setup", op: "setup", sock: func(o Owner, _ Meter) (any, error) {
 			return nil, o.Setup(kernel.SignSetup(headPub, key.Ed25519Signer(ownerPriv), key.Ed25519Signer(sparePriv)))
@@ -577,7 +593,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// Refused on both kernels by design: the admission past the cap, the
 	// pool at its reserve, and setup on a box that has its anchors (the
 	// setup-only tests take it on a fresh one). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true, "retry moved": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {
@@ -764,17 +780,18 @@ func get[T any](t *testing.T, f func() (T, error)) T {
 	return v
 }
 
-// No socket hands sealed plaintext to anyone (CH-25, #3160 Security): no
-// side has read or readfor, only the owner side has the erase calls, and a
-// named answer carries subject IDs, never a label's text.
+// No socket hands sealed plaintext to anyone but a content clerk (CH-25,
+// #3160 Security; KRN-content): only a content side has readfor, and no
+// side has read; only the owner side has the erase calls, and a named
+// answer carries subject IDs, never a label's text.
 func TestNoSideReadsSealedContent(t *testing.T) {
 	content := []string{"named", "recall", "erase", "unerased", "erasedreads"}
-	for _, side := range []Side{OwnerSide, MeterSide} {
-		for _, op := range []string{"read", "readfor", "open", "content"} {
+	for _, side := range []Side{OwnerSide, MeterSide, LinkSide, ContentSide("vision")} {
+		for _, op := range []string{"read", "readfor", "open", "content", "opensubject", "seal"} {
 			_, a := side.ops[op]
 			_, b := side.procOps[op]
-			if a || b {
-				t.Fatalf("the %s side serves %s", side.name, op)
+			if (a || b) != (side.name == "content" && (op == "readfor" || op == "opensubject" || op == "seal")) {
+				t.Fatalf("the %s side serves %s: %v", side.name, op, a || b)
 			}
 		}
 		for _, op := range content {
@@ -816,5 +833,293 @@ func TestNoSideReadsSealedContent(t *testing.T) {
 		if _, _, err := o.Named(bad); !errors.Is(err, ErrArgs) {
 			t.Fatalf("a label of %d bytes: %v", len(bad), err)
 		}
+	}
+	// LOG-4 (#3443): a blank label would find every blank-labelled subject,
+	// and invalid UTF-8 would cross as U+FFFD; neither reaches a match.
+	for bad, want := range map[string]error{"   ": kernel.ErrLabel, "\t\n": kernel.ErrLabel, "\xff": ErrArgs} {
+		if found, _, err := o.Named(bad); !errors.Is(err, want) || found != nil {
+			t.Fatalf("named %q: %v, %v; want %v", bad, found, err, want)
+		}
+	}
+}
+
+// edgeHello is edge's hello over nonce: its key, the nonce and the key's
+// signature over kernel.HelloMsg (EDGE-link-core decision 5).
+func edgeHello(edge ed25519.PrivateKey, nonce byte) candidateArgs {
+	n := bytes.Repeat([]byte{nonce}, kernel.HelloNonce)
+	return candidateArgs{edge.Public().(ed25519.PublicKey), n, ed25519.Sign(edge, kernel.HelloMsg(n))}
+}
+
+// edgeEnrollSig is the owner's hardware key's signature over enrolling edge
+// as b's next edge change.
+func edgeEnrollSig(b *box, edge ed25519.PublicKey) key.Cosign {
+	var c key.Cosign
+	b.h.With(func(k *kernel.Kernel) error {
+		c = key.Approve(key.Ed25519Signer(ownerPriv), kernel.EdgeEnrollHash(k.State().EdgeChanges(), k.Box(), edge, k.EdgeReplaces(edge)))
+		return nil
+	})
+	return c
+}
+
+// cvInput is a TLS 1.3 server CertificateVerify input over a transcript
+// hash of n bytes.
+func cvInput(n int) []byte {
+	return append(append([]byte(strings.Repeat(" ", 64)), "TLS 1.3, server CertificateVerify\x00"...), bytes.Repeat([]byte{7}, n)...)
+}
+
+// REQ: HW-15, HW-16
+// EDGE-link-core-c2b: the link key signs a TLS 1.3 server CertificateVerify
+// input over a SHA-256 or SHA-384 transcript hash and nothing else, so a
+// compromised link process cannot have it sign another message; a kernel
+// with no link key answers one fixed refusal. Revert mutants: the prefix
+// check dropped (the client's context and a bare hash are signed); the
+// length check dropped (a longer or shorter tail is signed); the no-key
+// check dropped (the no-key kernel panics instead of refusing).
+func TestLinksignSignsOnlyCertificateVerify(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	b.h.Close()
+	_, linkPriv := gen(40)
+	b.cfg.LinkKey = linkPriv
+	b.open()
+	link := serveSide(t, b, LinkSide, os.Getuid())
+	before := b.entries()
+
+	var pub ed25519.PublicKey
+	if err := link.Call("linkkey", nil, &pub); err != nil || !pub.Equal(linkPriv.Public()) {
+		t.Fatalf("linkkey: %x, %v", pub, err)
+	}
+	for _, n := range []int{32, 48} {
+		var sig []byte
+		if err := link.Call("linksign", signArgs{cvInput(n)}, &sig); err != nil || !ed25519.Verify(pub, cvInput(n), sig) {
+			t.Fatalf("linksign over a %d-byte transcript hash: %x, %v", n, sig, err)
+		}
+	}
+	client := append(append([]byte(strings.Repeat(" ", 64)), "TLS 1.3, client CertificateVerify\x00"...), bytes.Repeat([]byte{7}, 32)...)
+	for name, msg := range map[string][]byte{
+		"empty":                     nil,
+		"a bare hash":               bytes.Repeat([]byte{7}, 32),
+		"the client's context":      client,
+		"a 31-byte hash":            cvInput(31),
+		"a 33-byte hash":            cvInput(33),
+		"a 64-byte hash":            cvInput(64),
+		"the prefix alone":          cvInput(0),
+		"a hello's message":         kernel.HelloMsg(bytes.Repeat([]byte{1}, kernel.HelloNonce)),
+		"the context with no zero":  append([]byte(strings.Repeat(" ", 64)+"TLS 1.3, server CertificateVerify!"), bytes.Repeat([]byte{7}, 32)...),
+		"63 spaces then the server": append([]byte(strings.Repeat(" ", 63)+"TLS 1.3, server CertificateVerify\x00"), bytes.Repeat([]byte{7}, 33)...),
+	} {
+		var sig []byte
+		if err := link.Call("linksign", signArgs{msg}, &sig); !errors.Is(err, ErrLinkSign) || sig != nil {
+			t.Errorf("linksign over %s: %x, %v, want ErrLinkSign", name, sig, err)
+		}
+	}
+	// No other side signs with the link key.
+	for _, side := range []Side{OwnerSide, MeterSide} {
+		if err := serveSide(t, b, side, os.Getuid()).Call("linksign", signArgs{cvInput(32)}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+			t.Errorf("linksign on the %s socket: %v", side.name, err)
+		}
+	}
+	if n := b.entries(); n != before {
+		t.Fatalf("the link key's calls logged %d entries", n-before)
+	}
+
+	// A store enrolled before the link key: one fixed refusal, never a key.
+	nokey := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	nolink := serveSide(t, nokey, LinkSide, os.Getuid())
+	if err := nolink.Call("linksign", signArgs{cvInput(32)}, nil); !errors.Is(err, ErrNoLinkKey) {
+		t.Fatalf("linksign with no link key: %v", err)
+	}
+	if err := nolink.Call("linkkey", nil, &pub); !errors.Is(err, ErrNoLinkKey) {
+		t.Fatalf("linkkey with no link key: %v", err)
+	}
+}
+
+// REQ: HW-15, HW-16
+// EDGE-link-core-c2b: only the link's uid logs a candidate. Its socket
+// refuses every other uid and logs nothing, the owner and meter sides have
+// no link call, and the link side has no owner call. The owner's
+// edgeenroll takes only the candidate the link logged, on a hardware key's
+// signature, and edgekey and edgerevoke read and cut it. Revert mutants:
+// LinkSide served to every uid (ListenKernel's uid not passed: the other
+// uid's candidate is logged); edgecandidate added to OwnerSide (the owner
+// socket logs one); edgeenroll calling EdgeEnroll on any key (kernel.go's
+// candidate check is a2's, re-run here across the socket).
+func TestEdgecandidateOnlyFromTheLinkUid(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	_, edgePriv := gen(41)
+	_, otherPriv := gen(42)
+	edge := edgePriv.Public().(ed25519.PublicKey)
+	before := b.entries()
+
+	other := serveSide(t, b, LinkSide, os.Getuid()+1)
+	if err := other.Call("edgecandidate", edgeHello(edgePriv, 1), nil); err == nil {
+		t.Fatal("a link socket for another uid took this uid's candidate")
+	}
+	owner := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
+	meter := serveSide(t, b, MeterSide, os.Getuid())
+	for _, c := range []Conn{owner.Conn, meter} {
+		for _, op := range []string{"edgecandidate", "edgekey", "linkkey", "linksign"} {
+			if err := c.Call(op, edgeHello(edgePriv, 1), nil); err == nil || !strings.Contains(err.Error(), "no call") {
+				t.Errorf("%s on a socket not the link's: %v", op, err)
+			}
+		}
+	}
+	if n := b.entries(); n != before {
+		t.Fatalf("candidates from other uids or sides logged %d entries", n-before)
+	}
+
+	link := serveSide(t, b, LinkSide, os.Getuid())
+	for _, op := range []string{"edgeenroll", "edgerevoke", "stop", "status", "meter"} {
+		if err := link.Call(op, edgeArgs{edge}, nil); err == nil || !strings.Contains(err.Error(), "no call") {
+			t.Errorf("%s on the link socket: %v", op, err)
+		}
+	}
+	if err := link.Call("edgecandidate", edgeHello(edgePriv, 1), nil); err != nil {
+		t.Fatalf("the link's candidate: %v", err)
+	}
+	if n := b.entries(); n != before+1 {
+		t.Fatalf("the link's candidate logged %d entries, want 1", n-before)
+	}
+	// A refusal crosses as the kernel's own error.
+	if err := link.Call("edgecandidate", edgeHello(otherPriv, 2), nil); !errors.Is(err, kernel.ErrEdgeBusy) {
+		t.Fatalf("a second hello within the minute: %v, want ErrEdgeBusy", err)
+	}
+
+	// The owner enrols only the logged candidate.
+	otherKey := otherPriv.Public().(ed25519.PublicKey)
+	if err := owner.EdgeEnroll(otherKey, edgeEnrollSig(b, otherKey)); !errors.Is(err, kernel.ErrEdgeCandidate) {
+		t.Fatalf("edgeenroll of a key the link never logged: %v, want ErrEdgeCandidate", err)
+	}
+	bad := edgeEnrollSig(b, edge)
+	bad.Sig[0] ^= 1
+	if err := owner.EdgeEnroll(edge, bad); !errors.Is(err, kernel.ErrEdgeSig) {
+		t.Fatalf("edgeenroll on a bad signature: %v, want ErrEdgeSig", err)
+	}
+	if n := b.entries(); n != before+1 {
+		t.Fatalf("refused enrolments logged %d entries", n-before-1)
+	}
+	var e EdgeKey
+	if err := link.Call("edgekey", edgeArgs{edge}, &e); err != nil || e != (EdgeKey{}) {
+		t.Fatalf("edgekey before the enrolment: %+v, %v", e, err)
+	}
+	if err := owner.EdgeEnroll(edge, edgeEnrollSig(b, edge)); err != nil {
+		t.Fatalf("edgeenroll of the candidate: %v", err)
+	}
+	if err := link.Call("edgekey", edgeArgs{edge}, &e); err != nil || e != (EdgeKey{Live: true}) {
+		t.Fatalf("edgekey once enrolled: %+v, %v", e, err)
+	}
+	if err := owner.EdgeRevoke(edge); err != nil {
+		t.Fatalf("edgerevoke: %v", err)
+	}
+	if err := link.Call("edgekey", edgeArgs{edge}, &e); err != nil || e != (EdgeKey{Revoked: true}) {
+		t.Fatalf("edgekey once revoked: %+v, %v", e, err)
+	}
+	if err := owner.EdgeRevoke(edge); !errors.Is(err, kernel.ErrEdgeRevoked) {
+		t.Fatalf("a second edgerevoke: %v, want ErrEdgeRevoked", err)
+	}
+}
+
+// REQ: HW-15
+// edgekey answers only for a whole key: an empty or short one would equal
+// "no live edge" and read as live. Revert mutant: the length check in
+// LinkSide's edgekey dropped.
+func TestEdgekeyNeedsAWholeKey(t *testing.T) {
+	b := newBox(t, filepath.Join(shortDir(t), "web.sock"))
+	link := serveSide(t, b, LinkSide, os.Getuid())
+	for _, k := range []ed25519.PublicKey{nil, {}, make(ed25519.PublicKey, 31), make(ed25519.PublicKey, 33)} {
+		var e EdgeKey
+		if err := link.Call("edgekey", edgeArgs{k}, &e); !errors.Is(err, ErrArgs) || e.Live {
+			t.Errorf("edgekey of a %d-byte key: %+v, %v, want ErrArgs", len(k), e, err)
+		}
+	}
+}
+
+// REQ: HW-15
+// A kernel waiting for setup takes no link call: a candidate logged before
+// setup's anchors would take sequence 2 from the first edge key (decision
+// 3). Revert mutant: setupOps naming link/edgecandidate.
+func TestASetupOnlyKernelTakesNoLinkCall(t *testing.T) {
+	_, linkPriv := gen(43)
+	_, edgePriv := gen(44)
+	h, err := OpenKernel(KernelConfig{Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: headPub, Sign: headPriv, LinkKey: linkPriv}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	b := &box{t: t, h: h}
+	link := serveSide(t, b, LinkSide, os.Getuid())
+	for op, args := range map[string]any{"edgecandidate": edgeHello(edgePriv, 1), "edgekey": edgeArgs{edgePriv.Public().(ed25519.PublicKey)}, "linkkey": nil, "linksign": signArgs{cvInput(32)}} {
+		if err := link.Call(op, args, nil); !errors.Is(err, ErrSetupOnly) {
+			t.Errorf("%s before setup: %v, want ErrSetupOnly", op, err)
+		}
+	}
+	if n := b.entries(); n != 0 {
+		t.Fatalf("link calls before setup logged %d entries", n)
+	}
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r3: the recovery key the unlock step made on the lost-card
+// route is the owner's to read through recoverycard until recoverycarddone
+// wipes it; then the call refuses, and done again changes nothing. The key
+// is in no log entry nor in any backup taken while it is held, and a
+// restart holds none (the page then tells the owner to ask again).
+// Revert mutants: RecoveryCardDone leaving the key (the read after done
+// answers it); HoldRecoveryCard taking a key of any length (the 31-byte
+// hold reads back).
+func TestNewRecoveryHeldUntilDone(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.subject()
+	dir := b.addTarget("drive", false)
+	o := serveOwner(t, b.h, func() int64 { return b.now })
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("no card made at this boot: %v", err)
+	}
+	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.RecoveryLen-1))
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("a short key was held: %v", err)
+	}
+	rec := bytes.Repeat([]byte{0x5e}, handoff.RecoveryLen)
+	held := bytes.Clone(rec)
+	b.h.HoldRecoveryCard(held)
+	for range 2 {
+		if got, err := o.RecoveryCard(); err != nil || !bytes.Equal(got, rec) {
+			t.Fatalf("the card: %x, %v", got, err)
+		}
+	}
+	taken := b.backup()
+	if len(taken) != 1 {
+		t.Fatalf("took %+v", taken)
+	}
+	logged, _ := openBackup(t, dir, taken[0].Backup.BackupID, testRK)
+	if bytes.Contains(logged, rec) || bytes.Contains(b.logBytes(), rec) {
+		t.Fatal("the new recovery key is in the log")
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(dir, f.Name()))
+		if err != nil || bytes.Contains(raw, rec) {
+			t.Fatalf("backup file %s holds the key (%v)", f.Name(), err)
+		}
+	}
+	for range 2 {
+		if err := o.RecoveryCardDone(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after done: %v", err)
+	}
+	if !bytes.Equal(held, make([]byte, len(held))) {
+		t.Fatal("done left the key in memory")
+	}
+	b.h.HoldRecoveryCard(bytes.Clone(rec))
+	b.restart()
+	o = serveOwner(t, b.h, func() int64 { return b.now })
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after a restart: %v", err)
 	}
 }

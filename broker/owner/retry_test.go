@@ -1,13 +1,14 @@
 package owner
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 )
 
-// REQ: OP-2, CH-11
+// REQ: OP-2, CH-11, KRN-7
 
 func retryItem(ref string) Item {
 	return Item{Ref: ref, Object: "the email from 14:02 again", Detail: "may go twice",
@@ -19,7 +20,7 @@ func retryItem(ref string) Item {
 func TestRetryAsksWithATextedCodeAndWarnsOfADuplicate(t *testing.T) {
 	r := newRig(t, nil)
 	var listed []Item
-	r.edit = func(c *Config) { c.Retry = func() []Item { return listed } }
+	r.edit = func(c *Config) { c.Retry = func() ([]Item, error) { return listed, nil } }
 	r.ch = r.open()
 
 	if got := r.say("RETRY"); got != "Nothing to retry." {
@@ -46,10 +47,59 @@ func TestRetryAsksWithATextedCodeAndWarnsOfADuplicate(t *testing.T) {
 	}
 }
 
+// A part of the box whose waiting effects cannot be read is named, never
+// answered "Nothing to retry.": alone it gives the fixed line, and with
+// items it asks about them and adds the line (KRN-7). Revert mutant: drop
+// the error, and the first RETRY answers "Nothing to retry.".
+func TestRetrySaysWhenPartOfTheBoxIsNotAnswering(t *testing.T) {
+	r := newRig(t, nil)
+	var listed []Item
+	r.edit = func(c *Config) { c.Retry = func() ([]Item, error) { return listed, errors.New("kernel down") } }
+	r.ch = r.open()
+	if got := r.say("RETRY"); got != retryUnread || !strings.HasSuffix(got, "Text RETRY again later.") {
+		t.Fatalf("unread, nothing listed: %q", got)
+	}
+	listed = []Item{retryItem("retry:c")}
+	if got := r.say("RETRY"); got != retryUnread {
+		t.Fatalf("unread, one listed: %q", got)
+	}
+	if m := lowCodeRe.FindStringSubmatch(r.inbox()); m == nil {
+		t.Fatal("the listed item was not asked about")
+	}
+}
+
+// With too many requests open, RETRY says so and ends with one step: the
+// unread line when part of the box is not answering, else "for the rest"
+// (KRN-7, CH-12). Revert mutant: askRetry returns the short line alone
+// when unread, and the unread part is never named.
+func TestRetryAtTheCapStillNamesPartOfTheBoxNotAnswering(t *testing.T) {
+	r := newRig(t, nil)
+	var unread error
+	r.edit = func(c *Config) {
+		c.Retry = func() ([]Item, error) { return []Item{retryItem("retry:d")}, unread }
+	}
+	r.ch = r.open()
+	for range MaxOpen {
+		if _, err := r.ch.Request([]Item{lowItem("x")}, 0); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+	}
+	const full = "Too many open requests to ask about every retry now."
+	if got := r.say("RETRY"); got != full+" Text RETRY again later for the rest." {
+		t.Fatalf("at the cap: %q", got)
+	}
+	unread = errors.New("kernel down")
+	got := r.say("RETRY")
+	if got != full+" "+retryUnread || strings.Count(got, "Text RETRY") != 1 {
+		t.Fatalf("at the cap, unread: %q", got)
+	}
+}
+
 // Declining, or a wrong code, retries nothing.
 func TestRetryDeclinedOrWrongCodeRetriesNothing(t *testing.T) {
 	r := newRig(t, nil)
-	r.edit = func(c *Config) { c.Retry = func() []Item { return []Item{retryItem("retry:b")} } }
+	r.edit = func(c *Config) { c.Retry = func() ([]Item, error) { return []Item{retryItem("retry:b")}, nil } }
 	r.ch = r.open()
 	r.say("RETRY")
 	m := lowCodeRe.FindStringSubmatch(r.inbox())
@@ -90,7 +140,7 @@ func TestRetryOfMoneyNeedsTheCodeGeneratorAndEachItemIsAsked(t *testing.T) {
 		Facts: Facts{Verb: "pay", RecipientChecked: true, RecipientExists: true, RecipientByOwner: true, HasAmount: true, Amount: 100, Kind: MoneyRetry}}
 	plain := retryItem("retry:mail")
 	plain.Retried = first
-	r.edit = func(c *Config) { c.Retry = func() []Item { return []Item{money, plain} } }
+	r.edit = func(c *Config) { c.Retry = func() ([]Item, error) { return []Item{money, plain}, nil } }
 	r.ch = r.open()
 
 	if got := r.say("RETRY"); got != "" {

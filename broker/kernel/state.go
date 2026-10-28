@@ -87,7 +87,7 @@ var schema = map[string]int{
 	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
-	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1,
+	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1,
 }
 
@@ -102,7 +102,7 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet || typ == TBackupTarget ||
-		typ == TEdgeEnrolled
+		typ == TEdgeEnrolled || typ == TRecoveryRotate
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -706,6 +706,9 @@ type Unsettled struct {
 	Detail string // the clerk's last answer
 	Retry  bool   // the owner may RETRY it
 	SentAt int64  // when it was first sent (unix ms), which a RETRY line names (#3079)
+	// The step's dispatch attempt: a RETRY names it, and the kernel refuses
+	// one asked about an attempt since sent again (CH-10).
+	Attempt int
 	// What the owner's RETRY tier is judged on (CH-10, CH-11), from the
 	// plan's own step: its spend, whether its verb moves money (always
 	// the high tier), and its recipient.
@@ -730,7 +733,7 @@ func (s *State) Status() []Unsettled {
 			}
 			ks := p.Plan.Step(i)
 			out = append(out, Unsettled{Plan: id, Index: i, Verb: ks.Verb, Clerk: ks.Clerk,
-				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt,
+				Phase: st.Phase, Checks: st.Checks, Detail: st.Detail, Retry: retryable(p, st), SentAt: st.SentAt, Attempt: st.Attempt,
 				Amount: ks.Amount, Money: slices.Contains(key.ArgNames(ks.Verb), key.ArgAmount), Recipient: ks.Recipient,
 				PlanStatus: p.Status, Cancel: p.Cancel, CancelDetail: p.CancelDetail})
 		}
@@ -1132,6 +1135,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyErase(e)
 	case TBackupTarget, TBackupUntarget, TBackupTaken:
 		return s.applyBackup(e)
+	case TRecoveryRotate:
+		return s.applyRotate(e)
 	case TEdgeEnrolled, TEdgeCandidate, TEdgeRevoked, TEdgeCut:
 		return s.applyEdge(e)
 	default:

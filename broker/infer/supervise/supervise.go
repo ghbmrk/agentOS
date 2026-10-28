@@ -47,11 +47,19 @@ type Options struct {
 	// UID and GID are the service's user, with no supplementary groups.
 	// UID 0 is refused.
 	UID, GID uint32
-	// Log receives the child's stdout and stderr and the supervisor's
-	// own lines, which carry causes and counts only (INF-8). Nil drops
-	// them.
+	// Log receives the child's stdout and stderr (unless QuietChild)
+	// and the supervisor's own lines, which carry causes and counts only
+	// (INF-8). Nil drops them.
 	Log     io.Writer
 	Backoff Backoff
+	// Name is the service's name in the supervisor's own lines; empty
+	// is "infer".
+	Name string
+	// QuietChild sends the child's stdout and stderr to /dev/null
+	// instead of Log, for a service whose output must never reach
+	// agentosd's log (VIS-svc: an untrusted service that sees capture
+	// could write an encoding there). Log keeps the supervisor's lines.
+	QuietChild bool
 
 	// started, if set, is told each start's time (tests).
 	started func(time.Time)
@@ -110,6 +118,9 @@ func newSupervisor(o Options) *Supervisor {
 	if s.log == nil {
 		s.log = io.Discard
 	}
+	if s.o.Name == "" {
+		s.o.Name = "infer"
+	}
 	if s.o.timer == nil {
 		s.o.timer = time.NewTimer
 	}
@@ -154,7 +165,7 @@ func (s *Supervisor) loop(ctx context.Context, run func(context.Context) string)
 			st.Restarts++
 			n = st.Restarts
 		})
-		fmt.Fprintf(s.log, "infer: service stopped (%s); restart %d in %s\n", cause, n, delay)
+		fmt.Fprintf(s.log, "%s: service stopped (%s); restart %d in %s\n", s.o.Name, cause, n, delay)
 		t := s.o.timer(delay)
 		select {
 		case <-ctx.Done():
@@ -205,10 +216,14 @@ func (s *Supervisor) run(ctx context.Context) string {
 		defer syscall.Close(fd)
 		attr.UseCgroupFD, attr.CgroupFD = true, fd
 	}
+	var out io.Writer = s.log
+	if s.o.QuietChild {
+		out = nil // os/exec opens /dev/null
+	}
 	cmd := childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"), childproc.Options{
 		Dir:         "/",
-		Stdout:      s.log,
-		Stderr:      s.log,
+		Stdout:      out,
+		Stderr:      out,
 		SysProcAttr: attr,
 		ExtraFiles:  []*os.File{lf},
 		WaitDelay:   2 * time.Second,

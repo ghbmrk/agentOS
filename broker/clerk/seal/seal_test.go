@@ -1,6 +1,6 @@
 package seal_test
 
-// REQ: STO-2, A8, HW-5a, CLK-1
+// REQ: STO-2, A8, HW-5a, CLK-1, REC-4, BAK-1
 
 import (
 	"bytes"
@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 	"github.com/ghbmrk/agentos/broker/tpmseal/swtpm"
@@ -187,39 +188,56 @@ func TestCanaryKeyIsNotOnTheDrive(t *testing.T) {
 	}
 }
 
-// CLK-1: each clerk's sealer is its own; one clerk's sealer cannot open
-// another's Secrets, and the same clerk's sealer opens it after a restart.
-func TestClerkSealersAreDistinct(t *testing.T) {
+// CLK-1, MAIL-keys: the clerk root key is the same at every unlock, apart
+// from the log and head keys, and each clerk's sealer derived from it
+// (clerkkey.Derive, then Key.Sealer) is its own: one clerk's cannot open
+// another's Secrets, and the same clerk's opens it after a restart.
+func TestClerkRootGivesEachClerkItsOwnSealer(t *testing.T) {
 	r := recovery(t)
 	path, s := create(t, r)
-	mail, err := s.Sealer("mail")
+	root, err := s.ClerkRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	exit, err := s.Sealer("exit")
-	if err != nil {
-		t.Fatal(err)
+	lk, _ := s.LogKey()
+	hk, _ := s.HeadKey()
+	if root == ([32]byte{}) || root == lk || bytes.Equal(root[:], hk.Seed()) {
+		t.Fatal("the clerk root key is empty or another purpose's key")
+	}
+	sealer := func(root [32]byte, name string) clerk.Sealer {
+		t.Helper()
+		k, err := clerkkey.Derive(&root, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := k.Sealer()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sl, err := clerk.NewAESSealer(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sl
 	}
 	var atRest []byte
-	sec := clerk.NewSecrets(mail, func(b []byte) error { atRest = bytes.Clone(b); return nil })
+	sec := clerk.NewSecrets(sealer(root, "mail"), func(b []byte) error { atRest = bytes.Clone(b); return nil })
 	if err := sec.Put("mail/acct", clerk.KindStatic, []byte("canary-mail-password")); err != nil {
 		t.Fatal(err)
 	}
-	if err := clerk.NewSecrets(exit, nil).UnmarshalBinary(atRest); err == nil {
+	if err := clerk.NewSecrets(sealer(root, "exit"), nil).UnmarshalBinary(atRest); err == nil {
 		t.Error("the exit clerk's sealer opened the mail clerk's Secrets")
 	}
-
-	again, err := unlock(t, path, r).Sealer("mail")
-	if err != nil {
-		t.Fatal(err)
+	again, err := unlock(t, path, r).ClerkRoot()
+	if err != nil || again != root {
+		t.Fatalf("the clerk root key after a restart differs: %v", err)
 	}
-	if err := clerk.NewSecrets(again, nil).UnmarshalBinary(atRest); err != nil {
+	if err := clerk.NewSecrets(sealer(again, "mail"), nil).UnmarshalBinary(atRest); err != nil {
 		t.Errorf("the mail clerk's sealer after a restart: %v", err)
 	}
-	for _, bad := range []string{"", "Mail", "../log", "mail/x"} {
-		if _, err := s.Sealer(bad); err == nil {
-			t.Errorf("clerk name %q made a sealer", bad)
-		}
+	s.Close()
+	if _, err := s.ClerkRoot(); err == nil {
+		t.Error("a closed store gave the clerk root key")
 	}
 }
 
@@ -469,4 +487,58 @@ func TestAWholeStoreUnderTheBoxsPolicyKeyDoesNotOpen(t *testing.T) {
 	if !errors.Is(err, seal.ErrTampered) {
 		t.Fatalf("got %v, want ErrTampered", err)
 	}
+}
+
+// MIG-4-recovery-r2 (REC-4, BAK-1): the recovery slot and the backup
+// recipient change in one write. A write that fails before the rename
+// leaves the old slot opening and the old entry, in the file and in the
+// open store; a write that succeeds leaves only the new.
+func TestReplaceAndPutIsOneWrite(t *testing.T) {
+	old := recovery(t)
+	path, s := create(t, old)
+	if err := s.Put("backup/recipient", []byte("old recipient")); err != nil {
+		t.Fatal(err)
+	}
+	id := s.Slots()[0].ID
+	next := recovery(t)
+	restore := seal.FailWrite(errors.New("disk full"))
+	_, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
+	restore()
+	if err == nil {
+		t.Fatal("ReplaceAndPut hid the write's error")
+	}
+	for _, st := range []*seal.Store{s, unlock(t, path, old)} {
+		if v, _, _ := st.Get("backup/recipient"); string(v) != "old recipient" {
+			t.Fatalf("after a failed write the entry is %q", v)
+		}
+		if got := st.Slots(); len(got) != 1 || got[0].ID != id {
+			t.Fatalf("after a failed write the slots are %v", got)
+		}
+	}
+	if _, err := seal.Unlock(path, next); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("the new key after a failed write: got %v, want ErrWrongFactor", err)
+	}
+
+	nid, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
+	if err != nil || nid == "" || nid == id {
+		t.Fatalf("ReplaceAndPut: %q, %v", nid, err)
+	}
+	if _, err := seal.Unlock(path, old); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("the old key after the write: got %v, want ErrWrongFactor", err)
+	}
+	for _, st := range []*seal.Store{s, unlock(t, path, next)} {
+		if v, _, _ := st.Get("backup/recipient"); string(v) != "new recipient" {
+			t.Fatalf("after the write the entry is %q", v)
+		}
+		if got := st.Slots(); len(got) != 1 || got[0].ID != nid {
+			t.Fatalf("after the write the slots are %v", got)
+		}
+	}
+	if _, err := s.ReplaceAndPut("0123456789abcdef", recovery(t), "backup/recipient", nil); !errors.Is(err, seal.ErrNoSlot) {
+		t.Fatalf("an unknown slot: got %v, want ErrNoSlot", err)
+	}
+	if _, err := s.ReplaceAndPut(nid, recovery(t), "Bad Name", nil); err == nil {
+		t.Fatal("a bad entry name was taken")
+	}
+	unlock(t, path, next)
 }

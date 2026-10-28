@@ -1465,3 +1465,206 @@ func TestAnEraseOverAFailedWriteNamesNothing(t *testing.T) {
 		t.Fatalf("a key table went out: %v", ents)
 	}
 }
+
+// rotate asks b's kernel for an approval of next, signed by an anchor over
+// the recipient the kernel holds now.
+func (b *bbox) rotate(next string) []byte {
+	b.t.Helper()
+	v, err := b.h.Backups()
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	c := key.Approve(key.Ed25519Signer(sparePriv), kernel.RecoveryRotateHash(v.Recipient, next))
+	a, err := b.h.RecoveryRotate(b.now, next, c)
+	if err != nil {
+		b.t.Fatal(err)
+	}
+	return a
+}
+
+func recipientID(t *testing.T, rk []byte) string {
+	t.Helper()
+	r, err := backup.RecipientFor(rk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.ID()
+}
+
+// REQ: REC-4
+// MIG-4-recovery-r1 (#3391): the kernel's approval binds the recipient it
+// holds, the new one, the route and an expiry, under the store's head key.
+// One for another old, next or route, past its expiry, or under another
+// store's head key fails VerifyApproval or its caller's check; a restart
+// keeps it verifying. Catches a replayed or cross-box approval.
+func TestApprovalBindsOldNextRouteAndExpiry(t *testing.T) {
+	if handoff.RouteCard != kernel.RouteCard || handoff.RouteLost != kernel.RouteLost {
+		t.Fatal("the approval's routes are not the kernel's")
+	}
+	b := newBBox(t, recipientWire(t, testRK))
+	old, next := recipientID(t, testRK), recipientID(t, bytes.Repeat([]byte{0x6b}, 32))
+	card := b.rotate(next)
+	a, err := handoff.VerifyApproval(headPub, card, b.now)
+	if err != nil || a != (handoff.Approval{Route: handoff.RouteCard, Old: old, Next: next, Expires: b.now + handoff.CardApprovalFor}) {
+		t.Fatalf("card approval %+v, %v", a, err)
+	}
+	if _, err := handoff.VerifyApproval(headPub, card, b.now+handoff.CardApprovalFor); !errors.Is(err, handoff.ErrApprovalExpired) {
+		t.Fatalf("past its quarter hour: %v", err)
+	}
+	other, _ := gen(9)
+	if _, err := handoff.VerifyApproval(other, card, b.now); !errors.Is(err, handoff.ErrApproval) {
+		t.Fatalf("under another store's head key: %v", err)
+	}
+	lost := b.rotate("")
+	a, err = handoff.VerifyApproval(headPub, lost, b.now+handoff.CardApprovalFor)
+	if err != nil || a != (handoff.Approval{Route: handoff.RouteLost, Old: old, Expires: b.now + handoff.LostApprovalFor}) {
+		t.Fatalf("lost-card approval %+v, %v", a, err)
+	}
+	if _, err := handoff.VerifyApproval(headPub, lost, b.now+handoff.LostApprovalFor); !errors.Is(err, handoff.ErrApprovalExpired) {
+		t.Fatalf("past its week: %v", err)
+	}
+	// A phone passkey, or a signature over another old, approves nothing.
+	phonePub, phonePriv := gen(8)
+	if err := b.h.With(func(k *kernel.Kernel) error {
+		return k.Enroll(b.now, key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phonePub)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]key.Cosign{
+		"phone":     key.Approve(key.Ed25519Signer(phonePriv), kernel.RecoveryRotateHash(old, next)),
+		"other old": key.Approve(key.Ed25519Signer(ownerPriv), kernel.RecoveryRotateHash("", next)),
+	} {
+		if got, err := b.h.RecoveryRotate(b.now, next, c); !errors.Is(err, kernel.ErrRotateSig) || got != nil {
+			t.Fatalf("%s: %x, %v", name, got, err)
+		}
+	}
+	// The approval is the store's head key's, so a restart keeps it.
+	b.restart()
+	if _, err := handoff.VerifyApproval(headPub, card, b.now); err != nil {
+		t.Fatalf("after a restart: %v", err)
+	}
+	// A lost-card approval never switches the recipient: it has no next.
+	if err := b.h.SwitchRecipient(b.now, recipientWire(t, bytes.Repeat([]byte{0x6b}, 32)), lost); !errors.Is(err, ErrNotApproved) {
+		t.Fatalf("a lost-card approval switched: %v", err)
+	}
+	if err := b.h.SwitchRecipient(b.now+handoff.CardApprovalFor, recipientWire(t, bytes.Repeat([]byte{0x6b}, 32)), card); !errors.Is(err, handoff.ErrApprovalExpired) {
+		t.Fatalf("an expired approval switched: %v", err)
+	}
+}
+
+// REQ: BAK-1, REC-4
+// MIG-4-recovery-r1 (#3391): a matching approval switches the recipient at
+// once, so no kept backup counts and the next backup is new, at the new
+// recipient, opening with the new key; a retry changes nothing. A stale
+// old, a recipient whose ID is not next, a forged or lost-card approval
+// refuses and keeps the old recipient. Over the owner socket too. Catches a
+// rooted owner side redirecting backups.
+func TestRecipientSwitchesAtOnceOnlyWhenApproved(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.subject()
+	dir := b.addTarget("drive", false)
+	first := b.backup()[0].Backup
+	rk2, rk3 := bytes.Repeat([]byte{0x6b}, 32), bytes.Repeat([]byte{0x7c}, 32)
+	old, next := recipientID(t, testRK), recipientID(t, rk2)
+	card := b.rotate(next)
+	o := serveOwner(t, b.h, func() int64 { return b.now })
+	keeps := func(name string, err, want error) {
+		t.Helper()
+		if !errors.Is(err, want) {
+			t.Fatalf("%s: %v, want %v", name, err, want)
+		}
+		if v, _ := b.h.Backups(); v.Recipient != old {
+			t.Fatalf("%s: the recipient moved to %s", name, v.Recipient)
+		}
+	}
+	keeps("another recipient", o.SwitchRecipient(recipientWire(t, rk3), card), ErrNotApproved)
+	keeps("not a recipient", o.SwitchRecipient([]byte("short"), card), ErrArgs)
+	forged := bytes.Clone(card)
+	forged[len(forged)-1] ^= 1
+	keeps("forged", o.SwitchRecipient(recipientWire(t, rk2), forged), handoff.ErrApproval)
+	keeps("lost-card", o.SwitchRecipient(recipientWire(t, rk2), b.rotate("")), ErrNotApproved)
+	keeps("oversized", o.SwitchRecipient(recipientWire(t, rk2), bytes.Repeat([]byte{1}, handoff.MaxApproval+1)), ErrArgs)
+	stale, err := handoff.SignApproval(headPriv, handoff.Approval{Route: handoff.RouteCard, Old: recipientID(t, rk3), Next: next, Expires: b.now + 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeps("stale old", o.SwitchRecipient(recipientWire(t, rk2), stale), ErrApprovalStale)
+
+	if err := o.SwitchRecipient(recipientWire(t, rk2), card); err != nil {
+		t.Fatal(err)
+	}
+	v, err := o.Backups()
+	if err != nil || v.Recipient != next {
+		t.Fatalf("after the switch: %+v %v", v, err)
+	}
+	for _, kp := range v.Backups {
+		if kp.Recipient == v.Recipient {
+			t.Fatalf("a kept backup counts at the new recipient: %+v", kp)
+		}
+	}
+	// A retry once switched succeeds and changes nothing.
+	if err := o.SwitchRecipient(recipientWire(t, rk2), card); err != nil {
+		t.Fatalf("a retry: %v", err)
+	}
+	// The approval is spent: a third recipient's needs a new one.
+	c3, err := handoff.SignApproval(headPriv, handoff.Approval{Route: handoff.RouteCard, Old: old, Next: recipientID(t, rk3), Expires: b.now + 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := o.SwitchRecipient(recipientWire(t, rk3), c3); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("an approval from before the switch: %v", err)
+	}
+	b.now += 1000 // well within BackupEvery
+	taken := b.backup()
+	if taken[0].Reused || taken[0].Backup.BackupID == first.BackupID || taken[0].Backup.Recipient != next {
+		t.Fatalf("the backup after the switch: %+v", taken[0])
+	}
+	openBackup(t, dir, taken[0].Backup.BackupID, rk2)
+	f := mustOpen(t, filepath.Join(dir, taken[0].Backup.BackupID+".content"))
+	defer f.Close()
+	if _, _, err := backup.Open(f, testRK); err == nil {
+		t.Fatal("the old key opens the backup taken after the switch")
+	}
+}
+
+// REQ: BAK-1
+// A switch waits for a backup call being written, so that backup is
+// sealed to one recipient throughout and kept at the old one; the switch
+// lands once it is over.
+func TestASwitchWaitsForABackupBeingWritten(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.subject()
+	b.addTarget("drive", false)
+	rk2 := bytes.Repeat([]byte{0x6b}, 32)
+	card := b.rotate(recipientID(t, rk2))
+	// started is buffered so the hook's send never depends on the test already waiting.
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	b.h.bk.hook = func() {
+		select {
+		case started <- struct{}{}:
+			<-release
+		default:
+		}
+	}
+	taken := make(chan []Taken, 1)
+	go func() { out, _ := b.h.Backup(b.now); taken <- out }()
+	<-started
+	switched := make(chan error, 1)
+	go func() { switched <- b.h.SwitchRecipient(b.now, recipientWire(t, rk2), card) }()
+	select {
+	case err := <-switched:
+		t.Fatalf("the switch landed during a backup write: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	out := <-taken
+	if err := <-switched; err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Backup == nil || out[0].Backup.Recipient != recipientID(t, testRK) {
+		t.Fatalf("the backup written across the switch: %+v", out)
+	}
+	if v, _ := b.h.Backups(); v.Recipient != recipientID(t, rk2) {
+		t.Fatalf("after the backup: %s", v.Recipient)
+	}
+}

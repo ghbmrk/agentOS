@@ -1,0 +1,32 @@
+# The Owner Card confirm's hand-off (HW-1, STO-2; cmd/agentos-enroll -take-factors): one request from
+# the owner page on the connection, checked against the published page certificate, the card's two
+# factors written once where enrollment reads them, and one word back. Writing the recovery file
+# starts enrollment (agentos-keeper-enroll.path). With a store in place it only says whether the
+# card's passphrase opens it, and writes nothing. It needs no TPM.
+[Unit]
+Description=agentOS Owner Card hand-off
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/agentos/agentos-enroll -take-factors -setup-dir /run/agentos-setup \
+        -page-ca-cert /run/agentos-page-ca/authority.der -state /var/lib/agentos-store
+StandardInput=socket
+StandardOutput=socket
+# The reasons go to the journal, never to the socket, which gets only the word.
+StandardError=journal
+# A peer that never ends its request holds the one connection no longer than this (#3477: a oneshot's
+# bound is its start timeout).
+TimeoutStartSec=60
+# The factors live in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# No device but the standard pseudo-devices, and no TPM (#2889).
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

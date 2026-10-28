@@ -65,11 +65,14 @@ type Shape struct {
 }
 
 // Operation is one declared device operation, its verb (DEV-4) and the
-// shapes it may write.
+// shapes it may write. A Subscribe operation is a read that stays up and
+// reports each reading as it arrives, through Link.Report, until the host
+// ends it (DEVSLOT-subscribe-1).
 type Operation struct {
-	Name   string
-	Verb   key.Verb
-	Shapes []string
+	Name      string
+	Verb      key.Verb
+	Shapes    []string
+	Subscribe bool `json:",omitempty"`
 }
 
 // Declaration is a driver's DEV-1 declaration, as data. It names no address:
@@ -104,6 +107,7 @@ const (
 	CapRead     = 65540 // one frame read
 	CapWrite    = 4096  // one frame written
 	CapReadings = 1024  // readings per operation
+	CapKinds    = 32    // reading kinds, each its own DEV-8 window (DEVSLOT-host-lib-8)
 )
 
 // devVerbs is DEV-4's verb list: read, actuate, actuate-physical, present,
@@ -129,8 +133,9 @@ func refuse(format string, a ...any) error {
 
 // Check is whether d and p may run: only DEV-4 verbs, only known link and
 // shape kinds, names from a closed alphabet (so no device text reaches an
-// event), bounded frames, and a pin on the home network only (DEV-2).
-func Check(d Declaration, p Pin) error {
+// event), bounded frames, and a pin on the home network only (DEV-2). The
+// host passes home, the uplink's enclosing /56, for global IPv6 pins.
+func Check(d Declaration, p Pin, home ...netip.Prefix) error {
 	if !nameRe.MatchString(d.Device) {
 		return refuse("device name")
 	}
@@ -138,7 +143,13 @@ func Check(d Declaration, p Pin) error {
 	if !ok {
 		return refuse("unknown link kind %q", d.Link)
 	}
-	if err := checkPin(d.Link, p); err != nil {
+	var h netip.Prefix
+	if len(home) > 1 {
+		return refuse("one home prefix")
+	} else if len(home) == 1 {
+		h = home[0]
+	}
+	if err := checkPin(d.Link, p, h); err != nil {
 		return err
 	}
 	if d.MaxRead < 1 || d.MaxRead > CapRead {
@@ -198,11 +209,17 @@ func Check(d Declaration, p Pin) error {
 		if !devVerbs[o.Verb] {
 			return refuse("operation %s: verb %q is not a DEV-4 verb", o.Name, o.Verb)
 		}
+		if o.Subscribe && o.Verb != key.Read {
+			return refuse("operation %s: a subscription is a read", o.Name)
+		}
 		for _, s := range o.Shapes {
 			if !shapes[s] {
 				return refuse("operation %s: undeclared shape", o.Name)
 			}
 		}
+	}
+	if len(d.Readings) > CapKinds {
+		return refuse("more than %d reading kinds", CapKinds)
 	}
 	kinds := map[string]bool{}
 	for _, k := range d.Readings {
@@ -214,14 +231,14 @@ func Check(d Declaration, p Pin) error {
 	return nil
 }
 
-func checkPin(l LinkKind, p Pin) error {
+func checkPin(l LinkKind, p Pin, home netip.Prefix) error {
 	switch l {
 	case GATT:
 		if !macRe.MatchString(p.Address) || p.Host.IsValid() {
 			return refuse("a gatt pin is one Bluetooth address")
 		}
 	case TCP:
-		if p.Address != "" || !homeAddr(p.Host) {
+		if p.Address != "" || !homeAddr(p.Host, home) {
 			return refuse("a tcp pin is a home-network address")
 		}
 		if p.Key == ([32]byte{}) {
@@ -231,11 +248,56 @@ func checkPin(l LinkKind, p Pin) error {
 	return nil
 }
 
-// homeAddr is a private or link-local unicast address: never the internet,
-// the box itself, or a broadcast or multicast group (DEV-1, DEV-2).
-func homeAddr(a netip.Addr) bool {
-	return a.IsValid() && (a.IsPrivate() || a.IsLinkLocalUnicast()) && !a.IsLoopback()
+// homeAddr is a home-network unicast address (DEV-1, DEV-2): a private,
+// shared (100.64.0.0/10) or link-local IPv4 address that is not a directed
+// broadcast, a unique-local or link-local IPv6 address, or a global IPv6
+// address inside home, the uplink's enclosing /56. Never the internet, the
+// box itself, or a broadcast or multicast group. A v4-mapped address is
+// judged as its IPv4 address. A home outside 2000::/3, or inside a prefix
+// that carries IPv4 addresses (NAT64, 6to4, Teredo), holds no home address,
+// since such addresses reach the IPv4 internet.
+func homeAddr(a netip.Addr, home netip.Prefix) bool {
+	a = a.Unmap()
+	if !a.IsValid() || a.IsLoopback() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	if a.Is4() {
+		// Every broadcast of a /24 or wider ends in .255; a narrower home
+		// subnet's broadcast is not caught here (DEVSLOT-host-lib-3).
+		return (a.IsPrivate() || a.IsLinkLocalUnicast() || shared.Contains(a)) && a.As4()[3] != 255
+	}
+	if a.IsPrivate() || a.IsLinkLocalUnicast() {
+		return true
+	}
+	// The /56 must lie in 2000::/3, the global unicast allocation, which
+	// its first three bits decide, whatever host bits a caller left set.
+	if !home.IsValid() || home.Bits() != 56 || !globalUnicast.Contains(home.Addr()) ||
+		!a.IsGlobalUnicast() || !home.Contains(a.WithZone("")) {
+		return false
+	}
+	for _, t := range translated {
+		if t.Overlaps(home) {
+			return false
+		}
+	}
+	return true
 }
+
+// globalUnicast is IPv6's global unicast allocation (RFC 4291 §2.4).
+var globalUnicast = netip.MustParsePrefix("2000::/3")
+
+// translated are the prefixes inside 2000::/3 whose addresses carry IPv4
+// ones: 6to4 (RFC 3056) and Teredo (RFC 4380). NAT64's (64:ff9b::/96,
+// 64:ff9b:1::/48), the IPv4-compatible ::/96 and the IPv4-translated
+// ::ffff:0:0:0/96 lie outside 2000::/3.
+var translated = []netip.Prefix{
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("2001::/32"),
+}
+
+// shared is RFC 6598's shared address space, which a carrier-grade NAT or
+// a home router's own segment may use.
+var shared = netip.MustParsePrefix("100.64.0.0/10")
 
 // match is whether frame on ch is one of op's declared shapes.
 func (d *Declaration) match(op Operation, ch string, frame []byte) bool {

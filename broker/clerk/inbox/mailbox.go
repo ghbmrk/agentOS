@@ -8,6 +8,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"mime"
+	"net/mail"
 	"slices"
 	"strconv"
 	"strings"
@@ -15,10 +18,11 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
+	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapwire"
 )
 
 // Mailbox is where the clerk's effects land. Do calls it only after the
-// step passed the clerk's one check (clerk.Check) and the clerk's own rules,
+// step passed the clerk's one check (check.Check) and the clerk's own rules,
 // so nothing reaches a mailbox that the kernel did not dispatch. Each method
 // acts on one mail by the id the clerk read it under and confirms the effect
 // before it returns nil. A NotDone error means nothing changed; any other
@@ -818,4 +822,248 @@ func messageID(raw []byte) string {
 		}
 	}
 	return ""
+}
+
+// The senders read (MAIL-world-b2): who has delivered mail to the owner and
+// when, and whom the owner writes to, read from the mailbox in steps for
+// VRB-2's History, KnownSenders and Contacts. Only delivered folders count
+// as history: over IMAP the Inbox and Archive roles (never All, which RFC
+// 6154 lets a server fill with junk, nor any folder with no role); over Gmail
+// INBOX and the mail outside SPAM, TRASH, DRAFT and SENT. Contacts are the
+// To and Cc of the Sent role (Gmail's SENT). Each date is the server's
+// arrival date, never one the sender wrote.
+
+// SendersMax and ContactsMax bound the record: past either, the read gives
+// no history (D-154 rule 5, fail closed).
+const (
+	SendersMax  = 20000
+	ContactsMax = 5000
+	// addrMax is the longest address counted (RFC 5321's path limit), so
+	// the record's size follows from its bounds.
+	addrMax = 254
+)
+
+// SendersSource is the read's place in one source: an IMAP folder, by
+// name, or Gmail's one listing (gmailSource).
+type SendersSource struct {
+	Validity uint32 // IMAP: the UID validity High is under
+	High     uint64 // IMAP: the highest UID read; Gmail: the newest internalDate (ms) of a finished pass
+	Through  bool   // read through once
+	Page     string // Gmail: the next page of the pass in progress; "" at none
+	Top      uint64 // Gmail: the newest internalDate the pass in progress has read
+}
+
+// SendersRecord is what the senders read has found, and where it is.
+type SendersRecord struct {
+	Sources map[string]SendersSource
+	Senders map[string]int64 // a delivering sender (canonAddr) to its earliest arrival, Unix seconds
+	Sent    map[string]bool  // the addresses the owner's sent mail went to (canonAddr)
+}
+
+// Complete reports whether every source the last step counted has been
+// read through once.
+func (r SendersRecord) Complete() bool {
+	if len(r.Sources) == 0 {
+		return false
+	}
+	for _, s := range r.Sources {
+		if !s.Through {
+			return false
+		}
+	}
+	return true
+}
+
+// Over reports whether the record has passed a bound.
+func (r SendersRecord) Over() bool { return len(r.Senders) > SendersMax || len(r.Sent) > ContactsMax }
+
+func (r *SendersRecord) init() {
+	if r.Sources == nil {
+		r.Sources = map[string]SendersSource{}
+	}
+	if r.Senders == nil {
+		r.Senders = map[string]int64{}
+	}
+	if r.Sent == nil {
+		r.Sent = map[string]bool{}
+	}
+}
+
+// keepOnly drops the sources not in names: a folder gone, or no longer of a
+// counted role, no longer holds completeness back.
+func (r *SendersRecord) keepOnly(names func(string) bool) {
+	for name := range r.Sources {
+		if !names(name) {
+			delete(r.Sources, name)
+		}
+	}
+}
+
+// heads is what one call of the read found, merged into the record only
+// once the call has succeeded, so a call that fails commits nothing.
+type heads struct {
+	senders map[string]int64
+	sent    []string
+}
+
+// delivered notes the header's sender, as VRB-2 names it (one From field,
+// canonAddr of its address), as having delivered at arrived. A header with
+// no From, two, or an address past addrMax counts for no one.
+func (h *heads) delivered(header []byte, arrived time.Time) {
+	var from []byte
+	n := 0
+	for _, f := range splitHeader(header) {
+		if f.key() == "from" {
+			from, n = f.value, n+1
+		}
+	}
+	a := canonAddr(rawAddr([]byte(unfold.Replace(string(from)))))
+	if n != 1 || a == "" || len(a) > addrMax || arrived.IsZero() {
+		return
+	}
+	if h.senders == nil {
+		h.senders = map[string]int64{}
+	}
+	if t, ok := h.senders[a]; !ok || arrived.Unix() < t {
+		h.senders[a] = arrived.Unix()
+	}
+}
+
+// wrote notes every address in the header's To and Cc fields as one the
+// owner writes to: a list that does not parse is read part by part. More
+// addresses only add to the lookalike check.
+func (h *heads) wrote(header []byte) {
+	for _, f := range splitHeader(header) {
+		if k := f.key(); k != "to" && k != "cc" {
+			continue
+		}
+		v := unfold.Replace(string(f.value))
+		var as []string
+		p := mail.AddressParser{WordDecoder: &mime.WordDecoder{CharsetReader: rawCharset}}
+		if l, err := p.ParseList(v); err == nil {
+			for _, a := range l {
+				as = append(as, a.Address)
+			}
+		} else {
+			for _, part := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' }) {
+				as = append(as, bareAddr.FindString(part))
+			}
+		}
+		for _, a := range as {
+			if a = canonAddr(a); a != "" && len(a) <= addrMax {
+				h.sent = append(h.sent, a)
+			}
+		}
+	}
+}
+
+func (h heads) into(r *SendersRecord) {
+	for a, t := range h.senders {
+		if old, ok := r.Senders[a]; !ok || t < old {
+			r.Senders[a] = t
+		}
+	}
+	for _, a := range h.sent {
+		r.Sent[a] = true
+	}
+}
+
+// splitHeader is a header block's fields, as splitMessage reads them.
+func splitHeader(header []byte) []header {
+	hs, _ := splitMessage(header)
+	return hs
+}
+
+// longPerStep is how many long-header mails one step passes over in a
+// folder before it ends the folder's part of the step at the next.
+const longPerStep = 16
+
+// SendersStep reads at most limit more mails of the counted folders into r,
+// each folder in UID order from above its High: the first read in steps
+// until every folder is through, then only what arrived since. A changed
+// UID validity reads that folder again. Each folder's addresses come from
+// one AddrHeads call (BODY.PEEK, so nothing is marked read), merged only once
+// it succeeds. A mail whose From, To or Cc passes the header bound is passed
+// over: the call is asked again without it (longPerStep times a step, then
+// the folder goes on above it at the next step), so such a mail counts for no
+// one and a sender cannot make the read fail by padding a header. more is whether mail is
+// left to read now. Any other failure ends the step with its error; the
+// folders read before it keep their progress.
+func (l *Live) SendersStep(ctx context.Context, r *SendersRecord, limit int) (more bool, err error) {
+	r.init()
+	fs, err := l.st.Folders(ctx)
+	if err != nil {
+		return false, err
+	}
+	roles := map[string]imapwire.Role{}
+	for _, f := range fs {
+		switch f.Role {
+		case imapwire.Inbox, imapwire.Archive, imapwire.Sent:
+			roles[f.Name] = f.Role
+		}
+	}
+	r.keepOnly(func(name string) bool { _, ok := roles[name]; return ok })
+	for _, name := range slices.Sorted(maps.Keys(roles)) {
+		src := r.Sources[name]
+		if limit <= 0 {
+			more = more || !src.Through // a folder read through waits for the next step's mail read
+			r.Sources[name] = src
+			continue
+		}
+		validity, uids, err := l.st.UIDs(ctx, name)
+		if err != nil {
+			return false, err
+		}
+		if validity != src.Validity {
+			src = SendersSource{Validity: validity}
+		}
+		var fresh []uint32
+		for _, u := range uids {
+			if uint64(u) > src.High {
+				fresh = append(fresh, u)
+			}
+		}
+		slices.Sort(fresh)
+		// A mail with a long header is passed over and the call asked again
+		// without it, up to longPerStep times a step; past that, the step
+		// ends at it, so padded mails cost a sign-in each and slow the
+		// read, never stop it.
+		take, skipped := fresh[:min(len(fresh), limit)], map[uint32]bool{}
+		for {
+			var got heads
+			ask := slices.DeleteFunc(slices.Clone(take), func(u uint32) bool { return skipped[u] })
+			err := l.st.AddrHeads(ctx, name, validity, ask, func(h []byte, arrived time.Time) error {
+				if roles[name] == imapwire.Sent {
+					got.wrote(h)
+				} else {
+					got.delivered(h, arrived)
+				}
+				return nil
+			})
+			var long *imapsmtp.LongHeaderError
+			if errors.As(err, &long) {
+				if i := slices.Index(take, long.UID); i >= 0 && !skipped[long.UID] {
+					if len(skipped) >= longPerStep {
+						take = take[:i+1]
+					}
+					skipped[long.UID] = true
+					continue
+				}
+			}
+			if err != nil {
+				return false, err
+			}
+			got.into(r)
+			break
+		}
+		if len(take) > 0 {
+			src.High = uint64(take[len(take)-1])
+		}
+		limit -= len(take)
+		left := slices.ContainsFunc(fresh, func(u uint32) bool { return uint64(u) > src.High })
+		src.Through = src.Through || !left
+		more = more || left
+		r.Sources[name] = src
+	}
+	return more, nil
 }

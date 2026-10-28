@@ -16,6 +16,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // REQ: CLK-1, LOG-2, KRN-2, BAK-1
@@ -27,6 +28,7 @@ var good = []string{
 	"-clerk", "exit=/run/agentos-exit/kernel.sock,983",
 	"-clerk", "mail=/run/agentos-mail/kernel.sock,984",
 	"-backup-dir", "/var/lib/agentos-kernel/backups",
+	"-content-dir", "/var/lib/agentos-kernel/content",
 	"-keys-dir", "/var/lib/agentos-kernel/keys",
 }
 
@@ -55,6 +57,32 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 		if _, err := parse(bad, io.Discard); err == nil {
 			t.Errorf("parse %q: accepted", bad)
 		}
+	}
+}
+
+// REQ: CLK-1
+// MAIL-keys: -clerk-key names a clerk, its key socket and the one unit the
+// kernel hands that clerk's key to; each part is checked and a clerk is
+// named once.
+func TestClerkKeyFlags(t *testing.T) {
+	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/clerk-mail.key,/agentos-keeper.slice/agentos-keeper-mail.service",
+		"-clerk-key", "driver-hue=/run/agentos-kernel/clerk-driver-hue.key,/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service"), io.Discard)
+	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/clerk-mail.key", Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}) ||
+		c.ClerkKeys["driver-hue"].Cgroup != "/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service" {
+		t.Fatalf("parse: %+v %v", c.ClerkKeys, err)
+	}
+	for _, bad := range []string{
+		"mail=/k,/s.slice/a.service,x", "Mail=/k,/s.slice/a.service", "mail=k,/s.slice/a.service", "mail=/k,agentos-keeper-mail.service",
+		"mail=/k,/s.slice/agentos-keeper-mail", "mail=/k", "=/k,/a.service", "mail=/k,/s.slice/a b.service", "mail=/k,/s.slice/../a.service",
+		"mail=/k,/s.slice//a.service", "mail=/k,/s.slice/a.service/", "mail=/k,/",
+	} {
+		if _, err := parse(append(slices.Clone(good), "-clerk-key", bad), io.Discard); err == nil {
+			t.Errorf("-clerk-key %q accepted", bad)
+		}
+	}
+	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,/a.service", "-clerk-key", "mail=/b,/b.service")
+	if _, err := parse(twice, io.Discard); err == nil {
+		t.Error("a clerk's key given twice was accepted")
 	}
 }
 
@@ -178,7 +206,7 @@ func unread(t *testing.T, r *os.File) {
 
 // KRN-2 (#2892): the kernel's process links no clerk's code, so no mail or
 // model parser is in it: of broker/clerk it links only the unlock step's
-// hand-off, and no IMAP library or the golang.org/x/net and x/text modules the
+// hand-off and the clerks' key hand-off (MAIL-keys), and no IMAP library or the golang.org/x/net and x/text modules the
 // mail clerk brings (the standard library's vendored copies are its own).
 func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
 	out, err := exec.Command("go", "list", "-deps", ".").CombinedOutput()
@@ -187,9 +215,80 @@ func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
 	}
 	const clerk = "github.com/ghbmrk/agentos/broker/clerk"
 	for _, p := range strings.Fields(string(out)) {
-		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" ||
+		if p == clerk || strings.HasPrefix(p, clerk+"/") && p != clerk+"/handoff" && p != clerk+"/clerkkey" ||
 			strings.HasPrefix(p, "github.com/emersion/") || strings.HasPrefix(p, "golang.org/x/net/") || strings.HasPrefix(p, "golang.org/x/text/") {
 			t.Errorf("agentos-kernel links %s", p)
+		}
+	}
+}
+
+// REQ: HW-15, HW-16
+// EDGE-link-core-c2b: -link-sock and -link-uid come together, the link's
+// uid is a peer the kernel refuses to run as, and it is no other peer's,
+// since its socket is the only one that logs an edge candidate. Without
+// them there is no link socket. Revert mutants: the LinkUID append to
+// Peers dropped; the shared-uid check dropped.
+func TestTheLinkSocketIsTheLinksAlone(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.LinkSock != "" {
+		t.Fatalf("no link flags: %+v, %v", c.MainConfig, err)
+	}
+	link := append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "980")
+	if c, err = parse(link, io.Discard); err != nil || c.LinkSock != "/run/agentos-kernel/link.sock" || c.LinkUID != 980 || !slices.Contains(c.Peers, 980) {
+		t.Fatalf("link flags: %+v, %v", c.MainConfig, err)
+	}
+	for _, bad := range [][]string{
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock"),
+		append(slices.Clone(good), "-link-uid", "980"),
+		append(slices.Clone(good), "-link-sock", "link.sock", "-link-uid", "980"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "0"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "981"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "982"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "984"),
+	} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad[len(good):])
+		}
+	}
+}
+
+// REQ: LOG-4, CLK-1
+// KRN-content: -content-dir is required and absolute, and each -content
+// clerk's socket admits a uid that is its own: never the owner side's, the
+// model clerk's, the link's or another content clerk's, since that socket
+// hands out its store's plaintext. A clerk the kernel calls may share it.
+// Revert mutants: the shared-uid check dropped; the store-name check
+// dropped; -content-dir not required.
+func TestEachContentSocketIsItsClerksAlone(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.ContentDir != "/var/lib/agentos-kernel/content" || len(c.Content) != 0 {
+		t.Fatalf("no content flags: %+v, %v", c.MainConfig, err)
+	}
+	i := slices.Index(good, "-content-dir")
+	for _, bad := range [][]string{slices.Delete(slices.Clone(good), i, i+2), append(slices.Clone(good), "-content-dir", "content")} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
+		}
+	}
+	with := append(slices.Clone(good), "-content", "vision=/run/agentos-kernel/vision.sock,985", "-content", "mail=/run/agentos-kernel/mail.sock,984")
+	if c, err = parse(with, io.Discard); err != nil || c.Content["vision"].UID != 985 || c.Content["mail"].Socket != "/run/agentos-kernel/mail.sock" || !slices.Contains(c.Peers, 985) {
+		t.Fatalf("content flags: %+v, %v", c.MainConfig, err)
+	}
+	link := []string{"-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "980"}
+	for _, bad := range [][]string{
+		{"-content", "vision=/run/v.sock,981"},
+		{"-content", "vision=/run/v.sock,982"},
+		append(slices.Clone(link), "-content", "vision=/run/v.sock,980"),
+		{"-content", "vision=/run/v.sock,985", "-content", "photos=/run/p.sock,985"},
+		{"-content", "vision=/run/v.sock,985", "-content", "vision=/run/w.sock,986"},
+		{"-content", "Vision=/run/v.sock,985"},
+		{"-content", "../keys=/run/v.sock,985"},
+		{"-content", "key-table=/run/v.sock,985"},
+		{"-content", "vision=v.sock,985"},
+		{"-content", "vision=/run/v.sock,0"},
+	} {
+		if _, err := parse(append(slices.Clone(good), bad...), io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad)
 		}
 	}
 }

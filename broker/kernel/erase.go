@@ -94,6 +94,7 @@ var (
 	ErrSubjectKey    = errors.New("kernel: the subject's data key is missing, or not the one its subject.opened names")
 	ErrItem          = errors.New("kernel: no readable item by that hash")
 	ErrLineage       = errors.New("kernel: a lineage is 1 to 128 bytes of plain text")
+	ErrLabel         = errors.New("kernel: a label to look for is valid UTF-8 with a character that is not space")
 )
 
 // ValidSubject reports whether s is a subject ID as OpenSubject draws them:
@@ -307,6 +308,13 @@ func (s *State) Recall(subject string) (Recall, bool) {
 	}
 	r.Erased, r.ErasedAt, r.Count, r.Unconfirmed = true, st.erasedAt, len(st.items), st.unconfirmed()
 	return r, true
+}
+
+// ItemStore is the store the item named h is in, if the log names one: a
+// content clerk reads only its own store's items (KRN-content).
+func (s *State) ItemStore(h Hash) (string, bool) {
+	it, ok := s.items[h]
+	return it.Store, ok
 }
 
 // Unerased is an erased subject some store has not confirmed deleting.
@@ -542,8 +550,13 @@ func sameLabel(a, b string) bool {
 // apart from them those with a label that could not be read (a missing key,
 // a store down), so one fault does not hide every other subject. Before
 // OpenContent it returns ErrContentClosed and no subjects, since none could
-// be read. The log holds no name, so recall by name opens the labels.
+// be read. The log holds no name, so recall by name opens the labels. A
+// blank or invalid-UTF-8 label is ErrLabel: it would match labels the owner
+// did not type (LOG-4).
 func (k *Kernel) Named(label string) (found, unread []string, err error) {
+	if strings.TrimSpace(label) == "" || !utf8.ValidString(label) {
+		return nil, nil, ErrLabel
+	}
 	if k.keys == nil {
 		return nil, nil, ErrContentClosed
 	}

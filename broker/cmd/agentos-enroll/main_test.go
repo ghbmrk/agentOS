@@ -1,6 +1,6 @@
 package main
 
-// REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10
+// REQ: STO-2, STO-1, HW-5a, CLK-1, UPD-10, REC-4, BAK-1
 
 import (
 	"bytes"
@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -333,6 +334,117 @@ func TestEnrollStoresThePageAuthority(t *testing.T) {
 	}
 	if ok, _ := exists(z.c.storePath()); ok {
 		t.Fatal("a store without a page authority is in place")
+	}
+}
+
+// staged gives b a first-boot staging (-stage-page-ca) and points
+// enrollment at it, as the image's unit does.
+func (b *box) staged() staging {
+	b.t.Helper()
+	s := newStaging(b.t)
+	noErr(b.t, s.stage())
+	b.c.pageCAFile, b.c.pageCACert = s.staged, s.published
+	return s
+}
+
+// storedPageCA is the page authority entry of the enrolled store.
+func (b *box) storedPageCA() []byte {
+	b.t.Helper()
+	v, ok, err := b.enrolled().Get(handoff.PageCAEntry)
+	if err != nil || !ok {
+		b.t.Fatalf("no page authority in the store: %v", err)
+	}
+	return v
+}
+
+// REQ: STO-2, CH-9, HW-1
+// OWN-card-flow decision 7: with a staged authority, enrollment stores the
+// staged bytes as read, whose fingerprint is the published certificate's,
+// the one the Owner Card printed; it makes no authority of its own.
+func TestEnrollStoresTheStagedAuthority(t *testing.T) {
+	b := newBox(t)
+	s := b.staged()
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	v := b.storedPageCA()
+	if !bytes.Equal(v, get(os.ReadFile(s.staged))) {
+		t.Fatal("the store's authority is not the staged bytes")
+	}
+	a := get(pageca.Unmarshal(get(handoff.ParsePageCA(v))))
+	if a.Fingerprint() != pageca.Fingerprint(get(os.ReadFile(s.published))) {
+		t.Fatal("the stored authority's fingerprint is not the published certificate's")
+	}
+}
+
+// A staged pair that is not one authority, or not the published one, or a
+// published certificate others could have written, is refused before
+// anything changes: no staged store, no NV index, no file.
+func TestEnrollRefusesAMismatchedAuthority(t *testing.T) {
+	other := newStaging(t)
+	noErr(t, other.stage())
+	otherPair := get(os.ReadFile(other.staged))
+	for _, c := range []struct {
+		name string
+		bend func(t *testing.T, s staging)
+		want error
+	}{
+		{"a key that is not the certificate's", func(t *testing.T, s staging) {
+			var mine, theirs struct{ Cert, Key []byte }
+			noErr(t, json.Unmarshal(get(os.ReadFile(s.staged)), &mine))
+			noErr(t, json.Unmarshal(otherPair, &theirs))
+			v, _ := json.Marshal(map[string][]byte{"cert": mine.Cert, "key": theirs.Key})
+			rewrite(t, s.staged, v, 0o600)
+		}, errPageCARead},
+		{"a published certificate one byte off", func(t *testing.T, s staging) {
+			v := get(os.ReadFile(s.published))
+			v[len(v)-1] ^= 1
+			rewrite(t, s.published, v, 0o644)
+		}, errPageCAPair},
+		{"another authority's pair", func(t *testing.T, s staging) { rewrite(t, s.staged, otherPair, 0o600) }, errPageCAPair},
+		{"a pair that fails pageca's load checks", func(t *testing.T, s staging) { rewrite(t, s.staged, []byte(`{"cert":"","key":""}`), 0o600) }, errPageCARead},
+		{"a group-writable certificate", func(t *testing.T, s staging) { noErr(t, os.Chmod(s.published, 0o664)) }, errPublished},
+		{"a certificate that is not root's", func(t *testing.T, s staging) {
+			if os.Geteuid() != 0 {
+				t.Skip("needs root to give the file away")
+			}
+			noErr(t, os.Chown(s.published, 1, 1))
+		}, errPublished},
+		{"no published certificate", func(t *testing.T, s staging) { noErr(t, os.Remove(s.published)) }, os.ErrNotExist},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := newBox(t)
+			c.bend(t, b.staged())
+			files, idx := b.files(), nv(t, b.sw.TPM())
+			if err := enroll(b.c, b.sw.TPM()); !errors.Is(err, c.want) {
+				t.Fatalf("got %v, want %v", err, c.want)
+			}
+			if !sameMap(files, b.files()) || len(idx) != 0 || len(nv(t, b.sw.TPM())) != 0 {
+				t.Fatal("a refused enrollment changed something")
+			}
+		})
+	}
+}
+
+// rewrite replaces path's bytes and mode, as a tampered staging would.
+func rewrite(t *testing.T, path string, v []byte, m os.FileMode) {
+	t.Helper()
+	noErr(t, os.Remove(path))
+	noErr(t, os.WriteFile(path, v, m))
+}
+
+// A crash after the store's entries and a rerun store the same authority:
+// the card's fingerprint survives the crash (the old "a rerun makes a new
+// one" is gone).
+func TestEnrollRerunKeepsTheFingerprint(t *testing.T) {
+	b := newBox(t)
+	s := b.staged()
+	c := b.c
+	c.stop = func(step string) bool { return step == "slots" }
+	if err := enroll(c, b.sw.TPM()); !errors.Is(err, errCrash) {
+		t.Fatalf("got %v, want the crash", err)
+	}
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	if !bytes.Equal(b.storedPageCA(), get(os.ReadFile(s.staged))) {
+		t.Fatal("the rerun stored another authority")
 	}
 }
 
@@ -653,7 +765,25 @@ func TestParse(t *testing.T) {
 	if _, err := parse([]string{"-state", "/s", "-rotate"}, io.Discard); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
+	if c, err := parse([]string{"-stage-page-ca", "-page-ca-file", "/s/p", "-page-ca-cert", "/c/a"}, io.Discard); err != nil || !c.stagePageCA {
+		t.Fatalf("stage: %+v %v", c, err)
+	}
+	if c, err := parse([]string{"-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-cert", "/c/a"}, io.Discard); err != nil || !c.takeFactors {
+		t.Fatalf("take: %+v %v", c, err)
+	}
+	if c, err := parse(append(append([]string{}, good...), "-page-ca-file", "/p2", "-page-ca-cert", "/c/a"), io.Discard); err != nil || c.pageCAFile != "/p2" {
+		t.Fatalf("enroll with a staged authority: %+v %v", c, err)
+	}
 	for _, bad := range [][]string{
+		{"-stage-page-ca", "-page-ca-file", "/s/p"},
+		{"-stage-page-ca", "-page-ca-file", "p", "-page-ca-cert", "/c/a"},
+		{"-stage-page-ca", "-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-file", "/s/p", "-page-ca-cert", "/c/a"},
+		{"-take-factors", "-state", "/s", "-page-ca-cert", "/c/a"},
+		{"-take-factors", "-state", "/s", "-setup-dir", "/d"},
+		{"-take-factors", "-rotate-recovery", "-state", "/s", "-setup-dir", "/d", "-page-ca-cert", "/c/a"},
+		append(append([]string{}, good...), "-page-ca-file", "/p2"),
+		append(append([]string{}, good...), "-page-ca-cert", "/c/a"),
+		append(append([]string{}, good...), "-page-ca-file", "p2", "-page-ca-cert", "/c/a"),
 		good[:len(good)-2],
 		append(append([]string{}, good[:6]...), "-kernel-uid", "0", "-kernel-gid", "980", "-passphrase-file", "/p", "-recovery-file", "/r"),
 		{"-state", "s", "-rotate"},
@@ -999,5 +1129,228 @@ func TestCaptureIsTheOwnersAndNoSmallOrderKey(t *testing.T) {
 	noErr(t, os.WriteFile(small, append(append(bytes.Clone(identity), nonce...), forged...), 0o600))
 	if k, err := readCapture(small, os.Geteuid()); !errors.Is(err, errCapture) || k != nil {
 		t.Fatalf("a small-order capture was taken: %x, %v", k, err)
+	}
+}
+
+// testNow is the one-shot's clock in these tests.
+var testNow = time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC)
+
+// rotBox is an enrolled box whose owner side asks the keeper's one-shot to
+// rotate the recovery key, as MIG-4-recovery-r4a will.
+type rotBox struct {
+	*box
+	head ed25519.PrivateKey
+	old  string // the store's recipient ID
+}
+
+func newRotBox(t *testing.T) *rotBox {
+	t.Helper()
+	b := newBox(t)
+	noErr(t, enroll(b.c, b.sw.TPM()))
+	b.c.now = func() time.Time { return testNow }
+	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	defer st.Close()
+	return &rotBox{box: b, head: get(st.HeadKey()), old: get(storeRecipientID(st))}
+}
+
+func newKey(t *testing.T) []byte {
+	k := make([]byte, seal.RecoveryLen)
+	get(rand.Read(k))
+	return k
+}
+
+func recipientID(k []byte) string { return get(backup.RecipientFor(k)).ID() }
+
+// approve is the kernel's approval for old to next's recipient, signed by
+// head, expiring a quarter hour after testNow.
+func approve(head ed25519.PrivateKey, route, old, next string) []byte {
+	return get(handoff.SignApproval(head, handoff.Approval{Route: route, Old: old, Next: next,
+		Expires: testNow.UnixMilli() + handoff.CardApprovalFor}))
+}
+
+func request(factor string, secret, next, approval []byte) []byte {
+	return get(json.Marshal(map[string]any{"factor": factor, "secret": secret, "next": hex.EncodeToString(next),
+		"approval": approval}))
+}
+
+// ask runs the one-shot on req as the socket unit would, and returns its
+// word.
+func (b *rotBox) ask(req []byte) string {
+	b.t.Helper()
+	var out bytes.Buffer
+	code := rotateRecoveryMain(b.c, bytes.NewReader(req), &out)
+	w := strings.TrimSuffix(out.String(), "\n")
+	if (code == 0) != (w == "ok") || strings.Contains(w, "\n") {
+		b.t.Fatalf("exit %d with answer %q", code, out.String())
+	}
+	return w
+}
+
+func slotIDs(st *seal.Store, k seal.Kind) []string {
+	var out []string
+	for _, s := range st.Slots() {
+		if s.Kind == k {
+			out = append(out, s.ID)
+		}
+	}
+	return out
+}
+
+// MIG-4-recovery-r2: route A replaces the recovery slot and the backup
+// recipient together. The old key opens nothing; the new key opens the
+// store and derives its recipient; the passphrase and tpm slots are the
+// ones enrollment made. A second rotation by the new key works the same
+// way, so the old card is retired for good.
+func TestRotateRecoveryReplacesSlotAndRecipient(t *testing.T) {
+	b := newRotBox(t)
+	before := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	pass, tpm := slotIDs(before, seal.KindPassphrase), slotIDs(before, seal.KindTPM)
+	before.Close()
+
+	next := newKey(t)
+	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, recipientID(next)))); w != "ok" {
+		t.Fatalf("the rotation answered %q", w)
+	}
+	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: b.recovery}); !errors.Is(err, seal.ErrWrongFactor) {
+		t.Fatalf("the old recovery key after the rotation: got %v, want ErrWrongFactor", err)
+	}
+	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	defer st.Close()
+	v, ok, err := st.Get(handoff.RecipientEntry)
+	if err != nil || !ok {
+		t.Fatalf("no recipient after the rotation: %v", err)
+	}
+	want := get(backup.RecipientFor(next))
+	if !bytes.Equal(v, get(handoff.EncodeRecipient(want.X, want.EK))) {
+		t.Fatal("the store's recipient is not the new key's")
+	}
+	if !slicesEqual(slotIDs(st, seal.KindPassphrase), pass) || !slicesEqual(slotIDs(st, seal.KindTPM), tpm) ||
+		len(slotIDs(st, seal.KindRecovery)) != 1 {
+		t.Fatal("the rotation changed a slot other than the recovery slot")
+	}
+	b.enrolledAfterRotation(next)
+
+	third := newKey(t)
+	if w := b.ask(request("recovery", next, third, approve(b.head, handoff.RouteCard, want.ID(), recipientID(third)))); w != "ok" {
+		t.Fatalf("the rotation by the new key answered %q", w)
+	}
+	for _, k := range [][]byte{b.recovery, next} {
+		if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: k}); !errors.Is(err, seal.ErrWrongFactor) {
+			t.Fatalf("a retired recovery key: got %v, want ErrWrongFactor", err)
+		}
+	}
+	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: third})).Close()
+}
+
+func slicesEqual(a, b []string) bool { return strings.Join(a, ",") == strings.Join(b, ",") }
+
+// enrolledAfterRotation: the next boot still unlocks through the pins and
+// opens the counter anchor, and the passphrase still opens the store.
+func (b *rotBox) enrolledAfterRotation(next []byte) {
+	b.t.Helper()
+	b.reboot()
+	f := get(seal.Pinned(b.sw.TPM(), b.c.storePath()))
+	st := get(seal.Unlock(b.c.storePath(), f))
+	b.openAnchor(st)
+	st.Close()
+	get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass})).Close()
+}
+
+// MIG-4-recovery-r2: every refusal answers its fixed word and leaves the
+// store's bytes as they were.
+func TestRotateRecoveryRefuses(t *testing.T) {
+	b := newRotBox(t)
+	next := newKey(t)
+	nextID := recipientID(next)
+	good := approve(b.head, handoff.RouteCard, b.old, nextID)
+	_, stranger, _ := ed25519.GenerateKey(rand.Reader)
+	expired := get(handoff.SignApproval(b.head, handoff.Approval{Route: handoff.RouteCard, Old: b.old, Next: nextID,
+		Expires: testNow.UnixMilli()}))
+	short := newKey(t)[:16]
+	other := newKey(t)
+	for _, c := range []struct {
+		name, want string
+		req        []byte
+	}{
+		{"wrong passphrase", "factor", request("passphrase", []byte("not the owner's words"), next, good)},
+		{"wrong recovery key", "factor", request("recovery", other, next, good)},
+		{"short recovery key", "factor", request("recovery", short, next, good)},
+		{"another box's kernel", "approval", request("passphrase", b.pass, next, approve(stranger, handoff.RouteCard, b.old, nextID))},
+		{"expired", "approval", request("passphrase", b.pass, next, expired)},
+		{"lost-card route", "approval", request("passphrase", b.pass, next, approve(b.head, handoff.RouteLost, b.old, ""))},
+		{"stale old", "stale", request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, recipientID(other), nextID))},
+		{"next not approved", "approval", request("passphrase", b.pass, other, good)},
+		{"cut approval", "approval", request("passphrase", b.pass, next, good[:len(good)-1])},
+		{"no approval", "approval", request("passphrase", b.pass, next, nil)},
+		{"unknown factor", "request", request("tpm", b.pass, next, good)},
+		{"short next", "request", request("passphrase", b.pass, short, good)},
+		{"not json", "request", []byte("factor=passphrase")},
+		{"next not hex", "request", []byte(`{"factor":"passphrase","next":"zz"}`)},
+		{"oversized", "request", append(request("passphrase", b.pass, next, good), bytes.Repeat([]byte(" "), maxRotateRequest)...)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			was := get(os.ReadFile(b.c.storePath()))
+			if w := b.ask(c.req); w != c.want {
+				t.Fatalf("answered %q, want %q", w, c.want)
+			}
+			if !bytes.Equal(get(os.ReadFile(b.c.storePath())), was) {
+				t.Fatal("a refused rotation changed the store")
+			}
+		})
+	}
+	get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: b.recovery})).Close()
+	// The approval that every case above refused around still works.
+	if w := b.ask(request("passphrase", b.pass, next, good)); w != "ok" {
+		t.Fatalf("the good request after the refusals answered %q", w)
+	}
+	// And only once: the store's recipient has changed, so it is stale.
+	for _, k := range [][]byte{next, newKey(t)} {
+		if w := b.ask(request("recovery", next, k, good)); w != "stale" {
+			t.Fatalf("a replayed approval answered %q", w)
+		}
+	}
+}
+
+// MIG-4-recovery-r2: a store enrolled before MIG-4-recovery-e1 holds no
+// recipient; an approval with old "" gives it its first, and one naming
+// any recipient is stale.
+func TestRotateRecoveryPreE1Store(t *testing.T) {
+	b := newRotBox(t)
+	st := get(seal.Unlock(b.c.storePath(), seal.Passphrase{Phrase: b.pass}))
+	noErr(t, st.Delete(handoff.RecipientEntry))
+	st.Close()
+	next := newKey(t)
+	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, recipientID(next)))); w != "stale" {
+		t.Fatalf("an approval naming a recipient on a store with none answered %q", w)
+	}
+	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, "", recipientID(next)))); w != "ok" {
+		t.Fatalf("the first recipient answered %q", w)
+	}
+	st = get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	defer st.Close()
+	if got := get(storeRecipientID(st)); got != recipientID(next) {
+		t.Fatalf("the store's recipient is %q, not the new key's", got)
+	}
+}
+
+// MIG-4-recovery-r2: one rotation at a time. While another run holds the
+// store's lock the one-shot answers busy and changes nothing; once it is
+// released the same request goes through.
+func TestRotateRecoveryIsSerial(t *testing.T) {
+	b := newRotBox(t)
+	next := newKey(t)
+	req := request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, recipientID(next)))
+	release := get(lockStore(b.c, false))
+	was := get(os.ReadFile(b.c.storePath()))
+	if w := b.ask(req); w != "busy" {
+		release()
+		t.Fatalf("answered %q while the lock was held", w)
+	}
+	release()
+	if !bytes.Equal(get(os.ReadFile(b.c.storePath())), was) {
+		t.Fatal("a busy rotation changed the store")
+	}
+	if w := b.ask(req); w != "ok" {
+		t.Fatalf("answered %q once the lock was released", w)
 	}
 }

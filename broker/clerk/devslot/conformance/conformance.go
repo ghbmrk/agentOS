@@ -343,13 +343,14 @@ func (h *harness) leak(err error) string {
 }
 
 // slotSide is the only code from this repository a driver may link: the
-// slot and the key library. Everything else it links is held to the rules
+// slot, its process entry (proc) and the key library. Everything else it links is held to the rules
 // in bannedImports. This package is not on it: it is test tooling, so
 // drivers use it from their _test.go files only, which go list -deps does not
 // walk.
 var slotSide = map[string]bool{
-	reflect.TypeFor[devslot.Slot]().PkgPath(): true,
-	reflect.TypeFor[key.Verb]().PkgPath():     true,
+	reflect.TypeFor[devslot.Slot]().PkgPath():           true,
+	reflect.TypeFor[devslot.Slot]().PkgPath() + "/proc": true,
+	reflect.TypeFor[key.Verb]().PkgPath():               true,
 }
 
 // thisRepo prefixes this repository's packages, read from the slot's own

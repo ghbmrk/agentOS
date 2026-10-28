@@ -12,7 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -341,7 +341,7 @@ func TestCardFillAfterTheTapIsRefused(t *testing.T) {
 	fill := read(`{"v":0,"verb":"type","ref":"e4","text":"synth-card-0000"}`)
 	fill.Labels = []string{"card"}
 	r.run(t, 4, "fill", k, fill)
-	if s := r.step("fill"); s.Phase != kernel.PFailed || s.Detail != clerk.RClaim {
+	if s := r.step("fill"); s.Phase != kernel.PFailed || s.Detail != check.RClaim {
 		t.Fatalf("fill: phase %s (%s)", s.Phase, s.Detail)
 	}
 	if got := forwarded(t, r.h, "type"); len(got) != 0 {

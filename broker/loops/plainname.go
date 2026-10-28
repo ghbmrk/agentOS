@@ -48,11 +48,16 @@ var fuzzNames = map[string]string{
 	"update.FuzzParseAttestation":   "the check that reads update attestations",
 	"withings.FuzzReassemble":       "the check that reads your scale's Bluetooth replies",
 	"edgelink.FuzzReadFrame":        "the check that reads what the edge box sends",
+	"devslot.FuzzWire":              "the check that reads what a device driver and its host send each other",
 	"homekit.FuzzTLV8":              "the check that reads a HomeKit device's pairing replies",
 	"homekit.FuzzSessionFrame":      "the check that reads a HomeKit device's encrypted messages",
 	"homekit.FuzzResponse":          "the check that reads a HomeKit device's answers and alerts",
 	"homekit.FuzzAccessoriesJSON":   "the check that reads a HomeKit device's list of controls",
 	"homekit.FuzzSessionRoundTrip":  "the check that reads a HomeKit device's messages end to end",
+	"camwire.FuzzFrame":             "the check that reads what a camera and its viewers send each other",
+	"camwire.FuzzBundle":            "the check that reads a camera's signed settings",
+	"camwire.FuzzManifest":          "the check that reads a camera's signed update",
+	"vision.FuzzVisionReply":        "the check that reads what the camera vision service reports",
 }
 
 // probePrefix starts the socket probe's subject ("socket.<machine>").

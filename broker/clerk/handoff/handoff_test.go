@@ -80,6 +80,7 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 	hw := es256(t, "box.example")
 	keys := testKeys()
 	keys.Anchors = []key.PublicKey{anchors[0], hw, anchors[1]}
+	keys.ClerkRoot = [32]byte{7, 7, 7}
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -89,13 +90,13 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := testCounter()
-	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
+	if k.Log != [32]byte{9} || k.ClerkRoot != [32]byte{7, 7, 7} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
 		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth, want.Auth) {
 		t.Fatalf("keys did not survive the hand-off: %+v", k)
 	}
 	auth := k.Counter.Auth
 	k.Wipe()
-	if k.Head != nil || k.Log != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
+	if k.Head != nil || k.Log != ([32]byte{}) || k.ClerkRoot != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
 		t.Fatal("Wipe left keys")
 	}
 }
@@ -117,7 +118,11 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	v4 := bytes.Clone(good)
 	v4[len(handoffTag)-2] = '4' // a v4 hand-off, which carried no page authority
 	v5 := bytes.Clone(good)
-	v5[len(handoffTag)-2] = '5'                          // a v5 hand-off, which carried no link key, first edge or slot
+	v5[len(handoffTag)-2] = '5' // a v5 hand-off, which carried no link key, first edge or slot
+	v6 := bytes.Clone(good)
+	v6[len(handoffTag)-2] = '6' // a v6 hand-off, which carried no clerk root key
+	v7 := bytes.Clone(good)
+	v7[len(handoffTag)-2] = '7'                          // a v7 hand-off, which carried no new recovery key
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -138,7 +143,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	dupB = append(dupB, e...)
 	ragged := append(bytes.Clone(good[:len(good)-ed25519.PublicKeySize-2]), 0, 31)
 	ragged = append(ragged, ownerPub[:31]...) // an entry that decodes to no key
-	o := len(handoffTag) + 64                 // the SRK name's length
+	o := len(handoffTag) + 96                 // the SRK name's length
 	srkLong := bytes.Clone(good)
 	srkLong[o] = maxName + 1
 	srkNone := bytes.Clone(good)
@@ -147,7 +152,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "v6": v6, "v7": v7, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -345,7 +350,7 @@ func TestKernelKeysCarryTheRecipient(t *testing.T) {
 	}
 
 	// The recipient's length sits after the counter's auth value.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32
 	if binary.BigEndian.Uint16(b[o:]) != RecipientLen {
 		t.Fatalf("recipient length not at %d", o)
 	}
@@ -447,7 +452,7 @@ func TestKernelKeysCarryThePageCA(t *testing.T) {
 	}
 
 	// The authority's length sits after the recipient.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + RecipientLen
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + RecipientLen
 	if int(binary.BigEndian.Uint16(b[o:])) != len(ca) {
 		t.Fatalf("authority length not at %d", o)
 	}
@@ -536,7 +541,7 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 	}
 
 	// The link key's length sits after the page authority.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
 	if b[o] != ed25519.SeedSize || !bytes.Equal(b[o+1:o+33], link.Seed()) {
 		t.Fatalf("link key not at %d", o)
 	}
@@ -590,5 +595,150 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 	}
 	if got, err := ParseFirstEdge(edge); err != nil || !got.Equal(edge) || &got[0] == &edge[0] {
 		t.Fatalf("first edge entry is not a copy: %v", err)
+	}
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r1 (#3391): an approval round-trips under the head key
+// and binds its route, old, next and expiry; one under another head key,
+// edited in any byte, cut, padded, past its time or out of shape refuses.
+func TestApprovalRoundTripAndBounds(t *testing.T) {
+	pub, priv := gen(3)
+	otherPub, otherPriv := gen(4)
+	old, next := strings.Repeat("0a", 16), strings.Repeat("1b", 16)
+	card := Approval{Route: RouteCard, Old: old, Next: next, Expires: 5000}
+	for _, a := range []Approval{card, {Route: RouteCard, Next: next, Expires: 5000}, {Route: RouteLost, Old: old, Expires: 5000}, {Route: RouteLost, Expires: 1}} {
+		b, err := SignApproval(priv, a)
+		if err != nil {
+			t.Fatalf("%+v: %v", a, err)
+		}
+		if len(b) > MaxApproval {
+			t.Fatalf("%+v: %d bytes, over MaxApproval", a, len(b))
+		}
+		if got, err := VerifyApproval(pub, b, a.Expires-1); err != nil || got != a {
+			t.Fatalf("%+v: verified %+v, %v", a, got, err)
+		}
+		if _, err := VerifyApproval(pub, b, a.Expires); !errors.Is(err, ErrApprovalExpired) {
+			t.Fatalf("%+v at its expiry: %v", a, err)
+		}
+		if _, err := VerifyApproval(otherPub, b, 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%+v under another head key: %v", a, err)
+		}
+	}
+	b, err := SignApproval(priv, card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range b {
+		e := bytes.Clone(b)
+		e[i] ^= 1
+		if got, err := VerifyApproval(pub, e, 0); err == nil {
+			t.Fatalf("byte %d edited: verified %+v", i, got)
+		}
+	}
+	for name, e := range map[string][]byte{
+		"empty":   nil,
+		"cut":     b[:len(b)-1],
+		"no sig":  b[:len(b)-ed25519.SignatureSize],
+		"padded":  append(bytes.Clone(b), 0),
+		"long":    bytes.Repeat([]byte{'a'}, MaxApproval+1),
+		"tagless": b[len(approvalTag):],
+	} {
+		if _, err := VerifyApproval(pub, e, 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	// A body re-signed by the right key but out of shape still refuses:
+	// the parser, not only the signature, holds the form.
+	resign := func(body []byte) []byte { return append(bytes.Clone(body), ed25519.Sign(priv, body)...) }
+	body := card.body()
+	for name, e := range map[string][]byte{
+		"version 2":   append(append([]byte(approvalTag), 2), body[len(approvalTag)+1:]...),
+		"route c":     append(append([]byte(approvalTag), approvalV, 'c'), body[len(approvalTag)+2:]...),
+		"old overrun": append(append([]byte(approvalTag), approvalV, 'a', 200), body[len(approvalTag)+3:]...),
+		"trailing":    append(bytes.Clone(body), 0),
+	} {
+		if _, err := VerifyApproval(pub, resign(e), 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	for name, a := range map[string]Approval{
+		"card, no next":    {Route: RouteCard, Old: old},
+		"card, next = old": {Route: RouteCard, Old: old, Next: old},
+		"lost, a next":     {Route: RouteLost, Old: old, Next: next},
+		"no route":         {Old: old, Next: next},
+		"upper hex":        {Route: RouteCard, Old: strings.ToUpper(old), Next: next},
+		"short id":         {Route: RouteCard, Old: old[:30], Next: next},
+	} {
+		if _, err := SignApproval(priv, a); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s signed: %v", name, err)
+		}
+		if _, err := VerifyApproval(pub, resign(a.bodyUnchecked()), 0); !errors.Is(err, ErrApproval) {
+			t.Fatalf("%s verified: %v", name, err)
+		}
+	}
+	if _, err := SignApproval(otherPriv[:10], card); !errors.Is(err, ErrApproval) {
+		t.Fatalf("a short head key: %v", err)
+	}
+}
+
+// bodyUnchecked is body for any route byte, "" written as a zero byte.
+func (a Approval) bodyUnchecked() []byte {
+	if a.Route == "" {
+		a.Route = "\x00"
+	}
+	return a.body()
+}
+
+// REQ: REC-4
+// The recovery key a lost-card rotation made at this boot (D-201 route B)
+// crosses whole, after the slot, and Wipe clears it; a boot with none
+// hands none. Any other length is refused at both ends. Revert mutant:
+// NewRecovery dropped from Wipe (the wipe check fails).
+func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
+	rec := bytes.Repeat([]byte{0x5a}, RecoveryLen)
+	keys := testKeys()
+	keys.NewRecovery = rec
+	b, err := keys.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ReadKeys(pipeWith(t, b))
+	if err != nil || !bytes.Equal(k.NewRecovery, rec) || len(k.Anchors) != len(anchors) || k.Slot != SlotTPM {
+		t.Fatalf("the new recovery key did not survive the hand-off: %v", err)
+	}
+	held := k.NewRecovery
+	k.Wipe()
+	if k.NewRecovery != nil || !bytes.Equal(held, make([]byte, RecoveryLen)) {
+		t.Fatal("Wipe left the new recovery key")
+	}
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.NewRecovery != nil {
+		t.Fatalf("no new recovery key: %v", err)
+	}
+	// Its length sits right after the slot.
+	o := bytes.Index(b, append([]byte{byte(len(SlotTPM))}, SlotTPM...)) + 1 + len(SlotTPM)
+	if b[o] != RecoveryLen || !bytes.Equal(b[o+1:o+1+RecoveryLen], rec) {
+		t.Fatalf("new recovery key not at %d", o)
+	}
+	splice := func(skip int, with ...byte) []byte {
+		w := bytes.Clone(b[:o])
+		w = append(w, with...)
+		return append(w, b[o+skip:]...)
+	}
+	for name, w := range map[string][]byte{
+		"short": splice(1+RecoveryLen, append([]byte{RecoveryLen - 1}, rec[1:]...)...),
+		"long":  splice(1+RecoveryLen, append([]byte{RecoveryLen + 1, 0}, rec...)...),
+		"none":  b[:o],
+	} {
+		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
+			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for _, n := range []int{1, RecoveryLen - 1, RecoveryLen + 1} {
+		k := testKeys()
+		k.NewRecovery = make([]byte, n)
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("marshal %d bytes: got %v, want ErrHandoff", n, err)
+		}
 	}
 }

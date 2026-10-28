@@ -3,6 +3,7 @@ package kernel
 import (
 	"crypto/ed25519"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -136,4 +137,54 @@ func (s *State) applySetup(e Entry) error {
 	s.Anchors = slices.Clone(f.Anchors)
 	s.edge.setup = true
 	return nil
+}
+
+// MaxSetupFrame bounds the log's first frame as LoggedAnchors reads it: far
+// above an anchors.set entry with two ES256 keys and their signatures.
+const MaxSetupFrame = 64 << 10
+
+// LoggedAnchors reads the owner's anchors from a log's first entry, for the
+// unlock step on a box whose setup put them there and not in the store
+// (#2995, MAIL-keys). raw is the start of the log file, logKey the log's key
+// and box the head key's public half, which each hardware key signed over.
+// ok is false for a log with no whole first frame (none yet, or torn by a
+// crash). A first entry that is not anchors.set, or does not open under
+// logKey, or is not the owner's two keys each signing SetupMsg, is
+// ErrCorrupt. Only a holder of the log key writes a frame that opens, and
+// the signatures bind the keys to this box's head key.
+func LoggedAnchors(raw []byte, logKey [32]byte, box ed25519.PublicKey) (anchors []key.PublicKey, ok bool, err error) {
+	a, err := newAEAD(logKey)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(raw) < 4 {
+		return nil, false, nil
+	}
+	n := int(binary.BigEndian.Uint32(raw))
+	switch {
+	case n < a.NonceSize()+a.Overhead() || n > MaxSetupFrame:
+		return nil, false, ErrCorrupt
+	case len(raw)-4 < n:
+		return nil, false, nil
+	}
+	fr := raw[4 : 4+n]
+	pt, err := a.Open(nil, fr[:a.NonceSize()], fr[a.NonceSize():], aad(1))
+	if err != nil {
+		return nil, false, ErrCorrupt
+	}
+	var e Entry
+	if json.Unmarshal(pt, &e) != nil || e.Seq != 1 || e.Prev != (Hash{}) || e.Type != TAnchorsSet || !Known(e.Type, e.V) {
+		return nil, false, ErrCorrupt
+	}
+	f, err := body[FirstAnchors](e)
+	if err != nil || !f.shape() || len(f.Sigs) != len(f.Anchors) {
+		return nil, false, ErrCorrupt
+	}
+	msg := SetupMsg(box, f.Anchors)
+	for i, k := range f.Anchors {
+		if !k.Verify(msg, f.Sigs[i]) {
+			return nil, false, ErrCorrupt
+		}
+	}
+	return f.Anchors, true, nil
 }

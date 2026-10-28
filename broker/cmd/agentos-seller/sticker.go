@@ -16,7 +16,7 @@ import (
 func claimURL(code string) string { return card.BoxPage + "claim?code=" + code }
 
 var stickerPage = template.Must(template.New("sticker").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>AgentOS claim sticker</title>
+<html lang="en"><head><meta charset="utf-8"><title>agentOS claim sticker</title>
 <style>
 @page { margin: 10mm }
 body { font-family: sans-serif; margin: 0 }
@@ -39,7 +39,7 @@ body { font-family: sans-serif; margin: 0 }
 {{.QR}}
 <div class="label">Claim code</div>
 <div class="code">{{.Code}}</div>
-<div class="hint">Claim this AgentOS box: scan, or open {{.Page}} and type the claim code.</div>
+<div class="hint">Claim this agentOS box: scan, or open {{.Page}} and type the claim code.</div>
 </div></body></html>
 `))
 

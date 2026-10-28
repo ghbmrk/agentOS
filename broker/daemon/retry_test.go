@@ -75,7 +75,7 @@ func TestOP2UnclearEffectIsParkedAndRetriedOnlyOnTheOwnersWord(t *testing.T) {
 	// expiry, a wrong code, an item left out of a partial YES, and the
 	// decisions a restart reports (Boot: Approved false, Why "restart").
 	for _, why := range []string{"owner", "expired", "void", "not chosen", "restart"} {
-		ref := d.retry.items()[0].Ref
+		ref := d.retry.listed()[0].Ref
 		d.retry.decide(func(ownerch.Decision) { t.Fatal("a retry decision went to the gate") })(
 			ownerch.Decision{Request: "A1", Item: 1, Ref: ref, Approved: false, Why: why})
 		d.retry.running.Wait()
@@ -221,11 +221,11 @@ func TestOP2RetryApprovalRunsTheLineItsRequestShowed(t *testing.T) {
 		ran = append(ran, a.line.Shown.Amount)
 		return journal.Status{State: journal.Succeeded}, nil
 	}
-	first := d.retry.items()
+	first := d.retry.listed()
 	mu.Lock()
 	amount = "$9,000.00"
 	mu.Unlock()
-	second := d.retry.items()
+	second := d.retry.listed()
 	if len(first) != 1 || len(second) != 1 || first[0].Ref == second[0].Ref || second[0].Amount != "$9,000.00" {
 		t.Fatalf("asks %+v then %+v", first, second)
 	}
@@ -258,7 +258,7 @@ func TestOP2OlderRetryRequestEndingLeavesTheNewerOne(t *testing.T) {
 	for _, why := range []string{"expired", "owner", "void"} {
 		t.Run(why, func(t *testing.T) {
 			_, d, phone, f := startParked(t)
-			first, second := d.retry.items(), d.retry.items()
+			first, second := d.retry.listed(), d.retry.listed()
 			if len(first) != 1 || len(second) != 1 || first[0].Ref == second[0].Ref {
 				t.Fatalf("asks %+v then %+v", first, second)
 			}

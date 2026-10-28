@@ -11,12 +11,18 @@ A package-level skip (a package with no test files) is not a test skip.
   go test -json ./infer/... > run.json
   require_ran.py example.com/m/pkg.TestA example.com/m/pkg.TestB < run.json
                                           exit 0, or 1 with each problem on stderr
+  require_ran.py --gated ./vm/... ./recovery < run.json
+                                          also names every root-gated test of those packages
+                                          (tools/root_tests.py), so a root step covers them (#3541)
+  require_ran.py --named-skips-only ...   fail on a skip only in a named test or its subtests, for a
+                                          whole-package run whose other tests may skip by design
 """
 import json
+import os
 import sys
 
 
-def check(lines, names):
+def check(lines, names, named_skips_only=False):
     """Problems in a `go test -json` stream, as strings; empty when every name passed."""
     passed, skipped, problems = set(), [], []
     for n, line in enumerate(lines, 1):
@@ -45,16 +51,31 @@ def check(lines, names):
     for name in names:
         if name not in passed:
             problems.append(f"{name}: no pass (skipped, failed or missing)")
+    if named_skips_only:
+        skipped = [t for t in skipped if any(t == n or t.startswith(n + "/") for n in names)]
     problems += [f"{t}: skipped" for t in skipped]
     return problems
 
 
 def main(argv=None):
-    names = sys.argv[1:] if argv is None else argv
+    args = sys.argv[1:] if argv is None else argv
+    named_skips_only = "--named-skips-only" in args
+    args = names = [a for a in args if a != "--named-skips-only"]
+    if "--gated" in args:
+        i = args.index("--gated")
+        pats = [a for a in args[i + 1:] if a.startswith("./")]
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import root_tests
+        gated = root_tests.gated_names(pats) if pats else []
+        if not gated:
+            print("require_ran.py: --gated names no root-gated test", file=sys.stderr)
+            return 2
+        names = [a for a in args[:i] + args[i + 1:] if a not in pats] + gated
     if not names or any("." not in n for n in names):
-        print("usage: require_ran.py import/path.TestName... < go-test.json", file=sys.stderr)
+        print("usage: require_ran.py [--named-skips-only] [--gated ./pkg...] import/path.TestName... < go-test.json",
+              file=sys.stderr)
         return 2
-    problems = check(sys.stdin, names)
+    problems = check(sys.stdin, names, named_skips_only)
     for p in problems:
         print(f"::error::{p}", file=sys.stderr)
     return 1 if problems else 0

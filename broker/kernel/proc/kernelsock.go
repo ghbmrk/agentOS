@@ -7,7 +7,9 @@ import (
 	"io"
 	"net"
 	"time"
+	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
@@ -91,6 +93,13 @@ type (
 		Plan  string `json:"plan"`
 		Index int    `json:"index"`
 	}
+	// retryArgs names the dispatch attempt the owner's RETRY was asked
+	// about, which the kernel refuses once it moved (CH-10).
+	retryArgs struct {
+		Plan    string `json:"plan"`
+		Index   int    `json:"index"`
+		Attempt int    `json:"attempt"`
+	}
 	issueArgs struct {
 		Cosigns []key.Cosign `json:"cosigns"`
 		Keys    []key.Key    `json:"keys"`
@@ -172,14 +181,61 @@ type (
 		Confirmation kernel.Confirmation `json:"confirmation"`
 		Err          string              `json:"err,omitempty"`
 	}
+	// rotateArgs is a rotation an anchor signed: next is the new key's
+	// recipient ID, "" when the card is lost.
+	rotateArgs struct {
+		Next   string     `json:"next"`
+		Cosign key.Cosign `json:"cosign"`
+	}
+	approvalRead struct {
+		Approval []byte `json:"approval"`
+	}
+	// recoveryCardRead is the new recovery key, seal.RecoveryLen bytes.
+	recoveryCardRead struct {
+		Key []byte `json:"key"`
+	}
+	// recipientArgs is the new recipient in its wire form and its approval.
+	recipientArgs struct {
+		Recipient []byte `json:"recipient"`
+		Approval  []byte `json:"approval"`
+	}
+	// edgeArgs is an edge key: the one the link asks about or the owner
+	// cuts.
+	edgeArgs struct {
+		Key ed25519.PublicKey `json:"key"`
+	}
+	// edgeEnrollArgs is the page step's enrolment: the candidate's key and
+	// a hardware key's signature over kernel.EdgeEnrollHash.
+	edgeEnrollArgs struct {
+		Key    ed25519.PublicKey `json:"key"`
+		Cosign key.Cosign        `json:"cosign"`
+	}
+	// candidateArgs is a hello the link read: the edge's key, the
+	// connection's exporter value and the key's signature over HelloMsg.
+	candidateArgs struct {
+		Key   ed25519.PublicKey `json:"key"`
+		Nonce []byte            `json:"nonce"`
+		Sig   []byte            `json:"sig"`
+	}
+	signArgs struct {
+		Msg []byte `json:"msg"`
+	}
 	none struct{}
 )
+
+// EdgeKey is what the log says of an edge key now: Live, the core serves
+// it; Revoked, it was revoked or replaced in this log, so its hello is
+// dropped (EDGE-link-core decision 5).
+type EdgeKey struct {
+	Live    bool `json:"live"`
+	Revoked bool `json:"revoked"`
+}
 
 // OwnerSide is the owner side's table (sub B: owner, localui, localsrv,
 // control, question, cmd/agentosd): the owner seam's actions and its reads.
 var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"submit": act(func(k *kernel.Kernel, now int64, p kernel.Plan) error { return k.Submit(now, p) }),
-	"retry":  act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Retry(now, a.Plan, a.Index) }),
+	"retry":  act(func(k *kernel.Kernel, now int64, a retryArgs) error { return k.Retry(now, a.Plan, a.Index, a.Attempt) }),
 	"cancel": act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Cancel(now, a.Plan) }),
 	"undo":   act(func(k *kernel.Kernel, now int64, a stepArgs) error { return k.Undo(now, a.Plan, a.Index) }),
 	"enroll": act(func(k *kernel.Kernel, now int64, e key.Enrollment) error { return k.Enroll(now, e) }),
@@ -224,6 +280,11 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return taskRead{}
 	}),
 	"untarget": act(func(k *kernel.Kernel, now int64, a untargetArgs) error { return k.Untarget(now, a.Name) }),
+
+	// The edge (HW-15): the page step enrols the candidate the link port
+	// logged, on a hardware key's signature, and the owner cuts an edge.
+	"edgeenroll": act(func(k *kernel.Kernel, now int64, a edgeEnrollArgs) error { return k.EdgeEnroll(now, a.Key, a.Cosign) }),
+	"edgerevoke": act(func(k *kernel.Kernel, now int64, a edgeArgs) error { return k.EdgeRevoke(now, a.Key) }),
 
 	// Erase by name (LOG-4, KRN-forget): IDs, counts and stores cross, never
 	// sealed plaintext. No side has a read of content (CH-25).
@@ -272,6 +333,39 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return r, nil
 	},
 	"backups": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.Backups() },
+	// Recovery-key rotation (REC-4, D-201): the anchor's tap gets a
+	// head-signed approval; the recipient switches only on one.
+	"recoveryrotate": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a rotateArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		b, err := h.RecoveryRotate(now, a.Next, a.Cosign)
+		if err != nil {
+			return nil, err
+		}
+		return approvalRead{b}, nil
+	},
+	"recipient": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
+		var a recipientArgs
+		if err := json.Unmarshal(raw, &a); err != nil || len(a.Approval) > handoff.MaxApproval {
+			return nil, ErrArgs
+		}
+		return nil, h.SwitchRecipient(now, a.Recipient, a.Approval)
+	},
+	// The lost-card route (D-201 route B): the key the unlock step made at
+	// this boot, for the new card, until the owner confirms it.
+	"recoverycard": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		b, err := h.RecoveryCard()
+		if err != nil {
+			return nil, err
+		}
+		return recoveryCardRead{b}, nil
+	},
+	"recoverycarddone": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		h.RecoveryCardDone()
+		return nil, nil
+	},
 	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var f kernel.FirstAnchors
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -311,6 +405,90 @@ var MeterSide = Side{name: "meter", ops: map[string]op{
 		return k.ReadPool(now, a.Pool, a.Used, a.ResetAt)
 	}),
 }}
+
+// LinkSide is agentos-link's table (EDGE-link-core c2b, #3458): the core's
+// link key, which never leaves this process, signs the link's TLS
+// handshakes; the link asks what the log says of each edge key and reports
+// the hellos it reads. Its socket admits the link's uid alone, so a
+// candidate the page step can enrol came from the link port and nowhere
+// else (decision 8), and no other side has a link call.
+var LinkSide = Side{name: "link", ops: map[string]op{
+	"edgekey": func(k *kernel.Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a edgeArgs
+		// A key of any other length is never live: an empty one would
+		// equal no live edge.
+		if err := json.Unmarshal(raw, &a); err != nil || len(a.Key) != ed25519.PublicKeySize {
+			return nil, ErrArgs
+		}
+		return EdgeKey{Live: k.LiveEdge().Equal(a.Key), Revoked: k.State().EdgeRevoked(a.Key)}, nil
+	},
+	"edgecandidate": act(func(k *kernel.Kernel, now int64, a candidateArgs) error {
+		return k.EdgeCandidate(now, a.Key, a.Nonce, a.Sig)
+	}),
+}, procOps: map[string]procOp{
+	// The link key is the kernel process's, not the kernel's: these
+	// take no lock.
+	"linkkey": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.LinkKey() },
+	"linksign": func(h *Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a signArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		return h.LinkSign(a.Msg)
+	},
+}}
+
+type (
+	// sealArgs is an item for the side's own store: its subject, its
+	// class and its plaintext.
+	sealArgs struct {
+		Subject string `json:"subject"`
+		Class   string `json:"class"`
+		Data    []byte `json:"data"`
+	}
+	// readForArgs names an item and the agent session's lineage it is
+	// read for (D-169).
+	readForArgs struct {
+		Hash    kernel.Hash `json:"hash"`
+		Lineage string      `json:"lineage"`
+	}
+)
+
+// ContentSide is one content clerk's table (KRN-content, LOG-4): it opens
+// subjects, seals into store, its own, and reads that store's items for an
+// agent session's lineage, which the log records first so an erase rewinds
+// it (kernel.ReadFor, D-169). Its socket admits that clerk's uid alone,
+// never the owner side's, the model clerk's or the link's (cmd/agentos-kernel),
+// and no planner reaches a kernel socket, so sealed plaintext crosses to
+// the clerk that sealed it and to no one else. Erase stays the owner's.
+func ContentSide(store string) Side {
+	return Side{name: "content", ops: map[string]op{
+		"opensubject": func(k *kernel.Kernel, now int64, _ json.RawMessage) (any, error) {
+			return k.OpenSubject(now)
+		},
+		"seal": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+			var a sealArgs
+			if err := json.Unmarshal(raw, &a); err != nil || len(a.Data) > MaxItem {
+				return nil, ErrArgs
+			}
+			return k.Seal(now, a.Subject, store, a.Class, a.Data)
+		},
+		"readfor": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+			var a readForArgs
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, ErrArgs
+			}
+			// Another store's item reads as no item, whatever else is
+			// wrong with the call: the zero hash names no item, so its
+			// answer is an unknown item's, and the clerk learns nothing
+			// of what other clerks hold (#3560 Security finding 1).
+			if in, ok := k.State().ItemStore(a.Hash); ok && in != store {
+				a.Hash = kernel.Hash{}
+			}
+			return k.ReadFor(now, a.Hash, a.Lineage)
+		},
+	}}
+}
 
 // ListenKernel opens one side's socket on the kernel process, admitting only
 // that side's uid.
@@ -476,12 +654,16 @@ var (
 func init() {
 	wireList = []error{
 		kernel.ErrDuplicatePlan, kernel.ErrRetryRefused, kernel.ErrNeedsCosign, kernel.ErrLine, kernel.ErrNotEnrolled, kernel.ErrNotParked,
-		kernel.ErrNotUnenrolled,
+		kernel.ErrNotUnenrolled, kernel.ErrRetryMoved,
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
+		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
+		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
+		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
+		ErrNoLinkKey, ErrLinkSign,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
@@ -591,8 +773,8 @@ func asRefusal(err error) *key.Refusal {
 type Owner struct{ Conn }
 
 func (o Owner) Submit(p kernel.Plan) error { return o.Call("submit", p, nil) }
-func (o Owner) Retry(plan string, index int) error {
-	return o.Call("retry", stepArgs{plan, index}, nil)
+func (o Owner) Retry(plan string, index, attempt int) error {
+	return o.Call("retry", retryArgs{plan, index, attempt}, nil)
 }
 func (o Owner) Cancel(plan string) error { return o.Call("cancel", stepArgs{Plan: plan}, nil) }
 func (o Owner) Undo(plan string, index int) error {
@@ -681,6 +863,17 @@ func (o Owner) BackupTarget(t kernel.BackupTarget, c key.Cosign) error {
 	return o.Call("backuptarget", targetArgs{t, c}, nil)
 }
 
+// EdgeEnroll makes edge, the candidate the link port logged, the live edge
+// on a hardware key's signature c over kernel.EdgeEnrollHash.
+func (o Owner) EdgeEnroll(edge ed25519.PublicKey, c key.Cosign) error {
+	return o.Call("edgeenroll", edgeEnrollArgs{edge, c}, nil)
+}
+
+// EdgeRevoke cuts edge for good, with no replacement.
+func (o Owner) EdgeRevoke(edge ed25519.PublicKey) error {
+	return o.Call("edgerevoke", edgeArgs{edge}, nil)
+}
+
 // Untarget stops new backups to a destination; its backups keep their
 // erase reach.
 func (o Owner) Untarget(name string) error { return o.Call("untarget", untargetArgs{name}, nil) }
@@ -691,6 +884,33 @@ func (o Owner) Backup() (t []Taken, err error) { err = o.Call("backup", nil, &t)
 // Backups is the recipient's ID, every destination and every kept backup.
 func (o Owner) Backups() (v BackupsView, err error) { err = o.Call("backups", nil, &v); return }
 
+// RecoveryRotate asks for a recovery-key approval on an anchor's signature
+// c over kernel.RecoveryRotateHash(old, next), old the recipient the
+// kernel holds (Backups' Recipient): next is the new key's recipient ID,
+// or "" when the card is lost. The approval is handoff.Approval's form.
+func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
+	var r approvalRead
+	err := o.Call("recoveryrotate", rotateArgs{next, c}, &r)
+	return r.Approval, err
+}
+
+// SwitchRecipient makes r, in its wire form, the backup recipient, on the
+// card-route approval RecoveryRotate gave for it.
+func (o Owner) SwitchRecipient(r, approval []byte) error {
+	return o.Call("recipient", recipientArgs{r, approval}, nil)
+}
+
+// RecoveryCard is the recovery key the unlock step made at this boot on
+// the lost-card route, for the new card; ErrNoRecoveryCard once confirmed.
+func (o Owner) RecoveryCard() ([]byte, error) {
+	var r recoveryCardRead
+	err := o.Call("recoverycard", nil, &r)
+	return r.Key, err
+}
+
+// RecoveryCardDone wipes it, once the owner has confirmed the card.
+func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
+
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {
 	err = o.Call("certify", certifyArgs{pub}, &c)
@@ -698,8 +918,13 @@ func (o Owner) Certify(pub []byte) (c Certified, err error) {
 }
 
 // Named is the live subjects a label reads as (kernel.Named): those found,
-// and those whose labels could not be read.
+// and those whose labels could not be read. A blank label is
+// kernel.ErrLabel. Invalid UTF-8 is ErrArgs here, since JSON would carry it
+// as U+FFFD and match a label the owner did not type (LOG-4).
 func (o Owner) Named(label string) (found, unread []string, err error) {
+	if !utf8.ValidString(label) {
+		return nil, nil, ErrArgs
+	}
 	var r namedRead
 	err = o.Call("named", labelArgs{label}, &r)
 	return r.Found, r.Unread, err
@@ -767,4 +992,30 @@ func (m Meter) AdmitPool(_ int64, pool string) *key.Refusal {
 }
 func (m Meter) ReadPool(_ int64, pool string, used, resetAt int64) error {
 	return m.Call("readpool", poolArgs{Pool: pool, Used: used, ResetAt: resetAt}, nil)
+}
+
+// Content is a content clerk's seam over its content socket (ContentSide).
+type Content struct{ Conn }
+
+// OpenSubject opens a new subject and returns its ID.
+func (c Content) OpenSubject() (sub string, err error) {
+	err = c.Call("opensubject", nil, &sub)
+	return
+}
+
+// Seal seals data as an item of subject, of class, in the clerk's own
+// store, and returns its hash.
+func (c Content) Seal(subject, class string, data []byte) (h kernel.Hash, err error) {
+	if len(data) > MaxItem {
+		return h, ErrArgs
+	}
+	err = c.Call("seal", sealArgs{subject, class, data}, &h)
+	return
+}
+
+// ReadFor opens the item named h, of the clerk's own store, for the agent
+// session of lineage; the kernel logs the read first.
+func (c Content) ReadFor(h kernel.Hash, lineage string) (data []byte, err error) {
+	err = c.Call("readfor", readForArgs{h, lineage}, &data)
+	return
 }

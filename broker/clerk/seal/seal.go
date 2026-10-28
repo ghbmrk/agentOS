@@ -11,8 +11,8 @@
 //
 // So nothing stored on the SSD alone releases the key (STO-2, A8). Once a
 // slot opens, the store derives one key per purpose under its own HKDF label:
-// the log's AES-256-GCM key, the kernel's head-signing seed, and one sealing
-// key per clerk, which Sealer hands out as that clerk's clerk.Sealer. The
+// the log's AES-256-GCM key, the kernel's head-signing seed, and the clerk
+// root key, from which the kernel derives each clerk's key (ClerkRoot). The
 // store key stays with whoever unlocked the store (the unlock step, STO-2b),
 // and each process gets only the derived keys it needs (CLK-1).
 //
@@ -52,7 +52,6 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"golang.org/x/crypto/argon2"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -826,8 +825,44 @@ func (s *Store) Put(name string, value []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	e, err := s.withEntry(name, value)
+	if err != nil {
+		return err
+	}
+	return s.commit(s.f.Slots, e)
+}
+
+// ReplaceAndPut is Replace and Put in one write: a new recovery key's slot
+// in place of slot id, and its backup recipient as entry name (REC-4,
+// BAK-1, MIG-4-recovery-r2). A crash leaves the old slot and old entry, or
+// the new slot and new entry, never one without the other.
+func (s *Store) ReplaceAndPut(id string, f Factor, name string, value []byte) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.live(); err != nil {
+		return "", err
+	}
+	i := s.find(id)
+	if i < 0 {
+		return "", ErrNoSlot
+	}
+	e, err := s.withEntry(name, value)
+	if err != nil {
+		return "", err
+	}
+	sl, err := makeSlot(s.f.ID, s.key, f)
+	if err != nil {
+		return "", err
+	}
+	slots := slices.Clone(s.f.Slots)
+	slots[i] = sl
+	return s.committed(sl.ID, s.commit(slots, e))
+}
+
+// withEntry is the store's entries with name set to a copy of value.
+func (s *Store) withEntry(name string, value []byte) (map[string][]byte, error) {
 	if !entryName.MatchString(name) || len(value) > MaxEntry {
-		return errors.New("seal: bad entry name or value too long")
+		return nil, errors.New("seal: bad entry name or value too long")
 	}
 	e := make(map[string][]byte, len(s.entries)+1)
 	for k, v := range s.entries {
@@ -835,9 +870,9 @@ func (s *Store) Put(name string, value []byte) error {
 	}
 	e[name] = slices.Clone(value)
 	if len(e) > MaxEntries {
-		return fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
+		return nil, fmt.Errorf("seal: a store holds at most %d entries", MaxEntries)
 	}
-	return s.commit(s.f.Slots, e)
+	return e, nil
 }
 
 // Get returns a copy of an entry.
@@ -914,20 +949,18 @@ func (s *Store) HeadKey() (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(b), nil
 }
 
-var clerkName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
-// Sealer is clerk's sealer: AES-256-GCM under a key derived for that clerk
-// alone, so one clerk's sealer opens nothing another's sealed (CLK-1).
-func (s *Store) Sealer(clerkID string) (clerk.Sealer, error) {
-	if !clerkName.MatchString(clerkID) {
-		return nil, errors.New("seal: a clerk name is lower-case letters, digits and hyphens")
-	}
-	b, err := s.derived("sealer/" + clerkID)
+// ClerkRoot is the root of every clerk's key (MAIL-keys, CLK-1): the unlock
+// step hands it to the kernel, which derives each clerk's key from it
+// (clerkkey.Derive) and hands that key to that clerk alone.
+func (s *Store) ClerkRoot() ([32]byte, error) {
+	var k [32]byte
+	b, err := s.derived("clerks")
 	if err != nil {
-		return nil, err
+		return k, err
 	}
-	defer wipe(b)
-	return clerk.NewAESSealer(b)
+	copy(k[:], b)
+	wipe(b)
+	return k, nil
 }
 
 // Close wipes the store key. Keys already handed out are the caller's.
@@ -973,7 +1006,8 @@ func writeNew(path string, b []byte) error {
 	return syncDir(filepath.Dir(path))
 }
 
-func writeTemp(path string, b []byte) (string, error) {
+// writeTemp is a variable so a test can make a write fail before the rename.
+var writeTemp = func(path string, b []byte) (string, error) {
 	fh, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
 		return "", err

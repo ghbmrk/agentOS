@@ -50,6 +50,14 @@ type MailHost struct {
 	signing *gmailSignIn // the Gmail sign-in waiting for its paste; nil: none
 
 	planned planState // setup's account plan (accountPlan)
+
+	stepping   chan struct{}  // the worker's step in flight (planSenders); setup and removal wait for it
+	kick       chan struct{}  // wakes the worker; buffered, sent to without blocking
+	ws         worldState     // the host's own world's sources (world.go)
+	srec       *sealedSenders // the senders record of the account at srecAt, between steps (senders.go)
+	srecAt     int64
+	sendersWhy string // why the last senders step failed (trouble); "" if it did not
+	own        bool   // the world is the host's own: each read's clerk is bound to its account (worldAt)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -118,12 +126,29 @@ func stopped(stop error) (detail string, planner error) {
 }
 
 // NewMailHost opens the account in dir, if there is one.
+// With no cfg.World the host builds its own (world.go) and starts the
+// worker that reads its alert senders; a given World is used unchanged.
 func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailConfig) *MailHost {
-	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg}
+	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg, kick: make(chan struct{}, 1)}
+	h.own = cfg.World == nil
+	if h.own {
+		h.cfg.World = h.world
+	}
 	h.mu.Lock()
 	h.refresh()
 	h.mu.Unlock()
+	if h.own {
+		go h.work()
+	}
 	return h
+}
+
+// wake kicks the worker without blocking; h.mu may be held.
+func (h *MailHost) wake() {
+	select {
+	case h.kick <- struct{}{}:
+	default:
+	}
 }
 
 // refresh reads the account again and waits for the read; h.mu is held, and
@@ -142,6 +167,13 @@ func (h *MailHost) refresh() {
 	done := make(chan struct{})
 	h.reading = done
 	last, day, fails, today := h.mark, h.day, h.fails, h.cfg.day()
+	c := h.cfg
+	if h.own {
+		// The clerk judges in the world of the account it is opened for:
+		// a step it runs after a change of account has the guard off.
+		at := h.changes
+		c.World = func() inbox.World { return h.worldAt(at) }
+	}
 	h.mu.Unlock()
 	var m *Mail
 	var mark inbox.Mark
@@ -150,11 +182,12 @@ func (h *MailHost) refresh() {
 		read, mark, err = recheck(h.ctx, last, day, fails == 1, h.dir, h.sec, h.cfg)
 	}
 	if read && err == nil {
-		m, mark, err = openMail(h.ctx, h.dir, h.sec, h.cfg, mark)
+		m, mark, err = openMail(h.ctx, h.dir, h.sec, c, mark)
 	}
 	h.mu.Lock()
 	h.reading = nil
 	close(done)
+	h.wake() // a senders read that failed retries at the next refresh
 	if !read {
 		// The last read stands. A change check that failed, for any
 		// reason but a refused sign-in (which reads), is told until a
@@ -192,18 +225,22 @@ func (h *MailHost) refresh() {
 	}
 }
 
-// wait waits, with h.mu released, for the read in flight to end.
+// wait waits, with h.mu released, for the read in flight to end, or the
+// worker's step when no read is in flight.
 func (h *MailHost) wait() {
 	done := h.reading
+	if done == nil {
+		done = h.stepping
+	}
 	h.mu.Unlock()
 	<-done
 	h.mu.Lock()
 }
 
-// idle waits until no read is in flight; h.mu is held. While the caller
-// keeps h.mu, none starts.
+// idle waits until no read and no worker step is in flight; h.mu is held.
+// While the caller keeps h.mu, none starts.
 func (h *MailHost) idle() {
-	for h.reading != nil {
+	for h.reading != nil || h.stepping != nil {
 		h.wait()
 	}
 }
@@ -212,9 +249,19 @@ func (h *MailHost) idle() {
 // unread warm-up notice, which was about it, is dropped.
 func (h *MailHost) changed() {
 	h.changes++
+	h.ws.reset(h.changes)
+	h.srec = nil
+	h.wake()
 	h.cur, h.why, h.checkWhy, h.stop = nil, "", "", nil
 	h.mark, h.day = nil, ""
 	h.notices = slices.DeleteFunc(h.notices, func(n notice) bool { return n.warm })
+}
+
+// wrote is the test seam right after a setter's write (MailConfig.wrote).
+func (h *MailHost) wrote() {
+	if h.cfg.wrote != nil {
+		h.cfg.wrote()
+	}
 }
 
 // notify adds a notice. A warm-up notice already waiting keeps its place
@@ -292,6 +339,11 @@ func (h *MailHost) status() OwnerStatus {
 	why := cmp.Or(h.why, h.checkWhy)
 	if why != "" {
 		st.Lines = append(st.Lines, why)
+	}
+	// While a sign-in failure stops the clerk, h.why gives the owner's step
+	// and the worker waits for it: the senders line would promise a retry.
+	if l := sendersLine(h.ws.sendersNow(), h.sendersWhy); h.own && h.cur != nil && h.stop == nil && l != "" {
+		st.Lines = append(st.Lines, l)
 	}
 	if h.cur != nil && len(h.cur.Status.Lines) > 0 {
 		if why != "" {
@@ -394,12 +446,16 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		if replacing {
 			release = h.holdGmail(prev) // a Gmail account's grant, given back once SetMail drops it (A22)
 		}
+		end := h.ws.writing() // until the change is told (#3538)
 		err = SetMail(h.dir, h.sec, a.Settings, a.Password)
+		h.wrote()
 		release()
 		if !h.setUp(slotOf(a.Settings)) {
+			end()
 			return nil, err // the account before, and its grant, stand
 		}
 		h.changed()
+		end()
 		if replacing {
 			h.notify(false, noteMailReplaced)
 		}
@@ -416,12 +472,16 @@ var MailOwnerSide = MailSide{"mail owner", map[string]mailOp{
 		if removing {
 			release = h.holdGmail(prev) // a Gmail account's grant, given back once RemoveMail drops it (A22)
 		}
+		end := h.ws.writing()
 		err = RemoveMail(h.dir, h.sec)
+		h.wrote()
 		release()
 		if err != nil {
+			end()
 			return nil, err
 		}
 		h.changed()
+		end()
 		if removing {
 			h.notify(false, noteMailRemoved)
 		}

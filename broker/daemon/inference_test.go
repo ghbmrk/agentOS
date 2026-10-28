@@ -48,7 +48,7 @@ var linked = []string{compositionRoot, "change", "loops", "grants"}
 
 // forbidden broker packages: the model router and its provider adapters,
 // and the egress proxy.
-var forbidden = []string{"route", "egress", "cmd/agentos-egress", "cmd/agentos-infer"}
+var forbidden = []string{"route", "egress", "cmd/agentos-egress", "cmd/agentos-infer", "cmd/agentos-vision"}
 
 // providerSDK matches third-party model provider clients.
 var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|mistral|cohere|ollama|bedrock)`)
@@ -99,6 +99,9 @@ var netOK = map[string]allowance{
 	// supervisor makes that socket, hands it to the jailed service as fd 3
 	// and starts it into the inference leaf.
 	"infer": {"dials only the inference service's unix socket", []string{"net.Conn", "net.Dialer"}},
+	// The camera vision service's client (VIS-svc), as infer's; its
+	// supervisor is infer/supervise's and needs no entry.
+	"vision": {"dials only the vision service's unix socket", []string{"net.Conn", "net.Dialer"}},
 	"infer/supervise": {"the inference service's unix listener; its jail's user, empty network namespace, own IPC namespace and identity-mapped user namespace; no_new_privs on the starting thread; its start into the inference leaf",
 		[]string{"golang.org/x/sys/unix.PR_SET_NO_NEW_PRIVS", "golang.org/x/sys/unix.Prctl",
 			"net.Listen", "net.UnixListener",
@@ -206,7 +209,7 @@ var socketPkgs = map[string]bool{
 // composite literals that set their own non-nil transport or dialer
 // (clientTypes), each dial on "unix" to a configured address: modelroute
 // and the mail socket's client (SR3-mail-w2), both to the vault process.
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "owner/notice/noticesock": true, "infer": true, "checker/checkersock": true, "localsrv/accountsock": true, "owner/kernelsock": true}
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "owner/notice/noticesock": true, "infer": true, "vision": true, "checker/checkersock": true, "localsrv/accountsock": true, "owner/kernelsock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set
@@ -637,6 +640,9 @@ func TestImportCheckCatchesARouter(t *testing.T) {
 	}
 	if !contains(forbidden, "cmd/agentos-infer") {
 		t.Fatal("the inference service is not forbidden")
+	}
+	if !contains(forbidden, "cmd/agentos-vision") {
+		t.Fatal("the vision service is not forbidden")
 	}
 	src := func(imports, body string) string { return "package p\nimport (" + imports + ")\n" + body + "\n" }
 	for _, c := range []struct{ rel, src string }{

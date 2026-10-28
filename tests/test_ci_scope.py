@@ -253,17 +253,23 @@ MACHINES_LINES = [
     '        working-directory: broker',
     '        run: |',
     '          sudo mkdir /sys/fs/cgroup/agentos-ci',
+    '          rc=0',
     '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
     '            AGENTOS_REQUIRE_QUOTA=1 \\',
-    '            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery',
+    '            go test -count=1 -json ./cgroup ./quota/... ./vm/... ./recovery > /tmp/machine-test.json || rc=$?',
+    '          python3 -I ../tools/require_ran.py --named-skips-only --gated ./cgroup ./quota/... ./vm/... ./recovery \\',
+    '            < /tmp/machine-test.json || exit 1',
+    '          [ "$rc" -eq 0 ]',
     '          rc=0',
     '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
-    '            go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?',
-    '          python3 -I ../tools/require_ran.py < /tmp/infer-test.json \\',
+    '            go test -count=1 -json ./infer/... ./vision/... > /tmp/infer-test.json || rc=$?',
+    '          python3 -I ../tools/require_ran.py --gated ./infer/... ./vision/... < /tmp/infer-test.json \\',
     '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \\',
-    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf || exit 1',
+    '            github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf \\',
+    '            github.com/ghbmrk/agentos/broker/vision/supervise.TestVisionRunsInInferenceLeaf \\',
+    '            github.com/ghbmrk/agentos/broker/vision/supervise.TestVisionOOMStaysInLeaf || exit 1',
     '          [ "$rc" -eq 0 ]',
     '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \\',
     "            go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd",
@@ -595,6 +601,7 @@ class WiringTest(unittest.TestCase):
             "isolation flag dropped": (run, "          python3 ../tools/require_ran.py"),
             "exit on failure dropped": ("StaysInLeaf || exit 1\n", "StaysInLeaf\n"),
             "infer run moved off the infer tests": (" -json ./infer/... ", " -json ./cleanroom "),
+            "vision run dropped": (" ./infer/... ./vision/... > ", " ./infer/... > "),
         }
         for what, (old, new) in edits.items():
             with self.subTest(what):
@@ -603,6 +610,9 @@ class WiringTest(unittest.TestCase):
         sup = (ROOT / "broker" / "infer" / "supervise" / "supervise_test.go").read_text()
         for name in ("TestServiceRunsInInferenceLeaf", "TestServiceOOMStaysInLeaf"):
             self.assertRegex(sup, rf"(?m)^func {name}\(t \*testing\.T\)", name)
+        vis = (ROOT / "broker" / "vision" / "supervise" / "supervise_test.go").read_text()
+        for name in ("TestVisionRunsInInferenceLeaf", "TestVisionOOMStaysInLeaf"):
+            self.assertRegex(vis, rf"(?m)^func {name}\(t \*testing\.T\)", name)
 
 
 class FuzzStepTest(unittest.TestCase):

@@ -3,18 +3,25 @@
 // log key, the head key and the owner's anchors on descriptor 3:
 //
 //	agentos-kernel -log /var/lib/agentos-kernel/log -keys-dir /var/lib/agentos-kernel/keys \
-//	    -backup-dir /var/lib/agentos-kernel/backups \
+//	    -content-dir /var/lib/agentos-kernel/content -backup-dir /var/lib/agentos-kernel/backups \
 //	    -owner-sock /run/agentos-kernel/owner.sock -owner-uid 981 \
 //	    -meter-sock /run/agentos-kernel/meter.sock -meter-uid 982 \
-//	    -clerk exit=/run/agentos-exit/kernel.sock,983
+//	    -link-sock /run/agentos-kernel/link.sock -link-uid 980 \
+//	    -clerk exit=/run/agentos-exit/kernel.sock,983 \
+//	    -clerk-key mail=/run/agentos-kernel/clerk-mail.key,/agentos-keeper.slice/agentos-keeper-mail.service \
+//	    -content vision=/run/agentos-kernel/vision.sock,985
 //
 // It opens the subject-key table in -keys-dir, sealed under the log key, so
 // content opens and every logged erase is re-applied at start (KRN-erase),
+// its content stores in -content-dir, one per -content clerk, which seals
+// into its own on its own socket (KRN-content),
 // and its backups' records in -backup-dir, so an erase reaches every
 // backup taken before (BAK-1, LOG-4).
 // It refuses to run as root or as any peer's uid, makes itself non-dumpable,
 // serves the owner side and the model clerk's meter on their sockets, and
-// runs plans every second. It holds no credential and never the store key.
+// agentos-link on its own when -link-sock is given (EDGE-link-core c2b),
+// hands each -clerk-key clerk its key at every start of that clerk's unit
+// (MAIL-keys), and runs plans every second. It holds no credential and never the store key.
 // Its log anchor is the TPM counter enrollment defined (LOG-2, STO-1): the
 // signed head lives in -anchor-dir and the counter numbers its writes, so a
 // drive rolled back, log and anchor together, is refused at start.
@@ -27,14 +34,17 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -72,6 +82,24 @@ func (c clerks) Set(v string) error {
 	return nil
 }
 
+type keyClerks map[string]proc.KeyClerk
+
+func (c keyClerks) String() string { return fmt.Sprint(map[string]proc.KeyClerk(c)) }
+
+// Set reads name=socket,cgroup: the clerk unit's whole cgroup path.
+func (c keyClerks) Set(v string) error {
+	name, rest, ok := strings.Cut(v, "=")
+	sock, cg, ok2 := strings.Cut(rest, ",")
+	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || !proc.ValidCgroup(cg) {
+		return errors.New("a clerk's key socket is name=/abs/socket,/slice/unit.service")
+	}
+	if _, dup := c[name]; dup {
+		return fmt.Errorf("clerk %q's key given twice", name)
+	}
+	c[name] = proc.KeyClerk{Socket: sock, Cgroup: cg}
+	return nil
+}
+
 // config is the kernel process's: proc.MainConfig and the anchor's
 // directory.
 type config struct {
@@ -82,16 +110,21 @@ type config struct {
 func parse(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("agentos-kernel", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}}}
+	c := config{MainConfig: proc.MainConfig{Clerks: map[string]proc.Remote{}, ClerkKeys: map[string]proc.KeyClerk{}, Content: map[string]proc.Remote{}}}
 	fs.StringVar(&c.Log, "log", "", "the log file")
 	fs.StringVar(&c.KeyDir, "keys-dir", "", "the subject-key table's directory, beside the log")
+	fs.StringVar(&c.ContentDir, "content-dir", "", "the content stores' directory, beside the log")
 	fs.StringVar(&c.BackupDir, "backup-dir", "", "the backups' records directory, beside the log")
 	fs.StringVar(&c.AnchorDir, "anchor-dir", "", "the log anchor's directory, beside the log")
 	fs.StringVar(&c.OwnerSock, "owner-sock", "", "the owner side's socket")
 	fs.IntVar(&c.OwnerUID, "owner-uid", -1, "the owner side's uid, the only peer on owner-sock")
 	fs.StringVar(&c.MeterSock, "meter-sock", "", "the model clerk's meter socket")
 	fs.IntVar(&c.MeterUID, "meter-uid", -1, "the model clerk's uid, the only peer on meter-sock")
+	fs.StringVar(&c.LinkSock, "link-sock", "", "agentos-link's socket; none without it")
+	fs.IntVar(&c.LinkUID, "link-uid", -1, "agentos-link's uid, the only peer on link-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
+	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,/unit/cgroup/path.service (repeatable)")
+	fs.Var(clerks(c.Content), "content", "a content clerk's socket, store=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
 	if err := fs.Parse(args); err != nil {
@@ -108,14 +141,49 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("an absolute -keys-dir is required")
 	case !filepath.IsAbs(c.BackupDir):
 		return c, errors.New("an absolute -backup-dir is required")
+	case !filepath.IsAbs(c.ContentDir):
+		return c, errors.New("an absolute -content-dir is required")
 	case c.Up != "" && !filepath.IsAbs(c.Up):
 		return c, errors.New("-up must be an absolute path")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
+	case (c.LinkSock == "") != (c.LinkUID == -1):
+		return c, errors.New("-link-sock and -link-uid come together")
+	case c.LinkSock != "" && (!filepath.IsAbs(c.LinkSock) || c.LinkUID <= 0):
+		return c, errors.New("-link-sock is an absolute path and -link-uid never root")
 	}
 	c.Peers = []int{c.OwnerUID, c.MeterUID}
 	for _, r := range c.Clerks {
 		c.Peers = append(c.Peers, r.UID)
+	}
+	if c.LinkSock != "" {
+		// The link socket admits the link's uid alone: a peer sharing it
+		// could log a candidate the page step enrols (decision 8).
+		if slices.Contains(c.Peers, c.LinkUID) {
+			return c, errors.New("-link-uid is agentos-link's own, no other peer's")
+		}
+		c.Peers = append(c.Peers, c.LinkUID)
+	}
+	// A content socket hands its store's plaintext to its peer, so that
+	// uid is its content clerk's alone: never the owner side's, the model
+	// clerk's, the link's or another content clerk's (KRN-content). A
+	// clerk the kernel also calls may share it, being the same process.
+	taken := []int{c.OwnerUID, c.MeterUID}
+	if c.LinkSock != "" {
+		taken = append(taken, c.LinkUID)
+	}
+	for _, store := range slices.Sorted(maps.Keys(c.Content)) {
+		r := c.Content[store]
+		switch {
+		case !proc.ValidStoreName(store):
+			return c, fmt.Errorf("-content %q: %w", store, proc.ErrStoreName)
+		case slices.Contains(taken, r.UID):
+			return c, fmt.Errorf("-content %q: its uid is its clerk's own, no other side's", store)
+		}
+		taken = append(taken, r.UID)
+		if !slices.Contains(c.Peers, r.UID) {
+			c.Peers = append(c.Peers, r.UID)
+		}
 	}
 	return c, nil
 }
