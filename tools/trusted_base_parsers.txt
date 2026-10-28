@@ -92,6 +92,7 @@ parser github.com/ghbmrk/agentos/broker/control -- the owner's control words
 parser github.com/ghbmrk/agentos/broker/egress -- proxied HTTP requests and provider replies
 parser github.com/ghbmrk/agentos/broker/fold -- oversized tool results for guests
 parser github.com/ghbmrk/agentos/broker/follow -- the update root the local page approves
+inert  github.com/ghbmrk/agentos/broker/follow/followclerk -- checks a follow step the kernel already decoded (kernel/proc) and runs it through follow; decodes no bytes itself
 parser github.com/ghbmrk/agentos/broker/guest -- the guest interface, one socket per agent machine
 parser github.com/ghbmrk/agentos/broker/holder -- provider replies to a spent login
 parser github.com/ghbmrk/agentos/broker/kernel -- requests and key chains from clerks and planners

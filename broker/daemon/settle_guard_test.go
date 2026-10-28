@@ -17,9 +17,9 @@ import (
 
 // guardNames are the executor names agentosd registers with the daemon
 // besides the grants gate, whose Reconcile is a constant not_applied:
-// broker executors (loops, change, the update and FORGET routers, mail)
+// broker executors (loops, change, update and FORGET, retired; mail)
 // and the recall rollback executor.
-var guardNames = []string{"loops", "change", grants.FollowExecutor, grants.ForgetExecutor, "mail", grants.RecallExecutor}
+var guardNames = []string{"loops", "change", "update", grants.ForgetExecutor, "mail", grants.RecallExecutor}
 
 // guard stands in for an executor at restart. Reconcile answers unknown
 // for its first few asks, then the evidence it was given; Execute must
