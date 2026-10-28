@@ -1,6 +1,6 @@
 # DECOY: breach decoys, heartbeats and drills (KRN-12)
 
-Board section: Migration to the capability kernel (D-139) for slices a, b, e and f; Devices, hardware and image (SPEC §13-14) for c and d. SPEC KRN-12, KRN-10 (a trip is a proof), CLK-4 (the detector), KEY-3, KEY-4, KEY-6 (narrowing and resume), CH-15 (security class), NET-2 (channel, texts and calls), NET-4 (tightenings), DEP-3, KRN-6 (the simulator). Decision D-232. Six slices, one session each, tests first (CLAUDE.md), every touched package's `ASSUMPTIONS.md`.
+Board section: Migration to the capability kernel (D-139) for slices a, b, e and f; Devices, hardware and image (SPEC §13-14) for c and d. SPEC KRN-12, KRN-10 (its limits; a trip gets KRN-12's own response), CLK-4 (the detector), KEY-3, KEY-4, KEY-6 (narrowing and resume), CH-15 (security class), NET-2 (channel, texts and calls), NET-4 (tightenings), DEP-3, KRN-6 (the simulator). Decision D-232. Six slices, one session each, tests first (CLAUDE.md), every touched package's `ASSUMPTIONS.md`.
 
 ## The gap
 
@@ -43,9 +43,9 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 ### DECOY-c (#3764): the edge (KRN-12 Placement, Trips, Silence)
 
 **Scope:** `broker/edgelink/` (matcher on the core side of the link, heartbeat kind), the edge's image profile under `image/` (placements as data).
-**Builds:** the matcher on everything the core sends to the edge; the edge's dotfiles and jackpot files written from the table at enrolment; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
+**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
 **Acceptance tests:**
-1. KRN-12: `edgelink::TestDecoyToEdgeTrips`. Catches a guest's query smuggling a decoy out through a fetch.
+1. KRN-12: `edgelink::TestDecoyToEdgeTrips`: a decoy in any kind but the kernel's placement kind trips; enrolment and re-enrolment after a restore trip nothing. Catches a guest's query smuggling a decoy out, or a false trip at every enrolment.
 2. KRN-12: `edgelink::TestHeartbeatSilenceAlarms`: two missed beats raise one alarm, a late beat clears nothing without the log saying so. Catches a killed edge going unseen.
 3. KRN-12: the image test that the edge image adds no listener for any placement. Catches a fake service.
 **Size:** about 80k, tier A (the link), strongest model. **Depends on:** DECOY-b (#3763).
@@ -65,10 +65,10 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 ### DECOY-e (#3766): placements and the wallets (KRN-12 Placement, Outside canaries)
 
 **Scope:** `broker/decoy/place/` (new), the planner sandbox and host image placements under `image/`, the sealed store's decoy entries (`broker/clerk/seal/`), the planner's key view (honey keys), `broker/decoy/wallet/` (new), the edge seed copy through DECOY-c's placement path, the owner-page step (`broker/localui/`, sub B's directory: coordinate on the issue first).
-**Builds:** environment variables, dotfiles and jackpot files in the sandbox and host; decoy root and recovery entries in the sealed store; honey keys in the planner's view; three wallets made at setup, each seed planted at one boundary (sandbox and host jackpot files, the edge's, the sealed store, which every backup carries), receive addresses shown as QR codes in one optional owner-page step, never the seeds.
+**Builds:** environment variables, dotfiles and jackpot files in the sandbox and host; decoy root and recovery entries in the sealed store; honey keys in the planner's view; three wallets made at setup, each seed planted at one boundary (the host's jackpot files, never the planner sandbox; the edge's; the sealed store, which every backup carries), receive addresses shown as QR codes in one optional owner-page step, never the seeds.
 **Acceptance tests:**
-1. KRN-12: `place::TestEveryPlacementFromTable`: each placement's bytes are a table entry, wallet seeds aside, and each kind on the list is placed. Catches code at a place or a missed place.
-2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page and STATUS carry the address only. Catches a seed leak the owner pays for.
+1. KRN-12: `place::TestEveryPlacementFromTable`: each placement's bytes are a table entry, wallet seeds aside, each credential-shaped decoy names a destination in the enforcer's decoy range, and each kind on the list is placed. Catches code at a place or a missed place.
+2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page and STATUS carry the address only, and no seed is in the planner sandbox. Catches a seed leak the owner pays for.
 3. DEP-3: `wallet::TestSkippedStepCostsNothing`. Catches a required optional step.
 **Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a (#3762), DECOY-b (#3763), DECOY-c (#3764, the edge's placement path).
 
