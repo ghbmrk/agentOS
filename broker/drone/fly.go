@@ -98,41 +98,34 @@ func (h *Holder) returnLocked(why string) error {
 // fence bounds it, not the vision: a target outside the boundary leads the
 // aircraft to the fence, and the breach returns it (brief decision 9).
 func (h *Holder) Follow(target Point) error {
-	// Leaving AUTO goes on a heartbeat the aircraft signed after this call
-	// began (Link.FreshHeartbeat): one merely received late can predate a
-	// return it started since, and ArduPilot starts a low-battery return once. It is asked for
-	// outside the lock, so a return never waits behind it.
-	var fresh *Heartbeat
-	if hb, ok := h.link.LastHeartbeat(); !ok || hb.CustomMode != ModeGuided {
-		if f, err := h.link.FreshHeartbeat(); err == nil {
-			fresh = &f
+	if err := checkPoint(target); err != nil {
+		return fmt.Errorf("drone: follow refused: %w", err)
+	}
+	// Follow acts on a recent heartbeat in GUIDED (it is following already),
+	// or else on one the aircraft signed after this call began
+	// (Link.FreshHeartbeat): one merely received late can predate a return it
+	// started since, and ArduPilot starts a low-battery return once. It is
+	// asked for outside the lock, so a return never waits behind it.
+	hb, ok := h.link.LastHeartbeat()
+	if !ok || hb.CustomMode != ModeGuided || time.Since(hb.At) > followHeartbeatAge {
+		f, err := h.link.FreshHeartbeat()
+		if err != nil {
+			return fmt.Errorf("drone: follow refused: %w", err)
 		}
+		hb = f
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.flight == nil || len(h.flight.Animals) == 0 {
 		return errors.New("drone: follow refused: no flight that follows animals")
 	}
-	if err := checkPoint(target); err != nil {
-		return fmt.Errorf("drone: follow refused: %w", err)
-	}
 	// A return the aircraft started itself (a fence breach, low battery, lost
 	// link) ends the flight: follow never takes it out of a return.
-	hb, ok := h.link.LastHeartbeat()
-	if fresh != nil {
-		hb, ok = *fresh, true
-	}
-	if !ok || time.Since(hb.At) > followHeartbeatAge {
-		return errors.New("drone: follow refused: no recent signed heartbeat from the aircraft")
-	}
 	if !hb.Armed || (hb.CustomMode != ModeAuto && hb.CustomMode != ModeGuided) {
 		h.flight = nil
 		return errors.New("drone: follow refused: the aircraft is not flying the flight")
 	}
-	if hb.CustomMode != ModeGuided {
-		if fresh == nil {
-			return errors.New("drone: follow refused: the aircraft did not answer for its heartbeat")
-		}
+	if hb.CustomMode == ModeAuto {
 		if err := h.link.SetMode(ModeGuided); err != nil {
 			return err
 		}

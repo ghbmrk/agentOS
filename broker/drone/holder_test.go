@@ -30,6 +30,7 @@ type scripted struct {
 	hello  bool
 	beat   bool
 	relay  func() // run before it answers a heartbeat request: a relay's held frames
+	deaf   bool   // it never answers a heartbeat request
 	rc     bool
 	params map[string]float32
 	pos    Point    // the aircraft's reported position
@@ -78,7 +79,7 @@ func (a *scripted) run() {
 			continue // signed more than a minute behind the aircraft's clock
 		}
 		a.ts = max(a.ts, ts)
-		beat, rc, params, pos, mode, relay := a.beat, a.rc, a.params, a.pos, a.mode, a.relay
+		beat, rc, params, pos, mode, relay, deaf := a.beat, a.rc, a.params, a.pos, a.mode, a.relay, a.deaf
 		a.mu.Unlock()
 		switch m := fr.GetMessage().(type) {
 		case *common.MessageTimesync:
@@ -96,7 +97,7 @@ func (a *scripted) run() {
 					st.OnboardControlSensorsPresent = common.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
 				}
 				a.send(st)
-			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageHeartbeat{}).GetID():
+			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageHeartbeat{}).GetID() && !deaf:
 				if relay != nil {
 					relay()
 				}
@@ -324,6 +325,61 @@ func TestFollowLeavesAutoOnlyOnAFreshHeartbeat(t *testing.T) {
 	if h.flight != nil {
 		t.Error("the aircraft's return did not end the flight")
 	}
+}
+
+// REQ: NET-2
+// TestFollowNeedsAFreshHeartbeatToLeaveAuto: with a recent heartbeat in AUTO
+// on record but no heartbeat signed after follow's TIMESYNC echo (its request
+// and the periodic ones lost), follow is refused and asks for no mode, since
+// the recent one may have been held in transit; a lost answer is no sign of
+// a return, so the flight goes on.
+func TestFollowNeedsAFreshHeartbeatToLeaveAuto(t *testing.T) {
+	a := &scripted{pos: at(0, 120), mode: ModeAuto, beat: true, deaf: true}
+	h := scriptedFlight(t, a, "deer")
+	stop := h.link.KeepAlive()
+	defer stop()
+	if _, err := h.link.WaitHeartbeat(time.Time{}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	a.set(func(a *scripted) { a.beat = false })
+	if err := h.Follow(at(0, 100)); err == nil {
+		t.Fatal("follow left AUTO with no fresh heartbeat")
+	}
+	if got := a.modesAsked(); len(got) != 0 {
+		t.Fatalf("a refused follow asked for modes %v", got)
+	}
+	if h.flight == nil {
+		t.Error("a lost answer ended the flight: it is no sign of a return")
+	}
+}
+
+// REQ: NET-2
+// TestFollowStopsWhenHeartbeatsStop: following in GUIDED goes on while the
+// aircraft's heartbeats are recent; once they stop for longer than
+// followHeartbeatAge and no fresh one answers, follow is refused.
+func TestFollowStopsWhenHeartbeatsStop(t *testing.T) {
+	a := &scripted{pos: at(0, 120), mode: ModeGuided, beat: true}
+	h := scriptedFlight(t, a, "deer")
+	stop := h.link.KeepAlive()
+	defer stop()
+	waitModeAnchored(t, h.link, ModeGuided)
+	if err := h.Follow(at(0, 100)); err != nil {
+		t.Fatalf("following in GUIDED: %v", err)
+	}
+	a.set(func(a *scripted) { a.beat, a.deaf = false, true })
+	time.Sleep(followHeartbeatAge + 500*time.Millisecond)
+	if err := h.Follow(at(0, 100)); err == nil {
+		t.Fatal("follow went on with no recent heartbeat")
+	}
+}
+
+// waitModeAnchored anchors l, then waits for a heartbeat in mode.
+func waitModeAnchored(t *testing.T, l *Link, mode uint32) {
+	t.Helper()
+	if _, err := l.WaitHeartbeat(time.Time{}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	waitMode(t, l, mode)
 }
 
 // waitMode waits for a heartbeat in mode: one received after a change may
