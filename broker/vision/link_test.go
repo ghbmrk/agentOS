@@ -1,6 +1,6 @@
 package vision
 
-// REQ: ARC-2, KRN-3
+// REQ: KRN-3
 
 import (
 	"os/exec"

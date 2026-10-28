@@ -1,6 +1,6 @@
 package main
 
-// REQ: ARC-2, DEV-7, RES-3
+// REQ: KRN-3, DEV-7, RES-3
 
 import (
 	"bufio"
@@ -381,7 +381,7 @@ func TestLogsCarryNoCapture(t *testing.T) {
 	}
 }
 
-// REQ: ARC-2
+// REQ: KRN-3
 //
 // main serves the listener it is handed as fd 3 and names no socket of its
 // own; with no runtime in this build it answers, Unavailable.
