@@ -1,14 +1,16 @@
 // Command agentos-drone is the stand-in key-holder process for the drone
 // (DRONE-sim, #3516). It holds the MAVLink signing key, loads the
-// owner-signed flight policy, uploads it and reads it back, and sends the
-// aircraft its heartbeat. DRONE-enforcer (#3517) runs it on the enforcer.
+// owner-signed flight policy, uploads it and reads it back, starts a flight
+// from an owner-signed flight record, serves the core side's one command
+// (return to dock) on a local socket, and sends the aircraft its heartbeat.
+// DRONE-enforcer (#3517) runs it on the enforcer.
 //
 // The key and the owner's public key are read from files only, never from an
 // argument or the environment (P2). The aircraft is a serial device (its USB
 // or radio link), never a network address, so the key-holder dials nothing.
 //
 //	agentos-drone -new-key PATH
-//	agentos-drone -key PATH -owner PATH -state DIR -aircraft DEVICE [-provision] [-policy PATH]
+//	agentos-drone -key PATH -owner PATH -state DIR -aircraft DEVICE [-provision] [-policy PATH] [-flight PATH] [-core SOCKET]
 package main
 
 import (
@@ -18,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -42,6 +45,8 @@ func run(args []string) error {
 	aircraft := fs.String("aircraft", "", "the aircraft's MAVLink serial device")
 	provision := fs.Bool("provision", false, "store the key on an aircraft that holds none (first set-up link only)")
 	policyPath := fs.String("policy", "", "a signed policy to load")
+	flightPath := fs.String("flight", "", "a signed flight record to fly")
+	corePath := fs.String("core", "", "a unix socket path for the core side's return_to_dock")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,11 +103,40 @@ func run(args []string) error {
 	} else {
 		logger.Printf("boot read-back: the aircraft holds policy version %d", h.Policy().Version)
 	}
-	for {
-		if err := link.SendHeartbeat(); err != nil {
+	stop := link.KeepAlive()
+	defer stop()
+	if *flightPath != "" {
+		env, err := os.ReadFile(*flightPath)
+		if err != nil {
 			return err
 		}
-		time.Sleep(time.Second)
+		if err := h.Fly(env); err != nil {
+			return err
+		}
+	}
+	if *corePath != "" {
+		ln, err := net.Listen("unix", *corePath)
+		if err != nil {
+			return err
+		}
+		defer ln.Close()
+		go serveCore(ln, h, logger)
+	}
+	<-link.Done()
+	return errors.New("the aircraft link closed")
+}
+
+// serveCore serves one core-side connection at a time: the channel is the
+// core's, and the core is one client.
+func serveCore(ln net.Listener, h *drone.Holder, logger *log.Logger) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			logger.Printf("core socket: %v", err)
+			return
+		}
+		h.ServeCore(c)
+		c.Close()
 	}
 }
 

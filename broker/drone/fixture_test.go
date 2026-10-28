@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"testing"
+	"time"
 )
 
 // The test site is ArduPilot's own SITL default (CMAC, Canberra): synthetic,
@@ -78,4 +79,29 @@ func signRaw(t testing.TB, raw []byte, priv ed25519.PrivateKey) []byte {
 
 func signPolicy(t testing.TB, p Policy, priv ed25519.PrivateKey) []byte {
 	return signRaw(t, record(t, p), priv)
+}
+
+// testFlight is a valid flight record on the north route, good for an hour.
+func testFlight(now time.Time) Flight {
+	return Flight{ID: "0123456789abcdef0123456789abcdef", Route: "north", Animals: []string{},
+		NotAfter: now.Add(time.Hour).Unix()}
+}
+
+// signFlightRaw wraps raw flight bytes in a signed envelope, whatever they hold.
+func signFlightRaw(t testing.TB, raw []byte, priv ed25519.PrivateKey) []byte {
+	t.Helper()
+	sig := ed25519.Sign(priv, flightMessage(raw))
+	env := []byte(`{"flight":`)
+	env = append(env, raw...)
+	env = append(env, `,"sig":"`+base64.StdEncoding.EncodeToString(sig)+`"}`...)
+	return env
+}
+
+func signFlight(t testing.TB, f Flight, priv ed25519.PrivateKey) []byte {
+	t.Helper()
+	b, err := json.Marshal(&f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return signFlightRaw(t, b, priv)
 }

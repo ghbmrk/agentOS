@@ -35,8 +35,9 @@ func TestLoadedPolicyReadsBack(t *testing.T) {
 		t.Fatalf("after a reboot: %v", err)
 	}
 
-	// An out-of-band writer that holds the key (the test) on another port.
-	oob, err := Dial(r.sim.Dial(ports[1]), r.key)
+	// An out-of-band writer that holds the key (the test) on another port,
+	// on its own signing stream so it does not race the key-holder's.
+	oob, err := dial(r.sim.Dial(ports[1]), r.key, time.Now, holderLinkID+1)
 	if err != nil {
 		t.Fatal(err)
 	}
