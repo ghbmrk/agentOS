@@ -10,7 +10,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/camnode/se"
 	"github.com/ghbmrk/agentos/broker/camwire"
-	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // The node's settings state: the bundle in force, kept on the node's
@@ -56,8 +55,27 @@ func (d Dir) Read(name string) ([]byte, error) {
 	return p, nil
 }
 
+// Write writes in place and fsyncs, with no rename: a write cut short
+// leaves a file that fails verification, and the two-file order of
+// commit means one of pending and current always holds the bundle in
+// force (ASSUMPTIONS CAM-server-4).
 func (d Dir) Write(name string, p []byte) error {
-	return durable.WriteFile(filepath.Join(string(d), name), p, 0o600)
+	f, err := os.OpenFile(filepath.Join(string(d), name), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(p); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return syncDir(string(d))
 }
 
 func (d Dir) Remove(name string) error {
@@ -68,7 +86,16 @@ func (d Dir) Remove(name string) error {
 	if err != nil {
 		return err
 	}
-	return durable.SyncDir(string(d))
+	return syncDir(string(d))
+}
+
+func syncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // OwnerDigest is the owner pin the element holds for o: SHA-256 over the
