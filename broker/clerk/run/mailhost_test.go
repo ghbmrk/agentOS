@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -1216,5 +1217,40 @@ func TestARepeatedFailureIsTriedAgainTheNextDay(t *testing.T) {
 	r.reread(t)
 	if n := r.dials.Load() - before; n != 1 {
 		t.Fatalf("the third re-read of the next day made %d connections, want one change check", n)
+	}
+}
+
+// removemail deletes the record of senders, and the same account set up
+// again starts its read over: its first step gives no history.
+func TestRemoveMailDeletesTheSendersRecord(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.DeliverAt("INBOX", day(0), mailFrom("a@one.test", "<a1@one.test>"))
+	srv.DeliverAt("INBOX", day(1), mailFrom("b@two.test", "<b1@two.test>"))
+	var mu sync.Mutex
+	var fulls []bool
+	r := newSendersRig(t, srv, func(c *MailConfig) {
+		c.stepMax = 1
+		c.stepped = func(_, full bool) { mu.Lock(); fulls = append(fulls, full); mu.Unlock() }
+	})
+	r.full(t)
+	owner := MailOwner{serveMail(t, r.h, MailOwnerSide)}
+	if err := owner.RemoveMail(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(r.dir, sendersFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the record after removemail: %v", err)
+	}
+	blank(t, "after removemail", r.h.world())
+	mu.Lock()
+	n := len(fulls)
+	mu.Unlock()
+	if err := owner.SetMail(MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	r.full(t)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(fulls) <= n || fulls[n] {
+		t.Fatalf("steps after the new setup %v: want the first without history", fulls[n:])
 	}
 }

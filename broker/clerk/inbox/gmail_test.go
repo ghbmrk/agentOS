@@ -1,12 +1,13 @@
 package inbox
 
-// REQ: CLK-9, CLK-3, CLK-1, CLK-4, VRB-3
+// REQ: CLK-9, CLK-3, CLK-1, CLK-4, VRB-3, VRB-2
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -388,5 +389,73 @@ func gmailContract(t *testing.T, env gmailEnv) {
 	}
 	if _, err := env.box.labelsOf(ctx, gid); err != nil {
 		t.Fatalf("the mail is gone after the refused deletes: %v", err)
+	}
+}
+
+// The Gmail senders read uses only the declared plan calls (the listing of
+// all mail but spam and trash, and the metadata get), never a query, a full
+// or raw get or spam and trash; SPAM, TRASH, DRAFT and SENT mail is no
+// history, and SENT mail's To and Cc are contacts. The first pass pages at
+// most the step's limit at a time and is through only at the listing's end.
+func TestGmailSendersUsesDeclaredCalls(t *testing.T) {
+	box, srv := newGmail(t)
+	mail := func(from, rest string) []byte {
+		return []byte("From: " + from + "\r\n" + rest + "Subject: Hi\r\n\r\nsynthetic body\r\n")
+	}
+	srv.Deliver(mail("Ann <ann@inbox.test>", ""))
+	srv.Deliver(mail("bo@archived.test", ""), "STARRED")
+	srv.Deliver(mail("cy@spam.test", ""), "SPAM")
+	srv.Deliver(mail("di@trash.test", ""), "TRASH", "INBOX")
+	srv.Deliver(mail("ed@draft.test", ""), "DRAFT")
+	srv.Deliver(mail("owner@gmail.test", "To: Pal <pal@friends.test>\r\nCc: kim@work.test\r\n"), "SENT")
+	srv.Deliver(mail("ann@inbox.test", ""), "INBOX")
+	var r SendersRecord
+	more, err := box.SendersStep(context.Background(), &r, 500)
+	if err != nil || more || !r.Complete() {
+		t.Fatalf("SendersStep: more %v, %v, complete %v", more, err, r.Complete())
+	}
+	if len(r.Senders) != 2 || r.Senders["ann@inbox.test"] == 0 || r.Senders["bo@archived.test"] == 0 {
+		t.Fatalf("senders %v, want ann and bo", r.Senders)
+	}
+	if r.Senders["ann@inbox.test"] >= r.Senders["bo@archived.test"] {
+		t.Fatalf("ann's earliest arrival %d is not her first mail's", r.Senders["ann@inbox.test"])
+	}
+	if !maps.Equal(r.Sent, map[string]bool{"pal@friends.test": true, "kim@work.test": true}) {
+		t.Fatalf("sent %v", r.Sent)
+	}
+	lists, gets := planRequests(srv.Requests())
+	for _, q := range lists {
+		if q != "GET /gmail/v1/users/me/messages?maxResults=500" && !strings.HasPrefix(q, "GET /gmail/v1/users/me/messages?maxResults=500&pageToken=") {
+			t.Errorf("list request %s", q)
+		}
+	}
+	for _, q := range gets {
+		if !strings.HasSuffix(q, "?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results&metadataHeaders=To&metadataHeaders=Cc") {
+			t.Errorf("get request %s", q)
+		}
+	}
+	if len(gets) != 5 {
+		t.Fatalf("%d gets, want the 5 mails outside spam and trash", len(gets))
+	}
+
+	box, srv = newGmail(t)
+	for i := range 1200 {
+		srv.Deliver(mail(fmt.Sprintf("s%d@bulk.test", i), ""))
+	}
+	r = SendersRecord{}
+	for step := 1; ; step++ {
+		more, err := box.SendersStep(context.Background(), &r, 500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if more == (step == 3) || r.Complete() != (step == 3) {
+			t.Fatalf("step %d: more %v, complete %v", step, more, r.Complete())
+		}
+		if !more {
+			break
+		}
+	}
+	if len(r.Senders) != 1200 {
+		t.Fatalf("%d senders, want 1200", len(r.Senders))
 	}
 }
