@@ -55,10 +55,47 @@ type fake struct {
 	maxIn   int
 	gate    chan struct{} // when set, calls wait on it
 	wedge   chan struct{} // a wedged call waits on it, whatever Load does
+	face    []float32     // the encoding of the face in every frame
+	given   [][]float32   // every encoding handed to the service, to check it was zeroed
 }
 
 func newFake() *fake {
-	return &fake{model: Model{Name: "vis-fake", SHA256: sha}, release: make(chan struct{})}
+	return &fake{model: Model{Name: "vis-fake", SHA256: sha}, release: make(chan struct{}), face: []float32{0.6, -0.8, 0}}
+}
+
+// encoding is a copy of the frame's face's encoding, kept in given.
+func (f *fake) encoding() []float32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := append([]float32(nil), f.face...)
+	f.given = append(f.given, v)
+	return v
+}
+
+// zeroed reports whether every encoding the fake handed out is all zero.
+func (f *fake) zeroed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, v := range f.given {
+		for _, x := range v {
+			if x != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (f *fake) Encode(fr vision.Frame) ([]float32, error) {
+	mode, _, _ := f.enter()
+	defer f.leave()
+	switch mode {
+	case "noface":
+		return nil, ErrNoFace
+	case "crash":
+		return nil, errors.New("runtime failed")
+	}
+	return f.encoding(), nil
 }
 
 func (f *fake) Load() (Model, error) {
@@ -96,7 +133,7 @@ func (f *fake) leave() {
 	f.mu.Unlock()
 }
 
-func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
+func (f *fake) Detect(fr vision.Frame) ([]Seen, error) {
 	mode, release, gate := f.enter()
 	defer f.leave()
 	if gate != nil {
@@ -106,7 +143,7 @@ func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
 	f.frames++
 	f.last = fr.Data
 	f.mu.Unlock()
-	d := vision.Detection{Class: vision.Person, Box: vision.Box{X0: 0, Y0: 0, X1: fr.Width, Y1: fr.Height}, Conf: 80, Face: vision.FaceUnknown}
+	d := Seen{Detection: vision.Detection{Class: vision.Person, Box: vision.Box{X0: 0, Y0: 0, X1: fr.Width, Y1: fr.Height}, Conf: 80}, Face: f.encoding()}
 	switch mode {
 	case "crash":
 		return nil, errors.New("segfault in the runtime: frame bytes 0xCAFE")
@@ -124,12 +161,15 @@ func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
 		d.Class = "burglar"
 	case "outside":
 		d.Box.X1 = fr.Width + 1
-	case "enrolled":
-		d.Face = vision.FaceEnrolledAs + "alice"
+	case "enrolled": // the runtime names the face itself
+		d.Detection.Face = vision.FaceEnrolledAs + "alice"
+	case "vehicle-face": // an encoding on a non-person
+		d.Class = vision.Vehicle
 	case "plate":
-		d = vision.Detection{Class: vision.Vehicle, Box: d.Box, Conf: 60, Plate: "CANARY 9"}
+		clear(d.Face) // no face on a vehicle
+		d = Seen{Detection: vision.Detection{Class: vision.Vehicle, Box: d.Box, Conf: 60, Plate: "CANARY 9"}}
 	}
-	return []vision.Detection{d}, nil
+	return []Seen{d}, nil
 }
 
 func (f *fake) Sound(pcm []byte) ([]vision.Sound, error) {
@@ -268,8 +308,10 @@ func TestServiceRejectsOversizeRequest(t *testing.T) {
 // was not lent is unavailable, and the next call reloads.
 func TestServiceChecksItsRuntime(t *testing.T) {
 	f := newFake()
-	c := start(t, newService(Config{CallTimeout: 200 * time.Millisecond}, f, nil))
-	for _, mode := range []string{"crash", "panic", "hang", "off-list", "outside", "enrolled"} {
+	s := newService(Config{CallTimeout: 200 * time.Millisecond}, f, nil)
+	s.stuck = func() {} // a slow runner must not end the test binary
+	c := start(t, s)
+	for _, mode := range []string{"crash", "panic", "hang", "off-list", "outside", "enrolled", "vehicle-face"} {
 		f.failNext(mode, 1)
 		before := f.loads
 		_, err := c.Detect(context.Background(), gray(8, 8, 0))
@@ -461,32 +503,43 @@ func TestLogsCarryNoCapture(t *testing.T) {
 
 // REQ: KRN-3
 //
-// main serves the listener it is handed as fd 3 and names no socket of its
-// own; with no runtime in this build it answers, Unavailable.
+// main serves the listeners it is handed as fd 3 and 4 and names no
+// socket of its own; with no runtime in this build it answers,
+// Unavailable, on the feed socket, and takes a lend on the control socket.
 func TestMainServesTheListenerOnFD3(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "vision.sock")
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
+	ctl := filepath.Join(dir, "vision.sock.control")
+	var files []*os.File
+	for _, p := range []string{sock, ctl} {
+		ln, err := net.Listen("unix", p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ul := ln.(*net.UnixListener)
+		ul.SetUnlinkOnClose(false)
+		lf, err := ul.File()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ul.Close() // the child holds the only copy now
+		files = append(files, lf)
 	}
-	ul := ln.(*net.UnixListener)
-	ul.SetUnlinkOnClose(false)
-	lf, err := ul.File()
-	if err != nil {
-		t.Fatal(err)
-	}
-	ul.Close() // the child holds the only copy now
 	var stderr lockedBuffer
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmd := childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"),
-		childproc.Options{Dir: dir, Stderr: &stderr, ExtraFiles: []*os.File{lf}, WaitDelay: time.Second},
+		childproc.Options{Dir: dir, Stderr: &stderr, ExtraFiles: files, WaitDelay: time.Second},
 		os.Args[0], helperArg)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	lf.Close()
+	for _, f := range files {
+		f.Close()
+	}
+	if err := (vision.ControlClient{Path: ctl, Timeout: 5 * time.Second}).Lend(context.Background(), nil); err != nil {
+		t.Fatalf("lend on fd 4: %v (log: %s)", err, stderr.String())
+	}
 	defer func() { cancel(); cmd.Wait() }()
 	c := vision.Client{Path: sock, Timeout: 5 * time.Second}
 	if _, err := c.Hello(context.Background()); !isCause(err, vision.Unavailable) {
@@ -495,7 +548,7 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	if _, err := c.Detect(context.Background(), gray(4, 4, 0)); !isCause(err, vision.Unavailable) {
 		t.Fatalf("detect: %v", err)
 	}
-	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+	if ents, _ := os.ReadDir(dir); len(ents) != 2 {
 		t.Fatalf("the service made files beside its socket: %v", ents)
 	}
 }

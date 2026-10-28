@@ -403,3 +403,98 @@ func TestReadLineBound(t *testing.T) {
 		t.Fatalf("unterminated: %v", err)
 	}
 }
+
+// REQ: DEV-7
+//
+// The control calls: an enrol reply carries a template and nothing else,
+// in bounds; a lend reply is ready and nothing else; and no other reply may
+// carry a template, so a compromised service cannot attach an encoding to
+// a detection's reply.
+func TestControlReplies(t *testing.T) {
+	ctx := context.Background()
+	tpl := []byte{0, 0, 128, 63, 0, 0, 0, 64} // 1.0, 2.0
+	good, _ := json.Marshal(Reply{Template: tpl})
+	c := ControlClient{Path: serve(t, fixed(string(good)+"\n")), Timeout: time.Second}
+	if got, err := c.Enrol(ctx, frame(4, 4)); err != nil || string(got) != string(tpl) {
+		t.Fatalf("enrol: %v %v", got, err)
+	}
+	for name, line := range map[string]string{
+		"not finite":  `{"template":"AADAfw=="}`,
+		"all zero":    `{"template":"AAAAAAAAAAA="}`,
+		"odd length":  `{"template":"AACAPwA="}`,
+		"other field": `{"template":"AACAPw==","state":"ready"}`,
+		"none":        `{}`,
+	} {
+		c := ControlClient{Path: serve(t, fixed(line+"\n")), Timeout: time.Second}
+		_, err := c.Enrol(ctx, frame(4, 4))
+		wantUnavailable(t, name, err)
+	}
+	over, _ := json.Marshal(Reply{Template: make([]byte, MaxTemplate+4)})
+	_, err := ControlClient{Path: serve(t, fixed(string(over)+"\n")), Timeout: time.Second}.Enrol(ctx, frame(4, 4))
+	wantUnavailable(t, "over its bound", err)
+	if _, err := (ControlClient{Path: serve(t, fixed(`{"error":"no_face"}`+"\n")), Timeout: time.Second}).Enrol(ctx, frame(4, 4)); CauseOf(err) != NoFace {
+		t.Fatalf("no face: %v", err)
+	}
+	if err := (ControlClient{Path: serve(t, fixed(`{"state":"ready"}`+"\n")), Timeout: time.Second}).Lend(ctx, []Template{{ID: "alice", Vec: tpl}}); err != nil {
+		t.Fatalf("lend: %v", err)
+	}
+	for _, line := range []string{`{}`, `{"state":"ready","template":"AACAPw=="}`, `{"state":"ready","device":"cpu"}`} {
+		err := ControlClient{Path: serve(t, fixed(line+"\n")), Timeout: time.Second}.Lend(ctx, nil)
+		wantUnavailable(t, "lend "+line, err)
+	}
+	withTpl := `{"detections":[{"class":"person","box":{"x0":0,"y0":0,"x1":4,"y1":4},"conf":50,"face":"unknown"}],"template":"AACAPw=="}`
+	_, err = detect(t, serve(t, fixed(withTpl+"\n")), frame(4, 4), nil)
+	wantUnavailable(t, "a template on a detect reply", err)
+}
+
+// A lend's payload round-trips, and one out of its bounds is refused on
+// either side: a bad id, a repeated id, a vector that is no template, too
+// many, or cut short.
+func TestLendBounds(t *testing.T) {
+	v := []byte{0, 0, 128, 63}
+	ts := []Template{{ID: "alice", Vec: v}, {ID: "bob-2", Vec: append(v, v...)}}
+	b, err := EncodeLend(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodeLend(b)
+	if err != nil || len(back) != 2 || back[1].ID != "bob-2" || len(back[1].Vec) != 8 {
+		t.Fatalf("round trip: %+v %v", back, err)
+	}
+	clear(b)
+	if back[0].Vec[3] != 0 {
+		t.Fatal("a decoded vector is not a slice of the payload, so zeroing it misses")
+	}
+	many := make([]Template, MaxEnrolled+1)
+	for i := range many {
+		many[i] = Template{ID: "p" + string(rune('a'+i%26)) + string(rune('a'+i/26)), Vec: v}
+	}
+	for name, bad := range map[string][]Template{
+		"bad id":    {{ID: "Alice", Vec: v}},
+		"repeated":  {{ID: "a", Vec: v}, {ID: "a", Vec: v}},
+		"zero":      {{ID: "a", Vec: make([]byte, 4)}},
+		"odd":       {{ID: "a", Vec: v[:3]}},
+		"too many":  many,
+		"too large": {{ID: "a", Vec: make([]byte, MaxTemplate+4)}},
+	} {
+		if _, err := EncodeLend(bad); err == nil {
+			t.Errorf("%s: encoded", name)
+		}
+	}
+	for name, p := range map[string][]byte{
+		"cut in the id":     {5, 'a', 'b'},
+		"cut in the vector": {1, 'a', 0, 8, 0, 0, 128, 63},
+		"repeated":          {1, 'a', 0, 4, 0, 0, 128, 63, 1, 'a', 0, 4, 0, 0, 128, 63},
+		"bad id":            {1, 'A', 0, 4, 0, 0, 128, 63},
+	} {
+		if _, err := DecodeLend(p); err == nil {
+			t.Errorf("%s: decoded", name)
+		}
+	}
+	if err := (Request{Op: OpLend, Bytes: MaxLend + 1}).Check(); err == nil {
+		t.Error("a lend over its bound passed the check")
+	}
+	if !Control(OpEnrol) || !Control(OpLend) || Control(OpDetect) || Control(OpHello) || Control(OpSound) {
+		t.Error("the control ops are enrol and lend alone")
+	}
+}

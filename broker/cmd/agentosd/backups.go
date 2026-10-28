@@ -46,12 +46,13 @@ const (
 const backupStartGrace = 2 * time.Minute
 
 // The STATUS lines (ownerWorded). The owner adds a destination on the
-// Backups page (e4b, backupchoice.go); the recipient comes only with a
-// recovery-key rotation, which no page here serves yet.
+// Backups page (e4b, backupchoice.go); a box enrolled before e1 gets its
+// recipient by replacing the recovery key on the Recovery key page (r4a,
+// recovery.go).
 const (
 	backupStarting = "Backups: I cannot check them yet, so I may hold the only copy of your data; I keep trying."
 	backupUnread   = "Backups: I cannot check them now, so I may hold the only copy of your data; restart me."
-	backupNoKey    = "Backups: cannot start, I have no backup key yet; a later box version adds it."
+	backupNoKey    = "Backups: cannot start, I have no backup key; replace your recovery key on the Recovery key page."
 	backupNoTarget = "Backups: none, so I hold the only copy of your data; add a drive on the Backups page."
 	backupNotYet   = "Backups: none checked yet, so I hold the only copy of your data; I keep trying."
 	backupFailed   = "Backups: the last one failed, so I hold the only copy of your data; check the drive."

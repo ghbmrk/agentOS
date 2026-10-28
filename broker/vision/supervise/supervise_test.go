@@ -60,12 +60,34 @@ func helper(mode string) int {
 	if err != nil {
 		return 4
 	}
+	if mode == "control" {
+		ctl, err := net.FileListener(os.NewFile(4, "control"))
+		if err != nil {
+			return 6
+		}
+		go answer(ctl, "control")
+		answer(ln, "feed")
+		return 5
+	}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return 5
 		}
 		b, _ := json.Marshal(probe(mode))
+		c.Write(append(b, '\n'))
+		c.Close()
+	}
+}
+
+// answer answers each connection on ln with say.
+func answer(ln net.Listener, say string) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		b, _ := json.Marshal(say)
 		c.Write(append(b, '\n'))
 		c.Close()
 	}
@@ -288,6 +310,27 @@ func TestVisionIsJailed(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("service lacks %q:\n%s", want, got)
 		}
+	}
+}
+
+// The service gets its control socket as fd 4, at ControlPath beside its
+// socket in the same 0700 directory.
+func TestVisionGetsItsControlSocket(t *testing.T) {
+	needRoot(t)
+	_, sock := service(t, Options{}, "control")
+	if got := ask(t, sock); got != "feed" {
+		t.Fatalf("fd 3: %q", got)
+	}
+	ctl := ControlPath(sock)
+	if filepath.Dir(ctl) != filepath.Dir(sock) {
+		t.Fatalf("control socket %s is not beside %s", ctl, sock)
+	}
+	if got := ask(t, ctl); got != "control" {
+		t.Fatalf("fd 4: %q", got)
+	}
+	fi, err := os.Stat(filepath.Dir(ctl))
+	if err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("socket directory: %v %v", fi.Mode(), err)
 	}
 }
 

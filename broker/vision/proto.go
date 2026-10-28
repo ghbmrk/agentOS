@@ -16,9 +16,11 @@ package vision
 
 import (
 	"bufio"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -45,14 +47,35 @@ const (
 	MaxEnrolledID = 32
 	// DefaultTimeout is a call's deadline when Client.Timeout is zero.
 	DefaultTimeout = 5 * time.Second
+	// MaxTemplate bounds one enrolled template: little-endian float32s,
+	// at most 1024 of them.
+	MaxTemplate = 4 << 10
+	// MaxEnrolled bounds the templates one lend carries.
+	MaxEnrolled = 32
+	// MaxLend bounds a lend's payload: MaxEnrolled templates at their
+	// longest, each with its id and lengths.
+	MaxLend = MaxEnrolled * (1 + MaxEnrolledID + 2 + MaxTemplate)
 )
 
-// Ops a request names.
+// Ops a request names. Hello, detect and sound are the feed's, on the
+// service's socket; enrol and lend are the control ops (part c), served on
+// the control socket only, which only the trusted side holding the template
+// slots reaches (vision/faces).
 const (
 	OpHello  = "hello"
 	OpDetect = "detect"
 	OpSound  = "sound"
+	// OpEnrol asks for the template of the one face in an enrolment
+	// frame: the only op whose reply carries an encoding, and only of a
+	// person the owner is enrolling at the tier-4 step.
+	OpEnrol = "enrol"
+	// OpLend replaces every template the service holds with the ones its
+	// payload carries (EncodeLend); an empty payload holds none.
+	OpLend = "lend"
 )
+
+// Control reports an op served on the control socket only.
+func Control(op string) bool { return op == OpEnrol || op == OpLend }
 
 // Frame formats: decoded pixels, row-major, no padding. Y16 is a thermal
 // frame's 16-bit little-endian counts.
@@ -222,6 +245,14 @@ func (r Request) Check() error {
 			return badRequest("frame bytes differ from its size")
 		}
 		return nil
+	case OpEnrol:
+		// An enrolment frame is bounded as a detect frame.
+		return Request{Op: OpDetect, Format: r.Format, Width: r.Width, Height: r.Height, Bytes: r.Bytes}.Check()
+	case OpLend:
+		if r.Format != "" || r.Width != 0 || r.Height != 0 || r.Bytes < 0 || r.Bytes > MaxLend {
+			return badRequest(fmt.Sprintf("lend of %d bytes, want 0 to %d and no frame fields", r.Bytes, MaxLend))
+		}
+		return nil
 	case OpSound:
 		if r.Format != AudioPCM16k || r.Width != 0 || r.Height != 0 {
 			return badRequest("unknown audio format")
@@ -236,8 +267,9 @@ func (r Request) Check() error {
 
 // Reply is one reply line. Which fields may be set depends on the op:
 // hello (State, Device, Model, SHA256), detect (Detections), sound
-// (Sounds), or an error (Error alone). An error reply has no detail: the
-// service's own text is a channel this package does not open.
+// (Sounds), enrol (Template), lend (State alone), or an error (Error
+// alone). An error reply has no detail: the service's own text is a
+// channel this package does not open.
 type Reply struct {
 	State      string      `json:"state,omitempty"`
 	Device     string      `json:"device,omitempty"`
@@ -245,26 +277,29 @@ type Reply struct {
 	SHA256     string      `json:"sha256,omitempty"`
 	Detections []Detection `json:"detections,omitempty"`
 	Sounds     []Sound     `json:"sounds,omitempty"`
+	Template   []byte      `json:"template,omitempty"`
 	Error      Cause       `json:"error,omitempty"`
 }
 
 // Cause is why a call returned nothing.
 type Cause string
 
-// The four causes, as INFER-SVC's. Missing and Corrupt are about the
-// models; Unavailable is the service not answering, or answering
-// something malformed; BadRequest is a request outside the bounds.
+// The causes: INFER-SVC's four, and NoFace. Missing and Corrupt are about
+// the models; Unavailable is the service not answering, or answering
+// something malformed; BadRequest is a request outside the bounds; NoFace
+// is an enrolment frame without exactly one clear face.
 const (
 	Missing     Cause = "missing"
 	Corrupt     Cause = "corrupt"
 	Unavailable Cause = "unavailable"
 	BadRequest  Cause = "bad_request"
+	NoFace      Cause = "no_face"
 )
 
-// Known reports one of the four causes.
+// Known reports one of the causes.
 func (c Cause) Known() bool {
 	switch c {
-	case Missing, Corrupt, Unavailable, BadRequest:
+	case Missing, Corrupt, Unavailable, BadRequest, NoFace:
 		return true
 	}
 	return false
@@ -355,6 +390,90 @@ func CheckSounds(ss []Sound) error {
 		}
 	}
 	return nil
+}
+
+// CheckTemplate checks an enrolled template: 1 to MaxTemplate/4
+// little-endian float32s, each finite, not all zero.
+func CheckTemplate(t []byte) error {
+	if len(t) < 4 || len(t) > MaxTemplate || len(t)%4 != 0 {
+		return unavailable("template outside its bounds")
+	}
+	zero := true
+	for i := 0; i < len(t); i += 4 {
+		f := math.Float32frombits(binary.LittleEndian.Uint32(t[i:]))
+		if math.IsNaN(float64(f)) || math.IsInf(float64(f), 0) {
+			return unavailable("template not finite")
+		}
+		zero = zero && f == 0
+	}
+	if zero {
+		return unavailable("template all zero")
+	}
+	return nil
+}
+
+// Template is one enrolled person's template as a lend carries it: the id
+// a recognised face is named by, and its little-endian float32s.
+type Template struct {
+	ID  string
+	Vec []byte
+}
+
+// EncodeLend is a lend's payload: for each template, its id's length (one
+// byte), the id, its vector's length (two bytes, big-endian) and the
+// vector. No JSON, so nothing holds the vector as text the sender cannot
+// zero.
+func EncodeLend(ts []Template) ([]byte, error) {
+	if len(ts) > MaxEnrolled {
+		return nil, badRequest("too many templates")
+	}
+	n := 0
+	for _, t := range ts {
+		n += 3 + len(t.ID) + len(t.Vec)
+	}
+	b := make([]byte, 0, n)
+	seen := map[string]bool{}
+	for _, t := range ts {
+		if !ValidEnrolledID(t.ID) || seen[t.ID] || CheckTemplate(t.Vec) != nil {
+			clear(b[:cap(b)])
+			return nil, badRequest("template outside its bounds")
+		}
+		seen[t.ID] = true
+		b = append(b, byte(len(t.ID)))
+		b = append(b, t.ID...)
+		b = binary.BigEndian.AppendUint16(b, uint16(len(t.Vec)))
+		b = append(b, t.Vec...)
+	}
+	return b, nil
+}
+
+// DecodeLend reads EncodeLend's payload. The vectors are slices of b, so
+// zeroing b zeroes them.
+func DecodeLend(b []byte) ([]Template, error) {
+	var ts []Template
+	seen := map[string]bool{}
+	for len(b) > 0 {
+		if len(ts) == MaxEnrolled {
+			return nil, badRequest("too many templates")
+		}
+		n := int(b[0])
+		if len(b) < 1+n+2 {
+			return nil, badRequest("lend cut short")
+		}
+		id := string(b[1 : 1+n])
+		m := int(binary.BigEndian.Uint16(b[1+n:]))
+		b = b[3+n:]
+		if len(b) < m {
+			return nil, badRequest("lend cut short")
+		}
+		if !ValidEnrolledID(id) || seen[id] || CheckTemplate(b[:m]) != nil {
+			return nil, badRequest("template outside its bounds")
+		}
+		seen[id] = true
+		ts = append(ts, Template{ID: id, Vec: b[:m:m]})
+		b = b[m:]
+	}
+	return ts, nil
 }
 
 // ValidPlate reports plate text of 1 to MaxPlate characters from
