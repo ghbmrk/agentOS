@@ -19,7 +19,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 
 ## Slices
 
-### DECOY-a: the table and the matcher (KRN-12 One table, Trips)
+### DECOY-a (#3762): the table and the matcher (KRN-12 One table, Trips)
 
 **Scope:** `broker/decoy/` (new), `broker/decoy/match/` (new), `broker/browser/filter.go` (imports the moved patterns), `broker/daemon/arc2_test.go` (allowlist line), `tools/risk_tier.py` (one line).
 **Builds:** the table (value, kind, destination, placement), its generation at first boot from the same generators that make real entries, the sealed decoy bit (decision 3), and the matcher over bytes and destinations.
@@ -29,7 +29,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 3. CLK-4: `match::TestTableAndPatterns`: every table value and every existing CLK-4 pattern matches, split across two writes too; random high-entropy text without a table entry does not trip. Catches a lost CLK-4 case or a false trip.
 **Size:** about 90k, tier A, strongest model. **Depends on:** #3761 and the D-232 row merged.
 
-### DECOY-b: kernel trips and the response (KRN-12 Trips, Response)
+### DECOY-b (#3763): kernel trips and the response (KRN-12 Trips, Response)
 
 **Scope:** `broker/kernel/` (trip entry, refusal lookup, outbound-path match, response, resume), `broker/kernel/key/` only if the refusal needs a typed reason. `Trusted-core: D-232`.
 **Builds:** a `trip` log entry; a refused key that is in the table logs a trip; the kernel's outbound path runs the matcher; a trip pauses the keys of its scope (KEY-6's pause), stops planning, and queues one fixed-template security text; a honey-key trip stops only the citing planner session; a resume of a trip's pause needs a passkey assertion (KEY-4), a texted RESUME is refused with fixed wording.
@@ -38,9 +38,9 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 2. KRN-12: `kernel::TestOutboundDecoyPausesScope`: a decoy value in an outbound request pauses that scope's keys before the request leaves, logs one trip and queues one security text. Catches a decoy that leaves.
 3. KRN-12: `kernel::TestTripResumeNeedsPasskey`. Catches an intruder holding the owner's number undoing the pause.
 4. KRN-6: `sim::TestTripDeterministic`: same log and events, same trip entries. Catches a nondeterministic matcher in the kernel.
-**Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a.
+**Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a (#3762).
 
-### DECOY-c: the edge (KRN-12 Placement, Trips, Silence)
+### DECOY-c (#3764): the edge (KRN-12 Placement, Trips, Silence)
 
 **Scope:** `broker/edgelink/` (matcher on the core side of the link, heartbeat kind), the edge's image profile under `image/` (placements as data, the link-local metadata address answered with a static reply or dropped).
 **Builds:** the matcher on everything the core sends to the edge; the edge's dotfiles and jackpot files written from the table at enrolment; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
@@ -48,9 +48,9 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 1. KRN-12: `edgelink::TestDecoyToEdgeTrips`. Catches a guest's query smuggling a decoy out through a fetch.
 2. KRN-12: `edgelink::TestHeartbeatSilenceAlarms`: two missed beats raise one alarm, a late beat clears nothing without the log saying so. Catches a killed edge going unseen.
 3. KRN-12: the image test that the metadata address gets only the static reply or none, and that no listener is added. Catches a fake service.
-**Size:** about 80k, tier A (the link), strongest model. **Depends on:** DECOY-b.
+**Size:** about 80k, tier A (the link), strongest model. **Depends on:** DECOY-b (#3763).
 
-### DECOY-d: the enforcer (KRN-12 Placement, Trips, Silence; NET-2)
+### DECOY-d (#3765): the enforcer (KRN-12 Placement, Trips, Silence; NET-2)
 
 **Scope:** `broker/enforcer/decoy/` (new: its own addresses, decision 4), `broker/enforcer/nft/` (drop-and-trip rules), `broker/enforcer/channel/` and `broker/enforcer/wire/` (the heartbeat kind, the address read), `broker/enforcer/alert/` (trip and silence alerts; the own line, decision 6), `broker/kernel/enforcer/` (sending the heartbeat).
 **Builds:** decoy addresses per segment; drop-and-trip rules; a trip cuts the tripping box's internet (a NET-4 tightening), lights the light and texts; the core's signed heartbeat on the channel, silence alarmed with no cut; the alerts sent on the enforcer's own send-only line.
@@ -61,7 +61,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 4. NET-2: `channel::TestHeartbeatStrictFrame`. Catches a fourth kind that carries anything else.
 **Size:** about 120k, tier A, strongest model. **Depends on:** ENF-d (#3660), ENF-e (#3661), ENF-h (#3666), DECOY-a.
 
-### DECOY-e: placements and the wallets (KRN-12 Placement, Outside canaries)
+### DECOY-e (#3766): placements and the wallets (KRN-12 Placement, Outside canaries)
 
 **Scope:** `broker/decoy/place/` (new), the planner sandbox and host image placements under `image/`, the sealed store's decoy entries (`broker/clerk/seal/`), the planner's key view (honey keys), `broker/decoy/wallet/` (new), the owner-page step (`broker/localui/`, sub B's directory: coordinate on the issue first).
 **Builds:** environment variables, dotfiles and jackpot files in the sandbox and host; decoy root and recovery entries in the sealed store; honey keys in the planner's view; three wallets made at setup, each seed planted at one boundary (sandbox and edge jackpot files, sealed store, backup), receive addresses shown as QR codes in one optional owner-page step, never the seeds.
@@ -71,7 +71,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 3. DEP-3: `wallet::TestSkippedStepCostsNothing`. Catches a required optional step.
 **Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a, DECOY-b.
 
-### DECOY-f: drills (KRN-12 Drills)
+### DECOY-f (#3767): drills (KRN-12 Drills)
 
 **Scope:** `broker/kernel/sim/` (drill scenario), `tests/` or `evals/` (the intruder playbook script), STATUS's broken line in the kernel's STATUS view.
 **Builds:** a scripted intruder search over the sim box in the order KRN-12 lists; per tripwire, time to detect and false trips recorded in the log; a scheduled run (default weekly); STATUS lists a tripwire whose last drill is missing or failed as broken.
