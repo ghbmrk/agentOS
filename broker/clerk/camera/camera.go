@@ -131,7 +131,8 @@ type Config struct {
 	Limit devhost.Limit
 	// Frames takes each video and thermal frame, unparsed: the decoder
 	// sandbox's feed (part b) and the memory ring (part c). It must not
-	// block, and it is the only place a payload goes.
+	// block or call back into the clerk (a stop waits for a delivery in
+	// flight), and it is the only place a payload goes.
 	Frames func(camera string, f camwire.Frame)
 	// Lost records a KRN-7 line. The node is off whether or not it
 	// succeeds.
@@ -173,20 +174,30 @@ type Clerk struct {
 
 	mu   sync.Mutex
 	cams map[string]*cam
+
+	// smu guards status apart from mu, since a delivery holds a slot's
+	// lock and stop takes mu before it.
+	smu    sync.Mutex
+	status map[string]camwire.Status
 }
 
 // cam is one camera's state.
 type cam struct {
 	Camera
-	off    bool
-	status camwire.Status
-	seen   bool // a status frame has arrived
+	off bool
 	// run is the running stream, nil when none runs.
 	run *slot
 }
 
-// slot is one running stream: its cancel and, on request, its task.
+// slot is one running stream: its cancel and, on request, its task. Its
+// mu is held while a frame or status is handed on, and stopped is set
+// under it, so once a stop returns no delivery is in flight and none
+// follows (DEV-7: nothing reaches the consumer after a task ends or capture
+// is turned off).
 type slot struct {
+	mu      sync.Mutex
+	stopped bool
+
 	cancel context.CancelCauseFunc
 	task   string
 }
@@ -209,7 +220,7 @@ func New(cfg Config) (*Clerk, error) {
 	if cfg.MaxBackoff < cfg.MinBackoff {
 		cfg.MaxBackoff = max(DefaultMaxBackoff, cfg.MinBackoff)
 	}
-	c := &Clerk{cfg: cfg, cams: map[string]*cam{}}
+	c := &Clerk{cfg: cfg, cams: map[string]*cam{}, status: map[string]camwire.Status{}}
 	c.lim = &limiter{limit: cfg.Limit, now: cfg.Now, sink: cfg.Sink, win: map[string]*window{}}
 	return c, nil
 }
@@ -310,6 +321,9 @@ func (c *Clerk) Remove(id string) {
 	if cm := c.cams[id]; cm != nil {
 		cm.stop(ErrRemoved)
 		delete(c.cams, id)
+		c.smu.Lock()
+		delete(c.status, id)
+		c.smu.Unlock()
 		c.log("camera disconnected", id)
 	}
 }
@@ -325,13 +339,10 @@ func (c *Clerk) Off(id string) bool {
 // Status is the camera's last status record, if one has arrived. It holds
 // numbers only.
 func (c *Clerk) Status(id string) (camwire.Status, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	cm := c.cams[id]
-	if cm == nil {
-		return camwire.Status{}, false
-	}
-	return cm.status, cm.seen
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	st, ok := c.status[id]
+	return st, ok
 }
 
 // Flush emits the coalesced events of windows that have ended; the host
@@ -340,9 +351,28 @@ func (c *Clerk) Flush() error { return c.lim.flush() }
 
 func (cm *cam) stop(cause error) {
 	if cm.run != nil {
+		cm.run.halt()
 		cm.run.cancel(cause)
 		cm.run = nil
 	}
+}
+
+// halt waits out a delivery in flight and stops later ones.
+func (s *slot) halt() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+}
+
+// deliver runs fn unless the stream has been stopped.
+func (s *slot) deliver(fn func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return false
+	}
+	fn()
+	return true
 }
 
 // Run streams a camera whose capture is continuous until ctx ends, the
@@ -359,7 +389,7 @@ func (c *Clerk) Run(ctx context.Context, id string) error {
 		return err
 	}
 	defer c.end(id, s)
-	return c.loop(ctx, cm)
+	return c.loop(ctx, s, cm)
 }
 
 // Capture streams a camera whose capture is on request for one plan step:
@@ -380,7 +410,7 @@ func (c *Clerk) Capture(ctx context.Context, id string, step key.Step) error {
 		return err
 	}
 	defer c.end(id, s)
-	return c.loop(ctx, cm)
+	return c.loop(ctx, s, cm)
 }
 
 // EndTask ends the on-request streams of a task.
@@ -421,6 +451,7 @@ func (c *Clerk) begin(ctx context.Context, id string, gate func(*cam) error, tas
 // end releases the camera's slot if s still holds it; a stop may already
 // have cleared it, and a newer stream may hold it since.
 func (c *Clerk) end(id string, s *slot) {
+	s.halt()
 	s.cancel(nil)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -430,7 +461,7 @@ func (c *Clerk) end(id string, s *slot) {
 }
 
 // loop is one camera's dial, read and redial cycle.
-func (c *Clerk) loop(ctx context.Context, cm Camera) error {
+func (c *Clerk) loop(ctx context.Context, s *slot, cm Camera) error {
 	silence := cm.Silence
 	if silence == 0 {
 		silence = DefaultSilence
@@ -448,8 +479,11 @@ func (c *Clerk) loop(ctx context.Context, cm Camera) error {
 			c.turnOff(cm)
 			return ErrSpoofed
 		case err == nil:
-			n, rerr := c.read(ctx, conn, cm, silence, &last, &silent)
+			n, rerr := c.read(ctx, s, conn, cm, silence, &last, &silent)
 			conn.Close()
+			if errors.Is(rerr, errStopped) {
+				return ErrRemoved
+			}
 			if ctx.Err() != nil {
 				return cause(ctx)
 			}
@@ -491,11 +525,14 @@ func cause(ctx context.Context) error {
 	return ctx.Err()
 }
 
-var errSilent = errors.New("camera: silent past the interval")
+var (
+	errSilent  = errors.New("camera: silent past the interval")
+	errStopped = errors.New("camera: stream stopped")
+)
 
 // read reads frames until the stream fails, ctx ends, or no frame arrives
 // within silence. It returns how many frames it read.
-func (c *Clerk) read(ctx context.Context, conn net.Conn, cm Camera, silence time.Duration, last *time.Time, silent *bool) (int, error) {
+func (c *Clerk) read(ctx context.Context, s *slot, conn net.Conn, cm Camera, silence time.Duration, last *time.Time, silent *bool) (int, error) {
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
 	r := &lastErr{r: conn}
@@ -521,11 +558,15 @@ func (c *Clerk) read(ctx context.Context, conn net.Conn, cm Camera, silence time
 			c.log("camera recovered", cm.ID)
 			c.event(cm.ID, KindRecovered, 0)
 		}
+		var ok bool
 		if st != nil {
-			c.setStatus(cm.ID, *st)
-			continue
+			ok = s.deliver(func() { c.setStatus(cm.ID, *st) })
+		} else {
+			ok = s.deliver(func() { c.cfg.Frames(cm.ID, f) })
 		}
-		c.cfg.Frames(cm.ID, f)
+		if !ok {
+			return n, errStopped
+		}
 	}
 }
 
@@ -565,12 +606,12 @@ func (l *lastErr) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// setStatus runs only inside a live slot's delivery, so never after the
+// camera's Remove has stopped that slot.
 func (c *Clerk) setStatus(id string, st camwire.Status) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if cm := c.cams[id]; cm != nil {
-		cm.status, cm.seen = st, true
-	}
+	c.smu.Lock()
+	defer c.smu.Unlock()
+	c.status[id] = st
 }
 
 // turnOff marks the node off, writes the KRN-7 line and raises the key

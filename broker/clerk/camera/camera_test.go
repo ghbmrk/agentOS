@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -455,5 +456,62 @@ func TestOneStreamPerCamera(t *testing.T) {
 	e.c.Remove("porch")
 	if err := e.c.Run(context.Background(), "porch"); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("Run after disconnect = %v", err)
+	}
+}
+
+// TestNoFrameAfterStop: once EndTask, Set (capture off) or Remove returns,
+// no frame or status reaches the consumer, even from bytes already
+// buffered (Security on #3600, point 1). Revert mutant: delivering without
+// the slot's stopped check gets late frames in most runs.
+func TestNoFrameAfterStop(t *testing.T) {
+	flood := func(i int, c *tls.Conn) {
+		for j := 0; ; j++ {
+			f := video(j)
+			if j%7 == 0 {
+				f = status()
+			}
+			if camwire.WriteFrame(c, camwire.ToCore, camwire.Shape{}, f) != nil {
+				return
+			}
+		}
+	}
+	stops := map[string]func(e *env){
+		"end task": func(e *env) { e.c.EndTask("t1") },
+		"capture off": func(e *env) {
+			cm := e.cam
+			cm.Capture = CaptureOff
+			if err := e.c.Set(cm); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"remove": func(e *env) { e.c.Remove("porch") },
+	}
+	for name, stop := range stops {
+		t.Run(name, func(t *testing.T) {
+			for range 20 {
+				n := newNode(t, flood)
+				e := newEnv(t, n, OnRequest)
+				var late atomic.Int32
+				var stopped atomic.Bool
+				e.c.cfg.Frames = func(string, camwire.Frame) {
+					if stopped.Load() {
+						late.Add(1)
+					}
+				}
+				done := make(chan error, 1)
+				go func() { done <- e.c.Capture(context.Background(), "porch", readStep("porch", "t1")) }()
+				waitFor(t, "a status", func() bool { _, ok := e.c.Status("porch"); return ok || n.conns.Load() > 0 })
+				time.Sleep(5 * time.Millisecond)
+				stop(e)
+				stopped.Store(true)
+				if err := <-done; !errors.Is(err, ErrRemoved) {
+					t.Fatalf("Capture = %v, want ErrRemoved", err)
+				}
+				time.Sleep(10 * time.Millisecond)
+				if late.Load() != 0 {
+					t.Fatalf("%d frames delivered after the stop returned", late.Load())
+				}
+			}
+		})
 	}
 }

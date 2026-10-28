@@ -134,12 +134,23 @@ func clientConfig(key crypto.Signer, pin [32]byte) (*tls.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The certificate, and the key in it, is handed to the handshake once
+	// and dropped here, so the connection's config holds no key for the
+	// stream's life (CLK-1).
+	cert := &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
 		MaxVersion:             tls.VersionTLS13,
 		CurvePreferences:       []tls.CurveID{Group},
 		SessionTicketsDisabled: true,
-		Certificates:           []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			c := cert
+			cert = nil
+			if c == nil {
+				return &tls.Certificate{}, nil
+			}
+			return c, nil
+		},
 		// No chain or name: the node's key is pinned below. The check runs
 		// on the server's Certificate message, before its CertificateVerify
 		// and before any application byte.
