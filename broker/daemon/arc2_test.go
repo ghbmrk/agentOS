@@ -112,8 +112,10 @@ var controlPath = map[string][]string{
 	// that takes the owner side's uid on the calling thread (#2682); it
 	// imports golang.org/x/sys/unix, so like clock it has no entry below.
 	// It keeps the guests' plan holder key with kernel/privfile and narrows
-	// the owner's grant per machine with kernel/key (#3087).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
+	// the owner's grant per machine with kernel/key (#3087). It derives a
+	// new recovery key's backup recipient with backup, pure crypto over
+	// the kernel's types, for the Recovery key page (REC-4 r4a, #3409).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies

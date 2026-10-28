@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -76,6 +77,14 @@ type Config struct {
 	// tap on the passkey page's name. When unset, Passkeys that also serve
 	// the backup ops (AgentosdPasskeys, on the same socket) serve it.
 	Backups Backups
+	// Recovery, when set with Passkeys, serves the Recovery key page at
+	// /recovery/ behind sign-in (REC-4, r4a): its tap is on the passkey
+	// page's name. When unset, Passkeys that also serve the recovery ops
+	// (AgentosdPasskeys) serve it.
+	Recovery Recovery
+	// RecoveryCard makes the Recovery key page's new card; card.Generate
+	// when nil (tests wrap it).
+	RecoveryCard func(io.Reader) (*card.Card, error)
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.
@@ -133,6 +142,8 @@ type Server struct {
 	// unlock: only it, or a signed-in phone, is told the passphrase change
 	// did not finish (M1 on #93).
 	vaultOpener string
+	// recovery is the Recovery key page's one pending replacement.
+	recovery recoveryState
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
 	// claimWait holds a slot for each claim post running or waiting
@@ -181,6 +192,12 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Backups != nil && cfg.Passkeys == nil {
 		return nil, errors.New("localui: the Backups page needs the passkey page's name")
+	}
+	if rc, ok := cfg.Passkeys.(Recovery); ok && cfg.Recovery == nil {
+		cfg.Recovery = rc
+	}
+	if cfg.Recovery != nil && cfg.Passkeys == nil {
+		return nil, errors.New("localui: the Recovery key page needs the passkey page's name")
 	}
 	seen := map[string]bool{}
 	for _, d := range cfg.Connect {
@@ -286,6 +303,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Backups != nil {
 		s.Mount("/backups", "Backups", http.HandlerFunc(s.backupsPage))
+	}
+	if s.cfg.Recovery != nil {
+		s.Mount("/recovery", "Recovery key", http.HandlerFunc(s.recoveryPage))
 	}
 	if s.setup != nil {
 		s.setup.routes(s.mux)
