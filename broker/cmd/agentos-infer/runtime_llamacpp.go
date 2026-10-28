@@ -109,9 +109,9 @@ func (p *llamaProc) close() {
 }
 
 // start runs llama-server on the model and waits until it answers health.
-// Every flag below closes something: embedding mode with the model's last-token
-// pooling, two slots of 2048 tokens (the leaf's memory, INFER-A6), CPU only, no web
-// UI, no slots endpoint, no network fetch, and its log discarded since the
+// Every flag below closes something: embedding mode with the model's own
+// pooling, two slots of 2048 tokens (the leaf's memory, INFER-A6), CPU only, no
+// web UI, no slots endpoint, no network fetch, and its log discarded since the
 // service's log carries no request text (INF-8).
 func (l *llama) start(model string) (*llamaProc, error) {
 	dir, err := os.MkdirTemp("", "llama-")
@@ -122,7 +122,7 @@ func (l *llama) start(model string) (*llamaProc, error) {
 	args := []string{
 		"--model", model,
 		"--host", sock,
-		"--embedding", "--pooling", "last",
+		"--embedding",
 		"--parallel", fmt.Sprint(slots),
 		"--ctx-size", fmt.Sprint(slots * slotTokens),
 		"--gpu-layers", "0",

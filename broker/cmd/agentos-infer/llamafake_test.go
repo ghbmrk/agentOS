@@ -39,6 +39,10 @@ func fakeLlamaServer(args []string) {
 	dir := filepath.Dir(sock)
 	os.WriteFile(filepath.Join(dir, "argv"), []byte(strings.Join(args, "\n")), 0o600)
 	os.WriteFile(filepath.Join(dir, "env"), []byte(strings.Join(os.Environ(), "\n")), 0o600)
+	// Where the child's output goes: the adapter must leave both at /dev/null (INF-8).
+	o, _ := os.Readlink("/proc/self/fd/1")
+	e, _ := os.Readlink("/proc/self/fd/2")
+	os.WriteFile(filepath.Join(dir, "fds"), []byte(o+"\n"+e), 0o600)
 	if strings.Contains(strings.Join(args, " "), "slowstart") {
 		time.Sleep(time.Hour)
 	}
@@ -79,6 +83,8 @@ func fakeLlamaServer(args []string) {
 				return
 			case "log":
 				os.Stderr.WriteString(t) // the child's log must never reach the service's
+			case "count": // one vector fewer than texts
+				continue
 			case "short":
 				data = append(data, item{i, make([]float32, fakeDim-1)})
 				continue

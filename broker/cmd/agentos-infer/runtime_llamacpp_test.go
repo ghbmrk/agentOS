@@ -186,14 +186,18 @@ func TestLlamaStartsALockedDownEmbeddingServer(t *testing.T) {
 	}
 	dir := l.cur.dir
 	argv, _ := os.ReadFile(filepath.Join(dir, "argv"))
-	for _, want := range []string{"--host\n" + filepath.Join(dir, "s.sock"), "--embedding", "--pooling\nlast", "--offline",
+	for _, want := range []string{"--host\n" + filepath.Join(dir, "s.sock"), "--embedding", "--offline",
 		"--no-webui", "--no-slots", "--parallel\n2", "--ctx-size\n4096", "--gpu-layers\n0"} {
 		if !strings.Contains(string(argv), want) {
 			t.Errorf("argv lacks %q: %q", want, argv)
 		}
 	}
-	if strings.Contains(string(argv), "--port") {
+	if strings.Contains(string(argv), "--port") || strings.Contains(string(argv), "--pooling") {
 		t.Errorf("argv names a port: %q", argv)
+	}
+	// INF-8: the server's output goes nowhere, so nothing it logs reaches the service's.
+	if fds, _ := os.ReadFile(filepath.Join(dir, "fds")); string(fds) != "/dev/null\n/dev/null" {
+		t.Errorf("the server's stdout and stderr are %q; want /dev/null for both", fds)
 	}
 	env, _ := os.ReadFile(filepath.Join(dir, "env"))
 	if string(env) != "PATH=/usr/bin:/bin" {
@@ -297,7 +301,7 @@ func TestLlamaEmbedFailuresAreUnavailableThenRecover(t *testing.T) {
 	if err != nil || len(vs) != 2 {
 		t.Fatalf("first call: %v, %v", vs, err)
 	}
-	for _, p := range []string{"crash", "hang", "status", "malformed", "huge", "short", "dup"} {
+	for _, p := range []string{"crash", "hang", "status", "malformed", "huge", "count", "short", "dup"} {
 		if vs, _, err := c.Embed(ctx(t), []string{"x", p}); !unavailable(err) || vs != nil {
 			t.Errorf("text %q: %v, %v; want unavailable and no vectors", p, vs, err)
 		}
@@ -338,6 +342,9 @@ func TestLlamaAdapterRefusesUnplaceableAndOversizeReplies(t *testing.T) {
 	}
 	if vs, err := l.Embed([]string{"x", "dup"}); err == nil {
 		t.Errorf("two vectors for one index were placed: %v", vs)
+	}
+	if vs, err := l.Embed([]string{"x", "count"}); err == nil {
+		t.Errorf("one vector for two texts was accepted: %v", vs)
 	}
 	if vs, err := l.Embed([]string{"huge"}); err == nil {
 		t.Errorf("a reply over its bound was read: %d vectors", len(vs))
