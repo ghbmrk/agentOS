@@ -53,6 +53,14 @@ exempt-pr 3460
 # Remove once #3554 merges.
 exempt-pr 3554
 
+# #3557 (CAM-wire, #3513 part a): the new broker/camwire/, the camera node's wire, which
+# the G2 list does not name (D-198). Remove once #3557 merges.
+exempt-pr 3557
+
+# #3562 (DRONE-sim a, #3516): broker/drone/ and broker/cmd/agentos-drone/, which the G2
+# list does not name (D-198). Remove once #3562 merges.
+exempt-pr 3562
+
 # Project machinery and records.
 allow .claude/
 allow .github/
