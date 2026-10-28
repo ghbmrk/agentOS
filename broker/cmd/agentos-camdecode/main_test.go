@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -23,5 +24,34 @@ func TestRunExitsWithOneWord(t *testing.T) {
 	errOut.Reset()
 	if code := run([]string{"-video", "8x6", "-thermal", "4x3"}, strings.NewReader(""), &out, &errOut); code != 0 || errOut.Len() != 0 {
 		t.Errorf("empty input: exit %d, stderr %q", code, errOut.String())
+	}
+}
+
+// TestImageBuildsDecoderAlone: image/camdecode.sh, the image's one tagged
+// build (TestImageBuildShipsTheUntaggedBuild keeps image/build.sh
+// untagged), builds this program alone with exactly the libavcodec tags,
+// never agentos_e2e, and sets no GOFLAGS; image/build.sh runs it.
+func TestImageBuildsDecoderAlone(t *testing.T) {
+	b, err := os.ReadFile("../../../image/camdecode.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	for _, bad := range []string{"GOFLAGS", "agentos_e2e"} {
+		if strings.Contains(src, bad) {
+			t.Fatalf("image/camdecode.sh mentions %s", bad)
+		}
+	}
+	const line = "go build -tags libavcodec,netgo,osusergo -trimpath"
+	if strings.Count(src, "-tags") != 1 || strings.Count(src, "go build") != 1 || !strings.Contains(src, line) ||
+		!strings.Contains(src, "-o \"$ROOT/agentos-camdecode\" ./cmd/agentos-camdecode)") {
+		t.Fatal("image/camdecode.sh no longer builds agentos-camdecode alone with the line this test pins")
+	}
+	bs, err := os.ReadFile("../../../image/build.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bs), `sh "$HERE/camdecode.sh" `) {
+		t.Fatal("image/build.sh no longer builds the decoder with image/camdecode.sh")
 	}
 }

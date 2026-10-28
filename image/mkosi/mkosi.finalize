@@ -1256,9 +1256,23 @@ def noexec_violations(root):
             out.append("%s: %s; the tree check never passes what it cannot read (UPD-10)" % (name, e))
             continue
         out += namespace_mount_violations(name, files)
-        if "/" not in noexec:
+        # An empty root (TemporaryFileSystem=/, read-only and noexec) is the other way to hold UPD-10:
+        # nothing in it executes but what the unit binds in, which namespace_mount_violations limits.
+        # systemd keeps one mount entry per path (namespace.c drop_duplicates, the lower mode first),
+        # so with NoExecPaths=/ the empty root is silently dropped and the unit sees the host's (#3642).
+        try:
+            tmp_root = [(w.split(":", 1) + [""])[1] for w in ini_words(files, "Service", "TemporaryFileSystem")
+                        if w.split(":", 1)[0] == "/"]
+        except ValueError:
+            tmp_root = []
+        empty_root = any([o for o in opts.split(",") if o in ("ro", "rw")][-1:] == ["ro"] and mount_noexec(opts)
+                         for opts in tmp_root)
+        if tmp_root and "/" in noexec:
+            out.append("%s: TemporaryFileSystem=/ with NoExecPaths=/; systemd drops the empty root for the "
+                       "NoExecPaths= entry at the same path (UPD-10, #3642)" % name)
+        if "/" not in noexec and not empty_root:
             out.append("%s: NoExecPaths does not hold /; must be NoExecPaths=/ (UPD-10)" % name)
-        if not execs:
+        if not execs and not empty_root:
             out.append("%s: no ExecPaths; must be ExecPaths=%s (UPD-10)" % (name, EXEC_ONLY))
         for p in execs:
             if p != EXEC_ONLY and not p.startswith(EXEC_ONLY + "/"):
@@ -1507,8 +1521,10 @@ def keeper_path_violations(name, files):
 
 def driver_root(name, files):
     """Whether service NAME is a driver's template (DRIVER_UNIT; driver_violations holds each one to
-    the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro."""
-    return bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro"]
+    the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro,noexec, with no
+    NoExecPaths=/ entry, which would make systemd drop that root (#3642)."""
+    return (bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"]
+            and "/" not in ini_paths(files, "Service", "NoExecPaths"))
 
 
 def keeper_unit_violations(name, files):
@@ -2703,6 +2719,9 @@ DRIVER_MARKS = (b"agentos-drv-", b"/run/agentos-drivers")
 # The host's uid is fixed (DEVHOST_UID, its sysusers line), so the template can name it for the
 # driver's peer check (devslot/proc.HostUIDEnv); a unit cannot resolve a user name in Environment=.
 DEVHOST_UID = 900
+# The kernel's key socket for driver NAME's instances (kernel/proc.ServeClerkKey, which hands the key
+# to each instance of the driver's template; b2b-2, #3590).
+DRIVER_KEY_SOCKET = "/run/agentos-kernel/key-driver-{name}.sock"
 DRIVER_TEMPLATE = (
     ("usr/lib/systemd/system/agentos-driver-{name}.socket", """\
 # Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
@@ -2731,21 +2750,28 @@ ExecStart=/usr/lib/agentos/drivers/{name}/driver
 User=agentos-drv-{name}
 Group=agentos-drv-{name}
 Slice=agentos-drivers.slice
-Environment=AGENTOS_DEVHOST_UID=""" + str(DEVHOST_UID) + """
+Environment=AGENTOS_DEVHOST_UID=""" + str(DEVHOST_UID) + """ AGENTOS_DRIVER={name}
+# The driver's key stays in its own process (b2b-2, #3590): descriptors 4 and 5, named in
+# LISTEN_FDNAMES, are the kernel's key hand-off as clerk driver-{name} and its sealed device-key file,
+# read-only. Both graceful: a device with no key runs with none.
+OpenFile=""" + DRIVER_KEY_SOCKET + """:clerk-key:graceful
+OpenFile=/var/lib/agentos-drivers/{name}/device:device:read-only,graceful
 StandardInput=null
 StandardOutput=null
 StandardError=null
 RestrictAddressFamilies=none
 PrivateNetwork=yes
 IPAddressDeny=any
-TemporaryFileSystem=/:ro
+# The root is an empty read-only tmpfs that does not execute; the binary, bound from /usr, is all
+# there is and all that executes. Not NoExecPaths=/: systemd 257 keeps one mount entry per path
+# (namespace.c drop_duplicates, the lower mode first), so NoExecPaths=/ silently drops
+# TemporaryFileSystem=/ and the driver sees the host's root (#3642 Security 6470896209 point 2).
+TemporaryFileSystem=/:ro,noexec
 BindReadOnlyPaths=/usr/lib/agentos/drivers/{name}/driver
 ProcSubset=pid
 ProtectProc=invisible
 PrivateDevices=yes
 PrivateIPC=yes
-NoExecPaths=/
-ExecPaths=/usr/lib/agentos/drivers/{name}/driver
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 SystemCallFilter=@system-service
@@ -2764,7 +2790,7 @@ RuntimeMaxSec=120
 # Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
 # The main side's mask (agentos-.service.d/50-main-side.conf, read before this file) names paths the
 # driver's empty read-only root lacks, and systemd fails a unit whose InaccessiblePaths= entry is
-# missing (226/NAMESPACE). TemporaryFileSystem=/:ro already leaves none of them in view (#3473).
+# missing (226/NAMESPACE). The empty root already leaves none of them in view (#3473, #3642).
 [Service]
 InaccessiblePaths=
 """),

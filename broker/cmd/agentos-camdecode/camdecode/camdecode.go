@@ -5,7 +5,7 @@
 // bundle declares, never shapes the stream names. The clerk trusts none of
 // it: it checks each output frame's header and length against those
 // shapes (broker/clerk/camera decode.go). The clerk must not import this
-// package: part (b2) links libavcodec into it.
+// package: it links libavcodec (h264.go).
 package camdecode
 
 import (
@@ -127,16 +127,36 @@ func AppendHeader(dst []byte, k byte, s camwire.Shape, counter uint32) []byte {
 }
 
 // Run decodes frames from in until it ends, writing one output frame per
-// thermal input. A frame the camera wire refuses, or a status frame, is
-// ErrStream. Video is ErrVideo until part (b2) brings the H.264 decoder.
-// A clean end of input is nil.
+// thermal input and one per decoded picture. A frame the camera wire
+// refuses, or a status frame, is ErrStream. A decoder error, a picture of
+// another shape, or more pictures than access units in, is ErrVideo; so
+// is any video in a build without the H.264 decoder (HasH264). Video
+// output frames are counted from 1 here: an access unit carries no
+// counter. A clean end of input flushes the decoder and is nil.
 func Run(in io.Reader, out io.Writer, c Config) error {
 	w := bufio.NewWriterSize(out, 1<<16)
 	hdr := make([]byte, 0, HeaderLen)
+	var dec *h264
+	defer func() {
+		if dec != nil {
+			dec.close()
+		}
+	}()
+	var units, pictures uint32
+	picture := func(i420 []byte) error {
+		if pictures == units {
+			return ErrVideo
+		}
+		pictures++
+		return writeFrame(w, AppendHeader(hdr[:0], KindVideo, c.Video, pictures), i420)
+	}
 	for {
 		f, err := camwire.ReadFrame(in, camwire.ToCore, c.Thermal)
 		if err == io.EOF {
-			return nil
+			if dec == nil {
+				return nil
+			}
+			return dec.feed(nil, picture)
 		}
 		if err != nil {
 			return ErrStream
@@ -147,20 +167,36 @@ func Run(in io.Reader, out io.Writer, c Config) error {
 			if err != nil {
 				return ErrStream
 			}
-			hdr = AppendHeader(hdr[:0], KindThermal, c.Thermal, th.Counter)
-			if _, err := w.Write(hdr); err != nil {
-				return ErrWrite
-			}
-			if _, err := w.Write(th.Samples); err != nil {
-				return ErrWrite
-			}
-			if err := w.Flush(); err != nil {
-				return ErrWrite
+			if err := writeFrame(w, AppendHeader(hdr[:0], KindThermal, c.Thermal, th.Counter), th.Samples); err != nil {
+				return err
 			}
 		case camwire.TypeVideo:
-			return ErrVideo
+			if dec == nil {
+				if dec, err = newH264(c.Video); err != nil {
+					return err
+				}
+			}
+			units++
+			if err := dec.feed(f.Payload, picture); err != nil {
+				return err
+			}
 		default:
 			return ErrStream
 		}
 	}
+}
+
+// writeFrame writes one output frame and flushes it, so the clerk sees
+// each frame as soon as it is decoded.
+func writeFrame(w *bufio.Writer, hdr, pixels []byte) error {
+	if _, err := w.Write(hdr); err != nil {
+		return ErrWrite
+	}
+	if _, err := w.Write(pixels); err != nil {
+		return ErrWrite
+	}
+	if err := w.Flush(); err != nil {
+		return ErrWrite
+	}
+	return nil
 }

@@ -216,8 +216,13 @@ type Conn interface {
 
 // ServeWire runs one operation of drv for the host on c: it declares, takes
 // the operation and the pin, runs it through the slot, and reports done.
-// Main calls it after its checks; tests call it on a pipe.
-func ServeWire(ctx context.Context, drv Driver, c Conn) error {
+// Tests call it on a pipe; the device has no key.
+func ServeWire(ctx context.Context, drv Driver, c Conn) error { return ServeWireLend(ctx, drv, c, nil) }
+
+// ServeWireLend is ServeWire with the device's key lent through lend
+// (Env.Lend), nil for none. Main calls it after its checks, with the key
+// its unit passed (b2b-2).
+func ServeWireLend(ctx context.Context, drv Driver, c Conn, lend func(fn func(key []byte) error) error) error {
 	d := cloneDecl(drv.Declare())
 	b, err := Canonical(d)
 	if err != nil {
@@ -238,7 +243,7 @@ func ServeWire(ctx context.Context, drv Driver, c Conn) error {
 		return err
 	}
 	w := &wire{c: c, d: d, pin: pin}
-	s, err := New(declared{drv, d}, Env{Pin: pin, Home: home, Transport: w, Emit: w.emit})
+	s, err := New(declared{drv, d}, Env{Pin: pin, Home: home, Transport: w, Lend: lend, Emit: w.emit})
 	if err != nil {
 		return err
 	}
