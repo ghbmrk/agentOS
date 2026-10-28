@@ -68,7 +68,7 @@ func Derive(p *Policy) Plan {
 		"RC_PROTOCOLS":     0, // no RC protocol is decoded: RC is an unsigned control path
 		"ARMING_SKIPCHK":   skipRCChecks,
 		"SCR_ENABLE":       0, // no Lua scripting: scripts are code the signature does not cover
-		"RTL_ALT":          rtlAltM * 100,
+		"RTL_ALT_M":        rtlAltM,
 		"RALLY_INCL_HOME":  0, // return goes to the dock rally point, not to wherever it armed
 		"RALLY_LIMIT_KM":   0,
 		"MAV_SYSID":        targetSysID,

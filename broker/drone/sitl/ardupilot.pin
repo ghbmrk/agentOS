@@ -1,7 +1,9 @@
 # ArduPilot Copter SITL pin (DRONE-sim, #3516, brief decision 3). build.sh reads
-# these three lines; the cache key is the commit and the patch's hash. A bump
-# names the newest Copter stable tag, its commit, and re-checks that the patch
-# still applies and is still needed (ASSUMPTIONS.md, "Channel 0").
+# these four lines; drone-sitl.yml caches the build by the hash of this file,
+# the patch and build.sh. A bump names the newest Copter stable tag and its
+# commit, and re-checks that the patch still applies and is still needed
+# (ASSUMPTIONS.md row 1).
+repo https://github.com/ArduPilot/ardupilot.git
 tag Copter-4.7.2
 commit fb773567896014da007bca58358704d4a0d8516f
 patch ardupilot-signed-only.patch

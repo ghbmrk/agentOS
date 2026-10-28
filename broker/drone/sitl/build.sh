@@ -10,8 +10,8 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?usage: build.sh OUT_DIR}
-repo=https://github.com/ArduPilot/ardupilot.git
 pin() { awk -v k="$1" '$1 == k { print $2 }' "$here/ardupilot.pin"; }
+repo=$(pin repo)
 tag=$(pin tag)
 commit=$(pin commit)
 patch=$here/$(pin patch)
