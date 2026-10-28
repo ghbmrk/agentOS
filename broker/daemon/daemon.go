@@ -225,6 +225,9 @@ type PageSocket struct {
 	// BackupNotes is the status page's only-copy notice. nil is none.
 	Backups     localsrv.Backups
 	BackupNotes func() []string
+	// Recovery serves the Recovery key page's ops (REC-4, r4a) with
+	// Passkeys; nil is none.
+	Recovery localsrv.Recovery
 	// Certify is the kernel's certify, which signs the page's serving key
 	// (CH-9, MIG-4-recovery-f2); nil serves the page over HTTP only.
 	Certify localsrv.Certifier
@@ -495,6 +498,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.Accounts = cfg.PageSocket.Accounts
 		lcfg.Passkeys = cfg.PageSocket.Passkeys
 		lcfg.Backups, lcfg.BackupNotes = cfg.PageSocket.Backups, cfg.PageSocket.BackupNotes
+		lcfg.Recovery = cfg.PageSocket.Recovery
 		lcfg.Certify = cfg.PageSocket.Certify
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget

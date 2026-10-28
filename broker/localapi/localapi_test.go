@@ -16,7 +16,7 @@ import (
 func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 	others := []string{"message", "whoami", bridgeproto.OpInbound, bridgeproto.OpOutbox, bridgeproto.OpSent, bridgeproto.OpState}
 	seen := map[string]bool{}
-	for _, op := range append(append(append(append([]string{}, Ops...), SetupOps...), PasskeyOps...), BackupOps...) {
+	for _, op := range append(append(append(append(append([]string{}, Ops...), SetupOps...), PasskeyOps...), BackupOps...), RecoveryOps...) {
 		if !strings.HasPrefix(op, "page_") || seen[op] {
 			t.Errorf("op %q", op)
 		}
@@ -27,7 +27,7 @@ func TestPageOpsAreDisjointFromOtherSockets(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 44 {
+	if len(seen) != 46 {
 		t.Fatalf("%d ops", len(seen))
 	}
 }
