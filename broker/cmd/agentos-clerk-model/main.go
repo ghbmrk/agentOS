@@ -120,8 +120,9 @@ const (
 var errSlotTooLarge = errors.New("agentos-clerk-model: the plan login's slot is too large")
 
 // openStore opens the plan login's slot in dir: a plain file of this uid's
-// alone, or none. Its value is opened, and checked against the plan, when
-// plan.New binds it.
+// alone, or none; anything else refuses the start, since it is the
+// directory's tampering, not the slot's. Its value is opened, and checked
+// against the plan, when plan.New binds it (newLogin).
 func openStore(dir string, s clerk.Sealer) (*plan.Store, error) {
 	store := plan.NewStore(s, func(b []byte) error {
 		if len(b) > maxPlanSlot {
@@ -145,7 +146,9 @@ func openStore(dir string, s clerk.Sealer) (*plan.Store, error) {
 		return nil, err
 	}
 	if len(b) > maxPlanSlot {
-		return nil, errSlotTooLarge
+		// Not a form this process writes: it starts signed out (newLogin).
+		log.Printf("agentos-clerk-model: the plan login's slot is over %d bytes; starting signed out", maxPlanSlot)
+		b = nil
 	}
 	store.Load(b)
 	clear(b)
@@ -178,8 +181,7 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 	if err != nil {
 		return err
 	}
-	// The system's roots: the provider's hosts are public (nil RootCAs).
-	login, err := plan.New(plan.Codex(guard), store, nil)
+	login, err := newLogin(plan.Codex(guard), store)
 	if err != nil {
 		return err
 	}
@@ -205,4 +207,21 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 	}
 	ln.Close()
 	return err
+}
+
+// newLogin binds store to d. A slot whose value does not open under this
+// key or for this plan (another key's, damaged) is never opened: the clerk
+// logs one line and starts signed out, so the owner can sign in again and
+// that sign-in's write replaces the slot, as the mail clerk does
+// (MAIL-main-a-4). Refusing the start instead would leave planremove, the
+// owner's only remedy, unreachable (#3568 UX 1).
+func newLogin(d plan.Declaration, store *plan.Store) (*plan.Login, error) {
+	// The system's roots: the provider's hosts are public (nil RootCAs).
+	login, err := plan.New(d, store, nil)
+	if b, _ := store.MarshalBinary(); err == nil || len(b) == 0 {
+		return login, err
+	}
+	log.Printf("agentos-clerk-model: the plan login's slot does not open under this key; starting signed out")
+	store.Load(nil)
+	return plan.New(d, store, nil)
 }

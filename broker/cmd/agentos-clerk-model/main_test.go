@@ -234,6 +234,7 @@ func running(t *testing.T, c config, k [32]byte) run.PlanOwner {
 		}
 		select {
 		case err := <-done:
+			done <- nil // for the cleanup, which waits on it
 			t.Fatalf("serve ended: %v", err)
 		case <-time.After(10 * time.Millisecond):
 		}
@@ -259,8 +260,9 @@ func testConfig(t *testing.T) config {
 }
 
 // CLK-1, CLK-7: the plan login lives in this clerk's own sealed slot. It
-// opens at start under the same key and shows on the owner socket; planremove empties it on the drive; a slot another key sealed,
-// or one another uid can read or that is a link, refuses the start.
+// opens at start under the same key and shows on the owner socket;
+// planremove empties it on the drive; a slot another uid can read, or that
+// is a link, refuses the start, since that is the directory tampered with.
 func TestThePlanLoginIsSealedInTheClerksOwnSlot(t *testing.T) {
 	k := [32]byte{7}
 	c := testConfig(t)
@@ -275,11 +277,6 @@ func TestThePlanLoginIsSealedInTheClerksOwnSlot(t *testing.T) {
 		t.Fatalf("after planremove the slot holds %d bytes, %v", len(b), err)
 	}
 
-	other := testConfig(t)
-	sealedSlot(t, other.dir, [32]byte{8})
-	if err := refused(t, other, k); err == nil {
-		t.Error("a slot sealed under another key opened")
-	}
 	open := testConfig(t)
 	sealedSlot(t, open.dir, k)
 	must(t, os.Chmod(filepath.Join(open.dir, planSlot), 0o640))
@@ -291,11 +288,6 @@ func TestThePlanLoginIsSealedInTheClerksOwnSlot(t *testing.T) {
 	must(t, os.Symlink(filepath.Join(filepath.Dir(link.dir), planSlot), filepath.Join(link.dir, planSlot)))
 	if err := refused(t, link, k); err == nil {
 		t.Error("a slot that is a link opened")
-	}
-	big := testConfig(t)
-	must(t, os.WriteFile(filepath.Join(big.dir, planSlot), make([]byte, maxPlanSlot+1), 0o600))
-	if err := refused(t, big, k); !errors.Is(err, errSlotTooLarge) {
-		t.Errorf("an oversized slot: %v", err)
 	}
 }
 
@@ -335,6 +327,47 @@ func TestTheModelProcessLinksNoMainSideCode(t *testing.T) {
 			if dep == b+no || strings.HasPrefix(dep, b+no+"/") {
 				t.Errorf("the model clerk's process links %s", dep)
 			}
+		}
+	}
+}
+
+// CLK-1, OWN-17 (#3568 UX 1): a slot whose value does not open (sealed
+// under another key, damaged, or oversized) is never opened, and the clerk
+// starts signed out rather than refusing every start, so the owner's
+// planremove and sign-in stay reachable. The owner's next write replaces
+// the slot, and a start after it opens the slot under this key.
+func TestAnUnopenableSlotStartsSignedOut(t *testing.T) {
+	k := [32]byte{7}
+	for name, write := range map[string]func(dir string){
+		"another key's": func(dir string) { sealedSlot(t, dir, [32]byte{8}) },
+		"damaged": func(dir string) {
+			must(t, os.WriteFile(filepath.Join(dir, planSlot), []byte("not a sealed slot"), 0o600))
+		},
+		"oversized": func(dir string) {
+			must(t, os.WriteFile(filepath.Join(dir, planSlot), make([]byte, maxPlanSlot+1), 0o600))
+		},
+	} {
+		c := testConfig(t)
+		write(c.dir)
+		before, err := os.ReadFile(filepath.Join(c.dir, planSlot))
+		must(t, err)
+		owner := running(t, c, k)
+		st, err := owner.State()
+		if err != nil || st.SignedIn || st.Stopped != "" {
+			t.Errorf("%s slot: state = %+v, %v; want signed out and not stopped", name, st, err)
+			continue
+		}
+		if after, _ := os.ReadFile(filepath.Join(c.dir, planSlot)); string(after) != string(before) {
+			t.Errorf("%s slot: changed before any write", name)
+		}
+		must(t, owner.Remove())
+		if b, err := os.ReadFile(filepath.Join(c.dir, planSlot)); err != nil || len(b) != 0 {
+			t.Errorf("%s slot: the owner's write left %d bytes, %v", name, len(b), err)
+		}
+		again := testConfig(t)
+		again.dir = c.dir
+		if st, err := running(t, again, k).State(); err != nil || st.SignedIn {
+			t.Errorf("%s slot: after the write a start reads %+v, %v", name, st, err)
 		}
 	}
 }
