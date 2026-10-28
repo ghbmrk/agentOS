@@ -274,7 +274,10 @@ func gate(t *testing.T, dir, mod string, exempt, within, inPlace map[string]stri
 				switch {
 				case im == "os/exec":
 					found = append(found, name+": imports os/exec")
-				case !cutFrom(n.path, im) && visit(im) != nil:
+				// No file a build leaves out is within a scoped
+				// exemption: a tag could add a route to it from
+				// anywhere (#3754 delta Security 1).
+				case !cutFrom("", im) && visit(im) != nil:
 					found = append(found, name+": imports "+im+", which reaches os/exec")
 				}
 			}
@@ -596,7 +599,9 @@ func TestInPlaceAllowsOneExecAndNoChild(t *testing.T) {
 
 // #3754 Security 1: an exemption scoped to one directory is cut from its
 // importers there only. An importer outside it, directly, through a
-// package outside it, or from a file no build includes, reaches os/exec.
+// package outside it, or from a file no build includes, reaches os/exec;
+// so does a tagged file under the directory, which a tagged file anywhere
+// could import (#3754 delta Security 1).
 func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 	root := fixture(t, map[string]string{
 		"go.mod":         "module example.com/m\n\ngo 1.25\n",
@@ -608,6 +613,8 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"enf/via/v.go":   "package via\nimport \"example.com/m/kernel\"\n",
 		"tag/t.go":       "package tag\n",
 		"tag/u.go":       "//go:build sometag\n\npackage tag\nimport _ \"example.com/m/enf/load\"\n",
+		"enf/wrap/w.go":  "//go:build sometag\n\npackage wrap\nimport \"example.com/m/enf/load\"\nvar L = load.Load\n",
+		"kernel/zz.go":   "//go:build sometag\n\npackage kernel\nimport _ \"example.com/m/enf/wrap\"\n",
 	})
 	got := gate(t, root, "example.com/m", map[string]string{"enf/load": "r"}, map[string]string{"enf/load": "enf"}, nil)
 	want := []string{
@@ -615,6 +622,7 @@ func TestWithinCutsOnlyForItsDirectory(t *testing.T) {
 		"example.com/m/enfx: reaches os/exec",
 		"example.com/m/enf/via: reaches os/exec (example.com/m/enf/via -> example.com/m/kernel -> example.com/m/enf/load -> os/exec)",
 		"example.com/m/tag/u.go (not built): imports example.com/m/enf/load, which reaches os/exec",
+		"example.com/m/enf/wrap/w.go (not built): imports example.com/m/enf/load, which reaches os/exec",
 	}
 	for _, w := range want {
 		if !slices.ContainsFunc(got, func(g string) bool { return strings.HasPrefix(g, w) }) {
