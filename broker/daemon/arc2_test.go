@@ -282,8 +282,10 @@ var enforcer = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"enforcer":        {nil, droneForbid},
-	"enforcer/policy": {[]string{"kernel/key"}, droneForbid},
+	"enforcer":         {nil, droneForbid},
+	"enforcer/policy":  {[]string{"kernel/key"}, droneForbid},
+	"enforcer/wire":    {nil, droneForbid},
+	"enforcer/channel": {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
 }
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
