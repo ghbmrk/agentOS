@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
 // REQ: UPD-1, UPD-1a, UPD-5, UPD-6
 //
 // Update apply, broker side (UPD-a): a verified release the change
-// pipeline staged is handed to the A/B activator by a journaled intent
-// with a rollback point, only outside a call, accepted work and the
+// pipeline staged is handed to the A/B activator by a kernel plan step
+// whose logged result is the rollback point, only outside a call, accepted work and the
 // owner's excluded hours; after the restart it is committed once the
 // health check passed, or dropped when boot counting fell back.
 
@@ -35,17 +35,18 @@ func TestSecurityFixAppliesAtTheNextQuietMomentAndCommitsAfterHealthCheck(t *tes
 	if len(r.act.installed) != 1 || r.act.installed[0] != 1 || r.act.restarts != 1 {
 		t.Fatalf("activator: %+v", r.act)
 	}
-	its := r.intents()
-	if len(its) != 1 || its[0].State != journal.Succeeded || its[0].Intent.Action != journal.ActionReleaseActivate ||
-		its[0].Intent.Origin != Origin || its[0].Intent.Account != journal.BrokerAccount {
-		t.Fatalf("intents: %+v", its)
+	ps := r.plans()
+	if len(ps) != 1 || ps[0].Status != kernel.SDone || ps[0].Plan.Steps[0].Verb != "change-account" ||
+		ps[0].Plan.Steps[0].Args[ArgRoot] != strings.Repeat("0f", 32) {
+		t.Fatalf("plans: %+v", ps)
 	}
-	// The rollback point is in the intent: the release it replaces and
-	// the one it activates, each with its /usr root hash (UPD-1a).
-	p := its[0].Intent.Params
-	if fmt.Sprint(p["from"]) != "0" || fmt.Sprint(p["to"]) != "1" ||
-		p["to_usr"] != strings.Repeat("0f", 32) || p["from_usr"] != strings.Repeat(oldHash, 32) || p["adoption"] != "a1" {
-		t.Fatalf("params: %+v", p)
+	// The rollback point is the step's logged result: the release it
+	// replaces and the one it activates, each with its /usr root hash
+	// (UPD-1a, UPD-6).
+	want := fmt.Sprintf("rollback point: release 0 on root %s; activating release 1 on root %s",
+		strings.Repeat(oldHash, 32), strings.Repeat("0f", 32))
+	if d := ps[0].Steps[0].Detail; d != want {
+		t.Fatalf("logged result %q, want %q", d, want)
 	}
 	if st, ok, _ := r.store.Staged(); !ok || st.Version != 1 {
 		t.Fatal("not staged before the restart")
@@ -109,22 +110,19 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 		}
 		c.set(false)
 	}
-	if len(r.act.installed) != 0 || len(r.intents()) != 0 {
+	if len(r.act.installed) != 0 || len(r.plans()) != 0 {
 		t.Fatal("handed over while busy")
 	}
-	// A call that starts between the check and dispatch stops it.
-	id := r.a.nextID(1)
-	in, err := r.a.intent(ctx, id)
-	r.must(err)
-	if _, err := r.eng.Submit(in); err != nil {
-		t.Fatal(err)
+	// A call that starts between the submission and the dispatch stops
+	// it: the clerk re-checks the box before it acts (CLK-2).
+	r.hold = true
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("held tick: %v %v", ok, err)
 	}
-	if _, err := r.eng.Authorize(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	r.inCall = true
-	if st, _ := r.eng.Dispatch(ctx, id); st.State == journal.Succeeded || len(r.act.installed) != 0 {
-		t.Fatalf("dispatched during a call: %s", st.State)
+	r.hold, r.inCall = false, true
+	r.tick()
+	if ps := r.plans(); len(ps) != 1 || ps[0].Status != kernel.SFailed || len(r.act.installed) != 0 {
+		t.Fatalf("dispatched during a call: %+v", ps)
 	}
 	r.inCall = false
 	if ok, err := r.a.Tick(ctx); !ok || err != nil {
@@ -180,7 +178,7 @@ func TestWaitingForItsMomentSaysSoon(t *testing.T) {
 // UPD-1: a release that fails its health check falls back by boot
 // counting with no owner action; the box drops the staged release and
 // reverts the adoption, and rewinds nothing that lives outside the image:
-// the journal, root metadata (key revocations), the installed record.
+// the kernel log, root metadata (key revocations), the installed record.
 func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -191,7 +189,7 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); !ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	before := len(r.eng.List())
+	before := len(r.k.Log().Entries())
 	r.restart()
 	r.must(r.a.Resume(ctx))
 	if len(r.pipe.failed) != 1 || r.pipe.failed[0] != "a1" || len(r.pipe.confirmed) != 0 {
@@ -206,8 +204,8 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(r.store.Dir, "root.json")); !bytes.Equal(b, root) {
 		t.Fatal("root metadata rewound")
 	}
-	if its := r.intents(); len(its) != 1 || its[0].State != journal.Succeeded || len(r.eng.List()) != before {
-		t.Fatalf("journal changed: %+v", its)
+	if ps := r.plans(); len(ps) != 1 || ps[0].Status != kernel.SDone || len(r.k.Log().Entries()) != before {
+		t.Fatalf("kernel log changed: %+v", ps)
 	}
 	// UX-133-2: in STATUS until the next update installs, and once in
 	// the digest.
@@ -251,19 +249,11 @@ func TestResumeBeforeTheRestartJudgesNothing(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	r.act.installErr = nil
-	id := r.a.nextID(1)
-	in, err := r.a.intent(ctx, id)
-	r.must(err)
-	if _, err := r.eng.Submit(in); err != nil {
-		t.Fatal(err)
+	r.act.restartErr = errors.New("no restart yet")
+	if ok, err := r.a.Tick(ctx); !ok || err == nil || len(r.act.installed) != 1 {
+		t.Fatalf("not handed over: %v %v", ok, err)
 	}
-	if _, err := r.eng.Authorize(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	if st, err := r.eng.Dispatch(ctx, id); err != nil || st.State != journal.Succeeded {
-		t.Fatalf("%s %v", st.State, err)
-	}
+	r.act.restartErr = nil
 	r.restart() // the broker restarted, the box did not
 	r.must(r.a.Resume(ctx))
 	if len(r.pipe.failed)+len(r.pipe.confirmed) != 0 {
@@ -291,7 +281,7 @@ func TestInstallFailureStagesNothingAndRetries(t *testing.T) {
 	}
 }
 
-// A failed install's error can name a host path. The journal evidence must not.
+// A failed install's error can name a host path. The logged result must not.
 func TestAFailedInstallRecordsNoHostPath(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
@@ -301,37 +291,19 @@ func TestAFailedInstallRecordsNoHostPath(t *testing.T) {
 	if ok, _ := r.a.Tick(ctx); ok {
 		t.Fatal("installed")
 	}
-	its := r.intents()
-	if len(its) != 1 || len(its[0].Attempts) == 0 {
-		t.Fatalf("intents %+v", its)
+	ps := r.plans()
+	if len(ps) != 1 || ps[0].Status != kernel.SFailed {
+		t.Fatalf("plans %+v", ps)
 	}
-	ev := its[0].Attempts[len(its[0].Attempts)-1].Evidence
+	ev := ps[0].Steps[0].Detail
 	if strings.Contains(ev, canary) || strings.Contains(ev, "/var/") {
 		t.Fatalf("evidence %q", ev)
 	}
 }
 
-// Only the applier's own intent, for the release it holds, passes.
-func TestCheckAllowsOnlyTheScheduledRelease(t *testing.T) {
+func TestScheduleRefusesAnUnverifiedRelease(t *testing.T) {
 	r := newRig(t)
-	ctx := context.Background()
-	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	good, err := r.a.intent(ctx, r.a.nextID(1))
-	r.must(err)
-	if err := r.a.Check(ctx, journal.PhaseAuthorize, good); err != nil {
-		t.Fatal(err)
-	}
-	bad := []journal.Intent{good, good, good, good, good}
-	bad[0].Origin = "owner"
-	bad[1].Origin = "guest:m1"
-	bad[2].Action = "meta.loops.on"
-	bad[3].ID = "upd:apply:2:n1"
-	bad[4].Account = "mail"
-	for _, in := range bad {
-		if err := r.a.Check(ctx, journal.PhaseAuthorize, in); err == nil {
-			t.Fatalf("allowed %+v", in)
-		}
-	}
+	r.release(1, true)
 	if err := r.a.Schedule(nil, "a0"); err == nil {
 		t.Fatal("scheduled an unverified release")
 	}
@@ -405,18 +377,12 @@ func TestBrokerStoppedBeforeTheRestartRestartsLater(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, false), "a1"))
-	id := r.a.nextID(1)
-	in, err := r.a.intent(ctx, id)
-	r.must(err)
-	if _, err := r.eng.Submit(in); err != nil {
-		t.Fatal(err)
+	r.clk.add(6 * time.Hour) // past its jitter
+	r.act.restartErr = errors.New("stopped")
+	if ok, err := r.a.Tick(ctx); !ok || err == nil || len(r.act.installed) != 1 {
+		t.Fatalf("not handed over: %v %v", ok, err)
 	}
-	if _, err := r.eng.Authorize(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	if st, err := r.eng.Dispatch(ctx, id); err != nil || st.State != journal.Succeeded {
-		t.Fatalf("%s %v", st.State, err)
-	}
+	r.act.restartErr = nil
 	r.restart() // the broker stopped before restarting the box
 	r.must(r.a.Resume(ctx))
 	r.working = true
@@ -501,20 +467,24 @@ func TestStopHoldsTheHandover(t *testing.T) {
 	}
 }
 
-// Reconcile answers a replayed activation from saved state.
-func TestReconcileAfterReplay(t *testing.T) {
+// Probe answers a lost activation from saved state after a process
+// restart: done once the activator took it, notdone for a plan never
+// handed over (KRN-8).
+func TestProbeAfterProcessRestart(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
+	r.act.restartErr = errors.New("stopped")
 	if ok, _ := r.a.Tick(ctx); !ok {
 		t.Fatal("not applied")
 	}
-	id := r.intents()[0].Intent.ID
+	req := kernel.Request{Plan: r.plans()[0].Plan}
 	r.restart()
-	if o := r.a.Reconcile(ctx, journal.Intent{ID: id}, 1); o.Result != journal.ResultSucceeded {
-		t.Fatalf("%s: %+v", id, o)
+	if o := r.a.Probe(req, r.k.State()); o.Outcome != "done" || o.Detail != "handed over; restart pending" {
+		t.Fatalf("%+v", o)
 	}
-	if o := r.a.Reconcile(ctx, journal.Intent{ID: "upd:apply:1:n99"}, 1); o.Result != journal.ResultNotApplied {
+	req.Plan.ID = "upd:apply:1:n99"
+	if o := r.a.Probe(req, r.k.State()); o.Outcome != "notdone" {
 		t.Fatalf("unknown attempt: %+v", o)
 	}
 	if !strings.Contains(r.a.Status(), "installing") {

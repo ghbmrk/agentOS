@@ -9,7 +9,7 @@ import (
 
 // SR3-4f-r1-f2: when no apply is in flight and the box runs another root
 // than the update store's installed release, STATUS says the box runs the
-// previous version, with no restart promise: Execute's save before Stage
+// previous version, with no restart promise: execute's save before Stage
 // ended the other-root promise, so a later release that fails, falls back
 // or is withdrawn must not leave the owner told nothing.
 

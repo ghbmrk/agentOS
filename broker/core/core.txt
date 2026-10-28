@@ -166,10 +166,8 @@ allow clerk/inbox/cmd/slice clerk/inbox.* -- the eval runner builds the mail cle
 # Authorize and Dispatch move an intent the caller already submitted through
 # the gate's policy and the journal's dispatch; they run nothing the journal
 # did not judge.
-allow apply journal.Engine.Authorize -- apply.Journal moves the change intent it submitted through policy
-allow apply journal.Engine.Dispatch -- apply.Journal dispatches the change intent it submitted once authorized
-allow apply grants.Gate.Authorize -- apply.Journal is the grants gate on the box; same as journal.Engine.Authorize
-allow apply grants.Gate.Dispatch -- apply.Journal is the grants gate on the box; same as journal.Engine.Dispatch
+allow apply kernel.SignPlan -- the update clerk signs its one activate plan as holder of the image-pinned update key (#3423 decision 2); the kernel admits it and the clerk re-checks it before it acts
+allow apply kernel.Kernel.Submit -- apply.Kernel submits the activate plan; the kernel decides it and dispatches it back to the clerk, which re-checks it (CLK-2)
 allow change journal.Engine.Authorize -- change.Journal (also loops.Journal) moves the intent it submitted through policy
 allow change journal.Engine.Dispatch -- change.Journal (also loops.Journal) dispatches the intent it submitted once authorized
 allow change grants.Gate.Authorize -- change.Journal is the grants gate on the box; same as journal.Engine.Authorize
