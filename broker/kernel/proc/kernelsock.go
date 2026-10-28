@@ -195,8 +195,37 @@ type (
 		Recipient []byte `json:"recipient"`
 		Approval  []byte `json:"approval"`
 	}
+	// edgeArgs is an edge key: the one the link asks about or the owner
+	// cuts.
+	edgeArgs struct {
+		Key ed25519.PublicKey `json:"key"`
+	}
+	// edgeEnrollArgs is the page step's enrolment: the candidate's key and
+	// a hardware key's signature over kernel.EdgeEnrollHash.
+	edgeEnrollArgs struct {
+		Key    ed25519.PublicKey `json:"key"`
+		Cosign key.Cosign        `json:"cosign"`
+	}
+	// candidateArgs is a hello the link read: the edge's key, the
+	// connection's exporter value and the key's signature over HelloMsg.
+	candidateArgs struct {
+		Key   ed25519.PublicKey `json:"key"`
+		Nonce []byte            `json:"nonce"`
+		Sig   []byte            `json:"sig"`
+	}
+	signArgs struct {
+		Msg []byte `json:"msg"`
+	}
 	none struct{}
 )
+
+// EdgeKey is what the log says of an edge key now: Live, the core serves
+// it; Revoked, it was revoked or replaced in this log, so its hello is
+// dropped (EDGE-link-core decision 5).
+type EdgeKey struct {
+	Live    bool `json:"live"`
+	Revoked bool `json:"revoked"`
+}
 
 // OwnerSide is the owner side's table (sub B: owner, localui, localsrv,
 // control, question, cmd/agentosd): the owner seam's actions and its reads.
@@ -247,6 +276,11 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return taskRead{}
 	}),
 	"untarget": act(func(k *kernel.Kernel, now int64, a untargetArgs) error { return k.Untarget(now, a.Name) }),
+
+	// The edge (HW-15): the page step enrols the candidate the link port
+	// logged, on a hardware key's signature, and the owner cuts an edge.
+	"edgeenroll": act(func(k *kernel.Kernel, now int64, a edgeEnrollArgs) error { return k.EdgeEnroll(now, a.Key, a.Cosign) }),
+	"edgerevoke": act(func(k *kernel.Kernel, now int64, a edgeArgs) error { return k.EdgeRevoke(now, a.Key) }),
 
 	// Erase by name (LOG-4, KRN-forget): IDs, counts and stores cross, never
 	// sealed plaintext. No side has a read of content (CH-25).
@@ -353,6 +387,38 @@ var MeterSide = Side{name: "meter", ops: map[string]op{
 	"readpool": act(func(k *kernel.Kernel, now int64, a poolArgs) error {
 		return k.ReadPool(now, a.Pool, a.Used, a.ResetAt)
 	}),
+}}
+
+// LinkSide is agentos-link's table (EDGE-link-core c2b, #3458): the core's
+// link key, which never leaves this process, signs the link's TLS
+// handshakes; the link asks what the log says of each edge key and reports
+// the hellos it reads. Its socket admits the link's uid alone, so a
+// candidate the page step can enrol came from the link port and nowhere
+// else (decision 8), and no other side has a link call.
+var LinkSide = Side{name: "link", ops: map[string]op{
+	"edgekey": func(k *kernel.Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a edgeArgs
+		// A key of any other length is never live: an empty one would
+		// equal no live edge.
+		if err := json.Unmarshal(raw, &a); err != nil || len(a.Key) != ed25519.PublicKeySize {
+			return nil, ErrArgs
+		}
+		return EdgeKey{Live: k.LiveEdge().Equal(a.Key), Revoked: k.State().EdgeRevoked(a.Key)}, nil
+	},
+	"edgecandidate": act(func(k *kernel.Kernel, now int64, a candidateArgs) error {
+		return k.EdgeCandidate(now, a.Key, a.Nonce, a.Sig)
+	}),
+}, procOps: map[string]procOp{
+	// The link key is the kernel process's, not the kernel's: these
+	// take no lock.
+	"linkkey": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) { return h.LinkKey() },
+	"linksign": func(h *Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a signArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		return h.LinkSign(a.Msg)
+	},
 }}
 
 // ListenKernel opens one side's socket on the kernel process, admitting only
@@ -526,6 +592,8 @@ func init() {
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
 		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired,
+		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
+		ErrNoLinkKey, ErrLinkSign,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
@@ -723,6 +791,17 @@ func (o Owner) Task(id string) (kernel.Task, bool, error) {
 // kernel.BackupTargetHash.
 func (o Owner) BackupTarget(t kernel.BackupTarget, c key.Cosign) error {
 	return o.Call("backuptarget", targetArgs{t, c}, nil)
+}
+
+// EdgeEnroll makes edge, the candidate the link port logged, the live edge
+// on a hardware key's signature c over kernel.EdgeEnrollHash.
+func (o Owner) EdgeEnroll(edge ed25519.PublicKey, c key.Cosign) error {
+	return o.Call("edgeenroll", edgeEnrollArgs{edge, c}, nil)
+}
+
+// EdgeRevoke cuts edge for good, with no replacement.
+func (o Owner) EdgeRevoke(edge ed25519.PublicKey) error {
+	return o.Call("edgerevoke", edgeArgs{edge}, nil)
 }
 
 // Untarget stops new backups to a destination; its backups keep their

@@ -193,3 +193,33 @@ func TestTheKernelProcessLinksNoClerkCode(t *testing.T) {
 		}
 	}
 }
+
+// REQ: HW-15, HW-16
+// EDGE-link-core-c2b: -link-sock and -link-uid come together, the link's
+// uid is a peer the kernel refuses to run as, and it is no other peer's,
+// since its socket is the only one that logs an edge candidate. Without
+// them there is no link socket. Revert mutants: the LinkUID append to
+// Peers dropped; the shared-uid check dropped.
+func TestTheLinkSocketIsTheLinksAlone(t *testing.T) {
+	c, err := parse(good, io.Discard)
+	if err != nil || c.LinkSock != "" {
+		t.Fatalf("no link flags: %+v, %v", c.MainConfig, err)
+	}
+	link := append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "980")
+	if c, err = parse(link, io.Discard); err != nil || c.LinkSock != "/run/agentos-kernel/link.sock" || c.LinkUID != 980 || !slices.Contains(c.Peers, 980) {
+		t.Fatalf("link flags: %+v, %v", c.MainConfig, err)
+	}
+	for _, bad := range [][]string{
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock"),
+		append(slices.Clone(good), "-link-uid", "980"),
+		append(slices.Clone(good), "-link-sock", "link.sock", "-link-uid", "980"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "0"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "981"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "982"),
+		append(slices.Clone(good), "-link-sock", "/run/agentos-kernel/link.sock", "-link-uid", "984"),
+	} {
+		if _, err := parse(bad, io.Discard); err == nil {
+			t.Errorf("parse %q: accepted", bad[len(good):])
+		}
+	}
+}

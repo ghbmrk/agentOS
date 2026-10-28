@@ -6,6 +6,7 @@
 //	    -backup-dir /var/lib/agentos-kernel/backups \
 //	    -owner-sock /run/agentos-kernel/owner.sock -owner-uid 981 \
 //	    -meter-sock /run/agentos-kernel/meter.sock -meter-uid 982 \
+//	    -link-sock /run/agentos-kernel/link.sock -link-uid 980 \
 //	    -clerk exit=/run/agentos-exit/kernel.sock,983
 //
 // It opens the subject-key table in -keys-dir, sealed under the log key, so
@@ -14,6 +15,7 @@
 // backup taken before (BAK-1, LOG-4).
 // It refuses to run as root or as any peer's uid, makes itself non-dumpable,
 // serves the owner side and the model clerk's meter on their sockets, and
+// agentos-link on its own when -link-sock is given (EDGE-link-core c2b), and
 // runs plans every second. It holds no credential and never the store key.
 // Its log anchor is the TPM counter enrollment defined (LOG-2, STO-1): the
 // signed head lives in -anchor-dir and the counter numbers its writes, so a
@@ -30,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -91,6 +94,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.OwnerUID, "owner-uid", -1, "the owner side's uid, the only peer on owner-sock")
 	fs.StringVar(&c.MeterSock, "meter-sock", "", "the model clerk's meter socket")
 	fs.IntVar(&c.MeterUID, "meter-uid", -1, "the model clerk's uid, the only peer on meter-sock")
+	fs.StringVar(&c.LinkSock, "link-sock", "", "agentos-link's socket; none without it")
+	fs.IntVar(&c.LinkUID, "link-uid", -1, "agentos-link's uid, the only peer on link-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
@@ -112,10 +117,22 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-up must be an absolute path")
 	case c.OwnerUID <= 0 || c.MeterUID <= 0:
 		return c, errors.New("-owner-uid and -meter-uid are required, and never root")
+	case (c.LinkSock == "") != (c.LinkUID == -1):
+		return c, errors.New("-link-sock and -link-uid come together")
+	case c.LinkSock != "" && (!filepath.IsAbs(c.LinkSock) || c.LinkUID <= 0):
+		return c, errors.New("-link-sock is an absolute path and -link-uid never root")
 	}
 	c.Peers = []int{c.OwnerUID, c.MeterUID}
 	for _, r := range c.Clerks {
 		c.Peers = append(c.Peers, r.UID)
+	}
+	if c.LinkSock != "" {
+		// The link socket admits the link's uid alone: a peer sharing it
+		// could log a candidate the page step enrols (decision 8).
+		if slices.Contains(c.Peers, c.LinkUID) {
+			return c, errors.New("-link-uid is agentos-link's own, no other peer's")
+		}
+		c.Peers = append(c.Peers, c.LinkUID)
 	}
 	return c, nil
 }

@@ -82,8 +82,8 @@ type Kernel struct {
 	// Set at open and never changed, so it is read without the lock.
 	page *pageca.Authority
 	// firstEdge and link are KernelConfig's, set at open and never
-	// changed. Nothing reads link yet: the link's handshake signer is
-	// EDGE-link-core-c2's, and it never goes into a backup (BAK-1).
+	// changed, so link is read without the lock: only LinkSide's
+	// linksign signs with it, and it never goes into a backup (BAK-1).
 	firstEdge ed25519.PublicKey
 	link      ed25519.PrivateKey
 	clock     func() int64 // KernelConfig's
