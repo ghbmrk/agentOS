@@ -9,9 +9,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/card"
@@ -190,21 +192,34 @@ func TestTakeFactorsAnswers(t *testing.T) {
 }
 
 // No factor, nor any part of a request, reaches the journal or the answer,
-// on any path.
+// on any path. The answer is a fixed word (checked equal); the journal is
+// checked for each whole factor, and for each passphrase word and key group
+// once its fixed reasons are cut out, since a short word such as "kept" or
+// "open" can be both a card word and a reason's (#3556).
 func TestTakeFactorsNeverLogsAFactor(t *testing.T) {
 	cd, other := newCard(t), newCard(t)
 	canaries := []string{cd.VaultPassphrase, card.Normalize(cd.RecoveryKey), hex.EncodeToString(get(card.StoreRecoveryKey(cd.RecoveryKey)))}
-	canaries = append(canaries, strings.Fields(cd.VaultPassphrase)...)
-	canaries = append(canaries, strings.Split(cd.RecoveryKey, "-")...)
-	check := func(b *setupBox, req []byte, want string) {
+	parts := append(strings.Fields(cd.VaultPassphrase), strings.Split(cd.RecoveryKey, "-")...)
+	reasons := []string{errBad.Error(), errAuthority.Error(), errTaken.Error(), errKept.Error()}
+	check := func(b *setupBox, req []byte, want string, more ...string) {
 		t.Helper()
 		w, j := b.ask(req)
 		if w != want {
 			t.Fatalf("answer %q, want %q: %s", w, want, j)
 		}
+		j = strings.ToLower(j)
 		for _, c := range canaries {
-			if strings.Contains(strings.ToLower(w+j), strings.ToLower(c)) {
-				t.Fatalf("a %q answer's output holds the factor %q", want, c)
+			if strings.Contains(j, strings.ToLower(c)) {
+				t.Fatalf("a %q answer's journal holds the factor %q", want, c)
+			}
+		}
+		rest := j
+		for _, r := range append(reasons, more...) {
+			rest = strings.ReplaceAll(rest, strings.ToLower(r), "")
+		}
+		for _, c := range parts {
+			if strings.Contains(rest, strings.ToLower(c)) {
+				t.Fatalf("a %q answer's journal holds the factor part %q: %s", want, c, j)
 			}
 		}
 	}
@@ -217,7 +232,7 @@ func TestTakeFactorsNeverLogsAFactor(t *testing.T) {
 	// A setup directory that cannot take the files: no word, a fixed reason.
 	e := newSetupBox(t)
 	e.c.setupDir = filepath.Join(t.TempDir(), "missing")
-	check(e, setupRequestFor(cd, e.fp), "")
+	check(e, setupRequestFor(cd, e.fp), "", (&fs.PathError{Op: "open", Path: e.c.setupDir, Err: syscall.ENOENT}).Error())
 	// A store that this card opens, and one it does not.
 	s := newSetupBox(t)
 	st := get(seal.Create(s.c.storePath(), seal.Recovery{Key: get(card.StoreRecoveryKey(other.RecoveryKey))}))
