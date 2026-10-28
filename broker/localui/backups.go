@@ -265,7 +265,7 @@ func init() {
 <h2>Where backups go</h2>
 {{range .Choice.Places}}<p><strong>{{.Name}}</strong> <span class="mono">{{.Locator}}</span><br><span class="muted">{{if .AppendOnly}}keeps old copies{{else}}keeps no old copies{{end}}; {{if .Newest}}newest checked backup {{backupday .Newest}}{{else}}no checked backup yet{{end}}</span></p>
 <form method="post" action="/backups/"><input type="hidden" name="step" value="remove"><input type="hidden" name="name" value="{{.Name}}"><button class="plain">Stop backups here</button></form>{{else}}<p>No backup: I hold the only copy of your data.</p>{{end}}
-{{if .Choice.NoKey}}<p class="muted">I have no backup key yet, so no backup can start until your recovery key is replaced.</p>{{end}}
+{{if .Choice.NoKey}}<p class="muted">I have no backup key yet, so no backup can start until you <a href="/recovery/">replace your recovery key</a>.</p>{{end}}
 <h2>Add a second drive</h2>
 <p>Plug a drive into me, then name it and give the folder on it. Your hardware key signs the place before I send anything there.</p>
 <form method="post" action="/backups/"><input type="hidden" name="step" value="begin">

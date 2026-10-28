@@ -120,7 +120,9 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	v5 := bytes.Clone(good)
 	v5[len(handoffTag)-2] = '5' // a v5 hand-off, which carried no link key, first edge or slot
 	v6 := bytes.Clone(good)
-	v6[len(handoffTag)-2] = '6'                          // a v6 hand-off, which carried no clerk root key
+	v6[len(handoffTag)-2] = '6' // a v6 hand-off, which carried no clerk root key
+	v7 := bytes.Clone(good)
+	v7[len(handoffTag)-2] = '7'                          // a v7 hand-off, which carried no new recovery key
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -150,7 +152,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "v6": v6, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "v6": v6, "v7": v7, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -686,4 +688,57 @@ func (a Approval) bodyUnchecked() []byte {
 		a.Route = "\x00"
 	}
 	return a.body()
+}
+
+// REQ: REC-4
+// The recovery key a lost-card rotation made at this boot (D-201 route B)
+// crosses whole, after the slot, and Wipe clears it; a boot with none
+// hands none. Any other length is refused at both ends. Revert mutant:
+// NewRecovery dropped from Wipe (the wipe check fails).
+func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
+	rec := bytes.Repeat([]byte{0x5a}, RecoveryLen)
+	keys := testKeys()
+	keys.NewRecovery = rec
+	b, err := keys.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := ReadKeys(pipeWith(t, b))
+	if err != nil || !bytes.Equal(k.NewRecovery, rec) || len(k.Anchors) != len(anchors) || k.Slot != SlotTPM {
+		t.Fatalf("the new recovery key did not survive the hand-off: %v", err)
+	}
+	held := k.NewRecovery
+	k.Wipe()
+	if k.NewRecovery != nil || !bytes.Equal(held, make([]byte, RecoveryLen)) {
+		t.Fatal("Wipe left the new recovery key")
+	}
+	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.NewRecovery != nil {
+		t.Fatalf("no new recovery key: %v", err)
+	}
+	// Its length sits right after the slot.
+	o := bytes.Index(b, append([]byte{byte(len(SlotTPM))}, SlotTPM...)) + 1 + len(SlotTPM)
+	if b[o] != RecoveryLen || !bytes.Equal(b[o+1:o+1+RecoveryLen], rec) {
+		t.Fatalf("new recovery key not at %d", o)
+	}
+	splice := func(skip int, with ...byte) []byte {
+		w := bytes.Clone(b[:o])
+		w = append(w, with...)
+		return append(w, b[o+skip:]...)
+	}
+	for name, w := range map[string][]byte{
+		"short": splice(1+RecoveryLen, append([]byte{RecoveryLen - 1}, rec[1:]...)...),
+		"long":  splice(1+RecoveryLen, append([]byte{RecoveryLen + 1, 0}, rec...)...),
+		"none":  b[:o],
+	} {
+		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
+			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+	for _, n := range []int{1, RecoveryLen - 1, RecoveryLen + 1} {
+		k := testKeys()
+		k.NewRecovery = make([]byte, n)
+		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
+			t.Errorf("marshal %d bytes: got %v, want ErrHandoff", n, err)
+		}
+	}
 }

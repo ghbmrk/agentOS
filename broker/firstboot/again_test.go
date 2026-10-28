@@ -3,6 +3,7 @@ package firstboot
 // REQ: HW-1, F10
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -13,8 +14,8 @@ import (
 )
 
 // After Again the step holds and shows a new card, the vault was reset
-// once, and the disk latch still reads confirmed (agentos-ap keeps the
-// card's network); the new card's confirm releases the hold.
+// once, and the disk latch still reads confirmed; the new card's confirm
+// releases the hold.
 func TestCardStepAgain(t *testing.T) {
 	b := &startBox{download: true}
 	fb, err := b.begin(t)
@@ -38,8 +39,9 @@ func TestCardStepAgain(t *testing.T) {
 		t.Fatal("no new card shown")
 	}
 	raw, _ := b.latch.Load()
-	if ok, err := CardConfirmed(raw); !ok || err != nil {
-		t.Fatalf("latch %s: %v %v", raw, ok, err)
+	var cs cardState
+	if err := json.Unmarshal(raw, &cs); err != nil || !cs.Confirmed {
+		t.Fatalf("latch %s: %v", raw, err)
 	}
 	b.confirm(t, d)
 	if fb.Card.Hold() != nil || !b.vault {

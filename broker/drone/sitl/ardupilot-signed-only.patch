@@ -1,0 +1,34 @@
+diff --git a/libraries/GCS_MAVLink/GCS_Signing.cpp b/libraries/GCS_MAVLink/GCS_Signing.cpp
+index 44396ea..9509fe0 100644
+--- a/libraries/GCS_MAVLink/GCS_Signing.cpp
++++ b/libraries/GCS_MAVLink/GCS_Signing.cpp
+@@ -108,23 +108,14 @@ void GCS_MAVLINK::handle_setup_signing(const mavlink_message_t &msg) const
+  */
+ extern "C" {
+ 
+-static const uint32_t accept_list[] = {
+-    MAVLINK_MSG_ID_RADIO_STATUS,
+-    MAVLINK_MSG_ID_RADIO
+-};
+-    
++// agentOS (broker/drone/sitl/ardupilot-signed-only.patch): once a key is
++// stored, accept no unsigned or wrongly signed frame on any channel. Stock
++// firmware accepts every frame on MAVLINK_COMM_0, which is the first port
++// whose protocol is MAVLink, and RADIO_STATUS and RADIO on every channel.
+ static bool accept_unsigned_callback(const mavlink_status_t *status, uint32_t msgId)
+ {
+-    if (status == mavlink_get_channel_status(MAVLINK_COMM_0)) {
+-        // always accept channel 0, assumed to be secure channel. This
+-        // is USB on ChibiOS boards
+-        return true;
+-    }
+-    for (uint8_t i=0; i<ARRAY_SIZE(accept_list); i++) {
+-        if (accept_list[i] == msgId) {
+-            return true;
+-        }
+-    }
++    (void)status;
++    (void)msgId;
+     return false;
+ }
+ }

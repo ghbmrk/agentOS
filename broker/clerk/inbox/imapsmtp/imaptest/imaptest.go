@@ -132,10 +132,11 @@ func Run() (*Server, func(), error) {
 		"Sent": imap.SentAttr, "Trash": imap.TrashAttr, "Junk": imap.JunkAttr} {
 		s.boxes[name] = &box{name: name, attr: attr, next: 1, validity: 1}
 	}
-	il, err := net.Listen("tcp", "127.0.0.1:0")
+	tl, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, err
 	}
+	il := &listener{Listener: tl, conns: map[net.Conn]bool{}}
 	srv := server.New(&be{s})
 	srv.AllowInsecureAuth = true
 	srv.ErrorLog = discard{}
@@ -143,12 +144,74 @@ func Run() (*Server, func(), error) {
 	go srv.Serve(il)
 	sl, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		il.stop()
 		srv.Close()
 		return nil, nil, err
 	}
 	go s.serveSMTP(sl)
 	s.IMAP, s.SMTP = il.Addr().String(), sl.Addr().String()
-	return s, func() { srv.Close(); sl.Close() }, nil
+	return s, func() { il.stop(); srv.Close(); sl.Close() }, nil
+}
+
+// listener is the IMAP listener. go-imap's Server.Close closes each session
+// without its lock, racing a LOGIN still being handled (#3595), and misses a
+// listener Serve has not yet registered, so the stop ends every session
+// here first and waits until go-imap has let each go.
+type listener struct {
+	net.Listener
+	mu     sync.Mutex
+	closed bool
+	conns  map[net.Conn]bool
+	wg     sync.WaitGroup
+}
+
+func (l *listener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		c.Close()
+		return nil, net.ErrClosed
+	}
+	l.conns[c] = true
+	l.wg.Add(1)
+	return &session{Conn: c, l: l}, nil
+}
+
+// stop closes the listener and every session's socket, then waits for
+// go-imap to close each session, which it does once the session's serving
+// goroutine has stopped handling commands.
+func (l *listener) stop() {
+	l.mu.Lock()
+	l.closed = true
+	l.Listener.Close()
+	for c := range l.conns {
+		c.Close()
+	}
+	l.mu.Unlock()
+	l.wg.Wait()
+}
+
+// session is an accepted IMAP connection. go-imap calls its Close when the
+// session ends.
+type session struct {
+	net.Conn
+	l    *listener
+	once sync.Once
+}
+
+func (c *session) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() {
+		c.l.mu.Lock()
+		delete(c.l.conns, c.Conn)
+		c.l.mu.Unlock()
+		c.l.wg.Done()
+	})
+	return err
 }
 
 // AddFolder adds a folder with a special-use attribute (or none).

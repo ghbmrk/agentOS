@@ -382,6 +382,19 @@ func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int6
 			}
 		}
 	}
+	// A restore can bring back an item whose erase was confirmed after the
+	// backup was taken: it is deleted again before any read.
+	for _, st := range k.s.subjects {
+		for _, it := range st.items {
+			if cs := stores[it.Store]; st.erased && st.confirmed[it.Store] && cs != nil {
+				if _, err := cs.Get(it.Hash); !errors.Is(err, ErrItem) {
+					if err := cs.Delete(it.Hash); err != nil {
+						return ContentReport{}, err
+					}
+				}
+			}
+		}
+	}
 	for _, sub := range k.s.liveSubjects() {
 		dk, ok, err := keys.Get(sub)
 		if err != nil {

@@ -216,6 +216,11 @@ func TestStartRefusesRootAndRelativePaths(t *testing.T) {
 		{Path: "true", Socket: "/run/x/s", UID: 1, GID: 1},
 		{Path: "/bin/true", Socket: "s", UID: 1, GID: 1},
 		{Path: "/bin/true", Socket: "/run/x/s", UID: 1, GID: 1, Backoff: Backoff{Min: 2, Max: 1}},
+		// A control socket beside the listener only, never elsewhere or on it.
+		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/y/c", UID: 1, GID: 1},
+		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/x/s", UID: 1, GID: 1},
+		{Path: "/bin/true", Socket: "/run/x/s", Control: "c", UID: 1, GID: 1},
+		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/x/./s", UID: 1, GID: 1},
 	} {
 		if s, err := Start(ctx, o); err == nil {
 			t.Errorf("Start(%+v) succeeded", o)
@@ -679,4 +684,26 @@ func (l lockedWriter) Write(b []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(b)
+}
+
+// A supervisor started with a Name says it in its lines (VIS-svc).
+func TestSupervisorLogNamesTheService(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	s := newSupervisor(Options{Name: "vision", Backoff: Backoff{Min: time.Millisecond, Max: time.Millisecond, Reset: time.Hour},
+		Log: lockedWriter{&mu, &buf}})
+	ctx, cancel := context.WithCancel(context.Background())
+	n := 0
+	go s.loop(ctx, func(context.Context) string {
+		if n++; n == 2 {
+			cancel()
+		}
+		return "exited"
+	})
+	<-s.Done()
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.HasPrefix(buf.String(), "vision: service stopped (exited); restart 1 in ") {
+		t.Fatalf("log %q", buf.String())
+	}
 }

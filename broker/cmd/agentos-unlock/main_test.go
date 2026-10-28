@@ -107,10 +107,11 @@ type unlockRole struct {
 	UID, GID         int
 	PolicyKey        []byte // PKIX
 	Anchor           []byte
+	Request          string // -recovery-request
 }
 
 func (r unlockRole) Config() config {
-	c := config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, args: []string{asKernel, r.Kernel}}
+	c := config{store: r.Store, tpm: r.TPM, exec: r.Exec, uid: r.UID, gid: r.GID, request: r.Request, args: []string{asKernel, r.Kernel}}
 	if os.Geteuid() != 0 {
 		// A plain user cannot shed its supplementary groups. Every other
 		// check of the drop still runs first; as root the real drop runs.
@@ -166,6 +167,7 @@ type rig struct {
 	kernelUID, kernelG int
 	ownerUID, meterUID int
 	keys               handoff.KernelKeys // what the store derives, read through its recovery slot
+	request            string             // the unlock step's -recovery-request; "" for none
 }
 
 // newRig makes the box; putAnchors false leaves the owner's anchors out of
@@ -267,7 +269,7 @@ func testBinary(t *testing.T, dir string) string {
 func (r *rig) role(pk *ecdsa.PublicKey, anchor []byte) unlockRole {
 	der, err := x509.MarshalPKIXPublicKey(pk)
 	must(r.t, err)
-	return unlockRole{Store: r.store, TPM: r.sw.Socket(), Exec: r.bin, UID: r.kernelUID, GID: r.kernelG, PolicyKey: der, Anchor: anchor}
+	return unlockRole{Store: r.store, TPM: r.sw.Socket(), Exec: r.bin, UID: r.kernelUID, GID: r.kernelG, PolicyKey: der, Anchor: anchor, Request: r.request}
 }
 
 func (r *rig) mainConfig() proc.MainConfig {
@@ -1152,5 +1154,324 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("an anchors file in a directory others can write: %v", err)
+	}
+}
+
+// handoff.RecoveryLen is the store's recovery key length, which the hand-off
+// package states without linking the store.
+func TestRecoveryLenIsTheStores(t *testing.T) {
+	if handoff.RecoveryLen != seal.RecoveryLen {
+		t.Fatalf("handoff.RecoveryLen %d, seal.RecoveryLen %d", handoff.RecoveryLen, seal.RecoveryLen)
+	}
+}
+
+// lostRig is a box whose store holds its recovery key's backup recipient,
+// as enrollment since MIG-4-recovery-e1 leaves it, with the unlock step
+// reading the owner's lost-card request at r.request.
+func lostRig(t *testing.T) *rig {
+	t.Helper()
+	r := newRig(t, true)
+	r.request = filepath.Join(r.dir, "recovery-request")
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	must(t, err)
+	defer st.Close()
+	must(t, st.Put(handoff.RecipientEntry, recipientEntry(t, r.recovery)))
+	return r
+}
+
+// recipientEntry is rk's backup recipient in RecipientEntry's form.
+func recipientEntry(t *testing.T, rk []byte) []byte {
+	t.Helper()
+	rcp, err := backup.RecipientFor(rk)
+	must(t, err)
+	v, err := handoff.EncodeRecipient(rcp.X, rcp.EK)
+	must(t, err)
+	return v
+}
+
+// recipientWire is rk's backup recipient in the hand-off's form.
+func recipientWire(t *testing.T, rk []byte) []byte {
+	t.Helper()
+	w, err := handoff.ParseRecipient(recipientEntry(t, rk))
+	must(t, err)
+	return w
+}
+
+func recipientOf(t *testing.T, rk []byte) string {
+	t.Helper()
+	rcp, err := backup.RecipientFor(rk)
+	must(t, err)
+	return rcp.ID()
+}
+
+// lostCardApproval is the kernel's lost-card approval for the recipient
+// old, a week from now.
+func lostCardApproval(old string) handoff.Approval {
+	return handoff.Approval{Route: handoff.RouteLost, Old: old, Expires: time.Now().UnixMilli() + handoff.LostApprovalFor}
+}
+
+// ask writes a, signed with the store's head key, as the owner's request.
+func (r *rig) ask(a handoff.Approval) []byte {
+	r.t.Helper()
+	b, err := handoff.SignApproval(r.keys.Head, a)
+	must(r.t, err)
+	must(r.t, os.WriteFile(r.request, b, 0o600))
+	return b
+}
+
+// unlockOnce reboots the PC and runs the unlock step's unlock, by the
+// passphrase if pass is set, and returns what it would hand the kernel and
+// what it said on stderr.
+func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
+	r.t.Helper()
+	r.reboot()
+	role := r.role(&r.policy.PublicKey, r.anchor)
+	c := role.Config()
+	c.passphrase = pass
+	pr, pw, err := os.Pipe()
+	must(r.t, err)
+	saved := os.Stderr
+	os.Stderr = pw
+	said := make(chan string)
+	go func() { b, _ := io.ReadAll(pr); said <- string(b) }()
+	b, err := unlock(c, role.pins)
+	os.Stderr = saved
+	pw.Close()
+	out := <-said
+	if err != nil {
+		return handoff.KernelKeys{}, out, err
+	}
+	kr, kw, err := os.Pipe()
+	must(r.t, err)
+	_, err = kw.Write(b)
+	must(r.t, err)
+	kw.Close()
+	clear(b)
+	k, err := handoff.ReadKeys(kr)
+	return k, out, err
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r3, D-201 route B: on a boot that opens the tpm slot, the
+// owner's lost-card request, approved by the kernel for the store's current
+// recipient, makes a new recovery key: the old key opens nothing, the new
+// one opens the store, the store's recipient and the one handed are the new
+// key's, and the other slots are kept. The step waits for the store's lock,
+// and the request is gone once carried out. The kernel the step becomes
+// holds the key for the owner's page until the card is confirmed.
+// Revert mutants: lostCard's ReplaceAndPut writing the slot alone (the
+// recipient checks fail); takeRequest taking no lock (the wait check fails).
+func TestLostCardRequestReplacesAtBoot(t *testing.T) {
+	r := lostRig(t)
+	slots := func() []seal.SlotInfo {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		defer st.Close()
+		return st.Slots()
+	}
+	before := slots()
+	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
+
+	// Another writer holds the store's lock: the step waits for it.
+	release, err := lockStore(filepath.Dir(r.store))
+	must(t, err)
+	type result struct {
+		k   handoff.KernelKeys
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() { k, out, err := r.unlockOnce(nil); done <- result{k, out, err} }()
+	select {
+	case <-done:
+		t.Fatal("the unlock step did not wait for the store's lock")
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	res := <-done
+	k := res.k
+	if res.err != nil || len(k.NewRecovery) != seal.RecoveryLen || res.out != "" {
+		t.Fatalf("the lost-card unlock: %v, key of %d bytes, stderr %q", res.err, len(k.NewRecovery), res.out)
+	}
+	next := bytes.Clone(k.NewRecovery)
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
+		t.Fatal("the old recovery key still opens the store")
+	}
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: next})
+	must(t, err)
+	v, _, err := st.Get(handoff.RecipientEntry)
+	must(t, err)
+	after := st.Slots()
+	st.Close()
+	if !bytes.Equal(v, recipientEntry(t, next)) || !bytes.Equal(k.Recipient, recipientWire(t, next)) {
+		t.Fatal("the store's or the handed recipient is not the new key's")
+	}
+	if len(after) != len(before) {
+		t.Fatalf("slots %d, were %d", len(after), len(before))
+	}
+	for i := range after {
+		if after[i].Kind != before[i].Kind || after[i].Kind != seal.KindRecovery && after[i].ID != before[i].ID {
+			t.Fatalf("slot %d changed: %+v, was %+v", i, after[i], before[i])
+		}
+	}
+	if _, err := os.Lstat(r.request); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the request is still there: %v", err)
+	}
+	r.recovery = next
+
+	// The whole boot: the kernel holds the key until the card is confirmed.
+	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	card, err := r.owner().RecoveryCard()
+	if err != nil || len(card) != seal.RecoveryLen || bytes.Equal(card, r.recovery) {
+		t.Fatalf("the kernel's card: %v (output %s)", err, out)
+	}
+	if v, err := r.owner().Backups(); err != nil || v.Recipient != recipientOf(t, card) {
+		t.Fatalf("the kernel's recipient after the rotation: %+v, %v", v, err)
+	}
+	must(t, r.owner().RecoveryCardDone())
+	if _, err := r.owner().RecoveryCard(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+		t.Fatalf("after the confirm: %v", err)
+	}
+	r.shutdown(cmd, out)
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: card})
+	must(t, err)
+	st.Close()
+}
+
+// REQ: REC-4
+// A request that is not a lost-card approval for the store's recipient, from
+// this store's kernel and still in time, or not a plain file, changes
+// nothing: the step says so in one line and the kernel starts with the old
+// key and recipient. No request says nothing.
+// Revert mutants: the route check dropped (the card-route request
+// rotates); the Old check dropped (the stale request rotates); O_NOFOLLOW
+// dropped (the link rotates); the one-recovery-slot check weakened to none
+// (a store with two recovery slots has one replaced).
+func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
+	r := lostRig(t)
+	old := recipientOf(t, r.recovery)
+	_, other, err := ed25519.GenerateKey(nil)
+	must(t, err)
+	valid := func() []byte {
+		b, err := handoff.SignApproval(r.keys.Head, lostCardApproval(old))
+		must(t, err)
+		return b
+	}
+	sign := func(k ed25519.PrivateKey, a handoff.Approval) []byte {
+		b, err := handoff.SignApproval(k, a)
+		must(t, err)
+		return b
+	}
+	card := lostCardApproval(old)
+	card.Route, card.Next, card.Expires = handoff.RouteCard, recipientOf(t, bytes.Repeat([]byte{9}, 32)), time.Now().UnixMilli()+handoff.CardApprovalFor
+	expired := lostCardApproval(old)
+	expired.Expires = time.Now().UnixMilli() - 1
+	stale := lostCardApproval(recipientOf(t, bytes.Repeat([]byte{8}, 32)))
+	preE1 := lostCardApproval("")
+	forged := valid()
+	forged[len(forged)-1] ^= 1
+	for name, put := range map[string]func(){
+		"card route":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, card), 0o600)) },
+		"expired":      func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, expired), 0o600)) },
+		"stale":        func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, stale), 0o600)) },
+		"pre-e1 old":   func() { must(t, os.WriteFile(r.request, sign(r.keys.Head, preE1), 0o600)) },
+		"other kernel": func() { must(t, os.WriteFile(r.request, sign(other, lostCardApproval(old)), 0o600)) },
+		"forged":       func() { must(t, os.WriteFile(r.request, forged, 0o600)) },
+		"oversized":    func() { must(t, os.WriteFile(r.request, append(valid(), make([]byte, maxRequest)...), 0o600)) },
+		"symlinked": func() {
+			target := filepath.Join(r.dir, "elsewhere")
+			must(t, os.WriteFile(target, valid(), 0o600))
+			must(t, os.Symlink(target, r.request))
+		},
+		"fifo":      func() { must(t, syscall.Mkfifo(r.request, 0o600)) },
+		"directory": func() { must(t, os.Mkdir(r.request, 0o700)) },
+	} {
+		os.RemoveAll(r.request)
+		put()
+		was, err := os.ReadFile(r.store)
+		must(t, err)
+		k, out, err := r.unlockOnce(nil)
+		now, rerr := os.ReadFile(r.store)
+		must(t, rerr)
+		if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, r.recovery)) || !bytes.Equal(was, now) {
+			t.Errorf("%s: %v, new key %v, store changed %v", name, err, k.NewRecovery != nil, !bytes.Equal(was, now))
+		}
+		if strings.Count(out, "\n") != 1 || !strings.Contains(out, "lost-card request") {
+			t.Errorf("%s: stderr %q, want one line on the request", name, out)
+		}
+	}
+	os.RemoveAll(r.request)
+	if k, out, err := r.unlockOnce(nil); err != nil || k.NewRecovery != nil || out != "" {
+		t.Fatalf("no request: %v, new key %v, stderr %q", err, k.NewRecovery != nil, out)
+	}
+
+	// The kernel starts on the old recipient past an expired request.
+	must(t, os.WriteFile(r.request, sign(r.keys.Head, expired), 0o600))
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	if v, err := r.owner().Backups(); err != nil || v.Recipient != old {
+		t.Fatalf("the kernel's recipient: %+v, %v", v, err)
+	}
+	if _, err := r.owner().RecoveryCard(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+		t.Fatalf("a kernel with no new key: %v", err)
+	}
+	r.shutdown(cmd, out)
+	if !strings.Contains(out.String(), "lost-card request") {
+		t.Fatalf("the boot did not say why it ignored the request:\n%s", out)
+	}
+
+	// A store holding two recovery slots, as an interrupted rotation could
+	// leave it, is refused whole: replacing one would leave the other old
+	// key opening the store.
+	two := lostRig(t)
+	st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
+	must(t, err)
+	_, err = st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
+	st.Close()
+	must(t, err)
+	two.ask(lostCardApproval(recipientOf(t, two.recovery)))
+	was, err := os.ReadFile(two.store)
+	must(t, err)
+	k, said, err := two.unlockOnce(nil)
+	now, rerr := os.ReadFile(two.store)
+	must(t, rerr)
+	if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
+		t.Errorf("two recovery slots: %v, new key %v, store changed %v", err, k.NewRecovery != nil, !bytes.Equal(was, now))
+	}
+	if strings.Count(said, "\n") != 1 || !strings.Contains(said, "lost-card request") {
+		t.Errorf("two recovery slots: stderr %q, want one line on the request", said)
+	}
+}
+
+// REQ: REC-4
+// The lost-card route runs only on a boot that opened this PC's tpm slot: a
+// store opened by a card factor has the card (route A), so a valid request
+// is left as it is and the store unchanged.
+// Revert mutant: the k.Slot == handoff.SlotTPM condition dropped (the
+// passphrase unlock rotates).
+func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
+	r := lostRig(t)
+	phrase := []byte("correct horse battery staple")
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+	must(t, err)
+	_, err = st.AddSlot(seal.Passphrase{Phrase: phrase})
+	must(t, err)
+	st.Close()
+	b := r.ask(lostCardApproval(recipientOf(t, r.recovery)))
+	was, err := os.ReadFile(r.store)
+	must(t, err)
+	k, out, err := r.unlockOnce(phrase)
+	now, rerr := os.ReadFile(r.store)
+	must(t, rerr)
+	if err != nil || k.Slot != handoff.SlotPassphrase || k.NewRecovery != nil || !bytes.Equal(was, now) || out != "" {
+		t.Fatalf("a passphrase unlock: %v, slot %q, new key %v, store changed %v, stderr %q", err, k.Slot, k.NewRecovery != nil, !bytes.Equal(was, now), out)
+	}
+	if left, err := os.ReadFile(r.request); err != nil || !bytes.Equal(left, b) {
+		t.Fatalf("the request was not left for a tpm boot: %v", err)
+	}
+	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != seal.RecoveryLen {
+		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery != nil)
 	}
 }

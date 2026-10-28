@@ -100,8 +100,7 @@ func (s *CardStep) display(gen int) (*card.Display, error) {
 // latch says confirmed (#1330): the hold refuses at once, reset runs (the
 // vault's card reset, a no-op on a vault remade empty), then a new card
 // is shown whose confirm provisions and latches as before. The disk latch
-// is kept until that confirm: agentos-ap serves the card's network while
-// it reads confirmed, and the setup network is burned (ASSUMPTIONS.md).
+// is kept until that confirm, so it still reads confirmed.
 // A failed reset shows no card and keeps the hold; RetryRerun runs it
 // again (#2362).
 func (s *CardStep) Again(reset func() error) error {

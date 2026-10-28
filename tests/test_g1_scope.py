@@ -26,8 +26,8 @@ G2 = g.GATES[0]
 # G2's binaries (header of g1_scope_g2.txt): the G1 path's, plus the key holder and the
 # release signer.
 G2_BINARIES = (
-    "agentosd", "agentos-egress", "agentos-localui", "agentos-ap", "agentos-modem",
-    "agentos-netjoin", "agentos-guest-bridge", "agentos-seller", "agentos-checker",
+    "agentosd", "agentos-egress", "agentos-localui", "agentos-modem",
+    "agentos-guest-bridge", "agentos-seller", "agentos-checker",
     "agentos-clock-boot", "agentos-hostdisk", "agentos-holder", "agentos-release",
 )
 

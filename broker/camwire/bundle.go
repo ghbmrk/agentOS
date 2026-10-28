@@ -40,9 +40,9 @@ type Bundle struct {
 	Settings Settings
 }
 
-// Bundle verification errors besides ErrMalformed and ErrAssertion.
+// Verification errors besides ErrMalformed and ErrAssertion.
 var (
-	ErrOtherNode = errors.New("camwire: bundle is for another node")
+	ErrOtherNode = errors.New("camwire: bundle or manifest is for another node")
 	ErrCounter   = errors.New("camwire: counter does not rise")
 	ErrOwner     = errors.New("camwire: bundle names another owner credential")
 )
