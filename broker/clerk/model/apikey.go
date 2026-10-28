@@ -102,6 +102,7 @@ type APIBody struct {
 	ToolsKey    string   `json:"tools_key,omitempty"`
 	ToolTypes   []string `json:"tool_types,omitempty"`
 	SourceTypes []string `json:"source_types"`
+	OpaqueKeys  []string `json:"opaque_keys,omitempty"`
 }
 
 // UsageField is one usage figure in an answer, by its path of object keys.
@@ -166,7 +167,9 @@ var (
 	hostRE   = regexp.MustCompile(`\A[a-z0-9.-]+(?::[0-9]{1,5})?\z`)
 	pathRE   = regexp.MustCompile(`\A(?:/[A-Za-z0-9._-]+)+\z`)
 	headerRE = regexp.MustCompile(`\A[A-Z][A-Za-z0-9-]{0,63}\z`)
-	keyRE    = regexp.MustCompile(`\A[\x21-\x7e]{8,512}\z`)
+	// A key is printable ASCII with no space, quote or backslash, so the
+	// clerk's own JSON encoding of an answer spells it unescaped.
+	keyRE = regexp.MustCompile(`\A[\x21\x23-\x5b\x5d-\x7e]{8,512}\z`)
 )
 
 // keyHeaders may carry the key; none is a header remotes commonly log.
@@ -323,13 +326,14 @@ func (a *APIs) refuse(detail string) error {
 }
 
 // Call runs one API call for plan on route: op names the declared operation
-// and body is its JSON. A call is private unless public says the caller's
-// values are all public (PLN-3); a private call runs only on a route the
-// owner allowed private data. It is admitted on c at its worst case (the
+// and body is its JSON. Every call is private (PLN-3: unlabelled data is
+// private, and no label the clerk can check comes with a call yet), so a
+// route whose key the owner did not allow private data refuses every call.
+// It is admitted on c at its worst case (the
 // body's bytes, or the context window if it carries content whose tokens
 // its bytes do not bound, plus its declared output cap) before anything is
 // sent, and settled with what the answer reported.
-func (a *APIs) Call(c *Clerk, now int64, plan, route, op string, body []byte, public bool) ([]byte, error) {
+func (a *APIs) Call(c *Clerk, now int64, plan, route, op string, body []byte) ([]byte, error) {
 	ar, ok := a.routes[route]
 	if !ok || !slices.ContainsFunc(ar.d.Ops, func(o APIOp) bool { return o.Name == op }) {
 		return nil, a.refuse(DUndeclared)
@@ -348,7 +352,7 @@ func (a *APIs) Call(c *Clerk, now int64, plan, route, op string, body []byte, pu
 	var u Usage
 	var callErr error
 	err := a.keys.use(ar.d.Provider, func(key []byte, private bool) error {
-		if !public && !private {
+		if !private {
 			return a.refuse(DPrivate)
 		}
 		adm, err := c.Admit(now, plan, route, in, maxOut)
@@ -356,8 +360,10 @@ func (a *APIs) Call(c *Clerk, now int64, plan, route, op string, body []byte, pu
 			return err
 		}
 		reply, u, callErr = a.send(ar, path, checked, key)
-		out := min(Count(int64(len(reply))), maxOut)
-		if merr := adm.Settle(now, u, out, callErr); merr != nil {
+		// An answer with no usage figure is charged its whole output cap:
+		// its bytes bound nothing (thinking is billed past what is shown,
+		// and some scripts run under four bytes a token).
+		if merr := adm.Settle(now, u, maxOut, callErr); merr != nil {
 			reply = nil
 			return errors.Join(callErr, merr)
 		}
@@ -426,7 +432,7 @@ func (ar apiRoute) check(body []byte) ([]byte, int64, int64, string) {
 			}
 		}
 	}
-	sourced, rule := sources(obj, b.SourceTypes, 0)
+	sourced, rule := sources(obj, b.SourceTypes, b.OpaqueKeys, 0)
 	if rule != "" {
 		return nil, 0, 0, rule
 	}
@@ -447,25 +453,33 @@ func (ar apiRoute) check(body []byte) ([]byte, int64, int64, string) {
 	return checked, in, maxOut, ""
 }
 
-// sources walks v: every object's "source" that is an object must have a
-// declared type. It reports whether any source was seen.
-func sources(v any, types []string, depth int) (bool, string) {
+// sources walks v for content blocks: an object with a string "type" is
+// one, and its "source", if any, must be an object of a declared type. The
+// values under an opaque key (a tool's input schema, a tool call's
+// arguments) are the caller's own data, which the provider fetches nothing
+// for, so they are not walked. It reports whether any source was seen.
+func sources(v any, types, opaque []string, depth int) (bool, string) {
 	if depth > maxDepth {
 		return false, ruleDepth
 	}
 	seen := false
 	switch v := v.(type) {
 	case map[string]any:
-		if s, ok := v["source"]; ok {
-			sm, ok := s.(map[string]any)
-			t, _ := sm["type"].(string)
-			if !ok || !slices.Contains(types, t) {
-				return false, ruleSource
+		if _, block := v["type"].(string); block {
+			if s, ok := v["source"]; ok {
+				sm, ok := s.(map[string]any)
+				t, _ := sm["type"].(string)
+				if !ok || !slices.Contains(types, t) {
+					return false, ruleSource
+				}
+				seen = true
 			}
-			seen = true
 		}
-		for _, e := range v {
-			s, rule := sources(e, types, depth+1)
+		for k, e := range v {
+			if slices.Contains(opaque, k) {
+				continue
+			}
+			s, rule := sources(e, types, opaque, depth+1)
 			if rule != "" {
 				return false, rule
 			}
@@ -473,7 +487,7 @@ func sources(v any, types []string, depth int) (bool, string) {
 		}
 	case []any:
 		for _, e := range v {
-			s, rule := sources(e, types, depth+1)
+			s, rule := sources(e, types, opaque, depth+1)
 			if rule != "" {
 				return false, rule
 			}
@@ -529,9 +543,8 @@ func (a *APIs) send(ar apiRoute, path string, body, key []byte) ([]byte, Usage, 
 	if err != nil || len(raw) > maxAnswer {
 		return nil, Usage{}, &APIError{DAnswer}
 	}
-	reply := Redact(raw, key)
 	var v any
-	dec := json.NewDecoder(bytes.NewReader(reply))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	if dec.Decode(&v) != nil {
 		return nil, Usage{}, &APIError{DAnswer}
@@ -539,6 +552,15 @@ func (a *APIs) send(ar apiRoute, path string, body, key []byte) ([]byte, Usage, 
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, Usage{}, &APIError{DAnswer}
 	}
+	// The answer crosses as the clerk's own encoding of what it decoded,
+	// so no escape in the provider's text can spell the key past Redact.
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) != nil {
+		return nil, Usage{}, &APIError{DAnswer}
+	}
+	reply := Redact(bytes.TrimSuffix(out.Bytes(), []byte("\n")), key)
 	return reply, ar.d.usage(v), nil
 }
 
@@ -630,7 +652,7 @@ func (a *APIs) State() ([]KeyState, error) {
 }
 
 // ErrKeyForm is a key that is not a declared provider's or not of a key's
-// form: printable ASCII with no spaces, 8 to 512 bytes.
+// form: printable ASCII with no space, quote or backslash, 8 to 512 bytes.
 var ErrKeyForm = errors.New("model: not a declared provider, or not a key's form")
 
 // SetKey stores provider's key and whether its routes may see private

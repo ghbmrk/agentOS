@@ -267,7 +267,7 @@ func TestModelCallWithAnAPIKeyReachesOnlyTheDeclaredEndpoint(t *testing.T) {
 	if err := f.apis.SetKey("anthropic", apiKeyCanary, true); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := f.m.Send("t", "anthropic-sonnet-5-5", "messages", messages("claude-sonnet-5-5", 64), false)
+	reply, err := f.m.Send("t", "anthropic-sonnet-5-5", "messages", messages("claude-sonnet-5-5", 64))
 	if err != nil || !strings.Contains(string(reply), "hello") {
 		t.Fatalf("a declared call: %s, %v", reply, err)
 	}
@@ -295,7 +295,7 @@ func TestModelCallWithAnAPIKeyReachesOnlyTheDeclaredEndpoint(t *testing.T) {
 		{"an output cap past the model's", "anthropic-sonnet-5-5", "messages", messages("claude-sonnet-5-5", 128001), model.DBody},
 		{"no output cap", "anthropic-sonnet-5-5", "messages", []byte(`{"model":"claude-sonnet-5-5","messages":[]}`), model.DBody},
 	} {
-		_, err := f.m.Send("t", c.route, c.op, c.body, false)
+		_, err := f.m.Send("t", c.route, c.op, c.body)
 		if err == nil || !strings.HasPrefix(err.Error(), "model: "+c.detail) {
 			t.Errorf("%s: %v, want %s", c.name, err, c.detail)
 		}
@@ -320,7 +320,7 @@ func TestModelCallWithAnAPIKeyReachesOnlyTheDeclaredEndpoint(t *testing.T) {
 // The positive control: the provider did echo the key.
 func TestModelReplyCarriesNoKey(t *testing.T) {
 	b64 := base64.StdEncoding.EncodeToString([]byte(apiKeyCanary))
-	var fail atomic.Bool
+	var fail, escaped atomic.Bool
 	f := newAPIFix(t, func(w http.ResponseWriter, r *http.Request) {
 		echo := r.Header.Get("X-Api-Key")
 		if echo != apiKeyCanary {
@@ -330,20 +330,38 @@ func TestModelReplyCarriesNoKey(t *testing.T) {
 			http.Error(w, `{"error":{"message":"bad key `+echo+`"}}`, 401)
 			return
 		}
+		if escaped.Load() {
+			// The same echoes, JSON-escaped: decoded, they are the key.
+			esc := `\u0073` + echo[1:]
+			fmt.Fprintf(w, `{"content":[{"type":"text","text":"%s and %s"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+				esc, strings.ReplaceAll(base64.StdEncoding.EncodeToString([]byte(echo)), "/", `\/`))
+			return
+		}
 		answer(w, "your key is "+echo+" or "+base64.StdEncoding.EncodeToString([]byte(echo)))
 	})
 	if err := f.apis.SetKey("anthropic", apiKeyCanary, true); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64), false)
+	reply, err := f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(reply), "your key is [redacted] or [redacted]") || strings.Contains(string(reply), apiKeyCanary) || strings.Contains(string(reply), b64) {
 		t.Fatalf("reply %s", reply)
 	}
+	escaped.Store(true)
+	reply, err = f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded any
+	if json.Unmarshal(reply, &decoded) != nil || strings.Contains(fmt.Sprint(decoded), apiKeyCanary) || strings.Contains(fmt.Sprint(decoded), b64) ||
+		!strings.Contains(string(reply), "[redacted] and [redacted]") {
+		t.Fatalf("an escaped echo: %s", reply)
+	}
+	escaped.Store(false)
 	fail.Store(true)
-	_, err = f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64), false)
+	_, err = f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64))
 	if err == nil || err.Error() != "model: "+model.DUpstream+" http 401" {
 		t.Fatalf("a refused key: %v", err)
 	}
@@ -355,39 +373,44 @@ func TestModelReplyCarriesNoKey(t *testing.T) {
 		t.Fatalf("the key's state carries it: %s", b)
 	}
 	// 401 is declared unbilled: metered at 0 as the provider's figure.
-	if len(f.l.amount) != 2 || f.l.amount[1] != 0 || f.l.source[1] != "provider" {
+	if len(f.l.amount) != 3 || f.l.amount[2] != 0 || f.l.source[2] != "provider" {
 		t.Fatalf("metered %v %v", f.l.amount, f.l.source)
 	}
 }
 
-// A call that does not say all its values are public is private, and a
-// private call is refused, with nothing sent or metered, on a route whose
-// key the owner did not allow private data; a public call runs there, and
-// allowing it lets the private call run (PLN-3).
+// Every call is private: no label the clerk can check comes with a call, so
+// a route whose key the owner did not allow private data refuses every
+// call, with nothing sent or metered, and allowing it lets calls run
+// (PLN-3, #3705 L3 1).
 func TestPrivateCallRefusedOnARouteNotAllowedPrivate(t *testing.T) {
 	f := newAPIFix(t, func(w http.ResponseWriter, r *http.Request) { answer(w, "ok") })
-	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), true); err == nil || err.Error() != "model: "+model.DNoKey {
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8)); err == nil || err.Error() != "model: "+model.DNoKey {
 		t.Fatalf("no key: %v", err)
 	}
 	if err := f.apis.SetKey("anthropic", apiKeyCanary, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), false); err == nil || err.Error() != "model: "+model.DPrivate {
-		t.Fatalf("a private call on a route not allowed private data: %v", err)
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8)); err == nil || err.Error() != "model: "+model.DPrivate {
+		t.Fatalf("a call on a route not allowed private data: %v", err)
+	}
+	// A frame that still claims its values are public is refused all the
+	// same: the claim is not read.
+	raw := proc.Conn{Socket: f.m.Socket, UID: os.Getuid(), Timeout: 10 * time.Second}
+	err := raw.Call("send", map[string]any{"plan": "t", "route": "anthropic-opus-5-5", "op": "messages",
+		"body": json.RawMessage(messages("claude-opus-5-5", 8)), "public": true}, nil)
+	if err == nil || err.Error() != "model: "+model.DPrivate {
+		t.Fatalf("a call claiming to be public: %v", err)
 	}
 	if f.hits.Load() != 0 || len(f.l.amount) != 0 {
 		t.Fatalf("a refused call reached the provider (%d) or was metered (%v)", f.hits.Load(), f.l.amount)
 	}
-	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), true); err != nil {
-		t.Fatalf("a public call: %v", err)
-	}
 	if err := f.apis.SetPrivate("anthropic", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), false); err != nil {
-		t.Fatalf("a private call once allowed: %v", err)
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8)); err != nil {
+		t.Fatalf("a call once allowed: %v", err)
 	}
-	if f.hits.Load() != 2 {
-		t.Fatalf("%d calls reached the provider, want 2", f.hits.Load())
+	if f.hits.Load() != 1 {
+		t.Fatalf("%d calls reached the provider, want 1", f.hits.Load())
 	}
 }

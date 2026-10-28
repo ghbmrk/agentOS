@@ -442,7 +442,7 @@ func TestServesModelCallsToThePlannerOnly(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 		m := run.Model{Conn: proc.Conn{Socket: c.modelSock, UID: os.Getuid(), Timeout: 10 * time.Second}}
-		_, err := m.Send("t", route, "messages", body, false)
+		_, err := m.Send("t", route, "messages", body)
 		if planner != os.Getuid() {
 			if err == nil || strings.HasPrefix(err.Error(), "model: ") || len(k.seen()) != 0 || dials.Load() != 0 {
 				t.Fatalf("another uid's call: %v; the meter saw %v, %d dials", err, k.seen(), dials.Load())

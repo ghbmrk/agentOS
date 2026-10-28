@@ -27,15 +27,13 @@ type modelArgs struct {
 	MaxOut int64  `json:"max_out"`
 }
 
-// sendArgs is an API-key route's call: the operation, its JSON body, and
-// whether every value in it is public (PLN-3); a call that does not say so
-// is private.
+// sendArgs is an API-key route's call: the operation and its JSON body.
+// It carries no label: every call is private (PLN-3).
 type sendArgs struct {
-	Plan   string          `json:"plan"`
-	Route  string          `json:"route"`
-	Op     string          `json:"op"`
-	Body   json.RawMessage `json:"body"`
-	Public bool            `json:"public,omitempty"`
+	Plan  string          `json:"plan"`
+	Route string          `json:"route"`
+	Op    string          `json:"op"`
+	Body  json.RawMessage `json:"body"`
 }
 
 // ModelHost is what the model socket serves: the clerk, its API-key routes
@@ -74,7 +72,7 @@ func ServeModel(ln net.Listener, h ModelHost) error {
 				if h.APIs == nil || json.Unmarshal(raw, &a) != nil {
 					return nil, errModelOp
 				}
-				reply, err := h.APIs.Call(h.Clerk, h.Clock(), a.Plan, a.Route, a.Op, a.Body, a.Public)
+				reply, err := h.APIs.Call(h.Clerk, h.Clock(), a.Plan, a.Route, a.Op, a.Body)
 				if err != nil {
 					return nil, modelError(err)
 				}
@@ -119,9 +117,8 @@ func (m Model) Call(plan, route, prompt string, maxOut int64) (reply string, err
 }
 
 // Send makes one call of a declared operation on an API-key route, with its
-// JSON body, and returns the provider's answer with the key stripped. public
-// says every value in body is public (PLN-3).
-func (m Model) Send(plan, route, op string, body []byte, public bool) (reply json.RawMessage, err error) {
-	err = m.Conn.Call("send", sendArgs{plan, route, op, body, public}, &reply)
+// JSON body, and returns the provider's answer with the key stripped.
+func (m Model) Send(plan, route, op string, body []byte) (reply json.RawMessage, err error) {
+	err = m.Conn.Call("send", sendArgs{plan, route, op, body}, &reply)
 	return
 }

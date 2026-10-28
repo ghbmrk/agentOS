@@ -13,7 +13,8 @@
       "max_out_key": "max_tokens",
       "tools_key": "tools",
       "tool_types": ["", "custom"],
-      "source_types": ["base64", "text", "content"]
+      "source_types": ["base64", "text", "content"],
+      "opaque_keys": ["input_schema", "input"]
     },
     "usage_in": [
       {"path": ["usage", "input_tokens"], "weight": 1},

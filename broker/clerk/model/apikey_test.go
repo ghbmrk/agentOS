@@ -191,11 +191,11 @@ func TestTheKeysAreSealedInTheirSlot(t *testing.T) {
 func TestAnAPICallIsAdmittedAtItsWorstCase(t *testing.T) {
 	a, c, l := apiRig(t, ok(`{"input_tokens":3,"output_tokens":4,"cache_creation_input_tokens":10,"cache_read_input_tokens":1}`), nil)
 	plain := []byte(`{"model":"m","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`)
-	if _, err := a.Call(c, 0, "t", "r", "messages", plain, false); err != nil {
+	if _, err := a.Call(c, 0, "t", "r", "messages", plain); err != nil {
 		t.Fatal(err)
 	}
 	image := []byte(`{"model":"m","max_tokens":20,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}`)
-	if _, err := a.Call(c, 0, "t", "r", "messages", image, false); err != nil {
+	if _, err := a.Call(c, 0, "t", "r", "messages", image); err != nil {
 		t.Fatal(err)
 	}
 	if len(l.admitted) != 2 || l.admitted[0] != int64(len(plain))+20 || l.admitted[1] != 5000+20 {
@@ -212,19 +212,39 @@ func TestAnAPICallIsAdmittedAtItsWorstCase(t *testing.T) {
 func TestAnAPICallIsChargedByWhetherItLeft(t *testing.T) {
 	body := []byte(`{"model":"m","max_tokens":20,"messages":[]}`)
 	a, c, l := apiRig(t, ok(`{}`), func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("refused") })
-	if _, err := a.Call(c, 0, "t", "r", "messages", body, false); !errors.Is(err, model.ErrNotSent) || len(l.metered) != 1 || l.metered[0] != 0 {
+	if _, err := a.Call(c, 0, "t", "r", "messages", body); !errors.Is(err, model.ErrNotSent) || len(l.metered) != 1 || l.metered[0] != 0 {
 		t.Fatalf("never sent: %v, metered %v", err, l.metered)
 	}
 	a, c, l = apiRig(t, func(w http.ResponseWriter, _ *http.Request) {
 		conn, _, _ := w.(http.Hijacker).Hijack()
 		conn.Close()
 	}, nil)
-	if _, err := a.Call(c, 0, "t", "r", "messages", body, false); err == nil || len(l.metered) != 1 || l.metered[0] != l.admitted[0] {
+	if _, err := a.Call(c, 0, "t", "r", "messages", body); err == nil || len(l.metered) != 1 || l.metered[0] != l.admitted[0] {
 		t.Fatalf("cut after sending: %v, metered %v of %v", err, l.metered, l.admitted)
 	}
-	// An answer that reports no usage is the clerk's own count.
+	// An answer that reports no usage is charged its whole output cap,
+	// which its bytes do not bound (#3705 L3 3).
 	a, c, l = apiRig(t, ok(`{"output_tokens":1}`), nil)
-	if _, err := a.Call(c, 0, "t", "r", "messages", body, false); err != nil || l.metered[0] >= l.admitted[0] || l.metered[0] == 0 {
+	if _, err := a.Call(c, 0, "t", "r", "messages", body); err != nil || l.metered[0] != l.admitted[0] {
 		t.Fatalf("no usage reported: %v, metered %v of %v", err, l.metered, l.admitted)
+	}
+}
+
+// A content block's source must be inline, wherever the block sits, but a
+// key named source in a tool's input schema or a tool call's arguments is
+// the caller's own data, not a source (#3705 UX 6).
+func TestOnlyContentBlocksHaveSources(t *testing.T) {
+	a, c, _ := apiRig(t, ok(`{"input_tokens":1,"output_tokens":1}`), nil)
+	for name, body := range map[string]string{
+		"a tool schema with a source property": `{"model":"m","max_tokens":8,"messages":[],"tools":[{"name":"f","input_schema":{"type":"object","properties":{"source":{"type":"string"}}}}]}`,
+		"a tool call whose input has a source": `{"model":"m","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"x","name":"f","input":{"source":{"type":"url","url":"https://x.test"}}}]}]}`,
+	} {
+		if _, err := a.Call(c, 0, "t", "r", "messages", []byte(body)); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	nested := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"x","content":[{"type":"image","source":{"type":"url","url":"https://x.test/a.png"}}]}]}]}`
+	if _, err := a.Call(c, 0, "t", "r", "messages", []byte(nested)); err == nil || err.Error() != "model: body source" {
+		t.Fatalf("an image by address inside a tool result: %v", err)
 	}
 }
