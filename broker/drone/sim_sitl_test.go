@@ -1,8 +1,11 @@
-// Package sitl starts ArduPilot Copter SITL for the drone package's tests
-// (DRONE-sim, #3516). The binary is built at the pin by build.sh and named by
-// AGENTOS_SITL_BIN, its defaults by AGENTOS_SITL_DEFAULTS; a test under the
+//go:build sitl
+
+// This file starts ArduPilot Copter SITL for the sitl-tagged tests (DRONE-sim,
+// #3516). It is a test file so that no built package starts a process (the
+// childproc gate). The binary is built at the pin by sitl/build.sh and named
+// by AGENTOS_SITL_BIN, its defaults by AGENTOS_SITL_DEFAULTS; a test under the
 // sitl build tag fails, never skips, when either is unset.
-package sitl
+package drone
 
 import (
 	"bufio"
@@ -11,7 +14,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,17 +24,16 @@ import (
 	"time"
 )
 
-// Home is the SITL start position: ArduPilot's own CMAC test site, the same
+// sitlHome is the SITL start position: ArduPilot's own CMAC test site, the same
 // synthetic place as the drone tests' policy fixture.
-const Home = "-35.363261,149.165230,584,0"
+const sitlHome = "-35.363261,149.165230,584,0"
 
-// Instance is one running SITL.
-type Instance struct {
+// simulator is one running SITL.
+type simulator struct {
 	Dir      string
 	Instance int
 
 	t      testing.TB
-	extra  []string
 	cmd    *exec.Cmd
 	exited chan struct{}
 
@@ -41,25 +42,11 @@ type Instance struct {
 	out   strings.Builder
 }
 
-// Options start an instance.
-type Options struct {
-	Instance int      // SITL -I; ports are 5760+10*Instance onwards
-	Params   []string // extra "NAME VALUE" defaults lines
-}
-
-// Start boots SITL with a wiped EEPROM in a fresh directory and waits until it
-// has bound its serial ports.
-func Start(t testing.TB, o Options) *Instance {
+// startSITL boots SITL instance 0 with a wiped EEPROM in a fresh directory and
+// waits until it has bound its serial ports.
+func startSITL(t testing.TB) *simulator {
 	t.Helper()
-	dir := t.TempDir()
-	in := &Instance{Dir: dir, Instance: o.Instance, t: t}
-	if len(o.Params) > 0 {
-		p := filepath.Join(dir, "extra.parm")
-		if err := os.WriteFile(p, []byte(strings.Join(o.Params, "\n")+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		in.extra = []string{p}
-	}
+	in := &simulator{Dir: t.TempDir(), t: t}
 	in.boot(true)
 	t.Cleanup(in.Stop)
 	return in
@@ -78,12 +65,12 @@ func binaries(t testing.TB) (bin, defaults string) {
 
 var bindLine = regexp.MustCompile(`SERIAL(\d+) on TCP port (\d+)`)
 
-func (in *Instance) boot(wipe bool) {
+func (in *simulator) boot(wipe bool) {
 	t := in.t
 	t.Helper()
 	bin, defaults := binaries(t)
-	args := []string{"--model", "+", "--speedup", "1", "-I", strconv.Itoa(in.Instance), "--home", Home,
-		"--defaults", strings.Join(append([]string{defaults}, in.extra...), ","),
+	args := []string{"--model", "+", "--speedup", "1", "-I", strconv.Itoa(in.Instance), "--home", sitlHome,
+		"--defaults", defaults,
 		"--serial0", "tcp:0", "--serial1", "tcp:2", "--serial2", "tcp:3"}
 	if wipe {
 		args = append(args, "--wipe")
@@ -141,7 +128,7 @@ func (in *Instance) boot(wipe bool) {
 }
 
 // Ports lists the TCP ports SITL bound for its serial ports, by SERIAL number.
-func (in *Instance) Ports() []int {
+func (in *simulator) Ports() []int {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	var ns []int
@@ -157,10 +144,10 @@ func (in *Instance) Ports() []int {
 }
 
 // RCPort is SITL's UDP RC input port.
-func (in *Instance) RCPort() int { return 5501 + 10*in.Instance }
+func (in *simulator) RCPort() int { return 5501 + 10*in.Instance }
 
 // Output is SITL's console so far.
-func (in *Instance) Output() string {
+func (in *simulator) Output() string {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	return in.out.String()
@@ -168,7 +155,7 @@ func (in *Instance) Output() string {
 
 // Dial connects to one of the instance's TCP ports, retrying while SITL
 // starts listening.
-func (in *Instance) Dial(port int) net.Conn {
+func (in *simulator) Dial(port int) net.Conn {
 	in.t.Helper()
 	var err error
 	for i := 0; i < 100; i++ {
@@ -185,14 +172,14 @@ func (in *Instance) Dial(port int) net.Conn {
 
 // Restart kills SITL and boots it again on the same EEPROM: the aircraft's
 // stored key, parameters, fence and rally points survive, as on a power cycle.
-func (in *Instance) Restart() {
+func (in *simulator) Restart() {
 	in.t.Helper()
 	in.Stop()
 	in.boot(false)
 }
 
 // Stop kills SITL's process group.
-func (in *Instance) Stop() {
+func (in *simulator) Stop() {
 	if in.cmd == nil || in.cmd.Process == nil {
 		return
 	}

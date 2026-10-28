@@ -20,15 +20,13 @@ import (
 	"github.com/bluenviron/gomavlib/v3/pkg/dialects/common"
 	"github.com/bluenviron/gomavlib/v3/pkg/frame"
 	"github.com/bluenviron/gomavlib/v3/pkg/message"
-
-	"github.com/ghbmrk/agentos/broker/drone/sitl"
 )
 
 // rig is one SITL aircraft with a provisioned key and a key-holder on one of
 // its ports.
 type rig struct {
 	t     *testing.T
-	sim   *sitl.Instance
+	sim   *simulator
 	key   Key
 	owner ed25519.PrivateKey
 	state string
@@ -59,7 +57,7 @@ func (s *syncBuffer) String() string {
 // there; with load, it loads the fixture policy and requires it to read back.
 func newRig(t *testing.T, load bool) *rig {
 	t.Helper()
-	sim := sitl.Start(t, sitl.Options{})
+	sim := startSITL(t)
 	ports := sim.Ports()
 	if len(ports) < 3 {
 		t.Fatalf("SITL exposes %d serial ports, want at least 3:\n%s", len(ports), sim.Output())
