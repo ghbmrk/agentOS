@@ -89,6 +89,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 **Acceptance tests:** the matrix rows marked r4a, each a test in the touched package: no keeper call and no approval before the card is confirmed; the decision-6 order, with a fake kernel and keeper; a crash between keeper and switch retries the switch; the factor never reaches a log, a file or the kernel; STATUS for a pre-e1 box names the page.
 **Needs:** r1, r2, #3406 (the card's 32-byte form), #3403 (holds the agentosd slot; D-111 serial). **Estimate:** 100k tokens.
 
+**As built (r4c, #3606):** a retry after the keeper's lost answer: `-rotate-recovery` answers `ok` and writes nothing when the store's recipient already equals the approval's `next` and `RecipientFor(next)`; when the request's factor does not open the store it tries `next` as the recovery key, so the old card's key works for the retry (ASSUMPTIONS MIG-4-recovery-r4c-1). agentosd needs no new state: the retry tap's ok keeps the switch as before.
+
 ## r4b: the lost-card page (#3410)
 
 **Scope:** owner side, the same packages as r4a: a "card lost" choice that gathers the tap over `RecoveryRotateHash(old, "")`, gets the route-B approval, writes it to the request file in agentosd's state directory, and offers the restart through the existing reboot path; after the restart, shows `recoverycard` through the card display and calls `recoverycarddone` on confirm.

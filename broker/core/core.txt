@@ -77,6 +77,9 @@ wiring cmd/agentos-clerk-mail
 # The model clerk's process (MIG-4-untrusted-exit-b2b, #2780): its key from the
 # kernel on descriptor 3, the plan login's sealed slot, and agentosd's sockets.
 wiring cmd/agentos-clerk-model
+# The device-driver host's process (DEVSLOT-drivers b2b, #3473): the image's
+# drivers.json, each driver's socket unit, and the pinned transports.
+wiring cmd/agentos-devices
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.

@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -217,6 +218,36 @@ class PremergeTest(unittest.TestCase):
         self.write("ASSUMPTIONS.md", self.UNION + "| L-1 | edge new |\n| B-1 | bak |\n" + other.replace("| L-1 | edge old |\n", ""))
         self.commit("drop both")
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    SHARED = "\n## Other\n\n| ID | B |\n|---|---|\n| F-1 | f |\n| S-1 | shared |\n| F-2 | g |\n"
+
+    def test_a_copy_of_a_repeated_row_both_sides_delete_is_same_but_an_edit_is_changed(self):
+        # #3534: copies were counted file-wide, so the copy both sides deleted read as one the union brought back.
+        far = "".join(f"| P-{i} | p |\n" for i in range(8))
+        gone = self.SHARED.replace("| S-1 | shared |\n", "")
+        reviewed = self.union_merge("| S-1 | shared |\n" + far + "| M-1 | main |\n" + gone, "| S-1 | shared |\n| L-2 | pr |\n" + far + gone,
+                                    base_rows="| S-1 | shared |\n" + far + self.SHARED)
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| S-1 |"), 1, "both sides were meant to delete one copy cleanly")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| S-1 | shared |", "| S-1 | edited |"))
+        self.commit("edit the repeated row")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_row_the_union_kept_where_merge_file_aligns_unlike_the_replay_is_changed(self):
+        # #3534: where merge-file's conflicts do not rebuild the replay, the stale rows are counted file-wide as before.
+        base = "\n| C |\nx\n| C |\n| A |\n| A |\n| D |\n\n"
+        reviewed = self.union_merge(base + "| B |\n", "\n| C |\nx\n| A |\n", base_rows=base)
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        self.setUp()  # #3587 L3: here merge-file's conflicts alone count no row, so only the replay check reads it
+        reviewed = self.union_merge("\n| A |\n| B |\n| A |\n", "\n| B |\n| A |\n", base_rows="\n| B |\n| C |\n| A |\n")
+        onto = git(self.r, "merge-base", "main", "HEAD")
+        # Which alignment each git picks varies by version (git 2.55 replays this merge without the extra row), so
+        # merge-file's clean merge and the replay that kept a second `| B |` are fixed here rather than taken from git.
+        clean = (self.UNION + "\n| A |\n| B |\n| A |\n").encode()
+        replay = (self.UNION + "\n| B |\n| A |\n| B |\n| A |\n").encode()
+        with mock.patch.object(premerge, "_merge_file", return_value=(clean, "unused")):
+            self.assertEqual(premerge._stale(self.r, replay, "ASSUMPTIONS.md", reviewed, onto), {b"| B |": 1})
+            self.assertEqual(premerge._stale(self.r, clean, "ASSUMPTIONS.md", reviewed, onto), {})
 
     def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
         # #3401 Security P6: a row the reviewer read as inert, inside an HTML comment, moved into the live table.

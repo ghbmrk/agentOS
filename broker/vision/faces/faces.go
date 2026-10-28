@@ -23,6 +23,14 @@
 // could keep an unknown face's encoding as content (ASSUMPTIONS VIS-A13).
 // Without a content seam there is no erase, so enrolment is refused
 // (ErrNoErase) and no template is written.
+//
+// Enrolment is the owner's tier-4 step (DEV-7, CH-3), and the owner's page
+// runs on the untrusted side, so this side does not take its word for it:
+// Begin names the one enrolment (id, subject, the frame's digest, the
+// consent notice and a fresh nonce) as a change for an anchor's passkey to
+// co-sign, as the kernel's BackupTarget is, and Enrol makes a template only
+// on that co-signature, once, within ApprovalTTL. Un-enrolment narrows, so
+// it needs none.
 package faces
 
 import (
@@ -30,6 +38,8 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/vision"
 )
 
@@ -70,7 +81,22 @@ const (
 	// DefaultEvery is Run's period: the longest a template outlives its
 	// subject's erase when no Rewind comes.
 	DefaultEvery = 15 * time.Minute
+	// ApprovalTTL is how long a Begin's change waits for its co-signature.
+	ApprovalTTL = 10 * time.Minute
+	// MaxPending bounds the enrolments begun and not yet signed; the
+	// oldest is dropped for a new one.
+	MaxPending = 8
 )
+
+// ConsentNotice is the page's own words before the tap (risk 23; comment
+// 6459973175 point 3). Its digest is part of what the anchor signs, but
+// this side computes that digest from the constant and the tap is blind
+// to the hash, so it pins only which notice version applied, not what
+// the page displayed. Only the page's own test, owed with the page
+// (VIS-A17), checks that the page shows it.
+const ConsentNotice = "Enrolling someone else's face may need their consent under local law. " +
+	"I keep their face template sealed until you remove them, and erasing them destroys it. " +
+	"My backups don't keep templates yet, so after a restore they show as unknown until you enrol them again."
 
 // Errors a caller tells apart.
 var (
@@ -78,6 +104,10 @@ var (
 	ErrEnrolled = errors.New("faces: that id is already enrolled")
 	ErrID       = errors.New("faces: an enrolment id is 1 to 32 of a-z, 0-9 and -")
 	ErrFull     = errors.New("faces: no room for another enrolled person")
+	// ErrApproval is an enrolment without a live anchor co-signature
+	// over the change its Begin named: none, another change's, a used or
+	// expired one, or a passkey that is not an anchor.
+	ErrApproval = errors.New("faces: face enrolment needs your approval on the local page")
 )
 
 // Faces is the enrolled templates and the seams they move through.
@@ -92,8 +122,17 @@ type Faces struct {
 	// its template out of the lend until a later one reads it.
 	Gone    func(error) bool
 	Control Control
-	// Rand draws wrap keys; nil is crypto/rand.
+	// Anchors are the owner's anchor passkeys (the kernel's
+	// State().Anchors): the only signers of an enrolment. Nil refuses
+	// every enrolment.
+	Anchors func() []key.PublicKey
+	// Rand draws wrap keys and nonces; nil is crypto/rand.
 	Rand io.Reader
+	// Now is the clock for ApprovalTTL; nil is time.Now.
+	Now func() time.Time
+
+	pmu     sync.Mutex
+	pending map[[32]byte]begun
 
 	mu   sync.Mutex // one change or lend at a time
 	lmu  sync.Mutex // lent alone, so Enrolled never waits on a lend
@@ -135,17 +174,123 @@ func templateAAD(id, subject string) []byte {
 	return []byte("agentos/vision/template/" + id + "/" + subject)
 }
 
-// Enrol makes the template of the one face in f (the service's enrol
+// begun is an enrolment Begin named, waiting for its co-signature.
+type begun struct {
+	id, subject string
+	frame       [32]byte
+	exp         time.Time
+}
+
+// EnrolHash names one enrolment as a change a passkey co-signs
+// (key.CosignMsg): the nonce, id, subject, the frame's digest and the
+// consent notice's.
+func EnrolHash(nonce [16]byte, id, subject string, frame [32]byte) [32]byte {
+	notice := sha256.Sum256([]byte(ConsentNotice))
+	h := sha256.New()
+	h.Write([]byte("agentos.vision.enrol.v1\x00"))
+	h.Write(nonce[:])
+	for _, s := range []string{id, subject} {
+		h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(s))))
+		h.Write([]byte(s))
+	}
+	h.Write(frame[:])
+	h.Write(notice[:])
+	return [32]byte(h.Sum(nil))
+}
+
+// FrameDigest is the digest of the frame the owner's page shows and the
+// anchor approves.
+func FrameDigest(fr vision.Frame) [32]byte {
+	h := sha256.New()
+	h.Write([]byte("agentos.vision.frame.v1\x00"))
+	h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(fr.Format))))
+	h.Write([]byte(fr.Format))
+	h.Write(binary.BigEndian.AppendUint32(nil, uint32(fr.Width)))
+	h.Write(binary.BigEndian.AppendUint32(nil, uint32(fr.Height)))
+	h.Write(fr.Data)
+	return [32]byte(h.Sum(nil))
+}
+
+// Begin names the enrolment of the face in frame as id, bound to subject
+// (empty opens a new one), for an anchor's passkey to co-sign: the page
+// asks for a tap over key.CosignMsg(what) after showing ConsentNotice. It
+// refuses what Enrol would refuse before any signature, so the owner is
+// not asked to approve an enrolment that cannot happen.
+func (f *Faces) Begin(id, subject string, frame vision.Frame) (what [32]byte, err error) {
+	if f.Content == nil {
+		return what, ErrNoErase
+	}
+	if !vision.ValidEnrolledID(id) {
+		return what, ErrID
+	}
+	var nonce [16]byte
+	if _, err := io.ReadFull(f.rand(), nonce[:]); err != nil {
+		return what, err
+	}
+	b := begun{id: id, subject: subject, frame: FrameDigest(frame), exp: f.now().Add(ApprovalTTL)}
+	what = EnrolHash(nonce, id, subject, b.frame)
+	f.pmu.Lock()
+	defer f.pmu.Unlock()
+	if f.pending == nil {
+		f.pending = map[[32]byte]begun{}
+	}
+	for len(f.pending) >= MaxPending {
+		var old [32]byte
+		var at time.Time
+		for w, p := range f.pending {
+			if at.IsZero() || p.exp.Before(at) {
+				old, at = w, p.exp
+			}
+		}
+		delete(f.pending, old)
+	}
+	f.pending[what] = b
+	return what, nil
+}
+
+// approved takes what's pending enrolment, once, and reports whether it
+// is this one, unexpired, and c an anchor's co-signature over it.
+func (f *Faces) approved(what [32]byte, id, subject string, frame vision.Frame, c key.Cosign) bool {
+	f.pmu.Lock()
+	b, ok := f.pending[what]
+	delete(f.pending, what)
+	f.pmu.Unlock()
+	if !ok || !f.now().Before(b.exp) || b.id != id || b.subject != subject || b.frame != FrameDigest(frame) {
+		return false
+	}
+	return f.Anchors != nil && key.In(f.Anchors(), c.By) && c.Over(what)
+}
+
+func (f *Faces) rand() io.Reader {
+	if f.Rand == nil {
+		return rand.Reader
+	}
+	return f.Rand
+}
+
+func (f *Faces) now() time.Time {
+	if f.Now == nil {
+		return time.Now()
+	}
+	return f.Now()
+}
+
+// Enrol makes the template of the one face in frame (the service's enrol
 // call) and keeps it as id's, bound to subject; an empty subject opens a
-// new one. The wrap key is sealed in the kernel before the slot is written,
-// so no slot exists whose template an erase cannot reach. It runs only
-// from the owner's tier-4 page step (part c2), never from a planner.
-func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Frame) error {
+// new one. It runs only on c, an anchor's co-signature over what, the
+// change Begin named for this id, subject and frame: the owner's tier-4
+// step, never a planner's. A what is used once, whatever the outcome. The
+// wrap key is sealed in the kernel before the slot is written, so no slot
+// exists whose template an erase cannot reach.
+func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Frame, what [32]byte, c key.Cosign) error {
 	if f.Content == nil {
 		return ErrNoErase
 	}
 	if !vision.ValidEnrolledID(id) {
 		return ErrID
+	}
+	if !f.approved(what, id, subject, frame, c) {
+		return ErrApproval
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -167,11 +312,7 @@ func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Fram
 	}
 	wk := make([]byte, 32)
 	defer clear(wk)
-	r := f.Rand
-	if r == nil {
-		r = rand.Reader
-	}
-	if _, err := io.ReadFull(r, wk); err != nil {
+	if _, err := io.ReadFull(f.rand(), wk); err != nil {
 		return err
 	}
 	h, err := f.Content.Seal(subject, WrapClass, wk)

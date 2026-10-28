@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,12 +18,14 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/vision"
 	"github.com/ghbmrk/agentos/broker/vision/faces"
 )
@@ -178,9 +182,24 @@ func newFrig(t *testing.T, open bool) *frig {
 	}
 	r.sec = clerk.NewSecrets(sealer, nil)
 	r.ctl = vision.ControlClient{Path: ctl, Timeout: 5 * time.Second}
-	r.fs = &faces.Faces{Slots: slotsOf(r.sec), Content: r.k, Gone: gone, Control: r.ctl}
+	r.fs = &faces.Faces{Slots: slotsOf(r.sec), Content: r.k, Gone: gone, Control: r.ctl, Anchors: anchors}
 	r.feed = vision.Client{Path: feed, Timeout: 5 * time.Second, Enrolled: r.fs.Enrolled}
 	return r
+}
+
+// anchor is the owner's anchor passkey, synthetic.
+var anchor = key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{9}, 32)))
+
+func anchors() []key.PublicKey { return []key.PublicKey{anchor.Public()} }
+
+// step is the owner's tier-4 step on fs: Begin, the anchor's tap over the
+// change it names, and Enrol.
+func step(fs *faces.Faces, id string, fr vision.Frame) error {
+	what, err := fs.Begin(id, "", fr)
+	if err != nil {
+		return err
+	}
+	return fs.Enrol(context.Background(), id, "", fr, what, key.Approve(anchor, what))
 }
 
 // enrol enrols the face the fake now sees as id.
@@ -189,7 +208,7 @@ func (r *frig) enrol(id string, face []float32) string {
 	r.f.mu.Lock()
 	r.f.face = face
 	r.f.mu.Unlock()
-	if err := r.fs.Enrol(context.Background(), id, "", gray(64, 48, 1)); err != nil {
+	if err := step(r.fs, id, gray(64, 48, 1)); err != nil {
 		r.t.Fatalf("enrol %s: %v", id, err)
 	}
 	return r.subject(id)
@@ -363,8 +382,9 @@ func TestCrashAfterEraseLogged(t *testing.T) {
 func TestEnrolmentRefusedWithoutErase(t *testing.T) {
 	r := newFrig(t, false) // the kernel runs, its content stays closed
 	for name, c := range map[string]faces.Content{"no seam": nil, "content closed": r.k} {
-		fs := &faces.Faces{Slots: slotsOf(r.sec), Content: c, Gone: gone, Control: r.ctl}
-		if err := fs.Enrol(context.Background(), "alice", "", gray(64, 48, 1)); !errors.Is(err, faces.ErrNoErase) {
+		fs := &faces.Faces{Slots: slotsOf(r.sec), Content: c, Gone: gone, Control: r.ctl, Anchors: anchors}
+		// With no seam Begin refuses, before any tap is asked for.
+		if err := step(fs, "alice", gray(64, 48, 1)); !errors.Is(err, faces.ErrNoErase) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if r.sec.Len() != 0 {
@@ -492,12 +512,27 @@ func TestErasedTemplateDroppedWithinTheDelay(t *testing.T) {
 }
 
 // The scan finds an encoding written out as text, as a log line would hold
-// it, and as binary; and none in text that holds no encoding.
+// it (decimal or hex floats), as binary of either byte order, and as that
+// binary in base64 or hex; and none in text that holds no encoding.
 func TestTheScanFindsAnEncoding(t *testing.T) {
+	le := leBytes(strangerFace)
+	be := make([]byte, 0, len(le))
+	for _, x := range strangerFace {
+		be = binary.BigEndian.AppendUint32(be, math.Float32bits(x))
+	}
+	hexf := make([]string, len(strangerFace))
+	for i, x := range strangerFace {
+		hexf[i] = strconv.FormatFloat(float64(x), 'x', -1, 32)
+	}
 	for _, b := range [][]byte{
 		[]byte(fmt.Sprintf("face %v\n", strangerFace)),
 		[]byte(fmt.Sprintf(`{"v":[%g,%g,%g,%g,%g,%g]}`, strangerFace[0], strangerFace[1], strangerFace[2], strangerFace[3], strangerFace[4], strangerFace[5])),
-		append([]byte("x"), leBytes(strangerFace)...),
+		[]byte("face " + strings.Join(hexf, " ")),
+		append([]byte("x"), le...),
+		append([]byte("x"), be...),
+		[]byte(`{"t":"` + base64.StdEncoding.EncodeToString(le) + `"}`),
+		[]byte("t=" + base64.RawURLEncoding.EncodeToString(append([]byte{1}, be...))),
+		[]byte("t=" + hex.EncodeToString(le)),
 	} {
 		if !near(b, strangerFace) {
 			t.Fatalf("missed in %q", b)
@@ -562,12 +597,44 @@ func leBytes(v []float32) []byte {
 }
 
 // near reports an encoding of ref in b, however it was stored: as binary
-// float32s (nearBinary) or written out as decimal numbers, as a log line
-// or JSON would hold it (nearText).
-func near(b []byte, ref []float32) bool { return nearBinary(b, ref) || nearText(b, ref) }
+// float32s of either byte order (nearBinary), those bytes in base64 or hex
+// (nearEncoded), or written out as decimal or hex-float numbers, as a log
+// line or JSON would hold it (nearText).
+func near(b []byte, ref []float32) bool {
+	return nearBinary(b, ref) || nearEncoded(b, ref) || nearText(b, ref)
+}
 
-// number is a decimal number as %v, %g, JSON or strconv writes one.
-var number = regexp.MustCompile(`-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`)
+// number is a number as %v, %g, %x, JSON or strconv writes one: decimal,
+// or a hex float (0x1.8p+01).
+var number = regexp.MustCompile(`-?(?:0[xX][0-9a-fA-F]*\.?[0-9a-fA-F]*[pP][-+]?\d+|\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`)
+
+// encoded is a run of base64 (either alphabet) or hex long enough to hold
+// a few float32s.
+var encoded = regexp.MustCompile(`[A-Za-z0-9+/_-]{8,}={0,2}`)
+
+// nearEncoded reports an encoding of ref in a base64 or hex run of b,
+// decoded from each of its first four offsets, so a run that starts
+// before the encoding's own first byte is still found.
+func nearEncoded(b []byte, ref []float32) bool {
+	for _, m := range encoded.FindAll(b, -1) {
+		s := strings.TrimRight(string(m), "=")
+		if d, err := hex.DecodeString(s[:len(s)&^1]); err == nil && nearBinary(d, ref) {
+			return true
+		}
+		for k := 0; k < 4 && k < len(s); k++ {
+			t := s[k:]
+			if len(t)%4 == 1 {
+				t = t[:len(t)-1]
+			}
+			for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+				if d, err := enc.DecodeString(t); err == nil && nearBinary(d, ref) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
 
 // nearText reports len(ref) consecutive numbers in b's text within cosine
 // 0.99 of ref.
@@ -599,15 +666,19 @@ func cosine(a, b []float32) float64 {
 	return dot / math.Sqrt(na*nb)
 }
 
-// nearBinary reports a run of little-endian float32s anywhere in b, at any
-// byte offset, within cosine 0.99 of ref, or of ref scaled (the service
-// keeps templates at unit length).
+// nearBinary reports a run of float32s, little- or big-endian, anywhere in
+// b, at any byte offset, within cosine 0.99 of ref, or of ref scaled (the
+// service keeps templates at unit length).
 func nearBinary(b []byte, ref []float32) bool {
+	return nearOrder(b, ref, binary.LittleEndian) || nearOrder(b, ref, binary.BigEndian)
+}
+
+func nearOrder(b []byte, ref []float32, order binary.ByteOrder) bool {
 	n := len(ref)
 	for off := 0; off+4*n <= len(b); off++ {
 		var dot, nv, nr float64
 		for i := range n {
-			x := float64(math.Float32frombits(binary.LittleEndian.Uint32(b[off+4*i:])))
+			x := float64(math.Float32frombits(order.Uint32(b[off+4*i:])))
 			if math.IsNaN(x) || math.IsInf(x, 0) {
 				nv = 0
 				break

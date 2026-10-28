@@ -53,13 +53,17 @@ exempt-pr 3612
 # list does not name (D-198). Remove once #3589 merges.
 exempt-pr 3589
 
-# #3596 (VIS-faces c1, #3515 part c): broker/vision/ (with the new faces/) and
-# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
-exempt-pr 3596
+# #3619 (VIS-faces c2, #3515 part c): broker/vision/ and broker/cmd/agentos-vision/, which the
+# G2 list does not name (D-198). Remove once #3619 merges.
+exempt-pr 3619
 
 # DRONE-sim part b (#3609, row #3516) touches broker/drone/ and broker/cmd/agentos-drone/, which
 # the G2 list does not name (D-198). Remove once #3609 merges.
 exempt-pr 3609
+
+# #3617 (CAM-server b2, #3513 part b): broker/camnode/ (with the new se/ and capture/) and the new
+# broker/cmd/agentos-camnode/, which the G2 list does not name (D-198). Remove once #3617 merges.
+exempt-pr 3617
 
 # Project machinery and records.
 allow .claude/
