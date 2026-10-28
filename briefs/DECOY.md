@@ -24,7 +24,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Scope:** `broker/decoy/` (new), `broker/decoy/match/` (new), `broker/browser/filter.go` (imports the moved patterns), `tools/risk_tier.py` (one line; a gate file, so this PR also owes a separate Security accept, OPERATING §7).
 **Builds:** the table (value, kind, destination, placement), its generation at first boot from the same generators that make real entries, its sealed storage and its first-boot log event (decision 3), and the matcher over bytes and destinations.
 **Acceptance tests:**
-1. KRN-12: `decoy::TestDecoyIndistinguishable`: for each kind, generated decoys and real entries pass the same format checks and a two-sample test on length and character classes finds no difference. It covers values only: destinations point into the enforcer's public range by design (SPEC KRN-12 Limit). Catches a decoy value an intruder can skip.
+1. KRN-12: `decoy::TestDecoyIndistinguishable`: for each kind, generated decoys pass an independent validator of the kind's published format (checksums included) and a two-sample test on length and character classes against a fixed corpus of synthetic, format-valid examples finds no difference. It covers values only: destinations point into the enforcer's public range by design (SPEC KRN-12 Limit). Catches a decoy value an intruder can skip.
 2. KRN-12: `decoy::TestTableSealedAndReplayed`: the table is readable only through the sealed store, and replaying the log gives the same table and the same trips. Catches a public table or a nondeterministic trip.
 3. CLK-4: `match::TestTableAndPatterns`: every table value and every existing CLK-4 pattern matches, split across two writes too; random high-entropy text without a table entry does not trip. Catches a lost CLK-4 case or a false trip.
 **Size:** about 90k, tier A, strongest model. **Depends on:** #3761 and the D-232 row merged.
@@ -43,7 +43,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 ### DECOY-c (#3764): the edge (KRN-12 Placement, Trips, Silence)
 
 **Scope:** `broker/edgelink/` (matcher on the core side of the link, heartbeat kind), the edge's image profile under `image/` (placements as data).
-**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind, and the edge wallet seed sent in it outside the log (the log records its hash only, KRN-12 Outside canaries), again at every re-enrolment of a replaced edge; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
+**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind, and the edge wallet seed sent in it outside the log (the log records its hash only, KRN-12 Outside canaries); a replaced edge gets a fresh wallet, never a re-sent seed; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
 **Acceptance tests:**
 1. KRN-12: `edgelink::TestDecoyToEdgeTrips`: a decoy in any kind but the kernel's placement kind trips; enrolment and re-enrolment after a restore trip nothing. Catches a guest's query smuggling a decoy out, or a false trip at every enrolment.
 2. KRN-12: `edgelink::TestHeartbeatSilenceAlarms`: two missed beats raise one alarm, a late beat clears nothing without the log saying so. Catches a killed edge going unseen.
@@ -60,7 +60,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 3. Only if Mark chooses the own line (decision 6; its NET-2 spec PR lands first): `alert::TestTextNeverRidesCore`: with the core dropping every channel message, the trip text still leaves on the own line. Catches a core that swallows alerts. Until then a trip or core silence at the enforcer is certain to show only on its light and page (NET-2 Texts and calls).
 4. NET-2: `channel::TestHeartbeatStrictFrame`: the heartbeat frame carries only its fields and signature. Catches a heartbeat kind that smuggles anything else.
 5. KRN-12: `nft::TestTripChangesNoRule`. Catches an automatic cut the owner did not make (NET-4).
-**Size:** about 120k, tier A, strongest model. **Depends on:** ENF-d (#3660), ENF-e (#3661), ENF-h (#3666), DECOY-a.
+**Size:** about 120k, tier A, strongest model. **Depends on:** ENF-d (#3660), ENF-e (#3661), ENF-h (#3666).
 
 ### DECOY-e (#3766): placements and the wallets (KRN-12 Placement, Outside canaries)
 
@@ -68,7 +68,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Builds:** environment variables, dotfiles and jackpot files in the sandbox and host; decoy root and recovery entries in the sealed store; honey keys in the planner's view; three wallets made at setup, each seed planted at one boundary (the host's jackpot files, never the planner sandbox; the edge's; the sealed store, which every backup carries), receive addresses shown as QR codes in one optional owner-page step, never the seeds.
 **Acceptance tests:**
 1. KRN-12: `place::TestEveryPlacementFromTable`: each placement's bytes are a table entry, wallet seeds aside, each credential-shaped decoy names a destination in the enforcer's decoy range, and each kind on the list is placed. Catches code at a place or a missed place.
-2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page and STATUS carry the address only, and no seed is in the planner sandbox. Catches a seed leak the owner pays for.
+2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page, STATUS, the core's stores outside the sealed-store wallet's own copy, and a backup's contents beyond that copy carry the address only, and no seed is in the planner sandbox. Catches a seed leak the owner pays for.
 3. DEP-3: `wallet::TestSkippedStepCostsNothing`. Catches a required optional step.
 **Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a (#3762), DECOY-b (#3763), DECOY-c (#3764, the edge's placement path).
 
