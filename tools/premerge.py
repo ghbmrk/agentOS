@@ -211,20 +211,60 @@ def _duplicate_id(text):
     return False
 
 
+def _merge_file(cwd, path, reviewed, base, onto):
+    """`git merge-file -p --diff3` of `path` in the reviewed commit, `base` and `onto`, without `merge=union`, and
+    the random label its conflict markers carry."""
+    texts = [_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, base, onto)]
+    mark = secrets.token_hex(16)  # labels no file can carry, so its text never reads as a marker
+    with tempfile.TemporaryDirectory() as d:
+        names = [pathlib.Path(d, n) for n in ("pr", "base", "main")]
+        for n, t in zip(names, texts):
+            n.write_bytes(t)
+        merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)), *map(str, names)],
+                                cwd=cwd, capture_output=True).stdout
+    return merged, mark
+
+
 def _stale(cwd, text, path, reviewed, onto):
     """The table rows of an ASSUMPTIONS.md replay `text` that `merge=union` (.gitattributes) brought back, counted
-    in copies: of a row in the merge base verbatim, the copies beyond the merge's own (`onto`'s plus the reviewed
-    commit's, less the base's), so a copy one side edited or deleted and the other left alone (#3369, #1912, #3441,
-    #3502). Empty for any other file or a criss-cross merge."""
+    in copies, per conflict of the merge without the union: of a row in its base section, the copies beyond the
+    merge's own (main's plus the reviewed commit's, less the base's), so a copy one side edited or deleted and the
+    other left alone (#3369, #1912, #3441, #3502). A copy both sides deleted outside a conflict is gone from the
+    merge too (#3534). Where `git merge-file` aligns the file unlike the replay, the whole file counts as one
+    conflict. Empty for any other file or a criss-cross merge."""
     if path.rsplit("/", 1)[-1] != "ASSUMPTIONS.md":
         return collections.Counter()
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
         return collections.Counter()
-    mb, kept, pr = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines())
-                    for t in (bases[0], onto, reviewed))
-    rows = collections.Counter(line for line in text.splitlines() if FIRST_CELL.match(line) and line in mb)
-    return +collections.Counter({x: n - max(kept[x] + pr[x] - mb[x], 0) for x, n in rows.items()})
+    merged, mark = _merge_file(cwd, path, reviewed, bases[0], onto)
+    hunks, union, hunk, side = [], [], None, 0
+    for line in merged.splitlines(keepends=True):
+        bare = line.rstrip(b"\r\n")
+        if hunk is None and bare == f"<<<<<<< {mark}0".encode():
+            hunk, side = ([], [], []), 0
+        elif hunk is None:
+            union.append(line)
+        elif bare == f"||||||| {mark}1".encode() and side == 0:
+            side = 1
+        elif bare == b"=======" and side == 1:
+            side = 2
+        elif bare == f">>>>>>> {mark}2".encode() and side == 2:
+            union.extend(hunk[0] + hunk[2])
+            hunks.append(hunk)
+            hunk = None
+        else:
+            hunk[side].append(line)
+    if hunk is not None or b"".join(union) != text:  # the whole file, the replay's copies in place of the union's
+        hunks = [[_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto)] + [text]]
+    else:
+        hunks = [(b"".join(h[0]), b"".join(h[1]), b"".join(h[2]), b"".join(h[0] + h[2])) for h in hunks]
+    out = collections.Counter()
+    for pr, mb, kept, rows in hunks:
+        pr, mb, kept, rows = (collections.Counter(t.splitlines()) for t in (pr, mb, kept, rows))
+        out += collections.Counter({x: n - max(kept[x] + pr[x] - mb[x], 0) for x, n in rows.items()
+                                    if FIRST_CELL.match(x) and x in mb})
+    return out
 
 
 def _broken(cwd, tree, path, reviewed, onto):
@@ -259,14 +299,7 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1:
         return False
-    texts = [_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (reviewed, bases[0], onto)]
-    mark = secrets.token_hex(16)  # labels no file can carry, so its text never reads as a marker
-    with tempfile.TemporaryDirectory() as d:
-        names = [pathlib.Path(d, n) for n in ("pr", "base", "main")]
-        for n, t in zip(names, texts):
-            n.write_bytes(t)
-        merged = subprocess.run(["git", "merge-file", "-p", "--diff3", *(f"-L{mark}{i}" for i in range(3)), *map(str, names)],
-                                cwd=cwd, capture_output=True).stdout
+    merged, mark = _merge_file(cwd, path, reviewed, bases[0], onto)
     key = lambda line: FIRST_CELL.match(line) and FIRST_CELL.match(line).group(1)
     out, hunk, side, conflicts = ([], [], []), None, 0, 0  # resolutions 0 and 1; 2 is the union, to match the replay
     for line in merged.splitlines(keepends=True):
