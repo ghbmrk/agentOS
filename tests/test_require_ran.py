@@ -1,7 +1,8 @@
 """Tests for tools/require_ran.py: named tests must pass in a `go test -json` stream.
 
 REQ: INFER-CI-2
-No SPEC requirement IDs: CI tooling (briefs/INFER-CI.md). All data is synthetic.
+No SPEC requirement IDs: CI tooling (briefs/INFER-CI.md; --gated and --named-skips-only: CI-root-go-2,
+#3541). All data is synthetic.
 """
 import io
 import json
@@ -14,6 +15,7 @@ from contextlib import redirect_stdout
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import require_ran  # noqa: E402
+import root_tests  # noqa: E402
 
 PKG = "github.com/ghbmrk/agentos/broker/infer/supervise"
 LEAF, OOM = "TestServiceRunsInInferenceLeaf", "TestServiceOOMStaysInLeaf"
@@ -97,6 +99,38 @@ class RequireRanTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.assertEqual(require_ran.check(stream((LEAF, "pass")).splitlines(), [QLEAF]), [])
             self.assertEqual(len(require_ran.check([], [QLEAF, QOOM])), 2)
+
+
+class GatedTest(unittest.TestCase):
+    """CI-root-go-2 (#3541): a whole-package root run names every root-gated test it holds."""
+
+    def test_gated_names_every_root_gated_test_of_the_packages(self):
+        gated = root_tests.gated_names(["./infer/..."])
+        self.assertIn(QLEAF, gated)
+        self.assertIn(f"{PKG}.TestServiceHasNoNetwork", gated)
+        only_two = stream((LEAF, "pass"), (OOM, "pass"), (None, "pass"))
+        code, _, err = run(only_two, "--gated", "./infer/...")
+        self.assertEqual(code, 1)
+        self.assertIn(f"{PKG}.TestServiceHasNoNetwork: no pass", err)
+        everything = "".join(stream((n.rsplit(".", 1)[1], "pass")) for n in gated)
+        self.assertEqual(run(everything, "--gated", "./infer/...")[0], 0)
+        self.assertEqual(run(everything, QLEAF, "--gated", "./infer/...")[0], 0)
+
+    def test_gated_with_no_root_gated_test_is_an_error(self):
+        # An empty name list would pass anything, so a pattern that names nothing fails the step.
+        self.assertEqual(run(stream((LEAF, "pass")), "--gated", "./no/such/package")[0], 2)
+        self.assertEqual(run(stream((LEAF, "pass")), "--gated")[0], 2)
+        self.assertEqual(run(stream((LEAF, "pass")), QLEAF, "--gated", "./no/such/package")[0], 2)
+
+    def test_named_skips_only(self):
+        other = stream((LEAF, "pass"), ("TestQuota/ext4", "skip"), ("TestQuota", "pass"))
+        self.assertEqual(run(other, QLEAF)[0], 1)
+        self.assertEqual(run(other, "--named-skips-only", QLEAF)[0], 0)
+        sub = stream((f"{LEAF}/case", "skip"), (LEAF, "pass"))
+        code, _, err = run(sub, "--named-skips-only", QLEAF)
+        self.assertEqual(code, 1)
+        self.assertIn(f"{QLEAF}/case: skipped", err)
+        self.assertEqual(run(stream((LEAF, "skip")), "--named-skips-only", QLEAF)[0], 1)
 
 
 if __name__ == "__main__":

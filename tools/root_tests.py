@@ -7,9 +7,14 @@ EdgeEnroll's `cosign` tag passed CI while the only test of it skipped (#3536). T
 such test by reading the broker's `_test.go` files, and the root steps by reading ci.yml.
 
 A test is root-gated when its body, or a function of its package it calls (to any depth), holds
-an `if` on `Geteuid() != 0` whose block skips (`.Skip`, `.Skipf`, `.SkipNow`) or returns, since a
-test that returns early off root leaves its root half as unchecked as one that skips. A root step is a ci.yml line that runs `go test` under sudo; it covers a test
-when it names the test's package (or a `/...` above it) and its `-run` pattern, if any, matches.
+an `if` on `Geteuid()` or `Getuid()` compared with 0 that either skips or returns off root (`!= 0`)
+or branches, so that some of its checks run only as root (#3541: agentos-unlock's capability
+check). A test that skips as root (`== 0` with `.Skip`) is never root-gated: it runs only in the
+non-root jobs. A root step covers a test only when CI fails if the test skips or fails there: a
+ci.yml line runs `go test` under sudo with its output in a file (`> FILE`), the test's package and
+`-run` pattern match, and the next line of the step that reads or rewrites FILE is
+`python3 ... require_ran.py ... < FILE`, naming the test (or its package after `--gated`), with
+nothing after it but `|| exit 1`; the step has no `if:`, `continue-on-error:` or `shell:`.
 
   root_tests.py           exit 1, naming each root-gated test that no root step and no EXEMPT
                           line covers, and each EXEMPT line that matches no root-gated test
@@ -36,8 +41,9 @@ GENERATED = "Root-gated Go tests"
 EXEMPT = {
 }
 
-GATE = re.compile(r"^(\s*)(?:\}\s*else\s+)?if\s.*Geteuid\(\)\s*!=\s*0.*\{\s*(?://.*)?$", re.M)
+GATE = re.compile(r"^(\s*)(?:\}\s*else\s+)?if\s(.*\bGete?uid\(\)\s*[!=]=\s*0\b.*)\{\s*(?://.*)?$", re.M)
 SKIP = re.compile(r"\.Skip(?:f|Now)?\(|^\s*return\b", re.M)
+SKIPCALL = re.compile(r"\.Skip(?:f|Now)?\(")
 FUNC = re.compile(r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\])?\(", re.M)
 TEST = re.compile(r"^Test(?!Main$)[A-Z0-9_]")
 CALL = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
@@ -53,13 +59,28 @@ def funcs(src):
     return out
 
 
-def skips_off_root(body):
-    """True when an `if` on Geteuid() != 0 in body skips or returns inside its block."""
+def uid_gates(body):
+    """(gates, skips as root) for body: whether an `if` on the uid against 0 skips or returns off
+    root or branches, and whether one skips as root."""
+    gates = as_root = False
     for m in GATE.finditer(body):
         end = body.find("\n" + m.group(1) + "}", m.end())
-        if SKIP.search(body[m.end(): end if end >= 0 else len(body)]):
-            return True
-    return False
+        block = body[m.end(): end if end >= 0 else len(body)]
+        if re.search(r"Gete?uid\(\)\s*==\s*0", m.group(2)) and SKIPCALL.search(block):
+            as_root = True
+        else:
+            gates = True  # skips or returns off root, or branches: some checks run only as root
+    return gates, as_root
+
+
+def _closure(bodies, seed):
+    """seed and every function of bodies that calls one of them, to any depth."""
+    out, grew = set(seed), True
+    while grew:
+        more = {n for n, b in bodies.items() if n not in out and any(c in out for c in CALL.findall(b))}
+        out |= more
+        grew = bool(more)
+    return out
 
 
 def gated(broker=BROKER):
@@ -73,58 +94,148 @@ def gated(broker=BROKER):
                 with open(os.path.join(d, f), encoding="utf-8") as fh:
                     for name, body in funcs(fh.read()).items():
                         bodies[name] = bodies.get(name, "") + body
-        gate = {n for n, b in bodies.items() if skips_off_root(b)}
-        grew = True
-        while grew:
-            more = {n for n, b in bodies.items() if n not in gate and any(c in gate for c in CALL.findall(b))}
-            gate |= more
-            grew = bool(more)
-        tests = sorted(n for n in gate if TEST.match(n))
+        marks = {n: uid_gates(b) for n, b in bodies.items()}
+        gate = _closure(bodies, {n for n, (g, _) in marks.items() if g})
+        root_skip = _closure(bodies, {n for n, (_, r) in marks.items() if r})
+        tests = sorted(n for n in gate - root_skip if TEST.match(n))
         if tests:
             rel = os.path.relpath(d, broker).replace(os.sep, "/")
             found[MODULE if rel == "." else f"{MODULE}/{rel}"] = tests
     return found
 
 
-def root_runs(ci_text):
-    """[(package patterns, -run regex or None)] for each `go test` ci.yml runs under sudo, generated step left out."""
-    runs, lines, i, step = [], ci_text.split("\n"), 0, ""
+def _steps(ci_text):
+    """[(name, keys, run lines)] for each step in ci.yml; run lines are joined across `\\` and
+    stripped of comments, since a comment never runs (#3540 Security review)."""
+    out, lines, i = [], ci_text.split("\n"), 0
     while i < len(lines):
-        line = lines[i]
-        if line.strip().startswith("- name:"):
-            step = line.split("- name:", 1)[1].strip()
-        cmd = line
-        while cmd.rstrip().endswith("\\") and i + 1 < len(lines):
+        m = re.match(r"^(\s*)- ([A-Za-z][\w-]*):(.*)$", lines[i])
+        if not m:
             i += 1
-            cmd = cmd.rstrip()[:-1] + " " + lines[i].strip()
+            continue
+        ind, body = len(m.group(1)), [lines[i][: len(m.group(1))] + "  " + lines[i][len(m.group(1)) + 2:]]
         i += 1
-        # A comment never runs, so a commented-out root line covers nothing (#3540 Security review).
-        cmd = "" if cmd.lstrip().startswith("#") else re.split(r"(?:^|\s)#", cmd, maxsplit=1)[0]
-        if step.startswith(GENERATED) or "go test" not in cmd:
-            continue
-        before, _, after = cmd.partition("go test")
-        if "sudo" not in before:
-            continue
-        after = re.split(r"\s(?:>|\|\||&&|\|)\s", after, maxsplit=1)[0]
-        try:
-            words = shlex.split(after)
-        except ValueError:
-            continue
-        pat, pkgs, j = None, [], 0
-        while j < len(words):
-            w = words[j]
-            if w == "-run" and j + 1 < len(words):
-                pat, j = words[j + 1], j + 2
-                continue
-            if w.startswith("-run="):
-                pat = w[5:]
-            elif w.startswith("./"):
-                pkgs.append(w)
-            elif w.startswith("-") and w in ("-timeout", "-parallel", "-p", "-tags", "-count"):
-                j += 1
+        while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > ind):
+            body.append(lines[i])
+            i += 1
+        keys, name, run, j = {}, "", [], 0
+        while j < len(body):
+            k = re.match(r"^ {%d}([A-Za-z][\w-]*):\s*(.*)$" % (ind + 2), body[j])
             j += 1
-        if pkgs:
-            runs.append((pkgs, pat))
+            if not k:
+                continue
+            keys[k.group(1)] = k.group(2)
+            if k.group(1) == "name":
+                name = k.group(2).strip()
+            if k.group(1) != "run":
+                continue
+            raw = [] if k.group(2).strip() in ("|", ">", "|-", ">-") else [k.group(2)]
+            while j < len(body) and (not body[j].strip() or len(body[j]) - len(body[j].lstrip()) > ind + 2):
+                raw.append(body[j])
+                j += 1
+            n = 0
+            while n < len(raw):
+                cmd = raw[n]
+                while cmd.rstrip().endswith("\\") and n + 1 < len(raw):
+                    n += 1
+                    cmd = cmd.rstrip()[:-1] + " " + raw[n].strip()
+                n += 1
+                cmd = "" if cmd.lstrip().startswith("#") else re.split(r"(?:^|\s)#", cmd, maxsplit=1)[0]
+                if cmd.strip():
+                    run.append(cmd.strip())
+        out.append((name, keys, run))
+    return out
+
+
+PUNCT = {"<", ">", "|", "||", "&", "&&", ";", ";;", ">>", "2>", "(", ")"}
+
+
+def _words(cmd):
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        return list(lex)
+    except ValueError:
+        return None
+
+
+def _root_run(cmd):
+    """(package patterns, -run regex or None, output file) for a `sudo ... go test ... > FILE`, else None."""
+    before, sep, after = cmd.partition("go test")
+    if not sep or "sudo" not in before.split():
+        return None
+    words = _words(after)
+    if words is None or ">" not in words:
+        return None
+    out = words[words.index(">") + 1] if words.index(">") + 1 < len(words) else None
+    words = words[: words.index(">")]
+    pat, pkgs, j = None, [], 0
+    while j < len(words):
+        w = words[j]
+        if w in PUNCT:
+            return None
+        if w == "-run" and j + 1 < len(words):
+            pat, j = words[j + 1], j + 2
+            continue
+        if w.startswith("-run="):
+            pat = w[5:]
+        elif w.startswith("./"):
+            pkgs.append(w)
+        elif w in ("-timeout", "-parallel", "-p", "-tags", "-count", "-skip"):
+            j += 1
+        j += 1
+    return (pkgs, pat, out) if pkgs and out else None
+
+
+def _require(cmd):
+    """(input file, names, --gated patterns) for `python3 ... require_ran.py ... < FILE [|| exit 1]`
+    whose exit status reaches the step, else None."""
+    words = _words(cmd)
+    if not words or words[0] != "python3" or not any(w.endswith("require_ran.py") for w in words):
+        return None
+    words = words[[i for i, w in enumerate(words) if w.endswith("require_ran.py")][0] + 1:]
+    if words[-3:] == ["||", "exit", "1"]:
+        words = words[:-3]
+    if words.count("<") != 1 or words.index("<") + 1 >= len(words) or any(w in PUNCT - {"<"} for w in words):
+        return None
+    i = words.index("<")
+    src, args = words[i + 1], words[:i] + words[i + 2:]
+    names, pats, gated_mode = set(), [], False
+    for w in args:
+        if w == "--named-skips-only":
+            continue
+        if w == "--gated":
+            gated_mode = True
+        elif gated_mode and w.startswith("./"):
+            pats.append(w)
+        else:
+            names.add(w)
+    return src, names, pats
+
+
+# A step with one of these keys may skip or not fail the job; a line opening shell control flow
+# may run a root line conditionally. Either way the step covers nothing.
+UNSAFE_KEYS = ("if", "continue-on-error", "shell")
+UNSAFE_LINE = re.compile(r"^(?:if|while|until|for|case|select)\b|\bexit\s+0\b|\bset\s+\+e\b|&\s*$")
+
+
+def root_runs(ci_text):
+    """[(package patterns, -run regex or None, names, --gated patterns)] for each sudo `go test` in
+    ci.yml whose skips and failures fail CI: require_ran.py reads its output next (see module doc).
+    The generated step is left out."""
+    runs = []
+    for name, keys, run in _steps(ci_text):
+        if name.startswith(GENERATED) or any(k in keys for k in UNSAFE_KEYS) or any(UNSAFE_LINE.search(c) for c in run):
+            continue
+        for i, cmd in enumerate(run):
+            r = _root_run(cmd)
+            if not r:
+                continue
+            pkgs, pat, out = r
+            nxt = next((c for c in run[i + 1:] if out in (_words(c) or [])), None)
+            req = _require(nxt) if nxt else None
+            if req and req[0] == out:
+                runs.append((pkgs, pat, frozenset(req[1]), tuple(req[2])))
     return runs
 
 
@@ -138,7 +249,17 @@ def _in(pkg, pattern):
 
 
 def covered(pkg, test, runs):
-    return any(any(_in(pkg, p) for p in pkgs) and (pat is None or re.search(pat, test)) for pkgs, pat in runs)
+    """True when a root run executes the test and require_ran.py names it there, by name or package."""
+    return any(any(_in(pkg, p) for p in pkgs) and (pat is None or re.search(pat, test))
+               and (f"{pkg}.{test}" in names or any(_in(pkg, g) for g in gpats))
+               for pkgs, pat, names, gpats in runs)
+
+
+def gated_names(patterns, found=None, exempt=EXEMPT):
+    """The `<package>.<Test>` names of the root-gated, non-exempt tests in packages the patterns match."""
+    found = gated() if found is None else found
+    return [f"{p}.{t}" for p, ts in sorted(found.items()) if any(_in(p, g) for g in patterns)
+            for t in ts if f"{p}.{t}" not in exempt]
 
 
 def plan(found, runs, exempt=EXEMPT):

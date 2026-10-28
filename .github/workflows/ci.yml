@@ -396,11 +396,17 @@ jobs:
         working-directory: broker
         run: |
           sudo mkdir /sys/fs/cgroup/agentos-ci
-          # With no_new_privs, as agentosd.service runs runsc (NoNewPrivileges=yes; L7-6).
+          # With no_new_privs, as agentosd.service runs runsc (NoNewPrivileges=yes; L7-6). The
+          # step fails unless every root-gated test of these packages passed with no skip in it or its
+          # subtests (#3541); other tests may skip by design (a quota file system the host lacks).
+          rc=0
           sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
-            go test -count=1 -v ./cgroup ./quota/... ./vm/... ./recovery
+            go test -count=1 -json ./cgroup ./quota/... ./vm/... ./recovery > /tmp/machine-test.json || rc=$?
+          python3 -I ../tools/require_ran.py --named-skips-only --gated ./cgroup ./quota/... ./vm/... ./recovery \
+            < /tmp/machine-test.json || exit 1
+          [ "$rc" -eq 0 ]
           # The inference service's jail, leaf and OOM (INFER-SVC INF-1, INF-6),
           # with no_new_privs as agentosd.service runs it. Its tests skip off
           # root or without the cgroup, so the step fails on any skip and
@@ -409,7 +415,7 @@ jobs:
           sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -json ./infer/... > /tmp/infer-test.json || rc=$?
-          python3 -I ../tools/require_ran.py < /tmp/infer-test.json \
+          python3 -I ../tools/require_ran.py --gated ./infer/... < /tmp/infer-test.json \
             github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceRunsInInferenceLeaf \
             github.com/ghbmrk/agentos/broker/infer/supervise.TestServiceOOMStaysInLeaf || exit 1
           [ "$rc" -eq 0 ]
@@ -443,8 +449,9 @@ jobs:
           [ "$rc" -eq 0 ]
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
         # A test that skips off root is green in every other job (#3536: a renamed wire tag passed
-        # CI). root_tests.py fails unless each root-gated test runs in a root step, and --plan lists
-        # those no step above names; each package runs as root and fails on any skip or unrun test.
+        # CI). root_tests.py fails unless each root-gated test runs in a root step whose require_ran.py
+        # names it, and --plan lists those no step above names; each package runs as root and fails
+        # on any skip or unrun test.
         working-directory: broker
         run: |
           python3 -I ../tools/root_tests.py
@@ -466,9 +473,14 @@ jobs:
         run: |
           sh guest/openclaw/build-rootfs.sh /tmp/ocroot
           # With no_new_privs, as agentosd.service runs runsc (L7-6).
-          cd broker && sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          cd broker
+          rc=0
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
-            go test -count=1 -v -run '^TestIntegrationOpenClawGuest$' ./e2e
+            go test -count=1 -json -run '^TestIntegrationOpenClawGuest$' ./e2e > /tmp/openclaw-test.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/openclaw-test.json \
+            github.com/ghbmrk/agentos/broker/e2e.TestIntegrationOpenClawGuest || exit 1
+          [ "$rc" -eq 0 ]
       - name: Codex CLI containment under gVisor (S8-W1-contain, #1720)
         # The pinned CLI runs one tool call in a pw- machine from the built image, holding only a
         # synthetic placeholder login; the tool must not reach the forwarder, the route socket or
@@ -479,16 +491,24 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             sh guest/codex/build-rootfs.sh /tmp/cxroot
-          cd broker && sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          cd broker
+          rc=0
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CODEX_ROOTFS=/tmp/cxroot \
-            go test -count=1 -v -run '^TestIntegrationCodexContainment$' ./e2e
+            go test -count=1 -json -run '^TestIntegrationCodexContainment$' ./e2e > /tmp/codex-test.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/codex-test.json \
+            github.com/ghbmrk/agentos/broker/e2e.TestIntegrationCodexContainment || exit 1
+          [ "$rc" -eq 0 ]
       - name: Floor box admission and preemption (P2-5)
         # A 7680 MiB group stands in for the 8 GB N95 (HW-4); prints FLOOR-RESULT.
         working-directory: broker
         run: |
+          rc=0
           sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
-            go test -count=1 -v -timeout 20m ./floor
+            go test -count=1 -json -timeout 20m ./floor > /tmp/floor-test.json || rc=$?
+          python3 -I ../tools/require_ran.py --gated ./floor < /tmp/floor-test.json || exit 1
+          [ "$rc" -eq 0 ]
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: sudo rm -rf /tmp/gocache/fuzz
