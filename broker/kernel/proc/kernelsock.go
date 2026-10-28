@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -523,7 +524,7 @@ func init() {
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
-		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased,
+		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
@@ -757,8 +758,13 @@ func (o Owner) Certify(pub []byte) (c Certified, err error) {
 }
 
 // Named is the live subjects a label reads as (kernel.Named): those found,
-// and those whose labels could not be read.
+// and those whose labels could not be read. A blank label is
+// kernel.ErrLabel. Invalid UTF-8 is ErrArgs here, since JSON would carry it
+// as U+FFFD and match a label the owner did not type (LOG-4).
 func (o Owner) Named(label string) (found, unread []string, err error) {
+	if !utf8.ValidString(label) {
+		return nil, nil, ErrArgs
+	}
 	var r namedRead
 	err = o.Call("named", labelArgs{label}, &r)
 	return r.Found, r.Unread, err
