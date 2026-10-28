@@ -21,13 +21,17 @@ func FuzzVisionReply(f *testing.F) {
 		`{"state":"ready","device":"cpu","model":"vis","sha256":"` + hash + `"}`,
 		`{"error":"missing"}`,
 		`{"detections":[{"class":"person","box":{"x0":0,"y0":0,"x1":4,"y1":4},"conf":50,"embedding":[1,2]}]}`,
+		`{"template":"AACAPwAAAEA="}`,
+		`{"state":"ready"}`,
+		`{"detections":[],"template":"AACAPw=="}`,
+		`{"error":"no_face"}`,
 	} {
-		f.Add([]byte(s), uint8(0), uint16(8), uint16(8))
-		f.Add([]byte(s), uint8(1), uint16(8), uint16(8))
-		f.Add([]byte(s), uint8(2), uint16(8), uint16(8))
+		for op := uint8(0); op < 5; op++ {
+			f.Add([]byte(s), op, uint16(8), uint16(8))
+		}
 	}
 	enrolled := func(id string) bool { return id == "alice" }
-	ops := []string{OpHello, OpDetect, OpSound}
+	ops := []string{OpHello, OpDetect, OpSound, OpEnrol, OpLend}
 	f.Fuzz(func(t *testing.T, line []byte, op uint8, w, h uint16) {
 		o := ops[int(op)%len(ops)]
 		r, err := parseReply(o, line, int(w), int(h), enrolled)
@@ -37,7 +41,18 @@ func FuzzVisionReply(f *testing.F) {
 			}
 			return
 		}
+		if o != OpEnrol && r.Template != nil {
+			t.Fatalf("%s accepted a template", o)
+		}
 		switch o {
+		case OpEnrol:
+			if CheckTemplate(r.Template) != nil || r.State != "" || r.Detections != nil || r.Sounds != nil || r.Model != "" {
+				t.Fatalf("enrol accepted %+v", r)
+			}
+		case OpLend:
+			if !reflect.DeepEqual(norm(r), Reply{State: StateReady}) {
+				t.Fatalf("lend accepted %+v", r)
+			}
 		case OpHello:
 			if r.State != StateReady || r.Device != DeviceCPU || !ValidModelName(r.Model) || !ValidHash(r.SHA256) || r.Detections != nil || r.Sounds != nil {
 				t.Fatalf("hello accepted %+v", r)
@@ -69,6 +84,9 @@ func FuzzVisionReply(f *testing.F) {
 
 // norm treats an empty list as none, as the encoding does.
 func norm(r Reply) Reply {
+	if len(r.Template) == 0 {
+		r.Template = nil
+	}
 	if len(r.Detections) == 0 {
 		r.Detections = nil
 	}

@@ -182,6 +182,10 @@ var guestPlane = map[string]struct {
 	// socket, process or system call of its own.
 	"vision":           {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
 	"vision/supervise": {[]string{"cgroup", "infer/supervise"}, forbiddenStd},
+	// Face enrolment's trusted side (VIS-faces): template slots through
+	// the store surface its wiring hands it, and the service's control
+	// calls; no socket, process or system call of its own.
+	"vision/faces": {[]string{"vision"}, forbiddenStd},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).
