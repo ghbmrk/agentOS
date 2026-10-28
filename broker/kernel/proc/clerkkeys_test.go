@@ -141,6 +141,54 @@ func TestTheKeySocketAdmitsOnlyRoot(t *testing.T) {
 	}
 }
 
+// Security, MAIL-keys: the key socket's server returns only after its last
+// hand-off, so RunKernel, which waits for every server before it clears the
+// root, never races a derivation still reading it. Fails if serveClerkKey
+// returns while a hand-off is still running.
+func TestKeyServerOutlivesItsHandOffs(t *testing.T) {
+	dir, err := os.MkdirTemp("", "ck")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	p := filepath.Join(dir, "k")
+	ln, err := sockets.ListenPeers(p, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	unit := "/agentos-keeper.slice/agentos-keeper-mail.service"
+	done := make(chan error, 1)
+	go func() {
+		done <- serveClerkKey(ln, "mail", unit, testRoot(), func(int32) (string, error) {
+			close(entered)
+			<-release
+			return unit, nil
+		})
+	}()
+	c, err := net.Dial("unix", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	<-entered
+	ln.Close()
+	select {
+	case err := <-done:
+		t.Fatalf("the server returned (%v) while a hand-off still ran", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never returned after its hand-off")
+	}
+}
+
 // A kernel with no clerk root key, or a clerk with a bad name or unit,
 // serves no key.
 func TestNoKeyWithoutARootOrAUnit(t *testing.T) {

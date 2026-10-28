@@ -75,6 +75,8 @@ const keyWait = 2 * time.Second
 
 // ServeClerkKey hands name's key under root to each connection on ln from
 // a process in the cgroup at path cgroup, one at a time, until ln closes.
+// Serving one at a time, it returns only once no hand-off still reads
+// root, and the caller may then clear it.
 func ServeClerkKey(ln net.Listener, name, cgroup string, root *[clerkkey.Len]byte) error {
 	return serveClerkKey(ln, name, cgroup, root, procCgroup)
 }

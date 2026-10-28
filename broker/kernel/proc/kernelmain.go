@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -248,14 +249,23 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	errs := make(chan error, len(sides)+len(cfg.ClerkKeys))
 	if len(cfg.ClerkKeys) > 0 {
 		root := keys.ClerkRoot // the kernel's copy, for its whole life
-		defer clear(root[:])
+		// Cleared only once every key socket's server, and so every
+		// hand-off, has returned; the listeners close first (defers run
+		// last-in, first-out).
+		var serving sync.WaitGroup
+		defer func() {
+			serving.Wait()
+			clear(root[:])
+		}()
 		for name, kc := range cfg.ClerkKeys {
 			ln, err := ListenClerkKey(kc.Socket)
 			if err != nil {
 				return err
 			}
 			defer ln.Close()
+			serving.Add(1)
 			go func() {
+				defer serving.Done()
 				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Cgroup, &root))
 			}()
 		}
