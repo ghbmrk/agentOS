@@ -11,7 +11,7 @@ import (
 
 // FuzzStatusFrame feeds the clerk's frame reader arbitrary node bytes: it
 // never panics, returns a status only for an exact, well-formed status
-// frame (which re-encodes to the same bytes), and returns a payload only
+// frame, which re-encodes to the bytes read, and returns a payload only
 // for video or thermal.
 func FuzzStatusFrame(f *testing.F) {
 	st := camwire.AppendStatus(nil, camwire.Status{Uptime: 1, Settings: 2, Temperature: -50})
@@ -25,6 +25,7 @@ func FuzzStatusFrame(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) {
 		r := bytes.NewReader(b)
 		for range 16 {
+			at := len(b) - r.Len()
 			fr, s, err := readOne(r, camwire.Shape{})
 			if err != nil {
 				return
@@ -34,8 +35,8 @@ func FuzzStatusFrame(f *testing.F) {
 					t.Fatal("status and payload both returned")
 				}
 				enc := camwire.AppendStatus(nil, *s)
-				if len(enc) != camwire.StatusLen {
-					t.Fatalf("status re-encodes to %d bytes", len(enc))
+				if got := b[at+camwire.HeaderLen : len(b)-r.Len()]; !bytes.Equal(enc, got) {
+					t.Fatalf("status re-encodes to %x, read %x", enc, got)
 				}
 				continue
 			}

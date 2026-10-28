@@ -102,13 +102,13 @@ type Loss struct {
 }
 
 // ReasonKey is the loss when a node presents a key other than its pin.
-const ReasonKey = "camera presented another key; turned off until re-pinned"
+const ReasonKey = "camera answered with a different identity; off until you reconnect it on the local page"
 
 // Event kinds (devslot.Reading.Kind). Value is the number of seconds since
 // the node's last frame for KindSilent, and 0 otherwise.
 const (
 	KindSilent    = "camera-silent"
-	KindKey       = "camera-key"
+	KindKey       = "camera-identity-changed"
 	KindFault     = "camera-fault"
 	KindRecovered = "camera-recovered"
 )
@@ -157,12 +157,14 @@ var (
 	ErrAddress   = errors.New("camera: address is not on the home network")
 	ErrAdmission = errors.New("camera: admission refused a new camera")
 	ErrUnknown   = errors.New("camera: no such camera")
-	ErrOff       = errors.New("camera: node is off until re-pinned")
+	ErrOff       = errors.New("camera: node is off until reconnected")
 	ErrCapture   = errors.New("camera: capture is not turned on for this")
 	ErrStep      = errors.New("camera: plan step does not name this camera to read in a task")
-	ErrBusy      = errors.New("camera: camera already streaming")
-	ErrSpoofed   = errors.New("camera: node presented another key")
-	ErrRemoved   = errors.New("camera: camera disconnected or changed")
+	// ErrBusy is a second stream for a camera whose stream has not yet
+	// returned, stopped or not.
+	ErrBusy    = errors.New("camera: camera already streaming")
+	ErrSpoofed = errors.New("camera: node presented another key")
+	ErrRemoved = errors.New("camera: camera disconnected or changed")
 )
 
 var idRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
@@ -174,6 +176,7 @@ type Clerk struct {
 
 	mu   sync.Mutex
 	cams map[string]*cam
+	live map[string]*slot // running streams by camera, until their loop returns
 
 	// smu guards status apart from mu, since a delivery holds a slot's
 	// lock and stop takes mu before it.
@@ -220,7 +223,7 @@ func New(cfg Config) (*Clerk, error) {
 	if cfg.MaxBackoff < cfg.MinBackoff {
 		cfg.MaxBackoff = max(DefaultMaxBackoff, cfg.MinBackoff)
 	}
-	c := &Clerk{cfg: cfg, cams: map[string]*cam{}, status: map[string]camwire.Status{}}
+	c := &Clerk{cfg: cfg, cams: map[string]*cam{}, live: map[string]*slot{}, status: map[string]camwire.Status{}}
 	c.lim = &limiter{limit: cfg.Limit, now: cfg.Now, sink: cfg.Sink, win: map[string]*window{}}
 	return c, nil
 }
@@ -349,11 +352,13 @@ func (c *Clerk) Status(id string) (camwire.Status, bool) {
 // calls it on a timer (DEV-8).
 func (c *Clerk) Flush() error { return c.lim.flush() }
 
+// stop halts and cancels the running stream. The slot stays held until
+// the stream's Run or Capture returns (end), so a new stream for the camera
+// gets ErrBusy until then and there is never a second connection.
 func (cm *cam) stop(cause error) {
 	if cm.run != nil {
 		cm.run.halt()
 		cm.run.cancel(cause)
-		cm.run = nil
 	}
 }
 
@@ -437,7 +442,7 @@ func (c *Clerk) begin(ctx context.Context, id string, gate func(*cam) error, tas
 		return nil, nil, Camera{}, ErrUnknown
 	case cm.off:
 		return nil, nil, Camera{}, ErrOff
-	case cm.run != nil:
+	case c.live[id] != nil:
 		return nil, nil, Camera{}, ErrBusy
 	}
 	if err := gate(cm); err != nil {
@@ -445,16 +450,21 @@ func (c *Clerk) begin(ctx context.Context, id string, gate func(*cam) error, tas
 	}
 	ctx, cancel := context.WithCancelCause(ctx)
 	cm.run = &slot{cancel: cancel, task: task}
+	c.live[id] = cm.run
 	return ctx, cm.run, cm.Camera, nil
 }
 
-// end releases the camera's slot if s still holds it; a stop may already
-// have cleared it, and a newer stream may hold it since.
+// end releases the camera's slot once its stream's loop has returned. The
+// slot is held by id in live, so even a camera removed and connected again
+// meanwhile gets no second stream until the first has ended.
 func (c *Clerk) end(id string, s *slot) {
 	s.halt()
 	s.cancel(nil)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.live[id] == s {
+		delete(c.live, id)
+	}
 	if cm := c.cams[id]; cm != nil && cm.run == s {
 		cm.run = nil
 	}

@@ -40,7 +40,7 @@ func TestSpoofedNodeRefused(t *testing.T) {
 	e.nodes[testAddr] = spoof
 	e.mu.Unlock()
 
-	err := e.c.Run(context.Background(), e.cam.ID)
+	err := e.c.Run(bounded(t), e.cam.ID)
 	if !errors.Is(err, ErrSpoofed) {
 		t.Fatalf("Run = %v, want ErrSpoofed", err)
 	}
@@ -62,7 +62,7 @@ func TestSpoofedNodeRefused(t *testing.T) {
 	}
 
 	dials := e.dials.Load()
-	if err := e.c.Run(context.Background(), e.cam.ID); !errors.Is(err, ErrOff) {
+	if err := e.c.Run(bounded(t), e.cam.ID); !errors.Is(err, ErrOff) {
 		t.Fatalf("second Run = %v, want ErrOff", err)
 	}
 	if e.dials.Load() != dials {
@@ -83,7 +83,7 @@ func TestSpoofedNodeRefused(t *testing.T) {
 	e.nodes[testAddr] = real
 	e.mu.Unlock()
 	e.pin(e.cam)
-	if err := e.c.Run(context.Background(), e.cam.ID); !errors.Is(err, ErrSpoofed) {
+	if err := e.c.Run(bounded(t), e.cam.ID); !errors.Is(err, ErrSpoofed) {
 		t.Fatalf("old key after re-pin: Run = %v, want ErrSpoofed", err)
 	}
 }
@@ -94,7 +94,7 @@ func TestSpoofedNodeRefused(t *testing.T) {
 func TestNoStreamBeforeTurnOn(t *testing.T) {
 	n := newNode(t, send(video(0)))
 	e := newEnv(t, n, CaptureOff)
-	ctx := context.Background()
+	ctx := bounded(t)
 	if err := e.c.Run(ctx, "porch"); !errors.Is(err, ErrCapture) {
 		t.Fatalf("Run with capture off = %v", err)
 	}
@@ -174,7 +174,7 @@ func TestClientKeyNeverLeaves(t *testing.T) {
 	e.mu.Lock()
 	e.nodes[testAddr] = spoof
 	e.mu.Unlock()
-	spoofErr := e.c.Run(context.Background(), "porch")
+	spoofErr := e.c.Run(bounded(t), "porch")
 
 	want, err := ClientPoint(lendCanary)
 	if err != nil {
@@ -224,7 +224,7 @@ func TestOnlyPinnedAddressDialed(t *testing.T) {
 	if err := e.c.Set(cm); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.c.dial(context.Background(), cm); !errors.Is(err, netguard.ErrDenied) {
+	if _, err := e.c.dial(bounded(t), cm); !errors.Is(err, netguard.ErrDenied) {
 		t.Fatalf("dial unpinned = %v, want ErrDenied", err)
 	}
 	// Pinned with another kind (a backup target), still refused.
@@ -233,7 +233,7 @@ func TestOnlyPinnedAddressDialed(t *testing.T) {
 	if err := e.guard.SetPins([]netguard.Pin{p}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.c.dial(context.Background(), cm); !errors.Is(err, netguard.ErrDenied) {
+	if _, err := e.c.dial(bounded(t), cm); !errors.Is(err, netguard.ErrDenied) {
 		t.Fatalf("dial backup-pinned = %v, want ErrDenied", err)
 	}
 	if e.dials.Load() != 0 {
@@ -389,7 +389,7 @@ func TestCaptureNotInLogOrEvents(t *testing.T) {
 	e.mu.Lock()
 	e.nodes[testAddr] = newNode(t, nil)
 	e.mu.Unlock()
-	spoofErr := e.c.Run(context.Background(), "porch")
+	spoofErr := e.c.Run(bounded(t), "porch")
 
 	if e.nframes() == 0 || !bytes.Contains(e.frames[0].Payload, []byte(marker)) {
 		t.Fatal("frames did not reach Frames")
@@ -429,7 +429,7 @@ func TestAdmissionRefusesNewCamera(t *testing.T) {
 	if err := e.c.Set(cm); !errors.Is(err, ErrAdmission) {
 		t.Fatalf("Set = %v, want ErrAdmission", err)
 	}
-	if err := e.c.Run(context.Background(), "gate"); !errors.Is(err, ErrUnknown) {
+	if err := e.c.Run(bounded(t), "gate"); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("Run = %v, want ErrUnknown", err)
 	}
 	if !strings.Contains(strings.Join(e.everything(), "\n"), "admission refused a camera: gate") {
@@ -444,7 +444,7 @@ func TestOneStreamPerCamera(t *testing.T) {
 	e := newEnv(t, n, Continuous)
 	stop := e.run()
 	waitFor(t, "a frame", func() bool { return e.nframes() == 1 })
-	if err := e.c.Run(context.Background(), "porch"); !errors.Is(err, ErrBusy) {
+	if err := e.c.Run(bounded(t), "porch"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second Run = %v, want ErrBusy", err)
 	}
 	stop()
@@ -454,7 +454,7 @@ func TestOneStreamPerCamera(t *testing.T) {
 		t.Fatalf("Set with another key = %v, want ErrCamera", err)
 	}
 	e.c.Remove("porch")
-	if err := e.c.Run(context.Background(), "porch"); !errors.Is(err, ErrUnknown) {
+	if err := e.c.Run(bounded(t), "porch"); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("Run after disconnect = %v", err)
 	}
 }
@@ -499,7 +499,7 @@ func TestNoFrameAfterStop(t *testing.T) {
 					}
 				}
 				done := make(chan error, 1)
-				go func() { done <- e.c.Capture(context.Background(), "porch", readStep("porch", "t1")) }()
+				go func() { done <- e.c.Capture(bounded(t), "porch", readStep("porch", "t1")) }()
 				waitFor(t, "a status", func() bool { _, ok := e.c.Status("porch"); return ok || n.conns.Load() > 0 })
 				time.Sleep(5 * time.Millisecond)
 				stop(e)
@@ -513,5 +513,74 @@ func TestNoFrameAfterStop(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func bounded(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// TestSecondStreamWaitsForFirst: a stop frees the camera only once the
+// stopped stream's call has returned, so a new task's capture, or the same
+// camera removed and connected again, gets ErrBusy until then and there is
+// never a second connection (combined on #3600, point 1).
+func TestSecondStreamWaitsForFirst(t *testing.T) {
+	n := newNode(t, send(video(0)))
+	e := newEnv(t, n, OnRequest)
+	release := make(chan struct{})
+	e.mu.Lock()
+	e.block = release
+	e.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- e.c.Capture(bounded(t), "porch", readStep("porch", "t1")) }()
+	waitFor(t, "the first dial", func() bool { return e.dials.Load() == 1 })
+
+	e.c.EndTask("t1")
+	if err := e.c.Capture(bounded(t), "porch", readStep("porch", "t2")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("second task's Capture before the first returned = %v, want ErrBusy", err)
+	}
+	e.c.Remove("porch")
+	if err := e.c.Set(e.cam); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Capture(bounded(t), "porch", readStep("porch", "t2")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("Capture after reconnect before the first returned = %v, want ErrBusy", err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, ErrRemoved) {
+		t.Fatalf("first Capture = %v, want ErrRemoved", err)
+	}
+	if n.conns.Load() != 0 {
+		t.Fatalf("a stopped stream opened %d sessions", n.conns.Load())
+	}
+
+	go func() { done <- e.c.Capture(bounded(t), "porch", readStep("porch", "t2")) }()
+	waitFor(t, "t2's frame", func() bool { return e.nframes() == 1 })
+	e.c.EndTask("t2")
+	if err := <-done; !errors.Is(err, ErrRemoved) {
+		t.Fatalf("t2 Capture = %v", err)
+	}
+}
+
+// TestOneSilentEventPerOutage: a node that stays unreachable across many
+// redials raises one silent event, not one per dial.
+func TestOneSilentEventPerOutage(t *testing.T) {
+	n := newNode(t, nil)
+	e := newEnv(t, n, Continuous)
+	e.mu.Lock()
+	delete(e.nodes, testAddr)
+	e.mu.Unlock()
+	cm := e.cam
+	cm.Silence = 20 * time.Millisecond
+	if err := e.c.Set(cm); err != nil {
+		t.Fatal(err)
+	}
+	stop := e.run()
+	waitFor(t, "several redials", func() bool { return e.dials.Load() >= 8 })
+	stop()
+	if s, _ := e.count(KindSilent); s != 1 {
+		t.Fatalf("silent events = %d over %d dials, want 1", s, e.dials.Load())
 	}
 }

@@ -160,6 +160,7 @@ type env struct {
 	losses []Loss
 	frames []camwire.Frame
 	admit  bool
+	block  chan struct{} // if set, each connect waits for it to close
 }
 
 type option func(*Config)
@@ -170,8 +171,18 @@ func newEnv(t *testing.T, n *node, capture Capture, opts ...option) *env {
 	e.guard = netguard.New(netguard.Config{Connect: func(_ context.Context, _, addr string) (net.Conn, error) {
 		e.dials.Add(1)
 		e.mu.Lock()
-		nd := e.nodes[addr]
+		nd, block := e.nodes[addr], e.block
 		e.mu.Unlock()
+		if block != nil {
+			// The wait ignores ctx, so a stopped stream stays in its dial
+			// until released, and gives up after a bound so a broken
+			// clerk fails a test rather than hanging it.
+			select {
+			case <-block:
+			case <-time.After(3 * time.Second):
+				return nil, fmt.Errorf("connect not released")
+			}
+		}
 		if nd == nil {
 			return nil, fmt.Errorf("no node")
 		}
