@@ -69,6 +69,18 @@ exempt-pr 3617
 # which the G2 list does not name (D-198). Remove once #3640 merges.
 exempt-pr 3640
 
+# #3697 (ENF-a, #3658): the new broker/enforcer/, plus its import rule in broker/daemon/arc2_test.go
+# and its tools/risk_tier.py line, which the G2 list does not name (D-198). Remove once #3697 merges.
+exempt-pr 3697
+
+# #3703 (ENF-j, #3668): spikes/ENF-radio/ (README.md, run.sh, probe/go.mod, probe/main.go),
+# which the G2 list does not name (D-198). Remove once #3703 merges.
+exempt-pr 3703
+
+# #3705 (MIG-4-exit-m1, #3680): broker/cmd/agentos-clerk-model/, which the G2 list does not name
+# (D-198). Remove once #3705 merges.
+exempt-pr 3705
+
 # Project machinery and records.
 allow .claude/
 allow .github/
