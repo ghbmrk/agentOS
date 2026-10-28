@@ -11,8 +11,8 @@
 //
 // So nothing stored on the SSD alone releases the key (STO-2, A8). Once a
 // slot opens, the store derives one key per purpose under its own HKDF label:
-// the log's AES-256-GCM key, the kernel's head-signing seed, and one sealing
-// key per clerk, which Sealer hands out as that clerk's clerk.Sealer. The
+// the log's AES-256-GCM key, the kernel's head-signing seed, and the clerk
+// root key, from which the kernel derives each clerk's key (ClerkRoot). The
 // store key stays with whoever unlocked the store (the unlock step, STO-2b),
 // and each process gets only the derived keys it needs (CLK-1).
 //
@@ -52,7 +52,6 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"golang.org/x/crypto/argon2"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -950,20 +949,18 @@ func (s *Store) HeadKey() (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(b), nil
 }
 
-var clerkName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
-
-// Sealer is clerk's sealer: AES-256-GCM under a key derived for that clerk
-// alone, so one clerk's sealer opens nothing another's sealed (CLK-1).
-func (s *Store) Sealer(clerkID string) (clerk.Sealer, error) {
-	if !clerkName.MatchString(clerkID) {
-		return nil, errors.New("seal: a clerk name is lower-case letters, digits and hyphens")
-	}
-	b, err := s.derived("sealer/" + clerkID)
+// ClerkRoot is the root of every clerk's key (MAIL-keys, CLK-1): the unlock
+// step hands it to the kernel, which derives each clerk's key from it
+// (clerkkey.Derive) and hands that key to that clerk alone.
+func (s *Store) ClerkRoot() ([32]byte, error) {
+	var k [32]byte
+	b, err := s.derived("clerks")
 	if err != nil {
-		return nil, err
+		return k, err
 	}
-	defer wipe(b)
-	return clerk.NewAESSealer(b)
+	copy(k[:], b)
+	wipe(b)
+	return k, nil
 }
 
 // Close wipes the store key. Keys already handed out are the caller's.

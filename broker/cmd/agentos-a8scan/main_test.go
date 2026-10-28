@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/card"
-	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
@@ -366,10 +366,12 @@ func TestTakesTheCardsTypedKey(t *testing.T) {
 	}
 }
 
-// Each clerk's sealer key is a needle (#3435 Security release 1, CLK-1):
-// the shipped clerks' without a flag and any other named by -clerk. The
-// needle is the key seal's Sealer seals under.
-func TestFindsClerkSealerKeys(t *testing.T) {
+// Each clerk's keys are needles (#3435 Security release 1, CLK-1; MAIL-keys
+// #3419 comment 6453938265): the clerk root key the store derives, and, for
+// the shipped clerks without a flag and any other named by -clerk, the key
+// the kernel derives from it and the sealer key and handle secret the clerk
+// derives from that. The root needle is the key seal's ClerkRoot gives.
+func TestFindsClerkKeys(t *testing.T) {
 	d := newDrive(t)
 	key := d.storeKey(t)
 	raw, _ := os.ReadFile(d.store)
@@ -378,40 +380,150 @@ func TestFindsClerkSealerKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sl, err := st.Sealer("bank")
+	root, err := st.ClerkRoot()
 	st.Close()
+	if err != nil || !bytes.Equal(root[:], derive(key, id, "clerks")) {
+		t.Fatalf("derive(clerks) is not seal's ClerkRoot: %v", err)
+	}
+	bank, err := clerkkey.Derive(&root, "bank")
 	if err != nil {
 		t.Fatal(err)
 	}
-	blob, _ := sl.Seal([]byte("x"), nil)
-	mine, _ := clerk.NewAESSealer(derive(key, id, "sealer/bank"))
-	if p, err := mine.Open(blob, nil); err != nil || string(p) != "x" {
-		t.Fatal("derive(sealer/bank) is not the key seal's Sealer uses")
-	}
+	sl, _ := bank.Sealer()
+	hs, _ := bank.HandleSecret()
 	var out bytes.Buffer
 	for _, c := range []struct {
-		clerk  string
+		name   string
+		leak   []byte
 		clerks []string
-	}{{"mail", shippedClerks}, {"bank", append([]string{"bank"}, shippedClerks...)}} {
-		os.WriteFile(filepath.Join(d.esp(), "leak.bin"), append([]byte("x"), derive(key, id, "sealer/"+c.clerk)...), 0o600)
+	}{
+		{"clerk root key", root[:], nil},
+		{"key of clerk bank", bank.Key[:], []string{"bank"}},
+		{"sealer key of clerk bank", sl, []string{"bank"}},
+		{"handle secret of clerk bank", hs, append([]string{"bank"}, shippedClerks...)},
+	} {
+		os.WriteFile(filepath.Join(d.esp(), "leak.bin"), append([]byte("x"), c.leak...), 0o600)
 		out.Reset()
-		if n, err := run(d.store, d.rk, d.rkText, "", c.clerks, []string{d.esp()}, &out); err != nil || n == 0 || !strings.Contains(out.String(), "FIND sealer key of clerk "+c.clerk) {
-			t.Errorf("sealer key of %s: %d, %v\n%s", c.clerk, n, err, out.String())
+		if n, err := run(d.store, d.rk, d.rkText, "", c.clerks, []string{d.esp()}, &out); err != nil || n == 0 || !strings.Contains(out.String(), "FIND "+c.name) {
+			t.Errorf("%s: %d, %v\n%s", c.name, n, err, out.String())
+		}
+	}
+	// The shipped clerks' keys are needles with no flag.
+	ns, err := storeNeedles(d.store, mustUnlock(t, d), d.rk, d.rkText, "", shippedClerks, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range shippedClerks {
+		want, _ := clerkkey.Derive(&root, c)
+		hit := false
+		for _, n := range ns {
+			hit = hit || n.Name == "key of clerk "+c && bytes.Equal(n.Value, want.Key[:])
+		}
+		if !hit {
+			t.Errorf("no needle for the shipped clerk %s's key", c)
 		}
 	}
 }
 
-// Every purpose seal.go derives a key for under the store key is in
-// storePurposes, and every non-secret-free entry there names a needle the
-// scan plants; so a key seal starts deriving fails this test until the
-// scan looks for it.
-func TestEveryStorePurposeIsANeedle(t *testing.T) {
-	fs := token.NewFileSet()
-	file, err := parser.ParseFile(fs, "../../clerk/seal/seal.go", nil, parser.SkipObjectResolution)
+func mustUnlock(t *testing.T, d drive) *seal.Store {
+	t.Helper()
+	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(st.Close)
+	return st
+}
+
+// Every purpose seal derives a key for under the store key, in any of its
+// non-test files, is in storePurposes, and every label clerkkey derives a
+// clerk's keys under, from the clerk root key down, is in clerkPurposes;
+// every non-secret-free entry of either names a needle the scan plants. So
+// a key seal or the kernel's per-clerk chain starts deriving fails this
+// test until the scan looks for it (#3419 comment 6453938265).
+func TestEveryStorePurposeIsANeedle(t *testing.T) {
+	fs := token.NewFileSet()
 	inSeal := map[string]bool{}
+	for _, file := range parseDir(t, fs, "../../clerk/seal") {
+		storePurposesIn(t, fs, file, inSeal)
+	}
+	inClerkKey := map[string]bool{}
+	for _, file := range parseDir(t, fs, "../../clerk/clerkkey") {
+		ast.Inspect(file, func(n ast.Node) bool {
+			if l, ok := n.(*ast.BasicLit); ok && l.Kind == token.STRING {
+				if v, _ := strconv.Unquote(l.Value); strings.HasPrefix(v, "agentos.clerk.") {
+					inClerkKey[v] = true
+				}
+			}
+			return true
+		})
+	}
+	for p := range inClerkKey {
+		if _, ok := clerkPurposes[p]; !ok {
+			t.Errorf("clerkkey derives under %q, which the scan does not look for (clerkPurposes)", p)
+		}
+	}
+	for p := range inSeal {
+		if _, ok := storePurposes[p]; !ok {
+			t.Errorf("seal derives a %q key that the scan does not look for (storePurposes)", p)
+		}
+	}
+	d := newDrive(t)
+	ns, err := storeNeedles(d.store, mustUnlock(t, d), d.rk, d.rkText, "", shippedClerks, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasNeedle := func(name string) bool {
+		for _, n := range ns {
+			if strings.HasPrefix(n.Name, name) {
+				return true
+			}
+		}
+		return false
+	}
+	for p, name := range clerkPurposes {
+		if !inClerkKey[p] {
+			t.Errorf("clerkPurposes lists %q, which clerkkey no longer derives under", p)
+		}
+		if !hasNeedle(name) {
+			t.Errorf("clerk label %q: no needle named %q", p, name)
+		}
+	}
+	for p, name := range storePurposes {
+		if !inSeal[p] {
+			t.Errorf("storePurposes lists %q, which seal no longer derives", p)
+		}
+		if name != "" && !hasNeedle(name) {
+			t.Errorf("purpose %q: no needle named %q", p, name)
+		}
+	}
+}
+
+// parseDir parses every non-test Go file in dir.
+func parseDir(t *testing.T, fs *token.FileSet, dir string) []*ast.File {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+	if err != nil || len(paths) == 0 {
+		t.Fatalf("no Go files in %s: %v", dir, err)
+	}
+	var out []*ast.File
+	for _, p := range paths {
+		if strings.HasSuffix(p, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fs, p, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// storePurposesIn adds to in every purpose file passes to seal's derive or
+// derived.
+func storePurposesIn(t *testing.T, fs *token.FileSet, file *ast.File, inSeal map[string]bool) {
+	t.Helper()
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok {
@@ -452,36 +564,6 @@ func TestEveryStorePurposeIsANeedle(t *testing.T) {
 			}
 			return true
 		})
-	}
-	for p := range inSeal {
-		if _, ok := storePurposes[p]; !ok {
-			t.Errorf("seal derives a %q key that the scan does not look for (storePurposes)", p)
-		}
-	}
-	d := newDrive(t)
-	st, err := seal.Unlock(d.store, seal.Recovery{Key: d.rk})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	ns, err := storeNeedles(d.store, st, d.rk, d.rkText, "", shippedClerks, &bytes.Buffer{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for p, name := range storePurposes {
-		if !inSeal[p] {
-			t.Errorf("storePurposes lists %q, which seal no longer derives", p)
-		}
-		if name == "" {
-			continue
-		}
-		hit := false
-		for _, n := range ns {
-			hit = hit || strings.HasPrefix(n.Name, name)
-		}
-		if !hit {
-			t.Errorf("purpose %q: no needle named %q", p, name)
-		}
 	}
 }
 

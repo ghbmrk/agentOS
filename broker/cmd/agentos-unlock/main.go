@@ -9,13 +9,21 @@
 //
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
 // it before the exec, and the kernel gets only the log key, the head key,
-// the log anchor's counter and the owner's anchors on descriptor 3, and one
-// connection to the TPM on descriptor 4 for that counter (LOG-2, STO-1),
-// since the kernel's uid can open no TPM itself. Before that hand-off it caps
+// the clerk root key, the log anchor's counter and the owner's anchors on
+// descriptor 3, and one connection to the TPM on descriptor 4 for that
+// counter (LOG-2, STO-1), since the kernel's uid can open no TPM itself. Before that hand-off it caps
 // the slot's boot path (#2977), so that connection unseals nothing for the
 // rest of the boot. The box's policy key and the store's anchor come
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
+//
+// With -clerk-anchors and -log, it also writes the owner's hardware keys to
+// a root-owned file for the clerks, which check every view the kernel hands
+// them against keys the kernel did not hand them (D-146, MAIL-keys). Those
+// keys come from the store only: its kernel/anchors entry, or, on a box whose
+// setup put them in the kernel's log, its clerks/anchors entry, which this
+// step copies from the log's first entry at the first boot that finds one
+// (#2995).
 package main
 
 import (
@@ -40,6 +48,8 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -72,7 +82,11 @@ func storePins(path string) pinSource {
 type config struct {
 	store, tpm, exec string
 	uid, gid         int
-	args             []string // the kernel main's, after --
+	// clerkAnchors is the clerks' anchors file and log the kernel's log
+	// file, from whose first entry the step pins the anchors (#2995); ""
+	// for both writes no file.
+	clerkAnchors, log string
+	args              []string // the kernel main's, after --
 	// dropTo replaces drop in tests that run as a plain user, who cannot
 	// shed supplementary groups; the command line never sets it.
 	dropTo func(uid, gid int) error
@@ -93,6 +107,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.exec, "exec", "", "the kernel main, an absolute path")
 	fs.IntVar(&c.uid, "uid", -1, "the kernel's uid")
 	fs.IntVar(&c.gid, "gid", -1, "the kernel's gid")
+	fs.StringVar(&c.clerkAnchors, "clerk-anchors", "", "the clerks' anchors file, an absolute path; none without it")
+	fs.StringVar(&c.log, "log", "", "the kernel's log file, an absolute path, with -clerk-anchors")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -102,6 +118,10 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-store and an absolute -exec are required")
 	case c.uid <= 0 || c.gid <= 0:
 		return c, errors.New("-uid and -gid are required, and never root")
+	case (c.clerkAnchors == "") != (c.log == ""):
+		return c, errors.New("-clerk-anchors and -log come together")
+	case c.clerkAnchors != "" && (!filepath.IsAbs(c.clerkAnchors) || !filepath.IsAbs(c.log)):
+		return c, errors.New("-clerk-anchors and -log are absolute paths")
 	}
 	return c, nil
 }
@@ -204,6 +224,16 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if k.LinkKey, k.FirstEdge, err = linkKeys(st); err != nil {
 		return nil, err
 	}
+	if k.ClerkRoot, err = st.ClerkRoot(); err != nil {
+		return nil, err
+	}
+	if c.clerkAnchors != "" {
+		ca, err := clerkAnchors(st, k, c.log)
+		if err != nil {
+			return nil, err
+		}
+		writeClerkAnchors(c.clerkAnchors, ca)
+	}
 	if k.Counter, err = counter(st); err != nil {
 		return nil, err
 	}
@@ -244,6 +274,139 @@ func linkKeys(st *seal.Store) (ed25519.PrivateKey, ed25519.PublicKey, error) {
 		}
 	}
 	return link, edge, nil
+}
+
+// clerkAnchors is the owner's hardware keys for the clerks, from the store
+// alone: the kernel's anchors if the store holds them, else its
+// clerks/anchors entry. A store with neither, on a box whose setup put the
+// keys in the kernel's log, gets that entry now from the log's first entry,
+// read under the log key and checked against this box's head key, and keeps
+// it: from then on a kernel taken over cannot change what the clerks check
+// it by (D-146, #2995). None, with the reason on stderr, when the log holds
+// no setup or the store cannot keep it: the clerks then refuse to start,
+// and the kernel starts as ever. An entry that is there must read.
+func clerkAnchors(st *seal.Store, k handoff.KernelKeys, logPath string) ([]key.PublicKey, error) {
+	if len(k.Anchors) != 0 {
+		return k.Anchors, nil
+	}
+	raw, ok, err := st.Get(handoff.ClerkAnchorsEntry)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		a, err := handoff.ParseAnchors(raw)
+		if err != nil {
+			return nil, fmt.Errorf("agentos-unlock: the clerks' copy of your hardware keys in my store: %w", err)
+		}
+		return a, nil
+	}
+	first, err := logStart(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log: %v\n", err)
+		return nil, nil
+	}
+	a, ok, err := kernel.LoggedAnchors(first, k.Log, k.Head.Public().(ed25519.PublicKey))
+	if err != nil || !ok {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: my log's first entry: %v\n", err)
+		}
+		return nil, nil
+	}
+	b, err := handoff.EncodeAnchors(a)
+	if err == nil {
+		err = st.Put(handoff.ClerkAnchorsEntry, b)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks get no hardware keys: keep them in my store: %v\n", err)
+		return nil, nil
+	}
+	return a, nil
+}
+
+// logStart reads the start of the kernel's log, as far as its first frame
+// can reach: a regular file, never through a link, nor a FIFO the kernel's
+// uid put there to hold this root step. None yet is an empty start.
+func logStart(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a file", path)
+	}
+	b := make([]byte, 4+kernel.MaxSetupFrame)
+	n, err := io.ReadFull(f, b)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, err
+	}
+	return b[:n], nil
+}
+
+// writeClerkAnchors makes path hold anchors in handoff.EncodeAnchors' form,
+// world-readable and written only by this step's uid (root on the box), in a
+// directory of that uid's that no one else can write: the form and owner
+// the clerk mains require (MAIL-main-a-3). No anchors removes it, so a
+// clerk never starts on an earlier boot's. A failure is said, the file is
+// removed, and the kernel still starts: only the clerks go without.
+func writeClerkAnchors(path string, anchors []key.PublicKey) {
+	if err := putClerkAnchors(path, anchors); err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the clerks' hardware keys: %v\n", err)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
+		}
+	}
+}
+
+func putClerkAnchors(path string, anchors []key.PublicKey) error {
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 || int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s is not a directory of mine alone", dir)
+	}
+	if len(anchors) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	b, err := handoff.EncodeAnchors(anchors)
+	if err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".anchors-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path) // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the trusted unlock step cannot link it; the anchors are public, rewritten each boot, and pinned in the store
 }
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot
