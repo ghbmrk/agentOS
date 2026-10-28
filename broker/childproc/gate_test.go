@@ -33,6 +33,12 @@ import (
 // inherits only the checked pairs (#651 Security 4a point 3).
 var exempt = map[string]string{
 	"golang.org/x/sys/unix": "defines unix.Exec, a wrapper of syscall.Exec; every use of it is gated",
+	// The enforcer shares no code with agentOS, childproc included (ENF
+	// decision 1, broker/daemon/arc2_test.go), so its firewall loader runs
+	// nft itself: one fixed absolute binary, an empty environment, the
+	// ruleset on stdin (ENF decision 4). arc2_test.go lets no other
+	// enforcer package link it.
+	"enforcer/nft/load": "the enforcer's firewall loader runs nft -f; enforcer code cannot import childproc (ENF-e)",
 }
 
 // inPlace names the packages, by the same key as exempt, that may name
