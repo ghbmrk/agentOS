@@ -2,8 +2,11 @@ package apply
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -11,7 +14,8 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
@@ -212,24 +216,53 @@ type clock struct {
 func (c *clock) now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
 func (c *clock) add(d time.Duration) { c.mu.Lock(); defer c.mu.Unlock(); c.t = c.t.Add(d) }
 
-// policy is the journal policy: the applier's Check for its intents, as
-// the grants gate will delegate meta.release to it.
-// atDispatch, if set, runs once after the dispatch check passed.
-type policy struct {
-	a          *Applier
-	atDispatch func()
+// seedKey is a synthetic key from one seed byte.
+func seedKey(seed byte) (ed25519.PublicKey, ed25519.PrivateKey) {
+	b := make([]byte, ed25519.SeedSize)
+	b[0] = seed
+	k := ed25519.NewKeyFromSeed(b)
+	return k.Public().(ed25519.PublicKey), k
 }
 
-func (p *policy) Check(ctx context.Context, ph journal.Phase, in journal.Intent) error {
-	if in.Executor == Executor {
-		err := p.a.Check(ctx, ph, in)
-		if f := p.atDispatch; err == nil && ph == journal.PhaseDispatch && f != nil {
-			p.atDispatch = nil
-			f()
-		}
+// clerkSide is the update clerk across restarts under one kernel. When
+// atDispatch is set, it runs once after the clerk's own checks passed and
+// before it acts, as a change landing between the two would.
+type clerkSide struct{ r *rig }
+
+func (c clerkSide) Do(req kernel.Request, v kernel.View) kernel.Result {
+	c.r.dos++
+	f := c.r.atDispatch
+	if f == nil {
+		return c.r.a.Do(req, v)
+	}
+	if res, ok := c.r.a.done(req.Plan.ID); ok {
+		return res
+	}
+	if rf := c.r.a.authorize(req, v); rf != "" {
+		return kernel.Result{Outcome: "failed", Detail: rf}
+	}
+	c.r.atDispatch = nil
+	f()
+	return c.r.a.execute(context.Background(), req.Plan.ID)
+}
+
+func (c clerkSide) Probe(req kernel.Request, v kernel.View) kernel.Result { return c.r.a.Probe(req, v) }
+
+// kern is the kernel as the daemon drives it: a submitted plan is decided
+// and its step dispatched at once, unless hold is set.
+type kern struct{ r *rig }
+
+func (k kern) Submit(now int64, p kernel.Plan) error {
+	if err := k.r.k.Submit(now, p); err != nil {
 		return err
 	}
-	return nil
+	if ps := k.r.k.State().Plans[p.ID]; ps.Status == kernel.SRejected {
+		k.r.t.Logf("kernel rejected %s: %s", p.ID, ps.Reject)
+	}
+	if k.r.hold {
+		return nil
+	}
+	return k.r.k.Tick(now)
 }
 
 type rig struct {
@@ -241,15 +274,27 @@ type rig struct {
 	store *update.Store
 	// mirror: when set, store checks every release the rig makes from it,
 	// so a next release stages too.
-	mirror   *updatetest.Mirror
-	state    *change.MemStore
-	eng      *journal.Engine
-	pol      *policy
+	mirror *updatetest.Mirror
+	state  *change.MemStore
+	k      *kernel.Kernel
+	mem    *kernel.MemStore
+	anc    *kernel.MemAnchor
+	pinned key.PublicKey
+	holder ed25519.PrivateKey
+	upkey  key.Key
+	// hold: the kernel does not dispatch a submitted plan until the test
+	// ticks it; dos counts the clerk's dispatches.
+	hold       bool
+	dos        int
+	atDispatch func()
+	// saves: every state the applier saved, in order.
+	saves    []state
 	inCall   bool
 	working  bool
 	excluded func(time.Time) bool
 	talk     time.Time
 	stopped  bool
+	paused   bool // the pinned channel
 	// atBusy runs once, when the applier next asks whether the box is
 	// working; never set while Status may run (it asks under its lock).
 	atBusy func()
@@ -270,14 +315,89 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{t: t, clk: &clock{t: time.Date(2026, 10, 5, 3, 0, 0, 0, time.UTC)},
 		act:  &activator{boot: Boot{ID: "boot0", UsrRootHash: strings.Repeat(oldHash, 32), Blessed: true}},
-		pipe: &pipeline{}, state: &change.MemStore{}, pol: &policy{}}
-	var err error
-	r.eng, err = journal.Open(&journal.MemStore{}, r.pol, map[string]journal.Executor{Executor: current{r}},
-		func(s string) string { return s }, journal.WithClock(r.clk.now))
-	if err != nil {
+		pipe: &pipeline{}, state: &change.MemStore{}, mem: &kernel.MemStore{}, anc: &kernel.MemAnchor{}}
+	// The image-pinned update key: a standing root for activate only
+	// (decision 2 of brief #3423), granted in the log before the test.
+	pub, priv := seedKey(40)
+	r.pinned, r.holder = key.Ed25519(pub), priv
+	r.upkey = key.Issue(key.Ed25519Signer(priv), key.Root{Clerk: Name, Verbs: []key.Verb{key.ChangeAccount}, Serial: "image"})
+	r.bootKernel()
+	_, opriv := seedKey(1)
+	_, bpriv := seedKey(12)
+	batch := []key.Key{r.upkey}
+	cos := []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}
+	if err := r.k.Issue(r.ms()-kernel.GrantHold, cos, batch...); err != nil {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// anchors are the kernel's in the rig: the owner's two hardware keys and
+// the pinned update key.
+//
+// STAND-IN, NEVER WIRING: the pinned key is listed as an anchor only
+// because the kernel has no other way yet to admit a root no owner signed;
+// without it the kernel rejects every activate plan. An anchor signs
+// enrollments and cosigns for every clerk, and the pinned key's holder
+// ships in the image, so agentosd must never copy this list: #3677 gives
+// the kernel a grant of the image-pinned root that is not an anchor, and
+// this fixture moves to it then (ASSUMPTIONS MIG-4-adapters-e-1, A7).
+func (r *rig) anchors() []key.PublicKey {
+	opub, _ := seedKey(1)
+	bpub, _ := seedKey(12)
+	return []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub), r.pinned}
+}
+
+func (r *rig) ms() int64 { return r.clk.now().UnixMilli() }
+
+// bootKernel (re)starts the kernel over the rig's log, as after a reboot:
+// a step in flight is marked unknown, to be probed (KRN-8).
+func (r *rig) bootKernel() {
+	r.t.Helper()
+	kpub, kpriv := seedKey(3)
+	l, err := kernel.Open(kernel.Config{Store: r.mem, Anchor: r.anc, Pub: kpub, Sign: kpriv, Rand: mrand.NewChaCha8([32]byte{1})})
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{Name: clerkSide{r}}, r.ms()); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// nextDay moves past the kernel's 24-hour guard on an identical effect
+// (KRN-8) and lets the kernel reconcile a step left unknown, as the
+// daemon's kernel ticks would: the same release is activated again only
+// by a later plan, or by the kernel's redo of one proven not done.
+func (r *rig) nextDay() {
+	r.t.Helper()
+	r.clk.add(24 * time.Hour)
+	r.tick()
+}
+
+// reconcile lets the kernel probe a step left unknown, ProbeEvery later.
+func (r *rig) reconcile() {
+	r.t.Helper()
+	r.clk.add(kernel.ProbeEvery * time.Millisecond)
+	r.tick()
+}
+
+// retried is the same boot's retry of an unrecorded handover: the next
+// Tick abandons it, and the kernel, which admits no second plan for the
+// release while the first is unknown (KRN-8), probes the first, finds it
+// not done and redoes it; the Tick after that restarts into it.
+func (r *rig) retried() (bool, error) {
+	r.t.Helper()
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		return ok, fmt.Errorf("abandoning tick: %v", err)
+	}
+	r.reconcile()
+	return r.a.Tick(context.Background())
+}
+
+// tick runs the kernel now: a held dispatch or a probe.
+func (r *rig) tick() {
+	r.t.Helper()
+	r.must(r.k.Tick(r.ms()))
 }
 
 // release makes a verified release; the rig's store is the box that
@@ -307,17 +427,17 @@ func (r *rig) restart() {
 	if r.act0 != nil {
 		act = r.act0
 	}
-	a, err := New(Config{Journal: r.eng, Activator: act, Store: r.store, Pipeline: r.pipe, State: r.state,
+	a, err := New(Config{Kernel: kern{r}, Key: r.upkey, Holder: r.holder, Pinned: r.pinned, Activator: act, Store: r.store, Pipeline: r.pipe, State: savedState{r},
 		InCall: func() bool { return r.inCall }, Working: r.isWorking,
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },
 		Stopped:  func() bool { return r.stopped },
+		Paused:   func() bool { return r.paused },
 		Jitter:   6 * time.Hour, Rand: func(n int64) int64 { return n / 2 }, Now: r.clk.now})
 	if err != nil {
 		r.t.Fatal(err)
 	}
 	r.a = a
-	r.pol.a = a
 }
 
 func (r *rig) must(err error) {
@@ -327,22 +447,29 @@ func (r *rig) must(err error) {
 	}
 }
 
-// current is the applier executor across restarts in one engine.
-type current struct{ r *rig }
+// savedState is the rig's state store, recording each save.
+type savedState struct{ r *rig }
 
-func (c current) Execute(ctx context.Context, in journal.Intent, n int) journal.Outcome {
-	return c.r.a.Execute(ctx, in, n)
+func (s savedState) Load() ([]byte, error) { return s.r.state.Load() }
+
+func (s savedState) Save(b []byte) error {
+	if err := s.r.state.Save(b); err != nil {
+		return err
+	}
+	var st state
+	if err := json.Unmarshal(b, &st); err != nil {
+		return err
+	}
+	s.r.saves = append(s.r.saves, st)
+	return nil
 }
 
-func (c current) Reconcile(ctx context.Context, in journal.Intent, n int) journal.Outcome {
-	return c.r.a.Reconcile(ctx, in, n)
-}
-
-func (r *rig) intents() []journal.Status {
-	var out []journal.Status
-	for _, st := range r.eng.List() {
-		if st.Intent.Executor == Executor {
-			out = append(out, st)
+// plans is the update clerk's plans in the kernel's log, in order.
+func (r *rig) plans() []*kernel.PlanState {
+	var out []*kernel.PlanState
+	for _, id := range r.k.State().Order {
+		if p := r.k.State().Plans[id]; len(p.Plan.Steps) > 0 && p.Plan.Steps[0].Clerk == Name {
+			out = append(out, p)
 		}
 	}
 	return out
