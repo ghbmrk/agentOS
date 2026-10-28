@@ -5,9 +5,11 @@ package drone
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -269,21 +271,30 @@ func sendRC(t *testing.T, port int, pkt []byte, d time.Duration) {
 
 // REQ: NET-2
 // TestScriptingAndRCAreOff (brief acceptance test 6): SCR_ENABLE reads back
-// 0, and with the policy loaded no RC input on the simulator's RC port
-// changes the mode; before the policy, the same RC input does change the
-// mode, so the check can see one. Arming by stick and RC_CHANNELS_OVERRIDE
-// are not tried: neither has a positive control (the stick gesture fails the
-// stock arming checks, and the aircraft ignores an override once the policy
-// is loaded even signed), and RC_PROTOCOLS 0 cuts the input both would need.
+// 0, and RC changes nothing. RC_PROTOCOLS 0 does not stop a protocol the
+// aircraft already decodes, so RC that reached it before the policy (the
+// positive control, which changes the mode) makes the load fail its
+// read-back until the aircraft reboots; after the reboot the same RC input
+// changes nothing and the aircraft reads back equal. Arming by stick and
+// RC_CHANNELS_OVERRIDE are not tried: neither has a positive control (the
+// stick gesture fails the stock arming checks, and the aircraft ignores an
+// override once the policy is loaded even signed), and both need RC input.
 func TestScriptingAndRCAreOff(t *testing.T) {
 	r := newRig(t, false)
+	ports := r.sim.Ports()
 	// Positive control on stock RC settings: switch position 2 is LAND (copter.parm FLTMODE2).
 	sendRC(t, r.sim.RCPort(), rcPacket(1295, 1000, 1500), 3*time.Second)
 	if hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second); err != nil || hb.CustomMode != modeLand {
 		t.Fatalf("before the policy, RC did not change the mode (mode %d, %v); the RC check would be vacuous", hb.CustomMode, err)
 	}
-	if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); err != nil {
-		t.Fatalf("loading the policy: %v\n%s", err, r.logs)
+	if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); !errors.Is(err, ErrMismatch) || !strings.Contains(err.Error(), "RC input") {
+		t.Fatalf("a policy loaded on an aircraft that has had RC input read back as %v, want the RC refusal\n%s", err, r.logs)
+	}
+	r.link.Close()
+	r.sim.Restart()
+	r.attach(ports[0], r.sim.Dial(ports[0]))
+	if err := r.h.ArmCheck(); err != nil {
+		t.Fatalf("after a reboot with no RC input: %v", err)
 	}
 	if v, err := r.link.GetParam("SCR_ENABLE"); err != nil || v != 0 {
 		t.Errorf("SCR_ENABLE reads back %v (%v), want 0", v, err)
@@ -293,4 +304,7 @@ func TestScriptingAndRCAreOff(t *testing.T) {
 		sendRC(t, r.sim.RCPort(), rcPacket(pos, 1000, 1500), 2*time.Second)
 	}
 	r.requireSame(before, "RC input on the simulator's RC port")
+	if err := r.h.ArmCheck(); err != nil {
+		t.Errorf("RC input sent after the policy was in force from boot: %v", err)
+	}
 }

@@ -441,6 +441,17 @@ func relativeFrame(f common.MAV_FRAME) bool {
 	return f == common.MAV_FRAME_GLOBAL_RELATIVE_ALT || f == common.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
 }
 
+// SysStatus asks the aircraft for SYS_STATUS and returns its answer.
+func (l *Link) SysStatus() (*common.MessageSysStatus, error) {
+	got, err := l.exchange(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
+		Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageSysStatus{}).GetID())},
+		func(m message.Message) bool { _, ok := m.(*common.MessageSysStatus); return ok }, 3*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("drone: SYS_STATUS: %w", err)
+	}
+	return got.(*common.MessageSysStatus), nil
+}
+
 // Command sends COMMAND_LONG and returns the aircraft's result.
 func (l *Link) Command(cmd common.MAV_CMD, params [7]float32) (common.MAV_RESULT, error) {
 	got, err := l.exchange(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,

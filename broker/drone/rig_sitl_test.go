@@ -153,12 +153,11 @@ func (r *rig) snapshot() aircraft {
 		// Item 0 is home, which the aircraft sets itself at its first GPS fix.
 		a.Mission = a.Mission[1:]
 	}
-	st, err := r.link.exchange(long(common.MAV_CMD_REQUEST_MESSAGE, float32((&common.MessageSysStatus{}).GetID())),
-		func(m message.Message) bool { _, ok := m.(*common.MessageSysStatus); return ok }, 3*time.Second)
+	st, err := r.link.SysStatus()
 	if err != nil {
-		r.t.Fatalf("reading SYS_STATUS: %v", err)
+		r.t.Fatal(err)
 	}
-	a.FenceOn = st.(*common.MessageSysStatus).OnboardControlSensorsEnabled&common.MAV_SYS_STATUS_GEOFENCE != 0
+	a.FenceOn = st.OnboardControlSensorsEnabled&common.MAV_SYS_STATUS_GEOFENCE != 0
 	hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second)
 	if err != nil {
 		r.t.Fatal(err)
