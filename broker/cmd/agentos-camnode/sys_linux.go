@@ -49,6 +49,13 @@ func reboot() error {
 	return nil
 }
 
+// restart restarts the board with no tryboot flag: the bootloader boots
+// the default slot.
+func restart() error {
+	syscall.Sync()
+	return syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART)
+}
+
 // keyBytes is EVIOCGKEY's bitmap size: KEY_MAX (0x2ff) + 1 bits.
 const keyBytes = 0x300 / 8
 

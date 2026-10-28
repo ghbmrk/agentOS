@@ -319,3 +319,49 @@ func TestCaptureOpensNoSocket(t *testing.T) {
 		t.Fatal(fmt.Sprint("no source files read"))
 	}
 }
+
+// TestCameraFailsClosedAndKeepsNewest: settings the camera refuses (an IR
+// write that fails) leave capture stopped, never running at the old
+// settings (Security on #3617, finding 2); a full buffer drops its oldest
+// frame, so a reader that starts late gets the newest (L3 on #3617,
+// finding 4).
+func TestCameraFailsClosedAndKeepsNewest(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args")
+	t.Setenv("CAPTURE_HELPER", argsFile)
+	t.Setenv("CAPTURE_FRAMES", "1000")
+	fail := false
+	c := New(Config{
+		Encoder: []string{os.Args[0], "--"},
+		IR: func(uint8) error {
+			if fail {
+				return errors.New("ir: write failed")
+			}
+			return nil
+		},
+		Restart: 10 * time.Millisecond,
+	})
+	defer c.Close()
+	s := camwire.Settings{Width: 1280, Height: 720, FPS: 25, BitrateKbps: 3000, Stream: true}
+	if err := c.Apply(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Read(); err != nil {
+		t.Fatal(err)
+	}
+	fail, s.Stream = true, false
+	if err := c.Apply(s); err == nil {
+		t.Fatal("a failed IR write was taken")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(c.frames); n != 0 {
+		t.Fatalf("%d frames captured after a refused stream-off", n)
+	}
+
+	d := New(Config{})
+	for i := range 20 {
+		d.offer(camwire.Frame{Type: camwire.TypeVideo, Payload: []byte{byte(i)}})
+	}
+	if f, _ := d.Read(); f.Payload[0] != 20-byte(cap(d.frames)) {
+		t.Fatalf("oldest kept frame %d, want %d", f.Payload[0], 20-cap(d.frames))
+	}
+}

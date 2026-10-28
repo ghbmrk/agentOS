@@ -32,9 +32,9 @@ type Config struct {
 
 // Camera is camnode.Source on the board. Read is safe for concurrent use
 // (#3588 item 1): frames come from one channel, so a stream being replaced
-// and its successor never share a reader's state. Frames are dropped, not
-// queued, while no stream reads them, so a core that reconnects gets live
-// frames; the encoder's repeated SPS and PPS and its intra period (Args)
+// and its successor never share a reader's state. Only the newest frames
+// are kept while nothing reads them (the oldest is dropped), so a core that
+// reconnects gets live frames; the encoder's repeated SPS and PPS and its intra period (Args)
 // let the core's decoder pick up at the next IDR (ASSUMPTIONS
 // CAM-capture-2).
 type Camera struct {
@@ -70,8 +70,17 @@ func Args(s camwire.Settings) []string {
 
 // Apply stops the running capture and starts it again with s: the
 // encoder while the stream is on, the thermal reader while thermal is on.
+// Settings it refuses leave capture stopped.
 // The node calls it only with settings within its declared ranges.
 func (c *Camera) Apply(s camwire.Settings) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Stop first, so settings refused below leave the sensor off, never
+	// capturing at the old ones (Security on #3617, finding 2).
+	c.halt()
+	for len(c.frames) > 0 {
+		<-c.frames // frames at the old settings
+	}
 	if c.cfg.IR != nil {
 		if err := c.cfg.IR(s.IR); err != nil {
 			return err
@@ -81,12 +90,6 @@ func (c *Camera) Apply(s camwire.Settings) error {
 	}
 	if s.Thermal && (c.cfg.Thermal == nil || c.cfg.Shape == (camwire.Shape{})) {
 		return errors.New("capture: no thermal core fitted")
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.halt()
-	for len(c.frames) > 0 {
-		<-c.frames // frames at the old settings
 	}
 	stop := make(chan struct{})
 	c.stop = stop
@@ -144,10 +147,7 @@ func (c *Camera) run(stop chan struct{}, open func() (func() (camwire.Frame, err
 					if err != nil {
 						break
 					}
-					select {
-					case c.frames <- f:
-					default: // no stream is reading: drop it
-					}
+					c.offer(f)
 				}
 				close(done)
 				closer()
@@ -160,6 +160,24 @@ func (c *Camera) run(stop chan struct{}, open func() (func() (camwire.Frame, err
 			}
 		}
 	}()
+}
+
+// offer queues f, dropping the oldest frame queued when the buffer is
+// full, so a stream that starts reading gets the newest frames, and a
+// drop under load loses old frames rather than the ones a decoder needs
+// next (L3 on #3617, finding 4).
+func (c *Camera) offer(f camwire.Frame) {
+	for {
+		select {
+		case c.frames <- f:
+			return
+		default:
+		}
+		select {
+		case <-c.frames:
+		default:
+		}
+	}
 }
 
 // encoder starts rpicam-vid for s and reads its access units.

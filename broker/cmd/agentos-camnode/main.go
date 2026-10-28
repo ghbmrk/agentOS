@@ -134,7 +134,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	return serve(ln, camnode.Config{
+	err = serve(ln, camnode.Config{
 		Element:  el,
 		Store:    camnode.FileStore{Dir: *store},
 		Source:   cam,
@@ -148,6 +148,16 @@ func run(args []string) error {
 		Trial:    trial,
 		Log:      logf,
 	})
+	if trial {
+		// A trial that fails before or while serving restarts the board
+		// without tryboot, so the bootloader returns to the old slot now,
+		// not at the next power cycle (camnode ASSUMPTIONS CAM-b2-2).
+		logf("trial failed: restarting into the previous slot")
+		if rerr := restart(); rerr != nil {
+			return rerr
+		}
+	}
+	return err
 }
 
 // serve starts the node and serves ln until it fails. Everything after the

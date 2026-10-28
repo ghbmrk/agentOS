@@ -98,6 +98,9 @@ type Node struct {
 	settle uint64        // the image counter to raise once Serve starts; 0: none
 	up     chan struct{} // closed once Serve has settled the image
 
+	pumpOnce sync.Once
+	frames   chan camwire.Frame // the newest frame from the source
+
 	mu        sync.Mutex
 	staging   bool            // an update is being written
 	bundle    *camwire.Bundle // nil: no owner yet
@@ -115,7 +118,7 @@ func New(cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}, slots: make(chan struct{}, maxConns), up: make(chan struct{})}
+	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}, slots: make(chan struct{}, maxConns), up: make(chan struct{}), frames: make(chan camwire.Frame, 1)}
 	if n.tls, err = serverConfig(s, n.admits); err != nil {
 		return nil, err
 	}
@@ -300,23 +303,56 @@ func (n *Node) forget(c *tls.Conn) {
 
 // stream sends the source's frames to the core. The core sends nothing on
 // this channel (CAM-wire-12), so any byte from it, or its close, ends the
-// connection.
+// connection, and the stream returns at once even while no frame flows, so
+// it never holds a connection slot past its connection (L3 on #3617,
+// finding 1).
 func (n *Node) stream(c *tls.Conn) {
 	c.SetDeadline(time.Time{})
+	done := make(chan struct{})
 	go func() {
 		var b [1]byte
 		c.Read(b[:])
 		c.Close()
+		close(done)
 	}()
+	n.pumpOnce.Do(func() { go n.pump() })
 	for {
-		f, err := n.cfg.Source.Read()
-		if err != nil {
-			n.log("source failed")
+		var f camwire.Frame
+		select {
+		case <-done:
 			return
+		case f = <-n.frames:
 		}
 		c.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := camwire.WriteFrame(c, camwire.ToCore, n.cfg.Thermal, f); err != nil {
 			return
+		}
+	}
+}
+
+// pump is the source's one reader (#3588 item 1): it hands each frame to
+// whichever stream is live, dropping the oldest frame waiting when none
+// takes it, so a stream that starts gets the newest. A source that fails
+// is read again after a second.
+func (n *Node) pump() {
+	for {
+		f, err := n.cfg.Source.Read()
+		if err != nil {
+			n.log("source failed")
+			time.Sleep(time.Second)
+			continue
+		}
+		for {
+			select {
+			case n.frames <- f:
+			default:
+				select {
+				case <-n.frames:
+				default:
+				}
+				continue
+			}
+			break
 		}
 	}
 }

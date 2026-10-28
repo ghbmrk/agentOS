@@ -51,10 +51,11 @@ var (
 // running image. Its counter below the element's is a rollback; equal is a
 // settled image; above is an image to settle once the server is up
 // (Serve): a trial boot is marked good, then the counter raised; a boot
-// after a mark-good whose raise the power cut short only raises. A trial
-// also needs the owner's assertion over the manifest (NET-7), so a node
-// does not keep an image its owner did not approve even if the boot
-// partition was set offline to try one (ASSUMPTIONS CAM-b2-2).
+// after a mark-good whose raise the power cut short only raises. Above the
+// counter, the owner's assertion over the manifest is required whenever a
+// bundle is loaded (NET-7), so a node does not keep an image its owner did
+// not approve even if the boot partition was set offline to try it or to
+// boot it by default (ASSUMPTIONS CAM-b2-2, CAM-b2-3).
 func (n *Node) image() error {
 	counter, err := n.cfg.Element.Image()
 	if err != nil {
@@ -79,9 +80,10 @@ func (n *Node) image() error {
 	switch {
 	case m.Counter < counter:
 		return ErrRollback
-	case m.Counter == counter && n.cfg.Trial:
-		return ErrUpdate // a trial of the image already settled
 	case m.Counter == counter:
+		// Settled; on a trial boot, one already marked good and raised,
+		// whose service restarted within the same boot (L3 on #3617,
+		// finding 2).
 		return verifyRelease(n.cfg, s)
 	case n.cfg.Trial:
 		if n.bundle == nil {
@@ -90,7 +92,20 @@ func (n *Node) image() error {
 		if _, err := camwire.VerifyManifest(n.cfg.Manifest, n.node, n.cfg.Release, n.bundle.Owner, counter); err != nil {
 			return err
 		}
+	case n.bundle != nil:
+		// Not a trial, yet above the counter: a mark-good whose raise the
+		// power cut short, or a boot partition edited offline to make an
+		// unapproved slot the default. Storage cannot tell them apart, so
+		// the owner's assertion is required (Security on #3617, finding 1).
+		if _, err := camwire.VerifyManifest(n.cfg.Manifest, n.node, n.cfg.Release, n.bundle.Owner, counter); err != nil {
+			return err
+		}
 	default:
+		// A button start: no owner is loaded, and the button is physical
+		// presence. Raising only tightens, within the counter step.
+		if m.Counter-counter > camwire.MaxCounterStep {
+			return camwire.ErrCounter
+		}
 		if err := verifyRelease(n.cfg, s); err != nil {
 			return err
 		}
@@ -100,9 +115,9 @@ func (n *Node) image() error {
 }
 
 // verifyRelease checks the release signer's signature alone: a settled
-// image, or a raise the power cut short, needs no owner, since raising the
-// counter only tightens (an owner since re-provisioned would otherwise
-// leave the node unable to start its own image).
+// image needs no owner (an owner since re-provisioned would otherwise leave
+// the node unable to start its own image), nor does a raise on a button
+// start, which has no owner loaded.
 func verifyRelease(cfg Config, s camwire.SignedManifest) error {
 	if len(cfg.Release) != ed25519.PublicKeySize || !ed25519.Verify(cfg.Release, s.Manifest, s.Release[:]) {
 		return camwire.ErrRelease

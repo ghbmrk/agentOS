@@ -228,6 +228,9 @@ func TestUpdateStagesAndRollsBack(t *testing.T) {
 		"older":       {r.signManifest(newer, 2, r.owner, r.release), sha256.Sum256(newer), false, ErrRollback},
 		"factory":     {nil, sha256.Sum256(newer), false, ErrRollback},
 		"other key":   {r.signManifest(newer, 3, r.owner, ed25519.NewKeyFromSeed(make([]byte, 32))), sha256.Sum256(newer), false, camwire.ErrRelease},
+		// The boot partition edited offline to make an unapproved slot the
+		// default: not a trial, but the owner is still required.
+		"default slot": {r.signManifest(newer, 4, camwiretest.NewPasskey(t), r.release), sha256.Sum256(newer), false, camwire.ErrAssertion},
 	} {
 		r.manifest, r.image, r.trial = cfg.m, cfg.image, cfg.trial
 		if err := r.boot(false); !errors.Is(err, cfg.want) {
@@ -267,21 +270,37 @@ func TestUpdateStagesAndRollsBack(t *testing.T) {
 }
 
 // TestRaiseCompletesAfterMarkGood: a power cut between mark-good and the
-// raise boots the new image as the default; that start raises the counter
-// without marking good again and without the owner (raising only
-// tightens).
+// raise boots the new image as the default; that start verifies the
+// manifest with the loaded owner and raises the counter without marking
+// good again. On a button start no owner is loaded, so the raise needs the
+// release signature alone, within camwire.MaxCounterStep. Revert mutant:
+// the release-only arm taken while a bundle is loaded (Security on #3617,
+// finding 1).
 func TestRaiseCompletesAfterMarkGood(t *testing.T) {
 	r := newRig(t, true)
 	r.provision(5)
 	img := testImage()
 	r.manifest, r.image = r.signManifest(img, 2, r.owner, r.release), sha256.Sum256(img)
-	r.owner = camwiretest.NewPasskey(t) // re-provisioned since; not needed
 	if err := r.boot(false); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { c, _ := r.el.Image(); return c == 2 })
 	if _, _, _, good, _ := r.slots.state(); good != 0 {
 		t.Fatal("a non-trial boot marked good")
+	}
+
+	// A button start with a manifest another owner approved: no owner is
+	// loaded, the button is presence, and raising only tightens.
+	other := camwiretest.NewPasskey(t)
+	r.manifest = r.signManifest(img, 3, other, r.release)
+	if err := r.boot(true); err != nil {
+		t.Fatalf("button start: %v", err)
+	}
+	waitFor(t, func() bool { c, _ := r.el.Image(); return c == 3 })
+	// Past the counter step it is refused even then.
+	r.manifest = r.signManifest(img, 3+camwire.MaxCounterStep+1, other, r.release)
+	if err := r.boot(true); !errors.Is(err, camwire.ErrCounter) {
+		t.Fatalf("button start past the step: %v", err)
 	}
 }
 
