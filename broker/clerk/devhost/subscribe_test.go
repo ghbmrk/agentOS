@@ -255,7 +255,7 @@ func TestSubscribeEndsAtDeadlineAndResumes(t *testing.T) {
 	// the deadline its dial carried is at most sub after the dial, and
 	// short of it only by the few statements between the two (slack).
 	// The instance must not end before that deadline.
-	const slack = 50 * time.Millisecond
+	const slack = 10 * time.Millisecond
 	for i, end := range ended {
 		dl, at := d.deadlines[i], d.at[i]
 		if span := dl.Sub(at); dl.IsZero() || span > sub || span < sub-slack {
