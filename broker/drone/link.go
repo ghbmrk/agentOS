@@ -383,7 +383,7 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 // ahead, so no heartbeat held in transit passes.
 //
 // It holds the request lock for one try at a time (an anchor and a round
-// trip, at most freshTry), and before each further try lets every caller
+// trip, each at most freshTimeout), and before each further try lets every caller
 // then waiting for the lock go first, so a return waits behind at most one
 // try, however many fail (ASSUMPTIONS.md DRONE-sim-21).
 func (l *Link) FreshHeartbeat() (Heartbeat, error) {
