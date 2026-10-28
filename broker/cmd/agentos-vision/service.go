@@ -365,6 +365,7 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		case r.err != nil:
 			err = errCrashed
 		case check(r.v) != nil:
+			wipe(r.v)
 			err = errMalformed
 		default:
 			return r.v, nil
@@ -378,7 +379,8 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		go s.ready()
 		go func() {
 			select {
-			case <-done:
+			case r := <-done:
+				wipe(r.v) // a late template is zeroed too
 			case <-time.After(3 * s.cfg.CallTimeout):
 				fmt.Fprintln(s.log, "vision: runtime call stuck after the reload; exiting")
 				s.stuck()
@@ -386,6 +388,14 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		}()
 	}
 	return zero, err
+}
+
+// wipe zeroes a call's answer that will not be sent: an enrolment
+// template, the only answer that holds an encoding's bytes.
+func wipe[T any](v T) {
+	if b, ok := any(v).([]byte); ok {
+		clear(b)
+	}
 }
 
 // hold counts payloads held in and out of their slots.

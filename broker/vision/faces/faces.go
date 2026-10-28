@@ -255,8 +255,9 @@ func (f *Faces) Run(ctx context.Context, every time.Duration, logf func(string, 
 	}
 }
 
-// Enrolled reports an id whose template the last lend carried: the
-// client's own list (vision.Client.Enrolled), never the service's word.
+// Enrolled reports an id whose template the last lend carried, or, after
+// a lend that failed, both the last two did: the client's own list
+// (vision.Client.Enrolled), never the service's word.
 func (f *Faces) Enrolled(id string) bool {
 	f.lmu.Lock()
 	defer f.lmu.Unlock()
@@ -312,19 +313,21 @@ func (f *Faces) lend(ctx context.Context) error {
 			clear(tpl)
 		}
 	}
-	if err := f.Control.Lend(ctx, ts); err != nil {
-		// The service may still hold the last set; Enrolled keeps
-		// naming it, since the service may still name those faces.
-		return errors.Join(append(errs, err)...)
-	}
+	err := f.Control.Lend(ctx, ts)
 	lent := map[string]bool{}
-	for _, t := range ts {
-		lent[t.ID] = true
-	}
 	f.lmu.Lock()
+	for _, t := range ts {
+		// A lend that failed may or may not have landed, so Enrolled
+		// keeps only the ids both sets hold: one just un-enrolled or
+		// erased is refused at once, and one just enrolled waits for a
+		// lend that lands (fails closed).
+		if err == nil || f.lent[t.ID] {
+			lent[t.ID] = true
+		}
+	}
 	f.lent = lent
 	f.lmu.Unlock()
-	return errors.Join(errs...)
+	return errors.Join(append(errs, err)...)
 }
 
 func seal(key, plain, aad []byte) ([]byte, error) {

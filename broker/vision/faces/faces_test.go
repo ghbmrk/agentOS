@@ -61,7 +61,8 @@ func newFaces(t *testing.T) (*Faces, *control, *memContent) {
 
 // Enrolment takes a valid, new id, up to MaxEnrolled; every wrap-key read
 // is logged under svc-vision; the lend carries the template; and Enrolled
-// follows the last lend that landed, never the service.
+// follows the lends, never the service: after a failed lend it keeps only
+// ids both sets hold.
 func TestEnrolChecksAndLends(t *testing.T) {
 	ctx := context.Background()
 	f, c, m := newFaces(t)
@@ -90,11 +91,17 @@ func TestEnrolChecksAndLends(t *testing.T) {
 	if err := f.Unenrol(ctx, "alice"); err == nil {
 		t.Fatal("a failed lend was not returned")
 	}
-	if !f.Enrolled("alice") {
-		t.Fatal("a failed lend changed the list the service may still answer from")
+	if f.Enrolled("alice") {
+		t.Fatal("after a failed lend an un-enrolled id is still accepted")
+	}
+	if err := f.Enrol(ctx, "bob", "", fr); err == nil || f.Enrolled("bob") {
+		t.Fatalf("an id a failed lend carried is accepted: %v", err)
 	}
 	c.fail = nil
-	for i := range vision.MaxEnrolled {
+	if err := f.Sync(ctx); err != nil || !f.Enrolled("bob") {
+		t.Fatalf("a lend that lands: %v", err)
+	}
+	for i := range vision.MaxEnrolled - 1 { // bob holds one slot
 		id := "p" + string(rune('a'+i%26)) + string(rune('a'+i/26))
 		if err := f.Enrol(ctx, id, "", fr); err != nil {
 			t.Fatalf("enrolment %d: %v", i, err)

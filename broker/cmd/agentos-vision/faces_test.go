@@ -9,10 +9,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"net"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,7 +60,9 @@ type krig struct {
 	priv   ed25519.PrivateKey
 	k      *kernel.Kernel
 	now    int64
-	open   bool // OpenContent runs at boot
+	open   bool       // OpenContent runs at boot
+	mu     sync.Mutex // the kernel is called from Run's goroutine too
+	reads  int        // ReadFor calls, so a test knows a lend ran
 }
 
 func newKrig(t *testing.T, open bool) *krig {
@@ -90,13 +96,35 @@ func (r *krig) tick() int64 { r.now++; return r.now }
 
 // The content seam over the in-process kernel: what the content socket
 // (kernel/proc ContentSide) serves the side that holds the slots.
-func (r *krig) OpenSubject() (string, error) { return r.k.OpenSubject(r.tick()) }
+func (r *krig) OpenSubject() (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.k.OpenSubject(r.tick())
+}
 func (r *krig) Seal(sub, class string, data []byte) (faces.Hash, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	h, err := r.k.Seal(r.tick(), sub, "vision", class, data)
 	return faces.Hash(h), err
 }
 func (r *krig) ReadFor(h faces.Hash, lineage string) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
 	return r.k.ReadFor(r.tick(), kernel.Hash(h), lineage)
+}
+
+// erase erases sub as the owner does, under the kernel's lock.
+func (r *krig) erase(sub string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.k.Erase(r.tick(), sub)
+}
+
+func (r *krig) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
 }
 
 // slotsOf is the wiring's Slots over a clerk.Secrets store.
@@ -438,8 +466,17 @@ func TestErasedTemplateDroppedWithinTheDelay(t *testing.T) {
 	defer cancel()
 	every := 50 * time.Millisecond
 	done := make(chan struct{})
-	r.k.k.Erase(r.k.tick(), sub) // the kernel is called only under Run's lock below
 	go func() { r.fs.Run(ctx, every, nil); close(done) }()
+	// The erase comes after Run's first lend, so only a later, periodic
+	// lend can drop the template.
+	for before := r.k.readCount(); r.k.readCount() == before; {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(every / 5)
+	r.k.erase(sub)
+	if !r.svcHolds("alice") {
+		t.Fatal("setup: the template was dropped before the erase")
+	}
 	deadline := time.Now().Add(20 * every)
 	for r.svcHolds("alice") {
 		if time.Now().After(deadline) {
@@ -451,6 +488,23 @@ func TestErasedTemplateDroppedWithinTheDelay(t *testing.T) {
 	<-done
 	if got := r.sees(aliceFace); got != vision.FaceUnknown {
 		t.Fatalf("alice after the drop: %q", got)
+	}
+}
+
+// The scan finds an encoding written out as text, as a log line would hold
+// it, and as binary; and none in text that holds no encoding.
+func TestTheScanFindsAnEncoding(t *testing.T) {
+	for _, b := range [][]byte{
+		[]byte(fmt.Sprintf("face %v\n", strangerFace)),
+		[]byte(fmt.Sprintf(`{"v":[%g,%g,%g,%g,%g,%g]}`, strangerFace[0], strangerFace[1], strangerFace[2], strangerFace[3], strangerFace[4], strangerFace[5])),
+		append([]byte("x"), leBytes(strangerFace)...),
+	} {
+		if !near(b, strangerFace) {
+			t.Fatalf("missed in %q", b)
+		}
+	}
+	if near([]byte(`vision: 64x48 gray8 frame, 1 detections in 2ms`), strangerFace) {
+		t.Fatal("a plain log line read as an encoding")
 	}
 }
 
@@ -507,10 +561,48 @@ func leBytes(v []float32) []byte {
 	return b
 }
 
-// near reports a run of little-endian float32s anywhere in b, at any byte
-// offset, within cosine 0.99 of ref, or of ref scaled (the service keeps
-// templates at unit length): an encoding, however it was stored.
-func near(b []byte, ref []float32) bool {
+// near reports an encoding of ref in b, however it was stored: as binary
+// float32s (nearBinary) or written out as decimal numbers, as a log line
+// or JSON would hold it (nearText).
+func near(b []byte, ref []float32) bool { return nearBinary(b, ref) || nearText(b, ref) }
+
+// number is a decimal number as %v, %g, JSON or strconv writes one.
+var number = regexp.MustCompile(`-?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?`)
+
+// nearText reports len(ref) consecutive numbers in b's text within cosine
+// 0.99 of ref.
+func nearText(b []byte, ref []float32) bool {
+	var xs []float32
+	for _, m := range number.FindAll(b, -1) {
+		if f, err := strconv.ParseFloat(string(m), 32); err == nil {
+			xs = append(xs, float32(f))
+		}
+	}
+	for i := 0; i+len(ref) <= len(xs); i++ {
+		if cosine(xs[i:i+len(ref)], ref) > 0.99 {
+			return true
+		}
+	}
+	return false
+}
+
+func cosine(a, b []float32) float64 {
+	var dot, na, nb float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		na += float64(a[i]) * float64(a[i])
+		nb += float64(b[i]) * float64(b[i])
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / math.Sqrt(na*nb)
+}
+
+// nearBinary reports a run of little-endian float32s anywhere in b, at any
+// byte offset, within cosine 0.99 of ref, or of ref scaled (the service
+// keeps templates at unit length).
+func nearBinary(b []byte, ref []float32) bool {
 	n := len(ref)
 	for off := 0; off+4*n <= len(b); off++ {
 		var dot, nv, nr float64

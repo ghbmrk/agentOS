@@ -220,6 +220,7 @@ func TestStartRefusesRootAndRelativePaths(t *testing.T) {
 		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/y/c", UID: 1, GID: 1},
 		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/x/s", UID: 1, GID: 1},
 		{Path: "/bin/true", Socket: "/run/x/s", Control: "c", UID: 1, GID: 1},
+		{Path: "/bin/true", Socket: "/run/x/s", Control: "/run/x/./s", UID: 1, GID: 1},
 	} {
 		if s, err := Start(ctx, o); err == nil {
 			t.Errorf("Start(%+v) succeeded", o)

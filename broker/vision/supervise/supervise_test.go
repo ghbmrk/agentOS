@@ -314,7 +314,7 @@ func TestVisionIsJailed(t *testing.T) {
 }
 
 // The service gets its control socket as fd 4, at ControlPath beside its
-// socket in the same 0700 directory, and both paths go when it stops.
+// socket in the same 0700 directory.
 func TestVisionGetsItsControlSocket(t *testing.T) {
 	needRoot(t)
 	_, sock := service(t, Options{}, "control")

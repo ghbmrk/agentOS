@@ -107,7 +107,7 @@ func Start(ctx context.Context, o Options) (*Supervisor, error) {
 	if !filepath.IsAbs(o.Path) || !filepath.IsAbs(o.Socket) {
 		return nil, errors.New("supervise: the service and socket paths must be absolute")
 	}
-	if o.Control != "" && (filepath.Dir(o.Control) != filepath.Dir(o.Socket) || o.Control == o.Socket) {
+	if c, k := filepath.Clean(o.Control), filepath.Clean(o.Socket); o.Control != "" && (filepath.Dir(c) != filepath.Dir(k) || c == k) {
 		return nil, errors.New("supervise: the control socket is another path in the socket's directory")
 	}
 	if o.Backoff == (Backoff{}) {
