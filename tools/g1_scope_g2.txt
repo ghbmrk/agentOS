@@ -77,6 +77,10 @@ exempt-pr 3746
 # not name (D-198). Remove once #3750 merges.
 exempt-pr 3750
 
+# #3754 (ENF-e, #3661): broker/enforcer/nft/ (with its load/ and testdata/), which the G2 list does
+# not name (D-198). Remove once #3754 merges.
+exempt-pr 3754
+
 # Project machinery and records.
 allow .claude/
 allow .github/
