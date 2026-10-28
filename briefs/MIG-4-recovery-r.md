@@ -80,6 +80,8 @@ Only enrollment writes `handoff.RecipientEntry` (`cmd/agentos-enroll/main.go`, `
 **Needs:** r1 (approval), r2 (`ReplaceAndPut`); r1 edits `kernelsock.go`, so start after it merges (D-111). **Gate:** D-159 row.
 **Estimate:** 80k tokens.
 
+**As built (r3, for r4b):** the request file is `/var/lib/agentos/recovery-request` (agentosd's root-only state directory; unlock's `-recovery-request`), holding exactly the route-B approval bytes `RecoveryRotate(ctx, "", cosign)` returns; write it whole (temp file and rename). Unlock removes it once carried out. Kernel calls: `recoverycard` answers `{key}` (32 bytes) or `ErrNoRecoveryCard`; `recoverycarddone` wipes it. Owner client: `owner/kernelsock` `RecoveryCard`, `RecoveryCardDone`, `ErrNoRecoveryCard`. The hand-off tag is v8 (v7 went to MAIL-keys). The rotation runs after the cap, not before (ASSUMPTIONS MIG-4-recovery-r3-2).
+
 ## r4a: the route-A page and STATUS (#3409)
 
 **Scope:** owner side: `broker/cmd/agentosd` (the flow and the keeper client over `/run/agentos-keeper/rotate.sock`), `broker/localapi`, `broker/localsrv`, `broker/localui` (the page), and `broker/cmd/agentosd/backups.go`'s no-recipient STATUS line, which now names this page (superseding ASSUMPTIONS MIG-4-recovery-e4a-4). Reuse `card.NewDisplay` with `Rotate: &card.Parts{Recovery: true}` for show-and-confirm, and e4b's hardware-key tap.

@@ -190,6 +190,10 @@ type (
 	approvalRead struct {
 		Approval []byte `json:"approval"`
 	}
+	// recoveryCardRead is the new recovery key, seal.RecoveryLen bytes.
+	recoveryCardRead struct {
+		Key []byte `json:"key"`
+	}
 	// recipientArgs is the new recipient in its wire form and its approval.
 	recipientArgs struct {
 		Recipient []byte `json:"recipient"`
@@ -348,6 +352,19 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 			return nil, ErrArgs
 		}
 		return nil, h.SwitchRecipient(now, a.Recipient, a.Approval)
+	},
+	// The lost-card route (D-201 route B): the key the unlock step made at
+	// this boot, for the new card, until the owner confirms it.
+	"recoverycard": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		b, err := h.RecoveryCard()
+		if err != nil {
+			return nil, err
+		}
+		return recoveryCardRead{b}, nil
+	},
+	"recoverycarddone": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		h.RecoveryCardDone()
+		return nil, nil
 	},
 	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var f kernel.FirstAnchors
@@ -644,7 +661,7 @@ func init() {
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
 		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
-		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired,
+		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
 		ErrNoLinkKey, ErrLinkSign,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
@@ -882,6 +899,17 @@ func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
 func (o Owner) SwitchRecipient(r, approval []byte) error {
 	return o.Call("recipient", recipientArgs{r, approval}, nil)
 }
+
+// RecoveryCard is the recovery key the unlock step made at this boot on
+// the lost-card route, for the new card; ErrNoRecoveryCard once confirmed.
+func (o Owner) RecoveryCard() ([]byte, error) {
+	var r recoveryCardRead
+	err := o.Call("recoverycard", nil, &r)
+	return r.Key, err
+}
+
+// RecoveryCardDone wipes it, once the owner has confirmed the card.
+func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
 
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {
