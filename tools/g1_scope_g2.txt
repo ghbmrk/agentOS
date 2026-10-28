@@ -61,6 +61,10 @@ exempt-pr 3589
 # broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
 exempt-pr 3596
 
+# #3617 (CAM-server b2, #3513 part b): broker/camnode/ (with the new se/ and capture/) and the new
+# broker/cmd/agentos-camnode/, which the G2 list does not name (D-198). Remove once #3617 merges.
+exempt-pr 3617
+
 # Project machinery and records.
 allow .claude/
 allow .github/
