@@ -49,7 +49,7 @@ type fake struct {
 	times   int
 	loads   int
 	frames  int
-	last    []byte // the last frame's buffer, as the service lent it
+	last    []byte        // the last frame's buffer, as the service lent it
 	release chan struct{} // closed by Load: a hung call returns
 	inside  int
 	maxIn   int
