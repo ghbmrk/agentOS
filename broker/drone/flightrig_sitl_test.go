@@ -25,7 +25,9 @@ func flightRig(t *testing.T) (*rig, *Link) {
 	r := newRig(t, true)
 	stop := r.link.KeepAlive()
 	t.Cleanup(stop)
-	obs, err := Dial(r.sim.Dial(r.sim.Ports()[1]), r.key)
+	// Its own signing stream: two links on one stream would race each
+	// other's timestamps, and the aircraft refuses the older.
+	obs, err := dial(r.sim.Dial(r.sim.Ports()[1]), r.key, time.Now, holderLinkID+1)
 	if err != nil {
 		t.Fatal(err)
 	}

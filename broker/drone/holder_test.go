@@ -14,18 +14,20 @@ import (
 	"github.com/bluenviron/gomavlib/v3/pkg/message"
 )
 
-// scripted is a fake aircraft for the holder's read-back. It signs on one
-// stream with a clock that follows the key-holder's requests plus jump (a
-// boot moves it), answers TIMESYNC, SYS_STATUS requests, parameter reads
-// from params and empty mission lists, and answers each key-holder
-// heartbeat with its own when beat is set.
+// scripted is a fake aircraft for the holder's read-back. Its signing clock
+// works as ArduPilot's does: it refuses a frame signed more than a minute
+// behind it, rises to the newest frame it accepts and moves one unit a frame
+// it sends; a boot moves it ahead (boot). It signs on one stream, sends one
+// heartbeat at start with hello, answers TIMESYNC, SYS_STATUS requests,
+// parameter reads from params and empty mission lists, and answers each
+// key-holder heartbeat with its own when beat is set.
 type scripted struct {
 	t      *testing.T
 	k      Key
 	far    net.Conn
 	mu     sync.Mutex
 	ts     uint64
-	jump   uint64
+	hello  bool
 	beat   bool
 	rc     bool
 	params map[string]float32
@@ -34,9 +36,17 @@ type scripted struct {
 	cmds   []uint32 // the custom modes it was asked for
 }
 
-func (a *scripted) send(reqTS uint64, m message.Message) {
+// boot moves the aircraft's clock as a reboot does (GCS_Signing.cpp: a
+// minute past the last saved timestamp), and sends the booted aircraft's
+// first heartbeat.
+func (a *scripted) boot() {
+	a.set(func(a *scripted) { a.ts += uint64(70 * time.Second / tsUnit) })
+	go a.send(&common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR})
+}
+
+func (a *scripted) send(m message.Message) {
 	a.mu.Lock()
-	a.ts = max(a.ts+1, reqTS+1+a.jump)
+	a.ts++
 	b := signedFrame(a.t, a.k, 1, 1, 0, a.ts, m)
 	a.mu.Unlock()
 	a.far.Write(b)
@@ -47,6 +57,9 @@ func (a *scripted) run() {
 	if err != nil {
 		a.t.Error(err)
 		return
+	}
+	if a.hello {
+		go a.send(&common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR})
 	}
 	for {
 		fr, err := r.Read()
@@ -59,14 +72,19 @@ func (a *scripted) run() {
 		}
 		ts := fr.(*frame.V2Frame).SignatureTimestamp
 		a.mu.Lock()
+		if ts+uint64(time.Minute/tsUnit) < a.ts {
+			a.mu.Unlock()
+			continue // signed more than a minute behind the aircraft's clock
+		}
+		a.ts = max(a.ts, ts)
 		beat, rc, params, pos, mode := a.beat, a.rc, a.params, a.pos, a.mode
 		a.mu.Unlock()
 		switch m := fr.GetMessage().(type) {
 		case *common.MessageTimesync:
-			a.send(ts, &common.MessageTimesync{Tc1: 1, Ts1: m.Ts1})
+			a.send(&common.MessageTimesync{Tc1: 1, Ts1: m.Ts1})
 		case *common.MessageHeartbeat:
 			if beat {
-				a.send(ts, &common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, CustomMode: mode,
+				a.send(&common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, CustomMode: mode,
 					BaseMode: common.MAV_MODE_FLAG_SAFETY_ARMED | common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED})
 			}
 		case *common.MessageCommandLong:
@@ -76,19 +94,19 @@ func (a *scripted) run() {
 				if rc {
 					st.OnboardControlSensorsPresent = common.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
 				}
-				a.send(ts, st)
+				a.send(st)
 			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageGlobalPositionInt{}).GetID():
-				a.send(ts, &common.MessageGlobalPositionInt{Lat: e7(pos.Lat), Lon: e7(pos.Lon)})
+				a.send(&common.MessageGlobalPositionInt{Lat: e7(pos.Lat), Lon: e7(pos.Lon)})
 			case m.Command == common.MAV_CMD_DO_SET_MODE:
 				a.set(func(a *scripted) { a.mode = uint32(m.Param2); a.cmds = append(a.cmds, uint32(m.Param2)) })
-				a.send(ts, &common.MessageCommandAck{Command: m.Command, Result: common.MAV_RESULT_ACCEPTED})
+				a.send(&common.MessageCommandAck{Command: m.Command, Result: common.MAV_RESULT_ACCEPTED})
 			}
 		case *common.MessageParamRequestRead:
 			if v, ok := params[m.ParamId]; ok {
-				a.send(ts, paramValue(m.ParamId, v))
+				a.send(paramValue(m.ParamId, v))
 			}
 		case *common.MessageMissionRequestList:
-			a.send(ts, &common.MessageMissionCount{Count: 0, MissionType: m.MissionType})
+			a.send(&common.MessageMissionCount{Count: 0, MissionType: m.MissionType})
 		}
 	}
 }
@@ -168,7 +186,7 @@ func TestLinkReanchorsAfterAircraftBoot(t *testing.T) {
 	if v, err := l.GetParam("FENCE_ENABLE"); err != nil || v != 1 {
 		t.Fatalf("before the boot: %v, %v", v, err)
 	}
-	a.set(func(a *scripted) { a.jump = uint64(70 * time.Second / tsUnit) })
+	a.boot()
 	if v, err := l.GetParam("FENCE_ENABLE"); err != nil || v != 1 {
 		t.Fatalf("after the boot: %v, %v", v, err)
 	}
@@ -332,5 +350,20 @@ func TestKeepAliveBeatsEverySecond(t *testing.T) {
 	defer mu.Unlock()
 	if len(beats) != n {
 		t.Errorf("%d heartbeats after stop", len(beats)-n)
+	}
+}
+
+// REQ: NET-2
+// TestLinkFollowsTheAircraftClock: after boots that put the aircraft's
+// signing clock more than a minute ahead of the key-holder's, the aircraft
+// refuses frames signed by the key-holder's clock; the link signs no lower
+// than the newest verified frame from the aircraft, so it still anchors and
+// reads back.
+func TestLinkFollowsTheAircraftClock(t *testing.T) {
+	ahead := uint64(time.Now().Add(2*time.Minute).Sub(signatureEpoch) / tsUnit)
+	a := &scripted{ts: ahead, hello: true, params: map[string]float32{"FENCE_ENABLE": 1}}
+	l := scriptedLink(t, a)
+	if v, err := l.GetParam("FENCE_ENABLE"); err != nil || v != 1 {
+		t.Fatalf("an aircraft two boots ahead: %v, %v", v, err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gomavlib/v3/pkg/dialect"
@@ -63,8 +64,10 @@ func dialectRW() *dialect.ReadWriter {
 // since plus clockSlack; and a reply counts only when its timestamp is also
 // at or above the request's, because the aircraft raises its signing clock
 // to the newest timestamp it accepts (ASSUMPTIONS.md DRONE-sim-5). Neither
-// clock is trusted: a key-holder clock far behind the aircraft's gets no
-// anchor, and a capture from the future is above the bound.
+// clock is trusted: the link signs no lower than the newest verified frame
+// from the aircraft, so a key-holder clock behind the aircraft's still gets
+// an anchor once the aircraft has sent a frame, and a capture from the
+// future is above the bound.
 type Link struct {
 	conn io.ReadWriteCloser
 	rw   *dialect.ReadWriter
@@ -74,7 +77,14 @@ type Link struct {
 	wmu    sync.Mutex
 	seq    byte
 	lastTS uint64
+	stream byte // this link's signing link id
 	now    func() time.Time
+
+	// peerTS is the newest timestamp of any verified frame from the
+	// aircraft. The key-holder signs no lower: the aircraft refuses a frame
+	// signed more than a minute behind its own clock, which a boot sets a
+	// minute past its last saved value (ASSUMPTIONS.md DRONE-sim-4).
+	peerTS atomic.Uint64
 
 	req  sync.Mutex // one request/response exchange at a time
 	in   chan received
@@ -114,10 +124,10 @@ func (a *anchor) fresh(got received, now time.Time) bool {
 
 // Dial wraps conn as a signed link, starts reading it and sends a heartbeat.
 func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
-	return dial(conn, k, time.Now)
+	return dial(conn, k, time.Now, holderLinkID)
 }
 
-func dial(conn io.ReadWriteCloser, k Key, now func() time.Time) (*Link, error) {
+func dial(conn io.ReadWriteCloser, k Key, now func() time.Time, stream byte) (*Link, error) {
 	if !k.valid() {
 		return nil, errNoKey
 	}
@@ -125,7 +135,7 @@ func dial(conn io.ReadWriteCloser, k Key, now func() time.Time) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: now,
+	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: now, stream: stream,
 		in: make(chan received, 512), done: make(chan struct{}), streams: map[byte]uint64{}}
 	r, err := frame.NewReader(frame.ReaderConf{Reader: conn, DialectRW: l.rw, InKey: k.s()})
 	if err != nil {
@@ -175,6 +185,9 @@ func (l *Link) readLoop(r *frame.Reader) {
 			continue
 		}
 		l.streams[v2.SignatureLinkID] = ts
+		if ts > l.peerTS.Load() {
+			l.peerTS.Store(ts) // the read loop is the only writer
+		}
 		got := received{v2.GetMessage(), ts, v2.SignatureLinkID}
 		if hb, ok := got.msg.(*common.MessageHeartbeat); ok {
 			l.smu.Lock()
@@ -215,7 +228,7 @@ func (l *Link) send(m message.Message) (uint64, error) {
 	}
 	l.wmu.Lock()
 	defer l.wmu.Unlock()
-	ts := uint64(l.now().Sub(signatureEpoch) / tsUnit)
+	ts := max(uint64(l.now().Sub(signatureEpoch)/tsUnit), l.peerTS.Load())
 	if ts <= l.lastTS {
 		ts = l.lastTS + 1 // MAVLink 2 refuses a timestamp not above the stream's last
 	}
@@ -229,7 +242,7 @@ func (l *Link) send(m message.Message) (uint64, error) {
 	}
 	l.seq++
 	fr.Checksum = fr.GenerateChecksum(mp.CRCExtra())
-	fr.SignatureLinkID = holderLinkID
+	fr.SignatureLinkID = l.stream
 	fr.SignatureTimestamp = ts
 	fr.Signature = fr.GenerateSignature(l.key.s())
 	if err := l.w.Write(fr); err != nil {

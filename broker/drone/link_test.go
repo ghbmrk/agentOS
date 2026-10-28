@@ -198,7 +198,7 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 		defer far.Close()
 		hourAgo := uint64(time.Since(signatureEpoch.Add(time.Hour)) / tsUnit)
 		fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
-		l, err := dial(near, k, func() time.Time { return time.Now().Add(-2 * time.Hour) })
+		l, err := dial(near, k, func() time.Time { return time.Now().Add(-2 * time.Hour) }, holderLinkID)
 		if err != nil {
 			t.Fatal(err)
 		}
