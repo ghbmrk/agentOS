@@ -19,7 +19,8 @@ import (
 // (VIS-core part e). Load loads the models, replacing whatever was loaded,
 // and names them. Detect and Sound answer one frame or clip; the service
 // checks what they return as the client will. All may be called from
-// several goroutines.
+// several goroutines; a Load must make a call still running on the old
+// load return, since that call holds a frame and its slot until it does.
 type Runtime interface {
 	Load() (Model, error)
 	Detect(f vision.Frame) ([]vision.Detection, error)
@@ -75,8 +76,10 @@ type service struct {
 	sem  chan struct{}
 	load sync.Mutex // one load at a time
 
-	mu  sync.Mutex
-	cur loaded
+	mu   sync.Mutex
+	cur  loaded
+	held int // payloads allocated and not yet released
+	peak int // the most held at once
 }
 
 func newService(cfg Config, rt Runtime, log io.Writer) *service {
@@ -174,15 +177,29 @@ func (s *service) write(c net.Conn, r vision.Reply) bool {
 }
 
 // answer reads a checked request's payload from r and answers it. The
-// payload is read only once a slot is free, so at most Concurrent
-// payloads are held, and it is zeroed before the slot is given back.
+// payload is read only once a slot is free, and the slot is given back,
+// with the payload zeroed, only when nothing holds the payload any more:
+// a runtime call that outlives its deadline keeps both until it returns.
+// So at most Concurrent payloads are ever held.
 func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 	s.sem <- struct{}{}
-	defer func() { <-s.sem }()
 	var payload []byte
+	release := func() {
+		if payload != nil {
+			clear(payload)
+			s.hold(-1)
+		}
+		<-s.sem
+	}
+	handed := false // to a runtime call, which releases when it returns
+	defer func() {
+		if !handed {
+			release()
+		}
+	}()
 	if req.Bytes > 0 {
 		payload = make([]byte, req.Bytes)
-		defer clear(payload)
+		s.hold(1)
 		if _, err := io.ReadFull(r, payload); err != nil {
 			fmt.Fprintf(s.log, "vision: %s payload short of %d bytes\n", req.Op, req.Bytes)
 			return errReply(vision.BadRequest)
@@ -198,7 +215,8 @@ func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 		return vision.Reply{State: vision.StateReady, Device: vision.DeviceCPU, Model: cur.model.Name, SHA256: cur.model.SHA256}
 	case vision.OpDetect:
 		f := vision.Frame{Format: req.Format, Width: req.Width, Height: req.Height, Data: payload}
-		ds, err := call(s, cur, func() ([]vision.Detection, error) { return s.rt.Detect(f) },
+		handed = true
+		ds, err := call(s, cur, release, func() ([]vision.Detection, error) { return s.rt.Detect(f) },
 			func(ds []vision.Detection) error {
 				// No template is loaded in this build, so no id is enrolled
 				// (part c lends them).
@@ -210,7 +228,8 @@ func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 		fmt.Fprintf(s.log, "vision: %dx%d %s frame, %d detections in %s\n", req.Width, req.Height, req.Format, len(ds), since(start))
 		return vision.Reply{Detections: ds}
 	default: // vision.OpSound; Check admits no other op with a payload
-		ss, err := call(s, cur, func() ([]vision.Sound, error) { return s.rt.Sound(payload) }, vision.CheckSounds)
+		handed = true
+		ss, err := call(s, cur, release, func() ([]vision.Sound, error) { return s.rt.Sound(payload) }, vision.CheckSounds)
 		if err != nil {
 			return errReply(vision.Unavailable)
 		}
@@ -231,14 +250,17 @@ var (
 
 // call runs one runtime call within CallTimeout and checks its answer as
 // the client will: a runtime is not trusted to keep its own shape. A
-// failed call marks the load it ran on failed, so the next call reloads.
-func call[T any](s *service, on loaded, run func() (T, error), check func(T) error) (T, error) {
+// failed call marks the load it ran on failed, so the next call reloads;
+// a timed-out one also reloads at once, which makes it return (Runtime).
+// release runs when run returns, however late.
+func call[T any](s *service, on loaded, release func(), run func() (T, error), check func(T) error) (T, error) {
 	type result struct {
 		v   T
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
+		defer release()
 		defer func() {
 			if recover() != nil {
 				done <- result{err: errCrashed}
@@ -266,7 +288,18 @@ func call[T any](s *service, on loaded, run func() (T, error), check func(T) err
 	}
 	fmt.Fprintf(s.log, "vision: %s; reloading\n", err)
 	s.fail(on)
+	if err == errTimedOut {
+		go s.ready()
+	}
 	return zero, err
+}
+
+// hold counts payloads held in and out of their slots.
+func (s *service) hold(n int) {
+	s.mu.Lock()
+	s.held += n
+	s.peak = max(s.peak, s.held)
+	s.mu.Unlock()
 }
 
 // fail marks the load a failed call ran on as unavailable, so the next

@@ -45,10 +45,11 @@ type fake struct {
 	mu      sync.Mutex
 	loadErr error
 	model   Model
-	mode    string // "", "crash", "panic", "hang", "off-list", "outside", "enrolled", "plate"
+	mode    string // "", "crash", "panic", "hang", "slow", "off-list", "outside", "enrolled", "plate"
 	times   int
 	loads   int
 	frames  int
+	last    []byte // the last frame's buffer, as the service lent it
 	release chan struct{} // closed by Load: a hung call returns
 	inside  int
 	maxIn   int
@@ -102,6 +103,7 @@ func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
 	}
 	f.mu.Lock()
 	f.frames++
+	f.last = fr.Data
 	f.mu.Unlock()
 	d := vision.Detection{Class: vision.Person, Box: vision.Box{X0: 0, Y0: 0, X1: fr.Width, Y1: fr.Height}, Conf: 80, Face: vision.FaceUnknown}
 	switch mode {
@@ -112,6 +114,8 @@ func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
 	case "hang":
 		<-release
 		return nil, errors.New("released")
+	case "slow":
+		time.Sleep(300 * time.Millisecond)
 	case "off-list":
 		d.Class = "burglar"
 	case "outside":
@@ -337,7 +341,8 @@ func TestRunsWithNoAccelerator(t *testing.T) {
 func TestServiceCapsHeldPayloads(t *testing.T) {
 	f := newFake()
 	f.gate = make(chan struct{})
-	c := start(t, newService(Config{Concurrent: 2}, f, nil))
+	s := newService(Config{Concurrent: 2}, f, nil)
+	c := start(t, s)
 	var wg sync.WaitGroup
 	for range 6 {
 		wg.Add(1)
@@ -347,10 +352,56 @@ func TestServiceCapsHeldPayloads(t *testing.T) {
 		}()
 	}
 	time.Sleep(200 * time.Millisecond)
+	f.mu.Lock()
+	in := f.inside
+	f.mu.Unlock()
 	close(f.gate)
 	wg.Wait()
-	if f.maxIn > 2 {
-		t.Fatalf("%d calls in flight", f.maxIn)
+	if f.maxIn > 2 || in != 2 {
+		t.Fatalf("%d calls in flight at most, %d while blocked", f.maxIn, in)
+	}
+	if p := peak(s); p > 2 {
+		t.Fatalf("%d payloads held at once", p)
+	}
+}
+
+// A runtime call that outlives its deadline keeps its frame, so it keeps
+// its slot until it returns: timed-out calls cannot pile up frames.
+func TestTimedOutCallKeepsItsSlot(t *testing.T) {
+	f := newFake()
+	s := newService(Config{Concurrent: 1, CallTimeout: 50 * time.Millisecond}, f, nil)
+	c := start(t, s)
+	f.failNext("slow", 4)
+	for range 4 {
+		if _, err := c.Detect(context.Background(), gray(8, 8, 0)); !isCause(err, vision.Unavailable) {
+			t.Fatalf("slow call: %v", err)
+		}
+	}
+	f.mu.Lock()
+	maxIn := f.maxIn
+	f.mu.Unlock()
+	if p := peak(s); maxIn > 1 || p > 1 {
+		t.Fatalf("%d runtime calls and %d payloads at once, over Concurrent 1", maxIn, p)
+	}
+	if _, err := c.Detect(context.Background(), gray(8, 8, 0)); err != nil {
+		t.Fatalf("after the slow calls: %v", err)
+	}
+}
+
+// REQ: DEV-7
+//
+// A frame's buffer is zeroed once the runtime is done with it.
+func TestPayloadZeroedAfterUse(t *testing.T) {
+	f := newFake()
+	c := start(t, newService(Config{}, f, nil))
+	if _, err := c.Detect(context.Background(), gray(8, 8, 'Q')); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	last := f.last
+	f.mu.Unlock()
+	if len(last) != 64 || bytes.ContainsRune(last, 'Q') {
+		t.Fatalf("frame buffer after use: %q", last)
 	}
 }
 
@@ -424,3 +475,10 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 
 // isCause reports a failed call with cause c.
 func isCause(err error, c vision.Cause) bool { return err != nil && vision.CauseOf(err) == c }
+
+// peak is the most payloads s held at once.
+func peak(s *service) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
+}

@@ -314,9 +314,15 @@ func TestRepliesAreClosedVocabulary(t *testing.T) {
 // Malformed replies are unavailable: wrong counts, NaN boxes, an over-long
 // line, truncated JSON and a deadline.
 func TestClientRejectsMalformedReplies(t *testing.T) {
-	long := `{"detections":[` + strings.Repeat(`{"class":"person","box":{"x0":0,"y0":0,"x1":4,"y1":4},"conf":50},`, 600) + `]}`
+	// A valid reply padded past the bound with JSON whitespace: only the
+	// line bound refuses it.
+	long := `{"detections":[]` + strings.Repeat(" ", MaxReplyLine) + `}`
+	over := make([]Detection, MaxDetections+1) // each valid, so only the count refuses them
+	for i := range over {
+		over[i] = person(0, 0, 4, 4, 50)
+	}
 	for name, reply := range map[string]func(Request) []byte{
-		"wrong count":    func(Request) []byte { return detectReply(t, make([]Detection, MaxDetections+1)...) },
+		"wrong count":    func(Request) []byte { return detectReply(t, over...) },
 		"NaN box":        fixed(`{"detections":[{"class":"person","box":{"x0":NaN,"y0":0,"x1":4,"y1":4},"conf":50}]}`),
 		"infinite conf":  fixed(`{"detections":[{"class":"person","box":{"x0":0,"y0":0,"x1":4,"y1":4},"conf":1e999}]}`),
 		"over-long line": fixed(long),
