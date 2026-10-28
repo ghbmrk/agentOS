@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/camwire"
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // Store keeps signed bundles by their SHA-256, so the element's record
@@ -34,33 +35,13 @@ func (s FileStore) path(d [32]byte) string {
 	return filepath.Join(s.Dir, hex.EncodeToString(d[:])+storeSuffix)
 }
 
-// Put writes p under its digest: a temporary file, synced, renamed, then
-// the directory synced.
+// Put writes p under its digest, durably (durable.WriteFile: a synced
+// temporary file renamed into place, then the directory synced).
 func (s FileStore) Put(p []byte) error {
 	if len(p) > camwire.MaxSigned {
 		return camwire.ErrMalformed
 	}
-	f, err := os.CreateTemp(s.Dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if _, err := f.Write(p); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, s.path(sha256.Sum256(p))); err != nil {
-		return err
-	}
-	return s.syncDir()
+	return durable.WriteFile(s.path(sha256.Sum256(p)), p, 0o600)
 }
 
 // Get reads the bundle named digest and checks it hashes to its name.
@@ -99,11 +80,4 @@ func (s FileStore) remove(keep string) error {
 	return s.syncDir()
 }
 
-func (s FileStore) syncDir() error {
-	d, err := os.Open(s.Dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+func (s FileStore) syncDir() error { return durable.SyncDir(s.Dir) }
