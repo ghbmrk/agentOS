@@ -48,7 +48,8 @@
 // root, with no TPM: it reads one request on stdin, opens the store with the
 // Owner Card factor the request carries, checks the kernel's head-signed
 // approval, puts the new key's slot and backup recipient in place in one
-// write, and answers one word on stdout (rotateWord).
+// write, and answers one word on stdout (rotateWord). A store that already
+// holds the approved key and recipient answers ok and is left as it is.
 //
 // Enrollment runs as root, and -anchor-dir's parent may be the kernel uid's
 // to write. So the anchor's directory is removed, made and handed to the
@@ -1112,8 +1113,17 @@ func rotateRecovery(c config, in io.Reader) error {
 	}
 	defer unlock()
 	st, err := seal.Unlock(c.storePath(), f)
+	// A retry after the owner side lost an earlier ok (MIG-4-recovery-r4c):
+	// that run made next the recovery key, so the old card's key opens
+	// nothing now. If next opens the store, the request can only be
+	// answered as already done; anything else is still the factor's
+	// refusal.
+	applied := false
 	if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
-		return errFactor
+		if st, err = seal.Unlock(c.storePath(), seal.Recovery{Key: r.Next}); err != nil {
+			return errFactor
+		}
+		applied = true
 	} else if err != nil {
 		return fmt.Errorf("%w: %w", errStoreOpen, err)
 	}
@@ -1136,12 +1146,23 @@ func rotateRecovery(c config, in io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errStoreOpen, err)
 	}
-	if a.Old != old {
-		return errStale
-	}
 	next, err := backup.RecipientFor(r.Next)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errStoreOpen, err)
+	}
+	// The store already holds the approved key's recipient, which every
+	// writer puts with that key's recovery slot: the rotation is done,
+	// so the answer is ok and nothing is written. The owner side then asks
+	// the kernel to switch, as after the first ok (BAK-1).
+	if old == a.Next && next.ID() == a.Next {
+		log.Print("agentos-enroll: the store already holds the approved key and recipient; nothing to write")
+		return nil
+	}
+	if applied {
+		return errFactor
+	}
+	if a.Old != old {
+		return errStale
 	}
 	if next.ID() != a.Next {
 		return errApproval

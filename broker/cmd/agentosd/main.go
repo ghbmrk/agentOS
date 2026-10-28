@@ -636,6 +636,11 @@ func main() {
 			cfg.PageSocket.BackupNotes = bs.pageLines
 			if cfg.PageSocket.Passkeys != nil {
 				cfg.PageSocket.Backups = &backupChoice{K: *seat, S: bs}
+				// The Recovery key page (REC-4, r4a): its tap is on the
+				// same name, and a switch the kernel missed is retried.
+				rf := newRecoveryFlow(*seat, bs)
+				cfg.PageSocket.Recovery = rf
+				go rf.run(ctx, backupCheckEvery)
 			}
 		}
 		go bs.run(ctx, backupCheckEvery)
