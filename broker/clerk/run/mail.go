@@ -337,6 +337,18 @@ type MailConfig struct {
 	// returns its control connection (imapsmtp.Config.Conn, #2937 gap 2):
 	// the only process that parses IMAP. An IMAP account needs it.
 	Conn func(context.Context) (*net.UnixConn, error)
+	// DKIM looks up the key records of a read's signatures (inbox.KeyNames'
+	// names; inbox.LookupDKIM through Guard's resolver in the process). It
+	// runs once per read, and every judgement in that read sees its keys.
+	// Nil leaves World's own DKIMKeys (tests and the eval).
+	DKIM func(ctx context.Context, names []string) map[string]string
+
+	// Test seams for the host's own world (world.go), nil in the process:
+	// the clock, the provider tables (inbox.Shipped when nil), and a wrap
+	// around each PlanSenders read.
+	now     func() time.Time
+	tables  *inbox.Providers
+	senders func(ctx context.Context, read func(context.Context) ([]string, error)) ([]string, error)
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 	// gmail is the Gmail API's root, token endpoint, consent page and
@@ -384,9 +396,20 @@ func openMail(ctx context.Context, dir string, sec *clerk.Secrets, c MailConfig,
 	}
 	today := c.today()
 	opened, status := lastOpened(ctx, box, dir, c.Sealer, slotOf(s), today, ms, mark)
+	var keys map[string]string
+	if c.DKIM != nil {
+		raws := make([][]byte, len(ms))
+		for i := range ms {
+			raws[i] = ms[i].Raw
+		}
+		keys = c.DKIM(ctx, inbox.KeyNames(raws))
+	}
 	m := &Mail{Status: status, world: func() inbox.World {
 		w := c.World()
 		w.LastOpened = opened
+		if c.DKIM != nil {
+			w.DKIMKeys = keys
+		}
 		return w
 	}}
 	if m.Account, err = inbox.NewAccount(c.Anchors, c.HandleSecret, m.world, inbox.Read(ctx, c.Ask, ms), box, retention(s, c), c.OneClickBody); err != nil {

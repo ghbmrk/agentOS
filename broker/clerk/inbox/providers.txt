@@ -1,0 +1,13 @@
+# The mail clerk's shipped provider tables (MAIL-world-a, VRB-2's alert guard
+# and provider table). One entry per line, each ending with "-- <source>":
+#   esp <domain>                              a provider-table domain
+#   authserv <api-or-host-suffix> <id>        the provider's authserv-id
+#   security <api-or-host-suffix> <sender>    a provider security sender
+# A key with no dot is an API account's API ("gmail"); one with a dot is an
+# IMAP host suffix, matched in A-labels on dot boundaries. An entry no
+# provider document or header sample backs is left out, which fails closed.
+# No esp entry is shipped yet: none was cited (#3522, ASSUMPTIONS MAIL-world-a-4).
+authserv gmail mx.google.com -- Gmail Help 180707 "Check if your Gmail message is authenticated" (Show original: Authentication-Results: mx.google.com)
+authserv gmail.com mx.google.com -- Gmail Help 180707, as above; imap.gmail.com delivers the same Gmail mailbox
+security gmail accounts.google.com -- Google Account Help 2590353 "Respond to security alerts" (alerts from no-reply@accounts.google.com)
+security gmail.com accounts.google.com -- Google Account Help 2590353, as above

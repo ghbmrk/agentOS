@@ -39,6 +39,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/netguard"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
 
@@ -204,15 +205,23 @@ func serve(ctx context.Context, c config, anchors []key.PublicKey, keyFile *os.F
 	if err != nil {
 		return err
 	}
+	guard, err := netGuard(ctx, &netguard.Sources{}, netWatchEvery)
+	if err != nil {
+		return err
+	}
 	cfg := run.MailConfig{
 		Anchors:      anchors,
 		HandleSecret: handles,
 		Sealer:       sealer,
 		Ask:          func(context.Context, string) (string, error) { return "", errNoReader },
-		// The world's sources are MAIL-world's. An empty one dates each read
-		// by this process's own clock (D-154 rule 5) and lets VRB-2 pass no
-		// unsubscribe.
-		World: func() inbox.World { return inbox.World{} },
+		// Every name this process resolves, for IMAP, Gmail and the key
+		// records, goes through the learned resolver (DEV-2).
+		Guard: guard,
+		// The world is the host's own (run's world.go, D-154 rule 5): no
+		// World is passed, and each read looks up its own key records.
+		DKIM: func(ctx context.Context, names []string) map[string]string {
+			return inbox.LookupDKIM(ctx, guard.Resolver(), names)
+		},
 	}
 	cfg.Conn = imapConn(c.imapConn)
 	h := run.NewMailHost(ctx, c.dir, sec, cfg)

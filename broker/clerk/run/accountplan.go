@@ -65,47 +65,42 @@ func (h *MailHost) accountPlan() (AccountPlanned, error) {
 	}
 	h.mu.Lock()
 	changes, stop := h.changes, h.stop
-	s, serr := readMail(h.dir)
 	if p := h.planned.plan; p != nil && h.planned.changes == changes && stop == nil {
 		h.mu.Unlock()
 		return *p, nil
 	}
-	h.mu.Unlock()
 	if stop != nil {
+		h.mu.Unlock()
 		d, _ := stopped(stop)
 		return AccountPlanned{Reason: d}, nil
 	}
+	s, serr := readMail(h.dir)
 	var domains, connected []string
 	switch {
 	case errors.Is(serr, ErrNoMailAccount):
 	case serr != nil:
+		h.mu.Unlock()
 		return AccountPlanned{}, errMailUnreadable
 	default:
 		if s.API == APIGmail {
 			connected = []string{APIGmail} // the table's Gmail entry has the API's own ID
 		}
 		// Over IMAP no item is marked connected: IMAP is Full power,
-		// whichever provider serves it (A22, DEP-3).
-		box, err := boxFor(s, h.sec, h.cfg)
-		if err == nil {
-			domains, err = box.PlanSenders(h.ctx, h.authServ())
-		}
+		// whichever provider serves it (A22, DEP-3). The senders read is
+		// the worker's, shared: one read serves both (planSenders).
+		var err error
+		domains, err = h.planSenders(false)
 		if stops(err) {
-			h.mu.Lock()
-			if h.changes == changes {
-				// As a step refused this way (Do): nothing is sent until the
-				// owner signs in again, and STATUS says so (#2708 item 2).
-				why, next := trouble(err, nil)
-				h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, err
-			}
 			h.mu.Unlock()
 			d, _ := stopped(err)
 			return AccountPlanned{Reason: d}, nil
 		}
 		if err != nil {
+			h.mu.Unlock()
 			return AccountPlanned{}, err
 		}
 	}
+	h.mu.Unlock()
 	var p AccountPlanned
 	for _, it := range accounts.Build(t, domains, nil) { // ONB-3's device kinds are not on main yet
 		p.Items = append(p.Items, PlanItem{ID: it.ID, Name: it.Name, Kind: it.Kind, Group: it.Group, Source: string(it.Source),

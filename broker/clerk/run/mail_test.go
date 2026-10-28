@@ -429,6 +429,61 @@ func TestAFailedOpenedReadOffersNoUnsubscribe(t *testing.T) {
 	}
 }
 
+// keyServer serves the fixture's key records as TXT answers, rooted.
+type keyServer map[string]string
+
+func (k keyServer) LookupTXT(_ context.Context, name string) ([]string, error) {
+	if p, ok := k[strings.TrimSuffix(name, ".")]; ok && strings.HasSuffix(name, ".") {
+		return []string{"v=DKIM1; k=rsa; p=" + p}, nil
+	}
+	return nil, errors.New("no such name")
+}
+
+// A read looks up its own mails' key records (MAIL-world-a): with DKIM set
+// to LookupDKIM over a resolver serving the fixture's key, the signed bulk
+// mail passes VRB-2; with nothing served its signature fails (dkim-fail); with DKIM nil the
+// world's own keys are used.
+func TestReadUsesItsOwnKeyLookups(t *testing.T) {
+	w, raw := fixtureWorld(t)
+	served := w.DKIMKeys
+	reason := func(dkim func(context.Context, []string) map[string]string, keys map[string]string) string {
+		t.Helper()
+		srv := imaptest.Start(t)
+		srv.Deliver("INBOX", strings.ReplaceAll(string(raw), "\r\n", "\n"))
+		dir := shortDir(t)
+		sec, err := OpenSecrets(dir, testSealer())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+			t.Fatal(err)
+		}
+		cfg := mailConfig()
+		tw := w
+		tw.DKIMKeys = keys
+		cfg.World = func() inbox.World { return tw }
+		cfg.DKIM = dkim
+		m, err := OpenMail(context.Background(), dir, sec, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _ := inbox.Evaluate(raw, m.world())
+		return r
+	}
+	lookup := func(k keyServer) func(context.Context, []string) map[string]string {
+		return func(ctx context.Context, names []string) map[string]string { return inbox.LookupDKIM(ctx, k, names) }
+	}
+	if r := reason(lookup(keyServer(served)), nil); r != inbox.ROK {
+		t.Fatalf("with its own lookups serving the key: %s, want ok", r)
+	}
+	if r := reason(lookup(keyServer{}), served); r != inbox.RDKIMFail {
+		t.Fatalf("with its own lookups serving nothing: %s, want dkim-fail (the world's keys are not used)", r)
+	}
+	if r := reason(nil, served); r != inbox.ROK {
+		t.Fatalf("with DKIM nil: %s, want ok from the world's keys", r)
+	}
+}
+
 // Within the day, a re-read reads only under a Mark that differs from the
 // last read's, or under any Mark once after a first failed read (retry); a
 // Mark that cannot be taken or compared waits for the next day, whatever
