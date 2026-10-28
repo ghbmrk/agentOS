@@ -196,20 +196,20 @@ func TestLeptonFrames(t *testing.T) {
 	}
 }
 
-// The helper encoder: when the test binary runs with CAPTURE_HELPER set it
-// writes its arguments to that file, then a generated stream of frames
+// The helper encoder: when the test binary runs as -capture-helper FILE N
+// it writes its remaining arguments to FILE, then a generated stream of frames
 // access units, and exits.
 func TestMain(m *testing.M) {
-	if out := os.Getenv("CAPTURE_HELPER"); out != "" {
-		args := os.Args[1:]
-		for i, a := range args {
-			if a == "--" {
-				args = args[i+1:]
-				break
-			}
+	// The encoder runs with an empty environment, so the helper takes its
+	// file and frame count as its first two arguments.
+	if len(os.Args) > 3 && os.Args[1] == "-capture-helper" {
+		out := os.Args[2]
+		n, _ := strconv.Atoi(os.Args[3])
+		args := os.Args[4:]
+		if len(args) > 0 && args[0] == "--" {
+			args = args[1:]
 		}
 		os.WriteFile(out, []byte(strings.Join(args, " ")), 0o600)
-		n, _ := strconv.Atoi(os.Getenv("CAPTURE_FRAMES"))
 		os.Stdout.Write(cat(sps, pps, idr))
 		for range n {
 			os.Stdout.Write(pslice)
@@ -225,11 +225,9 @@ func TestMain(m *testing.M) {
 // turned off starts nothing. Revert mutant: run without its restart loop.
 func TestCameraRunsEncoder(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
-	t.Setenv("CAPTURE_HELPER", argsFile)
-	t.Setenv("CAPTURE_FRAMES", "3")
 	var irs []uint8
 	c := New(Config{
-		Encoder: []string{os.Args[0], "--"},
+		Encoder: []string{os.Args[0], "-capture-helper", argsFile, "3", "--"},
 		IR:      func(m uint8) error { irs = append(irs, m); return nil },
 		Restart: 10 * time.Millisecond,
 	})
@@ -327,11 +325,9 @@ func TestCaptureOpensNoSocket(t *testing.T) {
 // finding 4).
 func TestCameraFailsClosedAndKeepsNewest(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args")
-	t.Setenv("CAPTURE_HELPER", argsFile)
-	t.Setenv("CAPTURE_FRAMES", "1000")
 	fail := false
 	c := New(Config{
-		Encoder: []string{os.Args[0], "--"},
+		Encoder: []string{os.Args[0], "-capture-helper", argsFile, "1000", "--"},
 		IR: func(uint8) error {
 			if fail {
 				return errors.New("ir: write failed")

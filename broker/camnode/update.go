@@ -101,8 +101,9 @@ func (n *Node) image() error {
 			return err
 		}
 	default:
-		// A button start: no owner is loaded, and the button is physical
-		// presence. Raising only tightens, within the counter step.
+		// No bundle committed: a button start, or a start before the
+		// first bundle. The node is unowned, so there is no owner to ask;
+		// raising only tightens, within the counter step.
 		if m.Counter-counter > camwire.MaxCounterStep {
 			return camwire.ErrCounter
 		}
@@ -116,8 +117,8 @@ func (n *Node) image() error {
 
 // verifyRelease checks the release signer's signature alone: a settled
 // image needs no owner (an owner since re-provisioned would otherwise leave
-// the node unable to start its own image), nor does a raise on a button
-// start, which has no owner loaded.
+// the node unable to start its own image), nor does a raise on a node with
+// no bundle committed, which has no owner.
 func verifyRelease(cfg Config, s camwire.SignedManifest) error {
 	if len(cfg.Release) != ed25519.PublicKeySize || !ed25519.Verify(cfg.Release, s.Manifest, s.Release[:]) {
 		return camwire.ErrRelease

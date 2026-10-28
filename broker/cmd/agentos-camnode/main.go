@@ -40,7 +40,7 @@ func main() {
 	}
 }
 
-func run(args []string) error {
+func run(args []string) (err error) {
 	fs := flag.NewFlagSet("agentos-camnode", flag.ContinueOnError)
 	listen := fs.String("listen", ":8443", "the stream port, when no socket is passed as fd 3")
 	element := fs.String("element", "/dev/i2c-1", "the secure element's i2c-dev node")
@@ -94,6 +94,20 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if trial {
+		// A trial that fails from here on restarts the board without
+		// tryboot, so the bootloader returns to the old slot now, not at the
+		// next power cycle (camnode ASSUMPTIONS CAM-b2-2).
+		defer func() {
+			if err == nil {
+				return
+			}
+			logf("trial failed: restarting into the previous slot")
+			if rerr := restart(); rerr != nil {
+				err = rerr
+			}
+		}()
+	}
 	slots, err := newSlots(*autoboot, *slotsDir, [2]string{*slotA, *slotB}, [2]int{*partA, *partB}, part)
 	if err != nil {
 		return err
@@ -134,7 +148,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	err = serve(ln, camnode.Config{
+	return serve(ln, camnode.Config{
 		Element:  el,
 		Store:    camnode.FileStore{Dir: *store},
 		Source:   cam,
@@ -148,16 +162,6 @@ func run(args []string) error {
 		Trial:    trial,
 		Log:      logf,
 	})
-	if trial {
-		// A trial that fails before or while serving restarts the board
-		// without tryboot, so the bootloader returns to the old slot now,
-		// not at the next power cycle (camnode ASSUMPTIONS CAM-b2-2).
-		logf("trial failed: restarting into the previous slot")
-		if rerr := restart(); rerr != nil {
-			return rerr
-		}
-	}
-	return err
 }
 
 // serve starts the node and serves ln until it fails. Everything after the

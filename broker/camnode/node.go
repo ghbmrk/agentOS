@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/camwire"
@@ -99,7 +100,8 @@ type Node struct {
 	up     chan struct{} // closed once Serve has settled the image
 
 	pumpOnce sync.Once
-	frames   chan camwire.Frame // the newest frame from the source
+	frames   chan tagged   // the newest frame from the source
+	epoch    atomic.Uint64 // raised after each Source.Apply
 
 	mu        sync.Mutex
 	staging   bool            // an update is being written
@@ -118,7 +120,7 @@ func New(cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}, slots: make(chan struct{}, maxConns), up: make(chan struct{}), frames: make(chan camwire.Frame, 1)}
+	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}, slots: make(chan struct{}, maxConns), up: make(chan struct{}), frames: make(chan tagged, 1)}
 	if n.tls, err = serverConfig(s, n.admits); err != nil {
 		return nil, err
 	}
@@ -317,12 +319,16 @@ func (n *Node) stream(c *tls.Conn) {
 	}()
 	n.pumpOnce.Do(func() { go n.pump() })
 	for {
-		var f camwire.Frame
+		var t tagged
 		select {
 		case <-done:
 			return
-		case f = <-n.frames:
+		case t = <-n.frames:
 		}
+		if t.epoch != n.epoch.Load() {
+			continue // captured under settings since replaced
+		}
+		f := t.f
 		c.SetWriteDeadline(time.Now().Add(writeTimeout))
 		if err := camwire.WriteFrame(c, camwire.ToCore, n.cfg.Thermal, f); err != nil {
 			return
@@ -330,21 +336,33 @@ func (n *Node) stream(c *tls.Conn) {
 	}
 }
 
+// tagged is a frame and the settings epoch its read began in.
+type tagged struct {
+	f     camwire.Frame
+	epoch uint64
+}
+
 // pump is the source's one reader (#3588 item 1): it hands each frame to
 // whichever stream is live, dropping the oldest frame waiting when none
-// takes it, so a stream that starts gets the newest. A source that fails
-// is read again after a second.
+// takes it, so a stream that starts gets the newest. Each frame carries the
+// epoch read before its Read began; apply raises the epoch after
+// Source.Apply returns, so a frame whose read began under replaced
+// settings, waiting here or in the pump's hand, is never sent (L3 on
+// #3617, delta finding 1). A source that fails is read again after a
+// second.
 func (n *Node) pump() {
 	for {
+		e := n.epoch.Load()
 		f, err := n.cfg.Source.Read()
 		if err != nil {
 			n.log("source failed")
 			time.Sleep(time.Second)
 			continue
 		}
+		t := tagged{f, e}
 		for {
 			select {
-			case n.frames <- f:
+			case n.frames <- t:
 			default:
 				select {
 				case <-n.frames:
@@ -472,7 +490,11 @@ func (n *Node) apply(p []byte, from [camwire.PointLen]byte, first bool) error {
 		}
 		n.conns[c] = now
 	}
-	if err := n.cfg.Source.Apply(b.Settings); err != nil {
+	err = n.cfg.Source.Apply(b.Settings)
+	// Raised even when Apply failed: whatever the source captured before
+	// is under settings no longer the node's.
+	n.epoch.Add(1)
+	if err != nil {
 		return ErrSource
 	}
 	return nil

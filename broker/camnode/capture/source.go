@@ -1,14 +1,15 @@
 package capture
 
 import (
+	"context"
 	"errors"
 	"io"
-	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/camwire"
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // Config is the board's capture as the binary declares it.
@@ -185,7 +186,10 @@ func (c *Camera) encoder(s camwire.Settings) (func() (camwire.Frame, error), fun
 	if len(c.cfg.Encoder) == 0 {
 		return nil, nil, errors.New("capture: no encoder")
 	}
-	cmd := exec.Command(c.cfg.Encoder[0], append(append([]string{}, c.cfg.Encoder[1:]...), Args(s)...)...)
+	// The encoder gets an empty environment: nothing of the node's, and it
+	// needs none (childproc, P3-4b-3r-env-r8).
+	cmd := childproc.Command(context.Background(), childproc.NewEnv(), childproc.Options{WaitDelay: time.Second},
+		c.cfg.Encoder[0], append(append([]string{}, c.cfg.Encoder[1:]...), Args(s)...)...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, err
@@ -196,7 +200,7 @@ func (c *Camera) encoder(s camwire.Settings) (func() (camwire.Frame, error), fun
 	var once sync.Once
 	closer := func() {
 		once.Do(func() {
-			cmd.Process.Kill()
+			cmd.Kill()
 			cmd.Wait()
 		})
 	}
