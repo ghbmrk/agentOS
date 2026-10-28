@@ -64,21 +64,22 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 // kernel hands that clerk's key to; each part is checked and a clerk is
 // named once.
 func TestClerkKeyFlags(t *testing.T) {
-	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/clerk-mail.key,agentos-keeper-mail.service",
-		"-clerk-key", "driver-hue=/run/agentos-kernel/clerk-driver-hue.key,agentos-driver@hue.service"), io.Discard)
-	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/clerk-mail.key", Unit: "agentos-keeper-mail.service"}) ||
-		c.ClerkKeys["driver-hue"].Unit != "agentos-driver@hue.service" {
+	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/clerk-mail.key,/agentos-keeper.slice/agentos-keeper-mail.service",
+		"-clerk-key", "driver-hue=/run/agentos-kernel/clerk-driver-hue.key,/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service"), io.Discard)
+	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/clerk-mail.key", Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}) ||
+		c.ClerkKeys["driver-hue"].Cgroup != "/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service" {
 		t.Fatalf("parse: %+v %v", c.ClerkKeys, err)
 	}
 	for _, bad := range []string{
-		"mail=/k,agentos-keeper-mail.service,x", "Mail=/k,agentos-keeper-mail.service", "mail=k,agentos-keeper-mail.service",
-		"mail=/k,agentos-keeper-mail", "mail=/k", "=/k,a.service", "mail=/k,a b.service", "mail=/k,../a.service",
+		"mail=/k,/s.slice/a.service,x", "Mail=/k,/s.slice/a.service", "mail=k,/s.slice/a.service", "mail=/k,agentos-keeper-mail.service",
+		"mail=/k,/s.slice/agentos-keeper-mail", "mail=/k", "=/k,/a.service", "mail=/k,/s.slice/a b.service", "mail=/k,/s.slice/../a.service",
+		"mail=/k,/s.slice//a.service", "mail=/k,/s.slice/a.service/", "mail=/k,/",
 	} {
 		if _, err := parse(append(slices.Clone(good), "-clerk-key", bad), io.Discard); err == nil {
 			t.Errorf("-clerk-key %q accepted", bad)
 		}
 	}
-	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,a.service", "-clerk-key", "mail=/b,b.service")
+	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,/a.service", "-clerk-key", "mail=/b,/b.service")
 	if _, err := parse(twice, io.Discard); err == nil {
 		t.Error("a clerk's key given twice was accepted")
 	}

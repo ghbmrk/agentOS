@@ -256,7 +256,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 			}
 			defer ln.Close()
 			go func() {
-				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Unit, &root))
+				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Cgroup, &root))
 			}()
 		}
 	}

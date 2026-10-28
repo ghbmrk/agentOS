@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -25,21 +26,41 @@ import (
 // kernel writes the clerk's key, derived from the clerk root key the unlock
 // step handed it (clerkkey.Derive), and closes. It admits only uid 0, so a
 // process under the clerk's uid has no way to ask for the key, and only a
-// process in the clerk's own unit, so another root process, agentosd among
-// them, is not handed one either.
+// process in the clerk's own unit's cgroup, matched by its whole path, so
+// another root process that is not deliberately subverting the check,
+// agentosd among them, is not handed one either (ASSUMPTIONS MAIL-keys-4).
 
 // KeyClerk is a clerk the kernel hands a key to: its key socket and its
-// unit, the only cgroup the kernel hands that key to.
+// unit's whole cgroup path, such as
+// /agentos-keeper.slice/agentos-keeper-mail.service, the only cgroup the
+// kernel hands that key to. The whole path, not the unit's name alone: a
+// unit with Delegate=yes (agentosd) may make a group of any name under its
+// own (#3554 L3 1).
 type KeyClerk struct {
 	Socket string
-	Unit   string
+	Cgroup string
 }
 
-// unitName is a systemd service unit's name, a template instance's too.
-var unitName = regexp.MustCompile(`^[A-Za-z0-9:_.\\-]+(@[A-Za-z0-9:_.\\-]*)?\.service$`)
+// unitName is a systemd service unit's name, a template instance's too, and
+// cgroupElem one element of a cgroup path.
+var (
+	unitName   = regexp.MustCompile(`^[A-Za-z0-9:_.\-]+(@[A-Za-z0-9:_.\-]*)?\.service$`)
+	cgroupElem = regexp.MustCompile(`^[-A-Za-z0-9:_.@\\]+$`) // systemd escapes a slice name's "-" as \x2d
+)
 
-// ValidUnit reports whether u can name a clerk's unit.
-func ValidUnit(u string) bool { return unitName.MatchString(u) && len(u) <= 255 }
+// ValidCgroup reports whether c can be a clerk unit's cgroup: an absolute,
+// clean path whose last element is a service unit's name.
+func ValidCgroup(c string) bool {
+	if len(c) > 1024 || !strings.HasPrefix(c, "/") || path.Clean(c) != c || !unitName.MatchString(path.Base(c)) {
+		return false
+	}
+	for _, e := range strings.Split(c[1:], "/") {
+		if e == "." || e == ".." || !cgroupElem.MatchString(e) {
+			return false
+		}
+	}
+	return true
+}
 
 // ErrKeyPeer: the connection is not the service manager starting the
 // clerk's unit. It is closed unanswered.
@@ -53,29 +74,29 @@ func ListenClerkKey(path string) (net.Listener, error) { return sockets.ListenPe
 const keyWait = 2 * time.Second
 
 // ServeClerkKey hands name's key under root to each connection on ln from
-// a process in unit's cgroup, one at a time, until ln closes.
-func ServeClerkKey(ln net.Listener, name, unit string, root *[clerkkey.Len]byte) error {
-	return serveClerkKey(ln, name, unit, root, procUnit)
+// a process in the cgroup at path cgroup, one at a time, until ln closes.
+func ServeClerkKey(ln net.Listener, name, cgroup string, root *[clerkkey.Len]byte) error {
+	return serveClerkKey(ln, name, cgroup, root, procCgroup)
 }
 
-func serveClerkKey(ln net.Listener, name, unit string, root *[clerkkey.Len]byte, unitOf func(pid int32) (string, error)) error {
-	if !clerkkey.ValidName(name) || !ValidUnit(unit) || *root == ([clerkkey.Len]byte{}) {
+func serveClerkKey(ln net.Listener, name, cgroup string, root *[clerkkey.Len]byte, cgroupOf func(pid int32) (string, error)) error {
+	if !clerkkey.ValidName(name) || !ValidCgroup(cgroup) || *root == ([clerkkey.Len]byte{}) {
 		return fmt.Errorf("run: clerk %q's key: no clerk root key or no unit", name)
 	}
 	return ServeConns(ln, 1, func(conn net.Conn) {
 		defer conn.Close()
-		if err := handKey(conn, name, unit, root, unitOf); err != nil {
+		if err := handKey(conn, name, cgroup, root, cgroupOf); err != nil {
 			fmt.Fprintf(os.Stderr, "run: clerk %s's key: %v\n", name, err)
 		}
 	})
 }
 
-func handKey(conn net.Conn, name, unit string, root *[clerkkey.Len]byte, unitOf func(pid int32) (string, error)) error {
+func handKey(conn net.Conn, name, cgroup string, root *[clerkkey.Len]byte, cgroupOf func(pid int32) (string, error)) error {
 	pid, ok := peerPID(conn)
 	if !ok {
 		return ErrKeyPeer
 	}
-	if u, err := unitOf(pid); err != nil || u != unit {
+	if c, err := cgroupOf(pid); err != nil || c != cgroup {
 		return ErrKeyPeer
 	}
 	k, err := clerkkey.Derive(root, name)
@@ -113,8 +134,8 @@ func peerPID(c net.Conn) (int32, bool) {
 	return cred.Pid, true
 }
 
-// procUnit is the unit whose cgroup pid is in, read from /proc.
-func procUnit(pid int32) (string, error) {
+// procCgroup is the cgroup pid is in, read from /proc.
+func procCgroup(pid int32) (string, error) {
 	f, err := os.Open(fmt.Sprintf("/proc/%d/cgroup", pid))
 	if err != nil {
 		return "", err
@@ -124,22 +145,22 @@ func procUnit(pid int32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return cgroupUnit(b)
+	return cgroupPath(b)
 }
 
-// cgroupUnit reads the unified (cgroup v2) line of a /proc/<pid>/cgroup
-// file and returns its last element: the unit for a process the service
-// manager started in one. No unified line, or two, is an error.
-func cgroupUnit(b []byte) (string, error) {
-	var unit string
+// cgroupPath reads the unified (cgroup v2) line of a /proc/<pid>/cgroup
+// file and returns its whole path. No unified line, or two, or a path that
+// is no unit's cgroup, is an error.
+func cgroupPath(b []byte) (string, error) {
+	var c string
 	n := 0
 	for _, l := range bytes.Split(b, []byte("\n")) {
 		if p, ok := bytes.CutPrefix(l, []byte("0::")); ok {
-			unit, n = path.Base(string(p)), n+1
+			c, n = string(p), n+1
 		}
 	}
-	if n != 1 || !ValidUnit(unit) {
+	if n != 1 || !ValidCgroup(c) {
 		return "", ErrKeyPeer
 	}
-	return unit, nil
+	return c, nil
 }

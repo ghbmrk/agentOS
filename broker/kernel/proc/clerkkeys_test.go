@@ -33,7 +33,9 @@ func keySock(t *testing.T, root *[clerkkey.Len]byte, unitOf func(int32) (string,
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- serveClerkKey(ln, "mail", "agentos-keeper-mail.service", root, unitOf) }()
+	go func() {
+		done <- serveClerkKey(ln, "mail", "/agentos-keeper.slice/agentos-keeper-mail.service", root, unitOf)
+	}()
 	t.Cleanup(func() {
 		ln.Close()
 		if err := <-done; err != nil {
@@ -75,7 +77,7 @@ func testRoot() *[clerkkey.Len]byte {
 // could take its key.
 func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 	root := testRoot()
-	units := map[int32]string{int32(os.Getpid()): "agentos-keeper-mail.service"}
+	units := map[int32]string{int32(os.Getpid()): "/agentos-keeper.slice/agentos-keeper-mail.service"}
 	var unitErr error
 	p := keySock(t, root, func(pid int32) (string, error) { return units[pid], unitErr })
 	want, err := clerkkey.Derive(root, "mail")
@@ -93,9 +95,15 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 		}
 	}
 	for name, set := range map[string]func(){
-		"another unit":      func() { units[int32(os.Getpid())] = "agentosd.service" },
-		"another instance":  func() { units[int32(os.Getpid())] = "agentos-keeper-mail@x.service" },
-		"an unreadable one": func() { units[int32(os.Getpid())], unitErr = "agentos-keeper-mail.service", errors.New("gone") },
+		"another unit":     func() { units[int32(os.Getpid())] = "/system.slice/agentosd.service" },
+		"another instance": func() { units[int32(os.Getpid())] = "/agentos-keeper.slice/agentos-keeper-mail@x.service" },
+		// #3554 L3 1: agentosd has Delegate=yes and may name a group
+		// under its own after the clerk's unit.
+		"a nested namesake": func() { units[int32(os.Getpid())] = "/agentos.slice/agentosd.service" + "/agentos-keeper-mail.service" },
+		"another slice":     func() { units[int32(os.Getpid())] = "/system.slice/agentos-keeper-mail.service" },
+		"an unreadable one": func() {
+			units[int32(os.Getpid())], unitErr = "/agentos-keeper.slice/agentos-keeper-mail.service", errors.New("gone")
+		},
 	} {
 		set()
 		if b := handed(t, p); len(b) != 0 {
@@ -118,7 +126,7 @@ func TestTheKeySocketAdmitsOnlyRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	go serveClerkKey(ln, "mail", "agentos-keeper-mail.service", testRoot(), func(int32) (string, error) { return "agentos-keeper-mail.service", nil })
+	go serveClerkKey(ln, "mail", "/agentos-keeper.slice/agentos-keeper-mail.service", testRoot(), func(int32) (string, error) { return "/agentos-keeper.slice/agentos-keeper-mail.service", nil })
 	b := handed(t, p)
 	if root := os.Geteuid() == 0; root != (len(b) != 0) {
 		t.Fatalf("as uid %d the socket handed %d bytes", os.Geteuid(), len(b))
@@ -132,9 +140,10 @@ func TestNoKeyWithoutARootOrAUnit(t *testing.T) {
 		clerk, unit string
 		root        *[clerkkey.Len]byte
 	}{
-		"no root":  {"mail", "agentos-keeper-mail.service", &[clerkkey.Len]byte{}},
-		"bad name": {"Mail", "agentos-keeper-mail.service", testRoot()},
-		"bad unit": {"mail", "agentos-keeper-mail", testRoot()},
+		"no root":        {"mail", "/agentos-keeper.slice/agentos-keeper-mail.service", &[clerkkey.Len]byte{}},
+		"bad name":       {"Mail", "/agentos-keeper.slice/agentos-keeper-mail.service", testRoot()},
+		"bad unit":       {"mail", "/agentos-keeper.slice/agentos-keeper-mail", testRoot()},
+		"unit name only": {"mail", "agentos-keeper-mail.service", testRoot()},
 	} {
 		if err := serveClerkKey(nil, c.clerk, c.unit, c.root, nil); err == nil {
 			t.Errorf("%s: served", name)
@@ -142,23 +151,27 @@ func TestNoKeyWithoutARootOrAUnit(t *testing.T) {
 	}
 }
 
-// The unit is the last element of the process's one unified cgroup line.
-func TestCgroupUnit(t *testing.T) {
+// The cgroup is the whole path of the process's one unified cgroup line.
+func TestCgroupPath(t *testing.T) {
 	for in, want := range map[string]string{
-		"0::/agentos-keeper.slice/agentos-keeper-mail.service\n":                                "agentos-keeper-mail.service",
-		"0::/system.slice/agentos-driver@hue.service\n":                                         "agentos-driver@hue.service",
-		"12:pids:/x\n1:name=systemd:/y\n0::/agentos-keeper.slice/agentos-keeper-mail.service\n": "agentos-keeper-mail.service",
+		"0::/agentos-keeper.slice/agentos-keeper-mail.service\n":                                "/agentos-keeper.slice/agentos-keeper-mail.service",
+		"0::/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service\n":         "/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service",
+		"12:pids:/x\n1:name=systemd:/y\n0::/agentos-keeper.slice/agentos-keeper-mail.service\n": "/agentos-keeper.slice/agentos-keeper-mail.service",
+		// A namesake nested under another unit reads as its whole path,
+		// which is not the clerk's (#3554 L3 1).
+		"0::/agentos.slice/agentosd.service/agentos-keeper-mail.service\n": "/agentos.slice/agentosd.service/agentos-keeper-mail.service",
 	} {
-		if got, err := cgroupUnit([]byte(in)); err != nil || got != want {
+		if got, err := cgroupPath([]byte(in)); err != nil || got != want {
 			t.Errorf("%q: %q, %v", in, got, err)
 		}
 	}
-	for _, in := range []string{"", "0::/\n", "0::/init.scope\n", "1:name=systemd:/a.service\n", "0::/a.service\n0::/b.service\n", "0::/agentos-keeper.slice/agentos-keeper-mail.service/sub\n"} {
-		if got, err := cgroupUnit([]byte(in)); err == nil {
-			t.Errorf("%q read as unit %q", in, got)
+	for _, in := range []string{"", "0::/\n", "0::/init.scope\n", "1:name=systemd:/a.service\n", "0::/a.service\n0::/b.service\n",
+		"0::/agentos-keeper.slice/agentos-keeper-mail.service/sub\n", "0::agentos-keeper-mail.service\n", "0::/s.slice/../a.service\n"} {
+		if got, err := cgroupPath([]byte(in)); err == nil {
+			t.Errorf("%q read as cgroup %q", in, got)
 		}
 	}
-	if _, err := procUnit(int32(os.Getpid())); err != nil && !errors.Is(err, ErrKeyPeer) {
+	if _, err := procCgroup(int32(os.Getpid())); err != nil && !errors.Is(err, ErrKeyPeer) {
 		t.Errorf("this process's cgroup file: %v", err)
 	}
 }
@@ -168,7 +181,7 @@ func TestCgroupUnit(t *testing.T) {
 func TestRunKernelNeedsTheClerkRootToHandKeys(t *testing.T) {
 	dir := t.TempDir()
 	cfg := MainConfig{Log: filepath.Join(dir, "log"), KeyDir: filepath.Join(dir, "keys"), BackupDir: filepath.Join(dir, "b"),
-		ClerkKeys: map[string]KeyClerk{"mail": {Socket: filepath.Join(dir, "k"), Unit: "agentos-keeper-mail.service"}}}
+		ClerkKeys: map[string]KeyClerk{"mail": {Socket: filepath.Join(dir, "k"), Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}}}
 	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: headPriv}, &kernel.MemAnchor{})
 	if err == nil || !strings.Contains(err.Error(), "no clerk root key") {
 		t.Fatalf("got %v, want a refusal for the missing clerk root key", err)

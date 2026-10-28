@@ -8,7 +8,7 @@
 //	    -meter-sock /run/agentos-kernel/meter.sock -meter-uid 982 \
 //	    -link-sock /run/agentos-kernel/link.sock -link-uid 980 \
 //	    -clerk exit=/run/agentos-exit/kernel.sock,983 \
-//	    -clerk-key mail=/run/agentos-kernel/clerk-mail.key,agentos-keeper-mail.service
+//	    -clerk-key mail=/run/agentos-kernel/clerk-mail.key,/agentos-keeper.slice/agentos-keeper-mail.service
 //
 // It opens the subject-key table in -keys-dir, sealed under the log key, so
 // content opens and every logged erase is re-applied at start (KRN-erase),
@@ -82,17 +82,17 @@ type keyClerks map[string]proc.KeyClerk
 
 func (c keyClerks) String() string { return fmt.Sprint(map[string]proc.KeyClerk(c)) }
 
-// Set reads name=socket,unit.
+// Set reads name=socket,cgroup: the clerk unit's whole cgroup path.
 func (c keyClerks) Set(v string) error {
 	name, rest, ok := strings.Cut(v, "=")
-	sock, unit, ok2 := strings.Cut(rest, ",")
-	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || !proc.ValidUnit(unit) {
-		return errors.New("a clerk's key socket is name=/abs/socket,unit.service")
+	sock, cg, ok2 := strings.Cut(rest, ",")
+	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || !proc.ValidCgroup(cg) {
+		return errors.New("a clerk's key socket is name=/abs/socket,/slice/unit.service")
 	}
 	if _, dup := c[name]; dup {
 		return fmt.Errorf("clerk %q's key given twice", name)
 	}
-	c[name] = proc.KeyClerk{Socket: sock, Unit: unit}
+	c[name] = proc.KeyClerk{Socket: sock, Cgroup: cg}
 	return nil
 }
 
@@ -118,7 +118,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.LinkSock, "link-sock", "", "agentos-link's socket; none without it")
 	fs.IntVar(&c.LinkUID, "link-uid", -1, "agentos-link's uid, the only peer on link-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
-	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,unit (repeatable)")
+	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,/unit/cgroup/path.service (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")
 	if err := fs.Parse(args); err != nil {
