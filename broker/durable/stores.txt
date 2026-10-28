@@ -17,6 +17,7 @@
 # a listed package no longer does. A new domain lifecycle is a journal intent
 # kind (journal.Lifecycle), not a new line here.
 apnet config
+camnode config
 change debt debt:audit-2.5
 checker debt debt:#1947
 clock debt debt:#1947

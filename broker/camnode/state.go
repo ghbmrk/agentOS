@@ -10,6 +10,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/camnode/se"
 	"github.com/ghbmrk/agentos/broker/camwire"
+	"github.com/ghbmrk/agentos/broker/durable"
 )
 
 // The node's settings state: the bundle in force, kept on the node's
@@ -56,26 +57,7 @@ func (d Dir) Read(name string) ([]byte, error) {
 }
 
 func (d Dir) Write(name string, p []byte) error {
-	tmp := filepath.Join(string(d), name+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(p); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, filepath.Join(string(d), name)); err != nil {
-		return err
-	}
-	return syncDir(string(d))
+	return durable.WriteFile(filepath.Join(string(d), name), p, 0o600)
 }
 
 func (d Dir) Remove(name string) error {
@@ -86,16 +68,7 @@ func (d Dir) Remove(name string) error {
 	if err != nil {
 		return err
 	}
-	return syncDir(string(d))
-}
-
-func syncDir(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
+	return durable.SyncDir(string(d))
 }
 
 // OwnerDigest is the owner pin the element holds for o: SHA-256 over the
