@@ -175,7 +175,7 @@ func (p *llamaProc) waitHealthy(limit time.Duration) error {
 		default:
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://llama/health", nil)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost/health", nil)
 		resp, err := p.http.Do(req)
 		if err == nil {
 			io.Copy(io.Discard, io.LimitReader(resp.Body, maxHealthBody))
@@ -209,7 +209,7 @@ func (p *llamaProc) post(path string, body, out any, limit int64) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, "http://llama"+path, bytes.NewReader(b))
+	req, err := http.NewRequest(http.MethodPost, "http://localhost"+path, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
