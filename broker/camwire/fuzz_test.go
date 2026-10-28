@@ -63,7 +63,8 @@ func FuzzBundle(f *testing.F) {
 func FuzzManifest(f *testing.F) {
 	rel := newRelease(f)
 	o := newPasskey(f)
-	enc, _ := Manifest{Image: sha256.Sum256(nil), Size: 1, Counter: 1}.Encode()
+	node := Fingerprint(newPoint(f))
+	enc, _ := Manifest{Image: sha256.Sum256(nil), Size: 1, Counter: 1, Nodes: [][32]byte{node}}.Encode()
 	s := SignedManifest{Manifest: enc, Assertion: o.assert(f, enc)}
 	copy(s.Release[:], ed25519.Sign(rel, enc))
 	good, err := s.Encode()
@@ -73,7 +74,7 @@ func FuzzManifest(f *testing.F) {
 	f.Add(good)
 	f.Add(enc)
 	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = VerifyManifest(data, rel.Public().(ed25519.PublicKey), o.owner(), 0)
+		_, _ = VerifyManifest(data, node, rel.Public().(ed25519.PublicKey), o.owner(), 0)
 		s, _, err := ParseSignedManifest(data)
 		if err != nil {
 			return
