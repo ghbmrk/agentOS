@@ -34,6 +34,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/devhost"
 	"github.com/ghbmrk/agentos/broker/clerk/devslot"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // hostUID is the host's uid, fixed by its sysusers line so the driver
@@ -177,6 +178,7 @@ func (s dropSink) Emit(devhost.Event) error {
 // lists. A pin for any other driver is refused and logged, and starts
 // nothing: only image drivers run (TestHostStartsOnlyImageDrivers).
 func hosts(c config, image map[string]imageDriver, pins []pinned, logf func(string)) map[string]*devhost.Host {
+	guard := deviceGuard(image, pins, logf)
 	out := map[string]*devhost.Host{}
 	for _, p := range pins {
 		d, ok := image[p.driver]
@@ -184,7 +186,7 @@ func hosts(c config, image map[string]imageDriver, pins []pinned, logf func(stri
 			logf(fmt.Sprintf("devices: a pin names driver %q, which drivers.json does not list; refused", p.driver))
 			continue
 		}
-		t, err := transportFor(d.Decl, p.pin)
+		t, err := transportFor(d.Decl, p.pin, guard)
 		if err == nil {
 			var h *devhost.Host
 			h, err = devhost.New(devhost.Config{
@@ -207,6 +209,33 @@ func hosts(c config, image map[string]imageDriver, pins []pinned, logf func(stri
 		logf("devices: driver " + d.Name + ": its pin or declaration is refused: " + err.Error())
 	}
 	return out
+}
+
+// deviceGuard is the process's address policy (DEV-2): it admits a dial
+// only as a device executor's (PurposeDevice) to one of the image drivers'
+// pinned TCP devices, at its address and port, and logs each refusal by
+// address and reason only. The host dials nothing else, so it learns no
+// home network: the pins are its whole reach. A pin the guard refuses
+// leaves the guard with none, and every dial is refused.
+func deviceGuard(image map[string]imageDriver, pins []pinned, logf func(string)) *netguard.Policy {
+	g := netguard.New(netguard.Config{
+		OnDeny: func(e netguard.DenyEvent) {
+			logf(fmt.Sprintf("netguard: refused %v port %d purpose %d: %s", e.Addr, e.Port, e.Purpose, e.Reason))
+		},
+	})
+	var gp []netguard.Pin
+	for _, p := range pins {
+		if d, ok := image[p.driver]; ok {
+			if np, ok := devicePin(d.Decl, p.pin); ok && p.pin.Host.IsValid() && p.pin.Key != ([32]byte{}) {
+				gp = append(gp, np)
+			}
+		}
+	}
+	if err := g.SetPins(gp); err != nil {
+		logf("devices: the devices' pins are refused by the address guard: " + err.Error())
+		g.SetPins(nil)
+	}
+	return g
 }
 
 // run starts the hosts and flushes each one's DEV-8 windows until ctx ends.

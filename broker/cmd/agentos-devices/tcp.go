@@ -6,11 +6,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
-	"strconv"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/devslot"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // Transport errors. None carries text from the device, and devhost sends
@@ -36,21 +37,33 @@ type tcpTransport struct {
 	ch      devslot.Channel
 	maxRead int
 
+	// guard is the process's address policy (DEV-2): the stream is dialled
+	// only through it, as a device executor's dial (PurposeDevice) to a
+	// PinDevice pin, which devicePins gives each TCP device.
+	guard *netguard.Policy
+
 	mu   sync.Mutex // one call at a time on the stream
 	conn net.Conn
-	// dial, if set, replaces the TCP dial (tests).
-	dial func(ctx context.Context, addr string) (net.Conn, error)
 }
 
-func newTCPTransport(d devslot.Declaration, pin devslot.Pin) (*tcpTransport, error) {
-	if d.Link != devslot.TCP || len(d.Channels) != 1 || pin.Key == ([32]byte{}) || !pin.Host.IsValid() {
-		return nil, errors.New("devices: a TCP transport needs a TCP declaration with one channel and a keyed pin")
+func newTCPTransport(d devslot.Declaration, pin devslot.Pin, guard *netguard.Policy) (*tcpTransport, error) {
+	if d.Link != devslot.TCP || len(d.Channels) != 1 || pin.Key == ([32]byte{}) || !pin.Host.IsValid() || guard == nil {
+		return nil, errors.New("devices: a TCP transport needs a TCP declaration with one channel, a keyed pin and the address guard")
 	}
-	return &tcpTransport{pin: pin, ch: d.Channels[0], maxRead: d.MaxRead}, nil
+	return &tcpTransport{pin: pin, ch: d.Channels[0], maxRead: d.MaxRead, guard: guard}, nil
 }
 
-func (t *tcpTransport) addr() string {
-	return net.JoinHostPort(t.pin.Host.Unmap().String(), strconv.Itoa(int(t.ch.Port)))
+func (t *tcpTransport) addrPort() netip.AddrPort {
+	return netip.AddrPortFrom(t.pin.Host.Unmap(), t.ch.Port)
+}
+
+// devicePin is the guard's pin for a TCP device: its one address and port,
+// and its key, which tlsConfig checks at the handshake.
+func devicePin(d devslot.Declaration, pin devslot.Pin) (netguard.Pin, bool) {
+	if d.Link != devslot.TCP || len(d.Channels) != 1 {
+		return netguard.Pin{}, false
+	}
+	return netguard.Pin{Kind: netguard.PinDevice, Addr: netip.AddrPortFrom(pin.Host.Unmap(), d.Channels[0].Port), Key: pin.Key}, true
 }
 
 // tlsConfig checks the device's key against the pin, and nothing else.
@@ -80,14 +93,7 @@ func (t *tcpTransport) stream(ctx context.Context) (net.Conn, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, dialWait)
 	defer cancel()
-	dial := t.dial
-	if dial == nil {
-		dial = func(ctx context.Context, addr string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "tcp", addr)
-		}
-	}
-	raw, err := dial(ctx, t.addr())
+	raw, err := t.guard.DialContext(netguard.WithPurpose(ctx, netguard.PurposeDevice), "tcp", t.addrPort().String())
 	if err != nil {
 		return nil, err
 	}
@@ -161,10 +167,10 @@ func (gattTransport) Read(context.Context) (devslot.Target, []byte, error) {
 }
 
 // transportFor is the transport for a declaration's link kind.
-func transportFor(d devslot.Declaration, pin devslot.Pin) (devslot.Transport, error) {
+func transportFor(d devslot.Declaration, pin devslot.Pin, guard *netguard.Policy) (devslot.Transport, error) {
 	switch d.Link {
 	case devslot.TCP:
-		return newTCPTransport(d, pin)
+		return newTCPTransport(d, pin, guard)
 	case devslot.GATT:
 		return gattTransport{}, nil
 	}

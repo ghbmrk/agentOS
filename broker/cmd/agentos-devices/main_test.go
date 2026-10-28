@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/devslot"
 	"github.com/ghbmrk/agentos/broker/clerk/devslot/testdata/fixture"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // REQ: DEV-1, DEV-3, CLK-1, KRN-2
@@ -33,10 +34,11 @@ import (
 // device is a TCP device: a TLS server with its own key, which records what
 // reaches it after the handshake and answers each frame with "ack".
 type device struct {
-	ln   net.Listener
-	spki [32]byte
-	mu   sync.Mutex
-	got  []byte
+	ln    net.Listener
+	spki  [32]byte
+	mu    sync.Mutex
+	got   []byte
+	conns int
 }
 
 func newDevice(t *testing.T) *device {
@@ -63,6 +65,9 @@ func newDevice(t *testing.T) *device {
 			if err != nil {
 				return
 			}
+			d.mu.Lock()
+			d.conns++
+			d.mu.Unlock()
 			go func() {
 				defer c.Close()
 				buf := make([]byte, 64)
@@ -86,6 +91,23 @@ func (d *device) received() []byte {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return bytes.Clone(d.got)
+}
+
+func (d *device) connections() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.conns
+}
+
+// guardFor is the process's guard for these pins of a TCP declaration.
+func guardFor(t *testing.T, d devslot.Declaration, pins ...devslot.Pin) *netguard.Policy {
+	t.Helper()
+	image := map[string]imageDriver{"plug": {Name: "plug", Decl: d}}
+	var ps []pinned
+	for _, p := range pins {
+		ps = append(ps, pinned{"plug", p})
+	}
+	return deviceGuard(image, ps, func(string) {})
 }
 
 func (d *device) port() uint16 { return uint16(d.ln.Addr().(*net.TCPAddr).Port) }
@@ -112,7 +134,7 @@ func TestTCPTransportRefusesWrongKey(t *testing.T) {
 	// Another device's key: the handshake is refused, and no frame reaches
 	// the device.
 	wrong := devslot.Pin{Host: netip.MustParseAddr("127.0.0.1"), Key: sha256.Sum256([]byte("another device"))}
-	tr, err := newTCPTransport(d, wrong)
+	tr, err := newTCPTransport(d, wrong, guardFor(t, d, wrong))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +153,36 @@ func TestTCPTransportRefusesWrongKey(t *testing.T) {
 	// The pinned key: the frame goes through, and the answer comes back on
 	// the declared channel.
 	right := devslot.Pin{Host: netip.MustParseAddr("127.0.0.1"), Key: dev.spki}
-	tr, err = newTCPTransport(d, right)
+	tg = devslot.Target{Pin: right, Channel: d.Channels[0]}
+
+	// The address guard (DEV-2): with no pin for the device's address and
+	// port, the dial is refused before any connection is made.
+	before := dev.connections()
+	other := tcpDecl(dev.port() + 1)
+	for what, g := range map[string]*netguard.Policy{
+		"no pins":         guardFor(t, d),
+		"another port":    guardFor(t, other, right),
+		"unlisted driver": deviceGuard(map[string]imageDriver{}, []pinned{{"plug", right}}, func(string) {}),
+	} {
+		tr, err = newTCPTransport(d, right, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tr.Write(ctx, tg, []byte("get")); !errors.Is(err, netguard.ErrDenied) {
+			t.Fatalf("%s: write: %v, want the guard's refusal", what, err)
+		}
+	}
+	if dev.connections() != before {
+		t.Fatal("a dial the guard refused reached the device")
+	}
+	if _, err := newTCPTransport(d, right, nil); err == nil {
+		t.Fatal("a TCP transport with no address guard")
+	}
+
+	tr, err = newTCPTransport(d, right, guardFor(t, d, right))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tg = devslot.Target{Pin: right, Channel: d.Channels[0]}
 	if err := tr.Write(ctx, tg, []byte("get")); err != nil {
 		t.Fatal(err)
 	}
@@ -169,14 +216,14 @@ func TestTCPTransportRefusesWrongKey(t *testing.T) {
 }
 
 func TestTransportFor(t *testing.T) {
-	g, err := transportFor(fixture.Declaration(), devslot.Pin{Address: "02:00:00:00:00:01"})
+	g, err := transportFor(fixture.Declaration(), devslot.Pin{Address: "02:00:00:00:00:01"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := g.Write(context.Background(), devslot.Target{}, []byte{1}); !errors.Is(err, errNoRelay) {
 		t.Fatalf("GATT write: %v, want errNoRelay until part c", err)
 	}
-	if _, err := transportFor(tcpDecl(1), devslot.Pin{Host: netip.MustParseAddr("192.168.1.2")}); err == nil {
+	if _, err := transportFor(tcpDecl(1), devslot.Pin{Host: netip.MustParseAddr("192.168.1.2")}, guardFor(t, tcpDecl(1))); err == nil {
 		t.Fatal("a TCP transport with no pinned key")
 	}
 }
