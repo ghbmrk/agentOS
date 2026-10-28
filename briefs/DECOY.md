@@ -10,7 +10,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 
 ## Decisions (the brief's; a builder who finds one wrong stops and comments on the work item)
 
-1. **One table, one matcher.** `broker/decoy/` holds the table type, the generator calls and the matcher. The matcher is CLK-4's fixed-pattern detector (`broker/browser/filter.go`'s patterns, moved into `broker/decoy/match/` and imported back by the browser clerk) with the table's values and destinations added. `broker/decoy/match/` is standard library only, so the enforcer may import it under the drone rule (`broker/daemon/arc2_test.go`), like `broker/kernel/key`.
+1. **One table, one matcher.** `broker/decoy/` holds the table type, the generator calls and the matcher. The matcher is CLK-4's fixed-pattern detector (`broker/browser/filter.go`'s patterns, moved into `broker/decoy/match/` and imported back by the browser clerk) with the table's values and destinations added. It runs on the core only: the enforcer trips on its fixed addresses (decision 4) and imports nothing from `broker/decoy/`.
 2. **No new grant kind.** A honey key is a key-shaped value signed by no root. The key check already refuses it (KEY-1); the kernel looks a refused key up in the table and, on a hit, logs a trip instead of a plain refusal.
 3. **The table is sealed and logged.** It is stored in the sealed store (STO-2), so neither the image nor the repository shows a decoy, and it reaches the kernel as one logged event at first boot (KRN-1), so a replay gives the same trips (KRN-6). The wallet seeds are not in it (decision 5).
 4. **The enforcer's decoy addresses are fixed.** They are 169.254.169.254 and a never-assigned range of each segment, shipped in the enforcer's image; DHCP never hands them out, nothing is read over the channel, and placements that name a host (an SSH `known_hosts` entry for "core-admin", a "Backups" share path) point into the range. Drop-and-trip rules on them are part of the enforcer's own ruleset; no listener runs, and a trip changes no rule.
@@ -21,7 +21,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 
 ### DECOY-a (#3762): the table and the matcher (KRN-12 One table, Trips)
 
-**Scope:** `broker/decoy/` (new), `broker/decoy/match/` (new), `broker/browser/filter.go` (imports the moved patterns), `broker/daemon/arc2_test.go` (allowlist line), `tools/risk_tier.py` (one line; a gate file, so this PR also owes a separate Security accept, OPERATING §7).
+**Scope:** `broker/decoy/` (new), `broker/decoy/match/` (new), `broker/browser/filter.go` (imports the moved patterns), `tools/risk_tier.py` (one line; a gate file, so this PR also owes a separate Security accept, OPERATING §7).
 **Builds:** the table (value, kind, destination, placement), its generation at first boot from the same generators that make real entries, its sealed storage and its first-boot log event (decision 3), and the matcher over bytes and destinations.
 **Acceptance tests:**
 1. KRN-12: `decoy::TestDecoyIndistinguishable`: for each kind, generated decoys and real entries pass the same format checks and a two-sample test on length and character classes finds no difference. Catches a decoy an intruder can skip.
@@ -77,7 +77,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Scope:** `broker/kernel/sim/` (drill scenario), `tests/` or `evals/` (the intruder playbook script), STATUS's broken line in the kernel's STATUS view.
 **Builds:** a scripted intruder search over the sim box in the order KRN-12 lists; per tripwire, time to detect and false trips recorded in the log; a scheduled run (default weekly); STATUS lists a tripwire whose last drill is missing or failed as broken.
 **Acceptance tests:**
-1. KRN-12: `sim::TestDrillTripsEveryPlacement`: every placement trips within one minute of simulated time at its exit. Catches a dead tripwire.
+1. KRN-12: `sim::TestDrillTripsEveryPlacement`: every table placement and enforcer decoy address trips within one minute of simulated time at its exit; the wallets are watched by the owner's phone and are not drilled. Catches a dead tripwire.
 2. KRN-12: `sim::TestDrillNoFalseTrips`: an ordinary week of sim tasks trips nothing. Catches an alarm that cries wolf.
 3. KRN-12: `kernel::TestStaleDrillShowsBroken`. Catches a tripwire trusted without proof.
 **Size:** about 80k, tier A (`broker/kernel/sim/`), strongest model. **Depends on:** DECOY-b to DECOY-e.
