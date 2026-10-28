@@ -171,24 +171,39 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 	t.Run("heartbeat from before the anchor", func(t *testing.T) {
 		near, far := net.Pipe()
 		defer far.Close()
-		anchors := fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
+		fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
 		l, err := Dial(near, k)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer l.Close()
+		// Anchor first, with a deadline a loaded runner meets: a negative wait
+		// below that times out its anchor, and the next wait anchors afresh
+		// past the frames this test signs (#3649).
+		l.req.Lock()
+		err = l.anchorLocked(10 * time.Second)
+		l.req.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.smu.Lock()
+		ts := l.anchor.ts
+		l.smu.Unlock()
 		if _, err := l.WaitHeartbeat(time.Time{}, 300*time.Millisecond); err == nil {
 			t.Fatal("a heartbeat counted before any was sent")
 		}
-		ts := <-anchors
 		hb := &common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, Autopilot: common.MAV_AUTOPILOT_ARDUPILOTMEGA, MavlinkVersion: 3}
+		dropped := l.Dropped()
 		far.Write(signedFrame(t, k, 1, 1, 0, ts-1, hb)) // dropped twice over: below the stream's last and the anchor
 		far.Write(signedFrame(t, k, 1, 1, 2, ts-1, hb)) // a new stream, but below the anchor
 		if _, err := l.WaitHeartbeat(time.Time{}, 300*time.Millisecond); err == nil {
 			t.Fatal("a heartbeat signed before the anchor counted")
 		}
+		if l.Dropped() != dropped+1 {
+			t.Errorf("%d frames dropped, want the one below its stream's last", l.Dropped()-dropped)
+		}
 		far.Write(signedFrame(t, k, 1, 1, 0, ts+1, hb))
-		if _, err := l.WaitHeartbeat(time.Time{}, 2*time.Second); err != nil {
+		if _, err := l.WaitHeartbeat(time.Time{}, 10*time.Second); err != nil {
 			t.Fatalf("a heartbeat signed after the anchor did not count: %v", err)
 		}
 	})
@@ -198,7 +213,7 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 		defer far.Close()
 		hourAgo := uint64(time.Since(signatureEpoch.Add(time.Hour)) / tsUnit)
 		fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
-		l, err := dial(near, k, func() time.Time { return time.Now().Add(-2 * time.Hour) })
+		l, err := dial(near, k, func() time.Time { return time.Now().Add(-2 * time.Hour) }, holderLinkID)
 		if err != nil {
 			t.Fatal(err)
 		}

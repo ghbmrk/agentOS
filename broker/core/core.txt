@@ -157,6 +157,7 @@ allow clerk/model kernel.Kernel.Meter -- the model clerk records the spend of it
 allow clerk/model kernel.Kernel.Hold -- the model clerk stops a plan whose spend cap the kernel's own check just refused; the kernel takes only that refusal
 allow clerk/model kernel.Kernel.ReadPool -- the model clerk passes on the provider's figure for a usage pool; it can only narrow, a reopening is the kernel's logged widening
 allow clerk/plan clerk.Sealer.* -- the plan login clerk seals its one login with the sealing key its process is given and opens it for one request, bound to its plan's name, as clerk.Secrets does; it holds no other account's secret
+allow clerk/model clerk.Sealer.* -- the model clerk seals its API key map with the sealing key its process is given and opens it at start and reseals it on each key change, bound to its slot's name, as clerk/plan does its login; it holds no plan's or account's secret
 allow kernel/sim kernel.* -- the seeded harness drives the kernel as the daemon and owner would, on a fake disk; no broker package imports sim
 allow kernel/sim clerk.* -- the harness's world builds the mail clerk it checks the kernel against
 allow clerk/inbox/cmd/slice kernel.* -- the eval runner boots a kernel on a fake disk and drives it as the daemon and owner would; no broker package imports it

@@ -41,11 +41,15 @@ type Plan struct {
 const (
 	fenceTypeAltMaxPolygon = 1 | 4  // FENCE_TYPE bits: 0 max altitude, 2 polygon
 	fenceActionRTLOrLand   = 1      // FENCE_ACTION 1: RTL, or land if RTL is not possible
+	fenceNoModeChange      = 1      // FENCE_OPTIONS bit 0: no mode change while the breach return runs
 	battFSRTL              = 2      // BATT_FS_LOW_ACT 2: RTL
 	gcsFSRTL               = 1      // FS_GCS_ENABLE 1: RTL
 	ekfFSLand              = 1      // FS_EKF_ACTION 1: land
 	skipRCChecks           = 1 << 6 // ARMING_SKIPCHK bit 6: RC channels (there is no receiver)
 	gcsSysID               = 255    // MAV_GCS_SYSID: the key-holder's system id
+	battMonitorAnalog      = 4      // BATT_MONITOR 4: analog voltage and current; DRONE-enforcer sets the airframe's (ASSUMPTIONS.md)
+	battLowTimerS          = 10     // BATT_LOW_TIMER: seconds below BATT_LOW_VOLT before the low-battery return
+	autoArmAndTakeoff      = 1 | 2  // AUTO_OPTIONS bits: 0 arming in AUTO, 1 take-off without raising throttle (no receiver)
 )
 
 // Derive is the one pure function from a policy to the aircraft's plan
@@ -59,12 +63,18 @@ func Derive(p *Policy) Plan {
 		"FENCE_ALT_MAX":    p.CeilingM,
 		"FENCE_MARGIN":     p.FenceMarginM,
 		"FENCE_AUTOENABLE": 0, // the fence is always on, never enabled by arming or take-off
+		"FENCE_OPTIONS":    fenceNoModeChange,
 		"BATT_LOW_VOLT":    p.LowBatteryV,
 		"BATT_FS_LOW_ACT":  battFSRTL,
 		"FS_GCS_ENABLE":    gcsFSRTL,
 		"FS_GCS_TIMEOUT":   p.LostLinkS,
 		"FS_EKF_ACTION":    ekfFSLand,
 		"FS_THR_ENABLE":    0, // no receiver, so no radio failsafe; lost link is FS_GCS
+		"FS_OPTIONS":       0, // no failsafe continues a flight: every one returns or lands
+		"BATT_MONITOR":     battMonitorAnalog,
+		"BATT_LOW_TIMER":   battLowTimerS,
+		"AUTO_OPTIONS":     autoArmAndTakeoff,
+		"AVOID_ENABLE":     0, // follow is bounded by the fence breach, not by stopping short of it (brief decision 9)
 		"RC_PROTOCOLS":     0, // no RC protocol is decoded: RC is an unsigned control path
 		"ARMING_SKIPCHK":   skipRCChecks,
 		"SCR_ENABLE":       0, // no Lua scripting: scripts are code the signature does not cover

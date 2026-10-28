@@ -415,6 +415,9 @@ type State struct {
 	// Grants are the passkey's grants in the log, roots and first links,
 	// each live from its time (D-146).
 	Grants map[key.ID]Grant
+	// pinned is the image's pinned roots (Pin) by ID: granted from the
+	// image, never anchors.
+	pinned map[key.ID]key.Key
 	// Line is the owner's line for a big change, in percent; 0 is DefaultLine.
 	Line  int64
 	lines int // line changes so far, named in each one's co-signature
@@ -454,9 +457,12 @@ func NewState(anchors []key.PublicKey) *State {
 	}
 }
 
-// Replay folds a whole log.
-func Replay(anchors []key.PublicKey, es []Entry) (*State, error) {
+// Replay folds a whole log, under the image's pinned roots (Pin).
+func Replay(anchors []key.PublicKey, es []Entry, pinned ...key.Key) (*State, error) {
 	s := NewState(anchors)
+	if err := s.Pin(pinned...); err != nil {
+		return nil, err
+	}
 	for _, e := range es {
 		if err := s.Apply(e); err != nil {
 			return nil, err
@@ -542,7 +548,14 @@ func (s *State) LedgerBefore(seq uint64) key.Ledger { return ledger{s: s, before
 func (s *State) ChangesView() *key.Changes { return &s.Changes }
 
 // Granted is when the grant id is live, if the log holds it.
-func (s *State) Granted(id key.ID) (int64, bool) { g, ok := s.Grants[id]; return g.From, ok }
+// A pinned root is granted from the image, live from the start.
+func (s *State) Granted(id key.ID) (int64, bool) {
+	if _, ok := s.pinned[id]; ok {
+		return 0, true
+	}
+	g, ok := s.Grants[id]
+	return g.From, ok
+}
 
 // Enrollments is what Passkeys reads, for a clerk to check with its own anchors.
 func (s *State) Enrollments() ([]key.Enrollment, []key.PublicKey) {
@@ -665,7 +678,13 @@ func lapse(cs []key.Caveat) *int64 {
 func rootOf(k key.Key) key.ID { return key.Key{Root: k.Root}.Tip() }
 
 // owners is the passkey set a plan's key is verified against (PlanOwners).
-func (s *State) owners(k key.Key) []key.PublicKey { return PlanOwners(s, s.Anchors, k) }
+// A pinned root is verified against its own owner alone (Pin).
+func (s *State) owners(k key.Key) []key.PublicKey {
+	if p, ok := s.pinned[k.Tip()]; ok && len(k.Links) == 0 {
+		return []key.PublicKey{p.Root.Owner}
+	}
+	return PlanOwners(s, s.Anchors, k)
+}
 
 // PlanOwners is the passkey set a plan's key is verified against, in the
 // kernel and the clerk alike, from the checker's own anchors. For a key

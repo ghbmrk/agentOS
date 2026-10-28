@@ -270,6 +270,19 @@ var drone = map[string]struct {
 
 var droneForbid = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
+// The enforcer is enforcer code too (ENF, briefs/ENF.md decision 1): it
+// shares no kernel, secret or update source with agentOS (NET-2 Channel),
+// so it imports only the key-check library STO-4 names, broker/drone and
+// broker/camwire. Each slice that adds a package or an import adds it here.
+// TestEnforcerImportsNothingFromAgentOS holds the same rule transitively.
+var enforcer = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"enforcer":        {nil, droneForbid},
+	"enforcer/policy": {[]string{"kernel/key"}, droneForbid},
+}
+
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
 // stdExceptions are the forbidden standard packages a control-path package
@@ -307,6 +320,9 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range drone {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
+	for pkg, rule := range enforcer {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
 }
 
 // TestDroneImportsNothingFromAgentOS: everything the drone key-holder and
@@ -328,6 +344,42 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 		case contains(forbiddenDeps, dep):
 			t.Errorf("the drone key-holder links %s", dep)
 		}
+	}
+}
+
+// TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
+// links, transitively, only the standard library, the enforcer's own
+// packages, broker/kernel/key, broker/drone and broker/camwire (ENF
+// decision 1, STO-4), and no third-party package yet; none of it launches a
+// process or speaks HTTP. Slices e (the nft loader, os/exec), b (the page,
+// net/http) and l (the daemon) widen this with a reason each.
+func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
+	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./enforcer/...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
+	var own int
+	for _, dep := range strings.Fields(string(out)) {
+		rel := strings.TrimPrefix(dep, module)
+		switch {
+		case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
+			own++
+			if _, ok := enforcer[rel]; !ok {
+				t.Errorf("%s has no import rule in the enforcer map", dep)
+			}
+		case strings.HasPrefix(dep, module):
+			if !links[rel] {
+				t.Errorf("the enforcer links %s", dep)
+			}
+		case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
+			t.Errorf("the enforcer links third-party %s", dep)
+		case contains(forbiddenDeps, dep):
+			t.Errorf("the enforcer links %s", dep)
+		}
+	}
+	if own < len(enforcer) {
+		t.Errorf("go list found %d enforcer packages, the rule map names %d", own, len(enforcer))
 	}
 }
 

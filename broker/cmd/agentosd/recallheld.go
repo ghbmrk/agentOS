@@ -295,6 +295,9 @@ type recallHeld struct {
 	kept      map[string]bool
 	keptKnown bool // the journal was read
 	settled   map[string]recallSettled
+	// also is a second containment composed into Contained: the erase by
+	// name's rewind (eraseRewind.Contained, KRN-forget b). nil is none.
+	also func(string) bool
 }
 
 // openRecallHeld reads the recall directory at rest and the settled
@@ -365,11 +368,13 @@ func (h *recallHeld) containedLocked(lineage string) bool {
 	return !h.keptKnown || !h.kept[lineage]
 }
 
-// Contained is vm.Config.Contained and grants.Config.Contained.
+// Contained is vm.Config.Contained and grants.Config.Contained: held here,
+// or by the composed also.
 func (h *recallHeld) Contained(lineage string) bool {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.containedLocked(lineage)
+	held, also := h.containedLocked(lineage), h.also
+	h.mu.Unlock()
+	return held || also != nil && also(lineage)
 }
 
 // wire sets the grants hook and the STATUS line; the daemon copies both.

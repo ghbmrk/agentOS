@@ -112,6 +112,9 @@ func (k *Kernel) SetupWithEdge(now int64, f FirstAnchors, edge ed25519.PublicKey
 	if !f.shape() || len(f.Sigs) != len(f.Anchors) {
 		return ErrSetupKeys
 	}
+	if k.s.pinnedOwner(f.Anchors) {
+		return ErrPinned
+	}
 	msg := SetupMsg(k.log.cfg.Pub, f.Anchors)
 	for i, a := range f.Anchors {
 		if !a.Verify(msg, f.Sigs[i]) {
@@ -133,6 +136,9 @@ func (s *State) applySetup(e Entry) error {
 	}
 	if e.Seq != 1 || len(s.Anchors) != 0 || !f.shape() {
 		return fmt.Errorf("entry %d %s: setup is not this log's first entry or not two keys: %w", e.Seq, e.Type, ErrCorrupt)
+	}
+	if s.pinnedOwner(f.Anchors) {
+		return fmt.Errorf("entry %d %s: %w: %w", e.Seq, e.Type, ErrPinned, ErrCorrupt)
 	}
 	s.Anchors = slices.Clone(f.Anchors)
 	s.edge.setup = true
