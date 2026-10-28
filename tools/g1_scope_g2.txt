@@ -82,6 +82,10 @@ exempt-pr 3583
 # broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
 exempt-pr 3596
 
+# DRONE-sim part b (#3609, row #3516) touches broker/drone/ and broker/cmd/agentos-drone/, which
+# the G2 list does not name (D-198). Remove once #3609 merges.
+exempt-pr 3609
+
 # Project machinery and records.
 allow .claude/
 allow .github/
