@@ -15,7 +15,6 @@
 # --- Own packages (broker module) ---
 inert  github.com/ghbmrk/agentos/broker/accel -- reads the host's own device files
 inert  github.com/ghbmrk/agentos/broker/admission -- in-process admission arithmetic
-inert  github.com/ghbmrk/agentos/broker/apnet -- serves the card's network file; decodes only its own record
 parser github.com/ghbmrk/agentos/broker/backup -- backup objects and key tables read back from a backup target
 inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup budgets
 parser github.com/ghbmrk/agentos/broker/camwire -- frames, settings bundles and image manifests from a camera node or the enforcer, and the owner's passkey assertions
@@ -106,7 +105,6 @@ parser github.com/ghbmrk/agentos/broker/meter -- provider usage replies
 parser github.com/ghbmrk/agentos/broker/modelroute -- guests' model requests
 parser github.com/ghbmrk/agentos/broker/modem -- SIM and carrier messages
 parser github.com/ghbmrk/agentos/broker/modemlink -- the modem bridge's messages
-parser github.com/ghbmrk/agentos/broker/netjoin -- replies from the netjoin helper
 parser github.com/ghbmrk/agentos/broker/owner -- the owner's texts
 parser github.com/ghbmrk/agentos/broker/question -- guests' questions to the owner
 parser github.com/ghbmrk/agentos/broker/recovery -- backups restored onto new hardware

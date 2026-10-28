@@ -600,7 +600,7 @@ func TestUsage(t *testing.T) {
 // #1270 (HW-10): the files the seller seals route the box to the claim on
 // the shipped image, which is not the download's (BoxConfig.Download
 // unset): the claim screen first, never the download path's pairing. The
-// core holds no setup network (D-178): the enforcer serves it.
+// core keeps no setup network (D-178): the enforcer serves it.
 func TestASealedBoxRoutesToTheClaim(t *testing.T) {
 	needTools(t)
 	img, sums := writeImage(t, standardDisk(t, rootTree))
@@ -628,9 +628,6 @@ func TestASealedBoxRoutesToTheClaim(t *testing.T) {
 	}
 	if fb.Route != firstboot.RouteClaim || fb.Claim == nil || fb.Claim.Status().Claimed {
 		t.Fatalf("route %q, claim %+v", fb.Route, fb.Claim)
-	}
-	if n, err := fb.Network(); err != nil || n != nil {
-		t.Fatalf("setup network %v, %v; want none on the core", n, err)
 	}
 }
 

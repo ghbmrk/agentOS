@@ -104,7 +104,6 @@ class KeeperTreeTest(unittest.TestCase):
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
                        if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT)
         self.assertIn("agentos-localui.service", names)
-        self.assertIn("agentos-ap-exempt@.service", names)
         (self.root / SYSTEM / "agentos-.service.d/50-main-side.conf").unlink()
         want = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)" % (n, p)
                 for n in names for p in check.KEEPER_PATHS]
