@@ -519,35 +519,47 @@ class WorkflowTest(unittest.TestCase):
         self.assertIn('python3 tools/vulncheck.py image "$d" --check-issues', step)
 
     def test_install_is_retried_three_times_then_fails(self):
-        # #3768: a Go proxy stream error retries; the third failure fails the step.
+        # #3768: a Go proxy stream error on either install retries; its third failure fails the step.
+        gov = "install golang.org/x/vuln/cmd/govulncheck@v1.8.0"
+        osv = "install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1"
         for wf in (WORKFLOW, IMAGE_WORKFLOW):
             text = wf.read_text()
             lines = text[text.index("- name: Install govulncheck and osv-scanner"):].splitlines()[2:]
             script = "\n".join(l[10:] for l in lines[:lines.index(next(l for l in lines if not l.startswith(" " * 10)))])
-            for fails, ok in ((0, True), (2, True), (3, False)):
-                with self.subTest(workflow=wf.name, fails=fails), tempfile.TemporaryDirectory() as tmp:
-                    d = pathlib.Path(tmp)
-                    (d / "go").write_text(
-                        "#!/bin/sh\n[ \"$1\" = env ] && { echo /gopath; exit; }\n"
-                        f"echo \"$*\" >> {d}/calls\nn=$(wc -l < {d}/calls)\n"
-                        f"[ \"$n\" -gt {fails} ] || {{ echo 'stream error: INTERNAL_ERROR' >&2; exit 1; }}\n")
-                    (d / "sleep").write_text(f"#!/bin/sh\necho $1 >> {d}/slept\n")
-                    for stub in ("go", "sleep"):
-                        (d / stub).chmod(0o755)
-                    (d / "step.sh").write_text(script + "\n")
-                    r = subprocess.run(["bash", "--noprofile", "--norc", "-e", str(d / "step.sh")],
-                                       env={"PATH": f"{d}:/usr/bin:/bin", "GITHUB_PATH": str(d / "path")},
-                                       capture_output=True, text=True)
-                    calls = (d / "calls").read_text().splitlines()
-                    self.assertEqual(r.returncode == 0, ok, r.stderr)
-                    if ok:
-                        self.assertEqual(calls[fails:], ["install golang.org/x/vuln/cmd/govulncheck@v1.8.0",
-                                         "install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1"])
-                        self.assertEqual((d / "path").read_text(), "/gopath/bin\n")
-                    else:
-                        self.assertEqual(len(calls), 3)  # govulncheck three times; nothing after it
-                        self.assertFalse((d / "path").exists())
-                    self.assertEqual(len(((d / "slept").read_text() if fails else "").split()), min(fails, 2))
+            for flaky in (gov, osv):
+                for fails in (0, 2, 3):
+                    with self.subTest(workflow=wf.name, flaky=flaky, fails=fails), \
+                            tempfile.TemporaryDirectory() as tmp:
+                        d = pathlib.Path(tmp)
+                        # The stub fails its first `fails` installs of `flaky` only.
+                        (d / "go").write_text(
+                            "#!/bin/sh\n[ \"$1\" = env ] && { echo /gopath; exit; }\n"
+                            f"echo \"$*\" >> {d}/calls\n"
+                            f"[ \"$*\" = \"{flaky}\" ] && [ $(grep -cxF \"$*\" {d}/calls) -le {fails} ] && "
+                            "{ echo 'stream error: INTERNAL_ERROR' >&2; exit 1; }\nexit 0\n")
+                        (d / "sleep").write_text(f"#!/bin/sh\necho $1 >> {d}/slept\n")
+                        for stub in ("go", "sleep"):
+                            (d / stub).chmod(0o755)
+                        (d / "step.sh").write_text(script + "\n")
+                        r = subprocess.run(["bash", "--noprofile", "--norc", "-e", str(d / "step.sh")],
+                                           env={"PATH": f"{d}:/usr/bin:/bin", "GITHUB_PATH": str(d / "path")},
+                                           capture_output=True, text=True)
+                        calls = (d / "calls").read_text().splitlines()
+                        slept = (d / "slept").read_text().split() if (d / "slept").exists() else []
+                        tries = min(fails + 1, 3)
+                        if fails < 3:
+                            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                            self.assertEqual(calls, [gov] * (tries if flaky == gov else 1)
+                                             + [osv] * (tries if flaky == osv else 1))
+                            self.assertEqual((d / "path").read_text(), "/gopath/bin\n")
+                        else:
+                            self.assertNotEqual(r.returncode, 0)
+                            self.assertEqual(calls, ([] if flaky == gov else [gov]) + [flaky] * 3)
+                            self.assertFalse((d / "path").exists())
+                            self.assertIn(f"go {flaky} failed 3 times", r.stdout)
+                        self.assertEqual(slept, ["15", "30"][:min(fails, 2)])
+                        for t in range(1, min(fails, 3) + 1):
+                            self.assertIn(f"try {t} of 3 failed: go {flaky}", r.stderr)
 
 
 @unittest.skipUnless(shutil.which("govulncheck") and shutil.which("osv-scanner"),

@@ -266,7 +266,15 @@ jobs:
       # Tried three times, as in vulncheck.yml (#3768).
       - name: Install govulncheck and osv-scanner
         run: |
-          retry() { for t in 1 2 3; do "$@" && return; [ "$t" = 3 ] || sleep $((t * 15)); done; return 1; }
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the scan cannot run (#3768)"
+            return 1
+          }
           retry go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           retry go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
