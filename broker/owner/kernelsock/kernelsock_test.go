@@ -914,3 +914,86 @@ func TestRecoveryCardReachesTheKernel(t *testing.T) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 }
+
+// REQ: LOG-4
+// KRN-forget b: erase by name over the real OwnerSide on the written-out
+// wire. Named answers IDs, Recall counts, Erase confirms and records the
+// reader, and the kernel's content refusals come back as its own errors.
+func TestEraseByNameReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(data, "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: pub, Sign: priv,
+		Anchors: publics(anchorSigners(t)), KeyDir: filepath.Join(data, "keys"),
+		ContentDir: filepath.Join(data, "content"), Stores: []string{"mail"},
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	var alice string
+	if err := h.With(func(k *kernel.Kernel) error {
+		if alice, err = k.OpenSubject(1000); err != nil {
+			return err
+		}
+		if _, err := k.Seal(1000, alice, "mail", kernel.ClassLabel, []byte("Alice Smith")); err != nil {
+			return err
+		}
+		item, err := k.Seal(1000, alice, "mail", "message", []byte("CANARY-lunch"))
+		if err != nil {
+			return err
+		}
+		_, err = k.ReadFor(2000, item, "agent.1")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found, unread, err := o.Named(ctx, "alice  smith")
+	if err != nil || len(found) != 1 || found[0] != alice || unread != nil {
+		t.Fatalf("named: %v %v %v", found, unread, err)
+	}
+	if _, _, err := o.Named(ctx, "  "); !errors.Is(err, kernel.ErrLabel) {
+		t.Fatalf("a blank name: %v", err)
+	}
+	if r, ok, err := o.Recall(ctx, alice); err != nil || !ok || len(r.Items) != 2 {
+		t.Fatalf("recall: %+v %v %v", r, ok, err)
+	}
+	if _, ok, err := o.Recall(ctx, strings.Repeat("0", 32)); err != nil || ok {
+		t.Fatalf("recall of no subject: %v %v", ok, err)
+	}
+	c, err := o.Erase(ctx, alice)
+	if err != nil || c.Subject != alice || len(c.Unconfirmed) != 0 {
+		t.Fatalf("erase: %+v %v", c, err)
+	}
+	if _, err := o.Erase(ctx, alice); !errors.Is(err, kernel.ErrErased) || !errors.As(err, new(Refused)) {
+		t.Fatalf("a second erase: %v", err)
+	}
+	if _, err := o.Erase(ctx, strings.Repeat("0", 32)); !errors.Is(err, kernel.ErrSubject) {
+		t.Fatalf("an erase of no subject: %v", err)
+	}
+	if u, err := o.Unerased(ctx); err != nil || u != nil {
+		t.Fatalf("unerased: %+v %v", u, err)
+	}
+	rs, err := o.ErasedReads(ctx)
+	if err != nil || len(rs) != 1 || rs[0] != (kernel.ErasedRead{Subject: alice, Lineage: "agent.1", First: 2000}) {
+		t.Fatalf("erased reads: %+v %v", rs, err)
+	}
+	// A kernel with no subject-key table has no content to look in.
+	if _, _, err := runningKernel(t).Named(ctx, "Alice"); !errors.Is(err, kernel.ErrContentClosed) {
+		t.Fatalf("named before content opens: %v", err)
+	}
+}
