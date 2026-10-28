@@ -117,7 +117,7 @@ var controlPath = map[string][]string{
 	// imports golang.org/x/sys/unix, so like clock it has no entry below.
 	// It keeps the guests' plan holder key with kernel/privfile and narrows
 	// the owner's grant per machine with kernel/key (#3087).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "apnet", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -180,6 +180,12 @@ var guestPlane = map[string]struct {
 	// through golang.org/x/sys/unix, and TestAgentosdLinksNoInference
 	// holds its imports.
 	"infer": {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
+	// The camera vision service's protocol and client (VIS-svc), as
+	// infer's: the standard library only, dialing the service's unix
+	// socket. Its supervisor wraps infer/supervise's jail and holds no
+	// socket, process or system call of its own.
+	"vision":           {nil, []string{"net/http", "os/exec", "plugin", "unsafe", "C"}},
+	"vision/supervise": {[]string{"cgroup", "infer/supervise"}, forbiddenStd},
 	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
 	// guests as tools: no network clients, no processes, no inference
 	// beyond the in-process hashing embedder (DEP-1).

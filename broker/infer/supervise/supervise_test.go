@@ -680,3 +680,25 @@ func (l lockedWriter) Write(b []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(b)
 }
+
+// A supervisor started with a Name says it in its lines (VIS-svc).
+func TestSupervisorLogNamesTheService(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	s := newSupervisor(Options{Name: "vision", Backoff: Backoff{Min: time.Millisecond, Max: time.Millisecond, Reset: time.Hour},
+		Log: lockedWriter{&mu, &buf}})
+	ctx, cancel := context.WithCancel(context.Background())
+	n := 0
+	go s.loop(ctx, func(context.Context) string {
+		if n++; n == 2 {
+			cancel()
+		}
+		return "exited"
+	})
+	<-s.Done()
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.HasPrefix(buf.String(), "vision: service stopped (exited); restart 1 in ") {
+		t.Fatalf("log %q", buf.String())
+	}
+}
