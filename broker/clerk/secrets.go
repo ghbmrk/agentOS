@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -225,6 +226,40 @@ func (s *Secrets) DeviceKey(slot string) func(fn func(key []byte) error) error {
 		}
 		return s.with(slot, KindStatic, fn)
 	}
+}
+
+// VisionTemplateSlots prefixes the only slots VisionTemplate opens: an
+// enrolled person's face template, sealed under its own wrap key (VIS-faces,
+// vision/faces). VisionTemplate lends the slot to fn for one call and wipes
+// it after; no other lend opens it, and the slot is never kernel content,
+// so no recall lists it and no agent session reads it (DEV-7).
+const VisionTemplateSlots = "vision-template/"
+
+func (s *Secrets) VisionTemplate(slot string) func(fn func(sealed []byte) error) error {
+	return func(fn func(sealed []byte) error) error {
+		if !strings.HasPrefix(slot, VisionTemplateSlots) {
+			return errors.New("clerk: VisionTemplate opens only a vision template slot")
+		}
+		return s.with(slot, KindStatic, fn)
+	}
+}
+
+// Names lists the slots under prefix, sorted: their names only, never what
+// they hold. An empty prefix is refused, as RemovePrefix refuses it.
+func (s *Secrets) Names(prefix string) []string {
+	if s == nil || prefix == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for slot := range s.m {
+		if strings.HasPrefix(slot, prefix) {
+			out = append(out, slot)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (s *Secrets) Has(slot string) bool {

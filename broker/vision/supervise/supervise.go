@@ -9,7 +9,10 @@
 // an encoding there (DEV-7). The supervisor's lines carry causes and counts
 // only.
 //
-// Part (c) adds the templates the supervisor lends the service.
+// The service gets a second listener, its control socket, as fd 4, at
+// ControlPath(Socket) in the same 0700 directory: the enrolment and lend
+// calls (VIS-faces) are served there only, so a feed that comes to reach
+// the first socket can never lend or ask for a template.
 package supervise
 
 import (
@@ -65,6 +68,7 @@ func Start(ctx context.Context, o Options) (*Supervisor, error) {
 		Path:       o.Path,
 		Args:       o.Args,
 		Socket:     o.Socket,
+		Control:    ControlPath(o.Socket),
 		Cgroup:     o.Cgroup,
 		UID:        o.UID,
 		GID:        o.GID,
@@ -74,3 +78,7 @@ func Start(ctx context.Context, o Options) (*Supervisor, error) {
 		QuietChild: true,
 	})
 }
+
+// ControlPath is the control socket for a service whose socket is socket:
+// beside it, in the same directory.
+func ControlPath(socket string) string { return socket + ".control" }

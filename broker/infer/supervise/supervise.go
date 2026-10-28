@@ -55,6 +55,11 @@ type Options struct {
 	// Name is the service's name in the supervisor's own lines; empty
 	// is "infer".
 	Name string
+	// Control, if set, is a second listener's path, in Socket's
+	// directory, handed to the child as fd 4: a socket for calls only the
+	// caller makes (VIS-faces: lending enrolled templates), kept apart
+	// from a socket another feed may come to reach.
+	Control string
 	// QuietChild sends the child's stdout and stderr to /dev/null
 	// instead of Log, for a service whose output must never reach
 	// agentosd's log (VIS-svc: an untrusted service that sees capture
@@ -101,6 +106,9 @@ func Start(ctx context.Context, o Options) (*Supervisor, error) {
 	}
 	if !filepath.IsAbs(o.Path) || !filepath.IsAbs(o.Socket) {
 		return nil, errors.New("supervise: the service and socket paths must be absolute")
+	}
+	if o.Control != "" && (filepath.Dir(o.Control) != filepath.Dir(o.Socket) || o.Control == o.Socket) {
+		return nil, errors.New("supervise: the control socket is another path in the socket's directory")
 	}
 	if o.Backoff == (Backoff{}) {
 		o.Backoff = DefaultBackoff
@@ -197,20 +205,35 @@ func (s *Supervisor) run(ctx context.Context) string {
 	if g != nil {
 		ooms, _ = g.OOMKills()
 	}
-	lf, err := s.listen()
+	lf, err := s.listen(s.o.Socket)
 	if err != nil {
 		return "listen: " + err.Error()
 	}
 	// The socket path goes with the service, so no client reaches a
 	// listener nobody serves.
 	defer os.Remove(s.o.Socket)
+	files := []*os.File{lf}
+	if s.o.Control != "" {
+		cf, err := s.listen(s.o.Control)
+		if err != nil {
+			lf.Close()
+			return "listen: " + err.Error()
+		}
+		defer os.Remove(s.o.Control)
+		files = append(files, cf)
+	}
+	closeAll := func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}
 
 	attr := &syscall.SysProcAttr{Setpgid: true}
 	jail(attr, s.o.UID, s.o.GID)
 	if g != nil {
 		fd, err := syscall.Open(g.Path, syscall.O_DIRECTORY|syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
 		if err != nil {
-			lf.Close()
+			closeAll()
 			return "cgroup open: " + err.Error()
 		}
 		defer syscall.Close(fd)
@@ -225,13 +248,13 @@ func (s *Supervisor) run(ctx context.Context) string {
 		Stdout:      out,
 		Stderr:      out,
 		SysProcAttr: attr,
-		ExtraFiles:  []*os.File{lf},
+		ExtraFiles:  files,
 		WaitDelay:   2 * time.Second,
 		KillGroup:   true,
 	}, s.o.Path, s.o.Args...)
 	err = startNoNewPrivs(cmd.Start)
-	// The child holds its own copy; the caller keeps none.
-	lf.Close()
+	// The child holds its own copies; the caller keeps none.
+	closeAll()
 	if err != nil {
 		return "start: " + err.Error()
 	}
@@ -256,10 +279,10 @@ func (s *Supervisor) run(ctx context.Context) string {
 	return cause
 }
 
-// listen makes the socket directory 0700, replaces any old socket and
-// returns the new listener as a file for the child's fd 3.
-func (s *Supervisor) listen() (*os.File, error) {
-	dir := filepath.Dir(s.o.Socket)
+// listen makes the socket directory 0700, replaces any old socket at path
+// and returns the new listener as a file for the child (fd 3 or 4).
+func (s *Supervisor) listen(path string) (*os.File, error) {
+	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -273,10 +296,10 @@ func (s *Supervisor) listen() (*os.File, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(s.o.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	ln, err := net.Listen("unix", s.o.Socket)
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +309,7 @@ func (s *Supervisor) listen() (*os.File, error) {
 	f, err := ul.File()
 	ul.Close()
 	if err != nil {
-		os.Remove(s.o.Socket)
+		os.Remove(path)
 		return nil, err
 	}
 	return f, nil

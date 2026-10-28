@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Client is agentosd's side of the vision service's socket. Each call
+// Client is agentosd's side of the vision service's feed socket. Each call
 // dials the socket, writes one request (a header line and its payload) and
 // reads one reply line, within Timeout.
 type Client struct {
@@ -87,9 +87,16 @@ func (c Client) call(ctx context.Context, req Request, payload []byte, w, h int)
 		conn.SetDeadline(dl)
 	}
 	// A service that refuses the header answers and closes before taking
-	// the payload, so a failed write still reads for its reply.
-	_, werr := conn.Write(append(append(hdr, '\n'), payload...))
+	// the payload, so a failed write still reads for its reply. The
+	// payload is written from the caller's own buffer, never copied, so
+	// no frame or template is left in a buffer here that nothing zeroes.
+	_, werr := conn.Write(append(hdr, '\n'))
+	if werr == nil && len(payload) > 0 {
+		_, werr = conn.Write(payload)
+	}
 	line, err := ReadLine(bufio.NewReaderSize(conn, 4<<10), MaxReplyLine)
+	// An enrol reply's line holds a template as text.
+	defer clear(line)
 	if err != nil {
 		switch {
 		case ctx.Err() != nil:
@@ -122,10 +129,14 @@ func parseReply(op string, line []byte, w, h int, enrolled func(string) bool) (R
 		return Reply{}, unavailable("data after the reply")
 	}
 	if r.Error != "" {
-		if !r.Error.Known() || r.State != "" || r.Device != "" || r.Model != "" || r.SHA256 != "" || r.Detections != nil || r.Sounds != nil {
+		if !r.Error.Known() || r.State != "" || r.Device != "" || r.Model != "" || r.SHA256 != "" || r.Detections != nil || r.Sounds != nil || r.Template != nil {
 			return Reply{}, unavailable("malformed error reply")
 		}
 		return Reply{}, &Error{Cause: r.Error}
+	}
+	if r.Template != nil && op != OpEnrol {
+		clear(r.Template)
+		return Reply{}, unavailable("template on a reply that takes none")
 	}
 	hello := r.State != "" || r.Device != "" || r.Model != "" || r.SHA256 != ""
 	switch op {
@@ -150,8 +161,62 @@ func parseReply(op string, line []byte, w, h int, enrolled func(string) bool) (R
 		if err := CheckSounds(r.Sounds); err != nil {
 			return Reply{}, err
 		}
+	case OpEnrol:
+		if hello || r.Detections != nil || r.Sounds != nil {
+			clear(r.Template)
+			return Reply{}, unavailable("enrol reply has other fields")
+		}
+		if err := CheckTemplate(r.Template); err != nil {
+			clear(r.Template)
+			return Reply{}, err
+		}
+	case OpLend:
+		if r.State != StateReady || r.Device != "" || r.Model != "" || r.SHA256 != "" || r.Detections != nil || r.Sounds != nil {
+			return Reply{}, unavailable("lend reply is not ready")
+		}
 	default:
 		return Reply{}, badRequest("unknown op")
 	}
 	return r, nil
+}
+
+// ControlClient is the trusted side's client of the service's control
+// socket (vision/faces): the one path that asks for an enrolment template
+// and lends the enrolled ones. Only the side holding the template slots
+// holds it; the feed's Client never sends a control op.
+type ControlClient struct {
+	// Path is the service's control socket.
+	Path string
+	// Timeout bounds each call; zero is DefaultTimeout.
+	Timeout time.Duration
+}
+
+// Enrol returns the template of the one face in f. The caller seals it
+// and zeroes it; a frame without exactly one clear face is NoFace.
+func (c ControlClient) Enrol(ctx context.Context, f Frame) ([]byte, error) {
+	req := Request{Op: OpEnrol, Format: f.Format, Width: f.Width, Height: f.Height, Bytes: len(f.Data)}
+	if err := req.Check(); err != nil {
+		return nil, err
+	}
+	r, err := Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, f.Data, f.Width, f.Height)
+	if err != nil {
+		return nil, err
+	}
+	return r.Template, nil
+}
+
+// Lend replaces every template the service holds with ts; none holds
+// none. The payload is zeroed once sent.
+func (c ControlClient) Lend(ctx context.Context, ts []Template) error {
+	payload, err := EncodeLend(ts)
+	if err != nil {
+		return err
+	}
+	defer clear(payload)
+	req := Request{Op: OpLend, Bytes: len(payload)}
+	if err := req.Check(); err != nil {
+		return err
+	}
+	_, err = Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, payload, 0, 0)
+	return err
 }
