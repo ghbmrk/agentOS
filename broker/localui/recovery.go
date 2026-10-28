@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -135,7 +136,11 @@ func (s *Server) recoveryWipe(p *recoveryPending) {
 // session on the factor, and makes its card.
 func (s *Server) recoveryStart(tok, factor string, secret []byte) error {
 	p := &recoveryPending{starter: tokenKey(tok), token: tok, until: s.cfg.Now().Add(RecoveryPendingFor), factor: factor, secret: secret}
-	d, err := card.NewDisplay(card.DisplayConfig{Generate: s.cfg.RecoveryCard, Rotate: &card.Parts{Recovery: true},
+	var auth []byte
+	if s.cfg.PageAuthority != nil {
+		auth = s.cfg.PageAuthority()
+	}
+	d, err := card.NewDisplay(card.DisplayConfig{Generate: s.cfg.RecoveryCard, Rotate: &card.Parts{Recovery: true}, Authority: auth,
 		Provision: func(c *card.Card) error { return s.recoveryConfirmed(p, c) },
 		Discarded: func() { s.recoveryDiscarded(p) }})
 	if err != nil {
@@ -405,7 +410,9 @@ func (s *Server) recoveryFactor(w http.ResponseWriter, r *http.Request, tok stri
 		}
 		factor, secret = localapi.RecoveryFactorPassphrase, []byte(pass)
 	}
-	if err := s.recoveryStart(tok, factor, secret); err != nil {
+	if err := s.recoveryStart(tok, factor, secret); errors.Is(err, card.ErrNoAuthority) {
+		return firstboot.ErrNoAuthority.Error()
+	} else if err != nil {
 		return "I couldn't make a new card. Try again."
 	}
 	return ""

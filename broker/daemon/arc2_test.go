@@ -224,10 +224,10 @@ var learningPlane = map[string]struct {
 	// change reads the closed verb list to check an adapter's demo runs
 	// before adoption (ADP-8b); verb is standard library only.
 	"change": {[]string{"journal", "owner", "routerule", "update", "verb"}, forbiddenStd},
-	// loops reads its spare envelope's spend from the kernel's log and
-	// derives the narrower spare keys (MIG-4-spend-m). Its settings apply
-	// with no journal (#2786); privfile.ErrUnsynced is its Store contract.
-	"loops": {[]string{"change", "kernel", "kernel/key", "kernel/privfile", "skill/format"}, forbiddenStd},
+	// loops is the probe vocabulary and the settings-text parser; its
+	// scheduler, spare envelope and Guard went with the change pipeline
+	// (#2785, MIG-4-untrusted-change-c2).
+	"loops": {nil, forbiddenStd},
 	// The skill file format without the bridge (P3-6e): Loop 1 decodes
 	// the skills and procedures a builder writes.
 	"skill/format": {nil, forbiddenStd},

@@ -2,6 +2,7 @@ package proc
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -241,5 +242,67 @@ func TestNamedOverTheSocketBeforeContentOpens(t *testing.T) {
 	o := Owner{serveSide(t, b, OwnerSide, os.Getuid())}
 	if _, _, err := o.Named("Alice"); !errors.Is(err, kernel.ErrContentClosed) {
 		t.Fatalf("named before content opens: %v", err)
+	}
+}
+
+// downKeys is a key table whose delete fails with err.
+type downKeys struct {
+	*kernel.MemKeys
+	err error
+}
+
+func (d downKeys) Delete(string) error { return d.err }
+
+// KRN-forget-erase-err-test (#3525): when the key delete after a logged
+// erase fails, the owner socket still answers the Confirmation with the
+// error, and Owner.Erase gives the sentinel back by its text, or the text
+// alone for any other error, so the forget flow neither retries the erase
+// nor reports it unlogged (LOG-4).
+func TestEraseOverTheOwnerSocketWhenAStepAfterTheLogFails(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		is   error // the sentinel errors.Is finds across the socket; nil: none
+	}{
+		{"sentinel", kernel.ErrStore, kernel.ErrStore},
+		{"wrapped sentinel", fmt.Errorf("%w: key file", kernel.ErrStore), nil},
+		{"plain text", errors.New("key table down"), nil},
+		{"joined", errors.Join(kernel.ErrStore, errors.New("key table down")), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			h := contentKernel(t, filepath.Join(dir, "log"), filepath.Join(dir, "keys"))
+			defer h.Close()
+			o := Owner{serveSide(t, &box{t: t, h: h}, OwnerSide, os.Getuid())}
+			var sub string
+			if err := h.With(func(k *kernel.Kernel) (err error) {
+				if _, err = k.OpenContent(downKeys{kernel.NewMemKeys(), tc.err}, map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 1000); err != nil {
+					return err
+				}
+				if sub, err = k.OpenSubject(1000); err != nil {
+					return err
+				}
+				_, err = k.Seal(1000, sub, "mail", "message", []byte("lunch"))
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			c, err := o.Erase(sub)
+			if c.Subject != sub || !slices.Equal(c.Unconfirmed, []string{kernel.KeyTable}) {
+				t.Fatalf("the Confirmation did not cross with the error: %+v %v", c, err)
+			}
+			if err == nil || err.Error() != tc.err.Error() {
+				t.Fatalf("got error %v, want %q", err, tc.err)
+			}
+			if tc.is != nil && !errors.Is(err, tc.is) {
+				t.Fatalf("errors.Is(%v, %v) is false across the socket", err, tc.is)
+			}
+			if u, err := o.Unerased(); err != nil || len(u) != 1 || u[0].Subject != sub || !slices.Equal(u[0].Stores, []string{kernel.KeyTable}) {
+				t.Fatalf("unerased after the failed key delete: %+v %v", u, err)
+			}
+			if _, err := o.Erase(sub); !errors.Is(err, kernel.ErrErased) {
+				t.Fatalf("the erase is not logged: a second erase got %v", err)
+			}
+		})
 	}
 }

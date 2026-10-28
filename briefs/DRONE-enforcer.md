@@ -26,7 +26,7 @@ The attacker is a rooted core (it holds the channel and every camera's video) an
 
 ## Scope
 
-`broker/drone/` (adapter interface only), the enforcer image's drone service unit and page templates in whatever directory the enforcer rows create, the enforcer's channel parser (drone message only), tests beside each, `ASSUMPTIONS.md` of each touched package. The exact paths are settled when the enforcer rows exist; the builder writes them into this brief's Scope in the first commit of the build PR.
+`broker/drone/` (adapter interface only), the enforcer image's drone service unit and page templates in whatever directory the enforcer rows create, the enforcer's channel parser (drone message only), tests beside each, `ASSUMPTIONS.md` of each touched package. Paths follow briefs/ENF.md's code layout: the page templates under `broker/enforcer/page/`, the channel mapping in `broker/enforcer/channel/`, the service in `image/enforcer/`.
 
 **Requirement IDs:** NET-2 (Drones; Safety devices: the drone's return-to-dock exception), NET-4, NET-6, A18 (Channel and Approvals clauses as they apply to the drone).
 
@@ -47,4 +47,4 @@ One session, about 130k, strongest model, once the dependencies exist. If the en
 
 ## Dependencies
 
-DRONE-sim parts a and b merged. The enforcer rows for NET-2 to NET-7 (its image, page, passkey and loosening flow, channel parser): no work-item issue exists for them yet (checked 2026-10-27); this row cannot start until they are opened and built. Live tests need the enforcer hardware and the aircraft.
+DRONE-sim parts a and b merged. The enforcer rows in briefs/ENF.md: at least ENF-b #3659 (page and passkey), ENF-d #3660 (channel), ENF-l #3670 (daemon) and ENF-m #3671 (image); the drone's adapters live beside them under `broker/enforcer/`. Live tests need the enforcer hardware and the aircraft.

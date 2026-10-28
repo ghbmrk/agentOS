@@ -38,15 +38,18 @@ func TestMain(m *testing.M) {
 }
 
 // fake is the CI runtime: a fixed concept-table vector per text (a hash of
-// the text spread over dim floats), with switches to refuse the model, fail
-// loads, crash, panic, hang or answer malformed vectors on the next calls.
+// the text spread over dim floats) when dim is above zero, and a fixed
+// reply per prompt when gen is set, with switches to refuse the model, fail
+// loads, crash, panic, hang or answer malformed vectors or text on the next
+// calls.
 type fake struct {
 	dim int
+	gen bool
 
 	mu      sync.Mutex
 	refuse  bool
 	noLoad  bool
-	mode    string // "", "crash", "panic", "hang", "short", "nan", "count"
+	mode    string // "", "crash", "panic", "hang", "short", "nan", "count", "long", "utf8"
 	times   int    // calls left in mode
 	loads   int
 	release chan struct{} // closed by Load: a hung Embed returns
@@ -57,22 +60,78 @@ type fake struct {
 
 func newFake(dim int) *fake { return &fake{dim: dim, release: make(chan struct{})} }
 
-func (f *fake) Load(path string) (int, error) {
+// newGenFake is a fake whose model serves generate, and embed too when dim
+// is above zero.
+func newGenFake(dim int) *fake {
+	f := newFake(dim)
+	f.gen = true
+	return f
+}
+
+func (f *fake) Load(path string) (Serves, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loads++
 	close(f.release)
 	f.release = make(chan struct{})
 	if f.refuse {
-		return 0, ErrRefused
+		return Serves{}, ErrRefused
 	}
 	if f.noLoad {
-		return 0, errors.New("runtime binary absent")
+		return Serves{}, errors.New("runtime binary absent")
 	}
 	if _, err := os.Stat(path); err != nil {
-		return 0, ErrRefused
+		return Serves{}, ErrRefused
 	}
-	return f.dim, nil
+	return Serves{Dim: f.dim, Generate: f.gen}, nil
+}
+
+// replyCanary is in every reply the fake generates.
+const replyCanary = "synthetic-infer-reply-canary-7c41"
+
+// enter takes the next call's mode and counts the call in.
+func (f *fake) enter() (mode string, release, gate chan struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mode, release, gate = "", f.release, f.gate
+	if f.times > 0 {
+		mode = f.mode
+		f.times--
+	}
+	f.inside++
+	f.maxIn = max(f.maxIn, f.inside)
+	return mode, release, gate
+}
+
+func (f *fake) leave() {
+	f.mu.Lock()
+	f.inside--
+	f.mu.Unlock()
+}
+
+// Generate replies with the canary and the prompt, cut to four bytes a
+// token of maxOut.
+func (f *fake) Generate(prompt string, maxOut int) (string, error) {
+	mode, release, gate := f.enter()
+	defer f.leave()
+	if gate != nil {
+		<-gate
+	}
+	switch mode {
+	case "crash":
+		return "", errors.New("runtime died on: " + prompt)
+	case "panic":
+		panic("runtime panic")
+	case "hang":
+		<-release
+		return "", errors.New("killed")
+	case "long":
+		return strings.Repeat("y", infer.MaxGenerate+1), nil
+	case "utf8":
+		return replyCanary + "\xff\xfe", nil
+	}
+	out := replyCanary + " " + prompt
+	return out[:min(len(out), 4*maxOut)], nil
 }
 
 // failNext puts the next n calls in mode.
@@ -83,20 +142,8 @@ func (f *fake) failNext(mode string, n int) {
 }
 
 func (f *fake) Embed(texts []string) ([][]float32, error) {
-	f.mu.Lock()
-	mode, release, gate := "", f.release, f.gate
-	if f.times > 0 {
-		mode = f.mode
-		f.times--
-	}
-	f.inside++
-	f.maxIn = max(f.maxIn, f.inside)
-	f.mu.Unlock()
-	defer func() {
-		f.mu.Lock()
-		f.inside--
-		f.mu.Unlock()
-	}()
+	mode, release, gate := f.enter()
+	defer f.leave()
 	if gate != nil {
 		<-gate
 	}
@@ -176,7 +223,7 @@ func serve(t *testing.T, model []byte, p string, rt *fake, edit func(*Config)) *
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Config{Name: "synthetic-embed", Model: filepath.Join(dir, "model.gguf"), Pin: p,
-		CallTimeout: 300 * time.Millisecond, Retry: 50 * time.Millisecond}
+		CallTimeout: 300 * time.Millisecond, GenerateTimeout: 300 * time.Millisecond, Retry: 50 * time.Millisecond}
 	if model != nil {
 		if err := os.WriteFile(cfg.Model, model, 0o444); err != nil {
 			t.Fatal(err)
@@ -490,5 +537,197 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 2 {
 		t.Fatalf("the service made files beside its socket: %v", ents)
+	}
+}
+
+func (r *rig) genClient() infer.Client {
+	return infer.Client{Path: r.sock, Timeout: 5 * time.Second, GenerateTimeout: 5 * time.Second}
+}
+
+// REQ: PLN-7, RES-2
+func TestGenerateRoundTrip(t *testing.T) {
+	r := serve(t, modelBytes, pin(modelBytes), newGenFake(0), nil)
+	ctx := context.Background()
+	in, err := r.client().Hello(ctx)
+	if err != nil || in != (infer.Info{Model: "synthetic-embed", SHA256: pin(modelBytes), Generate: true}) {
+		t.Fatalf("hello = %+v, %v", in, err)
+	}
+	text, in2, err := r.genClient().Generate(ctx, "synthetic question", 64)
+	if err != nil || text != replyCanary+" synthetic question" || in2 != in {
+		t.Fatalf("generate = %q, %+v, %v", text, in2, err)
+	}
+	// max_out reaches the runtime.
+	if text, _, err := r.genClient().Generate(ctx, "synthetic question", 2); err != nil || len(text) != 8 {
+		t.Fatalf("max_out 2 = %q, %v", text, err)
+	}
+	// A model serving both answers both.
+	r = serve(t, modelBytes, pin(modelBytes), newGenFake(8), nil)
+	if _, _, err := r.genClient().Generate(ctx, "synthetic", 8); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.client().Embed(ctx, []string{"synthetic"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// REQ: PLN-7
+func TestGenerateBoundsRefused(t *testing.T) {
+	r := serve(t, modelBytes, pin(modelBytes), newGenFake(0), nil)
+	for name, req := range map[string]infer.Request{
+		"33 KiB prompt": {Op: infer.OpGenerate, Prompt: strings.Repeat("p", 33<<10), MaxOut: 8},
+		"empty prompt":  {Op: infer.OpGenerate, MaxOut: 8},
+		"max_out 0":     {Op: infer.OpGenerate, Prompt: "synthetic"},
+		"max_out 1025":  {Op: infer.OpGenerate, Prompt: "synthetic", MaxOut: infer.MaxOut + 1},
+		"texts too":     {Op: infer.OpGenerate, Prompt: "synthetic", MaxOut: 8, Texts: []string{"x"}},
+		"embed, prompt": {Op: infer.OpEmbed, Texts: []string{"x"}, Prompt: "synthetic"},
+		"hello, prompt": {Op: infer.OpHello, Prompt: "synthetic"},
+	} {
+		b, _ := json.Marshal(req)
+		rep, err := r.raw(b)
+		if err != nil || rep.Error != infer.BadRequest {
+			t.Fatalf("%s: %+v, %v", name, rep, err)
+		}
+	}
+	if _, _, err := r.genClient().Generate(context.Background(), strings.Repeat("p", infer.MaxPrompt), infer.MaxOut); err != nil {
+		t.Fatalf("the service stopped serving after refusals: %v", err)
+	}
+}
+
+// REQ: PLN-7
+func TestOpNotServedIsMissing(t *testing.T) {
+	ctx := context.Background()
+	gen := newGenFake(0)
+	r := serve(t, modelBytes, pin(modelBytes), gen, nil)
+	if _, _, err := r.client().Embed(ctx, []string{"synthetic"}); infer.CauseOf(err) != infer.Missing {
+		t.Fatalf("embed on a generate-only model: %v", err)
+	}
+	emb := newFake(8)
+	r = serve(t, modelBytes, pin(modelBytes), emb, nil)
+	b, _ := json.Marshal(infer.Request{Op: infer.OpGenerate, Prompt: "synthetic", MaxOut: 8})
+	if rep, err := r.raw(b); err != nil || rep.Error != infer.Missing {
+		t.Fatalf("generate on an embed-only model: %+v, %v", rep, err)
+	}
+	if _, _, err := r.genClient().Generate(ctx, "synthetic", 8); infer.CauseOf(err) != infer.Missing {
+		t.Fatalf("client generate on an embed-only model: %v", err)
+	}
+	// Missing is about the model, not a failed call: neither reloads.
+	if gen.loads != 1 || emb.loads != 1 {
+		t.Fatalf("loads %d and %d, want 1 each", gen.loads, emb.loads)
+	}
+	// A runtime that loads the file but serves nothing is Corrupt.
+	r = serve(t, modelBytes, pin(modelBytes), newFake(0), nil)
+	if _, err := r.client().Hello(ctx); infer.CauseOf(err) != infer.Corrupt {
+		t.Fatalf("a model serving no op: %v", err)
+	}
+}
+
+// REQ: PLN-7, RES-2
+//
+// The runtime is no more trusted than the service's peer: a crashed, hung
+// or malformed generate is Unavailable with no text, and the next call
+// reloads and answers.
+func TestGenerateFailureIsUnavailableThenRecovers(t *testing.T) {
+	ctx := context.Background()
+	for _, mode := range []string{"crash", "panic", "hang", "long", "utf8"} {
+		t.Run(mode, func(t *testing.T) {
+			rt := newGenFake(0)
+			r := serve(t, modelBytes, pin(modelBytes), rt, nil)
+			rt.failNext(mode, 1)
+			if text, _, err := r.genClient().Generate(ctx, "synthetic", 8); text != "" || infer.CauseOf(err) != infer.Unavailable {
+				t.Fatalf("got %q, %v", text, err)
+			}
+			if _, _, err := r.genClient().Generate(ctx, "synthetic", 8); err != nil {
+				t.Fatalf("no recovery: %v", err)
+			}
+			if rt.loads != 2 {
+				t.Fatalf("%d loads, want 2", rt.loads)
+			}
+		})
+	}
+}
+
+// RES-2, INFER-A6: with Concurrent defaulted, one generate runs at a time
+// while hello still answers; set, generate takes any slot.
+func TestGenerateHoldsOneSlotByDefault(t *testing.T) {
+	for _, c := range []struct {
+		concurrent, want int
+	}{{0, 1}, {3, 3}} {
+		rt := newGenFake(0)
+		r := serve(t, modelBytes, pin(modelBytes), rt, func(cfg *Config) {
+			cfg.Concurrent = c.concurrent
+			cfg.GenerateTimeout = 5 * time.Second
+		})
+		if _, err := r.client().Hello(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		gate := make(chan struct{})
+		rt.mu.Lock()
+		rt.gate = gate
+		rt.mu.Unlock()
+		var wg sync.WaitGroup
+		errs := make(chan error, 4)
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _, err := r.genClient().Generate(context.Background(), "synthetic burst", 8)
+				errs <- err
+			}()
+		}
+		time.Sleep(300 * time.Millisecond)
+		rt.mu.Lock()
+		in := rt.inside
+		rt.mu.Unlock()
+		// With the default, a generate in flight leaves a slot for hello.
+		var herr error
+		if c.concurrent == 0 {
+			hctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			_, herr = r.client().Hello(hctx)
+			cancel()
+		}
+		close(gate)
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if herr != nil {
+			t.Fatalf("concurrent %d: hello blocked behind generate: %v", c.concurrent, herr)
+		}
+		if in != c.want || rt.maxIn != c.want {
+			t.Fatalf("concurrent %d: %d generates in the runtime at once (max %d), want %d", c.concurrent, in, rt.maxIn, c.want)
+		}
+	}
+}
+
+// REQ: PLN-7
+func TestLogsCarryNoPrompt(t *testing.T) {
+	const canary = "synthetic-infer-prompt-canary-a19f"
+	rt := newGenFake(0)
+	r := serve(t, modelBytes, pin(modelBytes), rt, nil)
+	ctx := context.Background()
+	text, _, err := r.genClient().Generate(ctx, canary, 64)
+	if err != nil || !strings.Contains(text, replyCanary) || !strings.Contains(text, canary) {
+		t.Fatalf("generate = %q, %v", text, err)
+	}
+	for _, mode := range []string{"crash", "panic", "hang", "long", "utf8"} {
+		rt.failNext(mode, 1)
+		if _, _, err := r.genClient().Generate(ctx, canary, 8); err == nil {
+			t.Fatalf("%s: no error", mode)
+		} else if strings.Contains(err.Error(), canary) || strings.Contains(err.Error(), replyCanary) {
+			t.Fatalf("%s: the reply's detail carries the prompt or text: %v", mode, err)
+		}
+	}
+	r.raw([]byte(`{"op":"generate","max_out":8,"prompt":"` + canary + strings.Repeat("q", infer.MaxPrompt) + `"}`))
+	r.raw([]byte(`{"op":"` + canary + `","prompt":"` + canary + `"}`))
+	r.raw([]byte(`{"op":"generate","prompt":"` + canary))
+	log := r.log.String()
+	if !strings.Contains(log, "generated ") || !strings.Contains(log, "reloading") || !strings.Contains(log, "bad generate request") {
+		t.Fatalf("the log lacks the sizes and causes it should carry:\n%s", log)
+	}
+	if strings.Contains(log, canary) || strings.Contains(log, replyCanary) {
+		t.Fatalf("the log carries a prompt or generated text:\n%s", log)
 	}
 }

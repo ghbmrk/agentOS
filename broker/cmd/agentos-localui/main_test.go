@@ -255,7 +255,7 @@ func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Con
 	cfg.Hooks = openSetup
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
-		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void)
+		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void, testAuthority(t))
 	box.Reset = func() error { *resets++; return nil }
 	box.Download = download
 	cfg, route, err := withFirstBoot(cfg, box, void)
@@ -431,7 +431,7 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 			t.Fatal(err)
 		}
 		cfg, err := prepare(context.Background(), base(openSetup), sock,
-			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch.json")})
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch.json")}, testAuthority(t))
 		if err != nil || cfg.Claim == nil {
 			t.Fatalf("err %v, claim %v", err, cfg.Claim)
 		}
@@ -441,7 +441,7 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 	})
 
 	t.Run("no vault socket", func(t *testing.T) {
-		if _, err := prepare(context.Background(), base(openSetup), sock, boxFiles{Claim: filepath.Join(dir, "claim.json")}); !errors.Is(err, errNoVault) {
+		if _, err := prepare(context.Background(), base(openSetup), sock, boxFiles{Claim: filepath.Join(dir, "claim.json")}, nil); !errors.Is(err, errNoVault) {
 			t.Fatalf("err %v", err)
 		}
 		if err := run(context.Background(), base(openSetup), sock, boxFiles{}); !errors.Is(err, errNoVault) {
@@ -453,7 +453,7 @@ func TestRunGatesSetupOnTheClaim(t *testing.T) {
 		before := calls.Load()
 		owned := localui.AgentosdSetup{Owner: localui.InProcess{}}
 		cfg, err := prepare(context.Background(), base(owned), sock,
-			boxFiles{VaultSock: vsock, Claim: filepath.Join(dir, "none.json"), Latch: filepath.Join(dir, "none-latch.json")})
+			boxFiles{VaultSock: vsock, Claim: filepath.Join(dir, "none.json"), Latch: filepath.Join(dir, "none-latch.json")}, nil)
 		if err != nil || cfg.Claim != nil || cfg.Card != nil || calls.Load() != before {
 			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
 		}
@@ -671,7 +671,7 @@ func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
 	t.Run("transient error, then open", func(t *testing.T) {
 		o := &flakyOwner{fails: 2}
 		cfg, err := prepare(context.Background(), base(o), sock,
-			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch1.json")})
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch1.json")}, testAuthority(t))
 		if err != nil || cfg.Claim == nil || cfg.Card == nil {
 			t.Fatalf("err %v, claim %v, card %v", err, cfg.Claim, cfg.Card)
 		}
@@ -684,7 +684,7 @@ func TestThePageDecidesSetupOnAgentosdsAnswer(t *testing.T) {
 		before := calls.Load()
 		o := &flakyOwner{closed: true}
 		cfg, err := prepare(context.Background(), base(o), sock,
-			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch2.json")})
+			boxFiles{VaultSock: vsock, Claim: cs, Latch: filepath.Join(dir, "latch2.json")}, testAuthority(t))
 		if err != nil || cfg.Claim != nil || cfg.Card != nil || calls.Load() != before {
 			t.Fatalf("err %v, claim %v, card %v, vault calls %d", err, cfg.Claim, cfg.Card, calls.Load()-before)
 		}
@@ -1127,4 +1127,168 @@ func TestAdmitPort1HandOverIsReadableUnderTheUnitsUmask(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil || string(out) != "eth0\n" {
 		t.Fatalf("another uid reads %q, %v", out, err)
 	}
+}
+
+// testAuthority is a page authority's certificate for the card step.
+func testAuthority(t *testing.T) []byte {
+	t.Helper()
+	a, err := pageca.New(localui.DefaultPageName, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
+}
+
+// REQ: HW-1, REC-4, CH-9
+//
+// OWN-card-ca: run builds the card step after pageTLS, from the authority
+// agentosd certified the page under, so the shown card prints that
+// authority's fingerprint, and the rotation and the Recovery key page
+// take the same certificate. With no HTTPS the card step holds with the
+// fixed line and shows no card, and neither rotation has an authority.
+func TestCardStepGetsThePagesAuthority(t *testing.T) {
+	dir := shortDir(t)
+	sock, vsock := filepath.Join(dir, "a.sock"), filepath.Join(dir, "u.sock")
+	listenSock(t, sock)
+	var calls atomic.Int32
+	fakeVault(t, vsock, &calls)
+	start := func(o localui.Owner, latch string) (localui.Config, *localui.PageTLS) {
+		cfg := config(localui.Page{Iface: "eth0"}, 80, sock, vsock, heldFile(t))
+		cfg.Hooks = openSetup
+		pt := pageTLS(context.Background(), &cfg, o, func(string) {})
+		cfg, err := prepare(context.Background(), withAuthority(cfg, pt), sock,
+			boxFiles{VaultSock: vsock, Claim: filepath.Join(dir, "none.json"), Latch: filepath.Join(dir, latch), Download: true}, pt.Authority())
+		if err != nil || cfg.Card == nil {
+			t.Fatalf("err %v, card %v", err, cfg.Card)
+		}
+		return cfg, pt
+	}
+
+	a, err := pageca.New(localui.DefaultPageName, time.Now().Add(-48*time.Hour), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, pt := start(certifyingOwner{a}, "latch1.json")
+	if pt == nil {
+		t.Fatal("no HTTPS with an authority")
+	}
+	d := cfg.Card.Display()
+	if d == nil {
+		t.Fatalf("no card with an authority: %v", cfg.Card.Hold())
+	}
+	page, err := d.Page()
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := strings.Fields(a.Fingerprint())
+	for _, l := range []string{strings.Join(g[:8], " "), strings.Join(g[8:], " ")} {
+		if !strings.Contains(string(page), l) {
+			t.Fatalf("the card lacks the certified authority's fingerprint line %q", l)
+		}
+	}
+	rot, ok := cfg.Rotation.(*localui.Rotation)
+	if !ok || rot.Authority == nil || string(rot.Authority()) != string(a.Certificate()) ||
+		cfg.PageAuthority == nil || string(cfg.PageAuthority()) != string(a.Certificate()) {
+		t.Fatal("the rotation or the Recovery key page lacks the page's authority")
+	}
+
+	cfg, pt = start(refusingOwner(localapi.ErrNoAuthority), "latch2.json")
+	if pt != nil || cfg.Card.Display() != nil || !errors.Is(cfg.Card.Hold(), firstboot.ErrNoAuthority) {
+		t.Fatalf("no HTTPS: tls %v, display %v, hold %v", pt != nil, cfg.Card.Display(), cfg.Card.Hold())
+	}
+	if rot := cfg.Rotation.(*localui.Rotation); rot.Authority() != nil || cfg.PageAuthority() != nil {
+		t.Fatal("an authority with no HTTPS")
+	}
+}
+
+// REQ: HW-1, CH-9
+//
+// The first-boot card takes the authority agentos-keeper-pageca.service
+// published, read with no-follow, a size bound and owner and mode checks,
+// before agentosd's; anything else at that path reads as none, and then
+// the page's certified authority (or nothing) is used. It catches a card
+// printing a certificate another process could plant or swap.
+func TestFirstBootTakesThePublishedAuthority(t *testing.T) {
+	me := uint32(os.Getuid())
+	pub := testAuthority(t)
+	a, err := pageca.New(localui.DefaultPageName, time.Now().Add(-48*time.Hour), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := localui.Config{Page: testPage(), Port: localui.UIPort}
+	pt := pageTLS(context.Background(), &cfg, certifyingOwner{a}, func(string) {})
+	if pt == nil {
+		t.Fatal("no HTTPS with an authority")
+	}
+	setup := func(t *testing.T, data []byte, mode os.FileMode) string {
+		d := filepath.Join(t.TempDir(), "agentos-page-ca")
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(d, "authority.der")
+		if data != nil {
+			if err := os.WriteFile(p, data, mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+
+	good := setup(t, pub, 0o644)
+	if got := firstBootAuthority(good, me, pt); string(got) != string(pub) {
+		t.Fatal("the published authority was not taken first")
+	}
+	if got := firstBootAuthority(good, me, nil); string(got) != string(pub) {
+		t.Fatal("the published authority was not taken with no HTTPS")
+	}
+	if readPublished(good, me+1) != nil {
+		t.Fatal("took a certificate another user owns")
+	}
+
+	link := setup(t, nil, 0)
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := setup(t, pub, 0o644)
+	if err := os.Chmod(filepath.Dir(sharedDir), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	fifo := setup(t, nil, 0)
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]string{
+		"missing":           setup(t, nil, 0),
+		"group-writable":    setup(t, pub, 0o664),
+		"world-writable":    setup(t, pub, 0o646),
+		"a link":            link,
+		"a shared dir":      sharedDir,
+		"a fifo":            fifo,
+		"too big":           setup(t, append(pub, make([]byte, maxAuthority)...), 0o644),
+		"not a certificate": setup(t, []byte("not a certificate"), 0o644),
+		"another name":      setup(t, otherAuthority(t), 0o644),
+	} {
+		if readPublished(p, me) != nil {
+			t.Fatalf("%s: read as the authority", name)
+		}
+		if got := firstBootAuthority(p, me, pt); string(got) != string(a.Certificate()) {
+			t.Fatalf("%s: did not fall back to the page's certified authority", name)
+		}
+		if firstBootAuthority(p, me, nil) != nil {
+			t.Fatalf("%s: an authority with neither source", name)
+		}
+	}
+}
+
+// otherAuthority is an authority for another name.
+func otherAuthority(t *testing.T) []byte {
+	t.Helper()
+	a, err := pageca.New("other.internal", time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
 }

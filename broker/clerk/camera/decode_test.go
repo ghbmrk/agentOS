@@ -286,7 +286,7 @@ func liar(write func(out io.Writer, f camwire.Frame)) func(io.Reader, io.Writer)
 }
 
 func header(kind byte, s camwire.Shape) []byte {
-	return camdecode.AppendHeader(nil, kind, s, 7)
+	return camdecode.AppendHeader(nil, kind, s, 1)
 }
 
 // TestDecoderOutputMustMatchDeclaredSize: an output frame whose kind,

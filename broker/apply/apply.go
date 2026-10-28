@@ -1,18 +1,19 @@
-// Package apply is the broker side of update apply (UPD-1, UPD-6): it
+// Package apply is the update clerk (UPD-1, UPD-6, KRN-4, KRN-8): it
 // hands a verified release the change pipeline staged to the image's A/B
-// activator through a journaled intent with a rollback point, only when
-// the box is free (no call, no accepted work, not in hours the owner
-// excluded), and after the restart commits it once the new slot passed its
-// health check or drops it when boot counting fell back.
+// activator as one kernel plan step, activate, under the image-pinned
+// update key, only when the box is free (no call, no accepted work, not in
+// hours the owner excluded), and after the restart commits it once the new
+// slot passed its health check or drops it when boot counting fell back.
 //
 // A fallback rewinds only the boot slot. Everything the broker keeps lives
-// outside the image (the journal, grants and their revocations, budgets,
+// outside the image (the kernel log, keys and their revocations, budgets,
 // deletions, the update store's root metadata), so this package never
 // snapshots or restores it.
 package apply
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,16 +25,33 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/clerk/check"
+	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
-// Journal vocabulary. Activating a release is a broker-state intent
-// (OP-5) that only the applier submits.
+// Name is the update clerk's name in a plan step and its key's root.
+const Name = "update"
+
+// The activate verb: a release activation changes the box's own
+// configuration and nobody can undo it for the owner once it booted, so it
+// is change-account, irreversible at the high tier (VRB-2, KRN-4). Its
+// object is the release's /usr verity root hash and its value the digest
+// of the signed manifest that binds the boot entry with it (UPD-1a).
 const (
-	Executor = "update"
-	Origin   = "update"
-	Action   = journal.ActionReleaseActivate
+	ArgRoot  = "target"
+	ArgEntry = "value"
+)
+
+// Clerk refusal details beside check.Check's codes.
+const (
+	RKey      = "update-key" // the key is not the image-pinned update key for activate only
+	RStep     = "step"       // not the one activate step of an applier plan
+	RPaused   = "pinned"     // the pinned channel pauses automatic activation (UPD-4)
+	RRelease  = "release"    // not the newer, threshold-verified release the applier holds
+	RBusy     = "busy"       // the box is not free (UPD-6)
+	RApplying = "applying"   // a release is being applied
 )
 
 // Activator is the image's A/B activator (P2-1: systemd-sysupdate and
@@ -84,11 +102,11 @@ type Stager interface {
 	StageDropped(ctx context.Context, id string) error
 }
 
-// Journal is the part of the intent engine the applier uses.
-type Journal interface {
-	Submit(journal.Intent) (journal.Status, error)
-	Authorize(ctx context.Context, id string) (journal.Status, error)
-	Dispatch(ctx context.Context, id string) (journal.Status, error)
+// Kernel is the part of the kernel the applier submits its plans to: the
+// kernel admits the plan, dispatches its step to this clerk (Do) and
+// reconciles an unknown answer through it (Probe).
+type Kernel interface {
+	Submit(now int64, p kernel.Plan) error
 }
 
 // Store persists the applier's state (change.MemStore, change.FileStore).
@@ -97,10 +115,24 @@ type Store interface {
 	Save([]byte) error
 }
 
-// Config configures New. Every function field but Excluded, Rand and Now
-// is required.
+// Config configures New. Every function field but Excluded, Paused,
+// LastTalk, Rand and Now is required.
 type Config struct {
-	Journal   Journal
+	Kernel Kernel
+	// Key is the image-pinned update key (decision 2 of brief #3423, card
+	// cmsg_01R91wiieBzMSvPKFsAJVvuKUCsPpUiKJNwvXkmXsdfr63): a standing root
+	// whose owner is Pinned, for this clerk's activate verb only; Holder
+	// signs each plan under it. Pinned is the clerk's own trust root: Do
+	// takes no other key (CLK-2). The key's authority is the project's
+	// signing threshold, not the owner's: Do activates only a release that
+	// passed the TUF threshold and is newer than the installed one (UPD-2,
+	// UPD-8), so the key adds no power beyond that check.
+	Key    key.Key
+	Holder ed25519.PrivateKey
+	Pinned key.PublicKey
+	// Paused reports the pinned channel (UPD-4): no plan is submitted, no
+	// restart happens and STATUS says why while it holds. Nil: never.
+	Paused    func() bool
 	Activator Activator
 	// Store is the box's update store: the applier stages the release in
 	// it before the restart and commits or drops it after.
@@ -115,8 +147,7 @@ type Config struct {
 	// Nil: none.
 	Excluded func(time.Time) bool
 	// Stopped reports STOP in force (CH-11): nothing is handed over and no
-	// restart happens while it holds. Nil: the Journal's own Stopped, which
-	// *journal.Engine has; New refuses a journal without one.
+	// restart happens while it holds.
 	Stopped func() bool
 	// LastTalk is when the owner was last delivered a message or the
 	// agent last replied. Within Quiet of it the box is not free, so a
@@ -261,7 +292,7 @@ type Applier struct {
 	mu  sync.Mutex
 	st  state
 	rel *update.Verified // the pending release, held in memory only
-	// executing: Execute is handing a release over, with the lock
+	// executing: execute is handing a release over, with the lock
 	// released during the slot write.
 	executing bool
 	// handed: the release the activator took in this process, until it
@@ -274,6 +305,11 @@ type Applier struct {
 	// for this adoption, in this process (SR3-4f-3 B2). Its release is
 	// never restarted into, and a pending release of it never installs.
 	refused refusal
+	// asked: the plan this process submitted and Do has not answered,
+	// and when; no second plan is submitted for Quiet after it, so a
+	// kernel that dispatches later does not get one plan per Tick.
+	asked   string
+	askedAt time.Time
 }
 
 // refusal: a security Withdraw of adoption refused; starts says whether
@@ -290,19 +326,18 @@ type refusal struct {
 // SR3-4f-2-r1 lands (SR3-4f-2b). A pending release whose handover is in
 // flight is left to Resume.
 func New(cfg Config) (*Applier, error) {
-	if cfg.Journal == nil || cfg.Activator == nil || cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil ||
-		cfg.InCall == nil || cfg.Working == nil {
-		return nil, errors.New("apply: Journal, Activator, Store, Pipeline, State, InCall and Working are required")
+	if cfg.Kernel == nil || cfg.Activator == nil || cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil ||
+		cfg.InCall == nil || cfg.Working == nil || cfg.Stopped == nil {
+		return nil, errors.New("apply: Kernel, Activator, Store, Pipeline, State, InCall, Working and Stopped are required")
+	}
+	if !cfg.Pinned.Valid() || len(cfg.Holder) != ed25519.PrivateKeySize || !pinnedKey(cfg.Key, cfg.Pinned) {
+		return nil, errors.New("apply: Key must be the image-pinned update key for activate, and Holder its holder")
 	}
 	if cfg.Excluded == nil {
 		cfg.Excluded = func(time.Time) bool { return false }
 	}
-	if cfg.Stopped == nil {
-		j, ok := cfg.Journal.(interface{ Stopped() bool })
-		if !ok {
-			return nil, errors.New("apply: Stopped is required")
-		}
-		cfg.Stopped = j.Stopped
+	if cfg.Paused == nil {
+		cfg.Paused = func() bool { return false }
 	}
 	if cfg.LastTalk == nil {
 		cfg.LastTalk = func() time.Time { return time.Time{} }
@@ -465,6 +500,8 @@ func (a *Applier) talkUntil(p *pending) time.Time {
 // talkUntil, when that is set.
 func (a *Applier) busy(now, talkUntil time.Time) string {
 	switch {
+	case a.cfg.Paused():
+		return busyPinned
 	case a.cfg.Stopped():
 		return busyStop
 	case a.cfg.InCall():
@@ -481,6 +518,7 @@ func (a *Applier) busy(now, talkUntil time.Time) string {
 
 // Why the box is not free (UPD-6; UX-133-4).
 const (
+	busyPinned   = "the update channel is pinned"
 	busyStop     = "STOP is in force"
 	busyCall     = "a call is in progress"
 	busyWork     = "accepted work is in progress"
@@ -490,6 +528,7 @@ const (
 
 // waitLines say why an update waits (UX-133-3).
 var waitLines = map[string]string{
+	busyPinned:   "Update %d waits because your update channel is pinned.",
 	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
 	busyCall:     "Update %d will install after the current call.",
 	busyWork:     "Update %d will install once my current task is done.",
@@ -499,12 +538,13 @@ var waitLines = map[string]string{
 }
 
 // Tick applies the pending release when it is due and the box is free,
-// by journaling its activation, then restarts into it. The restart is
+// by submitting its activation as a kernel plan, then restarts into it
+// once the kernel's dispatch to Do handed it over. The restart is
 // its own step: it waits for the box to be free again after the slot
 // write, which can take minutes (UPD-6), and it is retried on later ticks
 // when the broker stopped before it (security F1 on #133). ok reports the
 // restart.
-// Adoptions dropped on the way are settled last, outside the journal's
+// Adoptions dropped on the way are settled last, outside the kernel's
 // dispatch (SR3-4f-2b).
 func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	defer a.settle(ctx)
@@ -515,7 +555,7 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	unhanded := a.st.Applying != nil && !a.st.Applying.Installed && !a.executing
 	a.mu.Unlock()
 	if unhanded {
-		// A handover Execute could not undo; Resume abandons it.
+		// A handover execute could not undo; Resume abandons it.
 		if err := a.Resume(ctx); err != nil {
 			return false, err
 		}
@@ -551,27 +591,22 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	if a.busy(now, until) != "" {
 		return false, nil
 	}
-	id := a.nextID(p.Version)
-	in, err := a.intent(ctx, id)
+	a.mu.Lock()
+	if a.asked != "" && now.Before(a.askedAt.Add(a.cfg.Quiet)) {
+		a.mu.Unlock()
+		return false, nil // the kernel has not dispatched it yet
+	}
+	plan, err := a.planLocked()
+	if err == nil {
+		a.asked, a.askedAt = plan.ID, now
+	}
+	a.mu.Unlock()
 	if err != nil {
 		return false, err
 	}
-	st, err := a.cfg.Journal.Submit(in)
-	if err != nil {
+	if err := a.cfg.Kernel.Submit(now.UnixMilli(), plan); err != nil {
+		a.answered(plan.ID)
 		return false, err
-	}
-	if st.State == journal.Pending {
-		if st, err = a.cfg.Journal.Authorize(ctx, id); err != nil {
-			return false, err
-		}
-	}
-	if st.State == journal.Authorized {
-		if st, err = a.cfg.Journal.Dispatch(ctx, id); err != nil {
-			return false, err
-		}
-	}
-	if st.State != journal.Succeeded {
-		return false, nil // denied (busy at dispatch) or not applied: try again later
 	}
 	return a.restartIfHandedOver(ctx)
 }
@@ -727,7 +762,7 @@ func (a *Applier) undoHandoverLocked(pt *point) error {
 	switch {
 	case a.executing, !pt.Installed:
 		// executing first: the activator may be mid-install, and Booted
-		// would wait on it. Execute marks it withdrawing, or Resume
+		// would wait on it. execute marks it withdrawing, or Resume
 		// abandons it: it never starts.
 		return handoverError{}
 	case a.restarting == pt.ID:
@@ -769,7 +804,7 @@ func (h handoverError) Starts() bool       { return h.starts }
 // settle calls StageDropped for each dropped adoption, after the state
 // that records it is saved; a failed call stays for the next settle
 // (SR3-4f-2b), unless the pipeline refused it for good: the adoption was
-// confirmed meanwhile, or is unknown (SR3-4f-3c). It runs outside the journal's dispatch: Tick defers it.
+// confirmed meanwhile, or is unknown (SR3-4f-3c). It runs outside the kernel's dispatch: Tick defers it.
 func (a *Applier) settle(ctx context.Context) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -796,38 +831,40 @@ func permanent(err error) bool {
 	return errors.As(err, &p) && p.Permanent()
 }
 
-// nextID numbers an apply attempt: upd:apply:<version>:n<seq>.
-func (a *Applier) nextID(version int64) string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.st.Seq++
-	return fmt.Sprintf("upd:apply:%d:n%d", version, a.st.Seq)
+// pinnedKey: k is a key off the image-pinned update root, for this clerk's
+// activate verb alone (decision 2 of brief #3423). A narrowing below the
+// root keeps that; the owner's keys, and any root with another verb, are
+// not it.
+func pinnedKey(k key.Key, pinned key.PublicKey) bool {
+	return pinned.Valid() && k.Root.Owner == pinned && k.Root.Clerk == Name &&
+		slices.Equal(k.Root.Verbs, []key.Verb{key.ChangeAccount})
 }
 
-// intent is the activation intent for id, with the rollback point in its
-// params: the release it replaces and the one it activates.
-func (a *Applier) intent(ctx context.Context, id string) (journal.Intent, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// Step is the activate step for rel: its /usr root hash and the digest of
+// the signed manifest that binds its boot entry (UPD-1a).
+func Step(rel *update.Verified) kernel.PlanStep {
+	r := rel.Ref()
+	return kernel.PlanStep{Verb: key.ChangeAccount, Clerk: Name,
+		Args: map[string]string{ArgRoot: r.UsrRootHash, ArgEntry: r.ManifestSHA256}}
+}
+
+// planLocked is the signed plan activating the pending release, numbered
+// upd:apply:<version>:n<seq>. The number is saved before the plan is
+// submitted, so a restart never reuses a plan ID the kernel logged.
+func (a *Applier) planLocked() (kernel.Plan, error) {
 	p := a.st.Pending
 	if p == nil || a.rel == nil {
-		return journal.Intent{}, errors.New("apply: no release is waiting")
+		return kernel.Plan{}, errors.New("apply: no release is waiting")
 	}
-	m, err := a.rel.Manifest()
-	if err != nil {
-		return journal.Intent{}, err
+	next := a.st
+	next.Seq++
+	if err := a.save(next); err != nil {
+		return kernel.Plan{}, err
 	}
-	in, err := a.cfg.Store.Installed()
-	if err != nil {
-		return journal.Intent{}, err
-	}
-	b, err := a.cfg.Activator.Booted(ctx)
-	if err != nil {
-		return journal.Intent{}, err
-	}
-	return journal.Intent{ID: id, Origin: Origin, Account: journal.BrokerAccount, Action: Action, Executor: Executor,
-		Params: map[string]any{"from": in.Version, "from_usr": b.UsrRootHash, "to": m.Version, "to_usr": m.UsrRootHash,
-			"adoption": p.Adoption, "security": p.Security}}, nil
+	a.st = next
+	plan := kernel.Plan{ID: fmt.Sprintf("upd:apply:%d:n%d", p.Version, next.Seq), Key: a.cfg.Key,
+		Steps: []kernel.PlanStep{Step(a.rel)}}
+	return kernel.SignPlan(plan, a.cfg.Holder), nil
 }
 
 func parseID(id string) (int64, bool) {
@@ -845,63 +882,132 @@ func parseID(id string) (int64, bool) {
 	return v, true
 }
 
-// Check is the policy for release activation (OP-3), at authorize and
-// again just before dispatch: only the applier's own intent, for the
-// release it holds, while the box is free (UPD-6).
-func (a *Applier) Check(_ context.Context, _ journal.Phase, in journal.Intent) error {
-	if in.Account != journal.BrokerAccount || in.Executor != Executor || in.Action != Action {
-		return errors.New("apply: not a release activation")
+// Facts is the clerk's own reading of a step: an activation carries no
+// content class or flow label, and moves no money (KEY-2).
+func (a *Applier) Facts(key.Step) (string, []string, int64) { return "", nil, 0 }
+
+// Do runs the activate step: once its own checks pass (CLK-2), it hands
+// the release to the activator. A step already handed over is answered ok
+// without a second Install (KRN-8).
+func (a *Applier) Do(r kernel.Request, v kernel.View) kernel.Result {
+	if res, ok := a.done(r.Plan.ID); ok {
+		return res
 	}
-	if in.Origin != Origin {
-		return errors.New("apply: only the update applier activates a release")
+	if rf := a.authorize(r, v); rf != "" {
+		a.answered(r.Plan.ID)
+		return kernel.Result{Outcome: "failed", Detail: rf}
 	}
-	v, ok := parseID(in.ID)
-	if !ok {
-		return errors.New("apply: malformed activation intent")
-	}
-	a.mu.Lock()
-	p, held, applying := a.st.Pending, a.rel != nil, a.st.Applying != nil
-	until := a.talkUntil(p)
-	a.mu.Unlock()
-	if p == nil || !held || p.Version != v || applying {
-		return errors.New("apply: no release is waiting for this activation")
-	}
-	if why := a.busy(a.cfg.Now(), until); why != "" {
-		return errors.New("apply: " + why)
-	}
-	return nil
+	return a.execute(context.Background(), r.Plan.ID)
 }
 
-// Execute hands the release to the activator. The rollback point is saved
+// done answers a step whose release was already handed over.
+func (a *Applier) done(id string) (kernel.Result, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.st.Applied[id] {
+		return kernel.Result{}, false
+	}
+	a.answeredLocked(id)
+	return kernel.Result{Outcome: "ok", Detail: "already handed over"}, true
+}
+
+func (a *Applier) answered(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.answeredLocked(id)
+}
+
+func (a *Applier) answeredLocked(id string) {
+	if a.asked == id {
+		a.asked = ""
+	}
+}
+
+// authorize is the clerk's own check of an activate request, just before
+// it acts, on its own clock (CLK-2): the key is the image-pinned update
+// key for activate, verified against the pinned root alone and live in the
+// log, with the step in flight; the step is the one step of an applier
+// plan; the channel is not pinned (UPD-4); the step names exactly the
+// release the applier holds, which passed the TUF threshold (Store.Check)
+// and is newer than the installed one (UPD-8); and the box is free
+// (UPD-6). It returns the refusal's detail, or "".
+func (a *Applier) authorize(r kernel.Request, v kernel.View) string {
+	if rf := check.Check([]key.PublicKey{a.cfg.Pinned}, Name, a.Facts, a.cfg.Now().UnixMilli(), r, v); rf != nil {
+		return rf.Code
+	}
+	if !pinnedKey(r.Plan.Key, a.cfg.Pinned) {
+		return RKey
+	}
+	ver, ok := parseID(r.Plan.ID)
+	st := step(r)
+	if !ok || len(r.Plan.Steps) != 1 || r.Index != 0 || st.Verb != key.ChangeAccount {
+		return RStep
+	}
+	if a.cfg.Paused() {
+		return RPaused
+	}
+	a.mu.Lock()
+	p, rel, applying := a.st.Pending, a.rel, a.st.Applying != nil || a.executing
+	until := a.talkUntil(p)
+	a.mu.Unlock()
+	if applying {
+		return RApplying
+	}
+	if p == nil || rel == nil || !rel.OK() || p.Version != ver {
+		return RRelease
+	}
+	if a.cfg.Now().Before(p.NotBefore) {
+		return RBusy + ": not due" // its jitter has not passed (UPD-5)
+	}
+	if ref := rel.Ref(); st.Args[ArgRoot].Value != ref.UsrRootHash || st.Args[ArgEntry].Value != ref.ManifestSHA256 {
+		return RRelease
+	}
+	if in, err := a.cfg.Store.Installed(); err != nil || ver <= in.Version {
+		return RRelease
+	}
+	if why := a.busy(a.cfg.Now(), until); why != "" {
+		return RBusy + ": " + why
+	}
+	return ""
+}
+
+// step is the request's step as check.Check reads it, through the core's
+// open kernel.Normalize.
+func step(r kernel.Request) key.Step {
+	if r.Index < 0 || r.Index >= len(r.Plan.Steps) {
+		return key.Step{}
+	}
+	return kernel.Normalize(key.ChargeTask(r.Plan.Key, r.Plan.ID), r.Plan.Steps[r.Index])
+}
+
+// execute hands the release to the activator. The rollback point is saved
 // first, then the release is staged in the update store and installed in
 // the inactive slot, without holding the lock, so STATUS answers during
 // the slot write. A failed install, or a handover whose record could not
 // be saved, is abandoned and drops the stage, and the release stays
-// pending: Execute succeeds only once the handover is durable (SR3-4).
-// The save before the install counts an unrecorded attempt for the exact
-// release, and the save that records the handover clears it; a release
-// that reached maxUnrecorded is not installed again (SR3-4f-1b).
-func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal.Outcome {
-	v, ok := parseID(in.ID)
-	if !ok {
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "malformed"}
-	}
+// pending: the step is ok only once the handover is durable (SR3-4), and
+// its answer carries the rollback point, so the kernel logs it as the
+// step's result (UPD-6). An abandon that fails leaves the point for Resume
+// and answers unknown, so Probe settles it. The save before the install
+// counts an unrecorded attempt for the exact release, and the save that
+// records the handover clears it; a release that reached maxUnrecorded is
+// not installed again (SR3-4f-1b).
+func (a *Applier) execute(ctx context.Context, id string) kernel.Result {
+	failed := func(detail string) kernel.Result { return kernel.Result{Outcome: "failed", Detail: detail} }
+	v, _ := parseID(id)
 	a.mu.Lock()
-	if a.st.Applied[in.ID] {
-		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultSucceeded}
-	}
+	a.answeredLocked(id)
 	p, rel := a.st.Pending, a.rel
 	if p == nil || rel == nil || p.Version != v || a.st.Applying != nil || a.executing {
 		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "no pending release"}
+		return failed(RRelease)
 	}
 	key := refKey(rel.Ref())
 	if a.st.Unrecorded[key] >= maxUnrecorded {
 		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: ErrRefused.Error()}
+		return failed(ErrRefused.Error())
 	}
-	pt, err := a.pointLocked(ctx, in.ID, rel, p.Adoption)
+	pt, err := a.pointLocked(ctx, id, rel, p.Adoption)
 	if err == nil {
 		pt.TalkUntil, pt.Security = a.talkUntil(p), p.Security
 		prev, prevLast := a.st.Unrecorded, a.st.Last
@@ -918,7 +1024,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	}
 	if err != nil {
 		a.mu.Unlock()
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "rollback point not saved: " + noted(err)}
+		return failed("rollback point not saved: " + noted(err))
 	}
 	a.executing = true
 	a.mu.Unlock()
@@ -938,8 +1044,7 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 			a.st.Pending, a.rel = nil, nil
 			retire(&a.st, p.Adoption)
 		}
-		a.abandonLocked(ctx, key, false)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: noted(err)}
+		return a.abandonedLocked(ctx, key, false, noted(err))
 	}
 	next := a.st
 	pt2 := *a.st.Applying
@@ -949,19 +1054,95 @@ func (a *Applier) Execute(ctx context.Context, in journal.Intent, _ int) journal
 	if next.Pending == p {
 		next.Pending = nil
 	}
-	next.Applied = map[string]bool{in.ID: true} // only the latest is ever reconciled
+	next.Applied = map[string]bool{id: true} // only the latest is ever probed
 	next.Unrecorded = counted(a.st.Unrecorded, key, 0)
 	if err := a.save(next); err != nil {
 		// Unrecorded, the handover is undone, so the activation is never
 		// called done while a restart in this boot would abandon it.
-		a.abandonLocked(ctx, key, true)
-		return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "handover not saved: " + noted(err)}
+		return a.abandonedLocked(ctx, key, true, "handover not saved: "+noted(err))
 	}
 	a.st, a.handed = next, rel
 	if a.st.Pending == nil {
 		a.rel = nil
 	}
-	return journal.Outcome{Result: journal.ResultSucceeded}
+	return kernel.Result{Outcome: "ok", Detail: rollbackPoint(&pt2)}
+}
+
+// abandonedLocked is the answer to a handover that did not complete: failed
+// once it is abandoned, unknown while its point stays for Resume.
+func (a *Applier) abandonedLocked(ctx context.Context, key string, took bool, detail string) kernel.Result {
+	a.abandonLocked(ctx, key, took)
+	if a.st.Applying != nil {
+		return kernel.Result{Outcome: "unknown", Detail: detail + "; not yet abandoned"}
+	}
+	return kernel.Result{Outcome: "failed", Detail: detail}
+}
+
+// rollbackPoint is the step's logged result: the release and root that
+// ran, and the release handed over with its root (UPD-1a, UPD-6).
+func rollbackPoint(pt *point) string {
+	return fmt.Sprintf("rollback point: release %d on root %s; activating release %d on root %s",
+		pt.From, pt.FromUsr, pt.To, pt.ToUsr)
+}
+
+// Probe settles an activate step whose answer was lost, from saved state
+// and the boot counter, never by a second Install (KRN-8): done once the
+// activator took the release, with what became of it (handed over and
+// waiting for the restart, committed, health check pending, fell back,
+// withdrawn); unknown while an install runs or an unrecorded handover
+// waits for Resume to abandon it; notdone when nothing of it was handed
+// over, so a retry is safe.
+func (a *Applier) Probe(r kernel.Request, _ kernel.View) kernel.Result {
+	id := r.Plan.ID
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	switch pt := a.st.Applying; {
+	case pt != nil && pt.ID == id && a.executing:
+		return kernel.Result{Outcome: "unknown", Detail: "installing"}
+	case pt != nil && pt.ID == id && pt.Installed:
+		return kernel.Result{Outcome: "done", Detail: a.bootLocked(pt)}
+	case pt != nil && pt.ID == id:
+		return kernel.Result{Outcome: "unknown", Detail: "handover not recorded; abandoning it"}
+	case a.st.Applied[id]:
+		v, _ := parseID(id)
+		return kernel.Result{Outcome: "done", Detail: settled(a.st.Last, v)}
+	}
+	return kernel.Result{Outcome: "notdone"}
+}
+
+// bootLocked reads the boot counter for pt, handed over and not settled.
+func (a *Applier) bootLocked(pt *point) string {
+	b, err := a.cfg.Activator.Booted(context.Background())
+	switch {
+	case err != nil:
+		return "handed over"
+	case b.ID == pt.BootID:
+		return "handed over; restart pending"
+	case b.UsrRootHash == pt.ToUsr && b.Blessed:
+		return "committed"
+	case b.UsrRootHash == pt.ToUsr:
+		return "booted; health check pending"
+	}
+	if _, ok, err := a.committedLocked(pt); err == nil && ok {
+		return "committed; the previous root booted this time"
+	}
+	return "fell back"
+}
+
+// settled names a settled activation's outcome for Probe.
+func settled(l *last, version int64) string {
+	if l == nil || l.Version != version {
+		return "handed over"
+	}
+	switch l.Kind {
+	case doneInstalled:
+		return "committed"
+	case doneInstalledOtherRoot:
+		return "committed; the previous root booted this time"
+	case doneFellBack:
+		return "fell back"
+	}
+	return "handed over, then withdrawn"
 }
 
 // abandonLocked undoes a handover that did not complete; the release
@@ -992,7 +1173,7 @@ func unrecordedLast(st state, version int64, key string, l *last) *last {
 	return l
 }
 
-// noted is err's text for the journal. A path stays in the log, not the
+// noted is err's text for the kernel log. A path stays in the log, not the
 // evidence, because a later owner text can be built from the evidence.
 func noted(err error) string {
 	msg := err.Error()
@@ -1019,17 +1200,6 @@ func (a *Applier) pointLocked(ctx context.Context, id string, rel *update.Verifi
 	}
 	return &point{ID: id, From: installed.Version, FromUsr: boot.UsrRootHash, To: m.Version,
 		ToUsr: m.UsrRootHash, ToManifest: rel.Ref().ManifestSHA256, Adoption: adoption, BootID: boot.ID}, nil
-}
-
-// Reconcile answers from saved state: an activation is applied only once
-// the activator took the release.
-func (a *Applier) Reconcile(_ context.Context, in journal.Intent, _ int) journal.Outcome {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.st.Applied[in.ID] || (a.st.Applying != nil && a.st.Applying.ID == in.ID && a.st.Applying.Installed) {
-		return journal.Outcome{Result: journal.ResultSucceeded}
-	}
-	return journal.Outcome{Result: journal.ResultNotApplied, Evidence: "not handed to the activator"}
 }
 
 // Resume settles an apply in flight after a restart, and is safe to call
@@ -1306,7 +1476,7 @@ func (a *Applier) Digest() []string {
 // previousRootLocked reports the update store's installed release when no
 // apply is in flight and this boot runs another root than it (SR3-4f-r1,
 // SR3-4f-r1-f2): an other-root boot, or a later release that fell back,
-// was withdrawn or failed after Execute's save before Stage, so the box
+// was withdrawn or failed after execute's save before Stage, so the box
 // runs N-1 while the store holds N. A boot or store that cannot be read,
 // or a store that never recorded a root, is not taken for it, since the
 // line says what the box started (CH-12).

@@ -50,6 +50,7 @@ type fake struct {
 	loads   int
 	frames  int
 	last    []byte        // the last frame's buffer, as the service lent it
+	clip    []byte        // the last clip's buffer, as the service lent it
 	release chan struct{} // closed by Load: a hung call returns
 	inside  int
 	maxIn   int
@@ -175,6 +176,9 @@ func (f *fake) Detect(fr vision.Frame) ([]Seen, error) {
 func (f *fake) Sound(pcm []byte) ([]vision.Sound, error) {
 	mode, _, _ := f.enter()
 	defer f.leave()
+	f.mu.Lock()
+	f.clip = pcm
+	f.mu.Unlock()
 	if mode == "off-list" {
 		return []vision.Sound{{Label: "speech", Conf: 50}}, nil
 	}

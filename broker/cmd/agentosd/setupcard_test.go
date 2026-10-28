@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/localsrv"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // REQ: HW-1, ONB-7
@@ -98,7 +100,7 @@ func (m *setupMode) withCard(f *cardFixture, st firstboot.Store) {
 		if err := firstboot.ResetUnlatched(st, f.vault.Reset); err != nil {
 			return nil, err
 		}
-		s, err := firstboot.NewCardStep(st, card.DisplayConfig{Provision: f.vault.Provision,
+		s, err := firstboot.NewCardStep(st, card.DisplayConfig{Authority: cardAuthority(), Provision: f.vault.Provision,
 			Generate: func(r io.Reader) (*card.Card, error) {
 				c, err := card.Generate(r)
 				if err == nil {
@@ -338,3 +340,13 @@ func TestSetupWithoutTheCardFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// cardAuthority is a page authority's certificate for the Owner Cards
+// these tests make, which print its fingerprint (HW-1, OWN-card-ca).
+var cardAuthority = sync.OnceValue(func() []byte {
+	a, err := pageca.New(pageca.DefaultName, time.Now(), nil)
+	if err != nil {
+		panic(err)
+	}
+	return a.Certificate()
+})

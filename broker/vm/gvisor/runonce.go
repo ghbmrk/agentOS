@@ -165,10 +165,16 @@ func (r *Runtime) RunOnce(ctx context.Context, o OneShot) (OneShotResult, error)
 	return res, err
 }
 
+// SandboxCPU is a one-shot or stream sandbox's CPU ceiling, in
+// thousandths of a CPU: one core, sentry and gofer included, even when
+// the host is idle, so a sandbox that still answers in time cannot spin
+// more (design point 4).
+const SandboxCPU = 1000
+
 // sandboxGroup makes a one-shot or stream sandbox's cgroup, name, under
 // parent, first emptying and removing one an earlier run left. Its
 // memory.high is its memory.max, so a run over the cap is killed rather
-// than slowed until the deadline.
+// than slowed until the deadline, and cpu.max holds it to SandboxCPU.
 func sandboxGroup(parentPath, name string, mem int64) (*cgroup.Group, error) {
 	parent, err := cgroup.Open(parentPath)
 	if err != nil {
@@ -181,7 +187,7 @@ func sandboxGroup(parentPath, name string, mem int64) (*cgroup.Group, error) {
 		cancel()
 		stale.Remove()
 	}
-	return parent.Child(name, cgroup.Limits{MaxBytes: mem, HighBytes: mem, CPUWeight: 100, IOWeight: 100, Pids: oneShotPids})
+	return parent.Child(name, cgroup.Limits{MaxBytes: mem, HighBytes: mem, CPUWeight: 100, IOWeight: 100, CPUMilli: SandboxCPU, Pids: oneShotPids})
 }
 
 // startIn sets opts so runsc starts in the cgroup at path: clone3 places

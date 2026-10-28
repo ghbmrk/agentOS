@@ -1,15 +1,13 @@
 package loops
 
 import (
-	"context"
-	"strings"
 	"testing"
 )
 
 // REQ: UPD-4, UPD-5
 //
 // The update channel and cadence are owner settings (UPD-4, UPD-5):
-// texted and applied like the loop settings, and read by Loop 3.
+// texted like the loop settings.
 
 func TestUpdateTextsParse(t *testing.T) {
 	for msg, want := range map[string]Request{
@@ -38,135 +36,5 @@ func TestUpdateTextsParse(t *testing.T) {
 		if r, ok := ParseText(msg); ok {
 			t.Fatalf("%q read as %+v", msg, r)
 		}
-	}
-}
-
-func TestUpdateSettingsDefaultToTheSpec(t *testing.T) {
-	var u UpdateSettings
-	if u.ChannelName() != ChannelStable || u.Soak() != DefaultSoakDays || u.SecurityAsk {
-		t.Fatalf("%+v", u)
-	}
-}
-
-func TestOwnerTextsSetTheUpdateChannelAndCadence(t *testing.T) {
-	r := newRig(t)
-	ctx := context.Background()
-	for _, c := range []struct{ msg, reply string }{
-		{"UPDATES FAST", "Updates: fast channel. New releases are offered as they come out. Reply UPDATES STABLE if this wasn't you."},
-		{"UPDATES STABLE", "Updates: stable channel. Releases are offered after other boxes have tested them for 7 days."},
-		{"UPDATE SOAK 14", "Stable releases now wait 14 days before I offer them."},
-		{"UPDATE SOAK 10 DAYS", "Stable releases now wait 10 days before I offer them. Reply UPDATE SOAK 14 if this wasn't you."},
-		{"SECURITY UPDATES ASK", "I will ask you before I install each security fix. Reply SECURITY UPDATES AUTO to undo."},
-		{"SECURITY UPDATES AUTO", "Tested security fixes install on their own again. Reply SECURITY UPDATES ASK if this wasn't you."},
-		{"UPDATES PINNED", "Updates: pinned. Nothing installs on its own; I still tell you about security fixes. Reply UPDATES STABLE to undo."},
-		// UX-130-3: a soak set off the stable channel says when it applies.
-		{"UPDATES SOAK 9 DAYS", "Stable releases now wait 9 days before I offer them. It applies once you're on UPDATES STABLE. Reply UPDATE SOAK 10 if this wasn't you."},
-	} {
-		if got, ok := r.s.Text(ctx, c.msg, true); !ok || got != c.reply {
-			t.Fatalf("%s: %q %v", c.msg, got, ok)
-		}
-	}
-	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 9 || u.SecurityAsk {
-		t.Fatalf("%+v", u)
-	}
-	// Out of range: answered with the bound, nothing changes.
-	for msg, reply := range map[string]string{
-		"UPDATE SOAK 3":   "The shortest soak is 7 days; UPDATES FAST takes releases as they come out.",
-		"UPDATE SOAK 120": "The longest soak is 60 days.",
-	} {
-		if got, ok := r.s.Text(ctx, msg, true); !ok || got != reply {
-			t.Fatalf("%s: %q %v", msg, got, ok)
-		}
-	}
-	if r.s.Settings().Updates.Soak() != 9 {
-		t.Fatalf("%+v", r.s.Settings().Updates)
-	}
-	// Kept across a restart.
-	r.restart()
-	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 9 {
-		t.Fatalf("after restart: %+v", u)
-	}
-}
-
-// In a locked session only changes that make updates slower or more
-// cautious are taken, as for UPDATE CHECKS OFF: a later channel, a longer
-// soak, asking before security fixes. The rest waits for the unlock.
-func TestALockedSessionTakesOnlyMoreCautiousUpdates(t *testing.T) {
-	r := newRig(t)
-	ctx := context.Background()
-	for _, msg := range []string{"UPDATES FAST", "UPDATE SOAK 6", "SECURITY UPDATES AUTO"} {
-		if _, ok := r.s.Text(ctx, msg, false); ok {
-			t.Fatalf("%s taken in a locked session", msg)
-		}
-	}
-	for _, msg := range []string{"UPDATE SOAK 21", "SECURITY UPDATES ASK", "UPDATES STABLE", "UPDATES PINNED", "HELP UPDATES", "UPDATE SOAK 200"} {
-		if _, ok := r.s.Text(ctx, msg, false); !ok {
-			t.Fatalf("%s not taken in a locked session", msg)
-		}
-		if !r.s.Narrows(msg) {
-			t.Fatalf("%s does not narrow", msg)
-		}
-	}
-	for _, msg := range []string{"UPDATES STABLE", "UPDATES FAST", "UPDATE SOAK 20"} {
-		if r.s.Narrows(msg) {
-			t.Fatalf("%s narrows from pinned with a 21-day soak", msg)
-		}
-	}
-	if u := r.s.Settings().Updates; u.ChannelName() != ChannelPinned || u.Soak() != 21 || !u.SecurityAsk {
-		t.Fatalf("%+v", u)
-	}
-}
-
-// The pinned undo names the channel the box was on (L3 on #130).
-func TestPinningFromFastSaysHowToGoBack(t *testing.T) {
-	r := newRig(t)
-	ctx := context.Background()
-	if _, ok := r.s.Text(ctx, "UPDATES FAST", true); !ok {
-		t.Fatal("UPDATES FAST")
-	}
-	if got, _ := r.s.Text(ctx, "UPDATES PINNED", true); !strings.HasSuffix(got, " Reply UPDATES FAST to undo.") {
-		t.Fatalf("%q", got)
-	}
-}
-
-// Saved update settings read fail-safe: a damaged or tampered state file
-// cannot set a soak outside 7..60 days or a channel that stops checks
-// (L3 MUST on #130).
-func TestSavedUpdateSettingsAreClampedOnLoad(t *testing.T) {
-	r := newRig(t)
-	for _, c := range []struct {
-		saved   string
-		channel string
-		soak    int
-	}{
-		{`{"channel":"nightly","soak_days":1}`, ChannelStable, MinSoakDays},
-		{`{"channel":"pinned","soak_days":400}`, ChannelPinned, MaxSoakDays},
-		{`{"soak_days":-3}`, ChannelStable, DefaultSoakDays},
-	} {
-		must(t, r.store.Save([]byte(`{"settings":{"spare_calls":100,"updates":`+c.saved+`}}`)))
-		r.restart()
-		if u := r.s.Settings().Updates; u.ChannelName() != c.channel || u.Soak() != c.soak {
-			t.Fatalf("%s: %s %d", c.saved, u.ChannelName(), u.Soak())
-		}
-	}
-	// Set refuses a soak outside the bounds, whatever Text let through.
-	for _, d := range []int{MinSoakDays - 1, MaxSoakDays + 1} {
-		if err := r.s.Set(context.Background(), Request{Kind: KindSoak, Days: d}, true); err == nil {
-			t.Fatalf("soak %d set", d)
-		}
-	}
-}
-
-func TestHelpUpdatesFitsOneSegment(t *testing.T) {
-	r := newRig(t)
-	got, ok := r.s.Text(context.Background(), "help updates", true)
-	if !ok || got != HelpUpdates {
-		t.Fatalf("%q %v", got, ok)
-	}
-	if !strings.Contains(HelpText, "HELP UPDATES") {
-		t.Fatal("HELP LOOPS does not point to HELP UPDATES (UX-130 Q1)")
-	}
-	if len(HelpUpdates) > 153 || len(HelpText) > 153 {
-		t.Fatalf("HELP UPDATES is %d characters", len(HelpUpdates))
 	}
 }
