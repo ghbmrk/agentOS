@@ -80,9 +80,6 @@ type recoveryPending struct {
 	display *card.Display           // the new card, until confirmed
 	next    []byte                  // its 32-byte key, once confirmed
 	begun   *localapi.RecoveryBegun // the tap's challenge, once confirmed
-	// tried: a rotation call ended without an answer, so the store may
-	// hold the new key already.
-	tried bool
 }
 
 // recoveryState guards the pending replacement. Its lock is never held
@@ -90,6 +87,19 @@ type recoveryPending struct {
 type recoveryState struct {
 	mu sync.Mutex
 	p  *recoveryPending
+	// unsure is the tokenKey of the session whose rotation call ended
+	// without an answer: the keeper may have written, so until one of its
+	// replacements is answered ok, no line it is shown says nothing
+	// changed (cancel, lapse, a new start's refusals included).
+	unsure string
+}
+
+// recoveryUnsure reports whether tok's session may hold a new card in
+// effect that it was not told of.
+func (s *Server) recoveryUnsure(tok string) bool {
+	s.recovery.mu.Lock()
+	defer s.recovery.mu.Unlock()
+	return tok != "" && s.recovery.unsure == tokenKey(tok)
 }
 
 // take returns the pending replacement of the session tok, dropping one
@@ -139,7 +149,8 @@ func (s *Server) recoveryWipe(p *recoveryPending) {
 func (s *Server) recoveryStart(tok, factor string, secret []byte) error {
 	p := &recoveryPending{starter: tokenKey(tok), token: tok, until: s.cfg.Now().Add(RecoveryPendingFor), factor: factor, secret: secret}
 	d, err := card.NewDisplay(card.DisplayConfig{Generate: s.cfg.RecoveryCard, Rotate: &card.Parts{Recovery: true},
-		Provision: func(c *card.Card) error { return s.recoveryConfirmed(p, c) }})
+		Provision: func(c *card.Card) error { return s.recoveryConfirmed(p, c) },
+		Discarded: func() { s.recoveryDiscarded(p) }})
 	if err != nil {
 		clear(secret)
 		return err
@@ -153,6 +164,20 @@ func (s *Server) recoveryStart(tok, factor string, secret []byte) error {
 		s.recoveryWipe(old)
 	}
 	return nil
+}
+
+// recoveryDiscarded is the display's discard (its own cancel button): the
+// replacement goes with its card. It runs with the display locked, so it
+// only detaches and clears; it never calls back into the display.
+func (s *Server) recoveryDiscarded(p *recoveryPending) {
+	s.recovery.mu.Lock()
+	defer s.recovery.mu.Unlock()
+	if s.recovery.p == p {
+		s.recovery.p = nil
+	}
+	clear(p.secret)
+	clear(p.next)
+	p.display = nil
 }
 
 // recoveryConfirmed is the display's provision, once the owner typed back
@@ -216,12 +241,14 @@ func recoveryWrongTap(err error) bool {
 
 // The page's fixed lines.
 const (
-	recoveryDoneText       = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I take a backup sealed to the new key within a minute."
-	recoveryLaterText      = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I finish moving backups to the new key within a few minutes."
-	recoveryUnsureText     = "I couldn't tell whether that finished. Keep both cards for now: if your new card took effect, the old one no longer opens my store. Try the tap again."
-	recoveryUnsureDropText = "I can't tell whether your new card took effect. Keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
-	recoveryCancelText     = "Cancelled. Nothing changed: your current card stays in effect."
-	recoveryExpiredText    = "That replacement took too long and was dropped. Nothing changed: your current card stays in effect. Start again."
+	recoveryDoneText         = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I take a backup sealed to the new key within a minute."
+	recoveryLaterText        = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I finish moving backups to the new key within a few minutes."
+	recoveryUnsureText       = "I couldn't tell whether that finished. Keep both cards for now: if your new card took effect, the old one no longer opens my store. Try the tap again."
+	recoveryUnsureDropText   = "I can't tell whether your new card took effect. Keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
+	recoveryKeepBothNote     = "Keep both cards for now: an earlier tap may already have put a new card in effect."
+	recoveryUnsureCancelText = "Cancelled. I can't tell whether an earlier tap put a new card in effect, so keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
+	recoveryCancelText       = "Cancelled. Nothing changed: your current card stays in effect."
+	recoveryExpiredText      = "That replacement took too long and was dropped. Nothing changed: your current card stays in effect. Start again."
 )
 
 // recoveryView is the page in one of its steps: "" the factor, "tap" the
@@ -290,6 +317,9 @@ func (s *Server) recoveryPage(w http.ResponseWriter, r *http.Request) {
 			s.recoveryDrop(p)
 		}
 		v.Done = recoveryCancelText
+		if s.recoveryUnsure(tok) {
+			v.Done = recoveryUnsureCancelText
+		}
 	case "rotate":
 		v.Err, v.Done = s.recoveryRotate(r, tok, p)
 	default:
@@ -313,6 +343,9 @@ func (s *Server) recoveryShow(w http.ResponseWriter, tok string, v recoveryView)
 		} else if v.Err == "" && v.Done == "" {
 			v.Step = "card"
 		}
+	}
+	if v.Err == "" && v.Done == "" && s.recoveryUnsure(tok) {
+		v.Err = recoveryKeepBothNote
 	}
 	s.render(w, "recovery", v)
 }
@@ -399,6 +432,9 @@ func (s *Server) recoveryFactor(w http.ResponseWriter, r *http.Request, tok stri
 // returns the page's error or done line.
 func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending) (errText, done string) {
 	if p == nil {
+		if s.recoveryUnsure(tok) {
+			return recoveryUnsureDropText, ""
+		}
 		return recoveryExpiredText, ""
 	}
 	// Copies, so a cancel or a new start that wipes p meanwhile does not
@@ -416,7 +452,11 @@ func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending)
 	cd, ok2 := formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
 	sig, ok3 := formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
 	if !ok1 || !ok2 || !ok3 {
-		return recoveryText(Refused(localapi.ErrRecoveryBadAssertion)), ""
+		err := Refused(localapi.ErrRecoveryBadAssertion)
+		if s.recoveryUnsure(tok) {
+			return recoveryText(err) + " " + recoveryKeepBothNote, ""
+		}
+		return recoveryText(err), ""
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), recoveryCallFor)
 	defer cancel()
@@ -425,30 +465,36 @@ func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending)
 	switch {
 	case err == nil:
 		s.recoveryDrop(p)
+		s.recovery.mu.Lock()
+		if s.recovery.unsure == p.starter {
+			s.recovery.unsure = ""
+		}
+		s.recovery.mu.Unlock()
 		if d.Switched {
 			return "", recoveryDoneText
 		}
 		return "", recoveryLaterText
 	case recoveryWrongTap(err), refused(err, localapi.ErrRecoveryBusy), refused(err, localapi.ErrLimited):
+		// The replacement stays for another tap.
+		if s.recoveryUnsure(tok) {
+			return recoveryText(err) + " " + recoveryKeepBothNote, ""
+		}
 		return recoveryText(err), ""
 	case !errors.As(err, &ref) || string(ref) == localapi.ErrRecoveryUnavailable:
 		// No answer: the keeper may have written before it was lost, so
-		// the replacement stays for another tap, and the owner keeps both
-		// cards.
+		// the replacement stays for another tap, and the session is
+		// unsure until one is answered ok.
 		s.recovery.mu.Lock()
-		p.tried = true
+		s.recovery.unsure = p.starter
 		s.recovery.mu.Unlock()
 		return recoveryUnsureText, ""
 	}
-	s.recovery.mu.Lock()
-	tried := p.tried
-	s.recovery.mu.Unlock()
 	s.recoveryDrop(p)
-	// After a call with no answer the keeper may have written, so any
-	// refusal but the tap's, busy and limited (answered above) may only
-	// say the store moved on: the old key no longer opening it reads as
-	// factor, the recipient changed as stale. Never "nothing changed".
-	if tried {
+	// After a call with no answer the keeper may have written, so a
+	// refusal may only mean the store moved on: the old key no longer
+	// opening it reads as factor, the recipient changed as stale. Never
+	// "nothing changed".
+	if s.recoveryUnsure(tok) {
 		return recoveryUnsureDropText, ""
 	}
 	return recoveryText(err), ""
