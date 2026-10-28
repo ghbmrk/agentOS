@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -11,6 +12,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +29,10 @@ type MainConfig struct {
 	OwnerUID  int    // the owner side's uid, its only peer
 	MeterSock string // MeterSide's socket
 	MeterUID  int    // the model clerk's uid, its only peer
+	// LinkSock is LinkSide's socket, "" for none (a box with no edge
+	// link); LinkUID is agentos-link's uid, its only peer.
+	LinkSock  string
+	LinkUID   int
 	Clerks    map[string]Remote
 	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
 	BackupDir string // the backups' records (KernelConfig.BackupDir)
@@ -34,7 +40,7 @@ type MainConfig struct {
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
 	Tick  time.Duration // how often plans run; 0 is one second
-	// Up is a file made once both sockets listen, so the unit can tell a
+	// Up is a file made once every socket listens, so the unit can tell a
 	// kernel that came up and then failed, which a reboot may cure, from
 	// one refused at its start, which every boot repeats (#2998). "" makes
 	// none.
@@ -112,6 +118,45 @@ func (h *Kernel) Certify(now int64, pub []byte) (Certified, error) {
 	return Certified{Leaf: leaf, Authority: h.page.Certificate()}, nil
 }
 
+// ErrNoLinkKey: the unlock step handed no link key (a store enrolled
+// before it), so the kernel signs no edge handshake; a new enrollment makes
+// one (EDGE-link-core decision 4).
+var ErrNoLinkKey = errors.New("run: my store holds no link key, so I sign no edge handshake")
+
+// ErrLinkSign refuses anything the link key is asked to sign but a TLS 1.3
+// server CertificateVerify input.
+var ErrLinkSign = errors.New("run: the link key signs a TLS 1.3 server CertificateVerify only")
+
+// certificateVerify is what every TLS 1.3 server CertificateVerify input
+// starts with (RFC 8446 section 4.4.3): 64 spaces, the server's context
+// string and a zero byte. The transcript hash follows.
+var certificateVerify = []byte(strings.Repeat(" ", 64) + "TLS 1.3, server CertificateVerify\x00")
+
+// LinkKey is the public half of the core's link key, which agentos-link's
+// TLS certificate names.
+func (h *Kernel) LinkKey() (ed25519.PublicKey, error) {
+	if len(h.link) != ed25519.PrivateKeySize {
+		return nil, ErrNoLinkKey
+	}
+	return h.link.Public().(ed25519.PublicKey), nil
+}
+
+// LinkSign signs msg with the link key when it is a TLS 1.3 server
+// CertificateVerify input over a SHA-256 or SHA-384 transcript hash, and
+// refuses anything else, so a compromised link process can complete
+// handshakes while it runs but can neither copy the key nor have it sign
+// another message (EDGE-link-core decision 4).
+func (h *Kernel) LinkSign(msg []byte) ([]byte, error) {
+	if len(h.link) != ed25519.PrivateKeySize {
+		return nil, ErrNoLinkKey
+	}
+	n := len(msg) - len(certificateVerify)
+	if !bytes.HasPrefix(msg, certificateVerify) || n != 32 && n != 48 {
+		return nil, ErrLinkSign
+	}
+	return ed25519.Sign(h.link, msg), nil
+}
+
 // Setup is the setup step (kernel.Setup) on this box: it logs the owner's
 // first anchors and, right after them, the first edge key the store
 // handed, if any (HW-15, brief EDGE-link-core decision 3).
@@ -123,8 +168,8 @@ func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
-// opens the log and the subject-key table under keys, serves OwnerSide and
-// MeterSide, and runs plans every Tick until ctx ends. anchor is where
+// opens the log and the subject-key table under keys, serves OwnerSide,
+// MeterSide and, given its socket, LinkSide, and runs plans every Tick until ctx ends. anchor is where
 // signed heads go (LOG-2).
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if cfg.KeyDir == "" {
@@ -184,11 +229,15 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
 		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
 	}
-	sides := []struct {
+	type served struct {
 		path string
 		uid  int
 		side Side
-	}{{cfg.OwnerSock, cfg.OwnerUID, OwnerSide}, {cfg.MeterSock, cfg.MeterUID, MeterSide}}
+	}
+	sides := []served{{cfg.OwnerSock, cfg.OwnerUID, OwnerSide}, {cfg.MeterSock, cfg.MeterUID, MeterSide}}
+	if cfg.LinkSock != "" {
+		sides = append(sides, served{cfg.LinkSock, cfg.LinkUID, LinkSide})
+	}
 	errs := make(chan error, len(sides))
 	for _, s := range sides {
 		ln, err := ListenKernel(s.path, s.uid)

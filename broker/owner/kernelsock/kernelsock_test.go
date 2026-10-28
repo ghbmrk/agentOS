@@ -801,3 +801,66 @@ func TestRecoveryRotateReachesTheKernel(t *testing.T) {
 		t.Fatalf("an approval from before the switch: %v", err)
 	}
 }
+
+// REQ: HW-15
+// EDGE-link-core-c2b: the page step's enrolment and the owner's cut reach
+// the real OwnerSide on the written-out wire: the candidate the link port
+// logged is enrolled on a hardware key's signature and is live, a key the
+// link never logged is the kernel's refusal, and a revoke cuts it.
+// Revert mutants: a call or argument name changed here (the kernel answers
+// "no call" or ErrArgs).
+func TestEdgeEnrollAndRevokeReachTheKernel(t *testing.T) {
+	needRoot(t)
+	ctx := context.Background()
+	as := anchorSigners(t)
+	head, headPriv, _ := ed25519.GenerateKey(nil)
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: head, Sign: headPriv, Anchors: publics(as),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	edge, edgePriv, _ := ed25519.GenerateKey(nil)
+	other, _, _ := ed25519.GenerateKey(nil)
+	nonce := make([]byte, kernel.HelloNonce)
+	sig := func(k ed25519.PublicKey) (c key.Cosign) {
+		h.With(func(kk *kernel.Kernel) error {
+			c = key.Approve(as[0], kernel.EdgeEnrollHash(kk.State().EdgeChanges(), kk.Box(), k, kk.EdgeReplaces(k)))
+			return nil
+		})
+		return c
+	}
+	live := func() (k ed25519.PublicKey) {
+		h.With(func(kk *kernel.Kernel) error { k = kk.LiveEdge(); return nil })
+		return k
+	}
+	if err := h.With(func(k *kernel.Kernel) error {
+		return k.EdgeCandidate(time.Now().UnixMilli(), edge, nonce, ed25519.Sign(edgePriv, kernel.HelloMsg(nonce)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var r Refused
+	if err := o.EdgeEnroll(ctx, other, sig(other)); !errors.As(err, &r) || r.Text != kernel.ErrEdgeCandidate.Error() {
+		t.Fatalf("enrolling a key the link never logged: %v", err)
+	}
+	if err := o.EdgeEnroll(ctx, edge, sig(edge)); err != nil || !live().Equal(edge) {
+		t.Fatalf("enrolling the candidate: %v, live %x", err, live())
+	}
+	if err := o.EdgeRevoke(ctx, edge); err != nil || live() != nil {
+		t.Fatalf("revoking it: %v, live %x", err, live())
+	}
+	if err := o.EdgeRevoke(ctx, edge); !errors.As(err, &r) || r.Text != kernel.ErrEdgeRevoked.Error() {
+		t.Fatalf("revoking it again: %v", err)
+	}
+}

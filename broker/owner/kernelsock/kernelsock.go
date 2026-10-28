@@ -19,6 +19,7 @@ package kernelsock
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -338,6 +339,26 @@ func (o Owner) Anchors(ctx context.Context) ([]key.PublicKey, error) {
 	var a []key.PublicKey
 	err := typed(o.call(ctx, "anchors", nil, &a))
 	return a, err
+}
+
+// EdgeEnroll is the owner-page step (HW-15, EDGE-link-core decision 8): it
+// makes edge, the candidate the link port logged, the live edge on a
+// hardware key's signature c over kernel.EdgeEnrollHash, revoking the edge
+// it replaces. The kernel refuses another key, or another signature, in its
+// own words.
+func (o Owner) EdgeEnroll(ctx context.Context, edge ed25519.PublicKey, c key.Cosign) error {
+	return typed(o.call(ctx, "edgeenroll", struct {
+		Key    ed25519.PublicKey `json:"key"`
+		Cosign key.Cosign        `json:"cosign"`
+	}{edge, c}, nil))
+}
+
+// EdgeRevoke cuts edge for good, with no replacement; its connection closes
+// within a second.
+func (o Owner) EdgeRevoke(ctx context.Context, edge ed25519.PublicKey) error {
+	return typed(o.call(ctx, "edgerevoke", struct {
+		Key ed25519.PublicKey `json:"key"`
+	}{edge}, nil))
 }
 
 // Backups (BAK-1, MIG-4-recovery-e3): the kernel holds the destinations and
