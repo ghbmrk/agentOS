@@ -1,6 +1,8 @@
 package drone
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +28,14 @@ const (
 
 var signatureEpoch = time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
 
+// tsUnit is a signature timestamp's unit, and clockSlack how far the
+// aircraft's signing clock may run ahead of its anchor plus the time since:
+// it advances by one unit a frame and jumps only when its GPS time is ahead.
+const (
+	tsUnit     = 10 * time.Microsecond
+	clockSlack = 10 * time.Second
+)
+
 // dialectRW is the codec for MAVLink's common dialect, which holds every
 // message the key-holder sends or reads; ArduPilot-only messages arrive raw
 // and are ignored.
@@ -42,13 +52,17 @@ func dialectRW() *dialect.ReadWriter {
 // unsigned or wrongly signed frame from the aircraft's side (a spoofed
 // PARAM_VALUE, say) is dropped, so a read-back cannot be faked (P1, P3).
 //
-// A captured signed frame is no answer either. Frames on each of the
-// aircraft's signing streams must carry strictly increasing timestamps, and
-// a reply counts only when its timestamp is at or above the request's: the
-// aircraft raises its own signing clock to the newest timestamp it accepts,
-// so only a frame signed after it saw the request can answer it. A heartbeat
-// counts only from at or above the link's first frame (ASSUMPTIONS.md
-// DRONE-sim-5).
+// A captured signed frame is no answer either. Before the first answer the
+// link anchors to the aircraft's signing clock with a TIMESYNC challenge,
+// whose signed reply must echo a random nonce, so no capture can be the
+// anchor. After it, frames on each of the aircraft's signing streams must
+// carry strictly increasing timestamps; a frame counts only on the anchor's
+// stream, at or above the anchor and no further ahead of it than the time
+// since plus clockSlack; and a reply counts only when its timestamp is also
+// at or above the request's, because the aircraft raises its signing clock
+// to the newest timestamp it accepts (ASSUMPTIONS.md DRONE-sim-5). Neither
+// clock is trusted: a key-holder clock far behind the aircraft's gets no
+// anchor, and a capture from the future is above the bound.
 type Link struct {
 	conn io.ReadWriteCloser
 	rw   *dialect.ReadWriter
@@ -67,7 +81,7 @@ type Link struct {
 	streams map[byte]uint64 // the aircraft's newest timestamp per signing link id; read loop only
 
 	smu      sync.Mutex
-	firstTS  uint64 // the timestamp of the link's first frame sent
+	anchor   *anchor
 	hb       *common.MessageHeartbeat
 	hbAt     time.Time
 	dropped  int
@@ -75,15 +89,33 @@ type Link struct {
 	closeErr sync.Once
 }
 
-// received is a verified message from the aircraft and its signature timestamp.
+// received is a verified message from the aircraft, its signature
+// timestamp and the signing stream it came on.
 type received struct {
-	msg message.Message
-	ts  uint64
+	msg    message.Message
+	ts     uint64
+	linkID byte
 }
 
-// Dial wraps conn as a signed link, starts reading it and sends a heartbeat,
-// whose timestamp is the floor for the aircraft's heartbeats on this link.
+// anchor is the aircraft's signing clock as a TIMESYNC challenge read it.
+type anchor struct {
+	ts     uint64
+	linkID byte
+	at     time.Time
+}
+
+// fresh reports whether a frame can have been signed since the anchor.
+func (a *anchor) fresh(got received, now time.Time) bool {
+	return a != nil && got.linkID == a.linkID && got.ts >= a.ts &&
+		got.ts <= a.ts+uint64((now.Sub(a.at)+clockSlack)/tsUnit)
+}
+
+// Dial wraps conn as a signed link, starts reading it and sends a heartbeat.
 func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
+	return dial(conn, k, time.Now)
+}
+
+func dial(conn io.ReadWriteCloser, k Key, now func() time.Time) (*Link, error) {
 	if !k.valid() {
 		return nil, errNoKey
 	}
@@ -91,7 +123,7 @@ func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: time.Now,
+	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: now,
 		in: make(chan received, 512), done: make(chan struct{}), streams: map[byte]uint64{}}
 	r, err := frame.NewReader(frame.ReaderConf{Reader: conn, DialectRW: l.rw, InKey: k.s()})
 	if err != nil {
@@ -141,16 +173,16 @@ func (l *Link) readLoop(r *frame.Reader) {
 			continue
 		}
 		l.streams[v2.SignatureLinkID] = ts
-		msg := v2.GetMessage()
-		if hb, ok := msg.(*common.MessageHeartbeat); ok {
+		got := received{v2.GetMessage(), ts, v2.SignatureLinkID}
+		if hb, ok := got.msg.(*common.MessageHeartbeat); ok {
 			l.smu.Lock()
-			if l.firstTS != 0 && ts >= l.firstTS {
-				l.hb, l.hbAt = hb, l.now()
+			if now := l.now(); l.anchor.fresh(got, now) {
+				l.hb, l.hbAt = hb, now
 			}
 			l.smu.Unlock()
 		}
 		select {
-		case l.in <- received{msg, ts}:
+		case l.in <- got:
 		default: // nobody is waiting; requests drain before they send
 		}
 	}
@@ -178,16 +210,11 @@ func (l *Link) send(m message.Message) (uint64, error) {
 	}
 	l.wmu.Lock()
 	defer l.wmu.Unlock()
-	ts := uint64(l.now().Sub(signatureEpoch) / (10 * time.Microsecond))
+	ts := uint64(l.now().Sub(signatureEpoch) / tsUnit)
 	if ts <= l.lastTS {
 		ts = l.lastTS + 1 // MAVLink 2 refuses a timestamp not above the stream's last
 	}
 	l.lastTS = ts
-	l.smu.Lock()
-	if l.firstTS == 0 {
-		l.firstTS = ts
-	}
-	l.smu.Unlock()
 	fr := &frame.V2Frame{
 		IncompatibilityFlag: frame.V2FlagSigned,
 		SequenceNumber:      l.seq,
@@ -209,7 +236,8 @@ func (l *Link) send(m message.Message) (uint64, error) {
 var errTimeout = errors.New("drone: no answer from the aircraft")
 
 // exchange sends m and returns the first message from the aircraft that match
-// accepts and that was signed at or after m, within timeout.
+// accepts and that was signed at or after m and since the anchor, within
+// timeout. It anchors the link first if it has no anchor.
 func (l *Link) exchange(m message.Message, match func(message.Message) bool, timeout time.Duration) (message.Message, error) {
 	l.req.Lock()
 	defer l.req.Unlock()
@@ -217,6 +245,53 @@ func (l *Link) exchange(m message.Message, match func(message.Message) bool, tim
 }
 
 func (l *Link) exchangeLocked(m message.Message, match func(message.Message) bool, timeout time.Duration) (message.Message, error) {
+	l.smu.Lock()
+	anchored := l.anchor != nil
+	l.smu.Unlock()
+	if !anchored {
+		if err := l.anchorLocked(timeout); err != nil {
+			return nil, err
+		}
+	}
+	got, err := l.roundTrip(m, func(got received, sent uint64) bool {
+		if got.ts < sent || !match(got.msg) {
+			return false
+		}
+		l.smu.Lock()
+		defer l.smu.Unlock()
+		return l.anchor.fresh(got, l.now())
+	}, timeout)
+	if err != nil {
+		return nil, err
+	}
+	return got.msg, nil
+}
+
+// anchorLocked reads the aircraft's signing clock: it sends TIMESYNC with a
+// random nonce, and the aircraft's signed answer must echo it.
+func (l *Link) anchorLocked(timeout time.Duration) error {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return err
+	}
+	nonce := int64(binary.LittleEndian.Uint64(b[:]) >> 1)
+	got, err := l.roundTrip(&common.MessageTimesync{Ts1: nonce, TargetSystem: targetSysID, TargetComponent: targetCompID},
+		func(got received, _ uint64) bool {
+			ts, ok := got.msg.(*common.MessageTimesync)
+			return ok && ts.Tc1 != 0 && ts.Ts1 == nonce
+		}, timeout)
+	if err != nil {
+		return fmt.Errorf("drone: no signed TIMESYNC answer to anchor the link: %w", err)
+	}
+	l.smu.Lock()
+	l.anchor = &anchor{ts: got.ts, linkID: got.linkID, at: l.now()}
+	l.smu.Unlock()
+	return nil
+}
+
+// roundTrip sends m and returns the first frame accept takes, given the
+// timestamp m was signed with, within timeout.
+func (l *Link) roundTrip(m message.Message, accept func(got received, sent uint64) bool, timeout time.Duration) (received, error) {
 	for drained := false; !drained; {
 		select {
 		case <-l.in:
@@ -226,20 +301,20 @@ func (l *Link) exchangeLocked(m message.Message, match func(message.Message) boo
 	}
 	sent, err := l.send(m)
 	if err != nil {
-		return nil, err
+		return received{}, err
 	}
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	for {
 		select {
 		case got := <-l.in:
-			if got.ts >= sent && match(got.msg) {
-				return got.msg, nil
+			if accept(got, sent) {
+				return got, nil
 			}
 		case <-l.done:
-			return nil, errors.New("drone: the link to the aircraft closed")
+			return received{}, errors.New("drone: the link to the aircraft closed")
 		case <-t.C:
-			return nil, errTimeout
+			return received{}, errTimeout
 		}
 	}
 }
@@ -262,9 +337,18 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 		Armed: l.hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.hbAt}, true
 }
 
-// WaitHeartbeat waits for a signed heartbeat newer than after.
+// WaitHeartbeat waits for a signed heartbeat newer than after, anchoring
+// the link first if it has no anchor: only a heartbeat since the anchor counts.
 func (l *Link) WaitHeartbeat(after time.Time, timeout time.Duration) (Heartbeat, error) {
 	deadline := time.Now().Add(timeout)
+	l.req.Lock()
+	l.smu.Lock()
+	anchored := l.anchor != nil
+	l.smu.Unlock()
+	for !anchored && time.Now().Before(deadline) {
+		anchored = l.anchorLocked(min(time.Until(deadline), 2*time.Second)) == nil
+	}
+	l.req.Unlock()
 	for time.Now().Before(deadline) {
 		if hb, ok := l.LastHeartbeat(); ok && hb.At.After(after) {
 			return hb, nil

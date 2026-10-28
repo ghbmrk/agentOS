@@ -77,7 +77,7 @@ func newRig(t *testing.T, load bool) *rig {
 	}
 	r.attach(ports[0], c)
 	if load {
-		if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); err != nil && !errors.Is(err, ErrMismatch) {
+		if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); err != nil && !(errors.Is(err, ErrMismatch) && strings.Contains(err.Error(), "RC input")) {
 			t.Fatalf("loading the fixture policy: %v\nlog:\n%s", err, r.logs)
 		}
 		r.link.Close()
