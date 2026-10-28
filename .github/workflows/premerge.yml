@@ -154,16 +154,17 @@ jobs:
             || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }
           # The names that already failed on the merge base excuse the same failure on the head; any failed read excuses none.
           # Only main's own first-attempt push or scheduled runs count, and only their jobs: a pusher can rerun or cancel
-          # a base run and a branch workflow can post a check run on any sha (#3533 Security review).
+          # a base run, and a branch workflow can post a check run on any sha, even into an Actions suite of main's
+          # (#3533 Security and delta L3 reviews), so the jobs come from each run's attempt-1 jobs list, not the sha's check runs.
           bwfs='[]' bruns='[]'
           if base=$(gh api "repos/$REPO/compare/main...$HEAD_SHA" --jq .merge_base_commit.sha) && echo "$base" | grep -Eqx '[0-9a-f]{40}'; then
             bw=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$base&per_page=100" --jq '.workflow_runs[]' \
               | jq -cs 'map(select(.head_branch == "main" and (.event | IN("push", "schedule")))) | group_by(.workflow_id)
                         | map(max_by(.id) | select(.run_attempt == 1 and .conclusion == "failure"))') || bw='[]'
             bwfs=$(printf '%s' "$bw" | jq -c 'map(.name)') || bwfs='[]'
-            bruns=$(gh api --paginate "repos/$REPO/commits/$base/check-runs?per_page=100" --jq '.check_runs[]' \
-              | jq -cs --argjson bw "$bw" '[$bw[].check_suite_id] as $s | map(select(.check_suite.id | IN($s[])))
-                        | group_by(.name) | map(max_by(.id) | select(.conclusion == "failure") | .name)') || bruns='[]'
+            bruns=$(printf '%s' "$bw" | jq -r '.[].id' | while read -r id; do
+                      echo "$id" | grep -Eqx '[0-9]+' && gh api --paginate "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=100" --jq '.jobs[]' || exit 1
+                    done | jq -cs 'map(select(.conclusion == "failure") | .name) | unique') || bruns='[]'
           fi
           echo "excused as failed on the merge base: $bwfs $bruns"
           wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \

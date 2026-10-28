@@ -191,9 +191,9 @@ PREMERGE_LINES = [
     '              | jq -cs \'map(select(.head_branch == "main" and (.event | IN("push", "schedule")))) | group_by(.workflow_id)',
     '                        | map(max_by(.id) | select(.run_attempt == 1 and .conclusion == "failure"))\') || bw=\'[]\'',
     '            bwfs=$(printf \'%s\' "$bw" | jq -c \'map(.name)\') || bwfs=\'[]\'',
-    '            bruns=$(gh api --paginate "repos/$REPO/commits/$base/check-runs?per_page=100" --jq \'.check_runs[]\' \\',
-    '              | jq -cs --argjson bw "$bw" \'[$bw[].check_suite_id] as $s | map(select(.check_suite.id | IN($s[])))',
-    '                        | group_by(.name) | map(max_by(.id) | select(.conclusion == "failure") | .name)\') || bruns=\'[]\'',
+    '            bruns=$(printf \'%s\' "$bw" | jq -r \'.[].id\' | while read -r id; do',
+    '                      echo "$id" | grep -Eqx \'[0-9]+\' && gh api --paginate "repos/$REPO/actions/runs/$id/attempts/1/jobs?per_page=100" --jq \'.jobs[]\' || exit 1',
+    '                    done | jq -cs \'map(select(.conclusion == "failure") | .name) | unique\') || bruns=\'[]\'',
     '          fi',
     '          echo "excused as failed on the merge base: $bwfs $bruns"',
     '          wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq \'.workflow_runs[]\' \\',
@@ -716,6 +716,8 @@ case "$*" in
      printf '%s' "$BWFS" | "$REAL_JQ" -c "$5" ;;
   "api --paginate repos/o/r/commits/$BASE/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = bruns ] && exit 1
      printf '%s' "$BRUNS" | "$REAL_JQ" -c "$5" ;;
+  "api --paginate repos/o/r/actions/runs/"*"/attempts/1/jobs?per_page=100 --jq .jobs[]") [ "$READ" = bjobs ] && exit 1
+     id=${3#repos/o/r/actions/runs/}; printf '%s' "$BJOBS" | "$REAL_JQ" -c --arg id "${id%%/*}" '.[$id] // [] | .[]' ;;
   "api --paginate repos/o/r/actions/runs?head_sha="*"&per_page=100 --jq .workflow_runs[]") [ "$READ" = wfs ] && exit 1
      printf '%s' "$WFS" | "$REAL_JQ" -c "$5" ;;
   "api --paginate repos/o/r/commits/"*"/check-runs?per_page=100 --jq .check_runs[]") [ "$READ" = fail ] && exit 1
@@ -746,7 +748,7 @@ class MergeRunTest(unittest.TestCase):
                 wf_("premerge", status="in_progress", conclusion=None)]
 
     def run_merge(self, runs=GREEN, wfs=WF_GREEN, statuses=(("premerge", "success"),), merge="ok", read="ok",
-                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base="c" * 40):
+                  token="synthetic-bot", sha=SHA, base_runs=(), base_wfs=(), base_jobs=None, base="c" * 40):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -757,7 +759,7 @@ class MergeRunTest(unittest.TestCase):
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "MERGE": merge, "READ": read,
                    "GH_TOKEN": token, "PR_NUMBER": "7", "REPO": "o/r", "HEAD_SHA": sha, "GITHUB_RUN_ID": "41",
                    "RUNS": json.dumps({"check_runs": list(runs)}), "WFS": json.dumps({"workflow_runs": list(wfs)}),
-                   "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}),
+                   "BASE": base, "BRUNS": json.dumps({"check_runs": list(base_runs)}), "BJOBS": json.dumps(base_jobs or {}),
                    "BWFS": json.dumps({"workflow_runs": list(base_wfs)}),
                    "STATUSES": json.dumps({"statuses": [{"context": c, "state": st} for c, st in statuses]})}
             proc = subprocess.run(merge_argv() + [str(stubs / "run.sh")],
@@ -804,45 +806,48 @@ class MergeRunTest(unittest.TestCase):
         # PREMERGE-inherited (#3532): #3503's head branched from a main commit whose vulncheck was red, so its
         # own vulncheck stayed red after main's fix; the same failure on the merge base is not the PR's.
         red_wf, red_run = wf_("vulncheck", id=5, conclusion="failure"), run_("vulncheck", conclusion="failure")
-        base_wf, base_run = wf_("vulncheck", id=2, conclusion="failure", suite=8), run_("vulncheck", id=3, conclusion="failure", suite=8)
+        base_wf, failed_job = wf_("vulncheck", id=2, conclusion="failure", suite=8), {"name": "vulncheck", "conclusion": "failure"}
+        jobs = {"2": [{"name": "scope / scope", "conclusion": "success"}, failed_job]}
         merged = (0, ["api -X PUT repos/o/r/pulls/7/merge -f merge_method=merge -f sha=" + self.SHA])
         self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], wfs=self.WF_GREEN + [red_wf],
-                                        base_runs=[base_run], base_wfs=[base_wf])[:2], merged)
-        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], base_runs=[base_run], base_wfs=[base_wf])[:2], merged)
+                                        base_wfs=[base_wf], base_jobs=jobs)[:2], merged)
+        self.assertEqual(self.run_merge(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs)[:2], merged)
         sched = wf_("vulncheck", id=2, conclusion="failure", suite=8, event="schedule")
         self.assertEqual(self.run_merge(wfs=self.WF_GREEN + [red_wf], base_wfs=[sched])[:2], merged)
         held = [
-            # the base was green, or never ran it (a pull_request_target workflow), or a later run on the base passed
-            dict(runs=self.GREEN + [red_run], base_runs=[run_("vulncheck", suite=8)], base_wfs=[base_wf]),
+            # the base's job passed, or the base never ran it (a pull_request_target workflow), or a later run passed
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": "success"}]}),
             dict(runs=self.GREEN + [red_run], base_wfs=[base_wf]),
-            dict(runs=self.GREEN + [red_run], base_runs=[base_run, run_("vulncheck", id=4, suite=8)], base_wfs=[base_wf]),
+            dict(runs=self.GREEN + [red_run], base_jobs=jobs),
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf, wf_("vulncheck", id=3, suite=9)]),
-            # a different check failed on the base, or the base's run is still going
-            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_runs=[base_run], base_wfs=[base_wf]),
-            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf],
-                 base_runs=[run_("vulncheck", id=3, status="in_progress", conclusion=None, suite=8)]),
-            # #3533 Security review: a cancelled base run, a rerun, a run main did not push or schedule, or a
-            # check run outside such a run's suite (any branch workflow can post one on any sha) excuses nothing
+            # a different job failed on the base, or the base's job is still going or was cancelled
+            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_wfs=[base_wf], base_jobs=jobs),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": None}]}),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": [{"name": "vulncheck", "conclusion": "cancelled"}]}),
+            # #3533 Security review: a cancelled base run, a rerun, or a run main did not push or schedule excuses nothing
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="cancelled")]),
-            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf],
-                 base_runs=[run_("vulncheck", id=3, suite=8), run_("vulncheck", id=4, conclusion="cancelled", suite=8)]),
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", attempt=2)]),
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", event="workflow_dispatch")]),
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[wf_("vulncheck", id=2, conclusion="failure", branch="side")]),
-            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf],
-                 base_runs=[run_("vulncheck", id=3, suite=8), run_("vulncheck", id=9, conclusion="failure", suite=777)]),
+            # #3533 delta reviews: a check run any branch workflow posts on the base sha, even one GitHub files in
+            # main's failed run's suite, is not one of that run's jobs and excuses nothing
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs={"2": []},
+                 base_runs=[run_("vulncheck", id=9, conclusion="failure", suite=8)]),
+            dict(runs=self.GREEN + [run_("broker-race", conclusion="failure")], base_wfs=[base_wf], base_jobs=jobs,
+                 base_runs=[run_("broker-race", id=9, conclusion="failure", suite=8)]),
             dict(runs=self.GREEN + [red_run], base_runs=[run_("vulncheck", id=9, conclusion="failure", suite=777)]),
             # only a head failure is excused: an unfinished or cancelled head run never is, nor a status
-            dict(runs=self.GREEN + [run_("vulncheck", status="queued", conclusion=None)], base_runs=[base_run], base_wfs=[base_wf]),
-            dict(runs=self.GREEN + [run_("vulncheck", conclusion="cancelled")], base_runs=[base_run], base_wfs=[base_wf]),
+            dict(runs=self.GREEN + [run_("vulncheck", status="queued", conclusion=None)], base_wfs=[base_wf], base_jobs=jobs),
+            dict(runs=self.GREEN + [run_("vulncheck", conclusion="cancelled")], base_wfs=[base_wf], base_jobs=jobs),
             dict(wfs=self.WF_GREEN + [wf_("vulncheck", id=5, status="in_progress", conclusion=None)], base_wfs=[base_wf]),
-            dict(statuses=(("premerge", "success"), ("vulncheck", "failure")), base_runs=[base_run], base_wfs=[base_wf]),
+            dict(statuses=(("premerge", "success"), ("vulncheck", "failure")), base_wfs=[base_wf], base_jobs=jobs),
             # an unreadable base excuses nothing
-            dict(runs=self.GREEN + [red_run], base_runs=[base_run], base_wfs=[base_wf], read="base"),
-            dict(runs=self.GREEN + [red_run], base_runs=[base_run], base_wfs=[base_wf], read="bruns"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="base"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="bjobs"),
             dict(wfs=self.WF_GREEN + [red_wf], base_wfs=[base_wf], read="bwfs"),
-            dict(runs=self.GREEN + [red_run], base_runs=[base_run], base_wfs=[base_wf], read="bwfs"),
-            dict(runs=self.GREEN + [red_run], base_runs=[base_run], base_wfs=[base_wf], base="c" * 39),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, read="bwfs"),
+            dict(runs=self.GREEN + [red_run], base_wfs=[base_wf], base_jobs=jobs, base="c" * 39),
+            dict(runs=self.GREEN + [red_run], base_wfs=[wf_("vulncheck", id="2/x", conclusion="failure")], base_jobs=jobs),
         ]
         for kw in held:
             self.assertEqual(self.run_merge(**kw)[:2], (0, []), kw)
