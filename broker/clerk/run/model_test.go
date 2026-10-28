@@ -1,19 +1,33 @@
 package run
 
-// REQ: LOG-7, CLK-1
+// REQ: LOG-7, CLK-1, CLK-7, CLK-3, CLK-4, PLN-3
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // fakeProvider answers every model call with 400 bytes, or err, and counts
@@ -60,7 +74,7 @@ func TestModelClerkMetersThroughTheKernelSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	go ServeModel(ln, c, func() int64 { return 0 }) // a clerk clock far behind
+	go ServeModel(ln, ModelHost{Clerk: c, Clock: func() int64 { return 0 }}) // a clerk clock far behind
 	m := Model{proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
 
 	start := time.Now().UnixMilli()
@@ -122,7 +136,7 @@ func TestAProviderErrorStaysInTheModelClerk(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	go ServeModel(ln, c, func() int64 { return 0 })
+	go ServeModel(ln, ModelHost{Clerk: c, Clock: func() int64 { return 0 }})
 	m := Model{proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
 	_, err = m.Call("t", "api", "hi", 10)
 	if !errors.Is(err, ErrModelCall) || strings.Contains(err.Error(), canary) || pr.calls != 1 {
@@ -157,4 +171,223 @@ func serveMeter(t *testing.T, b *box) proc.Conn {
 	t.Cleanup(func() { ln.Close() })
 	go proc.ServeKernel(ln, b.h, proc.MeterSide, func() int64 { return time.Now().UnixMilli() })
 	return proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}
+}
+
+// apiFix is the model socket over one API-key route whose declared host is
+// a local TLS server; the provider's answer is the handler's.
+type apiFix struct {
+	m    Model
+	apis *model.APIs
+	hits atomic.Int32
+	seen chan *http.Request
+	logs []string
+	mu   sync.Mutex
+	l    *meterLog
+}
+
+// meterLog is a ledger that admits everything and records what it meters.
+type meterLog struct {
+	admitAll
+	mu     sync.Mutex
+	amount []int64
+	source []string
+}
+
+func (l *meterLog) Meter(_ int64, _ kernel.Admitted, _ string, amount int64, source string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.amount, l.source = append(l.amount, amount), append(l.source, source)
+	return nil
+}
+
+type fixedResolver netip.Addr
+
+func (r fixedResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return []netip.Addr{netip.Addr(r)}, nil
+}
+
+const apiKeyCanary = "sk-test-CANARY-3680-0123456789abcdef"
+
+func newAPIFix(t *testing.T, handler http.HandlerFunc) *apiFix {
+	t.Helper()
+	f := &apiFix{seen: make(chan *http.Request, 16), l: &meterLog{}}
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.hits.Add(1)
+		f.seen <- r.Clone(context.Background())
+		handler(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	guard := netguard.New(netguard.Config{Resolver: fixedResolver(netip.MustParseAddr("8.8.8.8")), Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}})
+	d := model.Shipped[0]
+	d.Host = "api.example.com"
+	k := make([]byte, 32)
+	rand.Read(k)
+	s, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apis, err = model.NewAPIs([]model.APIDeclaration{d}, model.NewKeys(s, nil), guard, roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apis.Log = func(line string) { f.mu.Lock(); f.logs = append(f.logs, line); f.mu.Unlock() }
+	c := &model.Clerk{Routes: f.apis.Prices(), Ledger: f.l}
+	sock := filepath.Join(shortDir(t), "model.sock")
+	ln, err := ListenModel(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go ServeModel(ln, ModelHost{Clerk: c, APIs: f.apis, Clock: func() int64 { return 0 }})
+	f.m = Model{proc.Conn{Socket: sock, UID: os.Getuid(), Timeout: 10 * time.Second}}
+	return f
+}
+
+// answer is a provider answer that reports usage.
+func answer(w http.ResponseWriter, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"type":"message","content":[{"type":"text","text":%q}],"usage":{"input_tokens":10,"output_tokens":5}}`, text)
+}
+
+func messages(model string, maxOut int) []byte {
+	return []byte(fmt.Sprintf(`{"model":%q,"max_tokens":%d,"messages":[{"role":"user","content":"hi"}]}`, model, maxOut))
+}
+
+// A call on an API-key route is sent only to the declared host and path,
+// with the sealed key in the declared header, and metered at the usage the
+// answer reports. A route or operation not declared, a body out of its
+// shape and a model other than the route's are refused before anything is
+// sent, and each refusal is logged (CLK-3, CLK-7, LOG-7).
+func TestModelCallWithAnAPIKeyReachesOnlyTheDeclaredEndpoint(t *testing.T) {
+	f := newAPIFix(t, func(w http.ResponseWriter, r *http.Request) { answer(w, "hello") })
+	if err := f.apis.SetKey("anthropic", apiKeyCanary, true); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := f.m.Send("t", "anthropic-sonnet-5-5", "messages", messages("claude-sonnet-5-5", 64), false)
+	if err != nil || !strings.Contains(string(reply), "hello") {
+		t.Fatalf("a declared call: %s, %v", reply, err)
+	}
+	r := <-f.seen
+	if r.Method != "POST" || r.Host != "api.example.com" || r.URL.Path != "/v1/messages" ||
+		r.Header.Get("X-Api-Key") != apiKeyCanary || r.Header.Get("Anthropic-Version") != "2023-06-01" || r.Header.Get("Authorization") != "" {
+		t.Fatalf("sent %s %s%s with headers %v", r.Method, r.Host, r.URL.Path, r.Header)
+	}
+	// 10 in and 5 out at 200 and 1000 per million round up to 1.
+	if len(f.l.amount) != 1 || f.l.amount[0] != 1 || f.l.source[0] != "provider" {
+		t.Fatalf("metered %v %v, want 1 from the provider", f.l.amount, f.l.source)
+	}
+
+	for _, c := range []struct {
+		name, route, op string
+		body            []byte
+		detail          string
+	}{
+		{"an undeclared operation", "anthropic-sonnet-5-5", "files", messages("claude-sonnet-5-5", 64), model.DUndeclared},
+		{"an undeclared route", "other-route", "messages", messages("claude-sonnet-5-5", 64), model.DUndeclared},
+		{"another route's model", "anthropic-sonnet-5-5", "messages", messages("claude-opus-5-5", 64), model.DBody},
+		{"an undeclared key", "anthropic-sonnet-5-5", "messages", []byte(`{"model":"claude-sonnet-5-5","max_tokens":8,"messages":[],"stream":true}`), model.DBody},
+		{"a hosted tool", "anthropic-sonnet-5-5", "messages", []byte(`{"model":"claude-sonnet-5-5","max_tokens":8,"messages":[],"tools":[{"type":"web_search_20260209","name":"web_search"}]}`), model.DBody},
+		{"a content source by address", "anthropic-sonnet-5-5", "messages", []byte(`{"model":"claude-sonnet-5-5","max_tokens":8,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://x.test/a.png"}}]}]}`), model.DBody},
+		{"an output cap past the model's", "anthropic-sonnet-5-5", "messages", messages("claude-sonnet-5-5", 128001), model.DBody},
+		{"no output cap", "anthropic-sonnet-5-5", "messages", []byte(`{"model":"claude-sonnet-5-5","messages":[]}`), model.DBody},
+	} {
+		_, err := f.m.Send("t", c.route, c.op, c.body, false)
+		if err == nil || !strings.HasPrefix(err.Error(), "model: "+c.detail) {
+			t.Errorf("%s: %v, want %s", c.name, err, c.detail)
+		}
+	}
+	if n := f.hits.Load(); n != 1 {
+		t.Fatalf("%d requests reached the provider, want only the declared one", n)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.logs) != 8 {
+		t.Fatalf("logged %q, want each refusal", f.logs)
+	}
+	for _, l := range f.logs {
+		if strings.Contains(l, apiKeyCanary) || strings.Contains(l, "x.test") {
+			t.Fatalf("a log line carries a value: %q", l)
+		}
+	}
+}
+
+// The key and its encodings are stripped from what a call returns, and a
+// failed call's answer, which can echo it, never crosses (CLK-1, CLK-4).
+// The positive control: the provider did echo the key.
+func TestModelReplyCarriesNoKey(t *testing.T) {
+	b64 := base64.StdEncoding.EncodeToString([]byte(apiKeyCanary))
+	var fail atomic.Bool
+	f := newAPIFix(t, func(w http.ResponseWriter, r *http.Request) {
+		echo := r.Header.Get("X-Api-Key")
+		if echo != apiKeyCanary {
+			t.Errorf("the provider saw %q", echo)
+		}
+		if fail.Load() {
+			http.Error(w, `{"error":{"message":"bad key `+echo+`"}}`, 401)
+			return
+		}
+		answer(w, "your key is "+echo+" or "+base64.StdEncoding.EncodeToString([]byte(echo)))
+	})
+	if err := f.apis.SetKey("anthropic", apiKeyCanary, true); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(reply), "your key is [redacted] or [redacted]") || strings.Contains(string(reply), apiKeyCanary) || strings.Contains(string(reply), b64) {
+		t.Fatalf("reply %s", reply)
+	}
+	fail.Store(true)
+	_, err = f.m.Send("t", "anthropic-haiku-5-5", "messages", messages("claude-haiku-5-5", 64), false)
+	if err == nil || err.Error() != "model: "+model.DUpstream+" http 401" {
+		t.Fatalf("a refused key: %v", err)
+	}
+	st, err := f.apis.State()
+	if err != nil || len(st) != 1 || !st[0].Set || !st[0].Private {
+		t.Fatalf("state %+v, %v", st, err)
+	}
+	if b, _ := json.Marshal(st); strings.Contains(string(b), apiKeyCanary) {
+		t.Fatalf("the key's state carries it: %s", b)
+	}
+	// 401 is declared unbilled: metered at 0 as the provider's figure.
+	if len(f.l.amount) != 2 || f.l.amount[1] != 0 || f.l.source[1] != "provider" {
+		t.Fatalf("metered %v %v", f.l.amount, f.l.source)
+	}
+}
+
+// A call that does not say all its values are public is private, and a
+// private call is refused, with nothing sent or metered, on a route whose
+// key the owner did not allow private data; a public call runs there, and
+// allowing it lets the private call run (PLN-3).
+func TestPrivateCallRefusedOnARouteNotAllowedPrivate(t *testing.T) {
+	f := newAPIFix(t, func(w http.ResponseWriter, r *http.Request) { answer(w, "ok") })
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), true); err == nil || err.Error() != "model: "+model.DNoKey {
+		t.Fatalf("no key: %v", err)
+	}
+	if err := f.apis.SetKey("anthropic", apiKeyCanary, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), false); err == nil || err.Error() != "model: "+model.DPrivate {
+		t.Fatalf("a private call on a route not allowed private data: %v", err)
+	}
+	if f.hits.Load() != 0 || len(f.l.amount) != 0 {
+		t.Fatalf("a refused call reached the provider (%d) or was metered (%v)", f.hits.Load(), f.l.amount)
+	}
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), true); err != nil {
+		t.Fatalf("a public call: %v", err)
+	}
+	if err := f.apis.SetPrivate("anthropic", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Send("t", "anthropic-opus-5-5", "messages", messages("claude-opus-5-5", 8), false); err != nil {
+		t.Fatalf("a private call once allowed: %v", err)
+	}
+	if f.hits.Load() != 2 {
+		t.Fatalf("%d calls reached the provider, want 2", f.hits.Load())
+	}
 }

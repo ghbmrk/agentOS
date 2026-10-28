@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
@@ -135,7 +136,10 @@ func (p SignInPrompt) Code(printed string) (code string, ok bool) {
 
 // PlanHost is the plan route's owner side in the model clerk's process.
 type PlanHost struct {
-	Login   *plan.Login
+	Login *plan.Login
+	// APIs are the clerk's API-key routes, whose keys the owner side sets
+	// on the same socket (MIG-4-exit m1); nil serves no key call.
+	APIs    *model.APIs
 	Prompt  SignInPrompt
 	Workers SignInWorkers
 	Times   SignInTimes
@@ -376,8 +380,11 @@ func ListenPlanOwner(path string, ownerUID int) (net.Listener, error) {
 // closes.
 func ServePlanOwner(ln net.Listener, h *PlanHost) error {
 	return proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
-		proc.ServeOne(conn, func(op string, _ json.RawMessage) (json.RawMessage, error) {
+		proc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
 			var res any
+			if strings.HasPrefix(op, "apikey") {
+				return serveKeyCall(h.APIs, op, raw)
+			}
 			switch op {
 			case "planbegin":
 				res = h.Begin(context.Background())
@@ -401,6 +408,52 @@ func ServePlanOwner(ln net.Listener, h *PlanHost) error {
 		})
 	})
 }
+
+// keyArgs is an owner key call's arguments.
+type keyArgs struct {
+	Provider string `json:"provider"`
+	Key      string `json:"key,omitempty"`
+	Private  bool   `json:"private,omitempty"`
+}
+
+// serveKeyCall answers the owner side's API-key calls: apikeyset stores a
+// provider's key and its private-data label, apikeyprivate changes only the
+// label, apikeyremove removes the key, and apikeystate lists every declared
+// provider's key without it (CLK-1). An error names no value.
+func serveKeyCall(a *model.APIs, op string, raw json.RawMessage) (json.RawMessage, error) {
+	var k keyArgs
+	if a == nil || json.Unmarshal(raw, &k) != nil {
+		return nil, errors.New("run: the plan owner socket has no call " + op)
+	}
+	var err error
+	switch op {
+	case "apikeyset":
+		err = a.SetKey(k.Provider, k.Key, k.Private)
+	case "apikeyprivate":
+		err = a.SetPrivate(k.Provider, k.Private)
+	case "apikeyremove":
+		err = a.RemoveKey(k.Provider)
+	case "apikeystate":
+		st, err := a.State()
+		if err != nil {
+			return nil, errKeyStore
+		}
+		return json.Marshal(st)
+	default:
+		return nil, errors.New("run: the plan owner socket has no call " + op)
+	}
+	if errors.Is(err, model.ErrKeyForm) {
+		return nil, model.ErrKeyForm
+	}
+	if err != nil {
+		return nil, errKeyStore
+	}
+	return nil, nil
+}
+
+// errKeyStore is a key call the sealed store could not carry out; nothing
+// changed.
+var errKeyStore = errors.New("run: the API keys could not be opened or written; nothing changed")
 
 // PlanOwner is the owner side's caller of the plan route. Its Timeout must
 // exceed the host's SignInTimes.Link.
@@ -426,3 +479,24 @@ func (o PlanOwner) Resume() (detail string, err error) {
 }
 
 func (o PlanOwner) Remove() error { return o.Call("planremove", nil, nil) }
+
+// SetKey stores provider's API key and whether its routes may see private
+// data.
+func (o PlanOwner) SetKey(provider, key string, private bool) error {
+	return o.Call("apikeyset", keyArgs{provider, key, private}, nil)
+}
+
+// SetPrivate changes only the private-data label of provider's key.
+func (o PlanOwner) SetPrivate(provider string, private bool) error {
+	return o.Call("apikeyprivate", keyArgs{Provider: provider, Private: private}, nil)
+}
+
+func (o PlanOwner) RemoveKey(provider string) error {
+	return o.Call("apikeyremove", keyArgs{Provider: provider}, nil)
+}
+
+// KeyState lists every declared provider's key, never the key itself.
+func (o PlanOwner) KeyState() (st []model.KeyState, err error) {
+	err = o.Call("apikeystate", nil, &st)
+	return
+}
