@@ -97,7 +97,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-a | DECOY-a: one sealed decoy table, logged at first boot, CLK-4 matcher with the table (KRN-12) | #3761, D-232 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-b | DECOY-b: kernel trips, automatic narrowing, passkey resume (KRN-12) | #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier B; lane primary; brief briefs/DECOY.md) |
+| DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 
 ## Harness and operating model
 
@@ -318,7 +318,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-d-preauth | ENF-d-preauth: unauthenticated hellos drop, never pause the enforcer channel (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-d | DECOY-d: enforcer drop-and-trip rules, core heartbeat, alerts on its own line (KRN-12, NET-2) | #3660, #3661, #3666, #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666, #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 
 ## Model routes and the Codex lane
 
@@ -425,4 +425,6 @@ issue #3741: body has no board-row block
 issue #3742: body has no board-row block
 issue #3757: body has no board-row block
 issue #3771: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3779: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
