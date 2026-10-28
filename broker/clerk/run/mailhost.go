@@ -54,6 +54,7 @@ type MailHost struct {
 	stepping chan struct{} // the worker's step in flight (planSenders); setup and removal wait for it
 	kick     chan struct{} // wakes the worker; buffered, sent to without blocking
 	ws       worldState    // the host's own world's sources (world.go)
+	own      bool          // the world is the host's own: each read's clerk is bound to its account (worldAt)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -126,14 +127,14 @@ func stopped(stop error) (detail string, planner error) {
 // worker that reads its alert senders; a given World is used unchanged.
 func NewMailHost(ctx context.Context, dir string, sec *clerk.Secrets, cfg MailConfig) *MailHost {
 	h := &MailHost{ctx: ctx, dir: dir, sec: sec, cfg: cfg, kick: make(chan struct{}, 1)}
-	own := cfg.World == nil
-	if own {
+	h.own = cfg.World == nil
+	if h.own {
 		h.cfg.World = h.world
 	}
 	h.mu.Lock()
 	h.refresh()
 	h.mu.Unlock()
-	if own {
+	if h.own {
 		go h.work()
 	}
 	return h
@@ -163,6 +164,13 @@ func (h *MailHost) refresh() {
 	done := make(chan struct{})
 	h.reading = done
 	last, day, fails, today := h.mark, h.day, h.fails, h.cfg.day()
+	c := h.cfg
+	if h.own {
+		// The clerk judges in the world of the account it is opened for:
+		// a step it runs after a change of account has the guard off.
+		at := h.changes
+		c.World = func() inbox.World { return h.worldAt(at) }
+	}
 	h.mu.Unlock()
 	var m *Mail
 	var mark inbox.Mark
@@ -171,7 +179,7 @@ func (h *MailHost) refresh() {
 		read, mark, err = recheck(h.ctx, last, day, fails == 1, h.dir, h.sec, h.cfg)
 	}
 	if read && err == nil {
-		m, mark, err = openMail(h.ctx, h.dir, h.sec, h.cfg, mark)
+		m, mark, err = openMail(h.ctx, h.dir, h.sec, c, mark)
 	}
 	h.mu.Lock()
 	h.reading = nil

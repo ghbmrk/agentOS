@@ -222,17 +222,42 @@ func Build(t *Table, domains, devices []string) []Item {
 		plan = append(plan, item(e, Always))
 	}
 	for _, e := range t.entries {
-		if e.ID == CardID || e.ID == WalletID || e.ID == MailboxID {
+		if always(e) {
 			continue
 		}
 		switch {
-		case slices.ContainsFunc(domains, func(d string) bool { return matches(e, d) }):
+		case found(e, domains):
 			plan = append(plan, item(e, FromMail))
 		case slices.ContainsFunc(e.ImpliedBy, func(k string) bool { return slices.Contains(devices, k) }):
 			plan = append(plan, item(e, FromDevice))
 		}
 	}
 	return plan
+}
+
+// Held is the domains, of those given, that Build matches to an entry: the
+// authenticated sender domains of services in the table, in their order.
+// The card, the wallet and the mailbox, which Build lists always, match
+// none.
+func (t *Table) Held(domains []string) []string {
+	if t == nil {
+		return nil
+	}
+	var held []string
+	for _, d := range domains {
+		if slices.ContainsFunc(t.entries, func(e Entry) bool { return !always(e) && matches(e, d) }) {
+			held = append(held, d)
+		}
+	}
+	return held
+}
+
+// always reports whether Build lists e whatever the domains and devices.
+func always(e Entry) bool { return e.ID == CardID || e.ID == WalletID || e.ID == MailboxID }
+
+// found reports whether one of domains matches e.
+func found(e Entry, domains []string) bool {
+	return slices.ContainsFunc(domains, func(d string) bool { return matches(e, d) })
 }
 
 // matches reports whether the authenticated domain d is one of e's domains

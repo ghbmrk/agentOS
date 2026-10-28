@@ -8,12 +8,14 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/accounts"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/gmailtest"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp/imaptest"
@@ -35,12 +37,29 @@ var testTables = func() *inbox.Providers {
 	return p
 }()
 
+// testAccounts is a test-only accounts table: Gmail's entry, and services
+// at the made-up domains the senders gates give. spam.test is in none.
+var testAccounts = func() *accounts.Table {
+	t, err := accounts.Load([]byte(`[
+  {"id": "payment-card", "name": "Card", "kind": "money", "group": "payment", "route": "none"},
+  {"id": "payment-wallet", "name": "Wallet", "kind": "money", "group": "payment", "route": "none"},
+  {"id": "mailbox", "name": "Mailbox", "kind": "mail", "group": "mailbox", "route": "none"},
+  {"id": "gmail", "name": "Gmail", "kind": "mail", "group": "account", "domains": ["google.com"], "route": "oauth"},
+  {"id": "bank", "name": "Bank", "kind": "money", "group": "account", "domains": ["bank.test"], "route": "none"},
+  {"id": "old", "name": "Old", "kind": "mail", "group": "account", "domains": ["old.test"], "route": "none"}
+]`))
+	if err != nil {
+		panic(err)
+	}
+	return t
+}()
+
 // testDay is the host's clock in these tests.
 var testDay = time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)
 
 // ownConfig is c with the host's own world over the test tables and clock.
 func ownConfig(c MailConfig) MailConfig {
-	c.World, c.tables, c.now = nil, testTables, func() time.Time { return testDay }
+	c.World, c.tables, c.accounts, c.now = nil, testTables, testAccounts, func() time.Time { return testDay }
 	return c
 }
 
@@ -393,4 +412,68 @@ func TestWorldDoesNotWaitOnThePlan(t *testing.T) {
 		t.Fatalf("%d senders reads; want one shared by the plan and the worker", n)
 	}
 	eventually(t, "the world's alert senders", func() bool { return slices.Contains(h.world().AlertSenders, "accounts.google.com") })
+}
+
+// A sender the provider passed DKIM for is an alert sender only when the
+// accounts table matches it to a service: with the shipped tables, a
+// spammer's domains in the senders read stay out of AlertSenders while
+// Google's sign-in sender is kept (Security 6455968499 point 1; probe
+// builds/2026-10-27-pr3523-security-probes_test.go).
+func TestAlertSendersOnlyFromTheAccountsTable(t *testing.T) {
+	srv, dir, sec := newGmailAccount(t)
+	srv.Deliver(googleMail("mx.google.com"))
+	c := ownConfig(gmailConfig(srv))
+	c.tables, c.accounts = nil, nil // the shipped tables
+	g := newGate("spam.test", "accounts.google.com", "mail.spam.test", "google.com.spam.test")
+	close(g.open)
+	c.senders = g.wrap
+	h := NewMailHost(t.Context(), dir, sec, c)
+	eventually(t, "the senders read", func() bool { return slices.Contains(h.world().AlertSenders, "accounts.google.com") })
+	for _, d := range h.world().AlertSenders {
+		if strings.Contains(d, "spam.test") {
+			t.Fatalf("alert senders %q keep a sender outside the accounts table", h.world().AlertSenders)
+		}
+	}
+}
+
+// A read's clerk judges in the world of the account it was opened for:
+// once a change of account overtakes it, its world holds only the day, so
+// the guard is off and none of the new account's values reach it, while
+// the host's world is the new account's (L3 6455930789 point 1).
+func TestTheClerkJudgesInItsOwnAccountsWorld(t *testing.T) {
+	srv := imaptest.Start(t)
+	srv.Deliver("INBOX", mailFrom("deals@spam.test", "<s1@spam.test>"))
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMail(dir, sec, MailSettings{Address: imaptest.User, IMAP: srv.IMAP, SMTP: srv.SMTP}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	c := ownConfig(mailConfig())
+	g := newGate("bank.test", "spam.test")
+	close(g.open)
+	c.senders = g.wrap
+	h := NewMailHost(t.Context(), dir, sec, c)
+	owner := MailOwner{serveMail(t, h, MailOwnerSide)}
+	h.mu.Lock()
+	m := h.cur
+	h.mu.Unlock()
+	if m == nil {
+		t.Fatal("no clerk opened")
+	}
+	eventually(t, "the senders read", func() bool { return len(m.world().AlertSenders) > 0 })
+	if w := m.world(); w.AuthServ != "mx.loopback.test" || !slices.Equal(w.AlertSenders, []string{"security@loopback.test", "bank.test"}) {
+		t.Fatalf("the clerk's world before the change: %+v", w)
+	}
+	if err := owner.SetMail(MailSettings{Address: "owner@mailhub.test", IMAP: "imap.mailhub.test:993", SMTP: "smtp.mailhub.test:465"}, imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	if w := m.world(); w.Today != "2026-10-21" || w.AuthServ != "" || w.AlertSenders != nil || w.ProviderTable != nil {
+		t.Fatalf("the old clerk's world after the change: %+v", w)
+	}
+	if w := h.world(); w.AuthServ != "mx.mailhub.test" {
+		t.Fatalf("the host's world after the change: %+v", w)
+	}
 }
