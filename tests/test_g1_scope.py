@@ -20,7 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import g1_scope as g  # noqa: E402
 
-G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_text()
+G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_bytes().decode("utf-8")
 G2 = g.GATES[0]
 
 # G2's binaries (header of g1_scope_g2.txt): the G1 path's, plus the key holder and the
@@ -147,6 +147,45 @@ class CheckTest(unittest.TestCase):
                 run(["x"], list_text=bad)
         with self.assertRaises(g.ListError):
             run(["x"], created="yesterday")
+
+    def test_lists_are_printable_ascii_lines(self):  # G1-freeze-e (#3665)
+        # A line break git does not see turns a comment into a live line: a diff shows one
+        # comment line, while splitlines() also read the line after the hidden break.
+        for brk in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "):
+            for bad in (ON + "# note" + brk + "exempt-pr 99\n",
+                        ON + "# note" + brk + "allow broker/\n",
+                        "freeze on\n# note" + brk + S,
+                        S + "# note" + brk + "freeze off\n"):
+                with self.assertRaises(g.ListError, msg=repr(bad)):
+                    g.parse_list(bad)
+        # Lookalike digits: strptime read 1٥ (Arabic-Indic five, shown like 0) as 15.
+        for since in ("2026-10-1٥T19:55:00Z", "٢026-10-14T19:55:00Z", "2026-10-1５T19:55:00Z"):
+            with self.assertRaises(g.ListError, msg=since):
+                g.parse_list("freeze on\nsince " + since + "\n")
+        # Anything else outside printable ASCII and "\n" fails closed too, comments included.
+        for bad in (ON + "\tallow x/\n", ON + "# ‮on\n", ON + "# ​\n", ON + "# §\n", ON + "\x00\n"):
+            with self.assertRaises(g.ListError, msg=repr(bad)):
+                g.parse_list(bad)
+        self.assertTrue(g.parse_list(ON + "# OPERATING section 5 ~!@$%^&*()\n")[0])
+
+    def test_cli_reads_the_list_bytes_as_they_are(self):  # G1-freeze-e (#3665)
+        # The workflow runs the script on the checked-in list. Reading it as text turned a lone
+        # "\r" into "\n" before the check, so a comment hid a live exempt-pr line again.
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("g1_scope.py", "ci_scope.py"):
+                shutil.copy(ROOT / "tools" / name, d)
+            lst = pathlib.Path(d, G2[1])
+
+            def cli(tail):
+                lst.write_bytes(G2_LIST.encode() + tail)
+                return subprocess.run([sys.executable, "-I", str(pathlib.Path(d, "g1_scope.py")),
+                                       "--pr", "4242", "zzz_outside/x.go"], capture_output=True).returncode
+
+            self.assertEqual(cli(b""), 1)
+            self.assertEqual(cli(b"exempt-pr 4242\n"), 0)
+            for tail in (b"# reviewed note\rexempt-pr 4242\n", b"exempt-pr 4242\r\n",
+                         b"# note\xe2\x80\xa8exempt-pr 4242\n", b"# \xff\n"):
+                self.assertEqual(cli(tail), 2, tail)
 
     def test_cli_on_a_git_range(self):  # G1-freeze-a, -b, -e
         if not shutil.which("git"):
