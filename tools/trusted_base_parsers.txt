@@ -23,6 +23,7 @@ inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
 parser github.com/ghbmrk/agentos/broker/clerk/accounts -- senders from the owner's mail provider, for the account plan (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/clerk/camera -- frame headers and status from camera nodes (CAM-clerk, #3514)
 parser github.com/ghbmrk/agentos/broker/clerk/clerkkey -- a clerk's key hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail -- process entry; reads its key hand-off and the anchors file (uncertain; classed parser)
 inert  github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-model -- process entry; hands its key hand-off to clerkkey and its sealed slot's bytes to clerk/plan, which decode them; decodes only its flags
