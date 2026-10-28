@@ -4,7 +4,7 @@ name: board
 # Same split as trace.yml: rendering runs with a read-only token; only the commit job can
 # write, it runs no repository code, and it changes only BOARD.md. The commit job pushes the
 # bot/board branch, opens (or updates) its PR and dispatches ci.yml there, where board.py check
-# --repo compares the file with the live issues. The PR asks for auto-merge; that waits for
+# --base holds it to the generated format, not the live issues (#3745). The PR asks for auto-merge; that waits for
 # green checks only once main's ruleset requires them (stage 2), and without the repo's
 # 'Allow auto-merge' setting the PR is merged by hand.
 # BOARD-debounce (#3099): it renders every 6 hours, on dispatch and on a push touching BOARD.md,
