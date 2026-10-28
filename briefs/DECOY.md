@@ -43,11 +43,12 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 ### DECOY-c (#3764): the edge (KRN-12 Placement, Trips, Silence)
 
 **Scope:** `broker/edgelink/` (matcher on the core side of the link, heartbeat kind), the edge's image profile under `image/` (placements as data).
-**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind, and the edge wallet seed, which the kernel's effect names only by its sealed-store handle and the sealed-store clerk fills in at send, so the log holds the handle, never the seed (KRN-1, KRN-12 Outside canaries); a replaced edge gets a fresh wallet, never a re-sent seed; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
+**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind, and the edge wallet seed, which the kernel's effect names only by its sealed-store handle and the sealed-store clerk fills in at send, so the log holds the handle, never the seed (KRN-1, KRN-12 Outside canaries); the edge's check of each fetch's resolved address and every redirect against the decoy addresses in its image, refused and reported on the link; a replaced edge gets a fresh wallet, never a re-sent seed; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
 **Acceptance tests:**
 1. KRN-12: `edgelink::TestDecoyToEdgeTrips`: a decoy in any kind but the kernel's placement kind trips; enrolment and re-enrolment after a restore trip nothing. Catches a guest's query smuggling a decoy out, or a false trip at every enrolment.
 2. KRN-12: `edgelink::TestHeartbeatSilenceAlarms`: two missed beats raise one alarm, a late beat clears nothing without the log saying so. Catches a killed edge going unseen.
 3. KRN-12: the image test that the edge image adds no listener for any placement. Catches a fake service.
+4. KRN-12: `edgelink::TestResolvedDecoyStopsSessionOnly`: a public name that resolves to 169.254.169.254 or the decoy range, and a redirect to one, are refused at the edge and stop only that session; the enforcer sees no traffic. Catches DNS or a redirect turning a page into a box-wide stop.
 **Size:** about 80k, tier A (the link), strongest model. **Depends on:** DECOY-b (#3763).
 
 ### DECOY-d (#3765): the enforcer (KRN-12 Placement, Trips, Silence; NET-2)
@@ -78,6 +79,6 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Builds:** a scripted intruder search over the sim box in the order KRN-12 lists; per tripwire, time to detect and false trips recorded in the log; a scheduled run (default weekly); STATUS lists a tripwire whose last drill is missing or failed as broken.
 **Acceptance tests:**
 1. KRN-12: `sim::TestDrillTripsEveryPlacement`: every table placement and enforcer decoy address trips within one minute of simulated time at its exit; the wallets are watched by the owner's phone and are not drilled. Catches a dead tripwire.
-2. KRN-12: `sim::TestDrillNoFalseTrips`: an ordinary week of sim tasks, including a fetched public page that names 169.254.169.254 and the decoy range, trips nothing beyond refusing that step and stopping its one session, and planning goes on. Catches an alarm that cries wolf.
+2. KRN-12: `sim::TestDrillNoFalseTrips`: an ordinary week of sim tasks, including a fetched public page that names 169.254.169.254 and the decoy range directly, by a name that resolves there, and by a redirect, trips nothing beyond refusing that step and stopping its one session, and planning goes on. Catches an alarm that cries wolf.
 3. KRN-12: `kernel::TestStaleDrillShowsBroken`. Catches a tripwire trusted without proof.
 **Size:** about 80k, tier A (`broker/kernel/sim/`), strongest model. **Depends on:** DECOY-b to DECOY-e.
