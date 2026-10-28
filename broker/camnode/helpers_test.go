@@ -2,6 +2,7 @@ package camnode
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
@@ -60,7 +61,21 @@ func (e *fakeElement) ClearBundle() error {
 	return nil
 }
 
-func (e *fakeElement) Image() (uint64, error) { return e.image, nil }
+func (e *fakeElement) Image() (uint64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.image, nil
+}
+
+func (e *fakeElement) RaiseImage(c uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if c <= e.image {
+		return errors.New("fake element: image counter would not rise")
+	}
+	e.image = c
+	return nil
+}
 
 // fakeSource is generated video: one access unit per Read, a little apart.
 type fakeSource struct {
@@ -116,6 +131,17 @@ type rig struct {
 	logs     *logSink
 	errs     []error
 	window   time.Duration // Config.Window for the next boot
+
+	// The next boot's image: the release key it pins, its slots, the
+	// manifest it was installed with, whether it is a trial, and its hash.
+	release  ed25519.PrivateKey
+	slots    *fakeSlots
+	manifest []byte
+	trial    bool
+	image    [32]byte
+	// serve is closed to start Serve after New; nil serves at once.
+	serve  chan struct{}
+	served chan error // Serve's return
 }
 
 type logSink struct {
@@ -140,7 +166,9 @@ func newRig(t *testing.T, button bool) *rig {
 		core:     camwiretest.NewKey(t),
 		enforcer: camwiretest.NewKey(t),
 		logs:     &logSink{},
+		slots:    &fakeSlots{},
 	}
+	_, r.release, _ = ed25519.GenerateKey(rand.Reader)
 	r.boot(button)
 	return r
 }
@@ -148,7 +176,10 @@ func newRig(t *testing.T, button bool) *rig {
 // boot starts (or restarts) the node on the rig's element and store.
 func (r *rig) boot(button bool) error {
 	r.t.Helper()
-	n, err := New(Config{Element: r.el, Store: r.store, Source: r.src, Ranges: testRanges, Button: button, Window: r.window, Log: r.logs.add})
+	n, err := New(Config{
+		Element: r.el, Store: r.store, Source: r.src, Ranges: testRanges, Button: button, Window: r.window, Log: r.logs.add,
+		Release: r.release.Public().(ed25519.PublicKey), Slots: r.slots, Manifest: r.manifest, Trial: r.trial, Image: r.image,
+	})
 	if err != nil {
 		r.errs = append(r.errs, err)
 		return err
@@ -158,7 +189,23 @@ func (r *rig) boot(button bool) error {
 		r.t.Fatal(err)
 	}
 	r.t.Cleanup(func() { ln.Close() })
-	go n.Serve(ln)
+	served, gate := make(chan error, 1), r.serve
+	r.served = served
+	go func() {
+		if gate != nil {
+			<-gate
+		}
+		served <- n.Serve(ln)
+	}()
+	if gate == nil {
+		select {
+		case <-n.up:
+		case err := <-served:
+			served <- err // Serve refused to start; the test reads why
+		case <-time.After(5 * time.Second):
+			r.t.Fatal("Serve did not start")
+		}
+	}
 	r.node, r.addr = n, ln.Addr().String()
 	return nil
 }
@@ -231,7 +278,7 @@ func (r *rig) provision(c uint64) {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	if st, err := send(conn, r.owner.SignBundle(r.t, r.bundle(c))); err != nil || st.Settings != c {
+	if st, err := sendMore(conn, r.owner.SignBundle(r.t, r.bundle(c))); err != nil || st.Settings != c {
 		r.t.Fatalf("first bundle: %v, counter %d", err, st.Settings)
 	}
 	conn.Close()
