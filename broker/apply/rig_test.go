@@ -333,7 +333,15 @@ func newRig(t *testing.T) *rig {
 }
 
 // anchors are the kernel's in the rig: the owner's two hardware keys and
-// the pinned update key, which the rig's log grants like an owner's root.
+// the pinned update key.
+//
+// STAND-IN, NEVER WIRING: the pinned key is listed as an anchor only
+// because the kernel has no other way yet to admit a root no owner signed;
+// without it the kernel rejects every activate plan. An anchor signs
+// enrollments and cosigns for every clerk, and the pinned key's holder
+// ships in the image, so agentosd must never copy this list: #3677 gives
+// the kernel a grant of the image-pinned root that is not an anchor, and
+// this fixture moves to it then (ASSUMPTIONS MIG-4-adapters-e-1, A7).
 func (r *rig) anchors() []key.PublicKey {
 	opub, _ := seedKey(1)
 	bpub, _ := seedKey(12)

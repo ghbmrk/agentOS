@@ -130,8 +130,8 @@ type Config struct {
 	Key    key.Key
 	Holder ed25519.PrivateKey
 	Pinned key.PublicKey
-	// Paused reports the pinned channel (UPD-4): no automatic activation
-	// while it holds. Nil: never.
+	// Paused reports the pinned channel (UPD-4): no plan is submitted, no
+	// restart happens and STATUS says why while it holds. Nil: never.
 	Paused    func() bool
 	Activator Activator
 	// Store is the box's update store: the applier stages the release in
@@ -500,6 +500,8 @@ func (a *Applier) talkUntil(p *pending) time.Time {
 // talkUntil, when that is set.
 func (a *Applier) busy(now, talkUntil time.Time) string {
 	switch {
+	case a.cfg.Paused():
+		return busyPinned
 	case a.cfg.Stopped():
 		return busyStop
 	case a.cfg.InCall():
@@ -516,6 +518,7 @@ func (a *Applier) busy(now, talkUntil time.Time) string {
 
 // Why the box is not free (UPD-6; UX-133-4).
 const (
+	busyPinned   = "the update channel is pinned"
 	busyStop     = "STOP is in force"
 	busyCall     = "a call is in progress"
 	busyWork     = "accepted work is in progress"
@@ -525,6 +528,7 @@ const (
 
 // waitLines say why an update waits (UX-133-3).
 var waitLines = map[string]string{
+	busyPinned:   "Update %d waits because your update channel is pinned.",
 	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
 	busyCall:     "Update %d will install after the current call.",
 	busyWork:     "Update %d will install once my current task is done.",
@@ -951,6 +955,9 @@ func (a *Applier) authorize(r kernel.Request, v kernel.View) string {
 	}
 	if p == nil || rel == nil || !rel.OK() || p.Version != ver {
 		return RRelease
+	}
+	if a.cfg.Now().Before(p.NotBefore) {
+		return RBusy + ": not due" // its jitter has not passed (UPD-5)
 	}
 	if ref := rel.Ref(); st.Args[ArgRoot].Value != ref.UsrRootHash || st.Args[ArgEntry].Value != ref.ManifestSHA256 {
 		return RRelease

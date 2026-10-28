@@ -198,26 +198,29 @@ func TestUnrecordedHandoverProbesNotDoneOnceAbandoned(t *testing.T) {
 
 // UPD-6: a step dispatched while the box is not free is refused by the
 // clerk's own re-check (CLK-2), whatever the scheduler saw when it
-// submitted; so is one while the channel is pinned (UPD-4). Once the box
-// is free a new plan installs it.
+// submitted; so is one while the channel is pinned (UPD-4). While it
+// holds the scheduler submits no plan and STATUS says why, however long
+// it lasts (a pinned channel can hold for good: L3 blocker on #3678).
+// Once the box is free a new plan installs it.
 func TestBusyBoxHoldsActivation(t *testing.T) {
 	ctx := context.Background()
 	for _, c := range []struct {
 		why  string
 		set  func(r *rig, on bool)
 		want string
+		line string // STATUS while it holds
 	}{
-		{"call", func(r *rig, on bool) { r.inCall = on }, RBusy + ": " + busyCall},
-		{"work", func(r *rig, on bool) { r.working = on }, RBusy + ": " + busyWork},
-		{"excluded", func(r *rig, on bool) { r.excluded = func(time.Time) bool { return on } }, RBusy + ": " + busyExcluded},
+		{"call", func(r *rig, on bool) { r.inCall = on }, RBusy + ": " + busyCall, "Update 1 will install after the current call."},
+		{"work", func(r *rig, on bool) { r.working = on }, RBusy + ": " + busyWork, "Update 1 will install once my current task is done."},
+		{"excluded", func(r *rig, on bool) { r.excluded = func(time.Time) bool { return on } }, RBusy + ": " + busyExcluded, "Update 1 will install after your update-free hours."},
 		{"talk", func(r *rig, on bool) {
 			r.talk = time.Time{}
 			if on {
 				r.talk = r.clk.now()
 			}
-		}, RBusy + ": " + busyTalk},
-		{"STOP", func(r *rig, on bool) { r.stopped = on }, RBusy + ": " + busyStop},
-		{"pinned channel", func(r *rig, on bool) { r.paused = on }, RPaused},
+		}, RBusy + ": " + busyTalk, "Update 1 will install once your conversation pauses."},
+		{"STOP", func(r *rig, on bool) { r.stopped = on }, RBusy + ": " + busyStop, "Update 1 is on hold while actions are stopped; it installs after RESUME."},
+		{"pinned channel", func(r *rig, on bool) { r.paused = on }, RPaused, "Update 1 waits because your update channel is pinned."},
 	} {
 		t.Run(c.why, func(t *testing.T) {
 			r := submitted(t)
@@ -229,10 +232,26 @@ func TestBusyBoxHoldsActivation(t *testing.T) {
 			if len(r.act.installed) != 0 {
 				t.Fatal("activated while held")
 			}
-			// While it holds, the scheduler submits nothing either (the
-			// pinned channel is the clerk's alone to judge).
-			if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 0 {
-				t.Fatalf("tick while held: %v %v", ok, err)
+			if got := r.a.Status(); got != c.line {
+				t.Fatalf("status %q, want %q", got, c.line)
+			}
+			// While it holds, the scheduler submits nothing either: a day
+			// of Ticks a Quiet apart adds no plan (talk holds only for
+			// Quiet, so it gets one Tick).
+			ticks := int(24 * time.Hour / r.a.cfg.Quiet)
+			if c.why == "talk" {
+				ticks = 1
+			}
+			for i := 0; i < ticks; i++ {
+				if ok, err := r.a.Tick(ctx); ok || err != nil || len(r.act.installed) != 0 {
+					t.Fatalf("tick %d while held: %v %v", i, ok, err)
+				}
+				if c.why != "talk" {
+					r.clk.add(r.a.cfg.Quiet)
+				}
+			}
+			if n := len(r.plans()); n != 1 {
+				t.Fatalf("%d plans while held, want the one refused", n)
 			}
 			c.set(r, false)
 			r.clk.add(r.a.cfg.Quiet) // past the talk window
