@@ -28,7 +28,7 @@ MODULE = "github.com/ghbmrk/agentos/broker"
 WEIGHTS = {
     "journal": 223, "guest": 128, "cmd/agentosd": 124, "localui": 117,
     "holder": 99, "cmd/agentos-egress": 83, "recovery": 72, "update": 62, "recall": 57,
-    "kernel/sim": 35, "childproc": 35, "daemon": 34, "vm/gvisor": 33, "mail": 30,
+    "kernel/sim": 35, "childproc": 35, "daemon": 34, "vm/gvisor": 33,
     "change": 26, "loops": 25, "maintain": 18, "guesterr": 18, "core": 17,
     "e2e": 16, "claim": 16, "vm/overlay": 14, "cmd/agentos-guest-bridge": 14, "firstboot": 14,
     "apply": 13, "journal/check": 13, "modem/bridge": 11, "vault": 11, "probecmd": 10,
