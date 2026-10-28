@@ -1,6 +1,7 @@
-"""Tests for tools/root_tests.py: every root-gated Go test runs in a root CI step (CI-root-go, #3539).
+"""Tests for tools/root_tests.py: every root-gated Go test runs in a root CI step (CI-root-go, #3539),
+one whose skip or failure fails CI (CI-root-go-2, #3541).
 
-No SPEC requirement IDs: CI tooling (issue #3539). All data is synthetic.
+No SPEC requirement IDs: CI tooling (issues #3539, #3541). All data is synthetic.
 """
 import pathlib
 import sys
@@ -71,6 +72,31 @@ func TestSkipsAsRoot(t *testing.T) {
 \t}
 }
 
+func TestGetuidSkips(t *testing.T) {
+\tif os.Getuid() != 0 {
+\t\tt.Skip("mounting needs root")
+\t}
+}
+
+func TestBranchesThenSkipsAsRoot(t *testing.T) {
+\tif os.Geteuid() != 0 && err != nil {
+\t\tt.Fatal(err)
+\t}
+\tplainOnly(t)
+}
+
+func plainOnly(t *testing.T) {
+\tif os.Geteuid() == 0 {
+\t\tt.Skip("the kernel never runs as root")
+\t}
+}
+
+func TestComparesUIDsOnly(t *testing.T) {
+\tif k, err := read(os.Geteuid()); err != nil || uid != os.Geteuid() {
+\t\tt.Fatal(k)
+\t}
+}
+
 func TestPlain(t *testing.T) {
 \tcheck(t)
 }
@@ -86,12 +112,18 @@ def tree(files):
     return d
 
 
-STEPS = """      - name: Machine tests as root
+K = f"{M}/owner/kernelsock"
+STEPS = f"""      - name: Machine tests as root
         run: |
+          rc=0
           sudo setpriv --no-new-privs env "PATH=$PATH" \\
-            go test -count=1 -v ./cgroup ./vm/... ./recovery
+            go test -count=1 -json ./cgroup ./vm/... ./recovery > /tmp/m.json || rc=$?
+          python3 -I ../tools/require_ran.py --named-skips-only --gated ./vm/... ./recovery < /tmp/m.json || exit 1
+          [ "$rc" -eq 0 ]
           sudo env "PATH=$PATH" go test -count=1 -json -run '^(TestA|TestB)$' \\
             ./owner/kernelsock > /tmp/k.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/k.json \\
+            {K}.TestA {K}.TestB || exit 1
       - name: Not root
         run: go test -count=1 ./clerk/run
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
@@ -104,11 +136,25 @@ STEPS = """      - name: Machine tests as root
 """
 
 
+def runs_of(*lines, keys=""):
+    body = "".join(f"          {line}\n" for line in lines)
+    return root_tests.root_runs("      - name: x\n" + keys + "        run: |\n" + body)
+
+
+GO = "sudo env go test -count=1 -json ./owner/kernelsock > /tmp/x.json || rc=$?"
+NAMED = f"python3 -I ../tools/require_ran.py < /tmp/x.json {K}.TestA || exit 1"
+BARE = NAMED.replace(" || exit 1", "")
+COVERS = [(["./owner/kernelsock"], None, frozenset({f"{K}.TestA"}), ())]
+
+
 class GatedTest(unittest.TestCase):
     def test_finds_skips_and_returns_through_helpers(self):
         with tree({"p/p_test.go": HELPERS, "p/p.go": "package p\n"}) as d:
             found = root_tests.gated(d)
-        self.assertEqual(found, {f"{M}/p": ["TestDirect", "TestInASubtest", "TestReturnsEarly", "TestThroughTwoHelpers"]})
+        # #3541 (L3 on #3540): a test that branches on the uid has root-only checks and counts too;
+        # one that also skips as root, or only passes the uid along, does not.
+        self.assertEqual(found, {f"{M}/p": ["TestBranchesOnly", "TestDirect", "TestGetuidSkips", "TestInASubtest",
+                                            "TestReturnsEarly", "TestThroughTwoHelpers"]})
 
     def test_vendor_testdata_and_root_package(self):
         gate = "package x\n\nfunc TestR(t *testing.T) {\n\tif os.Geteuid() != 0 {\n\t\tt.SkipNow()\n\t}\n}\n"
@@ -124,38 +170,93 @@ class GatedTest(unittest.TestCase):
 class RunsTest(unittest.TestCase):
     def test_reads_root_go_test_lines(self):
         self.assertEqual(root_tests.root_runs(STEPS), [
-            (["./cgroup", "./vm/...", "./recovery"], None),
-            (["./owner/kernelsock"], "^(TestA|TestB)$"),
+            (["./cgroup", "./vm/...", "./recovery"], None, frozenset(), ("./vm/...", "./recovery")),
+            (["./owner/kernelsock"], "^(TestA|TestB)$", frozenset({f"{K}.TestA", f"{K}.TestB"}), ()),
         ])
+
+    def test_a_named_root_run_covers(self):
+        self.assertEqual(runs_of(GO, NAMED), COVERS)
+        self.assertEqual(runs_of(GO, NAMED, '[ "$rc" -eq 0 ]'), COVERS)
+        # `|| exit 1` ends the step whatever errexit's state, so turning it off loses nothing.
+        self.assertEqual(runs_of("set +o errexit", GO, NAMED, "true"), COVERS)
+
+    def test_a_run_whose_skip_cannot_fail_ci_covers_nothing(self):
+        # #3541: each of these lets a root-gated test skip or fail while the step stays green.
+        cases = {
+            "-v, no require_ran": [GO.replace(" > /tmp/x.json || rc=$?", "")],
+            "no require_ran": [GO],
+            "|| true on require_ran": [GO, BARE + " || true"],
+            "|| fail=1, never checked": [GO, BARE + " || fail=1"],
+            "&& after require_ran": [GO, BARE + " && echo ok"],
+            "require_ran in a pipe": [GO, BARE + " | tee log"],
+            # #3546 L3: without `|| exit 1`, errexit decides, and it can be turned off many ways.
+            "no || exit 1": [GO, BARE],
+            "no || exit 1, set +e": ["set +e", GO, BARE, "true"],
+            "no || exit 1, set +eu": ["set +eu", GO, BARE, "true"],
+            "no || exit 1, set -u +e": ["set -u +e", GO, BARE, "true"],
+            "no || exit 1, set +o errexit": ["set +o errexit", GO, BARE, "true"],
+            "no || exit 1, shopt": ["shopt -u -o errexit", GO, BARE, "true"],
+            "|| exit 0": [GO, BARE + " || exit 0"],
+            "|| exit 1 in a subshell": [GO, "( " + NAMED + " )"],
+            "a trap": ["trap 'exit 0' EXIT", GO, NAMED],
+            "a trap later": [GO, NAMED, "trap 'exit 0' EXIT"],
+            "exit 00": [GO, NAMED, "exit 00"],
+            "return 0 in a function": ["f() {", GO, NAMED, "return 0", "}", "f"],
+            "a function keyword": ["function f {", GO, NAMED, "}", "f"],
+            "a function called with || true": ["f() {", GO, NAMED, "}", "f || true"],
+            "require_ran reads another file": [GO, NAMED.replace("/tmp/x.json", "/tmp/y.json")],
+            "the file is rewritten first": [GO, "sudo env go test ./clerk > /tmp/x.json", NAMED],
+            "require_ran not run as a command": [GO, "true " + NAMED],
+            "another script reads the file": [GO, NAMED.replace("require_ran.py", "summary.py")],
+            "a name after || exit 1": [GO, NAMED + " x"],
+            "require_ran reads another file, named as an argument":
+                [GO, NAMED.replace("< /tmp/x.json", "< /tmp/y.json /tmp/x.json")],
+            "under an if": ["if [ -n \"$X\" ]; then", GO, NAMED, "fi"],
+            "exit 0 earlier": ["[ -n \"$X\" ] || exit 0", GO, NAMED],
+            "&& after || exit 1": [GO, NAMED + " && false"],
+            "in the background": [GO + " &", NAMED],
+            "commented out": ["# " + GO, NAMED],
+            "the test is not named": [GO, NAMED.replace(".TestA", ".TestOther")],
+        }
+        for why, lines in cases.items():
+            runs = runs_of(*lines)
+            self.assertFalse(root_tests.covered(K, "TestA", runs), why)
+
+    def test_a_step_that_can_skip_or_pass_on_failure_covers_nothing(self):
+        for keys in ("        if: github.event_name == 'push'\n", "        continue-on-error: true\n",
+                     "        shell: bash {0}\n"):
+            self.assertEqual(runs_of(GO, NAMED, keys=keys), [], keys)
+        self.assertEqual(runs_of(GO, NAMED, keys="        working-directory: broker\n"), COVERS)
 
     def test_comments_cover_nothing(self):
         # #3540 Security review: a commented-out root step must not count as running its package.
-        for line in ("          # sudo env go test ./owner/kernelsock",
-                     "        # sudo go test ./owner/kernelsock",
-                     "          true # sudo go test ./owner/kernelsock"):
-            self.assertEqual(root_tests.root_runs("      - name: x\n        run: |\n" + line + "\n"), [], line)
-        self.assertEqual(root_tests.root_runs("      - name: x\n        run: |\n          sudo go test ./a # b\n"),
-                         [(["./a"], None)])
+        for line in ("# " + GO, "true # " + GO):
+            self.assertEqual(runs_of(line, NAMED), [], line)
+        self.assertEqual(runs_of(GO + " # b", NAMED + " # c"), COVERS)
+        yaml_comment = "      - name: x\n        # " + GO + "\n        run: |\n          " + NAMED + "\n"
+        self.assertEqual(root_tests.root_runs(yaml_comment), [])
 
     def test_covered(self):
         runs = root_tests.root_runs(STEPS)
         self.assertTrue(root_tests.covered(f"{M}/vm/gvisor", "TestAny", runs))
         self.assertTrue(root_tests.covered(f"{M}/vm", "TestAny", runs))
+        self.assertTrue(root_tests.covered(f"{M}/recovery", "TestAny", runs))
+        self.assertFalse(root_tests.covered(f"{M}/cgroup", "TestAny", runs), "run, but require_ran does not name it")
         self.assertFalse(root_tests.covered(f"{M}/vmx", "TestAny", runs))
-        self.assertTrue(root_tests.covered(f"{M}/owner/kernelsock", "TestB", runs))
-        self.assertFalse(root_tests.covered(f"{M}/owner/kernelsock", "TestBackups", runs))
+        self.assertTrue(root_tests.covered(K, "TestB", runs))
+        self.assertFalse(root_tests.covered(K, "TestBackups", runs))
         self.assertFalse(root_tests.covered(f"{M}/clerk/run", "TestAny", runs))
         self.assertFalse(root_tests.covered(f"{M}/recovery/sub", "TestAny", runs))
 
     def test_generated_step(self):
         self.assertTrue(root_tests.generated_step(STEPS))
-        self.assertFalse(root_tests.generated_step(STEPS.replace("require_ran.py", "cat")))
+        self.assertFalse(root_tests.generated_step(STEPS.replace("require_ran.py $names", "cat")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("sudo env go", "env go")))
         self.assertFalse(root_tests.generated_step(STEPS.replace("Root-gated Go tests", "Other")))
 
 
 class CheckTest(unittest.TestCase):
-    FOUND = {f"{M}/owner/kernelsock": ["TestA", "TestEdgeEnroll"], f"{M}/vm/gvisor": ["TestG"]}
+    FOUND = {K: ["TestA", "TestEdgeEnroll"], f"{M}/vm/gvisor": ["TestG"]}
 
     def test_a_gated_test_no_step_names_fails_without_the_generated_step(self):
         runs = root_tests.root_runs(STEPS)
@@ -199,6 +300,25 @@ class RepoTest(unittest.TestCase):
         found, runs = root_tests.gated(), root_tests.root_runs(cut)
         probs = root_tests.problems(found, runs, root_tests.generated_step(cut))
         self.assertIn(f"{M}/owner/kernelsock.TestCertifyReachesTheKernel: root-gated, and no root step in ci.yml runs it", probs)
+
+    def test_every_root_step_names_what_it_covers(self):
+        # #3541: each root run ci.yml counts is read back through require_ran.py, so a skip there fails.
+        runs = root_tests.root_runs(CI)
+        pkgs = {p for ps, _, _, _ in runs for p in ps}
+        self.assertTrue({"./vm/...", "./recovery", "./floor", "./infer/...", "./e2e"} <= pkgs, pkgs)
+        found = root_tests.gated()
+        for p, ts in found.items():
+            for t in ts:
+                if root_tests.covered(p, t, runs):
+                    continue
+                self.assertIn((p, t), {(q, u) for q, _, us in root_tests.plan(found, runs) for u in us}, t)
+
+    def test_unlock_capability_check_runs_as_root(self):
+        # L3 on #3540: TestNoCapsSeesCapabilities branches on Geteuid() and checks root's capabilities.
+        found = root_tests.gated()
+        self.assertIn("TestNoCapsSeesCapabilities", found[f"{M}/cmd/agentos-unlock"])
+        self.assertIn("TestTheDropRefusesRootAndChecksItTook", found[f"{M}/cmd/agentos-unlock"])
+        self.assertIn("TestUnreadableOwnedMarkerCountsAsOwned", found[f"{M}/cmd/agentos-ap"])
 
     def test_root_skipping_tests_are_left_to_the_non_root_jobs(self):
         # The reverse gap: a test that skips as root must not be pulled into the root step.

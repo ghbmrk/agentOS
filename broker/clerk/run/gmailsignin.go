@@ -237,13 +237,16 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 	if perr == nil && !same {
 		release = h.holdGmail(prev) // before the new slot is put, so the store holds prev's only (CLK-1)
 	}
+	end := h.ws.writing() // until the change is told (#3538)
 	put := h.sec.Put(slot, clerk.KindGrant, g.grant)
 	err = put
 	if err == nil {
 		err = SetGmail(h.dir, h.sec, addr)
 	}
+	h.wrote()
 	release()
 	if put != nil || !h.setUp(slot) {
+		end()
 		// The account before, and its grant, stand. The same address keeps
 		// the new grant: Google's revocation of it would end the account's
 		// own grant with it, as on a sign-in again.
@@ -254,6 +257,7 @@ func (h *MailHost) gmailFinish(use, pasted string) (string, error) {
 		return "", err
 	}
 	h.changed()
+	end()
 	if perr == nil && !same {
 		h.notify(false, noteMailReplaced)
 	}

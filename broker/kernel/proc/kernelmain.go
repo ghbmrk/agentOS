@@ -15,6 +15,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,7 +39,10 @@ type MainConfig struct {
 	Clerks   map[string]Remote
 	// Content are the content clerks, by the store each seals into: each
 	// one's ContentSide socket and uid, its only peer.
-	Content    map[string]Remote
+	Content map[string]Remote
+	// ClerkKeys are the clerks the kernel hands their keys to, at each
+	// start of their units, by name (MAIL-keys): none without the flag.
+	ClerkKeys  map[string]KeyClerk
 	KeyDir     string // the subject-key table's directory (KernelConfig.KeyDir)
 	ContentDir string // the content stores' directory (KernelConfig.ContentDir)
 	BackupDir  string // the backups' records (KernelConfig.BackupDir)
@@ -179,7 +183,8 @@ var ErrNoContentDir = errors.New("run: a kernel needs its content stores' direct
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
 // opens the log, the subject-key table and the content stores under keys,
 // serves OwnerSide, MeterSide, LinkSide given its socket and each content
-// clerk's ContentSide, and runs plans every Tick until ctx ends. anchor is where
+// clerk's ContentSide, hands each of ClerkKeys its key at each start of its
+// unit, and runs plans every Tick until ctx ends. anchor is where
 // signed heads go (LOG-2).
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if cfg.KeyDir == "" {
@@ -190,6 +195,9 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	if cfg.ContentDir == "" {
 		return ErrNoContentDir
+	}
+	if len(cfg.ClerkKeys) > 0 && keys.ClerkRoot == ([32]byte{}) {
+		return errors.New("run: I hand clerks their keys, but the unlock step handed me no clerk root key")
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
@@ -256,7 +264,30 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		r := cfg.Content[store]
 		sides = append(sides, served{r.Socket, r.UID, ContentSide(store)})
 	}
-	errs := make(chan error, len(sides))
+	errs := make(chan error, len(sides)+len(cfg.ClerkKeys))
+	if len(cfg.ClerkKeys) > 0 {
+		root := keys.ClerkRoot // the kernel's copy, for its whole life
+		// Cleared only once every key socket's server, and so every
+		// hand-off, has returned; the listeners close first (defers run
+		// last-in, first-out).
+		var serving sync.WaitGroup
+		defer func() {
+			serving.Wait()
+			clear(root[:])
+		}()
+		for name, kc := range cfg.ClerkKeys {
+			ln, err := ListenClerkKey(kc.Socket)
+			if err != nil {
+				return err
+			}
+			defer ln.Close()
+			serving.Add(1)
+			go func() {
+				defer serving.Done()
+				errs <- fmt.Errorf("run: clerk %s's key socket: %w", name, ServeClerkKey(ln, name, kc.Cgroup, &root))
+			}()
+		}
+	}
 	for _, s := range sides {
 		ln, err := ListenKernel(s.path, s.uid)
 		if err != nil {

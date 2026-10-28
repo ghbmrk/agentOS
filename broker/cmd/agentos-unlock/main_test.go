@@ -213,6 +213,8 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	r.keys.Head, err = st.HeadKey()
 	must(t, err)
+	r.keys.ClerkRoot, err = st.ClerkRoot()
+	must(t, err)
 	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
@@ -760,7 +762,7 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
 	b, err := unlock(c, storePins(r.store))
 	must(t, err)
-	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}, Slot: handoff.SlotTPM}.Marshal()
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, ClerkRoot: r.keys.ClerkRoot, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}, Slot: handoff.SlotTPM}.Marshal()
 	must(t, err)
 	if !bytes.Equal(b, want) {
 		t.Fatal("the hand-off is not the store's keys")
@@ -1039,5 +1041,116 @@ func TestUnlockHandsTheSlot(t *testing.T) {
 		if _, err := handed(nil); err == nil || !strings.Contains(err.Error(), e.says) {
 			t.Errorf("%s entry: got %v", name, err)
 		}
+	}
+}
+
+// MAIL-keys, D-146, #2995: the unlock step hands the kernel the store's
+// clerk root key, and writes the owner's hardware keys for the clerks from
+// the store alone: its kernel/anchors entry, or, on a box set up through the
+// log, the clerks/anchors entry it copies from the log's first entry at the
+// first boot that finds it and reads from then on, even with the log gone.
+// A box with neither writes none, and removes an earlier boot's. The
+// kernel still starts on a store holding the copy.
+// Revert mutants: the st.Put of clerks/anchors dropped (the log-less unlock
+// then writes none); clerkAnchors reading the log before the store entry
+// (the log-less unlock then writes none).
+func TestUnlockWritesTheClerksAnchors(t *testing.T) {
+	handed := func(r *rig, path string) handoff.KernelKeys {
+		t.Helper()
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		c := role.Config()
+		c.clerkAnchors, c.log = path, r.mainConfig().Log
+		b, err := unlock(c, role.pins)
+		must(t, err)
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		clear(b)
+		k, err := handoff.ReadKeys(pr)
+		must(t, err)
+		return k
+	}
+	written := func(path string) []key.PublicKey {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		must(t, err)
+		fi, err := os.Stat(path)
+		must(t, err)
+		if fi.Mode().Perm() != 0o644 || fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+			t.Fatalf("the anchors file is %v, owned by %d", fi.Mode(), fi.Sys().(*syscall.Stat_t).Uid)
+		}
+		a, err := handoff.ParseAnchors(b)
+		must(t, err)
+		return a
+	}
+	root := func(r *rig) [32]byte {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		defer st.Close()
+		k, err := st.ClerkRoot()
+		must(t, err)
+		return k
+	}
+
+	// A store with the kernel's anchors: the clerks get those.
+	r := newRig(t, true)
+	path := filepath.Join(r.dir, "clerks", "anchors")
+	k := handed(r, path)
+	if k.ClerkRoot == ([32]byte{}) || k.ClerkRoot != root(r) {
+		t.Fatal("the hand-off's clerk root key is not the store's")
+	}
+	if a := written(path); len(a) != 2 || a[0] != key.Ed25519(gen(1)) || a[1] != key.Ed25519(gen(2)) {
+		t.Fatalf("the clerks' anchors: %v, want the store's", a)
+	}
+
+	// A box set up through the log.
+	r = newRig(t, false)
+	path = filepath.Join(r.dir, "clerks", "anchors")
+	must(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(t, os.WriteFile(path, []byte("an earlier boot's"), 0o644))
+	handed(r, path)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a box with no anchors anywhere left a file: %v", err)
+	}
+	cmd, out := r.boot()
+	r.up(cmd, out)
+	box := r.keys.Head.Public().(ed25519.PublicKey)
+	hw1 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{11}, 32))
+	hw2 := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{12}, 32))
+	must(t, r.owner().Setup(kernel.SignSetup(box, key.Ed25519Signer(hw1), key.Ed25519Signer(hw2))))
+	r.shutdown(cmd, out)
+	want := []key.PublicKey{key.Ed25519(hw1.Public().(ed25519.PublicKey)), key.Ed25519(hw2.Public().(ed25519.PublicKey))}
+	if a := written(path); a != nil {
+		t.Fatalf("anchors before the boot that reads the log: %v", a)
+	}
+	handed(r, path)
+	if a := written(path); len(a) != 2 || a[0] != want[0] || a[1] != want[1] {
+		t.Fatalf("the clerks' anchors after setup: %v, want the log's", a)
+	}
+	// The kernel the unlock step becomes still starts: it is not handed
+	// the clerks' copy, so its log's setup is not anchors twice.
+	cmd, out = r.boot()
+	r.up(cmd, out)
+	r.shutdown(cmd, out)
+	// From now on the store's copy is read, whatever the log holds.
+	must(t, os.Rename(r.mainConfig().Log, r.mainConfig().Log+".gone"))
+	handed(r, path)
+	if a := written(path); len(a) != 2 || a[0] != want[0] {
+		t.Fatalf("the clerks' anchors with the log gone: %v, want the store's copy", a)
+	}
+	// A directory others can write gets no file, and the kernel's
+	// hand-off is unchanged.
+	must(t, os.Chmod(filepath.Dir(path), 0o777))
+	if k := handed(r, path); k.ClerkRoot != root(r) {
+		t.Fatal("a refused anchors file changed the hand-off")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an anchors file in a directory others can write: %v", err)
 	}
 }

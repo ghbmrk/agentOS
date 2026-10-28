@@ -47,10 +47,19 @@ allow evals/slice-inbox/
 # #3460 (EDGE-link-core c2a, #3297): its new broker/cmd/agentos-link/ is added here by #3460
 # itself, which main cannot carry until the directory exists (D-198). Remove once it merges.
 exempt-pr 3460
-# #3500 (A8SCAN-typed-key, #3437): broker/cmd/agentos-a8scan/, which the G2 list does not
-# name, takes the card's typed recovery key (A8); the follow-up of #3435, which this line
-# replaced once #3435 merged (D-198). Remove once #3500 merges.
-exempt-pr 3500
+# #3554 (MAIL-keys, #3419): broker/cmd/agentos-a8scan/, which the G2 list does not name,
+# scans for the clerk root key and each clerk's keys in place of seal.Store.Sealer's, which
+# #3554 retires (#3419 comment 6453938265); it replaced #3500's line, merged (D-198).
+# Remove once #3554 merges.
+exempt-pr 3554
+
+# #3557 (CAM-wire, #3513 part a): the new broker/camwire/, the camera node's wire, which
+# the G2 list does not name (D-198). Remove once #3557 merges.
+exempt-pr 3557
+
+# #3562 (DRONE-sim a, #3516): broker/drone/ and broker/cmd/agentos-drone/, which the G2
+# list does not name (D-198). Remove once #3562 merges.
+exempt-pr 3562
 
 # Project machinery and records.
 allow .claude/

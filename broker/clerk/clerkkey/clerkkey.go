@@ -30,7 +30,7 @@ const Len = 32
 // this one, and the unlock step's hand-off never reads as a clerk's.
 const clerkKeyTag = "agentos-clerk-key/v1\n"
 
-// maxClerkName bounds a clerk's name, as seal.Store.Sealer does.
+// maxClerkName bounds a clerk's name.
 const maxClerkName = 64
 
 var clerkName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
@@ -104,6 +104,32 @@ func cutTag(b []byte, tag string) ([]byte, bool) {
 		return nil, false
 	}
 	return b[len(tag):], true
+}
+
+// ValidName reports whether name can be a clerk's: lower-case letters,
+// digits and hyphens, at most 64 bytes.
+func ValidName(name string) bool { return clerkName.MatchString(name) }
+
+// rootLabel derives one clerk's key from the clerk root key the unlock step
+// hands the kernel (handoff.KernelKeys.ClerkRoot, MAIL-keys).
+const rootLabel = "agentos.clerk.key.v1"
+
+// Derive is name's key under the clerk root key: what the kernel hands that
+// clerk at each start of its unit. The same root and name give the same key
+// at every start and after every update, so a clerk's sealed slots open
+// again; two names never share one (CLK-1). The caller wipes it.
+func Derive(root *[Len]byte, name string) (Key, error) {
+	if !clerkName.MatchString(name) || *root == ([Len]byte{}) {
+		return Key{}, ErrKey
+	}
+	b, err := hkdf.Key(sha256.New, root[:], nil, rootLabel+"\x00"+name, Len)
+	if err != nil {
+		return Key{}, err
+	}
+	defer clear(b)
+	k := Key{Name: name}
+	copy(k.Key[:], b)
+	return k, nil
 }
 
 // Sealer is the key the clerk seals its Secrets file and its records under
