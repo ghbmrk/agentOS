@@ -202,8 +202,9 @@ func (e *events) of(k Kind) []Event {
 }
 
 type frames struct {
-	mu sync.Mutex
-	f  []camwire.Frame
+	mu   sync.Mutex
+	f    []camwire.Frame
+	cuts []string
 }
 
 func (s *frames) Frame(_ string, f camwire.Frame) error {
@@ -211,6 +212,12 @@ func (s *frames) Frame(_ string, f camwire.Frame) error {
 	defer s.mu.Unlock()
 	s.f = append(s.f, camwire.Frame{Type: f.Type, Payload: bytes.Clone(f.Payload)})
 	return nil
+}
+
+func (s *frames) Cut(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cuts = append(s.cuts, id)
 }
 
 func (s *frames) len() int {

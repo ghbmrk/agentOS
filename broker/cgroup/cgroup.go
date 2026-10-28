@@ -38,10 +38,21 @@ type Limits struct {
 	// under contention (cpu.weight, io.weight: 1..10000, kernel default
 	// 100). Child requires both; Component leaves zero at the default.
 	CPUWeight, IOWeight int
+	// CPUMilli is the group's CPU ceiling in thousandths of a CPU
+	// (cpu.max over a 100ms period), which holds even when the host is
+	// idle; 1000 is one core. Zero leaves it at "max", none; a set ceiling
+	// is at least 10, the kernel's 1ms floor.
+	CPUMilli int64
 	// Pids caps the group's tasks (pids.max), threads included. Child
 	// requires it; Component writes it only when set.
 	Pids int64
 }
+
+// cpu.max's period in microseconds, and the quota per thousandth of a CPU.
+const (
+	cpuPeriod = 100000
+	cpuUnit   = cpuPeriod / 1000
+)
 
 // Controllers are the controllers Open requires and enables for children.
 var Controllers = []string{"cpu", "io", "memory", "pids"}
@@ -124,8 +135,9 @@ func (g *Group) Child(name string, l Limits) (*Group, error) {
 	return c, nil
 }
 
-// shares are l's weight and process-cap files, for the weights and cap
-// that are set. A weight outside the kernel's 1..10000 is an error.
+// shares are l's weight, CPU-ceiling and process-cap files, for those
+// that are set. A weight outside the kernel's 1..10000, or a ceiling
+// under its floor, is an error.
 func (l Limits) shares() ([][2]string, error) {
 	var kvs [][2]string
 	for _, w := range []struct {
@@ -139,6 +151,12 @@ func (l Limits) shares() ([][2]string, error) {
 			return nil, fmt.Errorf("%s %d outside 1..10000", w.file, w.v)
 		}
 		kvs = append(kvs, [2]string{w.file, w.prefix + strconv.Itoa(w.v)})
+	}
+	if l.CPUMilli < 0 || l.CPUMilli > 0 && l.CPUMilli < 10 || l.CPUMilli > math.MaxInt64/cpuUnit {
+		return nil, fmt.Errorf("cpu.max of %d thousandths of a CPU is under the 10 floor or too large", l.CPUMilli)
+	}
+	if l.CPUMilli > 0 {
+		kvs = append(kvs, [2]string{"cpu.max", strconv.FormatInt(l.CPUMilli*cpuUnit, 10) + " " + strconv.Itoa(cpuPeriod)})
 	}
 	if l.Pids < 0 {
 		return nil, fmt.Errorf("pids.max %d is negative", l.Pids)
