@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gomavlib/v3/pkg/dialect"
@@ -30,7 +31,9 @@ var signatureEpoch = time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // tsUnit is a signature timestamp's unit, and clockSlack how far the
 // aircraft's signing clock may run ahead of its anchor plus the time since:
-// it advances by one unit a frame and jumps only when its GPS time is ahead.
+// it advances by one unit a frame and jumps only when its GPS time is ahead
+// or it boots (about a minute, past the slack, so a request after a boot
+// re-anchors; see exchangeLocked).
 const (
 	tsUnit     = 10 * time.Microsecond
 	clockSlack = 10 * time.Second
@@ -61,8 +64,10 @@ func dialectRW() *dialect.ReadWriter {
 // since plus clockSlack; and a reply counts only when its timestamp is also
 // at or above the request's, because the aircraft raises its signing clock
 // to the newest timestamp it accepts (ASSUMPTIONS.md DRONE-sim-5). Neither
-// clock is trusted: a key-holder clock far behind the aircraft's gets no
-// anchor, and a capture from the future is above the bound.
+// clock is trusted: the link signs no lower than the newest verified frame
+// from the aircraft, so a key-holder clock behind the aircraft's still gets
+// an anchor once the aircraft has sent a frame, and a capture from the
+// future is above the bound.
 type Link struct {
 	conn io.ReadWriteCloser
 	rw   *dialect.ReadWriter
@@ -72,7 +77,14 @@ type Link struct {
 	wmu    sync.Mutex
 	seq    byte
 	lastTS uint64
+	stream byte // this link's signing link id
 	now    func() time.Time
+
+	// peerTS is the newest timestamp of any verified frame from the
+	// aircraft. The key-holder signs no lower: the aircraft refuses a frame
+	// signed more than a minute behind its own clock, which a boot sets a
+	// minute past its last saved value (ASSUMPTIONS.md DRONE-sim-4).
+	peerTS atomic.Uint64
 
 	req  sync.Mutex // one request/response exchange at a time
 	in   chan received
@@ -112,10 +124,10 @@ func (a *anchor) fresh(got received, now time.Time) bool {
 
 // Dial wraps conn as a signed link, starts reading it and sends a heartbeat.
 func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
-	return dial(conn, k, time.Now)
+	return dial(conn, k, time.Now, holderLinkID)
 }
 
-func dial(conn io.ReadWriteCloser, k Key, now func() time.Time) (*Link, error) {
+func dial(conn io.ReadWriteCloser, k Key, now func() time.Time, stream byte) (*Link, error) {
 	if !k.valid() {
 		return nil, errNoKey
 	}
@@ -123,7 +135,7 @@ func dial(conn io.ReadWriteCloser, k Key, now func() time.Time) (*Link, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: now,
+	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: now, stream: stream,
 		in: make(chan received, 512), done: make(chan struct{}), streams: map[byte]uint64{}}
 	r, err := frame.NewReader(frame.ReaderConf{Reader: conn, DialectRW: l.rw, InKey: k.s()})
 	if err != nil {
@@ -173,6 +185,9 @@ func (l *Link) readLoop(r *frame.Reader) {
 			continue
 		}
 		l.streams[v2.SignatureLinkID] = ts
+		if ts > l.peerTS.Load() {
+			l.peerTS.Store(ts) // the read loop is the only writer
+		}
 		got := received{v2.GetMessage(), ts, v2.SignatureLinkID}
 		if hb, ok := got.msg.(*common.MessageHeartbeat); ok {
 			l.smu.Lock()
@@ -187,6 +202,9 @@ func (l *Link) readLoop(r *frame.Reader) {
 		}
 	}
 }
+
+// Done is closed when the link's reader stops: the connection closed or failed.
+func (l *Link) Done() <-chan struct{} { return l.done }
 
 // Dropped counts frames from the aircraft's side that failed to parse or
 // verify, or were not newer than their stream's last.
@@ -210,7 +228,7 @@ func (l *Link) send(m message.Message) (uint64, error) {
 	}
 	l.wmu.Lock()
 	defer l.wmu.Unlock()
-	ts := uint64(l.now().Sub(signatureEpoch) / tsUnit)
+	ts := max(uint64(l.now().Sub(signatureEpoch)/tsUnit), l.peerTS.Load())
 	if ts <= l.lastTS {
 		ts = l.lastTS + 1 // MAVLink 2 refuses a timestamp not above the stream's last
 	}
@@ -224,7 +242,7 @@ func (l *Link) send(m message.Message) (uint64, error) {
 	}
 	l.seq++
 	fr.Checksum = fr.GenerateChecksum(mp.CRCExtra())
-	fr.SignatureLinkID = holderLinkID
+	fr.SignatureLinkID = l.stream
 	fr.SignatureTimestamp = ts
 	fr.Signature = fr.GenerateSignature(l.key.s())
 	if err := l.w.Write(fr); err != nil {
@@ -261,6 +279,14 @@ func (l *Link) exchangeLocked(m message.Message, match func(message.Message) boo
 		defer l.smu.Unlock()
 		return l.anchor.fresh(got, l.now())
 	}, timeout)
+	if errors.Is(err, errTimeout) {
+		// The aircraft's signing clock jumps when it boots, past any anchor
+		// taken before, so a request that goes unanswered drops the anchor and
+		// the next one takes a fresh one (ASSUMPTIONS.md DRONE-sim-5).
+		l.smu.Lock()
+		l.anchor = nil
+		l.smu.Unlock()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -335,6 +361,39 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 	}
 	return Heartbeat{CustomMode: l.hb.CustomMode,
 		Armed: l.hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.hbAt}, true
+}
+
+// FreshHeartbeat returns a heartbeat the aircraft signed after this call:
+// it anchors afresh (a signed TIMESYNC echoing a new random nonce) and takes
+// the first heartbeat on that stream strictly above the echo, which the
+// aircraft signed after it, as its clock moves up a unit a frame. Unlike a
+// reply at or above the request's timestamp, this holds whichever clock is
+// ahead, so no heartbeat held in transit passes.
+func (l *Link) FreshHeartbeat() (Heartbeat, error) {
+	l.req.Lock()
+	defer l.req.Unlock()
+	var last error
+	for try := 0; try < 3; try++ {
+		if last = l.anchorLocked(3 * time.Second); last != nil {
+			continue
+		}
+		l.smu.Lock()
+		a := *l.anchor
+		l.smu.Unlock()
+		var got received
+		got, last = l.roundTrip(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
+			Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageHeartbeat{}).GetID())},
+			func(got received, _ uint64) bool {
+				_, ok := got.msg.(*common.MessageHeartbeat)
+				return ok && got.linkID == a.linkID && got.ts > a.ts
+			}, 3*time.Second)
+		if last == nil {
+			hb := got.msg.(*common.MessageHeartbeat)
+			return Heartbeat{CustomMode: hb.CustomMode,
+				Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+		}
+	}
+	return Heartbeat{}, fmt.Errorf("drone: no fresh heartbeat from the aircraft: %w", last)
 }
 
 // WaitHeartbeat waits for a signed heartbeat newer than after, anchoring
@@ -527,17 +586,97 @@ func relativeFrame(f common.MAV_FRAME) bool {
 
 // SysStatus asks the aircraft for SYS_STATUS and returns its answer.
 func (l *Link) SysStatus() (*common.MessageSysStatus, error) {
+	got, err := l.request(&common.MessageSysStatus{})
+	if err != nil {
+		return nil, err
+	}
+	return got.(*common.MessageSysStatus), nil
+}
+
+// Position asks the aircraft for its position estimate (GLOBAL_POSITION_INT).
+func (l *Link) Position() (*common.MessageGlobalPositionInt, error) {
+	got, err := l.request(&common.MessageGlobalPositionInt{})
+	if err != nil {
+		return nil, err
+	}
+	return got.(*common.MessageGlobalPositionInt), nil
+}
+
+// request asks the aircraft for one message of want's type, retrying as a
+// parameter read does.
+func (l *Link) request(want message.Message) (message.Message, error) {
+	id := want.GetID()
 	var last error
 	for try := 0; try < 3; try++ {
 		got, err := l.exchange(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
-			Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageSysStatus{}).GetID())},
-			func(m message.Message) bool { _, ok := m.(*common.MessageSysStatus); return ok }, 3*time.Second)
+			Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32(id)},
+			func(m message.Message) bool { return m.GetID() == id }, 3*time.Second)
 		if err == nil {
-			return got.(*common.MessageSysStatus), nil
+			return got, nil
 		}
 		last = err
 	}
-	return nil, fmt.Errorf("drone: SYS_STATUS: %w", last)
+	return nil, fmt.Errorf("drone: requesting message %d: %w", id, last)
+}
+
+// Copter custom modes (ArduCopter mode numbers).
+const (
+	ModeAuto   = 3
+	ModeGuided = 4
+	ModeRTL    = 6
+	ModeLand   = 9
+)
+
+// SetMode asks the aircraft for a Copter flight mode and requires it accepted.
+func (l *Link) SetMode(mode uint32) error {
+	return l.accepted(common.MAV_CMD_DO_SET_MODE, [7]float32{float32(common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED), float32(mode)})
+}
+
+// accepted sends a command and requires MAV_RESULT_ACCEPTED.
+func (l *Link) accepted(cmd common.MAV_CMD, params [7]float32) error {
+	res, err := l.Command(cmd, params)
+	if err != nil {
+		return err
+	}
+	if res != common.MAV_RESULT_ACCEPTED {
+		return fmt.Errorf("drone: the aircraft refused %v: %v", cmd, res)
+	}
+	return nil
+}
+
+// Velocity sets a guided velocity (metres per second north, east and down)
+// that the aircraft holds for about three seconds unless renewed.
+func (l *Link) Velocity(north, east, down float32) error {
+	const onlyVelocity = common.POSITION_TARGET_TYPEMASK_X_IGNORE | common.POSITION_TARGET_TYPEMASK_Y_IGNORE |
+		common.POSITION_TARGET_TYPEMASK_Z_IGNORE | common.POSITION_TARGET_TYPEMASK_AX_IGNORE |
+		common.POSITION_TARGET_TYPEMASK_AY_IGNORE | common.POSITION_TARGET_TYPEMASK_AZ_IGNORE |
+		common.POSITION_TARGET_TYPEMASK_YAW_IGNORE | common.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
+	return l.Send(&common.MessageSetPositionTargetLocalNed{TargetSystem: targetSysID, TargetComponent: targetCompID,
+		CoordinateFrame: common.MAV_FRAME_LOCAL_NED, TypeMask: onlyVelocity, Vx: north, Vy: east, Vz: down})
+}
+
+// KeepAlive sends the key-holder's heartbeat every second until stop is
+// called or the link closes: the aircraft's lost-link failsafe counts these.
+func (l *Link) KeepAlive() (stop func()) {
+	quit := make(chan struct{})
+	var once sync.Once
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			if l.SendHeartbeat() != nil {
+				return
+			}
+			select {
+			case <-quit:
+				return
+			case <-l.done:
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(quit) }) }
 }
 
 // Command sends COMMAND_LONG and returns the aircraft's result.

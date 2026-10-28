@@ -47,9 +47,13 @@ type Holder struct {
 	state string
 	log   *log.Logger
 
-	mu     sync.Mutex
-	policy *Policy
-	plan   *Plan
+	mu       sync.Mutex
+	policy   *Policy
+	plan     *Plan
+	flight   *Flight // the flight in progress, nil after a return
+	disagree int     // consecutive camera fixes beyond the policy's bound
+
+	core *limiter // the core side's rate, across its connections
 }
 
 const policyFile = "policy.json"
@@ -61,7 +65,7 @@ func NewHolder(link *Link, owner ed25519.PublicKey, stateDir string, logger *log
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	h := &Holder{link: link, owner: append(ed25519.PublicKey(nil), owner...), state: stateDir, log: logger}
+	h := &Holder{link: link, owner: append(ed25519.PublicKey(nil), owner...), state: stateDir, log: logger, core: newLimiter()}
 	b, err := os.ReadFile(filepath.Join(stateDir, policyFile))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
