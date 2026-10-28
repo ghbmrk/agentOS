@@ -275,3 +275,48 @@ func TestStreamBadSpec(t *testing.T) {
 		t.Errorf("runsc called for a bad spec: %v", err)
 	}
 }
+
+// realStream is realOneShot's program as a stream.
+func realStream(root string, args ...string) Stream {
+	return Stream{Name: "it", Root: root, Argv: append([]string{"/oneshot"}, args...), MemBytes: 64 << 20,
+		Cgroup: os.Getenv("AGENTOS_CGROUP_PARENT")}
+}
+
+// TestStreamRealNoNetwork: under runsc, a stream's program sees only
+// loopback and cannot dial out (CI integration job).
+func TestStreamRealNoNetwork(t *testing.T) {
+	r, root := oneShotRoot(t)
+	run, err := r.StartStream(context.Background(), realStream(root, "net", "1.1.1.1:53"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer run.Stop()
+	b, _ := io.ReadAll(run.Out())
+	out := string(b)
+	if !strings.Contains(out, "dial failed") {
+		t.Errorf("program dialled out: %q", out)
+	}
+	for _, l := range strings.Split(strings.TrimSpace(out), "\n") {
+		if strings.HasPrefix(l, "iface ") && l != "iface lo" {
+			t.Errorf("program sees %q", l)
+		}
+	}
+}
+
+// TestStreamRealMemoryCap: under runsc, a stream asking for four times
+// its cap is killed and reports the cap, and its cgroup is gone after.
+func TestStreamRealMemoryCap(t *testing.T) {
+	r, root := oneShotRoot(t)
+	run, err := r.StartStream(context.Background(), realStream(root, "alloc", "256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(run.Out())
+	if err := run.Err(); !errors.Is(err, ErrOneShotMemory) || strings.Contains(string(b), "allocated") {
+		t.Fatalf("256 MiB under a 64 MiB cap: %q, %v", b, err)
+	}
+	run.Stop()
+	if _, err := os.Stat(filepath.Join(os.Getenv("AGENTOS_CGROUP_PARENT"), "stream-it")); !os.IsNotExist(err) {
+		t.Errorf("stream's cgroup left: %v", err)
+	}
+}
