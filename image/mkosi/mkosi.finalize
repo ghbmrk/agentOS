@@ -1505,6 +1505,12 @@ def keeper_path_violations(name, files):
     return out
 
 
+def driver_root(name, files):
+    """Whether service NAME is a driver's template (DRIVER_UNIT; driver_violations holds each one to
+    the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro."""
+    return bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro"]
+
+
 def keeper_unit_violations(name, files):
     """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins)."""
     out = []
@@ -1519,7 +1525,9 @@ def keeper_unit_violations(name, files):
     if not keeper and name not in NOEXEC_EXEMPT:
         hidden = ini_paths(files, "Service", "InaccessiblePaths")
         words = [w for v in ini_entries(files, "Service", "InaccessiblePaths") for w in v.split()]
-        for p in KEEPER_PATHS:
+        # #3473: a driver's root is an empty read-only tmpfs, so it holds no keeper path to mask, and
+        # systemd refuses a mask whose path is missing (226/NAMESPACE); the template lifts it.
+        for p in () if driver_root(name, files) else KEEPER_PATHS:
             if p not in hidden:
                 out.append("%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)"
                            % (name, p))
@@ -2679,6 +2687,7 @@ DRIVERS_DIR = "usr/lib/agentos/drivers"
 # The driver's name: devslot's name alphabet, short enough that agentos-drv-NAME is a valid user name
 # (systemd's limit is 31 bytes).
 DRIVER_NAME = re.compile(r"[a-z][a-z0-9-]{0,18}\Z")
+DRIVER_UNIT = re.compile(r"agentos-driver-[a-z][a-z0-9-]{0,18}@\.service\Z")
 DRIVER_KEYS = ("name", "repository", "commit", "sha256", "declaration", "classes", "measure")
 DRIVER_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}\Z")
 HEX40, HEX64 = re.compile(r"[0-9a-f]{40}\Z"), re.compile(r"[0-9a-f]{64}\Z")
@@ -2689,7 +2698,11 @@ DRIVER_MARKS = (b"agentos-drv-", b"/run/agentos-drivers")
 # The one public template, rendered for each listed driver by image/finish_image.py and re-rendered
 # here to compare. The caps are within RES-2: MemoryMax times MaxConnections is the driver's whole
 # memory, so systemd's default of 64 connections is never relied on; RuntimeMaxSec is the backstop
-# for the host's operation deadline, so PID 1 kills a hung operation.
+# for the host's operation deadline, so PID 1 kills a hung operation. Every driver's instances share
+# agentos-drivers.slice, whose MemoryMax= caps their sum however many drivers a build lists (#3473).
+# The host's uid is fixed (DEVHOST_UID, its sysusers line), so the template can name it for the
+# driver's peer check (devslot/proc.HostUIDEnv); a unit cannot resolve a user name in Environment=.
+DEVHOST_UID = 900
 DRIVER_TEMPLATE = (
     ("usr/lib/systemd/system/agentos-driver-{name}.socket", """\
 # Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
@@ -2717,6 +2730,8 @@ CollectMode=inactive-or-failed
 ExecStart=/usr/lib/agentos/drivers/{name}/driver
 User=agentos-drv-{name}
 Group=agentos-drv-{name}
+Slice=agentos-drivers.slice
+Environment=AGENTOS_DEVHOST_UID=""" + str(DEVHOST_UID) + """
 StandardInput=null
 StandardOutput=null
 StandardError=null
@@ -2728,6 +2743,7 @@ BindReadOnlyPaths=/usr/lib/agentos/drivers/{name}/driver
 ProcSubset=pid
 ProtectProc=invisible
 PrivateDevices=yes
+PrivateIPC=yes
 NoExecPaths=/
 ExecPaths=/usr/lib/agentos/drivers/{name}/driver
 NoNewPrivileges=yes
@@ -2743,6 +2759,14 @@ MemoryMax=48M
 TasksMax=16
 CPUQuota=25%
 RuntimeMaxSec=120
+"""),
+    ("usr/lib/systemd/system/agentos-driver-{name}@.service.d/90-driver.conf", """\
+# Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
+# The main side's mask (agentos-.service.d/50-main-side.conf, read before this file) names paths the
+# driver's empty read-only root lacks, and systemd fails a unit whose InaccessiblePaths= entry is
+# missing (226/NAMESPACE). TemporaryFileSystem=/:ro already leaves none of them in view (#3473).
+[Service]
+InaccessiblePaths=
 """),
     ("usr/lib/sysusers.d/agentos-driver-{name}.conf", """\
 # Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.

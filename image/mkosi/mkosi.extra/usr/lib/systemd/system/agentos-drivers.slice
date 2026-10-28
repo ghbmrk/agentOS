@@ -1,0 +1,11 @@
+# Every device driver's instances (DEVSLOT-image, #3473): the template puts each driver's service
+# here, so this MemoryMax= caps their sum however many drivers a private build lists (RES-2). A
+# driver's own cap is MemoryMax=48M times MaxConnections=2; this lets two drivers run at full and
+# fails the third's allocations rather than the kernel's or foreground's.
+[Unit]
+Description=agentOS device drivers
+Before=slices.target
+
+[Slice]
+MemoryMax=192M
+TasksMax=64

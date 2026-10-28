@@ -29,9 +29,9 @@ STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 
 # The broker, the vault process, the owner page, the modem bridge, the keeper: enrollment, the
 # unlock step and the kernel (STO-2c), and the host-disk helper the udev rules below run (HOST-1a),
-# static and path-free. No access point or Wi-Fi join (D-178).
+# static and path-free. No access point or Wi-Fi join (D-178). The device-driver host (DEVSLOT b2b).
 for cmd in agentosd agentos-egress agentos-localui agentos-modem \
-	agentos-enroll agentos-unlock agentos-kernel agentos-hostdisk; do
+	agentos-enroll agentos-unlock agentos-kernel agentos-hostdisk agentos-devices; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
@@ -67,6 +67,7 @@ install -D -m 0644 "$REPO/guest/openclaw/launch.json" "$STAGE/usr/lib/agentos/gu
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui.service" "$STAGE/usr/lib/systemd/system/agentos-localui.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-localui/agentos-localui-claim.service" "$STAGE/usr/lib/systemd/system/agentos-localui-claim.service"
 install -D -m 0644 "$REPO/broker/cmd/agentos-modem/agentos-modem.service" "$STAGE/usr/lib/systemd/system/agentos-modem.service"
+install -D -m 0644 "$REPO/broker/cmd/agentos-devices/agentos-devices.service" "$STAGE/usr/lib/systemd/system/agentos-devices.service"
 # The rule that gives qualified modems' nodes to the bridge's user.
 install -D -m 0644 "$REPO/broker/modem/at/udev/71-agentos-modem.rules" "$STAGE/usr/lib/udev/rules.d/71-agentos-modem.rules"
 # The host PC's disks stay hidden, unassembled and root-only (HW-8, HOST-1a; hostdisk ASSUMPTIONS

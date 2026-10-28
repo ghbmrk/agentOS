@@ -31,6 +31,9 @@ SERVICE = "usr/lib/systemd/system/agentos-driver-scale@.service"
 SOCKET = "usr/lib/systemd/system/agentos-driver-scale.socket"
 SYSUSER = "usr/lib/sysusers.d/agentos-driver-scale.conf"
 BINARY = "usr/lib/agentos/drivers/scale/driver"
+DROPIN = SERVICE + ".d/90-driver.conf"
+DRIVERS_SLICE = "usr/lib/systemd/system/agentos-drivers.slice"
+DEVICES_UNIT = "usr/lib/systemd/system/agentos-devices.service"
 
 
 def unit(text):
@@ -213,8 +216,11 @@ class DriversTest(unittest.TestCase):
             "StandardInput= changed": edit(SERVICE, "StandardInput=null", "StandardInput=socket"),
             "user changed": edit(SYSUSER, "u agentos-drv-scale", "u root"),
             "unit missing": lambda r: (r / SOCKET).unlink(),
-            "drop-in": lambda r: ((r / (SERVICE + ".d")).mkdir(),
+            "drop-in": lambda r: ((r / (SERVICE + ".d")).mkdir(exist_ok=True),
                                   (r / (SERVICE + ".d/50-net.conf")).write_text("[Service]\nPrivateNetwork=no\n")),
+            "mask lift dropped": lambda r: (r / DROPIN).unlink(),
+            "PrivateIPC= dropped": edit(SERVICE, "PrivateIPC=yes\n", ""),
+            "out of the drivers' slice": edit(SERVICE, "Slice=agentos-drivers.slice\n", ""),
             "etc override": lambda r: ((r / "etc/systemd/system").mkdir(parents=True),
                                        (r / "etc/systemd/system/agentos-driver-scale@.service").write_text("[Service]\n")),
             "other unit runs as a driver's user": lambda r: (r / "usr/lib/systemd/system/x.service").write_text(
@@ -261,6 +267,79 @@ class DriversTest(unittest.TestCase):
             self.assertFalse(check.self_bind(files, w), w)
         (self.stage / "usr/lib/agentos/link").symlink_to("/var/lib/x")
         self.assertFalse(check.self_bind(files, "/usr/lib/agentos/link"))
+
+    # #3473 (the b1 reviews' release points, folded into b2b).
+
+    def staged_tree(self):
+        """A clean tree with the fixture driver staged and the image's files b2b adds."""
+        self.driver()
+        self.stage_drivers()
+        clean_tree(self.stage)
+        mk = IMG / "mkosi/mkosi.extra"
+        for rel in (DRIVERS_SLICE, "usr/lib/sysusers.d/agentos-devices.conf"):
+            (self.stage / rel).write_text((mk / rel).read_text())
+        (self.stage / DEVICES_UNIT).write_text((IMG.parent / "broker/cmd/agentos-devices/agentos-devices.service").read_text())
+        return self.stage
+
+    def test_driver_starts_under_the_main_side_mask(self):
+        # 226/NAMESPACE (L3 6450605315 point 1): the main side's InaccessiblePaths= names paths the
+        # driver's empty root lacks, and systemd fails a unit on a missing one with no "-". The
+        # template's drop-in, read after 50-main-side.conf, lifts the mask for the driver alone.
+        root = self.staged_tree()
+        self.assertEqual(check.violations(root), [])
+        files = check.unit_with_dropins(str(root), check.unit_dirs(str(root))[0], "agentos-driver-scale@.service")
+        self.assertEqual([pathlib.PurePosixPath(f.name).name for f in files][-2:], ["50-main-side.conf", "90-driver.conf"])
+        self.assertEqual(check.ini_words(files, "Service", "InaccessiblePaths"), [])
+        self.assertEqual(check.ini_words(files, "Service", "TemporaryFileSystem"), ["/:ro"])
+        # The lift holds only for a driver's template with that empty root: any other unit that lifts
+        # the mask, or a driver unit given a root with something in it, is refused.
+        lifted = "the main side never sees the keeper's state (D-154)"
+        cases = {
+            "agentos-x.service": ("usr/lib/systemd/system/agentos-x.service.d/90-driver.conf", "[Service]\nInaccessiblePaths=\n"),
+            "agentos-driver-scale@.service": (SERVICE + ".d/95-root.conf", "[Service]\nTemporaryFileSystem=/var\n"),
+        }
+        for name, (rel, text) in cases.items():
+            with self.subTest(name):
+                r = self.d / ("k-" + name)
+                shutil.copytree(root, r, symlinks=True)
+                if name == "agentos-x.service":
+                    (r / "usr/lib/systemd/system/agentos-x.service").write_text(
+                        "[Service]\nExecStart=/usr/bin/true\nPrivateDevices=yes\n")
+                (r / rel).parent.mkdir(parents=True, exist_ok=True)
+                (r / rel).write_text(text)
+                self.assertTrue([v for v in check.keeper_violations(r) if v.startswith(name) and lifted in v], name)
+
+    def test_driver_ipc_and_memory_are_bounded(self):
+        units = check.driver_units("scale")
+        svc = unit(units[SERVICE])["Service"]
+        # L3 6450605315 point 2: no SysV IPC object shared with another driver (CLK-1).
+        self.assertEqual(svc["PrivateIPC"], "yes")
+        # Potency 6450650341 (RES-2): every driver's instances share one slice, whose cap bounds their
+        # sum however many drivers a build lists, and admits at least one driver at its own full cap.
+        self.assertEqual(svc["Slice"], "agentos-drivers.slice")
+        sl = unit((IMG / "mkosi/mkosi.extra" / DRIVERS_SLICE).read_text())["Slice"]
+        mb = lambda v: int(v.rstrip("M"))  # noqa: E731
+        per_driver = mb(svc["MemoryMax"]) * int(unit(units[SOCKET])["Socket"]["MaxConnections"])
+        self.assertGreaterEqual(mb(sl["MemoryMax"]), per_driver)
+        self.assertLessEqual(mb(sl["MemoryMax"]), 4 * per_driver)
+
+    def test_host_uid_is_the_drivers_peer(self):
+        # devslot/proc refuses a peer whose uid is not AGENTOS_DEVHOST_UID's; the host's sysusers line
+        # fixes that uid, and agentos-devices refuses to run under another.
+        svc = unit(check.driver_units("scale")[SERVICE])["Service"]
+        self.assertEqual(svc["Environment"], "AGENTOS_DEVHOST_UID=%d" % check.DEVHOST_UID)
+        users = (IMG / "mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-devices.conf").read_text()
+        self.assertIn('\nu agentos-devices %d "' % check.DEVHOST_UID, users)
+        main = (IMG.parent / "broker/cmd/agentos-devices/main.go").read_text()
+        self.assertIn("const hostUID = %d\n" % check.DEVHOST_UID, main)
+        proc = (IMG.parent / "broker/clerk/devslot/proc/proc_linux.go").read_text()
+        self.assertIn('HostUIDEnv = "AGENTOS_DEVHOST_UID"', proc)
+        self.assertEqual(unit(check.driver_units("scale")[SOCKET])["Socket"]["SocketUser"], "agentos-devices")
+        host = unit((IMG.parent / "broker/cmd/agentos-devices/agentos-devices.service").read_text())["Service"]
+        self.assertEqual(host["User"], "agentos-devices")
+        build = (IMG / "build.sh").read_text()
+        self.assertIn("agentos-hostdisk agentos-devices; do", build)
+        self.assertIn('broker/cmd/agentos-devices/agentos-devices.service" "$STAGE/%s"' % DEVICES_UNIT, build)
 
 
 if __name__ == "__main__":
