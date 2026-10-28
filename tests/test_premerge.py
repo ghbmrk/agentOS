@@ -218,6 +218,26 @@ class PremergeTest(unittest.TestCase):
         self.commit("drop both")
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
+    SHARED = "\n## Other\n\n| ID | B |\n|---|---|\n| F-1 | f |\n| S-1 | shared |\n| F-2 | g |\n"
+
+    def test_a_copy_of_a_repeated_row_both_sides_delete_is_same_but_an_edit_is_changed(self):
+        # #3534: copies were counted file-wide, so the copy both sides deleted read as one the union brought back.
+        far = "".join(f"| P-{i} | p |\n" for i in range(8))
+        gone = self.SHARED.replace("| S-1 | shared |\n", "")
+        reviewed = self.union_merge("| S-1 | shared |\n" + far + "| M-1 | main |\n" + gone, "| S-1 | shared |\n| L-2 | pr |\n" + far + gone,
+                                    base_rows="| S-1 | shared |\n" + far + self.SHARED)
+        self.assertEqual(self.read("ASSUMPTIONS.md").count("| S-1 |"), 1, "both sides were meant to delete one copy cleanly")
+        self.assertEqual(self.check(reviewed), [])
+        self.write("ASSUMPTIONS.md", self.read("ASSUMPTIONS.md").replace("| S-1 | shared |", "| S-1 | edited |"))
+        self.commit("edit the repeated row")
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
+    def test_a_row_the_union_kept_where_merge_file_aligns_unlike_the_replay_is_changed(self):
+        # #3534: where merge-file's conflicts do not rebuild the replay, the stale rows are counted file-wide as before.
+        base = "\n| C |\nx\n| C |\n| A |\n| A |\n| D |\n\n"
+        reviewed = self.union_merge(base + "| B |\n", "\n| C |\nx\n| A |\n", base_rows=base)
+        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+
     def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
         # #3401 Security P6: a row the reviewer read as inert, inside an HTML comment, moved into the live table.
         draft = "\n<!-- draft:\n| X | y |\n| L-1 | edge new |\n-->\n"
