@@ -66,17 +66,18 @@ const (
 type Server struct {
 	IMAP, SMTP string // host:port
 
-	mu        sync.Mutex
-	boxes     map[string]*box
-	validity  uint32
-	submitted []Submission
-	failList  map[string]bool
-	hidden    map[string]bool
-	logins    []string
-	smtpFail  bool
-	keywords  bool // drop keywords a STORE sets, as a server without \* does
-	move      Move
-	noUIDNext bool // SELECT gives no UIDNEXT, against RFC 3501
+	mu         sync.Mutex
+	boxes      map[string]*box
+	validity   uint32
+	submitted  []Submission
+	failList   map[string]bool
+	hidden     map[string]bool
+	logins     []string
+	smtpFail   bool
+	keywords   bool // drop keywords a STORE sets, as a server without \* does
+	move       Move
+	noUIDNext  bool // SELECT gives no UIDNEXT, against RFC 3501
+	afterFetch func(folder string)
 }
 
 // Move is how the server answers a MOVE.
@@ -250,6 +251,15 @@ func (s *Server) SetMove(m Move) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.move = m
+}
+
+// AfterFetch runs f after each FETCH in a folder has sent its messages and
+// before the server answers it done, so a test can change the folder between
+// two calls of one read, as the owner's mail app would. nil stops it.
+func (s *Server) AfterFetch(f func(folder string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterFetch = f
 }
 
 // FailSMTP makes the SMTP sink refuse DATA (or not).
@@ -464,9 +474,13 @@ func (m *mbox) ListMessages(uid bool, set *imap.SeqSet, items []imap.FetchItem, 
 			out = append(out, f)
 		}
 	}
+	after := m.s.afterFetch
 	m.s.mu.Unlock()
 	for _, f := range out {
 		ch <- f
+	}
+	if after != nil {
+		after(m.name)
 	}
 	return nil
 }
