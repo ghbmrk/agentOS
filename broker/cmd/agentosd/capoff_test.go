@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/localsrv"
 	"github.com/ghbmrk/agentos/broker/localui"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
 // REQ: OP-9
@@ -578,6 +580,44 @@ func TestOwnerLinesNameTheWiFiPage(t *testing.T) {
 		}
 		if strings.Contains(low, " page") && !strings.Contains(l, "my Wi-Fi page") {
 			t.Errorf("%q sends the owner to a page without naming \"my Wi-Fi page\"", l)
+		}
+	}
+}
+
+// REQ: LOG-4
+// KRN-forget b: an erase a store or the key still owes gives one STATUS
+// line by count and store, never by name; nothing owed gives none; an
+// unreachable kernel gives one line, not silence; forgetNotRunning is gone.
+func TestForgetStatusLines(t *testing.T) {
+	k := newFakeKernel()
+	note := forgetStatus(k)
+	if got := note(); got != "" {
+		t.Fatalf("nothing owed: %q", got)
+	}
+	k.unerased = []kernelsock.Unerased{{Subject: "0123456789abcdef0123456789abcdef", Items: 3, Stores: []string{kernelsock.KeyTable}}}
+	if got := note(); got != "Forget not finished: 1 erase waits on the key; I keep trying." {
+		t.Fatalf("one erase: %q", got)
+	}
+	k.unerased = append(k.unerased, kernelsock.Unerased{Subject: "fedcba9876543210fedcba9876543210", Items: 1, Stores: []string{"mail"}})
+	got := note()
+	if got != "Forget not finished: 2 erases wait on the key and the mail store; I keep trying." {
+		t.Fatalf("two erases: %q", got)
+	}
+	for _, l := range []string{got, forgetUnreached, forgetOwedLine([]kernelsock.Unerased{{Stores: []string{"a-very-long-store-name-one", "a-very-long-store-name-two", "a-very-long-store-name-three"}}})} {
+		if err := ownerWorded(l); err != nil {
+			t.Errorf("%q: %v", l, err)
+		}
+		if strings.Contains(l, "0123") || strings.Contains(l, kernelsock.KeyTable) {
+			t.Errorf("%q names a subject or the key table's log name", l)
+		}
+	}
+	k.readsErr = errors.New("unreachable")
+	if got := note(); got != forgetUnreached {
+		t.Fatalf("unreachable: %q", got)
+	}
+	for _, l := range capLineTexts() {
+		if strings.Contains(l, "not running here") && strings.HasPrefix(l, "Forget") {
+			t.Fatalf("a forget-not-running line remains: %q", l)
 		}
 	}
 }

@@ -411,6 +411,11 @@ func main() {
 	// gets no fork, merge or pre-allowance until its rollback is settled
 	// below (VM-lineage-contained, LOG-4).
 	recallHeld := openRecallHeld(recallAtRest, filepath.Join(stateDir, recallSettledFile), log.Printf)
+	// So does a lineage that read content the owner had the box forget,
+	// until it goes back (KRN-forget b, D-169); a kernel is attached below.
+	eraseBack := openEraseRewind(filepath.Join(stateDir, eraseRewoundFile), log.Printf)
+	var served atomic.Pointer[daemon.Daemon] // set once the daemon runs
+	recallHeld.also = eraseBack.Contained
 	// A box with no -owner is set up by the local UI (P2-2w c2): only
 	// setup's ops are served until its finish is recorded, and the owner's
 	// number then comes from the record, on this start and every later one.
@@ -626,6 +631,26 @@ func main() {
 		}
 		cfg.Kernel = storedKernel{*seat, kernelStore}
 		go reachKernel(ctx, *seat, 2*time.Second, log.Printf)
+		// Erase by name (KRN-forget b): every agent is contained until the
+		// kernel says which read erased content; the start-up pass below
+		// takes those back. The owner page's Forget step (KRN-forget c,
+		// #3414) calls newForgetFlow's find and confirm.
+		eraseBack.attach(*seat, func() lineageForgetter {
+			if m := pre.m.Load(); m != nil {
+				return m
+			}
+			return nil
+		}, func() error {
+			held, err := ev.kept.forget()
+			// The owner hears of held agent texts dropped (CAP3-F1).
+			if d := served.Load(); d != nil {
+				if terr := tellHeldDropped(d.Owner(), held); terr != nil {
+					log.Printf("held agent texts dropped by a forget; owner not told: %v", terr)
+				}
+			}
+			return err
+		})
+		cfg.Notes = append(cfg.Notes, eraseBack.Note, forgetStatus(*seat))
 		// Backups (BAK-1, e4a): daily and at once, and STATUS's
 		// only-copy notice until the kernel verifies one.
 		bs := newBackupSchedule(*seat)
@@ -667,7 +692,13 @@ func main() {
 		log.Fatal(err)
 	}
 	pictures.open(d.Engine().RecordPicture)
+	served.Store(d)
 	pacer.attach(ctx, d.Owner(), time.Minute)
+	if seat != nil {
+		// Erased reads the start-up pass could not get are asked again, and
+		// the owner told of each rewind that follows (D-169).
+		go eraseBack.watch(ctx, eraseReadsEvery, informOwner(d.Owner))
+	}
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	if noticeSocket != "" {
@@ -715,6 +746,9 @@ func main() {
 			// Held lineages go back before any machine is served or
 			// pruned; the journal has the owner's NOs by now.
 			recallHeld.settle(ctx, m, func() ([]recallNo, error) { return ownerNos(d.Engine()) }, informOwner(d.Owner))
+			// So do lineages that read content a crash left erased with no
+			// rewind, or rewound with the owner untold (D-169).
+			eraseBack.settle(ctx, informOwner(d.Owner))
 			go m.RunPruner(vm.PrunePolicy{LowWaterBytes: 1 << 30}, time.Minute, ctx.Done())
 			// Provider workers a crash left go first, served or not (#3249, #3308).
 			signIns.M = m

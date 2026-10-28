@@ -59,7 +59,7 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 		{kernel.Result{Outcome: "failed", Detail: "sent\nok"}, "", "failed", "unknown", "malformed"},
 	} {
 		sock := serveFake(t, fakeClerk{do: func() kernel.Result { return c.res }, probe: c.probe})
-		r := remote{Remote{Socket: sock, UID: os.Getuid()}, nil}
+		r := remote{Remote: Remote{Socket: sock, UID: os.Getuid()}}
 		v := kernel.NewState(anchors)
 		got := r.Do(kernel.Request{}, v)
 		if got.Outcome != c.want || got.Detail != c.detail {
@@ -71,7 +71,7 @@ func TestKernelBoundsWhatAClerkAnswers(t *testing.T) {
 	}
 	// No clerk listening: nothing was sent, so the step is sent again later,
 	// and a probe made no check.
-	r := remote{Remote{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}, nil}
+	r := remote{Remote: Remote{Socket: filepath.Join(shortDir(t), "none.sock"), UID: os.Getuid()}}
 	if got := r.Do(kernel.Request{}, kernel.NewState(nil)); got.Outcome != kernel.OUnsent || got.Detail != DUnreachable {
 		t.Fatalf("no clerk: %+v, want unsent %s", got, DUnreachable)
 	}
@@ -198,7 +198,7 @@ func TestViewCarriesTheOneOffLine(t *testing.T) {
 		if want <= 0 {
 			t.Fatalf("kernel's line %d: the test needs a live clerk key under the root", want)
 		}
-		s := view(k.State(), anchors, r, b.now)
+		s := view(k.State(), anchors, nil, r, b.now)
 		if got := s.OneOffLine(rid, 0); got != want {
 			t.Fatalf("view's line %d, want the kernel's %d", got, want)
 		}
@@ -229,7 +229,7 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 		if err := k.ApproveTask(b.now, "t1", a); err != nil {
 			t.Fatal(err)
 		}
-		s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now)
+		s := view(k.State(), anchors, nil, kernel.Request{Plan: in}, b.now)
 		ver, err := kernel.VerifyPlan(in, kernel.PlanOwners(&s, anchors, in.Key))
 		if err != nil {
 			t.Fatal(err)
@@ -243,13 +243,13 @@ func TestViewCarriesTheChainsTask(t *testing.T) {
 		if _, ok := s.Task("t2", b.now); ok {
 			t.Fatal("the view answered for a task the chain does not serve")
 		}
-		if s := view(k.State(), anchors, kernel.Request{Plan: out}, b.now); s.Served != nil {
+		if s := view(k.State(), anchors, nil, kernel.Request{Plan: out}, b.now); s.Served != nil {
 			t.Fatalf("a chain with no task carried one: %+v", s.Served)
 		}
 		if err := k.EndTask(b.now, "t1"); err != nil {
 			t.Fatal(err)
 		}
-		if s := view(k.State(), anchors, kernel.Request{Plan: in}, b.now); s.Served != nil {
+		if s := view(k.State(), anchors, nil, kernel.Request{Plan: in}, b.now); s.Served != nil {
 			t.Fatal("the view carried an ended task")
 		}
 		return nil

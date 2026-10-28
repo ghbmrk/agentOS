@@ -98,7 +98,7 @@ func TestViewCarriesWhatTheCheckReads(t *testing.T) {
 
 func roundTrip(t *testing.T, f *fakeView, ver *key.Verified, r kernel.Request, now int64) {
 	t.Helper()
-	b, err := json.Marshal(view(f, anchors, r, now))
+	b, err := json.Marshal(view(f, anchors, nil, r, now))
 	if err != nil {
 		t.Fatal(err)
 	}

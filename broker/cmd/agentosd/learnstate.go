@@ -96,8 +96,7 @@ func openLearnState(dir string, cfg *daemon.Config) {
 		erased = removeLearned(dir)
 	}
 	wireSettings(cfg)
-	cfg.Notes = append(cfg.Notes, func() string { return forgetNotRunning },
-		func() string { return lineIf(!erased, forgetNotErased) })
+	cfg.Notes = append(cfg.Notes, func() string { return lineIf(!erased, forgetNotErased) })
 }
 
 // loopsOffText answers the owner's loop settings texts (LOOPS, LEARNING,
