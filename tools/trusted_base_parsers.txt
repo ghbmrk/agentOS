@@ -34,6 +34,8 @@ inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its 
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
 inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/infer/supervise -- starts the inference service; decodes nothing
+parser github.com/ghbmrk/agentos/broker/vision -- replies from the untrusted vision service
+inert  github.com/ghbmrk/agentos/broker/vision/supervise -- starts the vision service; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/journal -- reads its own write-ahead journal
 inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's own records
 inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records

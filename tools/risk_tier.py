@@ -99,6 +99,7 @@ TIER_A_BROKER = {
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation
     "infer",                      # INFER-SVC: its jail and reply checks keep private text on the box and untrusted output out of recall; covers infer/supervise
+    "vision",                     # VIS-core: its reply checks keep templates and capture inside the vision service; covers vision/supervise
     "edgelink",                   # parses every frame and hello from the edge, and pins the link's TLS (HW-15, #3296)
     "camwire",                    # parses every camera frame and verifies the owner-signed settings and images a camera takes (NET-2, NET-4, #3513)
     # (c) parses owner-channel input
