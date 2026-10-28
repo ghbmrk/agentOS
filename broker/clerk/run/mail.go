@@ -151,7 +151,7 @@ var mailMu sync.Mutex
 // SetMail sets up or replaces the account in dir, the mail clerk's own
 // directory: the password goes, sealed, to the slot named for the settings,
 // and the settings beside it. A refusal writes nothing. The steps are: put the
-// new slot, write the settings, drop another account's record of read mail,
+// new slot, write the settings, drop another account's records of read mail and senders,
 // drop every other mail slot. A crash at any
 // point leaves the settings naming an account whose own slot holds its own
 // password, so no password goes to another account's servers, and the next
@@ -228,7 +228,7 @@ func setGmail(dir string, sec *clerk.Secrets, address string, stop func(i int) b
 
 // switchMail is setup's steps after its checks, with mailMu held: put the
 // account's secret (put), write the settings b, drop another account's
-// record of read mail, drop every other mail slot.
+// records of read mail and senders, drop every other mail slot.
 func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put func() error, stop func(i int) bool) error {
 	cur := slotOf(s)
 	prev, perr := readMail(dir)
@@ -238,12 +238,13 @@ func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put fu
 		put,
 		func() error { return privfile.WriteAtomic(dir, mailSettings, b, nil) },
 		func() error {
-			// Another account's record of read mail does not load under this
-			// one; dropping it makes the restart a new account's, not a loss.
+			// Another account's records of read mail and of senders do not
+			// load under this one; dropping them makes the restart a new
+			// account's, not a loss.
 			if same {
 				return nil
 			}
-			return removeFiles(dir, seenFile)
+			return removeFiles(dir, seenFile, sendersFile)
 		},
 		func() error { return sec.RemovePrefix(clerk.MailSlots, cur) },
 	}
@@ -279,7 +280,7 @@ func RemoveMail(dir string, sec *clerk.Secrets) error {
 	// A temporary a crashed write left may hold a sealed password or the
 	// settings; it is never read, and it goes too, with the record of read
 	// mail.
-	return removeFiles(dir, secretsName+".tmp", mailSettings+".tmp", mailSettings, seenFile, seenFile+".tmp")
+	return removeFiles(dir, secretsName+".tmp", mailSettings+".tmp", mailSettings, seenFile, seenFile+".tmp", sendersFile, sendersFile+".tmp")
 }
 
 // removeFiles removes the named files from dir, if there, and syncs it.
@@ -332,7 +333,7 @@ type MailConfig struct {
 	OneClickBody  string
 	TLS           *tls.Config      // nil: system roots, the server's name
 	Guard         *netguard.Policy // nil: imapsmtp's default policy
-	// Sealer seals the record of read mail, as it does the Secrets file.
+	// Sealer seals the records of read mail and senders, as it does the Secrets file.
 	Sealer clerk.Sealer
 	// Conn starts a fresh IMAP connection process for each session and
 	// returns its control connection (imapsmtp.Config.Conn, #2937 gap 2):
@@ -352,6 +353,13 @@ type MailConfig struct {
 	tables   *inbox.Providers
 	accounts *accounts.Table
 	senders  func(ctx context.Context, read func(context.Context) ([]string, error)) ([]string, error)
+	// stepped is told after each step of the senders read whether more
+	// is to read and whether the world now has history; wrote runs in each setter right after it writes the
+	// settings, with h.mu held. Tests only.
+	stepped func(more, full bool)
+	wrote   func()
+	stepMax int           // sendersStepMax when 0
+	pause   time.Duration // sendersPause when 0
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 	// gmail is the Gmail API's root, token endpoint, consent page and
@@ -486,6 +494,7 @@ type mailbox interface {
 	Opened(ctx context.Context, today string, log inbox.SeenLog) (map[string]string, inbox.SeenLog, error)
 	Mark(ctx context.Context) (inbox.Mark, error)
 	PlanSenders(ctx context.Context, authServ string) ([]string, error)
+	SendersStep(ctx context.Context, r *inbox.SendersRecord, limit int) (more bool, err error)
 }
 
 // mailBox is the mailbox of the account in dir, chosen by its settings'

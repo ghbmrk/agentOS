@@ -124,7 +124,7 @@ func TestPlanReaderReadsOnlyDeclaredMetadata(t *testing.T) {
 		}
 	}
 	for _, r := range gets {
-		if !strings.HasSuffix(r, "?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results") ||
+		if !strings.HasSuffix(r, "?format=metadata&metadataHeaders=From&metadataHeaders=Authentication-Results&metadataHeaders=To&metadataHeaders=Cc") ||
 			strings.Contains(r, "/"+oldest+"?") {
 			t.Errorf("get request %s", r)
 		}
