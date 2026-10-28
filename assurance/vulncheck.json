@@ -50,6 +50,7 @@
   {"id": "DEBIAN-CVE-2026-107778", "issue": 2919, "where": "image", "package": "krb5", "why": "Image package krb5 1.21.3-5+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-113351", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-115506", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
+  {"id": "DEBIAN-CVE-2026-117610", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-118370", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-11850", "issue": 2919, "where": "image", "package": "krb5", "why": "Image package krb5 1.21.3-5+deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-15059", "issue": 2919, "where": "image", "package": "systemd", "why": "Image package systemd 257.13-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
