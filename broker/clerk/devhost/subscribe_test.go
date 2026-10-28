@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -360,12 +362,19 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 		send(t, c, reading("temperature", 0, okTime))
 		send(t, c, devslot.Msg{T: devslot.MsgDone})
 	}
-	// The subscription's instance may be cancelled before the host
-	// answers its declaration, so it checks nothing.
+	// The subscription's instance holds the connection open until the
+	// host closes it at the cancel, so the cancel is the only way it ends.
+	// It may be cancelled before the host answers its declaration, so it
+	// checks nothing.
 	stays := func(t *testing.T, c net.Conn) {
 		b, _ := devslot.Canonical(subDecl())
 		send(t, c, devslot.Msg{T: devslot.MsgDeclare, B: b})
-		closed(c)
+		c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		for {
+			if _, err := devslot.ReadMsg(c); err != nil {
+				return
+			}
+		}
 	}
 	d := &dialer{t: t, scripts: []script{gated, one, stays}}
 	defer d.done.Wait()
@@ -379,7 +388,7 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 	defer cancel()
 	sub := make(chan error, 1)
 	go func() { _, err := h.Subscribe(ctx, "watch"); sub <- err }()
-	time.Sleep(100 * time.Millisecond)
+	parked(t, "(*Host).acquire")
 	// A second Do arrives while no instance runs, so there is nothing for
 	// it to preempt; it queues behind the subscription.
 	type res struct {
@@ -388,7 +397,7 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 	}
 	second := make(chan res, 1)
 	go func() { n, err := h.Do(context.Background(), "read-temperature"); second <- res{n, err} }()
-	time.Sleep(100 * time.Millisecond)
+	parked(t, "(*Host).Do")
 	close(gate)
 	if err := <-first; err != nil {
 		t.Fatalf("first Do: %v", err)
@@ -405,4 +414,19 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 	if err := <-sub; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Subscribe: %v", err)
 	}
+}
+
+// parked waits until a goroutine whose stack holds fn is parked on a mutex:
+// in this test, only h.mu is held long enough for a caller to park on it.
+func parked(t *testing.T, fn string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "[sync.Mutex.Lock") && strings.Contains(g, fn) {
+				return
+			}
+		}
+	}
+	t.Fatalf("no goroutine in %s parked on the host's mutex", fn)
 }
