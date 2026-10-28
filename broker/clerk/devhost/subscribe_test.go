@@ -220,9 +220,8 @@ func TestSubscribeFloodCoalesced(t *testing.T) {
 func TestSubscribeEndsAtDeadlineAndResumes(t *testing.T) {
 	const sub = 200 * time.Millisecond
 	var mu sync.Mutex
-	var held []time.Duration
+	var ended []time.Time
 	stays := func(t *testing.T, c net.Conn) {
-		start := time.Now()
 		if !declareSub(t, c) {
 			return
 		}
@@ -231,7 +230,7 @@ func TestSubscribeEndsAtDeadlineAndResumes(t *testing.T) {
 			t.Errorf("host kept a subscription's instance past its deadline")
 		}
 		mu.Lock()
-		held = append(held, time.Since(start))
+		ended = append(ended, time.Now())
 		mu.Unlock()
 	}
 	ends := func(t *testing.T, c net.Conn) {
@@ -249,12 +248,21 @@ func TestSubscribeEndsAtDeadlineAndResumes(t *testing.T) {
 	if n != 3 || err != nil {
 		t.Fatalf("Subscribe: %d, %v; want a reading from each of three instances", n, err)
 	}
-	if d.dials != 3 || len(held) != 2 {
-		t.Fatalf("%d instances, %d ended at the deadline; want 3 and 2", d.dials, len(held))
+	if d.dials != 3 || len(ended) != 2 {
+		t.Fatalf("%d instances, %d ended at the deadline; want 3 and 2", d.dials, len(ended))
 	}
-	for _, el := range held {
-		if el < sub || el > sub+2*time.Second {
-			t.Fatalf("an instance was held %v, want its deadline of %v", el, sub)
+	// The host starts each instance's deadline just before it dials, so
+	// the deadline its dial carried is at most sub after the dial, and
+	// short of it only by the few statements between the two (slack).
+	// The instance must not end before that deadline.
+	const slack = 50 * time.Millisecond
+	for i, end := range ended {
+		dl, at := d.deadlines[i], d.at[i]
+		if span := dl.Sub(at); dl.IsZero() || span > sub || span < sub-slack {
+			t.Fatalf("instance %d was dialed with a deadline %v after the dial, want %v", i, span, sub)
+		}
+		if end.Before(dl) || end.Sub(dl) > 2*time.Second {
+			t.Fatalf("instance %d ended %v after its deadline, want at or soon after it", i, end.Sub(dl))
 		}
 	}
 
