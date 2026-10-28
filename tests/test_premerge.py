@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -240,12 +241,13 @@ class PremergeTest(unittest.TestCase):
         self.setUp()  # #3587 L3: here merge-file's conflicts alone count no row, so only the replay check reads it
         reviewed = self.union_merge("\n| A |\n| B |\n| A |\n", "\n| B |\n| A |\n", base_rows="\n| B |\n| C |\n| A |\n")
         onto = git(self.r, "merge-base", "main", "HEAD")
-        tree = premerge._replayed(self.r, reviewed, onto)
-        self.write("ASSUMPTIONS.md", git(self.r, "show", f"{tree}:ASSUMPTIONS.md") + "\n")
-        replay = (self.r / "ASSUMPTIONS.md").read_bytes()
-        self.assertEqual(premerge._stale(self.r, replay, "ASSUMPTIONS.md", reviewed, onto), {b"| B |": 1})
-        git(self.r, "commit", "-qam", "keep the replay", "--allow-empty")  # newer git's merge may already be the replay
-        self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
+        # Which alignment each git picks varies by version (git 2.55 replays this merge without the extra row), so
+        # merge-file's clean merge and the replay that kept a second `| B |` are fixed here rather than taken from git.
+        clean = (self.UNION + "\n| A |\n| B |\n| A |\n").encode()
+        replay = (self.UNION + "\n| B |\n| A |\n| B |\n| A |\n").encode()
+        with mock.patch.object(premerge, "_merge_file", return_value=(clean, "unused")):
+            self.assertEqual(premerge._stale(self.r, replay, "ASSUMPTIONS.md", reviewed, onto), {b"| B |": 1})
+            self.assertEqual(premerge._stale(self.r, clean, "ASSUMPTIONS.md", reviewed, onto), {})
 
     def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
         # #3401 Security P6: a row the reviewer read as inert, inside an HTML comment, moved into the live table.
