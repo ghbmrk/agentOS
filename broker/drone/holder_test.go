@@ -271,9 +271,7 @@ func TestFollowNeverOverridesAReturn(t *testing.T) {
 		t.Fatalf("follow asked for modes %v, want GUIDED", got)
 	}
 	a.set(func(a *scripted) { a.mode, a.cmds = ModeRTL, nil })
-	if _, err := h.link.WaitHeartbeat(time.Now(), 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
+	waitMode(t, h.link, ModeRTL)
 	if err := h.Follow(at(0, 100)); err == nil {
 		t.Fatal("follow took the aircraft out of its own return")
 	}
@@ -281,12 +279,22 @@ func TestFollowNeverOverridesAReturn(t *testing.T) {
 		t.Fatalf("a refused follow asked for modes %v", got)
 	}
 	a.set(func(a *scripted) { a.mode = ModeGuided })
-	if _, err := h.link.WaitHeartbeat(time.Now(), 5*time.Second); err != nil {
-		t.Fatal(err)
-	}
+	waitMode(t, h.link, ModeGuided)
 	if err := h.Follow(at(0, 100)); err == nil {
 		t.Fatal("follow resumed after the aircraft's return ended the flight")
 	}
+}
+
+// waitMode waits for a heartbeat in mode: one received after a change may
+// have been sent before it.
+func waitMode(t *testing.T, l *Link, mode uint32) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if hb, ok := l.LastHeartbeat(); ok && hb.CustomMode == mode {
+			return
+		}
+	}
+	t.Fatalf("no heartbeat in mode %d", mode)
 }
 
 // REQ: NET-2
