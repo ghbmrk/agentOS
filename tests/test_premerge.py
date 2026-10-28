@@ -239,9 +239,12 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
         self.setUp()  # #3587 L3: here merge-file's conflicts alone count no row, so only the replay check reads it
         reviewed = self.union_merge("\n| A |\n| B |\n| A |\n", "\n| B |\n| A |\n", base_rows="\n| B |\n| C |\n| A |\n")
-        tree = premerge._replayed(self.r, reviewed, git(self.r, "merge-base", "main", "HEAD"))
+        onto = git(self.r, "merge-base", "main", "HEAD")
+        tree = premerge._replayed(self.r, reviewed, onto)
         self.write("ASSUMPTIONS.md", git(self.r, "show", f"{tree}:ASSUMPTIONS.md") + "\n")
-        self.commit("keep the replay")
+        replay = (self.r / "ASSUMPTIONS.md").read_bytes()
+        self.assertEqual(premerge._stale(self.r, replay, "ASSUMPTIONS.md", reviewed, onto), {b"| B |": 1})
+        git(self.r, "commit", "-qam", "keep the replay", "--allow-empty")  # newer git's merge may already be the replay
         self.assertEqual(self.check(reviewed), ["ASSUMPTIONS.md"])
 
     def test_a_head_that_moves_a_pr_row_out_of_a_comment_is_changed(self):
