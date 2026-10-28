@@ -65,7 +65,8 @@ const MaxFramePayload = camwire.MaxVideo
 
 // SegmentSlots prefixes a camera's segment key slot in the sealed store.
 // It is a device slot, so clerk.Secrets.DeviceKey lends it to one call and
-// wipes it after (CLK-1).
+// wipes it after (CLK-1). The clerk's process (part d) binds SegmentKeys
+// to those slots; this package calls no sealed-store write path itself.
 const SegmentSlots = clerk.DeviceSlots + "camera-segments/"
 
 // SegmentKeys holds each camera's segment key (DEV-7, CLK-1).
@@ -78,28 +79,6 @@ type SegmentKeys interface {
 	// absent key is erased already.
 	Erase(camera string) error
 }
-
-// SecretsKeys keeps segment keys in the sealed store, one static device
-// slot per camera under SegmentSlots.
-func SecretsKeys(s *clerk.Secrets) SegmentKeys { return secretsKeys{s} }
-
-type secretsKeys struct{ s *clerk.Secrets }
-
-func (k secretsKeys) Make(camera string) error {
-	if k.s.Has(SegmentSlots + camera) {
-		return nil
-	}
-	key := make([]byte, maxSegKey)
-	defer clear(key)
-	rand.Read(key)
-	return k.s.Put(SegmentSlots+camera, clerk.KindStatic, key)
-}
-
-func (k secretsKeys) Lend(camera string, fn func(key []byte) error) error {
-	return k.s.DeviceKey(SegmentSlots + camera)(fn)
-}
-
-func (k secretsKeys) Erase(camera string) error { return k.s.Remove(SegmentSlots + camera) }
 
 // StoreConfig is the store's wiring.
 type StoreConfig struct {

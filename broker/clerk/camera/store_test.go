@@ -469,3 +469,25 @@ func TestSegmentKeyInSealedStore(t *testing.T) {
 		t.Fatal("the segment key is on disk or in the log")
 	}
 }
+
+// secretsKeys binds SegmentKeys to the sealed store, one static device
+// slot per camera under SegmentSlots, as part (d) does.
+func SecretsKeys(s *clerk.Secrets) SegmentKeys { return secretsKeys{s} }
+
+type secretsKeys struct{ s *clerk.Secrets }
+
+func (k secretsKeys) Make(camera string) error {
+	if k.s.Has(SegmentSlots + camera) {
+		return nil
+	}
+	key := make([]byte, maxSegKey)
+	defer clear(key)
+	rand.Read(key)
+	return k.s.Put(SegmentSlots+camera, clerk.KindStatic, key)
+}
+
+func (k secretsKeys) Lend(camera string, fn func(key []byte) error) error {
+	return k.s.DeviceKey(SegmentSlots + camera)(fn)
+}
+
+func (k secretsKeys) Erase(camera string) error { return k.s.Remove(SegmentSlots + camera) }
