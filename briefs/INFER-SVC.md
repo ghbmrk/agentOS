@@ -2,9 +2,9 @@
 
 **Acceptance tests:** each slice's tests are named under its slice below (E1 to E3); the first PR's INF-* tests are listed in the original brief further down and have merged.
 
-## Embeddings-only re-scope (2026-10-28, at main 688d522; D-225)
+## Embeddings-only re-scope (2026-10-28, at main 688d522; D-230)
 
-**Decisions.** Mark answered the two questions of the PLN-7 re-scope draft (#3657, closed unmerged): Q1 "B, embeddings only" (the local model ships as an embedding model, with no local generative route for now) and Q2 "A, Apache-2.0 model". D-225 records both. This section supersedes the original brief below wherever they differ.
+**Decisions.** Mark answered the two questions of the PLN-7 re-scope draft (#3657, closed unmerged): Q1 "B, embeddings only" (the local model ships as an embedding model, with no local generative route for now) and Q2 "A, Apache-2.0 model". D-230 records both. This section supersedes the original brief below wherever they differ.
 
 **What stands.** The first PR at the original split merged (#2285, #2503, #2508): `broker/infer` (protocol, client), `broker/infer/supervise`, `broker/cmd/agentos-infer` against a fake runtime (`runtime_none.go`), the agentosd wiring (`broker/cmd/agentosd/infer.go`, `-infer` off), the guard entries, the risk class and the G2 list lines (INFER-A1). INF-1, INF-2, INF-4, INF-5, INF-6 and INF-8 stand as built. The protocol keeps the ops `hello` and `embed` only.
 
