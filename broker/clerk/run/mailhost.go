@@ -51,12 +51,13 @@ type MailHost struct {
 
 	planned planState // setup's account plan (accountPlan)
 
-	stepping chan struct{}  // the worker's step in flight (planSenders); setup and removal wait for it
-	kick     chan struct{}  // wakes the worker; buffered, sent to without blocking
-	ws       worldState     // the host's own world's sources (world.go)
-	srec     *sealedSenders // the senders record of the account at srecAt, between steps (senders.go)
-	srecAt   int64
-	own      bool // the world is the host's own: each read's clerk is bound to its account (worldAt)
+	stepping   chan struct{}  // the worker's step in flight (planSenders); setup and removal wait for it
+	kick       chan struct{}  // wakes the worker; buffered, sent to without blocking
+	ws         worldState     // the host's own world's sources (world.go)
+	srec       *sealedSenders // the senders record of the account at srecAt, between steps (senders.go)
+	srecAt     int64
+	sendersWhy string // why the last senders step failed (trouble); "" if it did not
+	own        bool   // the world is the host's own: each read's clerk is bound to its account (worldAt)
 }
 
 // notice is one thing the owner is told until the owner has read it. Seq
@@ -339,7 +340,7 @@ func (h *MailHost) status() OwnerStatus {
 	if why != "" {
 		st.Lines = append(st.Lines, why)
 	}
-	if l := sendersLine(h.ws.sendersNow()); h.own && h.cur != nil && l != "" {
+	if l := sendersLine(h.ws.sendersNow(), h.sendersWhy); h.own && h.cur != nil && l != "" {
 		st.Lines = append(st.Lines, l)
 	}
 	if h.cur != nil && len(h.cur.Status.Lines) > 0 {

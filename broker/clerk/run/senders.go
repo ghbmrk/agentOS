@@ -190,6 +190,10 @@ func (h *MailHost) readSenders() (more bool) {
 			h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, err
 		}
 		h.ws.keepSenders(changes, st, hist, known, contacts)
+		h.sendersWhy = ""
+		if err != nil {
+			h.sendersWhy, _ = trouble(err, nil)
+		}
 	}
 	if h.cfg.stepped != nil {
 		h.cfg.stepped(more, st == sendersFull)
@@ -198,13 +202,13 @@ func (h *MailHost) readSenders() (more bool) {
 }
 
 // sendersLine is STATUS's line while the senders read gives no history, or
-// "" once it does.
-func sendersLine(st sendersState) string {
+// "" once it does; why is the failed step's reason (trouble).
+func sendersLine(st sendersState, why string) string {
 	switch st {
 	case sendersReading:
 		return "Unsubscribing waits until I have read through your mailbox once, to learn who writes to you."
 	case sendersFailed:
-		return "Unsubscribing is paused: my last read of who writes to you failed. I'll try again when your mail changes."
+		return "Unsubscribing is paused: I could not finish reading who writes to you: " + why + ". I'll try again at my next read of your mail, within a day."
 	case sendersOver:
 		return "Unsubscribing is off: more people write to you, or you write to more people, than I can keep track of."
 	}

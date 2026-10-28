@@ -183,7 +183,7 @@ func TestIncompleteReadBlanksAll(t *testing.T) {
 		r.h.listing(true) // a mail read: the worker steps
 		eventually(t, "a failed step", func() bool { return r.steps.Load() > n })
 		noHistory(t, "after a folder failed", r.h.world())
-		if !has(r.h.status().Lines, "my last read of who writes to you failed") {
+		if !has(r.h.status().Lines, "could not finish reading who writes to you") {
 			t.Fatalf("status %q", r.h.status().Lines)
 		}
 		srv.FailList("Archive", false)

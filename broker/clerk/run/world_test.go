@@ -479,7 +479,8 @@ func TestTheClerkJudgesInItsOwnAccountsWorld(t *testing.T) {
 }
 
 // worldRig is a host with its own world over an IMAP account at a made-up
-// provider, its senders read answered by a gate, and the owner's socket.
+// provider, its senders read answered by a gate, and the owner's socket,
+// returned once the worker's start-up step has ended.
 func worldRig(t *testing.T, edit func(*MailConfig)) (*MailHost, MailOwner, string) {
 	t.Helper()
 	dir := shortDir(t)
@@ -499,6 +500,12 @@ func worldRig(t *testing.T, edit func(*MailConfig)) (*MailHost, MailOwner, strin
 		edit(&c)
 	}
 	h := NewMailHost(t.Context(), dir, sec, c)
+	// The worker's start-up step reads the world (planSenders' authServ),
+	// which caches the settings: it settles before a test resets them.
+	eventually(t, "the start-up senders read", func() bool { _, ok := h.ws.senders(); return ok })
+	h.mu.Lock()
+	h.idle()
+	h.mu.Unlock()
 	return h, MailOwner{serveMail(t, h, MailOwnerSide)}, dir
 }
 
