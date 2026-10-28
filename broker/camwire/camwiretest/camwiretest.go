@@ -29,7 +29,9 @@ func NewPasskey(t testing.TB) Passkey {
 }
 
 // Owner is the passkey as a node pins it.
-func (p Passkey) Owner() camwire.Owner { return camwire.Owner{RPID: RP, Point: Point(&p.priv.PublicKey)} }
+func (p Passkey) Owner() camwire.Owner {
+	return camwire.Owner{RPID: RP, Point: Point(&p.priv.PublicKey)}
+}
 
 // Assert is the passkey's honest assertion over msg: user present and
 // verified, challenge camwire.Challenge(msg), origin https://RP.
