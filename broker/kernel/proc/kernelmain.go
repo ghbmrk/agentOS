@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -31,11 +33,15 @@ type MainConfig struct {
 	MeterUID  int    // the model clerk's uid, its only peer
 	// LinkSock is LinkSide's socket, "" for none (a box with no edge
 	// link); LinkUID is agentos-link's uid, its only peer.
-	LinkSock  string
-	LinkUID   int
-	Clerks    map[string]Remote
-	KeyDir    string // the subject-key table's directory (KernelConfig.KeyDir)
-	BackupDir string // the backups' records (KernelConfig.BackupDir)
+	LinkSock string
+	LinkUID  int
+	Clerks   map[string]Remote
+	// Content are the content clerks, by the store each seals into: each
+	// one's ContentSide socket and uid, its only peer.
+	Content    map[string]Remote
+	KeyDir     string // the subject-key table's directory (KernelConfig.KeyDir)
+	ContentDir string // the content stores' directory (KernelConfig.ContentDir)
+	BackupDir  string // the backups' records (KernelConfig.BackupDir)
 	// Peers are the uids this process must not run as: every peer above
 	// (procguard.Isolate). The main fills it from the uids it was given.
 	Peers []int
@@ -167,9 +173,13 @@ func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
+// ErrNoContentDir: nor with nowhere to keep sealed items.
+var ErrNoContentDir = errors.New("run: a kernel needs its content stores' directory")
+
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
-// opens the log and the subject-key table under keys, serves OwnerSide,
-// MeterSide and, given its socket, LinkSide, and runs plans every Tick until ctx ends. anchor is where
+// opens the log, the subject-key table and the content stores under keys,
+// serves OwnerSide, MeterSide, LinkSide given its socket and each content
+// clerk's ContentSide, and runs plans every Tick until ctx ends. anchor is where
 // signed heads go (LOG-2).
 func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anchor kernel.Anchor) error {
 	if cfg.KeyDir == "" {
@@ -177,6 +187,9 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	if cfg.BackupDir == "" {
 		return ErrNoBackupDir
+	}
+	if cfg.ContentDir == "" {
+		return ErrNoContentDir
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("run: the kernel never runs as root")
@@ -213,6 +226,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
 		Pub: keys.Head.Public().(ed25519.PublicKey), Sign: keys.Head,
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
+		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
 		FirstEdge: first, LinkKey: keys.LinkKey, Clock: clock,
 	}, clock())
@@ -237,6 +251,10 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	sides := []served{{cfg.OwnerSock, cfg.OwnerUID, OwnerSide}, {cfg.MeterSock, cfg.MeterUID, MeterSide}}
 	if cfg.LinkSock != "" {
 		sides = append(sides, served{cfg.LinkSock, cfg.LinkUID, LinkSide})
+	}
+	for _, store := range slices.Sorted(maps.Keys(cfg.Content)) {
+		r := cfg.Content[store]
+		sides = append(sides, served{r.Socket, r.UID, ContentSide(store)})
 	}
 	errs := make(chan error, len(sides))
 	for _, s := range sides {

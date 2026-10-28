@@ -34,6 +34,12 @@ type KernelConfig struct {
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
 	KeyDir string
+	// ContentDir holds the content stores (FileContent), one directory
+	// each: every one of Stores and every one already there
+	// (OpenContentStores). It needs a KeyDir; "" opens no store, so Seal
+	// refuses (kernel.ErrStore); only tests start a kernel so.
+	ContentDir string
+	Stores     []string // the content clerks' stores (ContentSide)
 	// BackupDir is where the kernel keeps its backups' records, sealed
 	// under Key (MIG-4-recovery-e3); it needs a KeyDir. "" keeps backups
 	// off; only tests start a kernel so.
@@ -98,9 +104,9 @@ type Kernel struct {
 // to be probed through their clerk (KRN-8). With no anchors from the store
 // and none in the log, the kernel is setup-only (kernel.Setup): its sockets
 // serve only the setup step until the owner's hardware keys are logged.
-// With a KeyDir it then opens the subject-key table, which re-applies every
-// logged erase to it; no content store exists yet, so an erase's stores
-// stay unconfirmed and Tick retries them.
+// With a KeyDir it then opens the subject-key table and the content stores
+// in ContentDir, and re-applies every logged erase to them; a store an
+// erase names that is not there stays unconfirmed, and Tick retries it.
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
@@ -137,8 +143,15 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock, head: cfg.Sign}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
+		stores := map[string]kernel.ContentStore{}
+		if err == nil && cfg.ContentDir != "" {
+			if stores, err = OpenContentStores(cfg.ContentDir, cfg.Stores); err != nil {
+				st.Close()
+				return nil, fmt.Errorf("run: the content stores: %w", err)
+			}
+		}
 		if err == nil {
-			h.content, err = k.OpenContent(keys, map[string]kernel.ContentStore{}, now)
+			h.content, err = k.OpenContent(keys, stores, now)
 		}
 		if err != nil {
 			st.Close()
@@ -151,9 +164,9 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			}
 			k.OpenBackups(h.bk.set)
 		}
-	} else if cfg.BackupDir != "" {
+	} else if cfg.BackupDir != "" || cfg.ContentDir != "" {
 		st.Close()
-		return nil, errors.New("run: backups need the subject-key table")
+		return nil, errors.New("run: backups and content stores need the subject-key table")
 	}
 	return h, nil
 }
