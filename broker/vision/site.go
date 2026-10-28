@@ -36,6 +36,10 @@ const (
 	DefaultZoneEventsPerMinute = 6
 	// DefaultAsksPerMinute bounds a planner's asks of the site a minute.
 	DefaultAsksPerMinute = 12
+	// MaxCount caps every count and coalesced count leaving the site: a
+	// number at the cap means that many or more. Uncapped, each is a
+	// number a hostile service chooses by how many tracks it fakes.
+	MaxCount = 10
 	// MaxRange is the farthest ground point, in metres from its camera,
 	// a track is placed at; past it a ray is too near the horizon to
 	// place anything.
@@ -80,7 +84,8 @@ type Zone struct {
 // carries it (DEV-8): no box, frame or face, only the zone, the kind, the
 // class, the client's own object number and the class's count in the zone.
 // Coalesced counts that zone's events of the class the rate limit dropped
-// since its last one. At is unix seconds.
+// since its last one. Count and Coalesced are capped at MaxCount. At is
+// unix seconds.
 type ZoneEvent struct {
 	Zone      string
 	Kind      string
@@ -92,8 +97,10 @@ type ZoneEvent struct {
 }
 
 // Count is the answer to a planner's "count" ask: how many objects of the
-// class (every class but the drone when empty) stand in the zone, or are
-// seen by the camera, now.
+// class (every class but the drone when empty) stand in the zone, and are
+// seen by the camera if one is named, now, capped at MaxCount. A count
+// names a zone, so the objects it counts entered the zone, and each entry
+// was a zone event the owner can see.
 type Count struct {
 	Camera string
 	Zone   string
@@ -370,7 +377,7 @@ func (s *Site) zoneEvents(id uint64, o *object, now time.Time) []ZoneEvent {
 			continue
 		}
 		if e, ok := s.pass(z.ID, o.class, now); ok {
-			e.Kind, e.Object, e.Count = kind, id, s.countZone(z.ID, o.class)
+			e.Kind, e.Object, e.Count = kind, id, min(s.countZone(z.ID, o.class), MaxCount)
 			out = append(out, e)
 		}
 	}
@@ -401,7 +408,7 @@ func (s *Site) pass(zone string, class Class, now time.Time) (ZoneEvent, bool) {
 	}
 	r.last[class] = now
 	r.sent = append(r.sent, now)
-	e := ZoneEvent{Zone: zone, Class: class, Coalesced: r.coalesced[class], At: now.Unix()}
+	e := ZoneEvent{Zone: zone, Class: class, Coalesced: min(r.coalesced[class], MaxCount), At: now.Unix()}
 	delete(r.coalesced, class)
 	return e, true
 }
@@ -418,12 +425,17 @@ func (s *Site) countZone(zone string, class Class) int {
 }
 
 // Answer answers a planner's ask: "count" is the only op, and its answer
-// a Count, whose fields hold ids, a class and a number only. Every ask is
-// checked by CheckAsk, and past AsksPerMinute a minute is ErrBusy, so a
-// planner polling counts gets a few bits a minute.
+// a Count, whose fields hold ids, a class and a number from 0 to MaxCount
+// only. Every ask is checked by CheckAsk and must name one of the owner's
+// zones, and past AsksPerMinute a minute is ErrBusy, so a planner polling
+// counts gets under 4 bits an ask, and only by fake tracks that also
+// show as visitors in the zone (the #3730 Security review).
 func (s *Site) Answer(a Ask, now time.Time) (Count, error) {
 	if err := CheckAsk(a); err != nil {
 		return Count{}, err
+	}
+	if !slices.ContainsFunc(s.zones, func(z Zone) bool { return z.ID == a.Zone }) {
+		return Count{}, ErrNotOffered
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -451,6 +463,7 @@ func (s *Site) Answer(a Ask, now time.Time) (Count, error) {
 		}
 		c.N++
 	}
+	c.N = min(c.N, MaxCount)
 	return c, nil
 }
 

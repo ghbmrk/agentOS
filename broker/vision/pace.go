@@ -65,7 +65,10 @@ func (p *Pace) Take(camera string, at time.Time) bool {
 	if p.last == nil {
 		p.last = map[string]time.Time{}
 	}
-	if last, ok := p.last[camera]; ok && at.Sub(last) < every && !at.Before(last) {
+	// A frame stamped before the camera's last taken one is not taken,
+	// as the tracker refuses it (ErrFrameOrder), so stamps that run
+	// backwards cannot pass every frame under the floor.
+	if last, ok := p.last[camera]; ok && at.Sub(last) < every {
 		return false
 	}
 	p.last[camera] = at

@@ -222,6 +222,73 @@ func TestInconsistentBoxesDropped(t *testing.T) {
 	}
 }
 
+// The combined review of #3730: at the 1 fps floor, a car in view for two
+// frames is a confirmed track, and busy honest cameras never mark the
+// service faulty: each camera has its own window, and a short track that
+// joined a second frame is not inconsistent.
+func TestTrackerFloorRateBusyStreets(t *testing.T) {
+	var faulty atomic.Int32
+	tr := NewTracker()
+	tr.Faulty = func() { faulty.Add(1) }
+	confirmed := 0
+	for s := range 130 {
+		at := t0.Add(time.Duration(s) * time.Second)
+		for k, cam := range []string{"a", "b", "c"} {
+			// A new car every two seconds, in view for two frames,
+			// crossing 200 px a second.
+			x := 10 + 200*(s%2)
+			ds := []Detection{{Class: Vehicle, Box: Box{X0: x, Y0: 100 + 10*k, X1: x + 160, Y1: 200 + 10*k}, Conf: 90}}
+			u, err := tr.Observe(cam, FrameRef{At: at, Width: 640, Height: 480}, ds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			confirmed += len(u.Tracks)
+		}
+	}
+	if confirmed < 3*60 {
+		t.Fatalf("%d confirmed frames of 2-frame cars at the floor rate", confirmed)
+	}
+	if faulty.Load() != 0 {
+		t.Fatalf("faulty %d times on honest busy cameras", faulty.Load())
+	}
+	// The window is per camera: one camera's few inconsistent boxes and
+	// another's clean walker do not add up to a faulty window.
+	tr = NewTracker()
+	tr.Faulty = func() { faulty.Add(1) }
+	frames := int(DefaultDropWindow/frameStep) + 1
+	for i := range frames {
+		var ds []Detection
+		if i%4 == 0 && i < 4*DefaultDropMin*2/3 {
+			x := (i * 97) % 560
+			ds = append(ds, Detection{Class: Person, Box: Box{X0: x, Y0: 0, X1: x + 30, Y1: 60}, Conf: 90})
+		}
+		observe(t, tr, "scatter", i, ds...)
+		if i < DefaultDropMin/2 {
+			observe(t, tr, "clean", i, Detection{Class: Person, Box: walker(10, i), Conf: 80})
+		}
+	}
+	if faulty.Load() != 0 {
+		t.Fatal("two cameras' windows added up to a faulty one")
+	}
+	// A person in view for two frames at the floor rate is a track too.
+	tr = NewTracker()
+	n := 0
+	for s := range 2 {
+		u, _ := tr.Observe("d", FrameRef{At: t0.Add(time.Duration(s) * time.Second), Width: 640, Height: 480}, []Detection{{Class: Person, Box: walker(10, 10*s), Conf: 80}})
+		n += len(u.Tracks)
+	}
+	if n != 1 {
+		t.Fatalf("a person seen twice a second apart: %d confirmed frames", n)
+	}
+	// At 5 fps two frames are still not enough.
+	tr = NewTracker()
+	for i := range 2 {
+		if u := observe(t, tr, "front", i, Detection{Class: Person, Box: walker(10, i), Conf: 80}); len(u.Tracks) != 0 {
+			t.Fatal("confirmed after two frames 200 ms apart")
+		}
+	}
+}
+
 // A tentative track of a scattering service that happens to hit three
 // frames in a row is confirmed; the drop rule is about the rate, not one
 // lucky track, and the tentative track's earlier hits are not drops.
@@ -232,9 +299,13 @@ func TestTentativeHitsCountOnlyWhenTheyDie(t *testing.T) {
 	if u.Dropped != 0 {
 		t.Fatalf("dropped %d while tentative", u.Dropped)
 	}
-	u = observe(t, tr, "front", 2)
-	if u.Dropped != 2 {
-		t.Fatalf("a dead tentative track dropped %d, want its 2 hits", u.Dropped)
+	u = observe(t, tr, "front", 2, Detection{Class: Person, Box: Box{X0: 500, Y0: 300, X1: 540, Y1: 400}, Conf: 80})
+	if u.Dropped != 2 || u.lone != 0 {
+		t.Fatalf("a dead tentative track of 2 hits: dropped %d, inconsistent %d; want 2 and 0", u.Dropped, u.lone)
+	}
+	u = observe(t, tr, "front", 3)
+	if u.Dropped != 1 || u.lone != 1 {
+		t.Fatalf("a dead tentative track of 1 hit: dropped %d, inconsistent %d; want 1 and 1", u.Dropped, u.lone)
 	}
 }
 
@@ -249,7 +320,7 @@ func TestTrackerBoundsTracks(t *testing.T) {
 	}
 	tr.cams["full"] = c
 	u, _ := tr.Observe("full", FrameRef{At: t0, Width: 640, Height: 480}, []Detection{{Class: Person, Box: Box{X0: 100, Y0: 100, X1: 140, Y1: 200}, Conf: 90}})
-	if u.Dropped != 1 {
+	if u.Dropped != 1 || u.lone != 1 {
 		t.Fatalf("a detection past MaxTracks: %+v", u)
 	}
 }

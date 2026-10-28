@@ -53,6 +53,16 @@ func TestFrameRateDropsUnderAdmission(t *testing.T) {
 			t.Fatalf("%s: %d frames in 10 s under admission, want %d", cam, n, want)
 		}
 	}
+	// Frames stamped backwards are not taken (#3730 reviews).
+	back := 0
+	for i := range 100 {
+		if p.Take("front", t0.Add(time.Hour-time.Duration(i)*time.Second)) {
+			back++
+		}
+	}
+	if back != 1 {
+		t.Fatalf("%d of 100 frames stamped backwards taken, want the first only", back)
+	}
 	if p.Take("Front Door", t0) {
 		t.Fatal("a camera id outside the alphabet")
 	}

@@ -165,8 +165,8 @@ func TestDistinctCountWithoutIdentity(t *testing.T) {
 	if c.N != 2 {
 		t.Fatalf("count %d, want 2 people", c.N)
 	}
-	if c, _ := s.Answer(Ask{Op: "count", Camera: "side"}, t0); c.N != 1 {
-		t.Fatalf("count on the side camera %d, want 1", c.N)
+	if c, _ := s.Answer(Ask{Op: "count", Camera: "side", Zone: "porch"}, t0); c.N != 1 {
+		t.Fatalf("count in the porch on the side camera %d, want 1", c.N)
 	}
 	enters := 0
 	for _, e := range all {
@@ -314,18 +314,22 @@ func TestZoneEventsRateLimited(t *testing.T) {
 			t.Fatalf("%d events in a minute from %d", n, at)
 		}
 	}
-	deer, coalesced := 0, 0
+	deer, capped := 0, false
 	for _, e := range got {
-		if e.Class == Deer {
-			deer++
-			coalesced += e.Coalesced
+		if e.Class != Deer {
+			continue
 		}
+		deer++
+		if e.Coalesced > MaxCount || e.Count > MaxCount {
+			t.Fatalf("an event's numbers past MaxCount: %+v", e)
+		}
+		capped = capped || e.Coalesced == MaxCount
 	}
 	if deer > 2*DefaultZoneEventsPerMinute+2 || deer < 2*(DefaultZoneEventsPerMinute-1) {
 		t.Fatalf("%d deer events in two minutes", deer)
 	}
-	if coalesced == 0 || deer+coalesced+s.rates["porch"].coalesced[Deer] != 120 {
-		t.Fatalf("deer: %d events carrying %d coalesced, %d held, want 120 in all", deer, coalesced, s.rates["porch"].coalesced[Deer])
+	if !capped {
+		t.Fatalf("no deer event carried a coalesced count at the cap: %+v", got)
 	}
 }
 
@@ -357,6 +361,14 @@ func TestPlannerCountAsks(t *testing.T) {
 	if _, err := s.Answer(Ask{Op: "count"}, t0); !errors.Is(err, ErrNotOffered) {
 		t.Fatalf("a count of nothing: %v", err)
 	}
+	// A count names one of the owner's zones: the camera alone, or a
+	// zone the owner never drew, is not offered (the #3730 Security
+	// review: a count no zone event shows is a hidden channel).
+	for _, a := range []Ask{{Op: "count", Camera: "down"}, {Op: "count", Zone: "garage"}} {
+		if _, err := s.Answer(a, t0); !errors.Is(err, ErrNotOffered) {
+			t.Fatalf("%+v: %v", a, err)
+		}
+	}
 	if _, err := s.Answer(Ask{Op: "find", Zone: "porch"}, t0); !errors.Is(err, ErrNoMatch) {
 		t.Fatalf("a find: %v", err)
 	}
@@ -370,6 +382,29 @@ func TestPlannerCountAsks(t *testing.T) {
 	}
 	if _, err := s.Answer(Ask{Op: "count", Zone: "porch"}, t0.Add(61*time.Second)); err != nil {
 		t.Fatalf("a minute on: %v", err)
+	}
+	// A count past MaxCount reads MaxCount.
+	s = newSite(t, porch)
+	var ts []TrackState
+	for k := range 3 * MaxCount {
+		ts = append(ts, state("down", uint64(k+1), Person, footBox(0.1+0.12*float64(k), 2), t0))
+	}
+	s.Apply(Update{Camera: "down", Tracks: ts})
+	for i := range ts {
+		ts[i].At = t0.Add(2 * time.Minute)
+	}
+	ts = append(ts, state("down", 999, Person, footBox(3.9, 2), t0.Add(2*time.Minute)))
+	es := s.Apply(Update{Camera: "down", Tracks: ts})
+	if len(es) == 0 {
+		t.Fatal("no events from 31 people")
+	}
+	for _, e := range es {
+		if e.Count != MaxCount {
+			t.Fatalf("an event among 31 people: %+v, want its count at MaxCount", e)
+		}
+	}
+	if c, err := s.Answer(Ask{Op: "count", Zone: "porch"}, t0); err != nil || c.N != MaxCount {
+		t.Fatalf("count of %d people: %+v %v", 3*MaxCount, c, err)
 	}
 	ty := reflect.TypeOf(Count{})
 	for i := range ty.NumField() {

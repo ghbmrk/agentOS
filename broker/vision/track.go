@@ -16,10 +16,12 @@ import (
 // remaining low-confidence detections match the confirmed tracks left, then
 // the remaining high ones match tentative tracks or start new ones. A
 // tentative track is confirmed once it has been matched in Confirm frames
-// in a row, and dies at its first miss. A detection that joins no confirmed
-// track is dropped and counted: a low one at once, and a tentative track's
-// detections when it dies. A sustained drop rate marks the service as
-// faulty, which its caller answers by restarting it.
+// in a row, or in two frames ConfirmSpan apart (so at the floor rate a car
+// seen twice is a track), and dies at its first miss. A detection that
+// joins no confirmed track is dropped and counted. A confident detection
+// that joins no second frame is inconsistent, and a sustained rate of
+// those on one camera marks the service as faulty, which its caller
+// answers by restarting it.
 //
 // What leaves the tracker is a confirmed track's class and box, for the
 // site's ground plane and the owner's page only, plate events through
@@ -36,10 +38,17 @@ const (
 	// DefaultConfirm is the frames in a row a tentative track must be
 	// matched in before it is confirmed.
 	DefaultConfirm = 3
+	// DefaultConfirmSpan is how long a tentative track matched in at
+	// least two frames must have lived to be confirmed before Confirm
+	// frames, so a car in view for two frames at the floor rate is
+	// still a track.
+	DefaultConfirmSpan = time.Second
 	// DefaultLost is how long a confirmed track lives unmatched.
 	DefaultLost = 3 * time.Second
 	// DefaultDropWindow, DefaultDropMin and DefaultDropRate are the
-	// faulty rule: in a window of at least DropMin detections, more than
+	// faulty rule: in one camera's window of at least DropMin confident
+	// detections, more than DropRate percent of them inconsistent (in
+	// no second frame). The constants follow:
 	// DropRate percent dropped.
 	DefaultDropWindow = time.Minute
 	DefaultDropMin    = 120
@@ -100,6 +109,9 @@ type Update struct {
 	Evidence []Evidence
 	// Dropped is the detections dropped by this call.
 	Dropped int
+	// lone is the confident detections among Dropped that joined no
+	// second frame: what the faulty rule counts.
+	lone int
 }
 
 // ErrFrameOrder is Observe's answer to a frame older than its camera's
@@ -109,10 +121,12 @@ var ErrFrameOrder = errors.New("vision: frame older than the camera's last")
 // Tracker tracks each camera's detections. The zero value is not ready;
 // use NewTracker.
 type Tracker struct {
-	HighConf int
-	Confirm  int
-	Lost     time.Duration
-	// DropWindow, DropMin and DropRate (percent) are the faulty rule.
+	HighConf    int
+	Confirm     int
+	ConfirmSpan time.Duration
+	Lost        time.Duration
+	// DropWindow, DropMin and DropRate (percent) are the faulty rule,
+	// applied to each camera's own window.
 	DropWindow time.Duration
 	DropMin    int
 	DropRate   int
@@ -126,20 +140,22 @@ type Tracker struct {
 
 	mu   sync.Mutex
 	cams map[string]*camTracks
-	win  dropWindow
 	// drops counts every dropped detection.
 	drops int
 }
 
+// dropWindow counts one camera's confident detections and the
+// inconsistent ones among them: those that joined no second frame.
 type dropWindow struct {
-	start          time.Time
-	total, dropped int
+	start       time.Time
+	total, lone int
 }
 
 type camTracks struct {
 	next   uint64
 	last   time.Time
 	tracks []*track
+	win    dropWindow
 }
 
 type track struct {
@@ -148,6 +164,7 @@ type track struct {
 	box, prev Box
 	at        time.Time
 	prevAt    time.Time
+	first     time.Time
 	hits      int
 	hit       bool      // matched in the current frame
 	det       Detection // the detection matched last
@@ -160,7 +177,7 @@ type track struct {
 // NewTracker returns a Tracker with the default rule.
 func NewTracker() *Tracker {
 	return &Tracker{
-		HighConf: DefaultHighConf, Confirm: DefaultConfirm, Lost: DefaultLost,
+		HighConf: DefaultHighConf, Confirm: DefaultConfirm, ConfirmSpan: DefaultConfirmSpan, Lost: DefaultLost,
 		DropWindow: DefaultDropWindow, DropMin: DefaultDropMin, DropRate: DefaultDropRate,
 	}
 }
@@ -203,7 +220,13 @@ func (t *Tracker) Observe(camera string, f FrameRef, ds []Detection) (Update, er
 	u := Update{Camera: camera}
 	t.match(c, camera, f, ds, &u)
 	t.endStale(c, camera, f.At, &u)
-	faulty := t.count(f.At, len(ds), u.Dropped)
+	confident := 0
+	for _, d := range ds {
+		if d.Conf >= max(t.HighConf, 1) {
+			confident++
+		}
+	}
+	faulty := t.count(c, f.At, confident, u)
 	t.mu.Unlock()
 	if faulty && t.Faulty != nil {
 		t.Faulty()
@@ -218,13 +241,14 @@ func (t *Tracker) Expire(now time.Time) Update {
 	defer t.mu.Unlock()
 	var u Update
 	for id, c := range t.cams {
+		lone := u.lone
 		t.endStale(c, id, now, &u)
+		c.win.lone += u.lone - lone
 		if len(c.tracks) == 0 && now.Sub(c.last) > time.Hour {
 			delete(t.cams, id)
 		}
 	}
 	t.drops += u.Dropped
-	t.win.dropped += u.Dropped
 	return u
 }
 
@@ -251,7 +275,7 @@ func (t *Tracker) match(c *camTracks, camera string, f FrameRef, ds []Detection,
 	keep := c.tracks[:0]
 	for _, tr := range c.tracks {
 		if tr.id == 0 && !tr.hit {
-			u.Dropped += tr.hits
+			u.drop(tr)
 			continue
 		}
 		keep = append(keep, tr)
@@ -262,20 +286,29 @@ func (t *Tracker) match(c *camTracks, camera string, f FrameRef, ds []Detection,
 		if used[j] {
 			continue
 		}
-		if d.Conf < high || len(c.tracks) >= MaxTracks {
+		if d.Conf < high {
 			u.Dropped++
 			continue
 		}
-		tr := &track{class: d.Class, box: d.Box, at: f.At, hit: true, det: d}
+		if len(c.tracks) >= MaxTracks {
+			u.Dropped++
+			u.lone++
+			continue
+		}
+		tr := &track{class: d.Class, box: d.Box, at: f.At, first: f.At, hit: true, det: d}
 		tr.see(f, d)
 		c.tracks = append(c.tracks, tr)
 	}
 	confirm := max(t.Confirm, 1)
+	span := t.ConfirmSpan
+	if span <= 0 {
+		span = DefaultConfirmSpan
+	}
 	for _, tr := range c.tracks {
 		if !tr.hit {
 			continue
 		}
-		if tr.id == 0 && tr.hits >= confirm {
+		if tr.id == 0 && (tr.hits >= confirm || tr.hits >= 2 && tr.at.Sub(tr.first) >= span) {
 			c.next++
 			tr.id = c.next
 		}
@@ -382,7 +415,7 @@ func (t *Tracker) endStale(c *camTracks, camera string, now time.Time, u *Update
 			continue
 		}
 		if tr.id == 0 {
-			u.Dropped += tr.hits
+			u.drop(tr)
 			continue
 		}
 		k := TrackKey{Camera: camera, Track: tr.id}
@@ -400,16 +433,27 @@ func (t *Tracker) endStale(c *camTracks, camera string, now time.Time, u *Update
 	c.tracks = keep
 }
 
-// count adds a frame's detections and drops to the window and reports
-// whether the window just closed over the faulty rate. The caller holds mu.
-func (t *Tracker) count(now time.Time, n, dropped int) bool {
-	t.drops += dropped
-	w := &t.win
+// drop counts dead tentative track tr's detections as dropped, and as
+// inconsistent when it joined no second frame.
+func (u *Update) drop(tr *track) {
+	u.Dropped += tr.hits
+	if tr.hits == 1 {
+		u.lone++
+	}
+}
+
+// count adds a frame's confident detections and u's inconsistent ones to
+// camera c's window and reports whether the window just closed over the
+// faulty rate. Each camera has its own window, so honest short tracks on
+// several busy cameras never add up to one. The caller holds mu.
+func (t *Tracker) count(c *camTracks, now time.Time, confident int, u Update) bool {
+	t.drops += u.Dropped
+	w := &c.win
 	if w.start.IsZero() || now.Before(w.start) {
 		*w = dropWindow{start: now}
 	}
-	w.total += n
-	w.dropped += dropped
+	w.total += confident
+	w.lone += u.lone
 	span := t.DropWindow
 	if span <= 0 {
 		span = DefaultDropWindow
@@ -417,7 +461,7 @@ func (t *Tracker) count(now time.Time, n, dropped int) bool {
 	if now.Sub(w.start) < span {
 		return false
 	}
-	faulty := w.total >= max(t.DropMin, 1) && w.dropped*100 > t.DropRate*w.total
+	faulty := w.total >= max(t.DropMin, 1) && w.lone*100 > t.DropRate*w.total
 	*w = dropWindow{start: now}
 	return faulty
 }
