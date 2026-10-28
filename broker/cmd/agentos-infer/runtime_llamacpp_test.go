@@ -162,32 +162,38 @@ func TestLlamaDeeplyNestedArraysAreRefused(t *testing.T) {
 
 func TestLlamaRefusedModelIsErrRefused(t *testing.T) {
 	l := newLlama(t)
-	if _, err := l.Load(writeModel(t, "m.gguf", []byte("junk"))); !errors.Is(err, ErrRefused) {
-		t.Fatalf("Load = %v; want ErrRefused", err)
+	for name, data := range map[string][]byte{
+		"junk":                 []byte("junk"),
+		"a generative model":   gguf("qwen3", nil),
+		"a ranking model":      gguf("bert", u32(4)),
+		"pooling none (a LLM)": gguf("qwen3", u32(0)),
+	} {
+		if _, err := l.Load(writeModel(t, "m.gguf", data)); !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: Load = %v; want ErrRefused", name, err)
+		}
+		if l.cur != nil {
+			t.Errorf("%s: a refused model left a server", name)
+		}
 	}
 }
 
-func TestLlamaGenerateStartsALockedDownServer(t *testing.T) {
+func TestLlamaStartsALockedDownEmbeddingServer(t *testing.T) {
 	t.Setenv("AGENTOS_CANARY_SECRET", "canary-value-not-a-secret")
 	l := newLlama(t)
-	sv, err := l.Load(writeModel(t, "m.gguf", gguf("qwen3", nil)))
-	if err != nil || sv != (Serves{Generate: true}) {
-		t.Fatalf("Load = %+v, %v", sv, err)
-	}
-	got, err := l.Generate("hello", 7)
-	if err != nil || got != "reply to hello" {
-		t.Fatalf("Generate = %q, %v", got, err)
+	dim, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3))))
+	if err != nil || dim != fakeDim {
+		t.Fatalf("Load = %d, %v; want the probe's %d", dim, err, fakeDim)
 	}
 	dir := l.cur.dir
 	argv, _ := os.ReadFile(filepath.Join(dir, "argv"))
-	for _, want := range []string{"--host\n" + filepath.Join(dir, "s.sock"), "--offline", "--no-webui", "--no-slots",
-		"--parallel\n1", "--gpu-layers\n0", "--cache-ram\n0", "--ctx-size\n4096"} {
+	for _, want := range []string{"--host\n" + filepath.Join(dir, "s.sock"), "--embedding", "--pooling\nlast", "--offline",
+		"--no-webui", "--no-slots", "--parallel\n2", "--ctx-size\n4096", "--gpu-layers\n0"} {
 		if !strings.Contains(string(argv), want) {
 			t.Errorf("argv lacks %q: %q", want, argv)
 		}
 	}
-	if strings.Contains(string(argv), "--embedding") || strings.Contains(string(argv), "--port") {
-		t.Errorf("argv has --embedding or --port: %q", argv)
+	if strings.Contains(string(argv), "--port") {
+		t.Errorf("argv names a port: %q", argv)
 	}
 	env, _ := os.ReadFile(filepath.Join(dir, "env"))
 	if string(env) != "PATH=/usr/bin:/bin" {
@@ -197,13 +203,8 @@ func TestLlamaGenerateStartsALockedDownServer(t *testing.T) {
 
 func TestLlamaEmbedPlacesVectorsByIndex(t *testing.T) {
 	l := newLlama(t)
-	sv, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3))))
-	if err != nil || sv != (Serves{Dim: fakeDim}) {
-		t.Fatalf("Load = %+v, %v", sv, err)
-	}
-	argv, _ := os.ReadFile(filepath.Join(l.cur.dir, "argv"))
-	if !strings.Contains(string(argv), "--embedding") {
-		t.Errorf("an embedding model starts without --embedding: %q", argv)
+	if _, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err != nil {
+		t.Fatal(err)
 	}
 	vs, err := l.Embed([]string{"a", "bbb", "cc"})
 	if err != nil || len(vs) != 3 {
@@ -214,14 +215,11 @@ func TestLlamaEmbedPlacesVectorsByIndex(t *testing.T) {
 			t.Errorf("vector %d = %v; want the vector of a %d-byte text", i, vs[i], n)
 		}
 	}
-	if _, err := l.Generate("x", 1); err == nil {
-		t.Error("an embedding model generated")
-	}
 }
 
 func TestLlamaLoadReplacesTheServer(t *testing.T) {
 	l := newLlama(t)
-	m := writeModel(t, "m.gguf", gguf("qwen3", nil))
+	m := writeModel(t, "e.gguf", gguf("qwen3", u32(3)))
 	if _, err := l.Load(m); err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +236,7 @@ func TestLlamaLoadReplacesTheServer(t *testing.T) {
 		t.Fatalf("the old socket directory remains: %v", err)
 	}
 	l.stop()
-	if _, err := l.Generate("x", 1); err == nil {
+	if _, err := l.Embed([]string{"x"}); err == nil {
 		t.Fatal("a call after stop found a server")
 	}
 }
@@ -246,67 +244,60 @@ func TestLlamaLoadReplacesTheServer(t *testing.T) {
 func TestLlamaLoadFailureLeavesNothingRunning(t *testing.T) {
 	l := newLlama(t)
 	l.ready = 300 * time.Millisecond
-	if _, err := l.Load(writeModel(t, "slowstart.gguf", gguf("qwen3", nil))); err == nil || errors.Is(err, ErrRefused) {
+	if _, err := l.Load(writeModel(t, "slowstart.gguf", gguf("qwen3", u32(3)))); err == nil || errors.Is(err, ErrRefused) {
 		t.Fatalf("a server that never answers: Load = %v; want an ordinary error", err)
 	}
 	if l.cur != nil {
 		t.Fatal("a failed Load left a server")
 	}
 	l.exe = filepath.Join(t.TempDir(), "absent")
-	if _, err := l.Load(writeModel(t, "m.gguf", gguf("qwen3", nil))); err == nil || errors.Is(err, ErrRefused) {
+	if _, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err == nil || errors.Is(err, ErrRefused) {
 		t.Fatalf("an absent executable: Load = %v; want an ordinary error", err)
 	}
 }
 
+// lockedBuf is a log the service and the test both touch.
+type lockedBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+func (l *lockedBuf) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
+
 // llamaRig is the service over the adapter, on a unix socket.
-func llamaRig(t *testing.T, model []byte, name string, log io.Writer) (infer.Client, *llama) {
+func llamaRig(t *testing.T, name string, log io.Writer) infer.Client {
 	t.Helper()
+	model := gguf("qwen3", u32(3))
 	path := writeModel(t, name, model)
 	sum := sha256.Sum256(model)
-	l := newLlama(t)
 	cfg := Config{Name: "fake", Model: path, Pin: hex.EncodeToString(sum[:]),
-		CallTimeout: time.Second, GenerateTimeout: time.Second, Retry: 50 * time.Millisecond}
+		CallTimeout: time.Second, Retry: 50 * time.Millisecond}
 	sock := filepath.Join(t.TempDir(), "infer.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go newService(cfg, l, log).Serve(ln)
-	return infer.Client{Path: sock, Timeout: 10 * time.Second, GenerateTimeout: 10 * time.Second}, l
-}
-
-func TestLlamaGenerateFailuresAreUnavailableThenRecover(t *testing.T) {
-	c, _ := llamaRig(t, gguf("qwen3", nil), "m.gguf", nil)
-	if _, _, err := c.Generate(ctx(t), "ok", 5); err != nil {
-		t.Fatalf("first call: %v", err)
-	}
-	for _, p := range []string{"crash", "hang", "status", "malformed", "nocontent", "long", "huge"} {
-		text, _, err := c.Generate(ctx(t), p, 5)
-		if !unavailable(err) || text != "" {
-			t.Errorf("prompt %q: text %q err %v; want unavailable and no text", p, text, err)
-		}
-		deadline := time.Now().Add(15 * time.Second)
-		for {
-			text, _, err = c.Generate(ctx(t), "again", 5)
-			if err == nil || time.Now().After(deadline) {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if err != nil || text != "reply to again" {
-			t.Errorf("after %q: %q, %v; the service did not recover", p, text, err)
-		}
-	}
+	go newService(cfg, newLlama(t), log).Serve(ln)
+	return infer.Client{Path: sock, Timeout: 10 * time.Second}
 }
 
 func TestLlamaEmbedFailuresAreUnavailableThenRecover(t *testing.T) {
-	c, _ := llamaRig(t, gguf("qwen3", u32(3)), "e.gguf", nil)
+	c := llamaRig(t, "e.gguf", nil)
+	in, err := c.Hello(ctx(t))
+	if err != nil || in.Dim != fakeDim {
+		t.Fatalf("hello = %+v, %v", in, err)
+	}
 	vs, _, err := c.Embed(ctx(t), []string{"a", "bb"})
 	if err != nil || len(vs) != 2 {
 		t.Fatalf("first call: %v, %v", vs, err)
 	}
-	for _, p := range []string{"crash", "hang", "short", "dup"} {
+	for _, p := range []string{"crash", "hang", "status", "malformed", "huge", "short", "dup"} {
 		if vs, _, err := c.Embed(ctx(t), []string{"x", p}); !unavailable(err) || vs != nil {
 			t.Errorf("text %q: %v, %v; want unavailable and no vectors", p, vs, err)
 		}
@@ -324,46 +315,34 @@ func TestLlamaEmbedFailuresAreUnavailableThenRecover(t *testing.T) {
 	}
 }
 
-// lockedBuf is a log the service and the test both touch.
-type lockedBuf struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (l *lockedBuf) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.b.Write(p)
-}
-func (l *lockedBuf) String() string { l.mu.Lock(); defer l.mu.Unlock(); return l.b.String() }
-
-func TestLlamaLogsCarryNoPrompt(t *testing.T) {
+func TestLlamaLogsCarryNoText(t *testing.T) {
 	var log lockedBuf
-	c, _ := llamaRig(t, gguf("qwen3", nil), "m.gguf", &log)
-	const canary = "CANARY-PROMPT-7f3a"
-	if _, _, err := c.Generate(ctx(t), canary, 5); err != nil {
+	c := llamaRig(t, "e.gguf", &log)
+	if _, _, err := c.Embed(ctx(t), []string{"log"}); err != nil { // the fake writes the text to its stderr
 		t.Fatal(err)
 	}
-	if strings.Contains(log.String(), canary) || strings.Contains(log.String(), "reply to") {
-		t.Fatalf("the service log carries request or reply text: %q", log.String())
+	if _, _, err := c.Embed(ctx(t), []string{"CANARY-TEXT-7f3a"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(log.String(), "CANARY-TEXT") || strings.Contains(log.String(), "log\n") {
+		t.Fatalf("the service log carries request text: %q", log.String())
 	}
 }
 
 // The adapter itself refuses what it cannot place or bound, before the
 // service's own checks see it.
 func TestLlamaAdapterRefusesUnplaceableAndOversizeReplies(t *testing.T) {
-	g := newLlama(t)
-	if _, err := g.Load(writeModel(t, "m.gguf", gguf("qwen3", nil))); err != nil {
+	l := newLlama(t)
+	if _, err := l.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err != nil {
 		t.Fatal(err)
 	}
-	if text, err := g.Generate("huge", 5); err == nil || text != "" {
-		t.Errorf("a 2 MiB reply was read: %d bytes, %v", len(text), err)
-	}
-	e := newLlama(t)
-	if _, err := e.Load(writeModel(t, "e.gguf", gguf("qwen3", u32(3)))); err != nil {
-		t.Fatal(err)
-	}
-	if vs, err := e.Embed([]string{"x", "dup"}); err == nil {
+	if vs, err := l.Embed([]string{"x", "dup"}); err == nil {
 		t.Errorf("two vectors for one index were placed: %v", vs)
+	}
+	if vs, err := l.Embed([]string{"huge"}); err == nil {
+		t.Errorf("a reply over its bound was read: %d vectors", len(vs))
+	}
+	if vs, err := l.Embed([]string{"status"}); err == nil {
+		t.Errorf("an error status was read as vectors: %v", vs)
 	}
 }

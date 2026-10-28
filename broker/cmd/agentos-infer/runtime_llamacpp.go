@@ -24,7 +24,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/infer"
 )
 
-// newRuntime is the llama.cpp adapter: it runs the pinned llama-server at
+// newRuntime is the llama.cpp adapter, embedding only (D-230): it runs the pinned llama-server at
 // path as a child of this service and speaks to it over a unix socket in a
 // private directory, so the service needs no network, not even loopback
 // (INFER-A3, INFER-A11). The server is a separate executable and is never
@@ -46,19 +46,17 @@ type llamaProc struct {
 	cancel context.CancelFunc
 	done   chan struct{} // closed when the child has exited
 	http   *http.Client
-	embed  bool // the server runs in embedding mode
 }
 
 // Bounds on what the server may answer: it is untrusted (INFER-A11), so
 // nothing it sends is read past these.
 const (
-	maxCompletionBody = 1 << 20  // one completion reply, far over MaxGenerate
-	maxEmbeddingBody  = 32 << 20 // 64 vectors of MaxDim floats as JSON
-	maxHealthBody     = 4 << 10
-	// contextTokens is the server's context window (-c). A prompt that
-	// does not fit it fails the call, and the failed call reloads the
-	// server (INFER-A12).
-	contextTokens = 4096
+	maxEmbeddingBody = 32 << 20 // 64 vectors of MaxDim floats as JSON
+	maxHealthBody    = 4 << 10
+	// slots and slotTokens are the server's parallel slots and the context of each
+	// (INFER-A6); llama-server divides --ctx-size across its slots.
+	slots      = 2
+	slotTokens = 2048
 )
 
 var (
@@ -67,31 +65,30 @@ var (
 	errHTTP     = errors.New("llama-server answered an error status")
 )
 
-func (l *llama) Load(path string) (Serves, error) {
+func (l *llama) Load(path string) (int, error) {
 	embed, err := modelIsEmbedding(path)
-	if err != nil {
-		l.stop()
-		return Serves{}, fmt.Errorf("%w: %v", ErrRefused, err)
-	}
 	l.stop()
-	p, err := l.start(path, embed)
 	if err != nil {
-		return Serves{}, err
+		return 0, fmt.Errorf("%w: %v", ErrRefused, err)
+	}
+	if !embed {
+		return 0, fmt.Errorf("%w: not an embedding model", ErrRefused)
+	}
+	p, err := l.start(path)
+	if err != nil {
+		return 0, err
 	}
 	l.mu.Lock()
 	l.cur = p
 	l.mu.Unlock()
-	if !embed {
-		return Serves{Generate: true}, nil
-	}
 	// The dimension is what the server returns, not what the file claims:
 	// an output head can differ from the embedding length.
 	vs, err := l.Embed([]string{"dimension probe"})
 	if err != nil || len(vs) != 1 || len(vs[0]) == 0 || len(vs[0]) > infer.MaxDim {
 		l.stop()
-		return Serves{}, errBadReply
+		return 0, errBadReply
 	}
-	return Serves{Dim: len(vs[0])}, nil
+	return len(vs[0]), nil
 }
 
 // stop ends the current server, which makes any call stuck on it return.
@@ -112,12 +109,11 @@ func (p *llamaProc) close() {
 }
 
 // start runs llama-server on the model and waits until it answers health.
-// Every flag below closes something: no web UI, no slot or metrics
-// endpoints, no network fetch, no prompt cache kept between calls (the
-// server holds none of one caller's text for the next, and its memory is
-// the leaf's, INFER-A6), one slot, CPU only, and its log discarded since
-// the service's log carries no request text (INF-8).
-func (l *llama) start(model string, embed bool) (*llamaProc, error) {
+// Every flag below closes something: embedding mode with the model's last-token
+// pooling, two slots of 2048 tokens (the leaf's memory, INFER-A6), CPU only, no web
+// UI, no slots endpoint, no network fetch, and its log discarded since the
+// service's log carries no request text (INF-8).
+func (l *llama) start(model string) (*llamaProc, error) {
 	dir, err := os.MkdirTemp("", "llama-")
 	if err != nil {
 		return nil, err
@@ -126,14 +122,11 @@ func (l *llama) start(model string, embed bool) (*llamaProc, error) {
 	args := []string{
 		"--model", model,
 		"--host", sock,
-		"--ctx-size", fmt.Sprint(contextTokens),
-		"--parallel", "1",
+		"--embedding", "--pooling", "last",
+		"--parallel", fmt.Sprint(slots),
+		"--ctx-size", fmt.Sprint(slots * slotTokens),
 		"--gpu-layers", "0",
-		"--cache-ram", "0",
 		"--no-webui", "--no-slots", "--offline",
-	}
-	if embed {
-		args = append(args, "--embedding")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"), childproc.Options{
@@ -147,7 +140,7 @@ func (l *llama) start(model string, embed bool) (*llamaProc, error) {
 		os.RemoveAll(dir)
 		return nil, errors.New("llama-server did not start")
 	}
-	p := &llamaProc{dir: dir, cancel: cancel, done: make(chan struct{}), embed: embed}
+	p := &llamaProc{dir: dir, cancel: cancel, done: make(chan struct{})}
 	go func() { cmd.Wait(); close(p.done) }()
 	p.http = &http.Client{
 		Timeout: 10 * time.Minute, // a backstop: the service bounds a call and reloads
@@ -232,37 +225,6 @@ func (p *llamaProc) post(path string, body, out any, limit int64) error {
 	return nil
 }
 
-// Generate completes the prompt greedily (temperature 0) for at most maxOut
-// tokens. cache_prompt is off, so the server keeps no state from one call
-// for the next.
-func (l *llama) Generate(prompt string, maxOut int) (string, error) {
-	p, err := l.proc()
-	if err != nil {
-		return "", err
-	}
-	if p.embed {
-		return "", errors.New("the model is an embedding model")
-	}
-	var r struct {
-		Content *string `json:"content"`
-	}
-	err = p.post("/completion", map[string]any{
-		"prompt":       prompt,
-		"n_predict":    maxOut,
-		"temperature":  0,
-		"seed":         0,
-		"stream":       false,
-		"cache_prompt": false,
-	}, &r, maxCompletionBody)
-	if err != nil {
-		return "", err
-	}
-	if r.Content == nil {
-		return "", errBadReply
-	}
-	return *r.Content, nil
-}
-
 // Embed returns one vector per text, in order, from the server's
 // OpenAI-style endpoint (pooled and L2-normalised by the model's own
 // pooling).
@@ -270,9 +232,6 @@ func (l *llama) Embed(texts []string) ([][]float32, error) {
 	p, err := l.proc()
 	if err != nil {
 		return nil, err
-	}
-	if !p.embed {
-		return nil, errors.New("the model is not an embedding model")
 	}
 	var r struct {
 		Data []struct {
@@ -300,8 +259,9 @@ func (l *llama) Embed(texts []string) ([][]float32, error) {
 // modelIsEmbedding reads the model's GGUF header for what the model is.
 // A model whose architecture names a pooling type of mean, cls or last
 // (<arch>.pooling_type 1 to 3) is an embedding model and runs with
-// --embedding; one without it generates. A ranking model (4) and any file
-// that is not a GGUF are refused. The header is read-only and bounded.
+// --embedding; one without it is a generative model, which Load refuses
+// (D-230). A ranking model (4) and any file that is not a GGUF are refused
+// too. The header is read-only and bounded.
 func modelIsEmbedding(path string) (bool, error) {
 	f, err := os.Open(path)
 	if err != nil {

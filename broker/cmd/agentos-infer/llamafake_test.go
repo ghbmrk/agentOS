@@ -48,41 +48,6 @@ func fakeLlamaServer(args []string) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"status":"ok"}`)) })
-	mux.HandleFunc("/completion", func(w http.ResponseWriter, r *http.Request) {
-		var q struct {
-			Prompt string   `json:"prompt"`
-			N      int      `json:"n_predict"`
-			Temp   *float64 `json:"temperature"`
-			Cache  *bool    `json:"cache_prompt"`
-			Stream *bool    `json:"stream"`
-		}
-		// Each setting must be present and off: an omitted field is the server's own
-		// default (sampling on, prompt cache on, streaming on), not the zero value.
-		if embed || json.NewDecoder(r.Body).Decode(&q) != nil || q.Cache == nil || *q.Cache ||
-			q.Stream == nil || *q.Stream || q.Temp == nil || *q.Temp != 0 {
-			http.Error(w, "bad", http.StatusBadRequest)
-			return
-		}
-		os.Stderr.WriteString(q.Prompt) // the child's log must never reach the service's
-		switch q.Prompt {
-		case "crash":
-			os.Exit(1)
-		case "hang":
-			time.Sleep(time.Hour)
-		case "status":
-			http.Error(w, "boom", http.StatusInternalServerError)
-		case "malformed":
-			w.Write([]byte(`{"content":`))
-		case "nocontent":
-			w.Write([]byte(`{}`))
-		case "long":
-			json.NewEncoder(w).Encode(map[string]string{"content": strings.Repeat("a", 20000)})
-		case "huge":
-			w.Write([]byte(`{"content":"` + strings.Repeat("a", 2<<20) + `"}`))
-		default:
-			json.NewEncoder(w).Encode(map[string]any{"content": "reply to " + q.Prompt, "tokens_predicted": q.N})
-		}
-	})
 	mux.HandleFunc("/v1/embeddings", func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
 			Input []string `json:"input"`
@@ -103,6 +68,17 @@ func fakeLlamaServer(args []string) {
 				os.Exit(1)
 			case "hang":
 				time.Sleep(time.Hour)
+			case "status":
+				http.Error(w, "boom", http.StatusInternalServerError)
+				return
+			case "malformed":
+				w.Write([]byte(`{"data":`))
+				return
+			case "huge":
+				w.Write([]byte(`{"data":[{"index":0,"embedding":[` + strings.Repeat("0.5,", 9<<20) + `0.5]}]}`))
+				return
+			case "log":
+				os.Stderr.WriteString(t) // the child's log must never reach the service's
 			case "short":
 				data = append(data, item{i, make([]float32, fakeDim-1)})
 				continue
