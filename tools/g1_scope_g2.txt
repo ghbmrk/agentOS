@@ -65,6 +65,10 @@ exempt-pr 3609
 # broker/cmd/agentos-camnode/, which the G2 list does not name (D-198). Remove once #3617 merges.
 exempt-pr 3617
 
+# #3640 (CAM-decode b2, #3514 part b): broker/cmd/agentos-camdecode/ and image/libavcodec.sh,
+# which the G2 list does not name (D-198). Remove once #3640 merges.
+exempt-pr 3640
+
 # Project machinery and records.
 allow .claude/
 allow .github/
