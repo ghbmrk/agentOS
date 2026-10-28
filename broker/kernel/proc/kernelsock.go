@@ -461,10 +461,12 @@ func ContentSide(store string) Side {
 			if err := json.Unmarshal(raw, &a); err != nil {
 				return nil, ErrArgs
 			}
-			// Another store's item reads as no item: the clerk learns
-			// nothing of what other clerks hold.
+			// Another store's item reads as no item, whatever else is
+			// wrong with the call: the zero hash names no item, so its
+			// answer is an unknown item's, and the clerk learns nothing
+			// of what other clerks hold (#3560 Security finding 1).
 			if in, ok := k.State().ItemStore(a.Hash); ok && in != store {
-				return nil, kernel.ErrItem
+				a.Hash = kernel.Hash{}
 			}
 			return k.ReadFor(now, a.Hash, a.Lineage)
 		},

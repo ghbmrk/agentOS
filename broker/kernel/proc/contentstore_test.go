@@ -3,6 +3,7 @@ package proc
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -189,6 +190,15 @@ func TestOnlyAContentClerkSealsAndReads(t *testing.T) {
 	if _, err := vision.ReadFor(item, "lin"); !errors.Is(err, kernel.ErrItem) {
 		t.Errorf("vision reading mail's item: %v, want ErrItem", err)
 	}
+	// Another store's item answers as an unknown hash does, even with a bad
+	// lineage, so its existence does not show (#3560 Security finding 1).
+	for _, lin := range []string{"", strings.Repeat("l", 129)} {
+		_, mine := vision.ReadFor(item, lin)
+		_, none := vision.ReadFor(kernel.Hash{9}, lin)
+		if fmt.Sprint(mine) != fmt.Sprint(none) {
+			t.Errorf("lineage %d bytes: another store's item %v, no item %v", len(lin), mine, none)
+		}
+	}
 	if n := b.entries(); n != before {
 		t.Fatalf("refused calls logged %d entries", n-before)
 	}
@@ -289,6 +299,12 @@ func TestALooseContentStoreStopsTheStart(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(dir, loose), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		// Only the directory under test is loose (#3560 L3 point 1).
+		if loose != "content" {
+			if err := os.Chmod(filepath.Join(dir, "content"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
 		logPath := filepath.Join(dir, "log")
 		if _, err := OpenKernel(KernelConfig{
 			Log: logPath, Anchor: &kernel.MemAnchor{}, Key: [32]byte{7}, Pub: headPub, Sign: headPriv, Anchors: anchors,
@@ -339,4 +355,51 @@ func TestTheKernelServesTheContentSockets(t *testing.T) {
 		t.Fatalf("the vision store: %v %v", des, err)
 	}
 	noCanary(t, m.dir)
+}
+
+// An item file open to another uid is never read: readfor refuses it
+// (#3560 L3 point 1). Revert mutant: Get without privfile.CheckFile.
+func TestALooseItemFileIsNotRead(t *testing.T) {
+	dir := t.TempDir()
+	h := storeKernel(t, dir, "vision")
+	defer h.Close()
+	c := contentConn(t, h, "vision")
+	sub, _ := c.OpenSubject()
+	item, err := c.Seal(sub, "x", []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "content", "vision", itemName(item)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.ReadFor(item, "lin"); err == nil {
+		t.Fatalf("readfor of a loose item file: %q", got)
+	}
+}
+
+// A store an erase names that is neither configured nor on the drive
+// stays unconfirmed, in Unerased (LOG-4 fails closed; #3560 L3 point 2).
+func TestAMissingStoreKeepsTheEraseUnconfirmed(t *testing.T) {
+	dir := t.TempDir()
+	h := storeKernel(t, dir, "vision")
+	c := contentConn(t, h, "vision")
+	sub, _ := c.OpenSubject()
+	if _, err := c.Seal(sub, "x", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	if err := os.RemoveAll(filepath.Join(dir, "content", "vision")); err != nil {
+		t.Fatal(err)
+	}
+	h = storeKernel(t, dir)
+	defer h.Close()
+	conf, _ := h.Erase(time.Now().UnixMilli(), sub)
+	if len(conf.Unconfirmed) != 1 || conf.Unconfirmed[0] != "vision" {
+		t.Fatalf("erase with its store missing: %+v", conf)
+	}
+	var u []kernel.Unerased
+	h.With(func(k *kernel.Kernel) error { u = k.State().Unerased(); return nil })
+	if len(u) != 1 || u[0].Subject != sub {
+		t.Fatalf("unerased: %+v", u)
+	}
 }

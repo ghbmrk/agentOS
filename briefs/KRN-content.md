@@ -9,7 +9,7 @@ Work item: #3550, from the gap noted on #3515 (comment 6458131269). Tier A. Unbl
 ## Decisions
 
 1. **A file store beside the key table.** `FileContent` keeps one store per directory under `KernelConfig.ContentDir` (`-content-dir`, required by `RunKernel` and `cmd/agentos-kernel` like `-keys-dir`): one file per item, named by its ciphertext's SHA-256, written with `privfile.WriteAtomic`, the directory 0700 and this uid's alone (`privfile.Check`). Items arrive sealed under the subject key, so the store holds ciphertext only. `Delete` unlinks and syncs the directory and succeeds for an absent item.
-2. **Every store on the drive opens.** `OpenContentStores` opens each configured store and every store directory already present, so a store dropped from the config still has its items erased. A store missing from the drive leaves its erase in `Unerased` (fail closed). A temporary from a torn write is removed at start: `Seal` puts before it logs, so that item was never named. Store names are `[a-z][a-z0-9-]{0,31}` and never the key table, so a name is a safe directory name.
+2. **Every store on the drive opens.** `OpenContentStores` opens each configured store and every store directory already present, so a store dropped from the config still has its items erased. A store missing from the drive that is not configured leaves its erase in `Unerased` (fail closed); a configured one is recreated empty, so its erase confirms, which holds while the store is on the core SSD beside the log. A temporary from a torn write is removed at start: `Seal` puts before it logs, so that item was never named. Store names are `[a-z][a-z0-9-]{0,31}` and never the key table, so a name is a safe directory name.
 3. **One socket per content clerk, bound to its own store.** `ContentSide(store)` serves `opensubject`, `seal` (into `store` only) and `readfor` (of `store`'s items only; another store's item is `ErrItem`). `MainConfig.Content` and `-content store=/abs/socket,uid` (repeatable) name them. Each socket admits one uid, refused if it is the owner side's, the model clerk's, the link's or another content clerk's; a clerk the kernel calls (`-clerk`) may share it. Erase, recall and named stay the owner side's. `readfor` logs `content.read` under the caller's lineage before it answers (D-169). The kernel gains one read, `State.ItemStore`.
 4. **Bounds.** An item is at most `MaxItem` (1 MiB) of plaintext, so a `seal` call and a `readfor` answer fit the socket's 4 MiB bounds. The kernel's content errors (`ErrStore`, `ErrSubjectKey`, `ErrItem`, `ErrLineage`) cross the wire as sentinels.
 5. **Not this row.** Backups still carry no `content/<store>` sections (MIG-4-recovery-e3-a); that is a release follow-up. Which uid the vision path uses for its content socket is VIS-core's (parts c and f): its enrolment step seals through that clerk, not from the owner side.
@@ -23,7 +23,8 @@ Work item: #3550, from the gap noted on #3515 (comment 6458131269). Tier A. Unbl
 | Torn write, then restart | temporary removed; logged items read |
 | Erase | key gone, item file gone, `readfor` refused, the lineage listed in `ErasedReads` |
 | Store dropped from config, then erase | store still opened from disk, erase confirmed |
-| Store missing from the drive | erase stays in `Unerased`, retried by Tick |
+| Store missing from the drive, not configured | erase stays in `Unerased`, retried by Tick |
+| Store missing from the drive, configured | recreated empty at start, so its erase confirms: its items went with the directory |
 | No `KeyDir` (tests only) | `opensubject` and `seal` are `ErrContentClosed` |
 | Setup not done | content calls are `ErrSetupOnly` |
 
@@ -42,6 +43,6 @@ Work item: #3550, from the gap noted on #3515 (comment 6458131269). Tier A. Unbl
 - CLK-1: `TestOnlyAContentClerkSealsAndReads`: the owner, meter and link sockets have no content call, a socket for another uid takes nothing, another store's item reads as `ErrItem`, and none of it logs. *Mutant:* drop the `ItemStore` check.
 - LOG-4: `TestNoKeyTableRefusesSeal`: with no `KeyDir`, `seal` is `ErrContentClosed`.
 - LOG-4: `TestAStoreDroppedFromTheConfigIsStillErased`. *Mutant:* open only configured stores.
-- LOG-4: `TestContentRefusalsCrossTheSocket`, `TestALooseContentStoreStopsTheStart`, `TestRunKernelNeedsAContentDir`, `TestTheKernelServesTheContentSockets` (non-root; *mutant:* the `Content` loop in `RunKernel` dropped).
+- LOG-4: `TestAMissingStoreKeepsTheEraseUnconfirmed`, `TestALooseItemFileIsNotRead`, `TestContentRefusalsCrossTheSocket`, `TestALooseContentStoreStopsTheStart`, `TestRunKernelNeedsAContentDir`, `TestTheKernelServesTheContentSockets` (non-root; *mutant:* the `Content` loop in `RunKernel` dropped).
 - CLK-1: `cmd/agentos-kernel/main_test.go::TestEachContentSocketIsItsClerksAlone`. *Mutants:* drop the shared-uid check or the store-name check.
 - `kernelsock_test.go::TestNoSideReadsSealedContent` now covers every side: only a content side has `readfor`.
