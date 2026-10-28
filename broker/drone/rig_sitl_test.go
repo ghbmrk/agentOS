@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -54,7 +55,10 @@ func (s *syncBuffer) String() string {
 }
 
 // newRig boots SITL, provisions a fresh key over SERIAL0 and starts a holder
-// there; with load, it loads the fixture policy and requires it to read back.
+// there; with load, it loads the fixture policy, reboots the aircraft and
+// requires the policy to read back. The reboot is the provisioning step a
+// real airframe also takes: stock SITL decodes RC from boot, and the
+// read-back refuses until a boot with RC_PROTOCOLS 0 (DRONE-sim-14).
 func newRig(t *testing.T, load bool) *rig {
 	t.Helper()
 	sim := startSITL(t)
@@ -73,8 +77,14 @@ func newRig(t *testing.T, load bool) *rig {
 	}
 	r.attach(ports[0], c)
 	if load {
-		if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); err != nil {
+		if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); err != nil && !errors.Is(err, ErrMismatch) {
 			t.Fatalf("loading the fixture policy: %v\nlog:\n%s", err, r.logs)
+		}
+		r.link.Close()
+		sim.Restart()
+		r.attach(ports[0], sim.Dial(ports[0]))
+		if err := r.h.ArmCheck(); err != nil {
+			t.Fatalf("the fixture policy does not read back after a reboot: %v\nlog:\n%s", err, r.logs)
 		}
 	}
 	return r
