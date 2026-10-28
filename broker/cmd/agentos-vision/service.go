@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -76,6 +77,12 @@ type service struct {
 	sem  chan struct{}
 	load sync.Mutex // one load at a time
 
+	// stuck ends the process when a timed-out runtime call has not
+	// returned even after the reload: the supervisor restarts the
+	// service, which frees its slot and frame (os.Exit; tests replace
+	// it).
+	stuck func()
+
 	mu   sync.Mutex
 	cur  loaded
 	held int // payloads allocated and not yet released
@@ -99,7 +106,7 @@ func newService(cfg Config, rt Runtime, log io.Writer) *service {
 		log = io.Discard
 	}
 	return &service{cfg: cfg, rt: rt, log: log, sem: make(chan struct{}, cfg.Concurrent),
-		cur: loaded{cause: vision.Unavailable}}
+		stuck: func() { os.Exit(1) }, cur: loaded{cause: vision.Unavailable}}
 }
 
 // Serve answers each connection on its own goroutine until ln fails.
@@ -251,8 +258,11 @@ var (
 // call runs one runtime call within CallTimeout and checks its answer as
 // the client will: a runtime is not trusted to keep its own shape. A
 // failed call marks the load it ran on failed, so the next call reloads;
-// a timed-out one also reloads at once, which makes it return (Runtime).
-// release runs when run returns, however late.
+// a timed-out one also reloads at once, which makes it return (Runtime),
+// and if it still has not returned three CallTimeouts later the service
+// exits rather than hold its slot for ever. release runs when run returns,
+// however late, and before the answer is sent, so the frame is zeroed by
+// the time any reply leaves.
 func call[T any](s *service, on loaded, release func(), run func() (T, error), check func(T) error) (T, error) {
 	type result struct {
 		v   T
@@ -260,14 +270,15 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 	}
 	done := make(chan result, 1)
 	go func() {
-		defer release()
+		var r result
 		defer func() {
 			if recover() != nil {
-				done <- result{err: errCrashed}
+				r = result{err: errCrashed}
 			}
+			release()
+			done <- r
 		}()
-		v, err := run()
-		done <- result{v, err}
+		r.v, r.err = run()
 	}()
 	t := time.NewTimer(s.cfg.CallTimeout)
 	defer t.Stop()
@@ -290,6 +301,14 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 	s.fail(on)
 	if err == errTimedOut {
 		go s.ready()
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(3 * s.cfg.CallTimeout):
+				fmt.Fprintln(s.log, "vision: runtime call stuck after the reload; exiting")
+				s.stuck()
+			}
+		}()
 	}
 	return zero, err
 }

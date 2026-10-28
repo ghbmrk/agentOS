@@ -45,7 +45,7 @@ type fake struct {
 	mu      sync.Mutex
 	loadErr error
 	model   Model
-	mode    string // "", "crash", "panic", "hang", "slow", "off-list", "outside", "enrolled", "plate"
+	mode    string // "", "crash", "panic", "hang", "wedge", "slow", "off-list", "outside", "enrolled", "plate"
 	times   int
 	loads   int
 	frames  int
@@ -54,6 +54,7 @@ type fake struct {
 	inside  int
 	maxIn   int
 	gate    chan struct{} // when set, calls wait on it
+	wedge   chan struct{} // a wedged call waits on it, whatever Load does
 }
 
 func newFake() *fake {
@@ -116,6 +117,9 @@ func (f *fake) Detect(fr vision.Frame) ([]vision.Detection, error) {
 		return nil, errors.New("released")
 	case "slow":
 		time.Sleep(300 * time.Millisecond)
+	case "wedge":
+		<-f.wedge
+		return nil, errors.New("unwedged")
 	case "off-list":
 		d.Class = "burglar"
 	case "outside":
@@ -370,6 +374,7 @@ func TestServiceCapsHeldPayloads(t *testing.T) {
 func TestTimedOutCallKeepsItsSlot(t *testing.T) {
 	f := newFake()
 	s := newService(Config{Concurrent: 1, CallTimeout: 50 * time.Millisecond}, f, nil)
+	s.stuck = func() {} // the slow calls do return, past the watchdog's wait
 	c := start(t, s)
 	f.failNext("slow", 4)
 	for range 4 {
@@ -388,9 +393,31 @@ func TestTimedOutCallKeepsItsSlot(t *testing.T) {
 	}
 }
 
+// A runtime call that a reload does not end makes the service exit, so
+// the supervisor restarts it, rather than hold its slot for ever.
+func TestStuckCallEndsTheService(t *testing.T) {
+	f := newFake()
+	f.wedge = make(chan struct{})
+	t.Cleanup(func() { close(f.wedge) })
+	s := newService(Config{Concurrent: 1, CallTimeout: 50 * time.Millisecond}, f, nil)
+	exited := make(chan struct{})
+	s.stuck = func() { close(exited) }
+	c := start(t, s)
+	f.failNext("wedge", 1)
+	if _, err := c.Detect(context.Background(), gray(8, 8, 0)); !isCause(err, vision.Unavailable) {
+		t.Fatalf("wedged call: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the service kept a wedged call's slot")
+	}
+}
+
 // REQ: DEV-7
 //
-// A frame's buffer is zeroed once the runtime is done with it.
+// A frame's buffer is zeroed once the runtime is done with it, before
+// the reply leaves.
 func TestPayloadZeroedAfterUse(t *testing.T) {
 	f := newFake()
 	c := start(t, newService(Config{}, f, nil))
