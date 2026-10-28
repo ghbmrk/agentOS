@@ -8,12 +8,13 @@
 //
 // Profiles: "serial" (Zigbee: a serial device and nothing else, no IP sockets)
 // and "thread" (Thread and the Matter controller: IPv6, but only inside a
-// network namespace that holds lo and the stack's own tun interface).
+// network namespace that holds lo, wpan0 and infra0).
 package main
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -44,7 +45,19 @@ var denied = []uintptr{ // x86-64 numbers
 	169, 167, 168, // reboot, swapon, swapoff
 	163, 172, 173, // acct, iopl, ioperm
 	425, 426, 427, // io_uring_setup, io_uring_enter, io_uring_register
+	428, 429, 430, // open_tree, move_mount, fsopen (the new mount API)
+	431, 432, 433, // fsconfig, fsmount, fspick
+	442, // mount_setattr
 }
+
+const (
+	sysClone  = 56
+	sysClone3 = 435
+	// cloneNew is every CLONE_NEW* flag clone(2) takes: NEWNS, NEWCGROUP,
+	// NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET. CLONE_NEWTIME (0x80) is
+	// only valid through clone3 and unshare, both refused.
+	cloneNew = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000
+)
 
 type insn struct {
 	code   uint16
@@ -69,6 +82,10 @@ func filter(profile string) []insn {
 	for _, nr := range denied {
 		p = append(p, jeq(uint32(nr), 0, 1), ret(errno(syscall.EPERM)))
 	}
+	// clone3 passes its flags in memory, which seccomp cannot read, so it
+	// is refused with ENOSYS and libc falls back to clone, checked here.
+	p = append(p, jeq(sysClone3, 0, 1), ret(errno(syscall.ENOSYS)))
+	p = append(p, jeq(sysClone, 0, 4), ldAbs(16), jset(cloneNew, 0, 1), ret(errno(syscall.EPERM)), ldAbs(0))
 	families := []uint32{syscall.AF_PACKET}
 	if profile == "serial" {
 		families = append(families, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK)
@@ -140,6 +157,9 @@ func check(profile, policy string) bool {
 	pass(result("read the enforcer's policy file", err, false))
 	pass(result("ptrace(PTRACE_ATTACH, 1)", ptrace(1), false))
 	pass(result("unshare(CLONE_NEWNS)", syscall.Unshare(syscall.CLONE_NEWNS), false))
+	pass(result("clone(CLONE_NEWUSER|CLONE_NEWNS)", cloneNewUser(), false))
+	pass(result("clone3 (refused, so libc uses clone)", clone3(), false))
+	pass(result("fsopen(\"tmpfs\") (new mount API)", fsopen(), false))
 	pass(result("socket(AF_PACKET)", socket(syscall.AF_PACKET, syscall.SOCK_RAW), false))
 	pass(result("socket(AF_UNIX) for the command interface", socket(syscall.AF_UNIX, syscall.SOCK_STREAM), true))
 
@@ -151,9 +171,11 @@ func check(profile, policy string) bool {
 		pass(result("socket(AF_NETLINK)", socket(syscall.AF_NETLINK, syscall.SOCK_DGRAM), false))
 		return all
 	}
-	pass(result("only lo and the stack's own interface", onlyOwn(ifs), true))
-	pass(result("create tun wpan0 in its own namespace", tun("wpan0"), true))
+	pass(result("create wpan0 and infra0 in its own namespace", tuns("wpan0", "infra0"), true))
 	pass(result("bring wpan0 up (stack sets its own addresses)", up("wpan0"), true))
+	ifs = interfaces()
+	fmt.Printf("info  interfaces visible: %s\n", strings.Join(ifs, " "))
+	pass(result("only lo, wpan0 and infra0", onlyOwn(ifs), true))
 	pass(result("UDP to a LAN address (192.0.2.1:53)", dial(), false))
 	return all
 }
@@ -163,6 +185,38 @@ func ptrace(pid int) error {
 	if e != 0 {
 		return e
 	}
+	return nil
+}
+
+// cloneNewUser starts /bin/true in a new user and mount namespace, the
+// route that would give a confined process a full capability set.
+func cloneNewUser() error {
+	c := exec.Command("/bin/true")
+	c.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	return c.Run()
+}
+
+// clone3 with a null argument reaches the kernel and fails EINVAL, which
+// counts as allowed; only the filter's ENOSYS counts as refused.
+func clone3() error {
+	_, _, e := syscall.RawSyscall(sysClone3, 0, 0, 0)
+	if e == syscall.ENOSYS {
+		return e
+	}
+	return nil
+}
+
+func fsopen() error {
+	name := []byte("tmpfs\x00")
+	fd, _, e := syscall.RawSyscall(430, uintptr(unsafe.Pointer(&name[0])), 0, 0)
+	if e != 0 {
+		return e
+	}
+	syscall.Close(int(fd))
 	return nil
 }
 
@@ -182,14 +236,25 @@ func interfaces() []string {
 
 func onlyOwn(ifs []string) error {
 	for _, n := range ifs {
-		if n != "lo" && n != "wpan0" {
+		if n != "lo" && n != "wpan0" && n != "infra0" {
 			return fmt.Errorf("sees %s", n)
 		}
 	}
 	return nil
 }
 
-var tunFD = -1
+var tunFDs []int
+
+// tuns creates each interface as a tun device. infra0 is a dummy link in the
+// design; a tun stands in for it here, since only its visibility is checked.
+func tuns(names ...string) error {
+	for _, n := range names {
+		if err := tun(n); err != nil {
+			return fmt.Errorf("%s: %w", n, err)
+		}
+	}
+	return nil
+}
 
 func tun(name string) error {
 	// TUN names a tun device node the launcher granted to the stack user, as
@@ -205,7 +270,7 @@ func tun(name string) error {
 		syscall.Close(fd)
 		return e
 	}
-	tunFD = fd
+	tunFDs = append(tunFDs, fd)
 	return nil
 }
 

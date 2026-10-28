@@ -49,10 +49,10 @@ Matter-over-Thread locks (Door Lock cluster) go through the Matter controller; Z
 
 ## Confinement measured
 
-`run.sh` builds `probe/` (standard library only) and runs it under two profiles. Each runs as `nobody`, with no-new-privileges and a seccomp filter that denies ptrace, mount, namespace changes, bpf, kernel modules, kexec, keyrings, perf, userfaultfd, cross-process memory, io_uring and `AF_PACKET` sockets (`probe/main.go`, `denied`).
+`run.sh` builds `probe/` (standard library only) and runs it under two profiles. Each runs as `nobody`, with no-new-privileges and a seccomp filter (`probe/main.go`, `filter`) that denies ptrace, bpf, kernel modules, kexec, keyrings, perf, userfaultfd, cross-process memory, io_uring and `AF_PACKET` sockets, and every namespace and mount entry point: `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns`, the new mount API (`open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr`), and `clone` with any `CLONE_NEW*` flag. `clone3` carries its flags in memory, which seccomp cannot read, so it is refused with `ENOSYS` and libc falls back to `clone`. An earlier version denied only `unshare` and `setns`; L3 showed `clone(CLONE_NEWUSER|CLONE_NEWNS)` then `fsmount` mounting a tmpfs under both profiles, and that reproduction now fails at `clone` and at `fsopen`.
 
 - **serial** (Zigbee): a private, empty network namespace, no capabilities, and seccomp also denies `AF_INET`, `AF_INET6` and `AF_NETLINK`. The stack gets its serial device by file ownership and the command interface as a Unix socket.
-- **thread** (Thread and the Matter controller): `nobody` owns a new user and network namespace, so the capabilities it holds act only on that namespace. It creates `wpan0` there from a tun node the launcher granted it, and sets it up itself, which is what `ot-daemon` does.
+- **thread** (Thread and the Matter controller): `nobody` owns a new user and network namespace, so the capabilities it holds act only on that namespace. It creates `wpan0` and `infra0` there from a tun node the launcher granted it (in the design `infra0` is a dummy link; a tun stands in for it, since only visibility is checked) and sets `wpan0` up itself, which is what `ot-daemon` does. It then sees only lo, `wpan0` and `infra0`.
 
 Result on this kernel, every check as expected:
 
@@ -60,24 +60,25 @@ Result on this kernel, every check as expected:
 |---|---|---|
 | Read the enforcer's policy file (root, 0700 directory) | refused | refused |
 | ptrace, unshare | refused | refused |
+| `clone(CLONE_NEWUSER\|CLONE_NEWNS)`, `clone3`, `fsopen` | refused | refused |
 | `AF_PACKET` socket | refused | refused |
 | Unix socket for the command interface | allowed | allowed |
-| Interfaces visible | lo | lo, then its own wpan0 |
+| Interfaces visible | lo | lo, then its own wpan0 and infra0 |
 | `AF_INET`, `AF_INET6`, `AF_NETLINK` sockets | refused | allowed (namespace-local) |
-| Create and bring up wpan0 | — | allowed |
+| Create wpan0 and infra0, bring up wpan0 | — | allowed |
 | UDP to a LAN address | — | refused: network unreachable |
 
-Negative control: the same probe run as root with no confinement fails 5 of its 8 serial checks and sees `eth0`, so it detects missing confinement.
+Negative control: the same probe run as root with no confinement fails 8 of its 11 serial checks and sees `eth0`, so it detects missing confinement.
 
 Not measured here: IPv6 traffic on wpan0 (this kernel has no IPv6), real radios, and the candidates' own syscall sets. ENF-k records each stack's syscalls on hardware with `strace -f -c` and turns the deny list into an allowlist.
 
 ## Design consequences for the slices
 
-1. **One network namespace holds Thread and the Matter controller, and nothing else.** `ot-daemon` and the matter.js process share a namespace containing lo, `wpan0`, and a dummy `infra0` that `ot-daemon` uses as its infrastructure link, so SRP registrations reach the controller's mDNS without any LAN interface. [Inference] that `ot-daemon` advertises on a dummy interface; ENF-q2's first test checks it. Matter devices on Wi-Fi are out of this namespace and of scope until a slice adds a filtered veth from Devices.
+1. **One network namespace holds Thread and the Matter controller, and nothing else.** `ot-daemon` and the matter.js process share a namespace containing lo, `wpan0`, and a dummy `infra0` that `ot-daemon` uses as its infrastructure link, so SRP registrations reach the controller's mDNS without any LAN interface. [Inference] that `ot-daemon` advertises on a dummy interface; ENF-t's `radio::TestSrpReachesController` checks it. Matter devices on Wi-Fi are out of this namespace and of scope until a slice adds a filtered veth from Devices.
 2. **Zigbee has no IP at all.** herdsman runs in the serial profile; its only paths are the dongle and the Unix socket.
 3. **BLE commissioning of Matter devices goes through the BLE stack's interface.** matter.js on Linux uses raw HCI (`noble`), which would take the adapter from BlueZ. Instead the controller's BTP traffic (connect, write, indicate on the Matter GATT service) is a declared op of the BLE process (ENF-k), as the Matter server's `ble-proxy` package already does for remote radios. Pairing is a loosening at home, so this path is rare.
 4. **[Risk] A radio process holds its network's keys.** The Matter process holds the fabric's operational credentials and herdsman holds the Zigbee network key, so a compromised radio process can unlock a lock it controls even though it cannot touch the rules. Confinement stops it from reaching the policy, the page, the LAN or the other stacks; it does not stop misuse of its own devices. Mitigations within NET-2: the pre-authentication surface (Thread MLE and joiner, Zigbee MAC/NWK) is in `ot-daemon` and the NCP firmware, separate from the Matter process; the enforcer relocks after the owner-set interval and texts any unusual-time unlock it observes. Splitting fabric keys out of the controller is later work.
-5. **USB.** Only the two radios' (and the BLE dongle's) vendor and product IDs are authorised; other USB ports stay off (NET-2 Hardening, decision 9). Each dongle sits on a short USB 2.0 extension away from USB 3 ports [Inference, common interference advice]. Firmware: the Thread RCP is built from source in the image pipeline; the Zigbee NCP is Silicon Labs' signed binary, pinned by hash, since no open Zigbee NCP firmware exists.
+5. **USB.** Only the two radios' (and the BLE dongle's) vendor and product IDs are authorised; other USB ports stay off (NET-2 Hardening, decision 11). Each dongle sits on a short USB 2.0 extension away from USB 3 ports [Inference, common interference advice]. Firmware: the Thread RCP is built from source in the image pipeline; the Zigbee NCP is Silicon Labs' signed binary, pinned by hash, since no open Zigbee NCP firmware exists.
 
 ## Question for Decisions (also on #3668)
 
