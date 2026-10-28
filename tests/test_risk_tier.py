@@ -26,7 +26,6 @@ class RiskTierTest(unittest.TestCase):
             "tools/ci_scope.py": "A",
             "tools/ci_split.py": "A",
             "tools/g1_scope_g2.txt": "A",
-            "broker/mail/deliver.go": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",
             # loops is A through its core.txt allow lines.

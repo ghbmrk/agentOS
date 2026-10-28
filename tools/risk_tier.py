@@ -95,7 +95,7 @@ TIER_A_BROKER = {
     # (b) gates an effect or approval
     "apply", "card", "claim", "clock", "firstboot",
     "follow",                     # switches the update root of trust
-    "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation

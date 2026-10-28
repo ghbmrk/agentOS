@@ -185,7 +185,6 @@ allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
 allow broker/localui/
-allow broker/mail/
 allow broker/maintain/
 allow broker/meter/
 allow broker/pageca/

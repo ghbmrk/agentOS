@@ -41,7 +41,6 @@ inert  github.com/ghbmrk/agentos/broker/vision/supervise -- starts the vision se
 inert  github.com/ghbmrk/agentos/broker/journal -- reads its own write-ahead journal
 inert  github.com/ghbmrk/agentos/broker/journal/check -- judges the journal's own records
 inert  github.com/ghbmrk/agentos/broker/loops -- schedules over its own records
-inert  github.com/ghbmrk/agentos/broker/mail/mailsock -- socket between trusted processes (agentosd and agentos-egress)
 inert  github.com/ghbmrk/agentos/broker/netguard -- address policy over parsed netip values
 parser github.com/ghbmrk/agentos/broker/owner/graph -- the account plan's facts, from the mail clerk's reads (uncertain; classed parser)
 inert  github.com/ghbmrk/agentos/broker/owner/kernelsock -- socket between trusted processes (agentosd and the kernel); decodes only the kernel's bounded answer
@@ -102,8 +101,6 @@ parser github.com/ghbmrk/agentos/broker/localapi -- the local UI's messages on l
 parser github.com/ghbmrk/agentos/broker/localsrv -- the local UI's ops on localui.sock
 inert  github.com/ghbmrk/agentos/broker/localsrv/accountsock -- socket between trusted processes (agentosd and the mail clerk); the page's frames reach it already bounded by localsrv
 parser github.com/ghbmrk/agentos/broker/pageca -- the page's serving public keys to certify (PKIX DER) and its own sealed authority file (#3153)
-parser github.com/ghbmrk/agentos/broker/mail -- mail messages
-parser github.com/ghbmrk/agentos/broker/mail/imapsmtp -- mail from the IMAP transport
 parser github.com/ghbmrk/agentos/broker/maintain -- release listings from update mirrors
 parser github.com/ghbmrk/agentos/broker/meter -- provider usage replies
 parser github.com/ghbmrk/agentos/broker/modelroute -- guests' model requests
