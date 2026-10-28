@@ -57,6 +57,7 @@ var fuzzNames = map[string]string{
 	"camwire.FuzzFrame":             "the check that reads what a camera and its viewers send each other",
 	"camwire.FuzzBundle":            "the check that reads a camera's signed settings",
 	"camwire.FuzzManifest":          "the check that reads a camera's signed update",
+	"camera.FuzzStatusFrame":        "the check that reads a camera's stream",
 	"vision.FuzzVisionReply":        "the check that reads what the camera vision service reports",
 }
 

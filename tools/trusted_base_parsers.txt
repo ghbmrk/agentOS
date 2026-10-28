@@ -18,6 +18,7 @@ inert  github.com/ghbmrk/agentos/broker/admission -- in-process admission arithm
 parser github.com/ghbmrk/agentos/broker/backup -- backup objects and key tables read back from a backup target
 inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup budgets
 parser github.com/ghbmrk/agentos/broker/camwire -- frames, settings bundles and image manifests from a camera node or the enforcer, and the owner's passkey assertions
+parser github.com/ghbmrk/agentos/broker/clerk/camera -- frame headers and status from camera nodes, and their TLS handshakes; agentos-camdecode runs in the sandbox
 inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup files
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
