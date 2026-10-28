@@ -406,7 +406,7 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	return os.Rename(f.Name(), path) // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the trusted unlock step cannot link it; the anchors are public, rewritten each boot, and pinned in the store
 }
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot
