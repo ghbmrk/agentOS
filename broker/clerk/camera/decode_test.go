@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -216,7 +217,9 @@ func TestDecodeFormatMatchesDecoder(t *testing.T) {
 // pinned H.264-only libavcodec (image/libavcodec.sh): configured with
 // --disable-network, it reaches no network by its build, and the
 // sandbox's namespace stops any that would. Every other file of both
-// sandbox directories is refused "C", so no further C enters unseen.
+// sandbox directories is refused "C", and neither directory may hold a
+// source the go tool compiles or links besides Go (.c, .s, .S, .syso, ...;
+// only .go and .md files), so no further C or assembly enters unseen.
 func TestClerkDoesNotLinkDecoder(t *testing.T) {
 	check := func(dir string, ok func(file, path string) bool) {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
@@ -252,8 +255,18 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 		return !strings.Contains(p, ".") || p == "github.com/ghbmrk/agentos/broker/camwire" ||
 			p == "github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode"
 	}
-	check("../../cmd/agentos-camdecode", inSandbox)
-	check("../../cmd/agentos-camdecode/camdecode", inSandbox)
+	for _, dir := range []string{"../../cmd/agentos-camdecode", "../../cmd/agentos-camdecode/camdecode"} {
+		check(dir, inSandbox)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if ext := filepath.Ext(e.Name()); !e.IsDir() && ext != ".go" && ext != ".md" {
+				t.Errorf("%s holds %s: the decoder's only non-Go code is h264.go's cgo", dir, e.Name())
+			}
+		}
+	}
 }
 
 // TestDecoderThermalThroughSandbox: thermal frames go through the
