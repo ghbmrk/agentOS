@@ -1123,3 +1123,53 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 		t.Fatalf("after a restart: %v", err)
 	}
 }
+
+// brokenKeys is a key table whose delete fails with err.
+type brokenKeys struct {
+	*kernel.MemKeys
+	err error
+}
+
+func (b brokenKeys) Delete(string) error { return b.err }
+
+// KRN-erase-err-is (#3634): an erase whose step after the log fails with a
+// wrapped sentinel, or a join holding one, crosses the owner socket with
+// its text and is that sentinel to errors.Is, as a Call error is (LOG-4).
+func TestAnEraseErrorCrossesAsWhatItWraps(t *testing.T) {
+	for _, c := range []struct {
+		err error
+		is  error // nil: none
+	}{
+		{kernel.ErrStore, kernel.ErrStore},
+		{fmt.Errorf("%w: key file", kernel.ErrStore), kernel.ErrStore},
+		{errors.Join(errors.New("key table down"), kernel.ErrStore), kernel.ErrStore},
+		{errors.New("key table down"), nil},
+	} {
+		dir := t.TempDir()
+		h := contentKernel(t, filepath.Join(dir, "log"), filepath.Join(dir, "keys"))
+		o := Owner{serveSide(t, &box{t: t, h: h}, OwnerSide, os.Getuid())}
+		var sub string
+		if err := h.With(func(k *kernel.Kernel) (err error) {
+			if _, err = k.OpenContent(brokenKeys{kernel.NewMemKeys(), c.err}, map[string]kernel.ContentStore{"mail": kernel.NewMemContent()}, 1000); err != nil {
+				return err
+			}
+			sub, err = k.OpenSubject(1000)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		conf, got := o.Erase(sub)
+		h.Close()
+		if conf.Subject != sub || got == nil || got.Error() != c.err.Error() {
+			t.Fatalf("%v crossed as %+v %v", c.err, conf, got)
+		}
+		if c.err == c.is && got != c.is {
+			t.Fatalf("the sentinel %v crossed as another value, %#v", c.is, got)
+		}
+		for _, e := range wireList {
+			if errors.Is(got, e) != (e == c.is) {
+				t.Errorf("%v crossed: errors.Is(%v) = %v", c.err, e, errors.Is(got, e))
+			}
+		}
+	}
+}
