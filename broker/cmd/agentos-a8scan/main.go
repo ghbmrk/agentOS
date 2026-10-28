@@ -3,7 +3,8 @@
 // (STO-2) with the recovery key, as the unlock path does, and scans a
 // drive's plaintext partitions, or any files and directories, for the
 // store's data key, the keys derived from it (the log key, the head key,
-// the MAC and entries keys, each clerk's sealer key) and every sealed
+// the MAC and entries keys, the clerk root key, and each clerk's key, sealer
+// key and handle secret derived from it) and every sealed
 // secret, in raw, hex, base64 and base32 forms at every alignment. It also checks that the store holds
 // only TPM, passphrase and recovery slots.
 //
@@ -48,13 +49,15 @@ import (
 
 	"golang.org/x/crypto/argon2"
 
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 )
 
-// shippedClerks are the clerks whose seal.Store.Sealer keys are needles
-// without a -clerk flag: every clerk main the image ships
-// (cmd/agentos-clerk-*). MAIL-keys (#3419) replaces Sealer with keys the
-// kernel hands each clerk; the needles for that chain come with it.
+// shippedClerks are the clerks whose keys are needles without a -clerk
+// flag: every clerk main the image ships (cmd/agentos-clerk-*). Each clerk's
+// chain is a needle: the key the kernel derives for it from the clerk root
+// key and hands its unit (MAIL-keys, #3419), and the sealer key and handle
+// secret the clerk derives from that (clerkPurposes).
 var shippedClerks = []string{"mail"}
 
 type clerkList []string
@@ -66,7 +69,7 @@ func main() {
 	log.SetFlags(0)
 	sp := flag.String("store", "", "the drive's sealed store file")
 	var clerks clerkList
-	flag.Var(&clerks, "clerk", "a clerk whose sealer key is a needle, besides the shipped ones (repeatable)")
+	flag.Var(&clerks, "clerk", "a clerk whose keys are needles, besides the shipped ones (repeatable)")
 	flag.Parse()
 	if *sp == "" || flag.NArg() == 0 {
 		log.Fatal("usage: agentos-a8scan -store FILE [-clerk NAME]... TARGET... (recovery key on stdin)")
@@ -227,13 +230,19 @@ func storeNeedles(sp string, st *seal.Store, rk []byte, rkText, passphrase strin
 		}
 		clear(pk)
 	}
+	root := derive(key, id, "clerks")
+	ns = append(ns, Needle{Name: "clerk root key", Value: root})
 	seen := map[string]bool{}
 	for _, c := range clerks {
 		if seen[c] {
 			continue
 		}
 		seen[c] = true
-		ns = append(ns, Needle{Name: "sealer key of clerk " + c, Value: derive(key, id, "sealer/"+c)})
+		cn, err := clerkNeedles(root, c)
+		if err != nil {
+			return nil, err
+		}
+		ns = append(ns, cn...)
 	}
 	for _, name := range st.Entries() {
 		v, ok, err := st.Get(name)
@@ -277,8 +286,42 @@ var storePurposes = map[string]string{
 	"entries": "store entries key",
 	"log":     "log key",
 	"head":    "head key",
-	"sealer/": "sealer key of clerk ",
+	"clerks":  "clerk root key",
 	"anchor":  "", // the TPM unlock's anchor: not secret (seal.go, anchor)
+}
+
+// clerkPurposes names every label clerkkey derives a key under, from the
+// clerk root key down to each clerk's own keys, with the needle that covers
+// it. TestEveryStorePurposeIsANeedle fails on a label clerkkey gains that
+// this list lacks.
+var clerkPurposes = map[string]string{
+	"agentos.clerk.key.v1":     "key of clerk ",
+	"agentos.clerk.sealer.v1":  "sealer key of clerk ",
+	"agentos.clerk.handles.v1": "handle secret of clerk ",
+}
+
+// clerkNeedles are clerk c's keys under the clerk root key: the key the
+// kernel hands it, and the sealer key and handle secret it derives.
+func clerkNeedles(root []byte, c string) ([]Needle, error) {
+	var r [clerkkey.Len]byte
+	copy(r[:], root)
+	k, err := clerkkey.Derive(&r, c)
+	if err != nil {
+		return nil, fmt.Errorf("clerk %q: %w", c, err)
+	}
+	sl, err := k.Sealer()
+	if err != nil {
+		return nil, err
+	}
+	hs, err := k.HandleSecret()
+	if err != nil {
+		return nil, err
+	}
+	return []Needle{
+		{Name: "key of clerk " + c, Value: bytes.Clone(k.Key[:])},
+		{Name: "sealer key of clerk " + c, Value: sl},
+		{Name: "handle secret of clerk " + c, Value: hs},
+	}, nil
 }
 
 // The Owner Card's recovery key format (broker/card, recoverykey.go), read

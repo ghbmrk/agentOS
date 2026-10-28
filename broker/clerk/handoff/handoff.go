@@ -46,6 +46,16 @@ const maxName = 64
 // drive cannot swap in keys of their own.
 const AnchorsEntry = "kernel/anchors"
 
+// ClerkAnchorsEntry is the sealed store's entry holding the owner's hardware
+// keys for the clerks on a box whose setup put them in the kernel's log, not
+// in AnchorsEntry (#2995): the unlock step copies the log's first entry here
+// at the first boot that finds it, in EncodeAnchors' form, and from then on
+// reads only this, under the store's MAC, which the kernel never holds. So a
+// kernel taken over later cannot rewrite the anchors the clerks check its
+// views against (D-146). The kernel is never handed it: its anchors come
+// from its log.
+const ClerkAnchorsEntry = "clerks/anchors"
+
 // MaxAnchors bounds the owner's hardware keys in the hand-off.
 const MaxAnchors = 16
 
@@ -68,7 +78,7 @@ const recipientXLen = 32
 // from this one.
 const recipientTag = "agentos-backup-recipient/v1\n"
 
-const handoffTag = "agentos-kernel-keys/v6\n"
+const handoffTag = "agentos-kernel-keys/v7\n"
 
 // PageCAEntry is the sealed store's entry holding the page authority
 // (CH-9, MIG-4-recovery-f1): pageca.Marshal's form, its certificate and
@@ -115,11 +125,12 @@ const anchorsTag, anchorsTagStem = "agentos-anchors/v1\n", "agentos-anchors/"
 const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 
 // maxHandoff is the longest hand-off: the tag, the log key, the head seed,
+// the clerk root key,
 // the counter, the recipient and the page authority with their lengths, the
 // link key, the first edge key and the slot with theirs, the count and
 // MaxAnchors ES256 keys. It is far below a pipe's 64 KiB buffer, so the
 // unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MaxAnchors*maxAnchor
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -130,7 +141,8 @@ const maxCounter = 3*(1+maxName) + 4
 var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or missing")
 
 // KernelKeys is what the unlock step hands the kernel process: the log's
-// key, the head-signing key, the log anchor's counter, the owner's anchors,
+// key, the head-signing key, the clerk root key, the log anchor's counter,
+// the owner's anchors,
 // none when the store holds none (the kernel then starts setup-only and
 // takes them into its log, kernel.Setup), and the backup recipient, empty
 // when the store holds none (a box enrolled before MIG-4-recovery-e1; the
@@ -140,8 +152,12 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // enrolled before EDGE-link-core-b, or a restore's, which holds no first
 // key), and the slot that opened the store, which is always named.
 type KernelKeys struct {
-	Log       [32]byte
-	Head      ed25519.PrivateKey
+	Log  [32]byte
+	Head ed25519.PrivateKey
+	// ClerkRoot is the root of every clerk's key (MAIL-keys): the kernel
+	// derives one clerk's key from it (clerkkey.Derive) and hands it to that
+	// clerk's unit at each start. The store derives it; zero hands none.
+	ClerkRoot [32]byte
 	Counter   Counter
 	Anchors   []key.PublicKey
 	Recipient []byte             // RecipientLen bytes or none (RecipientEntry)
@@ -348,6 +364,7 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, handoffTag...)
 	b = append(b, k.Log[:]...)
 	b = append(b, k.Head.Seed()...)
+	b = append(b, k.ClerkRoot[:]...)
 	b = append(b, byte(len(k.Counter.SRK)))
 	b = append(b, k.Counter.SRK...)
 	b = binary.BigEndian.AppendUint32(b, k.Counter.Handle)
@@ -381,6 +398,7 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 // the holder's (STO-2a-e: the wipe is best-effort).
 func (k *KernelKeys) Wipe() {
 	clear(k.Log[:])
+	clear(k.ClerkRoot[:])
 	clear(k.Head)
 	k.Head = nil
 	clear(k.Counter.Auth)
@@ -432,7 +450,7 @@ func optional(b []byte, n int) (f, rest []byte, ok bool) {
 }
 
 func parseKeys(b []byte) (KernelKeys, error) {
-	o := len(handoffTag) + 32 + ed25519.SeedSize
+	o := len(handoffTag) + 32 + ed25519.SeedSize + 32
 	if len(b) < o || len(b) > maxHandoff || string(b[:len(handoffTag)]) != handoffTag {
 		return KernelKeys{}, ErrHandoff
 	}
@@ -492,6 +510,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	o = len(handoffTag)
 	copy(k.Log[:], b[o:o+32])
 	k.Head = ed25519.NewKeyFromSeed(b[o+32 : o+32+ed25519.SeedSize])
+	copy(k.ClerkRoot[:], b[o+32+ed25519.SeedSize:])
 	// Copies, so clearing the read buffer leaves the kernel its counter.
 	k.Counter = Counter{SRK: bytes.Clone(c.SRK), Handle: c.Handle, Name: bytes.Clone(c.Name), Auth: bytes.Clone(c.Auth)}
 	return k, nil

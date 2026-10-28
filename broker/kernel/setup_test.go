@@ -158,3 +158,47 @@ func mustJSON(t *testing.T, v any) []byte {
 	must(t, err)
 	return b
 }
+
+// REQ: D-146
+// The unlock step reads the owner's anchors from a setup box's log for the
+// clerks (#2995, MAIL-keys): the first entry's two keys, only under the log
+// key and only signed over this box's head key. A log with no whole first
+// frame has none; anything else is corrupt. Fails if a frame under another
+// key, or keys signed for another box, reach the clerks.
+func TestLoggedAnchorsReadOnlyThisBoxsSetup(t *testing.T) {
+	s := newSetupRig(t)
+	var logKey [32]byte // cfg's
+	if a, ok, err := kernel.LoggedAnchors(s.store.B, logKey, s.head.pub); ok || err != nil || a != nil {
+		t.Fatalf("an empty log: %v, %v, %v", a, ok, err)
+	}
+	must(t, s.k.Setup(1, s.first()))
+	raw := s.store.B
+	a, ok, err := kernel.LoggedAnchors(raw, logKey, s.head.pub)
+	if err != nil || !ok || len(a) != 2 || a[0] != s.owner.pk || a[1] != s.spare.pk {
+		t.Fatalf("LoggedAnchors = %v, %v, %v; want the owner's two keys", a, ok, err)
+	}
+	if _, ok, err := kernel.LoggedAnchors(raw[:len(raw)-1], logKey, s.head.pub); ok || err != nil {
+		t.Fatalf("a torn first frame: %v, %v", ok, err)
+	}
+	other := logKey
+	other[0] = 1
+	huge := append([]byte{0, 2, 0, 0}, raw[4:]...)
+	for name, c := range map[string]struct {
+		raw []byte
+		key [32]byte
+		box []byte
+	}{
+		"another log key": {raw, other, s.head.pub},
+		"another box":     {raw, logKey, gen(9).pub},
+		"too long":        {huge, logKey, s.head.pub},
+	} {
+		if _, ok, err := kernel.LoggedAnchors(c.raw, c.key, c.box); ok || !errors.Is(err, kernel.ErrCorrupt) {
+			t.Errorf("%s: %v, %v; want ErrCorrupt", name, ok, err)
+		}
+	}
+	// A box whose first entry is no setup (its anchors came from the store).
+	r := newRig(t)
+	if _, ok, err := kernel.LoggedAnchors(r.store.B, logKey, r.head.pub); ok || !errors.Is(err, kernel.ErrCorrupt) {
+		t.Fatalf("a log whose first entry is no setup: %v, %v", ok, err)
+	}
+}
