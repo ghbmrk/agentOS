@@ -278,3 +278,29 @@ func TestSignInAllowedRefusesUndeclaredHosts(t *testing.T) {
 		t.Fatal("nil allowed")
 	}
 }
+
+// Held keeps, in their order, only the domains Build matches to an entry,
+// exactly or as a parent; a sender outside the table, a look-alike, and a
+// domain the card, the wallet or the mailbox declares are not held
+// (MAIL-world-alerts: VRB-2's alert senders are accounts the owner holds).
+func TestHeldIsOnlyWhatBuildMatches(t *testing.T) {
+	tab := household(t)
+	domains := []string{"unknown.test", "mail.shop.test", "notbank.test", "BANK.test.", "spam.test", "router.test"}
+	if got := tab.Held(domains); !slices.Equal(got, []string{"mail.shop.test", "BANK.test.", "router.test"}) {
+		t.Fatalf("held = %q", got)
+	}
+	if tab.Held(nil) != nil || (*Table)(nil).Held(domains) != nil {
+		t.Fatal("held with no domains or no table")
+	}
+	fixed, err := Load([]byte(`[
+  {"id": "payment-card", "name": "Card", "kind": "money", "group": "payment", "route": "none", "domains": ["card.test"]},
+  {"id": "payment-wallet", "name": "Wallet", "kind": "money", "group": "payment", "route": "none", "domains": ["wallet.test"]},
+  {"id": "mailbox", "name": "Mailbox", "kind": "mail", "group": "mailbox", "route": "none", "domains": ["mailbox.test"]}
+]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fixed.Held([]string{"card.test", "wallet.test", "mailbox.test"}); got != nil {
+		t.Fatalf("the fixed items hold %q", got)
+	}
+}
