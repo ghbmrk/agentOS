@@ -13,8 +13,9 @@ check). A test that skips as root (`== 0` with `.Skip`) is never root-gated: it 
 non-root jobs. A root step covers a test only when CI fails if the test skips or fails there: a
 ci.yml line runs `go test` under sudo with its output in a file (`> FILE`), the test's package and
 `-run` pattern match, and the next line of the step that reads or rewrites FILE is
-`python3 ... require_ran.py ... < FILE`, naming the test (or its package after `--gated`), with
-nothing after it but `|| exit 1`; the step has no `if:`, `continue-on-error:` or `shell:`.
+`python3 ... require_ran.py ... < FILE || exit 1`, naming the test (or its package after
+`--gated`); the step has no `if:`, `continue-on-error:` or `shell:` key and no line that opens
+control flow, sets a trap, defines a function or exits or returns 0.
 
   root_tests.py           exit 1, naming each root-gated test that no root step and no EXEMPT
                           line covers, and each EXEMPT line that matches no root-gated test
@@ -188,14 +189,15 @@ def _root_run(cmd):
 
 
 def _require(cmd):
-    """(input file, names, --gated patterns) for `python3 ... require_ran.py ... < FILE [|| exit 1]`
-    whose exit status reaches the step, else None."""
+    """(input file, names, --gated patterns) for `python3 ... require_ran.py ... < FILE || exit 1`,
+    whose failure ends the step whatever errexit's state (#3546 L3), else None."""
     words = _words(cmd)
     if not words or words[0] != "python3" or not any(w.endswith("require_ran.py") for w in words):
         return None
     words = words[[i for i, w in enumerate(words) if w.endswith("require_ran.py")][0] + 1:]
-    if words[-3:] == ["||", "exit", "1"]:
-        words = words[:-3]
+    if words[-3:] != ["||", "exit", "1"]:
+        return None
+    words = words[:-3]
     if words.count("<") != 1 or words.index("<") + 1 >= len(words) or any(w in PUNCT - {"<"} for w in words):
         return None
     i = words.index("<")
@@ -214,9 +216,10 @@ def _require(cmd):
 
 
 # A step with one of these keys may skip or not fail the job; a line opening shell control flow
-# may run a root line conditionally. Either way the step covers nothing.
+# may run a root line conditionally, and a trap, a function or a zero exit or return may turn a
+# failure green. Either way the step covers nothing.
 UNSAFE_KEYS = ("if", "continue-on-error", "shell")
-UNSAFE_LINE = re.compile(r"^(?:if|while|until|for|case|select)\b|\bexit\s+0\b|\bset\s+\+e\b|&\s*$")
+UNSAFE_LINE = re.compile(r"^(?:if|while|until|for|case|select|trap|function)\b|\(\)\s*\{|\b(?:exit|return)\s+0+\b|&\s*$")
 
 
 def root_runs(ci_text):

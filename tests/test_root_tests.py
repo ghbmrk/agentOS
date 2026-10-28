@@ -123,7 +123,7 @@ STEPS = f"""      - name: Machine tests as root
           sudo env "PATH=$PATH" go test -count=1 -json -run '^(TestA|TestB)$' \\
             ./owner/kernelsock > /tmp/k.json || rc=$?
           python3 -I ../tools/require_ran.py < /tmp/k.json \\
-            {K}.TestA {K}.TestB
+            {K}.TestA {K}.TestB || exit 1
       - name: Not root
         run: go test -count=1 ./clerk/run
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
@@ -142,7 +142,8 @@ def runs_of(*lines, keys=""):
 
 
 GO = "sudo env go test -count=1 -json ./owner/kernelsock > /tmp/x.json || rc=$?"
-NAMED = f"python3 -I ../tools/require_ran.py < /tmp/x.json {K}.TestA"
+NAMED = f"python3 -I ../tools/require_ran.py < /tmp/x.json {K}.TestA || exit 1"
+BARE = NAMED.replace(" || exit 1", "")
 COVERS = [(["./owner/kernelsock"], None, frozenset({f"{K}.TestA"}), ())]
 
 
@@ -175,26 +176,44 @@ class RunsTest(unittest.TestCase):
 
     def test_a_named_root_run_covers(self):
         self.assertEqual(runs_of(GO, NAMED), COVERS)
-        self.assertEqual(runs_of(GO, NAMED + " || exit 1", '[ "$rc" -eq 0 ]'), COVERS)
+        self.assertEqual(runs_of(GO, NAMED, '[ "$rc" -eq 0 ]'), COVERS)
+        # `|| exit 1` ends the step whatever errexit's state, so turning it off loses nothing.
+        self.assertEqual(runs_of("set +o errexit", GO, NAMED, "true"), COVERS)
 
     def test_a_run_whose_skip_cannot_fail_ci_covers_nothing(self):
         # #3541: each of these lets a root-gated test skip or fail while the step stays green.
         cases = {
             "-v, no require_ran": [GO.replace(" > /tmp/x.json || rc=$?", "")],
             "no require_ran": [GO],
-            "|| true on require_ran": [GO, NAMED + " || true"],
-            "|| fail=1, never checked": [GO, NAMED + " || fail=1"],
-            "&& after require_ran": [GO, NAMED + " && echo ok"],
-            "require_ran in a pipe": [GO, NAMED + " | tee log"],
+            "|| true on require_ran": [GO, BARE + " || true"],
+            "|| fail=1, never checked": [GO, BARE + " || fail=1"],
+            "&& after require_ran": [GO, BARE + " && echo ok"],
+            "require_ran in a pipe": [GO, BARE + " | tee log"],
+            # #3546 L3: without `|| exit 1`, errexit decides, and it can be turned off many ways.
+            "no || exit 1": [GO, BARE],
+            "no || exit 1, set +e": ["set +e", GO, BARE, "true"],
+            "no || exit 1, set +eu": ["set +eu", GO, BARE, "true"],
+            "no || exit 1, set -u +e": ["set -u +e", GO, BARE, "true"],
+            "no || exit 1, set +o errexit": ["set +o errexit", GO, BARE, "true"],
+            "no || exit 1, shopt": ["shopt -u -o errexit", GO, BARE, "true"],
+            "|| exit 0": [GO, BARE + " || exit 0"],
+            "|| exit 1 in a subshell": [GO, "( " + NAMED + " )"],
+            "a trap": ["trap 'exit 0' EXIT", GO, NAMED],
+            "a trap later": [GO, NAMED, "trap 'exit 0' EXIT"],
+            "exit 00": [GO, NAMED, "exit 00"],
+            "return 0 in a function": ["f() {", GO, NAMED, "return 0", "}", "f"],
+            "a function keyword": ["function f {", GO, NAMED, "}", "f"],
+            "a function called with || true": ["f() {", GO, NAMED, "}", "f || true"],
             "require_ran reads another file": [GO, NAMED.replace("/tmp/x.json", "/tmp/y.json")],
             "the file is rewritten first": [GO, "sudo env go test ./clerk > /tmp/x.json", NAMED],
             "require_ran not run as a command": [GO, "true " + NAMED],
             "another script reads the file": [GO, NAMED.replace("require_ran.py", "summary.py")],
+            "a name after || exit 1": [GO, NAMED + " x"],
             "require_ran reads another file, named as an argument":
                 [GO, NAMED.replace("< /tmp/x.json", "< /tmp/y.json /tmp/x.json")],
             "under an if": ["if [ -n \"$X\" ]; then", GO, NAMED, "fi"],
             "exit 0 earlier": ["[ -n \"$X\" ] || exit 0", GO, NAMED],
-            "set +e": ["set +e", GO, NAMED],
+            "&& after || exit 1": [GO, NAMED + " && false"],
             "in the background": [GO + " &", NAMED],
             "commented out": ["# " + GO, NAMED],
             "the test is not named": [GO, NAMED.replace(".TestA", ".TestOther")],
