@@ -85,7 +85,7 @@ func capLineTexts() []string {
 }
 
 // forgetHeldLine is STATUS's line for agents that read erased content and
-// have not gone back: contained until a start takes them back.
+// have not gone back: contained until a retry takes them back.
 func forgetHeldLine(lineages []string) string {
 	who := "agent " + agentName(lineages[0]) + " could not go back, so it cannot"
 	if len(lineages) > 1 || len(who) > 50 {
@@ -94,7 +94,7 @@ func forgetHeldLine(lineages []string) string {
 			who = "an agent could not go back, so it cannot"
 		}
 	}
-	return "Forget: " + who + " fork or merge; I try again when I restart."
+	return "Forget: " + who + " fork or merge; I keep trying."
 }
 
 // forgetOwedLine is STATUS's line while erases wait on a store or the key:

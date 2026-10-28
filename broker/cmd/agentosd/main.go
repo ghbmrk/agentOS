@@ -414,6 +414,7 @@ func main() {
 	// So does a lineage that read content the owner had the box forget,
 	// until it goes back (KRN-forget b, D-169); a kernel is attached below.
 	eraseBack := openEraseRewind(filepath.Join(stateDir, eraseRewoundFile), log.Printf)
+	var served atomic.Pointer[daemon.Daemon] // set once the daemon runs
 	recallHeld.also = eraseBack.Contained
 	// A box with no -owner is set up by the local UI (P2-2w c2): only
 	// setup's ops are served until its finish is recorded, and the owner's
@@ -639,9 +640,17 @@ func main() {
 				return m
 			}
 			return nil
-		}, func() error { _, err := ev.kept.forget(); return err })
+		}, func() error {
+			held, err := ev.kept.forget()
+			// The owner hears of held agent texts dropped (CAP3-F1).
+			if d := served.Load(); d != nil {
+				if terr := tellHeldDropped(d.Owner(), held); terr != nil {
+					log.Printf("held agent texts dropped by a forget; owner not told: %v", terr)
+				}
+			}
+			return err
+		})
 		cfg.Notes = append(cfg.Notes, eraseBack.Note, forgetStatus(*seat))
-		go eraseBack.watch(ctx, eraseReadsEvery)
 		// Backups (BAK-1, e4a): daily and at once, and STATUS's
 		// only-copy notice until the kernel verifies one.
 		bs := newBackupSchedule(*seat)
@@ -683,7 +692,13 @@ func main() {
 		log.Fatal(err)
 	}
 	pictures.open(d.Engine().RecordPicture)
+	served.Store(d)
 	pacer.attach(ctx, d.Owner(), time.Minute)
+	if seat != nil {
+		// Erased reads the start-up pass could not get are asked again, and
+		// the owner told of each rewind that follows (D-169).
+		go eraseBack.watch(ctx, eraseReadsEvery, informOwner(d.Owner))
+	}
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
 	if noticeSocket != "" {

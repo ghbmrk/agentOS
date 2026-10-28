@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -244,6 +245,68 @@ func TestTheReplyFollowsTheRewind(t *testing.T) {
 	}
 }
 
+// D-169 when the kernel answers late: the start-up pass cannot read the
+// erased reads, so watch rewinds once it can, and tells the owner then,
+// once, not at the next restart (L3 1 on #3691).
+func TestWatchTellsTheOwnerOfItsRewind(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	k.erased["s1"] = true
+	k.readsErr = errors.New("kernel not up")
+	m := &rewindMachines{}
+	b := newForgetBox(t, k, m, t.TempDir())
+	var mu sync.Mutex
+	var told []string
+	tell := func(s string) error { mu.Lock(); told = append(told, s); mu.Unlock(); return nil }
+	b.rw.settle(context.Background(), tell)
+	if !b.rw.Contained("helper.1") || !b.rw.Contained("other.1") || len(told) != 0 {
+		t.Fatalf("reads unknown: told %q", told)
+	}
+	k.mu.Lock()
+	k.readsErr = nil
+	k.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.rw.watch(ctx, time.Millisecond, tell)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(told)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("watch rewound but never told the owner")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(told) != 1 || !strings.HasPrefix(told[0], "Agent helper had read something you had me forget") || len(m.calls) != 1 || b.rw.Contained("helper.1") {
+		t.Fatalf("told %q, rewinds %v", told, m.calls)
+	}
+}
+
+// A confirm's rewind is told by its result: its record is marked told only
+// once the result is built, and no later pass tells it again (L3 2 on
+// #3691).
+func TestAConfirmsRewindIsToldOnce(t *testing.T) {
+	dir := t.TempDir()
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	m := &rewindMachines{}
+	b := newForgetBox(t, k, m, dir)
+	b.rw.settle(context.Background(), func(string) error { return nil })
+	b.forget(t, "Alice")
+	var told []string
+	newForgetBox(t, k, m, dir).rw.settle(context.Background(), func(s string) error { told = append(told, s); return nil })
+	if len(told) != 0 || len(m.calls) != 1 {
+		t.Fatalf("told again %q, rewinds %v", told, m.calls)
+	}
+}
+
 // D-169 at start: an erased subject with a reader and no record (a crash
 // after the erase) is rewound by the start-up pass and the owner told
 // once; a recorded one is not rewound again.
@@ -317,7 +380,7 @@ func TestAFailedRewindStaysContained(t *testing.T) {
 	k.add("s2", "Bob", 1, map[string]int64{"writer.1": 7000})
 	b2.rw.attach(k, func() lineageForgetter { return m }, func() error { return errors.New("read-only") })
 	r = b2.forget(t, "Bob")
-	if !slices.Equal(r.Held, []string{"writer.1"}) || !b2.rw.Contained("writer.1") || len(m.calls) != 2 {
+	if !slices.Equal(r.Held, []string{"writer.1"}) || !b2.rw.Contained("writer.1") || len(m.calls) != 3 {
 		t.Fatalf("replies not dropped: %+v %v", r, m.calls)
 	}
 	// Erased reads the kernel does not answer contain every agent until it
@@ -329,12 +392,13 @@ func TestAFailedRewindStaysContained(t *testing.T) {
 		t.Fatalf("reads unknown: %q", b3.rw.Note())
 	}
 	k.readsErr = nil
-	b3.rw.rewind(context.Background(), false)
+	b3.rw.rewind(context.Background())
 	if b3.rw.Contained("other.1") {
 		t.Fatal("still all contained once the reads are known")
 	}
+	// A record that cannot be read contains every agent and is kept.
 	bad := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bad, eraseRewoundFile), []byte("{"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(bad, eraseRewoundFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	b4 := newForgetBox(t, k, m, bad)
@@ -342,8 +406,25 @@ func TestAFailedRewindStaysContained(t *testing.T) {
 	if !b4.rw.Contained("other.1") || b4.rw.Note() != forgetRecordUnread {
 		t.Fatalf("unreadable record: %q", b4.rw.Note())
 	}
-	if got, _ := os.ReadFile(filepath.Join(bad, eraseRewoundFile)); string(got) != "{" {
-		t.Fatalf("unreadable record overwritten: %q", got)
+	if fi, err := os.Stat(filepath.Join(bad, eraseRewoundFile)); err != nil || !fi.IsDir() {
+		t.Fatalf("unreadable record replaced: %v", err)
+	}
+	// A corrupt one is set aside, and every reader goes back again and
+	// the owner is told, so the agents are not held for good (L3 3 on
+	// #3691).
+	corrupt := t.TempDir()
+	if err := os.WriteFile(filepath.Join(corrupt, eraseRewoundFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := len(m.calls)
+	var told []string
+	b5 := newForgetBox(t, k, m, corrupt)
+	b5.rw.settle(context.Background(), func(s string) error { told = append(told, s); return nil })
+	if b5.rw.Contained("helper.1") || b5.rw.Contained("other.1") || len(m.calls) != before+2 || len(told) != 2 {
+		t.Fatalf("corrupt record: rewinds %v, told %q, note %q", m.calls[before:], told, b5.rw.Note())
+	}
+	if got, err := os.ReadFile(filepath.Join(corrupt, eraseRewoundFile+".corrupt")); err != nil || string(got) != "{" {
+		t.Fatalf("corrupt record not set aside: %q %v", got, err)
 	}
 	// No kernel attached: nothing was ever erased here, nothing contained.
 	if none := openEraseRewind(filepath.Join(t.TempDir(), eraseRewoundFile), t.Logf); none.Contained("x") || none.Note() != "" {
@@ -459,5 +540,101 @@ func TestForgetResultWording(t *testing.T) {
 	r := newForgetBox(t, k, &rewindMachines{}, t.TempDir()).forget(t, "Alice")
 	if want := "Forgot everything named Alice (2 items), but it is not finished: the key has not deleted them yet. I keep trying, and STATUS shows it. Older backups may still hold them."; r.Text() != want {
 		t.Fatalf("through confirm: %q", r.Text())
+	}
+}
+
+// keepingMachines keeps a reply built from the erased content while the
+// first reader is going back, as a second reader still running would.
+type keepingMachines struct {
+	kept  *keptReplies
+	calls []string
+}
+
+func (m *keepingMachines) ForgetSince(_ context.Context, lineage string, _ time.Time) error {
+	if len(m.calls) == 0 {
+		m.kept.keep("reply built from CANARY-mail")
+	}
+	m.calls = append(m.calls, lineage)
+	return nil
+}
+
+// LOG-4, D-169: the kept replies are dropped only after every reader has
+// gone back, so a reply one posts while another goes back does not survive
+// (Security 1 on #3691); a drop that fails settles nothing and watch tries
+// all of it again.
+func TestNoReplyKeptDuringTheRewindSurvives(t *testing.T) {
+	dir := t.TempDir()
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"a.1": 1000, "b.1": 2000})
+	kept := &keptReplies{store: change.FileStore{Path: filepath.Join(dir, "kept.json")}, now: time.Now}
+	kept.keep("old reply")
+	m := &keepingMachines{kept: kept}
+	rw := openEraseRewind(filepath.Join(dir, eraseRewoundFile), t.Logf)
+	fail := errors.New("read-only")
+	drops := 0
+	rw.attach(k, func() lineageForgetter { return m }, func() error {
+		if drops++; drops == 2 {
+			return fail
+		}
+		_, err := kept.forget()
+		return err
+	})
+	rw.settle(context.Background(), func(string) error { return nil })
+	f := newForgetFlow(k, rw)
+	found, _ := f.find(context.Background(), "Alice")
+	r, err := f.confirm(context.Background(), found.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := kept.list(); len(l) != 0 {
+		t.Fatalf("kept replies still hold %q after %q", l[0].Text, r.Text())
+	}
+	if !strings.Contains(r.Text(), "Agents a and b went back to before they read them.") {
+		t.Fatalf("text: %q", r.Text())
+	}
+	// A drop that fails: the readers stay held, and watch retries.
+	k.add("s2", "Bob", 1, map[string]int64{"c.1": 3000})
+	found, _ = f.find(context.Background(), "Bob")
+	r, _ = f.confirm(context.Background(), found.Handle)
+	if r.Rewound != nil || !slices.Equal(r.Held, []string{"c.1"}) || !rw.Contained("c.1") {
+		t.Fatalf("failed drop: %+v", r)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	told := make(chan string, 4)
+	go rw.watch(ctx, time.Millisecond, func(s string) error { told <- s; return nil })
+	select {
+	case s := <-told:
+		if !strings.HasPrefix(s, "Agent c had read") || rw.Contained("c.1") {
+			t.Fatalf("after the retry: %q", s)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch never retried the held reader")
+	}
+}
+
+// ctxMachines: the owner's page request ends as the rewind starts, and
+// vm's ForgetSince honours ctx.
+type ctxMachines struct{ cancel func() }
+
+func (m *ctxMachines) ForgetSince(ctx context.Context, _ string, _ time.Time) error {
+	m.cancel()
+	return ctx.Err()
+}
+
+// LOG-4 fails closed: the surface's request ending mid-confirm cancels
+// neither the erase nor the rewind (Security 2 on #3691).
+func TestAnEndedRequestStillRewinds(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"a.1": 1000})
+	ctx, cancel := context.WithCancel(context.Background())
+	rw := openEraseRewind(filepath.Join(t.TempDir(), eraseRewoundFile), t.Logf)
+	rw.attach(k, func() lineageForgetter { return &ctxMachines{cancel: cancel} }, func() error { return nil })
+	rw.settle(context.Background(), func(string) error { return nil })
+	f := newForgetFlow(k, rw)
+	found, _ := f.find(ctx, "Alice")
+	r, err := f.confirm(ctx, found.Handle)
+	if err != nil || r.Held != nil || !slices.Equal(r.Rewound, []string{"a.1"}) {
+		t.Fatalf("held=%v rewound=%v %v", r.Held, r.Rewound, err)
 	}
 }

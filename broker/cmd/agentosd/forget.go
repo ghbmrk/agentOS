@@ -39,6 +39,8 @@ const (
 	// eraseReadsEvery is how often an unanswered erasedreads is asked
 	// again while every agent is contained for want of it.
 	eraseReadsEvery = 5 * time.Second
+	// maxRewindWait bounds the wait between retries of a failed rewind.
+	maxRewindWait = 10 * time.Minute
 )
 
 // ErrForgetHandle is a confirm of a find that expired, was used, or never
@@ -165,6 +167,10 @@ func (f *forgetFlow) confirm(ctx context.Context, handle string) (forgetResult, 
 	if !ok {
 		return forgetResult{}, ErrForgetHandle
 	}
+	// Once confirmed, the surface's request ending (a closed tab, a
+	// timeout) cancels neither an erase nor the rewind that must follow it;
+	// each kernel call keeps its own bound.
+	ctx = context.WithoutCancel(ctx)
 	r := forgetResult{Name: p.found.Name, Items: p.found.Items, Unread: p.found.Unread}
 	held := map[string]kernelsock.BackupHold{}
 	for _, sub := range p.subjects {
@@ -191,7 +197,13 @@ func (f *forgetFlow) confirm(ctx context.Context, handle string) (forgetResult, 
 	for _, b := range slices.Sorted(maps.Keys(held)) {
 		r.StillHeld = append(r.StillHeld, held[b])
 	}
-	r.Rewound, r.Held, r.Unchecked = f.rw.rewind(ctx, true)
+	// The result tells the owner of these rewinds, so they are marked told
+	// once it is built, under the same hold as the rewind, so neither the
+	// start-up pass nor watch tells them again.
+	f.rw.run.Lock()
+	defer f.rw.run.Unlock()
+	r.Rewound, r.Held, r.Unchecked = f.rw.rewindLocked(ctx)
+	f.rw.markTold(r.Rewound)
 	return r, nil
 }
 
@@ -252,10 +264,18 @@ func (r forgetResult) Text() string {
 	case r.Unchecked:
 		out = append(out, "I could not check which agents read them, so no agent can copy itself until I can.")
 	case len(r.Held) > 0:
-		out = append(out, fmt.Sprintf("%s could not go back yet; it is held from copying itself until it does.", agentList(r.Held)))
+		if len(r.Held) > 1 {
+			out = append(out, fmt.Sprintf("%s could not go back yet; they are held from copying themselves until they do.", agentList(r.Held)))
+		} else {
+			out = append(out, fmt.Sprintf("%s could not go back yet; it is held from copying itself until it does.", agentList(r.Held)))
+		}
 	}
 	if len(r.Rewound) > 0 {
-		out = append(out, fmt.Sprintf("%s went back to before it read them.", agentList(r.Rewound)))
+		it := "it"
+		if len(r.Rewound) > 1 {
+			it = "they"
+		}
+		out = append(out, fmt.Sprintf("%s went back to before %s read them.", agentList(r.Rewound), it))
 	}
 	return strings.Join(out, " ")
 }
@@ -337,7 +357,10 @@ func agentList(lineages []string) string {
 		names = append(names, agentName(l))
 	}
 	sort.Strings(names)
-	return "Agent " + strings.Join(names, ", agent ")
+	if len(names) == 1 {
+		return "Agent " + names[0]
+	}
+	return "Agents " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // rewoundRead is one erased subject's reader whose rewind went through.
@@ -368,8 +391,9 @@ type eraseRewind struct {
 	holding    map[string]bool // lineages owed a rewind
 }
 
-// openEraseRewind reads the record. An unreadable one contains every
-// lineage once a kernel is attached, and is never overwritten.
+// openEraseRewind reads the record. One that cannot be read contains every
+// lineage once a kernel is attached, and is never overwritten; a corrupt
+// one is set aside and every rewind done again.
 func openEraseRewind(path string, logf func(string, ...any)) *eraseRewind {
 	w := &eraseRewind{path: path, logf: logf, holding: map[string]bool{}}
 	data, err := os.ReadFile(path)
@@ -380,8 +404,16 @@ func openEraseRewind(path string, logf func(string, ...any)) *eraseRewind {
 		w.bad = true
 	default:
 		if err := json.Unmarshal(data, &w.settled); err != nil {
-			logf("%s unreadable, every agent contained: %v", path, err)
-			w.bad, w.settled = true, nil
+			// A corrupt record is set aside, so every reader of erased
+			// content is rewound again (fails closed: later work goes too)
+			// and the owner told; kept if it cannot be moved.
+			w.settled = nil
+			if rerr := os.Rename(path, path+".corrupt"); rerr != nil {
+				logf("%s corrupt and not set aside, every agent contained: %v; %v", path, err, rerr)
+				w.bad = true
+			} else {
+				logf("%s corrupt, set aside: every agent that read forgotten things goes back again: %v", path, err)
+			}
 		}
 	}
 	return w
@@ -413,11 +445,16 @@ func (w *eraseRewind) isSettled(r kernelsock.ErasedRead) bool {
 // rewind reads the kernel's erased reads and takes each lineage with one
 // not yet settled back to its earliest, after dropping the kept agent
 // replies. A lineage that does not go back, or whose record is not
-// written, stays contained and is tried again at the next start. told
-// marks the new records as told: the caller tells the owner itself.
-func (w *eraseRewind) rewind(ctx context.Context, told bool) (rewound, held []string, unchecked bool) {
+// written, stays contained and is tried again at the next start. Each new
+// record is untold until notify or markTold.
+func (w *eraseRewind) rewind(ctx context.Context) (rewound, held []string, unchecked bool) {
 	w.run.Lock()
 	defer w.run.Unlock()
+	return w.rewindLocked(ctx)
+}
+
+// rewindLocked is rewind. Caller holds run.
+func (w *eraseRewind) rewindLocked(ctx context.Context) (rewound, held []string, unchecked bool) {
 	w.mu.Lock()
 	k, bad, machines, drop := w.k, w.bad, w.machines, w.drop
 	w.mu.Unlock()
@@ -451,18 +488,11 @@ func (w *eraseRewind) rewind(ctx context.Context, told bool) (rewound, held []st
 		return nil, nil, false
 	}
 	lineages := slices.Sorted(maps.Keys(owed))
-	// Replies an agent built from the content go first: if they cannot,
-	// no lineage is settled, so the next start does all of it again.
-	if drop != nil {
-		if err := drop(); err != nil {
-			w.logf("forget: kept agent replies not dropped, agents stay contained: %v", err)
-			return nil, lineages, false
-		}
-	}
 	var m lineageForgetter
 	if machines != nil {
 		m = machines()
 	}
+	var gone []string
 	for _, l := range lineages {
 		first := owed[l][0].First
 		for _, r := range owed[l] {
@@ -477,37 +507,73 @@ func (w *eraseRewind) rewind(ctx context.Context, told bool) (rewound, held []st
 			held = append(held, l)
 			continue
 		}
-		rewound = append(rewound, l)
-		w.mu.Lock()
-		before := len(w.settled)
-		for _, r := range owed[l] {
-			w.settled = append(w.settled, rewoundRead{r.Subject, r.Lineage, r.First, told})
-		}
-		if err := w.save(); err != nil {
-			// Not recorded: it stays contained and the next start takes it
-			// back again, so no further rewind is risked now.
-			w.settled = w.settled[:before]
-			w.mu.Unlock()
-			w.logf("forget: agent %s went back but %s was not written: %v", agentName(l), w.path, err)
-			return rewound, append(held, lineages[slices.Index(lineages, l)+1:]...), false
-		}
-		delete(w.holding, l)
-		w.mu.Unlock()
+		gone = append(gone, l)
 	}
-	return rewound, held, false
+	// Replies an agent built from the content go only once every reader
+	// that could go back has, so none it posts meanwhile is kept. If they
+	// cannot, no lineage is settled, and watch does all of it again.
+	if drop != nil {
+		if err := drop(); err != nil {
+			w.logf("forget: kept agent replies not dropped, agents stay contained: %v", err)
+			return nil, lineages, false
+		}
+	}
+	if len(gone) == 0 {
+		return nil, held, false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	before := len(w.settled)
+	for _, l := range gone {
+		for _, r := range owed[l] {
+			w.settled = append(w.settled, rewoundRead{r.Subject, r.Lineage, r.First, false})
+		}
+	}
+	if err := w.save(); err != nil {
+		// Not recorded: they stay contained and are taken back again.
+		w.settled = w.settled[:before]
+		w.logf("forget: agents went back but %s was not written: %v", w.path, err)
+		return gone, lineages, false
+	}
+	for _, l := range gone {
+		delete(w.holding, l)
+	}
+	return gone, held, false
 }
 
 // settle is the start-up pass, after the machines open and before any is
 // served (D-169): it rewinds what a crash left anywhere between an erase
 // and its reply, then tells the owner of each rewind not yet told.
 func (w *eraseRewind) settle(ctx context.Context, tell func(string) error) {
-	w.rewind(ctx, false)
+	w.rewind(ctx)
 	w.notify(tell)
 }
 
+// markTold records that the owner was told of each rewind of lineages.
+// Caller holds run.
+func (w *eraseRewind) markTold(lineages []string) {
+	if len(lineages) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for i := range w.settled {
+		if slices.Contains(lineages, w.settled[i].Lineage) {
+			w.settled[i].Told = true
+		}
+	}
+	if err := w.save(); err != nil {
+		// Untold on disk: the next start tells the owner again.
+		w.logf("%s not written: %v", w.path, err)
+	}
+}
+
 // notify tells the owner once of each rewind not yet told, by lineage.
-// Sends run outside mu, so a slow owner channel never stalls Contained.
+// Sends run outside mu, so a slow owner channel never stalls Contained,
+// and under run, so two passes never tell the same rewind.
 func (w *eraseRewind) notify(tell func(string) error) {
+	w.run.Lock()
+	defer w.run.Unlock()
 	w.mu.Lock()
 	untold := map[string]int64{}
 	for _, s := range w.settled {
@@ -541,11 +607,15 @@ func eraseBackNotice(lineage string, first int64) string {
 }
 
 // watch asks for the erased reads again while they are unknown, so every
-// agent is contained no longer than the kernel is unreachable. A failed
-// rewind waits for the next start (see eraseRewind).
-func (w *eraseRewind) watch(ctx context.Context, every time.Duration) {
+// agent is contained no longer than the kernel is unreachable, and retries
+// each lineage still owed a rewind, waiting twice as long after each
+// failure up to maxRewindWait (a repeat rewind takes back later work too,
+// which fails closed). The owner is told of each rewind it makes then, as
+// the start-up pass tells its own.
+func (w *eraseRewind) watch(ctx context.Context, every time.Duration, tell func(string) error) {
 	t := time.NewTicker(every)
 	defer t.Stop()
+	wait, next := every, time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -553,11 +623,22 @@ func (w *eraseRewind) watch(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 		w.mu.Lock()
-		retry := w.k != nil && !w.bad && !w.readsKnown
+		unknown := w.k != nil && !w.bad && !w.readsKnown
+		owed := w.k != nil && !w.bad && len(w.holding) > 0
 		w.mu.Unlock()
-		if retry {
-			w.rewind(ctx, false)
+		switch {
+		case unknown:
+		case owed && !time.Now().Before(next):
+			next = time.Now().Add(wait)
+			wait = min(2*wait, maxRewindWait)
+		default:
+			if !owed {
+				wait = every
+			}
+			continue
 		}
+		w.rewind(ctx)
+		w.notify(tell)
 	}
 }
 
