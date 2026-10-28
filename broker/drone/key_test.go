@@ -120,7 +120,7 @@ func TestKeyNeverLeaves(t *testing.T) {
 		note(err)
 	} else {
 		// Not root, so no file of another owner can be made: the owner check is
-		// code-read here (ASSUMPTIONS.md row 11).
+		// code-read here (ASSUMPTIONS.md row DRONE-sim-11).
 		t.Log("owner check not exercised: not root")
 	}
 	_, err = NewKey(bytes.NewReader(make([]byte, KeySize)))

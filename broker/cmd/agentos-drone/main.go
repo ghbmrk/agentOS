@@ -4,10 +4,11 @@
 // aircraft its heartbeat. DRONE-enforcer (#3517) runs it on the enforcer.
 //
 // The key and the owner's public key are read from files only, never from an
-// argument or the environment (P2).
+// argument or the environment (P2). The aircraft is a serial device (its USB
+// or radio link), never a network address, so the key-holder dials nothing.
 //
 //	agentos-drone -new-key PATH
-//	agentos-drone -key PATH -owner PATH -state DIR -aircraft HOST:PORT [-provision] [-policy PATH]
+//	agentos-drone -key PATH -owner PATH -state DIR -aircraft DEVICE [-provision] [-policy PATH]
 package main
 
 import (
@@ -17,9 +18,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/drone"
@@ -38,7 +39,7 @@ func run(args []string) error {
 	keyPath := fs.String("key", "", "the signing key file (mode 0600, owned by this user)")
 	ownerPath := fs.String("owner", "", "the owner's Ed25519 public key, base64, in a file")
 	state := fs.String("state", "", "the key-holder's state directory")
-	aircraft := fs.String("aircraft", "", "the aircraft's MAVLink TCP address")
+	aircraft := fs.String("aircraft", "", "the aircraft's MAVLink serial device")
 	provision := fs.Bool("provision", false, "store the key on an aircraft that holds none (first set-up link only)")
 	policyPath := fs.String("policy", "", "a signed policy to load")
 	if err := fs.Parse(args); err != nil {
@@ -62,7 +63,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialTimeout("tcp", *aircraft, 10*time.Second)
+	conn, err := os.OpenFile(*aircraft, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		return err
 	}
