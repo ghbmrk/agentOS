@@ -213,6 +213,8 @@ func newRig(t *testing.T, putAnchors bool) *rig {
 	must(t, err)
 	r.keys.Head, err = st.HeadKey()
 	must(t, err)
+	r.keys.ClerkRoot, err = st.ClerkRoot()
+	must(t, err)
 	r.keys.Counter = r.enrollCounter(st)
 	return r
 }
@@ -759,7 +761,7 @@ func TestTheProductionPinSourceReadsTheTPM(t *testing.T) {
 	must(t, tpmseal.WritePins(r.sw.TPM(), srk, id, tpmseal.Pins{PolicyKey: &r.policy.PublicKey, Anchor: r.anchor}))
 	b, err := unlock(c, storePins(r.store))
 	must(t, err)
-	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}, Slot: handoff.SlotTPM}.Marshal()
+	want, err := handoff.KernelKeys{Log: r.keys.Log, Head: r.keys.Head, ClerkRoot: r.keys.ClerkRoot, Counter: r.keys.Counter, Anchors: []key.PublicKey{key.Ed25519(gen(1)), key.Ed25519(gen(2))}, Slot: handoff.SlotTPM}.Marshal()
 	must(t, err)
 	if !bytes.Equal(b, want) {
 		t.Fatal("the hand-off is not the store's keys")
