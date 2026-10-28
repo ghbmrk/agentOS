@@ -76,7 +76,13 @@ if [ -n "$missing" ]; then
 	echo "$missing" >&2
 	exit 1
 fi
-make -C "$OUT/$BR" O="$O"
+# Buildroot only warns when a download has no hash file at all (BR2_DOWNLOAD_FORCE_CHECK_HASHES
+# covers a hash file without the entry); here an unchecked download fails the build.
+make -C "$OUT/$BR" O="$O" 2>&1 | tee "$O/make.log"
+if grep -F 'WARNING: no hash file for' "$O/make.log" >&2; then
+	echo "build.sh: those downloads were not checked against a hash" >&2
+	exit 1
+fi
 
 # The same for the kernel: Buildroot applies packages' kernel fixups after the fragments (systemd's
 # turns IPv6 on; camnode-init's turns it off again), so check the kernel that was built.
