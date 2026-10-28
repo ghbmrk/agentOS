@@ -97,6 +97,9 @@ type Kernel struct {
 	// recovery-key approvals the root steps verify (handoff.Approval).
 	// Set at open and never changed.
 	head ed25519.PrivateKey
+	// card is the recovery key a lost-card rotation made at this boot,
+	// held until the owner confirms the new card (kernelmain.go).
+	card recoveryCard
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans

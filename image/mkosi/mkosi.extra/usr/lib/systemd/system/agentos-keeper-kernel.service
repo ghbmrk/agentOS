@@ -4,6 +4,10 @@
 # descriptor 4 for the log's counter (LOG-2, STO-1). No process lives on with the store key (CLK-1).
 # The unlock step caps the tpm slot after its unseal (#2977), so no restart in the same boot unlocks:
 # a kernel that came up and then failed reboots the box (#2998, ExecStopPost= below).
+# On a boot by the tpm slot, unlock also carries out the owner's lost-card request (REC-4, route B of
+# D-201): agentosd writes the kernel's head-signed approval to its root-only state directory, and unlock
+# makes the new recovery key, replaces the recovery slot and backup recipient in one write, and hands
+# the key to the kernel for the new card. A request that is not one is ignored and the box starts.
 [Unit]
 Description=agentOS kernel
 ConditionPathExists=/var/lib/agentos-store/store
@@ -26,6 +30,7 @@ NoNewPrivileges=yes
 ExecStartPre=/usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel /run/agentos-kernel
 ExecStartPre=/usr/bin/rm -f /run/agentos-kernel/up
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \
+        -recovery-request /var/lib/agentos/recovery-request \
         -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
         -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \
         -keys-dir /var/lib/agentos-kernel/keys -content-dir /var/lib/agentos-kernel/content \

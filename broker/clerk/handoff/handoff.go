@@ -78,7 +78,11 @@ const recipientXLen = 32
 // from this one.
 const recipientTag = "agentos-backup-recipient/v1\n"
 
-const handoffTag = "agentos-kernel-keys/v7\n"
+const handoffTag = "agentos-kernel-keys/v8\n"
+
+// RecoveryLen is a recovery key's length, seal.RecoveryLen (the package
+// does not link the store; TestRecoveryLenIsTheStores ties the two).
+const RecoveryLen = 32
 
 // PageCAEntry is the sealed store's entry holding the page authority
 // (CH-9, MIG-4-recovery-f1): pageca.Marshal's form, its certificate and
@@ -127,10 +131,11 @@ const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 // maxHandoff is the longest hand-off: the tag, the log key, the head seed,
 // the clerk root key,
 // the counter, the recipient and the page authority with their lengths, the
-// link key, the first edge key and the slot with theirs, the count and
+// link key, the first edge key, the slot and the new recovery key with
+// theirs, the count and
 // MaxAnchors ES256 keys. It is far below a pipe's 64 KiB buffer, so the
 // unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MaxAnchors*maxAnchor
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + RecoveryLen + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -150,7 +155,9 @@ var ErrHandoff = errors.New("handoff: the unlock step's hand-off is damaged or m
 // store holds none (the kernel then certifies nothing). Then the link key
 // and the first edge key, each none when the store holds none (a box
 // enrolled before EDGE-link-core-b, or a restore's, which holds no first
-// key), and the slot that opened the store, which is always named.
+// key), and the slot that opened the store, which is always named. Last,
+// the recovery key the unlock step made at this boot on the lost-card
+// route, none on every other boot (REC-4, MIG-4-recovery-r3).
 type KernelKeys struct {
 	Log  [32]byte
 	Head ed25519.PrivateKey
@@ -165,6 +172,10 @@ type KernelKeys struct {
 	LinkKey   ed25519.PrivateKey // none or a whole key (LinkKeyEntry)
 	FirstEdge ed25519.PublicKey  // none or PublicKeySize bytes (FirstEdgeEntry)
 	Slot      string             // SlotTPM, or another slot's kind
+	// NewRecovery is the recovery key the unlock step put in the store at
+	// this boot (D-201 route B), RecoveryLen bytes, or none. The kernel
+	// holds it only until the owner confirms the new card.
+	NewRecovery []byte
 }
 
 // Counter names the log anchor's TPM counter for the kernel: the storage
@@ -357,7 +368,8 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	if len(k.Head) != ed25519.PrivateKeySize || !k.Counter.valid() || len(k.Anchors) > MaxAnchors ||
 		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(k.PageCA) != 0 && !validPageCA(k.PageCA) ||
 		len(k.LinkKey) != 0 && len(k.LinkKey) != ed25519.PrivateKeySize ||
-		len(k.FirstEdge) != 0 && len(k.FirstEdge) != ed25519.PublicKeySize || !validSlot(k.Slot) {
+		len(k.FirstEdge) != 0 && len(k.FirstEdge) != ed25519.PublicKeySize || !validSlot(k.Slot) ||
+		len(k.NewRecovery) != 0 && len(k.NewRecovery) != RecoveryLen {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
@@ -387,6 +399,8 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 	b = append(b, k.FirstEdge...)
 	b = append(b, byte(len(k.Slot)))
 	b = append(b, k.Slot...)
+	b = append(b, byte(len(k.NewRecovery)))
+	b = append(b, k.NewRecovery...)
 	out, err := appendAnchors(b, k.Anchors)
 	if err != nil {
 		clear(b)
@@ -407,6 +421,8 @@ func (k *KernelKeys) Wipe() {
 	k.PageCA = nil
 	clear(k.LinkKey)
 	k.LinkKey = nil
+	clear(k.NewRecovery)
+	k.NewRecovery = nil
 }
 
 // ReadKeys reads the hand-off from f and closes it. f must be a pipe, so a
@@ -495,7 +511,12 @@ func parseKeys(b []byte) (KernelKeys, error) {
 		return KernelKeys{}, ErrHandoff
 	}
 	slot := string(rest[1 : 1+int(rest[0])])
-	if rest = rest[1+int(rest[0]):]; !validSlot(slot) || len(rest) < 1 {
+	if rest = rest[1+int(rest[0]):]; !validSlot(slot) {
+		return KernelKeys{}, ErrHandoff
+	}
+	// None: no lost-card rotation ran at this boot.
+	rec, rest, ok := optional(rest, RecoveryLen)
+	if !ok || len(rest) < 1 {
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: the store has no anchors yet, so the kernel starts setup-only.
@@ -503,7 +524,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 	if err != nil {
 		return KernelKeys{}, err
 	}
-	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: bytes.Clone(ca), FirstEdge: bytes.Clone(edge), Slot: slot}
+	k := KernelKeys{Anchors: anchors, Recipient: bytes.Clone(rcp), PageCA: bytes.Clone(ca), FirstEdge: bytes.Clone(edge), Slot: slot, NewRecovery: bytes.Clone(rec)}
 	if seed != nil {
 		k.LinkKey = ed25519.NewKeyFromSeed(seed)
 	}
