@@ -1200,3 +1200,95 @@ func TestCardStepGetsThePagesAuthority(t *testing.T) {
 		t.Fatal("an authority with no HTTPS")
 	}
 }
+
+// REQ: HW-1, CH-9
+//
+// The first-boot card takes the authority agentos-keeper-pageca.service
+// published, read with no-follow, a size bound and owner and mode checks,
+// before agentosd's; anything else at that path reads as none, and then
+// the page's certified authority (or nothing) is used. It catches a card
+// printing a certificate another process could plant or swap.
+func TestFirstBootTakesThePublishedAuthority(t *testing.T) {
+	me := uint32(os.Getuid())
+	pub := testAuthority(t)
+	a, err := pageca.New(localui.DefaultPageName, time.Now().Add(-48*time.Hour), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := localui.Config{Page: testPage(), Port: localui.UIPort}
+	pt := pageTLS(context.Background(), &cfg, certifyingOwner{a}, func(string) {})
+	if pt == nil {
+		t.Fatal("no HTTPS with an authority")
+	}
+	setup := func(t *testing.T, data []byte, mode os.FileMode) string {
+		d := filepath.Join(t.TempDir(), "agentos-page-ca")
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(d, "authority.der")
+		if data != nil {
+			if err := os.WriteFile(p, data, mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(p, mode); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return p
+	}
+
+	good := setup(t, pub, 0o644)
+	if got := firstBootAuthority(good, me, pt); string(got) != string(pub) {
+		t.Fatal("the published authority was not taken first")
+	}
+	if got := firstBootAuthority(good, me, nil); string(got) != string(pub) {
+		t.Fatal("the published authority was not taken with no HTTPS")
+	}
+	if readPublished(good, me+1) != nil {
+		t.Fatal("took a certificate another user owns")
+	}
+
+	link := setup(t, nil, 0)
+	if err := os.Symlink(good, link); err != nil {
+		t.Fatal(err)
+	}
+	sharedDir := setup(t, pub, 0o644)
+	if err := os.Chmod(filepath.Dir(sharedDir), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	fifo := setup(t, nil, 0)
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]string{
+		"missing":           setup(t, nil, 0),
+		"group-writable":    setup(t, pub, 0o664),
+		"world-writable":    setup(t, pub, 0o646),
+		"a link":            link,
+		"a shared dir":      sharedDir,
+		"a fifo":            fifo,
+		"too big":           setup(t, append(pub, make([]byte, maxAuthority)...), 0o644),
+		"not a certificate": setup(t, []byte("not a certificate"), 0o644),
+		"another name":      setup(t, otherAuthority(t), 0o644),
+	} {
+		if readPublished(p, me) != nil {
+			t.Fatalf("%s: read as the authority", name)
+		}
+		if got := firstBootAuthority(p, me, pt); string(got) != string(a.Certificate()) {
+			t.Fatalf("%s: did not fall back to the page's certified authority", name)
+		}
+		if firstBootAuthority(p, me, nil) != nil {
+			t.Fatalf("%s: an authority with neither source", name)
+		}
+	}
+}
+
+// otherAuthority is an authority for another name.
+func otherAuthority(t *testing.T) []byte {
+	t.Helper()
+	a, err := pageca.New("other.internal", time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
+}

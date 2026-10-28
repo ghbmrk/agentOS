@@ -188,7 +188,7 @@ func TestFinishWaitsForTheCard(t *testing.T) {
 
 // REQ: HW-1
 //
-// No authority, no card (F19): the card step with no page authority holds
+// No authority, no card (firstboot OWN-card-ca-3): the card step with no page authority holds
 // setup at the card step, and the page says why in the fixed line instead
 // of a card; the card route shows nothing, and setup's recovery step still
 // refuses.

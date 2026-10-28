@@ -37,7 +37,7 @@ type CardStep struct {
 	cfg       card.DisplayConfig
 	preloaded bool
 	// noAuth: cfg.Authority is missing or not the page's authority
-	// (card.CheckAuthority), so no card is ever drawn (ASSUMPTIONS F19).
+	// (card.CheckAuthority), so no card is ever drawn (ASSUMPTIONS OWN-card-ca-3).
 	noAuth bool
 
 	mu   sync.Mutex
@@ -54,7 +54,7 @@ type CardStep struct {
 // with the same card (ASSUMPTIONS.md F10). Without a page authority
 // (cfg.Authority) it builds no display and draws no randomness: Hold
 // returns ErrNoAuthority, and the step never errors for it, so the page
-// does not crash-loop (F19).
+// does not crash-loop (OWN-card-ca-3).
 func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 	if st == nil || cfg.Provision == nil {
 		return nil, errors.New("firstboot: incomplete card step config")
