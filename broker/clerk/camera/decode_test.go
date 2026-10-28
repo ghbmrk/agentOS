@@ -1,6 +1,6 @@
 package camera
 
-// REQ: NET-2, DEV-7, DEV-8, ARC-5
+// REQ: NET-2, DEV-7, DEV-8
 
 import (
 	"bytes"

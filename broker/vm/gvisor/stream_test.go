@@ -1,6 +1,6 @@
 package gvisor
 
-// REQ: ARC-5, NET-2
+// REQ: NET-2
 
 import (
 	"context"
