@@ -27,19 +27,20 @@ CAM-clerk delivers decoded frames and keeps raw capture under DEV-7, but nothing
 
    The client checks every field before anything leaves it, because a compromised service could try to smuggle an encoding out:
    - plate text uses only `[A-Z0-9 -]`, is at most 10 characters, and is quoted as untrusted device-supplied text (DEV-8);
-   - `<id>` in `enrolled:<id>` must be in the client's own list of enrolled ids, which comes from the sealed store, not the service;
+   - `<id>` in `enrolled:<id>` must be in the client's own list of enrolled ids, which comes from its `clerk.Secrets` slots, not the service;
    - boxes are integers inside the declared frame size, and confidences are quantised to two decimals;
    - a request may produce only a bounded number of detections.
 
-   Raw boxes never leave VIS-core. Planners and the bus see only track-level outputs: zone entries, dwell, counts and closed-vocabulary classes, each rate-limited (DEV-8). The tracker runs in the client, not the service, and drops every detection that does not join a temporally consistent track. The drops are counted, and a sustained drop rate marks the service as faulty and restarts it. So a compromised service cannot push arbitrary box coordinates out to anyone; the only outward channel is a few bits per rate-limited zone event. [Risk: residual; an encoding of hundreds of bytes would need many hours of fake zone events that the owner would see.]
+   Raw boxes never reach a planner or the bus; only the owner's page (evidence references) and the drone position fixes use them. Planners and the bus see only track-level outputs: zone entries, dwell, counts and closed-vocabulary classes, each rate-limited (DEV-8). The tracker runs in the client, not the service, and drops every detection that does not join a temporally consistent track. The drops are counted, and a sustained drop rate marks the service as faulty and restarts it. So a compromised service cannot push arbitrary box coordinates out to anyone; the only outward channel is a few bits per rate-limited zone event. [Risk: residual; an encoding of hundreds of bytes would need many hours of fake zone events that the owner would see.]
 3. **Faces and voices inside the service only.**
-   - The service loads the enrolled templates, lent from the sealed store as the camera client key is.
+   - The service loads the enrolled templates, lent from `clerk.Secrets` slots as the camera client key is.
    - For each face or voice it computes the encoding in memory, compares it only with those templates, returns `enrolled:<id>` or `unknown`, and then zeroes the buffer. No op returns, logs or stores an encoding.
    - Enrolment is the one op that produces a template. It runs only from the owner's tier-4 local-page step, which shows its own biometric consent notice ("enrolling someone else may need their consent", risk 23). The template goes straight into the sealed store.
    - Enrolment is the template's retention, until un-enrolment.
-   - Templates live in sealed-store slots `vision-template/<enrolment id>`, lent only to `agentos-vision`, as the camera client key is lent only to `agentos-camera`. They are never kernel subject content, so recall never lists them and no agent session can read them (DEV-7: "never enters recall").
+   - Templates live, encrypted, in `clerk.Secrets` slots `vision-template/<enrolment id>`, lent only to `agentos-vision`, as the camera client key is lent only to `agentos-camera`. They are never kernel subject content, so recall never lists them and no agent session can read them (DEV-7: "never enters recall").
    - Un-enrolling empties the slot.
-   - Each enrolment records the enrolled person's subject id. Part (c) adds a narrow post-erase callback to `broker/kernel/erase.go`, registered at the composition root, so erasing that subject under LOG-4 also empties the slot.
+   - **Erase by key, with no kernel change.** Each template is encrypted under its own random wrap key, and that wrap key, not the template, is sealed as kernel content under the enrolled person's subject key (`Kernel.Seal`, LOG-4). The supervisor fetches it with `ReadFor` under the vision service's lineage, which logs `content.read`, whenever it lends a template. Erasing the subject destroys the subject key through the kernel's own logged, confirmed and retried erase, so the wrap key and with it the template become unreadable even if the slot survives. A crash after `subject.erased` is logged is re-applied at start by the kernel, as for any content. The slot is then removed lazily. A planner that reads the wrap key through recall gets 32 random bytes that open nothing it can reach.
+   - **Fail-closed until erase is live.** The running kernel opens no content store yet (`broker/kernel/proc/kernel.go` passes an empty map to `OpenContent`), and erase has no kernelsock op. Until the row that wires both into production merges, the enrolment step refuses ("face enrolment needs erase, not yet available"), so no template can exist that LOG-4 cannot erase. [Inference: that row is not on the board; noted on #3515. Part (c) is built and tested against `broker/kernel/sim`, which has content stores.]
 4. **Where unknown faces live.** They stay only in the capture (CAM-clerk retention, 30 days for the first household). VIS-core records derived references (segment id, frame time, box, sharpness score) so the owner's page can show "clearest unknown face per visit". Crops of unknown people go only to the owner's own page or channel on the owner's request, never to a planner or guest. A planner request to find or match an unenrolled person across captures is refused with a closed reason.
 5. **Tracks and zones.** ByteTrack-class tracking runs per camera. Tracks are fused across cameras on a ground plane from camera poses the owner sets once; the poses are owner data in the sealed store, never in git. Zone entries and dwell go onto the bus as private, untrusted, rate-limited events (DEV-8). Each camera node is verified (DEV-3), so owner rules may make an event urgent. Counts of distinct people come from tracking, never from comparing face encodings.
 6. **Drone outputs.** These are display data and fixes only:
@@ -60,7 +61,7 @@ CAM-clerk delivers decoded frames and keeps raw capture under DEV-7, but nothing
 
 - **(a) VIS-svc (about 110k):** `broker/vision` (protocol and client, standard library only), `broker/vision/supervise`, `broker/cmd/agentos-vision` with a fake runtime, the bounds, the closed vocabulary, and the ARC-2 guard entries.
 - **(b) VIS-track (about 90k; after a and CAM-clerk a):** tracking, ground-plane fusion, zones, DEV-8 events, and the drone zone and fix outputs.
-- **(c) VIS-faces (about 100k; after a):** template slots in the sealed store, the in-service compare, the tier-4 enrolment step with its consent notice, un-enrolment, the post-erase callback, the planner refusal, and evidence references.
+- **(c) VIS-faces (about 100k; after a):** template slots in `clerk.Secrets`, the wrap key sealed as kernel content, the in-service compare, the tier-4 enrolment step with its consent notice and its fail-closed refusal, un-enrolment, the planner refusal, and evidence references.
 - **(d) VIS-plates-sound (about 70k; after a):** plate text and sound labels.
 - **(e) VIS-models (about 90k; after a to d):** the real runtime and models, thermal (question 2), the synthetic scene and plate set, and the floor figures recorded in `broker/vision/ASSUMPTIONS.md`.
 - **(f) VIS-wire (about 80k; after a, c and CAM-clerk d), the integration owner:**
@@ -74,11 +75,14 @@ CAM-clerk delivers decoded frames and keeps raw capture under DEV-7, but nothing
 
 - `TestUnenrolledEncodingNeverLeaves` (DEV-7, A16 as amended): run a synthetic capture holding a face and a voice that are not enrolled, then scan every store, log line, event, reply and output for a vector within a cosine bound of their reference encodings. Nothing is found. This catches a build that keeps or logs an unknown encoding. (c)
 - `TestEnrolledRecognisedUnknownNot` (DEV-7): an enrolled synthetic face returns `enrolled:<id>` and an unknown face returns `unknown`, with no encoding in either reply. (c)
-- `TestUnenrolDestroysTemplate` and `TestErasureUnenrols` (DEV-7, LOG-4): after un-enrolling or erasing a subject, the template slot is empty and the same face returns `unknown`. (c)
+- `TestUnenrolDestroysTemplate` (DEV-7): after un-enrolling, the template slot is empty and the same face returns `unknown`. (c)
 - `TestEnrolOnlyFromTierFour` (DEV-7): an enrol op from any other caller is refused, and the page shows the consent notice. (c)
 - `TestPlannerCannotMatchUnknown` (DEV-7): a planner request to find or match an unenrolled person, by crop, by description or by track, is refused with a closed reason, and no crop of an unknown person reaches a planner. (c)
 - `TestNoCaptureLeavesVIS` (DEV-7): every planner tool, bus event and route request VIS-core produces is scanned for a marker pattern placed in synthetic frames, crops, audio and a canary template. None is found, and the only handlers that return crops serve the owner's page. (c)
-- `TestTemplatesNotInRecall` (DEV-7, LOG-4): after enrolment, recall lists nothing for the template and no agent session can read its slot. (c)
+- `TestEraseMakesTemplateUnusable` (LOG-4): against the kernel sim, erasing an enrolled subject leaves the template unreadable, so the same face returns `unknown` and the slot is then removed. (c)
+- `TestCrashAfterEraseLogged` (LOG-4): with the sim stopped between `subject.erased` and the key delete, restart deletes the key and the template is unreadable. (c)
+- `TestEnrolmentRefusedWithoutErase`: with no content store open, the enrolment step refuses and no slot is written. (c)
+- `TestTemplatesNotInRecall` (DEV-7, LOG-4): after enrolment, no template byte (a marker in the synthetic template) is in recall, the log or any `ReadFor` result. Only the wrap key item is there, and no agent session can read the slot. (c)
 - `TestEnrolledIDMustBeKnown`: a reply naming an id not in the client's enrolled list is rejected as `unavailable`. (a)
 - `TestPlateTextBounded` (DEV-8): plate text outside `[A-Z0-9 -]{1,10}` is rejected, and accepted text reaches events quoted. (a)
 - `TestBoxesAndConfidenceBounded`: boxes outside the frame, non-integer boxes, unquantised confidences and over-count replies are rejected. (a)
@@ -103,7 +107,7 @@ Failure path: an unknown face's encoding is kept or searched, a planner matches 
 
 ## Scope
 
-`broker/vision/` (with its `ASSUMPTIONS.md`), `broker/vision/supervise/`, `broker/cmd/agentos-vision/`, the enrolment step in `broker/localui`, the post-erase callback in `broker/kernel/erase.go` (one registration point, nothing else in the kernel), (f)'s files (`broker/cmd/agentosd/vision.go`, `agentosd.service`, `agentos-setup.conf`, `with-uids`, the feed in `broker/cmd/agentos-camera`, `broker/e2e`), `broker/loops/plainname.go` (one line per fuzz target; shared, so parts that edit it run serially, D-111), this brief.
+`broker/vision/` (with its `ASSUMPTIONS.md`), `broker/vision/supervise/`, `broker/cmd/agentos-vision/`, the enrolment step in `broker/localui`, calls to the kernel's existing `Seal` and `ReadFor` (no change to `broker/kernel`, so no `Trusted-core:` line), (f)'s files (`broker/cmd/agentosd/vision.go`, `agentosd.service`, `agentos-setup.conf`, `with-uids`, the feed in `broker/cmd/agentos-camera`, `broker/e2e`), `broker/loops/plainname.go` (one line per fuzz target; shared, so parts that edit it run serially, D-111), this brief.
 
 **Guard files:**
 - `tools/risk_tier.py` (`vision` in `TIER_A_BROKER`; it keys on the top directory, so this covers `vision/supervise`).
