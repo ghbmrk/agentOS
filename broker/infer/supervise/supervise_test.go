@@ -707,3 +707,49 @@ func TestSupervisorLogNamesTheService(t *testing.T) {
 		t.Fatalf("log %q", buf.String())
 	}
 }
+
+// Restart (VIS-track): a caller that finds the service faulty stops the
+// run, and the loop starts it again after the backoff, with the caller's
+// cause. A second Restart during the same run, or one between runs, does
+// nothing, and the context still ends the loop.
+func TestSupervisorRestartOnDemand(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	s := newSupervisor(Options{Name: "vision", Backoff: Backoff{Min: 20 * time.Millisecond, Max: 20 * time.Millisecond, Reset: time.Hour},
+		Log: lockedWriter{&mu, &buf}})
+	s.Restart("faulty") // before any run: nothing
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runs := make(chan struct{}, 10)
+	go s.loop(ctx, func(rctx context.Context) string {
+		runs <- struct{}{}
+		<-rctx.Done()
+		return "exited: signal: killed"
+	})
+	<-runs
+	s.Restart("faulty")
+	s.Restart("other")
+	select {
+	case <-runs:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no second run after Restart")
+	}
+	if st := s.State(); st.Restarts != 1 || st.Cause != "restarted: faulty" || st.State != Up && st.State != Starting {
+		t.Fatalf("state %+v", st)
+	}
+	select {
+	case <-runs:
+		t.Fatal("two Restarts in one run restarted twice")
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	<-s.Done()
+	if st := s.State(); st.State != Stopped || st.Restarts != 1 {
+		t.Fatalf("after the context ended: %+v", st)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := buf.String(); !strings.HasPrefix(got, "vision: service stopped (restarted: faulty); restart 1 in ") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("log %q", got)
+	}
+}

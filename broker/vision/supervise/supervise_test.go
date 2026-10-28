@@ -60,6 +60,10 @@ func helper(mode string) int {
 	if err != nil {
 		return 4
 	}
+	if mode == "pid" {
+		answer(ln, strconv.Itoa(os.Getpid()))
+		return 5
+	}
 	if mode == "control" {
 		ctl, err := net.FileListener(os.NewFile(4, "control"))
 		if err != nil {
@@ -331,6 +335,45 @@ func TestVisionGetsItsControlSocket(t *testing.T) {
 	fi, err := os.Stat(filepath.Dir(ctl))
 	if err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("socket directory: %v %v", fi.Mode(), err)
+	}
+}
+
+// Faulty restarts the running service (VIS-track): a new process answers
+// on the same socket, and the supervisor's line gives the cause "faulty"
+// and nothing of the service's.
+func TestVisionFaultyRestarts(t *testing.T) {
+	needRoot(t)
+	var mu sync.Mutex
+	var buf strings.Builder
+	s, sock := service(t, Options{Log: lockedWriter{&mu, &buf}, Backoff: Backoff{Min: 20 * time.Millisecond, Max: 20 * time.Millisecond, Reset: time.Hour}}, "pid")
+	first := ask(t, sock)
+	Faulty(s)()
+	deadline := time.Now().Add(10 * time.Second)
+	for s.State().Restarts == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("not restarted: %+v", s.State())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := s.State(); st.Cause != "restarted: faulty" {
+		t.Fatalf("cause %q", st.Cause)
+	}
+	var second string
+	for {
+		second = ask(t, sock)
+		if second != first || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if second == first {
+		t.Fatalf("the same process %s answers after the restart", first)
+	}
+	mu.Lock()
+	got := buf.String()
+	mu.Unlock()
+	if !strings.HasPrefix(got, "vision: service stopped (restarted: faulty); restart 1 in ") {
+		t.Fatalf("log %q", got)
 	}
 }
 

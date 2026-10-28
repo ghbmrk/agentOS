@@ -96,6 +96,10 @@ type Supervisor struct {
 	mu   sync.Mutex
 	st   Status
 	done chan struct{}
+	// stop ends the current run, nil between runs; asked is the cause
+	// Restart gave it.
+	stop  context.CancelFunc
+	asked string
 }
 
 // Start checks o and starts the restart loop; it returns before the
@@ -143,6 +147,21 @@ func (s *Supervisor) State() Status {
 	return s.st
 }
 
+// Restart stops the running service so the loop starts it again after the
+// usual backoff, with "restarted: " and cause as its stop's cause: for a
+// caller that finds the service faulty (VIS-track: a sustained rate of
+// detections that join no track). cause is the caller's fixed text, never
+// the service's. Between runs, or while one restart is under way, it does
+// nothing.
+func (s *Supervisor) Restart(cause string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stop != nil && s.asked == "" {
+		s.asked = cause
+		s.stop()
+	}
+}
+
 // Done is closed once the loop has ended and the service is gone.
 func (s *Supervisor) Done() <-chan struct{} { return s.done }
 
@@ -159,7 +178,18 @@ func (s *Supervisor) loop(ctx context.Context, run func(context.Context) string)
 	delay := s.o.Backoff.Min
 	for {
 		begin := time.Now()
-		cause := run(ctx)
+		rctx, stop := context.WithCancel(ctx)
+		s.mu.Lock()
+		s.stop, s.asked = stop, ""
+		s.mu.Unlock()
+		cause := run(rctx)
+		s.mu.Lock()
+		if s.asked != "" {
+			cause = "restarted: " + s.asked
+		}
+		s.stop, s.asked = nil, ""
+		s.mu.Unlock()
+		stop()
 		if ctx.Err() != nil {
 			s.set(func(st *Status) { st.State = Stopped })
 			return
