@@ -81,6 +81,10 @@ exempt-pr 3703
 # (D-198). Remove once #3705 merges.
 exempt-pr 3705
 
+# #3746 (ENF-b, #3659): broker/enforcer/page/ and broker/enforcer/policy/, which the G2 list does
+# not name (D-198). Remove once #3746 merges.
+exempt-pr 3746
+
 # Project machinery and records.
 allow .claude/
 allow .github/
