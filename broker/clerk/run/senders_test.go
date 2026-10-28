@@ -4,6 +4,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,7 @@ func TestHistoryFromTheMailbox(t *testing.T) {
 	srv.DeliverAt("Projects", day(3), mailFrom("gu@projects.test", "<g1@projects.test>"))
 	srv.DeliverAt("Drafts", day(3), mailFrom("ha@drafts.test", "<h1@drafts.test>"))
 	srv.DeliverAt("Sent", day(3), mailFrom(imaptest.User, "<s1@loopback.test>"))
+	srv.DeliverAt("INBOX", day(3), "From: x@two.test\n"+mailFrom("y@two.test", "<t1@two.test>")) // two From fields
 	w := newSendersRig(t, srv, nil).full(t)
 	want := []inbox.Delivery{{From: "ann@inbox.test", Folder: "inbox", Date: "2026-05-31"}, {From: "bo@archive.test", Folder: "inbox", Date: "2026-06-02"}}
 	if !slices.Equal(w.History, want) {
@@ -186,6 +188,15 @@ func TestIncompleteReadBlanksAll(t *testing.T) {
 		if !has(r.h.status().Lines, "could not finish reading who writes to you") {
 			t.Fatalf("status %q", r.h.status().Lines)
 		}
+		r.h.mu.Lock()
+		r.h.stop = errors.New("test: a sign-in the server refused")
+		r.h.mu.Unlock()
+		if has(r.h.status().Lines, "who writes to you") {
+			t.Fatalf("while a sign-in failure stops the worker, status promises a retry: %q", r.h.status().Lines)
+		}
+		r.h.mu.Lock()
+		r.h.stop = nil
+		r.h.mu.Unlock()
 		srv.FailList("Archive", false)
 		r.h.listing(true)
 		r.full(t)
@@ -318,6 +329,13 @@ func TestSenderRecordIsSealedAndIncremental(t *testing.T) {
 		{"too large", func() error { return privfile.WriteAtomic(r.dir, sendersFile, make([]byte, maxSendersRec+1), nil) }, false},
 		{"another account's", func() error { return saveSenders(r.dir, testSealer(), slot+"x", rec) }, false},
 		{"another key's", func() error { return saveSenders(r.dir, other, slot, rec) }, false},
+		{"past a bound, not marked", func() error {
+			big := sealedSenders{Rec: inbox.SendersRecord{Sources: rec.Rec.Sources, Senders: rec.Rec.Senders, Sent: map[string]bool{}}}
+			for i := range inbox.ContactsMax + 1 {
+				big.Rec.Sent[fmt.Sprintf("c%d@many.test", i)] = true
+			}
+			return saveSenders(r.dir, testSealer(), slot, big)
+		}, false},
 	} {
 		if err := c.write(); err != nil {
 			t.Fatal(err)
@@ -334,6 +352,9 @@ func TestSenderRecordIsSealedAndIncremental(t *testing.T) {
 		r.h.mu.Lock()
 		r.h.idle()
 		r.h.mu.Unlock()
+		if loadSenders(r.dir, testSealer(), slot).Over {
+			t.Errorf("%s: the record started over is marked past its bound", c.name)
+		}
 	}
 }
 
@@ -359,5 +380,39 @@ func TestSendersReadKeepsReadState(t *testing.T) {
 				t.Fatalf("%s %s: flags %v became %v", f, m.ID, m.Flags, after[i].Flags)
 			}
 		}
+	}
+}
+
+// Mails whose From passes the header bound are passed over without ending
+// the step, up to 16 a folder (inbox's longPerStep); past that the step ends at the
+// next and the folder goes on at the next step. They count for no one.
+func TestPaddedMailsDoNotStopTheRead(t *testing.T) {
+	padded := func(i int) string {
+		return mailFrom(strings.Repeat("x", 9000)+"@pad.test", fmt.Sprintf("<p%d@pad.test>", i))
+	}
+	for _, c := range []struct {
+		name  string
+		pads  int
+		steps int64
+	}{{"a few", 3, 1}, {"more than a step passes over (inbox passes 16)", 20, 2}} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := imaptest.Start(t)
+			srv.DeliverAt("INBOX", day(0), mailFrom("a@one.test", "<a1@one.test>"))
+			for i := range c.pads {
+				srv.DeliverAt("INBOX", day(1), padded(i))
+				if i == c.pads/2 {
+					srv.DeliverAt("INBOX", day(2), mailFrom("b@two.test", "<b1@two.test>"))
+				}
+			}
+			srv.DeliverAt("INBOX", day(3), mailFrom("c@three.test", "<c1@three.test>"))
+			r := newSendersRig(t, srv, nil)
+			w := r.full(t)
+			if !slices.Equal(w.KnownSenders, []string{"a@one.test", "b@two.test", "c@three.test"}) {
+				t.Fatalf("known senders %v", w.KnownSenders)
+			}
+			if n := r.steps.Load(); n != c.steps {
+				t.Fatalf("%d steps, want %d", n, c.steps)
+			}
+		})
 	}
 }

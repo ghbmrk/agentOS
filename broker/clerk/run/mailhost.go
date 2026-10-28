@@ -340,7 +340,9 @@ func (h *MailHost) status() OwnerStatus {
 	if why != "" {
 		st.Lines = append(st.Lines, why)
 	}
-	if l := sendersLine(h.ws.sendersNow(), h.sendersWhy); h.own && h.cur != nil && l != "" {
+	// While a sign-in failure stops the clerk, h.why gives the owner's step
+	// and the worker waits for it: the senders line would promise a retry.
+	if l := sendersLine(h.ws.sendersNow(), h.sendersWhy); h.own && h.cur != nil && h.stop == nil && l != "" {
 		st.Lines = append(st.Lines, l)
 	}
 	if h.cur != nil && len(h.cur.Status.Lines) > 0 {

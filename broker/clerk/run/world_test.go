@@ -545,10 +545,12 @@ func TestAnOvertakenSettingsReadIsNotKept(t *testing.T) {
 	if w := <-got; w.AuthServ != "" {
 		t.Fatalf("the old count's world after an overtaken read: authserv %q, want none", w.AuthServ)
 	}
+	// The worker, kicked by the change, may cache the settings itself, read
+	// under the new count: whatever is cached is the new account's.
 	h.ws.mu.Lock()
-	kept := h.ws.read
+	cached := h.ws.read && h.ws.set != nil && h.ws.set.IMAP != "imap.other.test:993"
 	h.ws.mu.Unlock()
-	if kept {
+	if cached {
 		t.Fatal("the overtaken read was kept")
 	}
 	if w := h.world(); w.AuthServ != "mx.other.test" {
@@ -566,14 +568,27 @@ func TestASettingsWriteIsInsideTheChange(t *testing.T) {
 	}{
 		{"setmail", func(o MailOwner) error { return o.SetMail(mailhub("imap.other.test:993"), imaptest.Password) }},
 		{"removemail", func(o MailOwner) error { return o.RemoveMail() }},
+		{"gmail sign-in finish", nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var h *MailHost
 			var at int64
 			var mid atomic.Value
+			srv := gmailtest.New()
+			t.Cleanup(srv.Close)
 			h, owner, _ := worldRig(t, func(cfg *MailConfig) {
 				cfg.wrote = func() { mid.Store(h.worldAt(at)) }
+				g := signInConfig(srv)
+				cfg.gmail, cfg.Guard, cfg.TLS = g.gmail, g.Guard, g.TLS
 			})
+			if c.change == nil {
+				c.change = func(o MailOwner) error {
+					if d := signIn(t, srv, o, "watch", fakeClient); d != clerk.DSignedIn+" watch" {
+						return errors.New("GmailFinish = " + d)
+					}
+					return nil
+				}
+			}
 			h.mu.Lock()
 			at = h.changes
 			h.ws.reset(at)

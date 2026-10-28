@@ -974,15 +974,19 @@ func splitHeader(header []byte) []header {
 	return hs
 }
 
+// longPerStep is how many long-header mails one step passes over in a
+// folder before it ends the folder's part of the step at the next.
+const longPerStep = 16
+
 // SendersStep reads at most limit more mails of the counted folders into r,
 // each folder in UID order from above its High: the first read in steps
 // until every folder is through, then only what arrived since. A changed
 // UID validity reads that folder again. Each folder's addresses come from
 // one AddrHeads call (BODY.PEEK, so nothing is marked read), merged only once
 // it succeeds. A mail whose From, To or Cc passes the header bound is passed
-// over: the call is asked again for the mails below it, and the folder goes
-// on above it at the next step, so such a mail counts for no one (a sender
-// cannot make the read fail by padding a header). more is whether mail is
+// over: the call is asked again without it (longPerStep times a step, then
+// the folder goes on above it at the next step), so such a mail counts for no
+// one and a sender cannot make the read fail by padding a header. more is whether mail is
 // left to read now. Any other failure ends the step with its error; the
 // folders read before it keep their progress.
 func (l *Live) SendersStep(ctx context.Context, r *SendersRecord, limit int) (more bool, err error) {
@@ -1020,10 +1024,15 @@ func (l *Live) SendersStep(ctx context.Context, r *SendersRecord, limit int) (mo
 			}
 		}
 		slices.Sort(fresh)
-		take, skip := fresh[:min(len(fresh), limit)], uint32(0)
+		// A mail with a long header is passed over and the call asked again
+		// without it, up to longPerStep times a step; past that, the step
+		// ends at it, so padded mails cost a sign-in each and slow the
+		// read, never stop it.
+		take, skipped := fresh[:min(len(fresh), limit)], map[uint32]bool{}
 		for {
 			var got heads
-			err := l.st.AddrHeads(ctx, name, validity, take, func(h []byte, arrived time.Time) error {
+			ask := slices.DeleteFunc(slices.Clone(take), func(u uint32) bool { return skipped[u] })
+			err := l.st.AddrHeads(ctx, name, validity, ask, func(h []byte, arrived time.Time) error {
 				if roles[name] == imapwire.Sent {
 					got.wrote(h)
 				} else {
@@ -1033,8 +1042,11 @@ func (l *Live) SendersStep(ctx context.Context, r *SendersRecord, limit int) (mo
 			})
 			var long *imapsmtp.LongHeaderError
 			if errors.As(err, &long) {
-				if i := slices.Index(take, long.UID); i >= 0 {
-					take, skip = take[:i], long.UID
+				if i := slices.Index(take, long.UID); i >= 0 && !skipped[long.UID] {
+					if len(skipped) >= longPerStep {
+						take = take[:i+1]
+					}
+					skipped[long.UID] = true
 					continue
 				}
 			}
@@ -1047,13 +1059,7 @@ func (l *Live) SendersStep(ctx context.Context, r *SendersRecord, limit int) (mo
 		if len(take) > 0 {
 			src.High = uint64(take[len(take)-1])
 		}
-		if skip != 0 {
-			src.High = uint64(skip)
-		}
 		limit -= len(take)
-		if skip != 0 {
-			limit--
-		}
 		left := slices.ContainsFunc(fresh, func(u uint32) bool { return uint64(u) > src.High })
 		src.Through = src.Through || !left
 		more = more || left
