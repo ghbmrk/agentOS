@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,7 +80,12 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 	root := testRoot()
 	units := map[int32]string{int32(os.Getpid()): "/agentos-keeper.slice/agentos-keeper-mail.service"}
 	var unitErr error
-	p := keySock(t, root, func(pid int32) (string, error) { return units[pid], unitErr })
+	var mu sync.Mutex // the serving goroutine reads what the cases below set
+	p := keySock(t, root, func(pid int32) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return units[pid], unitErr
+	})
 	want, err := clerkkey.Derive(root, "mail")
 	if err != nil {
 		t.Fatal(err)
@@ -105,7 +111,9 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 			units[int32(os.Getpid())], unitErr = "/agentos-keeper.slice/agentos-keeper-mail.service", errors.New("gone")
 		},
 	} {
+		mu.Lock()
 		set()
+		mu.Unlock()
 		if b := handed(t, p); len(b) != 0 {
 			t.Errorf("%s was handed %d bytes", name, len(b))
 		}
