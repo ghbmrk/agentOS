@@ -133,7 +133,18 @@ func (h *Holder) readBackLocked() error {
 	if h.plan == nil {
 		return fmt.Errorf("drone: no policy loaded: %w", ErrMismatch)
 	}
+	st, err := h.link.SysStatus()
+	if err != nil {
+		h.log.Printf("drone: read-back failed, arming refused: %v", err)
+		return fmt.Errorf("drone: %w: no fresh signed answer from the aircraft (check the enforcer's clock and the key): %v", ErrMismatch, err)
+	}
 	var bad []string
+	// RC_PROTOCOLS 0 stops the aircraft from taking up an RC protocol, but not
+	// one it already decodes, and it reports an RC receiver from any RC input
+	// until it reboots (ASSUMPTIONS.md DRONE-sim-14).
+	if st.OnboardControlSensorsPresent&common.MAV_SYS_STATUS_SENSOR_RC_RECEIVER != 0 {
+		bad = append(bad, "the aircraft has had RC input since it booted; reboot it with no receiver")
+	}
 	for _, want := range h.plan.Params {
 		got, err := h.link.GetParam(want.Name)
 		switch {
@@ -145,15 +156,6 @@ func (h *Holder) readBackLocked() error {
 	}
 	bad = append(bad, h.compareItems(MissionFence, h.plan.Fence)...)
 	bad = append(bad, h.compareItems(MissionRally, h.plan.Rally)...)
-	// RC_PROTOCOLS 0 stops the aircraft from taking up an RC protocol, but not
-	// one it already decodes, and it reports an RC receiver from the first RC
-	// input until it reboots (ASSUMPTIONS.md DRONE-sim-14).
-	switch st, err := h.link.SysStatus(); {
-	case err != nil:
-		bad = append(bad, "SYS_STATUS unreadable")
-	case st.OnboardControlSensorsPresent&common.MAV_SYS_STATUS_SENSOR_RC_RECEIVER != 0:
-		bad = append(bad, "the aircraft has had RC input since it booted; reboot it with no receiver")
-	}
 	if len(bad) > 0 {
 		err := fmt.Errorf("drone: %w: %s", ErrMismatch, strings.Join(bad, "; "))
 		h.log.Printf("drone: read-back mismatch, arming refused: %s", strings.Join(bad, "; "))

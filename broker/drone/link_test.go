@@ -34,11 +34,11 @@ func signedFrame(t *testing.T, k Key, sys, comp, linkID byte, ts uint64, m messa
 }
 
 // fakeAircraft answers the key-holder on far as the aircraft would: a
-// TIMESYNC challenge with a signed echo one unit after the challenge, sent
-// on the returned channel, and every PARAM_REQUEST_READ with the frames
+// TIMESYNC challenge with a signed echo of echo(nonce) one unit after the
+// challenge, its timestamp sent on the returned channel, and every PARAM_REQUEST_READ with the frames
 // answer returns for the request's signature timestamp. It answers nothing
 // signed more than a minute behind clock, as ArduPilot refuses such frames.
-func fakeAircraft(t *testing.T, far net.Conn, k Key, clock func() time.Time, answer func(reqTS uint64) [][]byte) <-chan uint64 {
+func fakeAircraft(t *testing.T, far net.Conn, k Key, clock func() time.Time, echo func(int64) int64, answer func(reqTS uint64) [][]byte) <-chan uint64 {
 	t.Helper()
 	r, err := frame.NewReader(frame.ReaderConf{Reader: far, DialectRW: dialectRW(), InKey: k.s()})
 	if err != nil {
@@ -61,7 +61,7 @@ func fakeAircraft(t *testing.T, far net.Conn, k Key, clock func() time.Time, ans
 			}
 			switch m := fr.GetMessage().(type) {
 			case *common.MessageTimesync:
-				far.Write(signedFrame(t, k, 1, 1, 0, ts+1, &common.MessageTimesync{Tc1: 1, Ts1: m.Ts1}))
+				far.Write(signedFrame(t, k, 1, 1, 0, ts+1, &common.MessageTimesync{Tc1: 1, Ts1: echo(m.Ts1)}))
 				anchors <- ts + 1
 			case *common.MessageParamRequestRead:
 				for _, b := range answer(ts) {
@@ -72,6 +72,8 @@ func fakeAircraft(t *testing.T, far net.Conn, k Key, clock func() time.Time, ans
 	}()
 	return anchors
 }
+
+func same(n int64) int64 { return n }
 
 func paramValue(name string, v float32) *common.MessageParamValue {
 	return &common.MessageParamValue{ParamId: name, ParamValue: v, ParamType: common.MAV_PARAM_TYPE_REAL32, ParamCount: 1}
@@ -123,7 +125,7 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 			t.Parallel()
 			near, far := net.Pipe()
 			defer far.Close()
-			fakeAircraft(t, far, k, time.Now, func(ts uint64) [][]byte { return c.answer(t, ts) })
+			fakeAircraft(t, far, k, time.Now, same, func(ts uint64) [][]byte { return c.answer(t, ts) })
 			l, err := Dial(near, k)
 			if err != nil {
 				t.Fatal(err)
@@ -143,7 +145,7 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 		near, far := net.Pipe()
 		defer far.Close()
 		var first []byte
-		fakeAircraft(t, far, k, time.Now, func(ts uint64) [][]byte {
+		fakeAircraft(t, far, k, time.Now, same, func(ts uint64) [][]byte {
 			if first == nil {
 				first = signedFrame(t, k, 1, 1, 0, ts+1, paramValue("FENCE_ENABLE", 1))
 				return [][]byte{first}
@@ -169,7 +171,7 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 	t.Run("heartbeat from before the anchor", func(t *testing.T) {
 		near, far := net.Pipe()
 		defer far.Close()
-		anchors := fakeAircraft(t, far, k, time.Now, func(uint64) [][]byte { return nil })
+		anchors := fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
 		l, err := Dial(near, k)
 		if err != nil {
 			t.Fatal(err)
@@ -195,21 +197,46 @@ func TestCapturedFramesAreNoAnswer(t *testing.T) {
 		near, far := net.Pipe()
 		defer far.Close()
 		hourAgo := uint64(time.Since(signatureEpoch.Add(time.Hour)) / tsUnit)
-		capture := signedFrame(t, k, 1, 1, 0, hourAgo, paramValue("FENCE_ENABLE", 1))
-		fakeAircraft(t, far, k, time.Now, func(uint64) [][]byte { return nil })
+		fakeAircraft(t, far, k, time.Now, same, func(uint64) [][]byte { return nil })
 		l, err := dial(near, k, func() time.Time { return time.Now().Add(-2 * time.Hour) })
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer l.Close()
 		go func() {
-			for i := 0; i < 20; i++ { // the capture, offered while the key-holder waits
-				far.Write(capture)
+			for i := uint64(0); i < 40; i++ { // hour-old captures, each newer than the last, offered while the key-holder waits
+				far.Write(signedFrame(t, k, 1, 1, 0, hourAgo+i, paramValue("FENCE_ENABLE", 1)))
 				time.Sleep(100 * time.Millisecond)
 			}
 		}()
 		if v, err := l.GetParam("FENCE_ENABLE"); err == nil {
-			t.Fatalf("a key-holder whose clock is behind read back %v from an hour-old capture", v)
+			t.Fatalf("a key-holder whose clock is behind read back %v from hour-old captures", v)
+		}
+	})
+
+	t.Run("TIMESYNC echoing another nonce", func(t *testing.T) {
+		near, far := net.Pipe()
+		defer far.Close()
+		fakeAircraft(t, far, k, time.Now, func(n int64) int64 { return n ^ 1 }, func(ts uint64) [][]byte {
+			return [][]byte{signedFrame(t, k, 1, 1, 0, ts+1, paramValue("FENCE_ENABLE", 1))}
+		})
+		l, err := Dial(near, k)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer l.Close()
+		hb := &common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, Autopilot: common.MAV_AUTOPILOT_ARDUPILOTMEGA, MavlinkVersion: 3}
+		go func() {
+			for i := 0; i < 30; i++ { // fresh signed heartbeats on the aircraft's stream
+				far.Write(signedFrame(t, k, 1, 1, 0, uint64(time.Since(signatureEpoch)/tsUnit), hb))
+				time.Sleep(100 * time.Millisecond)
+			}
+		}()
+		if _, err := l.WaitHeartbeat(time.Time{}, time.Second); err == nil {
+			t.Fatal("a heartbeat counted on a link anchored by a TIMESYNC echoing another nonce")
+		}
+		if v, err := l.GetParam("FENCE_ENABLE"); err == nil {
+			t.Fatalf("read back %v on a link anchored by a TIMESYNC echoing another nonce", v)
 		}
 	})
 }
