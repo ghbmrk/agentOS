@@ -17,9 +17,9 @@ import (
 
 const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-// serve answers each connection's first request line with reply(req).
-// A nil reply closes the connection unanswered; a reply holding "SLEEP"
-// sleeps instead of answering.
+// serve answers each request line on a connection with reply(req). A nil
+// reply closes the connection unanswered; a reply holding "SLEEP" sleeps
+// instead of answering.
 func serve(t *testing.T, reply func(Request) []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "s.sock")
@@ -36,20 +36,26 @@ func serve(t *testing.T, reply func(Request) []byte) string {
 			}
 			go func() {
 				defer c.Close()
-				line, err := ReadLine(bufio.NewReader(c), MaxRequestLine)
-				if err != nil {
-					return
+				br := bufio.NewReader(c)
+				for {
+					line, err := ReadLine(br, MaxRequestLine)
+					if err != nil {
+						return
+					}
+					var req Request
+					if json.Unmarshal(line, &req) != nil {
+						return
+					}
+					b := reply(req)
+					if string(b) == "SLEEP" {
+						time.Sleep(5 * time.Second)
+						return
+					}
+					if b == nil {
+						return
+					}
+					c.Write(b)
 				}
-				var req Request
-				if json.Unmarshal(line, &req) != nil {
-					return
-				}
-				b := reply(req)
-				if string(b) == "SLEEP" {
-					time.Sleep(5 * time.Second)
-					return
-				}
-				c.Write(b)
 			}()
 		}
 	}()
@@ -75,7 +81,7 @@ func line(t *testing.T, r Reply) []byte {
 func TestProtocolRoundTrip(t *testing.T) {
 	path := serve(t, func(req Request) []byte {
 		if req.Op == OpHello {
-			return line(t, Reply{Model: "synthetic", SHA256: hash, Dim: 4, State: StateReady})
+			return line(t, Reply{Model: "synthetic", SHA256: hash, Dim: 4, State: StateReady, Ops: []string{OpEmbed}})
 		}
 		r := Reply{SHA256: hash, Dim: 4}
 		for i := range req.Texts {
@@ -225,5 +231,141 @@ func TestReadLineBound(t *testing.T) {
 	big := strings.Repeat("y", 1<<20) + "\n"
 	if _, err := ReadLine(bufio.NewReaderSize(strings.NewReader(big), 16), 64); err != ErrLineTooLong {
 		t.Fatal(err)
+	}
+}
+
+// REQ: PLN-7, RES-2
+//
+// The local route's text comes from an untrusted service: anything but a
+// well-formed reply from the model hello named is Unavailable and no text.
+func TestClientRejectsMalformedGenerate(t *testing.T) {
+	text := func(s string) *string { return &s }
+	hello := Reply{Model: "synthetic-gen", SHA256: hash, State: StateReady, Ops: []string{OpGenerate}}
+	other := strings.Replace(hash, "0", "f", 1)
+	for _, c := range []struct {
+		name  string
+		reply func(*testing.T, Request) []byte
+	}{
+		{"over-long text", func(t *testing.T, r Request) []byte {
+			return line(t, Reply{SHA256: hash, Text: text(strings.Repeat("y", MaxGenerate+1))})
+		}},
+		{"invalid UTF-8", func(t *testing.T, r Request) []byte {
+			return []byte(`{"sha256":"` + hash + `","text":"synthetic` + "\xff" + `"}` + "\n")
+		}},
+		{"no text", func(t *testing.T, r Request) []byte { return line(t, Reply{SHA256: hash}) }},
+		{"wrong hash", func(t *testing.T, r Request) []byte { return line(t, Reply{SHA256: other, Text: text("synthetic")}) }},
+		{"no hash", func(t *testing.T, r Request) []byte { return line(t, Reply{Text: text("synthetic")}) }},
+		{"hello fields", func(t *testing.T, r Request) []byte {
+			return line(t, Reply{SHA256: hash, Text: text("synthetic"), State: StateReady})
+		}},
+		{"vectors too", func(t *testing.T, r Request) []byte {
+			return line(t, Reply{SHA256: hash, Text: text("synthetic"), Vectors: [][]float32{{1}}})
+		}},
+		{"EOF mid-line", func(t *testing.T, r Request) []byte {
+			b := line(t, Reply{SHA256: hash, Text: text("synthetic")})
+			return b[:len(b)/2]
+		}},
+		{"closed unanswered", func(t *testing.T, r Request) []byte { return nil }},
+		{"deadline", func(t *testing.T, r Request) []byte { return []byte("SLEEP") }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path := serve(t, func(r Request) []byte {
+				if r.Op == OpHello {
+					return line(t, hello)
+				}
+				return c.reply(t, r)
+			})
+			start := time.Now()
+			got, in, err := Client{Path: path, GenerateTimeout: 300 * time.Millisecond}.Generate(context.Background(), "synthetic prompt", 16)
+			if got != "" || in != (Info{}) || CauseOf(err) != Unavailable {
+				t.Fatalf("got %q, %+v, %v; want no text and unavailable", got, in, err)
+			}
+			if time.Since(start) > 2*time.Second {
+				t.Fatal("the call outlived its deadline")
+			}
+		})
+	}
+}
+
+// REQ: PLN-7
+func TestGenerateRoundTripOnTheWire(t *testing.T) {
+	var prompts atomic.Int32
+	path := serve(t, func(r Request) []byte {
+		if r.Op == OpHello {
+			return line(t, Reply{Model: "synthetic-gen", SHA256: hash, State: StateReady, Ops: []string{OpEmbed, OpGenerate}, Dim: 4})
+		}
+		prompts.Add(1)
+		s := "synthetic answer to " + r.Prompt
+		return line(t, Reply{SHA256: hash, Text: &s})
+	})
+	got, in, err := Client{Path: path}.Generate(context.Background(), "question", 8)
+	if err != nil || got != "synthetic answer to question" || in != (Info{Model: "synthetic-gen", SHA256: hash, Dim: 4, Generate: true}) {
+		t.Fatalf("generate: %q %+v %v", got, in, err)
+	}
+	// An empty generation is text, not a missing reply.
+	path = serve(t, func(r Request) []byte {
+		if r.Op == OpHello {
+			return line(t, Reply{SHA256: hash, State: StateReady, Ops: []string{OpGenerate}})
+		}
+		return []byte(`{"sha256":"` + hash + `","text":""}` + "\n")
+	})
+	if got, _, err := (Client{Path: path}).Generate(context.Background(), "question", 8); err != nil || got != "" {
+		t.Fatalf("empty generation: %q %v", got, err)
+	}
+	if prompts.Load() != 1 {
+		t.Fatalf("%d prompts sent, want 1", prompts.Load())
+	}
+}
+
+// A hello that misstates what the model serves is Unavailable, and a model
+// that does not serve generate never sees the prompt.
+func TestClientChecksHelloOps(t *testing.T) {
+	for name, r := range map[string]Reply{
+		"no ops":          {SHA256: hash, State: StateReady, Dim: 4},
+		"unknown op":      {SHA256: hash, State: StateReady, Ops: []string{"chat"}},
+		"repeated op":     {SHA256: hash, State: StateReady, Ops: []string{OpGenerate, OpGenerate}},
+		"embed, no dim":   {SHA256: hash, State: StateReady, Ops: []string{OpEmbed}},
+		"dim, no embed":   {SHA256: hash, State: StateReady, Ops: []string{OpGenerate}, Dim: 4},
+		"text with hello": {SHA256: hash, State: StateReady, Ops: []string{OpGenerate}, Text: new(string)},
+	} {
+		path := serve(t, func(Request) []byte { return line(t, r) })
+		if _, err := (Client{Path: path}).Hello(context.Background()); CauseOf(err) != Unavailable {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	var sent atomic.Bool
+	path := serve(t, func(r Request) []byte {
+		if r.Op == OpGenerate {
+			sent.Store(true)
+		}
+		return line(t, Reply{SHA256: hash, State: StateReady, Ops: []string{OpEmbed}, Dim: 4})
+	})
+	if _, _, err := (Client{Path: path}).Generate(context.Background(), "synthetic", 8); CauseOf(err) != Missing {
+		t.Fatalf("embed-only model: %v", err)
+	}
+	if sent.Load() {
+		t.Fatal("the prompt reached a model that does not serve generate")
+	}
+}
+
+// REQ: PLN-7
+func TestClientChecksGenerateBoundsBeforeSending(t *testing.T) {
+	var sent atomic.Bool
+	path := serve(t, func(Request) []byte { sent.Store(true); return nil })
+	for name, c := range map[string]struct {
+		prompt string
+		max    int
+	}{
+		"empty prompt":  {"", 8},
+		"33 KiB prompt": {strings.Repeat("x", 33<<10), 8},
+		"max_out 0":     {"synthetic", 0},
+		"max_out 1025":  {"synthetic", MaxOut + 1},
+	} {
+		if _, _, err := (Client{Path: path}).Generate(context.Background(), c.prompt, c.max); CauseOf(err) != BadRequest {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if sent.Load() {
+		t.Fatal("an out-of-bounds request reached the service")
 	}
 }
