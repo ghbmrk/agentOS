@@ -127,8 +127,10 @@ func (r *retrier) listed() []ownerch.Item {
 // (CH-10): approving the first retries it; once it has been sent again and
 // re-parked, approving the second, older ask sends the attempt that ask
 // read, the kernel refuses it, nothing is retried, and the owner is told
-// in fixed words. Revert mutant: re-read the attempt at approval time
-// (from Status), and the older ask retries the step a third time.
+// in fixed words that do not deny the newer retry went (CH-12). Revert
+// mutants: re-read the attempt at approval time (from Status), and the
+// older ask retries the step a third time; drop runKernel's kernelMoved
+// case, and the owner is told the step "was not tried again".
 func TestAnOlderKernelRETRYAskRetriesNothing(t *testing.T) {
 	k := &fakeKernel{steps: kernelSteps()}
 	d, phone := withKernelChannel(t, k)
@@ -158,7 +160,7 @@ func TestAnOlderKernelRETRYAskRetriesNothing(t *testing.T) {
 		t.Fatalf("second approve: %q", got)
 	}
 	d.retry.running.Wait()
-	want := "Retry " + asks[1][1] + " refused: it was sent again since I asked you. Organize on mail was not tried again; text RETRY later."
+	want := "Retry " + asks[1][1] + " refused: it was already tried again after I asked you. Text STATUS to see how it went; text RETRY to ask again."
 	if len(told) != 2 || told[1] != want {
 		t.Fatalf("older approval: %q, want %q", told, want)
 	}
@@ -356,6 +358,7 @@ func TestAKernelRETRYLineNamesItsAmountInTheHouseholdsCurrency(t *testing.T) {
 		{1250, "EUR", "12.50 EUR"}, {5, "USD", "0.05 USD"}, {0, "GBP", "0.00 GBP"}, {1250, "JPY", "1250 JPY"},
 		{1250, "KWD", "1.250 KWD"}, {1250, "", "1250 minor units"}, {-1, "EUR", "-1 minor units"},
 		{1250, "CLF", "1250 minor units"}, {1250, "XAU", "1250 minor units"},
+		{1250, "XCG", "12.50 XCG"}, {1250, "ANG", "1250 minor units"}, {1250, "BGN", "1250 minor units"},
 	} {
 		if got := amountText(c.amount, c.currency); got != c.want {
 			t.Errorf("%d %q: %q, want %q", c.amount, c.currency, got, c.want)
@@ -386,11 +389,17 @@ func TestAKernelRETRYLineNamesItsAmountInTheHouseholdsCurrency(t *testing.T) {
 // A currency that is not an ISO 4217 code of a currency in circulation is
 // refused at start: nothing else reaches the owner's texts, and no code
 // whose minor unit is 4 or undefined (CLF, UYW, XAU, XDR) reads at the
-// wrong scale (#3141 Security 1).
+// wrong scale (#3141 Security 1). Withdrawn codes (ANG 2025-03, BGN
+// 2026-01) and fund codes are refused too, and XCG, ANG's successor, is
+// not (#3142).
 func TestABadCurrencyIsRefusedAtStart(t *testing.T) {
-	for _, cur := range []string{"eur", "EURO", "E R", "€", "EUX", "CLF", "UYW", "XAU", "XDR", "XXX"} {
+	for _, cur := range []string{"eur", "EURO", "E R", "€", "EUX", "CLF", "UYW", "XAU", "XDR", "XXX",
+		"ANG", "BGN", "BOV", "CHE", "CHW", "COU", "MXV", "USN", "UYI"} {
 		if _, err := Run(context.Background(), Config{OwnerNumber: owner, Currency: cur}); err == nil || !strings.Contains(err.Error(), "ISO 4217") {
 			t.Errorf("currency %q: %v", cur, err)
 		}
+	}
+	if d, ok := minorDigits["XCG"]; !ok || d != 2 {
+		t.Errorf("XCG: %d digits, listed %v; want 2, listed", d, ok)
 	}
 }

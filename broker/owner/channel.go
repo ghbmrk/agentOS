@@ -1260,25 +1260,29 @@ func (c *Channel) Run(ctx context.Context) error {
 // request per effect, never one YES for all, each at the tier its own
 // verified facts give, and on the local page when its recipients cannot
 // be texted. It returns the reply, "" once every request is on its way.
+// A reply ends with one step that works, never two (CH-12).
 func (c *Channel) askRetry() string {
 	var items []Item
 	var unread error
 	if c.cfg.Retry != nil {
 		items, unread = c.cfg.Retry()
 	}
-	if unread != nil {
-		if len(items) == 0 {
-			return retryUnread
-		}
-		if reply := c.askRetryItems(items); reply != "" {
-			return reply + " " + retryUnread
-		}
-		return retryUnread
-	}
-	if len(items) == 0 {
+	if unread == nil && len(items) == 0 {
 		return "Nothing to retry."
 	}
-	return c.askRetryItems(items)
+	var short string
+	if len(items) > 0 {
+		short = c.askRetryItems(items)
+	}
+	switch {
+	case unread != nil && short != "":
+		return short + " " + retryUnread
+	case unread != nil:
+		return retryUnread
+	case short != "":
+		return short + " Text RETRY again later for the rest."
+	}
+	return ""
 }
 
 // retryUnread is RETRY's line while part of the box cannot say what is
@@ -1286,7 +1290,8 @@ func (c *Channel) askRetry() string {
 // untrue (KRN-7).
 const retryUnread = "Part of me is not answering, so I could not check every action to retry. Text RETRY again later."
 
-// askRetryItems asks about each of items, as askRetry says.
+// askRetryItems asks about each of items, as askRetry says. It returns
+// why some could not be asked, without a step, or "" once all were.
 func (c *Channel) askRetryItems(items []Item) string {
 	if len(items) > 20 {
 		items = items[:20]
@@ -1312,8 +1317,8 @@ func (c *Channel) askRetryItems(items []Item) string {
 	case err == nil:
 		return ""
 	case errors.Is(err, ErrFull):
-		return "Too many open requests to ask about every retry now. Text RETRY again later for the rest."
+		return "Too many open requests to ask about every retry now."
 	default:
-		return "Could not ask about every retry now. Text RETRY again later for the rest."
+		return "Could not ask about every retry now."
 	}
 }

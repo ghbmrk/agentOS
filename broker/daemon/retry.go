@@ -148,21 +148,24 @@ type retryAsk struct {
 }
 
 // minorDigits maps each currency Config.Currency may name, an ISO 4217
-// code of a currency in circulation, to the digits of its minor unit.
-// Fund, metal, drawing-right and test codes (CLF, UYW, XAU, XDR, XXX, ...)
-// are not listed: their minor unit is 4 or none, so an amount would read
-// at the wrong scale. Start refuses any code not here.
+// code of a currency in circulation, to the digits of its minor unit. It
+// follows List One as of 2026-01: XCG replaced ANG (2025-03-31) and BGN
+// went with Bulgaria's euro (2026-01-01). Fund codes (BOV, CHE, CHW, COU,
+// MXV, USN, UYI, ...) are not listed, since no household's money is held
+// in them, nor are metal, drawing-right and test codes or any code whose
+// minor unit is 4 or none (CLF, UYW, XAU, XDR, XXX, ...), so an amount
+// never reads at the wrong scale. Start refuses any code not here.
 var minorDigits = func() map[string]int {
 	m := map[string]int{}
 	for digits, codes := range []string{
 		"BIF CLP DJF GNF ISK JPY KMF KRW PYG RWF UGX VND VUV XAF XOF XPF",
 		"",
-		"AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF " +
+		"AED AFN ALL AMD AOA ARS AUD AWG AZN BAM BBD BDT BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF " +
 			"CNY COP CRC CUP CVE CZK DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GTQ GYD HKD HNL HTG HUF " +
 			"IDR ILS INR IRR JMD KES KGS KHR KPW KYD KZT LAK LBP LKR LRD LSL MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR " +
 			"MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD PAB PEN PGK PHP PKR PLN QAR RON RSD RUB SAR SBD SCR SDG SEK SGD " +
-			"SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TOP TRY TTD TWD TZS UAH USD UYU UZS VED VES WST XCD YER " +
-			"ZAR ZMW ZWG",
+			"SHP SLE SOS SRD SSP STN SVC SYP SZL THB TJS TMT TOP TRY TTD TWD TZS UAH USD UYU UZS VED VES WST XCD XCG " +
+			"YER ZAR ZMW ZWG",
 		"BHD IQD JOD KWD LYD OMR TND",
 	} {
 		for _, c := range strings.Fields(codes) {
@@ -412,6 +415,10 @@ func (r *retrier) runKernel(req string, a retryAsk, page bool) {
 		text = fmt.Sprintf("Retry %s: %s will be tried again; it may go twice. Text STATUS to see how it ends.", req, what)
 	case errors.Is(err, ErrKernelLost):
 		text = fmt.Sprintf("Retry %s: I could not tell whether %s will be tried again. Text STATUS to see; text RETRY to ask again.", req, what)
+	case kernelMoved(err):
+		// The step did go again, on the newer ask, so "was not tried
+		// again" would read as a contradiction (CH-12).
+		text = fmt.Sprintf("Retry %s refused: it was already tried again after I asked you. Text STATUS to see how it went; text RETRY to ask again.", req)
 	default:
 		text = fmt.Sprintf("Retry %s refused: %s. %s was not tried again; text RETRY later.", req, kernelRefusal(err), capital(what))
 	}
@@ -437,12 +444,17 @@ func kernelRefusal(err error) string {
 		return "it could not be started"
 	case strings.Contains(rf.Text, "no parked step"):
 		return "it is no longer waiting for a retry"
-	case strings.Contains(rf.Text, "retried since that ask"):
-		return "it was sent again since I asked you"
 	case strings.Contains(rf.Text, "stopped"):
 		return "STOP is on"
 	}
 	return "my checks refused it"
+}
+
+// kernelMoved reports whether the kernel refused a retry because its step
+// was retried since the ask (kernel.ErrRetryMoved), matching its text.
+func kernelMoved(err error) bool {
+	var rf KernelRefused
+	return errors.As(err, &rf) && strings.Contains(rf.Text, "retried since that ask")
 }
 
 // supersededHow says, in fixed words, what the request that superseded a

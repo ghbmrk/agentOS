@@ -68,6 +68,34 @@ func TestRetrySaysWhenPartOfTheBoxIsNotAnswering(t *testing.T) {
 	}
 }
 
+// With too many requests open, RETRY says so and ends with one step: the
+// unread line when part of the box is not answering, else "for the rest"
+// (KRN-7, CH-12). Revert mutant: askRetry returns the short line alone
+// when unread, and the unread part is never named.
+func TestRetryAtTheCapStillNamesPartOfTheBoxNotAnswering(t *testing.T) {
+	r := newRig(t, nil)
+	var unread error
+	r.edit = func(c *Config) {
+		c.Retry = func() ([]Item, error) { return []Item{retryItem("retry:d")}, unread }
+	}
+	r.ch = r.open()
+	for range MaxOpen {
+		if _, err := r.ch.Request([]Item{lowItem("x")}, 0); err != nil {
+			t.Fatal(err)
+		}
+		r.inbox()
+	}
+	const full = "Too many open requests to ask about every retry now."
+	if got := r.say("RETRY"); got != full+" Text RETRY again later for the rest." {
+		t.Fatalf("at the cap: %q", got)
+	}
+	unread = errors.New("kernel down")
+	got := r.say("RETRY")
+	if got != full+" "+retryUnread || strings.Count(got, "Text RETRY") != 1 {
+		t.Fatalf("at the cap, unread: %q", got)
+	}
+}
+
 // Declining, or a wrong code, retries nothing.
 func TestRetryDeclinedOrWrongCodeRetriesNothing(t *testing.T) {
 	r := newRig(t, nil)
