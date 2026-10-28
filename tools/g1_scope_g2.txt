@@ -72,6 +72,10 @@ exempt-pr 3568
 # secure-element driver, which the G2 list does not name (D-198). Remove once #3583 merges.
 exempt-pr 3583
 
+# #3596 (VIS-faces c1, #3515 part c): the new broker/vision/faces/, which the G2 list does
+# not name (D-198). Remove once #3596 merges.
+exempt-pr 3596
+
 # Project machinery and records.
 allow .claude/
 allow .github/
