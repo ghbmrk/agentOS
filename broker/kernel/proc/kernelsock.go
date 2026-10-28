@@ -180,6 +180,7 @@ type (
 	eraseRead struct {
 		Confirmation kernel.Confirmation `json:"confirmation"`
 		Err          string              `json:"err,omitempty"`
+		Is           string              `json:"is,omitempty"` // as kernelAnswer.Is
 	}
 	// rotateArgs is a rotation an anchor signed: next is the new key's
 	// recipient ID, "" when the card is lost.
@@ -328,7 +329,7 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		}
 		r := eraseRead{Confirmation: c}
 		if err != nil {
-			r.Err = err.Error()
+			r.Err, r.Is = err.Error(), wireIs(err)
 		}
 		return r, nil
 	},
@@ -611,13 +612,7 @@ func ServeOne(conn net.Conn, handle func(op string, args json.RawMessage) (json.
 			out.Refusal, out.Error = nil, "run: a refusal with no code"
 		}
 	case err.Error() != "":
-		out.Error = err.Error()
-		for _, e := range wireList {
-			if errors.Is(err, e) {
-				out.Is = e.Error()
-				break
-			}
-		}
+		out.Error, out.Is = err.Error(), wireIs(err)
 	default:
 		// Never an empty answer, which would read as success.
 		out.Error = "run: an error with no text"
@@ -682,6 +677,29 @@ func WireErrors(errs ...error) {
 	}
 }
 
+// wireIs is the text of the first wireErrors sentinel err is, "" when none:
+// for an errors.Join of two, the first in wireList.
+func wireIs(err error) string {
+	for _, e := range wireList {
+		if errors.Is(err, e) {
+			return e.Error()
+		}
+	}
+	return ""
+}
+
+// fromWire is the error a socket's answer names by its text and the
+// sentinel it wraps.
+func fromWire(text, is string) error {
+	if e, ok := wireErrors[text]; ok {
+		return e
+	}
+	if e, ok := wireErrors[is]; ok {
+		return wrapped{text, e}
+	}
+	return errors.New(text)
+}
+
 // wrapped is an error that crossed a socket wrapping a wireErrors sentinel.
 type wrapped struct {
 	text string
@@ -734,13 +752,7 @@ func (c Conn) Call(op string, args, out any) error {
 	case a.Refusal != nil:
 		return a.Refusal
 	case a.Error != "":
-		if e, ok := wireErrors[a.Error]; ok {
-			return e
-		}
-		if e, ok := wireErrors[a.Is]; ok {
-			return wrapped{a.Error, e}
-		}
-		return errors.New(a.Error)
+		return fromWire(a.Error, a.Is)
 	case out != nil:
 		return json.Unmarshal(a.Result, out)
 	}
@@ -950,10 +962,7 @@ func (o Owner) Erase(subject string) (kernel.Confirmation, error) {
 	if r.Err == "" {
 		return r.Confirmation, nil
 	}
-	if e, ok := wireErrors[r.Err]; ok {
-		return r.Confirmation, e
-	}
-	return r.Confirmation, errors.New(r.Err)
+	return r.Confirmation, fromWire(r.Err, r.Is)
 }
 
 // Unerased is every erase a store or the key table has not confirmed.

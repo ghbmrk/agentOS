@@ -120,6 +120,76 @@ func TestTheKeyGoesOnlyToTheClerksUnit(t *testing.T) {
 	}
 }
 
+// DEVSLOT-drivers b2b-2 (#3590): a template's path hands the key to each
+// instance of it that the driver's socket unit starts (Accept=yes names
+// each connection's instance), and to nothing else: not the template's
+// namesake in another parent, another driver's instances, a group nested
+// under an instance, or an empty instance. Fails if the kernel never hands
+// a driver instance its key, or hands it to a process outside the driver's
+// own instances.
+func TestTheKeyGoesToATemplatesInstances(t *testing.T) {
+	const tmpl = "/agentos.slice/agentos-drivers.slice/agentos-driver-scale@.service"
+	for c, want := range map[string]bool{
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@0-4242-900.service":                       true,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@x.service":                                true,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@.service":                                 false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scales@1.service":                               false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-hue@1.service":                                  false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale.service":                                  false,
+		"/agentos.slice/agentosd.service/agentos-driver-scale@1.service":                                     false,
+		"/system.slice/agentos-driver-scale@1.service":                                                       false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@1.service/sub.service":                    false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@1.service/agentos-driver-scale@2.service": false,
+		"/agentos.slice/agentos-drivers.slice/agentos-driver-scale@1@2.service":                              false,
+	} {
+		if got := unitCgroup(c, tmpl); got != want {
+			t.Errorf("%s: matched %v, want %v", c, got, want)
+		}
+	}
+	// A unit that is no template still matches its whole path only.
+	if unitCgroup("/agentos-keeper.slice/agentos-keeper-mail@x.service", "/agentos-keeper.slice/agentos-keeper-mail.service") {
+		t.Error("an instance matched a plain unit")
+	}
+
+	root := testRoot()
+	unit := "/agentos.slice/agentos-drivers.slice/agentos-driver-scale@3-77-900.service"
+	dir := t.TempDir()
+	p := filepath.Join(dir, "key-driver-scale.sock")
+	ln, err := sockets.ListenPeers(p, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	var mu sync.Mutex // the serving goroutine reads unit
+	go func() {
+		done <- serveClerkKey(ln, "driver-scale", tmpl, root, func(int32) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return unit, nil
+		})
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+	})
+	want, err := clerkkey.Derive(root, "driver-scale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, _ := os.Pipe()
+	w.Write(handed(t, p))
+	w.Close()
+	if got, err := clerkkey.Read(r, "driver-scale"); err != nil || got != want {
+		t.Fatalf("the driver's instance read %+v, %v; want its derived key", got, err)
+	}
+	mu.Lock()
+	unit = "/agentos.slice/agentos-drivers.slice/agentos-driver-hue@3-77-900.service"
+	mu.Unlock()
+	if b := handed(t, p); len(b) != 0 {
+		t.Errorf("another driver's instance was handed %d bytes", len(b))
+	}
+}
+
 // The key socket admits uid 0 alone: under any other uid, the clerk's
 // among them, a connection is closed unread.
 func TestTheKeySocketAdmitsOnlyRoot(t *testing.T) {
