@@ -560,6 +560,67 @@ class CliTest(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
 
 
+def board_step_script():
+    """ci.yml's live-issues step, as the runner's default `bash -e` would run it."""
+    lines = (ROOT / ".github" / "workflows" / "ci.yml").read_text().split("\n")
+    start = lines.index("        run: |", next(i for i, l in enumerate(lines) if "BOARD.md rows equal the live" in l)) + 1
+    end = next(i for i in range(start, len(lines)) if lines[i].strip() and not lines[i].startswith("          "))
+    return "\n".join(l[10:] for l in lines[start:end]) + "\n"
+
+
+class BotRaceTest(unittest.TestCase):
+    """BOARD-bot-race (#3745): bot/board skips only the live comparison; human PRs keep it."""
+
+    def run_step(self, event, ref="refs/pull/7/merge", head_ref="", head_repo=""):
+        with tempfile.TemporaryDirectory() as d:
+            stubs = pathlib.Path(d)
+            # git: BOARD.md changed, any `show` prints a base; python: record the argv.
+            for name, body in (("git", '#!/bin/sh\n[ "$1" = diff ] && exit 1\necho "show $2" >> "$STUBS/calls"\n'),
+                               ("python", '#!/bin/sh\necho "$*" >> "$STUBS/calls"\n')):
+                (stubs / name).write_text(body)
+                (stubs / name).chmod(0o755)
+            (stubs / "run.sh").write_text(board_step_script())
+            env = {"PATH": "%s:/usr/bin:/bin" % d, "STUBS": d, "RUNNER_TEMP": d, "GITHUB_EVENT_NAME": event,
+                   "GITHUB_REF": ref, "GITHUB_REPOSITORY": "o/r", "HEAD_REF": head_ref, "HEAD_REPO": head_repo}
+            proc = subprocess.run(["bash", "-e", str(stubs / "run.sh")], env=env, cwd=d,
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            return (stubs / "calls").read_text().splitlines()
+
+    def test_only_this_repositorys_bot_board_skips_the_live_comparison(self):
+        base = "--base %s/base-BOARD.md"
+        bot_pr = self.run_step("pull_request", head_ref="bot/board", head_repo="o/r")
+        self.assertEqual(bot_pr[0], "show HEAD^1:BOARD.md")
+        self.assertTrue(bot_pr[1].startswith("tools/board.py check --base "), bot_pr)
+        dispatched = self.run_step("workflow_dispatch", ref="refs/heads/bot/board")
+        self.assertEqual(dispatched[0], "show origin/main:BOARD.md")
+        self.assertTrue(dispatched[1].startswith("tools/board.py check --base "), dispatched)
+        # A human PR, a fork's bot/board and a look-alike branch keep the full check.
+        for head_ref, head_repo in (("pkg/1-x", "o/r"), ("bot/board", "fork/r"), ("bot/board2", "o/r"), ("", "")):
+            calls = self.run_step("pull_request", head_ref=head_ref, head_repo=head_repo)
+            self.assertTrue(calls[1].startswith("tools/board.py check --repo o/r --base "), (head_ref, calls))
+
+    def test_a_lagging_bot_board_passes_but_keeps_the_generated_guard(self):
+        generated = LIVE.replace("Intro prose.", board.GENERATED + "\n\nIntro prose.")
+        # One issue opened after the render: the bot's board lacks its row.
+        extra = board.issue({"id": "X-1", "section": "Harness", "cells": ["New", "—"], "state": "queued", "rest": ""})
+        live = opened(issues(generated) + [dict(extra, number=999)])
+        dropped = LIVE.replace("| A-1 | [Pilot](briefs/A-1.md) | — | building", "| A-1 | [Pilot](briefs/A-1.md) | — | in review")
+        with tempfile.TemporaryDirectory() as d:
+            base = pathlib.Path(d, "base.md")
+            base.write_text(generated)
+            # (1) the bot's check (no --repo) passes the lagging board;
+            self.assertEqual(CliTest.run_tool(self, "check", "--base", str(base), text=generated)[0], 0)
+            # (2) it still fails a board that drops the GENERATED line;
+            code, _, err = CliTest.run_tool(self, "check", "--base", str(base), text=dropped)
+            self.assertEqual(code, 1)
+            self.assertIn("drops the GENERATED line", err)
+            # (3) a human PR's check (--repo) fails the same lagging board.
+            code, _, err = CliTest.run_repo(self, "check", "--base", str(base), text=generated, items=live)
+            self.assertEqual(code, 1)
+            self.assertIn("differs from the live issues", err)
+
+
 class FreezeTest(unittest.TestCase):
     """D-098: a frozen row carries the `frozen` label, and check --repo fails when they disagree."""
     FROZEN = "queued (frozen until G2, LATER FRZ-fuzz, D-098)"
