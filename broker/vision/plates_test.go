@@ -126,7 +126,7 @@ func TestPlateReportedOnceAfterHold(t *testing.T) {
 		}
 	}
 	e, ok := p.Read(k, vehicle("ABC 1234"))
-	if !ok || e != (PlateEvent{Camera: "drive", Track: 1, Plate: `"ABC 1234"`, Frames: 4}) {
+	if !ok || e != (PlateEvent{Camera: "drive", Track: 1, Plate: `"ABC 1234"`}) {
 		t.Fatalf("settle: %+v, %v", e, ok)
 	}
 	for i := 0; i < 10; i++ {
@@ -147,8 +147,10 @@ func TestPlateReportedOnceAfterHold(t *testing.T) {
 			t.Fatal("lower-case plate text was reported")
 		}
 	}
-	if _, ok := p.Read(TrackKey{Camera: "Drive!", Track: 3}, vehicle("XYZ 999")); ok {
-		t.Fatal("a camera id outside its alphabet was taken")
+	for i := 0; i < 2*DefaultPlateHold; i++ {
+		if _, ok := p.Read(TrackKey{Camera: "Drive!", Track: 3}, vehicle("XYZ 999")); ok {
+			t.Fatal("a camera id outside its alphabet was taken")
+		}
 	}
 }
 
@@ -161,6 +163,17 @@ func TestCyclingPlateReadsNeverReport(t *testing.T) {
 		read := "A" + strconv.Itoa(i%(MaxPlateReads+1))
 		if e, ok := p.Read(k, vehicle(read)); ok {
 			t.Fatalf("read %d (%s) reported %+v", i, read, e)
+		}
+	}
+	// Past MaxPlateReads distinct reads the track is noise: a read that
+	// then holds and leads still never reports.
+	k = TrackKey{Camera: "drive", Track: 9}
+	for i := 0; i <= MaxPlateReads; i++ {
+		p.Read(k, vehicle("N"+strconv.Itoa(i)))
+	}
+	for i := 0; i < 100; i++ {
+		if e, ok := p.Read(k, vehicle("AAA 111")); ok {
+			t.Fatalf("a track past the distinct-read cap reported %+v", e)
 		}
 	}
 	// Two reads in turn never lead two to one either.
@@ -204,28 +217,66 @@ func TestPlateEventsRateLimited(t *testing.T) {
 	if _, ok := settle("gate", 1); !ok {
 		t.Fatal("a second camera shares the first's limit")
 	}
+	// A held-back track keeps its reads: once the limit allows, its next
+	// read reports it, carrying the count.
 	now = now.Add(time.Minute)
-	e, ok := settle("drive", 200)
-	if !ok || e.Coalesced != 4 {
-		t.Fatalf("after a minute: %+v, %v", e, ok)
+	e, ok := p.Read(TrackKey{Camera: "drive", Track: 100}, vehicle("PLT 100"))
+	if !ok || e.Plate != `"PLT 100"` || e.Coalesced != 4 {
+		t.Fatalf("held-back track after a minute: %+v, %v", e, ok)
 	}
 	if p.Coalesced("drive") != 0 {
 		t.Fatal("the count was not cleared by the event that carried it")
 	}
+	// Further reads on the full window count each held track once.
+	for i := 0; i < DefaultPlatesPerMinute-1; i++ {
+		settle("drive", uint64(300+i))
+	}
+	for i := 0; i < 3; i++ {
+		settle("drive", 400)
+	}
+	if n := p.Coalesced("drive"); n != 1 {
+		t.Fatalf("one held track counted %d times", n)
+	}
 }
 
-// The tracks held are bounded: past MaxPlateTracks the one read least
-// recently is forgotten, so a flood of tracks cannot grow memory.
+// The tracks held are bounded per camera: past MaxPlateTracks the
+// camera's track read least recently is forgotten, so a flood of tracks
+// cannot grow memory, and one camera's flood never pushes out another
+// camera's tracks (Security review of #3632, point 2).
 func TestPlateTracksBounded(t *testing.T) {
 	p := NewPlates()
-	for i := 0; i < 3*MaxPlateTracks; i++ {
-		p.Read(TrackKey{Camera: "drive", Track: uint64(i)}, vehicle("AAA 111"))
+	settled := TrackKey{Camera: "drive", Track: 1}
+	for i := 0; i < DefaultPlateHold; i++ {
+		p.Read(settled, vehicle("AAA 111"))
 	}
+	for i := 0; i < 3*MaxPlateTracks; i++ {
+		p.Read(TrackKey{Camera: "gate", Track: uint64(i)}, vehicle("BBB 222"))
+	}
+	if e, ok := p.Read(settled, vehicle("CCC 333")); ok {
+		t.Fatalf("another camera's flood let a reported track report again: %+v", e)
+	}
+	// Within one camera, the least recently read goes first.
+	for i := uint64(0); i < MaxPlateTracks; i++ {
+		p.Read(TrackKey{Camera: "yard", Track: i}, vehicle("DDD 444"))
+	}
+	p.Read(TrackKey{Camera: "yard", Track: 0}, vehicle("DDD 444")) // track 1 is now the oldest
+	p.Read(TrackKey{Camera: "yard", Track: MaxPlateTracks}, vehicle("DDD 444"))
 	p.mu.Lock()
-	n := len(p.tracks)
-	_, first := p.tracks[TrackKey{Camera: "drive", Track: 0}]
+	n, gate := p.held("yard"), p.held("gate")
+	_, zero := p.tracks[TrackKey{Camera: "yard", Track: 0}]
+	_, one := p.tracks[TrackKey{Camera: "yard", Track: 1}]
 	p.mu.Unlock()
-	if n != MaxPlateTracks || first {
-		t.Fatalf("%d tracks held (oldest kept: %v), want %d", n, first, MaxPlateTracks)
+	if n != MaxPlateTracks || gate != MaxPlateTracks || !zero || one {
+		t.Fatalf("yard holds %d (track 0 kept %v, track 1 kept %v), gate %d; want %d each, track 1 evicted", n, zero, one, gate, MaxPlateTracks)
+	}
+	// End forgets a track: a new track under the same number reads afresh.
+	p.End(settled)
+	var e PlateEvent
+	var ok bool
+	for i := 0; i < DefaultPlateHold; i++ {
+		e, ok = p.Read(settled, vehicle("EEE 555"))
+	}
+	if !ok || e.Plate != `"EEE 555"` {
+		t.Fatalf("after End: %+v, %v", e, ok)
 	}
 }

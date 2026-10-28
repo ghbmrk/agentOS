@@ -11,21 +11,22 @@ import (
 // the fixed list come back. Hear zeroes the clip once the call is done, on
 // every path, so no caller of it keeps audio by accident, and nothing here
 // logs, stores or forwards a byte of it. A label repeats onto the bus at
-// most once per Quiet for each source, and each source's sound events are
-// rate-limited, the excess coalesced and counted.
+// most once per Quiet for each source, and each source's repeats are
+// rate-limited, the excess coalesced and counted per label; a label with no
+// event in the last minute always passes, so a rare one is never starved.
 
 // Sound rule defaults.
 const (
 	// DefaultSoundQuiet is the least time between two events of one
 	// label from one source.
 	DefaultSoundQuiet = 30 * time.Second
-	// DefaultSoundsPerMinute bounds one source's sound events a minute.
+	// DefaultSoundsPerMinute bounds one source's repeat events a minute.
 	DefaultSoundsPerMinute = 6
 )
 
 // SoundEvent is one sound label heard at one source, as the bus carries
-// it. Coalesced counts the source's sound events dropped since its last
-// event, by Quiet or the rate limit.
+// it. Coalesced counts that label's events from the source dropped since
+// its last event, by Quiet or the rate limit.
 type SoundEvent struct {
 	Source    string
 	Label     string
@@ -41,7 +42,10 @@ type Sounds struct {
 	// Quiet is the least time between two events of one label from one
 	// source.
 	Quiet time.Duration
-	// PerMinute bounds each source's sound events in any minute.
+	// PerMinute bounds each source's events in any minute once they
+	// include a repeat: an event whose label already had one in that
+	// minute. A label's first event in a minute always passes, so a
+	// source gives at most PerMinute+MaxSounds events a minute.
 	PerMinute int
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -53,7 +57,7 @@ type Sounds struct {
 type soundSource struct {
 	last      map[string]time.Time // each label's last event
 	sent      []time.Time          // events in the last minute
-	coalesced int
+	coalesced map[string]int       // each label's drops since its last event
 	lastSeen  time.Time
 }
 
@@ -92,18 +96,22 @@ func (s *Sounds) Hear(ctx context.Context, source string, pcm []byte) ([]SoundEv
 	}
 	var out []SoundEvent
 	for _, h := range ss {
-		if at, ok := src.last[h.Label]; ok && now.Sub(at) < quiet {
-			src.coalesced++
+		at, sent := src.last[h.Label]
+		if sent && now.Sub(at) < quiet {
+			src.coalesced[h.Label]++
 			continue
 		}
-		if len(src.sent) >= max(s.PerMinute, 1) {
-			src.coalesced++
+		// A label with no event in the last minute passes the limit, so
+		// routine labels cannot starve a rare one (an alarm after a
+		// run of dog barks); the limit holds the repeats.
+		if sent && now.Sub(at) < time.Minute && len(src.sent) >= max(s.PerMinute, 1) {
+			src.coalesced[h.Label]++
 			continue
 		}
 		src.last[h.Label] = now
 		src.sent = append(src.sent, now)
-		out = append(out, SoundEvent{Source: source, Label: h.Label, Conf: h.Conf, Coalesced: src.coalesced})
-		src.coalesced = 0
+		out = append(out, SoundEvent{Source: source, Label: h.Label, Conf: h.Conf, Coalesced: src.coalesced[h.Label]})
+		delete(src.coalesced, h.Label)
 	}
 	return out, nil
 }
@@ -120,11 +128,11 @@ func (s *Sounds) source(id string) *soundSource {
 		// Sources are the owner's few; a stale one is dropped when a
 		// new one comes, so the map stays small.
 		for old, o := range s.sources {
-			if now.Sub(o.lastSeen) > time.Hour && o.coalesced == 0 {
+			if now.Sub(o.lastSeen) > time.Hour && len(o.coalesced) == 0 {
 				delete(s.sources, old)
 			}
 		}
-		src = &soundSource{last: map[string]time.Time{}}
+		src = &soundSource{last: map[string]time.Time{}, coalesced: map[string]int{}}
 		s.sources[id] = src
 	}
 	src.lastSeen = now
@@ -138,13 +146,13 @@ func (s *Sounds) source(id string) *soundSource {
 	return src
 }
 
-// Coalesced is source's sound events dropped and not yet carried by an
+// Coalesced is source's events of label dropped and not yet carried by an
 // event.
-func (s *Sounds) Coalesced(source string) int {
+func (s *Sounds) Coalesced(source, label string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if src := s.sources[source]; src != nil {
-		return src.coalesced
+		return src.coalesced[label]
 	}
 	return 0
 }

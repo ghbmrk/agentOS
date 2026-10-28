@@ -53,21 +53,41 @@ func TestSoundEventsQuietAndRateLimited(t *testing.T) {
 	if es := hear("porch"); len(es) != 1 || es[0].Coalesced != 1 {
 		t.Fatalf("after Quiet: %+v", es)
 	}
+	// The count went with the event that carried it.
+	now = now.Add(DefaultSoundQuiet / 2)
+	hear("porch")
+	now = now.Add(DefaultSoundQuiet)
+	if es := hear("porch"); len(es) != 1 || es[0].Coalesced != 1 {
+		t.Fatalf("a carried count came back: %+v", es)
+	}
 
-	// Every label at once: the per-minute limit holds the rest.
-	labels = nil
-	for i, l := range SoundLabels() {
-		labels = append(labels, Sound{Label: l, Conf: 10 + i})
-	}
+	// Repeats past the per-minute limit are held and counted per label.
+	routine := []Sound{{Label: "vehicle", Conf: 50}, {Label: "dog-bark", Conf: 50}, {Label: "knock", Conf: 50}, {Label: "doorbell", Conf: 50}}
+	labels = routine
 	now = now.Add(time.Hour)
-	es := hear("shed")
-	if len(es) != DefaultSoundsPerMinute || s.Coalesced("shed") != len(labels)-DefaultSoundsPerMinute {
-		t.Fatalf("burst: %d events, %d coalesced", len(es), s.Coalesced("shed"))
+	if es := hear("shed"); len(es) != 4 {
+		t.Fatalf("first routine labels: %+v", es)
 	}
-	now = now.Add(time.Minute)
+	now = now.Add(DefaultSoundQuiet)
+	es := hear("shed")
+	if len(es) != DefaultSoundsPerMinute-4 || s.Coalesced("shed", "doorbell") != 1 || s.Coalesced("shed", "knock") != 1 {
+		t.Fatalf("repeats: %+v; held knock %d, doorbell %d", es, s.Coalesced("shed", "knock"), s.Coalesced("shed", "doorbell"))
+	}
+	// A rare label is never starved by the routine ones (combined review
+	// of #3632, point 2): its first event in the minute passes the limit.
+	now = now.Add(10 * time.Second)
+	labels = append(routine, Sound{Label: "glass-break", Conf: 95})
 	es = hear("shed")
-	if len(es) == 0 || es[0].Coalesced != len(labels)-DefaultSoundsPerMinute {
-		t.Fatalf("after a minute: %+v", es)
+	if len(es) != 1 || es[0].Label != "glass-break" || es[0].Coalesced != 0 {
+		t.Fatalf("glass-break after routine labels: %+v", es)
+	}
+	// Each held label's count rides on that label's own next event.
+	now = now.Add(time.Minute)
+	labels = routine
+	for _, e := range hear("shed") {
+		if want := map[string]int{"vehicle": 1, "dog-bark": 1, "knock": 2, "doorbell": 2}[e.Label]; e.Coalesced != want {
+			t.Fatalf("%s carried %d, want %d", e.Label, e.Coalesced, want)
+		}
 	}
 }
 

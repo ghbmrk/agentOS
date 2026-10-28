@@ -24,8 +24,8 @@ const (
 	// MaxPlateReads bounds the distinct reads one track may give; past
 	// it the track's reads are noise, and it never reports.
 	MaxPlateReads = 8
-	// MaxPlateTracks bounds the tracks held at once; a new track past it
-	// evicts the one read least recently.
+	// MaxPlateTracks bounds the tracks held at once for one camera; a
+	// new track past it evicts that camera's track read least recently.
 	MaxPlateTracks = 256
 )
 
@@ -37,14 +37,14 @@ type TrackKey struct {
 }
 
 // PlateEvent is a track's plate as the bus carries it: Plate is quoted, as
-// device-supplied text (DEV-8). Frames is how many frames gave that read.
-// Coalesced counts this camera's plate events dropped by its rate limit
-// since its last event.
+// device-supplied text (DEV-8). It carries no count of the frames that
+// gave the read, which the service would choose. Coalesced counts the tracks this camera's rate limit held back since its
+// last event; a held-back track keeps its reads and reports on a later
+// read once the limit allows.
 type PlateEvent struct {
 	Camera    string
 	Track     uint64
 	Plate     string
-	Frames    int
 	Coalesced int
 }
 
@@ -68,6 +68,7 @@ type Plates struct {
 type plateTrack struct {
 	reads    map[string]int
 	done     bool
+	held     bool // settled while the camera's limit was full
 	lastRead uint64
 }
 
@@ -107,8 +108,8 @@ func (p *Plates) Read(k TrackKey, d Detection) (PlateEvent, bool) {
 	p.tick++
 	t := p.tracks[k]
 	if t == nil {
-		if len(p.tracks) >= MaxPlateTracks {
-			p.evict()
+		if p.held(k.Camera) >= MaxPlateTracks {
+			p.evict(k.Camera)
 		}
 		t = &plateTrack{reads: map[string]int{}}
 		p.tracks[k] = t
@@ -135,15 +136,20 @@ func (p *Plates) Read(k TrackKey, d Detection) (PlateEvent, bool) {
 	if n < hold || n < 2*(total-n) {
 		return PlateEvent{}, false
 	}
-	t.done = true
-	clear(t.reads)
 	c := p.camera(k.Camera)
 	if len(c.sent) >= max(p.PerMinute, 1) {
-		c.coalesced++
+		// Held back, not lost: the track keeps its reads and reports
+		// on a read once the camera's limit allows. It is counted once.
+		if !t.held {
+			t.held = true
+			c.coalesced++
+		}
 		return PlateEvent{}, false
 	}
+	t.done = true
+	clear(t.reads)
 	c.sent = append(c.sent, p.now())
-	e := PlateEvent{Camera: k.Camera, Track: k.Track, Plate: strconv.Quote(best), Frames: n, Coalesced: c.coalesced}
+	e := PlateEvent{Camera: k.Camera, Track: k.Track, Plate: strconv.Quote(best), Coalesced: c.coalesced}
 	c.coalesced = 0
 	return e, true
 }
@@ -175,13 +181,25 @@ func (p *Plates) camera(id string) *plateCamera {
 	return c
 }
 
-// evict forgets the track read least recently. The caller holds mu.
-func (p *Plates) evict() {
+// held is the tracks held for camera. The caller holds mu.
+func (p *Plates) held(camera string) int {
+	n := 0
+	for k := range p.tracks {
+		if k.Camera == camera {
+			n++
+		}
+	}
+	return n
+}
+
+// evict forgets camera's track read least recently, so one camera's flood
+// of tracks never pushes out another's. The caller holds mu.
+func (p *Plates) evict(camera string) {
 	var oldest TrackKey
 	var at uint64
 	first := true
 	for k, t := range p.tracks {
-		if first || t.lastRead < at {
+		if k.Camera == camera && (first || t.lastRead < at) {
 			oldest, at, first = k, t.lastRead, false
 		}
 	}
@@ -202,8 +220,8 @@ func (p *Plates) End(k TrackKey) {
 	p.forget(k)
 }
 
-// Coalesced is camera's plate events dropped by its rate limit and not
-// yet carried by an event.
+// Coalesced is the tracks camera's rate limit held back that no event
+// has counted yet.
 func (p *Plates) Coalesced(camera string) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
