@@ -56,6 +56,7 @@ func newBBox(t *testing.T, recipient []byte) *bbox {
 	b := &bbox{t: t, now: 1_000_000, cfg: KernelConfig{
 		Log: logPath, Anchor: anchor(t, logPath), Key: [32]byte{7}, Pub: headPub, Sign: headPriv, Anchors: anchors,
 		KeyDir: filepath.Join(data, "keys"), BackupDir: filepath.Join(data, "backups"), Recipient: recipient,
+		ContentDir: filepath.Join(data, "content"), Stores: []string{"vision"},
 	}}
 	b.open()
 	t.Cleanup(func() { b.h.Close() })
@@ -120,7 +121,7 @@ func (b *bbox) logBytes() []byte {
 }
 
 // openBackup opens backup id at dir with rk: the log section and the keys
-// its newest key table gives.
+// its newest key table gives. Only content sections follow the log.
 func openBackup(t *testing.T, dir, id string, rk []byte) ([]byte, *kernel.MemKeys) {
 	t.Helper()
 	f, err := os.Open(filepath.Join(dir, id+".content"))
@@ -140,8 +141,14 @@ func openBackup(t *testing.T, dir, id string, rk []byte) ([]byte, *kernel.MemKey
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := secs.Next(); err != io.EOF {
-		t.Fatalf("a section after the log: %v", err)
+	for {
+		s, _, err := secs.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil || !strings.HasPrefix(s.Name, "content/") {
+			t.Fatalf("a section %q after the log: %v", s.Name, err)
+		}
 	}
 	gens, err := backup.DirTarget{Dir: dir}.Tables(id)
 	if err != nil || len(gens) == 0 {

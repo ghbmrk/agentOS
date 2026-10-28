@@ -33,11 +33,6 @@ import (
 // inherits only the checked pairs (#651 Security 4a point 3).
 var exempt = map[string]string{
 	"golang.org/x/sys/unix": "defines unix.Exec, a wrapper of syscall.Exec; every use of it is gated",
-	// D-108: only cmd/agentos-netjoin imports godbus, and it dials the
-	// system bus (ConnectSystemBus), which starts no process. os/exec is
-	// reached only by the session bus's dbus-launch autolaunch and the
-	// darwin launchctl lookup, neither of which netjoin calls.
-	"github.com/godbus/dbus/v5": "session-bus autolaunch only (dbus-launch, launchctl); agentos-netjoin dials the system bus, D-108",
 }
 
 // inPlace names the packages, by the same key as exempt, that may name

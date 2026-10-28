@@ -174,6 +174,55 @@ func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
 	return h.With(func(k *kernel.Kernel) error { return k.SetupWithEdge(now, f, h.firstEdge) })
 }
 
+// The lost-card route (REC-4, D-201 route B, MIG-4-recovery-r3): the
+// unlock step made a new recovery key at this boot and put it in the
+// store; the kernel holds it in memory only, for the owner's page to show
+// on the new card, until the owner confirms that card. It is never logged
+// nor put in a backup, and a kernel restart loses it: the owner then asks
+// again (residual risk 2 of the brief).
+
+// ErrNoRecoveryCard: the kernel holds no new recovery key: none was made
+// at this boot, the owner confirmed the card, or the kernel restarted.
+var ErrNoRecoveryCard = errors.New("run: I hold no new recovery key to show; if you have not written down the new card, ask for one again")
+
+// recoveryCard is the new recovery key, guarded by its own lock so the
+// kernel's lock is never held for it.
+type recoveryCard struct {
+	mu  sync.Mutex
+	key []byte
+}
+
+// HoldRecoveryCard takes key, the hand-off's NewRecovery, to hold until
+// RecoveryCardDone; none holds nothing. The kernel owns key from then on.
+func (h *Kernel) HoldRecoveryCard(key []byte) {
+	h.card.mu.Lock()
+	defer h.card.mu.Unlock()
+	clear(h.card.key)
+	h.card.key = nil
+	if len(key) == handoff.RecoveryLen {
+		h.card.key = key
+	}
+}
+
+// RecoveryCard is a copy of the new recovery key, or ErrNoRecoveryCard.
+func (h *Kernel) RecoveryCard() ([]byte, error) {
+	h.card.mu.Lock()
+	defer h.card.mu.Unlock()
+	if h.card.key == nil {
+		return nil, ErrNoRecoveryCard
+	}
+	return bytes.Clone(h.card.key), nil
+}
+
+// RecoveryCardDone wipes the new recovery key once the owner has confirmed
+// the card. Done twice is not an error.
+func (h *Kernel) RecoveryCardDone() {
+	h.card.mu.Lock()
+	defer h.card.mu.Unlock()
+	clear(h.card.key)
+	h.card.key = nil
+}
+
 // ErrNoKeyTable: the kernel process never starts with its content closed.
 var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's directory")
 
@@ -242,6 +291,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		return err
 	}
 	defer h.Close()
+	h.HoldRecoveryCard(keys.NewRecovery)
 	if moved {
 		if err := h.With(func(k *kernel.Kernel) error { return k.EdgeCut(clock(), keys.Slot) }); err != nil {
 			return fmt.Errorf("run: cut the edge at a start by my %s slot: %w", keys.Slot, err)

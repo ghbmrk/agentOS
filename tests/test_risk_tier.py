@@ -327,10 +327,11 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual(sorted(rt.TIER_B_BROKER - dirs), [])
         self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring)), [])
 
-    # REQ: ONB-3 (P2-2w c3: netjoin writes the home Wi-Fi PSK, so it is tier A)
-    def test_netjoin_is_tier_a(self):
-        self.assertIn("netjoin", rt.TIER_A_BROKER)
-        self.assertEqual(rt.tier_of("broker/netjoin/join.go")[0], "A")
+    # REQ: NET-2 (DRONE-sim, #3516: the drone key-holder holds the signing key and arms the aircraft)
+    def test_drone_is_tier_a(self):
+        self.assertIn("drone", rt.TIER_A_BROKER)
+        for f in ("broker/drone/key.go", "broker/drone/sitl/ardupilot.pin", "broker/drone/sitl/ardupilot-signed-only.patch"):
+            self.assertEqual(rt.tier_of(f), ("A", "broker/drone/"), f)
 
     # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
     def test_merge_gate_tools_tests_and_lens_rules_are_a(self):

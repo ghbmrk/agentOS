@@ -300,6 +300,8 @@ func typed(err error) error {
 		return fmt.Errorf("%w (%w)", ErrApprovalStale, r)
 	case approvalExpiredText:
 		return fmt.Errorf("%w (%w)", ErrApprovalExpired, r)
+	case noRecoveryCardText:
+		return ErrNoRecoveryCard
 	}
 	return err
 }
@@ -507,6 +509,34 @@ func (o Owner) SwitchRecipient(ctx context.Context, recipient, approval []byte) 
 		Recipient []byte `json:"recipient"`
 		Approval  []byte `json:"approval"`
 	}{recipient, approval}, nil))
+}
+
+// The lost-card route (REC-4, D-201 route B, MIG-4-recovery-r3): after the
+// restart, the kernel holds the recovery key the unlock step made, for the
+// page to show on the new card, until the owner confirms that card.
+
+// ErrNoRecoveryCard: the kernel holds no new recovery key: none was made
+// at this boot, the card was confirmed, or the kernel restarted since.
+var ErrNoRecoveryCard = errors.New("kernelsock: the kernel holds no new recovery key")
+
+// noRecoveryCardText is kernel/proc ErrNoRecoveryCard's text;
+// TestRecoveryCardReachesTheKernel keeps them the same.
+const noRecoveryCardText = "run: I hold no new recovery key to show; if you have not written down the new card, ask for one again"
+
+// RecoveryCard is the recovery key the unlock step made at this boot, 32
+// bytes, or ErrNoRecoveryCard.
+func (o Owner) RecoveryCard(ctx context.Context) ([]byte, error) {
+	var r struct {
+		Key []byte `json:"key"`
+	}
+	err := typed(o.call(ctx, "recoverycard", nil, &r))
+	return r.Key, err
+}
+
+// RecoveryCardDone has the kernel wipe the new recovery key, once the
+// owner has confirmed the card. Done twice is not an error.
+func (o Owner) RecoveryCardDone(ctx context.Context) error {
+	return typed(o.call(ctx, "recoverycarddone", nil, nil))
 }
 
 // The page's serving certificate (CH-9, MIG-4-recovery-f1): the kernel

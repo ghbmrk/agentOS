@@ -74,6 +74,9 @@ wiring cmd/agentos-enroll
 # descriptor 3, the owner's anchors from a file only root writes (D-146), and
 # the kernel's, the owner side's and the planner's sockets.
 wiring cmd/agentos-clerk-mail
+# The model clerk's process (MIG-4-untrusted-exit-b2b, #2780): its key from the
+# kernel on descriptor 3, the plan login's sealed slot, and agentosd's sockets.
+wiring cmd/agentos-clerk-model
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -182,10 +185,6 @@ allow recall journal.FileStore.Append -- shape only: recall.Store matches the jo
 allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Append
 allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
 allow recall journal.MemStore.Rewrite -- shape only: as journal.FileStore.Append
-
-# The home Wi-Fi helper (P2-2w c3) runs as its own user with no capabilities
-# and serves one socket, to agentosd only (Security L8.1).
-allow cmd/agentos-netjoin sockets.Server.* -- the helper serves its own socket to agentosd only (Security L8.1, P2-2w c3)
 
 # agentosd's client of the mail clerk's owner socket (#3006) reads the
 # serving peer's uid (SO_PEERCRED) before it writes a frame, as kernel/proc's
