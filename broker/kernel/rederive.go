@@ -47,9 +47,13 @@ func (d derived) String() string { return d.typ + " " + string(d.body) }
 // leaves no entry. head is the running core's head key: an edge candidate
 // of the key live at head is not one the kernel logs. Entries written under
 // an earlier head key (before a restore) see no live key at head, so they
-// get the fold's checks only and never diverge falsely.
-func Rederive(anchors []key.PublicKey, head ed25519.PublicKey, es []Entry) (Rederived, error) {
+// get the fold's checks only and never diverge falsely. pinned is the
+// image's pinned roots the kernel was booted with (Pin).
+func Rederive(anchors []key.PublicKey, head ed25519.PublicKey, es []Entry, pinned ...key.Key) (Rederived, error) {
 	s := NewState(anchors)
+	if err := s.Pin(pinned...); err != nil {
+		return Rederived{}, err
+	}
 	out := Rederived{Checked: map[string]int{}, Recorded: map[string]int{}}
 	var refused *derived // the cancel a refused send may log next
 	for _, e := range es {

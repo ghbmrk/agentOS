@@ -30,6 +30,9 @@ type KernelConfig struct {
 	Sign    ed25519.PrivateKey
 	Anchors []key.PublicKey   // the owner's hardware keys (D-146); none starts setup-only
 	Clerks  map[string]Remote // every clerk the kernel runs, by name; a closed table
+	// Pinned is the image's pinned roots (kernel.State.Pin): granted from
+	// the image, never anchors.
+	Pinned []key.Key
 	// KeyDir is the subject-key table's directory (FileKeys, sealed under
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
@@ -136,10 +139,10 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	anchors := func() []key.PublicKey { return k.State().Anchors }
 	clerks, kc := map[string]remote{}, map[string]kernel.Clerk{}
 	for name, r := range cfg.Clerks {
-		clerks[name] = remote{r, anchors}
+		clerks[name] = remote{r, anchors, cfg.Pinned}
 		kc[name] = clerks[name]
 	}
-	if k, err = kernel.Boot(l, cfg.Anchors, kc, now); err != nil {
+	if k, err = kernel.Boot(l, cfg.Anchors, kc, now, cfg.Pinned...); err != nil {
 		st.Close()
 		return nil, err
 	}
@@ -206,7 +209,7 @@ func (h *Kernel) Tick(now int64) error {
 			ok := false
 			err := h.With(func(k *kernel.Kernel) (err error) {
 				if ok, err = k.Send(now, c); ok {
-					s = view(k.State(), k.State().Anchors, c.Req, now)
+					s = view(k.State(), k.State().Anchors, k.State().Pinned(), c.Req, now)
 				}
 				return err
 			})

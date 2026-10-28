@@ -72,13 +72,13 @@ type snapshot struct {
 // gets no grants, and a step not in flight no dispatch or uses; the clerk
 // refuses either. It shares nothing with v, since Tick sends it outside the
 // kernel's lock while STOP, a revoke or a pause changes v.
-func view(v kernel.View, anchors []key.PublicKey, r kernel.Request, now int64) snapshot {
+func view(v kernel.View, anchors []key.PublicKey, pinned []key.Key, r kernel.Request, now int64) snapshot {
 	c := v.ChangesView()
 	s := snapshot{Grants: map[key.ID]int64{}, Ledger: map[key.ID][]key.Use{}, OneOffLines: map[key.ID]int64{},
 		Changes: key.Changes{Revoked: maps.Clone(c.Revoked), Paused: maps.Clone(c.Paused), Stopped: c.Stopped}}
 	es, un := v.Enrollments()
 	s.Enrolled, s.Unenrolled = slices.Clone(es), slices.Clone(un)
-	ver, err := kernel.VerifyPlan(r.Plan, kernel.PlanOwners(v, anchors, r.Plan.Key))
+	ver, err := kernel.VerifyPlan(r.Plan, kernel.Owners(v, anchors, pinned, r.Plan.Key))
 	if err != nil {
 		return s
 	}
@@ -208,13 +208,14 @@ type Remote struct {
 // Clerk is r as the kernel calls it: each call carries the view of the
 // kernel.View it is given, verified against anchors.
 func (r Remote) Clerk(anchors []key.PublicKey) kernel.Clerk {
-	return remote{r, func() []key.PublicKey { return anchors }}
+	return remote{r, func() []key.PublicKey { return anchors }, nil}
 }
 
 // remote is a Remote as a kernel.Clerk.
 type remote struct {
 	Remote
 	anchors func() []key.PublicKey
+	pinned  []key.Key // the kernel's pinned roots
 }
 
 func (c remote) keys() []key.PublicKey {
@@ -225,11 +226,11 @@ func (c remote) keys() []key.PublicKey {
 }
 
 func (c remote) Do(r kernel.Request, v kernel.View) kernel.Result {
-	return c.do(r, view(v, c.keys(), r, time.Now().UnixMilli()))
+	return c.do(r, view(v, c.keys(), c.pinned, r, time.Now().UnixMilli()))
 }
 
 func (c remote) Probe(r kernel.Request, v kernel.View) kernel.Result {
-	return c.probe(r, view(v, c.keys(), r, time.Now().UnixMilli()))
+	return c.probe(r, view(v, c.keys(), c.pinned, r, time.Now().UnixMilli()))
 }
 
 // do and probe make a call with a view taken under the kernel's lock, so the
