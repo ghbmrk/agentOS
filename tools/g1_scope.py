@@ -214,7 +214,7 @@ def main(argv=None):
         history = pathlib.Path(a.timeline).read_text() if a.timeline else None
         paths = changed_paths(*a.git) if a.git else a.paths
         results = [
-            check(paths, (HERE / gate[1]).read_text(), a.pr, a.pr_created, history, gate)
+            check(paths, (HERE / gate[1]).read_bytes().decode("utf-8"), a.pr, a.pr_created, history, gate)
             for gate in GATES
         ]
     except (OSError, ValueError, subprocess.CalledProcessError, ListError) as e:

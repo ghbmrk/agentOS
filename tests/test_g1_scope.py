@@ -20,7 +20,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import g1_scope as g  # noqa: E402
 
-G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_text()
+G2_LIST = (ROOT / "tools" / "g1_scope_g2.txt").read_bytes().decode("utf-8")
 G2 = g.GATES[0]
 
 # G2's binaries (header of g1_scope_g2.txt): the G1 path's, plus the key holder and the
@@ -167,6 +167,25 @@ class CheckTest(unittest.TestCase):
             with self.assertRaises(g.ListError, msg=repr(bad)):
                 g.parse_list(bad)
         self.assertTrue(g.parse_list(ON + "# OPERATING section 5 ~!@$%^&*()\n")[0])
+
+    def test_cli_reads_the_list_bytes_as_they_are(self):  # G1-freeze-e (#3665)
+        # The workflow runs the script on the checked-in list. Reading it as text turned a lone
+        # "\r" into "\n" before the check, so a comment hid a live exempt-pr line again.
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("g1_scope.py", "ci_scope.py"):
+                shutil.copy(ROOT / "tools" / name, d)
+            lst = pathlib.Path(d, G2[1])
+
+            def cli(tail):
+                lst.write_bytes(G2_LIST.encode() + tail)
+                return subprocess.run([sys.executable, "-I", str(pathlib.Path(d, "g1_scope.py")),
+                                       "--pr", "4242", "zzz_outside/x.go"], capture_output=True).returncode
+
+            self.assertEqual(cli(b""), 1)
+            self.assertEqual(cli(b"exempt-pr 4242\n"), 0)
+            for tail in (b"# reviewed note\rexempt-pr 4242\n", b"exempt-pr 4242\r\n",
+                         b"# note\xe2\x80\xa8exempt-pr 4242\n", b"# \xff\n"):
+                self.assertEqual(cli(tail), 2, tail)
 
     def test_cli_on_a_git_range(self):  # G1-freeze-a, -b, -e
         if not shutil.which("git"):
