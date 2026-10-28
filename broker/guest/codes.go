@@ -40,6 +40,9 @@ var codes = set(
 	"plan-not-allowed", "plan-consent", "signin-busy", "signin-code", "signin-failed",
 	"signin-timed-out", "signin-stopped", "requalify", "plan-refused", "plan-meter",
 
+	// broker/clerk/model: an API call's refusals and failures.
+	"private", "nokey", "body", "upstream", "answer",
+
 	// broker/clerk/plan.
 	"plan-unmetered", "plan-body", "plan-undeclared", "plan-placeholder", "plan-stopped",
 	"plan-unswappable", "plan-exchange", "plan-save", "plan-encoded", "plan-stale", "plan-ended",
