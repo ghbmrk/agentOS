@@ -101,6 +101,7 @@ TIER_A_BROKER = {
     "infer",                      # INFER-SVC: its jail and reply checks keep private text on the box and untrusted output out of recall; covers infer/supervise
     "edgelink",                   # parses every frame and hello from the edge, and pins the link's TLS (HW-15, #3296)
     "camwire",                    # parses every camera frame and verifies the owner-signed settings and images a camera takes (NET-2, NET-4, #3513)
+    "camnode",                    # the camera node's server: holds its device key in the secure element, admits only pinned keys, applies owner-signed bundles (NET-2, #3513)
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check
