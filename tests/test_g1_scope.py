@@ -139,7 +139,10 @@ class CheckTest(unittest.TestCase):
                     ON + "allow broker/\nfrozen-import broker/loops/\n",
                     ON + "frozen-import broker/loops\n", "freeze on\n",
                     ON + S, "freeze on\nsince 2026-10-14\n", "freeze on\nsince 2026-10-14T19:55:00+01:00\n",
-                    ON + "exempt-pr x\n", ON + "exempt-pr\n"):
+                    ON + "exempt-pr x\n", ON + "exempt-pr\n",
+                    # Non-ASCII digits pass str.isdigit() but are not a PR number (#3638).
+                    ON + "exempt-pr 15\u00b2\n", ON + "exempt-pr \u0661\u0665\u0660\u0660\n",
+                    ON + "exempt-pr \uff11\uff15\uff10\uff10\n"):
             with self.assertRaises(g.ListError, msg=bad):
                 run(["x"], list_text=bad)
         with self.assertRaises(g.ListError):

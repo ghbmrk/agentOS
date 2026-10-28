@@ -104,7 +104,7 @@ def parse_list(text, name=GATES[0][1]):
                 allow.append(_clean(w[1]))
             elif w[0] == "frozen-import" and len(w) == 2 and w[1].endswith("/"):
                 frozen.append(_clean(w[1]))
-            elif w[0] == "exempt-pr" and len(w) == 2 and w[1].isdigit():
+            elif w[0] == "exempt-pr" and len(w) == 2 and w[1].isascii() and w[1].isdigit():
                 prs.add(int(w[1]))
             else:
                 raise ListError(f"unreadable line {line.strip()!r}")
