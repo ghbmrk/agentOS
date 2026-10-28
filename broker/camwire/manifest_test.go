@@ -68,6 +68,10 @@ func TestManifestVerifies(t *testing.T) {
 			t.Errorf("image counter %d: %v", c, err)
 		}
 	}
+	far := signedManifest(t, Manifest{Image: m.Image, Size: m.Size, Counter: 4 + MaxCounterStep + 1}, rel, o)
+	if _, err := VerifyManifest(far, relPub, o.owner(), 4); !errors.Is(err, ErrCounter) {
+		t.Errorf("image counter jump past MaxCounterStep: %v", err)
+	}
 	// A bundle's assertion never serves a manifest: the magics differ.
 	if bytes.HasPrefix(enc, []byte(bundleMagic)) {
 		t.Fatal("manifest opens with the bundle magic")

@@ -198,9 +198,18 @@ type Pin struct {
 	Counter uint64
 }
 
+// MaxCounterStep bounds how far one bundle or manifest may raise its
+// counter. Without it, one signed message at the counter's maximum would
+// leave no counter above it, and the node would refuse every later bundle
+// or image for good, a reset included (CAM-wire-4).
+const MaxCounterStep = 1 << 20
+
+// rises reports whether next is above cur by at most MaxCounterStep.
+func rises(next, cur uint64) bool { return next > cur && next-cur <= MaxCounterStep }
+
 // VerifyBundle reports the bundle p carries if the node pinned by pin may
 // apply it: the encoding is canonical, it names this node and the pinned
-// owner credential, its counter is above pin.Counter, and the pinned
+// owner credential, its counter is above pin.Counter by at most MaxCounterStep, and the pinned
 // owner's assertion over it verifies. The caller then raises the
 // element's counter to the bundle's before applying it.
 func VerifyBundle(p []byte, pin Pin) (Bundle, error) {
@@ -214,7 +223,7 @@ func VerifyBundle(p []byte, pin Pin) (Bundle, error) {
 	if b.Owner != pin.Owner {
 		return Bundle{}, ErrOwner
 	}
-	if b.Counter <= pin.Counter {
+	if !rises(b.Counter, pin.Counter) {
 		return Bundle{}, ErrCounter
 	}
 	if !pin.Owner.verify(s.Bundle, s.Assertion) {

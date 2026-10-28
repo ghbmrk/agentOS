@@ -100,14 +100,14 @@ func ParseSignedManifest(p []byte) (SignedManifest, Manifest, error) {
 // VerifyManifest reports the manifest p carries if the node may stage its
 // image: the encoding is canonical, release (the key the node's image
 // pins) signed it, the pinned owner's assertion over it verifies, and its
-// counter is above counter, the image counter in the node's secure element.
+// counter is above counter by at most MaxCounterStep, the image counter in the node's secure element.
 // The image's bytes are checked against Image after they arrive.
 func VerifyManifest(p []byte, release ed25519.PublicKey, owner Owner, counter uint64) (Manifest, error) {
 	s, m, err := ParseSignedManifest(p)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if m.Counter <= counter {
+	if !rises(m.Counter, counter) {
 		return Manifest{}, ErrCounter
 	}
 	if len(release) != ed25519.PublicKeySize || !ed25519.Verify(release, s.Manifest, s.Release[:]) {

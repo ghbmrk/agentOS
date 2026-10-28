@@ -29,14 +29,16 @@ func TestBundleVerifies(t *testing.T) {
 	wrongKey := newPasskey(t)
 
 	cases := map[string]func() []byte{
-		"flipped bundle byte": func() []byte {
+		// Both flips keep the encoding valid, so only the assertion can
+		// refuse them.
+		"flipped counter byte": func() []byte {
 			p := bytes.Clone(good)
-			p[len(bundleMagic)+32+8+1+len(testRP)+PointLen+3] ^= 1 // inside the core key
+			p[len(bundleMagic)+32+7] ^= 1 // the counter's low byte: 7 becomes 6
 			return p
 		},
 		"flipped settings byte": func() []byte {
 			p := bytes.Clone(good)
-			p[bundleFixed+len(testRP)-6] ^= 1 // the bitrate
+			p[bundleFixed+len(testRP)-6] ^= 1 // the bitrate's low byte
 			return p
 		},
 		"wrong relying-party hash": func() []byte {
@@ -79,8 +81,16 @@ func TestBundleVerifies(t *testing.T) {
 		"trailing byte":        func() []byte { return append(bytes.Clone(good), 0) },
 	}
 	for name, mk := range cases {
-		if _, err := VerifyBundle(mk(), f.pin(3)); err == nil {
-			t.Errorf("%s: verified", name)
+		_, err := VerifyBundle(mk(), f.pin(3))
+		switch name {
+		case "BER long-form length", "padded integer", "trailing byte":
+			if !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: got %v, want ErrMalformed", name, err)
+			}
+		default:
+			if !errors.Is(err, ErrAssertion) {
+				t.Errorf("%s: got %v, want ErrAssertion", name, err)
+			}
 		}
 	}
 }
@@ -160,6 +170,17 @@ func TestCounterMustRise(t *testing.T) {
 	}
 	if _, err := VerifyBundle(p, f.pin(f.bundle.Counter-1)); err != nil {
 		t.Errorf("counter one above: %v", err)
+	}
+	// A jump past MaxCounterStep is refused, so one signed bundle cannot
+	// exhaust the counter and lock the node out of every later one.
+	far := f.bundle
+	far.Counter = MaxCounterStep + 1
+	if _, err := VerifyBundle(f.signed(t, far, nil), f.pin(0)); !errors.Is(err, ErrCounter) {
+		t.Errorf("counter jump past MaxCounterStep: %v", err)
+	}
+	far.Counter = MaxCounterStep
+	if _, err := VerifyBundle(f.signed(t, far, nil), f.pin(0)); err != nil {
+		t.Errorf("counter jump of exactly MaxCounterStep: %v", err)
 	}
 	if _, err := VerifyFirstBundle(p, f.node, f.bundle.Counter); !errors.Is(err, ErrCounter) {
 		t.Errorf("first bundle at the element's counter: %v", err)

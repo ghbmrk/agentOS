@@ -111,6 +111,15 @@ func TestThermalShape(t *testing.T) {
 	if (Shape{Width: 1024, Height: 1024}).valid() {
 		t.Error("a shape over MaxThermal is valid")
 	}
+	// 8 + 2×65535×32769 wraps to 65542 in 32 bits.
+	wrap := Shape{Width: 65535, Height: 32769}
+	if wrap.valid() {
+		t.Error("a shape whose size wraps 32 bits is valid")
+	}
+	win := append(header(TypeThermal, 65542), AppendThermal(nil, Thermal{Width: 65535, Height: 32769, Samples: make([]byte, 65534)})...)
+	if _, err := ReadFrame(bytes.NewReader(win), ToCore, wrap); !errors.Is(err, ErrShape) {
+		t.Errorf("wrapping shape: %v", err)
+	}
 	if !(Shape{Width: 640, Height: 512}).valid() {
 		t.Error("a Boson-class shape is not valid")
 	}

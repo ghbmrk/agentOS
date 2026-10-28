@@ -92,12 +92,15 @@ var types = map[Type]spec{
 // no thermal core, and a thermal frame is then refused.
 type Shape struct{ Width, Height uint16 }
 
-// valid reports whether s is a shape whose frames fit MaxThermal.
+// valid reports whether s is a shape whose frames fit MaxThermal. The size
+// is computed in 64 bits, where two 16-bit sides cannot wrap.
 func (s Shape) valid() bool {
-	return s.Width > 0 && s.Height > 0 && s.payload() <= MaxThermal
+	return s.Width > 0 && s.Height > 0 &&
+		thermalHead+2*uint64(s.Width)*uint64(s.Height) <= MaxThermal
 }
 
-// payload is a thermal frame's exact payload length for s.
+// payload is a thermal frame's exact payload length for s, which valid has
+// bounded first.
 func (s Shape) payload() uint32 {
 	return thermalHead + 2*uint32(s.Width)*uint32(s.Height)
 }
