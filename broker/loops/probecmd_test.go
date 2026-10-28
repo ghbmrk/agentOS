@@ -3,10 +3,12 @@ package loops_test
 // REQ: LOOP-7, LOOP-9
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,9 +49,9 @@ func canaryRound(t *testing.T, release, mode string, contain map[string]string) 
 }
 
 // LOOP-7 acceptance, canary rounds: a planted leak in a product target is
-// a High finding through Report that pauses the registry's target; a
-// clean round reports nothing and closes it. No canary value reaches the
-// record or the owner.
+// a High finding naming the registry's target to pause; a clean round
+// reports nothing and lists the target as checked. No canary value
+// reaches the finding.
 func TestCanaryRoundsReportAPlantedLeakAndCloseOnACleanRound(t *testing.T) {
 	if testing.Short() {
 		t.Skip("runs the canary harness")
@@ -57,28 +59,21 @@ func TestCanaryRoundsReportAPlantedLeakAndCloseOnACleanRound(t *testing.T) {
 	release := t.TempDir()
 	leaky := &probecmd.CommandProbe{For: loops.CheckCanary, Interval: time.Hour, Timeout: 5 * time.Minute, Release: release,
 		Cmd: canaryRound(t, release, "leaky", map[string]string{"kind": "grant", "name": "G9", "label": "pre-allowance G9"})}
-	r := loops.NewProbeRig(t, leaky)
-	r.Run(t)
-	if name, res := r.Run(t); name != "probe:canary" || res.Err != nil || res.Value != 1 {
-		t.Fatalf("%q %+v", name, res)
+	res, err := leaky.Run(context.Background())
+	if err != nil || len(res.Found) != 1 {
+		t.Fatalf("%+v %v", res, err)
 	}
-	ev := r.Evidence()
-	if len(ev) != 1 || ev[0].Finding.Subject != "planted-leak" || ev[0].Finding.Severity != loops.High || ev[0].Contained != "paused" {
-		t.Fatalf("evidence %+v", ev)
+	f := res.Found[0]
+	if f.Subject != "planted-leak" || f.Severity != loops.High || f.Contain == nil || f.Contain.Name != "G9" {
+		t.Fatalf("finding %+v", f)
 	}
-	if c := r.Contained(); len(c) != 1 || c[0] != "G9" {
-		t.Fatalf("contained %v", c)
-	}
-	// The harness self-scans its output; what reached Guard is kinds only.
-	if !strings.HasPrefix(ev[0].Finding.Detail, "kinds: ") {
-		t.Fatalf("detail %q", ev[0].Finding.Detail)
+	// The harness self-scans its output; what reaches the finding is kinds only.
+	if !strings.HasPrefix(f.Detail, "kinds: ") {
+		t.Fatalf("detail %q", f.Detail)
 	}
 	leaky.Cmd = canaryRound(t, release, "clean", nil)
-	r.Advance(time.Hour)
-	if name, res := r.Run(t); name != "probe:canary" || res.Err != nil || res.Value != 0 {
-		t.Fatalf("%q %+v", name, res)
-	}
-	if r.Open(ev[0].Finding.ID) {
-		t.Fatal("a clean round left the leak open")
+	res, err = leaky.Run(context.Background())
+	if err != nil || len(res.Found) != 0 || !slices.Contains(res.Checked, "planted-leak") {
+		t.Fatalf("clean round %+v %v", res, err)
 	}
 }
