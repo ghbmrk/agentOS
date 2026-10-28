@@ -2703,6 +2703,9 @@ DRIVER_MARKS = (b"agentos-drv-", b"/run/agentos-drivers")
 # The host's uid is fixed (DEVHOST_UID, its sysusers line), so the template can name it for the
 # driver's peer check (devslot/proc.HostUIDEnv); a unit cannot resolve a user name in Environment=.
 DEVHOST_UID = 900
+# The kernel's key socket for driver NAME's instances (kernel/proc.ServeClerkKey, which hands the key
+# to each instance of the driver's template; b2b-2, #3590).
+DRIVER_KEY_SOCKET = "/run/agentos-kernel/key-driver-{name}.sock"
 DRIVER_TEMPLATE = (
     ("usr/lib/systemd/system/agentos-driver-{name}.socket", """\
 # Rendered from mkosi.finalize's DRIVER_TEMPLATE (DEVSLOT-image); the tree check refuses any change.
@@ -2731,7 +2734,12 @@ ExecStart=/usr/lib/agentos/drivers/{name}/driver
 User=agentos-drv-{name}
 Group=agentos-drv-{name}
 Slice=agentos-drivers.slice
-Environment=AGENTOS_DEVHOST_UID=""" + str(DEVHOST_UID) + """
+Environment=AGENTOS_DEVHOST_UID=""" + str(DEVHOST_UID) + """ AGENTOS_DRIVER={name}
+# The driver's key stays in its own process (b2b-2, #3590): descriptors 4 and 5, named in
+# LISTEN_FDNAMES, are the kernel's key hand-off as clerk driver-{name} and its sealed device-key file,
+# read-only. Both graceful: a device with no key runs with none.
+OpenFile=""" + DRIVER_KEY_SOCKET + """:clerk-key:graceful
+OpenFile=/var/lib/agentos-drivers/{name}/device:device:read-only,graceful
 StandardInput=null
 StandardOutput=null
 StandardError=null

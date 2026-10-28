@@ -27,8 +27,8 @@ var ErrPeer = errors.New("devslot: peer is not the host")
 
 // Main is a driver binary's whole main: func main() { proc.Main(drv) }.
 // It makes the process non-dumpable, refuses a peer on descriptor 3 whose
-// uid is not the host's, serves exactly one operation over the wire, and
-// exits: 0 if the operation succeeded, 1 otherwise. It writes nothing to
+// uid is not the host's, reads the device key the unit passed (keyLend),
+// serves exactly one operation over the wire with it, and exits: 0 if the operation succeeded, 1 otherwise. It writes nothing to
 // standard output or error. The sandbox itself is the unit's, applied
 // before exec (DEVSLOT-host-lib-2).
 func Main(drv devslot.Driver) {
@@ -59,5 +59,9 @@ func serveMain(drv devslot.Driver, fd int, hostUID string) error {
 	}
 	f := os.NewFile(uintptr(fd), "host")
 	defer f.Close()
-	return devslot.ServeWire(context.Background(), drv, f)
+	lend, err := keyLend(os.Getenv, os.Getpid())
+	if err != nil {
+		return err
+	}
+	return devslot.ServeWireLend(context.Background(), drv, f, lend)
 }

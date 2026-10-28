@@ -17,8 +17,10 @@
 # passed as SMBIOS credentials, which systemd honours only in a VM, so the image itself is unchanged.
 # With SLICE set to a directory holding a static cmd/slice, a boot runs the inbox slice's eval inside
 # the box (A21, #3117; see slice_run below).
+# With DEVSLOT set to a directory holding the device-driver slot's boot probe, a boot runs a fixture
+# driver instance under the driver template (DEVSLOT-drivers b2b-2; see below).
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
-# console-two-drives.log, console-fallback.log, console-slice.log, console-e2e.log.
+# console-two-drives.log, console-fallback.log, console-slice.log, console-devslot.log, console-e2e.log.
 set -eu
 HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
@@ -525,6 +527,54 @@ if [ -n "${SLICE:-}" ]; then
 	hasnt "$W/console-slice.log" "agentos-slice: FAIL"
 	python3 -I "$HERE/slice_boot.py" check "$SO" || fail=1
 	rm -rf "$W/slice.raw" "$SS" "$SO"
+fi
+
+# The device-driver slot's sandbox and key, in a booted image (DEVSLOT-drivers b2b-2, #3590). With
+# DEVSLOT set to a directory holding static builds of broker/clerk/devslot/proc/testdata's bootdriver
+# and bootprobe, a fresh copy boots with mkosi.finalize's own DRIVER_TEMPLATE rendered for the name
+# "fixture", passed as SMBIOS credentials with only the binary's path changed to the read-only 9p
+# share, so the image itself is unchanged. A CI-only unit (no agentos- prefix, so outside the main
+# side's mask) mounts the share and runs bootprobe as root: it seals the fixture's device-key file,
+# serves its key socket with the kernel's own hand-off code for the template's instances, then, as
+# the host's uid, runs one operation per fresh instance. One finds socket() refused for every family,
+# /etc/passwd unopenable, descriptor 0 /dev/null and Lend giving the fixture's own canary slot, in
+# an instance started under the main side's mask (226/NAMESPACE, #3589); one hangs and must be
+# killed at the template's RuntimeMaxSec=.
+if [ -n "${DEVSLOT:-}" ]; then
+	DS=$W/devslot-share
+	rm -rf "$DS"; mkdir -p "$DS/units"
+	for b in bootdriver bootprobe; do
+		cp "$DEVSLOT/$b" "$DS/$b" && echo "ok   $b for the devslot boot" || { echo "MISS $b for the devslot boot"; fail=1; }
+	done
+	python3 -I - "$HERE/mkosi/mkosi.finalize" "$DS/units" <<'EOP' || fail=1
+import importlib.machinery, importlib.util, pathlib, sys
+loader = importlib.machinery.SourceFileLoader("finalize", sys.argv[1])
+check = importlib.util.module_from_spec(importlib.util.spec_from_loader("finalize", loader))
+loader.exec_module(check)
+for rel, text in check.driver_units("fixture").items():
+    text = text.replace("/usr/lib/agentos/drivers/fixture/driver", "/run/agentos-ci-devslot/bootdriver")
+    name = "dropin.conf" if rel.endswith("/90-driver.conf") else rel.rsplit("/", 1)[-1]
+    pathlib.Path(sys.argv[2], name).write_text(text)
+EOP
+	P9="trans=virtio,version=9p2000.L"
+	DCG=/agentos.slice/agentos-drivers.slice/agentos-driver-fixture@.service
+	ufile() { printf ' -smbios type=11,value=io.systemd.credential.binary:%s=%s' "$1" "$(base64 -w0 "$DS/units/$2")"; }
+	DS_UNITS="$(ufile sysusers.extra agentos-driver-fixture.conf)$(ufile systemd.extra-unit.agentos-driver-fixture.socket agentos-driver-fixture.socket)"
+	DS_UNITS="$DS_UNITS$(ufile 'systemd.extra-unit.agentos-driver-fixture@.service' 'agentos-driver-fixture@.service')"
+	DS_UNITS="$DS_UNITS$(ufile 'systemd.unit-dropin.agentos-driver-fixture@.service~90-driver' dropin.conf)"
+	DS_UNITS="$DS_UNITS$(smbios_cred systemd.extra-unit.ci-devslot.service "[Unit]\nDescription=agentOS device-driver slot probe (CI only)\nWants=agentos-driver-fixture.socket\nAfter=systemd-sysusers.service systemd-tmpfiles-setup.service agentos-driver-fixture.socket\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=600\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'mkdir -p /run/agentos-ci-devslot && mount -t 9p -o $P9,ro devslot /run/agentos-ci-devslot && exec /run/agentos-ci-devslot/bootprobe -cgroup $DCG'\n")"
+	DS_UNITS="$DS_UNITS$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=ci-devslot.service\n')"
+	copy "$W/devslot.raw"
+	EXTRA="-virtfs local,path=$DS,mount_tag=devslot,security_model=none,readonly=on$DS_UNITS" \
+		UNTIL="agentos-devslot: DONE\|agentos-health: FAIL" boot "$W/console-devslot.log" "$W/devslot.raw"
+	grep -a "agentos-devslot:\|agentos-driver-fixture\|driver-fixture's key" "$W/console-devslot.log" | guest_echo || true
+	has "$W/console-devslot.log" "agentos-devslot: DONE"
+	for c in "instance started under the main side's mask" "socket() refused (inet=1 unix=1)" "opening /etc/passwd refused" \
+		"descriptor 0 is /dev/null" "Lend yields the canary key and no other slot (key=1)" "a hung operation is killed at RuntimeMaxSec"; do
+		has "$W/console-devslot.log" "agentos-devslot: ok   $c"
+	done
+	hasnt "$W/console-devslot.log" "agentos-devslot: FAIL"
+	rm -rf "$W/devslot.raw" "$DS"
 fi
 
 # Prints "ci_boot: G1 PROVEN" (a prefix only the host script uses; the guest console is never given it,

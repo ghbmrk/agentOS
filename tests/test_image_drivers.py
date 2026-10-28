@@ -323,11 +323,27 @@ class DriversTest(unittest.TestCase):
         self.assertGreaterEqual(mb(sl["MemoryMax"]), per_driver)
         self.assertLessEqual(mb(sl["MemoryMax"]), 4 * per_driver)
 
+    def test_driver_key_files(self):
+        # b2b-2 (#3590): the driver's own key reaches only its own instances, as two descriptors after
+        # the connection, named as devslot/proc reads them: the kernel's hand-off as clerk
+        # driver-<name> and its device-key file, read-only, both graceful (CLK-1, DEV-3).
+        svc = check.driver_units("scale")[SERVICE]
+        opens = [l.split("=", 1)[1] for l in svc.splitlines() if l.startswith("OpenFile=")]
+        self.assertEqual(opens, ["/run/agentos-kernel/key-driver-scale.sock:clerk-key:graceful",
+                                 "/var/lib/agentos-drivers/scale/device:device:read-only,graceful"])
+        proc = (IMG.parent / "broker/clerk/devslot/proc/keys_linux.go").read_text()
+        for s in ('KeyFDName    = "clerk-key"', 'DeviceFDName = "device"', 'DriverEnv = "AGENTOS_DRIVER"',
+                  '"driver-"+name', "[a-z][a-z0-9-]{0,18}"):
+            self.assertIn(s, proc)
+        # No key path is a keeper path the main side's mask hides (#2981).
+        for o in opens:
+            self.assertFalse(any(o.startswith(k + "/") for k in check.KEEPER_PATHS), o)
+
     def test_host_uid_is_the_drivers_peer(self):
         # devslot/proc refuses a peer whose uid is not AGENTOS_DEVHOST_UID's; the host's sysusers line
         # fixes that uid, and agentos-devices refuses to run under another.
         svc = unit(check.driver_units("scale")[SERVICE])["Service"]
-        self.assertEqual(svc["Environment"], "AGENTOS_DEVHOST_UID=%d" % check.DEVHOST_UID)
+        self.assertEqual(svc["Environment"], "AGENTOS_DEVHOST_UID=%d AGENTOS_DRIVER=scale" % check.DEVHOST_UID)
         users = (IMG / "mkosi/mkosi.extra/usr/lib/sysusers.d/agentos-devices.conf").read_text()
         self.assertIn('\nu agentos-devices %d "' % check.DEVHOST_UID, users)
         main = (IMG.parent / "broker/cmd/agentos-devices/main.go").read_text()
