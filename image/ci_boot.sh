@@ -537,9 +537,10 @@ fi
 # side's mask) mounts the share and runs bootprobe as root: it seals the fixture's device-key file,
 # serves its key socket with the kernel's own hand-off code for the template's instances, then, as
 # the host's uid, runs one operation per fresh instance. One finds socket() refused for every family,
-# /etc/passwd unopenable, descriptor 0 /dev/null and Lend giving the fixture's own canary slot, in
-# an instance started under the main side's mask (226/NAMESPACE, #3589); one hangs and must be
-# killed at the template's RuntimeMaxSec=.
+# a root that is the empty tmpfs (/etc/passwd ENOENT), descriptor 0 /dev/null and Lend giving the
+# fixture's own canary slot, in an instance started under the main side's mask (226/NAMESPACE,
+# #3589); one hangs (asleep, so the Go runtime never ends it as deadlocked) and must be killed at
+# the template's RuntimeMaxSec=.
 if [ -n "${DEVSLOT:-}" ]; then
 	DS=$W/devslot-share
 	rm -rf "$DS"; mkdir -p "$DS/units"
@@ -569,7 +570,8 @@ EOP
 		UNTIL="agentos-devslot: DONE\|agentos-health: FAIL" boot "$W/console-devslot.log" "$W/devslot.raw"
 	grep -a "agentos-devslot:\|agentos-driver-fixture\|driver-fixture's key" "$W/console-devslot.log" | guest_echo || true
 	has "$W/console-devslot.log" "agentos-devslot: DONE"
-	for c in "instance started under the main side's mask" "socket() refused (inet=1 unix=1)" "opening /etc/passwd refused" \
+	for c in "instance started under the main side's mask" "socket() refused (inet=1 unix=1)" "opening /etc/passwd fails with ENOENT" \
+		"the root is the empty tmpfs (no /etc, no /var)" \
 		"descriptor 0 is /dev/null" "Lend yields the canary key and no other slot (key=1)" "a hung operation is killed at RuntimeMaxSec"; do
 		has "$W/console-devslot.log" "agentos-devslot: ok   $c"
 	done

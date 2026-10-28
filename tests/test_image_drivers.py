@@ -200,11 +200,14 @@ class DriversTest(unittest.TestCase):
         self.assertNotIn("MaxConnections", svc["Service"])
         self.assertEqual((sock["Socket"]["Accept"], sock["Socket"]["SocketMode"]), ("yes", "0600"))
         for k, v in (("RestrictAddressFamilies", "none"), ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"),
-                     ("TemporaryFileSystem", "/:ro"), ("StandardInput", "null"), ("StandardOutput", "null"),
+                     ("TemporaryFileSystem", "/:ro,noexec"), ("StandardInput", "null"), ("StandardOutput", "null"),
                      ("StandardError", "null"), ("NoNewPrivileges", "yes"), ("CapabilityBoundingSet", ""),
-                     ("NoExecPaths", "/"), ("ExecPaths", "/usr/lib/agentos/drivers/scale/driver"),
                      ("User", "agentos-drv-scale"), ("LimitCORE", "0"), ("RuntimeMaxSec", "120")):
             self.assertEqual(svc["Service"][k], v, k)
+        # #3642 Security 6470896209 point 2: systemd keeps one mount entry per path, so NoExecPaths=/
+        # would drop the empty root; the root's own noexec holds UPD-10 instead.
+        self.assertNotIn("NoExecPaths", svc["Service"])
+        self.assertNotIn("ExecPaths", svc["Service"])
         # RES-2: the driver's whole memory is MemoryMax= times MaxConnections=.
         self.assertEqual(svc["Service"]["MemoryMax"], "48M")
         clean = self.stage
@@ -220,6 +223,8 @@ class DriversTest(unittest.TestCase):
                                   (r / (SERVICE + ".d/50-net.conf")).write_text("[Service]\nPrivateNetwork=no\n")),
             "mask lift dropped": lambda r: (r / DROPIN).unlink(),
             "PrivateIPC= dropped": edit(SERVICE, "PrivateIPC=yes\n", ""),
+            "empty root dropped by NoExecPaths=/": edit(SERVICE, "PrivateIPC=yes\n", "PrivateIPC=yes\nNoExecPaths=/\n"),
+            "root executes": edit(SERVICE, "TemporaryFileSystem=/:ro,noexec", "TemporaryFileSystem=/:ro"),
             "out of the drivers' slice": edit(SERVICE, "Slice=agentos-drivers.slice\n", ""),
             "etc override": lambda r: ((r / "etc/systemd/system").mkdir(parents=True),
                                        (r / "etc/systemd/system/agentos-driver-scale@.service").write_text("[Service]\n")),
@@ -281,6 +286,28 @@ class DriversTest(unittest.TestCase):
         (self.stage / DEVICES_UNIT).write_text((IMG.parent / "broker/cmd/agentos-devices/agentos-devices.service").read_text())
         return self.stage
 
+    def test_empty_root_holds_noexec(self):
+        # UPD-10 and #3642 Security 6470896209 point 2: a read-only, noexec TemporaryFileSystem=/ holds
+        # the rule in place of NoExecPaths=/, and the two together are refused, since systemd keeps the
+        # NoExecPaths= entry at "/" and drops the empty root.
+        root = self.staged_tree()
+        base = "[Service]\nExecStart=/usr/bin/true\nPrivateDevices=yes\nInaccessiblePaths=%s\n" % " ".join(check.KEEPER_PATHS)
+        for what, extra, bad in (
+                ("empty root", "TemporaryFileSystem=/:ro,noexec\n", None),
+                ("empty root and NoExecPaths=/", "TemporaryFileSystem=/:ro,noexec\nNoExecPaths=/\nExecPaths=/usr\n",
+                 "systemd drops the empty root"),
+                ("root executes", "TemporaryFileSystem=/:ro\n", "NoExecPaths does not hold /"),
+                ("root writable", "TemporaryFileSystem=/:noexec\n", "NoExecPaths does not hold /")):
+            with self.subTest(what):
+                r = self.d / ("n-" + what.replace(" ", "-").replace("/", "").replace("=", ""))
+                shutil.copytree(root, r, symlinks=True)
+                (r / "usr/lib/systemd/system/agentos-x.service").write_text(base + extra)
+                got = [v for v in check.noexec_violations(r) if v.startswith("agentos-x.service")]
+                if bad is None:
+                    self.assertEqual(got, [])
+                else:
+                    self.assertTrue([v for v in got if bad in v], got)
+
     def test_driver_starts_under_the_main_side_mask(self):
         # 226/NAMESPACE (L3 6450605315 point 1): the main side's InaccessiblePaths= names paths the
         # driver's empty root lacks, and systemd fails a unit on a missing one with no "-". The
@@ -290,17 +317,19 @@ class DriversTest(unittest.TestCase):
         files = check.unit_with_dropins(str(root), check.unit_dirs(str(root))[0], "agentos-driver-scale@.service")
         self.assertEqual([pathlib.PurePosixPath(f.name).name for f in files][-2:], ["50-main-side.conf", "90-driver.conf"])
         self.assertEqual(check.ini_words(files, "Service", "InaccessiblePaths"), [])
-        self.assertEqual(check.ini_words(files, "Service", "TemporaryFileSystem"), ["/:ro"])
+        self.assertEqual(check.ini_words(files, "Service", "TemporaryFileSystem"), ["/:ro,noexec"])
         # The lift holds only for a driver's template with that empty root: any other unit that lifts
         # the mask, or a driver unit given a root with something in it, is refused.
         lifted = "the main side never sees the keeper's state (D-154)"
-        cases = {
-            "agentos-x.service": ("usr/lib/systemd/system/agentos-x.service.d/90-driver.conf", "[Service]\nInaccessiblePaths=\n"),
-            "agentos-driver-scale@.service": (SERVICE + ".d/95-root.conf", "[Service]\nTemporaryFileSystem=/var\n"),
-        }
-        for name, (rel, text) in cases.items():
-            with self.subTest(name):
-                r = self.d / ("k-" + name)
+        # NoExecPaths=/ makes systemd drop the empty root for its own entry at "/" (#3642).
+        cases = [
+            ("agentos-x.service", "usr/lib/systemd/system/agentos-x.service.d/90-driver.conf", "[Service]\nInaccessiblePaths=\n"),
+            ("agentos-driver-scale@.service", SERVICE + ".d/95-root.conf", "[Service]\nTemporaryFileSystem=/var\n"),
+            ("agentos-driver-scale@.service", SERVICE + ".d/95-noexec.conf", "[Service]\nNoExecPaths=/\n"),
+        ]
+        for i, (name, rel, text) in enumerate(cases):
+            with self.subTest(rel):
+                r = self.d / ("k-%d-%s" % (i, name))
                 shutil.copytree(root, r, symlinks=True)
                 if name == "agentos-x.service":
                     (r / "usr/lib/systemd/system/agentos-x.service").write_text(

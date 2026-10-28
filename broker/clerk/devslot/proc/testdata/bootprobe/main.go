@@ -12,7 +12,8 @@
 // instances. Then, as the host's uid, it runs two operations through the
 // driver's socket unit, each a fresh instance, and prints one
 // "agentos-devslot:" line per check and a last DONE line:
-//   - probe: no socket() of any family, /etc/passwd does not open,
+//   - probe: no socket() of any family, /etc/passwd is not there (ENOENT)
+//     in a root that is the empty tmpfs,
 //     descriptor 0 is /dev/null, and Lend yields the fixture's own slot's
 //     canary (so the instance started under the main side's mask, and the
 //     kernel handed its key to a template instance);
@@ -170,7 +171,8 @@ func probe() {
 	}
 	say(true, "instance started under the main side's mask")
 	say(got["inet"] == 1 && got["unix"] == 1, "socket() refused (inet=%d unix=%d)", got["inet"], got["unix"])
-	say(got["passwd"] == 1, "opening /etc/passwd refused")
+	say(got["passwd"] == 1, "opening /etc/passwd fails with ENOENT")
+	say(got["root"] == 1, "the root is the empty tmpfs (no /etc, no /var)")
 	say(got["stdin"] == 1, "descriptor 0 is /dev/null")
 	say(got["key"] == 1, "Lend yields the canary key and no other slot (key=%d)", got["key"])
 }

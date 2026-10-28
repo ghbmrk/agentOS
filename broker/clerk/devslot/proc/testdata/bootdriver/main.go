@@ -4,12 +4,16 @@
 // name "fixture". Its operation "probe" reports what the sandbox lets it
 // do, as readings (1 refused, 0 allowed), and what Secrets.Open lends; its
 // operation "hang" never returns, so only PID 1's RuntimeMaxSec= ends it.
+// It sleeps rather than blocking forever: a Go program whose goroutines all
+// block with no timer pending aborts as deadlocked, which would end the
+// instance before the kill could be seen (#3642 Security point 1).
 // It is test tooling, so it imports what a driver may not (os, syscall): a
 // driver could never make these checks itself.
 package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"syscall"
 	"time"
@@ -31,9 +35,9 @@ func (fixture) Declare() devslot.Declaration {
 		Link:        devslot.GATT,
 		Channels:    []devslot.Channel{{Name: "data", Service: "fff0", Char: "fff1"}},
 		Operations:  []devslot.Operation{{Name: "probe", Verb: key.Read}, {Name: "hang", Verb: key.Read}},
-		Readings:    []string{"inet", "unix", "passwd", "stdin", "key"},
+		Readings:    []string{"inet", "unix", "passwd", "root", "stdin", "key"},
 		MaxRead:     1,
-		MaxReadings: 5,
+		MaxReadings: 6,
 	}
 }
 
@@ -46,7 +50,9 @@ func refused(err error) int64 {
 
 func (fixture) Run(ctx context.Context, op string, _ devslot.Link, s devslot.Secrets) ([]devslot.Reading, error) {
 	if op == "hang" {
-		select {} // ignores ctx, as a hostile driver would
+		for { // ignores ctx, as a hostile driver would
+			time.Sleep(time.Hour)
+		}
 	}
 	r := func(kind string, v int64) devslot.Reading {
 		return devslot.Reading{Kind: kind, Value: v, Time: time.Unix(1e9, 0).UTC()}
@@ -59,9 +65,22 @@ func (fixture) Run(ctx context.Context, op string, _ devslot.Link, s devslot.Sec
 	if uerr == nil {
 		syscall.Close(unix)
 	}
+	// 1: /etc/passwd is not there at all (ENOENT), not merely unreadable.
 	f, perr := os.Open("/etc/passwd")
 	if perr == nil {
 		f.Close()
+	}
+	passwd := int64(0)
+	if errors.Is(perr, syscall.ENOENT) {
+		passwd = 1
+	}
+	// 1: the root is a tmpfs (TemporaryFileSystem=/) with no /etc or /var.
+	root := int64(0)
+	var fs syscall.Statfs_t
+	_, eerr := os.Lstat("/etc")
+	_, verr := os.Lstat("/var")
+	if syscall.Statfs("/", &fs) == nil && fs.Type == 0x01021994 && errors.Is(eerr, syscall.ENOENT) && errors.Is(verr, syscall.ENOENT) {
+		root = 1
 	}
 	// 1: descriptor 0 is /dev/null (character device 1:3).
 	var st syscall.Stat_t
@@ -82,7 +101,7 @@ func (fixture) Run(ctx context.Context, op string, _ devslot.Link, s devslot.Sec
 	}); err == devslot.ErrNoKey {
 		k = 3
 	}
-	return []devslot.Reading{r("inet", refused(err)), r("unix", refused(uerr)), r("passwd", refused(perr)), r("stdin", stdin), r("key", k)}, nil
+	return []devslot.Reading{r("inet", refused(err)), r("unix", refused(uerr)), r("passwd", passwd), r("root", root), r("stdin", stdin), r("key", k)}, nil
 }
 
 func main() { proc.Main(fixture{}) }
