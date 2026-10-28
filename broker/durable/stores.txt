@@ -23,6 +23,7 @@ clock debt debt:#1947
 cmd/agentos-egress debt debt:#1947
 cmd/agentos-guest-bridge content
 cmd/agentosd debt debt:audit-2.7
+drone config
 follow debt debt:#1947
 guest debt debt:#1947
 journal journal

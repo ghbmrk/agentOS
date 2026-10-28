@@ -200,9 +200,13 @@ func writeAtomic(path string, b []byte) error {
 			err = cerr
 		}
 		if err == nil {
-			err = os.Rename(tmp, path)
+			err = os.Rename(tmp, path) // durable:exempt the drone imports nothing from agentOS (brief decision 1); the directory is synced below
 		}
 		if err == nil {
+			if d, derr := os.Open(filepath.Dir(path)); derr == nil {
+				d.Sync()
+				d.Close()
+			}
 			return nil
 		}
 	} else {
