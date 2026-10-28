@@ -18,13 +18,6 @@ import (
 	"github.com/bluenviron/gomavlib/v3/pkg/message"
 )
 
-// Copter custom modes.
-const (
-	modeAuto   = 3
-	modeGuided = 4
-	modeLand   = 9
-)
-
 type attack struct {
 	name string
 	msgs []message.Message
@@ -70,8 +63,8 @@ func attacks() []attack {
 	copy(badKey[:], "ATTACKER-KEY-not-the-holders-key")
 	return []attack{
 		{"arm (forced)", []message.Message{long(common.MAV_CMD_COMPONENT_ARM_DISARM, 1, 21196)}},
-		{"mode change (DO_SET_MODE guided)", []message.Message{long(common.MAV_CMD_DO_SET_MODE, 1, modeGuided)}},
-		{"mode change (SET_MODE auto)", []message.Message{&common.MessageSetMode{TargetSystem: targetSysID, BaseMode: 1, CustomMode: modeAuto}}},
+		{"mode change (DO_SET_MODE guided)", []message.Message{long(common.MAV_CMD_DO_SET_MODE, 1, ModeGuided)}},
+		{"mode change (SET_MODE auto)", []message.Message{&common.MessageSetMode{TargetSystem: targetSysID, BaseMode: 1, CustomMode: ModeAuto}}},
 		{fenceOff, []message.Message{long(common.MAV_CMD_DO_FENCE_ENABLE, 0)}},
 		{"parameter write FENCE_ENABLE 0", []message.Message{paramSet("FENCE_ENABLE", 0)}},
 		{"parameter write SCR_ENABLE 1", []message.Message{paramSet("SCR_ENABLE", 1)}},
@@ -284,7 +277,7 @@ func TestScriptingAndRCAreOff(t *testing.T) {
 	ports := r.sim.Ports()
 	// Positive control on stock RC settings: switch position 2 is LAND (copter.parm FLTMODE2).
 	sendRC(t, r.sim.RCPort(), rcPacket(1295, 1000, 1500), 3*time.Second)
-	if hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second); err != nil || hb.CustomMode != modeLand {
+	if hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second); err != nil || hb.CustomMode != ModeLand {
 		t.Fatalf("before the policy, RC did not change the mode (mode %d, %v); the RC check would be vacuous", hb.CustomMode, err)
 	}
 	if err := r.h.Load(signPolicy(t, testPolicy(), r.owner)); !errors.Is(err, ErrMismatch) || !strings.Contains(err.Error(), "RC input") {

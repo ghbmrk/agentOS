@@ -46,6 +46,9 @@ const (
 	ekfFSLand              = 1      // FS_EKF_ACTION 1: land
 	skipRCChecks           = 1 << 6 // ARMING_SKIPCHK bit 6: RC channels (there is no receiver)
 	gcsSysID               = 255    // MAV_GCS_SYSID: the key-holder's system id
+	battMonitorAnalog      = 4      // BATT_MONITOR 4: analog voltage and current; DRONE-enforcer sets the airframe's (ASSUMPTIONS.md)
+	battLowTimerS          = 10     // BATT_LOW_TIMER: seconds below BATT_LOW_VOLT before the low-battery return
+	autoArmAndTakeoff      = 1 | 2  // AUTO_OPTIONS bits: 0 arming in AUTO, 1 take-off without raising throttle (no receiver)
 )
 
 // Derive is the one pure function from a policy to the aircraft's plan
@@ -65,6 +68,11 @@ func Derive(p *Policy) Plan {
 		"FS_GCS_TIMEOUT":   p.LostLinkS,
 		"FS_EKF_ACTION":    ekfFSLand,
 		"FS_THR_ENABLE":    0, // no receiver, so no radio failsafe; lost link is FS_GCS
+		"FS_OPTIONS":       0, // no failsafe continues a flight: every one returns or lands
+		"BATT_MONITOR":     battMonitorAnalog,
+		"BATT_LOW_TIMER":   battLowTimerS,
+		"AUTO_OPTIONS":     autoArmAndTakeoff,
+		"AVOID_ENABLE":     0, // follow is bounded by the fence breach, not by stopping short of it (brief decision 9)
 		"RC_PROTOCOLS":     0, // no RC protocol is decoded: RC is an unsigned control path
 		"ARMING_SKIPCHK":   skipRCChecks,
 		"SCR_ENABLE":       0, // no Lua scripting: scripts are code the signature does not cover

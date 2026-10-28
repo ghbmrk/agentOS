@@ -184,6 +184,11 @@ func TestKeyNeverLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	note(h.Load([]byte(`{"policy":{},"sig":""}`)))
+	note(h.Fly([]byte(`{"flight":{},"sig":""}`)))
+	note(h.ServeCore(struct {
+		io.Reader
+		io.Writer
+	}{strings.NewReader("camera_fix x y\nwaypoint 1 2\n"), io.Discard}))
 	plan := Plan{Params: []Param{{"FENCE_ENABLE", 1}}, Fence: []Item{{Command: 1}}}
 	hb := Heartbeat{}
 
@@ -196,6 +201,7 @@ func TestKeyNeverLeaves(t *testing.T) {
 		"Key": k2, "Link": l, "Holder": h, "Policy": testPolicy(), "Plan": plan, "Param": plan.Params[0],
 		"Item": plan.Fence[0], "Point": testDock, "Waypoint": wp(0, 0, 1), "Route": testPolicy().Routes[0],
 		"Dock": testPolicy().Dock, "Heartbeat": hb,
+		"Flight": Flight{ID: strings.Repeat("a", 32), Route: "north", Animals: []string{"deer"}, NotAfter: 1},
 	}
 	for _, name := range exportedTypes(t) {
 		if _, ok := values[name]; !ok {

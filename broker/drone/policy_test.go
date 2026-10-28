@@ -184,7 +184,8 @@ func TestDeriveIsTheSignedLimits(t *testing.T) {
 	plan := Derive(p)
 	want := map[string]float32{"FENCE_ENABLE": 1, "FENCE_TYPE": 5, "FENCE_ACTION": 1, "FENCE_ALT_MAX": 60,
 		"FENCE_MARGIN": 2, "BATT_LOW_VOLT": 10.5, "BATT_FS_LOW_ACT": 2, "FS_GCS_ENABLE": 1, "FS_GCS_TIMEOUT": 5,
-		"SCR_ENABLE": 0, "RC_PROTOCOLS": 0, "RTL_ALT_M": 56, "RALLY_INCL_HOME": 0}
+		"SCR_ENABLE": 0, "RC_PROTOCOLS": 0, "RTL_ALT_M": 56, "RALLY_INCL_HOME": 0,
+		"FS_OPTIONS": 0, "BATT_MONITOR": 4, "BATT_LOW_TIMER": 10, "AUTO_OPTIONS": 3, "AVOID_ENABLE": 0}
 	got := map[string]float32{}
 	for _, pr := range plan.Params {
 		got[pr.Name] = pr.Value

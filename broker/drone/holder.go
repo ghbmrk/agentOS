@@ -47,9 +47,11 @@ type Holder struct {
 	state string
 	log   *log.Logger
 
-	mu     sync.Mutex
-	policy *Policy
-	plan   *Plan
+	mu       sync.Mutex
+	policy   *Policy
+	plan     *Plan
+	flight   *Flight // the flight in progress, nil after a return
+	disagree int     // consecutive camera fixes beyond the policy's bound
 }
 
 const policyFile = "policy.json"
