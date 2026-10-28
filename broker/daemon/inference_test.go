@@ -53,6 +53,10 @@ var forbidden = []string{"route", "egress", "cmd/agentos-egress", "cmd/agentos-i
 // providerSDK matches third-party model provider clients.
 var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|mistral|cohere|ollama|bedrock)`)
 
+// runtimeSDK matches third-party inference runtimes and their bindings,
+// which only the untrusted services (forbidden above) may link.
+var runtimeSDK = regexp.MustCompile(`(?i)(onnxruntime|llama|ggml|tensorflow|torch)`)
+
 // httpOK are the broker packages in the graph allowed to import net/http
 // (or anything that depends on it), and why. None may hold an HTTP client
 // except modelroute, whose every dial is to a unix socket (sourceUse).
@@ -388,6 +392,9 @@ func inferenceUse(t *testing.T, ps []listed) []string {
 		}
 		if !ours && providerSDK.MatchString(p.path) {
 			bad = append(bad, p.path+": a model provider client")
+		}
+		if !ours && runtimeSDK.MatchString(p.path) {
+			bad = append(bad, p.path+": an inference runtime")
 		}
 		if !ours && !strings.Contains(strings.SplitN(p.path, "/", 2)[0], ".") {
 			continue // the standard library
@@ -2077,5 +2084,19 @@ func g(t *T) { t.Env = []string{"A=1"} }
 func h() childproc.Env { return childproc.NewEnv("PATH=/bin", "HOME="+os.Getenv("X")) }`)
 	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
+	}
+}
+
+// REQ: ARC-2
+//
+// An inference runtime's Go binding (the vision service's ONNX Runtime
+// binding, a llama.cpp one) is reported wherever it sits in agentosd's
+// graph, so only the untrusted services link one (#3774 Security 3).
+func TestInferenceRuntimesAreReported(t *testing.T) {
+	for _, p := range []string{"github.com/yalue/onnxruntime_go", "github.com/go-skynet/go-llama.cpp"} {
+		bad := inferenceUse(t, []listed{{path: p}})
+		if !slices.Contains(bad, p+": an inference runtime") {
+			t.Errorf("%s not reported: %q", p, bad)
+		}
 	}
 }

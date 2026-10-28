@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	_ "image/jpeg"
 	"math/rand"
@@ -266,7 +267,8 @@ func TestRealRuntimeDetect(t *testing.T) {
 }
 
 // The floor's limits (VIS-A30), on CI's 4-core runner with 2 runtime
-// threads: the runner is about as fast per core as the N95 (HW-4).
+// threads, with room for the N95 (HW-4), which VIS-A30 takes as about two
+// times slower per core.
 const (
 	floorColdStart = 5 * time.Second
 	floorFrameP95  = 400 * time.Millisecond // a 1920x1080 colour frame
@@ -336,4 +338,27 @@ func rss(t *testing.T) int {
 	}
 	t.Fatal("no VmRSS")
 	return 0
+}
+
+// TestRealRuntimeRefusesOffPinDetector: with the real, pinned library in
+// place, a detector one byte off its pin is refused and never loaded
+// (VIS-A27; #3774 Security 2).
+func TestRealRuntimeRefusesOffPinDetector(t *testing.T) {
+	src := realDir(t, "AGENTOS_VISION_MODELS")
+	dir := t.TempDir()
+	lib, err := os.ReadFile(filepath.Join(src, ortLibrary))
+	if err != nil {
+		t.Fatal(err)
+	}
+	det, err := os.ReadFile(filepath.Join(src, detectorFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	det[len(det)/2] ^= 1
+	if os.WriteFile(filepath.Join(dir, ortLibrary), lib, 0o755) != nil || os.WriteFile(filepath.Join(dir, detectorFile), det, 0o644) != nil {
+		t.Fatal("cannot write the test's model directory")
+	}
+	if _, err := newRuntime(dir, 1).Load(); !errors.Is(err, ErrRefused) {
+		t.Fatalf("detector off its pin: %v, want ErrRefused", err)
+	}
 }

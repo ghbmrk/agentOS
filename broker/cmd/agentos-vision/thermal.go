@@ -36,7 +36,10 @@ const (
 // grows with its mean excess.
 func heatBlobs(f vision.Frame) []Seen {
 	n := f.Width * f.Height
+	// v is a copy of the frame and label the bodies' outlines: both are
+	// zeroed on return, as the service zeroes the frame (DEV-7, VIS-A7).
 	v := make([]uint16, n)
+	defer clear(v)
 	for i := range v {
 		v[i] = binary.LittleEndian.Uint16(f.Data[2*i:])
 	}
@@ -47,6 +50,7 @@ func heatBlobs(f vision.Frame) []Seen {
 	}
 	warm := func(i int) bool { return int(v[i]) >= limit && v[i] <= thermalHot }
 	label := make([]int32, n)
+	defer clear(label)
 	type blob struct {
 		x0, y0, x1, y1, area int
 		excess               int
