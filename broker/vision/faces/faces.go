@@ -1,6 +1,7 @@
 // Package faces is the trusted side of face enrolment (VIS-core part c,
 // VIS-faces): it keeps each enrolled person's template in a clerk.Secrets
-// slot under vision-template/<id>, encrypted under a wrap key of its own,
+// slot under vision-template/<id> (through Slots, which the wiring builds
+// from the store, so this package calls no core write path), encrypted under a wrap key of its own,
 // seals that wrap key as kernel content under the person's subject (LOG-4),
 // and lends the templates to the untrusted vision service on its control
 // socket. The service holds them in memory only and answers each face it
@@ -33,11 +34,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/vision"
 )
 
@@ -81,7 +82,7 @@ var (
 
 // Faces is the enrolled templates and the seams they move through.
 type Faces struct {
-	Secrets *clerk.Secrets
+	Slots Slots
 	// Content is nil until the kernel serves this side a content store:
 	// enrolment is refused until then.
 	Content Content
@@ -99,6 +100,25 @@ type Faces struct {
 	lent map[string]bool
 }
 
+// Slots is the sealed store's surface for the template slots, built by the
+// wiring from clerk.Secrets as clerk/devslot's Lend is: Names is
+// Secrets.Names(clerk.VisionTemplateSlots), Put is Secrets.Put with
+// clerk.KindStatic, Remove is Secrets.Remove, and Lend is
+// Secrets.VisionTemplate, which opens a template slot alone, for one call,
+// and wipes it after.
+type Slots struct {
+	Names  func() []string
+	Put    func(slot string, rec []byte) error
+	Remove func(slot string) error
+	Lend   func(slot string) func(fn func(rec []byte) error) error
+}
+
+// SlotPrefix is clerk.VisionTemplateSlots: the only slots this package
+// names.
+const SlotPrefix = "vision-template/"
+
+func (s Slots) has(slot string) bool { return slices.Contains(s.Names(), slot) }
+
 // record is a slot's content: the subject and wrap-key item the template
 // is bound to, and the template sealed under the wrap key.
 type record struct {
@@ -107,7 +127,7 @@ type record struct {
 	Sealed  []byte `json:"sealed"`
 }
 
-func slot(id string) string { return clerk.VisionTemplateSlots + id }
+func slot(id string) string { return SlotPrefix + id }
 
 // templateAAD binds a sealed template to its id and subject, so a slot's
 // blob cannot be moved to another person.
@@ -129,10 +149,10 @@ func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Fram
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.Secrets.Has(slot(id)) {
+	if f.Slots.has(slot(id)) {
 		return ErrEnrolled
 	}
-	if len(f.Secrets.Names(clerk.VisionTemplateSlots)) >= vision.MaxEnrolled {
+	if len(f.Slots.Names()) >= vision.MaxEnrolled {
 		return ErrFull
 	}
 	tpl, err := f.Control.Enrol(ctx, frame)
@@ -166,7 +186,7 @@ func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Fram
 	if err != nil {
 		return err
 	}
-	if err := f.Secrets.Put(slot(id), clerk.KindStatic, rec); err != nil {
+	if err := f.Slots.Put(slot(id), rec); err != nil {
 		return err
 	}
 	return f.lend(ctx)
@@ -178,7 +198,7 @@ func (f *Faces) Enrol(ctx context.Context, id, subject string, frame vision.Fram
 func (f *Faces) Unenrol(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if err := f.Secrets.Remove(slot(id)); err != nil {
+	if err := f.Slots.Remove(slot(id)); err != nil {
 		return err
 	}
 	return f.lend(ctx)
@@ -191,9 +211,9 @@ func (f *Faces) Rewind(ctx context.Context, subject string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var errs []error
-	for _, s := range f.Secrets.Names(clerk.VisionTemplateSlots) {
+	for _, s := range f.Slots.Names() {
 		var sub string
-		err := f.Secrets.VisionTemplate(s)(func(b []byte) error {
+		err := f.Slots.Lend(s)(func(b []byte) error {
 			var r record
 			if err := json.Unmarshal(b, &r); err != nil {
 				return err
@@ -202,7 +222,7 @@ func (f *Faces) Rewind(ctx context.Context, subject string) error {
 			return nil
 		})
 		if err == nil && sub == subject {
-			errs = append(errs, f.Secrets.Remove(s))
+			errs = append(errs, f.Slots.Remove(s))
 		}
 	}
 	return errors.Join(append(errs, f.lend(ctx))...)
@@ -255,11 +275,11 @@ func (f *Faces) lend(ctx context.Context) error {
 		}
 	}()
 	var errs []error
-	for _, s := range f.Secrets.Names(clerk.VisionTemplateSlots) {
-		id := strings.TrimPrefix(s, clerk.VisionTemplateSlots)
+	for _, s := range f.Slots.Names() {
+		id := strings.TrimPrefix(s, SlotPrefix)
 		var tpl []byte
 		gone := false
-		err := f.Secrets.VisionTemplate(s)(func(b []byte) error {
+		err := f.Slots.Lend(s)(func(b []byte) error {
 			var r record
 			if err := json.Unmarshal(b, &r); err != nil {
 				return err
@@ -283,7 +303,7 @@ func (f *Faces) lend(ctx context.Context) error {
 		})
 		switch {
 		case gone:
-			errs = append(errs, f.Secrets.Remove(s))
+			errs = append(errs, f.Slots.Remove(s))
 		case err != nil:
 			errs = append(errs, err)
 		case vision.ValidEnrolledID(id):

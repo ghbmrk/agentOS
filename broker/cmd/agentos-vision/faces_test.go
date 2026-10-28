@@ -99,6 +99,16 @@ func (r *krig) ReadFor(h faces.Hash, lineage string) ([]byte, error) {
 	return r.k.ReadFor(r.tick(), kernel.Hash(h), lineage)
 }
 
+// slotsOf is the wiring's Slots over a clerk.Secrets store.
+func slotsOf(s *clerk.Secrets) faces.Slots {
+	return faces.Slots{
+		Names:  func() []string { return s.Names(clerk.VisionTemplateSlots) },
+		Put:    func(slot string, rec []byte) error { return s.Put(slot, clerk.KindStatic, rec) },
+		Remove: s.Remove,
+		Lend:   s.VisionTemplate,
+	}
+}
+
 // gone is part (f)'s reading of the kernel's answers: an erased or
 // unknown subject, or an unknown item, opens nothing ever again.
 func gone(err error) bool {
@@ -140,7 +150,7 @@ func newFrig(t *testing.T, open bool) *frig {
 	}
 	r.sec = clerk.NewSecrets(sealer, nil)
 	r.ctl = vision.ControlClient{Path: ctl, Timeout: 5 * time.Second}
-	r.fs = &faces.Faces{Secrets: r.sec, Content: r.k, Gone: gone, Control: r.ctl}
+	r.fs = &faces.Faces{Slots: slotsOf(r.sec), Content: r.k, Gone: gone, Control: r.ctl}
 	r.feed = vision.Client{Path: feed, Timeout: 5 * time.Second, Enrolled: r.fs.Enrolled}
 	return r
 }
@@ -325,7 +335,7 @@ func TestCrashAfterEraseLogged(t *testing.T) {
 func TestEnrolmentRefusedWithoutErase(t *testing.T) {
 	r := newFrig(t, false) // the kernel runs, its content stays closed
 	for name, c := range map[string]faces.Content{"no seam": nil, "content closed": r.k} {
-		fs := &faces.Faces{Secrets: r.sec, Content: c, Gone: gone, Control: r.ctl}
+		fs := &faces.Faces{Slots: slotsOf(r.sec), Content: c, Gone: gone, Control: r.ctl}
 		if err := fs.Enrol(context.Background(), "alice", "", gray(64, 48, 1)); !errors.Is(err, faces.ErrNoErase) {
 			t.Fatalf("%s: %v", name, err)
 		}

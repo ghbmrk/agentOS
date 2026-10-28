@@ -56,7 +56,7 @@ func newFaces(t *testing.T) (*Faces, *control, *memContent) {
 	}
 	c := &control{tpl: []byte{0, 0, 128, 63, 0, 0, 0, 64}}
 	m := &memContent{items: map[Hash][]byte{}}
-	return &Faces{Secrets: clerk.NewSecrets(s, nil), Content: m, Control: c}, c, m
+	return &Faces{Slots: slotsOf(clerk.NewSecrets(s, nil)), Content: m, Control: c}, c, m
 }
 
 // Enrolment takes a valid, new id, up to MaxEnrolled; every wrap-key read
@@ -102,5 +102,23 @@ func TestEnrolChecksAndLends(t *testing.T) {
 	}
 	if err := f.Enrol(ctx, "one-more", "", fr); !errors.Is(err, ErrFull) {
 		t.Fatalf("over MaxEnrolled: %v", err)
+	}
+}
+
+// slotsOf is the wiring's Slots over a clerk.Secrets store.
+func slotsOf(s *clerk.Secrets) Slots {
+	return Slots{
+		Names:  func() []string { return s.Names(clerk.VisionTemplateSlots) },
+		Put:    func(slot string, rec []byte) error { return s.Put(slot, clerk.KindStatic, rec) },
+		Remove: s.Remove,
+		Lend:   s.VisionTemplate,
+	}
+}
+
+// SlotPrefix is the clerk's own prefix, so the wiring's Lend opens these
+// slots and no other.
+func TestSlotPrefixIsTheClerks(t *testing.T) {
+	if SlotPrefix != clerk.VisionTemplateSlots {
+		t.Fatal("the slot prefixes differ")
 	}
 }
