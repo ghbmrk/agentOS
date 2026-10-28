@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/modelroute"
+	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
 // The capability-off lines (OP-9, OP9-status-a): each capability that is
@@ -63,9 +64,13 @@ const (
 	workersOffLine = "Worker tools: not set up here; " + fixUpdate + "."
 	// C11: no update-check loop (Loop 3) runs on this box version.
 	updateChecksOff = "Update checks: not running here; " + fixUpdate + "."
-	// FORGET is deleted until the kernel's erase brings it back (#2781,
-	// #2823).
-	forgetNotRunning = "Forget: not running here; " + fixUpdate + "."
+	// Erase by name (KRN-forget b): the rewind record is unreadable, or
+	// the kernel did not say which agents read erased content, so every
+	// agent is contained (D-169); or it did not say whether every erase
+	// finished (LOG-4 fails closed).
+	forgetRecordUnread = "Forget: my record of which agents went back is unreadable, so none can fork or merge; " + fixRestart + "."
+	forgetReadsUnknown = "Forget: I cannot tell which agents read forgotten things, so none can fork or merge; I keep asking."
+	forgetUnreached    = "Forget: the core did not say whether every forget finished; I keep asking."
 	// Old learning state or a crash-left temp did not remove at start;
 	// the next start tries again (LOG-4).
 	forgetNotErased = "Forget: old learning data not fully erased; " + fixRestart + "."
@@ -74,7 +79,59 @@ const (
 // capLineTexts are every line the registry can show, for the wording test.
 func capLineTexts() []string {
 	return []string{agentNoRuntime, agentNoMachines, agentNoSoftware, modelUnset, modelUnreachable, modelNoGrant, modelLocked, modelNoPrivate,
-		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotRunning, forgetNotErased}
+		recallOffLine, questionsOffLine, workersOffLine, updateChecksOff, forgetNotErased,
+		forgetRecordUnread, forgetReadsUnknown, forgetUnreached, forgetHeldLine([]string{"helper.1"}), forgetHeldLine([]string{"a", "b"}),
+		forgetOwedLine([]kernelsock.Unerased{{Subject: "s", Items: 3, Stores: []string{kernelsock.KeyTable, "mail"}}})}
+}
+
+// forgetHeldLine is STATUS's line for agents that read erased content and
+// have not gone back: contained until a retry takes them back.
+func forgetHeldLine(lineages []string) string {
+	who := "agent " + agentName(lineages[0]) + " could not go back, so it cannot"
+	if len(lineages) > 1 || len(who) > 50 {
+		who = fmt.Sprintf("%d agents could not go back, so they cannot", len(lineages))
+		if len(lineages) == 1 {
+			who = "an agent could not go back, so it cannot"
+		}
+	}
+	return "Forget: " + who + " fork or merge; I keep trying."
+}
+
+// forgetOwedLine is STATUS's line while erases wait on a store or the key:
+// by count and the stores owed, never by name, which the box cannot read
+// once erased (LOG-4). STATUS notes are one line each, so every erase owed
+// shares it.
+func forgetOwedLine(u []kernelsock.Unerased) string {
+	if len(u) == 0 {
+		return ""
+	}
+	var stores []string
+	for _, e := range u {
+		stores = union(stores, e.Stores)
+	}
+	n := plural(len(u), "erase") + " waits"
+	if len(u) > 1 {
+		n = plural(len(u), "erase") + " wait"
+	}
+	line := "Forget not finished: " + n + " on " + storeNames(stores) + "; I keep trying."
+	if utf8.RuneCountInString(line) > 100 {
+		line = "Forget not finished: " + n + " on stores; I keep trying."
+	}
+	return line
+}
+
+// forgetStatus is STATUS's erase line from the kernel, asked with a short
+// bound so a hung kernel never holds STATUS.
+func forgetStatus(k eraser) func() string {
+	return func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		u, err := k.Unerased(ctx)
+		if err != nil {
+			return forgetUnreached
+		}
+		return forgetOwedLine(u)
+	}
 }
 
 // capClass is why a capability is off. An owner choice (LOOPS OFF, say)

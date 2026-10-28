@@ -572,3 +572,105 @@ func (o Owner) Certify(ctx context.Context, pub []byte) (leaf, authority []byte,
 	}{pub}, &c))
 	return c.Leaf, c.Authority, err
 }
+
+// Erase by name (LOG-4, KRN-forget b): IDs, counts and stores cross the
+// socket, never a label's text or sealed plaintext (CH-25).
+
+// The erase's types and refusals are the kernel package's own, named here
+// so agentosd's control path need not import it (daemon
+// TestARC2ControlPathCannotReachInference), as Target is.
+type (
+	Recall       = kernel.Recall
+	Item         = kernel.Item
+	Confirmation = kernel.Confirmation
+	BackupHold   = kernel.BackupHold
+	Unerased     = kernel.Unerased
+	ErasedRead   = kernel.ErasedRead
+)
+
+const (
+	KeyTable   = kernel.KeyTable   // the key table among the stores an erase owes
+	ClassLabel = kernel.ClassLabel // the class of a subject's name
+)
+
+var (
+	ErrContentClosed = kernel.ErrContentClosed
+	ErrSubject       = kernel.ErrSubject
+	ErrErased        = kernel.ErrErased
+	ErrLabel         = kernel.ErrLabel
+)
+
+// contentErrs are the kernel's content refusals, matched by their words as
+// kernel/proc's wireErrors are.
+var contentErrs = []error{kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel}
+
+// contentTyped is err wrapping the kernel's own sentinel when the kernel's
+// words are exactly one of contentErrs, else err.
+func contentTyped(err error) error {
+	var r Refused
+	if !errors.As(err, &r) {
+		return err
+	}
+	for _, e := range contentErrs {
+		if r.Text == e.Error() {
+			return fmt.Errorf("%w (%w)", e, r)
+		}
+	}
+	return err
+}
+
+// Named is the live subjects label reads as: those found, and those whose
+// labels could not be read (kernel.Named). A blank label is
+// kernel.ErrLabel; before the kernel opens content, kernel.ErrContentClosed.
+func (o Owner) Named(ctx context.Context, label string) (found, unread []string, err error) {
+	var r struct {
+		Found  []string `json:"found"`
+		Unread []string `json:"unread"`
+	}
+	err = contentTyped(o.call(ctx, "named", struct {
+		Label string `json:"label"`
+	}{label}, &r))
+	return r.Found, r.Unread, err
+}
+
+// Recall is what the box knows of subject; ok is false when it has none.
+func (o Owner) Recall(ctx context.Context, subject string) (kernel.Recall, bool, error) {
+	var r struct {
+		Recall *kernel.Recall `json:"recall"`
+	}
+	if err := o.call(ctx, "recall", subject, &r); err != nil || r.Recall == nil {
+		return kernel.Recall{}, false, err
+	}
+	return *r.Recall, true, nil
+}
+
+// Erase erases subject. A Confirmation with its Subject set means the
+// erase is logged, even with an error: a step after it failed, and the
+// kernel's Tick retries it. kernel.ErrErased and kernel.ErrSubject come
+// back as themselves.
+func (o Owner) Erase(ctx context.Context, subject string) (kernel.Confirmation, error) {
+	var r struct {
+		Confirmation kernel.Confirmation `json:"confirmation"`
+		Err          string              `json:"err,omitempty"`
+	}
+	if err := o.call(ctx, "erase", subject, &r); err != nil {
+		return kernel.Confirmation{}, contentTyped(err)
+	}
+	if r.Err != "" {
+		return r.Confirmation, contentTyped(Refused{r.Err})
+	}
+	return r.Confirmation, nil
+}
+
+// Unerased is every erase a store or the key table has not confirmed.
+func (o Owner) Unerased(ctx context.Context) (u []kernel.Unerased, err error) {
+	err = o.call(ctx, "unerased", nil, &u)
+	return
+}
+
+// ErasedReads is each lineage that read an erased subject's item, at its
+// first read in the kernel's milliseconds: what agentosd rewinds (D-169).
+func (o Owner) ErasedReads(ctx context.Context) (r []kernel.ErasedRead, err error) {
+	err = o.call(ctx, "erasedreads", nil, &r)
+	return
+}

@@ -132,7 +132,7 @@ func TestOpenSweepsCrashLeftTemps(t *testing.T) {
 	if _, err := os.Lstat(temp); !os.IsNotExist(err) {
 		t.Fatalf("crash-left temp kept: %v", err)
 	}
-	if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotRunning {
+	if got := statusNotes(&cfg); len(got) != 0 {
 		t.Fatalf("STATUS notes %q", got)
 	}
 }
@@ -156,13 +156,13 @@ func TestEraseFailureIsToldInStatus(t *testing.T) {
 			cfg := daemon.Config{}
 			openLearnState(dir, &cfg)
 			sweepTemp, removeAll = sweepLearnTemp, os.RemoveAll
-			if got := statusNotes(&cfg); len(got) != 2 || got[1] != forgetNotErased {
+			if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotErased {
 				t.Fatalf("STATUS notes %q", got)
 			}
 			// The next start tries again, and the line goes.
 			cfg = daemon.Config{}
 			openLearnState(dir, &cfg)
-			if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotRunning {
+			if got := statusNotes(&cfg); len(got) != 0 {
 				t.Fatalf("STATUS notes after the retry %q", got)
 			}
 			if _, err := os.Lstat(filepath.Join(dir, "tasks.json")); !os.IsNotExist(err) {
@@ -172,12 +172,12 @@ func TestEraseFailureIsToldInStatus(t *testing.T) {
 	}
 }
 
-// OP-9: FORGET does not run in this version (#2781), so STATUS always says
-// so, with nothing for the owner to do.
-func TestStatusSaysForgetIsNotRunning(t *testing.T) {
+// KRN-forget b: the erase by name brings forgetting back, so the learning
+// state adds no "not running" line; STATUS's forget lines are forget.go's.
+func TestStatusNoLongerSaysForgetIsNotRunning(t *testing.T) {
 	cfg := daemon.Config{}
 	openLearnState(t.TempDir(), &cfg)
-	if got := statusNotes(&cfg); len(got) != 1 || got[0] != forgetNotRunning {
+	if got := statusNotes(&cfg); len(got) != 0 {
 		t.Fatalf("STATUS notes %q", got)
 	}
 }
