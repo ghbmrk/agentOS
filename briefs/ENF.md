@@ -1,6 +1,6 @@
 # ENF: the enforcer (NET-2 to NET-7, STO-4)
 
-Board section: Devices, hardware and image (SPEC §13-14). D-178 (the enforcer is standard), D-190 (drones). SPEC NET-1 to NET-7, STO-4, STO-1 (head copies), STO-5, DEV-2 (the enforcer channel exception), A18, A19's home-control clauses, G6. Tier A throughout (KRN-2 puts the enforcer in the trusted base, STO-4 reviews it at the kernel's tier). Strongest model for every slice. Seventeen slices, each one session, each its own work item (#3658 to #3675, listed under **Slices**).
+Board section: Devices, hardware and image (SPEC §13-14). D-178 (the enforcer is standard), D-190 (drones). SPEC NET-1 to NET-7, STO-4, STO-1 (head copies), STO-5, DEV-2 (the enforcer channel exception), A18, A19's home-control clauses, G6. Tier A throughout (KRN-2 puts the enforcer in the trusted base, STO-4 reviews it at the kernel's tier). Strongest model for every slice. Nineteen slices, each one session, each its own work item (#3658 to #3675, #3692 and #3694, listed under **Slices**).
 
 ## The gap
 
@@ -13,7 +13,8 @@ SPEC makes the enforcer part of every installation (D-178) and G6 must pass befo
 Attackers: a rooted core (holds the channel, the owner line and every camera's video), a rooted edge, any device on Devices or Household, any guest, anyone in radio range, and anyone on the internet. Properties, each owned by a slice and tested there:
 
 - **P1. Rules change only by the owner's passkey, at home (NET-4, NET-6).** Every loosening is an owner assertion over a diff the enforcer rendered itself, on its own origin and relying-party name, served only to the Owner network and the wired admin port, applied 10 minutes later and cancelable. The channel cannot carry one.
-- **P2. Tightenings are a closed list (NET-4).** Anything not on it is a loosening. Off-list devices tighten at once, rate-limited; safety-list devices only lock and relock at once.
+- **P2. Tightenings are a closed list (NET-4).** Anything not on it is a loosening. Off-list devices tighten at once, rate-limited; safety-list devices only lock and relock at once, and every other tightening of one needs an owner assertion on a signed link.
+- **P8. Safety-list devices act only on the owner's word at home (NET-6, STO-3, STO-4).** Every turn-on or open needs a once-only, named, short-window assertion on the page; their secrets live only on the enforcer.
 - **P3. The channel is three fixed-schema kinds (NET-2 Channel, DEV-2).** Device commands, closed-list tightenings, reads. Parsed strictly, rate-limited, a burst pauses it until the owner resumes it on the page. For a safety-list device: reads, lock and relock, and only the one named secure-direction command; a drone's return to dock.
 - **P4. Default deny on every segment (NET-2 Segments, NET-3).** Per-device allow lists, the core's signed destination list resolved by the enforcer's own resolver, an edge segment that hears nothing from the enforcer, Guests counted only as a whole, no inbound from the internet.
 - **P5. Fails safe to the last signed policy (NET-2, STO-5).** Core down, silent or hostile changes nothing; the light and the page say so.
@@ -30,7 +31,8 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 6. **Radios run as confined processes behind one narrow interface (NET-2 Confined radio stacks).** BLE uses BlueZ (decided in briefs/DEV-withings-ble.md). Zigbee, Thread and the controller for Matter and lock devices are chosen by slice j's spike, which writes them into this brief; no slice adds a radio stack before that.
 7. **The enforcer image reuses the core's image pipeline, with its own key and feed** (pending Mark, question 1). A separate mkosi profile under `image/enforcer/`: Debian packages, `/usr` read-only on dm-verity in A/B slots, Secure Boot, boot counting and rollback, as `image/README.md` already does for the core, signed with an enforcer-only key and published on its own release feed, so neither box updates the other.
 8. **Per-device Wi-Fi identity is a per-device VLAN** (pending Mark, question 2). The enforcer generates each Devices password and the access point's hostapd `wpa_psk_file` maps it to that device's own VLAN; the enforcer pushes the file over the wired admin port and never shows it to the core. The enforcer then identifies a device by its VLAN tag, not by anything the access point reports.
-9. **Hardware.** The enforcer is the Protectli V1410 already named in briefs/DEV-homekit.md and briefs/DEV-withings-ble.md, with USB radios chosen by slice j, and one OpenWrt access point with VLAN support. Every acceptance test below runs in CI or a VM; live runs are later rows' work.
+10. **A safety-list device's secret reaches the enforcer sealed, inside the add-device loosening (STO-3, STO-4).** The enforcer has a pairing key pair (X25519 with ML-KEM-768, as D-149 seals backups; `crypto/ecdh` and `crypto/mlkem`, standard library). The core's pairing clerk seals the device secret to it, bound to the device's identity, and erases the plaintext at once, keeping only the sealed copy until the enforcer reports the secret held. The sealed secret rides the add-device proposal link (as a URL fragment the page posts back with the assertion), usually opened from the core's owner page during the setup session, since the owner is at home to enter Wi-Fi passwords anyway; the diff the owner signs names the device and the sealed secret's hash. The channel never carries a secret in either direction: its reads report only a fingerprint. If a device's secret cannot be sealed this way (the pairing protocol needs the controller's key live during pairing), the slice stops and asks on its issue.
+11. **Hardware.** The enforcer is the Protectli V1410 already named in briefs/DEV-homekit.md and briefs/DEV-withings-ble.md, with USB radios chosen by slice j, and one OpenWrt access point with VLAN support. Every acceptance test below runs in CI or a VM; live runs are later rows' work.
 
 ## Code layout
 
@@ -47,6 +49,8 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 | `broker/enforcer/alert/`, `broker/enforcer/heads/` | h | Texts and calls, the light, head copies and revocations |
 | `broker/enforcer/traffic/` | i | Per-device summaries |
 | `broker/enforcer/radio/` | k | Confined radio process host and BLE |
+| `broker/enforcer/pairseal/`, `broker/enforcer/devsecret/`, `broker/clerk/enfpair/` | r | Sealed pairing hand-off (both ends; standard library only), the enforcer's device-secret store, the core clerk's sealing helper |
+| `broker/enforcer/action/` | s | Asserted safety-list tightenings and once-only turn-on or open challenges |
 | `broker/cmd/agentos-enforcer/` | l | The daemon: wiring and the lifecycle matrix |
 | `image/enforcer/`, `.github/workflows/enforcer-image.yml` | m | The signed image and its CI boot |
 | `broker/e2e/enforcer/` | n | A18 in VMs |
@@ -56,7 +60,7 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 ## Guard files (pre-approved in each slice's scope)
 
 - `tools/risk_tier.py`: slice a adds `"enforcer"` to `TIER_A_BROKER` with a comment citing STO-4; slice l adds `cmd/agentos-enforcer` if `risk_tier` does not already class it A through the core list. Tier A and a gate file, so the PR needs the separate Security accept (OPERATING §7).
-- `broker/daemon/arc2_test.go`: slice a adds an `enforcer` rule map and `TestEnforcerImportsNothingFromAgentOS` (decision 1); slices that add an import extend it; slice o adds the kernel client's line.
+- `broker/daemon/arc2_test.go`: slice a adds an `enforcer` rule map and `TestEnforcerImportsNothingFromAgentOS` (decision 1); slices that add an import extend it (f, k and q are expected to, and list it in their Scope so the D-111 guard serializes them; any other slice that finds it needs one adds the file to its claim comment); slices o and r add the core-side lines.
 - `tools/g1_scope_g2.txt`: the G2 freeze holds and does not name these paths, so each build PR gets a one-line `exempt-pr N` companion PR with its own Security accept (D-198).
 - `image/` and `.github/workflows/`: slice m only.
 
@@ -73,10 +77,12 @@ Slice l wires every piece into `agentos-enforcer` and owns this matrix as one ta
 | Core down or silent* | Last signed policy enforced; light and page say core down | h, l |
 | Channel burst* | Channel paused; resumes only from the page | d, b |
 | Older policy offered | Refused without a fresh assertion; with one, it is a loosening | a, b |
-| Update applied, self-check fails* | Rolled back to the other slot; policy unchanged | m |
+| Update applied, self-check fails* (VM only: slice n) | Rolled back to the other slot; policy unchanged | m |
 | Factory reset with the case code | Policy kept; no loosening until a new passkey is enrolled | c, l |
 | Recovery code used | Replacement passkey only, after 10 minutes; text, page alert, light | c, h |
 | Core key revoked (KEY-7) | Channel refuses the revoked sub-key; head copies keep the revocation | h, o |
+| Safety-list device paired | Secret held by the enforcer, released only to that device's process; core holds no copy | r, l |
+| Safety-list turn-on asserted | Runs once inside its window; a replay or a channel request is refused | s, l |
 
 ## Slices
 
@@ -85,12 +91,12 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-a (#3658): policy and keys (STO-4, NET-4 Tightening, Loosening, Standing rules, NET-2 Recovery)
 
 **Scope:** `broker/enforcer/policy/` (new), `broker/enforcer/doc.go`, `tools/risk_tier.py` (one line), `broker/daemon/arc2_test.go` (enforcer rule).
-**Builds:** the canonical document and its encoder (decision 2); `Verify(current, next, assertion)`; versions that only rise; `Classify` (decision 3) with the closed list: remove one destination from one device, cut one device's vendor cloud, remove one pair, isolate or remove one device, plus a lock's lock and relock; the pending-loosening store (deadline = assertion time + 10 minutes, cancel, survives restart through an injected store); standing rules (create or widen = loosening, narrow or revoke = tightening, applied inside their window only); the per-device tightening rate limit.
+**Builds:** the canonical document and its encoder (decision 2); `Verify(current, next, assertion)`; versions that only rise; `Classify` (decision 3) with the closed list: remove one destination from one device, cut one device's vendor cloud, remove one pair, isolate or remove one device, plus a lock's lock and relock; for a safety-list device every closed-list kind except lock and relock classifies as an asserted tightening (applies at once, but only with an owner assertion over that change, which slice s collects); the pending-loosening store (deadline = assertion time + 10 minutes, cancel, survives restart through an injected store); standing rules (create or widen = loosening, narrow or revoke = tightening, applied inside their window only); the per-device tightening rate limit; the export of the signed versions (documents and assertions, never a Wi-Fi password or device secret) for the core's backup (NET-2 Recovery, BAK-1), served as a channel read by slice d.
 **Acceptance tests:**
 1. STO-4: `policy::TestVersionKeyVerifiesWithKernelKeyLibrary`: a version signed by the owner's ES256 credential verifies; one signed by another credential, another RP ID, without UV, or over another diff hash is refused. Catches a second rule system or an unbound diff.
-2. NET-4: `policy::TestClassifyClosedList` (table over every field of the document): only the closed-list kinds return tightening; every other change, and any mix, returns loosening. Catches a widening that slips through as a tightening.
+2. NET-4: `policy::TestClassifyClosedList` (table over every field of the document, each row for an off-list and a safety-list device): only the closed-list kinds return tightening; for a safety-list device only lock and relock return an at-once tightening and the rest return asserted tightening; every other change, and any mix, returns loosening. Catches a widening that slips through as a tightening, or a safety-list device cut off without the owner.
 3. NET-4: `policy::TestLooseningWaitsAndCancels`: applies at exactly +10 minutes on a fake clock, not before, never after cancel, and survives a restart of the store. Catches an early or lost apply.
-4. NET-2 Recovery: `policy::TestOlderVersionRefused`: a lower or equal version is refused; a restore of an older document is accepted only as a new, higher version with a fresh assertion. Catches rollback.
+4. NET-2 Recovery: `policy::TestOlderVersionRefused`: a lower or equal version is refused; a restore of an older document is accepted only as a new, higher version with a fresh assertion. Catches rollback. `policy::TestExportRestoresAndHoldsNoSecret`: the export restores through that path and contains no Wi-Fi password or device secret. Catches a backup the core could use to learn a secret.
 5. NET-4 Standing rules: `policy::TestStandingRuleWindow`: a visitor code rule applies inside its window only; narrowing applies at once, widening waits. Catches a core-widened rule.
 6. STO-4: `daemon::TestEnforcerImportsNothingFromAgentOS`. Catches a shared kernel or secret.
 **Size:** about 120k. **Depends on:** nothing new (`broker/kernel/key` is on main).
@@ -98,14 +104,15 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-b (#3659): the confirm screen and passkey assertions (NET-4 Owner's surface, Passkey rules, NET-6)
 
 **Scope:** `broker/enforcer/page/` (new) and its templates.
-**Builds:** an HTTPS server on the enforcer's own name (certificate limited to that name, NET-4) that listens only on the Owner VLAN and wired admin interfaces and also refuses by source address; renders a proposal or a pending change from the policy itself in plain words with consequences; issues a challenge per rendered diff (decision 2) and checks the assertion; shows pending loosenings with cancel; shows whether the passkey is synced (backup-eligible flag); resumes a paused channel; refuses framing (`frame-ancestors 'none'`, `X-Frame-Options`), cross-origin requests and any proposal link that is malformed or rate-limited.
+**Builds:** an HTTPS server on the enforcer's own name (certificate limited to that name, NET-4) that listens only on the Owner VLAN and wired admin interfaces and also refuses by source address; renders a proposal or a pending change from the policy itself in plain words with consequences; issues a challenge per rendered diff (decision 2) and checks the assertion; shows pending loosenings with cancel; shows whether the passkey is synced (backup-eligible flag); resumes a paused channel; shows NET-1's limits in its fixed words and each device's `contained`, `contained except radio` or `not containable` label from the signed policy, never from the device; refuses framing (`frame-ancestors 'none'`, `X-Frame-Options`), cross-origin requests and any proposal link that is malformed or rate-limited.
 **Acceptance tests:**
 1. NET-6: `page::TestServedOnlyToOwnerAndAdmin`: requests from Household, Guests, Devices, the core's and the edge's segments get no answer. Catches a page reachable off the Owner network.
 2. NET-4: `page::TestFalseDiffShowsTrueDiff`: a proposal link whose summary text disagrees with its change renders the change, and the assertion signs the rendered diff. Catches a core-drawn screen.
 3. NET-4: `page::TestAssertionRefusals`: none, no UV, wrong RP ID, wrong origin, cross-origin, another diff, replayed: each refused. Catches a weak assertion check.
 4. NET-4: `page::TestNotFramable`. Catches clickjacking by an agentOS page.
 5. NET-2 Channel: `page::TestResumeOnlyFromPage`. Catches a channel the core can unpause.
-**Size:** about 130k. **Depends on:** ENF-a.
+6. NET-1: `page::TestLimitsWordingAndLabels`: the limits text equals SPEC's words; a device that reports itself contained still shows the policy's label. Catches a page that overpromises.
+**Size:** about 140k. **Depends on:** ENF-a.
 
 ### ENF-c (#3663): enrolment, recovery and factory reset (NET-4 Enrolment and recovery, NET-2 Hardening, HW-10, D-178)
 
@@ -121,7 +128,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-d (#3660): the channel (NET-2 Channel, Safety devices, Drones, DEV-2)
 
 **Scope:** `broker/enforcer/wire/`, `broker/enforcer/channel/` (new).
-**Builds:** the frame (fixed-length device-challenge frame included, as DEV-withings-ble part s needs), mutual authentication by pinned keys (the core's channel sub-key, checked against KEY-7 revocations from slice h through an interface), three message kinds, strict parsing with no other path, the safety-list check (reads; lock and relock; the one named secure direction; unnamable classes refused at naming; unknown type = reads only; camera, microphone, alarm, siren, sensor: no command except a drone's return to dock), a per-kind rate limit and burst pause, a log line per command, and a hook that asks slice h to text the owner when a heater turns off or a valve shuts. Proposal links are not on the channel: the core texts them; the channel only rate-counts them if the core announces them.
+**Builds:** the frame (fixed-length device-challenge frame included, as DEV-withings-ble part s needs), mutual authentication by pinned keys (the core's channel sub-key, checked against KEY-7 revocations from slice h through an interface), three message kinds, strict parsing with no other path, the safety-list check (reads; lock and relock; the one named secure direction; unnamable classes refused at naming; unknown type = reads only; camera, microphone, alarm, siren, sensor: no command except a drone's return to dock), a per-kind rate limit and burst pause, a log line per command, a read of the policy export (slice a) and of each safety-list device's secret fingerprint (slice r), never the secret, and a hook that asks slice h to text the owner when a heater turns off or a valve shuts. Proposal links are not on the channel: the core texts them; the channel only rate-counts them if the core announces them.
 **Acceptance tests:**
 1. NET-2: `channel::TestOnlyThreeKinds` with a fuzz target `FuzzParse`: a loosening, rule change, unlock, disarm, arm, or any unknown or overlong frame is refused and logged. Catches channel widening.
 2. NET-2 Safety devices: `channel::TestSafetyListTable` (one row per class in NET-2): exactly the allowed commands pass. Catches an unlock or a turn-on by the core.
@@ -133,17 +140,17 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-e (#3661): segments and the firewall (NET-2 Segments, The core's list, Device paths, Cameras, NET-3, NET-1 limits)
 
 **Scope:** `broker/enforcer/nft/` (new).
-**Builds:** the compiler from a policy version to one nft ruleset (decision 4): the Owner, Household, Devices (one VLAN per device, decision 8) and Guests networks; the core's and the edge's segments and the cable rule between them; per-device default-deny allow sets filled by slice f; device-to-device drop except signed pairs; inbound from the internet dropped, no UPnP or NAT-PMP; the ISP router's admin and LAN unreachable from every segment; IPv6 parity and router advertisements dropped; outside DNS and known encrypted-DNS resolvers blocked on Devices; Guests counted only in whole-network counters; log rules for blocked traffic and for core and edge connections to devices; the loader (atomic replace, previous ruleset kept on failure).
+**Builds:** the compiler from a policy version to one nft ruleset (decision 4): the Owner, Household, Devices (device identity per the answer to question 2; decision 8 is the recommendation) and Guests networks; the core's and the edge's segments and the cable rule between them; per-device default-deny allow sets filled by slice f; device-to-device drop except signed pairs; inbound from the internet dropped, no UPnP or NAT-PMP; the ISP router's admin and LAN unreachable from every segment; IPv6 parity and router advertisements dropped; outside DNS and known encrypted-DNS resolvers blocked on Devices; Guests counted only in whole-network counters; log rules for blocked traffic and for core and edge connections to devices; the loader (atomic replace, previous ruleset kept on failure).
 **Acceptance tests:**
 1. NET-3, A18 Segments: `nft::TestGolden` for a fixture policy, and `nft::TestNetnsSegments` (network namespaces with veth and VLANs, root in CI) running the A18 Segments sentences that need no DNS. Catches a reachable segment.
 2. NET-3: `nft::TestCopiedMACGetsOwnList`. Catches identity by hardware address.
 3. NET-2 Segments: `nft::TestEdgeSegmentSilent`: no reply to DHCP, DHCPv6, router solicitation, DNS, or ARP for any address but the gateway's; a scan finds no open port. Catches a listener on the edge's segment.
 4. NET-2: `nft::TestLoadFailureKeepsPrevious`. Catches an open window on a bad update.
-**Size:** about 130k. **Depends on:** ENF-a.
+**Size:** about 130k. **Depends on:** ENF-a, Mark's question 2 (#3662): options B and C change where identity comes from and so the Devices rules and test 2.
 
 ### ENF-f (#3664): resolver, pairs and Wake-on-LAN (NET-2 The core's list, NET-3 Casting, DNS, NET-2 Segments)
 
-**Scope:** `broker/enforcer/dns/`, `broker/enforcer/mdns/`, `broker/enforcer/wol/` (new); `broker/enforcer/nft/` set names only.
+**Scope:** `broker/enforcer/dns/`, `broker/enforcer/mdns/`, `broker/enforcer/wol/` (new); `broker/enforcer/nft/` set names only; `broker/daemon/arc2_test.go` (an import line, if any).
 **Builds:** the dnsmasq config generator (decision 5) with `nftset=` per allowed name for the core and each device; DHCP and DNS only on the networks NET-2 Hardening lists; port-53 redirect on Devices; the mDNS pair relay (one record set, one pair, one direction pair); the Wake-on-LAN relay for paired machines only.
 **Acceptance tests:**
 1. NET-2: `dns::TestOnlyResolvedAddressesAllowed` (netns, dnsmasq in CI): an address the resolver did not return for a listed name is dropped. Catches a core dialing an unlisted address under a listed name.
@@ -190,8 +197,8 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 ### ENF-k (#3669): confined radio host and BLE (NET-2 Confined radio stacks)
 
-**Scope:** `broker/enforcer/radio/` (new).
-**Builds:** the radio process host: one unprivileged process per stack, one narrow command interface that the channel's commands also go through, no access to the policy store; and the BLE stack on BlueZ that DEV-withings-ble-c (#3277) builds on.
+**Scope:** `broker/enforcer/radio/` (new), `broker/daemon/arc2_test.go` (its import lines).
+**Builds:** the radio process host: one unprivileged process per stack, one narrow command interface that the channel's and slice s's commands also go through, no access to the policy store, and only its own devices' secrets from slice r's store; and the BLE stack on BlueZ that DEV-withings-ble-c (#3277) builds on.
 **Acceptance tests:**
 1. NET-2: `radio::TestRadioCannotChangeRule`: the radio process's credentials cannot open the policy store or the page's socket. Catches a radio exploit reaching the rules.
 2. NET-2: `radio::TestOnlyDeclaredOps`. Catches a wide radio interface.
@@ -200,9 +207,9 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-l (#3670): the daemon and lifecycle (integration owner)
 
 **Scope:** `broker/cmd/agentos-enforcer/` (new), `tools/risk_tier.py` if needed.
-**Builds:** wires a to k into one daemon and its services (page, channel, nft loader, dnsmasq, AP push, radios, alerts) with their users and state paths; owns the lifecycle matrix test above.
-**Acceptance tests:** 1. every matrix row: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
-**Size:** about 130k. **Depends on:** ENF-a to ENF-i and ENF-k.
+**Builds:** wires a to k, r and s into one daemon and its services (page, channel, nft loader, dnsmasq, AP push, radios, alerts) with their users and state paths; owns the lifecycle matrix test above.
+**Acceptance tests:** 1. every matrix row not marked VM only: `agentos-enforcer::TestLifecycle/<row>`. Catches pieces that pass alone and fail together.
+**Size:** about 130k. **Depends on:** ENF-a to ENF-i, ENF-k, ENF-r, ENF-s.
 
 ### ENF-m (#3671): the signed image (NET-2 Hardening, decision 7)
 
@@ -237,10 +244,31 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 ### ENF-q (#3675): locks and safety devices on the radios (NET-6, NET-4 Standing rules, DEV-5)
 
-**Scope:** set by ENF-j.
-**Builds:** unlock or disarm only by an assertion naming the lock, action and short window, once; an unusual-time unlock needs a second assertion; relock after the owner-set interval; visitor codes from standing rules; the safety-device drivers on the stacks ENF-j chose.
+**Scope:** set by ENF-j, plus `broker/daemon/arc2_test.go` (its import lines).
+**Builds:** unlock or disarm only by slice s's once-only challenge naming the lock, action and short window; an unusual-time unlock needs a second assertion; relock after the owner-set interval; visitor codes from standing rules; the safety-device drivers on the stacks ENF-j chose.
 **Acceptance tests:** the A18 Locks sentences, one test each, named by ENF-j.
-**Size:** about 130k (split by ENF-j if larger). **Depends on:** ENF-b, ENF-d, ENF-j, ENF-k.
+**Size:** about 130k (split by ENF-j if larger). **Depends on:** ENF-b, ENF-d, ENF-j, ENF-k, ENF-s.
+
+### ENF-r (#3692): safety-device secrets (STO-4, STO-3, decision 10)
+
+**Scope:** `broker/enforcer/pairseal/`, `broker/enforcer/devsecret/`, `broker/clerk/enfpair/` (new); the page's add-device handler and template under `broker/enforcer/page/`; one test file in `broker/enforcer/channel/`; `broker/daemon/arc2_test.go` (the core's line for `pairseal`).
+**Builds:** the sealed envelope (decision 10; both ends import `pairseal`, standard library only); the core-side helper the device-pairing clerk calls: seal, erase the plaintext, keep the sealed copy until the fingerprint read, then drop it; the enforcer's store for device secrets (on its state partition, sealed as ENF-m seals state), opened only after the owner's assertion over an add-device diff naming the device and the sealed secret's hash; release of a device's secret only to that device's radio or driver process; erase on device removal. Wiring the helper into each pairing clerk (HomeKit, Matter) is that device row's work, which lists ENF-r as a dependency.
+**Acceptance tests:**
+1. STO-4: `devsecret::TestOpensOnlyAfterAssertion`: a sealed secret opens only with an assertion over a diff naming its device and hash; the same envelope offered for another device, replayed, or without an assertion is refused. Catches a core that plants or swaps a device secret.
+2. STO-3: `enfpair::TestCoreKeepsNoCopy`: after sealing, nothing the helper or its store holds decrypts to the secret, and the sealed copy is gone after the fingerprint read. Catches a core that keeps the key.
+3. STO-4: `devsecret::TestReleasedOnlyToOwnDevice`: one device's process cannot read another's secret; the page and channel processes read none. Catches a radio exploit that collects keys.
+4. NET-2 Channel: `channel::TestNoSecretOnChannel`: no channel kind or read returns secret bytes, only the fingerprint. Catches a fourth channel kind.
+**Size:** about 120k. **Depends on:** ENF-a, ENF-b, ENF-d.
+
+### ENF-s (#3694): safety-list approvals (NET-4 Tightening, NET-6)
+
+**Scope:** `broker/enforcer/action/` (new); the page's action handlers and templates under `broker/enforcer/page/`.
+**Builds:** (1) asserted tightenings of a safety-list device (slice a's asserted class: cutting its vendor cloud, isolating or removing it) and the device commands NET-4 puts beside them (turning a camera off, arming an alarm): rendered by the enforcer, applied at once on an assertion over that change, with no 10-minute wait; the channel's requests for them become a texted link, never an action. (2) Every turn-on or open of a safety-list device (heater, oven, plug, relay, valve open, garage door open, a drone flight on one named route): a challenge naming the device, the action and a short window, good once, served only at home (NET-6). The action goes out through the radio host's interface (slice k) or a driver behind it (slice q); ENF-q's unlock and disarm use the same challenge.
+**Acceptance tests:**
+1. NET-6: `action::TestTurnOnNeedsNamedOnceChallenge` (one row per safety-list class and action): the command runs only with an assertion naming that device, action and an unexpired window; a second use, another device or action, an expired window, or a channel request is refused. Catches a heater turned on by the core or by a replayed tap.
+2. NET-4: `action::TestSafetyTighteningNeedsAssertion`: cutting the cloud, isolating, removing, camera off and arming apply only with an assertion and then at once; lock and relock need none. Catches a core that silences a camera or an alarm's phone alerts.
+3. NET-6: `action::TestServedOnlyAtHome`: the action routes answer only the Owner network and the wired admin port. Catches an approval reachable from away.
+**Size:** about 110k. **Depends on:** ENF-a, ENF-b.
 
 ## Questions for Decisions (also on the work items)
 
@@ -249,4 +277,4 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 
 ## Usage
 
-Seventeen sessions of 80k to 130k each. Parallel after ENF-a: b, d, e, j at once (disjoint scopes); then c, f, g, h, i, k, o; then l, m, n; p and q last.
+Nineteen sessions of 80k to 140k each, in waves that follow the Depends lines. Now: a and j. After a: b and d (and e, once question 2 is answered). After b and d: h, k, o, r, s, then p after o. After e: f and g; then i after f, and c after g. Then q (after j, k, s) and l (after a to i, k, r, s); then m (after l and question 1) and n.
