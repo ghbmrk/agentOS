@@ -50,13 +50,16 @@ func fakeLlamaServer(args []string) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"status":"ok"}`)) })
 	mux.HandleFunc("/completion", func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
-			Prompt string  `json:"prompt"`
-			N      int     `json:"n_predict"`
-			Temp   float64 `json:"temperature"`
-			Cache  bool    `json:"cache_prompt"`
-			Stream bool    `json:"stream"`
+			Prompt string   `json:"prompt"`
+			N      int      `json:"n_predict"`
+			Temp   *float64 `json:"temperature"`
+			Cache  *bool    `json:"cache_prompt"`
+			Stream *bool    `json:"stream"`
 		}
-		if embed || json.NewDecoder(r.Body).Decode(&q) != nil || q.Cache || q.Stream || q.Temp != 0 {
+		// Each setting must be present and off: an omitted field is the server's own
+		// default (sampling on, prompt cache on, streaming on), not the zero value.
+		if embed || json.NewDecoder(r.Body).Decode(&q) != nil || q.Cache == nil || *q.Cache ||
+			q.Stream == nil || *q.Stream || q.Temp == nil || *q.Temp != 0 {
 			http.Error(w, "bad", http.StatusBadRequest)
 			return
 		}

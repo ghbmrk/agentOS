@@ -341,7 +341,7 @@ func modelIsEmbedding(path string) (bool, error) {
 			}
 			pooling[key] = v
 		default:
-			if err := ggufSkip(r, typ); err != nil {
+			if err := ggufSkip(r, typ, 0); err != nil {
 				return false, errors.New("malformed GGUF header")
 			}
 		}
@@ -357,6 +357,10 @@ func modelIsEmbedding(path string) (bool, error) {
 	}
 	return false, errors.New("ranking models are not served")
 }
+
+// maxGGUFDepth is how deep arrays may nest in the header: real files use one
+// level (a list of strings), and a hostile one must not drive the recursion.
+const maxGGUFDepth = 4
 
 // GGUF value types (the spec's gguf_metadata_value_type).
 const (
@@ -382,7 +386,7 @@ func ggufString(r *bufio.Reader) (string, error) {
 }
 
 // ggufSkip discards one value of type typ.
-func ggufSkip(r *bufio.Reader, typ uint32) error {
+func ggufSkip(r *bufio.Reader, typ uint32, depth int) error {
 	if n, ok := ggufSize[typ]; ok {
 		_, err := r.Discard(int(n))
 		return err
@@ -396,6 +400,9 @@ func ggufSkip(r *bufio.Reader, typ uint32) error {
 		_, err := r.Discard(int(n))
 		return err
 	case ggufArray:
+		if depth >= maxGGUFDepth {
+			return errors.New("arrays nested too deep")
+		}
 		var elem uint32
 		var n uint64
 		if err := binary.Read(r, binary.LittleEndian, &elem); err != nil {
@@ -409,7 +416,7 @@ func ggufSkip(r *bufio.Reader, typ uint32) error {
 			return err
 		}
 		for i := uint64(0); i < n; i++ {
-			if err := ggufSkip(r, elem); err != nil {
+			if err := ggufSkip(r, elem, depth+1); err != nil {
 				return err
 			}
 		}

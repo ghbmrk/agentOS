@@ -73,6 +73,9 @@ const withLlama = true
 
 func ctx(t *testing.T) context.Context { return context.Background() }
 
+// unavailable is true for an error whose cause is unavailable; no error is not.
+func unavailable(err error) bool { return err != nil && infer.CauseOf(err) == infer.Unavailable }
+
 func u32(v uint32) *uint32 { return &v }
 
 func writeModel(t *testing.T, name string, data []byte) string {
@@ -119,6 +122,41 @@ func TestLlamaModeComesFromTheGGUFHeader(t *testing.T) {
 	}
 	if _, err := modelIsEmbedding(filepath.Join(t.TempDir(), "absent")); err == nil {
 		t.Fatal("an absent file is not a model")
+	}
+}
+
+func TestLlamaDeeplyNestedArraysAreRefused(t *testing.T) {
+	// nested builds a well-formed GGUF whose one value is an array nested
+	// levels deep. Real files use one level; a hostile one must not drive the
+	// header reader's recursion, so past maxGGUFDepth it is refused.
+	nested := func(levels int) []byte {
+		var b bytes.Buffer
+		w := func(v any) { binary.Write(&b, binary.LittleEndian, v) }
+		b.WriteString("GGUF")
+		w(uint32(3))
+		w(uint64(0))
+		w(uint64(2))
+		w(uint64(len("general.architecture")))
+		b.WriteString("general.architecture")
+		w(uint32(8))
+		w(uint64(len("qwen3")))
+		b.WriteString("qwen3")
+		w(uint64(len("x")))
+		b.WriteString("x")
+		w(uint32(9))
+		for i := 1; i < levels; i++ {
+			w(uint32(9)) // element type: an array
+			w(uint64(1))
+		}
+		w(uint32(4)) // innermost: an empty array of u32
+		w(uint64(0))
+		return b.Bytes()
+	}
+	if _, err := modelIsEmbedding(writeModel(t, "ok.gguf", nested(maxGGUFDepth))); err != nil {
+		t.Fatalf("%d levels refused: %v", maxGGUFDepth, err)
+	}
+	if _, err := modelIsEmbedding(writeModel(t, "deep.gguf", nested(maxGGUFDepth+1))); err == nil {
+		t.Fatalf("%d levels accepted", maxGGUFDepth+1)
 	}
 }
 
@@ -245,7 +283,7 @@ func TestLlamaGenerateFailuresAreUnavailableThenRecover(t *testing.T) {
 	}
 	for _, p := range []string{"crash", "hang", "status", "malformed", "nocontent", "long", "huge"} {
 		text, _, err := c.Generate(ctx(t), p, 5)
-		if infer.CauseOf(err) != infer.Unavailable || text != "" {
+		if !unavailable(err) || text != "" {
 			t.Errorf("prompt %q: text %q err %v; want unavailable and no text", p, text, err)
 		}
 		deadline := time.Now().Add(15 * time.Second)
@@ -269,7 +307,7 @@ func TestLlamaEmbedFailuresAreUnavailableThenRecover(t *testing.T) {
 		t.Fatalf("first call: %v, %v", vs, err)
 	}
 	for _, p := range []string{"crash", "hang", "short", "dup"} {
-		if vs, _, err := c.Embed(ctx(t), []string{"x", p}); infer.CauseOf(err) != infer.Unavailable || vs != nil {
+		if vs, _, err := c.Embed(ctx(t), []string{"x", p}); !unavailable(err) || vs != nil {
 			t.Errorf("text %q: %v, %v; want unavailable and no vectors", p, vs, err)
 		}
 		deadline := time.Now().Add(15 * time.Second)
