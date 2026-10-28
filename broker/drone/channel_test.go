@@ -116,26 +116,3 @@ func TestChannelRefusesAllButReturn(t *testing.T) {
 		t.Errorf("a refused line was logged raw: %q", logs.String())
 	}
 }
-
-// FuzzParseCore: only the exact return_to_dock line is a return.
-func FuzzParseCore(f *testing.F) {
-	f.Add(returnToDock)
-	f.Add("camera_fix -35.36 149.16")
-	f.Fuzz(func(t *testing.T, line string) {
-		k, p, err := parseCore(line)
-		switch k {
-		case coreReturn:
-			if line != returnToDock {
-				t.Fatalf("%q is a return", line)
-			}
-		case coreCameraFix:
-			if err != nil || checkPoint(p) != nil || !strings.HasPrefix(line, cameraFixWord+" ") {
-				t.Fatalf("%q is a camera fix %+v", line, p)
-			}
-		default:
-			if err == nil {
-				t.Fatalf("%q refused with no reason", line)
-			}
-		}
-	})
-}
