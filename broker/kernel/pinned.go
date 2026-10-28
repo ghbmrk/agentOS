@@ -8,7 +8,7 @@ import (
 )
 
 // ErrPinned refuses a pinned root that is not a bare root its own owner
-// signed, or whose owner is an anchor.
+// signed, or whose owner is an anchor, and a setup that would anchor one.
 var ErrPinned = errors.New("kernel: a pinned root is a bare root its owner signed, owned by no anchor")
 
 // Pin adds the image's pinned roots, such as the update clerk's standing
@@ -34,6 +34,17 @@ func (s *State) Pin(roots ...key.Key) error {
 		s.pinned[k.Tip()] = k
 	}
 	return nil
+}
+
+// pinnedOwner reports whether any of anchors owns a pinned root: setup
+// refuses it, live and on replay, so the image's key never anchors.
+func (s *State) pinnedOwner(anchors []key.PublicKey) bool {
+	for _, p := range s.pinned {
+		if key.In(anchors, p.Root.Owner) {
+			return true
+		}
+	}
+	return false
 }
 
 // Pinned lists the pinned roots.

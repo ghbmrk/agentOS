@@ -224,3 +224,37 @@ func TestPinRefusesAnythingButABareSelfSignedRoot(t *testing.T) {
 		}
 	}
 }
+
+// On a first boot there are no anchors to check the pinned key against, so
+// setup refuses to take it as one, live and when the log is read back: else
+// anyone with the image could anchor the box and enroll a passkey (#3701).
+func TestSetupRefusesThePinnedKey(t *testing.T) {
+	owner, image := gen(1), gen(40)
+	up := key.Issue(image.pass, key.Root{Clerk: "update", Verbs: []key.Verb{key.ChangeAccount}, Serial: "image"})
+	r := &rig{t: t, head: gen(3), store: &kernel.MemStore{}, anchor: &flakyAnchor{MemAnchor: &kernel.MemAnchor{}}}
+	boot := func(pinned ...key.Key) (*kernel.Kernel, error) {
+		l, err := kernel.Open(cfg(r))
+		must(t, err)
+		return kernel.Boot(l, nil, nil, 0, pinned...)
+	}
+	k, err := boot(up)
+	must(t, err)
+	if err := k.Setup(1, kernel.SignSetup(k.Box(), image.pass, owner.pass)); !errors.Is(err, kernel.ErrPinned) {
+		t.Fatalf("setup anchored the pinned key: %v", err)
+	}
+	if k.Log().Len() != 0 || !k.State().SetupOpen() {
+		t.Fatal("a refused setup logged something")
+	}
+
+	// A log whose setup anchored the image's key, written by a kernel booted
+	// without the pin, does not boot with it.
+	k, err = boot()
+	must(t, err)
+	must(t, k.Setup(1, kernel.SignSetup(k.Box(), image.pass, owner.pass)))
+	if _, err := boot(up); !errors.Is(err, kernel.ErrPinned) {
+		t.Fatalf("booted a log that anchors the pinned key: %v", err)
+	}
+	if _, err := kernel.Replay(nil, k.Log().Entries(), up); !errors.Is(err, kernel.ErrPinned) {
+		t.Fatalf("replayed a log that anchors the pinned key: %v", err)
+	}
+}
