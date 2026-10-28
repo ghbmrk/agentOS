@@ -74,7 +74,7 @@ var readWords = map[wire.ReadWhat]string{
 // handle acts on one decoded message and returns the reply.
 func (c *Channel) handle(m wire.Msg) wire.Msg {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.release()
 	now := c.cfg.Now()
 	ev := Event{At: now}
 	var reply wire.Msg
@@ -130,7 +130,8 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 				return wire.Refused, "no challenge outstanding with this id"
 			}
 			delete(c.outstanding, m.ID)
-			c.cfg.Answer(m.ID, m.Data)
+			id, data := m.ID, m.Data
+			c.queued = append(c.queued, func() { c.cfg.Answer(id, data) })
 			return wire.OK, "answer passed to the device"
 		})
 	default:
@@ -173,7 +174,7 @@ func (c *Channel) count(k Kind) bool {
 	}
 	c.paused = true
 	c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of " + string(k) + ": paused until the owner resumes it on the page"})
-	c.cfg.Alerts.Paused()
+	c.queued = append(c.queued, c.cfg.Alerts.Paused)
 	return false
 }
 
@@ -204,7 +205,8 @@ func (c *Channel) command(m wire.Command, nowMS int64) (wire.Code, string) {
 		return wire.Failed, "the radio host did not do it"
 	}
 	if !dev.Everyday && (m.Verb == wire.VerbOff || m.Verb == wire.VerbShut) {
-		c.cfg.Alerts.SafetyOff(dev.ID, m.Verb)
+		id, v := dev.ID, m.Verb
+		c.queued = append(c.queued, func() { c.cfg.Alerts.SafetyOff(id, v) })
 	}
 	return wire.OK, "done"
 }

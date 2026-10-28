@@ -136,6 +136,10 @@ type Channel struct {
 	buckets     map[Kind]*bucket
 	outstanding map[uint64]bool
 	session     *session
+	// queued holds the Alerts and Answer calls made under mu; release runs
+	// them after unlocking, so a sink that sends on the channel cannot
+	// deadlock it.
+	queued []func()
 }
 
 type session struct {
@@ -194,7 +198,7 @@ func (c *Channel) Resume() {
 func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	c.mu.Lock()
 	c.count(KindHello)
-	c.mu.Unlock()
+	c.release()
 
 	f, err := wire.ReadFrame(rw, wire.ToEnforcer)
 	if err == nil && f.Type != wire.THello {
@@ -262,10 +266,20 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 // refuse logs a refused frame, counts it, and returns err.
 func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.release()
 	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.count(KindRefused)
 	return err
+}
+
+// release unlocks c.mu and then runs the sink calls queued under it.
+func (c *Channel) release() {
+	q := c.queued
+	c.queued = nil
+	c.mu.Unlock()
+	for _, f := range q {
+		f()
+	}
 }
 
 func (s *session) send(m wire.Msg) error {

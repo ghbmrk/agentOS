@@ -133,15 +133,30 @@ type alerts struct {
 	mu     sync.Mutex
 	off    []string
 	paused int
+	// reenter, if set, runs inside each call, as slice h's alerts will
+	// when they send a text back through the channel.
+	reenter func()
 }
 
 func (a *alerts) SafetyOff(device string, v wire.Verb) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.off = append(a.off, device+" "+verbWords[v])
+	f := a.reenter
+	a.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
-func (a *alerts) Paused() { a.mu.Lock(); a.paused++; a.mu.Unlock() }
+func (a *alerts) Paused() {
+	a.mu.Lock()
+	a.paused++
+	f := a.reenter
+	a.mu.Unlock()
+	if f != nil {
+		f()
+	}
+}
 
 type heads struct{ n int }
 

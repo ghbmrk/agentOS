@@ -446,3 +446,33 @@ func TestSinksRequired(t *testing.T) {
 		}
 	}
 }
+
+// TestAlertsMayUseChannel (NET-2 Texts and calls): the alerts sink runs
+// after the channel lets go of its lock, so slice h can send its text back
+// through the channel from inside SafetyOff or Paused without a deadlock.
+// Revert mutant: calling Alerts under c.mu (Security finding on #3750).
+func TestAlertsMayUseChannel(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	r.alerts.reenter = func() {
+		r.ch.Paused()
+		r.ch.Alert(wire.Alert{Kind: wire.AlertText, Text: "The heater in the hall was turned off."})
+	}
+	cl.send(cmd(1, "heater", wire.VerbOff))
+	if m, ok := cl.recv().(wire.Alert); !ok || m.Kind != wire.AlertText {
+		t.Fatalf("alert frame: %+v", m)
+	}
+	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
+		t.Fatalf("result: %+v", m)
+	}
+
+	r.alerts.reenter = func() { r.ch.Paused() }
+	var id uint64 = 1
+	for !r.ch.Paused() {
+		id++
+		cl.do(cmd(id, "heater", wire.VerbOn)) // refused, until the refusals pause it
+	}
+	if r.alerts.paused != 1 {
+		t.Errorf("paused alerts %d", r.alerts.paused)
+	}
+}
