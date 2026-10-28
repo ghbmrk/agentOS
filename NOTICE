@@ -34,6 +34,8 @@ Apache License 2.0 dependencies (broker/vendor)
     SPDX-License-Identifier: Apache-2.0
 
 MIT dependencies (broker/vendor)
+- github.com/bluenviron/gomavlib/v3 (MAVLink framing and signing for the
+  drone key-holder, broker/drone)
 - github.com/emersion/go-imap, go-message, go-sasl, go-textwrapper
 - github.com/gen2brain/h265 (the HEIC decoder in agentos-photo; a port of
   rust_h265 and oxideav-h265, whose notices it carries in its LICENSE.
@@ -51,8 +53,19 @@ BSD-style dependencies (broker/vendor)
 - github.com/google/uuid, golang.org/x/{crypto,sync,sys,term,text,xerrors},
   google.golang.org/protobuf, rsc.io/qr (BSD 3-Clause)
 
+Built and run in CI only (never shipped, linked or bundled)
+- ArduPilot, GPL-3.0. broker/drone/sitl/build.sh builds its Copter SITL at
+  the commit broker/drone/sitl/ardupilot.pin names, with
+  broker/drone/sitl/ardupilot-signed-only.patch applied, and the drone tests
+  run that binary as a separate process. No ArduPilot code is in this
+  repository beyond that patch, which is a GPL-3.0 change to
+  libraries/GCS_MAVLink/GCS_Signing.cpp.
+
 Protocol references (no code copied)
 - github.com/pierosavi/withings-local, MIT License, Copyright (c) 2026
   pierosavi. broker/clerk/withings follows its protocol notes
   (docs/protocol.md) and the shape of its read-only client
   (src/withings_wpp), read at eab5a03 on 2026-10-26; the Go code is our own.
+- github.com/acato/drone_hass, Apache License 2.0: the DRONE-sim brief's
+  reference for MAVLink signing and SITL set-up (#3516); nothing imported
+  or copied.
