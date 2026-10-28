@@ -31,6 +31,9 @@ type Config struct {
 	// Button reports the board's provisioning button as held at power-on.
 	// Held, the node erases its bundle and takes the first bundle offered.
 	Button bool
+	// Window is how long the first-bundle window stays open after a
+	// button start, by the monotonic clock; zero is FirstBundleWindow.
+	Window time.Duration
 	// Log takes fixed-text events; it is never given peer data or key
 	// material. Nil discards them.
 	Log func(event string)
@@ -42,6 +45,10 @@ const (
 	handshakeTimeout = 10 * time.Second
 	writeTimeout     = 10 * time.Second
 	settingsIdle     = 2 * time.Minute
+	// FirstBundleWindow bounds the window a button start opens, so a node
+	// reset and left unprovisioned cannot be claimed by a LAN host later
+	// (Security on #3586, finding 1).
+	FirstBundleWindow = 10 * time.Minute
 )
 
 // Errors New and the settings channel return.
@@ -49,6 +56,9 @@ var (
 	ErrWindow = errors.New("camnode: no first-bundle window is open")
 	ErrRole   = errors.New("camnode: first bundle does not name the client that sent it as the enforcer")
 	ErrState  = errors.New("camnode: element and stored bundle disagree")
+	// ErrSource is a bundle committed (counter raised, now the node's) that
+	// the source then failed to take.
+	ErrSource = errors.New("camnode: bundle committed, source failed")
 )
 
 type role int
@@ -67,10 +77,11 @@ type Node struct {
 	tls   *tls.Config
 	start time.Time
 
-	mu     sync.Mutex
-	bundle *camwire.Bundle // nil: no owner yet
-	window bool            // the first-bundle window is open
-	conns  map[*tls.Conn]role
+	mu        sync.Mutex
+	bundle    *camwire.Bundle // nil: no owner yet
+	window    bool            // the first-bundle window is open until windowEnd
+	windowEnd time.Time
+	conns     map[*tls.Conn]role
 }
 
 // New starts the node from its element and store. With the button held it
@@ -94,6 +105,10 @@ func New(cfg Config) (*Node, error) {
 			return nil, err
 		}
 		n.window = true
+		if cfg.Window <= 0 {
+			cfg.Window = FirstBundleWindow
+		}
+		n.windowEnd = n.start.Add(cfg.Window)
 		n.log("button held: bundle erased, first-bundle window open")
 		return n, nil
 	}
@@ -160,7 +175,7 @@ func (n *Node) roleOf(key [camwire.PointLen]byte) role {
 
 func (n *Node) roleLocked(key [camwire.PointLen]byte) role {
 	switch b := n.bundle; {
-	case b == nil && n.window:
+	case b == nil && n.windowOpen():
 		return roleFirst
 	case b == nil:
 		return roleNone
@@ -171,6 +186,9 @@ func (n *Node) roleLocked(key [camwire.PointLen]byte) role {
 	}
 	return roleNone
 }
+
+// windowOpen reports whether the first-bundle window is still open.
+func (n *Node) windowOpen() bool { return n.window && time.Now().Before(n.windowEnd) }
 
 func (n *Node) admits(key [camwire.PointLen]byte) bool { return n.roleOf(key) != roleNone }
 
@@ -197,6 +215,7 @@ func (n *Node) handle(c *tls.Conn) {
 	if !ok {
 		return
 	}
+	var stale []*tls.Conn
 	n.mu.Lock()
 	r := n.roleLocked(key)
 	if r == roleCore {
@@ -204,7 +223,8 @@ func (n *Node) handle(c *tls.Conn) {
 		// the older.
 		for o, or := range n.conns {
 			if or == roleCore {
-				o.Close()
+				stale = append(stale, o)
+				delete(n.conns, o)
 			}
 		}
 	}
@@ -212,6 +232,7 @@ func (n *Node) handle(c *tls.Conn) {
 		n.conns[c] = r
 	}
 	n.mu.Unlock()
+	closeAll(stale)
 	defer n.forget(c)
 	switch r {
 	case roleCore:
@@ -268,7 +289,13 @@ func (n *Node) settings(c *tls.Conn, key [camwire.PointLen]byte, first bool) {
 			n.log("update refused: not served by this build")
 			return
 		}
-		if err := n.apply(f.Payload, key, first); err != nil {
+		if err := n.apply(f.Payload, key, first); errors.Is(err, ErrSource) {
+			// The counter moved: report it, so the enforcer does not show a
+			// refusal that did not happen, then end the channel.
+			n.log("bundle committed, source failed")
+			n.status(c)
+			return
+		} else if err != nil {
 			n.log("bundle refused")
 			return
 		}
@@ -300,6 +327,10 @@ func (n *Node) status(c *tls.Conn) error {
 // and only then given to the source. Connections whose key the bundle no
 // longer admits in their role are closed.
 func (n *Node) apply(p []byte, from [camwire.PointLen]byte, first bool) error {
+	var stale []*tls.Conn
+	// Closing sends close_notify, which a stalled peer can hold; never
+	// under n.mu, which every handshake takes.
+	defer func() { closeAll(stale) }()
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	counter, _, err := n.cfg.Element.Settings()
@@ -308,7 +339,7 @@ func (n *Node) apply(p []byte, from [camwire.PointLen]byte, first bool) error {
 	}
 	var b camwire.Bundle
 	switch {
-	case first && !n.window:
+	case first && !n.windowOpen():
 		return ErrWindow
 	case first:
 		if b, err = camwire.VerifyFirstBundle(p, n.node, counter); err != nil {
@@ -342,13 +373,20 @@ func (n *Node) apply(p []byte, from [camwire.PointLen]byte, first bool) error {
 		key, ok := peerPoint(c.ConnectionState())
 		now := n.roleLocked(key)
 		if !ok || now == roleNone || (now != was && !(was == roleFirst && now == roleEnforcer && key == from)) {
-			c.Close()
+			stale = append(stale, c)
+			delete(n.conns, c)
 			continue
 		}
 		n.conns[c] = now
 	}
 	if err := n.cfg.Source.Apply(b.Settings); err != nil {
-		return err
+		return ErrSource
 	}
 	return nil
+}
+
+func closeAll(cs []*tls.Conn) {
+	for _, c := range cs {
+		c.Close()
+	}
 }

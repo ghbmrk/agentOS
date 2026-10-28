@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/camwire"
 	"github.com/ghbmrk/agentos/broker/camwire/camwiretest"
@@ -311,5 +313,104 @@ func TestButtonResetKeepsKey(t *testing.T) {
 	c, _ := r.dial(r.enforcer)
 	if _, err := send(c, r.owner.SignBundle(t, r.bundle(9))); err == nil {
 		t.Error("a reset let an old counter back in")
+	}
+}
+
+// TestLiveStreamRevoked (L3 on #3586, finding 1): a bundle that turns the
+// stream off, or names another core key, ends the stream already running,
+// not only the next dial; and a second core connection ends the first.
+// Revert mutants: apply keeping the connections it should close, or handle
+// not replacing the older stream.
+func TestLiveStreamRevoked(t *testing.T) {
+	r := newRig(t, true)
+	r.provision(8)
+
+	first := r.streaming(r.core)
+	second := r.streaming(r.core)
+	if !ends(first) {
+		t.Error("a second core stream left the first running")
+	}
+
+	off := r.bundle(9)
+	off.Settings.Stream = false
+	c, _ := r.dial(r.enforcer)
+	if _, err := send(c, r.owner.SignBundle(t, off)); err != nil {
+		t.Fatal(err)
+	}
+	if !ends(second) {
+		t.Error("a live stream outlived the bundle that turned the stream off")
+	}
+
+	c, _ = r.dial(r.enforcer)
+	if _, err := send(c, r.owner.SignBundle(t, r.bundle(10))); err != nil {
+		t.Fatal(err)
+	}
+	live := r.streaming(r.core)
+	moved := r.bundle(11)
+	newCore := camwiretest.NewKey(t)
+	moved.Core = camwiretest.Point(&newCore.PublicKey)
+	c, _ = r.dial(r.enforcer)
+	if _, err := send(c, r.owner.SignBundle(t, moved)); err != nil {
+		t.Fatal(err)
+	}
+	if !ends(live) {
+		t.Error("a live stream outlived the bundle that replaced the core key")
+	}
+	if !readable(r, newCore) {
+		t.Error("the new core key is not streamed to")
+	}
+}
+
+// TestStartRefusesCounterAboveBundle: an element counter above the stored
+// bundle's (the store rolled back under a moved counter) refuses start.
+// Revert mutant: load skipping the counter > b.Counter check.
+func TestStartRefusesCounterAboveBundle(t *testing.T) {
+	r := newRig(t, true)
+	r.provision(8)
+	r.el.settings = 9
+	if err := r.boot(false); !errors.Is(err, ErrState) {
+		t.Errorf("start with the element's counter above the bundle's: %v", err)
+	}
+}
+
+// TestFirstBundleWindowCloses (Security on #3586, finding 1): the window a
+// button start opens closes after Config.Window, so a reset node left
+// unprovisioned cannot be claimed later. Revert mutant: windowOpen
+// ignoring windowEnd.
+func TestFirstBundleWindowCloses(t *testing.T) {
+	r := newRig(t, false)
+	r.window = 100 * time.Millisecond
+	r.boot(true)
+	time.Sleep(200 * time.Millisecond)
+	if !refused(r, r.enforcer) {
+		t.Error("a client was admitted after the window closed")
+	}
+	if err := r.node.apply(r.owner.SignBundle(t, r.bundle(1)), camwiretest.Point(&r.enforcer.PublicKey), true); !errors.Is(err, ErrWindow) {
+		t.Errorf("a first bundle after the window: %v", err)
+	}
+	if c, _, _ := r.el.Settings(); c != 0 {
+		t.Errorf("counter %d after the window closed", c)
+	}
+}
+
+// TestSourceFailureAfterCommit (L3 on #3586, finding 2): a bundle the
+// element committed but the source would not take is reported as committed:
+// the enforcer gets a status with the new counter and the log says so,
+// not "bundle refused".
+func TestSourceFailureAfterCommit(t *testing.T) {
+	r := newRig(t, true)
+	r.provision(8)
+	r.src.mu.Lock()
+	r.src.fail = true
+	r.src.mu.Unlock()
+	c, _ := r.dial(r.enforcer)
+	st, err := send(c, r.owner.SignBundle(t, r.bundle(9)))
+	if err != nil || st.Settings != 9 {
+		t.Fatalf("status after a committed bundle: counter %d, %v", st.Settings, err)
+	}
+	r.logs.mu.Lock()
+	defer r.logs.mu.Unlock()
+	if !slices.Contains(r.logs.lines, "bundle committed, source failed") || slices.Contains(r.logs.lines, "bundle refused") {
+		t.Errorf("log %q", r.logs.lines)
 	}
 }

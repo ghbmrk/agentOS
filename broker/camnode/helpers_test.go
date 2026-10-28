@@ -66,11 +66,15 @@ func (e *fakeElement) Image() (uint64, error) { return e.image, nil }
 type fakeSource struct {
 	mu      sync.Mutex
 	applied []camwire.Settings
+	fail    bool // Apply fails: a sensor that will not take its settings
 }
 
 func (s *fakeSource) Apply(st camwire.Settings) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.fail {
+		return errors.New("fake source: sensor failed")
+	}
 	s.applied = append(s.applied, st)
 	return nil
 }
@@ -111,6 +115,7 @@ type rig struct {
 	enforcer *ecdsa.PrivateKey
 	logs     *logSink
 	errs     []error
+	window   time.Duration // Config.Window for the next boot
 }
 
 type logSink struct {
@@ -143,7 +148,7 @@ func newRig(t *testing.T, button bool) *rig {
 // boot starts (or restarts) the node on the rig's element and store.
 func (r *rig) boot(button bool) error {
 	r.t.Helper()
-	n, err := New(Config{Element: r.el, Store: r.store, Source: r.src, Ranges: testRanges, Button: button, Log: r.logs.add})
+	n, err := New(Config{Element: r.el, Store: r.store, Source: r.src, Ranges: testRanges, Button: button, Window: r.window, Log: r.logs.add})
 	if err != nil {
 		r.errs = append(r.errs, err)
 		return err
@@ -237,3 +242,29 @@ type ecdsaKey = ecdsa.PrivateKey
 func deadline(ms int) time.Time { return time.Now().Add(time.Duration(ms) * time.Millisecond) }
 
 func isClosed(err error) bool { return errors.Is(err, net.ErrClosed) }
+
+// streaming dials the core key and reads one frame, so the stream is live.
+func (r *rig) streaming(k *ecdsaKey) *tls.Conn {
+	r.t.Helper()
+	c, err := r.dial(k)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := camwire.ReadFrame(c, camwire.ToCore, camwire.Shape{}); err != nil {
+		r.t.Fatalf("stream not live: %v", err)
+	}
+	return c
+}
+
+// ends reports whether a live stream stops well before a 3 s read
+// deadline. camwire maps every read error to ErrShort, so the time it took
+// tells the node's close from the deadline.
+func ends(c *tls.Conn) bool {
+	start := time.Now()
+	c.SetReadDeadline(start.Add(3 * time.Second))
+	for {
+		if _, err := camwire.ReadFrame(c, camwire.ToCore, camwire.Shape{}); err != nil {
+			return time.Since(start) < 2*time.Second
+		}
+	}
+}
