@@ -34,11 +34,11 @@ type Class struct {
 	// tightening, Op.
 	Tightening bool
 	Op         Op
-	// Owner is set for a tightening that touches a safety-list device: it
-	// can stop the device's alerts, so it needs the owner's assertion like
-	// a loosening (NET-4 Tightening), though it applies at once. Narrowing
-	// or revoking a standing rule only takes back what the rule granted, so
-	// it never sets Owner (ASSUMPTIONS ENF-a-3).
+	// Owner marks an asserted tightening: one that touches a safety-list
+	// device. It can stop the device's alerts, lock a visitor out or arm an
+	// alarm, so it needs the owner's assertion over that change (NET-4
+	// Tightening), though it applies at once with no wait. Only lock and
+	// relock (Document.SecureCommand) need none.
 	Owner bool
 }
 
@@ -164,14 +164,23 @@ func Apply(d Document, op Op) (Document, bool) {
 	return d, true
 }
 
-// safety reports whether op touches a device on o's safety list, other
-// than by narrowing or revoking a standing rule.
+// safety reports whether op touches a device on o's safety list: its own
+// device, a rule's device, either end of a pair, or, since isolating or
+// removing a device cuts every pair it is in, any device it is paired with.
 func safety(o Document, op Op) bool {
-	if op.Kind == NarrowRule || op.Kind == RevokeRule {
-		return false
+	ids := []string{op.Device, op.Pair.A, op.Pair.B}
+	if op.Kind == IsolateDevice || op.Kind == RemoveDevice {
+		for _, p := range o.Pairs {
+			switch op.Device {
+			case p.A:
+				ids = append(ids, p.B)
+			case p.B:
+				ids = append(ids, p.A)
+			}
+		}
 	}
-	for _, id := range []string{op.Device, op.Pair.A, op.Pair.B} {
-		if dev := o.Device(id); dev != nil && dev.Secure != "" {
+	for _, id := range ids {
+		if dev := o.Device(id); dev != nil && !dev.Everyday {
 			return true
 		}
 	}

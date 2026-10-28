@@ -2,7 +2,6 @@ package policy
 
 import (
 	"bytes"
-	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +30,7 @@ var (
 	ErrNotSecure     = errors.New("policy: not the device's secure-direction command")
 	ErrNoPending     = errors.New("policy: no such pending change")
 	ErrCorrupt       = errors.New("policy: stored state does not verify")
+	ErrPending       = errors.New("policy: another loosening is waiting; cancel it or let it apply first")
 )
 
 // Store keeps the engine's state across restarts: the enforcer's sealed
@@ -53,20 +53,30 @@ type Pending struct {
 	Signed
 	ID    string `json:"id"` // the key's serial
 	DueMS int64  `json:"due_ms"`
-	After uint64 `json:"after"` // the last tightening step before it was signed
+	After uint64 `json:"after"` // the last step before it was signed
 }
 
-// Step is one unsigned tightening applied on top of the signed version.
+// Step is one tightening applied on top of the base version: from the
+// channel with no assertion, or signed by the owner (an asserted
+// tightening, or any tightening the owner signed on the page). A signed
+// step keeps its version and Prev, the document it tightened, so a restart
+// can check that the owner signed exactly Op.
 type Step struct {
-	Seq uint64 `json:"seq"`
-	Op  Op     `json:"op"`
+	Seq    uint64  `json:"seq"`
+	Op     Op      `json:"op"`
+	Signed *Signed `json:"signed,omitempty"`
+	Prev   []byte  `json:"prev,omitempty"` // canonical
 }
 
 type state struct {
 	Base    *Signed   `json:"base"`
 	Steps   []Step    `json:"steps"`
-	Pending []Pending `json:"pending"`
+	Pending []Pending `json:"pending"` // at most one
 	Seq     uint64    `json:"seq"`
+	// Spent is the highest version ever accepted, applied, pending or
+	// cancelled. It only rises, so a cancelled loosening's assertion
+	// cannot be proposed again.
+	Spent uint64 `json:"spent"`
 }
 
 // Outcome is what Propose did.
@@ -77,9 +87,10 @@ type Outcome struct {
 	DueMS   int64
 }
 
-// Engine holds the policy in force: the last owner-signed version, the
-// closed-list tightenings applied since, and the loosenings waiting. It is
-// not safe for concurrent use; the daemon serialises calls.
+// Engine holds the policy in force: the base version (the last signed
+// loosening applied), the tightenings applied since, and the loosening
+// waiting, if any. It is not safe for concurrent use; the daemon
+// serialises calls.
 type Engine struct {
 	owner key.PublicKey
 	store Store
@@ -88,10 +99,11 @@ type Engine struct {
 	used  map[string][]int64 // device → recent tightening times, for the limit
 }
 
-// Open loads the engine's state from store and re-verifies it: the signed
-// version against owner, each tightening step as a closed-list op, and each
-// pending loosening's signature. Empty, it is version 0: default deny,
-// nothing allowed.
+// Open loads the engine's state from store and re-verifies it: the base
+// version against owner, each step as a closed-list tightening (an
+// asserted one only with the owner's signature over it), and the pending
+// loosening's signature. Empty, it is version 0: default deny, nothing
+// allowed.
 func Open(owner key.PublicKey, store Store) (*Engine, error) {
 	e := &Engine{owner: owner, store: store, used: map[string][]int64{}}
 	b, err := store.Load()
@@ -114,18 +126,55 @@ func Open(owner key.PublicKey, store Store) (*Engine, error) {
 		e.cur = d
 	}
 	for _, s := range e.st.Steps {
-		next, ok := Apply(e.cur, s.Op)
-		if !ok || !Classify(e.cur, next).Tightening || s.Seq > e.st.Seq {
-			return nil, fmt.Errorf("%w: step %d", ErrCorrupt, s.Seq)
+		next, err := e.replay(e.cur, s)
+		if err != nil || s.Seq > e.st.Seq {
+			return nil, fmt.Errorf("%w: step %d: %v", ErrCorrupt, s.Seq, err)
 		}
 		e.cur = next
 	}
+	if e.cur.Version > e.st.Spent || len(e.st.Pending) > 1 {
+		return nil, fmt.Errorf("%w: version %d, spent %d", ErrCorrupt, e.cur.Version, e.st.Spent)
+	}
 	for _, p := range e.st.Pending {
-		if _, err := e.check(p.Signed); err != nil || p.ID != p.Key.Root.Serial {
+		d, err := e.check(p.Signed)
+		if err != nil || p.ID != p.Key.Root.Serial || d.Version > e.st.Spent || p.After > e.st.Seq {
 			return nil, fmt.Errorf("%w: pending %s", ErrCorrupt, p.ID)
 		}
 	}
 	return e, nil
+}
+
+// replay applies a stored step to d. An unsigned step must be a closed-list
+// tightening that needs no owner; a signed one must carry the owner's
+// signature over a document that is exactly Prev with Op applied.
+func (e *Engine) replay(d Document, s Step) (Document, error) {
+	next, ok := Apply(d, s.Op)
+	if !ok {
+		return d, ErrNotTightening
+	}
+	c := Classify(d, next)
+	if !c.Tightening {
+		return d, ErrNotTightening
+	}
+	if s.Signed == nil {
+		if c.Owner || s.Prev != nil {
+			return d, ErrNeedsOwner
+		}
+		return next, nil
+	}
+	sd, err := e.check(*s.Signed)
+	if err != nil {
+		return d, err
+	}
+	prev, err := Decode(s.Prev)
+	if err != nil {
+		return d, err
+	}
+	if sc := Classify(prev, sd); !sc.Tightening || sc.Op != s.Op {
+		return d, ErrUnbound
+	}
+	next.Version = max(next.Version, sd.Version)
+	return next, nil
 }
 
 // check verifies a stored version and returns its document.
@@ -140,31 +189,26 @@ func (e *Engine) check(s Signed) (Document, error) {
 	return d, nil
 }
 
-// Current is the policy in force.
+// Current is the policy in force. Its Version is the highest signed
+// version applied.
 func (e *Engine) Current() Document { return e.cur.normal() }
 
-// Pending is the loosenings waiting, in the order they were signed.
+// Pending is the loosening waiting, if any.
 func (e *Engine) Pending() []Pending { return slices.Clone(e.st.Pending) }
 
-// floor is the highest version signed or pending: a new version must be
-// above it.
-func (e *Engine) floor() uint64 {
-	v := e.cur.Version
-	for _, p := range e.st.Pending {
-		if d, err := Decode(p.Doc); err == nil && d.Version > v {
-			v = d.Version
-		}
-	}
-	return v
-}
-
 // Propose takes an owner-signed version. sig is the owner's assertion over
-// next's root (Verify). A closed-list tightening applies at once; anything
-// else is a loosening and waits Wait from now, the time the assertion was
-// checked. Restoring an older document is a new, higher version like any
-// other, classified by what it changes (NET-2 Recovery).
+// next's root (Verify), and next's version must be above every version
+// ever accepted, cancelled ones included. A closed-list tightening, an
+// asserted one included, applies at once as a signed step, and a loosening
+// waiting meanwhile is kept: the step is applied again on top of it when
+// it lands. Anything else is a loosening: it waits Wait from now, the time
+// the assertion was checked, and is refused while another loosening waits
+// (ErrPending), since it was drawn against the policy without that one and
+// applying both would silently undo the first. Restoring an older document
+// is a new, higher version like any other, classified by what it changes
+// (NET-2 Recovery).
 func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error) {
-	k, err := Verify(e.owner, e.floor(), next, sig)
+	k, err := Verify(e.owner, e.st.Spent, next, sig)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -174,9 +218,18 @@ func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error
 	}
 	s := Signed{Key: k, Doc: doc, Diff: slices.Clone(next.Diff)}
 	c := Classify(e.cur, next.Doc)
+	if !c.Tightening && len(e.st.Pending) > 0 {
+		return Outcome{}, ErrPending
+	}
 	st := e.st
+	st.Spent = next.Doc.Version // above the floor, so it rises
 	if c.Tightening {
-		st.Base, st.Steps = &s, nil
+		prev, err := Encode(e.cur)
+		if err != nil {
+			return Outcome{}, err
+		}
+		st.Seq++
+		st.Steps = append(slices.Clone(st.Steps), Step{Seq: st.Seq, Op: c.Op, Signed: &s, Prev: prev})
 		if err := e.save(st); err != nil {
 			return Outcome{}, err
 		}
@@ -184,7 +237,7 @@ func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error
 		return Outcome{Class: c, Applied: true}, nil
 	}
 	p := Pending{Signed: s, ID: k.Root.Serial, DueMS: nowMS + Wait, After: st.Seq}
-	st.Pending = append(slices.Clone(st.Pending), p)
+	st.Pending = []Pending{p}
 	if err := e.save(st); err != nil {
 		return Outcome{}, err
 	}
@@ -192,7 +245,8 @@ func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error
 }
 
 // Cancel drops a pending loosening (NET-4: the owner can cancel it within
-// the wait). The page calls it after the owner's passkey.
+// the wait). The page calls it after the owner's passkey. Its version stays
+// spent.
 func (e *Engine) Cancel(id string) error {
 	i := slices.IndexFunc(e.st.Pending, func(p Pending) bool { return p.ID == id })
 	if i < 0 {
@@ -203,49 +257,39 @@ func (e *Engine) Cancel(id string) error {
 	return e.save(st)
 }
 
-// Tick applies every pending loosening due at now, in the order they fall
-// due, and returns their IDs. The tightenings applied since a loosening was
-// signed are applied again on top of it, so a later tightening is not
-// undone. A pending version at or below the version in force was
-// superseded by a later signed one and is dropped, not applied.
+// Tick applies the pending loosening if it is due at now, and returns its
+// ID. It becomes the new base, and every step applied since it was signed,
+// unsigned or signed, is applied again on top of it, so no tightening is
+// undone and no signed loosening is dropped. A step that no longer applies
+// (the loosening removed its target) is dropped with it.
 func (e *Engine) Tick(nowMS int64) ([]string, error) {
-	st := e.st
-	st.Pending = slices.Clone(st.Pending)
-	slices.SortStableFunc(st.Pending, func(a, b Pending) int { return cmp.Compare(a.DueMS, b.DueMS) })
-	cur := e.cur
-	var applied []string
-	for len(st.Pending) > 0 && st.Pending[0].DueMS <= nowMS {
-		p := st.Pending[0]
-		st.Pending = st.Pending[1:]
-		d, err := Decode(p.Doc)
-		if err != nil {
-			return nil, err
-		}
-		if d.Version <= cur.Version {
-			continue
-		}
-		var kept []Step
-		for _, s := range st.Steps {
-			if s.Seq <= p.After {
-				continue
-			}
-			if next, ok := Apply(d, s.Op); ok {
-				d = next
-				kept = append(kept, s)
-			}
-		}
-		base := p.Signed
-		st.Base, st.Steps, cur = &base, kept, d
-		applied = append(applied, p.ID)
-	}
-	if len(st.Pending) == len(e.st.Pending) {
+	if len(e.st.Pending) == 0 || e.st.Pending[0].DueMS > nowMS {
 		return nil, nil
 	}
+	p := e.st.Pending[0]
+	d, err := Decode(p.Doc)
+	if err != nil {
+		return nil, err
+	}
+	st := e.st
+	st.Pending = nil
+	var kept []Step
+	for _, s := range st.Steps {
+		if s.Seq <= p.After {
+			continue
+		}
+		if next, err := e.replay(d, s); err == nil {
+			d = next
+			kept = append(kept, s)
+		}
+	}
+	base := p.Signed
+	st.Base, st.Steps = &base, kept
 	if err := e.save(st); err != nil {
 		return nil, err
 	}
-	e.cur = cur
-	return applied, nil
+	e.cur = d
+	return []string{p.ID}, nil
 }
 
 // Tighten applies one closed-list tightening with no assertion: the path
@@ -328,4 +372,57 @@ func (e *Engine) save(st state) error {
 	}
 	e.st = st
 	return nil
+}
+
+// Export is the policy for the core's backup (NET-2 Recovery, BAK-1),
+// served as a channel read by slice d: the signed versions in force, with
+// their documents and assertions, and the policy in force to restore from.
+// It holds no secret: a document carries no Wi-Fi password or device
+// secret, only identities (decision 8, decision 10).
+type Export struct {
+	Base    *Signed  `json:"base"`
+	Signed  []Signed `json:"signed"` // the signed steps since Base
+	Current []byte   `json:"current"`
+}
+
+// Export is the engine's Export, encoded.
+func (e *Engine) Export() ([]byte, error) {
+	cur, err := Encode(e.cur)
+	if err != nil {
+		return nil, err
+	}
+	x := Export{Base: e.st.Base, Signed: []Signed{}, Current: cur}
+	for _, s := range e.st.Steps {
+		if s.Signed != nil {
+			x.Signed = append(x.Signed, *s.Signed)
+		}
+	}
+	return json.Marshal(x)
+}
+
+// ReadExport checks an export's signatures against owner and returns the
+// policy to restore. The export comes back from the core, so it restores
+// only through Propose: the owner signs the returned document as a new,
+// higher version, on the page, and it applies like any other.
+func ReadExport(owner key.PublicKey, b []byte) (Document, error) {
+	var x Export
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&x); err != nil || dec.More() {
+		return Document{}, ErrMalformed
+	}
+	e := &Engine{owner: owner}
+	for _, s := range append(slices.Clone(x.Signed), derefs(x.Base)...) {
+		if _, err := e.check(s); err != nil {
+			return Document{}, err
+		}
+	}
+	return Decode(x.Current)
+}
+
+func derefs(s *Signed) []Signed {
+	if s == nil {
+		return nil
+	}
+	return []Signed{*s}
 }

@@ -79,8 +79,12 @@ type Device struct {
 	// Isolated cuts the device off from everything, its allow list and
 	// pairs included, without forgetting them.
 	Isolated bool `json:"isolated"`
-	// Secure, when set, puts the device on the safety list (NET-2 Safety
-	// devices) and names its one secure-direction command, such as "lock".
+	// Everyday takes the device off the safety list (NET-2 Safety
+	// devices). The zero value is on it, so a device nobody classified
+	// fails safe; setting it is a loosening, so only the owner can.
+	Everyday bool `json:"everyday"`
+	// Secure names a safety-list device's one secure-direction command,
+	// such as a lock's "lock" (NET-2 Safety devices); empty for none.
 	Secure string `json:"secure"`
 }
 
@@ -176,7 +180,7 @@ func (d Document) Active(device string, nowMS int64) []StandingRule {
 // devices). Engine.Secure rate-limits it.
 func (d Document) SecureCommand(device, cmd string) bool {
 	dev := d.Device(device)
-	return dev != nil && dev.Secure != "" && dev.Secure == cmd
+	return dev != nil && !dev.Everyday && dev.Secure != "" && dev.Secure == cmd
 }
 
 // normal is d with every list sorted and deduplicated and every nil list
@@ -236,6 +240,9 @@ func (d Document) check() error {
 				return bad("device %q allows %q", dev.ID, h)
 			}
 		}
+		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
+			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
+		}
 	}
 	for _, h := range d.Destinations {
 		if !name(h) {
@@ -248,7 +255,7 @@ func (d Document) check() error {
 		}
 	}
 	for i, r := range d.Standing {
-		if !name(r.ID) || r.Action == "" || d.Device(r.Device) == nil || r.FromMS >= r.ToMS {
+		if !name(r.ID) || !name(r.Action) || d.Device(r.Device) == nil || r.FromMS >= r.ToMS {
 			return bad("standing rule %q", r.ID)
 		}
 		if i > 0 && d.Standing[i-1].ID == r.ID {

@@ -84,32 +84,6 @@ type memStore struct{ b []byte }
 func (m *memStore) Load() ([]byte, error) { return m.b, nil }
 func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
 
-// home is a small home: a plug with a vendor cloud, a camera paired with
-// it, and a lock on the safety list with a visitor's standing rule.
-func home(v uint64) Document {
-	return Document{
-		Version:      v,
-		Destinations: []string{"mail.example", "models.example"},
-		Devices: []Device{
-			{ID: "plug", Network: NetDevices, WiFi: "vlan101", Allow: []string{"a.example", "b.example"}, VendorCloud: true},
-			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}},
-			{ID: "lock", Network: NetDevices, Allow: []string{"lock.example"}, VendorCloud: true, Secure: "lock"},
-		},
-		Pairs:    []Pair{{A: "plug", B: "cam"}},
-		Standing: []StandingRule{{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: 1000, ToMS: 2000}},
-		Holds:    []Hold{{Device: "cam", Kind: HoldFirmware}},
-	}
-}
-
-// edit is home(v) changed by f.
-func edit(v uint64, f func(d *Document)) Document {
-	d := home(v)
-	f(&d)
-	return d
-}
-
-func dev(d *Document, id string) *Device { return d.Device(id) }
-
 // STO-4: a policy version is a KEY-1 root over the document and the
 // rendered diff, signed by the owner's ES256 passkey and checked by
 // broker/kernel/key. Another credential, another RP ID, no user
@@ -172,86 +146,197 @@ func TestVersionKeyVerifiesWithKernelKeyLibrary(t *testing.T) {
 	}
 }
 
+// home is a small home. On the safety list (NET-2): a smart plug with a
+// vendor cloud and a named secure command, a camera with none, and a lock
+// with a visitor's standing rule. Off it (Everyday, which only the owner
+// sets): a TV with a vendor cloud and a speaker paired with it, with a
+// standing rule of its own.
+func home(v uint64) Document {
+	return Document{
+		Version:      v,
+		Destinations: []string{"mail.example", "models.example"},
+		Devices: []Device{
+			{ID: "plug", Network: NetDevices, WiFi: "vlan101", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Secure: "off"},
+			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true},
+			{ID: "lock", Network: NetDevices, Allow: []string{"lock.example"}, VendorCloud: true, Secure: "lock"},
+			{ID: "tv", Network: NetDevices, WiFi: "vlan104", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Everyday: true},
+			{ID: "speaker", Network: NetDevices, WiFi: "vlan105", Allow: []string{"s.example"}, Everyday: true},
+		},
+		Pairs: []Pair{{A: "plug", B: "cam"}, {A: "tv", B: "speaker"}},
+		Standing: []StandingRule{
+			{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: 1000, ToMS: 2000},
+			{ID: "party", Device: "speaker", Action: "loud", FromMS: 1000, ToMS: 2000},
+		},
+		Holds: []Hold{{Device: "cam", Kind: HoldFirmware}},
+	}
+}
+
+// edit is home(v) changed by f.
+func edit(v uint64, f func(d *Document)) Document {
+	d := home(v)
+	f(&d)
+	return d
+}
+
+func dev(d *Document, id string) *Device { return d.Device(id) }
+
+func rule(d *Document, id string) *StandingRule {
+	i := slices.IndexFunc(d.Standing, func(r StandingRule) bool { return r.ID == id })
+	return &d.Standing[i]
+}
+
+func without[T any](s []T, drop func(T) bool) []T { return slices.DeleteFunc(slices.Clone(s), drop) }
+
+// opened is an engine whose policy in force is home(1).
+func opened(t *testing.T) (*Engine, *authenticator, *memStore) {
+	t.Helper()
+	a := newAuthenticator(t, rp)
+	store := &memStore{}
+	e, err := Open(a.Public(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Proposal{Doc: home(1), Diff: []byte("v1")}
+	if _, err := e.Propose(p, sign(t, a, a.Public(), p), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Tick(Wait); err != nil {
+		t.Fatal(err)
+	}
+	return e, a, store
+}
+
+func (a *authenticator) propose(t *testing.T, e *Engine, p Proposal, now int64) (Outcome, error) {
+	t.Helper()
+	return e.Propose(p, sign(t, a, a.Public(), p), now)
+}
+
 // NET-4 Tightening: only the closed-list kinds, one at a time, classify as
-// a tightening. Every other change to every field of the document, any mix
-// and any pair of tightenings is a loosening.
+// a tightening. Each row runs for an off-list device, where it applies at
+// once, and for a safety-list device, where it is an asserted tightening
+// (Owner). Every other change to every field, any mix and any two
+// tightenings is a loosening.
 func TestClassifyClosedList(t *testing.T) {
-	type want struct {
-		kind  string // "" = loosening
-		owner bool
-	}
-	cases := map[string]struct {
-		f func(d *Document)
-		w want
+	// Per-device rows: x is the device, y the other end of its pair, r its
+	// standing rule. Off-list: tv, speaker, party. Safety-list: plug, cam, plumber on lock.
+	type sub struct{ x, y, r, ry string }
+	subjects := map[string]sub{"off-list": {"tv", "speaker", "party", "speaker"}, "safety-list": {"plug", "cam", "plumber", "lock"}}
+	tight := map[string]struct {
+		kind string
+		f    func(d *Document, s sub)
 	}{
-		// The closed list.
-		"remove a host from one device": {func(d *Document) { dev(d, "plug").Allow = []string{"b.example"} }, want{RemoveDestination, false}},
-		"cut one vendor cloud":          {func(d *Document) { dev(d, "plug").VendorCloud = false }, want{CutVendorCloud, false}},
-		"remove one pair":               {func(d *Document) { d.Pairs = nil }, want{RemovePair, false}},
-		"isolate one device":            {func(d *Document) { dev(d, "cam").Isolated = true }, want{IsolateDevice, false}},
-		"remove one device":             {func(d *Document) { d.Devices = slices.Delete(d.Devices, 1, 2); d.Pairs = nil; d.Holds = nil }, want{RemoveDevice, false}},
-		"remove a device with its pair": {func(d *Document) { d.Devices = slices.Delete(d.Devices, 0, 1); d.Pairs = nil }, want{RemoveDevice, false}},
-		"narrow a standing rule":        {func(d *Document) { d.Standing[0].ToMS = 1500 }, want{NarrowRule, false}},
-		"revoke a standing rule":        {func(d *Document) { d.Standing = nil }, want{RevokeRule, false}},
-		// The closed list on a safety-list device needs the owner.
-		"cut the lock's vendor cloud": {func(d *Document) { dev(d, "lock").VendorCloud = false }, want{CutVendorCloud, true}},
-		"isolate the lock":            {func(d *Document) { dev(d, "lock").Isolated = true }, want{IsolateDevice, true}},
-		"remove the lock's host":      {func(d *Document) { dev(d, "lock").Allow = nil }, want{RemoveDestination, true}},
-		"remove the lock":             {func(d *Document) { d.Devices = d.Devices[:2]; d.Standing = nil }, want{RemoveDevice, true}},
-
-		// Every field, the other way or sideways: loosenings.
-		"version only":              {func(d *Document) { d.Version = 9 }, want{}},
-		"add a core destination":    {func(d *Document) { d.Destinations = append(d.Destinations, "x.example") }, want{}},
-		"remove a core destination": {func(d *Document) { d.Destinations = d.Destinations[:1] }, want{}},
-		"add a device":              {func(d *Document) { d.Devices = append(d.Devices, Device{ID: "tv", Network: NetDevices}) }, want{}},
-		"move a device's network":   {func(d *Document) { dev(d, "plug").Network = NetHousehold }, want{}},
-		"change a Wi-Fi identity":   {func(d *Document) { dev(d, "plug").WiFi = "vlan201" }, want{}},
-		"clear a Wi-Fi identity":    {func(d *Document) { dev(d, "plug").WiFi = "" }, want{}},
-		"add a host to a device":    {func(d *Document) { dev(d, "cam").Allow = append(dev(d, "cam").Allow, "x.example") }, want{}},
-		"swap a device's host":      {func(d *Document) { dev(d, "cam").Allow = []string{"x.example"} }, want{}},
-		"allow a vendor cloud":      {func(d *Document) { dev(d, "cam").VendorCloud = true }, want{}},
-		"take the lock off safety":  {func(d *Document) { dev(d, "lock").Secure = "" }, want{}},
-		"rename the secure command": {func(d *Document) { dev(d, "lock").Secure = "unlock" }, want{}},
-		"put the plug on safety":    {func(d *Document) { dev(d, "plug").Secure = "off" }, want{}},
-		"add a pair":                {func(d *Document) { d.Pairs = append(d.Pairs, Pair{A: "lock", B: "cam"}) }, want{}},
-		"add a standing rule":       {func(d *Document) { d.Standing = append(d.Standing, StandingRule{"x", "lock", "keypad-code", 1, 2}) }, want{}},
-		"widen a standing rule":     {func(d *Document) { d.Standing[0].ToMS = 2500 }, want{}},
-		"shift a standing rule":     {func(d *Document) { d.Standing[0].FromMS, d.Standing[0].ToMS = 1500, 2500 }, want{}},
-		"change a rule's action":    {func(d *Document) { d.Standing[0].Action = "unlock" }, want{}},
-		"move a rule to a device":   {func(d *Document) { d.Standing[0].Device = "cam" }, want{}},
-		"rename a rule":             {func(d *Document) { d.Standing[0].ID = "electrician" }, want{}},
-		"add a hold":                {func(d *Document) { d.Holds = append(d.Holds, Hold{"plug", HoldFix}) }, want{}},
-		"remove a hold":             {func(d *Document) { d.Holds = nil }, want{}},
-		"change a hold's kind":      {func(d *Document) { d.Holds[0].Kind = HoldFix }, want{}},
-		"change the drone policy":   {func(d *Document) { d.Drone = "ab" }, want{}},
-		"rename a device":           {func(d *Document) { dev(d, "plug").ID = "plug2"; d.Pairs[0].A = "plug2" }, want{}},
-
-		// Mixes, doubles and broken documents.
-		"tighten and loosen":                         {func(d *Document) { dev(d, "plug").Allow = []string{"b.example", "x.example"} }, want{}},
-		"two tightenings":                            {func(d *Document) { dev(d, "plug").Allow = nil }, want{}},
-		"tighten two kinds":                          {func(d *Document) { dev(d, "plug").VendorCloud = false; d.Pairs = nil }, want{}},
-		"isolate and narrow":                         {func(d *Document) { dev(d, "cam").Isolated = true; d.Standing[0].ToMS = 1500 }, want{}},
-		"remove a device, keep its pair (malformed)": {func(d *Document) { d.Devices = d.Devices[1:] }, want{}},
-		"no change":                                  {func(d *Document) {}, want{}},
+		"remove a host":        {RemoveDestination, func(d *Document, s sub) { dev(d, s.x).Allow = []string{"b.example"} }},
+		"cut the vendor cloud": {CutVendorCloud, func(d *Document, s sub) { dev(d, s.x).VendorCloud = false }},
+		"remove the pair": {RemovePair, func(d *Document, s sub) {
+			d.Pairs = without(d.Pairs, func(p Pair) bool { return p.A == s.x || p.B == s.x })
+		}},
+		"isolate the device": {IsolateDevice, func(d *Document, s sub) { dev(d, s.x).Isolated = true }},
+		"remove the device": {RemoveDevice, func(d *Document, s sub) {
+			d.Devices = without(d.Devices, func(v Device) bool { return v.ID == s.x })
+			d.Pairs = without(d.Pairs, func(p Pair) bool { return p.A == s.x || p.B == s.x })
+		}},
+		"narrow the rule": {NarrowRule, func(d *Document, s sub) { rule(d, s.r).ToMS = 1500 }},
+		"revoke the rule": {RevokeRule, func(d *Document, s sub) {
+			d.Standing = without(d.Standing, func(r StandingRule) bool { return r.ID == s.r })
+		}},
 	}
-	for name, c := range cases {
-		got := Classify(home(1), edit(1, c.f))
-		if got.Tightening != (c.w.kind != "") || got.Op.Kind != c.w.kind || got.Owner != c.w.owner {
-			t.Errorf("%s: %+v, want %+v", name, got, c.w)
+	loose := map[string]func(d *Document, s sub){
+		"add a host":             func(d *Document, s sub) { dev(d, s.x).Allow = append(dev(d, s.x).Allow, "x.example") },
+		"swap a host":            func(d *Document, s sub) { dev(d, s.x).Allow = []string{"a.example", "x.example"} },
+		"move network":           func(d *Document, s sub) { dev(d, s.x).Network = NetHousehold },
+		"change Wi-Fi identity":  func(d *Document, s sub) { dev(d, s.x).WiFi = "vlan201" },
+		"un-isolate":             func(d *Document, s sub) { dev(d, s.x).Isolated = false }, // run on an isolated base below
+		"toggle the safety list": func(d *Document, s sub) { dev(d, s.x).Everyday = !dev(d, s.x).Everyday; dev(d, s.x).Secure = "" },
+		"add a pair":             func(d *Document, s sub) { d.Pairs = append(d.Pairs, Pair{A: s.x, B: "lock"}) },
+		"widen the rule":         func(d *Document, s sub) { rule(d, s.r).ToMS = 2500 },
+		"shift the rule":         func(d *Document, s sub) { rule(d, s.r).FromMS, rule(d, s.r).ToMS = 1500, 2500 },
+		"change the rule action": func(d *Document, s sub) { rule(d, s.r).Action = "other" },
+		"move the rule":          func(d *Document, s sub) { rule(d, s.r).Device = s.y },
+		"rename the rule":        func(d *Document, s sub) { rule(d, s.r).ID = "renamed" },
+		"add a rule":             func(d *Document, s sub) { d.Standing = append(d.Standing, StandingRule{"new", s.x, "x", 1, 2}) },
+		"add a hold":             func(d *Document, s sub) { d.Holds = append(d.Holds, Hold{s.x, HoldFix}) },
+		"two hosts":              func(d *Document, s sub) { dev(d, s.x).Allow = nil },
+		"cut and isolate":        func(d *Document, s sub) { dev(d, s.x).VendorCloud = false; dev(d, s.x).Isolated = true },
+		"cut and add a host": func(d *Document, s sub) {
+			dev(d, s.x).VendorCloud = false
+			dev(d, s.x).Allow = append(dev(d, s.x).Allow, "x.example")
+		},
+		"narrow and widen": func(d *Document, s sub) {
+			rule(d, s.r).ToMS = 1500
+			rule(d, "party").FromMS, rule(d, "plumber").FromMS = 0, 0
+		},
+		"remove, keep its pair": func(d *Document, s sub) { d.Devices = without(d.Devices, func(v Device) bool { return v.ID == s.x }) },
+	}
+	for sname, s := range subjects {
+		for name, c := range tight {
+			got := Classify(home(1), edit(1, func(d *Document) { c.f(d, s) }))
+			if !got.Tightening || got.Op.Kind != c.kind || got.Owner != (sname == "safety-list") {
+				t.Errorf("%s, %s: %+v, want %s with Owner %v", sname, name, got, c.kind, sname == "safety-list")
+			}
+		}
+		for name, f := range loose {
+			base := home(1)
+			if name == "un-isolate" {
+				dev(&base, s.x).Isolated = true
+			}
+			next := base.normal() // a copy
+			f(&next, s)
+			if got := Classify(base, next); got.Tightening {
+				t.Errorf("%s, %s: classified as a tightening: %+v", sname, name, got)
+			}
 		}
 	}
-	if c := Classify(edit(1, func(d *Document) { dev(d, "cam").Isolated = true }), home(1)); c.Tightening {
-		t.Error("un-isolating a device classified as a tightening")
-	}
-	if c := Classify(edit(1, func(d *Document) { dev(d, "cam").Isolated = true }), edit(1, func(d *Document) { dev(d, "cam").Isolated = true })); c.Tightening {
-		t.Error("no change classified as a tightening")
+
+	// Whole-document fields and the safety list's own edges.
+	for name, f := range map[string]func(d *Document){
+		"version only":              func(d *Document) { d.Version = 9 },
+		"add a core destination":    func(d *Document) { d.Destinations = append(d.Destinations, "x.example") },
+		"remove a core destination": func(d *Document) { d.Destinations = d.Destinations[:1] },
+		"add a device": func(d *Document) {
+			d.Devices = append(d.Devices, Device{ID: "new", Network: NetDevices, Everyday: true})
+		},
+		"remove a hold":                            func(d *Document) { d.Holds = nil },
+		"change a hold's kind":                     func(d *Document) { d.Holds[0].Kind = HoldFix },
+		"change the drone policy":                  func(d *Document) { d.Drone = "ab" },
+		"rename the secure command":                func(d *Document) { dev(d, "lock").Secure = "bolt" },
+		"name a camera's command":                  func(d *Document) { dev(d, "cam").Secure = "off" },
+		"rename a device":                          func(d *Document) { dev(d, "tv").ID = "tv2"; d.Pairs[1].A = "tv2" },
+		"secure on an off-list device (malformed)": func(d *Document) { dev(d, "tv").Secure = "off" },
+		"no change":                                func(d *Document) {},
+	} {
+		if got := Classify(home(1), edit(1, f)); got.Tightening {
+			t.Errorf("%s: classified as a tightening: %+v", name, got)
+		}
 	}
 
-	// The table above names every field: adding a field to the document
-	// without a case here fails.
+	// A device nobody classified is on the safety list, and so is a camera
+	// with no named command: tightening either needs the owner.
+	unknown := edit(1, func(d *Document) {
+		d.Devices = append(d.Devices, Device{ID: "thing", Network: NetDevices, Allow: []string{"t.example"}})
+	})
+	for _, op := range []Op{{Kind: IsolateDevice, Device: "thing"}, {Kind: RemoveDestination, Device: "thing", Host: "t.example"}, {Kind: IsolateDevice, Device: "cam"}, {Kind: CutVendorCloud, Device: "cam"}} {
+		next, _ := Apply(unknown, op)
+		if c := Classify(unknown, next); !c.Tightening || !c.Owner {
+			t.Errorf("%s %s: %+v, want an asserted tightening", op.Kind, op.Device, c)
+		}
+	}
+
+	// Isolating or removing an off-list device cuts its pairs, so when it
+	// is paired with a safety-list device the owner must sign, as for
+	// removing that pair (Security fix-list on #3697, item 2).
+	linked := edit(1, func(d *Document) { d.Pairs = append(d.Pairs, Pair{A: "lock", B: "tv"}) })
+	for _, op := range []Op{{Kind: IsolateDevice, Device: "tv"}, {Kind: RemoveDevice, Device: "tv"}} {
+		next, _ := Apply(linked, op)
+		if c := Classify(linked, next); !c.Tightening || !c.Owner {
+			t.Errorf("%s tv, paired with the lock: %+v, want an asserted tightening", op.Kind, c)
+		}
+	}
+
+	// Every field has a row: adding a field to the document without one
+	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Secure"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},
@@ -270,7 +355,9 @@ func TestClassifyClosedList(t *testing.T) {
 
 // NET-4 Loosening: a signed loosening applies at exactly +10 minutes on the
 // enforcer's clock, not before, never after it is cancelled, and both the
-// wait and the cancel survive a restart.
+// wait and the cancel survive a restart. A cancelled assertion is spent. A
+// tightening, unsigned or signed, applied while a loosening waits is kept
+// when the loosening lands, and the loosening is not dropped.
 func TestLooseningWaitsAndCancels(t *testing.T) {
 	a := newAuthenticator(t, rp)
 	owner := a.Public()
@@ -280,16 +367,13 @@ func TestLooseningWaitsAndCancels(t *testing.T) {
 		t.Fatal(err)
 	}
 	const t0 = 1_000_000
-	p1 := Proposal{Doc: home(1), Diff: []byte("first policy")}
-	out, err := e.Propose(p1, sign(t, a, owner, p1), t0)
+	out, err := a.propose(t, e, Proposal{Doc: home(1), Diff: []byte("first policy")}, t0)
 	if err != nil || out.Applied || out.Pending == "" || out.DueMS != t0+Wait {
 		t.Fatalf("a loosening: %+v %v", out, err)
 	}
 	if got, _ := e.Tick(t0 + Wait - 1); got != nil || e.Current().Version != 0 {
 		t.Fatalf("applied before the wait: %v", got)
 	}
-
-	// Restart inside the wait: the pending change and its deadline survive.
 	if e, err = Open(owner, store); err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +384,12 @@ func TestLooseningWaitsAndCancels(t *testing.T) {
 		t.Fatalf("not applied at +10 minutes: %v %v", got, err)
 	}
 
-	// A second loosening, cancelled, then a restart: never applied.
+	// Cancelled, then a restart: never applied, and the same assertion is
+	// refused again (Security item 1, L3 item 3).
 	const t1 = 5_000_000
-	p2 := Proposal{Doc: edit(2, func(d *Document) { dev(d, "cam").VendorCloud = true }), Diff: []byte("allow cam's cloud")}
-	out, err = e.Propose(p2, sign(t, a, owner, p2), t1)
+	p2 := Proposal{Doc: edit(2, func(d *Document) { dev(d, "tv").Allow = append(dev(d, "tv").Allow, "evil.example") }), Diff: []byte("allow evil")}
+	sig2 := sign(t, a, owner, p2)
+	out, err = e.Propose(p2, sig2, t1)
 	if err != nil || out.Pending == "" {
 		t.Fatal(out, err)
 	}
@@ -313,114 +399,175 @@ func TestLooseningWaitsAndCancels(t *testing.T) {
 	if err := e.Cancel(out.Pending); !errors.Is(err, ErrNoPending) {
 		t.Errorf("a second cancel: %v", err)
 	}
+	if _, err := e.Propose(p2, sig2, t1+1); !errors.Is(err, ErrNotRising) {
+		t.Errorf("the cancelled assertion again: %v", err)
+	}
 	if e, err = Open(owner, store); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := e.Tick(t1 + 100*Wait); got != nil || e.Current().Version != 1 || dev(ptr(e.Current()), "cam").VendorCloud {
+	if _, err := e.Propose(p2, sig2, t1+2); !errors.Is(err, ErrNotRising) {
+		t.Errorf("the cancelled assertion after a restart: %v", err)
+	}
+	if got, _ := e.Tick(t1 + 100*Wait); got != nil || e.Current().Version != 1 || slices.Contains(e.Current().Device("tv").Allow, "evil.example") {
 		t.Fatalf("a cancelled loosening applied: %v", got)
 	}
 
-	// A tightening applied while a loosening waits is not undone by it.
-	p3 := Proposal{Doc: edit(3, func(d *Document) { dev(d, "cam").VendorCloud = true }), Diff: []byte("allow cam's cloud")}
-	if _, err := e.Propose(p3, sign(t, a, owner, p3), t1); err != nil {
+	// While v3 (add a host to the speaker) waits, the channel cuts the
+	// TV's cloud and the owner signs v4, cutting the lock's cloud (an
+	// asserted tightening). Both apply at once; v3 still lands, on top of
+	// them (L3 item 5, UX item 1).
+	p3 := Proposal{Doc: edit(3, func(d *Document) { dev(d, "speaker").Allow = append(dev(d, "speaker").Allow, "c.example") }), Diff: []byte("allow c on the speaker")}
+	if _, err := a.propose(t, e, p3, t1); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Tighten(Op{Kind: CutVendorCloud, Device: "plug"}, t1+1); err != nil {
+	if err := e.Tighten(Op{Kind: CutVendorCloud, Device: "tv"}, t1+1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Tick(t1 + Wait); err != nil {
+	p4 := Proposal{Doc: edit(4, func(d *Document) { dev(d, "tv").VendorCloud = false; dev(d, "lock").VendorCloud = false }), Diff: []byte("cut the lock's cloud")}
+	if out, err := a.propose(t, e, p4, t1+2); err != nil || !out.Applied || !out.Class.Owner {
+		t.Fatalf("a signed tightening of the lock while a loosening waits: %+v %v", out, err)
+	}
+	if len(e.Pending()) != 1 {
+		t.Fatal("a signed tightening dropped the waiting loosening")
+	}
+	p5 := Proposal{Doc: edit(5, func(d *Document) { dev(d, "cam").Allow = nil }), Diff: []byte("another loosening")}
+	if _, err := a.propose(t, e, p5, t1+3); err == nil {
+		t.Error("a second loosening while one waits was accepted")
+	}
+	if e, err = Open(owner, store); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := e.Tick(t1 + Wait); err != nil || len(got) != 1 {
+		t.Fatalf("the waiting loosening did not land: %v %v", got, err)
 	}
 	cur := e.Current()
-	if cur.Version != 3 || !dev(&cur, "cam").VendorCloud || dev(&cur, "plug").VendorCloud {
+	if cur.Version != 4 || !slices.Contains(dev(&cur, "speaker").Allow, "c.example") || dev(&cur, "tv").VendorCloud || dev(&cur, "lock").VendorCloud {
 		t.Fatalf("after the loosening: %+v", cur)
 	}
 	if e, err = Open(owner, store); err != nil || !reflect.DeepEqual(e.Current(), cur) {
 		t.Fatalf("restart changed the policy: %v", err)
 	}
-
-	// A signed tightening applies at once.
-	p4 := Proposal{Doc: edit(4, func(d *Document) {
-		dev(d, "cam").VendorCloud = true
-		dev(d, "plug").VendorCloud = false
-		dev(d, "lock").Isolated = true
-	}), Diff: []byte("isolate the lock")}
-	if out, err := e.Propose(p4, sign(t, a, owner, p4), t1+Wait); err != nil || !out.Applied || !out.Class.Owner || e.Current().Version != 4 {
-		t.Fatalf("a signed tightening of the lock: %+v %v", out, err)
-	}
 }
 
-func ptr(d Document) *Document { return &d }
-
-// NET-2 Recovery: a version at or below the one in force or pending is
+// NET-2 Recovery: a version at or below any version ever accepted is
 // refused, a replayed assertion with it; restoring an older document takes
 // a new, higher version with a fresh assertion, and is then a loosening
-// that waits.
+// that waits. The export for the core's backup restores through that path
+// and holds no secret.
 func TestOlderVersionRefused(t *testing.T) {
-	a := newAuthenticator(t, rp)
+	e, a, _ := opened(t)
 	owner := a.Public()
-	store := &memStore{}
-	e, _ := Open(owner, store)
 	p1 := Proposal{Doc: home(1), Diff: []byte("v1")}
-	sig1 := sign(t, a, owner, p1)
-	if _, err := e.Propose(p1, sig1, 0); err != nil {
-		t.Fatal(err)
-	}
-	e.Tick(Wait)
-	p2 := Proposal{Doc: edit(2, func(d *Document) { d.Pairs = nil }), Diff: []byte("v2: remove the pair")}
-	if out, err := e.Propose(p2, sign(t, a, owner, p2), Wait); err != nil || !out.Applied {
+	p2 := Proposal{Doc: edit(2, func(d *Document) { d.Pairs = d.Pairs[:1] }), Diff: []byte("v2: remove the tv-speaker pair")}
+	if out, err := a.propose(t, e, p2, Wait); err != nil || !out.Applied {
 		t.Fatal(out, err)
 	}
-	if _, err := e.Propose(p1, sig1, Wait); !errors.Is(err, ErrNotRising) {
-		t.Errorf("v1 replayed: %v", err)
-	}
-	p1b := Proposal{Doc: home(1), Diff: []byte("v1 again")}
-	if _, err := e.Propose(p1b, sign(t, a, owner, p1b), Wait); !errors.Is(err, ErrNotRising) {
+	if _, err := e.Propose(p1, sign(t, a, owner, p1), Wait); !errors.Is(err, ErrNotRising) {
 		t.Errorf("v1 freshly signed: %v", err)
 	}
-	same := Proposal{Doc: edit(2, func(d *Document) { d.Pairs = nil; dev(d, "cam").VendorCloud = true }), Diff: []byte("v2 again")}
-	if _, err := e.Propose(same, sign(t, a, owner, same), Wait); !errors.Is(err, ErrNotRising) {
+	same := Proposal{Doc: edit(2, func(d *Document) { d.Pairs = d.Pairs[:1]; dev(d, "cam").Isolated = true }), Diff: []byte("v2 again")}
+	if _, err := a.propose(t, e, same, Wait); !errors.Is(err, ErrNotRising) {
 		t.Errorf("an equal version: %v", err)
 	}
 	if e.Current().Version != 2 || len(e.Pending()) != 0 {
 		t.Fatal("a refused version changed the engine")
 	}
 
-	// Restore v1's document as v3: a fresh tap, a loosening, the wait.
 	restore := Proposal{Doc: home(3), Diff: []byte("restore v1: add the pair back")}
-	out, err := e.Propose(restore, sign(t, a, owner, restore), 2*Wait)
+	out, err := a.propose(t, e, restore, 2*Wait)
 	if err != nil || out.Applied || out.Class.Tightening || out.Pending == "" {
 		t.Fatalf("a restore: %+v %v", out, err)
 	}
-	// While v3 waits, v3 again is refused too.
-	again := Proposal{Doc: edit(3, func(d *Document) {}), Diff: []byte("other")}
-	if _, err := e.Propose(again, sign(t, a, owner, again), 2*Wait); !errors.Is(err, ErrNotRising) {
-		t.Errorf("a version equal to a pending one: %v", err)
-	}
 	e.Tick(3 * Wait)
-	if c := e.Current(); c.Version != 3 || len(c.Pairs) != 1 {
+	if c := e.Current(); c.Version != 3 || len(c.Pairs) != 2 {
 		t.Fatalf("after the restore: %+v", c)
-	}
-
-	// A loosening still waiting when the owner signs a later version is
-	// superseded by it: it never applies over the later one.
-	p4 := Proposal{Doc: edit(4, func(d *Document) { dev(d, "cam").VendorCloud = true }), Diff: []byte("v4: allow cam's cloud")}
-	if _, err := e.Propose(p4, sign(t, a, owner, p4), 3*Wait); err != nil {
-		t.Fatal(err)
-	}
-	p5 := Proposal{Doc: edit(5, func(d *Document) { d.Pairs = nil }), Diff: []byte("v5: remove the pair")}
-	if out, err := e.Propose(p5, sign(t, a, owner, p5), 3*Wait); err != nil || !out.Applied {
-		t.Fatal(out, err)
-	}
-	e.Tick(5 * Wait)
-	if c := e.Current(); c.Version != 5 || dev(&c, "cam").VendorCloud || len(e.Pending()) != 0 {
-		t.Fatalf("a superseded loosening applied: %+v", c)
 	}
 }
 
-// NET-4 Standing rules: a visitor's keypad code applies inside its window
-// only. Narrowing or revoking it applies at once, from the channel too;
-// creating or widening it is a loosening that waits.
+// NET-2 Recovery, BAK-1: the export holds the signed versions and the
+// policy in force, restores on a fresh enforcer only through a new signed
+// version, and carries no Wi-Fi password or device secret: its keys are a
+// fixed set, so a field that could hold one fails here first.
+func TestExportRestoresAndHoldsNoSecret(t *testing.T) {
+	e, a, _ := opened(t)
+	owner := a.Public()
+	if err := e.Tighten(Op{Kind: CutVendorCloud, Device: "tv"}, Wait); err != nil {
+		t.Fatal(err)
+	}
+	p2 := Proposal{Doc: edit(2, func(d *Document) { dev(d, "tv").VendorCloud = false; dev(d, "cam").Isolated = true }), Diff: []byte("isolate the camera")}
+	if _, err := a.propose(t, e, p2, Wait); err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var ex Export
+	if json.Unmarshal(b, &ex); ex.Base == nil || len(ex.Signed) != 1 {
+		t.Fatalf("the export holds %d signed steps and base %v, want the base and the camera's isolation", len(ex.Signed), ex.Base != nil)
+	}
+	var x any
+	json.Unmarshal(b, &x)
+	allowed := map[string]bool{
+		"base": true, "signed": true, "current": true, "key": true, "doc": true, "diff": true,
+		"root": true, "links": true, "owner": true, "clerk": true, "verbs": true, "serial": true, "sig": true,
+		"alg": true, "rp_id": true, "point": true,
+	}
+	var walk func(v any)
+	walk = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for k, c := range v {
+				if !allowed[k] {
+					t.Errorf("the export has a key %q", k)
+				}
+				walk(c)
+			}
+		case []any:
+			for _, c := range v {
+				walk(c)
+			}
+		}
+	}
+	walk(x)
+	cur, _ := Encode(e.Current())
+	var docKeys map[string]any
+	json.Unmarshal(cur, &docKeys)
+	for k := range docKeys {
+		if k != "version" && k != "destinations" && k != "devices" && k != "pairs" && k != "standing" && k != "holds" && k != "drone" {
+			t.Errorf("a document key %q", k)
+		}
+	}
+
+	got, err := ReadExport(owner, b)
+	if err != nil || !reflect.DeepEqual(got, e.Current()) {
+		t.Fatalf("read back: %v", err)
+	}
+	if _, err := ReadExport(newAuthenticator(t, rp).Public(), b); err == nil {
+		t.Error("an export read against another owner")
+	}
+
+	// A fresh enforcer, same owner: the export restores only as a new
+	// signed version, after the wait.
+	fresh, _ := Open(owner, &memStore{})
+	got.Version = 1
+	if out, err := a.propose(t, fresh, Proposal{Doc: got, Diff: []byte("restore the backup")}, 0); err != nil || out.Pending == "" {
+		t.Fatalf("restore: %+v %v", out, err)
+	}
+	fresh.Tick(Wait)
+	want := e.Current()
+	want.Version = 1
+	if !reflect.DeepEqual(fresh.Current(), want) {
+		t.Fatalf("restored %+v, want %+v", fresh.Current(), want)
+	}
+}
+
+// NET-4 Standing rules: a rule applies inside its window only. On an
+// off-list device narrowing or revoking it applies at once, from the
+// channel too; on a safety-list device, such as a lock's visitor code, it
+// needs the owner (it can lock a visitor out), then applies at once.
+// Creating or widening one is a loosening that waits.
 func TestStandingRuleWindow(t *testing.T) {
 	d := home(1)
 	for at, want := range map[int64]int{999: 0, 1000: 1, 1999: 1, 2000: 0} {
@@ -432,28 +579,36 @@ func TestStandingRuleWindow(t *testing.T) {
 		t.Error("a rule applies to another device")
 	}
 
-	a := newAuthenticator(t, rp)
-	owner := a.Public()
-	e, _ := Open(owner, &memStore{})
-	p := Proposal{Doc: d, Diff: []byte("v1")}
-	e.Propose(p, sign(t, a, owner, p), 0)
-	e.Tick(Wait)
-
-	if err := e.Tighten(Op{Kind: NarrowRule, Device: "lock", Rule: "plumber", FromMS: 1000, ToMS: 1500}, Wait); err != nil {
-		t.Fatalf("narrowing from the channel: %v", err)
+	e, a, _ := opened(t)
+	if err := e.Tighten(Op{Kind: NarrowRule, Device: "speaker", Rule: "party", FromMS: 1000, ToMS: 1500}, Wait); err != nil {
+		t.Fatalf("narrowing an off-list rule from the channel: %v", err)
 	}
-	if len(e.Current().Active("lock", 1600)) != 0 {
+	if len(e.Current().Active("speaker", 1600)) != 0 {
 		t.Error("a narrowed rule still applies outside its new window")
 	}
-	if err := e.Tighten(Op{Kind: NarrowRule, Device: "lock", Rule: "plumber", FromMS: 1000, ToMS: 3000}, Wait); !errors.Is(err, ErrNotTightening) {
-		t.Errorf("widening from the channel: %v", err)
+	for name, op := range map[string]Op{
+		"narrow":  {Kind: NarrowRule, Device: "lock", Rule: "plumber", FromMS: 1000, ToMS: 1500},
+		"revoke ": {Kind: RevokeRule, Device: "lock", Rule: "plumber"},
+	} {
+		if err := e.Tighten(op, Wait); !errors.Is(err, ErrNeedsOwner) {
+			t.Errorf("%s the lock's visitor code from the channel: %v", name, err)
+		}
 	}
-	if err := e.Tighten(Op{Kind: NarrowRule, Device: "lock", Rule: "plumber", FromMS: 500, ToMS: 1200}, Wait); !errors.Is(err, ErrNotTightening) {
-		t.Errorf("shifting from the channel: %v", err)
+	for name, op := range map[string]Op{
+		"widen": {Kind: NarrowRule, Device: "speaker", Rule: "party", FromMS: 1000, ToMS: 3000},
+		"shift": {Kind: NarrowRule, Device: "speaker", Rule: "party", FromMS: 500, ToMS: 1200},
+	} {
+		if err := e.Tighten(op, Wait); !errors.Is(err, ErrNotTightening) {
+			t.Errorf("%s from the channel: %v", name, err)
+		}
 	}
 
-	wide := Proposal{Doc: edit(2, func(d *Document) { d.Standing[0].ToMS = 9000 }), Diff: []byte("plumber until 9000")}
-	out, err := e.Propose(wide, sign(t, a, owner, wide), Wait)
+	narrow := Proposal{Doc: edit(2, func(d *Document) { rule(d, "party").ToMS = 1500; rule(d, "plumber").ToMS = 1200 }), Diff: []byte("plumber until 1200")}
+	if out, err := a.propose(t, e, narrow, Wait); err != nil || !out.Applied || !out.Class.Owner {
+		t.Fatalf("a signed narrowing of the lock's code: %+v %v", out, err)
+	}
+	wide := Proposal{Doc: edit(3, func(d *Document) { rule(d, "party").ToMS = 1500; rule(d, "plumber").ToMS = 9000 }), Diff: []byte("plumber until 9000")}
+	out, err := a.propose(t, e, wide, Wait)
 	if err != nil || out.Applied || out.Pending == "" {
 		t.Fatalf("a signed widening: %+v %v", out, err)
 	}
@@ -464,8 +619,8 @@ func TestStandingRuleWindow(t *testing.T) {
 	if len(e.Current().Active("lock", 5000)) != 1 {
 		t.Error("a signed widening did not apply after the wait")
 	}
-	if err := e.Tighten(Op{Kind: RevokeRule, Device: "lock", Rule: "plumber"}, 2*Wait); err != nil || len(e.Current().Standing) != 0 {
-		t.Fatalf("revoking from the channel: %v", err)
+	if err := e.Tighten(Op{Kind: RevokeRule, Device: "speaker", Rule: "party"}, 2*Wait); err != nil {
+		t.Fatalf("revoking an off-list rule from the channel: %v", err)
 	}
 }
 
@@ -474,32 +629,33 @@ func TestStandingRuleWindow(t *testing.T) {
 // rate-limited per device.
 func TestChannelTighteningsAreClosedAndLimited(t *testing.T) {
 	a := newAuthenticator(t, rp)
-	owner := a.Public()
-	e, _ := Open(owner, &memStore{})
+	e, _ := Open(a.Public(), &memStore{})
 	d := home(1)
 	for i := range 10 {
-		d.Devices[0].Allow = append(d.Devices[0].Allow, string(rune('c'+i))+".example")
+		dev(&d, "tv").Allow = append(dev(&d, "tv").Allow, string(rune('c'+i))+".example")
 	}
-	p := Proposal{Doc: d, Diff: []byte("v1")}
-	e.Propose(p, sign(t, a, owner, p), 0)
+	a.propose(t, e, Proposal{Doc: d, Diff: []byte("v1")}, 0)
 	e.Tick(Wait)
 
 	for name, op := range map[string]Op{
-		"unknown kind":      {Kind: "allow-destination", Device: "plug", Host: "x.example"},
-		"missing host":      {Kind: RemoveDestination, Device: "plug", Host: "x.example"},
-		"missing device":    {Kind: IsolateDevice, Device: "tv"},
-		"cut a cut cloud":   {Kind: CutVendorCloud, Device: "cam"},
-		"missing rule":      {Kind: RevokeRule, Device: "lock", Rule: "x"},
-		"rule on wrong dev": {Kind: RevokeRule, Device: "cam", Rule: "plumber"},
+		"unknown kind":      {Kind: "allow-destination", Device: "tv", Host: "x.example"},
+		"missing host":      {Kind: RemoveDestination, Device: "tv", Host: "x.example"},
+		"missing device":    {Kind: IsolateDevice, Device: "fridge"},
+		"cut a cut cloud":   {Kind: CutVendorCloud, Device: "speaker"},
+		"missing rule":      {Kind: RevokeRule, Device: "speaker", Rule: "x"},
+		"rule on wrong dev": {Kind: RevokeRule, Device: "tv", Rule: "party"},
 	} {
 		if err := e.Tighten(op, Wait); !errors.Is(err, ErrNotTightening) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	for name, op := range map[string]Op{
-		"isolate the lock":   {Kind: IsolateDevice, Device: "lock"},
-		"cut the lock cloud": {Kind: CutVendorCloud, Device: "lock"},
-		"remove the lock":    {Kind: RemoveDevice, Device: "lock"},
+		"isolate the lock":       {Kind: IsolateDevice, Device: "lock"},
+		"cut the camera's cloud": {Kind: CutVendorCloud, Device: "cam"},
+		"isolate the camera":     {Kind: IsolateDevice, Device: "cam"},
+		"cut the plug's cloud":   {Kind: CutVendorCloud, Device: "plug"},
+		"remove the plug's pair": {Kind: RemovePair, Pair: Pair{A: "cam", B: "plug"}},
+		"remove the lock":        {Kind: RemoveDevice, Device: "lock"},
 	} {
 		if err := e.Tighten(op, Wait); !errors.Is(err, ErrNeedsOwner) {
 			t.Errorf("%s: %v", name, err)
@@ -508,24 +664,27 @@ func TestChannelTighteningsAreClosedAndLimited(t *testing.T) {
 	if err := e.Secure("lock", "unlock", Wait); !errors.Is(err, ErrNotSecure) {
 		t.Errorf("unlock as a secure command: %v", err)
 	}
-	if err := e.Secure("plug", "off", Wait); !errors.Is(err, ErrNotSecure) {
+	if err := e.Secure("tv", "off", Wait); !errors.Is(err, ErrNotSecure) {
 		t.Errorf("a device off the safety list: %v", err)
 	}
+	if err := e.Secure("cam", "", Wait); !errors.Is(err, ErrNotSecure) {
+		t.Errorf("a camera with no named command: %v", err)
+	}
 
-	hosts := e.Current().Device("plug").Allow
+	hosts := e.Current().Device("tv").Allow
 	now := int64(Wait)
 	for i := range TightenLimit {
-		if err := e.Tighten(Op{Kind: RemoveDestination, Device: "plug", Host: hosts[i]}, now); err != nil {
+		if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: hosts[i]}, now); err != nil {
 			t.Fatalf("tightening %d: %v", i, err)
 		}
 	}
-	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "plug", Host: hosts[TightenLimit]}, now); !errors.Is(err, ErrRateLimited) {
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: hosts[TightenLimit]}, now); !errors.Is(err, ErrRateLimited) {
 		t.Errorf("past the limit: %v", err)
 	}
-	if err := e.Tighten(Op{Kind: IsolateDevice, Device: "cam"}, now); err != nil {
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "speaker", Host: "s.example"}, now); err != nil {
 		t.Errorf("another device's limit is its own: %v", err)
 	}
-	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "plug", Host: hosts[TightenLimit]}, now+TightenWindow); err != nil {
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: hosts[TightenLimit]}, now+TightenWindow); err != nil {
 		t.Errorf("after the window: %v", err)
 	}
 	for i := range TightenLimit {
@@ -539,55 +698,51 @@ func TestChannelTighteningsAreClosedAndLimited(t *testing.T) {
 }
 
 // A stored state that does not verify is refused at start, not enforced:
-// a forged signed version, or a step that is not a closed-list tightening.
+// a forged signed version, a step that is not a closed-list tightening, an
+// asserted step with no signature or a signature over another op, a
+// lowered spent version, or a pending change with another diff.
 func TestTamperedStoreRefused(t *testing.T) {
-	a := newAuthenticator(t, rp)
+	e, a, store := opened(t)
 	owner := a.Public()
-	store := &memStore{}
-	e, _ := Open(owner, store)
-	p := Proposal{Doc: home(1), Diff: []byte("v1")}
-	e.Propose(p, sign(t, a, owner, p), 0)
-	e.Tick(Wait)
-	e.Tighten(Op{Kind: CutVendorCloud, Device: "plug"}, Wait)
-	good := slices.Clone(store.b)
-
-	var st state
-	json.Unmarshal(good, &st)
-	wider := edit(1, func(d *Document) { dev(d, "plug").Allow = append(dev(d, "plug").Allow, "evil.example") })
-	st.Base.Doc, _ = Encode(wider)
-	store.b, _ = json.Marshal(st)
-	if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("a widened stored document: %v", err)
-	}
-
-	json.Unmarshal(good, &st)
-	st.Steps[0].Op = Op{Kind: "allow-cloud", Device: "cam"}
-	store.b, _ = json.Marshal(st)
-	if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("a loosening step: %v", err)
-	}
-
-	json.Unmarshal(good, &st)
-	st.Steps[0].Seq = st.Seq + 1
-	store.b, _ = json.Marshal(st)
-	if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("a step from after the last one: %v", err)
-	}
-
-	p2 := Proposal{Doc: edit(2, func(d *Document) { dev(d, "cam").VendorCloud = true }), Diff: []byte("v2")}
-	store.b = good
-	e, _ = Open(owner, store)
-	if _, err := e.Propose(p2, sign(t, a, owner, p2), Wait); err != nil {
+	e.Tighten(Op{Kind: CutVendorCloud, Device: "tv"}, Wait)
+	p2 := Proposal{Doc: edit(2, func(d *Document) { dev(d, "tv").VendorCloud = false; dev(d, "cam").Isolated = true }), Diff: []byte("isolate the camera")}
+	if _, err := a.propose(t, e, p2, Wait); err != nil {
 		t.Fatal(err)
 	}
-	json.Unmarshal(store.b, &st)
-	st.Pending[0].Diff = []byte("something the owner did not see")
-	store.b, _ = json.Marshal(st)
-	if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
-		t.Errorf("a pending change with another diff: %v", err)
+	p3 := Proposal{Doc: edit(3, func(d *Document) {
+		dev(d, "tv").VendorCloud = false
+		dev(d, "cam").Isolated = true
+		dev(d, "speaker").VendorCloud = true
+	}), Diff: []byte("v3")}
+	if _, err := a.propose(t, e, p3, Wait); err != nil {
+		t.Fatal(err)
 	}
-	json.Unmarshal(good, &st)
+	good := slices.Clone(store.b)
+	if _, err := Open(owner, store); err != nil {
+		t.Fatalf("the untampered state: %v", err)
+	}
 
+	for name, f := range map[string]func(st *state){
+		"a widened base document": func(st *state) {
+			st.Base.Doc, _ = Encode(edit(1, func(d *Document) { dev(d, "tv").Allow = append(dev(d, "tv").Allow, "evil.example") }))
+		},
+		"a loosening step":                           func(st *state) { st.Steps[0].Op = Op{Kind: "allow-cloud", Device: "cam"} },
+		"a step after the last":                      func(st *state) { st.Steps[0].Seq = st.Seq + 1 },
+		"an unsigned safety step":                    func(st *state) { st.Steps[0].Op = Op{Kind: IsolateDevice, Device: "lock"} },
+		"an asserted step stripped of its signature": func(st *state) { st.Steps[1].Signed, st.Steps[1].Prev = nil, nil },
+		"a signature moved to another op":            func(st *state) { st.Steps[1].Op = Op{Kind: IsolateDevice, Device: "lock"} },
+		"a lowered spent version":                    func(st *state) { st.Spent = 0 },
+		"a pending change with another diff":         func(st *state) { st.Pending[0].Diff = []byte("not what the owner saw") },
+		"two pending changes":                        func(st *state) { st.Pending = append(st.Pending, st.Pending[0]) },
+	} {
+		var st state
+		json.Unmarshal(good, &st)
+		f(&st)
+		store.b, _ = json.Marshal(st)
+		if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
 	store.b = good
 	if _, err := Open(newAuthenticator(t, rp).Public(), store); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("another owner's state: %v", err)
@@ -606,7 +761,7 @@ func TestCanonicalDocument(t *testing.T) {
 	}
 	shuffled := home(1)
 	slices.Reverse(shuffled.Devices)
-	shuffled.Pairs[0] = Pair{A: "plug", B: "cam"}
+	shuffled.Pairs[0] = Pair{A: "cam", B: "plug"}
 	if b2, _ := Encode(shuffled); string(b2) != string(b) {
 		t.Error("order changes the encoding")
 	}
@@ -620,12 +775,13 @@ func TestCanonicalDocument(t *testing.T) {
 		}
 	}
 	for name, f := range map[string]func(d *Document){
-		"duplicate device": func(d *Document) { d.Devices = append(d.Devices, d.Devices[0]) },
-		"unknown network":  func(d *Document) { d.Devices[0].Network = "wan" },
-		"slash in a host":  func(d *Document) { d.Devices[0].Allow = []string{"a/b"} },
-		"self pair":        func(d *Document) { d.Pairs = []Pair{{"cam", "cam"}} },
-		"empty window":     func(d *Document) { d.Standing[0].ToMS = d.Standing[0].FromMS },
-		"orphan hold":      func(d *Document) { d.Holds[0].Device = "tv" },
+		"duplicate device":          func(d *Document) { d.Devices = append(d.Devices, d.Devices[0]) },
+		"unknown network":           func(d *Document) { d.Devices[0].Network = "wan" },
+		"slash in a host":           func(d *Document) { d.Devices[0].Allow = []string{"a/b"} },
+		"self pair":                 func(d *Document) { d.Pairs = []Pair{{"cam", "cam"}} },
+		"empty window":              func(d *Document) { d.Standing[0].ToMS = d.Standing[0].FromMS },
+		"orphan hold":               func(d *Document) { d.Holds[0].Device = "fridge" },
+		"secure on everyday device": func(d *Document) { dev(d, "tv").Secure = "off" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)
