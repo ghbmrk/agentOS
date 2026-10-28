@@ -132,8 +132,8 @@ func TestEnrolChecksAndLends(t *testing.T) {
 
 // Enrol makes a template only on an anchor's co-signature over the one
 // change Begin named, used once and within ApprovalTTL: not without one,
-// not a passkey that is no anchor, not over another id, subject, frame or
-// notice, not a second time, and not late. A refused enrolment asks the
+// not a passkey that is no anchor, not over another id, subject or frame,
+// not a second time, and not late. A refused enrolment asks the
 // service for nothing and writes no slot (DEV-7, CH-3).
 func TestEnrolNeedsTheAnchorsApproval(t *testing.T) {
 	ctx := context.Background()
@@ -153,21 +153,26 @@ func TestEnrolNeedsTheAnchorsApproval(t *testing.T) {
 	}
 	var nonce [16]byte
 	unbegun := EnrolHash(nonce, "alice", "", FrameDigest(fr))
-	w0, w1, w2, w3 := begin("alice"), begin("alice"), begin("alice"), begin("alice")
+	w0, w1, w2, w3, w4 := begin("alice"), begin("alice"), begin("alice"), begin("alice"), begin("alice")
 	for _, tc := range []struct {
-		name  string
-		id    string
-		frame vision.Frame
-		what  [32]byte
-		c     key.Cosign
+		name    string
+		id      string
+		subject string
+		frame   vision.Frame
+		what    [32]byte
+		c       key.Cosign
 	}{
-		{"no signature", "alice", fr, w0, key.Cosign{}},
-		{"not an anchor", "alice", fr, w1, key.Approve(stranger, w1)},
-		{"another id", "bob", fr, w2, key.Approve(anchor, w2)},
-		{"another frame", "alice", other, w3, key.Approve(anchor, w3)},
-		{"never begun", "alice", fr, unbegun, key.Approve(anchor, unbegun)},
+		{"no signature", "alice", "", fr, w0, key.Cosign{}},
+		{"not an anchor", "alice", "", fr, w1, key.Approve(stranger, w1)},
+		{"another id", "bob", "", fr, w2, key.Approve(anchor, w2)},
+		{"another frame", "alice", "", other, w3, key.Approve(anchor, w3)},
+		// An approval of alice as a new person does not enrol her under
+		// someone else's subject, where erasing her would not reach the
+		// template (LOG-4, VIS-A15).
+		{"another subject", "alice", "s-bob", fr, w4, key.Approve(anchor, w4)},
+		{"never begun", "alice", "", fr, unbegun, key.Approve(anchor, unbegun)},
 	} {
-		if err := f.Enrol(ctx, tc.id, "", tc.frame, tc.what, tc.c); !errors.Is(err, ErrApproval) {
+		if err := f.Enrol(ctx, tc.id, tc.subject, tc.frame, tc.what, tc.c); !errors.Is(err, ErrApproval) {
 			t.Errorf("%s: %v", tc.name, err)
 		}
 	}
@@ -176,8 +181,9 @@ func TestEnrolNeedsTheAnchorsApproval(t *testing.T) {
 		t.Errorf("a change a refusal used: %v", err)
 	}
 	w := begin("alice")
-	// A signature over another change (as a page with other notice
-	// words would get) is refused.
+	// A signature over another change is refused. (This does not show
+	// the page displayed ConsentNotice: the page signs Begin's what
+	// whatever it showed, so only the page's own test can; VIS-A17.)
 	if err := f.Enrol(ctx, "alice", "", fr, w, key.Approve(anchor, [32]byte{1})); !errors.Is(err, ErrApproval) {
 		t.Errorf("a signature over another change: %v", err)
 	}

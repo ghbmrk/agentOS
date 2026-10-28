@@ -9,9 +9,10 @@ import (
 // A planner's asks of VIS-core (DEV-7, D-207; brief design point 4). A
 // planner sees only track-level outputs: zone entries, dwell, counts and
 // closed-vocabulary classes, which part (b) declares in PlannerOps. An Ask
-// has no field that can hold a crop, a frame, an encoding or a
-// description: its camera and zone are ids from a closed alphabet and its
-// class is from the closed list. So no ask can carry a person's likeness
+// has no field that can hold a crop, a frame or an encoding: its camera
+// and zone are ids from a closed alphabet and its class is from the
+// closed list. Op is a free string, but CheckAsk passes only an exact
+// member of PlannerOps, so no ask can carry a person's likeness
 // in, and none is answered with one: crops and boxes go only to the
 // owner's own page (brief points 2 and 4).
 

@@ -50,7 +50,8 @@ func TestEnrolOnlyFromTierFour(t *testing.T) {
 	if made != 0 || r.sec.Len() != 0 {
 		t.Fatalf("a refused enrolment made %d encodings and %d slots", made, r.sec.Len())
 	}
-	// The notice the anchor's change binds says what the page must.
+	// The notice, whose version the anchor's change pins, says what the page
+	// must. That the page shows it is the page's own test (VIS-A17).
 	for _, w := range []string{"consent", "until you remove them", "after a restore"} {
 		if !strings.Contains(faces.ConsentNotice, w) {
 			t.Errorf("the consent notice does not say %q", w)
