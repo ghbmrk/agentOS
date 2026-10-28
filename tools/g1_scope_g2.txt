@@ -53,6 +53,10 @@ exempt-pr 3746
 # not name (D-198). Remove once #3750 merges.
 exempt-pr 3750
 
+# #3774 (VIS-core e1, VIS-models, #3515): broker/vision/ (proto.go, ASSUMPTIONS.md) and
+# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3774 merges.
+exempt-pr 3774
+
 # Project machinery and records.
 allow .claude/
 allow .github/
