@@ -44,39 +44,18 @@ since 2026-10-17T17:06:19Z
 # migration step 4 (D-139; PLAN.md §3, "Who works where until step 4" and "One owner per
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
-# #3460 (EDGE-link-core c2a, #3297): its new broker/cmd/agentos-link/ is added here by #3460
-# itself, which main cannot carry until the directory exists (D-198). Remove once it merges.
-exempt-pr 3460
-# #3554 (MAIL-keys, #3419): broker/cmd/agentos-a8scan/, which the G2 list does not name,
-# scans for the clerk root key and each clerk's keys in place of seal.Store.Sealer's, which
-# #3554 retires (#3419 comment 6453938265); it replaced #3500's line, merged (D-198).
-# Remove once #3554 merges.
-exempt-pr 3554
-
-# #3576 (VIS-svc, #3515 part a): broker/vision/ and broker/cmd/agentos-vision/, which the
-# G2 list does not name (D-198). Remove once #3576 merges.
-exempt-pr 3576
-
-# #3557 (CAM-wire, #3513 part a): the new broker/camwire/, the camera node's wire, which
-# the G2 list does not name (D-198). Remove once #3557 merges.
-exempt-pr 3557
 
 # #3562 (DRONE-sim a, #3516): broker/drone/ and broker/cmd/agentos-drone/, which the G2
 # list does not name (D-198). Remove once #3562 merges.
 exempt-pr 3562
-# #3568 (MIG-4-untrusted-exit-b2b, #2780): the new broker/cmd/agentos-clerk-model/, which the G2
-# list does not name (D-198). Remove once #3568 merges.
-exempt-pr 3568
+
 # #3586 (CAM-server b1, #3513 part b): the new broker/camnode/ and broker/camwire/, which the
 # G2 list does not name (D-198). Remove once #3586 merges.
 exempt-pr 3586
+
 # #3589 (DEVSLOT-host-unit b2b-1, #3473): the new broker/cmd/agentos-devices/, which the G2
 # list does not name (D-198). Remove once #3589 merges.
 exempt-pr 3589
-
-# #3583 (CAM-server b1, #3513 part b): the new broker/camnode/, the camera node's server and
-# secure-element driver, which the G2 list does not name (D-198). Remove once #3583 merges.
-exempt-pr 3583
 
 # #3596 (VIS-faces c1, #3515 part c): broker/vision/ (with the new faces/) and
 # broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
