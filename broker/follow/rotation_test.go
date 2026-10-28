@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
 )
@@ -68,7 +66,7 @@ func (r *rig) describeChain(root []byte, chain ...[]byte) string {
 // describe time and at the switch.
 func TestOSS10wrSwitchBackAfterARotation(t *testing.T) {
 	r := newRig(t)
-	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	v2, k2 := rotated(t, r.shipped, r.pk)
@@ -77,7 +75,7 @@ func TestOSS10wrSwitchBackAfterARotation(t *testing.T) {
 	if r.x.Project(context.Background(), alone) {
 		t.Fatal("a twice-rotated root with no chain read as the project's")
 	}
-	if out := r.run(grants.FollowIntent("a2", "", alone)); out.Result != journal.ResultNotApplied ||
+	if out := r.run(req("a2", "", alone)); out.Result != NotSwitched ||
 		!strings.Contains(out.Evidence, "project's own root") || !r.trusts(r.fork) {
 		t.Fatalf("switched back with no chain: %+v", out)
 	}
@@ -85,7 +83,7 @@ func TestOSS10wrSwitchBackAfterARotation(t *testing.T) {
 	if d != alone || !r.x.Project(context.Background(), d) {
 		t.Fatal("the chained root is not the project's, or its digest moved")
 	}
-	if out := r.run(grants.FollowIntent("a3", "", d)); out.Result != journal.ResultSucceeded || !r.trusts(v3) {
+	if out := r.run(req("a3", "", d)); out.Result != SwitchedOK || !r.trusts(v3) {
 		t.Fatalf("switching back through the rotation: %+v", out)
 	}
 	if src, _ := r.store.Following(); src != (update.Followed{}) {
@@ -104,10 +102,10 @@ func TestOSS10wrForkRotationIsNotTheProject(t *testing.T) {
 	if r.x.Project(context.Background(), d) {
 		t.Fatal("a fork's own rotation read as the project's")
 	}
-	if out := r.run(grants.FollowIntent("a1", "", d)); out.Result != journal.ResultNotApplied || !r.trusts(r.shipped) {
+	if out := r.run(req("a1", "", d)); out.Result != NotSwitched || !r.trusts(r.shipped) {
 		t.Fatalf("%+v", out)
 	}
-	if out := r.run(grants.FollowIntent("a2", "Acme", d)); out.Result != journal.ResultSucceeded || !r.trusts(f2) {
+	if out := r.run(req("a2", "Acme", d)); out.Result != SwitchedOK || !r.trusts(f2) {
 		t.Fatalf("following the fork by name: %+v", out)
 	}
 }
@@ -134,20 +132,20 @@ func TestOSS10wrSwitchBackNeverRollsBack(t *testing.T) {
 	v2, k2 := rotated(t, r.shipped, r.pk)
 	v3, k3 := rotated(t, v2, k2)
 	v4, _ := rotated(t, v3, k3)
-	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
-	if out := r.run(grants.FollowIntent("a2", "", r.describeChain(v3, v2))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a2", "", r.describeChain(v3, v2))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
-	if out := r.run(grants.FollowIntent("a3", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a3", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	for name, d := range map[string]string{"v2": r.describeChain(v2), "shipped": r.describe(r.shipped)} {
 		if r.x.Project(context.Background(), d) {
 			t.Fatalf("%s read as the project's after the box trusted v3", name)
 		}
-		if out := r.run(grants.FollowIntent("b-"+name, "", d)); out.Result != journal.ResultNotApplied || !r.trusts(r.fork) {
+		if out := r.run(req("b-"+name, "", d)); out.Result != NotSwitched || !r.trusts(r.fork) {
 			t.Fatalf("switched back to %s: %+v", name, out)
 		}
 	}
@@ -165,10 +163,10 @@ func TestOSS10wrBackOnTheProjectNeverRollsBack(t *testing.T) {
 	v2, k2 := rotated(t, r.shipped, r.pk)
 	v3, k3 := rotated(t, v2, k2)
 	v4, _ := rotated(t, v3, k3)
-	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
-	if out := r.run(grants.FollowIntent("a2", "", r.describeChain(v3, v2))); out.Result != journal.ResultSucceeded || !r.trusts(v3) {
+	if out := r.run(req("a2", "", r.describeChain(v3, v2))); out.Result != SwitchedOK || !r.trusts(v3) {
 		t.Fatalf("%+v", out)
 	}
 	r.refusesRollback(map[string]string{"v2": r.describeChain(v2), "shipped": r.describe(r.shipped)}, v3)
@@ -203,7 +201,7 @@ func (r *rig) refusesRollback(older map[string]string, trusted []byte) {
 		if r.x.Project(context.Background(), d) {
 			r.t.Fatalf("%s read as the project's after the box trusted a newer root", name)
 		}
-		if out := r.run(grants.FollowIntent("b-"+name, "", d)); out.Result != journal.ResultNotApplied || !r.trusts(trusted) {
+		if out := r.run(req("b-"+name, "", d)); out.Result != NotSwitched || !r.trusts(trusted) {
 			r.t.Fatalf("switched back to %s: %+v", name, out)
 		}
 	}
@@ -252,14 +250,14 @@ func TestOSS10wrRotationDuringASwitchBackIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if out := x.Execute(context.Background(), grants.FollowIntent("a1", "", sum.Digest), 1); out.Result != journal.ResultNotApplied || !r.trusts(v2) {
+		if out := run(x, req("a1", "", sum.Digest)); out.Result != NotSwitched || !r.trusts(v2) {
 			t.Fatalf("switched back past a rotation: %+v", out)
 		}
 	})
 	t.Run("another switch back lands first", func(t *testing.T) {
 		r := newRig(t)
 		v2, _ := rotated(t, r.shipped, r.pk)
-		if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+		if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 			t.Fatalf("%+v", out)
 		}
 		var x *Executor
@@ -268,7 +266,7 @@ func TestOSS10wrRotationDuringASwitchBackIsRefused(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if out := x.Execute(context.Background(), grants.FollowIntent("b1", "", sum.Digest), 1); out.Result != journal.ResultSucceeded {
+			if out := run(x, req("b1", "", sum.Digest)); out.Result != SwitchedOK {
 				t.Fatalf("%+v", out)
 			}
 		}
@@ -277,7 +275,7 @@ func TestOSS10wrRotationDuringASwitchBackIsRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if out := x.Execute(context.Background(), grants.FollowIntent("a2", "", sum.Digest), 1); out.Result != journal.ResultNotApplied || !r.trusts(v2) {
+		if out := run(x, req("a2", "", sum.Digest)); out.Result != NotSwitched || !r.trusts(v2) {
 			t.Fatalf("switched back past a newer project root: %+v", out)
 		}
 		if b, err := r.store.ProjectRoot(); err != nil || string(b) != string(v2) {
@@ -296,7 +294,7 @@ func TestOSS10wrProjectRootIsNeverFollowedByName(t *testing.T) {
 	v2, k2 := rotated(t, r.shipped, r.pk)
 	v3, _ := rotated(t, v2, k2)
 	for i, d := range []string{r.describe(r.shipped), r.describe(v2), r.describeChain(v3, v2)} {
-		if out := r.run(grants.FollowIntent(fmt.Sprintf("a%d", i), "AgentOS", d)); out.Result != journal.ResultNotApplied ||
+		if out := r.run(req(fmt.Sprintf("a%d", i), "Agent"+"OS", d)); out.Result != NotSwitched ||
 			!strings.Contains(out.Evidence, "switch back") || !r.trusts(r.shipped) {
 			t.Fatalf("followed the project's root under a name: %+v", out)
 		}
@@ -304,7 +302,7 @@ func TestOSS10wrProjectRootIsNeverFollowedByName(t *testing.T) {
 	if src, _ := r.store.Following(); src != (update.Followed{}) {
 		t.Fatalf("recorded a fork: %+v", src)
 	}
-	if out := r.run(grants.FollowIntent("b", "", r.describeChain(v3, v2))); out.Result != journal.ResultSucceeded || !r.trusts(v3) {
+	if out := r.run(req("b", "", r.describeChain(v3, v2))); out.Result != SwitchedOK || !r.trusts(v3) {
 		t.Fatalf("switching back instead: %+v", out)
 	}
 }

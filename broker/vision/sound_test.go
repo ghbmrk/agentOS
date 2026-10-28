@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math/rand/v2"
+	"sync"
 	"testing"
 	"time"
 )
@@ -113,5 +115,118 @@ func TestHearZeroesTheClip(t *testing.T) {
 		if !zero(pcm) {
 			t.Errorf("%s: clip left unzeroed", name)
 		}
+	}
+}
+
+// #3728: the first-in-minute pass is one minute wide. With the limit full,
+// a label's repeat at 59 s after its last event is held, and at 60 s it
+// passes as the label's first event in a minute.
+func TestSoundFirstInMinuteWindowEdge(t *testing.T) {
+	var labels []Sound
+	path := serve(t, func(Request) []byte { return soundReply(t, labels...) })
+	now := time.Unix(1_800_000_000, 0)
+	s := NewSounds(Client{Path: path})
+	s.Now = func() time.Time { return now }
+	s.PerMinute = 1
+	hear := func(l string) []SoundEvent {
+		t.Helper()
+		labels = []Sound{{Label: l, Conf: 70}}
+		es, err := s.Hear(context.Background(), "porch", clip(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return es
+	}
+	start := now
+	if es := hear("knock"); len(es) != 1 {
+		t.Fatalf("first knock: %+v", es)
+	}
+	now = start.Add(30 * time.Second)
+	if es := hear("doorbell"); len(es) != 1 {
+		t.Fatalf("first doorbell: %+v", es)
+	}
+	now = start.Add(59 * time.Second)
+	if es := hear("knock"); len(es) != 0 {
+		t.Fatalf("a repeat at 59 s with the limit full: %+v", es)
+	}
+	now = start.Add(60 * time.Second)
+	if es := hear("knock"); len(es) != 1 || es[0].Coalesced != 1 {
+		t.Fatalf("at 60 s: %+v", es)
+	}
+}
+
+// #3728: a hostile service, hearing a random set of labels in each clip,
+// one clip a second for half an hour, gets at most PerMinute+MaxSounds
+// events in any minute from one source (VIS-A20: 14).
+func TestSoundCeilingPerSource(t *testing.T) {
+	r := rand.New(rand.NewPCG(3728, 1))
+	var mu sync.Mutex
+	path := serve(t, func(Request) []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		var ss []Sound
+		for _, l := range SoundLabels() {
+			if r.IntN(3) == 0 {
+				ss = append(ss, Sound{Label: l, Conf: 99})
+			}
+		}
+		return soundReply(t, ss...)
+	})
+	now := time.Unix(1_800_000_000, 0)
+	s := NewSounds(Client{Path: path})
+	s.Now = func() time.Time { return now }
+	var at []time.Time
+	for range 1800 {
+		es, err := s.Hear(context.Background(), "porch", clip(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range es {
+			at = append(at, now)
+		}
+		now = now.Add(time.Second)
+	}
+	most := 0
+	for i := range at {
+		n := 0
+		for _, b := range at[i:] {
+			if b.Sub(at[i]) < time.Minute {
+				n++
+			}
+		}
+		most = max(most, n)
+	}
+	if most > DefaultSoundsPerMinute+MaxSounds || most < MaxSounds {
+		t.Fatalf("at most %d events in a minute, want %d to %d", most, MaxSounds, DefaultSoundsPerMinute+MaxSounds)
+	}
+}
+
+// #3728, later: a stale source is dropped when a new one comes only if
+// it holds no coalesced count, so a held count is never lost.
+func TestSoundStaleSourceKeepsItsCount(t *testing.T) {
+	labels := []Sound{{Label: "knock", Conf: 70}}
+	path := serve(t, func(Request) []byte { return soundReply(t, labels...) })
+	now := time.Unix(1_800_000_000, 0)
+	s := NewSounds(Client{Path: path})
+	s.Now = func() time.Time { return now }
+	hear := func(src string) {
+		t.Helper()
+		if _, err := s.Hear(context.Background(), src, clip(1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hear("held")
+	hear("held") // within Quiet: held and counted
+	hear("clean")
+	now = now.Add(2 * time.Hour)
+	hear("new")
+	if s.Coalesced("held", "knock") != 1 {
+		t.Fatal("a stale source's held count was dropped")
+	}
+	s.mu.Lock()
+	_, clean := s.sources["clean"]
+	s.mu.Unlock()
+	if clean {
+		t.Fatal("a stale source with nothing held was kept")
 	}
 }

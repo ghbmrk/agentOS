@@ -265,9 +265,7 @@ func TestWatchTellsTheOwnerOfItsRewind(t *testing.T) {
 	k.mu.Lock()
 	k.readsErr = nil
 	k.mu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go b.rw.watch(ctx, time.Millisecond, tell)
+	watchUntilCleanup(t, b.rw, tell)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		mu.Lock()
@@ -599,10 +597,14 @@ func TestNoReplyKeptDuringTheRewindSurvives(t *testing.T) {
 	if r.Rewound != nil || !slices.Equal(r.Held, []string{"c.1"}) || !rw.Contained("c.1") {
 		t.Fatalf("failed drop: %+v", r)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	told := make(chan string, 4)
-	go rw.watch(ctx, time.Millisecond, func(s string) error { told <- s; return nil })
+	watchUntilCleanup(t, rw, func(s string) error {
+		select {
+		case told <- s:
+		default:
+		}
+		return nil
+	})
 	select {
 	case s := <-told:
 		if !strings.HasPrefix(s, "Agent c had read") || rw.Contained("c.1") {
@@ -611,6 +613,15 @@ func TestNoReplyKeptDuringTheRewindSurvives(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("watch never retried the held reader")
 	}
+}
+
+// watchUntilCleanup runs watch until the test ends and waits for it to
+// return, so it never writes into a TempDir that cleanup is removing.
+func watchUntilCleanup(t *testing.T, rw *eraseRewind, tell func(string) error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); rw.watch(ctx, time.Millisecond, tell) }()
+	t.Cleanup(func() { cancel(); <-done })
 }
 
 // ctxMachines: the owner's page request ends as the rewind starts, and

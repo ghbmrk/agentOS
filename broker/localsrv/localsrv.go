@@ -62,9 +62,9 @@ type Config struct {
 	// DescribeRoot verifies a root to follow and holds it, with the root
 	// files brought with it, for approval (follow.Executor.Describe); on an error, only the summary's Reason
 	// is kept, and only if it is a coarse cause the page words. Follow
-	// submits the owner's request to follow a held root
-	// (grants.FollowIntent) and returns the channel's reply. Either nil
-	// refuses its op.
+	// submits the owner's request to follow a held root and returns the
+	// page's reply; nothing sets it until the request reaches the kernel
+	// as the owner's own plan (#3430). Either nil refuses its op.
 	DescribeRoot func(ctx context.Context, root []byte, chain [][]byte) (localapi.RootSummary, error)
 	Follow       func(ctx context.Context, name, digest string) (string, error)
 	// Paused lists the paused grants (grants.Gate.Paused); AskResume asks

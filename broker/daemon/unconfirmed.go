@@ -18,7 +18,6 @@ const unconfirmedAfter = 1
 // no internal parts). Unlisted executors are "an action".
 var unconfirmedWhat = map[string]string{
 	"loops":               "a setting change",
-	grants.FollowExecutor: "an update change",
 	grants.ForgetExecutor: "a FORGET",
 	grants.RecallExecutor: "a memory rollback",
 	grants.ExecutorName:   "a permission change",
