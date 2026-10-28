@@ -100,14 +100,14 @@ func (d *device) connections() int {
 }
 
 // guardFor is the process's guard for these pins of a TCP declaration.
-func guardFor(t *testing.T, d devslot.Declaration, pins ...devslot.Pin) *netguard.Policy {
+func guardFor(t *testing.T, d devslot.Declaration, pins ...devslot.Pin) *deviceGuard {
 	t.Helper()
 	image := map[string]imageDriver{"plug": {Name: "plug", Decl: d}}
 	var ps []pinned
 	for _, p := range pins {
 		ps = append(ps, pinned{"plug", p})
 	}
-	return deviceGuard(image, ps, func(string) {})
+	return newDeviceGuard(image, ps, func(string) {})
 }
 
 func (d *device) port() uint16 { return uint16(d.ln.Addr().(*net.TCPAddr).Port) }
@@ -159,10 +159,10 @@ func TestTCPTransportRefusesWrongKey(t *testing.T) {
 	// port, the dial is refused before any connection is made.
 	before := dev.connections()
 	other := tcpDecl(dev.port() + 1)
-	for what, g := range map[string]*netguard.Policy{
+	for what, g := range map[string]*deviceGuard{
 		"no pins":         guardFor(t, d),
 		"another port":    guardFor(t, other, right),
-		"unlisted driver": deviceGuard(map[string]imageDriver{}, []pinned{{"plug", right}}, func(string) {}),
+		"unlisted driver": newDeviceGuard(map[string]imageDriver{}, []pinned{{"plug", right}}, func(string) {}),
 	} {
 		tr, err = newTCPTransport(d, right, g)
 		if err != nil {
@@ -212,6 +212,32 @@ func TestTCPTransportRefusesWrongKey(t *testing.T) {
 	}
 	if err := tr.Write(ctx, tg, []byte("get")); err != nil {
 		t.Fatalf("write after a dropped stream: %v", err)
+	}
+}
+
+// The guard admits only pinned devices (Security delta probe on #3589): a
+// public or private address no pin names is refused whatever the purpose.
+func TestDeviceGuardAdmitsOnlyPins(t *testing.T) {
+	d := tcpDecl(443)
+	pin := devslot.Pin{Host: netip.MustParseAddr("192.168.1.2"), Key: sha256.Sum256([]byte("plug"))}
+	ctx := context.Background()
+	for what, g := range map[string]*deviceGuard{"no pins": guardFor(t, d), "one pin": guardFor(t, d, pin)} {
+		for _, ap := range []string{"1.1.1.1:443", "192.168.1.3:443", "192.168.1.2:444", "[2606:4700::1111]:443"} {
+			a := netip.MustParseAddrPort(ap)
+			if err := g.Check(ctx, a.Addr(), a.Port(), "tcp"); !errors.Is(err, netguard.ErrDenied) {
+				t.Errorf("%s: %s admitted: %v", what, ap, err)
+			}
+			if _, err := g.DialContext(ctx, a); !errors.Is(err, netguard.ErrDenied) {
+				t.Errorf("%s: dial %s: %v, want refused", what, ap, err)
+			}
+		}
+	}
+	g := guardFor(t, d, pin)
+	if err := g.Check(ctx, pin.Host, 443, "tcp"); err != nil {
+		t.Fatalf("the pinned device: %v", err)
+	}
+	if err := g.Check(ctx, pin.Host, 443, "udp"); err == nil {
+		t.Fatal("udp to the pinned device admitted")
 	}
 }
 

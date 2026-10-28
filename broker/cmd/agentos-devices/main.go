@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -178,7 +179,7 @@ func (s dropSink) Emit(devhost.Event) error {
 // lists. A pin for any other driver is refused and logged, and starts
 // nothing: only image drivers run (TestHostStartsOnlyImageDrivers).
 func hosts(c config, image map[string]imageDriver, pins []pinned, logf func(string)) map[string]*devhost.Host {
-	guard := deviceGuard(image, pins, logf)
+	guard := newDeviceGuard(image, pins, logf)
 	out := map[string]*devhost.Host{}
 	for _, p := range pins {
 		d, ok := image[p.driver]
@@ -211,18 +212,24 @@ func hosts(c config, image map[string]imageDriver, pins []pinned, logf func(stri
 	return out
 }
 
-// deviceGuard is the process's address policy (DEV-2): it admits a dial
-// only as a device executor's (PurposeDevice) to one of the image drivers'
-// pinned TCP devices, at its address and port, and logs each refusal by
+// deviceGuard is the process's address policy (DEV-2). It admits only the
+// image drivers' pinned TCP devices, each at its address and port: any
+// other destination, public ones included, is refused before netguard is
+// asked. Those that pass are dialled through netguard as a device
+// executor's dial (PurposeDevice) to a PinDevice pin, so netguard's own
+// checks also run on the address connected. Each refusal is logged by
 // address and reason only. The host dials nothing else, so it learns no
-// home network: the pins are its whole reach. A pin the guard refuses
-// leaves the guard with none, and every dial is refused.
-func deviceGuard(image map[string]imageDriver, pins []pinned, logf func(string)) *netguard.Policy {
-	g := netguard.New(netguard.Config{
-		OnDeny: func(e netguard.DenyEvent) {
-			logf(fmt.Sprintf("netguard: refused %v port %d purpose %d: %s", e.Addr, e.Port, e.Purpose, e.Reason))
-		},
-	})
+// home network.
+type deviceGuard struct {
+	p    *netguard.Policy
+	pins map[netip.AddrPort]bool
+}
+
+func newDeviceGuard(image map[string]imageDriver, pins []pinned, logf func(string)) *deviceGuard {
+	deny := func(e netguard.DenyEvent) {
+		logf(fmt.Sprintf("netguard: refused %v port %d purpose %d: %s", e.Addr, e.Port, e.Purpose, e.Reason))
+	}
+	g := &deviceGuard{p: netguard.New(netguard.Config{OnDeny: deny}), pins: map[netip.AddrPort]bool{}}
 	var gp []netguard.Pin
 	for _, p := range pins {
 		if d, ok := image[p.driver]; ok {
@@ -231,11 +238,34 @@ func deviceGuard(image map[string]imageDriver, pins []pinned, logf func(string))
 			}
 		}
 	}
-	if err := g.SetPins(gp); err != nil {
+	if err := g.p.SetPins(gp); err != nil {
 		logf("devices: the devices' pins are refused by the address guard: " + err.Error())
-		g.SetPins(nil)
+		return g
+	}
+	for _, np := range gp {
+		g.pins[np.Addr] = true
 	}
 	return g
+}
+
+// unpinned is the refusal of a destination that is not a pinned device's.
+const unpinned = "not a pinned device's address and port"
+
+// Check decides one connection: a pinned device's address and port, and
+// netguard's check of it as a device executor's.
+func (g *deviceGuard) Check(ctx context.Context, a netip.Addr, port uint16, proto string) error {
+	if proto != "tcp" || !g.pins[netip.AddrPortFrom(a.Unmap().WithZone(""), port)] {
+		return &netguard.DeniedError{Addr: a, Reason: unpinned}
+	}
+	return g.p.Check(netguard.WithPurpose(ctx, netguard.PurposeDevice), a, port, proto)
+}
+
+// DialContext dials addr, a literal address and port, if Check admits it.
+func (g *deviceGuard) DialContext(ctx context.Context, addr netip.AddrPort) (net.Conn, error) {
+	if err := g.Check(ctx, addr.Addr(), addr.Port(), "tcp"); err != nil {
+		return nil, err
+	}
+	return g.p.DialContext(netguard.WithPurpose(ctx, netguard.PurposeDevice), "tcp", addr.String())
 }
 
 // run starts the hosts and flushes each one's DEV-8 windows until ctx ends.

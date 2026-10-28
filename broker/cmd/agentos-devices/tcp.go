@@ -38,15 +38,14 @@ type tcpTransport struct {
 	maxRead int
 
 	// guard is the process's address policy (DEV-2): the stream is dialled
-	// only through it, as a device executor's dial (PurposeDevice) to a
-	// PinDevice pin, which devicePins gives each TCP device.
-	guard *netguard.Policy
+	// only through it, which admits only the pinned devices.
+	guard *deviceGuard
 
 	mu   sync.Mutex // one call at a time on the stream
 	conn net.Conn
 }
 
-func newTCPTransport(d devslot.Declaration, pin devslot.Pin, guard *netguard.Policy) (*tcpTransport, error) {
+func newTCPTransport(d devslot.Declaration, pin devslot.Pin, guard *deviceGuard) (*tcpTransport, error) {
 	if d.Link != devslot.TCP || len(d.Channels) != 1 || pin.Key == ([32]byte{}) || !pin.Host.IsValid() || guard == nil {
 		return nil, errors.New("devices: a TCP transport needs a TCP declaration with one channel, a keyed pin and the address guard")
 	}
@@ -93,7 +92,7 @@ func (t *tcpTransport) stream(ctx context.Context) (net.Conn, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, dialWait)
 	defer cancel()
-	raw, err := t.guard.DialContext(netguard.WithPurpose(ctx, netguard.PurposeDevice), "tcp", t.addrPort().String())
+	raw, err := t.guard.DialContext(ctx, t.addrPort())
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +166,7 @@ func (gattTransport) Read(context.Context) (devslot.Target, []byte, error) {
 }
 
 // transportFor is the transport for a declaration's link kind.
-func transportFor(d devslot.Declaration, pin devslot.Pin, guard *netguard.Policy) (devslot.Transport, error) {
+func transportFor(d devslot.Declaration, pin devslot.Pin, guard *deviceGuard) (devslot.Transport, error) {
 	switch d.Link {
 	case devslot.TCP:
 		return newTCPTransport(d, pin, guard)
