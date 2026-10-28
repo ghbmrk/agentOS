@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/durable"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
@@ -408,7 +409,7 @@ func openEraseRewind(path string, logf func(string, ...any)) *eraseRewind {
 			// content is rewound again (fails closed: later work goes too)
 			// and the owner told; kept if it cannot be moved.
 			w.settled = nil
-			if rerr := os.Rename(path, path+".corrupt"); rerr != nil {
+			if rerr := durable.Rename(path, path+".corrupt"); rerr != nil {
 				logf("%s corrupt and not set aside, every agent contained: %v; %v", path, err, rerr)
 				w.bad = true
 			} else {
