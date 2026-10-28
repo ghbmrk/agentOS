@@ -6070,6 +6070,7 @@ UNIT_DEVICES = {
     "agentos-localui-claim.service": ("root", "closed"),
     "agentos-localui.service": ("agentos-localui", "private"),
     "agentos-modem.service": ("agentos-modem", "closed; char-ttyUSB rw, char-alsa rw"),
+    "agentos-devices.service": ("agentos-devices", "private"),
 }
 DEVICE_POLICY_EXEMPT = {"agentosd.service": "IMG-4 (#917)"}
 

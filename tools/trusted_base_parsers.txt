@@ -25,6 +25,7 @@ inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes n
 parser github.com/ghbmrk/agentos/broker/clerk/accounts -- senders from the owner's mail provider, for the account plan (uncertain; classed parser)
 parser github.com/ghbmrk/agentos/broker/clerk/clerkkey -- a clerk's key hand-off on descriptor 3
 parser github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail -- process entry; reads its key hand-off and the anchors file (uncertain; classed parser)
+parser github.com/ghbmrk/agentos/broker/cmd/agentos-devices -- process entry; the pins file and TCP devices' TLS handshakes and frames (DEVSLOT-drivers b2b)
 inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own configuration
 inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
