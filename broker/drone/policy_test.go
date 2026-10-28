@@ -86,6 +86,10 @@ func TestPolicyLoadFailsClosed(t *testing.T) {
 		{"self-crossing boundary", mut(func(p *Policy) {
 			p.Boundary = []Point{at(-200, -200), at(200, 200), at(200, -200), at(-200, 200)}
 		}), nil, "crosses itself"},
+		{"self-crossing boundary with area (a pentagram)", mut(func(p *Policy) {
+			p.Boundary = []Point{at(0, 200), at(-118, -162), at(190, 62), at(-190, 62), at(118, -162)}
+		}), nil, "crosses itself"},
+		{"no return altitude below the ceiling", mut(func(p *Policy) { p.CeilingM, p.FenceMarginM = 8, 2 }), nil, "return altitude"},
 		{"two-vertex boundary", mut(func(p *Policy) { p.Boundary = p.Boundary[:2] }), nil, "vertices"},
 		{"invalid latitude", mut(func(p *Policy) { p.Boundary[0].Lat = 91 }), nil, "latitude"},
 		{"boundary far from the dock", mut(func(p *Policy) { p.Boundary[0] = at(-20000, -200) }), nil, "from the dock"},
@@ -149,6 +153,7 @@ func fakeHolder(t *testing.T, pub ed25519.PublicKey) (*Holder, *atomic.Int64, st
 	if err != nil {
 		t.Fatal(err)
 	}
+	sent.Store(0) // Dial's own heartbeat
 	dir := t.TempDir()
 	h, err := NewHolder(l, pub, dir, log.New(io.Discard, "", 0))
 	if err != nil {
@@ -222,6 +227,7 @@ func TestStoredPolicyReloads(t *testing.T) {
 	near, far := net.Pipe()
 	defer near.Close()
 	defer far.Close()
+	go io.Copy(io.Discard, far)
 	l, err := Dial(near, k)
 	if err != nil {
 		t.Fatal(err)

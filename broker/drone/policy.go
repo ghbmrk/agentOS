@@ -140,9 +140,6 @@ func LoadPolicy(env []byte, owner ed25519.PublicKey, loaded *Policy) (*Policy, e
 	return &p, nil
 }
 
-// Raw returns the policy's signed canonical bytes.
-func (p *Policy) Raw() []byte { return append([]byte(nil), p.raw...) }
-
 // Route returns the named route.
 func (p *Policy) Route(name string) (Route, bool) {
 	for _, r := range p.Routes {

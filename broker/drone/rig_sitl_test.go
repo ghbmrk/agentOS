@@ -114,6 +114,7 @@ type aircraft struct {
 	Fence   []Item
 	Rally   []Item
 	Mission []Item
+	FenceOn bool // the fence's runtime state (SYS_STATUS), which DO_FENCE_ENABLE changes without a parameter
 	Mode    uint32
 	Armed   bool
 }
@@ -152,6 +153,12 @@ func (r *rig) snapshot() aircraft {
 		// Item 0 is home, which the aircraft sets itself at its first GPS fix.
 		a.Mission = a.Mission[1:]
 	}
+	st, err := r.link.exchange(long(common.MAV_CMD_REQUEST_MESSAGE, float32((&common.MessageSysStatus{}).GetID())),
+		func(m message.Message) bool { _, ok := m.(*common.MessageSysStatus); return ok }, 3*time.Second)
+	if err != nil {
+		r.t.Fatalf("reading SYS_STATUS: %v", err)
+	}
+	a.FenceOn = st.(*common.MessageSysStatus).OnboardControlSensorsEnabled&common.MAV_SYS_STATUS_GEOFENCE != 0
 	hb, err := r.link.WaitHeartbeat(time.Now(), 5*time.Second)
 	if err != nil {
 		r.t.Fatal(err)

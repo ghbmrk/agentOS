@@ -52,9 +52,10 @@ func NewKey(r io.Reader) (Key, error) {
 	return keyOf(&k), nil
 }
 
-// WriteKeyFile writes k to path, mode 0600, through a temporary file in the
-// same directory that is synced and renamed over path, so a crash leaves the
-// old file or the new one.
+// WriteKeyFile writes k to a new file at path, mode 0600, through a synced
+// temporary file in the same directory that is linked into place, so a crash
+// leaves no file or the whole one. It never replaces an existing file: that
+// could be the only key the aircraft accepts (ASSUMPTIONS.md DRONE-sim-11).
 func WriteKeyFile(path string, k Key) error {
 	if !k.valid() {
 		return errNoKey
@@ -65,12 +66,9 @@ func WriteKeyFile(path string, k Key) error {
 		return fmt.Errorf("drone: key file: %w", pathErr(err))
 	}
 	tmp := f.Name()
-	ok := false
 	defer func() {
-		if !ok {
-			f.Close()
-			os.Remove(tmp)
-		}
+		f.Close() // a second Close after the one below only errs
+		os.Remove(tmp)
 	}()
 	if err := f.Chmod(0o600); err != nil {
 		return fmt.Errorf("drone: key file: %w", pathErr(err))
@@ -84,10 +82,12 @@ func WriteKeyFile(path string, k Key) error {
 	if err := f.Close(); err != nil {
 		return errors.New("drone: closing the key file failed")
 	}
-	if err := os.Rename(tmp, path); err != nil { // durable:exempt lifecycle:exempt the drone imports nothing from agentOS (brief decision 1) and durable is old core (tools/old_core.txt), so it cannot list here; this is owner config, not a lifecycle, and the directory is synced below
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("drone: key file %s exists; move it aside first, it may be the key the aircraft holds", path)
+		}
 		return fmt.Errorf("drone: key file: %w", pathErr(err))
 	}
-	ok = true
 	if d, err := os.Open(dir); err == nil {
 		d.Sync()
 		d.Close()
@@ -100,7 +100,8 @@ func WriteKeyFile(path string, k Key) error {
 // another user, and one that is not exactly KeySize bytes. No error carries
 // the file's bytes.
 func LoadKeyFile(path string) (Key, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// O_NONBLOCK: a FIFO at path fails the regular-file check below instead of blocking the open.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return Key{}, fmt.Errorf("drone: key file: %w", pathErr(err))
 	}

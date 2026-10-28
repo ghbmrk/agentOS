@@ -30,8 +30,7 @@ const sitlHome = "-35.363261,149.165230,584,0"
 
 // simulator is one running SITL.
 type simulator struct {
-	Dir      string
-	Instance int
+	Dir string
 
 	t      testing.TB
 	cmd    *exec.Cmd
@@ -69,7 +68,7 @@ func (in *simulator) boot(wipe bool) {
 	t := in.t
 	t.Helper()
 	bin, defaults := binaries(t)
-	args := []string{"--model", "+", "--speedup", "1", "-I", strconv.Itoa(in.Instance), "--home", sitlHome,
+	args := []string{"--model", "+", "--speedup", "1", "-I", "0", "--home", sitlHome,
 		"--defaults", defaults,
 		"--serial0", "tcp:0", "--serial1", "tcp:2", "--serial2", "tcp:3"}
 	if wipe {
@@ -144,7 +143,7 @@ func (in *simulator) Ports() []int {
 }
 
 // RCPort is SITL's UDP RC input port.
-func (in *simulator) RCPort() int { return 5501 + 10*in.Instance }
+func (in *simulator) RCPort() int { return 5501 }
 
 // Output is SITL's console so far.
 func (in *simulator) Output() string {

@@ -9,12 +9,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"log"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -67,6 +69,20 @@ func TestKeyNeverLeaves(t *testing.T) {
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("written key file: %v, %v", fi, err)
 	}
+	if err := WriteKeyFile(path, k); err == nil || !strings.Contains(err.Error(), "exists") {
+		t.Errorf("writing over an existing key file: %v", err)
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("the key directory holds %d entries, want only the key", len(ents))
+	}
+	fifo := filepath.Join(dir, "fifo.key")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadKeyFile(fifo); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("a FIFO as the key file: %v", err)
+	}
+	os.Remove(fifo)
 
 	// Read from its file.
 	k2, err := LoadKeyFile(path)
@@ -147,6 +163,7 @@ func TestKeyNeverLeaves(t *testing.T) {
 		b := make([]byte, 4096)
 		n, _ := far.Read(b)
 		got <- b[:n]
+		io.Copy(io.Discard, far)
 	}()
 	l, err := Dial(near, k2)
 	if err != nil {

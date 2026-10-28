@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -17,10 +18,9 @@ import (
 
 // Copter custom modes.
 const (
-	modeStabilize = 0
-	modeAuto      = 3
-	modeGuided    = 4
-	modeLand      = 9
+	modeAuto   = 3
+	modeGuided = 4
+	modeLand   = 9
 )
 
 type attack struct {
@@ -48,26 +48,34 @@ func count(kind common.MAV_MISSION_TYPE, n uint16) *common.MessageMissionCount {
 
 // attacks is every way to change the aircraft over MAVLink the brief names:
 // commands, a parameter write, mission, fence and rally uploads and clears,
-// a MAVLink FTP write, a re-key, a reboot and an RC override.
+// a MAVLink FTP write, a re-key and a reboot. Each one, sent signed with the
+// key, changes what snapshot reads or breaks the link (re-key, reboot); the
+// rows whose change is not plain from a parameter (fence off, fence upload,
+// FTP) get that positive control in TestUnsignedFramesChangeNothing.
+//
+// RC_CHANNELS_OVERRIDE is not a row: once the policy is loaded the aircraft
+// ignores it even signed, so no snapshot could tell a refusal from an
+// acceptance. RC input is covered by TestScriptingAndRCAreOff.
 func attacks() []attack {
 	home := itemMsg(MissionMission, 0, Item{Command: uint16(common.MAV_CMD_NAV_WAYPOINT), Lat: e7(testDock.Lat), Lon: e7(testDock.Lon)})
 	far := itemMsg(MissionMission, 1, Item{Command: uint16(common.MAV_CMD_NAV_WAYPOINT), Lat: e7(at(500, 500).Lat), Lon: e7(at(500, 500).Lon), AltM: 100})
-	fenceVertex := itemMsg(MissionFence, 0, Item{Command: cmdFenceInclusion, Param1: 3, Lat: e7(at(5000, 0).Lat), Lon: e7(at(5000, 0).Lon)})
+	var fence []message.Message
+	for i, p := range []Point{at(5000, 0), at(-2500, 4000), at(-2500, -4000)} {
+		fence = append(fence, itemMsg(MissionFence, uint16(i), Item{Command: cmdFenceInclusion, Param1: 3, Lat: e7(p.Lat), Lon: e7(p.Lon)}))
+	}
 	rally := itemMsg(MissionRally, 0, Item{Command: cmdRallyPoint, Lat: e7(at(300, 300).Lat), Lon: e7(at(300, 300).Lon), AltM: 50})
 	var badKey [32]uint8
 	copy(badKey[:], "ATTACKER-KEY-not-the-holders-key")
-	override := &common.MessageRcChannelsOverride{TargetSystem: targetSysID, TargetComponent: targetCompID,
-		Chan1Raw: 1500, Chan2Raw: 1500, Chan3Raw: 1000, Chan4Raw: 2000, Chan5Raw: 1295, Chan6Raw: 1500, Chan7Raw: 1500, Chan8Raw: 1500}
 	return []attack{
 		{"arm (forced)", []message.Message{long(common.MAV_CMD_COMPONENT_ARM_DISARM, 1, 21196)}},
 		{"mode change (DO_SET_MODE guided)", []message.Message{long(common.MAV_CMD_DO_SET_MODE, 1, modeGuided)}},
 		{"mode change (SET_MODE auto)", []message.Message{&common.MessageSetMode{TargetSystem: targetSysID, BaseMode: 1, CustomMode: modeAuto}}},
-		{"fence off (DO_FENCE_ENABLE 0)", []message.Message{long(common.MAV_CMD_DO_FENCE_ENABLE, 0)}},
+		{fenceOff, []message.Message{long(common.MAV_CMD_DO_FENCE_ENABLE, 0)}},
 		{"parameter write FENCE_ENABLE 0", []message.Message{paramSet("FENCE_ENABLE", 0)}},
 		{"parameter write SCR_ENABLE 1", []message.Message{paramSet("SCR_ENABLE", 1)}},
 		{"parameter write MAV1_OPTIONS 1 (signing off)", []message.Message{paramSet("MAV1_OPTIONS", 1)}},
 		{"mission upload", []message.Message{count(MissionMission, 2), home, far}},
-		{"fence upload (one far vertex)", []message.Message{count(MissionFence, 1), fenceVertex}},
+		{fenceUpload, append([]message.Message{count(MissionFence, 3)}, fence...)},
 		{"fence clear (count 0)", []message.Message{count(MissionFence, 0)}},
 		{"fence and rally clear (CLEAR_ALL)", []message.Message{
 			&common.MessageMissionClearAll{TargetSystem: targetSysID, TargetComponent: targetCompID, MissionType: MissionFence},
@@ -78,8 +86,21 @@ func attacks() []attack {
 		{"re-key (SETUP_SIGNING)", []message.Message{&common.MessageSetupSigning{TargetSystem: targetSysID,
 			TargetComponent: targetCompID, SecretKey: badKey, InitialTimestamp: 1}}},
 		{"reboot", []message.Message{long(common.MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, 1)}},
-		{"RC override (arm stick, mode switch)", []message.Message{override, override, override}},
 	}
+}
+
+const (
+	fenceOff    = "fence off (DO_FENCE_ENABLE 0)"
+	fenceUpload = "fence upload (a far triangle)"
+)
+
+func attackNamed(name string) attack {
+	for _, a := range attacks() {
+		if a.name == name {
+			return a
+		}
+	}
+	panic("no attack " + name)
 }
 
 // REQ: NET-2, A18
@@ -102,8 +123,30 @@ func TestUnsignedFramesChangeNothing(t *testing.T) {
 	}
 	control := canaryFiles(t, r.sim.Dir)[0]
 	before := r.snapshot()
-	if before.Armed || len(before.Fence) == 0 || len(before.Rally) != 1 {
+	if before.Armed || !before.FenceOn || len(before.Fence) == 0 || len(before.Rally) != 1 {
 		t.Fatalf("baseline is not the loaded policy: %+v", before)
+	}
+	// The fence rows' positive controls: signed with the key, each changes
+	// what the snapshot reads; the signed link then restores it.
+	ctl = r.sim.Dial(ports[1])
+	send(t, newSender(t, ctl, r.key.s(), 9), attackNamed(fenceOff).msgs...)
+	time.Sleep(time.Second)
+	if r.snapshot().FenceOn {
+		t.Fatal("a signed DO_FENCE_ENABLE 0 left the fence on; the fence-off check cannot see a change")
+	}
+	send(t, newSender(t, ctl, r.key.s(), 9), long(common.MAV_CMD_DO_FENCE_ENABLE, 1))
+	send(t, newSender(t, ctl, r.key.s(), 9), attackNamed(fenceUpload).msgs...)
+	time.Sleep(1500 * time.Millisecond)
+	ctl.Close()
+	if got := r.snapshot(); reflect.DeepEqual(got.Fence, before.Fence) {
+		t.Fatalf("a signed fence upload left the fence %+v; the fence-upload check cannot see a change", got.Fence)
+	}
+	if err := r.link.Upload(MissionFence, Derive(r.h.Policy()).Fence); err != nil {
+		t.Fatal(err)
+	}
+	r.requireSame(before, "restoring after the positive controls")
+	if t.Failed() {
+		t.FailNow()
 	}
 	run := func(port int) {
 		for _, a := range attacks() {
@@ -226,9 +269,12 @@ func sendRC(t *testing.T, port int, pkt []byte, d time.Duration) {
 
 // REQ: NET-2
 // TestScriptingAndRCAreOff (brief acceptance test 6): SCR_ENABLE reads back
-// 0, and with the policy loaded no RC input (the simulator's RC port, or an
-// unsigned RC override) changes the mode or arms; before the policy, the same
-// RC input does change the mode, so the check can see one.
+// 0, and with the policy loaded no RC input on the simulator's RC port
+// changes the mode; before the policy, the same RC input does change the
+// mode, so the check can see one. Arming by stick and RC_CHANNELS_OVERRIDE
+// are not tried: neither has a positive control (the stick gesture fails the
+// stock arming checks, and the aircraft ignores an override once the policy
+// is loaded even signed), and RC_PROTOCOLS 0 cuts the input both would need.
 func TestScriptingAndRCAreOff(t *testing.T) {
 	r := newRig(t, false)
 	// Positive control on stock RC settings: switch position 2 is LAND (copter.parm FLTMODE2).
@@ -246,15 +292,5 @@ func TestScriptingAndRCAreOff(t *testing.T) {
 	for _, pos := range []uint16{1165, 1425, 1555, 1685, 1815} {
 		sendRC(t, r.sim.RCPort(), rcPacket(pos, 1000, 1500), 2*time.Second)
 	}
-	// Throttle low, yaw right: the stick arming gesture, held past its 2 s.
-	sendRC(t, r.sim.RCPort(), rcPacket(1295, 1000, 2000), 4*time.Second)
 	r.requireSame(before, "RC input on the simulator's RC port")
-	c := r.sim.Dial(r.sim.Ports()[1])
-	defer c.Close()
-	w := newSender(t, c, nil, 4)
-	for i := 0; i < 40; i++ {
-		send(t, w, &common.MessageRcChannelsOverride{TargetSystem: targetSysID, TargetComponent: targetCompID,
-			Chan1Raw: 1500, Chan2Raw: 1500, Chan3Raw: 1000, Chan4Raw: 2000, Chan5Raw: 1815, Chan6Raw: 1500, Chan7Raw: 1500, Chan8Raw: 1500})
-	}
-	r.requireSame(before, "an unsigned RC override")
 }

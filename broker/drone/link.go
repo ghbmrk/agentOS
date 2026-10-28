@@ -41,6 +41,14 @@ func dialectRW() *dialect.ReadWriter {
 // signed with the key and every frame received must verify under it: an
 // unsigned or wrongly signed frame from the aircraft's side (a spoofed
 // PARAM_VALUE, say) is dropped, so a read-back cannot be faked (P1, P3).
+//
+// A captured signed frame is no answer either. Frames on each of the
+// aircraft's signing streams must carry strictly increasing timestamps, and
+// a reply counts only when its timestamp is at or above the request's: the
+// aircraft raises its own signing clock to the newest timestamp it accepts,
+// so only a frame signed after it saw the request can answer it. A heartbeat
+// counts only from at or above the link's first frame (ASSUMPTIONS.md
+// DRONE-sim-5).
 type Link struct {
 	conn io.ReadWriteCloser
 	rw   *dialect.ReadWriter
@@ -53,10 +61,13 @@ type Link struct {
 	now    func() time.Time
 
 	req  sync.Mutex // one request/response exchange at a time
-	in   chan message.Message
+	in   chan received
 	done chan struct{}
 
+	streams map[byte]uint64 // the aircraft's newest timestamp per signing link id; read loop only
+
 	smu      sync.Mutex
+	firstTS  uint64 // the timestamp of the link's first frame sent
 	hb       *common.MessageHeartbeat
 	hbAt     time.Time
 	dropped  int
@@ -64,7 +75,14 @@ type Link struct {
 	closeErr sync.Once
 }
 
-// Dial wraps conn as a signed link and starts reading it.
+// received is a verified message from the aircraft and its signature timestamp.
+type received struct {
+	msg message.Message
+	ts  uint64
+}
+
+// Dial wraps conn as a signed link, starts reading it and sends a heartbeat,
+// whose timestamp is the floor for the aircraft's heartbeats on this link.
 func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
 	if !k.valid() {
 		return nil, errNoKey
@@ -74,12 +92,16 @@ func Dial(conn io.ReadWriteCloser, k Key) (*Link, error) {
 		return nil, err
 	}
 	l := &Link{conn: conn, rw: dialectRW(), key: k, w: w, now: time.Now,
-		in: make(chan message.Message, 512), done: make(chan struct{})}
+		in: make(chan received, 512), done: make(chan struct{}), streams: map[byte]uint64{}}
 	r, err := frame.NewReader(frame.ReaderConf{Reader: conn, DialectRW: l.rw, InKey: k.s()})
 	if err != nil {
 		return nil, err
 	}
 	go l.readLoop(r)
+	if err := l.SendHeartbeat(); err != nil {
+		l.Close()
+		return nil, err
+	}
 	return l, nil
 }
 
@@ -107,23 +129,35 @@ func (l *Link) readLoop(r *frame.Reader) {
 			l.smu.Unlock()
 			return
 		}
-		if fr.GetSystemID() != targetSysID || fr.GetComponentID() != targetCompID {
+		v2, ok := fr.(*frame.V2Frame)
+		if !ok || v2.Signature == nil || v2.GetSystemID() != targetSysID || v2.GetComponentID() != targetCompID {
+			continue // the reader verified every frame; this is belt and braces
+		}
+		ts := v2.SignatureTimestamp
+		if ts <= l.streams[v2.SignatureLinkID] {
+			l.smu.Lock()
+			l.dropped++ // replayed, or reordered: no older frame is trusted
+			l.smu.Unlock()
 			continue
 		}
-		msg := fr.GetMessage()
+		l.streams[v2.SignatureLinkID] = ts
+		msg := v2.GetMessage()
 		if hb, ok := msg.(*common.MessageHeartbeat); ok {
 			l.smu.Lock()
-			l.hb, l.hbAt = hb, l.now()
+			if l.firstTS != 0 && ts >= l.firstTS {
+				l.hb, l.hbAt = hb, l.now()
+			}
 			l.smu.Unlock()
 		}
 		select {
-		case l.in <- msg:
+		case l.in <- received{msg, ts}:
 		default: // nobody is waiting; requests drain before they send
 		}
 	}
 }
 
-// Dropped counts frames from the aircraft's side that failed to parse or verify.
+// Dropped counts frames from the aircraft's side that failed to parse or
+// verify, or were not newer than their stream's last.
 func (l *Link) Dropped() int {
 	l.smu.Lock()
 	defer l.smu.Unlock()
@@ -132,9 +166,15 @@ func (l *Link) Dropped() int {
 
 // Send signs and writes one message.
 func (l *Link) Send(m message.Message) error {
+	_, err := l.send(m)
+	return err
+}
+
+// send signs and writes m, and returns its signature timestamp.
+func (l *Link) send(m message.Message) (uint64, error) {
 	mp := l.rw.GetMessage(m.GetID())
 	if mp == nil {
-		return fmt.Errorf("drone: message %d is not in the dialect", m.GetID())
+		return 0, fmt.Errorf("drone: message %d is not in the dialect", m.GetID())
 	}
 	l.wmu.Lock()
 	defer l.wmu.Unlock()
@@ -143,6 +183,11 @@ func (l *Link) Send(m message.Message) error {
 		ts = l.lastTS + 1 // MAVLink 2 refuses a timestamp not above the stream's last
 	}
 	l.lastTS = ts
+	l.smu.Lock()
+	if l.firstTS == 0 {
+		l.firstTS = ts
+	}
+	l.smu.Unlock()
 	fr := &frame.V2Frame{
 		IncompatibilityFlag: frame.V2FlagSigned,
 		SequenceNumber:      l.seq,
@@ -156,15 +201,15 @@ func (l *Link) Send(m message.Message) error {
 	fr.SignatureTimestamp = ts
 	fr.Signature = fr.GenerateSignature(l.key.s())
 	if err := l.w.Write(fr); err != nil {
-		return errors.New("drone: writing to the aircraft failed")
+		return 0, errors.New("drone: writing to the aircraft failed")
 	}
-	return nil
+	return ts, nil
 }
 
 var errTimeout = errors.New("drone: no answer from the aircraft")
 
-// exchange sends m (unless nil) and returns the first received message match
-// accepts, within timeout.
+// exchange sends m and returns the first message from the aircraft that match
+// accepts and that was signed at or after m, within timeout.
 func (l *Link) exchange(m message.Message, match func(message.Message) bool, timeout time.Duration) (message.Message, error) {
 	l.req.Lock()
 	defer l.req.Unlock()
@@ -179,18 +224,17 @@ func (l *Link) exchangeLocked(m message.Message, match func(message.Message) boo
 			drained = true
 		}
 	}
-	if m != nil {
-		if err := l.Send(m); err != nil {
-			return nil, err
-		}
+	sent, err := l.send(m)
+	if err != nil {
+		return nil, err
 	}
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	for {
 		select {
 		case got := <-l.in:
-			if match(got) {
-				return got, nil
+			if got.ts >= sent && match(got.msg) {
+				return got.msg, nil
 			}
 		case <-l.done:
 			return nil, errors.New("drone: the link to the aircraft closed")
