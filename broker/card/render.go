@@ -71,12 +71,37 @@ type view struct {
 	GridCols    []string
 	Grid        []gridRow
 	GridCheck   string
+	// Authority is the page authority's lines (HW-1, CH-9).
+	Authority authorityView
 }
+
+// authorityView is what the card and every rotation sheet print about the
+// page's authority: its name, its fingerprint in two lines, and the
+// address-bar and trust lines (CH-9).
+type authorityView struct {
+	PageName    string
+	Fingerprint []string
+	AddressBar  string
+	Trust       string
+}
+
+func newAuthorityView(fp string) authorityView {
+	return authorityView{PageName: PageName, Fingerprint: fingerprintLines(fp), AddressBar: AddressBarLine, Trust: TrustLine}
+}
+
+// authorityHTML prints authorityView beside the Wi-Fi page line: one page,
+// named by its address, its name and its authority's fingerprint.
+const authorityHTML = `<p class="note">Wi-Fi page name: <span class="mono">{{.Authority.PageName}}</span><br>
+Wi-Fi page fingerprint:{{range .Authority.Fingerprint}}<br><span class="mono">{{.}}</span>{{end}}</p>
+<p class="note"><b>{{.Authority.AddressBar}}</b></p>
+<p class="note">{{.Authority.Trust}}</p>
+`
 
 // HTML renders the card as a printable page: the card itself (front and
 // back), the paper grid sheet, and the recovery key sheet. It is fully
-// self-contained, with QR codes as inline SVG (ONB-1).
-func HTML(c *Card) ([]byte, error) {
+// self-contained, with QR codes as inline SVG (ONB-1). fp is the page
+// authority's fingerprint (Fingerprint), printed on the front (HW-1).
+func HTML(c *Card, fp string) ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
@@ -85,7 +110,7 @@ func HTML(c *Card) ([]byte, error) {
 		return nil, err
 	}
 	v := view{Card: c, PassQR: pq, QuickStart: QuickStart, BootKeys: BootKeys, WaitMinutes: WaitMinutes, BoxPage: BoxPage,
-		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}, GridCheck: GridCheck(c.GridSeed)}
+		GridCols: []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}, GridCheck: GridCheck(c.GridSeed), Authority: newAuthorityView(fp)}
 	labels := owner.GridLabels()
 	for r := 0; r < 10; r++ {
 		row := gridRow{Row: r + 1}
@@ -103,9 +128,11 @@ func HTML(c *Card) ([]byte, error) {
 
 // rotationHTML renders the new parts of a rotated card (REC-4): only the
 // sections of the parts in p, each the same as on the full card, with a
-// line that every other part stays as on the current card.
-func rotationHTML(c *Card, p Parts) ([]byte, error) {
-	v := rotView{view: view{Card: c, BoxPage: BoxPage}, Parts: p}
+// line that every other part stays as on the current card, and the page
+// authority's lines (fp), whatever the parts: the owner may keep only the
+// newest sheet.
+func rotationHTML(c *Card, p Parts, fp string) ([]byte, error) {
+	v := rotView{view: view{Card: c, BoxPage: BoxPage, Authority: newAuthorityView(fp)}, Parts: p}
 	var err error
 	if p.Passphrase {
 		if v.PassQR, err = QRSVG(c.VaultPassphrase); err != nil {
@@ -160,7 +187,7 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 <h1>agentOS Owner Card: new parts</h1>
 <p class="note">These replace the same parts of your Owner Card. The parts not on this page stay as on your current card. Keep it like a passport, apart from the drive.</p>
 <p class="note">Wi-Fi page: <span class="mono">{{.BoxPage}}</span></p>
-</div>
+` + authorityHTML + `</div>
 {{if .Parts.Setup}}<div class="card">
 <h2>Setup code</h2>
 <p><span class="mono big">{{.SetupCode}}</span> <span class="note">(text it to your box if the setup page asks)</span></p>
@@ -222,7 +249,7 @@ table { border-collapse: collapse; } td, th { border: 1px solid #000; padding: 1
 <h1>agentOS Owner Card</h1>
 <p class="note">Keep this card like a passport, apart from the drive. Anyone with both can read your data.</p>
 <p>Wi-Fi page: <span class="mono">{{.BoxPage}}</span></p>
-<h2>Quick start</h2>
+` + authorityHTML + `<h2>Quick start</h2>
 <ol>{{range .QuickStart}}<li>{{.}}</li>{{end}}</ol>
 </div>
 

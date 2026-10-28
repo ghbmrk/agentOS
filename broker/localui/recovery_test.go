@@ -17,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
@@ -70,7 +71,7 @@ func newRecoveryRig(t *testing.T) *recoveryRig {
 	}
 	s, err := New(Config{Page: testPage(), Hooks: r.hooks, SetupSecret: r.card.SetupSecret, Store: &MemStore{},
 		Defaults: "spend cap $20 a day; payments need approval.", Passkeys: r.f, PasskeyRPID: DefaultPageName,
-		RecoveryCard: gen, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
+		RecoveryCard: gen, PageAuthority: testAuthority, Now: r.clock, Rand: rand.New(rand.NewSource(9))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,5 +419,27 @@ func TestRecoveryCardCancelDropsTheReplacement(t *testing.T) {
 	}
 	if r.f.calls() != 0 {
 		t.Fatal("a cancelled card reached agentosd")
+	}
+}
+
+// REQ: REC-4, HW-1
+//
+// No authority, no new card: with no page authority the Recovery key
+// page shows the fixed line, keeps no replacement (the factor goes) and
+// asks agentosd nothing. It catches a new card printed without the
+// fingerprint.
+func TestRecoveryRefusesWithoutAuthority(t *testing.T) {
+	r := newRecoveryRig(t)
+	r.signIn()
+	for _, auth := range []func() []byte{nil, func() []byte { return nil }} {
+		r.srv.cfg.PageAuthority = auth
+		res := r.factor(map[string]string{"passphrase": "alpha bravo charlie delta"})
+		body, _ := io.ReadAll(res.Body)
+		if res.Header.Get("Location") != "" || !strings.Contains(html.UnescapeString(string(body)), firstboot.ErrNoAuthority.Error()) {
+			t.Fatalf("factor without an authority: %d %q", res.StatusCode, res.Header.Get("Location"))
+		}
+		if r.srv.recovery.p != nil || r.f.calls() != 0 {
+			t.Fatalf("a replacement kept, or agentosd asked: %d calls", r.f.calls())
+		}
 	}
 }

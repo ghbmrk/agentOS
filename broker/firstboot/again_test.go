@@ -74,7 +74,7 @@ func TestCardStepAgainAfterRestart(t *testing.T) {
 	}
 
 	st := &change.MemStore{}
-	s, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
+	s, err := NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t), Provision: func(*card.Card) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestFirstBootAgainOnReinstall(t *testing.T) {
 // nothing. On the claim route it reaches the claimed card's step.
 func TestRetryRerunAfterAFailedReset(t *testing.T) {
 	st := &change.MemStore{}
-	s, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
+	s, err := NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t), Provision: func(*card.Card) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestRetryRerunAfterAFailedReset(t *testing.T) {
 func TestRetryRerunAfterTheCardCannotBeMade(t *testing.T) {
 	var shown card.Card
 	fail := false
-	s, err := NewCardStep(&change.MemStore{}, card.DisplayConfig{
+	s, err := NewCardStep(&change.MemStore{}, card.DisplayConfig{Authority: testAuthority(t),
 		Generate: func(rd io.Reader) (*card.Card, error) {
 			if fail {
 				fail = false

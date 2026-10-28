@@ -13,6 +13,13 @@ import (
 // the Owner Card and confirmed it (HW-1): setup does not finish before.
 var ErrCardPending = errors.New("firstboot: I am waiting for you to save your Owner Card")
 
+// ErrNoAuthority is what CardStep.Hold returns, a fixed line for the page,
+// while the card step has no page authority to print on the card (HW-1:
+// the box makes every Owner Card after the core's page authority, and a
+// card printed without its fingerprint can never get it). The step draws
+// nothing and shows no card; setup's finish still answers card pending.
+var ErrNoAuthority = errors.New("I cannot make your Owner Card until my page authority exists.")
+
 // cardState is the card step's latch, the only thing it keeps on disk.
 // Preloaded marks a box that held a claim code (Begin): it survives the
 // confirm, so a box that loses its claim state never looks bare (R4).
@@ -29,6 +36,9 @@ type CardStep struct {
 	state     Store
 	cfg       card.DisplayConfig
 	preloaded bool
+	// noAuth: cfg.Authority is missing or not the page's authority
+	// (card.CheckAuthority), so no card is ever drawn (ASSUMPTIONS OWN-card-ca-3).
+	noAuth bool
 
 	mu   sync.Mutex
 	done bool
@@ -41,7 +51,10 @@ type CardStep struct {
 
 // NewCardStep loads the latch and, if the card was not confirmed yet,
 // generates a new card for display. cfg.Provision must accept a retry
-// with the same card (ASSUMPTIONS.md F10).
+// with the same card (ASSUMPTIONS.md F10). Without a page authority
+// (cfg.Authority) it builds no display and draws no randomness: Hold
+// returns ErrNoAuthority, and the step never errors for it, so the page
+// does not crash-loop (OWN-card-ca-3).
 func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 	if st == nil || cfg.Provision == nil {
 		return nil, errors.New("firstboot: incomplete card step config")
@@ -56,8 +69,9 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 			return nil, fmt.Errorf("firstboot: card state: %w", err)
 		}
 	}
-	s := &CardStep{state: st, cfg: cfg, preloaded: cs.Preloaded, done: cs.Confirmed}
-	if s.done {
+	s := &CardStep{state: st, cfg: cfg, preloaded: cs.Preloaded, done: cs.Confirmed,
+		noAuth: card.CheckAuthority(cfg.Authority) != nil}
+	if s.done || s.noAuth {
 		return s, nil
 	}
 	if s.d, err = s.display(0); err != nil {
@@ -106,6 +120,10 @@ func (s *CardStep) display(gen int) (*card.Display, error) {
 func (s *CardStep) Again(reset func() error) error {
 	if reset == nil {
 		return errors.New("firstboot: incomplete card reset config")
+	}
+	if s.noAuth {
+		// No card could follow the reset, so the vault is left as it is.
+		return ErrNoAuthority
 	}
 	s.mu.Lock()
 	s.done = false
@@ -205,12 +223,16 @@ func (s *CardStep) Display() *card.Display {
 }
 
 // Hold returns ErrCardPending, with the owner's next step, until the card
-// is confirmed; nil after. The setup finish path calls it first.
+// is confirmed; nil after. Without a page authority it returns
+// ErrNoAuthority instead. The setup finish path calls it first.
 func (s *CardStep) Hold() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.done {
 		return nil
+	}
+	if s.noAuth {
+		return ErrNoAuthority
 	}
 	return fmt.Errorf("%w: print or save your Owner Card, then type the word and group I ask for", ErrCardPending)
 }

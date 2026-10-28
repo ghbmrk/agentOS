@@ -84,8 +84,15 @@ const (
 	checkGrid            // the grid check code
 )
 
-// DisplayConfig configures NewDisplay. Provision is required.
+// DisplayConfig configures NewDisplay. Provision and Authority are
+// required.
 type DisplayConfig struct {
+	// Authority is the page authority's certificate (DER): the card and
+	// every rotation sheet print its fingerprint (HW-1, CH-9, REC-4).
+	// NewDisplay refuses with ErrNoAuthority, before drawing any
+	// randomness, when it is missing or fails CheckAuthority. It is
+	// public, and kept apart from Card, the secrets wipeCard clears.
+	Authority []byte
 	// Rand is the box's randomness; crypto/rand.Reader when nil. Every
 	// value on the card comes from it, at the box, never from the image.
 	Rand io.Reader
@@ -152,6 +159,10 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	if cfg.Provision == nil {
 		return nil, errors.New("card: display needs a provisioner")
 	}
+	if err := CheckAuthority(cfg.Authority); err != nil {
+		return nil, err
+	}
+	fp := Fingerprint(cfg.Authority)
 	if cfg.Rand == nil {
 		cfg.Rand = rand.Reader
 	}
@@ -185,9 +196,9 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 		default:
 			d.check = checkGrid
 		}
-		d.sheet, err = rotationHTML(c, ask)
+		d.sheet, err = rotationHTML(c, ask, fp)
 	} else {
-		d.sheet, err = HTML(c)
+		d.sheet, err = HTML(c, fp)
 	}
 	if err == nil && ask.Passphrase {
 		d.word, err = uniform(cfg.Rand, PassphraseWords)

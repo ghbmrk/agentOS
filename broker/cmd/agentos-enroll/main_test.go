@@ -1369,6 +1369,51 @@ func TestRotateRecoveryRetryAfterLostAnswer(t *testing.T) {
 	}
 }
 
+// MIG-4-recovery-r4c-later (#3622): a retry's factor no longer opens the
+// store, and next's slot opens but the store fails for another reason, here
+// a MAC changed without the store key. The answer is the store's refusal,
+// not the factor's, and the store's bytes stay as they were.
+// Revert mutant: the fallback's error mapped to errFactor whatever it is
+// (both cases answer factor).
+func TestRotateRecoveryRetryOnADamagedStore(t *testing.T) {
+	b := newRotBox(t)
+	next := newKey(t)
+	nextID := recipientID(next)
+	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, nextID))); w != "ok" {
+		t.Fatalf("the first rotation answered %q", w)
+	}
+	// The store parses only in its canonical encoding, so the MAC is
+	// changed in place.
+	raw := get(os.ReadFile(b.c.storePath()))
+	var f struct{ MAC []byte }
+	noErr(t, json.Unmarshal(raw, &f))
+	good := get(json.Marshal(f.MAC))
+	f.MAC[0] ^= 1
+	raw = bytes.Replace(raw, append([]byte(`"mac":`), good...), append([]byte(`"mac":`), get(json.Marshal(f.MAC))...), 1)
+	noErr(t, os.WriteFile(b.c.storePath(), raw, 0o600))
+	if _, err := seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}); !errors.Is(err, seal.ErrTampered) {
+		t.Fatalf("next on the damaged store: got %v, want ErrTampered", err)
+	}
+	again := approve(b.head, handoff.RouteCard, b.old, nextID)
+	for _, c := range []struct {
+		name string
+		req  []byte
+	}{
+		{"the old card's key", request("recovery", b.recovery, next, again)},
+		{"a wrong passphrase", request("passphrase", []byte("not the owner's words"), next, again)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			was := get(os.ReadFile(b.c.storePath()))
+			if w := b.ask(c.req); w != "store" {
+				t.Fatalf("answered %q, want %q", w, "store")
+			}
+			if !bytes.Equal(get(os.ReadFile(b.c.storePath())), was) {
+				t.Fatal("a refused retry changed the store")
+			}
+		})
+	}
+}
+
 // MIG-4-recovery-r2: a store enrolled before MIG-4-recovery-e1 holds no
 // recipient; an approval with old "" gives it its first, and one naming
 // any recipient is stale.

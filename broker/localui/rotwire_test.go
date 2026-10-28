@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/modem"
 )
 
@@ -114,6 +115,7 @@ func newWireRig(t *testing.T) *wireRig {
 	t.Helper()
 	x := &wireRig{rig: newRig(t), v: &fakeRotVault{}}
 	x.r = NewRotation(x.v)
+	x.r.Authority = testAuthority
 	x.r.Generate = func(rd io.Reader) (*card.Card, error) {
 		c, err := card.Generate(rd)
 		if err == nil {
@@ -585,5 +587,35 @@ func TestRotationDisplayWithNoStarterIsShownToNone(t *testing.T) {
 	}
 	if _, committed, _ := x.v.n(); committed != 0 {
 		t.Fatal("a display with no starter committed")
+	}
+}
+
+// REQ: REC-4, HW-1
+//
+// No authority, no rotation sheet: with no page authority (unset, nil or
+// not the page's) a start is refused with the fixed line before anything
+// is generated, sent to the vault process or discarded; a waiting
+// rotation stays. It catches a sheet printed without the fingerprint.
+func TestRotationRefusesWithoutAuthority(t *testing.T) {
+	x := newWireRig(t)
+	x.start(t, url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+	waiting := x.r.Display()
+	gens := 0
+	gen := x.r.Generate
+	x.r.Generate = func(rd io.Reader) (*card.Card, error) { gens++; return gen(rd) }
+	for name, auth := range map[string]func() []byte{
+		"unset":   nil,
+		"nil":     func() []byte { return nil },
+		"garbage": func() []byte { return []byte("not a certificate") },
+	} {
+		x.r.Authority = auth
+		begun, _, cancels := x.v.n()
+		w := x.post("/rotate/", url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), firstboot.ErrNoAuthority.Error()) {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		if b, _, c := x.v.n(); b != begun || c != cancels || gens != 0 || x.r.Display() != waiting {
+			t.Fatalf("%s: %d begins, %d cancels, %d cards, waiting rotation replaced", name, b-begun, c-cancels, gens)
+		}
 	}
 }

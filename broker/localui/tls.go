@@ -1,6 +1,7 @@
 package localui
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -48,6 +49,9 @@ type PageTLS struct {
 
 	mu   sync.Mutex
 	cert *tls.Certificate
+	// authority is the authority's certificate (DER) from the last
+	// verified Renew; a failed renewal never clears it.
+	authority []byte
 }
 
 // ErrNoAuthority and ErrRestore are agentosd's answers that the page has
@@ -112,6 +116,7 @@ func (p *PageTLS) Renew(ctx context.Context) error {
 	}
 	p.mu.Lock()
 	p.cert = &tls.Certificate{Certificate: [][]byte{c.Leaf}, PrivateKey: key, Leaf: leaf}
+	p.authority = bytes.Clone(c.Authority)
 	p.mu.Unlock()
 	return nil
 }
@@ -143,6 +148,19 @@ func (p *PageTLS) Leaf() *x509.Certificate {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cert.Leaf
+}
+
+// Authority is a copy of the page authority's certificate (DER) from the
+// last verified renewal: the one the served leaf chains to, which the
+// Owner Card and every rotation sheet print the fingerprint of (HW-1,
+// REC-4). It is nil on a nil PageTLS (no HTTPS) and before any success.
+func (p *PageTLS) Authority() []byte {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return bytes.Clone(p.authority)
 }
 
 var errSNI = errors.New("localui: not the page's name")

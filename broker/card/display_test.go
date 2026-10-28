@@ -31,6 +31,7 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	x := &rig{}
 	d, err := NewDisplay(DisplayConfig{
+		Authority: testAuthority(t),
 		Generate: func(r io.Reader) (*Card, error) {
 			c, err := Generate(r)
 			if err == nil {
@@ -207,7 +208,7 @@ func TestNewDisplayNeedsProvision(t *testing.T) {
 		t.Fatal("display without a provisioner")
 	}
 	// A generator returning an invalid card is refused, not shown.
-	_, err := NewDisplay(DisplayConfig{Provision: func(*Card) error { return nil },
+	_, err := NewDisplay(DisplayConfig{Provision: func(*Card) error { return nil }, Authority: testAuthority(t),
 		Generate: func(io.Reader) (*Card, error) { return &Card{}, nil }})
 	if err == nil {
 		t.Fatal("invalid card shown")

@@ -31,7 +31,7 @@ func (b *startBox) begin(t *testing.T) (*FirstBoot, error) {
 		Latch:    &b.latch,
 		Download: b.download,
 		Reset:    func() error { b.resets++; b.vault = false; return nil },
-		Card: card.DisplayConfig{
+		Card: card.DisplayConfig{Authority: testAuthority(t),
 			Generate: func(r io.Reader) (*card.Card, error) {
 				c, err := card.Generate(r)
 				if err == nil {
@@ -216,7 +216,7 @@ func TestClaimedCardDisplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cc, err := NewClaimedCard(cl, &b.latch, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
+	cc, err := NewClaimedCard(cl, &b.latch, card.DisplayConfig{Authority: testAuthority(t), Provision: func(*card.Card) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

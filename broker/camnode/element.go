@@ -38,8 +38,12 @@ type Element interface {
 	CommitBundle(counter uint64, bundle [32]byte) error
 	// ClearBundle zeroes the bundle record. The counter is kept.
 	ClearBundle() error
-	// Image is the image counter (CAM-server part b2 raises it).
+	// Image is the image counter: the counter of the newest image this
+	// node has marked good.
 	Image() (uint64, error)
+	// RaiseImage raises the image counter to counter, which must be above
+	// it.
+	RaiseImage(counter uint64) error
 }
 
 // ErrElement is the element answering with something other than what was
@@ -68,10 +72,16 @@ func newSigner(e Element) (signer, [camwire.PointLen]byte, error) {
 func (s signer) Public() crypto.PublicKey { return s.pub }
 
 // Sign signs a SHA-256 digest only: TLS 1.3 with ECDSA P-256 asks for no
-// other.
+// other. It releases only a signature that verifies under the device key,
+// so a faulted element signature (a fault attack's lever on ECDSA) never
+// leaves the node (ASSUMPTIONS CAM-b2-1).
 func (s signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	if opts.HashFunc() != crypto.SHA256 || len(digest) != 32 {
+	if opts == nil || opts.HashFunc() != crypto.SHA256 || len(digest) != 32 {
 		return nil, ErrElement
 	}
-	return s.e.Sign(digest)
+	sig, err := s.e.Sign(digest)
+	if err != nil || !ecdsa.VerifyASN1(s.pub, digest, sig) {
+		return nil, ErrElement
+	}
+	return sig, nil
 }

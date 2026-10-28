@@ -20,6 +20,8 @@ def git(cwd, *args):
 
 
 EDITED = lambda kind: ["edited-verdict", kind + ":", *"a verdict edited after posting never counts, post a new comment".split()]
+UNPARSED = lambda kind, pr=7: ["unparsed-record", kind + ":",
+    *f'Record line must be "Record: PR #{pr} · package <ID-without-spaces> · head <sha>"'.split()]
 
 
 class PremergeTest(unittest.TestCase):
@@ -641,6 +643,13 @@ class PremergeTest(unittest.TestCase):
         missing = {k: v for k, v in c("accept", sha, "1").items() if k != "updated_at"}
         self.assertEqual(run([missing]), (1, EDITED("l3")))
         self.assertEqual(run([{**c("accept", sha, "1"), "updated_at": "1"}]), (0, ["same"]))
+        # #3611: a Record line that does not parse is named, not read as no-verdict; like an edit it supersedes
+        spaced = lambda x: {**x, "body": x["body"].replace("package X-1", "package house keeping")}
+        self.assertEqual(run([spaced(c("accept", sha, "1"))]), (1, UNPARSED("l3")))
+        self.assertEqual(run([c("accept", sha, "1"), spaced(c("accept", sha, "2"))]), (1, UNPARSED("l3")))
+        self.assertEqual(run([spaced(c("accept", sha, "1")), c("accept", sha, "2")]), (0, ["same"]))
+        unrecorded = {**c("accept", sha, "1"), "body": "Verdict: accept\n# t\n<!-- record: l3 -->\n"}
+        self.assertEqual(run([unrecorded]), (1, UNPARSED("l3")))
         # a later fix-list supersedes the accept
         self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
         # a push after the accept reads as changed; a delta accept at the new head clears it
@@ -698,6 +707,10 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([l3, {**sec(), "updated_at": "9"}]), (1, EDITED("security")))
         self.assertEqual(run([l3, sec(at="1"), {**sec("fix-list", at="2"), "updated_at": "9"}]), (1, EDITED("security")))
         self.assertEqual(run([l3, {**sec(at="1"), "updated_at": "9"}, sec(at="2")]), (0, ["same"]))
+        # #3611 (seen on #3603): a package with spaces never parsed, so the accept read as needs-security
+        spaced = lambda x: {**x, "body": x["body"].replace("package X-1", "package housekeeping (G2 freeze exempt-pr cleanup)")}
+        self.assertEqual(run([l3, spaced(sec())]), (1, UNPARSED("security")))
+        self.assertEqual(run([l3, spaced(sec(at="1")), sec(at="2")]), (0, ["same"]))
         # one comment carrying both markers is one review: it counts as the L3 accept, not the Security one
         both = rec("accept", sha, "<!-- record: security -->\n<!-- record: combined -->\n")
         self.assertEqual(run([both]), need)
@@ -787,6 +800,9 @@ class PremergeTest(unittest.TestCase):
             self.assertEqual(run([l3, bad, pot()]), (1, ["needs-lens", "ux"]), bad)
         self.assertEqual(run([l3, {**ux(), "updated_at": "9"}, pot()]), (1, EDITED("ux")))
         self.assertEqual(run([l3, {**ux(), "updated_at": "9"}]), (1, EDITED("ux")))
+        spaced = lambda x: {**x, "body": x["body"].replace("package X-1", "package two words")}
+        self.assertEqual(run([l3, spaced(ux()), pot()]), (1, UNPARSED("ux")))
+        self.assertEqual(run([l3, spaced(ux()), spaced(pot())]), (1, UNPARSED("ux,potency")))
         self.assertEqual(run([l3, ux(at="1"), ux("fix-list", at="2"), pot()]), (1, ["needs-lens", "ux"]))
         # a marker that is not on its own line is not a marker
         inline = self.rec("accept", sha, "see <!-- record: ux --> above\n")

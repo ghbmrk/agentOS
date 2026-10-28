@@ -127,7 +127,7 @@ func TestRecoveryKeyAndGridCheckMatchRecovery(t *testing.T) {
 			t.Fatalf("mistyped recovery key accepted (symbol %d)", i)
 		}
 	}
-	page, err := HTML(mustGen(t, 6))
+	page, err := HTML(mustGen(t, 6), testFingerprint(t))
 	if err != nil || !strings.Contains(string(page), "Grid check code: <span class=\"mono\">"+GridCheck(mustGen(t, 6).GridSeed)) {
 		t.Fatalf("grid check not printed under the grid: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestWiFiQRPayloadEscapes(t *testing.T) {
 // itself (no external fetch).
 func TestRenderedCardIsTheManual(t *testing.T) {
 	c := mustGen(t, 4)
-	out, err := HTML(c)
+	out, err := HTML(c, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func assertSelfContained(t *testing.T, page string) {
 // and the card never mentions BitLocker, Secure Boot, or firmware
 // settings: starting from the drive uses the one-time boot key only.
 func TestCardLeavesTheHostAlone(t *testing.T) {
-	out, err := HTML(mustGen(t, 4))
+	out, err := HTML(mustGen(t, 4), testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}

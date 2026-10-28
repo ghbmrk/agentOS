@@ -509,9 +509,9 @@ func (s *Store) sweepCamera(camera string, retention time.Duration, now time.Tim
 		// followed.
 		return 0, os.Remove(dir)
 	}
-	if err := privfile.Check(dir, true); err != nil {
-		return 0, err
-	}
+	// No privfile.Check here: a directory opened to other uids still has
+	// its expired capture deleted (#3628). seal keeps the check, so no
+	// segment is written into it.
 	des, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err
