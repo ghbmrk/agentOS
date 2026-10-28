@@ -6,8 +6,9 @@ package camdecode
 // H.264 decoder alone (image/libavcodec.sh), linked statically into
 // agentos-camdecode. Only this file touches C. It decodes on one thread,
 // logs nothing, and refuses a stream whose coded size exceeds the declared
-// shape's, beyond alignment padding, before the decoder allocates for it
-// (max_pixels).
+// shape's, beyond alignment padding, before the decoder allocates frame
+// buffers for it (max_pixels; its per-macroblock tables, at most about
+// 100 MB, are allocated first and fit the sandbox's memory limit).
 
 /*
 #cgo pkg-config: libavcodec libavutil

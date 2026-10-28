@@ -337,7 +337,7 @@ jobs:
           done
       - name: Camera H.264 decoder on the pinned libavcodec, with FuzzH264Feed for 20s (CAM-clerk b2, #3514)
         # go test ./... has no libavcodec, so the decoder's tests run here, against the same pinned
-        # H.264-only build image/build.sh links into agentos-camdecode.
+        # H.264-only build image/camdecode.sh links into agentos-camdecode.
         run: |
           sh ../image/libavcodec.sh "$RUNNER_TEMP/libavcodec"
           export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libavcodec" \

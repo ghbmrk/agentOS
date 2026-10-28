@@ -211,9 +211,14 @@ func TestDecodeFormatMatchesDecoder(t *testing.T) {
 // decoder, so no stream payload is decoded in the trusted base (design
 // point 3); and the decoder links nothing that reaches a network,
 // another process or memory outside Go (NET-2: no network in the
-// sandbox, by its imports as well as its namespace).
+// sandbox, by its imports as well as its namespace). The one exception is
+// cgo in camdecode/h264.go, the libavcodec-tagged file that links the
+// pinned H.264-only libavcodec (image/libavcodec.sh): configured with
+// --disable-network, it reaches no network by its build, and the
+// sandbox's namespace stops any that would. Every other file of both
+// sandbox directories is refused "C", so no further C enters unseen.
 func TestClerkDoesNotLinkDecoder(t *testing.T) {
-	check := func(dir string, ok func(string) bool) {
+	check := func(dir string, ok func(file, path string) bool) {
 		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil || len(files) == 0 {
 			t.Fatalf("%s: %v", dir, err)
@@ -228,15 +233,19 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 			}
 			for _, im := range f.Imports {
 				p, _ := strconv.Unquote(im.Path.Value)
-				if !ok(p) {
+				if !ok(name, p) {
 					t.Errorf("%s imports %s", name, p)
 				}
 			}
 		}
 	}
-	check(".", func(p string) bool { return !strings.Contains(p, "camdecode") })
+	check(".", func(_, p string) bool { return !strings.Contains(p, "camdecode") })
 	forbidden := []string{"net", "os/exec", "plugin", "unsafe", "syscall"}
-	inSandbox := func(p string) bool {
+	cgo := filepath.Join("..", "..", "cmd", "agentos-camdecode", "camdecode", "h264.go")
+	inSandbox := func(file, p string) bool {
+		if p == "C" {
+			return file == cgo
+		}
 		if strings.HasPrefix(p, "net/") || slices.Contains(forbidden, p) {
 			return false
 		}
