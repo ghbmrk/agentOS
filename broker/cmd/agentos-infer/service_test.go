@@ -28,6 +28,10 @@ import (
 const helperArg = "agentos-infer-main"
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--model" {
+		fakeLlamaServer(os.Args[1:]) // the test binary standing in for llama-server
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == helperArg {
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -532,7 +536,12 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	defer func() { cancel(); cmd.Wait() }()
 	_, err = infer.Client{Path: sock, Timeout: 5 * time.Second}.Hello(context.Background())
 	var e *infer.Error
-	if !errors.As(err, &e) || e.Cause != infer.Unavailable || e.Detail != "runtime did not load" {
+	// The build's own adapter answers: none cannot load, llama.cpp refuses a file that is not a GGUF.
+	cause, detail := infer.Unavailable, "runtime did not load"
+	if withLlama {
+		cause, detail = infer.Corrupt, "runtime refused the model file"
+	}
+	if !errors.As(err, &e) || e.Cause != cause || e.Detail != detail {
 		t.Fatalf("hello: %v (log: %s)", err, stderr.String())
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 2 {

@@ -1,3 +1,5 @@
+//go:build !infer_llamacpp
+
 package main
 
 import "errors"
