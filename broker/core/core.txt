@@ -74,6 +74,9 @@ wiring cmd/agentos-enroll
 # descriptor 3, the owner's anchors from a file only root writes (D-146), and
 # the kernel's, the owner side's and the planner's sockets.
 wiring cmd/agentos-clerk-mail
+# The model clerk's process (MIG-4-untrusted-exit-b2b, #2780): its key from the
+# kernel on descriptor 3, the plan login's sealed slot, and agentosd's sockets.
+wiring cmd/agentos-clerk-model
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
