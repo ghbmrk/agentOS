@@ -7,6 +7,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -148,6 +149,7 @@ type backups struct {
 	aead      cipher.AEAD
 	recipient *backup.Recipient // nil: the store holds none (enrolled before e1)
 	log       string
+	content   string // the content stores' directory ("" holds none)
 	keys      kernel.Keys
 	guard     []string // the kernel's own data folders, resolved
 	kept      []Kept
@@ -157,10 +159,12 @@ type backups struct {
 	// kernel's lock (#3338).
 	writing *backupWrite
 	// For tests only: hook runs as each section opens, wrap, when set,
-	// wraps every target, and saveErr, when set, fails every save.
+	// wraps every target, saveErr, when set, fails every save, and link
+	// replaces os.Link in the snapshot.
 	hook    func()
 	wrap    func(backup.Target) backup.Target
 	saveErr func() error
+	link    func(src, dst string) error
 }
 
 // openBackups opens the records in dir under logKey, made 0700 if missing,
@@ -182,7 +186,10 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, k *kernel.Kernel, now int64
 	if err != nil {
 		return nil, err
 	}
-	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, keys: keys}
+	bk := &backups{dir: cfg.BackupDir, aead: a, log: cfg.Log, content: cfg.ContentDir, keys: keys, link: os.Link}
+	if err := bk.dropSnaps(); err != nil {
+		return nil, err
+	}
 	if len(cfg.Recipient) > 0 {
 		x, ek, err := handoff.SplitRecipient(cfg.Recipient)
 		if err != nil {
@@ -452,13 +459,37 @@ type backupWrite struct {
 	done chan struct{}
 }
 
-// backupSnap is what one backup call writes: the log's first n bytes and the
-// live keys, both read under the kernel's lock (brief decision 7).
+// backupSnap is what one backup call writes: the log's first n bytes, the
+// live keys and the live subjects' items, all read under the kernel's lock
+// (brief decision 7). The items are linked, or copied, into dir, a fresh
+// directory in the backup directory, so an erase during the write cannot
+// take a file from under it; stores lists them by store, each sorted.
 type backupSnap struct {
-	n    int64
-	upto uint64 // the log head's sequence number at n
-	keys *kernel.MemKeys
-	live liveSet
+	n      int64
+	upto   uint64 // the log head's sequence number at n
+	keys   *kernel.MemKeys
+	live   liveSet
+	dir    string
+	stores map[string][]kernel.Hash
+}
+
+// snapPrefix begins a snapshot directory's name in the backup directory.
+const snapPrefix = "snap-"
+
+// dropSnaps removes every snapshot a stop left in the backup directory.
+func (bk *backups) dropSnaps() error {
+	des, err := os.ReadDir(bk.dir)
+	if err != nil {
+		return err
+	}
+	for _, de := range des {
+		if strings.HasPrefix(de.Name(), snapPrefix) {
+			if err := os.RemoveAll(filepath.Join(bk.dir, de.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (h *Kernel) snap() (backupSnap, error) {
@@ -466,14 +497,15 @@ func (h *Kernel) snap() (backupSnap, error) {
 	if err != nil {
 		return backupSnap{}, err
 	}
-	s := backupSnap{n: n, upto: uint64(h.k.Log().Len()), keys: kernel.NewMemKeys(), live: liveSet{}}
+	s := backupSnap{n: n, upto: uint64(h.k.Log().Len()), keys: kernel.NewMemKeys(), live: liveSet{}, stores: map[string][]kernel.Hash{}}
 	subs, err := h.bk.keys.List()
 	if err != nil {
 		return backupSnap{}, err
 	}
 	st := h.k.State()
 	for _, sub := range subs {
-		if r, ok := st.Recall(sub); !ok || r.Erased {
+		r, ok := st.Recall(sub)
+		if !ok || r.Erased {
 			continue
 		}
 		k, ok, err := h.bk.keys.Get(sub)
@@ -483,9 +515,114 @@ func (h *Kernel) snap() (backupSnap, error) {
 		if ok {
 			s.keys.Put(sub, k)
 			s.live[sub] = true
+			for _, it := range r.Items {
+				if ValidStoreName(it.Store) {
+					s.stores[it.Store] = append(s.stores[it.Store], it.Hash)
+				}
+			}
 		}
 	}
+	if len(s.stores) == 0 || h.bk.content == "" {
+		s.stores = nil
+		return s, nil
+	}
+	if err := h.bk.snapItems(&s); err != nil {
+		if s.dir != "" {
+			os.RemoveAll(s.dir)
+		}
+		return backupSnap{}, err
+	}
 	return s, nil
+}
+
+// snapItems links each of s's items into s.dir, made fresh, copying it
+// where the link fails. An item whose file is missing is left out: the
+// backup carries what the store holds.
+func (bk *backups) snapItems(s *backupSnap) error {
+	var err error
+	if s.dir, err = os.MkdirTemp(bk.dir, snapPrefix); err != nil {
+		return err
+	}
+	for store, hs := range s.stores {
+		slices.SortFunc(hs, func(a, b kernel.Hash) int { return bytes.Compare(a[:], b[:]) })
+		hs = slices.Compact(hs)
+		s.stores[store] = hs
+		dst := filepath.Join(s.dir, store)
+		if err := os.Mkdir(dst, 0o700); err != nil {
+			return err
+		}
+		src := &FileContent{filepath.Join(bk.content, store)}
+		for _, hh := range hs {
+			if err := bk.link(filepath.Join(src.dir, itemName(hh)), filepath.Join(dst, itemName(hh))); err == nil || errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			ct, err := src.Get(hh)
+			if errors.Is(err, kernel.ErrItem) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if err := privfile.WriteAtomic(dst, itemName(hh), ct, nil); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Each content/<store> section is the store's items in hash order, each
+// framed as its SHA-256 (32 bytes), its length (4 bytes, big-endian) and
+// its ciphertext. A restore checks every hash and length (RestoreSections).
+const itemFrame = sha256.Size + 4
+
+// contentSources are snap's content/<store> sections, by store name.
+func (bk *backups) contentSources(snap backupSnap) []backup.Source {
+	var out []backup.Source
+	for _, store := range slices.Sorted(maps.Keys(snap.stores)) {
+		fc, hs := &FileContent{filepath.Join(snap.dir, store)}, snap.stores[store]
+		out = append(out, backup.Source{Name: "content/" + store, Open: func() (io.ReadCloser, error) {
+			if bk.hook != nil {
+				bk.hook()
+			}
+			return io.NopCloser(&itemsReader{fc: fc, items: hs}), nil
+		}})
+	}
+	return out
+}
+
+// itemsReader frames each of items that fc holds whole: one missing, or
+// whose bytes are not its hash's, is left out, so one damaged file never
+// makes a backup that does not restore.
+type itemsReader struct {
+	fc    *FileContent
+	items []kernel.Hash
+	buf   []byte
+}
+
+func (r *itemsReader) Read(p []byte) (int, error) {
+	for len(r.buf) == 0 {
+		if len(r.items) == 0 {
+			return 0, io.EOF
+		}
+		h := r.items[0]
+		r.items = r.items[1:]
+		ct, err := r.fc.Get(h)
+		if errors.Is(err, kernel.ErrItem) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if kernel.Hash(sha256.Sum256(ct)) != h {
+			continue
+		}
+		r.buf = binary.BigEndian.AppendUint32(append(make([]byte, 0, itemFrame+len(ct)), h[:]...), uint32(len(ct)))
+		r.buf = append(r.buf, ct...)
+	}
+	n := copy(p, r.buf)
+	r.buf = r.buf[n:]
+	return n, nil
 }
 
 // logSource is the log's first n bytes, opened afresh each time.
@@ -563,6 +700,9 @@ func (h *Kernel) Backup(now int64) ([]Taken, error) {
 	})
 	if err != nil {
 		return nil, err
+	}
+	if snap.dir != "" {
+		defer os.RemoveAll(snap.dir)
 	}
 	// The writes end here on every path, before the closing re-seal.
 	over := sync.OnceFunc(func() {
@@ -756,7 +896,7 @@ func (h *Kernel) writeOne(t kernel.BackupTarget, snap backupSnap, now int64) (st
 		Subjects: slices.Sorted(maps.Keys(snap.live)), PageCA: caPrint}}
 	rec, err := backup.Write(f, pp, backup.Input{
 		Recipient: *bk.recipient, Created: now, PageCA: ca, PageCAFingerprint: caPrint,
-		Sections: []backup.Source{bk.logSource(snap.n)}, Keys: snap.keys, State: snap.live,
+		Sections: append([]backup.Source{bk.logSource(snap.n)}, bk.contentSources(snap)...), Keys: snap.keys, State: snap.live,
 	})
 	if err == nil {
 		err = f.Sync()

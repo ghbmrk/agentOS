@@ -94,8 +94,6 @@ var netOK = map[string]allowance{
 	// it dials on a thread whose effective uid alone is the owner side's.
 	"owner/kernelsock": {"dials only the kernel's owner unix socket, as the owner side's uid on the calling thread",
 		[]string{"golang.org/x/sys/unix.RawSyscall", "golang.org/x/sys/unix.SYS_GETEUID", "golang.org/x/sys/unix.SYS_SETRESUID", "net.Dialer"}},
-	// The home Wi-Fi helper's client (P2-2w c3; Security L8), as modelroute.
-	"netjoin": {"dials only the netjoin helper's unix socket", []string{"net.Dialer"}},
 	// The local inference service's client and supervisor (INFER-SVC
 	// INF-2, INF-1): the client dials the service's unix socket; the
 	// supervisor makes that socket, hands it to the jailed service as fd 3
@@ -210,9 +208,8 @@ var socketPkgs = map[string]bool{
 // unixDialers are the packages whose client types may be built, as
 // composite literals that set their own non-nil transport or dialer
 // (clientTypes), each dial on "unix" to a configured address: modelroute
-// and the mail socket's client (SR3-mail-w2), both to the vault process,
-// and the netjoin helper's client (P2-2w c3).
-var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "netjoin": true, "owner/notice/noticesock": true, "infer": true, "vision": true, "checker/checkersock": true, "localsrv/accountsock": true, "owner/kernelsock": true}
+// and the mail socket's client (SR3-mail-w2), both to the vault process.
+var unixDialers = map[string]bool{"modelroute": true, "mail/mailsock": true, "owner/notice/noticesock": true, "infer": true, "vision": true, "checker/checkersock": true, "localsrv/accountsock": true, "owner/kernelsock": true}
 
 // clients are the names that hold or open a connection, by package. In
 // unixDialers the types are allowed only as composite literals that set
@@ -765,13 +762,7 @@ var envExempt = map[string]string{}
 // decision that took it. TestVendorEnvExemptionsStayOutOfAgentosd pins
 // that agentosd links none of them, and the walk drops an exemption no
 // longer needed, as for envExempt.
-var vendorEnvExempt = map[string]string{
-	// godbus (D-108): dbus-launch for session-bus autolaunch, and
-	// launchctl on macOS. agentos-netjoin connects to the system bus only
-	// and its unit sets no environment (netjoin ASSUMPTIONS N8).
-	"vendor/github.com/godbus/dbus/v5/conn_other.go:var execCommand":               "D-108",
-	"vendor/github.com/godbus/dbus/v5/conn_darwin.go:getSessionBusPlatformAddress": "D-108",
-}
+var vendorEnvExempt = map[string]string{}
 
 // launcherPkgs are the packages whose calls start a child or read the
 // process's environment, with their default names.
@@ -1711,7 +1702,7 @@ func TestEveryChildGetsAnExplicitEnvironment(t *testing.T) {
 // REQ: ARC-2
 //
 // P2-2w c3 (D-108): a vendored package with an exempt child is never in
-// agentosd's graph; only agentos-netjoin links godbus.
+// agentosd's graph.
 func TestVendorEnvExemptionsStayOutOfAgentosd(t *testing.T) {
 	linked := map[string]bool{}
 	for _, p := range linkedDeps(t) {

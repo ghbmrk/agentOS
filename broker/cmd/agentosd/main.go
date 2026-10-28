@@ -20,7 +20,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/accel"
 	"github.com/ghbmrk/agentos/broker/admission"
-	"github.com/ghbmrk/agentos/broker/apnet"
 	"github.com/ghbmrk/agentos/broker/budget"
 	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/daemon"
@@ -241,7 +240,7 @@ func main() {
 	var agentImage, agentLaunch string
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
-	var keptPath, setupRecord, ownedPath string
+	var keptPath, setupRecord string
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -297,7 +296,6 @@ func main() {
 	flag.StringVar(&meterPath, "meter", "/var/lib/agentos/meter.json", "model-spend meter state (OP-8)")
 	flag.StringVar(&cfg.OwnerState, "owner-state", "/var/lib/agentos/owner.json", "owner channel state (P1-5)")
 	flag.StringVar(&setupRecord, "setup-record", "/var/lib/agentos/setup.json", "setup's record (P2-2w c2): with -owner unset, the local UI's setup is served on localui.sock until it records the owner's number here, then never again")
-	flag.StringVar(&ownedPath, "owned", apnet.Owned, "the owned marker (#2626): made once the owner's number is known, for agentos-ap, which cannot see the owner state; empty, it is not made")
 	flag.StringVar(&agentMachine, "agent-machine", "agent", "machine whose guest receives the owner's task chat")
 	flag.StringVar(&agentImage, "agent-image", "openclaw", "image the owner's agent machine is created from on first start; empty keeps no agent machine")
 	flag.StringVar(&agentLaunch, "agent-launch", "/usr/lib/agentos/guest/launch.json", "how the owner's agent machine starts: argv and env (guest/openclaw/launch.json)")
@@ -391,11 +389,6 @@ func main() {
 			log.Fatalf("%v; %v", held, err)
 		}
 		log.Print(held)
-		// The owner is known, so the loader stops serving setup while
-		// the restore is held.
-		if err := markOwned(ownedPath); err != nil {
-			log.Fatalf("owned marker: %v", err)
-		}
 		m := heldMode{Learn: learnDir, Dir: cfg.SocketDir, Owner: owner, PeerUID: &cfg.ModemUID, PeerGID: cfg.ModemGID,
 			Message: !modemBridge || ownerMessage, Logf: log.Printf}
 		if modemBridge {
@@ -466,10 +459,6 @@ func main() {
 		}
 		cfg.OwnerNumber = owner
 	}
-	if err := markOwned(ownedPath); err != nil {
-		log.Fatalf("owned marker: %v", err)
-	}
-
 	// RES-3: nothing below depends on what is found here. The local
 	// inference service runs on CPU and takes no lease (INF-1); leases are a
 	// later row (budget R8).
@@ -1096,10 +1085,7 @@ func openPool(root string, mem budget.Memory) (*cgroup.Group, error) {
 // sweepInboxTemps removes the temporary files a crash left beside the guest
 // inbox (#2373): one holds the outbox as it stood, reply text included, which
 // a forget of the guest's replies would otherwise leave on disk (CAP-3). It
-// runs first thing at start. The directory is shared: agentos-ap's one write
-// there, the setup network's burn, can lose its temp to this sweep, and then
-// its rename fails, the setup file is unchanged, and the unit restarts and
-// burns again (ASSUMPTIONS.md IT-2373). A failed sweep is logged, not fatal.
+// runs first thing at start. A failed sweep is logged, not fatal.
 func sweepInboxTemps(inboxPath string) {
 	if inboxPath == "" {
 		return

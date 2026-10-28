@@ -62,7 +62,7 @@ class NoExecTreeTest(unittest.TestCase):
         names = {rel.rsplit("/", 1)[1] for rel in shipped_units() if rel.endswith(".service")}
         self.assertIn("agentos-reboot.service", names)
         self.assertNotIn("agentos-ap.service", names)
-        self.assertIn("agentos-ap-exempt@.service", names)
+        self.assertNotIn("agentos-ap-exempt@.service", names)
         self.assertEqual(check.NOEXEC_EXEMPT, ("agentosd.service",))
         for name in sorted(names - set(check.NOEXEC_EXEMPT)):
             with self.subTest(name):
@@ -163,8 +163,8 @@ class NoExecTreeTest(unittest.TestCase):
         self.assertEqual(self.v(), [])
 
     def test_instances_and_links_are_refused_not_modelled(self):
-        for rel in ("etc/systemd/system/agentos-ap-exempt@wlan0.service.d/50-x.conf",
-                    "etc/systemd/system/agentos-ap-exempt@wlan0.service"):
+        for rel in ("etc/systemd/system/agentos-x@eth0.service.d/50-x.conf",
+                    "etc/systemd/system/agentos-x@eth0.service"):
             with self.subTest(rel):
                 f = write(self.root, rel, "[Service]\nNoExecPaths=\n")
                 self.assertTrue(any("an instance of a template" in x for x in self.v()), self.v())

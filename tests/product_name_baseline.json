@@ -87,23 +87,6 @@
   "briefs/P2-6m.md": {
     "ea73e50d722f2056b6ab0e0b27aabb5932a67a8a91b5ad774e531d8fc6c8ff95": 1
   },
-  "broker/apnet/ASSUMPTIONS.md": {
-    "1c668fa1fcf76df394a2a18299879ba528822d10b60e5bfd72f81a869360653c": 1
-  },
-  "broker/apnet/apnet.go": {
-    "7cb36ad2ab64089b523f8a21b8ed9b703149f5982ce75c464cabfd40f5334d1f": 1,
-    "ac24e29365671fd3d8c88f99b3b295a576365111ae69fc79d648d4482197ac85": 1
-  },
-  "broker/apnet/apnet_test.go": {
-    "0fbef8d2026715cd337de4338b6c918559b37f9fd40b458d54cd017d54a5241f": 1,
-    "1308545d23f5cd22ac59c286537473c76620304d8a96d6ac3b7ccd43eaa405d0": 1,
-    "78518a17b5b91811ce3ff6d9278b95e995e1eacc1c808cd5ef5f3d1818ef4290": 1,
-    "a0bf14b5015b7ceb2e7d0229fd1d67af6d821d4f403b4f316aa725ce09e29fe6": 1,
-    "a4247cd2ddca6cf3b0762c093be8d0bbbdf281dd45fbc0c665379c61d0dfac4d": 1,
-    "ce1067ec4deb377439edf63c06b214a413e22149fd97d602be205f3727a175f9": 1,
-    "df9147e1300bae4a8fb45395932e43cbd5316dbed67726e59ecd273324d3a804": 1,
-    "fa34d60263e9cbbd0f98fbfd58c5e35eff82205d804a7816bf242b6dbe8e800d": 1
-  },
   "broker/boxname/ASSUMPTIONS.md": {
     "c977535e2e402e0d2a9f0499bf4f4db3e4e153a8a9f69e78d8be075e32fd300a": 1
   },
@@ -142,11 +125,6 @@
   "broker/clock/chrony/chrony.conf": {
     "c880e9173659faa4262ad9dd864d99eaaaa0330214b5959085daf3f99ff991d8": 1
   },
-  "broker/cmd/agentos-ap/main_test.go": {
-    "99b1465ac45785bd9beda53733a0f606e51ff78a07ea2779e32fd849de2e70c7": 1,
-    "b4ed20ce2a466310a9a993f41c388641e8c46a437ea4b1bbbb64cf3346b3f370": 1,
-    "cf1ba0ac8b3658da974f4a0f374bbf96be9dd776a185ceaa32cbd584b835fd9a": 1
-  },
   "broker/cmd/agentos-egress/enroll.go": {
     "5080ecb45322f9ad9ce93736c6e7b58cd018202e7538da28f7d0077a7efb7a20": 1,
     "ee50a13f33bbb144b05591998859b4abd704a89b68c80ad7500410d2b387d765": 1
@@ -169,13 +147,6 @@
     "02b244be3afb6e4ced029183c329d1307a9166636f1bab5c2fa7aaf2235edf4e": 1,
     "06246dc9e972699e6498679dbe9a405a4a17a67a6318520d1a39b08875296784": 1,
     "8b8f80b5fb5b31cb582894bf49a4fda51a0138a97462b9a28513a3bd298b4303": 1
-  },
-  "broker/cmd/agentos-netjoin/50-agentos-netjoin.rules": {
-    "9ca553e9431f346a20d960d9b4a1fa848509d094f35c91962f03baae5145e031": 1
-  },
-  "broker/cmd/agentos-netjoin/agentos-netjoin.service": {
-    "12a39b3dbe4d1df989e33c7c7417bae84ed189cfa91b4276d4c9bdbdb04f4f44": 1,
-    "171d8f0f9d0ae6eb4fb8994e9cc5898ac2d658f691296085de92c2598fe10ce3": 1
   },
   "broker/cmd/agentos-release/main_test.go": {
     "af653ab828602894089d10a5b1f227dd6d69e485dd36b1aa55b833572e24023a": 1
@@ -226,9 +197,6 @@
   },
   "broker/egress/ASSUMPTIONS.md": {
     "6d211bbdeedcbb71d8988e7636ffea65148c9bc8626a2e84c0779d7843965a87": 1
-  },
-  "broker/firstboot/setupnet_test.go": {
-    "a7ba21ece54e40d15ac4e84dce4d5844016d2cdb2b788a0c4616722cf866aedb": 1
   },
   "broker/follow/follow.go": {
     "0b2e893983009d474a57f9192b1571972c0e351ecbc19ed02f18d39544f5b770": 1
@@ -288,12 +256,6 @@
   "broker/localui/ASSUMPTIONS.md": {
     "682e3a5dc7f04c9fdcd5dc0a0c2c117cc0f8cd936d31e41e2e9e1239fc9bb69d": 1,
     "df971f28a6536bfd9558ac82b14dd8c1f19742e8b1efc5eb546a0efeb22c98b1": 1
-  },
-  "broker/localui/ap_test.go": {
-    "f8d208a9ce792e877667b87e3d8c861c64dce46cca3e03479bcd972766627820": 1
-  },
-  "broker/localui/apexempt_test.go": {
-    "4061374e4eefc70ad811443f1e659e06abf77c62fded97daf102cf72903b2870": 1
   },
   "broker/localui/cardsock_test.go": {
     "01b43960af5680120897266c59a01007b9fdeeb843ea505ec450f918030ca32a": 1
@@ -404,13 +366,6 @@
   },
   "broker/modem/bridge/ASSUMPTIONS.md": {
     "0c552bec34bf380806895777a235943aa916a8b54d047352102bfea8a884b613": 1
-  },
-  "broker/netjoin/ASSUMPTIONS.md": {
-    "0005d50e80cb2fa7bebcf734e5c34631cc96d4c84717a8fdd82c4f1d854db2b8": 1
-  },
-  "broker/netjoin/scan_test.go": {
-    "30bb723fd02a67b6a4bb97db8f21bb24d206ad26e4571e93b5f774db5179baa4": 1,
-    "90da56ab6ae15e18a18ecf76759e833999986e1bee0993c3d85a10194185bc71": 1
   },
   "broker/owner/name_test.go": {
     "48a962f3fa6aa45852137345104e4d32432b35ceea407410afd72573b76a338f": 1,

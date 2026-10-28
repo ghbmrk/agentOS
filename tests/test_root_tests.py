@@ -399,7 +399,6 @@ class RepoTest(unittest.TestCase):
         found = root_tests.gated()
         self.assertIn("TestNoCapsSeesCapabilities", found[f"{M}/cmd/agentos-unlock"])
         self.assertIn("TestTheDropRefusesRootAndChecksItTook", found[f"{M}/cmd/agentos-unlock"])
-        self.assertIn("TestUnreadableOwnedMarkerCountsAsOwned", found[f"{M}/cmd/agentos-ap"])
 
     def test_root_skipping_tests_are_left_to_the_non_root_jobs(self):
         # The reverse gap: a test that skips as root must not be pulled into the root step.

@@ -72,6 +72,10 @@ exempt-pr 3568
 # secure-element driver, which the G2 list does not name (D-198). Remove once #3583 merges.
 exempt-pr 3583
 
+# #3596 (VIS-faces c1, #3515 part c): broker/vision/ (with the new faces/) and
+# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
+exempt-pr 3596
+
 # Project machinery and records.
 allow .claude/
 allow .github/
@@ -120,7 +124,6 @@ allow broker/vendor/
 
 # G2 binaries: G1's plus the key holder (SIM-split, CRED), the release signer (UPD-8, A14),
 # and the sealed store's kernel, unlock and enrollment steps (STO-2b-1 #2896, STO-2c-i #2957).
-allow broker/cmd/agentos-ap/
 allow broker/cmd/agentos-checker/
 allow broker/cmd/agentos-clerk-mail/
 allow broker/cmd/agentos-clock-boot/
@@ -134,7 +137,6 @@ allow broker/cmd/agentos-kernel/
 allow broker/cmd/agentos-link/
 allow broker/cmd/agentos-localui/
 allow broker/cmd/agentos-modem/
-allow broker/cmd/agentos-netjoin/
 allow broker/cmd/agentos-photo/
 allow broker/cmd/agentos-release/
 allow broker/cmd/agentos-seller/
@@ -145,7 +147,6 @@ allow broker/cmd/agentosd/
 # browser (A5 canary sessions, CRED-12), voice (CH-19, CH-21).
 allow broker/accel/
 allow broker/admission/
-allow broker/apnet/
 allow broker/apply/
 allow broker/attest/
 # The backup chain (#2865: slices a, b, d, e), admitted under the freeze by Mark's Decisions 8
@@ -191,7 +192,6 @@ allow broker/modelroute/
 allow broker/modem/
 allow broker/modemlink/
 allow broker/netguard/
-allow broker/netjoin/
 allow broker/owner/
 allow broker/photo/
 allow broker/procguard/
