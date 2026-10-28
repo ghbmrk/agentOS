@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clock"
-	"github.com/ghbmrk/agentos/broker/grants"
-	"github.com/ghbmrk/agentos/broker/journal"
 	"github.com/ghbmrk/agentos/broker/maintain"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/sigstore/sigstore/pkg/signature"
@@ -152,9 +150,33 @@ func (r *rig) describe(root []byte) string {
 	return sum.Digest
 }
 
-func (r *rig) run(in journal.Intent) journal.Outcome {
-	return r.x.Execute(context.Background(), in, 1)
+// request is what the follow clerk's step asks for: the root's digest and
+// the owner's name for it, "" for the project's own root.
+type request struct{ name, digest string }
+
+// req is a request; id names the case only.
+func req(_, name, digest string) request { return request{name, digest} }
+
+// outcome is a switch's result and evidence.
+type outcome struct {
+	Result   Switched
+	Evidence string
 }
+
+func run(x *Executor, q request) outcome {
+	s, ev := x.Switch(context.Background(), q.digest, q.name)
+	return outcome{s, ev}
+}
+
+func (r *rig) run(q request) outcome { return run(r.x, q) }
+
+// settled is what the box's own trusted root says of q (Executor.Settled).
+func settled(x *Executor, q request) outcome {
+	s, ev := x.Settled(q.digest, q.name)
+	return outcome{s, ev}
+}
+
+func (r *rig) settled(q request) outcome { return settled(r.x, q) }
 
 func (r *rig) trusts(root []byte) bool {
 	r.t.Helper()
@@ -166,13 +188,13 @@ func (r *rig) trusts(root []byte) bool {
 }
 
 // GR26 wiring: the updater follows the root the page holds for the
-// approved digest, the switch is the intent's journal outcome, and the
+// approved digest, the switch is the step's outcome, and the
 // owner is alerted at once with FollowAlert.
 func TestOSS10wFollowsTheHeldRootAndAlerts(t *testing.T) {
 	r := newRig(t)
-	in := grants.FollowIntent("a1", "Acme Fork", r.describe(r.fork))
+	in := req("a1", "Acme Fork", r.describe(r.fork))
 	out := r.run(in)
-	if out.Result != journal.ResultSucceeded || !r.trusts(r.fork) {
+	if out.Result != SwitchedOK || !r.trusts(r.fork) {
 		t.Fatalf("%+v", out)
 	}
 	if src, err := r.store.Following(); err != nil || src.Name != "Acme Fork" {
@@ -181,8 +203,8 @@ func TestOSS10wFollowsTheHeldRootAndAlerts(t *testing.T) {
 	if len(r.alerts) != 1 || r.alerts[0] != maintain.FollowAlert("Acme Fork", r.clk.at) {
 		t.Fatalf("alerts %q", r.alerts)
 	}
-	if out := r.x.Reconcile(context.Background(), in, 1); out.Result != journal.ResultSucceeded {
-		t.Fatalf("reconcile %+v", out)
+	if out := r.settled(in); out.Result != SwitchedOK {
+		t.Fatalf("settled %+v", out)
 	}
 }
 
@@ -191,17 +213,12 @@ func TestOSS10wFollowsTheHeldRootAndAlerts(t *testing.T) {
 func TestOSS10wRefusesARootThePageDoesNotHold(t *testing.T) {
 	r := newRig(t)
 	r.describe(r.fork)
-	for _, in := range []journal.Intent{
-		grants.FollowIntent("a1", "Acme", strings.Repeat("ab", 32)),
-		{ID: "follow/n2", Action: journal.ActionUpdateFollow},
-		{ID: grants.FollowID("a3", strings.Repeat("ab", 32), "Acme"), Action: journal.ActionGrantChange},
-	} {
-		if out := r.run(in); out.Result != journal.ResultNotApplied {
-			t.Fatalf("%s: %+v", in.ID, out)
-		}
-		if out := r.x.Reconcile(context.Background(), in, 1); out.Result == journal.ResultSucceeded {
-			t.Fatalf("%s reconciled as done", in.ID)
-		}
+	in := req("a1", "Acme", strings.Repeat("ab", 32))
+	if out := r.run(in); out.Result != NotSwitched {
+		t.Fatalf("%+v", out)
+	}
+	if out := r.settled(in); out.Result == SwitchedOK {
+		t.Fatal("settled as done")
 	}
 	if !r.trusts(r.shipped) || len(r.alerts) != 0 {
 		t.Fatalf("changed: alerts %q", r.alerts)
@@ -216,24 +233,24 @@ func TestOSS10wRefusesARootThePageDoesNotHold(t *testing.T) {
 // by the IDs a root may claim.
 func TestOSS10wSwitchingBackNeedsTheShippedRootKeys(t *testing.T) {
 	r := newRig(t)
-	if out := r.run(grants.FollowIntent("a1", "", r.describe(r.fork))); out.Result != journal.ResultNotApplied ||
+	if out := r.run(req("a1", "", r.describe(r.fork))); out.Result != NotSwitched ||
 		!strings.Contains(out.Evidence, "project's own root") || !r.trusts(r.shipped) {
 		t.Fatalf("a fork's root as the project's: %+v", out)
 	}
 	fake := forged(t, r.shipped)
 	// TUF accepts such a root (key IDs are labels); only the key material
 	// tells it from the project's.
-	if out := r.run(grants.FollowIntent("a2", "", r.describe(fake))); out.Result != journal.ResultNotApplied ||
+	if out := r.run(req("a2", "", r.describe(fake))); out.Result != NotSwitched ||
 		!strings.Contains(out.Evidence, "project's own root") {
 		t.Fatalf("a root claiming the shipped key IDs: %+v", out)
 	}
 	if !r.trusts(r.shipped) || len(r.alerts) != 0 {
 		t.Fatal("changed on a refused switch back")
 	}
-	if out := r.run(grants.FollowIntent("a3", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a3", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
-	if out := r.run(grants.FollowIntent("a4", "", r.describe(r.shipped))); out.Result != journal.ResultSucceeded || !r.trusts(r.shipped) {
+	if out := r.run(req("a4", "", r.describe(r.shipped))); out.Result != SwitchedOK || !r.trusts(r.shipped) {
 		t.Fatalf("switching back: %+v", out)
 	}
 	if src, _ := r.store.Following(); src != (update.Followed{}) {
@@ -266,8 +283,8 @@ func TestOSS10wClockFromLatest(t *testing.T) {
 	d := r.describe(r.fork)
 	r.clk.at = time.Now().Add(update.RootExpiry + 24*time.Hour)
 	calls := r.clk.calls
-	out := r.run(grants.FollowIntent("a1", "Acme", d))
-	if out.Result != journal.ResultNotApplied || !strings.Contains(out.Evidence, "expired") || r.clk.calls == calls {
+	out := r.run(req("a1", "Acme", d))
+	if out.Result != NotSwitched || !strings.Contains(out.Evidence, "expired") || r.clk.calls == calls {
 		t.Fatalf("followed a root expired by Latest: %+v", out)
 	}
 	if _, err := r.x.Describe(context.Background(), r.fork); err == nil {
@@ -301,8 +318,8 @@ func TestOSS10wNeedsEveryPiece(t *testing.T) {
 func TestOSS10wAlertFailureIsRecorded(t *testing.T) {
 	r := newRig(t)
 	r.x.cfg.Alert = func(context.Context, string) error { return errors.New("no line") }
-	out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork)))
-	if out.Result != journal.ResultSucceeded || !strings.Contains(out.Evidence, "alert not sent") {
+	out := r.run(req("a1", "Acme", r.describe(r.fork)))
+	if out.Result != SwitchedOK || !strings.Contains(out.Evidence, "alert not sent") {
 		t.Fatalf("%+v", out)
 	}
 }
@@ -314,38 +331,9 @@ func TestOSS10wHeldIsBounded(t *testing.T) {
 	for i := 0; i < MaxHeld; i++ {
 		r.describe(rootOf(t, newKey(t), newKey(t)))
 	}
-	if out := r.run(grants.FollowIntent("a1", "Acme", first)); out.Result != journal.ResultNotApplied {
+	if out := r.run(req("a1", "Acme", first)); out.Result != NotSwitched {
 		t.Fatalf("an evicted root was followed: %+v", out)
 	}
-}
-
-// The "update" executor serves both release activation and following:
-// Route sends each by action.
-func TestOSS10wRoute(t *testing.T) {
-	r := newRig(t)
-	other := &countExec{}
-	x := Route(r.x, other)
-	x.Execute(context.Background(), journal.Intent{ID: "a", Action: journal.ActionReleaseActivate}, 1)
-	if other.n != 1 {
-		t.Fatal("release activation not routed to the applier")
-	}
-	if out := x.Execute(context.Background(), grants.FollowIntent("a1", "Acme", r.describe(r.fork)), 1); out.Result != journal.ResultSucceeded || other.n != 1 {
-		t.Fatalf("follow not routed to the follower: %+v", out)
-	}
-	if out := Route(r.x, nil).Execute(context.Background(), journal.Intent{ID: "b", Action: journal.ActionReleaseActivate}, 1); out.Result != journal.ResultNotApplied {
-		t.Fatalf("no applier: %+v", out)
-	}
-}
-
-type countExec struct{ n int }
-
-func (c *countExec) Execute(context.Context, journal.Intent, int) journal.Outcome {
-	c.n++
-	return journal.Outcome{Result: journal.ResultSucceeded}
-}
-
-func (c *countExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
-	return journal.Outcome{Result: journal.ResultUnknown}
 }
 
 func signerOf(k ed25519.PrivateKey) signature.Signer {
@@ -368,59 +356,60 @@ func (r *rig) with(st Store) *Executor {
 	return x
 }
 
-// L3 blocker 1 (GR26 "alerts again, at least once"): Reconcile runs after a
-// crash, when nothing is held; it reads the box's own trusted root.
-func TestOSS10wReconcileAfterARestart(t *testing.T) {
+// L3 blocker 1 (GR26 "alerts again, at least once"): Settled runs after a
+// crash, when nothing is held; it reads the box's own trusted root, and
+// Realert sends the alert again (the follow clerk's Probe).
+func TestOSS10wSettledAfterARestart(t *testing.T) {
 	r := newRig(t)
-	in := grants.FollowIntent("a1", "Acme Fork", r.describe(r.fork))
-	if out := r.run(in); out.Result != journal.ResultSucceeded {
+	in := req("a1", "Acme Fork", r.describe(r.fork))
+	if out := r.run(in); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	fresh := r.with(r.store)
 	r.alerts = nil
-	if out := fresh.Reconcile(context.Background(), in, 2); out.Result != journal.ResultSucceeded {
-		t.Fatalf("reconcile %+v", out)
+	if out := settled(fresh, in); out.Result != SwitchedOK {
+		t.Fatalf("settled %+v", out)
 	}
+	fresh.Realert(context.Background(), in.name)
 	if len(r.alerts) != 1 || r.alerts[0] != maintain.FollowAlert("Acme Fork", r.clk.at) {
 		t.Fatalf("alerts %q", r.alerts)
 	}
-	digest, _, _ := grants.FollowOf(in.ID)
+	digest := in.digest
 	for _, other := range []struct {
-		in   journal.Intent
-		want journal.Result
+		in   request
+		want Switched
 	}{
 		// The same root under another name, or another root under the
 		// same name (the root may have rotated since): unknown.
-		{grants.FollowIntent("a2", "Other Name", digest), journal.ResultUnknown},
-		{grants.FollowIntent("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))), journal.ResultUnknown},
+		{req("a2", "Other Name", digest), SwitchedUnknown},
+		{req("a3", "Acme Fork", r.describe(rootOf(t, newKey(t), newKey(t)))), SwitchedUnknown},
 		// Neither the root nor the source: the switch back never landed.
-		{grants.FollowIntent("a4", "", r.describe(r.shipped)), journal.ResultNotApplied},
+		{req("a4", "", r.describe(r.shipped)), NotSwitched},
 	} {
 		r.alerts = nil
-		if out := fresh.Reconcile(context.Background(), other.in, 2); out.Result != other.want || len(r.alerts) != 0 {
-			t.Fatalf("%s: %+v %q", other.in.ID, out, r.alerts)
+		if out := settled(fresh, other.in); out.Result != other.want || len(r.alerts) != 0 {
+			t.Fatalf("%+v: %+v %q", other.in, out, r.alerts)
 		}
 	}
 }
 
 // REQ: OP-4, G1
 // #1372 (L3/UX R1 on #1325): power pulled before the switch was written
-// leaves the old root and the old source. Reconcile answers not applied,
-// so the broker account's fence lifts instead of holding every setting
-// for good; nothing runs and the owner is not alerted. A re-dispatch finds
-// nothing held (the held root lives in memory) and is not applied either.
-func TestOSS10wReconcileBeforeTheSwitchIsNotApplied(t *testing.T) {
+// leaves the old root and the old source. Settled answers not switched;
+// nothing runs and the owner is not alerted. A re-run finds nothing held
+// (the held root lives in memory) and does not switch either.
+func TestOSS10wSettledBeforeTheSwitchIsNotSwitched(t *testing.T) {
 	r := newRig(t)
-	in := grants.FollowIntent("a1", "Acme Fork", r.describe(r.fork))
+	in := req("a1", "Acme Fork", r.describe(r.fork))
 	fresh := r.with(r.store)
-	out := fresh.Reconcile(context.Background(), in, 1)
-	if out.Result != journal.ResultNotApplied || len(r.alerts) != 0 || !r.trusts(r.shipped) {
-		t.Fatalf("reconcile %+v %q", out, r.alerts)
+	out := settled(fresh, in)
+	if out.Result != NotSwitched || len(r.alerts) != 0 || !r.trusts(r.shipped) {
+		t.Fatalf("settled %+v %q", out, r.alerts)
 	}
 	if src, _ := r.store.Following(); src != (update.Followed{}) {
 		t.Fatalf("source %+v", src)
 	}
-	if out := fresh.Execute(context.Background(), in, 2); out.Result != journal.ResultNotApplied || !r.trusts(r.shipped) || len(r.alerts) != 0 {
+	if out := run(fresh, in); out.Result != NotSwitched || !r.trusts(r.shipped) || len(r.alerts) != 0 {
 		t.Fatalf("re-dispatch %+v", out)
 	}
 }
@@ -449,17 +438,17 @@ func (s failingStore) TrustedRoot() ([]byte, error) {
 }
 
 // L3 blocker 2: a store failure with the root in place, or with the store
-// unreadable, is Unknown (Reconcile decides), never "not applied"; only a
-// failure that left the old root is NotApplied.
+// unreadable, is Unknown (Settled decides), never NotSwitched; only a
+// failure that left the old root is NotSwitched.
 func TestOSS10wStoreFailureIsUnknownUnlessTheOldRootStands(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		st   failingStore
-		want journal.Result
+		want Switched
 	}{
-		{"root written", failingStore{written: true}, journal.ResultUnknown},
-		{"unreadable", failingStore{unreadable: true}, journal.ResultUnknown},
-		{"old root stands", failingStore{}, journal.ResultNotApplied},
+		{"root written", failingStore{written: true}, SwitchedUnknown},
+		{"unreadable", failingStore{unreadable: true}, SwitchedUnknown},
+		{"old root stands", failingStore{}, NotSwitched},
 	} {
 		r := newRig(t)
 		c.st.Store = r.store
@@ -468,13 +457,13 @@ func TestOSS10wStoreFailureIsUnknownUnlessTheOldRootStands(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		in := grants.FollowIntent("a1", "Acme Fork", sum.Digest)
-		if out := x.Execute(context.Background(), in, 1); out.Result != c.want || len(r.alerts) != 0 {
+		in := req("a1", "Acme Fork", sum.Digest)
+		if out := run(x, in); out.Result != c.want || len(r.alerts) != 0 {
 			t.Fatalf("%s: %+v %q", c.name, out, r.alerts)
 		}
 		if c.name == "root written" {
-			if out := r.x.Reconcile(context.Background(), in, 2); out.Result != journal.ResultSucceeded || len(r.alerts) != 1 {
-				t.Fatalf("reconcile %+v %q", out, r.alerts)
+			if out := r.settled(in); out.Result != SwitchedOK || len(r.alerts) != 0 {
+				t.Fatalf("settled %+v %q", out, r.alerts)
 			}
 		}
 	}
@@ -498,7 +487,7 @@ func TestOSS10w2UnsentAlertIsRetriedAndShown(t *testing.T) {
 	if r.x.Note() != "" || r.x.RetryAlert(ctx) {
 		t.Fatal("a note or a retry with nothing unsent")
 	}
-	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	want := maintain.FollowAlert("Acme", r.clk.at)
@@ -508,7 +497,7 @@ func TestOSS10w2UnsentAlertIsRetriedAndShown(t *testing.T) {
 	if r.x.RetryAlert(ctx) || r.x.Note() == "" {
 		t.Fatal("a failed retry cleared the alert")
 	}
-	if out := r.run(grants.FollowIntent("a2", "Acme Two", r.describe(rootOf(t, newKey(t), newKey(t))))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a2", "Acme Two", r.describe(rootOf(t, newKey(t), newKey(t))))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	down = false
@@ -526,7 +515,7 @@ func TestOSS10w2UnsentAlertIsRetriedAndShown(t *testing.T) {
 func TestOSS10w2UnsentAlertSurvivesARestart(t *testing.T) {
 	r := newRig(t)
 	r.x.cfg.Alert = func(context.Context, string) error { return errors.New("no line") }
-	if out := r.run(grants.FollowIntent("a1", "Acme", r.describe(r.fork))); out.Result != journal.ResultSucceeded {
+	if out := r.run(req("a1", "Acme", r.describe(r.fork))); out.Result != SwitchedOK {
 		t.Fatalf("%+v", out)
 	}
 	want := maintain.FollowAlert("Acme", r.clk.at)

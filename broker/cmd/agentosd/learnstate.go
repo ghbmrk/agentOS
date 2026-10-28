@@ -197,7 +197,10 @@ func restoreHold(dir string) error {
 // LOOPS ON or SPARE BUDGET) or a parked attempt settles on YES or RETRY
 // instead of failing with journal.ErrNoExecutor (NL-8). FORGET's and
 // recall's executors (RENEW, recall's rollbacks) are retired the same way
-// (#2781). The kernel's log replaces the journal.
+// (#2781), and so is the update executor that ran the page's follows
+// (#3430): an update-follow intent a previous version left open settles
+// not applied and never touches the update store, so only the follow
+// clerk switches a box. The kernel's log replaces the journal.
 type retiredExecutor struct{}
 
 func (retiredExecutor) Execute(context.Context, journal.Intent, int) journal.Outcome {
@@ -216,7 +219,7 @@ func registerRetired(cfg *daemon.Config) {
 	if cfg.BrokerExecutors == nil {
 		cfg.BrokerExecutors = map[string]journal.Executor{}
 	}
-	for _, name := range []string{change.Executor, loops.Executor, grants.ForgetExecutor} {
+	for _, name := range []string{change.Executor, loops.Executor, grants.ForgetExecutor, grants.FollowExecutor} {
 		cfg.BrokerExecutors[name] = retiredExecutor{}
 	}
 }

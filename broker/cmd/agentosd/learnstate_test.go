@@ -183,13 +183,14 @@ func TestStatusNoLongerSaysForgetIsNotRunning(t *testing.T) {
 }
 
 // NL-8: intents left open for the deleted executors (change, loops,
-// FORGET, and recall's rollbacks, RENEW among them) settle as not
-// applied instead of failing for want of an executor.
+// FORGET, recall's rollbacks, RENEW among them, and the page's follows,
+// #3430) settle as not applied instead of failing for want of an
+// executor; a follow intent never reaches the update store.
 func TestDeletedExecutorsSettleNotApplied(t *testing.T) {
 	cfg := daemon.Config{}
 	registerRetired(&cfg)
 	execs := []journal.Executor{cfg.Recall}
-	for _, name := range []string{change.Executor, loops.Executor, grants.ForgetExecutor} {
+	for _, name := range []string{change.Executor, loops.Executor, grants.ForgetExecutor, grants.FollowExecutor} {
 		execs = append(execs, cfg.BrokerExecutors[name])
 	}
 	for i, ex := range execs {

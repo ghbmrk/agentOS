@@ -127,6 +127,8 @@ type retrier struct {
 	k KernelOwner
 	// currency names a kernel step's amount (Config.Currency).
 	currency string
+	// lines are Config.KernelRetryLines.
+	kernelLines map[string]func() (object, detail string)
 
 	running sync.WaitGroup // retries started by decide
 
@@ -226,7 +228,7 @@ func (r *retrier) items() ([]ownerch.Item, error) {
 	}
 	parked, unread := r.kernelParked(retryMax - len(items))
 	for _, s := range parked {
-		a := kernelAsk(s, r.currency)
+		a := kernelAsk(s, r.currency, r.kernelLines[s.Clerk])
 		lines[a.line.Shown.Ref] = a
 		items = append(items, a.line.Shown)
 	}
@@ -298,8 +300,19 @@ func kernelItem(s KernelStep, currency string) ownerch.Item {
 }
 
 // kernelAsk is the ask about a parked kernel step, under a ref new to it.
-func kernelAsk(s KernelStep, currency string) retryAsk {
+// now, when set, is its clerk's reading of the box at this ask, which the
+// line shows in place of the clerk's name (Config.KernelRetryLines).
+func kernelAsk(s KernelStep, currency string, now func() (object, detail string)) retryAsk {
 	it := kernelItem(s, currency)
+	if now != nil {
+		obj, detail := now()
+		it.Object = obj
+		if it.Detail == "" {
+			it.Detail = detail
+		} else {
+			it.Detail += "; " + detail
+		}
+	}
 	it.Ref = kernelRefPrefix + newNonce()
 	return retryAsk{id: s.Plan, line: grants.RetryLine{Shown: it, Base: it}, step: &s}
 }

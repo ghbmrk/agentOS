@@ -289,7 +289,7 @@ func TestAKernelRETRYOfALocalLineNeedsThePage(t *testing.T) {
 	d.retry.inform = func(s string) error { told = append(told, s); return nil }
 	d.retry.mu.Unlock()
 	s := KernelStep{Plan: "p5", Verb: "send", Clerk: "mail", Recipient: "Alice <not canonical>"}
-	a := kernelAsk(s, "")
+	a := kernelAsk(s, "", nil)
 	if ownerch.SMSApprovable(a.line.Shown) {
 		t.Fatal("the line is approvable by text")
 	}
@@ -401,5 +401,38 @@ func TestABadCurrencyIsRefusedAtStart(t *testing.T) {
 	}
 	if d, ok := minorDigits["XCG"]; !ok || d != 2 {
 		t.Errorf("XCG: %d digits, listed %v; want 2, listed", d, ok)
+	}
+}
+
+// A parked follow step retried after a later follow approval would undo
+// that approval (#3430, carried from #3444's reviews): its RETRY line reads
+// what the box follows at each ask, in place of the clerk's name, and says
+// that RETRY replaces it.
+func TestAKernelRETRYLineSaysWhatTheBoxFollowsNow(t *testing.T) {
+	k := &fakeKernel{steps: []KernelStep{{Plan: "f1", Verb: "change-account", Clerk: "follow", Phase: KernelParked, Retry: true, Attempt: 1, PlanStatus: KernelPlanActive}}}
+	dir, err := os.MkdirTemp("", "bk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	now := "Acme"
+	_, d := startWith(t, dir, func(c *Config) {
+		c.Kernel, c.Auth, c.OwnerState = k, nil, filepath.Join(dir, "owner.json")
+		c.Modem = modem.NewCarrier().Line("+15550000009")
+		c.KernelRetryLines = map[string]func() (string, string){"follow": func() (string, string) {
+			return "updates, now from " + now, "RETRY replaces it"
+		}}
+	})
+	for _, want := range []string{"Acme", "Acme Two"} {
+		now = want
+		var line string
+		for _, it := range d.retry.listed() {
+			if strings.HasPrefix(it.Ref, kernelRefPrefix) {
+				line = it.Object + ", " + it.Detail
+			}
+		}
+		if line != "updates, now from "+want+", may go twice; RETRY replaces it" {
+			t.Fatalf("line %q", line)
+		}
 	}
 }
