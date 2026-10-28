@@ -22,9 +22,10 @@ control flow, sets a trap, defines a function or exits or returns 0.
   root_tests.py --plan    print `<package> <-run pattern> <test>...` per package of the gated tests
                           only ci.yml's generated step (\"Root-gated Go tests\") runs, for that step
 
-The generated step runs every package --plan prints as root and fails unless each listed test
-ran and passed, with no skip (tools/require_ran.py), so a new root-gated test is run as root by
-default and a test that cannot run on the runner has to be listed in EXEMPT with its reason.
+The generated step runs every package --plan prints as root with no_new_privs, as agentosd.service
+runs (#3542), and fails unless each listed test ran and passed, with no skip (tools/require_ran.py),
+so a new root-gated test is run as root by default and a test that cannot run on the runner has to
+be listed in EXEMPT with its reason.
 """
 import os
 import re
@@ -293,13 +294,16 @@ def problems(found, runs, generated, exempt=EXEMPT):
 
 
 def generated_step(ci_text):
-    """True when ci.yml has the generated step and it runs --plan's packages through require_ran."""
+    """True when ci.yml has the generated step and it runs --plan's packages through require_ran,
+    each `go test` as root with no_new_privs, as agentosd.service runs (NoNewPrivileges=yes; #3542)."""
     i = ci_text.find(f"- name: {GENERATED}")
     if i < 0:
         return False
     nxt = ci_text.find("\n      - ", i + 1)
     body = ci_text[i: nxt if nxt >= 0 else len(ci_text)]
-    return "root_tests.py --plan" in body and "require_ran.py" in body and "sudo" in body
+    tests = [ln.split() for ln in body.replace("\\\n", " ").splitlines() if "go test" in ln and not ln.lstrip().startswith("#")]
+    return ("root_tests.py --plan" in body and "require_ran.py" in body and bool(tests)
+            and all(w[:3] == ["sudo", "setpriv", "--no-new-privs"] for w in tests))
 
 
 def main(argv=None):

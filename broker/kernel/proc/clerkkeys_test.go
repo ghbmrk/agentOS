@@ -236,7 +236,7 @@ func TestCgroupPath(t *testing.T) {
 // root key, refuses to start, before its log opens or a socket listens.
 func TestRunKernelNeedsTheClerkRootToHandKeys(t *testing.T) {
 	dir := t.TempDir()
-	cfg := MainConfig{Log: filepath.Join(dir, "log"), KeyDir: filepath.Join(dir, "keys"), BackupDir: filepath.Join(dir, "b"),
+	cfg := MainConfig{Log: filepath.Join(dir, "log"), KeyDir: filepath.Join(dir, "keys"), ContentDir: filepath.Join(dir, "content"), BackupDir: filepath.Join(dir, "b"),
 		ClerkKeys: map[string]KeyClerk{"mail": {Socket: filepath.Join(dir, "k"), Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}}}
 	err := RunKernel(t.Context(), cfg, handoff.KernelKeys{Head: headPriv}, &kernel.MemAnchor{})
 	if err == nil || !strings.Contains(err.Error(), "no clerk root key") {
