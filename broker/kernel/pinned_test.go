@@ -206,8 +206,10 @@ func TestPinnedKeyCannotEnrollOrAnchor(t *testing.T) {
 	r.replays()
 }
 
-// A pinned root must be a bare root its own owner signed, and no anchor's:
-// the kernel refuses to boot on anything else.
+// A pinned root must be a bare root its own owner signed, no anchor's, and
+// exactly the update clerk's change-account root: the kernel refuses to boot
+// on anything else, so an image cannot pin a standing key for another clerk
+// or verb (KRN-4, #3707).
 func TestPinRefusesAnythingButABareSelfSignedRoot(t *testing.T) {
 	r := newPinRig(t)
 	ck, err := key.ClerkKey(r.up, r.image.pass, gen(41).pub, 0, 1<<20)
@@ -216,7 +218,20 @@ func TestPinRefusesAnythingButABareSelfSignedRoot(t *testing.T) {
 	forged.Root.Sig = append([]byte(nil), forged.Root.Sig...)
 	forged.Root.Sig[0] ^= 1
 	byAnchor := key.Issue(r.owner.pass, key.Root{Clerk: "update", Verbs: []key.Verb{key.ChangeAccount}, Serial: "image"})
-	for name, k := range map[string]key.Key{"a link": ck, "a bad signature": forged, "an anchor's root": byAnchor} {
+	scoped := func(clerk string, verbs ...key.Verb) key.Key {
+		return key.Issue(r.image.pass, key.Root{Clerk: clerk, Verbs: verbs, Serial: "image"})
+	}
+	// Issue folds a repeated verb; a root signed as-is keeps it.
+	twice := key.Root{Owner: r.image.pk, Clerk: "update", Verbs: []key.Verb{key.ChangeAccount, key.ChangeAccount}, Serial: "image"}
+	for name, k := range map[string]key.Key{
+		"update with change-account twice": key.AttachRoot(twice, r.image.pass.Sign(key.RootMsg(twice))),
+		"a link":                           ck, "a bad signature": forged, "an anchor's root": byAnchor,
+		"mail send":                     scoped("mail", key.Send),
+		"change-account at mail":        scoped("mail", key.ChangeAccount),
+		"update with another verb":      scoped("update", key.ChangeAccount, key.Send),
+		"update with no verbs":          scoped("update"),
+		"update with only another verb": scoped("update", key.Trash),
+	} {
 		l, err := kernel.Open(cfg(r.rig))
 		must(t, err)
 		if _, err := kernel.Boot(l, r.anchors(), nil, 1, k); !errors.Is(err, kernel.ErrPinned) {

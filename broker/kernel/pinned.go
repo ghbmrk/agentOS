@@ -8,8 +8,15 @@ import (
 )
 
 // ErrPinned refuses a pinned root that is not a bare root its own owner
-// signed, or whose owner is an anchor, and a setup that would anchor one.
-var ErrPinned = errors.New("kernel: a pinned root is a bare root its owner signed, owned by no anchor")
+// signed for the update clerk's change-account alone, or whose owner is an
+// anchor, and a setup that would anchor one.
+var ErrPinned = errors.New("kernel: a pinned root is a bare root its owner signed for update change-account, owned by no anchor")
+
+// pinClerk and pinVerbs are the one scope a pinned root may have: the
+// update clerk's activate (KRN-4, #3707). broker/apply names the clerk.
+const pinClerk = "update"
+
+var pinVerbs = []key.Verb{key.ChangeAccount}
 
 // Pin adds the image's pinned roots, such as the update clerk's standing
 // key for activate (UPD-3, #3677; Mark's card
@@ -19,10 +26,12 @@ var ErrPinned = errors.New("kernel: a pinned root is a bare root its owner signe
 // passkey, so it signs no enrollment, cut-off, grant or co-signature, and
 // no plan under any other root. Its holder ships in the image, so as an
 // anchor it would let anyone with the image enroll a passkey (KEY-1, D-146).
-// A revoke or pause of its ID still applies.
+// A revoke or pause of its ID still applies. Any other clerk or verb set is
+// refused (KRN-4, #3707): the image's key is one standing key for one thing.
 func (s *State) Pin(roots ...key.Key) error {
 	for _, k := range roots {
-		if len(k.Links) > 0 || key.In(s.Anchors, k.Root.Owner) {
+		if len(k.Links) > 0 || key.In(s.Anchors, k.Root.Owner) ||
+			k.Root.Clerk != pinClerk || !slices.Equal(k.Root.Verbs, pinVerbs) {
 			return ErrPinned
 		}
 		if _, err := key.Chain(k, []key.PublicKey{k.Root.Owner}); err != nil {
