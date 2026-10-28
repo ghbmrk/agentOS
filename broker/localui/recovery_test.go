@@ -10,7 +10,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
-	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -264,10 +263,9 @@ func TestRecoveryKeyWithCRLFOpensTheSlot(t *testing.T) {
 	}
 }
 
-// Each refusal: a wrong tap stays on the tap step; a factor or stale
-// refusal drops the replacement; no answer keeps it for another tap and
-// tells the owner to keep both cards, and a stale answer after that says
-// the new card may be in effect.
+// Each refusal: a wrong tap, busy and no answer keep the replacement for
+// another tap; factor and stale drop it; a begin agentosd refuses keeps the
+// card on the display.
 func TestRecoveryRefusalsKeepOrDrop(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
@@ -276,65 +274,27 @@ func TestRecoveryRefusalsKeepOrDrop(t *testing.T) {
 		r.confirm(false)
 	}
 	start()
-	r.f.rotateErr = Refused(localapi.ErrRecoveryNotAnchor)
-	p := html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
-	if !strings.Contains(p, "phone passkey") || !strings.Contains(p, `id="pk-tap"`) {
-		t.Fatalf("wrong tap:\n%s", p)
-	}
-	r.f.rotateErr = Refused(localapi.ErrRecoveryFactor)
-	p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
-	if !strings.Contains(p, "doesn't open my store") || r.srv.recovery.p != nil {
-		t.Fatalf("factor:\n%s", p)
-	}
-	start()
-	r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
-	p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
-	if !strings.Contains(p, recoveryUnsureText) || r.srv.recovery.p == nil || !strings.Contains(p, `id="pk-tap"`) {
-		t.Fatalf("no answer:\n%s", p)
-	}
-	r.f.rotateErr = Refused(localapi.ErrRecoveryStale)
-	p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
-	if !strings.Contains(p, "Keep both cards") || r.srv.recovery.p != nil {
-		t.Fatalf("stale after no answer:\n%s", p)
-	}
-	// A recovery-key factor the first, unanswered call already retired
-	// reads as factor on the retry: still "keep both", never "nothing
-	// changed" (L3 6464454818 on #3605).
-	r.factor(map[string]string{"recovery": r.card.RecoveryKey})
-	r.confirm(false)
-	r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
-	r.post("/recovery/", tapForm)
-	for _, e := range []string{localapi.ErrRecoveryFactor, localapi.ErrRecoverySetup, localapi.ErrUnauthorized} {
-		if e != localapi.ErrRecoveryFactor {
-			r.factor(map[string]string{"recovery": r.card.RecoveryKey})
-			r.confirm(false)
-			r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
-			r.post("/recovery/", tapForm)
-		}
+	for e, want := range map[string]string{localapi.ErrRecoveryNotAnchor: "phone passkey", localapi.ErrRecoveryBusy: "Another replacement",
+		localapi.ErrRecoveryUnavailable: recoveryUnsureText} {
 		r.f.rotateErr = Refused(e)
-		p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
-		if !strings.Contains(p, recoveryUnsureDropText) || strings.Contains(p, "Nothing changed") || strings.Contains(p, "Destroy the new card") {
-			t.Fatalf("%s after no answer:\n%s", e, p)
+		p := html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
+		if !strings.Contains(p, want) || !strings.Contains(p, `id="pk-tap"`) || r.srv.recovery.p == nil {
+			t.Fatalf("%s:\n%s", e, p)
 		}
 	}
-	// The session stays unsure through a new start, until an ok.
-	r.f.rotateErr = Refused(localapi.ErrRecoveryStale)
-	start()
-	if p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String()); !strings.Contains(p, recoveryUnsureDropText) {
-		t.Fatalf("stale on a new start while unsure:\n%s", p)
+	for e, want := range map[string]string{localapi.ErrRecoveryFactor: "doesn't open my store", localapi.ErrRecoveryStale: "Something changed since you started"} {
+		start()
+		r.f.rotateErr = Refused(e)
+		p := html.UnescapeString(r.post("/recovery/", tapForm).Body.String())
+		if !strings.Contains(p, want) || !strings.Contains(p, recoveryKeepAll) || r.srv.recovery.p != nil {
+			t.Fatalf("%s:\n%s", e, p)
+		}
 	}
 	r.f.rotateErr, r.f.switched = nil, false
 	start()
 	if p := html.UnescapeString(r.post("/recovery/", tapForm).Body.String()); !strings.Contains(p, recoveryLaterText) {
 		t.Fatalf("switch later:\n%s", p)
 	}
-	r.f.rotateErr = Refused(localapi.ErrRecoveryStale)
-	start()
-	if p = html.UnescapeString(r.post("/recovery/", tapForm).Body.String()); !strings.Contains(p, "Something changed since you started") {
-		t.Fatalf("stale:\n%s", p)
-	}
-	r.f.rotateErr = nil
-	// A begin agentosd refuses keeps the card on the display for a retry.
 	r.f.beginErr = Refused(localapi.ErrRecoveryUnavailable)
 	r.factor(map[string]string{"passphrase": "alpha bravo charlie delta"})
 	if res := r.confirm(false); res.StatusCode != http.StatusInternalServerError || r.srv.recovery.p.display == nil {
@@ -367,78 +327,82 @@ func TestRecoveryIsBoundToItsSession(t *testing.T) {
 	}
 }
 
-// After a rotation call with no answer the session stays unsure until one
-// of its replacements is answered ok: no path it can take afterwards says
-// nothing changed (L3 6464454818 and 6464542415 on #3605). Each case
-// starts from a fresh unanswered tap.
-func TestRecoveryNoLineSaysNothingChangedAfterNoAnswer(t *testing.T) {
-	unanswered := func(t *testing.T) *recoveryRig {
-		r := newRecoveryRig(t)
-		r.signIn()
-		r.factor(map[string]string{"recovery": r.card.RecoveryKey})
-		r.confirm(false)
-		r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
-		r.post("/recovery/", tapForm)
-		return r
+// The page never says which card is in effect but on Done (L3 6464454818,
+// 6464542415 and 6464746705 on #3605): an earlier call whose answer was
+// lost, from any phone, session or start of the page, may have rewritten
+// the store, and nothing on the owner side records it. Every session
+// (the one that tapped, a re-sign-in on the same phone, another phone,
+// and a page restarted with its memory gone) crossed with every path
+// after an unanswered tap: no page it is served claims nothing changed or
+// says to destroy a card, and each line that ends a replacement short of
+// Done says to keep all cards.
+func TestRecoveryNoPageClaimsWhatIsInEffect(t *testing.T) {
+	forbidden := []string{"Nothing changed", "nothing changed", "stays in effect", "Destroy the new card", "destroy its new card", "current card"}
+	sessions := map[string]func(r *recoveryRig){
+		"same session": func(*recoveryRig) {},
+		"re-sign-in":   func(r *recoveryRig) { r.jar, _ = cookiejar.New(nil); r.signIn() },
+		"other phone":  func(r *recoveryRig) { r.jar, _ = cookiejar.New(nil); r.ip = "10.42.0.77:5555"; r.signIn() },
+		// A restart of the page process (or agentosd) loses every memory
+		// of the call; the page holds no other state to lose.
+		"page restarted": func(r *recoveryRig) { r.srv.recovery = recoveryState{} },
 	}
-	page := func(w *httptest.ResponseRecorder) string { return html.UnescapeString(w.Body.String()) }
-	for name, run := range map[string]func(r *recoveryRig) string{
-		"cancel": func(r *recoveryRig) string { return page(r.post("/recovery/", url.Values{"step": {"cancel"}})) },
-		"lapse, then the tap": func(r *recoveryRig) string {
+	start := func(r *recoveryRig, factor string) {
+		r.factor(map[string]string{factor: map[string]string{"recovery": r.card.RecoveryKey, "passphrase": "alpha bravo charlie delta"}[factor]})
+		r.confirm(false)
+	}
+	paths := map[string]func(r *recoveryRig) string{
+		"cancel": func(r *recoveryRig) string { return r.post("/recovery/", url.Values{"step": {"cancel"}}).Body.String() },
+		"lapse": func(r *recoveryRig) string {
 			r.advance(RecoveryPendingFor)
-			return page(r.post("/recovery/", tapForm))
+			return r.post("/recovery/", tapForm).Body.String()
 		},
-		"lapse, then the page": func(r *recoveryRig) string {
-			r.advance(RecoveryPendingFor)
-			return html.UnescapeString(r.get("/recovery/"))
-		},
-		"the page again": func(r *recoveryRig) string { return html.UnescapeString(r.get("/recovery/")) },
+		"page": func(r *recoveryRig) string { return r.get("/recovery/") },
 		"factor": func(r *recoveryRig) string {
+			start(r, "recovery")
 			r.f.rotateErr = Refused(localapi.ErrRecoveryFactor)
-			return page(r.post("/recovery/", tapForm))
+			return r.post("/recovery/", tapForm).Body.String()
 		},
 		"stale": func(r *recoveryRig) string {
+			start(r, "passphrase")
 			r.f.rotateErr = Refused(localapi.ErrRecoveryStale)
-			return page(r.post("/recovery/", tapForm))
+			return r.post("/recovery/", tapForm).Body.String()
+		},
+		"card cancel": func(r *recoveryRig) string {
+			r.factor(map[string]string{"passphrase": "alpha bravo charlie delta"})
+			r.post("/recovery/card", url.Values{"cancel": {"1"}})
+			return r.do("GET", "/recovery/card", nil).Body.String() + r.get("/recovery/")
 		},
 		"wrong tap": func(r *recoveryRig) string {
+			start(r, "passphrase")
 			r.f.rotateErr = Refused(localapi.ErrRecoveryNotAnchor)
-			return page(r.post("/recovery/", tapForm))
+			return r.post("/recovery/", tapForm).Body.String()
 		},
-		"busy": func(r *recoveryRig) string {
-			r.f.rotateErr = Refused(localapi.ErrRecoveryBusy)
-			return page(r.post("/recovery/", tapForm))
-		},
-		"no tap in the form": func(r *recoveryRig) string { return page(r.post("/recovery/", url.Values{"step": {"rotate"}})) },
-		"a new start refused factor": func(r *recoveryRig) string {
-			r.factor(map[string]string{"recovery": r.card.RecoveryKey})
-			r.confirm(false)
-			r.f.rotateErr = Refused(localapi.ErrRecoveryFactor)
-			return page(r.post("/recovery/", tapForm))
-		},
-		"a new start cancelled on its card": func(r *recoveryRig) string {
-			r.factor(map[string]string{"recovery": r.card.RecoveryKey})
-			r.post("/recovery/card", url.Values{"cancel": {"1"}})
-			return html.UnescapeString(r.get("/recovery/"))
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			p := unanswered(t).run(t, run)
-			if strings.Contains(p, "Nothing changed") || strings.Contains(p, "Destroy the new card") || !strings.Contains(p, "both cards") {
-				t.Fatalf("after no answer:\n%s", p)
-			}
-		})
 	}
-	// A replacement answered ok ends the doubt.
-	r := unanswered(t)
-	r.f.rotateErr = nil
-	r.post("/recovery/", tapForm)
-	if p := html.UnescapeString(r.get("/recovery/")); strings.Contains(p, "both cards") {
-		t.Fatalf("still unsure after an ok:\n%s", p)
+	terminal := map[string]bool{"cancel": true, "lapse": true, "factor": true, "stale": true}
+	for sn, session := range sessions {
+		for pn, path := range paths {
+			t.Run(sn+"/"+pn, func(t *testing.T) {
+				r := newRecoveryRig(t)
+				r.signIn()
+				start(r, "recovery")
+				r.f.rotateErr = Refused(localapi.ErrRecoveryUnavailable)
+				r.post("/recovery/", tapForm)
+				session(r)
+				p := html.UnescapeString(path(r))
+				if terminal[pn] && sn == "same session" && !strings.Contains(p, recoveryKeepAll) {
+					t.Errorf("no keep-all line:\n%s", p)
+				}
+				for _, body := range r.seen {
+					for _, f := range forbidden {
+						if strings.Contains(html.UnescapeString(body), f) && strings.Contains(body, "<h1>Recovery key</h1>") {
+							t.Fatalf("a page says %q:\n%s", f, body)
+						}
+					}
+				}
+			})
+		}
 	}
 }
-
-func (r *recoveryRig) run(_ *testing.T, f func(*recoveryRig) string) string { return f(r) }
 
 // The card's own cancel drops the replacement with it, so the page starts
 // afresh rather than pointing at a card that is gone.

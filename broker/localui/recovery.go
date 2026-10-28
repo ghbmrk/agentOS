@@ -87,19 +87,6 @@ type recoveryPending struct {
 type recoveryState struct {
 	mu sync.Mutex
 	p  *recoveryPending
-	// unsure is the tokenKey of the session whose rotation call ended
-	// without an answer: the keeper may have written, so until one of its
-	// replacements is answered ok, no line it is shown says nothing
-	// changed (cancel, lapse, a new start's refusals included).
-	unsure string
-}
-
-// recoveryUnsure reports whether tok's session may hold a new card in
-// effect that it was not told of.
-func (s *Server) recoveryUnsure(tok string) bool {
-	s.recovery.mu.Lock()
-	defer s.recovery.mu.Unlock()
-	return tok != "" && s.recovery.unsure == tokenKey(tok)
 }
 
 // take returns the pending replacement of the session tok, dropping one
@@ -216,9 +203,9 @@ func recoveryText(err error) string {
 	case localapi.ErrRecoveryBadAssertion:
 		return "That tap didn't match. Tap again with one of your hardware keys."
 	case localapi.ErrRecoveryFactor:
-		return "That passphrase or recovery key doesn't open my store. Nothing changed: your current card stays in effect. Destroy the new card, then start again."
+		return "That passphrase or recovery key doesn't open my store. " + recoveryKeepAll + " If an earlier replacement finished, the newest card is the one that opens it. Then start again."
 	case localapi.ErrRecoveryStale:
-		return "Something changed since you started: another replacement finished, or too much time passed. Nothing changed by this one; destroy its new card, then start again."
+		return "Something changed since you started: another replacement finished, or too much time passed. " + recoveryKeepAll + " Then start again."
 	case localapi.ErrRecoveryBusy:
 		return "Another replacement is running. Try again in a minute."
 	case localapi.ErrRecoverySetup:
@@ -239,16 +226,18 @@ func recoveryWrongTap(err error) bool {
 	return string(r) == localapi.ErrRecoveryBadAssertion || string(r) == localapi.ErrRecoveryNotAnchor
 }
 
-// The page's fixed lines.
+// The page's fixed lines. Whether a replacement took effect is known only
+// when the page says Done: an earlier call whose answer was lost, from
+// this phone or another, before or after a restart, may have rewritten the
+// store, and nothing on the owner side records that. So no other line
+// says what is in effect; each says to keep every card (recoveryKeepAll).
 const (
-	recoveryDoneText         = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I take a backup sealed to the new key within a minute."
-	recoveryLaterText        = "Done. Your new card is in effect: keep it safe, and destroy your old card, which no longer opens my store. I finish moving backups to the new key within a few minutes."
-	recoveryUnsureText       = "I couldn't tell whether that finished. Keep both cards for now: if your new card took effect, the old one no longer opens my store. Try the tap again."
-	recoveryUnsureDropText   = "I can't tell whether your new card took effect. Keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
-	recoveryKeepBothNote     = "Keep both cards for now: an earlier tap may already have put a new card in effect."
-	recoveryUnsureCancelText = "Cancelled. I can't tell whether an earlier tap put a new card in effect, so keep both cards: one of them opens my store. Start a new replacement with whichever works to be sure."
-	recoveryCancelText       = "Cancelled. Nothing changed: your current card stays in effect."
-	recoveryExpiredText      = "That replacement took too long and was dropped. Nothing changed: your current card stays in effect. Start again."
+	recoveryKeepAll     = "Keep all your cards until a replacement says Done: only then do I know which one opens my store."
+	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I take a backup sealed to the new key within a minute."
+	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I finish moving backups to the new key within a few minutes."
+	recoveryUnsureText  = "I couldn't tell whether that finished. " + recoveryKeepAll + " Try the tap again."
+	recoveryCancelText  = "Cancelled. " + recoveryKeepAll
+	recoveryExpiredText = "That replacement took too long and was dropped. " + recoveryKeepAll + " Then start again."
 )
 
 // recoveryView is the page in one of its steps: "" the factor, "tap" the
@@ -317,9 +306,6 @@ func (s *Server) recoveryPage(w http.ResponseWriter, r *http.Request) {
 			s.recoveryDrop(p)
 		}
 		v.Done = recoveryCancelText
-		if s.recoveryUnsure(tok) {
-			v.Done = recoveryUnsureCancelText
-		}
 	case "rotate":
 		v.Err, v.Done = s.recoveryRotate(r, tok, p)
 	default:
@@ -343,9 +329,6 @@ func (s *Server) recoveryShow(w http.ResponseWriter, tok string, v recoveryView)
 		} else if v.Err == "" && v.Done == "" {
 			v.Step = "card"
 		}
-	}
-	if v.Err == "" && v.Done == "" && s.recoveryUnsure(tok) {
-		v.Err = recoveryKeepBothNote
 	}
 	s.render(w, "recovery", v)
 }
@@ -432,9 +415,6 @@ func (s *Server) recoveryFactor(w http.ResponseWriter, r *http.Request, tok stri
 // returns the page's error or done line.
 func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending) (errText, done string) {
 	if p == nil {
-		if s.recoveryUnsure(tok) {
-			return recoveryUnsureDropText, ""
-		}
 		return recoveryExpiredText, ""
 	}
 	// Copies, so a cancel or a new start that wipes p meanwhile does not
@@ -452,11 +432,7 @@ func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending)
 	cd, ok2 := formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
 	sig, ok3 := formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
 	if !ok1 || !ok2 || !ok3 {
-		err := Refused(localapi.ErrRecoveryBadAssertion)
-		if s.recoveryUnsure(tok) {
-			return recoveryText(err) + " " + recoveryKeepBothNote, ""
-		}
-		return recoveryText(err), ""
+		return recoveryText(Refused(localapi.ErrRecoveryBadAssertion)), ""
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), recoveryCallFor)
 	defer cancel()
@@ -465,38 +441,19 @@ func (s *Server) recoveryRotate(r *http.Request, tok string, p *recoveryPending)
 	switch {
 	case err == nil:
 		s.recoveryDrop(p)
-		s.recovery.mu.Lock()
-		if s.recovery.unsure == p.starter {
-			s.recovery.unsure = ""
-		}
-		s.recovery.mu.Unlock()
 		if d.Switched {
 			return "", recoveryDoneText
 		}
 		return "", recoveryLaterText
 	case recoveryWrongTap(err), refused(err, localapi.ErrRecoveryBusy), refused(err, localapi.ErrLimited):
 		// The replacement stays for another tap.
-		if s.recoveryUnsure(tok) {
-			return recoveryText(err) + " " + recoveryKeepBothNote, ""
-		}
 		return recoveryText(err), ""
 	case !errors.As(err, &ref) || string(ref) == localapi.ErrRecoveryUnavailable:
-		// No answer: the keeper may have written before it was lost, so
-		// the replacement stays for another tap, and the session is
-		// unsure until one is answered ok.
-		s.recovery.mu.Lock()
-		s.recovery.unsure = p.starter
-		s.recovery.mu.Unlock()
+		// No answer: the keeper may have written before it was lost; the
+		// replacement stays for another tap.
 		return recoveryUnsureText, ""
 	}
 	s.recoveryDrop(p)
-	// After a call with no answer the keeper may have written, so a
-	// refusal may only mean the store moved on: the old key no longer
-	// opening it reads as factor, the recipient changed as stale. Never
-	// "nothing changed".
-	if s.recoveryUnsure(tok) {
-		return recoveryUnsureDropText, ""
-	}
 	return recoveryText(err), ""
 }
 
@@ -517,8 +474,8 @@ func init() {
 <p>Your new card is waiting. <a href="/recovery/card">Show it and confirm it</a>.</p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="cancel"><button class="plain">Cancel</button></form>
 {{else}}
-<p>Replace your recovery key with a new card. Nothing changes until you have confirmed the new card and tapped one of your hardware keys; until then your current card stays in effect. Backups made before the change still open with the old key.</p>
-<p>First, show me your current card: take a photo of its passphrase code, or type the passphrase words, or type your recovery key.</p>
+<p>Replace your recovery key with a new card. This replacement changes nothing until you have confirmed the new card and tapped one of your hardware keys, and I say Done. Backups made before the change still open with the old key.</p>
+<p>First, show me the card that opens my store (if you hold more than one, start with the newest): take a photo of its passphrase code, or type the passphrase words, or type its recovery key.</p>
 <form method="post" action="/recovery/" enctype="multipart/form-data">
 <label>Photo of the passphrase code<input type="file" name="photo" id="photo" accept="image/*" capture="environment"></label>
 <label>Or the passphrase words<input type="password" name="passphrase" autocomplete="off" maxlength="512"></label>
