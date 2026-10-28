@@ -24,9 +24,9 @@ type Ask struct {
 	Class  Class
 }
 
-// PlannerOps are the asks a planner may make. Part (c) declares none;
-// part (b) adds its track-level outputs, none of which compares a person.
-var PlannerOps = []string{}
+// PlannerOps are the asks a planner may make: part (b)'s one, "count",
+// answered by Site.Answer with a Count, which compares no person.
+var PlannerOps = []string{"count"}
 
 // matchOps are the ops a planner would use to find or match a person
 // across captures. None is ever offered, so asking for one gets its own
@@ -40,7 +40,7 @@ var (
 )
 
 // CheckAsk refuses every ask that is not a declared planner op on a valid
-// camera, zone and class, and an ask whose op has a word of matchOps
+// camera or zone (or both) and class, and an ask whose op has a word of matchOps
 // ("find the man in the red jacket") with ErrNoMatch.
 func CheckAsk(a Ask) error {
 	words := strings.FieldsFunc(strings.ToLower(a.Op), func(r rune) bool { return r < 'a' || r > 'z' })
@@ -49,7 +49,7 @@ func CheckAsk(a Ask) error {
 			return ErrNoMatch
 		}
 	}
-	if !slices.Contains(PlannerOps, a.Op) || !validName(a.Camera) || a.Zone != "" && !validName(a.Zone) || a.Class != "" && !a.Class.Known() {
+	if !slices.Contains(PlannerOps, a.Op) || a.Camera == "" && a.Zone == "" || a.Camera != "" && !validName(a.Camera) || a.Zone != "" && !validName(a.Zone) || a.Class != "" && !a.Class.Known() {
 		return ErrNotOffered
 	}
 	return nil

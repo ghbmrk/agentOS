@@ -79,7 +79,7 @@ func marked(n int) []byte {
 // owner's page, and VIS-core serves none yet (brief point 8; part b adds
 // the track outputs, part f the bus).
 func TestNoCaptureLeavesVIS(t *testing.T) {
-	for _, v := range []any{vision.Detection{}, vision.Sound{}, vision.Ask{}} {
+	for _, v := range []any{vision.Detection{}, vision.Sound{}, vision.Ask{}, vision.Count{}, vision.ZoneEvent{}, vision.PlateEvent{}, vision.SoundEvent{}} {
 		if f, ok := carrier(reflect.TypeOf(v)); ok {
 			t.Fatalf("%T.%s could carry capture or an encoding", v, f)
 		}
