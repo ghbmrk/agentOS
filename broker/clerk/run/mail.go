@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
+	"github.com/ghbmrk/agentos/broker/clerk/accounts"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -344,11 +345,13 @@ type MailConfig struct {
 	DKIM func(ctx context.Context, names []string) map[string]string
 
 	// Test seams for the host's own world (world.go), nil in the process:
-	// the clock, the provider tables (inbox.Shipped when nil), and a wrap
-	// around each PlanSenders read.
-	now     func() time.Time
-	tables  *inbox.Providers
-	senders func(ctx context.Context, read func(context.Context) ([]string, error)) ([]string, error)
+	// the clock, the provider tables (inbox.Shipped when nil), the
+	// accounts table (accounts.Known when nil), and a wrap around each
+	// PlanSenders read.
+	now      func() time.Time
+	tables   *inbox.Providers
+	accounts *accounts.Table
+	senders  func(ctx context.Context, read func(context.Context) ([]string, error)) ([]string, error)
 
 	plain bool // the loopback test server only (imapsmtp refuses it elsewhere)
 	// gmail is the Gmail API's root, token endpoint, consent page and

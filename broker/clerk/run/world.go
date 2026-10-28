@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/accounts"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
 )
 
@@ -15,7 +16,8 @@ import (
 // itself: the day from its own clock, the provider table, authserv-id and
 // security senders from the tables shipped in its binary (inbox.Shipped),
 // keyed by the account as its settings are now, and the domains of its own
-// PlanSenders read, which the worker runs. DKIM keys are the read's own
+// PlanSenders read, which the worker runs, that the accounts table matches.
+// A read's clerk judges in the world of the account it was opened for. DKIM keys are the read's own
 // (MailConfig.DKIM), and LastOpened the clerk's record, as before. History,
 // KnownSenders and Contacts are slice b2's; until then they are empty, so
 // VRB-2 stops at no-history.
@@ -44,31 +46,42 @@ func (ws *worldState) reset(changes int64) {
 	ws.changes, ws.read, ws.set, ws.domains, ws.got = changes, false, nil, nil, false
 }
 
-// settings is the account's settings as they are now, cached until the
-// next change: a read that a change overtook is not kept. A file that does
-// not load is read again each time, and gives no account meanwhile.
-func (ws *worldState) settings(dir string) (MailSettings, bool) {
-	ws.mu.Lock()
-	if ws.read {
-		s := ws.set
-		ws.mu.Unlock()
-		if s == nil {
-			return MailSettings{}, false
-		}
-		return *s, true
-	}
-	at := ws.changes
-	ws.mu.Unlock()
-	s, err := readMail(dir)
+// snapshot is what the world for the account at changes at is built from,
+// taken under one ws.mu, so settings and senders are of the same account:
+// its settings, cached until the next change (a read that a change overtook
+// is not kept, and a file that does not load is read again each time and
+// gives no account meanwhile), and the domains of its last completed
+// senders read (got false until one has). With at < 0 it is the account as
+// it is now. ok is false with no account, or once a change has overtaken
+// at, so a world bound to an old account carries none of the new one's.
+func (ws *worldState) snapshot(dir string, at int64) (s MailSettings, domains []string, got, ok bool) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
-	if ws.changes == at && (err == nil || errors.Is(err, ErrNoMailAccount)) {
-		ws.read, ws.set = true, nil
-		if err == nil {
-			ws.set = &s
+	for {
+		now := ws.changes
+		if at >= 0 && at != now {
+			return MailSettings{}, nil, false, false
 		}
+		if !ws.read {
+			ws.mu.Unlock()
+			r, err := readMail(dir)
+			ws.mu.Lock()
+			if ws.changes != now {
+				continue // a change overtook the read: not kept, nor used
+			}
+			if err != nil && !errors.Is(err, ErrNoMailAccount) {
+				return MailSettings{}, nil, false, false
+			}
+			ws.read, ws.set = true, nil
+			if err == nil {
+				ws.set = &r
+			}
+		}
+		if ws.set == nil {
+			return MailSettings{}, nil, false, false
+		}
+		return *ws.set, append([]string(nil), ws.domains...), ws.got, true
 	}
-	return s, err == nil
 }
 
 // keep records the domains a senders read gave for the account at changes.
@@ -88,18 +101,24 @@ func (ws *worldState) senders() (domains []string, ok bool) {
 	return append([]string(nil), ws.domains...), ws.got
 }
 
-// world is the host's own world, for MailConfig.World. It reads no mailbox
-// and takes no lock but ws.mu. With no account it holds only the day.
-// AlertSenders stays empty until the senders read has completed for the
-// account as it is now, so after every start and change the guard is off
-// (guardOff) until then.
-func (h *MailHost) world() inbox.World {
+// world is the host's own world for the account as it is now, for
+// MailConfig.World; worldAt is the one a read binds its clerk to.
+func (h *MailHost) world() inbox.World { return h.worldAt(-1) }
+
+// worldAt is the host's own world for the account at changes at (now with
+// at < 0), from one snapshot. It reads no mailbox and takes no lock but
+// ws.mu. With no account, or once a change has overtaken at, it holds only
+// the day, so the guard is off (guardOff): a clerk opened for the old
+// account never judges with the new one's values. AlertSenders stays empty
+// until the senders read has completed for the account, so after every
+// start and change the guard is off until then too.
+func (h *MailHost) worldAt(at int64) inbox.World {
 	now := time.Now
 	if h.cfg.now != nil {
 		now = h.cfg.now
 	}
 	w := inbox.World{Today: now().UTC().Format(time.DateOnly)}
-	s, ok := h.ws.settings(h.dir)
+	s, d, got, ok := h.ws.snapshot(h.dir, at)
 	if !ok {
 		return w
 	}
@@ -110,10 +129,25 @@ func (h *MailHost) world() inbox.World {
 	w.ProviderTable = tables.Table()
 	auth, security := tables.For(s.API, imapHost(s))
 	w.AuthServ = auth
-	if d, ok := h.ws.senders(); ok && auth != "" {
+	if got && auth != "" {
 		w.AlertSenders = append(security, d...)
 	}
 	return w
+}
+
+// held is the senders read's domains that the accounts table matches to a
+// service (accounts.Table.Held): VRB-2's alert senders are those of
+// accounts the owner holds, never any sender the provider passed DKIM for.
+// A table that does not load gives none, so the guard stays off.
+func (h *MailHost) held(domains []string) []string {
+	t := h.cfg.accounts
+	if t == nil {
+		var err error
+		if t, err = accounts.Known(); err != nil {
+			return nil
+		}
+	}
+	return t.Held(domains)
 }
 
 // imapHost is the host of an IMAP account's server, "" for an API account.
@@ -205,7 +239,7 @@ func (h *MailHost) planSenders(again bool) ([]string, error) {
 			why, next := trouble(err, nil)
 			h.why, h.stop = "I stopped working in your mailbox: "+why+". "+next, err
 		case err == nil:
-			h.ws.keep(changes, domains)
+			h.ws.keep(changes, h.held(domains))
 		}
 	}
 	return domains, err
