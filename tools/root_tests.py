@@ -98,6 +98,8 @@ def root_runs(ci_text):
             i += 1
             cmd = cmd.rstrip()[:-1] + " " + lines[i].strip()
         i += 1
+        # A comment never runs, so a commented-out root line covers nothing (#3540 Security review).
+        cmd = "" if cmd.lstrip().startswith("#") else re.split(r"(?:^|\s)#", cmd, maxsplit=1)[0]
         if step.startswith(GENERATED) or "go test" not in cmd:
             continue
         before, _, after = cmd.partition("go test")

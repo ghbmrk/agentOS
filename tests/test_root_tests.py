@@ -128,6 +128,15 @@ class RunsTest(unittest.TestCase):
             (["./owner/kernelsock"], "^(TestA|TestB)$"),
         ])
 
+    def test_comments_cover_nothing(self):
+        # #3540 Security review: a commented-out root step must not count as running its package.
+        for line in ("          # sudo env go test ./owner/kernelsock",
+                     "        # sudo go test ./owner/kernelsock",
+                     "          true # sudo go test ./owner/kernelsock"):
+            self.assertEqual(root_tests.root_runs("      - name: x\n        run: |\n" + line + "\n"), [], line)
+        self.assertEqual(root_tests.root_runs("      - name: x\n        run: |\n          sudo go test ./a # b\n"),
+                         [(["./a"], None)])
+
     def test_covered(self):
         runs = root_tests.root_runs(STEPS)
         self.assertTrue(root_tests.covered(f"{M}/vm/gvisor", "TestAny", runs))
