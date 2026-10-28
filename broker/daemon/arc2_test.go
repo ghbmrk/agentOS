@@ -247,6 +247,22 @@ var edgeLink = map[string]struct {
 	"cmd/agentos-link": {[]string{"edgelink", "kernel", "sockets", "childproc", "golang.org/x/sys/unix"}, []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}},
 }
 
+// The drone key-holder is enforcer code (DRONE-sim, #3516, brief decision 1):
+// it imports nothing from agentOS, only the standard library and gomavlib's
+// MAVLink framing, and its stand-in main links only it.
+// TestDroneImportsNothingFromAgentOS holds the same rule transitively.
+var drone = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	"drone": {[]string{"github.com/bluenviron/gomavlib/v3/pkg/dialect",
+		"github.com/bluenviron/gomavlib/v3/pkg/dialects/common", "github.com/bluenviron/gomavlib/v3/pkg/frame",
+		"github.com/bluenviron/gomavlib/v3/pkg/message"}, droneForbid},
+	"cmd/agentos-drone": {[]string{"drone"}, droneForbid},
+}
+
+var droneForbid = []string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
+
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
 // stdExceptions are the forbidden standard packages a control-path package
@@ -280,6 +296,31 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	}
 	for pkg, rule := range edgeLink {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+	for pkg, rule := range drone {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+}
+
+// TestDroneImportsNothingFromAgentOS: everything the drone key-holder and
+// its main link, transitively, is the standard library, gomavlib's MAVLink
+// packages or the drone package itself (DRONE-sim decision 1), and none of it
+// launches a process or speaks HTTP.
+func TestDroneImportsNothingFromAgentOS(t *testing.T) {
+	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./drone", "./cmd/agentos-drone").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		switch {
+		case dep == module+"drone" || dep == module+"cmd/agentos-drone":
+		case strings.HasPrefix(dep, module):
+			t.Errorf("the drone key-holder links %s", dep)
+		case strings.Contains(strings.SplitN(dep, "/", 2)[0], ".") && !strings.HasPrefix(dep, "github.com/bluenviron/gomavlib/v3/pkg/"):
+			t.Errorf("the drone key-holder links third-party %s", dep)
+		case contains(forbiddenDeps, dep):
+			t.Errorf("the drone key-holder links %s", dep)
+		}
 	}
 }
 

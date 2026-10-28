@@ -1,3 +1,5 @@
+github.com/bluenviron/gomavlib/v3 v3.3.5 h1:4e0rxKqPH1ar1cJFkft0mjsdBDnVJKWUhDQQuuqhvyk=
+github.com/bluenviron/gomavlib/v3 v3.3.5/go.mod h1:tm3CnJMWdWqDGtHwUpmM2B8VY7TF67hCrCNBrwjYJpc=
 github.com/emersion/go-message v0.15.0 h1:urgKGqt2JAc9NFJcgncQcohHdiYb803YTH9OQwHBHIY=
 github.com/emersion/go-message v0.15.0/go.mod h1:wQUEfE+38+7EW8p8aZ96ptg6bAb1iwdgej19uXASlE4=
 github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21 h1:OJyUGMJTzHTd1XQp98QTaHernxMYzRaOasRir9hUlFQ=

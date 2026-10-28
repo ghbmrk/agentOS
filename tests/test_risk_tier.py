@@ -327,6 +327,12 @@ class RiskTierTest(unittest.TestCase):
         self.assertEqual(sorted(rt.TIER_B_BROKER - dirs), [])
         self.assertEqual(sorted(rt.TIER_A_BROKER & (core | wiring)), [])
 
+    # REQ: NET-2 (DRONE-sim, #3516: the drone key-holder holds the signing key and arms the aircraft)
+    def test_drone_is_tier_a(self):
+        self.assertIn("drone", rt.TIER_A_BROKER)
+        for f in ("broker/drone/key.go", "broker/drone/sitl/ardupilot.pin", "broker/drone/sitl/ardupilot-signed-only.patch"):
+            self.assertEqual(rt.tier_of(f), ("A", "broker/drone/"), f)
+
     # REQ: HW-10 (CTRL-claim-tier, CTRL-claim-wire: OPERATING §3 and TIER_A_BROKER agree on claim and firstboot)
     def test_merge_gate_tools_tests_and_lens_rules_are_a(self):
         # Security on #1953: paths that left premerge's Mark-only list keep the full review.
