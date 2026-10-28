@@ -37,9 +37,9 @@ name: premerge
 # start no push workflows on main; without that token it only warns, and a session arms by
 # hand (OPERATING section 7).
 # PREMERGE-inherited (#3532): a head branched from a red main stays red on that check after main
-# is fixed (vulncheck on #3503, #3509, #3520, #3523), so a completed check or workflow run that
-# did not pass is excused when the same name also completed without passing on the PR's merge
-# base with main. An unfinished run, a failure the base lacked and any status still hold it.
+# is fixed (vulncheck on #3503, #3509, #3520, #3523), so a failed check or workflow run is
+# excused when the same name failed in main's own first-attempt push or scheduled run of the
+# PR's merge base. Any other conclusion, a failure the base lacked and any status still hold it.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -81,6 +81,7 @@ jobs:
           private-key: ${{ secrets.PREMERGE_APP_KEY }}
           permission-statuses: write
       - name: Premerge (base copy of tools/premerge.py)
+        shell: bash # -eo pipefail: GitHub's default `bash -e` lets a failed read piped into jq pass
         id: gate
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
@@ -135,6 +136,7 @@ jobs:
     permissions: {}
     steps:
       - name: Merge the accepted head once every check on it is green
+        shell: bash # -eo pipefail: GitHub's default `bash -e` lets a failed read piped into jq pass
         env:
           GH_TOKEN: ${{ secrets.BOT_PR_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number }}
@@ -151,25 +153,28 @@ jobs:
           suite=$(gh api "repos/$REPO/actions/runs/$GITHUB_RUN_ID" --jq .check_suite_id) && echo "$suite" | grep -Eqx '[0-9]+' \
             || { echo "::warning::#$PR_NUMBER own check suite unreadable; the next run retries"; exit 0; }
           # The names that already failed on the merge base excuse the same failure on the head; any failed read excuses none.
+          # Only main's own first-attempt push or scheduled runs count, and only their jobs: a pusher can rerun or cancel
+          # a base run and a branch workflow can post a check run on any sha (#3533 Security review).
           bwfs='[]' bruns='[]'
           if base=$(gh api "repos/$REPO/compare/main...$HEAD_SHA" --jq .merge_base_commit.sha) && echo "$base" | grep -Eqx '[0-9a-f]{40}'; then
-            bwfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$base&per_page=100" --jq '.workflow_runs[]' \
-              | jq -cs 'group_by(.workflow_id) | map(max_by(.id) | select(.status == "completed"
-                          and (.conclusion | IN("success", "skipped", "neutral") | not)) | .name)') || bwfs='[]'
+            bw=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$base&per_page=100" --jq '.workflow_runs[]' \
+              | jq -cs 'map(select(.head_branch == "main" and (.event | IN("push", "schedule")))) | group_by(.workflow_id)
+                        | map(max_by(.id) | select(.run_attempt == 1 and .conclusion == "failure"))') || bw='[]'
+            bwfs=$(printf '%s' "$bw" | jq -c 'map(.name)') || bwfs='[]'
             bruns=$(gh api --paginate "repos/$REPO/commits/$base/check-runs?per_page=100" --jq '.check_runs[]' \
-              | jq -cs 'group_by(.name) | map(max_by(.id) | select(.status == "completed"
-                          and (.conclusion | IN("success", "skipped", "neutral") | not)) | .name)') || bruns='[]'
+              | jq -cs --argjson bw "$bw" '[$bw[].check_suite_id] as $s | map(select(.check_suite.id | IN($s[])))
+                        | group_by(.name) | map(max_by(.id) | select(.conclusion == "failure") | .name)') || bruns='[]'
           fi
           echo "excused as failed on the merge base: $bwfs $bruns"
           wfs=$(gh api --paginate "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --jq '.workflow_runs[]' \
             | jq -rs --argjson base "$bwfs" 'map(select(.path | startswith(".github/workflows/premerge.yml") | not)) | group_by(.workflow_id)[] | max_by(.id)
                       | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
-                      | select(.status != "completed" or (.name | IN($base[]) | not)) | .name') \
+                      | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER workflow runs unreadable; the next run retries"; exit 0; }
           runs=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" --jq '.check_runs[]' \
             | jq -r --argjson suite "$suite" --argjson base "$bruns" 'select(.check_suite.id != $suite)
                   | select(.status != "completed" or (.conclusion | IN("success", "skipped", "neutral") | not))
-                  | select(.status != "completed" or (.name | IN($base[]) | not)) | .name') \
+                  | select(.conclusion != "failure" or (.name | IN($base[]) | not)) | .name') \
             || { echo "::warning::#$PR_NUMBER check runs unreadable; the next run retries"; exit 0; }
           stats=$(gh api "repos/$REPO/commits/$HEAD_SHA/status?per_page=100" --jq '.statuses[] | select(.state != "success") | .context') \
             || { echo "::warning::#$PR_NUMBER statuses unreadable; the next run retries"; exit 0; }
