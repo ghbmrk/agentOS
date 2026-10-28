@@ -363,6 +363,19 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 		Armed: l.hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.hbAt}, true
 }
 
+// FreshHeartbeat asks the aircraft for its heartbeat and returns one it
+// signed after it took the request (the reply's timestamp is at or above the
+// request's), so not a heartbeat that was held in transit.
+func (l *Link) FreshHeartbeat() (Heartbeat, error) {
+	got, err := l.request(&common.MessageHeartbeat{})
+	if err != nil {
+		return Heartbeat{}, err
+	}
+	hb := got.(*common.MessageHeartbeat)
+	return Heartbeat{CustomMode: hb.CustomMode,
+		Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+}
+
 // WaitHeartbeat waits for a signed heartbeat newer than after, anchoring
 // the link first if it has no anchor: only a heartbeat since the anchor counts.
 func (l *Link) WaitHeartbeat(after time.Time, timeout time.Duration) (Heartbeat, error) {

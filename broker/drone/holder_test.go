@@ -95,6 +95,9 @@ func (a *scripted) run() {
 					st.OnboardControlSensorsPresent = common.MAV_SYS_STATUS_SENSOR_RC_RECEIVER
 				}
 				a.send(st)
+			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageHeartbeat{}).GetID():
+				a.send(&common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR, CustomMode: mode,
+					BaseMode: common.MAV_MODE_FLAG_SAFETY_ARMED | common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED})
 			case m.Command == common.MAV_CMD_REQUEST_MESSAGE && uint32(m.Param1) == (&common.MessageGlobalPositionInt{}).GetID():
 				a.send(&common.MessageGlobalPositionInt{Lat: e7(pos.Lat), Lon: e7(pos.Lon)})
 			case m.Command == common.MAV_CMD_DO_SET_MODE:
@@ -286,25 +289,29 @@ func TestFollowNeverOverridesAReturn(t *testing.T) {
 }
 
 // REQ: NET-2
-// TestFollowLeavesAutoOnlyOnAFreshHeartbeat: a heartbeat in AUTO from before
-// the follow began does not take the aircraft to GUIDED, since the aircraft
-// may have started its own return since; the next one, showing that return,
-// refuses the follow and ends the flight.
+// TestFollowLeavesAutoOnlyOnAFreshHeartbeat: a heartbeat in AUTO that the
+// aircraft signed before it started its own return, held in transit and
+// delivered while follow runs, does not take the aircraft to GUIDED: follow
+// leaves AUTO only on a heartbeat signed after the aircraft took its request,
+// which shows the return, so follow is refused and the flight ends.
 func TestFollowLeavesAutoOnlyOnAFreshHeartbeat(t *testing.T) {
 	a := &scripted{pos: at(0, 120), mode: ModeAuto, beat: true}
 	h := scriptedFlight(t, a, "deer")
-	stop := h.link.KeepAlive()
-	defer stop()
-	if _, err := h.link.WaitHeartbeat(time.Time{}, 5*time.Second); err != nil {
+	if _, err := h.link.FreshHeartbeat(); err != nil {
 		t.Fatal(err)
 	}
-	// The aircraft starts a return and its heartbeats stop reaching us.
-	a.set(func(a *scripted) { a.beat, a.mode = false, ModeRTL })
-	if err := h.Follow(at(0, 100)); err == nil {
-		t.Fatal("follow left AUTO on a heartbeat from before it began")
-	}
-	// The heartbeats come back, showing the return.
-	a.set(func(a *scripted) { a.beat = true })
+	// The aircraft signs a heartbeat in AUTO that is held, starts its return,
+	// and its periodic heartbeats are lost.
+	a.mu.Lock()
+	a.ts++
+	held := signedFrame(t, a.k, 1, 1, 0, a.ts, &common.MessageHeartbeat{Type: common.MAV_TYPE_QUADROTOR,
+		CustomMode: ModeAuto, BaseMode: common.MAV_MODE_FLAG_SAFETY_ARMED | common.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED})
+	a.beat, a.mode = false, ModeRTL
+	a.mu.Unlock()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		a.far.Write(held)
+	}()
 	if err := h.Follow(at(0, 100)); err == nil {
 		t.Fatal("follow took the aircraft out of its own return")
 	}
