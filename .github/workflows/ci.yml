@@ -335,6 +335,20 @@ jobs:
             IFS=: read -r pkg target cal <<< "$t"
             python3 ../tools/fuzzrun.py --pkg "./$pkg" --target "$target" ${cal:+--calibrate "$cal"} --budget 20s || exit 1
           done
+      - name: Camera H.264 decoder on the pinned libavcodec, with FuzzH264Feed for 20s (CAM-clerk b2, #3514)
+        # go test ./... has no libavcodec, so the decoder's tests run here, against the same pinned
+        # H.264-only build image/build.sh links into agentos-camdecode.
+        run: |
+          sh cmd/agentos-camdecode/libavcodec.sh "$RUNNER_TEMP/libavcodec"
+          export CGO_ENABLED=1 GOFLAGS=-tags=libavcodec PKG_CONFIG_SYSROOT_DIR="$RUNNER_TEMP/libavcodec" \
+            PKG_CONFIG_PATH="$RUNNER_TEMP/libavcodec/opt/agentos-libavcodec/lib/pkgconfig"
+          status=0
+          go test -count=1 -json ./cmd/agentos-camdecode/camdecode > "$RUNNER_TEMP/camdecode.json" || status=$?
+          p=github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode
+          python3 -I "$GITHUB_WORKSPACE/tools/require_ran.py" $p.TestRunVideo $p.TestRunVideoRefuses $p.TestRunVideoCropped \
+            $p.FuzzH264Feed < "$RUNNER_TEMP/camdecode.json" || exit 1
+          [ "$status" -eq 0 ]
+          python3 ../tools/fuzzrun.py --pkg ./cmd/agentos-camdecode/camdecode --target FuzzH264Feed --budget 20s
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"

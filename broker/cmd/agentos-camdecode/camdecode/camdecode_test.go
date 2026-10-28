@@ -51,9 +51,9 @@ func TestRunThermal(t *testing.T) {
 	}
 }
 
-// TestRunRefuses: a frame of another shape, a status frame, a truncated
-// frame or (until part b2) a video frame ends the run with its error and
-// exit code.
+// TestRunRefuses: a thermal frame of another shape, a truncated frame or
+// a video slice with no parameter sets (in either build, HasH264 or not)
+// ends the run with its error and exit code.
 func TestRunRefuses(t *testing.T) {
 	good := thermalFrame(4, 3, 1)
 	for _, c := range []struct {
