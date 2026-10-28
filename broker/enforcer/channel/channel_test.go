@@ -428,3 +428,21 @@ func TestChallengeAnswer(t *testing.T) {
 		t.Errorf("answers %v", r.answers)
 	}
 }
+
+// TestSinksRequired (NET-2 Safety devices, Channel): a channel cannot be
+// built without its log or its alerts, so no command acts unlogged and no
+// heater off or valve shut goes untexted. Revert mutant: New accepting a
+// nil Alerts or Log (the L3 probes on #3750).
+func TestSinksRequired(t *testing.T) {
+	for name, cut := range map[string]func(*Config){
+		"no alerts": func(c *Config) { c.Alerts = nil },
+		"no log":    func(c *Config) { c.Log = nil },
+	} {
+		r := newRig(t, nil)
+		cfg := r.ch.cfg
+		cut(&cfg)
+		if _, err := New(cfg); err != ErrConfig {
+			t.Errorf("%s: %v, want ErrConfig", name, err)
+		}
+	}
+}

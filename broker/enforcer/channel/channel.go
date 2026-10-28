@@ -66,8 +66,10 @@ type Alerts interface {
 	Paused()
 }
 
-// Config is what a channel is built from. Policy, Radio, Revoked, Core and
-// Key are required; a nil read source refuses that read.
+// Config is what a channel is built from. Core, Key, Revoked, Policy,
+// Radio, Alerts and Log are required, so no command acts unlogged and no
+// safety command goes untexted (NET-2); a nil read source refuses that
+// read.
 type Config struct {
 	// Core is the kernel's channel sub-key, pinned at enrolment.
 	Core ed25519.PublicKey
@@ -144,14 +146,11 @@ type session struct {
 // New checks cfg and returns a channel.
 func New(cfg Config) (*Channel, error) {
 	if len(cfg.Core) != ed25519.PublicKeySize || len(cfg.Key) != ed25519.PrivateKeySize ||
-		cfg.Revoked == nil || cfg.Policy == nil || cfg.Radio == nil {
+		cfg.Revoked == nil || cfg.Policy == nil || cfg.Radio == nil || cfg.Alerts == nil || cfg.Log == nil {
 		return nil, ErrConfig
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
-	}
-	if cfg.Log == nil {
-		cfg.Log = func(Event) {}
 	}
 	c := &Channel{cfg: cfg, paused: cfg.Paused, buckets: map[Kind]*bucket{}, outstanding: map[uint64]bool{}}
 	now := cfg.Now()

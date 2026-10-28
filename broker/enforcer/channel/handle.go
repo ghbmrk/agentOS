@@ -173,9 +173,7 @@ func (c *Channel) count(k Kind) bool {
 	}
 	c.paused = true
 	c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of " + string(k) + ": paused until the owner resumes it on the page"})
-	if c.cfg.Alerts != nil {
-		c.cfg.Alerts.Paused()
-	}
+	c.cfg.Alerts.Paused()
 	return false
 }
 
@@ -205,7 +203,7 @@ func (c *Channel) command(m wire.Command, nowMS int64) (wire.Code, string) {
 	if err := c.cfg.Radio.Do(dev.ID, m.Verb, m.Level); err != nil {
 		return wire.Failed, "the radio host did not do it"
 	}
-	if !dev.Everyday && (m.Verb == wire.VerbOff || m.Verb == wire.VerbShut) && c.cfg.Alerts != nil {
+	if !dev.Everyday && (m.Verb == wire.VerbOff || m.Verb == wire.VerbShut) {
 		c.cfg.Alerts.SafetyOff(dev.ID, m.Verb)
 	}
 	return wire.OK, "done"
