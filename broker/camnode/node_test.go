@@ -429,6 +429,9 @@ func TestSourceFailureAfterCommit(t *testing.T) {
 func TestConnectionCap(t *testing.T) {
 	r := newRig(t, true)
 	r.provision(3)
+	// provision's handler gives its token back after its connection
+	// closes; until then an idle dial below could be refused in its place.
+	waitFor(t, func() bool { return len(r.node.slots) == 0 })
 	var idle []net.Conn
 	for range maxConns {
 		c, err := net.Dial("tcp", r.addr)
@@ -437,7 +440,7 @@ func TestConnectionCap(t *testing.T) {
 		}
 		idle = append(idle, c)
 	}
-	time.Sleep(100 * time.Millisecond) // let the node take them
+	waitFor(t, func() bool { return len(r.node.slots) == maxConns })
 	if c, err := r.dial(r.core); err == nil {
 		c.SetReadDeadline(deadline(1000))
 		if _, err := camwire.ReadFrame(c, camwire.ToCore, camwire.Shape{}); err == nil {

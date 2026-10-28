@@ -156,6 +156,8 @@ func TestUpdateStagesAndRollsBack(t *testing.T) {
 	if _, err := r.push(p, img, camwire.MaxImage); err != nil {
 		t.Fatalf("update not staged: %v", err)
 	}
+	// The status goes out before the restart, so the reboot may lag it.
+	waitFor(t, func() bool { _, _, _, _, n := r.slots.state(); return n > 0 })
 	staged, armed, _, good, reboots := r.slots.state()
 	if !bytes.Equal(staged, img) || !bytes.Equal(armed, p) || reboots != 1 || good != 0 {
 		t.Fatalf("staging: image ok %v, armed %v, reboots %d, good %d", bytes.Equal(staged, img), armed != nil, reboots, good)
