@@ -45,25 +45,13 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #3612 (CAM-decode b1, #3514 part b): the new broker/cmd/agentos-camdecode/, which the G2
-# list does not name (D-198). Remove once #3612 merges.
-exempt-pr 3612
+# DRONE-sim-fresh-lock (#3739, row #3732) touches broker/drone/, which the G2 list does not name
+# (D-198). Remove once #3739 merges.
+exempt-pr 3739
 
-# #3589 (DEVSLOT-host-unit b2b-1, #3473): the new broker/cmd/agentos-devices/, which the G2
-# list does not name (D-198). Remove once #3589 merges.
-exempt-pr 3589
-
-# #3632 (VIS-core d, #3515 part d): broker/vision/ and broker/cmd/agentos-vision/, which the
-# G2 list does not name (D-198). Remove once #3632 merges.
-exempt-pr 3632
-
-# DRONE-sim part b (#3609, row #3516) touches broker/drone/ and broker/cmd/agentos-drone/, which
-# the G2 list does not name (D-198). Remove once #3609 merges.
-exempt-pr 3609
-
-# #3617 (CAM-server b2, #3513 part b): broker/camnode/ (with the new se/ and capture/) and the new
-# broker/cmd/agentos-camnode/, which the G2 list does not name (D-198). Remove once #3617 merges.
-exempt-pr 3617
+# #3730 (VIS-core b, VIS-track, #3515): broker/vision/ and broker/cmd/agentos-vision/ (one test
+# file), which the G2 list does not name (D-198). Remove once #3730 merges.
+exempt-pr 3730
 
 # #3640 (CAM-decode b2, #3514 part b): broker/cmd/agentos-camdecode/ and image/libavcodec.sh,
 # which the G2 list does not name (D-198). Remove once #3640 merges.
