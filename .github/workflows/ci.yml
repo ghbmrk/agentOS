@@ -450,7 +450,8 @@ jobs:
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
         # A test that skips off root is green in every other job (#3536: a renamed wire tag passed
         # CI). root_tests.py fails unless each root-gated test runs in a root step whose require_ran.py
-        # names it, and --plan lists those no step above names; each package runs as root and fails
+        # names it, and --plan lists those no step above names; each package runs as root with
+        # no_new_privs, as agentosd.service runs (NoNewPrivileges=yes; L7-6, #3542), and fails
         # on any skip or unrun test.
         working-directory: broker
         run: |
@@ -460,7 +461,8 @@ jobs:
           fail=0
           while read -r pkg pat names <&3; do
             rc=0
-            sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_SWTPM=1 \
+            sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+              AGENTOS_REQUIRE_SWTPM=1 \
               go test -count=1 -json -run "$pat" "$pkg" > "$RUNNER_TEMP/root-test.json" || rc=$?
             # shellcheck disable=SC2086 # names is a space-separated list of test names
             python3 -I ../tools/require_ran.py $names < "$RUNNER_TEMP/root-test.json" || fail=1

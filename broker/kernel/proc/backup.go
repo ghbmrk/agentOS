@@ -190,7 +190,7 @@ func openBackups(cfg KernelConfig, keys kernel.Keys, k *kernel.Kernel, now int64
 		}
 		bk.recipient = &backup.Recipient{X: x, EK: ek}
 	}
-	for _, d := range []string{filepath.Dir(cfg.Log), cfg.KeyDir, cfg.BackupDir} {
+	for _, d := range []string{filepath.Dir(cfg.Log), cfg.KeyDir, cfg.ContentDir, cfg.BackupDir} {
 		if d == "" {
 			continue
 		}

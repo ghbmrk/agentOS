@@ -190,6 +190,10 @@ type (
 	approvalRead struct {
 		Approval []byte `json:"approval"`
 	}
+	// recoveryCardRead is the new recovery key, seal.RecoveryLen bytes.
+	recoveryCardRead struct {
+		Key []byte `json:"key"`
+	}
 	// recipientArgs is the new recipient in its wire form and its approval.
 	recipientArgs struct {
 		Recipient []byte `json:"recipient"`
@@ -349,6 +353,19 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		}
 		return nil, h.SwitchRecipient(now, a.Recipient, a.Approval)
 	},
+	// The lost-card route (D-201 route B): the key the unlock step made at
+	// this boot, for the new card, until the owner confirms it.
+	"recoverycard": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		b, err := h.RecoveryCard()
+		if err != nil {
+			return nil, err
+		}
+		return recoveryCardRead{b}, nil
+	},
+	"recoverycarddone": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		h.RecoveryCardDone()
+		return nil, nil
+	},
 	"setup": func(h *Kernel, now int64, raw json.RawMessage) (any, error) {
 		var f kernel.FirstAnchors
 		if err := json.Unmarshal(raw, &f); err != nil {
@@ -420,6 +437,58 @@ var LinkSide = Side{name: "link", ops: map[string]op{
 		return h.LinkSign(a.Msg)
 	},
 }}
+
+type (
+	// sealArgs is an item for the side's own store: its subject, its
+	// class and its plaintext.
+	sealArgs struct {
+		Subject string `json:"subject"`
+		Class   string `json:"class"`
+		Data    []byte `json:"data"`
+	}
+	// readForArgs names an item and the agent session's lineage it is
+	// read for (D-169).
+	readForArgs struct {
+		Hash    kernel.Hash `json:"hash"`
+		Lineage string      `json:"lineage"`
+	}
+)
+
+// ContentSide is one content clerk's table (KRN-content, LOG-4): it opens
+// subjects, seals into store, its own, and reads that store's items for an
+// agent session's lineage, which the log records first so an erase rewinds
+// it (kernel.ReadFor, D-169). Its socket admits that clerk's uid alone,
+// never the owner side's, the model clerk's or the link's (cmd/agentos-kernel),
+// and no planner reaches a kernel socket, so sealed plaintext crosses to
+// the clerk that sealed it and to no one else. Erase stays the owner's.
+func ContentSide(store string) Side {
+	return Side{name: "content", ops: map[string]op{
+		"opensubject": func(k *kernel.Kernel, now int64, _ json.RawMessage) (any, error) {
+			return k.OpenSubject(now)
+		},
+		"seal": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+			var a sealArgs
+			if err := json.Unmarshal(raw, &a); err != nil || len(a.Data) > MaxItem {
+				return nil, ErrArgs
+			}
+			return k.Seal(now, a.Subject, store, a.Class, a.Data)
+		},
+		"readfor": func(k *kernel.Kernel, now int64, raw json.RawMessage) (any, error) {
+			var a readForArgs
+			if err := json.Unmarshal(raw, &a); err != nil {
+				return nil, ErrArgs
+			}
+			// Another store's item reads as no item, whatever else is
+			// wrong with the call: the zero hash names no item, so its
+			// answer is an unknown item's, and the clerk learns nothing
+			// of what other clerks hold (#3560 Security finding 1).
+			if in, ok := k.State().ItemStore(a.Hash); ok && in != store {
+				a.Hash = kernel.Hash{}
+			}
+			return k.ReadFor(now, a.Hash, a.Lineage)
+		},
+	}}
+}
 
 // ListenKernel opens one side's socket on the kernel process, admitting only
 // that side's uid.
@@ -591,7 +660,8 @@ func init() {
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
 		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
 		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
-		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired,
+		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
+		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
 		ErrNoLinkKey, ErrLinkSign,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
@@ -830,6 +900,17 @@ func (o Owner) SwitchRecipient(r, approval []byte) error {
 	return o.Call("recipient", recipientArgs{r, approval}, nil)
 }
 
+// RecoveryCard is the recovery key the unlock step made at this boot on
+// the lost-card route, for the new card; ErrNoRecoveryCard once confirmed.
+func (o Owner) RecoveryCard() ([]byte, error) {
+	var r recoveryCardRead
+	err := o.Call("recoverycard", nil, &r)
+	return r.Key, err
+}
+
+// RecoveryCardDone wipes it, once the owner has confirmed the card.
+func (o Owner) RecoveryCardDone() error { return o.Call("recoverycarddone", nil, nil) }
+
 // Certify signs the page's serving key, PKIX DER (Kernel.Certify).
 func (o Owner) Certify(pub []byte) (c Certified, err error) {
 	err = o.Call("certify", certifyArgs{pub}, &c)
@@ -911,4 +992,30 @@ func (m Meter) AdmitPool(_ int64, pool string) *key.Refusal {
 }
 func (m Meter) ReadPool(_ int64, pool string, used, resetAt int64) error {
 	return m.Call("readpool", poolArgs{Pool: pool, Used: used, ResetAt: resetAt}, nil)
+}
+
+// Content is a content clerk's seam over its content socket (ContentSide).
+type Content struct{ Conn }
+
+// OpenSubject opens a new subject and returns its ID.
+func (c Content) OpenSubject() (sub string, err error) {
+	err = c.Call("opensubject", nil, &sub)
+	return
+}
+
+// Seal seals data as an item of subject, of class, in the clerk's own
+// store, and returns its hash.
+func (c Content) Seal(subject, class string, data []byte) (h kernel.Hash, err error) {
+	if len(data) > MaxItem {
+		return h, ErrArgs
+	}
+	err = c.Call("seal", sealArgs{subject, class, data}, &h)
+	return
+}
+
+// ReadFor opens the item named h, of the clerk's own store, for the agent
+// session of lineage; the kernel logs the read first.
+func (c Content) ReadFor(h kernel.Hash, lineage string) (data []byte, err error) {
+	err = c.Call("readfor", readForArgs{h, lineage}, &data)
+	return
 }

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
@@ -779,17 +780,18 @@ func get[T any](t *testing.T, f func() (T, error)) T {
 	return v
 }
 
-// No socket hands sealed plaintext to anyone (CH-25, #3160 Security): no
-// side has read or readfor, only the owner side has the erase calls, and a
-// named answer carries subject IDs, never a label's text.
+// No socket hands sealed plaintext to anyone but a content clerk (CH-25,
+// #3160 Security; KRN-content): only a content side has readfor, and no
+// side has read; only the owner side has the erase calls, and a named
+// answer carries subject IDs, never a label's text.
 func TestNoSideReadsSealedContent(t *testing.T) {
 	content := []string{"named", "recall", "erase", "unerased", "erasedreads"}
-	for _, side := range []Side{OwnerSide, MeterSide} {
-		for _, op := range []string{"read", "readfor", "open", "content"} {
+	for _, side := range []Side{OwnerSide, MeterSide, LinkSide, ContentSide("vision")} {
+		for _, op := range []string{"read", "readfor", "open", "content", "opensubject", "seal"} {
 			_, a := side.ops[op]
 			_, b := side.procOps[op]
-			if a || b {
-				t.Fatalf("the %s side serves %s", side.name, op)
+			if (a || b) != (side.name == "content" && (op == "readfor" || op == "opensubject" || op == "seal")) {
+				t.Fatalf("the %s side serves %s: %v", side.name, op, a || b)
 			}
 		}
 		for _, op := range content {
@@ -1053,5 +1055,71 @@ func TestASetupOnlyKernelTakesNoLinkCall(t *testing.T) {
 	}
 	if n := b.entries(); n != 0 {
 		t.Fatalf("link calls before setup logged %d entries", n)
+	}
+}
+
+// REQ: REC-4, BAK-1
+// MIG-4-recovery-r3: the recovery key the unlock step made on the lost-card
+// route is the owner's to read through recoverycard until recoverycarddone
+// wipes it; then the call refuses, and done again changes nothing. The key
+// is in no log entry nor in any backup taken while it is held, and a
+// restart holds none (the page then tells the owner to ask again).
+// Revert mutants: RecoveryCardDone leaving the key (the read after done
+// answers it); HoldRecoveryCard taking a key of any length (the 31-byte
+// hold reads back).
+func TestNewRecoveryHeldUntilDone(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.subject()
+	dir := b.addTarget("drive", false)
+	o := serveOwner(t, b.h, func() int64 { return b.now })
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("no card made at this boot: %v", err)
+	}
+	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.RecoveryLen-1))
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("a short key was held: %v", err)
+	}
+	rec := bytes.Repeat([]byte{0x5e}, handoff.RecoveryLen)
+	held := bytes.Clone(rec)
+	b.h.HoldRecoveryCard(held)
+	for range 2 {
+		if got, err := o.RecoveryCard(); err != nil || !bytes.Equal(got, rec) {
+			t.Fatalf("the card: %x, %v", got, err)
+		}
+	}
+	taken := b.backup()
+	if len(taken) != 1 {
+		t.Fatalf("took %+v", taken)
+	}
+	logged, _ := openBackup(t, dir, taken[0].Backup.BackupID, testRK)
+	if bytes.Contains(logged, rec) || bytes.Contains(b.logBytes(), rec) {
+		t.Fatal("the new recovery key is in the log")
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		raw, err := os.ReadFile(filepath.Join(dir, f.Name()))
+		if err != nil || bytes.Contains(raw, rec) {
+			t.Fatalf("backup file %s holds the key (%v)", f.Name(), err)
+		}
+	}
+	for range 2 {
+		if err := o.RecoveryCardDone(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after done: %v", err)
+	}
+	if !bytes.Equal(held, make([]byte, len(held))) {
+		t.Fatal("done left the key in memory")
+	}
+	b.h.HoldRecoveryCard(bytes.Clone(rec))
+	b.restart()
+	o = serveOwner(t, b.h, func() int64 { return b.now })
+	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after a restart: %v", err)
 	}
 }

@@ -864,3 +864,53 @@ func TestEdgeEnrollAndRevokeReachTheKernel(t *testing.T) {
 		t.Fatalf("revoking it again: %v", err)
 	}
 }
+
+// REQ: REC-4
+// MIG-4-recovery-r3: after a lost-card restart, the page reads the new
+// recovery key from the real OwnerSide on the written-out wire until it
+// confirms the card; then the kernel holds none, which reads as
+// ErrNoRecoveryCard, and confirming again changes nothing.
+// Revert mutants: a call name changed here (the kernel answers "no call");
+// noRecoveryCardText changed (the text check fails).
+func TestRecoveryCardReachesTheKernel(t *testing.T) {
+	needRoot(t)
+	if noRecoveryCardText != proc.ErrNoRecoveryCard.Error() {
+		t.Fatal("the no-card refusal's text is not the kernel's")
+	}
+	ctx := context.Background()
+	as := anchorSigners(t)
+	head, headPriv, _ := ed25519.GenerateKey(nil)
+	h, err := proc.OpenKernel(proc.KernelConfig{
+		Log: filepath.Join(t.TempDir(), "log"), Anchor: &kernel.MemAnchor{}, Key: [32]byte{7},
+		Pub: head, Sign: headPriv, Anchors: publics(as),
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	path := filepath.Join(runDir(t), "owner.sock")
+	ln, err := proc.ListenKernel(path, testOwnerUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
+	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
+
+	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("no card made at this boot: %v", err)
+	}
+	rec := bytes.Repeat([]byte{0x42}, handoff.RecoveryLen)
+	h.HoldRecoveryCard(bytes.Clone(rec))
+	if got, err := o.RecoveryCard(ctx); err != nil || !bytes.Equal(got, rec) {
+		t.Fatalf("the card: %x, %v", got, err)
+	}
+	for range 2 {
+		if err := o.RecoveryCardDone(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+		t.Fatalf("after the confirm: %v", err)
+	}
+}

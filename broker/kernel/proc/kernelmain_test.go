@@ -78,7 +78,7 @@ func newMainBox(t *testing.T) *mainBox {
 	return &mainBox{t: t, dir: dir, cfg: MainConfig{
 		Log: filepath.Join(dir, "log"), OwnerSock: filepath.Join(dir, "o.sock"), OwnerUID: os.Getuid(),
 		MeterSock: filepath.Join(dir, "m.sock"), MeterUID: os.Getuid(),
-		KeyDir: filepath.Join(dir, "keys"), BackupDir: filepath.Join(dir, "backups"), Up: filepath.Join(dir, "up"),
+		KeyDir: filepath.Join(dir, "keys"), ContentDir: filepath.Join(dir, "content"), BackupDir: filepath.Join(dir, "backups"), Up: filepath.Join(dir, "up"),
 	}}
 }
 
