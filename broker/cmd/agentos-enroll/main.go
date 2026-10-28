@@ -1116,12 +1116,17 @@ func rotateRecovery(c config, in io.Reader) error {
 	// A retry after the owner side lost an earlier ok (MIG-4-recovery-r4c):
 	// that run made next the recovery key, so the old card's key opens
 	// nothing now. If next opens the store, the request can only be
-	// answered as already done; anything else is still the factor's
-	// refusal.
+	// answered as already done. If next opens no slot either, it is still
+	// the factor's refusal; any other failure, such as I/O or a damaged
+	// file, is the store's (MIG-4-recovery-r4c-later).
 	applied := false
 	if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
-		if st, err = seal.Unlock(c.storePath(), seal.Recovery{Key: r.Next}); err != nil {
+		st, err = seal.Unlock(c.storePath(), seal.Recovery{Key: r.Next})
+		if errors.Is(err, seal.ErrWrongFactor) || errors.Is(err, seal.ErrNoSlot) {
 			return errFactor
+		}
+		if err != nil {
+			return fmt.Errorf("%w: %w", errStoreOpen, err)
 		}
 		applied = true
 	} else if err != nil {
