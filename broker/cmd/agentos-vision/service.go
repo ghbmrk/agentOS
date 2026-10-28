@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -19,13 +21,28 @@ import (
 // (runtime_<name>.go) implements it, so the runtime choice changes one file
 // (VIS-core part e). Load loads the models, replacing whatever was loaded,
 // and names them. Detect and Sound answer one frame or clip; the service
-// checks what they return as the client will. All may be called from
-// several goroutines; a Load must make a call still running on the old
-// load return, since that call holds a frame and its slot until it does.
+// checks what they return as the client will. Encode is the enrolment
+// frame's one face's encoding, ErrNoFace when there is not exactly one
+// clear face. All may be called from several goroutines; a Load must make
+// a call still running on the old load return, since that call holds a
+// frame and its slot until it does.
+//
+// A face's encoding comes back in Seen.Face, never in the detection: the
+// service compares it with the lent templates, names the face, and zeroes
+// the encoding before anything is sent (DEV-7, D-207). The runtime keeps
+// no copy.
 type Runtime interface {
 	Load() (Model, error)
-	Detect(f vision.Frame) ([]vision.Detection, error)
+	Detect(f vision.Frame) ([]Seen, error)
+	Encode(f vision.Frame) ([]float32, error)
 	Sound(pcm []byte) ([]vision.Sound, error)
+}
+
+// Seen is one detection as the runtime gives it: the detection, with Face
+// unset, and, for a person whose face it saw, that face's encoding.
+type Seen struct {
+	vision.Detection
+	Face []float32
 }
 
 // Model names what a Runtime loaded: a name from [a-z0-9._-] and the
@@ -42,6 +59,11 @@ var (
 	ErrRefused = errors.New("runtime refused the model files")
 )
 
+// ErrNoFace is Encode's answer to an enrolment frame without exactly one
+// clear face: the service reports it as NoFace, and it is no failure of
+// the runtime.
+var ErrNoFace = errors.New("not exactly one clear face")
+
 // Config is the service's settings, from its flags.
 type Config struct {
 	// Concurrent bounds the requests whose payload is held or whose
@@ -56,7 +78,15 @@ type Config struct {
 	// Idle bounds the wait for a request on an open connection, and for
 	// its payload.
 	Idle time.Duration
+	// Match is the least cosine similarity between a face's encoding and
+	// an enrolled template that names the face; below it on every
+	// template the face is unknown. It depends on the encoder (part e);
+	// 0 is DefaultMatch.
+	Match float64
 }
+
+// DefaultMatch is Match when none is set.
+const DefaultMatch = 0.6
 
 // loaded is the outcome of the last load.
 type loaded struct {
@@ -87,6 +117,12 @@ type service struct {
 	cur  loaded
 	held int // payloads allocated and not yet released
 	peak int // the most held at once
+
+	// tpl is the lent templates by id, each scaled to unit length. A
+	// lend replaces the whole set and zeroes the old one; a compare
+	// holds tmu's read lock while it reads them.
+	tmu sync.RWMutex
+	tpl map[string][]float32
 }
 
 func newService(cfg Config, rt Runtime, log io.Writer) *service {
@@ -102,6 +138,9 @@ func newService(cfg Config, rt Runtime, log io.Writer) *service {
 	if cfg.Idle <= 0 {
 		cfg.Idle = time.Minute
 	}
+	if cfg.Match <= 0 || cfg.Match > 1 {
+		cfg.Match = DefaultMatch
+	}
 	if log == nil {
 		log = io.Discard
 	}
@@ -109,8 +148,15 @@ func newService(cfg Config, rt Runtime, log io.Writer) *service {
 		stuck: func() { os.Exit(1) }, cur: loaded{cause: vision.Unavailable}}
 }
 
-// Serve answers each connection on its own goroutine until ln fails.
-func (s *service) Serve(ln net.Listener) error {
+// Serve answers each connection on the feed socket on its own goroutine
+// until ln fails: hello, detect and sound.
+func (s *service) Serve(ln net.Listener) error { return s.serve(ln, false) }
+
+// ServeControl answers the control socket the same way: enrol and lend,
+// and nothing else.
+func (s *service) ServeControl(ln net.Listener) error { return s.serve(ln, true) }
+
+func (s *service) serve(ln net.Listener, control bool) error {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -120,15 +166,16 @@ func (s *service) Serve(ln net.Listener) error {
 			}
 			return err
 		}
-		go s.conn(c)
+		go s.conn(c, control)
 	}
 }
 
 // conn answers requests until the peer closes or idles. A header that is
-// over its bound, malformed or outside the bounds is answered BadRequest
-// and ends the connection, since its payload's length is not known: the
-// payload is never read, so a bad header cannot make the service hold it.
-func (s *service) conn(c net.Conn) {
+// over its bound, malformed or outside the bounds, or whose op is not this
+// socket's, is answered BadRequest and ends the connection, since its
+// payload's length is not known: the payload is never read, so a bad
+// header cannot make the service hold it.
+func (s *service) conn(c net.Conn, control bool) {
 	defer c.Close()
 	r := bufio.NewReaderSize(c, 4<<10)
 	for {
@@ -149,12 +196,15 @@ func (s *service) conn(c net.Conn) {
 			s.write(c, errReply(vision.BadRequest))
 			return
 		}
-		if err := req.Check(); err != nil {
+		if err := req.Check(); err != nil || vision.Control(req.Op) != control {
 			fmt.Fprintf(s.log, "vision: bad %s request (%d bytes)\n", opName(req.Op), req.Bytes)
 			s.write(c, errReply(vision.BadRequest))
 			return
 		}
-		if !s.write(c, s.answer(req, r)) {
+		rep := s.answer(req, r)
+		ok := s.write(c, rep)
+		clear(rep.Template)
+		if !ok {
 			return
 		}
 	}
@@ -163,7 +213,7 @@ func (s *service) conn(c net.Conn) {
 // opName is a request's op for the log: one of the three, or "unknown".
 func opName(op string) string {
 	switch op {
-	case vision.OpHello, vision.OpDetect, vision.OpSound:
+	case vision.OpHello, vision.OpDetect, vision.OpSound, vision.OpEnrol, vision.OpLend:
 		return op
 	}
 	return "unknown"
@@ -180,6 +230,8 @@ func (s *service) write(c net.Conn, r vision.Reply) bool {
 	}
 	c.SetWriteDeadline(time.Now().Add(s.cfg.CallTimeout))
 	_, err = c.Write(append(b, '\n'))
+	// An enrol reply's line holds a template as text.
+	clear(b[:cap(b)])
 	return err == nil
 }
 
@@ -212,6 +264,15 @@ func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 			return errReply(vision.BadRequest)
 		}
 	}
+	if req.Op == vision.OpLend {
+		// Templates need no model: a lend lands while the runtime loads.
+		n, err := s.lend(payload)
+		if err != nil {
+			return errReply(vision.BadRequest)
+		}
+		fmt.Fprintf(s.log, "vision: %d templates lent\n", n)
+		return vision.Reply{State: vision.StateReady}
+	}
 	cur := s.ready()
 	if cur.cause != "" {
 		return errReply(cur.cause)
@@ -223,17 +284,28 @@ func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 	case vision.OpDetect:
 		f := vision.Frame{Format: req.Format, Width: req.Width, Height: req.Height, Data: payload}
 		handed = true
-		ds, err := call(s, cur, release, func() ([]vision.Detection, error) { return s.rt.Detect(f) },
+		ds, err := call(s, cur, release, func() ([]vision.Detection, error) { return s.detect(f) },
 			func(ds []vision.Detection) error {
-				// No template is loaded in this build, so no id is enrolled
-				// (part c lends them).
-				return vision.CheckDetections(ds, req.Width, req.Height, nil)
+				return vision.CheckDetections(ds, req.Width, req.Height, s.enrolled)
 			})
 		if err != nil {
 			return errReply(vision.Unavailable)
 		}
 		fmt.Fprintf(s.log, "vision: %dx%d %s frame, %d detections in %s\n", req.Width, req.Height, req.Format, len(ds), since(start))
 		return vision.Reply{Detections: ds}
+	case vision.OpEnrol:
+		f := vision.Frame{Format: req.Format, Width: req.Width, Height: req.Height, Data: payload}
+		handed = true
+		t, err := call(s, cur, release, func() ([]byte, error) { return s.encode(f) }, vision.CheckTemplate)
+		switch {
+		case errors.Is(err, ErrNoFace):
+			fmt.Fprintln(s.log, "vision: enrolment frame without one clear face")
+			return errReply(vision.NoFace)
+		case err != nil:
+			return errReply(vision.Unavailable)
+		}
+		fmt.Fprintf(s.log, "vision: enrolment template made in %s\n", since(start))
+		return vision.Reply{Template: t}
 	default: // vision.OpSound; Check admits no other op with a payload
 		handed = true
 		ss, err := call(s, cur, release, func() ([]vision.Sound, error) { return s.rt.Sound(payload) }, vision.CheckSounds)
@@ -287,9 +359,13 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 	select {
 	case r := <-done:
 		switch {
+		case errors.Is(r.err, ErrNoFace):
+			// An answer about the frame, not a failure of the runtime.
+			return zero, ErrNoFace
 		case r.err != nil:
 			err = errCrashed
 		case check(r.v) != nil:
+			wipe(r.v)
 			err = errMalformed
 		default:
 			return r.v, nil
@@ -303,7 +379,8 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		go s.ready()
 		go func() {
 			select {
-			case <-done:
+			case r := <-done:
+				wipe(r.v) // a late template is zeroed too
 			case <-time.After(3 * s.cfg.CallTimeout):
 				fmt.Fprintln(s.log, "vision: runtime call stuck after the reload; exiting")
 				s.stuck()
@@ -311,6 +388,14 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		}()
 	}
 	return zero, err
+}
+
+// wipe zeroes a call's answer that will not be sent: an enrolment
+// template, the only answer that holds an encoding's bytes.
+func wipe[T any](v T) {
+	if b, ok := any(v).([]byte); ok {
+		clear(b)
+	}
 }
 
 // hold counts payloads held in and out of their slots.
@@ -377,4 +462,135 @@ func (s *service) loadModels() loaded {
 		fmt.Fprintf(s.log, "vision: models not loaded: %s\n", l.cause)
 	}
 	return l
+}
+
+// detect runs the runtime on f and names each face it saw: enrolled:<id>
+// for the best lent template at or above Match, else unknown. Every
+// encoding is zeroed before detect returns, whatever happens, so none
+// outlives the call that made it (DEV-7, D-207). A runtime that names a
+// face itself, or gives an encoding for anything but a person, is
+// answering outside the protocol.
+func (s *service) detect(f vision.Frame) ([]vision.Detection, error) {
+	seen, err := s.rt.Detect(f)
+	defer func() {
+		for _, d := range seen {
+			clear(d.Face)
+		}
+	}()
+	if err != nil {
+		return nil, err
+	}
+	if len(seen) > vision.MaxDetections {
+		return nil, errMalformed
+	}
+	ds := make([]vision.Detection, len(seen))
+	s.tmu.RLock()
+	defer s.tmu.RUnlock()
+	for i, d := range seen {
+		if d.Detection.Face != "" || (d.Face != nil && d.Class != vision.Person) {
+			return nil, errMalformed
+		}
+		ds[i] = d.Detection
+		if d.Face != nil {
+			ds[i].Face = s.name(d.Face)
+		}
+	}
+	return ds, nil
+}
+
+// name is the face's name: the best lent template's id at or above Match,
+// else unknown. The caller holds tmu's read lock.
+func (s *service) name(face []float32) string {
+	best, id := s.cfg.Match, ""
+	n := norm(face)
+	if n == 0 {
+		return vision.FaceUnknown
+	}
+	for tid, t := range s.tpl {
+		if len(t) != len(face) {
+			continue
+		}
+		var dot float64
+		for i := range t {
+			dot += float64(t[i]) * float64(face[i])
+		}
+		if c := dot / n; c >= best {
+			best, id = c, tid
+		}
+	}
+	if id == "" {
+		return vision.FaceUnknown
+	}
+	return vision.FaceEnrolledAs + id
+}
+
+func norm(v []float32) float64 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	return math.Sqrt(sum)
+}
+
+// enrolled reports an id the service holds a template for.
+func (s *service) enrolled(id string) bool {
+	s.tmu.RLock()
+	defer s.tmu.RUnlock()
+	_, ok := s.tpl[id]
+	return ok
+}
+
+// encode is the enrolment frame's template, as little-endian float32s;
+// the runtime's encoding is zeroed once copied.
+func (s *service) encode(f vision.Frame) ([]byte, error) {
+	v, err := s.rt.Encode(f)
+	defer clear(v)
+	if err != nil {
+		return nil, err
+	}
+	if len(v) == 0 || len(v)*4 > vision.MaxTemplate {
+		return nil, errMalformed
+	}
+	b := make([]byte, 0, 4*len(v))
+	for _, x := range v {
+		b = binary.LittleEndian.AppendUint32(b, math.Float32bits(x))
+	}
+	return b, nil
+}
+
+// lend replaces the lent templates with the payload's (vision.DecodeLend),
+// each scaled to unit length, and zeroes the set it replaces. The payload
+// itself is zeroed by its release.
+func (s *service) lend(payload []byte) (int, error) {
+	ts, err := vision.DecodeLend(payload)
+	if err != nil {
+		return 0, err
+	}
+	next := make(map[string][]float32, len(ts))
+	for _, t := range ts {
+		v := make([]float32, len(t.Vec)/4)
+		for i := range v {
+			v[i] = math.Float32frombits(binary.LittleEndian.Uint32(t.Vec[4*i:]))
+		}
+		n := norm(v)
+		if n == 0 || math.IsInf(n, 0) {
+			for _, old := range next {
+				clear(old)
+			}
+			clear(v)
+			return 0, errMalformed
+		}
+		for i := range v {
+			v[i] = float32(float64(v[i]) / n)
+		}
+		next[t.ID] = v
+	}
+	s.tmu.Lock()
+	old := s.tpl
+	s.tpl = next
+	s.tmu.Unlock()
+	for _, v := range old {
+		clear(v)
+	}
+	return len(next), nil
 }

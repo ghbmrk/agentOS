@@ -92,7 +92,9 @@ var netOK = map[string]allowance{
 	"localsrv/accountsock": {"dials only the mail clerk's owner unix socket", []string{"net.Dialer"}},
 	// agentosd's client of the kernel's owner socket (#2682), as modelroute;
 	// it dials on a thread whose effective uid alone is the owner side's.
-	"owner/kernelsock": {"dials only the kernel's owner unix socket, as the owner side's uid on the calling thread",
+	// It also dials the keeper's recovery-key rotation socket, as root
+	// (REC-4 r4a, #3409).
+	"owner/kernelsock": {"dials only the kernel's owner unix socket, as the owner side's uid on the calling thread, and the keeper's rotation unix socket",
 		[]string{"golang.org/x/sys/unix.RawSyscall", "golang.org/x/sys/unix.SYS_GETEUID", "golang.org/x/sys/unix.SYS_SETRESUID", "net.Dialer"}},
 	// The local inference service's client and supervisor (INFER-SVC
 	// INF-2, INF-1): the client dials the service's unix socket; the

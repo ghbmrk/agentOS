@@ -102,6 +102,7 @@ TIER_A_BROKER = {
     "vision",                     # VIS-core: its reply checks keep templates and capture inside the vision service; covers vision/supervise
     "edgelink",                   # parses every frame and hello from the edge, and pins the link's TLS (HW-15, #3296)
     "camwire",                    # parses every camera frame and verifies the owner-signed settings and images a camera takes (NET-2, NET-4, #3513)
+    "camnode",                    # the camera node's server: signs with its device key and admits only pinned clients and owner-signed settings (NET-2, NET-4, A16, #3513)
     # (c) parses owner-channel input
     "bridgeclient", "bridgeproto", "control", "localapi", "localsrv", "localui",
     "boxname",                    # parses the owner's NAME text; the CH-21 check

@@ -284,3 +284,35 @@ func TestSecretsRemovePrefix(t *testing.T) {
 		t.Fatal("an empty prefix was taken as every slot")
 	}
 }
+
+// REQ: DEV-7
+//
+// VisionTemplate opens a vision-template/ slot alone, and no other lend
+// opens one; Names lists names under its prefix only, and none for an empty
+// prefix (VIS-faces, D-214).
+func TestVisionTemplateOpensOnlyItsSlots(t *testing.T) {
+	s := clerk.NewSecrets(sealer(t), nil)
+	for slot, v := range map[string]string{"vision-template/alice": "tpl", "device/scale": "kl", "mail/me": "pw"} {
+		if err := s.Put(slot, clerk.KindStatic, []byte(v)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []byte
+	if err := s.VisionTemplate("vision-template/alice")(func(b []byte) error { got = bytes.Clone(b); return nil }); err != nil || string(got) != "tpl" {
+		t.Fatalf("own slot: %q %v", got, err)
+	}
+	for _, slot := range []string{"device/scale", "mail/me", "vision-template", "xvision-template/alice"} {
+		if err := s.VisionTemplate(slot)(func([]byte) error { return nil }); err == nil {
+			t.Errorf("VisionTemplate opened %s", slot)
+		}
+	}
+	if err := s.DeviceKey("vision-template/alice")(func([]byte) error { return nil }); err == nil {
+		t.Error("DeviceKey opened a template slot")
+	}
+	if n := s.Names(clerk.VisionTemplateSlots); len(n) != 1 || n[0] != "vision-template/alice" {
+		t.Errorf("names: %v", n)
+	}
+	if n := s.Names(""); n != nil {
+		t.Errorf("an empty prefix listed %v", n)
+	}
+}

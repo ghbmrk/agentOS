@@ -101,6 +101,9 @@ type Config struct {
 	// Backups, when set with Passkeys, serves the backup ops (BAK-1,
 	// e4b); nil leaves them unregistered.
 	Backups Backups
+	// Recovery, when set with Passkeys, serves the recovery-key ops
+	// (REC-4, r4a); nil leaves them unregistered.
+	Recovery Recovery
 	// BackupNotes is the only-copy notice for the status page, in its
 	// fixed words; nil shows none.
 	BackupNotes func() []string
@@ -125,15 +128,16 @@ type session struct {
 type Server struct {
 	cfg Config
 
-	mu            sync.Mutex
-	sessions      map[[sha256.Size]byte]session // by the token's digest
-	minted        uint64
-	wrong         []time.Time
-	inFlight      int
-	signins       []time.Time // plan sign-ins started in the last minute
-	plan          planKept    // the waiting plan sign-in the page started
-	passkeyBegins []time.Time // passkey enrolment starts in the last minute
-	backupBegins  []time.Time // backup destination adds begun in the last minute
+	mu              sync.Mutex
+	sessions        map[[sha256.Size]byte]session // by the token's digest
+	minted          uint64
+	wrong           []time.Time
+	inFlight        int
+	signins         []time.Time // plan sign-ins started in the last minute
+	plan            planKept    // the waiting plan sign-in the page started
+	passkeyBegins   []time.Time // passkey enrolment starts in the last minute
+	backupBegins    []time.Time // backup destination adds begun in the last minute
+	recoveryRotates []time.Time // recovery-key rotations in the last minute
 
 	planMu sync.Mutex // one plan sign-in start at a time
 	noPage sync.Once  // the no-authority line, logged once
@@ -153,13 +157,17 @@ func New(cfg Config) *Server {
 // Ops are localui.sock's ops, one for each of localapi.Ops, and the
 // passkey ops (localapi.PasskeyOps) when Config.Passkeys is set, and the
 // backup ops (localapi.BackupOps) when Config.Backups is set with it: the
-// add's tap is a WebAuthn ceremony on the passkey page's name.
+// add's tap is a WebAuthn ceremony on the passkey page's name; so are the
+// recovery-key ops (localapi.RecoveryOps) when Config.Recovery is set.
 func (s *Server) Ops() map[string]sockets.Handler {
 	ops := s.ops()
 	if s.cfg.Passkeys != nil {
 		maps.Copy(ops, s.passkeyOps())
 		if s.cfg.Backups != nil {
 			maps.Copy(ops, s.backupOps())
+		}
+		if s.cfg.Recovery != nil {
+			maps.Copy(ops, s.recoveryOps())
 		}
 	}
 	return ops
