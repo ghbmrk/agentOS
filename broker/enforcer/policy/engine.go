@@ -73,9 +73,8 @@ type state struct {
 	Steps   []Step    `json:"steps"`
 	Pending []Pending `json:"pending"` // at most one
 	Seq     uint64    `json:"seq"`
-	// Spent is the highest version ever accepted, applied, pending or
-	// cancelled. It only rises, so a cancelled loosening's assertion
-	// cannot be proposed again.
+	// Spent is the highest version ever verified, applied, pending,
+	// cancelled or refused. It only rises, so an assertion is good once.
 	Spent uint64 `json:"spent"`
 }
 
@@ -141,6 +140,9 @@ func Open(owner key.PublicKey, store Store) (*Engine, error) {
 			return nil, fmt.Errorf("%w: pending %s", ErrCorrupt, p.ID)
 		}
 	}
+	if _, err := e.landing(e.st); err != nil {
+		return nil, fmt.Errorf("%w: the pending loosening does not land: %v", ErrCorrupt, err)
+	}
 	return e, nil
 }
 
@@ -177,6 +179,44 @@ func (e *Engine) replay(d Document, s Step) (Document, error) {
 	return next, nil
 }
 
+// landing is the policy st's pending loosening will put in force when it
+// lands: its document with every step taken since it was signed applied
+// again. With nothing pending it is the zero document. Every step must
+// replay there, so a step that would not is refused when it is taken
+// (Tighten, Propose), never dropped when the loosening lands (Tick).
+func (e *Engine) landing(st state) (Document, error) {
+	if len(st.Pending) == 0 {
+		return Document{}, nil
+	}
+	p := st.Pending[0]
+	d, err := Decode(p.Doc)
+	if err != nil {
+		return d, err
+	}
+	for _, s := range st.Steps {
+		if s.Seq <= p.After {
+			continue
+		}
+		if d, err = e.replay(d, s); err != nil {
+			return d, err
+		}
+	}
+	return d, nil
+}
+
+// take saves st, which adds one step, unless the pending loosening could
+// not carry it: the step's target is gone there, or there it would touch a
+// safety-list device with no signature. That is refused now, so the page
+// or the text can say so, as ErrNeedsOwner or ErrPending.
+func (e *Engine) take(st state) error {
+	if _, err := e.landing(st); errors.Is(err, ErrNeedsOwner) {
+		return ErrNeedsOwner
+	} else if err != nil {
+		return ErrPending
+	}
+	return e.save(st)
+}
+
 // check verifies a stored version and returns its document.
 func (e *Engine) check(s Signed) (Document, error) {
 	d, err := Decode(s.Doc)
@@ -203,7 +243,7 @@ func (e *Engine) Pending() []Pending { return slices.Clone(e.st.Pending) }
 // waiting meanwhile is kept: the step is applied again on top of it when
 // it lands. Anything else is a loosening: it waits Wait from now, the time
 // the assertion was checked, and is refused while another loosening waits
-// (ErrPending), since it was drawn against the policy without that one and
+// (ErrPending; its version is spent all the same), since it was drawn against the policy without that one and
 // applying both would silently undo the first. Restoring an older document
 // is a new, higher version like any other, classified by what it changes
 // (NET-2 Recovery).
@@ -218,11 +258,16 @@ func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error
 	}
 	s := Signed{Key: k, Doc: doc, Diff: slices.Clone(next.Diff)}
 	c := Classify(e.cur, next.Doc)
-	if !c.Tightening && len(e.st.Pending) > 0 {
-		return Outcome{}, ErrPending
-	}
 	st := e.st
 	st.Spent = next.Doc.Version // above the floor, so it rises
+	if !c.Tightening && len(e.st.Pending) > 0 {
+		// Refused, but its version is spent: proposed again after the
+		// first lands, it would undo the tightenings taken since.
+		if err := e.save(st); err != nil {
+			return Outcome{}, err
+		}
+		return Outcome{}, ErrPending
+	}
 	if c.Tightening {
 		prev, err := Encode(e.cur)
 		if err != nil {
@@ -230,7 +275,13 @@ func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error
 		}
 		st.Seq++
 		st.Steps = append(slices.Clone(st.Steps), Step{Seq: st.Seq, Op: c.Op, Signed: &s, Prev: prev})
-		if err := e.save(st); err != nil {
+		if err := e.take(st); err != nil {
+			// Refused, but its version is spent, as below.
+			spent := e.st
+			spent.Spent = st.Spent
+			if serr := e.save(spent); serr != nil {
+				return Outcome{}, serr
+			}
 			return Outcome{}, err
 		}
 		e.cur = next.Doc.normal()
@@ -258,33 +309,24 @@ func (e *Engine) Cancel(id string) error {
 }
 
 // Tick applies the pending loosening if it is due at now, and returns its
-// ID. It becomes the new base, and every step applied since it was signed,
+// ID. It becomes the new base, and every step taken since it was signed,
 // unsigned or signed, is applied again on top of it, so no tightening is
-// undone and no signed loosening is dropped. A step that no longer applies
-// (the loosening removed its target) is dropped with it.
+// undone and no signed loosening is dropped: take refused any step that
+// would not carry over, so none is dropped here.
 func (e *Engine) Tick(nowMS int64) ([]string, error) {
 	if len(e.st.Pending) == 0 || e.st.Pending[0].DueMS > nowMS {
 		return nil, nil
 	}
 	p := e.st.Pending[0]
-	d, err := Decode(p.Doc)
+	d, err := e.landing(e.st)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
 	}
 	st := e.st
 	st.Pending = nil
-	var kept []Step
-	for _, s := range st.Steps {
-		if s.Seq <= p.After {
-			continue
-		}
-		if next, err := e.replay(d, s); err == nil {
-			d = next
-			kept = append(kept, s)
-		}
-	}
+	st.Steps = slices.DeleteFunc(slices.Clone(st.Steps), func(s Step) bool { return s.Seq <= p.After })
 	base := p.Signed
-	st.Base, st.Steps = &base, kept
+	st.Base = &base
 	if err := e.save(st); err != nil {
 		return nil, err
 	}
@@ -315,7 +357,7 @@ func (e *Engine) Tighten(op Op, nowMS int64) error {
 	st := e.st
 	st.Seq++
 	st.Steps = append(slices.Clone(st.Steps), Step{Seq: st.Seq, Op: c.Op})
-	if err := e.save(st); err != nil {
+	if err := e.take(st); err != nil {
 		return err
 	}
 	e.spend(devs, nowMS)
@@ -375,35 +417,27 @@ func (e *Engine) save(st state) error {
 }
 
 // Export is the policy for the core's backup (NET-2 Recovery, BAK-1),
-// served as a channel read by slice d: the signed versions in force, with
-// their documents and assertions, and the policy in force to restore from.
-// It holds no secret: a document carries no Wi-Fi password or device
-// secret, only identities (decision 8, decision 10).
+// served as a channel read by slice d: the base version and every step
+// since, with the documents and assertions the signed ones carry. It holds
+// no secret: a document carries no Wi-Fi password or device secret, only
+// identities (decision 8, decision 10), and an op names only devices,
+// hosts and windows.
 type Export struct {
-	Base    *Signed  `json:"base"`
-	Signed  []Signed `json:"signed"` // the signed steps since Base
-	Current []byte   `json:"current"`
+	Base  *Signed `json:"base"`
+	Steps []Step  `json:"steps"`
 }
 
 // Export is the engine's Export, encoded.
 func (e *Engine) Export() ([]byte, error) {
-	cur, err := Encode(e.cur)
-	if err != nil {
-		return nil, err
-	}
-	x := Export{Base: e.st.Base, Signed: []Signed{}, Current: cur}
-	for _, s := range e.st.Steps {
-		if s.Signed != nil {
-			x.Signed = append(x.Signed, *s.Signed)
-		}
-	}
-	return json.Marshal(x)
+	return json.Marshal(Export{Base: e.st.Base, Steps: append([]Step{}, e.st.Steps...)})
 }
 
-// ReadExport checks an export's signatures against owner and returns the
-// policy to restore. The export comes back from the core, so it restores
-// only through Propose: the owner signs the returned document as a new,
-// higher version, on the page, and it applies like any other.
+// ReadExport rebuilds the policy an export describes the way Open does:
+// the base checked against owner, then every step replayed (an asserted
+// one only with the owner's signature over it). What it returns is derived
+// from what it verified, so a core serving the backup cannot change it.
+// It restores only through Propose: the owner signs it as a new, higher
+// version on the page, and it applies like any other change.
 func ReadExport(owner key.PublicKey, b []byte) (Document, error) {
 	var x Export
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -412,17 +446,19 @@ func ReadExport(owner key.PublicKey, b []byte) (Document, error) {
 		return Document{}, ErrMalformed
 	}
 	e := &Engine{owner: owner}
-	for _, s := range append(slices.Clone(x.Signed), derefs(x.Base)...) {
-		if _, err := e.check(s); err != nil {
+	var d Document
+	if x.Base != nil {
+		var err error
+		if d, err = e.check(*x.Base); err != nil {
 			return Document{}, err
 		}
 	}
-	return Decode(x.Current)
-}
-
-func derefs(s *Signed) []Signed {
-	if s == nil {
-		return nil
+	for i, s := range x.Steps {
+		next, err := e.replay(d, s)
+		if err != nil || (i > 0 && s.Seq <= x.Steps[i-1].Seq) {
+			return Document{}, fmt.Errorf("%w: step %d: %v", ErrCorrupt, s.Seq, err)
+		}
+		d = next
 	}
-	return []Signed{*s}
+	return d.normal(), nil
 }

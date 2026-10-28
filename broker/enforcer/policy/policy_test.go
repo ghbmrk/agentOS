@@ -430,9 +430,13 @@ func TestLooseningWaitsAndCancels(t *testing.T) {
 	if len(e.Pending()) != 1 {
 		t.Fatal("a signed tightening dropped the waiting loosening")
 	}
-	p5 := Proposal{Doc: edit(5, func(d *Document) { dev(d, "cam").Allow = nil }), Diff: []byte("another loosening")}
-	if _, err := a.propose(t, e, p5, t1+3); err == nil {
-		t.Error("a second loosening while one waits was accepted")
+	// A second loosening while one waits is refused, and its assertion
+	// is spent: after the first lands it cannot come back and undo the
+	// tightenings taken since (delta Security item 1).
+	p5 := Proposal{Doc: edit(5, func(d *Document) { dev(d, "speaker").Allow = append(dev(d, "speaker").Allow, "x.example") }), Diff: []byte("another loosening")}
+	sig5 := sign(t, a, owner, p5)
+	if _, err := e.Propose(p5, sig5, t1+3); !errors.Is(err, ErrPending) {
+		t.Errorf("a second loosening while one waits: %v", err)
 	}
 	if e, err = Open(owner, store); err != nil {
 		t.Fatal(err)
@@ -446,6 +450,84 @@ func TestLooseningWaitsAndCancels(t *testing.T) {
 	}
 	if e, err = Open(owner, store); err != nil || !reflect.DeepEqual(e.Current(), cur) {
 		t.Fatalf("restart changed the policy: %v", err)
+	}
+	if _, err := e.Propose(p5, sig5, t1+Wait+1); !errors.Is(err, ErrNotRising) {
+		t.Errorf("the refused second loosening, after the first landed: %v", err)
+	}
+
+	// Every step taken while a loosening waits must carry over when it
+	// lands; one that would not is refused when it is taken, so nothing
+	// reported as applied is dropped later (delta Security item 2, delta
+	// L3 item 2). The owner puts the TV back on the safety list and moves
+	// the plumber's window to 1500-3000, both loosenings that wait.
+	const t2 = 9_000_000
+	p6 := Proposal{Doc: func() Document {
+		d := e.Current()
+		d.Version = 6
+		dev(&d, "tv").Everyday = false
+		dev(&d, "tv").Allow = []string{"a.example", "x.example"}
+		rule(&d, "plumber").FromMS, rule(&d, "plumber").ToMS = 1500, 3000
+		return d
+	}(), Diff: []byte("relist the tv, swap its host, move the plumber")}
+	if out, err := a.propose(t, e, p6, t2); err != nil || out.Pending == "" {
+		t.Fatalf("p6: %+v %v", out, err)
+	}
+	// The channel: isolating the TV needs no owner now but would after
+	// p6, so it is refused now; b.example is gone after p6.
+	if err := e.Tighten(Op{Kind: IsolateDevice, Device: "tv"}, t2+1); !errors.Is(err, ErrNeedsOwner) {
+		t.Errorf("isolating a TV that p6 relists: %v", err)
+	}
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: "b.example"}, t2+1); !errors.Is(err, ErrPending) {
+		t.Errorf("removing a host p6 drops: %v", err)
+	}
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "speaker", Host: "c.example"}, t2+1); err != nil {
+		t.Errorf("a step that carries over: %v", err)
+	}
+	// The owner narrows the plumber to 1000-1200: signed, but p6's window
+	// does not contain it, so it is refused now, and its version is spent.
+	p7 := Proposal{Doc: func() Document {
+		d := e.Current()
+		d.Version = 7
+		rule(&d, "plumber").ToMS = 1200
+		return d
+	}(), Diff: []byte("plumber until 1200")}
+	sig7 := sign(t, a, owner, p7)
+	if _, err := e.Propose(p7, sig7, t2+2); !errors.Is(err, ErrPending) {
+		t.Errorf("a signed narrowing p6 would undo: %v", err)
+	}
+	if _, err := e.Propose(p7, sig7, t2+2); !errors.Is(err, ErrNotRising) {
+		t.Errorf("the refused narrowing at once again: %v", err)
+	}
+	// One that does carry over: cut the lock's cloud is already done, so
+	// isolate the camera.
+	p8 := Proposal{Doc: func() Document { d := e.Current(); d.Version = 8; dev(&d, "cam").Isolated = true; return d }(), Diff: []byte("isolate the camera")}
+	if out, err := a.propose(t, e, p8, t2+3); err != nil || !out.Applied {
+		t.Fatalf("a signed tightening that carries over: %+v %v", out, err)
+	}
+	if e, err = Open(owner, store); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Propose(p7, sig7, t2+4); !errors.Is(err, ErrNotRising) {
+		t.Errorf("the refused narrowing again: %v", err)
+	}
+	if _, err := e.Tick(t2 + Wait); err != nil {
+		t.Fatal(err)
+	}
+	cur = e.Current()
+	if tv := dev(&cur, "tv"); tv.Everyday || tv.Isolated || !slices.Equal(tv.Allow, []string{"a.example", "x.example"}) {
+		t.Errorf("tv after p6: %+v", tv)
+	}
+	if !dev(&cur, "cam").Isolated || slices.Contains(dev(&cur, "speaker").Allow, "c.example") || cur.Version != 8 {
+		t.Errorf("a step taken during the wait did not carry over: %+v", cur)
+	}
+	if r := rule(&cur, "plumber"); r.FromMS != 1500 || r.ToMS != 3000 {
+		t.Errorf("plumber after p6: %+v", r)
+	}
+	if e, err = Open(owner, store); err != nil || !reflect.DeepEqual(e.Current(), cur) {
+		t.Fatalf("restart after p6: %v", err)
+	}
+	if err := e.Tighten(Op{Kind: RemoveDestination, Device: "tv", Host: "a.example"}, t2+Wait); !errors.Is(err, ErrNeedsOwner) {
+		t.Errorf("the relisted tv tightened from the channel: %v", err)
 	}
 }
 
@@ -504,13 +586,14 @@ func TestExportRestoresAndHoldsNoSecret(t *testing.T) {
 	}
 
 	var ex Export
-	if json.Unmarshal(b, &ex); ex.Base == nil || len(ex.Signed) != 1 {
-		t.Fatalf("the export holds %d signed steps and base %v, want the base and the camera's isolation", len(ex.Signed), ex.Base != nil)
+	if json.Unmarshal(b, &ex); ex.Base == nil || len(ex.Steps) != 2 || ex.Steps[1].Signed == nil {
+		t.Fatalf("the export: base %v, %d steps; want the base, the cloud cut and the camera's signed isolation", ex.Base != nil, len(ex.Steps))
 	}
 	var x any
 	json.Unmarshal(b, &x)
 	allowed := map[string]bool{
-		"base": true, "signed": true, "current": true, "key": true, "doc": true, "diff": true,
+		"base": true, "steps": true, "seq": true, "op": true, "signed": true, "prev": true, "key": true, "doc": true, "diff": true,
+		"kind": true, "device": true, "host": true, "pair": true, "a": true, "b": true, "rule": true, "from_ms": true, "to_ms": true,
 		"root": true, "links": true, "owner": true, "clerk": true, "verbs": true, "serial": true, "sig": true,
 		"alg": true, "rp_id": true, "point": true,
 	}
@@ -546,6 +629,29 @@ func TestExportRestoresAndHoldsNoSecret(t *testing.T) {
 	}
 	if _, err := ReadExport(newAuthenticator(t, rp).Public(), b); err == nil {
 		t.Error("an export read against another owner")
+	}
+	// What ReadExport returns is derived from what it verified: a core
+	// serving the backup cannot change it (delta L3 item 1).
+	for name, f := range map[string]func(x *Export){
+		"a widened base": func(x *Export) {
+			x.Base.Doc, _ = Encode(edit(1, func(d *Document) { d.Destinations = append(d.Destinations, "evil.example") }))
+		},
+		"a forged signed step":       func(x *Export) { x.Steps[1].Signed.Diff = []byte("not what the owner saw") },
+		"a signed step's op swapped": func(x *Export) { x.Steps[1].Op = Op{Kind: IsolateDevice, Device: "lock"} },
+		"an unsigned loosening step": func(x *Export) { x.Steps[0].Op = Op{Kind: "allow-cloud", Device: "cam"} },
+		"an unsigned safety step":    func(x *Export) { x.Steps[0].Op = Op{Kind: IsolateDevice, Device: "cam"} },
+		"steps out of order":         func(x *Export) { x.Steps[0], x.Steps[1] = x.Steps[1], x.Steps[0] },
+	} {
+		var bad Export
+		json.Unmarshal(b, &bad)
+		f(&bad)
+		bb, _ := json.Marshal(bad)
+		if _, err := ReadExport(owner, bb); err == nil {
+			t.Errorf("%s: read back", name)
+		}
+	}
+	if _, err := ReadExport(owner, append(slices.Clone(b[:len(b)-1]), []byte(`,"current":{}}`)...)); err == nil {
+		t.Error("an export with a document of the core's own: read back")
 	}
 
 	// A fresh enforcer, same owner: the export restores only as a new
@@ -734,6 +840,9 @@ func TestTamperedStoreRefused(t *testing.T) {
 		"a lowered spent version":                    func(st *state) { st.Spent = 0 },
 		"a pending change with another diff":         func(st *state) { st.Pending[0].Diff = []byte("not what the owner saw") },
 		"two pending changes":                        func(st *state) { st.Pending = append(st.Pending, st.Pending[0]) },
+		"spent below the version in force":           func(st *state) { st.Pending, st.Spent = nil, 1 },
+		"a pending change after the last step":       func(st *state) { st.Pending[0].After = st.Seq + 1 },
+		"an unsigned step with a prev":               func(st *state) { st.Steps[0].Prev = st.Steps[1].Prev },
 	} {
 		var st state
 		json.Unmarshal(good, &st)
@@ -743,6 +852,32 @@ func TestTamperedStoreRefused(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	// A step the pending loosening could not carry: the loosening puts the
+	// TV back on the list, and an unsigned step isolates it.
+	{
+		var st state
+		json.Unmarshal(good, &st)
+		d, _ := Decode(st.Pending[0].Doc)
+		d.Version = 9
+		dev(&d, "tv").Everyday = false
+		p := Proposal{Doc: d, Diff: []byte("relist the tv")}
+		r, _ := p.Root(owner)
+		doc, _ := Encode(d)
+		st.Pending[0].Signed = Signed{Key: key.AttachRoot(r, a.Sign(key.RootMsg(r))), Doc: doc, Diff: p.Diff}
+		st.Pending[0].ID = r.Serial
+		st.Spent = 9
+		store.b, _ = json.Marshal(st)
+		if _, err := Open(owner, store); err != nil {
+			t.Fatalf("the re-signed pending change alone: %v", err)
+		}
+		st.Seq++
+		st.Steps = append(st.Steps, Step{Seq: st.Seq, Op: Op{Kind: IsolateDevice, Device: "tv"}})
+		store.b, _ = json.Marshal(st)
+		if _, err := Open(owner, store); !errors.Is(err, ErrCorrupt) {
+			t.Errorf("a step the pending loosening cannot carry: %v", err)
+		}
+	}
+
 	store.b = good
 	if _, err := Open(newAuthenticator(t, rp).Public(), store); !errors.Is(err, ErrCorrupt) {
 		t.Errorf("another owner's state: %v", err)
