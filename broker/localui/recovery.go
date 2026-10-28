@@ -465,7 +465,7 @@ func init() {
 {{if eq .Step "tap"}}
 <h2>Tap your hardware key</h2>
 <p>Your new card is confirmed but not in effect yet. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
-<p>From: <span class="mono">{{if .Old}}{{.Old}}{{else}}none (this box has no backup key yet){{end}}</span><br>To: <span class="mono">{{.Next}}</span></p>
+<p>From: <span class="mono">{{if .Old}}{{.Old}}{{else}}none (I have no backup key yet){{end}}</span><br>To: <span class="mono">{{.Next}}</span></p>
 <form method="post" action="/recovery/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="rotate"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key to replace it</button></p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="cancel"><button class="plain">Cancel</button></form>
