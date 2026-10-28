@@ -24,14 +24,14 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Scope:** `broker/decoy/` (new), `broker/decoy/match/` (new), `broker/browser/filter.go` (imports the moved patterns), `tools/risk_tier.py` (one line; a gate file, so this PR also owes a separate Security accept, OPERATING §7).
 **Builds:** the table (value, kind, destination, placement), its generation at first boot from the same generators that make real entries, its sealed storage and its first-boot log event (decision 3), and the matcher over bytes and destinations.
 **Acceptance tests:**
-1. KRN-12: `decoy::TestDecoyIndistinguishable`: for each kind, generated decoys and real entries pass the same format checks and a two-sample test on length and character classes finds no difference. Catches a decoy an intruder can skip.
+1. KRN-12: `decoy::TestDecoyIndistinguishable`: for each kind, generated decoys and real entries pass the same format checks and a two-sample test on length and character classes finds no difference. It covers values only: destinations point into the enforcer's public range by design (SPEC KRN-12 Limit). Catches a decoy value an intruder can skip.
 2. KRN-12: `decoy::TestTableSealedAndReplayed`: the table is readable only through the sealed store, and replaying the log gives the same table and the same trips. Catches a public table or a nondeterministic trip.
 3. CLK-4: `match::TestTableAndPatterns`: every table value and every existing CLK-4 pattern matches, split across two writes too; random high-entropy text without a table entry does not trip. Catches a lost CLK-4 case or a false trip.
 **Size:** about 90k, tier A, strongest model. **Depends on:** #3761 and the D-232 row merged.
 
 ### DECOY-b (#3763): kernel trips and the response (KRN-12 Trips, Response)
 
-**Scope:** `broker/kernel/` (trip entry, refusal lookup, outbound-path match, response, resume), `broker/kernel/key/` only if the refusal needs a typed reason. Trusted-core growth: a one-row DECISIONS PR naming this slice's PR and citing D-232 merges first, then the PR body carries `Trusted-core: <that row>` (D-159; `tools/trusted_base.py` accepts only a row naming the PR itself).
+**Scope:** `broker/kernel/` (trip entry, refusal lookup, outbound-path match, response, resume), `broker/kernel/key/` only if the refusal needs a typed reason, and `tools/trusted_core.txt` (the `known` lines for the kernel's import of `broker/decoy/`). Trusted-core growth, here and in any slice that touches a core root (DECOY-e's `broker/clerk/seal/` included): a one-row DECISIONS PR naming this slice's PR and citing D-232 merges first, then the PR body carries `Trusted-core: <that row>` (D-159; `tools/trusted_base.py` accepts only a row naming the PR itself).
 **Builds:** a `trip` log entry; a refused key that is in the table logs a trip; the kernel's outbound path runs the matcher; a trip pauses the keys of its scope (KEY-6's pause), stops planning, and queues one fixed-template security text; a honey-key trip stops only the citing planner session; a resume of a trip's pause needs a passkey assertion (KEY-4), a texted RESUME is refused with fixed wording.
 **Acceptance tests:**
 1. KRN-12: `kernel::TestHoneyKeyTripsSessionOnly`. Catches a careless planner stopping the box, or a honey key that authorizes.
@@ -43,7 +43,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 ### DECOY-c (#3764): the edge (KRN-12 Placement, Trips, Silence)
 
 **Scope:** `broker/edgelink/` (matcher on the core side of the link, heartbeat kind), the edge's image profile under `image/` (placements as data).
-**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
+**Builds:** the matcher on everything the core sends to the edge except one placement kind that only the kernel sends, at enrolment; the edge's dotfiles and jackpot files written from the table through that kind, and the edge wallet seed sent in it outside the log (the log records its hash only, KRN-12 Outside canaries), again at every re-enrolment of a replaced edge; a signed heartbeat from the edge each interval, a missed one alarmed on the core.
 **Acceptance tests:**
 1. KRN-12: `edgelink::TestDecoyToEdgeTrips`: a decoy in any kind but the kernel's placement kind trips; enrolment and re-enrolment after a restore trip nothing. Catches a guest's query smuggling a decoy out, or a false trip at every enrolment.
 2. KRN-12: `edgelink::TestHeartbeatSilenceAlarms`: two missed beats raise one alarm, a late beat clears nothing without the log saying so. Catches a killed edge going unseen.
