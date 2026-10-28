@@ -118,11 +118,15 @@ const (
 	// fixes the GPS cross-check weighs (part b, VIS-A24). It is never
 	// fused, zoned or counted.
 	Drone Class = "drone"
+	// Warm is a body warmer than its surroundings on a thermal frame,
+	// kind unknown: the thermal stream finds heat, and the visible
+	// stream and the drone say what it is (part e, VIS-A29).
+	Warm Class = "warm"
 )
 
 // classes is the whole list, in order; unexported, so no caller can widen
 // it.
-var classes = []Class{Person, Vehicle, Dog, Cat, Bird, Deer, Fox, Coyote, Bear, UnknownAnimal, Drone}
+var classes = []Class{Person, Vehicle, Dog, Cat, Bird, Deer, Fox, Coyote, Bear, UnknownAnimal, Drone, Warm}
 
 // Classes returns the fixed list of classes.
 func Classes() []Class { return append([]Class(nil), classes...) }

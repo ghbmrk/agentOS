@@ -64,6 +64,11 @@ var (
 // the runtime.
 var ErrNoFace = errors.New("not exactly one clear face")
 
+// ErrNoModel is a Runtime's answer to an op its build has no model for
+// (part e1 has no face or sound model): the call is Unavailable, but the
+// load stands, so asking for it never reloads the detector.
+var ErrNoModel = errors.New("no model for this op in this build")
+
 // Config is the service's settings, from its flags.
 type Config struct {
 	// Concurrent bounds the requests whose payload is held or whose
@@ -362,6 +367,10 @@ func call[T any](s *service, on loaded, release func(), run func() (T, error), c
 		case errors.Is(r.err, ErrNoFace):
 			// An answer about the frame, not a failure of the runtime.
 			return zero, ErrNoFace
+		case errors.Is(r.err, ErrNoModel):
+			// An answer about this build, not a failure either.
+			fmt.Fprintln(s.log, "vision: no model for this op")
+			return zero, ErrNoModel
 		case r.err != nil:
 			err = errCrashed
 		case check(r.v) != nil:

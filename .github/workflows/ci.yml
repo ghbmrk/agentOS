@@ -269,6 +269,16 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
+      - name: The vision service's ONNX Runtime build, its real-runtime tests compiled (VIS-models, #3515)
+        # Default builds link no runtime; -tags vision_onnx links ONNX Runtime's Go binding,
+        # which loads the pinned library only at run time. The real tests need the pinned
+        # library, detector and scene set, so vision-real.yml runs them; here they compile,
+        # and the tagged build's own tests run without the library.
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go vet -tags vision_onnx,vision_real ./cmd/agentos-vision
+          go test -count=1 -tags vision_onnx ./cmd/agentos-vision
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"

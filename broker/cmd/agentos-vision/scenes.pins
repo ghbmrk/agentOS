@@ -1,0 +1,9 @@
+# The scene set the real detector's recall is recorded on (TestRealRuntimeDetect;
+# ASSUMPTIONS VIS-A30): COCO val2017 mini-500 (annotations CC-BY 4.0, images
+# under their Flickr licences), fetched by .github/workflows/vision-real.yml
+# at a fixed revision and never committed. Each line: name, value.
+revision  6c5d8d10dab92cf6f2cd476e1d5509ab5786cb88
+base  https://huggingface.co/datasets/LibreYOLO/coco-val2017-mini500/resolve
+instances_sha256  31c8e48b3e0bc957da945ad43697f8d519d7aaeb5971cef19e4cfaa4a8423a56
+# sha256 of `sha256sum` over the 500 images, in name order
+images_sha256  c2d52d03c4eee5956fcf9519259bdf2150822ebfee3078899f95622c771ed334
