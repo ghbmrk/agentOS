@@ -5,11 +5,14 @@ package camera
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -210,61 +213,95 @@ func TestDecodeFormatMatchesDecoder(t *testing.T) {
 
 // TestClerkDoesNotLinkDecoder: no file of the clerk links the sandbox's
 // decoder, so no stream payload is decoded in the trusted base (design
-// point 3); and the decoder links nothing that reaches a network,
+// point 3); and the decoder binary links nothing that reaches a network,
 // another process or memory outside Go (NET-2: no network in the
-// sandbox, by its imports as well as its namespace). The one exception is
-// cgo in camdecode/h264.go, the libavcodec-tagged file that links the
-// pinned H.264-only libavcodec (image/libavcodec.sh): configured with
-// --disable-network, it reaches no network by its build, and the
-// sandbox's namespace stops any that would. Every other file of both
-// sandbox directories is refused "C", and neither directory may hold a
-// source the go tool compiles or links besides Go (.c, .s, .S, .syso, ...;
-// only .go and .md files), so no further C or assembly enters unseen.
+// sandbox, by its build as well as its namespace). The decoder side is
+// checked on what the go tool links, untagged and with image/camdecode.sh's
+// tags: no net, os/exec or plugin anywhere in the dependency graph; no
+// package outside the standard library but camwire, camdecode and the
+// program; and in those, no unsafe or syscall import and no source but
+// Go, even one a build tag leaves out (.c, .s, .syso, ...). The one
+// exception is camdecode/h264.go's cgo, the libavcodec-tagged file that
+// links the pinned H.264-only libavcodec (image/libavcodec.sh), built
+// with --disable-network and run in the sandbox's namespace.
 func TestClerkDoesNotLinkDecoder(t *testing.T) {
-	check := func(dir string, ok func(file, path string) bool) {
-		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil || len(files) == 0 {
-			t.Fatalf("%s: %v", dir, err)
-		}
-		for _, name := range files {
-			if strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, im := range f.Imports {
-				p, _ := strconv.Unquote(im.Path.Value)
-				if !ok(name, p) {
-					t.Errorf("%s imports %s", name, p)
-				}
-			}
-		}
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("clerk: %v", err)
 	}
-	check(".", func(_, p string) bool { return !strings.Contains(p, "camdecode") })
-	forbidden := []string{"net", "os/exec", "plugin", "unsafe", "syscall"}
-	cgo := filepath.Join("..", "..", "cmd", "agentos-camdecode", "camdecode", "h264.go")
-	inSandbox := func(file, p string) bool {
-		if p == "C" {
-			return file == cgo
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
 		}
-		if strings.HasPrefix(p, "net/") || slices.Contains(forbidden, p) {
-			return false
-		}
-		return !strings.Contains(p, ".") || p == "github.com/ghbmrk/agentos/broker/camwire" ||
-			p == "github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode"
-	}
-	for _, dir := range []string{"../../cmd/agentos-camdecode", "../../cmd/agentos-camdecode/camdecode"} {
-		check(dir, inSandbox)
-		entries, err := os.ReadDir(dir)
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, e := range entries {
-			if ext := filepath.Ext(e.Name()); !e.IsDir() && ext != ".go" && ext != ".md" {
-				t.Errorf("%s holds %s: the decoder's only non-Go code is h264.go's cgo", dir, e.Name())
+		for _, im := range f.Imports {
+			if p, _ := strconv.Unquote(im.Path.Value); strings.Contains(p, "camdecode") {
+				t.Errorf("%s imports %s", name, p)
 			}
+		}
+	}
+
+	const mod = "github.com/ghbmrk/agentos/broker/"
+	ours := []string{mod + "camwire", mod + "cmd/agentos-camdecode", mod + "cmd/agentos-camdecode/camdecode"}
+	for _, tags := range []string{"", "libavcodec,netgo,osusergo"} {
+		cmd := exec.Command("go", "list", "-e", "-deps", "-json", "-tags="+tags, "../../cmd/agentos-camdecode")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=1", "GOFLAGS=")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list -tags=%q: %v", tags, err)
+		}
+		seen := 0
+		for dec := json.NewDecoder(bytes.NewReader(out)); dec.More(); {
+			var p struct {
+				ImportPath                                       string
+				Standard                                         bool
+				Error                                            *struct{ Err string }
+				Imports, CgoFiles, IgnoredOtherFiles             []string
+				CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles []string
+				SwigFiles, SwigCXXFiles, SysoFiles, EmbedFiles   []string
+			}
+			if err := dec.Decode(&p); err != nil {
+				t.Fatal(err)
+			}
+			where := fmt.Sprintf("tags %q: %s", tags, p.ImportPath)
+			if p.Error != nil {
+				t.Errorf("%s: %s", where, p.Error.Err)
+			}
+			if p.ImportPath == "net" || strings.HasPrefix(p.ImportPath, "net/") || p.ImportPath == "os/exec" || p.ImportPath == "plugin" {
+				t.Errorf("%s is linked", where)
+			}
+			if p.Standard {
+				continue
+			}
+			if !slices.Contains(ours, p.ImportPath) {
+				t.Errorf("%s is linked; the decoder links only camwire and its own packages", where)
+				continue
+			}
+			seen++
+			cgo := []string{}
+			if tags != "" && p.ImportPath == ours[2] {
+				cgo = []string{"h264.go"}
+			}
+			if !slices.Equal(p.CgoFiles, cgo) {
+				t.Errorf("%s has cgo files %v, want %v", where, p.CgoFiles, cgo)
+			}
+			for _, im := range p.Imports {
+				if im == "unsafe" || im == "syscall" || im == "C" && len(cgo) == 0 {
+					t.Errorf("%s imports %s", where, im)
+				}
+			}
+			for _, other := range [][]string{p.IgnoredOtherFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles,
+				p.SFiles, p.SwigFiles, p.SwigCXXFiles, p.SysoFiles, p.EmbedFiles} {
+				if len(other) > 0 {
+					t.Errorf("%s holds %v: the decoder's only non-Go code is h264.go's cgo", where, other)
+				}
+			}
+		}
+		if seen != len(ours) {
+			t.Errorf("tags %q: %d of the decoder's own packages listed, want %d", tags, seen, len(ours))
 		}
 	}
 }
