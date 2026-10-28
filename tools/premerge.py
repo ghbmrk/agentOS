@@ -40,7 +40,8 @@ the newest trusted verdicts marked `ux` and `potency` (one comment may carry bot
 `combined`, each an `accept` whose reviewed diff equals `head`'s. A tier-A diff confined to assurance tooling owes
 `potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts: while it is the newest of
 its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105), until a newer comment supersedes
-it. Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+it. Likewise a verdict comment whose `Record:` line does not parse (a package ID with spaces, a missing line;
+#3611) prints `unparsed-record <kind>` until a newer comment supersedes it. Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -98,6 +99,8 @@ TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
+# A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
+_RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -118,7 +121,8 @@ def verdict(comments, pr, security=False, lens=None):
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
-    `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed."""
+    `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
+    A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
@@ -128,7 +132,10 @@ def verdict(comments, pr, security=False, lens=None):
             marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", body, re.M)
         else:
             marked = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and rec and marked:
+        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not rec:
+            if not _RECORD.search(body):
+                found = ("unparsed", None)
+        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
@@ -403,8 +410,17 @@ def _accepted(v, head, base):
 EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a new comment"
 
 
-def _edited(v):
-    return bool(v) and v[0] == "edited"
+# #3611: a Record line with a spaced package never parsed, so the accept read as absent; name that too.
+UNPARSED = 'unparsed-record {}: Record line must be "Record: PR #{} · package <ID-without-spaces> · head <sha>"'
+
+
+def _named(v, kind, pr):
+    """The named cause a verdict `v` of `kind` never accepts, or None."""
+    if v and v[0] == "edited":
+        return EDITED.format(kind)
+    if v and v[0] == "unparsed":
+        return UNPARSED.format(kind, int(pr))
+    return None
 
 
 def main(argv):
@@ -420,7 +436,7 @@ def main(argv):
             base, args = args[1], args[2:]
         v = verdict(comments, pr)
         if v is None or v[0] != "accept":
-            print("no-verdict" if v is None else EDITED.format("l3") if _edited(v) else "not-accepted")
+            print("no-verdict" if v is None else _named(v, "l3", pr) or "not-accepted")
             return 1
         head = args[0] if args else "HEAD"
         changed = compare(".", v[1], head, base)
@@ -430,16 +446,18 @@ def main(argv):
         files = mark_range(".", base, head)
         owed = {x: verdict(comments, pr, lens=x) for x in lenses_owed(files)}
         lenses = [x for x, lv in owed.items() if not _accepted(lv, head, base)]
-        if any(_edited(owed[x]) for x in lenses):
-            print(EDITED.format(",".join(x for x in lenses if _edited(owed[x]))))
-            return 1
+        for state in ("edited", "unparsed"):
+            hit = [x for x in lenses if owed[x] and owed[x][0] == state]
+            if hit:
+                print(_named((state,), ",".join(hit), pr))
+                return 1
         if lenses:
             print("needs-lens " + ",".join(lenses))
             return 1
         gate = mark_paths(files)
         sec = verdict(comments, pr, security=True)
         if gate and not _accepted(sec, head, base):
-            print(EDITED.format("security") if _edited(sec) else "needs-security " + " ".join(gate))
+            print(_named(sec, "security", pr) or "needs-security " + " ".join(gate))
             return 1
         print("same")
         return 0

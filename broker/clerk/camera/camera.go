@@ -74,9 +74,12 @@ type Step struct {
 }
 
 // FrameSink takes each video and thermal frame, payload unparsed: the
-// decoder's feed (part b). An error ends the connection.
+// decoder's feed (part b). An error ends the connection. Cut drops what
+// the sink holds of a camera's frames, and returns once none of them can
+// come out of it; the clerk calls it on every owner change (DEV-7).
 type FrameSink interface {
 	Frame(camera string, f camwire.Frame) error
+	Cut(camera string)
 }
 
 // Backoff bounds the wait between dials of a node that is not streaming.
@@ -140,7 +143,8 @@ type Clerk struct {
 type node struct {
 	// deliver is held across a frame's check and its hand-off to the sink,
 	// and by every owner change, so no frame reaches the sink once
-	// SetCapture, Repin or Remove has returned. Taken before c.mu.
+	// SetCapture, Repin or Remove has returned, and none the sink took
+	// before comes out of it (FrameSink.Cut). Taken before c.mu.
 	deliver sync.Mutex
 	pin     Node
 	off     bool
@@ -255,14 +259,17 @@ func (c *Clerk) change(id string, fn func(*node)) error {
 	n.deliver.Lock()
 	defer n.deliver.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.nodes[id] != n {
+		c.mu.Unlock()
 		return ErrUnknown
 	}
 	fn(n)
 	if n.cancel != nil {
 		n.cancel()
 	}
+	c.mu.Unlock()
+	// Outside c.mu: the sink may raise events while it stops.
+	c.cfg.Frames.Cut(id)
 	return nil
 }
 

@@ -131,7 +131,7 @@ func TestCardBoxMarksTheCodesVoid(t *testing.T) {
 	f, u := newFakeUnlock(t)
 	void := &CodesVoid{}
 	box := CardBox(u, change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")},
-		&change.MemStore{}, void)
+		&change.MemStore{}, void, testAuthority())
 	f.set("/card/reset", 200, map[string]any{"ok": true})
 	f.set("/card/provision", 200, map[string]any{"ok": true})
 	if box.Reset() != nil || box.Card.Provision(&card.Card{}) != nil || void.Take() {
@@ -162,7 +162,7 @@ func newVoidRig(t *testing.T) *voidRig {
 	t.Helper()
 	vr := &voidRig{cardRig: &cardRig{rig: newRig(t)}, void: &CodesVoid{}}
 	var err error
-	vr.step, err = firstboot.NewCardStep(&change.MemStore{}, card.DisplayConfig{
+	vr.step, err = firstboot.NewCardStep(&change.MemStore{}, card.DisplayConfig{Authority: testAuthority(),
 		Generate: func(rd io.Reader) (*card.Card, error) {
 			c, err := card.Generate(rd)
 			if err == nil {

@@ -574,3 +574,44 @@ func TestSweepFollowsNoLink(t *testing.T) {
 		t.Fatal("sweep kept the link")
 	}
 }
+
+// REQ: DEV-7
+// TestSweepDeletesWhateverTheDirMode: a camera directory opened to other
+// uids (chmod 0755) still has its expired capture deleted, by the sweep and
+// when the retention is removed; a segment is not written into it.
+func TestSweepDeletesWhateverTheDirMode(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, time.Minute)
+	r.feed(t, testID, 3, time.Second)
+	if err := r.s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(r.dir, testID)
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.feed(t, testID, 3, time.Second)
+	if err := r.s.Flush(); !errors.Is(err, ErrWrite) {
+		t.Fatalf("segment written into an open directory: %v", err)
+	}
+	r.clk.add(time.Hour)
+	if err := r.s.Sweep(); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if names, _ := r.files(t); len(names) != 0 {
+		t.Fatalf("expired, still on disk: %q", names)
+	}
+	// Retention removed: the files and the directory go with the key.
+	r.s.Add("garage", time.Hour)
+	r.feed(t, "garage", 3, time.Second)
+	r.s.Flush()
+	if err := os.Chmod(filepath.Join(r.dir, "garage"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.SetRetention("garage", 0); err != nil {
+		t.Fatalf("retention removed: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(r.dir, "garage")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retention removed, directory kept: %v", err)
+	}
+}

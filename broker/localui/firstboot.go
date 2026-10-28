@@ -52,8 +52,10 @@ func (v *CodesVoid) Take() bool {
 // provision and the unconfirmed card's reset go to the vault process over
 // the unlock socket (egress K21, K22), and either answer that voids the
 // code generator sets void. claimStore holds the claim state a seller
-// sealed (claim.StatePath); latch is the card step's latch.
-func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, void *CodesVoid) firstboot.BoxConfig {
+// sealed (claim.StatePath); latch is the card step's latch. authority is
+// the page authority's certificate (PageTLS.Authority), which the card
+// prints; nil holds the card step (firstboot.ErrNoAuthority, HW-1).
+func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, void *CodesVoid, authority []byte) firstboot.BoxConfig {
 	return firstboot.BoxConfig{
 		Claim: claim.Config{Store: claimStore},
 		Latch: latch,
@@ -66,7 +68,7 @@ func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, voi
 			}
 			return err
 		},
-		Card: card.DisplayConfig{Provision: func(c *card.Card) error {
+		Card: card.DisplayConfig{Authority: authority, Provision: func(c *card.Card) error {
 			// A background context with a limit, as the rotation's
 			// commit (L38): a phone that drops mid-provision cannot cut
 			// a slot write short.

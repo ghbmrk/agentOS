@@ -31,7 +31,7 @@ func (x *rotRig) Display() *card.Display { x.mu.Lock(); defer x.mu.Unlock(); ret
 func newRotPageRig(t *testing.T, signIn bool) *rotRig {
 	t.Helper()
 	x := &rotRig{rig: newRig(t)}
-	d, err := card.NewDisplay(card.DisplayConfig{
+	d, err := card.NewDisplay(card.DisplayConfig{Authority: testAuthority(),
 		Rotate: &card.Parts{Recovery: true},
 		Generate: func(r io.Reader) (*card.Card, error) {
 			c, err := card.Generate(r)

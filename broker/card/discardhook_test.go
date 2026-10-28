@@ -16,7 +16,8 @@ func hookRig(t *testing.T, fail error) (*Display, *Card, *int) {
 	var gen Card
 	n := 0
 	d, err := NewDisplay(DisplayConfig{
-		Rotate: &Parts{Recovery: true},
+		Rotate:    &Parts{Recovery: true},
+		Authority: testAuthority(t),
 		Generate: func(r io.Reader) (*Card, error) {
 			c, err := Generate(r)
 			if err == nil {

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/change"
-	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
 )
@@ -99,6 +99,7 @@ func (r *rig) settledFellBack(rel *update.Verified) {
 		r.t.Fatalf("fallen-back release scheduled again: %v", err)
 	}
 	r.st().FellBack = nil
+	r.nextDay()
 	r.must(r.a.Schedule(rel, "a2"))
 	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
 		r.t.Fatalf("next update: %v %v", ok, err)
@@ -119,6 +120,7 @@ func (r *rig) admitsNext(rel *update.Verified) {
 	r.t.Helper()
 	r.act.failBoot = false
 	r.restart()
+	r.nextDay()
 	r.must(r.a.Schedule(rel, "a2"))
 	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
 		r.t.Fatalf("next update: %v %v", ok, err)
@@ -268,7 +270,7 @@ func TestFallbackStateSaveFailureKeepsTheObligation(t *testing.T) {
 // Review blocker 2a: the activator took the release but the save that
 // records it failed. The apply is not reported as succeeded: the slot is
 // abandoned and the release stays pending, so a restart in the same boot
-// cannot undo an activation the journal calls done.
+// cannot undo an activation the kernel logs as done.
 func TestHandoverSaveFailureIsNotSuccess(t *testing.T) {
 	r := newRig(t)
 	rel := r.release(1, true)
@@ -277,8 +279,8 @@ func TestHandoverSaveFailureIsNotSuccess(t *testing.T) {
 	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
-	if in := r.intents(); len(in) != 1 || in[0].State == journal.Succeeded {
-		t.Fatalf("journal: %+v", in)
+	if ps := r.plans(); len(ps) != 1 || ps[0].Status != kernel.SFailed {
+		t.Fatalf("plans: %+v", ps)
 	}
 	if r.act.abandoned != 1 || r.act.restarts != 0 {
 		t.Fatalf("activator: %+v", r.act)
@@ -315,7 +317,7 @@ func TestUnabandonedHandoverIsAbandonedByTheNextTick(t *testing.T) {
 		t.Fatalf("in memory: %+v", r.a.st.Applying)
 	}
 	r.state.Fail, r.act.abandonErr, r.act.onInstall = nil, nil, nil
-	if ok, err := r.a.Tick(context.Background()); !ok || err != nil {
+	if ok, err := r.retried(); !ok || err != nil {
 		t.Fatalf("retry: %v %v", ok, err)
 	}
 	if r.act.abandoned != 1 || len(r.act.installed) != 2 {
@@ -573,7 +575,8 @@ func TestOtherRootLineNeedsTheBootRead(t *testing.T) {
 // nothing schedules. Its rollback point names the root that ran, so a
 // fallback of it is judged against the old root. The rig's store checked
 // only release 1, so the store refuses to stage release 2; the applier's
-// part is what is pinned: Schedule and Tick pass it to the journal.
+// part is what is pinned: Schedule and Tick pass it to the kernel, and
+// the clerk saves its rollback point before it stages.
 func TestNextReleaseAfterOtherRootIsAdmitted(t *testing.T) {
 	r, _ := settleOnOldRoot(t)
 	r.restart()
@@ -581,21 +584,26 @@ func TestNextReleaseAfterOtherRootIsAdmitted(t *testing.T) {
 	if _, err := r.a.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	var next *journal.Status
-	for _, st := range r.intents() {
-		if fmt.Sprint(st.Intent.Params["to"]) == "2" {
-			next = &st
+	var next *kernel.PlanState
+	for _, p := range r.plans() {
+		if strings.HasPrefix(p.Plan.ID, "upd:apply:2:") {
+			next = p
 		}
 	}
 	if next == nil {
-		t.Fatalf("release 2 never reached the journal: %+v", r.intents())
+		t.Fatalf("release 2 never reached the kernel: %+v", r.plans())
 	}
-	p := next.Intent.Params
-	if fmt.Sprint(p["adoption"]) != "a2" || fmt.Sprint(p["from"]) != "1" || fmt.Sprint(p["from_usr"]) != strings.Repeat(oldHash, 32) {
-		t.Fatalf("rollback point %v", p)
+	var pt *point
+	for _, st := range r.saves {
+		if st.Applying != nil && st.Applying.To == 2 {
+			pt = st.Applying
+		}
 	}
-	if len(next.Attempts) != 1 || !strings.Contains(next.Attempts[0].Evidence, "checked by another store") {
-		t.Fatalf("not dispatched to the store: %+v", next.Attempts)
+	if pt == nil || pt.Adoption != "a2" || pt.From != 1 || pt.FromUsr != strings.Repeat(oldHash, 32) {
+		t.Fatalf("rollback point %+v", pt)
+	}
+	if next.Status != kernel.SFailed || !strings.Contains(next.Steps[0].Detail, "checked by another store") {
+		t.Fatalf("not dispatched to the store: %+v", next.Steps)
 	}
 }
 
@@ -672,6 +680,7 @@ func twiceUnrecorded(t *testing.T) (*rig, *update.Verified) {
 		if ok, err := r.a.Tick(ctx); ok || err != nil { // settles the last attempt
 			t.Fatalf("cycle %d: %v %v", i, ok, err)
 		}
+		r.nextDay()
 		if err := r.a.Schedule(rel, fmt.Sprintf("a%d", i+1)); err != nil && i < 2 {
 			t.Fatalf("cycle %d: %v", i, err)
 		}
@@ -750,7 +759,7 @@ func TestRecordedHandoverResetsTheUnrecordedCount(t *testing.T) {
 	r.must(r.a.Schedule(rel, "a1"))
 	r.unrecordedAttempt()
 	r.act.failBoot = true
-	if ok, err := r.a.Tick(ctx); !ok || err != nil { // recorded, then falls back
+	if ok, err := r.retried(); !ok || err != nil { // recorded, then falls back
 		t.Fatalf("tick: %v %v", ok, err)
 	}
 	r.restart()
@@ -767,12 +776,14 @@ func TestRecordedHandoverResetsTheUnrecordedCount(t *testing.T) {
 		t.Fatalf("schedule: %v", err)
 	}
 	r.st().FellBack = nil
+	r.nextDay()
 	r.must(r.a.Schedule(rel, "a2"))
 	r.unrecordedAttempt()
 	r.restart()
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
+	r.reconcile()
 	r.must(r.a.Schedule(rel, "a3")) // a2 was dropped across the restart
 	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 4 {
 		t.Fatalf("tick: %v %v, installed %d", ok, err, len(r.act.installed))
@@ -803,7 +814,7 @@ func TestRestartDropsPendingEvenAfterAFailedAbandon(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	r.pol.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
+	r.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
 	r.act.abandonErr = errIO
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
@@ -1060,7 +1071,7 @@ func TestPolicyDropSettlesTheAdoption(t *testing.T) {
 func TestPolicyMovedAtStageSettlesTheAdoption(t *testing.T) {
 	r := newRig(t)
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
-	r.pol.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
+	r.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
 	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
@@ -1139,7 +1150,7 @@ func TestNotHandedAbandonAcrossRestartSettles(t *testing.T) {
 	r := newRig(t)
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
 	r.unrecordedAttempt()
-	if ok, err := r.a.Tick(ctx); !ok || err != nil || len(r.act.installed) != 2 {
+	if ok, err := r.retried(); !ok || err != nil || len(r.act.installed) != 2 {
 		t.Fatalf("same boot: %v %v, installed %d", ok, err, len(r.act.installed))
 	}
 	r.dropsAre()
@@ -1377,9 +1388,9 @@ const (
 //
 // SR3-4f-3 B2: from the save before the install until Installed is
 // saved, the applier is executing. A security withdraw then is refused,
-// but recorded: Execute saves the point as withdrawing, and the same Tick
+// but recorded: execute saves the point as withdrawing, and the same Tick
 // abandons it instead of restarting into it, though the box is free.
-// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+// Mutant: drop the Withdrawing set in execute, and the Tick restarts.
 func TestSecurityWithdrawDuringInstallNeverBoots(t *testing.T) {
 	r := newRig(t)
 	r.must(r.a.Schedule(r.release(1, true), "a1"))
@@ -1405,7 +1416,7 @@ func TestSecurityWithdrawDuringInstallNeverBoots(t *testing.T) {
 // The refusal is saved with the handover: when the same Tick's withdraw
 // fails, then the broker restarts in the same boot, an ordinary release
 // is still not restarted into.
-// Mutant: drop the Withdrawing set in Execute, and the Tick restarts.
+// Mutant: drop the Withdrawing set in execute, and the Tick restarts.
 func TestSecurityWithdrawDuringInstallSurvivesAProcessRestart(t *testing.T) {
 	r := newRig(t)
 	r.must(r.a.Schedule(r.release(1, false), "a1"))
@@ -1431,7 +1442,7 @@ func TestSecurityWithdrawDuringInstallSurvivesAProcessRestart(t *testing.T) {
 	r.withdrawn()
 }
 
-// B3: a handover Execute could not record (not installed, not executing)
+// B3: a handover execute could not record (not installed, not executing)
 // is refused with no Abandon; the next Tick's Resume abandons it, and
 // its release is dropped rather than installed again.
 // Mutant: drop !pt.Installed from the refusal, and the withdraw abandons

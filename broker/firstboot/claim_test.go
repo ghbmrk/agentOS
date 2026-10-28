@@ -51,7 +51,7 @@ func startPreloaded(t *testing.T, dir, bootID string, rnd io.Reader) *claimBoot 
 	}
 	cb := &claimBoot{b: &boot{t: t, dir: dir}}
 	cb.step, err = NewClaimedCard(cl, change.FileStore{Path: filepath.Join(dir, "var", "lib", "agentos", "firstboot-card.json")},
-		card.DisplayConfig{
+		card.DisplayConfig{Authority: testAuthority(t),
 			Rand: rnd,
 			Generate: func(r io.Reader) (*card.Card, error) {
 				cb.generated++

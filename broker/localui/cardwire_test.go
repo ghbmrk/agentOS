@@ -4,6 +4,7 @@ package localui
 
 import (
 	"errors"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -28,7 +29,7 @@ func newCardRig(t *testing.T) *cardRig {
 	t.Helper()
 	cr := &cardRig{rig: newRig(t)}
 	var err error
-	cr.step, err = firstboot.NewCardStep(&change.MemStore{}, card.DisplayConfig{
+	cr.step, err = firstboot.NewCardStep(&change.MemStore{}, card.DisplayConfig{Authority: testAuthority(),
 		Generate: func(rd io.Reader) (*card.Card, error) {
 			c, err := card.Generate(rd)
 			if err == nil {
@@ -182,5 +183,33 @@ func TestFinishWaitsForTheCard(t *testing.T) {
 	}
 	if !errors.Is(r.srv.cfg.Card.Hold(), firstboot.ErrCardPending) {
 		t.Fatal("hold")
+	}
+}
+
+// REQ: HW-1
+//
+// No authority, no card (firstboot OWN-card-ca-3): the card step with no page authority holds
+// setup at the card step, and the page says why in the fixed line instead
+// of a card; the card route shows nothing, and setup's recovery step still
+// refuses.
+func TestTheCardStepWithoutAuthoritySaysWhy(t *testing.T) {
+	cr := &cardRig{rig: newRig(t)}
+	var err error
+	cr.step, err = firstboot.NewCardStep(&change.MemStore{}, card.DisplayConfig{Provision: func(*card.Card) error { cr.made++; return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr.owned = cr.step
+	cr.srv = cr.open(&MemStore{})
+	cr.toCard()
+	if p := html.UnescapeString(cr.get("/setup")); !strings.Contains(p, firstboot.ErrNoAuthority.Error()) || !strings.Contains(p, "Owner Card") {
+		t.Fatalf("the card step does not say why:\n%s", p)
+	}
+	if w := cr.do("GET", "/setup/card", nil); w.Code != http.StatusSeeOther {
+		t.Fatalf("the card route without a card: %d", w.Code)
+	}
+	cr.post("/setup/recovery", url.Values{"stored": {"1"}})
+	if cr.made != 0 || cr.step.Hold() == nil {
+		t.Fatal("setup passed the card step without a card")
 	}
 }
