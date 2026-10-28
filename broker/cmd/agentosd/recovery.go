@@ -175,6 +175,10 @@ func (f *recoveryFlow) Rotate(ctx context.Context, factor string, secret, next, 
 		return localapi.RecoveryDone{}, recoveryCode(err)
 	}
 	word, err := f.Keeper.Rotate(ctx, factor, secret, next, approval)
+	// A lost answer leaves no switch kept, since the keeper may not have
+	// written. The owner's next tap for the same key reaches it again, and
+	// a keeper that wrote answers ok then without writing again
+	// (MIG-4-recovery-r4c), so that tap keeps the switch below.
 	if err != nil {
 		log.Printf("recovery key: the keeper did not answer: %v", err)
 		return localapi.RecoveryDone{}, sockets.Code(localapi.ErrRecoveryUnavailable)
