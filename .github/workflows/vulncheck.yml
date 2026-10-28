@@ -49,10 +49,21 @@ jobs:
           got=$(go version | awk '{print $3}')
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       # Pinned versions; the Go checksum database verifies every module go install fetches.
+      # A Go proxy or checksum database read can fail mid-stream (#3768), so each install is
+      # tried three times; the third failure fails the step, so no scan is ever skipped.
       - name: Install govulncheck and osv-scanner
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
-          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
+          retry() {
+            for t in 1 2 3; do
+              "$@" && return
+              echo "try $t of 3 failed: $*" >&2
+              [ "$t" = 3 ] || sleep $((t * 15))
+            done
+            echo "::error::$* failed 3 times; the scan cannot run (#3768)"
+            return 1
+          }
+          retry go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          retry go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Control (planted vulnerabilities, offline databases)
         run: python3 tools/vulncheck.py control

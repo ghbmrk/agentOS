@@ -94,10 +94,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-forget-follow | KRN-forget-follow: void a rewound reader's queued effects, and hold serving until erased reads answer at start (LOG-4, D-169). | KRN-forget b (#3691) | queued (release; tier A; prerequisite of KRN-forget c #3414) |
 | KRN-pin-audit | KRN-pin-audit: a replay given no pinned roots no longer reports a false divergence on a pinned plan (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | KRN-pin-anchors | KRN-pin-anchors: the pinned key is checked against anchors logged later, and against re-anchors (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
-| DECOY-a | DECOY-a: one decoy table, sealed decoy bit, CLK-4 matcher with the table (KRN-12) | #3761, D-232 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| DECOY-a | DECOY-a: one sealed decoy table, logged at first boot, CLK-4 matcher with the table (KRN-12) | #3761, D-232 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-b | DECOY-b: kernel trips, automatic narrowing, passkey resume (KRN-12) | #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier B; lane primary; brief briefs/DECOY.md) |
+| DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 
 ## Harness and operating model
 
@@ -116,7 +116,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian | Reduce the image's unfixed Debian advisories by dropping packages it does not need; rebuild when Debian ships fixes (EVL-5 findings from TN-vulncheck-2). | #2886 | queued (release; tier A) |
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
 | CODEX-toolsh-outer-proc | CODEX-toolsh-outer-proc: agentos-toolsh fails at random in a pid namespace with an outer /proc (bwrap's /proc lookup); fail-closed. Serves CRED-5, A14 (later; from CODEX-pidns-cause) | CODEX-pidns-cause (#1616) | queued (later; from CODEX-pidns-cause) |
-| CI-vulncheck-install-retry | CI-vulncheck-install-retry: the vulncheck and image-vulncheck jobs retry their osv-scanner and govulncheck installs, failing closed after three tries. | vulncheck (D-137 gate) | building (release; tier A; size S; from #3746 and #3747 CI) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -313,13 +312,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DEVSLOT-root-guard | DEVSLOT-root-guard: the image check refuses any other mount entry at / in a driver unit (DEV-1, UPD-10, D-154) | DEVSLOT-host-unit-2 #3590 | queued(tier A; lane primary; release finding from #3642 Security 6471425724) |
 | DEVSLOT-host-unit-2-tails | DEVSLOT-host-unit-2-tails: test the device file's regular-file guard; fix stale empty-root wording (DEV-1, CLK-1) | DEVSLOT-host-unit-2 #3590 | queued(tier B; lane primary; release findings from #3642 L3 6471380989) |
 | CAM-decode-f2 | CAM-decode-f2: pin h264.go's #cgo lines and includes so the decoder sandbox links only the pinned libavcodec (NET-2; #3640 Security release) | #3640 | queued(tier A; lane primary; release; after #3640) |
-| DRONE-sim-fresh-lock | DRONE-sim-fresh-lock: FreshHeartbeat releases the link's request lock between its tries, so a core return waits one try, not three (NET-2). | DRONE-sim b (#3609) | building (release; tier A; size S; from #3609 Security accept) |
 | ENF-class | ENF-class: device class in the enforcer policy; naming refuses unnamable classes; channel table and heater text by class (NET-2 Safety devices) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF | ENF-e2: device class and ports in the enforcer policy; camera stream path and port-narrowed core and edge rules (NET-2 Device paths, Cameras) | #3661 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-d-preauth | ENF-d-preauth: unauthenticated hellos drop, never pause the enforcer channel (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
-| DECOY-d | DECOY-d: enforcer drop-and-trip rules, core heartbeat, alerts on its own line (KRN-12, NET-2) | #3660, #3661, #3666, #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 
 ## Model routes and the Codex lane
 
@@ -334,6 +332,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | INFER-llama | The llama.cpp runtime adapter for the local inference service, embed only, with a tagged real-runtime test (CAP-13, RES-3, D-230; [brief](briefs/INFER-SVC.md) E1). Needs a session allowing huggingface.co and llama.cpp releases. | #3737 | building (release; tier A; one session) |
 | INFER-image | Ship llama-server and the Apache-2.0 embedding model in the image, pinned by hash, with the agentos-infer user and the service left off until a consumer (CAP-13, RES-2, D-230; [brief](briefs/INFER-SVC.md) E2). Needs a session allowing huggingface.co and llama.cpp releases. | INFER-llama #3654; image/build.sh queue | queued (release; tier A; one session) |
 | INFER-floor | Measure the embedding model on the N95 floor: memory, cold start, embed latency and throughput, against the brief's limits (HW-4, RES-2; [brief](briefs/INFER-SVC.md) E3). | INFER-image #3655; N95 | queued (release; tier A; hardware) |
+| CLK-model-running-deflake | CLK-model-running-deflake: the clerk-model test helper waits for the owner socket by event with a 30 s deadline, not 200 polls of 10 ms. | MIG-4-exit-m1 | queued (later; tier A; size S; from #3769 CI) |
 
 ## Defects and later findings on surviving packages
 
@@ -425,4 +424,6 @@ issue #3741: body has no board-row block
 issue #3742: body has no board-row block
 issue #3757: body has no board-row block
 issue #3771: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3779: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```

@@ -45,37 +45,17 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# DRONE-sim-fresh-lock (#3739, row #3732) touches broker/drone/, which the G2 list does not name
-# (D-198). Remove once #3739 merges.
-exempt-pr 3739
-
-# #3730 (VIS-core b, VIS-track, #3515): broker/vision/ and broker/cmd/agentos-vision/ (one test
-# file), which the G2 list does not name (D-198). Remove once #3730 merges.
-exempt-pr 3730
-
-# #3640 (CAM-decode b2, #3514 part b): broker/cmd/agentos-camdecode/ and image/libavcodec.sh,
-# which the G2 list does not name (D-198). Remove once #3640 merges.
-exempt-pr 3640
-
-# #3697 (ENF-a, #3658): the new broker/enforcer/, plus its import rule in broker/daemon/arc2_test.go
-# and its tools/risk_tier.py line, which the G2 list does not name (D-198). Remove once #3697 merges.
-exempt-pr 3697
-
-# #3703 (ENF-j, #3668): spikes/ENF-radio/ (README.md, run.sh, probe/go.mod, probe/main.go),
-# which the G2 list does not name (D-198). Remove once #3703 merges.
-exempt-pr 3703
-
-# #3705 (MIG-4-exit-m1, #3680): broker/cmd/agentos-clerk-model/, which the G2 list does not name
-# (D-198). Remove once #3705 merges.
-exempt-pr 3705
-
 # #3746 (ENF-b, #3659): broker/enforcer/page/ and broker/enforcer/policy/, which the G2 list does
 # not name (D-198). Remove once #3746 merges.
 exempt-pr 3746
 
-# #3750 (ENF-d, #3660): broker/enforcer/wire/ and broker/enforcer/channel/, which the G2 list does
-# not name (D-198). Remove once #3750 merges.
-exempt-pr 3750
+# #3774 (VIS-core e1, VIS-models, #3515): broker/vision/ (proto.go, ASSUMPTIONS.md) and
+# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3774 merges.
+exempt-pr 3774
+
+# #3754 (ENF-e, #3661): broker/enforcer/nft/ (with its load/ and testdata/), which the G2 list does
+# not name (D-198). Remove once #3754 merges.
+exempt-pr 3754
 
 # Project machinery and records.
 allow .claude/

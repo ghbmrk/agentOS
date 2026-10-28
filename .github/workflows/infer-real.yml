@@ -1,0 +1,76 @@
+name: infer-real
+# INFER-llama (G4, #3654): the llama.cpp adapter against the real llama-server and real model
+# files. The pins are in broker/cmd/agentos-infer/llama.pins. Each file is downloaded, checked
+# against its pin and refused on a mismatch before anything runs; the test then runs the
+# adapter under the tags infer_real and infer_llamacpp. It runs only when the adapter, the
+# service, the protocol or the pins change, or on demand. ci.yml compiles the same tests on
+# every change (go vet -tags infer_real,infer_llamacpp), so a break to them shows there first.
+on:
+  pull_request:
+    paths:
+      - broker/cmd/agentos-infer/**
+      - broker/infer/**
+      - broker/childproc/**
+      - .github/workflows/infer-real.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  GOTOOLCHAIN: local
+jobs:
+  real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Download the pinned release and model, check each hash
+        run: |
+          pins=broker/cmd/agentos-infer/llama.pins
+          pin() { sed -n "s/^$1=//p" "$pins"; }
+          d="$RUNNER_TEMP/llama"
+          mkdir -p "$d"
+          bad=0
+          for k in llama embed; do
+            url=$(pin "${k}_url"); want=$(pin "${k}_sha256")
+            curl -fsSL --retry 3 --retry-delay 5 -o "$d/$k.dl" "$url"
+            got=$(sha256sum "$d/$k.dl" | cut -d' ' -f1)
+            echo "$k: $url"
+            echo "$k: sha256 $got (pinned: $want)"
+            if [ "$got" != "$want" ]; then
+              echo "::error file=$pins::${k}_sha256 pin is '$want'; the download hashes to $got"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ] || exit 1
+          mkdir "$d/server" && tar -xzf "$d/llama.dl" -C "$d/server"
+          server=$(find "$d/server" -type f -name llama-server | head -n 1)
+          [ -n "$server" ] || { echo "no llama-server in the release" >&2; exit 1; }
+          chmod +x "$server"
+          mv "$d/embed.dl" "$d/embed.gguf"
+          {
+            echo "AGENTOS_LLAMA_SERVER=$server"
+            echo "AGENTOS_LLAMA_EMBED_MODEL=$d/embed.gguf"
+            echo "AGENTOS_LLAMA_EMBED_SHA256=$(pin embed_sha256)"
+          } >> "$GITHUB_ENV"
+      - name: llama-server runs here
+        run: '"$AGENTOS_LLAMA_SERVER" --version'
+      - name: The real runtime (embed)
+        working-directory: broker
+        run: |
+          go test -count=1 -timeout 30m -tags infer_real,infer_llamacpp -run 'TestRealRuntime' -v ./cmd/agentos-infer | tee "$RUNNER_TEMP/real.log"
+          # A renamed test or an unset variable must not pass by running nothing.
+          grep -q -- '^--- PASS: TestRealRuntimeEmbed ' "$RUNNER_TEMP/real.log" || { echo "TestRealRuntimeEmbed did not pass" >&2; exit 1; }
