@@ -52,6 +52,10 @@ exempt-pr 3460
 # replaced once #3435 merged (D-198). Remove once #3500 merges.
 exempt-pr 3500
 
+# #3557 (CAM-wire, #3513 part a): the new broker/camwire/, the camera node's wire, which
+# the G2 list does not name (D-198). Remove once #3557 merges.
+exempt-pr 3557
+
 # Project machinery and records.
 allow .claude/
 allow .github/
