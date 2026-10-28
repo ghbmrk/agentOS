@@ -68,7 +68,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Builds:** environment variables, dotfiles and jackpot files in the sandbox and host; decoy root and recovery entries in the sealed store; honey keys in the planner's view; three wallets made at setup, each seed planted at one boundary (the host's jackpot files, never the planner sandbox; the edge's; the sealed store, which every backup carries), receive addresses shown as QR codes in one optional owner-page step, never the seeds.
 **Acceptance tests:**
 1. KRN-12: `place::TestEveryPlacementFromTable`: each placement's bytes are a table entry, wallet seeds aside, each credential-shaped decoy names a destination in the enforcer's decoy range, and each kind on the list is placed. Catches code at a place or a missed place.
-2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page, STATUS, the core's stores outside the sealed-store wallet's own copy, and a backup's contents beyond that copy carry the address only, and no seed is in the planner sandbox. Catches a seed leak the owner pays for.
+2. KRN-12: `wallet::TestSeedNeverLeaves`: the seed appears only in its decoy copies; logs, texts, the owner page, STATUS, the core's stores outside the three decoy copies, and a backup's contents beyond the sealed-store copy carry the address only; a restored host gets a fresh wallet, and no seed is in the planner sandbox. Catches a seed leak the owner pays for.
 3. DEP-3: `wallet::TestSkippedStepCostsNothing`. Catches a required optional step.
 **Size:** about 110k, tier A, strongest model. **Depends on:** DECOY-a (#3762), DECOY-b (#3763), DECOY-c (#3764, the edge's placement path).
 
@@ -78,6 +78,6 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 **Builds:** a scripted intruder search over the sim box in the order KRN-12 lists; per tripwire, time to detect and false trips recorded in the log; a scheduled run (default weekly); STATUS lists a tripwire whose last drill is missing or failed as broken.
 **Acceptance tests:**
 1. KRN-12: `sim::TestDrillTripsEveryPlacement`: every table placement and enforcer decoy address trips within one minute of simulated time at its exit; the wallets are watched by the owner's phone and are not drilled. Catches a dead tripwire.
-2. KRN-12: `sim::TestDrillNoFalseTrips`: an ordinary week of sim tasks trips nothing. Catches an alarm that cries wolf.
+2. KRN-12: `sim::TestDrillNoFalseTrips`: an ordinary week of sim tasks, including a fetched public page that names 169.254.169.254 and the decoy range, trips nothing beyond refusing that step and stopping its one session, and planning goes on. Catches an alarm that cries wolf.
 3. KRN-12: `kernel::TestStaleDrillShowsBroken`. Catches a tripwire trusted without proof.
 **Size:** about 80k, tier A (`broker/kernel/sim/`), strongest model. **Depends on:** DECOY-b to DECOY-e.
