@@ -8,7 +8,6 @@ import (
 	"go/token"
 	"regexp"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -16,10 +15,10 @@ import (
 // words only, so "finding" stays allowed.
 var banned = regexp.MustCompile(`(?i)\b(find|finds|hunt|hunts|detect|detects|detector)\b`)
 
-// ownerTables are the files holding loop 2's and onboarding's owner text:
-// notices, digest and STATUS lines, and the LOOP-0 defaults line.
-// agentosd no longer wires loop 2, so it holds none (MIG-4-untrusted-learn).
-var ownerTables = []string{"secure.go", "report.go", "plainname.go", "settings.go", "scheduler.go"}
+// ownerTables are the files holding loop 2's owner text: the plain names
+// of findings and the settings help. Loop 2's notices, digest and STATUS
+// lines went with the Guard and the change pipeline (#2785).
+var ownerTables = []string{"plainname.go", "settings.go"}
 
 // scanWording returns every string literal in src that uses the banned
 // vocabulary.
@@ -53,8 +52,5 @@ func TestOwnerWordingNeverClaimsDetection(t *testing.T) {
 	planted := "package loops\nconst a = \"Loop 2 detects attacks.\"\nconst b = \"Security finding on x.\"\n"
 	if bad := scanWording(t, "planted.go", planted); len(bad) != 1 || bad[0] != "Loop 2 detects attacks." {
 		t.Fatalf("planted scan: %q", bad)
-	}
-	if line := DefaultsLine(100); !strings.Contains(line, "against known problems and repair what I can") {
-		t.Fatalf("defaults line %q", line)
 	}
 }

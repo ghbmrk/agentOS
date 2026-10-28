@@ -1,27 +1,15 @@
-// Package loops is the spare-capacity scheduler shared by the three
-// autonomous loops (SPEC §11A, LOOP-0 to LOOP-3).
+// Package loops holds what is left of the autonomous loops (SPEC §11A)
+// after the change pipeline's delete (#2785): Loop 2's off-the-shelf
+// probe vocabulary and probes (LOOP-7: canary rounds through ../probecmd,
+// published corpora, tamper and exhaustion rounds), and the parser for
+// the owner's loop settings texts (LOOP-0), which agentosd's learn-state
+// sweep reads.
 //
-// The scheduler runs one unit of loop work at a time, only while the box
-// has spare capacity: nothing in the foreground or accepted classes needs
-// it (RES-1), STOP is not in force, the owner has the loop on (LOOP-0), and
-// the spare AI budget has room (LOOP-2). Work yields when foreground work
-// arrives: Preempt cancels it and waits at most the frozen preemption
-// target, and the preempted unit is offered again later. Spare capacity is
-// split across loops by measured return, value per unit of cost (LOOP-3);
-// a loop that stops producing value gets less, and when no loop has
-// worthwhile work the scheduler sleeps until something new arrives.
-//
-// Loop model calls (counterfactual replay, the clean-room builder) are
-// charged to one dedicated key, the spare envelope, separate from every work budget (LOOP-2, OP-8). Its day cap is an
-// owner setting, applied directly with no journal (HLD-4); every raise needs
-// the owner's passkey (KEY-6), so nothing a loop runs can raise it.
-//
-// Loop 1, which mined the journal for hypotheses, and its Harvester were
-// deleted (#2786 part a, HLD-4: off until it beats the baseline); its
-// builder contract went with loopbuild (#2787).
-//
-// Loop 2's passive checks and finding handling (LOOP-8 to LOOP-10) are
-// Guard, in secure.go. Loop 3 plugs in as a Source. The package uses no inference (ARC-2).
+// The spare-capacity scheduler, the spare envelope and Loop 2's Guard
+// (finding handling, LOOP-8 to LOOP-10) went with the pipeline; the
+// HLD-2 to HLD-4 rebuild is a kernel-interface row. Loop 1 and its
+// Harvester were deleted earlier (#2786 part a). The package uses no
+// inference (ARC-2).
 //
 // Assumptions are listed in ASSUMPTIONS.md next to this file.
 package loops
