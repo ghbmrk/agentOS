@@ -12,6 +12,7 @@ import json
 import pathlib
 import re
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -516,6 +517,37 @@ class WorkflowTest(unittest.TestCase):
         step = wf[wf.index("Known vulnerabilities in main's latest image"):]
         self.assertIn("github.event_name == 'schedule'", step)
         self.assertIn('python3 tools/vulncheck.py image "$d" --check-issues', step)
+
+    def test_install_is_retried_three_times_then_fails(self):
+        # #3768: a Go proxy stream error retries; the third failure fails the step.
+        for wf in (WORKFLOW, IMAGE_WORKFLOW):
+            text = wf.read_text()
+            lines = text[text.index("- name: Install govulncheck and osv-scanner"):].splitlines()[2:]
+            script = "\n".join(l[10:] for l in lines[:lines.index(next(l for l in lines if not l.startswith(" " * 10)))])
+            for fails, ok in ((0, True), (2, True), (3, False)):
+                with self.subTest(workflow=wf.name, fails=fails), tempfile.TemporaryDirectory() as tmp:
+                    d = pathlib.Path(tmp)
+                    (d / "go").write_text(
+                        "#!/bin/sh\n[ \"$1\" = env ] && { echo /gopath; exit; }\n"
+                        f"echo \"$*\" >> {d}/calls\nn=$(wc -l < {d}/calls)\n"
+                        f"[ \"$n\" -gt {fails} ] || {{ echo 'stream error: INTERNAL_ERROR' >&2; exit 1; }}\n")
+                    (d / "sleep").write_text(f"#!/bin/sh\necho $1 >> {d}/slept\n")
+                    for stub in ("go", "sleep"):
+                        (d / stub).chmod(0o755)
+                    (d / "step.sh").write_text(script + "\n")
+                    r = subprocess.run(["bash", "--noprofile", "--norc", "-e", str(d / "step.sh")],
+                                       env={"PATH": f"{d}:/usr/bin:/bin", "GITHUB_PATH": str(d / "path")},
+                                       capture_output=True, text=True)
+                    calls = (d / "calls").read_text().splitlines()
+                    self.assertEqual(r.returncode == 0, ok, r.stderr)
+                    if ok:
+                        self.assertEqual(calls[fails:], ["install golang.org/x/vuln/cmd/govulncheck@v1.8.0",
+                                         "install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1"])
+                        self.assertEqual((d / "path").read_text(), "/gopath/bin\n")
+                    else:
+                        self.assertEqual(len(calls), 3)  # govulncheck three times; nothing after it
+                        self.assertFalse((d / "path").exists())
+                    self.assertEqual(len(((d / "slept").read_text() if fails else "").split()), min(fails, 2))
 
 
 @unittest.skipUnless(shutil.which("govulncheck") and shutil.which("osv-scanner"),
