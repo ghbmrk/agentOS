@@ -1,6 +1,7 @@
 package camnode
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/tls"
 	"errors"
@@ -34,6 +35,17 @@ type Config struct {
 	// Window is how long the first-bundle window stays open after a
 	// button start, by the monotonic clock; zero is FirstBundleWindow.
 	Window time.Duration
+	// Release is the release signer's key the node's image pins (HW-10);
+	// every image manifest must carry its signature.
+	Release ed25519.PublicKey
+	// Slots are the board's A/B root slots; nil refuses every update.
+	Slots Slots
+	// Manifest is the signed manifest the running image was installed
+	// with, from its slot; nil for the factory image.
+	Manifest []byte
+	// Trial reports this boot as the one-shot trial of a staged image,
+	// which Serve marks good once it is up.
+	Trial bool
 	// Log takes fixed-text events; it is never given peer data or key
 	// material. Nil discards them.
 	Log func(event string)
@@ -45,6 +57,11 @@ const (
 	handshakeTimeout = 10 * time.Second
 	writeTimeout     = 10 * time.Second
 	settingsIdle     = 2 * time.Minute
+	// maxConns bounds the connections served at once, so a LAN host
+	// cannot hold handshakes (each costs an element signature) or settings
+	// connections without limit (#3588 item 2). A connection over it is
+	// closed before its handshake.
+	maxConns = 8
 	// FirstBundleWindow bounds the window a button start opens, so a node
 	// reset and left unprovisioned cannot be claimed by a LAN host later
 	// (Security on #3586, finding 1).
@@ -77,7 +94,12 @@ type Node struct {
 	tls   *tls.Config
 	start time.Time
 
+	slots  chan struct{} // one token per connection served (maxConns)
+	settle uint64        // the image counter to raise once Serve starts; 0: none
+	up     chan struct{} // closed once Serve has settled the image
+
 	mu        sync.Mutex
+	staging   bool            // an update is being written
 	bundle    *camwire.Bundle // nil: no owner yet
 	window    bool            // the first-bundle window is open until windowEnd
 	windowEnd time.Time
@@ -93,11 +115,17 @@ func New(cfg Config) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}}
+	n := &Node{cfg: cfg, node: camwire.Fingerprint(pt), start: time.Now(), conns: map[*tls.Conn]role{}, slots: make(chan struct{}, maxConns), up: make(chan struct{})}
 	if n.tls, err = serverConfig(s, n.admits); err != nil {
 		return nil, err
 	}
 	if cfg.Button {
+		if cfg.Trial {
+			return nil, ErrUpdate // no owner to approve the trial image
+		}
+		if err := n.image(); err != nil {
+			return nil, err
+		}
 		if err := cfg.Element.ClearBundle(); err != nil {
 			return nil, err
 		}
@@ -112,7 +140,10 @@ func New(cfg Config) (*Node, error) {
 		n.log("button held: bundle erased, first-bundle window open")
 		return n, nil
 	}
-	return n, n.load()
+	if err := n.load(); err != nil {
+		return n, err
+	}
+	return n, n.image()
 }
 
 // load restores the committed bundle: the stored bytes must hash to the
@@ -193,14 +224,33 @@ func (n *Node) windowOpen() bool { return n.window && time.Now().Before(n.window
 func (n *Node) admits(key [camwire.PointLen]byte) bool { return n.roleOf(key) != roleNone }
 
 // Serve accepts on ln until it fails. ln is the node's one listener, opened
-// by the binary; the node opens nothing else.
+// by the binary; the node opens nothing else. Once listening, it settles
+// the running image (a trial is marked good); a trial that cannot be is
+// returned, so the binary exits and the board returns to the old slot.
 func (n *Node) Serve(ln net.Listener) error {
+	if err := n.settleImage(); err != nil {
+		return err
+	}
+	select {
+	case <-n.up:
+	default:
+		close(n.up)
+	}
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
-		go n.handle(tls.Server(c, n.tls))
+		select {
+		case n.slots <- struct{}{}:
+		default:
+			c.Close()
+			continue
+		}
+		go func() {
+			defer func() { <-n.slots }()
+			n.handle(tls.Server(c, n.tls))
+		}()
 	}
 }
 
@@ -272,9 +322,12 @@ func (n *Node) stream(c *tls.Conn) {
 }
 
 // settings serves the enforcer's channel: a status record on connect and
-// after each bundle applied. Any frame refused ends the connection.
+// after each bundle applied, and image updates. Any frame refused ends the
+// connection. While the first-bundle window is open nothing is sent before
+// a bundle applies, so a LAN host that is not provisioning learns nothing
+// (#3588 item 3).
 func (n *Node) settings(c *tls.Conn, key [camwire.PointLen]byte, first bool) {
-	if n.status(c) != nil {
+	if !first && n.status(c) != nil {
 		return
 	}
 	for {
@@ -283,10 +336,14 @@ func (n *Node) settings(c *tls.Conn, key [camwire.PointLen]byte, first bool) {
 		if err != nil {
 			return
 		}
-		if f.Type != camwire.TypeBundle {
-			// Updates are CAM-server part b2; until then a manifest or an
-			// image chunk ends the connection like any frame refused.
-			n.log("update refused: not served by this build")
+		switch {
+		case f.Type == camwire.TypeManifest && !first:
+			if err := n.update(c, f.Payload); err != nil {
+				n.log("update refused")
+			}
+			return
+		case f.Type != camwire.TypeBundle:
+			n.log("frame refused")
 			return
 		}
 		if err := n.apply(f.Payload, key, first); errors.Is(err, ErrSource) {

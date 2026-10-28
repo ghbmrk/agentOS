@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"reflect"
 	"slices"
@@ -114,7 +115,13 @@ func TestFirstBundleNeedsButton(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := send(c, r.owner.SignBundle(t, r.bundle(3))); err == nil {
+	// Nothing is sent before a bundle applies (#3588 item 3).
+	c.SetReadDeadline(deadline(300))
+	if _, err := readStatus(c); err == nil {
+		t.Error("status sent to a client in the open window")
+	}
+	c.SetDeadline(deadline(5000))
+	if _, err := sendMore(c, r.owner.SignBundle(t, r.bundle(3))); err == nil {
 		t.Error("a first bundle naming another enforcer was taken")
 	}
 	r.provision(3)
@@ -230,7 +237,7 @@ func TestSettingsWithinDeclaredRanges(t *testing.T) {
 // scalar appears in no log line, error or byte the node sends. Revert
 // mutant: an Export method on Element, or logging the signer.
 func TestDeviceKeyNeverExported(t *testing.T) {
-	want := []string{"ClearBundle", "CommitBundle", "Image", "Public", "Settings", "Sign"}
+	want := []string{"ClearBundle", "CommitBundle", "Image", "Public", "RaiseImage", "Settings", "Sign"}
 	var got []string
 	et := reflect.TypeOf((*Element)(nil)).Elem()
 	for i := 0; i < et.NumMethod(); i++ {
@@ -413,4 +420,41 @@ func TestSourceFailureAfterCommit(t *testing.T) {
 	if !slices.Contains(r.logs.lines, "bundle committed, source failed") || slices.Contains(r.logs.lines, "bundle refused") {
 		t.Errorf("log %q", r.logs.lines)
 	}
+}
+
+// TestConnectionCap (#3588 item 2): connections past maxConns are closed
+// before their handshake, so a LAN host holding idle handshakes cannot
+// make the node sign without bound; once they go, the core connects again.
+// Revert mutant: Serve without its token.
+func TestConnectionCap(t *testing.T) {
+	r := newRig(t, true)
+	r.provision(3)
+	var idle []net.Conn
+	for range maxConns {
+		c, err := net.Dial("tcp", r.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, c)
+	}
+	time.Sleep(100 * time.Millisecond) // let the node take them
+	if c, err := r.dial(r.core); err == nil {
+		c.SetReadDeadline(deadline(1000))
+		if _, err := camwire.ReadFrame(c, camwire.ToCore, camwire.Shape{}); err == nil {
+			t.Fatal("a connection past the cap was served")
+		}
+	}
+	for _, c := range idle {
+		c.Close()
+	}
+	waitFor(t, func() bool {
+		c, err := r.dial(r.core)
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		c.SetReadDeadline(deadline(1000))
+		_, err = camwire.ReadFrame(c, camwire.ToCore, camwire.Shape{})
+		return err == nil
+	})
 }
