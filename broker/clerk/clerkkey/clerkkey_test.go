@@ -144,3 +144,40 @@ func TestClerkKeysDeriveApart(t *testing.T) {
 		t.Fatal("Wipe left the key")
 	}
 }
+
+// REQ: CLK-1
+// The kernel's per-clerk key (MAIL-keys): the same root and name give the
+// same key at every start, two clerks' keys differ, neither is the root,
+// and a bad name or an empty root derives nothing. Fails if one clerk's key
+// could open another's slots.
+func TestDeriveGivesEachClerkItsOwnStableKey(t *testing.T) {
+	var root [Len]byte
+	for i := range root {
+		root[i] = byte(0x40 + i)
+	}
+	mail, err := Derive(&root, "mail")
+	if err != nil || mail.Name != "mail" {
+		t.Fatalf("Derive(mail) = %+v, %v", mail, err)
+	}
+	again, _ := Derive(&root, "mail")
+	model, _ := Derive(&root, "model")
+	if again != mail {
+		t.Fatal("the same root and name gave two keys: a restart would open nothing")
+	}
+	if model.Key == mail.Key || mail.Key == root {
+		t.Fatal("two clerks share a key, or a clerk holds the root")
+	}
+	other := root
+	other[0] ^= 1
+	if o, _ := Derive(&other, "mail"); o.Key == mail.Key {
+		t.Fatal("another root gave the same clerk key")
+	}
+	for _, name := range []string{"", "Mail", "mail/x"} {
+		if _, err := Derive(&root, name); !errors.Is(err, ErrKey) {
+			t.Errorf("Derive(%q): %v", name, err)
+		}
+	}
+	if _, err := Derive(&[Len]byte{}, "mail"); !errors.Is(err, ErrKey) {
+		t.Errorf("an empty root derived a key: %v", err)
+	}
+}

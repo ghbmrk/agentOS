@@ -80,6 +80,7 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 	hw := es256(t, "box.example")
 	keys := testKeys()
 	keys.Anchors = []key.PublicKey{anchors[0], hw, anchors[1]}
+	keys.ClerkRoot = [32]byte{7, 7, 7}
 	b, err := keys.Marshal()
 	if err != nil {
 		t.Fatal(err)
@@ -89,13 +90,13 @@ func TestTheHandoffCarriesTheKernelsKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := testCounter()
-	if k.Log != [32]byte{9} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
+	if k.Log != [32]byte{9} || k.ClerkRoot != [32]byte{7, 7, 7} || !k.Head.Equal(headPriv) || len(k.Anchors) != 3 || k.Anchors[0] != anchors[0] || k.Anchors[1] != hw || k.Anchors[2] != anchors[1] ||
 		!bytes.Equal(k.Counter.SRK, want.SRK) || k.Counter.Handle != want.Handle || !bytes.Equal(k.Counter.Name, want.Name) || !bytes.Equal(k.Counter.Auth, want.Auth) {
 		t.Fatalf("keys did not survive the hand-off: %+v", k)
 	}
 	auth := k.Counter.Auth
 	k.Wipe()
-	if k.Head != nil || k.Log != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
+	if k.Head != nil || k.Log != ([32]byte{}) || k.ClerkRoot != ([32]byte{}) || k.Counter.Auth != nil || !bytes.Equal(auth, make([]byte, len(auth))) {
 		t.Fatal("Wipe left keys")
 	}
 }
@@ -117,7 +118,9 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	v4 := bytes.Clone(good)
 	v4[len(handoffTag)-2] = '4' // a v4 hand-off, which carried no page authority
 	v5 := bytes.Clone(good)
-	v5[len(handoffTag)-2] = '5'                          // a v5 hand-off, which carried no link key, first edge or slot
+	v5[len(handoffTag)-2] = '5' // a v5 hand-off, which carried no link key, first edge or slot
+	v6 := bytes.Clone(good)
+	v6[len(handoffTag)-2] = '6'                          // a v6 hand-off, which carried no clerk root key
 	count := len(good) - 2*(2+ed25519.PublicKeySize) - 1 // the anchors' count
 	miscount := bytes.Clone(good)
 	miscount[count] = 3
@@ -138,7 +141,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	dupB = append(dupB, e...)
 	ragged := append(bytes.Clone(good[:len(good)-ed25519.PublicKeySize-2]), 0, 31)
 	ragged = append(ragged, ownerPub[:31]...) // an entry that decodes to no key
-	o := len(handoffTag) + 64                 // the SRK name's length
+	o := len(handoffTag) + 96                 // the SRK name's length
 	srkLong := bytes.Clone(good)
 	srkLong[o] = maxName + 1
 	srkNone := bytes.Clone(good)
@@ -147,7 +150,7 @@ func TestADamagedHandoffIsRefused(t *testing.T) {
 	authShort := bytes.Clone(good)
 	authShort[authLen]--
 	for name, b := range map[string][]byte{
-		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "count": miscount,
+		"empty": nil, "short": good[:len(good)-1], "trailing": extra, "tag": retag, "v2": v2, "v3": v3, "v4": v4, "v5": v5, "v6": v6, "count": miscount,
 		"zero-length entry": zeroLen, "past the end": pastEnd, "duplicate es256": dupB, "no key": ragged,
 		"srk long": srkLong, "srk none": srkNone, "auth miscounted": authShort, "no counter": good[:o],
 		"huge": bytes.Repeat([]byte{1}, maxHandoff+1),
@@ -345,7 +348,7 @@ func TestKernelKeysCarryTheRecipient(t *testing.T) {
 	}
 
 	// The recipient's length sits after the counter's auth value.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32
 	if binary.BigEndian.Uint16(b[o:]) != RecipientLen {
 		t.Fatalf("recipient length not at %d", o)
 	}
@@ -447,7 +450,7 @@ func TestKernelKeysCarryThePageCA(t *testing.T) {
 	}
 
 	// The authority's length sits after the recipient.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + RecipientLen
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + RecipientLen
 	if int(binary.BigEndian.Uint16(b[o:])) != len(ca) {
 		t.Fatalf("authority length not at %d", o)
 	}
@@ -536,7 +539,7 @@ func TestKernelKeysCarryTheLinkKeys(t *testing.T) {
 	}
 
 	// The link key's length sits after the page authority.
-	o := len(handoffTag) + 64 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
+	o := len(handoffTag) + 96 + 1 + 34 + 4 + 1 + 34 + 1 + 32 + 2 + 2 + len(keys.PageCA)
 	if b[o] != ed25519.SeedSize || !bytes.Equal(b[o+1:o+33], link.Seed()) {
 		t.Fatalf("link key not at %d", o)
 	}

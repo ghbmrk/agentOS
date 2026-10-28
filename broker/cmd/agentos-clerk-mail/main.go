@@ -9,18 +9,23 @@
 //	    -kernel-sock /run/agentos-mail/kernel.sock -kernel-uid 980 \
 //	    -owner-sock /run/agentos-mail/owner.sock -owner-uid 0 \
 //	    -planner-sock /run/agentos-mail/planner.sock -planner-uid 982 \
-//	    -imap-conn /run/agentos-imapconn/conn.sock
+//	    -imap-conn /run/agentos-imapconn/conn.sock \
+//	    -reader-sock /run/agentos-reader/reader.sock -reader-uid 984
 //
 // Its key comes from the kernel on descriptor 3 at each start
 // (clerkkey.Key; Mark's option A, #2682 comment 6428111900), and it
 // derives its sealer and its handle secret from it. The owner's anchors, which
 // it checks every view against (D-146), come from a file only root writes,
-// never from the kernel. Every refusal of the process comes before the key is
+// never from the kernel. Its quarantined read (PLN-2) goes over a frame to
+// the reader process on the main side (clerk/readerwire, D-154 rule 4).
+// Every refusal of the process comes before the key is
 // read, so a clerk that cannot start never takes it.
 package main
 
 import (
+	"container/list"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
@@ -30,12 +35,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/clerk/readerwire"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -58,6 +65,8 @@ type config struct {
 	kernelSock, ownerSock, plannerSock string
 	kernelUID, ownerUID, plannerUID    int
 	imapConn                           string // the IMAP connection process's socket; "": no IMAP account
+	readerSock                         string // the reader process's socket; "": no reader, so no mail is classed
+	readerUID                          int
 	// anchorsOwner is the uid the anchors file and its directory must belong
 	// to: root, or the test's own uid in tests; the command line never sets it.
 	anchorsOwner int
@@ -76,6 +85,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.plannerSock, "planner-sock", "", "the planner's socket")
 	fs.IntVar(&c.plannerUID, "planner-uid", -1, "the planner's uid, the only peer on planner-sock")
 	fs.StringVar(&c.imapConn, "imap-conn", "", "the IMAP connection process's socket, one process per session (#3015); empty, an IMAP account is refused")
+	fs.StringVar(&c.readerSock, "reader-sock", "", "the reader process's socket, for the quarantined read; with -reader-uid")
+	fs.IntVar(&c.readerUID, "reader-uid", -1, "the reader process's uid, the only listener the clerk sends a mail's text to")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -90,6 +101,14 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-kernel-uid, -planner-uid and -owner-uid are required; only the owner side's may be root")
 	case c.kernelUID == c.plannerUID || c.kernelUID == c.ownerUID || c.plannerUID == c.ownerUID:
 		return c, errors.New("the kernel, the owner side and the planner each need a uid of their own")
+	case (c.readerSock == "") != (c.readerUID == -1):
+		return c, errors.New("-reader-sock and -reader-uid go together")
+	case c.readerSock != "" && !filepath.IsAbs(c.readerSock):
+		return c, errors.New("-reader-sock must be an absolute path")
+	case c.readerSock != "" && c.readerUID <= 0:
+		return c, errors.New("-reader-uid must be positive: the reader never runs as root")
+	case c.readerSock != "" && (c.readerUID == c.kernelUID || c.readerUID == c.ownerUID || c.readerUID == c.plannerUID):
+		return c, errors.New("the reader needs a uid of its own, apart from the kernel's, the owner side's and the planner's")
 	}
 	return c, nil
 }
@@ -124,7 +143,11 @@ func guard(c config) ([]key.PublicKey, error) {
 	if os.Geteuid() == 0 || os.Getuid() == 0 {
 		return nil, errors.New("agentos-clerk-mail: the mail clerk never runs as root")
 	}
-	if err := procguard.Isolate(c.kernelUID, c.ownerUID, c.plannerUID); err != nil {
+	peers := []int{c.kernelUID, c.ownerUID, c.plannerUID}
+	if c.readerSock != "" {
+		peers = append(peers, c.readerUID)
+	}
+	if err := procguard.Isolate(peers...); err != nil {
 		return nil, err
 	}
 	return readAnchors(c.anchors, c.anchorsOwner)
@@ -174,9 +197,61 @@ func readAnchors(path string, owner int) ([]key.PublicKey, error) {
 	return anchors, nil
 }
 
-// errNoReader is every quarantined read's answer until the reader's frame
-// exists (MAIL-reader-sock): no mail is classed, so the clerk acts on none.
-var errNoReader = errors.New("agentos-clerk-mail: no reader is wired yet")
+// errNoReader is every quarantined read's answer with no -reader-sock: no
+// mail is classed, so the clerk acts on none.
+var errNoReader = errors.New("agentos-clerk-mail: no reader is wired")
+
+// reader is the quarantined read: with no socket it always fails; with one,
+// each call goes to the reader process over its frame, behind a cache.
+func reader(c config) inbox.Ask {
+	if c.readerSock == "" {
+		return func(context.Context, string) (string, error) { return "", errNoReader }
+	}
+	return cache(inbox.Ask(readerwire.Dial(c.readerSock, c.readerUID, readerwire.DefaultTimeout)), cacheMax)
+}
+
+// cacheMax bounds the cache: inbox.DailyCap's mails many times over.
+const cacheMax = 4096
+
+// cache wraps ask in a per-process cache of successful replies, keyed by the
+// prompt's SHA-256 and evicting the least recently used past max entries.
+// Each read re-classes the newest mails, so without it every read would
+// re-send them all to a metered route (CLK-7). A failure is never cached,
+// so the next read asks again; nothing is written to the drive, so a
+// restart asks again too.
+func cache(ask inbox.Ask, max int) inbox.Ask {
+	var mu sync.Mutex
+	lru := list.New()
+	at := map[[sha256.Size]byte]*list.Element{}
+	type entry struct {
+		key   [sha256.Size]byte
+		reply string
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		k := sha256.Sum256([]byte(prompt))
+		mu.Lock()
+		if e, ok := at[k]; ok {
+			lru.MoveToFront(e)
+			r := e.Value.(entry).reply
+			mu.Unlock()
+			return r, nil
+		}
+		mu.Unlock()
+		reply, err := ask(ctx, prompt)
+		if err != nil {
+			return "", err
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := at[k]; !ok {
+			at[k] = lru.PushFront(entry{k, reply})
+			for lru.Len() > max {
+				delete(at, lru.Remove(lru.Back()).(entry).key)
+			}
+		}
+		return reply, nil
+	}
+}
 
 // serve reads the key from keyFile, opens the clerk and serves its three
 // sockets until ctx ends or one stops serving.
@@ -213,7 +288,7 @@ func serve(ctx context.Context, c config, anchors []key.PublicKey, keyFile *os.F
 		Anchors:      anchors,
 		HandleSecret: handles,
 		Sealer:       sealer,
-		Ask:          func(context.Context, string) (string, error) { return "", errNoReader },
+		Ask:          reader(c),
 		// Every name this process resolves, for IMAP, Gmail and the key
 		// records, goes through the learned resolver (DEV-2).
 		Guard: guard,
