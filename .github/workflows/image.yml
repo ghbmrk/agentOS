@@ -152,9 +152,13 @@ jobs:
       - name: Build the inbox slice
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/slice/slice" ./clerk/inbox/cmd/slice
-      - name: Boot test (Secure Boot on), inbox slice and end-to-end run
+      # The device-driver slot's boot probe: a fixture driver under the driver template (#3590).
+      - name: Build the device-driver slot's boot probe
         if: matrix.run == 'a'
-        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: cd broker && for b in bootdriver bootprobe; do CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/devslot/$b" ./clerk/devslot/proc/testdata/$b; done
+      - name: Boot test (Secure Boot on), inbox slice, driver slot and end-to-end run
+        if: matrix.run == 'a'
+        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" DEVSLOT="$RUNNER_TEMP/devslot" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
