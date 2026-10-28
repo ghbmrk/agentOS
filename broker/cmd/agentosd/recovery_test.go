@@ -318,6 +318,40 @@ func TestRecoverySwitchIsRetriedAfterTheKeepersWrite(t *testing.T) {
 	}
 }
 
+// MIG-4-recovery-r4c (BAK-1, brief decision 6): the keeper wrote but its
+// answer was lost, so nothing switches and no switch is kept. The owner's
+// next tap for the same key gets a fresh approval from the kernel, still
+// at the old recipient, and the keeper's ok for a store that already holds
+// the key; the kernel then switches to the new recipient with that
+// approval.
+func TestRecoverySwitchesAfterALostKeeperAnswer(t *testing.T) {
+	was, _ := backup.RecipientFor(bytes.Repeat([]byte{0x3c}, localapi.RecoveryKeyLen))
+	old := was.ID()
+	r := newRotRig(t, old)
+	r.keeper.err = kernelsock.ErrLost
+	if _, err := r.rotate(r.anchors[0], "recovery", testNewKey); code(err) != localapi.ErrRecoveryUnavailable {
+		t.Fatalf("a lost answer: %v", err)
+	}
+	if r.count("recipient") != 0 || r.f.pending != nil {
+		t.Fatal("a lost answer switched the kernel or kept a switch")
+	}
+	r.keeper.err = nil
+	d, err := r.rotate(r.anchors[0], "recovery", testNewKey)
+	if err != nil || !d.Switched || len(r.rk.switched) != 1 || r.f.pending != nil {
+		t.Fatalf("the retry: %+v %v, %d switches", d, err, len(r.rk.switched))
+	}
+	rc, _ := backup.RecipientFor(testNewKey)
+	if len(r.rk.approvals) != 2 || !bytes.Equal(r.keeper.approval, r.rk.approvals[1]) {
+		t.Fatal("the retry did not carry the kernel's fresh approval to the keeper")
+	}
+	if want := append(append(append([]byte{}, rc.X...), rc.EK...), r.rk.approvals[1]...); !bytes.Equal(r.rk.switched[0], want) {
+		t.Fatal("the switch used another recipient or approval")
+	}
+	if !bytes.Equal(r.rk.approvals[1], []byte("approval:"+old+">"+rc.ID())) {
+		t.Fatalf("the retry's approval is %q, not over the kernel's old recipient", r.rk.approvals[1])
+	}
+}
+
 // The factor and the new key reach the keeper alone: never a log line,
 // the kernel, or a refusal, on success and on every failure path.
 func TestRecoveryFactorReachesOnlyTheKeeper(t *testing.T) {
