@@ -748,7 +748,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Pairs":        func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
 		"Standing":     func(d *policy.Document) { d.Standing[0].ToMS++ },
 		"Holds":        func(d *policy.Document) { d.Holds = append(d.Holds, policy.Hold{Device: "tv", Kind: policy.HoldFix}) },
-		"Drone":        func(d *policy.Document) { d.Drone = "ab" },
+		"Drone":        func(d *policy.Document) { d.Drone = strings.Repeat("ab", 32) },
 	}
 	rules := map[string]func(r *policy.StandingRule){
 		"ID": func(r *policy.StandingRule) { r.ID = "other" }, "Device": func(r *policy.StandingRule) { r.Device = "cam" },
@@ -866,5 +866,26 @@ func TestLeafLifeAndRenewal(t *testing.T) {
 	}
 	if _, err := nl.Verify(x509.VerifyOptions{Roots: pool, DNSName: rp, CurrentTime: leaf.NotAfter.Add(time.Hour)}); err != nil {
 		t.Errorf("the renewed leaf: %v", err)
+	}
+}
+
+// NET-4: the only free text a document could carry onto the screen is
+// refused by the policy, and the page escapes it anyway: a drone reference
+// is a hash, and one with a newline or a bidi override never reaches the
+// signed diff raw (Security on #3746, blocker 2).
+func TestDroneShownSafely(t *testing.T) {
+	next := policy.Document{Version: 2, Destinations: []string{"evil.example"},
+		Drone: "0.\nNothing above applies: this only closes something.‮"}
+	if _, err := policy.Encode(next); err == nil {
+		t.Error("the policy took a drone reference that is not a hash")
+	}
+	diff := string(diffText(policy.Classify(policy.Document{}, next), Describe(policy.Document{}, next)))
+	if strings.Contains(diff, "\nNothing above applies") || strings.ContainsRune(diff, '‮') {
+		t.Errorf("drone text reaches the diff raw: %q", diff)
+	}
+	// And a new lock's at-once command shows (blocker 1).
+	lock := policy.Document{Version: 2, Devices: []policy.Device{{ID: "frontdoor", Network: policy.NetDevices, Secure: "unlock"}}}
+	if got := strings.Join(Describe(policy.Document{}, lock), "\n"); !strings.Contains(got, "frontdoor's command unlock apply at once") {
+		t.Errorf("a new device's at-once command is hidden: %s", got)
 	}
 }

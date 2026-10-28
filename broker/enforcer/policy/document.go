@@ -233,7 +233,8 @@ func sorted(s []string) []string {
 }
 
 // check refuses a document with a nameless or duplicate device, an unknown
-// network or label, a pair, rule or hold naming no device, or an empty window.
+// network or label, a drone reference that is not a hash, a pair, rule or
+// hold naming no device, or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	for i, dev := range d.Devices {
@@ -257,6 +258,9 @@ func (d Document) check() error {
 		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
 			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
 		}
+	}
+	if d.Drone != "" && !hash(d.Drone) {
+		return bad("drone policy %q", d.Drone)
 	}
 	for _, h := range d.Destinations {
 		if !name(h) {
@@ -282,6 +286,16 @@ func (d Document) check() error {
 		}
 	}
 	return nil
+}
+
+// hash is a SHA-256 in lowercase hex: all a drone reference may be, so it
+// cannot carry text onto the page's screen or signed diff.
+func hash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil && strings.ToLower(s) == s
 }
 
 // name is a non-empty token with no space, control character or slash, so

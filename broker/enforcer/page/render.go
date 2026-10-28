@@ -99,6 +99,7 @@ func Describe(old, next policy.Document) []string {
 // one to one, so equal names stay equal.
 func plain(d policy.Document) policy.Document {
 	d = clone(d)
+	d.Drone = ascii(d.Drone)
 	for i := range d.Destinations {
 		d.Destinations[i] = ascii(d.Destinations[i])
 	}
