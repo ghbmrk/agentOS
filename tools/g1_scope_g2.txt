@@ -65,6 +65,10 @@ exempt-pr 3557
 # list does not name (D-198). Remove once #3562 merges.
 exempt-pr 3562
 
+# #3583 (CAM-server b1, #3513 part b): the new broker/camnode/, the camera node's server and
+# secure-element driver, which the G2 list does not name (D-198). Remove once #3583 merges.
+exempt-pr 3583
+
 # Project machinery and records.
 allow .claude/
 allow .github/
