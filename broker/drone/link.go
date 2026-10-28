@@ -39,6 +39,10 @@ const (
 	clockSlack = 10 * time.Second
 )
 
+// freshTimeout bounds each half of a FreshHeartbeat try, its anchor and its
+// round trip, so one try holds the request lock for at most twice it.
+const freshTimeout = 3 * time.Second
+
 // dialectRW is the codec for MAVLink's common dialect, which holds every
 // message the key-holder sends or reads; ArduPilot-only messages arrive raw
 // and are ignored.
@@ -86,9 +90,10 @@ type Link struct {
 	// minute past its last saved value (ASSUMPTIONS.md DRONE-sim-4).
 	peerTS atomic.Uint64
 
-	req  sync.Mutex // one request/response exchange at a time
-	in   chan received
-	done chan struct{}
+	req     sync.Mutex   // one request/response exchange at a time
+	waiting atomic.Int32 // callers waiting for req (lockReq), whom FreshHeartbeat lets go first between its tries
+	in      chan received
+	done    chan struct{}
 
 	streams map[byte]uint64 // the aircraft's newest timestamp per signing link id; read loop only
 
@@ -257,9 +262,16 @@ var errTimeout = errors.New("drone: no answer from the aircraft")
 // accepts and that was signed at or after m and since the anchor, within
 // timeout. It anchors the link first if it has no anchor.
 func (l *Link) exchange(m message.Message, match func(message.Message) bool, timeout time.Duration) (message.Message, error) {
-	l.req.Lock()
+	l.lockReq()
 	defer l.req.Unlock()
 	return l.exchangeLocked(m, match, timeout)
+}
+
+// lockReq takes the request lock, counted in waiting while it waits.
+func (l *Link) lockReq() {
+	l.waiting.Add(1)
+	l.req.Lock()
+	l.waiting.Add(-1)
 }
 
 func (l *Link) exchangeLocked(m message.Message, match func(message.Message) bool, timeout time.Duration) (message.Message, error) {
@@ -369,38 +381,71 @@ func (l *Link) LastHeartbeat() (Heartbeat, bool) {
 // aircraft signed after it, as its clock moves up a unit a frame. Unlike a
 // reply at or above the request's timestamp, this holds whichever clock is
 // ahead, so no heartbeat held in transit passes.
+//
+// It holds the request lock for one try at a time (an anchor and a round
+// trip, at most freshTry), and before each further try lets every caller
+// then waiting for the lock go first, so a return waits behind at most one
+// try, however many fail (ASSUMPTIONS.md DRONE-sim-21).
 func (l *Link) FreshHeartbeat() (Heartbeat, error) {
-	l.req.Lock()
-	defer l.req.Unlock()
 	var last error
 	for try := 0; try < 3; try++ {
-		if last = l.anchorLocked(3 * time.Second); last != nil {
-			continue
+		if try > 0 {
+			if err := l.yieldReq(); err != nil {
+				return Heartbeat{}, err
+			}
 		}
-		l.smu.Lock()
-		a := *l.anchor
-		l.smu.Unlock()
-		var got received
-		got, last = l.roundTrip(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
-			Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageHeartbeat{}).GetID())},
-			func(got received, _ uint64) bool {
-				_, ok := got.msg.(*common.MessageHeartbeat)
-				return ok && got.linkID == a.linkID && got.ts > a.ts
-			}, 3*time.Second)
-		if last == nil {
-			hb := got.msg.(*common.MessageHeartbeat)
-			return Heartbeat{CustomMode: hb.CustomMode,
-				Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+		var hb Heartbeat
+		if hb, last = l.freshTry(); last == nil {
+			return hb, nil
 		}
 	}
 	return Heartbeat{}, fmt.Errorf("drone: no fresh heartbeat from the aircraft: %w", last)
+}
+
+// freshTry is one try of FreshHeartbeat, under the request lock: the anchor
+// and the heartbeat it admits are one exchange.
+func (l *Link) freshTry() (Heartbeat, error) {
+	l.lockReq()
+	defer l.req.Unlock()
+	if err := l.anchorLocked(freshTimeout); err != nil {
+		return Heartbeat{}, err
+	}
+	l.smu.Lock()
+	a := *l.anchor
+	l.smu.Unlock()
+	got, err := l.roundTrip(&common.MessageCommandLong{TargetSystem: targetSysID, TargetComponent: targetCompID,
+		Command: common.MAV_CMD_REQUEST_MESSAGE, Param1: float32((&common.MessageHeartbeat{}).GetID())},
+		func(got received, _ uint64) bool {
+			_, ok := got.msg.(*common.MessageHeartbeat)
+			return ok && got.linkID == a.linkID && got.ts > a.ts
+		}, freshTimeout)
+	if err != nil {
+		return Heartbeat{}, err
+	}
+	hb := got.msg.(*common.MessageHeartbeat)
+	return Heartbeat{CustomMode: hb.CustomMode,
+		Armed: hb.BaseMode&common.MAV_MODE_FLAG_SAFETY_ARMED != 0, At: l.now()}, nil
+}
+
+// yieldReq waits, holding nothing, until no caller waits for the request
+// lock: each one waiting has taken it by then. One that starts waiting
+// later waits for at most the next try.
+func (l *Link) yieldReq() error {
+	for l.waiting.Load() > 0 {
+		select {
+		case <-l.done:
+			return errors.New("drone: the link to the aircraft closed")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	return nil
 }
 
 // WaitHeartbeat waits for a signed heartbeat newer than after, anchoring
 // the link first if it has no anchor: only a heartbeat since the anchor counts.
 func (l *Link) WaitHeartbeat(after time.Time, timeout time.Duration) (Heartbeat, error) {
 	deadline := time.Now().Add(timeout)
-	l.req.Lock()
+	l.lockReq()
 	l.smu.Lock()
 	anchored := l.anchor != nil
 	l.smu.Unlock()
@@ -478,7 +523,7 @@ const (
 
 // Upload writes a whole mission, fence or rally list.
 func (l *Link) Upload(kind common.MAV_MISSION_TYPE, items []Item) error {
-	l.req.Lock()
+	l.lockReq()
 	defer l.req.Unlock()
 	isReq := func(m message.Message) bool {
 		switch r := m.(type) {
@@ -535,7 +580,7 @@ func itemMsg(kind common.MAV_MISSION_TYPE, seq uint16, it Item) *common.MessageM
 
 // Download reads a whole mission, fence or rally list back.
 func (l *Link) Download(kind common.MAV_MISSION_TYPE) ([]Item, error) {
-	l.req.Lock()
+	l.lockReq()
 	defer l.req.Unlock()
 	var got message.Message
 	var err error
