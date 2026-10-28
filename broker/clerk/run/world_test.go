@@ -111,7 +111,7 @@ func (g *gate) wrap(ctx context.Context, read func(context.Context) ([]string, e
 // For a Gmail account (the shipped table) and an IMAP account (a test
 // table), the world has the table's fields, Today from the host's clock,
 // and, once the senders read has completed, its domains in AlertSenders;
-// it has no History, Contacts or KnownSenders, which are slice b2's.
+// DKIMKeys and LastOpened are the read's own, not the host world's.
 func TestWorldFromOwnSources(t *testing.T) {
 	check := func(t *testing.T, h *MailHost, auth string, security string) {
 		t.Helper()
@@ -123,8 +123,8 @@ func TestWorldFromOwnSources(t *testing.T) {
 		if !slices.Contains(w.AlertSenders, security) || !slices.Contains(w.AlertSenders, "accounts.google.com") {
 			t.Fatalf("alert senders %q: want %q and the read's accounts.google.com", w.AlertSenders, security)
 		}
-		if w.History != nil || w.Contacts != nil || w.KnownSenders != nil || w.DKIMKeys != nil || w.LastOpened != nil {
-			t.Fatalf("world %+v carries fields this slice does not source", w)
+		if w.DKIMKeys != nil || w.LastOpened != nil {
+			t.Fatalf("world %+v carries fields the host's world does not source", w)
 		}
 	}
 	t.Run("gmail", func(t *testing.T) {
@@ -475,5 +475,134 @@ func TestTheClerkJudgesInItsOwnAccountsWorld(t *testing.T) {
 	}
 	if w := h.world(); w.AuthServ != "mx.mailhub.test" {
 		t.Fatalf("the host's world after the change: %+v", w)
+	}
+}
+
+// worldRig is a host with its own world over an IMAP account at a made-up
+// provider, its senders read answered by a gate, and the owner's socket,
+// returned once the worker's start-up step has ended.
+func worldRig(t *testing.T, edit func(*MailConfig)) (*MailHost, MailOwner, string) {
+	t.Helper()
+	dir := shortDir(t)
+	sec, err := OpenSecrets(dir, testSealer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetMail(dir, sec, mailhub("imap.mailhub.test:993"), imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	c := ownConfig(mailConfig())
+	c.plain = false
+	g := newGate("old.test")
+	close(g.open)
+	c.senders = g.wrap
+	if edit != nil {
+		edit(&c)
+	}
+	h := NewMailHost(t.Context(), dir, sec, c)
+	// The worker's start-up step reads the world (planSenders' authServ),
+	// which caches the settings: it settles before a test resets them.
+	eventually(t, "the start-up senders read", func() bool { _, ok := h.ws.senders(); return ok })
+	h.mu.Lock()
+	h.idle()
+	h.mu.Unlock()
+	return h, MailOwner{serveMail(t, h, MailOwnerSide)}, dir
+}
+
+func mailhub(imap string) MailSettings {
+	return MailSettings{Address: "owner@mailhub.test", IMAP: imap, SMTP: "smtp.mailhub.test:465"}
+}
+
+// A settings read that a change of account overtook is neither kept nor
+// returned for the old count (#3538 item 1): the read waits while the file
+// is rewritten and the change is counted, with no setter's write window
+// around it, so only the overtaken-read check stands between the old
+// account's clerk and the new account's settings.
+func TestAnOvertakenSettingsReadIsNotKept(t *testing.T) {
+	h, _, dir := worldRig(t, nil)
+	started, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.mu.Lock()
+	at := h.changes
+	h.ws.reset(at) // nothing cached: the next world reads the file
+	h.mu.Unlock()
+	h.ws.mu.Lock()
+	h.ws.load = func(dir string) (MailSettings, error) {
+		once.Do(func() { close(started); <-release })
+		return readMail(dir)
+	}
+	h.ws.mu.Unlock()
+	got := make(chan inbox.World)
+	go func() { got <- h.worldAt(at) }()
+	<-started
+	if err := SetMail(dir, h.sec, mailhub("imap.other.test:993"), imaptest.Password); err != nil {
+		t.Fatal(err)
+	}
+	h.mu.Lock()
+	h.changed()
+	h.mu.Unlock()
+	close(release)
+	if w := <-got; w.AuthServ != "" {
+		t.Fatalf("the old count's world after an overtaken read: authserv %q, want none", w.AuthServ)
+	}
+	// The worker, kicked by the change, may cache the settings itself, read
+	// under the new count: whatever is cached is the new account's.
+	h.ws.mu.Lock()
+	cached := h.ws.read && h.ws.set != nil && h.ws.set.IMAP != "imap.other.test:993"
+	h.ws.mu.Unlock()
+	if cached {
+		t.Fatal("the overtaken read was kept")
+	}
+	if w := h.world(); w.AuthServ != "mx.other.test" {
+		t.Fatalf("the world now: authserv %q", w.AuthServ)
+	}
+}
+
+// Each setter writes the settings inside its change (#3538 item 2): a world
+// for the old count, built between the write and the change being counted
+// with no settings cached, has no account, never the new one's.
+func TestASettingsWriteIsInsideTheChange(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(MailOwner) error
+	}{
+		{"setmail", func(o MailOwner) error { return o.SetMail(mailhub("imap.other.test:993"), imaptest.Password) }},
+		{"removemail", func(o MailOwner) error { return o.RemoveMail() }},
+		{"gmail sign-in finish", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var h *MailHost
+			var at int64
+			var mid atomic.Value
+			srv := gmailtest.New()
+			t.Cleanup(srv.Close)
+			h, owner, _ := worldRig(t, func(cfg *MailConfig) {
+				cfg.wrote = func() { mid.Store(h.worldAt(at)) }
+				g := signInConfig(srv)
+				cfg.gmail, cfg.Guard, cfg.TLS = g.gmail, g.Guard, g.TLS
+			})
+			if c.change == nil {
+				c.change = func(o MailOwner) error {
+					if d := signIn(t, srv, o, "watch", fakeClient); d != clerk.DSignedIn+" watch" {
+						return errors.New("GmailFinish = " + d)
+					}
+					return nil
+				}
+			}
+			h.mu.Lock()
+			at = h.changes
+			h.ws.reset(at)
+			h.mu.Unlock()
+			if err := c.change(owner); err != nil {
+				t.Fatal(err)
+			}
+			w, ok := mid.Load().(inbox.World)
+			if !ok {
+				t.Fatal("the setter did not write")
+			}
+			if w.AuthServ != "" || w.ProviderTable != nil {
+				t.Fatalf("the old count's world between the write and the change: %+v", w)
+			}
+		})
 	}
 }
