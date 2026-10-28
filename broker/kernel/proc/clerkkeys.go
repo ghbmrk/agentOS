@@ -35,7 +35,10 @@ import (
 // /agentos-keeper.slice/agentos-keeper-mail.service, the only cgroup the
 // kernel hands that key to. The whole path, not the unit's name alone: a
 // unit with Delegate=yes (agentosd) may make a group of any name under its
-// own (#3554 L3 1).
+// own (#3554 L3 1). A template's path, such as
+// /agentos.slice/agentos-drivers.slice/agentos-driver-scale@.service, is
+// each of its instances in that same parent: a socket unit with Accept=yes
+// names each connection's instance itself (DEVSLOT-drivers b2b-2, #3590).
 type KeyClerk struct {
 	Socket string
 	Cgroup string
@@ -98,7 +101,7 @@ func handKey(conn net.Conn, name, cgroup string, root *[clerkkey.Len]byte, cgrou
 	if !ok {
 		return ErrKeyPeer
 	}
-	if c, err := cgroupOf(pid); err != nil || c != cgroup {
+	if c, err := cgroupOf(pid); err != nil || !unitCgroup(c, cgroup) {
 		return ErrKeyPeer
 	}
 	k, err := clerkkey.Derive(root, name)
@@ -114,6 +117,21 @@ func handKey(conn net.Conn, name, cgroup string, root *[clerkkey.Len]byte, cgrou
 	conn.SetWriteDeadline(time.Now().Add(keyWait))
 	_, err = conn.Write(b)
 	return err
+}
+
+// unitCgroup reports whether c, a peer's whole cgroup path, is the clerk's
+// unit at cgroup: the same path, or, for a template's path (an empty
+// instance), an instance of that template, named by a non-empty instance,
+// in the same parent. Nothing nested under an instance matches: its path
+// has another element.
+func unitCgroup(c, cgroup string) bool {
+	tmpl, ok := strings.CutSuffix(cgroup, "@.service")
+	if !ok {
+		return c == cgroup
+	}
+	inst, ok := strings.CutPrefix(c, tmpl+"@")
+	inst, ok2 := strings.CutSuffix(inst, ".service")
+	return ok && ok2 && inst != "" && !strings.ContainsAny(inst, "/@") && ValidCgroup(c)
 }
 
 // peerPID is the pid of the process that connected (SO_PEERCRED).

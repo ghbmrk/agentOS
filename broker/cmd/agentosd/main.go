@@ -268,6 +268,9 @@ func main() {
 	var updateStore, shippedRoot string
 	flag.StringVar(&updateStore, "update-store", "", "the update store, already trusting a root; with -shipped-root and the local page, the owner can change where updates come from (OSS-10)")
 	flag.StringVar(&shippedRoot, "shipped-root", "", "the root of trust this image ships (switching back needs its keys, WF1)")
+	var followClerk, followAnchors string
+	flag.StringVar(&followClerk, "follow-clerk", "", "the follow clerk's socket, which only -kernel-uid may call: the kernel runs the owner's approved switch of update source through it (CH-10, #3430); needs -update-store and -follow-anchors")
+	flag.StringVar(&followAnchors, "follow-anchors", "", "the owner's anchors, in a file only root writes: the follow clerk's own trust root (D-146)")
 	flag.BoolVar(&modemBridge, "modem-bridge", true, "serve the modem bridge's ops on the owner socket and send the owner channel's texts through it")
 	modemRoles := flag.String("modem-roles", "/var/lib/agentos/modem/roles.json", "agentos-modem's roles file, where a SIM the owner adopts on the local page is recorded")
 	flag.BoolVar(&ownerMessage, "owner-message", false, "also serve the raw \"message\" op on the owner socket with the bridge on (simulator and test builds only; it skips the bridge's checks)")
@@ -608,6 +611,9 @@ func main() {
 	if fs != nil && !fs.wire(&cfg) {
 		log.Print("-update-store is set but the local page is not served (-localui-uid): updates keep their source")
 	}
+	if err := followClerkFlags(followClerk, followAnchors, kernelUID, fs); err != nil {
+		log.Fatal(err)
+	}
 
 	seat, err := kernelFlags(kernelOwner, kernelUID, kernelOwnerUID, localUIUID, cfg.ModemUID, mailUID)
 	if err != nil {
@@ -701,6 +707,13 @@ func main() {
 	}
 	ev.attach(ctx, d)
 	fs.attach(ctx, d)
+	if followClerk != "" {
+		// After the daemon starts: the journal's update executor is
+		// retired, so no follow it held can switch the box beside this.
+		if err := fs.serveClerk(ctx, followClerk, followAnchors, 0, kernelUID, log.Printf); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if noticeSocket != "" {
 		go newNoticePuller(noticeSocket, informOwner(d.Owner)).run(ctx)
 	}

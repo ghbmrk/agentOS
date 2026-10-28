@@ -21,13 +21,11 @@ import (
 // reworded line fails here rather than going quiet.
 func TestEveryOwnerNoticeLineMapsToANotice(t *testing.T) {
 	for line, want := range map[string]notice.Code{
-		noteMailReplaced: notice.MailReplaced,
-		noteMailRemoved:  notice.MailRemoved,
-		noteSIPReplaced:  notice.LineCallReplaced,
-		noteSIPRemoved:   notice.LineCallRemoved,
-		noteSMSReplaced:  notice.LineTextReplaced,
-		noteSMSRemoved:   notice.LineTextRemoved,
-		noteSMSMissed:    notice.LineTextsMissed,
+		noteSIPReplaced: notice.LineCallReplaced,
+		noteSIPRemoved:  notice.LineCallRemoved,
+		noteSMSReplaced: notice.LineTextReplaced,
+		noteSMSRemoved:  notice.LineTextRemoved,
+		noteSMSMissed:   notice.LineTextsMissed,
 	} {
 		if n, ok := notice.FromLog(line); !ok || n.Code != want {
 			t.Errorf("%q: %+v %v, want %s", line, n, ok, want)

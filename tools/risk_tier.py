@@ -82,6 +82,7 @@ TIER_A_BROKER = {
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     "drone",                      # the MAVLink signing key and the flight policy; also (b): it alone arms the aircraft (NET-2, #3516)
+    "enforcer",                   # the home clerk: holds the safety-list devices' secrets and the owner-signed policy; also (b): it alone loosens a home rule; trusted base at the kernel's tier (STO-4, #3658)
     # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
     # Card's values and the code-generator seed, and its verdict proves G1.
     "e2e",
@@ -94,7 +95,7 @@ TIER_A_BROKER = {
     # (b) gates an effect or approval
     "apply", "card", "claim", "clock", "firstboot",
     "follow",                     # switches the update root of trust
-    "mail", "netguard", "reversible", "route", "sendrules", "update", "workers",
+    "netguard", "reversible", "route", "sendrules", "update", "workers",
     "provagent",                  # runs a provider agent on the owner's plan (CAP-11); also (a): seeds placeholders
     "attest",                     # bounds what public output may say (OSS-4)
     "hostdisk",                   # HW-8a second confirmation; udev host-disk isolation

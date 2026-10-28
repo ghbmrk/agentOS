@@ -155,6 +155,20 @@ var netOK = map[string]allowance{
 		[]string{"net.CIDRMask", "net.IPNet", "net.IPv4zero", "net.IPv6zero", "net.ParseIP", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.Stat_t"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
+	// The follow clerk's kernel socket, which agentosd hosts (#3430):
+	// kernel/proc's ListenClerk and ServeClerk, and the rest of the package
+	// they come in, which serves and dials only unix sockets (its dials are
+	// unixDialCalls), locks its own store and refuses to be dumpable.
+	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store, O_NOFOLLOW opens; no network client",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
+			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
+			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
+	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
+		[]string{"syscall.PR_GET_DUMPABLE", "syscall.PR_SET_DUMPABLE", "syscall.RawSyscall6", "syscall.SYS_PRCTL"}},
+	"clerk/clerkkey": {"Fstat and the file type of a handed-in key descriptor; no network client",
+		[]string{"syscall.Fstat", "syscall.S_IFIFO", "syscall.S_IFMT", "syscall.S_IFSOCK", "syscall.Stat_t"}},
+	"clerk/handoff": {"Fstat and the file type of a handed-in descriptor; no network client",
+		[]string{"syscall.Fstat", "syscall.S_IFIFO", "syscall.S_IFMT", "syscall.Stat_t"}},
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 }
@@ -185,6 +199,14 @@ var rawOK = map[string]map[string]string{
 		"golang.org/x/sys/unix.SYS_SETRESUID": "sets one thread's effective uid to the owner side's and back to root's (#2682)",
 		"golang.org/x/sys/unix.SYS_GETEUID":   "checks the thread's effective uid took (#2682)",
 	},
+	"procguard": {"syscall.SYS_PRCTL": "reads and clears the dumpable flag only (PR_GET_DUMPABLE, PR_SET_DUMPABLE; CLK-1)"},
+}
+
+// unixDialCalls are the dial functions a package may call directly, and
+// why; dials still checks each is on "unix" to a configured address.
+// kernel/proc dials its clerks' and its owner seam's sockets (#3430).
+var unixDialCalls = map[string]map[string]string{
+	"kernel/proc": {"net.DialTimeout": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
@@ -547,7 +569,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			switch {
 			case full == "os.StartProcess" && escapeOK[rel]["os/exec"] == "":
 				at(n, "starts a process (os.StartProcess)")
-			case clients[pkg][id] && !literalType[n]:
+			case clients[pkg][id] && !literalType[n] && !(callee[n] && unixDialCalls[rel][full] != ""):
 				at(n, "network client ("+full+")")
 			case socketPkgs[pkg] && !clients[pkg][id] && !uses[full]:
 				at(n, full+" is outside this package's netOK uses")

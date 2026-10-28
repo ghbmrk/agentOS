@@ -1,5 +1,5 @@
 # The vault process's memory ceiling (SR3-mail-k18e, #1676; release r1 of Security 4a on #1658).
-# A hostile mail or model host costs one call, not the vault process or the host (CRED-8, egress
+# A hostile model host costs one call, not the vault process or the host (CRED-8, egress
 # K18): agentos-egress.service caps the unit's memory, so a runaway the parser bounds miss ends
 # the vault (it fails closed and restarts) inside its own cgroup instead of the kernel OOM killer
 # picking another process. The cap is derived from what the bounded paths can legitimately hold
@@ -16,9 +16,6 @@ BROKER = ROOT / "broker"
 
 KiB, MiB, GiB = 1 << 10, 1 << 20, 1 << 30
 
-# Mail M21 (#1658): one IMAP response stopped at the field bound peaks near 60 MB of heap, and the
-# bound binds before the 16 MiB read budget does. Rounded up to 64 MiB.
-RESPONSE_PEAK = 64 * MiB
 # A Fetch asks for at most 100 messages (agentosd's batches; Security l1 on #1658).
 FETCH_BATCH = 100
 # What the proxy's requests in flight may hold at once is DefaultInFlightBytes in egress/proxy.go
@@ -76,13 +73,11 @@ def gomem(v):
 
 
 def legitimate_peak():
-    """What the bounded paths can hold live at once: every mail call at its worst (one response
-    at the field bound, plus a full Fetch's read budget of kept bodies), one unlock's Argon2id,
-    the proxy's in-flight budget and the provider worker routes' request bodies."""
-    fetch_budget = 16 * MiB + FETCH_BATCH * (go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch") + 8 * KiB)
-    mail = go_int("cmd/agentos-egress/mailaccount.go", "mailConns") * (RESPONSE_PEAK + fetch_budget)
+    """What the bounded paths can hold live at once: one unlock's Argon2id, the proxy's in-flight
+    budget and the provider worker routes' request bodies. The vault serves no mailbox any more
+    (#3679): the mail clerk holds it in its own process."""
     routes = go_int("cmd/agentos-egress/workerroute.go", "routeCalls") * go_int("egress/proxy.go", "DefaultMaxBody")
-    return mail + kdf_memory() + go_int("egress/proxy.go", "DefaultInFlightBytes") + routes
+    return kdf_memory() + go_int("egress/proxy.go", "DefaultInFlightBytes") + routes
 
 
 def seen_peak():
@@ -113,12 +108,11 @@ class VaultMemoryCeiling(unittest.TestCase):
         self.assertEqual(go_int("clerk/inbox/mailbox.go", "searchMax"), go_int("third_party/go-imap/read.go", "maxRespFields"))
 
     def test_the_vault_never_reads_who_was_opened(self):
-        # The vault's mail store wraps the transport without Seen, and the vault does not link the
-        # mail clerk's package, so neither Seen nor openedMax counts in the vault's ceiling.
-        self.assertNotIn(".Seen(", (BROKER / "mail/imapsmtp/imapsmtp.go").read_text())
+        # The vault links neither the mail clerk's package nor its transport (#3679), so no mail
+        # call, Seen or openedMax counts in the vault's ceiling.
         deps = subprocess.run(["go", "list", "-deps", "./cmd/agentos-egress"], cwd=BROKER,
                               capture_output=True, text=True, check=True).stdout.split()
-        self.assertIn("github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp", deps)
+        self.assertNotIn("github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp", deps)
         self.assertNotIn("github.com/ghbmrk/agentos/broker/clerk/inbox", deps)
 
     def test_memory_max_is_set_within_the_derived_range(self):
@@ -148,7 +142,6 @@ class VaultMemoryCeiling(unittest.TestCase):
 
     def test_the_derivation_reads_real_figures(self):
         # Guards the regexes: a figure that stops parsing must not pass as zero.
-        self.assertEqual(go_int("cmd/agentos-egress/mailaccount.go", "mailConns"), 8)
         self.assertEqual(go_int("clerk/inbox/imapsmtp/imapsmtp.go", "cfg.MaxFetch"), 256 * KiB)
         self.assertEqual(kdf_memory(), 256 * MiB)
         self.assertEqual(go_int("egress/proxy.go", "DefaultMaxBody"), 8 * MiB)

@@ -15,11 +15,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
+	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
@@ -59,15 +61,24 @@ func TestFlags(t *testing.T) {
 		t.Fatalf("parse(good) = %+v, %v", c, err)
 	}
 	bad := map[string][]string{
-		"relative dir":       with("-dir", "var/lib/agentos-model"),
-		"no owner socket":    with("-owner-sock", ""),
-		"relative signin":    with("-signin-sock", "signin.sock"),
-		"no agentosd uid":    with("-agentosd-uid", "-1"),
-		"stray argument":     append(slices.Clone(good), "x"),
-		"an unknown flag":    append(slices.Clone(good), "-model-sock", "/run/m.sock"),
+		"relative dir":         with("-dir", "var/lib/agentos-model"),
+		"no owner socket":      with("-owner-sock", ""),
+		"relative signin":      with("-signin-sock", "signin.sock"),
+		"no agentosd uid":      with("-agentosd-uid", "-1"),
+		"stray argument":       append(slices.Clone(good), "x"),
+		"an unknown flag":      append(slices.Clone(good), "-model-socket", "/run/m.sock"),
+		"a model socket alone": append(slices.Clone(good), "-model-sock", "/run/m.sock"),
+		"a relative meter socket": append(slices.Clone(good), "-model-sock", "/run/m.sock", "-planner-uid", "981",
+			"-meter-sock", "meter.sock", "-kernel-uid", "980"),
+		"a root planner": append(slices.Clone(good), "-model-sock", "/run/m.sock", "-planner-uid", "0",
+			"-meter-sock", "/run/k/meter.sock", "-kernel-uid", "980"),
 		"no signin socket":   with("-signin-sock", ""),
 		"negative agentosd":  with("-agentosd-uid", "-7"),
 		"relative owner one": with("-owner-sock", "owner.sock"),
+	}
+	m, err := parse(append(slices.Clone(good), "-model-sock", "/run/m.sock", "-planner-uid", "981", "-meter-sock", "/run/k/meter.sock", "-kernel-uid", "980"), io.Discard)
+	if err != nil || m.plannerUID != 981 || m.kernelUID != 980 || m.meterSock != "/run/k/meter.sock" {
+		t.Fatalf("the model flags: %+v, %v", m, err)
 	}
 	for name, args := range bad {
 		if _, err := parse(args, io.Discard); err == nil {
@@ -368,6 +379,78 @@ func TestAnUnopenableSlotStartsSignedOut(t *testing.T) {
 		again.dir = c.dir
 		if st, err := running(t, again, k).State(); err != nil || st.SignedIn {
 			t.Errorf("%s slot: after the write a start reads %+v, %v", name, st, err)
+		}
+	}
+}
+
+// meter is a fake of the kernel's meter socket: it admits every call and
+// records each op.
+type meter struct {
+	mu  sync.Mutex
+	ops []string
+}
+
+func (m *meter) serve(t *testing.T, sock string) {
+	ln, err := proc.ListenKernel(sock, os.Getuid())
+	must(t, err)
+	t.Cleanup(func() { ln.Close() })
+	go proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
+		proc.ServeOne(conn, func(op string, _ json.RawMessage) (json.RawMessage, error) {
+			m.mu.Lock()
+			m.ops = append(m.ops, op)
+			m.mu.Unlock()
+			if op == "admitspend" {
+				return json.Marshal(map[string]any{"plan": "t", "seq": 1})
+			}
+			return nil, nil
+		})
+	})
+}
+
+func (m *meter) seen() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.ops)
+}
+
+// CLK-1, CLK-7 (MIG-4-exit m1): the model socket serves the planner's uid
+// only. A call from any other uid is closed unanswered: nothing is admitted,
+// metered or sent. The positive control: with this uid as the planner's,
+// the same call is admitted on the kernel's meter socket.
+func TestServesModelCallsToThePlannerOnly(t *testing.T) {
+	var dials atomic.Int32
+	netConnect = func(context.Context, string, string) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("no network in this test")
+	}
+	t.Cleanup(func() { netConnect = nil })
+	body := []byte(`{"model":"` + model.Shipped[0].Models[0].Model + `","max_tokens":8,"messages":[]}`)
+	route := model.Shipped[0].Models[0].Route
+	for _, planner := range []int{os.Getuid() + 1, os.Getuid()} {
+		c := testConfig(t)
+		rd := filepath.Dir(c.ownerSock)
+		c.modelSock, c.meterSock = filepath.Join(rd, "m.sock"), filepath.Join(rd, "k.sock")
+		c.plannerUID, c.kernelUID = planner, os.Getuid()
+		k := &meter{}
+		k.serve(t, c.meterSock)
+		o := running(t, c, [32]byte{3})
+		must(t, o.SetKey(model.Shipped[0].Provider, "sk-test-0123456789", true))
+		for range 200 {
+			if _, err := os.Stat(c.modelSock); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		m := run.Model{Conn: proc.Conn{Socket: c.modelSock, UID: os.Getuid(), Timeout: 10 * time.Second}}
+		_, err := m.Send("t", route, "messages", body)
+		if planner != os.Getuid() {
+			if err == nil || strings.HasPrefix(err.Error(), "model: ") || len(k.seen()) != 0 || dials.Load() != 0 {
+				t.Fatalf("another uid's call: %v; the meter saw %v, %d dials", err, k.seen(), dials.Load())
+			}
+			continue
+		}
+		if ops := k.seen(); len(ops) == 0 || ops[0] != "admitspend" {
+			t.Fatalf("the planner's call: %v; the meter saw %v", err, ops)
 		}
 	}
 }

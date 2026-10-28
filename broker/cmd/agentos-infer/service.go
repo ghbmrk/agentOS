@@ -20,22 +20,12 @@ import (
 // Runtime is the model runtime behind the service: one adapter file
 // (runtime_<name>.go) implements it, so the runtime choice changes one file
 // (INFER-SVC Q1). Load loads the model file at path, replacing (and
-// stopping) whatever was loaded before, and reports the ops the model
-// serves. Embed returns one vector per text; Generate returns the text
-// for a prompt, at most maxOut tokens. All three may be called from
-// several goroutines; a Load must make a call stuck in the old model
-// return.
+// stopping) whatever was loaded before, and returns the vector length.
+// Embed returns one vector per text. Both may be called from several
+// goroutines; a Load must make an Embed stuck in the old model return.
 type Runtime interface {
-	Load(path string) (Serves, error)
+	Load(path string) (int, error)
 	Embed(texts []string) ([][]float32, error)
-	Generate(prompt string, maxOut int) (string, error)
-}
-
-// Serves is what a loaded model serves: embed when Dim (its vector length)
-// is above zero, and generate when Generate is set.
-type Serves struct {
-	Dim      int
-	Generate bool
 }
 
 // ErrRefused is a Runtime's answer to a model file it cannot use: the
@@ -48,16 +38,11 @@ type Config struct {
 	Model string // the model file
 	Pin   string // the model file's SHA-256, lower-case hex
 	// Concurrent bounds the runtime calls in flight, so a burst queues
-	// rather than multiplying memory. Zero is 2, of which at most one is a
-	// generate call (ASSUMPTIONS INFER-A6); set, generate calls take any
-	// of the slots.
+	// rather than multiplying memory (2 by default).
 	Concurrent int
-	// CallTimeout bounds one embed call; past it the call is Unavailable
+	// CallTimeout bounds one runtime call; past it the call is Unavailable
 	// and the runtime is reloaded.
 	CallTimeout time.Duration
-	// GenerateTimeout bounds one generate call likewise (120 s by default,
-	// the client's own deadline).
-	GenerateTimeout time.Duration
 	// Retry is the least time between two loads of a model that failed to
 	// load; a call that finds the runtime crashed reloads at once.
 	Retry time.Duration
@@ -70,7 +55,7 @@ type loaded struct {
 	cause  infer.Cause // "" when ready
 	detail string
 	sha    string
-	serves Serves
+	dim    int
 	at     time.Time
 }
 
@@ -82,24 +67,18 @@ type service struct {
 	rt   Runtime
 	log  io.Writer
 	sem  chan struct{}
-	gen  chan struct{} // nil, or the one generate slot when Concurrent is defaulted
-	load sync.Mutex    // one load at a time
+	load sync.Mutex // one load at a time
 
 	mu  sync.Mutex
 	cur loaded
 }
 
 func newService(cfg Config, rt Runtime, log io.Writer) *service {
-	var gen chan struct{}
 	if cfg.Concurrent <= 0 {
 		cfg.Concurrent = 2
-		gen = make(chan struct{}, 1)
 	}
 	if cfg.CallTimeout <= 0 {
 		cfg.CallTimeout = 30 * time.Second
-	}
-	if cfg.GenerateTimeout <= 0 {
-		cfg.GenerateTimeout = infer.DefaultGenerateTimeout
 	}
 	if cfg.Retry <= 0 {
 		cfg.Retry = 10 * time.Second
@@ -110,7 +89,7 @@ func newService(cfg Config, rt Runtime, log io.Writer) *service {
 	if log == nil {
 		log = io.Discard
 	}
-	return &service{cfg: cfg, rt: rt, log: log, sem: make(chan struct{}, cfg.Concurrent), gen: gen,
+	return &service{cfg: cfg, rt: rt, log: log, sem: make(chan struct{}, cfg.Concurrent),
 		cur: loaded{cause: infer.Unavailable, detail: "not loaded"}}
 }
 
@@ -151,7 +130,7 @@ func (s *service) conn(c net.Conn) {
 			continue
 		}
 		if err := req.Check(); err != nil {
-			fmt.Fprintf(s.log, "infer: bad %s request (%d texts, %d-byte prompt)\n", opName(req.Op), len(req.Texts), len(req.Prompt))
+			fmt.Fprintf(s.log, "infer: bad request (%d texts)\n", len(req.Texts))
 			s.write(c, errReply(infer.BadRequest, err.(*infer.Error).Detail))
 			continue
 		}
@@ -159,16 +138,6 @@ func (s *service) conn(c net.Conn) {
 			return
 		}
 	}
-}
-
-// opName is op for the log: a known op, else "unknown", since the op is
-// the peer's text.
-func opName(op string) string {
-	switch op {
-	case infer.OpHello, infer.OpEmbed, infer.OpGenerate:
-		return op
-	}
-	return "unknown"
 }
 
 func errReply(c infer.Cause, detail string) infer.Reply {
@@ -189,31 +158,17 @@ func (s *service) write(c net.Conn, r infer.Reply) bool {
 
 // answer is the reply to one checked request.
 func (s *service) answer(req infer.Request) infer.Reply {
-	if req.Op == infer.OpGenerate && s.gen != nil {
-		s.gen <- struct{}{}
-		defer func() { <-s.gen }()
-	}
 	s.sem <- struct{}{}
 	defer func() { <-s.sem }()
 	cur := s.ready()
 	if cur.cause != "" {
 		return errReply(cur.cause, cur.detail)
 	}
-	in := infer.Info{Dim: cur.serves.Dim, Generate: cur.serves.Generate}
-	switch req.Op {
-	case infer.OpHello:
-		return infer.Reply{Model: s.cfg.Name, SHA256: cur.sha, Dim: in.Dim, State: infer.StateReady, Ops: in.Ops()}
-	case infer.OpGenerate:
-		if !in.Generate {
-			return errReply(infer.Missing, "the model does not serve generate")
-		}
-		return s.generate(req, cur)
-	}
-	if in.Dim == 0 {
-		return errReply(infer.Missing, "the model does not serve embed")
+	if req.Op == infer.OpHello {
+		return infer.Reply{Model: s.cfg.Name, SHA256: cur.sha, Dim: cur.dim, State: infer.StateReady}
 	}
 	start := time.Now()
-	vs, err := s.embed(req.Texts, in.Dim)
+	vs, err := s.embed(req.Texts, cur.dim)
 	if err != nil {
 		fmt.Fprintf(s.log, "infer: embed of %d texts failed after %s: %s; reloading\n",
 			len(req.Texts), time.Since(start).Round(time.Millisecond), err)
@@ -221,27 +176,7 @@ func (s *service) answer(req infer.Request) infer.Reply {
 		return errReply(infer.Unavailable, err.Error())
 	}
 	fmt.Fprintf(s.log, "infer: embedded %d texts in %s\n", len(req.Texts), time.Since(start).Round(time.Millisecond))
-	return infer.Reply{SHA256: cur.sha, Dim: in.Dim, Vectors: vs}
-}
-
-// generate runs one generate call within GenerateTimeout and checks its
-// text as the client will. Its log names sizes and durations, never the
-// prompt or the text.
-func (s *service) generate(req infer.Request, cur loaded) infer.Reply {
-	start := time.Now()
-	text, err := within(s.cfg.GenerateTimeout, func() (string, error) { return s.rt.Generate(req.Prompt, req.MaxOut) })
-	if err == nil && !infer.ValidText(text) {
-		err = errMalformedText
-	}
-	if err != nil {
-		fmt.Fprintf(s.log, "infer: generate from a %d-byte prompt failed after %s: %s; reloading\n",
-			len(req.Prompt), time.Since(start).Round(time.Millisecond), err)
-		s.fail(cur)
-		return errReply(infer.Unavailable, err.Error())
-	}
-	fmt.Fprintf(s.log, "infer: generated %d bytes from a %d-byte prompt in %s\n",
-		len(text), len(req.Prompt), time.Since(start).Round(time.Millisecond))
-	return infer.Reply{SHA256: cur.sha, Text: &text}
+	return infer.Reply{SHA256: cur.sha, Dim: cur.dim, Vectors: vs}
 }
 
 // The causes of a failed embed: fixed text, never the runtime's own, which
@@ -250,15 +185,13 @@ var (
 	errCrashed   = errors.New("runtime failed")
 	errTimedOut  = errors.New("runtime timed out")
 	errMalformed = errors.New("runtime answered malformed vectors")
-	// errMalformedText is text over MaxGenerate or not UTF-8.
-	errMalformedText = errors.New("runtime answered malformed text")
 )
 
-// within runs one runtime call, giving up after d: errTimedOut past it,
-// errCrashed for the call's error or panic.
-func within[T any](d time.Duration, call func() (T, error)) (T, error) {
+// embed runs one runtime call within CallTimeout and checks its answer as
+// the client will: a runtime is not trusted to keep its own shape.
+func (s *service) embed(texts []string, dim int) ([][]float32, error) {
 	type result struct {
-		v   T
+		vs  [][]float32
 		err error
 	}
 	done := make(chan result, 1)
@@ -268,39 +201,29 @@ func within[T any](d time.Duration, call func() (T, error)) (T, error) {
 				done <- result{err: errCrashed}
 			}
 		}()
-		v, err := call()
-		done <- result{v, err}
+		vs, err := s.rt.Embed(texts)
+		done <- result{vs, err}
 	}()
-	t := time.NewTimer(d)
+	t := time.NewTimer(s.cfg.CallTimeout)
 	defer t.Stop()
-	var zero T
+	var r result
 	select {
-	case r := <-done:
-		if r.err != nil {
-			return zero, errCrashed
-		}
-		return r.v, nil
+	case r = <-done:
 	case <-t.C:
-		return zero, errTimedOut
+		return nil, errTimedOut
 	}
-}
-
-// embed runs one runtime call within CallTimeout and checks its answer as
-// the client will: a runtime is not trusted to keep its own shape.
-func (s *service) embed(texts []string, dim int) ([][]float32, error) {
-	vs, err := within(s.cfg.CallTimeout, func() ([][]float32, error) { return s.rt.Embed(texts) })
-	if err != nil {
-		return nil, err
+	if r.err != nil {
+		return nil, errCrashed
 	}
-	if len(vs) != len(texts) {
+	if len(r.vs) != len(texts) {
 		return nil, errMalformed
 	}
-	for _, v := range vs {
+	for _, v := range r.vs {
 		if len(v) != dim || !infer.Finite(v) {
 			return nil, errMalformed
 		}
 	}
-	return vs, nil
+	return r.vs, nil
 }
 
 // fail marks the load the failed call ran on as unavailable, so the next
@@ -346,7 +269,7 @@ func (s *service) loadModel() loaded {
 	l := s.hashAndLoad()
 	l.at = time.Now()
 	if l.cause == "" {
-		fmt.Fprintf(s.log, "infer: model loaded (dim %d, generate %t) in %s\n", l.serves.Dim, l.serves.Generate, time.Since(start).Round(time.Millisecond))
+		fmt.Fprintf(s.log, "infer: model loaded (dim %d) in %s\n", l.dim, time.Since(start).Round(time.Millisecond))
 	} else {
 		fmt.Fprintf(s.log, "infer: model not loaded: %s: %s\n", l.cause, l.detail)
 	}
@@ -371,16 +294,14 @@ func (s *service) hashAndLoad() loaded {
 	if !infer.ValidHash(s.cfg.Pin) || sum != s.cfg.Pin {
 		return loaded{cause: infer.Corrupt, detail: "model file hash differs from the pin"}
 	}
-	sv, err := s.rt.Load(s.cfg.Model)
+	dim, err := s.rt.Load(s.cfg.Model)
 	switch {
 	case errors.Is(err, ErrRefused):
 		return loaded{cause: infer.Corrupt, detail: "runtime refused the model file"}
 	case err != nil:
 		return loaded{cause: infer.Unavailable, detail: "runtime did not load"}
-	case sv.Dim < 0 || sv.Dim > infer.MaxDim:
+	case dim <= 0 || dim > infer.MaxDim:
 		return loaded{cause: infer.Corrupt, detail: "runtime reported a bad dim"}
-	case sv.Dim == 0 && !sv.Generate:
-		return loaded{cause: infer.Corrupt, detail: "runtime serves no op with the model"}
 	}
-	return loaded{sha: sum, serves: sv}
+	return loaded{sha: sum, dim: dim}
 }
