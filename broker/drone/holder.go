@@ -200,7 +200,7 @@ func writeAtomic(path string, b []byte) error {
 			err = cerr
 		}
 		if err == nil {
-			err = os.Rename(tmp, path) // durable:exempt the drone imports nothing from agentOS (brief decision 1); the directory is synced below
+			err = os.Rename(tmp, path) // durable:exempt lifecycle:exempt the drone imports nothing from agentOS (brief decision 1) and durable is old core (tools/old_core.txt), so it cannot list here; this is owner config, not a lifecycle, and the directory is synced below
 		}
 		if err == nil {
 			if d, derr := os.Open(filepath.Dir(path)); derr == nil {

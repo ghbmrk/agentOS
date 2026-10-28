@@ -84,7 +84,7 @@ func WriteKeyFile(path string, k Key) error {
 	if err := f.Close(); err != nil {
 		return errors.New("drone: closing the key file failed")
 	}
-	if err := os.Rename(tmp, path); err != nil { // durable:exempt the drone imports nothing from agentOS (brief decision 1); the directory is synced below
+	if err := os.Rename(tmp, path); err != nil { // durable:exempt lifecycle:exempt the drone imports nothing from agentOS (brief decision 1) and durable is old core (tools/old_core.txt), so it cannot list here; this is owner config, not a lifecycle, and the directory is synced below
 		return fmt.Errorf("drone: key file: %w", pathErr(err))
 	}
 	ok = true
