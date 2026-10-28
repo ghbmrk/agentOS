@@ -41,6 +41,7 @@ type Plan struct {
 const (
 	fenceTypeAltMaxPolygon = 1 | 4  // FENCE_TYPE bits: 0 max altitude, 2 polygon
 	fenceActionRTLOrLand   = 1      // FENCE_ACTION 1: RTL, or land if RTL is not possible
+	fenceNoModeChange      = 1      // FENCE_OPTIONS bit 0: no mode change while the breach return runs
 	battFSRTL              = 2      // BATT_FS_LOW_ACT 2: RTL
 	gcsFSRTL               = 1      // FS_GCS_ENABLE 1: RTL
 	ekfFSLand              = 1      // FS_EKF_ACTION 1: land
@@ -62,6 +63,7 @@ func Derive(p *Policy) Plan {
 		"FENCE_ALT_MAX":    p.CeilingM,
 		"FENCE_MARGIN":     p.FenceMarginM,
 		"FENCE_AUTOENABLE": 0, // the fence is always on, never enabled by arming or take-off
+		"FENCE_OPTIONS":    fenceNoModeChange,
 		"BATT_LOW_VOLT":    p.LowBatteryV,
 		"BATT_FS_LOW_ACT":  battFSRTL,
 		"FS_GCS_ENABLE":    gcsFSRTL,

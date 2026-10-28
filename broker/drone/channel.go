@@ -8,6 +8,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -70,6 +71,7 @@ func parseCoord(s string) (float64, error) {
 // coreInterval. An empty bucket pauses the reader, so a flood waits rather
 // than reaching the aircraft at line rate.
 type limiter struct {
+	mu     sync.Mutex
 	tokens float64
 	last   time.Time
 	now    func() time.Time
@@ -83,6 +85,8 @@ func newLimiter() *limiter {
 // wait takes one token, pausing first if there is none. It reports whether
 // it paused.
 func (l *limiter) wait() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	t := l.now()
 	if !l.last.IsZero() {
 		l.tokens = math.Min(coreBurst, l.tokens+t.Sub(l.last).Seconds()/coreInterval.Seconds())
@@ -101,9 +105,10 @@ func (l *limiter) wait() bool {
 
 // ServeCore serves one core-side connection until it closes: each line is
 // rate-limited, parsed and answered with "ok" or "refused". A line longer
-// than maxCoreLine ends the connection.
+// than maxCoreLine ends the connection. The rate is the holder's, across
+// connections, so reconnecting does not refill it.
 func (h *Holder) ServeCore(rw io.ReadWriter) error {
-	return h.serveCore(rw, newLimiter())
+	return h.serveCore(rw, h.core)
 }
 
 func (h *Holder) serveCore(rw io.ReadWriter, lim *limiter) error {

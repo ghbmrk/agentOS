@@ -98,6 +98,14 @@ func (h *Holder) returnLocked(why string) error {
 // fence bounds it, not the vision: a target outside the boundary leads the
 // aircraft to the fence, and the breach returns it (brief decision 9).
 func (h *Holder) Follow(target Point) error {
+	// Leaving AUTO goes on a heartbeat the aircraft sent after this call: an
+	// older one can predate a return it started since, and ArduPilot does not
+	// start a low-battery return twice. It is waited for outside the lock, so
+	// a return never waits behind it.
+	start := time.Now()
+	if hb, ok := h.link.LastHeartbeat(); ok && hb.CustomMode != ModeGuided {
+		h.link.WaitHeartbeat(start, followHeartbeatAge) // checked under the lock
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.flight == nil || len(h.flight.Animals) == 0 {
@@ -117,6 +125,9 @@ func (h *Holder) Follow(target Point) error {
 		return errors.New("drone: follow refused: the aircraft is not flying the flight")
 	}
 	if hb.CustomMode != ModeGuided {
+		if !hb.At.After(start) {
+			return errors.New("drone: follow refused: no heartbeat from the aircraft since the follow began")
+		}
 		if err := h.link.SetMode(ModeGuided); err != nil {
 			return err
 		}

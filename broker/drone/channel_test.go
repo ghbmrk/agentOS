@@ -96,6 +96,19 @@ func TestChannelRefusesAllButReturn(t *testing.T) {
 	if len(paused) != 0 {
 		t.Errorf("a burst after a quiet spell paused %d times", len(paused))
 	}
+	// The rate is the holder's: a reconnect does not refill it.
+	clock = clock.Add(coreBurst * coreInterval)
+	paused = nil
+	h.core = lim
+	for _, n := range []int{coreBurst, 3} {
+		h.ServeCore(struct {
+			io.Reader
+			io.Writer
+		}{strings.NewReader(strings.Repeat("arm\n", n)), io.Discard})
+	}
+	if len(paused) != 3 {
+		t.Errorf("a burst split over two connections paused %d times, want 3", len(paused))
+	}
 
 	// A line over the limit ends the connection.
 	out.Reset()

@@ -285,6 +285,37 @@ func TestFollowNeverOverridesAReturn(t *testing.T) {
 	}
 }
 
+// REQ: NET-2
+// TestFollowLeavesAutoOnlyOnAFreshHeartbeat: a heartbeat in AUTO from before
+// the follow began does not take the aircraft to GUIDED, since the aircraft
+// may have started its own return since; the next one, showing that return,
+// refuses the follow and ends the flight.
+func TestFollowLeavesAutoOnlyOnAFreshHeartbeat(t *testing.T) {
+	a := &scripted{pos: at(0, 120), mode: ModeAuto, beat: true}
+	h := scriptedFlight(t, a, "deer")
+	stop := h.link.KeepAlive()
+	defer stop()
+	if _, err := h.link.WaitHeartbeat(time.Time{}, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	// The aircraft starts a return and its heartbeats stop reaching us.
+	a.set(func(a *scripted) { a.beat, a.mode = false, ModeRTL })
+	if err := h.Follow(at(0, 100)); err == nil {
+		t.Fatal("follow left AUTO on a heartbeat from before it began")
+	}
+	// The heartbeats come back, showing the return.
+	a.set(func(a *scripted) { a.beat = true })
+	if err := h.Follow(at(0, 100)); err == nil {
+		t.Fatal("follow took the aircraft out of its own return")
+	}
+	if got := a.modesAsked(); len(got) != 0 {
+		t.Fatalf("a refused follow asked for modes %v", got)
+	}
+	if h.flight != nil {
+		t.Error("the aircraft's return did not end the flight")
+	}
+}
+
 // waitMode waits for a heartbeat in mode: one received after a change may
 // have been sent before it.
 func waitMode(t *testing.T, l *Link, mode uint32) {
