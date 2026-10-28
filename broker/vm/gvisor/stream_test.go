@@ -149,7 +149,7 @@ func TestDecoderHasNoNetwork(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(d, "startedin")); err != nil || string(b) != leaf {
 		t.Errorf("runsc started in %q, %v; want %s", b, err, leaf)
 	}
-	for f, want := range map[string]string{"memory.max": "67108864", "memory.swap.max": "0", "memory.oom.group": "1", "pids.max": "256"} {
+	for f, want := range map[string]string{"memory.max": "67108864", "memory.swap.max": "0", "memory.oom.group": "1", "pids.max": "256", "cpu.max": "100000 100000"} {
 		if b, err := os.ReadFile(filepath.Join(leaf, f)); err != nil || string(b) != want {
 			t.Errorf("%s = %q, %v; want %q", f, b, err, want)
 		}

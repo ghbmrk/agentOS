@@ -76,8 +76,12 @@ type Decoded struct {
 	// and false for a picture (Pixels holds I420 planes).
 	Thermal       bool
 	Width, Height uint16
-	Counter       uint32
-	Pixels        []byte
+	// Counter is, for a thermal frame, the counter of the fed frame it
+	// came from: the decoder checks that each one is the next fed, in
+	// order. For a picture it is the sandbox's own value, and a consumer
+	// must not order or dedupe by it.
+	Counter uint32
+	Pixels  []byte
 }
 
 // Proc is a running decoder sandbox; *gvisor.StreamRun is one.
@@ -207,11 +211,44 @@ func (d *Decoder) Add(id string, video, thermal camwire.Shape) error {
 		return ErrShapes
 	}
 	d.Remove(id)
-	ctx, cancel := context.WithCancel(context.Background())
 	d.mu.Lock()
-	d.cams[id] = &decodeCam{id: id, video: video, thermal: thermal, q: make(chan camwire.Frame, d.cfg.Queue), ctx: ctx, cancel: cancel}
+	d.cams[id] = d.newCam(id, video, thermal)
 	d.mu.Unlock()
 	return nil
+}
+
+func (d *Decoder) newCam(id string, video, thermal camwire.Shape) *decodeCam {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &decodeCam{id: id, video: video, thermal: thermal, q: make(chan camwire.Frame, d.cfg.Queue), ctx: ctx, cancel: cancel}
+}
+
+// Cut drops camera id's output (DEV-7): the frames queued for its
+// sandbox, and any inside it, are discarded and the sandbox is stopped,
+// but its shapes stay, so a later frame starts a fresh one. It returns
+// once no frame fed before it can reach Out. The clerk calls it on every
+// owner change: revoke, capture off and re-pin.
+func (d *Decoder) Cut(id string) {
+	d.mu.Lock()
+	old := d.cams[id]
+	if old == nil {
+		d.mu.Unlock()
+		return
+	}
+	c := d.newCam(id, old.video, old.thermal)
+	d.cams[id] = c
+	done := old.done
+	d.mu.Unlock()
+	old.cancel()
+	if done != nil {
+		<-done
+	}
+	old.smu.Lock()
+	dropped, faults := old.dropped+len(old.q), old.faults
+	old.smu.Unlock()
+	c.smu.Lock()
+	c.dropped += dropped
+	c.faults += faults
+	c.smu.Unlock()
 }
 
 // Remove stops camera id's sandbox and forgets it. It returns once no
@@ -388,18 +425,31 @@ func (d *Decoder) session(c *decodeCam, first camwire.Frame, recovering bool) er
 }
 
 // decodeSession is one sandbox's counts: frames fed and frames out of
-// each kind, and since when a fed frame has had no output.
+// each kind, since when a fed frame has had no output, and the thermal
+// frames fed and not yet out, oldest first.
 type decodeSession struct {
 	mu      sync.Mutex
 	fed     [3]int
 	out     [3]int
 	waiting time.Time
+	therm   []fedThermal
 }
 
+// fedThermal is a thermal frame fed to the sandbox: its counter, which
+// its output must carry, and when it was fed.
+type fedThermal struct {
+	counter uint32
+	at      time.Time
+}
+
+// stalled is whether a fed frame has waited past stall: any output at
+// all, or the oldest thermal frame's own, since thermal frames come out
+// one for one and a sandbox must not hold one back behind pictures.
 func (s *decodeSession) stalled(now time.Time, stall time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return !s.waiting.IsZero() && now.Sub(s.waiting) > stall
+	return !s.waiting.IsZero() && now.Sub(s.waiting) > stall ||
+		len(s.therm) > 0 && now.Sub(s.therm[0].at) > stall
 }
 
 // feed writes c's frames to the sandbox until idle, a write fails, or the
@@ -409,10 +459,21 @@ func (d *Decoder) feed(ctx context.Context, c *decodeCam, s *decodeSession, p Pr
 	defer idle.Stop()
 	for {
 		k := kindOf(f.Type)
+		var th camwire.Thermal
+		if k == outThermal {
+			var err error
+			if th, err = camwire.ParseThermal(f.Payload, c.thermal); err != nil {
+				return errFault
+			}
+		}
+		now := time.Now()
 		s.mu.Lock()
 		s.fed[k]++
+		if k == outThermal {
+			s.therm = append(s.therm, fedThermal{th.Counter, now})
+		}
 		if s.waiting.IsZero() {
-			s.waiting = time.Now()
+			s.waiting = now
 		}
 		s.mu.Unlock()
 		if err := camwire.WriteFrame(p.In(), camwire.ToCore, c.thermal, f); err != nil {
@@ -438,8 +499,10 @@ func kindOf(t camwire.Type) int {
 
 // read checks each output frame against c's declared shapes before any of
 // it is kept: its kind, its dimensions, a count no higher than the frames
-// of that kind fed, and then exactly the declared length of pixels. The
-// first frame that breaks a rule ends the session as a fault.
+// of that kind fed, for a thermal frame the counter of the next one fed,
+// and then exactly the declared length of pixels. The first frame that
+// breaks a rule ends the session as a fault, and none reaches Out once c
+// is cut or removed.
 func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) error {
 	var h [outHeaderLen]byte
 	for {
@@ -460,8 +523,10 @@ func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) 
 		if h[1]|h[2]|h[3] != 0 || w != shape.Width || ht != shape.Height {
 			return errFault
 		}
+		counter := binary.BigEndian.Uint32(h[8:])
 		s.mu.Lock()
-		over := s.out[kind] >= s.fed[kind]
+		over := s.out[kind] >= s.fed[kind] ||
+			kind == outThermal && (len(s.therm) == 0 || s.therm[0].counter != counter)
 		s.mu.Unlock()
 		if over {
 			return errFault
@@ -472,6 +537,9 @@ func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) 
 		}
 		s.mu.Lock()
 		s.out[kind]++
+		if kind == outThermal {
+			s.therm = s.therm[1:]
+		}
 		if s.out[outVideo] >= s.fed[outVideo] && s.out[outThermal] >= s.fed[outThermal] {
 			s.waiting = time.Time{}
 		} else {
@@ -483,8 +551,11 @@ func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) 
 			d.cfg.Log("camera " + c.id + ": decoder recovered")
 			d.cfg.Report(c.id, DecoderRecovered)
 		}
+		if c.ctx.Err() != nil {
+			return nil
+		}
 		d.cfg.Out(Decoded{Camera: c.id, Thermal: kind == outThermal, Width: w, Height: ht,
-			Counter: binary.BigEndian.Uint32(h[8:]), Pixels: px})
+			Counter: counter, Pixels: px})
 	}
 }
 
