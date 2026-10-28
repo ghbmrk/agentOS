@@ -66,7 +66,7 @@ func startClaimSetup(t *testing.T, b *claimBox) *claimSetup {
 			Latch:    &b.latch,
 			Reset:    cs.f.vault.Reset,
 			Download: b.download,
-			Card: card.DisplayConfig{Provision: cs.f.vault.Provision,
+			Card: card.DisplayConfig{Authority: cardAuthority(), Provision: cs.f.vault.Provision,
 				Generate: func(r io.Reader) (*card.Card, error) {
 					c, err := card.Generate(r)
 					if err == nil {

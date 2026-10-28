@@ -49,11 +49,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -338,11 +340,16 @@ type boxFiles struct {
 }
 
 func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
-	cfg, err := prepare(ctx, cfg, sock, fb)
-	if err != nil {
+	// The page authority comes before the card step, which prints its
+	// fingerprint (HW-1): pageTLS first, once agentosd's socket accepts.
+	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
 		return err
 	}
 	pt := pageTLS(ctx, &cfg, localui.Socket{Path: sock}, nil)
+	cfg, err := prepare(ctx, withAuthority(cfg, pt), sock, fb, firstBootAuthority(publishedAuthority, 0, pt))
+	if err != nil {
+		return err
+	}
 	if err := checkPasskeyRPID(cfg.PasskeyRPID, cfg); err != nil {
 		return err
 	}
@@ -427,6 +434,76 @@ func pageTLS(ctx context.Context, cfg *localui.Config, o localui.Owner, logf fun
 	return pt
 }
 
+// withAuthority gives the Owner Card's rotation and the Recovery key
+// page's new card the page authority's certificate (PageTLS.Authority) to
+// print the fingerprint of (REC-4, HW-1). With no HTTPS (pt nil) it is
+// nil, and both refuse to make a card.
+func withAuthority(cfg localui.Config, pt *localui.PageTLS) localui.Config {
+	cfg.PageAuthority = pt.Authority
+	if rot, ok := cfg.Rotation.(*localui.Rotation); ok {
+		rot.Authority = pt.Authority
+	}
+	return cfg
+}
+
+// publishedAuthority is the first-boot page authority's certificate that
+// agentos-keeper-pageca.service publishes before this page starts
+// (image ASSUMPTIONS OWN-a-image): root's, public, never overwritten.
+const publishedAuthority = "/run/agentos-page-ca/authority.der"
+
+// maxAuthority bounds the published certificate's size.
+const maxAuthority = 8 << 10
+
+// firstBootAuthority is the certificate the first-boot card prints (HW-1):
+// the published one at path when it reads as the page's authority, else
+// the one agentosd certified the page under (pt; nil with no HTTPS). The
+// rotation and the Recovery key page take only pt's (REC-4).
+func firstBootAuthority(path string, owner uint32, pt *localui.PageTLS) []byte {
+	if b := readPublished(path, owner); b != nil {
+		return b
+	}
+	return pt.Authority()
+}
+
+// readPublished reads the published certificate at path, or nil: the
+// file and its directory must be owned by owner (root on the box) and
+// writable by no one else, the file regular, not a link, and at most
+// maxAuthority bytes, and it must pass card.CheckAuthority. A missing file
+// is the common case (a box with a store stages none) and reads as nil.
+func readPublished(path string, owner uint32) []byte {
+	if !ownedNotShared(filepath.Dir(path), owner, true) {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxAuthority || !statOwned(fi, owner) {
+		return nil
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxAuthority+1))
+	if err != nil || len(b) > maxAuthority || card.CheckAuthority(b) != nil {
+		return nil
+	}
+	return b
+}
+
+// ownedNotShared reports whether path (not followed) is a directory, when
+// dir, owned by owner and not group- or world-writable.
+func ownedNotShared(path string, owner uint32, dir bool) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.IsDir() == dir && statOwned(fi, owner)
+}
+
+// statOwned reports whether fi is owned by owner and not group- or
+// world-writable.
+func statOwned(fi os.FileInfo, owner uint32) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == owner && fi.Mode().Perm()&0o022 == 0
+}
+
 // ports are the listeners run serves: the plain page, then 443 only with
 // a certificate.
 func ports(cfg localui.Config, pt *localui.PageTLS) []int {
@@ -466,7 +543,9 @@ var errNoVault = errors.New("setup is open and -vault-sock is unset: no claim ga
 // boot. An owned box never runs it: its reset could remove a vault in use.
 // An open setup without the unlock socket fails closed, serving no step:
 // the claim gate of a preloaded box runs only with the first boot.
-func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) (localui.Config, error) {
+// authority is the page authority's certificate the card prints (HW-1);
+// nil holds the card step (firstboot.ErrNoAuthority).
+func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles, authority []byte) (localui.Config, error) {
 	// New asks agentosd whether setup is open and takes no answer as
 	// closed, so it waits until agentosd's socket accepts.
 	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
@@ -490,7 +569,7 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) 
 	}
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
-		change.FileStore{Path: fb.Latch}, void)
+		change.FileStore{Path: fb.Latch}, void, authority)
 	box.Download = fb.Download
 	cfg, _, err = withFirstBoot(cfg, box, void)
 	return cfg, err

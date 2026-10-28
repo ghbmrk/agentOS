@@ -1,7 +1,9 @@
 package localui
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -368,3 +370,59 @@ func TestHTTPRedirectsThePageNameToHTTPS(t *testing.T) {
 		}
 	}
 }
+
+// REQ: HW-1, REC-4
+//
+// PageTLS.Authority is the certificate of the last verified renewal: nil
+// with no HTTPS and before any success, the authority after, unchanged by
+// a failed or refused renewal, and a copy, never the page's own storage.
+func TestPageTLSKeepsTheVerifiedAuthority(t *testing.T) {
+	if (*PageTLS)(nil).Authority() != nil {
+		t.Fatal("no HTTPS has an authority")
+	}
+	f := newCertifier(t)
+	f.fail = true
+	p := &PageTLS{name: DefaultPageName, owner: f, rand: rand.Reader, log: func(string) {}, after: time.After}
+	if p.Renew(context.Background()) == nil || p.Authority() != nil {
+		t.Fatal("an authority before any verified renewal")
+	}
+	f.fail = false
+	if err := p.Renew(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := f.a.Certificate()
+	got := p.Authority()
+	if !bytes.Equal(got, want) {
+		t.Fatal("not the certified authority")
+	}
+	got[0] ^= 0xff
+	if !bytes.Equal(p.Authority(), want) {
+		t.Fatal("Authority shares the page's storage")
+	}
+	// A failed renewal, and one answered under another authority whose
+	// leaf does not verify, leave it as it was.
+	f.fail = true
+	if p.Renew(context.Background()) == nil || !bytes.Equal(p.Authority(), want) {
+		t.Fatal("a failed renewal changed the authority")
+	}
+	other, err := pageca.New("other.internal", testBuilt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.fail, f.a = false, other
+	if p.Renew(context.Background()) == nil || !bytes.Equal(p.Authority(), want) {
+		t.Fatal("a refused answer changed the authority")
+	}
+}
+
+// testAuthorityDER is a page authority's certificate for the tests that
+// make Owner Cards, which print its fingerprint (HW-1).
+var testAuthorityDER = func() []byte {
+	a, err := pageca.New(DefaultPageName, testBuilt, nil)
+	if err != nil {
+		panic(err)
+	}
+	return a.Certificate()
+}()
+
+func testAuthority() []byte { return bytes.Clone(testAuthorityDER) }

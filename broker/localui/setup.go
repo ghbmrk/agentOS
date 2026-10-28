@@ -627,6 +627,12 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.PairCode = u.pair[key]
 	case "codes":
 		v.CodesShown = u.shown && u.shownGen == u.gen
+	case "card":
+		// No page authority, no card (HW-1): the page says so in the
+		// step's fixed line rather than offering a card it cannot show.
+		if v.Err == "" && errors.Is(u.s.cfg.Card.Hold(), firstboot.ErrNoAuthority) {
+			v.Err = firstboot.ErrNoAuthority.Error()
+		}
 	}
 	gen := u.gen
 	u.mu.Unlock()

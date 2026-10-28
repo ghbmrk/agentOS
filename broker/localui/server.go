@@ -85,6 +85,10 @@ type Config struct {
 	// RecoveryCard makes the Recovery key page's new card; card.Generate
 	// when nil (tests wrap it).
 	RecoveryCard func(io.Reader) (*card.Card, error)
+	// PageAuthority is the page authority's certificate
+	// (PageTLS.Authority): the Recovery key page's new card prints its
+	// fingerprint (REC-4, HW-1), and without one it makes no card.
+	PageAuthority func() []byte
 	// Claim, when set, is the box's claim (HW-10): setup waits for the
 	// claim code from the box's sticker at /claim, then continues only on
 	// the phone that typed it.

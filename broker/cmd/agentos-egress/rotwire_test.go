@@ -14,6 +14,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localui"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/recovery"
 )
 
@@ -66,6 +67,8 @@ func newWireRig(t *testing.T) *wireRig {
 	x.u = localui.NewUnlockClient(filepath.Join(run, UnlockSocket))
 	x.ids = &idTap{UnlockClient: x.u}
 	x.r = localui.NewRotation(x.ids)
+	auth := cardAuthority(t)
+	x.r.Authority = func() []byte { return auth }
 	x.r.Generate = func(rd io.Reader) (*card.Card, error) {
 		c, err := card.Generate(rd)
 		if err == nil {
@@ -257,4 +260,15 @@ func TestTheLocalPageSeesAnUnconfirmedCodeGenerator(t *testing.T) {
 	if p, err := x.u.EnrollmentPending(ctx); err != nil || !p {
 		t.Fatalf("after: %v %v", p, err)
 	}
+}
+
+// cardAuthority is a page authority's certificate for the Owner Cards
+// this test makes, which print its fingerprint (HW-1, OWN-card-ca).
+func cardAuthority(t testing.TB) []byte {
+	t.Helper()
+	a, err := pageca.New(pageca.DefaultName, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
 }
