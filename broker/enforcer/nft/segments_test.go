@@ -5,10 +5,12 @@ package nft
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -267,7 +269,13 @@ func TestEdgeSegmentSilent(t *testing.T) {
 	if !hearsRA(t, h.hosts["owner"], func() { sendRA(t, nil, "own0") }) {
 		t.Fatal("control: an RA sent onto Owner was not heard")
 	}
-	if hearsRA(t, edge, func() { sendRA(t, nil, "edge0") }) {
+	// The output chain drops the enforcer's own RA onto the edge's
+	// segment, which the sender sees as EPERM.
+	if hearsRA(t, edge, func() {
+		if err := sendICMP6(t, nil, "edge0", "ff02::1", 134); err != nil && !errors.Is(err, syscall.EPERM) {
+			t.Fatal(err)
+		}
+	}) {
 		t.Error("an RA reached the edge's segment")
 	}
 	rs := h.counter(EdgeIn)
@@ -356,10 +364,17 @@ func TestLoadFailureKeepsPrevious(t *testing.T) {
 
 // ICMPv6 helpers. A router advertisement is type 134, a solicitation 133;
 // both go to all-nodes or all-routers with hop limit 255.
-func sendRA(t *testing.T, x *host, ifc string) { sendICMP6(t, x, ifc, "ff02::1", 134) }
-func sendRS(t *testing.T, x *host)             { sendICMP6(t, x, "eth0", "ff02::2", 133) }
+func sendRA(t *testing.T, x *host, ifc string) { must(t, sendICMP6(t, x, ifc, "ff02::1", 134)) }
+func sendRS(t *testing.T, x *host)             { must(t, sendICMP6(t, x, "eth0", "ff02::2", 133)) }
 
-func sendICMP6(t *testing.T, x *host, ifc, dst string, typ byte) {
+func must(t *testing.T, err error) {
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sendICMP6(t *testing.T, x *host, ifc, dst string, typ byte) error {
+	var serr error
 	within(t, x, func() {
 		c, err := net.ListenPacket("ip6:ipv6-icmp", "::")
 		if err != nil {
@@ -371,10 +386,11 @@ func sendICMP6(t *testing.T, x *host, ifc, dst string, typ byte) {
 			msg = msg[:8]
 		}
 		if _, err := c.WriteTo(msg, &net.IPAddr{IP: net.ParseIP(dst), Zone: ifc}); err != nil {
-			t.Fatalf("send icmpv6 %d on %s: %v", typ, ifc, err)
+			serr = fmt.Errorf("send icmpv6 %d on %s: %w", typ, ifc, err)
 		}
 	})
 	time.Sleep(200 * time.Millisecond)
+	return serr
 }
 
 func hearsRA(t *testing.T, x *host, send func()) bool {
