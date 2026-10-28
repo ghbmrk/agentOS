@@ -11,7 +11,7 @@ Build: `image/camnode/build.sh cm4|qemu OUT [VERSION]` on a Linux host that can 
 | `external/package/camnode-init/` | The initramfs's only program: verity over the booted slot's root, read whole, mounted read-only, then systemd |
 | `external/board/common/` | The firewall, the network, the units and mounts, the user, the kernel fragment, `post-build.sh` (refuses a shell or setuid file), `post-image.sh` (slot image, boot image, factory disk) |
 | `external/board/cm4/` | `config.txt` inside the boot image, udev names for the eMMC, element, button and camera devices, the IR file |
-| `external/board/qemu/` | udev names and units for the stand-ins; the journal on the serial console |
+| `external/board/qemu/` | udev names and units for the stand-ins; the journal on a virtio console of its own |
 | `e2e/driver/` | The end-to-end test: plays the bootloader, the home network, the core and the enforcer |
 | `e2e/element/`, `e2e/button/`, `e2e/encoder/` | QEMU-only stand-ins for the OPTIGA Trust M (CUSE), the button (uinput) and `rpicam-vid` |
 
