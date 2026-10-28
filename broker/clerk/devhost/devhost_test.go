@@ -26,15 +26,20 @@ type script func(t *testing.T, c net.Conn)
 
 // dialer starts each dial's script on a fresh pipe and records every
 // connection, so a test sees how many ran and whether each was closed.
+// It also records when each dial came and the deadline its context
+// carried, which the host set before dialing.
 type dialer struct {
-	t       *testing.T
-	scripts []script
-	mu      sync.Mutex
-	dials   int
-	done    sync.WaitGroup
+	t         *testing.T
+	scripts   []script
+	mu        sync.Mutex
+	dials     int
+	at        []time.Time
+	deadlines []time.Time
+	done      sync.WaitGroup
 }
 
-func (d *dialer) Dial(context.Context) (devhost.Conn, error) {
+func (d *dialer) Dial(ctx context.Context) (devhost.Conn, error) {
+	now := time.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.dials >= len(d.scripts) {
@@ -42,6 +47,9 @@ func (d *dialer) Dial(context.Context) (devhost.Conn, error) {
 	}
 	s := d.scripts[d.dials]
 	d.dials++
+	dl, _ := ctx.Deadline()
+	d.at = append(d.at, now)
+	d.deadlines = append(d.deadlines, dl)
 	host, drv := net.Pipe()
 	d.done.Add(1)
 	go func() {

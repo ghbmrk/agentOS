@@ -1303,11 +1303,69 @@ func TestRotateRecoveryRefuses(t *testing.T) {
 	if w := b.ask(request("passphrase", b.pass, next, good)); w != "ok" {
 		t.Fatalf("the good request after the refusals answered %q", w)
 	}
-	// And only once: the store's recipient has changed, so it is stale.
-	for _, k := range [][]byte{next, newKey(t)} {
-		if w := b.ask(request("recovery", next, k, good)); w != "stale" {
-			t.Fatalf("a replayed approval answered %q", w)
+	// And only once: the store's recipient has changed, so for another key
+	// it is stale, and for the same key it is already done and writes
+	// nothing (MIG-4-recovery-r4c).
+	was := get(os.ReadFile(b.c.storePath()))
+	for k, want := range map[string]string{"another key": "stale", "the approved key": "ok"} {
+		key := newKey(t)
+		if want == "ok" {
+			key = next
 		}
+		if w := b.ask(request("recovery", next, key, good)); w != want {
+			t.Fatalf("a replayed approval for %s answered %q, want %q", k, w, want)
+		}
+	}
+	if !bytes.Equal(get(os.ReadFile(b.c.storePath())), was) {
+		t.Fatal("a replayed approval changed the store")
+	}
+}
+
+// MIG-4-recovery-r4c (BAK-1, brief decision 6): the one-shot wrote the new
+// key and recipient but its ok never reached the owner side, which taps
+// again for the same key and gets a fresh approval from the kernel, still
+// at the old recipient. The retry answers ok with either card factor, the
+// old card's key included, and writes nothing, so the owner side goes on
+// to switch the kernel. A retry for any other key is still refused.
+func TestRotateRecoveryRetryAfterLostAnswer(t *testing.T) {
+	b := newRotBox(t)
+	next := newKey(t)
+	nextID := recipientID(next)
+	if w := b.ask(request("passphrase", b.pass, next, approve(b.head, handoff.RouteCard, b.old, nextID))); w != "ok" {
+		t.Fatalf("the first rotation answered %q", w)
+	}
+	again := approve(b.head, handoff.RouteCard, b.old, nextID)
+	_, stranger, _ := ed25519.GenerateKey(rand.Reader)
+	other := newKey(t)
+	expired := get(handoff.SignApproval(b.head, handoff.Approval{Route: handoff.RouteCard, Old: b.old, Next: nextID,
+		Expires: testNow.UnixMilli()}))
+	for _, c := range []struct {
+		name, want string
+		req        []byte
+	}{
+		{"the old card's key", "ok", request("recovery", b.recovery, next, again)},
+		{"the passphrase", "ok", request("passphrase", b.pass, next, again)},
+		{"a wrong passphrase", "ok", request("passphrase", []byte("not the owner's words"), next, again)},
+		{"another box's kernel", "approval", request("recovery", b.recovery, next, approve(stranger, handoff.RouteCard, b.old, nextID))},
+		{"expired", "approval", request("recovery", b.recovery, next, expired)},
+		{"another key by the old card", "factor", request("recovery", b.recovery, other, approve(b.head, handoff.RouteCard, b.old, recipientID(other)))},
+		{"another key by the passphrase", "stale", request("passphrase", b.pass, other, approve(b.head, handoff.RouteCard, b.old, recipientID(other)))},
+		{"next not approved by the old card", "factor", request("recovery", b.recovery, next, approve(b.head, handoff.RouteCard, b.old, recipientID(other)))},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			was := get(os.ReadFile(b.c.storePath()))
+			if w := b.ask(c.req); w != c.want {
+				t.Fatalf("answered %q, want %q", w, c.want)
+			}
+			if !bytes.Equal(get(os.ReadFile(b.c.storePath())), was) {
+				t.Fatal("a retry changed the store")
+			}
+		})
+	}
+	st := get(seal.Unlock(b.c.storePath(), seal.Recovery{Key: next}))
+	defer st.Close()
+	if got := get(storeRecipientID(st)); got != nextID {
+		t.Fatalf("the store's recipient is %q, not the new key's", got)
 	}
 }
 
