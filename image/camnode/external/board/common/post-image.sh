@@ -53,7 +53,7 @@ ARGS="camnode.root=$ROOT_OFF:$ROOT_LEN camnode.hash=$HASH_OFF camnode.roothash=$
 case $BOARD in
 qemu)
 	cp "$BIN/Image" "$W/bootimg/Image"
-	printf 'ro panic=5 console=ttyAMA0 camnode.disk=vda %s\n' "$ARGS" > "$W/bootimg/cmdline.txt"
+	printf 'ro panic=5 console=ttyAMA0 systemd.show_status=false camnode.disk=vda %s\n' "$ARGS" > "$W/bootimg/cmdline.txt"
 	printf 'kernel=Image\ninitramfs camnode-initramfs.cpio followkernel\n' > "$W/bootimg/config.txt"
 	;;
 cm4)

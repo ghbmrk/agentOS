@@ -35,7 +35,8 @@ type board struct {
 // vm is one power-on of the board.
 type vm struct {
 	cmd     *exec.Cmd
-	console string
+	console string // the kernel's serial console (ttyAMA0)
+	journal string // the journal's console (hvc0), kept off the kernel's (see stopped)
 	part    int
 	trial   bool
 	done    chan error
@@ -215,24 +216,36 @@ func (b *board) power(button bool) (*vm, error) {
 			return nil, fmt.Errorf("fdtput %v: %v: %s", a, err, out)
 		}
 	}
-	console := filepath.Join(dir, "console.log")
+	console, journal := filepath.Join(dir, "console.log"), filepath.Join(dir, "journal.log")
 	args = append(args,
 		"-kernel", files["Image"], "-initrd", files["camnode-initramfs.cpio"],
 		"-append", strings.TrimSpace(string(cmdline)), "-dtb", dtb,
-		"-serial", "file:"+console, "-monitor", "none")
+		"-serial", "file:"+console, "-monitor", "none",
+		"-device", "virtio-serial-pci,addr=0x7", "-chardev", "file,id=journal,path="+journal,
+		"-device", "virtconsole,chardev=journal")
 	cmd := exec.Command(b.tool("qemu-system-aarch64"), args...)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	v := &vm{cmd: cmd, console: console, part: part, trial: trial, done: make(chan error, 1)}
+	v := &vm{cmd: cmd, console: console, journal: journal, part: part, trial: trial, done: make(chan error, 1)}
 	go func() { v.done <- cmd.Wait() }()
 	logf("boot %d: partition %d, tryboot %v, console %s", b.boots, part, trial, console)
 	return v, nil
 }
 
+// log is the kernel's console then the journal.
 func (v *vm) log() string {
+	return v.kernel() + v.journalLog()
+}
+
+func (v *vm) kernel() string {
 	b, _ := os.ReadFile(v.console)
+	return string(b)
+}
+
+func (v *vm) journalLog() string {
+	b, _ := os.ReadFile(v.journal)
 	return string(b)
 }
 
@@ -268,7 +281,10 @@ func (v *vm) stopped(b *board, timeout time.Duration) (restart string, err error
 		v.cut()
 		return "", fmt.Errorf("board did not restart within %v", timeout)
 	}
-	m := restartRe.FindStringSubmatch(v.log())
+	// The kernel's console carries kernel messages only: with the journal on it too, a journal
+	// write holding the console when the node calls reboot could leave the restart line unprinted
+	// when the other CPU is stopped (seen in CI).
+	m := restartRe.FindStringSubmatch(v.kernel())
 	if m == nil {
 		return "", errors.New("board stopped without restarting")
 	}
