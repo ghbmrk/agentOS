@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
@@ -219,8 +220,11 @@ func TestDecodeFormatMatchesDecoder(t *testing.T) {
 // checked on what the go tool links, untagged and with image/camdecode.sh's
 // tags: no net, os/exec or plugin anywhere in the dependency graph; no
 // package outside the standard library but camwire, camdecode and the
-// program; and in those, no unsafe or syscall import and no source but
-// Go, even one a build tag leaves out (.c, .s, .syso, ...). The one
+// program; and in those, no source but Go, even one a build tag leaves
+// out (.c, .s, .syso, ...), and in every Go file of them, whatever its
+// build constraint, only the imports each needs today (no os, reflect,
+// unsafe, syscall or net; the program's os limited to Args, Exit and the
+// three standard streams). The one
 // exception is camdecode/h264.go's cgo, the libavcodec-tagged file that
 // links the pinned H.264-only libavcodec (image/libavcodec.sh), built
 // with --disable-network and run in the sandbox's namespace.
@@ -259,7 +263,7 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 				ImportPath                                       string
 				Standard                                         bool
 				Error                                            *struct{ Err string }
-				Imports, CgoFiles, IgnoredOtherFiles             []string
+				CgoFiles, IgnoredOtherFiles                      []string
 				CFiles, CXXFiles, MFiles, HFiles, FFiles, SFiles []string
 				SwigFiles, SwigCXXFiles, SysoFiles, EmbedFiles   []string
 			}
@@ -288,11 +292,6 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 			if !slices.Equal(p.CgoFiles, cgo) {
 				t.Errorf("%s has cgo files %v, want %v", where, p.CgoFiles, cgo)
 			}
-			for _, im := range p.Imports {
-				if im == "unsafe" || im == "syscall" || im == "C" && len(cgo) == 0 {
-					t.Errorf("%s imports %s", where, im)
-				}
-			}
 			for _, other := range [][]string{p.IgnoredOtherFiles, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles,
 				p.SFiles, p.SwigFiles, p.SwigCXXFiles, p.SysoFiles, p.EmbedFiles} {
 				if len(other) > 0 {
@@ -302,6 +301,56 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 		}
 		if seen != len(ours) {
 			t.Errorf("tags %q: %d of the decoder's own packages listed, want %d", tags, seen, len(ours))
+		}
+	}
+
+	// Every Go file of the decoder's own packages, whatever its build
+	// constraint (GOOS, GOARCH, GOAMD64 or any tag), imports only what
+	// that package needs today: no os, reflect, unsafe, syscall or net, so
+	// no file, process, socket or raw memory is reachable from Go. The
+	// program alone takes os, and uses only its five names below.
+	allowed := map[string][]string{
+		"../../camwire": {"bytes", "crypto/ecdsa", "crypto/ed25519", "crypto/elliptic", "crypto/sha256",
+			"encoding/base64", "encoding/binary", "encoding/json", "errors", "io"},
+		"../../cmd/agentos-camdecode/camdecode": {"bufio", "encoding/binary", "errors", "fmt", "io", "strconv", "strings", ours[0]},
+		"../../cmd/agentos-camdecode":           {"fmt", "io", "os", "runtime/debug", ours[2]},
+	}
+	names := map[string][]string{"os": {"Args", "Exit", "Stderr", "Stdin", "Stdout"}, "runtime/debug": {"SetMemoryLimit"}}
+	for dir, ok := range allowed {
+		files, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("%s: %v", dir, err)
+		}
+		for _, name := range files {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			local := map[string]string{}
+			for _, im := range f.Imports {
+				p, _ := strconv.Unquote(im.Path.Value)
+				switch {
+				case im.Name != nil:
+					t.Errorf("%s imports %s as %s", name, p, im.Name.Name)
+				case p == "C" && filepath.Base(name) == "h264.go" && strings.HasSuffix(dir, "/camdecode"):
+				case !slices.Contains(ok, p):
+					t.Errorf("%s imports %s", name, p)
+				case names[p] != nil:
+					local[p[strings.LastIndex(p, "/")+1:]] = p
+				}
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				if sel, isSel := n.(*ast.SelectorExpr); isSel {
+					if x, isIdent := sel.X.(*ast.Ident); isIdent && local[x.Name] != "" &&
+						!slices.Contains(names[local[x.Name]], sel.Sel.Name) {
+						t.Errorf("%s uses %s.%s", name, local[x.Name], sel.Sel.Name)
+					}
+				}
+				return true
+			})
 		}
 	}
 }
