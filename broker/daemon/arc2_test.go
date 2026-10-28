@@ -281,7 +281,16 @@ var enforcer = map[string]struct {
 }{
 	"enforcer":        {nil, droneForbid},
 	"enforcer/policy": {[]string{"kernel/key"}, droneForbid},
+	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
+	// alone may serve HTTP and TLS; it still launches nothing.
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
 }
+
+var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
+
+// enforcerWeb is the enforcer packages that may link net/http and
+// crypto/tls: the page (slice b) serves the owner's confirm screen.
+var enforcerWeb = map[string]bool{"enforcer/page": true}
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
@@ -351,12 +360,32 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package yet; none of it launches a
-// process or speaks HTTP. Slices e (the nft loader, os/exec), b (the page,
-// net/http) and l (the daemon) widen this with a reason each.
+// process, and only the page (enforcerWeb, slice b) speaks HTTP or TLS.
+// Slices e (the nft loader, os/exec) and l (the daemon) widen this with a
+// reason each.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./enforcer/...").Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
+	}
+	pkgs, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	args := []string{"list", "-C", "..", "-deps"}
+	for _, p := range strings.Fields(string(pkgs)) {
+		if !enforcerWeb[strings.TrimPrefix(p, module)] {
+			args = append(args, p)
+		}
+	}
+	plain, err := exec.Command("go", args...).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(plain)) {
+		if dep == "net/http" || dep == "crypto/tls" {
+			t.Errorf("an enforcer package other than the page links %s", dep)
+		}
 	}
 	links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
 	var own int
@@ -374,6 +403,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 			}
 		case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
 			t.Errorf("the enforcer links third-party %s", dep)
+		case dep == "net/http" || dep == "crypto/tls": // the page's; checked above
 		case contains(forbiddenDeps, dep):
 			t.Errorf("the enforcer links %s", dep)
 		}

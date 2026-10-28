@@ -245,6 +245,7 @@ func TestClassifyClosedList(t *testing.T) {
 		"swap a host":            func(d *Document, s sub) { dev(d, s.x).Allow = []string{"a.example", "x.example"} },
 		"move network":           func(d *Document, s sub) { dev(d, s.x).Network = NetHousehold },
 		"change Wi-Fi identity":  func(d *Document, s sub) { dev(d, s.x).WiFi = "vlan201" },
+		"relabel":                func(d *Document, s sub) { dev(d, s.x).Label = LabelContained },
 		"un-isolate":             func(d *Document, s sub) { dev(d, s.x).Isolated = false }, // run on an isolated base below
 		"toggle the safety list": func(d *Document, s sub) { dev(d, s.x).Everyday = !dev(d, s.x).Everyday; dev(d, s.x).Secure = "" },
 		"add a pair":             func(d *Document, s sub) { d.Pairs = append(d.Pairs, Pair{A: s.x, B: "lock"}) },
@@ -336,7 +337,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure", "Label"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},

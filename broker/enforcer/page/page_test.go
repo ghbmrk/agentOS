@@ -1,0 +1,723 @@
+package page
+
+// REQ: NET-4, NET-6, NET-2, NET-1
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"os"
+	"regexp"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+)
+
+const rp = "enforcer.home.arpa"
+
+// The test home's segments: the Owner network and the admin port may reach
+// the page; nothing else may.
+var (
+	ownerAddr = netip.MustParseAddr("127.0.0.2")
+	adminAddr = netip.MustParseAddr("127.0.0.3")
+	others    = map[string]netip.Addr{
+		"household": netip.MustParseAddr("127.0.0.4"), "guests": netip.MustParseAddr("127.0.0.5"),
+		"devices": netip.MustParseAddr("127.0.0.6"), "core": netip.MustParseAddr("127.0.0.7"),
+		"edge": netip.MustParseAddr("127.0.0.8"),
+	}
+)
+
+// authenticator is the owner's phone: an ES256 passkey that answers a
+// get() for a challenge the page served, as a browser on origin would.
+type authenticator struct {
+	t           *testing.T
+	priv        *ecdsa.PrivateKey
+	rpID        string // the RP ID hashed into authenticator data
+	origin      string
+	crossOrigin bool
+	flags       byte
+}
+
+func newAuthenticator(t *testing.T) *authenticator {
+	t.Helper()
+	p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &authenticator{t: t, priv: p, rpID: rp, origin: "https://" + rp, flags: 0x01 | 0x04 | 0x08}
+}
+
+func (a *authenticator) Public() key.PublicKey {
+	point, _ := a.priv.PublicKey.Bytes()
+	pk, err := key.ES256(rp, point)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return pk
+}
+
+// get signs challenge (base64url, as the page serves it).
+func (a *authenticator) get(challenge string) assertion {
+	cd, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": challenge, "origin": a.origin, "crossOrigin": a.crossOrigin})
+	h := sha256.Sum256([]byte(a.rpID))
+	ad := append(h[:], a.flags, 0, 0, 0, 0)
+	cdh := sha256.Sum256(cd)
+	m := sha256.Sum256(append(append([]byte{}, ad...), cdh[:]...))
+	sig, err := ecdsa.SignASN1(rand.Reader, a.priv, m[:])
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	e := base64.RawURLEncoding.EncodeToString
+	return assertion{AuthenticatorData: e(ad), ClientDataJSON: e(cd), Signature: e(sig)}
+}
+
+type memStore struct{ b []byte }
+
+func (m *memStore) Load() ([]byte, error) { return m.b, nil }
+func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
+
+type fakeChannel struct{ paused bool }
+
+func (c *fakeChannel) Paused() bool  { return c.paused }
+func (c *fakeChannel) Resume() error { c.paused = false; return nil }
+
+func home(v uint64) policy.Document {
+	return policy.Document{
+		Version:      v,
+		Destinations: []string{"models.example"},
+		Devices: []policy.Device{
+			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true},
+			{ID: "lock", Network: policy.NetDevices, Allow: []string{"lock.example"}, Secure: "lock", Label: policy.LabelExceptRadio},
+			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan104", Allow: []string{"a.example"}, VendorCloud: true, Everyday: true, Label: policy.LabelContained},
+		},
+	}
+}
+
+type rig struct {
+	t      *testing.T
+	s      *Server
+	e      *policy.Engine
+	a      *authenticator
+	ch     *fakeChannel
+	now    time.Time
+	cert   Cert
+	remote netip.Addr
+}
+
+// newRig is a page over an engine holding home(1), on a fake clock.
+func newRig(t *testing.T) *rig {
+	t.Helper()
+	a := newAuthenticator(t)
+	e, err := policy.Open(a.Public(), &memStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := policy.Proposal{Doc: home(1), Diff: []byte("v1")}
+	r, _ := p.Root(a.Public())
+	if _, err := e.Propose(p, a.signMsg(key.RootMsg(r)), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Tick(policy.Wait); err != nil {
+		t.Fatal(err)
+	}
+	g := &rig{t: t, e: e, a: a, ch: &fakeChannel{}, now: time.Now(), remote: ownerAddr}
+	g.cert, err = NewCert(rp, g.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.s, err = New(Config{
+		Name: rp, Owner: a.Public(),
+		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
+		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
+		Policy: e, Channel: g.ch, Cert: g.cert.Leaf,
+		Now: func() time.Time { return g.now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// signMsg is a tap over msg itself (the challenge is its SHA-256).
+func (a *authenticator) signMsg(msg []byte) []byte {
+	c := key.Challenge(msg)
+	x := a.get(base64.RawURLEncoding.EncodeToString(c[:]))
+	d := base64.RawURLEncoding.DecodeString
+	ad, _ := d(x.AuthenticatorData)
+	cd, _ := d(x.ClientDataJSON)
+	sig, _ := d(x.Signature)
+	b, err := key.AssertionSig(key.Assertion{AuthenticatorData: ad, ClientDataJSON: cd, Signature: sig})
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return b
+}
+
+// do sends one request to the page as the phone's browser on the page's
+// own origin would, from g.remote.
+func (g *rig) do(method, path string, body any, hdr ...string) *httptest.ResponseRecorder {
+	g.t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req := httptest.NewRequest(method, "https://"+rp+path, rd)
+	req.RemoteAddr = netip.AddrPortFrom(g.remote, 50000).String()
+	if method == http.MethodPost {
+		req.Header.Set("Origin", "https://"+rp)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+	} else {
+		req.Header.Set("Sec-Fetch-Site", "cross-site") // opened from a text
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		if hdr[i] == "Host" {
+			req.Host = hdr[i+1]
+		} else if hdr[i+1] == "" {
+			req.Header.Del(hdr[i])
+		} else {
+			req.Header.Set(hdr[i], hdr[i+1])
+		}
+	}
+	w := httptest.NewRecorder()
+	g.s.ServeHTTP(w, req)
+	return w
+}
+
+// linkFor is the proposal link the core would text for next.
+func linkFor(next policy.Document, summary string) string {
+	b, err := policy.Encode(next)
+	if err != nil {
+		panic(err)
+	}
+	return "/p?d=" + base64.RawURLEncoding.EncodeToString(b) + "&s=" + strings.ReplaceAll(summary, " ", "+")
+}
+
+var (
+	reID   = regexp.MustCompile(`data-id="([0-9a-f]+)"`)
+	reChal = regexp.MustCompile(`data-challenge="([A-Za-z0-9_-]+)"`)
+)
+
+// open opens a proposal link and returns the screen, its challenge ID and
+// the challenge.
+func (g *rig) open(next policy.Document, summary string) (string, string, string) {
+	g.t.Helper()
+	w := g.do(http.MethodGet, linkFor(next, summary), nil)
+	if w.Code != http.StatusOK {
+		g.t.Fatalf("open: %d %s", w.Code, w.Body)
+	}
+	body := w.Body.String()
+	id, ch := reID.FindStringSubmatch(body), reChal.FindStringSubmatch(body)
+	if id == nil || ch == nil {
+		g.t.Fatalf("no challenge on the screen:\n%s", body)
+	}
+	return body, id[1], ch[1]
+}
+
+func (g *rig) approve(id string, a assertion) *httptest.ResponseRecorder {
+	a.ID = id
+	return g.do(http.MethodPost, "/approve", a)
+}
+
+func edit(v uint64, f func(d *policy.Document)) policy.Document {
+	d := home(v)
+	f(&d)
+	return d
+}
+
+func dev(d *policy.Document, id string) *policy.Device {
+	for i := range d.Devices {
+		if d.Devices[i].ID == id {
+			return &d.Devices[i]
+		}
+	}
+	panic(id)
+}
+
+// NET-6: the page answers only the Owner network and the wired admin port.
+// A connection from Household, Guests, Devices, the core's or the edge's
+// segment is closed before the TLS handshake, with no answer; a request
+// that reached the handler from one anyway is aborted unanswered; and the
+// page never binds an unspecified address or one off those networks.
+func TestServedOnlyToOwnerAndAdmin(t *testing.T) {
+	g := newRig(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go g.s.Serve(ln)
+	defer ln.Close()
+	roots := x509.NewCertPool()
+	rc, _ := x509.ParseCertificate(g.cert.Root)
+	roots.AddCert(rc)
+
+	get := func(from netip.Addr) (int, error) {
+		d := &net.Dialer{LocalAddr: &net.TCPAddr{IP: from.AsSlice()}, Timeout: 2 * time.Second}
+		c := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return d.DialContext(ctx, "tcp", ln.Addr().String())
+			},
+			TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: rp},
+		}}
+		res, err := c.Get("https://" + rp + "/")
+		if err != nil {
+			return 0, err
+		}
+		res.Body.Close()
+		return res.StatusCode, nil
+	}
+	for name, from := range map[string]netip.Addr{"owner": ownerAddr, "admin": adminAddr} {
+		if code, err := get(from); err != nil || code != http.StatusOK {
+			t.Errorf("from the %s network: %d %v, want the page", name, code, err)
+		}
+	}
+	for name, from := range others {
+		if code, err := get(from); err == nil {
+			t.Errorf("from the %s segment: answered %d", name, code)
+		}
+		// Not even a TLS handshake: the connection is closed first.
+		d := &net.Dialer{LocalAddr: &net.TCPAddr{IP: from.AsSlice()}, Timeout: 2 * time.Second}
+		if c, err := tls.DialWithDialer(d, "tcp", ln.Addr().String(), &tls.Config{RootCAs: roots, ServerName: rp}); err == nil {
+			c.Close()
+			t.Errorf("from the %s segment: the TLS handshake completed", name)
+		}
+	}
+
+	for name, from := range others {
+		g.remote = from
+		func() {
+			defer func() {
+				if r := recover(); r != http.ErrAbortHandler {
+					t.Errorf("from the %s segment, the handler did not abort: %v", name, r)
+				}
+			}()
+			g.do(http.MethodGet, "/", nil)
+		}()
+	}
+
+	cfg := g.s.cfg
+	for name, addrs := range map[string][]netip.AddrPort{
+		"every interface":     {netip.MustParseAddrPort("0.0.0.0:443")},
+		"every v6 interface":  {netip.MustParseAddrPort("[::]:443")},
+		"the devices network": {netip.AddrPortFrom(others["devices"], 443)},
+		"none":                nil,
+	} {
+		c := cfg
+		c.Addrs = addrs
+		if _, err := New(c); !errors.Is(err, ErrConfig) {
+			t.Errorf("binding %s: %v, want refused", name, err)
+		}
+	}
+	c := cfg
+	c.Owner, _ = key.ES256("agentos.home.arpa", g.a.Public().Bytes())
+	if _, err := New(c); !errors.Is(err, ErrConfig) {
+		t.Errorf("a passkey on another RP ID: %v, want refused", err)
+	}
+
+	// The root the phone trusts vouches for the enforcer's name only.
+	root, rootKey, err := newRoot(rp, g.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := issue(root, rootKey, "bank.example", g.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	oc, _ := x509.ParseCertificate(other.Certificate[0])
+	if _, err := oc.Verify(x509.VerifyOptions{Roots: pool, DNSName: "bank.example", CurrentTime: g.now}); err == nil {
+		t.Error("the enforcer's root vouches for another name")
+	}
+}
+
+// NET-4: a proposal link whose summary says one thing and whose change does
+// another shows the change, drawn by the enforcer from the policy, and the
+// owner's tap signs that rendered diff. A diff drawn against a policy that
+// has moved since is refused, not applied over the move.
+func TestFalseDiffShowsTrueDiff(t *testing.T) {
+	g := newRig(t)
+	next := edit(7, func(d *policy.Document) { dev(d, "tv").Allow = append(dev(d, "tv").Allow, "x.example") })
+	body, id, ch := g.open(next, "Isolate the camera")
+	if strings.Contains(body, "Isolate") || strings.Contains(body, "camera") {
+		t.Errorf("the screen shows the link's summary:\n%s", body)
+	}
+	for _, want := range []string{"Let tv reach x.example.", "applies 10 minutes after you approve"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the screen lacks %q:\n%s", want, body)
+		}
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	p := g.e.Pending()
+	if len(p) != 1 || !strings.Contains(string(p[0].Diff), "Let tv reach x.example.") || strings.Contains(string(p[0].Diff), "camera") {
+		t.Fatalf("pending: %+v", p)
+	}
+	doc, _ := policy.Decode(p[0].Doc)
+	if err := policy.Check(g.a.Public(), p[0].Key, policy.Proposal{Doc: doc, Diff: p[0].Diff}); err != nil {
+		t.Errorf("the owner's key does not commit to the rendered diff: %v", err)
+	}
+	if doc.Version <= 1 {
+		t.Errorf("version %d: the page did not pick a rising version", doc.Version)
+	}
+	if err := g.e.Cancel(p[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The core tightens after the screen is drawn: approving it would undo
+	// that cut without the screen saying so.
+	next = edit(8, func(d *policy.Document) { dev(d, "tv").Allow = append(dev(d, "tv").Allow, "y.example") })
+	_, id, ch = g.open(next, "")
+	if err := g.e.Tighten(policy.Op{Kind: policy.CutVendorCloud, Device: "tv"}, g.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusConflict {
+		t.Errorf("a diff drawn before a move: %d %s, want refused", w.Code, w.Body)
+	}
+	if len(g.e.Pending()) != 0 || !strings.Contains(g.do(http.MethodGet, "/", nil).Body.String(), "Nothing.") {
+		t.Error("a stale diff was applied")
+	}
+
+	// The core's names cannot reorder a line: a right-to-left override is
+	// shown escaped.
+	lines := Describe(home(1), edit(2, func(d *policy.Document) { dev(d, "tv").Allow = []string{"a.example", "moc.\u202eevil"} }))
+	if !slices.Contains(lines, `Let tv reach "moc.\u202eevil".`) {
+		t.Errorf("an override shown raw: %q", lines)
+	}
+
+	// A tightening applies at once.
+	cut := g.e.Current()
+	dev(&cut, "tv").Allow = nil
+	body, id, ch = g.open(cut, "")
+	if !strings.Contains(body, "applies as soon as you approve") {
+		t.Errorf("a tightening's screen:\n%s", body)
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"applied":true`) {
+		t.Errorf("a tightening: %d %s", w.Code, w.Body)
+	}
+}
+
+// NET-4 Passkey rules: the page takes only the owner's passkey, with user
+// verification, on the enforcer's RP ID and origin, not cross-origin, over
+// the diff it drew, once. Each refusal leaves the policy as it was.
+func TestAssertionRefusals(t *testing.T) {
+	g := newRig(t)
+	next := edit(2, func(d *policy.Document) { dev(d, "cam").Allow = append(dev(d, "cam").Allow, "x.example") })
+	stranger := newAuthenticator(t)
+	for name, f := range map[string]func(ch string) assertion{
+		"none":  func(string) assertion { return assertion{} },
+		"no UV": func(ch string) assertion { a := *g.a; a.flags = 0x01; return a.get(ch) },
+		"wrong RP ID": func(ch string) assertion {
+			a := *g.a
+			a.rpID, a.origin = "home.arpa", "https://home.arpa"
+			return a.get(ch)
+		},
+		"wrong origin": func(ch string) assertion { a := *g.a; a.origin = "https://agentos." + rp; return a.get(ch) },
+		"cross-origin": func(ch string) assertion { a := *g.a; a.crossOrigin = true; return a.get(ch) },
+		"another key":  func(ch string) assertion { return stranger.get(ch) },
+		"another diff": func(string) assertion {
+			p := policy.Proposal{Doc: next, Diff: []byte("Isolate the camera")}
+			r, _ := p.Root(g.a.Public())
+			c := key.Challenge(key.RootMsg(r))
+			return g.a.get(base64.RawURLEncoding.EncodeToString(c[:]))
+		},
+		"another challenge": func(string) assertion {
+			c := key.Challenge([]byte("anything else"))
+			return g.a.get(base64.RawURLEncoding.EncodeToString(c[:]))
+		},
+	} {
+		_, id, ch := g.open(next, "")
+		if w := g.approve(id, f(ch)); w.Code != http.StatusForbidden {
+			t.Errorf("%s: %d %s, want refused", name, w.Code, w.Body)
+		}
+		if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusGone {
+			t.Errorf("%s: the challenge outlived a refused tap: %d", name, w.Code)
+		}
+	}
+	if len(g.e.Pending()) != 0 || g.e.Current().Version != 1 {
+		t.Fatalf("a refused tap changed the policy: %d pending, version %d", len(g.e.Pending()), g.e.Current().Version)
+	}
+
+	// Sent from another origin, the tap is refused before it is read.
+	_, id, ch := g.open(next, "")
+	for name, hdr := range map[string][]string{
+		"another origin":   {"Origin", "https://agentos.home.arpa"},
+		"no origin":        {"Origin", ""},
+		"cross-site fetch": {"Sec-Fetch-Site", "cross-site"},
+		"a form post":      {"Content-Type", "application/x-www-form-urlencoded"},
+	} {
+		a := g.a.get(ch)
+		a.ID = id
+		if w := g.do(http.MethodPost, "/approve", a, hdr...); w.Code != http.StatusForbidden {
+			t.Errorf("%s: %d, want refused", name, w.Code)
+		}
+	}
+
+	// Replayed: the same tap again, or on a fresh screen for the same link.
+	good := g.a.get(ch)
+	if w := g.approve(id, good); w.Code != http.StatusOK {
+		t.Fatalf("the owner's tap: %d %s", w.Code, w.Body)
+	}
+	if w := g.approve(id, good); w.Code != http.StatusGone {
+		t.Errorf("replayed: %d, want refused", w.Code)
+	}
+	if err := g.e.Cancel(g.e.Pending()[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	_, id2, _ := g.open(next, "")
+	if w := g.approve(id2, good); w.Code != http.StatusForbidden {
+		t.Errorf("replayed on a fresh screen: %d, want refused", w.Code)
+	}
+	if len(g.e.Pending()) != 0 {
+		t.Error("a replayed tap is pending")
+	}
+
+	// Malformed and flooding links are refused.
+	g.now = g.now.Add(LinkWindow)
+	for name, path := range map[string]string{
+		"no document":   "/p",
+		"not base64":    "/p?d=%%%",
+		"not canonical": "/p?d=" + base64.RawURLEncoding.EncodeToString([]byte(`{"version":1, "devices":[]}`)),
+		"extra field":   linkFor(next, "") + "&x=1",
+		"no change":     linkFor(home(5), ""),
+		"too long":      "/p?d=" + strings.Repeat("A", maxLink+4),
+	} {
+		if w := g.do(http.MethodGet, path, nil); w.Code != http.StatusBadRequest {
+			t.Errorf("%s: %d, want refused", name, w.Code)
+		}
+	}
+	g.now = g.now.Add(LinkWindow)
+	var limited bool
+	for range LinkLimit + 1 {
+		limited = g.do(http.MethodGet, linkFor(next, ""), nil).Code == http.StatusTooManyRequests
+	}
+	if !limited {
+		t.Error("proposal links are not rate-limited")
+	}
+}
+
+// NET-4: no answer from the page can be framed, by agentOS's pages or
+// anyone's, and a request the browser marks as a frame load or a
+// cross-site subresource gets nothing.
+func TestNotFramable(t *testing.T) {
+	g := newRig(t)
+	next := edit(2, func(d *policy.Document) { dev(d, "tv").Isolated = true })
+	for _, path := range []string{"/", linkFor(next, ""), "/p?d=bad", "/page.js", "/nothing"} {
+		w := g.do(http.MethodGet, path, nil)
+		h := w.Header()
+		if h.Get("X-Frame-Options") != "DENY" || !strings.Contains(h.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Errorf("%s: framing headers %q, %q", path, h.Get("X-Frame-Options"), h.Get("Content-Security-Policy"))
+		}
+	}
+	if w := g.do(http.MethodPost, "/approve", assertion{}); w.Header().Get("X-Frame-Options") != "DENY" {
+		t.Error("a refusal is framable")
+	}
+	for _, dest := range []string{"iframe", "frame", "embed", "object"} {
+		w := g.do(http.MethodGet, linkFor(next, ""), nil, "Sec-Fetch-Dest", dest)
+		if w.Code != http.StatusForbidden || strings.Contains(w.Body.String(), "data-challenge") {
+			t.Errorf("loaded as %s: %d", dest, w.Code)
+		}
+	}
+	if w := g.do(http.MethodGet, "/", nil, "Sec-Fetch-Mode", "no-cors"); w.Code != http.StatusForbidden {
+		t.Errorf("a cross-site subresource load: %d", w.Code)
+	}
+	if w := g.do(http.MethodGet, "/", nil, "Host", "evil.example"); w.Code == http.StatusOK {
+		t.Error("answered for another host name (DNS rebinding)")
+	}
+}
+
+// NET-2 Channel, NET-6: a paused channel resumes only by the owner's tap on
+// this page, on a resume challenge, once.
+func TestResumeOnlyFromPage(t *testing.T) {
+	g := newRig(t)
+	g.ch.paused = true
+	if !strings.Contains(g.do(http.MethodGet, "/", nil).Body.String(), "The channel is paused.") {
+		t.Error("the page does not show the pause")
+	}
+	resume := func(id string, a assertion) int {
+		var b struct {
+			assertion
+			Action string `json:"action"`
+		}
+		b.assertion, b.Action = a, ActResume
+		b.ID = id
+		return g.do(http.MethodPost, "/act", b).Code
+	}
+	chal := func(action, target string, hdr ...string) (string, string) {
+		w := g.do(http.MethodPost, "/challenge", map[string]string{"action": action, "target": target}, hdr...)
+		var c struct{ ID, Challenge string }
+		json.Unmarshal(w.Body.Bytes(), &c)
+		return c.ID, c.Challenge
+	}
+
+	if code := resume("", g.a.get("x")); code != http.StatusGone {
+		t.Errorf("no challenge: %d", code)
+	}
+	if id, _ := chal(ActResume, "", "Origin", "https://agentos.home.arpa"); id != "" {
+		t.Error("another origin drew a resume challenge")
+	}
+	id, ch := chal(ActResume, "")
+	a := *g.a
+	a.flags = 0x01
+	if code := resume(id, a.get(ch)); code != http.StatusForbidden || !g.ch.paused {
+		t.Errorf("without user verification: %d, paused %v", code, g.ch.paused)
+	}
+	// A tap for a cancel does not resume.
+	g.open(edit(2, func(d *policy.Document) { dev(d, "tv").Allow = nil; dev(d, "cam").VendorCloud = false }), "")
+	id, ch = chal(ActResume, "")
+	c := key.Challenge(actMsg(ActCancel, "", id))
+	if code := resume(id, g.a.get(base64.RawURLEncoding.EncodeToString(c[:]))); code != http.StatusForbidden || !g.ch.paused {
+		t.Errorf("a cancel's tap: %d, paused %v", code, g.ch.paused)
+	}
+	id, ch = chal(ActResume, "")
+	good := g.a.get(ch)
+	if code := resume(id, good); code != http.StatusOK || g.ch.paused {
+		t.Fatalf("the owner's tap: %d, paused %v", code, g.ch.paused)
+	}
+	g.ch.paused = true
+	if code := resume(id, good); code != http.StatusGone || !g.ch.paused {
+		t.Errorf("replayed: %d, paused %v", code, g.ch.paused)
+	}
+	g.remote = others["core"]
+	func() {
+		defer func() { recover() }()
+		resume(id, good)
+	}()
+	if !g.ch.paused {
+		t.Error("the core's segment resumed the channel")
+	}
+}
+
+// NET-4 Loosening: the page shows the loosening waiting and cancels it on
+// the owner's tap over that one cancel.
+func TestCancelPending(t *testing.T) {
+	g := newRig(t)
+	next := edit(2, func(d *policy.Document) { dev(d, "cam").Allow = append(dev(d, "cam").Allow, "x.example") })
+	_, id, ch := g.open(next, "")
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		t.Fatal(w.Body)
+	}
+	pid := g.e.Pending()[0].ID
+	if body := g.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(body, "Let cam reach x.example.") || !strings.Contains(body, "Cancel with your passkey") {
+		t.Errorf("home does not show the pending loosening:\n%s", body)
+	}
+	w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActCancel, "target": pid})
+	var c struct{ ID, Challenge string }
+	json.Unmarshal(w.Body.Bytes(), &c)
+	a := g.a.get(c.Challenge)
+	a.ID = c.ID
+	if w := g.do(http.MethodPost, "/act", struct {
+		assertion
+		Action string `json:"action"`
+	}{a, ActCancel}); w.Code != http.StatusOK || len(g.e.Pending()) != 0 {
+		t.Errorf("cancel: %d %s", w.Code, w.Body)
+	}
+	if w := g.do(http.MethodPost, "/challenge", map[string]string{"action": ActCancel, "target": "policy/nope"}); w.Code != http.StatusNotFound {
+		t.Errorf("cancel of nothing: %d", w.Code)
+	}
+}
+
+// NET-1: the page's limits are SPEC's words, and each device's label is the
+// signed policy's, never what the device calls itself. NET-4: the page
+// shows whether the passkey is synced.
+func TestLimitsWordingAndLabels(t *testing.T) {
+	spec, err := os.ReadFile("../../../SPEC.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []string
+	in := false
+	for _, l := range strings.Split(string(spec), "\n") {
+		switch {
+		case strings.HasPrefix(l, "- **NET-1**"):
+			in = true
+		case in && strings.HasPrefix(l, "  - "):
+			l = strings.TrimPrefix(l, "  - ")
+			l = strings.ReplaceAll(strings.ReplaceAll(l, " [Fact]", ""), "`", "")
+			want = append(want, l)
+		case in:
+			in = false
+		}
+	}
+	if len(want) == 0 || !slices.Equal(Limits, want) {
+		t.Errorf("the limits differ from SPEC NET-1:\n got %q\nwant %q", Limits, want)
+	}
+
+	g := newRig(t)
+	body := g.do(http.MethodGet, "/", nil).Body.String()
+	for _, l := range Limits {
+		if !strings.Contains(body, template_escape(l)) {
+			t.Errorf("home lacks the limit %q", l)
+		}
+	}
+	// A device that calls itself "contained" has no label in the policy.
+	next := edit(2, func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "contained", Network: policy.NetDevices, Everyday: true})
+	})
+	scr, id, ch := g.open(next, "")
+	if !strings.Contains(scr, "Label contained not containable.") {
+		t.Errorf("the add screen:\n%s", scr)
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		t.Fatal(w.Body)
+	}
+	g.now = g.now.Add(11 * time.Minute)
+	if _, err := g.e.Tick(g.now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	body = g.do(http.MethodGet, "/", nil).Body.String()
+	for _, row := range []string{
+		"<td>contained</td><td>devices</td><td>not containable</td>",
+		"<td>tv</td><td>devices</td><td>contained</td>",
+		"<td>lock</td><td>devices</td><td>contained except radio</td>",
+		"<td>cam</td><td>devices</td><td>not containable</td>",
+	} {
+		if !strings.Contains(body, row) {
+			t.Errorf("home lacks the row %s", row)
+		}
+	}
+	if !strings.Contains(body, "Your passkey is synced") {
+		t.Error("home does not say the passkey is synced (its last tap set BE)")
+	}
+}
+
+func template_escape(s string) string {
+	var b strings.Builder
+	for _, c := range s {
+		switch c {
+		case '\'':
+			b.WriteString("&#39;")
+		case '"':
+			b.WriteString("&#34;")
+		case '&':
+			b.WriteString("&amp;")
+		case '<':
+			b.WriteString("&lt;")
+		case '>':
+			b.WriteString("&gt;")
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
+}
