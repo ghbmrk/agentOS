@@ -15,7 +15,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 3. **Decoys are picked by a sealed secret.** Each entry's decoy bit is an HMAC of its generated value under a sealed-store slot key (STO-2), so neither the image nor the repository nor a copy of the table without that key shows which entries are decoys.
 4. **The enforcer makes its own decoy addresses.** It generates them in its own segments with its own generator, never takes them from the core, and serves them as a channel read so the core can plant references (an SSH `known_hosts` entry for "core-admin", a "Backups" share path). Drop-and-trip rules on them are part of the enforcer's own ruleset; no listener runs.
 5. **Wallets use a mature library.** BIP39 seeds and BIP84 receive addresses through an existing Go library (for example `btcsuite/btcd/btcutil/hdkeychain`); the PR names why if it picks another. The box never broadcasts a transaction and holds no code that spends.
-6. **The enforcer's own line** (D-232, pending Mark's card): ENF-h sends its texts and calls on a send-only modem and SIM of its own (`broker/modem/at` reused, inbound refused, no data bearer). If Mark picks "light and wallets only", slice d drops this and ENF-h stays as briefed.
+6. **The enforcer's own line** (pending Mark's card; it gets its own D row and a NET-2 spec PR if chosen): ENF-h sends its texts and calls on a send-only modem and SIM of its own (`broker/modem/at` reused, inbound refused, no data bearer). If Mark picks "light and wallets only", slice d drops this and ENF-h stays as briefed.
 
 ## Slices
 
@@ -31,7 +31,7 @@ Canaries exist only in tests. A running box that is breached raises no alarm: an
 
 ### DECOY-b (#3763): kernel trips and the response (KRN-12 Trips, Response)
 
-**Scope:** `broker/kernel/` (trip entry, refusal lookup, outbound-path match, response, resume), `broker/kernel/key/` only if the refusal needs a typed reason. `Trusted-core: D-232`.
+**Scope:** `broker/kernel/` (trip entry, refusal lookup, outbound-path match, response, resume), `broker/kernel/key/` only if the refusal needs a typed reason. Trusted-core growth: a one-row DECISIONS PR naming this slice's PR and citing D-232 merges first, then the PR body carries `Trusted-core: <that row>` (D-159; `tools/trusted_base.py` accepts only a row naming the PR itself).
 **Builds:** a `trip` log entry; a refused key that is in the table logs a trip; the kernel's outbound path runs the matcher; a trip pauses the keys of its scope (KEY-6's pause), stops planning, and queues one fixed-template security text; a honey-key trip stops only the citing planner session; a resume of a trip's pause needs a passkey assertion (KEY-4), a texted RESUME is refused with fixed wording.
 **Acceptance tests:**
 1. KRN-12: `kernel::TestHoneyKeyTripsSessionOnly`. Catches a careless planner stopping the box, or a honey key that authorizes.
