@@ -49,6 +49,18 @@ allow evals/slice-inbox/
 # list does not name (D-198). Remove once #3562 merges.
 exempt-pr 3562
 
+# #3586 (CAM-server b1, #3513 part b): the new broker/camnode/ and broker/camwire/, which the
+# G2 list does not name (D-198). Remove once #3586 merges.
+exempt-pr 3586
+
+# #3589 (DEVSLOT-host-unit b2b-1, #3473): the new broker/cmd/agentos-devices/, which the G2
+# list does not name (D-198). Remove once #3589 merges.
+exempt-pr 3589
+
+# #3596 (VIS-faces c1, #3515 part c): broker/vision/ (with the new faces/) and
+# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3596 merges.
+exempt-pr 3596
+
 # Project machinery and records.
 allow .claude/
 allow .github/
