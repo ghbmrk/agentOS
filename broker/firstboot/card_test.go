@@ -18,6 +18,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
+	"github.com/ghbmrk/agentos/broker/claim"
 	"github.com/ghbmrk/agentos/broker/recovery"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
@@ -52,7 +53,7 @@ func bootImage(t *testing.T, dir string) *boot {
 	}
 	t.Cleanup(func() { jf.Close() })
 	st := change.FileStore{Path: filepath.Join(dir, "var", "lib", "agentos", "firstboot-card.json")}
-	b.step, err = NewCardStep(st, card.DisplayConfig{
+	b.step, err = NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t),
 		Generate: func(r io.Reader) (*card.Card, error) {
 			c, err := card.Generate(r)
 			if err == nil {
@@ -241,7 +242,7 @@ func TestCardStepLatchFailureHolds(t *testing.T) {
 	st := &change.MemStore{}
 	var provisioned int
 	var shown *card.Card
-	s, err := NewCardStep(st, card.DisplayConfig{
+	s, err := NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t),
 		Generate: func(r io.Reader) (*card.Card, error) {
 			c, err := card.Generate(r)
 			if err == nil {
@@ -310,7 +311,61 @@ func TestNewCardStepBadState(t *testing.T) {
 	if err := st.Save([]byte("{")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }}); err == nil {
+	if _, err := NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t), Provision: func(*card.Card) error { return nil }}); err == nil {
 		t.Fatal("corrupt state accepted")
+	}
+}
+
+// countRand counts the bytes read from it.
+type countRand struct{ n int }
+
+func (c *countRand) Read(p []byte) (int, error) { c.n += len(p); return len(p), nil }
+
+// REQ: HW-1
+//
+// No authority, no card: a card step without the page authority (nil or
+// not the page's) builds no display, draws nothing and generates nothing,
+// holds with the fixed ErrNoAuthority line, and never errors out of
+// NewCardStep or Begin, so the page does not crash-loop. Again leaves the
+// vault alone. It catches a crash-loop or a card drawn early.
+func TestCardStepHoldsWithoutAuthority(t *testing.T) {
+	for name, auth := range map[string][]byte{"nil": nil, "garbage": []byte("not a certificate")} {
+		r := &countRand{}
+		gen := 0
+		cfg := card.DisplayConfig{Authority: auth, Rand: r,
+			Generate:  func(r io.Reader) (*card.Card, error) { gen++; return card.Generate(r) },
+			Provision: func(*card.Card) error { t.Fatal("provisioned without a card"); return nil }}
+		s, err := NewCardStep(&change.MemStore{}, cfg)
+		if err != nil {
+			t.Fatalf("%s: NewCardStep: %v", name, err)
+		}
+		if s.Display() != nil || !errors.Is(s.Hold(), ErrNoAuthority) || r.n != 0 || gen != 0 {
+			t.Fatalf("%s: display %v, hold %v, %d random bytes, %d cards", name, s.Display(), s.Hold(), r.n, gen)
+		}
+		resets := 0
+		if err := s.Again(func() error { resets++; return nil }); !errors.Is(err, ErrNoAuthority) || resets != 0 {
+			t.Fatalf("%s: Again = %v after %d resets", name, err, resets)
+		}
+		if s.Hold().Error() != "I cannot make your Owner Card until my page authority exists." {
+			t.Fatalf("hold text %q", s.Hold())
+		}
+		// Begin, on the download route, starts and holds the same way.
+		fb, err := Begin(BoxConfig{Download: true, Latch: &change.MemStore{}, Reset: func() error { return nil }, Card: cfg,
+			Claim: claim.Config{Store: &change.MemStore{}}})
+		if err != nil {
+			t.Fatalf("%s: Begin: %v", name, err)
+		}
+		if fb.Card.Display() != nil || !errors.Is(fb.Card.Hold(), ErrNoAuthority) || r.n != 0 || gen != 0 {
+			t.Fatalf("%s: Begin's card step drew a card", name)
+		}
+	}
+	// A confirmed latch needs no authority: the card is done.
+	st := &change.MemStore{}
+	if err := st.Save([]byte(`{"card_confirmed":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
+	if err != nil || s.Hold() != nil {
+		t.Fatalf("confirmed card step: %v, hold %v", err, s.Hold())
 	}
 }

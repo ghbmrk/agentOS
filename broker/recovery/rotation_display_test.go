@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/vault"
 )
 
@@ -49,7 +50,7 @@ func (x *box) rotateOnDisplay(parts []Part, proof Proof) *rotWire {
 	must(x.t, err)
 	w := &rotWire{t: x.t, x: x, p: p, now: t0}
 	rot := cardParts(p.Parts())
-	w.d, err = card.NewDisplay(card.DisplayConfig{
+	w.d, err = card.NewDisplay(card.DisplayConfig{Authority: cardAuthority(x.t),
 		Rotate: &rot,
 		Generate: func(r io.Reader) (*card.Card, error) {
 			c, err := card.Generate(r)
@@ -538,4 +539,15 @@ func recvName(e ast.Expr) string {
 		return id.Name
 	}
 	return ""
+}
+
+// cardAuthority is a page authority's certificate for the Owner Cards
+// this test makes, which print its fingerprint (HW-1, OWN-card-ca).
+func cardAuthority(t testing.TB) []byte {
+	t.Helper()
+	a, err := pageca.New(pageca.DefaultName, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
 }

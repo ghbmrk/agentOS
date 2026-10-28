@@ -338,11 +338,16 @@ type boxFiles struct {
 }
 
 func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
-	cfg, err := prepare(ctx, cfg, sock, fb)
-	if err != nil {
+	// The page authority comes before the card step, which prints its
+	// fingerprint (HW-1): pageTLS first, once agentosd's socket accepts.
+	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
 		return err
 	}
 	pt := pageTLS(ctx, &cfg, localui.Socket{Path: sock}, nil)
+	cfg, err := prepare(ctx, withAuthority(cfg, pt), sock, fb, pt.Authority())
+	if err != nil {
+		return err
+	}
 	if err := checkPasskeyRPID(cfg.PasskeyRPID, cfg); err != nil {
 		return err
 	}
@@ -427,6 +432,18 @@ func pageTLS(ctx context.Context, cfg *localui.Config, o localui.Owner, logf fun
 	return pt
 }
 
+// withAuthority gives the Owner Card's rotation and the Recovery key
+// page's new card the page authority's certificate (PageTLS.Authority) to
+// print the fingerprint of (REC-4, HW-1). With no HTTPS (pt nil) it is
+// nil, and both refuse to make a card.
+func withAuthority(cfg localui.Config, pt *localui.PageTLS) localui.Config {
+	cfg.PageAuthority = pt.Authority
+	if rot, ok := cfg.Rotation.(*localui.Rotation); ok {
+		rot.Authority = pt.Authority
+	}
+	return cfg
+}
+
 // ports are the listeners run serves: the plain page, then 443 only with
 // a certificate.
 func ports(cfg localui.Config, pt *localui.PageTLS) []int {
@@ -466,7 +483,9 @@ var errNoVault = errors.New("setup is open and -vault-sock is unset: no claim ga
 // boot. An owned box never runs it: its reset could remove a vault in use.
 // An open setup without the unlock socket fails closed, serving no step:
 // the claim gate of a preloaded box runs only with the first boot.
-func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) (localui.Config, error) {
+// authority is the page authority's certificate the card prints (HW-1);
+// nil holds the card step (firstboot.ErrNoAuthority).
+func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles, authority []byte) (localui.Config, error) {
 	// New asks agentosd whether setup is open and takes no answer as
 	// closed, so it waits until agentosd's socket accepts.
 	if err := awaitSocket(ctx, sock, agentosdWait); err != nil {
@@ -490,7 +509,7 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) 
 	}
 	void := &localui.CodesVoid{}
 	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
-		change.FileStore{Path: fb.Latch}, void)
+		change.FileStore{Path: fb.Latch}, void, authority)
 	box.Download = fb.Download
 	cfg, _, err = withFirstBoot(cfg, box, void)
 	return cfg, err

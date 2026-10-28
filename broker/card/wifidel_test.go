@@ -16,11 +16,11 @@ func TestCardPrintsThePageByItsName(t *testing.T) {
 		t.Fatalf("BoxPage = %q", BoxPage)
 	}
 	c := mustGen(t, 7)
-	full, err := HTML(c)
+	full, err := HTML(c, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, Parts{Setup: true})
+	rot, err := rotationHTML(c, Parts{Setup: true}, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +48,11 @@ var allParts = Parts{Setup: true, Passphrase: true, Grid: true, Recovery: true}
 // the local page's name (CH-12, WIFI-del-f), names a box Wi-Fi.
 func TestCardCarriesNoWiFi(t *testing.T) {
 	c := mustGen(t, 8)
-	full, err := HTML(c)
+	full, err := HTML(c, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, allParts)
+	rot, err := rotationHTML(c, allParts, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestQuickStartStartsFromTheEnforcer(t *testing.T) {
 	if setup < 0 || owner <= setup {
 		t.Fatalf("setup network step %d, Owner network claim step %d", setup+1, owner+1)
 	}
-	page, err := HTML(mustGen(t, 9))
+	page, err := HTML(mustGen(t, 9), testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +131,11 @@ func TestQuickStartStartsFromTheEnforcer(t *testing.T) {
 func cardPages(t *testing.T) map[string]string {
 	t.Helper()
 	c := mustGen(t, 10)
-	full, err := HTML(c)
+	full, err := HTML(c, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, allParts)
+	rot, err := rotationHTML(c, allParts, testFingerprint(t))
 	if err != nil {
 		t.Fatal(err)
 	}

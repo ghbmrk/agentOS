@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 )
 
 // Owner Card rotation wired to the vault process (REC-4,
@@ -121,6 +122,10 @@ type Rotation struct {
 	Journal func(event string)
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
+	// Authority is the page authority's certificate (PageTLS.Authority):
+	// every rotation sheet prints its fingerprint (REC-4, HW-1). Unset,
+	// or with no authority, Start refuses with firstboot.ErrNoAuthority.
+	Authority func() []byte
 
 	v       RotationVault
 	startMu sync.Mutex // serializes Start
@@ -166,6 +171,15 @@ func (r *Rotation) Display() *card.Display {
 // Start discards any waiting rotation (cancelling it in the vault
 // process), begins a new one there and makes its display.
 func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
+	// No authority, no sheet: refused before anything is generated, sent
+	// to the vault process or discarded.
+	var auth []byte
+	if r.Authority != nil {
+		auth = r.Authority()
+	}
+	if card.CheckAuthority(auth) != nil {
+		return firstboot.ErrNoAuthority
+	}
 	r.startMu.Lock()
 	defer r.startMu.Unlock()
 	r.mu.Lock()
@@ -201,7 +215,7 @@ func (r *Rotation) Start(ctx context.Context, b RotationBegin) error {
 		until = max
 	}
 	parts := st.Parts
-	d, err := card.NewDisplay(card.DisplayConfig{Generate: r.Generate, Journal: r.Journal, Rotate: &parts,
+	d, err := card.NewDisplay(card.DisplayConfig{Generate: r.Generate, Journal: r.Journal, Rotate: &parts, Authority: auth,
 		Provision: func(c *card.Card) error { return r.provision(id, c) },
 		Discarded: func() { r.cancel(id) }})
 	if err != nil {
@@ -567,6 +581,9 @@ func (s *Server) rotateStart(w http.ResponseWriter, r *http.Request, rot *Rotati
 	defer cancel()
 	if err := rot.Start(ctx, b); err != nil {
 		code, msg := vaultRefusal(err)
+		if errors.Is(err, firstboot.ErrNoAuthority) {
+			code, msg = http.StatusServiceUnavailable, err.Error()
+		}
 		w.WriteHeader(code)
 		s.render(w, "rotate", rotateView{Err: msg})
 		return

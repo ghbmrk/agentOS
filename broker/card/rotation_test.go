@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"net/url"
@@ -18,7 +19,8 @@ func newRotRig(t *testing.T, p Parts) *rig {
 	t.Helper()
 	x := &rig{}
 	d, err := NewDisplay(DisplayConfig{
-		Rotate: &p,
+		Rotate:    &p,
+		Authority: testAuthority(t),
 		Generate: func(r io.Reader) (*Card, error) {
 			c, err := Generate(r)
 			if err == nil {
@@ -324,7 +326,7 @@ func contains(ss []string, s string) bool {
 }
 
 func TestRotationNeedsAPart(t *testing.T) {
-	_, err := NewDisplay(DisplayConfig{Rotate: &Parts{}, Provision: func(*Card) error { return nil }})
+	_, err := NewDisplay(DisplayConfig{Rotate: &Parts{}, Authority: testAuthority(t), Provision: func(*Card) error { return nil }})
 	if err == nil {
 		t.Fatal("rotation of nothing shown")
 	}
@@ -396,4 +398,25 @@ func must(b []byte, err error) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// REQ: REC-4, HW-1, CH-9
+//
+// Every rotation sheet, whatever its parts, prints the authority's name,
+// fingerprint and the address-bar line: the owner may keep only the
+// newest sheet. It catches a rotation sheet without them.
+func TestRotationSheetPrintsTheFingerprint(t *testing.T) {
+	for _, p := range []Parts{{Setup: true}, {Passphrase: true}, {Grid: true}, {Recovery: true}, allParts} {
+		page, err := newRotRig(t, p).d.Page()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := append(printedFingerprint(testFingerprint(t)), `<span class="mono">`+PageName+`</span>`,
+			template.HTMLEscapeString(AddressBarLine), template.HTMLEscapeString(TrustLine))
+		for _, w := range want {
+			if !strings.Contains(string(page), w) {
+				t.Fatalf("rotation of %+v lacks %q", p, w)
+			}
+		}
+	}
 }

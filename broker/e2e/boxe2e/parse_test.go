@@ -12,6 +12,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/owner"
+	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
 // REQ: HW-10
@@ -21,7 +22,7 @@ import (
 // real display accepts what it reads, and provisions.
 func TestCardSheetAndPromptConfirmARealDisplay(t *testing.T) {
 	provisioned := 0
-	d, err := card.NewDisplay(card.DisplayConfig{Provision: func(*card.Card) error { provisioned++; return nil }})
+	d, err := card.NewDisplay(card.DisplayConfig{Authority: cardAuthority(t), Provision: func(*card.Card) error { provisioned++; return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,4 +172,15 @@ func TestDeviceOfferAndLinkMatchThePage(t *testing.T) {
 	if _, _, ok := deviceLink(page); ok {
 		t.Fatal("link parsed from the offer")
 	}
+}
+
+// cardAuthority is a page authority's certificate for the Owner Cards
+// this test makes, which print its fingerprint (HW-1, OWN-card-ca).
+func cardAuthority(t testing.TB) []byte {
+	t.Helper()
+	a, err := pageca.New(pageca.DefaultName, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a.Certificate()
 }
