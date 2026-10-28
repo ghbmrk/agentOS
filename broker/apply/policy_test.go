@@ -40,7 +40,7 @@ func TestSR36NarrowingAtDispatchIsRefusedAtStage(t *testing.T) {
 	ctx := context.Background()
 	rel := r.release(1, true)
 	r.must(r.a.Schedule(rel, "a1"))
-	r.pol.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
+	r.atDispatch = func() { r.must(r.store.NoteAttestors(nil, nil)) }
 	if ok, err := r.a.Tick(ctx); ok || err != nil {
 		t.Fatalf("tick: %v %v", ok, err)
 	}
