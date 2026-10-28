@@ -56,21 +56,9 @@ mkdir -p "$PHOTO/proc" "$PHOTO/dev" "$PHOTO/sys"
 	-o "$PHOTO/agentos-photo" ./cmd/agentos-photo)
 chmod 0755 "$PHOTO/agentos-photo"
 
-# The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode, linked with
-# the pinned libavcodec (its H.264 decoder only), and empty mount points, nothing else. The camera
-# clerk runs it read-only in one long-running sandbox per streaming camera (gvisor.Stream.Root).
-CAMDECODE=$STAGE/usr/lib/agentos/images/camdecode
-mkdir -p "$CAMDECODE/proc" "$CAMDECODE/dev" "$CAMDECODE/sys"
-sh "$HERE/libavcodec.sh" "$OUT/libavcodec"
-(cd "$REPO/broker" && CGO_ENABLED=1 PKG_CONFIG_PATH="$OUT/libavcodec/opt/agentos-libavcodec/lib/pkgconfig" \
-	PKG_CONFIG_SYSROOT_DIR="$OUT/libavcodec" go build -tags libavcodec,netgo,osusergo -trimpath \
-	-ldflags='-s -w -buildid= -linkmode=external -extldflags=-static' \
-	-o "$CAMDECODE/agentos-camdecode" ./cmd/agentos-camdecode)
-! readelf -l "$CAMDECODE/agentos-camdecode" | grep -q INTERP || { echo "agentos-camdecode is not static" >&2; exit 1; }
-chmod 0755 "$CAMDECODE/agentos-camdecode"
-install -D -m 0644 "$OUT/libavcodec/opt/agentos-libavcodec/share/COPYING.LGPLv2.1" \
-	"$STAGE/usr/share/licenses/libavcodec/COPYING.LGPLv2.1"
-rm -rf "$OUT/libavcodec"
+# The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode on the
+# pinned libavcodec, built by its own script (image/camdecode.sh), and libavcodec's licence text.
+sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/share/licenses" "$OUT/libavcodec"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"

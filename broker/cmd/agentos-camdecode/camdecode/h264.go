@@ -37,7 +37,7 @@ static AVCodecContext *cd_open(int w, int h) {
 
 // cd_send copies one access unit into a padded packet and sends it; a
 // NULL p with n 0 sends the flush packet.
-static int cd_send(AVCodecContext *ctx, AVPacket *pkt, const void *p, int n) {
+static int cd_send(AVCodecContext *ctx, AVPacket *pkt, const unsigned char *p, int n) {
 	if (!p) return avcodec_send_packet(ctx, NULL);
 	av_packet_unref(pkt);
 	if (av_new_packet(pkt, n) < 0) return AVERROR(ENOMEM);
@@ -51,6 +51,22 @@ static int cd_eagain(int r) { return r == AVERROR(EAGAIN); }
 static int cd_eof(int r) { return r == AVERROR_EOF; }
 static int cd_i420(int f) { return f == AV_PIX_FMT_YUV420P || f == AV_PIX_FMT_YUVJ420P; }
 
+// cd_pack packs the frame's I420 planes of a w by h picture into dst,
+// each row cut to the plane's width (linesize pads it); dst holds
+// w*h + 2*((w+1)/2)*((h+1)/2) bytes. A missing plane or a linesize short
+// of the plane's width is 0.
+static int cd_pack(const AVFrame *f, int w, int h, unsigned char *dst) {
+	for (int i = 0; i < 3; i++) {
+		int pw = i ? (w + 1) / 2 : w, ph = i ? (h + 1) / 2 : h;
+		if (!f->data[i] || f->linesize[i] < pw) return 0;
+		for (int y = 0; y < ph; y++) {
+			memcpy(dst, f->data[i] + (size_t)y * f->linesize[i], pw);
+			dst += pw;
+		}
+	}
+	return 1;
+}
+
 static void cd_close(AVCodecContext *ctx, AVPacket *pkt, AVFrame *fr) {
 	av_frame_free(&fr);
 	av_packet_free(&pkt);
@@ -59,11 +75,7 @@ static void cd_close(AVCodecContext *ctx, AVPacket *pkt, AVFrame *fr) {
 */
 import "C"
 
-import (
-	"unsafe"
-
-	"github.com/ghbmrk/agentos/broker/camwire"
-)
+import "github.com/ghbmrk/agentos/broker/camwire"
 
 // HasH264 reports whether this build decodes video.
 const HasH264 = true
@@ -96,7 +108,7 @@ func (d *h264) feed(au []byte, pic func(i420 []byte) error) error {
 	if au == nil {
 		r = C.cd_send(d.ctx, d.pkt, nil, 0)
 	} else {
-		r = C.cd_send(d.ctx, d.pkt, unsafe.Pointer(&au[0]), C.int(len(au)))
+		r = C.cd_send(d.ctx, d.pkt, (*C.uchar)(&au[0]), C.int(len(au)))
 	}
 	if r < 0 {
 		return ErrVideo
@@ -118,29 +130,15 @@ func (d *h264) feed(au []byte, pic func(i420 []byte) error) error {
 }
 
 // picture checks the decoded frame against the declared shape and hands
-// pic its planes packed, each row cut to the plane's width (linesize pads
-// it).
+// pic its planes packed (cd_pack). The C side takes Go memory only as
+// byte pointers, so this file imports no unsafe (TestClerkDoesNotLinkDecoder).
 func (d *h264) picture(pic func(i420 []byte) error) error {
 	w, h := int(d.shape.Width), int(d.shape.Height)
-	if int(d.fr.width) != w || int(d.fr.height) != h || C.cd_i420(C.int(d.fr.format)) == 0 {
+	if int(d.fr.width) != w || int(d.fr.height) != h || C.cd_i420(C.int(d.fr.format)) == 0 ||
+		len(d.buf) != Len(KindVideo, d.shape) || C.cd_pack(d.fr, C.int(w), C.int(h), (*C.uchar)(&d.buf[0])) == 0 {
 		return ErrVideo
 	}
-	p := d.buf[:0]
-	for i := 0; i < 3; i++ {
-		pw, ph := w, h
-		if i > 0 {
-			pw, ph = (w+1)/2, (h+1)/2
-		}
-		stride := int(d.fr.linesize[i])
-		if stride < pw || d.fr.data[i] == nil {
-			return ErrVideo
-		}
-		src := unsafe.Slice((*byte)(unsafe.Pointer(d.fr.data[i])), stride*(ph-1)+pw)
-		for y := 0; y < ph; y++ {
-			p = append(p, src[y*stride:y*stride+pw]...)
-		}
-	}
-	return pic(p)
+	return pic(d.buf)
 }
 
 func (d *h264) close() {

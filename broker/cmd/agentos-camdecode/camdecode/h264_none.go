@@ -6,7 +6,7 @@ import "github.com/ghbmrk/agentos/broker/camwire"
 
 // HasH264 reports whether this build decodes video. Without the
 // libavcodec build tag (go test ./..., which has no libavcodec) it does
-// not, and a video frame is ErrVideo; image/build.sh builds with it.
+// not, and a video frame is ErrVideo; image/camdecode.sh builds with it.
 const HasH264 = false
 
 type h264 struct{}
