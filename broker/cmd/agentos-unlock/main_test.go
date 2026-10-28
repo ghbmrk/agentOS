@@ -1347,7 +1347,8 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 // key and recipient. No request says nothing.
 // Revert mutants: the route check dropped (the card-route request
 // rotates); the Old check dropped (the stale request rotates); O_NOFOLLOW
-// dropped (the link rotates).
+// dropped (the link rotates); the one-recovery-slot check weakened to none
+// (a store with two recovery slots has one replaced).
 func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	r := lostRig(t)
 	old := recipientOf(t, r.recovery)
@@ -1419,6 +1420,28 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	r.shutdown(cmd, out)
 	if !strings.Contains(out.String(), "lost-card request") {
 		t.Fatalf("the boot did not say why it ignored the request:\n%s", out)
+	}
+
+	// A store holding two recovery slots, as an interrupted rotation could
+	// leave it, is refused whole: replacing one would leave the other old
+	// key opening the store.
+	two := lostRig(t)
+	st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
+	must(t, err)
+	_, err = st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
+	st.Close()
+	must(t, err)
+	two.ask(lostCardApproval(recipientOf(t, two.recovery)))
+	was, err := os.ReadFile(two.store)
+	must(t, err)
+	k, said, err := two.unlockOnce(nil)
+	now, rerr := os.ReadFile(two.store)
+	must(t, rerr)
+	if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
+		t.Errorf("two recovery slots: %v, new key %v, store changed %v", err, k.NewRecovery != nil, !bytes.Equal(was, now))
+	}
+	if strings.Count(said, "\n") != 1 || !strings.Contains(said, "lost-card request") {
+		t.Errorf("two recovery slots: stderr %q, want one line on the request", said)
 	}
 }
 
