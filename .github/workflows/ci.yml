@@ -315,6 +315,12 @@ jobs:
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
       - name: Vet
         run: go vet ./...
+      - name: The llama.cpp adapter, its real-runtime test compiled, and its fake-server tests (INFER-llama)
+        # Default builds link no runtime; the tagged build links the adapter. The real tests need the
+        # pinned llama-server and models, so infer-real.yml runs them; here they only compile.
+        run: |
+          go vet -tags infer_real,infer_llamacpp ./cmd/agentos-infer
+          go test -count=1 -tags infer_llamacpp ./cmd/agentos-infer
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.
