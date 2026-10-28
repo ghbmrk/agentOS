@@ -108,6 +108,7 @@ var (
 	ErrRetention   = errors.New("camera: retention is zero (none) or a positive duration")
 	ErrFrame       = errors.New("camera: only video and thermal frames are capture")
 	ErrWrite       = errors.New("camera: segment not written")
+	ErrErase       = errors.New("camera: capture not deleted")
 	ErrSegment     = errors.New("camera: segment does not open")
 )
 
@@ -238,15 +239,16 @@ func (s *Store) setRetention(camera string, h *held, retention time.Duration) er
 		}
 	}
 	h.retention = retention
-	if _, err := s.sweepCamera(camera, retention, s.cfg.Now()); err != nil {
-		return ErrWrite
-	}
+	var kerr error
 	if retention == 0 {
-		// Nothing is kept, so no key is either.
+		// Nothing is kept, so no key is either. The key goes first, so a
+		// file a failed unlink leaves opens no more (CAM-clerk-12).
 		h.dropPending()
-		if err := s.cfg.Keys.Erase(camera); err != nil {
-			return ErrWrite
-		}
+		kerr = s.cfg.Keys.Erase(camera)
+	}
+	if _, err := s.sweepCamera(camera, retention, s.cfg.Now()); err != nil || kerr != nil {
+		s.log(camera, "capture not deleted")
+		return ErrErase
 	}
 	return nil
 }
@@ -382,7 +384,7 @@ func (s *Store) erase(camera string) error {
 	}
 	if kerr != nil || derr != nil {
 		s.log(camera, "erase incomplete")
-		return ErrWrite
+		return ErrErase
 	}
 	s.log(camera, "capture erased")
 	return nil
@@ -425,7 +427,7 @@ func (s *Store) ids() []string {
 // after Add has taken every connected camera, then on a timer.
 func (s *Store) Sweep() error {
 	now := s.cfg.Now()
-	var first error
+	var werr, first error
 	keep := func(err error) {
 		if err != nil && first == nil {
 			first = err
@@ -439,7 +441,9 @@ func (s *Store) Sweep() error {
 		h.mu.Lock()
 		if !h.gone {
 			if h.retention > 0 && len(h.pend) > 0 && now.Sub(h.pendFrom) >= s.cfg.SegmentSpan {
-				keep(s.seal(id, h))
+				if err := s.seal(id, h); err != nil {
+					werr = err
+				}
 			}
 			n, err := s.sweepCamera(id, h.retention, now)
 			keep(err)
@@ -468,9 +472,9 @@ func (s *Store) Sweep() error {
 		s.mu.Unlock()
 	}
 	if first != nil {
-		return ErrWrite
+		return ErrErase
 	}
-	return nil
+	return werr
 }
 
 var segName = regexp.MustCompile(`^([0-9a-f]{16})-([0-9a-f]{16})-([0-9a-f]{8})\` + segExt + `$`)
@@ -493,10 +497,22 @@ func parseSegment(name string) (Segment, bool) {
 // deleted. Held under the camera's lock.
 func (s *Store) sweepCamera(camera string, retention time.Duration, now time.Time) (int, error) {
 	dir := filepath.Join(s.cfg.Dir, camera)
-	des, err := os.ReadDir(dir)
+	fi, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
+	if err != nil {
+		return 0, err
+	}
+	if !fi.IsDir() {
+		// Not the store's own directory (a symlink, say): removed, never
+		// followed.
+		return 0, os.Remove(dir)
+	}
+	if err := privfile.Check(dir, true); err != nil {
+		return 0, err
+	}
+	des, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err
 	}

@@ -138,6 +138,13 @@ func TestNoRetentionWritesNothing(t *testing.T) {
 	if got, _ := r.s.Recent(testID); len(got) != 3 {
 		t.Fatalf("byte-capped ring holds %d frames, want 3", len(got))
 	}
+	// Frame keeps its own copy: the caller may reuse its buffer.
+	in := video()
+	r.s.Frame(testID, in)
+	clear(in.Payload)
+	if got, _ := r.s.Recent(testID); !bytes.Contains(got[len(got)-1].Frame.Payload, marker) {
+		t.Fatal("Frame kept the caller's buffer")
+	}
 	// Recent hands copies: changing one changes nothing held.
 	got, _ = r.s.Recent(testID)
 	clear(got[0].Frame.Payload)
@@ -203,6 +210,11 @@ func TestRetentionSweepDeletes(t *testing.T) {
 	}
 	// No retention: the open segment, the files and the key go.
 	r.feed(t, testID, 3, time.Second)
+	r.s.Flush()
+	r.feed(t, testID, 2, time.Second)
+	if names, _ := r.files(t); len(names) != 1 {
+		t.Fatalf("before the retention is removed, on disk: %q, want one segment", names)
+	}
 	if err := r.s.SetRetention(testID, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -392,8 +404,12 @@ func TestRestartKeepsOnlyRetained(t *testing.T) {
 	os.Mkdir(filepath.Join(r.dir, "Not-An-ID"), 0o700)
 
 	r.open(t, nil)
-	r.s.Add(testID, time.Hour)
-	r.s.Add("garden", 0)
+	if err := r.s.Add(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Add("garden", 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.s.Sweep(); err != nil {
 		t.Fatal(err)
 	}
@@ -491,3 +507,70 @@ func (k secretsKeys) Lend(camera string, fn func(key []byte) error) error {
 }
 
 func (k secretsKeys) Erase(camera string) error { return k.s.Remove(SegmentSlots + camera) }
+
+// countingKeys records how many files the camera's directory held when
+// its key was erased.
+type countingKeys struct {
+	SegmentKeys
+	dir     string
+	atErase int
+}
+
+func (k *countingKeys) Erase(camera string) error {
+	des, _ := os.ReadDir(filepath.Join(k.dir, camera))
+	k.atErase = len(des)
+	return k.SegmentKeys.Erase(camera)
+}
+
+// REQ: DEV-7, CLK-1
+// TestRetentionRemovedErasesKeyFirst: removing a retention, like a
+// disconnect, destroys the key while the segments are still there, so a
+// file a failed unlink leaves opens no more (CAM-clerk-12).
+func TestRetentionRemovedErasesKeyFirst(t *testing.T) {
+	for _, disconnect := range []bool{false, true} {
+		r := newStoreRig(t, nil)
+		k := &countingKeys{SegmentKeys: SecretsKeys(r.secrets), dir: r.dir}
+		r.open(t, func(c *StoreConfig) { c.Keys = k })
+		r.s.Add(testID, time.Hour)
+		r.feed(t, testID, 3, time.Second)
+		r.s.Flush()
+		var err error
+		if disconnect {
+			err = r.s.Erase(testID)
+		} else {
+			err = r.s.SetRetention(testID, 0)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if k.atErase != 1 {
+			t.Fatalf("disconnect %v: key erased with %d files left, want 1 (key first)", disconnect, k.atErase)
+		}
+		if names, _ := r.files(t); len(names) != 0 {
+			t.Fatalf("disconnect %v: on disk %q", disconnect, names)
+		}
+	}
+}
+
+// REQ: DEV-7
+// TestSweepFollowsNoLink: a camera's directory that is a symlink is
+// removed, never followed, so a sweep deletes nothing outside the store.
+func TestSweepFollowsNoLink(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, 0)
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(r.dir, testID)); err != nil {
+		t.Fatal(err)
+	}
+	r.s.Sweep()
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("sweep followed the link: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(r.dir, testID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("sweep kept the link")
+	}
+}
