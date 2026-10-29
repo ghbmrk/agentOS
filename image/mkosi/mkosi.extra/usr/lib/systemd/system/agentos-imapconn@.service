@@ -1,0 +1,47 @@
+# One IMAP session's parser (TB-parsers-2-launch, #3015): go-imap runs here, never in the mail clerk.
+# The property (CLK-1, A5, KRN-2): a fresh process per session, under a user that is not the clerk's,
+# with no network, none of the clerk's files and no new privileges, so attacker code running here
+# sees no credential and reaches nothing but the one session's stream and control connection.
+# systemd seals the process before exec, so no go-imap code (a package init included) runs outside
+# it. The session's control connection is descriptor 3.
+[Unit]
+Description=agentOS IMAP connection process: one session
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/lib/agentos/agentos-imapconn
+# Its own user, not the clerk's. Not DynamicUser=: that implies ProtectSystem=strict, a second mount
+# entry at "/", and systemd keeps one entry per path, which would drop the empty root below (#3642).
+User=agentos-imapconn
+Group=agentos-imapconn
+StandardInput=null
+StandardOutput=null
+StandardError=null
+RestrictAddressFamilies=AF_UNIX
+PrivateNetwork=yes
+IPAddressDeny=any
+# The root is an empty read-only tmpfs that does not execute; the binary, bound from /usr, is all
+# there is and all that executes, as for a device driver (mkosi.finalize's DRIVER_TEMPLATE). Not
+# NoExecPaths=/, which would drop the empty root (#3642, #3712).
+TemporaryFileSystem=/:ro,noexec
+BindReadOnlyPaths=/usr/lib/agentos/agentos-imapconn
+ProcSubset=pid
+ProtectProc=invisible
+PrivateDevices=yes
+PrivateIPC=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged @resources
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+LimitCORE=0
+# A Fetch is at most 50 messages of MaxFetch (256 KiB) each, held once as go-imap's literal and once
+# as its frame; this leaves twice that.
+MemoryMax=128M
+TasksMax=16
+# The clerk's relay ends a session's step at its timeout and closes the connection, and the process
+# then exits; this is the backstop for one that does not, past the longest Seen run.
+RuntimeMaxSec=1h

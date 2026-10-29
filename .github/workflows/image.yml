@@ -160,18 +160,22 @@ jobs:
       - name: Build the device-driver slot's boot probe
         if: matrix.run == 'a'
         run: cd broker && for b in bootdriver bootprobe; do CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/devslot/$b" ./clerk/devslot/proc/testdata/$b; done
+      # The IMAP connection process's boot probe: a stand-in under its shipped sandbox (#3015).
+      - name: Build the IMAP connection process's boot probe
+        if: matrix.run == 'a'
+        run: cd broker && for b in bootconn bootprobe; do CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/imapconn/$b" ./clerk/inbox/imapconn/testdata/$b; done
       # The local inference service's real test the inference boot runs on the installed llama-server
       # and model (INFER-image, #3655): static, so it runs in the image as built here.
       - name: Build the inference real test
         if: matrix.run == 'a'
         run: cd broker && CGO_ENABLED=0 go test -c -tags infer_real,infer_llamacpp -trimpath -o "$RUNNER_TEMP/infer/infer.test" ./cmd/agentos-infer
-      - name: Boot test (Secure Boot on), inbox slice, driver slot, inference and end-to-end run
+      - name: Boot test (Secure Boot on), inbox slice, driver slot, IMAP connection process, inference and end-to-end run
         if: matrix.run == 'a'
-        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" DEVSLOT="$RUNNER_TEMP/devslot" INFER="$RUNNER_TEMP/infer" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" DEVSLOT="$RUNNER_TEMP/devslot" IMAPCONN="$RUNNER_TEMP/imapconn" INFER="$RUNNER_TEMP/infer" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives console-fallback console-slice console-infer console-e2e; do
+          for l in console console-reboot console-two-drives console-fallback console-slice console-imapconn console-infer console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record

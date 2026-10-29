@@ -582,6 +582,47 @@ EOP
 	rm -rf "$W/devslot.raw" "$DS"
 fi
 
+# The IMAP connection process's launch, in a booted image (TB-parsers-2-launch, #3015). With IMAPCONN
+# set to a directory holding static builds of broker/clerk/inbox/imapconn/testdata's bootconn and
+# bootprobe, a fresh copy boots with one drop-in, passed as an SMBIOS credential, that changes only the
+# binary agentos-imapconn@.service runs (ExecStart= and its bind) to bootconn on a read-only 9p share,
+# so every other line of the shipped socket and service holds. A CI-only unit (no agentos- prefix)
+# mounts the share and runs bootprobe as the mail clerk's user: two sessions, one after the other, each
+# a fresh process under another user, whose socket() is refused for inet, inet6 and netlink, which
+# cannot open the clerk's state directory or reach its kernel socket, sees the empty root, has no new
+# privileges, and ends when the session closes. Then, as the planner's user, the socket refuses it.
+if [ -n "${IMAPCONN:-}" ]; then
+	IC=$W/imapconn-share
+	rm -rf "$IC"; mkdir -p "$IC"
+	for b in bootconn bootprobe; do
+		cp "$IMAPCONN/$b" "$IC/$b" && echo "ok   $b for the imapconn boot" || { echo "MISS $b for the imapconn boot"; fail=1; }
+	done
+	P9="trans=virtio,version=9p2000.L"
+	ICB=/run/agentos-ci-imapconn
+	IC_UNITS="$(smbios_cred 'systemd.unit-dropin.agentos-imapconn@.service~99-ci-probe' "[Service]\nExecStart=\nExecStart=$ICB/bootconn\nBindReadOnlyPaths=$ICB/bootconn\n")"
+	IC_UNITS="$IC_UNITS$(smbios_cred systemd.extra-unit.ci-imapconn.service "[Unit]\nDescription=agentOS IMAP connection process probe (CI only)\nWants=agentos-imapconn.socket\nAfter=systemd-sysusers.service systemd-tmpfiles-setup.service agentos-imapconn.socket\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=300\nStandardOutput=journal+console\nStandardError=journal+console\nExecStart=/bin/sh -c 'mkdir -p $ICB && mount -t 9p -o $P9,ro imapconn $ICB && setpriv --reuid=agentos-mail --regid=agentos-mail --clear-groups --no-new-privs $ICB/bootprobe; setpriv --reuid=agentos-planner --regid=agentos-planner --clear-groups --no-new-privs $ICB/bootprobe -refused'\n")"
+	IC_UNITS="$IC_UNITS$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=ci-imapconn.service\n')"
+	copy "$W/imapconn.raw"
+	EXTRA="-virtfs local,path=$IC,mount_tag=imapconn,security_model=none,readonly=on$IC_UNITS" \
+		UNTIL="agentos-imapconn: DONE refused\|agentos-health: FAIL" boot "$W/console-imapconn.log" "$W/imapconn.raw"
+	grep -a "agentos-imapconn" "$W/console-imapconn.log" | guest_echo || true
+	has "$W/console-imapconn.log" "agentos-imapconn: DONE"
+	has "$W/console-imapconn.log" "agentos-imapconn: DONE refused"
+	hasnt "$W/console-imapconn.log" "agentos-imapconn: DONE failed"
+	for c in "the clerk's state directory is there for its own user" "each session is a fresh process"; do
+		has "$W/console-imapconn.log" "agentos-imapconn: ok   $c"
+	done
+	for i in 1 2; do
+		for c in "runs as uid" "socket() refused" "cannot open the clerk's state directory" "cannot reach the clerk's kernel socket" \
+			"the root is the empty tmpfs" "has no new privileges" "runs while the session is open and ends when it closes"; do
+			grep -aq "agentos-imapconn: ok   session $i.*$c" "$W/console-imapconn.log" && echo "ok   session $i $c" || { echo "MISS session $i $c"; fail=1; }
+		done
+	done
+	has "$W/console-imapconn.log" "is refused the socket"
+	hasnt "$W/console-imapconn.log" "agentos-imapconn: FAIL"
+	rm -rf "$W/imapconn.raw" "$IC"
+fi
+
 # The local inference service's real runtime, in a booted image (INFER-image, #3655; INFER-SVC E2).
 # With INFER set to a directory holding infer.test (broker/cmd/agentos-infer's tests built with the
 # tags infer_real and infer_llamacpp, static), a fresh copy boots and a CI-only unit, passed as an
