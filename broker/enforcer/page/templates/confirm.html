@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve a change: {{.Name}}</title>
+<link rel="stylesheet" href="/page.css">
+<script src="/page.js" defer></script>
+</head>
+<body>
+<h1>Approve a change</h1>
+<p>Your home enforcer drew this change itself. Approve it only if it is what you meant.</p>
+<ul class="diff">
+{{range .Lines}}<li>{{.}}</li>
+{{end}}</ul>
+<p class="consequence">{{.Consequence}}</p>
+{{if .Blocked}}
+<p class="blocked">Another change is waiting to apply. Cancel it on the <a href="/">home page</a> or let it apply first, then open this link again.</p>
+{{else}}
+<button id="approve" data-id="{{.ID}}" data-challenge="{{.Challenge}}" data-rp="{{.Name}}">Approve with your passkey</button>
+{{end}}
+<p id="result" role="status"></p>
+</body>
+</html>

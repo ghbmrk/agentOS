@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home enforcer: {{.Name}}</title>
+<link rel="stylesheet" href="/page.css">
+<script src="/page.js" defer></script>
+</head>
+<body>
+<h1>Home enforcer</h1>
+<p>Policy version {{.Version}}.</p>
+
+<h2>Waiting to apply</h2>
+{{if .Pending}}{{range .Pending}}
+<div class="pending">
+<p>Applies at {{when .DueMS}} unless you cancel it.</p>
+<ul class="diff">{{range lines .Diff}}<li>{{.}}</li>{{end}}</ul>
+<button class="act" data-action="cancel" data-target="{{.ID}}" data-rp="{{$.Name}}">Cancel with your passkey</button>
+</div>
+{{end}}{{else}}<p>Nothing.</p>{{end}}
+
+<h2>Your passkey</h2>
+{{if not .Sync.Known}}<p>Not known yet: it shows here after your next approval.</p>
+{{else if .Sync.Eligible}}<p class="warn">Your passkey is synced to your phone's cloud account. Anyone who takes over that account and is on your Owner Wi-Fi can use it.</p>
+{{else}}<p>Your passkey is kept on one device only and does not sync.</p>{{end}}
+
+<h2>agentOS channel</h2>
+<p>The channel is {{.Channel}}.</p>
+{{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
+
+<h2>Devices</h2>
+{{if .Devices}}<table>
+<tr><th>Device</th><th>Network</th><th>Label</th></tr>
+{{range .Devices}}<tr><td>{{.ID}}</td><td>{{.Network}}</td><td>{{label .Label}}</td></tr>
+{{end}}</table>{{else}}<p>None yet.</p>{{end}}
+
+<h2>What this box cannot do</h2>
+<p>Full coverage is not promised.</p>
+<ul class="limits">
+{{range .Limits}}<li>{{.}}</li>
+{{end}}</ul>
+<p id="result" role="status"></p>
+</body>
+</html>

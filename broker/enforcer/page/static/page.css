@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 1rem auto; padding: 0 1rem; line-height: 1.4; }
+.diff li { margin: .3rem 0; }
+.consequence, .warn, .blocked { font-weight: 600; }
+button { font-size: 1.1rem; padding: .6rem 1rem; }
+table { border-collapse: collapse; }
+td, th { padding: .2rem .6rem; text-align: left; }

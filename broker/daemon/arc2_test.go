@@ -289,12 +289,22 @@ var enforcer = map[string]struct {
 	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
+	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
+	// alone may serve HTTP and TLS; it still launches nothing.
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
 }
+
+var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
 // enforcerExec is the one enforcer package that starts a process: the
 // firewall loader runs nft (ENF decision 4, slice e), and it imports nothing
 // from the enforcer, so no other enforcer package links os/exec through it.
 const enforcerExec = "enforcer/nft/load"
+
+// enforcerWeb is the one enforcer package that links net/http and
+// crypto/tls: the page (slice b) serves the owner's confirm screen, and no
+// other enforcer package imports it.
+const enforcerWeb = "enforcer/page"
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
@@ -363,10 +373,10 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
-// decision 1, STO-4), and no third-party package yet; none of it speaks
-// HTTP, and only the firewall loader (enforcerExec, slice e) launches a
-// process. Slices b (the page, net/http) and l (the daemon) widen this with
-// a reason each.
+// decision 1, STO-4), and no third-party package yet; only the page
+// (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
+// (enforcerExec, slice e) launches a process. Slice l (the daemon) widens
+// this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	list, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
 	if err != nil {
@@ -374,7 +384,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if p != module+enforcerExec {
+		if p != module+enforcerExec && p != module+enforcerWeb {
 			rest = append(rest, p)
 		}
 	}
@@ -405,10 +415,13 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		}
 	}
 	check(rest, forbiddenDeps)
-	if own[enforcerExec] {
-		t.Errorf("an enforcer package other than %s links it", enforcerExec)
+	for _, p := range []string{enforcerExec, enforcerWeb} {
+		if own[p] {
+			t.Errorf("an enforcer package other than %s links it", p)
+		}
 	}
 	check([]string{module + enforcerExec}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
+	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }))
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}
