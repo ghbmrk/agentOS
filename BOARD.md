@@ -66,7 +66,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4a | MIG-4-recovery-r4a: the owner page replaces the recovery key on the running box (scan, new card confirmed, hardware-key tap, keeper write, kernel switch); STATUS names it for a box with no recipient (REC-4, BAK-1). | MIG-4-recovery-r1 (#3391), r2, MIG-4-recovery-len (#3406), #3403; agentosd serial | building (release; tier A; slice r4a of #3391) |
 | MIG-4-recovery-r4b | MIG-4-recovery-r4b: the owner page's lost-card route: a hardware-key tap files the kernel-approved request, the box restarts, the page shows the new card and the kernel wipes it on confirm (REC-4). | MIG-4-recovery-r3, r4a; agentosd serial | queued (release; tier A; slice r4b of #3391) |
 | KRN-forget-c | The owner's Forget surface: a signed-in page step with a passkey tap (option A) or a FORGET word with a texted code (option B), calling KRN-forget's find and confirm (LOG-4, CH-3, CH-26). | #3179; a decision between A and B | queued (release; sub A; tier A; size M; needs decision) |
-| MAIL-unit | [The mail clerk's unit in the image, after the kernel, with its key and anchors (MAIL-unit)](briefs/MAIL-main.md) (A21, A22). | MAIL-main, MAIL-keys | queued (release; tier A) |
 | MAIL-reader-sock | The mail clerk's quarantined read (inbox.Ask) as a frame to a main-side reader process that calls the model clerk (PLN-2, D-154 rule 4). | MAIL-main, #2780 | queued (release; tier A) |
 | MIG-4-adapters-b | MIG-4-adapters-b: delete `recall` and `events` (CAP-3). | MIG-4-adapters-a; #2574; #2571 | queued (tier A; slice b of #2579) |
 | MIG-4-adapters-c | MIG-4-adapters-c: the recall directory at rest is removed only once every held lineage is settled and told; STATUS's unknown line gets an owner step (CAP-3, LOG-4). | agentosd slot | queued (release; tier A; slice c of #2579) |
@@ -77,7 +76,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-adapters-h | MIG-4-adapters-h: A5 and A14 assurance runs rebuilt on the kernel and clerk exit; old-core e2e tests and `provagent` deleted (A5, A14, CRED-5). | MIG-4-adapters-g; #2780; #2571 | queued (tier A; slice h of #2579) |
 | MIG-4-recovery-retire-rotate | MIG-4-recovery-retire-rotate: the migration runbook has the owner rotate the recovery key (REC-4) once the old core and its vault are retired (ID-1). | MIG-4-recovery-r4a (#3409); old-core deletion | queued (later; tier B; from #3412 reviews) |
 | MIG-4-adapters-f2b | MIG-4-adapters-f2b: the update store records a follow step's idempotency key with the switch, so the follow clerk can prove a lost switch never landed (KRN-8). | MIG-4-adapters-f2 | queued (tier A; later) |
-| EDGE-link-core-c2c | EDGE-link-core-c2c: agentos-link's capture and served units, its user, and the link interface's input rule in the image (HW-15, HW-16). | EDGE-link-core-c2 (#3297), EDGE-link-core-c2b | queued (release; tier A; slice c2c of #3290) |
+| EDGE-link-core-c2c | EDGE-link-core-c2c: agentos-link's capture and served units, its user, and the link interface's input rule in the image (HW-15, HW-16). | EDGE-link-core-c2 (#3297), EDGE-link-core-c2b | building (release; tier A; slice c2c of #3290) |
 | MIG-4-untrusted-change-c3 | MIG-4-untrusted-change-c3: delete the change engine, keeping only `change`'s store, so `change` imports neither `journal` nor `verb`; `grants` drops its `Changes` gate. | MIG-4-untrusted-change-c1 (#3455, merged), MIG-4-untrusted-loops (#2786) | queued (sub B; tier A; gate file) |
 | OWN-card-flow-b | OWN-card-flow-b: the owner page's first-boot card takes the published page authority, and its confirm hands the factors to the keeper before the vault (HW-1, CH-9, STO-2). | #3167, #3470 | queued (sub B; tier A; slice b of #3470) |
 | KRN-erase-err-is | Map a wrapped or joined erase error to its sentinel across the owner socket, as Call does (LOG-4). | #3525 | building (later; tier A; size S) |
@@ -90,7 +89,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-d1 | MIG-4-exit-d1: delete the vault process and `agentos-holder` with their units and CI paths; the image run still reaches a frontier source (CLK-1, ONB-3). | #3681 (m2); #3684 (c3); #3685 (p); #3679; #2780 b3; #3431; image queue | queued (tier A; slice d1 of #2571; size M) |
 | MIG-4-exit-d2 | MIG-4-exit-d2: delete `broker/vault`, `egress` and `holder` and their last importers; #2571 closes (CLK-1, D-139). | #3686 (d1); #3432; #3624 | queued (tier A; slice d2 of #2571; size M) |
 | MIG-4-adapters-e-wire-b | MIG-4-adapters-e-wire-b: agentos-kernel passes the image's pinned update root as `KernelConfig.Pinned` (never an anchor); agentosd builds the update clerk with `Paused` from the channel (UPD-3, UPD-4, KEY-1). | #3677 | queued (tier A; agentosd serial slot) |
-| MIG-4-adapters-e-pin | MIG-4-adapters-e-pin: a pin after a handover withdraws the release before any boot takes it; a pinned channel submits no activation plans (UPD-4). | #3678 | queued (tier A; release finding of #3678's Security review; after #3678) |
 | KRN-forget-follow | KRN-forget-follow: void a rewound reader's queued effects, and hold serving until erased reads answer at start (LOG-4, D-169). | KRN-forget b (#3691) | queued (release; tier A; prerequisite of KRN-forget c #3414) |
 | KRN-pin-audit | KRN-pin-audit: a replay given no pinned roots no longer reports a false divergence on a pinned plan (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | KRN-pin-anchors | KRN-pin-anchors: the pinned key is checked against anchors logged later, and against re-anchors (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
@@ -100,6 +98,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | ENF-attest | Core-to-enforcer attestation channel: the enforcer verifies the core booted the signed image (attestation key enrolled at HW-5a, measured values pinned) before it accepts "core reflashed" (KRN-12, REC-5, HW-5a) | #3796, #3797 (PR #3798); brief to write | queued(later; tier A; one session) |
 | KRN-12-rec3 | KRN-12-rec3: when the owner signs the backup destination and how the enforcer matches a name (KRN-12, BAK-1) | PR #3801, #3800; builds with DECOY-d #3765 (first enforcer code row), not as a standalone spec PR | queued(tier B; lane primary; brief briefs/DECOY.md) |
+| MIG-4-adapters-e-rig | MIG-4-adapters-e-rig: the apply test rig boots the kernel with the pinned update root (#3701), not as an anchor. | #3701 | queued (tier C; later finding of #3812) |
+| MIG-4-adapters-e-unpin | MIG-4-adapters-e-unpin: after an unpin, the A1 wiring re-offers a pin-withdrawn release or tells the owner the next release replaces it (UPD-4, recheck when A1 is wired). | #3822 | queued (later finding of #3822's combined review) |
+| MIG-4-adapters-e-stale | MIG-4-adapters-e-stale: STATUS for a stale security handover (A13, SR3-4f-2c) in the handover boot stops promising a restart before the next Tick withdraws it (UPD-6, CH-12). | #3829 | queued (later finding raised while building #3829) |
+| MIG-4-adapters-e-pin-abandon | MIG-4-adapters-e-pin-abandon: a pin withdrawal whose Abandon failed reports that the release may start, in Pin's error and in STATUS (UPD-4, CH-12). | #3831 | queued (later finding of #3831's Security review) |
 
 ## Harness and operating model
 
@@ -118,6 +120,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-debian | Reduce the image's unfixed Debian advisories by dropping packages it does not need; rebuild when Debian ships fixes (EVL-5 findings from TN-vulncheck-2). | #2886 | queued (release; tier A) |
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
 | CODEX-toolsh-outer-proc | CODEX-toolsh-outer-proc: agentos-toolsh fails at random in a pid namespace with an outer /proc (bwrap's /proc lookup); fail-closed. Serves CRED-5, A14 (later; from CODEX-pidns-cause) | CODEX-pidns-cause (#1616) | queued (later; from CODEX-pidns-cause) |
+| OPERATING-resign-wording | OPERATING-resign-wording: OPERATING §3 Security re-sign wording matches premerge (re-sign after any changed push on a tier-A PR) | #3819 combined review | queued (release; tier C; gate file) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -310,9 +313,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-r | ENF-r: safety-device secrets on the enforcer: sealed hand-off at pairing, enforcer store, no core copy (STO-4, STO-3) | #3658, #3659, #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-s | ENF-s: safety-list approvals on the enforcer page: asserted tightenings, once-only turn-on or open (NET-4, NET-6) | #3658, #3659 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-t | ENF-t: the enforcer's Thread and Matter stacks in confined processes, Matter on the C++ SDK (NET-2 Confined radio stacks; D-231) | #3669 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| DEVSLOT-root-guard | DEVSLOT-root-guard: the image check refuses any other mount entry at / in a driver unit (DEV-1, UPD-10, D-154) | DEVSLOT-host-unit-2 #3590 | queued(tier A; lane primary; release finding from #3642 Security 6471425724) |
-| DEVSLOT-host-unit-2-tails | DEVSLOT-host-unit-2-tails: test the device file's regular-file guard; fix stale empty-root wording (DEV-1, CLK-1) | DEVSLOT-host-unit-2 #3590 | queued(tier B; lane primary; release findings from #3642 L3 6471380989) |
-| CAM-decode-f2 | CAM-decode-f2: pin h264.go's #cgo lines and includes so the decoder sandbox links only the pinned libavcodec (NET-2; #3640 Security release) | #3640 | queued(tier A; lane primary; release; after #3640) |
 | ENF-class | ENF-class: device class in the enforcer policy; naming refuses unnamable classes; channel table and heater text by class (NET-2 Safety devices) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF | ENF-e2: device class and ports in the enforcer policy; camera stream path and port-narrowed core and edge rules (NET-2 Device paths, Cameras) | #3661 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-d-preauth | ENF-d-preauth: unauthenticated hellos drop, never pause the enforcer channel (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
@@ -320,7 +320,11 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | VIS-faces-later | VIS-faces-later: seven later findings from the #3787 reviews (unclear vs unknown, rotated alignment test, no_face causes, licence wording, thin false-accept margin, small far faces, zeroing comment) | #3515 e2 (#3787) | queued (later; tier A; one session) |
-| VIS-plates-guards | VIS-plates-guards: guards for the plate path's zeroing, the per-frame vehicle bound and width, the zero-height plate box and the sound +Inf check (release findings from the #3803 reviews; DEV-7, DEV-8, RES-2) | #3515 e3 (#3803) | building (release; tier A; one session) |
+| VIS-ort-outputs | VIS-ort-outputs: zero ONNX Runtime's own copy of the run-allocated outputs (plate rows, YAMNet scores), found in the #3805 build | #3515 e3 (#3805) | queued (later; tier A; one session) |
+| CAM-decode-f3 | CAM-decode-f3: pin the decoder's pkg-config Libs and build flags, nm-check the static binary, and name cgoPin in the pin test's failure (NET-2; #3811 later findings) | #3811 | queued(tier A; lane primary; later) |
+| DEVSLOT-root-guard-tails | DEVSLOT-root-guard-tails: root guard message and wording tails (DEV-1, UPD-10, D-154) | DEVSLOT-root-guard #3712 | queued(tier A; lane primary; later findings from #3814 combined 6491489388) |
+| CAM-decode-f2-note | CAM-decode-f2-note: reword cgoBuildFaults' platform comment (arm64 is extra coverage, not a decoder platform; #3820 combined 6491879426) | #3820 | queued(tier C; lane primary; later) |
+| EDGE-link | EDGE-link: keep every USB Ethernet adapter but the link down, so a second adapter cannot carry the edge's cable outside the link's drop (release finding from the #3834 Security review; HW-16). | EDGE-link-core-c2c #3459 | queued (release; tier A; one session) |
 
 ## Model routes and the Codex lane
 
@@ -335,7 +339,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | INFER-floor | Measure the embedding model on the N95 floor: memory, cold start, embed latency and throughput, against the brief's limits (HW-4, RES-2; [brief](briefs/INFER-SVC.md) E3). | INFER-image #3655; N95 | queued (release; tier A; hardware) |
 | CLK-model-running-deflake | CLK-model-running-deflake: the clerk-model test helper waits for the owner socket by event with a 30 s deadline, not 200 polls of 10 ms. | MIG-4-exit-m1 | queued (later; tier A; size S; from #3769 CI) |
 | INFER-retrieve | Retrieve pass: the new-core consumer of the embedding service (LOG-4, CAP-13); picks the dialling clerk, the index and the peer socket access, and turns `-infer` on. Needs a brief. | INFER-image #3655 | queued (later; tier A; one session) |
-| INFER-image later findings | INFER-image later findings: duplicate licence key, NEEDED-check test, update download size, a long comment (four later findings from the #3784 reviews). | INFER-image #3655 | queued (later; tier A; one session) |
+| INFER-image later findings | INFER-image later findings: duplicate licence key, NEEDED-check test, update download size, a long comment, a repeated pins key, the step test's shell, a retired ID in A11 (later findings from the #3784 and #3810 reviews). | INFER-image #3655 | queued (later; tier A; one session) |
 
 ## Defects and later findings on surviving packages
 
@@ -407,6 +411,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-2 split doc | KRN-2 split doc: LANES.md's owner seam names `run.Kernel.With` in broker/clerk/run; it is now `kernelproc.Kernel.With` (found on KRN-2 split). | KRN-2 | queued (later) |
 | TN-graph-brake | TN-graph `bounded` accepts a held brake only when turning it off is itself delayed or the witness watches the brake (KRN-11; #3193 Security 4, Potency 2). | TN-graph (#2857) | queued (later; tier A) |
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
+| EDGE-link-core-c2c later findings | EDGE-link-core-c2c later findings: a .link allowlist in the tree checks, the edge image's own link naming and address, ARP on the link, a stale link-set element, a long comment (later findings from the #3834 reviews). | EDGE-link-core-c2c #3459 | queued (later; tier A; one session) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -428,5 +433,4 @@ issue #3742: body has no board-row block
 issue #3757: body has no board-row block
 issue #3771: title 'INFER-llama follow-ups: probe timeout, leftover socket dir, setsid grandchild, adapter-level checks, wording' does not start with '<ID>: '
 issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #3790: title 'INFER-image follow-up: infer-real rebuilds the llama.cpp archive from the pinned commit; A13 wording' does not start with '<ID>: '
 ```
