@@ -35,8 +35,8 @@ const ExecutorName = "grants"
 // guest can submit one.
 const OriginOwner = "owner"
 
-// OriginRecall and RecallExecutor mark the broker's recall rollback
-// intents (journal.ActionRecallRollback); recalltool submits and runs them.
+// OriginRecall and RecallExecutor marked recall's rollback intents
+// (journal.ActionRecallRollback), retired with recalltool (#2781): denied.
 const (
 	OriginRecall   = "broker:recall"
 	RecallExecutor = "recall"
