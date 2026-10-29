@@ -94,8 +94,8 @@ type Boot struct {
 // settled the same way, so Resume can call them again (SR3-4).
 // StageDropped settles an adoption whose release left the applier before
 // it was installed, so its image no longer counts as active and the
-// release can be adopted again under a new ID (SR3-4f-2b; Loop 3 forgets
-// the old adoption with BOARD SR3-4f-2-r1).
+// release can be adopted again under a new ID (SR3-4f-2b; offering it
+// again is the A1 wiring's, ASSUMPTIONS MIG-4-adapters-e-pin).
 type Stager interface {
 	ConfirmStaged(id string) error
 	StageFailed(ctx context.Context, id string) error
@@ -1491,20 +1491,22 @@ const (
 // pinned the update channel after the handover (#3699).
 const (
 	pinnedLine       = "Update %d is withdrawn because your update channel is pinned; I will not start it."
+	pinnedHeldLine   = "Update %d waits because your update channel is pinned; I will not restart into it."
 	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
 // pinnedHandoverLocked: pt was handed over in this boot and the channel
 // is pinned, or its pin withdrawal is under way, so the next Tick or Pin
-// withdraws it rather than restart into it. A boot that cannot be read,
-// or a later boot, is not taken for it: the new slot may already run,
-// and then it stays (Security release 2 on #3812).
-func (a *Applier) pinnedHandoverLocked(pt *point) bool {
+// withdraws it rather than restart into it. A later boot is not taken
+// for it: the new slot may already run, and then it stays (Security
+// release 2 on #3812). unread: the boot cannot be read, so it may be
+// either, and no Tick restarts (Security release 1 on #3822).
+func (a *Applier) pinnedHandoverLocked(pt *point) (here, unread bool) {
 	if !pt.Installed || a.executing || !pt.Pinned && !a.cfg.Paused() {
-		return false
+		return false, false
 	}
 	b, err := a.cfg.Activator.Booted(context.Background())
-	return err == nil && b.ID == pt.BootID
+	return err == nil && b.ID == pt.BootID, err != nil
 }
 
 // Status is the applier's STATUS line, or "": an update installing or
@@ -1521,9 +1523,14 @@ func (a *Applier) Status() string {
 			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
 		}
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
-	case a.st.Applying != nil && a.pinnedHandoverLocked(a.st.Applying):
-		return fmt.Sprintf(pinnedLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
+		here, unread := a.pinnedHandoverLocked(a.st.Applying)
+		if here {
+			return fmt.Sprintf(pinnedLine, a.st.Applying.To)
+		}
+		if unread {
+			return fmt.Sprintf(pinnedHeldLine, a.st.Applying.To)
+		}
 		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
@@ -1642,8 +1649,8 @@ func unrecordedText(v int64) string {
 		"You can retry it on my Wi-Fi page.", v)
 }
 
-// fellBackLine: Loop 3 never proposes a release again once it was adopted
-// (security C3 on #133), so it is not tried again.
+// fellBackLine: Schedule refuses a release that fell back (ErrFellBack,
+// #1924; security C3 on #133), so it is not tried again.
 func fellBackLine(v int64) string {
 	return fmt.Sprintf("Update %d did not start cleanly, so I went back to the version I had. "+
 		"Nothing is needed from you. It won't be tried again; a later update will replace it.", v)

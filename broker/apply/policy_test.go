@@ -10,8 +10,8 @@ import (
 //
 // SR3-6: a security fix queued on its attestation authority is not
 // activated once the box's attestor policy narrowed; the pending
-// automatic authorization is dropped, and Loop 3's next check schedules
-// the release again under the current policy (the owner's path).
+// automatic authorization is dropped; the A1 wiring must schedule the
+// release again under the current policy (the owner's path).
 
 func TestSR36NarrowedPolicyDropsPendingSecurityFix(t *testing.T) {
 	r := newRig(t)

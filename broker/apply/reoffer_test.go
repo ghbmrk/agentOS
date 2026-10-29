@@ -10,8 +10,8 @@ import (
 //
 // SR3-4f-2-r1e (LATER SR3-4f-2 l4): an adoption that arrives while
 // another release is being applied is refused with ErrApplying and
-// dropped, so the change pipeline records it WhyDropped and Loop 3 offers
-// the release again at its next check (SR3-4f-2-r1a).
+// dropped, so the change pipeline records it WhyDropped and the A1 wiring
+// can offer the release again under a new adoption.
 func TestIncomingAdoptionRefusedWhileApplyingIsDropped(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
