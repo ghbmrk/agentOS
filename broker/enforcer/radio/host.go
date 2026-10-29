@@ -57,11 +57,24 @@ type Host struct {
 	next  uint64
 }
 
+// Conn is a stack's link: a socket the host can put a write deadline on,
+// so a stack that stops reading cannot hold a caller past Config.Timeout.
+// The *os.File confine.Start returns and a net.Conn both are.
+type Conn interface {
+	io.ReadWriteCloser
+	SetWriteDeadline(time.Time) error
+}
+
+// maxExpired bounds the requests a link may leave unanswered past their
+// timeout; past it the stack is treated as dead.
+const maxExpired = 64
+
 type link struct {
 	stack   Stack
-	conn    io.ReadWriteCloser
+	conn    Conn
 	wmu     sync.Mutex
 	pending map[uint64]pending // under Host.mu
+	expired map[uint64]string  // timed-out requests' devices, under Host.mu
 	dead    bool               // under Host.mu
 }
 
@@ -96,11 +109,11 @@ func NewHost(cfg Config) (*Host, error) {
 
 // Attach makes conn stack s's command interface, replacing any earlier
 // link (a restarted process), and reads its answers until it ends.
-func (h *Host) Attach(s Stack, conn io.ReadWriteCloser) error {
+func (h *Host) Attach(s Stack, conn Conn) error {
 	if Declared[s] == nil {
 		return fmt.Errorf("radio: stack %q not declared", s)
 	}
-	l := &link{stack: s, conn: conn, pending: map[uint64]pending{}}
+	l := &link{stack: s, conn: conn, pending: map[uint64]pending{}, expired: map[uint64]string{}}
 	h.mu.Lock()
 	old := h.links[s]
 	h.links[s] = l
@@ -143,15 +156,20 @@ func (h *Host) Call(r Request) ([]byte, error) {
 	l.pending[r.ID] = pending{device: r.Device, answer: answer}
 	h.mu.Unlock()
 
+	// One deadline bounds the write and the answer together.
+	deadline := time.Now().Add(h.cfg.Timeout)
+	timer := time.NewTimer(h.cfg.Timeout)
+	defer timer.Stop()
 	l.wmu.Lock()
-	err := write(l.conn, r)
+	err := l.conn.SetWriteDeadline(deadline)
+	if err == nil {
+		err = write(l.conn, r)
+	}
 	l.wmu.Unlock()
 	if err != nil {
 		h.fail(l, "write: "+err.Error())
 		return nil, ErrNoStack
 	}
-	timer := time.NewTimer(h.cfg.Timeout)
-	defer timer.Stop()
 	select {
 	case u, ok := <-answer:
 		if !ok {
@@ -167,9 +185,19 @@ func (h *Host) Call(r Request) ([]byte, error) {
 		}
 		return nil, ErrFailed
 	case <-timer.C:
+		// A late answer is dropped, not taken as unasked; a stack that
+		// leaves too many unanswered is dead.
 		h.mu.Lock()
+		_, still := l.pending[r.ID]
 		delete(l.pending, r.ID)
+		if still {
+			l.expired[r.ID] = r.Device
+		}
+		dead := len(l.expired) > maxExpired
 		h.mu.Unlock()
+		if dead {
+			h.fail(l, "too many requests unanswered")
+		}
 		return nil, ErrTimeout
 	}
 }
@@ -222,12 +250,21 @@ func (h *Host) readLoop(l *link) {
 		h.mu.Lock()
 		p, ok := l.pending[u.ID]
 		delete(l.pending, u.ID)
+		late, expired := l.expired[u.ID]
+		delete(l.expired, u.ID)
 		h.mu.Unlock()
-		if !ok || p.device != u.Device {
+		switch {
+		case ok && p.device == u.Device:
+			p.answer <- u
+		case !ok && expired && late == u.Device:
+			// the answer to a request that already timed out
+		default:
+			if ok {
+				close(p.answer)
+			}
 			h.fail(l, "answer to no outstanding request")
 			return
 		}
-		p.answer <- u
 	}
 }
 

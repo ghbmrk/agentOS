@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -245,6 +247,89 @@ func FuzzUp(f *testing.F) {
 		}
 		if !name(u.Device) || len(u.Data) > MaxData || (u.ID != 0 && (u.Code < CodeOK || u.Code > CodeUnreachable)) {
 			t.Fatalf("passed: %+v", u)
+		}
+	})
+}
+
+// TestStackThatStopsReadingCannotWedgeHost (NET-2 Confined radio stacks,
+// ENF-k-8): a stack that never reads its end fills the socket, and every
+// Call still returns within about Config.Timeout, so one exploited stack
+// cannot hold the channel's lock. From the Security and L3 probes on #3908.
+func TestStackThatStopsReadingCannotWedgeHost(t *testing.T) {
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscall.SetNonblock(fds[0], true)
+	theirs := os.NewFile(uintptr(fds[1]), "theirs") // never read
+	defer theirs.Close()
+	h, err := NewHost(Config{Devices: []Device{scale}, Notify: func(Notification) {}, Log: func(string) {},
+		Timeout: 5 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Attach(StackBLE, os.NewFile(uintptr(fds[0]), "ours"))
+	for i := 0; i < 5000; i++ {
+		done := make(chan error, 1)
+		go func() { _, err := h.State(scale.Name); done <- err }()
+		select {
+		case err := <-done:
+			if errors.Is(err, ErrNoStack) {
+				return // the link failed on its write deadline
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("call %d blocked past 2s with a 5ms timeout", i)
+		}
+	}
+	t.Fatal("the stack never read, yet the link did not fail")
+}
+
+// TestAnswerEdges (ENF-k-6): a waiter whose answer names another device
+// fails at once with the link, not after its timeout; an answer that
+// arrives after its request timed out is dropped and the link stays.
+func TestAnswerEdges(t *testing.T) {
+	newLink := func(timeout time.Duration) (*Host, net.Conn) {
+		h, _ := NewHost(Config{Devices: []Device{scale, {Name: "lamp", Stack: StackBLE}}, Timeout: timeout,
+			Notify: func(Notification) {}, Log: func(string) {}})
+		host, stack := net.Pipe()
+		h.Attach(StackBLE, host)
+		return h, stack
+	}
+	t.Run("wrong device", func(t *testing.T) {
+		h, stack := newLink(time.Minute)
+		defer stack.Close()
+		go func() {
+			var r Request
+			read(stack, &r)
+			write(stack, Up{ID: r.ID, Code: CodeOK, Device: "lamp"})
+		}()
+		start := time.Now()
+		if _, err := h.State(scale.Name); !errors.Is(err, ErrNoStack) || time.Since(start) > 10*time.Second {
+			t.Fatalf("err %v after %v; want ErrNoStack at once", err, time.Since(start))
+		}
+	})
+	t.Run("late answer", func(t *testing.T) {
+		h, stack := newLink(50 * time.Millisecond)
+		defer stack.Close()
+		first := make(chan uint64, 1)
+		go func() {
+			var r Request
+			read(stack, &r)
+			first <- r.ID
+		}()
+		if _, err := h.State(scale.Name); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("first call: %v", err)
+		}
+		if err := write(stack, Up{ID: <-first, Code: CodeOK, Device: scale.Name}); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			var r Request
+			read(stack, &r)
+			write(stack, Up{ID: r.ID, Code: CodeOK, Device: scale.Name, Data: []byte("ok")})
+		}()
+		if got, err := h.State(scale.Name); err != nil || string(got) != "ok" {
+			t.Fatalf("after a late answer: %q %v; the link should stay", got, err)
 		}
 	})
 }

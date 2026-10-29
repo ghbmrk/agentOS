@@ -3,7 +3,6 @@ package radio
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -23,6 +22,10 @@ import (
 const probeArg = "radio-probe-stack"
 
 const nestedEnv = "AGENTOS_RADIO_USERNS"
+
+// leakedFD is a descriptor the enforcer holds without close-on-exec when
+// it starts the stack; the stack must not have it.
+const leakedFD = 100
 
 func TestMain(m *testing.M) {
 	confine.Trampoline()
@@ -75,6 +78,8 @@ func probeStack(policy, page string) {
 		out["ptrace"] = try(e)
 	}
 	out["AF_UNIX socket (the system bus)"] = try(sock(syscall.AF_UNIX))
+	var st syscall.Stat_t
+	out["inherited fd 100"] = try(syscall.Fstat(leakedFD, &st))
 	b, _ := os.ReadFile("/proc/net/dev")
 	var ifs []string
 	for _, l := range strings.Split(string(b), "\n")[2:] {
@@ -165,7 +170,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	bin := filepath.Join(state, "radio.test")
 	copyFile(t, os.Args[0], bin)
 
-	read := func(t *testing.T, conn io.ReadWriteCloser) map[string]string {
+	read := func(t *testing.T, conn Conn) map[string]string {
 		h, err := NewHost(Config{Devices: []Device{scale}, Timeout: 20 * time.Second,
 			Notify: func(Notification) {}, Log: func(s string) { t.Log(s) }})
 		if err != nil {
@@ -184,6 +189,15 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	}
 
 	t.Run("confined", func(t *testing.T) {
+		f, err := syscall.Open(policy, syscall.O_RDONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Dup2(f, leakedFD); err != nil {
+			t.Fatal(err)
+		}
+		syscall.Close(f)
+		defer syscall.Close(leakedFD)
 		proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
 		if err != nil {
@@ -196,7 +210,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		for _, k := range []string{"read the policy", "write the policy store", "dial the page",
 			"AF_INET socket", "AF_INET6 socket", "AF_NETLINK socket", "AF_PACKET socket",
-			"AF_BLUETOOTH socket", "unshare a user namespace", "setuid 0", "ptrace"} {
+			"AF_BLUETOOTH socket", "unshare a user namespace", "setuid 0", "ptrace", "inherited fd 100"} {
 			if !strings.HasPrefix(got[k], "refused") {
 				t.Errorf("confined stack: %s %s", k, got[k])
 			}
@@ -228,6 +242,20 @@ func TestRadioCannotChangeRule(t *testing.T) {
 			if got[k] != "allowed" {
 				t.Errorf("unconfined probe: %s %s; the probe cannot see a missing confinement", k, got[k])
 			}
+		}
+	})
+
+	t.Run("no socket families", func(t *testing.T) {
+		p := confine.BLE(4242, 4242)
+		p.Families = nil
+		proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
+			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer proc.Stop()
+		if got := read(t, conn); got["AF_UNIX socket (the system bus)"] != "refused" {
+			t.Errorf("a profile with no families opened a socket: %v", got)
 		}
 	})
 

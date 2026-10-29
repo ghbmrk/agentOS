@@ -153,17 +153,25 @@ func Trampoline() {
 func confineAndExec(families, path string, argv []string) error {
 	var fam []int
 	for f := range strings.SplitSeq(families, ",") {
+		if f == "" {
+			continue // a profile with no socket families
+		}
 		n, err := strconv.Atoi(f)
 		if err != nil {
 			return err
 		}
 		fam = append(fam, n)
 	}
-	if syscall.Getuid() == 0 || syscall.Geteuid() == 0 || syscall.Getgid() == 0 {
+	if syscall.Getuid() == 0 || syscall.Geteuid() == 0 || syscall.Getgid() == 0 || syscall.Getegid() == 0 {
 		return ErrRoot
 	}
 	if groups, err := syscall.Getgroups(); err != nil || len(groups) != 0 {
 		return fmt.Errorf("confine: supplementary groups %v (%v)", groups, err)
+	}
+	// Close every descriptor past the interface (fd 3), so nothing the
+	// enforcer inherited without close-on-exec reaches the stack.
+	if _, _, e := syscall.RawSyscall(sysCloseRange, 4, 1<<32-1, 0); e != 0 {
+		return fmt.Errorf("confine: close_range: %w", e)
 	}
 	runtime.LockOSThread()
 	if err := install(filter(slices.Sorted(slices.Values(fam)))); err != nil {

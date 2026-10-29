@@ -17,6 +17,7 @@ const (
 	sysSocket     = 41
 	sysSocketpair = 53
 	sysSeccomp    = 317
+	sysCloseRange = 436
 
 	// cloneNew is every CLONE_NEW* flag clone(2) takes: NEWNS, NEWCGROUP,
 	// NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET.
