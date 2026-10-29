@@ -286,7 +286,7 @@ func (v *vm) stopped(b *board, timeout time.Duration) (restart string, err error
 	// when the other CPU is stopped (seen in CI).
 	m := restartRe.FindStringSubmatch(v.kernel())
 	if m == nil {
-		return "", errors.New("board stopped without restarting")
+		return "", fmt.Errorf("board stopped without restarting (qemu: %v)", v.cmd.ProcessState)
 	}
 	b.tryboot = strings.Contains(m[1], "tryboot")
 	return m[1], nil

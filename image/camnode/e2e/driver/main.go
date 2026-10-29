@@ -140,7 +140,8 @@ func runAll(out, work, only string) bool {
 			ok = false
 			logf("--- FAIL: %s (%v): %v", t.name, time.Since(start).Round(time.Second), err)
 			if e.vm != nil {
-				logf("console tail (%s):\n%s", e.vm.console, tail(e.vm.log(), 60))
+				logf("kernel console tail (%s):\n%s", e.vm.console, tail(e.vm.kernel(), 40))
+				logf("journal tail (%s):\n%s", e.vm.journal, tail(e.vm.journalLog(), 30))
 			}
 			// The later tests build on the node this one left; stop here.
 			break

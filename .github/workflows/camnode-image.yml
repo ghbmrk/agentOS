@@ -92,6 +92,7 @@ jobs:
       - name: End-to-end test (QEMU aarch64)
         if: matrix.board == 'qemu'
         run: |
+          df -h "$RUNNER_TEMP"
           sudo ip netns add camnode-e2e
           sudo ip netns exec camnode-e2e "$RUNNER_TEMP/out/e2e/camnode-e2e" run -out "$RUNNER_TEMP/out"
       - name: Keep the console logs
