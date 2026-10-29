@@ -77,6 +77,10 @@ type Config struct {
 	// tap on the passkey page's name. When unset, Passkeys that also serve
 	// the backup ops (AgentosdPasskeys, on the same socket) serve it.
 	Backups Backups
+	// Cameras, when set, serves the Cameras page at /cameras/ behind
+	// sign-in (CAM-clerk part d, #3514): the tier-4 connect, capture
+	// turn-on, retention and re-pin steps, and the disconnect.
+	Cameras Cameras
 	// Recovery, when set with Passkeys, serves the Recovery key page at
 	// /recovery/ behind sign-in (REC-4, r4a): its tap is on the passkey
 	// page's name. When unset, Passkeys that also serve the recovery ops
@@ -307,6 +311,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Backups != nil {
 		s.Mount("/backups", "Backups", http.HandlerFunc(s.backupsPage))
+	}
+	if s.cfg.Cameras != nil {
+		s.Mount("/cameras", "Cameras", http.HandlerFunc(s.camerasPage))
 	}
 	if s.cfg.Recovery != nil {
 		s.Mount("/recovery", "Recovery key", http.HandlerFunc(s.recoveryPage))
