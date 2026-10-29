@@ -41,7 +41,8 @@ the newest trusted verdicts marked `ux` and `potency` (one comment may carry bot
 `potency` only (D-086). Otherwise it prints `needs-lens <lens,...>` and exits 1. A verdict comment edited after posting never accepts: while it is the newest of
 its kind the check prints `edited-verdict <kind>` (l3, a lens or security; #3105), until a newer comment supersedes
 it. Likewise a verdict comment whose `Record:` line does not parse (a package ID with spaces, a missing line;
-#3611) prints `unparsed-record <kind>` until a newer comment supersedes it. Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
+#3611) prints `unparsed-record <kind>` until a newer comment supersedes it. An accept whose Record head names no commit here prints
+`unresolved-record <kind>` the same way (#3856). Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
 prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
@@ -414,8 +415,18 @@ EDITED = "edited-verdict {}: a verdict edited after posting never counts, post a
 UNPARSED = 'unparsed-record {}: Record line must be "Record: PR #{} · package <ID-without-spaces> · head <sha>"'
 
 
+# #3856 (seen on #3842): a Record head no `git rev-parse` resolves crashed --check with a traceback; name it as never accepting.
+UNRESOLVED = "unresolved-record {}: Record head {} resolves to no single commit here, post a new verdict naming the reviewed head"
+
+
+def _resolves(sha):
+    return subprocess.run(["git", "rev-parse", "-q", "--verify", f"{sha}^{{commit}}"], capture_output=True).returncode == 0
+
+
 def _named(v, kind, pr):
     """The named cause a verdict `v` of `kind` never accepts, or None."""
+    if v and v[0] == "accept" and not _resolves(v[1]):
+        return UNRESOLVED.format(kind, v[1])
     if v and v[0] == "edited":
         return EDITED.format(kind)
     if v and v[0] == "unparsed":
@@ -435,7 +446,7 @@ def main(argv):
         if args[:1] == ["--base"]:
             base, args = args[1], args[2:]
         v = verdict(comments, pr)
-        if v is None or v[0] != "accept":
+        if v is None or v[0] != "accept" or _named(v, "l3", pr):
             print("no-verdict" if v is None else _named(v, "l3", pr) or "not-accepted")
             return 1
         head = args[0] if args else "HEAD"
@@ -451,6 +462,10 @@ def main(argv):
             if hit:
                 print(_named((state,), ",".join(hit), pr))
                 return 1
+        hit = [m for m in (_named(owed[x], x, pr) for x in lenses) if m]
+        if hit:
+            print(hit[0])
+            return 1
         if lenses:
             print("needs-lens " + ",".join(lenses))
             return 1

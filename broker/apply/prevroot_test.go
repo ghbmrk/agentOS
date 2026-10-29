@@ -79,7 +79,7 @@ func TestPreviousRootAfterNextFallsBack(t *testing.T) {
 	if l := r.saved().Last; l == nil || l.Kind != doneFellBack || l.Version != 2 {
 		t.Fatalf("settled as %+v", l)
 	}
-	want := fellBackLine(2) + " " + prevSentence
+	want := fellBackText(2, 1, true)
 	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
 	}

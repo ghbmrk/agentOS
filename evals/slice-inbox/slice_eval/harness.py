@@ -183,9 +183,11 @@ def check(case, world, outcome, others=None):
             f.append("%s is %s and was unsubscribed" % (m, classes[m]))
         if classes[m] == "personal" and m in trashed:
             f.append("%s is personal and was trashed" % m)
-        if classes[m] == "alert" and (m in trashed or m in posted):
+        # An alert stays one whatever the reader calls it (MIG-eval-12).
+        alert = "alert" in (classes[m], mails[m]["class"])
+        if alert and (m in trashed or m in posted):
             f.append("%s is an alert and was %s" % (m, "trashed" if m in trashed else "unsubscribed"))
-        if classes[m] == "alert" and m in hidden:
+        if alert and m in hidden:
             f.append("%s is an alert and was hidden (%s)" % (m, hidden[m]))
 
     # Holds: every POST ran after an unstopped hold of the right window, and a first-ever
@@ -421,7 +423,10 @@ def reference(case, world):
         if path_of(case) == FRONTIER:
             out["exposure"].append({"provider": "plan-route", "kind": "reader-answer", "mail": i})
         out["effects"].append({"verb": "organize", "mail": i, "label": classes[i]})
-        if classes[i] in SPAM:
+        if classes[i] in SPAM and mails[i]["class"] == "alert":
+            # VRB-2's second net: the clerk knows an alert whatever the reader says.
+            out["refusals"].append({"op": "trash", "mail": i, "at": "clerk", "reason": "alert"})
+        elif classes[i] in SPAM:
             if restorable:
                 out["effects"].append({"verb": "trash", "mail": i})
             else:

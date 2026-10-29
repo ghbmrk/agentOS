@@ -1,10 +1,16 @@
-# The wired uplink (P2-1, #1416): any physical Ethernet port takes an address by DHCP and IPv6
+# The wired uplink (P2-1, #1416): any physical PCI Ethernet port takes an address by DHCP and IPv6
 # router advertisement, so plugging a cable into the home router is all it takes to go online.
 # Type=ether never matches a radio (Type=wlan; the box turns no Wi-Fi on, D-178);
 # Kind=!* leaves out every virtual link (veth, bridge, ...). Inbound stays dropped (I11).
+# The match is positive (#3840): only a port whose udev record says PCI, so a USB adapter, a
+# rename loser's empty record and Thunderbolt networking (its driver, which networkd reads from
+# the kernel, not udev) all fall to 90-agentos-down.network and stay down; the edge's cable
+# never takes this DHCP.
 [Match]
 Type=ether
 Kind=!*
+Property=ID_BUS=pci
+Driver=!thunderbolt-net
 
 [Network]
 DHCP=yes
