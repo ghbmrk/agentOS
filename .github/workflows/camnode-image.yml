@@ -1,0 +1,112 @@
+name: camnode-image
+# The camera node image (CAM-node part c, #3513; image/camnode/): builds the QEMU board's image
+# and runs its end-to-end test under QEMU aarch64 (image/camnode/e2e/driver), and builds the CM4
+# board's image, on a pull request that touches the image, the node's code or this file, on
+# main, and nightly. Buildroot's downloads and compiler cache are cached by the hash of the
+# Buildroot tree's configuration, so a rebuild after a code change recompiles only what changed.
+# The CM4 build uses a throwaway release key: its outputs are for review, never for a board.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "image/camnode/**"
+      - "broker/camnode/**"
+      - "broker/camwire/**"
+      - "broker/cmd/agentos-camnode/**"
+      - ".github/workflows/camnode-image.yml"
+  pull_request:
+    paths:
+      - "image/camnode/**"
+      - "broker/camnode/**"
+      - "broker/camwire/**"
+      - "broker/cmd/agentos-camnode/**"
+      - "broker/go.mod"
+      - "broker/go.sum"
+      - ".github/workflows/camnode-image.yml"
+permissions:
+  contents: read
+concurrency:
+  group: camnode-image-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  GOTOOLCHAIN: local
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [qemu, cm4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' broker/go.mod)
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; go.mod names $want" >&2; exit 1; }
+      - name: Install Buildroot's host requirements and the test's DHCP server
+        run: sudo apt-get update -q && sudo apt-get install -y -q build-essential cpio rsync bc unzip file dnsmasq-base
+      - name: Cache key
+        id: key
+        run: |
+          h=$(cat image/camnode/build.sh image/camnode/external/configs/*.config image/camnode/external/board/*/linux.fragment | sha256sum | cut -c1-32)
+          echo "key=camnode-br-${{ matrix.board }}-$h" >> "$GITHUB_OUTPUT"
+      - name: Restore downloads and compiler cache
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: |
+            ~/camnode-dl
+            ~/camnode-ccache
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: camnode-br-${{ matrix.board }}-
+      - name: Throwaway release key (cm4)
+        if: matrix.board == 'cm4'
+        run: |
+          (cd broker && CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/camnode-e2e" ../image/camnode/e2e/driver/*.go)
+          "$RUNNER_TEMP/camnode-e2e" keygen "$RUNNER_TEMP/throwaway"
+          echo "CAMNODE_RELEASE_PUB=$RUNNER_TEMP/throwaway.pub" >> "$GITHUB_ENV"
+      - name: Build the ${{ matrix.board }} image
+        run: |
+          export CAMNODE_DL=$HOME/camnode-dl CAMNODE_CCACHE=$HOME/camnode-ccache
+          # pipefail: the build's own exit decides the step, whatever the filter shows.
+          set -o pipefail
+          image/camnode/build.sh ${{ matrix.board }} "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log" |
+            { grep -E '^(>>>|post-image:|build.sh:)' || true; } || { tail -200 "$RUNNER_TEMP/build.log"; exit 1; }
+      - name: Save downloads and compiler cache
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: |
+            ~/camnode-dl
+            ~/camnode-ccache
+          key: ${{ steps.key.outputs.key }}-${{ github.run_id }}
+      - name: End-to-end test (QEMU aarch64)
+        if: matrix.board == 'qemu'
+        run: |
+          df -h "$RUNNER_TEMP"
+          sudo ip netns add camnode-e2e
+          sudo ip netns exec camnode-e2e "$RUNNER_TEMP/out/e2e/camnode-e2e" run -out "$RUNNER_TEMP/out"
+      - name: Keep the console logs
+        if: always() && matrix.board == 'qemu'
+        run: sudo tar -C "$RUNNER_TEMP/out" -czf "$RUNNER_TEMP/consoles.tar.gz" --ignore-failed-read $(cd "$RUNNER_TEMP/out" && sudo find e2e-run '(' -name console.log -o -name journal.log ')' 2>/dev/null) || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: always()
+        with:
+          name: camnode-${{ matrix.board }}
+          path: |
+            ${{ runner.temp }}/out/SHA256SUMS
+            ${{ runner.temp }}/out/camnode-${{ matrix.board }}.slot.json
+            ${{ runner.temp }}/consoles.tar.gz
+            ${{ runner.temp }}/build.log
+          if-no-files-found: ignore

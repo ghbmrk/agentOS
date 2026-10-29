@@ -1,0 +1,7 @@
+# The CM4 board: the button (gpio-keys), the IR illuminator (gpio-led), the secure element on
+# i2c-dev, the thermal core on spidev, the camera on unicam and the hardware encoder.
+CONFIG_KEYBOARD_GPIO=y
+CONFIG_LEDS_GPIO=y
+CONFIG_I2C_CHARDEV=y
+CONFIG_SPI_SPIDEV=m
+CONFIG_MMC_SDHCI_IPROC=y

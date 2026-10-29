@@ -1,0 +1,28 @@
+#!/usr/sbin/nft -f
+# The camera node's whole firewall (CAM-node part c; briefs/CAM-node.md, design point 5; NET-2).
+# In: the stream port and DHCP replies. Out: replies to connections the node accepted, and the
+# DHCP client's requests. Nothing else in or out. The kernel has no IPv6 (CONFIG_IPV6 off).
+flush ruleset
+
+table ip camnode {
+	chain input {
+		type filter hook input priority filter; policy drop;
+		iif "lo" accept
+		ct state invalid drop
+		ct state established,related accept
+		tcp dport 8443 ct state new accept
+		udp sport 67 udp dport 68 accept
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+	}
+
+	chain output {
+		type filter hook output priority filter; policy drop;
+		oif "lo" accept
+		ct state invalid drop
+		ct state established accept
+		udp sport 68 udp dport 67 accept
+	}
+}

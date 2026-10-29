@@ -1,0 +1,2 @@
+# username uid group gid password home shell groups comment (Buildroot makeusers)
+camnode 990 camnode 990 ! - - video agentOS camera node

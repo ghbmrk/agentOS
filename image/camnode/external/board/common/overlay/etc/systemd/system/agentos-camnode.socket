@@ -1,0 +1,12 @@
+[Unit]
+Description=Camera node stream port
+Requires=camnode-firewall.service
+After=camnode-firewall.service
+
+[Socket]
+ListenStream=0.0.0.0:8443
+NoDelay=yes
+Accept=no
+
+[Install]
+WantedBy=sockets.target

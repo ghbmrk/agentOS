@@ -1,0 +1,5 @@
+# The QEMU board's mainline kernel, with the hash Buildroot ships for it in
+# linux/from-6.17/linux.hash (copied there from kernel.org's signed sha256sums.asc).
+# Buildroot 2026.02.3 looks for it under linux/6.18.33/, which it does not ship, so without
+# this file the tarball is taken unchecked (build.sh refuses that).
+sha256  6f16ff302599f6fe34742890322cf0775703105fbd8767449682fca6af0fb782  linux-6.18.33.tar.xz

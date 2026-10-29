@@ -1,0 +1,11 @@
+# End-to-end stand-in for the provisioning button (QEMU board only): a uinput key, held from
+# power-on when the harness sets fw_cfg opt/camnode/button to 1.
+[Unit]
+Description=e2e stand-in: provisioning button
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=agentos-camnode.service
+
+[Service]
+Type=notify
+ExecStart=/usr/libexec/camnode/e2e-button /sys/firmware/qemu_fw_cfg/by_name/opt/camnode/button/raw
