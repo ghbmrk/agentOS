@@ -168,9 +168,11 @@ func confineAndExec(families, path string, argv []string) error {
 	if groups, err := syscall.Getgroups(); err != nil || len(groups) != 0 {
 		return fmt.Errorf("confine: supplementary groups %v (%v)", groups, err)
 	}
-	// Close every descriptor past the interface (fd 3), so nothing the
-	// enforcer inherited without close-on-exec reaches the stack.
-	if _, _, e := syscall.RawSyscall(sysCloseRange, 4, 1<<32-1, 0); e != 0 {
+	// Mark every descriptor past the interface (fd 3) close-on-exec, so
+	// nothing the enforcer inherited without it reaches the stack. Marking
+	// rather than closing leaves the Go runtime's own fds (netpoll) open
+	// until the exec.
+	if _, _, e := syscall.RawSyscall(sysCloseRange, 4, 1<<32-1, closeRangeCloexec); e != 0 {
 		return fmt.Errorf("confine: close_range: %w", e)
 	}
 	runtime.LockOSThread()

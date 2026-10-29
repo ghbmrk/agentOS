@@ -19,6 +19,8 @@ const (
 	sysSeccomp    = 317
 	sysCloseRange = 436
 
+	closeRangeCloexec = 4 // CLOSE_RANGE_CLOEXEC
+
 	// cloneNew is every CLONE_NEW* flag clone(2) takes: NEWNS, NEWCGROUP,
 	// NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET.
 	cloneNew = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000

@@ -171,8 +171,10 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	copyFile(t, os.Args[0], bin)
 
 	read := func(t *testing.T, conn Conn) map[string]string {
+		// The host's read loop outlives the subtest (its link ends when the
+		// deferred Stop runs), so its log goes to a sink, not to t.
 		h, err := NewHost(Config{Devices: []Device{scale}, Timeout: 20 * time.Second,
-			Notify: func(Notification) {}, Log: func(s string) { t.Log(s) }})
+			Notify: func(Notification) {}, Log: func(string) {}})
 		if err != nil {
 			t.Fatal(err)
 		}
