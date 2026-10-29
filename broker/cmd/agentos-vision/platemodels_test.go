@@ -80,6 +80,24 @@ func TestPlateDecode(t *testing.T) {
 	if _, ok := plateDecode(out[7:21], pb); ok {
 		t.Fatal("a narrow or weak plate was kept")
 	}
+	// A wide box above or below the vehicle clamps to no rows, and an
+	// upside-down box has none: neither is a plate (#3805), as the
+	// reader would sample the row before the region's first.
+	ax0, ay0 := at(300, 20)
+	ax1, ay1 := at(420, 60)
+	bx0, by0 := at(300, 380)
+	bx1, by1 := at(420, 450)
+	ux0, uy0 := at(300, 250)
+	ux1, uy1 := at(420, 220)
+	for name, row := range map[string][]float32{
+		"above":       {0, ax0, ay0, ax1, ay1, 0, 0.9},
+		"below":       {0, bx0, by0, bx1, by1, 0, 0.9},
+		"upside down": {0, ux0, uy0, ux1, uy1, 0, 0.9},
+	} {
+		if got, ok := plateDecode(row, pb); ok {
+			t.Errorf("a box %s the vehicle was kept as %+v", name, got)
+		}
+	}
 	// A box past the vehicle is clamped to it.
 	ex0, ey0 := at(150, 50)
 	ex1, ey1 := at(700, 320)
@@ -122,18 +140,22 @@ func TestPlateInputPadsAndFills(t *testing.T) {
 }
 
 func TestPlateVehiclesBestFirstBounded(t *testing.T) {
+	// Nine vehicles at least 96 pixels wide, people among them, and a
+	// 95-pixel vehicle scoring best: the best 4 of the nine are searched
+	// and the narrow one is not (VIS-A33). The bound and the width are
+	// written out, not taken from the constants, so a change to either
+	// fails here (#3805).
 	var seen []Seen
-	for i := 0; i < 7; i++ {
+	for i := 0; i < 12; i++ {
 		c := vision.Vehicle
-		if i%3 == 0 {
+		if i%4 == 0 {
 			c = vision.Person
 		}
-		seen = append(seen, Seen{Detection: vision.Detection{Class: c, Box: vision.Box{X1: plateMinVehicle}, Conf: 10 + i}})
+		seen = append(seen, Seen{Detection: vision.Detection{Class: c, Box: vision.Box{X0: 10 * i, X1: 10*i + 96 + i%2}, Conf: 10 + i}})
 	}
-	// A vehicle too narrow to hold a readable plate is not searched.
-	seen = append(seen, Seen{Detection: vision.Detection{Class: vision.Vehicle, Box: vision.Box{X0: 1, X1: plateMinVehicle}, Conf: 99}})
+	seen = append(seen, Seen{Detection: vision.Detection{Class: vision.Vehicle, Box: vision.Box{X0: 5, X1: 100}, Conf: 99}})
 	got := plateVehicles(seen)
-	if want := []int{5, 4, 2, 1}; len(got) != len(want) || got[0] != 5 || got[1] != 4 || got[2] != 2 || got[3] != 1 {
+	if want := []int{11, 10, 9, 7}; len(got) != len(want) || got[0] != 11 || got[1] != 10 || got[2] != 9 || got[3] != 7 {
 		t.Fatalf("vehicles %v, want %v", got, want)
 	}
 }
@@ -156,6 +178,9 @@ func TestSoundInputAndDecode(t *testing.T) {
 	scores[2*yamnetClasses+0] = 0.99         // Speech: on no list
 	scores[349] = float32(soundMinScore["doorbell"] - 0.01)
 	scores[2*yamnetClasses+421] = float32(math.NaN())
+	// An infinite score hears nothing either (#3805): without the finite
+	// check it would be the gunshot's best.
+	scores[422] = float32(math.Inf(1))
 	got := soundDecode(scores)
 	if len(got) != 1 || got[0] != (vision.Sound{Label: "dog-bark", Conf: percent(bark)}) {
 		t.Fatalf("sounds %+v", got)
