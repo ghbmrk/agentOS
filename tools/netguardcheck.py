@@ -57,7 +57,12 @@ def hooked(path):
 def load_allow(path):
     allow = {}
     if path.exists():
-        for n, raw in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+        # Bytes, so "\r" is not turned into "\n", and printable ASCII only: a hidden break would
+        # add an entry (REV-CHK-crlf, #3902).
+        for n, raw in enumerate(path.read_bytes().decode("utf-8", "replace").split("\n"), 1):
+            bad = [c for c in raw if not " " <= c <= "~"]
+            if bad:
+                raise SystemExit(f"{path}:{n}: character {bad[0]!r} outside printable ASCII")
             raw = raw.strip()
             if not raw or raw.startswith("#"):
                 continue
