@@ -124,7 +124,8 @@ type state uint8
 const (
 	handed state = iota + 1 // with the line now
 	sent
-	maybe // handed, its answer lost: never sent again
+	maybe   // handed, its answer lost: never sent again
+	notSent // this clerk saw that nothing went out; it may run again
 )
 
 // Clerk is the second-line clerk.
@@ -291,11 +292,12 @@ func (c *Clerk) DoContext(ctx context.Context, r kernel.Request, v kernel.View) 
 		return failed(code)
 	}
 	c.mu.Lock()
-	if c.steps[idem] != 0 { // a concurrent Do of the same step got here first
+	if st := c.steps[idem]; st != 0 && st != notSent { // a concurrent Do of the same step got here first
 		c.mu.Unlock()
 		return kernel.Result{Outcome: "unknown", Detail: RMaybeSent}
 	}
 	if ctx.Err() != nil {
+		c.steps[idem] = notSent
 		c.mu.Unlock()
 		return failed(RCancelled)
 	}
@@ -319,10 +321,10 @@ func (c *Clerk) DoContext(ctx context.Context, r kernel.Request, v kernel.View) 
 		c.log(Entry{Kind: EntrySent, Idem: idem, To: to, Words: words})
 		return kernel.Result{Outcome: "ok"}
 	case errors.Is(err, ErrNotTaken):
-		delete(c.steps, idem)
+		c.steps[idem] = notSent
 		return failed(RNotTaken)
 	case errors.Is(err, ErrRefused):
-		delete(c.steps, idem)
+		c.steps[idem] = notSent
 		return failed(RProvider)
 	}
 	c.steps[idem] = maybe
@@ -331,19 +333,21 @@ func (c *Clerk) DoContext(ctx context.Context, r kernel.Request, v kernel.View) 
 	return kernel.Result{Outcome: "unknown", Detail: RMaybeSent}
 }
 
-// Probe answers from the clerk's memory, never by acting (KRN-8): a text
-// the line may have sent is unknown for good, so the kernel parks it and
-// it is never sent again; one the line never took is notdone.
+// Probe answers from the clerk's memory, never by acting (KRN-8): notdone
+// only for a step this clerk saw go nowhere. A text the line may have sent,
+// and any step the clerk has no record of (its memory is lost on a
+// restart), is unknown for good, so the kernel parks it and it is never
+// sent again, as clerk.Exit answers for a request that is not idempotent.
 func (c *Clerk) Probe(r kernel.Request, _ kernel.View) kernel.Result {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch c.steps[r.Idem()] {
 	case sent:
 		return kernel.Result{Outcome: "done"}
-	case handed, maybe:
-		return kernel.Result{Outcome: "unknown"}
+	case notSent:
+		return kernel.Result{Outcome: "notdone"}
 	}
-	return kernel.Result{Outcome: "notdone"}
+	return kernel.Result{Outcome: "unknown"}
 }
 
 func failed(code string) kernel.Result { return kernel.Result{Outcome: "failed", Detail: code} }
