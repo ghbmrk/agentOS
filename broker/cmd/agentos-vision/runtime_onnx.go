@@ -22,14 +22,18 @@ import (
 // needs no model (VIS-A27 to A29). On a frame with a person it also runs
 // the pinned YuNet face detector and encodes each person's face with the
 // pinned SFace (VIS-A31); Encode is SFace on an enrolment frame's one
-// clear face. There is no sound model yet (part e3), so Sound answers
-// ErrNoModel.
+// clear face. On each of a frame's best vehicles it runs the pinned plate
+// detector and reads the plate it finds with the pinned reader (VIS-A33).
+// Sound is the pinned YAMNet's labels for a clip (VIS-A34).
 const (
 	ortLibrary   = "libonnxruntime.so.1.29.0"
 	detectorFile = "yolox_tiny.onnx"
 	yunetFile    = "face_detection_yunet_2023mar.onnx"
 	sfaceFile    = "face_recognition_sface_2021dec.onnx"
-	modelsName   = "yolox-tiny-416.yunet-2023mar.sface-2021dec"
+	plateFile    = "yolo-v9-t-416-license-plates-end2end.onnx"
+	readerFile   = "cct_xs_v2_global.onnx"
+	yamnetFile   = "yamnet.onnx"
+	modelsName   = "yolox-tiny-416.yunet-2023mar.sface-2021dec.plate.cct-xs.yamnet"
 )
 
 // modelsHash is what hello reports as the models' SHA-256: the hash of the
@@ -57,16 +61,18 @@ type onnxRuntime struct {
 	cur *onnxLoad
 }
 
-// onnxLoad is one load's sessions (the detector, the face detector and
-// the face encoder) and the runs in flight on them, so a reload can stop
+// onnxLoad is one load's sessions (the detector, the face detector, the
+// face encoder, the plate detector, the plate reader and the sound
+// classifier) and the runs in flight on them, so a reload can stop
 // them (Runtime: a Load makes a call still running on the old load
 // return).
 type onnxLoad struct {
-	sess, yunet, sface *ort.DynamicAdvancedSession
-	mu                 sync.Mutex
-	runs               map[*ort.RunOptions]bool
-	gone               bool
-	wg                 sync.WaitGroup
+	sess, yunet, sface    *ort.DynamicAdvancedSession
+	plate, reader, yamnet *ort.DynamicAdvancedSession
+	mu                    sync.Mutex
+	runs                  map[*ort.RunOptions]bool
+	gone                  bool
+	wg                    sync.WaitGroup
 	// encodes counts the face encoder's runs, so a test can see that
 	// Detect told not to encode runs none (#3792; D-207).
 	encodes atomic.Int64
@@ -94,8 +100,8 @@ func (r *onnxRuntime) Load() (Model, error) {
 	if err := r.environment(); err != nil {
 		return Model{}, err
 	}
-	var files [3][]byte
-	for i, name := range []string{detectorFile, yunetFile, sfaceFile} {
+	var files [6][]byte
+	for i, name := range []string{detectorFile, yunetFile, sfaceFile, plateFile, readerFile, yamnetFile} {
 		b, err := readPinned(r.dir, name)
 		if err != nil {
 			return Model{}, err
@@ -119,6 +125,11 @@ func (r *onnxRuntime) Load() (Model, error) {
 		{&next.sess, files[0], []string{"images"}, []string{"output"}},
 		{&next.yunet, files[1], []string{"input"}, yunetOutputs},
 		{&next.sface, files[2], []string{"data"}, []string{"fc1"}},
+		{&next.plate, files[3], []string{"images"}, []string{"output0"}},
+		{&next.reader, files[4], []string{"input"}, []string{"plate"}},
+		// Only the class scores: the window embeddings and the
+		// spectrogram are never asked for (soundmodel.go).
+		{&next.yamnet, files[5], []string{"waveform"}, []string{"output_0"}},
 	} {
 		sess, err := ort.NewDynamicAdvancedSessionWithONNXData(m.b, m.in, m.out, opts)
 		if err != nil {
@@ -139,7 +150,7 @@ func (r *onnxRuntime) Load() (Model, error) {
 
 // destroy frees the load's sessions.
 func (l *onnxLoad) destroy() {
-	for _, s := range []*ort.DynamicAdvancedSession{l.sess, l.yunet, l.sface} {
+	for _, s := range []*ort.DynamicAdvancedSession{l.sess, l.yunet, l.sface, l.plate, l.reader, l.yamnet} {
 		if s != nil {
 			s.Destroy()
 		}
@@ -205,6 +216,9 @@ func (r *onnxRuntime) Detect(f vision.Frame, encode bool) ([]Seen, error) {
 	defer l.end(ro)
 	seen, err := l.detect(f, ro)
 	if err != nil {
+		return nil, err
+	}
+	if err := l.plates(f, ro, seen); err != nil {
 		return nil, err
 	}
 	people := false
@@ -345,5 +359,117 @@ func (r *onnxRuntime) Encode(f vision.Frame) ([]float32, error) {
 	return v, err
 }
 
-// Sound has no sound model in this build (part e3).
-func (r *onnxRuntime) Sound([]byte) ([]vision.Sound, error) { return nil, ErrNoModel }
+// plates sets the plate text of each of seen's best vehicles
+// (plateVehicles) whose box holds a plate the reader reads (VIS-A33). The
+// models' inputs and outputs, which hold a plate's pixels and its text,
+// are zeroed on return.
+func (l *onnxLoad) plates(f vision.Frame, ro *ort.RunOptions, seen []Seen) error {
+	vs := plateVehicles(seen)
+	if len(vs) == 0 {
+		return nil
+	}
+	in := make([]float32, 3*plateSize*plateSize)
+	defer clear(in)
+	it, err := ort.NewTensor(ort.NewShape(1, 3, plateSize, plateSize), in)
+	if err != nil {
+		return errNotLoaded
+	}
+	defer it.Destroy()
+	rin := make([]uint8, readerH*readerW*3)
+	defer clear(rin)
+	rt, err := ort.NewTensor(ort.NewShape(1, readerH, readerW, 3), rin)
+	if err != nil {
+		return errNotLoaded
+	}
+	defer rt.Destroy()
+	ot, err := ort.NewEmptyTensor[float32](ort.NewShape(1, readerSlots, int64(len(readerAlphabet))))
+	if err != nil {
+		return errNotLoaded
+	}
+	defer ot.Destroy()
+	read := ot.GetData()
+	defer clear(read)
+	for _, i := range vs {
+		vr, ok := boxRect(seen[i].Box, f.Width, f.Height)
+		if !ok {
+			continue
+		}
+		pb := plateInput(f, vr, in)
+		// The detector's row count is its own (suppression is inside
+		// it), so its output is allocated by the run.
+		outs := []ort.Value{nil}
+		if err := l.plate.RunWithOptions([]ort.Value{it}, outs, ro); err != nil {
+			return errors.New("plate detector run failed")
+		}
+		pr, found := plateRows(outs[0], pb)
+		if !found {
+			continue
+		}
+		readerInput(f, pr, rin)
+		if err := l.reader.RunWithOptions([]ort.Value{rt}, []ort.Value{ot}, ro); err != nil {
+			return errors.New("plate reader run failed")
+		}
+		if text, ok := readerDecode(read); ok {
+			seen[i].Plate = text
+		}
+	}
+	return nil
+}
+
+// plateRows is the best plate in a run-allocated detector output, which
+// it zeroes and frees; false when there is none or the output is not
+// float rows of plateRow.
+func plateRows(v ort.Value, pb plateBox) (rect, bool) {
+	if v == nil {
+		return rect{}, false
+	}
+	defer v.Destroy()
+	t, ok := v.(*ort.Tensor[float32])
+	if !ok {
+		return rect{}, false
+	}
+	data := t.GetData()
+	defer clear(data)
+	if s := t.GetShape(); len(s) != 2 || s[1] != plateRow {
+		return rect{}, false
+	}
+	return plateDecode(data, pb)
+}
+
+// Sound is YAMNet's labels for the clip, 16 kHz 16-bit samples (VIS-A34).
+// The samples' copy and the scores are zeroed on return; the service
+// zeroes the clip itself (VIS-A20).
+func (r *onnxRuntime) Sound(pcm []byte) ([]vision.Sound, error) {
+	l, ok := r.current()
+	if !ok {
+		return nil, errNotLoaded
+	}
+	ro, ok := l.begin()
+	if !ok {
+		return nil, errNotLoaded
+	}
+	defer l.end(ro)
+	in := make([]float32, max(len(pcm)/2, yamnetMinSamples))
+	defer clear(in)
+	n := soundInput(pcm, in)
+	it, err := ort.NewTensor(ort.NewShape(int64(n)), in[:n])
+	if err != nil {
+		return nil, errNotLoaded
+	}
+	defer it.Destroy()
+	outs := []ort.Value{nil}
+	if err := l.yamnet.RunWithOptions([]ort.Value{it}, outs, ro); err != nil {
+		return nil, errors.New("sound model run failed")
+	}
+	if outs[0] == nil {
+		return nil, errors.New("sound model gave no scores")
+	}
+	defer outs[0].Destroy()
+	t, ok := outs[0].(*ort.Tensor[float32])
+	if !ok {
+		return nil, errors.New("sound model gave no scores")
+	}
+	scores := t.GetData()
+	defer clear(scores)
+	return soundDecode(scores), nil
+}

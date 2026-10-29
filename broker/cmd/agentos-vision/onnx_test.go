@@ -31,3 +31,17 @@ func TestOnnxLoadNeedsPinnedFiles(t *testing.T) {
 		t.Fatalf("library off its pin: %v, want ErrRefused", err)
 	}
 }
+
+// TestOnnxModelNameValid: the name hello reports for this build's models
+// is one the client takes (vision.ValidModelName), every model it loads
+// is pinned, and the pins are what modelsHash is made from.
+func TestOnnxModelNameValid(t *testing.T) {
+	if !vision.ValidModelName(modelsName) || !vision.ValidHash(modelsHash) {
+		t.Fatalf("model name %q or hash %q is not valid", modelsName, modelsHash)
+	}
+	for _, f := range []string{ortLibrary, detectorFile, yunetFile, sfaceFile, plateFile, readerFile, yamnetFile} {
+		if pinFor(f) == "" {
+			t.Errorf("%s is not pinned", f)
+		}
+	}
+}

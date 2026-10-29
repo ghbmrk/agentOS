@@ -1,0 +1,13 @@
+# The sound set the real sound path is measured on (TestRealSound;
+# ASSUMPTIONS VIS-A34): folds 3 and 4 of ESC-50 (800 five-second clips,
+# 40 of each of 50 categories; CC BY-NC 3.0, so fetched by
+# .github/workflows/vision-real.yml and never committed). The repository
+# has no release, so the files are fetched by name from its master branch
+# and held to the hashes here: a change upstream fails the run. The
+# thresholds were set on folds 1 and 2 (soundmodel.go). Each line: name,
+# value.
+base  https://raw.githubusercontent.com/karolpiczak/ESC-50/master
+meta_sha256  ca660da60191a97de289983a05821c9382d852a38a2ba8428980816b68cf6246
+folds  3 4
+# sha256 of `sha256sum` over the 800 clips, in name order
+audio_sha256  1dab0d5d3603ea9d06c4e917b74394252e8dd1f7c2fa8c7b69df6b5235894ce6
