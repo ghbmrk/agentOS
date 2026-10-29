@@ -508,8 +508,9 @@ func TestLogsCarryNoCapture(t *testing.T) {
 // REQ: KRN-3
 //
 // main serves the listeners it is handed as fd 3 and 4 and names no
-// socket of its own; with no runtime in this build it answers,
-// Unavailable, on the feed socket, and takes a lend on the control socket.
+// socket of its own; with no runtime in this build, or no models in
+// -models, it answers with its cause on the feed socket, and takes a lend
+// on the control socket.
 func TestMainServesTheListenerOnFD3(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "vision.sock")
@@ -534,7 +535,7 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	defer cancel()
 	cmd := childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"),
 		childproc.Options{Dir: dir, Stderr: &stderr, ExtraFiles: files, WaitDelay: time.Second},
-		os.Args[0], helperArg)
+		os.Args[0], helperArg, "-models", dir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -546,10 +547,10 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	}
 	defer func() { cancel(); cmd.Wait() }()
 	c := vision.Client{Path: sock, Timeout: 5 * time.Second}
-	if _, err := c.Hello(context.Background()); !isCause(err, vision.Unavailable) {
+	if _, err := c.Hello(context.Background()); !isCause(err, noModelsCause) {
 		t.Fatalf("hello: %v (log: %s)", err, stderr.String())
 	}
-	if _, err := c.Detect(context.Background(), gray(4, 4, 0)); !isCause(err, vision.Unavailable) {
+	if _, err := c.Detect(context.Background(), gray(4, 4, 0)); !isCause(err, noModelsCause) {
 		t.Fatalf("detect: %v", err)
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 2 {

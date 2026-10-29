@@ -20,6 +20,7 @@ require (
 	github.com/pion/srtp/v3 v3.1.3
 	github.com/sigstore/sigstore v1.10.6
 	github.com/theupdateframework/go-tuf/v2 v2.4.2
+	github.com/yalue/onnxruntime_go v1.36.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.24.0

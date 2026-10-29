@@ -1,0 +1,8 @@
+# The vision runtime's pinned files (VIS-core part e, ASSUMPTIONS VIS-A27).
+# Each line: SHA-256, file name, where it is fetched from. The runtime
+# (runtime_onnx.go) refuses a model or library whose hash is not the one
+# here; .github/workflows/vision-real.yml checks every download against
+# these before anything runs.
+c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba  onnxruntime-linux-x64-1.29.0.tgz  https://github.com/microsoft/onnxruntime/releases/download/v1.29.0/onnxruntime-linux-x64-1.29.0.tgz
+5715f06d8992ca8eeeddcce43df3a7d38f97d537052126f558e912cb312460ca  libonnxruntime.so.1.29.0  onnxruntime-linux-x64-1.29.0.tgz:onnxruntime-linux-x64-1.29.0/lib/libonnxruntime.so.1.29.0
+427cc366d34e27ff7a03e2899b5e3671425c262ea2291f88bb942bc1cc70b0f7  yolox_tiny.onnx  https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_tiny.onnx

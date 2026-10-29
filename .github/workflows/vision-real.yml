@@ -1,0 +1,94 @@
+name: vision-real
+# VIS-models (#3515 part e1): the vision service on the real ONNX Runtime and detector.
+# Every file is downloaded, checked against its pin and refused on a mismatch before
+# anything runs: the runtime library and the detector against
+# broker/cmd/agentos-vision/models.pins (the same pins the runtime checks again when it
+# loads), the scene set against scenes.pins. The tests then run under the tags vision_onnx
+# and vision_real, and fail, never skip, without the files. It runs when the service, the
+# protocol or the pins change, nightly, or on demand; ci.yml compiles the same tests on
+# every change, so a break to them shows there first.
+on:
+  pull_request:
+    paths:
+      - broker/cmd/agentos-vision/**
+      - broker/vision/**
+      - broker/go.mod
+      - broker/go.sum
+      - broker/vendor/github.com/yalue/**
+      - .github/workflows/vision-real.yml
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  GOTOOLCHAIN: local
+jobs:
+  real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      - name: Download the pinned runtime and detector, check each hash
+        run: |
+          pins=broker/cmd/agentos-vision/models.pins
+          pin() { awk -v f="$1" -v n="$2" '$1 !~ /^#/ && $2 == f {print $n}' "$pins"; }
+          check() { # file, pinned name
+            got=$(sha256sum "$1" | cut -d' ' -f1); want=$(pin "$2" 1)
+            echo "$2: sha256 $got (pinned: $want)"
+            [ -n "$want" ] && [ "$got" = "$want" ] || { echo "::error file=$pins::$2 hashes to $got, pinned $want"; exit 1; }
+          }
+          d="$RUNNER_TEMP/vision-models"
+          mkdir -p "$d" "$RUNNER_TEMP/ort"
+          tgz=onnxruntime-linux-x64-1.29.0.tgz
+          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/$tgz" "$(pin $tgz 3)"
+          check "$RUNNER_TEMP/$tgz" $tgz
+          tar -xzf "$RUNNER_TEMP/$tgz" -C "$RUNNER_TEMP/ort"
+          lib=libonnxruntime.so.1.29.0
+          cp "$RUNNER_TEMP/ort/onnxruntime-linux-x64-1.29.0/lib/$lib" "$d/$lib"
+          check "$d/$lib" $lib
+          det=yolox_tiny.onnx
+          curl -fsSL --retry 3 --retry-delay 5 -o "$d/$det" "$(pin $det 3)"
+          check "$d/$det" $det
+          echo "AGENTOS_VISION_MODELS=$d" >> "$GITHUB_ENV"
+      - name: Download the pinned scene set, check its hashes
+        run: |
+          pins=broker/cmd/agentos-vision/scenes.pins
+          pin() { awk -v k="$1" '$1 == k {print $2}' "$pins"; }
+          d="$RUNNER_TEMP/vision-scenes"
+          mkdir -p "$d/images"
+          base="$(pin base)/$(pin revision)"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$d/instances.json" "$base/annotations/instances_val2017_mini500.json"
+          got=$(sha256sum "$d/instances.json" | cut -d' ' -f1)
+          [ "$got" = "$(pin instances_sha256)" ] || { echo "::error file=$pins::instances.json hashes to $got"; exit 1; }
+          jq -r '.images[].file_name' "$d/instances.json" | sort > "$d/names"
+          grep -qvE '^[0-9]{12}\.jpg$' "$d/names" && { echo "::error file=$pins::an image name outside [0-9]{12}.jpg"; exit 1; }
+          xargs -P 8 -I{} curl -fsSL --retry 3 --retry-delay 5 -o "$d/images/{}" "$base/images/val2017/{}" < "$d/names"
+          got=$(cd "$d/images" && xargs sha256sum < "$d/names" | sha256sum | cut -d' ' -f1)
+          [ "$got" = "$(pin images_sha256)" ] || { echo "::error file=$pins::the images hash to $got"; exit 1; }
+          echo "AGENTOS_VISION_SCENES=$d" >> "$GITHUB_ENV"
+      - name: The real runtime (detection, thermal, floor figures)
+        working-directory: broker
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 30m -tags vision_onnx,vision_real -run 'TestRealRuntime|TestFloorFigures|TestOnnx|TestThermal' -v ./cmd/agentos-vision | tee "$RUNNER_TEMP/real.log"
+          # A renamed test or an unset variable must not pass by running nothing.
+          for t in TestRealRuntimeDetect TestRealRuntimeRefusesOffPinDetector TestFloorFigures TestOnnxLoadNeedsPinnedFiles TestThermalDetect; do
+            grep -q -- "^--- PASS: $t " "$RUNNER_TEMP/real.log" || { echo "$t did not pass" >&2; exit 1; }
+          done

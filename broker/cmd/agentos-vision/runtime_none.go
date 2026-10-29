@@ -1,3 +1,5 @@
+//go:build !vision_onnx
+
 package main
 
 import (
@@ -7,9 +9,10 @@ import (
 )
 
 // newRuntime is the runtime adapter. This build has none: every load is
-// Unavailable, so the service answers but never detects. VIS-core part (e)
-// replaces this file with its own runtime_<name>.go (ASSUMPTIONS VIS-A1).
-func newRuntime() Runtime { return noRuntime{} }
+// Unavailable, so the service answers but never detects. Built with
+// -tags vision_onnx, runtime_onnx.go is the adapter instead (VIS-A1,
+// VIS-A27).
+func newRuntime(string, int) Runtime { return noRuntime{} }
 
 type noRuntime struct{}
 
