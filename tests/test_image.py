@@ -116,11 +116,12 @@ def bt_block(root):
 
 UPLINK_REL = "usr/lib/systemd/network/20-agentos-uplink.network"
 RESOLVED_REL = "usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf"
+LINK_NET_REL = "usr/lib/systemd/network/10-agentos-link.network"
 
 
 def uplink(root):
-    # The image's networkd and resolved files (#1478, #1479), copied from mkosi.extra.
-    for rel in (UPLINK_REL, RESOLVED_REL):
+    # The image's networkd and resolved files (#1478, #1479, EDGE-link-core c2c), copied from mkosi.extra.
+    for rel in (UPLINK_REL, RESOLVED_REL, LINK_NET_REL):
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
 
 
@@ -2315,7 +2316,7 @@ class ConfFilesTest(unittest.TestCase):
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
             "var/lib/private", "run/agentos-egress", "run/agentos-localui", "run/agentos-mail",
-            "var/lib/agentos-mail")))
+            "var/lib/agentos-mail", "run/agentos-link")))
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
@@ -4878,12 +4879,15 @@ class UplinkTest(unittest.TestCase):
     def test_no_network_file_matches_the_radio(self):
         # The box turns no Wi-Fi on (D-178), and no link file names or renames a radio.
         files = sorted(self.NET.glob("*.network"))
-        self.assertEqual([f.name for f in files], [self.UPLINK.name])
+        self.assertEqual([f.name for f in files], ["10-agentos-link.network", self.UPLINK.name])
         for f in files:
             m = ini(f)["Match"]
             self.assertNotIn("wlan", m.get("Type", "").split())
             self.assertFalse(any(n.startswith(("wl", "ap")) for n in m.get("Name", "").split()), f.name)
-        self.assertEqual(sorted(self.NET.glob("*.link")), [])
+        # The one link file names the edge link's USB Ethernet adapter (EDGE-link-core c2c), never a radio.
+        links = sorted(self.NET.glob("*.link"))
+        self.assertEqual([f.name for f in links], ["10-agentos-link.link"])
+        self.assertEqual(ini(links[0])["Match"]["Type"], "ether")
 
     def test_distro_network_files_are_removed_from_the_image(self):
         # REQ: DEV-2, CH-9 (#1478): Debian's 80-*.network files (one masquerades) never reach the
@@ -5484,8 +5488,9 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-localui", "agentos-mail",
-                                 "agentos-model", "agentos-modem", "agentos-owner", "agentos-planner"])
+        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-link", "agentos-link-items",
+                                 "agentos-localui", "agentos-mail", "agentos-model", "agentos-modem", "agentos-owner",
+                                 "agentos-planner"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem")):
             s = ini(unit)["Service"]
             self.assertEqual((s["User"], s["Group"]), (user, user))
@@ -5889,6 +5894,8 @@ UNIT_DEVICES = {
     "agentos-keeper-pageca.service": ("root", "closed"),
     "agentos-keeper-setup@.service": ("root", "closed"),
     "agentos-keeper-mail.service": ("agentos-mail", "private"),
+    "agentos-keeper-link-capture.service": ("root", "private"),
+    "agentos-link.service": ("agentos-link", "private"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),
@@ -6069,3 +6076,164 @@ class HostDiskImageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+LINK_CAPTURE = MK / "mkosi.extra/usr/lib/systemd/system/agentos-keeper-link-capture.service"
+LINK_SERVED = MK / "mkosi.extra/usr/lib/systemd/system/agentos-link.service"
+LINK_ADMIT = "/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { \"agentos-link\" }'"
+LINK_CLOSE = "/usr/sbin/nft flush set inet agentos_inbound link"
+
+
+class EdgeLinkUnitsTest(unittest.TestCase):
+    """EDGE-link-core c2c (#3459; HW-15, HW-16): agentos-link's two units against the kernel's and
+    enrollment's units, the mains they run, the inbound drop and the link's network files. Before the
+    store, the capture unit (root) takes the first hello and enrollment, which stops it first, takes the
+    capture; after the kernel, the served unit (the link's own user) serves the live edge."""
+
+    def setUp(self):
+        u = MK / "mkosi.extra/usr/lib/systemd/system"
+        self.cap, self.srv = exec_args(LINK_CAPTURE), exec_args(LINK_SERVED)
+        self.enroll = exec_args(u / "agentos-keeper-enroll.service")
+        k = exec_args(u / "agentos-keeper-kernel.service")
+        i = k.index("--")
+        self.unlock, self.kern = k[1:i], k[i + 1:]
+
+    def flags(self, cmd):
+        src = (ROOT / "broker/cmd" / cmd / "main.go").read_text()
+        return set(re.findall(r'fs\.(?:String|Bool|Int|Duration|Uint)?(?:Var)?\((?:[^,]+, )?"([a-z-]+)"', src))
+
+    # REQ: HW-15, HW-16
+    def test_the_units_commands_name_the_mains_flags(self):
+        for words, cmd in ((self.cap, "agentos-link"), (self.srv, "agentos-link"), (self.enroll, "agentos-enroll"),
+                           (self.kern, "agentos-kernel")):
+            if cmd == "agentos-link":
+                self.assertEqual(words[0], "/usr/lib/agentos/agentos-link")
+            for w in words[1:]:
+                if w.startswith("-") and w != "--":
+                    self.assertIn(w[1:], self.flags(cmd), "%s %s" % (cmd, w))
+        for unit in (LINK_CAPTURE, LINK_SERVED):
+            self.assertTrue(ini(unit)["Service"]["ExecStart"].startswith("/usr/lib/agentos/with-uids "))
+        # Two modes, never both: the capture's flags in one unit, the served ones in the other.
+        self.assertFalse({"-kernel-sock", "-consumer-sock"} & set(self.cap))
+        self.assertFalse({"-capture", "-store", "-uid", "-gid"} & set(self.srv))
+        # The build ships the main.
+        self.assertRegex((ROOT / "image/build.sh").read_text(), r"for cmd in [^;]*\bagentos-link\b")
+
+    # REQ: HW-15, HW-16
+    def test_the_units_users(self):
+        users = {l.split()[1] for l in (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
+                 if l.strip() and not l.startswith("#") and l.split()[0] == "u"}
+        # The capture's parent is root, so enrollment takes its file (b2 decision 2); its hello reader
+        # drops to the link's user.
+        cs = ini(LINK_CAPTURE)["Service"]
+        self.assertNotIn("User", cs)
+        self.assertNotIn("DynamicUser", cs)
+        self.assertEqual((arg(self.cap, "uid"), arg(self.cap, "gid")), ("@uid:agentos-link", "@gid:agentos-link"))
+        # Served, the link's own user, which the kernel's link socket alone admits.
+        ss = ini(LINK_SERVED)["Service"]
+        self.assertEqual((ss["User"], ss["Group"]), ("agentos-link", "agentos-link"))
+        self.assertEqual(arg(self.kern, "link-uid"), "@uid:" + ss["User"])
+        self.assertEqual(arg(self.kern, "link-sock"), arg(self.srv, "kernel-sock"))
+        self.assertEqual(arg(self.srv, "kernel-uid"), arg(self.unlock, "uid"))
+        self.assertEqual(arg(self.kern, "link-sock").rsplit("/", 1)[0], arg(self.kern, "owner-sock").rsplit("/", 1)[0])
+        # The consumer is a user of its own, no other peer's, which no process runs as yet.
+        consumer = arg(self.srv, "consumer-uid")
+        self.assertEqual(consumer, "@uid:agentos-link-items")
+        peers = {consumer, "@uid:agentos-link", arg(self.unlock, "uid"), arg(self.kern, "owner-uid"),
+                 arg(self.kern, "meter-uid")}
+        self.assertEqual(len(peers), 5, peers)
+        for p in peers:
+            self.assertIn(p.split(":", 1)[1], users)
+        self.assertEqual(arg(self.srv, "consumer-sock").rsplit("/", 1)[0], "/run/" + ss["RuntimeDirectory"])
+
+    # REQ: HW-15
+    def test_the_capture_runs_only_before_the_store_and_stops_before_enrollment(self):
+        store = arg(self.unlock, "store")
+        self.assertEqual(arg(self.cap, "store"), store)
+        self.assertEqual(store, arg(self.enroll, "state") + "/store")
+        cu = ini(LINK_CAPTURE)["Unit"]
+        self.assertEqual(re.findall(r"(?m)^ConditionPathExists=(.*)$", LINK_CAPTURE.read_text()), ["!" + store])
+        # Enrollment takes the capture the unit writes, and starting it stops the capture first.
+        self.assertEqual(arg(self.enroll, "first-edge"), arg(self.cap, "capture"))
+        eu = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-keeper-enroll.service")["Unit"]
+        self.assertEqual(eu["Conflicts"].split(), [LINK_CAPTURE.name])
+        self.assertIn(LINK_CAPTURE.name, eu["After"].split())
+        self.assertNotIn("agentos-keeper-enroll.service", cu.get("Before", "").split())
+        # The capture's directory is root's alone (agentos-link ASSUMPTIONS EDGE-link-c2-2), made at
+        # every boot, and keeper state no main-side unit sees.
+        d = arg(self.cap, "capture").rsplit("/", 1)[0]
+        made = {w[1]: w for w in (l.split() for l in (MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf").read_text()
+                                  .splitlines()) if w and w[0] == "d"}
+        self.assertEqual(made[d], ["d", d, "0700", "root", "root", "-"])
+        self.assertIn(d, check.KEEPER_PATHS)
+        self.assertIn(LINK_CAPTURE.name, check.KEEPER_UNITS)
+        self.assertEqual(ini(LINK_CAPTURE)["Service"]["ReadWritePaths"], d)
+        # A failed start (no link interface yet) is retried until the store exists, never left failed.
+        self.assertEqual(cu["StartLimitIntervalSec"], "0")
+        self.assertEqual(ini(LINK_CAPTURE)["Service"]["Restart"], "on-failure")
+
+    # REQ: HW-15, HW-16
+    def test_the_served_link_runs_after_the_kernel(self):
+        su = ini(LINK_SERVED)["Unit"]
+        self.assertEqual(re.findall(r"(?m)^ConditionPathExists=(.*)$", LINK_SERVED.read_text()),
+                         [arg(self.unlock, "store")])
+        self.assertIn("agentos-keeper-kernel.service", su["After"].split())
+        # Every boot with a store, and the kernel's start on the confirm's boot.
+        self.assertEqual(sorted(ini(LINK_SERVED)["Install"]["WantedBy"].split()),
+                         ["agentos-keeper-kernel.service", "multi-user.target"])
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
+        for unit in (LINK_CAPTURE, LINK_SERVED):
+            self.assertIn("enable " + unit.name, preset)
+        # Main side: masked from the keeper's state, the capture included.
+        self.assertNotIn(LINK_SERVED.name, check.KEEPER_UNITS)
+        self.assertFalse(LINK_SERVED.name.startswith(check.KEEPER_PREFIX))
+        self.assertEqual(su["StartLimitIntervalSec"], "0")
+
+    # REQ: HW-15, HW-16
+    def test_both_open_the_link_port_on_the_link_alone(self):
+        rules = (MK / "mkosi.extra/usr/lib/agentos/inbound.nft").read_text()
+        net = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-link.network")
+        link = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-link.link")
+        for unit, words, prefix in ((LINK_CAPTURE, self.cap, ""), (LINK_SERVED, self.srv, "+")):
+            with self.subTest(unit=unit.name):
+                iface, port = arg(words, "iface"), arg(words, "port")
+                self.assertEqual(iface, net["Match"]["Name"])
+                self.assertEqual(iface, link["Link"]["Name"])
+                self.assertIn("    iifname @link tcp dport %s accept\n" % port, rules)
+                self.assertIn("{ \"%s\" }" % iface, LINK_ADMIT)
+                s = settings(unit)
+                self.assertEqual(s["ExecStartPre"], [prefix + LINK_ADMIT])
+                self.assertEqual(s["ExecStopPost"], [prefix + LINK_CLOSE])
+                u = ini(unit)["Unit"]
+                self.assertIn("agentos-inbound.service", u["Requires"].split())
+                self.assertIn("agentos-inbound.service", u["After"].split())
+        # The link's network: the fixed address, and nothing taken from or sent to the edge.
+        self.assertEqual(dict(net["Network"]), {"DHCP": "no", "LinkLocalAddressing": "no", "Address": "fe80::1/64",
+                                                "IPv6AcceptRA": "no", "LLDP": "no", "EmitLLDP": "no"})
+        self.assertEqual(net["Link"]["RequiredForOnline"], "no")
+        # The adapter that becomes the link: USB Ethernet, never a radio or a virtual link.
+        self.assertEqual(dict(link["Match"]), {"Type": "ether", "Kind": "!*", "Property": "ID_BUS=usb"})
+        self.assertLess("10-agentos-link.network", "20-agentos-uplink.network")
+        self.assertLess("10-agentos-link.link", "99-default.link")
+
+    # REQ: HW-15, HW-16, UPD-10
+    def test_the_link_s_sandboxes(self):
+        for unit in (LINK_CAPTURE, LINK_SERVED):
+            with self.subTest(unit=unit.name):
+                s = ini(unit)["Service"]
+                for k, v in (("NoNewPrivileges", "yes"), ("LimitCORE", "0"), ("UMask", "0077"),
+                             ("ProtectSystem", "strict"), ("ProtectHome", "yes"), ("PrivateTmp", "yes"),
+                             ("PrivateDevices", "yes"), ("DevicePolicy", "closed"), ("MemoryDenyWriteExecute", "yes"),
+                             ("NoExecPaths", "/"), ("ExecPaths", "/usr"), ("IPAddressDeny", "any"),
+                             ("IPAddressAllow", "link-local"), ("RestrictNamespaces", "yes")):
+                    self.assertEqual(s[k], v, k)
+                for k in ("DeviceAllow", "AmbientCapabilities", "PrivateNetwork", "EnvironmentFile"):
+                    self.assertNotIn(k, s)
+                self.assertNotIn(unit.name, check.TPM_UNITS)
+        # Served: no capability at all; the capture's root keeps only what starting and killing the
+        # reader and loading the link set need, and never reads the setup factors.
+        self.assertEqual(ini(LINK_SERVED)["Service"]["CapabilityBoundingSet"], "")
+        cs = ini(LINK_CAPTURE)["Service"]
+        self.assertEqual(sorted(cs["CapabilityBoundingSet"].split()),
+                         ["CAP_KILL", "CAP_NET_ADMIN", "CAP_SETGID", "CAP_SETUID"])
+        self.assertIn("/run/agentos-setup:ro", cs["TemporaryFileSystem"].split())

@@ -57,10 +57,20 @@ func exemptSet(t *testing.T, rules string) map[string]bool {
 // and fails on any other.
 func verdict(t *testing.T, rules string, p pkt, page ...string) string {
 	t.Helper()
+	return linkVerdict(t, rules, p, nil, page...)
+}
+
+// linkVerdict is verdict with link as the link set's content, as the link's
+// units load it (empty as rendered).
+func linkVerdict(t *testing.T, rules string, p pkt, link []string, page ...string) string {
+	t.Helper()
 	ex := exemptSet(t, rules)
-	pg := map[string]bool{}
+	pg, lk := map[string]bool{}, map[string]bool{}
 	for _, u := range page {
 		pg[u] = true
+	}
+	for _, u := range link {
+		lk[u] = true
 	}
 	in := false
 	for _, ln := range strings.Split(rules, "\n") {
@@ -104,6 +114,9 @@ func verdict(t *testing.T, rules string, p pkt, page ...string) string {
 				f := strings.Fields(body)
 				ok = p.proto == "udp" && f[2] == strconv.Itoa(int(p.dport))
 				body = strings.TrimSpace(strings.TrimPrefix(body, "udp dport "+f[2]))
+			case strings.HasPrefix(body, "iifname @link"):
+				ok = lk[p.iif]
+				body = strings.TrimSpace(strings.TrimPrefix(body, "iifname @link"))
 			case strings.HasPrefix(body, "iifname @page"):
 				ok = pg[p.iif]
 				body = strings.TrimSpace(strings.TrimPrefix(body, "iifname @page"))
@@ -304,6 +317,7 @@ func TestInboundRulesAreValidNft(t *testing.T) {
 		Devices:   []DeviceAllow{{Addr: netip.MustParseAddr("192.168.1.60"), TCPPorts: []uint16{8443, 8444}}, {Addr: netip.MustParseAddr("2001:db8::60"), TCPPorts: []uint16{80}}},
 		Discovery: []DiscoveryPort{DiscoverMDNS, DiscoverSSDP, DiscoverMatter},
 		Page:      true,
+		Link:      true,
 	})
 	admit, err := InboundPageAdmit("enp1s0")
 	if err != nil {
@@ -325,12 +339,13 @@ func TestInboundRulesAreValidNft(t *testing.T) {
 // imageRules is the file the image loads at boot (agentos-inbound.service).
 const imageRules = "../../image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft"
 
-// DEV-net-e 2a: the image loads exactly the rules of Image (the zero value
-// and the owner page's ports, WIFI-del-a3), after its header comment.
+// DEV-net-e 2a: the image loads exactly the rules of Image (the zero value,
+// the owner page's ports, WIFI-del-a3, and the edge link's port,
+// EDGE-link-core c2c), after its header comment.
 // Regenerate with AGENTOS_WRITE_INBOUND=1 go test ./netguard.
 func TestInboundImageFileIsTheDefault(t *testing.T) {
-	if Image.Devices != nil || Image.Discovery != nil || Image.Exempt != nil || !Image.Page {
-		t.Fatalf("the image's rules are not the zero value and the page: %+v", Image)
+	if Image.Devices != nil || Image.Discovery != nil || Image.Exempt != nil || !Image.Page || !Image.Link {
+		t.Fatalf("the image's rules are not the zero value, the page and the link: %+v", Image)
 	}
 	want := render(t, Image)
 	if os.Getenv("AGENTOS_WRITE_INBOUND") == "1" {
@@ -566,5 +581,74 @@ func TestInboundPageAdmitHoldsOneName(t *testing.T) {
 	}
 	if InboundPageClose != "flush set inet agentos_inbound page\n" {
 		t.Errorf("close script %q", InboundPageClose)
+	}
+}
+
+// EDGE-link-core c2c (HW-15, HW-16): the edge link's port is accepted only
+// on the interface in the link set, and nothing else on that interface is:
+// another port, UDP, a router advertisement, a DHCP reply, the page's
+// ports even if that interface were in the page set, or anything if it
+// were exempt. Replies and neighbour discovery on it pass, so the link
+// works. The port is dropped on every other interface, and everywhere
+// while the set is empty (as the image boots, and once the link's unit
+// stops) or the rule is not rendered. agentos-link binds the same port to
+// the same interface (its TestListensOnTheLinkInterfaceOnly), so the two
+// checks hold the link to one port on one cable.
+// Revert mutants: dropping the "iifname @link drop" line admits the RA,
+// the DHCP reply and the page's ports on the link; moving the link block
+// after "iifname @exempt accept" admits everything on an exempt link;
+// dropping "iifname @link" from the port rule admits the port on eth0.
+// REQ: HW-15, HW-16
+func TestInboundLinkPortOnTheLinkOnly(t *testing.T) {
+	r := render(t, Image)
+	link := []string{"agentos-link"}
+	ll := netip.MustParseAddr("fe80::2")
+	for _, c := range []struct {
+		p    pkt
+		want string
+	}{
+		{pkt{iif: "agentos-link", src: ll, proto: "tcp", dport: LinkPort}, "accept"},
+		{pkt{iif: "agentos-link", src: netip.MustParseAddr("169.254.0.2"), proto: "tcp", dport: LinkPort}, "accept"},
+		{pkt{iif: "agentos-link", src: ll, proto: "tcp", sport: 80, dport: 51000, established: true}, "accept"},
+		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 255}, "accept"},
+		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-advert", hop: 255}, "accept"},
+		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 64}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-router-advert", hop: 255}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "echo-request", hop: 64}, "drop"},
+		{pkt{iif: "agentos-link", src: netip.MustParseAddr("169.254.0.2"), proto: "udp", sport: 67, dport: 68}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "udp", sport: 547, dport: 546}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "tcp", dport: LinkPort + 1}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "tcp", dport: 22}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "udp", dport: LinkPort}, "drop"},
+		{pkt{iif: "agentos-link", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: 443}, "drop"},
+		{pkt{iif: "agentos-link", src: ll, proto: "udp", dport: 5353}, "drop"},
+		{pkt{iif: "eth0", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: LinkPort}, "drop"},
+		{pkt{iif: "enp1s0", src: ll, proto: "tcp", dport: LinkPort}, "drop"},
+		{pkt{iif: "usb0", src: ll, proto: "tcp", dport: LinkPort}, "drop"},
+	} {
+		if v := linkVerdict(t, r, c.p, link); v != c.want {
+			t.Errorf("%+v: %s, want %s", c.p, v, c.want)
+		}
+		if c.p.established {
+			continue
+		}
+		if v := linkVerdict(t, r, c.p, nil); c.p.iif == "agentos-link" && c.p.dport == LinkPort && c.p.proto == "tcp" && v != "drop" {
+			t.Errorf("the empty link set admits %+v: %s", c.p, v)
+		}
+		if v := linkVerdict(t, render(t, Inbound{Page: true}), c.p, link); c.p.dport == LinkPort && v != "drop" {
+			t.Errorf("without Link, %+v: %s", c.p, v)
+		}
+	}
+	// The page set or the exempt set naming the link opens nothing more on it.
+	page := pkt{iif: "agentos-link", src: netip.MustParseAddr("192.168.1.9"), proto: "tcp", dport: 443}
+	if v := linkVerdict(t, r, page, link, "agentos-link"); v != "drop" {
+		t.Errorf("the page's port on the link, with the link in the page set: %s", v)
+	}
+	ex := render(t, Inbound{Page: true, Link: true, Exempt: []string{"agentos-link"}})
+	if v := linkVerdict(t, ex, pkt{iif: "agentos-link", src: ll, proto: "tcp", dport: 22}, link); v != "drop" {
+		t.Errorf("port 22 on an exempt link: %s", v)
+	}
+	if !strings.Contains(r, "  set link {\n    type ifname\n  }\n") {
+		t.Errorf("the link set is not rendered empty:\n%s", r)
 	}
 }

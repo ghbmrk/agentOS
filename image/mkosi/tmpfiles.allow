@@ -18,6 +18,7 @@ usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-store 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-kernel 0700 agentos-kernel agentos-kernel -
 usr/lib/tmpfiles.d/agentos.conf	d /run/agentos-setup 0700 root root -
+usr/lib/tmpfiles.d/agentos.conf	d /run/agentos-link-capture 0700 root root -
 usr/lib/tmpfiles.d/agentos.conf	d /var/lib/agentos-mail 0700 agentos-mail agentos-mail -
 usr/lib/tmpfiles.d/agentos.conf	d /run/agentos-page-ca 0755 root root -
 usr/lib/tmpfiles.d/credstore.conf	d /etc/credstore 0700 root root

@@ -5,6 +5,9 @@
 # which it stores (brief OWN-card-flow decisions 6 and 7): the store is never made with its tpm slot
 # alone (#2905 open point 1). agentos-keeper-enroll.path starts it when the factors arrive. A rerun
 # after a crash finishes or redoes the attempt, with the same staged authority (ASSUMPTIONS STO-2c-a).
+# It also takes the first edge's key, if the capture unit took one before the confirm, and removes the
+# capture (EDGE-link-core decision 3): the capture unit is stopped first, so no hello lands after
+# enrollment has read it.
 [Unit]
 Description=agentOS enrollment
 ConditionPathExists=!/var/lib/agentos-store/store
@@ -14,8 +17,10 @@ ConditionPathExists=/run/agentos-setup/page-ca
 # Wants= as well as After=: when the path unit starts enrollment, the staging is in the same
 # transaction, so it is always ordered first. The kernel starts in the same boot once the store exists.
 Wants=agentos-keeper-pageca.service agentos-keeper-kernel.service
-After=local-fs.target systemd-sysusers.service agentos-keeper-pageca.service
+After=local-fs.target systemd-sysusers.service agentos-keeper-pageca.service agentos-keeper-link-capture.service
 Before=agentos-keeper-kernel.service
+# Starting enrollment stops the first edge's capture, and the stop is ordered before the start.
+Conflicts=agentos-keeper-link-capture.service
 # A failed enrollment keeps the factors, so the path unit starts it again: three starts a boot, then
 # the path unit fails and a reboot starts the card over (#3492 L3 finding 2).
 StartLimitIntervalSec=infinity
@@ -33,7 +38,8 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state /var
         -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log \
         -kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel \
         -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery \
-        -page-ca-file /run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der
+        -page-ca-file /run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der \
+        -first-edge /run/agentos-link-capture/first-edge
 # The factors and the staged authority are not kept once the store holds them (#2981); on a failure
 # they stay for a retry.
 ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery \
