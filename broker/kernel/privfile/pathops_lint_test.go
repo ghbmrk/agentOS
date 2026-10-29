@@ -18,8 +18,10 @@ package privfile
 // through a path the reason deems safe (a parent directory another uid can
 // write). Calls outside pathOps (os.Lstat, os.ReadDir, os.Symlink, os.Chtimes,
 // os.Truncate, syscall and unix path calls), a binary that a udev rule or a
-// script rather than a unit starts, and a binary built by a line binaryPackages
-// does not parse are outside the check.
+// script rather than a unit starts (#3950), a binary built by a line
+// binaryPackages does not parse, files only a build tag brings in (go list
+// runs with no -tags; no root-side binary builds with tags today), and file
+// operations of non-root host processes are outside the check.
 
 import (
 	"bufio"
@@ -58,13 +60,15 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 	})
 	t.Run("refuses each call and form", func(t *testing.T) {
 		for op := range pathOps {
-			for _, form := range []string{"call", "value", "alias"} {
+			for _, form := range []string{"call", "value", "value in a func", "alias"} {
 				src := "package side\n\nimport \"os\"\n\nvar _ = os." + op + "\n"
 				switch form {
 				case "call":
-					src = "package side\n\nimport \"os\"\n\nfunc F() { _ = os." + op + " }\n"
+					src = "package side\n\nimport \"os\"\n\nfunc F() { os." + op + "() }\n"
 				case "alias":
 					src = "package side\n\nimport o \"os\"\n\nfunc F() { _ = o." + op + " }\n"
+				case "value in a func":
+					src = "package side\n\nimport \"os\"\n\nfunc F() { _ = os." + op + " }\n"
 				}
 				problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "")
 				if len(problems) != 1 || !strings.Contains(problems[0], "os."+op) {
@@ -78,9 +82,18 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 		if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 0 {
 			t.Fatalf("an O_NOFOLLOW open: got %q, want none", problems)
 		}
-		src = strings.Replace(src, "syscall.O_NOFOLLOW", "syscall.O_CLOEXEC", 1)
-		if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 1 {
-			t.Fatalf("an open without O_NOFOLLOW: got %q, want one problem", problems)
+		for _, flags := range []string{"os.O_RDONLY|syscall.O_CLOEXEC", "os.O_RDWR&^syscall.O_NOFOLLOW", "flags(syscall.O_NOFOLLOW)", "os.O_RDONLY|(syscall.O_NOFOLLOW^syscall.O_NOFOLLOW)", "os.O_RDONLY+syscall.O_NOFOLLOW"} {
+			src := strings.Replace(src, "os.O_RDONLY|syscall.O_NOFOLLOW", flags, 1)
+			if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 1 {
+				t.Errorf("an open with flags %s: got %q, want one problem", flags, problems)
+			}
+		}
+	})
+	t.Run("a dot import of os fails", func(t *testing.T) {
+		src := "package side\n\nimport . \"os\"\n\nfunc F(p string) { Remove(p) }\n"
+		problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "pending broker/side #1 even pending\n")
+		if len(problems) != 2 || !strings.Contains(strings.Join(problems, "\n"), "dot import") {
+			t.Fatalf("got %q, want the dot import refused (and the pending line stale)", problems)
 		}
 	})
 	t.Run("through privfile passes", func(t *testing.T) {
@@ -176,6 +189,20 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			t.Fatalf("got %q, want [./other]", bins)
 		}
 	})
+	for name, dropin := range map[string]string{
+		"an empty User=": "[Service]\nUser=\n",
+		"User=root":      "[Service]\nUser=root\n",
+		"User=0":         "[Service]\nUser=0\n",
+		"DynamicUser=no": "[Service]\nDynamicUser=no\n",
+	} {
+		t.Run("a drop-in resetting the user: "+name, func(t *testing.T) {
+			files := clone(files)
+			files["image/mkosi/agentos-side.service.d/z.conf"] = dropin
+			if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+				t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
+			}
+		})
+	}
 	t.Run("User= from a drop-in", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side\n"
@@ -292,6 +319,10 @@ func lintRepo(t *testing.T, root, allowText string) []string {
 	}
 	usedAllow, usedPending := map[string]bool{}, map[string]bool{}
 	for _, u := range uses {
+		if u.op == "." {
+			problems = append(problems, fmt.Sprintf("%s:%d: a dot import of os; import it by name so the lint sees its calls", u.file, u.line))
+			continue
+		}
 		key := u.file + " " + u.fn + " os." + u.op
 		if _, ok := allows[key]; ok {
 			usedAllow[key] = true
@@ -376,7 +407,12 @@ func rootBinaries(root string) ([]string, error) {
 		for _, dir := range dropinDirs(name) {
 			paths = append(paths, dropins[dir]...)
 		}
-		asUser := false
+		// A later User= or DynamicUser= replaces an earlier one, and drop-ins
+		// sort across directories, so any assignment that runs as root (an
+		// empty, root or 0 User=, a false DynamicUser=) counts as root
+		// wherever it sits: an over-approximation that never drops a root
+		// binary (#3951 L3 3).
+		asUser, asRoot := false, false
 		var lines []string
 		for _, f := range paths {
 			b, err := os.ReadFile(f)
@@ -391,10 +427,14 @@ func rootBinaries(root string) ([]string, error) {
 				}
 				k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 				switch {
-				case k == "User" && v != "" && v != "root" && v != "0":
+				case k == "User" && (v == "" || v == "root" || v == "0"):
+					asRoot = true
+				case k == "User":
 					asUser = true
 				case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
 					asUser = true
+				case k == "DynamicUser":
+					asRoot = true
 				case strings.HasPrefix(k, "Exec"):
 					lines = append(lines, v)
 				}
@@ -402,7 +442,7 @@ func rootBinaries(root string) ([]string, error) {
 		}
 		for _, v := range lines {
 			prefix := v[:len(v)-len(strings.TrimLeft(v, "@-:+!|"))]
-			if asUser && !strings.ContainsAny(prefix, "+!") {
+			if asUser && !asRoot && !strings.ContainsAny(prefix, "+!") {
 				continue
 			}
 			for _, word := range strings.Fields(v[len(prefix):]) {
@@ -542,30 +582,36 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 // name for a package-level var) it sits in. An os.OpenFile call whose flag
 // argument names O_NOFOLLOW is not a use.
 func fileUses(fset *token.FileSet, f *ast.File, rel string) []use {
-	osName := ""
+	osNames := map[string]bool{}
+	var uses []use
 	for _, imp := range f.Imports {
 		if p, _ := strconv.Unquote(imp.Path.Value); p == "os" {
-			osName = "os"
-			if imp.Name != nil {
-				osName = imp.Name.Name
+			switch {
+			case imp.Name == nil:
+				osNames["os"] = true
+			case imp.Name.Name == ".":
+				// Bare calls are not tracked; a dot import is refused
+				// outright (#3951 L3 2).
+				uses = append(uses, use{file: rel, fn: "import", op: ".", line: fset.Position(imp.Pos()).Line})
+			case imp.Name.Name != "_":
+				osNames[imp.Name.Name] = true
 			}
 		}
 	}
-	if osName == "" || osName == "_" {
-		return nil
+	if len(osNames) == 0 {
+		return uses
 	}
-	var uses []use
 	for _, decl := range f.Decls {
 		fn := declName(decl)
 		safe := map[*ast.SelectorExpr]bool{}
 		ast.Inspect(decl, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && isOS(sel, osName) && sel.Sel.Name == "OpenFile" && len(n.Args) == 3 && namesNoFollow(n.Args[1]) {
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && isOS(sel, osNames) && sel.Sel.Name == "OpenFile" && len(n.Args) == 3 && namesNoFollow(n.Args[1]) {
 					safe[sel] = true
 				}
 			case *ast.SelectorExpr:
-				if isOS(n, osName) && pathOps[n.Sel.Name] && !safe[n] {
+				if isOS(n, osNames) && pathOps[n.Sel.Name] && !safe[n] {
 					uses = append(uses, use{file: rel, fn: fn, op: n.Sel.Name, line: fset.Position(n.Pos()).Line})
 				}
 			}
@@ -575,20 +621,38 @@ func fileUses(fset *token.FileSet, f *ast.File, rel string) []use {
 	return uses
 }
 
-func isOS(sel *ast.SelectorExpr, osName string) bool {
+func isOS(sel *ast.SelectorExpr, osNames map[string]bool) bool {
 	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == osName
+	return ok && osNames[id.Name]
 }
 
+// namesNoFollow reports whether a flag argument is an OR of named flags
+// (parentheses allowed) with O_NOFOLLOW as one operand; any other shape,
+// such as one that clears it with &^, is not (#3951 L3 1).
 func namesNoFollow(e ast.Expr) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "O_NOFOLLOW" {
-			found = true
-		}
-		return !found
-	})
-	return found
+	switch e := e.(type) {
+	case *ast.ParenExpr:
+		return namesNoFollow(e.X)
+	case *ast.BinaryExpr:
+		return e.Op == token.OR && orOfFlags(e.X) && orOfFlags(e.Y) && (namesNoFollow(e.X) || namesNoFollow(e.Y))
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "O_NOFOLLOW"
+	case *ast.Ident:
+		return e.Name == "O_NOFOLLOW"
+	}
+	return false
+}
+
+func orOfFlags(e ast.Expr) bool {
+	switch e := e.(type) {
+	case *ast.ParenExpr:
+		return orOfFlags(e.X)
+	case *ast.BinaryExpr:
+		return e.Op == token.OR && orOfFlags(e.X) && orOfFlags(e.Y)
+	case *ast.SelectorExpr, *ast.Ident:
+		return true
+	}
+	return false
 }
 
 func declName(d ast.Decl) string {
