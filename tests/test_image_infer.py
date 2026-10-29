@@ -63,6 +63,19 @@ def licence(data):
                               capture_output=True, text=True)
 
 
+def infer_real_step(name):
+    """The run: body of the named infer-real step, as the runner gets it."""
+    lines = (ROOT / ".github/workflows/infer-real.yml").read_text().splitlines()
+    i = lines.index("      - name: " + name)
+    assert lines[i + 1] == "        run: |", lines[i + 1]
+    body = []
+    for line in lines[i + 2:]:
+        if line.strip() and not line.startswith("          "):
+            break
+        body.append(line[10:])
+    return "\n".join(body) + "\n"
+
+
 class TestInferImage(unittest.TestCase):
     def test_both_pins_are_sha256_values_the_build_checks(self):
         p = pins()
@@ -77,12 +90,86 @@ class TestInferImage(unittest.TestCase):
         self.assertIn('WANT=$(pin llama_src_sha256)', server)
         self.assertIn('[ "$GOT" = "$WANT" ] || {', server)
         self.assertIn('[ "$COMMIT" = "$(pin llama_src_commit)" ] || {', server)
-        wf = (ROOT / ".github/workflows/infer-real.yml").read_text()
-        self.assertIn("git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b11900", wf)
         infer = (IMG / "infer.sh").read_text()
         self.assertIn('[ "$GOT" = "$(pin embed_sha256)" ] || {', infer)
         # The prebuilt release asset is gone: the server tested is the one built from the pin.
         self.assertNotIn("llama_url", p)
+
+    def test_infer_real_rebuilds_the_source_archive_from_the_pinned_commit(self):
+        # INFER-A13: the archive's pax header travels inside the download, so CI must rebuild the archive
+        # from the pinned commit over git and compare hashes. Run the step itself against a local
+        # upstream that git reaches in place of github.com.
+        step = infer_real_step("The release tag and the pinned source are the pinned commit")
+        with tempfile.TemporaryDirectory() as t:
+            t = pathlib.Path(t)
+            up = t / "up/owner/llama.cpp"
+            env = {"PATH": "/usr/bin:/bin", "HOME": str(t), "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_COUNT": "1",
+                   "GIT_CONFIG_KEY_0": "url.file://%s/up/.insteadOf" % t,
+                   "GIT_CONFIG_VALUE_0": "https://github.com/", "RUNNER_TEMP": str(t / "rt"),
+                   "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                   "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+
+            def git(*a):
+                return subprocess.run(["git", "-C", str(up), *a], env=env, check=True,
+                                      capture_output=True, text=True).stdout.strip()
+
+            def archive(rev, tag):
+                tar = subprocess.run(["git", "-C", str(up), "archive", "--format=tar",
+                                      "--prefix=llama.cpp-%s/" % tag, rev], env=env, check=True,
+                                     capture_output=True).stdout
+                gz = subprocess.run(["gzip", "-cn"], input=tar, check=True, capture_output=True).stdout
+                return subprocess.run(["sha256sum"], input=gz, check=True,
+                                      capture_output=True).stdout.split()[0].decode()
+
+            up.mkdir(parents=True)
+            git("init", "-q")
+            (up / "src.c").write_text("int main(void) { return 0; }\n")
+            git("add", "-A")
+            git("commit", "-qm", "one")
+            one = git("rev-parse", "HEAD")
+            git("tag", "b1")
+            git("tag", "-a", "-m", "annotated", "b2")
+            (up / "src.c").write_text("int main(void) { return 1; }\n")
+            git("commit", "-qam", "two")
+            two = git("rev-parse", "HEAD")
+            git("tag", "b3")
+
+            def run(url, sha, commit):
+                work = t / "work"
+                pins = work / "broker/cmd/agentos-infer/llama.pins"
+                pins.parent.mkdir(parents=True, exist_ok=True)
+                pins.write_text("llama_src_url=%s\nllama_src_sha256=%s\nllama_src_commit=%s\n" % (url, sha, commit))
+                subprocess.run(["rm", "-rf", str(t / "rt")], check=True)
+                (t / "rt").mkdir()
+                r = subprocess.run(["bash", "-eo", "pipefail", "-c", step], cwd=work, env=env,
+                                   capture_output=True, text=True)
+                return r.returncode, r.stdout + r.stderr
+
+            tag_url = "https://github.com/owner/llama.cpp/archive/refs/tags/%s.tar.gz"
+            for tag in ("b1", "b2"):  # lightweight and annotated tags
+                rc, out = run(tag_url % tag, archive(one, tag), one)
+                self.assertEqual(rc, 0, out)
+                self.assertIn("rebuilt as an archive: sha256 %s" % archive(one, tag), out)
+            # A substituted archive: right commit and tag pinned, other bytes' hash.
+            rc, out = run(tag_url % "b1", archive(two, "b1"), one)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("tree archives to %s" % archive(one, "b1"), out)
+            # The tag is read from the URL: a tag naming another commit fails.
+            rc, out = run(tag_url % "b3", archive(one, "b3"), one)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("the tag b3 names %s" % two, out)
+            # The pinned commit must match the tree too, not only the tag.
+            rc, out = run(tag_url % "b3", archive(one, "b3"), two)
+            self.assertEqual(rc, 1, out)
+            for bad in ("https://example.com/owner/llama.cpp/archive/refs/tags/b1.tar.gz",
+                        "https://github.com/owner/llama.cpp/archive/refs/heads/b1.tar.gz",
+                        "https://github.com/owner/llama.cpp/archive/refs/tags/b1.tar.gz x"):
+                rc, out = run(bad, archive(one, "b1"), one)
+                self.assertEqual(rc, 1, bad)
+                self.assertIn("not a GitHub tag archive", out)
+        # Nothing names the release by hand: the tag comes from llama_src_url.
+        self.assertNotRegex(step, r"b\d{4,}")
 
     def test_the_server_is_static_cpu_only_and_fetches_nothing(self):
         s = (IMG / "llamaserver.sh").read_text()
