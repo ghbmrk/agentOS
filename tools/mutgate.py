@@ -39,11 +39,27 @@ MARKER = re.compile(r"\+.*REQ:\s*[A-Z]{2,4}-\d+")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
 
 
+# A package name that reaches the workflow's matrix: path segments of plain characters only.
+PKG_NAME = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+
+
 def tier_a_packages(broker=BROKER):
-    """Tier-A package paths under broker/ that exist and hold Go source, sorted."""
-    core, wiring, allowed = risk_tier.core_list()
-    names = core | wiring | allowed | risk_tier.TIER_A_BROKER
-    return sorted(n for n in names if any((broker / n).glob("*.go")))
+    """Package paths under broker/ that hold Go source with a file risk_tier.tier_of puts in tier A, sorted.
+
+    Every .go file is classed by tier_of, so packages under a prefix line (kernel/privfile,
+    clerk/inbox/imapsmtp) and unlisted ones count, as risk_tier counts them (#3948). A tier-A
+    package whose path PKG_NAME refuses raises, rather than dropping out of the gate unseen.
+    """
+    files = {}
+    for f in broker.rglob("*.go"):
+        rel = f.parent.relative_to(broker).as_posix()
+        if rel != "." and not {"vendor", "testdata"} & set(rel.split("/")):
+            files.setdefault(rel, []).append(f"broker/{rel}/{f.name}")
+    out = sorted(rel for rel, fs in files.items() if any(risk_tier.tier_of(p)[0] == "A" for p in fs))
+    bad = [rel for rel in out if not PKG_NAME.fullmatch(rel)]
+    if bad:
+        raise ValueError(f"mutgate: tier-A package path(s) outside {PKG_NAME.pattern}: {bad}")
+    return out
 
 
 def survivors(results_dir):
@@ -117,7 +133,8 @@ def violations(diff_text, live):
 
 def cmd_run(args):
     pkgs = args.pkg or tier_a_packages()
-    out = pathlib.Path(args.out)
+    # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
+    out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     bad = 0
     for pkg in pkgs:

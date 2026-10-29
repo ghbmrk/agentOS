@@ -69,6 +69,57 @@ class Gate(unittest.TestCase):
         self.assertIn("netguard", pkgs)
         self.assertNotIn("quota", pkgs)
 
+    def test_prefix_listed_packages_are_tier_a(self):
+        # #3948 blocker: only exact core-list names counted, so packages under a prefix line were skipped.
+        pkgs = mutgate.tier_a_packages()
+        for pkg in ("kernel/key", "kernel/privfile", "clerk/inbox/imapsmtp"):
+            self.assertIn(pkg, pkgs)
+            diff = DIFF.replace("broker/hint/", f"broker/{pkg}/")
+            self.assertEqual(mutgate.claimed(diff), [pkg])
+
+    def test_tier_a_packages_match_risk_tier_on_every_package(self):
+        # Every .go file, not a made-up name, through the tier rule premerge uses: a package is
+        # in the set when any of its files is tier A (#3948 Security delta 2).
+        broker = ROOT / "broker"
+        pkgs = set(mutgate.tier_a_packages())
+        for d in sorted({f.parent for f in broker.rglob("*.go")}):
+            rel = d.relative_to(broker).as_posix()
+            if rel == "." or {"vendor", "testdata"} & set(rel.split("/")):
+                continue
+            want = any(mutgate.risk_tier.tier_of(f.relative_to(ROOT).as_posix())[0] == "A" for f in d.glob("*.go"))
+            self.assertEqual(rel in pkgs, want, rel)
+
+    def test_one_tier_a_file_puts_its_package_in(self):
+        # A tier rule naming one .go file in an otherwise tier-B package must still count.
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("a.go", "b.go"):
+                (pathlib.Path(d) / "quota").mkdir(exist_ok=True)
+                (pathlib.Path(d) / "quota" / name).write_text("package quota\n")
+            real = mutgate.risk_tier.tier_of
+            for one in ("broker/quota/a.go", "broker/quota/b.go"):
+                mutgate.risk_tier.tier_of = lambda p, one=one: ("A", p) if p == one else ("B", p)
+                try:
+                    self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["quota"], one)
+                finally:
+                    mutgate.risk_tier.tier_of = real
+
+    def test_odd_tier_a_package_names_fail_loudly(self):
+        # Go accepts `+` and `~` in a path: such a tier-A package must stop the run, not drop out
+        # of the gate unseen (#3948 Security delta 1). vendor/ and testdata/ stay out quietly.
+        def tree(d, names):
+            for name in names:
+                (pathlib.Path(d) / name).mkdir(parents=True)
+                (pathlib.Path(d) / name / "a.go").write_text("package x\n")
+        with tempfile.TemporaryDirectory() as d:
+            tree(d, ["kernel/ok", "kernel/vendor/v", "kernel/testdata/t"])
+            self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["kernel/ok"])
+        for odd in ("kernel/key+v2", "kernel/key~old", "kernel/a b", "kernel/$(x)"):
+            with tempfile.TemporaryDirectory() as d:
+                tree(d, ["kernel/ok", odd])
+                with self.assertRaises(ValueError, msg=odd) as cm:
+                    mutgate.tier_a_packages(pathlib.Path(d))
+                self.assertIn(odd, str(cm.exception))
+
     def test_report_and_cli(self):
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "hint.json").write_text(json.dumps(
@@ -104,11 +155,15 @@ class Claimed(unittest.TestCase):
         self.assertEqual(mutgate.claimed(DOCS_ONLY, tier_a=["hint"]), [])
 
     def test_claimed_covers_every_package_violations_reads(self):
-        # Any package outside claimed() could never yield a violation, whatever survives there.
-        live = {p: [("hint.go", 11, "X")] for p in ("hint", "mail", "vm/gvisor")}
-        found = {v[0] for v in mutgate.violations(DIFF, live)}
-        self.assertLessEqual(found, set(mutgate.claimed(DIFF, tier_a=["hint", "mail", "vm/gvisor"])))
-        self.assertEqual(found, {"hint"})
+        # Any tier-A package outside claimed() could never yield a violation, whatever survives
+        # there. The real tier list, not an injected one, so a prefix-line package counts (#3948).
+        pkgs = ["netguard", "kernel/privfile", "clerk/inbox/imapsmtp", "quota"]
+        diff = "".join(DIFF.replace("broker/hint/", f"broker/{p}/") for p in pkgs)
+        live = {p: [("hint.go", 11, "X")] for p in pkgs}
+        tier_a = set(mutgate.tier_a_packages())
+        found = {v[0] for v in mutgate.violations(diff, live)} & tier_a
+        self.assertEqual(found, set(pkgs) - {"quota"})
+        self.assertEqual(set(mutgate.claimed(diff)), found)
 
     def test_claimed_cli_on_a_real_diff(self):
         with tempfile.TemporaryDirectory() as d:
@@ -165,6 +220,23 @@ class Shape(unittest.TestCase):
                                 str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("not gremlins' files[].mutations[] shape", r.stderr)
+
+    def test_run_writes_a_relative_out_dir_from_the_callers_cwd(self):
+        # The workflow passes `--out mutants` from the repo root while gremlins runs in broker/;
+        # gremlins (like this stub) does not create the -o directory (#3947's live run).
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\n"
+                "[ -d \"$(dirname \"$2\")\" ] || exit 0\n"
+                "printf '%s' '{\"files\":[],\"mutants_lived\":0}' > \"$2\"\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out", "rel"],
+                               capture_output=True, text=True, env=env, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue((pathlib.Path(d) / "rel" / "hint.json").exists())
 
 
 def job(text, name):
