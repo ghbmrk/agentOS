@@ -1,13 +1,15 @@
 # The edge link (EDGE-link-core c2c; HW-15, HW-16): the direct cable from the edge to the core's
-# USB Ethernet adapter, which 10-agentos-link.link names agentos-link. It matches every USB Ethernet
-# adapter, as the .link file does, so a second one (which keeps its kernel name and gets no link port)
-# never runs the uplink's DHCP either, whichever adapter the edge's cable is in. The core takes one fixed link-local address there,
-# fe80::1, so the edge always knows where to connect, and nothing else: no DHCP, no router
-# advertisement and no LLDP, either way, so the edge cannot give the core an address, a route or a
-# resolver, and the core's traffic never leaves through the edge. Sorted before the uplink's file, so
-# the uplink's DHCP never runs on the link. The inbound drop admits only the link's port here
-# (netguard Link). mkosi.finalize holds this file to exactly these keys (LINK_KEYS).
+# USB Ethernet adapter, which 10-agentos-link.link names agentos-link. It matches that name alone
+# (and only as a USB Ethernet adapter); any other USB Ethernet adapter, which keeps its kernel name,
+# is kept down by 15-agentos-usb-down.network, so the edge's cable in it reaches nothing (#3840).
+# The core takes one fixed link-local address here, fe80::1, so the edge always knows where to
+# connect, and nothing else: no DHCP, no router advertisement and no LLDP, either way, so the edge
+# cannot give the core an address, a route or a resolver, and the core's traffic never leaves
+# through the edge. Sorted before the uplink's file, so the uplink's DHCP never runs on the link.
+# The inbound drop admits only the link's port here (netguard Link). mkosi.finalize holds this file
+# to exactly these keys (LINK_KEYS).
 [Match]
+Name=agentos-link
 Type=ether
 Kind=!*
 Property=ID_BUS=usb

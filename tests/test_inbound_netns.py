@@ -18,6 +18,11 @@
 # control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
 #
+# Its test_a_second_usb_adapter_stays_down runs the [Link] and [Network] sections the image ships in
+# 15-agentos-usb-down.network (#3840) on eth1, a second adapter with the edge's cable in it: the
+# adapter is down, stays down when something brings it up, and has no address.
+# REQ: HW-15, HW-16
+#
 # NoRoutingThroughTheDrop is I21, the box routes nothing (#2824): with forwarding turned on in the
 # box (as a NetworkManager shared profile does, with NetworkManager's own accept-and-masquerade
 # table loaded beside it), a home host on eth0 reaches nothing on usb0's side, over IPv4 or IPv6,
@@ -437,6 +442,7 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         self.assertFalse(self.reply_on_link(), "a reply passed on the replugged link")
 
 UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"
+USB_DOWN = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/15-agentos-usb-down.network"
 NETWORKD = "/usr/lib/systemd/systemd-networkd"
 ROUTER4 = "192.0.2.1"
 
@@ -455,14 +461,15 @@ PoolSize=10
 """ % (ROUTER4, "Address=%s/64\nIPv6SendRA=yes\n\n[IPv6Prefix]\nPrefix=%s/64\n" % (ROUTER6, PREFIX) if IPV6 else "")
 
 
-def box_network():
-    """The shipped uplink file with its [Match] on eth0 and everything else as shipped."""
-    text = UPLINK.read_text()
+def box_network(path=UPLINK, name="eth0"):
+    """The shipped file PATH (the uplink's by default) with its [Match] on NAME and everything after
+    [Match] as shipped."""
+    text = path.read_text()
     shipped = configparser.ConfigParser(strict=False, interpolation=None)
     shipped.optionxform = str
     shipped.read_string(text)
-    body = text[text.index("[Network]"):]
-    return "[Match]\nName=eth0\n\n" + body, shipped
+    body = text[text.index("[", text.index("[Match]") + 1):]
+    return "[Match]\nName=%s\n\n" % name + body, shipped
 
 
 @unittest.skipUnless(os.geteuid() == 0 and all(shutil.which(t) for t in ("ip", "nft", "unshare"))
@@ -593,6 +600,49 @@ class UplinkByNetworkd(unittest.TestCase):
         for addr in targets:
             with self.subTest(control=addr):
                 self.assertTrue(reaches(HOME, addr), "control: the test cannot see the drop at " + addr)
+
+
+    def flags(self, dev):
+        out = sh("ip", "-o", "link", "show", "dev", dev, ns=BOX).stdout
+        return out[out.index("<") + 1:out.index(">")].split(",")
+
+    def held_down(self, dev):
+        """Whether DEV is down 3 s after it was last brought up (networkd acts within a second)."""
+        for _ in range(30):
+            if "UP" not in self.flags(dev):
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)
+        return "UP" not in self.flags(dev)
+
+    def test_a_second_usb_adapter_stays_down(self):
+        # REQ: HW-15, HW-16 (#3840): a second USB Ethernet adapter, the edge's cable in it, keeps its
+        # kernel name (eth1 here) and gets the shipped down file. The file's [Match] is the USB
+        # adapter's (veth links never match it), so it names eth1 here and the rest is as shipped.
+        body, shipped = box_network(USB_DOWN, "eth1")
+        self.assertEqual(shipped["Link"]["ActivationPolicy"], "always-down")
+        sh("ip", "link", "add", "eth1", "netns", BOX, "type", "veth", "peer", "name", "e1", "netns", HOME)
+        sh("ip", "link", "set", "e1", "up", ns=HOME)
+        # Something brought it up before networkd ran (the kernel never does; a stray tool might).
+        sh("ip", "link", "set", "eth1", "up", ns=BOX)
+        first = len(self.procs)
+        self.networkd(BOX, body)
+        self.assertTrue(self.held_down("eth1"), "networkd left the adapter up:\n" + self.logs())
+        # Brought up again later: networkd takes it down again.
+        sh("ip", "link", "set", "eth1", "up", ns=BOX)
+        self.assertTrue(self.held_down("eth1"), "the adapter stayed up:\n" + self.logs())
+        self.assertEqual(sh("ip", "-o", "addr", "show", "dev", "eth1", ns=BOX).stdout.strip(), "",
+                         "the adapter has an address")
+        # Potency: the same file without the policy leaves the adapter up once something brings it up.
+        for p in self.procs[first:]:
+            p.kill()
+            p.wait()
+        del self.procs[first:]
+        shutil.rmtree(os.path.join(self.tmp, BOX))
+        self.networkd(BOX, body.replace("ActivationPolicy=always-down\n", ""))
+        time.sleep(1)
+        sh("ip", "link", "set", "eth1", "up", ns=BOX)
+        self.assertFalse(self.held_down("eth1"), "control: the test cannot see the policy")
 
 
 # BootProbeOverIPv6 checks the boot test's IPv6 probe (image/probe_lan6.py, #1457 u1c) against a

@@ -1,0 +1,23 @@
+# Every USB Ethernet adapter but the edge link's (#3840; HW-15, HW-16): a second adapter, or a
+# phone's USB tether, fails 10-agentos-link.link's rename, so it keeps its kernel name and misses
+# 10-agentos-link.network's Name= match. This file keeps it down, so whichever adapter the edge's
+# cable is in, it reaches the core only as agentos-link, behind the link's own drop; on a down link
+# the core takes no packet at all, the general inbound rules' replies included. networkd sets it
+# down again if anything brings it up, and the keys below give it nothing in that moment either.
+# Sorted after the link's file and before the uplink's, so the uplink's DHCP never runs on it.
+# mkosi.finalize holds this file to exactly these keys (USB_DOWN_KEYS).
+[Match]
+Type=ether
+Kind=!*
+Property=ID_BUS=usb
+
+[Link]
+ActivationPolicy=always-down
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+LLDP=no
+EmitLLDP=no
