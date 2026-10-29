@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"math/rand"
 	"os"
-	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -94,18 +93,16 @@ func TestThermalLeavesNoOutline(t *testing.T) {
 		}
 		return true
 	}
-	probe := make([]int32, run)
+	probe := heapInt32s(run)
 	for i := range probe {
 		probe[i] = int32((body.Y0+10)*w + body.X0 + i)
 	}
-	runtime.KeepAlive(probe)
 	if scanMemoryFor(t, 4*run, 4, places) == 0 {
 		t.Fatal("the scanner did not find a run of places in the test's own slice")
 	}
 	for i := range probe {
 		probe[i] = int32(id)
 	}
-	runtime.KeepAlive(probe)
 	if scanMemoryFor(t, 4*run, 4, labels) == 0 {
 		t.Fatal("the scanner did not find a run of labels in the test's own slice")
 	}
@@ -120,6 +117,19 @@ func TestThermalLeavesNoOutline(t *testing.T) {
 	if n := scanMemoryFor(t, 4*run, 4, labels); n != 0 {
 		t.Errorf("%d runs of the body's label are left after heatBlobs", n)
 	}
+}
+
+// probeSink makes heapInt32s' slices escape to the heap: on a goroutine
+// stack the test's own probe would be copied, unzeroed, whenever the
+// stack grows, and be found once more after it is cleared.
+var probeSink []int32
+
+// heapInt32s is n zero int32s on the heap.
+func heapInt32s(n int) []int32 {
+	probeSink = make([]int32, n)
+	s := probeSink
+	probeSink = nil
+	return s
 }
 
 // scanMemory counts the places in the process's readable, writable
