@@ -252,36 +252,43 @@ func FuzzUp(f *testing.F) {
 }
 
 // TestStackThatStopsReadingCannotWedgeHost (NET-2 Confined radio stacks,
-// ENF-k-8): a stack that never reads its end fills the socket, and every
-// Call still returns within about Config.Timeout, so one exploited stack
-// cannot hold the channel's lock. From the Security and L3 probes on #3908.
+// ENF-k-8): a stack that never reads its end has a full socket, and Call
+// still returns within about Config.Timeout, so one exploited stack cannot
+// hold the channel's lock. The buffer is filled before the first call, so
+// only the write deadline can bound it (no timeout count ends the link
+// first). From the Security and L3 probes on #3908.
 func TestStackThatStopsReadingCannotWedgeHost(t *testing.T) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	syscall.SetNonblock(fds[0], true)
 	theirs := os.NewFile(uintptr(fds[1]), "theirs") // never read
 	defer theirs.Close()
+	syscall.SetNonblock(fds[0], true)
+	fill := make([]byte, 64<<10)
+	for {
+		if _, err := syscall.Write(fds[0], fill); err == syscall.EAGAIN {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
 	h, err := NewHost(Config{Devices: []Device{scale}, Notify: func(Notification) {}, Log: func(string) {},
 		Timeout: 5 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.Attach(StackBLE, os.NewFile(uintptr(fds[0]), "ours"))
-	for i := 0; i < 5000; i++ {
-		done := make(chan error, 1)
-		go func() { _, err := h.State(scale.Name); done <- err }()
-		select {
-		case err := <-done:
-			if errors.Is(err, ErrNoStack) {
-				return // the link failed on its write deadline
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatalf("call %d blocked past 2s with a 5ms timeout", i)
+	done := make(chan error, 1)
+	go func() { _, err := h.State(scale.Name); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNoStack) {
+			t.Fatalf("a full link answered %v; want ErrNoStack from the write deadline", err)
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the call blocked past 2s with a 5ms timeout: the write is not bounded")
 	}
-	t.Fatal("the stack never read, yet the link did not fail")
 }
 
 // TestAnswerEdges (ENF-k-6): a waiter whose answer names another device
