@@ -39,14 +39,14 @@ UPD-3: before any AI or personal account is connected, the box fetches the lates
 | Install N+2 booted on N+1 | overwrites N's slot, never N+1's | b, c | #888 |
 | Owner pinned an entry with `d` (EFI `LoaderEntryDefault`) | Install's default write wins or clears the variable (#2094 point 2) | b, c | — |
 
-## Slice (a): the seed and the mirror source (startable once #3880 merges)
+## Slice (a): the seed and the mirror source (startable)
 
-**Waits on #3880** (the image queue). It edits `image/build.sh`, `.github/workflows/image.yml` and the image tests this slice touches (D-111). Rebase on it.
+#3880 (the image-queue PR that edited `image/build.sh`, `image.yml` and the image tests) has merged, so this slice is startable; run the D-111 check at start.
 
 1. **`update.Seed(dir, shipped string) (*Store, error)`** in `broker/update/seed.go`. If `dir/root.json` exists, it returns the store as it is, after checking that `root.json` parses as root metadata. It never writes in that case, and a missing `installed.json` beside an existing root is an error. Otherwise it reads `shipped/root.json` and `shipped/seed.json` (`{"version": N}` with N ≥ 1, unknown fields refused, size bounded like `maxMetadata`) and calls `InitStore`. The shipped files are read with no-follow, as regular files owned by root and not group- or world-writable. Under `/usr` that holds by construction, but tests pin it so that a writable copy is never trusted.
 2. **`broker/update/mirror`** (new package). It provides `Parse([]byte) ([]Mirror, error)` and `(Mirror) Source(c *http.Client) update.Source`. Format: one mirror per line, `https://host[:port]/base/` followed optionally by `redirect=host1,host2`. `#` starts a comment. There are at most 16 mirrors; the base must end in `/` and carry no query, fragment or userinfo. An `http:` mirror is refused, and so is anything that does not parse, with the line number. `Open(name)` validates `name` with the store's own path rule (export `update.ValidTargetPath`; do not copy it). It joins the path under the base and issues a GET with no cookies or `Authorization`. It follows at most 3 redirects, each to `https` on the mirror's own host or a listed `redirect=` host; anything else is an error. A non-200 answer is an error that names the status. The caller supplies the client's `DialContext` and roots (#888 passes netguard's policy, as `clerk.guarded` does). The package itself does not import `netguard`, so it stays testable with `httptest`. Size limits stay where they are: the store bounds metadata, and `Verified.Fetch` checks length and hash.
 3. **Image.** `image/build.sh` installs the two inputs as `/usr/share/agentos/update/root.json` and `/usr/share/agentos/update/mirrors`, and writes `/usr/share/agentos/update/seed.json` with the version number. It refuses inputs that `agentos-release verify -root` (or a small Go check built beside it) cannot parse. `.github/workflows/image.yml` generates the throwaway repository before the build and deletes the keys. The image ASSUMPTIONS row records the version mapping, and that a CI image's root is throwaway.
-4. **The mirror hosts are destinations.** NET-2 lists signed updates among the core's declared destinations. The enforcer's signed list must therefore admit the shipped mirror hosts and their `redirect=` hosts at first boot (§12.1 step 3). That list lives on the enforcer and is outside this scope. Record it as a release finding in the PR (below).
+4. **The mirror hosts are destinations.** NET-2 lists signed updates among the core's declared destinations. The enforcer's signed list must therefore admit the shipped mirror hosts and their `redirect=` hosts at first boot (§12.1 step 3). That list lives on the enforcer and is outside this scope. Filed as #3925.
 
 **Acceptance tests:** slice (a).
 - UPD-3, UPD-8 (seeded once): `broker/update/seed_test.go::TestSeedInitialisesOnceAndNeverOverwrites`. The first call initialises the store from a shipped root and version. A second call with a different shipped root leaves `root.json` byte-equal to the first. A rotated root (via `rotateRoot`) survives a reboot-style re-Seed. Catches a box that re-trusts the shipped root after rotating away from it.
@@ -108,10 +108,10 @@ UPD-3: before any AI or personal account is connected, the box fetches the lates
 
 **Usage estimate (c):** about 140k tokens, one session. Checkpoint at 90k: the adapter's loop-device test green. If the drill's variant repack cannot fit, split it into (c1) adapter and (c2) drill before starting.
 
-## Outside this brief (for the coordinator to file; not built here)
+## Outside this brief (filed; not built here)
 
-- **Release (enforcer track):** the enforcer's first-boot destination list must admit the shipped mirror hosts and their redirect hosts (NET-2), or the first-boot update can never reach a mirror. Failure path: a preloaded box online behind the enforcer holds at "updating" forever.
-- **Release (publishing):** the project's live TUF repository needs a host, a scheduled snapshot and timestamp refresh, and a production build that passes the real root and mirror list. HW-10 and DEP-2 point at GitHub Releases (the `/usr` image is about 1.1 GiB, under the 2 GiB asset limit). Failure path: every shipped box has a root nobody can sign for.
+- **#3925 (release, enforcer track):** the enforcer's first-boot destination list must admit the shipped mirror hosts and their redirect hosts (NET-2), or the first-boot update can never reach a mirror. Failure path: a preloaded box online behind the enforcer holds at "updating" forever.
+- **#3926 (release, publishing):** the project's live TUF repository needs a host, a scheduled snapshot and timestamp refresh, and a production build that passes the real root and mirror list. HW-10 and DEP-2 point at GitHub Releases (the `/usr` image is about 1.1 GiB, under the 2 GiB asset limit). Failure path: every shipped box has a root nobody can sign for.
 - **Mark only, before the first public release (not before this build):** custody of the root and targets keys, which is SPEC open risk 6 (UPD-2). This build uses only throwaway CI keys.
 
 ## Recurring kinds (reviews/security and reviews/potency READMEs), as acceptance criteria
