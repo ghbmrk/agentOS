@@ -14,10 +14,15 @@ ExecStart=/usr/lib/agentos/agentos-imapconn
 # entry at "/", and systemd keeps one entry per path, which would drop the empty root below (#3642).
 User=agentos-imapconn
 Group=agentos-imapconn
+# Concurrent sessions share that user, so each gets its own pid namespace: it cannot see, signal or
+# open the /proc entries (mem, fd) of another session's process, whatever Yama allows (#3880). The
+# process also makes itself undumpable before it receives a session (imapconn.Undumpable).
+PrivatePIDs=yes
 StandardInput=null
 StandardOutput=null
 StandardError=null
-RestrictAddressFamilies=AF_UNIX
+# It makes no socket: its stream and control connection are handed to it as descriptors.
+RestrictAddressFamilies=none
 PrivateNetwork=yes
 IPAddressDeny=any
 # The root is an empty read-only tmpfs that does not execute; the binary, bound from /usr, is all

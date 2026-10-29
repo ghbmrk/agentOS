@@ -62,8 +62,9 @@ class ImapConnUnitsTest(unittest.TestCase):
 
     def test_the_sandbox(self):
         s = self.svc
-        # No network: no socket family but AF_UNIX, its own empty network namespace, no IP.
-        for k, v in (("RestrictAddressFamilies", "AF_UNIX"), ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"),
+        # No network: no socket of any family, its own empty network namespace, no IP; its own pid
+        # namespace, so no other session's process to see, signal or open under /proc (#3880).
+        for k, v in (("RestrictAddressFamilies", "none"), ("PrivatePIDs", "yes"), ("PrivateNetwork", "yes"), ("IPAddressDeny", "any"),
                      # The empty root: the binary, bound from the verity-checked /usr, is all there is.
                      ("TemporaryFileSystem", "/:ro,noexec"), ("BindReadOnlyPaths", BINARY), ("ExecStart", BINARY),
                      ("NoNewPrivileges", "yes"), ("CapabilityBoundingSet", ""), ("PrivateDevices", "yes"),
@@ -115,6 +116,7 @@ class ImapConnTreeTest(unittest.TestCase):
         lifted = "the main side never sees the keeper's state (D-154)"
         # Each of these leaves the process a root with something in it, or makes systemd drop the
         # empty root (#3642, #3712), so the lifted mask is refused.
+        # PrivatePIDs= mounts a /proc, not an entry at "/", so the shipped unit keeps its root.
         for text in ("TemporaryFileSystem=\nTemporaryFileSystem=/var", "NoExecPaths=/", "DynamicUser=yes",
                      "ProtectSystem=strict", "BindReadOnlyPaths=/var:/"):
             with self.subTest(text):
@@ -138,8 +140,9 @@ class ImapConnBootTest(unittest.TestCase):
         # The probe runs as the clerk's user, then as another, which the socket refuses.
         self.assertIn("setpriv --reuid=%s --regid=%s" % ((ini(MAIL)["Service"]["User"],) * 2), text)
         self.assertIn("setpriv --reuid=agentos-planner --regid=agentos-planner", text)
-        for c in ("each session is a fresh process", "runs as uid", "socket() refused",
-                  "cannot open the clerk's state directory", "runs while the session is open and ends when it closes"):
+        for c in ("each session is a fresh process", "runs as uid", "socket() refused", "has its own pid namespace",
+                  "marks itself undumpable", "cannot read session 1's memory", "cannot open the clerk's state directory",
+                  "ends when the session closes"):
             self.assertIn(c, text)
             self.assertIn(c, (ROOT / "broker/clerk/inbox/imapconn/testdata/bootprobe/main.go").read_text())
         wf = WORKFLOW.read_text()

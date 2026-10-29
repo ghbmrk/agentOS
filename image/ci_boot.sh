@@ -587,10 +587,11 @@ fi
 # bootprobe, a fresh copy boots with one drop-in, passed as an SMBIOS credential, that changes only the
 # binary agentos-imapconn@.service runs (ExecStart= and its bind) to bootconn on a read-only 9p share,
 # so every other line of the shipped socket and service holds. A CI-only unit (no agentos- prefix)
-# mounts the share and runs bootprobe as the mail clerk's user: two sessions, one after the other, each
-# a fresh process under another user, whose socket() is refused for inet, inet6 and netlink, which
-# cannot open the clerk's state directory or reach its kernel socket, sees the empty root, has no new
-# privileges, and ends when the session closes. Then, as the planner's user, the socket refuses it.
+# mounts the share and runs bootprobe as the mail clerk's user: two sessions held open at once, each a
+# fresh process under another user, in its own pid namespace and undumpable, whose socket() is refused
+# for every family, which cannot open the clerk's state directory or reach its kernel socket, sees the
+# empty root, has no new privileges, and ends when the session closes; the second cannot read the
+# first's memory (#3880). Then, as the planner's user, the socket refuses it.
 if [ -n "${IMAPCONN:-}" ]; then
 	IC=$W/imapconn-share
 	rm -rf "$IC"; mkdir -p "$IC"
@@ -612,9 +613,13 @@ if [ -n "${IMAPCONN:-}" ]; then
 	for c in "the clerk's state directory is there for its own user" "each session is a fresh process"; do
 		has "$W/console-imapconn.log" "agentos-imapconn: ok   $c"
 	done
+	for c in "session 1's process" "session 2 cannot read session 1's memory"; do
+		has "$W/console-imapconn.log" "agentos-imapconn: ok   $c"
+	done
 	for i in 1 2; do
-		for c in "runs as uid" "socket() refused" "cannot open the clerk's state directory" "cannot reach the clerk's kernel socket" \
-			"the root is the empty tmpfs" "has no new privileges" "runs while the session is open and ends when it closes"; do
+		for c in "runs as uid" "has its own pid namespace" "marks itself undumpable" "socket() refused" \
+			"cannot open the clerk's state directory" "cannot reach the clerk's kernel socket" "the root is the empty tmpfs" \
+			"has no new privileges" "process .* ends when the session closes"; do
 			grep -aq "agentos-imapconn: ok   session $i.*$c" "$W/console-imapconn.log" && echo "ok   session $i $c" || { echo "MISS session $i $c"; fail=1; }
 		done
 	done
