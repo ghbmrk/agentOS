@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/modem"
 )
 
 // codeAsks are agent texts CH-21 withholds: a word of the vocabulary, the
@@ -22,6 +24,11 @@ var codeAsks = []string{
 	"ΥΕЅ Α7",
 	"What is your PIN?",
 	"I need the one-time number from the email.",
+	"Text me the codes your bank sent.",
+	"What are your passwords?",
+	"Send both PINs.",
+	"Paste the OTPs here.",
+	"Send both ΡΙΝs.",
 }
 
 // TestCodeAskIsHeldNotPacked: agent text that asks for a code or takes the
@@ -92,15 +99,24 @@ func TestSecretStillWinsOverHold(t *testing.T) {
 	}
 }
 
-// TestHeldCodeIsTheSpecWording: the fixed text is CH-21's, word for word,
-// and is itself not held again.
+// TestHeldCodeIsTheSpecWording: until #890 keeps held text, the fixed
+// text is CH-21's could-not-be-kept text: it opens as CH-21's held text
+// does, fits one GSM-7 segment, points to no page that lacks the text
+// (CH-12), and is itself not held again.
 func TestHeldCodeIsTheSpecWording(t *testing.T) {
 	b, err := os.ReadFile("../../SPEC.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"`+HeldCode+`"`) {
-		t.Fatalf("SPEC.md CH-21 does not quote %q", HeldCode)
+	const opening = "I held back a message because it mentioned a code"
+	if !strings.Contains(string(b), `"`+opening) || !strings.HasPrefix(HeldCode, opening) {
+		t.Fatalf("HeldCode %q does not open as CH-21's held text", HeldCode)
+	}
+	if !strings.Contains(HeldCode, "could not keep") || strings.Contains(HeldCode, "Wi-Fi page") {
+		t.Fatalf("HeldCode %q points to a page that does not keep the text", HeldCode)
+	}
+	if n, gsm := modem.Segments(HeldCode); !gsm || n != 1 {
+		t.Fatalf("HeldCode is %d segments (GSM-7 %v)", n, gsm)
 	}
 	if got := agentText(HeldCode); got != HeldCode {
 		t.Fatalf("agentText(HeldCode) = %q", got)

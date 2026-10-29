@@ -9,13 +9,17 @@ import (
 )
 
 // HeldCode replaces agent text that mentions a code or takes the reply
-// grammar (CH-21): only the broker's own texts ask for a code.
-const HeldCode = "I held back a message because it mentioned a code. Read it on my Wi-Fi page."
+// grammar (CH-21): only the broker's own texts ask for a code. Nothing
+// keeps held text for the Wi-Fi page yet (#890), so this is CH-21's
+// could-not-be-kept text, not its pointer; #890's keep switches it to the
+// pointer.
+const HeldCode = "I held back a message because it mentioned a code, and I could not keep it. Ask me to put it another way."
 
 // The vocabulary and the reply grammar are the spec's, not a model (ARC-2).
 // Ordinary task text that uses the words is held; the spec says those
-// false holds will be common until measured.
-var voiceWordRE = regexp.MustCompile(`(?i)(?:\bcode generator\b|\bone-time\b|\b(?:code|passcode|pin|otp|authenticator|verification|grid|cell|password)\b)`)
+// false holds will be common until measured. A word's plural counts too
+// ("codes", "PINs").
+var voiceWordRE = regexp.MustCompile(`(?i)\b(?:code generator|one-time|code|passcode|pin|otp|authenticator|verification|grid|cell|password)s?\b`)
 
 // A control word followed by a request id or a 4 to 8 digit token.
 var voiceGrammarRE = regexp.MustCompile(`(?i)\b(?:STOP|YES|NO|RUN|UNDO|MORE|HELP|STATUS|RESUME|UNLOCK|NAME)\s+(?:[A-Z][0-9]{1,2}|[0-9]{4,8})\b`)
@@ -44,7 +48,7 @@ var foldVoiceWordRE, foldVoiceGrammarRE, foldReplyYes, foldOrNo = func() (w, g, 
 		digits = append(digits, string(c))
 	}
 	l, d := alt(letters), alt(digits)
-	return regexp.MustCompile(`\b` + alt(voiceVocabulary) + `\b`),
+	return regexp.MustCompile(`\b` + alt(voiceVocabulary) + `(?:` + FoldPattern("s") + `)?\b`),
 		regexp.MustCompile(`\b` + alt(voiceControls) + ` +(?:` + l + d + `{1,2}|` + d + `{4,8})\b`),
 		regexp.MustCompile(FoldPattern("reply yes")),
 		regexp.MustCompile(FoldPattern("or no"))
