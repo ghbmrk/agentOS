@@ -42,6 +42,13 @@ const roleEnv = "AGENTOS_RUN_ROLE"
 func TestMain(m *testing.M) {
 	switch os.Getenv(roleEnv) {
 	case "":
+		// A zone off UTC, so an arrival's local time differs from its UTC
+		// time whatever zone the test runs in (#2742 item 4). It is set
+		// here, before any test starts a goroutine: a test that set it
+		// raced every goroutine still reading time.Local through
+		// time.Now, such as a keep-alive connection an earlier test left
+		// behind (#3181).
+		time.Local = time.FixedZone("test", 5*3600+30*60)
 		os.Exit(m.Run())
 	case "provider":
 		provider()
