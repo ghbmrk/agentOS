@@ -489,9 +489,10 @@ func TestProbeAfterProcessRestart(t *testing.T) {
 		t.Fatalf("unknown attempt: %+v", o)
 	}
 	// A security fix whose held release the restart lost is withdrawn by
-	// the next Tick, so no restart is promised (A13, #3830).
+	// the next Tick, so no restart is promised (A13, #3830); until its
+	// Abandon is recorded, a reboot would boot it (#3852).
 	// Mutant: drop the stale case from installedLineLocked.
-	if got := r.a.Status(); got != "Update 1 is being withdrawn; I will not start it. Nothing is needed from you." {
+	if got := r.a.Status(); got != "Update 1 is being withdrawn; it may start before I can undo it. Nothing is needed from you." {
 		t.Fatalf("same boot after a broker restart: %q", got)
 	}
 }

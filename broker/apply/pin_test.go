@@ -532,7 +532,7 @@ func TestApplyLinesFitOneSegment(t *testing.T) {
 	const v, n = 1_000_000_000, 999_999_999
 	const none = " Nothing is needed from you."
 	needs := map[string]string{} // line: the end it must have; "" any
-	for _, f := range []string{wontStartLine, mayStartLine, staleLine, startedLine, mayRunLine,
+	for _, f := range []string{wontStartLine, mayStartLine, staleLine, staleMayStartLine, startedLine, mayRunLine,
 		pinnedHeldLine, pinnedMayStartLine, pinnedStartedLine, pinnedMayRunLine} {
 		needs[fmt.Sprintf(f, v)] = none
 	}
