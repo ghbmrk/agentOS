@@ -134,3 +134,20 @@ func TestCamerasDisconnectConfirms(t *testing.T) {
 		t.Fatalf("changes: %+v", fc.changes)
 	}
 }
+
+// L3 point 2 on 0658b8c: re-pin, like connect, takes the listed node only
+// when the owner types the first 8 characters of its key, and carries the
+// node's address with its key.
+func TestCamerasRepinChecksTheLabel(t *testing.T) {
+	r, fc := cameraRig(t)
+	r.signIn()
+	bad := url.Values{"step": {"repin"}, "addr": {"192.168.1.61:8443"}, "id": {"porch"}, "label": {"a1b2c3d5"}, "code": {"123456"}}
+	if p := r.post("/cameras/", bad).Body.String(); len(fc.changes) != 0 || !strings.Contains(html.UnescapeString(p), "doesn't match") {
+		t.Fatal("a wrong label was taken")
+	}
+	good := url.Values{"step": {"repin"}, "addr": {"192.168.1.61:8443"}, "id": {"porch"}, "label": {"a1b2c3d4"}, "code": {"123456"}}
+	r.post("/cameras/", good)
+	if len(fc.changes) != 1 || fc.changes[0].Node.Key != camKey || fc.changes[0].Node.Addr != "192.168.1.61:8443" {
+		t.Fatalf("changes: %+v", fc.changes)
+	}
+}

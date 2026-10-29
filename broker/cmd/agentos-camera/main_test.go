@@ -388,50 +388,62 @@ func TestRestartKeepsRetainedCapture(t *testing.T) {
 	}
 }
 
-// #3625, the failure path: a connected camera that does not start (here,
-// its settings refused by a newer clerk) skips every sweep, so its
-// retained capture is kept.
-func TestSweepWaitsForEveryCamera(t *testing.T) {
+// #3625, the failure path, and Security and L3 point 1 on 0658b8c: a
+// connected camera that does not start (here, its shapes refused by a
+// newer decoder) keeps its retained capture, while every camera that did
+// start still has its capture expire on time.
+func TestPartialStartKeepsAndExpires(t *testing.T) {
 	b := newBox(t)
 	if err := b.h.connect(b.rec("porch", "continuous", 3600)); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "frames", func() bool { return b.feed.n("porch") >= 4 })
-	b.halt()
-	segs, _ := b.h.store.Segments("porch")
-	if len(segs) == 0 {
-		t.Fatal("no segment")
-	}
-	// The decoder refuses porch's shapes at the next start.
-	st, err := load(b.dir)
-	if err != nil {
+	y := b.rec("yard", "continuous", 1)
+	y.Addr = "192.168.1.61:8443"
+	if err := b.h.connect(y); err != nil {
 		t.Fatal(err)
 	}
-	b.feed = newFeed()
+	waitFor(t, "frames", func() bool { return b.feed.n("porch") >= 4 && b.feed.n("yard") >= 4 })
+	b.halt()
+	porch, _ := b.h.store.Segments("porch")
+	yard, _ := b.h.store.Segments("yard")
+	if len(porch) == 0 || len(yard) == 0 {
+		t.Fatal("no segment")
+	}
 	sec, _ := run.OpenSecrets(b.dir, b.sealer)
-	refuse := &refusing{newFeed()}
+	var err error
+	b.feed = newFeed()
+	refuse := refusing{b.feed, "porch"}
 	b.h, err = newHostWith(b.dir, sec, b.node.connect, b.log.add, func(func(string, camera.Kind)) (decoder, error) { return refuse, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	if err := b.h.start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	b.h.tick(cancelled(), time.Millisecond)
-	if len(st.Cameras) != 1 || !b.h.partial {
-		t.Fatal("the start was not partial")
-	}
-	// porch is not in the store, so its directory is read directly.
-	if after, err := os.ReadDir(filepath.Join(b.dir, "capture", "porch")); err != nil || len(after) != len(segs) {
-		t.Fatalf("a sweep erased capture of a camera that did not start: %d of %d, %v", len(after), len(segs), err)
+	b.h.stop() // no new segments: only the old ones are in question
+	done := make(chan struct{})
+	go func() { b.h.tick(ctx, 20*time.Millisecond); close(done) }()
+	waitFor(t, "yard's capture to expire", func() bool { s, _ := b.h.store.Segments("yard"); return len(s) == 0 })
+	cancel()
+	<-done
+	if after, err := b.h.store.Segments("porch"); err != nil || len(after) != len(porch) {
+		t.Fatalf("a sweep erased capture of a camera that did not start: %d of %d, %v", len(after), len(porch), err)
 	}
 }
 
-type refusing struct{ *feed }
+// refusing is a decoder feed that refuses one camera's shapes.
+type refusing struct {
+	*feed
+	id string
+}
 
-func (refusing) Add(string, camwire.Shape, camwire.Shape) error { return camera.ErrShapes }
+func (r refusing) Add(id string, v, th camwire.Shape) error {
+	if id == r.id {
+		return camera.ErrShapes
+	}
+	return r.feed.Add(id, v, th)
+}
 
 func cancelled() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -461,7 +473,7 @@ func TestRepin(t *testing.T) {
 		t.Fatalf("no tamper event logged:\n%s", b.log.all())
 	}
 	before := b.feed.n("porch")
-	if err := b.h.repin("porch", newPin); err != nil {
+	if err := b.h.repin("porch", "", newPin); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "frames under the new pin", func() bool { return b.feed.n("porch") > before })
@@ -469,7 +481,7 @@ func TestRepin(t *testing.T) {
 	if st.Cameras[0].Key != newPin || newPin == oldPin {
 		t.Fatal("the new pin was not saved")
 	}
-	if b.h.repin("porch", "zz") == nil {
+	if b.h.repin("porch", "", "zz") == nil {
 		t.Fatal("a malformed key was taken")
 	}
 }
@@ -691,7 +703,7 @@ func TestEndToEnd(t *testing.T) {
 	if b.feed.n("porch") != 0 {
 		t.Fatal("a frame from a node with another key reached the decoder")
 	}
-	if err := b.h.repin("porch", newPin); err != nil {
+	if err := b.h.repin("porch", "", newPin); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "frames after the re-pin", func() bool { return b.feed.n("porch") > 0 })
@@ -704,5 +716,103 @@ func TestEndToEnd(t *testing.T) {
 	}
 	if bytes.Contains([]byte(b.log.all()), marker) {
 		t.Fatal("capture in the log")
+	}
+}
+
+// failSave makes the next save fail: cameras.json becomes a non-empty
+// directory, so WriteAtomic cannot rename over it.
+func failSave(t *testing.T, dir string) (undo func()) {
+	p := filepath.Join(dir, stateName)
+	b, _ := os.ReadFile(p)
+	os.Remove(p)
+	os.Mkdir(p, 0o700)
+	os.WriteFile(filepath.Join(p, "x"), nil, 0o600)
+	return func() { os.RemoveAll(p); os.WriteFile(p, b, 0o600) }
+}
+
+// Security point 1 on 0658b8c: a capture turn-on whose save fails opens
+// nothing, and the clerk's own gate stays off.
+func TestCaptureFailedSaveOpensNothing(t *testing.T) {
+	b := newBox(t)
+	if err := b.h.connect(b.rec("porch", "off", 0)); err != nil {
+		t.Fatal(err)
+	}
+	undo := failSave(t, b.dir)
+	defer undo()
+	if err := b.h.setCapture("porch", "continuous"); err == nil {
+		t.Fatal("the save did not fail")
+	}
+	if b.h.st.Cameras[0].Capture != "off" {
+		t.Fatal("the record kept the new mode")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := b.h.clerk.Run(ctx, "porch"); !errors.Is(err, camera.ErrCaptureOff) || b.node.dials.Load() != 0 {
+		t.Fatalf("the clerk's gate opened after a failed turn-on: %v, %d dials", err, b.node.dials.Load())
+	}
+}
+
+// Security point 1 on 0658b8c: a re-pin whose save fails leaves the old
+// key pinned in the clerk: the old node still streams.
+func TestRepinFailedSaveKeepsOldKey(t *testing.T) {
+	b := newBox(t)
+	if err := b.h.connect(b.rec("porch", "continuous", 0)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frames", func() bool { return b.feed.n("porch") > 0 })
+	_, other := newCert(t)
+	undo := failSave(t, b.dir)
+	defer undo()
+	if err := b.h.repin("porch", "", other); err == nil {
+		t.Fatal("the save did not fail")
+	}
+	// Force a redial: the node with the old key must still be accepted.
+	b.h.mu.Lock()
+	b.h.halt("porch")
+	b.h.run(b.h.st.Cameras[0])
+	b.h.mu.Unlock()
+	n := b.feed.n("porch")
+	waitFor(t, "frames under the old pin", func() bool { return b.feed.n("porch") > n })
+	if strings.Contains(b.status(), "camera porch: off") {
+		t.Fatal("the clerk took the unsaved key")
+	}
+}
+
+// L3 point 4 on 0658b8c: a node that came back at another address with a
+// new key is re-pinned there and streams.
+func TestRepinMovesAddress(t *testing.T) {
+	b := newBox(t)
+	if err := b.h.connect(b.rec("porch", "continuous", 0)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frames", func() bool { return b.feed.n("porch") > 0 })
+	newPin := b.node.swap(t)
+	if err := b.h.repin("porch", "192.168.1.70:8443", newPin); err != nil {
+		t.Fatal(err)
+	}
+	n := b.feed.n("porch")
+	waitFor(t, "frames at the new address", func() bool { return b.feed.n("porch") > n })
+	st, _ := load(b.dir)
+	if st.Cameras[0].Addr != "192.168.1.70:8443" || st.Cameras[0].Key != newPin {
+		t.Fatalf("saved: %+v", st.Cameras[0])
+	}
+}
+
+// Security point 3 on 0658b8c: a listed address with a zone, or off the
+// home network, is refused, so the enforcer's channel cannot put its own
+// text into a STATUS line.
+func TestListedAddressCanonical(t *testing.T) {
+	b := newBox(t)
+	key := b.pin()
+	for _, a := range []string{"[fe80::1%a\nb]:80", "[fe80::1%x camera porch: capture off]:80", "8.8.8.8:443"} {
+		if b.h.setListed([]listed{{Addr: a, Key: key}}) == nil {
+			t.Errorf("%q was listed", a)
+		}
+	}
+	if err := b.h.setListed([]listed{{Addr: "[fd00::0001]:8443", Key: strings.ToUpper(key)}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.status(), "camera node at [fd00::1]:8443: listed by the enforcer, key "+key[:8]) {
+		t.Fatalf("STATUS:\n%s", b.status())
 	}
 }

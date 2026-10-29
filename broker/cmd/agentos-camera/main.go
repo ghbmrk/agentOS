@@ -266,7 +266,7 @@ type (
 		ID           string
 		RetentionSec int64 `json:"retention_sec"`
 	}
-	repinArgs      struct{ ID, Key string }
+	repinArgs      struct{ ID, Addr, Key string }
 	disconnectArgs struct{ ID string }
 	listedArgs     struct{ Nodes []listed }
 	statusAnswer   struct {
@@ -305,7 +305,7 @@ var ops = map[string]func(h *host, args json.RawMessage) (any, error){
 		if err := decode(a, &r); err != nil {
 			return nil, err
 		}
-		return nil, h.repin(r.ID, r.Key)
+		return nil, h.repin(r.ID, r.Addr, r.Key)
 	},
 	"camera/disconnect": func(h *host, a json.RawMessage) (any, error) {
 		var r disconnectArgs

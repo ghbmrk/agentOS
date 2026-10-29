@@ -151,9 +151,6 @@ type host struct {
 	runs    map[string]context.CancelFunc
 	wg      sync.WaitGroup
 	started bool
-	// partial is a start at which a connected camera was not added: no
-	// sweep runs, so its retained capture is kept until the next start.
-	partial bool
 }
 
 // load reads the settings file: missing is no camera; any malformed
@@ -198,12 +195,15 @@ func (h *host) save() error {
 	return privfile.WriteAtomic(h.dir, stateName, b, nil)
 }
 
-// start loads the settings and connects every camera, then runs the first
-// capture-store sweep, then opens the continuous streams (#3625: the sweep
-// erases every camera directory Add has not taken, so it runs only once
-// every connected camera is added). A camera whose settings the clerk
-// refuses now (RES-2) is logged and left in the file, and its retained
-// capture is kept: the sweep runs only when every camera was added.
+// start loads the settings and adds every camera to the capture store,
+// then runs the first sweep, then connects each camera to the clerk and
+// its decoder and opens the continuous streams (#3625: the sweep erases
+// every camera directory the store has not taken, so it runs only once
+// every connected camera is in the store). A camera the clerk or the
+// decoder refuses now is logged and left in the file and the store, so its
+// retained capture is kept and still expires on time, and every other
+// camera's sweep goes on. A camera the store refuses (its sealed key
+// slot failing) refuses the start: no sweep could then run safely.
 func (h *host) start(ctx context.Context) error {
 	st, err := load(h.dir)
 	if err != nil {
@@ -212,22 +212,20 @@ func (h *host) start(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.ctx, h.st, h.runs = ctx, st, map[string]context.CancelFunc{}
-	all := true
 	for _, r := range st.Cameras {
-		if err := h.add(r); err != nil {
+		if err := h.store.Add(r.ID, r.retention()); err != nil {
+			return fmt.Errorf("camera %s: its capture store did not open: %w", r.ID, err)
+		}
+	}
+	if err := h.store.Sweep(); err != nil {
+		h.log("camera: the first sweep failed: " + err.Error())
+	}
+	for _, r := range st.Cameras {
+		if err := h.live(r); err != nil {
 			h.log("camera " + r.ID + ": not connected at start: " + err.Error())
-			all = false
 		}
 	}
 	h.pins()
-	h.partial = !all
-	if all {
-		if err := h.store.Sweep(); err != nil {
-			h.log("camera: the first sweep failed: " + err.Error())
-		}
-	} else {
-		h.log("camera: the first sweep is skipped: a connected camera did not start")
-	}
 	h.started = true
 	for _, r := range st.Cameras {
 		h.run(r)
@@ -235,9 +233,9 @@ func (h *host) start(ctx context.Context) error {
 	return nil
 }
 
-// add connects r to the clerk, the store and the decoder, undoing what it
-// did on a refusal; held under h.mu.
-func (h *host) add(r record) error {
+// live connects r to the clerk and the decoder, undoing what it did on a
+// refusal; held under h.mu.
+func (h *host) live(r record) error {
 	n, err := r.node()
 	if err != nil {
 		return err
@@ -249,9 +247,20 @@ func (h *host) add(r record) error {
 		h.clerk.Remove(r.ID)
 		return errRecord
 	}
+	return nil
+}
+
+// add connects a new camera r to the store, the clerk and the decoder,
+// undoing what it did on a refusal; held under h.mu.
+func (h *host) add(r record) error {
+	if _, err := r.node(); err != nil {
+		return err
+	}
 	if err := h.store.Add(r.ID, r.retention()); err != nil {
-		h.dec.Remove(r.ID)
-		h.clerk.Remove(r.ID)
+		return err
+	}
+	if err := h.live(r); err != nil {
+		h.store.Erase(r.ID)
 		return err
 	}
 	return nil
@@ -374,8 +383,11 @@ func (h *host) disconnect(id string) error {
 	return err
 }
 
-// update changes one camera's record with fn, saves it, and applies it
-// with apply; a failed save or apply leaves the old record.
+// update changes one camera's record with fn, saves it, and only then
+// applies it with apply, so no stream opens on a setting the file does not
+// hold. A failed save applies nothing. A failed apply restores the old
+// record, saves it, and applies it again; apply reads only its record
+// arguments, so the rollback closes what the change opened.
 func (h *host) update(id string, fn func(*record), apply func(old, new record) error) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -389,13 +401,19 @@ func (h *host) update(id string, fn func(*record), apply func(old, new record) e
 	if _, err := r.node(); err != nil {
 		return err
 	}
-	if err := apply(old, r); err != nil {
-		return err
-	}
 	h.st.Cameras[i] = r
 	if err := h.save(); err != nil {
 		h.st.Cameras[i] = old
-		apply(r, old)
+		return err
+	}
+	if err := apply(old, r); err != nil {
+		h.st.Cameras[i] = old
+		if serr := h.save(); serr != nil {
+			h.log("camera " + id + ": the old settings were not saved back: " + serr.Error())
+		}
+		if rerr := apply(r, old); rerr != nil {
+			h.log("camera " + id + ": the old settings were not applied back: " + rerr.Error())
+		}
 		return err
 	}
 	return nil
@@ -405,12 +423,13 @@ func (h *host) update(id string, fn func(*record), apply func(old, new record) e
 // stream the new setting does not allow ends at once (Clerk.SetCapture),
 // and turning capture away from a mode drops that camera's memory ring.
 func (h *host) setCapture(id, mode string) error {
-	m, ok := modes[mode]
-	if !ok {
+	if _, ok := modes[mode]; !ok {
 		return errRecord
 	}
+	// apply reads the mode from r, never from mode: a failed save
+	// re-applies the old record, which must close the gate again.
 	return h.update(id, func(r *record) { r.Capture = mode }, func(old, r record) error {
-		if err := h.clerk.SetCapture(id, m); err != nil {
+		if err := h.clerk.SetCapture(id, modes[r.Capture]); err != nil {
 			return err
 		}
 		if old.Capture != r.Capture {
@@ -419,7 +438,7 @@ func (h *host) setCapture(id, mode string) error {
 				h.log("camera " + id + ": the ring was not dropped: " + err.Error())
 			}
 		}
-		h.log("camera " + id + ": capture " + mode + " by the owner")
+		h.log("camera " + id + ": capture " + r.Capture + " by the owner")
 		h.run(r)
 		return nil
 	})
@@ -435,18 +454,33 @@ func (h *host) setRetention(id string, sec int64) error {
 
 // repin is the owner's tier-4 re-pin (DEV-3): the new key is pinned, the
 // old one is refused, and a node turned off by a mismatch runs again.
-func (h *host) repin(id, key string) error {
+func (h *host) repin(id, addr, key string) error {
 	k, err := hex.DecodeString(key)
 	if err != nil || len(k) != 32 {
 		return errRecord
 	}
-	return h.update(id, func(r *record) { r.Key = key }, func(_, r record) error {
-		if err := h.clerk.Repin(id, [32]byte(k)); err != nil {
+	// A node that came back at another address is pinned there: the
+	// listed node's address and key go together.
+	return h.update(id, func(r *record) {
+		r.Key = key
+		if addr != "" {
+			r.Addr = addr
+		}
+	}, func(old, r record) error {
+		n, err := r.node()
+		if err != nil {
+			return err
+		}
+		h.halt(id)
+		if old.Addr != r.Addr {
+			h.clerk.Remove(id)
+			if err := h.clerk.Add(n); err != nil {
+				return err
+			}
+		} else if err := h.clerk.Repin(id, n.Key); err != nil {
 			return err
 		}
 		h.pins()
-		// A runner that returned on a mismatch is started again.
-		h.halt(id)
 		h.run(r)
 		return nil
 	})
@@ -486,19 +520,27 @@ func (h *host) resume() error {
 // A listed node is only a STATUS line: it is never dialed until the owner
 // connects it on the local page.
 func (h *host) setListed(ls []listed) error {
-	for _, l := range ls {
-		if _, err := netip.ParseAddrPort(l.Addr); err != nil {
-			return errRecord
-		}
-		if k, err := hex.DecodeString(l.Key); err != nil || len(k) != 32 {
-			return errRecord
-		}
-	}
 	if len(ls) > 4*maxCameras {
 		return errRecord
 	}
+	// Each entry is put back in canonical form, so no text the enforcer's
+	// channel sent reaches a STATUS line: a zone, or anything but a home
+	// address, is refused.
+	out := make([]listed, 0, len(ls))
+	for _, l := range ls {
+		ap, err := netip.ParseAddrPort(l.Addr)
+		a := ap.Addr()
+		if err != nil || a.Zone() != "" || !(a.IsPrivate() || a.IsLinkLocalUnicast()) {
+			return errRecord
+		}
+		k, err := hex.DecodeString(l.Key)
+		if err != nil || len(k) != 32 {
+			return errRecord
+		}
+		out = append(out, listed{Addr: ap.String(), Key: hex.EncodeToString(k)})
+	}
 	h.mu.Lock()
-	h.listed = slices.Clone(ls)
+	h.listed = out
 	h.mu.Unlock()
 	return nil
 }
@@ -551,12 +593,6 @@ func (h *host) tick(ctx context.Context, every time.Duration) {
 			return
 		case <-t.C:
 			h.clerk.Flush()
-			h.mu.Lock()
-			partial := h.partial
-			h.mu.Unlock()
-			if partial {
-				continue
-			}
 			if err := h.store.Sweep(); err != nil {
 				h.log("camera: sweep failed: " + err.Error())
 			}
