@@ -997,3 +997,25 @@ func TestEraseByNameReachesTheKernel(t *testing.T) {
 		t.Fatalf("named before content opens: %v", err)
 	}
 }
+
+// ApproveCode sends the checker's approval as kernel/proc's own call, so the
+// kernel, not this channel, checks the checker's signature (CH-4, #3682).
+func TestApproveCodeSendsTheKernelsOwnCall(t *testing.T) {
+	needRoot(t)
+	path, lines := capturingKernel(t)
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := kernel.SignCode(priv, []kernel.CodeStep{{Plan: "plan:7", Index: 2, Hash: [32]byte{9}}})
+	if err := (proc.Owner{Conn: proc.Conn{Socket: path, UID: os.Getuid(), Timeout: 5 * time.Second}}).ApproveCode(a); err != nil {
+		t.Fatal(err)
+	}
+	want := <-lines
+	if err := (Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}).ApproveCode(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-lines; got != want {
+		t.Fatalf("approvecode sends %q; kernel/proc sends %q", got, want)
+	}
+}

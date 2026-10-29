@@ -377,7 +377,7 @@ func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 	id, _ := r.ch.Request([]Item{it}, 0)
 	text := r.inbox()
 	m := lowCodeRe.FindStringSubmatch(text)
-	want := id + ": send invoice 1042 to billing@acme.example, undo within 10 min. Expires 12:15. Reply YES " + id + " " + m[2] + " or NO " + id + "."
+	want := `Can I send "invoice 1042" to billing@acme.example? It can be undone within 10 min. Expires 12:15. Reply YES ` + id + " " + m[2] + " or NO " + id + "."
 	if text != want {
 		t.Fatalf("got  %q\nwant %q", text, want)
 	}
@@ -385,7 +385,7 @@ func TestApprovalTextIsFixedWordingFromVerifiedFields(t *testing.T) {
 		t.Fatalf("single approval takes %d segments", n)
 	}
 	r.ch.Request([]Item{highItem("h")}, 0)
-	if text := r.inbox(); !strings.Contains(text, "pay invoice 77 to acct ...4821, $250.00, cannot be undone") {
+	if text := r.inbox(); !strings.Contains(text, `Can I pay "invoice 77" to acct ...4821 for $250.00? It can't be undone.`) {
 		t.Fatalf("high text: %q", text)
 	}
 	sec := lowItem("s")
@@ -426,7 +426,7 @@ func TestRecipientsAreNeverCutHiddenOrCollapsed(t *testing.T) {
 	it.Object = strings.Repeat("o", 60)
 	r.ch.Request([]Item{it}, 0)
 	text := r.inbox()
-	if !strings.Contains(text, "to +15551234821") || !strings.Contains(text, ": UNVERIFIED, details on the Wi-Fi page: send ") {
+	if !strings.Contains(text, "to +15551234821") || !strings.HasPrefix(text, `UNVERIFIED, see my Wi-Fi page: Can I send "`) {
 		t.Fatalf("text %q", text)
 	}
 }
@@ -505,7 +505,7 @@ func TestBatchRepliesPartialYesNoAndExpiry(t *testing.T) {
 	id, _ := r.ch.Request(items, 0)
 	text := r.inbox()
 	m := lowCodeRe.FindStringSubmatch(text)
-	if !strings.Contains(text, "3 items. 1 send") || !strings.Contains(text, "YES "+id+" 1 2 "+m[2]+" for some") {
+	if !strings.Contains(text, "Can I do these 3 things? 1 send") || !strings.Contains(text, "YES "+id+" 1 2 "+m[2]+" for some") {
 		t.Fatalf("batch text: %q", text)
 	}
 	if got := r.say("NO 2"); got != "Denied "+id+" item 2." {
@@ -573,7 +573,7 @@ func TestLongBatchFitsThreeSegmentsAndPointsToMore(t *testing.T) {
 	}
 	id, _ := r.ch.Request(items, 0)
 	text := r.inbox()
-	if !strings.Contains(text, "MORE "+id) || !strings.Contains(text, "12 items") {
+	if !strings.Contains(text, "MORE "+id) || !strings.Contains(text, "these 12 things?") {
 		t.Fatalf("long batch: %q", text)
 	}
 	if got := r.say("MORE " + id); !strings.Contains(got, "Rest on my Wi-Fi page") {
@@ -783,7 +783,7 @@ func TestAutoReplyAlertUndoAndCommitmentFilter(t *testing.T) {
 	if res.Queued != nil || res.Request == "" || res.Matched != "commitment" {
 		t.Fatalf("%+v", res)
 	}
-	if text := r.inbox(); !strings.HasPrefix(text, res.Request+": send reply (commitment) to sam@example.com") {
+	if text := r.inbox(); !strings.HasPrefix(text, `Can I send "reply (commitment)" to sam@example.com?`) || !strings.HasSuffix(text, "or NO "+res.Request+".") {
 		t.Fatalf("approval: %q", text)
 	}
 }

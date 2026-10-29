@@ -59,7 +59,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 		return ""
 	}
 	say := func(msg string) string { return strings.Join(ch.Handle(ctx, ownerNum, msg), " | ") }
-	idRE := regexp.MustCompile(`^([A-Z][0-9]{1,2}):`)
+	idRE := regexp.MustCompile(`NO ([A-Z][0-9]{1,2})\.$`)
 
 	// 1. A grant: asked on the local page only, where one
 	// code-generator code approves and confirms it (Security Q1).
@@ -85,7 +85,7 @@ func TestOwnerChannelEndToEnd(t *testing.T) {
 	r.g.Flush()
 	req = text()
 	m := regexp.MustCompile(`Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindStringSubmatch(req)
-	if m == nil || !strings.Contains(req, "send invoice 1042 to sam@example.com, $120.00") {
+	if m == nil || !strings.Contains(req, `send "invoice 1042" to sam@example.com for $120.00?`) {
 		t.Fatalf("send request %q", req)
 	}
 	if got := say("YES " + m[1] + " " + m[2]); !strings.HasPrefix(got, "Approved") {
@@ -197,7 +197,7 @@ func TestRestartReissuesThroughTheChannel(t *testing.T) {
 	r.advance(time.Minute) // the batch goes quiet
 	r.g.Tick()
 	again := text()
-	m := regexp.MustCompile(`([A-Z][0-9]{1,2}): send invoice .+?, asked 09:0[0-9], re-sent after restart\. Expires 09:1[0-9]\. Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindAllStringSubmatch(again, -1)
+	m := regexp.MustCompile(`Can I send "invoice .+? Asked 09:0[0-9], before a restart\. Expires 09:1[0-9]\. Reply YES (([A-Z][0-9]{1,2})) ([0-9]{6})`).FindAllStringSubmatch(again, -1)
 	if len(m) != 2 || m[0][3] == m[1][3] {
 		t.Fatalf("re-sent text %q", again)
 	}
@@ -227,7 +227,7 @@ func (r *rig) grant2(ch *owner.Channel, text func() string, say func(string) str
 		Action: journal.ActionGrantChange, Params: specParams(s), Executor: ExecutorName})
 	r.g.Flush()
 	req := text()
-	rid := regexp.MustCompile(`^([A-Z][0-9]{1,2}):`).FindStringSubmatch(req)[1]
+	rid := regexp.MustCompile(`NO ([A-Z][0-9]{1,2})\.$`).FindStringSubmatch(req)[1]
 	// Codes work once per step: move to the next one.
 	r.advance(30 * time.Second)
 	pageApprove(r.t, ch, rid, totp(seed, r.now()))

@@ -16,7 +16,7 @@ import (
 func TestARepeatSaysItWasAlreadySentAndAsks(t *testing.T) {
 	r := newRig(t, nil)
 	sent := r.clock().Add(-2 * time.Hour)
-	stamp := "already sent " + sent.In(r.ch.cfg.Location).Format("15:04 Jan 2") + "; send it again?"
+	stamp := "It was already sent " + sent.In(r.ch.cfg.Location).Format("15:04 Jan 2") + "."
 
 	low := lowItem("i1")
 	low.Sent = sent
@@ -27,7 +27,7 @@ func TestARepeatSaysItWasAlreadySentAndAsks(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := r.inbox()
-	if !strings.Contains(text, stamp) || !lowCodeRe.MatchString(text) || strings.Contains(text, "may go twice") {
+	if !strings.Contains(text, stamp) || !strings.Contains(text, " again? ") || !lowCodeRe.MatchString(text) || strings.Contains(text, "may go twice") {
 		t.Fatalf("low repeat %q", text)
 	}
 
@@ -48,7 +48,7 @@ func TestARepeatSaysItWasAlreadySentAndAsks(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = r.inbox()
-	if !strings.Contains(text, "was already sent "+sent.In(r.ch.cfg.Location).Format("15:04 Jan 2")+". Send it again?") {
+	if !strings.Contains(text, " again? It was already sent "+sent.In(r.ch.cfg.Location).Format("15:04 Jan 2")+".") {
 		t.Fatalf("page repeat notice %q", text)
 	}
 }
@@ -72,7 +72,7 @@ func TestAnErasedOnlyRepeatSaysItMayRepeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := r.inbox()
-	if !strings.Contains(text, "may repeat a send whose record was erased (it went "+at+"); send it?") ||
+	if !strings.Contains(text, "? It can't be undone. It may repeat a send whose record was erased (it went "+at+").") ||
 		strings.Contains(text, "already sent") || !lowCodeRe.MatchString(text) {
 		t.Fatalf("low erased repeat %q", text)
 	}
