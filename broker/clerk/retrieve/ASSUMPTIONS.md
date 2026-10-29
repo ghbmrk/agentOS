@@ -1,0 +1,14 @@
+# Retrieve index: assumptions
+
+Built for INFER-retrieve R1 (#3783, `briefs/INFER-RETRIEVE.md`): the index library in `broker/clerk/retrieve`, against seams, with no process, socket or wiring. Each row is a reading a reviewer may want to change.
+
+| ID | Assumption | Spec basis | If it changes |
+|---|---|---|---|
+| RET-A1 | The archive is a KRN-content store whose clerk holds each item's text at seal. | BAK-2, KRN-content (D-211) | R2 adapts the seams (`Content`, `Item`, `Text`); this library does not change. |
+| RET-A2 | [Inference] 256-dim int8 Matryoshka vectors keep enough recall for mail search. | PLN-7 | R2 measures recall on a synthetic set against full 1024-dim float vectors and raises `Dim` if recall drops more than 5 points; a new dim makes old items stale, so they are re-embedded (`TestModelChangeReembeds`). |
+| RET-A3 | Sending item text to the no-network inference service is within KRN-content's "sealed plaintext crosses to the clerk that sealed it": the text is the clerk's, and the service keeps nothing (INF-6, INF-8). | KRN-content, PLN-3 | The R2 Security review checks this reading explicitly (L3 comment 6502051926, finding 3). |
+| RET-A4 | Reading every vector item under `svc-retrieve` at each start, and again at each `Reconcile`, costs one `content.read` log entry per item each time. | LOG-1, D-169 | R2 measures the log growth at 200,000 chunks and, if too large, proposes a per-subject wrap key (the `faces` pattern). |
+| RET-A5 | `Embedder` uses this package's own `Info` (SHA256, Dim), so `infer.Client` does not satisfy it directly; R2 wraps it in a three-line adapter. The brief asked both for `infer.Client` to satisfy the interface and for R1 not to import `infer`, and Go's method sets cannot do both. | ARC-2 | If R2 prefers it, `Embedder` can take `infer.Info` once the archive clerk links `infer` anyway. |
+| RET-A6 | `Add` runs after the source item is sealed (it takes the source's hash) while the clerk still holds the text, so nothing is read back. A pending source keeps no text in memory: `Retry` reads it again under `svc-retrieve`, which bounds memory and lets an erase drop it. | KRN-content, LOG-4 | If reading back is unwanted, R2 keeps a bounded text cache for pending sources. |
+| RET-A7 | A subject is never reused after its erase, so `Rewind` keeps the subject's name and refuses later `Add`s for it; this stops an `Add` in flight from bringing an erased subject back. The set grows by one name per erase. | LOG-4 | If subjects can be reused, the guard becomes a per-subject generation. |
+| RET-A8 | The query instruction is Qwen3-Embedding's `Instruct: <task>\nQuery:<query>` form, keyed by the pinned model's SHA-256; `New` refuses a model without one. | PLN-7 | A model update adds its instruction to `queryPrefix` in the same PR that changes the pin. |
