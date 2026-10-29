@@ -239,19 +239,25 @@ func running(t *testing.T, c config, k [32]byte) run.PlanOwner {
 		}
 	})
 	o := run.PlanOwner{Conn: proc.Conn{Socket: c.ownerSock, UID: os.Getuid(), Timeout: time.Minute}}
-	for range 200 {
-		if _, err := os.Stat(c.ownerSock); err == nil {
+	// Wait for the event, a dial that connects, not for the path: bind
+	// creates the path before listen, and a dial in that gap is refused
+	// (#3776). The deadline only bounds a hang; a slow -race runner passes.
+	deadline := time.After(30 * time.Second)
+	for {
+		if conn, err := net.Dial("unix", c.ownerSock); err == nil {
+			conn.Close()
 			return o
 		}
 		select {
 		case err := <-done:
 			done <- nil // for the cleanup, which waits on it
 			t.Fatalf("serve ended: %v", err)
+		case <-deadline:
+			t.Fatal("the owner socket never opened")
+			return o
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	t.Fatal("the owner socket never opened")
-	return o
 }
 
 // refused starts c with key k for at most two seconds: an error, or nil if
