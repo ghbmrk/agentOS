@@ -554,7 +554,7 @@ func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
 
 // unlabelled is a character a label to look for may not hold: one invisible
 // refuses, but for the two joiners (#2740).
-func unlabelled(c rune) bool { return c != '‌' && c != '‍' && invisible(c) }
+func unlabelled(c rune) bool { return c != '\u200c' && c != '\u200d' && invisible(c) }
 
 // sameLabel compares labels after folding case and collapsing runs of
 // whitespace, so "alice  smith" reads "Alice Smith". Fuzzier matching is

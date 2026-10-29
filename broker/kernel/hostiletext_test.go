@@ -18,7 +18,7 @@ func TestNameCheckRefusesHostileText(t *testing.T) {
 		hostiletext.Run(t, func(s string) bool { return BackupTarget{Name: s, Kind: KindDir, Locator: "/mnt/usb"}.shape() })
 	})
 	t.Run("backup target locator", func(t *testing.T) {
-		hostiletext.Run(t, func(s string) bool { return BackupTarget{Name: "usb", Kind: KindDir, Locator: "/mnt/" + s}.shape() })
+		hostiletext.Run(t, func(s string) bool { return BackupTarget{Name: "usb", Kind: KindDir, Locator: "/mnt/" + s}.addable() })
 	})
 	t.Run("named label", func(t *testing.T) {
 		hostiletext.Run(t, func(s string) bool {
