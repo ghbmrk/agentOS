@@ -5,6 +5,7 @@ package firstboot
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -346,7 +347,7 @@ func TestCardStepHoldsWithoutAuthority(t *testing.T) {
 		if err := s.Again(func() error { resets++; return nil }); !errors.Is(err, ErrNoAuthority) || resets != 0 {
 			t.Fatalf("%s: Again = %v after %d resets", name, err, resets)
 		}
-		if s.Hold().Error() != "I cannot make your Owner Card until my page authority exists." {
+		if s.Hold().Error() != "I can't make your Owner Card yet, because my page certificate isn't ready. Restart the box and open this page again. If you see this again, tell me in a text." {
 			t.Fatalf("hold text %q", s.Hold())
 		}
 		// Begin, on the download route, starts and holds the same way.
@@ -367,5 +368,68 @@ func TestCardStepHoldsWithoutAuthority(t *testing.T) {
 	s, err := NewCardStep(st, card.DisplayConfig{Provision: func(*card.Card) error { return nil }})
 	if err != nil || s.Hold() != nil {
 		t.Fatalf("confirmed card step: %v, hold %v", err, s.Hold())
+	}
+}
+
+// REQ: HW-1
+//
+// OWN-card-flow decisions 8 and 10: a provision that answers ErrKept
+// latches the step as confirmed and leaves its line for the page once; one
+// that answers another Line holds, keeps the card for a retry and leaves
+// its line once; a retry that succeeds leaves none. It catches a stuck box
+// after a crash between the hand-off and the latch, and a refusal that
+// latches.
+func TestCardStepKeptLatchesAndLinesHold(t *testing.T) {
+	refusal := Line("a fixed refusal line")
+	var answer error
+	st := &change.MemStore{}
+	var shown *card.Card
+	s, err := NewCardStep(st, card.DisplayConfig{Authority: testAuthority(t),
+		Generate: func(r io.Reader) (*card.Card, error) {
+			c, err := card.Generate(r)
+			if err == nil {
+				cp := *c
+				shown = &cp
+			}
+			return c, err
+		},
+		Provision: func(*card.Card) error { return answer }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if TakeNote(s) != "" {
+		t.Fatal("a note before any confirm")
+	}
+	confirm := func() error {
+		w, g := s.Display().Asks()
+		return s.Display().Confirm(strings.Fields(shown.VaultPassphrase)[w-1], strings.Split(shown.RecoveryKey, "-")[g-1])
+	}
+	answer = fmt.Errorf("wrapped: %w", refusal)
+	if err := confirm(); !errors.Is(err, refusal) || s.Hold() == nil || s.Display() == nil {
+		t.Fatalf("a refusal: %v, hold %v", err, s.Hold())
+	}
+	if b, _ := st.Load(); b != nil {
+		t.Fatalf("a refusal latched: %s", b)
+	}
+	if n := TakeNote(s); n != string(refusal) || TakeNote(s) != "" {
+		t.Fatalf("note %q, then not cleared", n)
+	}
+	answer = errors.New("not a line")
+	if err := confirm(); err == nil || TakeNote(s) != "" || s.Hold() == nil {
+		t.Fatalf("a plain error: %v, or it left a note", err)
+	}
+	answer = fmt.Errorf("keeper: %w", ErrKept)
+	if err := confirm(); err != nil || s.Hold() != nil {
+		t.Fatalf("kept: %v, hold %v", err, s.Hold())
+	}
+	if n := TakeNote(s); n != string(ErrKept) {
+		t.Fatalf("kept note %q", n)
+	}
+	b, err := st.Load()
+	if err != nil || !strings.Contains(string(b), `"card_confirmed":true`) {
+		t.Fatalf("kept did not latch: %s %v", b, err)
+	}
+	if TakeNote(nil) != "" {
+		t.Fatal("a note with no card step")
 	}
 }
