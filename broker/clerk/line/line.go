@@ -68,6 +68,7 @@ const (
 	RNotFixed    = "not-owner-fixed"
 	RNeedContact = "needs-contact" // a short or premium-rate code that is not a contact
 	ROwnNumber   = "own-number"    // the owner's number or one of the box's (CH-1, CH-19)
+	RNotNumber   = "not-a-number"  // neither E.164 nor a digits-only short code
 	RCancelled   = "cancelled"     // cancelled before the line took it
 	RNotTaken    = "not-taken"
 	RProvider    = "provider-refused"
@@ -214,6 +215,9 @@ func (c *Clerk) Admit(a key.Arg, own string) string {
 			return ROwnNumber
 		}
 	}
+	if !dialable(a.Value) {
+		return RNotNumber
+	}
 	c.mu.Lock()
 	contact, fixed := c.contacts[a.Value], c.fixed[a.Value]
 	c.mu.Unlock()
@@ -236,13 +240,35 @@ func (c *Clerk) Admit(a key.Arg, own string) string {
 	return RPlanner
 }
 
-// sameNumber is a == n, or one is the other in a national or
-// international-prefix form (sendrules.SameNumber).
+// sameNumber is a == n, or a's digits, whatever separators it was saved
+// with, are n in a national or international-prefix form
+// (sendrules.SameNumber).
 func sameNumber(a, n string) bool {
 	if n == "" || a == "" {
 		return false
 	}
-	return a == n || sendrules.SameNumber(strings.TrimPrefix(a, "+"), n)
+	digits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, a)
+	return a == n || sendrules.SameNumber(digits, n)
+}
+
+// dialable is the only form a recipient may take (CLK-8): E.164, "+" and 3
+// to 15 digits, or a short code of 3 to 8 digits.
+func dialable(n string) bool {
+	d, plus := strings.CutPrefix(n, "+")
+	if len(d) < 3 || len(d) > 15 || !plus && len(d) > 8 {
+		return false
+	}
+	for _, r := range d {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Facts is the clerk's reading of a step's claims: a text claims no content
@@ -395,6 +421,8 @@ func OwnerText(code string) string {
 		return "The second line only texts your contacts and numbers you gave it, so nothing was sent. Add the number on my Wi-Fi page."
 	case RNeedContact:
 		return "The second line texts a short or premium-rate number only when it is one of your contacts, so nothing was sent."
+	case RNotNumber:
+		return "The second line texts a full number with its country code, or a short code, so nothing was sent. Fix the contact's number on my Wi-Fi page."
 	case ROwnNumber:
 		return "The second line never texts your own number or mine, so nothing was sent."
 	case RCancelled, RNotTaken:

@@ -82,15 +82,31 @@ func TestShortCodeNeedsOwnerContact(t *testing.T) {
 	if got := r.c.Admit(r.c.Source("72346"), lineNum); got != RNeedContact {
 		t.Fatalf("short code the owner fixed: %q", got)
 	}
+	// A recipient is E.164 or a digits-only short code: a contact in a
+	// national or separated form, or a long digits-only one, is refused,
+	// not left to the line to drop (CLK-8).
+	for _, n := range []string{"+1 555 000 0777", "(555) 000-0777", "5550000777", "+1555000077x", "12", "+1234567890123456"} {
+		r.c.SetContacts([]Contact{{Name: "Shop", Number: n}})
+		if got := r.c.Admit(r.c.Source(n), lineNum); got != RNotNumber {
+			t.Fatalf("contact %q: %q", n, got)
+		}
+	}
 }
 
-// The owner's number and either of the box's never pass, in any form and
-// even as a contact (CH-1, CH-19).
+// The owner's number and either of the box's never pass, in a national,
+// international-prefix or separated form, even as a contact (CH-1, CH-19).
 func TestOwnerAndBoxNumbersNeverPass(t *testing.T) {
 	r := newRig(t, true)
-	r.c.SetContacts([]Contact{{Name: "Me", Number: ownerNum}, {Name: "Box", Number: boxNum}, {Name: "Line", Number: lineNum}, {Name: "Me at home", Number: "5550000001"}})
-	r.c.SetFixed([]string{ownerNum, "015550000100"})
-	for i, to := range []string{ownerNum, boxNum, lineNum, "5550000001", "015550000100"} {
+	forms := []string{ownerNum, boxNum, lineNum, "5550000001", "015550000100",
+		// Saved with separators, as an owner's own card often is (L3 6503790799).
+		"+1 555 000 0001", "+1-555-000-0001", "(555) 000-0001", "001 5550000001", "1 555 000 0100", "+1555 0000300"}
+	var cs []Contact
+	for _, n := range forms {
+		cs = append(cs, Contact{Name: "Me", Number: n})
+	}
+	r.c.SetContacts(cs)
+	r.c.SetFixed(forms)
+	for i, to := range forms {
 		if res := r.text(t, "own"+strconv.Itoa(i), to, "code?"); res.Detail != ROwnNumber {
 			t.Fatalf("%s: %+v", to, res)
 		}
@@ -238,7 +254,7 @@ func TestPasswordNeverInStatusErrorsOrLog(t *testing.T) {
 	r.c.Inbound(Text{From: stranger, Words: "who is this", At: t0})
 	var seen []string
 	seen = append(seen, fmt.Sprintf("%+v %#v %+v", r.c.Status(), r.c.Status(), r.logged))
-	for _, code := range []string{RUnavailable, RUnconfirmed, RPlanner, RNotContact, RNotFixed, RNeedContact, ROwnNumber, RCancelled, RNotTaken, RProvider, RMaybeSent, RUndeclared, "rate"} {
+	for _, code := range []string{RUnavailable, RUnconfirmed, RPlanner, RNotContact, RNotFixed, RNeedContact, RNotNumber, ROwnNumber, RCancelled, RNotTaken, RProvider, RMaybeSent, RUndeclared, "rate"} {
 		seen = append(seen, OwnerText(code))
 	}
 	ctx := context.Background()
