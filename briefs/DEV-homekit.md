@@ -34,7 +34,7 @@ HAP facts the code rests on (HAP non-commercial spec, R2+): pair-setup is SRP-6a
 - **(a)** Protocol package `broker/clerk/homekit/`: TLV8 codec, SRP-6a, pair-setup and pair-verify against an injected key holder, the encrypted session, `/accessories` and `/characteristics` read and write, the thermostat class rows, fuzz targets. Synthetic accessory in tests. If the session nears 150k tokens, cut at (a1) TLV8, SRP, pair-setup and pair-verify, and (a2) the session, characteristics and class rows.
 - **(b)** Core-side clerk: controller key in the sealed store (STO-2, CLK-1), the tier-4 local-page connect step taking the HomeKit code, pinning, bounds confirmation, events onto the bus. No device-clerk host is on main, so (b) splits at the host:
   - **(b1)** The clerk as a library in `broker/clerk/homekit/`: `SealedKeyHolder` over `clerk.Secrets.DeviceKey`, `Clerk.Connect` (one pair-setup by code, then the thermostats behind the pin), `Clerk.Open` (pinned pair-verify, a mismatch turns the device off with a KRN-7 line), `Link.ConfirmBounds`, events through `Emit`, local-only dials and bounded steps, and #3325 items 1 to 5.
-  - **(b2)** The host that runs it as its own clerk (CLK-1), the tier-4 local-page step that calls `Connect`, `Device` kept across restarts, and the bus wiring. Needs the device-clerk host (DEVSLOT-drivers part b, #3321); serial with the agentosd chain (D-111).
+  - **(b2)** The process that runs it as its own clerk (CLK-1), the tier-4 local-page step that calls `Connect`, `Device` kept across restarts, and the bus wiring. Re-scoped on 2026-10-29 into b2a to b2d under "Part (b2), settled" below.
 - **(c)** Live: pair the four T10 Pros behind the enforcer and confirm they hold schedules with Resideo blocked. Needs the enforcer (Protectli V1410, not arrived).
 
 ## Acceptance tests
@@ -63,10 +63,76 @@ Part (b1), in `broker/clerk/homekit/clerk_test.go`:
 
 Failure path: the controller key leaks, a spoofed accessory gets commands, or the heating or cooling mode changes without the owner's code-generator code (CH-10).
 
+## Part (b2), settled (2026-10-29)
+
+Parts a (#3320) and b1 (#3335) are on main in `broker/clerk/homekit/`. Since b2 was written, the device-driver host landed (`broker/clerk/devhost/`, `broker/cmd/agentos-devices/`, DEVSLOT b2a and b2b), and the camera clerk's host (#3868) set the pattern for a keyed device clerk's process. This section replaces b2's one bullet.
+
+### The premise, corrected
+
+b2 said it "needs the device-clerk host (DEVSLOT part b)". It does not run on that host. `agentos-devices` holds no key, owns the transport and checks every device frame against a declared shape (DEVSLOT-host-lib-4, -5). HomeKit fits none of that: the clerk holds the controller key (CLK-1, HK-14), the HAP session is encrypted end to end so the host would see only opaque frames, and the accessory's identity is proved by pair-verify inside the session, not by a TCP key. So HomeKit, a public standards stack (D-189), gets its own clerk process, as the camera clerk does. What it does reuse from the DEVSLOT work is `devhost.Limit` for DEV-8 (as `clerk/camera` does) and DEVSLOT b3's device-report entry (#3474) for the bus.
+
+b2 also said it was "serial with the agentosd chain". Only the relay is. #3868 shows the split: the process, its owner socket and the local page land without touching `cmd/agentosd`, and a later slice in the agentosd slot relays the page's steps.
+
+### Design points settled here (recommendations, flagged for the reviews)
+
+1. **Its own process.** `broker/cmd/agentos-homekit` runs `homekit.Clerk` under its own uid. Its key comes from the kernel on descriptor 3 (`clerkkey`, as `agentos-clerk-mail` and `agentos-camera` get theirs), and the controller key sits in its own sealed slot (`run.OpenSecrets`, `SealedKeyHolder`). Every refusal of the process comes before the key is read.
+2. **Owner socket.** One socket admits only the owner side's uid, with a closed table: `homekit/listed`, `homekit/connect` (name, listed accessory, code), `homekit/bounds`, `homekit/repin`, `homekit/disconnect`, `homekit/stop`, `homekit/resume` and `homekit/status`. The HomeKit code crosses this socket once and is never stored, logged or echoed in a refusal. The socket does no tier-4 check of its own: agentosd checks the approval code before relaying (b2b), as with `localapi.CameraTier4`.
+3. **Which accessories can be connected.** Only accessories the enforcer lists. Under NET-3 each device sits on its own network, and the enforcer relays mDNS only for signed pairs (ENF-f), so the core never browses the home network itself (DEV-2 Discovery). `homekit/listed` takes {enforcer device ID, address, HAP port, TXT `id`, `c#`, `sf`}. Connect refuses an accessory that is not listed, or whose `sf` says it is already paired. No typed address is accepted: DEV-2 allows a device clerk only its own devices' pinned endpoints, and DEV-10 connects only through a listing. Before pair-setup the host pins the listed address with a setup key of its own; once `Connect` returns, it swaps in `Device.GuardPin` (HK-21). A changed `c#` in a later listing calls `Link.Config` (re-resolve).
+4. **Devices across restarts.** `homekit.json` holds each `Device` (name, address, pin, `AID`, bounds, off), with no secrets, written with `privfile.WriteAtomic`. A malformed file is refused whole. At start, every device that is not off opens with pair-verify, polls and subscribes. A dropped link redials with a capped backoff and raises one counted event. An identity mismatch turns the device off with a KRN-7 line (HK-18), and only `homekit/repin` brings it back.
+5. **Re-pin and disconnect.** Re-pin is pair-setup again by code (tier 4). Since HAP keeps one pairing per controller, the owner first resets HomeKit on the thermostat, and the page says so. Disconnect sends HAP `remove-pairing` for the box's own pairing over the pinned session (`delete-remote`, DEV-4), then drops the device from the file before it erases its state. If the accessory is off or unreachable, the device is dropped locally, and the page tells the owner to reset HomeKit on the thermostat. `remove-pairing` is new library code in `clerk/homekit` (one TLV exchange on `/pairings`); add-pairing and list-pairings stay unbuilt ("No multi-admin" in the first design list).
+6. **Bounds.** No setpoint has bounds until the owner confirms them on the page (tier 4, DEV-10 "widen actuate bounds"). Until then, every setpoint write is `actuate-physical` under the class rows. That is DEV-4's conservative default, and it is safe while no connection plan supplies the type's defaults.
+7. **No planner writes yet.** b2a to b2c give pairing, readings and events. A planner's write needs the kernel to class it from a kernel-shipped table over standard types (DEV-4) and to admit it, with the code-generator code for `actuate-physical` (CH-10). No such table is on main: DEVSLOT b3 (#3474) classes driver operations from manifest class rows only. So b2d puts `ThermostatRows` and `AdminRows` (HK-8) into the kernel as data and adds the admitted write step. Until b2d lands, the process serves no write.
+8. **Events.** Values go out as `homekit.Event` (private, untrusted, no accessory text), limited per device and characteristic with `devhost.Limit`. Until DEVSLOT b3's device-report entry exists, they are counted and dropped, never logged with their values. b2c wires them to the entry.
+9. **Radio.** HAP over IP only. The T10 Pro joins Wi-Fi [Inference: Honeywell's T10 manuals; checked in part c]. HAP over Bluetooth or Thread is out: D-231 gives the enforcer Thread and Bluetooth radios for Matter and BLE devices, not for HAP. A HomeKit accessory reachable only over those radios lists as unsupported.
+10. **STOP.** `homekit/stop` closes every link and refuses every step until `homekit/resume` (KRN-7).
+
+### The parts
+
+- **b2a, DEV-homekit-host (#3891; tier A, one session, about 110k; after #3868 merges, which holds `broker/localui/server.go`, `broker/localapi/localapi_test.go`, `broker/core/core.txt` and `tools/trusted_base_parsers.txt`).**
+  - `broker/cmd/agentos-homekit/` (new, with its `ASSUMPTIONS.md`): points 1 to 6, 8 and 10.
+  - `remove-pairing` in `broker/clerk/homekit/` (point 5), and HK-13 updated to this split.
+  - The HomeKit page behind sign-in: `broker/localui/homekit.go`, `broker/localapi/homekit.go`, and one mount line in `broker/localui/server.go`. The page names a listed accessory by its type and the enforcer's device ID, and a paired one by its type and the first 8 characters of its pinned key's fingerprint, never by a device-supplied name (DEV-8, DEV-10). It takes the 8-digit HomeKit code (CH-6), then the approval code. Bounds and re-pin take the approval code. Disconnect asks once more.
+  - No `cmd/agentosd` edit.
+  - Guard files: `broker/core/core.txt` (`wiring cmd/agentos-homekit`) and `tools/trusted_base_parsers.txt` (a `parser` line for the process entry, which decodes its devices file and the owner side's calls; accessory parsing is already registered under `clerk/homekit`), each with its PR body line. Gate file, so it needs the separate Security accept (D-137).
+- **b2b, DEV-homekit-relay (#3893; tier A, one session, about 60k; agentosd serial slot, D-111, after b2a and CAM-clerk-e #3866).** In `cmd/agentosd`:
+  - Serve the HomeKit page's ops: check the session and the approval code of every tier-4 step, relay to the owner socket, and map its refusals to the localapi codes. Set the page's localui config.
+  - Relay STOP and RESUME, and re-send STOP after a clerk restart while the kernel holds one.
+  - Feed the enforcer channel's listed HAP accessories into `homekit/listed`. If the channel does not carry the HAP port and TXT `id`, `c#` and `sf` (ENF-f's relay), file the gap on the enforcer rows and leave listing empty. Do not browse from the core.
+- **b2c, DEV-homekit-image (#3894; tier A, one session, about 40k; image queue, after #3867).** `agentos-homekit.service` (own user; the kernel's key hand-off on descriptor 3; `IPAddressAllow` for the home ranges only; the hardening set of `agentos-devices.service`), its sysusers line, the kernel's `-clerk-key homekit=` entry and the `tests/test_image.py` lines. Then, once DEVSLOT b3 (#3474) lands, wire point 8's events to the kernel's device-report entry.
+- **b2d, DEV-homekit-ops (#3895; tier A, one session, about 90k; kernel files, after #3474, checked against open kernel PRs under D-111).** The kernel-shipped DEV-4 table for standard device types, starting with the HomeKit Thermostat rows as data (HK-8), and the admitted write step from a kernel-admitted plan step to `agentos-homekit` (a `homekit/write` op on a kernel-only socket). `actuate-physical` and out-of-bounds values need the code-generator code (CH-10, DEV-5) per action. Shares the device-report socket side with b3. If b3's class path already generalises to a table over standard types, b2d adds rows only, and says so.
+
+### Acceptance tests
+
+Part b2a, in `broker/cmd/agentos-homekit/` (against the synthetic accessory from `clerk/homekit`'s tests, exported as a test helper if needed):
+
+- `TestConnectOnlyListed`: an unlisted accessory, or one whose `sf` says it is paired, is refused before any dial.
+- `TestConnectPinsAndSaves`: connect by code pins the key, swaps the setup pin for `GuardPin`, and writes the device to `homekit.json` without the code or any key material.
+- `TestRestartReopensPinnedDevices`: after a restart every device that is not off reopens by pair-verify and emits polled values. A device that is off is not dialed.
+- `TestMalformedDevicesFileRefused`: a malformed file is refused whole, and nothing is dialed.
+- `TestKeyMismatchAfterRestartTurnsOff`: a spoofed key at restart turns the device off with a KRN-7 line, and the file records it.
+- `TestRepin`: re-pin by code pins the new key, and the old key is refused.
+- `TestDisconnectRemovesPairing`: disconnect sends `remove-pairing` for the box's own pairing only, drops the device from the file, then erases. With the accessory unreachable, the device is still dropped, and the answer says to reset HomeKit.
+- `TestBoundsNeedConfirm`: before `homekit/bounds`, every setpoint's class is `actuate-physical`; after it, in-bounds values are `actuate`.
+- `TestStopClosesLinks`: STOP closes every link and refuses every op but `status` and `resume`.
+- `TestOwnerSocketRefusesOtherUID` and `TestOwnerSocketClosedTable`.
+- `TestCodeAndKeyNeverLeave` (A16): the code and the canary controller key appear in no log line, file, refusal, event or STATUS answer.
+- `TestEventsLimitedAndCounted`: a flood of one characteristic is limited and counted, and another characteristic still goes out.
+- Page, in `broker/localui/`: `TestHomeKitPageLists`, `TestHomeKitConnectTakesCodeThenApproval`, `TestHomeKitDisconnectConfirms`, `TestHomeKitPageShowsNoDeviceName`.
+
+Part b2b, in `cmd/agentosd`: `TestHomeKitTier4NeedsTheCode` (a connect, bounds or re-pin step without a valid approval code is not relayed), `TestHomeKitStopRelayedAndResent`, `TestHomeKitListedFromEnforcer`.
+
+Part b2c, in `tests/test_image.py`: the unit has its own user, the key hand-off line and home-only `IPAddressAllow`. Removing any of them fails the tree check.
+
+Part b2d, in the kernel: `TestHomeKitRowsInKernelTable`, `TestDeviceWriteAdmittedOnlyByClass` (a planner's out-of-bounds or mode write without the code-generator code is refused and never reaches the clerk), `TestCheckPathDoesNotLinkHomeKit` (still holds).
+
+Failure path for b2: the HomeKit code or controller key leaks; an unlisted or spoofed accessory gets paired or commanded; a tier-4 step is relayed without its code; or a heating or cooling mode changes without the code-generator code.
+
 ## Scope
 
 `broker/clerk/homekit/` (its own `ASSUMPTIONS.md`), `broker/vendor/golang.org/x/crypto/chacha20poly1305`, `broker/vendor/golang.org/x/crypto/chacha20` and the `x/crypto` internal packages they need, `broker/vendor/modules.txt`, `broker/loops/plainname.go` (one owner-words line per fuzz target), any test-only vendored accessory and its tree, `NOTICE`, this brief.
 
+Part b2, per part under "Part (b2), settled": b2a `broker/cmd/agentos-homekit/`, `broker/clerk/homekit/` (`remove-pairing`, `ASSUMPTIONS.md`), `broker/localui/homekit.go`, `broker/localui/server.go` (one mount), `broker/localapi/homekit.go`, `broker/localapi/localapi_test.go`, and the guard files `broker/core/core.txt` and `tools/trusted_base_parsers.txt`; b2b `broker/cmd/agentosd/`; b2c `image/` unit, sysusers and finalize lines and `tests/test_image.py`; b2d `broker/kernel/` and `broker/clerk/run/` (the kernel-only socket side). Each part runs `python3 tools/premerge.py --needs-mark`; where it prints `mark`, the part owes the separate Security accept (D-137).
+
 ## Estimate
 
-Part (a): one session, about 130k tokens, strongest model; split at (a1)/(a2) above if it nears 150k.
+Part (a): one session, about 130k tokens, strongest model; split at (a1)/(a2) above if it nears 150k. Part b2: b2a about 110k, b2b 60k, b2c 40k, b2d 90k, one session each, strongest model.
