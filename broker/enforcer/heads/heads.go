@@ -92,8 +92,10 @@ type Config struct {
 	Kernel ed25519.PublicKey
 	// Journal keeps what the store holds across a restart.
 	Journal Journal
-	// Fork is told the seq of each fork refused, after the store unlocks,
-	// so the daemon can raise the alert (slice l).
+	// Fork is told the seq of each fork refused, so the daemon can raise
+	// the alert (slice l). It runs on its own goroutine: the channel calls
+	// Head and Entry holding its lock, and the alert goes out on the
+	// channel.
 	Fork func(seq uint64)
 }
 
@@ -335,7 +337,7 @@ func (s *Store) keepEntry(e entry, body []byte) error {
 
 func (s *Store) reported(seq uint64, err error) error {
 	if errors.Is(err, ErrFork) && s.cfg.Fork != nil {
-		s.cfg.Fork(seq)
+		go s.cfg.Fork(seq)
 	}
 	return err
 }

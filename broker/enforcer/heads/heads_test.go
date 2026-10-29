@@ -13,6 +13,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/channel"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
@@ -106,8 +107,8 @@ func TestKeepsEveryHeadRefusesFork(t *testing.T) {
 	pub, priv := keys(t)
 	k := newKlog(t, priv)
 	j := &journal{}
-	var forks []uint64
-	s, err := Open(Config{Kernel: pub, Journal: j, Fork: func(seq uint64) { forks = append(forks, seq) }})
+	forked := make(chan uint64, 8)
+	s, err := Open(Config{Kernel: pub, Journal: j, Fork: func(seq uint64) { forked <- seq }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +146,18 @@ func TestKeepsEveryHeadRefusesFork(t *testing.T) {
 	if err := s.Head(rb2.head()); !errors.Is(err, ErrFork) {
 		t.Fatalf("head below the newest: %v, want ErrFork", err)
 	}
-	if !slices.Equal(forks, []uint64{3, 3, 1}) {
-		t.Fatalf("forks reported %v, want [3 3 1]", forks)
+	var forks []uint64
+	for range 3 {
+		select {
+		case seq := <-forked:
+			forks = append(forks, seq)
+		case <-time.After(5 * time.Second):
+			t.Fatal("fork not reported")
+		}
+	}
+	slices.Sort(forks)
+	if !slices.Equal(forks, []uint64{1, 3, 3}) {
+		t.Fatalf("forks reported %v, want [1 3 3]", forks)
 	}
 	// A head signed by another key is not the kernel's.
 	_, other := keys(t)

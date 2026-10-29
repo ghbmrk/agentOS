@@ -239,7 +239,8 @@ func (a *Alerts) write(r Record) error {
 
 // Raise logs one event, and for a text or call keeps it open, turns the
 // light red and sends it. The log line and the light come first, so a
-// dropped or refused text still shows (P6). An event of a kind already
+// dropped or refused text still shows (P6); a journal error is returned
+// after the light and the send. An event of a kind already
 // open for the same device counts on that alert and sends nothing more,
 // so a burst costs the owner one text.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
@@ -261,20 +262,18 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	if fresh {
 		r = Record{ID: a.next + 1, Kind: k, Device: device, Text: text, At: now, Last: now, Count: 1, Open: d != LogOnly}
 	}
-	if err := a.write(r); err != nil {
-		a.mu.Unlock()
-		return Record{}, err
-	}
+	// A record the journal refused is still shown and sent: the light
+	// must not depend on the disk either (P6).
+	werr := a.write(r)
 	a.put(r)
 	a.mu.Unlock()
-	if d == LogOnly {
-		return r, nil
+	if d != LogOnly {
+		a.show()
+		if fresh {
+			r = a.send(r)
+		}
 	}
-	a.show()
-	if fresh {
-		r = a.send(r)
-	}
-	return r, nil
+	return r, werr
 }
 
 func (a *Alerts) open(k Kind, device string) int {

@@ -287,17 +287,13 @@ var enforcer = map[string]struct {
 	"enforcer/policy":   {[]string{"kernel/key"}, droneForbid},
 	"enforcer/wire":     {nil, droneForbid},
 	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer/alert":    {[]string{"enforcer/wire"}, droneForbid},               // slice h: texts and light
+	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
-
-	// Slice h: the texts and light, and the head copies and revocation
-	// set, which checks the owner's revocation of the kernel's sub-key with
-	// the key-check library (STO-4, KEY-7).
-	"enforcer/alert": {[]string{"enforcer/wire"}, droneForbid},
-	"enforcer/heads": {[]string{"kernel/key", "enforcer/wire"}, droneForbid},
 }
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
