@@ -555,8 +555,10 @@ func pairErr(err error) error {
 
 // pair runs one pair-setup by code with the listed accessory l (design
 // point 3): the guard holds the setup pin for l's address only for the
-// step, then the paired devices' GuardPins. It makes one attempt.
-func (h *host) pair(name string, l listed, code string, skip []*entry) ([]homekit.Device, error) {
+// step, then the paired devices' GuardPins. It makes one attempt. commit
+// keeps the paired devices; it runs under the same hold of h.mu that
+// checked STOP, so a STOP that came during the step keeps nothing.
+func (h *host) pair(name string, l listed, code string, skip []*entry, commit func([]homekit.Device) error) error {
 	addr := l.hostport()
 	ap := netip.MustParseAddrPort(addr)
 	h.mu.Lock()
@@ -568,21 +570,26 @@ func (h *host) pair(name string, l listed, code string, skip []*entry) ([]homeki
 	defer h.mu.Unlock()
 	h.pins(nil)
 	if h.stopped {
-		return nil, h.stoppedMidStep(name, err == nil || len(devs) > 0)
+		return h.stoppedMidStep(name, err == nil || len(devs) > 0)
 	}
 	if err != nil && !(errors.Is(err, homekit.ErrUnresolved) && len(devs) == 1) {
 		h.log("homekit " + name + ": pair-setup with " + l.Device + " failed")
-		return nil, pairErr(err)
+		return pairErr(err)
 	}
 	if len(devs) == 0 || len(h.devs)-len(skip)+len(devs) > maxDevices {
-		return nil, errAdmission
+		return errAdmission
 	}
 	for _, d := range devs {
 		if !h.nameFree(d.Name, skip) {
-			return nil, errExists
+			return errExists
 		}
 	}
-	return devs, nil
+	if err := commit(devs); err != nil {
+		return err
+	}
+	h.pins(nil)
+	h.configs[devs[0].Pin.AccessoryID] = l.C
+	return nil
 }
 
 // stoppedMidStep is a pairing step's answer when STOP came during it
@@ -634,33 +641,23 @@ func (h *host) connect(name, device, code string) error {
 	case full:
 		return errAdmission
 	}
-	devs, err := h.pair(name, l, code, nil)
-	if err != nil {
-		return err
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.stopped {
-		return h.stoppedMidStep(name, true)
-	}
-	var add []*entry
-	for _, d := range devs {
-		add = append(add, &entry{dev: d})
-	}
-	h.devs = append(h.devs, add...)
-	if err := h.save(); err != nil {
-		h.devs = h.devs[:len(h.devs)-len(add)]
-		h.pins(nil)
-		h.log("homekit " + name + ": paired but not saved; reset HomeKit on the thermostat and connect it again")
-		return err
-	}
-	h.pins(nil)
-	h.configs[devs[0].Pin.AccessoryID] = l.C
-	h.log(fmt.Sprintf("homekit %s: connected by the owner, %d thermostats", name, len(devs)))
-	for _, e := range add {
-		h.run(e)
-	}
-	return nil
+	return h.pair(name, l, code, nil, func(devs []homekit.Device) error {
+		var add []*entry
+		for _, d := range devs {
+			add = append(add, &entry{dev: d})
+		}
+		h.devs = append(h.devs, add...)
+		if err := h.save(); err != nil {
+			h.devs = h.devs[:len(h.devs)-len(add)]
+			h.log("homekit " + name + ": paired but not saved; reset HomeKit on the thermostat and connect it again")
+			return err
+		}
+		h.log(fmt.Sprintf("homekit %s: connected by the owner, %d thermostats", name, len(devs)))
+		for _, e := range add {
+			h.run(e)
+		}
+		return nil
+	})
 }
 
 // repin is the owner's tier-4 re-pin (design point 5): after the owner
@@ -690,38 +687,27 @@ func (h *host) repin(name, device, code string) error {
 		return errPaired
 	}
 	base := grp[0].dev.Name
-	devs, err := h.pair(base, l, code, grp)
+	var dones []<-chan struct{}
+	var add []*entry
+	err := h.pair(base, l, code, grp, func(devs []homekit.Device) error {
+		old := slices.Clone(h.devs)
+		h.devs = slices.DeleteFunc(h.devs, func(x *entry) bool { return slices.Contains(grp, x) })
+		for _, d := range devs {
+			add = append(add, &entry{dev: d})
+		}
+		h.devs = append(h.devs, add...)
+		if err := h.save(); err != nil {
+			h.devs, add = old, nil
+			return err
+		}
+		for _, x := range grp {
+			dones = append(dones, h.halt(x))
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	var dones []<-chan struct{}
-	h.mu.Lock()
-	if h.stopped {
-		h.mu.Unlock()
-		return h.stoppedMidStep(base, true)
-	}
-	old := slices.Clone(h.devs)
-	for _, x := range grp {
-		dones = append(dones, h.halt(x))
-	}
-	h.devs = slices.DeleteFunc(h.devs, func(x *entry) bool { return slices.Contains(grp, x) })
-	var add []*entry
-	for _, d := range devs {
-		add = append(add, &entry{dev: d})
-	}
-	h.devs = append(h.devs, add...)
-	if err := h.save(); err != nil {
-		h.devs = old
-		h.pins(nil)
-		for _, x := range grp {
-			h.run(x)
-		}
-		h.mu.Unlock()
-		return err
-	}
-	h.pins(nil)
-	h.configs[devs[0].Pin.AccessoryID] = l.C
-	h.mu.Unlock()
 	for _, d := range dones {
 		<-d
 	}
