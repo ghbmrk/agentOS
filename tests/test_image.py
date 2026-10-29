@@ -1585,10 +1585,8 @@ class ConfigTest(unittest.TestCase):
 
     def test_broker_flags_exist(self):
         # MUST 1 on #41: a flag agentosd lacks makes it exit at start and loop on restart.
-        src = (ROOT / "broker/cmd/agentosd").glob("*.go")
-        defined = set()
-        for f in src:
-            defined |= set(re.findall(r'flag\.\w+\([^,]+,\s*"([\w-]+)"', f.read_text()))
+        # flag.X or a FlagSet's fs.X (the inference flags register on flag.CommandLine that way).
+        defined = flags("agentosd")
         exe = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentosd.service")["Service"]["ExecStart"]
         used = re.findall(r"(?:^|\s)-([a-z][\w-]*)", exe)
         self.assertTrue(used)
@@ -5485,7 +5483,7 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-kernel", "agentos-localui", "agentos-model",
+        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-localui", "agentos-model",
                                  "agentos-modem", "agentos-owner"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem")):
             s = ini(unit)["Service"]

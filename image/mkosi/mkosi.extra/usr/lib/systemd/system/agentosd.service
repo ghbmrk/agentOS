@@ -36,8 +36,12 @@ ExecStartPre=/usr/lib/agentos/drive-id check
 # (-owner-uid), on a thread of the broker's own; the kernel's uid is the only peer it calls (#2682).
 # -disk-quota on is the default, passed so the image never runs another value (RES-4, #1386): with
 # no project quota on root agentosd keeps agent machines off. The off value is never passed (tests/test_image_quota.py).
+# The local inference service's user, model and the model's hash (INFER-image, D-230); -infer itself
+# stays off until a retrieve row consumes the service, so the model costs disk only (tests/test_image_infer.py).
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} \
         -modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui \
+        -infer-uid @uid:agentos-infer -infer-model /usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf \
+        -infer-model-sha256 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439 \
         -kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel \
         -kernel-owner-uid @uid:agentos-owner \
         -runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw \

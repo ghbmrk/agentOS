@@ -30,6 +30,8 @@ on:
       - "broker/cmd/agentos-localui/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
+      # The local inference service and the pins of what the image ships with it (INFER-image).
+      - "broker/cmd/agentos-infer/**"
       # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
       # eval set (PLAN: A21 runs on every change to the kernel or clerks).
       - "broker/kernel/**"
@@ -60,6 +62,8 @@ on:
       - "broker/cmd/agentos-localui/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
+      # The local inference service and the pins of what the image ships with it (INFER-image).
+      - "broker/cmd/agentos-infer/**"
       # A21 in QEMU (#3117): the slice boot runs on every change to the kernel, the clerks or the
       # eval set (PLAN: A21 runs on every change to the kernel or clerks).
       - "broker/kernel/**"
@@ -156,13 +160,18 @@ jobs:
       - name: Build the device-driver slot's boot probe
         if: matrix.run == 'a'
         run: cd broker && for b in bootdriver bootprobe; do CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/devslot/$b" ./clerk/devslot/proc/testdata/$b; done
-      - name: Boot test (Secure Boot on), inbox slice, driver slot and end-to-end run
+      # The local inference service's real test the inference boot runs on the installed llama-server
+      # and model (INFER-image, #3655): static, so it runs in the image as built here.
+      - name: Build the inference real test
         if: matrix.run == 'a'
-        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" DEVSLOT="$RUNNER_TEMP/devslot" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
+        run: cd broker && CGO_ENABLED=0 go test -c -tags infer_real,infer_llamacpp -trimpath -o "$RUNNER_TEMP/infer/infer.test" ./cmd/agentos-infer
+      - name: Boot test (Secure Boot on), inbox slice, driver slot, inference and end-to-end run
+        if: matrix.run == 'a'
+        run: sudo env E2E="$RUNNER_TEMP/e2e" SLICE="$RUNNER_TEMP/slice" DEVSLOT="$RUNNER_TEMP/devslot" INFER="$RUNNER_TEMP/infer" image/ci_boot.sh "$RUNNER_TEMP/out/agentos_$(jq -r .version "$RUNNER_TEMP"/out/*.release.json).raw" "$RUNNER_TEMP/boot"
       - name: Keep the console logs
         if: always() && matrix.run == 'a'
         run: |
-          for l in console console-reboot console-two-drives console-fallback console-slice console-e2e; do
+          for l in console console-reboot console-two-drives console-fallback console-slice console-infer console-e2e; do
             sudo cp "$RUNNER_TEMP/boot/$l.log" "$RUNNER_TEMP/out/qemu-$l.log" || true
           done
       - name: Release record
