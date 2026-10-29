@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -143,7 +144,12 @@ type SetupState struct {
 	// long as the SetupStore does; agentosd's owed record (#1544) restores
 	// it after a restart and holds finish on its own.
 	Unsaved map[string]bool `json:"unsaved,omitempty"`
-	Done    bool            `json:"done"`
+	// Name is the box's name (CH-21): the suggestion the paired phone was
+	// first shown, or the name the owner typed over it. OwnerName is the
+	// owner's own name, "" when not given. Finish hands both to agentosd.
+	Name      string `json:"name,omitempty"`
+	OwnerName string `json:"owner_name,omitempty"`
+	Done      bool   `json:"done"`
 }
 
 // SetupStore persists SetupState.
@@ -383,6 +389,9 @@ type setup struct {
 	// busy is the providers with an AI post in flight: one at a time
 	// each, none while Finish runs, and no Finish while any is (#1467).
 	busy map[string]bool
+	// suggestion is the made-up name offered while Name is unset
+	// (boxname.Suggest), made once per pairing.
+	suggestion string
 }
 
 func newSetup(s *Server, st SetupState) *setup {
@@ -480,6 +489,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/number":      u.number,
 		"/setup/number-code": u.numberCode,
 		"/setup/claim":       u.claim,
+		"/setup/name":        u.name,
 		"/setup/codes":       u.codes,
 		"/setup/recovery":    u.recovery,
 		"/setup/host":        u.host,
@@ -559,6 +569,9 @@ type setupView struct {
 	// Unsaved is the retry box of each provider whose answer did not
 	// save (#1467).
 	Unsaved map[string]*privateBox
+	// BoxName and OwnerName fill the names form on the step after
+	// pairing (CH-21).
+	BoxName, OwnerName string
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -627,6 +640,15 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.PairCode = u.pair[key]
 	case "codes":
 		v.CodesShown = u.shown && u.shownGen == u.gen
+		// The phone that paired is first shown the suggestion here, and
+		// it is kept: Name is what finish sends unless the owner types
+		// another. A store that fails to save still offers it.
+		if u.st.Name == "" {
+			if n := u.suggestLocked(); n != "" && u.save(func(s *SetupState) { s.Name = n }) != nil {
+				u.st.Name = n
+			}
+		}
+		v.BoxName, v.OwnerName = u.st.Name, u.st.OwnerName
 	case "card":
 		// No page authority, no card (HW-1): the page says so in the
 		// step's fixed line rather than offering a card it cannot show.
@@ -648,6 +670,9 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
 		}
 	case "codes":
+		if n, ok := u.s.cfg.Hooks.BoxNumber(); ok && phoneRe.MatchString(n) {
+			v.BoxNumber = n
+		}
 		if v.CodesShown {
 			break
 		}
@@ -993,9 +1018,82 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
 	u.device, u.parked, u.lapsed, u.answer = map[string][3]string{}, map[string][3]string{}, map[string][3]string{}, map[string]bool{}
+	u.suggestion = ""
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
+		s.Name, s.OwnerName = "", ""
 	})
+}
+
+// Names are the names the owner chose at setup (CH-21): Box, the box's
+// name, and Owner, the owner's own name. Either may be "".
+type Names struct{ Box, Owner string }
+
+// NamedFinish is Hooks whose finish also takes the names: setup calls
+// FinishNamed instead of Finish when Hooks has it.
+type NamedFinish interface {
+	FinishNamed(ownerNumber string, n Names) error
+}
+
+// suggestLocked is the made-up name offered while Name is unset, made on
+// first use; "" when none could be made.
+func (u *setup) suggestLocked() string {
+	if u.suggestion == "" {
+		u.suggestion, _ = boxname.Suggest(u.s.cfg.Rand, u.st.OwnerName)
+	}
+	return u.suggestion
+}
+
+// cardName is the name on the box's contact card: the box's name, else the
+// suggestion, else "agentOS".
+func (u *setup) cardName() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.st.Name != "" {
+		return u.st.Name
+	}
+	if n := u.suggestLocked(); n != "" {
+		return n
+	}
+	return "agentOS"
+}
+
+// name keeps or replaces the box's name and records the owner's own name
+// (CH-21), from the phone that paired only: before pairing, any phone on
+// the Wi-Fi may run setup's steps, but none may name the box.
+func (u *setup) name(r *http.Request, key string) error {
+	owner := strings.TrimSpace(r.PostFormValue("owner_name"))
+	if owner != "" && !boxname.Shape(owner) {
+		return errOwnerNameShape
+	}
+	owner = strings.Join(strings.Fields(owner), " ")
+	n, err := boxname.Check(r.PostFormValue("name"), owner)
+	if err != nil {
+		return nameError(err)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.st.Owner == "" || key != u.st.Device {
+		return errors.New("Text your box first; then you can name it.")
+	}
+	return u.save(func(s *SetupState) { s.Name, s.OwnerName = n, owner })
+}
+
+var errOwnerNameShape = errors.New("Your name is up to 32 letters, spaces, hyphens and apostrophes. Leave it empty if you prefer.")
+
+// nameError is boxname's reason as the names form's sentence.
+func nameError(err error) error {
+	switch {
+	case errors.Is(err, boxname.ErrShape):
+		return errors.New("My name is 1 to 32 letters, spaces, hyphens and apostrophes. Nothing changed.")
+	case errors.Is(err, boxname.ErrControlWord):
+		return errors.New("That is one of my control words, so it can't be my name. Nothing changed.")
+	case errors.Is(err, boxname.ErrReserved):
+		return errors.New(`My name can't contain "agentOS" or "assistant". Nothing changed.`)
+	case errors.Is(err, boxname.ErrOwnerName):
+		return errors.New("That is your own name; pick another for me. Nothing changed.")
+	}
+	return errors.New("Nothing changed. Try again.")
 }
 
 // codes confirms code-generator enrollment with one entered code (ONB-3)
@@ -1471,6 +1569,7 @@ func (u *setup) maybeFinish() {
 	}
 	u.finishing = true
 	who := u.st.Owner
+	names := Names{Box: u.st.Name, Owner: u.st.OwnerName}
 	u.mu.Unlock()
 	defer func() { u.mu.Lock(); u.finishing = false; u.mu.Unlock() }()
 	// agentosd keeps each answer owed to the vault in its own record,
@@ -1503,7 +1602,11 @@ func (u *setup) maybeFinish() {
 	if !connected {
 		return
 	}
-	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
+	finish := u.s.cfg.Hooks.Finish
+	if nf, ok := u.s.cfg.Hooks.(NamedFinish); ok {
+		finish = func(who string) error { return nf.FinishNamed(who, names) }
+	}
+	if err := finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
 		msg := "Could not finish setup. Try again."
 		switch {
 		case errors.Is(err, ErrCodesUnavailable):

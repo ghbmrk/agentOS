@@ -451,3 +451,55 @@ func TestFinishIsHeldWhenTheVaultHoldsNoCard(t *testing.T) {
 		t.Fatalf("finish with a card %v", err)
 	}
 }
+
+// TestFinishRecordsTheNames: finish takes the box's name the owner kept or
+// typed at setup and the owner's own name, records them in the setup
+// record for the owner channel, and refuses names that fail CH-21's name
+// check, whoever sends them: the page is not trusted to have checked.
+func TestFinishRecordsTheNames(t *testing.T) {
+	// REQ: CH-21
+	r := newSetupRig(t)
+	r.enrollAndConfirm()
+	for _, bad := range []localapi.Finish{
+		{Name: "R2D2"},
+		{Name: "STOP"},
+		{Name: "Agent OS"},
+		{Name: "Mark  Jones", OwnerName: "mark jones"},
+		{Name: "Dave Smith", OwnerName: "Mark 2"},
+		{Name: "Dave Smith", OwnerName: "Mark\nJones"},
+		{OwnerName: strings.Repeat("a", 33)},
+	} {
+		bad.Owner = "+15550100100"
+		if err := r.call(localapi.OpSetupFinish, bad, nil); code(err) != localapi.ErrBadArgs {
+			t.Errorf("finish %+v: %v, want bad args", bad, err)
+		}
+	}
+	if len(r.finished) != 0 {
+		t.Fatalf("a refused finish finished: %v", r.finished)
+	}
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100", Name: " Dave   Smith ", OwnerName: "Mark  Jones"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := FileRecord{Path: r.path}.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Name != "Dave Smith" || rec.OwnerName != "Mark Jones" || !rec.Finished {
+		t.Errorf("record %+v, want Dave Smith and Mark Jones", rec)
+	}
+}
+
+// TestFinishWithoutNames: a page that gives no names (an older page, or a
+// suggestion that could not be made) still finishes, with none recorded.
+func TestFinishWithoutNames(t *testing.T) {
+	// REQ: CH-21
+	r := newSetupRig(t)
+	r.enrollAndConfirm()
+	if err := r.call(localapi.OpSetupFinish, localapi.Finish{Owner: "+15550100100"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := FileRecord{Path: r.path}.Load()
+	if err != nil || rec.Name != "" || rec.OwnerName != "" {
+		t.Errorf("record %+v, %v; want no names", rec, err)
+	}
+}

@@ -332,6 +332,10 @@ form { margin: .6em 0 1.2em; }
 
 {{else if eq .Step "codes"}}
 <p class="muted">Paired with your number {{.Paired}}.</p>{{template "restart" false}}
+<h2>My name</h2>
+<p>I made up a name for myself. Keep it or type another; people I write to on your behalf see it.</p>
+<form method="post" action="/setup/name"><label>My name<input type="text" name="name" value="{{.BoxName}}" maxlength="32" autocomplete="off" required></label><label>Your name (optional)<input type="text" name="owner_name" value="{{.OwnerName}}" maxlength="32" autocomplete="name"></label><button>Save names</button></form>
+{{if .BoxNumber}}<p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
 <h2>2. Add approval codes</h2>
 {{with .Replace}}<p class="err">{{.}}</p>{{end}}
 {{if .CodesUnavailable}}

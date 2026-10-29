@@ -173,10 +173,15 @@ type Confirmed struct {
 // that its Owner Card step is confirmed and provisioned (HW-1, #1115).
 // agentosd's setup mode takes Card only when the card step runs in the
 // page (agentosd links no card code, ARC-2), and finish answers
-// ErrCardPending without it.
+// ErrCardPending without it. Name is the box's name the owner kept or
+// typed at setup and OwnerName the owner's own name, each "" when not
+// given (CH-21); finish refuses a Name that fails boxname.Check against
+// OwnerName, or an OwnerName that fails boxname.Shape, as ErrBadArgs.
 type Finish struct {
-	Owner string `json:"owner"`
-	Card  bool   `json:"card,omitempty"`
+	Owner     string `json:"owner"`
+	Card      bool   `json:"card,omitempty"`
+	Name      string `json:"name,omitempty"`
+	OwnerName string `json:"owner_name,omitempty"`
 }
 
 // MaxAPIKey bounds a provider API key in bytes; a key is printable ASCII
