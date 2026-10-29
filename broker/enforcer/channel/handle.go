@@ -35,21 +35,28 @@ var everyday = map[wire.Verb]bool{wire.VerbOn: true, wire.VerbOff: true, wire.Ve
 
 // Nameable reports whether secure is a secure direction the channel can
 // carry. A safety-list device named anything else takes reads only. The
-// page that renders a naming loosening refuses any other name before the
-// owner signs it.
+// signed policy refuses a name its device's class does not allow
+// (policy.Nameable).
 func Nameable(secure string) bool { _, ok := secureVerb[secure]; return ok }
 
 // Allowed is the safety-list table (NET-2 Safety devices, Drones): whether
 // the channel carries verb v to dev. Off the list, the everyday commands;
-// on it, only the one secure direction the signed policy names, and
-// nothing for a device it names nothing for (a camera, microphone, alarm,
-// siren, sensor, a device of unknown type, or one not yet named).
+// on it, only the one secure direction the signed policy names and dev's
+// class allows, and nothing for a device it names nothing for (a camera,
+// microphone, alarm, siren, sensor, primary heating, a feeding valve, a
+// device of unknown type, or one not yet named).
 func Allowed(dev policy.Device, v wire.Verb) bool {
 	if dev.Everyday {
 		return everyday[v]
 	}
 	want, ok := secureVerb[dev.Secure]
-	return ok && v == want
+	return ok && v == want && policy.Nameable(dev.Class, dev.Secure)
+}
+
+// texts reports whether verb v on dev, carried out, texts the owner: a
+// heater turned off or a valve shut (NET-2 Safety devices).
+func texts(dev policy.Device, v wire.Verb) bool {
+	return !dev.Everyday && (dev.Class == policy.ClassHeater && v == wire.VerbOff || dev.Class == policy.ClassValve && v == wire.VerbShut)
 }
 
 var verbWords = map[wire.Verb]string{
@@ -204,7 +211,7 @@ func (c *Channel) command(m wire.Command, nowMS int64) (wire.Code, string) {
 	if err := c.cfg.Radio.Do(dev.ID, m.Verb, m.Level); err != nil {
 		return wire.Failed, "the radio host did not do it"
 	}
-	if !dev.Everyday && (m.Verb == wire.VerbOff || m.Verb == wire.VerbShut) {
+	if texts(*dev, m.Verb) {
 		id, v := dev.ID, m.Verb
 		c.queued = append(c.queued, func() { c.cfg.Alerts.SafetyOff(id, v) })
 	}
