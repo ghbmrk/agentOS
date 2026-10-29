@@ -1,5 +1,5 @@
 # Files under broker/ that are not plain Go (REV-CHK-src; tools/srclint.py). One per line: the
-# path, the finding kinds it excuses (comma-separated: nongo, cgo, linkname, tag, parse, symlink),
-# then the reason. Another kind in the file still fails; a kind the file no longer has is stale.
+# path, the finding kinds it excuses (comma-separated: nongo, cgo, linkname, tag, parse, symlink,
+# testdata), then the reason. Another kind in the file still fails; a kind no longer found is stale.
 # Every boundary lint is blind to what these files do in C or assembly, so each needs review.
 broker/cmd/agentos-camdecode/camdecode/h264.go cgo the H.264 decoder (CAM-clerk part b2, #3514): cgo into a statically linked libavcodec built with its H.264 decoder alone (image/libavcodec.sh), only in agentos-camdecode, which runs read-only in a gVisor sandbox per camera (image/camdecode.sh); what it links is pinned by TestDecoderCgoIsPinned (NET-2), and the libavcodec tag keeps it out of every other build

@@ -15,6 +15,8 @@ those), that is:
     .f, .swig, .syso and the rest of go/build's list), in any letter case;
   - a .go file that imports "C" (in any spelling of the literal), has `#cgo` in any comment,
     or has `go:linkname` or a `go:cgo_` directive in any comment;
+  - a .go file that imports a package under a testdata/ directory: go builds one when it is
+    named, though ./... leaves it out, and this check skips testdata/;
   - a .go file whose build constraint (`//go:build` or `// +build` before the package
     clause) or file-name suffix (_GOOS, _GOARCH) names a tag outside the build set;
   - a .go file it cannot read: not UTF-8, or an unterminated comment or literal.
@@ -55,7 +57,7 @@ GOARCH = frozenset(
     "mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm".split())
 ALWAYS = frozenset({"gc", "ignore"})
 # Finding kinds, as an allow line names them.
-KINDS = frozenset({"nongo", "cgo", "linkname", "tag", "parse", "symlink"})
+KINDS = frozenset({"nongo", "cgo", "linkname", "tag", "parse", "symlink", "testdata"})
 RELEASE = re.compile(r"go1\.\d+\Z")
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
@@ -254,6 +256,8 @@ def go_problems(text, name, tags):
     out = []
     if "C" in imports:
         out.append(("cgo", 'imports "C" (cgo)'))
+    for path in sorted({i for i in imports if "testdata" in i.split("/")}):
+        out.append(("testdata", f"imports {path}, which is under a testdata/ directory this check skips"))
     comments = [v for k, v in toks if k == "comment"]
     if any(CGO_DIRECTIVE.search(c) for c in comments):
         out.append(("cgo", "has a #cgo line in a comment"))

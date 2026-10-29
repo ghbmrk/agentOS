@@ -43,6 +43,10 @@ SHAPES = [
     ("broker/drv/negated.go", b"//go:build !(linux && hidden)\n\npackage drv\n", "hidden"),
     ("broker/drv/exec_windows.go", b"package drv\n", "windows"),
     ("broker/drv/exec_linux_riscv64.go", b"package drv\n", "riscv64"),
+    # L3 delta on #3949: an explicit import builds a testdata/ package, which the scan skips.
+    ("broker/drv/fixture.go",
+     b'package drv\n\nimport x "github.com/ghbmrk/agentos/broker/drv/testdata/asm"\n\nvar _ = x.F\n',
+     "testdata/asm, which is under a testdata/"),
     ("broker/drv/broken.go", b"package drv\n\n/* never closed\n", "cannot parse"),
     ("broker/drv/latin1.go", b"package drv\n\n// caf\xe9\n", "cannot parse"),
 ]
