@@ -69,6 +69,22 @@ exempt-pr 3875
 # (D-198). Remove once #3846 merges.
 exempt-pr 3846
 
+# #3908 (ENF-k, #3669): broker/enforcer/radio/, which the G2 list does not name (D-198).
+# Remove once #3908 merges.
+exempt-pr 3908
+
+# #3909 (ENF-h, #3666): broker/enforcer/alert/ and heads/, which the G2 list does not name
+# (D-198). Remove once #3909 merges.
+exempt-pr 3909
+
+# #3935 (PLAN-muse slice b, #1379): spikes/PLAN-muse-capture/, which the G2 list does not name
+# (D-198). Remove once #3935 merges.
+exempt-pr 3935
+
+# #3957 (REV-CHK-names, #3901): broker/enforcer/policy/, wire/ and broker/internal/hostiletext/,
+# which the G2 list does not name (D-198). Remove once #3957 merges.
+exempt-pr 3957
+
 # Project machinery and records.
 allow .claude/
 allow .github/
