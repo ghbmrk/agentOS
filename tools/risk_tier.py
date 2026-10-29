@@ -44,11 +44,17 @@ CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" /
 def core_list(path=CORE_LIST):
     """Return (core, wiring, allowed) package sets from the core list; exit if unreadable."""
     try:
-        text = path.read_text()
+        text = path.read_bytes().decode("utf-8", "replace")
     except OSError as e:
         sys.exit(f"risk_tier: cannot read the core list: {e}")
     core, wiring, allowed = set(), set(), set()
-    for n, line in enumerate(text.splitlines(), 1):
+    # Split on "\n" only and refuse anything outside printable ASCII, comments included:
+    # read_text() and splitlines() also end a line at "\r", U+2028 and others, so a break
+    # hidden in a comment would make a line mean other than it shows (REV-CHK-crlf, #3902).
+    for n, line in enumerate(text.split("\n"), 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            sys.exit(f"risk_tier: {path}:{n}: character {bad[0]!r} outside printable ASCII")
         w = line.split()
         if not w or w[0].startswith("#"):
             continue
@@ -126,7 +132,8 @@ TIER_B_BROKER = {
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
 # Third-party source compiled into the broker: the code go.sum pins.
 TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
-# risk_tier itself is A: CI runs the PR's own copy, so an edit to it decides its own tier.
+# risk_tier itself is A: the lane gate runs the base copy, but the review depth a PR gets
+# still comes from the copy it merges, so an edit to it is held to the deepest review.
 # image/ builds what ships; .github/ builds the image,
 # gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
 # decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
@@ -136,12 +143,14 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # tests that pin the merge gates and the lens READMEs (review rules) left its Mark-only
 # list on Mark's "Narrow only" (2026-10-16), so they keep the full review instead.
 # tools/vulncheck and its planted fixture decide which known vulnerabilities fail CI (EVL-5).
+# tools/hostcheck, its HW-8 allow list and its test decide which host changes count as
+# disclosed (HW-8, RT-2 #801), so a C PR cannot allow-list a real host change.
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope", "tools/ci_split", "tools/premerge", "tools/vulncheck",
+    "tools/g1_scope", "tools/ci_split", "tools/premerge", "tools/vulncheck", "tools/hostcheck",
     "tests/fixtures/vulncheck/",
     "tests/test_premerge", "tests/test_risk_tier", "tests/test_ci_scope", "tests/test_g1_scope",
-    "tests/test_workflows", "tests/test_merge_queue", "tests/test_lane",
+    "tests/test_workflows", "tests/test_merge_queue", "tests/test_lane", "tests/test_hostcheck",
     "image/", ".github/", ".claude/",
 )
 # guest/<name>/<file>: what the guest runs or installs.

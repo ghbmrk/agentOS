@@ -14,6 +14,12 @@ import (
 )
 
 func main() {
+	// Before any session's bytes arrive: a concurrent session's process,
+	// under the same user, cannot read or write this one's memory.
+	if err := imapconn.Undumpable(); err != nil {
+		fmt.Fprintln(os.Stderr, "imapconn: cannot mark the process undumpable")
+		os.Exit(2)
+	}
 	f := os.NewFile(3, "control")
 	c, err := net.FileConn(f)
 	f.Close()

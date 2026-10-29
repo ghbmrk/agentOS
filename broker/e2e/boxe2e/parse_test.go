@@ -184,3 +184,27 @@ func cardAuthority(t testing.TB) []byte {
 	}
 	return a.Certificate()
 }
+
+// REQ: HW-1, CH-9
+//
+// OWN-card-flow-b-3: the driver finds the published certificate's fingerprint on a real
+// display's saved sheet, and not another authority's. It catches the
+// box-e2e check passing on a sheet that prints no fingerprint.
+func TestPrintsFingerprintReadsARealSheet(t *testing.T) {
+	auth := cardAuthority(t)
+	d, err := card.NewDisplay(card.DisplayConfig{Authority: auth, Provision: func(*card.Card) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	d.Handler(func(*http.Request) bool { return true }, "/setup").ServeHTTP(w, httptest.NewRequest("GET", "/setup/card?save=1", nil))
+	if !printsFingerprint(w.Body.Bytes(), card.Fingerprint(auth)) {
+		t.Fatal("the sheet's fingerprint was not found")
+	}
+	if printsFingerprint(w.Body.Bytes(), card.Fingerprint(cardAuthority(t))) {
+		t.Fatal("another authority's fingerprint read as printed")
+	}
+	if printsFingerprint(w.Body.Bytes(), "") {
+		t.Fatal("an empty fingerprint read as printed")
+	}
+}

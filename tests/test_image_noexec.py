@@ -38,6 +38,11 @@ def shipped_units():
     return out
 
 
+def stage_binaries(root):
+    """The binaries image/build.sh stages that a shipped unit binds onto itself (#3015)."""
+    write(root, "usr/lib/agentos/agentos-imapconn", "", 0o755)
+
+
 class NoExecTreeTest(unittest.TestCase):
     """mkosi.finalize's UPD-10 check on a tree holding the image's own files."""
 
@@ -47,6 +52,7 @@ class NoExecTreeTest(unittest.TestCase):
         for rel, src in shipped_units().items():
             write(self.root, rel, src.read_text())
         write(self.root, SYSTEM + "tmp.mount", STOCK_TMP)
+        stage_binaries(self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -68,7 +74,9 @@ class NoExecTreeTest(unittest.TestCase):
             with self.subTest(name):
                 f = self.root / SYSTEM / name
                 good = f.read_text()
-                f.write_text(good.replace("NoExecPaths=/\n", "").replace("ExecPaths=/usr\n", ""))
+                # An empty-root unit (#3015) holds UPD-10 with its root, so that goes too.
+                f.write_text(good.replace("NoExecPaths=/\n", "").replace("ExecPaths=/usr\n", "")
+                             .replace("TemporaryFileSystem=/:ro,noexec\n", ""))
                 self.assertEqual(self.v(), ["%s: NoExecPaths does not hold /; must be NoExecPaths=/ (UPD-10)" % name,
                                             "%s: no ExecPaths; must be ExecPaths=/usr (UPD-10)" % name])
                 f.write_text(good)

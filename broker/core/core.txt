@@ -80,6 +80,10 @@ wiring cmd/agentos-clerk-model
 # The device-driver host's process (DEVSLOT-drivers b2b, #3473): the image's
 # drivers.json, each driver's socket unit, and the pinned transports.
 wiring cmd/agentos-devices
+# The camera clerk's process (CAM-clerk part d, #3514): its key from the
+# kernel on descriptor 3, its client and segment keys in its own sealed slots,
+# and the owner side's socket.
+wiring cmd/agentos-camera
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -196,6 +200,11 @@ allow localsrv/accountsock sockets.PeerUID -- reads the mail clerk's uid before 
 # agentosd's client of the kernel's owner socket (#2682) reads the serving
 # peer's uid before it writes a frame, as kernel/proc's Conn does.
 allow owner/kernelsock sockets.PeerUID -- reads the kernel's uid before an owner seam frame is sent (#2682, D-154)
+
+# The owner page's client of the keeper's Owner Card hand-off socket
+# (OWN-card-flow-b, #3491) reads the serving peer's uid (root, PID 1's
+# socket) before it sends the card's factors; the read changes nothing.
+allow localui sockets.PeerUID -- reads the keeper socket's uid before the Owner Card's factors are sent (#3491, D-154)
 
 # The mail clerk's quarantined read (MAIL-reader-sock-a, #3421): its end
 # reads the reader's uid before a mail's text is sent, and the reader's end

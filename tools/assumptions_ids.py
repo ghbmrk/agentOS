@@ -40,18 +40,32 @@ def assumption_files(root):
     return [f for f in out.splitlines() if pathlib.PurePosixPath(f).name == "ASSUMPTIONS.md"]
 
 
-def legacy(root):
+def list_lines(text, where=LEGACY):
+    """The "\n"-separated lines of the legacy list, refusing any character outside printable
+    ASCII: splitlines() also ends a line at "\r", U+2028 and others, so a break hidden in a
+    comment would add a line (REV-CHK-crlf, #3902)."""
+    lines = text.split("\n")
+    for n, line in enumerate(lines, 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            raise SystemExit(f"{where}:{n}: character {bad[0]!r} outside printable ASCII")
+    return lines
+
+
+def read_legacy(root):
     path = pathlib.Path(root) / LEGACY
-    if not path.is_file():
-        return set()
-    return {tuple(l.split(None, 1)) for l in path.read_text().splitlines() if l.strip() and not l.startswith("#")}
+    # Bytes, so "\r" is not turned into "\n" before list_lines sees it.
+    return list_lines(path.read_bytes().decode("utf-8", "replace")) if path.is_file() else []
+
+
+def legacy(root):
+    return {tuple(l.split(None, 1)) for l in read_legacy(root) if l.strip() and not l.startswith("#")}
 
 
 def growth(root, base_text):
     """Legacy lines the tree has beyond base_text (the base branch's copy of the list)."""
-    base = {l for l in base_text.splitlines() if l.strip() and not l.startswith("#")}
-    path = pathlib.Path(root) / LEGACY
-    now = path.read_text().splitlines() if path.is_file() else []
+    base = {l for l in list_lines(base_text, f"{LEGACY} (base)") if l.strip() and not l.startswith("#")}
+    now = read_legacy(root)
     for line in now:
         if line.strip() and not line.startswith("#") and line not in base:
             yield f"{LEGACY}: `{line}` is new in the legacy list; it only shrinks, so give the row a package-scoped ID instead"

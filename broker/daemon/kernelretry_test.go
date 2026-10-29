@@ -100,7 +100,7 @@ func TestRETRYRetriesTheKernelsParkedStep(t *testing.T) {
 	}
 	req := nextText(t, phone)
 	m := retryCodeRe.FindStringSubmatch(req)
-	if m == nil || !strings.Contains(req, "organize on mail") || !strings.Contains(req, "may go twice") || strings.Contains(req, "post") {
+	if m == nil || !strings.Contains(req, `organize "on mail"`) || !strings.Contains(req, "may go twice") || strings.Contains(req, "post") {
 		t.Fatalf("request %q", req)
 	}
 	if got := d.Owner().Handle(ctx, owner, "YES "+m[1]+" "+m[2]); len(got) != 1 || got[0] != "Approved "+m[1]+"." {
@@ -340,7 +340,7 @@ func TestAKernelRETRYLineNamesWhenTheStepWasFirstTried(t *testing.T) {
 		t.Fatalf("RETRY replies %q", got)
 	}
 	req := nextText(t, phone)
-	if !regexp.MustCompile(`organize on mail,[^.]* may go twice, first tried \d\d:\d\d Oct 1[34]`).MatchString(req) ||
+	if !regexp.MustCompile(`organize "on mail"[^.?]* again\? It can't be undone\. It may go twice; first tried \d\d:\d\d Oct 1[34]`).MatchString(req) ||
 		strings.Count(req, "may go twice") != 1 {
 		t.Fatalf("request %q", req)
 	}
