@@ -1,6 +1,6 @@
 # CLK-8-line: the second-line clerk
 
-Board section: Migration to the capability kernel (D-139). Work item #3735; SPEC CLK-8 ("A second line"), CH-1, DEP-3, KEY-2, VRB-2, CLK-1, CLK-2, CLK-3, KRN-8, HW-15. Tier A (a credential holder, a send path to third parties). Authority: D-227 (Mark, "Delete, rebuild later", cmsg_01R91wiieBzMSvPKFsAJVvuK9dfdh6jst4ztNfubyNwnVs); where SIP runs, D-236 (option C, keeper filters). Written 2026-10-29 against main at the commit this brief merges on. Class `later` until the row is scheduled for MVP acceptance.
+Board section: Migration to the capability kernel (D-139). Work item #3735; SPEC CLK-8 ("A second line"), CH-1, DEP-3, KEY-2, VRB-2, CLK-1, CLK-2, CLK-3, KRN-8, HW-15. Tier A (a credential holder, a send path to third parties). Authority: D-227 (Mark, "Delete, rebuild later", cmsg_01R91wiieBzMSvPKFsAJVvuK9dfdh6jst4ztNfubyNwnVs); where SIP runs, D-238 (option C, keeper filters). Written 2026-10-29 against main at the commit this brief merges on. Class `later` until the row is scheduled for MVP acceptance.
 
 ## Why
 
@@ -12,12 +12,12 @@ D-227 deletes the old second-line accounts with the vault process (MIG-4-exit p 
 - `broker/sipsign`: `Account.Sign` (digest answers, only for the recorded realm, only REGISTER, MESSAGE, INVITE, BYE and CANCEL, only `qop=auth`), `Settings` and its checks, realm learning (SL3). Its HTTP `Handler` and `Client` are the vault's `sign.sock`, served by `cmd/agentos-egress` until d1.
 - `broker/sendrules`: `CheckRecipient`, `Premium`, `PremiumDialed`, `SameNumber` (pure), and a `Budget`.
 - `broker/smsapi`: texts over a provider's HTTP API with a vault-held token; its importers are `cmd/agentos-egress` (d1 deletes), `localui/secondline.go` (p deletes) and `sipline`'s `Texts` option.
-- `broker/clerk/inbox/imapsmtp`: the pattern D-236 reuses. The mail clerk ends TLS itself and relays the stream to a parser process holding no credential (`imapconn`), through a filter that passes only the commands the typed request needs (#2937 gap 2).
+- `broker/clerk/inbox/imapsmtp`: the pattern D-238 reuses. The mail clerk ends TLS itself and relays the stream to a parser process holding no credential (`imapconn`), through a filter that passes only the commands the typed request needs (#2937 gap 2).
 - `broker/modem/secondline`: the old tool over a second SIM or an account; it needs the owner modem in-process, which the new core does not give a clerk.
 - `broker/edgelink`: kinds `text` and `call` exist edge to core, labelled `untrusted-second-line`. There is no core-to-edge text or call kind and no edge-side process (EDGE-link-core, Unowned gaps).
 - The kernel's clerk wire (`kernel/proc.ServeClerk`), the clerk key on descriptor 3 (`clerk/clerkkey`), sealed slots (`clerk/seal`, `clerk.Secrets`) and `key.Arg.Source` (owner, clerk, planner) already carry what a send-verb clerk needs; `cmd/agentos-clerk-mail` and `cmd/agentos-clerk-model` are the patterns.
 
-## Where SIP runs (decided: D-236, option C, keeper filters)
+## Where SIP runs (decided: D-238, option C, keeper filters)
 
 Mark tapped C on the CLK-8 card in Decisions 8 (cmsg_01R91wiieBzMSvPKFsAJVvuKFgCheAbR5yXsk6xU1KXTo1); the options are in `answers/2026-10-29-clk8-sip-third-option.md` (project files). A (keeper signs, line ends TLS) and B (whole SIP stack in the keeper) are rejected.
 
@@ -33,7 +33,7 @@ Mark tapped C on the CLK-8 card in Decisions 8 (cmsg_01R91wiieBzMSvPKFsAJVvuKFgC
 
 **Residual.** A taken-over line process can lie about inbound senders (already untrusted) or about a delivery outcome (at-most-once still holds, since the keeper never resends on its own). It can also deny service. It cannot change words or recipients, send twice, register beyond the rate, or see the password. The `qop=auth` body gap under A is closed.
 
-**Size.** The filter is trusted-core growth, approved by the tap at about 300 to 500 lines with a fuzz target (D-236). The builder's first-step estimate (*inference*, from the rules above) is about 450: framing and headers about 200, rules about 120, the digest step about 40 over `sipsign`, the inbound status read about 50, counters about 40. Part a2 reports the measured count. Past 500, it stops and goes back to Mark through the coordinator before building on.
+**Size.** The filter is trusted-core growth, approved by the tap at about 300 to 500 lines with a fuzz target (D-238). The builder's first-step estimate (*inference*, from the rules above) is about 450: framing and headers about 200, rules about 120, the digest step about 40 over `sipsign`, the inbound status read about 50, counters about 40. Part a2 reports the measured count. Past 500, it stops and goes back to Mark through the coordinator before building on.
 
 ## Design points settled here (flagged for the reviews)
 
@@ -71,7 +71,7 @@ Mark tapped C on the CLK-8 card in Decisions 8 (cmsg_01R91wiieBzMSvPKFsAJVvuKFgC
 - CLK-8 one budget, part a: `::TestTextsShareTheKeysRateCaveats` (the eleventh text past a ten-a-day caveat refuses whatever its recipient; catches a per-transport budget).
 - CLK-2 and KRN-8, part a: `::TestLostAnswerIsMayHaveBeenSentAndNeverResent`, `::TestCancelBeforeHandOffIsNotCounted`.
 - Signing binding (point 5 under A), part a (#3881): `sign_test.go::TestSignsMessageOnlyForAnAdmittedSendOnce`, `::TestRegisterSigningIsRateLimited`; a2 deletes them with `sign.go`.
-- Keeper filter (D-236), part a2: `broker/clerk/line/filter_test.go::TestOnlyAdmittedWordsAndRecipientPass` (one changed byte of the words, a different Request-URI or `To`, or another `Content-Type` drops; catches a body or recipient rewrite), `::TestAdmittedMessagePassesOnceAndOneChallengedResend` (a third copy drops, and so does a second copy with no 401 or 407 before it; catches a double send), `::TestRegisterOnlyToTheRegistrarAndRateLimited`, `::TestAmbiguousFramingDrops` (duplicate or folded `Content-Length`, `To` or `Content-Type`, a request inside a body), `::TestLineSuppliedAuthorizationDrops`, `::TestDigestOnlyForRecordedRealm`; `FuzzFilter` (on any line bytes, no written MESSAGE differs from an admitted one or passes more often than the rule allows, and no output carries the canary password except inside the keeper's digest).
+- Keeper filter (D-238), part a2: `broker/clerk/line/filter_test.go::TestOnlyAdmittedWordsAndRecipientPass` (one changed byte of the words, a different Request-URI or `To`, or another `Content-Type` drops; catches a body or recipient rewrite), `::TestAdmittedMessagePassesOnceAndOneChallengedResend` (a third copy drops, and so does a second copy with no 401 or 407 before it; catches a double send), `::TestRegisterOnlyToTheRegistrarAndRateLimited`, `::TestAmbiguousFramingDrops` (duplicate or folded `Content-Length`, `To` or `Content-Type`, a request inside a body), `::TestLineSuppliedAuthorizationDrops`, `::TestDigestOnlyForRecordedRealm`; `FuzzFilter` (on any line bytes, no written MESSAGE differs from an admitted one or passes more often than the rule allows, and no output carries the canary password except inside the keeper's digest).
 - CLK-1 custody, part a: `::TestPasswordNeverInStatusErrorsOrLog` (a canary password appears in no status, error, owner text or log entry); `::TestShortPasswordRefusedAtSetup`.
 - Inbound (point 7), part a: `::TestInboundTextIsUntrustedItem`, `::TestOwnerTextingTheLineReachesNoPlanner`.
 - DEP-3, part a: `::TestNoAccountMeansUnavailableAndNothingSent`.
@@ -88,7 +88,7 @@ Recurring kinds from the lens READMEs, as criteria: each defence above has a tes
 - (b) `broker/cmd/agentos-clerk-line/`, `broker/cmd/agentos-line/` (new); `broker/modem/sipline/sipline.go`, `sipline_test.go`, `texts_test.go`, `ASSUMPTIONS.md` (drop `Texts`; add the relayed-stream dial seam); `broker/sipsign/` (drop the HTTP half); `broker/smsapi/` (delete); `broker/e2e/secondline_test.go`; `image/` units, sysusers, preset and `build.sh` command list; `tools/ci_split.py`; the guard files below.
 - (c) the owner page's second-line step and routes in `broker/localui/` (new `secondline.go` after p deletes the old one), STATUS lines where they are rendered, `broker/localui/ASSUMPTIONS.md`.
 
-**Guard files:** (a) adds `broker/clerk/line/`, under `broker/clerk/` on the G2 list; `tools/risk_tier.py` classes an unnamed broker package tier A; its imports of `sipsign` and `sendrules` need a rule in `broker/daemon/arc2_test.go`, pre-approved. (b) adds two mains: `tools/g1_scope_g2.txt` (an `allow` line each, as `broker/cmd/agentos-clerk-mail/` has) and `broker/daemon/arc2_test.go`, pre-approved. The filter is keeper-domain growth approved under D-236. a2 and b carry `Trusted-core: D-236` in their PR bodies, and each reports the filter's own line count, whether or not `tools/trusted_base.py` counts it (no root of `tools/trusted_core.txt` imports either today).
+**Guard files:** (a) adds `broker/clerk/line/`, under `broker/clerk/` on the G2 list; `tools/risk_tier.py` classes an unnamed broker package tier A; its imports of `sipsign` and `sendrules` need a rule in `broker/daemon/arc2_test.go`, pre-approved. (b) adds two mains: `tools/g1_scope_g2.txt` (an `allow` line each, as `broker/cmd/agentos-clerk-mail/` has) and `broker/daemon/arc2_test.go`, pre-approved. The filter is keeper-domain growth approved under D-238. a2 and b carry `Trusted-core: D-238` in their PR bodies, and each reports the filter's own line count, whether or not `tools/trusted_base.py` counts it (no root of `tools/trusted_core.txt` imports either today).
 
 ## Unowned gaps (not in a to c)
 
