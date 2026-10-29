@@ -5,6 +5,10 @@
 # which it stores (brief OWN-card-flow decisions 6 and 7): the store is never made with its tpm slot
 # alone (#2905 open point 1). agentos-keeper-enroll.path starts it when the factors arrive. A rerun
 # after a crash finishes or redoes the attempt, with the same staged authority (ASSUMPTIONS STO-2c-a).
+# It also takes the first edge's key, if the capture unit took one before the confirm, and removes the
+# capture (EDGE-link-core decision 3); the capture ends by itself once the store exists. No
+# Conflicts= with it: every boot's transaction holds this unit's start job (its conditions are checked
+# only when the job runs), so a conflict would delete the capture's start at boot (#3834 review).
 [Unit]
 Description=agentOS enrollment
 ConditionPathExists=!/var/lib/agentos-store/store
@@ -33,7 +37,8 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state /var
         -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log \
         -kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel \
         -passphrase-file /run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery \
-        -page-ca-file /run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der
+        -page-ca-file /run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der \
+        -first-edge /run/agentos-link-capture/first-edge
 # The factors and the staged authority are not kept once the store holds them (#2981); on a failure
 # they stay for a retry.
 ExecStartPost=/usr/bin/rm -f /run/agentos-setup/passphrase /run/agentos-setup/recovery \

@@ -147,3 +147,26 @@ func TestPreviousRootLineIsQuiet(t *testing.T) {
 		}
 	})
 }
+
+// Combined release 1 on #3831's delta: the withdrawn line with the
+// previous-version line, as STATUS says it, puts that line before
+// "Nothing is needed from you." (CH-12).
+// Mutants: append the previous-version line after it in Status, or drop
+// it there.
+func TestPreviousRootAfterNextReleasePinned(t *testing.T) {
+	r := mirroredOnOldRoot(t)
+	r.restart()
+	r.must(r.a.Schedule(r.release(2, false), "a2"))
+	r.clk.add(7 * time.Hour)
+	r.act.onInstall = func() { r.working = true } // holds the restart
+	if ok, err := r.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.act.onInstall = nil
+	r.paused = true
+	r.must(r.a.Pin(context.Background()))
+	const want = "Update 2 was withdrawn because you pinned your update channel. " + prevSentence + " Nothing is needed from you."
+	if got := r.a.Status(); got != want {
+		t.Fatalf("status %q", got)
+	}
+}

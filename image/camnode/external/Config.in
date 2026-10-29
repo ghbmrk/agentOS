@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_CAMNODE_PATH/package/camnode-init/Config.in"

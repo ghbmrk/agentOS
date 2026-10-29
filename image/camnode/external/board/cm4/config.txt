@@ -1,0 +1,21 @@
+# Camera node, CM4: the firmware configuration inside the signed boot image (boot.img).
+arm_64bit=1
+kernel=Image
+initramfs camnode-initramfs.cpio followkernel
+start_file=start4.elf
+fixup_file=fixup4.dat
+gpu_mem=128
+enable_uart=0
+disable_splash=1
+camera_auto_detect=0
+display_auto_detect=0
+dtparam=audio=off
+dtparam=i2c_arm=on
+dtoverlay=disable-bt
+dtoverlay=disable-wifi
+# The IMX462 runs on the imx290 driver.
+dtoverlay=imx290,clock-frequency=74250000
+# Reference wiring (ASSUMPTIONS CAM-image-6): the button on GPIO 17 to ground, the IR
+# illuminator's driver on GPIO 27.
+dtoverlay=gpio-key,gpio=17,active_low=1,gpio_pull=up,keycode=256,label=camnode-button
+dtoverlay=gpio-led,gpio=27,label=ir

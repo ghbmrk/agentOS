@@ -3,7 +3,7 @@ name: premerge
 # `success` only when `tools/premerge.py --check` prints `same`: the newest trusted L3 verdict
 # comment is an accept and the diff it reviewed (its `Record:` head) equals the head's, so a
 # push after the accept, a later fix-list, a deleted accept or a PR never reviewed all fail;
-# the lens screen the tier owes and, on a gate-file PR, the Security accept must match too.
+# the lens screen the tier owes and, on a gate-file or tier-A PR, the Security accept must match too.
 # The generated-file bot PRs (bot/trace, bot/metrics, bot/board from this repository, not a
 # fork) carry no verdict and pass through `--bot` when they change only their own output. Main must require the `premerge` status (a ruleset change Mark makes).
 # It reruns on every PR push and on every PR comment created, edited or deleted. Both events

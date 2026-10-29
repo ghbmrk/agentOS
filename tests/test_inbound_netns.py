@@ -319,6 +319,123 @@ class NoRoutingThroughTheDrop(unittest.TestCase):
         self.assertFalse(reaches(LAN, "192.0.2.3"), "the box bridged a home host to another link")
 
 
+LINK_UNIT = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/system/agentos-link.service"
+EDGE = "agentos-t-edge"
+
+
+def unit_command(unit, key):
+    """The one KEY= command of UNIT, as the argv systemd runs, its "+" taken off."""
+    import shlex
+    lines = [l.split("=", 1)[1] for l in unit.read_text().splitlines() if l.startswith(key + "=")]
+    assert len(lines) == 1, lines
+    return shlex.split(lines[0].lstrip("+"))
+
+
+@unittest.skipUnless(os.geteuid() == 0 and shutil.which("ip") and shutil.which("nft"),
+                     "needs root, ip and nft")
+class EdgeLinkOnTheLinkOnly(unittest.TestCase):
+    """EDGE-link-core c2c (HW-15, HW-16): the box with the edge on agentos-link and the home network on
+    eth0, the shipped rules loaded, and the link unit's own nft commands run as its unit runs them. The
+    link's port answers the edge on the link, over its link-local address and over IPv4, only while the
+    unit's start command has put the link in the link set; no other port answers there, and the link's
+    port never answers on eth0."""
+    # REQ: HW-15, HW-16
+    LINK_PORT = 7443
+
+    def setUp(self):
+        self.procs = []
+        self.addCleanup(self.cleanup)
+        for ns in (BOX, HOME, EDGE):
+            sh("ip", "netns", "add", ns)
+            sh("ip", "link", "set", "lo", "up", ns=ns)
+        for box, ns, peer, v4 in (("eth0", HOME, "h0", "192.0.2"), ("agentos-link", EDGE, "e0", "198.51.100")):
+            sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", ns)
+            for n, dev, host in ((BOX, box, 1), (ns, peer, 2)):
+                sh("ip", "addr", "add", "%s.%d/24" % (v4, host), "dev", dev, ns=n)
+                if IPV6 and box == "agentos-link":
+                    sh("sysctl", "-qw", "net.ipv6.conf.%s.addr_gen_mode=1" % dev, ns=n)
+                    sh("ip", "-6", "addr", "add", "fe80::%d/64" % host, "dev", dev, "nodad", ns=n)
+                sh("ip", "link", "set", dev, "up", ns=n)
+        for port in (PORT, self.LINK_PORT):
+            p = subprocess.Popen(["ip", "netns", "exec", BOX, "python3", "-c", LISTEN, "6" if IPV6 else "4", str(port)])
+            self.procs.append(p)
+            for _ in range(50):
+                if sh("ss", "-Htln", "sport = :%d" % port, ns=BOX, check=False).stdout.strip():
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("listener on %d did not start" % port)
+
+    def cleanup(self):
+        for p in self.procs:
+            p.kill()
+            p.wait()
+        for ns in (BOX, HOME, EDGE):
+            sh("ip", "netns", "del", ns, check=False)
+
+    def run_unit(self, key):
+        r = sh(*unit_command(LINK_UNIT, key), ns=BOX, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def reply_on_link(self):
+        """Whether the edge's reply to the box's own ping over the link reaches the box."""
+        if not shutil.which("ping"):
+            self.skipTest("ping is not installed")
+        return sh("ping", "-c1", "-W2", "198.51.100.2", ns=BOX, check=False).returncode == 0
+
+    def edge_addrs(self):
+        return ["198.51.100.1"] + (["fe80::1%e0"] if IPV6 else [])
+
+    def test_the_link_port_answers_on_the_link_alone_while_the_unit_runs(self):
+        for addr in self.edge_addrs():
+            self.assertTrue(reaches(EDGE, addr, self.LINK_PORT), "control: %s before the rules" % addr)
+        self.assertTrue(reaches(HOME, "192.0.2.1", self.LINK_PORT), "control: eth0 before the rules")
+        r = sh("nft", "-f", str(RULES), ns=BOX, check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # As the image boots: the link set is empty, so the link's port is closed everywhere.
+        for addr in self.edge_addrs():
+            self.assertFalse(reaches(EDGE, addr, self.LINK_PORT), "the empty link set admits %s" % addr)
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed with the link set empty")
+        # The unit's start: the link's port answers the edge on the link, and nothing else does.
+        self.run_unit("ExecStartPre")
+        self.run_unit("ExecStartPre")
+        listed = sh("nft", "list", "set", "inet", "agentos_inbound", "link", ns=BOX).stdout
+        self.assertIn('elements = { "agentos-link" }', listed)
+        for addr in self.edge_addrs():
+            with self.subTest(edge_to=addr):
+                self.assertTrue(reaches(EDGE, addr, self.LINK_PORT), "the edge cannot reach the link at %s" % addr)
+                self.assertFalse(reaches(EDGE, addr, PORT), "the edge reached port %d at %s" % (PORT, addr))
+        self.assertFalse(reaches(HOME, "192.0.2.1", self.LINK_PORT), "the link's port answered on eth0")
+        self.assertFalse(reaches(HOME, "192.0.2.1", PORT))
+        # Not even replies pass on the link: conntrack is not per interface, so the edge could forge one
+        # into another flow (#3834 Security review). The box opens nothing over the link.
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed")
+        if shutil.which("ping"):
+            self.assertEqual(sh("ping", "-c1", "-W2", "192.0.2.2", ns=BOX, check=False).returncode, 0,
+                             "control: replies on eth0")
+        # The unit's stop: the link's port is closed again.
+        self.run_unit("ExecStopPost")
+        for addr in self.edge_addrs():
+            self.assertFalse(reaches(EDGE, addr, self.LINK_PORT), "the link's port still open at %s after the stop" % addr)
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed after the stop")
+
+
+    def test_a_replugged_link_keeps_its_rules(self):
+        # A replugged or reset adapter comes back as a new device under the same name. The units are
+        # bound to the device and start again with it (tests/test_image.py); the firewall's link rules
+        # match the name, so the new device gets the same port and the same drop.
+        sh("nft", "-f", str(RULES), ns=BOX)
+        self.run_unit("ExecStartPre")
+        self.assertTrue(reaches(EDGE, "198.51.100.1", self.LINK_PORT), "control: before the replug")
+        sh("ip", "link", "del", "agentos-link", ns=BOX)
+        sh("ip", "link", "add", "agentos-link", "netns", BOX, "type", "veth", "peer", "name", "e0", "netns", EDGE)
+        for n, dev, host in ((BOX, "agentos-link", 1), (EDGE, "e0", 2)):
+            sh("ip", "addr", "add", "198.51.100.%d/24" % host, "dev", dev, ns=n)
+            sh("ip", "link", "set", dev, "up", ns=n)
+        self.assertTrue(reaches(EDGE, "198.51.100.1", self.LINK_PORT), "the replugged link lost its port")
+        self.assertFalse(reaches(EDGE, "198.51.100.1", PORT), "the replugged link admits port %d" % PORT)
+        self.assertFalse(self.reply_on_link(), "a reply passed on the replugged link")
+
 UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"
 NETWORKD = "/usr/lib/systemd/systemd-networkd"
 ROUTER4 = "192.0.2.1"

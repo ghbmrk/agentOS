@@ -45,41 +45,13 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #3612 (CAM-decode b1, #3514 part b): the new broker/cmd/agentos-camdecode/, which the G2
-# list does not name (D-198). Remove once #3612 merges.
-exempt-pr 3612
+# #3746 (ENF-b, #3659): broker/enforcer/page/ and broker/enforcer/policy/, which the G2 list does
+# not name (D-198). Remove once #3746 merges.
+exempt-pr 3746
 
-# #3589 (DEVSLOT-host-unit b2b-1, #3473): the new broker/cmd/agentos-devices/, which the G2
-# list does not name (D-198). Remove once #3589 merges.
-exempt-pr 3589
-
-# #3632 (VIS-core d, #3515 part d): broker/vision/ and broker/cmd/agentos-vision/, which the
-# G2 list does not name (D-198). Remove once #3632 merges.
-exempt-pr 3632
-
-# DRONE-sim part b (#3609, row #3516) touches broker/drone/ and broker/cmd/agentos-drone/, which
-# the G2 list does not name (D-198). Remove once #3609 merges.
-exempt-pr 3609
-
-# #3617 (CAM-server b2, #3513 part b): broker/camnode/ (with the new se/ and capture/) and the new
-# broker/cmd/agentos-camnode/, which the G2 list does not name (D-198). Remove once #3617 merges.
-exempt-pr 3617
-
-# #3640 (CAM-decode b2, #3514 part b): broker/cmd/agentos-camdecode/ and image/libavcodec.sh,
-# which the G2 list does not name (D-198). Remove once #3640 merges.
-exempt-pr 3640
-
-# #3697 (ENF-a, #3658): the new broker/enforcer/, plus its import rule in broker/daemon/arc2_test.go
-# and its tools/risk_tier.py line, which the G2 list does not name (D-198). Remove once #3697 merges.
-exempt-pr 3697
-
-# #3703 (ENF-j, #3668): spikes/ENF-radio/ (README.md, run.sh, probe/go.mod, probe/main.go),
-# which the G2 list does not name (D-198). Remove once #3703 merges.
-exempt-pr 3703
-
-# #3705 (MIG-4-exit-m1, #3680): broker/cmd/agentos-clerk-model/, which the G2 list does not name
-# (D-198). Remove once #3705 merges.
-exempt-pr 3705
+# #3808 (VIS-plates-guards, #3805): tests and one comment line in broker/cmd/agentos-vision/,
+# which the G2 list does not name (D-198). Remove once #3808 merges.
+exempt-pr 3808
 
 # Project machinery and records.
 allow .claude/
@@ -189,7 +161,6 @@ allow broker/journal/
 allow broker/localapi/
 allow broker/localsrv/
 allow broker/localui/
-allow broker/mail/
 allow broker/maintain/
 allow broker/meter/
 allow broker/pageca/

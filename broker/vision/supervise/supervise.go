@@ -82,3 +82,7 @@ func Start(ctx context.Context, o Options) (*Supervisor, error) {
 // ControlPath is the control socket for a service whose socket is socket:
 // beside it, in the same directory.
 func ControlPath(socket string) string { return socket + ".control" }
+
+// Faulty is a vision.Tracker's Faulty for s: it restarts the service with
+// the cause "faulty" (VIS-track, VIS-A22).
+func Faulty(s *Supervisor) func() { return func() { s.Restart("faulty") } }

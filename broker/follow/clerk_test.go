@@ -11,6 +11,7 @@ import (
 	"go/token"
 	mrand "math/rand/v2"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -407,16 +408,26 @@ func TestStepWithoutOwnerApprovalRefused(t *testing.T) {
 	r.unchanged()
 }
 
-// The journal executor is the only old-core user left in the package, until
-// f2 (#3430) deletes it with the agentosd wiring; the clerk's checks live in
-// followclerk.
-func TestOnlyTheExecutorImportsTheOldCore(t *testing.T) {
+// f2 (#3430) deleted the journal executor: nothing in follow or
+// followclerk links the old core's journal or grants, and package follow
+// imports nothing of broker/clerk, whose exit links the network that
+// agentosd, serving Describe, must not.
+func TestFollowLinksNoOldCore(t *testing.T) {
+	out, err := exec.Command("go", "list", "-deps", "./...").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range strings.Fields(string(out)) {
+		if strings.HasSuffix(p, "/broker/journal") || strings.HasSuffix(p, "/broker/grants") {
+			t.Errorf("follow links %s", p)
+		}
+	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") || f == "executor.go" {
+		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
 		af, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.ImportsOnly)
@@ -424,13 +435,8 @@ func TestOnlyTheExecutorImportsTheOldCore(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, im := range af.Imports {
-			p, _ := strconv.Unquote(im.Path.Value)
-			// broker/clerk links the network exit, which agentosd, serving
-			// Describe, must not (followclerk holds it).
-			for _, old := range []string{"/broker/journal", "/broker/grants", "/broker/clerk"} {
-				if strings.HasSuffix(p, old) {
-					t.Errorf("%s imports %s", f, p)
-				}
+			if p, _ := strconv.Unquote(im.Path.Value); strings.Contains(p, "/broker/clerk") {
+				t.Errorf("%s imports %s", f, p)
 			}
 		}
 	}

@@ -1,0 +1,13 @@
+# End-to-end stand-in for the OPTIGA Trust M (QEMU board only): it speaks the element's I2C
+# protocol on /dev/i2c-1 over CUSE and keeps the key and counters on the second virtio disk,
+# so they survive a restart and a button reset as the chip's do.
+[Unit]
+Description=e2e stand-in: secure element
+DefaultDependencies=no
+Requires=dev-vdb.device
+After=dev-vdb.device systemd-udevd.service
+Before=agentos-camnode.service
+
+[Service]
+Type=notify
+ExecStart=/usr/libexec/camnode/e2e-element /dev/vdb

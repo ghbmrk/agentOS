@@ -502,14 +502,6 @@ func serveCmd(args []string) error {
 		return err
 	}
 	srvs = append(srvs, noticeSrv)
-	mailLn, err := serveMail(*run, c, *brokerUID)
-	if err != nil {
-		for _, s := range srvs {
-			s.Close()
-		}
-		return err
-	}
-	defer mailLn.Close()
 	routesLn, err := serveWorkerRoutes(*run, c, *brokerUID)
 	if err != nil {
 		for _, s := range srvs {

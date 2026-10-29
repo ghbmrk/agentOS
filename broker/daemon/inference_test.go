@@ -53,6 +53,10 @@ var forbidden = []string{"route", "egress", "cmd/agentos-egress", "cmd/agentos-i
 // providerSDK matches third-party model provider clients.
 var providerSDK = regexp.MustCompile(`(?i)(anthropic|openai|genai|generativeai|mistral|cohere|ollama|bedrock)`)
 
+// runtimeSDK matches third-party inference runtimes and their bindings,
+// which only the untrusted services (forbidden above) may link.
+var runtimeSDK = regexp.MustCompile(`(?i)(onnxruntime|llama|ggml|tensorflow|torch)`)
+
 // httpOK are the broker packages in the graph allowed to import net/http
 // (or anything that depends on it), and why. None may hold an HTTP client
 // except modelroute, whose every dial is to a unix socket (sourceUse).
@@ -155,6 +159,20 @@ var netOK = map[string]allowance{
 		[]string{"net.CIDRMask", "net.IPNet", "net.IPv4zero", "net.IPv6zero", "net.ParseIP", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.Stat_t"}},
 	compositionRoot: {"SIGTERM for shutdown; O_NOFOLLOW, O_NONBLOCK, and Stat_t to open the launch file safely; read-only Getxattr for systemd's cgroup delegate mark (budget R13)",
 		[]string{"syscall.Getxattr", "syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SIGTERM", "syscall.Stat_t"}},
+	// The follow clerk's kernel socket, which agentosd hosts (#3430):
+	// kernel/proc's ListenClerk and ServeClerk, and the rest of the package
+	// they come in, which serves and dials only unix sockets (its dials are
+	// unixDialCalls), locks its own store and refuses to be dumpable.
+	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store, O_NOFOLLOW opens; no network client",
+		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
+			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
+			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
+	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
+		[]string{"syscall.PR_GET_DUMPABLE", "syscall.PR_SET_DUMPABLE", "syscall.RawSyscall6", "syscall.SYS_PRCTL"}},
+	"clerk/clerkkey": {"Fstat and the file type of a handed-in key descriptor; no network client",
+		[]string{"syscall.Fstat", "syscall.S_IFIFO", "syscall.S_IFMT", "syscall.S_IFSOCK", "syscall.Stat_t"}},
+	"clerk/handoff": {"Fstat and the file type of a handed-in descriptor; no network client",
+		[]string{"syscall.Fstat", "syscall.S_IFIFO", "syscall.S_IFMT", "syscall.Stat_t"}},
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
 }
@@ -185,6 +203,14 @@ var rawOK = map[string]map[string]string{
 		"golang.org/x/sys/unix.SYS_SETRESUID": "sets one thread's effective uid to the owner side's and back to root's (#2682)",
 		"golang.org/x/sys/unix.SYS_GETEUID":   "checks the thread's effective uid took (#2682)",
 	},
+	"procguard": {"syscall.SYS_PRCTL": "reads and clears the dumpable flag only (PR_GET_DUMPABLE, PR_SET_DUMPABLE; CLK-1)"},
+}
+
+// unixDialCalls are the dial functions a package may call directly, and
+// why; dials still checks each is on "unix" to a configured address.
+// kernel/proc dials its clerks' and its owner seam's sockets (#3430).
+var unixDialCalls = map[string]map[string]string{
+	"kernel/proc": {"net.DialTimeout": "dials only a configured clerk's or kernel's unix socket, then checks the peer's uid"},
 }
 
 // escapes are imports past the checks above: foreign code, unchecked
@@ -367,6 +393,9 @@ func inferenceUse(t *testing.T, ps []listed) []string {
 		if !ours && providerSDK.MatchString(p.path) {
 			bad = append(bad, p.path+": a model provider client")
 		}
+		if !ours && runtimeSDK.MatchString(p.path) {
+			bad = append(bad, p.path+": an inference runtime")
+		}
 		if !ours && !strings.Contains(strings.SplitN(p.path, "/", 2)[0], ".") {
 			continue // the standard library
 		}
@@ -547,7 +576,7 @@ func sourceUse(t *testing.T, path, name, rel string) []string {
 			switch {
 			case full == "os.StartProcess" && escapeOK[rel]["os/exec"] == "":
 				at(n, "starts a process (os.StartProcess)")
-			case clients[pkg][id] && !literalType[n]:
+			case clients[pkg][id] && !literalType[n] && !(callee[n] && unixDialCalls[rel][full] != ""):
 				at(n, "network client ("+full+")")
 			case socketPkgs[pkg] && !clients[pkg][id] && !uses[full]:
 				at(n, full+" is outside this package's netOK uses")
@@ -2055,5 +2084,19 @@ func g(t *T) { t.Env = []string{"A=1"} }
 func h() childproc.Env { return childproc.NewEnv("PATH=/bin", "HOME="+os.Getenv("X")) }`)
 	if noEnv, inherits := check(ok); len(noEnv)+len(inherits) != 0 {
 		t.Errorf("flagged %v %v", noEnv, inherits)
+	}
+}
+
+// REQ: ARC-2
+//
+// An inference runtime's Go binding (the vision service's ONNX Runtime
+// binding, a llama.cpp one) is reported wherever it sits in agentosd's
+// graph, so only the untrusted services link one (#3774 Security 3).
+func TestInferenceRuntimesAreReported(t *testing.T) {
+	for _, p := range []string{"github.com/yalue/onnxruntime_go", "github.com/go-skynet/go-llama.cpp"} {
+		bad := inferenceUse(t, []listed{{path: p}})
+		if !slices.Contains(bad, p+": an inference runtime") {
+			t.Errorf("%s not reported: %q", p, bad)
+		}
 	}
 }

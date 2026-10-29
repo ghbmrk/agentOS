@@ -38,6 +38,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -161,20 +162,39 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	env, opts := helloSpec(c, f, stderr)
-	cmd := childproc.Command(ctx, env, opts, self, "-hello-child")
-	out, err := cmd.StdoutPipe()
+	return awaitCapture(ctx, c, stderr, func(ctx context.Context) (io.Reader, func(), error) {
+		env, opts := helloSpec(c, f, stderr)
+		cmd := childproc.Command(ctx, env, opts, self, "-hello-child")
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		f.Close()
+		ln.Close()
+		return out, func() { cmd.Kill(); cmd.Wait() }, nil
+	})
+}
+
+// awaitCapture starts the hello reader and writes the one capture it hands
+// back, or ends when the store appears. The store's existence ends the
+// window (decision 3): enrollment makes it, and this process ends then,
+// freeing the port for the served link. No unit stops it, as the Owner Card
+// flow's units run no systemctl, and a Conflicts= would cost the capture its
+// start at every boot.
+func awaitCapture(ctx context.Context, c config, stderr io.Writer,
+	start func(context.Context) (io.Reader, func(), error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go untilStore(ctx, c.store, cancel)
+	out, stop, err := start(ctx)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	f.Close()
-	ln.Close()
 	err = takeCapture(out, c.capture, c.store)
-	cmd.Kill()
-	cmd.Wait()
+	stop()
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -187,6 +207,26 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	}
 	fmt.Fprintln(stderr, "agentos-link: the first edge's key is captured for the Owner Card confirm")
 	return nil
+}
+
+// storePoll is how often the capture looks for the store.
+var storePoll = time.Second
+
+// untilStore calls done once store exists, or returns when ctx ends.
+func untilStore(ctx context.Context, store string, done func()) {
+	t := time.NewTicker(storePoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := os.Lstat(store); !errors.Is(err, os.ErrNotExist) {
+				done()
+				return
+			}
+		}
+	}
 }
 
 // captureAs refuses the pre-store mode at any euid but root's: enrollment

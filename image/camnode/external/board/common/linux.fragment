@@ -1,0 +1,48 @@
+# Both boards: what camnode-init and the root need, and what the node must not have.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_MD=y
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_VERITY=y
+# Verity hashes with SHA-256 through the crypto API; built in, as nothing loads modules.
+CONFIG_CRYPTO_SHA256=y
+CONFIG_EROFS_FS=y
+CONFIG_EROFS_FS_ZIP=y
+CONFIG_EXT4_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_FAT_DEFAULT_UTF8=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_NLS_UTF8=y
+CONFIG_NETFILTER=y
+CONFIG_NF_CONNTRACK=y
+CONFIG_NF_TABLES=y
+CONFIG_NF_TABLES_IPV4=y
+CONFIG_NFT_CT=y
+CONFIG_NFT_LIMIT=y
+CONFIG_NFT_REJECT=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_AUTOFS_FS=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_CGROUPS=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+CONFIG_NET_NS=y
+CONFIG_PANIC_TIMEOUT=5
+# No wireless, no Bluetooth, no memory or kernel-memory devices, no kexec or hibernation.
+# CONFIG_WIRELESS is not set
+# CONFIG_WLAN is not set
+# CONFIG_BT is not set
+# CONFIG_DEVMEM is not set
+# CONFIG_DEVPORT is not set
+# CONFIG_KEXEC is not set
+# CONFIG_KEXEC_FILE is not set
+# CONFIG_HIBERNATION is not set
+# CONFIG_MAGIC_SYSRQ is not set
+# The Raspberry Pi defconfig turns on the kernel debugger, which selects SysRq on the console.
+# CONFIG_KGDB is not set
+# CONFIG_IPV6 is not set
+CONFIG_BPF_SYSCALL=y
+CONFIG_CGROUP_BPF=y

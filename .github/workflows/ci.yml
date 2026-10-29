@@ -133,14 +133,18 @@ jobs:
         run: python tools/board.py check
       - name: BOARD.md rows equal the live work-item issues (SIM-repo-2)
         # Once BOARD.md carries board.GENERATED, its rows come only from issues: a PR that
-        # changes BOARD.md, and board.yml's bot/board branch, must match the board rendered from
-        # the live issues. Other PRs skip it, so an issue change between board.yml runs turns no
-        # unrelated PR red. Before the migration this is the same round trip as the step above.
-        # Generated-ness comes from the base (the PR's, or main for bot/board), so deleting the
-        # line cannot switch the check off.
+        # changes BOARD.md must match the board rendered from the live issues. Other PRs skip it,
+        # so an issue change between board.yml runs turns no unrelated PR red. Before the
+        # migration this is the same round trip as the step above. Generated-ness comes from the
+        # base (the PR's, or main for bot/board), so deleting the line cannot switch the check off.
+        # board.yml's bot/board branch from this repository skips only the live comparison
+        # (BOARD-bot-race, #3745): it was rendered from the live issues minutes earlier, so an
+        # issue edit since then is a race, not a hand edit. The GENERATED guard still runs.
         if: github.event_name == 'pull_request' || github.ref == 'refs/heads/bot/board'
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             if git diff --quiet HEAD^1...HEAD^2 -- BOARD.md; then
@@ -150,7 +154,12 @@ jobs:
           else
             git show origin/main:BOARD.md > "$RUNNER_TEMP/base-BOARD.md"
           fi
-          python tools/board.py check --repo "$GITHUB_REPOSITORY" --base "$RUNNER_TEMP/base-BOARD.md"
+          if [ "$GITHUB_REF" = refs/heads/bot/board ] \
+            || { [ "$HEAD_REF" = bot/board ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]; }; then
+            python tools/board.py check --base "$RUNNER_TEMP/base-BOARD.md"
+          else
+            python tools/board.py check --repo "$GITHUB_REPOSITORY" --base "$RUNNER_TEMP/base-BOARD.md"
+          fi
       - name: Archived status files stay frozen (SIM-repo-2b, D23)
         # Once the base BOARD.md is generated, no PR edits docs/BOARD-HISTORY.md or
         # docs/LATER-HISTORY.md, or brings back LATER.md or docs/MARK-QUEUE.md.
@@ -260,6 +269,16 @@ jobs:
         env:
           AGENTOS_REQUIRE_SWTPM: "1"
         run: go test -race -count=1 -timeout 25m $(cat "$RUNNER_TEMP/shard")
+      - name: The vision service's ONNX Runtime build, its real-runtime tests compiled (VIS-models, #3515)
+        # Default builds link no runtime; -tags vision_onnx links ONNX Runtime's Go binding,
+        # which loads the pinned library only at run time. The real tests need the pinned
+        # library, detector and scene set, so vision-real.yml runs them; here they compile,
+        # and the tagged build's own tests run without the library.
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go vet -tags vision_onnx,vision_real ./cmd/agentos-vision
+          go test -count=1 -tags vision_onnx ./cmd/agentos-vision
       - name: Drop the fuzz corpus before the cache save (main only; CI-PATHS)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: rm -rf "$(go env GOCACHE)/fuzz"
@@ -306,6 +325,12 @@ jobs:
         run: f=$(find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l); test -z "$f" || { echo "$f"; exit 1; }
       - name: Vet
         run: go vet ./...
+      - name: The llama.cpp adapter, its real-runtime test compiled, and its fake-server tests (INFER-llama)
+        # Default builds link no runtime; the tagged build links the adapter. The real tests need the
+        # pinned llama-server and models, so infer-real.yml runs them; here they only compile.
+        run: |
+          go vet -tags infer_real,infer_llamacpp ./cmd/agentos-infer
+          go test -count=1 -tags infer_llamacpp ./cmd/agentos-infer
       - name: Vendored code equals the modules go.sum pins (KRN-2cap-harden, #2945)
         # `go mod vendor` rewrites vendor/ from the checksum-verified modules (and the local
         # replace directories), so an edited, added or deleted vendored file shows as a change.

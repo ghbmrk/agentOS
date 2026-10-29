@@ -338,6 +338,43 @@ class DriversTest(unittest.TestCase):
                 (r / rel).write_text(text)
                 self.assertTrue([v for v in check.keeper_violations(r) if v.startswith(name) and lifted in v], name)
 
+    def test_no_other_mount_entry_at_root(self):
+        # #3712 (#3642 Security 6471425724 non-blocker 1): systemd 257 keeps one mount entry per path,
+        # the lower MountMode first, so any of these at "/" drops the driver's empty root. A generic
+        # drop-in that names no driver passes driver_violations, so the lift and the pair check refuse it.
+        root = self.staged_tree()
+        name = "agentos-driver-scale@.service"
+        dirs = check.unit_dirs(str(root))[0]
+        self.assertTrue(check.driver_root(name, check.unit_with_dropins(str(root), dirs, name)))
+        bad = ("InaccessiblePaths=/", "InaccessibleDirectories=/", "MountImages=/var/x.raw:/",
+               "BindPaths=/var:/", "BindPaths=/", "BindReadOnlyPaths=-/var:/:rbind", "ReadOnlyPaths=/",
+               "ReadOnlyDirectories=/", "ProtectSystem=strict", "DynamicUser=yes", "ReadWritePaths=/",
+               "ReadWriteDirectories=/", "ExecPaths=/", "NoExecPaths=-//", "TemporaryFileSystem=/:ro",
+               "ReadOnlyPaths=\"/\"", "ProtectSystem=Strict")
+        ok = ("ProtectSystem=full", "ProtectSystem=yes", "DynamicUser=no", "BindReadOnlyPaths=/var:/var",
+              "ReadOnlyPaths=/var", "ProtectSystem=strict\nProtectSystem=no")
+        for i, line in enumerate(bad + ok):
+            with self.subTest(line):
+                r = self.d / ("r-%d" % i)
+                shutil.copytree(root, r, symlinks=True)
+                rel = r / "usr/lib/systemd/system/service.d/99-root.conf"
+                rel.parent.mkdir(parents=True, exist_ok=True)
+                rel.write_text("[Service]\n%s\n" % line)
+                self.assertEqual(check.driver_violations(r), [])
+                files = check.unit_with_dropins(str(r), dirs, name)
+                try:
+                    lifted = check.driver_root(name, files)
+                except ValueError:
+                    lifted = False
+                named = [v for v in check.noexec_violations(r) if v.startswith(name) and "drops the empty root" in v]
+                if line in ok:
+                    self.assertTrue(lifted)
+                    self.assertEqual(named, [])
+                else:
+                    self.assertFalse(lifted)
+                    self.assertTrue(named, check.noexec_violations(r))
+                    self.assertTrue([v for v in check.keeper_violations(r) if v.startswith(name)])
+
     def test_driver_ipc_and_memory_are_bounded(self):
         units = check.driver_units("scale")
         svc = unit(units[SERVICE])["Service"]
@@ -383,7 +420,7 @@ class DriversTest(unittest.TestCase):
         host = unit((IMG.parent / "broker/cmd/agentos-devices/agentos-devices.service").read_text())["Service"]
         self.assertEqual(host["User"], "agentos-devices")
         build = (IMG / "build.sh").read_text()
-        self.assertIn("agentos-hostdisk agentos-devices; do", build)
+        self.assertRegex(build, r"for cmd in [^;]*\bagentos-devices\b[^;]*; do")
         self.assertIn('broker/cmd/agentos-devices/agentos-devices.service" "$STAGE/%s"' % DEVICES_UNIT, build)
 
 

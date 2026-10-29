@@ -1,0 +1,15 @@
+[Unit]
+Description=Camera node firewall (stream port in, replies out)
+Documentation=file:/etc/camnode/firewall.nft
+DefaultDependencies=no
+Before=network-pre.target agentos-camnode.socket
+Wants=network-pre.target
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/camnode/firewall.nft
+
+[Install]
+WantedBy=sysinit.target

@@ -9,8 +9,14 @@ table inet agentos_inbound {
   set page {
     type ifname
   }
+  set link {
+    type ifname
+  }
   chain input {
     type filter hook input priority filter; policy accept;
+    iifname "agentos-link" ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
+    iifname @link tcp dport 7443 accept
+    iifname "agentos-link" drop
     iifname @exempt accept
     ct state established,related accept
     ip6 saddr fe80::/10 ip6 hoplimit 255 icmpv6 type nd-router-advert accept

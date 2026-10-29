@@ -10,7 +10,8 @@ import (
 
 // FuzzVisionReply feeds arbitrary reply lines to the client's parser. A
 // line it accepts must hold only closed-vocabulary values inside the
-// frame, and must re-encode to a line it accepts again as the same reply;
+// frame and of its format (the op byte's quotient by five picks the
+// format), and must re-encode to a line it accepts again as the same reply;
 // a line it refuses must be refused with a known cause.
 func FuzzVisionReply(f *testing.F) {
 	for _, s := range []string{
@@ -25,16 +26,20 @@ func FuzzVisionReply(f *testing.F) {
 		`{"state":"ready"}`,
 		`{"detections":[],"template":"AACAPw=="}`,
 		`{"error":"no_face"}`,
+		`{"detections":[{"class":"warm","box":{"x0":0,"y0":0,"x1":4,"y1":4},"conf":50}]}`,
 	} {
-		for op := uint8(0); op < 5; op++ {
+		for op := uint8(0); op < 15; op++ {
 			f.Add([]byte(s), op, uint16(8), uint16(8))
 		}
 	}
 	enrolled := func(id string) bool { return id == "alice" }
 	ops := []string{OpHello, OpDetect, OpSound, OpEnrol, OpLend}
+	formats := []string{FormatRGB24, FormatGray8, FormatY16}
 	f.Fuzz(func(t *testing.T, line []byte, op uint8, w, h uint16) {
 		o := ops[int(op)%len(ops)]
-		r, err := parseReply(o, line, int(w), int(h), enrolled)
+		fm := formats[int(op)/len(ops)%len(formats)]
+		req := Request{Op: o, Format: fm, Width: int(w), Height: int(h)}
+		r, err := parseReply(req, line, enrolled)
 		if err != nil {
 			if !CauseOf(err).Known() {
 				t.Fatalf("unknown cause: %v", err)
@@ -58,7 +63,7 @@ func FuzzVisionReply(f *testing.F) {
 				t.Fatalf("hello accepted %+v", r)
 			}
 		case OpDetect:
-			if err := CheckDetections(r.Detections, int(w), int(h), enrolled); err != nil || r.Sounds != nil || r.Model != "" {
+			if err := CheckDetections(r.Detections, fm, int(w), int(h), enrolled); err != nil || r.Sounds != nil || r.Model != "" {
 				t.Fatalf("detect accepted %+v: %v", r, err)
 			}
 			for _, d := range r.Detections {
@@ -75,7 +80,7 @@ func FuzzVisionReply(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		again, err := parseReply(o, b, int(w), int(h), enrolled)
+		again, err := parseReply(req, b, enrolled)
 		if err != nil || !reflect.DeepEqual(norm(again), norm(r)) {
 			t.Fatalf("re-encoded %s: %+v, %v; first %+v", b, again, err, r)
 		}

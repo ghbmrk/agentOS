@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -115,7 +116,10 @@ var controlPath = map[string][]string{
 	// the owner's grant per machine with kernel/key (#3087). It derives a
 	// new recovery key's backup recipient with backup, pure crypto over
 	// the kernel's types, for the Recovery key page (REC-4 r4a, #3409).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup"},
+	// It hosts the follow clerk on kernel/proc's clerk socket, under the
+	// owner's anchors read with clerk/handoff (#3430); kernel/proc serves
+	// and dials only unix sockets (netOK in inference_test.go).
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -279,8 +283,12 @@ var enforcer = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"enforcer":        {nil, droneForbid},
-	"enforcer/policy": {[]string{"kernel/key"}, droneForbid},
+	"enforcer":          {nil, droneForbid},
+	"enforcer/policy":   {[]string{"kernel/key"}, droneForbid},
+	"enforcer/wire":     {nil, droneForbid},
+	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
+	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
@@ -288,9 +296,15 @@ var enforcer = map[string]struct {
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
-// enforcerWeb is the enforcer packages that may link net/http and
-// crypto/tls: the page (slice b) serves the owner's confirm screen.
-var enforcerWeb = map[string]bool{"enforcer/page": true}
+// enforcerExec is the one enforcer package that starts a process: the
+// firewall loader runs nft (ENF decision 4, slice e), and it imports nothing
+// from the enforcer, so no other enforcer package links os/exec through it.
+const enforcerExec = "enforcer/nft/load"
+
+// enforcerWeb is the one enforcer package that links net/http and
+// crypto/tls: the page (slice b) serves the owner's confirm screen, and no
+// other enforcer package imports it.
+const enforcerWeb = "enforcer/page"
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
@@ -359,57 +373,57 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
-// decision 1, STO-4), and no third-party package yet; none of it launches a
-// process, and only the page (enforcerWeb, slice b) speaks HTTP or TLS.
-// Slices e (the nft loader, os/exec) and l (the daemon) widen this with a
-// reason each.
+// decision 1, STO-4), and no third-party package yet; only the page
+// (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
+// (enforcerExec, slice e) launches a process. Slice l (the daemon) widens
+// this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
-	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./enforcer/...").Output()
+	list, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
-	pkgs, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
-	if err != nil {
-		t.Fatalf("go list: %v", err)
-	}
-	args := []string{"list", "-C", "..", "-deps"}
-	for _, p := range strings.Fields(string(pkgs)) {
-		if !enforcerWeb[strings.TrimPrefix(p, module)] {
-			args = append(args, p)
+	var rest []string
+	for _, p := range strings.Fields(string(list)) {
+		if p != module+enforcerExec && p != module+enforcerWeb {
+			rest = append(rest, p)
 		}
 	}
-	plain, err := exec.Command("go", args...).Output()
-	if err != nil {
-		t.Fatalf("go list: %v", err)
-	}
-	for _, dep := range strings.Fields(string(plain)) {
-		if dep == "net/http" || dep == "crypto/tls" {
-			t.Errorf("an enforcer package other than the page links %s", dep)
+	own := map[string]bool{}
+	check := func(pkgs []string, forbidden []string) {
+		out, err := exec.Command("go", append([]string{"list", "-C", "..", "-deps"}, pkgs...)...).Output()
+		if err != nil {
+			t.Fatalf("go list: %v", err)
 		}
-	}
-	links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
-	var own int
-	for _, dep := range strings.Fields(string(out)) {
-		rel := strings.TrimPrefix(dep, module)
-		switch {
-		case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
-			own++
-			if _, ok := enforcer[rel]; !ok {
-				t.Errorf("%s has no import rule in the enforcer map", dep)
+		links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
+		for _, dep := range strings.Fields(string(out)) {
+			rel := strings.TrimPrefix(dep, module)
+			switch {
+			case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
+				own[rel] = true
+				if _, ok := enforcer[rel]; !ok {
+					t.Errorf("%s has no import rule in the enforcer map", dep)
+				}
+			case strings.HasPrefix(dep, module):
+				if !links[rel] {
+					t.Errorf("the enforcer links %s", dep)
+				}
+			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
+				t.Errorf("the enforcer links third-party %s", dep)
+			case contains(forbidden, dep):
+				t.Errorf("%v link %s", pkgs, dep)
 			}
-		case strings.HasPrefix(dep, module):
-			if !links[rel] {
-				t.Errorf("the enforcer links %s", dep)
-			}
-		case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
-			t.Errorf("the enforcer links third-party %s", dep)
-		case dep == "net/http" || dep == "crypto/tls": // the page's; checked above
-		case contains(forbiddenDeps, dep):
-			t.Errorf("the enforcer links %s", dep)
 		}
 	}
-	if own < len(enforcer) {
-		t.Errorf("go list found %d enforcer packages, the rule map names %d", own, len(enforcer))
+	check(rest, forbiddenDeps)
+	for _, p := range []string{enforcerExec, enforcerWeb} {
+		if own[p] {
+			t.Errorf("an enforcer package other than %s links it", p)
+		}
+	}
+	check([]string{module + enforcerExec}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
+	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }))
+	if len(own) < len(enforcer) {
+		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}
 }
 

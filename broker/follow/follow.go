@@ -330,3 +330,21 @@ func (x *Executor) Realert(ctx context.Context, name string) string {
 // Latest is the clock guard's latest trustworthy time, the follow clerk's
 // own clock (WF2).
 func (x *Executor) Latest(ctx context.Context) time.Time { return x.latest(ctx) }
+
+// Following is what the box follows now, read from its own store: the
+// source's name ("" for the project's own root) and its trusted root's
+// digest. A parked switch's RETRY line shows it, since a retry replaces it.
+func (x *Executor) Following() (name, digest string, err error) {
+	cur, err := x.cfg.Store.TrustedRoot()
+	if err != nil {
+		return "", "", err
+	}
+	if digest, err = update.RootDigest(cur); err != nil {
+		return "", "", err
+	}
+	src, err := x.cfg.Store.Following()
+	if err != nil {
+		return "", "", err
+	}
+	return src.Name, digest, nil
+}

@@ -1,0 +1,18 @@
+# The plate set the real plate path is measured on (TestRealPlates;
+# ASSUMPTIONS VIS-A33): the first 500 rows of the first shard of
+# spawn99/UK-Car-Plate-VRN-Dataset on Hugging Face (MIT), synthetic UK
+# plates rendered from random registrations, each clean and twice
+# augmented (blurred, tilted, noised on a 448-pixel background): plates of
+# no real vehicle. .github/workflows/vision-real.yml fetches it at a fixed
+# revision, unpacks it with pyarrow pinned by its wheels' hashes, and never
+# commits it. Each line: name, value.
+revision  d14ed9c7311a58c2220cb18a2b697f755ce6cce9
+base  https://huggingface.co/datasets/spawn99/UK-Car-Plate-VRN-Dataset/resolve
+shard  data/train-00000-of-00003.parquet
+shard_sha256  7e33ef0b04a031a153f5413d6ed04b3a3d6806842f0015c33e9d5b2248c6bcde
+# pyarrow (Apache-2.0) reads the parquet shard and nothing else; one wheel
+# per Python a runner may have (3.12, 3.13, 3.14), manylinux x86_64.
+pyarrow  26.0.0
+pyarrow_wheel  6a628922ba20705fa964ca73e4ef959c2fb2f14b9bbec5589a6a1e68e6257c85
+pyarrow_wheel  240bd18a7487f8767616a948a69dd4e740a8bc36a1c9da49e4dc9a32c5c2faed
+pyarrow_wheel  ab6914db225d7f399652ae1f08588dfbc9efe617612715701e3d9d5cfa5ca19f

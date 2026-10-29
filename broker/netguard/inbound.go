@@ -54,10 +54,32 @@ type Inbound struct {
 	// stops. The set is empty as rendered, so the page's ports are dropped
 	// on every link until then (CH-9, D-178, HW-12; HW12-port1-set).
 	Page bool
+	// Link admits nothing on the link interface (LinkIface) but neighbour
+	// discovery and, while that interface is in the link set, the edge
+	// link's one TCP port (LinkPort): every other packet arriving on it is
+	// dropped before any other rule, an exempt or page entry included,
+	// whether or not a link unit runs. Not even replies: the core opens
+	// nothing over the link, and connection tracking is not per interface,
+	// so an "established" rule there would let the edge inject packets into
+	// the core's flows on other links. Every packet of an accepted link
+	// connection is to LinkPort. The set is empty as rendered; agentos-link's
+	// units put the link interface there as root while it listens and empty
+	// it when it stops (EDGE-link-core c2c, HW-15, HW-16: the core accepts
+	// nothing from the edge but the link).
+	Link bool
 }
 
-// Image is what the image loads at boot: the zero value and the page.
-var Image = Inbound{Page: true}
+// LinkPort is the edge link's TCP port (agentos-link -port), the only one
+// the link set's interface admits.
+const LinkPort = 7443
+
+// LinkIface is the link interface's fixed name (10-agentos-link.link,
+// agentos-link -iface).
+const LinkIface = "agentos-link"
+
+// Image is what the image loads at boot: the zero value, the page and the
+// edge link.
+var Image = Inbound{Page: true, Link: true}
 
 // Validate says why the configuration cannot be rendered.
 func (c Inbound) Validate() error {
@@ -126,9 +148,17 @@ func InboundPageAdmit(iface string) (string, error) {
 // the page's ports on every link.
 const InboundPageClose = "flush set inet " + InboundTable + " " + InboundPageSet + "\n"
 
+// InboundLinkSet is the named set of the one interface the edge link's
+// port is open on (Link).
+const InboundLinkSet = "link"
+
 // InboundRules renders the nftables ruleset that drops every connection the
 // home network opens to a box port (DEV-2 In), on every interface: one the
-// box has not named yet (a USB tether, a second NIC) is dropped too. It
+// box has not named yet (a USB tether, a second NIC) is dropped too. First,
+// on the link interface (Link), it admits neighbour solicitations and
+// advertisements with hop limit 255 and, while the interface is in the link
+// set, the link's port, and drops the rest, so no later rule opens anything
+// there. Then it
 // admits, in order: any interface in the exempt set (loopback always);
 // replies to what the box opened; the host's own link configuration, which
 // DEV-2 does not count as connections (router advertisements from a
@@ -170,8 +200,18 @@ func InboundRules(c Inbound) (string, error) {
 		line("    type ifname")
 		line("  }")
 	}
+	if c.Link {
+		line("  set %s {", InboundLinkSet)
+		line("    type ifname")
+		line("  }")
+	}
 	line("  chain input {")
 	line("    type filter hook input priority filter; policy accept;")
+	if c.Link {
+		line("    iifname %q ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept", LinkIface)
+		line("    iifname @%s tcp dport %d accept", InboundLinkSet, LinkPort)
+		line("    iifname %q drop", LinkIface)
+	}
 	line("    iifname @%s accept", InboundExemptSet)
 	line("    ct state established,related accept")
 	line("    ip6 saddr fe80::/10 ip6 hoplimit 255 icmpv6 type nd-router-advert accept")

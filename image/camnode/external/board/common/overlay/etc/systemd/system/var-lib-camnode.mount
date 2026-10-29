@@ -1,0 +1,15 @@
+# The data partition: the bundle store and the slot manifests, both untrusted storage that
+# agentos-camnode checks at every start (CAM-server-3, CAM-b2-3). Nothing on it executes.
+[Unit]
+Description=Camera node data partition
+Requires=dev-camnode-data.device
+After=dev-camnode-data.device
+
+[Mount]
+What=/dev/camnode/data
+Where=/var/lib/camnode
+Type=ext4
+Options=nosuid,nodev,noexec,noatime
+
+[Install]
+WantedBy=local-fs.target

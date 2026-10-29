@@ -6,10 +6,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -45,7 +47,7 @@ type fake struct {
 	mu      sync.Mutex
 	loadErr error
 	model   Model
-	mode    string // "", "crash", "panic", "hang", "wedge", "slow", "off-list", "outside", "enrolled", "plate"
+	mode    string // "", "crash", "panic", "hang", "wedge", "slow", "off-list", "outside", "enrolled", "vehicle-face", "warm", "cold-person", "plate"
 	times   int
 	loads   int
 	frames  int
@@ -58,6 +60,7 @@ type fake struct {
 	wedge   chan struct{} // a wedged call waits on it, whatever Load does
 	face    []float32     // the encoding of the face in every frame
 	given   [][]float32   // every encoding handed to the service, to check it was zeroed
+	encodes []bool        // each Detect call's encode
 }
 
 func newFake() *fake {
@@ -134,7 +137,9 @@ func (f *fake) leave() {
 	f.mu.Unlock()
 }
 
-func (f *fake) Detect(fr vision.Frame) ([]Seen, error) {
+// Detect sees a person filling the frame, with a face, or on a thermal
+// frame a warm body.
+func (f *fake) Detect(fr vision.Frame, encode bool) ([]Seen, error) {
 	mode, release, gate := f.enter()
 	defer f.leave()
 	if gate != nil {
@@ -143,8 +148,16 @@ func (f *fake) Detect(fr vision.Frame) ([]Seen, error) {
 	f.mu.Lock()
 	f.frames++
 	f.last = fr.Data
+	f.encodes = append(f.encodes, encode)
 	f.mu.Unlock()
-	d := Seen{Detection: vision.Detection{Class: vision.Person, Box: vision.Box{X0: 0, Y0: 0, X1: fr.Width, Y1: fr.Height}, Conf: 80}, Face: f.encoding()}
+	d := Seen{Detection: vision.Detection{Class: vision.Person, Box: vision.Box{X0: 0, Y0: 0, X1: fr.Width, Y1: fr.Height}, Conf: 80}, Face: []float32{}}
+	if encode {
+		d.Face = f.encoding()
+	}
+	if fr.Format == vision.FormatY16 && mode == "" { // a warm body, no face
+		clear(d.Face)
+		d = Seen{Detection: vision.Detection{Class: vision.Warm, Box: d.Box, Conf: 80}}
+	}
 	switch mode {
 	case "crash":
 		return nil, errors.New("segfault in the runtime: frame bytes 0xCAFE")
@@ -166,6 +179,12 @@ func (f *fake) Detect(fr vision.Frame) ([]Seen, error) {
 		d.Detection.Face = vision.FaceEnrolledAs + "alice"
 	case "vehicle-face": // an encoding on a non-person
 		d.Class = vision.Vehicle
+	case "warm": // a thermal class on a visible or infrared frame
+		clear(d.Face)
+		d = Seen{Detection: vision.Detection{Class: vision.Warm, Box: d.Box, Conf: 80}}
+	case "cold-person": // a person on a thermal frame (y16 only)
+		clear(d.Face)
+		d.Face = nil
 	case "plate":
 		clear(d.Face) // no face on a vehicle
 		d = Seen{Detection: vision.Detection{Class: vision.Vehicle, Box: d.Box, Conf: 60, Plate: "CANARY 9"}}
@@ -232,7 +251,11 @@ func TestDetectAndSoundThroughTheService(t *testing.T) {
 		gray(vision.MaxWidth, vision.MaxHeight, 0),
 	} {
 		ds, err := c.Detect(context.Background(), f)
-		if err != nil || len(ds) != 1 || ds[0].Box != (vision.Box{X1: f.Width, Y1: f.Height}) || ds[0].Face != vision.FaceUnknown {
+		want := vision.FaceUnknown
+		if f.Format == vision.FormatY16 {
+			want = ""
+		}
+		if err != nil || len(ds) != 1 || ds[0].Box != (vision.Box{X1: f.Width, Y1: f.Height}) || ds[0].Face != want {
 			t.Fatalf("%s %dx%d: %+v, %v", f.Format, f.Width, f.Height, ds, err)
 		}
 	}
@@ -315,10 +338,14 @@ func TestServiceChecksItsRuntime(t *testing.T) {
 	s := newService(Config{CallTimeout: 200 * time.Millisecond}, f, nil)
 	s.stuck = func() {} // a slow runner must not end the test binary
 	c := start(t, s)
-	for _, mode := range []string{"crash", "panic", "hang", "off-list", "outside", "enrolled", "vehicle-face"} {
+	for _, mode := range []string{"crash", "panic", "hang", "off-list", "outside", "enrolled", "vehicle-face", "warm", "cold-person"} {
 		f.failNext(mode, 1)
 		before := f.loads
-		_, err := c.Detect(context.Background(), gray(8, 8, 0))
+		fr := gray(8, 8, 0)
+		if mode == "cold-person" {
+			fr = vision.Frame{Format: vision.FormatY16, Width: 8, Height: 8, Data: make([]byte, 128)}
+		}
+		_, err := c.Detect(context.Background(), fr)
 		if !isCause(err, vision.Unavailable) {
 			t.Errorf("%s: %v", mode, err)
 		}
@@ -508,8 +535,9 @@ func TestLogsCarryNoCapture(t *testing.T) {
 // REQ: KRN-3
 //
 // main serves the listeners it is handed as fd 3 and 4 and names no
-// socket of its own; with no runtime in this build it answers,
-// Unavailable, on the feed socket, and takes a lend on the control socket.
+// socket of its own; with no runtime in this build, or no models in
+// -models, it answers with its cause on the feed socket, and takes a lend
+// on the control socket.
 func TestMainServesTheListenerOnFD3(t *testing.T) {
 	dir := t.TempDir()
 	sock := filepath.Join(dir, "vision.sock")
@@ -534,7 +562,7 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	defer cancel()
 	cmd := childproc.Command(ctx, childproc.NewEnv("PATH=/usr/bin:/bin"),
 		childproc.Options{Dir: dir, Stderr: &stderr, ExtraFiles: files, WaitDelay: time.Second},
-		os.Args[0], helperArg)
+		os.Args[0], helperArg, "-models", dir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -546,10 +574,10 @@ func TestMainServesTheListenerOnFD3(t *testing.T) {
 	}
 	defer func() { cancel(); cmd.Wait() }()
 	c := vision.Client{Path: sock, Timeout: 5 * time.Second}
-	if _, err := c.Hello(context.Background()); !isCause(err, vision.Unavailable) {
+	if _, err := c.Hello(context.Background()); !isCause(err, noModelsCause) {
 		t.Fatalf("hello: %v (log: %s)", err, stderr.String())
 	}
-	if _, err := c.Detect(context.Background(), gray(4, 4, 0)); !isCause(err, vision.Unavailable) {
+	if _, err := c.Detect(context.Background(), gray(4, 4, 0)); !isCause(err, noModelsCause) {
 		t.Fatalf("detect: %v", err)
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 2 {
@@ -565,4 +593,41 @@ func peak(s *service) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.peak
+}
+
+// TestNoEncodingWithoutTemplates (VIS-A31): while the service holds no
+// template, the runtime is asked to encode no face, so a face is unknown
+// without its encoding ever being made; once a template is lent, faces
+// are encoded and compared.
+func TestNoEncodingWithoutTemplates(t *testing.T) {
+	f := newFake()
+	s := newService(Config{}, f, nil)
+	c := start(t, s)
+	ds, err := c.Detect(context.Background(), gray(8, 8, 0))
+	if err != nil || len(ds) != 1 || ds[0].Face != vision.FaceUnknown {
+		t.Fatalf("no templates: %+v, %v", ds, err)
+	}
+	if len(f.given) != 0 || len(f.encodes) != 1 || f.encodes[0] {
+		t.Fatalf("no templates, yet asked to encode: %v, %d encodings", f.encodes, len(f.given))
+	}
+	tpl := make([]byte, 0, 12)
+	for _, x := range []float32{0, 1, 0} { // not the fake's face
+		tpl = binary.LittleEndian.AppendUint32(tpl, math.Float32bits(x))
+	}
+	payload, err := vision.EncodeLend([]vision.Template{{ID: "alice", Vec: tpl}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.lend(payload); err != nil {
+		t.Fatal(err)
+	}
+	if ds, err := c.Detect(context.Background(), gray(8, 8, 0)); err != nil || ds[0].Face != vision.FaceUnknown {
+		t.Fatalf("a template lent: %+v, %v", ds, err)
+	}
+	if len(f.given) != 1 || !f.encodes[1] {
+		t.Fatalf("a template lent, yet not asked to encode: %v", f.encodes)
+	}
+	if !f.zeroed() {
+		t.Fatal("the encoding was not zeroed")
+	}
 }

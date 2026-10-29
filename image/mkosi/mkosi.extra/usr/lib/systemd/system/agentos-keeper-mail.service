@@ -1,0 +1,78 @@
+# The mail clerk (MAIL-unit, briefs/MAIL-main.md slice c; D-154): one mail account's clerk under its own
+# user, holding that account's Secrets and no others (CLK-1). At every start and restart the service
+# manager connects to the kernel's key socket for it (OpenFile=); the kernel hands the clerk's key only
+# to a process in this unit's cgroup, and the clerk gets it as descriptor 3 (MAIL-keys). The owner's
+# anchors come from the file the unlock step writes, root's alone, never from the kernel (D-146). It
+# serves three sockets, each to one peer's uid: the kernel's calls, the owner side's setup (agentosd,
+# root) and the planner's listing (the planner's user, which no process runs as yet).
+[Unit]
+Description=agentOS mail clerk
+# No store, no kernel to hand the key: the first boot, before enrollment, starts none.
+ConditionPathExists=/var/lib/agentos-store/store
+After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-keeper-kernel.service network.target
+# The backoff below bounds the restarts, so no start limit stops the clerk for the rest of a boot.
+StartLimitIntervalSec=0
+
+[Service]
+User=agentos-mail
+Group=agentos-mail
+ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-clerk-mail -dir /var/lib/agentos-mail \
+        -anchors /run/agentos-keeper/anchors \
+        -kernel-sock /run/agentos-mail/kernel.sock -kernel-uid @uid:agentos-kernel \
+        -owner-sock /run/agentos-mail/owner.sock -owner-uid 0 \
+        -planner-sock /run/agentos-mail/planner.sock -planner-uid @uid:agentos-planner
+OpenFile=/run/agentos-kernel/key-mail.sock:clerk-key
+# The kernel's unit is started once its process is, before it listens, and a kernel that runs
+# setup-only hands the unlock step no anchors, so the clerk refuses until a boot that has them: retry
+# soon, then back off to every five minutes. A refused start leaves its key unread (MAIL-main-a-1).
+Restart=on-failure
+RestartSec=2
+RestartSteps=8
+RestartMaxDelaySec=5min
+StandardError=journal
+# The sockets' directory, the clerk's own; its peers reach it, and each socket admits one uid.
+RuntimeDirectory=agentos-mail
+RuntimeDirectoryMode=0755
+# The sealed Secrets: tmpfiles.d makes the directory at boot, a keeper path the main side never sees.
+ReadWritePaths=/var/lib/agentos-mail
+# Go's TLS reads its roots from the verity-checked /usr only, never from /etc, which root can change:
+# SSL_CERT_FILE reads as empty and SSL_CERT_DIR is Debian's Mozilla set.
+Environment=SSL_CERT_FILE=/dev/null SSL_CERT_DIR=/usr/share/ca-certificates/mozilla
+# The key and the Secrets live in this process's memory (IMG-nodump).
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateIPC=yes
+# The clerk ends its own TLS to the mail provider (D-154 rule 3), and its network policy learns the
+# home network from netlink and /proc/net/route (MAIL-world-a-m1), so /proc keeps its net files.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged
+# A call outside the filter fails rather than killing the clerk mid-write.
+SystemCallErrorNumber=EPERM
+# No device but the standard pseudo-devices, and no TPM (#2889).
+PrivateDevices=yes
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+WantedBy=multi-user.target
