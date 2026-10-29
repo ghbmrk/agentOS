@@ -1,0 +1,22 @@
+# Every Ethernet link that neither the edge link's file nor the uplink's claims (#3840; HW-15,
+# HW-16): a second USB Ethernet adapter, a phone's USB tether, Thunderbolt networking, or any
+# adapter whose udev record holds no bus. A second USB adapter fails 10-agentos-link.link's rename,
+# and udev then saves an empty record for it (no ID_BUS), so this file matches on nothing udev
+# writes: it sorts after both, and whatever they miss lands here, down, whichever adapter the edge's
+# cable is in. On a down link the core takes no packet at all. networkd sets it down again if
+# anything brings it up, and the keys below give it nothing in that moment either. mkosi.finalize
+# holds this file to exactly these keys (DOWN_KEYS).
+[Match]
+Type=ether
+Kind=!*
+
+[Link]
+ActivationPolicy=always-down
+RequiredForOnline=no
+
+[Network]
+DHCP=no
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+LLDP=no
+EmitLLDP=no

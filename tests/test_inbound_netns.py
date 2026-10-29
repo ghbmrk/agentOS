@@ -18,9 +18,12 @@
 # control). The box still reaches the router. Also needs unshare and systemd-networkd.
 # REQ: DEV-2, DEV-net-e, ONB-3
 #
-# Its test_a_second_usb_adapter_stays_down runs the [Link] and [Network] sections the image ships in
-# 15-agentos-usb-down.network (#3840) on eth1, a second adapter with the edge's cable in it: the
-# adapter is down, stays down when something brings it up, and has no address.
+# Its test_a_down_link_stays_down runs the [Link] and [Network] sections the image ships in
+# 90-agentos-down.network (#3840) on eth1, a second adapter with the edge's cable in it: the adapter
+# is down, stays down when something brings it up, and has no address. Its
+# test_a_rename_loser_is_held_down runs the image's three .network files, their [Match] sections as
+# shipped but for Kind (veth here), against udev records as udev leaves them: ID_BUS=pci on the
+# uplink, ID_BUS=usb on agentos-link, and an empty record on the adapter that lost the rename.
 # REQ: HW-15, HW-16
 #
 # NoRoutingThroughTheDrop is I21, the box routes nothing (#2824): with forwarding turned on in the
@@ -442,7 +445,8 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         self.assertFalse(self.reply_on_link(), "a reply passed on the replugged link")
 
 UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"
-USB_DOWN = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/15-agentos-usb-down.network"
+NETWORK_DIR = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network"
+DOWN = NETWORK_DIR / "90-agentos-down.network"
 NETWORKD = "/usr/lib/systemd/systemd-networkd"
 ROUTER4 = "192.0.2.1"
 
@@ -499,18 +503,25 @@ class UplinkByNetworkd(unittest.TestCase):
             time.sleep(0.1)
         self.fail("listener in %s did not start" % ns)
 
-    def networkd(self, ns, network):
-        """systemd-networkd in ns, in its own mount namespace: only this .network file, its own
-        /run, with a udev database saying every link is ready."""
+    def networkd(self, ns, network, props=None):
+        """systemd-networkd in ns, in its own mount namespace: only this .network file (or these, a
+        {name: text} dict), its own /run, with a udev database saying every link is ready, and the
+        udev properties PROPS ({link: ["ID_BUS=usb", ...]}) on the links it names."""
         conf = pathlib.Path(self.tmp, ns)
         conf.mkdir()
-        (conf / "10-test.network").write_text(network)
-        (conf / "10-test.network").chmod(0o644)
+        for name, text in (network if isinstance(network, dict) else {"10-test.network": network}).items():
+            (conf / name).write_text(text)
+            (conf / name).chmod(0o644)
         conf.chmod(0o755)
+        records = ""
+        for link, lines in (props or {}).items():
+            index = sh("cat", "/sys/class/net/%s/ifindex" % link, ns=ns).stdout.strip()
+            records += "&& printf 'I:1\\n%s' > /run/udev/data/n%s " % ("".join("E:%s\\n" % p for p in lines), index)
         setup = ("mount -t tmpfs -o mode=0755 tmpfs /run && mkdir -p /run/systemd/netif /run/udev/data "
                  "&& chown systemd-network:systemd-network /run/systemd/netif "
                  # Each link marked initialized, as udev would: there is no udev in a namespace.
                  "&& for l in /sys/class/net/*; do echo I:1 > /run/udev/data/n$(cat $l/ifindex); done "
+                 + records +
                  "&& mount --bind \"$1\" /etc/systemd/network && exec %s" % NETWORKD)
         env = {k: v for k, v in os.environ.items() if k != "NOTIFY_SOCKET"}
         env["SYSTEMD_LOG_LEVEL"] = "info"
@@ -601,13 +612,12 @@ class UplinkByNetworkd(unittest.TestCase):
             with self.subTest(control=addr):
                 self.assertTrue(reaches(HOME, addr), "control: the test cannot see the drop at " + addr)
 
-
     def flags(self, dev):
         out = sh("ip", "-o", "link", "show", "dev", dev, ns=BOX).stdout
         return out[out.index("<") + 1:out.index(">")].split(",")
 
     def held_down(self, dev):
-        """Whether DEV is down 3 s after it was last brought up (networkd acts within a second)."""
+        """Whether DEV goes down within 3 s and is still down half a second later."""
         for _ in range(30):
             if "UP" not in self.flags(dev):
                 break
@@ -615,11 +625,11 @@ class UplinkByNetworkd(unittest.TestCase):
         time.sleep(0.5)
         return "UP" not in self.flags(dev)
 
-    def test_a_second_usb_adapter_stays_down(self):
+    def test_a_down_link_stays_down(self):
         # REQ: HW-15, HW-16 (#3840): a second USB Ethernet adapter, the edge's cable in it, keeps its
-        # kernel name (eth1 here) and gets the shipped down file. The file's [Match] is the USB
-        # adapter's (veth links never match it), so it names eth1 here and the rest is as shipped.
-        body, shipped = box_network(USB_DOWN, "eth1")
+        # kernel name (eth1 here) and gets the shipped down file. The file's [Match] leaves out veth
+        # links, so it names eth1 here and the rest is as shipped.
+        body, shipped = box_network(DOWN, "eth1")
         self.assertEqual(shipped["Link"]["ActivationPolicy"], "always-down")
         sh("ip", "link", "add", "eth1", "netns", BOX, "type", "veth", "peer", "name", "e1", "netns", HOME)
         sh("ip", "link", "set", "e1", "up", ns=HOME)
@@ -643,6 +653,56 @@ class UplinkByNetworkd(unittest.TestCase):
         time.sleep(1)
         sh("ip", "link", "set", "eth1", "up", ns=BOX)
         self.assertFalse(self.held_down("eth1"), "control: the test cannot see the policy")
+
+
+    def test_a_rename_loser_is_held_down(self):
+        # REQ: HW-15, HW-16 (#3840; Security on #3842): udev saves an empty record (no ID_BUS) for a
+        # second USB adapter whose rename to agentos-link failed, and networkd reads that record at
+        # every start. With the edge's cable in it and the edge serving DHCP, it must match neither
+        # the link's file nor the uplink's, and stay down with no address, while the uplink still
+        # takes its lease and the link its fixed address.
+        def shipped(f, uplink_match=None):
+            text = (NETWORK_DIR / f).read_text().replace("Kind=!*\n", "Kind=veth\n")
+            return text if uplink_match is None else text.replace("Property=ID_BUS=pci\n", uplink_match)
+        files = {f: shipped(f) for f in ("10-agentos-link.network", "20-agentos-uplink.network",
+                                         "90-agentos-down.network")}
+        self.assertTrue(all(f.count("Kind=veth\n") == 1 for f in files.values()))
+        for box, peer in (("agentos-link", "e1"), ("u2", "e2")):
+            sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", HOME)
+        edge = ("[Match]\nName=e2\n\n[Network]\nAddress=198.51.100.1/24\nDHCPServer=yes\n\n"
+                "[DHCPServer]\nPoolOffset=100\nPoolSize=10\n")
+        self.networkd(HOME, {"10-router.network": ROUTER_NETWORK, "20-edge.network": edge})
+        props = {"eth0": ["ID_BUS=pci"], "agentos-link": ["ID_BUS=usb"]}
+        # Up before networkd runs, so only the down file can take it down.
+        sh("ip", "link", "set", "u2", "up", ns=BOX)
+        first = len(self.procs)
+        self.networkd(BOX, files, props)
+        self.wait_for("-4", "192.0.2.0/24")
+        if IPV6:
+            for _ in range(50):
+                if "fe80::1/64" in sh("ip", "-6", "-o", "addr", "show", "dev", "agentos-link", ns=BOX).stdout:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("the link has no fe80::1:\n" + self.logs())
+        self.assertTrue(self.held_down("u2"), "the rename loser is up:\n" + self.logs())
+        self.assertEqual(sh("ip", "-o", "addr", "show", "dev", "u2", ns=BOX).stdout.strip(), "",
+                         "the rename loser has an address")
+        self.assertNotIn("u2", sh("ip", "route", ns=BOX).stdout)
+        # Potency: the uplink matching any bus again (as before #3840) gives the loser the edge's lease.
+        for p in self.procs[first:]:
+            p.kill()
+            p.wait()
+        del self.procs[first:]
+        shutil.rmtree(os.path.join(self.tmp, BOX))
+        files["20-agentos-uplink.network"] = shipped("20-agentos-uplink.network", "")
+        self.networkd(BOX, files, props)
+        for _ in range(300):
+            if "198.51.100." in sh("ip", "-4", "-o", "addr", "show", "dev", "u2", ns=BOX).stdout:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("control: the loser took no lease from the edge with the old uplink match:\n" + self.logs())
 
 
 # BootProbeOverIPv6 checks the boot test's IPv6 probe (image/probe_lan6.py, #1457 u1c) against a
