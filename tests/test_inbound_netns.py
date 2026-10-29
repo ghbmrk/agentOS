@@ -420,6 +420,22 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         self.assertFalse(self.reply_on_link(), "a reply on the link passed after the stop")
 
 
+    def test_a_replugged_link_keeps_its_rules(self):
+        # A replugged or reset adapter comes back as a new device under the same name. The units are
+        # bound to the device and start again with it (tests/test_image.py); the firewall's link rules
+        # match the name, so the new device gets the same port and the same drop.
+        sh("nft", "-f", str(RULES), ns=BOX)
+        self.run_unit("ExecStartPre")
+        self.assertTrue(reaches(EDGE, "198.51.100.1", self.LINK_PORT), "control: before the replug")
+        sh("ip", "link", "del", "agentos-link", ns=BOX)
+        sh("ip", "link", "add", "agentos-link", "netns", BOX, "type", "veth", "peer", "name", "e0", "netns", EDGE)
+        for n, dev, host in ((BOX, "agentos-link", 1), (EDGE, "e0", 2)):
+            sh("ip", "addr", "add", "198.51.100.%d/24" % host, "dev", dev, ns=n)
+            sh("ip", "link", "set", dev, "up", ns=n)
+        self.assertTrue(reaches(EDGE, "198.51.100.1", self.LINK_PORT), "the replugged link lost its port")
+        self.assertFalse(reaches(EDGE, "198.51.100.1", PORT), "the replugged link admits port %d" % PORT)
+        self.assertFalse(self.reply_on_link(), "a reply passed on the replugged link")
+
 UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"
 NETWORKD = "/usr/lib/systemd/systemd-networkd"
 ROUTER4 = "192.0.2.1"

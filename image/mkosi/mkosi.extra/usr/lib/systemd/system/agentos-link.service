@@ -10,9 +10,13 @@ Description=agentOS edge link
 # No store, no kernel to ask: before enrollment the capture unit has the port.
 ConditionPathExists=/var/lib/agentos-store/store
 Requires=agentos-inbound.service
-After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-inbound.service agentos-keeper-kernel.service network.target
-# The backoff below bounds the restarts (no link interface, or the kernel not listening yet), so no
-# start limit stops the link for the rest of a boot.
+# The listener is bound to the link interface's index, which a replugged or reset adapter changes: the
+# unit lives exactly as long as the interface, starting when it appears (Install below) and stopping
+# when it goes, so no socket outlives its device (#3834 Potency).
+BindsTo=sys-subsystem-net-devices-agentos\x2dlink.device
+After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-inbound.service agentos-keeper-kernel.service network.target sys-subsystem-net-devices-agentos\x2dlink.device
+# The backoff below bounds the restarts (the kernel not listening yet), so no start limit stops the
+# link for the rest of a boot.
 StartLimitIntervalSec=0
 
 [Service]
@@ -70,6 +74,7 @@ NoExecPaths=/
 ExecPaths=/usr
 
 [Install]
-# Every boot with a store, and the kernel's first start on the Owner Card confirm's boot, so the first
-# edge is served without a reboot.
-WantedBy=multi-user.target agentos-keeper-kernel.service
+# Whenever the link interface appears, at boot (coldplug) or plugged in later, and the kernel's first
+# start on the Owner Card confirm's boot, so the first edge is served without a reboot. Not
+# multi-user.target: with no adapter, a boot want would only wait out the device and fail.
+WantedBy=sys-subsystem-net-devices-agentos\x2dlink.device agentos-keeper-kernel.service

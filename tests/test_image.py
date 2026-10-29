@@ -6178,7 +6178,7 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         self.assertIn("agentos-keeper-kernel.service", su["After"].split())
         # Every boot with a store, and the kernel's start on the confirm's boot.
         self.assertEqual(sorted(ini(LINK_SERVED)["Install"]["WantedBy"].split()),
-                         ["agentos-keeper-kernel.service", "multi-user.target"])
+                         ["agentos-keeper-kernel.service", "sys-subsystem-net-devices-agentos\\x2dlink.device"])
         preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
         for unit in (LINK_CAPTURE, LINK_SERVED):
             self.assertIn("enable " + unit.name, preset)
@@ -6245,10 +6245,9 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         self.assertIn("/run/agentos-setup:ro", cs["TemporaryFileSystem"].split())
 
     # REQ: HW-15
-    def test_the_boot_transaction_keeps_the_capture_s_start(self):
-        # systemd's own transaction over the image's units, each enabled one wanted by the boot target:
-        # a conflict with a unit in the same boot would delete the capture's start job, and nothing
-        # would ever be captured (#3834 review blocker 1).
+    def transaction(self, *wanted):
+        """The start jobs of systemd's own transaction for WANTED together over the image's units, each
+        enabled one wanted by its WantedBy= units, as the preset installs them."""
         pid1 = "/usr/lib/systemd/systemd"
         if not os.access(pid1, os.X_OK):
             if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
@@ -6260,20 +6259,42 @@ class EdgeLinkUnitsTest(unittest.TestCase):
             os.chmod(d, 0o755)
             tree = pathlib.Path(d) / "units"
             shutil.copytree(units, tree)
-            wants = tree / "multi-user.target.wants"
-            wants.mkdir()
             for f in sorted(units.glob("*.service")):
-                c = ini(f)
-                if f.name in preset and "multi-user.target" in c.get("Install", "WantedBy", fallback="").split():
+                if f.name not in preset:
+                    continue
+                for by in ini(f).get("Install", "WantedBy", fallback="").split():
+                    wants = tree / (by + ".wants")
+                    wants.mkdir(exist_ok=True)
                     (wants / f.name).symlink_to("../" + f.name)
+            (tree / "agentos-test-boot.target").write_text("[Unit]\nWants=%s\n" % " ".join(wanted))
             # Test mode refuses root.
             drop = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"] if os.geteuid() == 0 else []
-            r = subprocess.run(drop + [pid1, "--test", "--system", "--unit=multi-user.target", "--no-pager"],
+            r = subprocess.run(drop + [pid1, "--test", "--system", "--unit=agentos-test-boot.target", "--no-pager"],
                                env=dict(os.environ, SYSTEMD_UNIT_PATH=str(tree) + ":"), capture_output=True,
                                text=True, timeout=120)
             self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        jobs = set(re.findall(r"(?m)^\t+Action: (\S+) -> start$", r.stdout))
-        for unit in (LINK_CAPTURE.name, "agentos-keeper-enroll.service", LINK_SERVED.name):
+        self.assertNotIn("deleting job", r.stdout + r.stderr)
+        return set(re.findall(r"(?m)^\t+Action: (\S+) -> start$", r.stdout))
+
+    # REQ: HW-15
+    def test_the_link_s_units_live_with_the_link_interface(self):
+        # The listener is bound to the interface's index, which a replugged or reset adapter changes, so
+        # both units are bound to the interface's device: started when it appears, at boot or later,
+        # stopped when it goes, never left listening on a stale index (#3834 Potency blocker).
+        for unit, words in ((LINK_CAPTURE, self.cap), (LINK_SERVED, self.srv)):
+            with self.subTest(unit=unit.name):
+                device = "sys-subsystem-net-devices-%s.device" % arg(words, "iface").replace("-", "\\x2d")
+                u = ini(unit)
+                self.assertEqual(u["Unit"]["BindsTo"].split(), [device])
+                self.assertIn(device, u["Unit"]["After"].split())
+                self.assertIn(device, u["Install"]["WantedBy"].split())
+                # No boot-target want: with no adapter it would only wait out the device and fail.
+                self.assertNotIn("multi-user.target", u["Install"]["WantedBy"].split())
+        # systemd's own transaction for a boot with the adapter plugged in: the interface's appearance
+        # starts both (their conditions pick one), beside enrollment's start, and no job is deleted for
+        # a conflict (#3834 review blocker 1).
+        jobs = self.transaction("multi-user.target", device)
+        for unit in (LINK_CAPTURE.name, LINK_SERVED.name, "agentos-inbound.service", "agentos-keeper-enroll.service"):
             self.assertIn(unit, jobs)
 
 
