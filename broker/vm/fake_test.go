@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
@@ -37,10 +36,14 @@ type fakeRuntime struct {
 	// onStart runs as a machine starts or is restored, before the runtime
 	// takes its own lock, so it may call back into the manager.
 	onStart func(id string)
+	// hang holds every "hang" command until it is closed, so a test can
+	// tell returning beside a hung runtime from waiting behind it without
+	// timing either one.
+	hang chan struct{}
 }
 
 func newFake() *fakeRuntime {
-	return &fakeRuntime{running: map[string]Launch{}, paused: map[string]bool{}, mem: map[string]int{}}
+	return &fakeRuntime{running: map[string]Launch{}, paused: map[string]bool{}, mem: map[string]int{}, hang: make(chan struct{})}
 }
 
 func (f *fakeRuntime) take() error {
@@ -261,7 +264,7 @@ func (e *env) upper(id, rel string) string {
 
 // Exec runs a few commands against the machine's upper layer: "echo"
 // prints its arguments, "write PATH" stores stdin, "cat PATH" prints the
-// file, "sleep" waits for the context, "hang" ignores it for a second, "killed" exits 137 once it ends, and
+// file, "sleep" waits for the context, "hang" ignores it until f.hang closes, "killed" exits 137 once it ends, and
 // "exit N" exits N.
 func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResult, error) {
 	f.mu.Lock()
@@ -300,7 +303,7 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 		<-ctx.Done()
 		return ExecResult{ExitCode: 137}, nil
 	case "hang": // a runtime that ignores cancellation
-		time.Sleep(time.Second)
+		<-f.hang
 		return ExecResult{}, ctx.Err()
 	case "exit":
 		n, _ := strconv.Atoi(a[1])
