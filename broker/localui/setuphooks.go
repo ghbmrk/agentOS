@@ -126,12 +126,16 @@ func (a AgentosdSetup) AlreadySetUp() bool {
 // good and starts the owner channel. A vault that cannot finish setup's
 // enrollment answers ErrCodesUnavailable, and a private-content answer
 // agentosd still owes the vault answers ErrAnswerOwed.
-func (a AgentosdSetup) Finish(owner string) error { return a.finish(owner, false) }
+func (a AgentosdSetup) Finish(owner string) error { return a.finish(owner, false, Names{}) }
+
+// FinishNamed is Finish with the names the owner chose at setup (CH-21),
+// which agentosd checks again and records.
+func (a AgentosdSetup) FinishNamed(owner string, n Names) error { return a.finish(owner, false, n) }
 
 // finish is OpSetupFinish with card, the page's report that its Owner Card
-// is confirmed (CardFinish).
-func (a AgentosdSetup) finish(owner string, card bool) error {
-	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner, Card: card}, nil)
+// is confirmed (CardFinish), and the setup names.
+func (a AgentosdSetup) finish(owner string, card bool, n Names) error {
+	err := a.call(localapi.OpSetupFinish, localapi.Finish{Owner: owner, Card: card, Name: n.Box, OwnerName: n.Owner}, nil)
 	if refused(err, localapi.ErrEnrollUnavailable) {
 		return ErrCodesUnavailable
 	}
@@ -372,9 +376,11 @@ type CardFinish struct {
 	Again func() error
 }
 
-func (c CardFinish) Finish(owner string) error {
+func (c CardFinish) Finish(owner string) error { return c.FinishNamed(owner, Names{}) }
+
+func (c CardFinish) FinishNamed(owner string, n Names) error {
 	confirmed := c.Card != nil && c.Card.Hold() == nil
-	err := c.finish(owner, confirmed)
+	err := c.finish(owner, confirmed, n)
 	if !refused(err, localapi.ErrCardPending) || !confirmed || c.Again == nil {
 		return err
 	}

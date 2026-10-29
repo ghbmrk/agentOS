@@ -917,7 +917,9 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	if h := reachedHost(r); !s.cfg.HTTPS && r.TLS == nil && h != "" {
 		page = h
 	}
-	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:agentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
+	// The name holds only letters, spaces, hyphens and apostrophes
+	// (boxname.Check), none of which vCard escapes.
+	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:"+s.setup.cardName()+"\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
 }
 
 var msgs = map[string]string{
