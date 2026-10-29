@@ -49,9 +49,9 @@ allow evals/slice-inbox/
 # not name (D-198). Remove once #3746 merges.
 exempt-pr 3746
 
-# #3794 (VIS-faces-guards, #3792): tests in broker/cmd/agentos-vision/, which the G2 list does
-# not name (D-198). Remove once #3794 merges.
-exempt-pr 3794
+# #3803 (VIS-core e3, plates and sound, #3515): broker/vision/ (ASSUMPTIONS.md) and
+# broker/cmd/agentos-vision/, which the G2 list does not name (D-198). Remove once #3803 merges.
+exempt-pr 3803
 
 # Project machinery and records.
 allow .claude/
