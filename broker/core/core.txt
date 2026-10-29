@@ -58,6 +58,10 @@ core clerk/inbox
 # The clerk check path (MIG-4-adapters-f2, #3430): net-free, so agentosd can
 # host a clerk with it.
 core clerk/check
+# The CH-4 checker on the new core (MIG-4-exit-c2, D-226): it holds the code
+# seed alone and signs code approvals the kernel admits. checker stays above
+# until d2 deletes it with holder, which still links it.
+core clerk/codecheck
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived
 # from it. Only the unlock step (STO-2b) opens it.
 core clerk/seal

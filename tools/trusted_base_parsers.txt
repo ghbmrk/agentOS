@@ -67,6 +67,9 @@ inert github.com/ghbmrk/agentos/broker/clerk/check -- checks a request the kerne
 parser github.com/ghbmrk/agentos/broker/clerk/devhost -- a device driver's wire messages and the device's frames (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/devslot -- the driver wire's messages, from the host or a driver's process (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
+parser github.com/ghbmrk/agentos/broker/clerk/codecheck -- owner codes and the held steps they approve, from agentosd (uncertain; classed parser)
+inert  github.com/ghbmrk/agentos/broker/clerk/codecheck/totp -- computes and compares six-digit codes; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/clerk/codecheck/wire -- socket between trusted processes (agentosd and the checker); decodes only the checker's bounded answer
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server responses, in the mail clerk's connection process (go-imap; #2937 gap 2)
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- pre-auth lines and SMTP replies
