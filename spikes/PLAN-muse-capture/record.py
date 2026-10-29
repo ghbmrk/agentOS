@@ -1,22 +1,29 @@
-"""Shapes-only recorder for the PLAN-muse capture (#1379 slice (b)): a mitmproxy addon that stands
-between Muse Code and Meta, as fwd.py did for Codex in #809. It logs hosts, methods, paths, statuses,
-header names, quota-like header values and body shapes (key names, kinds, JWT claim names, short
-enum values under known-safe keys), never a token, cookie, prompt, reply or account value. Model
-calls are refused before they leave the machine unless MUSE_CAP_ALLOW_TURNS grants some, so a run
-spends no plan usage by default.
+"""Default-deny recording gate for the PLAN-muse capture (#1379 slice (b)): a mitmproxy addon
+between Muse Code and Meta. It refuses everything except what it is told to pass, and logs the
+shape of everything it sees (hosts, methods, paths with ids replaced, statuses, header names,
+quota-like header values, body key names and kinds, JWT claim names), never a token, cookie,
+prompt, reply or account value.
 
-Environment: MUSE_CAP_LOG (JSONL path, required), MUSE_CAP_PHASE (label written on each record),
-MUSE_CAP_ALLOW_TURNS (model calls to let through, default 0)."""
+What passes:
+- No-prompt phases (sign-in, reads, Contributor reads): an HTTP request whose method, host and
+  normalised path are a line of the allow file and whose body is empty, JSON or a form with no
+  model key. Its exact URL is added to the seen file.
+- Prompt phases (MUSE_CAP_STRICT=1): only a GET or HEAD with no body whose exact URL is in the
+  seen file, i.e. one already sent before any prompt existed. Nothing derived from a prompt can
+  leave in a URL or body; header values are the one channel not compared.
+Every other request is refused with 503 before it leaves, and every non-HTTP flow (raw TCP,
+UDP, websockets) is killed. An error in a hook refuses the request.
+
+Environment: MUSE_CAP_LOG (JSONL, required), MUSE_CAP_PHASE, MUSE_CAP_ALLOW (allow file),
+MUSE_CAP_SEEN (seen-URL file), MUSE_CAP_STRICT."""
 import base64, json, os, re, threading, time
 
 LOG = os.environ.get("MUSE_CAP_LOG", "")
 PHASE = os.environ.get("MUSE_CAP_PHASE", "")
 _lock = threading.Lock()
-_turns = [int(os.environ.get("MUSE_CAP_ALLOW_TURNS", "0") or 0)]
-# run.sh puts this token in every test prompt. Any request or client websocket message that
-# carries it, in any shape or encoding the recorder can decode, is a turn (or a copy of one) and
-# is refused unless a turn is granted: this fails closed where the key detector cannot.
-CANARY = os.environ.get("MUSE_CAP_CANARY", "").encode()
+ALLOW = os.environ.get("MUSE_CAP_ALLOW", "")
+SEEN = os.environ.get("MUSE_CAP_SEEN", "")
+STRICT = os.environ.get("MUSE_CAP_STRICT", "") == "1"
 
 # String values kept verbatim only under these keys, and only when short and token-free: they
 # name item types, roles, grant types, error codes and the like, which the declaration needs.
@@ -149,15 +156,13 @@ def headers(h, quota_values):
 
 
 def has_model_key(v, depth=0):
-    """True if a model key appears at any depth, including inside strings that parse as JSON
-    (GraphQL `variables`, form fields) and inside arrays (batched bodies)."""
     if depth > 32:
         return True
     if isinstance(v, dict):
         return bool(MODEL_KEYS & {str(k).lower() for k in v}) or any(has_model_key(x, depth + 1) for x in v.values())
     if isinstance(v, list):
         return any(has_model_key(x, depth + 1) for x in v)
-    if isinstance(v, (str, bytes)) and v[:1] in ("{", "[", b"{", b"["):
+    if isinstance(v, str) and v.strip()[:1] in ("{", "["):
         try:
             return has_model_key(json.loads(v), depth + 1)
         except Exception:
@@ -165,115 +170,73 @@ def has_model_key(v, depth=0):
     return False
 
 
-def body_has_model_key(raw):
+def lines(path):
+    try:
+        with open(path) as f:
+            return {l.strip() for l in f if l.strip() and not l.startswith("#")}
+    except FileNotFoundError:
+        return set()
+
+
+def body_ok(req):
+    """Empty, or JSON or a form, decoded strictly, with no model key at any depth."""
+    raw = req.get_content(strict=True)
     if not raw:
-        return False
-    if has_model_key(raw.strip()):
         return True
-    from urllib.parse import parse_qsl
-    try:
-        pairs = parse_qsl(raw.decode(errors="replace"))
-    except Exception:
-        return False
-    return any(k.lower() in MODEL_KEYS or has_model_key(v) for k, v in pairs)
-
-
-def carries_canary(*parts):
-    return bool(CANARY) and any(CANARY in p for p in parts if p)
-
-
-def readable(raw):
-    """The views of a body the canary is checked in, or None when the body cannot be fully
-    inspected (an undecodable content-encoding, binary or compressed data, UTF-16, control bytes). Such a
-    body is refused, so the guard fails closed on what it cannot read."""
-    if not raw:
-        return [b""]
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):  # binary framing
-        return None
-    from urllib.parse import unquote_plus
-    views = [text, unquote_plus(text)]
-    try:
-        views.append(json.dumps(json.loads(text), ensure_ascii=False))  # \u escapes
-    except Exception:
-        pass
-    for run in re.findall(r"[A-Za-z0-9+/_-]{16,}={0,2}", text):  # base64 of text
-        for dec in (base64.b64decode, base64.urlsafe_b64decode):
-            try:
-                views.append(dec(run + "=" * (-len(run) % 4)).decode("utf-8"))
-            except Exception:
-                pass
-    return [v.encode() for v in views]
-
-
-def body_views(req):
-    try:
-        raw = req.get_content(strict=True)
-    except Exception:
-        return None
-    return readable(raw or b"")
-
-
-def opaque_or_model_call(flow):
-    """("opaque", "canary" or "keys") for a request to refuse unless a turn is granted, else ""."""
-    req = flow.request
-    from urllib.parse import unquote_plus
-    if carries_canary(req.raw_content, req.path.encode(errors="replace"),
-                      unquote_plus(req.path).encode(errors="replace"),
-                      b"\n".join(v.encode(errors="replace") for v in req.headers.values())):
-        return "canary"
-    views = body_views(req)
-    if views is None:
-        return "opaque"
-    if carries_canary(*views):
-        return "canary"
-    if req.method in ("POST", "PUT", "PATCH") and body_has_model_key(views[0]):
-        return "keys"
-    return ""
-
-
-def take_turn():
-    if _turns[0] > 0:
-        _turns[0] -= 1
-        return True
+    ctype = req.headers.get("content-type", "").lower()
+    text = raw.decode("utf-8")
+    if "json" in ctype:
+        return not has_model_key(json.loads(text))
+    if "x-www-form-urlencoded" in ctype:
+        from urllib.parse import parse_qsl
+        pairs = parse_qsl(text, strict_parsing=True)
+        return not any(k.lower() in MODEL_KEYS or has_model_key(v) for k, v in pairs)
     return False
+
+
+def verdict(flow):
+    """"" to pass, else why the request is refused."""
+    req = flow.request
+    url = req.method + " " + req.pretty_url
+    if STRICT:
+        if req.method in ("GET", "HEAD") and not req.raw_content and url in lines(SEEN):
+            return ""
+        return "strict"
+    if req.method + " " + req.pretty_host + " " + norm_path(req.path) not in lines(ALLOW):
+        return "not-allowed"
+    if not body_ok(req):
+        return "body"
+    with _lock, open(SEEN, "a") as f:
+        f.write(url + "\n")
+    return ""
 
 
 def refuse(flow):
     from mitmproxy import http
-    flow.response = http.Response.make(503, b'{"error":"blocked by capture"}',
+    flow.response = http.Response.make(503, b'{"error":"refused by capture gate"}',
                                        {"content-type": "application/json"})
 
 
 class Recorder:
     def request(self, flow):
-        # Fail closed: the block is decided first, and any error refuses the request.
         req = flow.request
         rec = {"dir": "req"}
         try:
             rec.update(host=req.pretty_host, method=req.method, path=norm_path(req.path))
-            why = opaque_or_model_call(flow)
-            if why == "opaque":
-                rec.update(opaque=True, blocked=True)
+            why = verdict(flow)
+            if why:
+                rec["refused"] = why
                 refuse(flow)
-            elif why:
-                rec.update(model_call=True, why=why)
-                if not take_turn():
-                    rec["blocked"] = True
-                    refuse(flow)
             rec.update(query_keys=sorted(req.query.keys()), headers=headers(req.headers, False),
                        body=body_shape(req.get_content(strict=False), req.headers.get("content-type")))
         except Exception as e:
-            rec.update(blocked=True, error=type(e).__name__)
+            rec.update(refused="error", error=type(e).__name__)
             refuse(flow)
         flow.metadata["rec"] = rec
         log(rec)
 
     def response(self, flow):
-        if flow.metadata.get("rec", {}).get("blocked"):
+        if flow.metadata.get("rec", {}).get("refused"):
             return
         r = flow.response
         rec = {"dir": "resp", "host": flow.request.pretty_host, "method": flow.request.method,
@@ -285,37 +248,36 @@ class Recorder:
             rec["error"] = type(e).__name__
         log(rec)
 
-    def websocket_message(self, flow):
-        m = flow.websocket.messages[-1]
-        rec = {"dir": "ws-" + ("out" if m.from_client else "in"), "host": flow.request.pretty_host,
-               "path": norm_path(flow.request.path)}
-        try:
-            try:
-                rec["body"] = shape(json.loads(m.content))
-            except Exception:
-                rec["body"] = {"len": len(m.content)}
-            if m.from_client:
-                views = readable(m.content)
-                if views is None:
-                    rec.update(opaque=True, blocked=True)
-                    m.drop()
-                elif carries_canary(m.content, *views) or body_has_model_key(views[0]):
-                    rec["model_call"] = True
-                    if not take_turn():
-                        rec["blocked"] = True
-                        m.drop()
-        except Exception as e:
-            rec.update(blocked=True, error=type(e).__name__)
-            if m.from_client:
-                m.drop()
-        log(rec)
+    def websocket_start(self, flow):
+        flow.kill()
+        log({"dir": "killed", "kind": "websocket", "host": flow.request.pretty_host,
+             "path": norm_path(flow.request.path)})
+
+    def tcp_start(self, flow):
+        flow.kill()
+        log({"dir": "killed", "kind": "tcp", "host": str(flow.server_conn.address)})
+
+    def tcp_message(self, flow):
+        # A kill at start does not stop bytes already queued; empty and kill every message too.
+        flow.messages[-1].content = b""
+        if flow.killable:
+            flow.kill()
+
+    def udp_message(self, flow):
+        flow.messages[-1].content = b""
+        if flow.killable:
+            flow.kill()
+
+    def udp_start(self, flow):
+        flow.kill()
+        log({"dir": "killed", "kind": "udp", "host": str(flow.server_conn.address)})
 
     def error(self, flow):
         log({"dir": "error", "host": flow.request.pretty_host, "method": flow.request.method,
              "path": norm_path(flow.request.path), "error": str(flow.error)[:120]})
 
     def tls_failed_client(self, data):
-        # The client refused the recorder's certificate: it pins or ignores the CA bundle.
+        # The client refused the gate's certificate: it pins or ignores the CA bundle.
         log({"dir": "tls-refused", "sni": data.context.client.sni})
 
     def http_connect(self, flow):

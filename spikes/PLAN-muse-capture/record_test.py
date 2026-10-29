@@ -1,6 +1,7 @@
-"""Tests for record.py: the log holds shapes and never a canary value, and model calls are refused
-unless a turn is granted. Run: MUSE_CAP_LOG=x python3 -m pytest record_test.py (run.sh test)."""
-import base64, importlib, json, os, sys, tempfile
+"""Tests for record.py: the gate refuses by default, passes only allowed readable requests (and in
+strict phases only bodyless repeats of URLs already seen), kills non-HTTP flows, and the log holds
+shapes, never a canary value. Run: run.sh test."""
+import base64, gzip, importlib, json, os, sys, tempfile
 
 from mitmproxy.test import tflow, tutils
 
@@ -18,210 +19,142 @@ REFRESH = "mrt_CANARYrefreshTOKENvalue0123456789abcdef"
 PROMPT = "CANARY prompt text that must never be logged"
 
 
-def load(turns="0", canary=""):
-    log = tempfile.mktemp()
-    os.environ.update(MUSE_CAP_LOG=log, MUSE_CAP_PHASE="test", MUSE_CAP_ALLOW_TURNS=turns, MUSE_CAP_CANARY=canary)
+def load(allow=(), strict=False, seen=()):
+    d = tempfile.mkdtemp()
+    paths = {k: os.path.join(d, k) for k in ("log", "allow", "seen")}
+    with open(paths["allow"], "w") as f:
+        f.write("".join(a + "\n" for a in allow))
+    with open(paths["seen"], "w") as f:
+        f.write("".join(u + "\n" for u in seen))
+    os.environ.update(MUSE_CAP_LOG=paths["log"], MUSE_CAP_PHASE="test", MUSE_CAP_ALLOW=paths["allow"],
+                      MUSE_CAP_SEEN=paths["seen"], MUSE_CAP_STRICT="1" if strict else "")
     import record
     importlib.reload(record)
-    return record, log
+    return record, paths
 
 
-def records(log):
-    with open(log) as f:
+def text(path):
+    with open(path) as f:
         return f.read()
 
 
-def flow(path, body, resp=None, rhdrs=()):
-    f = tflow.tflow(req=tutils.treq(method=b"POST", path=path.encode(), content=json.dumps(body).encode(),
-                                    headers=((b"content-type", b"application/json"), (b"authorization", ("Bearer " + JWT).encode()))))
-    if resp is not None:
-        f.response = tutils.tresp(content=json.dumps(resp).encode(),
-                                  headers=((b"content-type", b"application/json"),) + tuple(rhdrs))
-    return f
+def recs(paths):
+    return [json.loads(l) for l in text(paths["log"]).splitlines()]
 
 
-def test_token_answer_logs_shapes_not_values():
-    rec, log = load()
-    f = flow("/oauth/token", {"grant_type": "refresh_token", "refresh_token": REFRESH},
-             {"access_token": JWT, "refresh_token": REFRESH, "id_token": JWT, "expires_in": 3600,
-              "account_id": 1234567890123, "token_type": "Bearer"},
-             ((b"x-ratelimit-remaining", b"42"), (b"set-cookie", b"s=CANARYCOOKIE")))
-    r = rec.Recorder()
-    r.request(f)
-    r.response(f)
-    out = records(log)
-    for canary in ("CANARYSUB123", "canary@example.invalid", REFRESH, JWT, "CANARYCOOKIE", "1234567890123", "c2lnbmF0dXJl"):
-        assert canary not in out
-    resp = [json.loads(l) for l in out.splitlines()][1]
-    body = resp["body"]["json"]
-    assert body["id_token"]["jwt_claims"] == ["contributor", "email", "sub"]
-    assert body["refresh_token"]["prefix"] == "mrt_"
-    assert body["expires_in"] == 3600 and body["account_id"] == "int"
-    assert body["token_type"] == "Bearer"
-    assert resp["headers"]["quota"] == {"x-ratelimit-remaining": "42"}
+def req(method=b"POST", path=b"/oauth/token", body=b"", ctype=b"application/json", extra=()):
+    hdrs = ((b"content-type", ctype), (b"authorization", ("Bearer " + JWT).encode())) + tuple(extra)
+    return tflow.tflow(req=tutils.treq(method=method, path=path, content=body, headers=hdrs))
 
 
-def test_model_call_blocked_by_default():
-    rec, log = load()
-    f = flow("/v1/turn", {"model": "muse-1", "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": PROMPT}]}]})
-    rec.Recorder().request(f)
-    assert f.response is not None and f.response.status_code == 503
-    out = records(log)
-    assert PROMPT not in out
-    r = json.loads(out)
-    assert r["blocked"] and r["model_call"]
-    item = r["body"]["json"]["input"][0]
-    assert item["type"] == "message" and item["role"] == "user" and item["content"][0]["type"] == "input_text"
-
-
-def test_granted_turn_passes_once():
-    rec, _ = load("1")
-    r = rec.Recorder()
-    first, second = (flow("/v1/turn", {"messages": [{"role": "user", "content": PROMPT}]}) for _ in range(2))
-    r.request(first)
-    r.request(second)
-    assert first.response is None
-    assert second.response is not None and second.response.status_code == 503
-
-
-def test_safe_key_value_with_token_run_is_shaped():
-    rec, _ = load()
-    assert rec.shape("x" * 30, "code") == {"len": 30, "cls": "a"}
-    assert rec.shape("invalid_grant", "error") == "invalid_grant"
-
-
-def test_path_ids_are_replaced():
-    rec, _ = load()
-    assert rec.norm_path("/v1/users/1234567890/settings?x=1") == "/v1/users/{id}/settings"
-    assert rec.norm_path("/a/0f8fad5b-d9cb-469f-a165-70867728950e") == "/a/{id}"
-
-
-def post(body, ctype):
-    return tflow.tflow(req=tutils.treq(method=b"POST", path=b"/api/graphql", content=body,
-                                       headers=((b"content-type", ctype),)))
-
-
-def blocked(rec, f):
+def refused(rec, f):
     rec.Recorder().request(f)
     return f.response is not None and f.response.status_code == 503
 
 
-def test_nested_model_bodies_blocked():
-    rec, log = load()
-    from urllib.parse import urlencode
-    shapes = [
-        (json.dumps({"doc_id": "1", "variables": {"input": {"message": {"text": PROMPT}}}}), b"application/json"),
-        (json.dumps({"doc_id": "1", "variables": json.dumps({"message": {"text": PROMPT}})}), b"application/json"),
-        (urlencode({"doc_id": "1", "variables": json.dumps({"message": {"sensitive_string_value": PROMPT}})}), b"application/x-www-form-urlencoded"),
-        (urlencode({"doc_id": "1", "prompt": PROMPT}), b"application/x-www-form-urlencoded"),
-        (json.dumps([{"messages": [{"role": "user", "content": PROMPT}]}]), b"application/json"),
-    ]
-    for body, ctype in shapes:
-        assert blocked(rec, post(body.encode(), ctype)), body
-    assert PROMPT not in records(log)
+TOKEN = "POST address /oauth/token"
 
 
-def test_read_without_model_key_passes():
-    rec, _ = load()
-    assert not blocked(rec, post(json.dumps({"doc_id": "1", "variables": {"id": "x"}}).encode(), b"application/json"))
+def test_token_answer_logs_shapes_not_values():
+    rec, p = load(allow=[TOKEN])
+    f = req(body=json.dumps({"grant_type": "refresh_token", "refresh_token": REFRESH}).encode())
+    r = rec.Recorder()
+    r.request(f)
+    assert f.response is None
+    f.response = tutils.tresp(content=json.dumps(
+        {"access_token": JWT, "refresh_token": REFRESH, "id_token": JWT, "expires_in": 3600,
+         "account_id": 1234567890123, "token_type": "Bearer"}).encode(),
+        headers=((b"content-type", b"application/json"), (b"x-ratelimit-remaining", b"42"), (b"set-cookie", b"s=CANARYCOOKIE")))
+    r.response(f)
+    out = text(p["log"])
+    for canary in ("CANARYSUB123", "canary@example.invalid", REFRESH, JWT, "CANARYCOOKIE", "1234567890123", "c2lnbmF0dXJl"):
+        assert canary not in out
+    body = recs(p)[1]["body"]["json"]
+    assert body["id_token"]["jwt_claims"] == ["contributor", "email", "sub"]
+    assert body["refresh_token"]["prefix"] == "mrt_"
+    assert body["expires_in"] == 3600 and body["account_id"] == "int"
+    assert recs(p)[1]["headers"]["quota"] == {"x-ratelimit-remaining": "42"}
 
 
-def test_websocket_turn_dropped_unless_granted():
-    from mitmproxy.websocket import WebSocketMessage
-    for turns, dropped in (("0", True), ("1", False)):
-        rec, log = load(turns)
-        f = tflow.twebsocketflow()
-        f.websocket.messages.append(WebSocketMessage(1, True, json.dumps({"type": "turn", "input": [{"text": PROMPT}]}).encode()))
-        rec.Recorder().websocket_message(f)
-        assert f.websocket.messages[-1].dropped is dropped
-        assert PROMPT not in records(log)
+def test_default_deny():
+    rec, p = load()
+    assert refused(rec, req(body=b'{"a":1}'))
+    assert refused(rec, req(method=b"GET", path=b"/me"))
+    assert recs(p)[0]["refused"] == "not-allowed"
 
 
-def test_mid_length_ids_and_device_codes_are_shaped():
-    rec, _ = load()
-    assert rec.norm_path("/v1/acct/a1b2c3d4e5f6/x") == "/v1/acct/{id}/x"
-    assert rec.norm_path("/v1/graphql") == "/v1/graphql"
-    assert rec.shape("ABCD-EFGH", "code") == {"len": 9, "cls": "A-"}
-    assert rec.shape("authorization_pending", "code") == "authorization_pending"
+def test_allowed_endpoint_refuses_unreadable_or_model_bodies():
+    rec, _ = load(allow=[TOKEN])
+    said = PROMPT.encode()
+    for body, ctype, extra in (
+            (said, b"application/json", ((b"content-encoding", b"snappy"),)),
+            (said, b"application/json", ((b"content-encoding", b"gzip, br"),)),
+            (gzip.compress(said), b"application/octet-stream", ()),
+            (b"\x0a\x03abc", b"application/grpc", ()),
+            (PROMPT.encode("utf-16"), b"text/plain", ()),
+            (b"--XyZ\r\n\r\n" + said + b"\r\n--XyZ--", b"multipart/form-data; boundary=XyZ", ()),
+            (json.dumps({"doc_id": "1", "variables": json.dumps({"message": PROMPT})}).encode(), b"application/json", ()),
+            (b"q=" + said, b"text/plain", ())):
+        assert refused(rec, req(body=body, ctype=ctype, extra=extra)), body[:20]
+    assert not refused(rec, req(body=b"grant_type=device_code&device_code=x", ctype=b"application/x-www-form-urlencoded"))
 
 
-CANARY = "mcapcanary0f3a9c1e7b"
+def test_allowed_request_records_its_url_for_strict_phases():
+    rec, p = load(allow=["GET address /v1/me"])
+    assert not refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", ctype=b"text/plain"))
+    assert "GET http://address:22/v1/me?fields=a" in text(p["seen"])
 
 
-def test_canary_blocks_any_shape():
-    rec, log = load(canary=CANARY)
-    said = "Reply ok. " + CANARY
-    for body, ctype in ((b"\x0a\x2d" + said.encode(), b"application/grpc"),
-                        (json.dumps({"event": "prompt_submitted", "text": said}).encode(), b"application/json"),
-                        (json.dumps({"query": said}).encode(), b"application/json"),
-                        (b"--XyZ\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n" + said.encode() + b"\r\n--XyZ--\r\n", b"multipart/form-data; boundary=XyZ")):
-        assert blocked(rec, post(body, ctype)), body
-    get = tflow.tflow(req=tutils.treq(method=b"GET", path=("/log?q=" + CANARY).encode()))
-    assert blocked(rec, get)
-    out = records(log)
-    assert CANARY not in out and "Reply ok." not in out
-
-
-def test_canary_websocket_dropped():
-    from mitmproxy.websocket import WebSocketMessage
-    rec, _ = load(canary=CANARY)
-    f = tflow.twebsocketflow()
-    f.websocket.messages.append(WebSocketMessage(2, True, b"\x08\x01" + CANARY.encode()))
-    rec.Recorder().websocket_message(f)
-    assert f.websocket.messages[-1].dropped
-
-
-def enc_post(body, hdrs):
-    return tflow.tflow(req=tutils.treq(method=b"POST", path=b"/x", content=body, headers=hdrs))
-
-
-def test_uninspectable_bodies_refused_and_logged():
-    import gzip
-    from urllib.parse import quote
-    rec, log = load(canary=CANARY)
-    said = "Reply ok. " + CANARY
-    cases = [
-        (said.encode(), ((b"content-encoding", b"snappy"),)),
-        (said.encode(), ((b"content-encoding", b"gzip, br"),)),
-        (gzip.compress(said.encode()), ((b"content-type", b"application/octet-stream"),)),
-        (b"\x01\x00\x00\x00\x20" + gzip.compress(said.encode()), ((b"content-type", b"application/grpc"), (b"grpc-encoding", b"gzip"))),
-        (said.encode("utf-16"), ((b"content-type", b"text/plain"),)),
-        (b"\x0a\x03abc", ((b"content-type", b"application/grpc"),)),  # binary, no canary: still refused
-    ]
-    for body, hdrs in cases:
-        assert blocked(rec, enc_post(body, hdrs)), (body[:20], hdrs)
-    recs = [json.loads(l) for l in records(log).splitlines()]
-    assert len(recs) == len(cases) and all(r["blocked"] for r in recs)
-
-
-def test_canary_seen_through_text_encodings():
-    from urllib.parse import quote
-    rec, _ = load(canary=CANARY)
-    said = "Reply ok. " + CANARY
-    for body in (json.dumps({"p": base64.b64encode(said.encode()).decode()}),
-                 json.dumps({"p": said}, ensure_ascii=True).replace(CANARY[:4], "\\u006d\\u0063\\u0061\\u0070"),
-                 "q=" + "".join("%%%02X" % c for c in said.encode())):
-        assert blocked(rec, post(body.encode(), b"application/json")), body
+def test_strict_passes_only_bodyless_repeats_of_seen_urls():
+    seen = ["GET http://address:22/v1/me?fields=a"]
+    rec, p = load(allow=[TOKEN, "GET address /v1/me"], strict=True, seen=seen)
+    assert not refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", ctype=b"text/plain"))
+    assert refused(rec, req(method=b"GET", path=b"/v1/me?fields=b", ctype=b"text/plain"))  # new query
+    assert refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", body=b"x", ctype=b"text/plain"))
+    assert refused(rec, req(body=b'{"grant_type":"x"}'))  # allowed in no-prompt phases, not here
+    assert PROMPT not in text(p["log"])
 
 
 def test_hook_error_refuses():
-    rec, log = load(canary=CANARY)
-    f = post(b'{"a":1}', b"application/json")
+    rec, p = load(allow=[TOKEN])
     orig = rec.body_shape
     rec.body_shape = lambda *a: 1 / 0
     try:
+        f = req(body=b'{"a":1}')
         rec.Recorder().request(f)
     finally:
         rec.body_shape = orig
     assert f.response.status_code == 503
-    r = json.loads(records(log))
-    assert r["blocked"] and r["error"] == "ZeroDivisionError"
+    assert recs(p)[0]["refused"] == "error"
 
 
-def test_binary_websocket_message_dropped():
-    from mitmproxy.websocket import WebSocketMessage
-    rec, _ = load(canary=CANARY)
-    f = tflow.twebsocketflow()
-    f.websocket.messages.append(WebSocketMessage(2, True, b"\xff\x00\x13"))
-    rec.Recorder().websocket_message(f)
-    assert f.websocket.messages[-1].dropped
+def test_non_http_flows_killed():
+    rec, p = load()
+    r = rec.Recorder()
+    t = tflow.ttcpflow()
+    r.tcp_start(t)
+    u = tflow.tudpflow()
+    r.udp_start(u)
+    w = tflow.twebsocketflow()
+    r.websocket_start(w)
+    assert t.error and u.error and w.error
+    assert [x["kind"] for x in recs(p)] == ["tcp", "udp", "websocket"]
+
+
+def test_path_ids_and_codes_are_shaped():
+    rec, _ = load()
+    assert rec.norm_path("/v1/users/1234567890/settings?x=1") == "/v1/users/{id}/settings"
+    assert rec.norm_path("/a/0f8fad5b-d9cb-469f-a165-70867728950e") == "/a/{id}"
+    assert rec.norm_path("/v1/acct/a1b2c3d4e5f6/x") == "/v1/acct/{id}/x"
+    assert rec.shape("ABCD-EFGH", "code") == {"len": 9, "cls": "A-"}
+    assert rec.shape("authorization_pending", "code") == "authorization_pending"
+    assert rec.shape("x" * 30, "code") == {"len": 30, "cls": "a"}
+
+
+def test_non_http_messages_emptied():
+    from mitmproxy.tcp import TCPMessage
+    rec, _ = load()
+    t = tflow.ttcpflow()
+    t.messages.append(TCPMessage(True, b"\x10\x2aMQTT " + PROMPT.encode()))
+    rec.Recorder().tcp_message(t)
+    assert t.messages[-1].content == b""
