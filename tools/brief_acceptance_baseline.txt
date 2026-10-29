@@ -259,7 +259,6 @@ UPD-c.md
 UX-41-2.md
 UX3-1.md
 UX3-6.md
-UX3-7.md
 UX4-1.md
 UX4-2.md
 W1.md

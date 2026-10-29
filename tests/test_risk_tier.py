@@ -25,6 +25,11 @@ class RiskTierTest(unittest.TestCase):
             "tools/risk_tier.py": "A",
             "tools/ci_scope.py": "A",
             "tools/ci_split.py": "A",
+            # REQ: HW-8 (RT-2 #801): the host check and its allow list set what counts as disclosed.
+            "tools/hostcheck.py": "A",
+            "tools/hostcheck_hw8.json": "A",
+            "tools/hostcheck_standin.sh": "A",
+            "tests/test_hostcheck.py": "A",
             "tools/g1_scope_g2.txt": "A",
             "broker/daemon/daemon.go": "A",
             "broker/cmd/agentosd/main.go": "A",

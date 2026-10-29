@@ -447,7 +447,7 @@ func TestRequestEachGivesEveryItemItsOwnCode(t *testing.T) {
 	}
 	text := r.inbox()
 	m := regexp.MustCompile(`Reply YES ([A-Z][0-9]{1,2}) ([0-9]{6})`).FindAllStringSubmatch(text, -1)
-	if len(m) != 2 || m[0][2] == m[1][2] || strings.Count(text, "re-sent after restart") != 1 || !strings.Contains(text, "asked 11:50, re-sent after restart") || !strings.Contains(text, "Expires 12:05") {
+	if len(m) != 2 || m[0][2] == m[1][2] || strings.Count(text, "before a restart") != 1 || !strings.Contains(text, "Asked 11:50, before a restart.") || !strings.Contains(text, "Expires 12:05") {
 		t.Fatalf("text %q", text)
 	}
 	select {

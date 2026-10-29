@@ -99,7 +99,7 @@ func TestOP2UnclearEffectIsParkedAndRetriedOnlyOnTheOwnersWord(t *testing.T) {
 	}
 	m := retryCodeRe.FindStringSubmatch(req)
 	first := ps[0].Dispatched.In(time.Local).Format("15:04 Jan 2")
-	if m == nil || !strings.Contains(req, "a setting change") || !strings.Contains(req, "may go twice, first tried "+first) ||
+	if m == nil || !strings.Contains(req, "a setting change") || !strings.Contains(req, "may go twice; first tried "+first) ||
 		strings.Contains(strings.ToLower(req), "for all") {
 		t.Fatalf("request %q", req)
 	}

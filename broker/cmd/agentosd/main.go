@@ -655,6 +655,12 @@ func main() {
 				}
 			}
 			return err
+		}, func(lineage string, since time.Time) ([]string, error) {
+			// What a reader queued since its read is closed (#3704).
+			if d := served.Load(); d != nil {
+				return d.Gate().VoidSince(lineage, since)
+			}
+			return nil, errors.New("the approval queue is not open")
 		})
 		cfg.Notes = append(cfg.Notes, eraseBack.Note, forgetStatus(*seat))
 		// Backups (BAK-1, e4a): daily and at once, and STATUS's
