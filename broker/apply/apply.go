@@ -329,9 +329,9 @@ type refusal struct {
 // New loads the applier's state. A pending release is not kept across a
 // restart (a *update.Verified is never persisted): its adoption is
 // retired and settled with StageDropped by the next Tick, and the
-// release is scheduled again only under a new adoption ID, once BOARD
-// SR3-4f-2-r1 lands (SR3-4f-2b). A pending release whose handover is in
-// flight is left to Resume.
+// release can be scheduled again only under a new adoption ID, by the A1
+// wiring (SR3-4f-2b; ASSUMPTIONS MIG-4-adapters-e-pin). A pending release
+// whose handover is in flight is left to Resume.
 func New(cfg Config) (*Applier, error) {
 	if cfg.Kernel == nil || cfg.Activator == nil || cfg.Store == nil || cfg.Pipeline == nil || cfg.State == nil ||
 		cfg.InCall == nil || cfg.Working == nil || cfg.Stopped == nil {
@@ -535,7 +535,7 @@ const (
 
 // waitLines say why an update waits (UX-133-3).
 var waitLines = map[string]string{
-	busyPinned:   "Update %d waits because your update channel is pinned.",
+	busyPinned:   "Update %d waits because you pinned your update channel. Nothing is needed from you.",
 	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
 	busyCall:     "Update %d will install after the current call.",
 	busyWork:     "Update %d will install once my current task is done.",
@@ -577,8 +577,8 @@ func (a *Applier) Tick(ctx context.Context) (ok bool, err error) {
 	if p.Security && !a.rel.Security() || a.refused.adoption != "" && a.refused.adoption == p.Adoption {
 		// The attestor policy narrowed since it was scheduled (SR3-6):
 		// drop the automatic authorization and settle the adoption
-		// (SR3-4f-2b). The release is adopted again only under a new
-		// ID, under the current policy, once SR3-4f-2-r1 lands.
+		// (SR3-4f-2b). The release can be adopted again only under a
+		// new ID, under the current policy, by the A1 wiring.
 		a.st.Pending, a.rel = nil, nil
 		retire(&a.st, p.Adoption)
 		err := a.saveLocked()
@@ -1487,26 +1487,38 @@ const (
 	mayStartLine  = "Update %d failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
 )
 
-// The lines for a release withdrawn, or being withdrawn, because the owner
-// pinned the update channel after the handover (#3699).
+// The lines for a release the activator took (#3829), and for one
+// withdrawn because the owner pinned the update channel after the
+// handover (#3699).
 const (
-	pinnedLine       = "Update %d is withdrawn because your update channel is pinned; I will not start it."
-	pinnedHeldLine   = "Update %d waits because your update channel is pinned; I will not restart into it."
+	installingLine   = "Update %d is installing; I will restart and check it."
+	mayRunLine       = "Update %d may have started already. Nothing is needed from you."
+	pinnedHeldLine   = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
+	pinnedMayRunLine = "Update %d was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
+	pinnedLine       = "Update %d was withdrawn because you pinned your update channel; I will not start it. Nothing is needed from you."
 	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
-// pinnedHandoverLocked: pt was handed over in this boot and the channel
-// is pinned, or its pin withdrawal is under way, so the next Tick or Pin
-// withdraws it rather than restart into it. A later boot is not taken
-// for it: the new slot may already run, and then it stays (Security
-// release 2 on #3812). unread: the boot cannot be read, so it may be
-// either, and no Tick restarts (Security release 1 on #3822).
-func (a *Applier) pinnedHandoverLocked(pt *point) (here, unread bool) {
-	if !pt.Installed || a.executing || !pt.Pinned && !a.cfg.Paused() {
-		return false, false
-	}
+// installedLineLocked is STATUS for pt, a release the activator took.
+// Only in the boot it was handed over in does the line say what comes
+// next: a restart into it, or none while the channel is pinned or pt's
+// pin withdrawal is under way (pinned or not since), when the next Tick
+// or Pin withdraws it. A later boot may already run it, and then it stays
+// (Security release 2 on #3812); a boot that cannot be read may be
+// either; and a restart already under way when the owner pinned may
+// start it. Each of those says it may have started (#3829).
+func (a *Applier) installedLineLocked(pt *point) string {
+	pinned := pt.Pinned || a.cfg.Paused()
 	b, err := a.cfg.Activator.Booted(context.Background())
-	return err == nil && b.ID == pt.BootID, err != nil
+	switch here := err == nil && b.ID == pt.BootID; {
+	case here && !pinned:
+		return fmt.Sprintf(installingLine, pt.To)
+	case here && a.restarting != pt.ID:
+		return fmt.Sprintf(pinnedHeldLine, pt.To)
+	case pinned:
+		return fmt.Sprintf(pinnedMayRunLine, pt.To)
+	}
+	return fmt.Sprintf(mayRunLine, pt.To)
 }
 
 // Status is the applier's STATUS line, or "": an update installing or
@@ -1524,14 +1536,7 @@ func (a *Applier) Status() string {
 		}
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
-		here, unread := a.pinnedHandoverLocked(a.st.Applying)
-		if here {
-			return fmt.Sprintf(pinnedLine, a.st.Applying.To)
-		}
-		if unread {
-			return fmt.Sprintf(pinnedHeldLine, a.st.Applying.To)
-		}
-		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
+		return a.installedLineLocked(a.st.Applying)
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
 		if now := a.cfg.Now(); a.cfg.Paused() || !now.Before(a.st.Pending.NotBefore) {

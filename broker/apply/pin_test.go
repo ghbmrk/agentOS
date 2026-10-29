@@ -22,7 +22,10 @@ import (
 // TestBusyBoxHoldsActivation.
 
 const (
-	pinnedStatus = "Update 1 is withdrawn because your update channel is pinned; I will not start it."
+	pinnedStatus = "Update 1 was withdrawn because you pinned your update channel; I will not start it. Nothing is needed from you."
+	heldStatus   = "Update 1 is held because you pinned your update channel; I will not start it. Nothing is needed from you."
+	pinnedMayRun = "Update 1 was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
+	pinnedWait   = "Update 1 waits because you pinned your update channel. Nothing is needed from you."
 	pinnedDigest = "Update 1 was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
@@ -82,7 +85,7 @@ func TestPinAfterHandoverWithdrawsTheRelease(t *testing.T) {
 			t.Run(fmt.Sprintf("%s security=%v", by, security), func(t *testing.T) {
 				r := installedHeld(t, security)
 				r.paused = true
-				if got := r.a.Status(); got != pinnedStatus {
+				if got := r.a.Status(); got != heldStatus {
 					t.Fatalf("status once pinned %q", got)
 				}
 				if by == "Pin" {
@@ -144,7 +147,7 @@ func TestPinWithdrawalSurvivesACut(t *testing.T) {
 		if ok, err := r.a.Tick(ctx); ok || !errors.Is(err, errIO) || r.act.restarts != 0 {
 			t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
 		}
-		if got := r.a.Status(); got != pinnedStatus {
+		if got := r.a.Status(); got != heldStatus {
 			t.Fatalf("status %q", got)
 		}
 		r.act.abandonErr = nil
@@ -185,15 +188,21 @@ func TestPinRacesTheRestart(t *testing.T) {
 		r := installedHeld(t, false)
 		r.working = false
 		var during error
+		var status string
 		r.act.onRestart = func() {
 			r.paused = true
 			during = r.a.Pin(ctx)
+			status = r.a.Status()
 		}
 		if ok, err := r.a.Tick(ctx); !ok || err != nil {
 			t.Fatalf("tick: %v %v", ok, err)
 		}
 		if !starts(t, during) {
 			t.Fatal("a restart under way did not say it may start")
+		}
+		// #3829; mutant: drop the restart check from installedLineLocked.
+		if status != pinnedMayRun {
+			t.Fatalf("status during the restart %q", status)
 		}
 	})
 	t.Run("pinned before it", func(t *testing.T) {
@@ -250,7 +259,7 @@ func TestPinnedDuringTheJitterSaysPaused(t *testing.T) {
 	r := newRig(t)
 	r.must(r.a.Schedule(r.release(1, false), "a1"))
 	r.paused = true
-	if got := r.a.Status(); got != "Update 1 waits because your update channel is pinned." {
+	if got := r.a.Status(); got != pinnedWait {
 		t.Fatalf("status %q", got)
 	}
 	r.paused = false
@@ -289,7 +298,7 @@ func TestPinBetweenAuthorizeAndExecuteIsRefused(t *testing.T) {
 	if len(r.act.installed) != 0 || r.saved().Applying != nil {
 		t.Fatalf("handed over after the pin: installed %v, applying %+v", r.act.installed, r.saved().Applying)
 	}
-	if got := r.a.Status(); got != "Update 1 waits because your update channel is pinned." {
+	if got := r.a.Status(); got != pinnedWait {
 		t.Fatalf("status %q", got)
 	}
 	r.must(r.act.Restart(ctx))
@@ -319,7 +328,7 @@ func TestPinnedLineOnlyInTheHandoverBoot(t *testing.T) {
 	r.restart()
 	r.must(r.a.Resume(ctx))
 	r.must(r.a.Pin(ctx))
-	if got := r.a.Status(); got == pinnedStatus {
+	if got := r.a.Status(); got != pinnedMayRun {
 		t.Fatalf("status %q while the new slot runs", got)
 	}
 	r.act.boot.Blessed = true
@@ -348,13 +357,82 @@ func TestPinWithAnUnreadableBootIsNotTaken(t *testing.T) {
 	r.pinWithdrawn()
 }
 
-// Security release 1 on #3822: a pin withdrawal whose Abandon failed,
-// or a pin not yet marked, while the boot cannot be read: no Tick
-// restarts, so STATUS promises neither a start nor a restart; once the
-// boot reads as the handover boot it says withdrawn.
-// Mutant: drop the unreadable-boot case from Status.
+// #3829 (release findings of #3828's reviews, its UX lens): STATUS for a
+// release the activator took, for each state of the pin (none, the
+// channel pinned, a pin withdrawal under way, both) and the boot (the
+// handover boot, a later one, unreadable). Only the handover boot is
+// promised a next step: a restart unpinned, none pinned or marked, and a
+// Tick there does exactly that. A later boot (the new slot running, its
+// health check not run yet) or an unreadable one may already run it.
+// Each wait or problem line ends with what the owner needs (CH-12).
+// Mutants: drop pt.Pinned from installedLineLocked, and a marked
+// withdrawal after an unpin promises a restart; take every boot for
+// unreadable, or for the handover boot, and the other rows fail.
+func TestInstalledStatusByPinAndBoot(t *testing.T) {
+	const (
+		installing = "Update 1 is installing; I will restart and check it."
+		mayRun     = "Update 1 may have started already. Nothing is needed from you."
+	)
+	for _, boot := range []string{"handover", "later", "unreadable"} {
+		for _, marked := range []bool{false, true} {
+			for _, pinned := range []bool{false, true} {
+				name := fmt.Sprintf("%s boot marked=%v pinned=%v", boot, marked, pinned)
+				t.Run(name, func(t *testing.T) {
+					ctx := context.Background()
+					r := installedHeld(t, false)
+					if marked {
+						r.paused, r.act.abandonErr = true, errIO
+						if err := r.a.Pin(ctx); !errors.Is(err, ErrApplying) {
+							t.Fatalf("pin taken: %v", err)
+						}
+						if pt := r.saved().Applying; pt == nil || !pt.Pinned {
+							t.Fatalf("not marked pinned: %+v", pt)
+						}
+						r.act.abandonErr = nil
+					}
+					r.paused = pinned
+					switch boot {
+					case "later":
+						r.act.pending = true
+						r.must(r.act.Restart(ctx))
+						r.restart()
+						r.must(r.a.Resume(ctx))
+					case "unreadable":
+						r.act.bootedErr = errIO
+					}
+					want := mayRun
+					switch {
+					case boot == "handover" && !marked && !pinned:
+						want = installing
+					case boot == "handover":
+						want = heldStatus
+					case marked || pinned:
+						want = pinnedMayRun
+					}
+					if got := r.a.Status(); got != want {
+						t.Fatalf("status %q, want %q", got, want)
+					}
+					if boot != "handover" {
+						return
+					}
+					r.working = false
+					restarts := r.act.restarts
+					if _, err := r.a.Tick(ctx); err != nil {
+						t.Fatalf("tick: %v", err)
+					}
+					if started := r.act.restarts > restarts; started != (want == installing) {
+						t.Fatalf("%q, but the tick restarted: %v", want, started)
+					}
+				})
+			}
+		}
+	}
+}
+
+// Security release 1 on #3822: no Tick restarts a pinned handover while
+// the boot cannot be read; once it reads as the handover boot, STATUS
+// says held.
 func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
-	const held = "Update 1 waits because your update channel is pinned; I will not restart into it."
 	for _, marked := range []bool{true, false} {
 		r := installedHeld(t, false)
 		r.paused = true
@@ -363,19 +441,16 @@ func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 			if err := r.a.Pin(context.Background()); !errors.Is(err, ErrApplying) {
 				t.Fatalf("pin taken: %v", err)
 			}
-			if pt := r.saved().Applying; pt == nil || !pt.Pinned {
-				t.Fatalf("not marked pinned: %+v", pt)
-			}
 		}
 		r.act.bootedErr = errIO
-		if got := r.a.Status(); got != held {
+		if got := r.a.Status(); got != pinnedMayRun {
 			t.Fatalf("marked %v: status %q", marked, got)
 		}
 		if _, err := r.a.Tick(context.Background()); err == nil || r.act.restarts != 0 {
 			t.Fatalf("marked %v: tick %v, restarts %d", marked, err, r.act.restarts)
 		}
 		r.act.bootedErr, r.act.abandonErr = nil, nil
-		if got := r.a.Status(); got != pinnedStatus {
+		if got := r.a.Status(); got != heldStatus {
 			t.Fatalf("marked %v: status %q", marked, got)
 		}
 	}

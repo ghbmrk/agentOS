@@ -51,8 +51,9 @@ func TestSecurityFixAppliesAtTheNextQuietMomentAndCommitsAfterHealthCheck(t *tes
 	if st, ok, _ := r.store.Staged(); !ok || st.Version != 1 {
 		t.Fatal("not staged before the restart")
 	}
-	if !strings.Contains(r.a.Status(), "restart") {
-		t.Fatalf("status: %q", r.a.Status())
+	// Restarted, before Resume settles it: no restart is promised (#3829).
+	if got := r.a.Status(); got != "Update 1 may have started already. Nothing is needed from you." {
+		t.Fatalf("status: %q", got)
 	}
 
 	r.restart()
