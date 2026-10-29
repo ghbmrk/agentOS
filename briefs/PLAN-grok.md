@@ -4,7 +4,7 @@ Work item #1378. Tier A. Re-briefed 2026-10-29 onto the model clerk (CLK-7); the
 
 **What carries over.** D-117: terms verdict `allowed` (x.ai/legal/terms-of-service, read 2026-10-13; the credential-sharing clause does not reach the owner's own box), the clerk holds the login, plan login only, no API key (Mark, 2026-10-14, cmsg_01R63S2yrPkq32thy8WQCuvDToGvZ2vEYNyb3st7AwrJwn and cmsg_01R63S2yrPkq32thy8WQCuvDYTgmCCEorhYYFX8R3HrbkN). Under CLK-7 that is mode `permitted`. No Grok-specific criteria beyond CLK-7. PR #2439 (old core) declared the route gated until qualified; nothing of it is reused.
 
-**Needs.** PLAN-muse slice (a), PLAN-slots (`briefs/PLAN-muse.md`): several plan logins in one model clerk, owner calls that name their plan. If PLAN-muse (c) added `Require` settings or a second `Body` format, reuse them; this row adds neither unless its capture demands it.
+**Needs.** PLAN-muse slice (a), PLAN-slots (`briefs/PLAN-muse.md`): several plan logins in one model clerk, owner and sign-in socket calls that name their plan. Slice (b)'s wiring also needs #3927's Grok slice. If PLAN-muse (c) added `Require` settings or a second `Body` format, reuse them; this row adds neither unless its capture demands it.
 
 **What is not known.** Nothing of Grok Build's (`grok`) traffic has been measured. The declaration is a measured artifact, so it waits for slice (a) below, which needs Mark's own Grok plan.
 
@@ -27,7 +27,7 @@ Needs Mark: a signed-in Grok plan, in a supervised session, as S8-live (#809) di
 1. **`plan.Grok(guard)`** in `broker/clerk/plan`, from the capture, with `Mode: Permitted` and `Version: "grok-<cli version>-1"`; **`run.GrokSignIn()`** with `From: "xAI"`.
 2. **Pool** (RES-5): from the captured headers; none gives no reading, recorded in ASSUMPTIONS.
 3. If the capture shows a request format the declared `Body` shapes do not cover, add it with the same refusals (hosted tools, remote content, server-side state); over about 400 lines, split first.
-4. **Wire it:** `declarations(guard)` in `agentos-clerk-model` gains `plan.Grok`. Wiring is the listing (HLD-3).
+4. **Wire it:** `declarations(guard)` in `agentos-clerk-model` gains `plan.Grok`. Wiring is the listing (HLD-3), so it lands only after #3927's Grok slice (the Grok guest image and agentosd's Grok sign-in machine) has merged.
 
 **Requirement IDs (b):** CLK-1, CLK-3, CLK-4, CLK-7, PLN-5, RES-5.
 
@@ -50,6 +50,6 @@ Needs Mark: a signed-in Grok plan, in a supervised session, as S8-live (#809) di
 
 **Conflict (D-111), 2026-10-29 19:30Z.** Same files as PLAN-muse (a) and (c): build after each has merged, never beside them.
 
-**Not here.** The Grok guest itself (image, inbound API, configuration template with cloud and remote features off, D-138) and its qualification run (HLD-3, HLD-6).
+**Not here.** The Grok guest itself (image, inbound API, configuration template with cloud and remote features off, D-138), agentosd's per-plan sign-in machine and the qualification run (HLD-3, HLD-6): #3927.
 
 **Usage estimate:** (a) one supervised session with Mark; (b) about 90k tokens. Builder model: strongest (tier A). Reviews: L3 and Security.

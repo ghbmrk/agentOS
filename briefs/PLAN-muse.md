@@ -15,16 +15,18 @@ Work item #1379. Tier A. Re-briefed 2026-10-29 onto the model clerk (CLK-7); the
 Capture-independent; build now, before #2780(b) wires `PlanOwner`, so `cmd/agentosd` is wired once.
 1. **One `Login` per wired declaration**, each in its own sealed slot `plan-<name>` (the Codex slot keeps its name, so a stored login survives). `agentos-clerk-model` builds them from one list, `declarations(guard)`, which holds only `plan.Codex` until slice (c). A declaration on that list is a qualified route (HLD-3): a plan is listed only once a release wires it, so no separate qualification flag is needed.
 2. **Owner calls name their plan.** Every `plan*` call carries `{"plan":"<name>"}`; an unknown name is refused (`plan-unknown`) with nothing done. `run.PlanOwner`'s methods take the plan name. `ServePlanOwner` serves a set of `PlanHost`s keyed by name, each with its own `SignInPrompt`, and the API-key calls on the same socket are unchanged. One sign-in waits at a time per plan.
-3. **Nothing crosses plans.** A placeholder minted by one plan's `Login` resolves at no other (each `Login` mints its own); a stop, consent or removal of one plan leaves the others as they were (CLK-7 Control: pause and stops are per plan).
+3. **Sign-in socket calls name their plan** (#3922 L3 1). `run.SignInSock`'s calls to agentosd's sign-in host (`signinroute`, `signinstart`, `signinread`, `signinstop`, `broker/clerk/run/signinsock.go`) carry `{"plan":"<name>"}` beside `guest`, set from the `PlanHost` that started the sign-in. agentosd's host (`broker/cmd/agentosd/signinhost.go`) decodes without `DisallowUnknownFields`, so it ignores the field until #3927 gives it one sign-in machine per plan; agentosd is not touched here. Codex sends `"codex"`.
+4. **Nothing crosses plans.** A placeholder minted by one plan's `Login` resolves at no other (each `Login` mints its own); a stop, consent or removal of one plan leaves the others as they were (CLK-7 Control: pause and stops are per plan).
 
 **Requirement IDs (a):** CLK-1, CLK-7, PLN-5.
 
-**Scope (a):** `broker/cmd/agentos-clerk-model/main.go` (and its test), `broker/clerk/run/plansignin.go`, `broker/clerk/run/plansignin_test.go`, `broker/clerk/run/ASSUMPTIONS.md`, this brief.
+**Scope (a):** `broker/cmd/agentos-clerk-model/main.go` (and its test), `broker/clerk/run/plansignin.go`, `broker/clerk/run/plansignin_test.go`, `broker/clerk/run/signinsock.go`, `broker/clerk/run/signinsock_test.go`, `broker/clerk/run/ASSUMPTIONS.md`, this brief.
 
 **Acceptance tests (a):**
 - `broker/clerk/run/plansignin_test.go::TestPlanOwnerCallsNameTheirPlan` (CLK-7): with two plans served, begin, state, resume and remove act on the named plan only; an unknown or missing name is refused and changes nothing. Fails if a call falls through to a default plan.
 - `broker/clerk/run/plansignin_test.go::TestPlanPlaceholdersDoNotCrossPlans` (CLK-1): a guest's placeholder from plan A sent to plan B's endpoint is refused with nothing sent upstream.
 - `broker/clerk/run/plansignin_test.go::TestPlanStopsArePerPlan` (CLK-7): an unswappable or refused-login stop, a removal and a withdrawn consent on one plan leave the other serving.
+- `broker/clerk/run/signinsock_test.go::TestSignInSockNamesThePlan` (CLK-7, PLN-5): each of the four calls carries the plan of the `PlanHost` that began the sign-in; `TestSignInSockSpeaksTheHostsWire` still passes against agentosd's current host. Fails if a call omits the plan or sends a fixed one.
 - `broker/cmd/agentos-clerk-model` test `TestPlanSlotsPerDeclaration` (CLK-1): each wired declaration opens `plan-<name>`; an existing `plan-codex` slot still opens signed in; a slot sealed for another plan starts that plan signed out and leaves the others alone.
 
 **Revert mutants (a):** drop the plan-name check (default to the first host); share one `Login` across two declarations; key the slot by a fixed name.
@@ -49,7 +51,7 @@ Needs (a) and (b).
 3. **Pool sizing** (RES-5): Muse's pool is read from its declared headers, which carry the allowance that applies to the account as set, so with Contributor mode off the reduced allowance is what is read. If the capture shows no usage headers, the route has no pool reading; record that in ASSUMPTIONS rather than invent a size.
 4. **4(f), only the owner's own login:** already the clerk's shape (one slot per plan, per-guest placeholders, an account change kills old placeholders, MIG-4-plan-login-a1, a2). Tested here on the Muse declaration.
 5. **4(p), automated nature disclosed:** satisfied on every route by CH-21's rule that the box tells everyone else it is an automated assistant in names, signatures and call openings, which the kernel renders whatever guest planned the step. No Muse-specific code; record it as an ASSUMPTIONS row citing CH-21.
-6. **Wire it:** `declarations(guard)` in `agentos-clerk-model` gains `plan.Muse`. Wiring is the listing (HLD-3), so this lands only with (b)'s capture behind it.
+6. **Wire it:** `declarations(guard)` in `agentos-clerk-model` gains `plan.Muse`. Wiring is the listing (HLD-3), so this lands only with (b)'s capture behind it and after #3927's Muse slice has merged (the Muse guest image and agentosd's Muse sign-in machine behind the plan-named sign-in socket). Listed without them, a Muse `planbegin` would start Codex's sign-in machine against Muse's endpoint: a listed route that can never sign in.
 7. If the capture shows a request format other than OpenAI Responses, `Body` gains that format as a second declared shape with the same refusals (hosted tools, remote content, `store`-like server-side state). If that adds more than about 400 lines, split it into its own slice before building.
 
 **Requirement IDs (c):** CLK-1, CLK-3, CLK-4, CLK-7, PLN-5, RES-5, ONB-9.
@@ -75,6 +77,6 @@ Needs (a) and (b).
 
 **Conflict (D-111), 2026-10-29 19:30Z.** No open PR touches `broker/clerk/plan` or `broker/clerk/run/plansignin*`. #3861 may touch `agentos-clerk-model` tests: check its files before starting (a). (a) should merge before #2780(b) starts; tell the coordinator if #2780(b) is already building.
 
-**Not here.** The Muse guest itself (its image, inbound API, configuration template with cloud and remote features off, D-138, PLN-5 declaration) and its qualification run (HLD-3, HLD-6). D-142 failover between plan guests is the kernel's.
+**Not here.** The Muse guest itself (its image, inbound API, configuration template with cloud and remote features off, D-138, PLN-5 declaration), agentosd's per-plan sign-in machine and the qualification run (HLD-3, HLD-6): #3927. D-142 failover between plan guests is the kernel's.
 
 **Usage estimate:** (a) about 70k tokens; (b) one supervised session with Mark; (c) about 110k (split item 7 if it grows). Builder model: strongest (tier A). Reviews: L3 and Security per slice.
