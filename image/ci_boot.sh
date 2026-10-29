@@ -585,9 +585,9 @@ fi
 # The local inference service's real runtime, in a booted image (INFER-image, #3655; INFER-SVC E2).
 # With INFER set to a directory holding infer.test (broker/cmd/agentos-infer's tests built with the
 # tags infer_real and infer_llamacpp, static), a fresh copy boots and a CI-only unit, passed as an
-# SMBIOS credential, runs TestRealRuntimeEmbed from a read-only 9p share as agentos-infer, with no
-# network, on the llama-server and the model the image installs: 1024 finite floats a text, the
-# same across calls, and the model's hash equal to the pin in llama.pins (which agentosd.service
+# SMBIOS credential, mounts a read-only 9p share and runs TestRealRuntimeEmbed from it as agentos-infer
+# (setpriv; the mount and the run share one command, so one mount namespace), with no network, on
+# the llama-server and the model the image installs: 1024 finite floats a text, the same across calls, and the model's hash equal to the pin in llama.pins (which agentosd.service
 # passes too). The test starts the service itself, so the image's -infer stays off. Its socket
 # directory goes under the host's /tmp as the service user (ASSUMPTIONS INFER-A14).
 if [ -n "${INFER:-}" ]; then
@@ -596,7 +596,7 @@ if [ -n "${INFER:-}" ]; then
 	cp "$INFER/infer.test" "$IS/infer.test" && echo "ok   infer.test for the inference boot" || { echo "MISS infer.test for the inference boot"; fail=1; }
 	PIN=$(sed -n 's/^embed_sha256=//p' "$HERE/../broker/cmd/agentos-infer/llama.pins")
 	P9="trans=virtio,version=9p2000.L"
-	INFER_UNITS="$(smbios_cred systemd.extra-unit.ci-infer.service "[Unit]\nDescription=agentOS local inference real test (CI only)\nAfter=systemd-sysusers.service systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1800\nUser=agentos-infer\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nEnvironment=AGENTOS_LLAMA_SERVER=/usr/lib/agentos/infer/llama-server AGENTOS_LLAMA_EMBED_MODEL=/usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf AGENTOS_LLAMA_EMBED_SHA256=$PIN\nExecStartPre=+/bin/sh -c 'mkdir -p /run/agentos-ci-infer && mount -t 9p -o $P9,ro infer /run/agentos-ci-infer'\nExecStart=/bin/sh -c '/run/agentos-ci-infer/infer.test -test.run ^TestRealRuntime -test.v -test.timeout 25m; echo agentos-infer-boot: DONE'\n")"
+	INFER_UNITS="$(smbios_cred systemd.extra-unit.ci-infer.service "[Unit]\nDescription=agentOS local inference real test (CI only)\nAfter=systemd-sysusers.service systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1800\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nEnvironment=AGENTOS_LLAMA_SERVER=/usr/lib/agentos/infer/llama-server AGENTOS_LLAMA_EMBED_MODEL=/usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf AGENTOS_LLAMA_EMBED_SHA256=$PIN\nExecStart=/bin/sh -c 'mkdir -p /run/agentos-ci-infer && mount -t 9p -o $P9,ro infer /run/agentos-ci-infer && setpriv --reuid=agentos-infer --regid=agentos-infer --clear-groups --no-new-privs /run/agentos-ci-infer/infer.test -test.run ^TestRealRuntime -test.v -test.timeout 25m; echo agentos-infer-boot: DONE'\n")"
 	INFER_UNITS="$INFER_UNITS$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=ci-infer.service\n')"
 	copy "$W/infer.raw"
 	TMO=2400 EXTRA="-virtfs local,path=$IS,mount_tag=infer,security_model=none,readonly=on$INFER_UNITS" \

@@ -161,7 +161,7 @@ class TestInferImage(unittest.TestCase):
         boot = (IMG / "ci_boot.sh").read_text()
         self.assertIn("AGENTOS_LLAMA_SERVER=%s AGENTOS_LLAMA_EMBED_MODEL=%s" % (SERVER, MODEL), boot)
         self.assertIn("PIN=$(sed -n 's/^embed_sha256=//p' \"$HERE/../broker/cmd/agentos-infer/llama.pins\")", boot)
-        self.assertIn("User=agentos-infer", boot)
+        self.assertIn("setpriv --reuid=agentos-infer --regid=agentos-infer --clear-groups --no-new-privs /run/agentos-ci-infer/infer.test", boot)
         self.assertIn('has "$W/console-infer.log" "PASS: TestRealRuntimeEmbed"', boot)
         wf = (ROOT / ".github/workflows/image.yml").read_text()
         self.assertIn("go test -c -tags infer_real,infer_llamacpp", wf)
