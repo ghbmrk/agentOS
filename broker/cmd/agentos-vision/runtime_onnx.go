@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	ort "github.com/yalue/onnxruntime_go"
 
@@ -66,6 +67,9 @@ type onnxLoad struct {
 	runs               map[*ort.RunOptions]bool
 	gone               bool
 	wg                 sync.WaitGroup
+	// encodes counts the face encoder's runs, so a test can see that
+	// Detect told not to encode runs none (#3792; D-207).
+	encodes atomic.Int64
 }
 
 // environment starts ONNX Runtime from the pinned library once; a failed
@@ -304,6 +308,7 @@ func (l *onnxLoad) encode(f vision.Frame, fc face, ro *ort.RunOptions) ([]float3
 	defer ot.Destroy()
 	out := ot.GetData()
 	defer clear(out)
+	l.encodes.Add(1)
 	if err := l.sface.RunWithOptions([]ort.Value{it}, []ort.Value{ot}, ro); err != nil {
 		return nil, errors.New("face encoder run failed")
 	}
