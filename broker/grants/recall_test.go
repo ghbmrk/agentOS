@@ -51,7 +51,10 @@ func TestVoidSinceClosesWhatAReaderQueued(t *testing.T) {
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": {Stage: "draft.save", Inverse: "draft.discard"}}))
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
-	send := func(id string) { r.effect(id, "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com"); r.g.Flush() }
+	send := func(id string) {
+		r.effect(id, "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+	}
 	send("agent/before")
 	r.submit(journal.Intent{ID: "other/s1", Origin: "guest:other", Account: "mail", Action: "invoice.send",
 		Params: map[string]any{"record": "inv-1042"}, Recipients: []string{"sam@example.com"}, Executor: "mail", Machine: "other", Label: "private"})
