@@ -77,6 +77,7 @@ type journal struct{ b []byte }
 
 func (j *journal) Load() ([]byte, error) { return j.b, nil }
 func (j *journal) Append(b []byte) error { j.b = append(j.b, b...); return nil }
+func (j *journal) Truncate(n int) error  { j.b = j.b[:n]; return nil }
 
 func keys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
@@ -417,9 +418,17 @@ func TestJournal(t *testing.T) {
 	if err := s.Head(k.head()); err != nil {
 		t.Fatal(err)
 	}
-	j.b = append(j.b, `{"head":{"seq":`...)
-	if got := open(t, pub, &j.journal).Heads(); len(got) != 1 {
+	j.b = append(j.b, `{"head":{"seq":`...) // a power cut mid-append
+	s = open(t, pub, &j.journal)
+	if got := s.Heads(); len(got) != 1 {
 		t.Fatalf("after a torn record: %v", got)
+	}
+	k.add(kernel.TKeyPaused, 1, map[string]key.ID{"ID": {2}})
+	if err := s.Head(k.head()); err != nil { // the next append is clean
+		t.Fatal(err)
+	}
+	if got := open(t, pub, &j.journal).Heads(); len(got) != 2 {
+		t.Fatalf("append after a torn record, reopened: %v", got)
 	}
 	j.b = append(j.b, "\n{}\n"...)
 	if _, err := Open(Config{Kernel: pub, Journal: &j.journal}); !errors.Is(err, ErrCorrupt) {

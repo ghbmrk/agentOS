@@ -21,6 +21,7 @@ type journal struct{ b []byte }
 
 func (j *journal) Load() ([]byte, error) { return j.b, nil }
 func (j *journal) Append(b []byte) error { j.b = append(j.b, b...); return nil }
+func (j *journal) Truncate(n int) error  { j.b = j.b[:n]; return nil }
 
 type bulb struct {
 	mu    sync.Mutex
@@ -290,12 +291,77 @@ func TestJournal(t *testing.T) {
 	if _, err := r.a.Raise(Enrolment, ""); err != nil {
 		t.Fatal(err)
 	}
-	j.b = append(j.b, `{"id":2,"kin`...)
-	if got := newRig(t, j).a.Log(); len(got) != 1 {
+	j.b = append(j.b, `{"id":2,"kin`...) // a power cut mid-append
+	r = newRig(t, j)
+	if got := r.a.Log(); len(got) != 1 {
 		t.Fatalf("after a torn line: %v", got)
 	}
-	j.b = append(j.b, "\n{\"id\":3}\n"...)
+	if _, err := r.a.Raise(Enrolment, ""); err != nil { // the next append is clean
+		t.Fatal(err)
+	}
+	if got := newRig(t, j).a.Log(); len(got) != 1 || got[0].Count != 2 {
+		t.Fatalf("append after a torn line, reopened: %v", got)
+	}
+	j.b = append(j.b, "{\"id\":3,\"x\":1}\n"...)
 	if _, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: j}); !errors.Is(err, ErrCorrupt) {
 		t.Fatalf("corrupt journal: %v", err)
+	}
+}
+
+// TestLaterEventTellsAgain (NET-2 Texts and calls): an open alert folds a
+// burst, but not a later event: an alarm three days after one the owner,
+// away from home, could not clear calls again, and so does an unusual
+// unlock a week later. Within the window a repeat still sends nothing.
+// Catches one unresolved alert silencing every later one (Potency and UX
+// fix-lists on #3909).
+func TestLaterEventTellsAgain(t *testing.T) {
+	c := &core{}
+	now := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	a, err := New(Config{Send: c.Send, Light: &bulb{}, Journal: &journal{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Core(true)
+	raise := func(k Kind, dev string) {
+		t.Helper()
+		if _, err := a.Raise(k, dev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raise(AlarmTriggered, "hall")
+	now = now.Add(FoldCall - time.Second)
+	raise(AlarmTriggered, "hall") // the same burst
+	now = now.Add(72 * time.Hour)
+	raise(AlarmTriggered, "hall")
+	raise(DoorForced, "front")
+	now = now.Add(48 * time.Hour)
+	raise(DoorForced, "front")
+	raise(UnusualUnlock, "front")
+	now = now.Add(7 * 24 * time.Hour)
+	raise(UnusualUnlock, "front")
+	var calls, texts int
+	for _, g := range c.got {
+		if g.Kind == wire.AlertCall {
+			calls++
+		} else {
+			texts++
+		}
+	}
+	if calls != 4 || texts != 2 {
+		t.Fatalf("%d calls and %d texts, want 4 and 2", calls, texts)
+	}
+	if st := a.Status(); len(st.Open) != 3 || st.Open[0].Count != 3 {
+		t.Fatalf("open: %+v", st.Open)
+	}
+}
+
+// A valve shut and a heater off each name what happened.
+func TestSafetyOffNamesVerb(t *testing.T) {
+	r := newRig(t, &journal{})
+	r.a.SafetyOff("boiler", wire.VerbOff)
+	r.a.SafetyOff("main-valve", wire.VerbShut)
+	if len(r.core.got) != 2 || !strings.Contains(r.core.got[0].Text, "boiler was switched off") ||
+		!strings.Contains(r.core.got[1].Text, "main-valve was shut") {
+		t.Fatalf("texts %v", r.core.got)
 	}
 }

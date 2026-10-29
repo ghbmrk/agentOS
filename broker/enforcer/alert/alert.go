@@ -40,8 +40,9 @@ const (
 	RecoveryCodeUsed
 	Enrolment
 	ChannelPaused
-	SafetyOff // a channel command turned a heater off or shut a valve
-	HeadFork  // the kernel's log forked from the head copies (STO-1)
+	SafetyOff  // a channel command turned a heater off
+	SafetyShut // a channel command shut a valve
+	HeadFork   // the kernel's log forked from the head copies (STO-1)
 	// Calls: an urgent safety event.
 	AlarmTriggered
 	DoorForced
@@ -67,18 +68,35 @@ type spec struct {
 }
 
 var kinds = map[Kind]spec{
-	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. If it was not you, open the enforcer's page at home."},
-	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. If it was not you, open the enforcer's page at home."},
-	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, cancel it on the enforcer's page at home within 10 minutes."},
-	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. If it was not you, open the enforcer's page at home."},
+	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home; its light stays red until you do."},
+	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home; its light stays red until you do."},
+	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, cancel it on the enforcer's page at home before the light stops showing a recovery."},
+	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home; its light stays red until you do."},
 	ChannelPaused:    {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
-	SafetyOff:        {Text, true, "Enforcer: %s was switched off or shut by the core. Check it is as you want; turning it back on needs the enforcer's page at home."},
+	SafetyOff:        {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home; clear this there too."},
+	SafetyShut:       {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home; clear this there too."},
 	HeadFork:         {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Open the enforcer's page at home."},
 	AlarmTriggered:   {Call, true, "Enforcer: the alarm %s was triggered."},
 	DoorForced:       {Call, true, "Enforcer: %s was forced open."},
 	FailedUnlocks:    {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
 	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
 	RoutineLock:      {LogOnly, true, "%s locked."},
+}
+
+// Fold windows: a repeat of an open alert within its delivery's window
+// after the owner was last told counts on it and sends nothing; a repeat
+// after the window tells the owner again (NET-2: every urgent event calls,
+// a burst costs one).
+const (
+	FoldCall = 10 * time.Minute
+	FoldText = time.Hour
+)
+
+func (d Delivery) fold() time.Duration {
+	if d == Call {
+		return FoldCall
+	}
+	return FoldText
 }
 
 // Delivery is k's delivery; ok is false for a kind not on the list.
@@ -118,10 +136,12 @@ type Light interface {
 
 // Journal is the alert log's durable record: one line per change,
 // appended. Append must be durable when it returns; Load returns every
-// byte appended, a torn last line included.
+// byte appended, a torn last line included; Truncate cuts the record to n
+// bytes.
 type Journal interface {
 	Load() ([]byte, error)
 	Append([]byte) error
+	Truncate(n int) error
 }
 
 // Record is one alert log line, as its latest state.
@@ -133,7 +153,8 @@ type Record struct {
 	At       time.Time `json:"at"`
 	Last     time.Time `json:"last"`
 	Count    int       `json:"count"`          // times raised while open
-	Sent     bool      `json:"sent,omitempty"` // the kernel took the text; never proof it arrived
+	Told     time.Time `json:"told,omitzero"`  // when the text or call was last offered to the kernel
+	Sent     bool      `json:"sent,omitempty"` // the kernel took the last offer; never proof it arrived
 	Open     bool      `json:"open,omitempty"`
 	Resolved time.Time `json:"resolved,omitzero"`
 }
@@ -199,8 +220,11 @@ func New(cfg Config) (*Alerts, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := bytes.Split(raw, []byte{'\n'})
-	for i, ln := range lines {
+	raw, err = whole(cfg.Journal, raw)
+	if err != nil {
+		return nil, err
+	}
+	for i, ln := range bytes.Split(raw, []byte{'\n'}) {
 		if len(ln) == 0 {
 			continue
 		}
@@ -208,9 +232,6 @@ func New(cfg Config) (*Alerts, error) {
 		d := json.NewDecoder(bytes.NewReader(ln))
 		d.DisallowUnknownFields()
 		if err := d.Decode(&r); err != nil || r.ID == 0 {
-			if i == len(lines)-1 {
-				break // torn
-			}
 			return nil, fmt.Errorf("%w: line %d", ErrCorrupt, i+1)
 		}
 		a.put(r)
@@ -240,9 +261,11 @@ func (a *Alerts) write(r Record) error {
 // Raise logs one event, and for a text or call keeps it open, turns the
 // light red and sends it. The log line and the light come first, so a
 // dropped or refused text still shows (P6); a journal error is returned
-// after the light and the send. An event of a kind already
-// open for the same device counts on that alert and sends nothing more,
-// so a burst costs the owner one text.
+// after the light and the send. An event of a kind already open for the
+// same device counts on that alert; it sends nothing more within the
+// delivery's fold window after the owner was last told, so a burst costs
+// one text or call, and sends again after it, so a later event is never
+// silenced by an earlier one left open.
 func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	text, err := Words(k, device)
 	if err != nil {
@@ -251,16 +274,17 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	d, _ := k.Delivery()
 	now := a.cfg.Now().UTC()
 	a.mu.Lock()
-	r, fresh := Record{}, true
-	if d != LogOnly {
-		if i := a.open(k, device); i >= 0 {
-			r, fresh = a.log[i], false
-			r.Count++
-			r.Last = now
-		}
-	}
-	if fresh {
+	r, tell := Record{}, d != LogOnly
+	if i := a.open(k, device); d != LogOnly && i >= 0 {
+		r = a.log[i]
+		r.Count++
+		r.Last = now
+		tell = now.Sub(r.Told) >= d.fold()
+	} else {
 		r = Record{ID: a.next + 1, Kind: k, Device: device, Text: text, At: now, Last: now, Count: 1, Open: d != LogOnly}
+	}
+	if tell {
+		r.Told, r.Sent = now, false
 	}
 	// A record the journal refused is still shown and sent: the light
 	// must not depend on the disk either (P6).
@@ -269,7 +293,7 @@ func (a *Alerts) Raise(k Kind, device string) (Record, error) {
 	a.mu.Unlock()
 	if d != LogOnly {
 		a.show()
-		if fresh {
+		if tell {
 			r = a.send(r)
 		}
 	}
@@ -316,7 +340,13 @@ func (a *Alerts) send(r Record) Record {
 
 // SafetyOff is the channel's hook: a channel command turned a heater off
 // or shut a valve (NET-2 Channel).
-func (a *Alerts) SafetyOff(device string, _ wire.Verb) { _, _ = a.Raise(SafetyOff, device) }
+func (a *Alerts) SafetyOff(device string, v wire.Verb) {
+	k := SafetyOff
+	if v == wire.VerbShut {
+		k = SafetyShut
+	}
+	_, _ = a.Raise(k, device)
+}
 
 // Paused is the channel's hook: a burst paused the channel.
 func (a *Alerts) Paused() { _, _ = a.Raise(ChannelPaused, "") }
@@ -429,4 +459,19 @@ func (a *Alerts) show() error {
 	a.lightMu.Lock()
 	defer a.lightMu.Unlock()
 	return a.cfg.Light.Show(a.Status().Colour)
+}
+
+// whole cuts a torn last append, a line with no newline, from the journal
+// and returns the rest. Append writes a record and its newline in one
+// call, so a line without one was never acknowledged, and cutting it
+// keeps the next Append from landing on the fragment.
+func whole(j Journal, raw []byte) ([]byte, error) {
+	n := bytes.LastIndexByte(raw, '\n') + 1
+	if n == len(raw) {
+		return raw, nil
+	}
+	if err := j.Truncate(n); err != nil {
+		return nil, err
+	}
+	return raw[:n], nil
 }

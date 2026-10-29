@@ -80,10 +80,12 @@ var (
 
 // Journal is the store's durable record: one line per change, appended.
 // Append must be durable when it returns; Load returns every byte
-// appended, a torn last line included. Slice l backs it with a file.
+// appended, a torn last line included; Truncate cuts the record to n
+// bytes. Slice l backs it with a file.
 type Journal interface {
 	Load() ([]byte, error)
 	Append([]byte) error
+	Truncate(n int) error
 }
 
 // Config is what a store is built from. Kernel and Journal are required.
@@ -168,15 +170,15 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	lines := bytes.Split(raw, []byte{'\n'})
-	for i, ln := range lines {
+	raw, err = whole(cfg.Journal, raw)
+	if err != nil {
+		return nil, err
+	}
+	for i, ln := range bytes.Split(raw, []byte{'\n'}) {
 		if len(ln) == 0 {
 			continue
 		}
 		if err := s.replay(ln); err != nil {
-			if i == len(lines)-1 {
-				break // torn
-			}
 			return nil, fmt.Errorf("%w: line %d: %v", ErrCorrupt, i+1, err)
 		}
 	}
@@ -541,4 +543,19 @@ func (s *Store) Entries() [][]byte {
 		out[i] = slices.Clone(s.entries[seq])
 	}
 	return out
+}
+
+// whole cuts a torn last append, a line with no newline, from the journal
+// and returns the rest. Append writes a record and its newline in one
+// call, so a line without one was never acknowledged, and cutting it
+// keeps the next Append from landing on the fragment.
+func whole(j Journal, raw []byte) ([]byte, error) {
+	n := bytes.LastIndexByte(raw, '\n') + 1
+	if n == len(raw) {
+		return raw, nil
+	}
+	if err := j.Truncate(n); err != nil {
+		return nil, err
+	}
+	return raw[:n], nil
 }
