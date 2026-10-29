@@ -1,0 +1,80 @@
+# The edge link (EDGE-link-core c2c; HW-15, HW-16, HW-17): agentos-link, served, under its own user,
+# after the kernel. It listens on the link's one TCP port, bound to the link interface alone, ends TLS
+# with a key it never holds (the kernel signs, linksign), and asks the kernel on every connection
+# whether the edge's key is live: the live edge's items go to the consumer socket with their kind's
+# label, and any other key's one hello is reported to the kernel as a candidate for the owner page step.
+# No consumer runs yet (the public fetch path, the second-line clerk and the device relay are rows of
+# their own): its socket admits only the consumer's user, which no process runs as.
+[Unit]
+Description=agentOS edge link
+# No store, no kernel to ask: before enrollment the capture unit has the port.
+ConditionPathExists=/var/lib/agentos-store/store
+Requires=agentos-inbound.service
+# The listener is bound to the link interface's index, which a replugged or reset adapter changes: the
+# unit lives exactly as long as the interface, starting when it appears (Install below) and stopping
+# when it goes, so no socket outlives its device (#3834 Potency).
+BindsTo=sys-subsystem-net-devices-agentos\x2dlink.device
+After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service agentos-inbound.service agentos-keeper-kernel.service network.target sys-subsystem-net-devices-agentos\x2dlink.device
+# The backoff below bounds the restarts (the kernel not listening yet), so no start limit stops the
+# link for the rest of a boot.
+StartLimitIntervalSec=0
+
+[Service]
+User=agentos-link
+Group=agentos-link
+# The link's port opens in the inbound firewall only while this runs (netguard Link): one step as root
+# (+) makes the link interface the link set's only element in one nft transaction, and every stop,
+# failed starts included, empties the set.
+ExecStartPre=+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { "agentos-link" }'
+ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-link -iface agentos-link -port 7443 \
+        -kernel-sock /run/agentos-kernel/link.sock -kernel-uid @uid:agentos-kernel \
+        -consumer-sock /run/agentos-link/items.sock -consumer-uid @uid:agentos-link-items
+ExecStopPost=+/usr/sbin/nft flush set inet agentos_inbound link
+Restart=on-failure
+RestartSec=2
+RestartSteps=8
+RestartMaxDelaySec=5min
+StandardError=journal
+# The consumer socket's directory, the link's own; its consumer reaches it, and the socket admits one uid.
+RuntimeDirectory=agentos-link
+RuntimeDirectoryMode=0755
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateIPC=yes
+# The link's TCP port, over link-local addresses only, and the kernel's and the consumer's sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=link-local
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@debug @mount @privileged
+SystemCallErrorNumber=EPERM
+# No device but the standard pseudo-devices, and no TPM (#2889).
+PrivateDevices=yes
+DevicePolicy=closed
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr
+
+[Install]
+# Whenever the link interface appears, at boot (coldplug) or plugged in later, and the kernel's first
+# start on the Owner Card confirm's boot, so the first edge is served without a reboot. Not
+# multi-user.target: with no adapter, a boot want would only wait out the device and fail.
+WantedBy=sys-subsystem-net-devices-agentos\x2dlink.device agentos-keeper-kernel.service

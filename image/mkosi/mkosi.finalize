@@ -91,9 +91,10 @@ BLOCKED_MODULES = ("btusb", "btmtk")
 # first, without /run (a tmpfs on the box).
 MODPROBE_DIRS = ("etc/modprobe.d", "usr/local/lib/modprobe.d", "usr/lib/modprobe.d", "lib/modprobe.d")
 REFUSE = ("/bin/false", "/usr/bin/false")
-# The only .network file the image may run (#1478); anything else (Debian's 80-* container, VM and
-# ad-hoc files) must be removed or masked.
+# The only .network files the image may run (#1478): the uplink and the edge link's (EDGE-link-core
+# c2c); anything else (Debian's 80-* container, VM and ad-hoc files) must be removed or masked.
 UPLINK = "20-agentos-uplink.network"
+LINK_NETWORK = "10-agentos-link.network"
 # The uplink's every assignment, as (section, key): value (#1496). The live uplink must hold exactly
 # these, each once: an allowlist, since networkd also honours old spellings (ProxyARP=, [DHCP]),
 # generic DHCP options (SendOption=) and list keys (a second Token=) that a denylist misses. With
@@ -102,6 +103,17 @@ UPLINK = "20-agentos-uplink.network"
 UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", "DHCP"): "yes",
                ("Network", "IPv6PrivacyExtensions"): "yes", ("DHCPv4", "SendHostname"): "no",
                ("DHCPv6", "SendHostname"): "no", ("IPv6AcceptRA", "Token"): "prefixstable"}
+# The edge link's every assignment, held as the uplink's are (HW-15, HW-16): every USB Ethernet adapter,
+# the link's (10-agentos-link.link names one agentos-link) and any second one, so the edge's cable never
+# runs the uplink's DHCP whichever adapter it is in, with the core's one fixed link-local address and
+# nothing else. No DHCP, router advertisement or LLDP
+# is taken from or sent to the edge, so the edge sets no address, route or resolver on the core; the
+# link never counts towards being online.
+LINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Match", "Property"): "ID_BUS=usb",
+             ("Link", "RequiredForOnline"): "no", ("Network", "DHCP"): "no",
+             ("Network", "LinkLocalAddressing"): "no", ("Network", "Address"): "fe80::1/64",
+             ("Network", "IPv6AcceptRA"): "no", ("Network", "LLDP"): "no", ("Network", "EmitLLDP"): "no"}
+NETWORKS = {UPLINK: UPLINK_KEYS, LINK_NETWORK: LINK_KEYS}
 # sysctl leaves that turn routing on (#1478). systemd-sysctl expands a glob key per component against
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
@@ -130,11 +142,12 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 # #1702: directories a service user or a login user owns on the box. agentos-localui serves the
 # LAN-facing setup page from var/lib/agentos-localui, the vault's user from var/lib/agentos-egress;
 # DynamicUser services live under var/lib/private, and people under home and run/user; the egress,
-# localui and mail clerk units' RuntimeDirectory= lives under run, and the mail clerk's user owns
-# var/lib/agentos-mail (MAIL-unit).
+# localui, mail clerk and edge link units' RuntimeDirectory= lives under run, and the mail clerk's user
+# owns var/lib/agentos-mail (MAIL-unit).
 # A link into one is refused like one into WORLD_WRITABLE.
 SERVICE_DIRS = ("var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user", "var/lib/private",
-                "run/agentos-egress", "run/agentos-localui", "run/agentos-mail", "var/lib/agentos-mail")
+                "run/agentos-egress", "run/agentos-localui", "run/agentos-mail", "var/lib/agentos-mail",
+                "run/agentos-link")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
 # makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
@@ -1391,11 +1404,14 @@ def noexec_violations(root):
 KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
 KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service",
-                "agentos-keeper-pageca.service", "agentos-keeper-setup@.service", "agentos-keeper-mail.service")
+                "agentos-keeper-pageca.service", "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
+                "agentos-keeper-link-capture.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, the Owner Card's factors that
-# setup leaves for enrollment, and the mail clerk's sealed Secrets (MAIL-unit). No main-side unit sees
-# it; the image makes each at boot (tmpfiles.d).
-KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup", "/var/lib/agentos-mail")
+# setup leaves for enrollment, the mail clerk's sealed Secrets (MAIL-unit) and the first edge's capture
+# that enrollment takes (EDGE-link-core c2c). No main-side unit sees it; the image makes each at boot
+# (tmpfiles.d).
+KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup", "/var/lib/agentos-mail",
+                "/run/agentos-link-capture")
 # Settings whose files the service manager opens as root and hands to the unit, past its mask and
 # DAC (#2981): each value's path, as the field after FIELD ':'s (None: the whole value), with a
 # prefix stripped.
@@ -1438,11 +1454,19 @@ TPM_DEVICE_GROUPS = ("tpm", "tpmrm", "misc")
 # the old core's vault process (its drive-id and egress-setup steps, image/ASSUMPTIONS.md I14).
 FULL_PRIVILEGE_EXEMPT = ("agentos-egress.service",)
 # Single "+" commands a unit may run, exactly as written (HW12-port1-set): the page's unit opens and
-# closes its ports in the inbound firewall as root. Neither opens a device or reads the keeper's state.
+# closes its ports in the inbound firewall as root, and so does the edge link's for its port
+# (EDGE-link-core c2c). None opens a device or reads the keeper's state.
 FULL_PRIVILEGE_COMMANDS = (
     ("agentos-localui.service", "ExecStartPre", "+/usr/lib/agentos/agentos-localui -admit-port1 -iface "
      "${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1"),
     ("agentos-localui.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound page"),
+    ("agentos-link.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet "
+     "agentos_inbound link { \"agentos-link\" }'"),
+    ("agentos-link.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound link"),
+    ("agentos-keeper-link-capture.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; "
+     "add element inet agentos_inbound link { \"agentos-link\" }'"),
+    ("agentos-keeper-link-capture.service", "ExecStopPost", "+/usr/bin/sh -c '[ -e /var/lib/agentos-store/store ] || "
+     "exec /usr/sbin/nft flush set inet agentos_inbound link'"),
 )
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")
@@ -2662,10 +2686,11 @@ def byte_violations(f):
     return out
 
 
-def uplink_violations(up):
-    """#1496: the uplink holds exactly UPLINK_KEYS, each assigned once. Every other line is blank,
-    a comment or a section header; byte_violations refuses what would make systemd read the lines
-    differently from this split."""
+def network_file_violations(up, name):
+    """#1496: the .network file NAME (the uplink, or the edge link's) holds exactly its NETWORKS keys,
+    each assigned once. Every other line is blank, a comment or a section header; byte_violations
+    refuses what would make systemd read the lines differently from this split."""
+    keys = NETWORKS[name]
     out, seen, section = byte_violations(up), {}, None
     try:
         text = up.text()
@@ -2681,16 +2706,16 @@ def uplink_violations(up):
             k, v = ln.split("=", 1)
             seen.setdefault((section, k.strip()), []).append(v.strip())
         else:
-            out.append("%s: line %d: neither a section nor an assignment in one" % (UPLINK, n))
+            out.append("%s: line %d: neither a section nor an assignment in one" % (name, n))
     for (s, k), vals in sorted(seen.items()):
-        if (s, k) not in UPLINK_KEYS:
-            out.append("%s: [%s] %s is %s; not a key the image ships" % (UPLINK, s, k, vals[-1]))
+        if (s, k) not in keys:
+            out.append("%s: [%s] %s is %s; not a key the image ships" % (name, s, k, vals[-1]))
         elif len(vals) > 1:
-            out.append("%s: [%s] %s is set %d times; must be set once" % (UPLINK, s, k, len(vals)))
-    for (s, k), want in sorted(UPLINK_KEYS.items()):
+            out.append("%s: [%s] %s is set %d times; must be set once" % (name, s, k, len(vals)))
+    for (s, k), want in sorted(keys.items()):
         v = seen.get((s, k), [None])[0]
         if v != want:
-            out.append("%s: [%s] %s is %s; must be %s" % (UPLINK, s, k, v, want))
+            out.append("%s: [%s] %s is %s; must be %s" % (name, s, k, v, want))
     return out
 
 
@@ -2729,8 +2754,9 @@ def forward_key(k):
 
 
 def network_violations(root):
-    """#1478: the effective .network set is the uplink alone, nothing changes it, and neither it nor
-    networkd.conf turns on forwarding or LAN name answering; #1479: the uplink keeps the box private.
+    """#1478: the effective .network set is the uplink and the edge link's alone, nothing changes them,
+    and neither they nor networkd.conf turn on forwarding or LAN name answering; #1479: the uplink keeps
+    the box private; EDGE-link-core c2c: the edge sets nothing on the core.
     The set is conf_files over systemd/network, as networkd's network_load lists it; network_load_one
     skips a file that reads as nothing (an empty file, a mask), and applies conf_files over NAME.d to
     the rest. A file the check cannot read (any other link, #1543) is refused and counts as live."""
@@ -2742,15 +2768,16 @@ def network_violations(root):
         except OSError as e:
             out.append("%s: unreadable (%s); the tree check never passes a file it cannot read" % (f.rel, e.strerror))
         live[f.name] = f
-    for n in sorted(set(live) - {UPLINK}):
-        out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].rel, UPLINK))
-    up = live.get(UPLINK)
-    if up is None:
-        out.append("%s: missing or masked; the wired uplink needs it" % UPLINK)
-    elif up.is_link():
-        out.append("%s: a link; the tree check reads only a regular file" % up.rel)
-    else:
-        out += uplink_violations(up)
+    for n in sorted(set(live) - set(NETWORKS)):
+        out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].rel, " and ".join(NETWORKS)))
+    for name, why in ((UPLINK, "the wired uplink needs it"), (LINK_NETWORK, "the edge link needs it")):
+        up = live.get(name)
+        if up is None:
+            out.append("%s: missing or masked; %s" % (name, why))
+        elif up.is_link():
+            out.append("%s: a link; the tree check reads only a regular file" % up.rel)
+        else:
+            out += network_file_violations(up, name)
     for n in sorted(live):
         for f in conf_files(root, conf_paths("systemd/network/%s.d" % n)):
             try:

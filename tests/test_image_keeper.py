@@ -85,7 +85,8 @@ class KeeperTreeTest(unittest.TestCase):
     def test_the_keeper_is_listed_once(self):
         self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service",
                                               "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
-                                              "agentos-keeper-setup@.service", "agentos-keeper-mail.service"))
+                                              "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
+                                              "agentos-keeper-link-capture.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
         # The recovery-key rotation, the page authority's staging and the card's hand-off are the
         # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).
@@ -321,9 +322,13 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(self.v(), ["agentos-boot-report.service: ExecStartPre=+/usr/bin/true runs with full privileges, "
                                     "outside its device policy and namespace (STO-2c)"])
         self.assertEqual(check.FULL_PRIVILEGE_EXEMPT, ("agentos-egress.service",))
-        # HW12-port1-set: the page's unit runs exactly its two firewall commands as root, and nothing else.
+        # HW12-port1-set: the page's unit runs exactly its two firewall commands as root, and nothing else;
+        # so does the edge link's (EDGE-link-core c2c).
         self.assertEqual([(u, k) for u, k, _ in check.FULL_PRIVILEGE_COMMANDS],
-                         [("agentos-localui.service", "ExecStartPre"), ("agentos-localui.service", "ExecStopPost")])
+                         [("agentos-localui.service", "ExecStartPre"), ("agentos-localui.service", "ExecStopPost"),
+                          ("agentos-link.service", "ExecStartPre"), ("agentos-link.service", "ExecStopPost"),
+                          ("agentos-keeper-link-capture.service", "ExecStartPre"),
+                          ("agentos-keeper-link-capture.service", "ExecStopPost")])
         self.add("agentos-localui.service", "Service", "ExecStartPost=+/usr/bin/true")
         self.assertIn("agentos-localui.service: ExecStartPost=+/usr/bin/true runs with full privileges, "
                       "outside its device policy and namespace (STO-2c)", self.v())
@@ -506,7 +511,8 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("-o agentos-kernel -g agentos-kernel /var/lib/agentos-kernel", ini(ENROLL)["Service"]["ExecStartPre"])
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
                                                              arg(e, "passphrase-file").rsplit("/", 1)[0],
-                                                             arg(exec_args(MAIL), "dir")}))
+                                                             arg(exec_args(MAIL), "dir"),
+                                                             arg(e, "first-edge").rsplit("/", 1)[0]}))
 
     def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
         # #3073: systemd chowns a RuntimeDirectory= to the unit's user, root here, at every command's

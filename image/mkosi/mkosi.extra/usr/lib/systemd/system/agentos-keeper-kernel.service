@@ -11,7 +11,9 @@
 # The clerks (MAIL-unit): unlock writes the owner's anchors for them to a file only root writes
 # (D-146); the kernel calls the mail clerk on its socket, admitting only its uid, and hands it its key
 # on a socket only the service manager starting agentos-keeper-mail.service, in that unit's cgroup,
-# is answered on (MAIL-keys). A slice's name nests at each "-", so the keeper's slice is under
+# is answered on (MAIL-keys). The edge link (EDGE-link-core c2c): agentos-link asks the kernel about the
+# edge's key and has it sign the link's TLS on one more socket, admitting only the link's uid. A
+# slice's name nests at each "-", so the keeper's slice is under
 # agentos.slice.
 [Unit]
 Description=agentOS kernel
@@ -45,6 +47,7 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var
         -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model \
         -clerk mail=/run/agentos-mail/kernel.sock,@uid:agentos-mail \
         -clerk-key mail=/run/agentos-kernel/key-mail.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service \
+        -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \
         -up /run/agentos-kernel/up
 # #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its
 # sockets listened, and it made "up") and then failed reboots the box. One refused at its start (no
