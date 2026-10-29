@@ -283,6 +283,70 @@ func TestBurstPauses(t *testing.T) {
 	}
 }
 
+// TestPreAuthNeverPauses (NET-2 Channel, #3755): a hello that fails, from
+// a key that is not the pinned core key, on another connection's exporter,
+// after the core's key is revoked, or a frame before any hello, drops the
+// connection and never pauses the channel, however many arrive; past the
+// pre-auth bucket the drops stop being logged one by one. The real core
+// connects straight after the flood, and only its own reconnects count
+// toward the pause. Catches a stranger pausing the channel for the core.
+func TestPreAuthNeverPauses(t *testing.T) {
+	r := newRig(t, nil)
+	_, stranger, _ := ed25519.GenerateKey(nil)
+	raw := func(m wire.Msg) []byte {
+		f, err := wire.Encode(wire.ToEnforcer, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return frameBytes(f.Type, f.Payload)
+	}
+	strangerHello, _ := wire.SignHello(wire.RoleCore, stranger, exporter)
+	otherExporter, _ := wire.SignHello(wire.RoleCore, r.core, bytes.Repeat([]byte{1}, wire.ExporterLen))
+	coreHello, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+	floods := [][]byte{raw(strangerHello), raw(otherExporter), raw(cmd(1, "lamp", wire.VerbOn))}
+	for i := range 300 {
+		if !r.connect().closed(floods[i%len(floods)]) {
+			t.Fatalf("%d: a failed hello was not dropped", i)
+		}
+	}
+	r.mu.Lock()
+	r.revoked = true
+	r.mu.Unlock()
+	for i := range 30 {
+		if !r.connect().closed(raw(coreHello)) {
+			t.Fatalf("%d: a revoked key's hello was not dropped", i)
+		}
+	}
+	r.mu.Lock()
+	r.revoked = false
+	r.mu.Unlock()
+	if r.ch.Paused() || r.alerts.paused != 0 {
+		t.Fatal("failed hellos paused the channel")
+	}
+	var logged int
+	for _, e := range r.events() {
+		if e.Kind == KindHello || e.Kind == KindPreAuth {
+			logged++
+		}
+	}
+	if max := DefaultLimits[KindPreAuth].Burst + 1; logged > max {
+		t.Errorf("%d log lines for a flood of failed hellos, want at most %d", logged, max)
+	}
+
+	cl := r.dial()
+	if c := cl.code(cmd(2, "lamp", wire.VerbOn)); c != wire.OK {
+		t.Fatalf("the core after a stranger's flood: %v", c)
+	}
+
+	// The core's own reconnects still pause a burst.
+	for i := 0; !r.ch.Paused(); i++ {
+		if i > DefaultLimits[KindHello].Burst {
+			t.Fatal("the core's reconnect flood never paused")
+		}
+		r.dial()
+	}
+}
+
 // TestHeaterOffTexts (NET-2 Safety devices): a channel command that turns a
 // heater off or shuts a valve texts the owner through the enforcer's own
 // alerts; a lock, a garage door's close, an everyday device's off and a
