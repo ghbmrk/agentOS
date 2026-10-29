@@ -653,7 +653,7 @@ func TestOtherRootPromiseEndsWithTheNextInstall(t *testing.T) {
 // retries it. A boot on the old root after an unrecorded Install proves
 // nothing about the release, so no fallback is recorded.
 
-const unrecordedLine = "I could not record update 1 as installed, twice, so I will not try it again on my own. " +
+const unrecordedLine = "I could not record update 1 as installed twice, so I stopped trying it. " +
 	"You can retry it on my Wi-Fi page."
 
 // unrecordedAttempt ticks once with the save that records the handover
