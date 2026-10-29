@@ -4,7 +4,8 @@
 # to a process in this unit's cgroup, and the clerk gets it as descriptor 3 (MAIL-keys). The owner's
 # anchors come from the file the unlock step writes, root's alone, never from the kernel (D-146). It
 # serves three sockets, each to one peer's uid: the kernel's calls, the owner side's setup (agentosd,
-# root) and the planner's listing (the planner's user, which no process runs as yet).
+# root) and the planner's listing (the planner's user, which no process runs as yet). Each IMAP
+# session's parsing runs in a fresh agentos-imapconn@.service, reached on its socket (#3015).
 [Unit]
 Description=agentOS mail clerk
 # No store, no kernel to hand the key: the first boot, before enrollment, starts none.
@@ -20,7 +21,8 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-clerk-mail -dir /v
         -anchors /run/agentos-keeper/anchors \
         -kernel-sock /run/agentos-mail/kernel.sock -kernel-uid @uid:agentos-kernel \
         -owner-sock /run/agentos-mail/owner.sock -owner-uid 0 \
-        -planner-sock /run/agentos-mail/planner.sock -planner-uid @uid:agentos-planner
+        -planner-sock /run/agentos-mail/planner.sock -planner-uid @uid:agentos-planner \
+        -imap-conn /run/agentos-imapconn/conn.sock
 OpenFile=/run/agentos-kernel/key-mail.sock:clerk-key
 # The kernel's unit is started once its process is, before it listens, and a kernel that runs
 # setup-only hands the unlock step no anchors, so the clerk refuses until a boot that has them: retry

@@ -34,6 +34,11 @@ DROP = {
     "liblastlog2-2": ("util-linux", "only lslogins links it, an account-listing tool for a person at a shell; the box has no login"),
     "libtirpc3t64": ("libtirpc", "only ss links it (RPC service names); nothing on the box runs ss"),
     "libtirpc-common": ("libtirpc", "only libtirpc3t64 reads its /etc/netconfig"),
+    "libgssapi-krb5-2": ("krb5", "only libtirpc3t64 linked it, and that is dropped"),
+    "libkrb5-3": ("krb5", "as libgssapi-krb5-2"),
+    "libk5crypto3": ("krb5", "as libgssapi-krb5-2"),
+    "libkrb5support0": ("krb5", "as libgssapi-krb5-2"),
+    "libkeyutils1": ("keyutils", "only krb5 links it"),
     "libbz2-1.0": ("bzip2", "only dpkg-deb links it; the box unpacks no package"),
 }
 # Dropped packages whose source the box still runs other packages of, so the source's image

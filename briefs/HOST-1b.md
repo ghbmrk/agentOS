@@ -9,3 +9,5 @@ No hardware-clock writes (HW-8): the time service leaves the RTC alone (no `hwcl
 **Gate:** lenses
 
 **State on the board before the 2026-10-08 index split:** part 1 merged (#177); part 2 queued on P2-2w (R1 needs the live page)
+
+**Part 2 brief:** [HOST-1bc-p2](HOST-1bc-p2.md) (written 2026-10-29); what it leaves is listed there as part 3.

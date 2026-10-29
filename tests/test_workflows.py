@@ -143,12 +143,17 @@ PREMERGE_LINES = [
     '          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")',
     '          HEAD_REPO=$(jq -r \'.head.repo.full_name // ""\' "$RUNNER_TEMP/pr.json")',
     '          BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")',
+    '          PR_CREATED=$(jq -r .created_at "$RUNNER_TEMP/pr.json")',
     '          state=failure',
     '          out=$(',
     '            [ "$BASE_REF" = main ] || { echo "base-not-main"; exit 1; }',
     '            git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \\',
     '              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1',
     '            git cat-file -e "$HEAD_SHA^{commit}" || exit 1',
+    '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/timeline" \\',
+    '              --jq \'.[] | [(.event // ""), (.created_at // "")] | @tsv\' > "$RUNNER_TEMP/timeline.tsv" || exit 1',
+    '            python3 -I tools/g1_scope.py --git refs/remotes/pr/base "$HEAD_SHA" --pr "$PR_NUMBER" --pr-created "$PR_CREATED" \\',
+    '              --timeline "$RUNNER_TEMP/timeline.tsv" >&2 || { echo "g1-freeze"; exit 1; }',
     '            if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then',
     '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"',
     '            fi',
@@ -529,6 +534,9 @@ class WorkflowTest(unittest.TestCase):
                      ("          post \"$state\" \"$out\"", "          post success \"$out\""),
                      (") && state=success", ") || true; state=success"),
                      ("git cat-file -e \"$HEAD_SHA^{commit}\" || exit 1", "git cat-file -e \"$HEAD_SHA^{commit}\""),
+                     # PREMERGE-freeze (#3871): the freeze decides before any verdict, and its failure is the status.
+                     ('>&2 || { echo "g1-freeze"; exit 1; }', '>&2 || true'),
+                     ('> "$RUNNER_TEMP/timeline.tsv" || exit 1', '> "$RUNNER_TEMP/timeline.tsv"'),
                      ("          persist-credentials: false", "          persist-credentials: false\n          ref: refs/pull/1/head"),
                      # PREMERGE-source (#1943): the key's environment, the App token on the post,
                      # the token's one permission and the main-only base.
@@ -589,6 +597,7 @@ STUB_JQ = r"""#!/bin/sh
 exec "$REAL_JQ" "$@"
 """
 STUB_PY = r"""#!/bin/sh
+[ "$2" = tools/g1_scope.py ] && exit "$FREEZE"
 echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
 """
 
@@ -631,7 +640,8 @@ class PremergeRunTest(unittest.TestCase):
 
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
-    def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN):
+    def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
+                 freeze=0, descriptions=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
@@ -643,13 +653,16 @@ class PremergeRunTest(unittest.TestCase):
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
-                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state}
+                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state,
+                   "FREEZE": str(freeze)}
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
             posts = (stubs / "posts").read_text().splitlines() if (stubs / "posts").exists() else []
             if tokens is not None:
                 tokens.extend((stubs / "post-tokens").read_text().split())
+            if descriptions is not None:
+                descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
@@ -700,6 +713,16 @@ class PremergeRunTest(unittest.TestCase):
             out = []
             self.run_gate(verdict, outputs=out, **kw)
             self.assertEqual(out, [], (verdict, kw))
+
+    def test_freeze_holds_an_accepted_head(self):
+        # PREMERGE-freeze (#3871): g1-freeze is not required, so auto-merge passed it red. A head
+        # main's g1_scope.py refuses posts `failure` and hands no head to the merge job, accept or bot.
+        for freeze in (1, 2):  # 1: outside the list; 2: cannot decide (fails closed)
+            for verdict, ref in (("same", "feature"), ("bot", "bot/trace")):
+                out, desc = [], []
+                self.assertEqual(self.run_gate(verdict, ref=ref, freeze=freeze, outputs=out, descriptions=desc),
+                                 (0, ["failure"]), (freeze, verdict))
+                self.assertEqual((out, desc), ([], ["g1-freeze"]), (freeze, verdict))
 
     def test_error_before_head_known_fails_the_job(self):
         # Residual named in #1946: with the pulls API down there is no head to post to.

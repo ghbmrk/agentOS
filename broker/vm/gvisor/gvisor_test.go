@@ -513,6 +513,23 @@ func TestIntegrationWorkerExec(t *testing.T) {
 	}
 }
 
+// TestIntegrationWorkerExecExitTwo: under the pinned runsc, a guest that
+// exits 2 after writing stdout and stderr gets a result, not runsc's
+// failure. Exit 2 is also runsc's own exit on a Go panic, so this checks
+// that a normal exec leaves runsc's stderr empty and the guest's stderr on
+// Exec's pipe (CAP-8, SR2-3n, V32).
+func TestIntegrationWorkerExecExitTwo(t *testing.T) {
+	r := newRig(t, 4096)
+	r.worker("wk-1")
+	res, err := r.m.Exec(context.Background(), "wk-1", vm.Command{Argv: []string{"/guest", "stdin", "2"}, Stdin: []byte("hello worker")}, 20*time.Second)
+	if err != nil {
+		t.Fatalf("exec of a guest exiting 2 = %v; want a result", err)
+	}
+	if res.ExitCode != 2 || string(res.Stdout) != "hello worker" || string(res.Stderr) != "oops\n" || res.Truncated {
+		t.Fatalf("exec = code %d, stdout %q, stderr %q, truncated %v; want 2, %q, %q, false", res.ExitCode, res.Stdout, res.Stderr, res.Truncated, "hello worker", "oops\n")
+	}
+}
+
 func TestCappedKeepsTheFirstBytes(t *testing.T) {
 	c := &capped{max: 4}
 	c.Write([]byte("ab"))
