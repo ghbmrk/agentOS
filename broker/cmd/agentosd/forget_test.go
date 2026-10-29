@@ -161,13 +161,40 @@ type forgetBox struct {
 	dir     string
 	dropped int
 	logs    []string
+	// queued is the approval queue: what each lineage asked for, and
+	// when; void closes it as grants.Gate.VoidSince does.
+	queued  []queuedAsk
+	voided  []string
+	voidErr error
+}
+
+type queuedAsk struct {
+	id, lineage string
+	at          time.Time
+}
+
+func (b *forgetBox) void(lineage string, since time.Time) ([]string, error) {
+	if b.voidErr != nil {
+		return nil, b.voidErr
+	}
+	var ids []string
+	b.queued = slices.DeleteFunc(b.queued, func(q queuedAsk) bool {
+		if q.lineage == lineage && !q.at.Before(since) {
+			ids = append(ids, q.id)
+			return true
+		}
+		return false
+	})
+	b.voided = append(b.voided, ids...)
+	return ids, nil
 }
 
 func newForgetBox(t *testing.T, k *fakeKernel, m *rewindMachines, dir string) *forgetBox {
 	t.Helper()
 	b := &forgetBox{k: k, m: m, dir: dir}
 	b.rw = openEraseRewind(filepath.Join(dir, eraseRewoundFile), func(f string, a ...any) { b.logs = append(b.logs, f) })
-	b.rw.attach(k, func() lineageForgetter { return m }, func() error { b.dropped++; return nil })
+	b.rw.attach(k, func() lineageForgetter { return m }, func() error { b.dropped++; return nil }, b.void)
+	b.rw.startWait = 0
 	b.f = newForgetFlow(k, b.rw)
 	return b
 }
@@ -376,7 +403,7 @@ func TestAFailedRewindStaysContained(t *testing.T) {
 	}
 	// Kept replies that do not drop settle nothing: the lineage stays held.
 	k.add("s2", "Bob", 1, map[string]int64{"writer.1": 7000})
-	b2.rw.attach(k, func() lineageForgetter { return m }, func() error { return errors.New("read-only") })
+	b2.rw.attach(k, func() lineageForgetter { return m }, func() error { return errors.New("read-only") }, nil)
 	r = b2.forget(t, "Bob")
 	if !slices.Equal(r.Held, []string{"writer.1"}) || !b2.rw.Contained("writer.1") || len(m.calls) != 3 {
 		t.Fatalf("replies not dropped: %+v %v", r, m.calls)
@@ -576,7 +603,7 @@ func TestNoReplyKeptDuringTheRewindSurvives(t *testing.T) {
 		}
 		_, err := kept.forget()
 		return err
-	})
+	}, nil)
 	rw.settle(context.Background(), func(string) error { return nil })
 	f := newForgetFlow(k, rw)
 	found, _ := f.find(context.Background(), "Alice")
@@ -640,12 +667,114 @@ func TestAnEndedRequestStillRewinds(t *testing.T) {
 	k.add("s1", "Alice", 1, map[string]int64{"a.1": 1000})
 	ctx, cancel := context.WithCancel(context.Background())
 	rw := openEraseRewind(filepath.Join(t.TempDir(), eraseRewoundFile), t.Logf)
-	rw.attach(k, func() lineageForgetter { return &ctxMachines{cancel: cancel} }, func() error { return nil })
+	rw.attach(k, func() lineageForgetter { return &ctxMachines{cancel: cancel} }, func() error { return nil }, nil)
 	rw.settle(context.Background(), func(string) error { return nil })
 	f := newForgetFlow(k, rw)
 	found, _ := f.find(ctx, "Alice")
 	r, err := f.confirm(ctx, found.Handle)
 	if err != nil || r.Held != nil || !slices.Equal(r.Rewound, []string{"a.1"}) {
 		t.Fatalf("held=%v rewound=%v %v", r.Held, r.Rewound, err)
+	}
+}
+
+// LOG-4, D-169 (Security 3 on #3691): what a reader queued from the
+// content, an approval card or an effect in its undo window, is closed
+// before confirm returns, and the result says so; its asks from before
+// the read, and another agent's, are kept. A queue that cannot be closed
+// holds the reader.
+func TestARewoundReadersQueueIsVoided(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	b := newForgetBox(t, k, &rewindMachines{}, t.TempDir())
+	ask := func(id, l string, ms int64) queuedAsk { return queuedAsk{id, l, time.UnixMilli(ms)} }
+	b.queued = []queuedAsk{ask("before", "helper.1", 4999), ask("card", "helper.1", 5000), ask("held", "helper.1", 7000), ask("other", "other.1", 6000)}
+	b.rw.settle(context.Background(), func(string) error { return nil })
+	r := b.forget(t, "Alice")
+	if !slices.Equal(r.Voided, []string{"card", "held"}) || len(b.queued) != 2 || b.queued[0].id != "before" || b.queued[1].id != "other" {
+		t.Fatalf("voided %v, kept %v", r.Voided, b.queued)
+	}
+	if !strings.Contains(r.Text(), "I cancelled 2 requests an agent made after reading them, so they will not run.") {
+		t.Fatalf("text: %q", r.Text())
+	}
+	k.add("s2", "Bob", 1, map[string]int64{"writer.1": 8000})
+	b.voidErr = errors.New("journal unreadable")
+	r = b.forget(t, "Bob")
+	if r.Rewound != nil || !slices.Equal(r.Held, []string{"writer.1"}) || !b.rw.Contained("writer.1") {
+		t.Fatalf("queue not closed, yet: %+v", r)
+	}
+}
+
+// D-169 "before any is served" (Security 4 on #3691): the start-up pass
+// waits a bound for the kernel's first answer, so a reader a crash left
+// is rewound before machines are served; past the bound every agent stays
+// contained and STATUS says so.
+func TestStartWaitsForTheErasedReads(t *testing.T) {
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	k.erased["s1"] = true
+	k.readsErr = errors.New("kernel not up")
+	m := &rewindMachines{}
+	b := newForgetBox(t, k, m, t.TempDir())
+	b.rw.startWait = 5 * time.Second
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		k.mu.Lock()
+		k.readsErr = nil
+		k.mu.Unlock()
+	}()
+	b.rw.settle(context.Background(), func(string) error { return nil })
+	if !slices.Equal(m.calls, []string{"helper.1"}) || b.rw.Contained("helper.1") {
+		t.Fatalf("served before the rewind: %v", m.calls)
+	}
+	k.mu.Lock()
+	k.readsErr = errors.New("kernel not up")
+	k.mu.Unlock()
+	b2 := newForgetBox(t, k, &rewindMachines{}, t.TempDir())
+	b2.rw.startWait = 20 * time.Millisecond
+	b2.rw.settle(context.Background(), func(string) error { return nil })
+	if !b2.rw.Contained("helper.1") || !b2.rw.Contained("other.1") || b2.rw.Note() != forgetReadsUnknown {
+		t.Fatalf("past the bound: %q", b2.rw.Note())
+	}
+}
+
+// D-169 "then tells the owner" (delta L3 1 on #3691): a confirm marks told
+// only the rewinds it made, so an earlier one whose notice did not go is
+// still told, and watch sends it without waiting for another rewind.
+func TestAConfirmLeavesAnEarlierUntoldRewind(t *testing.T) {
+	dir := t.TempDir()
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	k.erased["s1"] = true
+	k.add("s2", "Bob", 1, map[string]int64{"helper.1": 9000})
+	m := &rewindMachines{}
+	b := newForgetBox(t, k, m, dir)
+	b.rw.settle(context.Background(), func(string) error { return errors.New("owner channel down") })
+	b.forget(t, "Bob")
+	told := make(chan string, 4)
+	watchUntilCleanup(t, b.rw, func(s string) error { told <- s; return nil })
+	select {
+	case s := <-told:
+		if !strings.HasPrefix(s, "Agent helper had read") || len(m.calls) != 2 {
+			t.Fatalf("told %q after rewinds %v", s, m.calls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the earlier rewind was never told")
+	}
+}
+
+// Delta L3 2 on #3691: a record that is not written reports the readers
+// held, never also gone, and marks nothing told.
+func TestAnUnsavedRewindIsOnlyHeld(t *testing.T) {
+	dir := t.TempDir()
+	k := newFakeKernel()
+	k.add("s1", "Alice", 1, map[string]int64{"helper.1": 5000})
+	b := newForgetBox(t, k, &rewindMachines{}, dir)
+	b.rw.settle(context.Background(), func(string) error { return nil })
+	if err := os.MkdirAll(filepath.Join(dir, eraseRewoundFile, "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	r := b.forget(t, "Alice")
+	if r.Rewound != nil || !slices.Equal(r.Held, []string{"helper.1"}) || strings.Contains(r.Text(), "went back") || !b.rw.Contained("helper.1") {
+		t.Fatalf("unsaved: %+v %q", r, r.Text())
 	}
 }
