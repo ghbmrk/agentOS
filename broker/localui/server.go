@@ -81,6 +81,10 @@ type Config struct {
 	// sign-in (CAM-clerk part d, #3514): the tier-4 connect, capture
 	// turn-on, retention and re-pin steps, and the disconnect.
 	Cameras Cameras
+	// HomeKit, when set, serves the HomeKit page at /homekit/ behind
+	// sign-in (DEV-homekit part b2a, #3891): the tier-4 connect by HomeKit
+	// code, bounds and re-pin steps, and the disconnect.
+	HomeKit HomeKit
 	// Recovery, when set with Passkeys, serves the Recovery key page at
 	// /recovery/ behind sign-in (REC-4, r4a): its tap is on the passkey
 	// page's name. When unset, Passkeys that also serve the recovery ops
@@ -314,6 +318,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Cameras != nil {
 		s.Mount("/cameras", "Cameras", http.HandlerFunc(s.camerasPage))
+	}
+	if s.cfg.HomeKit != nil {
+		s.Mount("/homekit", "HomeKit", http.HandlerFunc(s.homekitPage))
 	}
 	if s.cfg.Recovery != nil {
 		s.Mount("/recovery", "Recovery key", http.HandlerFunc(s.recoveryPage))

@@ -84,6 +84,10 @@ wiring cmd/agentos-devices
 # kernel on descriptor 3, its client and segment keys in its own sealed slots,
 # and the owner side's socket.
 wiring cmd/agentos-camera
+# The HomeKit clerk's process (DEV-homekit part b2a, #3891): its key from the
+# kernel on descriptor 3, the controller key in its own sealed slot, and the
+# owner side's socket.
+wiring cmd/agentos-homekit
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
