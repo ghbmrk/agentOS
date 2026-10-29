@@ -1,6 +1,7 @@
 package clock
 
 // REQ: TIM-1
+// REQ: TIM-1 (REV-CHK-mut live probe)
 
 import (
 	"context"

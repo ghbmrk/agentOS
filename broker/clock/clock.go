@@ -183,7 +183,7 @@ func HeldText(jump time.Duration) string {
 // zoneLike reports a skew within a minute of a whole number of quarter
 // hours, the shape of a wrong time zone rather than a moved clock.
 func zoneLike(skew time.Duration) bool {
-	if skew < 0 {
+	if skew < 0 { // REV-CHK-mut live probe, not for merge
 		skew = -skew
 	}
 	if skew < 14*time.Minute {
