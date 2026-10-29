@@ -18,17 +18,21 @@ those), that is:
   - a .go file whose build constraint (`//go:build` or `// +build` before the package
     clause) or file-name suffix (_GOOS, _GOARCH) names a tag outside the build set;
   - a .go file it cannot read: not UTF-8, or an unterminated comment or literal.
+  - a symlink, to a file or a directory, under any name: the walk does not follow one.
 The build set is read from the builds, not a hand list: every `-tags` value, `-race`,
 `GOOS`/`GOARCH` and `CGO_ENABLED=1` in .github/workflows/ and in the non-Markdown files
 under image/, plus linux and amd64 for each `runs-on: ubuntu` runner (arm64 for an -arm
 one). Always admitted: `gc`, release tags `goN.M`, `unix` with linux, and `ignore` (the
 convention for a file no build selects). Whole-line `#` comments are not read.
 
-Each exception is a line in tools/srclint_allow.txt: the path, a space, then the reason.
-A line whose file is gone or no longer has a finding fails (stale entry).
+Each exception is a line in tools/srclint_allow.txt: the path, the kinds of finding it
+excuses (comma-separated, from KINDS), then the reason, separated by spaces. A finding of
+another kind in that file still fails, and so does a line naming a kind the file no longer
+has, or a file that is gone (stale entry).
 
 Bound: reflection, `unsafe` and raw syscalls in plain Go stay held by review (childproc
-r8 l1, l2), as does what an allowed file does.
+r8 l1, l2), as do what an allowed file does, the skipped vendor/ and third_party/ code, and
+code reached from outside broker/ by a go.mod `replace` or a go.work `use`.
 
 Usage: srclint.py [--root DIR] [--allow FILE]
 """
@@ -50,6 +54,8 @@ GOARCH = frozenset(
     "386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 "
     "mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm".split())
 ALWAYS = frozenset({"gc", "ignore"})
+# Finding kinds, as an allow line names them.
+KINDS = frozenset({"nongo", "cgo", "linkname", "tag", "parse", "symlink"})
 RELEASE = re.compile(r"go1\.\d+\Z")
 SKIP_TOP = ("broker/vendor/", "broker/third_party/")
 
@@ -239,24 +245,24 @@ def _name_tags(name):
 
 
 def go_problems(text, name, tags):
-    """What makes one .go file's source not plain Go, or unreadable."""
+    """(kind, message) for what makes one .go file's source not plain Go, or unreadable."""
     try:
         toks = list(tokens(text))
         header, imports = _header_and_imports(toks)
     except Unreadable as e:
-        return [f"cannot parse ({e})"]
+        return [("parse", f"cannot parse ({e})")]
     out = []
     if "C" in imports:
-        out.append('imports "C" (cgo)')
+        out.append(("cgo", 'imports "C" (cgo)'))
     comments = [v for k, v in toks if k == "comment"]
     if any(CGO_DIRECTIVE.search(c) for c in comments):
-        out.append("has a #cgo line in a comment")
+        out.append(("cgo", "has a #cgo line in a comment"))
     for d in sorted({m.group(0) for c in comments for m in LINK_DIRECTIVE.finditer(c)}):
-        out.append(f"has a {d} directive")
+        out.append(("linkname", f"has a {d} directive"))
     named = _constraint_tags(header) | _name_tags(name)
     unknown = sorted(t for t in named if t not in tags and not RELEASE.match(t))
     if unknown:
-        out.append(f"build constraint names {', '.join(unknown)}, which no workflow or image build sets")
+        out.append(("tag", f"build constraint names {', '.join(unknown)}, which no workflow or image build sets"))
     return out
 
 
@@ -267,21 +273,25 @@ def _skipped(rel):
 
 
 def scan(root, tags):
-    """{repo-relative path: [problem, ...]} for every file under broker/ that is not plain Go."""
+    """{repo-relative path: [(kind, message), ...]} for every file under broker/ that is not plain Go."""
     root = pathlib.Path(root)
     found = {}
     for f in sorted((root / "broker").rglob("*")):
         rel = f.relative_to(root).as_posix()
+        if f.is_symlink() and not rel.startswith(SKIP_TOP) and "testdata" not in rel.split("/"):
+            # rglob does not descend into a linked directory, but the go tool builds through one.
+            found[rel] = [("symlink", "is a symlink: the go tool follows it and this check does not")]
+            continue
         if not f.is_file() or _skipped(rel):
             continue
         ext = f.suffix.lower()
         if ext in NON_GO:
-            found[rel] = [f"is a {f.suffix} file the go tool compiles or links, not Go"]
+            found[rel] = [("nongo", f"is a {f.suffix} file the go tool compiles or links, not Go")]
         elif ext == ".go":
             try:
                 text = f.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
-                found[rel] = ["cannot parse (not UTF-8)"]
+                found[rel] = [("parse", "cannot parse (not UTF-8)")]
                 continue
             p = go_problems(text, f.name, tags)
             if p:
@@ -290,7 +300,7 @@ def scan(root, tags):
 
 
 def load_allow(path):
-    """{path: reason}. A line is `path reason`; blank lines and `#` lines are skipped. A
+    """{path: kinds}. A line is `path kind[,kind...] reason`; blank lines and `#` lines are skipped. A
     control character or a line break other than LF fails: a line must mean what it shows."""
     allow = {}
     path = pathlib.Path(path)
@@ -308,12 +318,15 @@ def load_allow(path):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        rel, _, why = line.partition(" ")
+        rel, kinds, why = (line.split(None, 2) + ["", ""])[:3]
+        kinds = frozenset(kinds.split(","))
+        if not kinds <= KINDS:
+            raise SystemExit(f"srclint: {path}:{n}: {rel}: kinds must be from {', '.join(sorted(KINDS))}")
         if not why.strip():
             raise SystemExit(f"srclint: {path}:{n}: {rel} needs a reason")
         if rel in allow:
             raise SystemExit(f"srclint: {path}:{n}: {rel} listed twice")
-        allow[rel] = why.strip()
+        allow[rel] = kinds
     return allow
 
 
@@ -321,9 +334,11 @@ def check(root, allow_file):
     root = pathlib.Path(root)
     allow = load_allow(allow_file)
     found = scan(root, build_tags(root))
-    problems = [f"{rel}: {p}" for rel, ps in found.items() if rel not in allow for p in ps]
-    problems += [f"{rel}: allow-listed but plain Go or gone (stale entry)"
-                 for rel in sorted(set(allow) - set(found))]
+    problems = [f"{rel}: {msg}" for rel, ps in found.items() for kind, msg in ps
+                if kind not in allow.get(rel, ())]
+    for rel, kinds in sorted(allow.items()):
+        for kind in sorted(kinds - {k for k, _ in found.get(rel, ())}):
+            problems.append(f"{rel}: allow-listed for {kind} but has none (stale entry)")
     return problems
 
 

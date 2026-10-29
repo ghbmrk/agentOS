@@ -109,23 +109,54 @@ class SrcLintTest(unittest.TestCase):
                 self.assertTrue(all(p.startswith(rel + ": ") for p in problems), problems)
                 self.assertTrue(any(words in p for p in problems), problems)
 
+    def test_refuses_a_symlink(self):
+        # Security on #3949: rglob does not descend into a linked directory; go builds through it.
+        outside = self.t.root / "outside"
+        outside.mkdir()
+        (outside / "x_amd64.s").write_bytes(b"nop\n")
+        (outside / "ok.go").write_bytes(b"package ok\n")
+        for rel, target in (("broker/linked", outside), ("broker/ok/_linked", outside),
+                            ("broker/ok/link.go", outside / "ok.go")):
+            with self.subTest(rel=rel):
+                link = self.t.root / rel
+                link.symlink_to(target)
+                try:
+                    self.assertEqual(self.t.check(),
+                                     [f"{rel}: is a symlink: the go tool follows it and this check does not"])
+                finally:
+                    link.unlink()
+
     def test_allow_line_excuses_its_file_only(self):
         self.t.put("broker/drv/cgo.go", b'package drv\n\nimport "C"\n')
         self.t.put("broker/drv/trap_amd64.s", b"nop\n")
-        self.t.allow.write_text("broker/drv/cgo.go the reviewed decoder\n")
+        self.t.allow.write_text("broker/drv/cgo.go cgo the reviewed decoder\n")
         self.assertEqual(self.t.check(), ["broker/drv/trap_amd64.s: is a .s file the go tool compiles or links, not Go"])
 
-    def test_stale_allow_line_fails(self):
-        self.t.allow.write_text("# header\nbroker/ok/ok.go was cgo once\nbroker/gone.go never existed\n")
+    def test_allow_line_excuses_its_kinds_only(self):
+        # L3 on #3949: an allowed cgo file that gains a linkname or an unknown tag still fails.
+        self.t.put("broker/drv/cgo.go", b'//go:build sometag\n\npackage drv\n\nimport "C"\n\n//go:linkname f g.h\nfunc f()\n')
+        self.t.allow.write_text("broker/drv/cgo.go cgo the reviewed decoder\n")
         self.assertEqual(self.t.check(), [
-            "broker/gone.go: allow-listed but plain Go or gone (stale entry)",
-            "broker/ok/ok.go: allow-listed but plain Go or gone (stale entry)",
+            "broker/drv/cgo.go: has a go:linkname directive",
+            "broker/drv/cgo.go: build constraint names sometag, which no workflow or image build sets"])
+        self.t.allow.write_text("broker/drv/cgo.go cgo,linkname,tag the reviewed decoder\n")
+        self.assertEqual(self.t.check(), [])
+
+    def test_stale_allow_line_fails(self):
+        self.t.put("broker/drv/cgo.go", b'package drv\n\nimport "C"\n')
+        self.t.allow.write_text("# header\nbroker/ok/ok.go cgo was cgo once\nbroker/gone.go nongo never existed\n"
+                                "broker/drv/cgo.go cgo,linkname had a linkname once\n")
+        self.assertEqual(self.t.check(), [
+            "broker/drv/cgo.go: allow-listed for linkname but has none (stale entry)",
+            "broker/gone.go: allow-listed for nongo but has none (stale entry)",
+            "broker/ok/ok.go: allow-listed for cgo but has none (stale entry)",
         ])
 
     def test_allow_line_needs_a_reason_and_no_hidden_break(self):
-        for text in ("broker/drv/cgo.go\n", "broker/drv/cgo.go ok\rbroker/x.go ok\n",
-                     "broker/drv/cgo.go ok\u2028broker/x.go ok\n", "broker/drv/cgo.go ok\x85\n",
-                     "broker/drv/cgo.go a\nbroker/drv/cgo.go b\n"):
+        for text in ("broker/drv/cgo.go\n", "broker/drv/cgo.go cgo\n", "broker/drv/cgo.go asm reason\n",
+                     "broker/drv/cgo.go cgo, reason\n", "broker/drv/cgo.go cgo ok\rbroker/x.go cgo ok\n",
+                     "broker/drv/cgo.go cgo ok\u2028broker/x.go cgo ok\n", "broker/drv/cgo.go cgo ok\x85\n",
+                     "broker/drv/cgo.go cgo a\nbroker/drv/cgo.go cgo b\n"):
             with self.subTest(text=text):
                 self.t.allow.write_text(text)
                 with self.assertRaises(SystemExit):
