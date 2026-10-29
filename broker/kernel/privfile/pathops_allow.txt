@@ -30,6 +30,7 @@ allow broker/vm/vm.go Manager.limitDisk os.MkdirAll the machine's disk/ director
 allow broker/vm/vm.go Manager.writeLayer os.RemoveAll a stopped machine's upper and work directories, in root-held disk/; RemoveAll follows no link the guest left in them
 allow broker/vm/vm.go Manager.writeLayer os.Mkdir a fresh upper directory in root-held disk/
 allow broker/vm/vm.go writeSeed os.MkdirAll seed directories in a fresh upper no guest has run on, so the broker made every directory on the path
+allow broker/vm/vm.go writeSeed os.OpenFile a seed file in that fresh upper, with O_EXCL, which refuses a link at the name
 allow broker/vm/vm.go Manager.captureAs os.Mkdir mem in the snapshot stage publishDir just made, root-held
 allow broker/vm/vm.go Manager.withdrawLocked os.RemoveAll a snapshot directory in root-held snapshots/
 allow broker/vm/vm.go Manager.load os.RemoveAll an unpublished snapshot directory in root-held snapshots/
@@ -42,7 +43,12 @@ allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory
 allow broker/vm/forget.go Manager.removeSnapshot os.Remove the snapshot's meta.json, at the top of its root-held directory
 allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the root-held snapshot directory
 allow broker/vm/prune.go Manager.Prune os.RemoveAll snapshot directories in root-held snapshots/
+allow broker/vm/sleep.go treeHash os.Open a file WalkDir found (it follows no link) and d.Info, an lstat, showed regular, in a root-held snapshot no guest runs on
 allow broker/vm/gvisor/gvisor.go Runtime.launch os.MkdirAll r.StateDir, runsc's --root: agentosd's machines/runsc, root-held
+allow broker/vm/gvisor/gvisor.go keepConsole os.OpenFile console.log in the root-held machine directory, or exec.log in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go notRun os.Open runsc's --log file, which Exec's CreateTemp made in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go fileTail os.Open console.log in the root-held machine directory
+allow broker/vm/gvisor/gvisor.go clipped os.Open a runsc log file Exec's CreateTemp made in runsc's root-held --root
 allow broker/vm/gvisor/gvisor.go writeBundle os.MkdirAll the machine's bundle directory, root-held beside its layer
 allow broker/vm/gvisor/gvisor.go writeBundle os.WriteFile config.json in the root-held bundle directory, which no guest reaches
 allow broker/vm/gvisor/gvisor.go Runtime.Exec os.MkdirAll runsc's --root, root-held

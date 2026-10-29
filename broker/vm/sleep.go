@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -212,7 +211,7 @@ func treeHash(dir string) (string, error) {
 			}
 			field([]byte(t))
 		case fi.Mode().IsRegular():
-			f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+			f, err := os.Open(p)
 			if err != nil {
 				return err
 			}

@@ -227,7 +227,7 @@ func keepConsole(r io.ReadCloser, path string, limit int64) {
 	var size int64
 	open := func() bool {
 		var err error
-		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600); err != nil {
+		if f, err = os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600); err != nil {
 			return false
 		}
 		fi, err := f.Stat()
@@ -423,7 +423,7 @@ const runscMsgLineMax = 1 << 20
 // only after it; a guest argv that reads as a lost answer only makes the
 // error the safer ErrExecFailed.
 func notRun(errLog string, argv []string) error {
-	f, err := os.OpenFile(errLog, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(errLog)
 	if err != nil {
 		return vm.ErrExecFailed
 	}
@@ -523,7 +523,7 @@ func (r *Runtime) logStart(id, verb string, err error, console []byte) {
 
 // fileTail is the last runscMsgMax bytes of the file at path.
 func fileTail(path string) []byte {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -537,7 +537,7 @@ func fileTail(path string) []byte {
 
 // clipped is the first runscMsgMax bytes of the file at path.
 func clipped(path string) []byte {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
