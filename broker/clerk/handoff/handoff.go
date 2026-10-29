@@ -227,16 +227,27 @@ func SplitRecipient(r []byte) (x, ek []byte, err error) {
 	return bytes.Clone(r[:recipientXLen]), bytes.Clone(r[recipientXLen:]), nil
 }
 
+// lowOrderProbe is a fixed X25519 key. Its scalar, like every X25519
+// scalar, is a multiple of the cofactor, so its ECDH against a low-order
+// point is all zeros, which crypto/ecdh refuses.
+var lowOrderProbe, _ = ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{0x42}, 32))
+
 // validRecipient: r is RecipientLen bytes and both its keys parse, so a
-// backup can be sealed to it.
+// backup can be sealed to it. NewPublicKey takes any 32 bytes, so the
+// X25519 key must also not be a low-order point, whose shared secret is
+// all zeros (#3274).
 func validRecipient(r []byte) bool {
 	if len(r) != RecipientLen {
 		return false
 	}
-	if _, err := ecdh.X25519().NewPublicKey(r[:recipientXLen]); err != nil {
+	x, err := ecdh.X25519().NewPublicKey(r[:recipientXLen])
+	if err != nil {
 		return false
 	}
-	_, err := mlkem.NewEncapsulationKey768(r[recipientXLen:])
+	if _, err := lowOrderProbe.ECDH(x); err != nil {
+		return false
+	}
+	_, err = mlkem.NewEncapsulationKey768(r[recipientXLen:])
 	return err == nil
 }
 

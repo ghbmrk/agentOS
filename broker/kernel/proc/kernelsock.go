@@ -250,11 +250,12 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"approvetask": act(func(k *kernel.Kernel, now int64, a approveArgs) error {
 		return k.ApproveTask(now, a.Task, a.Approval)
 	}),
-	"revoke":  act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Revoke(now, id) }),
-	"pause":   act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Pause(now, id) }),
-	"unpause": act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
-	"stop":    act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
-	"resume":  act(func(k *kernel.Kernel, now int64, a resumeArgs) error { return k.Resume(now, a.Stops) }),
+	"approvecode": act(func(k *kernel.Kernel, now int64, a kernel.CodeApproval) error { return k.ApproveCode(now, a) }),
+	"revoke":      act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Revoke(now, id) }),
+	"pause":       act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Pause(now, id) }),
+	"unpause":     act(func(k *kernel.Kernel, now int64, id key.ID) error { return k.Unpause(now, id) }),
+	"stop":        act(func(k *kernel.Kernel, now int64, _ none) error { return k.Stop(now) }),
+	"resume":      act(func(k *kernel.Kernel, now int64, a resumeArgs) error { return k.Resume(now, a.Stops) }),
 	"setupinfo": func(k *kernel.Kernel, _ int64, _ json.RawMessage) (any, error) {
 		return SetupInfo{Open: k.State().SetupOpen(), Box: k.Box()}, nil
 	},
@@ -658,7 +659,7 @@ func init() {
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
 		kernel.ErrEdgeKey, kernel.ErrEdgeSig, kernel.ErrEdgeRevoked, kernel.ErrEdgeCandidate, kernel.ErrEdgeHello, kernel.ErrEdgeBusy, kernel.ErrEdgeLive,
-		ErrNoLinkKey, ErrLinkSign,
+		ErrNoLinkKey, ErrLinkSign, kernel.ErrNoChecker, kernel.ErrCodeApproval,
 		ErrNoRecipient, ErrNoAuthority, ErrPageRestore, pageca.ErrKey, pageca.ErrExpired, ErrBackupsOff, ErrNoBackupTarget, ErrTargetInKernel, ErrTargetNotDir,
 	}
 	for _, e := range wireList {
@@ -811,10 +812,11 @@ func (o Owner) Issue(cos []key.Cosign, keys ...key.Key) error {
 func (o Owner) ApproveTask(id string, a kernel.TaskApproval) error {
 	return o.Call("approvetask", approveArgs{id, a}, nil)
 }
-func (o Owner) Revoke(id key.ID) error  { return o.Call("revoke", id, nil) }
-func (o Owner) Pause(id key.ID) error   { return o.Call("pause", id, nil) }
-func (o Owner) Unpause(id key.ID) error { return o.Call("unpause", id, nil) }
-func (o Owner) Stop() error             { return o.Call("stop", nil, nil) }
+func (o Owner) ApproveCode(a kernel.CodeApproval) error { return o.Call("approvecode", a, nil) }
+func (o Owner) Revoke(id key.ID) error                  { return o.Call("revoke", id, nil) }
+func (o Owner) Pause(id key.ID) error                   { return o.Call("pause", id, nil) }
+func (o Owner) Unpause(id key.ID) error                 { return o.Call("unpause", id, nil) }
+func (o Owner) Stop() error                             { return o.Call("stop", nil, nil) }
 
 // Resume lifts the STOP whose count it names (Changes's stops).
 func (o Owner) Resume(stops uint64) error { return o.Call("resume", resumeArgs{stops}, nil) }

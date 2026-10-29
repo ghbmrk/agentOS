@@ -31,7 +31,7 @@ func TestALocalOnlyItemIsAskedOnThePage(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := r.inbox()
-	if !strings.HasPrefix(text, id+": ") || !strings.Contains(text, "2 recipients") || strings.Contains(text, "acme") ||
+	if !strings.HasPrefix(text, "Can I ") || !strings.Contains(text, "2 recipients") || strings.Contains(text, "acme") ||
 		!strings.Contains(text, "Wi-Fi page") || !strings.Contains(text, "NO "+id) || strings.Contains(text, "YES") {
 		t.Fatalf("notice %q", text)
 	}
@@ -174,7 +174,7 @@ func TestTheLocalNoticeNamesTheActionAndTheDeadline(t *testing.T) {
 	id, _ := r.ch.RequestLocal(it, 0)
 	text := r.inbox()
 	exp := r.clock().Add(LocalTTL)
-	want := id + `: Can I send "` + field(it.Object, 40) + `" to 2 recipients? I can't show them in a text. Approve or deny on my Wi-Fi page before ` +
+	want := `Can I send "` + field(it.Object, 40) + `" to 2 recipients? I can't show them in a text. Approve or deny on my Wi-Fi page before ` +
 		exp.Format("15:04") + ", or reply NO " + id + "."
 	if text != want {
 		t.Fatalf("notice\n got %q\nwant %q", text, want)
@@ -614,7 +614,7 @@ func TestPageRequestsOpenedTogetherShareAText(t *testing.T) {
 		t.Fatalf("ids %v err %v", ids, err)
 	}
 	sent := r.carrier.Log()[before:]
-	if len(sent) != 1 || !strings.HasPrefix(sent[0].Text, ids[0]+": ") || !strings.Contains(sent[0].Text, " "+ids[1]+": ") || strings.Contains(sent[0].Text, "acme") {
+	if len(sent) != 1 || !strings.HasPrefix(sent[0].Text, "Can I ") || !strings.Contains(sent[0].Text, "reply NO "+ids[0]+". Can I ") || !strings.HasSuffix(sent[0].Text, "reply NO "+ids[1]+".") || strings.Contains(sent[0].Text, "acme") {
 		t.Fatalf("sent %+v", sent)
 	}
 	got := r.ch.LocalRequests()
@@ -645,7 +645,7 @@ func TestAConfirmationTakesOneCodeOnThePage(t *testing.T) {
 	}
 	text := r.inbox()
 	for _, id := range ids {
-		if !strings.Contains(text, id+": Can I grant \"mail.read for CANARY-agent\"? Approve or deny on my Wi-Fi page before ") || !strings.Contains(text, "or reply NO "+id+".") {
+		if !strings.Contains(text, "Can I grant \"mail.read for CANARY-agent\"? Approve or deny on my Wi-Fi page before ") || !strings.Contains(text, "or reply NO "+id+".") {
 			t.Fatalf("notice %q", text)
 		}
 	}
@@ -784,7 +784,7 @@ func TestPageNoticesAreQuestionsWithinTheirBudget(t *testing.T) {
 			if !fits(text) || strings.Contains(text, "your agent wants") {
 				t.Fatalf("budget or voice: %q", text)
 			}
-			for _, f := range []string{id + ":", "Can I " + field(it.Facts.Verb, 12) + ` "` + field(it.Object, 40) + `"`, "? ", "before " + exp, "reply NO " + id + "."} {
+			for _, f := range []string{"Can I " + field(it.Facts.Verb, 12) + ` "` + field(it.Object, 40) + `"`, "? ", "before " + exp, "reply NO " + id + "."} {
 				if !strings.Contains(text, f) {
 					t.Fatalf("missing %q in %q", f, text)
 				}
