@@ -9,7 +9,10 @@
 # step's latch (#1270). Both live in its own state directory.
 [Unit]
 Description=agentOS owner page
-After=agentosd.service agentos-egress.service agentos-localui-claim.service agentos-inbound.service
+# The first-boot page authority is published before the page starts, so the Owner Card prints it
+# (HW-1; brief OWN-card-flow). After=, never Requires=: an enrolled box skips the staging, and the
+# page must still start; with no published certificate the card takes agentosd's.
+After=agentosd.service agentos-egress.service agentos-localui-claim.service agentos-inbound.service agentos-keeper-pageca.service
 # Requires=, not Wants=, on the claim hand-over: if the move fails, the page
 # must not start without its claim state, or a preloaded box would serve
 # setup without the sticker code. A hand-over skipped by its condition
@@ -39,7 +42,8 @@ ExecStartPre=+/usr/lib/agentos/agentos-localui -admit-port1 -iface ${AGENTOS_PAG
 ExecStart=/usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface ${AGENTOS_PAGE_IFACE} \
         -port1-file /run/agentos-localui/port1 \
         -vault-sock /run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json \
-        -card-latch /var/lib/agentos-localui/card-latch.json
+        -card-latch /var/lib/agentos-localui/card-latch.json \
+        -page-ca-cert /run/agentos-page-ca/authority.der -keeper-setup-sock /run/agentos-keeper/setup.sock
 ExecStopPost=+/usr/sbin/nft flush set inet agentos_inbound page
 Restart=always
 RestartSec=5

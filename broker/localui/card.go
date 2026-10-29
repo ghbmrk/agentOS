@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/firstboot"
 )
 
 // OwnerCard is the first-boot Owner Card step as setup sees it
@@ -37,7 +38,7 @@ func (u *setup) card(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := d.Handler(u.paired, "/setup")
-	if r.Method != http.MethodPost || u.s.cfg.CodesVoid == nil {
+	if r.Method != http.MethodPost {
 		h.ServeHTTP(w, r)
 		return
 	}
@@ -46,7 +47,19 @@ func (u *setup) card(w http.ResponseWriter, r *http.Request) {
 	// keeps the card for the confirm after it.
 	rec := &cardReply{h: http.Header{}, code: http.StatusOK}
 	h.ServeHTTP(rec, r)
-	if u.voidCodes() {
+	if u.s.cfg.CodesVoid != nil && u.voidCodes() {
+		http.Redirect(w, r, "/setup", http.StatusSeeOther)
+		return
+	}
+	// A confirm the keeper refused, or answered kept, goes back to setup
+	// with the step's fixed line (OWN-card-flow decision 10) rather than
+	// the display's own retry text. Only the paired phone confirms.
+	if line := firstboot.TakeNote(u.s.cfg.Card); line != "" {
+		if key := u.phone(nil, r, false); u.paired(r) {
+			u.mu.Lock()
+			u.err[key] = line
+			u.mu.Unlock()
+		}
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
 		return
 	}

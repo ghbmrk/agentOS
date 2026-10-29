@@ -37,6 +37,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/claim"
@@ -54,6 +55,9 @@ const (
 	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
+	// publishedAuthority is the first-boot page certificate
+	// agentos-keeper-pageca.service publishes until enrollment (OWN-card-flow-b-3).
+	publishedAuthority = "/run/agentos-page-ca/authority.der"
 	// pageDropIn names the page's interface (agentos-localui.service's
 	// AGENTOS_PAGE_IFACE).
 	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
@@ -503,9 +507,24 @@ func (d *driver) card() error {
 	if err != nil {
 		return err
 	}
+	// The card prints the published page certificate's fingerprint
+	// (OWN-card-flow-b-3), read before the confirm: enrollment removes it.
+	pub, err := os.ReadFile(publishedAuthority)
+	if err != nil {
+		return fmt.Errorf("no published page certificate before the confirm: %v", err)
+	}
+	if !printsFingerprint(sheet, card.Fingerprint(pub)) {
+		return errors.New("the card does not print the published page certificate's fingerprint")
+	}
 	st, loc, err := d.post("/setup/card", url.Values{"word": {w}, "group": {g}})
 	if err != nil || st != http.StatusSeeOther {
 		return fmt.Errorf("POST card confirm %d %q %v", st, loc, err)
+	}
+	// The confirm handed the factors to the keeper, whose path unit starts
+	// enrollment; enrollment stores the staged authority only if it is the
+	// published one, and removes the published certificate once it has.
+	if err := waitGone(publishedAuthority, 2*time.Minute); err != nil {
+		return err
 	}
 	b, err := os.ReadFile(cardLatch)
 	if err != nil {
@@ -519,6 +538,21 @@ func (d *driver) card() error {
 	}
 	_, err = d.waitStep("4", time.Minute)
 	return err
+}
+
+// waitGone waits up to wait for path to be removed.
+func waitGone(path string, wait time.Duration) error {
+	end := time.Now().Add(wait)
+	for {
+		_, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if time.Now().After(end) {
+			return fmt.Errorf("enrollment did not take the confirmed card in %v (published certificate still there, err %v)", wait, err)
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func (d *driver) recovery() error {

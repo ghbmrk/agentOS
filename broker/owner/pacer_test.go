@@ -16,6 +16,18 @@ import (
 
 var regexp6 = regexp.MustCompile(`[0-9]{6}`)
 
+// TestMain runs the package with the process in Auckland, so a test that
+// gives the box its own zone shows the box's clock and not the process's
+// (TestHeldMarkerUsesBoxLocalTime). It is set here, before any test starts a
+// goroutine: a test that set it raced every goroutine still reading
+// time.Local through time.Now (#3865, as #3181).
+func TestMain(m *testing.M) {
+	if proc, err := time.LoadLocation("Pacific/Auckland"); err == nil {
+		time.Local = proc
+	}
+	os.Exit(m.Run())
+}
+
 // sentTexts drains the texts the box sent to the owner's phone so far.
 func (r *rig) sentTexts() []string {
 	r.t.Helper()
@@ -942,9 +954,9 @@ func TestHeldMarkerUsesBoxLocalTime(t *testing.T) {
 	if err1 != nil || err2 != nil {
 		t.Skip("no tz data")
 	}
-	old := time.Local
-	time.Local = proc
-	t.Cleanup(func() { time.Local = old })
+	if time.Local.String() != proc.String() {
+		t.Fatalf("process zone %v, want %v from TestMain", time.Local, proc)
+	}
 	st := &MemStore{}
 	if err := st.Save(State{Pacing: quiet22to7()}); err != nil {
 		t.Fatal(err)
