@@ -16,6 +16,7 @@
 package activatortest
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -23,6 +24,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -109,6 +111,7 @@ type Disk struct {
 	cmdline  string
 	selected string
 	efi      string // LoaderEntryDefault, "" when unset
+	oneShot  string // LoaderEntryOneShot, "" when unset
 	esp      esp    // as written
 	synced   esp    // as on disk at the last SyncESP
 	slots    map[string]*slot
@@ -239,18 +242,83 @@ func (d *Disk) Entries() (map[string]Entry, string, error) {
 }
 
 // Effective is the entry the loader boots by default on the ESP as
-// written: LoaderEntryDefault when it names an entry, else loader.conf's.
+// written (see effective).
 func (d *Disk) Effective() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return effective(d.esp, d.efi)
+	return effective(d.esp, d.oneShot, d.efi)
 }
 
-func effective(e esp, efi string) string {
-	if _, ok := e.Entries[efi]; ok && efi != "" {
-		return efi
+// effective is systemd-boot's selection (v260 boot.c): the first of
+// LoaderEntryOneShot, LoaderEntryDefault and loader.conf's default that
+// matches an entry, each a glob matched against the entries in menu order
+// with no boot assessment (an entry with no tries left still matches);
+// failing all three, the first entry in menu order. Menu order puts
+// entries with no tries left last, then newer versions first. Entry IDs
+// carry no +N-M counter, as on v260. "" when the menu is empty.
+func effective(e esp, oneShot, efi string) string {
+	ids := order(e.Entries)
+	for _, pat := range []string{oneShot, efi, e.Default} {
+		if pat == "" {
+			continue
+		}
+		for _, id := range ids {
+			if ok, _ := path.Match(pat, id); ok {
+				return id
+			}
+		}
 	}
-	return e.Default
+	if len(ids) == 0 {
+		return ""
+	}
+	return ids[0]
+}
+
+// order is the boot menu's order: entries with no tries left last, then
+// by ID in descending version order (strverscmp).
+func order(es map[string]Entry) []string {
+	ids := slices.Collect(maps.Keys(es))
+	slices.SortFunc(ids, func(a, b string) int {
+		if ba, bb := es[a].Tries == 0, es[b].Tries == 0; ba != bb {
+			if ba {
+				return 1
+			}
+			return -1
+		}
+		return -vercmp(a, b)
+	})
+	return ids
+}
+
+// vercmp compares a and b with digit runs compared as numbers.
+func vercmp(a, b string) int {
+	for a != "" && b != "" {
+		da, db := digits(a), digits(b)
+		if da > 0 && db > 0 {
+			na, nb := strings.TrimLeft(a[:da], "0"), strings.TrimLeft(b[:db], "0")
+			if c := cmp.Compare(len(na), len(nb)); c != 0 {
+				return c
+			}
+			if c := strings.Compare(na, nb); c != 0 {
+				return c
+			}
+			a, b = a[da:], b[db:]
+			continue
+		}
+		if a[0] != b[0] {
+			return cmp.Compare(a[0], b[0])
+		}
+		a, b = a[1:], b[1:]
+	}
+	return cmp.Compare(len(a), len(b))
+}
+
+func digits(s string) int {
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		n++
+	}
+	return n
 }
 
 // WriteEntry writes boot entry id.
@@ -275,10 +343,10 @@ func (d *Disk) RemoveEntry(id string) error {
 	return nil
 }
 
-// SetDefault sets loader.conf's default. A LoaderEntryDefault naming an
-// entry in the menu overrides it, as in systemd-boot, so an activator
-// that needs id to be the effective boot either sets that variable to id
-// or clears it (#2094 point 2).
+// SetDefault sets loader.conf's default pattern; "" removes the line.
+// LoaderEntryDefault overrides it, and neither skips an entry with no
+// tries left (see effective), so an activator that pins an exact counted
+// entry here never falls back.
 func (d *Disk) SetDefault(id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -446,14 +514,17 @@ type vslot struct {
 	label        string
 }
 
-// view is what a boot after a cut finds: the boot menu, LoaderEntryDefault
-// and the slots.
+// view is what a boot after a cut finds: the boot menu, the loader's
+// variables and the slots.
 type view struct {
-	name  string
-	esp   esp
-	efi   string
-	slots map[string]vslot
+	name    string
+	esp     esp
+	oneShot string
+	efi     string
+	slots   map[string]vslot
 }
+
+func (v view) effective() string { return effective(v.esp, v.oneShot, v.efi) }
 
 // views are the states a cut can leave: the ESP as last synced and as
 // written, each with the slots as they reach the disk.
@@ -471,8 +542,8 @@ func (d *Disk) views() []view {
 		slots[s] = vslot{at(bootab.PartUsr), at(bootab.PartVerity), sl.data, sl.verity, sl.label}
 	}
 	return []view{
-		{"synced ESP", d.synced.clone(), d.efi, slots},
-		{"written ESP", d.esp.clone(), d.efi, maps.Clone(slots)},
+		{"synced ESP", d.synced.clone(), d.oneShot, d.efi, slots},
+		{"written ESP", d.esp.clone(), d.oneShot, d.efi, maps.Clone(slots)},
 	}
 }
 
@@ -491,7 +562,7 @@ func (d *Disk) holds(v view, s, h string) bool {
 // on the same slot.
 func (d *Disk) reboot() *Disk {
 	v := d.views()[0]
-	r := &Disk{booted: d.booted, bootID: "boot-2", cmdline: d.cmdline, selected: d.selected, efi: v.efi,
+	r := &Disk{booted: d.booted, bootID: "boot-2", cmdline: d.cmdline, selected: d.selected, efi: v.efi, oneShot: v.oneShot,
 		esp: v.esp.clone(), synced: v.esp.clone(), slots: map[string]*slot{}, images: maps.Clone(d.images), touched: map[string]bool{}}
 	for s, sl := range v.slots {
 		r.slots[s] = &slot{
@@ -510,24 +581,35 @@ const (
 )
 
 // Scenario is the A12 other-root disk: booted on slot a running N-1, with
-// N blessed and default on slot b, and no LoaderEntryDefault.
-func Scenario() *Disk { return scenario("") }
+// N blessed and first in the menu on slot b, no loader.conf default (as
+// the image ships it) and no loader variables.
+func Scenario() *Disk { return scenario(pin{}) }
 
-// scenario is Scenario with LoaderEntryDefault set to efi.
-func scenario(efi string) *Disk {
+// pin is a boot selection the owner or an older image left in place.
+type pin struct{ name, oneShot, efi, conf string }
+
+// pins are the selections the check runs under: none; the owner's `d` pin
+// (LoaderEntryDefault) on N-1 (#2094 point 2) and on N; a one-shot pick of
+// N; and a loader.conf default naming N or N-1 exactly.
+var pins = []pin{
+	{name: "no pin"},
+	{name: "EFI pin on N-1", efi: bootab.EntryID(prev)},
+	{name: "EFI pin on N", efi: bootab.EntryID(inst)},
+	{name: "one-shot on N", oneShot: bootab.EntryID(inst)},
+	{name: "loader.conf pin on N", conf: bootab.EntryID(inst)},
+	{name: "loader.conf pin on N-1", conf: bootab.EntryID(prev)},
+}
+
+func scenario(p pin) *Disk {
 	d := NewDisk("a",
 		map[string]string{"a": updatetest.UsrHash(prev), "b": updatetest.UsrHash(inst)},
 		map[string]Entry{
-			"agentos-1": {Slot: "a", UsrHash: updatetest.UsrHash(prev), Tries: Blessed},
-			"agentos-2": {Slot: "b", UsrHash: updatetest.UsrHash(inst), Tries: Blessed},
-		}, "agentos-2", updatetest.UsrHash(next))
-	d.efi = efi
+			bootab.EntryID(prev): {Slot: "a", UsrHash: updatetest.UsrHash(prev), Tries: Blessed},
+			bootab.EntryID(inst): {Slot: "b", UsrHash: updatetest.UsrHash(inst), Tries: Blessed},
+		}, p.conf, updatetest.UsrHash(next))
+	d.efi, d.oneShot = p.efi, p.oneShot
 	return d
 }
-
-// pins are the LoaderEntryDefault values the check runs under: unset, the
-// owner's `d` pin on N-1 (#2094 point 2) and on N.
-var pins = []string{"", "agentos-1", "agentos-2"}
 
 // NextRelease is N+1 as the box's store checked it, with the source that
 // serves its files: Image(3) as host-image/usr.img and usr.verity, root
@@ -599,7 +681,7 @@ func Violations(t testing.TB, newActivator func(*Disk, update.Source) apply.Acti
 	return out
 }
 
-func violations(t testing.TB, rel *update.Verified, src update.Source, pin string, newActivator func(*Disk, update.Source) apply.Activator) []string {
+func violations(t testing.TB, rel *update.Verified, src update.Source, pin pin, newActivator func(*Disk, update.Source) apply.Activator) []string {
 	m, err := rel.Manifest()
 	if err != nil {
 		return []string{fmt.Sprintf("release: %v", err)}
@@ -611,13 +693,13 @@ func violations(t testing.TB, rel *update.Verified, src update.Source, pin strin
 		d.cutAt = k
 		err := newActivator(d, src).Install(t.Context(), rel)
 		if !d.cut {
-			at := fmt.Sprintf("pin %q, uncut", pin)
+			at := pin.name + ", uncut"
 			if err != nil {
 				return append(out, fmt.Sprintf("%s Install: %v", at, err))
 			}
 			return append(out, finished(d, want, at)...)
 		}
-		at := fmt.Sprintf("pin %q, cut at step %d", pin, k)
+		at := fmt.Sprintf("%s, cut at step %d", pin.name, k)
 		if err == nil {
 			out = append(out, at+": Install returned nil after the cut")
 		}
@@ -632,7 +714,7 @@ func violations(t testing.TB, rel *update.Verified, src update.Source, pin strin
 		}
 		out = append(out, finished(r, want, at+", Install again after reboot")...)
 	}
-	return append(out, fmt.Sprintf("pin %q: Install did not finish in %d steps", pin, maxSteps))
+	return append(out, fmt.Sprintf("%s: Install did not finish in %d steps", pin.name, maxSteps))
 }
 
 // Check fails t with each of Violations.
@@ -648,14 +730,15 @@ func Check(t *testing.T, newActivator func(*Disk, update.Source) apply.Activator
 // an entry whose slot is whole for it (N before any byte of its slot is
 // written, N+1 once it is written, synced and given its UUIDs, and only
 // counted, so a bad N+1 falls back); no blessed entry points at a slot
-// that is not whole for it; and no N+1 entry is without a try counter.
+// that is not whole for it; no N+1 entry is without a try counter or
+// points at a slot not yet whole for it.
 // Once a byte of N's slot is written, only N-1 is left to be the default
 // until N+1 is whole.
 func partway(d *Disk, want, at string) []string {
 	out := intact(d, at)
 	for _, v := range d.views() {
 		w := at + ", " + v.name
-		id := effective(v.esp, v.efi)
+		id := v.effective()
 		def, ok := v.esp.Entries[id]
 		switch {
 		case !ok:
@@ -673,6 +756,9 @@ func partway(d *Disk, want, at string) []string {
 			if e.UsrHash == want && e.Tries <= 0 {
 				out = append(out, fmt.Sprintf("%s: N+1's entry %q has no try counter", w, id))
 			}
+			if e.UsrHash == want && !d.holds(v, e.Slot, want) {
+				out = append(out, fmt.Sprintf("%s: N+1's entry %q points at slot %s, which is not whole for it (a pick from the menu boots it)", w, id, e.Slot))
+			}
 		}
 	}
 	return out
@@ -681,7 +767,10 @@ func partway(d *Disk, want, at string) []string {
 // finished checks a completed Install on the synced view: N+1 is whole on
 // slot b, labelled for it, and its counted entry is the effective next
 // boot; N is gone from the boot menu, and N-1 still boots from the intact
-// slot a.
+// slot a. Then it counts N+1's tries down as failed boots do: while any
+// are left N+1 stays the next boot, and once none are left N-1 is, with
+// no owner action (UPD-1; a pin on the counted entry would keep booting
+// it).
 func finished(d *Disk, want, at string) []string {
 	out := intact(d, at)
 	v := d.views()[0]
@@ -691,10 +780,24 @@ func finished(d *Disk, want, at string) []string {
 	if got := v.slots["b"].label; got != fmt.Sprintf("agentos_%d", next) {
 		out = append(out, fmt.Sprintf("%s: slot b is labelled %q", at, got))
 	}
-	id := effective(v.esp, v.efi)
+	id := v.effective()
 	def := v.esp.Entries[id]
 	if def.Slot != "b" || def.UsrHash != want || def.Tries <= 0 {
 		out = append(out, fmt.Sprintf("%s: effective next boot %q is %+v, not N+1 counted on slot b", at, id, def))
+	} else {
+		v.oneShot = "" // consumed by the first boot
+		for left := def.Tries - 1; left >= 0; left-- {
+			e := v.esp.Entries[id]
+			e.Tries = left
+			v.esp.Entries[id] = e
+			got := v.esp.Entries[v.effective()]
+			switch {
+			case left > 0 && v.effective() != id:
+				out = append(out, fmt.Sprintf("%s: with %d tries left the next boot is %q, not N+1", at, left, v.effective()))
+			case left == 0 && (got.Slot != "a" || got.UsrHash != updatetest.UsrHash(prev) || got.Tries != Blessed):
+				out = append(out, fmt.Sprintf("%s: after N+1's tries run out the next boot is %q (%+v), not N-1", at, v.effective(), got))
+			}
+		}
 	}
 	booted := false
 	for id, e := range v.esp.Entries {

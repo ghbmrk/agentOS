@@ -26,13 +26,15 @@ type ref struct {
 	writeFirst bool // writes the slot before retiring its entries
 	noSync     bool // retires the entries without SyncESP before the slot writes
 	byDefault  bool // takes the slot not holding the default as inactive
-	blessFirst bool // makes N+1 the default blessed, then counts it
+	blessFirst bool // makes N+1 the EFI default blessed, then counts it
 	blessEntry bool // writes N+1's entry blessed, then counts it
 	hashBytes  bool // writes the root-hash string as the image, unverified
 	short      bool // writes the image less its last byte, unverified
 	noVerity   bool // never writes the verity partition, unverified
 	noUUIDs    bool // never sets the partition UUIDs
-	confOnly   bool // sets only loader.conf's default, never LoaderEntryDefault
+	keepPin    bool // leaves LoaderEntryDefault in place
+	exactPin   bool // pins loader.conf's default to N+1's counted entry
+	entryFirst bool // writes N+1's counted entry before the slot
 }
 
 func (r *ref) slots() (booted, inactive string, err error) {
@@ -59,44 +61,38 @@ func (r *ref) slots() (booted, inactive string, err error) {
 	return "", "", errors.New("ref: one slot")
 }
 
-// setDefault makes id the effective default: loader.conf, synced, then
-// LoaderEntryDefault cleared.
-func (r *ref) setDefault(id string) error {
-	if err := r.d.SetDefault(id); err != nil {
+// finish leaves the menu order to pick the next boot: loader.conf's
+// default removed and synced, then LoaderEntryDefault deleted.
+func (r *ref) finish(id string) error {
+	if r.exactPin {
+		if err := r.d.SetDefault(id); err != nil {
+			return err
+		}
+	} else if err := r.d.SetDefault(""); err != nil {
 		return err
 	}
 	if err := r.d.SyncESP(); err != nil {
 		return err
 	}
-	if r.confOnly {
+	if r.keepPin {
 		return nil
 	}
 	efi, err := r.d.EFIDefault()
-	if err != nil || efi == "" || efi == id {
+	if err != nil || efi == "" {
 		return err
 	}
 	return r.d.SetEFIDefault("")
 }
 
-// retire takes every entry on slot s out of the boot menu, making an entry
-// on booted the effective default first.
+// retire takes the entries on slot s out of the boot menu (all of them, or
+// only counted ones), leaving the booted slot's blessed entry.
 func (r *ref) retire(booted, s string, all bool) error {
-	es, def, err := r.d.Entries()
+	es, _, err := r.d.Entries()
 	if err != nil {
 		return err
 	}
-	efi, err := r.d.EFIDefault()
-	if err != nil {
-		return err
-	}
-	if cur := es[effective(esp{es, def}, efi)]; cur.Slot == s && (all || cur.Tries != Blessed) {
-		id, ok := bootedEntry(es, booted)
-		if !ok {
-			return errors.New("ref: no entry on the booted slot")
-		}
-		if err := r.setDefault(id); err != nil {
-			return err
-		}
+	if _, ok := bootedEntry(es, booted); !ok {
+		return errors.New("ref: no entry on the booted slot")
 	}
 	for id, e := range es {
 		if e.Slot == s && (all || e.Tries != Blessed) {
@@ -189,6 +185,11 @@ func (r *ref) Install(_ context.Context, v *update.Verified) error {
 	if err := r.retire(booted, s, true); err != nil {
 		return err
 	}
+	if r.entryFirst {
+		if err := r.d.WriteEntry(bootab.EntryID(m.Version), Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: 3}); err != nil {
+			return err
+		}
+	}
 	if !r.writeFirst {
 		if err := r.writeSlot(s, m, data, verity); err != nil {
 			return err
@@ -211,7 +212,7 @@ func (r *ref) Install(_ context.Context, v *update.Verified) error {
 	if err := r.d.SetSlotLabel(s, bootab.Label(m.Version)); err != nil {
 		return err
 	}
-	id := fmt.Sprintf("agentos-%d", m.Version)
+	id := bootab.EntryID(m.Version)
 	if r.blessEntry {
 		if err := r.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: Blessed}); err != nil {
 			return err
@@ -224,7 +225,10 @@ func (r *ref) Install(_ context.Context, v *update.Verified) error {
 		if err := r.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: Blessed}); err != nil {
 			return err
 		}
-		if err := r.setDefault(id); err != nil {
+		if err := r.d.SyncESP(); err != nil {
+			return err
+		}
+		if err := r.d.SetEFIDefault(id); err != nil {
 			return err
 		}
 	}
@@ -234,7 +238,7 @@ func (r *ref) Install(_ context.Context, v *update.Verified) error {
 	if err := r.d.SyncESP(); err != nil {
 		return err
 	}
-	return r.setDefault(id)
+	return r.finish(id)
 }
 
 func (r *ref) Abandon(context.Context) error {
@@ -301,7 +305,10 @@ func TestCheckCatchesA12Defects(t *testing.T) {
 		{"N+1 made the default blessed", func(r *ref) { r.blessFirst = true }, "nor a whole, counted N+1"},
 		// The same for an N+1 entry that is not the default: a manual
 		// pick from the menu boots it with no fallback.
-		{"N+1 entry written blessed", func(r *ref) { r.blessEntry = true }, "N+1's entry \"agentos-3\" has no try counter"},
+		{"N+1 entry written blessed", func(r *ref) { r.blessEntry = true }, "N+1's entry \"agentos_3.conf\" has no try counter"},
+		// A4: a counted entry for a slot not yet written and verified,
+		// so a manual pick boots a torn /usr (L3 point 4 on #3964).
+		{"N+1 entry written before the slot", func(r *ref) { r.entryFirst = true }, "which is not whole for it"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if v := Violations(t, newRef(c.mut)); !anyContains(v, c.want) {
@@ -335,25 +342,76 @@ func TestWholenessIsTheImageDigest(t *testing.T) {
 }
 
 // TestPinnedEFIDefaultIsOverridden (#2094 point 2): with the owner's
-// LoaderEntryDefault pinning N-1, an activator that writes only
-// loader.conf leaves N-1 the effective boot, and the check says so.
+// LoaderEntryDefault pinning N-1, an activator that leaves the pin in
+// place leaves N-1 the effective boot, and the check says so. A pin on N
+// names an entry Install removes, so the loader passes over it.
 func TestPinnedEFIDefaultIsOverridden(t *testing.T) {
-	v := Violations(t, newRef(func(r *ref) { r.confOnly = true }))
-	if !anyContains(v, `pin "agentos-1", uncut: effective next boot "agentos-1"`) {
+	v := Violations(t, newRef(func(r *ref) { r.keepPin = true }))
+	if !anyContains(v, `EFI pin on N-1, uncut: effective next boot "agentos_1.conf"`) {
 		t.Errorf("violations %q", v)
 	}
-	// The pin on N names an entry Install removes, so the loader falls
-	// back to loader.conf: that pin needs no clearing.
-	if anyContains(v, `pin "agentos-2"`) || anyContains(v, `pin "",`) {
-		t.Errorf("violations outside the N-1 pin: %q", v)
+	for _, p := range pins {
+		if p.efi != bootab.EntryID(prev) && anyContains(v, p.name+",") {
+			t.Errorf("violations under %s: %q", p.name, v)
+		}
 	}
-	d := scenario("agentos-1")
-	if got := d.Effective(); got != "agentos-1" {
-		t.Errorf("effective default under the N-1 pin is %q", got)
+}
+
+// TestExhaustedTriesFallBack (UPD-1, Security finding 1 on #3964): an
+// activator that pins loader.conf's default to N+1's counted entry passes
+// every cut, but once N+1's tries run out the pin still selects it, since
+// systemd-boot matches a default with no boot assessment; the check says
+// the box does not fall back to N-1.
+func TestExhaustedTriesFallBack(t *testing.T) {
+	v := Violations(t, newRef(func(r *ref) { r.exactPin = true }))
+	if !anyContains(v, `no pin, uncut: after N+1's tries run out the next boot is "agentos_3.conf"`) {
+		t.Errorf("violations %q", v)
 	}
-	d.efi = "gone"
-	if got := d.Effective(); got != "agentos-2" {
-		t.Errorf("a pin naming no entry is not passed over: %q", got)
+}
+
+// TestSelectionFollowsSystemdBoot: one-shot, then LoaderEntryDefault, then
+// loader.conf's default, each a glob matched in menu order with no boot
+// assessment, then the first entry in menu order; menu order puts entries
+// with no tries left last and newer versions first.
+func TestSelectionFollowsSystemdBoot(t *testing.T) {
+	es := map[string]Entry{
+		"agentos_9.conf":  {Tries: 0},
+		"agentos_10.conf": {Tries: 2},
+		"agentos_2.conf":  {Tries: Blessed},
+	}
+	for _, c := range []struct {
+		oneShot, efi, conf, want string
+	}{
+		{"", "", "", "agentos_10.conf"},
+		{"", "", "agentos_9.conf", "agentos_9.conf"}, // exact pin: no assessment
+		{"", "", "agentos_*", "agentos_10.conf"},     // glob: menu order
+		{"", "agentos_2.conf", "agentos_9.conf", "agentos_2.conf"},
+		{"", "gone.conf", "", "agentos_10.conf"}, // a pin matching nothing is passed over
+		{"agentos_9.conf", "agentos_2.conf", "", "agentos_9.conf"},
+	} {
+		if got := effective(esp{es, c.conf}, c.oneShot, c.efi); got != c.want {
+			t.Errorf("one-shot %q, EFI %q, loader.conf %q: %q, want %q", c.oneShot, c.efi, c.conf, got, c.want)
+		}
+	}
+	es["agentos_10.conf"] = Entry{Tries: 0}
+	if got := effective(esp{es, ""}, "", ""); got != "agentos_2.conf" {
+		t.Errorf("with both counted entries out of tries: %q", got)
+	}
+	if got := effective(esp{map[string]Entry{}, "x"}, "", ""); got != "" {
+		t.Errorf("empty menu: %q", got)
+	}
+}
+
+// TestRebootKeepsTheLoaderVariables: a boot after a cut finds the owner's
+// pin and one-shot pick as they were; NVRAM is not the ESP.
+func TestRebootKeepsTheLoaderVariables(t *testing.T) {
+	d := scenario(pin{efi: "agentos_1.conf", oneShot: "agentos_2.conf"})
+	if err := d.SetEFIDefault("agentos_2.conf"); err != nil {
+		t.Fatal(err)
+	}
+	r := d.reboot()
+	if r.efi != "agentos_2.conf" || r.oneShot != "agentos_2.conf" {
+		t.Errorf("after reboot: EFI %q, one-shot %q", r.efi, r.oneShot)
 	}
 }
 
@@ -398,14 +456,14 @@ func (f forever) Install(context.Context, *update.Verified) error {
 func TestCutStopsEveryWrite(t *testing.T) {
 	d := Scenario()
 	d.cutAt = 1
-	if err := d.SetDefault("agentos-1"); !errors.Is(err, ErrCut) {
+	if err := d.SetDefault("agentos_1.conf"); !errors.Is(err, ErrCut) {
 		t.Fatalf("SetDefault after cut: %v", err)
 	}
 	for name, f := range map[string]func() error{
 		"WriteEntry":    func() error { return d.WriteEntry("x", Entry{}) },
-		"RemoveEntry":   func() error { return d.RemoveEntry("agentos-2") },
+		"RemoveEntry":   func() error { return d.RemoveEntry("agentos_2.conf") },
 		"SyncESP":       d.SyncESP,
-		"SetEFIDefault": func() error { return d.SetEFIDefault("agentos-1") },
+		"SetEFIDefault": func() error { return d.SetEFIDefault("agentos_1.conf") },
 		"TruncatePart":  func() error { return d.TruncatePart("b", bootab.PartUsr) },
 		"WritePart":     func() error { return d.WritePart("b", bootab.PartVerity, []byte("x")) },
 		"SyncPart":      func() error { return d.SyncPart("b", bootab.PartUsr) },
@@ -419,7 +477,7 @@ func TestCutStopsEveryWrite(t *testing.T) {
 	}
 	es, def, _ := d.Entries()
 	v := d.views()[1]
-	if def != "agentos-2" || len(es) != 2 || d.efi != "" || d.Touched("b") || !d.holds(v, "b", updatetest.UsrHash(inst)) {
+	if def != "" || len(es) != 2 || d.efi != "" || d.Touched("b") || !d.holds(v, "b", updatetest.UsrHash(inst)) {
 		t.Errorf("disk changed after the cut: %v %q %q %+v", es, def, d.efi, v.slots["b"])
 	}
 }

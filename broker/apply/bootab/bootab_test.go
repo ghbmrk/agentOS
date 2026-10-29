@@ -98,7 +98,7 @@ func TestNoEntryWithoutVerify(t *testing.T) {
 					t.Fatalf("Install: %v", err)
 				}
 				noEntry(t, d)
-				if d.Touched("b") || d.Effective() != "agentos-2" {
+				if d.Touched("b") || d.Effective() != "agentos_2.conf" {
 					t.Errorf("a failed fetch changed the disk: slot b touched %v, default %q", d.Touched("b"), d.Effective())
 				}
 			})
@@ -125,13 +125,52 @@ func TestStagingRefusesALink(t *testing.T) {
 			if err := bootab.New(d, bootab.Config{Source: src, Staging: dir}).Install(t.Context(), rel); err == nil {
 				t.Fatal("Install accepted the staging directory")
 			}
-			if d.Touched("b") || d.Effective() != "agentos-2" {
+			if d.Touched("b") || d.Effective() != "agentos_2.conf" {
 				t.Error("the disk changed")
 			}
 			if es, _ := os.ReadDir(real); len(es) != 0 {
 				t.Errorf("staged through the link: %v", es)
 			}
 		})
+	}
+}
+
+// TestStagingRefusesAnotherOwner: a staging directory owned by another
+// user, though not group- or world-writable, is refused: its owner could
+// swap the fetched files before they are written (Security finding 4).
+func TestStagingRefusesAnotherOwner(t *testing.T) {
+	rel, src := activatortest.NextRelease(t)
+	dir := "/usr" // root-owned and 0755: another owner unless this runs as root
+	if os.Getuid() == 0 {
+		dir = t.TempDir()
+		if err := os.Chown(dir, 65534, 65534); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := activatortest.Scenario()
+	if err := bootab.New(d, bootab.Config{Source: src, Staging: dir}).Install(t.Context(), rel); err == nil || !strings.Contains(err.Error(), "owns") {
+		t.Fatalf("Install: %v", err)
+	}
+	if d.Touched("b") {
+		t.Error("the disk changed")
+	}
+}
+
+// TestRefusesTheRunningEntryID: a release whose entry ID is already the
+// booted slot's entry is refused before any write, so Install never
+// rewrites the running entry to boot the other slot (Security finding 3).
+func TestRefusesTheRunningEntryID(t *testing.T) {
+	rel, src := activatortest.NextRelease(t)
+	d := activatortest.NewDisk("a", map[string]string{"a": updatetest.UsrHash(1), "b": updatetest.UsrHash(2)},
+		map[string]activatortest.Entry{
+			bootab.EntryID(3): {Slot: "a", UsrHash: updatetest.UsrHash(1), Tries: activatortest.Blessed},
+			bootab.EntryID(2): {Slot: "b", UsrHash: updatetest.UsrHash(2), Tries: activatortest.Blessed},
+		}, "", updatetest.UsrHash(3))
+	if err := newActivator(t)(d, src).Install(t.Context(), rel); err == nil {
+		t.Fatal("Install accepted")
+	}
+	if es, _, _ := d.Entries(); es[bootab.EntryID(3)].Slot != "a" || d.Touched("b") {
+		t.Errorf("the disk changed: %v", es)
 	}
 }
 
@@ -152,12 +191,12 @@ func TestRefusesAnIncompleteRelease(t *testing.T) {
 	rel, s := activatortest.NextRelease(t)
 	for name, d := range map[string]*activatortest.Disk{
 		"one slot": activatortest.NewDisk("a", map[string]string{"a": updatetest.UsrHash(1)},
-			map[string]activatortest.Entry{"agentos-1": {Slot: "a", UsrHash: updatetest.UsrHash(1), Tries: activatortest.Blessed}}, "agentos-1"),
+			map[string]activatortest.Entry{"agentos_1.conf": {Slot: "a", UsrHash: updatetest.UsrHash(1), Tries: activatortest.Blessed}}, "agentos_1.conf"),
 		"booted entry counted": activatortest.NewDisk("a", map[string]string{"a": updatetest.UsrHash(1), "b": updatetest.UsrHash(2)},
 			map[string]activatortest.Entry{
-				"agentos-1": {Slot: "a", UsrHash: updatetest.UsrHash(1), Tries: 2},
-				"agentos-2": {Slot: "b", UsrHash: updatetest.UsrHash(2), Tries: activatortest.Blessed},
-			}, "agentos-2"),
+				"agentos_1.conf": {Slot: "a", UsrHash: updatetest.UsrHash(1), Tries: 2},
+				"agentos_2.conf": {Slot: "b", UsrHash: updatetest.UsrHash(2), Tries: activatortest.Blessed},
+			}, "agentos_2.conf"),
 	} {
 		if err := bootab.New(d, bootab.Config{Source: s, Staging: t.TempDir()}).Install(t.Context(), rel); err == nil {
 			t.Errorf("%s: Install accepted", name)
@@ -182,7 +221,7 @@ func TestAbandonRestoresTheRunningRoot(t *testing.T) {
 	if err := a.Abandon(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if d.Effective() != "agentos-2" {
+	if d.Effective() != "agentos_2.conf" {
 		t.Errorf("Abandon with nothing installed moved the default to %q", d.Effective())
 	}
 	if err := a.Install(t.Context(), rel); err != nil {
@@ -195,13 +234,13 @@ func TestAbandonRestoresTheRunningRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	es, _, _ := d.Entries()
-	if d.Effective() != "agentos-1" {
+	if d.Effective() != "agentos_1.conf" {
 		t.Errorf("after Abandon the default is %q", d.Effective())
 	}
 	if _, ok := es[bootab.EntryID(3)]; ok {
 		t.Error("N+1's counted entry is still in the menu")
 	}
-	if _, ok := es["agentos-1"]; !ok {
+	if _, ok := es["agentos_1.conf"]; !ok {
 		t.Error("N-1's entry is gone")
 	}
 }
@@ -217,17 +256,17 @@ func TestBootedReadsTheLoader(t *testing.T) {
 		want                    apply.Boot
 		err                     bool
 	}{
-		{"blessed N-1", "ro usrhash=" + h1, "agentos-1", apply.Boot{ID: "boot-9", UsrRootHash: h1, Blessed: true}, false},
-		{"counted entry", "usrhash=" + h2 + " quiet", "agentos-3", apply.Boot{ID: "boot-9", UsrRootHash: h2}, false},
-		{"selected names another root", "usrhash=" + h1, "agentos-2", apply.Boot{ID: "boot-9", UsrRootHash: h1}, false},
+		{"blessed N-1", "ro usrhash=" + h1, "agentos_1.conf", apply.Boot{ID: "boot-9", UsrRootHash: h1, Blessed: true}, false},
+		{"counted entry", "usrhash=" + h2 + " quiet", "agentos_3.conf", apply.Boot{ID: "boot-9", UsrRootHash: h2}, false},
+		{"selected names another root", "usrhash=" + h1, "agentos_2.conf", apply.Boot{ID: "boot-9", UsrRootHash: h1}, false},
 		{"selected unset", "usrhash=" + h1, "", apply.Boot{ID: "boot-9", UsrRootHash: h1}, false},
-		{"no usrhash", "ro quiet", "agentos-1", apply.Boot{}, true},
-		{"two usrhash", "usrhash=" + h1 + " usrhash=" + h2, "agentos-1", apply.Boot{}, true},
-		{"bad usrhash", "usrhash=xyz", "agentos-1", apply.Boot{}, true},
+		{"no usrhash", "ro quiet", "agentos_1.conf", apply.Boot{}, true},
+		{"two usrhash", "usrhash=" + h1 + " usrhash=" + h2, "agentos_1.conf", apply.Boot{}, true},
+		{"bad usrhash", "usrhash=xyz", "agentos_1.conf", apply.Boot{}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			d := activatortest.Scenario()
-			if err := d.WriteEntry("agentos-3", activatortest.Entry{Slot: "b", UsrHash: h2, Tries: 2}); err != nil {
+			if err := d.WriteEntry("agentos_3.conf", activatortest.Entry{Slot: "b", UsrHash: h2, Tries: 2}); err != nil {
 				t.Fatal(err)
 			}
 			d.SetBoot("boot-9", c.cmdline, c.selected)

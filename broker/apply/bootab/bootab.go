@@ -70,6 +70,9 @@ type Disk interface {
 	// Cmdline is the running kernel's command line (/proc/cmdline).
 	Cmdline() (string, error)
 	// Selected is the entry the loader booted (LoaderEntrySelected).
+	// Entry IDs here never carry boot counting's +N-M suffix (systemd
+	// 257 keeps it in the ID, 260 strips it): the adapter strips it, so
+	// one entry has one ID while its tries count down.
 	Selected() (string, error)
 	// BootedSlot is the slot the running /usr comes from.
 	BootedSlot() (string, error)
@@ -79,11 +82,10 @@ type Disk interface {
 	Entries() (map[string]Entry, string, error)
 	WriteEntry(id string, e Entry) error
 	RemoveEntry(id string) error
-	// SetDefault sets loader.conf's default. An EFI LoaderEntryDefault
-	// that names an entry in the menu overrides it, as systemd-boot
-	// does, so a caller that needs id to be the effective boot also
-	// clears that variable (or sets it to id).
-	SetDefault(id string) error
+	// SetDefault sets loader.conf's default pattern; "" removes it.
+	// LoaderEntryDefault overrides it, and systemd-boot matches neither
+	// with boot assessment, so this package only ever removes it.
+	SetDefault(pattern string) error
 	SyncESP() error
 	// EFIDefault is LoaderEntryDefault, "" when unset (the owner's `d`
 	// pin in the boot menu).
@@ -98,7 +100,9 @@ type Disk interface {
 	// SetSlotUUIDs sets the GPT partition UUIDs of slot s's data and
 	// verity partitions.
 	SetSlotUUIDs(s, data, verity string) error
-	// SetSlotLabel sets both partitions' GPT label.
+	// SetSlotLabel sets the slot's GPT labels from label: the adapter
+	// names each partition as the image does (finish_image.py: the data
+	// partition label, the verity partition label + "_verity").
 	SetSlotLabel(s, label string) error
 	// VerifySlot checks slot s's data against its verity partition and
 	// rootHash (veritysetup verify).
@@ -188,59 +192,47 @@ func running(es map[string]Entry, booted string) (string, error) {
 	return ids[0], nil
 }
 
-// effective is the entry the loader boots by default: LoaderEntryDefault
-// when it names an entry in the menu, else loader.conf's default.
-func effective(es map[string]Entry, def, efi string) string {
-	if _, ok := es[efi]; ok && efi != "" {
-		return efi
-	}
-	return def
-}
-
-// makeDefault leaves id the effective default, durably: loader.conf's
-// default written and synced, then a LoaderEntryDefault naming another
-// entry cleared (#2094 point 2). A cut between the two leaves the old
-// pin in force, which only ever names an entry that still boots whole.
-func (a *activator) makeDefault(id string) error {
-	if err := a.d.SetDefault(id); err != nil {
-		return err
-	}
-	if err := a.d.SyncESP(); err != nil {
-		return err
-	}
-	efi, err := a.d.EFIDefault()
+// clearPins leaves the boot menu's own order to pick the next boot: no
+// loader.conf default (as the image ships it), synced, then no
+// LoaderEntryDefault. systemd-boot matches either without boot assessment,
+// so a pin on a counted entry would keep booting it after its tries run
+// out; its menu order puts an entry with no tries left last and the newest
+// version first, which makes a new counted entry the next boot and the
+// running root the fallback (UPD-1). A cut between the steps leaves a pin
+// that names the running root or nothing.
+func (a *activator) clearPins() error {
+	_, def, err := a.d.Entries()
 	if err != nil {
 		return err
 	}
-	if efi != "" && efi != id {
-		return a.d.SetEFIDefault("")
+	if def != "" {
+		if err := a.d.SetDefault(""); err != nil {
+			return err
+		}
+		if err := a.d.SyncESP(); err != nil {
+			return err
+		}
 	}
-	return nil
+	efi, err := a.d.EFIDefault()
+	if err != nil || efi == "" {
+		return err
+	}
+	return a.d.SetEFIDefault("")
 }
 
-// retire makes the running entry the effective default unless it already
-// boots the booted slot, then takes every entry on slot s out of the menu,
-// durably, before any byte of s is written (A12(4)). With all false
-// (Abandon) it touches only counted entries on s: a blessed entry stays
-// the default until an Install replaces it (A12(2)).
+// retire takes entries on slot s out of the menu, durably: every entry
+// before Install writes any byte of s (A12(4)), so only entries on the
+// booted slot are left to boot whatever pin or order picks; with all false
+// (Abandon), only counted ones, so a blessed entry stays where the menu
+// puts it until an Install replaces it (A12(2)). It requires the booted
+// slot's blessed entry, the fallback that is left.
 func (a *activator) retire(booted, s string, all bool) error {
-	es, def, err := a.d.Entries()
+	es, _, err := a.d.Entries()
 	if err != nil {
 		return err
 	}
-	efi, err := a.d.EFIDefault()
-	if err != nil {
+	if _, err := running(es, booted); err != nil {
 		return err
-	}
-	e, ok := es[effective(es, def, efi)]
-	if all && (!ok || e.Slot != booted) || !all && ok && e.Slot == s && e.Tries != Blessed {
-		id, err := running(es, booted)
-		if err != nil {
-			return err
-		}
-		if err := a.makeDefault(id); err != nil {
-			return err
-		}
 	}
 	for id, e := range es {
 		if e.Slot == s && (all || e.Tries != Blessed) {
@@ -276,8 +268,11 @@ func (a *activator) stage(v *update.Verified) (dir string, err error) {
 	if err != nil {
 		return "", err
 	}
-	if !fi.IsDir() || fi.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("bootab: staging %q is not a directory only its owner writes (%v)", a.c.Staging, fi.Mode())
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	// A symlink's mode is 0777, so the mode test refuses one; a file that
+	// is not a directory fails MkdirTemp below.
+	if fi.Mode().Perm()&0o022 != 0 || !ok || int(st.Uid) != os.Getuid() {
+		return "", fmt.Errorf("bootab: staging %q is not a directory this process owns and only it writes (%v)", a.c.Staging, fi.Mode())
 	}
 	dir, err = os.MkdirTemp(a.c.Staging, "install-*")
 	if err != nil {
@@ -295,10 +290,16 @@ func (a *activator) stage(v *update.Verified) (dir string, err error) {
 // chunk is the size of each partition write.
 const chunk = 1 << 20
 
+// openStaged opens a staged file without following a link planted in its
+// place.
+func openStaged(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+}
+
 // write copies a staged file, which Fetch checked against its signed
 // length and hash, into slot s's partition part and syncs it.
 func (a *activator) write(s, part, path string) error {
-	fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	fd, err := openStaged(path)
 	if err != nil {
 		return err
 	}
@@ -325,7 +326,7 @@ func (a *activator) write(s, part, path string) error {
 }
 
 // Install writes release v to the slot not booted and makes its counted
-// entry the next boot (A4, A12). Nothing is written before both files are
+// entry the next boot by menu order, with no pin (A4, A12; UPD-1). Nothing is written before both files are
 // fetched and checked; no entry is written before the slot verifies.
 func (a *activator) Install(ctx context.Context, v *update.Verified) error {
 	m, err := v.Manifest()
@@ -339,6 +340,14 @@ func (a *activator) Install(ctx context.Context, v *update.Verified) error {
 	booted, s, err := a.slots()
 	if err != nil {
 		return err
+	}
+	id := EntryID(m.Version)
+	es, _, err := a.d.Entries()
+	if err != nil {
+		return err
+	}
+	if e, ok := es[id]; ok && e.Slot != s {
+		return fmt.Errorf("bootab: entry %s already boots slot %s", id, e.Slot)
 	}
 	dir, err := a.stage(v)
 	if err != nil {
@@ -368,19 +377,18 @@ func (a *activator) Install(ctx context.Context, v *update.Verified) error {
 	if err := a.d.SetSlotLabel(s, Label(m.Version)); err != nil {
 		return err
 	}
-	id := EntryID(m.Version)
 	if err := a.d.WriteEntry(id, Entry{Slot: s, UsrHash: m.UsrRootHash, Tries: Tries}); err != nil {
 		return err
 	}
 	if err := a.d.SyncESP(); err != nil {
 		return err
 	}
-	return a.makeDefault(id)
+	return a.clearPins()
 }
 
-// Abandon makes the running entry the effective default again and takes
-// the counted entries on the other slot out of the menu. It is a no-op
-// when nothing was installed.
+// Abandon takes the counted entries on the other slot out of the menu, so
+// the running root boots next again. It is a no-op when nothing was
+// installed.
 func (a *activator) Abandon(context.Context) error {
 	booted, s, err := a.slots()
 	if err != nil {
