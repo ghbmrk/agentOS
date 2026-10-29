@@ -1516,7 +1516,7 @@ const (
 	mayRunLine         = "Update %d may have started already. Nothing is needed from you."
 	pinnedHeldLine     = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
 	pinnedMayStartLine = "Update %d was ready to start before you pinned your update channel, and it may still start. Nothing is needed from you."
-	pinnedStartedLine  = "Update %d had started before you pinned your update channel; I am checking it. Nothing is needed from you."
+	pinnedStartedLine  = "Update %d was ready to start before you pinned your update channel and has started; I am checking it. Nothing is needed from you."
 	pinnedMayRunLine   = "Update %d was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
 	pinnedLine         = "Update %d was withdrawn because you pinned your update channel."
 	pinnedDigestLine   = "Update %d was ready to start, but you pinned your update channel, so I withdrew it."
@@ -1698,7 +1698,7 @@ func unrecordedText(v, n int64, prev bool) string {
 	if prev {
 		runs = fmt.Sprintf("; I run the version before update %d", n)
 	}
-	return fmt.Sprintf("I could not record update %d as installed twice, so I stopped trying it%s. "+
+	return fmt.Sprintf("I could not record update %d as installed, twice, so I stopped trying it%s. "+
 		"You can retry it on my Wi-Fi page.", v, runs)
 }
 

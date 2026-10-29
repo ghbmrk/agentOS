@@ -31,7 +31,7 @@ const (
 	// pin withdrawal's Abandon did not take (#3832).
 	pinnedMayStart = "Update 1 was ready to start before you pinned your update channel, and it may still start. Nothing is needed from you."
 	// The new slot runs, its health check pending (#3830).
-	pinnedStarted = "Update 1 had started before you pinned your update channel; I am checking it. Nothing is needed from you."
+	pinnedStarted = "Update 1 was ready to start before you pinned your update channel and has started; I am checking it. Nothing is needed from you."
 	startedStatus = "Update 1 has started; I am checking it. Nothing is needed from you."
 	pinnedWait    = "Update 1 waits because you pinned your update channel. Nothing is needed from you."
 	pinnedDigest  = "Update 1 was ready to start, but you pinned your update channel, so I withdrew it."
