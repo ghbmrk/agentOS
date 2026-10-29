@@ -9,3 +9,5 @@ Firmware-change disclosure and BitLocker prevention (HW-8, ONB-7): boot instruct
 **Gate:** lenses
 
 **State on the board before the 2026-10-08 index split:** part 1 merged (#183); part 2 queued (needs P2-2)
+
+**Part 2 brief:** [HOST-1bc-p2](HOST-1bc-p2.md) (written 2026-10-29); what it leaves is listed there as part 3.
