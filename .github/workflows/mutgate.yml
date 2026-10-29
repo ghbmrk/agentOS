@@ -24,10 +24,16 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0 # the diff reads the base commit
+      # The merge commit's first parent is the base it was built on; the event's base sha can be
+      # older, and then main's own later REQ lines would count as this PR's (#3948).
+      - name: The base this merge commit was built on
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
+          echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
       - name: Tier-A packages this PR claims coverage in
         id: claimed
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           pkgs=$(python3 -I tools/mutgate.py claimed --git "$BASE" --json)
           echo "$pkgs"
@@ -67,6 +73,14 @@ jobs:
             sleep $((t * 15))
           done
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # The merge commit's first parent is the base it was built on; the event's base sha can be
+      # older, and then main's own later REQ lines would count as this PR's (#3948).
+      - name: The base this merge commit was built on
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
+          echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}
@@ -74,8 +88,6 @@ jobs:
       - name: Survivors
         run: python3 -I tools/mutgate.py report mutants
       - name: Gate (MUT-tierA)
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
         run: python3 -I tools/mutgate.py gate mutants --git "$BASE"
   mutgate:
     needs: [claimed, mutants]

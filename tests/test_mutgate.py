@@ -256,7 +256,13 @@ class Workflow(unittest.TestCase):
         self.assertEqual(on.strip(), "pull_request:")
         claimed = job(self.text, "claimed")
         self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
-        self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", claimed)
+        # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
+        self.assertNotIn("base.sha", self.text)
+        for body in (claimed, job(self.text, "mutants")):
+            self.assertIn('[ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || {', body)
+            self.assertIn('echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"', body)
+            self.assertIn("PR_HEAD: ${{ github.event.pull_request.head.sha }}", body)
+            self.assertLess(body.index("HEAD^1"), body.index('--git "$BASE"'))
         self.assertIn("fetch-depth: 0", claimed)
         mutants = job(self.text, "mutants")
         # The package list comes from the claim, and an empty claim (a docs-only PR) runs no gremlins.
