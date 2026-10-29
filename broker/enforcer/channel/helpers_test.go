@@ -68,41 +68,46 @@ func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
 // devices.
 func home() policy.Document {
 	d := policy.Document{Version: 1}
-	add := func(id string, everyday bool, secure string) {
-		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Secure: secure})
+	add := func(id string, everyday bool, s safety) {
+		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Class: s.class, Secure: s.secure})
 	}
-	add("lamp", true, "")
-	add("tv", true, "")
+	add("lamp", true, safety{})
+	add("tv", true, safety{})
 	d.Devices[1].Allow = []string{"ads.example", "cdn.example"}
 	d.Devices[1].VendorCloud = true
-	add("speaker", true, "")
+	add("speaker", true, safety{})
 	d.Pairs = []policy.Pair{{A: "speaker", B: "tv"}}
-	for id, secure := range safetyDevices {
-		add(id, false, secure)
+	for id, s := range safetyDevices {
+		add(id, false, s)
 	}
 	d.Standing = []policy.StandingRule{{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: 0, ToMS: 1 << 50}}
 	return d
 }
 
+// safety is a safety-list device's class and the secure direction the
+// owner named for it, if any.
+type safety struct{ class, secure string }
+
 // safetyDevices is one device per NET-2 safety class, with the secure
 // direction the owner named for it, if any.
-var safetyDevices = map[string]string{
-	"lock":          SecureLock,
-	"valve":         SecureShut,
-	"heater":        SecureOff,
-	"oven":          SecureOff,
-	"plug":          SecureOff,
-	"relay":         SecureOff,
-	"garage":        SecureClose,
-	"drone":         SecureReturn,
-	"camera":        "",
-	"microphone":    "",
-	"alarm":         "",
-	"siren":         "",
-	"sensor":        "",
-	"unknown":       "",
-	"unnamed-valve": "",
-	"misnamed":      "on", // a name off the closed list: reads only
+var safetyDevices = map[string]safety{
+	"lock":            {policy.ClassLock, SecureLock},
+	"valve":           {policy.ClassValve, SecureShut},
+	"heater":          {policy.ClassHeater, SecureOff},
+	"oven":            {policy.ClassOven, SecureOff},
+	"plug":            {policy.ClassPlug, SecureOff},
+	"relay":           {policy.ClassRelay, SecureOff},
+	"garage":          {policy.ClassGarageDoor, SecureClose},
+	"drone":           {policy.ClassDrone, SecureReturn},
+	"camera":          {policy.ClassCamera, ""},
+	"microphone":      {policy.ClassMicrophone, ""},
+	"alarm":           {policy.ClassAlarm, ""},
+	"siren":           {policy.ClassSiren, ""},
+	"sensor":          {policy.ClassSensor, ""},
+	"primary-heating": {policy.ClassPrimaryHeating, ""}, // cannot be named
+	"feed-valve":      {policy.ClassFeedValve, ""},      // cannot be named
+	"unknown":         {"", ""},
+	"unnamed-valve":   {policy.ClassValve, ""},
 }
 
 type radio struct {
