@@ -80,6 +80,10 @@ wiring cmd/agentos-clerk-model
 # The device-driver host's process (DEVSLOT-drivers b2b, #3473): the image's
 # drivers.json, each driver's socket unit, and the pinned transports.
 wiring cmd/agentos-devices
+# The camera clerk's process (CAM-clerk part d, #3514): its key from the
+# kernel on descriptor 3, its client and segment keys in its own sealed slots,
+# and the owner side's socket.
+wiring cmd/agentos-camera
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.

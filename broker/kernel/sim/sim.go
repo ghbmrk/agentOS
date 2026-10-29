@@ -244,7 +244,7 @@ func (w *world) judge(r kernel.Request, v kernel.View) {
 	}
 	if c, ok := key.ClassOf(st.Verb); ok && c.Irreversible() {
 		if win := max(ver.Limits.Window(false), ver.Limits.Window(true)); win > 0 {
-			if !d.Held || now < ver.Limits.Due(d.HeldAt, d.Novel) {
+			if !d.Held || (!d.Approved && now < ver.Limits.Due(d.HeldAt, d.Novel)) {
 				w.bad = append(w.bad, "irreversible effect inside its hold window")
 			}
 		}

@@ -1,0 +1,47 @@
+# Root-side path operations that pathops_lint_test.go lets through
+# (REV-CHK-links, #3900). Two line forms:
+#   allow <file> <func> os.<Call> <reason>
+#     every use of os.<Call> in that top-level function (Type.Method for a
+#     method) of that file; the reason says why no other uid can plant a link
+#     on the path, and review checks it.
+#   pending <dir> #<issue> <reason>
+#     every use in that package's non-test files, until the issue's row ports
+#     them; the line fails once the package has no use left to cover.
+# A line that matches no use fails, so this file only shrinks as rows land.
+
+allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
+allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
+
+pending broker/kernel/proc #3940 the kernel side
+pending broker/cmd/agentos-unlock #3940 the kernel side
+pending broker/cmd/agentos-enroll #3940 the kernel side
+pending broker/clerk/seal #3940 the kernel side
+pending broker/cmd/agentosd #3941 agentosd
+pending broker/update #3942 update
+pending broker/vm #3943 vm
+pending broker/vm/gvisor #3943 vm
+pending broker/vm/overlay #3943 vm
+pending broker/sockets #3944 daemon packages a
+pending broker/cgroup #3944 daemon packages a
+pending broker/guest #3944 daemon packages a
+pending broker/loops #3944 daemon packages a
+pending broker/infer/supervise #3944 daemon packages a
+pending broker/clock #3945 daemon packages b
+pending broker/backup #3945 daemon packages b
+pending broker/quota #3945 daemon packages b
+pending broker/change #3945 daemon packages b
+pending broker/netguard #3945 daemon packages b
+pending broker/modem/at #3945 daemon packages b
+pending broker/follow #3945 daemon packages b
+pending broker/question #3945 daemon packages b
+pending broker/owner #3945 daemon packages b
+pending broker/meter #3945 daemon packages b
+pending broker/localsrv #3945 daemon packages b
+pending broker/claim #3945 daemon packages b
+pending broker/budget #3945 daemon packages b
+pending broker/accel #3945 daemon packages b
+pending broker/e2e/boxe2e #3946 the e2e image harness
+pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
+pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
+pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
+pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root

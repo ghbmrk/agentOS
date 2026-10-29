@@ -211,8 +211,8 @@ type point struct {
 	// Pinned: it is withdrawn because the owner pinned the update
 	// channel (UPD-4, #3699), not for a failed security check.
 	Pinned bool `json:"pinned,omitempty"`
-	// Abandoned: the pin withdrawal's Abandon took. Unset on a pin
-	// withdrawal, the counted entry may still boot (#3832).
+	// Abandoned: the withdrawal's Abandon took. Unset on a withdrawal,
+	// the counted entry may still boot (#3832, #3852).
 	Abandoned bool `json:"abandoned,omitempty"`
 }
 
@@ -700,7 +700,8 @@ func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 		return err
 	}
 	if abandonOwed(pt) {
-		// Recorded, so STATUS and Pin say it will not start (#3832).
+		// Recorded, so STATUS, Pin and Withdraw say it will not start
+		// (#3832, #3852).
 		marked := *pt
 		marked.Abandoned = true
 		next := a.st
@@ -724,10 +725,10 @@ func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	return nil
 }
 
-// abandonOwed: pt is a pin withdrawal whose Abandon is not recorded as
-// taken, so the counted entry may still boot, and Resume commits it once
-// it does (#3832, the #3701 boundary).
-func abandonOwed(pt *point) bool { return pt.Pinned && !pt.Abandoned }
+// abandonOwed: pt is a withdrawal (pin, security or stale) whose Abandon
+// is not recorded as taken, so the counted entry may still boot, and
+// Resume commits it once it does (#3832, #3852, the #3701 boundary).
+func abandonOwed(pt *point) bool { return !pt.Abandoned }
 
 // withdrawnKind is the outcome of a handover withdrawn before any boot
 // took it.
@@ -828,9 +829,9 @@ func (a *Applier) withdrawLocked(ctx context.Context, pt *point, pinned bool) er
 		next := a.st
 		next.Applying = &marked
 		if err := a.save(next); err != nil {
-			// Not durable: after a process restart only a security
-			// fix fails closed (ASSUMPTIONS A13).
-			return fmt.Errorf("%w: %w", handoverError{starts: !pt.Security}, err)
+			// Not durable, and nothing abandoned: a reboot boots the
+			// counted entry (#3852).
+			return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
 		}
 		a.st, pt = next, &marked
 	}
@@ -1406,9 +1407,9 @@ func (a *Applier) Resume(ctx context.Context) error {
 		if err := a.cfg.Store.DropStaged(); err != nil {
 			return err
 		}
-		if pt.Withdrawing {
+		if pt.Withdrawing || pt.Abandoned {
 			// The withdraw's Abandon took before the reboot: not a
-			// fallback (SR3-4f-3a).
+			// fallback (SR3-4f-3a, #3852).
 			next.Last = &last{Version: pt.To, Kind: withdrawnKind(pt)}
 			retire(&next, pt.Adoption)
 			break
@@ -1512,6 +1513,7 @@ const (
 const (
 	installingLine     = "Update %d is installing; I will restart and check it."
 	staleLine          = "Update %d is being withdrawn; I will not start it. Nothing is needed from you."
+	staleMayStartLine  = "Update %d is being withdrawn; it may start before I can undo it. Nothing is needed from you."
 	startedLine        = "Update %d has started; I am checking it. Nothing is needed from you."
 	mayRunLine         = "Update %d may have started already. Nothing is needed from you."
 	pinnedHeldLine     = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
@@ -1525,7 +1527,8 @@ const (
 // installedLineLocked is STATUS for pt, a release the activator took.
 // Only in the boot it was handed over in does the line say what comes
 // next: a restart into it; none for a stale security fix (A13,
-// SR3-4f-2c), which the next Tick withdraws (#3830); and, while the
+// SR3-4f-2c), which the next Tick withdraws (#3830), held only once its
+// Abandon is recorded (#3852); and, while the
 // channel is pinned or pt's pin withdrawal is under way (pinned or not
 // since), held only once its Abandon is recorded. Before that, a mark
 // save or an Abandon that failed, or a restart already under way, the
@@ -1539,8 +1542,10 @@ func (a *Applier) installedLineLocked(pt *point) string {
 	here := err == nil && b.ID == pt.BootID
 	started := err == nil && !here && b.UsrRootHash == pt.ToUsr && !b.Blessed
 	switch {
-	case here && !pinned && a.staleLocked(pt):
+	case here && !pinned && a.staleLocked(pt) && pt.Abandoned:
 		return fmt.Sprintf(staleLine, pt.To)
+	case here && !pinned && a.staleLocked(pt):
+		return fmt.Sprintf(staleMayStartLine, pt.To)
 	case here && !pinned:
 		return fmt.Sprintf(installingLine, pt.To)
 	case here && a.restarting != pt.ID && pt.Abandoned:
@@ -1564,8 +1569,11 @@ func (a *Applier) Status() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
-	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned:
+	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned && a.st.Applying.Abandoned:
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
+	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned:
+		// Its Abandon is not recorded: a reboot boots it (#3852).
+		return fmt.Sprintf(mayStartLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
 		if a.refused.starts {
 			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
