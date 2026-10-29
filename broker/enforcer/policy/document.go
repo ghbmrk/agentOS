@@ -91,7 +91,43 @@ type Device struct {
 	// device reports: LabelContained, LabelExceptRadio, or empty for not
 	// containable, so a device nobody labelled promises nothing.
 	Label string `json:"label"`
+	// Class is ClassCamera or ClassMicrophone for a device that records
+	// video or audio, or empty for any other. A camera or microphone is
+	// on the safety list and names no secure command (NET-2 Safety
+	// devices).
+	Class string `json:"class"`
+	// Control is the device's control ports: the only ports the box that
+	// runs an everyday device reaches, the core while it is offline and
+	// the edge while it is online (NET-2 Device paths). A device with
+	// none is reached by neither box.
+	Control []Port `json:"control"`
+	// Stream is a camera's or microphone's stream ports: the only ports
+	// the core reaches on a safety-list device, and only while it has no
+	// vendor cloud (NET-2 Cameras and microphones). Empty for any other
+	// class.
+	Stream []Port `json:"stream"`
 }
+
+// The device classes the enforcer tells apart; the empty class is any
+// other device.
+const (
+	ClassCamera     = "camera"
+	ClassMicrophone = "microphone"
+)
+
+// Recorder reports whether the device is a camera or a microphone.
+func (d Device) Recorder() bool { return d.Class == ClassCamera || d.Class == ClassMicrophone }
+
+// Port is one TCP or UDP port on a device.
+type Port struct {
+	Proto string `json:"proto"` // ProtoTCP or ProtoUDP
+	Num   uint16 `json:"num"`   // 1 to 65535
+}
+
+const (
+	ProtoTCP = "tcp"
+	ProtoUDP = "udp"
+)
 
 // The NET-1 labels a device can carry; the empty label is not containable.
 const (
@@ -201,6 +237,7 @@ func (d Document) normal() Document {
 	devs := make([]Device, len(d.Devices))
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
+		dev.Control, dev.Stream = ports(dev.Control), ports(dev.Stream)
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -226,6 +263,17 @@ func (d Document) normal() Document {
 	return d
 }
 
+func ports(s []Port) []Port {
+	out := append([]Port{}, s...)
+	slices.SortFunc(out, func(a, b Port) int {
+		if c := strings.Compare(a.Proto, b.Proto); c != 0 {
+			return c
+		}
+		return int(a.Num) - int(b.Num)
+	})
+	return slices.Compact(out)
+}
+
 func sorted(s []string) []string {
 	out := append([]string{}, s...)
 	slices.Sort(out)
@@ -233,7 +281,8 @@ func sorted(s []string) []string {
 }
 
 // check refuses a document with a nameless or duplicate device, an unknown
-// network or label, a drone reference that is not a hash, a pair, rule or
+// network, label, class or port, a class or stream port on a device that
+// cannot carry it, a drone reference that is not a hash, a pair, rule or
 // hold naming no device, or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
@@ -257,6 +306,17 @@ func (d Document) check() error {
 		}
 		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
 			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
+		}
+		if dev.Class != "" && (!dev.Recorder() || dev.Everyday || dev.Secure != "") {
+			return bad("device %q: class %q needs a safety-list device with no secure command", dev.ID, dev.Class)
+		}
+		if len(dev.Stream) > 0 && !dev.Recorder() {
+			return bad("device %q: stream ports need a camera or microphone", dev.ID)
+		}
+		for _, p := range append(slices.Clone(dev.Control), dev.Stream...) {
+			if (p.Proto != ProtoTCP && p.Proto != ProtoUDP) || p.Num == 0 {
+				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
+			}
 		}
 	}
 	if d.Drone != "" && !hash(d.Drone) {
