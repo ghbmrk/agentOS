@@ -176,7 +176,13 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 			add("Put %s on the safety list: it acts only on your passkey here at home.", d.ID)
 		}
 	}
-	if o.Class != d.Class {
+	// An everyday device has no class, so the safety-list line above
+	// already says what it is.
+	switch {
+	case o.Class == d.Class || d.Everyday:
+	case o.Everyday:
+		add("Record %s as %s.", d.ID, classWords(d.Class))
+	default:
 		add("Record %s as %s, not %s.", d.ID, classWords(d.Class), classWords(o.Class))
 	}
 	if o.Secure != d.Secure {
