@@ -475,3 +475,70 @@ func TestHeadsOnlyRise(t *testing.T) {
 		t.Fatal("a fork changed the store")
 	}
 }
+
+// A head and an entry one seq apart must chain: an entry whose Prev is not
+// the held head before it, or a head that is not the Prev of the held
+// entry after it, is a fork (Security release items on #3909).
+func TestHeadAndEntryChain(t *testing.T) {
+	pub, priv := keys(t)
+	k := newKlog(t, priv)
+	k.add(kernel.TKeyPaused, 1, map[string]key.ID{"ID": {1}})
+	h1 := k.head()
+	e2 := k.add(kernel.TKeyPaused, 1, map[string]key.ID{"ID": {2}})
+	other := newKlog(t, priv)
+	other.add(kernel.TKeyRevoked, 1, map[string]key.ID{"ID": {9}})
+	o1 := other.head()
+	o2 := other.add(kernel.TKeyRevoked, 1, map[string]key.ID{"ID": {8}})
+
+	s := open(t, pub, &journal{})
+	if err := s.Head(h1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Entry(o2); !errors.Is(err, ErrFork) {
+		t.Fatalf("entry not chaining from the held head: %v", err)
+	}
+	if err := s.Entry(e2); err != nil {
+		t.Fatal(err)
+	}
+
+	s = open(t, pub, &journal{})
+	if err := s.Entry(e2); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Head(o1); !errors.Is(err, ErrFork) {
+		t.Fatalf("head the held next entry does not chain from: %v", err)
+	}
+	if err := s.Head(h1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A revocation and a trip are in force for this run even when the journal
+// refuses them; the error still says they will not survive a restart.
+func TestRevokeAndTripSurviveJournalFailure(t *testing.T) {
+	pub, priv := keys(t)
+	j := &failing{fail: true}
+	s := open(t, pub, &j.journal)
+	s.cfg.Journal = j
+	owner := newAuthenticator(t, "enforcer.home.arpa")
+	sig := owner.Sign(key.RootMsg(SubKeyRoot(owner.Public(), pub)))
+	if err := s.RevokeSubKey(owner.Public(), pub, sig); err == nil {
+		t.Fatal("journal failure not reported")
+	}
+	if !s.Revoked(pub) {
+		t.Fatal("the revocation is not in force")
+	}
+	k := newKlog(t, priv)
+	k.add(kernel.TKeyPaused, 1, map[string]key.ID{"ID": {1}})
+	if err := s.Head(k.head()); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("head after a failed-to-persist revocation: %v", err)
+	}
+	s2 := open(t, pub, &journal{})
+	s2.cfg.Journal = j
+	if err := s2.Trip(); err == nil {
+		t.Fatal("journal failure not reported")
+	}
+	if err := s2.Head(k.head()); !errors.Is(err, ErrTripped) {
+		t.Fatalf("head after a failed-to-persist trip: %v", err)
+	}
+}

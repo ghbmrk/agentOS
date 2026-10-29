@@ -266,6 +266,9 @@ func (s *Store) head(h wire.Head) error {
 	if eh, ok := s.hashes[h.Seq]; ok && eh != h.Hash {
 		return ErrFork
 	}
+	if next, ok := s.next(h.Seq); ok && next != h.Hash {
+		return ErrFork
+	}
 	if err := s.write(record{Head: &h}); err != nil {
 		return err
 	}
@@ -306,6 +309,9 @@ func (s *Store) entry(e entry, body []byte) error {
 		return ErrFork
 	}
 	if prev, ok := s.hashes[e.Seq-1]; ok && prev != e.Prev {
+		return ErrFork
+	}
+	if hd, ok := s.heads[e.Seq-1]; ok && hash(hd.Hash) != e.Prev {
 		return ErrFork
 	}
 	if next, ok := s.next(e.Seq); ok && next != h {
@@ -459,11 +465,10 @@ func (s *Store) RevokeSubKey(owner key.PublicKey, sub ed25519.PublicKey, sig []b
 	if s.revokedSub[string(sub)] {
 		return nil
 	}
-	if err := s.write(record{Revoke: slices.Clone(sub)}); err != nil {
-		return err
-	}
+	// Refused from now even if the journal fails, which is returned so the
+	// page can say the revocation will not survive a restart.
 	s.revokedSub[string(sub)] = true
-	return nil
+	return s.write(record{Revoke: slices.Clone(sub)})
 }
 
 // Trip stops the store keeping anything from the core: after a core trip
@@ -475,11 +480,8 @@ func (s *Store) Trip() error {
 	if s.tripped {
 		return nil
 	}
-	if err := s.write(record{Tripped: true}); err != nil {
-		return err
-	}
-	s.tripped = true
-	return nil
+	s.tripped = true // as RevokeSubKey: in force even if the journal fails
+	return s.write(record{Tripped: true})
 }
 
 // Revoked reports whether an Ed25519 key is revoked: a kernel sub-key the
