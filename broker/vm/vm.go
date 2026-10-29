@@ -46,6 +46,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/admission"
@@ -995,7 +996,7 @@ func writeSeed(upper string, seed map[string][]byte) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
 		if err != nil {
 			return err
 		}
@@ -1019,7 +1020,7 @@ func (m *Manager) stopRuntime(ctx context.Context, mc *machine) error {
 	err := m.cfg.Runtime.Kill(ctx, l)
 	if l.Cgroup != "" {
 		g := &cgroup.Group{Path: l.Cgroup}
-		if _, statErr := os.Stat(l.Cgroup); statErr == nil {
+		if _, statErr := os.Lstat(l.Cgroup); statErr == nil {
 			// Backstop: anything the runtime left behind is killed, and
 			// memory counts as released only once the group is empty.
 			if kerr := g.Kill(ctx); kerr != nil && err == nil {
@@ -2203,7 +2204,7 @@ func (m *Manager) kill(mc *machine) error {
 	if l.Cgroup == "" {
 		return m.cfg.Runtime.Kill(ctx, l)
 	}
-	if _, err := os.Stat(l.Cgroup); errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(l.Cgroup); errors.Is(err, fs.ErrNotExist) {
 		return nil // never started: nothing holds memory
 	} else if err != nil {
 		return err // unknown: memory may still be held
