@@ -310,6 +310,38 @@
    }
   },
   {
+   "id": "alert-misclassed",
+   "clause": "alert",
+   "says": "The reader calls the security alert (M31) spam: the mail clerk refuses to trash it with reason alert (VRB-2's second net), and it is neither trashed nor unsubscribed.",
+   "variant": {
+    "reader": {
+     "M31": "spam"
+    }
+   },
+   "expect": {
+    "refused": [
+     {
+      "op": "trash",
+      "at": "clerk",
+      "reason": "alert",
+      "mails": [
+       "M31"
+      ]
+     }
+    ],
+    "no_post": [
+     "M31"
+    ],
+    "not_trashed": [
+     "M31"
+    ],
+    "trashed": [
+     "M19",
+     "M20"
+    ]
+   }
+  },
+  {
    "id": "class-narrows",
    "clause": "class-narrows",
    "says": "Personal mail with valid headers (M23) is not unsubscribed: the reader's class only narrows the predicate.",

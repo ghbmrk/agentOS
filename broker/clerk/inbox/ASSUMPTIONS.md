@@ -95,7 +95,7 @@ The mail clerk links no IMAP parser (KRN-2). `imapsmtp` dials, does TLS and sign
 | MIG-3-R2 | #2601: The real POSTer's egress rules: parse with `net/url`, deny private addresses after resolution, port 443 only, no redirects, reject userinfo, whitespace and control characters. | An unsubscribe URL steers the POST at a host inside the home network. |
 | MIG-3-R3 | #2602: DKIM `x=` and `t=` tags, and IDN domains. | An expired or replayed signature passes VRB-2. Done: MIG-3-19, MIG-3-20. |
 | MIG-3-R4 | #2603: A wider lookalike check than the confusable pairs in `skeleton`. | A lookalike sender outside the pair list is unsubscribed from. Done: MIG-3-21. |
-| MIG-3-R5 | #2604: Alert eval case and a real-reader alert guard. | A real alert the reader misclasses as spam or phishing is trashed. |
+| MIG-3-R5 | #2604: Alert eval case and a real-reader alert guard. | A real alert the reader misclasses as spam or phishing is trashed. Done: the guard in `alert.go` (`TestTheGuardHoldsForPhishingAndMatchesAddressesExactly`, `TestPhishingInAnAlertsWordingIsNotTrashed`) and the eval case `alert-misclassed` (#3039). |
 | MIG-3-R6 | #2614: Trash an unsubscribed sender's later bulk mail at the clerk (A21). | A bulk mail from a sender already unsubscribed stays in the inbox. |
 | MIG-3-R7 | #2615: The `trash-not-restorable` status line gets a next step. | The owner is told spam was not deleted and not what to do about it. |
 | MIG-3-R8 | #2616: Held-unsubscribe notices name senders in plain words, written by the clerk. | A notice shows a sender handle the owner cannot read. |

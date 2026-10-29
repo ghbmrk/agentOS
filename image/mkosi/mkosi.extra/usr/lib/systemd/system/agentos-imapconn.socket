@@ -1,0 +1,20 @@
+# The mail clerk's IMAP connection process (TB-parsers-2-launch, #3015; #2937 gap 2): the clerk's
+# -imap-conn. Each connection starts one fresh agentos-imapconn@.service, which parses that one IMAP
+# session and nothing else. Only the clerk's user connects; the clerk's relay holds the credential,
+# the TLS connection and the byte budget, and passes the process only the session's stream.
+[Unit]
+Description=agentOS IMAP connection process: one connection per session
+
+[Socket]
+ListenStream=/run/agentos-imapconn/conn.sock
+Accept=yes
+SocketUser=agentos-mail
+SocketGroup=agentos-mail
+SocketMode=0600
+DirectoryMode=0711
+# MemoryMax= of the service times this is the parsers' whole memory (RES-2); a session past it is
+# refused, and the clerk reports it as the session's failure.
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

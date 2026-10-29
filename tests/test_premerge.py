@@ -22,6 +22,8 @@ def git(cwd, *args):
 EDITED = lambda kind: ["edited-verdict", kind + ":", *"a verdict edited after posting never counts, post a new comment".split()]
 UNPARSED = lambda kind, pr=7: ["unparsed-record", kind + ":",
     *f'Record line must be "Record: PR #{pr} · package <ID-without-spaces> · head <sha>"'.split()]
+UNRESOLVED = lambda kind, sha: ["unresolved-record", kind + ":", "Record", "head", sha,
+    *"resolves to no single commit here, post a new verdict naming the reviewed head".split()]
 
 
 class PremergeTest(unittest.TestCase):
@@ -650,6 +652,13 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([spaced(c("accept", sha, "1")), c("accept", sha, "2")]), (0, ["same"]))
         unrecorded = {**c("accept", sha, "1"), "body": "Verdict: accept\n# t\n<!-- record: l3 -->\n"}
         self.assertEqual(run([unrecorded]), (1, UNPARSED("l3")))
+        # #3856: a Record head naming no commit here (full or short) is named, not a git traceback; a later accept clears it
+        full = lambda head, at: {**c("accept", sha, at), "body": c("accept", sha, at)["body"].replace(sha[:7], head)}
+        for ghost in ("f" * 40, "fffffff"):
+            self.assertEqual(run([full(ghost, "1")]), (1, UNRESOLVED("l3", ghost)))
+            self.assertEqual(run([c("accept", sha, "1"), full(ghost, "2")]), (1, UNRESOLVED("l3", ghost)))
+            self.assertEqual(run([full(ghost, "1"), c("accept", sha, "2")]), (0, ["same"]))
+        self.assertEqual(run([full(sha, "1")]), (0, ["same"]))
         # a later fix-list supersedes the accept
         self.assertEqual(run([c("accept", sha, "1"), c("fix-list", sha, "2")]), (1, ["not-accepted"]))
         # a push after the accept reads as changed; a delta accept at the new head clears it
@@ -702,7 +711,7 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([l3, sec(who="NONE")]), need)
         self.assertEqual(run([l3, sec(pr=8)]), need)
         self.assertEqual(run([l3, sec("fix-list")]), need)
-        self.assertEqual(run([l3, sec(head="0" * 40)]), need)
+        self.assertEqual(run([l3, sec(head="0" * 40)]), (1, UNRESOLVED("security", "0" * 7)))  # #3856: named
         # an edited Security accept is not an accept, and an edited Security fix-list still supersedes an earlier accept
         self.assertEqual(run([l3, {**sec(), "updated_at": "9"}]), (1, EDITED("security")))
         self.assertEqual(run([l3, sec(at="1"), {**sec("fix-list", at="2"), "updated_at": "9"}]), (1, EDITED("security")))
@@ -797,8 +806,9 @@ class PremergeTest(unittest.TestCase):
         both = self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n")
         self.assertEqual(run([l3, both]), (0, ["same"]))
         # untrusted, other PR, fix-list, edited, unknown head, superseded: none counts
-        for bad in (ux(who="NONE"), ux(pr=8), ux("fix-list"), ux(head="0" * 40)):
+        for bad in (ux(who="NONE"), ux(pr=8), ux("fix-list")):
             self.assertEqual(run([l3, bad, pot()]), (1, ["needs-lens", "ux"]), bad)
+        self.assertEqual(run([l3, ux(head="0" * 40), pot()]), (1, UNRESOLVED("ux", "0" * 7)))  # #3856: named
         self.assertEqual(run([l3, {**ux(), "updated_at": "9"}, pot()]), (1, EDITED("ux")))
         self.assertEqual(run([l3, {**ux(), "updated_at": "9"}]), (1, EDITED("ux")))
         spaced = lambda x: {**x, "body": x["body"].replace("package X-1", "package two words")}
@@ -836,8 +846,9 @@ class PremergeTest(unittest.TestCase):
         need = (1, ["needs-security", "broker/clerk/camera/decode_test.go"])
         self.assertEqual(self.lens_run([l3, lens]), need)
         self.assertEqual(self.lens_run([l3, lens, sec()]), (0, ["same"]))
-        for bad in (sec(who="NONE"), sec(pr=8), sec("fix-list"), sec(head="0" * 40)):
+        for bad in (sec(who="NONE"), sec(pr=8), sec("fix-list")):
             self.assertEqual(self.lens_run([l3, lens, bad]), need, bad)
+        self.assertEqual(self.lens_run([l3, lens, sec(head="0" * 40)]), (1, UNRESOLVED("security", "0" * 7)))  # #3856
         self.assertEqual(self.lens_run([l3, lens, sec(at="2"), sec("fix-list", at="3")]), need)
         # the lens comment or the L3 comment carrying a security marker is not the separate review
         self.assertEqual(self.lens_run([l3, self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n"

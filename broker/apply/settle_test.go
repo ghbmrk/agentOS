@@ -653,7 +653,7 @@ func TestOtherRootPromiseEndsWithTheNextInstall(t *testing.T) {
 // retries it. A boot on the old root after an unrecorded Install proves
 // nothing about the release, so no fallback is recorded.
 
-const unrecordedLine = "I could not record update 1 as installed, twice, so I will not try it again on my own. " +
+const unrecordedLine = "I could not record update 1 as installed, twice, so I stopped trying it. " +
 	"You can retry it on my Wi-Fi page."
 
 // unrecordedAttempt ticks once with the save that records the handover
@@ -1552,7 +1552,7 @@ func TestWithdrawRefusedOnAnUnreadBootIsNotRestartedInto(t *testing.T) {
 func TestAnyWithdrawFinishesAMarkedOne(t *testing.T) {
 	r := installedHeld(t, false)
 	r.act.abandonErr = errIO
-	if err := r.a.Withdraw("a1", WhySecurity); starts(t, err) {
+	if err := r.a.Withdraw("a1", WhySecurity); !starts(t, err) {
 		t.Fatalf("withdraw: %v", err)
 	}
 	r.act.abandonErr = nil
@@ -1564,6 +1564,7 @@ func TestAnyWithdrawFinishesAMarkedOne(t *testing.T) {
 // the restart from booting the image, across a process restart, until a
 // later Tick completes the withdraw. An ordinary release past its jitter
 // shows it is the flag, not the policy check, that holds the restart.
+// STATUS says it may start, since a reboot would boot it (#3852).
 func TestWithdrawAbandonFailureKeepsTheImageFromBooting(t *testing.T) {
 	r := installedHeld(t, false)
 	ctx := context.Background()
@@ -1584,7 +1585,7 @@ func TestWithdrawAbandonFailureKeepsTheImageFromBooting(t *testing.T) {
 	if ok, err := r.a.Tick(ctx); ok || !errors.Is(err, errIO) || r.act.restarts != 0 {
 		t.Fatalf("tick after a process restart: %v %v, restarts %d", ok, err, r.act.restarts)
 	}
-	if got := r.a.Status(); got != "Update 1 failed a security check; I will not start it. Nothing is needed from you." {
+	if got := r.a.Status(); got != mayStart {
 		t.Fatalf("status: %q", got)
 	}
 	r.act.abandonErr = nil

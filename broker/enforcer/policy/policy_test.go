@@ -922,6 +922,8 @@ func TestCanonicalDocument(t *testing.T) {
 		"empty window":              func(d *Document) { d.Standing[0].ToMS = d.Standing[0].FromMS },
 		"orphan hold":               func(d *Document) { d.Holds[0].Device = "fridge" },
 		"secure on everyday device": func(d *Document) { dev(d, "tv").Secure = "off" },
+		"spaced Wi-Fi identity":     func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
+		"Wi-Fi identity newline":    func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)
