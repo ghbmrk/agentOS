@@ -418,7 +418,8 @@ func (l *onnxLoad) plates(f vision.Frame, ro *ort.RunOptions, seen []Seen) error
 
 // plateRows is the best plate in a run-allocated detector output, which
 // it zeroes and frees; false when there is none or the output is not
-// float rows of plateRow.
+// float rows of plateRow. The binding hands over a copy of the rows and
+// frees ONNX Runtime's own unzeroed (#3807); only the copy is zeroed here.
 func plateRows(v ort.Value, pb plateBox) (rect, bool) {
 	if v == nil {
 		return rect{}, false

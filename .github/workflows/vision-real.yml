@@ -153,6 +153,6 @@ jobs:
           go test -count=1 -timeout 30m -tags vision_onnx,vision_real -run 'TestRealRuntime|TestRealFaces|TestRealEnrol|TestRealPlates|TestRealSound|TestFloor|TestOnnx|TestThermal' -v ./cmd/agentos-vision | tee "$RUNNER_TEMP/real.log"
           # A renamed test or an unset variable must not pass by running nothing.
           for t in TestRealRuntimeDetect TestRealRuntimeRefusesOffPinDetector TestRealFaces TestRealFacesNotEncodedWhenNoneEnrolled TestRealEnrolNeedsOneClearFace TestRealEnrolZeroesEncoderOutput TestFloorFigures TestFloorFaces TestOnnxLoadNeedsPinnedFiles TestThermalDetect \
-              TestRealPlates TestRealSound TestRealSoundOutputsScoresOnly TestRealSoundLeavesNoSampleCopy TestFloorPlatesSound TestOnnxModelNameValid; do
+              TestRealPlates TestRealPlatesLeaveNoCopy TestRealSound TestRealSoundOutputsScoresOnly TestRealSoundLeavesNoSampleCopy TestFloorPlatesSound TestOnnxModelNameValid; do
             grep -q -- "^--- PASS: $t " "$RUNNER_TEMP/real.log" || { echo "$t did not pass" >&2; exit 1; }
           done
