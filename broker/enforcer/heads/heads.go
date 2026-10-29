@@ -149,6 +149,12 @@ type Store struct {
 	entries map[uint64][]byte // seq -> the kernel's encoding
 	hashes  map[uint64]hash
 	tripped bool
+	// unsaved holds a sub-key revocation or the trip ("trip") that is in
+	// force but whose journal write failed, so a retry writes it again.
+	unsaved map[string]bool
+	// size is the journal's length after its last good append, so a
+	// failed append is cut back and leaves no fragment.
+	size int
 
 	revokedSub  map[string]bool // ed25519 keys: the owner's sub-key revocations
 	revokedEdge map[string]bool
@@ -165,7 +171,7 @@ func Open(cfg Config) (*Store, error) {
 	}
 	s := &Store{cfg: cfg, heads: map[uint64]wire.Head{}, entries: map[uint64][]byte{}, hashes: map[uint64]hash{},
 		revokedSub: map[string]bool{}, revokedEdge: map[string]bool{}, revokedPK: map[string]bool{},
-		revokedID: map[key.ID]bool{}, paused: map[key.ID]bool{}}
+		revokedID: map[key.ID]bool{}, paused: map[key.ID]bool{}, unsaved: map[string]bool{}}
 	raw, err := cfg.Journal.Load()
 	if err != nil {
 		return nil, err
@@ -174,6 +180,7 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.size = len(raw)
 	for i, ln := range bytes.Split(raw, []byte{'\n'}) {
 		if len(ln) == 0 {
 			continue
@@ -216,7 +223,13 @@ func (s *Store) write(r record) error {
 	if err != nil {
 		return err
 	}
-	return s.cfg.Journal.Append(append(b, '\n'))
+	b = append(b, '\n')
+	if err := s.cfg.Journal.Append(b); err != nil {
+		_ = s.cfg.Journal.Truncate(s.size) // a short write leaves no fragment
+		return err
+	}
+	s.size += len(b)
+	return nil
 }
 
 // headMsg is the kernel's head message: the head domain, the seq and the
@@ -462,13 +475,14 @@ func (s *Store) RevokeSubKey(owner key.PublicKey, sub ed25519.PublicKey, sig []b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.revokedSub[string(sub)] {
+	if s.revokedSub[string(sub)] && !s.unsaved[string(sub)] {
 		return nil
 	}
 	// Refused from now even if the journal fails, which is returned so the
-	// page can say the revocation will not survive a restart.
+	// page can say the revocation will not survive a restart; a retry
+	// writes it again until one write succeeds.
 	s.revokedSub[string(sub)] = true
-	return s.write(record{Revoke: slices.Clone(sub)})
+	return s.save(string(sub), record{Revoke: slices.Clone(sub)})
 }
 
 // Trip stops the store keeping anything from the core: after a core trip
@@ -477,11 +491,22 @@ func (s *Store) RevokeSubKey(owner key.PublicKey, sub ed25519.PublicKey, sig []b
 func (s *Store) Trip() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.tripped {
+	if s.tripped && !s.unsaved["trip"] {
 		return nil
 	}
 	s.tripped = true // as RevokeSubKey: in force even if the journal fails
-	return s.write(record{Tripped: true})
+	return s.save("trip", record{Tripped: true})
+}
+
+// save writes r for the change named id, marking it unsaved until a write
+// succeeds.
+func (s *Store) save(id string, r record) error {
+	if err := s.write(r); err != nil {
+		s.unsaved[id] = true
+		return err
+	}
+	delete(s.unsaved, id)
+	return nil
 }
 
 // Revoked reports whether an Ed25519 key is revoked: a kernel sub-key the

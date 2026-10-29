@@ -202,6 +202,10 @@ type Alerts struct {
 	recovery bool
 	coreDown bool
 
+	// size is the journal's length after its last good append, so a
+	// failed append is cut back and leaves no fragment.
+	size int
+
 	// lightMu orders light updates so a stale colour never lands last.
 	lightMu sync.Mutex
 }
@@ -224,6 +228,7 @@ func New(cfg Config) (*Alerts, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.size = len(raw)
 	for i, ln := range bytes.Split(raw, []byte{'\n'}) {
 		if len(ln) == 0 {
 			continue
@@ -255,7 +260,13 @@ func (a *Alerts) write(r Record) error {
 	if err != nil {
 		return err
 	}
-	return a.cfg.Journal.Append(append(b, '\n'))
+	b = append(b, '\n')
+	if err := a.cfg.Journal.Append(b); err != nil {
+		_ = a.cfg.Journal.Truncate(a.size) // a short write leaves no fragment
+		return err
+	}
+	a.size += len(b)
+	return nil
 }
 
 // Raise logs one event, and for a text or call keeps it open, turns the
@@ -327,8 +338,8 @@ func (a *Alerts) send(r Record) Record {
 	if !ok {
 		return r
 	}
-	if a.log[i].Sent {
-		return a.log[i]
+	if a.log[i].Sent || !a.log[i].Told.Equal(r.Told) {
+		return a.log[i] // already taken, or a newer telling owns the flag
 	}
 	s := a.log[i]
 	s.Sent = true

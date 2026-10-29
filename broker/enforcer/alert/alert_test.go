@@ -370,3 +370,41 @@ func TestSafetyOffNamesVerb(t *testing.T) {
 		t.Fatalf("texts %v", r.core.got)
 	}
 }
+
+type short struct {
+	journal
+	fail bool
+}
+
+func (s *short) Append(b []byte) error {
+	if s.fail {
+		s.journal.b = append(s.journal.b, b[:len(b)/2]...)
+		return errors.New("disk full")
+	}
+	return s.journal.Append(b)
+}
+
+// A failed append that wrote part of its line is cut back, so the next
+// append and the next open see no fragment (delta L3 on #3909).
+func TestShortWriteLeavesNoFragment(t *testing.T) {
+	j := &short{}
+	a, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: j})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.fail = true
+	if _, err := a.Raise(Enrolment, ""); err == nil {
+		t.Fatal("short write not reported")
+	}
+	j.fail = false
+	if _, err := a.Raise(RoutineLock, "front-door"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: &j.journal})
+	if err != nil {
+		t.Fatalf("reopen after a short write: %v", err)
+	}
+	if n := len(b.Log()); n != 1 {
+		t.Fatalf("%d lines after reopen, want the one written whole", n)
+	}
+}

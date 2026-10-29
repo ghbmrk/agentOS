@@ -438,11 +438,14 @@ func TestJournal(t *testing.T) {
 
 type failing struct {
 	journal
-	fail bool
+	fail, short bool
 }
 
 func (f *failing) Append(b []byte) error {
 	if f.fail {
+		if f.short {
+			f.journal.b = append(f.journal.b, b[:len(b)/2]...)
+		}
 		return errors.New("disk full")
 	}
 	return f.journal.Append(b)
@@ -540,5 +543,43 @@ func TestRevokeAndTripSurviveJournalFailure(t *testing.T) {
 	}
 	if err := s2.Head(k.head()); !errors.Is(err, ErrTripped) {
 		t.Fatalf("head after a failed-to-persist trip: %v", err)
+	}
+
+	// A retry once the disk is back writes them; a reopen keeps both.
+	j.fail = false
+	if err := s.RevokeSubKey(owner.Public(), pub, sig); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Trip(); err != nil {
+		t.Fatal(err)
+	}
+	r := open(t, pub, &j.journal)
+	if !r.Revoked(pub) {
+		t.Fatal("the retried revocation was not persisted")
+	}
+	if err := r.Head(k.head()); !errors.Is(err, ErrTripped) {
+		t.Fatalf("the retried trip was not persisted: %v", err)
+	}
+}
+
+// A failed append that wrote part of its line is cut back, so appends
+// after it, and the next open, see no fragment (delta L3 on #3909).
+func TestShortWriteLeavesNoFragment(t *testing.T) {
+	pub, priv := keys(t)
+	j := &failing{}
+	s := open(t, pub, &j.journal)
+	s.cfg.Journal = j
+	k := newKlog(t, priv)
+	k.add(kernel.TKeyPaused, 1, map[string]key.ID{"ID": {1}})
+	j.fail, j.short = true, true
+	if err := s.Head(k.head()); err == nil {
+		t.Fatal("short write not reported")
+	}
+	j.fail = false
+	if err := s.Head(k.head()); err != nil {
+		t.Fatal(err)
+	}
+	if got := open(t, pub, &j.journal).Heads(); len(got) != 1 {
+		t.Fatalf("after a short write: %v", got)
 	}
 }
