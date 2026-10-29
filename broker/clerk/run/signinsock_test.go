@@ -30,6 +30,7 @@ type stubHost struct {
 	args  []signInArgs
 	fail  map[string]error
 	route string // signinroute's answer, if not dir/guest
+	ended bool   // signinread answers that the CLI exited
 }
 
 func (s *stubHost) serve(t *testing.T) string {
@@ -64,7 +65,10 @@ func (s *stubHost) serve(t *testing.T) string {
 			case "signinstop":
 				os.RemoveAll(filepath.Join(s.dir, a.Guest))
 			case "signinread":
-				return json.Marshal(signInRead{Printed: "code", Exited: false})
+				s.mu.Lock()
+				ended := s.ended
+				s.mu.Unlock()
+				return json.Marshal(signInRead{Printed: "code", Exited: ended})
 			}
 			return nil, nil
 		})
@@ -150,22 +154,25 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 // sign-in machine per plan (#3927) starts the right one (CLK-7, PLN-5).
 func TestSignInSockNamesThePlan(t *testing.T) {
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
-	host := &stubHost{dir: dir, fail: map[string]error{}}
+	host := &stubHost{dir: dir, fail: map[string]error{}, ended: true}
 	sock := host.serve(t)
 	var ca, cb atomic.Int32
 	la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, nil))
 	lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
 	conn := proc.Conn{Socket: sock, UID: os.Getuid()}
+	// Link only bounds a hang: the stub's CLI exits at its first read, so
+	// each sign-in ends on that read, not on a timer.
+	times := SignInTimes{Poll: time.Millisecond, Link: time.Minute, Wall: time.Minute}
 	for _, h := range []*PlanHost{
-		{Plan: "codex", Login: la, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: la, SandboxUID: os.Getuid()}, Times: quick},
-		{Plan: "other", Login: lb, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: lb, SandboxUID: os.Getuid()}, Times: quick},
+		{Plan: "codex", Login: la, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: la, SandboxUID: os.Getuid()}, Times: times},
+		{Plan: "other", Login: lb, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: lb, SandboxUID: os.Getuid()}, Times: times},
 	} {
 		host.mu.Lock()
 		host.calls, host.args = nil, nil
 		host.mu.Unlock()
-		// The stub prints no link: the sign-in times out after Link and is
-		// stopped, having made every call.
-		if b := h.Begin(context.Background()); b.Detail != DSignInTimedOut {
+		// The stub's CLI exits before printing a link: the sign-in fails at
+		// its first read and is stopped, having made every call.
+		if b := h.Begin(context.Background()); b.Detail != DSignInFailed {
 			t.Fatalf("%s: begun %+v", h.Plan, b)
 		}
 		host.mu.Lock()
