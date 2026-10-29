@@ -241,6 +241,7 @@ func main() {
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
 	var keptPath, setupRecord string
+	var keptDays int
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -316,7 +317,8 @@ func main() {
 	flag.StringVar(&workerArgv, "worker-argv", "sleep infinity", "what a worker machine runs while the guest drives it, space-separated")
 	flag.Int64Var(&workerLayerMB, "worker-layer-mb", 4096, "the most one worker's files may hold, MB; over it the worker takes no command or snapshot until it shrinks; 0 is no cap beyond the disk reserve")
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
-	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "agent replies too long for a text or that could not be sent, kept for the local page (CH-20)")
+	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "agent replies too long for a text or that could not be sent, and texts the owner channel held back, kept for the local page (CH-19, CH-20)")
+	flag.IntVar(&keptDays, "kept-days", 30, "days a kept reply or held-back text stays readable on the local page (CH-19)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
@@ -600,8 +602,17 @@ func main() {
 	// Agent replies (CH-20): texted, or kept for the local page when too
 	// long. The mail clerk runs in its own process and has no share route
 	// to an owner destination yet, so no destination can be set.
-	ev := newEvidence(keptPath, log.Printf)
+	if keptDays < 1 {
+		log.Fatal("-kept-days must be at least 1")
+	}
+	ev := newEvidence(keptPath, time.Duration(keptDays)*24*time.Hour, log.Printf)
 	ev.wire(&cfg)
+	// What the owner channel withholds is kept for the owner page and
+	// pointed to only when the page is served (CH-19, CH-21, #993).
+	if cfg.PageSocket != nil {
+		ev.page = true
+		cfg.PageSocket.Held = ev.kept.held
+	}
 	// Changing where updates come from (OSS-10): on the clock guard's
 	// Latest, which questions.open starts; until then nothing is followed.
 	fs, err := newFollowSetting(updateStore, shippedRoot, qs.g.Load)

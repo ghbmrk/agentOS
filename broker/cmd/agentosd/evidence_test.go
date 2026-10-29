@@ -1,6 +1,6 @@
 package main
 
-// REQ: CH-20, CH-19, CH-10, CAP-3, CH-3
+// REQ: CH-20, CH-19, CH-21, CH-10, CAP-3, CH-3
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -85,12 +86,12 @@ func TestLongRepliesAreKept(t *testing.T) {
 // every kept reply, which may quote the deleted record (security C6).
 func TestADeletionForgetsKeptReplies(t *testing.T) {
 	r := newEvRig(t)
-	r.ev.kept.keep("quotes the record")
+	r.ev.kept.keep("long", "quotes the record")
 	n, err := r.ev.kept.forget()
 	if n != 0 || err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("forgot %d %v %d", n, err, len(r.ev.kept.list()))
 	}
-	r.ev.kept.keep("again")
+	r.ev.kept.keep("long", "again")
 	if _, err := r.ev.kept.forget(); err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("again: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestDEL1f1DeletionReachesTheOutbox(t *testing.T) {
 	}
 	src := &forgettingOutbox{fakeOutbox: fakeOutbox{sent: r.texts}}
 	src.add("quotes the record")
-	r.ev.kept.keep("quotes it too")
+	r.ev.kept.keep("long", "quotes it too")
 	r.ev.serve(src)
 	if _, err := r.ev.kept.forget(); err != nil {
 		t.Fatalf("forget: %v", err)
@@ -495,5 +496,129 @@ func TestEvidenceSettingIsNotYet(t *testing.T) {
 		if r, _ := cfg.Settings(context.Background(), msg, true); r != "loops" {
 			t.Errorf("%q: %q", msg, r)
 		}
+	}
+}
+
+// TestKeptSurvivesRestart (HELD-2): what was kept is still listed, with
+// the same id, kind and text, by a store opened again on the same file.
+func TestKeptSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kept.json")
+	ev := newEvidence(path, defaultKeepFor, t.Logf)
+	if err := ev.kept.Keep(owner.KeptCode, "I fixed the code."); err != nil {
+		t.Fatal(err)
+	}
+	before := ev.kept.list()
+	after := newEvidence(path, defaultKeepFor, t.Logf).kept.list()
+	if len(before) != 1 || before[0].ID == "" || !slices.Equal(before, after) || after[0].Kind != owner.KeptCode || after[0].Text != "I fixed the code." {
+		t.Fatalf("kept %+v, after a restart %+v", before, after)
+	}
+}
+
+// TestKeptExpiresOnlyByTime (HELD-2): 25 items are all kept (no count
+// eviction); on day 29 they are listed, on day 30 + 1 s each is a stub
+// with no text, on the page as on disk once swept, and 30 days later the
+// stubs are gone.
+func TestKeptExpiresOnlyByTime(t *testing.T) {
+	r := newEvRig(t)
+	const canary = "CANARY-held-482913"
+	for i := range 25 {
+		if err := r.ev.kept.keep(localapi.HeldLong, fmt.Sprintf("%s %d", canary, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := r.now
+	r.now = start.Add(29 * 24 * time.Hour)
+	l := r.ev.kept.list()
+	if len(l) != 25 || l[0].Text != canary+" 0" || l[0].Expired {
+		t.Fatalf("day 29: %d kept", len(l))
+	}
+	r.now = start.Add(defaultKeepFor + time.Second)
+	h := r.ev.kept.held()
+	if len(h.Items) != 25 || !h.Items[0].Expired || h.Items[0].Text != "" || h.Items[0].ID != l[24].ID {
+		t.Fatalf("day 30 + 1 s: %+v", h.Items[0])
+	}
+	r.ev.kept.sweep()
+	if raw, _ := r.store.Load(); strings.Contains(string(raw), canary) {
+		t.Fatal("an expired text is still on disk")
+	}
+	r.now = start.Add(defaultKeepFor + stubFor + time.Second)
+	if l := r.ev.kept.list(); len(l) != 0 {
+		t.Fatalf("stubs outlived their 30 days: %d", len(l))
+	}
+}
+
+// TestFullStoreRefusesNotEvicts (HELD-2): an item that would take the file
+// past its byte cap is refused, every older item stays as it was, and the
+// owner channel then says the text could not be kept.
+func TestFullStoreRefusesNotEvicts(t *testing.T) {
+	r := newEvRig(t)
+	big := strings.Repeat("x", maxKeptBytes/3)
+	for range 2 {
+		if err := r.ev.kept.keep(localapi.HeldLong, big); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := r.store.Load()
+	if err := r.ev.kept.Keep(owner.KeptSecret, big); !errors.Is(err, errKeptFull) {
+		t.Fatalf("a full store kept it: %v", err)
+	}
+	if after, _ := r.store.Load(); string(after) != string(before) {
+		t.Fatal("a refused keep changed the older items")
+	}
+	long := strings.Repeat("All of this is the reply. ", 80)
+	r.ev.sendSplit("agent", long+big)
+	got := r.texts()
+	if len(got) != 3 || !strings.HasSuffix(got[2], " "+keptLongNotKept) || len(owner.AgentPrefix+got[2]) > control.MaxText {
+		t.Fatalf("a long reply not kept ended %q", got[len(got)-1])
+	}
+	noPage(t, got[2])
+}
+
+// TestUnsentNotKeptIsTold: a reply that did not go and could not be kept
+// is logged, and the owner is told in the broker's own words.
+func TestUnsentNotKeptIsTold(t *testing.T) {
+	r := newEvRig(t)
+	r.ev.kept.store = failStore{}
+	var told []string
+	r.ev.inform = func(s string) error { told = append(told, s); return nil }
+	n := 0
+	r.ev.notify = func(string) error {
+		if n++; n == 2 {
+			return errNoSend
+		}
+		return nil
+	}
+	r.ev.sendSplit("agent", strings.Repeat("A reply in two texts. ", 30))
+	if len(told) != 1 || told[0] != unsentNotKept {
+		t.Fatalf("told %q", told)
+	}
+	noPage(t, unsentNotKept)
+}
+
+type failStore struct{}
+
+func (failStore) Load() ([]byte, error) { return nil, nil }
+func (failStore) Save([]byte) error     { return errors.New("disk full") }
+
+// TestHeldListsNewestFirst: the page's view lists what is kept newest
+// first, then the expired stubs, and reading it removes nothing (HELD-3).
+func TestHeldListsNewestFirst(t *testing.T) {
+	r := newEvRig(t)
+	start := r.now
+	for i, k := range []string{owner.KeptSecret, owner.KeptCode, localapi.HeldUnsent} {
+		r.now = start.Add(time.Duration(i) * 24 * time.Hour)
+		if err := r.ev.kept.keep(k, k+" text"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.now = start.Add(defaultKeepFor + time.Hour)
+	for range 2 {
+		h := r.ev.kept.held()
+		if len(h.Items) != 3 || h.Items[0].Kind != localapi.HeldUnsent || h.Items[1].Kind != owner.KeptCode || !h.Items[2].Expired || h.Items[2].Kind != owner.KeptSecret {
+			t.Fatalf("held %+v", h.Items)
+		}
+	}
+	if owner.KeptSecret != localapi.HeldSecret || owner.KeptCode != localapi.HeldCode {
+		t.Fatal("the owner channel's kinds are not the page's")
 	}
 }

@@ -99,14 +99,17 @@ func TestSecretStillWinsOverHold(t *testing.T) {
 	}
 }
 
-// TestHeldCodeIsTheSpecWording: until #890 keeps held text, the fixed
-// text is CH-21's could-not-be-kept text: it opens as CH-21's held text
-// does, fits one GSM-7 segment, points to no page that lacks the text
-// (CH-12), and is itself not held again.
+// TestHeldCodeIsTheSpecWording: HeldCodePointer is CH-21's held text
+// word for word, and HeldCode, sent when the text could not be kept
+// (#993), opens as it does, fits one GSM-7 segment, points to no page
+// that lacks the text (CH-12), and is itself not held again.
 func TestHeldCodeIsTheSpecWording(t *testing.T) {
 	b, err := os.ReadFile("../../SPEC.md")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"`+HeldCodePointer+`"`) {
+		t.Fatalf("HeldCodePointer %q is not CH-21's held text", HeldCodePointer)
 	}
 	const opening = "I held back a message because it mentioned a code"
 	if !strings.Contains(string(b), `"`+opening) || !strings.HasPrefix(HeldCode, opening) {
