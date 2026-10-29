@@ -20,7 +20,7 @@ var ErrCardPending = errors.New("firstboot: I am waiting for you to save your Ow
 // nothing and shows no card; setup's finish still answers card pending.
 // The same line answers a keeper that does not know the card's page
 // certificate (OWN-card-flow decision 10).
-var ErrNoAuthority = errors.New("I can't make your Owner Card yet, because my page certificate isn't ready. Restart the box and open this page again. If you see this again, tell me in a text.")
+var ErrNoAuthority = errors.New("I can't make your Owner Card yet, because my page certificate isn't ready. Restart me and open this page again. If you see this again, tell me in a text.")
 
 // Line is a Provision error that is the page's fixed line for the owner
 // (OWN-card-flow decision 10): the step keeps it for Note, so the setup page
@@ -34,7 +34,7 @@ func (l Line) Error() string { return string(l) }
 // card does not open it (OWN-card-flow decision 8): the step latches as
 // confirmed, and the page shows this line once, so the owner keeps the
 // earlier card.
-var ErrKept = Line("This box already holds the keys of the Owner Card you confirmed before it restarted. Keep that card and throw this one away.")
+var ErrKept = Line("I already hold the keys of the Owner Card you confirmed before I restarted. Keep that card and throw this one away.")
 
 // cardState is the card step's latch, the only thing it keeps on disk.
 // Preloaded marks a box that held a claim code (Begin): it survives the

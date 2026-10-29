@@ -347,7 +347,7 @@ func TestCardStepHoldsWithoutAuthority(t *testing.T) {
 		if err := s.Again(func() error { resets++; return nil }); !errors.Is(err, ErrNoAuthority) || resets != 0 {
 			t.Fatalf("%s: Again = %v after %d resets", name, err, resets)
 		}
-		if s.Hold().Error() != "I can't make your Owner Card yet, because my page certificate isn't ready. Restart the box and open this page again. If you see this again, tell me in a text." {
+		if s.Hold().Error() != "I can't make your Owner Card yet, because my page certificate isn't ready. Restart me and open this page again. If you see this again, tell me in a text." {
 			t.Fatalf("hold text %q", s.Hold())
 		}
 		// Begin, on the download route, starts and holds the same way.

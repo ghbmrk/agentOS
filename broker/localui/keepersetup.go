@@ -117,8 +117,8 @@ func keeperSetupRequest(c *card.Card, fingerprint string) ([]byte, error) {
 // firstboot.ErrKept.
 const (
 	keeperUnreachableLine = "I couldn't save your Owner Card's keys. Wait a minute and confirm again."
-	keeperTakenLine       = "I couldn't save this Owner Card's keys, because I already hold another card's. Restart the box and open this page again, and I will make you a new card."
-	keeperBadLine         = "I couldn't save your Owner Card's keys. Restart the box and open this page again. If you see this again, tell me in a text."
+	keeperTakenLine       = "I couldn't save this Owner Card's keys, because I already hold another card's. Restart me and open this page again, and I will make you a new card."
+	keeperBadLine         = "I couldn't save your Owner Card's keys. Restart me and open this page again. If you see this again, tell me in a text."
 )
 
 // handOff gives the keeper the confirmed card's factors (decision 9: before
