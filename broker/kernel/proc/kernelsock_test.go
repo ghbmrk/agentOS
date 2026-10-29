@@ -451,6 +451,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	edge, edgePriv := gen(45)
 	hi := edgeHello(edgePriv, 1)
 	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
+	code := kernel.SignCode(phonePriv, []kernel.CodeStep{kernel.CodeStepOf(p1, 0)}) // no checker is pinned: refused alike
 	approval := kernel.TaskApproval{Site: "shop.test", First: "r", By: key.Approve(key.Ed25519Signer(phonePriv), kernel.TaskHash("t1", 0, "shop.test", "r"))}
 	for _, b := range []*box{direct, sock} {
 		if err := b.h.With(func(k *kernel.Kernel) error {
@@ -494,6 +495,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			return nil, k.Enroll(now(), key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phone)))
 		}},
 		{name: "approvetask", op: "approvetask", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveTask("t1", approval) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveTask(now(), "t1", approval) }},
+		{name: "approvecode", op: "approvecode", sock: func(o Owner, _ Meter) (any, error) { return nil, o.ApproveCode(code) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ApproveCode(now(), code) }},
 		{name: "task", op: "task", read: func(v any) bool { return len(v.(kernel.Task).Approvals) > 0 },
 			sock: func(o Owner, _ Meter) (any, error) {
 				tk, ok, err := o.Task("t1")
@@ -591,9 +593,10 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		}},
 	}
 	// Refused on both kernels by design: the admission past the cap, the
-	// pool at its reserve, and setup on a box that has its anchors (the
-	// setup-only tests take it on a fresh one). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true, "retry moved": true}
+	// pool at its reserve, setup on a box that has its anchors (the
+	// setup-only tests take it on a fresh one), and a code approval on a box
+	// with no checker pinned (kernel TestCodeApproval*). Every other action succeeds.
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true, "retry moved": true, "approvecode": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {
