@@ -69,6 +69,34 @@ class Gate(unittest.TestCase):
         self.assertIn("netguard", pkgs)
         self.assertNotIn("quota", pkgs)
 
+    def test_prefix_listed_packages_are_tier_a(self):
+        # #3948 blocker: only exact core-list names counted, so packages under a prefix line were skipped.
+        pkgs = mutgate.tier_a_packages()
+        for pkg in ("kernel/key", "kernel/privfile", "clerk/inbox/imapsmtp"):
+            self.assertIn(pkg, pkgs)
+            diff = DIFF.replace("broker/hint/", f"broker/{pkg}/")
+            self.assertEqual(mutgate.claimed(diff), [pkg])
+
+    def test_tier_a_packages_match_risk_tier_on_every_package(self):
+        # Each Go package's own files, not a made-up name, through the tier rule premerge uses.
+        broker = ROOT / "broker"
+        pkgs = set(mutgate.tier_a_packages())
+        for d in sorted({f.parent for f in broker.rglob("*.go")}):
+            rel = d.relative_to(broker).as_posix()
+            if rel == "." or {"vendor", "testdata"} & set(rel.split("/")):
+                continue
+            src = next(f for f in sorted(d.glob("*.go")))
+            want = mutgate.risk_tier.tier_of(src.relative_to(ROOT).as_posix())[0] == "A"
+            self.assertEqual(rel in pkgs, want, rel)
+
+    def test_odd_package_names_never_reach_the_matrix(self):
+        with tempfile.TemporaryDirectory() as d:
+            broker = pathlib.Path(d)
+            for name in ("kernel/ok", "kernel/a b", "kernel/$(x)", "kernel/vendor/v", "kernel/testdata/t"):
+                (broker / name).mkdir(parents=True)
+                (broker / name / "a.go").write_text("package x\n")
+            self.assertEqual(mutgate.tier_a_packages(broker), ["kernel/ok"])
+
     def test_report_and_cli(self):
         with tempfile.TemporaryDirectory() as d:
             (pathlib.Path(d) / "hint.json").write_text(json.dumps(
@@ -104,11 +132,15 @@ class Claimed(unittest.TestCase):
         self.assertEqual(mutgate.claimed(DOCS_ONLY, tier_a=["hint"]), [])
 
     def test_claimed_covers_every_package_violations_reads(self):
-        # Any package outside claimed() could never yield a violation, whatever survives there.
-        live = {p: [("hint.go", 11, "X")] for p in ("hint", "mail", "vm/gvisor")}
-        found = {v[0] for v in mutgate.violations(DIFF, live)}
-        self.assertLessEqual(found, set(mutgate.claimed(DIFF, tier_a=["hint", "mail", "vm/gvisor"])))
-        self.assertEqual(found, {"hint"})
+        # Any tier-A package outside claimed() could never yield a violation, whatever survives
+        # there. The real tier list, not an injected one, so a prefix-line package counts (#3948).
+        pkgs = ["netguard", "kernel/privfile", "clerk/inbox/imapsmtp", "quota"]
+        diff = "".join(DIFF.replace("broker/hint/", f"broker/{p}/") for p in pkgs)
+        live = {p: [("hint.go", 11, "X")] for p in pkgs}
+        tier_a = set(mutgate.tier_a_packages())
+        found = {v[0] for v in mutgate.violations(diff, live)} & tier_a
+        self.assertEqual(found, set(pkgs) - {"quota"})
+        self.assertEqual(set(mutgate.claimed(diff)), found)
 
     def test_claimed_cli_on_a_real_diff(self):
         with tempfile.TemporaryDirectory() as d:

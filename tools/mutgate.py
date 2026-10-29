@@ -39,11 +39,24 @@ MARKER = re.compile(r"\+.*REQ:\s*[A-Z]{2,4}-\d+")
 HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
 
 
+# A package name that reaches the workflow's matrix: path segments of plain characters only.
+PKG_NAME = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+
+
 def tier_a_packages(broker=BROKER):
-    """Tier-A package paths under broker/ that exist and hold Go source, sorted."""
-    core, wiring, allowed = risk_tier.core_list()
-    names = core | wiring | allowed | risk_tier.TIER_A_BROKER
-    return sorted(n for n in names if any((broker / n).glob("*.go")))
+    """Package paths under broker/ that hold Go source and that risk_tier.tier_of puts in tier A, sorted.
+
+    Every directory is classed by tier_of, so packages under a prefix line (kernel/privfile,
+    clerk/inbox/imapsmtp) and unlisted ones count, as risk_tier counts them (#3948).
+    """
+    out = []
+    for d in sorted({f.parent for f in broker.rglob("*.go")}):
+        rel = d.relative_to(broker).as_posix()
+        if rel == "." or {"vendor", "testdata"} & set(rel.split("/")) or not PKG_NAME.fullmatch(rel):
+            continue
+        if risk_tier.tier_of(f"broker/{rel}/x.go")[0] == "A":
+            out.append(rel)
+    return out
 
 
 def survivors(results_dir):

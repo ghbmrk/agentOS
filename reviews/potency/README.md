@@ -18,7 +18,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 | Finding kind | Check | Since |
 |---|---|---|
-| A defence can be reverted and the suite still passes (a surviving mutant) | `.github/workflows/mutgate.yml` runs `tools/mutgate.py` (gremlins v0.6.0) on each tier-A package where a PR adds a `REQ:` marker and fails on a LIVED mutant on a line the PR adds there. Bound: survivors on old lines, uncovered code, non-tier-A code (#3177) and PRs that add no `REQ:` marker stay held by review. | REV-CHK-mut (#3899) |
+| A defence can be reverted and the suite still passes (a surviving mutant) | `.github/workflows/mutgate.yml` runs `tools/mutgate.py` (gremlins v0.6.0) on each tier-A package where a PR adds a `REQ:` marker and fails on a LIVED mutant on a line the PR adds there. Bound: survivors on old lines, uncovered code, non-tier-A code and PRs that add no `REQ:` marker stay held by review. | REV-CHK-mut (#3899) |
 
 ## Spec-wide runs
 
