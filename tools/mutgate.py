@@ -44,18 +44,21 @@ PKG_NAME = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
 
 
 def tier_a_packages(broker=BROKER):
-    """Package paths under broker/ that hold Go source and that risk_tier.tier_of puts in tier A, sorted.
+    """Package paths under broker/ that hold Go source with a file risk_tier.tier_of puts in tier A, sorted.
 
-    Every directory is classed by tier_of, so packages under a prefix line (kernel/privfile,
-    clerk/inbox/imapsmtp) and unlisted ones count, as risk_tier counts them (#3948).
+    Every .go file is classed by tier_of, so packages under a prefix line (kernel/privfile,
+    clerk/inbox/imapsmtp) and unlisted ones count, as risk_tier counts them (#3948). A tier-A
+    package whose path PKG_NAME refuses raises, rather than dropping out of the gate unseen.
     """
-    out = []
-    for d in sorted({f.parent for f in broker.rglob("*.go")}):
-        rel = d.relative_to(broker).as_posix()
-        if rel == "." or {"vendor", "testdata"} & set(rel.split("/")) or not PKG_NAME.fullmatch(rel):
-            continue
-        if risk_tier.tier_of(f"broker/{rel}/x.go")[0] == "A":
-            out.append(rel)
+    files = {}
+    for f in broker.rglob("*.go"):
+        rel = f.parent.relative_to(broker).as_posix()
+        if rel != "." and not {"vendor", "testdata"} & set(rel.split("/")):
+            files.setdefault(rel, []).append(f"broker/{rel}/{f.name}")
+    out = sorted(rel for rel, fs in files.items() if any(risk_tier.tier_of(p)[0] == "A" for p in fs))
+    bad = [rel for rel in out if not PKG_NAME.fullmatch(rel)]
+    if bad:
+        raise ValueError(f"mutgate: tier-A package path(s) outside {PKG_NAME.pattern}: {bad}")
     return out
 
 
@@ -130,7 +133,8 @@ def violations(diff_text, live):
 
 def cmd_run(args):
     pkgs = args.pkg or tier_a_packages()
-    out = pathlib.Path(args.out)
+    # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
+    out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     bad = 0
     for pkg in pkgs:

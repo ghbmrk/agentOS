@@ -78,24 +78,47 @@ class Gate(unittest.TestCase):
             self.assertEqual(mutgate.claimed(diff), [pkg])
 
     def test_tier_a_packages_match_risk_tier_on_every_package(self):
-        # Each Go package's own files, not a made-up name, through the tier rule premerge uses.
+        # Every .go file, not a made-up name, through the tier rule premerge uses: a package is
+        # in the set when any of its files is tier A (#3948 Security delta 2).
         broker = ROOT / "broker"
         pkgs = set(mutgate.tier_a_packages())
         for d in sorted({f.parent for f in broker.rglob("*.go")}):
             rel = d.relative_to(broker).as_posix()
             if rel == "." or {"vendor", "testdata"} & set(rel.split("/")):
                 continue
-            src = next(f for f in sorted(d.glob("*.go")))
-            want = mutgate.risk_tier.tier_of(src.relative_to(ROOT).as_posix())[0] == "A"
+            want = any(mutgate.risk_tier.tier_of(f.relative_to(ROOT).as_posix())[0] == "A" for f in d.glob("*.go"))
             self.assertEqual(rel in pkgs, want, rel)
 
-    def test_odd_package_names_never_reach_the_matrix(self):
+    def test_one_tier_a_file_puts_its_package_in(self):
+        # A tier rule naming one .go file in an otherwise tier-B package must still count.
         with tempfile.TemporaryDirectory() as d:
-            broker = pathlib.Path(d)
-            for name in ("kernel/ok", "kernel/a b", "kernel/$(x)", "kernel/vendor/v", "kernel/testdata/t"):
-                (broker / name).mkdir(parents=True)
-                (broker / name / "a.go").write_text("package x\n")
-            self.assertEqual(mutgate.tier_a_packages(broker), ["kernel/ok"])
+            for name in ("a.go", "b.go"):
+                (pathlib.Path(d) / "quota").mkdir(exist_ok=True)
+                (pathlib.Path(d) / "quota" / name).write_text("package quota\n")
+            real = mutgate.risk_tier.tier_of
+            for one in ("broker/quota/a.go", "broker/quota/b.go"):
+                mutgate.risk_tier.tier_of = lambda p, one=one: ("A", p) if p == one else ("B", p)
+                try:
+                    self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["quota"], one)
+                finally:
+                    mutgate.risk_tier.tier_of = real
+
+    def test_odd_tier_a_package_names_fail_loudly(self):
+        # Go accepts `+` and `~` in a path: such a tier-A package must stop the run, not drop out
+        # of the gate unseen (#3948 Security delta 1). vendor/ and testdata/ stay out quietly.
+        def tree(d, names):
+            for name in names:
+                (pathlib.Path(d) / name).mkdir(parents=True)
+                (pathlib.Path(d) / name / "a.go").write_text("package x\n")
+        with tempfile.TemporaryDirectory() as d:
+            tree(d, ["kernel/ok", "kernel/vendor/v", "kernel/testdata/t"])
+            self.assertEqual(mutgate.tier_a_packages(pathlib.Path(d)), ["kernel/ok"])
+        for odd in ("kernel/key+v2", "kernel/key~old", "kernel/a b", "kernel/$(x)"):
+            with tempfile.TemporaryDirectory() as d:
+                tree(d, ["kernel/ok", odd])
+                with self.assertRaises(ValueError, msg=odd) as cm:
+                    mutgate.tier_a_packages(pathlib.Path(d))
+                self.assertIn(odd, str(cm.exception))
 
     def test_report_and_cli(self):
         with tempfile.TemporaryDirectory() as d:
@@ -197,6 +220,23 @@ class Shape(unittest.TestCase):
                                 str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("not gremlins' files[].mutations[] shape", r.stderr)
+
+    def test_run_writes_a_relative_out_dir_from_the_callers_cwd(self):
+        # The workflow passes `--out mutants` from the repo root while gremlins runs in broker/;
+        # gremlins (like this stub) does not create the -o directory (#3947's live run).
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\n"
+                "[ -d \"$(dirname \"$2\")\" ] || exit 0\n"
+                "printf '%s' '{\"files\":[],\"mutants_lived\":0}' > \"$2\"\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out", "rel"],
+                               capture_output=True, text=True, env=env, cwd=d)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue((pathlib.Path(d) / "rel" / "hint.json").exists())
 
 
 def job(text, name):
