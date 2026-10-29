@@ -18,9 +18,9 @@ REFRESH = "mrt_CANARYrefreshTOKENvalue0123456789abcdef"
 PROMPT = "CANARY prompt text that must never be logged"
 
 
-def load(turns="0"):
+def load(turns="0", canary=""):
     log = tempfile.mktemp()
-    os.environ.update(MUSE_CAP_LOG=log, MUSE_CAP_PHASE="test", MUSE_CAP_ALLOW_TURNS=turns)
+    os.environ.update(MUSE_CAP_LOG=log, MUSE_CAP_PHASE="test", MUSE_CAP_ALLOW_TURNS=turns, MUSE_CAP_CANARY=canary)
     import record
     importlib.reload(record)
     return record, log
@@ -143,3 +143,29 @@ def test_mid_length_ids_and_device_codes_are_shaped():
     assert rec.norm_path("/v1/graphql") == "/v1/graphql"
     assert rec.shape("ABCD-EFGH", "code") == {"len": 9, "cls": "A-"}
     assert rec.shape("authorization_pending", "code") == "authorization_pending"
+
+
+CANARY = "mcapcanary0f3a9c1e7b"
+
+
+def test_canary_blocks_any_shape():
+    rec, log = load(canary=CANARY)
+    said = "Reply ok. " + CANARY
+    for body, ctype in ((b"\x0a\x2d" + said.encode(), b"application/grpc"),
+                        (json.dumps({"event": "prompt_submitted", "text": said}).encode(), b"application/json"),
+                        (json.dumps({"query": said}).encode(), b"application/json"),
+                        (b"--XyZ\r\nContent-Disposition: form-data; name=\"q\"\r\n\r\n" + said.encode() + b"\r\n--XyZ--\r\n", b"multipart/form-data; boundary=XyZ")):
+        assert blocked(rec, post(body, ctype)), body
+    get = tflow.tflow(req=tutils.treq(method=b"GET", path=("/log?q=" + CANARY).encode()))
+    assert blocked(rec, get)
+    out = records(log)
+    assert CANARY not in out and "Reply ok." not in out
+
+
+def test_canary_websocket_dropped():
+    from mitmproxy.websocket import WebSocketMessage
+    rec, _ = load(canary=CANARY)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(2, True, b"\x08\x01" + CANARY.encode()))
+    rec.Recorder().websocket_message(f)
+    assert f.websocket.messages[-1].dropped

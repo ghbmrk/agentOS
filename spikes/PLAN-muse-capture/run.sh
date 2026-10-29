@@ -7,7 +7,10 @@
 #
 # Usage: run.sh setup | test | rec PHASE [TURNS] | reverse PHASE URL [TURNS] | muse ARGS... |
 #               scan | stop | clean
-#   setup    venv with the pinned mitmproxy, the recorder's CA, a CA bundle (certifi + that CA)
+#   setup    venv with the pinned mitmproxy, the recorder's CA, a CA bundle (certifi + that CA),
+#            and this run's canary token
+#   canary   print the canary; every test prompt ends with it, and the recorder refuses any
+#            request or websocket message that carries it unless a turn is granted
 #   test     record.py's tests
 #   rec      (re)start the recorder as an HTTPS proxy on 127.0.0.1:18433, labelling records PHASE;
 #            TURNS model calls are let through (default 0)
@@ -34,7 +37,7 @@ stop() {
 start() { # start PHASE TURNS MODE-ARGS...
 	phase=$1 turns=$2; shift 2
 	stop
-	MUSE_CAP_LOG="$W/log.jsonl" MUSE_CAP_PHASE="$phase" MUSE_CAP_ALLOW_TURNS="$turns" \
+	MUSE_CAP_LOG="$W/log.jsonl" MUSE_CAP_PHASE="$phase" MUSE_CAP_ALLOW_TURNS="$turns" MUSE_CAP_CANARY="$(cat "$W/canary")" \
 		"$W/venv/bin/mitmdump" -q --listen-host 127.0.0.1 -p $PORT --set confdir="$W/mitm" \
 		--set connection_strategy=lazy "$@" -s "$here/record.py" >"$W/rec.err" 2>&1 &
 	echo $! >"$W/rec.pid"
@@ -47,6 +50,7 @@ start() { # start PHASE TURNS MODE-ARGS...
 
 case ${1:-} in
 setup)
+	[ -s "$W/canary" ] || echo "mcapcanary$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')" >"$W/canary"
 	[ -x "$W/venv/bin/mitmdump" ] || { python3 -m venv "$W/venv" && "$W/venv/bin/pip" -q install "mitmproxy==$MITM" pytest; }
 	if [ ! -f "$W/mitm/mitmproxy-ca-cert.pem" ]; then
 		start setup 0
@@ -58,6 +62,9 @@ setup)
 	"$W/venv/bin/mitmdump" --version | head -1
 	echo "muse: $(command -v muse || echo 'not installed')"
 	command -v muse >/dev/null && { muse --version || true; file -L "$(command -v muse)" | cut -c1-160; }
+	;;
+canary)
+	cat "$W/canary"
 	;;
 test)
 	cd "$here" && MUSE_CAP_LOG="$W/test.jsonl" "$W/venv/bin/python" -I -m pytest -q record_test.py
@@ -107,7 +114,14 @@ for n, line in enumerate(open(sys.argv[1]), 1):
 for (ph, h, m, p), c in sorted(seen.items(), key=str):
     print(f"{ph}\t{h}\t{m}\t{p}\t{c}")
 turns = [r for r in map(json.loads, open(sys.argv[1])) if r.get("model_call")]
-print(f"model calls: {len(turns)}, blocked: {sum(1 for r in turns if r.get('blocked'))}")
+for ph in sorted({r.get("phase") for r in turns}, key=str):
+    t = [r for r in turns if r.get("phase") == ph]
+    print(f"model calls in {ph}: {len(t)}, blocked: {sum(1 for r in t if r.get('blocked'))}")
+if not turns:
+    print("model calls: none")
+canary = open(sys.argv[1].rsplit("/", 1)[0] + "/canary").read().strip()
+if canary and canary in open(sys.argv[1]).read():
+    hits.append(("log", "canary"))
 if hits:
     print(f"scan: {len(hits)} suspect value(s), first: {hits[:3]}", file=sys.stderr); sys.exit(1)
 print("scan: clean")

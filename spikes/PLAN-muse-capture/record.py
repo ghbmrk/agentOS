@@ -13,6 +13,10 @@ LOG = os.environ.get("MUSE_CAP_LOG", "")
 PHASE = os.environ.get("MUSE_CAP_PHASE", "")
 _lock = threading.Lock()
 _turns = [int(os.environ.get("MUSE_CAP_ALLOW_TURNS", "0") or 0)]
+# run.sh puts this token in every test prompt. Any request or client websocket message that
+# carries it, in any shape or encoding the recorder can decode, is a turn (or a copy of one) and
+# is refused unless a turn is granted: this fails closed where the key detector cannot.
+CANARY = os.environ.get("MUSE_CAP_CANARY", "").encode()
 
 # String values kept verbatim only under these keys, and only when short and token-free: they
 # name item types, roles, grant types, error codes and the like, which the declaration needs.
@@ -174,10 +178,19 @@ def body_has_model_key(raw):
     return any(k.lower() in MODEL_KEYS or has_model_key(v) for k, v in pairs)
 
 
+def carries_canary(*parts):
+    return bool(CANARY) and any(CANARY in p for p in parts if p)
+
+
 def is_model_call(flow):
-    if flow.request.method not in ("POST", "PUT", "PATCH"):
+    req = flow.request
+    raw = req.get_content(strict=False) or b""
+    if carries_canary(raw, req.raw_content, req.path.encode(errors="replace"),
+                      b"\n".join(v.encode(errors="replace") for v in req.headers.values())):
+        return True
+    if req.method not in ("POST", "PUT", "PATCH"):
         return False
-    return body_has_model_key(flow.request.get_content())
+    return body_has_model_key(raw)
 
 
 def take_turn():
@@ -221,7 +234,7 @@ class Recorder:
             s = {"len": len(m.content)}
         rec = {"dir": "ws-" + ("out" if m.from_client else "in"), "host": flow.request.pretty_host,
                "path": norm_path(flow.request.path), "body": s}
-        if m.from_client and body_has_model_key(m.content):
+        if m.from_client and (carries_canary(m.content) or body_has_model_key(m.content)):
             rec["model_call"] = True
             if not take_turn():
                 rec["blocked"] = True
