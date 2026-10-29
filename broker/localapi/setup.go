@@ -129,7 +129,7 @@ const SetupTextsPerHour = 20
 var setupTexts = regexp.MustCompile(`^(?:` +
 	`[Aa]gentOS setup code: [0-9]{6}\. Type it on the setup page\.` +
 	`|[Aa]gentOS page code: [0-9]{6}\. Type it on the setup page\.` +
-	`|[Aa]gentOS is running on (?:this PC|[A-Za-z0-9][A-Za-z0-9 ,()+'-]{0,` + strconv.Itoa(SetupHostMax-1) + `})\. This is your box's number; save it as [Aa]gentOS\.(?: Page code: [0-9]{6}\.)?` +
+	`|[Aa]gentOS is running on (?:this PC|[A-Za-z0-9][A-Za-z0-9 ,()+'-]{0,` + strconv.Itoa(SetupHostMax-1) + `})\. This is your box's number\.(?: Page code: [0-9]{6}\.)?` +
 	`|Could not save your number\. Try again\.` +
 	`)$`)
 

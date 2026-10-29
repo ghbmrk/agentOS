@@ -77,12 +77,12 @@ func (r *rig) names() (box, owner, card string) {
 	return box, owner, card
 }
 
-// TestSetupSuggestsTheBoxName: the screen after pairing offers a made-up
+// TestSetupSuggestsTheBoxName: the host step offers a made-up
 // full name, which is the contact card's name too, and kept unless the
 // owner types another (SPEC CH-21, §12.1). Finish hands it to agentosd.
 func TestSetupSuggestsTheBoxName(t *testing.T) {
 	r, h := newNamedRig(t)
-	r.pair()
+	r.toNames()
 	box, owner, card := r.names()
 	if strings.Count(box, " ") != 1 || owner != "" || card != box {
 		t.Fatalf("suggested %q, owner %q, card %q", box, owner, card)
@@ -94,7 +94,7 @@ func TestSetupSuggestsTheBoxName(t *testing.T) {
 	if again, _, _ := r.names(); again != box {
 		t.Errorf("reload suggested %q, then %q", box, again)
 	}
-	r.runSetupAfterPairing()
+	r.runSetupFromNames()
 	if len(h.names) != 1 || h.names[0] != (Names{Box: box}) {
 		t.Errorf("finished with %+v, want the suggestion %q", h.names, box)
 	}
@@ -105,7 +105,7 @@ func TestSetupSuggestsTheBoxName(t *testing.T) {
 // own name, and changes nothing (SPEC CH-21).
 func TestSetupOwnerTypesTheNames(t *testing.T) {
 	r, h := newNamedRig(t)
-	r.pair()
+	r.toNames()
 	suggested, _, _ := r.names()
 	for _, c := range []struct{ name, owner, want string }{
 		{"R2D2", "", "1 to 32 letters"},
@@ -130,7 +130,7 @@ func TestSetupOwnerTypesTheNames(t *testing.T) {
 	if box, owner, card := r.names(); box != "Zoë O'Neil" || owner != "Mark Jones" || card != box {
 		t.Fatalf("names %q, %q, card %q", box, owner, card)
 	}
-	r.runSetupAfterPairing()
+	r.runSetupFromNames()
 	if len(h.names) != 1 || h.names[0] != (Names{Box: "Zoë O'Neil", Owner: "Mark Jones"}) {
 		t.Errorf("finished with %+v", h.names)
 	}
@@ -146,7 +146,7 @@ func TestOnlyThePairedPhoneNamesTheBox(t *testing.T) {
 	if r.srv.setup.st.Name != "" {
 		t.Fatalf("named before pairing: %q", r.srv.setup.st.Name)
 	}
-	r.pair()
+	r.toNames()
 	suggested, _, _ := r.names()
 	r.asOther(func() {
 		if w := r.post("/setup/name", url.Values{"name": {"Eve Spoof"}, "owner_name": {"Eve"}}); w.Code != http.StatusSeeOther {
@@ -163,13 +163,17 @@ func TestOnlyThePairedPhoneNamesTheBox(t *testing.T) {
 // owner's.
 func TestRestartDropsTheNames(t *testing.T) {
 	r, _ := newNamedRig(t)
-	r.pair()
+	r.toNames()
 	r.post("/setup/name", url.Values{"name": {"Zoë O'Neil"}, "owner_name": {"Mark Jones"}})
 	r.post("/setup/restart", url.Values{})
 	if st := r.srv.setup.st; st.Owner != "" || st.Name != "" || st.OwnerName != "" {
 		t.Fatalf("after restart: %+v", st)
 	}
+	// The vault keeps its sealed seed across a restart, so the codes
+	// step only continues.
 	r.pair()
+	r.post("/setup/codes", url.Values{"enrolled": {"1"}})
+	r.post("/setup/recovery", url.Values{"stored": {"1"}})
 	if box, owner, _ := r.names(); box == "" || box == "Zoë O'Neil" || owner != "" {
 		t.Errorf("after restart the names are %q, %q", box, owner)
 	}
@@ -184,14 +188,12 @@ func TestSetupWithoutNamedFinish(t *testing.T) {
 	}
 }
 
-// runSetupAfterPairing walks the steps after pairing to the end, as
-// runSetup does.
-func (r *rig) runSetupAfterPairing() {
+// toNames walks setup from pairing to the host step, which carries the
+// names form: the approval codes and the recovery sheet.
+func (r *rig) toNames() {
 	t := r.t
 	t.Helper()
-	// The names screen is the codes step, so its key was shown already:
-	// ask for a new one.
-	r.post("/setup/codes", url.Values{"new": {"1"}})
+	r.pair()
 	p := html.UnescapeString(r.get("/setup"))
 	m := regexp.MustCompile(`otpauth://totp/AgentOS:AgentOS\?secret=([A-Z2-7]+)&`).FindStringSubmatch(p)
 	if m == nil {
@@ -203,6 +205,16 @@ func (r *rig) runSetupAfterPairing() {
 	}
 	r.post("/setup/codes", url.Values{"code": {owner.TOTP(seed, r.clock())}})
 	r.post("/setup/recovery", url.Values{"stored": {"1"}})
+	if !strings.Contains(r.get("/setup"), "5. This PC") {
+		t.Fatalf("not at the host step: %q", r.setupErr())
+	}
+}
+
+// runSetupFromNames walks the steps after the names screen to the end, as
+// runSetup does.
+func (r *rig) runSetupFromNames() {
+	t := r.t
+	t.Helper()
 	r.post("/setup/host", url.Values{})
 	r.hooks.mu.Lock()
 	r.hooks.progress = Progress{Phase: "ready", Updated: true, Online: true}
@@ -210,6 +222,29 @@ func (r *rig) runSetupAfterPairing() {
 	r.post("/setup/ai-key", url.Values{"provider": {"anthropic"}, "key": {apiCanary}, "private": {"1"}})
 	if r.hooks.finished != ownerNum {
 		t.Fatalf("setup did not finish: %q", r.setupErr())
+	}
+}
+
+// TestNamesNeverHideTheCodesKey: the names form is not on the codes step,
+// whose key is shown once, and a names post there is refused, so naming
+// can never take an unscanned key off the page (UX on #3913).
+func TestNamesNeverHideTheCodesKey(t *testing.T) {
+	r, _ := newNamedRig(t)
+	r.hooks.progress.Online = true
+	if p := r.get("/setup"); strings.Contains(p, `href="/box.vcf"`) {
+		t.Error("the pairing step offers a contact card before the name is kept")
+	}
+	r.pair()
+	p := r.get("/setup")
+	if !strings.Contains(p, "otpauth://") || strings.Contains(p, `action="/setup/name"`) {
+		t.Fatalf("codes step without its key, or with the names form: %s", p)
+	}
+	r.post("/setup/name", url.Values{"name": {"Zoë O'Neil"}})
+	if e := r.setupErr(); !strings.Contains(e, "approval codes first") {
+		t.Errorf("names post on the codes step: %q", e)
+	}
+	if r.srv.setup.st.Name != "" {
+		t.Errorf("named on the codes step: %q", r.srv.setup.st.Name)
 	}
 }
 
@@ -238,9 +273,9 @@ func TestSetupNamesReachAgentosd(t *testing.T) {
 	a := AgentosdSetup{Owner: InProcess(s.Ops())}
 	r.via = viaAgentosdNamed{viaAgentosd{r.hooks, a}, CardFinish{AgentosdSetup: a}}
 	r.srv = r.open(&MemStore{})
-	r.pair()
+	r.toNames()
 	r.post("/setup/name", url.Values{"name": {"Zoë O'Neil"}, "owner_name": {"Mark Jones"}})
-	r.runSetupAfterPairing()
+	r.runSetupFromNames()
 	got, err := localsrv.FileRecord{Path: rec}.Load()
 	if err != nil || !got.Finished || got.Name != "Zoë O'Neil" || got.OwnerName != "Mark Jones" {
 		t.Fatalf("agentosd recorded %+v, %v", got, err)

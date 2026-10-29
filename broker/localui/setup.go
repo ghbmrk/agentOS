@@ -389,9 +389,6 @@ type setup struct {
 	// busy is the providers with an AI post in flight: one at a time
 	// each, none while Finish runs, and no Finish while any is (#1467).
 	busy map[string]bool
-	// suggestion is the made-up name offered while Name is unset
-	// (boxname.Suggest), made once per pairing.
-	suggestion string
 }
 
 func newSetup(s *Server, st SetupState) *setup {
@@ -640,11 +637,15 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.PairCode = u.pair[key]
 	case "codes":
 		v.CodesShown = u.shown && u.shownGen == u.gen
-		// The phone that paired is first shown the suggestion here, and
-		// it is kept: Name is what finish sends unless the owner types
-		// another. A store that fails to save still offers it.
+	case "host":
+		// The names come on the host step, which shows nothing one-time:
+		// a names post reloads the page, and on the codes step that would
+		// hide an unscanned key (UX on #3913). The phone that paired is
+		// first shown the suggestion here, and it is kept: Name is what
+		// finish sends unless the owner types another. A store that fails
+		// to save still offers it.
 		if u.st.Name == "" {
-			if n := u.suggestLocked(); n != "" && u.save(func(s *SetupState) { s.Name = n }) != nil {
+			if n, err := boxname.Suggest(u.s.cfg.Rand, u.st.OwnerName); err == nil && u.save(func(s *SetupState) { s.Name = n }) != nil {
 				u.st.Name = n
 			}
 		}
@@ -669,10 +670,11 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		if ok && phoneRe.MatchString(n) {
 			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
 		}
-	case "codes":
+	case "host":
 		if n, ok := u.s.cfg.Hooks.BoxNumber(); ok && phoneRe.MatchString(n) {
 			v.BoxNumber = n
 		}
+	case "codes":
 		if v.CodesShown {
 			break
 		}
@@ -852,7 +854,7 @@ func pairedText(host string) string {
 	if host == "" {
 		host = "this PC"
 	}
-	return "agentOS is running on " + host + ". This is your box's number; save it as agentOS."
+	return "agentOS is running on " + host + ". This is your box's number."
 }
 
 // number is the typing fallback for pairing (ONB-6): the owner types their
@@ -934,7 +936,7 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 
 // errPairedUnsent is the number step's note when the paired text did not
 // go (#1293). The pairing stands, so the page moves on and shows it once.
-var errPairedUnsent = errors.New("You are paired, but my text did not go. Save the number my code came from as agentOS.")
+var errPairedUnsent = errors.New("You are paired, but my text did not go. My number is the one my code came from; you can save it as a contact later in setup.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
@@ -1018,7 +1020,6 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.pair, u.pairOrder = map[string]string{}, nil
 	u.claimCode, u.numCode, u.numTo, u.numDevice = "", "", "", ""
 	u.device, u.parked, u.lapsed, u.answer = map[string][3]string{}, map[string][3]string{}, map[string][3]string{}, map[string]bool{}
-	u.suggestion = ""
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
 		s.Name, s.OwnerName = "", ""
@@ -1035,25 +1036,15 @@ type NamedFinish interface {
 	FinishNamed(ownerNumber string, n Names) error
 }
 
-// suggestLocked is the made-up name offered while Name is unset, made on
-// first use; "" when none could be made.
-func (u *setup) suggestLocked() string {
-	if u.suggestion == "" {
-		u.suggestion, _ = boxname.Suggest(u.s.cfg.Rand, u.st.OwnerName)
-	}
-	return u.suggestion
-}
-
-// cardName is the name on the box's contact card: the box's name, else the
-// suggestion, else "agentOS".
+// cardName is the name on the box's contact card: the box's name, else
+// "agentOS". The card is offered only with the names form (L3 on #3913):
+// one offered before the name is drawn and kept would carry a name that a
+// restart could draw again differently.
 func (u *setup) cardName() string {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	if u.st.Name != "" {
 		return u.st.Name
-	}
-	if n := u.suggestLocked(); n != "" {
-		return n
 	}
 	return "agentOS"
 }
@@ -1075,6 +1066,9 @@ func (u *setup) name(r *http.Request, key string) error {
 	defer u.mu.Unlock()
 	if u.st.Owner == "" || key != u.st.Device {
 		return errors.New("Text your box first; then you can name it.")
+	}
+	if !u.st.Codes {
+		return errors.New("Add approval codes first; then you can name me.")
 	}
 	return u.save(func(s *SetupState) { s.Name, s.OwnerName = n, owner })
 }
