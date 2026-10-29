@@ -1080,6 +1080,12 @@ func (a *Applier) execute(ctx context.Context, id string) kernel.Result {
 		a.mu.Unlock()
 		return failed(RRelease)
 	}
+	if a.cfg.Paused() {
+		// Pinned since authorize: a Pin that found nothing applied was
+		// reported taken, so nothing is handed over now (UPD-4, #3699).
+		a.mu.Unlock()
+		return failed(RPaused)
+	}
 	key := refKey(rel.Ref())
 	if a.st.Unrecorded[key] >= maxUnrecorded {
 		a.mu.Unlock()
@@ -1484,16 +1490,17 @@ const (
 // The lines for a release withdrawn, or being withdrawn, because the owner
 // pinned the update channel after the handover (#3699).
 const (
-	pinnedLine       = "Update %d is paused because your update channel is pinned; I will not start it."
+	pinnedLine       = "Update %d is withdrawn because your update channel is pinned; I will not start it."
 	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
 // pinnedHandoverLocked: pt was handed over in this boot and the channel
-// is pinned, so the next Tick or Pin withdraws it rather than restart
-// into it. A boot that cannot be read, or a later boot, is not taken for
-// it: the new slot may already run.
+// is pinned, or its pin withdrawal is under way, so the next Tick or Pin
+// withdraws it rather than restart into it. A boot that cannot be read,
+// or a later boot, is not taken for it: the new slot may already run,
+// and then it stays (Security release 2 on #3812).
 func (a *Applier) pinnedHandoverLocked(pt *point) bool {
-	if !pt.Installed || a.executing || !a.cfg.Paused() {
+	if !pt.Installed || a.executing || !pt.Pinned && !a.cfg.Paused() {
 		return false
 	}
 	b, err := a.cfg.Activator.Booted(context.Background())
@@ -1514,7 +1521,7 @@ func (a *Applier) Status() string {
 			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
 		}
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
-	case a.st.Applying != nil && (a.st.Applying.Pinned || a.pinnedHandoverLocked(a.st.Applying)):
+	case a.st.Applying != nil && a.pinnedHandoverLocked(a.st.Applying):
 		return fmt.Sprintf(pinnedLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)

@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // REQ: UPD-4, UPD-1
@@ -19,7 +22,7 @@ import (
 // TestBusyBoxHoldsActivation.
 
 const (
-	pinnedStatus = "Update 1 is paused because your update channel is pinned; I will not start it."
+	pinnedStatus = "Update 1 is withdrawn because your update channel is pinned; I will not start it."
 	pinnedDigest = "Update 1 was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
@@ -254,4 +257,93 @@ func TestPinnedDuringTheJitterSaysPaused(t *testing.T) {
 	if got := r.a.Status(); got != "Update 1 will install soon. Nothing is needed from you." {
 		t.Fatalf("status %q", got)
 	}
+}
+
+// Security blocker on #3812: a pin between the clerk's own checks and the
+// handover. Pin finds nothing applied and returns nil, so the pin is
+// reported taken; execute then refuses, and nothing becomes the next boot.
+// Mutant: drop the Paused check in execute, and the release is handed over
+// and installs at the next boot.
+func TestPinBetweenAuthorizeAndExecuteIsRefused(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	r.must(r.a.Schedule(r.release(1, false), "a1"))
+	r.clk.add(7 * time.Hour) // past the jitter
+	var pinErr error
+	r.atDispatch = func() {
+		r.paused = true
+		pinErr = r.a.Pin(ctx)
+	}
+	r.hold = true
+	if ok, err := r.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	r.hold = false
+	r.tick()
+	if pinErr != nil {
+		t.Fatalf("pin: %v", pinErr)
+	}
+	if st := r.step(); st.Phase != kernel.PFailed || st.Detail != RPaused {
+		t.Fatalf("logged %+v, want failed %q", st, RPaused)
+	}
+	if len(r.act.installed) != 0 || r.saved().Applying != nil {
+		t.Fatalf("handed over after the pin: installed %v, applying %+v", r.act.installed, r.saved().Applying)
+	}
+	if got := r.a.Status(); got != "Update 1 waits because your update channel is pinned." {
+		t.Fatalf("status %q", got)
+	}
+	r.must(r.act.Restart(ctx))
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	if in, _ := r.store.Installed(); in.Version != 0 {
+		t.Fatalf("installed %+v", in)
+	}
+}
+
+// Security release 2 on #3812: a pin withdrawal cut before its Abandon
+// took, then a reboot into the counted entry: the box runs the new slot,
+// so STATUS does not say it will not start it; the release stays (the
+// #3701 boundary).
+// Mutant: drop the handover-boot gate on the Pinned case in Status.
+func TestPinnedLineOnlyInTheHandoverBoot(t *testing.T) {
+	ctx := context.Background()
+	r := installedHeld(t, false)
+	r.paused = true
+	r.act.abandonErr = errIO
+	if err := r.a.Pin(ctx); !errors.Is(err, ErrApplying) {
+		t.Fatalf("pin taken: %v", err)
+	}
+	r.act.abandonErr = nil
+	r.act.pending = true // the new slot boots; health check not run yet
+	r.must(r.act.Restart(ctx))
+	r.restart()
+	r.must(r.a.Resume(ctx))
+	r.must(r.a.Pin(ctx))
+	if got := r.a.Status(); got == pinnedStatus {
+		t.Fatalf("status %q while the new slot runs", got)
+	}
+	r.act.boot.Blessed = true
+	r.must(r.a.Resume(ctx))
+	if in, _ := r.store.Installed(); in.Version != 1 {
+		t.Fatalf("installed %+v", in)
+	}
+}
+
+// L3 release 3 on #3812: an unreadable boot is not taken for "nothing
+// can start": the pin is not reported taken.
+// Mutant: Pin returns nil when Booted fails.
+func TestPinWithAnUnreadableBootIsNotTaken(t *testing.T) {
+	r := installedHeld(t, false)
+	r.paused = true
+	r.act.bootedErr = errIO
+	if err := r.a.Pin(context.Background()); !errors.Is(err, errIO) || !starts(t, err) {
+		t.Fatalf("pin taken: %v", err)
+	}
+	if r.act.abandoned != 0 {
+		t.Fatal("abandoned on an unreadable boot")
+	}
+	r.act.bootedErr = nil
+	r.must(r.a.Pin(context.Background()))
+	r.working = false
+	r.pinWithdrawn()
 }
