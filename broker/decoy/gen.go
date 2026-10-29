@@ -23,18 +23,43 @@ const (
 	awsHigh = "QRSTUVWXYZ234567" // b32 symbols with the top bit set
 )
 
-// draw returns n symbols of alphabet, each uniform (rejection sampling).
+// uniform returns an index below n, uniform, by rejection sampling over one
+// byte when n fits one and two bytes otherwise, so the accepted range is never
+// empty. n above 1<<16 is refused.
+func uniform(r io.Reader, n int) (int, error) {
+	if n <= 0 || n > 1<<16 {
+		return 0, ErrTooMany
+	}
+	width := 1
+	if n > 256 {
+		width = 2
+	}
+	space := 1 << (8 * width)
+	limit := space - space%n
+	var buf [2]byte
+	for {
+		if _, err := io.ReadFull(r, buf[:width]); err != nil {
+			return 0, err
+		}
+		v := int(buf[0])
+		if width == 2 {
+			v = v<<8 | int(buf[1])
+		}
+		if v < limit {
+			return v % n, nil
+		}
+	}
+}
+
+// draw returns n symbols of alphabet, each uniform.
 func draw(r io.Reader, alphabet string, n int) (string, error) {
-	limit := 256 - 256%len(alphabet)
 	out := make([]byte, 0, n)
-	buf := make([]byte, 1)
 	for len(out) < n {
-		if _, err := io.ReadFull(r, buf); err != nil {
+		i, err := uniform(r, len(alphabet))
+		if err != nil {
 			return "", err
 		}
-		if int(buf[0]) < limit {
-			out = append(out, alphabet[int(buf[0])%len(alphabet)])
-		}
+		out = append(out, alphabet[i])
 	}
 	return string(out), nil
 }

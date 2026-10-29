@@ -530,6 +530,51 @@ func TestGenerateRules(t *testing.T) {
 			t.Errorf("nothing placed at %s", p)
 		}
 	}
+	// More than one byte's worth of addresses still returns, and every
+	// address can be picked (Security and L3 on 54307e7: a one-byte
+	// rejection bound was empty past 256 and Generate never returned).
+	for _, n := range []int{256, 257, 300, 1000} {
+		var ds []netip.Addr
+		for i := range n {
+			ds = append(ds, netip.AddrFrom4([4]byte{10, 99, byte(i >> 8), byte(i)}))
+		}
+		if _, err := Generate(rand.Reader, ds); err != nil {
+			t.Fatalf("%d addresses: %v", n, err)
+		}
+	}
+	hits := make([]int, 300)
+	r := newSeeded(4)
+	for range 300 * 200 {
+		i, err := uniform(r, 300)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hits[i]++
+	}
+	for i, h := range hits {
+		if h < 100 || h > 300 {
+			t.Fatalf("index %d drawn %d times of a mean 200", i, h)
+		}
+	}
+	if _, err := uniform(r, MaxRange+1); err != ErrTooMany {
+		t.Fatalf("an oversized range: %v", err)
+	}
+	many := make([]netip.Addr, MaxRange+1)
+	for i := range many {
+		many[i] = netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+	}
+	if _, err := Generate(rand.Reader, many); err != ErrTooMany {
+		t.Fatalf("%d addresses: %v", len(many), err)
+	}
+	// A value short enough to occur in ordinary traffic is refused, from a
+	// caller's generator and in a stored or logged table.
+	short := Own{KHoneyKey, PPlannerView, func(io.Reader) (string, error) { return "a", nil }}
+	if _, err := Generate(rand.Reader, rangeAddrs, short); err == nil {
+		t.Fatal("a one-byte own value was accepted")
+	}
+	if _, err := Load([]byte(`[{"v":"abcdefghi","k":"github","d":"192.168.10.250","p":"host.env"}]`)); err == nil {
+		t.Fatal("a nine-byte stored value was accepted")
+	}
 	if _, err := Generate(rand.Reader, rangeAddrs, Own{KGitHub, PHostEnv, gitHub}); err == nil {
 		t.Fatal("a caller replaced a built-in generator")
 	}

@@ -148,7 +148,17 @@ var (
 	// a rule (an unknown kind or place, a value too long, a credential with
 	// no decoy-range destination).
 	ErrBadTable = errors.New("decoy: the table is damaged")
+	// ErrTooMany: more decoy-range addresses than MaxRange, or an alphabet
+	// too large to sample.
+	ErrTooMany = errors.New("decoy: too many decoy-range addresses")
 )
+
+// MaxRange bounds the decoy-range addresses Generate takes: one /16's worth.
+const MaxRange = 1 << 16
+
+// MinValue is the shortest value a table holds (a recovery code's length),
+// so no value is short enough to turn up in ordinary traffic and trip.
+const MinValue = 10
 
 // Generate makes a table from r, which must be a cryptographic source in
 // production; the same bytes give the same table. dests are the enforcer's
@@ -159,17 +169,15 @@ func Generate(r io.Reader, dests []netip.Addr, own ...Own) (Table, error) {
 	if len(dests) == 0 {
 		return Table{}, ErrNoRange
 	}
+	if len(dests) > MaxRange {
+		return Table{}, ErrTooMany
+	}
 	pick := func() (netip.Addr, error) {
-		var b [1]byte
-		limit := 256 - 256%len(dests)
-		for {
-			if _, err := io.ReadFull(r, b[:]); err != nil {
-				return netip.Addr{}, err
-			}
-			if int(b[0]) < limit {
-				return dests[int(b[0])%len(dests)], nil
-			}
+		i, err := uniform(r, len(dests))
+		if err != nil {
+			return netip.Addr{}, err
 		}
+		return dests[i], nil
 	}
 	var t Table
 	add := func(k Kind, p Place, mk func(io.Reader) (string, error)) error {
@@ -221,8 +229,8 @@ func knownPlace(p Place) bool {
 	return false
 }
 
-// check holds a table to the rules: known kinds and places, values within
-// match.MaxValue, the metadata entry valueless at the metadata address, and
+// check holds a table to the rules: known kinds and places, values from
+// MinValue to match.MaxValue bytes, the metadata entry valueless at the metadata address, and
 // every other entry a value to a decoy-range address (in range, when range
 // is given). A table read back gets the same check, minus the range.
 func (t Table) check(rng []netip.Addr) error {
@@ -231,6 +239,9 @@ func (t Table) check(rng []netip.Addr) error {
 	}
 	for _, e := range t.entries {
 		if !knownKind(e.Kind) || !knownPlace(e.Place) || len(e.Value) > match.MaxValue {
+			return ErrBadTable
+		}
+		if e.Kind != KMetadata && len(e.Value) < MinValue {
 			return ErrBadTable
 		}
 		if e.Kind == KMetadata {
