@@ -787,7 +787,8 @@ class PremergeTest(unittest.TestCase):
         l3 = self.rec("accept", sha, "<!-- record: l3 -->\n", at="0")
         ux = lambda v="accept", head=sha, **k: self.rec(v, head, "<!-- record: ux -->\n", **k)
         pot = lambda v="accept", head=sha, **k: self.rec(v, head, "<!-- record: potency -->\n", **k)
-        run = self.lens_run
+        sec = lambda head=sha, at="4": self.rec("accept", head, "<!-- record: security -->\n", at=at)
+        run = lambda comments: self.lens_run(comments + [sec()])  # #3817: tier A owes Security too
         self.assertEqual(run([l3]), (1, ["needs-lens", "ux,potency"]))
         self.assertEqual(run([l3, ux()]), (1, ["needs-lens", "potency"]))
         self.assertEqual(run([l3, pot()]), (1, ["needs-lens", "ux"]))
@@ -818,7 +819,43 @@ class PremergeTest(unittest.TestCase):
         new = self.commit("later")
         l3new = self.rec("accept", new, "<!-- record: l3 -->\n", at="2")
         self.assertEqual(run([l3, ux(), pot(), l3new]), (1, ["needs-lens", "ux,potency"]))
-        self.assertEqual(run([l3, ux(), pot(), l3new, ux(head=new, at="3"), pot(head=new, at="3")]), (0, ["same"]))
+        fresh = [l3, ux(), pot(), l3new, ux(head=new, at="3"), pot(head=new, at="3")]
+        self.assertEqual(run(fresh), (1, ["needs-security", "image/build.sh"]))
+        self.assertEqual(self.lens_run(fresh + [sec(head=new, at="5")]), (0, ["same"]))
+
+    def test_check_gate_tier_a_needs_security(self):
+        # #3817: #3811 (tier A, no gate file) merged on L3/combined, UX and Potency with no Security record.
+        # Every tier-A PR owes the separate Security accept at an equal head; tiers B and C owe none.
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "broker/clerk/camera").mkdir(parents=True)
+        self.write("broker/clerk/camera/decode_test.go", "package camera\n")
+        sha = self.commit("tier A")
+        l3 = self.rec("accept", sha, "<!-- record: combined -->\n", at="0")
+        lens = self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n")
+        sec = lambda v="accept", head=sha, at="2", **k: self.rec(v, head, "<!-- record: security -->\n", at=at, **k)
+        need = (1, ["needs-security", "broker/clerk/camera/decode_test.go"])
+        self.assertEqual(self.lens_run([l3, lens]), need)
+        self.assertEqual(self.lens_run([l3, lens, sec()]), (0, ["same"]))
+        for bad in (sec(who="NONE"), sec(pr=8), sec("fix-list"), sec(head="0" * 40)):
+            self.assertEqual(self.lens_run([l3, lens, bad]), need, bad)
+        self.assertEqual(self.lens_run([l3, lens, sec(at="2"), sec("fix-list", at="3")]), need)
+        # the lens comment or the L3 comment carrying a security marker is not the separate review
+        self.assertEqual(self.lens_run([l3, self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n"
+                                                     "<!-- record: security -->\n<!-- record: l3 -->\n")]), need)
+        # a push after the Security accept needs a fresh one
+        self.write("broker/clerk/camera/decode_test.go", "package camera // x\n")
+        new = self.commit("later")
+        again = [l3, lens, sec(), self.rec("accept", new, "<!-- record: combined -->\n", at="3"),
+                 self.rec("accept", new, "<!-- record: ux -->\n<!-- record: potency -->\n", at="3")]
+        self.assertEqual(self.lens_run(again), need)
+        self.assertEqual(self.lens_run(again + [sec(head=new, at="4")]), (0, ["same"]))
+
+    def test_check_gate_tiers_b_and_c_need_no_security(self):
+        for path, marks in (("SPEC.md", "<!-- record: combined -->\n"), ("b.md", "<!-- record: l3 -->\n")):
+            git(self.r, "checkout", "-q", "-B", "pr", "main")
+            self.write(path, path + "\n")
+            sha = self.commit(path)
+            self.assertEqual(self.lens_run([self.rec("accept", sha, marks)]), (0, ["same"]), path)
 
     def test_check_gate_lens_comes_before_security(self):
         # A tier-A gate-file PR owes both; the lens screen is reported first, then the Security accept.
