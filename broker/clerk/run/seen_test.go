@@ -289,10 +289,7 @@ func TestTheSeenRecordFollowsItsAccount(t *testing.T) {
 // show as escapes (#2698 items 2, 6, 16, 21, 22).
 func TestTroubleIsToldInFixedWords(t *testing.T) {
 	const leak = "CANARY-SERVER-TEXT"
-	// A zone off UTC, so the arrival's local time differs from its UTC time
-	// whatever zone the test runs in (#2742 item 4).
-	defer func(l *time.Location) { time.Local = l }(time.Local)
-	time.Local = time.FixedZone("test", 5*3600+30*60)
+	// TestMain runs every test in a zone off UTC (#2742 item 4).
 	arrived := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
 	cases := []struct {
 		err  error

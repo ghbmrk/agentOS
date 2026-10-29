@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
@@ -25,8 +27,14 @@ const (
 	pinnedStatus = "Update 1 was withdrawn because you pinned your update channel. Nothing is needed from you."
 	heldStatus   = "Update 1 is held because you pinned your update channel; I will not start it. Nothing is needed from you."
 	pinnedMayRun = "Update 1 was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
-	pinnedWait   = "Update 1 waits because you pinned your update channel. Nothing is needed from you."
-	pinnedDigest = "Update 1 was ready to start, but your update channel is pinned, so I withdrew it."
+	// pinnedMayStart: in the handover boot, a restart is under way or the
+	// pin withdrawal's Abandon did not take (#3832).
+	pinnedMayStart = "Update 1 was ready to start before you pinned your update channel, and it may still start. Nothing is needed from you."
+	// The new slot runs, its health check pending (#3830).
+	pinnedStarted = "Update 1 was ready to start before you pinned your update channel and has started; I am checking it. Nothing is needed from you."
+	startedStatus = "Update 1 has started; I am checking it. Nothing is needed from you."
+	pinnedWait    = "Update 1 waits because you pinned your update channel. Nothing is needed from you."
+	pinnedDigest  = "Update 1 was ready to start, but you pinned your update channel, so I withdrew it."
 )
 
 // pinWithdrawn: the handover was undone for the pin and the adoption
@@ -75,7 +83,8 @@ func (r *rig) pinWithdrawn() {
 
 // Item 1 and 3: a pin after the handover, by Pin or by the next Tick,
 // withdraws a security fix or an ordinary release alike, and STATUS stops
-// promising a restart as soon as the channel is pinned.
+// promising a restart as soon as the channel is pinned; until the Abandon
+// is recorded it says the release may still start (L3 on #3854).
 // Mutant: drop the Paused branch in restartIfHandedOver, and the Tick
 // case keeps the release; drop withdrawLocked from Pin, and the Pin case
 // does.
@@ -85,7 +94,7 @@ func TestPinAfterHandoverWithdrawsTheRelease(t *testing.T) {
 			t.Run(fmt.Sprintf("%s security=%v", by, security), func(t *testing.T) {
 				r := installedHeld(t, security)
 				r.paused = true
-				if got := r.a.Status(); got != heldStatus {
+				if got := r.a.Status(); got != pinnedMayStart {
 					t.Fatalf("status once pinned %q", got)
 				}
 				if by == "Pin" {
@@ -125,8 +134,9 @@ func TestPinWhileInstallingIsNotTaken(t *testing.T) {
 
 // The withdrawal is marked before the slot is abandoned. A failed Abandon
 // keeps the pin from being taken, and the release is never restarted into,
-// across a process restart; once the Abandon took, a reboot before the
-// record is cleared is not judged a fallback.
+// across a process restart, though Pin and STATUS say it may start, since
+// a reboot would boot the counted entry (#3832); once the Abandon took, a
+// reboot before the record is cleared is not judged a fallback.
 // Mutant: drop the mark (save) in withdrawLocked, and the cut case
 // records a fallback.
 func TestPinWithdrawalSurvivesACut(t *testing.T) {
@@ -135,8 +145,8 @@ func TestPinWithdrawalSurvivesACut(t *testing.T) {
 		r := installedHeld(t, false)
 		r.paused = true
 		r.act.abandonErr = errIO
-		if err := r.a.Pin(ctx); !errors.Is(err, ErrApplying) || !errors.Is(err, errIO) {
-			t.Fatalf("pin taken: %v", err)
+		if err := r.a.Pin(ctx); !errors.Is(err, ErrApplying) || !errors.Is(err, errIO) || !starts(t, err) {
+			t.Fatalf("pin taken, or said it will not start: %v", err)
 		}
 		if pt := r.saved().Applying; pt == nil || !pt.Withdrawing || !pt.Pinned {
 			t.Fatalf("applying %+v", pt)
@@ -147,7 +157,7 @@ func TestPinWithdrawalSurvivesACut(t *testing.T) {
 		if ok, err := r.a.Tick(ctx); ok || !errors.Is(err, errIO) || r.act.restarts != 0 {
 			t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
 		}
-		if got := r.a.Status(); got != heldStatus {
+		if got := r.a.Status(); got != pinnedMayStart {
 			t.Fatalf("status %q", got)
 		}
 		r.act.abandonErr = nil
@@ -177,6 +187,54 @@ func TestPinWithdrawalSurvivesACut(t *testing.T) {
 	})
 }
 
+// #3832: once the pin withdrawal's Abandon took, it is recorded, so a
+// later step that fails leaves Pin saying it will not start, and STATUS
+// says held; before that record, both say it may start.
+// Mutant: drop the Abandoned save in withdrawHandoverLocked, and STATUS
+// says it may start.
+func TestPinAfterTheAbandonTookSaysHeld(t *testing.T) {
+	ctx := context.Background()
+	r := installedHeld(t, false)
+	r.paused = true
+	r.act.onAbandon = func() { r.afterSave = func() { r.state.Fail = errIO } }
+	if err := r.a.Pin(ctx); !errors.Is(err, ErrApplying) || starts(t, err) {
+		t.Fatalf("pin: %v", err)
+	}
+	if pt := r.saved().Applying; pt == nil || !pt.Withdrawing || !pt.Pinned || !pt.Abandoned {
+		t.Fatalf("applying %+v", pt)
+	}
+	if got := r.a.Status(); got != heldStatus {
+		t.Fatalf("status %q", got)
+	}
+	r.act.onAbandon, r.state.Fail = nil, nil
+	r.working = false
+	if ok, err := r.a.Tick(ctx); ok || err != nil || r.act.restarts != 0 {
+		t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
+	}
+	if got := r.a.Status(); got != pinnedStatus {
+		t.Fatalf("status %q", got)
+	}
+}
+
+// L3 blocker on #3854: a pin whose mark save fails leaves the slot
+// unabandoned, so Pin and STATUS both say the release may still start.
+// Mutant: guard the held line with !abandonOwed(pt) again.
+func TestPinMarkSaveFailsMayStart(t *testing.T) {
+	r := installedHeld(t, false)
+	r.paused = true
+	r.state.Fail = errIO
+	if err := r.a.Pin(context.Background()); !errors.Is(err, ErrApplying) || !starts(t, err) {
+		t.Fatalf("pin: %v", err)
+	}
+	r.state.Fail = nil
+	if r.act.abandoned != 0 {
+		t.Fatal("abandoned without the mark")
+	}
+	if got := r.a.Status(); got != pinnedMayStart {
+		t.Fatalf("status %q", got)
+	}
+}
+
 // A pin that lands while the box decides to restart: once the restart is
 // under way Pin says the release may start; a pin seen before it is under
 // way holds it, and the next Tick withdraws it.
@@ -201,7 +259,7 @@ func TestPinRacesTheRestart(t *testing.T) {
 			t.Fatal("a restart under way did not say it may start")
 		}
 		// #3829; mutant: drop the restart check from installedLineLocked.
-		if status != pinnedMayRun {
+		if status != pinnedMayStart {
 			t.Fatalf("status during the restart %q", status)
 		}
 	})
@@ -328,7 +386,7 @@ func TestPinnedLineOnlyInTheHandoverBoot(t *testing.T) {
 	r.restart()
 	r.must(r.a.Resume(ctx))
 	r.must(r.a.Pin(ctx))
-	if got := r.a.Status(); got != pinnedMayRun {
+	if got := r.a.Status(); got != pinnedStarted {
 		t.Fatalf("status %q while the new slot runs", got)
 	}
 	r.act.boot.Blessed = true
@@ -405,7 +463,12 @@ func TestInstalledStatusByPinAndBoot(t *testing.T) {
 					case boot == "handover" && !marked && !pinned:
 						want = installing
 					case boot == "handover":
-						want = heldStatus
+						// pinned or marked, no Abandon recorded (#3832, L3 on #3854)
+						want = pinnedMayStart
+					case boot == "later" && (marked || pinned):
+						want = pinnedStarted
+					case boot == "later":
+						want = startedStatus
 					case marked || pinned:
 						want = pinnedMayRun
 					}
@@ -431,7 +494,7 @@ func TestInstalledStatusByPinAndBoot(t *testing.T) {
 
 // Security release 1 on #3822: no Tick restarts a pinned handover while
 // the boot cannot be read; once it reads as the handover boot, STATUS
-// says held.
+// says it may still start, since no Abandon is recorded (#3832).
 func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 	for _, marked := range []bool{true, false} {
 		r := installedHeld(t, false)
@@ -450,31 +513,49 @@ func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 			t.Fatalf("marked %v: tick %v, restarts %d", marked, err, r.act.restarts)
 		}
 		r.act.bootedErr, r.act.abandonErr = nil, nil
-		if got := r.a.Status(); got != heldStatus {
+		// No Abandon recorded either way (#3832, L3 on #3854).
+		if got := r.a.Status(); got != pinnedMayStart {
 			t.Fatalf("marked %v: status %q", marked, got)
 		}
 	}
 }
 
-// Combined release 1 on #3831: every pinned line, the withdrawn one with
-// the previous-version line too, is GSM-7 (ASCII here) and fits one
-// 160-character segment at large version numbers, and ends saying
-// nothing is needed (CH-12).
-// Mutant: append the previous-version line after "Nothing is needed".
-func TestPinnedLinesFitOneSegment(t *testing.T) {
-	const v = 1_000_000_000
-	lines := []string{pinnedText(v, v-1, true), pinnedText(v, v-1, false)}
-	for _, f := range []string{pinnedHeldLine, pinnedMayRunLine, mayRunLine, waitLines[busyPinned]} {
-		lines = append(lines, fmt.Sprintf(f, v))
+// #3830 (combined release 1 and delta later 2 on #3831): every STATUS and
+// digest line of the applier, each with the previous-version line where
+// it can carry one, fits one 160-septet GSM-7 segment at large version
+// numbers, in the basic set only (no extension character costs two
+// septets), and each wait or problem line ends saying what the owner
+// needs (CH-12).
+// Mutant: append the previous-version line after "Nothing is needed",
+// or use fellBackLine-plus-withPreviousRoot again.
+func TestApplyLinesFitOneSegment(t *testing.T) {
+	const v, n = 1_000_000_000, 999_999_999
+	const none = " Nothing is needed from you."
+	needs := map[string]string{} // line: the end it must have; "" any
+	for _, f := range []string{wontStartLine, mayStartLine, staleLine, staleMayStartLine, startedLine, mayRunLine,
+		pinnedHeldLine, pinnedMayStartLine, pinnedStartedLine, pinnedMayRunLine} {
+		needs[fmt.Sprintf(f, v)] = none
 	}
-	for _, l := range lines {
-		if len(l) > 160 || !strings.HasSuffix(l, " Nothing is needed from you.") {
-			t.Errorf("%d characters: %q", len(l), l)
+	for why, f := range waitLines {
+		end := none
+		if why == busyStop {
+			end = " it installs after RESUME."
 		}
-		for _, c := range l {
-			if c < ' ' || c > '~' {
-				t.Errorf("not GSM-7 ASCII %q in %q", c, l)
-			}
+		needs[fmt.Sprintf(f, v)] = end
+	}
+	for _, prev := range []bool{false, true} {
+		needs[pinnedText(v, n, prev)] = none
+		needs[fellBackText(v, n, prev)] = ""
+		needs[unrecordedText(v, n, prev)] = " You can retry it on my Wi-Fi page."
+		needs[withPreviousRoot(fmt.Sprintf(pinnedDigestLine, v), n, prev)] = ""
+		needs[withPreviousRoot(fmt.Sprintf("Update %d is installed.", v), n, prev)] = ""
+		needs[withPreviousRoot(fmt.Sprintf("Update %d was not installed; I will try again.", v), n, prev)] = ""
+	}
+	needs[previousRootText(n)] = ""
+	needs[otherRootText(v)] = none
+	for l, end := range needs {
+		if !control.IsGSM7(l) || utf8.RuneCountInString(l) > 160 || !strings.HasSuffix(l, end) {
+			t.Errorf("%d characters, GSM-7 %v, want end %q: %q", utf8.RuneCountInString(l), control.IsGSM7(l), end, l)
 		}
 	}
 }

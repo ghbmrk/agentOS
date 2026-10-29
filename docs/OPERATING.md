@@ -82,7 +82,7 @@ A broker package outside the core list is tier A only if it meets at least one o
 
 **Migration (PLAN.md §3).** `broker/kernel` (with its `key` and `sim` packages) and `broker/clerk` are tier A from their first commit: a broker package in neither list is A, and step 2 adds them to core.txt. The simulator lives in `broker/kernel/sim`; the old `broker/sim` was deleted by the kernel PR (#2550), not grown (PLAN.md §3). Once the step-3 replay gate exists, a tier-B change also passes it (SPEC HLD-2). During step 4 an old broker package keeps the class above until the port that replaces it deletes it; step 5 leaves core.txt naming only the kernel and the clerks, and the A row above shrinks with it.
 
-**Security re-sign (mechanical).** After Security has signed a tier-A PR, any later delta for which `python3 tools/risk_tier.py --git <signed commit> HEAD` prints tier A needs a re-sign. The Security session may sign a test-only or comment-only delta, as §4 "One-line delta" defines them, in one line. This over-triggers on harmless deltas and never misses one; on tier A that is the right trade (DECISIONS D-054).
+**Security re-sign (mechanical).** After Security has signed a tier-A or gate-file PR, any push for which `python3 tools/premerge.py <signed commit> HEAD` prints `changed` needs a re-sign; `premerge.py --check` prints `needs-security` until it exists (§7, #3819). The Security session may sign a test-only or comment-only delta, as §4 "One-line delta" defines them, in one line. This over-triggers on harmless deltas and never misses one (D-054).
 
 **Every PR gets an L3 review.** Tier C skips only the lens screen, never the review (DECISIONS D-055).
 

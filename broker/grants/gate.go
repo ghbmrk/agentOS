@@ -1395,17 +1395,6 @@ func (g *Gate) evaluateBroker(ctx context.Context, phase journal.Phase, in journ
 		}
 		return verdict{kind: ask, local: true, item: owner.Item{Ref: in.ID, Object: short(s), Detail: detail, Terms: owner.NewTerms(Terms(s)),
 			Facts: owner.Facts{Kind: owner.GrantChange, Verb: "grant", NoRecipient: true}}}
-	case journal.ActionRecallRollback:
-		// Recall's deletion reach asks before taking back agent work
-		// (recalltool W10). Only the broker submits it; its line is the
-		// broker's own text.
-		obj, _ := in.Params["object"].(string)
-		detail, _ := in.Params["detail"].(string)
-		if in.Origin != OriginRecall || in.Executor != RecallExecutor || obj == "" {
-			return verdict{kind: deny, why: "a recall rollback comes only from the broker's recall"}
-		}
-		return verdict{kind: ask, item: owner.Item{Ref: in.ID, Object: obj, Detail: detail,
-			Facts: owner.Facts{Kind: owner.Ordinary, Verb: "forget", NoRecipient: true}}}
 	case journal.ActionLearnForget:
 		// The owner's forget of a task (W3-forget): only the broker
 		// submits it, on the owner's FORGET; the line is the box's own,
@@ -1926,23 +1915,47 @@ func (g *Gate) endHeld(ids ...string) {
 	}
 }
 
-// Withdraw closes a recall rollback question still waiting for the owner,
-// as superseded by an earlier one for the same agent (recalltool W10): it
-// is denied with "not approved: superseded" and an answer to it later
-// does nothing. Only the broker's recall rollbacks can be withdrawn.
-func (g *Gate) Withdraw(id string) error {
-	st, err := g.eng.Get(id)
-	if err != nil {
-		return err
+// Forgotten is why a voided intent did not run (VoidSince).
+const Forgotten guesterr.Literal = "it was made from something the owner had me forget"
+
+// VoidSince closes what lineage asked for at or after since that still
+// waits: for the owner's answer, or held for its undo window, whose staged
+// copy then goes as at an UNDO. The agent read content the owner had the
+// box forget at since, so what it built from it never runs (LOG-4, D-169);
+// an answer to one later does nothing. One whose submission time is
+// unknown is closed too. It returns the IDs closed, and an error if one
+// that waits could not be.
+func (g *Gate) VoidSince(lineage string, since time.Time) (voided []string, err error) {
+	at := map[string]time.Time{}
+	recs, terr := g.eng.ReadTrail()
+	for _, r := range recs {
+		if _, ok := at[r.ID]; !ok && r.Type == journal.RecSubmitted {
+			at[r.ID] = r.At
+		}
 	}
-	if st.Intent.Origin != OriginRecall || st.Intent.Action != journal.ActionRecallRollback {
-		return errors.New("grants: only a recall rollback can be withdrawn")
+	for _, st := range g.eng.List() {
+		id := st.Intent.ID
+		if t, ok := at[id]; st.State != journal.Pending || st.Intent.Origin != "guest:"+lineage || terr == nil && ok && t.Before(since) {
+			continue
+		}
+		g.mu.Lock()
+		w := g.waiting[id]
+		delete(g.carried, id)
+		g.batch = slices.DeleteFunc(g.batch, func(b string) bool { return b == id })
+		g.mu.Unlock()
+		g.closeIntent(id, Forgotten)
+		if st, err = g.eng.Get(id); err == nil && st.State != journal.Denied {
+			err = fmt.Errorf("grants: %s is %s, not voided", id, st.State)
+		}
+		if err != nil {
+			return voided, err
+		}
+		voided = append(voided, id)
+		if w != nil && w.held {
+			g.afterHold(st, w.reply, w.attempt)
+		}
 	}
-	if st.State != journal.Pending {
-		return nil
-	}
-	g.closeIntent(id, "superseded")
-	return nil
+	return voided, nil
 }
 
 // List returns every intent the journal holds, in submission order.

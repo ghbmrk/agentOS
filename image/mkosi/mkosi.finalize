@@ -91,29 +91,38 @@ BLOCKED_MODULES = ("btusb", "btmtk")
 # first, without /run (a tmpfs on the box).
 MODPROBE_DIRS = ("etc/modprobe.d", "usr/local/lib/modprobe.d", "usr/lib/modprobe.d", "lib/modprobe.d")
 REFUSE = ("/bin/false", "/usr/bin/false")
-# The only .network files the image may run (#1478): the uplink and the edge link's (EDGE-link-core
-# c2c); anything else (Debian's 80-* container, VM and ad-hoc files) must be removed or masked.
+# The only .network files the image may run (#1478): the uplink, the edge link's (EDGE-link-core
+# c2c) and the one that keeps every other Ethernet link down (#3840); anything else (Debian's 80-*
+# container, VM and ad-hoc files) must be removed or masked.
 UPLINK = "20-agentos-uplink.network"
 LINK_NETWORK = "10-agentos-link.network"
+DOWN = "90-agentos-down.network"
 # The uplink's every assignment, as (section, key): value (#1496). The live uplink must hold exactly
 # these, each once: an allowlist, since networkd also honours old spellings (ProxyARP=, [DHCP]),
 # generic DHCP options (SendOption=) and list keys (a second Token=) that a denylist misses. With
 # them nothing forwards, answers or advertises on the LAN (#1478), the box sends no hostname (every
-# box is "agentos") and its IPv6 addresses carry no MAC (#1479).
-UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", "DHCP"): "yes",
+# box is "agentos") and its IPv6 addresses carry no MAC (#1479). It matches PCI ports only, never
+# Thunderbolt networking, so everything else falls to DOWN (#3840).
+UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Match", "Property"): "ID_BUS=pci",
+               ("Match", "Driver"): "!thunderbolt-net", ("Network", "DHCP"): "yes",
                ("Network", "IPv6PrivacyExtensions"): "yes", ("DHCPv4", "SendHostname"): "no",
                ("DHCPv6", "SendHostname"): "no", ("IPv6AcceptRA", "Token"): "prefixstable"}
-# The edge link's every assignment, held as the uplink's are (HW-15, HW-16): every USB Ethernet adapter,
-# the link's (10-agentos-link.link names one agentos-link) and any second one, so the edge's cable never
-# runs the uplink's DHCP whichever adapter it is in, with the core's one fixed link-local address and
-# nothing else. No DHCP, router advertisement or LLDP
-# is taken from or sent to the edge, so the edge sets no address, route or resolver on the core; the
-# link never counts towards being online.
-LINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Match", "Property"): "ID_BUS=usb",
-             ("Link", "RequiredForOnline"): "no", ("Network", "DHCP"): "no",
+# The edge link's every assignment, held as the uplink's are (HW-15, HW-16): the USB Ethernet adapter
+# 10-agentos-link.link names agentos-link, with the core's one fixed link-local address and nothing
+# else. No DHCP, router advertisement or LLDP is taken from or sent to the edge, so the edge sets no
+# address, route or resolver on the core; the link never counts towards being online.
+LINK_KEYS = {("Match", "Name"): "agentos-link", ("Match", "Type"): "ether", ("Match", "Kind"): "!*",
+             ("Match", "Property"): "ID_BUS=usb", ("Link", "RequiredForOnline"): "no", ("Network", "DHCP"): "no",
              ("Network", "LinkLocalAddressing"): "no", ("Network", "Address"): "fe80::1/64",
              ("Network", "IPv6AcceptRA"): "no", ("Network", "LLDP"): "no", ("Network", "EmitLLDP"): "no"}
-NETWORKS = {UPLINK: UPLINK_KEYS, LINK_NETWORK: LINK_KEYS}
+# Every Ethernet link the two above miss (a second USB adapter, whose failed rename leaves an empty
+# udev record, a phone's USB tether, Thunderbolt networking): held down, with no address of any kind,
+# so the edge's cable in it reaches nothing on the core (#3840). It matches nothing udev writes.
+DOWN_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*",
+             ("Link", "ActivationPolicy"): "always-down", ("Link", "RequiredForOnline"): "no",
+             ("Network", "DHCP"): "no", ("Network", "LinkLocalAddressing"): "no",
+             ("Network", "IPv6AcceptRA"): "no", ("Network", "LLDP"): "no", ("Network", "EmitLLDP"): "no"}
+NETWORKS = {UPLINK: UPLINK_KEYS, LINK_NETWORK: LINK_KEYS, DOWN: DOWN_KEYS}
 # sysctl leaves that turn routing on (#1478). systemd-sysctl expands a glob key per component against
 # /proc/sys, so a key counts when its first component is "net" or a glob and its last is one of these
 # or a glob (#1497). Any glob counts, not only one that matches: glibc's glob takes [^x] as a negated
@@ -1629,12 +1638,18 @@ def keeper_path_violations(name, files):
     return out
 
 
+# The other parsers that run with an empty root, as a driver does: the mail clerk's IMAP connection
+# process, one per session (#3015).
+EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
+
+
 def driver_root(name, files):
     """Whether service NAME is a driver's template (DRIVER_UNIT; driver_violations holds each one to
-    the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro,noexec, with no
-    other mount entry at "/" (root_mounts), which would make systemd drop that root (#3642, #3712)."""
-    return (bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"]
-            and not root_mounts(files))
+    the template rendered for its name) or an EMPTY_ROOT_UNITS unit, whose whole root is
+    TemporaryFileSystem=/:ro,noexec, with no other mount entry at "/" (root_mounts), which would make
+    systemd drop that root (#3642, #3712)."""
+    return ((bool(DRIVER_UNIT.match(name)) or name in EMPTY_ROOT_UNITS)
+            and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
 def keeper_unit_violations(name, files):
@@ -2687,7 +2702,7 @@ def byte_violations(f):
 
 
 def network_file_violations(up, name):
-    """#1496: the .network file NAME (the uplink, or the edge link's) holds exactly its NETWORKS keys,
+    """#1496: the .network file NAME (the uplink, the edge link's or DOWN) holds exactly its NETWORKS keys,
     each assigned once. Every other line is blank, a comment or a section header; byte_violations
     refuses what would make systemd read the lines differently from this split."""
     keys = NETWORKS[name]
@@ -2754,9 +2769,9 @@ def forward_key(k):
 
 
 def network_violations(root):
-    """#1478: the effective .network set is the uplink and the edge link's alone, nothing changes them,
+    """#1478: the effective .network set is the uplink, the edge link's and DOWN alone, nothing changes them,
     and neither they nor networkd.conf turn on forwarding or LAN name answering; #1479: the uplink keeps
-    the box private; EDGE-link-core c2c: the edge sets nothing on the core.
+    the box private; EDGE-link-core c2c: the edge sets nothing on the core, #3840: and reaches it only on the link.
     The set is conf_files over systemd/network, as networkd's network_load lists it; network_load_one
     skips a file that reads as nothing (an empty file, a mask), and applies conf_files over NAME.d to
     the rest. A file the check cannot read (any other link, #1543) is refused and counts as live."""
@@ -2770,7 +2785,8 @@ def network_violations(root):
         live[f.name] = f
     for n in sorted(set(live) - set(NETWORKS)):
         out.append("%s: live .network file; only %s may run (mask or remove it)" % (live[n].rel, " and ".join(NETWORKS)))
-    for name, why in ((UPLINK, "the wired uplink needs it"), (LINK_NETWORK, "the edge link needs it")):
+    for name, why in ((UPLINK, "the wired uplink needs it"), (LINK_NETWORK, "the edge link needs it"),
+                      (DOWN, "every other Ethernet link must stay down")):
         up = live.get(name)
         if up is None:
             out.append("%s: missing or masked; %s" % (name, why))

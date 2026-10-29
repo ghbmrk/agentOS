@@ -79,6 +79,8 @@ func main() {
 	flag.StringVar(&held, "held", "/var/lib/agentos-localui/unsaved.json", "setup's private-content answers agentosd has not recorded, kept across a reboot (localui.HeldStore)")
 	flag.StringVar(&fb.Claim, "claim-state", claim.StatePath, "a preloaded box's claim state, as its seller sealed it (HW-10)")
 	flag.StringVar(&fb.Latch, "card-latch", "/var/lib/agentos/card-latch.json", "the Owner Card step's latch (HW-1)")
+	flag.StringVar(&fb.PageCA, "page-ca-cert", publishedAuthority, "the first-boot page authority's certificate agentos-keeper-pageca.service publishes, which the first-boot Owner Card prints (HW-1); absent, the card takes agentosd's")
+	flag.StringVar(&fb.KeeperSock, "keeper-setup-sock", localui.KeeperSetupSock, "the keeper's Owner Card hand-off socket (agentos-keeper-setup.socket); the card's confirm hands its factors there before the vault (OWN-card-flow)")
 	flag.BoolVar(&fb.Download, "download-box", false, "the download's image, which ships no claim state; unset, a box without one is told to reinstall (#1270)")
 	flag.StringVar(&iface, "iface", "", "port 1's interface, the core's cable to the enforcer; empty: the one fixed PCI Ethernet port (localui.Port1), and none if two or more")
 	flag.BoolVar(&admit, "admit-port1", false, "run as root before the page (its unit's ExecStartPre=+): choose port 1 as the page does, open the page's ports in the inbound firewall on it alone, write its name to -port1-file, and exit")
@@ -337,6 +339,12 @@ const agentosdWait = 30 * time.Second
 type boxFiles struct {
 	VaultSock, Claim, Latch string
 	Download                bool
+	// PageCA is the first-boot page authority's published certificate
+	// (publishedAuthority); KeeperSock the keeper's Owner Card hand-off
+	// socket (localui.KeeperSetupSock), which the card's confirm calls
+	// before the vault (brief OWN-card-flow decision 9). Empty is none: a
+	// confirm then holds with the unreachable keeper's line.
+	PageCA, KeeperSock string
 }
 
 func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) error {
@@ -346,7 +354,7 @@ func run(ctx context.Context, cfg localui.Config, sock string, fb boxFiles) erro
 		return err
 	}
 	pt := pageTLS(ctx, &cfg, localui.Socket{Path: sock}, nil)
-	cfg, err := prepare(ctx, withAuthority(cfg, pt), sock, fb, firstBootAuthority(publishedAuthority, 0, pt))
+	cfg, err := prepare(ctx, withAuthority(cfg, pt), sock, fb, firstBootAuthority(fb.PageCA, 0, pt))
 	if err != nil {
 		return err
 	}
@@ -568,7 +576,7 @@ func prepare(ctx context.Context, cfg localui.Config, sock string, fb boxFiles, 
 		return cfg, err
 	}
 	void := &localui.CodesVoid{}
-	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), change.FileStore{Path: fb.Claim},
+	box := localui.CardBox(localui.NewUnlockClient(fb.VaultSock), localui.KeeperSetup{Socket: fb.KeeperSock}, change.FileStore{Path: fb.Claim},
 		change.FileStore{Path: fb.Latch}, void, authority)
 	box.Download = fb.Download
 	cfg, _, err = withFirstBoot(cfg, box, void)
