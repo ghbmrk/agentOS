@@ -104,8 +104,8 @@ func home(v uint64) policy.Document {
 		Version:      v,
 		Destinations: []string{"models.example"},
 		Devices: []policy.Device{
-			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true},
-			{ID: "lock", Network: policy.NetDevices, Allow: []string{"lock.example"}, Secure: "lock", Label: policy.LabelExceptRadio},
+			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true, Class: policy.ClassCamera},
+			{ID: "lock", Network: policy.NetDevices, Allow: []string{"lock.example"}, Class: policy.ClassLock, Secure: "lock", Label: policy.LabelExceptRadio},
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan104", Allow: []string{"a.example"}, VendorCloud: true, Everyday: true, Label: policy.LabelContained},
 		},
 	}
@@ -737,13 +737,14 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Allow":       func(d *policy.Device) { d.Allow = []string{"z.example"} },
 		"VendorCloud": func(d *policy.Device) { d.VendorCloud = !d.VendorCloud },
 		"Isolated":    func(d *policy.Device) { d.Isolated = !d.Isolated },
-		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Secure = "" },
-		"Secure":      func(d *policy.Device) { d.Secure = "unlock" },
+		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Class, d.Secure = "", "" },
+		"Class":       func(d *policy.Device) { d.Class, d.Secure = policy.ClassSensor, "" },
+		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
 		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
 		"Control":     func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
 	}
-	// A class and a stream port only a camera or microphone carries, so
-	// these rows run on one.
+	// A stream port only a camera or microphone carries, and a change
+	// from one of those classes to the other, so these rows run on one.
 	recorders := map[string]func(d *policy.Device){
 		"Class":  func(d *policy.Device) { d.Class = policy.ClassMicrophone },
 		"Stream": func(d *policy.Device) { d.Stream = append(d.Stream, policy.Port{Proto: policy.ProtoUDP, Num: 554}) },
@@ -798,7 +799,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		}
 	}
 	// A device added with each field set, against the same device without.
-	nw := policy.Device{ID: "new", Network: policy.NetDevices, Allow: []string{"n.example"}, VendorCloud: true}
+	nw := policy.Device{ID: "new", Network: policy.NetDevices, Allow: []string{"n.example"}, VendorCloud: true, Class: policy.ClassLock}
 	added := func(f func(*policy.Device)) policy.Document {
 		d := clone(base)
 		v := nw
@@ -826,6 +827,18 @@ func TestEveryFieldRendered(t *testing.T) {
 		}
 		differs("the lock's "+name, base, func() policy.Document { d := clone(base); f(dev(&d, "lock")); return d }())
 	}
+	// A class change alone, with the same secure command (L3 on #3873).
+	heat := func(class string) policy.Document {
+		d := clone(base)
+		d.Devices = append(d.Devices, policy.Device{ID: "heat", Network: policy.NetDevices, Class: class, Secure: "off"})
+		return d
+	}
+	if _, err := policy.Encode(heat(policy.ClassHeater)); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := Describe(heat(policy.ClassHeater), heat(policy.ClassHeater)), Describe(heat(policy.ClassHeater), heat(policy.ClassPlug)); slices.Equal(a, b) {
+		t.Errorf("a heater recorded as a plug: the diff does not show it: %q", b)
+	}
 	for name, f := range docs {
 		if f != nil {
 			differs("the document's "+name, base, func() policy.Document { d := clone(base); f(&d); return d }())
@@ -850,7 +863,7 @@ func keys[V any](ms ...map[string]V) []string {
 		}
 	}
 	slices.Sort(out)
-	return out
+	return slices.Compact(out) // a field may have a row in more than one map
 }
 
 // NET-4: the page's certificate lasts no more than Apple's 825 days, and
@@ -904,5 +917,22 @@ func TestDroneShownSafely(t *testing.T) {
 	lock := policy.Document{Version: 2, Devices: []policy.Device{{ID: "frontdoor", Network: policy.NetDevices, Secure: "unlock"}}}
 	if got := strings.Join(Describe(policy.Document{}, lock), "\n"); !strings.Contains(got, "frontdoor's command unlock apply at once") {
 		t.Errorf("a new device's at-once command is hidden: %s", got)
+	}
+}
+
+// NET-2 Safety devices (#3748; UX on #3873): moving a classed device off
+// or onto the safety list never calls the everyday side "a device of
+// unknown type", which NET-2 counts as safety.
+func TestSafetyListMoveClassLine(t *testing.T) {
+	listed := policy.Document{Version: 1, Devices: []policy.Device{{ID: "lamp", Network: policy.NetDevices, Class: policy.ClassPlug, Secure: "off"}}}
+	everyday := policy.Document{Version: 2, Devices: []policy.Device{{ID: "lamp", Network: policy.NetDevices, Everyday: true}}}
+	for name, lines := range map[string][]string{"off the list": Describe(listed, everyday), "onto the list": Describe(everyday, listed)} {
+		got := strings.Join(lines, "\n")
+		if strings.Contains(got, "unknown type") {
+			t.Errorf("%s: %q", name, got)
+		}
+		if name == "onto the list" && !strings.Contains(got, "Record lamp as a plug.") {
+			t.Errorf("%s: the class is not shown: %q", name, got)
+		}
 	}
 }

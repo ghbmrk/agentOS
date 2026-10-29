@@ -97,8 +97,16 @@ def git_tree(root, ref):
 
 
 def old_core_dirs(tree):
-    return [l.strip() for l in tree.get(OLD_CORE, "").splitlines()
-            if l.strip() and not l.startswith("#")]
+    # "\n" only, printable ASCII only: splitlines() also ends a line at "\r", U+2028 and
+    # others, so a break hidden in a comment would add a line (REV-CHK-crlf, #3902).
+    dirs = []
+    for n, l in enumerate(tree.get(OLD_CORE, "").split("\n"), 1):
+        bad = [c for c in l if not " " <= c <= "~"]
+        if bad:
+            raise SystemExit(f"{OLD_CORE}:{n}: character {bad[0]!r} outside printable ASCII")
+        if l.strip() and not l.startswith("#"):
+            dirs.append(l.strip())
+    return dirs
 
 
 def under(path, d):

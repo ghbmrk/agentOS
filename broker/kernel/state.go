@@ -88,7 +88,7 @@ var schema = map[string]int{
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
-	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1,
+	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1, TCodeApproved: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -102,7 +102,7 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet || typ == TBackupTarget ||
-		typ == TEdgeEnrolled || typ == TRecoveryRotate
+		typ == TEdgeEnrolled || typ == TRecoveryRotate || typ == TCodeApproved
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -332,6 +332,7 @@ type StepState struct {
 	Covered     string // a covered submit's STATUS line (CLK-3)
 	SentAt      int64  // when the log first recorded it sent; a covered step's, when it was done
 	Retried     bool   // RETRY sent it again: it may have acted until a probe finds it not done
+	Approved    bool   // a code approval released its hold (codeapproval.go)
 }
 
 type PlanState struct {
@@ -710,7 +711,7 @@ func (s *State) Dispatched(r Request) (Dispatch, bool) {
 	if st == nil || st.Phase != PInflight || st.DispatchSeq == 0 || !reflect.DeepEqual(r.Plan, p.Plan) {
 		return Dispatch{}, false
 	}
-	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel}, true
+	return Dispatch{Seq: st.DispatchSeq, Held: st.HeldSeq != 0, HeldAt: st.HeldAt, Novel: st.Novel, Approved: st.Approved}, true
 }
 
 // Unsettled is a step whose effect is uncertain: still being reconciled, or
@@ -1158,6 +1159,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyRotate(e)
 	case TEdgeEnrolled, TEdgeCandidate, TEdgeRevoked, TEdgeCut:
 		return s.applyEdge(e)
+	case TCodeApproved:
+		return s.applyCode(e)
 	default:
 		return ErrUnknown
 	}

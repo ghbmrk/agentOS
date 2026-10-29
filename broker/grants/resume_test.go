@@ -228,7 +228,7 @@ func TestAResumeTakesAFreshPageCode(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.g.Flush()
-		m := regexp.MustCompile(`^([A-Z][0-9]{1,2}):`).FindStringSubmatch(text())
+		m := regexp.MustCompile(`NO ([A-Z][0-9]{1,2})\.$`).FindStringSubmatch(text())
 		if m == nil {
 			t.Fatal("no page notice")
 		}

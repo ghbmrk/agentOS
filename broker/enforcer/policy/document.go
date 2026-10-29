@@ -83,19 +83,19 @@ type Device struct {
 	// devices). The zero value is on it, so a device nobody classified
 	// fails safe; setting it is a loosening, so only the owner can.
 	Everyday bool `json:"everyday"`
+	// Class is a safety-list device's class (NET-2 Safety devices), from
+	// the closed list below; empty for a device of unknown type, and always
+	// empty for an everyday device. Setting or changing it is a loosening.
+	Class string `json:"class"`
 	// Secure names a safety-list device's one secure-direction command,
-	// such as a lock's "lock" (NET-2 Safety devices); empty for none.
+	// such as a lock's "lock" (NET-2 Safety devices); empty for none. Only
+	// the one name its class allows is valid (Nameable).
 	Secure string `json:"secure"`
 	// Label is how far the enforcer can contain the device (NET-1), from
 	// qualification and the enforcer's observation, never from what the
 	// device reports: LabelContained, LabelExceptRadio, or empty for not
 	// containable, so a device nobody labelled promises nothing.
 	Label string `json:"label"`
-	// Class is ClassCamera or ClassMicrophone for a device that records
-	// video or audio, or empty for any other. A camera or microphone is
-	// on the safety list and names no secure command (NET-2 Safety
-	// devices).
-	Class string `json:"class"`
 	// Control is the device's control ports: the only ports the box that
 	// runs an everyday device reaches, the core while it is offline and
 	// the edge while it is online (NET-2 Device paths). A device with
@@ -108,12 +108,56 @@ type Device struct {
 	Stream []Port `json:"stream"`
 }
 
-// The device classes the enforcer tells apart; the empty class is any
-// other device.
+// The NET-2 safety classes a device can carry; the empty class is unknown
+// type. A primary heater and a valve that feeds sprinklers, heating or a
+// medical supply have classes of their own so that they cannot be named.
 const (
-	ClassCamera     = "camera"
-	ClassMicrophone = "microphone"
+	ClassLock           = "lock"
+	ClassValve          = "valve"
+	ClassFeedValve      = "feed-valve" // feeds sprinklers, heating or a medical supply
+	ClassHeater         = "heater"
+	ClassPrimaryHeating = "primary-heating"
+	ClassOven           = "oven"
+	ClassPlug           = "plug"
+	ClassRelay          = "relay"
+	ClassGarageDoor     = "garage-door"
+	ClassDrone          = "drone"
+	ClassCamera         = "camera"
+	ClassMicrophone     = "microphone"
+	ClassAlarm          = "alarm"
+	ClassSiren          = "siren"
+	ClassSensor         = "sensor"
 )
+
+// classSecure is each class's one nameable secure direction, empty for a
+// class that cannot be named (NET-2 Safety devices): a camera, microphone,
+// alarm, siren or sensor gets no command, and primary heating and a
+// feeding valve cannot be named.
+var classSecure = map[string]string{
+	ClassLock:           "lock",
+	ClassValve:          "shut",
+	ClassFeedValve:      "",
+	ClassHeater:         "off",
+	ClassPrimaryHeating: "",
+	ClassOven:           "off",
+	ClassPlug:           "off",
+	ClassRelay:          "off",
+	ClassGarageDoor:     "close",
+	ClassDrone:          "return-to-dock",
+	ClassCamera:         "",
+	ClassMicrophone:     "",
+	ClassAlarm:          "",
+	ClassSiren:          "",
+	ClassSensor:         "",
+}
+
+// Nameable reports whether a device of class may be named safe for the
+// secure-direction command secure: the one name its class allows, and
+// none for an unknown or unnamable class.
+func Nameable(class, secure string) bool {
+	want, ok := classSecure[class]
+	return ok && want != "" && secure == want
+}
 
 // Recorder reports whether the device is a camera or a microphone.
 func (d Device) Recorder() bool { return d.Class == ClassCamera || d.Class == ClassMicrophone }
@@ -281,10 +325,11 @@ func sorted(s []string) []string {
 }
 
 // check refuses a document with a nameless or duplicate device, a Wi-Fi
-// identity that is not a name, an unknown network, label, class or port, a
-// class or stream port on a device that cannot carry it, a drone reference
-// that is not a hash, a pair, rule or
-// hold naming no device, or an empty window.
+// identity that is not a name, an unknown network, label, class or port, an
+// everyday device with a safety class, a secure command its class cannot be
+// named for, a stream port on a device that is not a camera or microphone, a
+// drone reference that is not a hash, a pair, rule or hold naming no device,
+// or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	for i, dev := range d.Devices {
@@ -308,11 +353,14 @@ func (d Document) check() error {
 		if dev.Label != "" && dev.Label != LabelContained && dev.Label != LabelExceptRadio {
 			return bad("device %q label %q", dev.ID, dev.Label)
 		}
-		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
-			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
+		if _, ok := classSecure[dev.Class]; dev.Class != "" && !ok {
+			return bad("device %q class %q", dev.ID, dev.Class)
 		}
-		if dev.Class != "" && (!dev.Recorder() || dev.Everyday || dev.Secure != "") {
-			return bad("device %q: class %q needs a safety-list device with no secure command", dev.ID, dev.Class)
+		if dev.Everyday && dev.Class != "" {
+			return bad("device %q: class %q is on the safety list", dev.ID, dev.Class)
+		}
+		if dev.Secure != "" && (dev.Everyday || !Nameable(dev.Class, dev.Secure)) {
+			return bad("device %q: a %q cannot be named safe for %q", dev.ID, dev.Class, dev.Secure)
 		}
 		if len(dev.Stream) > 0 && !dev.Recorder() {
 			return bad("device %q: stream ports need a camera or microphone", dev.ID)

@@ -234,6 +234,15 @@ func (o Owner) Retry(ctx context.Context, plan string, index, attempt int) error
 	return o.call(ctx, "retry", retryArgs{plan, index, attempt}, nil)
 }
 
+// ApproveCode hands the kernel the checker's approval of exact held steps on
+// a verified code (CH-4, kernel.ApproveCode). The kernel checks the
+// checker's signature with the key it was pinned at boot, so this channel
+// can carry an approval but never make one; one naming a step that is not
+// held, a secret step or a step it already approved is refused.
+func (o Owner) ApproveCode(ctx context.Context, a kernel.CodeApproval) error {
+	return o.call(ctx, "approvecode", a, nil)
+}
+
 // Submit logs a guest's plan on the kernel, which decides it at once (PLN-5
 // (b)): its authority is its key and the signature of the key's last holder,
 // not this channel. A plan the key check rejects is logged all the same
