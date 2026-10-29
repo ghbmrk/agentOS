@@ -29,6 +29,8 @@ ENROLL = UNITS / "agentos-keeper-enroll.service"
 KERNEL = UNITS / "agentos-keeper-kernel.service"
 ROTATE = UNITS / "agentos-keeper-rotate@.service"
 ROTATE_SOCKET = UNITS / "agentos-keeper-rotate.socket"
+MAIL = UNITS / "agentos-keeper-mail.service"
+PRESET = MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset"
 SYSUSERS = MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf"
 WITH_UIDS = MK / "mkosi.extra/usr/lib/agentos/with-uids"
 TMPFILES = MK / "mkosi.extra/usr/lib/tmpfiles.d/agentos.conf"
@@ -83,7 +85,7 @@ class KeeperTreeTest(unittest.TestCase):
     def test_the_keeper_is_listed_once(self):
         self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service",
                                               "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
-                                              "agentos-keeper-setup@.service"))
+                                              "agentos-keeper-setup@.service", "agentos-keeper-mail.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
         # The recovery-key rotation, the page authority's staging and the card's hand-off are the
         # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).
@@ -503,7 +505,8 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("agentos-keeper-enroll.service", ini(KERNEL)["Unit"]["After"].split())
         self.assertIn("-o agentos-kernel -g agentos-kernel /var/lib/agentos-kernel", ini(ENROLL)["Service"]["ExecStartPre"])
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
-                                                             arg(e, "passphrase-file").rsplit("/", 1)[0]}))
+                                                             arg(e, "passphrase-file").rsplit("/", 1)[0],
+                                                             arg(exec_args(MAIL), "dir")}))
 
     def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
         # #3073: systemd chowns a RuntimeDirectory= to the unit's user, root here, at every command's
@@ -522,10 +525,10 @@ class KeeperUnitsTest(unittest.TestCase):
     def test_the_users_exist_and_none_is_in_a_tpm_group(self):
         lines = [l.split() for l in SYSUSERS.read_text().splitlines() if l.strip() and not l.startswith("#")]
         users = {w[1] for w in lines if w[0] == "u"}
-        for unit in (ENROLL, KERNEL):
+        for unit in (ENROLL, KERNEL, MAIL):
             for w in exec_args(unit):
-                if w.startswith(("@uid:", "@gid:")):
-                    self.assertIn(w[5:], users)
+                if "@uid:" in w or w.startswith("@gid:"):
+                    self.assertIn(w.split("@", 1)[1][4:], users)
         self.assertFalse([w for w in lines if w[0] == "m"])
 
     def test_with_uids_swaps_group_names_for_gids(self):
@@ -536,9 +539,30 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertNotEqual(bad.returncode, 0)
         self.assertEqual(bad.stdout, "")
 
+    # REQ: CLK-1
+    def test_with_uids_swaps_a_last_uid_field_and_keeps_descriptor_3_from_its_lookups(self):
+        """MAIL-unit: the kernel's -clerk name=socket,uid takes the clerk's user's uid in its last field,
+        and a clerk's key on descriptor 3 reaches the command it runs, never the lookups' processes."""
+        out = subprocess.run([str(WITH_UIDS), "echo", "mail=/run/m.sock,@uid:root", "a,b,@uid:root", "x@uid:root",
+                              "m,@gid:root"], capture_output=True, text=True, check=True)
+        self.assertEqual(out.stdout, "mail=/run/m.sock,0 a,b,0 x@uid:root m,@gid:root\n")
+        bad = subprocess.run([str(WITH_UIDS), "echo", "mail=/run/m.sock,@uid:agentos-no-such-user"],
+                             capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertEqual(bad.stdout, "")
+        with tempfile.TemporaryDirectory() as d:
+            # An id that fails if it holds descriptor 3, and a command that says whether it does; the
+            # outer shell opens descriptor 3 as the service manager's OpenFile= does.
+            write(pathlib.Path(d), "id", "#!/bin/sh\n[ -e /proc/self/fd/3 ] && exit 9\necho 7\n", 0o755)
+            out = subprocess.run(["sh", "-c", 'exec 3</dev/null; exec "$0" "$@"', str(WITH_UIDS),
+                                  "sh", "-c", 'echo "$1 $2"; [ -e /proc/self/fd/3 ] && echo held', "-",
+                                  "@uid:x", "m=/s,@uid:x"], capture_output=True, text=True,
+                                 env={"PATH": d + ":/usr/bin:/bin"})
+        self.assertEqual((out.returncode, out.stdout), (0, "7 m=/s,7\nheld\n"), out.stderr)
+
     def test_the_build_ships_the_keeper_s_mains(self):
         build = (ROOT / "image/build.sh").read_text()
-        for cmd in ("agentos-enroll", "agentos-unlock", "agentos-kernel"):
+        for cmd in ("agentos-enroll", "agentos-unlock", "agentos-kernel", "agentos-clerk-mail"):
             self.assertRegex(build, r"for cmd in [^;]*\b%s\b" % cmd)
 
     def test_the_boot_test_enrolls_on_the_first_boot(self):
@@ -678,6 +702,135 @@ class KeeperUnitsTest(unittest.TestCase):
             for line in unit.read_text().replace("\\\n", " ").splitlines():
                 if line.startswith("Exec"):
                     self.assertIsNone(check.REBOOT_WORDS.search(line), "%s: %s" % (unit.name, line))
+
+
+def slice_cgroup(slice_, unit):
+    """The cgroup path systemd gives UNIT in SLICE: a slice's name nests at each "-", so a-b.slice is
+    under a.slice (systemd.slice(5))."""
+    parts = slice_[:-len(".slice")].split("-")
+    return "/" + "/".join("-".join(parts[:i + 1]) + ".slice" for i in range(len(parts))) + "/" + unit
+
+
+class MailClerkUnitTest(unittest.TestCase):
+    """MAIL-unit (#3420, briefs/MAIL-main.md slice c): the mail clerk's unit against the kernel's unit,
+    the mains they run, and the lifecycle the brief gives it (start, clerk restart, update reboot)."""
+
+    def setUp(self):
+        self.m, k = exec_args(MAIL), exec_args(KERNEL)
+        i = k.index("--")
+        self.unlock, self.kern = k[1:i], k[i + 1:]
+        self.svc = ini(MAIL)["Service"]
+
+    # REQ: CLK-1, CLK-2, KRN-2
+    def test_the_mail_clerk_and_the_kernel_name_each_other(self):
+        m, kern, unlock = self.m, self.kern, self.unlock
+        self.assertEqual(m[0], "/usr/lib/agentos/agentos-clerk-mail")
+        self.assertTrue(ini(MAIL)["Service"]["ExecStart"].startswith("/usr/lib/agentos/with-uids "))
+        for cmd, words in (("agentos-clerk-mail", m[1:]), ("agentos-unlock", unlock), ("agentos-kernel", kern)):
+            for w in words:
+                if w.startswith("-"):
+                    self.assertIn(w[1:], go_flags(cmd), "%s %s" % (cmd, w))
+        user = self.svc["User"]
+        self.assertEqual((user, self.svc["Group"]), ("agentos-mail", "agentos-mail"))
+        # The kernel calls the clerk on the clerk's kernel socket, admitting only the clerk's user.
+        self.assertEqual(arg(kern, "clerk"), "mail=%s,@uid:%s" % (arg(m, "kernel-sock"), user))
+        # The clerk admits only the kernel's user there: the user unlock drops to.
+        self.assertEqual(arg(m, "kernel-uid"), arg(unlock, "uid"))
+        # The owner side is agentosd, root (MAIL-main-a-7); the planner is a user of its own.
+        self.assertEqual(arg(m, "owner-uid"), "0")
+        self.assertEqual(arg(m, "planner-uid"), "@uid:agentos-planner")
+        peers = {arg(m, "kernel-uid"), arg(m, "planner-uid"), "@uid:" + user, arg(kern, "owner-uid"),
+                 arg(kern, "meter-uid")}
+        self.assertEqual(len(peers), 5, peers)
+        # The anchors come from the file unlock writes, root's, never from the kernel (D-146); unlock
+        # pins them in the kernel's own log.
+        self.assertEqual(arg(m, "anchors"), arg(unlock, "clerk-anchors"))
+        self.assertEqual(arg(unlock, "log"), arg(kern, "log"))
+        self.assertFalse(check.keeper_reach(arg(m, "anchors")))
+        made = [l.split() for l in TMPFILES.read_text().splitlines() if l.strip() and not l.startswith("#")]
+        self.assertNotIn(arg(m, "anchors").rsplit("/", 1)[0], [w[1] for w in made])
+        # No IMAP connection process and no reader yet (#3015, #3421): both fail closed in the main.
+        self.assertNotIn("-imap-conn", m)
+        self.assertNotIn("-reader-sock", m)
+
+    # REQ: CLK-1
+    def test_the_kernel_hands_the_key_to_this_unit_alone(self):
+        name, sock_cg = arg(self.kern, "clerk-key").split("=", 1)
+        sock, cg = sock_cg.split(",")
+        self.assertEqual(name, "mail")
+        # The whole cgroup path the unit runs in: the keeper's slice, nested as systemd nests it.
+        drop = ini(UNITS / "agentos-keeper-.service.d/90-keeper.conf")["Service"]
+        self.assertEqual(cg, slice_cgroup(drop["Slice"], MAIL.name))
+        self.assertEqual(cg, "/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service")
+        self.assertNotIn("Slice", self.svc)
+        # The manager connects at each start and the clerk gets the connection as descriptor 3, its
+        # only one: no socket activation, no descriptor store, no other file.
+        self.assertEqual(exec_lines(MAIL, "OpenFile"), [sock + ":clerk-key"])
+        self.assertEqual(sock.rsplit("/", 1)[0], arg(self.kern, "owner-sock").rsplit("/", 1)[0])
+        for key in ("Sockets", "FileDescriptorStoreMax", "StandardInput", "StandardOutput"):
+            self.assertNotIn(key, self.svc)
+        # Only ExecStart= runs in the unit, so only the clerk's main is ever handed the key.
+        self.assertEqual([k for k in check.EXEC_KEYS if k in self.svc], ["ExecStart"])
+        self.assertIn('FD = 3', (ROOT / "broker/clerk/clerkkey/clerkkey.go").read_text())
+
+    # REQ: CLK-1, STO-2, UPD-10
+    def test_the_mail_clerk_s_lifecycle(self):
+        u = ini(MAIL)["Unit"]
+        # Start: after the kernel, on a box with a store; enabled for every boot.
+        self.assertIn("agentos-keeper-kernel.service", u["After"].split())
+        self.assertIn("systemd-tmpfiles-setup.service", u["After"].split())
+        self.assertEqual(re.findall(r"^ConditionPathExists=(.*)$", MAIL.read_text(), re.M), [arg(self.unlock, "store")])
+        self.assertEqual(ini(MAIL)["Install"]["WantedBy"], "multi-user.target")
+        self.assertIn("enable agentos-keeper-mail.service", PRESET.read_text().splitlines())
+        # Clerk restart: every failed start, the kernel's not yet listening and a setup-only boot's
+        # missing anchors included, is retried with a backoff to at most five minutes, and no start
+        # limit leaves it failed for the rest of the boot. Each start is a new connection, so a new key.
+        self.assertEqual(self.svc["Restart"], "on-failure")
+        self.assertEqual((self.svc["RestartSec"], self.svc["RestartSteps"], self.svc["RestartMaxDelaySec"]),
+                         ("2", "8", "5min"))
+        self.assertEqual(u["StartLimitIntervalSec"], "0")
+        self.assertNotIn("StartLimitBurst", u)
+        # Update reboot: the Secrets stay in a directory on the root partition, made at every boot and
+        # never emptied, owned by the clerk's user alone; the key is derived again from the same store.
+        state = arg(self.m, "dir")
+        self.assertIn(state, check.KEEPER_PATHS)
+        self.assertTrue(state.startswith("/var/lib/"))
+        made = {w[1]: w for w in (l.split() for l in TMPFILES.read_text().splitlines()) if w and w[0] == "d"}
+        self.assertEqual(made[state], ["d", state, "0700", "agentos-mail", "agentos-mail", "-"])
+        self.assertEqual(self.svc["ReadWritePaths"], state)
+        for key in ("StateDirectory", "RuntimeDirectoryPreserve", "DynamicUser"):
+            self.assertNotIn(key, self.svc)
+        # The sockets: the clerk's own runtime directory, which its peers reach and the main side may.
+        run = "/run/" + self.svc["RuntimeDirectory"]
+        for flag in ("kernel-sock", "owner-sock", "planner-sock"):
+            self.assertEqual(arg(self.m, flag).rsplit("/", 1)[0], run)
+        self.assertEqual(self.svc["RuntimeDirectoryMode"], "0755")
+        self.assertFalse(check.keeper_reach(run))
+
+    # REQ: CLK-1, HW-5a, UPD-10
+    def test_the_mail_clerk_s_sandbox(self):
+        s = self.svc
+        for k, v in (("NoNewPrivileges", "yes"), ("CapabilityBoundingSet", ""), ("LimitCORE", "0"), ("UMask", "0077"),
+                     ("ProtectSystem", "strict"), ("ProtectHome", "yes"), ("PrivateTmp", "yes"),
+                     ("PrivateDevices", "yes"), ("DevicePolicy", "closed"), ("MemoryDenyWriteExecute", "yes"),
+                     ("NoExecPaths", "/"), ("ExecPaths", "/usr"), ("SystemCallArchitectures", "native")):
+            self.assertEqual(s[k], v, k)
+        self.assertNotIn("DeviceAllow", s)
+        self.assertNotIn(MAIL.name, check.TPM_UNITS)
+        # It ends its own TLS (D-154 rule 3) and learns its network from netlink and /proc/net/route
+        # (MAIL-world-a-m1): ProcSubset=pid would hide the routes, and nothing else is reached.
+        self.assertEqual(s["RestrictAddressFamilies"].split(), ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"])
+        self.assertNotIn("PrivateNetwork", s)
+        self.assertNotIn("ProcSubset", s)
+        self.assertIn("netlink", (ROOT / "broker/cmd/agentos-clerk-mail/netguard.go").read_text())
+        # Its TLS roots come only from the verity-checked /usr (Go reads SSL_CERT_FILE, then every file
+        # in each SSL_CERT_DIR), and nothing else is set in its environment.
+        env = dict(w.split("=", 1) for v in exec_lines(MAIL, "Environment") for w in v.split())
+        self.assertEqual(env, {"SSL_CERT_FILE": "/dev/null", "SSL_CERT_DIR": "/usr/share/ca-certificates/mozilla"})
+        self.assertNotIn("EnvironmentFile", s)
+        self.assertIn("ca-certificates", (MK / "mkosi.conf").read_text().split())
+        self.assertEqual(exec_lines(MAIL, "SystemCallFilter"), ["@system-service", "~@debug @mount @privileged"])
+        self.assertEqual(s["SystemCallErrorNumber"], "EPERM")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,11 @@
 # D-201): agentosd writes the kernel's head-signed approval to its root-only state directory, and unlock
 # makes the new recovery key, replaces the recovery slot and backup recipient in one write, and hands
 # the key to the kernel for the new card. A request that is not one is ignored and the box starts.
+# The clerks (MAIL-unit): unlock writes the owner's anchors for them to a file only root writes
+# (D-146); the kernel calls the mail clerk on its socket, admitting only its uid, and hands it its key
+# on a socket only the service manager starting agentos-keeper-mail.service, in that unit's cgroup,
+# is answered on (MAIL-keys). A slice's name nests at each "-", so the keeper's slice is under
+# agentos.slice.
 [Unit]
 Description=agentOS kernel
 ConditionPathExists=/var/lib/agentos-store/store
@@ -31,12 +36,16 @@ ExecStartPre=/usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel /ru
 ExecStartPre=/usr/bin/rm -f /run/agentos-kernel/up
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \
         -recovery-request /var/lib/agentos/recovery-request \
+        -clerk-anchors /run/agentos-keeper/anchors -log /var/lib/agentos-kernel/log \
         -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \
         -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \
         -keys-dir /var/lib/agentos-kernel/keys -content-dir /var/lib/agentos-kernel/content \
         -backup-dir /var/lib/agentos-kernel/backups \
         -owner-sock /run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner \
-        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model -up /run/agentos-kernel/up
+        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model \
+        -clerk mail=/run/agentos-mail/kernel.sock,@uid:agentos-mail \
+        -clerk-key mail=/run/agentos-kernel/key-mail.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service \
+        -up /run/agentos-kernel/up
 # #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its
 # sockets listened, and it made "up") and then failed reboots the box. One refused at its start (no
 # owner's hardware keys, a log under another key, a rolled-back drive) never made "up": every boot

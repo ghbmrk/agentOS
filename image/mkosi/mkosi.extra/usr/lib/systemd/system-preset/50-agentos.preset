@@ -25,5 +25,7 @@ enable agentos-keeper-enroll.path
 enable agentos-keeper-kernel.service
 # The recovery-key rotation's socket (REC-4): its one-shot runs per connection.
 enable agentos-keeper-rotate.socket
+# The mail clerk, after the kernel, which hands it its key (MAIL-unit).
+enable agentos-keeper-mail.service
 # Debian's nftables.service runs /etc/nftables.conf, which flushes the whole ruleset.
 disable nftables.service
