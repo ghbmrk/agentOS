@@ -1,6 +1,6 @@
 # UPD-7t: the stable-release gate (soak plus attestations), with its test and marker
 
-Work item #1013. Source: `dispatch/2026-10-29-pre-migration-triage.md` §4; acceptance from `docs/conv-5-uncovered.md` (UPD-7t row).
+Work item #1013 (the 2026-10-29 pre-migration triage put it in "brief first"). Acceptance from `docs/conv-5-uncovered.md` (UPD-7t row).
 
 ## Goal
 
@@ -17,16 +17,18 @@ UPD-7 (primary), UPD-5 (the stable soak row), UPD-4 (fast boxes take releases un
 `func (v *Verified) StableReady(atts [][]byte, own ed25519.PublicKey, channel string, firstSeen, now time.Time, soakDays, minPasses int) (Wait, error)`
 
 - `Wait` is a small typed result: ready, or not ready with a reason the wiring can turn into owner text (CH-12) and, where one exists, an `Until` time. Reasons: `soak` (with `Until`), `attestations` (with how many more independent passes are needed), `no attestor listed`, `pinned`.
-- **Fast box** (`channel == ChannelFast`): ready with no soak and no attestation (UPD-4, UPD-7: fast boxes are the ones that produce attestations).
+The rules apply in this order: pinned, then security fix, then fast, then ordinary stable.
+
 - **Pinned** (`"pinned"` or any value other than stable or fast): not ready, reason `pinned`. Fail closed on an unknown channel.
-- **Security fix** (`v.Security()`): the answer is `SecurityAutoStage(atts, own)`; no soak (UPD-5 security row). One entry point, so the wiring cannot pick the wrong rule.
+- **Security fix**, on either channel: the answer is `SecurityAutoStage(atts, own)`, with no soak (UPD-5 security row). Branch on the predicate `SecurityAutoStage` itself uses (`v.release.Security || v.coversFix`, `attest.go`), never on `v.Security()`: that is true only once `WithAttestations` has checked an attestation (`store.go`, "never the manifest flag alone"), so an unattested fix would fall through to the soak, and a release that only covers a fix (`coversFix`) would be missed. UPD-8 has no fast-box exception, so a security fix on a fast box also needs one independent attestation. One entry point, so the wiring cannot pick the wrong rule.
+- **Fast box** (`channel == ChannelFast`), ordinary release: ready with no soak and no attestation (UPD-4, UPD-7: fast boxes are the ones that produce attestations).
 - **Ordinary release on a stable box:** ready only when both hold (UPD-5 "whichever is later"):
   - `now >= firstSeen + soakDays×24h`, where `soakDays` below 7 is raised to 7 (UPD-5 "at least 7") and above `loops.MaxSoakDays` (60) is capped at 60. Define the bounds in `update` rather than import `loops`.
   - `v.IndependentPasses(atts, own) >= minPasses`, where `minPasses` below 1 is raised to 1.
 - **Fail closed on every bad input** (security lens recurring kind: a guard fails open on a missing or out-of-range value): nil or unsealed `v` returns `ErrNotChecked`; a zero `firstSeen` or a zero `now` is not ready; `now` before `firstSeen` (clock moved back) is not ready with `Until = firstSeen + soak`; a negative `soakDays` or `minPasses` takes the floor, never zero.
-- **Empty allow-list:** not ready, reason `no attestor listed`. This is the brief's reading of SPEC v1.0 and differs from the deleted M6, which let the soak alone apply when no attestor was listed (because the owner then approved every image release). v1.0 UPD-5 says soak **and** attestations, UPD-8 pins the project's test box as the interim entry so a correctly built image never has an empty list, and UPD-9 says ordinary releases never ask the owner, so the old fallback would let a release in with neither attestation nor approval. A reviewer who reads it otherwise raises it at the first review (OPERATING §4 "doubt about direction"), not as a late blocker.
+- **Empty allow-list** (neither `v.allowed` nor `v.pinned` holds a key, the same test as `restsOnPolicy` in `store.go`; a box whose only entry is the interim test box is not empty): not ready, reason `no attestor listed`. This is the brief's reading of SPEC v1.0 and differs from the deleted M6, which let the soak alone apply when no attestor was listed (because the owner then approved every image release). v1.0 UPD-5 says soak **and** attestations, UPD-8 pins the project's test box as the interim entry so a correctly built image never has an empty list, and UPD-9 says ordinary releases never ask the owner, so the old fallback would let a release in with neither attestation nor approval. A reviewer who reads it otherwise raises it at the first review (OPERATING §4 "doubt about direction"), not as a late blocker.
 - `now` must be the clock guard's `Earliest` (`broker/clock`, "a soak … uses Earliest"), so a clock moved forward cannot end the soak early. The gate takes `now` as a value; its doc comment says where it must come from.
-- **Not in the gate:** behavior-changing releases needing the owner (CHG-3, the change pipeline's), the quiet window and jitter (`broker/apply` A3), and the first-sighting record.
+- **Not in the gate:** UPD-5's "local requalification" before an ordinary stable release (the wiring row's, through the change pipeline's qualification), behavior-changing releases needing the owner (CHG-3, the change pipeline's), the quiet window and jitter (`broker/apply` A3), and the first-sighting record.
 
 ## Acceptance tests
 
@@ -36,9 +38,9 @@ UPD-7 (primary), UPD-5 (the stable soak row), UPD-4 (fast boxes take releases un
 - UPD-5: `soak_test.go::TestSoakDaysAreFloored` — `soakDays` 0, -1 and 3 behave as 7; 61 behaves as 60. Catches a zero or negative soak (fails open).
 - UPD-8: `soak_test.go::TestOnlyIndependentFastPassesCount` — a pass on the stable channel, a fail, a pass by the box's own key, a pass by a root-listed key, and a pass by an unlisted key each leave the release not ready; one listed fast pass makes it ready. With `minPasses` 2, two passes from one attestor count once.
 - UPD-8: `soak_test.go::TestEmptyAllowListNeverReady` — no attestor listed, soak long over: not ready, reason `no attestor listed`.
-- UPD-4, UPD-7: `soak_test.go::TestFastBoxTakesReleaseUnsoaked` — fast channel, `firstSeen == now`, no attestations: ready.
+- UPD-4, UPD-7, UPD-8: `soak_test.go::TestFastBoxTakesReleaseUnsoaked` — fast channel, `firstSeen == now`, no attestations: an ordinary release is ready; a security fix returns `ErrNeedsAttestation`. Catches fast checked before security.
 - UPD-4: `soak_test.go::TestPinnedAndUnknownChannelNeverReady` — `"pinned"`, `""` and `"beta"` are not ready.
-- UPD-5: `soak_test.go::TestSecurityFixFollowsSecurityAutoStage` — a security release on a stable box with `firstSeen == now` is ready with one listed fast pass and returns `ErrNeedsAttestation` with none.
+- UPD-5: `soak_test.go::TestSecurityFixFollowsSecurityAutoStage` — a security release on a stable box with `firstSeen == now` is ready with one listed fast pass and returns `ErrNeedsAttestation` (not reason `soak`) with none; the same holds for a newest release that only covers a fix (`coversFix`). Catches routing on `v.Security()`.
 - UPD-5: `soak_test.go::TestClockBackAndZeroTimesFailClosed` — zero `firstSeen`, zero `now`, `now` before `firstSeen`, and a nil `*Verified` are each not ready (nil returns `ErrNotChecked`).
 - UPD-7: `hardening_test.go::TestManifestOnlyImagesAndStrict` gains a case: a signed manifest that adds `"rollout_percent": 10` or `"cohort": "a"` is refused by the strict decoder, so no release metadata can carry a project-run rollout setting. Add `UPD-7` to that file's `REQ:` line. Check first whether the existing unknown-key case already covers it; if so, add the two keys to its table rather than a new test.
 - Mutants (potency recurring kind): the PR body lists, for each of the eight `soak_test.go` tests, the one-line mutant of `StableReady` it kills.
