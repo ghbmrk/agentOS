@@ -14,8 +14,9 @@
 //
 // A safety-list device takes reads and, only when the signed policy names
 // it, its one secure-direction command (Table). Every kind is rate-limited,
-// and a burst pauses the whole channel until the owner resumes it on the
-// enforcer's page (Resume); nothing on the channel resumes it. Every
+// and a burst from the authenticated core pauses the whole channel until
+// the owner resumes it on the enforcer's page (Resume); nothing on the
+// channel resumes it. A failed hello is dropped and never pauses it. Every
 // request is logged, and a channel command that turns a heater off or shuts
 // a valve texts the owner.
 //
@@ -136,6 +137,9 @@ type Channel struct {
 	buckets     map[Kind]*bucket
 	outstanding map[uint64]bool
 	session     *session
+	// preAuthQuiet is set while failed hellos are over KindPreAuth's
+	// bucket and dropped unlogged.
+	preAuthQuiet bool
 	// queued holds the Alerts and Answer calls made under mu; release runs
 	// them after unlocking, so a sink that sends on the channel cannot
 	// deadlock it.
@@ -196,10 +200,6 @@ func (c *Channel) Resume() {
 // wire.ExporterLabel. It returns when the stream ends or a frame is
 // refused; the daemon then closes the connection.
 func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
-	c.mu.Lock()
-	c.count(KindHello)
-	c.release()
-
 	f, err := wire.ReadFrame(rw, wire.ToEnforcer)
 	if err == nil && f.Type != wire.THello {
 		err = wire.ErrType
@@ -212,11 +212,15 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 		err = m.(wire.Hello).Verify(wire.RoleCore, c.cfg.Core, exporter)
 	}
 	if err != nil {
-		return c.refuse(KindHello, 0, "hello refused", ErrHello)
+		return c.preAuth("hello refused", ErrHello)
 	}
 	if c.cfg.Revoked(c.cfg.Core) {
-		return c.refuse(KindHello, 0, "the core's channel key is revoked", ErrRevoked)
+		return c.preAuth("the core's channel key is revoked", ErrRevoked)
 	}
+	// Only the authenticated core counts toward a pause (#3755).
+	c.mu.Lock()
+	c.count(KindHello)
+	c.release()
 	mine, err := wire.SignHello(wire.RoleEnforcer, c.cfg.Key, exporter)
 	if err != nil {
 		return err
@@ -269,6 +273,26 @@ func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	defer c.release()
 	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.count(KindRefused)
+	return err
+}
+
+// preAuth logs and drops a connection that failed before the core
+// authenticated, and returns err. It counts in KindPreAuth's bucket, which
+// never pauses: anyone who reaches the port can fail a hello, and a pause
+// would shut the real core out until the owner resumes it at home (#3755).
+// Past the bucket one line says the drops go unlogged, so a flood cannot
+// fill the log; the next line logged after the bucket refills ends that.
+func (c *Channel) preAuth(reason string, err error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.cfg.Now()
+	if c.buckets[KindPreAuth].take(now) {
+		c.preAuthQuiet = false
+		c.cfg.Log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
+	} else if !c.preAuthQuiet {
+		c.preAuthQuiet = true
+		c.cfg.Log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the channel is not paused"})
+	}
 	return err
 }
 
