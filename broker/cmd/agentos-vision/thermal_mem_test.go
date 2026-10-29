@@ -6,8 +6,10 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"math/rand"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -49,9 +51,95 @@ func TestThermalLeavesNoFrameCopy(t *testing.T) {
 	}
 }
 
+// TestThermalLeavesNoOutline (#3792, VIS-A7): once heatBlobs has
+// returned, neither its fill stack, which held the places of a body's
+// samples, nor its labels, which marked them, is left in memory: no 16
+// int32s in a row are each a place inside the body, and no 16 in a row
+// are the body's label. The frame's top rows hold 159 lone warm samples
+// first, each its own region too small to be a body, so the body's label
+// is 160, a value no other run of the process holds 16 times over. The
+// scanner is checked to find each pattern in a slice the test fills.
+func TestThermalLeavesNoOutline(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	const w, h = 160, 120
+	body := vision.Box{X0: 40, Y0: 30, X1: 64, Y1: 90}
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	f := thermalScene(rng, w, h, 27315, []vision.Box{body})
+	lone := 0
+	for y := 2; y <= 8; y += 3 {
+		for x := 1; x < w; x += 3 {
+			binary.LittleEndian.PutUint16(f.Data[2*(y*w+x):], 27315+2400)
+			lone++
+		}
+	}
+	id := uint32(lone + 1)
+	const run = 16
+	inBody := func(v uint32) bool {
+		x, y := int(v)%w, int(v)/w
+		return v < w*h && x >= body.X0 && x < body.X1 && y >= body.Y0 && y < body.Y1
+	}
+	places := func(b []byte) bool {
+		for i := 0; i < len(b); i += 4 {
+			if !inBody(binary.LittleEndian.Uint32(b[i:])) {
+				return false
+			}
+		}
+		return true
+	}
+	labels := func(b []byte) bool {
+		for i := 0; i < len(b); i += 4 {
+			if binary.LittleEndian.Uint32(b[i:]) != id {
+				return false
+			}
+		}
+		return true
+	}
+	probe := make([]int32, run)
+	for i := range probe {
+		probe[i] = int32((body.Y0+10)*w + body.X0 + i)
+	}
+	runtime.KeepAlive(probe)
+	if scanMemoryFor(t, 4*run, 4, places) == 0 {
+		t.Fatal("the scanner did not find a run of places in the test's own slice")
+	}
+	for i := range probe {
+		probe[i] = int32(id)
+	}
+	runtime.KeepAlive(probe)
+	if scanMemoryFor(t, 4*run, 4, labels) == 0 {
+		t.Fatal("the scanner did not find a run of labels in the test's own slice")
+	}
+	clear(probe)
+	if ds := heatBlobs(f); len(ds) != 1 {
+		t.Fatalf("heatBlobs: %+v, want one body", ds)
+	}
+	clear(f.Data)
+	if n := scanMemoryFor(t, 4*run, 4, places); n != 0 {
+		t.Errorf("%d runs of the body's places are left after heatBlobs", n)
+	}
+	if n := scanMemoryFor(t, 4*run, 4, labels); n != 0 {
+		t.Errorf("%d runs of the body's label are left after heatBlobs", n)
+	}
+}
+
 // scanMemory counts the places in the process's readable, writable
 // memory holding the run whose bytes XOR key give masked.
 func scanMemory(t *testing.T, masked, key []byte) int {
+	t.Helper()
+	return scanMemoryFor(t, len(masked), 1, func(w []byte) bool {
+		for j := range w {
+			if w[j]^key[j] != masked[j] {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// scanMemoryFor counts the places, every step bytes from each region's
+// start, in the process's readable, writable memory where the n bytes
+// there match.
+func scanMemoryFor(t *testing.T, n, step int, match func([]byte) bool) int {
 	t.Helper()
 	maps, err := os.Open("/proc/self/maps")
 	if err != nil {
@@ -81,21 +169,18 @@ func scanMemory(t *testing.T, masked, key []byte) int {
 		t.Fatal(err)
 	}
 	defer mem.Close()
-	n := len(masked)
 	buf := make([]byte, 1<<20)
 	defer clear(buf)
+	// Chunks advance by a whole number of steps and overlap by at least
+	// n-1 bytes, so a run across two is seen once.
+	adv := (len(buf) - n + 1) / step * step
 	found := 0
 	for _, r := range rs {
-		// Chunks overlap by n-1 bytes, so a run across two is seen.
-		for off := r.lo; off < r.hi; off += uint64(len(buf) - n + 1) {
+		for off := r.lo; off < r.hi; off += uint64(adv) {
 			size := min(uint64(len(buf)), r.hi-off)
 			got, _ := mem.ReadAt(buf[:size], int64(off))
-			for i := 0; i+n <= got; i++ {
-				j := 0
-				for j < n && buf[i+j]^key[j] == masked[j] {
-					j++
-				}
-				if j == n {
+			for i := 0; i+n <= got && i < adv; i += step {
+				if match(buf[i : i+n]) {
 					found++
 				}
 			}
