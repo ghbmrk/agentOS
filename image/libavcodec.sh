@@ -9,6 +9,8 @@
 # DESTDIR/opt/agentos-libavcodec. Build with
 #   PKG_CONFIG_PATH=DESTDIR/opt/agentos-libavcodec/lib/pkgconfig PKG_CONFIG_SYSROOT_DIR=DESTDIR
 # and the Go build tag libavcodec. FFMPEG_TARBALL=<file> uses a local copy (still hash-checked).
+# image/camdecode.sh pins the pkg-config flags this build installs: a configure change that alters
+# them stops the image build until the pin there changes, under a NET-2 review (#3816).
 # Needs: curl (unless FFMPEG_TARBALL is set), sha256sum, tar, xz, make, cc.
 #
 # The tarball is signed by the FFmpeg release signing key FCF9 86EA 15E6 E293 A564 4F10 B432 2F04

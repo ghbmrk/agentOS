@@ -19,7 +19,7 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from test_image import MK, ROOT, check, clean_tree, exec_args, arg, ini, write  # noqa: E402
-from test_image_noexec import STOCK_TMP, SYSTEM, shipped_units  # noqa: E402
+from test_image_noexec import STOCK_TMP, SYSTEM, shipped_units, stage_binaries  # noqa: E402
 
 UNITS = MK / "mkosi.extra/usr/lib/systemd/system"
 # The keeper's files beside its units, which shipped_units (agentos* regular files) leaves out.
@@ -62,6 +62,7 @@ class KeeperTreeTest(unittest.TestCase):
             write(self.root, rel, (MK / "mkosi.extra" / rel).read_text())
         write(self.root, SYSTEM + "tmp.mount", STOCK_TMP)
         write(self.root, "usr/lib/sysusers.d/agentos-setup.conf", SYSUSERS.read_text())
+        stage_binaries(self.root)
 
     def v(self):
         return check.keeper_violations(self.root)
@@ -105,7 +106,8 @@ class KeeperTreeTest(unittest.TestCase):
 
     def test_every_main_side_unit_is_masked_from_the_keeper(self):
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
-                       if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT)
+                       if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
+                       + check.EMPTY_ROOT_UNITS)
         self.assertIn("agentos-localui.service", names)
         (self.root / SYSTEM / "agentos-.service.d/50-main-side.conf").unlink()
         want = ["%s: InaccessiblePaths does not hold %s; the main side never sees the keeper's state (D-154)" % (n, p)
@@ -143,7 +145,8 @@ class KeeperTreeTest(unittest.TestCase):
             self.assertEqual(made[p][2], "0700", p)
         self.assertEqual(made["/var/lib/agentos-kernel"][3:5], ["agentos-kernel", "agentos-kernel"])
         names = sorted(n for n in (p.name for p in (self.root / SYSTEM).iterdir())
-                       if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT)
+                       if check.NOEXEC_UNITS.match(n) and n not in check.KEEPER_UNITS + check.NOEXEC_EXEMPT
+                       + check.EMPTY_ROOT_UNITS)
         self.edit("agentos-.service.d/50-main-side.conf", " /var/lib/agentos-kernel", " -/var/lib/agentos-kernel")
         self.assertEqual(self.v(), ["%s: InaccessiblePaths=-/var/lib/agentos-kernel gives no mask while the path is "
                                     "missing; the image makes it at boot (D-154)" % n for n in names])
@@ -755,8 +758,9 @@ class MailClerkUnitTest(unittest.TestCase):
         self.assertFalse(check.keeper_reach(arg(m, "anchors")))
         made = [l.split() for l in TMPFILES.read_text().splitlines() if l.strip() and not l.startswith("#")]
         self.assertNotIn(arg(m, "anchors").rsplit("/", 1)[0], [w[1] for w in made])
-        # No IMAP connection process and no reader yet (#3015, #3421): both fail closed in the main.
-        self.assertNotIn("-imap-conn", m)
+        # Each IMAP session's parser is its own process on its own socket (#3015,
+        # tests/test_image_imapconn.py); no reader yet (#3421), which fails closed in the main.
+        self.assertEqual(arg(m, "imap-conn"), ini(UNITS / "agentos-imapconn.socket")["Socket"]["ListenStream"])
         self.assertNotIn("-reader-sock", m)
 
     # REQ: CLK-1

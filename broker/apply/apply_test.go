@@ -91,16 +91,16 @@ func TestNeverAppliesDuringACallWorkOrExcludedHours(t *testing.T) {
 		set  func(bool)
 		line string
 	}{
-		{func(b bool) { r.inCall = b }, "Update 1 will install after the current call."},
-		{func(b bool) { r.working = b }, "Update 1 will install once my current task is done."},
-		{func(b bool) { r.excluded = func(time.Time) bool { return b } }, "Update 1 will install after your update-free hours."},
+		{func(b bool) { r.inCall = b }, "Update 1 will install after the current call. Nothing is needed from you."},
+		{func(b bool) { r.working = b }, "Update 1 will install once my current task is done. Nothing is needed from you."},
+		{func(b bool) { r.excluded = func(time.Time) bool { return b } }, "Update 1 will install after your update-free hours. Nothing is needed from you."},
 		{func(b bool) {
 			if b {
 				r.talk = r.clk.now().Add(-5 * time.Minute)
 			} else {
 				r.talk = time.Time{}
 			}
-		}, "Update 1 will install once your conversation pauses."},
+		}, "Update 1 will install once your conversation pauses. Nothing is needed from you."},
 	} {
 		c.set(true)
 		if ok, err := r.a.Tick(ctx); ok || err != nil {
@@ -210,7 +210,7 @@ func TestFallbackRevertsTheAdoptionAndRewindsNothing(t *testing.T) {
 	}
 	// UX-133-2: in STATUS until the next update installs, and once in
 	// the digest.
-	want := "Update 1 did not start cleanly, so I went back to the version I had. Nothing is needed from you. It won't be tried again; a later update will replace it."
+	want := "Update 1 did not start cleanly, so I went back to the version I had. It won't be tried again. Nothing is needed from you."
 	if got := r.a.Status(); got != want {
 		t.Fatalf("status: %q", got)
 	}
@@ -488,8 +488,12 @@ func TestProbeAfterProcessRestart(t *testing.T) {
 	if o := r.a.Probe(req, r.k.State()); o.Outcome != "notdone" {
 		t.Fatalf("unknown attempt: %+v", o)
 	}
-	if !strings.Contains(r.a.Status(), "installing") {
-		t.Fatalf("same boot after a broker restart: %q", r.a.Status())
+	// A security fix whose held release the restart lost is withdrawn by
+	// the next Tick, so no restart is promised (A13, #3830); until its
+	// Abandon is recorded, a reboot would boot it (#3852).
+	// Mutant: drop the stale case from installedLineLocked.
+	if got := r.a.Status(); got != "Update 1 is being withdrawn; it may start before I can undo it. Nothing is needed from you." {
+		t.Fatalf("same boot after a broker restart: %q", got)
 	}
 }
 
