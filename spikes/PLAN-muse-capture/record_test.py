@@ -169,3 +169,59 @@ def test_canary_websocket_dropped():
     f.websocket.messages.append(WebSocketMessage(2, True, b"\x08\x01" + CANARY.encode()))
     rec.Recorder().websocket_message(f)
     assert f.websocket.messages[-1].dropped
+
+
+def enc_post(body, hdrs):
+    return tflow.tflow(req=tutils.treq(method=b"POST", path=b"/x", content=body, headers=hdrs))
+
+
+def test_uninspectable_bodies_refused_and_logged():
+    import gzip
+    from urllib.parse import quote
+    rec, log = load(canary=CANARY)
+    said = "Reply ok. " + CANARY
+    cases = [
+        (said.encode(), ((b"content-encoding", b"snappy"),)),
+        (said.encode(), ((b"content-encoding", b"gzip, br"),)),
+        (gzip.compress(said.encode()), ((b"content-type", b"application/octet-stream"),)),
+        (b"\x01\x00\x00\x00\x20" + gzip.compress(said.encode()), ((b"content-type", b"application/grpc"), (b"grpc-encoding", b"gzip"))),
+        (said.encode("utf-16"), ((b"content-type", b"text/plain"),)),
+        (b"\x0a\x03abc", ((b"content-type", b"application/grpc"),)),  # binary, no canary: still refused
+    ]
+    for body, hdrs in cases:
+        assert blocked(rec, enc_post(body, hdrs)), (body[:20], hdrs)
+    recs = [json.loads(l) for l in records(log).splitlines()]
+    assert len(recs) == len(cases) and all(r["blocked"] for r in recs)
+
+
+def test_canary_seen_through_text_encodings():
+    from urllib.parse import quote
+    rec, _ = load(canary=CANARY)
+    said = "Reply ok. " + CANARY
+    for body in (json.dumps({"p": base64.b64encode(said.encode()).decode()}),
+                 json.dumps({"p": said}, ensure_ascii=True).replace(CANARY[:4], "\\u006d\\u0063\\u0061\\u0070"),
+                 "q=" + "".join("%%%02X" % c for c in said.encode())):
+        assert blocked(rec, post(body.encode(), b"application/json")), body
+
+
+def test_hook_error_refuses():
+    rec, log = load(canary=CANARY)
+    f = post(b'{"a":1}', b"application/json")
+    orig = rec.body_shape
+    rec.body_shape = lambda *a: 1 / 0
+    try:
+        rec.Recorder().request(f)
+    finally:
+        rec.body_shape = orig
+    assert f.response.status_code == 503
+    r = json.loads(records(log))
+    assert r["blocked"] and r["error"] == "ZeroDivisionError"
+
+
+def test_binary_websocket_message_dropped():
+    from mitmproxy.websocket import WebSocketMessage
+    rec, _ = load(canary=CANARY)
+    f = tflow.twebsocketflow()
+    f.websocket.messages.append(WebSocketMessage(2, True, b"\xff\x00\x13"))
+    rec.Recorder().websocket_message(f)
+    assert f.websocket.messages[-1].dropped

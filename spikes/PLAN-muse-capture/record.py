@@ -182,15 +182,57 @@ def carries_canary(*parts):
     return bool(CANARY) and any(CANARY in p for p in parts if p)
 
 
-def is_model_call(flow):
+def readable(raw):
+    """The views of a body the canary is checked in, or None when the body cannot be fully
+    inspected (an undecodable content-encoding, binary or compressed data, UTF-16, control bytes). Such a
+    body is refused, so the guard fails closed on what it cannot read."""
+    if not raw:
+        return [b""]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):  # binary framing
+        return None
+    from urllib.parse import unquote_plus
+    views = [text, unquote_plus(text)]
+    try:
+        views.append(json.dumps(json.loads(text), ensure_ascii=False))  # \u escapes
+    except Exception:
+        pass
+    for run in re.findall(r"[A-Za-z0-9+/_-]{16,}={0,2}", text):  # base64 of text
+        for dec in (base64.b64decode, base64.urlsafe_b64decode):
+            try:
+                views.append(dec(run + "=" * (-len(run) % 4)).decode("utf-8"))
+            except Exception:
+                pass
+    return [v.encode() for v in views]
+
+
+def body_views(req):
+    try:
+        raw = req.get_content(strict=True)
+    except Exception:
+        return None
+    return readable(raw or b"")
+
+
+def opaque_or_model_call(flow):
+    """("opaque", "canary" or "keys") for a request to refuse unless a turn is granted, else ""."""
     req = flow.request
-    raw = req.get_content(strict=False) or b""
-    if carries_canary(raw, req.raw_content, req.path.encode(errors="replace"),
+    from urllib.parse import unquote_plus
+    if carries_canary(req.raw_content, req.path.encode(errors="replace"),
+                      unquote_plus(req.path).encode(errors="replace"),
                       b"\n".join(v.encode(errors="replace") for v in req.headers.values())):
-        return True
-    if req.method not in ("POST", "PUT", "PATCH"):
-        return False
-    return body_has_model_key(raw)
+        return "canary"
+    views = body_views(req)
+    if views is None:
+        return "opaque"
+    if carries_canary(*views):
+        return "canary"
+    if req.method in ("POST", "PUT", "PATCH") and body_has_model_key(views[0]):
+        return "keys"
+    return ""
 
 
 def take_turn():
@@ -200,20 +242,33 @@ def take_turn():
     return False
 
 
+def refuse(flow):
+    from mitmproxy import http
+    flow.response = http.Response.make(503, b'{"error":"blocked by capture"}',
+                                       {"content-type": "application/json"})
+
+
 class Recorder:
     def request(self, flow):
+        # Fail closed: the block is decided first, and any error refuses the request.
         req = flow.request
-        rec = {"dir": "req", "host": req.pretty_host, "method": req.method,
-               "path": norm_path(req.path), "query_keys": sorted(req.query.keys()),
-               "headers": headers(req.headers, False),
-               "body": body_shape(req.get_content(), req.headers.get("content-type"))}
-        if is_model_call(flow):
-            rec["model_call"] = True
-            if not take_turn():
-                from mitmproxy import http
-                rec["blocked"] = True
-                flow.response = http.Response.make(503, b'{"error":"blocked by capture"}',
-                                                   {"content-type": "application/json"})
+        rec = {"dir": "req"}
+        try:
+            rec.update(host=req.pretty_host, method=req.method, path=norm_path(req.path))
+            why = opaque_or_model_call(flow)
+            if why == "opaque":
+                rec.update(opaque=True, blocked=True)
+                refuse(flow)
+            elif why:
+                rec.update(model_call=True, why=why)
+                if not take_turn():
+                    rec["blocked"] = True
+                    refuse(flow)
+            rec.update(query_keys=sorted(req.query.keys()), headers=headers(req.headers, False),
+                       body=body_shape(req.get_content(strict=False), req.headers.get("content-type")))
+        except Exception as e:
+            rec.update(blocked=True, error=type(e).__name__)
+            refuse(flow)
         flow.metadata["rec"] = rec
         log(rec)
 
@@ -221,23 +276,37 @@ class Recorder:
         if flow.metadata.get("rec", {}).get("blocked"):
             return
         r = flow.response
-        log({"dir": "resp", "host": flow.request.pretty_host, "method": flow.request.method,
-             "path": norm_path(flow.request.path), "status": r.status_code,
-             "headers": headers(r.headers, True),
-             "body": body_shape(r.get_content(), r.headers.get("content-type"))})
+        rec = {"dir": "resp", "host": flow.request.pretty_host, "method": flow.request.method,
+               "path": norm_path(flow.request.path), "status": r.status_code}
+        try:
+            rec.update(headers=headers(r.headers, True),
+                       body=body_shape(r.get_content(strict=False), r.headers.get("content-type")))
+        except Exception as e:
+            rec["error"] = type(e).__name__
+        log(rec)
 
     def websocket_message(self, flow):
         m = flow.websocket.messages[-1]
-        try:
-            s = shape(json.loads(m.content))
-        except Exception:
-            s = {"len": len(m.content)}
         rec = {"dir": "ws-" + ("out" if m.from_client else "in"), "host": flow.request.pretty_host,
-               "path": norm_path(flow.request.path), "body": s}
-        if m.from_client and (carries_canary(m.content) or body_has_model_key(m.content)):
-            rec["model_call"] = True
-            if not take_turn():
-                rec["blocked"] = True
+               "path": norm_path(flow.request.path)}
+        try:
+            try:
+                rec["body"] = shape(json.loads(m.content))
+            except Exception:
+                rec["body"] = {"len": len(m.content)}
+            if m.from_client:
+                views = readable(m.content)
+                if views is None:
+                    rec.update(opaque=True, blocked=True)
+                    m.drop()
+                elif carries_canary(m.content, *views) or body_has_model_key(views[0]):
+                    rec["model_call"] = True
+                    if not take_turn():
+                        rec["blocked"] = True
+                        m.drop()
+        except Exception as e:
+            rec.update(blocked=True, error=type(e).__name__)
+            if m.from_client:
                 m.drop()
         log(rec)
 

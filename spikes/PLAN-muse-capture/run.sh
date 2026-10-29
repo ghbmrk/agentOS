@@ -36,6 +36,7 @@ stop() {
 
 start() { # start PHASE TURNS MODE-ARGS...
 	phase=$1 turns=$2; shift 2
+	[ -s "$W/canary" ] || { echo "run.sh: no canary in $W/canary; run setup first" >&2; exit 1; }
 	stop
 	MUSE_CAP_LOG="$W/log.jsonl" MUSE_CAP_PHASE="$phase" MUSE_CAP_ALLOW_TURNS="$turns" MUSE_CAP_CANARY="$(cat "$W/canary")" \
 		"$W/venv/bin/mitmdump" -q --listen-host 127.0.0.1 -p $PORT --set confdir="$W/mitm" \
@@ -113,7 +114,7 @@ for n, line in enumerate(open(sys.argv[1]), 1):
         seen[key] = seen.get(key, 0) + 1
 for (ph, h, m, p), c in sorted(seen.items(), key=str):
     print(f"{ph}\t{h}\t{m}\t{p}\t{c}")
-turns = [r for r in map(json.loads, open(sys.argv[1])) if r.get("model_call")]
+turns = [r for r in map(json.loads, open(sys.argv[1])) if r.get("model_call") or r.get("opaque")]
 for ph in sorted({r.get("phase") for r in turns}, key=str):
     t = [r for r in turns if r.get("phase") == ph]
     print(f"model calls in {ph}: {len(t)}, blocked: {sum(1 for r in t if r.get('blocked'))}")

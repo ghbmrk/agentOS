@@ -20,7 +20,13 @@ message is treated as a model call, and refused unless a turn is granted, when a
 form fields and string fields such as GraphQL `variables`. That key detector is for the log;
 the guard is a canary: every test prompt ends with this run's token (`run.sh canary`), and any
 request (any method, body, path, query or header) or client websocket message carrying it is
-refused, whatever its shape, endpoint or encoding, protobuf included. Never a token, cookie, prompt,
+refused, whatever its shape or endpoint. The canary is looked for in the body after any HTTP
+content-encoding mitmproxy decodes, percent-decoded, JSON-unescaped, and inside base64 of text.
+A body it cannot fully read (an unknown or stacked content-encoding, binary, protobuf or gRPC
+frames, application-level compression, base64 of compressed data, UTF-16) is refused whether or
+not it carries the canary, and so is any request whose check raises an error. So a CLI that
+speaks only binary bodies cannot complete the capture; that shows as `opaque` records and is a
+stop. The guard does not cover traffic that bypasses the proxy (stop list below). Never a token, cookie, prompt,
 reply, email or account id; `record_test.py` checks this with synthetic canaries and `run.sh scan`
 re-checks the real log. No raw flow file is written. The CLI's login lives under
 `$TMPDIR/agentos-muse-capture/home` and `run.sh clean` logs it out and deletes it. Only
