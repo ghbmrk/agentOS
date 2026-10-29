@@ -6,7 +6,8 @@ import "time"
 type Kind string
 
 const (
-	KindHello    Kind = "hello"    // a connection
+	KindHello    Kind = "hello"    // a connection the core authenticated
+	KindPreAuth  Kind = "preauth"  // a connection dropped before it authenticated
 	KindCommand  Kind = "command"  // a device command
 	KindTighten  Kind = "tighten"  // a closed-list tightening
 	KindRead     Kind = "read"     // a read
@@ -20,7 +21,8 @@ const (
 
 // Limit is a token bucket: Burst at once, then one more every Every. A
 // request that finds its kind's bucket empty is a burst, and pauses the
-// channel (NET-2 Channel).
+// channel (NET-2 Channel). KindPreAuth is the one bucket that never pauses:
+// past it, failed hellos are still dropped but no longer logged one by one.
 type Limit struct {
 	Burst int
 	Every time.Duration
@@ -39,6 +41,7 @@ var DefaultLimits = map[Kind]Limit{
 	KindHead:     {Burst: 600, Every: 100 * time.Millisecond},
 	KindAnswer:   {Burst: 30, Every: 2 * time.Second},
 	KindRefused:  {Burst: 10, Every: time.Minute},
+	KindPreAuth:  {Burst: 10, Every: time.Minute},
 }
 
 type bucket struct {
