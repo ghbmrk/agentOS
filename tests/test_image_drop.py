@@ -160,6 +160,25 @@ class NeededTest(unittest.TestCase):
         self.assertIn("usr/bin/lslogins", drop.FILES)
         self.assertEqual(set(drop.PARTIAL), {"liblastlog2-2"})
 
+    def test_krb5_goes_with_tirpc(self):
+        # libtirpc3t64 was the image's only krb5 user (its Depends on libgssapi-krb5-2), and krb5
+        # the only user of libkeyutils1. The build's NEEDED check refuses the tree if anything kept
+        # still links one of them.
+        krb5 = ("libgssapi-krb5-2", "libkrb5-3", "libk5crypto3", "libkrb5support0")
+        self.assertEqual({drop.DROP[p][0] for p in krb5}, {"krb5"})
+        self.assertEqual(drop.DROP["libkeyutils1"][0], "keyutils")
+        self.assertNotIn("krb5", {drop.DROP[p][0] for p in drop.PARTIAL})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(stdout="")
+
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "FILES", ()):
+            drop.main(str(self.root))
+        purged = [p for c in calls if c[1:3] == ["dpkg", "--purge"] for p in c if not p.startswith("-")]
+        self.assertTrue(set(krb5 + ("libkeyutils1",)) <= set(purged))
+
     def test_bzip2_goes_with_dpkg_deb(self):
         # dpkg-deb is libbz2's only user (traced in trixie with the image's own package list). The
         # account tools (passwd, login.defs, adduser and libsemanage2's chain) came only with polkitd,
