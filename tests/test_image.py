@@ -2314,7 +2314,8 @@ class ConfFilesTest(unittest.TestCase):
                         f.unlink()
         self.assertEqual(sorted(check.SERVICE_DIRS), sorted((
             "var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user",
-            "var/lib/private", "run/agentos-egress", "run/agentos-localui")))
+            "var/lib/private", "run/agentos-egress", "run/agentos-localui", "run/agentos-mail",
+            "var/lib/agentos-mail")))
 
     def test_a_dotdot_after_a_box_mount_or_a_missing_step_cannot_reach_run_lock(self):
         # #1702 (Security 1): /run/.. is / on the box, so /run/../var/lock is /var/lock, which is
@@ -5483,8 +5484,8 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-localui", "agentos-model",
-                                 "agentos-modem", "agentos-owner"])
+        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-localui", "agentos-mail",
+                                 "agentos-model", "agentos-modem", "agentos-owner", "agentos-planner"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem")):
             s = ini(unit)["Service"]
             self.assertEqual((s["User"], s["Group"]), (user, user))
@@ -5887,6 +5888,7 @@ UNIT_DEVICES = {
     "agentos-keeper-rotate@.service": ("root", "closed"),
     "agentos-keeper-pageca.service": ("root", "closed"),
     "agentos-keeper-setup@.service": ("root", "closed"),
+    "agentos-keeper-mail.service": ("agentos-mail", "private"),
     "agentos-modem-env.service": ("root", "private"),
     "agentos-reboot.service": ("root", "closed; block-* r, /dev/mapper/control rw"),
     "agentosd.service": ("root", "none"),
