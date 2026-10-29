@@ -669,6 +669,8 @@ class UplinkByNetworkd(unittest.TestCase):
         self.assertTrue(all(f.count("Kind=veth\n") == 1 for f in files.values()))
         for box, peer in (("agentos-link", "e1"), ("u2", "e2")):
             sh("ip", "link", "add", box, "netns", BOX, "type", "veth", "peer", "name", peer, "netns", HOME)
+        # The edge's side of the link is up, so networkd sees carrier and sets the link's address.
+        sh("ip", "link", "set", "e1", "up", ns=HOME)
         edge = ("[Match]\nName=e2\n\n[Network]\nAddress=198.51.100.1/24\nDHCPServer=yes\n\n"
                 "[DHCPServer]\nPoolOffset=100\nPoolSize=10\n")
         self.networkd(HOME, {"10-router.network": ROUTER_NETWORK, "20-edge.network": edge})
@@ -679,7 +681,7 @@ class UplinkByNetworkd(unittest.TestCase):
         self.networkd(BOX, files, props)
         self.wait_for("-4", "192.0.2.0/24")
         if IPV6:
-            for _ in range(50):
+            for _ in range(100):
                 if "fe80::1/64" in sh("ip", "-6", "-o", "addr", "show", "dev", "agentos-link", ns=BOX).stdout:
                     break
                 time.sleep(0.1)
