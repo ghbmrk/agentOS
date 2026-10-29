@@ -208,8 +208,22 @@ func (c *Clerk) Source(to string) key.Arg {
 
 // Admit is the recipient rule (CLK-8, KEY-2): "" when the line may text
 // a, else the refusal code. It re-reads the clerk's records whatever a's
-// Source says, so a mislabelled argument passes nothing.
+// Source says, so a mislabelled argument passes nothing. A value missing
+// from the records a's Source names is refused for that first, so a
+// planner's guess never learns whether it is the owner's or the box's
+// number (CH-1, PLN-1; Security 6507339887).
 func (c *Clerk) Admit(a key.Arg, own string) string {
+	c.mu.Lock()
+	contact, fixed := c.contacts[a.Value], c.fixed[a.Value]
+	c.mu.Unlock()
+	switch {
+	case a.Source == key.SrcClerk && !contact:
+		return RNotContact
+	case a.Source == key.SrcOwner && !fixed:
+		return RNotFixed
+	case a.Source != key.SrcClerk && a.Source != key.SrcOwner:
+		return RPlanner
+	}
 	for _, n := range []string{c.cfg.Numbers.Owner, c.cfg.Numbers.Channel, own} {
 		if sameNumber(a.Value, n) {
 			return ROwnNumber
@@ -218,26 +232,11 @@ func (c *Clerk) Admit(a key.Arg, own string) string {
 	if !dialable(a.Value) {
 		return RNotNumber
 	}
-	c.mu.Lock()
-	contact, fixed := c.contacts[a.Value], c.fixed[a.Value]
-	c.mu.Unlock()
-	switch a.Source {
-	case key.SrcClerk:
-		if !contact {
-			return RNotContact
-		}
-		return ""
-	case key.SrcOwner:
-		if !fixed {
-			return RNotFixed
-		}
-		// A short or premium-rate code passes only as a contact.
-		if sendrules.CheckRecipient(a.Value, "", "") != nil {
-			return RNeedContact
-		}
-		return ""
+	// A short or premium-rate code passes only as a contact.
+	if a.Source == key.SrcOwner && sendrules.CheckRecipient(a.Value, "", "") != nil {
+		return RNeedContact
 	}
-	return RPlanner
+	return ""
 }
 
 // sameNumber is a == n, or a's digits, whatever separators it was saved
