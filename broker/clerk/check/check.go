@@ -87,7 +87,7 @@ func verify(anchors []key.PublicKey, name string, facts Facts, now int64, r kern
 		if !d.Held {
 			return ver, &key.Refusal{Code: RHold, Detail: "step was not held"}
 		}
-		if now < ver.Limits.Due(d.HeldAt, d.Novel) {
+		if !d.Approved && now < ver.Limits.Due(d.HeldAt, d.Novel) {
 			return ver, &key.Refusal{Code: RHold, Detail: "window not over"}
 		}
 	}

@@ -105,7 +105,7 @@ func plain(d policy.Document) policy.Document {
 	}
 	for i := range d.Devices {
 		v := &d.Devices[i]
-		v.ID, v.WiFi, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Secure)
+		v.ID, v.WiFi, v.Class, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Class), ascii(v.Secure)
 		for j := range v.Allow {
 			v.Allow[j] = ascii(v.Allow[j])
 		}
@@ -176,6 +176,15 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 			add("Put %s on the safety list: it acts only on your passkey here at home.", d.ID)
 		}
 	}
+	// An everyday device has no class, so the safety-list line above
+	// already says what it is.
+	switch {
+	case o.Class == d.Class || d.Everyday:
+	case o.Everyday:
+		add("Record %s as %s.", d.ID, classWords(d.Class))
+	default:
+		add("Record %s as %s, not %s.", d.ID, classWords(d.Class), classWords(o.Class))
+	}
 	if o.Secure != d.Secure {
 		add("Change %s's one secure command from %s to %s.", d.ID, none(o.Secure), none(d.Secure))
 	}
@@ -202,7 +211,25 @@ func safety(d policy.Device) string {
 	if d.Everyday {
 		return "It is an everyday device: agentOS may switch it without asking you."
 	}
-	return "It is on the safety list: it acts only on your passkey here at home."
+	return fmt.Sprintf("It is on the safety list as %s: it acts only on your passkey here at home.", classWords(d.Class))
+}
+
+// classWords is a NET-2 safety class in the page's words. A device without
+// one is of unknown type.
+func classWords(c string) string {
+	switch c {
+	case "":
+		return "a device of unknown type"
+	case policy.ClassFeedValve:
+		return "a valve that feeds sprinklers, heating or a medical supply"
+	case policy.ClassPrimaryHeating:
+		return "primary heating"
+	case policy.ClassGarageDoor:
+		return "a garage door"
+	case policy.ClassAlarm, policy.ClassOven:
+		return "an " + c
+	}
+	return "a " + c
 }
 
 // labelWords is a NET-1 label in the page's words. A device without one is

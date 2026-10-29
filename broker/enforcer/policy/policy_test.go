@@ -157,9 +157,9 @@ func home(v uint64) Document {
 		Version:      v,
 		Destinations: []string{"mail.example", "models.example"},
 		Devices: []Device{
-			{ID: "plug", Network: NetDevices, WiFi: "vlan101", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Secure: "off"},
-			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true},
-			{ID: "lock", Network: NetDevices, Allow: []string{"lock.example"}, VendorCloud: true, Secure: "lock"},
+			{ID: "plug", Network: NetDevices, WiFi: "vlan101", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Class: ClassPlug, Secure: "off"},
+			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true, Class: ClassCamera},
+			{ID: "lock", Network: NetDevices, Allow: []string{"lock.example"}, VendorCloud: true, Class: ClassLock, Secure: "lock"},
 			{ID: "tv", Network: NetDevices, WiFi: "vlan104", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Everyday: true},
 			{ID: "speaker", Network: NetDevices, WiFi: "vlan105", Allow: []string{"s.example"}, Everyday: true},
 		},
@@ -242,13 +242,19 @@ func TestClassifyClosedList(t *testing.T) {
 		}},
 	}
 	loose := map[string]func(d *Document, s sub){
-		"add a host":             func(d *Document, s sub) { dev(d, s.x).Allow = append(dev(d, s.x).Allow, "x.example") },
-		"swap a host":            func(d *Document, s sub) { dev(d, s.x).Allow = []string{"a.example", "x.example"} },
-		"move network":           func(d *Document, s sub) { dev(d, s.x).Network = NetHousehold },
-		"change Wi-Fi identity":  func(d *Document, s sub) { dev(d, s.x).WiFi = "vlan201" },
-		"relabel":                func(d *Document, s sub) { dev(d, s.x).Label = LabelContained },
-		"un-isolate":             func(d *Document, s sub) { dev(d, s.x).Isolated = false }, // run on an isolated base below
-		"toggle the safety list": func(d *Document, s sub) { dev(d, s.x).Everyday = !dev(d, s.x).Everyday; dev(d, s.x).Secure = "" },
+		"add a host":            func(d *Document, s sub) { dev(d, s.x).Allow = append(dev(d, s.x).Allow, "x.example") },
+		"swap a host":           func(d *Document, s sub) { dev(d, s.x).Allow = []string{"a.example", "x.example"} },
+		"move network":          func(d *Document, s sub) { dev(d, s.x).Network = NetHousehold },
+		"change Wi-Fi identity": func(d *Document, s sub) { dev(d, s.x).WiFi = "vlan201" },
+		"relabel":               func(d *Document, s sub) { dev(d, s.x).Label = LabelContained },
+		"un-isolate":            func(d *Document, s sub) { dev(d, s.x).Isolated = false }, // run on an isolated base below
+		"toggle the safety list": func(d *Document, s sub) {
+			dev(d, s.x).Everyday = !dev(d, s.x).Everyday
+			dev(d, s.x).Class, dev(d, s.x).Secure = "", ""
+		},
+		"change the class": func(d *Document, s sub) {
+			dev(d, s.x).Everyday, dev(d, s.x).Class, dev(d, s.x).Secure = false, ClassHeater, "off"
+		},
 		"add a pair":             func(d *Document, s sub) { d.Pairs = append(d.Pairs, Pair{A: s.x, B: "lock"}) },
 		"widen the rule":         func(d *Document, s sub) { rule(d, s.r).ToMS = 2500 },
 		"shift the rule":         func(d *Document, s sub) { rule(d, s.r).FromMS, rule(d, s.r).ToMS = 1500, 2500 },
@@ -338,7 +344,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure", "Label"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},
@@ -922,11 +928,54 @@ func TestCanonicalDocument(t *testing.T) {
 		"empty window":              func(d *Document) { d.Standing[0].ToMS = d.Standing[0].FromMS },
 		"orphan hold":               func(d *Document) { d.Holds[0].Device = "fridge" },
 		"secure on everyday device": func(d *Document) { dev(d, "tv").Secure = "off" },
+		"unknown class":             func(d *Document) { dev(d, "cam").Class = "webcam" },
+		"class on everyday device":  func(d *Document) { dev(d, "tv").Class = ClassPlug },
+		"camera named off":          func(d *Document) { dev(d, "cam").Secure = "off" },
+		"lock named off":            func(d *Document) { dev(d, "lock").Secure = "off" },
+		"unknown type named":        func(d *Document) { dev(d, "plug").Class = "" },
 		"spaced Wi-Fi identity":     func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
 		"Wi-Fi identity newline":    func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// NET-2 Safety devices (#3748): a safety-list device can be named safe for
+// only the one secure direction its class allows, so the signed policy
+// refuses a camera, microphone, alarm, siren or sensor named for any
+// command, primary heating or a valve that feeds sprinklers, heating or a
+// medical supply named at all, and a device of unknown type named. Catches
+// a naming loosening that names a camera or primary heating "off", which
+// the channel would then carry. Revert mutant: check accepting any
+// non-empty name passes the camera's "off".
+func TestNamingByClass(t *testing.T) {
+	names := []string{"lock", "shut", "off", "close", "return-to-dock", "on", "open", "unlock"}
+	want := map[string]string{
+		ClassLock: "lock", ClassValve: "shut", ClassHeater: "off", ClassOven: "off", ClassPlug: "off",
+		ClassRelay: "off", ClassGarageDoor: "close", ClassDrone: "return-to-dock",
+		ClassFeedValve: "", ClassPrimaryHeating: "", ClassCamera: "", ClassMicrophone: "",
+		ClassAlarm: "", ClassSiren: "", ClassSensor: "", "": "",
+	}
+	if len(want) != len(classSecure)+1 {
+		t.Fatal("a class has no row")
+	}
+	for class, named := range want {
+		for _, s := range append(names, "") {
+			d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Class: class, Secure: s}}}
+			_, err := Encode(d)
+			if ok := s == "" || s == named; (err == nil) != ok {
+				t.Errorf("a %q named %q: %v, want valid %v", class, s, err, ok)
+			}
+			if got := Nameable(class, s); got != (s != "" && s == named) {
+				t.Errorf("Nameable(%q, %q) = %v", class, s, got)
+			}
+		}
+		// Off the safety list a device has no class.
+		d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Everyday: true, Class: class}}}
+		if _, err := Encode(d); (err == nil) != (class == "") {
+			t.Errorf("an everyday %q: %v", class, err)
 		}
 	}
 }

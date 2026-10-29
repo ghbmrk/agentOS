@@ -1,6 +1,7 @@
 package kernel
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 
@@ -181,7 +182,7 @@ func Next(s *State, id string, now int64) Act {
 		a.Kind, a.Novel = ActHold, s.seen[p.Root][Shape(sp)] <= 0
 		return a
 	}
-	if st.Phase == PHeld {
+	if st.Phase == PHeld && !st.Approved {
 		if due := v.Limits.Due(st.HeldAt, st.Novel); now < due {
 			a.WakeAt = due
 			return a
@@ -228,6 +229,8 @@ type Dispatch struct {
 	Held   bool
 	HeldAt int64
 	Novel  bool
+	// Approved is a code approval of the step, which ends its hold (codeapproval.go).
+	Approved bool
 }
 
 // View is the read-only part of the state a clerk checks against (CLK-2).
@@ -294,6 +297,8 @@ type Kernel struct {
 	// handed out and Resealed has not had back (erase.go).
 	backups   Backups
 	resealing map[string]bool
+	// checker is the checker process's key, from the store's pins (PinChecker).
+	checker ed25519.PublicKey
 }
 
 var ErrDuplicatePlan = errors.New("kernel: plan id already used")

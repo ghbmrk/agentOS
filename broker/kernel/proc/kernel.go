@@ -33,6 +33,9 @@ type KernelConfig struct {
 	// Pinned is the image's pinned roots (kernel.State.Pin): granted from
 	// the image, never anchors.
 	Pinned []key.Key
+	// Checker is the checker process's key, from the store's pins
+	// (kernel.PinChecker); none approves no step on a code.
+	Checker ed25519.PublicKey
 	// KeyDir is the subject-key table's directory (FileKeys, sealed under
 	// Key), opened at start so content opens (KRN-erase). "" keeps content
 	// closed (kernel.ErrContentClosed); only tests start a kernel so.
@@ -146,6 +149,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		st.Close()
 		return nil, err
 	}
+	k.PinChecker(cfg.Checker)
 	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock, head: cfg.Sign}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
