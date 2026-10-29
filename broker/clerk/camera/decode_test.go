@@ -12,6 +12,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -351,6 +352,178 @@ func TestClerkDoesNotLinkDecoder(t *testing.T) {
 				}
 				return true
 			})
+		}
+	}
+}
+
+// decoderCgo is the decoder's one cgo file (TestClerkDoesNotLinkDecoder).
+const decoderCgo = "../../cmd/agentos-camdecode/camdecode/h264.go"
+
+// cgoPin is everything h264.go's cgo may name today: the preamble's
+// preprocessor lines, in order; every identifier of its C code, which
+// holds no comment the C compiler would see and no string or character
+// literal; and every C name its Go code uses. A preamble that adds a
+// local name has to add it here too.
+var cgoPin = struct{ directives, cIdents, goNames []string }{
+	directives: []string{
+		"#cgo pkg-config: libavcodec libavutil",
+		"#cgo LDFLAGS: -lm",
+		"#include <errno.h>",
+		"#include <string.h>",
+		"#include <libavcodec/avcodec.h>",
+		"#include <libavutil/log.h>",
+		"#include <libavutil/pixfmt.h>",
+	},
+	cIdents: strings.Fields(`AVCodec AVCodecContext AVERROR AVERROR_EOF AVFrame AVPacket AV_CODEC_ID_H264
+		AV_LOG_QUIET AV_PIX_FMT_YUV420P AV_PIX_FMT_YUVJ420P EAGAIN ENOMEM NULL av_frame_free
+		av_log_set_level av_new_packet av_packet_free av_packet_unref avcodec_alloc_context3
+		avcodec_find_decoder avcodec_free_context avcodec_open2 avcodec_send_packet c cd_close
+		cd_eagain cd_eof cd_i420 cd_open cd_pack cd_send char const ctx data dst f for fr h i if
+		int int64_t linesize max_pixels memcpy n p ph pkt pw r return size_t static thread_count
+		unsigned void w y`),
+	goNames: strings.Fields(`AVCodecContext AVFrame AVPacket av_frame_alloc av_frame_unref av_packet_alloc
+		avcodec_receive_frame cd_close cd_eagain cd_eof cd_i420 cd_open cd_pack cd_send int uchar`),
+}
+
+// cgoFaults lists how src, as h264.go, steps outside cgoPin. It reads the
+// preamble the way cgo and the C compiler do: the doc comment of the one
+// import "C", which must be a single block comment; backslash-newlines
+// spliced first; %: and ??= read as #; a line whose first token is # a
+// directive; // to the end of a line a comment, so a literal, which could
+// hold one, is a fault.
+func cgoFaults(src []byte) []string {
+	f, err := parser.ParseFile(token.NewFileSet(), decoderCgo, src, parser.ParseComments)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var faults []string
+	var doc *ast.CommentGroup
+	imports := 0
+	for _, d := range f.Decls {
+		g, isGen := d.(*ast.GenDecl)
+		if !isGen || g.Tok != token.IMPORT {
+			continue
+		}
+		for _, s := range g.Specs {
+			if s.(*ast.ImportSpec).Path.Value != `"C"` {
+				continue
+			}
+			imports++
+			if doc = s.(*ast.ImportSpec).Doc; doc == nil && len(g.Specs) == 1 {
+				doc = g.Doc
+			}
+		}
+	}
+	if imports != 1 {
+		return []string{fmt.Sprintf("%d imports of C, want 1", imports)}
+	}
+	if doc == nil || len(doc.List) != 1 || !strings.HasPrefix(doc.List[0].Text, "/*") {
+		return []string{"the preamble is not a single block comment"}
+	}
+	pre := strings.TrimSuffix(strings.TrimPrefix(doc.List[0].Text, "/*"), "*/")
+	if strings.IndexFunc(pre, func(r rune) bool { return r >= 0x80 }) >= 0 {
+		faults = append(faults, "the preamble holds a character outside ASCII")
+	}
+	pre = strings.NewReplacer("\\\r\n", "", "\\\n", "").Replace(pre)
+	pre = strings.NewReplacer("%:", "#", "??=", "#").Replace(pre)
+	var directives []string
+	idents := map[string]bool{}
+	for _, line := range strings.Split(pre, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "#") {
+			directives = append(directives, line)
+			continue
+		}
+		if line, _, _ = strings.Cut(line, "//"); strings.ContainsAny(line, `"'`) {
+			faults = append(faults, "the preamble's code holds a literal: "+line)
+		}
+		for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
+			return r != '_' && (r < '0' || r > '9') && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z')
+		}) {
+			if tok[0] < '0' || tok[0] > '9' {
+				idents[tok] = true
+			}
+		}
+	}
+	if !slices.Equal(directives, cgoPin.directives) {
+		faults = append(faults, fmt.Sprintf("the preamble's directives are %q, want %q", directives, cgoPin.directives))
+	}
+	for _, id := range slices.Sorted(maps.Keys(idents)) {
+		if !slices.Contains(cgoPin.cIdents, id) {
+			faults = append(faults, "the preamble names "+id)
+		}
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if sel, isSel := n.(*ast.SelectorExpr); isSel {
+			if x, isIdent := sel.X.(*ast.Ident); isIdent && x.Name == "C" && !slices.Contains(cgoPin.goNames, sel.Sel.Name) {
+				faults = append(faults, "the Go code uses C."+sel.Sel.Name)
+			}
+		}
+		return true
+	})
+	return faults
+}
+
+// TestDecoderCgoIsPinned: h264.go, the one file TestClerkDoesNotLinkDecoder
+// lets use cgo, links the pinned libavcodec and libavutil and libm, and
+// nothing else: its #cgo lines are exactly pkg-config libavcodec libavutil
+// and -lm, its includes exactly today's five, its C code names nothing
+// new (a socket call, a prototype, asm or a pragma), and its Go code calls
+// no C function but today's (NET-2; #3724). Each edit below, one way a
+// later change could link more into the sandbox, must fail the check
+// with the fault that names it.
+func TestDecoderCgoIsPinned(t *testing.T) {
+	src, err := os.ReadFile(decoderCgo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if faults := cgoFaults(src); len(faults) > 0 {
+		t.Fatalf("h264.go: %q", faults)
+	}
+	const (
+		pc      = "#cgo pkg-config: libavcodec libavutil\n"
+		ld      = "#cgo LDFLAGS: -lm\n"
+		inc     = "#include <libavutil/pixfmt.h>\n"
+		cOpen   = "static AVCodecContext *cd_open(int w, int h) {\n"
+		cBody   = "\tctx->thread_count = 1;\n"
+		goClose = "\td.ctx, d.pkt, d.fr = nil, nil, nil\n"
+		imC     = "import \"C\"\n"
+	)
+	edits := []struct{ name, old, new, want string }{
+		{"another library", ld, ld + "#cgo LDFLAGS: -lcurl\n", "directives"},
+		{"a changed LDFLAGS", ld, "#cgo LDFLAGS: -lm -lcurl\n", "directives"},
+		{"an object file", ld, "#cgo LDFLAGS: -lm /usr/lib/x86_64-linux-gnu/libc.a\n", "directives"},
+		{"another pkg-config module", pc, "#cgo pkg-config: libavcodec libavutil libcurl\n", "directives"},
+		{"a CFLAGS line", pc, pc + "#cgo CFLAGS: -include sys/socket.h\n", "directives"},
+		{"a dropped LDFLAGS", ld, "", "directives"},
+		{"another include", inc, inc + "#include <sys/socket.h>\n", "directives"},
+		{"a changed include", "#include <string.h>\n", "#include <stdlib.h>\n", "directives"},
+		{"a digraph include", inc, inc + "%:include <sys/socket.h>\n", "directives"},
+		{"a spliced digraph include", inc, inc + "%\\\n:include <sys/socket.h>\n", "directives"},
+		{"a trigraph include", inc, inc + "??=include <sys/socket.h>\n", "directives"},
+		{"an indented define", inc, inc + "  #define cd_eof socket\n", "directives"},
+		{"a pragma", inc, inc + "#pragma GCC poison memcpy\n", "directives"},
+		{"a socket call", cBody, cBody + "\tsocket(2, 1, 0);\n", "names socket"},
+		{"a prototype", cOpen, "int socket(int, int, int);\n" + cOpen, "names socket"},
+		{"a typedef'd declaration", cOpen, "typedef int fn(int, int, int);\nextern fn connect;\n" + cOpen, "names connect"},
+		{"asm", cBody, cBody + "\t__asm__ volatile (\"syscall\");\n", "names __asm__"},
+		{"a universal character name", cBody, cBody + "\t\\u0073ocket(2, 1, 0);\n", "names u0073ocket"},
+		{"a _Pragma operator", cBody, cBody + "\t_Pragma(\"GCC diagnostic ignored\")\n", "names _Pragma"},
+		{"a spliced name", cBody, cBody + "\tsock\\\net(2, 1, 0);\n", "names socket"},
+		{"a name outside ASCII", cBody, cBody + "\ts\u043ecket(2, 1, 0);\n", "outside ASCII"},
+		{"a call behind a literal", cBody, cBody + "\tchar *s = \"//\"; socket(2, 1, 0);\n", "literal"},
+		{"a Go call to a C function", goClose, goClose + "\tC.system(nil)\n", "uses C.system"},
+		{"a second import of C", imC, imC + "\n// #cgo LDFLAGS: -lcurl\nimport \"C\"\n", "2 imports of C"},
+		{"a split preamble", "/*\n" + pc, "/*\n#cgo LDFLAGS: -lcurl\n*/\n/*\n" + pc, "not a single block comment"},
+		{"a line-comment preamble", "/*\n" + pc, "// #cgo LDFLAGS: -lcurl\n/*\n" + pc, "not a single block comment"},
+	}
+	for _, e := range edits {
+		if bytes.Count(src, []byte(e.old)) != 1 {
+			t.Errorf("%s: %q is not in h264.go exactly once", e.name, e.old)
+			continue
+		}
+		if faults := cgoFaults(bytes.Replace(src, []byte(e.old), []byte(e.new), 1)); !slices.ContainsFunc(faults,
+			func(f string) bool { return strings.Contains(f, e.want) }) {
+			t.Errorf("%s: faults %q, want one with %q", e.name, faults, e.want)
 		}
 	}
 }
