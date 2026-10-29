@@ -287,14 +287,16 @@ type rig struct {
 	hold       bool
 	dos        int
 	atDispatch func()
-	// saves: every state the applier saved, in order.
-	saves    []state
-	inCall   bool
-	working  bool
-	excluded func(time.Time) bool
-	talk     time.Time
-	stopped  bool
-	paused   bool // the pinned channel
+	// saves: every state the applier saved, in order; afterSave runs
+	// once, after the next save.
+	saves     []state
+	afterSave func()
+	inCall    bool
+	working   bool
+	excluded  func(time.Time) bool
+	talk      time.Time
+	stopped   bool
+	paused    bool // the pinned channel
 	// atBusy runs once, when the applier next asks whether the box is
 	// working; never set while Status may run (it asks under its lock).
 	atBusy func()
@@ -317,35 +319,20 @@ func newRig(t *testing.T) *rig {
 		act:  &activator{boot: Boot{ID: "boot0", UsrRootHash: strings.Repeat(oldHash, 32), Blessed: true}},
 		pipe: &pipeline{}, state: &change.MemStore{}, mem: &kernel.MemStore{}, anc: &kernel.MemAnchor{}}
 	// The image-pinned update key: a standing root for activate only
-	// (decision 2 of brief #3423), granted in the log before the test.
+	// (decision 2 of brief #3423), granted at boot as a pinned root, not
+	// an anchor (#3701).
 	pub, priv := seedKey(40)
 	r.pinned, r.holder = key.Ed25519(pub), priv
 	r.upkey = key.Issue(key.Ed25519Signer(priv), key.Root{Clerk: Name, Verbs: []key.Verb{key.ChangeAccount}, Serial: "image"})
 	r.bootKernel()
-	_, opriv := seedKey(1)
-	_, bpriv := seedKey(12)
-	batch := []key.Key{r.upkey}
-	cos := []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}
-	if err := r.k.Issue(r.ms()-kernel.GrantHold, cos, batch...); err != nil {
-		t.Fatal(err)
-	}
 	return r
 }
 
-// anchors are the kernel's in the rig: the owner's two hardware keys and
-// the pinned update key.
-//
-// STAND-IN, NEVER WIRING: the pinned key is listed as an anchor only
-// because the kernel has no other way yet to admit a root no owner signed;
-// without it the kernel rejects every activate plan. An anchor signs
-// enrollments and cosigns for every clerk, and the pinned key's holder
-// ships in the image, so agentosd must never copy this list: #3677 gives
-// the kernel a grant of the image-pinned root that is not an anchor, and
-// this fixture moves to it then (ASSUMPTIONS MIG-4-adapters-e-1, A7).
+// anchors are the kernel's in the rig: the owner's two hardware keys.
 func (r *rig) anchors() []key.PublicKey {
 	opub, _ := seedKey(1)
 	bpub, _ := seedKey(12)
-	return []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub), r.pinned}
+	return []key.PublicKey{key.Ed25519(opub), key.Ed25519(bpub)}
 }
 
 func (r *rig) ms() int64 { return r.clk.now().UnixMilli() }
@@ -359,7 +346,7 @@ func (r *rig) bootKernel() {
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	if r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{Name: clerkSide{r}}, r.ms()); err != nil {
+	if r.k, err = kernel.Boot(l, r.anchors(), map[string]kernel.Clerk{Name: clerkSide{r}}, r.ms(), r.upkey); err != nil {
 		r.t.Fatal(err)
 	}
 }
@@ -461,6 +448,10 @@ func (s savedState) Save(b []byte) error {
 		return err
 	}
 	s.r.saves = append(s.r.saves, st)
+	if f := s.r.afterSave; f != nil {
+		s.r.afterSave = nil
+		f()
+	}
 	return nil
 }
 

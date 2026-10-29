@@ -210,15 +210,15 @@ func TestBusyBoxHoldsActivation(t *testing.T) {
 		want string
 		line string // STATUS while it holds
 	}{
-		{"call", func(r *rig, on bool) { r.inCall = on }, RBusy + ": " + busyCall, "Update 1 will install after the current call."},
-		{"work", func(r *rig, on bool) { r.working = on }, RBusy + ": " + busyWork, "Update 1 will install once my current task is done."},
-		{"excluded", func(r *rig, on bool) { r.excluded = func(time.Time) bool { return on } }, RBusy + ": " + busyExcluded, "Update 1 will install after your update-free hours."},
+		{"call", func(r *rig, on bool) { r.inCall = on }, RBusy + ": " + busyCall, "Update 1 will install after the current call. Nothing is needed from you."},
+		{"work", func(r *rig, on bool) { r.working = on }, RBusy + ": " + busyWork, "Update 1 will install once my current task is done. Nothing is needed from you."},
+		{"excluded", func(r *rig, on bool) { r.excluded = func(time.Time) bool { return on } }, RBusy + ": " + busyExcluded, "Update 1 will install after your update-free hours. Nothing is needed from you."},
 		{"talk", func(r *rig, on bool) {
 			r.talk = time.Time{}
 			if on {
 				r.talk = r.clk.now()
 			}
-		}, RBusy + ": " + busyTalk, "Update 1 will install once your conversation pauses."},
+		}, RBusy + ": " + busyTalk, "Update 1 will install once your conversation pauses. Nothing is needed from you."},
 		{"STOP", func(r *rig, on bool) { r.stopped = on }, RBusy + ": " + busyStop, "Update 1 is on hold while actions are stopped; it installs after RESUME."},
 		{"pinned channel", func(r *rig, on bool) { r.paused = on }, RPaused, pinnedWait},
 	} {
@@ -294,9 +294,10 @@ func TestFallbackAnswersFellBack(t *testing.T) {
 }
 
 // KRN-4: only the image-pinned update key covers an activation. A step
-// under any other key the kernel admits, the owner's own root for this
-// clerk or a pinned root that also names another verb, is refused by the
-// clerk's own check, and nothing is written.
+// under any other key the kernel admits, such as the owner's own root for
+// this clerk, is refused by the clerk's own check, and nothing is written.
+// A wider root of the pinned key's holder is not admitted at all, since
+// the holder is no anchor (TestWiderPinnedRootIsNotGranted).
 func TestStepWithoutKeyRefused(t *testing.T) {
 	_, opriv := seedKey(1)
 	_, bpriv := seedKey(12)
@@ -313,11 +314,6 @@ func TestStepWithoutKeyRefused(t *testing.T) {
 			k := key.Issue(key.Ed25519Signer(opriv), key.Root{Clerk: Name, Verbs: []key.Verb{key.ChangeAccount}, Serial: "owner"})
 			grant(r, k)
 			return kernel.SignPlan(kernel.Plan{ID: "upd:apply:1:n7", Key: k, Steps: []kernel.PlanStep{Step(r.a.rel)}}, opriv)
-		}},
-		{"pinned root with another verb", func(r *rig) kernel.Plan {
-			k := key.Issue(key.Ed25519Signer(r.holder), key.Root{Clerk: Name, Verbs: []key.Verb{key.ChangeAccount, key.Send}, Serial: "wide"})
-			grant(r, k)
-			return kernel.SignPlan(kernel.Plan{ID: "upd:apply:1:n8", Key: k, Steps: []kernel.PlanStep{Step(r.a.rel)}}, r.holder)
 		}},
 		{"pinned key, another release", func(r *rig) kernel.Plan {
 			st := Step(r.a.rel)
@@ -342,6 +338,20 @@ func TestStepWithoutKeyRefused(t *testing.T) {
 				t.Fatal("activated under another key")
 			}
 		})
+	}
+}
+
+// KRN-4, #3701: the pinned key's holder is no anchor, so a wider root it
+// signs is never granted, even with both owner co-signatures.
+func TestWiderPinnedRootIsNotGranted(t *testing.T) {
+	r := newRig(t)
+	_, opriv := seedKey(1)
+	_, bpriv := seedKey(12)
+	k := key.Issue(key.Ed25519Signer(r.holder), key.Root{Clerk: Name, Verbs: []key.Verb{key.ChangeAccount, key.Send}, Serial: "wide"})
+	batch := []key.Key{k}
+	cos := []key.Cosign{key.Approve(key.Ed25519Signer(opriv), kernel.BatchHash(batch...)), key.Approve(key.Ed25519Signer(bpriv), kernel.BatchHash(batch...))}
+	if err := r.k.Issue(r.ms()-kernel.GrantHold, cos, batch...); err == nil {
+		t.Fatal("granted a wider root of the pinned key's holder")
 	}
 }
 

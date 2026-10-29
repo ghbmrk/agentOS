@@ -933,6 +933,8 @@ func TestCanonicalDocument(t *testing.T) {
 		"camera named off":          func(d *Document) { dev(d, "cam").Secure = "off" },
 		"lock named off":            func(d *Document) { dev(d, "lock").Secure = "off" },
 		"unknown type named":        func(d *Document) { dev(d, "plug").Class = "" },
+		"spaced Wi-Fi identity":     func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
+		"Wi-Fi identity newline":    func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)

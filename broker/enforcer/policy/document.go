@@ -288,10 +288,11 @@ func sorted(s []string) []string {
 	return slices.Compact(out)
 }
 
-// check refuses a document with a nameless or duplicate device, an unknown
-// network, label or class, an everyday device with a safety class, a
-// secure command its class cannot be named for, a drone reference that is
-// not a hash, a pair, rule or hold naming no device, or an empty window.
+// check refuses a document with a nameless or duplicate device, a Wi-Fi
+// identity that is not a name, an unknown network, label or class, an
+// everyday device with a safety class, a secure command its class cannot be
+// named for, a drone reference that is not a hash, a pair, rule or hold
+// naming no device, or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	for i, dev := range d.Devices {
@@ -303,6 +304,9 @@ func (d Document) check() error {
 		}
 		if !slices.Contains(networks, dev.Network) {
 			return bad("device %q on network %q", dev.ID, dev.Network)
+		}
+		if dev.WiFi != "" && !name(dev.WiFi) {
+			return bad("device %q Wi-Fi identity %q", dev.ID, dev.WiFi)
 		}
 		for _, h := range dev.Allow {
 			if !name(h) {
