@@ -203,6 +203,11 @@ func TestWordsFixed(t *testing.T) {
 		if _, err := wire.Encode(wire.ToCore, wire.Alert{Kind: wire.AlertText, Text: w}); err != nil {
 			t.Fatalf("kind %d's words do not cross the wire: %v", k, err)
 		}
+		// Every text opens an alert only the page clears, so every text
+		// says so, with no condition on it (UX fix-lists on #3909).
+		if s.delivery == Text && !strings.HasSuffix(w, "its light stays red until you do.") {
+			t.Fatalf("kind %d's text does not say the light stays red until cleared: %q", k, w)
+		}
 		want := Text
 		switch {
 		case slices.Contains(calls, k):
