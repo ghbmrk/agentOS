@@ -40,6 +40,9 @@ name: premerge
 # is fixed (vulncheck on #3503, #3509, #3520, #3523), so a failed check or workflow run is
 # excused when the same name failed in main's own first-attempt push or scheduled run of the
 # PR's merge base. Any other conclusion, a failure the base lacked and any status still hold it.
+# PREMERGE-freeze: g1-freeze is not a required check, so an armed auto-merge passed it red (#3871).
+# The gate runs main's tools/g1_scope.py itself before any verdict, so a frozen PR posts
+# `failure` (`g1-freeze`) and never reaches the merge job; a removed g1_scope.py fails closed.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited]
@@ -103,6 +106,7 @@ jobs:
           HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/pr.json")
           HEAD_REPO=$(jq -r '.head.repo.full_name // ""' "$RUNNER_TEMP/pr.json")
           BASE_REF=$(jq -r .base.ref "$RUNNER_TEMP/pr.json")
+          PR_CREATED=$(jq -r .created_at "$RUNNER_TEMP/pr.json")
           state=failure
           # errexit does not apply inside a substitution that is part of `&&`, so each step exits on its own failure.
           out=$(
@@ -111,6 +115,10 @@ jobs:
             git fetch --no-tags origin "+refs/pull/$PR_NUMBER/head:refs/remotes/pr/head" \
               "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1
             git cat-file -e "$HEAD_SHA^{commit}" || exit 1
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/timeline" \
+              --jq '.[] | [(.event // ""), (.created_at // "")] | @tsv' > "$RUNNER_TEMP/timeline.tsv" || exit 1
+            python3 -I tools/g1_scope.py --git refs/remotes/pr/base "$HEAD_SHA" --pr "$PR_NUMBER" --pr-created "$PR_CREATED" \
+              --timeline "$RUNNER_TEMP/timeline.tsv" >&2 || { echo "g1-freeze"; exit 1; }
             if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then
               exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"
             fi

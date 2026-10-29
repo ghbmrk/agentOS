@@ -1638,12 +1638,18 @@ def keeper_path_violations(name, files):
     return out
 
 
+# The other parsers that run with an empty root, as a driver does: the mail clerk's IMAP connection
+# process, one per session (#3015).
+EMPTY_ROOT_UNITS = ("agentos-imapconn@.service",)
+
+
 def driver_root(name, files):
     """Whether service NAME is a driver's template (DRIVER_UNIT; driver_violations holds each one to
-    the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro,noexec, with no
-    other mount entry at "/" (root_mounts), which would make systemd drop that root (#3642, #3712)."""
-    return (bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"]
-            and not root_mounts(files))
+    the template rendered for its name) or an EMPTY_ROOT_UNITS unit, whose whole root is
+    TemporaryFileSystem=/:ro,noexec, with no other mount entry at "/" (root_mounts), which would make
+    systemd drop that root (#3642, #3712)."""
+    return ((bool(DRIVER_UNIT.match(name)) or name in EMPTY_ROOT_UNITS)
+            and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
 def keeper_unit_violations(name, files):
