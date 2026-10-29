@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -282,11 +283,18 @@ var enforcer = map[string]struct {
 	allowed []string
 	forbid  []string
 }{
-	"enforcer":         {nil, droneForbid},
-	"enforcer/policy":  {[]string{"kernel/key"}, droneForbid},
-	"enforcer/wire":    {nil, droneForbid},
-	"enforcer/channel": {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer":          {nil, droneForbid},
+	"enforcer/policy":   {[]string{"kernel/key"}, droneForbid},
+	"enforcer/wire":     {nil, droneForbid},
+	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
+	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 }
+
+// enforcerExec is the one enforcer package that starts a process: the
+// firewall loader runs nft (ENF decision 4, slice e), and it imports nothing
+// from the enforcer, so no other enforcer package links os/exec through it.
+const enforcerExec = "enforcer/nft/load"
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
@@ -355,36 +363,54 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
-// decision 1, STO-4), and no third-party package yet; none of it launches a
-// process or speaks HTTP. Slices e (the nft loader, os/exec), b (the page,
-// net/http) and l (the daemon) widen this with a reason each.
+// decision 1, STO-4), and no third-party package yet; none of it speaks
+// HTTP, and only the firewall loader (enforcerExec, slice e) launches a
+// process. Slices b (the page, net/http) and l (the daemon) widen this with
+// a reason each.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
-	out, err := exec.Command("go", "list", "-C", "..", "-deps", "./enforcer/...").Output()
+	list, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
 	if err != nil {
 		t.Fatalf("go list: %v", err)
 	}
-	links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
-	var own int
-	for _, dep := range strings.Fields(string(out)) {
-		rel := strings.TrimPrefix(dep, module)
-		switch {
-		case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
-			own++
-			if _, ok := enforcer[rel]; !ok {
-				t.Errorf("%s has no import rule in the enforcer map", dep)
-			}
-		case strings.HasPrefix(dep, module):
-			if !links[rel] {
-				t.Errorf("the enforcer links %s", dep)
-			}
-		case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
-			t.Errorf("the enforcer links third-party %s", dep)
-		case contains(forbiddenDeps, dep):
-			t.Errorf("the enforcer links %s", dep)
+	var rest []string
+	for _, p := range strings.Fields(string(list)) {
+		if p != module+enforcerExec {
+			rest = append(rest, p)
 		}
 	}
-	if own < len(enforcer) {
-		t.Errorf("go list found %d enforcer packages, the rule map names %d", own, len(enforcer))
+	own := map[string]bool{}
+	check := func(pkgs []string, forbidden []string) {
+		out, err := exec.Command("go", append([]string{"list", "-C", "..", "-deps"}, pkgs...)...).Output()
+		if err != nil {
+			t.Fatalf("go list: %v", err)
+		}
+		links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
+		for _, dep := range strings.Fields(string(out)) {
+			rel := strings.TrimPrefix(dep, module)
+			switch {
+			case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
+				own[rel] = true
+				if _, ok := enforcer[rel]; !ok {
+					t.Errorf("%s has no import rule in the enforcer map", dep)
+				}
+			case strings.HasPrefix(dep, module):
+				if !links[rel] {
+					t.Errorf("the enforcer links %s", dep)
+				}
+			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
+				t.Errorf("the enforcer links third-party %s", dep)
+			case contains(forbidden, dep):
+				t.Errorf("%v link %s", pkgs, dep)
+			}
+		}
+	}
+	check(rest, forbiddenDeps)
+	if own[enforcerExec] {
+		t.Errorf("an enforcer package other than %s links it", enforcerExec)
+	}
+	check([]string{module + enforcerExec}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
+	if len(own) < len(enforcer) {
+		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}
 }
 
