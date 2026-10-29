@@ -259,7 +259,8 @@ class Workflow(unittest.TestCase):
         # The base is the merge commit's first parent, checked in both jobs, never the event's base sha.
         self.assertNotIn("base.sha", self.text)
         for body in (claimed, job(self.text, "mutants")):
-            self.assertIn('[ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || {', body)
+            self.assertIn('          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || '
+                          '{ echo "::error::HEAD is not the merge of this PR\'s head"; exit 1; }\n', body)
             self.assertIn('echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"', body)
             self.assertIn("PR_HEAD: ${{ github.event.pull_request.head.sha }}", body)
             self.assertLess(body.index("HEAD^1"), body.index('--git "$BASE"'))
