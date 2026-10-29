@@ -41,16 +41,30 @@ jobs:
           [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
       - name: Build llama-server from the pinned source
         run: sh image/llamaserver.sh "$RUNNER_TEMP/llama/server" "$RUNNER_TEMP/llama/build"
-      - name: The release tag names the pinned commit
+      - name: The release tag and the pinned source are the pinned commit
         run: |
+          # The archive's pax header is inside the download it vouches for, so a substituted archive
+          # could keep it. Instead rebuild the archive from the pinned commit fetched over git, as
+          # GitHub makes it (git archive, gzip -n), and require the hash llamaserver.sh checked.
           pins=broker/cmd/agentos-infer/llama.pins
-          want=$(sed -n 's/^llama_src_commit=//p' "$pins")
+          pin() { sed -n "s/^$1=//p" "$pins"; }
+          url=$(pin llama_src_url); want=$(pin llama_src_sha256); commit=$(pin llama_src_commit)
+          echo "$url" | grep -Eqx 'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/archive/refs/tags/[A-Za-z0-9_.-]+\.tar\.gz' ||
+            { echo "::error file=$pins::llama_src_url is not a GitHub tag archive: $url"; exit 1; }
+          repo=${url%/archive/refs/tags/*}; tag=${url##*/archive/refs/tags/}; tag=${tag%.tar.gz}
           # An annotated tag's peeled line (^{}) is the commit; a lightweight tag has only the one line.
-          refs=$(git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b11900 'refs/tags/b11900^{}')
-          got=$(echo "$refs" | awk '$2 == "refs/tags/b11900^{}" {print $1}')
-          [ -n "$got" ] || got=$(echo "$refs" | awk '$2 == "refs/tags/b11900" {print $1}')
-          echo "tag b11900: commit $got (pinned: $want)"
-          [ -n "$got" ] && [ "$got" = "$want" ] || { echo "::error file=$pins::llama_src_commit is '$want'; the tag names $got"; exit 1; }
+          refs=$(git ls-remote "$repo" "refs/tags/$tag" "refs/tags/$tag^{}")
+          got=$(echo "$refs" | awk -v r="refs/tags/$tag^{}" '$2 == r {print $1}')
+          [ -n "$got" ] || got=$(echo "$refs" | awk -v r="refs/tags/$tag" '$2 == r {print $1}')
+          echo "tag $tag: commit $got (pinned: $commit)"
+          [ -n "$got" ] && [ "$got" = "$commit" ] || { echo "::error file=$pins::llama_src_commit is '$commit'; the tag $tag names $got"; exit 1; }
+          g="$RUNNER_TEMP/llama-git"
+          git init -q "$g"
+          git -C "$g" fetch -q --depth 1 "$repo" "$commit"
+          [ "$(git -C "$g" rev-parse FETCH_HEAD)" = "$commit" ] || { echo "the fetch is not $commit" >&2; exit 1; }
+          got=$(git -C "$g" archive --format=tar --prefix="${repo##*/}-$tag/" FETCH_HEAD | gzip -cn | sha256sum | cut -d' ' -f1)
+          echo "commit $commit rebuilt as an archive: sha256 $got (pinned: $want)"
+          [ "$got" = "$want" ] || { echo "::error file=$pins::llama_src_sha256 is '$want'; commit $commit's tree archives to $got"; exit 1; }
       - name: Download the pinned model, check its hash
         run: |
           pins=broker/cmd/agentos-infer/llama.pins
