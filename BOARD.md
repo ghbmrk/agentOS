@@ -98,6 +98,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-b | DECOY-b: kernel trips, automatic narrowing, passkey resume (KRN-12) | #3762 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| ENF-attest | Core-to-enforcer attestation channel: the enforcer verifies the core booted the signed image (attestation key enrolled at HW-5a, measured values pinned) before it accepts "core reflashed" (KRN-12, REC-5, HW-5a) | #3796, #3797 (PR #3798); brief to write | queued(later; tier A; one session) |
+| KRN-12-rec3 | KRN-12-rec3: when the owner signs the backup destination and how the enforcer matches a name (KRN-12, BAK-1) | PR #3801, #3800; builds with DECOY-d #3765 (first enforcer code row), not as a standalone spec PR | queued(tier B; lane primary; brief briefs/DECOY.md) |
 
 ## Harness and operating model
 
@@ -292,7 +294,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-a | ENF-a: enforcer policy as owner-signed keys, closed tightening list, 10-minute loosening wait, standing rules (STO-4, NET-4) | none | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-b | ENF-b: enforcer confirm screen and passkey assertions, served only to Owner and the wired admin port (NET-4, NET-6) | #3658 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-d | ENF-d: enforcer channel: three fixed-schema kinds, safety-list check, rate limit and burst pause (NET-2 Channel, Safety devices, DEV-2) | #3658 | building(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-e | ENF-e: enforcer segments and nftables firewall: per-device default deny, silent edge segment, atomic load (NET-2 Segments, NET-3) | #3658, question 2 (#3662) | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-g | ENF-g: access point config from the enforcer: four networks, per-device Wi-Fi passwords on per-device VLANs, admin only from the wired port (NET-3) | #3661 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-c | ENF-c: enforcer enrolment, recovery code, factory reset; setup network replaced at enrolment (NET-4, NET-2 Hardening, HW-10, D-178) | #3659, #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-f | ENF-f: enforcer resolver for the signed lists (dnsmasq nftset), mDNS for signed pairs only, Wake-on-LAN relay (NET-2, NET-3) | #3661 | queued(tier A; lane primary; brief briefs/ENF.md) |
@@ -318,6 +319,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| VIS-faces-later | VIS-faces-later: seven later findings from the #3787 reviews (unclear vs unknown, rotated alignment test, no_face causes, licence wording, thin false-accept margin, small far faces, zeroing comment) | #3515 e2 (#3787) | queued (later; tier A; one session) |
+| VIS-plates-guards | VIS-plates-guards: guards for the plate path's zeroing, the per-frame vehicle bound and width, the zero-height plate box and the sound +Inf check (release findings from the #3803 reviews; DEV-7, DEV-8, RES-2) | #3515 e3 (#3803) | building (release; tier A; one session) |
 
 ## Model routes and the Codex lane
 
@@ -329,10 +332,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CAP-11-plan-fu5 | CAP-11-plan-fu5: Provider run: add the --output-last-message switch. (queued; class later; from PR #1864 review) | — | queued (queued; class later; from PR #1864 review) |
 | CAP-11-plan-fu6 | CAP-11-plan-fu6: REV-5 Private-label exception row and rename TestRunInheritsLabelAndReservationAndIsGoneAfter. (queued; class later; from PR #1864 review) | — | queued (queued; class later; from PR #1864 review) |
 | INFER-gen | Local inference service gains a bounded generate call beside embed, against the fake runtime; hello names the ops served (PLN-7 local route, RES-2; [brief](briefs/INFER-SVC.md) G1). | #2217 first PR (merged) | building (release; tier A; one session) |
-| INFER-llama | The llama.cpp runtime adapter for the local inference service, embed only, with a tagged real-runtime test (CAP-13, RES-3, D-230; [brief](briefs/INFER-SVC.md) E1). Needs a session allowing huggingface.co and llama.cpp releases. | #3737 | building (release; tier A; one session) |
-| INFER-image | Ship llama-server and the Apache-2.0 embedding model in the image, pinned by hash, with the agentos-infer user and the service left off until a consumer (CAP-13, RES-2, D-230; [brief](briefs/INFER-SVC.md) E2). Needs a session allowing huggingface.co and llama.cpp releases. | INFER-llama #3654; image/build.sh queue | queued (release; tier A; one session) |
 | INFER-floor | Measure the embedding model on the N95 floor: memory, cold start, embed latency and throughput, against the brief's limits (HW-4, RES-2; [brief](briefs/INFER-SVC.md) E3). | INFER-image #3655; N95 | queued (release; tier A; hardware) |
 | CLK-model-running-deflake | CLK-model-running-deflake: the clerk-model test helper waits for the owner socket by event with a 30 s deadline, not 200 polls of 10 ms. | MIG-4-exit-m1 | queued (later; tier A; size S; from #3769 CI) |
+| INFER-retrieve | Retrieve pass: the new-core consumer of the embedding service (LOG-4, CAP-13); picks the dialling clerk, the index and the peer socket access, and turns `-infer` on. Needs a brief. | INFER-image #3655 | queued (later; tier A; one session) |
+| INFER-image later findings | INFER-image later findings: duplicate licence key, NEEDED-check test, update download size, a long comment (four later findings from the #3784 reviews). | INFER-image #3655 | queued (later; tier A; one session) |
 
 ## Defects and later findings on surviving packages
 
@@ -423,7 +426,7 @@ issue #3735: body has no board-row block
 issue #3741: body has no board-row block
 issue #3742: body has no board-row block
 issue #3757: body has no board-row block
-issue #3771: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #3779: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3771: title 'INFER-llama follow-ups: probe timeout, leftover socket dir, setsid grandchild, adapter-level checks, wording' does not start with '<ID>: '
 issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3790: title 'INFER-image follow-up: infer-real rebuilds the llama.cpp archive from the pinned commit; A13 wording' does not start with '<ID>: '
 ```
