@@ -19,8 +19,11 @@
 # the box (A21, #3117; see slice_run below).
 # With DEVSLOT set to a directory holding the device-driver slot's boot probe, a boot runs a fixture
 # driver instance under the driver template (DEVSLOT-drivers b2b-2; see below).
+# With INFER set to a directory holding infer.test, a boot runs the local inference service's real
+# test on the installed llama-server and model (INFER-image; see below).
 # Usage: ci_boot.sh IMAGE [WORKDIR]. Console logs: WORKDIR/console.log, console-reboot.log,
-# console-two-drives.log, console-fallback.log, console-slice.log, console-devslot.log, console-e2e.log.
+# console-two-drives.log, console-fallback.log, console-slice.log, console-devslot.log, console-infer.log,
+# console-e2e.log.
 set -eu
 HERE=$(dirname "$(realpath "$0")")
 IMG=$1; W=$(realpath -m "${2:-/var/tmp/agentos-boot}"); mkdir -p "$W"
@@ -577,6 +580,33 @@ EOP
 	done
 	hasnt "$W/console-devslot.log" "agentos-devslot: FAIL"
 	rm -rf "$W/devslot.raw" "$DS"
+fi
+
+# The local inference service's real runtime, in a booted image (INFER-image, #3655; INFER-SVC E2).
+# With INFER set to a directory holding infer.test (broker/cmd/agentos-infer's tests built with the
+# tags infer_real and infer_llamacpp, static), a fresh copy boots and a CI-only unit, passed as an
+# SMBIOS credential, runs TestRealRuntimeEmbed from a read-only 9p share as agentos-infer, with no
+# network, on the llama-server and the model the image installs: 1024 finite floats a text, the
+# same across calls, and the model's hash equal to the pin in llama.pins (which agentosd.service
+# passes too). The test starts the service itself, so the image's -infer stays off. Its socket
+# directory goes under the host's /tmp as the service user (ASSUMPTIONS INFER-A14).
+if [ -n "${INFER:-}" ]; then
+	IS=$W/infer-share
+	rm -rf "$IS"; mkdir -p "$IS"
+	cp "$INFER/infer.test" "$IS/infer.test" && echo "ok   infer.test for the inference boot" || { echo "MISS infer.test for the inference boot"; fail=1; }
+	PIN=$(sed -n 's/^embed_sha256=//p' "$HERE/../broker/cmd/agentos-infer/llama.pins")
+	P9="trans=virtio,version=9p2000.L"
+	INFER_UNITS="$(smbios_cred systemd.extra-unit.ci-infer.service "[Unit]\nDescription=agentOS local inference real test (CI only)\nAfter=systemd-sysusers.service systemd-tmpfiles-setup.service\nBefore=agentos-boot-report.service serial-getty@ttyS0.service\n[Service]\nType=oneshot\nTimeoutStartSec=1800\nUser=agentos-infer\nPrivateNetwork=yes\nStandardOutput=journal+console\nStandardError=journal+console\nEnvironment=AGENTOS_LLAMA_SERVER=/usr/lib/agentos/infer/llama-server AGENTOS_LLAMA_EMBED_MODEL=/usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf AGENTOS_LLAMA_EMBED_SHA256=$PIN\nExecStartPre=+/bin/sh -c 'mkdir -p /run/agentos-ci-infer && mount -t 9p -o $P9,ro infer /run/agentos-ci-infer'\nExecStart=/bin/sh -c '/run/agentos-ci-infer/infer.test -test.run ^TestRealRuntime -test.v -test.timeout 25m; echo agentos-infer-boot: DONE'\n")"
+	INFER_UNITS="$INFER_UNITS$(smbios_cred systemd.unit-dropin.multi-user.target '[Unit]\nWants=ci-infer.service\n')"
+	copy "$W/infer.raw"
+	TMO=2400 EXTRA="-virtfs local,path=$IS,mount_tag=infer,security_model=none,readonly=on$INFER_UNITS" \
+		UNTIL="agentos-infer-boot: DONE\|agentos-health: FAIL" boot "$W/console-infer.log" "$W/infer.raw"
+	grep -a -- "--- \|infer\.test\|^ok \|^FAIL\|^PASS" "$W/console-infer.log" | guest_echo || true
+	has "$W/console-infer.log" "agentos-infer-boot: DONE"
+	has "$W/console-infer.log" "PASS: TestRealRuntimeEmbed"
+	hasnt "$W/console-infer.log" "SKIP: TestRealRuntimeEmbed"
+	hasnt "$W/console-infer.log" "FAIL: TestRealRuntime"
+	rm -rf "$W/infer.raw" "$IS"
 fi
 
 # Prints "ci_boot: G1 PROVEN" (a prefix only the host script uses; the guest console is never given it,

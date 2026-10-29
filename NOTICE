@@ -25,6 +25,20 @@ Camera video decoder (built from source, linked statically, not in this reposito
   patent rights; H.264 is covered by patent pools, and a distributor of an
   image with it may need their licences.
 
+Local inference runtime and model (built or downloaded at image build, not in this repository)
+- llama.cpp release b11900 (llama-server), MIT License, Copyright (c) the ggml
+  authors. image/llamaserver.sh downloads the release's source
+  tarball (https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11900.tar.gz),
+  checks its SHA-256 (broker/cmd/agentos-infer/llama.pins) and builds
+  llama-server from it, CPU only and static; it runs as the local inference
+  service's child (INFER-SVC). The image carries its licence text at
+  /usr/share/licenses/llama.cpp/LICENSE.
+- Qwen3-Embedding-0.6B, Q8_0 GGUF, Apache License 2.0, by the Qwen team,
+  Alibaba Cloud (https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF, at the
+  revision in llama.pins). Shipped unmodified, checked by SHA-256 and by the
+  licence its own header declares (image/infer.sh). The image carries the
+  Apache License 2.0 text at /usr/share/licenses/Qwen3-Embedding-0.6B/LICENSE.
+
 Apache License 2.0 dependencies (broker/vendor)
 - github.com/google/go-tpm
 - github.com/google/go-containerregistry

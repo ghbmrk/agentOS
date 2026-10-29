@@ -25,7 +25,7 @@ func main() {
 	flag.StringVar(&cfg.Model, "model", "", "model file")
 	flag.StringVar(&cfg.Pin, "model-sha256", "", "the model file's SHA-256, lower-case hex")
 	flag.StringVar(&cfg.Name, "model-name", "", "the model's name in hello replies (default: the file's base name)")
-	flag.StringVar(&runtime, "runtime", "", "the model runtime's executable")
+	flag.StringVar(&runtime, "runtime", "/usr/lib/agentos/infer/llama-server", "the model runtime's executable (image/infer.sh installs it here)")
 	flag.IntVar(&cfg.Concurrent, "concurrent", 2, "runtime calls in flight")
 	flag.DurationVar(&cfg.CallTimeout, "call-timeout", 30*time.Second, "bound on one runtime call")
 	flag.Parse()
