@@ -347,3 +347,36 @@ func TestPinWithAnUnreadableBootIsNotTaken(t *testing.T) {
 	r.working = false
 	r.pinWithdrawn()
 }
+
+// Security release 1 on #3822: a pin withdrawal whose Abandon failed,
+// or a pin not yet marked, while the boot cannot be read: no Tick
+// restarts, so STATUS promises neither a start nor a restart; once the
+// boot reads as the handover boot it says withdrawn.
+// Mutant: drop the unreadable-boot case from Status.
+func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
+	const held = "Update 1 waits because your update channel is pinned; I will not restart into it."
+	for _, marked := range []bool{true, false} {
+		r := installedHeld(t, false)
+		r.paused = true
+		if marked {
+			r.act.abandonErr = errIO
+			if err := r.a.Pin(context.Background()); !errors.Is(err, ErrApplying) {
+				t.Fatalf("pin taken: %v", err)
+			}
+			if pt := r.saved().Applying; pt == nil || !pt.Pinned {
+				t.Fatalf("not marked pinned: %+v", pt)
+			}
+		}
+		r.act.bootedErr = errIO
+		if got := r.a.Status(); got != held {
+			t.Fatalf("marked %v: status %q", marked, got)
+		}
+		if _, err := r.a.Tick(context.Background()); err == nil || r.act.restarts != 0 {
+			t.Fatalf("marked %v: tick %v, restarts %d", marked, err, r.act.restarts)
+		}
+		r.act.bootedErr, r.act.abandonErr = nil, nil
+		if got := r.a.Status(); got != pinnedStatus {
+			t.Fatalf("marked %v: status %q", marked, got)
+		}
+	}
+}
