@@ -104,8 +104,8 @@ func home(v uint64) policy.Document {
 		Version:      v,
 		Destinations: []string{"models.example"},
 		Devices: []policy.Device{
-			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true},
-			{ID: "lock", Network: policy.NetDevices, Allow: []string{"lock.example"}, Secure: "lock", Label: policy.LabelExceptRadio},
+			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true, Class: policy.ClassCamera},
+			{ID: "lock", Network: policy.NetDevices, Allow: []string{"lock.example"}, Class: policy.ClassLock, Secure: "lock", Label: policy.LabelExceptRadio},
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan104", Allow: []string{"a.example"}, VendorCloud: true, Everyday: true, Label: policy.LabelContained},
 		},
 	}
@@ -737,8 +737,9 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Allow":       func(d *policy.Device) { d.Allow = []string{"z.example"} },
 		"VendorCloud": func(d *policy.Device) { d.VendorCloud = !d.VendorCloud },
 		"Isolated":    func(d *policy.Device) { d.Isolated = !d.Isolated },
-		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Secure = "" },
-		"Secure":      func(d *policy.Device) { d.Secure = "unlock" },
+		"Everyday":    func(d *policy.Device) { d.Everyday = !d.Everyday; d.Class, d.Secure = "", "" },
+		"Class":       func(d *policy.Device) { d.Class, d.Secure = policy.ClassSensor, "" },
+		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
 		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
 	}
 	docs := map[string]func(d *policy.Document){
@@ -790,7 +791,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		}
 	}
 	// A device added with each field set, against the same device without.
-	nw := policy.Device{ID: "new", Network: policy.NetDevices, Allow: []string{"n.example"}, VendorCloud: true}
+	nw := policy.Device{ID: "new", Network: policy.NetDevices, Allow: []string{"n.example"}, VendorCloud: true, Class: policy.ClassLock}
 	added := func(f func(*policy.Device)) policy.Document {
 		d := clone(base)
 		v := nw
