@@ -6,6 +6,10 @@ reports the surviving mutants, and fails a PR that claims coverage of code where
 survives.
 
   tools/mutgate.py packages                  list the tier-A broker packages
+  tools/mutgate.py claimed --git BASE [HEAD] [--json]
+                                             the tier-A packages where the diff BASE...HEAD adds a
+                                             REQ marker: the only ones the gate can fail, so the
+                                             only ones CI runs gremlins on (REV-CHK-mut, #3899)
   tools/mutgate.py run [PKG...] [--out DIR]  run gremlins per package (default: all tier A),
                                              one JSON file per package in DIR (default mutants/)
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
@@ -89,6 +93,13 @@ def package_of(path):
     return "/".join(parts[1:-1])
 
 
+def claimed(diff_text, tier_a=None):
+    """Tier-A packages where the diff adds a REQ marker, sorted. violations() reads no other."""
+    _, marked = added_lines(diff_text)
+    pkgs = {package_of(p) for p in marked} - {None}
+    return sorted(pkgs & set(tier_a_packages() if tier_a is None else tier_a))
+
+
 def violations(diff_text, live):
     """Lines the diff adds where a mutant lived, in packages the diff claims coverage of."""
     added, marked = added_lines(diff_text)
@@ -115,7 +126,24 @@ def cmd_run(args):
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
+        elif not shape_ok(json.loads(dest.read_text())):
+            # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
+            print(f"mutgate: {dest} is not gremlins' files[].mutations[] shape", file=sys.stderr)
+            bad += 1
     return 1 if bad else 0
+
+
+def shape_ok(data):
+    """True when gremlins' JSON has the fields survivors() reads, for every mutation it counts."""
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        return False
+    muts = [m for f in data["files"] for m in (f.get("mutations") or [])]
+    if not all(isinstance(f.get("file_name"), str) for f in data["files"]):
+        return False
+    if not all(isinstance(m.get("status"), str) and isinstance(m.get("line"), int) for m in muts):
+        return False
+    # gremlins' own LIVED count must match what survivors() reads, so a renamed status fails too.
+    return data.get("mutants_lived") == sum(m["status"] == "LIVED" for m in muts)
 
 
 def cmd_report(args):
@@ -127,12 +155,21 @@ def cmd_report(args):
     return 0
 
 
-def cmd_gate(args):
-    diff = subprocess.run(
-        ["git", "diff", "-U0", f"{args.git}...{args.head}", "--", "broker"],
+def broker_diff(base, head):
+    return subprocess.run(
+        ["git", "diff", "-U0", f"{base}...{head}", "--", "broker"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
-    found = violations(diff, survivors(args.dir))
+
+
+def cmd_claimed(args):
+    pkgs = claimed(broker_diff(args.git, args.head))
+    print(json.dumps(pkgs) if args.json else "\n".join(pkgs))
+    return 0
+
+
+def cmd_gate(args):
+    found = violations(broker_diff(args.git, args.head), survivors(args.dir))
     for pkg, path, line, kind in found:
         print(f"mutgate: {path}:{line} {kind} survives, in package {pkg} where this PR claims REQ coverage")
     if found:
@@ -144,6 +181,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("packages")
+    p = sub.add_parser("claimed")
+    p.add_argument("--git", required=True, metavar="BASE")
+    p.add_argument("head", nargs="?", default="HEAD")
+    p.add_argument("--json", action="store_true")
     p = sub.add_parser("run")
     p.add_argument("pkg", nargs="*")
     p.add_argument("--out", default="mutants")
@@ -157,7 +198,7 @@ def main(argv=None):
     if args.cmd == "packages":
         print("\n".join(tier_a_packages()))
         return 0
-    return {"run": cmd_run, "report": cmd_report, "gate": cmd_gate}[args.cmd](args)
+    return {"claimed": cmd_claimed, "run": cmd_run, "report": cmd_report, "gate": cmd_gate}[args.cmd](args)
 
 
 if __name__ == "__main__":

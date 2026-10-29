@@ -1,15 +1,19 @@
-"""tools/mutgate.py: the REQ-claim gate over gremlins results (MUT-tierA, #1814).
+"""tools/mutgate.py: the REQ-claim gate over gremlins results (MUT-tierA, #1814), and the
+workflow that runs it on pull requests (REV-CHK-mut, #3899).
 
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
 import json
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+WORKFLOW = ROOT / ".github" / "workflows" / "mutgate.yml"
 sys.path.insert(0, str(ROOT / "tools"))
 import mutgate  # noqa: E402
 
@@ -74,6 +78,143 @@ class Gate(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn("hint: 1 surviving", r.stdout)
             self.assertIn("h.go:9 T", r.stdout)
+
+
+DOCS_ONLY = """\
+diff --git a/docs/x.md b/docs/x.md
+--- a/docs/x.md
++++ b/docs/x.md
+@@ -1,0 +2 @@
++REQ: CRED-1
+"""
+
+
+def gremlins_json(statuses, lived=None):
+    muts = [{"type": "T", "status": s, "line": i + 1, "column": 1} for i, s in enumerate(statuses)]
+    n = sum(s == "LIVED" for s in statuses) if lived is None else lived
+    return {"files": [{"file_name": "a.go", "mutations": muts}], "mutants_lived": n}
+
+
+class Claimed(unittest.TestCase):
+    # REV-CHK-mut: gremlins runs only where the gate can fail, so the run is the claim, not the package list.
+    def test_claimed_is_marked_tier_a_packages_only(self):
+        self.assertEqual(mutgate.claimed(DIFF, tier_a=["hint", "mail"]), ["hint"])
+        self.assertEqual(mutgate.claimed(DIFF, tier_a=["mail"]), [])
+        self.assertEqual(mutgate.claimed(DIFF.replace("REQ:", "NOTE:"), tier_a=["hint"]), [])
+        self.assertEqual(mutgate.claimed(DOCS_ONLY, tier_a=["hint"]), [])
+
+    def test_claimed_covers_every_package_violations_reads(self):
+        # Any package outside claimed() could never yield a violation, whatever survives there.
+        live = {p: [("hint.go", 11, "X")] for p in ("hint", "mail", "vm/gvisor")}
+        found = {v[0] for v in mutgate.violations(DIFF, live)}
+        self.assertLessEqual(found, set(mutgate.claimed(DIFF, tier_a=["hint", "mail", "vm/gvisor"])))
+        self.assertEqual(found, {"hint"})
+
+    def test_claimed_cli_on_a_real_diff(self):
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            # The CLI diffs the repo it sits in, so run a copy of tools/ (and the tier lists) in a temp repo.
+            shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+            shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            pkg = pathlib.Path(d) / "broker" / "netguard"
+            pkg.mkdir(parents=True)
+            (pkg / "a.go").write_text("package netguard\n")
+            (pkg / "a_test.go").write_text("package netguard\n// REQ: CRED-1\n")
+            (pathlib.Path(d) / "docs").mkdir()
+            (pathlib.Path(d) / "docs" / "x.md").write_text("REQ: CRED-1\n")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+            r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"),
+                                "claimed", "--git", "HEAD~1", "--json"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), ["netguard"])
+
+
+class Shape(unittest.TestCase):
+    # ASSUMPTIONS D33: another JSON shape would make survivors() read nothing and the gate pass.
+    def test_gremlins_shape_passes(self):
+        self.assertTrue(mutgate.shape_ok(gremlins_json(["LIVED", "KILLED", "NOT COVERED"])))
+
+    def test_each_unreadable_shape_fails(self):
+        for bad in (
+            [],
+            {"results": []},
+            gremlins_json(["LIVED"], lived=2),            # gremlins counted a survivor we cannot see
+            gremlins_json(["SURVIVED"], lived=1),         # a renamed status
+            {"files": [{"file_name": "a.go", "mutations": [{"status": "LIVED", "line": "3"}]}], "mutants_lived": 1},
+            {"files": [{"name": "a.go", "mutations": []}], "mutants_lived": 0},
+            {"files": [], "mutants_lived": None},
+        ):
+            self.assertFalse(mutgate.shape_ok(bad), bad)
+
+    def test_run_fails_on_an_unreadable_shape(self):
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            # A stub gremlins writing JSON whose status is renamed: the run must fail, not pass empty.
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\n"
+                "printf '%s' '{\"files\":[{\"file_name\":\"a.go\",\"mutations\":"
+                "[{\"status\":\"SURVIVED\",\"line\":1}]}],\"mutants_lived\":1}' > \"$2\"\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out",
+                                str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("not gremlins' files[].mutations[] shape", r.stderr)
+
+
+def job(text, name):
+    """The body of job `name` in a workflow's jobs: block."""
+    m = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][\w-]*:\n|\Z)", text.split("\njobs:\n", 1)[1])
+    return m.group(1) if m else ""
+
+
+class Workflow(unittest.TestCase):
+    # REV-CHK-mut, brief acceptance test test_mutgate_runs_only_on_touched_tier_a_packages. It lives
+    # here, not in tests/test_workflows.py, because open PR #3885 edits that file (D-111).
+    def setUp(self):
+        self.text = WORKFLOW.read_text()
+
+    def test_mutgate_runs_only_on_touched_tier_a_packages(self):
+        on = self.text.split("\non:\n", 1)[1].split("\npermissions:", 1)[0]
+        self.assertEqual(on.strip(), "pull_request:")
+        claimed = job(self.text, "claimed")
+        self.assertIn('python3 -I tools/mutgate.py claimed --git "$BASE" --json', claimed)
+        self.assertIn("BASE: ${{ github.event.pull_request.base.sha }}", claimed)
+        self.assertIn("fetch-depth: 0", claimed)
+        mutants = job(self.text, "mutants")
+        # The package list comes from the claim, and an empty claim (a docs-only PR) runs no gremlins.
+        self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", mutants)
+        self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
+        self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
+        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants', mutants)
+        self.assertIn('python3 -I tools/mutgate.py gate mutants --git "$BASE"', mutants)
+        self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
+        self.assertIn("gremlins@v0.6.0", mutants)
+        self.assertIn("gremlins@v0.6.0", (ROOT / "tools" / "mutgate.py").read_text())
+        self.assertNotIn("continue-on-error", self.text)
+
+    def test_summary_fails_unless_the_claim_ran_and_each_package_passed(self):
+        script = job(self.text, "mutgate").split("run: |\n", 1)[1]
+        script = "\n".join(l[10:] for l in script.split("\n"))
+        cases = [
+            ("success", "[]", "skipped", 0),
+            ("success", '["kernel"]', "success", 0),
+            ("success", '["kernel"]', "failure", 1),
+            ("success", '["kernel"]', "skipped", 1),
+            ("success", "[]", "failure", 1),
+            ("failure", "", "skipped", 1),
+        ]
+        for claimed, pkgs, mutants, want in cases:
+            env = {"CLAIMED": claimed, "PACKAGES": pkgs, "MUTANTS": mutants, "PATH": "/usr/bin:/bin"}
+            r = subprocess.run(["sh", "-ec", script], env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode != 0, bool(want), (claimed, pkgs, mutants, r.stdout, r.stderr))
+        self.assertIn("if: ${{ !cancelled() }}", job(self.text, "mutgate"))
+        self.assertIn("needs: [claimed, mutants]", job(self.text, "mutgate"))
 
 
 if __name__ == "__main__":

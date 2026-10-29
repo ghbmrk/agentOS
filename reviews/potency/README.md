@@ -18,7 +18,7 @@ Finding kinds CI now catches; the screen no longer looks for them by hand (OPERA
 
 | Finding kind | Check | Since |
 |---|---|---|
-| — | none recorded yet | — |
+| A defence can be reverted and the suite still passes (a surviving mutant) | `.github/workflows/mutgate.yml` runs `tools/mutgate.py` (gremlins v0.6.0) on each tier-A package where a PR adds a `REQ:` marker and fails on a LIVED mutant on a line the PR adds there. Bound: survivors on old lines, uncovered code, non-tier-A code (#3177) and PRs that add no `REQ:` marker stay held by review. | REV-CHK-mut (#3899) |
 
 ## Spec-wide runs
 
@@ -39,5 +39,4 @@ Per-PR and per-bundle records up to cut 4 are the files `YYYY-MM-DD-*.md` in thi
 
 | Kind | Seen on | Check to add | Owner package |
 |---|---|---|---|
-| A defence can be reverted and the suite still passes (a surviving mutant) | #583 (LATER P3-4b-4c-canary l3), #585 (P3-4b-3r-pass l5, l6), #588 (BOARD P3-4b-3r-confine-r5), #589 (P3-4b-4c-corpus l6), #599 (P3-4b-4c-exhaust l4, l5) | each package's brief names the revert mutant for every defence it adds; the L3 reruns it and rejects a defence whose revert still passes | the next package that adds a defence in `loops`, `loop7`, `machprobe` or `canary` |
 | A brief's declared scope omits the test files the change forces | #589 (LATER P3-4b-4c-corpus l5, l7), #585, #623 (`ownertext_test.go`), #628 (`daemon/inference_test.go`, `fuzzleaf_test.go`), #629 (`daemon/inference_test.go`, LATER P3-4b-3r-confine-r3 l3) | `tools/doclint.py` compares a brief's declared scope with the PR's changed test files and flags a test file outside it | the next package that touches `tools/doclint.py` or the brief template |
