@@ -49,9 +49,9 @@ allow evals/slice-inbox/
 # not name (D-198). Remove once #3746 merges.
 exempt-pr 3746
 
-# #3808 (VIS-plates-guards, #3805): tests and one comment line in broker/cmd/agentos-vision/,
-# which the G2 list does not name (D-198). Remove once #3808 merges.
-exempt-pr 3808
+# #3846 (ENF-d-preauth, #3755): broker/enforcer/channel/, which the G2 list does not name
+# (D-198). Remove once #3846 merges.
+exempt-pr 3846
 
 # Project machinery and records.
 allow .claude/
