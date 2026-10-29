@@ -128,7 +128,7 @@ class Config(unittest.TestCase):
         frag = (TREE / "board" / "common" / "linux.fragment").read_text().splitlines()
         for line in ("CONFIG_DM_VERITY=y", "CONFIG_EROFS_FS=y", "CONFIG_NF_TABLES=y",
                      "# CONFIG_WIRELESS is not set", "# CONFIG_BT is not set", "# CONFIG_IPV6 is not set",
-                     "# CONFIG_DEVMEM is not set", "# CONFIG_KEXEC is not set"):
+                     "# CONFIG_DEVMEM is not set", "# CONFIG_KEXEC is not set", "# CONFIG_KGDB is not set"):
             self.assertIn(line, frag)
         # systemd's kernel fixup turns IPv6 back on after the fragments; this tree's runs after it.
         mk = (TREE / "package" / "camnode-init" / "camnode-init.mk").read_text()

@@ -41,6 +41,8 @@ CONFIG_PANIC_TIMEOUT=5
 # CONFIG_KEXEC_FILE is not set
 # CONFIG_HIBERNATION is not set
 # CONFIG_MAGIC_SYSRQ is not set
+# The Raspberry Pi defconfig turns on the kernel debugger, which selects SysRq on the console.
+# CONFIG_KGDB is not set
 # CONFIG_IPV6 is not set
 CONFIG_BPF_SYSCALL=y
 CONFIG_CGROUP_BPF=y

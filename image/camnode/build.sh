@@ -85,15 +85,20 @@ if grep -F 'WARNING: no hash file for' "$O/make.log" >&2; then
 fi
 
 # The same for the kernel: Buildroot applies packages' kernel fixups after the fragments (systemd's
-# turns IPv6 on; camnode-init's turns it off again), so check the kernel that was built.
+# turns IPv6 on; camnode-init's turns it off again), so check the kernel that was built. An option
+# the fragment turns off passes when no line sets it: Kconfig leaves out an option whose dependencies
+# are off (the CM4 kernel has no KEXEC), and the line that sets one anyway is what gets reported.
 kconf=$(ls -d "$O"/build/linux-*/.config | grep -v '/linux-headers-')
 [ "$(echo "$kconf" | wc -l)" = 1 ] || { echo "build.sh: expected one kernel build, found: $kconf" >&2; exit 1; }
 missing=$(grep -hE '^(CONFIG_[A-Z0-9_]+=|# CONFIG_[A-Z0-9_]+ is not set)' "$HERE/external/board/common/linux.fragment" \
 	"$HERE/external/board/$BOARD/linux.fragment" | while read -r l; do
-	grep -qxF -- "$l" "$kconf" || echo "$l"
+	case $l in
+	"# "*) o=${l#\# }; grep "^${o% is not set}=" "$kconf" || true ;;
+	*) grep -qxF -- "$l" "$kconf" || echo "$l" ;;
+	esac
 done)
 if [ -n "$missing" ]; then
-	echo "build.sh: the kernel did not keep these lines:" >&2
+	echo "build.sh: the kernel did not keep these lines (or sets what they turn off):" >&2
 	echo "$missing" >&2
 	exit 1
 fi
