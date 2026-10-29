@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"io"
@@ -386,11 +387,14 @@ var cgoPin = struct{ directives, cIdents, goNames []string }{
 }
 
 // cgoFaults lists how src, as h264.go, steps outside cgoPin. It reads the
-// preamble the way cgo and the C compiler do: the doc comment of the one
+// preamble the way the C compiler does: the doc comment of the one
 // import "C", which must be a single block comment; backslash-newlines
 // spliced first; %: and ??= read as #; a line whose first token is # a
 // directive; // to the end of a line a comment, so a literal, which could
-// hold one, is a fault.
+// hold one, is a fault. It reads the #cgo lines the way go/build does:
+// every raw line, unspliced, whose trimmed text starts #cgo, so a comment
+// the C compiler sees cannot hide one; and it asks go/build itself which
+// flags it would apply (cgoBuildFaults).
 func cgoFaults(src []byte) []string {
 	f, err := parser.ParseFile(token.NewFileSet(), decoderCgo, src, parser.ParseComments)
 	if err != nil {
@@ -424,6 +428,16 @@ func cgoFaults(src []byte) []string {
 	if strings.IndexFunc(pre, func(r rune) bool { return r >= 0x80 }) >= 0 {
 		faults = append(faults, "the preamble holds a character outside ASCII")
 	}
+	var cgoLines []string
+	for _, line := range strings.Split(pre, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, "#cgo") {
+			cgoLines = append(cgoLines, line)
+		}
+	}
+	if !slices.Equal(cgoLines, cgoPin.directives[:2]) {
+		faults = append(faults, fmt.Sprintf("the preamble's #cgo lines are %q, want %q", cgoLines, cgoPin.directives[:2]))
+	}
+	faults = append(faults, cgoBuildFaults(src)...)
 	pre = strings.NewReplacer("\\\r\n", "", "\\\n", "").Replace(pre)
 	pre = strings.NewReplacer("%:", "#", "??=", "#").Replace(pre)
 	var directives []string
@@ -460,6 +474,46 @@ func cgoFaults(src []byte) []string {
 		}
 		return true
 	})
+	return faults
+}
+
+// cgoBuildFaults lists how the flags go/build applies to camdecode, with
+// src as h264.go, step outside cgoPin's two #cgo lines: on linux/amd64,
+// where image/build.sh builds it, and on linux/arm64, the other platform
+// the boxes run. A #cgo line limited to any other platform is still a
+// fault of the raw #cgo lines in cgoFaults.
+func cgoBuildFaults(src []byte) []string {
+	var faults []string
+	for _, arch := range []string{"amd64", "arm64"} {
+		ctxt := build.Default
+		ctxt.GOOS, ctxt.GOARCH, ctxt.CgoEnabled, ctxt.BuildTags = "linux", arch, true, []string{"libavcodec"}
+		ctxt.OpenFile = func(path string) (io.ReadCloser, error) {
+			if filepath.Base(path) == filepath.Base(decoderCgo) {
+				return io.NopCloser(bytes.NewReader(src)), nil
+			}
+			return os.Open(path)
+		}
+		p, err := ctxt.ImportDir(filepath.Dir(decoderCgo), 0)
+		if err != nil {
+			faults = append(faults, fmt.Sprintf("go/build on linux/%s: %v", arch, err))
+			continue
+		}
+		for _, f := range []struct {
+			name      string
+			got, want []string
+		}{
+			{"pkg-config", p.CgoPkgConfig, []string{"libavcodec", "libavutil"}},
+			{"LDFLAGS", p.CgoLDFLAGS, []string{"-lm"}},
+			{"CFLAGS", p.CgoCFLAGS, nil},
+			{"CPPFLAGS", p.CgoCPPFLAGS, nil},
+			{"CXXFLAGS", p.CgoCXXFLAGS, nil},
+			{"FFLAGS", p.CgoFFLAGS, nil},
+		} {
+			if !slices.Equal(f.got, f.want) {
+				faults = append(faults, fmt.Sprintf("go/build on linux/%s applies %s %q, want %q", arch, f.name, f.got, f.want))
+			}
+		}
+	}
 	return faults
 }
 
@@ -514,6 +568,9 @@ func TestDecoderCgoIsPinned(t *testing.T) {
 		{"a Go call to a C function", goClose, goClose + "\tC.system(nil)\n", "uses C.system"},
 		{"a second import of C", imC, imC + "\n// #cgo LDFLAGS: -lcurl\nimport \"C\"\n", "2 imports of C"},
 		{"a split preamble", "/*\n" + pc, "/*\n#cgo LDFLAGS: -lcurl\n*/\n/*\n" + pc, "not a single block comment"},
+		{"a #cgo line behind a continued comment", inc, inc + "// plain note \\\n#cgo LDFLAGS: -lcurl\n", "#cgo lines"},
+		{"a #cgo line go/build applies behind a continued comment", inc, inc + "// plain note \\\n#cgo LDFLAGS: -lcurl\n", "go/build on linux/amd64 applies LDFLAGS"},
+		{"an arm64-only #cgo line", inc, inc + "#cgo arm64 LDFLAGS: -lcurl\n", "go/build on linux/arm64 applies LDFLAGS"},
 		{"a line-comment preamble", "/*\n" + pc, "// #cgo LDFLAGS: -lcurl\n/*\n" + pc, "not a single block comment"},
 	}
 	for _, e := range edits {
