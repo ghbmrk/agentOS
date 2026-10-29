@@ -128,10 +128,14 @@ func (t BackupTarget) shape() bool {
 	}
 	switch t.Kind {
 	case KindDir:
-		return path.IsAbs(t.Locator) && path.Clean(t.Locator) == t.Locator
+		return path.IsAbs(t.Locator) && path.Clean(t.Locator) == t.Locator && !slices.ContainsFunc(strings.Split(t.Locator, "/"), padded)
 	}
 	return false
 }
+
+// padded reports a path element led or trailed by a space, or only space,
+// which the page shows as the element without it (#3901).
+func padded(e string) bool { return strings.TrimSpace(e) != e }
 
 // invisible reports a character the page cannot show: unprintable, or
 // printable but default-ignorable (a joiner, a variation selector, a filler).

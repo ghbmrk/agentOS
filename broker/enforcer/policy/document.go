@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The networks NET-2 Segments names. A device sits on one of the last two;
@@ -301,14 +303,15 @@ func hash(s string) bool {
 	return err == nil && strings.ToLower(s) == s
 }
 
-// name is a non-empty token with no space, control character or slash, so
-// it cannot split a serial or a rendered line.
+// name is a non-empty token of valid UTF-8 with no space, slash, control,
+// format (bidi, zero-width, tag), filler or variation selector character, so
+// it cannot split a serial or a rendered line, or show as another (#3901).
 func name(s string) bool {
-	if s == "" || len(s) > 253 {
+	if s == "" || len(s) > 253 || !utf8.ValidString(s) {
 		return false
 	}
 	for _, c := range s {
-		if c <= ' ' || c == 0x7f || c == '/' {
+		if c == ' ' || c == '/' || !unicode.IsPrint(c) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, c) || unicode.Is(unicode.Variation_Selector, c) {
 			return false
 		}
 	}

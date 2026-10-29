@@ -94,7 +94,7 @@ var (
 	ErrSubjectKey    = errors.New("kernel: the subject's data key is missing, or not the one its subject.opened names")
 	ErrItem          = errors.New("kernel: no readable item by that hash")
 	ErrLineage       = errors.New("kernel: a lineage is 1 to 128 bytes of plain text")
-	ErrLabel         = errors.New("kernel: a label to look for is valid UTF-8 with a character that is not space")
+	ErrLabel         = errors.New("kernel: a label to look for is visible text: valid UTF-8, not blank, no control or invisible character")
 )
 
 // ValidSubject reports whether s is a subject ID as OpenSubject draws them:
@@ -552,6 +552,10 @@ func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
 	return k.Read(h)
 }
 
+// unlabelled is a character a label to look for may not hold: one invisible
+// refuses, but for the two joiners (#2740).
+func unlabelled(c rune) bool { return c != '‌' && c != '‍' && invisible(c) }
+
 // sameLabel compares labels after folding case and collapsing runs of
 // whitespace, so "alice  smith" reads "Alice Smith". Fuzzier matching is
 // later (PLN-7).
@@ -564,10 +568,12 @@ func sameLabel(a, b string) bool {
 // a store down), so one fault does not hide every other subject. Before
 // OpenContent it returns ErrContentClosed and no subjects, since none could
 // be read. The log holds no name, so recall by name opens the labels. A
-// blank or invalid-UTF-8 label is ErrLabel: it would match labels the owner
-// did not type (LOG-4).
+// blank or invalid-UTF-8 label, or one holding a character the owner cannot
+// see (a control or the invisibles backup destinations refuse; the two
+// joiners stay, as in STATUS lines, #2740), is ErrLabel: it would match
+// labels the owner did not type (LOG-4, #3901).
 func (k *Kernel) Named(label string) (found, unread []string, err error) {
-	if strings.TrimSpace(label) == "" || !utf8.ValidString(label) {
+	if strings.TrimSpace(label) == "" || !utf8.ValidString(label) || strings.ContainsFunc(label, unlabelled) {
 		return nil, nil, ErrLabel
 	}
 	if k.keys == nil {

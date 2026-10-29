@@ -230,7 +230,7 @@ func TestHello(t *testing.T) {
 // only"). Revert mutant: an "os" or "net" import in a non-test file.
 func TestImportsStandardLibraryOnly(t *testing.T) {
 	allowed := map[string]bool{
-		"crypto/ed25519": true, "encoding/binary": true, "errors": true, "io": true, "unicode/utf8": true,
+		"crypto/ed25519": true, "encoding/binary": true, "errors": true, "io": true, "unicode": true, "unicode/utf8": true,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
