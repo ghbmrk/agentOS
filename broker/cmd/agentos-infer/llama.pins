@@ -9,8 +9,11 @@
 # that build and the image ships it (INFER-image, #3655). `unpinned` makes the workflow print the
 # file's hash and fail, which is how the pin is taken (the hash of a file downloaded in CI, never a
 # value typed from memory).
+# The archive carries the commit it was made from; llama_src_commit pins it, and infer-real checks
+# that the tag b11900 names that commit over git (git ls-remote), a path apart from the archive.
 llama_src_url=https://github.com/ggml-org/llama.cpp/archive/refs/tags/b11900.tar.gz
 llama_src_sha256=unpinned
+llama_src_commit=unpinned
 # The model, Qwen3-Embedding-0.6B at Q8_0 (D-230), 639150592 bytes, at the Hugging Face revision
 # below. Apache-2.0: its GGUF header's general.license, which the image build reads and checks
 # (INFER-A4). The SHA-256 is the LFS object id Hugging Face publishes for the file, read from its

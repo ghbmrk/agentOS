@@ -68,6 +68,7 @@ class TestInferImage(unittest.TestCase):
         p = pins()
         self.assertRegex(p["llama_src_sha256"], HEX, "take the pin from the infer-real run's download")
         self.assertRegex(p["embed_sha256"], HEX)
+        self.assertRegex(p["llama_src_commit"], r"^[0-9a-f]{40}$")
         self.assertTrue(p["llama_src_url"].startswith("https://github.com/ggml-org/llama.cpp/"))
         self.assertTrue(p["embed_url"].startswith("https://huggingface.co/"))
         # The model is pinned at a revision (a commit id), never a moving branch.
@@ -75,6 +76,9 @@ class TestInferImage(unittest.TestCase):
         server = (IMG / "llamaserver.sh").read_text()
         self.assertIn('WANT=$(pin llama_src_sha256)', server)
         self.assertIn('[ "$GOT" = "$WANT" ] || {', server)
+        self.assertIn('[ "$COMMIT" = "$(pin llama_src_commit)" ] || {', server)
+        wf = (ROOT / ".github/workflows/infer-real.yml").read_text()
+        self.assertIn("git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b11900", wf)
         infer = (IMG / "infer.sh").read_text()
         self.assertIn('[ "$GOT" = "$(pin embed_sha256)" ] || {', infer)
         # The prebuilt release asset is gone: the server tested is the one built from the pin.
