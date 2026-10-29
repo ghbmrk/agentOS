@@ -290,8 +290,10 @@ func (c *Channel) dropOpen(ids []string, now time.Time) {
 }
 
 // renderLocked is the approval text (CH-12): fixed wording from verified
-// fields, the expiry, and the valid replies, in GSM-7 within three
-// segments. Items that do not fit are left to MORE.
+// fields, read as a first-person question, then the expiry and the valid
+// replies, in GSM-7 within three segments. The request ID is in the
+// replies, with no leading label (D-127). Items that do not fit are left
+// to MORE.
 func (c *Channel) renderLocked(r *request) string {
 	exp := r.expires.In(c.cfg.Location).Format("15:04")
 	var replies string
@@ -307,29 +309,29 @@ func (c *Channel) renderLocked(r *request) string {
 		if !it.Sent.IsZero() && it.SentErased {
 			// Only an erased send matched (OP2-ER-2): the notice says it
 			// may repeat one, never that this one was sent.
-			return fmt.Sprintf("%s: %sCan I %s \"%s\"? It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+			return fmt.Sprintf("%sCan I %s \"%s\"? It may repeat a send whose record was erased (%s). Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if !it.Sent.IsZero() {
 			// A repeat of a send known to have gone (confirm repeats,
 			// D-116): the notice says so and asks.
-			return fmt.Sprintf("%s: %s%s \"%s\" was already sent %s. Send it again? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+			return fmt.Sprintf("%sCan I %s \"%s\" again? It was already sent %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Sent.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if !it.Retried.IsZero() {
 			// An owner retry (OP-2): the notice warns of a duplicate and
 			// names no recipient, which the page shows.
-			return fmt.Sprintf("%s: %s%s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
+			return fmt.Sprintf("%sCan I %s \"%s\" again? It may go twice; first tried %s. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				pre, field(it.Facts.Verb, 12), field(it.Object, 40), it.Retried.In(c.cfg.Location).Format("15:04 Jan 2"), exp, r.id)
 		}
 		if SMSApprovable(it) {
 			// A change that needs the page's confirmation (CH-3,
 			// Security Q1 on P2-2a part 2): only NO by text.
-			return fmt.Sprintf("%s: %sCan I %s \"%s\"? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-				r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
+			return fmt.Sprintf("%sCan I %s \"%s\"? Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+				pre, field(it.Facts.Verb, 12), field(it.Object, 40), exp, r.id)
 		}
-		return fmt.Sprintf("%s: %sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
-			r.id, pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
+		return fmt.Sprintf("%sCan I %s \"%s\" to %d recipient%s? I can't show them in a text. Approve or deny on my Wi-Fi page before %s, or reply NO %s.",
+			pre, field(it.Facts.Verb, 12), field(it.Object, 40), n, map[bool]string{true: "s"}[n != 1], exp, r.id)
 	}
 	switch {
 	case r.tier == High && len(r.items) == 1:
@@ -342,11 +344,18 @@ func (c *Channel) renderLocked(r *request) string {
 		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
 	}
 	if len(r.items) == 1 {
-		return fmt.Sprintf("%s: %s. Expires %s. %s", r.id, c.itemLine(r.items[0]), exp, replies)
+		// The full wording, or its short form when that would not fit
+		// three segments with the longest request ID and grid cell, so
+		// the form never depends on which ID was drawn (CH12V-4).
+		text := fmt.Sprintf("%s Expires %s. %s", c.question(r.items[0], false), exp, replies)
+		if !fits(text + "xxx") {
+			text = fmt.Sprintf("%s Expires %s. %s", c.question(r.items[0], true), exp, replies)
+		}
+		return text
 	}
 	for shown := len(r.items); shown >= 0; shown-- {
 		var b strings.Builder
-		fmt.Fprintf(&b, "%s: %d items.", r.id, len(r.items))
+		fmt.Fprintf(&b, "Can I do these %d things?", len(r.items))
 		for i := 0; i < shown; i++ {
 			fmt.Fprintf(&b, " %d %s.", i+1, c.itemLine(r.items[i]))
 		}
@@ -358,7 +367,7 @@ func (c *Channel) renderLocked(r *request) string {
 			return b.String()
 		}
 	}
-	return fmt.Sprintf("%s: %d items. MORE %s lists them. Expires %s. %s", r.id, len(r.items), r.id, exp, replies)
+	return fmt.Sprintf("Can I do these %d things? MORE %s lists them. Expires %s. %s", len(r.items), r.id, exp, replies)
 }
 
 // moreLocked lists a request's open items (CH-12's MORE).
