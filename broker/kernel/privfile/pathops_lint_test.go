@@ -89,6 +89,17 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a shadowed flag package fails", func(t *testing.T) {
+		for _, src := range []string{
+			"package side\n\nimport (\n\t\"os\"\n\t\"syscall\"\n)\n\nvar _ = syscall.O_RDONLY\n\nfunc F(p string) { syscall := struct{ O_NOFOLLOW int }{}; os.OpenFile(p, os.O_RDWR|syscall.O_NOFOLLOW, 0) }\n",
+			"package side\n\nimport (\n\t\"os\"\n\tunix \"syscall\"\n)\n\nvar _ = unix.O_RDONLY\n\nfunc F(p string) { unix := struct{ O_NOFOLLOW int }{}; os.OpenFile(p, os.O_RDWR|unix.O_NOFOLLOW, 0) }\n",
+			"package side\n\nimport (\n\t\"os\"\n\t\"syscall\"\n)\n\nvar _ = syscall.O_RDONLY\n\nvar G = func(p string, syscall struct{ O_NOFOLLOW int }) { os.OpenFile(p, os.O_RDWR|syscall.O_NOFOLLOW, 0) }\n",
+		} {
+			if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 1 {
+				t.Errorf("got %q, want one problem for\n%s", problems, src)
+			}
+		}
+	})
 	t.Run("a dot import of os fails", func(t *testing.T) {
 		src := "package side\n\nimport . \"os\"\n\nfunc F(p string) { Remove(p) }\n"
 		problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "pending broker/side #1 even pending\n")
@@ -564,7 +575,7 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 	var uses []use
 	fset := token.NewFileSet()
 	for p := range files {
-		f, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
+		f, err := parser.ParseFile(fset, p, nil, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -647,7 +658,9 @@ func namesNoFollow(e ast.Expr, flagNames map[string]bool) bool {
 		return e.Op == token.OR && orOfFlags(e.X) && orOfFlags(e.Y) && (namesNoFollow(e.X, flagNames) || namesNoFollow(e.Y, flagNames))
 	case *ast.SelectorExpr:
 		id, ok := e.X.(*ast.Ident)
-		return ok && flagNames[id.Name] && e.Sel.Name == "O_NOFOLLOW"
+		// An import never resolves to a local object; a variable or
+		// parameter shadowing its name does (#3951 Security delta 3).
+		return ok && id.Obj == nil && flagNames[id.Name] && e.Sel.Name == "O_NOFOLLOW"
 	}
 	return false
 }
