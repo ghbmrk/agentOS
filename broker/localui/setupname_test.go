@@ -195,7 +195,7 @@ func (r *rig) toNames() {
 	t.Helper()
 	r.pair()
 	p := html.UnescapeString(r.get("/setup"))
-	m := regexp.MustCompile(`otpauth://totp/AgentOS:AgentOS\?secret=([A-Z2-7]+)&`).FindStringSubmatch(p)
+	m := regexp.MustCompile(`otpauth://totp/[^?]*\?secret=([A-Z2-7]+)&`).FindStringSubmatch(p)
 	if m == nil {
 		t.Fatalf("no otpauth link: %s", p)
 	}
