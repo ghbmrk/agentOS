@@ -130,8 +130,9 @@ type Config struct {
 	Key    key.Key
 	Holder ed25519.PrivateKey
 	Pinned key.PublicKey
-	// Paused reports the pinned channel (UPD-4): no plan is submitted, no
-	// restart happens and STATUS says why while it holds. Nil: never.
+	// Paused reports the pinned channel (UPD-4): no plan is submitted, a
+	// release handed over in this boot is withdrawn instead of restarted
+	// into (Pin) and STATUS says why while it holds. Nil: never.
 	Paused    func() bool
 	Activator Activator
 	// Store is the box's update store: the applier stages the release in
@@ -207,6 +208,9 @@ type point struct {
 	// Withdraw finishes abandoning it, and a boot of the old root is not
 	// a fallback (SR3-4f-3a).
 	Withdrawing bool `json:"withdrawing,omitempty"`
+	// Pinned: it is withdrawn because the owner pinned the update
+	// channel (UPD-4, #3699), not for a failed security check.
+	Pinned bool `json:"pinned,omitempty"`
 }
 
 // Outcome kinds for Status.
@@ -220,6 +224,9 @@ const (
 	// doneUnrecorded: the release reached maxUnrecorded and is refused
 	// until Retry (SR3-4f-1b).
 	doneUnrecorded = "unrecorded"
+	// donePinned: the owner pinned the update channel after the handover,
+	// so the release was withdrawn before any boot took it (#3699).
+	donePinned = "pinned"
 )
 
 // maxUnrecorded is how many times Install runs for one release with no
@@ -642,14 +649,21 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 		a.mu.Unlock()
 		return false, err
 	}
+	if pt != nil && a.cfg.Paused() {
+		// Pinned after the handover: withdrawn before any boot takes it
+		// (UPD-4, #3699).
+		err := a.withdrawLocked(ctx, pt, true)
+		a.mu.Unlock()
+		return false, err
+	}
 	a.mu.Unlock()
 	if pt == nil || a.busy(a.cfg.Now(), pt.TalkUntil) != "" {
 		return false, nil
 	}
 	a.mu.Lock()
-	if pt = a.applyingLocked(pt.ID); pt == nil || a.staleLocked(pt) {
+	if pt = a.applyingLocked(pt.ID); pt == nil || a.staleLocked(pt) || a.cfg.Paused() {
 		a.mu.Unlock()
-		return false, nil // withdrawn meanwhile: the next Tick settles it
+		return false, nil // withdrawn or pinned meanwhile: the next Tick settles it
 	}
 	a.restarting = pt.ID
 	a.mu.Unlock()
@@ -687,13 +701,22 @@ func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	}
 	next := a.st
 	next.Applying = nil
-	next.Last = &last{Version: pt.To, Kind: doneNotHanded}
+	next.Last = &last{Version: pt.To, Kind: withdrawnKind(pt)}
 	retire(&next, pt.Adoption)
 	if err := a.save(next); err != nil {
 		return err
 	}
 	a.st, a.handed = next, nil
 	return nil
+}
+
+// withdrawnKind is the outcome of a handover withdrawn before any boot
+// took it.
+func withdrawnKind(pt *point) string {
+	if pt.Pinned {
+		return donePinned
+	}
+	return doneNotHanded
 }
 
 // WhySecurity is the change pipeline's reason for a revert after a
@@ -772,9 +795,17 @@ func (a *Applier) undoHandoverLocked(pt *point) error {
 	if b, err := a.cfg.Activator.Booted(ctx); err != nil || b.ID != pt.BootID {
 		return handoverError{starts: true} // a new boot is Resume's to settle
 	}
+	return a.withdrawLocked(ctx, pt, false)
+}
+
+// withdrawLocked undoes pt's handover in the boot it was handed over in,
+// marked durably first, so it is never restarted into even when a step
+// fails, and a reboot of the old root is not taken for a fallback
+// (SR3-4f-3a). pinned: the owner pinned the update channel (#3699).
+func (a *Applier) withdrawLocked(ctx context.Context, pt *point, pinned bool) error {
 	if !pt.Withdrawing {
 		marked := *pt
-		marked.Withdrawing = true
+		marked.Withdrawing, marked.Pinned = true, pinned
 		next := a.st
 		next.Applying = &marked
 		if err := a.save(next); err != nil {
@@ -788,6 +819,53 @@ func (a *Applier) undoHandoverLocked(pt *point) error {
 		return fmt.Errorf("%w: %w", handoverError{}, err)
 	}
 	return nil
+}
+
+// Pin withdraws a release handed over in this boot, for the owner's pin
+// of the update channel (UPD-4, #3699): pinned means no automatic
+// update, and a handed-over release would start at the next restart,
+// planned or not. The caller pins the channel (Paused true) first and
+// reports the pin as taken only once Pin returns nil, so the owner is
+// never told "pinned" while the next boot would take the release.
+//
+// The boundary is the first boot of the new slot: once the box has booted
+// it, going back is a downgrade, so the release stays and Resume settles
+// it as usual (Security on #3701). An install still running, or a restart
+// already under way, is refused with an error that is ErrApplying, and
+// Pin is called again; a Tick while pinned withdraws it too. The
+// withdrawal is marked durably before the slot is abandoned, the adoption
+// is dropped, and STATUS and the digest say so.
+func (a *Applier) Pin(ctx context.Context) error {
+	a.mu.Lock()
+	unhanded := a.st.Applying != nil && !a.st.Applying.Installed && !a.executing
+	a.mu.Unlock()
+	if unhanded {
+		// A handover execute could not undo; Resume abandons it.
+		if err := a.Resume(ctx); err != nil {
+			return err
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pt := a.st.Applying
+	switch {
+	case pt == nil:
+		return nil
+	case a.executing || !pt.Installed:
+		return handoverError{}
+	case a.restarting == pt.ID:
+		return handoverError{starts: true}
+	}
+	b, err := a.cfg.Activator.Booted(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
+	}
+	if b.ID != pt.BootID {
+		return nil // booted since the handover: Resume's to settle
+	}
+	err = a.withdrawLocked(ctx, pt, true)
+	a.settleLocked(ctx)
+	return err
 }
 
 // handoverError: the adoption's release is being installed. It is
@@ -1306,7 +1384,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 		if pt.Withdrawing {
 			// The withdraw's Abandon took before the reboot: not a
 			// fallback (SR3-4f-3a).
-			next.Last = &last{Version: pt.To, Kind: doneNotHanded}
+			next.Last = &last{Version: pt.To, Kind: withdrawnKind(pt)}
 			retire(&next, pt.Adoption)
 			break
 		}
@@ -1403,6 +1481,25 @@ const (
 	mayStartLine  = "Update %d failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
 )
 
+// The lines for a release withdrawn, or being withdrawn, because the owner
+// pinned the update channel after the handover (#3699).
+const (
+	pinnedLine       = "Update %d is paused because your update channel is pinned; I will not start it."
+	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
+)
+
+// pinnedHandoverLocked: pt was handed over in this boot and the channel
+// is pinned, so the next Tick or Pin withdraws it rather than restart
+// into it. A boot that cannot be read, or a later boot, is not taken for
+// it: the new slot may already run.
+func (a *Applier) pinnedHandoverLocked(pt *point) bool {
+	if !pt.Installed || a.executing || !a.cfg.Paused() {
+		return false
+	}
+	b, err := a.cfg.Activator.Booted(context.Background())
+	return err == nil && b.ID == pt.BootID
+}
+
 // Status is the applier's STATUS line, or "": an update installing or
 // waiting, with why, and a fallback until the next update installs
 // (UX-133-1 to 3). A successful install is said once, in the digest.
@@ -1410,18 +1507,20 @@ func (a *Applier) Status() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
-	case a.st.Applying != nil && a.st.Applying.Withdrawing:
+	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned:
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
 		if a.refused.starts {
 			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
 		}
 		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
+	case a.st.Applying != nil && (a.st.Applying.Pinned || a.pinnedHandoverLocked(a.st.Applying)):
+		return fmt.Sprintf(pinnedLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return fmt.Sprintf("Update %d is installing; I will restart and check it.", a.st.Applying.To)
 	case a.st.Pending != nil && a.rel != nil:
 		why := ""
-		if now := a.cfg.Now(); !now.Before(a.st.Pending.NotBefore) {
+		if now := a.cfg.Now(); a.cfg.Paused() || !now.Before(a.st.Pending.NotBefore) {
 			why = a.busy(now, a.talkUntil(a.st.Pending))
 		}
 		return fmt.Sprintf(waitLines[why], a.st.Pending.Version)
@@ -1442,6 +1541,13 @@ func (a *Applier) Status() string {
 		return withPreviousRoot(fellBackLine(l.Version), n, prev)
 	case l.Kind == doneUnrecorded:
 		return withPreviousRoot(unrecordedText(l.Version), n, prev)
+	case l.Kind == donePinned && a.cfg.Paused():
+		return withPreviousRoot(fmt.Sprintf(pinnedLine, l.Version), n, prev)
+	case l.Kind == donePinned:
+		if prev {
+			return previousRootText(n)
+		}
+		return ""
 	default:
 		return withPreviousRoot(fmt.Sprintf("Update %d was not installed; I will try again.", l.Version), n, prev)
 	}
@@ -1464,6 +1570,8 @@ func (a *Applier) Digest() []string {
 		return []string{withPreviousRoot(fmt.Sprintf("Update %d is installed.", l.Version), n, prev)}
 	case doneUnrecorded:
 		return []string{withPreviousRoot(unrecordedText(l.Version), n, prev)}
+	case donePinned:
+		return []string{withPreviousRoot(fmt.Sprintf(pinnedDigestLine, l.Version), n, prev)}
 	case doneInstalledOtherRoot:
 		if prev {
 			return []string{otherRootText(l.Version)}
