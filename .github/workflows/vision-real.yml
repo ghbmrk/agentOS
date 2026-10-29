@@ -1,9 +1,10 @@
 name: vision-real
-# VIS-models (#3515 parts e1, e2): the vision service on the real ONNX Runtime, detector
-# and face models. Every file is downloaded, checked against its pin and refused on a
+# VIS-models (#3515 parts e1, e2, e3): the vision service on the real ONNX Runtime, detector,
+# face, plate and sound models. Every file is downloaded, checked against its pin and refused on a
 # mismatch before anything runs: the runtime library and the models against
 # broker/cmd/agentos-vision/models.pins (the same pins the runtime checks again when it
-# loads), the scene set against scenes.pins and the face set against faces.pins. The tests then run under the tags vision_onnx
+# loads), the scene set against scenes.pins, the face set against faces.pins, the plate set
+# against plates.pins and the sound set against sounds.pins. The tests then run under the tags vision_onnx
 # and vision_real, and fail, never skip, without the files. It runs when the service, the
 # protocol or the pins change, nightly, or on demand; ci.yml compiles the same tests on
 # every change, so a break to them shows there first.
@@ -61,7 +62,8 @@ jobs:
           lib=libonnxruntime.so.1.29.0
           cp "$RUNNER_TEMP/ort/onnxruntime-linux-x64-1.29.0/lib/$lib" "$d/$lib"
           check "$d/$lib" $lib
-          for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx; do
+          for m in yolox_tiny.onnx face_detection_yunet_2023mar.onnx face_recognition_sface_2021dec.onnx \
+              yolo-v9-t-416-license-plates-end2end.onnx cct_xs_v2_global.onnx yamnet.onnx; do
             curl -fsSL --retry 3 --retry-delay 5 -o "$d/$m" "$(pin $m 3)"
             check "$d/$m" $m
           done
@@ -95,14 +97,62 @@ jobs:
           tar -tf "$RUNNER_TEMP/faces.tar" | grep -E '^SFHQ_pt1_[0-9]{8}_resize\.\.jpg$' > "$d/names"
           tar -xf "$RUNNER_TEMP/faces.tar" -C "$d/images" --no-same-owner --no-same-permissions -T "$d/names"
           echo "AGENTOS_VISION_FACES=$d" >> "$GITHUB_ENV"
-      - name: The real runtime (detection, faces, thermal, floor figures)
+      - name: Download the pinned plate set, check its hash, unpack it
+        run: |
+          pins=broker/cmd/agentos-vision/plates.pins
+          pin() { awk -v k="$1" '$1 == k {print $2}' "$pins"; }
+          d="$RUNNER_TEMP/vision-plates"
+          mkdir -p "$d"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/plates.parquet" "$(pin base)/$(pin revision)/$(pin shard)"
+          got=$(sha256sum "$RUNNER_TEMP/plates.parquet" | cut -d' ' -f1)
+          [ "$got" = "$(pin shard_sha256)" ] || { echo "::error file=$pins::the plate shard hashes to $got"; exit 1; }
+          # pyarrow, held to its wheels' hashes and no dependency, only reads the shard; the
+          # files are named by row number, so no value in the shard can name a path.
+          python3 -m venv "$RUNNER_TEMP/pa"
+          { printf 'pyarrow==%s' "$(pin pyarrow)"; awk '$1 == "pyarrow_wheel" {printf " --hash=sha256:%s", $2}' "$pins"; echo; } > "$RUNNER_TEMP/pa.txt"
+          "$RUNNER_TEMP/pa/bin/pip" install --quiet --no-deps --only-binary :all: --require-hashes -r "$RUNNER_TEMP/pa.txt"
+          "$RUNNER_TEMP/pa/bin/python" -I - "$RUNNER_TEMP/plates.parquet" "$d" <<'EOF'
+          import sys, pyarrow.parquet as pq
+          src, d = sys.argv[1], sys.argv[2]
+          t = pq.read_table(src, columns=["vrn", "front_plate", "augmented_front_plate", "augmented_rear_plate"]).slice(0, 500).to_pylist()
+          with open(d + "/plates.tsv", "w") as out:
+              for i, r in enumerate(t):
+                  for k, c in (("clean", "front_plate"), ("front", "augmented_front_plate"), ("rear", "augmented_rear_plate")):
+                      b = r[c]["bytes"]
+                      if b[:3] != b"\xff\xd8\xff":
+                          sys.exit("row %d %s is not a JPEG" % (i, c))
+                      open("%s/%03d-%s.jpg" % (d, i, k), "wb").write(b)
+                  out.write("%03d\t%s\n" % (i, r["vrn"]))
+          EOF
+          echo "AGENTOS_VISION_PLATES=$d" >> "$GITHUB_ENV"
+      - name: Download the pinned sound set, check its hashes
+        run: |
+          pins=broker/cmd/agentos-vision/sounds.pins
+          pin() { awk -v k="$1" '$1 == k {print $2}' "$pins"; }
+          d="$RUNNER_TEMP/vision-sounds"
+          mkdir -p "$d/audio"
+          curl -fsSL --retry 3 --retry-delay 5 -o "$d/esc50.csv" "$(pin base)/meta/esc50.csv"
+          got=$(sha256sum "$d/esc50.csv" | cut -d' ' -f1)
+          [ "$got" = "$(pin meta_sha256)" ] || { echo "::error file=$pins::esc50.csv hashes to $got"; exit 1; }
+          folds=$(awk '$1 == "folds" {$1 = ""; print}' "$pins")
+          awk -F, -v folds="$folds" 'BEGIN {n = split(folds, f, " "); for (i = 1; i <= n; i++) want[f[i]] = 1}
+            NR > 1 && ($2 in want) {print $1 "\t" $4}' "$d/esc50.csv" > "$d/clips.tsv"
+          cut -f1 "$d/clips.tsv" | sort > "$d/names"
+          grep -qvE '^[1-5]-[0-9]+-[A-Z]-[0-9]+\.wav$' "$d/names" && { echo "::error file=$pins::a clip name outside the ESC-50 pattern"; exit 1; }
+          cut -f2 "$d/clips.tsv" | grep -qvE '^[a-z_]+$' && { echo "::error file=$pins::a category outside [a-z_]"; exit 1; }
+          xargs -P 8 -I{} curl -fsSL --retry 3 --retry-delay 5 -o "$d/audio/{}" "$(pin base)/audio/{}" < "$d/names"
+          got=$(cd "$d/audio" && xargs sha256sum < "$d/names" | sha256sum | cut -d' ' -f1)
+          [ "$got" = "$(pin audio_sha256)" ] || { echo "::error file=$pins::the clips hash to $got"; exit 1; }
+          echo "AGENTOS_VISION_SOUNDS=$d" >> "$GITHUB_ENV"
+      - name: The real runtime (detection, faces, plates, sound, thermal, floor figures)
         working-directory: broker
         env:
           CGO_ENABLED: "1"
         run: |
           set -o pipefail
-          go test -count=1 -timeout 30m -tags vision_onnx,vision_real -run 'TestRealRuntime|TestRealFaces|TestRealEnrol|TestFloor|TestOnnx|TestThermal' -v ./cmd/agentos-vision | tee "$RUNNER_TEMP/real.log"
+          go test -count=1 -timeout 30m -tags vision_onnx,vision_real -run 'TestRealRuntime|TestRealFaces|TestRealEnrol|TestRealPlates|TestRealSound|TestFloor|TestOnnx|TestThermal' -v ./cmd/agentos-vision | tee "$RUNNER_TEMP/real.log"
           # A renamed test or an unset variable must not pass by running nothing.
-          for t in TestRealRuntimeDetect TestRealRuntimeRefusesOffPinDetector TestRealFaces TestRealFacesNotEncodedWhenNoneEnrolled TestRealEnrolNeedsOneClearFace TestRealEnrolZeroesEncoderOutput TestFloorFigures TestFloorFaces TestOnnxLoadNeedsPinnedFiles TestThermalDetect; do
+          for t in TestRealRuntimeDetect TestRealRuntimeRefusesOffPinDetector TestRealFaces TestRealFacesNotEncodedWhenNoneEnrolled TestRealEnrolNeedsOneClearFace TestRealEnrolZeroesEncoderOutput TestFloorFigures TestFloorFaces TestOnnxLoadNeedsPinnedFiles TestThermalDetect \
+              TestRealPlates TestRealSound TestRealSoundOutputsScoresOnly TestRealSoundLeavesNoSampleCopy TestFloorPlatesSound TestOnnxModelNameValid; do
             grep -q -- "^--- PASS: $t " "$RUNNER_TEMP/real.log" || { echo "$t did not pass" >&2; exit 1; }
           done
