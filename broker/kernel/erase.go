@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -552,9 +553,8 @@ func (k *Kernel) ReadFor(now int64, h Hash, lineage string) ([]byte, error) {
 	return k.Read(h)
 }
 
-// unlabelled is a character a label to look for may not hold: one invisible
-// refuses, but for the two joiners (#2740).
-func unlabelled(c rune) bool { return c != '\u200c' && c != '\u200d' && invisible(c) }
+// seen is a character that shows: not a space, nor one invisible refuses.
+func seen(c rune) bool { return !unicode.IsSpace(c) && !invisible(c) }
 
 // sameLabel compares labels after folding case and collapsing runs of
 // whitespace, so "alice  smith" reads "Alice Smith". Fuzzier matching is
@@ -568,12 +568,14 @@ func sameLabel(a, b string) bool {
 // a store down), so one fault does not hide every other subject. Before
 // OpenContent it returns ErrContentClosed and no subjects, since none could
 // be read. The log holds no name, so recall by name opens the labels. A
-// blank or invalid-UTF-8 label, or one holding a character the owner cannot
-// see (a control or the invisibles backup destinations refuse; the two
-// joiners stay, as in STATUS lines, #2740), is ErrLabel: it would match
-// labels the owner did not type (LOG-4, #3901).
+// label is ErrLabel when it is invalid UTF-8, holds a character a STATUS
+// line would not show (unseen: a control, separator or format character but
+// the two joiners, #2740), or has no character to see at all, only spaces
+// and invisibles: such a label would match labels the owner did not type
+// (LOG-4, #3901). What STATUS shows stays, an emoji's variation selector
+// among them, since sameLabel is exact and it can widen no match.
 func (k *Kernel) Named(label string) (found, unread []string, err error) {
-	if strings.TrimSpace(label) == "" || !utf8.ValidString(label) || strings.ContainsFunc(label, unlabelled) {
+	if !utf8.ValidString(label) || strings.ContainsFunc(label, unseen) || !strings.ContainsFunc(label, seen) {
 		return nil, nil, ErrLabel
 	}
 	if k.keys == nil {

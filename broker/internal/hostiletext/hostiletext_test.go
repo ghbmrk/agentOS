@@ -44,7 +44,7 @@ func strict(s string) bool {
 // character sits; one that refuses the plain name fails the positive
 // control; a strict check passes.
 func TestRunFailsAnAcceptingCheck(t *testing.T) {
-	zw := func(s string) bool { return strict(strings.ReplaceAll(s, "​", "")) }
+	zw := func(s string) bool { return strict(strings.ReplaceAll(s, "\u200b", "")) }
 	r := run(zw)
 	for _, where := range []string{"leading", "inside", "trailing"} {
 		if !r.has("accepts zero-width space U+200B " + where) {
@@ -79,7 +79,7 @@ func TestRunFailsAnAcceptingCheck(t *testing.T) {
 // An exception covers only the entry it names, and only with a reason; one
 // naming no entry fails, so a renamed entry does not widen a check.
 func TestExceptNamesAnEntryAndAReason(t *testing.T) {
-	joiner := func(s string) bool { return strict(strings.ReplaceAll(s, "‍", "")) }
+	joiner := func(s string) bool { return strict(strings.ReplaceAll(s, "\u200d", "")) }
 	if r := run(joiner); !r.has("zero-width joiner") {
 		t.Fatalf("a joiner-accepting check passed: %q", r.errs)
 	}
