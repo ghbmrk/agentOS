@@ -479,9 +479,11 @@ func cgoFaults(src []byte) []string {
 
 // cgoBuildFaults lists how the flags go/build applies to camdecode, with
 // src as h264.go, step outside cgoPin's two #cgo lines: on linux/amd64,
-// where image/build.sh builds it, and on linux/arm64, the other platform
-// the boxes run. A #cgo line limited to any other platform is still a
-// fault of the raw #cgo lines in cgoFaults.
+// the x86-64 controller camdecode runs on (SPEC HW-3), where
+// image/camdecode.sh, called from image/build.sh, builds it; and on
+// linux/arm64, as extra coverage only, since the arm64 camera node builds
+// with CGO_ENABLED=0 (image/camnode/build.sh). A #cgo line limited to any
+// other platform is still a fault of the raw #cgo lines in cgoFaults.
 func cgoBuildFaults(src []byte) []string {
 	var faults []string
 	for _, arch := range []string{"amd64", "arm64"} {
@@ -531,7 +533,7 @@ func TestDecoderCgoIsPinned(t *testing.T) {
 		t.Fatal(err)
 	}
 	if faults := cgoFaults(src); len(faults) > 0 {
-		t.Fatalf("h264.go: %q", faults)
+		t.Fatalf("h264.go steps outside cgoPin in broker/clerk/camera/decode_test.go, and a change to cgoPin needs a NET-2 review: %q", faults)
 	}
 	const (
 		pc      = "#cgo pkg-config: libavcodec libavutil\n"
@@ -581,6 +583,82 @@ func TestDecoderCgoIsPinned(t *testing.T) {
 		if faults := cgoFaults(bytes.Replace(src, []byte(e.old), []byte(e.new), 1)); !slices.ContainsFunc(faults,
 			func(f string) bool { return strings.Contains(f, e.want) }) {
 			t.Errorf("%s: faults %q, want one with %q", e.name, faults, e.want)
+		}
+	}
+}
+
+// camdecodeSh is the decoder's build script.
+const camdecodeSh = "../../../image/camdecode.sh"
+
+// TestDecoderLinkHasNoNetworkCall: image/camdecode.sh links the decoder
+// with a cross-reference map and stops the build on any network call that
+// linkfaults finds in it, after pinning go env's cgo tools and flags and
+// pkg-config's flags for cgoPin's pkg-config modules (NET-2; #3816). Run
+// on maps shaped as ld writes them, linkfaults passes what libc's static
+// start-up references and names each network call that a file outside
+// libc.a defines or uses: Go's objects, libavcodec, any library a flag
+// adds.
+func TestDecoderLinkHasNoNetworkCall(t *testing.T) {
+	b, err := os.ReadFile(camdecodeSh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	modules := strings.TrimPrefix(cgoPin.directives[0], "#cgo pkg-config: ")
+	for _, want := range []string{
+		"go env CC CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_FFLAGS CGO_LDFLAGS PKG_CONFIG)\" = \"$env_pin\" ]",
+		"for f in --cflags --libs '--libs --static'; do",
+		"pkg-config $f " + modules + "))\" = \"$want\" ]",
+		"-Wl,-Map=$lib/camdecode.map,--cref",
+		"faults=$(linkfaults \"$lib/camdecode.map\")\n[ -z \"$faults\" ] || {",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("image/camdecode.sh no longer holds %q", want)
+		}
+	}
+	start := strings.Index(src, "\nlinkfaults() {\n")
+	end := strings.Index(src[max(start, 0):], "\n}\n")
+	if start < 0 || end < 0 {
+		t.Fatal("image/camdecode.sh no longer defines linkfaults")
+	}
+	fn := src[start : start+end+3]
+
+	const libc = "/usr/lib/gcc/x86_64-linux-gnu/13/../../../x86_64-linux-gnu/libc.a"
+	row := func(sym string, files ...string) string {
+		line := sym + strings.Repeat(" ", max(1, 50-len(sym))) + files[0] + "\n"
+		for _, f := range files[1:] {
+			line += strings.Repeat(" ", 50) + f + "\n"
+		}
+		return line
+	}
+	head := "Archive member included to satisfy reference by file (symbol)\n\n" +
+		"/w/lib/libavcodec.a(net.o)\n" + strings.Repeat(" ", 30) + "/tmp/go-link-1/go.o (socket)\n\n" +
+		"Cross Reference Table\n\nSymbol" + strings.Repeat(" ", 44) + "File\n"
+	startup := row("__socket", libc+"(socket.o)", libc+"(opensock.o)", libc+"(ifaddrs.o)", libc+"(res_hconf.o)") +
+		row("bind", libc+"(bind.o)") + row("sendto", libc+"(sendto.o)") + row("socket", libc+"(socket.o)") +
+		row("pthread_create", libc+"(pthread_create.o)", "/tmp/go-link-1/000008.o") +
+		row("_dl_tunable_set_elision_skip_trylock_internal_abort", libc+"(elision-conf.o)")
+	for _, c := range []struct{ name, m, want string }{
+		{"libc's static start-up", head + startup, ""},
+		{"Go code calling connect", head + startup + row("connect", libc+"(connect.o)", "/tmp/go-link-1/go.o"),
+			"connect in /tmp/go-link-1/go.o\n"},
+		{"libavcodec defining socket", head + row("socket", "/w/lib/libavcodec.a(net.o)"), "socket in /w/lib/libavcodec.a(net.o)\n"},
+		{"a flag's library using __libc_sendmsg", head + startup + row("__libc_sendmsg", libc+"(sendmsg.o)", "/usr/lib/libcurl.a(cf.o)"),
+			"__libc_sendmsg in /usr/lib/libcurl.a(cf.o)\n"},
+		{"cgo calling getaddrinfo", head + row("getaddrinfo", libc+"(getaddrinfo.o)", "/tmp/go-link-1/000001.o"),
+			"getaddrinfo in /tmp/go-link-1/000001.o\n"},
+		{"a library named like libc", head + row("recvfrom", "/usr/lib/notlibc.a(r.o)"), "recvfrom in /usr/lib/notlibc.a(r.o)\n"},
+		{"a symbol whose file starts the next line", head + "accept4\n" + strings.Repeat(" ", 50) + "/tmp/go-link-1/go.o\n",
+			"accept4 in /tmp/go-link-1/go.o\n"},
+		{"a map without the table", "Archive member included to satisfy reference by file (symbol)\n", "no cross-reference table\n"},
+	} {
+		m := filepath.Join(t.TempDir(), "camdecode.map")
+		if err := os.WriteFile(m, []byte(c.m), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command("sh", "-c", fn+"linkfaults \"$1\"", "sh", m).Output()
+		if err != nil || string(out) != c.want {
+			t.Errorf("%s: linkfaults printed %q (%v), want %q", c.name, out, err, c.want)
 		}
 	}
 }

@@ -86,7 +86,18 @@ type Device struct {
 	// Secure names a safety-list device's one secure-direction command,
 	// such as a lock's "lock" (NET-2 Safety devices); empty for none.
 	Secure string `json:"secure"`
+	// Label is how far the enforcer can contain the device (NET-1), from
+	// qualification and the enforcer's observation, never from what the
+	// device reports: LabelContained, LabelExceptRadio, or empty for not
+	// containable, so a device nobody labelled promises nothing.
+	Label string `json:"label"`
 }
+
+// The NET-1 labels a device can carry; the empty label is not containable.
+const (
+	LabelContained   = "contained"
+	LabelExceptRadio = "contained-except-radio"
+)
 
 // Pair is a signed device-to-device path. A sorts before B.
 type Pair struct {
@@ -221,8 +232,9 @@ func sorted(s []string) []string {
 	return slices.Compact(out)
 }
 
-// check refuses a document with a nameless or duplicate device, an unknown
-// network, a pair, rule or hold naming no device, or an empty window.
+// check refuses a document with a nameless or duplicate device, a Wi-Fi
+// identity that is not a name, an unknown network or label, a drone reference that is not a hash, a pair, rule or
+// hold naming no device, or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	for i, dev := range d.Devices {
@@ -235,14 +247,23 @@ func (d Document) check() error {
 		if !slices.Contains(networks, dev.Network) {
 			return bad("device %q on network %q", dev.ID, dev.Network)
 		}
+		if dev.WiFi != "" && !name(dev.WiFi) {
+			return bad("device %q Wi-Fi identity %q", dev.ID, dev.WiFi)
+		}
 		for _, h := range dev.Allow {
 			if !name(h) {
 				return bad("device %q allows %q", dev.ID, h)
 			}
 		}
+		if dev.Label != "" && dev.Label != LabelContained && dev.Label != LabelExceptRadio {
+			return bad("device %q label %q", dev.ID, dev.Label)
+		}
 		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
 			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
 		}
+	}
+	if d.Drone != "" && !hash(d.Drone) {
+		return bad("drone policy %q", d.Drone)
 	}
 	for _, h := range d.Destinations {
 		if !name(h) {
@@ -268,6 +289,16 @@ func (d Document) check() error {
 		}
 	}
 	return nil
+}
+
+// hash is a SHA-256 in lowercase hex: all a drone reference may be, so it
+// cannot carry text onto the page's screen or signed diff.
+func hash(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil && strings.ToLower(s) == s
 }
 
 // name is a non-empty token with no space, control character or slash, so
