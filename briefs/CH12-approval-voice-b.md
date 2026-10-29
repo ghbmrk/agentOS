@@ -11,6 +11,6 @@ Issue: #2190 (SPEC v1.0 CH-12, D-127). Part a (`briefs/CH12-approval-voice.md`) 
 **Out of scope:** MORE pages, batch item lines (`itemLine`), reply and STATUS texts.
 
 **Acceptance tests:** REQ: CH-12.
-- `TestApprovalTextIsAFirstPersonQuestionWithEveryField` (voice_test.go, new): at every field's cap, for each reversibility and notice, every verified field is present in order, there is no ID label, and the text fits three GSM-7 segments with three-character IDs.
+- `TestApprovalTextIsAFirstPersonQuestionWithEveryField` (voice_test.go, new): at every field's cap, for every combination of reversibility, notice, UNVERIFIED and restart note, every verified field is present in order, there is no ID label, and the text fits three GSM-7 segments with the longest request ID and grid cell. A text that would not fit takes a short form that keeps every field and notice, and only then.
 - `TestABatchIsOneQuestion` (voice_test.go, new): one question over the items, ID only in the replies.
 - `TestApprovalTextIsFixedWordingFromVerifiedFields` (channel_test.go): exact golden, one segment.

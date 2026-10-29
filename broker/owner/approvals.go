@@ -344,7 +344,14 @@ func (c *Channel) renderLocked(r *request) string {
 		replies = fmt.Sprintf("Reply YES %s %s for all, YES %s 1 2 %s for some (the rest are denied), or NO %s.", r.id, r.code, r.id, r.code, r.id)
 	}
 	if len(r.items) == 1 {
-		return fmt.Sprintf("%s Expires %s. %s", c.question(r.items[0]), exp, replies)
+		// The full wording, or its short form when that would not fit
+		// three segments with the longest request ID and grid cell, so
+		// the form never depends on which ID was drawn (CH12V-4).
+		text := fmt.Sprintf("%s Expires %s. %s", c.question(r.items[0], false), exp, replies)
+		if !fits(text + "xxx") {
+			text = fmt.Sprintf("%s Expires %s. %s", c.question(r.items[0], true), exp, replies)
+		}
+		return text
 	}
 	for shown := len(r.items); shown >= 0; shown-- {
 		var b strings.Builder
