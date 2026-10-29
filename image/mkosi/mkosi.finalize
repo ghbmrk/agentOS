@@ -1465,7 +1465,8 @@ FULL_PRIVILEGE_COMMANDS = (
     ("agentos-link.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound link"),
     ("agentos-keeper-link-capture.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; "
      "add element inet agentos_inbound link { \"agentos-link\" }'"),
-    ("agentos-keeper-link-capture.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound link"),
+    ("agentos-keeper-link-capture.service", "ExecStopPost", "+/usr/bin/sh -c '[ -e /var/lib/agentos-store/store ] || "
+     "exec /usr/sbin/nft flush set inet agentos_inbound link'"),
 )
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")

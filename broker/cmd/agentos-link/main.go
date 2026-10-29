@@ -162,26 +162,39 @@ func runCapture(ctx context.Context, c config, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// The store's existence ends the window (decision 3): enrollment makes it, and this process ends
-	// then, freeing the port for the served link. No unit stops it, as the Owner Card flow's units
-	// run no systemctl, and a Conflicts= would cost the capture its start at every boot.
+	return awaitCapture(ctx, c, stderr, func(ctx context.Context) (io.Reader, func(), error) {
+		env, opts := helloSpec(c, f, stderr)
+		cmd := childproc.Command(ctx, env, opts, self, "-hello-child")
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			return nil, nil, err
+		}
+		f.Close()
+		ln.Close()
+		return out, func() { cmd.Kill(); cmd.Wait() }, nil
+	})
+}
+
+// awaitCapture starts the hello reader and writes the one capture it hands
+// back, or ends when the store appears. The store's existence ends the
+// window (decision 3): enrollment makes it, and this process ends then,
+// freeing the port for the served link. No unit stops it, as the Owner Card
+// flow's units run no systemctl, and a Conflicts= would cost the capture its
+// start at every boot.
+func awaitCapture(ctx context.Context, c config, stderr io.Writer,
+	start func(context.Context) (io.Reader, func(), error)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go untilStore(ctx, c.store, cancel)
-	env, opts := helloSpec(c, f, stderr)
-	cmd := childproc.Command(ctx, env, opts, self, "-hello-child")
-	out, err := cmd.StdoutPipe()
+	out, stop, err := start(ctx)
 	if err != nil {
 		return err
 	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	f.Close()
-	ln.Close()
 	err = takeCapture(out, c.capture, c.store)
-	cmd.Kill()
-	cmd.Wait()
+	stop()
 	if ctx.Err() != nil {
 		return nil
 	}

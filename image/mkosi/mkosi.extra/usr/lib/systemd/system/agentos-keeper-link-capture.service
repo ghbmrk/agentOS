@@ -24,7 +24,10 @@ ExecStartPre=+/usr/sbin/nft 'flush set inet agentos_inbound link; add element in
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-link -iface agentos-link -port 7443 \
         -capture /run/agentos-link-capture/first-edge -store /var/lib/agentos-store/store \
         -uid @uid:agentos-link -gid @gid:agentos-link
-ExecStopPost=+/usr/sbin/nft flush set inet agentos_inbound link
+# Once the store exists, the served unit owns the set: a flush after the capture's exit would race
+# its admit and leave the served link's port closed until reboot (#3834 Security), so only a stop
+# before the store empties it.
+ExecStopPost=+/usr/bin/sh -c '[ -e /var/lib/agentos-store/store ] || exec /usr/sbin/nft flush set inet agentos_inbound link'
 Restart=on-failure
 RestartSec=2
 RestartSteps=8

@@ -377,6 +377,12 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         r = sh(*unit_command(LINK_UNIT, key), ns=BOX, check=False)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def reply_on_link(self):
+        """Whether the edge's reply to the box's own ping over the link reaches the box."""
+        if not shutil.which("ping"):
+            self.skipTest("ping is not installed")
+        return sh("ping", "-c1", "-W2", "198.51.100.2", ns=BOX, check=False).returncode == 0
+
     def edge_addrs(self):
         return ["198.51.100.1"] + (["fe80::1%e0"] if IPV6 else [])
 
@@ -389,6 +395,7 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         # As the image boots: the link set is empty, so the link's port is closed everywhere.
         for addr in self.edge_addrs():
             self.assertFalse(reaches(EDGE, addr, self.LINK_PORT), "the empty link set admits %s" % addr)
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed with the link set empty")
         # The unit's start: the link's port answers the edge on the link, and nothing else does.
         self.run_unit("ExecStartPre")
         self.run_unit("ExecStartPre")
@@ -402,14 +409,15 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
         self.assertFalse(reaches(HOME, "192.0.2.1", PORT))
         # Not even replies pass on the link: conntrack is not per interface, so the edge could forge one
         # into another flow (#3834 Security review). The box opens nothing over the link.
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed")
         if shutil.which("ping"):
-            self.assertNotEqual(sh("ping", "-c1", "-W2", "198.51.100.2", ns=BOX, check=False).returncode, 0)
             self.assertEqual(sh("ping", "-c1", "-W2", "192.0.2.2", ns=BOX, check=False).returncode, 0,
                              "control: replies on eth0")
         # The unit's stop: the link's port is closed again.
         self.run_unit("ExecStopPost")
         for addr in self.edge_addrs():
             self.assertFalse(reaches(EDGE, addr, self.LINK_PORT), "the link's port still open at %s after the stop" % addr)
+        self.assertFalse(self.reply_on_link(), "a reply on the link passed after the stop")
 
 
 UPLINK = ROOT / "image/mkosi/mkosi.extra/usr/lib/systemd/network/20-agentos-uplink.network"

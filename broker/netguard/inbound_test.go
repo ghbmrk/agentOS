@@ -114,6 +114,10 @@ func linkVerdict(t *testing.T, rules string, p pkt, link []string, page ...strin
 				f := strings.Fields(body)
 				ok = p.proto == "udp" && f[2] == strconv.Itoa(int(p.dport))
 				body = strings.TrimSpace(strings.TrimPrefix(body, "udp dport "+f[2]))
+			case strings.HasPrefix(body, "iifname \""):
+				name, rest, _ := strings.Cut(strings.TrimPrefix(body, "iifname \""), "\"")
+				ok = p.iif == name
+				body = strings.TrimSpace(rest)
 			case strings.HasPrefix(body, "iifname @link"):
 				ok = lk[p.iif]
 				body = strings.TrimSpace(strings.TrimPrefix(body, "iifname @link"))
@@ -587,14 +591,15 @@ func TestInboundPageAdmitHoldsOneName(t *testing.T) {
 // EDGE-link-core c2c (HW-15, HW-16): the edge link's port is accepted only
 // on the interface in the link set, and nothing else on that interface is:
 // another port, UDP, a router advertisement, a DHCP reply, the page's
-// ports even if that interface were in the page set, or anything if it
-// were exempt. Replies and neighbour discovery on it pass, so the link
-// works. The port is dropped on every other interface, and everywhere
-// while the set is empty (as the image boots, and once the link's unit
-// stops) or the rule is not rendered. agentos-link binds the same port to
+// ports even if that interface were in the page set, anything if it were
+// exempt, or a reply, which the edge could forge into another flow (#3834
+// Security). Neighbour discovery on it passes, so the link works. The port
+// is dropped on every other interface, and everywhere while the set is
+// empty (as the image boots, and once the link's unit stops) or the rule is
+// not rendered; the rest of the link's drop holds with the set empty too. agentos-link binds the same port to
 // the same interface (its TestListensOnTheLinkInterfaceOnly), so the two
 // checks hold the link to one port on one cable.
-// Revert mutants: dropping the "iifname @link drop" line admits the RA,
+// Revert mutants: dropping the link's drop line admits the RA,
 // the DHCP reply and the page's ports on the link; moving the link block
 // after "iifname @exempt accept" admits everything on an exempt link;
 // dropping "iifname @link" from the port rule admits the port on eth0.
@@ -611,6 +616,8 @@ func TestInboundLinkPortOnTheLinkOnly(t *testing.T) {
 		{pkt{iif: "agentos-link", src: netip.MustParseAddr("169.254.0.2"), proto: "tcp", dport: LinkPort}, "accept"},
 		// No replies: conntrack is not per interface, so the edge could forge one for another flow.
 		{pkt{iif: "agentos-link", src: ll, proto: "tcp", sport: 80, dport: 51000, established: true}, "drop"},
+		{pkt{iif: "agentos-link", src: netip.MustParseAddr("169.254.0.2"), proto: "udp", sport: 53, dport: 41000, established: true}, "drop"},
+		{pkt{iif: "eth0", src: netip.MustParseAddr("192.168.1.1"), proto: "tcp", sport: 443, dport: 51000, established: true}, "accept"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 255}, "accept"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-advert", hop: 255}, "accept"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 64}, "drop"},
@@ -630,11 +637,17 @@ func TestInboundLinkPortOnTheLinkOnly(t *testing.T) {
 		if v := linkVerdict(t, r, c.p, link); v != c.want {
 			t.Errorf("%+v: %s, want %s", c.p, v, c.want)
 		}
+		// With the set empty (no link unit running), the port closes and
+		// nothing else changes: the link's drop does not depend on the set.
+		want := c.want
+		if c.p.iif == LinkIface && c.p.proto == "tcp" && c.p.dport == LinkPort {
+			want = "drop"
+		}
+		if v := linkVerdict(t, r, c.p, nil); v != want {
+			t.Errorf("with the link set empty, %+v: %s, want %s", c.p, v, want)
+		}
 		if c.p.established {
 			continue
-		}
-		if v := linkVerdict(t, r, c.p, nil); c.p.iif == "agentos-link" && c.p.dport == LinkPort && c.p.proto == "tcp" && v != "drop" {
-			t.Errorf("the empty link set admits %+v: %s", c.p, v)
 		}
 		if v := linkVerdict(t, render(t, Inbound{Page: true}), c.p, link); c.p.dport == LinkPort && v != "drop" {
 			t.Errorf("without Link, %+v: %s", c.p, v)

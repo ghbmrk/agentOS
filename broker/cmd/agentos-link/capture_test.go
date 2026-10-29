@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -200,5 +201,52 @@ func TestTheStoreEndsTheCaptureWindow(t *testing.T) {
 	case <-ended:
 	case <-time.After(5 * time.Second):
 		t.Fatal("untilStore outlived its context")
+	}
+}
+
+// REQ: HW-15
+
+// TestTheCaptureEndsWhenTheStoreAppears: the capture itself, not only the
+// helper, ends once the store exists, with its reader stopped and no capture
+// written.
+func TestTheCaptureEndsWhenTheStoreAppears(t *testing.T) {
+	old := storePoll
+	storePoll = 10 * time.Millisecond
+	t.Cleanup(func() { storePoll = old })
+	dir := t.TempDir()
+	c := config{capture: filepath.Join(dir, "first-edge"), store: filepath.Join(dir, "store")}
+	stopped := make(chan struct{})
+	// The reader never hands back a hello; like the real child, its output
+	// ends when its context does.
+	start := func(ctx context.Context) (io.Reader, func(), error) {
+		pr, pw := io.Pipe()
+		go func() { <-ctx.Done(); pw.Close() }()
+		return pr, func() { close(stopped) }, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- awaitCapture(context.Background(), c, io.Discard, start) }()
+	select {
+	case err := <-done:
+		t.Fatalf("ended with no store: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.Mkdir(c.store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the store's appearance is not a failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the store did not end the capture")
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("the reader was not stopped")
+	}
+	if _, err := os.Lstat(c.capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a capture was written: %v", err)
 	}
 }

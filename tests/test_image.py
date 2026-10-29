@@ -6201,7 +6201,11 @@ class EdgeLinkUnitsTest(unittest.TestCase):
                 s = settings(unit)
                 # Full privileges for the one nft step, so neither process holds CAP_NET_ADMIN.
                 self.assertEqual(s["ExecStartPre"], ["+" + LINK_ADMIT])
-                self.assertEqual(s["ExecStopPost"], ["+" + LINK_CLOSE])
+                # The capture empties the set only before the store: after it, the served unit owns the
+                # set, and the capture's exit must not race the served unit's admit (#3834 Security).
+                close = LINK_CLOSE if unit == LINK_SERVED else \
+                    "/usr/bin/sh -c '[ -e %s ] || exec %s'" % (arg(self.cap, "store"), LINK_CLOSE)
+                self.assertEqual(s["ExecStopPost"], ["+" + close])
                 u = ini(unit)["Unit"]
                 self.assertIn("agentos-inbound.service", u["Requires"].split())
                 self.assertIn("agentos-inbound.service", u["After"].split())
