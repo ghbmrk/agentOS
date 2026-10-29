@@ -11,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-
-	"golang.org/x/sys/unix"
 )
 
 // Check checks that path is this uid's own, open to no other uid, and not a
@@ -69,10 +67,10 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 	var f *os.File
 	steps := []func() error{
 		func() error {
-			if err := unix.Unlinkat(fd, tmp, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+			if err := syscall.Unlinkat(fd, tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return &os.PathError{Op: "remove", Path: filepath.Join(dir, tmp), Err: err}
 			}
-			t, err := unix.Openat(fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+			t, err := syscall.Openat(fd, tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
 			if err != nil {
 				return &os.PathError{Op: "open", Path: filepath.Join(dir, tmp), Err: err}
 			}
@@ -83,7 +81,7 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 		func() error { return f.Sync() },
 		func() error { return f.Close() },
 		func() error {
-			if err := unix.Renameat(fd, tmp, fd, name); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is sealed content, not a lifecycle, and the next step syncs the directory
+			if err := syscall.Renameat(fd, tmp, fd, name); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is sealed content, not a lifecycle, and the next step syncs the directory
 				return &os.LinkError{Op: "rename", Old: filepath.Join(dir, tmp), New: filepath.Join(dir, name), Err: err}
 			}
 			return nil
@@ -118,7 +116,7 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 // refuses a readable directory, because some callers' directories are
 // legitimately 0755 (agentosd's StateDirectoryMode). ACLs are not read.
 func openDir(dir string) (*os.File, error) {
-	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +153,7 @@ var ErrUnsynced = errors.New("run: written, but the directory sync failed")
 // O_DIRECTORY and O_NOFOLLOW, so a link planted at dir, or a FIFO or device
 // node there, fails at once rather than hanging root or opening a device.
 var SyncDir = func(dir string) error {
-	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}

@@ -149,9 +149,10 @@ var netOK = map[string]allowance{
 		[]string{"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK"}},
 	// The atomic replace of the owner state, the setup record and the
 	// question book (#2778): a temporary opened without following a link,
-	// and the owner-only check's file owner.
-	"kernel/privfile": {"O_NOFOLLOW for its temporary and Stat_t for the owner-only check; no network client",
-		[]string{"syscall.O_NOFOLLOW", "syscall.Stat_t"}},
+	// and the owner-only check's file owner. The directory is opened once
+	// without following a link and the replace works relative to it (#3954).
+	"kernel/privfile": {"O_NOFOLLOW for its temporary and directory, *at calls on the open directory, and Stat_t for the owner-only check; no network client",
+		[]string{"syscall.O_CLOEXEC", "syscall.O_DIRECTORY", "syscall.O_NOFOLLOW", "syscall.Openat", "syscall.Renameat", "syscall.Stat_t", "syscall.Unlinkat"}},
 	// The owner page's authority (#3153): x509's name constraint takes its
 	// excluded address ranges as net.IPNet, and the sealed file is opened
 	// without following a link or blocking on a FIFO.
