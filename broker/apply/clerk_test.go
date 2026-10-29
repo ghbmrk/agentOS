@@ -220,7 +220,7 @@ func TestBusyBoxHoldsActivation(t *testing.T) {
 			}
 		}, RBusy + ": " + busyTalk, "Update 1 will install once your conversation pauses."},
 		{"STOP", func(r *rig, on bool) { r.stopped = on }, RBusy + ": " + busyStop, "Update 1 is on hold while actions are stopped; it installs after RESUME."},
-		{"pinned channel", func(r *rig, on bool) { r.paused = on }, RPaused, "Update 1 waits because your update channel is pinned."},
+		{"pinned channel", func(r *rig, on bool) { r.paused = on }, RPaused, pinnedWait},
 	} {
 		t.Run(c.why, func(t *testing.T) {
 			r := submitted(t)
