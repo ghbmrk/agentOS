@@ -83,7 +83,8 @@ func (r *rig) pinWithdrawn() {
 
 // Item 1 and 3: a pin after the handover, by Pin or by the next Tick,
 // withdraws a security fix or an ordinary release alike, and STATUS stops
-// promising a restart as soon as the channel is pinned.
+// promising a restart as soon as the channel is pinned; until the Abandon
+// is recorded it says the release may still start (L3 on #3854).
 // Mutant: drop the Paused branch in restartIfHandedOver, and the Tick
 // case keeps the release; drop withdrawLocked from Pin, and the Pin case
 // does.
@@ -93,7 +94,7 @@ func TestPinAfterHandoverWithdrawsTheRelease(t *testing.T) {
 			t.Run(fmt.Sprintf("%s security=%v", by, security), func(t *testing.T) {
 				r := installedHeld(t, security)
 				r.paused = true
-				if got := r.a.Status(); got != heldStatus {
+				if got := r.a.Status(); got != pinnedMayStart {
 					t.Fatalf("status once pinned %q", got)
 				}
 				if by == "Pin" {
@@ -211,6 +212,25 @@ func TestPinAfterTheAbandonTookSaysHeld(t *testing.T) {
 		t.Fatalf("tick: %v %v, restarts %d", ok, err, r.act.restarts)
 	}
 	if got := r.a.Status(); got != pinnedStatus {
+		t.Fatalf("status %q", got)
+	}
+}
+
+// L3 blocker on #3854: a pin whose mark save fails leaves the slot
+// unabandoned, so Pin and STATUS both say the release may still start.
+// Mutant: guard the held line with !abandonOwed(pt) again.
+func TestPinMarkSaveFailsMayStart(t *testing.T) {
+	r := installedHeld(t, false)
+	r.paused = true
+	r.state.Fail = errIO
+	if err := r.a.Pin(context.Background()); !errors.Is(err, ErrApplying) || !starts(t, err) {
+		t.Fatalf("pin: %v", err)
+	}
+	r.state.Fail = nil
+	if r.act.abandoned != 0 {
+		t.Fatal("abandoned without the mark")
+	}
+	if got := r.a.Status(); got != pinnedMayStart {
 		t.Fatalf("status %q", got)
 	}
 }
@@ -442,10 +462,9 @@ func TestInstalledStatusByPinAndBoot(t *testing.T) {
 					switch {
 					case boot == "handover" && !marked && !pinned:
 						want = installing
-					case boot == "handover" && marked:
-						want = pinnedMayStart // its Abandon failed (#3832)
 					case boot == "handover":
-						want = heldStatus
+						// pinned or marked, no Abandon recorded (#3832, L3 on #3854)
+						want = pinnedMayStart
 					case boot == "later" && (marked || pinned):
 						want = pinnedStarted
 					case boot == "later":
@@ -475,7 +494,7 @@ func TestInstalledStatusByPinAndBoot(t *testing.T) {
 
 // Security release 1 on #3822: no Tick restarts a pinned handover while
 // the boot cannot be read; once it reads as the handover boot, STATUS
-// says held, or that it may start after a failed Abandon (#3832).
+// says it may still start, since no Abandon is recorded (#3832).
 func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 	for _, marked := range []bool{true, false} {
 		r := installedHeld(t, false)
@@ -494,11 +513,8 @@ func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 			t.Fatalf("marked %v: tick %v, restarts %d", marked, err, r.act.restarts)
 		}
 		r.act.bootedErr, r.act.abandonErr = nil, nil
-		want := heldStatus
-		if marked {
-			want = pinnedMayStart // its Abandon failed (#3832)
-		}
-		if got := r.a.Status(); got != want {
+		// No Abandon recorded either way (#3832, L3 on #3854).
+		if got := r.a.Status(); got != pinnedMayStart {
 			t.Fatalf("marked %v: status %q", marked, got)
 		}
 	}

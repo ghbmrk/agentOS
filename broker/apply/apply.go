@@ -1525,11 +1525,11 @@ const (
 // installedLineLocked is STATUS for pt, a release the activator took.
 // Only in the boot it was handed over in does the line say what comes
 // next: a restart into it; none for a stale security fix (A13,
-// SR3-4f-2c), which the next Tick withdraws (#3830); and none while the
+// SR3-4f-2c), which the next Tick withdraws (#3830); and, while the
 // channel is pinned or pt's pin withdrawal is under way (pinned or not
-// since), when the next Tick or Pin withdraws it. A restart already under
-// way when the owner pinned, or a pin withdrawal whose Abandon did not
-// take, may still start it (#3832). A later boot running its root with
+// since), held only once its Abandon is recorded. Before that, a mark
+// save or an Abandon that failed, or a restart already under way, the
+// counted entry may still boot (#3832). A later boot running its root with
 // the health check pending has started it (#3830); any other later boot
 // may already run it, and then it stays (Security release 2 on #3812);
 // a boot that cannot be read may be either (#3829).
@@ -1543,7 +1543,7 @@ func (a *Applier) installedLineLocked(pt *point) string {
 		return fmt.Sprintf(staleLine, pt.To)
 	case here && !pinned:
 		return fmt.Sprintf(installingLine, pt.To)
-	case here && a.restarting != pt.ID && !abandonOwed(pt):
+	case here && a.restarting != pt.ID && pt.Abandoned:
 		return fmt.Sprintf(pinnedHeldLine, pt.To)
 	case here:
 		return fmt.Sprintf(pinnedMayStartLine, pt.To)
