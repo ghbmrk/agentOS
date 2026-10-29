@@ -1495,7 +1495,7 @@ const (
 	mayRunLine       = "Update %d may have started already. Nothing is needed from you."
 	pinnedHeldLine   = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
 	pinnedMayRunLine = "Update %d was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
-	pinnedLine       = "Update %d was withdrawn because you pinned your update channel; I will not start it. Nothing is needed from you."
+	pinnedLine       = "Update %d was withdrawn because you pinned your update channel."
 	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
 )
 
@@ -1561,7 +1561,7 @@ func (a *Applier) Status() string {
 	case l.Kind == doneUnrecorded:
 		return withPreviousRoot(unrecordedText(l.Version), n, prev)
 	case l.Kind == donePinned && a.cfg.Paused():
-		return withPreviousRoot(fmt.Sprintf(pinnedLine, l.Version), n, prev)
+		return pinnedText(l.Version, n, prev)
 	case l.Kind == donePinned:
 		if prev {
 			return previousRootText(n)
@@ -1638,6 +1638,13 @@ func withPreviousRoot(line string, n int64, prev bool) string {
 		return line
 	}
 	return line + " " + fmt.Sprintf(previousRootLine, n)
+}
+
+// pinnedText: update v was withdrawn for the pin. The previous-version line
+// comes before "Nothing is needed from you.", so the whole fits one
+// segment (CH-12).
+func pinnedText(v, n int64, prev bool) string {
+	return withPreviousRoot(fmt.Sprintf(pinnedLine, v), n, prev) + " Nothing is needed from you."
 }
 
 // otherRootText: the release is installed, but this boot runs the

@@ -22,7 +22,7 @@ import (
 // TestBusyBoxHoldsActivation.
 
 const (
-	pinnedStatus = "Update 1 was withdrawn because you pinned your update channel; I will not start it. Nothing is needed from you."
+	pinnedStatus = "Update 1 was withdrawn because you pinned your update channel. Nothing is needed from you."
 	heldStatus   = "Update 1 is held because you pinned your update channel; I will not start it. Nothing is needed from you."
 	pinnedMayRun = "Update 1 was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
 	pinnedWait   = "Update 1 waits because you pinned your update channel. Nothing is needed from you."
@@ -452,6 +452,29 @@ func TestPinnedLineWithAnUnreadableBoot(t *testing.T) {
 		r.act.bootedErr, r.act.abandonErr = nil, nil
 		if got := r.a.Status(); got != heldStatus {
 			t.Fatalf("marked %v: status %q", marked, got)
+		}
+	}
+}
+
+// Combined release 1 on #3831: every pinned line, the withdrawn one with
+// the previous-version line too, is GSM-7 (ASCII here) and fits one
+// 160-character segment at large version numbers, and ends saying
+// nothing is needed (CH-12).
+// Mutant: append the previous-version line after "Nothing is needed".
+func TestPinnedLinesFitOneSegment(t *testing.T) {
+	const v = 1_000_000_000
+	lines := []string{pinnedText(v, v-1, true), pinnedText(v, v-1, false)}
+	for _, f := range []string{pinnedHeldLine, pinnedMayRunLine, mayRunLine, waitLines[busyPinned]} {
+		lines = append(lines, fmt.Sprintf(f, v))
+	}
+	for _, l := range lines {
+		if len(l) > 160 || !strings.HasSuffix(l, " Nothing is needed from you.") {
+			t.Errorf("%d characters: %q", len(l), l)
+		}
+		for _, c := range l {
+			if c < ' ' || c > '~' {
+				t.Errorf("not GSM-7 ASCII %q in %q", c, l)
+			}
 		}
 	}
 }
