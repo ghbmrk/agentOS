@@ -4,9 +4,12 @@ package grants
 
 import (
 	"context"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/reversible"
 )
 
 type recordExec struct{ ran []string }
@@ -18,52 +21,6 @@ func (e *recordExec) Execute(_ context.Context, in journal.Intent, _ int) journa
 
 func (e *recordExec) Reconcile(context.Context, journal.Intent, int) journal.Outcome {
 	return journal.Outcome{Result: journal.ResultNotApplied}
-}
-
-// recalltool W10: the broker's recall rollback is asked of the owner with
-// the broker's line and runs only on YES; no other origin can submit one.
-func TestRecallRollbackRunsOnlyOnTheOwnersYes(t *testing.T) {
-	ex := &recordExec{}
-	r := newRigExecs(t, nil, map[string]journal.Executor{RecallExecutor: ex})
-	rollback := func(id, origin string) journal.Intent {
-		return journal.Intent{ID: id, Origin: origin, Account: journal.BrokerAccount,
-			Action: journal.ActionRecallRollback, Executor: RecallExecutor,
-			Params: map[string]any{"lineage": "agent.x", "since": "2026-10-05T09:00:00Z",
-				"object": "a mail you deleted from agent", "detail": "back to 08:12 Oct 5; 2 actions stay done"}}
-	}
-	for _, origin := range []string{"guest:agent.x", OriginOwner, "local"} {
-		if st := r.submit(rollback("rb-"+origin, origin)); st.State != journal.Denied {
-			t.Fatalf("rollback from %s: %s", origin, st.State)
-		}
-	}
-	if st := r.submit(rollback("rb-1", OriginRecall)); st.State != journal.Pending {
-		t.Fatalf("broker rollback not asked: %s %q", st.State, st.Permission.Reason)
-	}
-	r.g.Flush()
-	_, items := r.own.last(t)
-	if len(items) != 1 || items[0].Facts.Verb != "forget" || items[0].Object != "a mail you deleted from agent" ||
-		items[0].Detail == "" || items[0].Recipient != "" {
-		t.Fatalf("approval line: %+v", items)
-	}
-	if len(ex.ran) != 0 {
-		t.Fatal("ran before the owner answered")
-	}
-	r.decide(true, "owner")
-	if len(ex.ran) != 1 || r.state("rb-1").State != journal.Succeeded {
-		t.Fatalf("after YES: ran %v, %s", ex.ran, r.state("rb-1").State)
-	}
-	if st := r.submit(rollback("rb-2", OriginRecall)); st.State != journal.Pending {
-		t.Fatal(st.State)
-	}
-	r.g.Flush()
-	r.decide(false, "owner")
-	if len(ex.ran) != 1 || r.state("rb-2").State != journal.Denied {
-		t.Fatalf("after NO: ran %v, %s", ex.ran, r.state("rb-2").State)
-	}
-	// recalltool tells the owner's NO from no answer by this reason.
-	if why := r.state("rb-2").Permission.Reason; why != "not approved: owner" {
-		t.Fatalf("NO recorded as %q", why)
-	}
 }
 
 // recalltool W10, #59 security C2: a lineage that still holds a record
@@ -85,34 +42,47 @@ func TestContainedLineageGetsNoPreAllowance(t *testing.T) {
 	}
 }
 
-// recalltool W10 (#59 L3): a rollback question superseded by an earlier
-// one is withdrawn: closed as superseded, and a later YES runs nothing.
-// Nothing else can be withdrawn.
-func TestRecallRollbackCanBeWithdrawn(t *testing.T) {
-	ex := &recordExec{}
-	r := newRigExecs(t, nil, map[string]journal.Executor{RecallExecutor: ex})
-	in := journal.Intent{ID: "rb", Origin: OriginRecall, Account: journal.BrokerAccount,
-		Action: journal.ActionRecallRollback, Executor: RecallExecutor,
-		Params: map[string]any{"lineage": "agent.x", "since": "2026-10-05T09:00:00Z",
-			"object": "a mail you deleted from agent", "detail": "back to 08:12 Oct 5; 2 actions stay done"}}
-	if st := r.submit(in); st.State != journal.Pending {
-		t.Fatal(st.State)
-	}
+// LOG-4, D-169 (#3704): an agent that read content the owner had the box
+// forget goes back, and what it asked for since that still waits, for the
+// owner or in its undo window, is closed: a held one's staged copy goes,
+// and a later YES or release runs nothing. Its asks from before the read,
+// and other agents', are kept.
+func TestVoidSinceClosesWhatAReaderQueued(t *testing.T) {
+	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": {Stage: "draft.save", Inverse: "draft.discard"}}))
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	send := func(id string) { r.effect(id, "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com"); r.g.Flush() }
+	send("agent/before")
+	r.submit(journal.Intent{ID: "other/s1", Origin: "guest:other", Account: "mail", Action: "invoice.send",
+		Params: map[string]any{"record": "inv-1042"}, Recipients: []string{"sam@example.com"}, Executor: "mail", Machine: "other", Label: "private"})
 	r.g.Flush()
-	if err := r.g.Withdraw("rb"); err != nil {
-		t.Fatal(err)
+	r.advance(time.Minute)
+	read := r.now()
+	send("agent/held")
+	r.approveHeld()
+	send("agent/asked")
+	voided, err := r.g.VoidSince("agent", read)
+	if err != nil || !slices.Equal(voided, []string{"agent/held", "agent/asked"}) {
+		t.Fatalf("voided %v %v", voided, err)
 	}
-	if st := r.state("rb"); st.State != journal.Denied || st.Permission.Reason != "not approved: superseded" {
-		t.Fatalf("withdrawn: %s %q", st.State, st.Permission.Reason)
+	for _, id := range voided {
+		if st := r.state(id); st.State != journal.Denied || st.Permission.Reason != "not approved: "+string(Forgotten) {
+			t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
+		}
+	}
+	if st := r.state(reversible.InverseID("agent/held", 1)); st.State != journal.Succeeded {
+		t.Fatalf("staged copy left: %s", st.State)
 	}
 	r.decide(true, "owner")
-	if len(ex.ran) != 0 {
-		t.Fatal("a withdrawn rollback ran")
+	r.advance(reversible.DefaultWindow)
+	r.g.Tick()
+	r.g.Wait()
+	if r.exec.runs("agent/held")+r.exec.runs("agent/asked") != 0 {
+		t.Fatal("a voided intent ran")
 	}
-	other := in
-	other.ID, other.Origin = "o", "guest:agent.x"
-	r.submit(other)
-	if err := r.g.Withdraw("o"); err == nil {
-		t.Fatal("withdrew an intent that is not a recall rollback")
+	for _, id := range []string{"agent/before", "other/s1"} {
+		if st := r.state(id); st.State != journal.Pending {
+			t.Fatalf("%s: %s", id, st.State)
+		}
 	}
 }
