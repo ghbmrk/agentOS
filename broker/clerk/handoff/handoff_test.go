@@ -9,6 +9,7 @@ import (
 	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -382,6 +383,36 @@ func TestKernelKeysCarryTheRecipient(t *testing.T) {
 		k.Recipient = r
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {
 			t.Errorf("marshal %s: got %v, want ErrHandoff", name, err)
+		}
+	}
+
+	// A low-order X25519 point (any multiple of it is the identity, so an
+	// X25519 against it is all zeros, whatever the key) is refused at both
+	// ends, in every encoding X25519 reads: canonical, past p, and with the
+	// ignored top bit set (#3274).
+	for _, h := range []string{
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+		"5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		lo, _ := hex.DecodeString(h)
+		for _, top := range []byte{0, 0x80} {
+			x := bytes.Clone(lo)
+			x[31] |= top
+			r := append(x, rcp[recipientXLen:]...)
+			if validRecipient(r) {
+				t.Errorf("low-order point %x accepted", x)
+			}
+			if _, err := ReadKeys(pipeWith(t, wire(RecipientLen, r))); !errors.Is(err, ErrHandoff) {
+				t.Errorf("wire low-order %x: got %v, want ErrHandoff", x, err)
+			}
+			if _, err := EncodeRecipient(x, rcp[recipientXLen:]); !errors.Is(err, ErrHandoff) {
+				t.Errorf("encode low-order %x: got %v, want ErrHandoff", x, err)
+			}
 		}
 	}
 

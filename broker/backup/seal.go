@@ -97,6 +97,9 @@ func privateHalves(rk []byte) (*ecdh.PrivateKey, *mlkem.DecapsulationKey768, err
 	if err != nil {
 		return nil, nil, err
 	}
+	// Both constructors copy their input, so the derived bytes are wiped
+	// here (best-effort, as handoff.KernelKeys.Wipe; #3274).
+	defer clear(xs)
 	x, err := ecdh.X25519().NewPrivateKey(xs)
 	if err != nil {
 		return nil, nil, err
@@ -105,6 +108,7 @@ func privateHalves(rk []byte) (*ecdh.PrivateKey, *mlkem.DecapsulationKey768, err
 	if err != nil {
 		return nil, nil, err
 	}
+	defer clear(seed)
 	dk, err := mlkem.NewDecapsulationKey768(seed)
 	if err != nil {
 		return nil, nil, err
