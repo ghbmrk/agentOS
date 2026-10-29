@@ -10,7 +10,8 @@ What passes:
   model key. Its exact URL is added to the seen file.
 - Prompt phases (MUSE_CAP_STRICT=1): only a GET or HEAD with no body whose exact URL is in the
   seen file, i.e. one already sent before any prompt existed. Nothing derived from a prompt can
-  leave in a URL or body; header values are the one channel not compared.
+  leave in a URL or body. Not compared: header values, chunked or HTTP/2 trailers, and the
+  CONNECT target and SNI (resolved and connected before a non-HTTP flow is killed).
 Every other request is refused with 503 before it leaves, and every non-HTTP flow (raw TCP,
 UDP, websockets) is killed. An error in a hook refuses the request.
 
@@ -148,7 +149,8 @@ def headers(h, quota_values):
     out = {"names": names}
     auth = h.get("authorization", "")
     if auth:
-        out["auth_scheme"] = auth.split(" ", 1)[0][:16]
+        m = re.match(r"^([A-Za-z]{1,16}) ", auth)
+        out["auth_scheme"] = m.group(1) if m else "none"
     if quota_values:
         out["quota"] = {k.lower(): v for k, v in h.items()
                         if QUOTA_HDR.match(k) and k.lower() not in SECRET_HDR and not LONG_RUN.search(v)}
@@ -194,15 +196,31 @@ def body_ok(req):
     return False
 
 
+def dest(req):
+    """host, or host:port when the port is not the scheme's default."""
+    default = {"http": 80, "https": 443}.get(req.scheme)
+    return req.host if req.port == default else "%s:%d" % (req.host, req.port)
+
+
+def query_keys(req):
+    """Query key names, shaped like any other string unless short and plain."""
+    return sorted({k if re.match(r"^[A-Za-z0-9_.\[\]-]{1,32}$", k) and not id_like(k) else json.dumps(sshape(k), sort_keys=True)
+                   for k in req.query.keys()})
+
+
 def verdict(flow):
     """"" to pass, else why the request is refused."""
     req = flow.request
-    url = req.method + " " + req.pretty_url
+    # The allow check and the seen URL use the connection's real destination; a Host header naming
+    # another host is refused, so a listed name cannot carry a request elsewhere.
+    if req.pretty_host != req.host:
+        return "host-mismatch"
+    url = req.method + " " + req.url
     if STRICT:
         if req.method in ("GET", "HEAD") and not req.raw_content and url in lines(SEEN):
             return ""
         return "strict"
-    if req.method + " " + req.pretty_host + " " + norm_path(req.path) not in lines(ALLOW):
+    if req.method + " " + dest(req) + " " + norm_path(req.path) not in lines(ALLOW):
         return "not-allowed"
     if not body_ok(req):
         return "body"
@@ -222,12 +240,14 @@ class Recorder:
         req = flow.request
         rec = {"dir": "req"}
         try:
-            rec.update(host=req.pretty_host, method=req.method, path=norm_path(req.path))
+            rec.update(host=dest(req), method=req.method, path=norm_path(req.path))
+            if req.pretty_host != req.host:
+                rec["host_header_differs"] = True
             why = verdict(flow)
             if why:
                 rec["refused"] = why
                 refuse(flow)
-            rec.update(query_keys=sorted(req.query.keys()), headers=headers(req.headers, False),
+            rec.update(query_keys=query_keys(req), headers=headers(req.headers, False),
                        body=body_shape(req.get_content(strict=False), req.headers.get("content-type")))
         except Exception as e:
             rec.update(refused="error", error=type(e).__name__)
@@ -239,7 +259,7 @@ class Recorder:
         if flow.metadata.get("rec", {}).get("refused"):
             return
         r = flow.response
-        rec = {"dir": "resp", "host": flow.request.pretty_host, "method": flow.request.method,
+        rec = {"dir": "resp", "host": dest(flow.request), "method": flow.request.method,
                "path": norm_path(flow.request.path), "status": r.status_code}
         try:
             rec.update(headers=headers(r.headers, True),
@@ -250,7 +270,7 @@ class Recorder:
 
     def websocket_start(self, flow):
         flow.kill()
-        log({"dir": "killed", "kind": "websocket", "host": flow.request.pretty_host,
+        log({"dir": "killed", "kind": "websocket", "host": dest(flow.request),
              "path": norm_path(flow.request.path)})
 
     def tcp_start(self, flow):
@@ -273,7 +293,7 @@ class Recorder:
         log({"dir": "killed", "kind": "udp", "host": str(flow.server_conn.address)})
 
     def error(self, flow):
-        log({"dir": "error", "host": flow.request.pretty_host, "method": flow.request.method,
+        log({"dir": "error", "host": dest(flow.request), "method": flow.request.method,
              "path": norm_path(flow.request.path), "error": str(flow.error)[:120]})
 
     def tls_failed_client(self, data):
@@ -281,7 +301,7 @@ class Recorder:
         log({"dir": "tls-refused", "sni": data.context.client.sni})
 
     def http_connect(self, flow):
-        log({"dir": "connect", "host": flow.request.pretty_host, "port": flow.request.port})
+        log({"dir": "connect", "host": dest(flow.request), "port": flow.request.port})
 
 
 addons = [Recorder()] if LOG else []

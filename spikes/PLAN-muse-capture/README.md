@@ -25,8 +25,13 @@ a list, so a prompt cannot slip past it through an encoding the gate failed to r
   with 503 before it leaves.
 - **The one prompt phase** (step 7, `rec turn strict`, Contributor mode off). Only a GET or HEAD
   request passes, with no body and with an exact URL from `seen.txt`. Each such URL was sent
-  before any prompt existed. Nothing built from the prompt can leave in a URL or a body. The one
-  channel the gate does not compare is header values.
+  before any prompt existed. Nothing built from the prompt can leave in a URL or a body. The
+  channels the gate does not compare are header values, chunked or HTTP/2 trailers (if a client
+  sends them), and the `CONNECT` target hostname and SNI, which are resolved and connected
+  upstream before a non-HTTP flow is killed.
+- **Allow lines name the real destination.** The host in an allow line is the connection's
+  destination (`host`, or `host:port` off the default port). A request whose `Host` header names
+  a different host is refused.
 - **Every non-HTTP flow is killed and its bytes are emptied.** That covers raw TCP after
   `CONNECT`, UDP and websockets. An error inside a hook refuses the request.
 

@@ -75,7 +75,7 @@ refused)
 	jq -r 'select(.refused) | "\(.refused)\t\(.method) \(.host) \(.path)"' "$W/log.jsonl" | sort | uniq -c
 	;;
 allow)
-	echo "$2" | grep -Eq '^(GET|HEAD|POST|PUT|PATCH|DELETE) [A-Za-z0-9.-]+ /[^ ]*$' || { echo "run.sh: want 'METHOD HOST PATH'" >&2; exit 2; }
+	echo "$2" | grep -Eq '^(GET|HEAD|POST|PUT|PATCH|DELETE) [A-Za-z0-9.-]+(:[0-9]+)? /[^ ]*$' || { echo "run.sh: want 'METHOD HOST PATH'" >&2; exit 2; }
 	echo "$2" >>"$W/allow.txt"
 	;;
 muse)

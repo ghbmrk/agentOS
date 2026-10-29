@@ -52,7 +52,7 @@ def refused(rec, f):
     return f.response is not None and f.response.status_code == 503
 
 
-TOKEN = "POST address /oauth/token"
+TOKEN = "POST address:22 /oauth/token"
 
 
 def test_token_answer_logs_shapes_not_values():
@@ -100,14 +100,14 @@ def test_allowed_endpoint_refuses_unreadable_or_model_bodies():
 
 
 def test_allowed_request_records_its_url_for_strict_phases():
-    rec, p = load(allow=["GET address /v1/me"])
+    rec, p = load(allow=["GET address:22 /v1/me"])
     assert not refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", ctype=b"text/plain"))
     assert "GET http://address:22/v1/me?fields=a" in text(p["seen"])
 
 
 def test_strict_passes_only_bodyless_repeats_of_seen_urls():
     seen = ["GET http://address:22/v1/me?fields=a"]
-    rec, p = load(allow=[TOKEN, "GET address /v1/me"], strict=True, seen=seen)
+    rec, p = load(allow=[TOKEN, "GET address:22 /v1/me"], strict=True, seen=seen)
     assert not refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", ctype=b"text/plain"))
     assert refused(rec, req(method=b"GET", path=b"/v1/me?fields=b", ctype=b"text/plain"))  # new query
     assert refused(rec, req(method=b"GET", path=b"/v1/me?fields=a", body=b"x", ctype=b"text/plain"))
@@ -158,3 +158,23 @@ def test_non_http_messages_emptied():
     t.messages.append(TCPMessage(True, b"\x10\x2aMQTT " + PROMPT.encode()))
     rec.Recorder().tcp_message(t)
     assert t.messages[-1].content == b""
+
+
+def test_allow_matches_the_real_destination_not_the_host_header():
+    rec, p = load(allow=["POST allowed.test /v1/usage"])
+    f = req(path=b"/v1/usage", body=b'{"a":1}', extra=((b"host", b"allowed.test"),))
+    assert f.request.pretty_host == "allowed.test" and f.request.host == "address"
+    assert refused(rec, f)
+    assert recs(p)[0]["refused"] == "host-mismatch" and recs(p)[0]["host"] == "address:22"
+    assert text(p["seen"]) == ""
+
+
+def test_auth_without_scheme_and_odd_query_keys_are_shaped():
+    rec, p = load()
+    f = req(method=b"GET", path=b"/x?Reply%20ok%20please=1&fields=a", extra=())
+    f.request.headers["authorization"] = "Ab+Cd/Ef12+Gh3=IjKlMn"
+    rec.Recorder().request(f)
+    r = recs(p)[0]
+    assert r["headers"]["auth_scheme"] == "none"
+    assert "Ab+Cd" not in text(p["log"]) and "Reply ok" not in text(p["log"])
+    assert "fields" in r["query_keys"]
