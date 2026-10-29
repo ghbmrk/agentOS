@@ -1,6 +1,6 @@
 # REV-CHK: checks for review findings seen on two or more PRs
 
-Work item #803. Written 2026-10-29 against main at 98ffab5. This brief files no code: it names six finding kinds that reviews raised on two or more PRs with no lint, test or CI check catching them, and proposes one row per check (OPERATING §4 "Recurring findings become checks"; token rule 11). Each row is its own work item and session.
+Work item #803. Written 2026-10-29 against main at 98ffab5. This brief files no code: it names six finding kinds that reviews raised on two or more PRs with no lint, test or CI check catching them, and proposes one row per check (OPERATING §4 "Recurring findings become checks"; token rule 11). Each row is its own work item and session: REV-CHK-src #3898, -mut #3899, -links #3900, -names #3901, -crlf #3902, -save #3903.
 
 ## Sources read
 
