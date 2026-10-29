@@ -408,19 +408,12 @@
     "8784817fa7a898111f84f7ca4b431f3d8f33f8ebd7ff2709c75871e48ff4b5da": 1
   },
   "docs/LATER-HISTORY.md": {
-    "46d564530f781ef942766d98df2f5b95b89dc028572f8de54aaf682922bffe87": 1,
     "ab46e24ca1f4d1ab907cbb6e942ad0a3aed43a32e0abfcfb5b003096f06bacf0": 1,
     "e55ab82f77e457896c8e6d57f6c9990a15d75086a86e6e5c80474229f4b5115b": 1,
     "f30f68945c398c871ca847229da0c415f9012577e5d9840694fbae171ed298ff": 1
   },
   "guest/openclaw/openclaw.json5": {
     "9a4be47698a0e9a550524a53dd554fe8c796a1c2257660e768ce2ce6d6e1bd78": 1
-  },
-  "image/ASSUMPTIONS.md": {
-    "3875e54ae48ed851a0458fcb9ec0fc903d81f9f6b3e108ca90bcb9842bc196bf": 1,
-    "d4c0d5fdcf82b330fe1b6cbd1148aad1bda1322105674b70c5162d1be1fee4ec": 1,
-    "e0d8c6bbb8fbbd4b2c9876b7d7f783952dea01f0249db13bc5698fdd5f12f779": 1,
-    "f7a85ab39ef8d8ce57fdacc34b150596d8f5296655e9b493dac38c3aa508d2e4": 1
   },
   "image/build.sh": {
     "6af3a1cb90d128d8ed97af623803556244e6cf3e455fd29c10a0f162bf6e736c": 1
