@@ -21,6 +21,8 @@ ON = "agentos-quota: root=ext4 prjquota flag=on"
 # The one command the image runs agentosd with (Security #2110 re-sign 3: exact, not parsed).
 CANON = ("/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER} "
          "-modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui "
+         "-infer-uid @uid:agentos-infer -infer-model /usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf "
+         "-infer-model-sha256 06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439 "
          "-kernel-owner /run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel "
          "-kernel-owner-uid @uid:agentos-owner "
          "-runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw "

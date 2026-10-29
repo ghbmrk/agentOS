@@ -1,10 +1,11 @@
 #!/bin/sh
 # Build the AgentOS device image (PLAN P2-1). Run as root on Linux with network access to
 # snapshot.debian.org, security.debian.org, storage.googleapis.com (gVisor), nodejs.org and
-# registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), and the Go
-# module proxy. CI does this: .github/workflows/image.yml
-# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc with a static libc, make, pkg-config, mtools,
-# erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring.
+# registry.npmjs.org (OpenClaw guest), ffmpeg.org or archive.ubuntu.com (libavcodec), github.com
+# (llama.cpp) and huggingface.co (the embedding model), and the Go module proxy. CI does this:
+# .github/workflows/image.yml
+# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,
+# cmake, pkg-config, mtools, erofs-utils, dosfstools, cryptsetup-bin, debian-archive-keyring.
 #
 # Usage: build.sh [OUT [VERSION [DRIVERS]]]
 # Output in OUT: agentos_VERSION.raw (the whole drive), the release (agentos_VERSION.usr.raw,
@@ -59,6 +60,10 @@ chmod 0755 "$PHOTO/agentos-photo"
 # The camera decoder's stream root (CAM-clerk b2, NET-2): the static agentos-camdecode on the
 # pinned libavcodec, built by its own script (image/camdecode.sh), and libavcodec's licence text.
 sh "$HERE/camdecode.sh" "$STAGE/usr/lib/agentos/images/camdecode" "$STAGE/usr/share/licenses" "$OUT/libavcodec"
+
+# The local inference service, its pinned llama-server and embedding model, and their licence texts
+# (INFER-image, D-230), built by its own script (image/infer.sh); agentosd leaves it off (-infer).
+sh "$HERE/infer.sh" "$STAGE" "$OUT/infer"
 
 # The OpenClaw guest's root file system (P1-7), as an agent-machine image.
 sh "$REPO/guest/openclaw/build-rootfs.sh" "$STAGE/usr/lib/agentos/images/openclaw"
