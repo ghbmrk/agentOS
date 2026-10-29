@@ -228,8 +228,14 @@ type host struct {
 	configs map[string]uint32 // last c# seen per accessory ID
 	pinned  []netguard.Pin    // the guard's pins as last set
 	ctx     context.Context
-	wg      sync.WaitGroup
-	started bool
+	// step is the context the owner's dialing steps run on, and stepLink
+	// the link a disconnect opened for its remove-pairing: STOP cancels the
+	// one and closes the other, so no step goes on past STOP (KRN-7).
+	step     context.Context
+	stepStop context.CancelFunc
+	stepLink link
+	wg       sync.WaitGroup
+	started  bool
 }
 
 // load reads the devices file: missing is no device; any malformed record
@@ -293,6 +299,7 @@ func (h *host) start(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.ctx, h.stopped, h.configs = ctx, st.Stopped, map[string]uint32{}
+	h.step, h.stepStop = context.WithCancel(ctx)
 	for _, d := range devs {
 		h.devs = append(h.devs, &entry{dev: d})
 	}
@@ -554,12 +561,15 @@ func (h *host) pair(name string, l listed, code string, skip []*entry) ([]homeki
 	ap := netip.MustParseAddrPort(addr)
 	h.mu.Lock()
 	h.pins(&ap)
-	ctx := h.ctx
+	ctx := h.step
 	h.mu.Unlock()
 	devs, err := h.p.Connect(ctx, name, addr, code)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pins(nil)
+	if h.stopped {
+		return nil, h.stoppedMidStep(name, err == nil || len(devs) > 0)
+	}
 	if err != nil && !(errors.Is(err, homekit.ErrUnresolved) && len(devs) == 1) {
 		h.log("homekit " + name + ": pair-setup with " + l.Device + " failed")
 		return nil, pairErr(err)
@@ -573,6 +583,17 @@ func (h *host) pair(name string, l listed, code string, skip []*entry) ([]homeki
 		}
 	}
 	return devs, nil
+}
+
+// stoppedMidStep is a pairing step's answer when STOP came during it
+// (KRN-7): nothing is saved and no link opens. An accessory that took the
+// pairing before the step was cancelled keeps it, so the owner resets
+// HomeKit on it; held under h.mu.
+func (h *host) stoppedMidStep(name string, paired bool) error {
+	if paired {
+		h.log("homekit " + name + ": paired as STOP came, so not kept; reset HomeKit on the thermostat and connect it again after RESUME")
+	}
+	return errStopped
 }
 
 // stepAllowed refuses every owner step but status and resume during a
@@ -619,6 +640,9 @@ func (h *host) connect(name, device, code string) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.stopped {
+		return h.stoppedMidStep(name, true)
+	}
 	var add []*entry
 	for _, d := range devs {
 		add = append(add, &entry{dev: d})
@@ -672,6 +696,10 @@ func (h *host) repin(name, device, code string) error {
 	}
 	var dones []<-chan struct{}
 	h.mu.Lock()
+	if h.stopped {
+		h.mu.Unlock()
+		return h.stoppedMidStep(base, true)
+	}
 	old := slices.Clone(h.devs)
 	for _, x := range grp {
 		dones = append(dones, h.halt(x))
@@ -732,7 +760,7 @@ func (h *host) disconnect(name string) (bool, error) {
 		dones = append(dones, h.halt(x))
 	}
 	d := e.dev
-	ctx := h.ctx
+	ctx := h.step
 	h.mu.Unlock()
 	for _, c := range dones {
 		<-c
@@ -741,11 +769,29 @@ func (h *host) disconnect(name string) (bool, error) {
 	// An accessory that did not prove its key is not dialed again (HK-18).
 	if !d.Off && d.AID != 0 {
 		if l, err := h.p.Open(ctx, &d); err == nil {
+			// The link is STOP's to close until remove-pairing answers.
+			h.mu.Lock()
+			if h.stopped {
+				h.mu.Unlock()
+				l.Close()
+				return false, errStopped
+			}
+			h.stepLink = l
+			h.mu.Unlock()
 			removed = l.RemovePairing() == nil
+			h.mu.Lock()
+			h.stepLink = nil
+			h.mu.Unlock()
 		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// A STOP during the step leaves every device in the file; RESUME
+	// opens them again. A remove-pairing that answered before STOP closed
+	// its link stands, and the runners then find the pairing gone.
+	if h.stopped && !removed {
+		return false, errStopped
+	}
 	old := slices.Clone(h.devs)
 	h.devs = slices.DeleteFunc(h.devs, func(x *entry) bool { return slices.Contains(grp, x) })
 	if err := h.save(); err != nil {
@@ -798,6 +844,10 @@ func (h *host) bounds(name, char string, lo, hi float64) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.stopped {
+		ld.Bounds = prior
+		return errStopped
+	}
 	old := e.dev.Bounds
 	e.dev.Bounds = maps.Clone(ld.Bounds)
 	if err := h.save(); err != nil {
@@ -809,13 +859,19 @@ func (h *host) bounds(name, char string, lo, hi float64) error {
 	return nil
 }
 
-// stop is the owner side's STOP relay (KRN-7): every link closes and every
-// step but status and resume is refused until resume. It is saved first,
+// stop is the owner side's STOP relay (KRN-7): every link closes, an owner
+// step under way is cancelled (its dial closes, and it saves nothing), and
+// every step but status and resume is refused until resume. It takes no
+// owner-step lock, so it never waits behind a step. It is saved first,
 // so a restart during a STOP opens nothing.
 func (h *host) stop() error {
 	h.mu.Lock()
 	h.stopped = true
 	err := h.save()
+	h.stepStop()
+	if h.stepLink != nil {
+		h.stepLink.Close()
+	}
 	var dones []<-chan struct{}
 	for _, e := range h.devs {
 		dones = append(dones, h.halt(e))
@@ -838,6 +894,7 @@ func (h *host) resume() error {
 		h.stopped = true
 		return err
 	}
+	h.step, h.stepStop = context.WithCancel(h.ctx)
 	for _, e := range h.devs {
 		h.run(e)
 	}

@@ -73,6 +73,9 @@ type fakeClerk struct {
 	kh    homekit.KeyHolder
 	emit  func(homekit.Event) error
 	dials []string
+	// hold, when set, runs at the start of each Connect and Open: a slow
+	// accessory step (KRN-7 tests).
+	hold func(ctx context.Context)
 }
 
 func newAcc(t *testing.T) *fakeAcc {
@@ -84,6 +87,10 @@ func newAcc(t *testing.T) *fakeAcc {
 }
 
 func (f *fakeClerk) dial(ctx context.Context, addr string) error {
+	// A step's context ending closes its connection (homekit.Clerk.dial).
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c, err := f.guard.DialContext(netguard.WithPurpose(ctx, netguard.PurposeDevice), "tcp", addr)
 	if err != nil {
 		return err
@@ -105,7 +112,17 @@ func (f *fakeClerk) acc(addr string) (*fakeAcc, error) {
 	return a, nil
 }
 
+func (f *fakeClerk) slow(ctx context.Context) {
+	f.mu.Lock()
+	h := f.hold
+	f.mu.Unlock()
+	if h != nil {
+		h(ctx)
+	}
+}
+
 func (f *fakeClerk) Connect(ctx context.Context, name, addr, code string) ([]homekit.Device, error) {
+	f.slow(ctx)
 	if err := f.dial(ctx, addr); err != nil {
 		return nil, err
 	}
@@ -179,6 +196,7 @@ func (f *fakeClerk) Open(ctx context.Context, d *homekit.Device) (link, error) {
 	if d.AID == 0 {
 		return nil, homekit.ErrUnresolved
 	}
+	f.slow(ctx)
 	a, err := f.verify(ctx, d)
 	if err != nil {
 		return nil, err
@@ -949,5 +967,114 @@ func TestParse(t *testing.T) {
 	}
 	if _, err := parse(append(good, "extra"), &bytes.Buffer{}); err == nil {
 		t.Fatal("an extra argument was taken")
+	}
+}
+
+// stepGate makes the fake's next Connect or Open wait: until its context
+// ends (a hung accessory, cancelled by STOP), or, with finish, until the
+// test releases it, so the step completes just as STOP comes.
+type stepGate struct {
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (b *box) gate(finish bool) *stepGate {
+	g := &stepGate{entered: make(chan struct{}), release: make(chan struct{})}
+	b.f.mu.Lock()
+	b.f.hold = func(ctx context.Context) {
+		first := false
+		g.once.Do(func() { first = true; close(g.entered) })
+		if !first {
+			return
+		}
+		if finish {
+			<-g.release
+		} else {
+			// Bounded, so a host that never cancels fails rather than hangs.
+			select {
+			case <-ctx.Done():
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+	b.f.mu.Unlock()
+	return g
+}
+
+// KRN-7 (Security on 22f3e1b5): STOP stops an owner step already under
+// way. A connect, re-pin or disconnect whose accessory step is hung, or
+// that finishes just as STOP comes, saves nothing, opens no link and sends
+// no remove-pairing, and STOP does not wait for it.
+func TestStopCancelsStepsUnderWay(t *testing.T) {
+	for _, finish := range []bool{false, true} {
+		for _, step := range []string{"connect", "repin", "disconnect"} {
+			t.Run(fmt.Sprintf("%s/finish=%v", step, finish), func(t *testing.T) {
+				b := newBox(t)
+				b.list(1)
+				if step != "connect" {
+					if err := b.h.connect("hall", "enf-dev-7", hkCode); err != nil {
+						t.Fatal(err)
+					}
+					waitFor(t, "the link to open", func() bool { return b.stateOf("hall") == "open" })
+				}
+				if step == "repin" {
+					_, sk, _ := ed25519.GenerateKey(rand.Reader)
+					b.with(accAddr, func(a *fakeAcc) { a.key, a.paired = sk, false })
+					waitFor(t, "hall off", func() bool { return b.stateOf("hall") == "off" })
+					b.list(1)
+				}
+				before := `{"devices":[]}`
+				if step != "connect" {
+					before = b.file()
+				}
+				g := b.gate(finish)
+				res := make(chan error, 1)
+				go func() {
+					switch step {
+					case "connect":
+						res <- b.h.connect("den", "enf-dev-7", hkCode)
+					case "repin":
+						res <- b.h.repin("hall", "enf-dev-7", hkCode)
+					case "disconnect":
+						_, err := b.h.disconnect("hall")
+						res <- err
+					}
+				}()
+				<-g.entered
+				stopped := make(chan error, 1)
+				go func() { stopped <- b.h.stop() }()
+				select {
+				case err := <-stopped:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("STOP waited behind the step")
+				}
+				dials := b.dials()
+				close(g.release)
+				if err := <-res; !errors.Is(err, errStopped) {
+					t.Fatalf("%s after STOP: %v", step, err)
+				}
+				var st, was state
+				json.Unmarshal([]byte(b.file()), &st)
+				json.Unmarshal([]byte(before), &was)
+				if !st.Stopped || len(st.Devices) != len(was.Devices) || (len(st.Devices) > 0 && st.Devices[0].Key != was.Devices[0].Key) {
+					t.Fatalf("file after STOP: %s (before: %s)", b.file(), before)
+				}
+				if r := get(b, func(a *fakeAcc) []string { return a.removed }); len(r) != 0 {
+					t.Fatalf("remove-pairing sent after STOP: %q", r)
+				}
+				if n := b.dials() - dials; finish && n > 1 || !finish && n != 0 {
+					t.Fatalf("%d dials after STOP answered", n)
+				}
+				time.Sleep(20 * time.Millisecond)
+				for _, d := range b.h.status().Devices {
+					if d.State == "open" {
+						t.Fatalf("a link is open during STOP: %+v", d)
+					}
+				}
+			})
+		}
 	}
 }
