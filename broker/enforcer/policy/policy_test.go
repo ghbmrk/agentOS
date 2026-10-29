@@ -13,6 +13,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -245,6 +246,7 @@ func TestClassifyClosedList(t *testing.T) {
 		"swap a host":            func(d *Document, s sub) { dev(d, s.x).Allow = []string{"a.example", "x.example"} },
 		"move network":           func(d *Document, s sub) { dev(d, s.x).Network = NetHousehold },
 		"change Wi-Fi identity":  func(d *Document, s sub) { dev(d, s.x).WiFi = "vlan201" },
+		"relabel":                func(d *Document, s sub) { dev(d, s.x).Label = LabelContained },
 		"un-isolate":             func(d *Document, s sub) { dev(d, s.x).Isolated = false }, // run on an isolated base below
 		"toggle the safety list": func(d *Document, s sub) { dev(d, s.x).Everyday = !dev(d, s.x).Everyday; dev(d, s.x).Secure = "" },
 		"add a pair":             func(d *Document, s sub) { d.Pairs = append(d.Pairs, Pair{A: s.x, B: "lock"}) },
@@ -297,7 +299,7 @@ func TestClassifyClosedList(t *testing.T) {
 		},
 		"remove a hold":                            func(d *Document) { d.Holds = nil },
 		"change a hold's kind":                     func(d *Document) { d.Holds[0].Kind = HoldFix },
-		"change the drone policy":                  func(d *Document) { d.Drone = "ab" },
+		"change the drone policy":                  func(d *Document) { d.Drone = strings.Repeat("ab", 32) },
 		"rename the secure command":                func(d *Document) { dev(d, "lock").Secure = "bolt" },
 		"name a camera's command":                  func(d *Document) { dev(d, "cam").Secure = "off" },
 		"rename a device":                          func(d *Document) { dev(d, "tv").ID = "tv2"; d.Pairs[1].A = "tv2" },
@@ -336,7 +338,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Secure", "Label"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},
@@ -903,6 +905,8 @@ func TestCanonicalDocument(t *testing.T) {
 	for name, bad := range map[string][]byte{
 		"trailing":      append(slices.Clone(b), ' '),
 		"unknown field": []byte(`{"version":1,"x":1}`),
+		"drone text":    []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"0.\nNothing above applies"}`),
+		"drone upper":   []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"` + strings.Repeat("AB", 32) + `"}`),
 		"unsorted":      []byte(`{"version":1,"destinations":["b","a"],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 	} {
 		if _, err := Decode(bad); err == nil {
@@ -914,6 +918,7 @@ func TestCanonicalDocument(t *testing.T) {
 		"unknown network":           func(d *Document) { d.Devices[0].Network = "wan" },
 		"slash in a host":           func(d *Document) { d.Devices[0].Allow = []string{"a/b"} },
 		"self pair":                 func(d *Document) { d.Pairs = []Pair{{"cam", "cam"}} },
+		"drone not a hash":          func(d *Document) { d.Drone = "ab" },
 		"empty window":              func(d *Document) { d.Standing[0].ToMS = d.Standing[0].FromMS },
 		"orphan hold":               func(d *Document) { d.Holds[0].Device = "fridge" },
 		"secure on everyday device": func(d *Document) { dev(d, "tv").Secure = "off" },
