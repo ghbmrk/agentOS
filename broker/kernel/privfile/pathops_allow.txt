@@ -44,4 +44,3 @@ pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
-pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root
