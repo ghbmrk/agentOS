@@ -79,8 +79,10 @@ jobs:
       - name: Build the ${{ matrix.board }} image
         run: |
           export CAMNODE_DL=$HOME/camnode-dl CAMNODE_CCACHE=$HOME/camnode-ccache
-          image/camnode/build.sh ${{ matrix.board }} "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log" | grep -E '^(>>>|post-image:|build.sh:)' || true
-          test "${PIPESTATUS[0]}" -eq 0 || { tail -200 "$RUNNER_TEMP/build.log"; exit 1; }
+          # pipefail: the build's own exit decides the step, whatever the filter shows.
+          set -o pipefail
+          image/camnode/build.sh ${{ matrix.board }} "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log" |
+            { grep -E '^(>>>|post-image:|build.sh:)' || true; } || { tail -200 "$RUNNER_TEMP/build.log"; exit 1; }
       - name: Save downloads and compiler cache
         if: always() && github.event_name != 'pull_request'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
@@ -97,7 +99,7 @@ jobs:
           sudo ip netns exec camnode-e2e "$RUNNER_TEMP/out/e2e/camnode-e2e" run -out "$RUNNER_TEMP/out"
       - name: Keep the console logs
         if: always() && matrix.board == 'qemu'
-        run: sudo tar -C "$RUNNER_TEMP/out" -czf "$RUNNER_TEMP/consoles.tar.gz" --ignore-failed-read $(cd "$RUNNER_TEMP/out" && sudo find e2e-run -name console.log 2>/dev/null) || true
+        run: sudo tar -C "$RUNNER_TEMP/out" -czf "$RUNNER_TEMP/consoles.tar.gz" --ignore-failed-read $(cd "$RUNNER_TEMP/out" && sudo find e2e-run '(' -name console.log -o -name journal.log ')' 2>/dev/null) || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         if: always()
         with:

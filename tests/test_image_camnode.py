@@ -16,6 +16,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 TREE = REPO / "image" / "camnode" / "external"
 COMMON = TREE / "board" / "common" / "overlay"
 UNITS = COMMON / "etc" / "systemd" / "system"
+WORKFLOW = REPO / ".github" / "workflows" / "camnode-image.yml"
 
 
 def unit(path):
@@ -150,6 +151,32 @@ class Init(unittest.TestCase):
         self.assertIn("restart_on_corruption", src)
         self.assertIn("reboot(RB_AUTOBOOT)", src)
         self.assertIn('"erofs", MS_RDONLY', src)
+
+
+class Workflow(unittest.TestCase):
+    """The build step's filter must not hide the build's exit (Security on #3772): a build that fails
+    before printing a line the filter keeps went green."""
+
+    def run_step(self, stub):
+        m = re.search(r"\n( +)- name: Build the .*\n +run: \|\n((?:\1    .*\n)+)", WORKFLOW.read_text())
+        self.assertIsNotNone(m, "the build step")
+        run = "\n".join(l.strip() for l in m.group(2).splitlines())
+        with tempfile.TemporaryDirectory() as d:
+            fake = pathlib.Path(d) / "build.sh"
+            fake.write_text("#!/bin/bash\n" + stub + "\n")
+            fake.chmod(0o755)
+            script = run.replace("${{ matrix.board }}", "qemu").replace("image/camnode/build.sh", str(fake))
+            # GitHub runs a step's script with `bash -e {0}`.
+            return subprocess.run(["bash", "-e", "-c", script], env={"RUNNER_TEMP": d, "HOME": d, "PATH": "/usr/bin:/bin"},
+                                  capture_output=True, text=True).returncode
+
+    def test_a_failed_build_fails_the_step(self):
+        self.assertNotEqual(self.run_step("echo 'sha256sum: WARNING: 1 computed checksum did NOT match'; exit 1"), 0)
+        self.assertNotEqual(self.run_step("echo '>>> linux'; exit 2"), 0)
+
+    def test_a_good_build_passes_the_step(self):
+        self.assertEqual(self.run_step("exit 0"), 0)
+        self.assertEqual(self.run_step("echo '>>> linux'; echo post-image: ok"), 0)
 
 
 if __name__ == "__main__":
