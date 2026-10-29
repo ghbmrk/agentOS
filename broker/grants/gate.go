@@ -1916,7 +1916,7 @@ func (g *Gate) endHeld(ids ...string) {
 }
 
 // Forgotten is why a voided intent did not run (VoidSince).
-const Forgotten guesterr.Literal = "it was made from something the owner had the box forget"
+const Forgotten guesterr.Literal = "it was made from something the owner had me forget"
 
 // VoidSince closes what lineage asked for at or after since that still
 // waits: for the owner's answer, or held for its undo window, whose staged
