@@ -32,9 +32,9 @@ the newest L3 verdict comment from a repository owner, member or collaborator, a
 when that verdict is `accept` and the diff it reviewed (its `Record:` line head) equals `head`'s. Otherwise it
 prints `changed <files>`, `not-accepted`, `edited-verdict <kind>` or `no-verdict` and exits 1, so a push after the accept, a later
 fix-list and a PR never reviewed all fail (PREMERGE-required, #1834). A gate-file PR (the `--needs-mark` list)
-also needs a separate Security accept (D-137): the newest trusted verdict comment marked `security` and not
+or tier-A PR also needs a separate Security accept (D-137, #3817): the newest trusted verdict comment marked `security` and not
 `l3` or `combined` is `accept` and its reviewed diff equals `head`'s; otherwise it prints `needs-security <files>`
-and exits 1. Before that, the lens screen the PR's tier needs (OPERATING §3-§4, PREMERGE-lens #2644; tier from
+and exits 1, naming the gate and tier-A files. Before that, the lens screen the PR's tier needs (OPERATING §3-§4, PREMERGE-lens #2644; tier from
 tools/risk_tier.py over the same file list, read from the checkout, which in the workflow is the base): on tier A
 the newest trusted verdicts marked `ux` and `potency` (one comment may carry both), on tier B the newest marked
 `combined`, each an `accept` whose reviewed diff equals `head`'s. A tier-A diff confined to assurance tooling owes
@@ -97,7 +97,7 @@ def mark_range(cwd, base, head):
 
 TRUSTED = {"OWNER", "MEMBER", "COLLABORATOR"}
 _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
-# D-137: a gate-file PR also needs a Security accept in a comment of its own, so one review cannot count twice.
+# D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 # A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
 _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
@@ -454,10 +454,11 @@ def main(argv):
         if lenses:
             print("needs-lens " + ",".join(lenses))
             return 1
-        gate = mark_paths(files)
+        tier, top = risk_tier.tier_of_change(files)
+        owed = sorted(set(mark_paths(files)) | set(top if tier == "A" else []))  # #3817: tier A too (OPERATING §4 4a)
         sec = verdict(comments, pr, security=True)
-        if gate and not _accepted(sec, head, base):
-            print(_named(sec, "security", pr) or "needs-security " + " ".join(gate))
+        if owed and not _accepted(sec, head, base):
+            print(_named(sec, "security", pr) or "needs-security " + " ".join(owed))
             return 1
         print("same")
         return 0
