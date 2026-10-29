@@ -1,8 +1,8 @@
 # The edge link's interface (EDGE-link-core c2c; HW-15): the core's USB Ethernet adapter, the port used
 # for nothing else, since ports 1 and 2 are the core's fixed ones (HW-12; localui.Port1 leaves USB
 # adapters out for this reason). It is named agentos-link, the name the link's units, its .network
-# file and the inbound drop's link set use. A second USB Ethernet adapter keeps its kernel name and
-# gets none of the link's settings. Sorted before 99-default.link, which would name it otherwise.
+# file's address and the inbound drop's link set use. A second USB Ethernet adapter (or a phone's USB
+# tether) keeps its kernel name and gets no link port; 10-agentos-link.network gives it no DHCP either. Sorted before 99-default.link, which would name it otherwise.
 [Match]
 Type=ether
 Kind=!*

@@ -6,8 +6,9 @@
 # alone (#2905 open point 1). agentos-keeper-enroll.path starts it when the factors arrive. A rerun
 # after a crash finishes or redoes the attempt, with the same staged authority (ASSUMPTIONS STO-2c-a).
 # It also takes the first edge's key, if the capture unit took one before the confirm, and removes the
-# capture (EDGE-link-core decision 3): the capture unit is stopped first, so no hello lands after
-# enrollment has read it.
+# capture (EDGE-link-core decision 3); the capture ends by itself once the store exists. No
+# Conflicts= with it: every boot's transaction holds this unit's start job (its conditions are checked
+# only when the job runs), so a conflict would delete the capture's start at boot (#3834 review).
 [Unit]
 Description=agentOS enrollment
 ConditionPathExists=!/var/lib/agentos-store/store
@@ -17,10 +18,8 @@ ConditionPathExists=/run/agentos-setup/page-ca
 # Wants= as well as After=: when the path unit starts enrollment, the staging is in the same
 # transaction, so it is always ordered first. The kernel starts in the same boot once the store exists.
 Wants=agentos-keeper-pageca.service agentos-keeper-kernel.service
-After=local-fs.target systemd-sysusers.service agentos-keeper-pageca.service agentos-keeper-link-capture.service
+After=local-fs.target systemd-sysusers.service agentos-keeper-pageca.service
 Before=agentos-keeper-kernel.service
-# Starting enrollment stops the first edge's capture, and the stop is ordered before the start.
-Conflicts=agentos-keeper-link-capture.service
 # A failed enrollment keeps the factors, so the path unit starts it again: three starts a boot, then
 # the path unit fails and a reboot starts the card over (#3492 L3 finding 2).
 StartLimitIntervalSec=infinity

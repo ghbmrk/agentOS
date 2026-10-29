@@ -609,7 +609,8 @@ func TestInboundLinkPortOnTheLinkOnly(t *testing.T) {
 	}{
 		{pkt{iif: "agentos-link", src: ll, proto: "tcp", dport: LinkPort}, "accept"},
 		{pkt{iif: "agentos-link", src: netip.MustParseAddr("169.254.0.2"), proto: "tcp", dport: LinkPort}, "accept"},
-		{pkt{iif: "agentos-link", src: ll, proto: "tcp", sport: 80, dport: 51000, established: true}, "accept"},
+		// No replies: conntrack is not per interface, so the edge could forge one for another flow.
+		{pkt{iif: "agentos-link", src: ll, proto: "tcp", sport: 80, dport: 51000, established: true}, "drop"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 255}, "accept"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-advert", hop: 255}, "accept"},
 		{pkt{iif: "agentos-link", src: ll, proto: "icmpv6", icmp6: "nd-neighbor-solicit", hop: 64}, "drop"},

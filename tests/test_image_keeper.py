@@ -326,7 +326,9 @@ class KeeperTreeTest(unittest.TestCase):
         # so does the edge link's (EDGE-link-core c2c).
         self.assertEqual([(u, k) for u, k, _ in check.FULL_PRIVILEGE_COMMANDS],
                          [("agentos-localui.service", "ExecStartPre"), ("agentos-localui.service", "ExecStopPost"),
-                          ("agentos-link.service", "ExecStartPre"), ("agentos-link.service", "ExecStopPost")])
+                          ("agentos-link.service", "ExecStartPre"), ("agentos-link.service", "ExecStopPost"),
+                          ("agentos-keeper-link-capture.service", "ExecStartPre"),
+                          ("agentos-keeper-link-capture.service", "ExecStopPost")])
         self.add("agentos-localui.service", "Service", "ExecStartPost=+/usr/bin/true")
         self.assertIn("agentos-localui.service: ExecStartPost=+/usr/bin/true runs with full privileges, "
                       "outside its device policy and namespace (STO-2c)", self.v())

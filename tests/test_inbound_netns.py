@@ -400,9 +400,12 @@ class EdgeLinkOnTheLinkOnly(unittest.TestCase):
                 self.assertFalse(reaches(EDGE, addr, PORT), "the edge reached port %d at %s" % (PORT, addr))
         self.assertFalse(reaches(HOME, "192.0.2.1", self.LINK_PORT), "the link's port answered on eth0")
         self.assertFalse(reaches(HOME, "192.0.2.1", PORT))
-        # The box's own connections to the edge still work (replies pass).
+        # Not even replies pass on the link: conntrack is not per interface, so the edge could forge one
+        # into another flow (#3834 Security review). The box opens nothing over the link.
         if shutil.which("ping"):
-            self.assertEqual(sh("ping", "-c1", "-W2", "198.51.100.2", ns=BOX, check=False).returncode, 0)
+            self.assertNotEqual(sh("ping", "-c1", "-W2", "198.51.100.2", ns=BOX, check=False).returncode, 0)
+            self.assertEqual(sh("ping", "-c1", "-W2", "192.0.2.2", ns=BOX, check=False).returncode, 0,
+                             "control: replies on eth0")
         # The unit's stop: the link's port is closed again.
         self.run_unit("ExecStopPost")
         for addr in self.edge_addrs():

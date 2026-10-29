@@ -12,7 +12,8 @@
 # (D-146); the kernel calls the mail clerk on its socket, admitting only its uid, and hands it its key
 # on a socket only the service manager starting agentos-keeper-mail.service, in that unit's cgroup,
 # is answered on (MAIL-keys). The edge link (EDGE-link-core c2c): agentos-link asks the kernel about the
-# edge's key and has it sign the link's TLS on one more socket, admitting only the link's uid. A slice's name nests at each "-", so the keeper's slice is under
+# edge's key and has it sign the link's TLS on one more socket, admitting only the link's uid. A
+# slice's name nests at each "-", so the keeper's slice is under
 # agentos.slice.
 [Unit]
 Description=agentOS kernel

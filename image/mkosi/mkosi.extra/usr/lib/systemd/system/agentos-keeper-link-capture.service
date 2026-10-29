@@ -1,12 +1,12 @@
 # The first edge's capture (EDGE-link-core c2c, decision 3; HW-15): before the Owner Card confirm there
 # is no store and no kernel, so agentos-link, in its pre-store mode, takes the first valid hello on the
 # link port and writes the edge's key where enrollment reads it (agentos-enroll -first-edge), then
-# exits; later hellos find nothing listening. It runs only while there is no store, and enrollment's
-# unit stops it before enrollment runs (Conflicts= there). The parent is root, so enrollment takes the
-# capture (b2 decision 2), and binds the port; a child under the link's own user parses the edge's TLS
-# and hello, and the parent checks its 128 bytes again before writing them (agentos-link ASSUMPTIONS
-# EDGE-link-c2-1). It is the keeper's: it reads whether the store exists, which the main side's mask
-# hides, and its capture directory is keeper state that no main-side unit sees.
+# exits; later hellos find nothing listening. It runs only while there is no store, and ends by itself
+# once enrollment makes it, freeing the port for the served unit. The parent is root, so enrollment
+# takes the capture (b2 decision 2), and binds the port; a child under the link's own user parses the
+# edge's TLS and hello, and the parent checks its 128 bytes again before writing them (agentos-link
+# ASSUMPTIONS EDGE-link-c2-1). It is the keeper's: it reads whether the store exists, which the main
+# side's mask hides, and its capture directory is keeper state that no main-side unit sees.
 [Unit]
 Description=agentOS first edge capture
 ConditionPathExists=!/var/lib/agentos-store/store
@@ -17,22 +17,23 @@ After=local-fs.target systemd-sysusers.service systemd-tmpfiles-setup.service ag
 StartLimitIntervalSec=0
 
 [Service]
-# The link's port opens in the inbound firewall only while this listens (netguard Link): the link
-# interface becomes the link set's only element, in one nft transaction, and every stop empties it.
-ExecStartPre=/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { "agentos-link" }'
+# The link's port opens in the inbound firewall only while this listens (netguard Link): one step with
+# full privileges (+) makes the link interface the link set's only element, in one nft transaction, and
+# every stop empties it, so the process itself holds no CAP_NET_ADMIN.
+ExecStartPre=+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { "agentos-link" }'
 ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-link -iface agentos-link -port 7443 \
         -capture /run/agentos-link-capture/first-edge -store /var/lib/agentos-store/store \
         -uid @uid:agentos-link -gid @gid:agentos-link
-ExecStopPost=/usr/sbin/nft flush set inet agentos_inbound link
+ExecStopPost=+/usr/sbin/nft flush set inet agentos_inbound link
 Restart=on-failure
 RestartSec=2
 RestartSteps=8
 RestartMaxDelaySec=5min
 StandardError=journal
-# Root, with only what it needs: start the reader under the link's ids and kill it, and load the
-# link set. No CAP_DAC_OVERRIDE, so the kernel's, the mail clerk's and the setup factors' directories
-# stay closed to it by their modes; the factors' are root's, so they are masked as well.
-CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL CAP_NET_ADMIN
+# Root, with only what it needs: start the reader under the link's ids and kill it. No
+# CAP_DAC_OVERRIDE, so the kernel's, the mail clerk's and the setup factors' directories stay closed
+# to it by their modes; the factors' are root's, so they are masked as well.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
 TemporaryFileSystem=/run/agentos-setup:ro /var/lib/agentos-kernel:ro /var/lib/agentos-mail:ro
 ReadWritePaths=/run/agentos-link-capture
 LimitCORE=0
@@ -42,8 +43,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateIPC=yes
-# The link's TCP port, over link-local addresses only, and nft's netlink.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# The link's TCP port, over link-local addresses only.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 IPAddressDeny=any
 IPAddressAllow=link-local
 ProtectProc=invisible

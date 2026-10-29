@@ -6074,10 +6074,6 @@ class HostDiskImageTest(unittest.TestCase):
             self.assertIn(line, s)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 LINK_CAPTURE = MK / "mkosi.extra/usr/lib/systemd/system/agentos-keeper-link-capture.service"
 LINK_SERVED = MK / "mkosi.extra/usr/lib/systemd/system/agentos-link.service"
 LINK_ADMIT = "/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { \"agentos-link\" }'"
@@ -6147,17 +6143,19 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         self.assertEqual(arg(self.srv, "consumer-sock").rsplit("/", 1)[0], "/run/" + ss["RuntimeDirectory"])
 
     # REQ: HW-15
-    def test_the_capture_runs_only_before_the_store_and_stops_before_enrollment(self):
+    def test_the_capture_runs_only_before_the_store(self):
         store = arg(self.unlock, "store")
         self.assertEqual(arg(self.cap, "store"), store)
         self.assertEqual(store, arg(self.enroll, "state") + "/store")
         cu = ini(LINK_CAPTURE)["Unit"]
         self.assertEqual(re.findall(r"(?m)^ConditionPathExists=(.*)$", LINK_CAPTURE.read_text()), ["!" + store])
-        # Enrollment takes the capture the unit writes, and starting it stops the capture first.
+        # Enrollment takes the capture the unit writes; the capture ends itself once the store exists
+        # (agentos-link's -store), so no unit stops it. Not Conflicts=: the boot transaction would
+        # delete the capture's start job (#3834 review; the boot transaction test below).
         self.assertEqual(arg(self.enroll, "first-edge"), arg(self.cap, "capture"))
         eu = ini(MK / "mkosi.extra/usr/lib/systemd/system/agentos-keeper-enroll.service")["Unit"]
-        self.assertEqual(eu["Conflicts"].split(), [LINK_CAPTURE.name])
-        self.assertIn(LINK_CAPTURE.name, eu["After"].split())
+        self.assertNotIn("Conflicts", eu)
+        self.assertNotIn("Conflicts", cu)
         self.assertNotIn("agentos-keeper-enroll.service", cu.get("Before", "").split())
         # The capture's directory is root's alone (agentos-link ASSUMPTIONS EDGE-link-c2-2), made at
         # every boot, and keeper state no main-side unit sees.
@@ -6194,16 +6192,16 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         rules = (MK / "mkosi.extra/usr/lib/agentos/inbound.nft").read_text()
         net = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-link.network")
         link = ini(MK / "mkosi.extra/usr/lib/systemd/network/10-agentos-link.link")
-        for unit, words, prefix in ((LINK_CAPTURE, self.cap, ""), (LINK_SERVED, self.srv, "+")):
+        for unit, words in ((LINK_CAPTURE, self.cap), (LINK_SERVED, self.srv)):
             with self.subTest(unit=unit.name):
                 iface, port = arg(words, "iface"), arg(words, "port")
-                self.assertEqual(iface, net["Match"]["Name"])
                 self.assertEqual(iface, link["Link"]["Name"])
                 self.assertIn("    iifname @link tcp dport %s accept\n" % port, rules)
                 self.assertIn("{ \"%s\" }" % iface, LINK_ADMIT)
                 s = settings(unit)
-                self.assertEqual(s["ExecStartPre"], [prefix + LINK_ADMIT])
-                self.assertEqual(s["ExecStopPost"], [prefix + LINK_CLOSE])
+                # Full privileges for the one nft step, so neither process holds CAP_NET_ADMIN.
+                self.assertEqual(s["ExecStartPre"], ["+" + LINK_ADMIT])
+                self.assertEqual(s["ExecStopPost"], ["+" + LINK_CLOSE])
                 u = ini(unit)["Unit"]
                 self.assertIn("agentos-inbound.service", u["Requires"].split())
                 self.assertIn("agentos-inbound.service", u["After"].split())
@@ -6211,8 +6209,11 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         self.assertEqual(dict(net["Network"]), {"DHCP": "no", "LinkLocalAddressing": "no", "Address": "fe80::1/64",
                                                 "IPv6AcceptRA": "no", "LLDP": "no", "EmitLLDP": "no"})
         self.assertEqual(net["Link"]["RequiredForOnline"], "no")
-        # The adapter that becomes the link: USB Ethernet, never a radio or a virtual link.
-        self.assertEqual(dict(link["Match"]), {"Type": "ether", "Kind": "!*", "Property": "ID_BUS=usb"})
+        # The adapter that becomes the link: USB Ethernet, never a radio or a virtual link. The network
+        # matches every such adapter, not the name alone, so a second one never takes the uplink's DHCP.
+        usb = {"Type": "ether", "Kind": "!*", "Property": "ID_BUS=usb"}
+        self.assertEqual(dict(link["Match"]), usb)
+        self.assertEqual(dict(net["Match"]), usb)
         self.assertLess("10-agentos-link.network", "20-agentos-uplink.network")
         self.assertLess("10-agentos-link.link", "99-default.link")
 
@@ -6231,9 +6232,46 @@ class EdgeLinkUnitsTest(unittest.TestCase):
                     self.assertNotIn(k, s)
                 self.assertNotIn(unit.name, check.TPM_UNITS)
         # Served: no capability at all; the capture's root keeps only what starting and killing the
-        # reader and loading the link set need, and never reads the setup factors.
+        # reader need, and never reads the setup factors.
         self.assertEqual(ini(LINK_SERVED)["Service"]["CapabilityBoundingSet"], "")
         cs = ini(LINK_CAPTURE)["Service"]
         self.assertEqual(sorted(cs["CapabilityBoundingSet"].split()),
-                         ["CAP_KILL", "CAP_NET_ADMIN", "CAP_SETGID", "CAP_SETUID"])
+                         ["CAP_KILL", "CAP_SETGID", "CAP_SETUID"])
+        self.assertNotIn("AF_NETLINK", cs["RestrictAddressFamilies"].split())
         self.assertIn("/run/agentos-setup:ro", cs["TemporaryFileSystem"].split())
+
+    # REQ: HW-15
+    def test_the_boot_transaction_keeps_the_capture_s_start(self):
+        # systemd's own transaction over the image's units, each enabled one wanted by the boot target:
+        # a conflict with a unit in the same boot would delete the capture's start job, and nothing
+        # would ever be captured (#3834 review blocker 1).
+        pid1 = "/usr/lib/systemd/systemd"
+        if not os.access(pid1, os.X_OK):
+            if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+                self.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but %s is not installed" % pid1)
+            self.skipTest("%s is not installed; this test is skipped without it" % pid1)
+        units = MK / "mkosi.extra/usr/lib/systemd/system"
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().split()
+        with tempfile.TemporaryDirectory() as d:
+            os.chmod(d, 0o755)
+            tree = pathlib.Path(d) / "units"
+            shutil.copytree(units, tree)
+            wants = tree / "multi-user.target.wants"
+            wants.mkdir()
+            for f in sorted(units.glob("*.service")):
+                c = ini(f)
+                if f.name in preset and "multi-user.target" in c.get("Install", "WantedBy", fallback="").split():
+                    (wants / f.name).symlink_to("../" + f.name)
+            # Test mode refuses root.
+            drop = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups"] if os.geteuid() == 0 else []
+            r = subprocess.run(drop + [pid1, "--test", "--system", "--unit=multi-user.target", "--no-pager"],
+                               env=dict(os.environ, SYSTEMD_UNIT_PATH=str(tree) + ":"), capture_output=True,
+                               text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+        jobs = set(re.findall(r"(?m)^\t+Action: (\S+) -> start$", r.stdout))
+        for unit in (LINK_CAPTURE.name, "agentos-keeper-enroll.service", LINK_SERVED.name):
+            self.assertIn(unit, jobs)
+
+
+if __name__ == "__main__":
+    unittest.main()

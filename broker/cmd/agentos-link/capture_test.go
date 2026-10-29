@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/ed25519"
 	"io"
@@ -161,4 +162,43 @@ func capture(t *testing.T, e edge) []byte {
 		t.Fatal(err)
 	}
 	return hello{e.key(), nonce, sig}.capture()
+}
+
+// REQ: HW-15
+
+// TestTheStoreEndsTheCaptureWindow: once enrollment makes the store, the
+// capture ends by itself, freeing the port for the served link, and it never
+// ends before then.
+func TestTheStoreEndsTheCaptureWindow(t *testing.T) {
+	old := storePoll
+	storePoll = 10 * time.Millisecond
+	t.Cleanup(func() { storePoll = old })
+	store := filepath.Join(t.TempDir(), "store")
+	done := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go untilStore(ctx, store, func() { close(done) })
+	select {
+	case <-done:
+		t.Fatal("ended with no store")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := os.Mkdir(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the store did not end the window")
+	}
+	// A stopped capture stops looking.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	ended := make(chan struct{})
+	go func() { untilStore(ctx2, filepath.Join(t.TempDir(), "none"), func() {}); close(ended) }()
+	cancel2()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("untilStore outlived its context")
+	}
 }

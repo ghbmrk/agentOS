@@ -103,11 +103,14 @@ LINK_NETWORK = "10-agentos-link.network"
 UPLINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Network", "DHCP"): "yes",
                ("Network", "IPv6PrivacyExtensions"): "yes", ("DHCPv4", "SendHostname"): "no",
                ("DHCPv6", "SendHostname"): "no", ("IPv6AcceptRA", "Token"): "prefixstable"}
-# The edge link's every assignment, held as the uplink's are (HW-15, HW-16): the link interface alone,
-# with the core's one fixed link-local address and nothing else. No DHCP, router advertisement or LLDP
+# The edge link's every assignment, held as the uplink's are (HW-15, HW-16): every USB Ethernet adapter,
+# the link's (10-agentos-link.link names one agentos-link) and any second one, so the edge's cable never
+# runs the uplink's DHCP whichever adapter it is in, with the core's one fixed link-local address and
+# nothing else. No DHCP, router advertisement or LLDP
 # is taken from or sent to the edge, so the edge sets no address, route or resolver on the core; the
 # link never counts towards being online.
-LINK_KEYS = {("Match", "Name"): "agentos-link", ("Link", "RequiredForOnline"): "no", ("Network", "DHCP"): "no",
+LINK_KEYS = {("Match", "Type"): "ether", ("Match", "Kind"): "!*", ("Match", "Property"): "ID_BUS=usb",
+             ("Link", "RequiredForOnline"): "no", ("Network", "DHCP"): "no",
              ("Network", "LinkLocalAddressing"): "no", ("Network", "Address"): "fe80::1/64",
              ("Network", "IPv6AcceptRA"): "no", ("Network", "LLDP"): "no", ("Network", "EmitLLDP"): "no"}
 NETWORKS = {UPLINK: UPLINK_KEYS, LINK_NETWORK: LINK_KEYS}
@@ -1460,6 +1463,9 @@ FULL_PRIVILEGE_COMMANDS = (
     ("agentos-link.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; add element inet "
      "agentos_inbound link { \"agentos-link\" }'"),
     ("agentos-link.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound link"),
+    ("agentos-keeper-link-capture.service", "ExecStartPre", "+/usr/sbin/nft 'flush set inet agentos_inbound link; "
+     "add element inet agentos_inbound link { \"agentos-link\" }'"),
+    ("agentos-keeper-link-capture.service", "ExecStopPost", "+/usr/sbin/nft flush set inet agentos_inbound link"),
 )
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")

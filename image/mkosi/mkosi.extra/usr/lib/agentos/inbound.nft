@@ -14,7 +14,6 @@ table inet agentos_inbound {
   }
   chain input {
     type filter hook input priority filter; policy accept;
-    iifname @link ct state established,related accept
     iifname @link ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } accept
     iifname @link tcp dport 7443 accept
     iifname @link drop
