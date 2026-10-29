@@ -74,7 +74,7 @@ func TestRealEnrolZeroesEncoderOutput(t *testing.T) {
 	clear(v)
 	clear(p.Data)
 	if found := scanMemory(t, masked, key); found != 0 {
-		t.Fatalf("%d copies of the encoding are left after Encode", found)
+		t.Fatalf("the encoding is left in memory (%d places) after Encode", found)
 	}
 }
 
@@ -139,7 +139,7 @@ func TestRealFacesNotEncodedWhenNoneEnrolled(t *testing.T) {
 			}
 		}
 		if found := scanMemory(t, masked, key); found != 0 {
-			t.Fatalf("%s: %d copies of the face's encoding are in memory after Detect was told not to encode", n, found)
+			t.Fatalf("%s: the face's encoding is left in memory (%d places) after this frame's Detect calls", n, found)
 		}
 		clear(f.Data)
 	}
