@@ -56,11 +56,11 @@ type flaky struct {
 	refuse         bool // the log refuses the settlement outright
 }
 
-func (f *flaky) ReadPool(now int64, pool string, used, resetAt int64) error {
+func (f *flaky) ReadPool(now int64, pool string, ws []kernel.WindowReading) error {
 	if f.failPool {
 		return errors.New("log down")
 	}
-	return f.Ledger.ReadPool(now, pool, used, resetAt)
+	return f.Ledger.ReadPool(now, pool, ws)
 }
 
 func (f *flaky) Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error {
@@ -170,8 +170,13 @@ func TestExhaustedPlanIsHeldAndOwnerExtends(t *testing.T) {
 	}
 }
 
+// pw is a reading of the 5-hour window alone.
+func pw(used, resetAt int64) *model.PoolReading {
+	return &model.PoolReading{Windows: []model.PoolWindow{{Window: "5h", Used: used, ResetAt: resetAt}}}
+}
+
 func TestPoolRouteReadsUtilizationAndStopsAtTheReserve(t *testing.T) {
-	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}}
+	f := &fake{u: model.Usage{Reported: true, Pool: pw(950, 10_000)}}
 	c, k, _ := rig(t, f)
 	if err := k.Reserve(0, "codex-5h", 100); err != nil {
 		t.Fatal(err)
@@ -185,8 +190,35 @@ func TestPoolRouteReadsUtilizationAndStopsAtTheReserve(t *testing.T) {
 	if _, err := c.Call(2, "t", "api", "hi", 10); err != nil {
 		t.Fatalf("other routes are unaffected: %v", err)
 	}
+	// Each window is read on its own: the 5-hour window's reset leaves the
+	// week at the reserve closed.
+	f.u.Pool = &model.PoolReading{Windows: []model.PoolWindow{{Window: "5h", Used: 950, ResetAt: 20_000}, {Window: "7d", Used: 960, ResetAt: 90_000}}}
 	if _, err := c.Call(10_000, "t", "plan", "hi", 10); err != nil {
 		t.Fatalf("the reset time is the cooldown: %v", err)
+	}
+	f.u.Pool = nil
+	if _, err := c.Call(20_000, "t", "plan", "hi", 10); err == nil {
+		t.Fatal("the week is still at the reserve after the 5-hour reset")
+	}
+	if w := k.State().Pools["codex-5h"].Windows; w["5h"].Used != 0 || w["7d"].Used != 960 {
+		t.Fatalf("windows %+v", w)
+	}
+	if _, err := c.Call(90_000, "t", "plan", "hi", 10); err != nil {
+		t.Fatalf("the week's reset reopens the route: %v", err)
+	}
+}
+
+// A full window with no reset time falls back to its declared length, not
+// the kernel's default (RES-5).
+func TestAFullWindowFallsBackToItsDeclaredLength(t *testing.T) {
+	week := int64(7 * 24 * 3600 * 1000)
+	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Windows: []model.PoolWindow{{Window: "7d", Used: 1000, Every: week}}}}}
+	c, k, _ := rig(t, f)
+	if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.State().Pools["codex-5h"].Windows["7d"].ResetAt; got != 1+week {
+		t.Fatalf("reset at %d, want the week's length from now %d", got, 1+week)
 	}
 }
 
@@ -406,7 +438,7 @@ func TestUsageReturnedWithAnErrorIsMetered(t *testing.T) {
 }
 
 func TestPoolReadingIsAppliedOnAProviderError(t *testing.T) {
-	f := &fake{u: model.Usage{Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}, err: errors.New("cut off")}
+	f := &fake{u: model.Usage{Pool: pw(950, 10_000)}, err: errors.New("cut off")}
 	c, k, _ := rig(t, f)
 	if err := k.Reserve(0, "codex-5h", 100); err != nil {
 		t.Fatal(err)
@@ -543,12 +575,13 @@ func TestPaidReplyIsKeptWhenItsPoolReadingIsRefused(t *testing.T) {
 	}{
 		// a figure outside 0..1000
 		"bad figure": {used: 1500},
-		// at 900 used, the owner raises the reserve mid-call, so the closed pool refuses a lower reading
+		// at 900 used, the owner raises the reserve mid-call, so the closed
+		// window keeps its figure: a lower reading cannot reopen it
 		"reserve raised": {before: 900, used: 500, during: func(k *kernel.Kernel) error { return k.Reserve(1, "codex-5h", 200) }},
 	} {
-		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: tc.used, ResetAt: 10_000}}}
+		f := &fake{u: model.Usage{Reported: true, Pool: pw(tc.used, 10_000)}}
 		c, k, _ := rig(t, f)
-		if err := k.ReadPool(0, "codex-5h", tc.before, 10_000); err != nil {
+		if err := k.ReadPool(0, "codex-5h", []kernel.WindowReading{{Window: "5h", Used: tc.before, ResetAt: 10_000}}); err != nil {
 			t.Fatal(err)
 		}
 		if tc.during != nil {
@@ -562,8 +595,15 @@ func TestPaidReplyIsKeptWhenItsPoolReadingIsRefused(t *testing.T) {
 		if err != nil || reply == "" {
 			t.Fatalf("%s: the paid reply is kept: %q %v", name, reply, err)
 		}
-		if b := poolRead(t, k); !strings.Contains(b, `"used":1000`) || !strings.Contains(b, `"reset_at":10000`) {
+		if b := poolRead(t, k); tc.during == nil && (!strings.Contains(b, `"used":1000`) || !strings.Contains(b, `"reset_at":10000`)) {
 			t.Fatalf("%s: the refused reading is recorded as a full pool: %s", name, b)
+		}
+		want := int64(kernel.PoolFull)
+		if tc.during != nil {
+			want = tc.before
+		}
+		if w := k.State().Pools["codex-5h"].Windows["5h"]; w.Used != want || w.ResetAt != 10_000 {
+			t.Fatalf("%s: window %+v", name, w)
 		}
 		if r := k.AdmitPool(2, "codex-5h"); r == nil {
 			t.Fatalf("%s: the pool is closed", name)
@@ -575,7 +615,7 @@ func TestPaidReplyIsKeptWhenItsPoolReadingIsRefused(t *testing.T) {
 // and the reading is owed before any further call. Once written it is the
 // provider's own figure, not a full pool.
 func TestUnrecordedPoolReadingShutsTheClerkUntilTheLogRecords(t *testing.T) {
-	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 300, ResetAt: 10_000}}}
+	f := &fake{u: model.Usage{Reported: true, Pool: pw(300, 10_000)}}
 	c, k, lg := rig(t, f)
 	lg.failPool = true
 	if reply, err := c.Call(1, "t", "plan", "hi", 10); err != nil || reply == "" {
@@ -605,7 +645,7 @@ func TestOwedReadingPastItsResetIsDropped(t *testing.T) {
 		// no reset time: the declared window from the call is the cooldown
 		"no reset time": {resetAt: 0, recover: 1 + kernel.PoolWindowMS},
 	} {
-		f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000, ResetAt: tc.resetAt}}}
+		f := &fake{u: model.Usage{Reported: true, Pool: pw(1000, tc.resetAt)}}
 		c, k, lg := rig(t, f)
 		lg.failPool = true
 		if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
@@ -630,7 +670,7 @@ func TestOwedReadingPastItsResetIsDropped(t *testing.T) {
 // A failed meter still applies the call's pool reading, so the pool is not
 // left open once the log records the owed spend.
 func TestPoolReadingIsAppliedWhenTheMeterFails(t *testing.T) {
-	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 950, ResetAt: 10_000}}}
+	f := &fake{u: model.Usage{Reported: true, Pool: pw(950, 10_000)}}
 	c, k, lg := rig(t, f)
 	if err := k.Reserve(0, "codex-5h", 100); err != nil {
 		t.Fatal(err)
@@ -648,7 +688,7 @@ func TestPoolReadingIsAppliedWhenTheMeterFails(t *testing.T) {
 // A reading with no reset time is owed with the declared window from the call,
 // not from when the log recovers, so an outage never lengthens the cooldown.
 func TestOwedReadingKeepsTheWindowFromTheCall(t *testing.T) {
-	f := &fake{u: model.Usage{Reported: true, Pool: &model.PoolReading{Used: 1000}}}
+	f := &fake{u: model.Usage{Reported: true, Pool: pw(1000, 0)}}
 	c, k, lg := rig(t, f)
 	lg.failPool = true
 	if _, err := c.Call(1, "t", "plan", "hi", 10); err != nil {
@@ -717,7 +757,7 @@ func TestAdmittedCallIsSettledOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := adm.Settle(6, model.Usage{Pool: &model.PoolReading{Used: 1000, ResetAt: 1 << 40}}, 1, nil); err != nil {
+	if err := adm.Settle(6, model.Usage{Pool: pw(1000, 1<<40)}, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.Admit(7, "big", "plan", 10, 20); err == nil {

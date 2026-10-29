@@ -584,69 +584,6 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	return k.owner(now, TSpendExtend, spendExtended{plan, ext})
 }
 
-// resetIfDue logs the reopening of a pool at its reserve once the reset time
-// the provider gave has passed, so a restart that loses it closes the pool
-// again (RES-5, KRN-7).
-func (k *Kernel) resetIfDue(now int64, pool string) error {
-	if !k.s.PoolDue(now, pool) {
-		return nil
-	}
-	_, err := k.emit(now, TPoolReset, poolReset{pool})
-	return err
-}
-
-// ReadPool records the provider's figure for a pool: used and the reset time
-// (RES-5). A pool at the owner's reserve reopens only at its reset time, never
-// on a reading, so a reading can only narrow. A reset time that is missing or
-// already past is replaced by the pool's declared window from now, so a full
-// pool always has a way back.
-func (k *Kernel) ReadPool(now int64, pool string, used, resetAt int64) error {
-	if used < 0 || used > PoolFull {
-		return errors.New("kernel: utilization is a share of the pool")
-	}
-	if resetAt <= now {
-		resetAt = now + PoolWindowMS
-	}
-	if err := k.resetIfDue(now, pool); err != nil {
-		return err
-	}
-	if !k.s.PoolOpen(pool) && used+k.s.Pools[pool].Reserve < PoolFull {
-		return errors.New("kernel: a pool at the reserve reopens at its reset time, not on a reading")
-	}
-	_, err := k.emit(now, TPoolRead, poolRead{pool, used, resetAt})
-	return err
-}
-
-// Reserve sets the share of a pool kept for the owner. Raising narrows, so a
-// text is enough; lowering widens, so it is a widening entry (KEY-4, KEY-6).
-func (k *Kernel) Reserve(now int64, pool string, reserve int64) error {
-	if reserve < 0 || reserve > PoolFull {
-		return errors.New("kernel: a reserve is a share of the pool")
-	}
-	typ := TReserveUp
-	if reserve < k.s.Pools[pool].Reserve {
-		typ = TReserveDown
-	}
-	return k.owner(now, typ, poolReserve{pool, reserve})
-}
-
-// AdmitPool refuses work on a pool at the owner's reserve until it resets.
-// Past the reset time the provider gave, the reopening is logged as a widening.
-func (k *Kernel) AdmitPool(now int64, pool string) *key.Refusal {
-	if k.log.broken {
-		// The pool may have been reopened by a widening whose anchor failed
-		// (KRN-5, #2613 item 13).
-		return &key.Refusal{Code: CBroken, Detail: ErrBroken.Error()}
-	}
-	if err := k.resetIfDue(now, pool); err != nil {
-		return &key.Refusal{Code: CPool, Detail: pool + ": " + err.Error()}
-	}
-	if k.s.PoolOpen(pool) {
-		return nil
-	}
-	return &key.Refusal{Code: CPool, Detail: pool}
-}
-
 func (k *Kernel) Revoke(now int64, id key.ID) error { return k.owner(now, TKeyRevoked, keyID{id}) }
 func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPaused, keyID{id}) }
 func (k *Kernel) Unpause(now int64, id key.ID) error {

@@ -3,6 +3,8 @@ package plan
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -39,17 +41,42 @@ type Used struct {
 	Pool *Reading
 }
 
-// Reading is a usage pool's state: per mille used, and when it resets
-// (unix ms; 0 when the answer did not say).
-type Reading struct{ Used, ResetAt int64 }
+// Reading is a usage pool's state, window by window: only the windows the
+// answer stated.
+type Reading struct{ Windows []WindowUse }
 
-// Pool is how a provider's answer states the plan's usage pool (RES-5).
+// WindowUse is one window's state: its ID, per mille used, when it resets
+// (unix ms; 0 when the answer did not say), and its declared length.
+type WindowUse struct {
+	Window               string
+	Used, ResetAt, Every int64
+}
+
+// Pool is the plan's usage pool as the provider names it and as its answers
+// state it (RES-5). Names and labels stay in the image's declaration: the
+// log carries the pool's and windows' IDs only.
 type Pool struct {
-	// Windows are the header prefixes of the pool's rate windows. Each
-	// window carries <prefix>Used-Percent and <prefix>Reset-At (unix s).
-	Windows []string
-	// Reached names a header whose presence reads as a full pool.
+	// ID is the pool's kernel name, which model.Price.Pool carries.
+	ID string
+	// Name is the pool as the provider names it: "ChatGPT Codex".
+	Name string
+	// Windows are the pool's rate windows, in the provider's order.
+	Windows []Window
+	// Reached names a header whose presence reads as every window full.
 	Reached string
+}
+
+// Window is one rate window of a pool. Its answer carries
+// <Prefix>Used-Percent and <Prefix>Reset-At (unix s).
+type Window struct {
+	// ID is the window's kernel name: "5h".
+	ID     string
+	Prefix string
+	// Label is the window as the provider names it: "5-hour limit".
+	Label string
+	// Every is the window's length in ms, the reset a full window with no
+	// reset time falls back to.
+	Every int64
 }
 
 // DUnmetered is Do's answer for a model call with no meter: nothing sent.
@@ -63,31 +90,35 @@ const DBody = "plan-body"
 // passed on unread, and the call is metered as if it reported nothing.
 const maxEvent = 4 << 20
 
-// reading is the pool's state from h: the window nearest its limit, and a
-// reached limit as a full pool. A window whose use is unreadable is no
-// reading of it, since 0% would read as an open pool.
+// reading is the pool's state from h, each window read on its own, and a
+// reached limit as every window full at the latest reset time. A window
+// whose use is unreadable is no reading of it, since 0% would read as an
+// open window.
 func (p Pool) reading(h http.Header) *Reading {
-	var r *Reading
+	var ws []WindowUse
 	var latest int64
-	for _, pre := range p.Windows {
-		pct, err := strconv.ParseFloat(strings.TrimSpace(h.Get(pre+"Used-Percent")), 64)
-		if err != nil || math.IsNaN(pct) || pct < 0 {
-			continue
-		}
-		used := int64(math.Min(math.Ceil(pct*10), 1000))
+	for _, w := range p.Windows {
 		var reset int64
-		if s, err := strconv.ParseInt(strings.TrimSpace(h.Get(pre+"Reset-At")), 10, 64); err == nil && s > 0 && s <= math.MaxInt64/1000 {
+		if s, err := strconv.ParseInt(strings.TrimSpace(h.Get(w.Prefix+"Reset-At")), 10, 64); err == nil && s > 0 && s <= math.MaxInt64/1000 {
 			reset = s * 1000
 		}
 		latest = max(latest, reset)
-		if r == nil || used > r.Used || used == r.Used && reset > r.ResetAt {
-			r = &Reading{Used: used, ResetAt: reset}
+		pct, err := strconv.ParseFloat(strings.TrimSpace(h.Get(w.Prefix+"Used-Percent")), 64)
+		if err != nil || math.IsNaN(pct) || pct < 0 {
+			continue
 		}
+		ws = append(ws, WindowUse{w.ID, int64(math.Min(math.Ceil(pct*10), 1000)), reset, w.Every})
 	}
 	if p.Reached != "" && h.Get(p.Reached) != "" {
-		r = &Reading{Used: 1000, ResetAt: latest}
+		ws = ws[:0]
+		for _, w := range p.Windows {
+			ws = append(ws, WindowUse{w.ID, 1000, latest, w.Every})
+		}
 	}
-	return r
+	if len(ws) == 0 {
+		return nil
+	}
+	return &Reading{ws}
 }
 
 // meterReader reads a model call's answer for its usage as it passes, and
@@ -197,4 +228,24 @@ func (m *meterReader) event(l []byte) {
 // count is a token figure the clerk takes: a whole number, at most 1e12.
 func count(f *float64) bool {
 	return f != nil && *f >= 0 && *f <= 1e12 && *f == math.Trunc(*f)
+}
+
+// valid reports whether a pool declaration can be read and named: a pool
+// with windows has an ID and a name, and each window its own ID, a prefix,
+// a label and a length.
+func (p Pool) valid() error {
+	if len(p.Windows) == 0 {
+		return nil
+	}
+	if p.ID == "" || p.Name == "" {
+		return errors.New("a pool needs its ID and name")
+	}
+	seen := map[string]bool{}
+	for _, w := range p.Windows {
+		if w.ID == "" || seen[w.ID] || w.Prefix == "" || w.Label == "" || w.Every <= 0 {
+			return fmt.Errorf("pool %s: window %q needs its own ID, a prefix, a label and a length", p.ID, w.ID)
+		}
+		seen[w.ID] = true
+	}
+	return nil
 }

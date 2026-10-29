@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -302,8 +303,8 @@ func TestPlanModelCallIsMeteredOnce(t *testing.T) {
 		t.Fatalf("settled %d times", len(u))
 	}
 	want := plan.Used{Sent: true, Done: true, Reported: true, In: 1200, Out: 340, Bytes: int64(len(sse(1200, 340))),
-		Pool: &plan.Reading{Used: 400, ResetAt: 1792500000 * 1000}}
-	if u[0].Pool == nil || *u[0].Pool != *want.Pool {
+		Pool: rd(w5h(125, 1792000000*1000), w7d(400, 1792500000*1000))}
+	if u[0].Pool == nil || !reflect.DeepEqual(*u[0].Pool, *want.Pool) {
 		t.Fatalf("pool reading %+v, want %+v", u[0].Pool, want.Pool)
 	}
 	u[0].Pool, want.Pool = nil, nil
@@ -422,7 +423,7 @@ func TestPlanModelCallSettlesAsItEnded(t *testing.T) {
 	if resp, det := callWith(p, "g", ph, `{"model":"m","stream":true}`, rec.meter); resp != nil || det != plan.DEncoded {
 		t.Fatalf("an encoded answer: %v %q", resp != nil, det)
 	}
-	if u := rec.settled(); len(u) != 1 || !u[0].Sent || u[0].Done || u[0].Pool == nil || u[0].Pool.Used != 100 {
+	if u := rec.settled(); len(u) != 1 || !u[0].Sent || u[0].Done || u[0].Pool == nil || !reflect.DeepEqual(*u[0].Pool, *rd(w5h(100, 0))) {
 		t.Fatalf("an encoded answer settled %+v, want once, sent, with its reading", u)
 	}
 	// A dial the home-network policy refuses sends nothing.
@@ -468,19 +469,19 @@ func TestPlanPoolReading(t *testing.T) {
 		want *plan.Reading
 	}{
 		"none":            {map[string]string{}, nil},
-		"primary only":    {map[string]string{"X-Codex-Primary-Used-Percent": "0.01"}, &plan.Reading{Used: 1}},
-		"over 100":        {map[string]string{"X-Codex-Primary-Used-Percent": "180", "X-Codex-Primary-Reset-At": "5"}, &plan.Reading{Used: 1000, ResetAt: 5000}},
+		"primary only":    {map[string]string{"X-Codex-Primary-Used-Percent": "0.01"}, rd(w5h(1, 0))},
+		"over 100":        {map[string]string{"X-Codex-Primary-Used-Percent": "180", "X-Codex-Primary-Reset-At": "5"}, rd(w5h(1000, 5000))},
 		"unreadable":      {map[string]string{"X-Codex-Primary-Used-Percent": "lots", "X-Codex-Primary-Reset-At": "5"}, nil},
 		"negative":        {map[string]string{"X-Codex-Primary-Used-Percent": "-3"}, nil},
 		"not a number":    {map[string]string{"X-Codex-Primary-Used-Percent": "NaN"}, nil},
-		"reset too large": {map[string]string{"X-Codex-Primary-Used-Percent": "10", "X-Codex-Primary-Reset-At": "99999999999999999"}, &plan.Reading{Used: 100}},
-		"the tighter window": {map[string]string{"X-Codex-Primary-Used-Percent": "90", "X-Codex-Primary-Reset-At": "10",
-			"X-Codex-Secondary-Used-Percent": "30", "X-Codex-Secondary-Reset-At": "20"}, &plan.Reading{Used: 900, ResetAt: 10000}},
-		"a tie takes the later reset": {map[string]string{"X-Codex-Primary-Used-Percent": "50", "X-Codex-Primary-Reset-At": "10",
-			"X-Codex-Secondary-Used-Percent": "50", "X-Codex-Secondary-Reset-At": "20"}, &plan.Reading{Used: 500, ResetAt: 20000}},
+		"reset too large": {map[string]string{"X-Codex-Primary-Used-Percent": "10", "X-Codex-Primary-Reset-At": "99999999999999999"}, rd(w5h(100, 0))},
+		"each window on its own": {map[string]string{"X-Codex-Primary-Used-Percent": "90", "X-Codex-Primary-Reset-At": "10",
+			"X-Codex-Secondary-Used-Percent": "30", "X-Codex-Secondary-Reset-At": "20"}, rd(w5h(900, 10000), w7d(300, 20000))},
+		"an unreadable window is no reading of it": {map[string]string{"X-Codex-Primary-Used-Percent": "lots", "X-Codex-Primary-Reset-At": "10",
+			"X-Codex-Secondary-Used-Percent": "50", "X-Codex-Secondary-Reset-At": "20"}, rd(w7d(500, 20000))},
 		"limit reached": {map[string]string{"X-Codex-Rate-Limit-Reached-Type": "primary", "X-Codex-Primary-Used-Percent": "20", "X-Codex-Primary-Reset-At": "10",
-			"X-Codex-Secondary-Used-Percent": "30", "X-Codex-Secondary-Reset-At": "20"}, &plan.Reading{Used: 1000, ResetAt: 20000}},
-		"limit reached with no window": {map[string]string{"X-Codex-Rate-Limit-Reached-Type": "primary"}, &plan.Reading{Used: 1000}},
+			"X-Codex-Secondary-Used-Percent": "30", "X-Codex-Secondary-Reset-At": "20"}, rd(w5h(1000, 20000), w7d(1000, 20000))},
+		"limit reached with no window": {map[string]string{"X-Codex-Rate-Limit-Reached-Type": "primary"}, rd(w5h(1000, 0), w7d(1000, 0))},
 	} {
 		mu.Lock()
 		hdr = c.h
@@ -492,8 +493,52 @@ func TestPlanPoolReading(t *testing.T) {
 		}
 		read(t, resp)
 		got := rec.settled()[0].Pool
-		if (got == nil) != (c.want == nil) || got != nil && *got != *c.want {
+		if (got == nil) != (c.want == nil) || got != nil && !reflect.DeepEqual(*got, *c.want) {
 			t.Errorf("%s: reading %+v, want %+v", name, got, c.want)
+		}
+	}
+}
+
+const (
+	hourMS = 3600 * 1000
+	weekMS = 7 * 24 * hourMS
+)
+
+func rd(ws ...plan.WindowUse) *plan.Reading { return &plan.Reading{Windows: ws} }
+func w5h(used, reset int64) plan.WindowUse {
+	return plan.WindowUse{Window: "5h", Used: used, ResetAt: reset, Every: 5 * hourMS}
+}
+func w7d(used, reset int64) plan.WindowUse {
+	return plan.WindowUse{Window: "7d", Used: used, ResetAt: reset, Every: weekMS}
+}
+
+// The Codex pool is named as ChatGPT names it, and its windows as the
+// headers #809 captured read them, so the owner's page invents no name or
+// window (RES-5, CLK-7).
+// REQ: RES-5, CLK-7
+func TestTheCodexPoolIsNamedAsTheProviderNamesIt(t *testing.T) {
+	d := plan.Codex(nil)
+	want := plan.Pool{ID: "codex", Name: "ChatGPT Codex", Windows: []plan.Window{
+		{ID: "5h", Prefix: "X-Codex-Primary-", Label: "5-hour limit", Every: 5 * hourMS},
+		{ID: "7d", Prefix: "X-Codex-Secondary-", Label: "week", Every: weekMS},
+	}, Reached: "X-Codex-Rate-Limit-Reached-Type"}
+	if d.Title != "ChatGPT" || !reflect.DeepEqual(d.Pool, want) {
+		t.Fatalf("declared %q %+v, want ChatGPT %+v", d.Title, d.Pool, want)
+	}
+	for name, mut := range map[string]func(*plan.Pool){
+		"no name":        func(p *plan.Pool) { p.Name = "" },
+		"no ID":          func(p *plan.Pool) { p.ID = "" },
+		"a window twice": func(p *plan.Pool) { p.Windows[1].ID = "5h" },
+		"no label":       func(p *plan.Pool) { p.Windows[0].Label = "" },
+		"no prefix":      func(p *plan.Pool) { p.Windows[0].Prefix = "" },
+		"no length":      func(p *plan.Pool) { p.Windows[1].Every = 0 },
+	} {
+		f := newPlanFix(t)
+		d := f.decl(t)
+		d.Pool.Windows = append([]plan.Window{}, d.Pool.Windows...)
+		mut(&d.Pool)
+		if _, err := plan.New(d, f.sec, f.roots); err == nil {
+			t.Errorf("%s: a pool declaration that cannot name its windows is refused", name)
 		}
 	}
 }
