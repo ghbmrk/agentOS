@@ -18,7 +18,23 @@ var ErrCardPending = errors.New("firstboot: I am waiting for you to save your Ow
 // the box makes every Owner Card after the core's page authority, and a
 // card printed without its fingerprint can never get it). The step draws
 // nothing and shows no card; setup's finish still answers card pending.
-var ErrNoAuthority = errors.New("I cannot make your Owner Card until my page authority exists.")
+// The same line answers a keeper that does not know the card's page
+// certificate (OWN-card-flow decision 10).
+var ErrNoAuthority = errors.New("I can't make your Owner Card yet, because my page certificate isn't ready. Restart me and open this page again. If you see this again, tell me in a text.")
+
+// Line is a Provision error that is the page's fixed line for the owner
+// (OWN-card-flow decision 10): the step keeps it for Note, so the setup page
+// shows it in place of the card's own retry text. It never holds card text.
+type Line string
+
+func (l Line) Error() string { return string(l) }
+
+// ErrKept, wrapped in a Provision error, says the keeper's store was made
+// from an Owner Card the owner confirmed before the box restarted, and this
+// card does not open it (OWN-card-flow decision 8): the step latches as
+// confirmed, and the page shows this line once, so the owner keeps the
+// earlier card.
+var ErrKept = Line("I already hold the keys of the Owner Card you confirmed before I restarted. Keep that card and throw this one away.")
 
 // cardState is the card step's latch, the only thing it keeps on disk.
 // Preloaded marks a box that held a claim code (Begin): it survives the
@@ -47,6 +63,8 @@ type CardStep struct {
 	// failed is the reset of the latest rerun when that rerun showed no
 	// card; RetryRerun runs it again (#2362).
 	failed func() error
+	// note is the latest confirm's Line, until Note takes it.
+	note string
 }
 
 // NewCardStep loads the latch and, if the card was not confirmed yet,
@@ -81,19 +99,29 @@ func NewCardStep(st Store, cfg card.DisplayConfig) (*CardStep, error) {
 }
 
 // display builds generation gen's card display: its confirm provisions,
-// latches and releases the hold, unless Again has moved on since.
+// latches and releases the hold, unless Again has moved on since. A
+// provision error that is a Line is kept for Note; ErrKept latches.
 func (s *CardStep) display(gen int) (*card.Display, error) {
 	cfg := s.cfg
 	prov := cfg.Provision
 	cfg.Provision = func(c *card.Card) error {
 		s.mu.Lock()
 		stale := s.gen != gen
+		s.note = ""
 		s.mu.Unlock()
 		if stale {
 			return errors.New("firstboot: this Owner Card was replaced; use the new one")
 		}
 		if err := prov(c); err != nil {
-			return err
+			var l Line
+			if errors.As(err, &l) {
+				s.mu.Lock()
+				s.note = string(l)
+				s.mu.Unlock()
+			}
+			if !errors.Is(err, ErrKept) {
+				return err
+			}
 		}
 		b, err := json.Marshal(cardState{Confirmed: true, Preloaded: s.preloaded})
 		if err != nil {
@@ -220,6 +248,27 @@ func (s *CardStep) Display() *card.Display {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.d
+}
+
+// TakeNote returns the latest confirm's fixed line for the owner (a Line
+// its provision returned), once, or "" when there is none. c is a route's
+// card step (FirstBoot.Card), as for RetryRerun.
+func TakeNote(c CardHold) string {
+	var s *CardStep
+	switch v := c.(type) {
+	case *CardStep:
+		s = v
+	case *ClaimedCard:
+		s = v.Card()
+	}
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.note
+	s.note = ""
+	return n
 }
 
 // Hold returns ErrCardPending, with the owner's next step, until the card

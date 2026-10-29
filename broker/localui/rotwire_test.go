@@ -3,6 +3,7 @@ package localui
 import (
 	"context"
 	"errors"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -611,7 +612,7 @@ func TestRotationRefusesWithoutAuthority(t *testing.T) {
 		x.r.Authority = auth
 		begun, _, cancels := x.v.n()
 		w := x.post("/rotate/", url.Values{"parts": {"recovery"}, "recovery": {"SYNTH-RECOVERY-CANARY"}})
-		if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), firstboot.ErrNoAuthority.Error()) {
+		if w.Code != http.StatusServiceUnavailable || !strings.Contains(html.UnescapeString(w.Body.String()), firstboot.ErrNoAuthority.Error()) {
 			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
 		}
 		if b, _, c := x.v.n(); b != begun || c != cancels || gens != 0 || x.r.Display() != waiting {

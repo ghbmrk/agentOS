@@ -37,6 +37,17 @@ func sheetSecrets(sheet []byte) (pass, rec string, err error) {
 	return html.UnescapeString(string(p[1])), html.UnescapeString(string(r[1])), nil
 }
 
+// printsFingerprint reports whether the saved card sheet prints fp, a
+// card.Fingerprint, as its two lines of eight groups.
+func printsFingerprint(sheet []byte, fp string) bool {
+	g := strings.Fields(fp)
+	if len(g) != 16 {
+		return false
+	}
+	text := html.UnescapeString(string(sheet))
+	return strings.Contains(text, strings.Join(g[:8], " ")) && strings.Contains(text, strings.Join(g[8:], " "))
+}
+
 // promptAsks reads the first-boot confirm prompt's 1-based word and group.
 func promptAsks(page []byte) (word, group int, err error) {
 	m := promptRe.FindSubmatch(page)
