@@ -151,7 +151,7 @@ func TestRetryOfMoneyNeedsTheCodeGeneratorAndEachItemIsAsked(t *testing.T) {
 		t.Fatalf("retry request offers a YES for all: %q", text)
 	}
 	// One request per item, each with its own ID.
-	starts := regexp.MustCompile(`(?:^|\. )([A-Z][0-9]{1,2}): `).FindAllStringSubmatchIndex(text, -1)
+	starts := regexp.MustCompile(`(?:^|\. )Can I `).FindAllStringIndex(text, -1)
 	if len(starts) != 2 {
 		t.Fatalf("not one request per item: %q", text)
 	}
@@ -167,7 +167,7 @@ func TestRetryOfMoneyNeedsTheCodeGeneratorAndEachItemIsAsked(t *testing.T) {
 			t.Fatalf("retry item without when it was first tried: %q", part)
 		}
 		if strings.Contains(part, "invoice 1042") {
-			id, hi = text[st[2]:st[3]], part
+			id, hi = regexp.MustCompile(`or NO ([A-Z][0-9]{1,2})`).FindStringSubmatch(part)[1], part
 		} else {
 			lo = part
 		}

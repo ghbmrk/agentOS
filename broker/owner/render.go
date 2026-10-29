@@ -275,6 +275,59 @@ func (c *Channel) itemLine(it Item) string {
 	return s
 }
 
+// question is a lone item's approval wording (CH-12): the fields of its
+// line, in the same order, asked as a first-person question, then its
+// reversibility and any notice as plain sentences.
+func (c *Channel) question(it Item) string {
+	verb := strings.ToLower(field(it.Facts.Verb, 12))
+	s := "Can I " + verb + " \"" + field(it.Object, 40) + "\""
+	if it.Detail != "" {
+		s += ", " + field(it.Detail, 40) + ","
+	}
+	if it.Recipient != "" {
+		if r, ok := recipientText(it.Recipient); ok {
+			s += " to " + r
+		} else {
+			n := len(strings.Split(it.Recipient, ","))
+			s += fmt.Sprintf(" to %d recipient%s, shown on the Wi-Fi page,", n, map[bool]string{true: "s"}[n != 1])
+		}
+	}
+	if it.Amount != "" {
+		s += " for " + field(it.Amount, 16)
+	}
+	s = strings.TrimSuffix(s, ",")
+	if (!it.Sent.IsZero() && !it.SentErased || !it.Retried.IsZero()) && verb != "retry" {
+		s += " again"
+	}
+	s += "?"
+	if it.Unverified {
+		s = "UNVERIFIED, see my Wi-Fi page: " + s
+	}
+	switch {
+	case it.UndoWindow > 0:
+		s += " It can be undone within " + dur(it.UndoWindow) + "."
+	case it.UndoBy != "":
+		s += " To undo: " + field(it.UndoBy, 24) + "."
+	default:
+		s += " It can't be undone."
+	}
+	at := func(t time.Time) string { return t.In(c.cfg.Location).Format("15:04 Jan 2") }
+	switch {
+	case !it.Sent.IsZero() && it.SentErased:
+		// Only an erased send matched (OP2-ER-2): it may not be this one.
+		s += " It may repeat a send whose record was erased (it went " + at(it.Sent) + ")."
+	case !it.Sent.IsZero():
+		// Confirm repeats (D-116).
+		s += " It was already sent " + at(it.Sent) + "."
+	case !it.Retried.IsZero():
+		s += " It may go twice; first tried " + at(it.Retried) + "."
+	}
+	if !it.Asked.IsZero() {
+		s += " Asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", before a restart."
+	}
+	return s
+}
+
 func (it Item) line() string {
 	s := field(it.Facts.Verb, 12) + " " + field(it.Object, 40)
 	if it.Detail != "" {
