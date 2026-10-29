@@ -15,7 +15,7 @@ var t0 = time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 const frameStep = 200 * time.Millisecond
 
 func fref(i int) FrameRef {
-	return FrameRef{At: t0.Add(time.Duration(i) * frameStep), Width: 640, Height: 480, Segment: "seg-1"}
+	return FrameRef{Format: FormatRGB24, At: t0.Add(time.Duration(i) * frameStep), Width: 640, Height: 480, Segment: "seg-1"}
 }
 
 // walker is a person's box at frame i, walking right 4 px a frame.
@@ -140,7 +140,7 @@ func TestTrackerPredictsMotion(t *testing.T) {
 func TestTrackerAtTheFloorRate(t *testing.T) {
 	tr := NewTracker()
 	for i := range 6 {
-		f := FrameRef{At: t0.Add(time.Duration(i) * time.Second), Width: 640, Height: 480}
+		f := FrameRef{Format: FormatRGB24, At: t0.Add(time.Duration(i) * time.Second), Width: 640, Height: 480}
 		u, err := tr.Observe("front", f, []Detection{{Class: Person, Box: Box{X0: 10 + 60*i, Y0: 100, X1: 50 + 60*i, Y1: 200}, Conf: 80}})
 		if err != nil {
 			t.Fatal(err)
@@ -238,7 +238,7 @@ func TestTrackerFloorRateBusyStreets(t *testing.T) {
 			// crossing 200 px a second.
 			x := 10 + 200*(s%2)
 			ds := []Detection{{Class: Vehicle, Box: Box{X0: x, Y0: 100 + 10*k, X1: x + 160, Y1: 200 + 10*k}, Conf: 90}}
-			u, err := tr.Observe(cam, FrameRef{At: at, Width: 640, Height: 480}, ds)
+			u, err := tr.Observe(cam, FrameRef{Format: FormatRGB24, At: at, Width: 640, Height: 480}, ds)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -274,7 +274,7 @@ func TestTrackerFloorRateBusyStreets(t *testing.T) {
 	tr = NewTracker()
 	n := 0
 	for s := range 2 {
-		u, _ := tr.Observe("d", FrameRef{At: t0.Add(time.Duration(s) * time.Second), Width: 640, Height: 480}, []Detection{{Class: Person, Box: walker(10, 10*s), Conf: 80}})
+		u, _ := tr.Observe("d", FrameRef{Format: FormatRGB24, At: t0.Add(time.Duration(s) * time.Second), Width: 640, Height: 480}, []Detection{{Class: Person, Box: walker(10, 10*s), Conf: 80}})
 		n += len(u.Tracks)
 	}
 	if n != 1 {
@@ -319,7 +319,7 @@ func TestTrackerBoundsTracks(t *testing.T) {
 		c.tracks = append(c.tracks, &track{class: Cat, box: Box{X0: 0, Y0: 0, X1: 1, Y1: 1}, at: t0, id: 1})
 	}
 	tr.cams["full"] = c
-	u, _ := tr.Observe("full", FrameRef{At: t0, Width: 640, Height: 480}, []Detection{{Class: Person, Box: Box{X0: 100, Y0: 100, X1: 140, Y1: 200}, Conf: 90}})
+	u, _ := tr.Observe("full", FrameRef{Format: FormatRGB24, At: t0, Width: 640, Height: 480}, []Detection{{Class: Person, Box: Box{X0: 100, Y0: 100, X1: 140, Y1: 200}, Conf: 90}})
 	if u.Dropped != 1 || u.lone != 1 {
 		t.Fatalf("a detection past MaxTracks: %+v", u)
 	}
@@ -330,7 +330,7 @@ func TestTrackerBoundsTracks(t *testing.T) {
 // camera's last.
 func TestTrackerChecksItsInput(t *testing.T) {
 	tr := NewTracker()
-	f := FrameRef{At: t0, Width: 64, Height: 48}
+	f := FrameRef{Format: FormatRGB24, At: t0, Width: 64, Height: 48}
 	for _, ds := range [][]Detection{
 		{{Class: Person, Box: Box{X0: 0, Y0: 0, X1: 65, Y1: 10}, Conf: 50}},
 		{{Class: "man", Box: Box{X0: 0, Y0: 0, X1: 6, Y1: 10}, Conf: 50}},
@@ -343,7 +343,7 @@ func TestTrackerChecksItsInput(t *testing.T) {
 	if _, err := tr.Observe("Front Door", f, nil); err == nil {
 		t.Fatal("a camera id outside the alphabet")
 	}
-	if _, err := tr.Observe("front", FrameRef{At: t0, Width: 0, Height: 48}, nil); err == nil {
+	if _, err := tr.Observe("front", FrameRef{Format: FormatRGB24, At: t0, Width: 0, Height: 48}, nil); err == nil {
 		t.Fatal("a frame without a size")
 	}
 	if _, err := tr.Observe("front", f, nil); err != nil {
@@ -415,7 +415,7 @@ func TestEvidenceForUnknownVisitsOnly(t *testing.T) {
 		if i == 6 {
 			conf = 95 // the clearest frame
 		}
-		u, err := tr.Observe("front", FrameRef{At: fref(i).At, Width: 640, Height: 480, Segment: "seg-" + string(rune('a'+i))}, []Detection{
+		u, err := tr.Observe("front", FrameRef{Format: FormatRGB24, At: fref(i).At, Width: 640, Height: 480, Segment: "seg-" + string(rune('a'+i))}, []Detection{
 			{Class: Person, Box: b, Conf: conf, Face: FaceUnknown},
 			{Class: Person, Box: walker(400, i), Conf: 80, Face: "enrolled:alice"},
 			{Class: Person, Box: Box{X0: 10, Y0: 300, X1: 50, Y1: 400}, Conf: 80},

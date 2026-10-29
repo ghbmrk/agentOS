@@ -74,7 +74,7 @@ func TestYoloxDecodeMapsAndSuppresses(t *testing.T) {
 			t.Errorf("detection %d: %+v, want %+v", i, d.Detection, w)
 		}
 	}
-	if err := vision.CheckDetections(detections(ds), 832, 416, nil); err != nil {
+	if err := vision.CheckDetections(detections(ds), vision.FormatRGB24, 832, 416, nil); err != nil {
 		t.Fatalf("decoded detections fail the client's check: %v", err)
 	}
 }
@@ -107,7 +107,7 @@ func TestYoloxDecodeBoundsTheReply(t *testing.T) {
 			t.Fatalf("detections not best first: %d after %d", ds[i].Conf, ds[i-1].Conf)
 		}
 	}
-	if err := vision.CheckDetections(detections(ds), size, size, nil); err != nil {
+	if err := vision.CheckDetections(detections(ds), vision.FormatRGB24, size, size, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -215,7 +215,7 @@ func TestThermalDetect(t *testing.T) {
 		}
 		f := thermalScene(rng, w, h, ambient, bodies)
 		ds := heatBlobs(f)
-		if err := vision.CheckDetections(detections(ds), w, h, nil); err != nil {
+		if err := vision.CheckDetections(detections(ds), vision.FormatY16, w, h, nil); err != nil {
 			t.Fatalf("scene %d: %v", scene, err)
 		}
 		hit := make([]bool, len(ds))
@@ -303,9 +303,9 @@ func TestPinsCheckEveryFile(t *testing.T) {
 			t.Errorf("%s: %v, want %v", file, err, want)
 		}
 	}
-	// The shipped pins name the library and the detector.
+	// The shipped pins name the library, the detector and the face models.
 	modelPins = saved
-	for _, file := range []string{"libonnxruntime.so.1.29.0", "yolox_tiny.onnx"} {
+	for _, file := range []string{"libonnxruntime.so.1.29.0", "yolox_tiny.onnx", "face_detection_yunet_2023mar.onnx", "face_recognition_sface_2021dec.onnx"} {
 		if len(pinFor(file)) != 64 {
 			t.Errorf("%s is not pinned", file)
 		}

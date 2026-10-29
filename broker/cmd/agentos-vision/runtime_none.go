@@ -18,7 +18,7 @@ type noRuntime struct{}
 
 var errNoRuntime = errors.New("no runtime in this build")
 
-func (noRuntime) Load() (Model, error)                   { return Model{}, errNoRuntime }
-func (noRuntime) Detect(vision.Frame) ([]Seen, error)    { return nil, errNoRuntime }
-func (noRuntime) Encode(vision.Frame) ([]float32, error) { return nil, errNoRuntime }
-func (noRuntime) Sound([]byte) ([]vision.Sound, error)   { return nil, errNoRuntime }
+func (noRuntime) Load() (Model, error)                      { return Model{}, errNoRuntime }
+func (noRuntime) Detect(vision.Frame, bool) ([]Seen, error) { return nil, errNoRuntime }
+func (noRuntime) Encode(vision.Frame) ([]float32, error)    { return nil, errNoRuntime }
+func (noRuntime) Sound([]byte) ([]vision.Sound, error)      { return nil, errNoRuntime }

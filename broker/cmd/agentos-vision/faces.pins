@@ -1,0 +1,16 @@
+# The face set the real face path is measured on (TestRealFaces; ASSUMPTIONS
+# VIS-A32): the first shard of SFHQ part 1 as resized to 512 pixels on
+# Hugging Face (canva999888/SFHQ-Tiny-512-Part1, Apache-2.0; SFHQ itself is
+# CC0), 1000 portraits of synthetic people: generated faces of no one.
+# .github/workflows/vision-real.yml fetches it at a fixed revision and
+# never commits it. Each line: name, value.
+revision  7b8c60b49039d2acc4f1f610a86fc5413362f2a0
+base  https://huggingface.co/datasets/canva999888/SFHQ-Tiny-512-Part1/resolve
+shard  validation/validation-000000.tar
+shard_sha256  42918cc488957fd716c478bc9f15a9107c0f3d34979fd1c765a5159b875cca46
+# Portraits the generator made of one person twice, seen by eye: a
+# portrait, then the one it is a copy of. A sighting of one may be named
+# as the other.
+twin  SFHQ_pt1_00006905_resize..jpg  SFHQ_pt1_00000261_resize..jpg
+twin  SFHQ_pt1_00012108_resize..jpg  SFHQ_pt1_00000550_resize..jpg
+twin  SFHQ_pt1_00024023_resize..jpg  SFHQ_pt1_00000009_resize..jpg

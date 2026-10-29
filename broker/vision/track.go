@@ -62,11 +62,12 @@ const (
 	boxSlack = 0.5
 )
 
-// FrameRef is a frame's place in capture: when it was taken, its size, and
-// the CAM-clerk segment that holds it, which an evidence reference names.
-// The frame's pixels never reach the tracker.
+// FrameRef is a frame's place in capture: when it was taken, its format
+// and size, and the CAM-clerk segment that holds it, which an evidence
+// reference names. The frame's pixels never reach the tracker.
 type FrameRef struct {
 	At            time.Time
+	Format        string
 	Width, Height int
 	Segment       string
 }
@@ -200,7 +201,7 @@ func (t *Tracker) Observe(camera string, f FrameRef, ds []Detection) (Update, er
 	if f.Width < 1 || f.Width > MaxWidth || f.Height < 1 || f.Height > MaxHeight {
 		return Update{}, badRequest("frame outside its bounds")
 	}
-	if err := CheckDetections(ds, f.Width, f.Height, ValidEnrolledID); err != nil {
+	if err := CheckDetections(ds, f.Format, f.Width, f.Height, ValidEnrolledID); err != nil {
 		return Update{}, err
 	}
 	t.mu.Lock()

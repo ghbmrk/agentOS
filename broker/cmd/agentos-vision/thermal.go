@@ -56,7 +56,12 @@ func heatBlobs(f vision.Frame) []Seen {
 		excess               int
 	}
 	var blobs []blob
-	stack := make([]int, 0, 64)
+	// stack holds warm samples' places while a body is filled. Each
+	// sample is pushed at most once, so it never grows past n and its one
+	// backing array is zeroed on return, with the bodies' shapes in it
+	// (#3779; VIS-A7).
+	stack := make([]int32, 0, n)
+	defer func() { clear(stack[:cap(stack)]) }()
 	for i := range v {
 		if label[i] != 0 || !warm(i) {
 			continue
@@ -64,9 +69,9 @@ func heatBlobs(f vision.Frame) []Seen {
 		id := int32(len(blobs) + 1)
 		b := blob{x0: f.Width, y0: f.Height}
 		label[i] = id
-		stack = append(stack[:0], i)
+		stack = append(stack[:0], int32(i))
 		for len(stack) > 0 {
-			j := stack[len(stack)-1]
+			j := int(stack[len(stack)-1])
 			stack = stack[:len(stack)-1]
 			x, y := j%f.Width, j/f.Width
 			b.x0, b.y0, b.x1, b.y1 = min(b.x0, x), min(b.y0, y), max(b.x1, x+1), max(b.y1, y+1)
@@ -81,7 +86,7 @@ func heatBlobs(f vision.Frame) []Seen {
 					k := ny*f.Width + nx
 					if label[k] == 0 && warm(k) {
 						label[k] = id
-						stack = append(stack, k)
+						stack = append(stack, int32(k))
 					}
 				}
 			}
