@@ -1,0 +1,5 @@
+# The toolchain's kernel headers (BR2_KERNEL_HEADERS_6_12), with the hash Buildroot ships for
+# them in linux/before-6.17/linux.hash (copied there from kernel.org's signed sha256sums.asc).
+# Buildroot 2026.02.3 looks for it under package/linux-headers/6.12.91/, which it does not ship,
+# so without this file the tarball is taken unchecked (build.sh refuses that).
+sha256  0ff2ab9e169f9f1948557471fbb450d3018f8c5b77caf288e1a3982582597969  linux-6.12.91.tar.xz

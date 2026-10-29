@@ -1,0 +1,9 @@
+# CM4 board: the eMMC (or a CM4 Lite's card) is mmcblk0; the element is on i2c-1 (i2c_arm);
+# the button is the gpio-keys device config.txt declares [Inference: part d confirms].
+KERNEL=="mmcblk0p1", SYMLINK+="camnode/autoboot"
+KERNEL=="mmcblk0p2", SYMLINK+="camnode/slot-a", GROUP="camnode", MODE="0660"
+KERNEL=="mmcblk0p3", SYMLINK+="camnode/slot-b", GROUP="camnode", MODE="0660"
+KERNEL=="mmcblk0p4", SYMLINK+="camnode/data"
+SUBSYSTEM=="i2c-dev", KERNEL=="i2c-1", SYMLINK+="camnode/element", GROUP="camnode", MODE="0660", TAG+="systemd"
+SUBSYSTEM=="input", KERNEL=="event*", SUBSYSTEMS=="platform", DRIVERS=="gpio-keys", SYMLINK+="camnode/button", GROUP="camnode", MODE="0640", TAG+="systemd"
+SUBSYSTEM=="dma_heap", GROUP="video", MODE="0660"

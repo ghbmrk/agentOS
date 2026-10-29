@@ -1,0 +1,12 @@
+# The QEMU board's stand-ins (board/qemu/): CUSE for the secure element, uinput for the button,
+# fw_cfg for the button's state, virtio for the disk, the network and the journal's console.
+CONFIG_FUSE_FS=y
+CONFIG_CUSE=y
+CONFIG_INPUT_MISC=y
+CONFIG_INPUT_UINPUT=y
+CONFIG_FW_CFG_SYSFS=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_VIRTIO_NET=y
+CONFIG_PCI_HOST_GENERIC=y
+CONFIG_VIRTIO_CONSOLE=y

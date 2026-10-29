@@ -1,0 +1,9 @@
+# QEMU board (end-to-end test only): the disk is the first virtio disk; the element stand-in
+# (camnode-e2e-element) keeps its state on the second and serves i2c-1 over CUSE; the button
+# stand-in is a uinput device.
+KERNEL=="vda1", SYMLINK+="camnode/autoboot"
+KERNEL=="vda2", SYMLINK+="camnode/slot-a", GROUP="camnode", MODE="0660"
+KERNEL=="vda3", SYMLINK+="camnode/slot-b", GROUP="camnode", MODE="0660"
+KERNEL=="vda4", SYMLINK+="camnode/data"
+SUBSYSTEM=="cuse", KERNEL=="i2c-1", SYMLINK+="camnode/element", GROUP="camnode", MODE="0660", TAG+="systemd"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="camnode-button", SYMLINK+="camnode/button", GROUP="camnode", MODE="0640", TAG+="systemd"

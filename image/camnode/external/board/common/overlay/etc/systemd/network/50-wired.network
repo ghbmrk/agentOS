@@ -1,0 +1,21 @@
+# The node's one wired link: an IPv4 address by DHCP and nothing else. No link-local address,
+# no hostname, DNS, NTP or domain taken or sent: the node resolves and dials nothing.
+[Match]
+Type=ether
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+LLMNR=no
+MulticastDNS=no
+LLDP=no
+EmitLLDP=no
+
+[DHCPv4]
+UseDNS=no
+UseNTP=no
+UseSIP=no
+UseHostname=no
+UseDomains=no
+SendHostname=no
+UseTimezone=no
