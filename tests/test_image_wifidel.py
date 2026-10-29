@@ -58,8 +58,12 @@ class TestImageShipsNoWiFi(unittest.TestCase):
             self.assertNotRegex(users, r"(?m)^u %s\b" % u)
         listed = [rel for rel, _ in check.exec_allowed()]
         self.assertEqual([rel for rel in listed if re.search(r"netjoin|hostapd|dnsmasq", rel)], [])
-        # The only link file named the radio (wlan0) for the loader; nothing does now.
-        self.assertEqual(sorted((MK / "mkosi.extra/usr/lib/systemd/network").glob("*.link")), [])
+        # The only link file named the radio (wlan0) for the loader; nothing does now. The one link file
+        # left names the edge link's wired USB adapter (EDGE-link-core c2c), never a radio.
+        links = sorted((MK / "mkosi.extra/usr/lib/systemd/network").glob("*.link"))
+        self.assertEqual([f.name for f in links], ["10-agentos-link.link"])
+        self.assertRegex(links[0].read_text(), r"(?m)^Type=ether$")
+        self.assertNotRegex(links[0].read_text(), r"(?mi)wlan|wl\*")
 
     def test_tree_check_refuses_wifi(self):
         self.assertEqual(check.violations(self.root), [])

@@ -420,7 +420,7 @@ class DriversTest(unittest.TestCase):
         host = unit((IMG.parent / "broker/cmd/agentos-devices/agentos-devices.service").read_text())["Service"]
         self.assertEqual(host["User"], "agentos-devices")
         build = (IMG / "build.sh").read_text()
-        self.assertIn("agentos-hostdisk agentos-devices; do", build)
+        self.assertRegex(build, r"for cmd in [^;]*\bagentos-devices\b[^;]*; do")
         self.assertIn('broker/cmd/agentos-devices/agentos-devices.service" "$STAGE/%s"' % DEVICES_UNIT, build)
 
 
