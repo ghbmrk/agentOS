@@ -211,6 +211,9 @@ type point struct {
 	// Pinned: it is withdrawn because the owner pinned the update
 	// channel (UPD-4, #3699), not for a failed security check.
 	Pinned bool `json:"pinned,omitempty"`
+	// Abandoned: the pin withdrawal's Abandon took. Unset on a pin
+	// withdrawal, the counted entry may still boot (#3832).
+	Abandoned bool `json:"abandoned,omitempty"`
 }
 
 // Outcome kinds for Status.
@@ -537,10 +540,10 @@ const (
 var waitLines = map[string]string{
 	busyPinned:   "Update %d waits because you pinned your update channel. Nothing is needed from you.",
 	busyStop:     "Update %d is on hold while actions are stopped; it installs after RESUME.",
-	busyCall:     "Update %d will install after the current call.",
-	busyWork:     "Update %d will install once my current task is done.",
-	busyExcluded: "Update %d will install after your update-free hours.",
-	busyTalk:     "Update %d will install once your conversation pauses.",
+	busyCall:     "Update %d will install after the current call. Nothing is needed from you.",
+	busyWork:     "Update %d will install once my current task is done. Nothing is needed from you.",
+	busyExcluded: "Update %d will install after your update-free hours. Nothing is needed from you.",
+	busyTalk:     "Update %d will install once your conversation pauses. Nothing is needed from you.",
 	"":           "Update %d will install soon. Nothing is needed from you.",
 }
 
@@ -696,6 +699,17 @@ func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	if err := a.cfg.Activator.Abandon(ctx); err != nil {
 		return err
 	}
+	if abandonOwed(pt) {
+		// Recorded, so STATUS and Pin say it will not start (#3832).
+		marked := *pt
+		marked.Abandoned = true
+		next := a.st
+		next.Applying = &marked
+		if err := a.save(next); err != nil {
+			return err
+		}
+		a.st, pt = next, &marked
+	}
 	if err := a.cfg.Store.DropStaged(); err != nil {
 		return err
 	}
@@ -709,6 +723,11 @@ func (a *Applier) withdrawHandoverLocked(ctx context.Context, pt *point) error {
 	a.st, a.handed = next, nil
 	return nil
 }
+
+// abandonOwed: pt is a pin withdrawal whose Abandon is not recorded as
+// taken, so the counted entry may still boot, and Resume commits it once
+// it does (#3832, the #3701 boundary).
+func abandonOwed(pt *point) bool { return pt.Pinned && !pt.Abandoned }
 
 // withdrawnKind is the outcome of a handover withdrawn before any boot
 // took it.
@@ -816,7 +835,7 @@ func (a *Applier) withdrawLocked(ctx context.Context, pt *point, pinned bool) er
 		a.st, pt = next, &marked
 	}
 	if err := a.withdrawHandoverLocked(ctx, pt); err != nil {
-		return fmt.Errorf("%w: %w", handoverError{}, err)
+		return fmt.Errorf("%w: %w", handoverError{starts: abandonOwed(a.st.Applying)}, err)
 	}
 	return nil
 }
@@ -1491,30 +1510,47 @@ const (
 // withdrawn because the owner pinned the update channel after the
 // handover (#3699).
 const (
-	installingLine   = "Update %d is installing; I will restart and check it."
-	mayRunLine       = "Update %d may have started already. Nothing is needed from you."
-	pinnedHeldLine   = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
-	pinnedMayRunLine = "Update %d was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
-	pinnedLine       = "Update %d was withdrawn because you pinned your update channel."
-	pinnedDigestLine = "Update %d was ready to start, but your update channel is pinned, so I withdrew it."
+	installingLine     = "Update %d is installing; I will restart and check it."
+	staleLine          = "Update %d is being withdrawn; I will not start it. Nothing is needed from you."
+	startedLine        = "Update %d has started; I am checking it. Nothing is needed from you."
+	mayRunLine         = "Update %d may have started already. Nothing is needed from you."
+	pinnedHeldLine     = "Update %d is held because you pinned your update channel; I will not start it. Nothing is needed from you."
+	pinnedMayStartLine = "Update %d was ready to start before you pinned your update channel, and it may still start. Nothing is needed from you."
+	pinnedStartedLine  = "Update %d was ready to start before you pinned your update channel and has started; I am checking it. Nothing is needed from you."
+	pinnedMayRunLine   = "Update %d was ready to start before you pinned your update channel, so it may have started already. Nothing is needed from you."
+	pinnedLine         = "Update %d was withdrawn because you pinned your update channel."
+	pinnedDigestLine   = "Update %d was ready to start, but you pinned your update channel, so I withdrew it."
 )
 
 // installedLineLocked is STATUS for pt, a release the activator took.
 // Only in the boot it was handed over in does the line say what comes
-// next: a restart into it, or none while the channel is pinned or pt's
-// pin withdrawal is under way (pinned or not since), when the next Tick
-// or Pin withdraws it. A later boot may already run it, and then it stays
-// (Security release 2 on #3812); a boot that cannot be read may be
-// either; and a restart already under way when the owner pinned may
-// start it. Each of those says it may have started (#3829).
+// next: a restart into it; none for a stale security fix (A13,
+// SR3-4f-2c), which the next Tick withdraws (#3830); and, while the
+// channel is pinned or pt's pin withdrawal is under way (pinned or not
+// since), held only once its Abandon is recorded. Before that, a mark
+// save or an Abandon that failed, or a restart already under way, the
+// counted entry may still boot (#3832). A later boot running its root with
+// the health check pending has started it (#3830); any other later boot
+// may already run it, and then it stays (Security release 2 on #3812);
+// a boot that cannot be read may be either (#3829).
 func (a *Applier) installedLineLocked(pt *point) string {
 	pinned := pt.Pinned || a.cfg.Paused()
 	b, err := a.cfg.Activator.Booted(context.Background())
-	switch here := err == nil && b.ID == pt.BootID; {
+	here := err == nil && b.ID == pt.BootID
+	started := err == nil && !here && b.UsrRootHash == pt.ToUsr && !b.Blessed
+	switch {
+	case here && !pinned && a.staleLocked(pt):
+		return fmt.Sprintf(staleLine, pt.To)
 	case here && !pinned:
 		return fmt.Sprintf(installingLine, pt.To)
-	case here && a.restarting != pt.ID:
+	case here && a.restarting != pt.ID && pt.Abandoned:
 		return fmt.Sprintf(pinnedHeldLine, pt.To)
+	case here:
+		return fmt.Sprintf(pinnedMayStartLine, pt.To)
+	case started && pinned:
+		return fmt.Sprintf(pinnedStartedLine, pt.To)
+	case started:
+		return fmt.Sprintf(startedLine, pt.To)
 	case pinned:
 		return fmt.Sprintf(pinnedMayRunLine, pt.To)
 	}
@@ -1557,9 +1593,9 @@ func (a *Applier) Status() string {
 		}
 		return ""
 	case l.Kind == doneFellBack:
-		return withPreviousRoot(fellBackLine(l.Version), n, prev)
+		return fellBackText(l.Version, n, prev)
 	case l.Kind == doneUnrecorded:
-		return withPreviousRoot(unrecordedText(l.Version), n, prev)
+		return unrecordedText(l.Version, n, prev)
 	case l.Kind == donePinned && a.cfg.Paused():
 		return pinnedText(l.Version, n, prev)
 	case l.Kind == donePinned:
@@ -1588,7 +1624,7 @@ func (a *Applier) Digest() []string {
 	case doneInstalled:
 		return []string{withPreviousRoot(fmt.Sprintf("Update %d is installed.", l.Version), n, prev)}
 	case doneUnrecorded:
-		return []string{withPreviousRoot(unrecordedText(l.Version), n, prev)}
+		return []string{unrecordedText(l.Version, n, prev)}
 	case donePinned:
 		return []string{withPreviousRoot(fmt.Sprintf(pinnedDigestLine, l.Version), n, prev)}
 	case doneInstalledOtherRoot:
@@ -1597,7 +1633,7 @@ func (a *Applier) Digest() []string {
 		}
 		return []string{fmt.Sprintf("Update %d is installed.", l.Version)}
 	}
-	return []string{withPreviousRoot(fellBackLine(l.Version), n, prev)}
+	return []string{fellBackText(l.Version, n, prev)}
 }
 
 // previousRootLocked reports the update store's installed release when no
@@ -1655,17 +1691,27 @@ func otherRootText(v int64) string {
 }
 
 // unrecordedText: the release reached maxUnrecorded and waits for the
-// owner's retry (SR3-4f-1b).
-func unrecordedText(v int64) string {
-	return fmt.Sprintf("I could not record update %d as installed, twice, so I will not try it again on my own. "+
-		"You can retry it on my Wi-Fi page.", v)
+// owner's retry (SR3-4f-1b). With prev, it names the root the box runs
+// within the same segment (CH-12, #3830).
+func unrecordedText(v, n int64, prev bool) string {
+	runs := ""
+	if prev {
+		runs = fmt.Sprintf("; I run the version before update %d", n)
+	}
+	return fmt.Sprintf("I could not record update %d as installed, twice, so I stopped trying it%s. "+
+		"You can retry it on my Wi-Fi page.", v, runs)
 }
 
-// fellBackLine: Schedule refuses a release that fell back (ErrFellBack,
-// #1924; security C3 on #133), so it is not tried again.
-func fellBackLine(v int64) string {
-	return fmt.Sprintf("Update %d did not start cleanly, so I went back to the version I had. "+
-		"Nothing is needed from you. It won't be tried again; a later update will replace it.", v)
+// fellBackText: Schedule refuses a release that fell back (ErrFellBack,
+// #1924; security C3 on #133), so it is not tried again. With prev, it
+// names the root the box runs within the same segment (CH-12, #3830).
+func fellBackText(v, n int64, prev bool) string {
+	had := "the version I had"
+	if prev {
+		had = fmt.Sprintf("the version before update %d", n)
+	}
+	return fmt.Sprintf("Update %d did not start cleanly, so I went back to %s. "+
+		"It won't be tried again. Nothing is needed from you.", v, had)
 }
 
 func (a *Applier) saveLocked() error { return a.save(a.st) }

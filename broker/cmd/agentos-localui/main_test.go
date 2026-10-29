@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -254,7 +255,7 @@ func beginBox(t *testing.T, dir string, resets *int, download bool) (localui.Con
 	cfg := config(localui.Page{Iface: "eth0"}, 80, "/run/agentos/localui.sock", "", heldFile(t))
 	cfg.Hooks = openSetup
 	void := &localui.CodesVoid{}
-	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")),
+	box := localui.CardBox(localui.NewUnlockClient(filepath.Join(dir, "none.sock")), localui.KeeperSetup{Socket: filepath.Join(dir, "none-keeper.sock")},
 		change.FileStore{Path: filepath.Join(dir, "claim.json")}, change.FileStore{Path: filepath.Join(dir, "latch.json")}, void, testAuthority(t))
 	box.Reset = func() error { *resets++; return nil }
 	box.Download = download
@@ -1291,4 +1292,59 @@ func otherAuthority(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return a.Certificate()
+}
+
+// REQ: HW-1
+//
+// OWN-card-flow slice b: the page starts after the first-boot authority is
+// staged (After=, never Requires= or another dependency: an enrolled box
+// skips the staging and its page must still start), and passes the
+// published certificate and the keeper's hand-off socket as the image has
+// them, which are also the flags' defaults. It catches a page that fails
+// to start on an enrolled box, and a confirm sent to no keeper.
+func TestUnitOrdersAfterPageca(t *testing.T) {
+	b, err := os.ReadFile("agentos-localui.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after, exec []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\\\n", " "), "\n") {
+		k, v, _ := strings.Cut(strings.TrimSpace(l), "=")
+		switch k {
+		case "After":
+			after = append(after, strings.Fields(v)...)
+		case "Requires", "Requisite", "BindsTo", "Wants", "PartOf", "Upholds":
+			if strings.Contains(v, "agentos-keeper") {
+				t.Errorf("%s= on a keeper unit: %s", k, v)
+			}
+		case "ExecStart":
+			exec = strings.Fields(v)
+		}
+	}
+	if !slices.Contains(after, "agentos-keeper-pageca.service") {
+		t.Errorf("After= %v lacks agentos-keeper-pageca.service", after)
+	}
+	for flag, want := range map[string]string{
+		"-page-ca-cert":      publishedAuthority,
+		"-keeper-setup-sock": localui.KeeperSetupSock,
+	} {
+		i := slices.Index(exec, flag)
+		if i < 0 || i+1 >= len(exec) || exec[i+1] != want {
+			t.Errorf("ExecStart lacks %s %s", flag, want)
+		}
+	}
+	// The same paths the keeper's units publish and listen on.
+	units := "../../../image/mkosi/mkosi.extra/usr/lib/systemd/system/"
+	for unit, want := range map[string]string{
+		"agentos-keeper-pageca.service": "-page-ca-cert " + publishedAuthority,
+		"agentos-keeper-setup.socket":   "ListenStream=" + localui.KeeperSetupSock,
+	} {
+		b, err := os.ReadFile(units + unit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), want+"\n") {
+			t.Errorf("%s does not have %q", unit, want)
+		}
+	}
 }

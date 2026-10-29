@@ -130,7 +130,7 @@ func TestTheCardOpsGoOverTheUnlockSocket(t *testing.T) {
 func TestCardBoxMarksTheCodesVoid(t *testing.T) {
 	f, u := newFakeUnlock(t)
 	void := &CodesVoid{}
-	box := CardBox(u, change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")},
+	box := CardBox(u, &fakeKeeper{word: KeeperOK}, change.FileStore{Path: filepath.Join(t.TempDir(), "claim.json")},
 		&change.MemStore{}, void, testAuthority())
 	f.set("/card/reset", 200, map[string]any{"ok": true})
 	f.set("/card/provision", 200, map[string]any{"ok": true})

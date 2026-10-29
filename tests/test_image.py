@@ -117,11 +117,12 @@ def bt_block(root):
 UPLINK_REL = "usr/lib/systemd/network/20-agentos-uplink.network"
 RESOLVED_REL = "usr/lib/systemd/resolved.conf.d/50-agentos-uplink.conf"
 LINK_NET_REL = "usr/lib/systemd/network/10-agentos-link.network"
+DOWN_REL = "usr/lib/systemd/network/90-agentos-down.network"
 
 
 def uplink(root):
-    # The image's networkd and resolved files (#1478, #1479, EDGE-link-core c2c), copied from mkosi.extra.
-    for rel in (UPLINK_REL, RESOLVED_REL, LINK_NET_REL):
+    # The image's networkd and resolved files (#1478, #1479, EDGE-link-core c2c, #3840), copied from mkosi.extra.
+    for rel in (UPLINK_REL, RESOLVED_REL, LINK_NET_REL, DOWN_REL):
         write(root, rel, (MK / "mkosi.extra" / rel).read_text())
 
 
@@ -321,6 +322,46 @@ class TreeCheckTest(unittest.TestCase):
         # The shipped file with its comments and blank lines changed still passes.
         write(self.root, UPLINK_REL, "\n".join(ln for ln in base.splitlines() if not ln.startswith("#")) + "\n")
         self.assertEqual(check.violations(self.root), [])
+
+    # REQ: HW-15, HW-16
+    def test_every_ethernet_link_but_the_link_and_the_uplink_is_held_down(self):
+        # #3840: the link's file matches agentos-link alone, the uplink PCI ports alone, and every other
+        # Ethernet link (a second USB adapter, whose failed rename leaves an empty udev record, a phone's
+        # tether, Thunderbolt networking) falls to a file that keeps it down, so the edge's cable in it
+        # never gets an address outside the link's drop. Each revert below fails the tree check.
+        up = (MK / "mkosi.extra" / UPLINK_REL).read_text()
+        link = (MK / "mkosi.extra" / LINK_NET_REL).read_text()
+        down = (MK / "mkosi.extra" / DOWN_REL).read_text()
+        for name, rel, text, want in (
+                ("link file without its name", LINK_NET_REL, link.replace("Name=agentos-link\n", ""),
+                 "[Match] Name is None; must be agentos-link"),
+                ("link file on another name", LINK_NET_REL, link.replace("Name=agentos-link", "Name=agentos-link eth*"),
+                 "[Match] Name is agentos-link eth*; must be agentos-link"),
+                ("adapter brought up", DOWN_REL, down.replace("ActivationPolicy=always-down", "ActivationPolicy=up"),
+                 "[Link] ActivationPolicy is up; must be always-down"),
+                ("adapter without a policy", DOWN_REL, down.replace("ActivationPolicy=always-down\n", ""),
+                 "[Link] ActivationPolicy is None; must be always-down"),
+                ("adapter given an address", DOWN_REL, down + "Address=fe80::1/64\n",
+                 "[Network] Address is fe80::1/64; not a key the image ships"),
+                ("adapter given DHCP", DOWN_REL, down.replace("DHCP=no", "DHCP=yes"), "[Network] DHCP is yes"),
+                ("down file on one name only", DOWN_REL, down.replace("[Match]\n", "[Match]\nName=eth1\n"),
+                 "[Match] Name is eth1; not a key the image ships"),
+                ("down file on a udev property", DOWN_REL, down.replace("[Match]\n", "[Match]\nProperty=ID_BUS=usb\n"),
+                 "[Match] Property is ID_BUS=usb; not a key the image ships"),
+                ("uplink on any bus", UPLINK_REL, up.replace("Property=ID_BUS=pci\n", ""),
+                 "[Match] Property is None; must be ID_BUS=pci"),
+                ("uplink on Thunderbolt", UPLINK_REL, up.replace("Driver=!thunderbolt-net\n", ""),
+                 "[Match] Driver is None; must be !thunderbolt-net")):
+            with self.subTest(name):
+                write(self.root, rel, text)
+                self.assertIn(want, " ".join(check.violations(self.root)))
+                write(self.root, rel, (MK / "mkosi.extra" / rel).read_text())
+        self.assertEqual(check.violations(self.root), [])
+        (self.root / DOWN_REL).unlink()
+        self.assertIn("90-agentos-down.network: missing or masked", " ".join(check.violations(self.root)))
+        write(self.root, "etc/systemd/network/90-agentos-down.network", "")
+        write(self.root, DOWN_REL, down)
+        self.assertIn("90-agentos-down.network: missing or masked", " ".join(check.violations(self.root)))
 
     # REQ: DEV-2, CH-9
     def test_bytes_systemd_reads_differently_are_refused(self):
@@ -4872,6 +4913,9 @@ class UplinkTest(unittest.TestCase):
         # Not veth, bridge, macvlan, ...: the machines' and namespaces' links stay unconfigured here.
         self.assertEqual(m["Kind"], "!*")
         self.assertNotIn("Name", m)
+        # PCI ports only, never Thunderbolt networking; the rest fall to the down file (#3840).
+        self.assertEqual(m["Property"], "ID_BUS=pci")
+        self.assertEqual(m["Driver"], "!thunderbolt-net")
         self.assertEqual(u["Network"]["DHCP"], "yes")
         # IPv6 comes from the home router's advertisements; the drop admits them (I11).
         self.assertNotEqual(u["Network"].get("IPv6AcceptRA"), "no")
@@ -4879,7 +4923,8 @@ class UplinkTest(unittest.TestCase):
     def test_no_network_file_matches_the_radio(self):
         # The box turns no Wi-Fi on (D-178), and no link file names or renames a radio.
         files = sorted(self.NET.glob("*.network"))
-        self.assertEqual([f.name for f in files], ["10-agentos-link.network", self.UPLINK.name])
+        self.assertEqual([f.name for f in files], ["10-agentos-link.network", self.UPLINK.name,
+                                                   "90-agentos-down.network"])
         for f in files:
             m = ini(f)["Match"]
             self.assertNotIn("wlan", m.get("Type", "").split())
@@ -6213,12 +6258,19 @@ class EdgeLinkUnitsTest(unittest.TestCase):
         self.assertEqual(dict(net["Network"]), {"DHCP": "no", "LinkLocalAddressing": "no", "Address": "fe80::1/64",
                                                 "IPv6AcceptRA": "no", "LLDP": "no", "EmitLLDP": "no"})
         self.assertEqual(net["Link"]["RequiredForOnline"], "no")
-        # The adapter that becomes the link: USB Ethernet, never a radio or a virtual link. The network
-        # matches every such adapter, not the name alone, so a second one never takes the uplink's DHCP.
+        # The adapter that becomes the link: USB Ethernet, never a radio or a virtual link. The link's
+        # network matches its name; every other such adapter keeps its kernel name, with an empty udev
+        # record, and is held down by a file that matches no udev property and sorts last (#3840).
         usb = {"Type": "ether", "Kind": "!*", "Property": "ID_BUS=usb"}
         self.assertEqual(dict(link["Match"]), usb)
-        self.assertEqual(dict(net["Match"]), usb)
+        self.assertEqual(dict(net["Match"]), dict(usb, Name=link["Link"]["Name"]))
+        down = ini(MK / "mkosi.extra" / DOWN_REL)
+        self.assertEqual(dict(down["Match"]), {"Type": "ether", "Kind": "!*"})
+        self.assertEqual(dict(down["Link"]), {"ActivationPolicy": "always-down", "RequiredForOnline": "no"})
+        self.assertEqual(dict(down["Network"]), {"DHCP": "no", "LinkLocalAddressing": "no", "IPv6AcceptRA": "no",
+                                                 "LLDP": "no", "EmitLLDP": "no"})
         self.assertLess("10-agentos-link.network", "20-agentos-uplink.network")
+        self.assertLess("20-agentos-uplink.network", "90-agentos-down.network")
         self.assertLess("10-agentos-link.link", "99-default.link")
 
     # REQ: HW-15, HW-16, UPD-10

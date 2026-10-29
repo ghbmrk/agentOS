@@ -950,6 +950,8 @@ func TestCanonicalDocument(t *testing.T) {
 		"port zero":                func(d *Document) { dev(d, "speaker").Control = []Port{{ProtoTCP, 0}} },
 		"unknown protocol":         func(d *Document) { dev(d, "speaker").Control = []Port{{"sctp", 80}} },
 		"stream port zero":         func(d *Document) { dev(d, "cam").Stream = []Port{{ProtoUDP, 0}} },
+		"spaced Wi-Fi identity":    func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
+		"Wi-Fi identity newline":   func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)
