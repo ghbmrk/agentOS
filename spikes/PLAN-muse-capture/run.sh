@@ -92,7 +92,8 @@ def walk(v, where):
             walk(k, where); walk(x, where)
     elif isinstance(v, list):
         for x in v: walk(x, where)
-    elif isinstance(v, str) and bad.search(v):
+    elif isinstance(v, str) and (bad.search(v) or any(re.search(r"\d", r) and re.search(r"[A-Za-z]", r)
+                                                     for r in re.findall(r"[A-Za-z0-9]{10,}", v))):
         hits.append((where, v[:12] + "..."))
     elif isinstance(v, int) and not isinstance(v, bool) and v > 10**9 and where != "t":
         hits.append((where, "large number"))
@@ -105,6 +106,8 @@ for n, line in enumerate(open(sys.argv[1]), 1):
         seen[key] = seen.get(key, 0) + 1
 for (ph, h, m, p), c in sorted(seen.items(), key=str):
     print(f"{ph}\t{h}\t{m}\t{p}\t{c}")
+turns = [r for r in map(json.loads, open(sys.argv[1])) if r.get("model_call")]
+print(f"model calls: {len(turns)}, blocked: {sum(1 for r in turns if r.get('blocked'))}")
 if hits:
     print(f"scan: {len(hits)} suspect value(s), first: {hits[:3]}", file=sys.stderr); sys.exit(1)
 print("scan: clean")

@@ -94,3 +94,52 @@ def test_path_ids_are_replaced():
     rec, _ = load()
     assert rec.norm_path("/v1/users/1234567890/settings?x=1") == "/v1/users/{id}/settings"
     assert rec.norm_path("/a/0f8fad5b-d9cb-469f-a165-70867728950e") == "/a/{id}"
+
+
+def post(body, ctype):
+    return tflow.tflow(req=tutils.treq(method=b"POST", path=b"/api/graphql", content=body,
+                                       headers=((b"content-type", ctype),)))
+
+
+def blocked(rec, f):
+    rec.Recorder().request(f)
+    return f.response is not None and f.response.status_code == 503
+
+
+def test_nested_model_bodies_blocked():
+    rec, log = load()
+    from urllib.parse import urlencode
+    shapes = [
+        (json.dumps({"doc_id": "1", "variables": {"input": {"message": {"text": PROMPT}}}}), b"application/json"),
+        (json.dumps({"doc_id": "1", "variables": json.dumps({"message": {"text": PROMPT}})}), b"application/json"),
+        (urlencode({"doc_id": "1", "variables": json.dumps({"message": {"sensitive_string_value": PROMPT}})}), b"application/x-www-form-urlencoded"),
+        (urlencode({"doc_id": "1", "prompt": PROMPT}), b"application/x-www-form-urlencoded"),
+        (json.dumps([{"messages": [{"role": "user", "content": PROMPT}]}]), b"application/json"),
+    ]
+    for body, ctype in shapes:
+        assert blocked(rec, post(body.encode(), ctype)), body
+    assert PROMPT not in records(log)
+
+
+def test_read_without_model_key_passes():
+    rec, _ = load()
+    assert not blocked(rec, post(json.dumps({"doc_id": "1", "variables": {"id": "x"}}).encode(), b"application/json"))
+
+
+def test_websocket_turn_dropped_unless_granted():
+    from mitmproxy.websocket import WebSocketMessage
+    for turns, dropped in (("0", True), ("1", False)):
+        rec, log = load(turns)
+        f = tflow.twebsocketflow()
+        f.websocket.messages.append(WebSocketMessage(1, True, json.dumps({"type": "turn", "input": [{"text": PROMPT}]}).encode()))
+        rec.Recorder().websocket_message(f)
+        assert f.websocket.messages[-1].dropped is dropped
+        assert PROMPT not in records(log)
+
+
+def test_mid_length_ids_and_device_codes_are_shaped():
+    rec, _ = load()
+    assert rec.norm_path("/v1/acct/a1b2c3d4e5f6/x") == "/v1/acct/{id}/x"
+    assert rec.norm_path("/v1/graphql") == "/v1/graphql"
+    assert rec.shape("ABCD-EFGH", "code") == {"len": 9, "cls": "A-"}
+    assert rec.shape("authorization_pending", "code") == "authorization_pending"

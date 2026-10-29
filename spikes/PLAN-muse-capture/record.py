@@ -26,13 +26,22 @@ SAFE_VAL = re.compile(r"^[A-Za-z0-9_.:/ +-]{0,64}$")
 LONG_RUN = re.compile(r"[A-Za-z0-9_\-]{24,}")
 QUOTA_HDR = re.compile(r"^(x-)?(ratelimit|rate-limit|quota|usage|retry-after|x-.*(limit|quota|usage|remaining|reset))", re.I)
 SECRET_HDR = {"authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key"}
-MODEL_KEYS = {"messages", "input", "prompt", "contents"}
+MODEL_KEYS = {"messages", "message", "input", "prompt", "contents"}
+# A device or authorization code under `code` is shaped; only lower-case error codes are kept.
+ERROR_CODE = re.compile(r"^[a-z][a-z0-9_.]*$|^[0-9]{1,6}$")
+ALNUM_RUN = re.compile(r"[A-Za-z0-9]{10,}")
+
+
+def id_like(s):
+    """True for a token-like run, or a run of 10 or more letters and digits that mixes both."""
+    return bool(LONG_RUN.search(s)) or any(re.search(r"\d", r) and re.search(r"[A-Za-z]", r)
+                                           for r in ALNUM_RUN.findall(s))
 
 
 def norm_path(p):
     """The path with id-like segments (long digit runs, UUIDs, token-like runs) replaced by {id}."""
     segs = p.split("?")[0].split("/")
-    return "/".join("{id}" if re.match(r"^\d{4,}$", x) or LONG_RUN.search(x) or re.match(r"^[0-9a-f-]{32,36}$", x)
+    return "/".join("{id}" if re.match(r"^\d{4,}$", x) or id_like(x) or re.match(r"^[0-9a-f-]{32,36}$", x)
                     else x for x in segs)
 
 
@@ -55,8 +64,9 @@ def sshape(s):
                                   ("-", "-"), (".", r"\."), ("%", "@"), ("~", r"[^A-Za-z0-9_.@-]"))
                   if re.search(rx, s))
     out["cls"] = cls
+    # A typed prefix (rt_, sk-) is kept only on a long value, so a short code never shows half.
     m = re.match(r"^([A-Za-z]{1,6}[_-])", s)
-    if m:
+    if m and len(s) - len(m.group(1)) >= 16:
         out["prefix"] = m.group(1)
     parts = s.split(".")
     if s.startswith("eyJ") and len(parts) in (3, 5):
@@ -89,8 +99,9 @@ def shape(v, key=""):
         snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key).lower().replace("-", "_")
         return v if NUM_KEY.search(snake) else type(v).__name__
     if isinstance(v, str):
-        if key.lower() in SAFE_KEYS and SAFE_VAL.match(v) and not LONG_RUN.search(v):
-            return v
+        if key.lower() in SAFE_KEYS and SAFE_VAL.match(v) and not id_like(v):
+            if key.lower() != "code" or ERROR_CODE.match(v):
+                return v
         return sshape(v)
     return type(v).__name__
 
@@ -133,14 +144,47 @@ def headers(h, quota_values):
     return out
 
 
-def is_model_call(flow):
-    if flow.request.method != "POST":
+def has_model_key(v, depth=0):
+    """True if a model key appears at any depth, including inside strings that parse as JSON
+    (GraphQL `variables`, form fields) and inside arrays (batched bodies)."""
+    if depth > 32:
+        return True
+    if isinstance(v, dict):
+        return bool(MODEL_KEYS & {str(k).lower() for k in v}) or any(has_model_key(x, depth + 1) for x in v.values())
+    if isinstance(v, list):
+        return any(has_model_key(x, depth + 1) for x in v)
+    if isinstance(v, (str, bytes)) and v[:1] in ("{", "[", b"{", b"["):
+        try:
+            return has_model_key(json.loads(v), depth + 1)
+        except Exception:
+            return False
+    return False
+
+
+def body_has_model_key(raw):
+    if not raw:
         return False
+    if has_model_key(raw.strip()):
+        return True
+    from urllib.parse import parse_qsl
     try:
-        j = json.loads(flow.request.get_content() or b"{}")
+        pairs = parse_qsl(raw.decode(errors="replace"))
     except Exception:
         return False
-    return isinstance(j, dict) and bool(MODEL_KEYS & set(j))
+    return any(k.lower() in MODEL_KEYS or has_model_key(v) for k, v in pairs)
+
+
+def is_model_call(flow):
+    if flow.request.method not in ("POST", "PUT", "PATCH"):
+        return False
+    return body_has_model_key(flow.request.get_content())
+
+
+def take_turn():
+    if _turns[0] > 0:
+        _turns[0] -= 1
+        return True
+    return False
 
 
 class Recorder:
@@ -152,9 +196,7 @@ class Recorder:
                "body": body_shape(req.get_content(), req.headers.get("content-type"))}
         if is_model_call(flow):
             rec["model_call"] = True
-            if _turns[0] > 0:
-                _turns[0] -= 1
-            else:
+            if not take_turn():
                 from mitmproxy import http
                 rec["blocked"] = True
                 flow.response = http.Response.make(503, b'{"error":"blocked by capture"}',
@@ -177,8 +219,14 @@ class Recorder:
             s = shape(json.loads(m.content))
         except Exception:
             s = {"len": len(m.content)}
-        log({"dir": "ws-" + ("out" if m.from_client else "in"), "host": flow.request.pretty_host,
-             "path": norm_path(flow.request.path), "body": s})
+        rec = {"dir": "ws-" + ("out" if m.from_client else "in"), "host": flow.request.pretty_host,
+               "path": norm_path(flow.request.path), "body": s}
+        if m.from_client and body_has_model_key(m.content):
+            rec["model_call"] = True
+            if not take_turn():
+                rec["blocked"] = True
+                m.drop()
+        log(rec)
 
     def error(self, flow):
         log({"dir": "error", "host": flow.request.pretty_host, "method": flow.request.method,

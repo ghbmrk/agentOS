@@ -14,7 +14,10 @@ trust; `run.sh` works on Linux too.
 **What is kept, and where.** `record.py` writes `$TMPDIR/agentos-muse-capture/log.jsonl` (mode 700
 directory): hosts, methods, paths with id segments replaced by `{id}`, statuses, header names,
 quota-like header values, and body shapes (key names, kinds, JWT header and claim names, short
-enum values under known keys such as `type`, `role`, `error`). Never a token, cookie, prompt,
+enum values under known keys such as `type`, `role`, `error`). A request or client websocket
+message is treated as a model call, and refused unless a turn is granted, when a `messages`,
+`message`, `input`, `prompt` or `contents` key appears at any depth, including inside JSON-valued
+form fields and string fields such as GraphQL `variables`. Never a token, cookie, prompt,
 reply, email or account id; `record_test.py` checks this with synthetic canaries and `run.sh scan`
 re-checks the real log. No raw flow file is written. The CLI's login lives under
 `$TMPDIR/agentos-muse-capture/home` and `run.sh clean` logs it out and deletes it. Only
@@ -35,6 +38,9 @@ Claude runs every `run.sh` line; **Mark** steps are marked.
 5. Reads and one blocked turn: `run.sh rec reads`, then the status/usage command from step 3 and
    one non-interactive turn (`run.sh muse exec "Reply ok."` or the CLI's equivalent). The recorder
    refuses the model call (503), so its request body shape is logged and nothing is spent.
+   **Check before step 6:** `run.sh scan` must report at least one blocked model call, and the
+   CLI must not have printed a model reply. If either fails, the detector missed the turn's shape
+   (for example a gRPC or protobuf body): stop and report; do not go on to step 6.
 6. Contributor mode read. **Mark:** turn Contributor mode on. `run.sh rec contrib-on`, repeat
    step 5 (the model call is still refused, so no prompt reaches Meta). **Mark:** turn it off.
    `run.sh rec contrib-off`, repeat step 5.
