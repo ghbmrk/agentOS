@@ -9,7 +9,6 @@
 #     them; the line fails once the package has no use left to cover.
 # A line that matches no use fails, so this file only shrinks as rows land.
 
-allow broker/kernel/privfile/privfile.go SyncDir os.Open a read-only open used only to fsync writes nothing, so a link at dir changes only which directory gets synced, whoever calls it
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
 
@@ -45,4 +44,4 @@ pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
-pending broker/kernel/privfile #3954 WriteAtomic checks no dir, and a root caller (question) passes an unchecked one
+pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root

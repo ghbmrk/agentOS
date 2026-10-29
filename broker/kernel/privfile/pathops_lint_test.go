@@ -82,7 +82,7 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 		if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 0 {
 			t.Fatalf("an O_NOFOLLOW open: got %q, want none", problems)
 		}
-		for _, flags := range []string{"os.O_RDONLY|syscall.O_CLOEXEC", "os.O_RDWR&^syscall.O_NOFOLLOW", "flags(syscall.O_NOFOLLOW)", "os.O_RDONLY|(syscall.O_NOFOLLOW^syscall.O_NOFOLLOW)", "os.O_RDONLY+syscall.O_NOFOLLOW"} {
+		for _, flags := range []string{"os.O_RDONLY|syscall.O_CLOEXEC", "os.O_RDWR&^syscall.O_NOFOLLOW", "flags(syscall.O_NOFOLLOW)", "os.O_RDONLY|(syscall.O_NOFOLLOW^syscall.O_NOFOLLOW)", "os.O_RDONLY+syscall.O_NOFOLLOW", "os.O_RDONLY|O_NOFOLLOW", "os.O_RDONLY|cfg.O_NOFOLLOW"} {
 			src := strings.Replace(src, "os.O_RDONLY|syscall.O_NOFOLLOW", flags, 1)
 			if problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, ""); len(problems) != 1 {
 				t.Errorf("an open with flags %s: got %q, want one problem", flags, problems)
@@ -582,10 +582,20 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 // name for a package-level var) it sits in. An os.OpenFile call whose flag
 // argument names O_NOFOLLOW is not a use.
 func fileUses(fset *token.FileSet, f *ast.File, rel string) []use {
-	osNames := map[string]bool{}
+	osNames, flagNames := map[string]bool{}, map[string]bool{}
 	var uses []use
 	for _, imp := range f.Imports {
-		if p, _ := strconv.Unquote(imp.Path.Value); p == "os" {
+		p, _ := strconv.Unquote(imp.Path.Value)
+		if p == "os" || p == "syscall" || p == "golang.org/x/sys/unix" {
+			// Only these packages' O_NOFOLLOW counts, never a local
+			// constant or field of that name (#3951 Security delta 2).
+			name := filepath.Base(p)
+			if imp.Name != nil {
+				name = imp.Name.Name
+			}
+			flagNames[name] = true
+		}
+		if p == "os" {
 			switch {
 			case imp.Name == nil:
 				osNames["os"] = true
@@ -607,7 +617,7 @@ func fileUses(fset *token.FileSet, f *ast.File, rel string) []use {
 		ast.Inspect(decl, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.CallExpr:
-				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && isOS(sel, osNames) && sel.Sel.Name == "OpenFile" && len(n.Args) == 3 && namesNoFollow(n.Args[1]) {
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && isOS(sel, osNames) && sel.Sel.Name == "OpenFile" && len(n.Args) == 3 && namesNoFollow(n.Args[1], flagNames) {
 					safe[sel] = true
 				}
 			case *ast.SelectorExpr:
@@ -627,18 +637,17 @@ func isOS(sel *ast.SelectorExpr, osNames map[string]bool) bool {
 }
 
 // namesNoFollow reports whether a flag argument is an OR of named flags
-// (parentheses allowed) with O_NOFOLLOW as one operand; any other shape,
+// (parentheses allowed) with os., syscall. or unix.O_NOFOLLOW as one operand; any other shape,
 // such as one that clears it with &^, is not (#3951 L3 1).
-func namesNoFollow(e ast.Expr) bool {
+func namesNoFollow(e ast.Expr, flagNames map[string]bool) bool {
 	switch e := e.(type) {
 	case *ast.ParenExpr:
-		return namesNoFollow(e.X)
+		return namesNoFollow(e.X, flagNames)
 	case *ast.BinaryExpr:
-		return e.Op == token.OR && orOfFlags(e.X) && orOfFlags(e.Y) && (namesNoFollow(e.X) || namesNoFollow(e.Y))
+		return e.Op == token.OR && orOfFlags(e.X) && orOfFlags(e.Y) && (namesNoFollow(e.X, flagNames) || namesNoFollow(e.Y, flagNames))
 	case *ast.SelectorExpr:
-		return e.Sel.Name == "O_NOFOLLOW"
-	case *ast.Ident:
-		return e.Name == "O_NOFOLLOW"
+		id, ok := e.X.(*ast.Ident)
+		return ok && flagNames[id.Name] && e.Sel.Name == "O_NOFOLLOW"
 	}
 	return false
 }
