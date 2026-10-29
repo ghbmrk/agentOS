@@ -5,7 +5,7 @@ model and its pin, while -infer itself stays off until a retrieve row consumes t
 The booted image runs the real test on the installed files (image/ci_boot.sh, INFER).
 
 Kept apart from tests/test_image.py, which several open PRs edit (D-111)."""
-# REQ: CAP-13, RES-2, RES-3
+# REQ: PLN-7, RES-2, RES-3
 import pathlib
 import re
 import struct
