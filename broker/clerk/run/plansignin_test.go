@@ -1,14 +1,18 @@
 package run
 
-// REQ: CLK-7, PLN-5, CLK-4
+// REQ: CLK-7, PLN-5, CLK-4, CLK-1
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,8 +21,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 // fakeCLI is the guest host's sign-in sandbox: it asks its endpoint for a
@@ -30,6 +37,7 @@ type fakeCLI struct {
 	printed string
 	exited  bool
 	starts  int
+	plan    string
 	guest   string
 	stopped chan struct{}
 	err     error
@@ -39,11 +47,11 @@ func newFakeCLI(login *plan.Login, printed string) *fakeCLI {
 	return &fakeCLI{login: login, printed: printed, stopped: make(chan struct{})}
 }
 
-func (f *fakeCLI) Start(_ context.Context, guest string) (SignInWorker, error) {
+func (f *fakeCLI) Start(_ context.Context, planName, guest string) (SignInWorker, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts++
-	f.guest = guest
+	f.plan, f.guest = planName, guest
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -325,31 +333,24 @@ func TestPlanOwnerSocket(t *testing.T) {
 		return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1")}
 	}))
 	cli := newFakeCLI(login, codexPrinted)
-	h := &PlanHost{Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
-	sock := filepath.Join(shortDir(t), "owner.sock")
-	ln, err := ListenPlanOwner(sock, os.Getuid())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	go ServePlanOwner(ln, h)
-	o := PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}
+	h := &PlanHost{Plan: "codex", Login: login, Prompt: CodexSignIn(), Workers: cli, Times: quick}
+	o := servedOwner(t, h)
 
-	b, err := o.Begin()
+	b, err := o.Begin("codex")
 	if err != nil || b.Code != "ABCD-12345" || b.Page != CodexSignIn().Page {
 		t.Fatalf("begin: %+v %v", b, err)
 	}
-	if st, err := o.State(); err != nil || !st.Signing || st.Code != b.Code {
+	if st, err := o.State("codex"); err != nil || !st.Signing || st.Code != b.Code {
 		t.Fatalf("state: %+v %v", st, err)
 	}
-	if err := o.Remove(); err != nil {
+	if err := o.Remove("codex"); err != nil {
 		t.Fatal(err)
 	}
 	cli.waitStopped(t)
-	if st, err := o.State(); err != nil || st != (PlanState{Mode: plan.Permitted, Last: DSignInStopped}) {
+	if st, err := o.State("codex"); err != nil || st != (PlanState{Mode: plan.Permitted, Last: DSignInStopped}) {
 		t.Fatalf("after remove: %+v %v", st, err)
 	}
-	if d, err := o.Resume(); err != nil || d != "" {
+	if d, err := o.Resume("codex"); err != nil || d != "" {
 		t.Fatalf("resume with nothing stopped: %q %v", d, err)
 	}
 
@@ -367,18 +368,18 @@ func TestPlanOwnerSocket(t *testing.T) {
 	if code, body := serve(PlanGuest{Login: login, Guest: "g"}, r); code == 200 || strings.Contains(body, "real-") {
 		t.Fatalf("an unswappable refresh: %d %q", code, body)
 	}
-	if d, err := o.Resume(); err != nil || d != DRequalify {
+	if d, err := o.Resume("codex"); err != nil || d != DRequalify {
 		t.Fatalf("resume after an unswappable answer: %q %v", d, err)
 	}
 	cli2 := newFakeCLI(login, codexPrinted)
 	h.Workers = cli2
-	if b, err := o.Begin(); err != nil || b.Detail != plan.DStopped+" "+plan.StopUnswappable {
+	if b, err := o.Begin("codex"); err != nil || b.Detail != plan.DStopped+" "+plan.StopUnswappable {
 		t.Fatalf("begin while unswappable: %+v %v", b, err)
 	}
 	if n, _ := cli2.started(); n != 0 {
 		t.Fatal("a sandbox was started")
 	}
-	if st, err := o.State(); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn {
+	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable || !st.SignedIn {
 		t.Fatalf("state while unswappable: %+v %v", st, err)
 	}
 }
@@ -478,12 +479,12 @@ type stuckCLI struct {
 	reading, release chan struct{}
 }
 
-func (s *stuckCLI) Start(ctx context.Context, guest string) (SignInWorker, error) {
+func (s *stuckCLI) Start(ctx context.Context, planName, guest string) (SignInWorker, error) {
 	if s.stuck {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	if _, err := s.fakeCLI.Start(ctx, guest); err != nil {
+	if _, err := s.fakeCLI.Start(ctx, planName, guest); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -587,4 +588,318 @@ func TestPlanSignInWaitsOutARemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli.waitStopped(t)
+}
+
+// servedOwner serves hosts on a fresh owner socket and returns its caller.
+func servedOwner(t *testing.T, hosts ...*PlanHost) PlanOwner {
+	t.Helper()
+	sock := filepath.Join(shortDir(t), "owner.sock")
+	ln, err := ListenPlanOwner(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go ServePlanOwner(ln, nil, hosts...)
+	return PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}
+}
+
+// namedLogin is planLoginAt's Codex declaration under another plan's name,
+// with a store of its own: a second wired plan.
+func namedLogin(t *testing.T, name string, mode plan.Mode, h http.Handler) *plan.Login {
+	t.Helper()
+	srv := httptest.NewTLSServer(h)
+	t.Cleanup(srv.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	d := plan.Codex(netguard.New(netguard.Config{Resolver: oneAddr(netip.MustParseAddr("8.8.8.8")), Connect: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	}}))
+	host := "example.com:" + srv.URL[strings.LastIndex(srv.URL, ":")+1:]
+	for i := range d.Endpoints {
+		d.Endpoints[i].Host = host
+	}
+	d.Name, d.Version, d.Mode = name, name+"-1", mode
+	k := make([]byte, 32)
+	rand.Read(k)
+	s, err := clerk.NewAESSealer(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := plan.New(d, plan.NewStore(s, nil), roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// refusedRefresh answers a refresh with a code the declaration lists as a
+// refused login while refuse is set, and otherwise as tokenProvider does.
+func refusedRefresh(calls *atomic.Int32, refuse *atomic.Bool) http.Handler {
+	next := tokenProvider(calls, nil)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuse.Load() && r.URL.Path == "/oauth/token" && strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(401)
+			io.WriteString(w, `{"error":"refresh_token_expired"}`)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func refreshRequest(ph string) *http.Request {
+	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token",
+		strings.NewReader(`{"client_id":"app_x","grant_type":"refresh_token","refresh_token":"`+ph+`"}`))
+	r.Header.Set("Content-Type", "application/json")
+	return r
+}
+
+// signedIn signs login in and returns a run guest's token set.
+func signedIn(t *testing.T, login *plan.Login, guest string) plan.Tokens {
+	t.Helper()
+	codeExchange(t, login, "s-"+guest)
+	login.Forget("s-" + guest)
+	tok, err := login.Guest(guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
+}
+
+// PLAN-slots (#1379 (a)): every owner call names its plan and acts on that
+// plan's host alone; a call naming an unknown plan, or none, is refused
+// with plan-unknown and changes nothing, never falling through to another
+// plan (CLK-7).
+func TestPlanOwnerCallsNameTheirPlan(t *testing.T) {
+	var ca, cb atomic.Int32
+	var bad atomic.Bool
+	la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, func() map[string]any {
+		if bad.Load() {
+			return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1"), "debug": "x"}
+		}
+		return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1")}
+	}))
+	lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+	cliA, cliB := newFakeCLI(la, codexPrinted), newFakeCLI(lb, codexPrinted)
+	ha := &PlanHost{Plan: "codex", Login: la, Prompt: CodexSignIn(), Workers: cliA, Times: quick}
+	hb := &PlanHost{Plan: "other", Login: lb, Prompt: SignInPrompt{Links: CodexSignIn().Links, Page: "https://other.example/device", From: "Other"}, Workers: cliB, Times: quick}
+	o := servedOwner(t, ha, hb)
+	tokB := signedIn(t, lb, "g")
+
+	unknown := func(what string, err error) {
+		t.Helper()
+		var rf *key.Refusal
+		if !errors.As(err, &rf) || rf.Code != DPlanUnknown {
+			t.Fatalf("%s: %v, want %s", what, err, DPlanUnknown)
+		}
+	}
+	for _, name := range []string{"", "nope", "Codex"} {
+		_, err := o.Begin(name)
+		unknown("begin "+name, err)
+		_, err = o.State(name)
+		unknown("state "+name, err)
+		_, err = o.Resume(name)
+		unknown("resume "+name, err)
+		unknown("remove "+name, o.Remove(name))
+	}
+	for _, op := range []string{"planbegin", "planstate", "planresume", "planremove"} {
+		unknown(op+" with no arguments", o.Call(op, nil, nil))
+	}
+	if n, _ := cliA.started(); n != 0 {
+		t.Fatal("a refused call started a sign-in")
+	}
+	if n, _ := cliB.started(); n != 0 {
+		t.Fatal("a refused call started a sign-in")
+	}
+	if st, err := o.State("other"); err != nil || !st.SignedIn {
+		t.Fatalf("a refused remove changed another plan: %+v %v", st, err)
+	}
+
+	// begin and state act on the named plan only.
+	b, err := o.Begin("other")
+	if err != nil || b != (PlanBegun{Page: "https://other.example/device", Code: "ABCD-12345", From: "Other"}) {
+		t.Fatalf("begin other: %+v %v", b, err)
+	}
+	cliB.mu.Lock()
+	started := cliB.plan
+	cliB.mu.Unlock()
+	if n, _ := cliA.started(); started != "other" || n != 0 {
+		t.Fatalf("the sign-in started for %q, codex's host started %d", started, n)
+	}
+	if st, err := o.State("codex"); err != nil || st.Signing || st.SignedIn {
+		t.Fatalf("codex while other signs in: %+v %v", st, err)
+	}
+	if st, err := o.State("other"); err != nil || !st.Signing || st.Code != b.Code {
+		t.Fatalf("other while signing: %+v %v", st, err)
+	}
+	// One sign-in waits at a time per plan, not per clerk.
+	if b, err := o.Begin("codex"); err != nil || b.Code == "" {
+		t.Fatalf("begin codex while other signs in: %+v %v", b, err)
+	}
+	if b, err := o.Begin("other"); err != nil || b.Detail != DSignInBusy {
+		t.Fatalf("a second sign-in on other: %+v %v", b, err)
+	}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(o.Remove("codex"))
+	cliA.waitStopped(t)
+	if st, err := o.State("other"); err != nil || !st.Signing || !st.SignedIn {
+		t.Fatalf("other after codex's remove: %+v %v", st, err)
+	}
+	must(o.Remove("other"))
+	cliB.waitStopped(t)
+	if lb.Signed() {
+		t.Fatal("other's remove left its login")
+	}
+	sent := cb.Load()
+	if code, _ := serve(PlanGuest{Login: lb, Guest: "g"}, modelsRead(tokB.Tokens["access_token"])); code == 200 || cb.Load() != sent {
+		t.Fatalf("a removed login served: %d", code)
+	}
+
+	// resume acts on the named plan only.
+	tokA := signedIn(t, la, "g")
+	bad.Store(true)
+	if code, _ := serve(PlanGuest{Login: la, Guest: "g"}, refreshRequest(tokA.Tokens["refresh_token"])); code == 200 {
+		t.Fatal("an unswappable refresh was answered")
+	}
+	if d, err := o.Resume("other"); err != nil || d != "" {
+		t.Fatalf("resume other: %q %v", d, err)
+	}
+	if st, err := o.State("codex"); err != nil || st.Stopped != plan.StopUnswappable {
+		t.Fatalf("resume other touched codex: %+v %v", st, err)
+	}
+	if d, err := o.Resume("codex"); err != nil || d != DRequalify {
+		t.Fatalf("resume codex: %q %v", d, err)
+	}
+}
+
+// A placeholder one plan's Login minted resolves at no other plan's
+// endpoint, even for the same account: it is refused and nothing is sent
+// upstream (CLK-1).
+func TestPlanPlaceholdersDoNotCrossPlans(t *testing.T) {
+	var ca, cb atomic.Int32
+	la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, nil))
+	lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+	tokA, tokB := signedIn(t, la, "g"), signedIn(t, lb, "g")
+	sentA, sentB := ca.Load(), cb.Load()
+	gb := PlanGuest{Login: lb, Guest: "g"}
+	if code, body := serve(gb, modelsRead(tokA.Tokens["access_token"])); code == 200 || strings.Contains(body, "real-") || cb.Load() != sentB {
+		t.Fatalf("plan A's access placeholder at plan B: %d %q", code, body)
+	}
+	if code, body := serve(gb, refreshRequest(tokA.Tokens["refresh_token"])); code == 200 || strings.Contains(body, "real-") || cb.Load() != sentB {
+		t.Fatalf("plan A's refresh placeholder at plan B: %d %q", code, body)
+	}
+	ga := PlanGuest{Login: la, Guest: "g"}
+	if code, _ := serve(ga, modelsRead(tokB.Tokens["access_token"])); code == 200 || ca.Load() != sentA {
+		t.Fatalf("plan B's placeholder at plan A: %d", code)
+	}
+	// Each still serves its own.
+	if code, _ := serve(gb, modelsRead(tokB.Tokens["access_token"])); code != 200 || cb.Load() != sentB+1 {
+		t.Fatalf("plan B's own placeholder: %d", code)
+	}
+	if code, _ := serve(ga, modelsRead(tokA.Tokens["access_token"])); code != 200 || ca.Load() != sentA+1 {
+		t.Fatalf("plan A's own placeholder: %d", code)
+	}
+}
+
+// A stop, a removal or a withdrawn consent on one plan leaves the other
+// serving (CLK-7 Control: pause and stops are per plan).
+func TestPlanStopsArePerPlan(t *testing.T) {
+	serving := func(t *testing.T, l *plan.Login, g PlanGuest, calls *atomic.Int32) {
+		t.Helper()
+		if l.Stopped() != "" {
+			t.Fatalf("the other plan stopped: %s", l.Stopped())
+		}
+		tok, err := l.Guest(g.Guest)
+		if err != nil {
+			t.Fatalf("the other plan issues no token set: %v", err)
+		}
+		sent := calls.Load()
+		if code, body := serve(g, modelsRead(tok.Tokens["access_token"])); code != 200 || calls.Load() != sent+1 {
+			t.Fatalf("the other plan: %d %q", code, body)
+		}
+	}
+	t.Run("unswappable", func(t *testing.T) {
+		var ca, cb atomic.Int32
+		la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, func() map[string]any {
+			return map[string]any{"access_token": "real-access-2", "id_token": fakeJWT("acct-1"), "debug": "x"}
+		}))
+		lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+		tokA := signedIn(t, la, "g")
+		signedIn(t, lb, "g")
+		serve(PlanGuest{Login: la, Guest: "g"}, refreshRequest(tokA.Tokens["refresh_token"]))
+		if la.Stopped() != plan.StopUnswappable {
+			t.Fatalf("plan A: %q", la.Stopped())
+		}
+		serving(t, lb, PlanGuest{Login: lb, Guest: "g"}, &cb)
+	})
+	t.Run("refused login", func(t *testing.T) {
+		var ca, cb atomic.Int32
+		var refuse atomic.Bool
+		la, _ := planLoginAt(t, plan.Permitted, refusedRefresh(&ca, &refuse))
+		lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+		tokA := signedIn(t, la, "g")
+		signedIn(t, lb, "g")
+		refuse.Store(true)
+		serve(PlanGuest{Login: la, Guest: "g"}, refreshRequest(tokA.Tokens["refresh_token"]))
+		if la.Stopped() != plan.StopRefused {
+			t.Fatalf("plan A: %q", la.Stopped())
+		}
+		serving(t, lb, PlanGuest{Login: lb, Guest: "g"}, &cb)
+	})
+	t.Run("removal", func(t *testing.T) {
+		var ca, cb atomic.Int32
+		la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, nil))
+		lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+		signedIn(t, la, "g")
+		signedIn(t, lb, "g")
+		o := servedOwner(t, &PlanHost{Plan: "codex", Login: la, Workers: newFakeCLI(la, "")},
+			&PlanHost{Plan: "other", Login: lb, Workers: newFakeCLI(lb, "")})
+		if err := o.Remove("codex"); err != nil {
+			t.Fatal(err)
+		}
+		if la.Signed() {
+			t.Fatal("plan A's login stayed")
+		}
+		serving(t, lb, PlanGuest{Login: lb, Guest: "g"}, &cb)
+	})
+	t.Run("withdrawn consent", func(t *testing.T) {
+		var ca, cb atomic.Int32
+		la, _ := planLoginAt(t, plan.Unconfirmed, tokenProvider(&ca, nil))
+		lb := namedLogin(t, "other", plan.Unconfirmed, tokenProvider(&cb, nil))
+		tokA := signedIn(t, la, "g")
+		signedIn(t, lb, "g")
+		sent := ca.Load()
+		ga := PlanGuest{Login: la, Guest: "g", Consent: func() bool { return false }}
+		if code, body := serve(ga, modelsRead(tokA.Tokens["access_token"])); code != 503 || !strings.Contains(body, DPlanConsent) || ca.Load() != sent {
+			t.Fatalf("plan A without consent: %d %q", code, body)
+		}
+		serving(t, lb, PlanGuest{Login: lb, Guest: "g", Consent: func() bool { return true }}, &cb)
+	})
+}
+
+// The owner socket refuses to serve two plans under one name, or one with
+// none, so no call can reach a plan by a name it does not hold.
+func TestPlanOwnerSocketNeedsDistinctNames(t *testing.T) {
+	var calls atomic.Int32
+	la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&calls, nil))
+	for name, hosts := range map[string][]*PlanHost{
+		"a repeated name": {{Plan: "codex", Login: la}, {Plan: "codex", Login: la}},
+		"no name":         {{Login: la}},
+		"a nil host":      {nil},
+	} {
+		ln, err := ListenPlanOwner(filepath.Join(shortDir(t), "owner.sock"), os.Getuid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ServePlanOwner(ln, nil, hosts...); err == nil {
+			t.Errorf("%s served", name)
+		}
+		ln.Close()
+	}
 }

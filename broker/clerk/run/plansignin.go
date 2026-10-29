@@ -15,14 +15,16 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/clerk/model"
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 )
 
 // The owner's plan sign-in and the plan route's owner calls, on the model
 // clerk process's owner socket (MIG-4-plan-login-c, #3104, CLK-7, PLN-5).
-// planbegin starts the provider CLI's device-code sign-in in a sandbox of
-// the guest host's and returns the provider's page and the code the CLI
-// printed; planstate reads the route; planresume is the owner's PLAN <plan>
+// Every owner call names its plan ({"plan":"<name>"}), and the socket
+// serves one PlanHost per wired plan (PLAN-slots, #1379 (a)). planbegin
+// starts the provider CLI's device-code sign-in in a sandbox of the guest
+// host's and returns the provider's page and the code the CLI printed; planstate reads the route; planresume is the owner's PLAN <plan>
 // ON after a refused login; planremove drops the login. The sign-in CLI is
 // a sign-in guest of the plan login clerk (plan.Login.BeginSignIn), so its
 // only way out is its own endpoint in this process (ServePlan), and the
@@ -34,10 +36,10 @@ import (
 // SignInWorkers is the guest host's (#2780(b)): it runs the plan CLI's
 // device-code sign-in.
 type SignInWorkers interface {
-	// Start runs the sign-in CLI as guest in a fresh sandbox whose only
+	// Start runs plan's sign-in CLI as guest in a fresh sandbox whose only
 	// route out is guest's plan endpoint in this process (ServePlan). It
 	// returns once ctx ends.
-	Start(ctx context.Context, guest string) (SignInWorker, error)
+	Start(ctx context.Context, plan, guest string) (SignInWorker, error)
 }
 
 // SignInWorker is one running sign-in CLI.
@@ -102,6 +104,7 @@ const (
 	DSignInStopped  = "signin-stopped"   // planremove ended the sign-in
 	DSignedIn       = "signedin"         // this sign-in committed the login
 	DRequalify      = "requalify"        // only a release reopens the route
+	DPlanUnknown    = "plan-unknown"     // the call names no plan this clerk serves; nothing done
 )
 
 // signInCode is a device code as the provider prints it.
@@ -134,12 +137,12 @@ func (p SignInPrompt) Code(printed string) (code string, ok bool) {
 	return "", false
 }
 
-// PlanHost is the plan route's owner side in the model clerk's process.
+// PlanHost is one plan route's owner side in the model clerk's process.
 type PlanHost struct {
-	Login *plan.Login
-	// APIs are the clerk's API-key routes, whose keys the owner side sets
-	// on the same socket (MIG-4-exit m1); nil serves no key call.
-	APIs    *model.APIs
+	// Plan is the plan's name, its declaration's: the owner calls name it,
+	// and its sign-ins name it on agentosd's sign-in socket.
+	Plan    string
+	Login   *plan.Login
 	Prompt  SignInPrompt
 	Workers SignInWorkers
 	Times   SignInTimes
@@ -225,7 +228,7 @@ func (h *PlanHost) Begin(ctx context.Context) PlanBegun {
 		detail = plan.DStopped + " " + plan.StopUnswappable
 	case err != nil:
 	default:
-		w, err = h.Workers.Start(lctx, s.guest)
+		w, err = h.Workers.Start(lctx, h.Plan, s.guest)
 		switch {
 		case err == nil && w != nil:
 			code, detail = h.awaitCode(lctx, bg, w, t)
@@ -376,15 +379,43 @@ func ListenPlanOwner(path string, ownerUID int) (net.Listener, error) {
 	return proc.ListenKernel(path, ownerUID)
 }
 
-// ServePlanOwner answers the owner side's plan calls to h on ln until ln
-// closes.
-func ServePlanOwner(ln net.Listener, h *PlanHost) error {
+// planArgs are a plan owner call's arguments.
+type planArgs struct {
+	Plan string `json:"plan"`
+}
+
+// errPlanUnknown is an owner call naming no plan this clerk serves, or
+// none: nothing is done, and no call falls through to another plan.
+var errPlanUnknown = &key.Refusal{Code: DPlanUnknown, Detail: "the call names no plan this clerk serves"}
+
+// ServePlanOwner answers the owner side's calls on ln until ln closes: each
+// plan call to the PlanHost it names, and the API-key calls to apis (nil
+// serves none; MIG-4-exit m1). A plan named twice, or with no name, refuses
+// the start.
+func ServePlanOwner(ln net.Listener, apis *model.APIs, plans ...*PlanHost) error {
+	byName := make(map[string]*PlanHost, len(plans))
+	for _, h := range plans {
+		if h == nil || h.Plan == "" || byName[h.Plan] != nil {
+			return errors.New("run: each plan on the owner socket needs a name of its own")
+		}
+		byName[h.Plan] = h
+	}
 	return proc.ServeConns(ln, proc.MaxConns, func(conn net.Conn) {
 		proc.ServeOne(conn, func(op string, raw json.RawMessage) (json.RawMessage, error) {
-			var res any
 			if strings.HasPrefix(op, "apikey") {
-				return serveKeyCall(h.APIs, op, raw)
+				return serveKeyCall(apis, op, raw)
 			}
+			switch op {
+			case "planbegin", "planstate", "planresume", "planremove":
+			default:
+				return nil, errors.New("run: the plan owner socket has no call " + op)
+			}
+			var a planArgs
+			if json.Unmarshal(raw, &a) != nil || byName[a.Plan] == nil {
+				return nil, errPlanUnknown
+			}
+			h := byName[a.Plan]
+			var res any
 			switch op {
 			case "planbegin":
 				res = h.Begin(context.Background())
@@ -401,8 +432,6 @@ func ServePlanOwner(ln net.Listener, h *PlanHost) error {
 					return nil, err
 				}
 				return nil, nil
-			default:
-				return nil, errors.New("run: the plan owner socket has no call " + op)
 			}
 			return json.Marshal(res)
 		})
@@ -459,30 +488,30 @@ func serveKeyCall(a *model.APIs, op string, raw json.RawMessage) (json.RawMessag
 // changed.
 var errKeyStore = errors.New("run: the API keys could not be opened or written; nothing changed")
 
-// PlanOwner is the owner side's caller of the plan route. Its Timeout must
-// exceed the host's SignInTimes.Link.
+// PlanOwner is the owner side's caller of the plan routes; each plan call
+// names its plan. Its Timeout must exceed the host's SignInTimes.Link.
 type PlanOwner struct{ proc.Conn }
 
-// Begin starts the plan's sign-in: the provider's page and code, or a
+// Begin starts plan name's sign-in: the provider's page and code, or a
 // detail.
-func (o PlanOwner) Begin() (b PlanBegun, err error) {
-	err = o.Call("planbegin", nil, &b)
+func (o PlanOwner) Begin(name string) (b PlanBegun, err error) {
+	err = o.Call("planbegin", planArgs{name}, &b)
 	return
 }
 
-func (o PlanOwner) State() (st PlanState, err error) {
-	err = o.Call("planstate", nil, &st)
+func (o PlanOwner) State(name string) (st PlanState, err error) {
+	err = o.Call("planstate", planArgs{name}, &st)
 	return
 }
 
 // Resume reopens a route the provider refused the login on: "" or
 // DRequalify.
-func (o PlanOwner) Resume() (detail string, err error) {
-	err = o.Call("planresume", nil, &detail)
+func (o PlanOwner) Resume(name string) (detail string, err error) {
+	err = o.Call("planresume", planArgs{name}, &detail)
 	return
 }
 
-func (o PlanOwner) Remove() error { return o.Call("planremove", nil, nil) }
+func (o PlanOwner) Remove(name string) error { return o.Call("planremove", planArgs{name}, nil) }
 
 // SetKey stores provider's API key and whether its routes may see private
 // data.
