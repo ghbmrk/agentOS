@@ -261,52 +261,53 @@ func TestREV5ExecRaisesAndChecksUnderTheWorkersLock(t *testing.T) {
 // A runtime that ignores cancellation holds the worker for at most
 // ExecGrace past the timeout, and erasure gets the worker after it (L3
 // MUST-1 on #146; F1). The runtime stays hung until the test ends, so
-// Exec or ForgetSince returning at all proves it did not wait behind the
-// runtime; returnsWithin's bound only turns a wait into a failure rather
-// than a stuck test (#1304: a 500ms bound flaked under -race).
+// neither Exec nor ForgetSince can return by the runtime finishing. Each
+// bound is three ExecGraces: two of slack for a loaded -race runner
+// (#1304: ForgetSince took 686ms past a 50ms ExecGrace), while a wait
+// that ignored ExecGrace, or scaled it, still fails.
 func TestCAP8ExecReturnsWhenTheRuntimeIgnoresCancellation(t *testing.T) {
 	old := ExecGrace
-	ExecGrace = 50 * time.Millisecond
+	ExecGrace = time.Second
 	t.Cleanup(func() { ExecGrace = old })
+	bound := 3 * ExecGrace
 	e := newEnv(t, 4096)
 	t.Cleanup(func() { close(e.rt.hang) })
 	agent := e.create("agent", admission.Experiment, 500)
 	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
 	must(t, err)
 	var r ExecResult
-	returnsWithin(t, "exec", func() {
+	returnsWithin(t, "exec", 20*time.Millisecond+bound, func() {
 		r, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, 20*time.Millisecond)
 	})
 	if err != nil || !r.TimedOut {
 		t.Fatalf("exec = %+v, %v; want a timed-out result", r, err)
 	}
+	returnsWithin(t, "the first command's start", bound, func() { <-e.rt.hung })
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, time.Minute)
 		done <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
-	returnsWithin(t, "ForgetSince", func() {
+	returnsWithin(t, "the second command's start", bound, func() { <-e.rt.hung })
+	returnsWithin(t, "ForgetSince", bound, func() {
 		err = e.m.ForgetSince(bg, agent.Lineage, time.Now().Add(-time.Hour))
 	})
 	must(t, err)
-	if err := <-done; err == nil {
+	returnsWithin(t, "the abandoned command", bound, func() { err = <-done })
+	if err == nil {
 		t.Fatal("the abandoned command reported success")
 	}
 }
 
-// returnsWithin fails the test if f has not returned while the fake
-// runtime's "hang" still holds. The bound is far past any scheduling delay
-// yet under ExecGrace's 15s default, so a wait that ignored the shortened
-// ExecGrace still fails.
-func returnsWithin(t *testing.T, what string, f func()) {
+// returnsWithin fails the test if f has not returned within d.
+func returnsWithin(t *testing.T, what string, d time.Duration, f func()) {
 	t.Helper()
 	ch := make(chan struct{})
 	go func() { f(); close(ch) }()
 	select {
 	case <-ch:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("%s waited behind a hung runtime", what)
+	case <-time.After(d):
+		t.Fatalf("%s took over %v", what, d)
 	}
 }
 

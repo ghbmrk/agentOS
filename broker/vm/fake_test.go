@@ -37,13 +37,14 @@ type fakeRuntime struct {
 	// takes its own lock, so it may call back into the manager.
 	onStart func(id string)
 	// hang holds every "hang" command until it is closed, so a test can
-	// tell returning beside a hung runtime from waiting behind it without
-	// timing either one.
-	hang chan struct{}
+	// tell returning beside a hung runtime from waiting behind it. hung
+	// takes a value as each "hang" command starts: the worker's lock is
+	// held and its command cancellable by then.
+	hang, hung chan struct{}
 }
 
 func newFake() *fakeRuntime {
-	return &fakeRuntime{running: map[string]Launch{}, paused: map[string]bool{}, mem: map[string]int{}, hang: make(chan struct{})}
+	return &fakeRuntime{running: map[string]Launch{}, paused: map[string]bool{}, mem: map[string]int{}, hang: make(chan struct{}), hung: make(chan struct{}, 8)}
 }
 
 func (f *fakeRuntime) take() error {
@@ -303,6 +304,10 @@ func (f *fakeRuntime) Exec(ctx context.Context, id string, c Command) (ExecResul
 		<-ctx.Done()
 		return ExecResult{ExitCode: 137}, nil
 	case "hang": // a runtime that ignores cancellation
+		select {
+		case f.hung <- struct{}{}:
+		default:
+		}
 		<-f.hang
 		return ExecResult{}, ctx.Err()
 	case "exit":
