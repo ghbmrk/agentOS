@@ -5533,7 +5533,7 @@ class SetupServicesTest(unittest.TestCase):
     def test_the_image_creates_every_service_user(self):
         lines = (MK / "mkosi.extra/usr/lib/sysusers.d/agentos-setup.conf").read_text().splitlines()
         users = sorted(l.split()[1] for l in lines if l.strip() and not l.startswith("#") and l.split()[0] == "u")
-        self.assertEqual(users, ["agentos-egress", "agentos-infer", "agentos-kernel", "agentos-link", "agentos-link-items",
+        self.assertEqual(users, ["agentos-egress", "agentos-imapconn", "agentos-infer", "agentos-kernel", "agentos-link", "agentos-link-items",
                                  "agentos-localui", "agentos-mail", "agentos-model", "agentos-modem", "agentos-owner",
                                  "agentos-planner"])
         for unit, user in ((PAGE_UNIT, "agentos-localui"), (MODEM_UNIT, "agentos-modem")):
@@ -5948,6 +5948,7 @@ UNIT_DEVICES = {
     "agentos-localui.service": ("agentos-localui", "private"),
     "agentos-modem.service": ("agentos-modem", "closed; char-ttyUSB rw, char-alsa rw"),
     "agentos-devices.service": ("agentos-devices", "private"),
+    "agentos-imapconn@.service": ("agentos-imapconn", "private"),
 }
 DEVICE_POLICY_EXEMPT = {"agentosd.service": "IMG-4 (#917)"}
 

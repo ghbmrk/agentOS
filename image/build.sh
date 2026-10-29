@@ -38,6 +38,9 @@ for cmd in agentosd agentos-egress agentos-localui agentos-modem \
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
+# The mail clerk's IMAP connection process (#3015), which the clerk's package keeps beside it.
+(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
+	-o "$STAGE/usr/lib/agentos/agentos-imapconn" ./clerk/inbox/imapconn/cmd/imapconn)
 
 # gVisor, the same release and hash as CI's machine tests, with its sidecars beside runsc as CI
 # installs them: this release's runsc refuses to start a sandbox without gvisor-bin/ (#1701).

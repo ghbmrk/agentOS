@@ -55,7 +55,11 @@ func (v *CodesVoid) Take() bool {
 // sealed (claim.StatePath); latch is the card step's latch. authority is
 // the page authority's certificate (PageTLS.Authority), which the card
 // prints; nil holds the card step (firstboot.ErrNoAuthority, HW-1).
-func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, void *CodesVoid, authority []byte) firstboot.BoxConfig {
+// The confirm hands the card's factors to keeper first (handOff, brief
+// OWN-card-flow decision 9); only after its ok does it provision the vault,
+// whose failure the page retries with the same card, which the keeper
+// answers ok again. The vault call goes with the vault's deletion row.
+func CardBox(u *UnlockClient, keeper CardKeeper, claimStore claim.Store, latch firstboot.Store, void *CodesVoid, authority []byte) firstboot.BoxConfig {
 	return firstboot.BoxConfig{
 		Claim: claim.Config{Store: claimStore},
 		Latch: latch,
@@ -69,6 +73,9 @@ func CardBox(u *UnlockClient, claimStore claim.Store, latch firstboot.Store, voi
 			return err
 		},
 		Card: card.DisplayConfig{Authority: authority, Provision: func(c *card.Card) error {
+			if err := handOff(keeper, c, authority); err != nil {
+				return err
+			}
 			// A background context with a limit, as the rotation's
 			// commit (L38): a phone that drops mid-provision cannot cut
 			// a slot write short.
