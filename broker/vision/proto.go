@@ -340,16 +340,25 @@ func unavailable(detail string) error { return &Error{Cause: Unavailable, Detail
 func badRequest(detail string) error  { return &Error{Cause: BadRequest, Detail: detail} }
 
 // CheckDetections checks a detect reply's detections against a frame of
-// w by h pixels; enrolled says whether an id is one the checker itself
-// holds (nil: none is). The service checks its runtime's answer with it
-// too, so a runtime is not trusted to keep the shape.
-func CheckDetections(ds []Detection, w, h int, enrolled func(string) bool) error {
+// format and w by h pixels; enrolled says whether an id is one the
+// checker itself holds (nil: none is). The service checks its runtime's
+// answer with it too, so a runtime is not trusted to keep the shape. A
+// thermal (y16) frame holds only warm bodies, and warm is never named on
+// any other frame, so a service cannot pick a class from a wider list
+// than the stream can honestly give (#3779, VIS-A25).
+func CheckDetections(ds []Detection, format string, w, h int, enrolled func(string) bool) error {
+	if _, ok := bytesPerPixel[format]; !ok {
+		return unavailable("frame format not known")
+	}
 	if len(ds) > MaxDetections {
 		return unavailable("too many detections")
 	}
 	for _, d := range ds {
 		if !d.Class.Known() {
 			return unavailable("class not on the list")
+		}
+		if (format == FormatY16) != (d.Class == Warm) {
+			return unavailable("class not of the frame's format")
 		}
 		b := d.Box
 		if b.X0 < 0 || b.Y0 < 0 || b.X1 > w || b.Y1 > h || b.X0 >= b.X1 || b.Y0 >= b.Y1 {

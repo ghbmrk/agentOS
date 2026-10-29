@@ -73,12 +73,18 @@ type letterbox struct {
 // trained. A gray8 frame (an infrared night picture) fills all three
 // planes. f is rgb24 or gray8, checked by the request.
 func yoloxInput(f vision.Frame, size int, dst []float32) letterbox {
+	return letterboxInput(f, size, yoloxPad, dst)
+}
+
+// letterboxInput is yoloxInput with the padding's value given: the face
+// detector shares it (facemodels.go).
+func letterboxInput(f vision.Frame, size int, pad float32, dst []float32) letterbox {
 	scale := math.Min(float64(size)/float64(f.Width), float64(size)/float64(f.Height))
 	nw := min(size, int(math.Round(float64(f.Width)*scale)))
 	nh := min(size, int(math.Round(float64(f.Height)*scale)))
 	plane := size * size
 	for i := range dst[:3*plane] {
-		dst[i] = yoloxPad
+		dst[i] = pad
 	}
 	bpp := 3
 	if f.Format == vision.FormatGray8 {

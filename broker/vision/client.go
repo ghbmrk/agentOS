@@ -27,7 +27,7 @@ type Client struct {
 // Hello asks the service for its models and device. A service that is up
 // but has no usable model answers Missing or Corrupt.
 func (c Client) Hello(ctx context.Context) (Info, error) {
-	r, err := c.call(ctx, Request{Op: OpHello}, nil, 0, 0)
+	r, err := c.call(ctx, Request{Op: OpHello}, nil)
 	if err != nil {
 		return Info{}, err
 	}
@@ -41,7 +41,7 @@ func (c Client) Detect(ctx context.Context, f Frame) ([]Detection, error) {
 	if err := req.Check(); err != nil {
 		return nil, err
 	}
-	r, err := c.call(ctx, req, f.Data, f.Width, f.Height)
+	r, err := c.call(ctx, req, f.Data)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func (c Client) Sound(ctx context.Context, pcm []byte) ([]Sound, error) {
 	if err := req.Check(); err != nil {
 		return nil, err
 	}
-	r, err := c.call(ctx, req, pcm, 0, 0)
+	r, err := c.call(ctx, req, pcm)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func (c Client) Sound(ctx context.Context, pcm []byte) ([]Sound, error) {
 
 // call sends one request and returns its checked reply, an error reply as
 // its *Error, and anything else that goes wrong as Unavailable.
-func (c Client) call(ctx context.Context, req Request, payload []byte, w, h int) (Reply, error) {
+func (c Client) call(ctx context.Context, req Request, payload []byte) (Reply, error) {
 	d := c.Timeout
 	if d <= 0 {
 		d = DefaultTimeout
@@ -108,13 +108,15 @@ func (c Client) call(ctx context.Context, req Request, payload []byte, w, h int)
 		}
 		return Reply{}, unavailable("no complete reply")
 	}
-	return parseReply(req.Op, line, w, h, c.Enrolled)
+	return parseReply(req, line, c.Enrolled)
 }
 
-// parseReply decodes one reply line for op and checks every field: an
-// unknown field, a field op does not take, or a value off its list or
-// outside its bound is Unavailable.
-func parseReply(op string, line []byte, w, h int, enrolled func(string) bool) (Reply, error) {
+// parseReply decodes one reply line for req and checks every field: an
+// unknown field, a field req's op does not take, or a value off its list
+// or outside its bound (a detection's against req's frame) is
+// Unavailable.
+func parseReply(req Request, line []byte, enrolled func(string) bool) (Reply, error) {
+	op := req.Op
 	// An object only: null would decode as an empty reply.
 	if t := bytes.TrimLeft(line, " \t\r"); len(t) == 0 || t[0] != '{' {
 		return Reply{}, unavailable("reply is not an object")
@@ -151,7 +153,7 @@ func parseReply(op string, line []byte, w, h int, enrolled func(string) bool) (R
 		if hello || r.Sounds != nil {
 			return Reply{}, unavailable("detect reply has other fields")
 		}
-		if err := CheckDetections(r.Detections, w, h, enrolled); err != nil {
+		if err := CheckDetections(r.Detections, req.Format, req.Width, req.Height, enrolled); err != nil {
 			return Reply{}, err
 		}
 	case OpSound:
@@ -198,7 +200,7 @@ func (c ControlClient) Enrol(ctx context.Context, f Frame) ([]byte, error) {
 	if err := req.Check(); err != nil {
 		return nil, err
 	}
-	r, err := Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, f.Data, f.Width, f.Height)
+	r, err := Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, f.Data)
 	if err != nil {
 		return nil, err
 	}
@@ -217,6 +219,6 @@ func (c ControlClient) Lend(ctx context.Context, ts []Template) error {
 	if err := req.Check(); err != nil {
 		return err
 	}
-	_, err = Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, payload, 0, 0)
+	_, err = Client{Path: c.Path, Timeout: c.Timeout}.call(ctx, req, payload)
 	return err
 }

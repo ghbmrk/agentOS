@@ -65,6 +65,10 @@ func frame(w, h int) Frame {
 	return Frame{Format: FormatGray8, Width: w, Height: h, Data: make([]byte, w*h)}
 }
 
+func thermal(w, h int) Frame {
+	return Frame{Format: FormatY16, Width: w, Height: h, Data: make([]byte, 2*w*h)}
+}
+
 func person(x0, y0, x1, y1, conf int) Detection {
 	return Detection{Class: Person, Box: Box{x0, y0, x1, y1}, Conf: conf}
 }
@@ -288,10 +292,14 @@ func TestRepliesAreClosedVocabulary(t *testing.T) {
 		_, err := detect(t, serve(t, fixed(line)), frame(8, 8), func(string) bool { return true })
 		wantUnavailable(t, name, err)
 	}
-	// Every class on the list passes.
+	// Every class on the list passes, on a frame of its format.
 	for _, c := range Classes() {
 		d := Detection{Class: c, Box: Box{0, 0, 4, 4}, Conf: 50}
-		if _, err := detect(t, serve(t, func(Request) []byte { return detectReply(t, d) }), frame(8, 8), nil); err != nil {
+		f := frame(8, 8)
+		if c == Warm {
+			f = thermal(8, 8)
+		}
+		if _, err := detect(t, serve(t, func(Request) []byte { return detectReply(t, d) }), f, nil); err != nil {
 			t.Errorf("class %s: %v", c, err)
 		}
 	}
@@ -496,5 +504,38 @@ func TestLendBounds(t *testing.T) {
 	}
 	if !Control(OpEnrol) || !Control(OpLend) || Control(OpDetect) || Control(OpHello) || Control(OpSound) {
 		t.Error("the control ops are enrol and lend alone")
+	}
+}
+
+// TestClassMustFitFrameFormat (#3779): a thermal frame's detections are
+// warm bodies only, and warm is named on no other frame; a reply that
+// mixes them is unavailable, so a service cannot choose a detection's
+// class from a wider list than its stream gives.
+func TestClassMustFitFrameFormat(t *testing.T) {
+	box := Box{0, 0, 4, 4}
+	rgb := Frame{Format: FormatRGB24, Width: 8, Height: 8, Data: make([]byte, 8*8*3)}
+	for _, f := range []Frame{frame(8, 8), rgb} {
+		d := Detection{Class: Warm, Box: box, Conf: 50}
+		_, err := detect(t, serve(t, func(Request) []byte { return detectReply(t, d) }), f, nil)
+		wantUnavailable(t, "warm on "+f.Format, err)
+	}
+	for _, c := range Classes() {
+		if c == Warm {
+			continue
+		}
+		d := Detection{Class: c, Box: box, Conf: 50}
+		_, err := detect(t, serve(t, func(Request) []byte { return detectReply(t, d) }), thermal(8, 8), nil)
+		wantUnavailable(t, string(c)+" on y16", err)
+	}
+	// A face is on a person only, so never on a thermal frame either.
+	d := Detection{Class: Warm, Box: box, Conf: 50, Face: FaceUnknown}
+	_, err := detect(t, serve(t, func(Request) []byte { return detectReply(t, d) }), thermal(8, 8), nil)
+	wantUnavailable(t, "a face on y16", err)
+	// The tracker holds the same rule.
+	if _, err := (&Tracker{}).Observe("cam", FrameRef{Format: FormatY16, Width: 8, Height: 8}, []Detection{{Class: Person, Box: box, Conf: 90}}); err == nil {
+		t.Error("the tracker took a person on a thermal frame")
+	}
+	if _, err := (&Tracker{}).Observe("cam", FrameRef{Width: 8, Height: 8}, []Detection{{Class: Person, Box: box, Conf: 90}}); err == nil {
+		t.Error("the tracker took a frame of no format")
 	}
 }

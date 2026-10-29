@@ -21,7 +21,10 @@ import (
 // (runtime_<name>.go) implements it, so the runtime choice changes one file
 // (VIS-core part e). Load loads the models, replacing whatever was loaded,
 // and names them. Detect and Sound answer one frame or clip; the service
-// checks what they return as the client will. Encode is the enrolment
+// checks what they return as the client will. Detect encodes the faces
+// it sees only when encode is set, which the service sets only while it
+// holds templates: with none, a face is unknown without its encoding
+// ever being made (VIS-A31). Encode is the enrolment
 // frame's one face's encoding, ErrNoFace when there is not exactly one
 // clear face. All may be called from several goroutines; a Load must make
 // a call still running on the old load return, since that call holds a
@@ -33,13 +36,14 @@ import (
 // no copy.
 type Runtime interface {
 	Load() (Model, error)
-	Detect(f vision.Frame) ([]Seen, error)
+	Detect(f vision.Frame, encode bool) ([]Seen, error)
 	Encode(f vision.Frame) ([]float32, error)
 	Sound(pcm []byte) ([]vision.Sound, error)
 }
 
 // Seen is one detection as the runtime gives it: the detection, with Face
-// unset, and, for a person whose face it saw, that face's encoding.
+// unset, and, for a person whose face it saw, that face's encoding, or an
+// empty one for a face it did not encode (unknown).
 type Seen struct {
 	vision.Detection
 	Face []float32
@@ -85,13 +89,15 @@ type Config struct {
 	Idle time.Duration
 	// Match is the least cosine similarity between a face's encoding and
 	// an enrolled template that names the face; below it on every
-	// template the face is unknown. It depends on the encoder (part e);
-	// 0 is DefaultMatch.
+	// template the face is unknown. 0 is DefaultMatch.
 	Match float64
 }
 
-// DefaultMatch is Match when none is set.
-const DefaultMatch = 0.6
+// DefaultMatch is Match when none is set: for SFace, well above the 0.363
+// OpenCV gives for a balanced error, because naming a stranger as
+// someone enrolled is the costly mistake, and a person seen over several
+// frames is named on one that clears it (VIS-A32).
+const DefaultMatch = 0.7
 
 // loaded is the outcome of the last load.
 type loaded struct {
@@ -291,7 +297,7 @@ func (s *service) answer(req vision.Request, r io.Reader) vision.Reply {
 		handed = true
 		ds, err := call(s, cur, release, func() ([]vision.Detection, error) { return s.detect(f) },
 			func(ds []vision.Detection) error {
-				return vision.CheckDetections(ds, req.Width, req.Height, s.enrolled)
+				return vision.CheckDetections(ds, req.Format, req.Width, req.Height, s.enrolled)
 			})
 		if err != nil {
 			return errReply(vision.Unavailable)
@@ -481,7 +487,7 @@ func (s *service) loadModels() loaded {
 // face itself, or gives an encoding for anything but a person, is
 // answering outside the protocol.
 func (s *service) detect(f vision.Frame) ([]vision.Detection, error) {
-	seen, err := s.rt.Detect(f)
+	seen, err := s.rt.Detect(f, s.holding())
 	defer func() {
 		for _, d := range seen {
 			clear(d.Face)
@@ -540,6 +546,14 @@ func norm(v []float32) float64 {
 		sum += float64(x) * float64(x)
 	}
 	return math.Sqrt(sum)
+}
+
+// holding reports whether the service holds any template, so a face is
+// worth encoding.
+func (s *service) holding() bool {
+	s.tmu.RLock()
+	defer s.tmu.RUnlock()
+	return len(s.tpl) > 0
 }
 
 // enrolled reports an id the service holds a template for.
