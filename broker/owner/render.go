@@ -279,7 +279,7 @@ func (c *Channel) itemLine(it Item) string {
 // line, in the same order, asked as a first-person question, then its
 // reversibility and any notice as plain sentences. short is the fallback
 // for a text that would not fit three segments: the same fields and
-// notices in fewer words, without the restart note (CH12V-4).
+// notices in fewer words (CH12V-4).
 func (c *Channel) question(it Item, short bool) string {
 	verb := strings.ToLower(field(it.Facts.Verb, 12))
 	s := "Can I " + verb + " \"" + field(it.Object, 40) + "\""
@@ -332,7 +332,7 @@ func (c *Channel) question(it Item, short bool) string {
 	case !it.Retried.IsZero():
 		s += " It may go twice; first tried " + at(it.Retried) + "."
 	}
-	if !it.Asked.IsZero() && !short {
+	if !it.Asked.IsZero() {
 		s += " Asked " + it.Asked.In(c.cfg.Location).Format("15:04") + ", before a restart."
 	}
 	return s

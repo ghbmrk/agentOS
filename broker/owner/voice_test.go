@@ -18,7 +18,7 @@ import (
 // restart is checked with each field at its cap, a 100-character
 // recipient list, a two-digit day, high-tier replies and the longest
 // request ID and grid cell. A text that would not fit takes the short
-// form (CH12V-4), which keeps every field and notice. It has no leading ID
+// form (CH12V-4), which keeps every field, notice and restart note. It has no leading ID
 // label and no "your agent wants".
 func TestApprovalTextIsAFirstPersonQuestionWithEveryField(t *testing.T) {
 	sent := time.Date(2026, 10, 14, 19, 5, 0, 0, time.UTC)
@@ -122,8 +122,11 @@ func TestApprovalTextIsAFirstPersonQuestionWithEveryField(t *testing.T) {
 					if unverified && !strings.HasPrefix(text, "UNVERIFIED") {
 						t.Fatalf("%s: unverified %q", name, text)
 					}
+					if asked != strings.Contains(text, " Asked 19:05, before a restart. Expires") {
+						t.Fatalf("%s: restart note %q", name, text)
+					}
 					full := strings.Contains(text, " to "+recip+" for") && (!unverified || strings.HasPrefix(text, "UNVERIFIED, see my Wi-Fi page: ")) &&
-						(nn == "none" || strings.Contains(text, long[nn])) && (!asked || strings.Contains(text, " Asked 19:05, before a restart."))
+						(nn == "none" || strings.Contains(text, long[nn]))
 					// The short form is taken only when the full one would
 					// not fit.
 					if !full {
@@ -133,9 +136,6 @@ func TestApprovalTextIsAFirstPersonQuestionWithEveryField(t *testing.T) {
 						}
 						r2 := strings.NewReplacer(brief["repeat"], long["repeat"], brief["erased"], long["erased"], brief["retried"], long["retried"],
 							"UNVERIFIED: ", "UNVERIFIED, see my Wi-Fi page: ").Replace(text)
-						if asked {
-							r2 = strings.Replace(r2, " Expires", " Asked 19:05, before a restart. Expires", 1)
-						}
 						if fits(r2 + "xxx") {
 							t.Fatalf("%s: short form though the full one fits: %q", name, text)
 						}
