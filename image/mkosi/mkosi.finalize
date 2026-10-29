@@ -1203,7 +1203,8 @@ def namespace_mount_violations(name, files):
 def self_bind(files, word):
     """DEVSLOT-image: whether BindReadOnlyPaths= WORD binds a regular file under /usr onto itself, every
     step to it a directory and the file not a link, so the mount shows the verity file where it already
-    is and adds nothing that executes (a driver's binary inside its TemporaryFileSystem=/:ro)."""
+    is and adds nothing that executes (a driver's binary inside its TemporaryFileSystem=/:ro,noexec,
+    which holds UPD-10 in place of NoExecPaths=/; that entry at "/" would drop the empty root, #3642)."""
     if word[:1] in "-+" or ":" in word or not word.startswith(EXEC_ONLY + "/") or not files:
         return False
     rel = word.lstrip("/")
@@ -1214,6 +1215,82 @@ def self_bind(files, word):
     except OSError:
         return False
     return st is not None and stat.S_ISREG(st.st_mode)
+
+
+# DEVSLOT-root-guard (#3712): systemd 257 keeps one mount entry per path (namespace.c drop_duplicates
+# after mount_path_compare: by path, then by MountMode, the first wins), so an entry at "/" in any mode
+# before MOUNT_TMPFS silently drops TemporaryFileSystem=/. Read from v257.13's MountMode and the
+# append_* calls of setup_namespace: these are the unit settings that can name "/" in such a mode
+# (MOUNT_INACCESSIBLE, MOUNT_IMAGE, MOUNT_BIND, MOUNT_READ_ONLY, MOUNT_READ_WRITE, MOUNT_NOEXEC,
+# MOUNT_EXEC, with load-fragment's *Directories= aliases). MOUNT_READ_ONLY at "/" also comes from
+# ProtectSystem=strict, which DynamicUser=yes forces (unit.c unit_patch_contexts). MOUNT_OVERLAY is
+# ExtensionDirectories=, refused by NAMESPACE_ROOTS; every other mode before MOUNT_TMPFS has a fixed
+# path that is not "/", and a mode after it loses to the empty root.
+ROOT_ACCESS = ("InaccessiblePaths", "InaccessibleDirectories", "ReadOnlyPaths", "ReadOnlyDirectories",
+               "ReadWritePaths", "ReadWriteDirectories", "NoExecPaths", "ExecPaths")
+ROOT_TARGETS = ("BindPaths", "BindReadOnlyPaths", "MountImages")
+PROTECT_SYSTEM = {"strict": "strict", "full": "full", "yes": "yes", "no": "no"}
+
+
+def ini_assignments(files, section, key):
+    """Every value assigned to SECTION.KEY across FILES in order, empty ones included. ValueError as
+    ini_words."""
+    val = []
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        val += [v for s, k, v in lines if (s, k) == (section, key)]
+    return val
+
+
+def root_strict(files):
+    """Whether systemd 257 resolves FILES' [Service] to ProtectSystem=strict: DynamicUser=yes forces it,
+    else the last value systemd parses (parse_boolean, then the case-sensitive table; a value it cannot
+    parse, the empty one included, is logged and the previous kept). ValueError for a value the check
+    does not model."""
+    def last(key, parse):
+        got = None
+        for v in ini_assignments(files, "Service", key):
+            x = parse(v)
+            if x is None:
+                raise ValueError("%s=%s: the tree check does not model it" % (key, v))
+            got = x
+        return got
+
+    def boolean(v):
+        return True if v.lower() in TRUE_WORDS else False if v.lower() in FALSE_WORDS else None
+
+    def protect(v):
+        return {True: "yes", False: "no"}.get(boolean(v)) or PROTECT_SYSTEM.get(v)
+    return bool(last("DynamicUser", boolean)) or last("ProtectSystem", protect) == "strict"
+
+
+def root_mounts(files):
+    """DEVSLOT-root-guard (#3712): each setting FILES resolve to that puts a mount entry at "/" which
+    systemd 257 keeps in place of TemporaryFileSystem=/ (ROOT_ACCESS, ROOT_TARGETS, root_strict), as
+    KEY=WORD, and every TemporaryFileSystem=/ word past the first, since two entries in one mode sort
+    in no set order. ValueError for a word the check does not model."""
+    out = []
+    for key in ROOT_ACCESS:
+        out += ["%s=/" % key for p in ini_paths(files, "Service", key) if p == "/"]
+    for key in ROOT_TARGETS:
+        for w in ini_words(files, "Service", key):
+            if any(c in w for c in "\"'%\\"):
+                raise ValueError("%s=%s: the tree check does not model it" % (key, w))
+            parts = w.lstrip("-+").split(":")
+            target = parts[1] if len(parts) > 1 else parts[0]
+            if ".." in target.split("/"):
+                raise ValueError("%s=%s: the tree check does not model it" % (key, w))
+            if not [x for x in target.split("/") if x not in ("", ".")]:
+                out.append("%s=%s" % (key, w))
+    if root_strict(files):
+        out.append("ProtectSystem=strict")
+    tmp = [w for w in ini_words(files, "Service", "TemporaryFileSystem")
+           if not [x for x in w.split(":", 1)[0].split("/") if x not in ("", ".")]]
+    return out + ["TemporaryFileSystem=%s" % w for w in tmp[1:]]
+
 
 def noexec_violations(root):
     """UPD-10: each agentos service the tree ships but NOEXEC_EXEMPT, with every drop-in systemd
@@ -1258,8 +1335,8 @@ def noexec_violations(root):
         out += namespace_mount_violations(name, files)
         # An empty root (TemporaryFileSystem=/, read-only and noexec) is the other way to hold UPD-10:
         # nothing in it executes but what the unit binds in, which namespace_mount_violations limits.
-        # systemd keeps one mount entry per path (namespace.c drop_duplicates, the lower mode first),
-        # so with NoExecPaths=/ the empty root is silently dropped and the unit sees the host's (#3642).
+        # systemd keeps one mount entry per path, so any other entry at "/" (root_mounts; NoExecPaths=/
+        # in #3642) silently drops the empty root and the unit sees the host's (#3712).
         try:
             tmp_root = [(w.split(":", 1) + [""])[1] for w in ini_words(files, "Service", "TemporaryFileSystem")
                         if w.split(":", 1)[0] == "/"]
@@ -1267,9 +1344,15 @@ def noexec_violations(root):
             tmp_root = []
         empty_root = any([o for o in opts.split(",") if o in ("ro", "rw")][-1:] == ["ro"] and mount_noexec(opts)
                          for opts in tmp_root)
-        if tmp_root and "/" in noexec:
-            out.append("%s: TemporaryFileSystem=/ with NoExecPaths=/; systemd drops the empty root for the "
-                       "NoExecPaths= entry at the same path (UPD-10, #3642)" % name)
+        if tmp_root:
+            try:
+                others = root_mounts(files)
+            except ValueError as e:
+                others = [str(e)]
+            if others:
+                empty_root = False
+                out.append("%s: TemporaryFileSystem=/ with %s; systemd drops the empty root for the other "
+                           "entry at the same path (UPD-10, #3642, #3712)" % (name, ", ".join(others)))
         if "/" not in noexec and not empty_root:
             out.append("%s: NoExecPaths does not hold /; must be NoExecPaths=/ (UPD-10)" % name)
         if not execs and not empty_root:
@@ -1362,6 +1445,7 @@ FULL_PRIVILEGE_COMMANDS = (
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
+FALSE_WORDS = ("0", "no", "n", "false", "f", "off")
 
 
 def unit_with_dropins(root, dirs, name):
@@ -1522,9 +1606,9 @@ def keeper_path_violations(name, files):
 def driver_root(name, files):
     """Whether service NAME is a driver's template (DRIVER_UNIT; driver_violations holds each one to
     the template rendered for its name) whose whole root is TemporaryFileSystem=/:ro,noexec, with no
-    NoExecPaths=/ entry, which would make systemd drop that root (#3642)."""
+    other mount entry at "/" (root_mounts), which would make systemd drop that root (#3642, #3712)."""
     return (bool(DRIVER_UNIT.match(name)) and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"]
-            and "/" not in ini_paths(files, "Service", "NoExecPaths"))
+            and not root_mounts(files))
 
 
 def keeper_unit_violations(name, files):

@@ -111,8 +111,14 @@ func TestLendFromRefuses(t *testing.T) {
 		"name off the alphabet": {"Scale", key("driver-Scale"), func() *os.File { return file(good) }},
 		"another clerk's key":   {"scale", key("driver-hue"), func() *os.File { return file(good) }},
 		"not a regular file":    {"scale", key("driver-scale"), func() *os.File { f, _ := os.Open(dir); return f }},
-		"too large":             {"scale", key("driver-scale"), func() *os.File { return file(make([]byte, maxDeviceFile+1)) }},
-		"no slot":               {"scale", key("driver-scale"), func() *os.File { return file(store("driver-scale", func(*clerk.Secrets) {})) }},
+		// #3713: a pipe that carries the good file's bytes; only the S_IFREG check refuses it.
+		"a pipe": {"scale", key("driver-scale"), func() *os.File {
+			r, w, _ := os.Pipe()
+			go func() { w.Write(good); w.Close() }()
+			return r
+		}},
+		"too large": {"scale", key("driver-scale"), func() *os.File { return file(make([]byte, maxDeviceFile+1)) }},
+		"no slot":   {"scale", key("driver-scale"), func() *os.File { return file(store("driver-scale", func(*clerk.Secrets) {})) }},
 		"a grant": {"scale", key("driver-scale"), func() *os.File {
 			return file(store("driver-scale", func(s *clerk.Secrets) { s.Put("device/scale", clerk.KindGrant, []byte("canary-g")) }))
 		}},
