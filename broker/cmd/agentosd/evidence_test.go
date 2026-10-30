@@ -797,3 +797,26 @@ func TestHeldCodeBesideAKeyExpires(t *testing.T) {
 		t.Fatalf("kept %+v", l)
 	}
 }
+
+// TestHeldCodeShowsItsExpiredView (CODEH-8, #4014 delta L3): at the hour a
+// code kept with KeepCode reads as the view the owner channel gave, and
+// the swept file holds neither code.
+func TestHeldCodeShowsItsExpiredView(t *testing.T) {
+	r := newEvRig(t)
+	text := "Your code is 482913. Also verifi cation 4829 13"
+	if err := r.ev.kept.KeepCode(text, owner.ExpiredView("Your code is 482913. Also verifi\x07cation 4829\x0713")); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); l[0].Text != text {
+		t.Fatalf("before the hour %+v", l[0])
+	}
+	r.now = r.now.Add(time.Hour)
+	r.ev.kept.sweep()
+	raw, _ := r.store.Load()
+	if strings.Contains(string(raw), "4829") {
+		t.Fatalf("swept file %s", raw)
+	}
+	if l := r.ev.kept.list(); l[0].Text != owner.ExpiredCode || !l[0].CodeExpired {
+		t.Fatalf("at the hour %+v", l[0])
+	}
+}

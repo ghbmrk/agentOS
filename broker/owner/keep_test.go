@@ -20,8 +20,17 @@ type recKeeper struct {
 	err   error
 	kinds []string
 	texts []string
-	sent  []int
-	phone *modem.Line
+	// expired are KeepCode's views, in order.
+	expired []string
+	sent    []int
+	phone   *modem.Line
+}
+
+func (k *recKeeper) KeepCode(text, expired string) error {
+	k.mu.Lock()
+	k.expired = append(k.expired, expired)
+	k.mu.Unlock()
+	return k.Keep(KeptOneTime, text)
 }
 
 func (k *recKeeper) Keep(kind, text string) error {

@@ -22,6 +22,7 @@ Board section: Owner channel and approvals (SPEC §10). Work item #906, D-089 an
 - CODEH-5 `::TestCodeHoursBound`: 0 and 25 are refused, 1 and 24 accepted, default 1.
 - CODEH-6 `broker/localui/held_test.go::TestHeldPageSaysCodeExpired`.
 - CODEH-7 `broker/owner/codehours_test.go::TestEveryHeldCodeGetsHours` and `broker/cmd/agentosd/evidence_test.go::TestHeldCodeBesideAKeyExpires`: a code beside a key, and one found only before controls are stripped, are kept as `KeptOneTime` and expire at the hour; the key keeps its days.
+- CODEH-8 `broker/owner/codehours_test.go::TestNoHeldCodeOutlivesItsHours` and `broker/cmd/agentosd/evidence_test.go::TestHeldCodeShowsItsExpiredView`: the owner channel hands the keeper the expired view (`Keeper.KeepCode`); a text whose strip changed it expires whole, so a code a control hid beside a visible one goes too.
 - Updated, not new: `broker/owner/keep_test.go` (the secret case is a code, so its kind and pointer change).
 
 **Scope:** `broker/owner/disclose.go`, `broker/owner/keep.go`, `broker/owner/codehours_test.go` (new), `broker/owner/keep_test.go`, `broker/owner/ASSUMPTIONS.md`, `broker/cmd/agentosd/evidence.go`, `broker/cmd/agentosd/evidence_test.go`, `broker/cmd/agentosd/main.go` (the flag only), `broker/localapi/held.go`, `broker/localui/held.go`, `broker/localui/held_test.go`. `broker/owner/pacer.go` only for `checkAgent`'s one withhold call, which passes the text as received (#2189 edits `agentText` there).

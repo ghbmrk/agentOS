@@ -182,6 +182,19 @@ func ExpireCodes(text string) string {
 	return ExpiredCode
 }
 
+// ExpiredView is what a held text received as text shows once its code
+// expires: ExpireCodes of the text as kept, stripped of controls. A
+// control or bidi character the strip changed may have hidden a code the
+// kept text no longer shows, so then the whole text goes (CH-19, #906,
+// #4014 L3).
+func ExpiredView(text string) string {
+	s := control.StripControls(text)
+	if s != text {
+		return ExpiredCode
+	}
+	return ExpireCodes(s)
+}
+
 // CodeKind names the kind of code text carries, never its value: "a
 // code of 6 digits" when every code next to a code word is that many digits,
 // otherwise "a code" (CH-19, #906).

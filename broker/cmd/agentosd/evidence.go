@@ -368,7 +368,7 @@ func converse(channel func() *owner.Channel) func(string) error {
 // Each expires only by time, keepFor after it was kept; its text is then
 // dropped and a stub stays for stubFor more, so the page can say it has
 // expired. A code the owner channel kept (owner.KeptOneTime) is kept only
-// codeFor; then its text reads with the code expired (owner.ExpireCodes),
+// codeFor; then its text reads with the code expired (owner.ExpiredView),
 // and the item keeps its days (CH-19, #906). Nothing is evicted by count: a new item that would take the
 // file past maxKeptBytes is refused, and its sender says it could not be
 // kept. A deletion's reach (CAP-3) forgets them all, stubs too (forget).
@@ -401,6 +401,8 @@ type keptReply struct {
 	// whose code has (CH-19, #906).
 	CodeUntil   time.Time `json:"code_until,omitzero"`
 	CodeExpired bool      `json:"code_expired,omitempty"`
+	// CodeGone is the text to show from CodeUntil (owner.ExpiredView).
+	CodeGone string `json:"code_gone,omitempty"`
 }
 
 type keptReplies struct {
@@ -508,7 +510,16 @@ func tellHeldDropped(ch *owner.Channel, n int) error {
 
 // Keep keeps a text the owner channel withheld (owner.Keeper).
 func (k *keptReplies) Keep(kind, text string) error {
+	if kind == owner.KeptOneTime {
+		return k.KeepCode(text, owner.ExpireCodes(text))
+	}
 	return k.keep(kind, text)
+}
+
+// KeepCode keeps a code the owner channel withheld, with the text to show
+// once it expires (owner.Keeper).
+func (k *keptReplies) KeepCode(text, expired string) error {
+	return k.keepWith(owner.KeptOneTime, text, expired)
 }
 
 // keep adds text of kind, or refuses it, logging why without the text.
@@ -518,6 +529,12 @@ func (k *keptReplies) Keep(kind, text string) error {
 // keeps its id but takes this keep's time, and moves to the end, so it
 // lasts keepFor from the latest pointer to it (HELD-1, HELD-2).
 func (k *keptReplies) keep(kind, text string) error {
+	return k.keepWith(kind, text, "")
+}
+
+// keepWith is keep, with what a KeptOneTime text shows once its code
+// expires.
+func (k *keptReplies) keepWith(kind, text, codeGone string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	l, err := k.loadLocked()
@@ -528,7 +545,7 @@ func (k *keptReplies) keep(kind, text string) error {
 			if codeFor <= 0 {
 				codeFor = defaultCodeFor
 			}
-			item.CodeUntil = item.At.Add(codeFor)
+			item.CodeUntil, item.CodeGone = item.At.Add(codeFor), codeGone
 		}
 		if i := slices.IndexFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }); i >= 0 {
 			item.ID = l[i].ID
@@ -672,7 +689,11 @@ func (k *keptReplies) loadLocked() ([]keptReply, error) {
 			r.ID = hex.EncodeToString(sum[:8])
 		}
 		if !r.CodeUntil.IsZero() && !now.Before(r.CodeUntil) {
-			r.Text, r.CodeUntil, r.CodeExpired = owner.ExpireCodes(r.Text), time.Time{}, true
+			gone := r.CodeGone
+			if gone == "" {
+				gone = owner.ExpireCodes(r.Text)
+			}
+			r.Text, r.CodeUntil, r.CodeGone, r.CodeExpired = gone, time.Time{}, "", true
 		}
 		age := now.Sub(r.At)
 		switch {

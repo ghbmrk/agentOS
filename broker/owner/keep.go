@@ -12,6 +12,9 @@ import (
 // KeptOneTime or KeptCode; text is stripped of controls. An error means it was not kept.
 type Keeper interface {
 	Keep(kind, text string) error
+	// KeepCode keeps a KeptOneTime text with what to show in its place
+	// once its code expires (ExpiredView, CH-19, #906).
+	KeepCode(text, expired string) error
 }
 
 // The kinds of text the channel withholds and keeps.
@@ -79,7 +82,11 @@ func (c *Channel) withholdFrom(kind, text, source string) string {
 			pointer = CodePointer(CodeKind(stripped), source)
 		}
 	}
-	if k := c.keeper.Load(); k != nil && (*k).Keep(kind, stripped) == nil {
+	keep := func(k Keeper) error { return k.Keep(kind, stripped) }
+	if kind == KeptOneTime {
+		keep = func(k Keeper) error { return k.KeepCode(stripped, ExpiredView(text)) }
+	}
+	if k := c.keeper.Load(); k != nil && keep(*k) == nil {
 		return pointer
 	}
 	log.Printf("owner channel: a held %s text was not kept for the owner page", kind)

@@ -163,3 +163,30 @@ func TestEveryHeldCodeGetsHours(t *testing.T) {
 		t.Fatalf("a code not found in the stored text survived: %q", got)
 	}
 }
+
+// TestNoHeldCodeOutlivesItsHours (CODEH-8, #4014 delta L3): what a held
+// text shows once its code expires carries none of its codes, including
+// one a control hid beside one the kept text still shows; a text with no
+// control keeps its other words.
+func TestNoHeldCodeOutlivesItsHours(t *testing.T) {
+	for _, c := range []struct{ text, want string }{
+		{"code 482913 and co\x07de 777777", ExpiredCode},
+		{"Your code is 482913. Also verifi\x07cation 4829\x0713", ExpiredCode},
+		{"code 482913 then later the pin\x07 is 5555", ExpiredCode},
+		{"login code 111111 and key AKIACANARY0000000000 and co\x07de 777777", ExpiredCode},
+		{"Your code is 482913.\nAsk me if it fails.", "Your code is " + ExpiredCode + ".\nAsk me if it fails."},
+	} {
+		r := pacedRig(t, quiet22to7(), 12, 0)
+		k := &recKeeper{phone: r.phone}
+		r.ch.SetKeeper(k)
+		if err := r.ch.Converse(c.text); err != nil {
+			t.Fatal(err)
+		}
+		if len(k.kinds) != 1 || k.kinds[0] != KeptOneTime || len(k.expired) != 1 || k.expired[0] != c.want {
+			t.Fatalf("%q: kept %q, expired view %q", c.text, k.kinds, k.expired)
+		}
+		if ExpiredView(c.text) != c.want || AgentCode(c.want) {
+			t.Fatalf("%q: ExpiredView %q", c.text, ExpiredView(c.text))
+		}
+	}
+}
