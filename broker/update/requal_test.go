@@ -220,6 +220,71 @@ func TestSecurityFailureIsFinalOnItsSuite(t *testing.T) {
 	}
 }
 
+// baseErr fails the baseline's security run while err is set.
+type baseErr struct {
+	*fakeRunner
+	err error
+}
+
+func (r *baseErr) Run(ctx context.Context, rel *Verified, suite string) (Score, error) {
+	if rel == nil && suite == SuiteSecurity && r.err != nil {
+		return Score{}, r.err
+	}
+	return r.fakeRunner.Run(ctx, rel, suite)
+}
+
+// hook calls before ahead of each Run.
+type hook struct {
+	*fakeRunner
+	before func(rel *Verified, suite string)
+}
+
+func (h *hook) Run(ctx context.Context, rel *Verified, suite string) (Score, error) {
+	h.before(rel, suite)
+	return h.fakeRunner.Run(ctx, rel, suite)
+}
+
+// A candidate's security failure is saved before the baseline runs, so a
+// baseline error afterwards does not let a clean retry pass it (#4033
+// Security delta 2, point 1a).
+func TestSecurityMarkSurvivesBaselineError(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := &baseErr{fakeRunner: passing(), err: errors.New("sandbox flake")}
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39)
+	if _, err := requalifier(t, f, r).Requalify(context.Background(), v); err == nil {
+		t.Fatal("baseline error not reported")
+	}
+	r.err = nil
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 40)
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("clean retry after a baseline error: %+v, %v; want not passed", got, err)
+	}
+}
+
+// A mark whose save failed still holds in this process (point 1b).
+func TestSecurityMarkHeldWhenSaveFails(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := passing()
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39)
+	path := filepath.Join(f.dir, "requal.json")
+	// After load, a non-empty directory at the record path makes the save
+	// fail: it is planted when the candidate's security run starts.
+	q := requalifier(t, f, &hook{r, func(rel *Verified, suite string) {
+		if rel != nil && suite == SuiteSecurity {
+			f.must(os.MkdirAll(filepath.Join(path, "x"), 0o700))
+		}
+	}})
+	if _, err := q.Requalify(context.Background(), v); err == nil {
+		t.Fatal("failed save not reported")
+	}
+	f.must(os.RemoveAll(path))
+	q.runner = r
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 40)
+	if got, err := q.Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("clean retry after a failed save: %+v, %v; want not passed", got, err)
+	}
+}
+
 // The ship gate holds even on a record a runner once wrote (#4033 Security
 // point 4).
 func TestNoRunnerAfterAPassStillHolds(t *testing.T) {

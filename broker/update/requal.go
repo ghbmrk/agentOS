@@ -62,6 +62,9 @@ type Requalifier struct {
 	runner Runner
 	path   string
 	mu     sync.Mutex
+	// failed holds this process's security failures too, so a mark whose
+	// save failed still holds until the process ends.
+	failed map[string]string
 }
 
 // requalState is the saved record: the security suite's floor, which only
@@ -80,7 +83,7 @@ func NewRequalifier(store *Store, runner Runner, path string) (*Requalifier, err
 	if store == nil || path == "" {
 		return nil, errors.New("update: requalifier needs a store and a state path")
 	}
-	return &Requalifier{store: store, runner: runner, path: path}, nil
+	return &Requalifier{store: store, runner: runner, path: path, failed: map[string]string{}}, nil
 }
 
 // Requalify judges v against the installed release, running every suite
@@ -105,10 +108,18 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 	if err != nil {
 		return Verdict{}, err
 	}
+	key := refKey(out.Ref)
 	for _, s := range suites {
 		cand, err := q.run(ctx, v, s)
 		if err != nil {
 			return Verdict{}, err
+		}
+		// A failing security case is marked and saved before anything
+		// else can fail, so no later error lets a retry pass it.
+		if s == SuiteSecurity && cand.Passed < cand.Cases {
+			if err := q.mark(&st, key, cand.Digest); err != nil {
+				return Verdict{}, err
+			}
 		}
 		base, err := q.run(ctx, nil, s)
 		if err != nil {
@@ -120,10 +131,9 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		}
 		detail := judge(cand, base, st.Floor)
 		if s == SuiteSecurity {
-			key := refKey(out.Ref)
 			if detail != "" {
-				st.Failed[key] = cand.Digest
-			} else if st.Failed[key] == cand.Digest {
+				st.Failed[key], q.failed[key] = cand.Digest, cand.Digest
+			} else if st.Failed[key] == cand.Digest || q.failed[key] == cand.Digest {
 				detail = "failed this security suite before"
 			}
 		}
@@ -141,6 +151,14 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 
 func refKey(r Ref) string {
 	return fmt.Sprintf("%d:%s:%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
+}
+
+// mark records that the candidate failed the security suite digest, in
+// memory first, then in the saved record.
+func (q *Requalifier) mark(st *requalState, key, digest string) error {
+	q.failed[key] = digest
+	st.Failed[key] = digest
+	return q.save(*st)
 }
 
 // run is one Runner call whose score must be for the suite it asked for
