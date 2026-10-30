@@ -116,6 +116,26 @@ func TestOwnerAndBoxNumbersNeverPass(t *testing.T) {
 	}
 }
 
+// A planner's guess at the owner's, the box's or the line's number, in any
+// form, reads planner-number like any other guess, so the refusal code is
+// no oracle on those numbers (CH-1, PLN-1; Security 6507339887).
+func TestPlannerGuessOfOwnNumberIsPlannerNumber(t *testing.T) {
+	r := newRig(t, true)
+	for i, to := range []string{ownerNum, boxNum, lineNum, "5550000001", "+1 555 000 0001", "(555) 000-0001", "not a number"} {
+		if res := r.text(t, "guess"+strconv.Itoa(i), to, "code?"); res.Detail != RPlanner {
+			t.Fatalf("%s: %+v", to, res)
+		}
+		for _, src := range []key.Source{key.SrcClerk, key.SrcOwner} {
+			if got := r.c.Admit(key.Arg{Value: to, Source: src}, lineNum); got != RNotContact && got != RNotFixed {
+				t.Fatalf("%s labelled %s: %q", to, src, got)
+			}
+		}
+	}
+	if len(r.line.texts()) != 0 {
+		t.Fatalf("sent %v", r.line.texts())
+	}
+}
+
 // The line's one budget is the key's rate caveats, charged by the kernel's
 // ledger: the eleventh text past ten a day is refused whatever its
 // recipient, and the clerk keeps no budget of its own beside it.
