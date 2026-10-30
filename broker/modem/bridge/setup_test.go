@@ -98,7 +98,7 @@ func TestSetupPairsOverTheBridge(t *testing.T) {
 	if !ok || from != "+15550000101" || text != "PAIR 4821" {
 		t.Fatalf("setup got %q %q %v", from, text, ok)
 	}
-	if err := line.Send(context.Background(), from, "agentOS is running on this PC. This is your box's number; save it as agentOS."); err != nil {
+	if err := line.Send(context.Background(), from, "agentOS is running on this PC. This is your box's number."); err != nil {
 		t.Fatal(err)
 	}
 	select {
