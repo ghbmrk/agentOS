@@ -23,6 +23,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/localapi"
+	"github.com/ghbmrk/agentos/broker/owner"
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
@@ -706,8 +707,8 @@ func TestAnEnrolmentIsAnnouncedOnce(t *testing.T) {
 	if err := r.enrol("s1", phone, r.anchors[1]); err != nil {
 		t.Fatal(err)
 	}
-	want := "A phone passkey was added: " + fingerprint(phone.public(t)) + ", approved by hardware key " +
-		fingerprint(r.anchors[1].public(t)) + ". If you didn't add it, cut it off on the passkey page."
+	want := "A phone passkey was added: " + noticePrint(phone.public(t)) + ", approved by hardware key " +
+		noticePrint(r.anchors[1].public(t)) + ". If you didn't add it, cut it off on the passkey page."
 	if len(r.told) != 1 || r.told[0] != want {
 		t.Fatalf("told %q, want once %q", r.told, want)
 	}
@@ -737,8 +738,32 @@ func TestALostEnrolAnswerIsStillAnnounced(t *testing.T) {
 		t.Fatalf("after the lost answer, told %q", r.told)
 	}
 	r.p.Finish(context.Background(), "s1", ad, cd, sig) // the page's retry
-	if len(r.told) != 1 || !strings.Contains(r.told[0], fingerprint(phone.public(t))) ||
-		!strings.Contains(r.told[0], fingerprint(r.anchors[0].public(t))) {
+	if len(r.told) != 1 || !strings.Contains(r.told[0], noticePrint(phone.public(t))) ||
+		!strings.Contains(r.told[0], noticePrint(r.anchors[0].public(t))) {
 		t.Fatalf("told %q", r.told)
+	}
+}
+
+// The notice reaches the owner as written: the owner channel holds back
+// any text owner.SecretShaped flags (Channel.disclose, CH-19), and a
+// fingerprint group beside "key" would read as a code (#3228).
+func TestTheEnrolmentNoticeIsNotHeldBack(t *testing.T) {
+	ed := func() key.PublicKey {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key.Ed25519(pub)
+	}
+	for range 500 {
+		pk, by := newAuthenticator(t).public(t), ed()
+		if s := enrolledNotice(pk, by); owner.SecretShaped(s) || owner.Disclose(s) != s {
+			t.Fatalf("held back: %q", s)
+		}
+	}
+	// The page's spaced form would be held back, which is why the notice
+	// joins the groups.
+	if !owner.SecretShaped("approved by hardware key 9f48 889a 51b9") {
+		t.Fatal("the filter no longer reads a spaced fingerprint as a code; the dashes can go")
 	}
 }

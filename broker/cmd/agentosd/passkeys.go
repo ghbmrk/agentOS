@@ -77,10 +77,18 @@ func newPasskeys(k passkeyKernel, rpID string, tell func(string) error) *passkey
 // enrolledNotice is the owner's notice of a phone passkey enrolled by the
 // hardware key by (#3228): a compromised page could put its own point
 // under the owner's tap, so the owner sees every key added and can cut off
-// one they did not add.
+// one they did not add. The fingerprints' groups are joined by dashes: a
+// 4-digit group beside "key" reads as a code to the owner channel's filter
+// (owner.CodeShaped, CH-19), which would hold the notice back, while one
+// 14-character word does not.
 func enrolledNotice(pk, by key.PublicKey) string {
-	return "A phone passkey was added: " + fingerprint(pk) + ", approved by hardware key " + fingerprint(by) +
+	return "A phone passkey was added: " + noticePrint(pk) + ", approved by hardware key " + noticePrint(by) +
 		". If you didn't add it, cut it off on the passkey page."
+}
+
+// noticePrint is fingerprint with its groups joined by dashes.
+func noticePrint(pk key.PublicKey) string {
+	return strings.ReplaceAll(fingerprint(pk), " ", "-")
 }
 
 // LogPasskeyUntold is logged when an enrolment's notice could not be sent.
