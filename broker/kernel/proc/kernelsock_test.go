@@ -449,6 +449,14 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	}
 	phone, phonePriv := gen(8)
 	edge, edgePriv := gen(45)
+	// lowered is by's signature over lowering "full" from 1000 to 900, its
+	// second reserve change after the raise above.
+	lowered := func(by ed25519.PrivateKey) key.Cosign {
+		return key.Approve(key.Ed25519Signer(by), kernel.ReserveHash(1, "full", kernel.PoolFull, 900))
+	}
+	win := func(used, resetAt int64) []kernel.WindowReading {
+		return []kernel.WindowReading{{Window: "5h", Used: used, ResetAt: resetAt}}
+	}
 	hi := edgeHello(edgePriv, 1)
 	spend := &key.Refusal{Code: key.RSpendTask, Detail: "used up"}
 	code := kernel.SignCode(phonePriv, []kernel.CodeStep{kernel.CodeStepOf(p1, 0)}) // no checker is pinned: refused alike
@@ -513,6 +521,28 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			}},
 		{name: "setline", op: "setline", sock: func(o Owner, _ Meter) (any, error) { return nil, o.SetLine(100) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.SetLine(now(), 100) }},
 		{name: "reserve", op: "reserve", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Reserve("full", kernel.PoolFull) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", kernel.PoolFull) }},
+		// A lowering with no passkey is refused alike, as ErrReserveSig itself;
+		// signed by both hardware keys (from 1000 it is big), it is logged
+		// and held (RES-5a).
+		{name: "reserve unsigned", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+			err := o.Reserve("full", 900)
+			if !errors.Is(err, kernel.ErrReserveSig) {
+				t.Errorf("an unsigned lowering over the socket: %v, want %v", err, kernel.ErrReserveSig)
+			}
+			return nil, err
+		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", 900) }},
+		{name: "reserve one passkey", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+			err := o.Reserve("full", 900, lowered(ownerPriv))
+			if !errors.Is(err, kernel.ErrNeedsCosign) {
+				t.Errorf("a big lowering with one passkey over the socket: %v, want %v", err, kernel.ErrNeedsCosign)
+			}
+			return nil, err
+		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Reserve(now(), "full", 900, lowered(ownerPriv)) }},
+		{name: "reserve lowered", op: "reserve", sock: func(o Owner, _ Meter) (any, error) {
+			return nil, o.Reserve("full", 900, lowered(ownerPriv), lowered(sparePriv))
+		}, call: func(k *kernel.Kernel) (any, error) {
+			return nil, k.Reserve(now(), "full", 900, lowered(ownerPriv), lowered(sparePriv))
+		}},
 		{name: "admit", op: "admitspend", read: func(v any) bool { return v.(kernel.Admitted).Seq > 0 },
 			sock: func(_ Owner, m Meter) (any, error) {
 				a, r := m.AdmitSpend(0, "m", 37)
@@ -528,9 +558,10 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 			}
 			return nil, err
 		}, call: func(k *kernel.Kernel) (any, error) { return nil, k.Meter(now(), admitted, "api", 37, "provider") }},
+		{name: "spent", op: "spent", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Spent(at - 1) }, call: func(k *kernel.Kernel) (any, error) { return k.State().Spent(at - 1), nil }},
 		{name: "admitspend", op: "admitspend", sock: func(_ Owner, m Meter) (any, error) { a, r := m.AdmitSpend(0, "m", 1000); return a, refusal(r) }, call: func(k *kernel.Kernel) (any, error) { a, r := k.AdmitSpend(now(), "m", 1000); return a, refusal(r) }},
 		{name: "admitpool", op: "admitpool", sock: func(_ Owner, m Meter) (any, error) { return nil, refusal(m.AdmitPool(0, "full")) }, call: func(k *kernel.Kernel) (any, error) { return nil, refusal(k.AdmitPool(now(), "full")) }},
-		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", 300, at+1000) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", 300, at+1000) }},
+		{name: "readpool", op: "readpool", sock: func(_ Owner, m Meter) (any, error) { return nil, m.ReadPool(0, "codex", win(300, at+1000)) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.ReadPool(now(), "codex", win(300, at+1000)) }},
 		{name: "hold", op: "hold", sock: func(_ Owner, m Meter) (any, error) { return nil, m.Hold(0, "m", spend) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Hold(now(), "m", spend) }},
 		{name: "spendheld", op: "spendheld", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.SpendHeld() }, call: func(k *kernel.Kernel) (any, error) { return k.State().SpendHeld, nil }},
 		{name: "extend", op: "extend", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Extend(ext, "m") }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Extend(now(), ext, "m") }},
@@ -546,7 +577,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 		{name: "retry moved", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 0) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 0) }},
 		{name: "retry", op: "retry", sock: func(o Owner, _ Meter) (any, error) { return nil, o.Retry("p1", 0, 1) }, call: func(k *kernel.Kernel) (any, error) { return nil, k.Retry(now(), "p1", 0, 1) }},
 		{name: "linechanges", op: "linechanges", read: func(v any) bool { return v.(int) > 0 }, sock: func(o Owner, _ Meter) (any, error) { return o.LineChanges() }, call: func(k *kernel.Kernel) (any, error) { return k.State().LineChanges(), nil }},
-		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Pools, nil }},
+		{name: "pools", op: "pools", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Pools() }, call: func(k *kernel.Kernel) (any, error) { return k.State().PoolsAt(now()), nil }},
 		{name: "anchors", op: "anchors", read: nonEmpty, sock: func(o Owner, _ Meter) (any, error) { return o.Anchors() }, call: func(k *kernel.Kernel) (any, error) { return k.State().Anchors, nil }},
 		{name: "enrollments", op: "enrollments", read: func(v any) bool { return len(v.(enrolled).Enrolled) > 0 },
 			sock: func(o Owner, _ Meter) (any, error) {
@@ -596,7 +627,7 @@ func TestEverySocketCallIsTheDirectCall(t *testing.T) {
 	// pool at its reserve, setup on a box that has its anchors (the
 	// setup-only tests take it on a fresh one), and a code approval on a box
 	// with no checker pinned (kernel TestCodeApproval*). Every other action succeeds.
-	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "setup": true, "untarget": true, "retry moved": true, "approvecode": true}
+	refused := map[string]bool{"admitspend": true, "admitpool": true, "meter again": true, "reserve unsigned": true, "reserve one passkey": true, "setup": true, "untarget": true, "retry moved": true, "approvecode": true}
 	served := map[string]bool{}
 	for _, c := range cases {
 		if c.name == "status" {

@@ -48,7 +48,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 		t.Fatalf("STATUS before setup: %v", err)
 	}
 	for name, err := range map[string]error{
-		"stop": o.Stop(), "resume": o.Resume(0), "readpool": m.ReadPool(0, "codex", 1, 2),
+		"stop": o.Stop(), "resume": o.Resume(0), "readpool": m.ReadPool(0, "codex", []kernel.WindowReading{{Window: "5h", Used: 1, ResetAt: 2}}),
 	} {
 		if !errors.Is(err, ErrSetupOnly) {
 			t.Errorf("%s before setup: got %v, want ErrSetupOnly", name, err)
@@ -64,7 +64,7 @@ func TestASetupOnlyKernelServesOnlySetup(t *testing.T) {
 	if err := o.Stop(); err != nil {
 		t.Fatalf("STOP after setup: %v", err)
 	}
-	if err := m.ReadPool(0, "codex", 1, 2); errors.Is(err, ErrSetupOnly) {
+	if err := m.ReadPool(0, "codex", []kernel.WindowReading{{Window: "5h", Used: 1, ResetAt: 2}}); errors.Is(err, ErrSetupOnly) {
 		t.Fatalf("the meter after setup: %v", err)
 	}
 }
