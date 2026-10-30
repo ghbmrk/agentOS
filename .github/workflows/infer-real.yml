@@ -22,6 +22,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 jobs:
   real:
     runs-on: ubuntu-latest

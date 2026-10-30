@@ -279,6 +279,30 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(files)
         return files
 
+    def test_go_builds_ignore_go_work(self):
+        # #4007 Security: Go loads a go.work from the build's directory or any parent, and it
+        # overrides broker/go.mod, go.sum and vendor/, so every Go run in CI and every image
+        # build sets GOWORK=off; sudo drops the environment, so each sudo env sets it again.
+        for wf in sorted(WORKFLOWS.glob("*.yml")):
+            text = wf.read_text()
+            if "actions/setup-go@" not in text:
+                continue
+            with self.subTest(workflow=wf.name):
+                top = text.split("\njobs:", 1)[0].split("\nenv:\n", 1)
+                self.assertEqual(len(top), 2, "no workflow-level env")
+                env = re.findall(r"^  (\w+): *([^#\n]*?) *(?:#.*)?$", top[1].split("\n\n")[0], re.M)
+                self.assertIn(("GOWORK", '"off"'), env)
+                for line in text.splitlines():
+                    if re.search(r"\bsudo\b.*\benv\b.*GOTOOLCHAIN=", line):
+                        self.assertIn(" GOWORK=off ", line)
+        root = WORKFLOWS.parent.parent
+        for script in ("image/build.sh", "image/infer.sh", "image/camdecode.sh", "image/camnode/build.sh"):
+            with self.subTest(script=script):
+                text = (root / script).read_text()
+                head, _, rest = text.partition("\nexport GOWORK=off\n")
+                self.assertTrue(rest, "no export GOWORK=off")
+                self.assertNotIn("go build", head)
+
     def test_actions_are_pinned_by_full_sha(self):
         for f in self.files():
             for action, _ in steps(f.read_text()):
