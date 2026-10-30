@@ -10,7 +10,7 @@ Work item #4032 (slice b of `briefs/UPD-5r.md`; slice a is #4031, PR #4033). Wri
 
 ## The split
 
-Every row is tier A. A suite with no source is an error from the runner, which `Requalify` treats as fail closed, so wiring (b6) can land before b3 to b5 without lifting the ship gate on empty suites. The gate lifts only when all three sources exist; a source that exists and holds no cases is a fresh box's real state, which slice a's rule passes.
+Every row is tier A. A suite with no source is an error from the runner, which `Requalify` treats as fail closed, so wiring (b6) can land before b3 to b5 without lifting the ship gate on empty suites. The gate lifts only when all three sources exist and the security suite holds at least one case: slice a's rule passes an empty held-out or replay suite (a fresh box's real state) but fails an empty security suite, so b3 ships at least one case.
 
 | Row | What | Scope | After |
 |---|---|---|---|
@@ -33,16 +33,16 @@ b2 to b6 are their own `work-item` issues; each one's builder writes its full br
 - `Config{Sandbox, Suites, CaseTimeout, Budget}`; `New(Config) (*Runner, error)` refuses a nil sandbox and non-positive limits.
 
 **Rules of `Run(ctx, rel, suite)`:**
-1. A suite with no entry, source or grader is `ErrNoSource` (fail closed: the gate holds). A non-nil `rel` that is not checked (`!rel.OK()`) is refused.
+1. A suite with no entry, source or grader is `ErrNoSource` (fail closed: the gate holds). A source that errs is an error, never an empty suite. A non-nil `rel` that is not checked (`!rel.OK()`) is refused.
 2. The runner computes `Digest` itself over the cases (ID, input, expect, length-prefixed), so a source cannot name one suite and serve another. Duplicate case IDs are an error.
-3. An empty suite boots nothing and scores 0 of 0.
+3. An empty suite boots nothing and scores 0 of 0; slice a then fails it only for security.
 4. One session per run; every case gets `CaseTimeout`, the whole run `Budget` (HLD-2's evaluation budget, set by the installed release). Running out of `Budget` is an error, never a partial score.
 5. **Asymmetric failure.** A candidate whose session errs or times out on a case fails that case. A baseline (`rel == nil`) whose start, case or close errs makes the run an error, since a broken baseline would lower the bar the candidate must meet. A start or close error is an error for both.
 6. `Unadmitted` sums the graders' counts on the replay suite only.
 
 **Requirement IDs:** UPD-5, HLD-2, HLD-3.
 
-**Acceptance tests** (`broker/vm/requal/requal_test.go`, marker `REQ: UPD-5, HLD-2, HLD-3`): `TestHostGradesWhatTheSandboxReturns`, `TestOnlyTheInputReachesTheSandbox`, `TestSuiteWithoutSourceFailsClosed` (also through `update.Requalifier`: the verdict is an error, never passed), `TestEmptySuiteBootsNothing`, `TestDigestNamesTheCases`, `TestDuplicateCaseIDsRefused`, `TestCandidateErrorFailsTheCase`, `TestBaselineErrorIsAnError`, `TestBudgetSpentIsAnError`, `TestUnadmittedCountsOnReplayOnly`, `TestUncheckedReleaseRefused`, `TestRequalifyThroughTheRunner` (slice a's rule end to end: a regressing candidate fails, an equal one passes).
+**Acceptance tests** (`broker/vm/requal/requal_test.go`, marker `REQ: UPD-5, HLD-2, HLD-3`): `TestHostGradesWhatTheSandboxReturns`, `TestOnlyTheInputReachesTheSandbox`, `TestSuiteWithoutSourceFailsClosed` (also through `update.Requalifier`: the verdict is an error, never passed), `TestEmptySuiteBootsNothing` (also through `update.Requalifier`: all suites empty fails on security), `TestSourceErrorIsAnError`, `TestDigestNamesTheCases`, `TestDuplicateCaseIDsRefused`, `TestCandidateErrorFailsTheCase`, `TestBaselineErrorIsAnError`, `TestBudgetSpentIsAnError`, `TestUnadmittedCountsOnReplayOnly`, `TestNegativeUnadmittedCountsAsNone`, `TestUncheckedReleaseRefused`, `TestRequalifyThroughTheRunner` (slice a's rule end to end: a regressing candidate fails, an equal one passes).
 
 **Scope:** `broker/vm/requal/requal.go`, `requal_test.go`, `ASSUMPTIONS.md`; `briefs/UPD-5r-b.md`. No new import outside the module; `broker/vm/` is open under the G2 freeze; not trusted core.
 

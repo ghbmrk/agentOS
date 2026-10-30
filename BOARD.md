@@ -78,7 +78,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-pin-audit | KRN-pin-audit: a replay given no pinned roots no longer reports a false divergence on a pinned plan (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | KRN-pin-anchors | KRN-pin-anchors: the pinned key is checked against anchors logged later, and against re-anchors (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | CLK-8-line | CLK-8-line: the second-line clerk: third-party texts through the `send` verb on an owner-held calling account, never the owner's number; E.164 recipients the clerk verified or the owner fixed; one rate budget; transcripts logged; inbound as untrusted data (CLK-8, CH-1, DEP-3, KEY-2). Rebuild under D-227. | part a: none; part b: a, #3686 (d1), #3685 (p), Mark's D-154 rule 3 answer; part c: b, #3685 (p) | building (release; tier A; brief briefs/CLK-8-line.md; part a in PR #3881) |
-| DECOY-b | DECOY-b: kernel trips, automatic narrowing, passkey resume (KRN-12) | #3762 | building(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | ENF-attest | Core-to-enforcer attestation channel: the enforcer verifies the core booted the signed image (attestation key enrolled at HW-5a, measured values pinned) before it accepts "core reflashed" (KRN-12, REC-5, HW-5a) | #3796, #3797 (PR #3798); brief to write | queued(later; tier A; one session) |
@@ -90,7 +89,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-c2-unit | MIG-4-exit-c2-unit: the checker's unit (kernel-handed key, loaded sealed seed), the keeper's codes socket and the unlock, kernel and enrollment flags on the image (CH-4, CLK-1). | #3683 (c2); image queue | queued (release; tier A; follow-up of MIG-4-exit-c2; size S) |
 | DECOY-b-wire | DECOY-b-wire: first-boot table, call trips over the kernel socket, texts and resume (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | MIG-4-untrusted-reconnect-a4 | Passkey follow-ups from the #4057 reviews: a race test that fails fast, and a retry challenge tied to the begun point. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
-| DECOY-b-harden | DECOY-b-harden: bounded repeat trips and resume, trip logged with its rejection, honey keys at every key check, outbound scan past the plan (KRN-12) | #3763 | queued(release; tier A; size M; from #4037 reviews) |
+| DECOY-b-harden | DECOY-b-harden: bounded repeat trips and resume, trip logged with its rejection, honey keys at every key check, outbound scan past the plan (KRN-12) | #3763 | building(release; tier A; size M; from #4037 reviews) |
+| MIG-4-untrusted-reconnect-a5 | Passkey enrolment notice follow-ups from the #4076 reviews: retry a lost notice, fresh enrolment challenges, fingerprint strength and form. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
+| DECOY-b-scan | DECOY-b-scan: the decoy matcher on the model clerk's outbound body and the edge link (KRN-12 Trips) | #3763 | queued(release; tier A; size M; from #4037 L3 4, split from #4070; after #4039) |
 
 ## Harness and operating model
 
@@ -278,9 +279,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CAM-retain later findings | CAM-retain-later: Erase/Add race, orphan key slots, segment times, test depth (recheck when part (d) wires the store). | CAM-clerk (d) (#3514) | queued (later; tier A; from #3608 reviews) |
 | ENF-g | ENF-g: access point config from the enforcer: four networks, per-device Wi-Fi passwords on per-device VLANs, admin only from the wired port (NET-3) | #3661 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-c | ENF-c: enforcer enrolment, recovery code, factory reset; setup network replaced at enrolment (NET-4, NET-2 Hardening, HW-10, D-178) | #3659, #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-f | ENF-f: enforcer resolver for the signed lists (dnsmasq nftset), mDNS for signed pairs only, Wake-on-LAN relay (NET-2, NET-3) | #3661 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-h | ENF-h: enforcer texts, calls and status light; log head copies and revoked keys (NET-2 Texts and calls, STO-1, STO-4, KEY-7) | #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-i | ENF-i: per-device traffic summaries; vendor firmware freeze and hold as loosenings; frozen devices isolated (NET-5, NET-7) | #3658, #3661, #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-i | ENF-i: per-device traffic summaries; vendor firmware freeze and hold as loosenings; frozen devices isolated (NET-5, NET-7) | #3658, #3661, #3664 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-k | ENF-k: confined radio process host on the enforcer and its BLE stack on BlueZ (NET-2 Confined radio stacks) | #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-l | ENF-l: agentos-enforcer daemon and its lifecycle matrix (integration owner for the enforcer rows; NET-2, STO-5) | ENF-a to ENF-i, ENF-k, ENF-r, ENF-s | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-m | ENF-m: enforcer signed image: read-only A/B, Secure Boot, watchdog, own key and feed (NET-2 Hardening) | #3670; brief question 1 | queued(tier A; lane primary; brief briefs/ENF.md) |
@@ -290,7 +290,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-q | ENF-q: locks and safety devices on the enforcer's radios: home-only unlock, unusual-time second assertion, visitor codes (NET-6, NET-4, DEV-5) | #3659, #3660, #3668, #3669, #3694 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-r | ENF-r: safety-device secrets on the enforcer: sealed hand-off at pairing, enforcer store, no core copy (STO-4, STO-3) | #3658, #3659, #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-t | ENF-t: the enforcer's Thread and Matter stacks in confined processes, Matter on the C++ SDK (NET-2 Confined radio stacks; D-231) | #3669 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | VIS-faces-later | VIS-faces-later: seven later findings from the #3787 reviews (unclear vs unknown, rotated alignment test, no_face causes, licence wording, thin false-accept margin, small far faces, zeroing comment) | #3515 e2 (#3787) | queued (later; tier A; one session) |
@@ -313,6 +312,16 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-names-b | ENF-names-b: unambiguous pair separator in the enforcer log; one policy copy per request (NET-2 Channel) | #3758 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-s-b | ENF-s-b: action screen wording (next step on a refused tap, local time for the window) | #3694 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-mdns-records | ENF-mdns-records: the mDNS pair relay passes only a paired device's own records (NET-3 Casting) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-wan-dhcp | ENF-wan-dhcp: the enforcer's own WAN DHCP and DHCPv6 pass the reverse-path filter (NET-2 Fails safe) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-dns-upstream | ENF-dns-upstream: refuse an upstream resolver inside a served prefix | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-set-reload | ENF-set-reload: keep live allow-set entries across a ruleset load (NET-2 The core's list) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-mdns-v6 | ENF-mdns-v6: the mDNS pair relay carries IPv6 (NET-3 Casting) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-dns-per-device | ENF-dns-per-device: per-device resolver views (NET-3 Devices) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-g-b | ENF-g-b: grouped Wi-Fi password on the device card; note that devices join on 2.4 GHz only (NET-3) | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-g-c | ENF-g-c: access point hardening: no SHA-1 host key, LuCI off, AP-side command allowlist (NET-3) | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-k-ptrace | ENF-k-ptrace: the radio confinement test's ptrace probe must not stop the host's PID 1 (NET-2) | #3669 | building (tier A; lane primary; from ENF-k #3669 CI) |
+| KERNEL-trim | KERNEL-trim: measure the image kernel's attack surface; trimmed, locked-down configs for core, edge and enforcer; CVE-class reduction and signed-kernel cost (HW-5a) | none (part a); the image queue (parts b and c) | building (tier A; lane primary; brief briefs/KERNEL-trim.md) |
+| SPEC-struct-1 | SPEC-struct-1: structural bounds enforced outside the core: egress byte caps (HW-12/NET-2), bind-or-bound credentials (CLK-9), breach ceiling (CLK-10/11), erase by class (LOG-4) | none | building (tier B; L1 spec-diff; design cross-silo-structure-spec-change-2026-10-30.md Part 1) |
 
 ## Model routes and the Codex lane
 
@@ -412,13 +421,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | queued |
 | VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | queued |
 | VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | queued |
-| UPD-5r-b | Requalification runner, host side: cases and graders from the installed release, fail closed without a source (UPD-5, HLD-2, HLD-3; brief briefs/UPD-5r-b.md) | UPD-5r-a (#4031) | building (A; brief to write; lifts the stable ship gate) |
 | UPD-5r-b2 | production requalification sandbox: a release's /usr image under gVisor (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; lifts the stable ship gate with b3-b6) |
 | UPD-5r-b3 | security suite held as log data (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2, UPD-7w (#3961) | queued (A) |
-| BROWSER-lost-bound | The four lost-click browser tests keep a 300 ms bound that a starved runner can still outrun after #4056; give them 3 s without changing what they assert (release, Security finding on #4056) | #4056 Security review | building (release; tier A) |
+| BROWSER-read-hook | If the lost-click browser tests flake again after #4071, add a test hook for when the fake driver has read stdin instead of raising the bound (later) | #4071 coordinator note | queued (later; tier A) |
+| UPD-5r-b1-t | UPD-5r-b1 follow-ups: tests for the source-error and clamp mutants; empty-security-suite wording | #4072 | building (A; from #4072 reviews) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
