@@ -49,6 +49,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/procguard"
 	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -123,6 +124,11 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// Not as its owner side's uid, and not dumpable, since a decoder under
+	// the clerk's own uid could then read the keys from its memory (CLK-1).
+	if err := procguard.Isolate(c.ownerUID); err != nil {
+		return err
+	}
 	// The kernel hands the key only to a peer in the unit's own group, so
 	// the clerk leaves it for its leaf only once it holds the key.
 	sec, err := openSecrets(c.dir, keyFile)

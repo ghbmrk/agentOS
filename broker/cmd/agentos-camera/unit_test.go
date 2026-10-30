@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clerk/camera"
+	"github.com/ghbmrk/agentos/broker/procguard"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
@@ -38,9 +40,10 @@ func TestDecodersLeaveTheUnitsGroup(t *testing.T) {
 	}
 }
 
-// TestTheKeyIsReadBeforeTheClerkLeavesItsGroup: the kernel hands the key
-// only to a peer in the unit's own group, so a clerk with no key never moves
-// into its leaf (CAM-host-11).
+// TestTheKeyIsReadBeforeTheClerkLeavesItsGroup: the clerk refuses its owner
+// side's uid and turns non-dumpable before it reads its key, and the kernel
+// hands the key only to a peer in the unit's own group, so a clerk with no
+// key never moves into its leaf (CAM-host-11).
 func TestTheKeyIsReadBeforeTheClerkLeavesItsGroup(t *testing.T) {
 	d, cg := t.TempDir(), t.TempDir()
 	r, w, err := os.Pipe()
@@ -49,13 +52,24 @@ func TestTheKeyIsReadBeforeTheClerkLeavesItsGroup(t *testing.T) {
 	}
 	w.Close() // the kernel sent nothing: no key
 	defer r.Close()
-	err = start([]string{"-dir", d, "-owner-sock", filepath.Join(d, "owner.sock"), "-owner-uid", "0",
-		"-runsc", "/r", "-runsc-root", "/rr", "-decode-root", "/dr", "-cgroup", cg}, io.Discard, r)
-	if err == nil {
+	args := func(owner int) []string {
+		return []string{"-dir", d, "-owner-sock", filepath.Join(d, "owner.sock"), "-owner-uid", strconv.Itoa(owner),
+			"-runsc", "/r", "-runsc-root", "/rr", "-decode-root", "/dr", "-cgroup", cg}
+	}
+	// Never as the owner side's uid: its uid check would be no boundary.
+	if err := start(args(os.Getuid()), io.Discard, r); err == nil || !strings.Contains(err.Error(), "peer uid") {
+		t.Fatalf("the clerk ran as its owner side's uid: %v", err)
+	}
+	if err := start(args(os.Getuid()+1), io.Discard, r); err == nil {
 		t.Fatal("the clerk started with no key")
 	}
 	if _, err := os.Stat(filepath.Join(cg, leaf)); !os.IsNotExist(err) {
 		t.Fatalf("the clerk left its group before it held its key: %v", err)
+	}
+	// Non-dumpable before the key is read: a decoder escape under the
+	// clerk's uid cannot read the clerk's memory (CLK-1).
+	if v, _, e := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_GET_DUMPABLE, 0, 0); e != 0 || v != 0 {
+		t.Fatalf("the clerk is dumpable: %d, %v", v, e)
 	}
 }
 
@@ -74,6 +88,10 @@ func TestDecoderStartsInTheUnitsSandbox(t *testing.T) {
 	}
 	if got := ownCgroup(t); got != cg {
 		t.Fatalf("the clerk runs in %s; the unit's -cgroup names %s", got, cg)
+	}
+	// As start leaves it: non-dumpable, apart from its owner side (root).
+	if err := procguard.Isolate(0); err != nil {
+		t.Fatal(err)
 	}
 	rt, err := decoders(config{runsc: bin, runscRoot: state, cgr: cg})
 	if err != nil {
