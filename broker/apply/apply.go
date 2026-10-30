@@ -860,7 +860,7 @@ func (a *Applier) undoHandoverLocked(pt *point, why string) error {
 		// before the next Tick never restarts into it (#4112). Otherwise
 		// a new boot may have fallen back, which Resume must judge as a
 		// fallback (UPD-1).
-		if a.thisBoot == pt.BootID {
+		if a.thisBoot != "" && a.thisBoot == pt.BootID {
 			if err := a.markLocked(pt, why); err != nil {
 				return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
 			}

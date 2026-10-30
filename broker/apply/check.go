@@ -145,7 +145,7 @@ func (c *Check) Line() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for id, v := range c.held {
-		if v == c.lineV && c.st.Adoptions[id].State == adStaged {
+		if a := c.st.Adoptions[id]; v == c.lineV && (a.State == adStaged || a.State == adDropped && a.Unsure) {
 			return ""
 		}
 	}

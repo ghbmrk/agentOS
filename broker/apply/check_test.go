@@ -1348,3 +1348,68 @@ func TestPinnedPointKeepsItsLines(t *testing.T) {
 		t.Fatalf("after undo %q, want %q", got, want)
 	}
 }
+
+// #4112 after a broker restart in the same boot: a boot read in the new
+// process (Resume's, or a Withdraw's whose mark failed to save) shows the boot is the
+// handover's, so a later unread boot still saves the stable mark.
+// Mutant: drop the boot note from Resume or from undoHandoverLocked.
+func TestUnreadBootMarkedAfterSameBootRestart(t *testing.T) {
+	for _, via := range []string{"resume", "withdraw"} {
+		cr := newCheckRig(t, update.ChannelFast)
+		ctx := context.Background()
+		cr.m.add(2, update.ChannelStable, false, "two")
+		cr.mustStep()
+		cr.clk.add(7 * time.Hour)
+		cr.act.onInstall = func() { cr.inCall = true }
+		if ok, err := cr.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("%s: handover tick: %v %v", via, ok, err)
+		}
+		cr.restart()
+		if via == "resume" {
+			cr.must(cr.a.Resume(ctx))
+		} else {
+			// The boot reads, but the mark cannot be saved.
+			cr.state.Fail = errors.New("disk full")
+			if err := cr.a.Withdraw("upd:2:1", WhyStable); !errors.Is(err, ErrApplying) {
+				t.Fatalf("%s: stable %v", via, err)
+			}
+			cr.state.Fail = nil
+		}
+		cr.act.bootedErr = errors.New("boot unreadable")
+		cr.channel = update.ChannelStable
+		cr.mustStep()
+		if pt := cr.a.st.Applying; pt == nil || !pt.Withdrawing || !pt.Stable {
+			t.Fatalf("%s: not marked: %+v", via, pt)
+		}
+		cr.act.bootedErr = nil
+		cr.restart()
+		cr.must(cr.a.Resume(ctx))
+		cr.inCall = false
+		if ok, err := cr.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("%s: tick: %v %v", via, ok, err)
+		}
+		if cr.act.restarts != 0 {
+			t.Fatalf("%s: restarted into the fast release", via)
+		}
+	}
+}
+
+// Line is held back only for the version the applier is withdrawing,
+// and for an unsure drop too: a newer release's line still shows.
+// Mutant: ignore the version; hold back only staged adoptions.
+func TestLineHeldOnlyForTheWithdrawnVersion(t *testing.T) {
+	c := &Check{st: checkState{Adoptions: map[string]adoption{
+		"upd:2:1": {State: adStaged}, "upd:3:2": {State: adDropped, Unsure: true}, "upd:4:3": {State: adDropped}}}}
+	for _, tc := range []struct {
+		held map[string]int64
+		v    int64
+		want bool
+	}{{map[string]int64{"upd:2:1": 2}, 2, false}, {map[string]int64{"upd:2:1": 2}, 5, true},
+		{map[string]int64{"upd:3:2": 3}, 3, false}, {map[string]int64{"upd:4:3": 4}, 4, true}} {
+		c.held = tc.held
+		c.setLineV("line", tc.v)
+		if got := c.Line() != ""; got != tc.want {
+			t.Errorf("held %v, line for %d shown %v, want %v", tc.held, tc.v, got, tc.want)
+		}
+	}
+}
