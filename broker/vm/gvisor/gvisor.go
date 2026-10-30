@@ -54,6 +54,11 @@ type Runtime struct {
 	Bin      string // runsc binary
 	StateDir string // runsc --root; broker-held
 	Platform string // "systrap" (no KVM needed) or "kvm"
+	// Rootless runs runsc as the caller's own uid, in a user namespace
+	// runsc makes for itself (--rootless), for a caller that is not root:
+	// a clerk under its own user (CLK-1). runsc takes it for run, not for
+	// create, so only streams and one-shot runs use it.
+	Rootless bool
 
 	logMu sync.Mutex // the exec log's appends and rotation
 
@@ -100,6 +105,9 @@ func (r *Runtime) argv(args ...string) []string {
 		n++
 	}
 	out := append(slices.Clone(args[:n]), "--root", r.StateDir, "--platform="+r.platform(), "--network=none", "--ignore-cgroups", "--overlay2=none", "--host-uds=open")
+	if r.Rootless {
+		out = append(out, "--rootless")
+	}
 	return append(out, args[n:]...)
 }
 

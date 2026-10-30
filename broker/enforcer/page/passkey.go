@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -45,8 +46,16 @@ type challenge struct {
 	prop    policy.Proposal
 	class   policy.Class
 	base    string // propose: the hash of the policy the diff was drawn against
+	secret  *sealedRef
 	msg     []byte
 	expires int64
+}
+
+// sealedRef is the sealed device secret an add-device link names: the
+// device and the envelope's hash. The envelope itself arrives with the
+// assertion and must hash to it.
+type sealedRef struct {
+	device, hash string
 }
 
 // syncState is what the last verified assertion said about the passkey
@@ -61,6 +70,8 @@ var (
 	errGone      = errors.New("this approval has expired or was already used; open the link again")
 	errRefused   = errors.New("the passkey did not approve this change")
 	errMoved     = errors.New("the policy changed since this page was drawn; open the link again")
+	errSealed    = errors.New("the device's sealed secret is missing or not the one this change names; nothing was added")
+	errStuck     = errors.New("the device's secret was refused but this change could not be withdrawn; cancel it on the home page")
 )
 
 func newID() string {
@@ -111,15 +122,19 @@ func (s *Server) link() bool {
 // draft is the proposal a link asks for, drawn by the enforcer: its next
 // document from the link with a version the page picks, its diff rendered
 // from the policy in force. The link's version and any summary text it
-// carries are never used.
+// carries are never used. A link that carries a safety-list device's
+// sealed secret names the device and the envelope's hash (pairseal's
+// ParamDevice and ParamHash); the change must add that device to the
+// safety list, and the diff gets pairseal.Statement's line naming both.
 func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 	q := r.URL.Query()
 	for k := range q {
-		if k != "d" && k != "s" {
+		if k != "d" && k != "s" && k != pairseal.ParamDevice && k != pairseal.ParamHash {
 			return nil, nil, errMalformed
 		}
 	}
-	if len(q["d"]) != 1 || len(q["d"][0]) > maxLink || len(q["s"]) > 1 {
+	if len(q["d"]) != 1 || len(q["d"][0]) > maxLink || len(q["s"]) > 1 ||
+		len(q[pairseal.ParamDevice]) > 1 || len(q[pairseal.ParamDevice]) != len(q[pairseal.ParamHash]) {
 		return nil, nil, errMalformed
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(q["d"][0])
@@ -150,12 +165,28 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 	if lines[0] == noChange {
 		return nil, nil, errMalformed
 	}
+	var ref *sealedRef
+	if len(q[pairseal.ParamDevice]) == 1 {
+		ref = &sealedRef{device: q[pairseal.ParamDevice][0], hash: q[pairseal.ParamHash][0]}
+		dev := next.Device(ref.device)
+		if s.cfg.Secrets == nil || !pairseal.Device(ref.device) || !hexHash(ref.hash) ||
+			dev == nil || dev.Everyday || cur.Device(ref.device) != nil {
+			return nil, nil, errMalformed
+		}
+		lines = append(lines, pairseal.Statement(ref.device, ref.hash))
+	}
 	prop := policy.Proposal{Doc: next, Diff: diffText(class, lines)}
 	root, err := prop.Root(s.cfg.Owner)
 	if err != nil {
 		return nil, nil, errMalformed
 	}
-	return &challenge{kind: "propose", prop: prop, class: class, base: base, msg: key.RootMsg(root)}, lines, nil
+	return &challenge{kind: "propose", prop: prop, class: class, base: base, secret: ref, msg: key.RootMsg(root)}, lines, nil
+}
+
+// hexHash is a SHA-256 in lowercase hex, as pairseal.HashHex writes it.
+func hexHash(s string) bool {
+	b, err := hex.DecodeString(s)
+	return err == nil && len(b) == pairseal.HashLen && hex.EncodeToString(b) == s
 }
 
 // assertion is a WebAuthn get() result as the page's script posts it,
@@ -224,9 +255,16 @@ func fail(w http.ResponseWriter, code int, err error) {
 
 // approve takes the owner's tap on a drawn proposal and hands it to the
 // policy, which verifies it again and classifies it against the policy in
-// force: a tightening applies now, a loosening waits 10 minutes.
+// force: a tightening applies now, a loosening waits 10 minutes. An
+// add-device change that names a sealed secret needs the envelope posted
+// with the tap, hashing to the hash the diff named; the store then admits
+// it, and if it refuses, the change is cancelled, so no device is added
+// without the secret the owner approved.
 func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
-	var a assertion
+	var a struct {
+		assertion
+		Sealed string `json:"sealed"`
+	}
 	if err := readJSON(r, &a); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
@@ -238,9 +276,20 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusGone, err)
 		return
 	}
-	sig, err := s.signature(a, c.msg)
+	sig, err := s.signature(a.assertion, c.msg)
 	if err != nil {
 		fail(w, http.StatusForbidden, err)
+		return
+	}
+	var sealed []byte
+	if c.secret != nil {
+		sealed, err = base64.RawURLEncoding.DecodeString(a.Sealed)
+		if err != nil || pairseal.HashHex(sealed) != c.secret.hash {
+			fail(w, http.StatusBadRequest, errSealed)
+			return
+		}
+	} else if a.Sealed != "" {
+		fail(w, http.StatusBadRequest, errMalformed)
 		return
 	}
 	s.cfg.Lock.Lock()
@@ -253,6 +302,20 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, http.StatusConflict, err)
 		return
+	}
+	if c.secret != nil {
+		if err := s.cfg.Secrets.Admit(c.secret.device, sealed, c.prop, sig); err != nil {
+			if out.Pending == "" || s.cfg.Policy.Cancel(out.Pending) != nil {
+				fail(w, http.StatusInternalServerError, errStuck)
+				return
+			}
+			s.cfg.Secrets.Prune() // fails closed: an unsaved erase still holds in memory
+			fail(w, http.StatusConflict, errSealed)
+			return
+		}
+	}
+	if s.cfg.Secrets != nil {
+		s.cfg.Secrets.Prune() // fails closed, as above
 	}
 	res := map[string]any{"applied": out.Applied}
 	if out.Pending != "" {
@@ -337,6 +400,9 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 	case ActCancel:
 		s.cfg.Lock.Lock()
 		err = s.cfg.Policy.Cancel(c.target)
+		if err == nil && s.cfg.Secrets != nil {
+			err = s.cfg.Secrets.Prune() // a cancelled add-device change takes its secret with it
+		}
 		s.cfg.Lock.Unlock()
 	case ActResume:
 		err = s.cfg.Channel.Resume()

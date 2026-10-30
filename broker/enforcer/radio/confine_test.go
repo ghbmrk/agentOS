@@ -3,6 +3,7 @@ package radio
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -21,6 +22,10 @@ import (
 // interface on fd 3 and, asked to read, reports what it could reach.
 const probeArg = "radio-probe-stack"
 
+// idleArg makes this test binary a process that waits for its stdin to
+// close: the probe's ptrace target.
+const idleArg = "radio-probe-idle"
+
 const nestedEnv = "AGENTOS_RADIO_USERNS"
 
 // leakedFD is a descriptor the enforcer holds without close-on-exec when
@@ -31,6 +36,10 @@ func TestMain(m *testing.M) {
 	confine.Trampoline()
 	if len(os.Args) == 4 && os.Args[1] == probeArg {
 		probeStack(os.Args[2], os.Args[3])
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == idleArg {
+		io.Copy(io.Discard, os.Stdin)
 		return
 	}
 	os.Exit(m.Run())
@@ -71,12 +80,7 @@ func probeStack(policy, page string) {
 	out["AF_BLUETOOTH socket"] = try(sock(31))
 	out["unshare a user namespace"] = try(syscall.Unshare(syscall.CLONE_NEWUSER))
 	out["setuid 0"] = try(syscall.Setuid(0))
-	_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, syscall.PTRACE_ATTACH, 1, 0)
-	if e == 0 {
-		out["ptrace"] = "allowed"
-	} else {
-		out["ptrace"] = try(e)
-	}
+	out["ptrace"] = ptraceChild(try)
 	out["AF_UNIX socket (the system bus)"] = try(sock(syscall.AF_UNIX))
 	var st syscall.Stat_t
 	out["inherited fd 100"] = try(syscall.Fstat(leakedFD, &st))
@@ -92,6 +96,32 @@ func probeStack(policy, page string) {
 	NewServer(StackBLE, os.NewFile(3, "interface")).Serve(func(r Request) ([]byte, Code) {
 		return report, CodeOK
 	})
+}
+
+// ptraceChild seizes a child the probe started, so the probe never touches
+// a process it did not start: attaching to pid 1 stopped the runner's init
+// (#4091). PTRACE_SEIZE runs PTRACE_ATTACH's permission checks without
+// stopping the tracee. The child is the stack's own, same user, so only the
+// confinement's seccomp floor refuses it. No child means no verdict.
+func ptraceChild(try func(error) string) string {
+	cmd := exec.Command("/proc/self/exe", idleArg)
+	stdin, err := cmd.StdinPipe()
+	if err == nil {
+		err = cmd.Start()
+	}
+	if err != nil {
+		return fmt.Sprintf("untested: no target: %v", err)
+	}
+	defer func() {
+		cmd.Process.Kill()
+		stdin.Close()
+		cmd.Wait()
+	}()
+	_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, 0x4206 /* PTRACE_SEIZE */, uintptr(cmd.Process.Pid), 0)
+	if e == 0 {
+		return "allowed"
+	}
+	return try(e)
 }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
@@ -240,7 +270,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		theirs.Close()
 		defer func() { cmd.Process.Kill(); cmd.Wait() }()
 		got := read(t, ours)
-		for _, k := range []string{"read the policy", "dial the page", "AF_INET socket"} {
+		for _, k := range []string{"read the policy", "dial the page", "AF_INET socket", "ptrace"} {
 			if got[k] != "allowed" {
 				t.Errorf("unconfined probe: %s %s; the probe cannot see a missing confinement", k, got[k])
 			}
