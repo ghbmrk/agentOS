@@ -285,7 +285,8 @@ class WorkflowTest(unittest.TestCase):
         # build sets GOWORK=off; sudo drops the environment, so each sudo env sets it again.
         for wf in sorted(WORKFLOWS.glob("*.yml")):
             text = wf.read_text()
-            if "actions/setup-go@" not in text:
+            # trusted-base runs Go only through tools/trusted_base.py, which sets GOWORK=off itself.
+            if "actions/setup-go@" not in text or wf.name == "trusted-base.yml":
                 continue
             with self.subTest(workflow=wf.name):
                 top = text.split("\njobs:", 1)[0].split("\nenv:\n", 1)
