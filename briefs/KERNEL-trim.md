@@ -60,6 +60,8 @@ These are modules that appeared in the booted VM when uid 1000 with no groups ra
 | nftables rules (`nft`) | 39 | nf_tables, nft_ct, nft_nat, nft_masq, nft_redir, nft_reject (inet, bridge), nft_fib, nft_socket, nft_tproxy, nft_synproxy, nft_osf, nft_queue, nft_xfrm, nft_hash, nft_numgen, nft_limit, nft_quota, nft_log, nft_connlimit, nft_dup_netdev, nf_flow_table, ... |
 | `tc` qdiscs, filters and actions | 36 | sch_{netem,cake,htb,hfsc,qfq,drr,taprio,cbs,etf,fq,fq_pie,pie,hhf,sfb,sfq,multiq,mqprio,skbprio,plug,prio,codel,ingress}, cls_{u32,flower,bpf,basic,matchall,fw,route,cgroup,flow}, act_{ct,ctinfo,connmark} |
 
+The four rows sum to 189 because the link stage ran in an earlier boot and `dummy` counts in both it and the tc stage (tc needs a dummy link): 188 distinct modules.
+
 Debian already removes the autoload aliases of DCCP, RDS, TIPC, X.25, AX.25 and similar families. The modules are still shipped, and root can load them.
 
 **Device-driven autoload (counted, not exercised):** 350 modules carry `usb:` aliases and 620 carry `pci:` aliases. A USB device plugged into any box makes udev load whichever driver matches it: media (580 modules), sound (349), HID (129), IIO (300), storage (uas, usb_storage) and network adapters (cdc_ether, cdc_ncm, rndis_host). `dev.tty.ldisc_autoload=1` also lets any process that holds a tty load the 11 `tty-ldisc-*` modules.
