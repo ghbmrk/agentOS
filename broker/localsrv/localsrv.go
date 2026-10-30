@@ -107,6 +107,8 @@ type Config struct {
 	// BackupNotes is the only-copy notice for the status page, in its
 	// fixed words; nil shows none.
 	BackupNotes func() []string
+	// Held, when set, serves OpHeld (#993); nil leaves it unregistered.
+	Held func() localapi.HeldList
 }
 
 // WrongPerMinute bounds wrong codes on the socket in any minute, tries in
@@ -158,9 +160,13 @@ func New(cfg Config) *Server {
 // passkey ops (localapi.PasskeyOps) when Config.Passkeys is set, and the
 // backup ops (localapi.BackupOps) when Config.Backups is set with it: the
 // add's tap is a WebAuthn ceremony on the passkey page's name; so are the
-// recovery-key ops (localapi.RecoveryOps) when Config.Recovery is set.
+// recovery-key ops (localapi.RecoveryOps) when Config.Recovery is set,
+// and the held-text op (localapi.HeldOps) when Config.Held is set.
 func (s *Server) Ops() map[string]sockets.Handler {
 	ops := s.ops()
+	if s.cfg.Held != nil {
+		maps.Copy(ops, s.heldOps())
+	}
 	if s.cfg.Passkeys != nil {
 		maps.Copy(ops, s.passkeyOps())
 		if s.cfg.Backups != nil {
