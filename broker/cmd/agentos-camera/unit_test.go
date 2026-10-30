@@ -39,7 +39,8 @@ func TestDecodersLeaveTheUnitsGroup(t *testing.T) {
 }
 
 // TestDecoderStartsInTheUnitsSandbox runs inside the image's own
-// agentos-keeper-camera.service, as the clerk's user, with only ExecStart=
+// agentos-keeper-camera.service, as the clerk's user (its User=, which
+// tests/test_image_camera.py holds), with only ExecStart=
 // and the key's OpenFile= replaced (CI's camera unit step): the clerk's
 // group is the unit's delegated group, which the unit's -cgroup names; it
 // leaves it for its leaf, and a decoder sandbox starts under runsc beside
@@ -49,9 +50,6 @@ func TestDecoderStartsInTheUnitsSandbox(t *testing.T) {
 		os.Getenv("AGENTOS_RUNSC_ROOT"), os.Getenv("AGENTOS_DECODE_ROOT")
 	if bin == "" || cg == "" || state == "" || root == "" {
 		t.Skip("set AGENTOS_RUNSC, AGENTOS_CAMERA_CGROUP, AGENTOS_RUNSC_ROOT and AGENTOS_DECODE_ROOT, and run in the camera unit (CI)")
-	}
-	if os.Geteuid() == 0 || os.Getuid() == 0 {
-		t.Fatal("runs as the clerk's own user, never root (CLK-1)")
 	}
 	if got := ownCgroup(t); got != cg {
 		t.Fatalf("the clerk runs in %s; the unit's -cgroup names %s", got, cg)
