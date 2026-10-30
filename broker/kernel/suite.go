@@ -26,10 +26,9 @@ const (
 	TSecurityKept = "security.kept"
 )
 
-// Bounds on a case, so the suite's share of the kernel's memory is bounded
-// while a minimized case still fits: at most MaxSecurityCases live cases,
-// plus the cases the owner dropped, which the log keeps and each of which
-// cost a passkey tap and a hold. A full suite refuses a case, never drops one.
+// Bounds on a case, so kernel memory is bounded while a minimized case fits:
+// MaxSecurityCases live, plus the cases dropped, each a passkey tap and a
+// hold. A full suite refuses a case, never drops one.
 const (
 	MaxSecurityCases  = 4096
 	MaxSecurityID     = 128
