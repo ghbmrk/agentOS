@@ -80,6 +80,11 @@ func Describe(old, next policy.Document) []string {
 	for _, h := range holdsMinus(old.Holds, next.Holds) {
 		add("%s", holdWords(h, false))
 	}
+	// NET-7: a lock or an alarm is held only on a screen that names the
+	// risk; the policy refuses a diff without one line per such hold.
+	for _, h := range policy.RiskHolds(old, next) {
+		add("Risk of holding back %s's updates: %s", h.Device, policy.Risk(next.Device(h.Device).Class))
+	}
 	if old.Drone != next.Drone {
 		switch {
 		case next.Drone == "":
