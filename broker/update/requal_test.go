@@ -79,9 +79,9 @@ func TestRequalifyPassesWithNoRegression(t *testing.T) {
 	if r.calls != 6 {
 		t.Fatalf("runner called %d times, want 6 (three suites, candidate and baseline)", r.calls)
 	}
-	// Kept: a second call with the same installed release runs nothing.
+	// Nothing is kept: a second call runs every suite again.
 	again, err := q.Requalify(context.Background(), v)
-	if err != nil || !again.Passed || r.calls != 6 {
+	if err != nil || !again.Passed || r.calls != 12 {
 		t.Fatalf("second call: %+v, %v, %d calls", again, err, r.calls)
 	}
 }
@@ -111,7 +111,7 @@ func TestRequalifyFailures(t *testing.T) {
 			s.Unadmitted = 1
 			r.cand[SuiteReplay] = s
 		}, SuiteReplay},
-		{"security case fails", func(r *fakeRunner) { r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39) }, SuiteSecurity},
+		{"security case fails", func(r *fakeRunner) { r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 37) }, SuiteSecurity},
 		{"security suite empty", func(r *fakeRunner) {
 			r.cand[SuiteSecurity], r.base[SuiteSecurity] = sc(SuiteSecurity, 0, 0), sc(SuiteSecurity, 0, 0)
 		}, SuiteSecurity},
@@ -130,6 +130,9 @@ func TestRequalifyFailures(t *testing.T) {
 			if err != nil || got.Passed || got.Reason != c.reason || got.Detail == "" {
 				t.Fatalf("got %+v, %v; want failed on %s with a detail", got, err, c.reason)
 			}
+			if c.name == "security case fails" && got.Detail != "3 security cases fail" {
+				t.Fatalf("detail %q, want the failing count", got.Detail)
+			}
 		})
 	}
 }
@@ -141,9 +144,9 @@ func TestSecuritySuiteOnlyGrows(t *testing.T) {
 	if got, err := q.Requalify(context.Background(), v); err != nil || !got.Passed {
 		t.Fatalf("first: %+v, %v", got, err)
 	}
-	// The installed release changes (its verdicts go stale) and the suite
-	// now has fewer cases on both sides: the floor of 40 fails it, across
-	// a new Requalifier on the same record.
+	// The installed release changes and the suite now has fewer cases on
+	// both sides: the floor of 40 fails it, across a new Requalifier on the
+	// same record.
 	f.must(f.store.writeInstalled(Installed{Version: 1, UsrRootHash: strings.Repeat("cd", 32)}))
 	r.cand[SuiteSecurity], r.base[SuiteSecurity] = sc(SuiteSecurity, 30, 30), sc(SuiteSecurity, 30, 30)
 	got, err := requalifier(t, f, r).Requalify(context.Background(), v)
@@ -152,18 +155,81 @@ func TestSecuritySuiteOnlyGrows(t *testing.T) {
 	}
 }
 
-func TestNewInstalledReleaseRequalifiesAgain(t *testing.T) {
+// A pass is never reused: a security case added since (HLD-5) is run, and
+// a release that fails it does not pass (#4033 L3 point 2).
+func TestSuiteGrowthIsRunAgain(t *testing.T) {
 	f, v := ordinary(t, Options{})
 	r := passing()
 	q := requalifier(t, f, r)
-	if _, err := q.Requalify(context.Background(), v); err != nil {
-		t.Fatal(err)
+	if got, err := q.Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("first: %+v, %v", got, err)
 	}
-	f.must(f.store.writeInstalled(Installed{Version: 1, UsrRootHash: strings.Repeat("cd", 32)}))
-	r.cand[SuiteHeldOut] = sc(SuiteHeldOut, 10, 7)
+	r.base[SuiteSecurity] = Score{Suite: SuiteSecurity, Digest: "d2", Cases: 41, Passed: 41}
+	r.cand[SuiteSecurity] = Score{Suite: SuiteSecurity, Digest: "d2", Cases: 41, Passed: 40}
 	got, err := q.Requalify(context.Background(), v)
-	if err != nil || got.Passed || r.calls != 8 {
-		t.Fatalf("against a new baseline: %+v, %v, %d calls; want a fresh failing run", got, err, r.calls)
+	if err != nil || got.Passed || got.Reason != SuiteSecurity {
+		t.Fatalf("after the suite grew: %+v, %v; want failed on security", got, err)
+	}
+}
+
+// A held-out failure is not kept: a run that passes later passes.
+func TestFailureIsRunAgain(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := passing()
+	r.cand[SuiteHeldOut] = sc(SuiteHeldOut, 10, 7)
+	q := requalifier(t, f, r)
+	if got, err := q.Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("first: %+v, %v; want failed", got, err)
+	}
+	r.cand[SuiteHeldOut] = sc(SuiteHeldOut, 10, 9)
+	if got, err := q.Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("second: %+v, %v; want passed", got, err)
+	}
+}
+
+// A security failure is final on that suite, across restarts: a later run
+// that passes every case does not pass (#4033 Security delta point 1). A
+// new suite digest runs it afresh, and another candidate is not affected.
+func TestSecurityFailureIsFinalOnItsSuite(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := passing()
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39)
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("first: %+v, %v; want failed", got, err)
+	}
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 40)
+	got, err := requalifier(t, f, r).Requalify(context.Background(), v)
+	if err != nil || got.Passed || got.Reason != SuiteSecurity {
+		t.Fatalf("retry on the same suite: %+v, %v; want failed on security", got, err)
+	}
+	// Another candidate on the same suite is judged on its own.
+	f.release(3, nil)
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), res.Release); err != nil || !got.Passed {
+		t.Fatalf("another candidate: %+v, %v; want passed", got, err)
+	}
+	// A grown suite (new digest) runs the first candidate afresh.
+	grown := Score{Suite: SuiteSecurity, Digest: "d2", Cases: 41, Passed: 41}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = grown, grown
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("new suite: %+v, %v; want passed", got, err)
+	}
+}
+
+// The ship gate holds even on a record a runner once wrote (#4033 Security
+// point 4).
+func TestNoRunnerAfterAPassStillHolds(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	if got, err := requalifier(t, f, passing()).Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("with a runner: %+v, %v", got, err)
+	}
+	got, err := requalifier(t, f, nil).Requalify(context.Background(), v)
+	if err != nil || got.Passed || got.Reason != RequalUnavailable {
+		t.Fatalf("no runner on the same record: %+v, %v; want unavailable", got, err)
 	}
 }
 

@@ -64,11 +64,14 @@ type Requalifier struct {
 	mu     sync.Mutex
 }
 
-// requalState is the saved record: the security suite's floor (it only
-// grows, HLD-3) and the verdict for each candidate.
+// requalState is the saved record: the security suite's floor, which only
+// grows (HLD-3), and, per candidate, the digest of the security suite it
+// failed. No verdict is kept, so a suite that gained a case since a pass is
+// run, and held-out or replay noise is retried; but a security failure is
+// final on that suite, so a retry never turns one into a pass.
 type requalState struct {
-	Floor    int                `json:"security_floor"`
-	Verdicts map[string]Verdict `json:"verdicts,omitempty"`
+	Floor  int               `json:"security_floor"`
+	Failed map[string]string `json:"security_failed"`
 }
 
 // NewRequalifier keeps its record at path. A nil runner is allowed: every
@@ -80,14 +83,9 @@ func NewRequalifier(store *Store, runner Runner, path string) (*Requalifier, err
 	return &Requalifier{store: store, runner: runner, path: path}, nil
 }
 
-func refKey(r Ref) string {
-	return fmt.Sprintf("%d:%s:%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
-}
-
-// Requalify judges v against the installed release. A verdict is kept per
-// candidate and reused while the installed release is the same one; a
-// Runner error keeps nothing, so the next call runs again. The record is
-// saved before a verdict is returned.
+// Requalify judges v against the installed release, running every suite
+// on both. A Runner error saves nothing; otherwise the floor is saved
+// before the verdict is returned.
 func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, error) {
 	if !v.ok() {
 		return Verdict{}, ErrNotChecked
@@ -107,10 +105,6 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 	if err != nil {
 		return Verdict{}, err
 	}
-	key := refKey(out.Ref)
-	if old, ok := st.Verdicts[key]; ok && old.Base == out.Base {
-		return old, nil
-	}
 	for _, s := range suites {
 		cand, err := q.run(ctx, v, s)
 		if err != nil {
@@ -124,26 +118,29 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		if s == SuiteSecurity {
 			st.Floor = max(st.Floor, base.Cases)
 		}
-		if detail := judge(cand, base, st.Floor); detail != "" {
+		detail := judge(cand, base, st.Floor)
+		if s == SuiteSecurity {
+			key := refKey(out.Ref)
+			if detail != "" {
+				st.Failed[key] = cand.Digest
+			} else if st.Failed[key] == cand.Digest {
+				detail = "failed this security suite before"
+			}
+		}
+		if detail != "" {
 			out.Reason, out.Detail = s, detail
 			break
 		}
 	}
 	out.Passed = out.Reason == ""
-	// Verdicts against another installed release are stale.
-	for k, old := range st.Verdicts {
-		if old.Base != out.Base {
-			delete(st.Verdicts, k)
-		}
-	}
-	if st.Verdicts == nil {
-		st.Verdicts = map[string]Verdict{}
-	}
-	st.Verdicts[key] = out
 	if err := q.save(st); err != nil {
 		return Verdict{}, err
 	}
 	return out, nil
+}
+
+func refKey(r Ref) string {
+	return fmt.Sprintf("%d:%s:%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
 }
 
 // run is one Runner call whose score must be for the suite it asked for
@@ -186,7 +183,7 @@ func judge(cand, base Score, floor int) string {
 }
 
 func (q *Requalifier) load() (requalState, error) {
-	var st requalState
+	st := requalState{Failed: map[string]string{}}
 	b, err := readFile(q.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
@@ -196,6 +193,9 @@ func (q *Requalifier) load() (requalState, error) {
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		return requalState{}, fmt.Errorf("update: requalification record: %w", err)
+	}
+	if st.Failed == nil {
+		st.Failed = map[string]string{}
 	}
 	return st, nil
 }
