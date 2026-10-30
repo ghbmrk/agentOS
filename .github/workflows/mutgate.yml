@@ -81,6 +81,17 @@ jobs:
         run: |
           [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
           echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      # loops' canary-round test runs tools/canary.py, whose targets run as the runner's first
+      # subordinate id in a user namespace (tools/ASSUMPTIONS.md D13); gremlins' coverage run
+      # needs it as broker-race does. Kept equal to ci.yml's step by tests/test_workflows.py.
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}
