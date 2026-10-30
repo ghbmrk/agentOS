@@ -129,6 +129,17 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 			return []derived{d}, true
 		}
 		return nil, true
+	case TTrip:
+		_ = json.Unmarshal(e.Body, &ref)
+		if ref.Plan == "" {
+			return nil, false // an exit's report (CallTrip)
+		}
+		if p := s.Plans[ref.Plan]; p != nil && p.Status == SRejected && p.Reject == CTrip {
+			if t := s.tripOf(p.Plan); t != nil {
+				return []derived{entry(TTrip, *t)}, true
+			}
+		}
+		return nil, true
 	}
 	// A type the kernel adds is a decision with no derivation until it is
 	// listed here or derived above, so none is folded unchecked by default.
@@ -146,7 +157,7 @@ var recorded = map[string]bool{
 	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
 	TSubjectOpened: true, TContentStored: true, TSubjectErased: true, TEraseConfirmed: true, TContentRead: true,
 	TBackupTarget: true, TBackupUntarget: true, TBackupTaken: true, TEdgeRevoked: true, TEdgeCut: true,
-	TRecoveryRotate: true, TCodeApproved: true,
+	TRecoveryRotate: true, TCodeApproved: true, TDecoyTable: true, TTripResumed: true,
 }
 
 // decision is decide's entry for a pending plan.
