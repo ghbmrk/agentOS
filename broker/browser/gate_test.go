@@ -140,6 +140,17 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
+	// The gate's Timeout starts when it writes, and the pipe takes the
+	// write before the fake reads it: wait until the fake is up, so a
+	// slow start under -race is not a driver that never read (#4052).
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if b, _ := os.ReadFile(log); strings.Contains(string(b), "\nARGS ") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the fake driver did not start")
+		}
+	}
 	// Tests of other rules click e1 and download e2 without a snapshot;
 	// the gate refuses a ref it has not seen (ADP-14-get) and sends only a
 	// link to a plain target as a read, so they start as seen links. A

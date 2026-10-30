@@ -64,6 +64,10 @@ open clerk/line.Signer.Sign
 # The clerk check path (MIG-4-adapters-f2, #3430): net-free, so agentosd can
 # host a clerk with it.
 core clerk/check
+# The CH-4 checker on the new core (MIG-4-exit-c2, D-226): it holds the code
+# seed alone and signs code approvals the kernel admits. checker stays above
+# until d2 deletes it with holder, which still links it.
+core clerk/codecheck
 # The sealed store (STO-2, #2828): the store key's slots and the keys derived
 # from it. Only the unlock step (STO-2b) opens it.
 core clerk/seal
@@ -90,6 +94,10 @@ wiring cmd/agentos-devices
 # kernel on descriptor 3, its client and segment keys in its own sealed slots,
 # and the owner side's socket.
 wiring cmd/agentos-camera
+# The HomeKit clerk's process (DEV-homekit part b2a, #3891): its key from the
+# kernel on descriptor 3, the controller key in its own sealed slot, and the
+# owner side's socket.
+wiring cmd/agentos-homekit
 
 # Pure functions of the key chain and the request. They write nothing; a clerk
 # calls them to put a step in canonical form and to check a request itself.
@@ -193,10 +201,6 @@ allow provagent journal.Engine.ReopenRoute -- the owner's stored sign-in reopens
 allow vm guest.Plane.Open -- a machine's sandbox opens its own guest socket at creation (vm.Services)
 allow vm guest.Plane.Close -- and closes it when the machine is destroyed (vm.Services)
 allow vm guest.Plane.Reset -- and drops the tool results it held for the machine when a forget resets it (vm.Resetter, CAP-3)
-allow recall journal.FileStore.Append -- shape only: recall.Store matches the journal's store, and wiring gives recall its own FileStore
-allow recall journal.FileStore.Rewrite -- shape only: as journal.FileStore.Append
-allow recall journal.MemStore.Append -- shape only: as journal.FileStore.Append
-allow recall journal.MemStore.Rewrite -- shape only: as journal.FileStore.Append
 
 # agentosd's client of the mail clerk's owner socket (#3006) reads the
 # serving peer's uid (SO_PEERCRED) before it writes a frame, as kernel/proc's

@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 
-	"github.com/ghbmrk/agentos/broker/durable"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 )
 
 // The suites a release is requalified on, in run order (UPD-5, HLD-3).
@@ -232,5 +233,5 @@ func (q *Requalifier) save(st requalState) error {
 	if err != nil {
 		return err
 	}
-	return durable.WriteFile(q.path, b, 0o600)
+	return privfile.WriteAtomic(filepath.Dir(q.path), filepath.Base(q.path), b, nil)
 }

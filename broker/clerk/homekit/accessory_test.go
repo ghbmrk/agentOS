@@ -55,9 +55,16 @@ type fakeAccessory struct {
 	// when set, holds every characteristics read until it is closed.
 	accJSON string
 	hang    chan struct{}
+	// pairings is every /pairings request's decoded TLV8; removed names
+	// the controllers remove-pairing took out.
+	pairings []tlvMap
+	removed  []string
 }
 
 const testCode = "111-22-333"
+
+// errRemoved ends the fake's session once the controller's pairing is gone.
+var errRemoved = fmt.Errorf("pairing removed")
 
 func newFakeAccessory(t *testing.T) *fakeAccessory {
 	t.Helper()
@@ -376,6 +383,23 @@ func (a *fakeAccessory) handle(w io.Writer, req *http.Request, body []byte) erro
 			}
 		}
 		return writeResp(w, 200, hj, a.valuesJSON(ids))
+	case req.Method == "POST" && req.URL.Path == "/pairings":
+		m, err := decodeTLV(body)
+		if err != nil || req.Header.Get("Content-Type") != pairingTLV {
+			return writeResp(w, 400, hj, []byte(`{}`))
+		}
+		a.pairings = append(a.pairings, m)
+		id := string(m[tlvIdentifier])
+		if len(m[tlvMethod]) != 1 || m[tlvMethod][0] != methodRemovePairing || a.ctrls[id] == nil {
+			return tlvResp(w, tb(tlvState, 2), tb(tlvError, 1))
+		}
+		delete(a.ctrls, id)
+		a.removed = append(a.removed, id)
+		if err := tlvResp(w, tb(tlvState, 2)); err != nil {
+			return err
+		}
+		// The accessory ends the removed controller's sessions.
+		return errRemoved
 	case req.Method == "PUT" && req.URL.Path == "/characteristics":
 		a.writes = append(a.writes, string(body))
 		var doc struct {
