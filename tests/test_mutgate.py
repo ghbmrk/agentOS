@@ -221,6 +221,44 @@ class Shape(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("not gremlins' files[].mutations[] shape", r.stderr)
 
+    def test_foreign_names_are_lived_files_not_in_the_package(self):
+        # #3956: violations() joins broker/<pkg>/<file_name>, so only a bare file name in the package matches.
+        with tempfile.TemporaryDirectory() as d:
+            pkg = pathlib.Path(d)
+            (pkg / "clock.go").write_text("package clock\n")
+            (pkg / "sub").mkdir()
+            data = {"files": [
+                {"file_name": "clock.go", "mutations": [{"status": "LIVED", "line": 1}]},
+                {"file_name": "clock/clock.go", "mutations": [{"status": "LIVED", "line": 1}]},
+                {"file_name": "sub", "mutations": [{"status": "LIVED", "line": 1}]},
+                {"file_name": "gone.go", "mutations": [{"status": "KILLED", "line": 1}]},
+            ], "mutants_lived": 3}
+            self.assertEqual(mutgate.foreign_names(data, pkg), ["clock/clock.go", "sub"])
+
+    def run_stub(self, file_name):
+        """mutgate.py run on a real tier-A package, with a stub gremlins reporting one LIVED mutant in file_name."""
+        pkg = mutgate.tier_a_packages()[0]
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            out = json.dumps({"files": [{"file_name": file_name, "mutations": [{"status": "LIVED", "line": 1}]}],
+                              "mutants_lived": 1})
+            (stub / "gremlins").write_text(
+                f"#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{out}' > \"$2\"\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            return subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", pkg, "--out",
+                                   str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
+
+    def test_run_fails_on_a_module_relative_file_name(self):
+        pkg = mutgate.tier_a_packages()[0]
+        name = sorted(f.name for f in (ROOT / "broker" / pkg).glob("*.go") if not f.name.endswith("_test.go"))[0]
+        r = self.run_stub(f"{pkg.split('/')[-1]}/{name}")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn(f"not files in broker/{pkg}/", r.stderr)
+        r = self.run_stub(name)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_run_writes_a_relative_out_dir_from_the_callers_cwd(self):
         # The workflow passes `--out mutants` from the repo root while gremlins runs in broker/;
         # gremlins (like this stub) does not create the -o directory (#3947's live run).

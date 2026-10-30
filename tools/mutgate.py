@@ -147,7 +147,18 @@ def cmd_run(args):
             # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
             print(f"mutgate: {dest} is not gremlins' files[].mutations[] shape", file=sys.stderr)
             bad += 1
+        elif unknown := foreign_names(json.loads(dest.read_text()), BROKER / pkg):
+            # violations() joins broker/<pkg>/<file_name>; another name format would match no line (#3956).
+            print(f"mutgate: {dest} names LIVED mutants in {unknown}, not files in broker/{pkg}/", file=sys.stderr)
+            bad += 1
     return 1 if bad else 0
+
+
+def foreign_names(data, pkg_dir):
+    """file_names carrying a LIVED mutant that are not a file directly in pkg_dir, sorted."""
+    names = {f["file_name"] for f in data["files"]
+             if any(m["status"] == "LIVED" for m in f.get("mutations") or [])}
+    return sorted(n for n in names if "/" in n or "\\" in n or not (pkg_dir / n).is_file())
 
 
 def shape_ok(data):
