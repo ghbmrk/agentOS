@@ -18,7 +18,8 @@ import (
 type fakeRecovery struct {
 	calls []string
 	err   error
-	card  []byte // LostCard's answer, when set
+	card  []byte                      // LostCard's answer, when set
+	begun *localapi.RecoveryLostBegun // LostBegin's answer, when set
 }
 
 func (f *fakeRecovery) Begin(_ context.Context, next []byte) (localapi.RecoveryBegun, error) {
@@ -33,6 +34,9 @@ func (f *fakeRecovery) Rotate(_ context.Context, factor string, secret, next, ad
 
 func (f *fakeRecovery) LostBegin(context.Context) (localapi.RecoveryLostBegun, error) {
 	f.calls = append(f.calls, "lostbegin")
+	if f.begun != nil {
+		return *f.begun, f.err
+	}
 	return localapi.RecoveryLostBegun{Old: strings.Repeat("a", 32), Challenge: make([]byte, 32)}, f.err
 }
 
@@ -251,5 +255,27 @@ func TestRecoveryLostFramesAreBounded(t *testing.T) {
 		if want := i == RecoveryRotatesPerMinute; (code(err) == localapi.ErrLimited) != want {
 			t.Fatalf("%s %d: %v", op, i, err)
 		}
+	}
+}
+
+// A lost-card begin answer out of shape (a challenge of another length, or
+// a recipient ID that is neither none nor RecoveryIDLen) is unavailable,
+// so the page never asks a tap over it; one from a box with no recipient
+// passes.
+func TestRecoveryLostBeginShape(t *testing.T) {
+	r, f := recoveryRig(t)
+	tok := r.signIn()
+	for i, b := range []localapi.RecoveryLostBegun{
+		{Old: strings.Repeat("a", 32), Challenge: make([]byte, 31)},
+		{Old: strings.Repeat("a", 31), Challenge: make([]byte, 32)},
+	} {
+		f.begun = &b
+		if _, err := r.call(localapi.OpRecoveryLostBegin, localapi.RecoverySession{Token: tok}); code(err) != localapi.ErrRecoveryUnavailable {
+			t.Errorf("case %d: %v", i, err)
+		}
+	}
+	f.begun = &localapi.RecoveryLostBegun{Challenge: make([]byte, 32)}
+	if _, err := r.call(localapi.OpRecoveryLostBegin, localapi.RecoverySession{Token: tok}); err != nil {
+		t.Fatalf("no recipient yet: %v", err)
 	}
 }
