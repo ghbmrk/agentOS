@@ -114,8 +114,8 @@ const (
 	passesLine      = "Update %d installs once another box has tested it. Nothing is needed from you."
 	noAttestorLine  = "Update %d waits because no tester box is listed to vouch for updates. Nothing is needed from you."
 	securityLine    = "Security update %d installs once another box has tested it. Nothing is needed from you."
-	unavailableLine = "Update %d waits until this box can test it itself. Security fixes still install. Nothing is needed from you."
-	requalFailLine  = "Update %d did not pass this box's own tests, so I am holding it. Nothing is needed from you."
+	unavailableLine = "Update %d waits until I can test it myself. Security fixes still install. Nothing is needed from you."
+	requalFailLine  = "Update %d did not pass my own tests, so I am holding it. Nothing is needed from you."
 	checkFellBack   = "Update %d did not start cleanly before, so I will not try it again. Nothing is needed from you."
 	checkPinned     = "Automatic updates are off because you pinned your update channel; unpin it to get them again."
 )
