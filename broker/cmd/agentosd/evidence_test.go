@@ -553,8 +553,8 @@ func TestKeptExpiresOnlyByTime(t *testing.T) {
 func TestFullStoreRefusesNotEvicts(t *testing.T) {
 	r := newEvRig(t)
 	big := strings.Repeat("x", maxKeptBytes/3)
-	for range 2 {
-		if err := r.ev.kept.keep(localapi.HeldLong, big); err != nil {
+	for i := range 2 {
+		if err := r.ev.kept.keep(localapi.HeldLong, big+fmt.Sprint(i)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -620,5 +620,64 @@ func TestHeldListsNewestFirst(t *testing.T) {
 	}
 	if owner.KeptSecret != localapi.HeldSecret || owner.KeptCode != localapi.HeldCode {
 		t.Fatal("the owner channel's kinds are not the page's")
+	}
+}
+
+// TestRetriedKeepIsKeptOnce: a held text offered again while it is still
+// kept, as a retried owner question is on every try (#3986 L3 1; owner's
+// TestRetriedHeldTextKeepsAskingTheKeeper), is kept once, so retries
+// never fill the store; another kind, or the same text once expired, is a
+// new item.
+func TestRetriedKeepIsKeptOnce(t *testing.T) {
+	r := newEvRig(t)
+	const q = "I fixed the code. Shall I push it?"
+	for range 120 {
+		if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l := r.ev.kept.list(); len(l) != 1 {
+		t.Fatalf("kept %d copies of one retried text", len(l))
+	}
+	if err := r.ev.kept.keep(localapi.HeldUnsent, q); err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(defaultKeepFor + time.Second)
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); len(l) != 3 || l[2].Expired {
+		t.Fatalf("kept %+v", l)
+	}
+}
+
+// TestLegacyKeptGetsAStableID: a reply kept before items had ids is
+// listed with one, the same before and after its text expires.
+func TestLegacyKeptGetsAStableID(t *testing.T) {
+	r := newEvRig(t)
+	if err := r.store.Save([]byte(`[{"text":"an old reply","at":"2026-10-04T09:00:00Z"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	live := r.ev.kept.list()
+	r.now = r.now.Add(defaultKeepFor)
+	r.ev.kept.sweep()
+	stub := r.ev.kept.list()
+	if len(live) != 1 || live[0].ID == "" || len(stub) != 1 || !stub[0].Expired || stub[0].ID != live[0].ID {
+		t.Fatalf("live %+v, stub %+v", live, stub)
+	}
+}
+
+// TestNotKeptTextsGiveAStep: each could-not-be-kept text fits one GSM-7
+// segment, names no page, and says what the owner can do (CH-12);
+// keptLongNotKept fits where keptLong would.
+func TestNotKeptTextsGiveAStep(t *testing.T) {
+	for _, s := range []string{keptLongNotKept, unsentNotKept} {
+		if n, gsm := modem.Segments(s); !gsm || n != 1 || !strings.Contains(s, "Ask me") {
+			t.Fatalf("%q", s)
+		}
+		noPage(t, s)
+	}
+	if len(keptLongNotKept) > len(keptLong) {
+		t.Fatal("keptLongNotKept is longer than keptLong")
 	}
 }

@@ -10,7 +10,7 @@ import (
 // key when it could not be kept for the owner page: it names no page
 // (CH-19, D-079). HiddenPointer replaces it once it is kept (keep.go).
 const (
-	Hidden        = "I held back a message because it may contain a code or key, and I could not keep it."
+	Hidden        = "I held back a message because it may contain a code or key, and I could not keep it. Ask me to put it another way."
 	HiddenPointer = "I held back a message because it may contain a code or key. Read it on my Wi-Fi page."
 )
 

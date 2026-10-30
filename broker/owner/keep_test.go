@@ -146,8 +146,31 @@ func TestPointersAreOneTextAndNotHeldAgain(t *testing.T) {
 			t.Fatalf("agentText(%q) = %q", s, got)
 		}
 		pointer := s == HiddenPointer || s == HeldCodePointer
+		// CH-12: a not-kept text says what the owner can do.
+		if !pointer && !strings.HasSuffix(s, "Ask me to put it another way.") {
+			t.Fatalf("%q gives no next step", s)
+		}
 		if strings.Contains(s, "Wi-Fi page") != pointer || strings.Contains(s, "could not keep") == pointer {
 			t.Fatalf("%q: pointer %v", s, pointer)
 		}
+	}
+}
+
+// TestRetriedHeldTextKeepsAskingTheKeeper: a held owner question retried
+// while the line is down is withheld, and offered to the keeper, on every
+// try; the keeper (agentosd's kept replies) keeps one copy (#3986 L3 1,
+// cmd/agentosd TestRetriedKeepIsKeptOnce).
+func TestRetriedHeldTextKeepsAskingTheKeeper(t *testing.T) {
+	r := pacedRig(t, quiet22to7(), 12, 0)
+	k := &recKeeper{phone: r.phone}
+	r.ch.SetKeeper(k)
+	r.box.SetDown(true)
+	for range 3 {
+		if err := r.ch.NotifyNow("I fixed the code. Shall I push it?"); !errors.Is(err, modem.ErrNotSent) {
+			t.Fatalf("send on a down line: %v", err)
+		}
+	}
+	if len(k.kinds) != 3 {
+		t.Fatalf("offered %d times", len(k.kinds))
 	}
 }

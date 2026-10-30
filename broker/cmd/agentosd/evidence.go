@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,8 +61,8 @@ type replySourceBox struct{ s replySource }
 // no longer than keptLong, so it fits where keptLong would.
 const (
 	keptLong        = "Cut here. Ask me to send it in shorter parts."
-	keptLongNotKept = "Cut here, and I could not keep the rest."
-	unsentNotKept   = "A reply did not go, and I could not keep it."
+	keptLongNotKept = "Cut here, not kept. Ask me for shorter parts."
+	unsentNotKept   = "A reply did not go, and I could not keep it. Ask me to send it again."
 	evidenceNotYet  = "Emailing private replies is not in this build yet."
 )
 
@@ -492,10 +493,16 @@ func (k *keptReplies) Keep(kind, text string) error {
 }
 
 // keep adds text of kind, or refuses it, logging why without the text.
+// A text of the same kind still kept is kept once: a sender that retries,
+// such as an owner question while the line is down, is withheld and kept
+// on every try, and copies would fill the store (#3986).
 func (k *keptReplies) keep(kind, text string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	l, err := k.loadLocked()
+	if err == nil && slices.ContainsFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }) {
+		return nil
+	}
 	if err == nil {
 		l = append(l, keptReply{ID: randHex(8), Kind: kind, Text: text, At: k.now()})
 		err = k.saveLocked(l)
@@ -628,6 +635,12 @@ func (k *keptReplies) loadLocked() ([]keptReply, error) {
 	}
 	now := k.now()
 	for _, r := range l {
+		if r.ID == "" {
+			// Kept before items had ids: one from what it holds, so it
+			// stays the same once its text has expired and been swept.
+			sum := sha256.Sum256([]byte(r.At.UTC().Format(time.RFC3339Nano) + "\x00" + r.Text))
+			r.ID = hex.EncodeToString(sum[:8])
+		}
 		age := now.Sub(r.At)
 		switch {
 		case age >= keepFor+stubFor:
