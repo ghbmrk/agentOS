@@ -149,4 +149,40 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	if has(safe, coreSpk) {
 		t.Error("the core reaches a safety-list device")
 	}
+
+	// Each box reaches an everyday device only on its control ports, and
+	// the core a camera only on its stream ports while it is offline
+	// (NET-2 Device paths, Cameras and microphones; ENF-e-2).
+	for _, s := range []string{
+		`iifname "edge0" oifname "ap0.101" tcp dport { 80 } log`,
+		`iifname "core0" oifname "ap0.102" tcp dport { 80 } log`,
+		`iifname "core0" oifname "ap0.102" udp dport { 123 } log`,
+		`iifname "core0" oifname "ap0.104" tcp dport { 554 } log prefix "enf core-stream 104 " counter name "core_stream" accept`,
+	} {
+		if !has(d, s) {
+			t.Errorf("fixture lacks %q", s)
+		}
+	}
+	for _, s := range []string{`oifname "ap0.105" log`, `oifname "ap0.105" tcp`, `oifname "ap0.104" tcp dport { 80 }`, `oifname "ap0.103" tcp`} {
+		if has(d, s) {
+			t.Errorf("fixture has %q", s)
+		}
+	}
+	stream := `oifname "ap0.104" tcp dport { 554 }`
+	for name, f := range map[string]func(*policy.Device){
+		"cloud camera":    func(v *policy.Device) { v.VendorCloud = true },
+		"isolated camera": func(v *policy.Device) { v.Isolated = true },
+		"no stream port":  func(v *policy.Device) { v.Stream = nil },
+	} {
+		c := fixturePolicy()
+		f(&c.Devices[3])
+		if has(c, stream) {
+			t.Errorf("%s: the core reaches its stream", name)
+		}
+	}
+	none := fixturePolicy()
+	none.Devices[1].Control = nil
+	if has(none, `oifname "ap0.102"`) {
+		t.Error("the core reaches an everyday device with no control port")
+	}
 }
