@@ -17,7 +17,7 @@ type Keeper interface {
 // The kinds of text the channel withholds and keeps.
 const (
 	KeptSecret  = "secret"  // CH-19: may carry a key
-	KeptOneTime = "onetime" // CH-19: carries a code and no key; the code is kept for hours (#906)
+	KeptOneTime = "onetime" // CH-19: carries a code, kept for hours (#906)
 	KeptCode    = "code"    // CH-21: mentions a code or takes the reply grammar
 )
 
@@ -62,20 +62,24 @@ func (c *Channel) withhold(kind, text string) string {
 	return c.withholdFrom(kind, text, fromAgent)
 }
 
-// withholdFrom is withhold for text from source. Secret-shaped text that
-// carries a code and no key is kept as KeptOneTime, and its pointer names
-// the code's kind and the source (CH-19, #906). The log names only the
-// kind: the text may carry the code.
+// withholdFrom is withhold for text from source. Secret-shaped text in
+// which the patterns find a code, read as received, is kept as
+// KeptOneTime, so its code expires in hours, a key beside it included;
+// with no key its pointer names the code's kind and the source (CH-19,
+// #906). The log names only the kind: the text may carry the code.
 func (c *Channel) withholdFrom(kind, text, source string) string {
-	text = control.StripControls(text)
+	stripped := control.StripControls(text)
 	pointer, notKept := HiddenPointer, Hidden
 	switch {
 	case kind == KeptCode:
 		pointer, notKept = HeldCodePointer, HeldCode
-	case kind == KeptSecret && AgentCode(text) && !AgentToken(text):
-		kind, pointer = KeptOneTime, CodePointer(CodeKind(text), source)
+	case kind == KeptSecret && AgentCode(text):
+		kind = KeptOneTime
+		if !AgentToken(text) {
+			pointer = CodePointer(CodeKind(stripped), source)
+		}
 	}
-	if k := c.keeper.Load(); k != nil && (*k).Keep(kind, text) == nil {
+	if k := c.keeper.Load(); k != nil && (*k).Keep(kind, stripped) == nil {
 		return pointer
 	}
 	log.Printf("owner channel: a held %s text was not kept for the owner page", kind)

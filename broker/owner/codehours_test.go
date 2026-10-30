@@ -125,3 +125,41 @@ func TestExpireCodesLeavesOtherTextReadable(t *testing.T) {
 		t.Fatal("the expired marker adds a code shape")
 	}
 }
+
+// TestEveryHeldCodeGetsHours (CODEH-7, #4014 L3 1): a code beside a key,
+// and a code the patterns find only before controls are stripped, are
+// both kept as KeptOneTime, so their codes expire in hours; the mixed
+// one's pointer is the generic one, and a code that cannot be found in
+// the stored text expires with the whole text.
+func TestEveryHeldCodeGetsHours(t *testing.T) {
+	cases := []struct{ name, text, pointer string }{
+		{"code beside a key", "Your login code is 482913 and your key is AKIACANARY0000000000", HiddenPointer},
+		{"split code word", "co\x07de 482913", CodePointer("a code", fromAgent)},
+		{"split code", "verifi\x07cation 4829\x0713", ""},
+	}
+	for _, c := range cases {
+		r := pacedRig(t, quiet22to7(), 12, 0)
+		k := &recKeeper{phone: r.phone}
+		r.ch.SetKeeper(k)
+		if err := r.ch.Converse(c.text); err != nil {
+			t.Fatal(err)
+		}
+		got := r.sentTexts()
+		if len(k.kinds) != 1 || k.kinds[0] != KeptOneTime || len(got) != 1 || c.pointer != "" && got[0] != c.pointer {
+			t.Fatalf("%s: kept %q, sent %q", c.name, k.kinds, got)
+		}
+		if SecretShaped(got[0]) || strings.Contains(got[0], "482") {
+			t.Fatalf("%s: pointer carries the value: %q", c.name, got[0])
+		}
+		exp := ExpireCodes(k.texts[0])
+		if AgentCode(exp) || strings.Contains(exp, "482913") || strings.Contains(exp, "4829") {
+			t.Fatalf("%s: expired %q", c.name, exp)
+		}
+	}
+	if got := ExpireCodes("Your login code is 482913 and your key is AKIACANARY0000000000"); got != "Your login code is "+ExpiredCode+" and your key is AKIACANARY0000000000" {
+		t.Fatalf("mixed: %q", got)
+	}
+	if got := ExpireCodes("co de 482913"); got != ExpiredCode {
+		t.Fatalf("a code not found in the stored text survived: %q", got)
+	}
+}

@@ -776,3 +776,24 @@ func TestCodeHoursBound(t *testing.T) {
 		t.Fatalf("default code hours: %+v", l[0])
 	}
 }
+
+// TestHeldCodeBesideAKeyExpires (CODEH-7, #4014 L3 1): a code kept beside
+// a key leaves the disk at the hour while the key stays for its days, and
+// a kept code the stored text cannot show expires with the whole text.
+func TestHeldCodeBesideAKeyExpires(t *testing.T) {
+	r := newEvRig(t)
+	for _, text := range []string{"Your login code is 482913 and your key is AKIACANARY0000000000", "co de 482913"} {
+		if err := r.ev.kept.Keep(owner.KeptOneTime, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.now = r.now.Add(time.Hour)
+	r.ev.kept.sweep()
+	raw, _ := r.store.Load()
+	if strings.Contains(string(raw), "482913") || !strings.Contains(string(raw), "AKIACANARY0000000000") {
+		t.Fatalf("swept file %s", raw)
+	}
+	if l := r.ev.kept.list(); len(l) != 2 || l[1].Text != owner.ExpiredCode || !l[1].CodeExpired || l[1].Expired {
+		t.Fatalf("kept %+v", l)
+	}
+}

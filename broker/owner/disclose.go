@@ -162,8 +162,13 @@ const ExpiredCode = "[expired]"
 // rest left readable (CH-19, #906). It replaces the code-like words next
 // to a code word, then, if a code shape is still found, every code-like
 // word, and then, if one still is, the whole text, so what it returns is
-// never AgentCode.
+// never AgentCode. Callers pass a text the patterns found a code in: when
+// text itself is not AgentCode (the code showed only before its controls
+// were stripped), the code cannot be found in it, so the whole text goes.
 func ExpireCodes(text string) string {
+	if !AgentCode(text) {
+		return ExpiredCode
+	}
 	words := textWords(text)
 	for _, all := range []bool{false, true} {
 		out := text
