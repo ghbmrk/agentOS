@@ -195,9 +195,25 @@ func TestRefusalWindow(t *testing.T) {
 	if n, _ := log.of(101); n != 1 {
 		t.Errorf("after the window: %d", n)
 	}
+	log.Line(line, Window)   // the new window's start
+	log.Line(line, Window+1) // and just after it
+	if n, _ := log.of(101); n != 3 {
+		t.Errorf("inside the new window: %d", n)
+	}
 	log.Line(line, 5) // the clock went back
 	if n, _ := log.of(101); n != 1 {
 		t.Errorf("after the clock went back: %d", n)
+	}
+}
+
+// Each refusal prefix counts when the line came in on a device's VLAN.
+func TestEveryRefusalPrefixCounts(t *testing.T) {
+	log := NewLog("ap0")
+	for _, p := range nft.BlockedPrefixes {
+		log.Line(p+"IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.0.0.1 LEN=60", 1)
+	}
+	if n, _ := log.of(101); n != uint64(len(nft.BlockedPrefixes)) {
+		t.Errorf("%d of %d refusal prefixes counted", n, len(nft.BlockedPrefixes))
 	}
 }
 

@@ -244,12 +244,19 @@ func NewLog(trunk string) *Log { return &Log{trunk: trunk, vlans: map[int]*refus
 // counts; anything else, the accepted core and edge connections and every
 // other network included, is ignored.
 func (l *Log) Line(msg string, nowMS int64) {
-	i := slices.IndexFunc(nft.BlockedPrefixes, func(p string) bool { return strings.HasPrefix(msg, p) })
-	if i < 0 {
+	var rest string
+	refused := false
+	for _, p := range nft.BlockedPrefixes {
+		if r, ok := strings.CutPrefix(msg, p); ok {
+			rest, refused = r, true
+			break
+		}
+	}
+	if !refused {
 		return
 	}
 	var in, dst string
-	for _, f := range strings.Fields(msg[len(nft.BlockedPrefixes[i]):]) {
+	for _, f := range strings.Fields(rest) {
 		k, v, _ := strings.Cut(f, "=")
 		switch {
 		case k == "IN" && in == "":
