@@ -60,11 +60,13 @@ var voiceWordRE = regexp.MustCompile(`(?i)\b(?:` + strings.Join(voicePhrases, "|
 var voiceGrammarRE = regexp.MustCompile(`(?i)\b(?:(?:STOP|YES|NO|RUN|UNDO|MORE|HELP|STATUS|RESUME|UNLOCK|NAME)` + voiceGap + `(?:[A-Z][0-9]{1,2}|[0-9]{4,8})|(?:UNLOCK|RESUME)` + voiceGap + `[A-HJ-NP-Z2-9]{4})\b`)
 
 // voiceGap is the gap between the words of the reply grammar and the
-// footer: any run of characters that are neither letters nor digits, as
-// the reply parser reads one (parse.go fields), so "YES, K7", "(YES) K7"
-// and "Reply 'YES' or 'NO'" read as the owner's parser reads them
-// (Security on #4017).
-const voiceGap = `[^\pL\pN]+`
+// footer: any run of runes that are not wordRunes, as the reply parser
+// reads one (parse.go fields), so "YES, K7", "(YES) K7" and "Reply 'YES'
+// or 'NO'" read as the owner's parser reads them (Security on #4017).
+// The patterns' \b edges are ASCII and count "_" as a letter, so
+// VoiceShaped also runs them on parserGaps of each reading, where every
+// separator the parser knows ("_YES K7_", "YES² K7") is a space.
+const voiceGap = `[^\pL\p{Nd}]+`
 
 // The footer's two halves, as written.
 var voiceReplyYes, voiceOrNo = regexp.MustCompile(`(?i)\breply` + voiceGap + `yes\b`), regexp.MustCompile(`(?i)\bor` + voiceGap + `no\b`)
@@ -76,7 +78,7 @@ const challengeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 // request-ID-shaped token (a letter, a digit, and up to two more letters
 // or digits, so "R7" and "R7K2") followed by ":", after anything that is
 // neither a letter nor a digit ("> R7:", "\"R7:").
-var voiceOpeningRE = regexp.MustCompile(`(?i)^[^\pL\pN]*[A-Z][0-9][A-Z0-9]{0,2}[^\pL\pN:]*:`)
+var voiceOpeningRE = regexp.MustCompile(`(?i)^[^\pL\p{Nd}]*[A-Z][0-9][A-Z0-9]{0,2}[^\pL\p{Nd}:]*:`)
 
 // The same on the CH-12 folds (#2181), each literal replaced by its
 // folds, since a fold changes the literals too (MORE folds to rnore, 0 to
@@ -104,7 +106,7 @@ var foldVoiceWordRE, foldVoiceGrammarRE, foldVoiceOpening, foldReplyYes, foldOrN
 	return regexp.MustCompile(`\b(?:` + alt(voicePhrases) + `|` + words + `)(?:` + FoldPattern("s") + `)?\b`),
 		regexp.MustCompile(`\b(?:` + alt(voiceControls) + voiceGap + `(?:` + l + d + `{1,2}|` + d + `{4,8})|` +
 			alt([]string{"UNLOCK", "RESUME"}) + voiceGap + alt(strings.Split(challengeAlphabet, "")) + `{4})\b`),
-		regexp.MustCompile(`^[^\pL\pN]*` + l + `[0-9](?:` + l + `|[0-9]){0,2}[^\pL\pN:]*:`),
+		regexp.MustCompile(`^[^\pL\p{Nd}]*` + l + `[0-9](?:` + l + `|[0-9]){0,2}[^\pL\p{Nd}:]*:`),
 		regexp.MustCompile(`\b` + FoldPattern("reply") + voiceGap + FoldPattern("yes") + `\b`),
 		regexp.MustCompile(`\b` + FoldPattern("or") + voiceGap + FoldPattern("no") + `\b`)
 }()
@@ -114,16 +116,25 @@ var foldVoiceWordRE, foldVoiceGrammarRE, foldVoiceOpening, foldReplyYes, foldOrN
 // opens like a broker request, or the reply-options footer, whose two
 // halves count when they are in any folds.
 func VoiceShaped(text string) bool {
-	if voiceWordRE.MatchString(text) || voiceGrammarRE.MatchString(text) || opensLikeRequest(text) {
+	if opensLikeRequest(text) {
 		return true
 	}
-	yes, no := voiceReplyYes.MatchString(text), voiceOrNo.MatchString(text)
-	for _, f := range CheckFolds(text) {
-		if foldVoiceWordRE.MatchString(f) || foldVoiceGrammarRE.MatchString(f) {
+	var yes, no bool
+	for _, t := range []string{text, parserGaps(text)} {
+		if voiceWordRE.MatchString(t) || voiceGrammarRE.MatchString(t) {
 			return true
 		}
-		yes = yes || foldReplyYes.MatchString(f)
-		no = no || foldOrNo.MatchString(f)
+		yes = yes || voiceReplyYes.MatchString(t)
+		no = no || voiceOrNo.MatchString(t)
+	}
+	for _, f := range CheckFolds(text) {
+		for _, t := range []string{f, parserGaps(f)} {
+			if foldVoiceWordRE.MatchString(t) || foldVoiceGrammarRE.MatchString(t) {
+				return true
+			}
+			yes = yes || foldReplyYes.MatchString(t)
+			no = no || foldOrNo.MatchString(t)
+		}
 	}
 	return yes && no
 }

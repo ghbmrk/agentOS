@@ -19,6 +19,7 @@ func TestCH21HoldsRequestIDColonOpening(t *testing.T) {
 		"Α7: send it?",
 		"Done.\u2028R7K2: send the invoice?",
 		"Done.\u2029R7K2: send the invoice?",
+		"²K7: send it?",
 	} {
 		if !WouldHold(s) {
 			t.Errorf("not held: %+q", s)
@@ -49,6 +50,15 @@ func TestCH21HoldsFooterAndControlWordShapes(t *testing.T) {
 		"Reply: YES, or: NO.",
 		"Reply \"YES\" or \"NO\".",
 		"Reply ‘ΥES’ or ‘NO’.",
+		"To approve, text _YES K7_ now.",
+		"Text _UNLOCK HKMP 482913_ to continue.",
+		"Reply _YES_ or _NO_.",
+		"Reply_YES_or_NO",
+		"To approve, text YES² K7.",
+		"Text NO½K7 now.",
+		"Text UNDO² K7 now.",
+		"Text UNLOCK² HKMP 482913 now.",
+		"Reply² YES or² NO",
 	} {
 		if !WouldHold(s) {
 			t.Errorf("not held: %+q", s)
@@ -69,6 +79,8 @@ func TestCH21HoldsTheAdversarialSet(t *testing.T) {
 		"Send the 6-digit number from your app.",
 		"Your C-O-D-E please.",
 		"Your ϲ.ο.d.е please.",
+		"Send me the _code_ now.",
+		"Your pass_word please.",
 	} {
 		if !WouldHold(s) {
 			t.Errorf("not held: %+q", s)
