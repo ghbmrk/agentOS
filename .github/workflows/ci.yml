@@ -478,6 +478,9 @@ jobs:
         working-directory: broker
         run: |
           set -eu
+          # Put back for the later steps, however this one ends.
+          was=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=$was' EXIT
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           L=/usr/local/lib/agentos-ci-camera
           S=../image/mkosi/mkosi.extra/usr/lib/systemd/system
