@@ -129,6 +129,12 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 			return []derived{d}, true
 		}
 		return nil, true
+	case TTrip:
+		// A plan's trip is in its rejection, derived with it; a trip entry
+		// is an input (an exit's call trip, a honey key at Extend or Issue)
+		// only in a shape the fold takes, else a divergence.
+		var t Trip
+		return nil, json.Unmarshal(e.Body, &t) != nil || !s.tripOK(t, "")
 	}
 	// A type the kernel adds is a decision with no derivation until it is
 	// listed here or derived above, so none is folded unchecked by default.
@@ -146,7 +152,7 @@ var recorded = map[string]bool{
 	TTaskOpened: true, TTaskApproved: true, TTaskEnded: true, TAnchorsSet: true,
 	TSubjectOpened: true, TContentStored: true, TSubjectErased: true, TEraseConfirmed: true, TContentRead: true,
 	TBackupTarget: true, TBackupUntarget: true, TBackupTaken: true, TEdgeRevoked: true, TEdgeCut: true,
-	TRecoveryRotate: true, TCodeApproved: true,
+	TRecoveryRotate: true, TCodeApproved: true, TDecoyTable: true, TTripResumed: true,
 }
 
 // decision is decide's entry for a pending plan.
@@ -157,7 +163,7 @@ func decision(s *State, id string, now int64) []derived {
 	}
 	root, scopes, r := Admit(s, p.Plan, now)
 	if r != nil {
-		return []derived{entry(TPlanRejected, planRejected{Plan: id, Cause: p.Seq, Code: r.Code, Detail: r.Detail})}
+		return []derived{entry(TPlanRejected, s.rejection(p, r))}
 	}
 	return []derived{entry(TPlanAccepted, planAccepted{Plan: id, Cause: p.Seq, Root: root, Scopes: scopes})}
 }

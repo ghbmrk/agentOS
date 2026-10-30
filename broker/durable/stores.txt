@@ -6,7 +6,7 @@
 # kind is one of:
 #   journal           the journal itself (OP-11's one log)
 #   projection        a pure function of the journal, or a named cache of one
-#   content           bytes the journal names: vault, snapshots, recall, logs
+#   content           bytes the journal names: vault, snapshots, logs
 #   external-session  state an outside program changes itself (CRED-4, CRED-5)
 #   config            owner or setup settings, not a lifecycle
 #   debt              keeps a lifecycle beside the journal; <ref> names the
@@ -26,7 +26,6 @@ follow debt debt:#1947
 guest debt debt:#1947
 journal journal
 meter debt debt:#1947
-recall content
 recovery debt debt:#1947
 update debt debt:audit-2.4
 vault content

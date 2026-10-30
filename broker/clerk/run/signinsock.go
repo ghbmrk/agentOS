@@ -38,8 +38,12 @@ type SignInSock struct {
 // the sign-in machine sees it as /run/agentos/route.sock.
 const SignInRouteSocket = "route.sock"
 
+// signInArgs name the sign-in's guest and its plan, the PlanHost's that
+// began it (#1379 (a)); agentosd's host ignores the plan until it runs one
+// sign-in machine per plan (#3927).
 type signInArgs struct {
 	Guest string `json:"guest"`
+	Plan  string `json:"plan"`
 }
 
 type signInRoute struct {
@@ -69,14 +73,15 @@ func within(ctx context.Context, c proc.Conn) (proc.Conn, error) {
 }
 
 // Start has agentosd make guest's route afresh, serves guest's endpoint in
-// it and has agentosd start the sign-in CLI on it.
-func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, error) {
+// it and has agentosd start planName's sign-in CLI on it.
+func (s SignInSock) Start(ctx context.Context, planName, guest string) (SignInWorker, error) {
 	c, err := within(ctx, s.Host)
 	if err != nil {
 		return nil, err
 	}
 	var r signInRoute
-	if err := c.Call("signinroute", signInArgs{Guest: guest}, &r); err != nil {
+	args := signInArgs{Guest: guest, Plan: planName}
+	if err := c.Call("signinroute", args, &r); err != nil {
 		return nil, err
 	}
 	err = errors.New("run: agentosd named a route that is not the guest's")
@@ -85,12 +90,12 @@ func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, erro
 		ln, err = ListenPlan(filepath.Join(r.Route, SignInRouteSocket), s.SandboxUID)
 	}
 	if err != nil {
-		(&signInSockWorker{s: s, guest: guest}).Stop()
+		(&signInSockWorker{s: s, args: args}).Stop()
 		return nil, err
 	}
 	go servePlan(ln, PlanGuest{Login: s.Login, Guest: guest})
-	w := &signInSockWorker{s: s, guest: guest, ln: ln}
-	if err := c.Call("signinstart", signInArgs{Guest: guest}, nil); err != nil {
+	w := &signInSockWorker{s: s, args: args, ln: ln}
+	if err := c.Call("signinstart", args, nil); err != nil {
 		// A lost answer may have started it: stop is idempotent.
 		w.Stop()
 		return nil, err
@@ -99,9 +104,9 @@ func (s SignInSock) Start(ctx context.Context, guest string) (SignInWorker, erro
 }
 
 type signInSockWorker struct {
-	s     SignInSock
-	guest string
-	ln    net.Listener // nil once the endpoint did not open
+	s    SignInSock
+	args signInArgs
+	ln   net.Listener // nil once the endpoint did not open
 }
 
 // Read asks agentosd what the CLI printed. A call that fails reads as an
@@ -113,7 +118,7 @@ func (w *signInSockWorker) Read(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	var r signInRead
-	if err := c.Call("signinread", signInArgs{Guest: w.guest}, &r); err != nil {
+	if err := c.Call("signinread", w.args, &r); err != nil {
 		return "", true
 	}
 	return r.Printed, r.Exited
@@ -126,7 +131,7 @@ func (w *signInSockWorker) Stop() {
 	if c.Timeout == 0 {
 		c.Timeout = 45 * time.Second
 	}
-	c.Call("signinstop", signInArgs{Guest: w.guest}, nil)
+	c.Call("signinstop", w.args, nil)
 	if w.ln != nil {
 		w.ln.Close()
 	}

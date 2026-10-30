@@ -24,6 +24,7 @@ import doclint  # noqa: E402
 import g1_scope  # noqa: E402
 import netguardcheck  # noqa: E402
 import risk_tier  # noqa: E402
+import srclint  # noqa: E402
 import trace  # noqa: E402
 import trusted_base  # noqa: E402
 
@@ -66,6 +67,7 @@ CASES = {
         "doclint.baseline_growth": lambda t: list(doclint.baseline_growth(ROOT, t / "tools/brief_acceptance_baseline.txt")),
     },
     "tools/netguard_allow.txt": {"netguardcheck.load_allow": lambda t: netguardcheck.load_allow(t / "tools/netguard_allow.txt")},
+    "tools/srclint_allow.txt": {"srclint.load_allow": lambda t: srclint.load_allow(t / "tools/srclint_allow.txt")},
     "tools/g1_scope_g2.txt": {"g1_scope.parse_list": _g2_list},
 }
 

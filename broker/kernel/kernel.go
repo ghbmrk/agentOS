@@ -31,6 +31,12 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
 	}
+	if t := s.tripOf(p); t != nil {
+		return key.ID{}, nil, &key.Refusal{Code: CTrip, Detail: t.Cause}
+	}
+	if s.decoys.stopped {
+		return key.ID{}, nil, &key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}
+	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err != nil {
 		return key.ID{}, nil, &key.Refusal{Code: CKey, Detail: err.Error()}
@@ -348,6 +354,9 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
 func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
+	if err := k.honeyTrip(now, "", keys...); err != nil {
+		return err
+	}
 	if _, err := k.s.grants(keys, cos, now); err != nil {
 		return err
 	}
@@ -552,6 +561,9 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
 func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
+	if err := k.honeyTrip(now, plan, ext); err != nil {
+		return err
+	}
 	h, ok := k.s.SpendHeld[plan]
 	if !ok {
 		return &key.Refusal{Code: CNotHeld, Detail: plan}
@@ -587,6 +599,9 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 func (k *Kernel) Revoke(now int64, id key.ID) error { return k.owner(now, TKeyRevoked, keyID{id}) }
 func (k *Kernel) Pause(now int64, id key.ID) error  { return k.owner(now, TKeyPaused, keyID{id}) }
 func (k *Kernel) Unpause(now int64, id key.ID) error {
+	if _, tripped := k.s.decoys.paused[id]; tripped {
+		return ErrTripResume
+	}
 	return k.owner(now, TKeyResumed, keyID{id})
 }
 func (k *Kernel) Stop(now int64) error { return k.owner(now, TStop, struct{}{}) }
@@ -598,6 +613,9 @@ var ErrStaleResume = errors.New("kernel: a STOP was logged after this RESUME was
 // Resume lifts the STOP whose count it names (State.Stops), and only that
 // one: a RESUME that waited behind a later STOP is refused, unlogged.
 func (k *Kernel) Resume(now int64, stops uint64) error {
+	if k.s.decoys.held() {
+		return ErrTripResume
+	}
 	if stops != k.s.Stops {
 		return ErrStaleResume
 	}
@@ -688,7 +706,7 @@ func (k *Kernel) decide(now int64, id string) error {
 	p := k.s.Plans[id]
 	root, scopes, r := Admit(k.s, p.Plan, now)
 	if r != nil {
-		_, err := k.emit(now, TPlanRejected, planRejected{Plan: id, Cause: p.Seq, Code: r.Code, Detail: r.Detail})
+		_, err := k.emit(now, TPlanRejected, k.s.rejection(p, r))
 		return err
 	}
 	_, err := k.emit(now, TPlanAccepted, planAccepted{Plan: id, Cause: p.Seq, Root: root, Scopes: scopes})

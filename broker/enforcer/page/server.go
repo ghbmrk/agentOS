@@ -10,8 +10,18 @@
 // another source, unanswered. Every response refuses framing, and every
 // state-changing request must come from the page's own origin.
 //
-// It is enforcer code: it imports the standard library, broker/kernel/key
-// and broker/enforcer/policy only (broker/daemon/arc2_test.go). Its
+// It also serves slice s's asserted actions (package action): every
+// turn-on or open of a safety-list device, unlock or disarm, camera off or
+// alarm arm, each on a once-only challenge naming the device, the action
+// and a short window.
+//
+// It also takes a safety-list device's sealed secret with the add-device
+// change that names it (slice r, decision 10) and hands it to the
+// enforcer's store through Secrets, which can only admit, never read.
+//
+// It is enforcer code: it imports the standard library, broker/kernel/key,
+// broker/enforcer/policy, broker/enforcer/action and
+// broker/enforcer/pairseal only (broker/daemon/arc2_test.go). Its
 // assumptions are in ASSUMPTIONS.md.
 package page
 
@@ -27,6 +37,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/action"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -38,6 +49,17 @@ type Policy interface {
 	Pending() []policy.Pending
 	Propose(next policy.Proposal, sig []byte, nowMS int64) (policy.Outcome, error)
 	Cancel(id string) error
+}
+
+// Secrets is the part of the enforcer's device-secret store
+// (devsecret.Store) the page drives: it admits a sealed secret with the
+// owner's approval of the add-device change that names it, and prunes
+// secrets whose change was cancelled. It has no method that returns a
+// secret, so the page reads none (STO-4). The page holds Config.Lock
+// around every call.
+type Secrets interface {
+	Admit(device string, sealed []byte, prop policy.Proposal, sig []byte) error
+	Prune() error
 }
 
 // Channel is the enforcer channel's pause, which only the page lifts (NET-2
@@ -66,6 +88,12 @@ type Config struct {
 	// page's own lock.
 	Lock    sync.Locker
 	Channel Channel // nil until slice d is wired
+	// Act carries out the owner's asserted actions on safety-list devices
+	// (slice s); nil serves none.
+	Act action.Actuator
+	// Secrets takes safety-list devices' sealed secrets (slice r); nil
+	// refuses every link that carries one.
+	Secrets Secrets
 	Cert    tls.Certificate
 	Now     func() time.Time // nil means time.Now
 }
@@ -83,6 +111,7 @@ type Server struct {
 	last  uint64  // the highest version the page has drawn a challenge for
 	sync  syncState
 	tmpl  *template.Template
+	book  *action.Book // nil when Config.Act is
 }
 
 //go:embed templates static
@@ -119,7 +148,13 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, chals: map[string]*challenge{}, tmpl: t}, nil
+	s := &Server{cfg: cfg, chals: map[string]*challenge{}, tmpl: t}
+	if cfg.Act != nil {
+		if s.book, err = action.NewBook(cfg.Owner, cfg.Act); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // dnsName is a DNS name: what the passkey's RP ID and the certificate
@@ -226,9 +261,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.home(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/p":
 		s.confirm(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/a" && s.book != nil:
+		s.action(w, r)
 	case r.Method == http.MethodGet && (r.URL.Path == "/page.js" || r.URL.Path == "/page.css"):
 		s.static(w, r)
-	case r.Method == http.MethodPost && (r.URL.Path == "/approve" || r.URL.Path == "/challenge" || r.URL.Path == "/act"):
+	case r.Method == http.MethodPost && (r.URL.Path == "/approve" || r.URL.Path == "/challenge" || r.URL.Path == "/act" ||
+		r.URL.Path == "/do" && s.book != nil):
 		if !s.sameOrigin(r) {
 			http.Error(w, "cross-origin", http.StatusForbidden)
 			return
@@ -238,6 +276,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.approve(w, r)
 		case "/challenge":
 			s.challenge(w, r)
+		case "/do":
+			s.do(w, r)
 		default:
 			s.act(w, r)
 		}

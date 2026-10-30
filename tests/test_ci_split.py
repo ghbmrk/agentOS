@@ -32,7 +32,7 @@ def go_list():
 class SplitTest(unittest.TestCase):
     """Every package runs on exactly one shard."""
 
-    PKGS = [f"{M}/{p}" for p in ("guest", "journal", "holder", "recall", "a", "b", "c", "d/e")]
+    PKGS = [f"{M}/{p}" for p in ("guest", "journal", "holder", "update", "a", "b", "c", "d/e")]
 
     def assertExactCover(self, pkgs, parts):
         self.assertEqual(ci_split.gaps_and_duplicates(pkgs, parts), ([], [], []))
@@ -108,7 +108,7 @@ class SplitTest(unittest.TestCase):
         finally:
             sys.stdin = old
         out = buf.getvalue().split()
-        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("journal", "guest", "holder", "recall")])
+        self.assertEqual(out[:4], [f"{M}/{p}" for p in ("journal", "guest", "holder", "update")])
         self.assertEqual([ci_split.weight(p) for p in out], sorted((ci_split.weight(p) for p in out), reverse=True))
 
 

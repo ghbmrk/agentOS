@@ -20,9 +20,8 @@
 # - every package the G2 binaries import (`go list -deps`, G2_BINARIES in
 #   tests/test_g1_scope.py): the G1 path's binaries plus agentos-holder and agentos-release;
 # - what A4, A5 and A14 exercise directly beyond those: the credentialed browser (A5,
-#   CRED-12), the journal tail (A4), the CH-21 voice check (A14), the recall index
-#   (A14 CAP-3, so it leaves the G1 list's frozen imports), the simulators and scenario
-#   scripts, and the whole of broker/route/ (A14 CAP-9, CAP-11, CRED-5: every route the
+#   CRED-12), the journal tail (A4), the CH-21 voice check (A14), the simulators and
+#   scenario scripts, and the whole of broker/route/ (A14 CAP-9, CAP-11, CRED-5: every route the
 #   box can call is in scope, not only G1's one);
 # - the plan-route spikes (S8) that A14's provider-agent cases rest on.
 # Frozen by D-098 until G2 passes: the open-source bridge (cleanroom, hint, pubid, pubsend),
@@ -45,38 +44,25 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4042 (ENF-names, #3758): broker/enforcer/channel/, which the G2 list does not name (D-198).
-# Remove once #4042 merges.
-exempt-pr 4042
-
-# #4049 (ENF-s, #3694): broker/enforcer/action/ and broker/enforcer/page/, which the G2 list does
-# not name (D-198). Remove once #4049 merges.
-exempt-pr 4049
-
-# #4050 (CAM-clerk-rollback-test + CAM-clerk-broken-slot, #3967/#3968): broker/cmd/agentos-camera/,
-# which the G2 list does not name (D-198). Remove once #4050 merges.
-exempt-pr 4050
-
 # #4051 (ENF-g, #3662): broker/enforcer/ap/ (with push/), which the G2 list does not name
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
 
-# #4055 (ENF-f, #3664): broker/enforcer/dns/, mdns/, wol/ and nft/, which the G2 list does not
-# name (D-198). Remove once #4055 merges.
-exempt-pr 4055
+# #4088 (ENF-i, #3667): broker/enforcer/traffic/, which the G2 list does not name (D-198). Remove
+# once #4088 merges.
+exempt-pr 4088
 
-# #3976 (DEV-homekit-b2a, #3891): broker/cmd/agentos-homekit/, which the G2 list does not
-# name (D-198). Remove once #3976 merges.
-exempt-pr 3976
+# #4092 (ENF-k-ptrace, #4091): broker/enforcer/radio/, which the G2 list does not name (D-198).
+# Remove once #4092 merges.
+exempt-pr 4092
 
-# #3973 (PLAN-slots, #1379 (a)): broker/cmd/agentos-clerk-model/, which the G2 list does not
-# name (D-198). Remove once #3973 merges.
-exempt-pr 3973
+# #4073 (ENF-r, #3692): broker/enforcer/pairseal/, broker/enforcer/devsecret/ and
+# broker/clerk/enfpair/, which the G2 list does not name (D-198). Remove once #4073 merges.
+exempt-pr 4073
 
-# #3974 (MIG-4-exit-c2, #3683): broker/cmd/agentos-a8scan/main.go, a one-line needle that
-# TestEveryStorePurposeIsANeedle forces, which the G2 list does not name (D-198). Remove once
-# #3974 merges.
-exempt-pr 3974
+# #4058 (CAM-clerk-image, #3867): broker/cmd/agentos-camera/, which the G2 list does not name
+# (D-198). Remove once #4058 merges.
+exempt-pr 4058
 
 # Project machinery and records.
 allow .claude/
@@ -168,10 +154,11 @@ allow broker/claim/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/
+# The decoy table and matcher (DECOY-a #3762), which the kernel links from DECOY-b (#3763, D-232).
+allow broker/decoy/
 allow broker/durable/
 allow broker/edgelink/
 allow broker/egress/
-allow broker/events/
 allow broker/firstboot/
 allow broker/fold/
 allow broker/follow/
@@ -199,7 +186,6 @@ allow broker/procguard/
 allow broker/provagent/
 allow broker/question/
 allow broker/quota/
-allow broker/recall/
 allow broker/recovery/
 allow broker/reversible/
 allow broker/route/

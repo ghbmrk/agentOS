@@ -156,7 +156,7 @@ func TaskApproved(v View, anchors []key.PublicKey, ver *key.Verified, site strin
 }
 
 func (s *State) openOK(t Task) error {
-	if t.ID == "" || !utf8.ValidString(t.ID) || strings.HasPrefix(t.ID, key.PlanPrefix) || s.tasks[t.ID] != nil || s.Stopped {
+	if t.ID == "" || !utf8.ValidString(t.ID) || strings.HasPrefix(t.ID, key.PlanPrefix) || s.tasks[t.ID] != nil || s.Stopped || s.decoys.stopped {
 		return ErrTaskOpen
 	}
 	return nil

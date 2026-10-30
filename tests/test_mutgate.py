@@ -55,6 +55,68 @@ class Gate(unittest.TestCase):
         self.assertEqual(added["broker/hint/hint.go"], {11, 12})
         self.assertEqual(marked, {"broker/hint/hint_test.go"})
 
+    def test_added_lines_split_on_newline_only(self):
+        # #4028: a Go comment may carry any of these; str.splitlines() broke the diff line there.
+        for ch in ("\u2028", "\u2029", "\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85"):
+            diff = DIFF.replace("+\tif x > 1 {\n", f"+// a{ch}b\n+\tif x > 1 {{\n")
+            added, _ = mutgate.added_lines(diff)
+            self.assertEqual(added["broker/hint/hint.go"], {11, 12, 13}, repr(ch))
+            self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 12, "X")]}),
+                             [("hint", "broker/hint/hint.go", 12, "X")], repr(ch))
+
+    def test_added_lines_skip_the_no_newline_marker(self):
+        # #4103: the marker after a rewritten unterminated last line is not a line.
+        diff = ("diff --git a/broker/x/a.go b/broker/x/a.go\n--- a/broker/x/a.go\n+++ b/broker/x/a.go\n"
+                "@@ -2 +2,2 @@\n-old\n\\ No newline at end of file\n+n1\n+n2\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3}})
+        diff += "\\ No newline at end of file\n"
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3}})
+        # a LIVED mutant on the first added line is read, not skipped
+        diff = diff.replace("broker/x/a.go", "broker/hint/hint.go").replace("+n1", "+n1\n+// REQ: CRED-1")
+        self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 2, "X")]}),
+                         [("hint", "broker/hint/hint.go", 2, "X")])
+
+    def test_added_lines_read_quoted_and_tab_suffixed_headers(self):
+        # #4105: git quotes a non-ASCII name and appends a TAB after a name with a space.
+        for header, path in (('"b/broker/hint/h\\303\\251.go"', "broker/hint/h\u00e9.go"),
+                             ("b/broker/hint/a b.go\t", "broker/hint/a b.go"),
+                             ('"b/broker/hint/q\\"\\\\t.go"', 'broker/hint/q"\\t.go')):
+            diff = f"diff --git a/x b/x\n--- a/x\n+++ {header}\n@@ -1,0 +2 @@\n+x\n"
+            self.assertEqual(mutgate.added_lines(diff)[0], {path: {2}}, header)
+        gone = "diff --git a/x b/x\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+        self.assertEqual(mutgate.added_lines(gone)[0], {})
+
+    def test_added_line_starting_plus_plus_space_is_not_a_header(self):
+        diff = ("diff --git a/broker/x/a.go b/broker/x/a.go\n--- a/broker/x/a.go\n+++ b/broker/x/a.go\n"
+                "@@ -1,0 +2,4 @@\n+a\n+++ b\n+c\n+d\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3, 4, 5}})
+        diff = diff.replace("+++ b\n", "+++ b/other.go\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3, 4, 5}})
+
+    def test_gate_numbers_lines_by_newline_only_on_a_real_diff(self):
+        # #4028: git's own diff, read as text, would turn a lone \r into a line break too.
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+            pkg = pathlib.Path(d) / "broker" / "hint"
+            pkg.mkdir(parents=True)
+            (pkg / "hint.go").write_text("package hint\n")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            (pkg / "hint.go").write_bytes(b"package hint\n// a\rb \xe2\x80\xa8 c\nvar a = 1 + 1\n")
+            (pkg / "hint_test.go").write_text("package hint\n// REQ: CRED-1\n")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+            res = pathlib.Path(d) / "res"
+            res.mkdir()
+            (res / "hint.json").write_text(json.dumps({"files": [{"file_name": "hint.go", "mutations": [
+                {"status": "LIVED", "line": 3, "type": "ARITHMETIC_BASE"}]}], "mutants_lived": 1}))
+            r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "gate", str(res),
+                                "--git", "HEAD~1"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/hint/hint.go:3 ARITHMETIC_BASE survives", r.stdout)
+
     def test_survivors_reads_lived_only_and_nested_package_names(self):
         with tempfile.TemporaryDirectory() as d:
             data = {"files": [{"file_name": "a.go", "mutations": [
@@ -224,6 +286,39 @@ class Shape(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("not gremlins' files[].mutations[] shape", r.stderr)
 
+    def run_config_stub(self, status="KILLED", env_extra=None):
+        """mutgate.py run with a stub gremlins that records the --config file it is given and its
+        GREMLINS_* environment, and reports one mutant with the given status."""
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            out = json.dumps({"files": [{"file_name": "x.go", "mutations": [{"status": status, "line": 1}]}],
+                              "mutants_lived": 0})
+            (stub / "gremlins").write_text(
+                "#!/bin/sh\n{ echo \"$*\"; env | grep ^GREMLINS_; } > \"%s/seen\"\n"
+                "while [ \"$1\" != --config ]; do shift; done\ncat \"$2\" > \"%s/cfg\"\n"
+                "while [ \"$1\" != -o ]; do shift; done\nprintf '%%s' '%s' > \"$2\"\n" % (d, d, out))
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin", **(env_extra or {})}
+            r = subprocess.run([sys.executable, str(ROOT / "tools" / "mutgate.py"), "run", "hint", "--out",
+                                str(pathlib.Path(d) / "out")], capture_output=True, text=True, env=env)
+            seen = (pathlib.Path(d) / "seen").read_text()
+            return r, seen, (pathlib.Path(d) / "cfg").read_text()
+
+    def test_run_reads_no_config_but_its_own_empty_one(self):
+        # #4027: a PR-added broker/**/.gremlins.yaml or a GREMLINS_* variable must not reach gremlins.
+        r, seen, cfg = self.run_config_stub(env_extra={"GREMLINS_UNLEASH_DRY_RUN": "true"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(seen.splitlines()[0], r"^unleash \./hint --config \S+/gremlins\.yaml -o ")
+        self.assertNotIn("GREMLINS_", "\n".join(seen.splitlines()[1:]))
+        self.assertEqual(cfg, "{}\n")
+
+    def test_run_fails_on_a_mutant_gremlins_did_not_run(self):
+        # #4027: a dry run leaves every mutant RUNNABLE and no LIVED one, which the gate would pass.
+        r, _, _ = self.run_config_stub(status="RUNNABLE")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("mutants gremlins did not run", r.stderr)
+
     def test_foreign_names_are_lived_files_not_in_the_package(self):
         # #3956: violations() joins broker/<pkg>/<file_name>, so only a bare file name in the package matches.
         with tempfile.TemporaryDirectory() as d:
@@ -327,7 +422,7 @@ class Shape(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         cwd, argv, diff = seen.split("\n", 2)
         self.assertEqual(pathlib.Path(cwd).name, "hint")
-        self.assertTrue(argv.endswith("/broker/hint -D HEAD~1 -o D/out/hint.json"), argv)
+        self.assertRegex(argv, r"/broker/hint -D HEAD~1 --config \S+ -o D/out/hint\.json$")
         self.assertIn("+++ b/hint.go\n@@ -1,0 +2,2 @@", diff)
         self.assertNotIn("\n package hint\n", diff)  # no context line
         # A mutant gremlins skipped on a line the gate reads fails the run, not the gate empty.

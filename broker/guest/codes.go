@@ -19,6 +19,7 @@ var codes = set(
 	kernel.CKey, kernel.CUngranted, kernel.CGrantHeld, kernel.CCutOff, kernel.CPlan,
 	kernel.CDuplicate, kernel.CClerk, kernel.CPool, kernel.CNotHeld, kernel.CExtension,
 	kernel.CHeld, kernel.CBroken, kernel.CInFlight, kernel.CTask, kernel.CCosign,
+	kernel.CTrip, kernel.CTripped,
 	key.RMalformed, key.RStopped, key.RRevoked, key.RPaused, key.RExpired, key.RClerk,
 	key.RVerb, key.RArg, key.RContent, key.RLabels, key.RSpendTask, key.RSpendDay,
 	key.RRate, key.RUses, key.RTask,
@@ -38,7 +39,7 @@ var codes = set(
 	"not-owner-approved", "grant-not-staged", "not-this-clerk",
 	"no-account", "sign-in-refused", "no-sign-in", "address", "notgmail",
 	"plan-not-allowed", "plan-consent", "signin-busy", "signin-code", "signin-failed",
-	"signin-timed-out", "signin-stopped", "requalify", "plan-refused", "plan-meter",
+	"signin-timed-out", "signin-stopped", "requalify", "plan-refused", "plan-meter", "plan-unknown",
 
 	// broker/clerk/model: an API call's refusals and failures.
 	"private", "nokey", "body", "upstream", "answer",

@@ -119,7 +119,7 @@ var controlPath = map[string][]string{
 	// It hosts the follow clerk on kernel/proc's clerk socket, under the
 	// owner's anchors read with clerk/handoff (#3430); kernel/proc serves
 	// and dials only unix sockets (netOK in inference_test.go).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -193,11 +193,6 @@ var guestPlane = map[string]struct {
 	// and the anchor co-signature check (kernel/key) that makes enrolment
 	// the owner's tier-4 step; no socket, process or system call of its own.
 	"vision/faces": {[]string{"vision", "kernel/key"}, forbiddenStd},
-	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
-	// guests as tools: no network clients, no processes, no inference
-	// beyond the in-process hashing embedder (DEP-1).
-	"recall": {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"events": {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
@@ -291,9 +286,15 @@ var enforcer = map[string]struct {
 	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
+	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice f: dnsmasq configuration
+	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the pair relay
+	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the Wake-on-LAN relay
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal"}, enforcerWebForbid},
+	// Asserted safety-list actions (slice s): once-only owner challenges;
+	// the page serves them and the daemon wires their actuator.
+	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
@@ -303,6 +304,24 @@ var enforcer = map[string]struct {
 	// over SSH (enforcerSSH).
 	"enforcer/ap":      {[]string{"enforcer/policy", "enforcer/nft"}, droneForbid},
 	"enforcer/ap/push": {[]string{"enforcer/ap", "golang.org/x/crypto/ssh"}, droneForbid},
+	// Safety-list devices' secrets (slice r, decision 10): the sealed
+	// envelope both ends import, standard library only, and the enforcer's
+	// store, which neither the page nor the channel links.
+	"enforcer/pairseal":  {nil, droneForbid},
+	"enforcer/devsecret": {[]string{"kernel/key", "enforcer/policy", "enforcer/pairseal"}, droneForbid},
+}
+
+// coreEnforcer are the core packages that link an enforcer package: the
+// core's half of a shared format, never the enforcer's logic (ENF brief,
+// guard files). TestCoreLinksOnlyEnforcerFormats holds that for every core
+// package.
+var coreEnforcer = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	// The pairing clerks' sealing helper (slice r): seals to the
+	// enforcer's pairing key with pairseal and holds no private key.
+	"clerk/enfpair": {[]string{"enforcer/pairseal"}, forbiddenStd},
 }
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
@@ -371,6 +390,32 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	}
 	for pkg, rule := range enforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+	for pkg, rule := range coreEnforcer {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+}
+
+// TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
+// package except as coreEnforcer allows, so the core links no enforcer
+// logic, its device-secret store above all (STO-4).
+func TestCoreLinksOnlyEnforcerFormats(t *testing.T) {
+	out, err := exec.Command("go", "list", "-C", "..", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", "./...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		pkg := strings.TrimPrefix(f[0], module)
+		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") {
+			continue
+		}
+		for _, im := range f[1:] {
+			rel := strings.TrimPrefix(im, module)
+			if (rel == "enforcer" || strings.HasPrefix(rel, "enforcer/")) && !contains(coreEnforcer[pkg].allowed, rel) {
+				t.Errorf("core package %s links enforcer package %s", pkg, rel)
+			}
+		}
 	}
 }
 
