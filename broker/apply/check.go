@@ -73,6 +73,10 @@ type adoption struct {
 	// Fast: an ordinary release adopted on the fast channel, which the
 	// stable gate never judged.
 	Fast bool `json:"fast,omitempty"`
+	// Unsure: dropped after a Schedule error that may leave the release
+	// pending in the applier's memory, so a stable step still withdraws
+	// it.
+	Unsure bool `json:"unsure,omitempty"`
 }
 
 // checkState is the check's saved record: when each release image was
@@ -374,6 +378,7 @@ func (c *Check) adopted(ref update.Ref) bool {
 }
 
 // withdrawFast withdraws every staged ordinary release adopted on fast,
+// and every unsure one dropped after a Schedule error,
 // so a box moved to stable installs nothing its stable gate did not pass
 // (UPD-4, UPD-5). The withdrawn adoption is dropped and offered again
 // under the stable gate. A release handed over in this boot is undone;
@@ -385,7 +390,7 @@ func (c *Check) withdrawFast() error {
 	c.mu.Lock()
 	var ids []string
 	for id, a := range c.st.Adoptions {
-		if a.State == adStaged && a.Fast {
+		if a.Fast && (a.State == adStaged || a.State == adDropped && a.Unsure) {
 			ids = append(ids, id)
 		}
 	}
@@ -408,11 +413,27 @@ func (c *Check) withdrawFast() error {
 		if err != nil {
 			return err
 		}
-		if err := c.settle(id, adDropped, []string{adStaged}, []string{adFailed}); err != nil {
+		if err := c.withdrawn(id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// withdrawn records that the applier gave up adoption id: a staged one is
+// dropped, and an unsure one is sure. Saved before it returns.
+func (c *Check) withdrawn(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.st.Adoptions[id]
+	if !ok || !(a.State == adStaged || a.State == adDropped && a.Unsure) {
+		return nil
+	}
+	next := c.st
+	next.Adoptions = maps.Clone(c.st.Adoptions)
+	a.State, a.Unsure = adDropped, false
+	next.Adoptions[id] = a
+	return c.saveLocked(next)
 }
 
 // unschedule settles adoption id after Schedule refused it with err. A
@@ -420,7 +441,8 @@ func (c *Check) withdrawFast() error {
 // release refused on every step does not grow the record (#4102); the
 // applier's StageDropped of it is then refused as unknown, for good
 // (A16). Any other error (a failed save may leave the release pending in
-// memory, so it may still install and be confirmed) drops it.
+// memory, so it may still install and be confirmed) drops it as unsure,
+// so a fast one is still withdrawn on a move to stable.
 func (c *Check) unschedule(id string, err error) error {
 	for _, e := range []error{ErrRetired, ErrFellBack, ErrApplying, ErrRefused, update.ErrRollback, update.ErrNotChecked} {
 		if errors.Is(err, e) {
@@ -432,7 +454,17 @@ func (c *Check) unschedule(id string, err error) error {
 			return c.saveLocked(next)
 		}
 	}
-	return c.settle(id, adDropped, []string{adStaged}, []string{adFailed})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	a, ok := c.st.Adoptions[id]
+	if !ok || a.State != adStaged {
+		return nil // settled meanwhile by the applier
+	}
+	next := c.st
+	next.Adoptions = maps.Clone(c.st.Adoptions)
+	a.State, a.Unsure = adDropped, true
+	next.Adoptions[id] = a
+	return c.saveLocked(next)
 }
 
 // mint saves a new adoption for ref as staged and returns its ID,

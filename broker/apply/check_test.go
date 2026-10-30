@@ -1249,3 +1249,102 @@ func TestSecurityCauseWithoutItsSave(t *testing.T) {
 		t.Fatalf("status %q, want %q", got, want)
 	}
 }
+
+// UPD-1: a boot that cannot be read is taken for the handover's only when
+// this process saw it so. A fallback the process never read is still
+// judged as one, after a move to stable or a security withdraw.
+// Mutant: mark on any unread boot.
+func TestUnreadBootAfterRestartStillFallsBack(t *testing.T) {
+	for _, why := range []string{WhyStable, WhySecurity} {
+		cr := newCheckRig(t, update.ChannelFast)
+		ctx := context.Background()
+		cr.m.add(2, update.ChannelStable, false, "two")
+		cr.mustStep()
+		cr.clk.add(7 * time.Hour)
+		cr.act.onInstall = func() { cr.inCall = true }
+		if ok, err := cr.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("%s: handover tick: %v %v", why, ok, err)
+		}
+		cr.act.failBoot = true
+		cr.must(cr.act.Restart(ctx)) // the old root boots under a new ID
+		cr.act.bootedErr = errors.New("boot unreadable")
+		cr.restart()
+		if err := cr.a.Resume(ctx); err == nil {
+			t.Fatalf("%s: resume read the boot", why)
+		}
+		if why == WhyStable {
+			cr.channel = update.ChannelStable
+			cr.mustStep()
+		} else if err := cr.a.Withdraw("upd:2:1", why); !errors.Is(err, ErrApplying) {
+			t.Fatalf("%s: withdraw %v", why, err)
+		}
+		cr.act.bootedErr = nil
+		cr.must(cr.a.Resume(ctx))
+		if !cr.a.FellBack(2) || cr.a.st.Last == nil || cr.a.st.Last.Kind != doneFellBack {
+			t.Fatalf("%s: fell back %v, last %+v", why, cr.a.FellBack(2), cr.a.st.Last)
+		}
+		if got := cr.c.st.Adoptions["upd:2:1"].State; got != adFailed {
+			t.Fatalf("%s: adoption %q", why, got)
+		}
+	}
+}
+
+// UPD-4, UPD-5: a fast adoption dropped after a Schedule error the
+// applier may still hold pending is withdrawn on a move to stable, so it
+// never installs past the stable gate.
+// Mutant: withdraw only staged adoptions; never mark the drop unsure.
+func TestUnsureDropWithdrawnOnStable(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.state.Fail = errors.New("disk full")
+	if err := cr.step(); err == nil {
+		t.Fatal("a failed applier save passed")
+	}
+	if a := cr.c.st.Adoptions["upd:2:1"]; a.State != adDropped || !a.Unsure || !a.Fast {
+		t.Fatalf("adoption %+v", a)
+	}
+	cr.state.Fail = nil
+	cr.channel = update.ChannelStable
+	cr.mustStep()
+	if a := cr.c.st.Adoptions["upd:2:1"]; a.Unsure {
+		t.Fatalf("still unsure after the withdraw: %+v", a)
+	}
+	cr.clk.add(7 * time.Hour)
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if len(cr.act.installed) != 0 {
+		t.Fatalf("installed %v on stable with no gate", cr.act.installed)
+	}
+}
+
+// A pinned point keeps its pinned lines when another reason's Withdraw
+// is refused for it.
+// Mutant: record any other reason as security.
+func TestPinnedPointKeepsItsLines(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	cr.act.onInstall = func() { cr.inCall = true }
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	cr.act.abandonErr = errors.New("activator busy")
+	cr.paused = true
+	if err := cr.a.Pin(ctx); !errors.Is(err, ErrApplying) {
+		t.Fatalf("pin: %v", err)
+	}
+	want := cr.a.Status()
+	if want != fmt.Sprintf(pinnedMayStartLine, 2) {
+		t.Fatalf("pinned status %q", want)
+	}
+	if err := cr.a.Withdraw("upd:2:1", "undo"); !errors.Is(err, ErrApplying) {
+		t.Fatalf("undo: %v", err)
+	}
+	if got := cr.a.Status(); got != want {
+		t.Fatalf("after undo %q, want %q", got, want)
+	}
+}

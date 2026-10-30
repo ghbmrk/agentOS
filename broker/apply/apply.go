@@ -325,6 +325,10 @@ type Applier struct {
 	// release is never restarted into, and a pending release of it never
 	// installs.
 	refused refusal
+	// thisBoot: the boot this process runs in, once a boot read or a
+	// handover in this process showed it; "" before. A process never
+	// outlives a boot.
+	thisBoot string
 	// asked: the plan this process submitted and Do has not answered,
 	// and when; no second plan is submitted for Quiet after it, so a
 	// kernel that dispatches later does not get one plan per Tick.
@@ -821,9 +825,13 @@ func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
 	if errors.As(err, &h) { // security, stable, or already withdrawing
 		r := why
 		if r != WhySecurity && r != WhyStable {
-			r = WhySecurity
-			if pt.Stable {
+			switch {
+			case pt.Stable:
 				r = WhyStable
+			case pt.Pinned:
+				r = whyPin
+			default:
+				r = WhySecurity
 			}
 		}
 		if a.refused.adoption == pt.Adoption && a.refused.why == WhySecurity {
@@ -847,14 +855,19 @@ func (a *Applier) undoHandoverLocked(pt *point, why string) error {
 	ctx := context.Background()
 	b, err := a.cfg.Activator.Booted(ctx)
 	if err != nil {
-		// Unread, the boot is still the handover's: Resume settled any
-		// new boot when this process started. Marked durably, so a process
-		// restart before the next Tick never restarts into it (#4112).
-		if err := a.markLocked(pt, why); err != nil {
-			return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
+		// Unread, the boot is still the handover's only when this process
+		// saw it so; then it is marked durably, so a process restart
+		// before the next Tick never restarts into it (#4112). Otherwise
+		// a new boot may have fallen back, which Resume must judge as a
+		// fallback (UPD-1).
+		if a.thisBoot == pt.BootID {
+			if err := a.markLocked(pt, why); err != nil {
+				return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
+			}
 		}
 		return handoverError{starts: true}
 	}
+	a.thisBoot = b.ID
 	if b.ID != pt.BootID {
 		return handoverError{starts: true} // a new boot is Resume's to settle
 	}
@@ -1226,6 +1239,7 @@ func (a *Applier) execute(ctx context.Context, id string) kernel.Result {
 		return a.abandonedLocked(ctx, key, true, "handover not saved: "+noted(err))
 	}
 	a.st, a.handed = next, rel
+	a.thisBoot = pt2.BootID // read for the rollback point, in this process
 	if a.st.Pending == nil {
 		a.rel = nil
 	}
@@ -1414,6 +1428,7 @@ func (a *Applier) Resume(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.thisBoot = b.ID
 	next := a.st
 	next.Applying = nil
 	switch {
@@ -1652,7 +1667,8 @@ func (a *Applier) Status() string {
 		// refusal since names the cause over a move to stable.
 		sec := a.refused.adoption == a.st.Applying.Adoption && a.refused.why == WhySecurity
 		return withdrawingLine(a.st.Applying.To, a.st.Applying.Stable && !sec, !a.st.Applying.Abandoned)
-	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
+	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption &&
+		a.refused.why != whyPin: // a pinned point keeps its pinned lines
 		return withdrawingLine(a.st.Applying.To, a.refused.why == WhyStable, a.refused.starts)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return a.installedLineLocked(a.st.Applying)
