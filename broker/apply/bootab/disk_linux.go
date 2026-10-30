@@ -4,13 +4,13 @@ package bootab
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -20,6 +20,8 @@ import (
 	"unicode/utf16"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ghbmrk/agentos/broker/childproc"
 )
 
 // The GPT partition types of an x86-64 /usr slot (Discoverable Partitions
@@ -41,12 +43,27 @@ const efiAttrs = 0x7
 // immutable, and bootctl clears it before a write or delete.
 const fsImmutable = 0x10
 
+// The tools the adapter runs, by absolute path so no $PATH lookup picks
+// them, and the whole environment they get (util-linux, cryptsetup-bin).
+const (
+	sfdisk      = "/usr/sbin/sfdisk"
+	veritysetup = "/usr/sbin/veritysetup"
+	toolPath    = "PATH=/usr/sbin:/usr/bin"
+)
+
+// maxGPTName is a GPT partition name's length in UTF-16 units; the
+// adapter's labels are ASCII.
+const maxGPTName = 36
+
 // maxESPFile bounds an entry or loader.conf read.
 const maxESPFile = 64 << 10
 
 // entryName is an agentOS entry's file name: its version and the try
-// counter systemd-boot keeps in the name (+LEFT or +LEFT-DONE).
-var entryName = regexp.MustCompile(`^agentos_([0-9]{1,19})(\+([0-9]{1,9})(-[0-9]{1,9})?)?\.conf$`)
+// counter systemd-boot keeps in the name (+LEFT or +LEFT-DONE). The image
+// names its entry after build.sh's VERSION, YYYYMMDD.HHMMSS
+// (finish_image.py); Install names one after the release's update
+// version, the same digits without the dot (EntryID).
+var entryName = regexp.MustCompile(`^agentos_([0-9]{1,19}(?:\.[0-9]{1,9})?)(\+([0-9]{1,9})(-[0-9]{1,9})?)?\.conf$`)
 
 // Linux is the production Disk: the ESP's entries and loader.conf, the
 // loader's EFI variables in efivarfs, and the /usr slots as GPT partitions
@@ -63,7 +80,8 @@ type Linux struct {
 	Usr string
 	// Device is the whole disk holding the slots.
 	Device string
-	// Run runs a tool (sfdisk, veritysetup) and returns its output.
+	// Run runs a tool (sfdisk, veritysetup) by absolute path and returns
+	// its output; nil starts it through childproc.
 	Run func(name string, arg ...string) ([]byte, error)
 
 	mu    sync.Mutex
@@ -115,8 +133,7 @@ func (l *Linux) run(name string, arg ...string) ([]byte, error) {
 		return l.Run(name, arg...)
 	}
 	var stderr bytes.Buffer
-	cmd := exec.Command(name, arg...)
-	cmd.Stderr = &stderr
+	cmd := childproc.Command(context.Background(), childproc.NewEnv(toolPath), childproc.Options{Stderr: &stderr}, name, arg...)
 	out, err := cmd.Output()
 	if err != nil {
 		return out, fmt.Errorf("bootab: %s %s: %w: %s", name, strings.Join(arg, " "), err, strings.TrimSpace(stderr.String()))
@@ -263,7 +280,7 @@ func (l *Linux) SetEFIDefault(id string) error { return l.setEFIVar("LoaderEntry
 // usr-verity partition in partition order are slot i ("a", "b"). Labels
 // change with each Install, so they never pair partitions.
 func (l *Linux) table() (map[string]slotParts, error) {
-	out, err := l.run("sfdisk", "--json", l.Device)
+	out, err := l.run(sfdisk, "--json", l.Device)
 	if err != nil {
 		return nil, err
 	}
@@ -353,8 +370,8 @@ func (l *Linux) usrHolders() ([]string, error) {
 	return names, nil
 }
 
-// BootedSlot is the slot whose data partition the running /usr comes
-// from.
+// BootedSlot is the slot whose data or verity partition the running /usr
+// comes from.
 func (l *Linux) BootedSlot() (string, error) {
 	held, err := l.usrHolders()
 	if err != nil {
@@ -364,9 +381,12 @@ func (l *Linux) BootedSlot() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// A slot is booted when /usr holds either of its partitions, so a
+	// table that pairs the partitions otherwise than the image never
+	// calls the booted hash partition inactive.
 	var booted []string
 	for s, p := range t {
-		if slices.Contains(held, filepath.Base(p.data.Node)) {
+		if slices.Contains(held, filepath.Base(p.data.Node)) || slices.Contains(held, filepath.Base(p.verity.Node)) {
 			booted = append(booted, s)
 		}
 	}
@@ -844,7 +864,7 @@ func (l *Linux) syncDevice() error {
 // sfdiskSet sets one GPT field of partition n with sfdisk, which writes
 // both GPT copies, and leaves the kernel's partitions as they are.
 func (l *Linux) sfdiskSet(field string, n int, v string) error {
-	_, err := l.run("sfdisk", "--no-reread", "--no-tell-kernel", "--"+field, l.Device, strconv.Itoa(n), v)
+	_, err := l.run(sfdisk, "--no-reread", "--no-tell-kernel", "--"+field, l.Device, strconv.Itoa(n), v)
 	return err
 }
 
@@ -866,16 +886,16 @@ func (l *Linux) SetSlotUUIDs(s, data, verity string) error {
 // SetSlotLabel labels slot s as the image does: the data partition label,
 // the verity partition label + "_verity", and EmptyLabel on both.
 func (l *Linux) SetSlotLabel(s, label string) error {
-	if label == "" || strings.ContainsAny(label, " \t\n\"'") || len(label) > 36 {
-		return fmt.Errorf("bootab: label %q", label)
+	vl := label + "_verity"
+	if label == EmptyLabel {
+		vl = EmptyLabel
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(label) || len(vl) > maxGPTName {
+		return fmt.Errorf("bootab: label %q (verity %q) is not a GPT name of at most %d ASCII characters", label, vl, maxGPTName)
 	}
 	p, err := l.slot(s)
 	if err != nil {
 		return err
-	}
-	vl := label + "_verity"
-	if label == EmptyLabel {
-		vl = EmptyLabel
 	}
 	if err := l.sfdiskSet("part-label", p.dataNum, label); err != nil {
 		return err
@@ -896,6 +916,6 @@ func (l *Linux) VerifySlot(s, rootHash string) error {
 	if err != nil {
 		return err
 	}
-	_, err = l.run("veritysetup", "verify", p.data.Node, p.verity.Node, rootHash)
+	_, err = l.run(veritysetup, "verify", p.data.Node, p.verity.Node, rootHash)
 	return err
 }

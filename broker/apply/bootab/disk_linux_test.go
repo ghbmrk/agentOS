@@ -283,6 +283,69 @@ func TestLinuxEntries(t *testing.T) {
 	}
 }
 
+// TestLinuxReadsTheShippedEntry: the entry the image ships is named after
+// build.sh's dotted VERSION (finish_image.py: agentos_<VERSION>+3.conf);
+// the adapter reads it under one ID while its tries count down and once
+// blessed, and copies its kernel into the next release's entry.
+func TestLinuxReadsTheShippedEntry(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	dir := filepath.Join(l.ESP, "loader/entries")
+	shipped := strings.Replace(entryText(1, hashN), "version 1", "version 20261030.013400", 1)
+	if err := os.Remove(filepath.Join(dir, "agentos_1.conf")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		file  string
+		tries int
+	}{{"agentos_20261030.013400+3.conf", 3}, {"agentos_20261030.013400+1-2.conf", 1}, {"agentos_20261030.013400.conf", bootab.Blessed}} {
+		ents, _ := os.ReadDir(dir)
+		for _, e := range ents {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+		if err := os.WriteFile(filepath.Join(dir, c.file), []byte(shipped), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		es, _, err := l.Entries()
+		if want := (bootab.Entry{Slot: "a", UsrHash: hashN, Tries: c.tries}); err != nil || len(es) != 1 || es["agentos_20261030.013400.conf"] != want {
+			t.Errorf("%s: Entries = %+v, %v; want %+v", c.file, es, err, want)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(l.EFIVars, "LoaderEntrySelected-"+loaderGUID), efiVar("agentos_20261030.013400+2-1.conf"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := l.Selected(); err != nil || got != "agentos_20261030.013400.conf" {
+		t.Errorf("Selected = %q, %v", got, err)
+	}
+	data, verity, _ := bootab.PartitionUUIDs(hashN1)
+	run(t, "", "sfdisk", "-q", "--part-uuid", l.Device, "4", data)
+	run(t, "", "sfdisk", "-q", "--part-uuid", l.Device, "5", verity)
+	if err := l.WriteEntry(bootab.EntryID(20261031120000), bootab.Entry{Slot: "b", UsrHash: hashN1, Tries: bootab.Tries}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := readESP(t, l, "loader/entries/agentos_20261031120000+3.conf"), strings.Replace(entryText(1, hashN1), "version 1", "version 20261031120000", 1); got != want {
+		t.Errorf("entry text:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestLinuxRefusesLongLabels: a label whose verity name ("_verity"
+// appended) would pass GPT's 36 characters, or that is not plain ASCII,
+// is refused before the GPT is touched, so the two labels never diverge
+// by truncation (Security point 3 on #4003).
+func TestLinuxRefusesLongLabels(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	before := run(t, "", "sfdisk", "--json", l.Device)
+	for _, label := range []string{strings.Repeat("x", 30), "agentos 1", "agentos_é", ""} {
+		if err := l.SetSlotLabel("b", label); err == nil {
+			t.Errorf("SetSlotLabel(%q) succeeded", label)
+		}
+	}
+	if after := run(t, "", "sfdisk", "--json", l.Device); after != before {
+		t.Error("a refused label changed the GPT")
+	}
+}
+
 // TestLinuxRefusesUnknownEntries: an entry file the activator cannot read
 // as agentOS's, two files with one ID, or an entry with no single
 // usrhash= stops every read, so Install never reasons over a menu it
