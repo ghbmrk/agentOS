@@ -47,13 +47,19 @@ allow broker/sockets/sockets.go Server.Start os.Chmod that socket, and the check
 
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
+allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made
+allow broker/update/store.go InitStore os.MkdirAll makes the store directory its caller names; outside tests and updatetest only agentos-release calls it, on a directory inside its own os.MkdirTemp directory, and no unit starts agentos-release (agentosd opens an existing store, Store{Dir})
+allow broker/update/repo.go Init os.MkdirAll only agentos-release calls Init, as the maintainer on the maintainer's machine (no unit starts it), in the repository directory the maintainer names
+allow broker/update/repo.go Repo.storeTarget os.Open only agentos-release calls it (AddRelease), as the maintainer, on a release file the maintainer names on its command line, which may be a link on purpose
+allow broker/update/repo.go Repo.storeTarget os.MkdirAll only agentos-release calls it (AddRelease), as the maintainer, under the repository directory the maintainer names
+allow broker/update/keys.go readPEM os.ReadFile only agentos-release calls LoadPublicKey and LoadPrivateKey, as the maintainer, on key files the maintainer names on its command line, which may be links on purpose
+allow broker/update/keys.go LoadPrivateKey os.Stat only agentos-release calls it, as the maintainer, on a key file the maintainer names; the mode check reads the key the maintainer pointed at, link or not
 
 pending broker/kernel/proc #3940 the kernel side
 pending broker/cmd/agentos-unlock #3940 the kernel side
 pending broker/cmd/agentos-enroll #3940 the kernel side
 pending broker/clerk/seal #3940 the kernel side
 pending broker/cmd/agentosd #3941 agentosd
-pending broker/update #3942 update
 pending broker/vm #3943 vm
 pending broker/vm/gvisor #3943 vm
 pending broker/vm/overlay #3943 vm

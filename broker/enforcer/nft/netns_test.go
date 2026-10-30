@@ -180,7 +180,7 @@ var segNets = map[string]string{"owner": "10.10.0", "household": "10.20.0", "gue
 
 // listenPorts are opened on every host and on the enforcer, so a blocked
 // probe is a drop and not a closed port.
-var listenPorts = []int{22, 53, 67, 80, 123, 443, 547, 5353, 7443, 8443}
+var listenPorts = []int{22, 53, 67, 80, 123, 443, 547, 554, 5353, 7443, 8443}
 
 // build makes the fixture home and loads the fixture policy's ruleset.
 func build(t *testing.T) *home {
