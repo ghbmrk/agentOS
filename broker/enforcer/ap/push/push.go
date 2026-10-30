@@ -56,7 +56,8 @@ type Pusher struct {
 	// Timeout bounds one Sync; zero is 30 seconds.
 	Timeout time.Duration
 
-	// mu keeps two Syncs of one access point from overlapping.
+	// mu keeps two Syncs of this Pusher from overlapping; there is one
+	// Pusher per access point (ENF-g-8).
 	mu sync.Mutex
 }
 
@@ -71,9 +72,10 @@ type Result struct {
 
 // Sync makes the access point hold exactly files: it reads each back,
 // writes those that differ, reloads, and reads them all back again. It
-// reloads on every Sync, drift or not, so a Sync that failed after its
-// writes (a reload that errored, a connection that dropped) is finished
-// by the next one: reload_config applies only configs that changed since
+// reloads on every Sync, drift or not, and after a failed write too, so
+// a Sync that failed after some writes (a reload that errored, a later
+// write that failed, a connection that dropped) is finished by the next
+// one: reload_config applies only configs that changed since
 // its last run, so an in-sync reload is a no-op. Syncs of one Pusher run
 // one at a time.
 func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
@@ -108,15 +110,24 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 			res.Drift = append(res.Drift, f.Path)
 		}
 	}
+	// A write that fails does not stop the reload: the files already
+	// written are on the access point and would not read as drift next
+	// time, so they are applied now, and the write error is returned.
+	var werr error
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
 			if _, err := run(c, writeCmd(f.Path), f.Data); err != nil {
-				return res, fmt.Errorf("push: write %s: %w", f.Path, err)
+				werr = fmt.Errorf("push: write %s: %w", f.Path, err)
+				break
 			}
 		}
 	}
-	if _, err := run(c, applyCmd, nil); err != nil {
-		return res, fmt.Errorf("push: reload: %w", err)
+	_, rerr := run(c, applyCmd, nil)
+	if werr != nil {
+		return res, werr
+	}
+	if rerr != nil {
+		return res, fmt.Errorf("push: reload: %w", rerr)
 	}
 	res.Applied = len(res.Drift) > 0
 	for _, f := range files {

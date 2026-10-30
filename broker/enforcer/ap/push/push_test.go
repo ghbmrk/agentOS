@@ -34,6 +34,7 @@ type fakeAP struct {
 	logins  int
 	stuck   bool // ignores writes, like a full or read-only flash
 
+	failWrite         map[string]bool // writes of these paths fail
 	readFails         map[string]bool // reads of these paths print the file, then exit 1
 	failReload        int             // the next this many reloads fail
 	active, maxActive int             // logged-in connections now, and at most
@@ -141,6 +142,9 @@ func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
 			return 0
 		case writeCmd(p):
 			b, _ := io.ReadAll(ch)
+			if f.failWrite[p] {
+				return 1
+			}
 			f.writes++
 			if !f.stuck {
 				f.files[p] = b
@@ -387,6 +391,29 @@ func TestTempFilePerPath(t *testing.T) {
 		}
 		seen[tp] = p
 	}
+	// The write command itself uses its path's file and no other's.
+	for _, p := range ap.Paths {
+		for _, q := range ap.Paths {
+			if has := strings.Contains(writeCmd(p), tmpPath(q)); has != (p == q) {
+				t.Errorf("write command for %s names the temporary file of %s: %v", p, q, has)
+			}
+		}
+	}
+}
+
+// TestCutOffReadDoesNotHang: a file far past MaxFile is cut and
+// rewritten without waiting for the rest of it. Catches a read that waits
+// for a command that has more to say than the enforcer will take.
+func TestCutOffReadDoesNotHang(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.set(ap.PathNetwork, bytes.Repeat([]byte("x"), 16<<20))
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	start := time.Now()
+	res, err := p.Sync(context.Background(), config())
+	if err != nil || !slices.Contains(res.Drift, ap.PathNetwork) || time.Since(start) > 4*time.Second {
+		t.Fatalf("sync of a 16 MiB file: %+v %v after %v", res, err, time.Since(start))
+	}
 }
 
 // TestDefaultsAndLimit: a zero Timeout means 30 seconds, not none, and a
@@ -419,5 +446,29 @@ func TestFailedReadIsDrift(t *testing.T) {
 	// ErrVerify; what counts is that the file was found as drift.
 	if !errors.Is(err, ErrVerify) || !slices.Contains(res.Drift, ap.PathNetwork) {
 		t.Fatalf("a failed read counted as holding the file: %+v %v", res, err)
+	}
+}
+
+// TestFailedWriteStillReloads: when a later file's write fails, the files
+// written before it are still reloaded, so a revoked password in the
+// first file does not stay live because the error named another file.
+// Catches a Sync that returns between a write and the reload.
+func TestFailedWriteStillReloads(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failWrite = map[string]bool{ap.PathAuthKeys: true}
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	for i := range 2 {
+		if _, err := p.Sync(context.Background(), config()); err == nil {
+			t.Fatalf("sync %d: a failed write was not reported", i)
+		}
+		if _, _, applies, _ := f.n(); applies != i+1 {
+			t.Fatalf("sync %d: applies = %d", i, applies)
+		}
+	}
+	if !bytes.Equal(f.get(ap.PathWireless), config()[1].Data) {
+		t.Fatal("the written file is not in place")
 	}
 }
