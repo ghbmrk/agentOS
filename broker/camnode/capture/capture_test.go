@@ -276,17 +276,38 @@ func TestCameraRunsEncoder(t *testing.T) {
 		t.Fatalf("IR set %v", irs)
 	}
 
-	os.Remove(argsFile)
+	// Apply returns only once every producer has ended, so an encoder that
+	// was mid-restart cannot write the file after the Remove below.
 	s.Stream = false
 	if err := c.Apply(s); err != nil {
 		t.Fatal(err)
 	}
+	os.Remove(argsFile)
 	time.Sleep(100 * time.Millisecond)
 	if _, err := os.Stat(argsFile); err == nil {
 		t.Fatal("encoder started with the stream off")
 	}
 	if err := c.Apply(camwire.Settings{Thermal: true, Stream: true}); err == nil {
 		t.Fatal("thermal applied with no core fitted")
+	}
+}
+
+// TestHaltedCameraStartsNothing: a producer whose stop is already closed
+// opens nothing, even when its restart is due at the same moment (the
+// "encoder started with the stream off" flake). Revert mutant: run without
+// its stop check before open.
+func TestHaltedCameraStartsNothing(t *testing.T) {
+	c := New(Config{Restart: time.Nanosecond})
+	stop := make(chan struct{})
+	close(stop)
+	opened := 0
+	c.run(stop, func() (func() (camwire.Frame, error), func(), error) {
+		opened++
+		return nil, nil, errors.New("capture: not fitted")
+	})
+	c.wg.Wait()
+	if opened != 0 {
+		t.Fatalf("a halted camera opened %d producers", opened)
 	}
 }
 
