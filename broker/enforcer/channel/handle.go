@@ -86,31 +86,35 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	defer c.release()
 	now := c.cfg.Now()
 	ev := Event{At: now}
-	// Names are read for the log before act runs, so a removed device is
-	// still logged by its name.
-	cur := c.cfg.Policy.Current()
+	// The three kinds that name a device take one copy of the policy, and
+	// read names from it for the log before act runs, so a removed device
+	// is still logged by its name; command and read check against the same
+	// copy (#4066).
 	var reply wire.Msg
 	var code wire.Code
 	switch m := m.(type) {
 	case wire.Command:
+		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindCommand, m.ID, logName(cur, m.Device), verbWords[m.Verb]
 		if m.Verb == wire.VerbLevel {
 			ev.What = fmt.Sprintf("level %d", m.Level)
 		}
-		code, ev.Reason = c.gate(KindCommand, func() (wire.Code, string) { return c.command(m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(KindCommand, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
 	case wire.Tighten:
+		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, logName(cur, m.Device), tightenKinds[m.Kind]
 		if m.Kind == wire.RemovePair {
-			ev.Device = logName(cur, m.A) + "," + logName(cur, m.B)
+			ev.Device, ev.Other = logName(cur, m.A), logName(cur, m.B)
 		}
 		code, ev.Reason = c.gate(KindTighten, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
+		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
 		code, ev.Reason = c.gate(KindRead, func() (wire.Code, string) {
 			var code wire.Code
 			var why string
-			body, code, why = c.read(m)
+			body, code, why = c.read(cur, m)
 			return code, why
 		})
 		if code == wire.OK {
@@ -163,15 +167,34 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 }
 
 // logName is how the log names a device the core sent: its ID if the
-// signed policy names it, else "unknown " and the SHA-256 of the name, so
+// signed policy names it, else unknownWord and the SHA-256 of the name, so
 // every name in the log is one the owner signed and the core cannot write
-// words into the owner's record (#3758).
+// words into the owner's record (#3758). A signed ID holds no space
+// (policy.name), so the two forms never meet.
 func logName(d policy.Document, s string) string {
 	if s == "" || d.Device(s) != nil {
 		return s
 	}
 	h := sha256.Sum256([]byte(s))
-	return "unknown " + hex.EncodeToString(h[:])
+	return unknownWord + hex.EncodeToString(h[:])
+}
+
+const (
+	unknownWord = "unknown "
+	// shortHex is how many hex digits of an unknown name's hash the
+	// owner's line shows: enough to tell repeated unknown names apart.
+	shortHex = 12
+)
+
+// Short is a logged name as the owner's log line shows it: a signed ID as
+// itself, an unknown name as "unknown" and the first 12 hex digits of its
+// hash. The Event keeps the full hash for the detail view (#4066). Neither
+// form shows any of the core's words.
+func Short(logged string) string {
+	if len(logged) == len(unknownWord)+2*sha256.Size && logged[:len(unknownWord)] == unknownWord {
+		return logged[:len(unknownWord)+shortHex]
+	}
+	return logged
 }
 
 // gate runs act unless the channel is paused, after counting k; a kind
@@ -202,10 +225,10 @@ func (c *Channel) count(k Kind) bool {
 	return false
 }
 
-// command checks m against the signed policy and the safety-list table and
-// sends it through the radio host.
-func (c *Channel) command(m wire.Command, nowMS int64) (wire.Code, string) {
-	dev := c.cfg.Policy.Current().Device(m.Device)
+// command checks m against cur, the signed policy handle copied, and the
+// safety-list table, and sends it through the radio host.
+func (c *Channel) command(cur policy.Document, m wire.Command, nowMS int64) (wire.Code, string) {
+	dev := cur.Device(m.Device)
 	if dev == nil {
 		return wire.Refused, "no such device in the signed policy"
 	}
@@ -257,12 +280,13 @@ func (c *Channel) tighten(m wire.Tighten, nowMS int64) (wire.Code, string) {
 	}
 }
 
-// read answers a read from the enforcer's own sources.
-func (c *Channel) read(m wire.Read) ([]byte, wire.Code, string) {
+// read answers a read from the enforcer's own sources, checking the device
+// against cur, the signed policy handle copied.
+func (c *Channel) read(cur policy.Document, m wire.Read) ([]byte, wire.Code, string) {
 	var body []byte
 	var err error
 	if m.What != wire.ReadExport {
-		dev := c.cfg.Policy.Current().Device(m.Device)
+		dev := cur.Device(m.Device)
 		if dev == nil {
 			return nil, wire.Refused, "no such device in the signed policy"
 		}
