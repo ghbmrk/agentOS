@@ -7,7 +7,13 @@
 //	agentos-camera -dir /var/lib/agentos-camera \
 //	    -owner-sock /run/agentos-camera/owner.sock -owner-uid 0 \
 //	    -runsc /usr/lib/agentos/runsc -runsc-root /run/agentos-camera/runsc \
-//	    -decode-root /usr/lib/agentos/camdecode -cgroup /sys/fs/cgroup/agentos.slice/agentos-camera.service/decode
+//	    -decode-root /usr/lib/agentos/images/camdecode \
+//	    -cgroup /sys/fs/cgroup/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service
+//
+// -cgroup is the clerk's own unit's group, delegated to its user: the clerk
+// moves itself into its leaf there before anything else, and each decoder
+// sandbox's group is made beside it. runsc runs as the clerk's uid, in a
+// user namespace it makes (gvisor.Runtime.Rootless).
 //
 // Its key comes from the kernel on descriptor 3 at each start
 // (clerkkey.Key, as agentos-clerk-mail's). It serves one socket, admitting
@@ -35,6 +41,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/ghbmrk/agentos/broker/cgroup"
 	"github.com/ghbmrk/agentos/broker/clerk"
 	"github.com/ghbmrk/agentos/broker/clerk/camera"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
@@ -42,6 +49,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/procguard"
 	"github.com/ghbmrk/agentos/broker/sockets"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
@@ -83,7 +91,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.runsc, "runsc", "", "the gVisor runtime the decoder sandboxes run under")
 	fs.StringVar(&c.runscRoot, "runsc-root", "", "runsc's state directory, this clerk's own")
 	fs.StringVar(&c.decodeRoot, "decode-root", "", "the decoder sandbox's read-only root, holding /agentos-camdecode")
-	fs.StringVar(&c.cgr, "cgroup", "", "the cgroup v2 group each decoder sandbox's group is made under")
+	fs.StringVar(&c.cgr, "cgroup", "", "the clerk's own unit's cgroup v2 group, delegated to it: it moves into its leaf there, and each decoder sandbox's group is made beside it")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -116,12 +124,22 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// Not as its owner side's uid, and not dumpable, since a decoder under
+	// the clerk's own uid could then read the keys from its memory (CLK-1).
+	if err := procguard.Isolate(c.ownerUID); err != nil {
+		return err
+	}
+	// The kernel hands the key only to a peer in the unit's own group, so
+	// the clerk leaves it for its leaf only once it holds the key.
 	sec, err := openSecrets(c.dir, keyFile)
 	if err != nil {
 		return err
 	}
+	rt, err := decoders(c)
+	if err != nil {
+		return err
+	}
 	logf := func(m string) { log.Print(m) }
-	rt := &gvisor.Runtime{Bin: c.runsc, StateDir: c.runscRoot, Platform: "systrap"}
 	h, err := newHost(c.dir, sec, nil, camera.GVisor(rt), c.decodeRoot, c.cgr, logf)
 	if err != nil {
 		return err
@@ -141,6 +159,26 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 	ln.Close()
 	<-done
 	return nil
+}
+
+// leaf is the clerk's own group under -cgroup.
+const leaf = "clerk"
+
+// decoders moves the clerk, once it holds its key, into its leaf of its
+// unit's delegated group and returns the runtime its decoder sandboxes start
+// under, beside the leaf (CAM-host-11). cgroup v2 lets a group that holds a process give its
+// children no controller, so the clerk leaves its unit's group before a
+// sandbox's group, with its memory cap, is made there. runsc runs as the
+// clerk's own uid, which is not root (CLK-1), so it runs rootless.
+func decoders(c config) (*gvisor.Runtime, error) {
+	g := &cgroup.Group{Path: filepath.Join(c.cgr, leaf)}
+	if err := os.Mkdir(g.Path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, err
+	}
+	if err := g.Join(0); err != nil {
+		return nil, fmt.Errorf("joining %s: %w", g.Path, err)
+	}
+	return &gvisor.Runtime{Bin: c.runsc, StateDir: c.runscRoot, Platform: "systrap", Rootless: true}, nil
 }
 
 // openSecrets reads the clerk's key from the kernel's hand-off and opens

@@ -87,7 +87,7 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual(check.KEEPER_UNITS, ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service",
                                               "agentos-keeper-rotate@.service", "agentos-keeper-pageca.service",
                                               "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
-                                              "agentos-keeper-link-capture.service"))
+                                              "agentos-keeper-link-capture.service", "agentos-keeper-camera.service"))
         self.assertEqual(check.UNLOCK_UNITS, ("agentos-keeper-kernel.service",))
         # The recovery-key rotation, the page authority's staging and the card's hand-off are the
         # keeper's but open no TPM (MIG-4-recovery-r2, OWN-card-flow).
@@ -515,6 +515,7 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
                                                              arg(e, "passphrase-file").rsplit("/", 1)[0],
                                                              arg(exec_args(MAIL), "dir"),
+                                                         arg(exec_args(UNITS / "agentos-keeper-camera.service"), "dir"),
                                                              arg(e, "first-edge").rsplit("/", 1)[0]}))
 
     def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
