@@ -246,6 +246,10 @@ jobs:
             go-build-broker-${{ runner.os }}-${{ hashFiles('broker/go.mod', 'broker/go.sum') }}-
       - name: Software TPM for the trusted-host slot (P2-4b)
         run: sudo apt-get update -q && sudo apt-get install -yq swtpm
+      # The enforcer's resolver tests run the real dnsmasq (briefs/ENF.md slice f);
+      # dnsmasq-base is the binary alone, with no service started.
+      - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
+        run: sudo apt-get install -yq dnsmasq-base
       # loops' canary-round test runs tools/canary.py, whose targets run as the
       # runner's first subordinate id in a user namespace (tools/ASSUMPTIONS.md D13).
       - name: Subordinate ids for the canary sandbox

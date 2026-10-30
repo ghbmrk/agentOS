@@ -43,8 +43,11 @@ func TestNetnsSegments(t *testing.T) {
 		// Outside DNS and a known encrypted-DNS resolver are blocked, even
 		// at an address in the device's allow set.
 		probe{from: tv, addr: netDoH, port: 443, why: "outside DoH resolver"},
-		probe{from: tv, addr: netAllow, port: 53, udp: true, why: "outside DNS"},
-		probe{from: tv, addr: netAllow, port: 53, why: "outside DNS over TCP"},
+		// Port 53 to anywhere is answered by the enforcer itself (slice
+		// f's redirect; the dns_redirect counter shows it), never outside.
+		probe{from: tv, addr: netAllow, port: 53, udp: true, want: connected, why: "outside DNS, redirected to the enforcer"},
+		probe{from: tv, addr: netOther, port: 53, want: connected, why: "outside DNS over TCP, redirected to the enforcer"},
+		probe{from: tv, addr: netAllow, port: 853, why: "outside DNS over TLS"},
 		// A camera and an offline everyday device get no internet; an
 		// isolated device gets nothing, its allow list and pairs included.
 		probe{from: cam, addr: netAllow, port: 80, why: "camera without cloud"},
@@ -151,7 +154,7 @@ func TestNetnsSegments(t *testing.T) {
 	for _, c := range counters {
 		after[c] = h.counter(c)
 	}
-	for _, c := range []string{Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, DNSOutside, APAdminDrop, ISPDrop, CoreEdge, GuestsOut, GuestsIn, GuestsConns, RADropped} {
+	for _, c := range []string{Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, DNSOutside, DNSRedirect, APAdminDrop, ISPDrop, CoreEdge, GuestsOut, GuestsIn, GuestsConns, RADropped} {
 		if c == RADropped && !h.v6 {
 			continue
 		}
