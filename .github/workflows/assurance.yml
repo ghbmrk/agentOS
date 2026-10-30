@@ -21,6 +21,7 @@ concurrency:
 # each job checks it, and an offline build fails rather than fetch one.
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 # Both harnesses are stdlib-only, so they use the runner's system python3: no
 # setup action to pin or trust.
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a

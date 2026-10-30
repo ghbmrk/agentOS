@@ -1,6 +1,6 @@
 package update
 
-// REQ: UPD-2, UPD-8, CHG-3
+// REQ: UPD-2, UPD-8, CHG-3, UPD-7
 
 import (
 	"bytes"
@@ -30,6 +30,9 @@ func TestManifestOnlyImagesAndStrict(t *testing.T) {
 		`{` + base + `,"files":["host-image/../grants/x"]}`,
 		`{` + base + `,"files":["host-image/a","host-image/a"]}`,
 		`{` + base + `,"files":["host-image/a"],"grants":["x"]}`,
+		// No release metadata carries a project-run rollout setting (UPD-7).
+		`{` + base + `,"files":["host-image/a"],"rollout_percent":10}`,
+		`{` + base + `,"files":["host-image/a"],"cohort":"a"}`,
 		`{` + base + `,"files":["host-image/a"]}}`,
 		`{` + base + `,"files":["host-image/a"]}]`,
 		`{` + base + `,"files":["host-image/a"]}{}`,

@@ -7,7 +7,8 @@ package below is a hard dependency of one the box keeps, so apt would remove the
 dpkg purges it with --force-depends instead, and FILES removes what used it. The NEEDED check then
 fails the build if any ELF file under usr still names a library a dropped package shipped: a forced
 purge must not leave a binary that cannot load. The #! check does the same for an executable script
-whose interpreter a dropped package shipped (perl), bar the package tools in PERL_TOOLS.
+whose interpreter a dropped package shipped (perl), bar the package tools in PERL_TOOLS. dash
+goes too: /usr/bin/sh is diverted and relinked to bash first, so sh still runs (as bash).
 
 Source names are Debian's (what the advisories and assurance/vulncheck.json name); a dropped
 source has no image record there (tests/test_image_drop.py)."""
@@ -40,6 +41,7 @@ DROP = {
     "libkrb5support0": ("krb5", "as libgssapi-krb5-2"),
     "libkeyutils1": ("keyutils", "only krb5 links it"),
     "libbz2-1.0": ("bzip2", "only dpkg-deb links it; the box unpacks no package"),
+    "dash": ("dash", "Essential as /bin/sh, which is relinked to bash first; nothing runs dash by name"),
 }
 # Dropped packages whose source the box still runs other packages of, so the source's image
 # records stay (tests/test_image_drop.py).
@@ -47,6 +49,11 @@ PARTIAL = ("liblastlog2-2",)
 # Essential packages: dpkg removes them only with --force-remove-essential, in a second call after
 # the rest, so no other package's removal script finds perl or diff already gone.
 ESSENTIAL = ("tar", "diffutils", "perl-base")
+# dash ships /usr/bin/sh. Before it goes, sh is diverted (so dash's purge leaves it) and relinked to
+# bash, which runs as POSIX sh by that name; dash is then purged alone, before ESSENTIAL, since its
+# postrm and debianutils' trigger run /bin/sh and debconf's purge step needs perl.
+SHELL = "dash"
+SH = "/usr/bin/sh"
 # Files a kept package ships that link a dropped one. Each pattern must match: a stale one fails.
 FILES = (
     "usr/bin/ss",
@@ -236,15 +243,29 @@ def remove_files(root):
     return out
 
 
+def relink_sh(root):
+    """Divert /usr/bin/sh from dash and point it at bash, so dash's purge leaves a working sh."""
+    subprocess.run(["mkosi-chroot", "dpkg-divert", "--local", "--no-rename", "--divert", SH + ".distrib",
+                    "--add", SH], check=True)
+    link = os.path.join(root, SH[1:])
+    os.symlink("bash", link + ".new")
+    os.replace(link + ".new", link)
+
+
 def main(root):
+    if not os.path.isfile(os.path.join(root, "usr/bin/bash")):
+        raise SystemExit("drop.py: usr/bin/bash is missing, so sh cannot move off dash")
     listed = subprocess.run(["mkosi-chroot", "dpkg-query", "-L", *DROP], check=True,
                             stdout=subprocess.PIPE, text=True).stdout.splitlines()
-    rest = [p for p in DROP if p not in ESSENTIAL]
+    rest = [p for p in DROP if p not in ESSENTIAL and p != SHELL]
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", *rest], check=True)
+    relink_sh(root)
+    subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
+                    SHELL], check=True)
     subprocess.run(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
                     *ESSENTIAL], check=True)
     problems = (remove_files(root) + needed_violations(root, shipped(listed))
-                + interpreter_violations(root, programs(listed), PERL_TOOLS))
+                + interpreter_violations(root, programs(listed) - {SH}, PERL_TOOLS))
     for p in problems:
         print("drop.py: " + p, file=sys.stderr)
     return 1 if problems else 0

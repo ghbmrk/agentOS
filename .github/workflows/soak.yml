@@ -23,6 +23,7 @@ concurrency:
   cancel-in-progress: false
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 jobs:
   fuzz:
     runs-on: ubuntu-latest

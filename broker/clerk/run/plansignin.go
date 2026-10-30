@@ -139,7 +139,10 @@ type PlanHost struct {
 	Login *plan.Login
 	// APIs are the clerk's API-key routes, whose keys the owner side sets
 	// on the same socket (MIG-4-exit m1); nil serves no key call.
-	APIs    *model.APIs
+	APIs *model.APIs
+	// Routes are the model clerk's routes that draw on this plan's pool
+	// (model.Price.Pool), set where the clerk's routes are wired.
+	Routes  []string
 	Prompt  SignInPrompt
 	Workers SignInWorkers
 	Times   SignInTimes
@@ -159,6 +162,11 @@ type planSignIn struct {
 
 // PlanState is the route as the owner's page shows it.
 type PlanState struct {
+	// Title is the plan as the owner names it, and Pool its usage pool as
+	// the provider names it: names and labels only, never a figure, which
+	// the owner side reads from the kernel (RES-5a).
+	Title    string    `json:"title"`
+	Pool     PlanPool  `json:"pool"`
 	Mode     plan.Mode `json:"mode"`
 	SignedIn bool      `json:"signedIn"` // a login is stored
 	Stopped  string    `json:"stopped"`  // why the route is down, or ""
@@ -171,6 +179,22 @@ type PlanState struct {
 	// Last is how the last sign-in ended: DSignedIn, a DSignIn* detail,
 	// or "".
 	Last string `json:"last,omitempty"`
+}
+
+// PlanPool is a plan's pool as the owner's page names it: the kernel's pool
+// and window IDs with the provider's names, and the model routes that draw
+// on it, so the owner side can tell plan spend from API spend.
+type PlanPool struct {
+	ID      string       `json:"id"`
+	Name    string       `json:"name"`
+	Windows []PlanWindow `json:"windows"`
+	Routes  []string     `json:"routes"`
+}
+
+// PlanWindow is one window of a plan's pool: its ID and its label.
+type PlanWindow struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 // PlanBegun is planbegin's answer: the page and code, or a detail.
@@ -328,7 +352,12 @@ func (h *PlanHost) end(s *planSignIn, detail string) {
 
 // State reads the route. It reads no token.
 func (h *PlanHost) State() PlanState {
-	st := PlanState{Mode: h.Login.Mode(), SignedIn: h.Login.Signed(), Stopped: h.Login.Stopped()}
+	st := PlanState{Title: h.Login.Title(), Mode: h.Login.Mode(), SignedIn: h.Login.Signed(), Stopped: h.Login.Stopped()}
+	p := h.Login.Pool()
+	st.Pool = PlanPool{ID: p.ID, Name: p.Name, Windows: []PlanWindow{}, Routes: append([]string{}, h.Routes...)}
+	for _, w := range p.Windows {
+		st.Pool.Windows = append(st.Pool.Windows, PlanWindow{w.ID, w.Label})
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st.Last = h.last

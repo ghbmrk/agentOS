@@ -34,15 +34,15 @@ func TestAReactionAfterAForgetDoesNotQuoteTheForgottenReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	r.say("Liked “Agent: The Acme contract renews…”")
+	r.say("Liked “The Acme contract renews…”")
 	if g := r.agent.got(); len(g) != 1 || !strings.Contains(g[0], forgottenWords) {
 		t.Fatalf("before the deletion the reaction matched %q, want the reply", g)
 	}
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	r.say("Liked “Agent: The Acme contract renews…”")
+	r.say("Liked “The Acme contract renews…”")
 	r.say("Emphasized “Acme contract renews on the third”")
-	r.say("Loved “Agent: " + forgottenReply + "”")
+	r.say("Loved “" + forgottenReply + "”")
 	got := r.agent.got()[before:]
 	if len(got) != 3 {
 		t.Fatalf("agent got %q, want three events", got)
@@ -56,7 +56,7 @@ func TestAReactionAfterAForgetDoesNotQuoteTheForgottenReply(t *testing.T) {
 	// Texts after the deletion still match.
 	r.ch.Converse("Lunch is booked for one in the afternoon.")
 	r.inbox()
-	r.say("Liked “Agent: Lunch is booked for one…”")
+	r.say("Liked “Lunch is booked for one…”")
 	if g := r.agent.got(); !strings.Contains(g[len(g)-1], "Lunch is booked") {
 		t.Fatalf("a text after the deletion did not match: %q", g[len(g)-1])
 	}
@@ -70,7 +70,7 @@ func TestAHeldReactionIsDroppedByAForget(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	if got := r.say("Liked “Agent: The Acme contract renews…”"); !strings.Contains(got, "reaction is held") {
+	if got := r.say("Liked “The Acme contract renews…”"); !strings.Contains(got, "reaction is held") {
 		t.Fatalf("locked reaction: %q", got)
 	}
 	r.ch.ForgetRecent()
@@ -92,7 +92,7 @@ func TestAReactionWordedBeforeAForgetIsNotDelivered(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	rt, ok := r.ch.route(ownerNum, "Liked “Agent: The Acme contract renews…”")
+	rt, ok := r.ch.route(ownerNum, "Liked “The Acme contract renews…”")
 	if !ok || !strings.Contains(rt.react, forgottenWords) {
 		t.Fatalf("route: %v %q", ok, rt.react)
 	}
@@ -116,7 +116,7 @@ func TestAForgetWaitsForAReactionBeingDelivered(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	r.ch.ctrl.Agent = gatedAgent{started: started, release: release}
-	go r.ch.Handle(context.Background(), ownerNum, "Liked “Agent: The Acme contract renews…”")
+	go r.ch.Handle(context.Background(), ownerNum, "Liked “The Acme contract renews…”")
 	<-started
 	done := make(chan struct{})
 	go func() { r.ch.ForgetRecent(); close(done) }()
@@ -184,7 +184,7 @@ func TestAQuotedForgottenReplyIsNotChatAfterAForget(t *testing.T) {
 	r.inbox()
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	if got := r.say("Liked “Agent: " + reply + "”"); got != readAsReaction {
+	if got := r.say("Liked “" + reply + "”"); got != readAsReaction {
 		t.Fatalf("owner got %q, want %q", got, readAsReaction)
 	}
 	got := r.agent.got()[before:]
@@ -225,7 +225,7 @@ func TestTheForgetRuleOutlivesARestart(t *testing.T) {
 	r.advance(time.Minute)
 	r.ch = r.open()
 	before := len(r.agent.got())
-	r.say("Loved “Agent: " + quotedReply + "”")
+	r.say("Loved “" + quotedReply + "”")
 	got := r.agent.got()[before:]
 	if len(got) != 1 || !strings.Contains(got[0], "none of the recent texts") {
 		t.Fatalf("after a restart the agent got %q, want one reaction that matched none", got)
@@ -249,7 +249,7 @@ func TestAnUnlistedFormOnAForgottenReplyIsNotChat(t *testing.T) {
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
 	for _, reply := range []string{quotedReply, forgottenReply} {
-		if got := r.say("Pinned “Agent: " + reply + "”"); got != readAsReaction {
+		if got := r.say("Pinned “" + reply + "”"); got != readAsReaction {
 			t.Fatalf("owner got %q, want %q", got, readAsReaction)
 		}
 	}
@@ -274,7 +274,7 @@ func TestAReactionHeldAfterAForgetIsDeliveredOnRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	if got := r.say("Liked “Agent: Lunch is booked for one…”"); !strings.Contains(got, "reaction is held") {
+	if got := r.say("Liked “Lunch is booked for one…”"); !strings.Contains(got, "reaction is held") {
 		t.Fatalf("locked reaction: %q", got)
 	}
 	r.say(r.totp())

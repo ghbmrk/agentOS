@@ -58,10 +58,10 @@ const (
 
 	MaxText = 200 // runes
 	// MaxRendered is the longest owner text a question may render to, in
-	// bytes: control.MaxText (459) less owner.AgentPrefix ("Agent: "),
-	// which Notify adds, so Fit never cuts off the default or the
-	// deadline (owner/question_test.go pins both).
-	MaxRendered = 452
+	// bytes: control.MaxText (459), since Notify adds no label (CH-21),
+	// so Fit never cuts off the default or the deadline
+	// (owner/question_test.go pins both).
+	MaxRendered = 459
 	MaxDefault  = 80
 	MaxChoices  = 4
 	MaxChoice   = 40
@@ -134,7 +134,7 @@ type Status struct {
 type Config struct {
 	// Send texts the owner at once. The wiring passes
 	// owner.Channel.NotifyNow: the question is agent-written, so it goes
-	// out behind the agent prefix, with secret-shaped text replaced
+	// out with no label (CH-21), checked, with secret-shaped text replaced
 	// (CH-19), and it is never held, since its deadline starts when Send
 	// returns nil (#989, #1563). The Book paces it itself: Quiet and
 	// Reserve. An error wrapping ErrNotSent means the text provably did
@@ -1140,10 +1140,12 @@ func (b *Book) clock(now, t time.Time) string {
 
 // renderBy is the owner's text for a question, by being "by 14:30" or,
 // while the clock is restricted, "within 2 hours" (PQ4). It is sent
-// through Notify, which marks it as agent text.
+// through NotifyNow as agent text, whose CH-21 check holds a line that
+// opens with a request ID and ":", so it opens with a word ("Question
+// Q101: ...", #2189).
 func (b *Book) renderBy(e *entry, by string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s: %s", e.ID, e.Text)
+	fmt.Fprintf(&sb, "Question %s: %s", e.ID, e.Text)
 	if len(e.Choices) > 0 {
 		sb.WriteString(" Choices:")
 		for i, c := range e.Choices {

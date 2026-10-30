@@ -158,10 +158,10 @@ func home(v uint64) Document {
 		Destinations: []string{"mail.example", "models.example"},
 		Devices: []Device{
 			{ID: "plug", Network: NetDevices, WiFi: "vlan101", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Class: ClassPlug, Secure: "off"},
-			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true, Class: ClassCamera},
+			{ID: "cam", Network: NetDevices, WiFi: "vlan102", Allow: []string{"cam.example"}, VendorCloud: true, Class: ClassCamera, Stream: []Port{{ProtoTCP, 554}}},
 			{ID: "lock", Network: NetDevices, Allow: []string{"lock.example"}, VendorCloud: true, Class: ClassLock, Secure: "lock"},
-			{ID: "tv", Network: NetDevices, WiFi: "vlan104", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Everyday: true},
-			{ID: "speaker", Network: NetDevices, WiFi: "vlan105", Allow: []string{"s.example"}, Everyday: true},
+			{ID: "tv", Network: NetDevices, WiFi: "vlan104", Allow: []string{"a.example", "b.example"}, VendorCloud: true, Everyday: true, Control: []Port{{ProtoTCP, 8008}}},
+			{ID: "speaker", Network: NetDevices, WiFi: "vlan105", Allow: []string{"s.example"}, Everyday: true, Control: []Port{{ProtoTCP, 80}, {ProtoUDP, 1900}}},
 		},
 		Pairs: []Pair{{A: "plug", B: "cam"}, {A: "tv", B: "speaker"}},
 		Standing: []StandingRule{
@@ -274,6 +274,11 @@ func TestClassifyClosedList(t *testing.T) {
 			rule(d, "party").FromMS, rule(d, "plumber").FromMS = 0, 0
 		},
 		"remove, keep its pair": func(d *Document, s sub) { d.Devices = without(d.Devices, func(v Device) bool { return v.ID == s.x }) },
+		// Ports: naming, removing or changing a control port is not on the
+		// closed list, so even a narrowing waits (ENF-a-13).
+		"add a control port":    func(d *Document, s sub) { dev(d, s.x).Control = append(dev(d, s.x).Control, Port{ProtoTCP, 9}) },
+		"change a control port": func(d *Document, s sub) { dev(d, s.x).Control = []Port{{ProtoUDP, 9}} },
+		"remove a control port": func(d *Document, s sub) { dev(d, s.x).Control = nil }, // run on a base with a port below
 	}
 	for sname, s := range subjects {
 		for name, c := range tight {
@@ -284,8 +289,11 @@ func TestClassifyClosedList(t *testing.T) {
 		}
 		for name, f := range loose {
 			base := home(1)
-			if name == "un-isolate" {
+			switch name {
+			case "un-isolate":
 				dev(&base, s.x).Isolated = true
+			case "remove a control port":
+				dev(&base, s.x).Control = []Port{{ProtoTCP, 9}}
 			}
 			next := base.normal() // a copy
 			f(&next, s)
@@ -310,6 +318,13 @@ func TestClassifyClosedList(t *testing.T) {
 		"name a camera's command":                  func(d *Document) { dev(d, "cam").Secure = "off" },
 		"rename a device":                          func(d *Document) { dev(d, "tv").ID = "tv2"; d.Pairs[1].A = "tv2" },
 		"secure on an off-list device (malformed)": func(d *Document) { dev(d, "tv").Secure = "off" },
+		"add a stream port":                        func(d *Document) { dev(d, "cam").Stream = append(dev(d, "cam").Stream, Port{ProtoUDP, 5004}) },
+		"change a stream port":                     func(d *Document) { dev(d, "cam").Stream = []Port{{ProtoTCP, 8554}} },
+		"remove the stream port":                   func(d *Document) { dev(d, "cam").Stream = nil },
+		"class a camera a microphone":              func(d *Document) { dev(d, "cam").Class = ClassMicrophone },
+		"unclass the camera":                       func(d *Document) { dev(d, "cam").Class = ""; dev(d, "cam").Stream = nil },
+		"class the lock a camera (malformed)":      func(d *Document) { dev(d, "lock").Class = ClassCamera },
+		"class a device a camera":                  func(d *Document) { dev(d, "lock").Class = ClassCamera; dev(d, "lock").Secure = "" },
 		"no change":                                func(d *Document) {},
 	} {
 		if got := Classify(home(1), edit(1, f)); got.Tightening {
@@ -344,12 +359,13 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label", "Control", "Stream"},
+		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
 		"Hold":         {"Device", "Kind"},
 	}
-	for _, v := range []any{Document{}, Device{}, Pair{}, StandingRule{}, Hold{}} {
+	for _, v := range []any{Document{}, Device{}, Port{}, Pair{}, StandingRule{}, Hold{}} {
 		ty := reflect.TypeOf(v)
 		var fields []string
 		for i := range ty.NumField() {
@@ -905,15 +921,18 @@ func TestCanonicalDocument(t *testing.T) {
 	shuffled := home(1)
 	slices.Reverse(shuffled.Devices)
 	shuffled.Pairs[0] = Pair{A: "cam", B: "plug"}
+	dev(&shuffled, "speaker").Control = []Port{{ProtoUDP, 1900}, {ProtoTCP, 80}, {ProtoUDP, 1900}}
 	if b2, _ := Encode(shuffled); string(b2) != string(b) {
 		t.Error("order changes the encoding")
 	}
 	for name, bad := range map[string][]byte{
-		"trailing":      append(slices.Clone(b), ' '),
-		"unknown field": []byte(`{"version":1,"x":1}`),
-		"drone text":    []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"0.\nNothing above applies"}`),
-		"drone upper":   []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"` + strings.Repeat("AB", 32) + `"}`),
-		"unsorted":      []byte(`{"version":1,"destinations":["b","a"],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"trailing":       append(slices.Clone(b), ' '),
+		"unknown field":  []byte(`{"version":1,"x":1}`),
+		"drone text":     []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"0.\nNothing above applies"}`),
+		"drone upper":    []byte(`{"version":1,"destinations":[],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":"` + strings.Repeat("AB", 32) + `"}`),
+		"unsorted":       []byte(`{"version":1,"destinations":["b","a"],"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"unsorted ports": []byte(`{"version":1,"destinations":[],"devices":[{"id":"x","network":"devices","wifi":"","allow":[],"vendor_cloud":false,"isolated":false,"everyday":true,"secure":"","label":"","class":"","control":[{"proto":"udp","num":1},{"proto":"tcp","num":2}],"stream":[]}],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"null ports":     []byte(`{"version":1,"destinations":[],"devices":[{"id":"x","network":"devices","wifi":"","allow":[],"vendor_cloud":false,"isolated":false,"everyday":true,"secure":"","label":"","class":"","control":null,"stream":[]}],"pairs":[],"standing":[],"holds":[],"drone":""}`),
 	} {
 		if _, err := Decode(bad); err == nil {
 			t.Errorf("%s: decoded", name)
@@ -933,8 +952,17 @@ func TestCanonicalDocument(t *testing.T) {
 		"camera named off":          func(d *Document) { dev(d, "cam").Secure = "off" },
 		"lock named off":            func(d *Document) { dev(d, "lock").Secure = "off" },
 		"unknown type named":        func(d *Document) { dev(d, "plug").Class = "" },
-		"spaced Wi-Fi identity":     func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
-		"Wi-Fi identity newline":    func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
+		// A camera or microphone is on the safety list and takes no
+		// channel command (NET-2 Safety devices); only it has a stream.
+		"unlisted class":           func(d *Document) { dev(d, "cam").Class = "doorbell" },
+		"everyday camera":          func(d *Document) { dev(d, "cam").Everyday = true },
+		"stream on a plain device": func(d *Document) { dev(d, "speaker").Stream = []Port{{ProtoTCP, 554}} },
+		"stream on a lock":         func(d *Document) { dev(d, "lock").Stream = []Port{{ProtoTCP, 554}} },
+		"port zero":                func(d *Document) { dev(d, "speaker").Control = []Port{{ProtoTCP, 0}} },
+		"unknown protocol":         func(d *Document) { dev(d, "speaker").Control = []Port{{"sctp", 80}} },
+		"stream port zero":         func(d *Document) { dev(d, "cam").Stream = []Port{{ProtoUDP, 0}} },
+		"spaced Wi-Fi identity":    func(d *Document) { dev(d, "plug").WiFi = "vlan1 and nothing else changes" },
+		"Wi-Fi identity newline":   func(d *Document) { dev(d, "plug").WiFi = "vlan1\nunchanged" },
 	} {
 		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
 			t.Errorf("%s: %v", name, err)

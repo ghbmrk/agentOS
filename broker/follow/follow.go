@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/clock"
@@ -103,9 +105,9 @@ func New(c Config) (*Executor, error) {
 		return nil, fmt.Errorf("follow: shipped root: %v", err)
 	}
 	// An alert a previous run could not send is still owed.
-	b, err := os.ReadFile(c.Pending)
+	b, err := readFile(c.Pending)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("follow: pending alert: %v", err)
+		return nil, fmt.Errorf("follow: pending alert: %w", err)
 	}
 	return &Executor{cfg: c, held: map[string]held{}, unsent: string(b)}, nil
 }
@@ -347,4 +349,15 @@ func (x *Executor) Following() (name, digest string, err error) {
 		return "", "", err
 	}
 	return src.Name, digest, nil
+}
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
+// pending-alert file is never a link, so one there was planted.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

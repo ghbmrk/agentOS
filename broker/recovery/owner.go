@@ -142,8 +142,8 @@ func (nc *NumberChange) Complete(current, from, text string, now time.Time) (str
 	}
 	nc.Expires = time.Time{}
 	return from, Texts{
-		ToOld: fmt.Sprintf("AgentOS: the owner number moved to %s with the recovery key. This number can no longer control me. If you did not do this, enter the recovery key on my Wi-Fi page to move it back.", tail(from)),
-		ToNew: "AgentOS: this is now the owner number. Text a code from your code generator to unlock. HELP for commands.",
+		ToOld: fmt.Sprintf("The owner number moved to %s with the recovery key. This number can no longer control me. If you did not do this, enter the recovery key on my Wi-Fi page to move it back.", tail(from)),
+		ToNew: "This is now the owner number. Text a code from your code generator to unlock. HELP for commands.",
 	}, nil
 }
 
@@ -162,10 +162,10 @@ func eightDigits(s string) bool {
 // RestoreNotice is the owner text after a restore (REC-2).
 func RestoreNotice(rep Report) string {
 	if rep.Source == "drive" {
-		return "AgentOS: I was restored from my old drive. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked recently may appear there; leave them off."
+		return "I was restored from my old drive. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked recently may appear there; leave them off."
 	}
 	d := rep.Created.UTC().Format("2006-01-02")
-	return fmt.Sprintf("AgentOS: I was restored from a backup made %s. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked after %s appear there; leave them off.", d, d)
+	return fmt.Sprintf("I was restored from a backup made %s. Pre-allowances and today's budget are paused until you review them on my Wi-Fi page (one step). Grants you revoked after %s appear there; leave them off.", d, d)
 }
 
 // EndSession ends the owner channel's session unlock and, after a new
