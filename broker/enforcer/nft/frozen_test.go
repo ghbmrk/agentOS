@@ -73,6 +73,12 @@ func TestFrozenIsolated(t *testing.T) {
 // summary's destinations are only what the device reached. The counting
 // sets read back through the loader's listing.
 func TestDeviceTrafficCounted(t *testing.T) {
+	// A home with no device on a VLAN has no counting map at all (nft
+	// refuses an empty one).
+	empty, err := Compile(policy.Document{Version: 1}, fixtureLayout())
+	if err != nil || strings.Contains(empty, "vmap") || strings.Contains(empty, "_count") {
+		t.Errorf("a home with no devices: counting rules present (%v)", err)
+	}
 	if !inNetns(t) {
 		return
 	}
