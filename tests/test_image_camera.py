@@ -76,7 +76,7 @@ class CameraClerkUnitTest(unittest.TestCase):
         self.assertEqual([k for k in check.EXEC_KEYS if k in self.svc], ["ExecStart"])
         self.assertIn('clerkName = "camera"', (CMD / "main.go").read_text())
         # The kernel matches the peer's whole cgroup, so no process of the unit may sit in a subgroup when
-        # the manager connects: no DelegateSubgroup= (the clerk moves itself after its start).
+        # the manager connects: no DelegateSubgroup= (the clerk moves itself once it holds its key).
         self.assertNotIn("DelegateSubgroup", self.svc)
 
     # REQ: RES-2, NET-2

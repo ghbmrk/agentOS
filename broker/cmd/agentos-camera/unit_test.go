@@ -38,6 +38,27 @@ func TestDecodersLeaveTheUnitsGroup(t *testing.T) {
 	}
 }
 
+// TestTheKeyIsReadBeforeTheClerkLeavesItsGroup: the kernel hands the key
+// only to a peer in the unit's own group, so a clerk with no key never moves
+// into its leaf (CAM-host-11).
+func TestTheKeyIsReadBeforeTheClerkLeavesItsGroup(t *testing.T) {
+	d, cg := t.TempDir(), t.TempDir()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Close() // the kernel sent nothing: no key
+	defer r.Close()
+	err = start([]string{"-dir", d, "-owner-sock", filepath.Join(d, "owner.sock"), "-owner-uid", "0",
+		"-runsc", "/r", "-runsc-root", "/rr", "-decode-root", "/dr", "-cgroup", cg}, io.Discard, r)
+	if err == nil {
+		t.Fatal("the clerk started with no key")
+	}
+	if _, err := os.Stat(filepath.Join(cg, leaf)); !os.IsNotExist(err) {
+		t.Fatalf("the clerk left its group before it held its key: %v", err)
+	}
+}
+
 // TestDecoderStartsInTheUnitsSandbox runs inside the image's own
 // agentos-keeper-camera.service, as the clerk's user (its User=, which
 // tests/test_image_camera.py holds), with only ExecStart=

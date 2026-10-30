@@ -121,13 +121,15 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 	if err != nil {
 		return err
 	}
-	rt, err := decoders(c)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	// The kernel hands the key only to a peer in the unit's own group, so
+	// the clerk leaves it for its leaf only once it holds the key.
+	sec, err := openSecrets(c.dir, keyFile)
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-	sec, err := openSecrets(c.dir, keyFile)
+	rt, err := decoders(c)
 	if err != nil {
 		return err
 	}
@@ -156,9 +158,9 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 // leaf is the clerk's own group under -cgroup.
 const leaf = "clerk"
 
-// decoders moves the clerk into its leaf of its unit's delegated group and
-// returns the runtime its decoder sandboxes start under, beside the leaf
-// (CAM-host-11). cgroup v2 lets a group that holds a process give its
+// decoders moves the clerk, once it holds its key, into its leaf of its
+// unit's delegated group and returns the runtime its decoder sandboxes start
+// under, beside the leaf (CAM-host-11). cgroup v2 lets a group that holds a process give its
 // children no controller, so the clerk leaves its unit's group before a
 // sandbox's group, with its memory cap, is made there. runsc runs as the
 // clerk's own uid, which is not root (CLK-1), so it runs rootless.
