@@ -119,8 +119,9 @@ class Gate(unittest.TestCase):
             self.assertIn("broker/hint/hint.go:3 ARITHMETIC_BASE survives", r.stdout)
 
     def test_gate_reads_a_real_diff_whatever_the_git_prefix_config(self):
-        # #4115: diff.noprefix, diff.mnemonicPrefix or diff.dstPrefix must not drop the PR's added lines.
-        for key, value in (("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true"), ("diff.dstPrefix", "w/")):
+        # #4115: prefix, colour and external-diff git config must not drop the PR's added lines.
+        for key, value in (("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true"), ("diff.dstPrefix", "w/"),
+                           ("color.ui", "always"), ("diff.external", "true"), ("diff.renames", "copies")):
             with self.subTest(key), tempfile.TemporaryDirectory() as d:
                 git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
                 shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
