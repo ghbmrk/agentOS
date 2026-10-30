@@ -530,7 +530,7 @@ func init() {
 {{else if .Lost.Filed}}<p>Your request for a new card waits for my next restart.</p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="restart"><button>Restart now</button></form>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="withdraw"><button class="plain">Withdraw the request</button></form>
-{{else}}<p>If no card you hold opens my store, I can make a new one when I restart, after one of your hardware keys approves it. Use this only when the whole card is lost: until you confirm the new card, nobody holds a recovery key that opens my store. If you asked before and restarted but I show no new card here, I lost it before you saw it: ask again.</p>
+{{else}}<p>If no card you hold opens my store, I can make a new one when I restart, after one of your hardware keys approves it. Use this only when the whole card is lost: from my restart until you print or save the new card, nobody holds a recovery key that opens my store. If you asked before and restarted but I show no new card here, I no longer hold it: if you printed or saved it, keep it, as it is in effect; if not, ask again.</p>
 <p><a href="/recovery/lost">Ask for a new card</a></p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}`))

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/localapi"
@@ -144,19 +145,20 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	}
 }
 
-// Brief matrix, r4b: a kernel restart before the card is shown leaves no
-// card, and the page tells the owner to ask again.
+// Brief matrix, r4b: a box restart before the confirm leaves no card, and
+// the page tells the owner to keep the card if they printed or saved it,
+// and to ask again if not.
 func TestLostCardGoneTellsTheOwnerToAskAgain(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	p := html.UnescapeString(r.get("/recovery/new"))
-	if !strings.Contains(p, lostGoneText) || !strings.Contains(p, "Ask for a new card again") {
+	if !strings.Contains(p, lostGoneText) || !strings.Contains(p, "ask for a new card again") {
 		t.Fatalf("no card:\n%s", p)
 	}
 	if r.srv.lost.display != nil {
 		t.Fatal("a display with no card")
 	}
-	if p := html.UnescapeString(r.get("/recovery/")); !strings.Contains(p, "I lost it before you saw it: ask again") {
+	if p := html.UnescapeString(r.get("/recovery/")); !strings.Contains(p, "if not, ask again") {
 		t.Fatal("the first step does not say to ask again")
 	}
 }
@@ -207,5 +209,42 @@ func TestLostCardConfirmAfterAKernelRestart(t *testing.T) {
 	r.f.doneErr = Refused(localapi.ErrRecoveryNoCard)
 	if w := r.post("/recovery/new", group()); w.Code != http.StatusSeeOther || r.srv.lost.display != nil {
 		t.Fatalf("no card at the confirm: %d", w.Code)
+	}
+}
+
+// Losing the page's process before the confirm loses only its display:
+// the kernel still holds the card, so the reopened page shows the same
+// card. A box restart then loses the kernel's copy too, and the page
+// says the card already printed is in effect and the old passphrase
+// still opens the store.
+func TestLostCardPageRestartBeforeConfirm(t *testing.T) {
+	r := newRecoveryRig(t)
+	r.signIn()
+	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
+	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	r.f.lostCard, r.f.lostState = bytes.Clone(bits), localapi.RecoveryLostState{Ready: true}
+	if p := r.get("/recovery/new"); !strings.Contains(p, text) {
+		t.Fatal("the card is not shown")
+	}
+	// The page's process ends with no confirm: its in-memory state is gone.
+	r.srv.lost.mu.Lock()
+	r.srv.lost.display, r.srv.lost.starter, r.srv.lost.until = nil, "", time.Time{}
+	r.srv.lost.mu.Unlock()
+	if p := r.get("/recovery/new"); !strings.Contains(p, text) {
+		t.Fatal("the reopened page does not show the kernel's card")
+	}
+	if fmt.Sprint(r.f.lost) != "[card card]" {
+		t.Fatalf("calls %v", r.f.lost)
+	}
+	// The whole box restarts with no confirm: the kernel's copy is gone.
+	r.srv.lost.mu.Lock()
+	r.srv.lost.display, r.srv.lost.starter, r.srv.lost.until = nil, "", time.Time{}
+	r.srv.lost.mu.Unlock()
+	r.f.lostCard, r.f.lostState = nil, localapi.RecoveryLostState{}
+	p := html.UnescapeString(r.get("/recovery/new"))
+	for _, s := range []string{"If you printed or saved it, it is in effect", "so keep it", "If not, ask for a new card again", "Your old card's passphrase still opens my store"} {
+		if !strings.Contains(p, s) {
+			t.Errorf("after a box restart the page lacks %q", s)
+		}
 	}
 }
