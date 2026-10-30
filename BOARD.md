@@ -55,7 +55,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-b | MIG-4-recovery-b: broker/recovery rebuilt on the kernel log as a restore-as-install rooted in the two hardware keys; passkeys cut; newer erases re-applied first, holds named, classes unsealed one at a time; old code deleted (REC-2, LOG-4). | MIG-4-recovery-a (#3185), #2577, #2682 | queued (release; sub A; tier A; slice b of #2865) |
 | MIG-4-recovery-c | MIG-4-recovery-c: compromised restore switch regenerates store, kernel and holder keys and the page CA, texts and prints the new fingerprint, revokes and re-consents at providers, rotates Owner Card secrets; ordinary restores keep the CA (REC-5, CH-9). | MIG-4-recovery-b (#3186), #3172 | queued (release; sub A; tier A; slice c of #2865) |
 | MIG-4-untrusted-reconnect-a2 | Announce a passkey enrolment on the owner channel: the new key's fingerprint and the hardware key that signed it. | MIG-4-untrusted-reconnect-a | building (later; tier A) |
-| MIG-4-untrusted-reconnect-a3 | Passkey Finish follow-ups from the #3229 L3: a deterministic race test, and a retry challenge the server holds. | MIG-4-untrusted-reconnect-a | building (later; tier A) |
 | MIG-4-untrusted-exit-b2b-links | Put -signin-routes on a tmpfs of its own (or require fs.protected_hardlinks=1) before b2b's unit sets -signin-sock (#3282 Security 1). | #2780 b2b | queued (release; tier A) |
 | EDGE-link-core-d | EDGE-link-core-d: the owner page's edge step, the tamper alert and the edge status lines (HW-15, REC-2). | EDGE-link-core-c2 | queued (release; tier A; slice d of #3290) |
 | MIG-4-untrusted-exit-b1-sweep-f2 | MIG-4-untrusted-exit-b1-sweep-f2: vm.load removes a provider or worker machine directory a crash left without meta.json, so no placeholder seed stays at rest (CAP-8). | MIG-4-untrusted-exit-b1-sweep-f1 (#3308) | queued (later; tier A) |
@@ -91,6 +90,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-c2-unit | MIG-4-exit-c2-unit: the checker's unit (kernel-handed key, loaded sealed seed), the keeper's codes socket and the unlock, kernel and enrollment flags on the image (CH-4, CLK-1). | #3683 (c2); image queue | queued (release; tier A; follow-up of MIG-4-exit-c2; size S) |
 | DECOY-b-wire | DECOY-b-wire: first-boot table, call trips over the kernel socket, texts and resume (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | MIG-4-untrusted-reconnect-a4 | Passkey follow-ups from the #4057 reviews: a race test that fails fast, and a retry challenge tied to the begun point. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
+| DECOY-b-harden | DECOY-b-harden: bounded repeat trips and resume, trip logged with its rejection, honey keys at every key check, outbound scan past the plan (KRN-12) | #3763 | queued(release; tier A; size M; from #4037 reviews) |
 
 ## Harness and operating model
 
@@ -288,8 +288,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-o | ENF-o: the kernel's enforcer channel client: pinned endpoint, fixed kinds, log heads, enforcer alerts to the owner line (DEV-2, NET-2 Channel, STO-1) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-p | ENF-p: wire the kernel's enforcer channel client into agentosd (serial slot, D-111) | #3673; agentosd slot | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-q | ENF-q: locks and safety devices on the enforcer's radios: home-only unlock, unusual-time second assertion, visitor codes (NET-6, NET-4, DEV-5) | #3659, #3660, #3668, #3669, #3694 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-r | ENF-r: safety-device secrets on the enforcer: sealed hand-off at pairing, enforcer store, no core copy (STO-4, STO-3) | #3658, #3659, #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-s | ENF-s: safety-list approvals on the enforcer page: asserted tightenings, once-only turn-on or open (NET-4, NET-6) | #3658, #3659 | building(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-r | ENF-r: safety-device secrets on the enforcer: sealed hand-off at pairing, enforcer store, no core copy (STO-4, STO-3) | #3658, #3659, #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-t | ENF-t: the enforcer's Thread and Matter stacks in confined processes, Matter on the C++ SDK (NET-2 Confined radio stacks; D-231) | #3669 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
@@ -307,12 +306,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-pub | Publish the project's TUF update repository, scheduled refresh, production image build (UPD-2, UPD-8, HW-10; brief to write) | UPD-b3 (a) (#889) | queued |
 | RES-5b | RES-5b: spare work draws a usage pool only down to the reserve or the foreground forecast, whichever is larger; last-hours use of what would reset unused (RES-5, HLD-4; brief to write) | RES-5a | queued (release; tier A) |
 | RES-5c | RES-5c: slow new starts on a usage pool only while its provider returns rate-limit errors, with no fixed cap on concurrent runs (RES-5; brief to write) | RES-5a | queued (release; tier A) |
-| CAM-clerk-rollback-test | CAM-clerk-rollback-test: a test pins agentos-camera's failed-apply rollback of capture and re-pin (DEV-7, DEV-3) | CAM-clerk (d) (#3514, #3868) | building (release; tier A; from #3868 delta L3 point 1) |
-| CAM-clerk-broken-slot | CAM-clerk-broken-slot: a camera whose sealed slot fails at start is kept, unswept and shown as refused, while the others run (DEV-7, DEV-10) | CAM-clerk (d) (#3514, #3868) | building (release; tier A; from #3868 delta L3 point 2) |
 | ENF-helpers | ENF-helpers: paired helper machines in the enforcer policy; the core's path to them and the Wake-on-LAN relay's list (NET-2 Segments, HW-11) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | IMG-reproduce-deflake | IMG-reproduce-deflake: the release record lists every /usr file's hash, reproduce names the differing file, and that file builds the same twice. | — | queued (release; tier B; size S; from #4037 and main CI) |
 | CAM-clerk-kept-expiry | CAM-clerk-kept-expiry: a camera kept back by a failing sealed slot still has its capture expire on time (DEV-7) | CAM-clerk-broken-slot (#3968, #4050) | queued (release; tier A; from #4050 Security 1 and combined 1) |
 | CAM-clerk-broken-slot-later | CAM-clerk-broken-slot-later: test the broken camera's pin and run guards, retry a briefly failed slot, tidy two dead lines (DEV-3, DEV-10) | CAM-clerk-broken-slot (#3968, #4050) | queued (later; tier A; from #4050 reviews) |
+| ENF-names-b | ENF-names-b: unambiguous pair separator in the enforcer log; one policy copy per request (NET-2 Channel) | #3758 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-s-b | ENF-s-b: action screen wording (next step on a refused tap, local time for the window) | #3694 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-mdns-records | ENF-mdns-records: the mDNS pair relay passes only a paired device's own records (NET-3 Casting) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
 
 ## Model routes and the Codex lane
 
@@ -406,20 +406,18 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-e2e | REV-CHK-links-e2e: root-side path operations in the image test harness (`boxe2e`) go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-links-udev | REV-CHK-links-udev: the path lint counts binaries a udev rule runs (`agentos-hostdisk`) as root-side | #3900 | queued |
 | REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | queued |
-| UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief briefs/UPD-7w.md, #4001) | #4001 (brief); build after #3979 and #3994 merge | queued (A; ready to build once #3979 and #3994 merge) |
+| UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief briefs/UPD-7w.md, #4001) | #4001 (brief); build after #3979 and #3994 merge | building (A; ready to build once #3979 and #3994 merge) |
 | REV-CHK-links-update-r | REV-CHK-links-update-r: drive sources open beneath their root; the remove allow line names Fetch's parent bound | #3979 | queued |
 | REV-CHK-links-update-l | REV-CHK-links-update-l: saved TUF metadata read fails closed; store parent chain root-only; tighter link test | #3979 | queued |
 | REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | queued |
 | VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | queued |
 | VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | queued |
-| UPD-5r-a | Local requalification rule, verdict record and stable ship gate (UPD-5, HLD-3; brief briefs/UPD-5r.md) | UPD-7w (#3961) consumes it | building (A; top of dispatch, Mark's decision C on #3961) |
 | UPD-5r-b | Requalification runner, host side: cases and graders from the installed release, fail closed without a source (UPD-5, HLD-2, HLD-3; brief briefs/UPD-5r-b.md) | UPD-5r-a (#4031) | building (A; brief to write; lifts the stable ship gate) |
 | UPD-5r-b2 | production requalification sandbox: a release's /usr image under gVisor (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; lifts the stable ship gate with b3-b6) |
 | UPD-5r-b3 | security suite held as log data (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2, UPD-7w (#3961) | queued (A) |
-| BROWSER-logged-out-flake | `TestLoggedOutEffectIsParkedNotResent` (broker/browser/clerk_test.go:202) fails under -race on main, twice in a row: "driver got []"; make the wait on the driver's recorded forward robust without weakening the KRN-8 check (release, CI timing flake, runs 41044163075 and 41044987726) | main CI runs 41044163075 and 41044987726 | building (release; tier A; second sighting, OPERATING §5) |
 | BROWSER-lost-bound | The four lost-click browser tests keep a 300 ms bound that a starved runner can still outrun after #4056; give them 3 s without changing what they assert (release, Security finding on #4056) | #4056 Security review | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
