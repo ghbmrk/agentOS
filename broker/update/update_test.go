@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -579,5 +580,60 @@ func TestWeakIntermediateRootRefused(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(f.store.Dir, "root.json"))
 	if r, _ := metadata.Root().FromBytes(b); r.Signed.Version != 1 {
 		t.Fatalf("box saved root v%d past a weak one", r.Signed.Version)
+	}
+}
+
+// A link planted at a store, lock or repository file is refused, not
+// followed (REV-CHK-links, #3942): the box reads no file a link names.
+func TestPlantedLinksAreRefused(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	plant := func(p string) {
+		t.Helper()
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		real := filepath.Join(f.dir, filepath.Base(p)+".real")
+		if err := os.WriteFile(real, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(real, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installed := f.store.p("installed.json")
+	plant(installed)
+	if _, err := f.store.Installed(); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("installed.json as a link: %v, want ELOOP", err)
+	}
+	if _, err := f.check(Options{}); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("check over a linked installed.json: %v, want ELOOP", err)
+	}
+	g := newFixture(t)
+	g.release(2, nil)
+	g.publish(0, 1)
+	if err := os.Symlink(filepath.Join(g.dir, "elsewhere"), g.store.p(".lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.check(Options{}); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("check with .lock a link: %v, want ELOOP", err)
+	}
+	if _, err := os.Lstat(filepath.Join(g.dir, "elsewhere")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the lock's link target was created: %v", err)
+	}
+	h := newFixture(t)
+	h.release(2, nil)
+	h.publish(0, 1)
+	plant(filepath.Join(h.repo.Dir, "metadata", "timestamp.json"))
+	if _, err := DirSource(h.repo.Dir).Open("metadata/timestamp.json"); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("repository file as a link: %v, want ELOOP", err)
+	}
+	if res, err := h.check(Options{}); err == nil && res.Release != nil {
+		t.Fatal("check read a linked timestamp")
 	}
 }
