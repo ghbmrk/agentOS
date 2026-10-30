@@ -56,6 +56,10 @@ exempt-pr 4051
 # name (D-198). Remove once #4055 merges.
 exempt-pr 4055
 
+# #4037 (DECOY-b, #3763): broker/decoy/match/, which the G2 list does not name (D-198). Remove once
+# #4037 merges.
+exempt-pr 4037
+
 # #4073 (ENF-r, #3692): broker/enforcer/pairseal/, broker/enforcer/devsecret/ and
 # broker/clerk/enfpair/, which the G2 list does not name (D-198). Remove once #4073 merges.
 exempt-pr 4073
