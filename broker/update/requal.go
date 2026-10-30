@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/durable"
@@ -64,17 +65,17 @@ type Requalifier struct {
 	mu     sync.Mutex
 	// failed holds this process's security failures too, so a mark whose
 	// save failed still holds until the process ends.
-	failed map[string]string
+	failed map[string][]string
 }
 
 // requalState is the saved record: the security suite's floor, which only
-// grows (HLD-3), and, per candidate, the digest of the security suite it
+// grows (HLD-3), and, per candidate, the digests of the security suites it
 // failed. No verdict is kept, so a suite that gained a case since a pass is
 // run, and held-out or replay noise is retried; but a security failure is
 // final on that suite, so a retry never turns one into a pass.
 type requalState struct {
-	Floor  int               `json:"security_floor"`
-	Failed map[string]string `json:"security_failed"`
+	Floor  int                 `json:"security_floor"`
+	Failed map[string][]string `json:"security_failed"`
 }
 
 // NewRequalifier keeps its record at path. A nil runner is allowed: every
@@ -83,7 +84,7 @@ func NewRequalifier(store *Store, runner Runner, path string) (*Requalifier, err
 	if store == nil || path == "" {
 		return nil, errors.New("update: requalifier needs a store and a state path")
 	}
-	return &Requalifier{store: store, runner: runner, path: path, failed: map[string]string{}}, nil
+	return &Requalifier{store: store, runner: runner, path: path, failed: map[string][]string{}}, nil
 }
 
 // Requalify judges v against the installed release, running every suite
@@ -132,8 +133,9 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		detail := judge(cand, base, st.Floor)
 		if s == SuiteSecurity {
 			if detail != "" {
-				st.Failed[key], q.failed[key] = cand.Digest, cand.Digest
-			} else if st.Failed[key] == cand.Digest || q.failed[key] == cand.Digest {
+				addDigest(st.Failed, key, cand.Digest)
+				addDigest(q.failed, key, cand.Digest)
+			} else if slices.Contains(st.Failed[key], cand.Digest) || slices.Contains(q.failed[key], cand.Digest) {
 				detail = "failed this security suite before"
 			}
 		}
@@ -153,11 +155,18 @@ func refKey(r Ref) string {
 	return fmt.Sprintf("%d:%s:%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
 }
 
+// addDigest adds digest to key's set in m.
+func addDigest(m map[string][]string, key, digest string) {
+	if !slices.Contains(m[key], digest) {
+		m[key] = append(m[key], digest)
+	}
+}
+
 // mark records that the candidate failed the security suite digest, in
 // memory first, then in the saved record.
 func (q *Requalifier) mark(st *requalState, key, digest string) error {
-	q.failed[key] = digest
-	st.Failed[key] = digest
+	addDigest(q.failed, key, digest)
+	addDigest(st.Failed, key, digest)
 	return q.save(*st)
 }
 
@@ -201,7 +210,7 @@ func judge(cand, base Score, floor int) string {
 }
 
 func (q *Requalifier) load() (requalState, error) {
-	st := requalState{Failed: map[string]string{}}
+	st := requalState{Failed: map[string][]string{}}
 	b, err := readFile(q.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
@@ -213,7 +222,7 @@ func (q *Requalifier) load() (requalState, error) {
 		return requalState{}, fmt.Errorf("update: requalification record: %w", err)
 	}
 	if st.Failed == nil {
-		st.Failed = map[string]string{}
+		st.Failed = map[string][]string{}
 	}
 	return st, nil
 }

@@ -218,6 +218,16 @@ func TestSecurityFailureIsFinalOnItsSuite(t *testing.T) {
 	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || !got.Passed {
 		t.Fatalf("new suite: %+v, %v; want passed", got, err)
 	}
+	// It fails d2 too; back on the first suite, it still does not pass
+	// (#4033 L3 delta 2, point 3: every failed digest is kept).
+	r.cand[SuiteSecurity] = Score{Suite: SuiteSecurity, Digest: "d2", Cases: 41, Passed: 40}
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("failing d2: %+v, %v; want not passed", got, err)
+	}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = sc(SuiteSecurity, 41, 41), sc(SuiteSecurity, 41, 41)
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("back on the first suite: %+v, %v; want not passed", got, err)
+	}
 }
 
 // baseErr fails the baseline's security run while err is set.
