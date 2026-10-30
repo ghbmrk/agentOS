@@ -595,19 +595,22 @@ func TestTwoFinishesInOneSessionEnrolOnce(t *testing.T) {
 	}
 	ad, cd, sig := r.anchors[0].get(t, c)
 	r.k.entered, r.k.gate = make(chan struct{}, 2), make(chan struct{})
-	errs := make(chan error, 2)
-	finish := func() { errs <- r.p.Finish(context.Background(), "s1", ad, cd, sig) }
-	go finish()
+	waiting := make(chan struct{}, 1)
+	r.p.waiting = func() { waiting <- struct{}{} }
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() { first <- r.p.Finish(context.Background(), "s1", ad, cd, sig) }()
 	<-r.k.entered
-	go finish()
-	time.Sleep(50 * time.Millisecond) // the second reaches Finish while the first is in Enroll
+	go func() { second <- r.p.Finish(context.Background(), "s1", ad, cd, sig) }()
+	<-waiting // the second waits on the first, which is still in Enroll
 	close(r.k.gate)
-	first, second := <-errs, <-errs
+	if err := <-first; err != nil {
+		t.Fatalf("the first: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("the second takes the first's answer: %v", err)
+	}
 	if r.k.enrolls != 1 {
 		t.Fatalf("%d Enroll calls", r.k.enrolls)
-	}
-	if first != nil || (second != nil && code(second) != localapi.ErrPasskeyStale) {
-		t.Fatalf("answers %v, %v", first, second)
 	}
 	if es := r.enrolled(); len(es) != 1 || es[0].Passkey != phone.public(t) {
 		t.Fatalf("enrolled %+v", es)
