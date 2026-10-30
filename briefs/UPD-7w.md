@@ -55,7 +55,7 @@ UPD-5 (stable soak plus attestations; security fixes auto-staged), UPD-7 (no cen
 | Mirror unreachable or unverified | as left | nothing scheduled; sightings kept | as left | as left | as left |
 | Attestor list narrowed | — | a dropped security fix (A9) is re-offered only under the current policy | — | — | — |
 
-Each filled cell is a test (Acceptance tests). Construction in `cmd/agentosd` is one call beside the applier, which MIG-4-adapters-e-wire-b (#3677) builds; that row adds it (a comment on #3677 asks for it), and this package's matrix runs against the real `Applier`, `update.Store` and `updatetest` mirror so the agentosd call adds no untested behaviour.
+Each filled cell is a test (Acceptance tests). Construction in `cmd/agentosd` is one call beside the applier, which MIG-4-adapters-e-wire-b (#3677) builds; whichever of #3677 and this row lands second adds it, with the check passed as the applier's `Pipeline` (comment on #3677), and this package's matrix runs against the real `Applier`, `update.Store` and `updatetest` mirror so the agentosd call adds no untested behaviour.
 
 ## Acceptance tests
 
