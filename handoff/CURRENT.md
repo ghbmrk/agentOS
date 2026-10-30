@@ -46,7 +46,7 @@ Written by sub A (this project's Decisions thread) at Mark's request, so sub B c
 **Sub B, in this order**
 1. **Reviews sub A can't start.** First: **#4033** (UPD-5 re-test rebuild plus the ship gate, issue #4031, head 472a5a34 at writing). It is tier A but not a gate-file PR, so it needs one L3+lens thread and one Security thread. Its gate lifts only once the sandbox runner (#4032) is done, so #4032 is the next build row. Next is **#4041**, the waste-sweep process PR (D-246, a tier-A gate file), which needs one L3+lens thread and one Security thread. Then: For every open PR whose latest verdict comment lists a review owed, run one L3+lens thread and, where tier A or `premerge.py --needs-mark` requires, one Security thread. The last accept arms (CLAUDE.md).
 2. **Idle PRs with no owner**, blockers as of 11:00Z (take each over or close it with its row requeued, D-098):
-   - #3949: every review accepts, but CI's `checks` job is red because `tests/test_list_readers.py` is missing a reader case. The waste-sweep thread is pushing the fix, after which a test-only delta review is owed.
+   - #3949 (a gate-file PR, since it touches `ci.yml`): its `checks` fix is pushed at 6fe0c237 and includes a 4-line change to `srclint.load_allow`, so it is not test-only. It needs an L3 delta and a Security delta at that head.
    - #3973: needs a merge from main, then a Security review.
    - #3976: `g1-freeze` is red because it has no D-198 exempt-pr companion. A Security delta is owed at 41911480.
    - #3991: needs a merge from main, and a Security delta is owed at 8f8e8d7.
