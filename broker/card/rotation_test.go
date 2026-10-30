@@ -393,6 +393,43 @@ func TestRotationHandlerCancel(t *testing.T) {
 	}
 }
 
+// REQ: REC-4
+// A card the box already made (the lost-card route, D-201 route B) shows
+// no cancel and never says the current card stays in effect: the old card
+// opens nothing any more. A posted cancel is not a cancel, and the confirm
+// still provisions. Revert mutant: Made ignored (the page offers cancel).
+func TestMadeCardOffersNoCancel(t *testing.T) {
+	var gen Card
+	confirmed := 0
+	d, err := NewDisplay(DisplayConfig{Rotate: &Parts{Recovery: true}, Made: true, Authority: testAuthority(t),
+		Generate: func(r io.Reader) (*Card, error) {
+			c, err := Generate(r)
+			if err == nil {
+				gen = *c
+			}
+			return c, err
+		},
+		Provision: func(*Card) error { confirmed++; return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(must(d.Page()))
+	if strings.Contains(page, `name="cancel"`) || strings.Contains(page, "stays in effect") || !strings.Contains(page, "already opens my store") {
+		t.Fatalf("made card page: %q", page)
+	}
+	h := d.Handler(paired, "/recovery/")
+	if w := do(t, h, "POST", "/card", url.Values{"cancel": {"1"}}, true, nil); w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("cancel of a made card: %d", w.Code)
+	}
+	if _, err := d.Page(); err != nil {
+		t.Fatal("a cancel discarded a made card")
+	}
+	_, g := d.Asks()
+	if w := do(t, h, "POST", "/card", url.Values{"group": {strings.Split(gen.RecoveryKey, "-")[g-1]}}, true, nil); w.Code != http.StatusSeeOther || confirmed != 1 {
+		t.Fatalf("confirm of a made card: %d, provisioned %d", w.Code, confirmed)
+	}
+}
+
 func must(b []byte, err error) []byte {
 	if err != nil {
 		panic(err)

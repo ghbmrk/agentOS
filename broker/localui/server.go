@@ -156,6 +156,8 @@ type Server struct {
 	vaultOpener string
 	// recovery is the Recovery key page's one pending replacement.
 	recovery recoveryState
+	// lost is the Recovery key page's display of a card the box made.
+	lost lostState
 	// scanning admits one photo upload at a time.
 	scanning chan struct{}
 	// claimWait holds a slot for each claim post running or waiting
