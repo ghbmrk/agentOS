@@ -203,8 +203,9 @@ type point struct {
 	// Security: it was scheduled as a security fix, so its restart is
 	// automatic only while the release still is one (SR3-4f-2c).
 	Security bool `json:"security,omitempty"`
-	// Withdrawing: a security recheck failed the adoption after the
-	// handover. The release is never restarted into; the next Tick or
+	// Withdrawing: after the handover, a security recheck failed the
+	// adoption, the owner pinned the channel (Pinned) or moved the box
+	// to stable (Stable). The release is never restarted into; the next Tick or
 	// Withdraw finishes abandoning it, and a boot of the old root is not
 	// a fallback (SR3-4f-3a).
 	Withdrawing bool `json:"withdrawing,omitempty"`
@@ -1606,8 +1607,10 @@ func (a *Applier) Status() string {
 	defer a.mu.Unlock()
 	switch {
 	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned:
-		// Its Abandon not recorded, a reboot boots it (#3852).
-		return withdrawingLine(a.st.Applying.To, a.st.Applying.Stable, !a.st.Applying.Abandoned)
+		// Its Abandon not recorded, a reboot boots it (#3852). A security
+		// refusal since names the cause over a move to stable.
+		sec := a.refused.adoption == a.st.Applying.Adoption && a.refused.why == WhySecurity
+		return withdrawingLine(a.st.Applying.To, a.st.Applying.Stable && !sec, !a.st.Applying.Abandoned)
 	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
 		return withdrawingLine(a.st.Applying.To, a.refused.why == WhyStable, a.refused.starts)
 	case a.st.Applying != nil && a.st.Applying.Installed:

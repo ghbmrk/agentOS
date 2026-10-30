@@ -824,6 +824,21 @@ func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
 		t.Fatalf("not handed over: %+v", pt)
 	}
 	ho.channel = update.ChannelStable
+	ho.act.abandonErr = errors.New("activator busy")
+	if err := ho.step(); err != nil {
+		t.Fatalf("step with the abandon failing: %v", err)
+	}
+	if got, want := ho.a.Status(), fmt.Sprintf(stableMayStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	// A security refusal since names its own cause.
+	if err := ho.a.Withdraw("upd:2:1", WhySecurity); !errors.Is(err, ErrApplying) {
+		t.Fatalf("security withdraw with the abandon failing: %v", err)
+	}
+	if got, want := ho.a.Status(), fmt.Sprintf(mayStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	ho.act.abandonErr = nil
 	ho.mustStep()
 	ho.inCall = false
 	if ok, err := ho.a.Tick(ctx); ok || err != nil {
@@ -893,10 +908,17 @@ func TestStableRefusalKeepsSecurityReason(t *testing.T) {
 		}
 		got = cr.a.Status()
 	}
-	if _, err := cr.a.Tick(context.Background()); err != nil {
-		t.Fatal(err)
+	cr.act.abandonErr = errors.New("activator busy")
+	if _, err := cr.a.Tick(context.Background()); err == nil {
+		t.Fatal("tick undid the handover with the abandon failing")
 	}
 	if want := fmt.Sprintf(wontStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	// Saved by execute, the point keeps the security cause across a
+	// process restart, which forgets the refusal.
+	cr.restart()
+	if got, want := cr.a.Status(), fmt.Sprintf(mayStartLine, 2); got != want {
 		t.Fatalf("status %q, want %q", got, want)
 	}
 }
