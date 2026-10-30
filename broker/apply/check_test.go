@@ -1214,3 +1214,38 @@ func TestAdoptedCountsSettledAdoptions(t *testing.T) {
 		t.Fatalf("adopted: confirmed %v, failed %v, dropped %v", cr.c.adopted(r(2)), cr.c.adopted(r(3)), cr.c.adopted(r(4)))
 	}
 }
+
+// A security withdraw of a point withdrawn for a move to stable names
+// security even when its save fails; a mark that cannot be saved on an
+// unread boot is refused with the cause.
+// Mutant: take the refusal reason from the point for a security
+// withdraw; read another adoption's refusal; drop the mark's error.
+func TestSecurityCauseWithoutItsSave(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	cr.act.onInstall = func() { cr.inCall = true }
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	disk := errors.New("disk full")
+	cr.act.bootedErr = errors.New("boot unreadable")
+	cr.state.Fail = disk
+	if err := cr.a.Withdraw("upd:2:1", WhyStable); !errors.Is(err, ErrApplying) || !errors.Is(err, disk) {
+		t.Fatalf("unsaved mark: %v", err)
+	}
+	cr.act.bootedErr, cr.state.Fail = nil, nil
+	cr.act.abandonErr = errors.New("activator busy")
+	if err := cr.a.Withdraw("upd:2:1", WhyStable); !errors.Is(err, ErrApplying) {
+		t.Fatalf("stable: %v", err)
+	}
+	cr.state.Fail = disk
+	if err := cr.a.Withdraw("upd:2:1", WhySecurity); !errors.Is(err, ErrApplying) {
+		t.Fatalf("security: %v", err)
+	}
+	if got, want := cr.a.Status(), fmt.Sprintf(mayStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+}
