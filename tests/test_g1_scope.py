@@ -289,7 +289,7 @@ class ListTest(unittest.TestCase):
                   "guest/openclaw/x", "guest/codex/x", "spikes/CTRL-spike/x", "spikes/S8-live/x",
                   "tools/g1_scope_g2.txt", "SPEC.md", "broker/provagent/x.go",
                   "broker/route/route.go", "broker/route/anthropic.go", "broker/voice/v.go",
-                  "broker/browser/x.go", "broker/recall/x.go",
+                  "broker/browser/x.go",
                   "broker/holder/x.go", "broker/cmd/agentos-holder/main.go",
                   "broker/cmd/agentos-release/main.go", "broker/test/a9/x.sh",
                   "broker/photo/x.go", "broker/cmd/agentos-photo/main.go",

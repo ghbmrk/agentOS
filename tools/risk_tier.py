@@ -93,9 +93,6 @@ TIER_A_BROKER = {
     # e2e/boxe2e, the G1 in-image run (#1714): holds the claim code, the Owner
     # Card's values and the code-generator seed, and its verdict proves G1.
     "e2e",
-    # CRED-1 custody (#1654): recall's scrubber and the event bus that runs it
-    # decide what authentication material reaches the recall index and event log.
-    "events", "recall",
     "maintain",                   # also (b): attestor keys that gate security releases
     "probecmd",                   # also (b): CRED-1 child env; findings that pause grants
     "recovery",
