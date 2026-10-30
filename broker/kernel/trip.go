@@ -206,9 +206,9 @@ type SecurityText struct {
 }
 
 var tripTexts = map[string]string{
-	RespFull:    "agentOS security: a decoy was used, so something on the box is breached. I paused the keys it came from and stopped planning. Nothing resumes until you open the owner page and use your passkey.",
-	RespSession: "agentOS security: a planner session reached for a decoy, as injected content can make it. I refused that step and stopped only that session; planning goes on.",
-	RespCall:    "agentOS security: a core service tried to connect to a decoy address. I refused that one connection; nothing else stopped.",
+	RespFull:    "Security: a decoy was used, so something in me is breached. I paused the keys it came from and stopped planning. Nothing resumes until you open my owner page and use your passkey.",
+	RespSession: "Security: a planner session reached for a decoy, as injected content can make it. I refused that step and stopped only that session; planning goes on.",
+	RespCall:    "Security: one of my services tried to connect to a decoy address. I refused that one connection; nothing else stopped.",
 }
 
 // SecurityTexts is one text per trip, oldest first, for the owner line to
