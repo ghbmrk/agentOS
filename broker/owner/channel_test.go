@@ -72,6 +72,7 @@ func (a *recAgent) got() []string {
 
 type rig struct {
 	t       *testing.T
+	ucs2    bool // the test sends agent text, which may need UCS-2 (checkFormat)
 	now     time.Time
 	carrier *modem.Carrier
 	phone   *modem.Line
@@ -186,10 +187,10 @@ func (r *rig) inbox() string {
 }
 
 // checkFormat holds every text to CH-12: at most three segments, and
-// GSM-7 unless it is agent text, which may need UCS-2.
+// GSM-7 unless the test sends agent text, which may need UCS-2 (r.ucs2).
 func (r *rig) checkFormat(s string) {
 	r.t.Helper()
-	if n, gsm := modem.Segments(s); (!gsm && !strings.HasPrefix(s, AgentPrefix)) || n > MaxSegments {
+	if n, gsm := modem.Segments(s); (!gsm && !r.ucs2) || n > MaxSegments {
 		r.t.Errorf("text breaks CH-12 (%d segments, gsm7=%v): %q", n, gsm, s)
 	}
 }
@@ -730,8 +731,8 @@ func TestAgentTextsCarryNoCodesOrKeys(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 	r.ch.Notify("Invoice 482913 was paid on 2026-10-04.")
-	// Agent text is always marked, so it cannot pass for a broker template.
-	if got := r.inbox(); got != "Agent: Invoice 482913 was paid on 2026-10-04." {
+	// Agent text carries no label (CH-21); digits that are not a code go.
+	if got := r.inbox(); got != "Invoice 482913 was paid on 2026-10-04." {
 		t.Fatalf("got %q", got)
 	}
 }

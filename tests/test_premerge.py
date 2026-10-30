@@ -491,6 +491,8 @@ class PremergeTest(unittest.TestCase):
                   "tools/g1_scope.py", "tools/g1_scope_g2.txt", "docs/LANES.md", "tools/trace.py", "tools/old_core.txt",
                   # KRN-2cap (#2935): the trusted core's budget and the tool that enforces it.
                   "tools/trusted_base.py", "tools/trusted_core.txt",
+                  # #3955: the mutation gate's script, which .github/workflows/mutgate.yml runs from the PR's head.
+                  "tools/mutgate.py",
                   # #2438: this gate's own tests and the lens rules need the Security accept too.
                   "tests/test_premerge.py", "tests/test_premerge_lens.py", "reviews/l3/README.md",
                   "reviews/security/README.md", "reviews/ux/README.txt"):
@@ -499,7 +501,8 @@ class PremergeTest(unittest.TestCase):
         for f in ("tools/records.py", "reviews/l3/2026-10-15-pr1.md", "README.md", "docs/OTHER.md", "src/claude/x.go",
                   "reviews/README.md", "reviews/a/b/README.md", "tests/x/test_premerge.py", "tests/test_risk_tier.py",
                   "tests/test_ci_scope.py", "tests/test_g1_scope.py", "tests/test_workflows.py", "tests/test_merge_queue.py",
-                  "tests/test_lane.py", "tools/trusted_base_parsers.txt", "tests/test_trusted_base.py"):
+                  "tests/test_lane.py", "tools/trusted_base_parsers.txt", "tests/test_trusted_base.py",
+                  "tools/mutgate.pyc", "tools/x/mutgate.py", "tests/test_mutgate.py"):
             self.assertEqual(premerge.mark_paths([f]), [], f)
 
     def test_mark_paths_cover_agent_config_and_tier_inputs(self):

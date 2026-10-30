@@ -19,6 +19,8 @@
 # file-system IDs come from mkosi.conf's Seed, so two builds of one commit give the same /usr
 # root hash. VERSION defaults to the commit time, so releases sort in commit order.
 set -eu
+# A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
+export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}
 SOURCE_DATE_EPOCH=$(git -c safe.directory="$REPO" -C "$REPO" log -1 --format=%ct); export SOURCE_DATE_EPOCH

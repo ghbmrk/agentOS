@@ -206,7 +206,7 @@ func (c *Channel) PostAbout(class Class, text string, subjects []string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.postHeld(class, HeldText{Text: control.Fit(Disclose(text)), Subjects: append([]string(nil), subjects...)})
+	return c.postHeld(class, HeldText{Text: control.Fit(c.disclose(text)), Subjects: append([]string(nil), subjects...)})
 }
 
 // checkPacing fails a bad saved setting closed to the defaults (QH-1).
@@ -227,7 +227,7 @@ func (c *Channel) Post(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.post(class, control.Fit(Disclose(text)), false)
+	return c.post(class, control.Fit(c.disclose(text)), false)
 }
 
 // postTemplate is Post for a broker template, such as an alert carrying
@@ -239,7 +239,7 @@ func (c *Channel) postTemplate(class Class, text string) error {
 // sendTemplate sends a broker template at once, never held, and counts
 // it.
 func (c *Channel) sendTemplate(text string) error {
-	return c.sendCounted(control.Fit(text))
+	return c.sendCounted(control.Fit(text), false)
 }
 
 // post is Post for text already disclosed and fitted. agent marks
@@ -251,11 +251,12 @@ func (c *Channel) post(class Class, text string, agent bool) error {
 // postHeld is post for h, whose Class and At it sets.
 func (c *Channel) postHeld(class Class, h HeldText) error {
 	text := h.Text
+	agent := agentWords(h)
 	if c.Urgent(class) {
 		if !c.stillCurrent(h) {
 			return nil
 		}
-		return c.sendCounted(text)
+		return c.sendCounted(text, agent)
 	}
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
@@ -288,8 +289,12 @@ func (c *Channel) postHeld(class Class, h HeldText) error {
 		c.unreserve(at)
 		return nil
 	}
-	return c.sendReserved(at, text)
+	return c.sendReserved(at, text, agent)
 }
+
+// agentWords reports whether held text h is the agent's own words: agent
+// text that was not withheld, whose stand-in is the broker's.
+func agentWords(h HeldText) bool { return h.Agent && !withheld(h.Text) }
 
 // NotifyAs is Notify with a caller-chosen class, for agent-derived text
 // that belongs to another class (QH-2).
@@ -297,7 +302,7 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	text, err := checkAgent(text)
+	text, err := c.checkAgent(text)
 	if err != nil {
 		return err
 	}
@@ -326,13 +331,14 @@ func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return ErrNoModem
 	}
-	text, err := checkAgent(text)
+	text, err := c.checkAgent(text)
 	if err != nil {
 		return err
 	}
 	text = agentText(text)
+	agent := !withheld(text)
 	if c.Urgent(ClassApproval) {
-		return c.sendCounted(text)
+		return c.sendCounted(text, agent)
 	}
 	c.pmu.Lock()
 	defer c.pmu.Unlock()
@@ -344,28 +350,74 @@ func (c *Channel) NotifyNow(text string) error {
 	}
 	at := c.reserveLocked(now)
 	c.mu.Unlock()
-	return c.sendReserved(at, text)
+	return c.sendReserved(at, text, agent)
 }
 
 // checkAgent strips agent-derived text of control and bidi characters
 // (control.StripControls), refuses a reaction form, discloses it
 // (AgentSecret), and holds text that mentions a code or takes the reply
 // grammar (AgentVoice, CH-21), so the reaction check, CH-19 and CH-21
-// read the text the owner's phone shows (CH-12). Callers send the text it
-// returns.
-func checkAgent(text string) (string, error) {
+// read the text the owner's phone shows (CH-12). Both checks also run on
+// the text joined to the agent's earlier texts since the owner's last
+// message (CH-12, joinedAgent), so a shape split across texts is held
+// where it completes. Withheld text is kept for the owner page before
+// its pointer is returned (withhold). Callers send the text it returns.
+func (c *Channel) checkAgent(text string) (string, error) {
 	s := control.StripControls(text)
 	if err := refuseReaction(s); err != nil {
 		return s, err
 	}
 	if AgentSecret(text) {
-		return Hidden, nil
+		// withhold strips it, but classes it as received (#4014).
+		return c.withhold(KeptSecret, text), nil
 	}
 	if AgentVoice(text) {
 		holdVoice()
-		return HeldCode, nil
+		return c.withhold(KeptCode, s), nil
+	}
+	switch c.joinedAgent(s) {
+	case KeptSecret:
+		return c.withhold(KeptSecret, s), nil
+	case KeptCode:
+		holdVoice()
+		return c.withhold(KeptCode, s), nil
 	}
 	return s, nil
+}
+
+// maxSinceOwner bounds the earlier agent texts a new one is joined to.
+const maxSinceOwner = 8
+
+// joinedAgent checks s joined, a line apart, to the agent texts let
+// through since the owner's last message: KeptSecret if the join is
+// secret-shaped, KeptCode if it is voice-shaped, else "", in which case
+// s joins them. Check and join are one step under agentMu, so two texts
+// at once are each checked against the other.
+func (c *Channel) joinedAgent(s string) string {
+	c.agentMu.Lock()
+	defer c.agentMu.Unlock()
+	if len(c.sinceOwner) > 0 {
+		joined := strings.Join(c.sinceOwner, "\n") + "\n" + s
+		switch {
+		case AgentSecret(joined):
+			return KeptSecret
+		case AgentVoice(joined):
+			return KeptCode
+		}
+	}
+	c.sinceOwner = append(c.sinceOwner, s)
+	if n := len(c.sinceOwner) - maxSinceOwner; n > 0 {
+		c.sinceOwner = append([]string(nil), c.sinceOwner[n:]...)
+	}
+	return ""
+}
+
+// ownerSpoke starts a new run of agent texts: the owner's message ends
+// the one joinedAgent checks against.
+func (c *Channel) ownerSpoke() {
+	c.agentMu.Lock()
+	c.sinceOwner = nil
+	c.agentMu.Unlock()
 }
 
 // AgentSecret reports whether agent text is secret-shaped (SecretShaped)
@@ -378,34 +430,54 @@ func AgentSecret(text string) bool {
 	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
 }
 
-// agentText strips, discloses and checks agent-derived text, prefixes it
-// with AgentPrefix unless it was withheld, and fits it to one text in the
-// encoding it needs, emoji and line breaks kept (CH-12).
+// agentText strips, discloses and checks agent-derived text and fits it
+// to one text in the encoding it needs, emoji and line breaks kept
+// (CH-12). It carries no label (CH-21): the checks run here on every
+// agent text, so none reaches the owner unchecked. Callers pass what
+// checkAgent returned, so its own checks find nothing more; if they did,
+// nothing was kept, so the text says so (CH-19).
 func agentText(text string) string {
-	if text != Hidden && text != HeldCode {
+	if !withheld(text) {
 		if AgentSecret(text) {
 			text = Hidden
 		} else if AgentVoice(text) {
 			holdVoice()
 			text = HeldCode
 		} else {
-			text = AgentPrefix + control.StripControls(text)
+			text = control.StripControls(text)
 		}
 	}
 	return control.FitAgent(text)
 }
 
 // sendCounted counts text toward the hour, sends it to the owner, and
-// uncounts it if the send failed.
-func (c *Channel) sendCounted(text string) error {
-	return c.sendReserved(c.reserve(), text)
+// uncounts it if the send failed. agent says text is the agent's words.
+func (c *Channel) sendCounted(text string, agent bool) error {
+	return c.sendReserved(c.reserve(), text, agent)
 }
 
 // sendReserved sends text, already counted at at, and settles the count.
-func (c *Channel) sendReserved(at time.Time, text string) error {
-	err := c.cfg.Modem.Send(c.cfg.Owner, text)
+func (c *Channel) sendReserved(at time.Time, text string, agent bool) error {
+	var err error
+	if agent {
+		err = c.sendOwner(text)
+	} else {
+		err = c.cfg.Modem.Send(c.cfg.Owner, text)
+	}
 	c.settle(at, err)
 	return err
+}
+
+// sendOwner sends the agent's words to the owner, recorded as the
+// agent's in the texts a reaction may mark (reaction.go), unless text is
+// a withheld text's stand-in, which is the broker's. With no label on
+// agent text, the record, not the words, tells the agent's texts from
+// the broker's.
+func (c *Channel) sendOwner(text string) error {
+	if w, ok := c.cfg.Modem.(watchedLine); ok && !withheld(text) {
+		return w.send(c.cfg.Owner, text, true)
+	}
+	return c.cfg.Modem.Send(c.cfg.Owner, text)
 }
 
 // settle ends the count made at at once its send returned err. A text
@@ -614,7 +686,10 @@ func (c *Channel) releasePaced() error {
 		}
 		at := c.reserveLocked(now)
 		c.mu.Unlock()
-		if err := c.sendReserved(at, text); err != nil {
+		// Agent text goes alone (packHeld), so a text of one held agent
+		// text and no drops is the agent's words.
+		agent := n == 1 && dropped == 0 && agentWords(send[0])
+		if err := c.sendReserved(at, text, agent); err != nil {
 			return err
 		}
 		c.mu.Lock()

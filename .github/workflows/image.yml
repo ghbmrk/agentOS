@@ -72,6 +72,8 @@ on:
       - "broker/clerk/**"
       - "evals/slice-inbox/**"
       - "tests/test_slice_inbox_slice.py"
+env:
+  GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
 permissions:
   contents: read
 # A newer push to the same PR cancels that PR's older run, both builds and every check after them,

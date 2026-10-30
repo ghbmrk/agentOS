@@ -42,9 +42,9 @@ func (l *ledger) Meter(_ int64, _ kernel.Admitted, _ string, amount int64, _ str
 	l.metered = append(l.metered, amount)
 	return nil
 }
-func (*ledger) Hold(int64, string, *key.Refusal) error     { return nil }
-func (*ledger) AdmitPool(int64, string) *key.Refusal       { return nil }
-func (*ledger) ReadPool(int64, string, int64, int64) error { return nil }
+func (*ledger) Hold(int64, string, *key.Refusal) error               { return nil }
+func (*ledger) AdmitPool(int64, string) *key.Refusal                 { return nil }
+func (*ledger) ReadPool(int64, string, []kernel.WindowReading) error { return nil }
 
 func newSealer(t *testing.T) clerk.Sealer {
 	t.Helper()

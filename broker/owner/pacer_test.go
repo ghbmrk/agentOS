@@ -212,7 +212,7 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 		t.Fatalf("agent text sent in quiet hours: %q", got)
 	}
 	h := r.held()
-	if len(h) != 3 || h[1].Text != AgentPrefix+"hello" || h[2].Text != AgentPrefix+"taken back" {
+	if len(h) != 3 || h[1].Text != "hello" || h[2].Text != "taken back" {
 		t.Fatalf("held: %+v", h)
 	}
 
@@ -229,14 +229,14 @@ func TestQuietHoursHoldUpdatesButNotSecurity(t *testing.T) {
 		t.Fatalf("agent text went with only approval urgent: %q", got)
 	}
 	r.ch.NotifyAs(ClassApproval, "taken back")
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"taken back" {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "taken back" {
 		t.Fatalf("NotifyAs(approval) by default: %q", got)
 	}
 
 	// With URGENT agent ON, Notify goes at once and keeps the prefix.
 	r = pacedRig(t, Pacing{QuietFrom: 22 * 60, QuietTo: 7 * 60, Urgent: []Class{ClassAgent}, ApprovalHeld: true}, 23, 0)
 	r.ch.Notify("hello")
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"hello" {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "hello" {
 		t.Fatalf("Notify with URGENT agent: %q", got)
 	}
 	r.ch.NotifyAs(ClassApproval, "taken back")
@@ -476,7 +476,7 @@ func TestApprovalGoesInQuietHoursAndCounts(t *testing.T) {
 		if err := r.ch.NotifyAs(ClassApproval, fmt.Sprintf("approve %d", i)); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+fmt.Sprintf("approve %d", i) {
+		if got := r.sentTexts(); len(got) != 1 || got[0] != fmt.Sprintf("approve %d", i) {
 			t.Fatalf("approval %d in quiet hours: sent %q, held %+v", i, got, r.held())
 		}
 	}
@@ -644,18 +644,18 @@ func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	if got[0] != "(from 23:00) Backup finished." {
 		t.Fatalf("first: %q", got[0])
 	}
-	if !strings.HasPrefix(got[1], AgentPrefix) || strings.Contains(got[1], "Backup") || strings.Contains(got[1], "Disk") {
+	if strings.HasPrefix(got[1], "(from ") || strings.Contains(got[1], "Backup") || strings.Contains(got[1], "Disk") {
 		t.Fatalf("agent text packed with others: %q", got[1])
 	}
 	if got[2] != "(from 23:00) Disk at 40%." {
 		t.Fatalf("third: %q", got[2])
 	}
-	if h := r.held(); len(h) != 1 || h[0].Text != AgentPrefix+"Second agent note." {
+	if h := r.held(); len(h) != 1 || h[0].Text != "Second agent note." {
 		t.Fatalf("held: %+v", h)
 	}
 	r.advance(time.Hour)
 	r.ch.Release()
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Second agent note." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Second agent note." {
 		t.Fatalf("second release: %q", got)
 	}
 
@@ -665,7 +665,7 @@ func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	r.ch.NotifyAs(ClassApproval, probe)
 	r.advance(8 * time.Hour)
 	r.ch.Release()
-	if got := r.sentTexts(); len(got) != 2 || got[0] != "(from 23:00) One." || !strings.HasPrefix(got[1], AgentPrefix) {
+	if got := r.sentTexts(); len(got) != 2 || got[0] != "(from 23:00) One." || strings.HasPrefix(got[1], "(from ") {
 		t.Fatalf("NotifyAs packed: %q", got)
 	}
 }
@@ -771,8 +771,8 @@ func TestNotifyNowSendsAtOnceAndCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.sentTexts()
-	if len(got) != 1 || !strings.HasPrefix(got[0], AgentPrefix) || !strings.Contains(got[0], "Q1 asks") {
-		t.Fatalf("NotifyNow sent %q, want one prefixed text at once", got)
+	if len(got) != 1 || got[0] != "Q1 asks: which time? Answer by 8:30." {
+		t.Fatalf("NotifyNow sent %q, want the text alone at once", got)
 	}
 	if after := r.ch.Allowance(r.clock()); after != before-1 {
 		t.Fatalf("allowance %d after NotifyNow, want %d", after, before-1)
@@ -929,6 +929,7 @@ func TestHeldAgentTextIsReleasedUnmarked(t *testing.T) {
 	// goes alone with no marker added: CH-15 and CH-12 keep it whole.
 	probe := "(from 01:00) Pay the invoice now.\nThanks 👍"
 	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.ucs2 = true
 	r.ch.Inform("Disk at 40%.")
 	r.ch.Notify(probe)
 	r.advance(8 * time.Hour)
@@ -939,7 +940,7 @@ func TestHeldAgentTextIsReleasedUnmarked(t *testing.T) {
 	if len(got) != 2 || got[0] != "(from 23:00) Disk at 40%." {
 		t.Fatalf("released: %q", got)
 	}
-	if want := control.FitAgent(AgentPrefix + probe); got[1] != want {
+	if want := control.FitAgent(probe); got[1] != want {
 		t.Fatalf("agent text: %q, want %q", got[1], want)
 	}
 	if strings.Count(got[1], "(from ") != 1 || strings.Contains(got[1], "23:00") {

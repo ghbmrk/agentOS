@@ -32,6 +32,17 @@ def steps(text):
         yield m.group(2), "\n".join(body)
 
 
+def job_steps(text, job):
+    """Return [(name, step text)] for each step of a top-level job, in order."""
+    m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", text, re.M | re.S)
+    assert m, job
+    out = []
+    for block in re.split(r"^(?=      - )", m.group(1), flags=re.M)[1:]:
+        name = re.match(r"      - (?:uses: \S+\n\s+)?name: (.*)", block)
+        out.append((name.group(1).strip() if name else "", block.rstrip()))
+    return out
+
+
 # CTRL-lane-gate r3 (#1347, Security R3 and L3 on #1583): lane-gate.yml must run only the
 # base's code and fail closed. Every line that is not blank or a whole-line comment must equal
 # this pin, in order, so no edit can add `if:` or `continue-on-error:`, swap the action, point
@@ -278,6 +289,31 @@ class WorkflowTest(unittest.TestCase):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
         self.assertTrue(files)
         return files
+
+    def test_go_builds_ignore_go_work(self):
+        # #4007 Security: Go loads a go.work from the build's directory or any parent, and it
+        # overrides broker/go.mod, go.sum and vendor/, so every Go run in CI and every image
+        # build sets GOWORK=off; sudo drops the environment, so each sudo env sets it again.
+        for wf in sorted(WORKFLOWS.glob("*.yml")):
+            text = wf.read_text()
+            # trusted-base runs Go only through tools/trusted_base.py, which sets GOWORK=off itself.
+            if "actions/setup-go@" not in text or wf.name == "trusted-base.yml":
+                continue
+            with self.subTest(workflow=wf.name):
+                top = text.split("\njobs:", 1)[0].split("\nenv:\n", 1)
+                self.assertEqual(len(top), 2, "no workflow-level env")
+                env = re.findall(r"^  (\w+): *([^#\n]*?) *(?:#.*)?$", top[1].split("\n\n")[0], re.M)
+                self.assertIn(("GOWORK", '"off"'), env)
+                for line in text.splitlines():
+                    if re.search(r"\bsudo\b.*\benv\b.*GOTOOLCHAIN=", line):
+                        self.assertIn(" GOWORK=off ", line)
+        root = WORKFLOWS.parent.parent
+        for script in ("image/build.sh", "image/infer.sh", "image/camdecode.sh", "image/camnode/build.sh"):
+            with self.subTest(script=script):
+                text = (root / script).read_text()
+                head, _, rest = text.partition("\nexport GOWORK=off\n")
+                self.assertTrue(rest, "no export GOWORK=off")
+                self.assertNotIn("go build", head)
 
     def test_actions_are_pinned_by_full_sha(self):
         for f in self.files():
@@ -574,6 +610,18 @@ class WorkflowTest(unittest.TestCase):
         # PREMERGE-wire (#1860): the context the ruleset must require is the one the workflow posts.
         ops = (WORKFLOWS.parent.parent / "docs" / "OPERATING.md").read_text()
         self.assertIn("requires the `premerge` status", ops)
+
+    def test_mutants_job_sets_up_the_canary_sandbox_as_broker_race_does(self):
+        # REV-CHK-mut-userns (#4010): gremlins' coverage run on loops runs the canary-round
+        # test, whose sandbox needs subordinate ids and unprivileged user namespaces (tools/
+        # ASSUMPTIONS.md D13). The mutants job sets them up with broker-race's own step, first.
+        want = "Subordinate ids for the canary sandbox"
+        race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
+        mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), "mutants")
+        names = [n for n, _ in mut]
+        self.assertIn(want, names)
+        self.assertLess(names.index(want), names.index("Gremlins on the package"))
+        self.assertEqual(dict(mut)[want], race[want])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

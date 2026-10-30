@@ -48,7 +48,7 @@ func TestHeldQuestionsShareOneText(t *testing.T) {
 	if len(shared) > MaxRendered || strings.Count(shared, "Reply Q") != MaxPerText || strings.Contains(shared, "Ferry or train?") {
 		t.Fatalf("shared text %q", shared)
 	}
-	for _, want := range []string{"Q101: Ferry at six?", "Q103: Wine or beer?", "Q104: Taxi home?", "by 14:30"} {
+	for _, want := range []string{"Question Q101: Ferry at six?", "Question Q103: Wine or beer?", "Question Q104: Taxi home?", "by 14:30"} {
 		if !strings.Contains(shared, want) {
 			t.Errorf("shared text %q lacks %q", shared, want)
 		}
