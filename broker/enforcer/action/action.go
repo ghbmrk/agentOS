@@ -77,16 +77,25 @@ func Acts() []Act { return []Act{On, Open, Fly, Unlock, Disarm, Off, Arm} }
 // Actuator carries out one verified action: the radio host (slice k), or a
 // driver behind it (slice q, a camera's settings channel), wired by the
 // daemon (slice l). route is empty except for Fly.
+//
+// Act must return within Timeout. The book stops waiting then and reports
+// ErrTimeout, so a hung call cannot hold the policy lock the page takes
+// around Redeem, which the channel's relocks share. An act already sent
+// when the book stops waiting must stay ordered before every later command
+// to the same device (the radio host sends a stack's commands in order on
+// one link), so a relock that lands after a timeout still wins.
 type Actuator interface {
 	Act(device string, a Act, route string) error
 }
 
 // Window is how long a challenge lasts: the short window NET-6 names.
 // MaxLive bounds the challenges held at once, so the Owner network cannot
-// fill the enforcer's memory.
+// fill the enforcer's memory. Timeout bounds one Actuator call, as the
+// radio host bounds one answer.
 const (
 	Window  = 2 * time.Minute
 	MaxLive = 16
+	Timeout = 10 * time.Second
 	maxName = 64
 )
 
@@ -99,9 +108,12 @@ var (
 	ErrMalformed = errors.New("this link is malformed")
 	ErrLimited   = errors.New("too many approvals waiting; wait a minute")
 	ErrGone      = errors.New("this approval has expired or was already used; open the link again")
-	ErrNotOwner  = errors.New("the passkey did not approve this action")
+	ErrNotOwner  = errors.New("your passkey did not approve this action; open the link again and approve with your passkey")
 	ErrMoved     = errors.New("the device changed since this page was drawn; open the link again")
+	ErrTimeout   = errors.New("the device did not answer in time and may still do it; check the device before you open the link again")
 )
+
+var errPanicked = errors.New("action: the actuator failed")
 
 // Challenge is one tap the owner is asked for: one act on one device, good
 // once, until ExpiresMS.
@@ -118,18 +130,24 @@ type Challenge struct {
 // Book holds the live challenges and does each action once, after the
 // owner's assertion. It is safe for concurrent use.
 type Book struct {
-	owner key.PublicKey
-	act   Actuator
-	mu    sync.Mutex
-	live  map[string]Challenge
+	owner   key.PublicKey
+	act     Actuator
+	timeout time.Duration
+	mu      sync.Mutex
+	live    map[string]Challenge
 }
 
-// NewBook returns a book whose actions owner approves and act carries out.
-func NewBook(owner key.PublicKey, act Actuator) (*Book, error) {
-	if owner.Alg() != key.AlgES256 || act == nil {
+// NewBook returns a book whose actions owner approves and act carries out,
+// waiting at most timeout for each: zero means Timeout, and a longer or
+// negative one is refused, so the bound can only be tightened.
+func NewBook(owner key.PublicKey, act Actuator, timeout time.Duration) (*Book, error) {
+	if timeout == 0 {
+		timeout = Timeout
+	}
+	if owner.Alg() != key.AlgES256 || act == nil || timeout < 0 || timeout > Timeout {
 		return nil, errors.New("action: bad config")
 	}
-	return &Book{owner: owner, act: act, live: map[string]Challenge{}}, nil
+	return &Book{owner: owner, act: act, timeout: timeout, live: map[string]Challenge{}}, nil
 }
 
 // Issue draws a challenge for act a on device in doc, the policy in force.
@@ -161,7 +179,8 @@ func (b *Book) Issue(doc policy.Document, device string, a Act, route string, no
 // Redeem spends challenge id, whether or not sig verifies, and, if sig is
 // the owner's assertion over it (key.AssertionSig form), the window has
 // not passed and the device in doc, the policy in force, still takes the
-// act with the class it had, carries the act out at once.
+// act with the class it had, carries the act out at once. It waits for the
+// actuator at most the book's timeout and then returns ErrTimeout.
 func (b *Book) Redeem(doc policy.Document, id string, sig []byte, nowMS int64) (Challenge, error) {
 	b.mu.Lock()
 	c, ok := b.live[id]
@@ -177,10 +196,34 @@ func (b *Book) Redeem(doc policy.Document, id string, sig []byte, nowMS int64) (
 	if dev == nil || dev.Class != c.Class || !Takes(*dev, c.Act) {
 		return Challenge{}, ErrMoved
 	}
-	if err := b.act.Act(c.Device, c.Act, c.Route); err != nil {
+	if err := b.call(c); err != nil {
 		return Challenge{}, err
 	}
 	return c, nil
+}
+
+// call runs the actuator for c and waits for it at most the book's
+// timeout. A call still running then is left to finish on its own; its
+// result is dropped. A panicking actuator is a failed act, not a crash of
+// the enforcer.
+func (b *Book) call(c Challenge) error {
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- errPanicked
+			}
+		}()
+		done <- b.act.Act(c.Device, c.Act, c.Route)
+	}()
+	t := time.NewTimer(b.timeout)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+		return ErrTimeout
+	}
 }
 
 // msg is what the passkey signs: the domain, then the device, its class,

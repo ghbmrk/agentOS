@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,7 +167,7 @@ func device(d policy.Document, id string) policy.Device {
 
 func newBook(t *testing.T, p *phone) (*action.Book, *radio) {
 	r := &radio{}
-	b, err := action.NewBook(p.public(), r)
+	b, err := action.NewBook(p.public(), r, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func TestTurnOnNeedsNamedOnceChallenge(t *testing.T) {
 	}
 
 	// The radio failing: the tap is spent and the failure reported.
-	fb, err := action.NewBook(p.public(), failing{})
+	fb, err := action.NewBook(p.public(), failing{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +405,10 @@ type rig struct {
 	remote netip.Addr
 }
 
-func newRig(t *testing.T) *rig {
+func newRig(t *testing.T) *rig { t.Helper(); return newRigWith(t, nil) }
+
+// newRigWith is newRig with cfg changed by set before the page is made.
+func newRigWith(t *testing.T, set func(*page.Config)) *rig {
 	t.Helper()
 	p := newPhone(t)
 	e, err := policy.Open(p.public(), &memStore{})
@@ -424,13 +428,17 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.s, err = page.New(page.Config{
+	cfg := page.Config{
 		Name: rp, Owner: p.public(),
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		Policy: e, Act: g.r, Cert: cert.Leaf,
 		Now: func() time.Time { return g.now },
-	})
+	}
+	if set != nil {
+		set(&cfg)
+	}
+	g.s, err = page.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,5 +671,135 @@ func TestServedOnlyAtHome(t *testing.T) {
 		if !errors.Is(err, page.ErrConfig) {
 			t.Errorf("page listens on %s: %v", name, err)
 		}
+	}
+}
+
+// NET-4: the action screen tells the owner what to do. It names the
+// window as a length, never as a clock time in a zone the owner must
+// convert, and every refusal of a tap says what to do next.
+func TestActionScreenWording(t *testing.T) {
+	g := newRig(t)
+	link := action.Link(rp, "heater", action.On, "")
+	body, id, ch := g.open(link)
+	if !strings.Contains(body, "within 2 minutes") {
+		t.Fatalf("the screen does not name the window:\n%s", body)
+	}
+	if regexp.MustCompile(`UTC|\d\d:\d\d`).MatchString(body) {
+		t.Fatalf("the screen shows a clock time:\n%s", body)
+	}
+
+	nextStep := func(w *httptest.ResponseRecorder, code int, words ...string) {
+		t.Helper()
+		var res struct{ Error string }
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != code {
+			t.Fatalf("%d %s, want %d", w.Code, w.Body, code)
+		}
+		for _, want := range words {
+			if !strings.Contains(res.Error, want) {
+				t.Errorf("%q does not say %q", res.Error, want)
+			}
+		}
+	}
+	// Another passkey: refused, and told to open the link and approve
+	// with the passkey.
+	nextStep(g.tap("/do", id, ch, newPhone(t)), http.StatusForbidden, "open the link again", "approve with your passkey")
+	// The same challenge again: spent, and told to open the link again.
+	nextStep(g.tap("/do", id, ch, g.p), http.StatusGone, "open the link again")
+	// The device changed under the screen: told to open the link again
+	// (the book's own test holds when it is returned).
+	if !strings.Contains(action.ErrMoved.Error(), "open the link again") {
+		t.Errorf("%q has no next step", action.ErrMoved)
+	}
+	if len(g.r.did) != 0 {
+		t.Fatalf("a refused tap acted: %v", g.r.did)
+	}
+}
+
+// NET-6: opening action links and proposal links are limited on separate
+// counts, so a flood of either from the Owner network cannot delay the
+// other's approval.
+func TestActionLinkLimitIsItsOwn(t *testing.T) {
+	g := newRig(t)
+	plink, err := action.TighteningLink(rp, g.e.Current(), policy.Op{Kind: policy.CutVendorCloud, Device: "cam"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alink := action.Link(rp, "heater", action.On, "")
+	flood := func(link string) {
+		t.Helper()
+		for i := 0; ; i++ {
+			w, _ := g.do(http.MethodGet, link, nil)
+			if w.Code == http.StatusTooManyRequests {
+				if i != page.LinkLimit {
+					t.Fatalf("%s limited after %d, want %d", link, i, page.LinkLimit)
+				}
+				return
+			}
+			if w.Code != http.StatusOK || i > page.LinkLimit {
+				t.Fatalf("%s: %d %s", link, w.Code, w.Body)
+			}
+		}
+	}
+	flood(plink)
+	_, id, ch := g.open(alink) // proposal links spent: an action still opens
+	if w := g.tap("/do", id, ch, g.p); w.Code != http.StatusOK {
+		t.Fatalf("tap: %d %s", w.Code, w.Body)
+	}
+
+	g.now = g.now.Add(page.LinkWindow)
+	flood(alink)
+	g.open(plink) // action links spent: a proposal still opens
+}
+
+// hung is an actuator that does not answer until released.
+type hung struct{ release chan struct{} }
+
+func (h hung) Act(string, action.Act, string) error { <-h.release; return nil }
+
+type panicking struct{}
+
+func (panicking) Act(string, action.Act, string) error { panic("driver bug") }
+
+// NET-6: a hung actuator does not hold the policy lock, which the
+// channel's relocks share, past the book's timeout; the tap is reported as
+// not answered, with what to do next. The bound can only be tightened, and
+// a panicking actuator is a failed act, not a crash.
+func TestHungActuatorReleasesLock(t *testing.T) {
+	h := hung{make(chan struct{})}
+	defer close(h.release)
+	var mu sync.Mutex
+	const bound = 50 * time.Millisecond
+	g := newRigWith(t, func(c *page.Config) { c.Act, c.Lock, c.ActTimeout = h, &mu, bound })
+	_, id, ch := g.open(action.Link(rp, "door", action.Unlock, ""))
+	start := time.Now()
+	w := g.tap("/do", id, ch, g.p)
+	if took := time.Since(start); took > bound+2*time.Second {
+		t.Fatalf("the tap took %v", took)
+	}
+	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "check the device") {
+		t.Fatalf("hung: %d %s", w.Code, w.Body)
+	}
+	if !mu.TryLock() {
+		t.Fatal("the policy lock is still held after the timeout")
+	}
+	mu.Unlock()
+
+	p := newPhone(t)
+	for _, d := range []time.Duration{-time.Second, action.Timeout + time.Nanosecond} {
+		if _, err := action.NewBook(p.public(), &radio{}, d); err == nil {
+			t.Errorf("timeout %v accepted", d)
+		}
+	}
+	if _, err := action.NewBook(p.public(), &radio{}, action.Timeout); err != nil {
+		t.Errorf("timeout %v refused: %v", action.Timeout, err)
+	}
+
+	b, err := action.NewBook(p.public(), panicking{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := b.Issue(home(), "heater", action.On, "", 0)
+	if _, err := b.Redeem(home(), c.ID, p.sign(c.Msg), 1); err == nil {
+		t.Fatal("a panicking actuator reported done")
 	}
 }
