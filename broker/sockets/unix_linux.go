@@ -37,9 +37,10 @@ func fileUID(fi os.FileInfo) (int, bool) {
 	return int(st.Uid), true
 }
 
-// lockDir takes an exclusive lock on dir/.lock for the server's lifetime.
+// lockDir takes an exclusive lock on dir/.lock for the server's lifetime. A
+// link at .lock fails with ELOOP rather than creating or locking its target.
 func lockDir(dir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
