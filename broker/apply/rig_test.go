@@ -266,12 +266,14 @@ func (k kern) Submit(now int64, p kernel.Plan) error {
 }
 
 type rig struct {
-	t     *testing.T
-	clk   *clock
-	act   *activator
-	act0  Activator // the activator the applier uses; nil: act
-	pipe  *pipeline
-	store *update.Store
+	t    *testing.T
+	clk  *clock
+	act  *activator
+	act0 Activator // the activator the applier uses; nil: act
+	pipe *pipeline
+	// stager: the Stager the applier uses; nil: pipe.
+	stager Stager
+	store  *update.Store
 	// mirror: when set, store checks every release the rig makes from it,
 	// so a next release stages too.
 	mirror *updatetest.Mirror
@@ -414,7 +416,11 @@ func (r *rig) restart() {
 	if r.act0 != nil {
 		act = r.act0
 	}
-	a, err := New(Config{Kernel: kern{r}, Key: r.upkey, Holder: r.holder, Pinned: r.pinned, Activator: act, Store: r.store, Pipeline: r.pipe, State: savedState{r},
+	var stager Stager = r.pipe
+	if r.stager != nil {
+		stager = r.stager
+	}
+	a, err := New(Config{Kernel: kern{r}, Key: r.upkey, Holder: r.holder, Pinned: r.pinned, Activator: act, Store: r.store, Pipeline: stager, State: savedState{r},
 		InCall: func() bool { return r.inCall }, Working: r.isWorking,
 		Excluded: func(t time.Time) bool { return r.excluded != nil && r.excluded(t) },
 		LastTalk: func() time.Time { return r.talk },

@@ -34,6 +34,7 @@ UPD-5 (stable soak plus attestations; security fixes auto-staged), UPD-7 (no cen
 - `Trusted func() bool`: the first-boot gate has finished (`firstboot.Gate.Trusted`); until then `Step` does nothing, so first boot keeps its own path (UPD-3, apply A8).
 - `Requalify func(ctx, *update.Verified) (update.Verdict, error)`: UPD-5's local requalification, `(*update.Requalifier).Requalify` (UPD-5r, #4031). Required: the wiring passes a `Requalifier` even when it has no runner, so the ship gate below can never be configured away.
 - `State Store` (its own file, not the applier's), `SoakDays`, `MinPasses` (defaults 7 and 1; `StableReady` clamps them; the owner's way to change them is out of scope).
+- Built with `Zone *time.Location` (the box's zone for the soak date; default `time.Local`). Step 3's pruning keeps a sighting whose image is still offered, so a release held past twice `MaxSoakDays` (as every stable release is until #4032) is not soaked again.
 
 **One `Step`, in order:**
 1. Not `Trusted()`: return. Channel pinned (or unreadable): no `Store.Check`; `Line` is the pinned line; return.
