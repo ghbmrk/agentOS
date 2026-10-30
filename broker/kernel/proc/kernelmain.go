@@ -200,7 +200,7 @@ func (h *Kernel) HoldRecoveryCard(key []byte) {
 	defer h.card.mu.Unlock()
 	clear(h.card.key)
 	h.card.key = nil
-	if len(key) == handoff.RecoveryLen {
+	if len(key) == handoff.CardKeyLen {
 		h.card.key = key
 	}
 }

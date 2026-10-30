@@ -368,8 +368,9 @@ func lockStore(dir string) (func(), error) {
 // backup recipient st holds now ("" for none): it makes a new recovery
 // key and puts it in st's one recovery slot, and its recipient in
 // RecipientEntry, in one write (seal.Store.ReplaceAndPut), and returns the
-// key. Any error changes nothing. Once the recipient has changed the
-// request no longer matches, so it is carried out at most once.
+// new card's bits (handoff.CardKeyLen), from which that key derives. Any
+// error changes nothing. Once the recipient has changed the request no
+// longer matches, so it is carried out at most once.
 func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64) ([]byte, error) {
 	a, err := handoff.VerifyApproval(head, request, now)
 	if err != nil {
@@ -394,15 +395,22 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 	if len(slot) != 1 {
 		return nil, fmt.Errorf("my store holds %d recovery slots, not one", len(slot))
 	}
-	rec := make([]byte, seal.RecoveryLen)
-	rand.Read(rec)
-	next, err := backup.RecipientFor(rec)
+	// The new card's 160 bits, which the page prints; the slot and the
+	// recipient take the key derived from them, as from any card (#3406).
+	bits := make([]byte, handoff.CardKeyLen)
+	rand.Read(bits)
+	rec, err := handoff.StoreRecoveryKey(bits)
+	defer clear(rec)
+	var next backup.Recipient
+	if err == nil {
+		next, err = backup.RecipientFor(rec)
+	}
 	var v []byte
 	if err == nil {
 		v, err = handoff.EncodeRecipient(next.X, next.EK)
 	}
 	if err != nil {
-		clear(rec)
+		clear(bits)
 		return nil, err
 	}
 	// A directory sync that fails after the rename still leaves the new
@@ -410,13 +418,13 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 	// opens the store, so it is handed on.
 	id, err := st.ReplaceAndPut(slot[0], seal.Recovery{Key: rec}, handoff.RecipientEntry, v)
 	if id == "" {
-		clear(rec)
+		clear(bits)
 		return nil, err
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agentos-unlock: the new recovery key is in place; my store's directory sync failed: %v\n", err)
 	}
-	return rec, nil
+	return bits, nil
 }
 
 // storeRecipientID is the ID of the backup recipient st holds, or "" for a
