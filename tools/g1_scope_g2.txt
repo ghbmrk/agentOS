@@ -52,6 +52,10 @@ exempt-pr 4051
 # once #4088 merges.
 exempt-pr 4088
 
+# #4125 (ENF-t, #3702): broker/enforcer/radio/thread/, which the G2 list does not name (D-198).
+# Remove once #4125 merges.
+exempt-pr 4125
+
 # #4122 (ENF-r-follow, #4119): broker/enforcer/devsecret/, page/ and pairseal/, which the G2 list
 # does not name (D-198). Remove once #4122 merges.
 exempt-pr 4122
