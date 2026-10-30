@@ -1,6 +1,6 @@
 package page
 
-// REQ: NET-4, NET-6, NET-2, NET-1
+// REQ: NET-4, NET-6, NET-2, NET-1, NET-7
 
 import (
 	"bytes"
@@ -934,5 +934,37 @@ func TestSafetyListMoveClassLine(t *testing.T) {
 		if name == "onto the list" && !strings.Contains(got, "Record lamp as a plug.") {
 			t.Errorf("%s: the class is not shown: %q", name, got)
 		}
+	}
+}
+
+// NET-7 Freeze: a hold on a lock or an alarm is shown with its risk, one
+// line per hold, and the owner's approval of that screen goes through; a
+// hold on any other device carries no risk line. The policy refuses a diff
+// without the line (policy::TestFreezeIsLoosening).
+func TestHoldOnLockNamesRisk(t *testing.T) {
+	g := newRig(t)
+	next := edit(7, func(d *policy.Document) {
+		d.Holds = []policy.Hold{{Device: "lock", Kind: policy.HoldFirmware}, {Device: "lock", Kind: policy.HoldFix}, {Device: "tv", Kind: policy.HoldFirmware}}
+	})
+	risk := policy.Risk(policy.ClassLock)
+	lines := Describe(home(1), next)
+	if n := strings.Count(strings.Join(lines, "\n"), risk); n != 2 {
+		t.Fatalf("risk shown %d times for two holds on a lock: %q", n, lines)
+	}
+	if !slices.Contains(lines, "Risk of holding back lock's updates: "+risk) {
+		t.Errorf("the risk line does not name the lock: %q", lines)
+	}
+	if strings.Contains(strings.Join(lines, "\n"), "tv's updates") {
+		t.Errorf("a risk line for an everyday device: %q", lines)
+	}
+	body, id, ch := g.open(next, "")
+	if !strings.Contains(body, template_escape(risk)) {
+		t.Errorf("the screen lacks the risk:\n%s", body)
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	if p := g.e.Pending(); len(p) != 1 || strings.Count(string(p[0].Diff), risk) != 2 {
+		t.Fatalf("pending: %+v", p)
 	}
 }
