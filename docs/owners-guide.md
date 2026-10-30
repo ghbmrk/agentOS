@@ -6,11 +6,20 @@ This guide answers common questions about your box. This part covers your PC and
 
 agentOS runs entirely from its own drive. It does not open, change, or repair your PC's own disks, and it does not set your PC's clock. When you take the drive out and start the PC again, the PC is as it was, apart from the few small things listed below.
 
-Many PCs start from the drive by themselves, with no screen or keyboard. If the box's Wi-Fi does not appear a few minutes after you turn the PC on, the PC did not start from the drive. Then use its one-time boot key; you'll need a screen and keyboard for that one start: turn the PC on, press its boot key a few times until a menu appears, then choose the USB drive. The back of your card lists the boot key for each major PC brand. This choice lasts for one start only.
+Many PCs start from the drive by themselves, with no screen or keyboard. If the box's Wi-Fi does not appear a few minutes after you turn the PC on, the PC did not start from the drive. Then use its one-time boot key; you'll need a screen and keyboard for that one start: turn the PC on, press its boot key a few times until a menu appears, then choose the USB drive. The back of your card lists the boot key for each major PC brand. This choice lasts for one start only. If the boot menu does not offer the USB drive either, check your PC against "Which PCs can run agentOS" below.
 
 You never need to change your PC's settings, and you never need to turn Secure Boot off.
 
 You can give agentOS one of the PC's internal disks for more space, on the box's Wi-Fi page, under Settings > Storage. Everything on that disk is erased first, and the box asks you to confirm. Until you do that, no internal disk is used.
+
+## Which PCs can run agentOS
+
+agentOS starts on most recent Windows PCs. These are the kinds of PC it can and cannot run on:
+
+- <!-- host: supported --> **PCs with an Intel or AMD processor and current start-up firmware (UEFI, the program that starts a PC before Windows),** which covers most Windows 10 and 11 PCs sold in about the last ten years.
+- <!-- host: unsupported windows-on-arm --> **Windows laptops with an ARM processor, such as Snapdragon models.** agentOS cannot run on them: their processor cannot run its start-up program.
+- <!-- host: unsupported pre-uefi --> **Older PCs whose start-up firmware predates UEFI (sometimes called "legacy BIOS" only).** agentOS cannot run on them: their firmware cannot find its start-up program.
+- <!-- host: unsupported mac --> **Macs, with an Intel or Apple processor.** agentOS does not support them.
 
 ## What agentOS changes on your PC
 

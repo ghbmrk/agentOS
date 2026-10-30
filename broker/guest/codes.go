@@ -54,6 +54,11 @@ var codes = set(
 	"renumbered", "no-move", "no-trash-folder", "no-poster", "bad-flag", "no-uidnext",
 	"bad-unsubscribe-url", "egress-refused", "post-not-sent", "gmail-not-sent",
 
+	// broker/clerk/line.
+	"unavailable", "planner-number", "not-a-contact", "not-owner-fixed", "needs-contact",
+	"own-number", "not-a-number", "cancelled", "not-taken", "provider-refused",
+	"may-have-been-sent",
+
 	// broker/browser and broker/follow/followclerk.
 	"unapproved", "verb", "owner", "malformed",
 )

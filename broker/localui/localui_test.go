@@ -819,8 +819,8 @@ func TestAllSetText(t *testing.T) {
 		if n, gsm := modem.Segments(s); !gsm || n > 3 {
 			t.Fatalf("breaks CH-12: %d segments: %q", n, s)
 		}
-		if !strings.HasSuffix(s, "HELP for commands.") || strings.Count(s, "\n") != 4 {
-			t.Fatalf("not three examples and HELP: %q", s)
+		if !strings.HasSuffix(s, "HELP for commands.\n"+CodeLine) || strings.Count(s, "\n") != 5 || strings.Count(s, CodeLine) != 1 {
+			t.Fatalf("not three examples, HELP and the code line once: %q", s)
 		}
 		for _, c := range conn {
 			if !strings.Contains(s, accountExamples[c]) {

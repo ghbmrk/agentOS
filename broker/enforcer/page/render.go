@@ -43,6 +43,7 @@ func Describe(old, next policy.Document) []string {
 				add("Let %s's command %s apply at once, with no passkey.", d.ID, d.Secure)
 			}
 			add("Label %s %s.", d.ID, labelWords(d.Label))
+			describePorts(policy.Device{ID: d.ID}, d, add)
 			continue
 		}
 		describeDevice(*o, d, add)
@@ -128,6 +129,8 @@ func clone(d policy.Document) policy.Document {
 	d.Devices = slices.Clone(d.Devices)
 	for i := range d.Devices {
 		d.Devices[i].Allow = slices.Clone(d.Devices[i].Allow)
+		d.Devices[i].Control = slices.Clone(d.Devices[i].Control)
+		d.Devices[i].Stream = slices.Clone(d.Devices[i].Stream)
 	}
 	d.Pairs = slices.Clone(d.Pairs)
 	d.Standing = slices.Clone(d.Standing)
@@ -191,7 +194,37 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	if o.Label != d.Label {
 		add("Label %s %s, not %s.", d.ID, labelWords(d.Label), labelWords(o.Label))
 	}
+	describePorts(o, d, add)
 }
+
+// describePorts is each control and stream port d opens or closes against
+// o (NET-2 Device paths, Cameras and microphones).
+func describePorts(o, d policy.Device, add func(string, ...any)) {
+	for _, p := range portsMinus(d.Control, o.Control) {
+		add("Open %s's control port %s: agentOS may reach it there while it is an everyday device.", d.ID, portWords(p))
+	}
+	for _, p := range portsMinus(o.Control, d.Control) {
+		add("Close %s's control port %s.", d.ID, portWords(p))
+	}
+	for _, p := range portsMinus(d.Stream, o.Stream) {
+		add("Let agentOS receive %s's video or audio on %s, while it has no vendor cloud.", d.ID, portWords(p))
+	}
+	for _, p := range portsMinus(o.Stream, d.Stream) {
+		add("Stop agentOS receiving %s's video or audio on %s.", d.ID, portWords(p))
+	}
+}
+
+func portsMinus(a, b []policy.Port) []policy.Port {
+	var out []policy.Port
+	for _, p := range a {
+		if !slices.Contains(b, p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func portWords(p policy.Port) string { return p.Proto + " " + strconv.Itoa(int(p.Num)) }
 
 func none(s string) string {
 	if s == "" {
