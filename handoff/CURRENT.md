@@ -41,11 +41,17 @@ Written by sub A (this project's Decisions thread) at Mark's request, so sub B c
 - #3974 (MIG-4-exit c2, codecheck): L3 plus the Potency subagent in cmsg_01R91wiieBzMSvPKFsAJVvuK5aZ8Udnq4egyzZ1p6kjaBF, Security in cmsg_01R91wiieBzMSvPKFsAJVvuK9hpTCZHXVK3unJfvyoK8V5. The UX accept carries over.
 - #3971: all accepts are in, and its builder merges it on green.
 - The UPD-5 requalification rebuild: PR #4033 from builder cmsg_01R91wiieBzMSvPKFsAJVvuK5TAT5R2Wi7aY1LczS1GghE (its reviews are sub B's step 1).
-- The waste-sweep process PR: bookkeeping folded into its causing PRs, bot-committed renders, briefs inside build PRs, merge-clean allowlists, automatic decision IDs, and the review-shape wording.
+- The waste-sweep process PR: fixes (d) to (f) and the one-review-thread wording, as one gate-file PR, so it needs a Security accept, which is sub B's to start. Fixes (a) and (b) wait on Mark's call about retiring G2.
 
 **Sub B, in this order**
 1. **Reviews sub A can't start.** First: **#4033** (UPD-5 re-test rebuild plus the ship gate, issue #4031, head 472a5a34 at writing). It is tier A but not a gate-file PR, so it needs one L3+lens thread and one Security thread. Its gate lifts only once the sandbox runner (#4032) is done, so #4032 is the next build row. Then: For every open PR whose latest verdict comment lists a review owed, run one L3+lens thread and, where tier A or `premerge.py --needs-mark` requires, one Security thread. The last accept arms (CLAUDE.md).
-2. **Idle PRs with no owner:** #3949, #3973, #3976, #3991 (idle 8 to 11 hours). Take each over or close it with its row requeued (D-098). #4003 waits on an `image.yml` fix. #4023, #4025, #4027 and #4028 are follow-ups.
+2. **Idle PRs with no owner**, blockers as of 11:00Z (take each over or close it with its row requeued, D-098):
+   - #3949: every review accepts, but CI's `checks` job is red. It needs a builder fix.
+   - #3973: needs a merge from main, then a Security review.
+   - #3976: `g1-freeze` is red because it has no D-198 exempt-pr companion. A Security delta is owed at 41911480.
+   - #3991: needs a merge from main, and a Security delta is owed at 8f8e8d7.
+   - #4003: a UX and Potency delta is owed at 048c81a. Its `mutgate` (about 16 survivors in `disk_linux.go`), `checks` and `broker-race` jobs are red, and a Security accept is still owed.
+   - Follow-ups: #4023, #4025, #4027, #4028.
 3. **Deletion rows (D-245), where scope is disjoint from open PRs:** MIG-4-adapters b to h (#2579 slices; briefs/MIG-4-adapters.md), MIG-4-mail (briefs/MIG-4-mail.md: delete `broker/mail/`), MIG-4-spend (`broker/verb`, `broker/meter`), the MIG-4-untrusted-* chain (`cmd/agentosd`, `broker/daemon`, `change`), and MIG-4-exit c3, p and d1. Exit d2 waits on #3974, and MIG-4-keys and MIG-4-log come last (MIG-4-log needs Opus). Kernel-lane rows still run one at a time across both subs.
 4. **New-capability lanes, each in its own directory and so parallel-safe:**
    - ENF-c, f, g, i, l to t and names (`broker/enforcer/`, `image/enforcer/`; briefs/ENF.md; ENF-h and ENF-k are building);
