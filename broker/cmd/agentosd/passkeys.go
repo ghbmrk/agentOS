@@ -44,9 +44,13 @@ type passkeys struct {
 	K    passkeyKernel
 	RPID string
 	Now  func() time.Time
+	// Tell texts the owner (alertOwner, never held): each phone passkey
+	// this agentosd enrols is announced once (#3228).
+	Tell func(string) error
 
 	mu      sync.Mutex
 	pending map[string]pendingKey // by page session
+	told    map[key.PublicKey]bool
 
 	// waiting, when set (tests only), is called as a Finish starts waiting
 	// for the one under way on its point.
@@ -66,8 +70,57 @@ type finishing struct {
 	err  error // set before done is closed
 }
 
-func newPasskeys(k passkeyKernel, rpID string) *passkeys {
-	return &passkeys{K: k, RPID: rpID, Now: time.Now, pending: map[string]pendingKey{}}
+func newPasskeys(k passkeyKernel, rpID string, tell func(string) error) *passkeys {
+	return &passkeys{K: k, RPID: rpID, Now: time.Now, Tell: tell, pending: map[string]pendingKey{}, told: map[key.PublicKey]bool{}}
+}
+
+// enrolledNotice is the owner's notice of a phone passkey enrolled by the
+// hardware key by (#3228): a compromised page could put its own point
+// under the owner's tap, so the owner sees every key added and can cut off
+// one they did not add. The fingerprints' groups are joined by dashes: a
+// 4-digit group beside "key" reads as a code to the owner channel's filter
+// (owner.CodeShaped, CH-19), which would hold the notice back, while one
+// 14-character word does not.
+func enrolledNotice(pk, by key.PublicKey) string {
+	return "A phone passkey was added: " + noticePrint(pk) + ", approved by hardware key " + noticePrint(by) +
+		". If you didn't add it, cut it off on the passkey page."
+}
+
+// noticePrint is fingerprint with its groups joined by dashes.
+func noticePrint(pk key.PublicKey) string {
+	return strings.ReplaceAll(fingerprint(pk), " ", "-")
+}
+
+// LogPasskeyUntold is logged when an enrolment's notice could not be sent.
+const LogPasskeyUntold = "passkeys: a passkey was enrolled but the owner could not be told"
+
+// announce tells the owner once that pk is live under by.
+func (p *passkeys) announce(pk, by key.PublicKey) {
+	p.mu.Lock()
+	if p.told[pk] {
+		p.mu.Unlock()
+		return
+	}
+	p.told[pk] = true
+	p.mu.Unlock()
+	if p.Tell == nil || p.Tell(enrolledNotice(pk, by)) != nil {
+		log.Print(LogPasskeyUntold)
+	}
+}
+
+// announceIfLive announces pk when the kernel's log holds it live: an
+// Enroll whose answer was lost, or refused because an earlier one landed,
+// may still have enrolled it.
+func (p *passkeys) announceIfLive(ctx context.Context, pk key.PublicKey) {
+	_, live, _, err := p.keys(ctx)
+	if err != nil {
+		return
+	}
+	for _, e := range live {
+		if e.Passkey == pk {
+			p.announce(pk, e.By)
+		}
+	}
 }
 
 // passkeyCode maps the kernel's answer to the page's fixed codes; no
@@ -273,6 +326,11 @@ func (p *passkeys) finish(ctx context.Context, pk key.PublicKey, authData, clien
 		return true, sockets.Code(localapi.ErrPasskeyUnavailable)
 	}
 	err = p.K.Enroll(ctx, key.Enrollment{Passkey: pk, By: by, Sig: canon})
+	if err == nil {
+		p.announce(pk, by)
+	} else {
+		p.announceIfLive(ctx, pk)
+	}
 	var r kernelsock.Refused
 	answered := err == nil || errors.As(err, &r) || errors.Is(err, kernelsock.ErrSetupOnly) || errors.Is(err, kernelsock.ErrAnchor)
 	return answered, passkeyCode(err, localapi.ErrPasskeyRefused)
