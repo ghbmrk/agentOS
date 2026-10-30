@@ -643,7 +643,7 @@ func TestKeepHoldsBackTheSweep(t *testing.T) {
 	if r.s.Add(testID, time.Hour) == nil {
 		t.Fatal("the failing slot was taken")
 	}
-	if err := r.s.Keep(testID); err != nil {
+	if err := r.s.Keep(testID, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.s.Sweep(); err != nil {
@@ -658,7 +658,7 @@ func TestKeepHoldsBackTheSweep(t *testing.T) {
 	if r.s.Frame(testID, video()) == nil {
 		t.Fatal("a frame for a kept camera was taken")
 	}
-	if r.s.Keep("Not An ID") == nil {
+	if r.s.Keep("Not An ID", time.Hour) == nil {
 		t.Fatal("a malformed name was kept")
 	}
 	if err := r.s.Erase(testID); err != nil {
@@ -675,5 +675,87 @@ func TestKeepHoldsBackTheSweep(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.dir, testID)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("an erased camera stayed kept")
+	}
+}
+
+// REQ: DEV-7
+// TestKeptCameraExpires (#4064): a kept camera's segments still expire at
+// its retention: the sweep deletes those past it by name, keeps those
+// within it, and never touches the camera's key or removes its directory.
+// A kept camera with no retention keeps nothing on disk.
+func TestKeptCameraExpires(t *testing.T) {
+	r := newStoreRig(t, nil)
+	for _, id := range []string{testID, "garage"} {
+		r.s.Add(id, time.Hour)
+		r.feed(t, id, 3, time.Second)
+	}
+	r.s.Flush()
+	r.open(t, nil) // a restart whose Adds fail: both are kept
+	if err := r.s.Keep(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Keep("garage", 0); err != nil {
+		t.Fatal(err)
+	}
+	porch, garage := filepath.Join(r.dir, testID), filepath.Join(r.dir, "garage")
+	if err := os.WriteFile(filepath.Join(porch, "x"+tmpExt), []byte("torn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	des, _ := os.ReadDir(porch)
+	if len(des) != 1 || !strings.HasSuffix(des[0].Name(), segExt) {
+		t.Fatalf("within its retention, a kept camera's directory holds %v", des)
+	}
+	if des, err := os.ReadDir(garage); err != nil || len(des) != 0 {
+		t.Fatalf("a kept camera with no retention kept %v, %v", des, err)
+	}
+	r.clk.add(30 * 24 * time.Hour)
+	if err := r.s.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if des, err := os.ReadDir(porch); err != nil || len(des) != 0 {
+		t.Fatalf("a kept camera's segment outlived its retention: %v, %v", des, err)
+	}
+	for _, id := range []string{testID, "garage"} {
+		if !r.secrets.Has(SegmentSlots + id) {
+			t.Fatalf("the sweep erased kept camera %s's key", id)
+		}
+	}
+	if !strings.Contains(r.log.all(), "camera porch: 1 segments deleted at the end of their retention (kept camera)") {
+		t.Fatalf("log:\n%s", r.log.all())
+	}
+	if r.s.Keep(testID, -1) != ErrRetention || r.s.Keep(testID, MaxRetention+1) != ErrRetention {
+		t.Fatal("a bad retention was kept")
+	}
+}
+
+// REQ: DEV-7, DEV-10
+// TestAddTakesAKeptCamera (#4065): a camera Add takes is never kept, and
+// a kept camera a later Add takes (its slot retried) is swept by its new
+// retention only: the kept one's sweep ends with the Add.
+func TestAddTakesAKeptCamera(t *testing.T) {
+	r := newStoreRig(t, nil)
+	if err := r.s.Add(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if r.s.Keep(testID, 0) != ErrNode {
+		t.Fatal("an added camera was kept")
+	}
+	r.open(t, nil)
+	if err := r.s.Keep(testID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Add(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	r.feed(t, testID, 3, time.Second)
+	r.s.Flush()
+	if err := r.s.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.segments(t, testID)) != 1 {
+		t.Fatal("the kept retention's sweep went on after the Add")
 	}
 }

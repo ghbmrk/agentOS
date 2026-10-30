@@ -15,6 +15,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -829,8 +830,12 @@ func (b *box) redial(id string) {
 }
 
 // #3967: a capture turn-on whose apply fails (the clerk does not hold the
-// camera: its decoder refused it at start) leaves the record, the file
-// and the clerk's gate at the old mode, and opens no stream.
+// camera: its decoder refused it at start) leaves the record and the file
+// at the old mode, and starts no stream runner. The clerk's gate is not
+// read here: the clerk does not hold the camera, so no gate could open,
+// and the turn-on's only failing call is its first, so nothing changed
+// (#4065; CAM-host-10). The re-pin rollback tests below pin a rollback
+// that undoes a changed clerk.
 func TestCaptureFailedApplyRollsBack(t *testing.T) {
 	b := newBox(t)
 	if err := b.h.connect(b.rec("porch", "off", 0)); err != nil {
@@ -858,10 +863,11 @@ func TestCaptureFailedApplyRollsBack(t *testing.T) {
 	if st, err := load(b.dir); err != nil || st.Cameras[0].Capture != "off" {
 		t.Fatalf("the file kept the new mode: %+v, %v", st, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	if err := b.h.clerk.Run(ctx, "porch"); err == nil || b.node.dials.Load() != 0 {
-		t.Fatalf("the clerk's gate opened after a failed turn-on: %v, %d dials", err, b.node.dials.Load())
+	b.h.mu.Lock()
+	ran := b.h.runs["porch"] != nil
+	b.h.mu.Unlock()
+	if ran {
+		t.Fatal("a failed turn-on started a stream runner")
 	}
 }
 
@@ -1023,4 +1029,101 @@ func slicesHas(segs []camera.Segment, name string) bool {
 		}
 	}
 	return false
+}
+
+// flakySlot is a sealer that cannot seal one sealed slot while fail is
+// set, as a slot that fails for a while.
+type flakySlot struct {
+	clerk.Sealer
+	slot string
+	fail *atomic.Bool
+}
+
+func (s flakySlot) Seal(plain, aad []byte) ([]byte, error) {
+	if s.fail.Load() && bytes.HasSuffix(aad, []byte("/"+s.slot)) {
+		return nil, errors.New("the slot fails")
+	}
+	return s.Sealer.Seal(plain, aad)
+}
+
+// pinned reports whether the guard lets the clerk reach addr.
+func (b *box) pinned(addr string) bool {
+	ap := netip.MustParseAddrPort(addr)
+	ctx := netguard.WithPurpose(context.Background(), netguard.PurposeDevice)
+	return b.h.guard.Check(ctx, ap.Addr(), ap.Port(), "tcp") == nil
+}
+
+// #4064, #4065: a camera whose sealed slot fails at start is never pinned
+// or run, its capture still expires at its retention while its key and
+// directory stay, its STATUS line says a disconnect erases what it kept,
+// and once the slot works again a sweep's retry takes it back: pinned,
+// streaming and shown as connected, with no restart and no disconnect.
+func TestBrokenSlotRetried(t *testing.T) {
+	b := newBox(t)
+	if err := b.h.connect(b.rec("porch", "continuous", 1)); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "frames", func() bool { return b.feed.n("porch") >= 4 })
+	b.halt()
+	porchDir := filepath.Join(b.dir, "capture", "porch")
+	if des, err := os.ReadDir(porchDir); err != nil || len(des) == 0 {
+		t.Fatalf("no segment: %v", err)
+	}
+	sec, _ := run.OpenSecrets(b.dir, b.sealer)
+	if err := sec.Remove(camera.SegmentSlots + "porch"); err != nil {
+		t.Fatal(err)
+	}
+	fail := &atomic.Bool{}
+	fail.Store(true)
+	b.sealer = flakySlot{b.sealer, camera.SegmentSlots + "porch", fail}
+	sec, err := run.OpenSecrets(b.dir, b.sealer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.feed = newFeed()
+	b.h, err = newHostWith(b.dir, sec, b.node.connect, b.log.add, func(func(string, camera.Kind)) (decoder, error) { return b.feed, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := b.h.start(ctx); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	// The pin and run guards, before any sweep can retry it.
+	if b.pinned(camAddr) {
+		t.Fatal("the broken camera was pinned")
+	}
+	b.h.mu.Lock()
+	b.h.run(b.h.st.Cameras[0])
+	ran := b.h.runs["porch"] != nil
+	b.h.mu.Unlock()
+	if ran {
+		t.Fatal("the broken camera's stream was started")
+	}
+	want := "camera porch: refused: its capture store did not open, retried each minute; its capture is kept 1s, then deleted; disconnecting it on the local page erases that capture now"
+	if !strings.Contains(b.status(), want) {
+		t.Fatalf("STATUS:\n%s", b.status())
+	}
+	done := make(chan struct{})
+	go func() { b.h.tick(ctx, 20*time.Millisecond); close(done) }()
+	b.cancel, b.done = cancel, done
+	waitFor(t, "the broken camera's capture to expire", func() bool {
+		des, err := os.ReadDir(porchDir)
+		return err == nil && len(des) == 0
+	})
+	if b.feed.n("porch") != 0 || b.pinned(camAddr) {
+		t.Fatal("the broken camera was connected while its slot failed")
+	}
+	fail.Store(false)
+	waitFor(t, "the retried camera to stream", func() bool { return b.feed.n("porch") > 0 })
+	if !b.pinned(camAddr) {
+		t.Fatal("the retried camera is not pinned")
+	}
+	if s := b.status(); strings.Contains(s, "refused") || !strings.Contains(s, "camera porch: capture continuous, kept 1s") {
+		t.Fatalf("STATUS:\n%s", s)
+	}
+	if err := b.h.setCapture("porch", "off"); err != nil {
+		t.Fatalf("a change on the retried camera was refused: %v", err)
+	}
 }
