@@ -285,3 +285,42 @@ func TestKeepAtTheHoldsEndFoldsToNothing(t *testing.T) {
 		t.Fatalf("a keep at the hold's end folded: %v, %d dropped", ids, dropped)
 	}
 }
+
+// KRN-7: a keep anchors, so a log rolled back past it, which would let the
+// cancelled drop go live, is caught at boot.
+func TestRollbackPastAKeepIsCaught(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.AddSecurityCase(1, secCase("a")))
+	must(t, r.k.DropSecurityCase(2, "a", key.Approve(r.owner.pass, kernel.SecurityDropHash(0, "a"))))
+	before := len(r.store.B)
+	must(t, r.k.KeepSecurityCase(3, "a"))
+	r.store.B = r.store.B[:before]
+	l, err := kernel.Open(cfg(r))
+	if err == nil {
+		_, err = kernel.Boot(l, r.anchors(), nil, 4)
+	}
+	if err == nil {
+		t.Fatal("a log rolled back past a keep opened")
+	}
+}
+
+// KRN-7: an added case anchors, so a case logged with the anchor down is
+// reported as not done, and a log rolled back past one is caught at boot.
+func TestAddedCaseAnchors(t *testing.T) {
+	r := newRig(t)
+	r.anchor.down = true
+	if err := r.k.AddSecurityCase(1, secCase("a")); err == nil {
+		t.Fatal("a case added with the anchor down reported done")
+	}
+	r.anchor.down = false
+	before := len(r.store.B)
+	must(t, r.k.AddSecurityCase(2, secCase("b")))
+	r.store.B = r.store.B[:before]
+	l, err := kernel.Open(cfg(r))
+	if err == nil {
+		_, err = kernel.Boot(l, r.anchors(), nil, 3)
+	}
+	if err == nil {
+		t.Fatal("a log rolled back past a case opened")
+	}
+}

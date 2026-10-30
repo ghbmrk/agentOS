@@ -27,8 +27,9 @@ const (
 )
 
 // Bounds on a case, so the suite's share of the kernel's memory is bounded
-// (at most MaxSecurityCases × (MaxSecurityInput + MaxSecurityExpect)) while
-// a minimized case still fits. A full suite refuses a case, never drops one.
+// while a minimized case still fits: at most MaxSecurityCases live cases,
+// plus the cases the owner dropped, which the log keeps and each of which
+// cost a passkey tap and a hold. A full suite refuses a case, never drops one.
 const (
 	MaxSecurityCases  = 4096
 	MaxSecurityID     = 128
@@ -111,13 +112,13 @@ func (k *Kernel) DropSecurityCase(now int64, id string, by key.Cosign) error {
 }
 
 // KeepSecurityCase cancels a drop of id still in its hold, at the owner's
-// word: it narrows.
+// word: it narrows, but it anchors, so a log rolled back past it cannot let
+// the drop go live (KRN-7).
 func (k *Kernel) KeepSecurityCase(now int64, id string) error {
 	if d, ok := k.s.sec.drops[id]; !ok || now >= d.From {
 		return ErrSecurityKeep
 	}
-	_, err := k.emit(now, TSecurityKept, securityKept{id})
-	return err
+	return k.owner(now, TSecurityKept, securityKept{id})
 }
 
 // SecuritySuite is the suite at now: its live cases, in the order added, and
