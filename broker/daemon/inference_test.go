@@ -130,14 +130,14 @@ var netOK = map[string]allowance{
 			"syscall.MS_NOSUID", "syscall.MS_PRIVATE", "syscall.Mount", "syscall.O_CLOEXEC", "syscall.O_DIRECTORY",
 			"syscall.O_RDONLY", "syscall.Open", "syscall.SysProcAttr", "syscall.Unmount"}},
 	// Per-machine disk quotas (RES-4, SR2-3).
-	"quota": {"quotactl_fd and FS_IOC_FS[GS]ETXATTR on the machines' directories; capget/capset to drop CAP_SYS_RESOURCE on one thread; O_NOFOLLOW to tag a tree without following links; no network client",
+	"quota": {"quotactl_fd and FS_IOC_FS[GS]ETXATTR on the machines' directories; capget/capset to drop CAP_SYS_RESOURCE on one thread; O_NOFOLLOW to tag a tree without following links, and O_DIRECTORY|O_NOFOLLOW to open a directory refusing a link or FIFO (REV-CHK-links, #3945); no network client",
 		[]string{"golang.org/x/sys/unix.CAP_SYS_RESOURCE", "golang.org/x/sys/unix.CapUserData", "golang.org/x/sys/unix.CapUserHeader",
 			"golang.org/x/sys/unix.Capget", "golang.org/x/sys/unix.Capset", "golang.org/x/sys/unix.LINUX_CAPABILITY_VERSION_3",
 			"golang.org/x/sys/unix.SYS_IOCTL", "golang.org/x/sys/unix.SYS_QUOTACTL_FD", "golang.org/x/sys/unix.Syscall", "golang.org/x/sys/unix.Syscall6",
-			"syscall.O_NOFOLLOW"}},
+			"syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
 	// The box clock check (P2-9, W9 links it for question deadlines).
-	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; no network client",
-		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex"}},
+	"clock": {"read-only adjtimex (is NTP synced) and CLOCK_BOOTTIME; O_NOFOLLOW on its state and sysfs reads (REV-CHK-links, #3945); no network client",
+		[]string{"golang.org/x/sys/unix.Adjtimex", "golang.org/x/sys/unix.CLOCK_BOOTTIME", "golang.org/x/sys/unix.ClockGettime", "golang.org/x/sys/unix.STA_UNSYNC", "golang.org/x/sys/unix.TIME_ERROR", "golang.org/x/sys/unix.Timespec", "golang.org/x/sys/unix.Timex", "syscall.O_NOFOLLOW"}},
 	// The probe runner starts its children in a process group of their own
 	// and kills the group on cancel (#515 Security 1).
 	"probecmd": {"its probe children's own process group", []string{"syscall.SysProcAttr"}},
@@ -175,6 +175,10 @@ var netOK = map[string]allowance{
 		[]string{"syscall.Fstat", "syscall.S_IFIFO", "syscall.S_IFMT", "syscall.Stat_t"}},
 	// RES-5: wraps a machine socket's listener so each open connection holds budget; never listens or dials.
 	"inflight": {"wraps a caller's listener, budgeting its open connections", []string{"net.Conn", "net.ErrClosed", "net.Listener"}},
+	// Root-side reads that refuse a link planted at the path (REV-CHK-links, #3945).
+	"backup": {"O_NOFOLLOW on key-table reads and the target directory's sync open, with O_DIRECTORY; no network client", []string{"syscall.O_DIRECTORY", "syscall.O_NOFOLLOW"}},
+	"follow": {"O_NOFOLLOW on the pending-alert read; no network client", []string{"syscall.O_NOFOLLOW"}},
+	"meter":  {"O_NOFOLLOW on the meter state's read; no network client", []string{"syscall.O_NOFOLLOW"}},
 }
 
 // escapeOK are the broker packages in the graph allowed an escape hatch

@@ -19,9 +19,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # Builds never download a Go toolchain: setup-go installs the one go.mod's
 # toolchain line names (setup-go's go-version-file reads only the go line),
-# each job checks it, and an offline build fails rather than fetch one.
+# each job checks it, and an offline build fails rather than fetch one. GOWORK=off: a
+# go.work in the repo cannot override broker/go.mod, go.sum or vendor/ (#4007 Security).
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 # Every job has a 30-minute timeout: a whole run takes about 4 minutes, and a
 # hung job would otherwise hold one of the few runners for GitHub's 6h default.
 # A records-only change (CI-docs; the set is tools/ci_scope.py's) runs only the document
@@ -439,7 +441,7 @@ jobs:
           # step fails unless every root-gated test of these packages passed with no skip in it or its
           # subtests (#3541); other tests may skip by design (a quota file system the host lacks).
           rc=0
-          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -json ./cgroup ./quota/... ./vm/... ./recovery > /tmp/machine-test.json || rc=$?
@@ -451,7 +453,7 @@ jobs:
           # Their tests skip off root or without the cgroup, so the step fails on
           # any skip and unless the leaf and OOM tests passed (INFER-CI-2).
           rc=0
-          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -json ./infer/... ./vision/... > /tmp/infer-test.json || rc=$?
           python3 -I ../tools/require_ran.py --gated ./infer/... ./vision/... < /tmp/infer-test.json \
@@ -461,7 +463,7 @@ jobs:
             github.com/ghbmrk/agentos/broker/vision/supervise.TestVisionOOMStaysInLeaf || exit 1
           [ "$rc" -eq 0 ]
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
       - name: agentosd calls the kernel as the owner side (#2682)
         # As agentosd.service runs: root with no_new_privs. Each call takes the owner side's uid on
@@ -469,7 +471,7 @@ jobs:
         working-directory: broker
         run: |
           rc=0
-          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             go test -count=1 -json -run '^(TestSpeaksTheKernelsWire|TestOnlyTheKernelsUIDIsCalled|TestNoThreadKeepsTheOwnerSidesUID)$' \
             ./owner/kernelsock > /tmp/kernelsock-test.json || rc=$?
           python3 -I ../tools/require_ran.py < /tmp/kernelsock-test.json \
@@ -483,7 +485,7 @@ jobs:
         working-directory: broker
         run: |
           rc=0
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             go test -count=1 -json -run '^TestRealMailClerkAsRoot$' ./cmd/agentos-clerk-mail > /tmp/clerk-mail-test.json || rc=$?
           python3 -I ../tools/require_ran.py < /tmp/clerk-mail-test.json \
             github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail.TestRealMailClerkAsRoot || exit 1
@@ -502,7 +504,7 @@ jobs:
           fail=0
           while read -r pkg pat names <&3; do
             rc=0
-            sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+            sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
               AGENTOS_REQUIRE_SWTPM=1 \
               go test -count=1 -json -run "$pat" "$pkg" > "$RUNNER_TEMP/root-test.json" || rc=$?
             # shellcheck disable=SC2086 # names is a space-separated list of test names
@@ -518,7 +520,7 @@ jobs:
           # With no_new_privs, as agentosd.service runs runsc (L7-6).
           cd broker
           rc=0
-          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_OPENCLAW_ROOTFS=/tmp/ocroot \
             go test -count=1 -json -run '^TestIntegrationOpenClawGuest$' ./e2e > /tmp/openclaw-test.json || rc=$?
           python3 -I ../tools/require_ran.py < /tmp/openclaw-test.json \
@@ -532,11 +534,11 @@ jobs:
         # on a workspace owned by an unmapped uid, and bwrap cannot create the .git mount point.
         run: |
           sudo apt-get update -q && sudo apt-get install -y -q libcap-dev
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             sh guest/codex/build-rootfs.sh /tmp/cxroot
           cd broker
           rc=0
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CODEX_ROOTFS=/tmp/cxroot \
             go test -count=1 -json -run '^TestIntegrationCodexContainment$' ./e2e > /tmp/codex-test.json || rc=$?
           python3 -I ../tools/require_ran.py < /tmp/codex-test.json \
@@ -547,7 +549,7 @@ jobs:
         working-directory: broker
         run: |
           rc=0
-          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \
+          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
             AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \
             go test -count=1 -json -timeout 20m ./floor > /tmp/floor-test.json || rc=$?
           python3 -I ../tools/require_ran.py --gated ./floor < /tmp/floor-test.json || exit 1

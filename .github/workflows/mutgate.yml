@@ -2,8 +2,9 @@ name: mutgate
 # REV-CHK-mut (#3899, briefs/REV-CHK.md): the MUT-tierA gate (tools/mutgate.py, #1814) on every
 # pull request. A PR that adds a `REQ:` marker in a tier-A broker package fails when gremlins
 # finds a LIVED mutant on a line the PR adds there: the tests run that line but do not check it.
-# Gremlins runs only on those packages (`mutgate.py claimed`), one job each; a PR that claims
-# none runs no gremlins and passes. The `mutgate` job is the one result to read.
+# Gremlins runs only on those packages (`mutgate.py claimed`), one job each, and only on the lines
+# the PR adds (`run --git`): the only lines the gate reads. A PR that claims none runs no gremlins
+# and passes. The `mutgate` job is the one result to read.
 on:
   pull_request:
 permissions:
@@ -13,6 +14,7 @@ concurrency:
   cancel-in-progress: true
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 jobs:
   claimed:
     runs-on: ubuntu-latest
@@ -95,7 +97,7 @@ jobs:
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}
-        run: python3 -I tools/mutgate.py run "$PKG" --out mutants
+        run: python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"
       - name: Survivors
         run: python3 -I tools/mutgate.py report mutants
       - name: Gate (MUT-tierA)

@@ -178,6 +178,9 @@ class Claimed(unittest.TestCase):
             pkg.mkdir(parents=True)
             (pkg / "a.go").write_text("package netguard\n")
             (pkg / "a_test.go").write_text("package netguard\n// REQ: CRED-1\n")
+            # A `-diff` attribute must not hide the marker as a binary file (L3 on #4026).
+            (pkg / ".gitattributes").write_text("*.go -diff\n")
+            (pkg / "blob.bin").write_bytes(b"\xbb\xff\n")  # not UTF-8, as broker/ already tracks
             (pathlib.Path(d) / "docs").mkdir()
             (pathlib.Path(d) / "docs" / "x.md").write_text("REQ: CRED-1\n")
             git("add", "-A")
@@ -276,6 +279,62 @@ class Shape(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             self.assertTrue((pathlib.Path(d) / "rel" / "hint.json").exists())
 
+    def test_skipped_added_reads_only_skips_on_lines_the_gate_reads(self):
+        added = mutgate.added_lines(DIFF)[0]
+        data = {"files": [
+            {"file_name": "hint.go", "mutations": [{"status": "SKIPPED", "line": 11},
+                                                   {"status": "SKIPPED", "line": 40},
+                                                   {"status": "KILLED", "line": 12}]},
+            {"file_name": "hint_test.go", "mutations": [{"status": "SKIPPED", "line": 2}]},
+        ]}
+        self.assertEqual(mutgate.skipped_added(data, "hint", added), [("hint.go", 11)])
+        self.assertEqual(mutgate.skipped_added(data, "mail", added), [])
+
+    def run_diff_stub(self, skipped_line):
+        """mutgate.py run --git in a temp repo whose last commit adds hint.go lines 2-3, with a stub
+        gremlins that records its cwd, argv and git config and reports a SKIPPED mutant on skipped_line."""
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+            shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+            pkg = pathlib.Path(d) / "broker" / "hint"
+            pkg.mkdir(parents=True)
+            (pkg / "hint.go").write_text("package hint\n")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            (pkg / "hint.go").write_text("package hint\nvar a = 1 + 1\nvar b = 2 + 2\n")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+            stub = pathlib.Path(d) / "bin"
+            stub.mkdir()
+            out = json.dumps({"files": [{"file_name": "hint.go", "mutations": [
+                {"status": "SKIPPED", "line": skipped_line}, {"status": "KILLED", "line": 2}]}], "mutants_lived": 0})
+            (stub / "gremlins").write_text(
+                f"#!/bin/sh\n{{ pwd; echo \"$*\"; git diff --merge-base \"$4\"; }} > \"{d}/seen\"\n"
+                f"while [ \"$1\" != -o ]; do shift; done\nprintf '%s' '{out}' > \"$2\"\n")
+            (stub / "gremlins").chmod(0o755)
+            env = {"PATH": f"{stub}:/usr/bin:/bin"}
+            r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "run", "hint",
+                                "--git", "HEAD~1", "--out", str(pathlib.Path(d) / "out")],
+                               capture_output=True, text=True, env=env)
+            return r, (pathlib.Path(d) / "seen").read_text().replace(d, "D")
+
+    def test_run_with_git_mutates_only_added_lines_and_fails_on_a_skip_there(self):
+        # Gremlins runs in the package directory with -D BASE, and its `git diff` names files as
+        # its mutants do (relative to the package) with one exact hunk per added run (no context).
+        r, seen = self.run_diff_stub(skipped_line=1)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        cwd, argv, diff = seen.split("\n", 2)
+        self.assertEqual(pathlib.Path(cwd).name, "hint")
+        self.assertTrue(argv.endswith("/broker/hint -D HEAD~1 -o D/out/hint.json"), argv)
+        self.assertIn("+++ b/hint.go\n@@ -1,0 +2,2 @@", diff)
+        self.assertNotIn("\n package hint\n", diff)  # no context line
+        # A mutant gremlins skipped on a line the gate reads fails the run, not the gate empty.
+        r, _ = self.run_diff_stub(skipped_line=3)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("gremlins skipped mutants on lines this diff adds in broker/hint/: [('hint.go', 3)]", r.stderr)
+
 
 def job(text, name):
     """The body of job `name` in a workflow's jobs: block."""
@@ -308,7 +367,7 @@ class Workflow(unittest.TestCase):
         self.assertIn("if: ${{ needs.claimed.outputs.packages != '[]' }}", mutants)
         self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
         self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
-        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants', mutants)
+        self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"', mutants)
         self.assertIn('python3 -I tools/mutgate.py gate mutants --git "$BASE"', mutants)
         self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
         self.assertIn("gremlins@v0.6.0", mutants)

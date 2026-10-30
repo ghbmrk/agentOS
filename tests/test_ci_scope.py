@@ -200,6 +200,7 @@ CI_PREAMBLE_LINES = [
     "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
     'env:',
     '  GOTOOLCHAIN: local',
+    '  GOWORK: "off"',
 ]
 
 # The machines job from its header through "Machine tests as root" (INFER-CI-2), pinned line by
@@ -254,7 +255,7 @@ MACHINES_LINES = [
     '        run: |',
     '          sudo mkdir /sys/fs/cgroup/agentos-ci',
     '          rc=0',
-    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
     '            AGENTOS_REQUIRE_QUOTA=1 \\',
     '            go test -count=1 -json ./cgroup ./quota/... ./vm/... ./recovery > /tmp/machine-test.json || rc=$?',
@@ -262,7 +263,7 @@ MACHINES_LINES = [
     '            < /tmp/machine-test.json || exit 1',
     '          [ "$rc" -eq 0 ]',
     '          rc=0',
-    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\',
+    '          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\',
     '            AGENTOS_CGROUP_PARENT=/sys/fs/cgroup/agentos-ci \\',
     '            go test -count=1 -json ./infer/... ./vision/... > /tmp/infer-test.json || rc=$?',
     '          python3 -I ../tools/require_ran.py --gated ./infer/... ./vision/... < /tmp/infer-test.json \\',
@@ -271,7 +272,7 @@ MACHINES_LINES = [
     '            github.com/ghbmrk/agentos/broker/vision/supervise.TestVisionRunsInInferenceLeaf \\',
     '            github.com/ghbmrk/agentos/broker/vision/supervise.TestVisionOOMStaysInLeaf || exit 1',
     '          [ "$rc" -eq 0 ]',
-    '          sudo env "PATH=$PATH" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \\',
+    '          sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \\',
     "            go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd",
 ]
 
@@ -561,7 +562,7 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(machines_problems(ci), [])
         step = "      - name: Machine tests as root\n        working-directory: broker\n        run: |\n"
         rc0 = "          rc=0\n"
-        go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
+        go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
         run = "          python3 -I ../tools/require_ran.py"
         rc = '          [ "$rc" -eq 0 ]\n'
         nxt = "      - name: agentosd calls the kernel as the owner side"

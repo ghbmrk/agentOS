@@ -65,6 +65,15 @@ class RiskTierTest(unittest.TestCase):
                 self.assertEqual(rt.tier_of(path)[0], want)
 
     # RT-1a (briefs/RT-1.md; a local ID with no SPEC row, so no REQ marker)
+    def test_go_workspace_files_are_a_anywhere(self):
+        # #4007 Security: Go loads a go.work from the build's directory or any parent,
+        # and it overrides broker/go.mod, go.sum and vendor/, so it is supply chain.
+        for d in ("", "broker/", "broker/test/", "tests/", "tools/", "docs/", "spikes/S1/"):
+            for name in ("go.work", "go.work.sum"):
+                with self.subTest(path=d + name):
+                    self.assertEqual(rt.tier_of(d + name), ("A", name))
+        self.assertEqual(rt.tier_of_change(["docs/a.md", "go.work"]), ("A", ["go.work"]))
+
     def test_image_ci_and_guest_build_paths_are_a(self):
         # Each path brief RT-1 lists under "Today", at the tier RT-1a gives it.
         paths = [
