@@ -224,37 +224,48 @@ func (s *State) SecurityTexts() []SecurityText {
 func (d *trips) held() bool { return d.stopped || len(d.paused) > 0 }
 
 // tripOf is the trip plan p is, or nil: pure over the state, so Admit, the
-// trip entry decide logs after it, and Rederive agree (KRN-6). The checks run
-// in order: a honey key, a table value in the steps, a table destination.
+// trip entry decide logs after it, and Rederive agree (KRN-6). A table value
+// that needs the full response gives it whatever else the plan cites (KRN-12);
+// otherwise the first of a honey key, a table value in the steps and a table
+// destination names the session-only trip.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
 	if !d.set {
 		return nil
 	}
-	t := &Trip{Exit: ExitKernel, Plan: p.ID, Response: RespSession}
+	var hit *Trip
 	ky := key.Key{Root: p.Key.Root}
 	for i := 0; i <= len(p.Key.Links); i++ {
 		ky.Links = p.Key.Links[:i]
 		if id, ok := d.honey[ky.Tip()]; ok {
-			t.Cause, t.Entry, t.Session = CauseHoneyKey, id, key.TaskOf(p.Key)
-			return t
+			hit = &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: key.TaskOf(p.Key)}
+			break
 		}
 	}
+	session := ""
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err == nil {
-		t.Session = v.Limits.Task
+		session = v.Limits.Task
+	} else if hit != nil {
+		session = hit.Session
 	}
 	steps, _ := json.Marshal(p.Steps)
-	if r := d.m.Scan(append([]byte(p.ID+"\n"), steps...)); len(r.Trips) > 0 {
-		t.Cause, t.Entry = CauseValue, r.Trips[0]
-		if pl := d.entries[t.Entry].Place; t.Session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
-			t.Response, t.Session = RespFull, ""
+	for _, id := range d.m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
+		if pl := d.entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
+			t := &Trip{Cause: CauseValue, Exit: ExitKernel, Entry: id, Response: RespFull, Plan: p.ID}
 			if err == nil {
 				t.Scopes = v.Scopes()
 			}
+			return t
 		}
-		return t
+		if hit == nil {
+			hit = &Trip{Cause: CauseValue, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: session}
+		}
 	}
+	if hit != nil {
+		return hit
+	}
+	t := &Trip{Exit: ExitKernel, Plan: p.ID, Response: RespSession, Session: session}
 	for _, st := range p.Steps {
 		names := make([]string, 0, len(st.Args))
 		for n := range st.Args {
@@ -320,9 +331,9 @@ func (d *trips) tripOK(t Trip) bool {
 	}
 	switch t.Response {
 	case RespSession:
-		return len(t.Scopes) == 0
+		return t.Plan != "" && len(t.Scopes) == 0
 	case RespFull:
-		return t.Session == ""
+		return t.Plan != "" && t.Session == ""
 	case RespCall:
 		return t.Exit != ExitKernel && t.Session == "" && len(t.Scopes) == 0 && t.Plan == ""
 	}

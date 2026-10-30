@@ -122,18 +122,21 @@ func TestHoneyKeyTripsSessionOnly(t *testing.T) {
 }
 
 // A fetched page that makes a planner name the metadata address or the
-// decoy range refuses that step and stops only that session (KRN-12
+// decoy range, in any form that carries an IPv4 address, zoned or not, refuses that step and stops only that session (KRN-12
 // Response). Catches an injected page stopping the box.
 func TestHostilePageDecoyDestinationStopsSessionOnly(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
 	rng := entry(t, tb, decoy.PSandboxEnv).Dest
-	for i, dest := range []string{
+	dests := []string{
 		"http://169.254.169.254/latest/meta-data/iam/security-credentials/",
 		"https://[::ffff:" + rng.String() + "]:8443/",
 		"[64:ff9b::" + rng.String() + "]:22",
 		rng.String(),
-	} {
+		"http://[64:ff9b::a9fe:a9fe%25eth0]/latest/meta-data/",
+		"http://[2002:a9fe:a9fe::1]/",
+	}
+	for i, dest := range dests {
 		s1, s2 := "a"+string(rune('0'+i)), "b"+string(rune('0'+i))
 		must(t, r.k.OpenTask(int64(i), s1))
 		must(t, r.k.OpenTask(int64(i), s2))
@@ -151,7 +154,7 @@ func TestHostilePageDecoyDestinationStopsSessionOnly(t *testing.T) {
 	// is resolved.
 	must(t, r.k.OpenTask(9, "c"))
 	r.plan("fine", r.serve("c"), st(key.Organize, "https://169.254.169.254.example/"), st(key.Organize, "8.8.8.8"))
-	if r.status("fine") != kernel.SActive || len(r.k.State().Trips()) != 4 {
+	if r.status("fine") != kernel.SActive || len(r.k.State().Trips()) != len(dests) {
 		t.Fatalf("a public address or a name tripped: %s", r.status("fine"))
 	}
 }
@@ -357,4 +360,64 @@ func TestTripEntryBounds(t *testing.T) {
 		}
 		must(t, r.k.ResumeTrip(2, key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))))
 	}
+}
+
+// A plan that cites decoys of different weights gets the strongest response
+// any of them needs: a host value beside a sandbox value or a honey key is
+// the full response, and a honey key beside a sandbox value stays
+// session-only (KRN-12 Response). Catches a weaker decoy listed first
+// masking a breach.
+func TestStrongestDecoyResponseWins(t *testing.T) {
+	// A sandbox value then a host value, from a planner session.
+	r := newRig(t)
+	tb := r.decoys()
+	sandbox, host := entry(t, tb, decoy.PSandboxEnv), entry(t, tb, decoy.PHostDotfile)
+	must(t, r.k.OpenTask(0, "t1"))
+	r.plan("p1", r.serve("t1"), st(key.Trash, sandbox.Value), st(key.Trash, host.Value))
+	if tr := r.trips(1); tr.Response != kernel.RespFull || tr.Entry == entryIndex(t, tb, sandbox) || len(tr.Scopes) == 0 {
+		t.Fatalf("sandbox then host value: trip %+v", tr)
+	}
+	if !r.k.State().Tripped() {
+		t.Fatal("planning not stopped")
+	}
+
+	// A honey key with a host value, and with a sandbox value.
+	for i, c := range []struct {
+		value string
+		full  bool
+	}{{host.Value, true}, {sandbox.Value, false}} {
+		r := newRig(t)
+		tb := r.decoys()
+		must(t, r.k.OpenTask(0, "t1"))
+		must(t, r.k.OpenTask(0, "t2"))
+		var honey key.Key
+		must(t, json.Unmarshal([]byte(entry(t, tb, decoy.PPlannerView).Value), &honey))
+		issuer := key.Ed25519Signer(ed25519.NewKeyFromSeed(honeySeed[:ed25519.SeedSize]))
+		intruder := gen(40)
+		hk, err := key.ClerkKey(honey, issuer, intruder.pub, 0, 1<<20, key.LimitTask("t1"))
+		must(t, err)
+		must(t, r.k.Submit(1, kernel.SignPlan(kernel.Plan{ID: "h", Key: hk, Steps: []kernel.PlanStep{st(key.Trash, c.value)}}, intruder.priv)))
+		tr := r.trips(1)
+		switch {
+		case c.full && (tr.Response != kernel.RespFull || tr.Cause != kernel.CauseValue || !r.k.State().Tripped()):
+			t.Fatalf("%d: honey key and host value: trip %+v", i, tr)
+		case !c.full && (tr.Response != kernel.RespSession || tr.Cause != kernel.CauseHoneyKey || tr.Session != "t1"):
+			t.Fatalf("%d: honey key and sandbox value: trip %+v", i, tr)
+		}
+		if !c.full {
+			r.sessionOnly("t1", "t2", 2)
+		}
+	}
+}
+
+// entryIndex is e's index in tb.
+func entryIndex(t *testing.T, tb decoy.Table, e decoy.Entry) int {
+	t.Helper()
+	for i, x := range tb.Entries() {
+		if x == e {
+			return i
+		}
+	}
+	t.Fatal("no such entry")
+	return -1
 }

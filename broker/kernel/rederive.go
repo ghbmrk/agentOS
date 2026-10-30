@@ -130,13 +130,14 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		}
 		return nil, true
 	case TTrip:
-		_ = json.Unmarshal(e.Body, &ref)
-		if ref.Plan == "" {
-			return nil, false // an exit's report (CallTrip)
+		var t Trip
+		_ = json.Unmarshal(e.Body, &t)
+		if t.Plan == "" {
+			return nil, t.Response != RespCall // only an exit's report (CallTrip) is an input
 		}
-		if p := s.Plans[ref.Plan]; p != nil && p.Status == SRejected && p.Reject == CTrip {
-			if t := s.tripOf(p.Plan); t != nil {
-				return []derived{entry(TTrip, *t)}, true
+		if p := s.Plans[t.Plan]; p != nil && p.Status == SRejected && p.Reject == CTrip {
+			if d := s.tripOf(p.Plan); d != nil {
+				return []derived{entry(TTrip, *d)}, true
 			}
 		}
 		return nil, true
