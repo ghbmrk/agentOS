@@ -66,7 +66,7 @@ Work item #4045. Written 2026-10-30 against main at 55a15c74 (after #4099).
 
 **Acceptance tests:**
 - `broker/kernel/suite_test.go`: `TestSecurityCasesAreLogData`, `TestSecurityCaseShapeAndIDsNeverReused`, `TestFullSecuritySuiteRefusesAndDropsNothing`, `TestSecurityDropNeedsTheOwnersPasskey`, `TestSecurityDropWaitsTheHold`, `TestKeepCancelsADropAndItsSignatureNeverReplays`, `TestRevokedPasskeyCancelsItsDropInTheHold`, `TestUnanchoredSecurityDropDoesNotSurviveARestart`, `TestSecurityCaseIDAlphabetEdges`, `TestEachDropMovesTheNumber`, `TestKeepAtTheHoldsEndFoldsToNothing`, `TestRollbackPastAKeepIsCaught`, `TestAddedCaseAnchors`.
-- `broker/vm/requal/security_test.go`: `TestShippedInjectionTestsAreTheSecuritySuite` (at least one case), `TestSecurityGraderIsStructural`, `TestSecuritySuiteWithoutALogFailsClosed`, `TestRequalifyOnTheSuiteInTheLog`, `TestNegativeDropCountIsAnError`, `TestATakenCorpusNameDoesNotBlockTheRealCase`, `TestRepeatsKey`.
+- `broker/vm/requal/security_test.go`: `TestShippedInjectionTestsAreTheSecuritySuite` (at least one case), `TestSecurityGraderIsStructural`, `TestSecuritySuiteWithoutALogFailsClosed`, `TestRequalifyOnTheSuiteInTheLog`, `TestNegativeDropCountIsAnError`, `TestATakenCorpusNameDoesNotBlockTheRealCase`, `TestRepeatsKey`, `TestB64WindowIsAllTheCanarySets`.
 - `broker/update/requal_test.go`: `TestOwnerDroppedSecurityCasesKeepTheFloor`.
 
 **Scope:** `broker/kernel/suite.go`, `suite_test.go`, `state.go`, `rederive.go`, `ASSUMPTIONS.md`; `broker/vm/requal/requal.go`, `security.go`, `security_test.go`, `ASSUMPTIONS.md`; `broker/update/requal.go`, `requal_test.go`, `ASSUMPTIONS.md`; this brief. The kernel adds no import.

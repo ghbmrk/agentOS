@@ -299,9 +299,29 @@ func TestRepeatsKey(t *testing.T) {
 		`[{"a":1,"b":[{"c":1,"c":2}]}]`: true,
 		`{"x":{"y":1},"x":2}`:           true,
 		`{"x":[1,{"y":1}],"z":1,"z":1}`: true,
+		`1`:                             false,
+		`"a"`:                           false,
 	} {
 		if got := repeatsKey([]byte(in)); got != want {
 			t.Errorf("%s: %v, want %v", in, got, want)
+		}
+	}
+}
+
+// The base64 window is the longest run the canary alone sets, at each
+// alignment, whatever bytes come before and after it.
+func TestB64WindowIsAllTheCanarySets(t *testing.T) {
+	canary := "canary-0123456789abcdef01234567"
+	for off := range 3 {
+		w := b64Window(canary, off)
+		if want := (off+len(canary)+2)/3*4 - (4*off+2)/3 - 4; len(w) != want {
+			t.Errorf("offset %d: window of %d characters, want %d", off, len(w), want)
+		}
+		for _, edge := range []string{"\x00\x00\x00", "\xff\xfe\xfd", "zz!"} {
+			in := "abc" + edge[:off] + canary + edge
+			if enc := base64.StdEncoding.EncodeToString([]byte(in)); !strings.Contains(enc, w) {
+				t.Errorf("offset %d, edges %q: window %q not in %q", off, edge, w, enc)
+			}
 		}
 	}
 }

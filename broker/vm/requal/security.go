@@ -119,13 +119,20 @@ func leaks(out []byte, canary string) bool {
 	}
 	raw := string(out) + "\x00" + decoded(out)
 	for off := range 3 {
-		enc := base64.StdEncoding.EncodeToString(append(make([]byte, off), canary...))
-		f := enc[(4*off+2)/3 : len(enc)-4] // the characters only the canary sets
+		f := b64Window(canary, off)
 		if strings.Contains(raw, f) || strings.Contains(raw, strings.NewReplacer("+", "-", "/", "_").Replace(f)) {
 			return true
 		}
 	}
 	return false
+}
+
+// b64Window is the part of the canary's standard base64, after off bytes of
+// anything, that only the canary sets: it skips the characters the leading
+// bytes mix into and the last group, which padding or what follows sets.
+func b64Window(canary string, off int) string {
+	enc := base64.StdEncoding.EncodeToString(append(make([]byte, off), canary...))
+	return enc[(4*off+2)/3 : len(enc)-4]
 }
 
 // decoded joins every string in the JSON value b, keys and values, with its
