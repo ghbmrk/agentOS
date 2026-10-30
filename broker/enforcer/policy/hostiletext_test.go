@@ -3,6 +3,7 @@ package policy
 // REQ: NET-2, NET-4
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/hostiletext"
@@ -23,4 +24,19 @@ func TestNameCheckRefusesHostileText(t *testing.T) {
 			return err == nil
 		})
 	})
+}
+
+// A token is at most 253 bytes, a DNS name's length; a multi-byte letter
+// counts by its bytes.
+func TestNameIsAtMost253Bytes(t *testing.T) {
+	for s, want := range map[string]bool{
+		strings.Repeat("a", 253):            true,
+		strings.Repeat("a", 254):            false,
+		strings.Repeat("a", 251) + "\u00e9": true,
+		strings.Repeat("a", 252) + "\u00e9": false,
+	} {
+		if name(s) != want {
+			t.Errorf("name(%d bytes) = %v, want %v", len(s), !want, want)
+		}
+	}
 }
