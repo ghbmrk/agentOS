@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-kernel/anchor"
@@ -1473,5 +1474,101 @@ func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
 	}
 	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != seal.RecoveryLen {
 		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery != nil)
+	}
+}
+
+// REQ: CH-4, CLK-1, STO-2
+// MIG-4-exit-c2: at each boot the unlock step hands the checker the store's
+// code seed, sealed under the checker's clerk key, in a file only root
+// reads, so the kernel, which gets the key and not the file, never holds
+// the seed, and the kernel's hand-off is unchanged. A store with no seed
+// removes an earlier boot's file; a directory others can reach gets none,
+// and the kernel still starts.
+// Revert mutant: seal under "mail"'s key (the checker then opens nothing).
+func TestUnlockHandsTheCheckerItsSeed(t *testing.T) {
+	r := newRig(t, true)
+	path := filepath.Join(r.dir, "checker-seed", "seed")
+	seed := []byte("synthetic-code-seed-01")
+	edit := func(f func(st *seal.Store)) {
+		st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
+		must(t, err)
+		f(st)
+		st.Close()
+	}
+	var root [32]byte
+	edit(func(st *seal.Store) {
+		v, err := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: seed, Step: 42})
+		must(t, err)
+		must(t, st.Put(handoff.CheckerSeedEntry, v))
+		root, err = st.ClerkRoot()
+		must(t, err)
+	})
+	handed := func() handoff.KernelKeys {
+		t.Helper()
+		r.reboot()
+		role := r.role(&r.policy.PublicKey, r.anchor)
+		c := role.Config()
+		c.checkerSeed = path
+		b, err := unlock(c, role.pins)
+		must(t, err)
+		defer clear(b)
+		for i := 0; i+8 <= len(seed); i++ {
+			if bytes.Contains(b, seed[i:i+8]) {
+				t.Fatal("the kernel's hand-off holds the seed")
+			}
+		}
+		pr, pw, err := os.Pipe()
+		must(t, err)
+		_, err = pw.Write(b)
+		must(t, err)
+		pw.Close()
+		k, err := handoff.ReadKeys(pr)
+		must(t, err)
+		return k
+	}
+	if k := handed(); k.ClerkRoot != root {
+		t.Fatal("the hand-off's clerk root is not the store's")
+	}
+	blob, err := os.ReadFile(path)
+	must(t, err)
+	fi, err := os.Stat(path)
+	must(t, err)
+	if fi.Mode().Perm() != 0o600 || fi.Sys().(*syscall.Stat_t).Uid != uint32(os.Geteuid()) {
+		t.Fatalf("the seed file is %v, owned by %d", fi.Mode(), fi.Sys().(*syscall.Stat_t).Uid)
+	}
+	if bytes.Contains(blob, seed[:8]) {
+		t.Fatal("the seed file holds the seed in the clear")
+	}
+	ck, err := clerkkey.Derive(&root, handoff.CheckerName)
+	must(t, err)
+	sealer, err := ck.Sealer()
+	must(t, err)
+	got, err := handoff.OpenCodeSeed(sealer, blob)
+	if err != nil || !bytes.Equal(got.Seed, seed) || got.Step != 42 {
+		t.Fatalf("the checker's key opens %+v, %v", got, err)
+	}
+	mk, _ := clerkkey.Derive(&root, "mail")
+	ms, _ := mk.Sealer()
+	if _, err := handoff.OpenCodeSeed(ms, blob); err == nil {
+		t.Fatal("another clerk's key opens the seed")
+	}
+
+	// A store with no seed leaves no earlier boot's file.
+	edit(func(st *seal.Store) { must(t, st.Delete(handoff.CheckerSeedEntry)) })
+	handed()
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a store with no seed left a file: %v", err)
+	}
+	// A directory others can reach gets none, and the kernel still starts.
+	edit(func(st *seal.Store) {
+		v, _ := handoff.EncodeCodeSeed(handoff.CodeSeed{Seed: seed})
+		must(t, st.Put(handoff.CheckerSeedEntry, v))
+	})
+	must(t, os.Chmod(filepath.Dir(path), 0o755))
+	if k := handed(); k.ClerkRoot != root {
+		t.Fatal("a refused seed file changed the hand-off")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a seed file in a directory others can read: %v", err)
 	}
 }
