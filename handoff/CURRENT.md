@@ -21,51 +21,52 @@ Read this first, on either subscription (both are equal peers, OPERATING §7; D-
 - **D-122** Phone custody (#1843): an app login on a box-owned dedicated phone is broker custody only if the phone has no SIM, is not on the owner's number, every commit tap is gated by the approval tiers, and it is never the approval phone (CH-4).
 - Chat layout: standing threads Decisions, Questions, PR updates, Alerts; finished threads are resolved at once. Project memory may be off, so durable state lives in the repo.
 
-## 3. Snapshot, 2026-10-25 11:45Z (step 4 under way; for sub A on its return)
-Sub A paused on 2026-10-22 (#2578, comments 6340104703 and 6340351358). This is what sub B (the other project) did and learned since then that lives only in its chat. The rest is on the issues and PRs linked here. Recheck each line against GitHub before acting on it.
+## 3. Snapshot, 2026-10-30 11:10Z (for sub B, starting fresh; sub A is out of thread starts)
+Written by sub A (this project's Decisions thread) at Mark's request, so sub B can work at full parallel speed the moment its usage resets. GitHub overrides any line here that differs from it.
 
-**Lanes, from Mark in chat**
-- On 2026-10-22, sub B took the step-4 untrusted ports and the rows sub A handed off. On 2026-10-23, Mark widened that to any sub A row that fits in one session (#2578, 6365422670).
-- On 2026-10-25 at 11:14Z, Mark said sub A is back, and sub B keeps taking queued rows, sub A's included, unless they overlap ("you have usage they will be wasted if not used"; #2578, 6396935897). Each sub skips any row the other has claimed and any file scope an open PR touches (D-111). Kernel-lane rows (#2525) run one at a time across both subs. Claim with `state:building` plus a comment naming the branch. Every session posts as `ghbmrk`, so a label alone doesn't show which sub claimed a row; the claim comment does.
+**Why sub B takes over starts.** Sub A's account used 500 of its 500 daily thread starts (each PR cost a builder plus about four review threads). Its threads already running continue, but it cannot start a new builder or reviewer until the count resets. Mark, 2026-10-29 and 2026-10-30: use all usage on work that isn't wasteful, ignore usage pacing, avoid conflicts and duplicates, and move to the other sub when one runs out. The temporary split, sub A on this repo and sub B on agentos-private, is off: sub B works here too and keeps agentos-private.
 
-**Merged from sub A's rows since the pause** (details on each issue)
-- STO-2 sealed store and keeper: #2905 (STO-2c), #2998 (restart), #3073 (rundir). Open follow-ups: #2995 and #2987.
-- #2682: its start-up slice merged as #3072. The rest is queued and yours (hand-off comment 6394347971).
-- Inbox: #2681, #2618, #2601, #2602, #2603 and #2604. Process: #2644, #2720 and #2697. Kernel: #2838 (KEY-spend-parent) and #2989 KEY-oracle-1. In #2989 Mark chose "Rust plus over time": the Rust checker and the formal model stay, and the Go reference model is retired.
-- Deletes: #2575 (replay) and #2781 (forget). `cmd/agentosd` chain: #2783 a and b (#3077, #3080), 2784a (#3090) and #2778 (#3093).
-- Decision rows: D-149 to D-161, read in DECISIONS.md. D-159 means trusted-core growth that builds an approved design needs no card, only full reviews and a cited decision.
+**Rules new since the 2026-10-25 snapshot** (DECISIONS.md is authoritative)
+- **D-245 deletion first.** Among startable rows, start the ones that delete old-core code, and the rows that unblock them, before new features. The coordinator reports the old core's remaining lines (`tools/trace.py` old-core measures) to Mark weekly.
+- **Review shape (Mark's tap 2026-10-30, wording PR pending, see below).** One review thread per PR: it runs L3 and spawns the UX/Potency lens screen as a fresh-context subagent that never sees L3's reasoning. Security stays its own fresh thread. Delta re-reviews take the same shape. Use it now.
+- **UPD-7w (#3961), Mark's tap 2026-10-30.** #3468 deletes the change engine. UPD-5's local requalification is rebuilt as the very next row, and no stable release goes to an owner box until it is back (a ship gate).
+- D-227 to D-244: second line deleted then rebuilt with keeper filters (D-238), OpenWrt One AP (D-228), one Apache-2.0 embedding model (D-230), enforcer with no language runtime (D-231), short-lived codes and erase tombstones (D-239), checker rebuilt as `broker/clerk/codecheck` (D-244).
 
-**Taps not yet on main**
-- Decisions card cmsg_01R91wiieBzMSvPKFsAJVvuKNMSJeYDwU83rpMEZjXrtfi, 11:36Z: "Yes, #3078 and #3079" (stop generation on RESUME, plus the RETRY line's first-tried time and currency). The D-162 row is PR #3106.
-- Card cmsg_01R91wiieBzMSvPKFsAJVvuKFLtE8GpJc4B8mRNgH5rtFs: agentosd's plan-signing holder key lives in agentosd's root-only state dir. This is recorded on #3087 only.
+**Who owns what, to stop today's collisions** (two D-244s; allowlist-file conflicts forced full re-reviews)
+- **Decision IDs:** sub B numbers its new rows from **D-300** up and sub A continues from D-246, until the waste-sweep PR's automatic IDs land.
+- **Process docs** (CLAUDE.md, AGENTS.md, PLAN.md, docs/OPERATING.md, docs/LANES.md, role skills): only the waste-sweep PR edits them until it merges (thread cmsg_01R91wiieBzMSvPKFsAJVvuKPLhCRLR3dg61qXtt7n6Siw). Sub B files process changes as issues meanwhile.
+- **Rows:** claim with `state:building` plus a comment naming the branch and the sub, and never start a row whose files an open PR touches (D-111).
 
-**In flight at 11:45Z**
-- Open PRs: #3100 (#3099 BOARD-debounce, a gate file), #3102 (#3095), #3105 (#3104 slice a) and #3106 (D-162).
-- `state:building`: #3078, #3087, #3095, #3099 and #3104.
-- The `cmd/agentosd` chain slot is free. #2779 is next, but it is blocked (below).
+**Sub A threads still running (don't duplicate them)**
+- #3974 (MIG-4-exit c2, codecheck): L3 plus the Potency subagent in cmsg_01R91wiieBzMSvPKFsAJVvuK5aZ8Udnq4egyzZ1p6kjaBF, Security in cmsg_01R91wiieBzMSvPKFsAJVvuK9hpTCZHXVK3unJfvyoK8V5. The UX accept carries over.
+- #3971: all accepts are in, and its builder merges it on green.
+- The UPD-5 requalification rebuild: PR #4033 from builder cmsg_01R91wiieBzMSvPKFsAJVvuK5TAT5R2Wi7aY1LczS1GghE (its reviews are sub B's step 1).
+- The waste-sweep process PR: bookkeeping folded into its causing PRs, bot-committed renders, briefs inside build PRs, merge-clean allowlists, automatic decision IDs, and the review-shape wording.
 
-**Questions for sub A** (answer on the issue)
-- #2779: three of its items need a passkey to sign, and `kernel/key` takes only raw `ed25519` keys. The proposed split puts a kernel-lane prerequisite first: an external-signer seam plus the WebAuthn verifier (comment of 11:19Z). Sub A's call, since it is the kernel lane.
-- #935, piece 3: should the netjoin PSK hand-off reuse the #2682 clerk-main hand-off (recommended), or should the unlock step dial the helper itself? (Comment of 11:17Z.)
-- #2780(b) waits on #3104 (the model clerk's plan login), not on #2779 (comment of 11:21Z).
+**Sub B, in this order**
+1. **Reviews sub A can't start.** First: **#4033** (UPD-5 re-test rebuild plus the ship gate, issue #4031, head 472a5a34 at writing). It is tier A but not a gate-file PR, so it needs one L3+lens thread and one Security thread. Its gate lifts only once the sandbox runner (#4032) is done, so #4032 is the next build row. Then: For every open PR whose latest verdict comment lists a review owed, run one L3+lens thread and, where tier A or `premerge.py --needs-mark` requires, one Security thread. The last accept arms (CLAUDE.md).
+2. **Idle PRs with no owner:** #3949, #3973, #3976, #3991 (idle 8 to 11 hours). Take each over or close it with its row requeued (D-098). #4003 waits on an `image.yml` fix. #4023, #4025, #4027 and #4028 are follow-ups.
+3. **Deletion rows (D-245), where scope is disjoint from open PRs:** MIG-4-adapters b to h (#2579 slices; briefs/MIG-4-adapters.md), MIG-4-mail (briefs/MIG-4-mail.md: delete `broker/mail/`), MIG-4-spend (`broker/verb`, `broker/meter`), the MIG-4-untrusted-* chain (`cmd/agentosd`, `broker/daemon`, `change`), and MIG-4-exit c3, p and d1. Exit d2 waits on #3974, and MIG-4-keys and MIG-4-log come last (MIG-4-log needs Opus). Kernel-lane rows still run one at a time across both subs.
+4. **New-capability lanes, each in its own directory and so parallel-safe:**
+   - ENF-c, f, g, i, l to t and names (`broker/enforcer/`, `image/enforcer/`; briefs/ENF.md; ENF-h and ENF-k are building);
+   - DEV-homekit-b2b to b2d (`broker/clerk/homekit/`; b2a is building);
+   - CAM-* (`broker/clerk/camera/`);
+   - VIS-core (`broker/vision/`);
+   - DEVSLOT-* (`broker/clerk/devslot/`, `device/`);
+   - DEV-withings-ble c to e (`broker/clerk/withings/`);
+   - DECOY-b to f (`broker/decoy/`);
+   - CLK-8-line part b and on (`broker/clerk/line/`; D-238).
+   Rows that share `image/` or `broker/core/core.txt` run one at a time.
+5. **REV-CHK-links-*** rows touch many directories: check each one's files against open PRs before starting.
 
-**Process changes**
-- Until #3100 merges, every issue event re-renders BOARD.md onto main, which leaves every open PR behind main (#3099).
-- #3103: when L3 and Security post in parallel, each lists the other as owed, so neither arms. Until it is fixed, re-read the comments after posting an accept, and arm or merge if the set is complete. #3093 sat fully accepted for 4.5 hours this way.
-- Sub B's coordinator rotated overnight, and its hourly backstop lapsed from 06:40Z to 11:13Z. A fresh coordinator re-arms the backstop on its first turn.
-
-**Waiting on Mark, unverified from tools**
-- The PREMERGE App settings steps after #3031 (briefs/PREMERGE-source.md). The forged-`premerge` hole stays open until they're done; the card was posted on 2026-10-24 at 20:21Z, with no reply seen.
-- `count` and `vulncheck` added to main-checks (Mark tapped Done on 2026-10-23; rulesets can't be read from here).
-- The Gmail test account (#1021) is not needed yet. The hardware is bought and on its way.
-
-**Not approved: don't build**
-- Local-first model routing waits on a capability benchmark against the plan routes (Mark, 2026-10-24 00:02Z). Private planning on a Mac Studio would need a SPEC change (HW-7, HW-11).
-- These are proposals only: one case for all boards; a second-device confirm for high-value widenings; hardware-backdoor measures (chip-vendor diversity, the store key split across vendors); a flip phone plus two FIDO2 keys as root (compare D-146).
+**Waiting on Mark**
+- The Muse and then Grok supervised capture (he said yes on 2026-10-29). The recorder is being rebuilt to refuse by default, and the Contributor-mode step sends no prompt.
+- The PREMERGE App settings steps (#3405).
+- Buying the OpenWrt One (D-228).
 
 ### Owed first
-1. Sub A: answer #935 and settle the #2779 signer seam. Both gate the next `cmd/agentosd` chain rows.
-2. Merge #3106, then build #3078 and #3079.
-3. Build #3104 (slices a, b and c), then #2780(b).
+1. Sub B: the reviews owed on open PRs (step 1 above), then the idle PRs.
+2. Sub B: deletion rows (step 3), as many in parallel as disjoint scopes allow.
+3. Sub A on reset: merge the waste-sweep PR, then resume starts, skipping every row sub B has claimed.
 
 Edit sections 1 and 2 only when a standing decision changes; replace the snapshot whole, never per batch. Where DECISIONS.md and this list differ, DECISIONS.md wins.
