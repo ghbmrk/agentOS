@@ -760,6 +760,42 @@ func TestAddTakesAKeptCamera(t *testing.T) {
 	}
 }
 
+// REQ: DEV-7
+// TestSweepWaitsForAdd: a sweep that runs while Add takes a kept camera
+// back (its slot retried) never reads the camera before its retention is
+// set, so capture within that retention stays. The test holds the kept
+// camera's lock, so Add waits on it; a camera Add published before then
+// would be swept under a zero retention.
+func TestSweepWaitsForAdd(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, time.Hour)
+	r.feed(t, testID, 3, time.Second)
+	r.s.Flush()
+	want := len(r.segments(t, testID))
+	r.open(t, nil)
+	if err := r.s.Keep(testID, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	k := r.s.kept[testID]
+	k.mu.Lock()
+	added := make(chan error, 1)
+	go func() { added <- r.s.Add(testID, time.Hour) }()
+	time.Sleep(50 * time.Millisecond) // Add now waits on the kept lock
+	swept := make(chan error, 1)
+	go func() { swept <- r.s.Sweep() }()
+	time.Sleep(50 * time.Millisecond) // a sweep that reads the camera runs now
+	k.mu.Unlock()
+	if err := <-added; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-swept; err != nil {
+		t.Fatal(err)
+	}
+	if got := len(r.segments(t, testID)); got != want {
+		t.Fatalf("a sweep beside Add left %d of %d segments", got, want)
+	}
+}
+
 // slowKeys holds Make until release closes, after telling entered.
 type slowKeys struct {
 	SegmentKeys
@@ -774,11 +810,10 @@ func (k slowKeys) Make(camera string) error {
 }
 
 // REQ: DEV-7
-// TestSweepWaitsForAdd: a sweep that runs while Add takes a camera back
-// (a restart's Add, or a kept camera's retry) waits for its retention, so
-// capture within that retention stays: neither the kept retention nor
-// the new camera's unset one deletes it.
-func TestSweepWaitsForAdd(t *testing.T) {
+// TestSweepWaitsForRetention: a sweep that runs while Add is still
+// setting a camera's retention (its key slot slow) waits for it, so
+// capture within that retention stays.
+func TestSweepWaitsForRetention(t *testing.T) {
 	r := newStoreRig(t, nil)
 	r.s.Add(testID, time.Hour)
 	r.feed(t, testID, 3, time.Second)
@@ -786,7 +821,6 @@ func TestSweepWaitsForAdd(t *testing.T) {
 	want := len(r.segments(t, testID))
 	k := slowKeys{nil, make(chan struct{}), make(chan struct{})}
 	r.open(t, func(c *StoreConfig) { k.SegmentKeys = c.Keys; c.Keys = k })
-	r.s.Keep(testID, 0)
 	added := make(chan error, 1)
 	go func() { added <- r.s.Add(testID, time.Hour) }()
 	<-k.entered
