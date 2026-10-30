@@ -767,6 +767,8 @@ func TestABigLoweringNeedsTwoPasskeysOneAnAnchor(t *testing.T) {
 	}
 	must(t, r.k.Reserve(10, "b", 500))
 	must(t, r.k.Reserve(11, "b", 400, lower(r, "b", 400, phone))) // 500 to 600: one passkey
+	must(t, r.k.Reserve(12, "c", 600))
+	must(t, r.k.Reserve(13, "c", 590, lower(r, "c", 590, phone))) // 400 to 410: one passkey
 	must(t, r.k.Reserve(6, "w", 1000))
 	if err := r.k.Reserve(7, "w", 990, lower(r, "w", 990, phone)); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("any lowering from 1000 is big: %v", err)
