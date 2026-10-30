@@ -995,6 +995,7 @@ func TestHoldNamesLostPairs(t *testing.T) {
 		{"freeze", doc(7, nil, nil), doc(8, tv, nil), []string{"cam and tv stop talking to each other while tv's updates are held back."}},
 		{"hold", doc(7, nil, nil), doc(8, []policy.Hold{{Device: "tv", Kind: policy.HoldFix}}, nil), []string{"cam and tv stop talking to each other while tv's updates are held back."}},
 		{"unfreeze", doc(7, tv, nil), doc(8, nil, nil), []string{"cam and tv talk to each other again."}},
+		{"unfreeze cam", doc(7, []policy.Hold{{Device: "cam", Kind: policy.HoldFirmware}}, nil), doc(8, nil, nil), []string{"cam and tv talk to each other again.", "laptop and cam talk to each other again."}},
 		{"from Household", doc(7, nil, nil), doc(8, []policy.Hold{{Device: "cam", Kind: policy.HoldFirmware}}, nil), []string{
 			"cam and tv stop talking to each other while cam's updates are held back.",
 			"laptop and cam stop talking to each other while cam's updates are held back.",

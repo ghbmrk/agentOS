@@ -100,7 +100,7 @@ func TestLinked(t *testing.T) {
 		d.Devices = append(d.Devices,
 			Device{ID: "phone", Network: NetOwner},
 			Device{ID: "laptop", Network: NetHousehold},
-			Device{ID: "guest", Network: NetGuests},
+			Device{ID: "guest", Network: NetGuests, WiFi: "vlan107"},
 			Device{ID: "old", Network: NetDevices, WiFi: "vlan106", Isolated: true})
 		d.Holds = []Hold{{Device: "cam", Kind: HoldFirmware}, {Device: "laptop", Kind: HoldFix}, {Device: "phone", Kind: HoldFirmware}}
 	})
