@@ -73,7 +73,7 @@ func (r Repo) p(parts ...string) string {
 // published until the staged files carry their thresholds.
 func Init(dir string, cfg RootConfig) (Repo, error) {
 	r := Repo{Dir: dir}
-	if _, err := os.Stat(r.p("metadata")); err == nil {
+	if _, err := os.Lstat(r.p("metadata")); err == nil {
 		return r, errors.New("repository already initialised")
 	}
 	root := metadata.Root(r.now().Add(RootExpiry))
@@ -153,7 +153,7 @@ func (r Repo) published(roleName string) (int64, []byte, error) {
 	if err != nil || v == 0 {
 		return 0, nil, err
 	}
-	b, err := os.ReadFile(r.p("metadata", fmt.Sprintf("%d.%s.json", v, roleName)))
+	b, err := readFile(r.p("metadata", fmt.Sprintf("%d.%s.json", v, roleName)))
 	return v, b, err
 }
 
@@ -321,7 +321,7 @@ func (r Repo) AddRelease(rel Manifest, files map[string]string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer remove(tmp.Name())
 	if _, err := tmp.Write(man); err != nil {
 		tmp.Close()
 		return err
@@ -363,7 +363,7 @@ func (r Repo) SetMaintainerAttestors(keys []ed25519.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer remove(tmp.Name())
 	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
@@ -407,7 +407,7 @@ func (r Repo) storeTarget(targetPath, local string) (*metadata.TargetFiles, erro
 	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(out.Name())
+	defer remove(out.Name())
 	_, err = io.Copy(out, f)
 	if err == nil {
 		err = out.Chmod(0o644)
@@ -525,7 +525,7 @@ func (r Repo) publishRoot() error {
 	if err := writeMeta(r.p("metadata", fmt.Sprintf("%d.root.json", m.Signed.Version)), m); err != nil {
 		return err
 	}
-	return os.Remove(name)
+	return remove(name)
 }
 
 func (r Repo) publishTargets() error {
@@ -554,7 +554,7 @@ func (r Repo) publishTargets() error {
 	if err := writeMeta(r.p("metadata", fmt.Sprintf("%d.targets.json", m.Signed.Version)), m); err != nil {
 		return err
 	}
-	return os.Remove(name)
+	return remove(name)
 }
 
 // Refresh signs a new snapshot and timestamp over the published targets.
