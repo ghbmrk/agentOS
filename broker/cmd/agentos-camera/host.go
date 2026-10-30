@@ -83,6 +83,7 @@ var (
 	errExists  = errors.New("camera: a camera with that name is connected")
 	errUnknown = errors.New("camera: no camera with that name is connected")
 	errState   = errors.New("camera: the cameras file does not load")
+	errBroken  = errors.New("camera: the camera's capture store did not open; disconnect it")
 )
 
 // node reads and checks a record: the clerk's Node, pin included.
@@ -144,11 +145,15 @@ type host struct {
 	// point is the core's camera client public key, for STATUS.
 	point [camwire.PointLen]byte
 
-	mu      sync.Mutex
-	st      state
-	listed  []listed
-	ctx     context.Context
-	runs    map[string]context.CancelFunc
+	mu     sync.Mutex
+	st     state
+	listed []listed
+	ctx    context.Context
+	runs   map[string]context.CancelFunc
+	// broken are the cameras the store refused at start (#3968): kept in
+	// the file, unswept, never connected, and shown as refused until the
+	// owner disconnects them.
+	broken  map[string]bool
 	wg      sync.WaitGroup
 	started bool
 }
@@ -203,7 +208,9 @@ func (h *host) save() error {
 // decoder refuses now is logged and left in the file and the store, so its
 // retained capture is kept and still expires on time, and every other
 // camera's sweep goes on. A camera the store refuses (its sealed key
-// slot failing) refuses the start: no sweep could then run safely.
+// slot failing) is held back from the sweep (Store.Keep), so its capture
+// is kept, and is not connected: STATUS shows it refused, and the owner's
+// disconnect erases it (#3968). Every other camera starts.
 func (h *host) start(ctx context.Context) error {
 	st, err := load(h.dir)
 	if err != nil {
@@ -211,16 +218,23 @@ func (h *host) start(ctx context.Context) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.ctx, h.st, h.runs = ctx, st, map[string]context.CancelFunc{}
+	h.ctx, h.st, h.runs, h.broken = ctx, st, map[string]context.CancelFunc{}, map[string]bool{}
 	for _, r := range st.Cameras {
 		if err := h.store.Add(r.ID, r.retention()); err != nil {
-			return fmt.Errorf("camera %s: its capture store did not open: %w", r.ID, err)
+			if kerr := h.store.Keep(r.ID); kerr != nil {
+				return fmt.Errorf("camera %s: its capture store did not open: %w", r.ID, err)
+			}
+			h.broken[r.ID] = true
+			h.log("camera " + r.ID + ": refused at start: its capture store did not open: " + err.Error())
 		}
 	}
 	if err := h.store.Sweep(); err != nil {
 		h.log("camera: the first sweep failed: " + err.Error())
 	}
 	for _, r := range st.Cameras {
+		if h.broken[r.ID] {
+			continue
+		}
 		if err := h.live(r); err != nil {
 			h.log("camera " + r.ID + ": not connected at start: " + err.Error())
 		}
@@ -271,7 +285,7 @@ func (h *host) add(r record) error {
 func (h *host) pins() {
 	var ps []netguard.Pin
 	for _, r := range h.st.Cameras {
-		if n, err := r.node(); err == nil {
+		if n, err := r.node(); err == nil && !h.broken[r.ID] {
 			ps = append(ps, netguard.Pin{Kind: netguard.PinDevice, Addr: n.Addr, Key: n.Key})
 		}
 	}
@@ -283,7 +297,7 @@ func (h *host) pins() {
 // run starts r's stream runner when r is continuous and no STOP holds;
 // held under h.mu.
 func (h *host) run(r record) {
-	if !h.started || h.st.Stopped || r.Capture != "continuous" || h.runs[r.ID] != nil {
+	if !h.started || h.st.Stopped || r.Capture != "continuous" || h.runs[r.ID] != nil || h.broken[r.ID] {
 		return
 	}
 	ctx, cancel := context.WithCancel(h.ctx)
@@ -377,6 +391,7 @@ func (h *host) disconnect(id string) error {
 		h.st.Cameras = old
 		return err
 	}
+	delete(h.broken, id)
 	h.pins()
 	err := h.remove(id)
 	h.log("camera " + id + ": disconnected by the owner")
@@ -394,6 +409,9 @@ func (h *host) update(id string, fn func(*record), apply func(old, new record) e
 	i := h.find(id)
 	if i < 0 {
 		return errUnknown
+	}
+	if h.broken[id] {
+		return errBroken
 	}
 	old := h.st.Cameras[i]
 	r := old
@@ -557,6 +575,10 @@ func (h *host) status() []string {
 		out = append(out, "cameras: stopped (STOP); no stream opens until RESUME")
 	}
 	for _, r := range h.st.Cameras {
+		if h.broken[r.ID] {
+			out = append(out, "camera "+r.ID+": refused: its capture store did not open; its capture is kept; disconnect it on the local page")
+			continue
+		}
 		ret := "memory only"
 		if r.RetentionSec > 0 {
 			ret = "kept " + r.retention().String()

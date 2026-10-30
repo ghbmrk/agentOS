@@ -615,3 +615,65 @@ func TestSweepDeletesWhateverTheDirMode(t *testing.T) {
 		t.Fatalf("retention removed, directory kept: %v", err)
 	}
 }
+
+// failingKeys refuses to make one camera's key, as a sealed slot that
+// fails.
+type failingKeys struct {
+	SegmentKeys
+	camera string
+}
+
+func (k failingKeys) Make(camera string) error {
+	if camera == k.camera {
+		return errors.New("slot fails")
+	}
+	return k.SegmentKeys.Make(camera)
+}
+
+// REQ: DEV-7, DEV-10
+// TestKeepHoldsBackTheSweep (#3968): a connected camera that Add refuses
+// is Kept: the sweep leaves its segments and key, a frame for it is
+// refused, and Erase still erases it.
+func TestKeepHoldsBackTheSweep(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, time.Hour)
+	r.feed(t, testID, 3, time.Second)
+	r.s.Flush()
+	r.open(t, func(c *StoreConfig) { c.Keys = failingKeys{c.Keys, testID} })
+	if r.s.Add(testID, time.Hour) == nil {
+		t.Fatal("the failing slot was taken")
+	}
+	if err := r.s.Keep(testID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.s.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := r.files(t); len(names) == 0 {
+		t.Fatal("the sweep erased a kept camera's segments")
+	}
+	if !r.secrets.Has(SegmentSlots + testID) {
+		t.Fatal("the sweep erased a kept camera's key")
+	}
+	if r.s.Frame(testID, video()) == nil {
+		t.Fatal("a frame for a kept camera was taken")
+	}
+	if r.s.Keep("Not An ID") == nil {
+		t.Fatal("a malformed name was kept")
+	}
+	if err := r.s.Erase(testID); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := r.files(t); len(names) != 0 || r.secrets.Has(SegmentSlots+testID) {
+		t.Fatalf("erase left %q", names)
+	}
+	// Erased, the camera is no longer kept: a directory left under its
+	// name is swept.
+	os.Mkdir(filepath.Join(r.dir, testID), 0o700)
+	if err := r.s.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(r.dir, testID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an erased camera stayed kept")
+	}
+}
