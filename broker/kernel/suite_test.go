@@ -241,3 +241,47 @@ func TestUnanchoredSecurityDropDoesNotSurviveARestart(t *testing.T) {
 		t.Fatalf("an unanchored drop survived: %v, %d dropped", ids, dropped)
 	}
 }
+
+// The ID alphabet's edges: each end of each range and each listed mark is
+// in, the byte past each range out.
+func TestSecurityCaseIDAlphabetEdges(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.AddSecurityCase(1, secCase("azAZ09._/-")))
+	for _, b := range []string{"`", "{", "@", "[", ":", ",", "+"} {
+		if err := r.k.AddSecurityCase(1, secCase("x"+b)); !errors.Is(err, kernel.ErrSecurityCase) {
+			t.Errorf("%q in an ID: %v", b, err)
+		}
+	}
+}
+
+// Each logged drop moves the number the next one signs, so a signature over
+// an earlier number fits no later drop.
+func TestEachDropMovesTheNumber(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.AddSecurityCase(1, secCase("a")))
+	must(t, r.k.AddSecurityCase(1, secCase("b")))
+	must(t, r.k.DropSecurityCase(2, "a", key.Approve(r.owner.pass, kernel.SecurityDropHash(0, "a"))))
+	if n, ok := r.k.State().SecurityDrop("b"); n != 1 || !ok {
+		t.Fatalf("next drop number %d %v, want 1", n, ok)
+	}
+	if err := r.k.DropSecurityCase(3, "b", key.Approve(r.owner.pass, kernel.SecurityDropHash(0, "b"))); !errors.Is(err, kernel.ErrSecurityDrop) {
+		t.Fatalf("a drop over the old number: %v", err)
+	}
+}
+
+// A keep logged at the moment the drop goes live, written by hand past the
+// kernel's own check, folds to nothing: the drop stands.
+func TestKeepAtTheHoldsEndFoldsToNothing(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.AddSecurityCase(1, secCase("a")))
+	must(t, r.k.DropSecurityCase(2, "a", key.Approve(r.owner.pass, kernel.SecurityDropHash(0, "a"))))
+	if _, err := r.k.Log().Append(2+kernel.GrantHold, kernel.TSecurityKept, 1, struct {
+		ID string `json:"id"`
+	}{"a"}); err != nil {
+		t.Fatal(err)
+	}
+	r.boot(3 + kernel.GrantHold)
+	if ids, dropped := suiteIDs(r.k.State(), 3+kernel.GrantHold); len(ids) != 0 || dropped != 1 {
+		t.Fatalf("a keep at the hold's end folded: %v, %d dropped", ids, dropped)
+	}
+}
