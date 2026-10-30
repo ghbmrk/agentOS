@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/boxname"
@@ -148,7 +150,7 @@ type FileRecord struct{ Path string }
 
 func (f FileRecord) Load() (SetupRecord, error) {
 	var r SetupRecord
-	b, err := os.ReadFile(f.Path)
+	b, err := readFile(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return r, nil
 	}
@@ -417,4 +419,15 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		s.cfg.Finished(a.Owner)
 	}
 	return struct{}{}, nil
+}
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
+// setup record is never a link, so one there was planted.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

@@ -12,7 +12,7 @@ import (
 // arrived. USB CDC ignores the baud rate; 115200 is set for adapters that
 // do not.
 func OpenSerial(path string) (io.ReadWriteCloser, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -1,7 +1,6 @@
 package clock
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -12,7 +11,7 @@ import (
 // RTC reads the host's hardware clock as the kernel does (as if UTC),
 // read-only from sysfs. It is never written (HW-8).
 func RTC() (time.Time, error) {
-	b, err := os.ReadFile("/sys/class/rtc/rtc0/since_epoch")
+	b, err := readFile("/sys/class/rtc/rtc0/since_epoch")
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -26,7 +25,7 @@ func RTC() (time.Time, error) {
 // HostID is the firmware's system UUID (SMBIOS), which names the PC the
 // box is booted on; root-readable only. It is hashed before it is kept.
 func HostID() string {
-	b, err := os.ReadFile("/sys/class/dmi/id/product_uuid")
+	b, err := readFile("/sys/class/dmi/id/product_uuid")
 	if err != nil {
 		return ""
 	}
@@ -45,7 +44,7 @@ func bootElapsed() time.Duration {
 
 // bootID names this boot; an anchor recorded in another boot is dropped.
 func bootID() string {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	b, err := readFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return ""
 	}

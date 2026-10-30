@@ -32,6 +32,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -173,7 +174,7 @@ type Claim struct {
 
 // KernelBootID reads Linux's boot_id, which changes on every boot.
 func KernelBootID() (string, error) {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	b, err := readFile("/proc/sys/kernel/random/boot_id")
 	if err != nil {
 		return "", err
 	}
@@ -508,4 +509,15 @@ func (c *Claim) Claimant(tok string) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare(tokenHash(tok), c.st.Owner) == 1
+}
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): boot_id
+// is a plain procfs file, never a link.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

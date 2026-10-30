@@ -15,11 +15,13 @@ package accel
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 )
@@ -111,8 +113,15 @@ func integrated(dev string) bool {
 	return strings.HasPrefix(filepath.Base(p), "0000:00:")
 }
 
+// readTrim reads a sysfs or procfs attribute, a plain file, refusing a link
+// at p (REV-CHK-links, #3945).
 func readTrim(p string) string {
-	b, err := os.ReadFile(p)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return ""
 	}
