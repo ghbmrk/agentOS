@@ -202,6 +202,7 @@ The rules are in CLAUDE.md §Budget; the reasons and procedures are here.
 - **Readiness reads the code.** A readiness check before starting a row reads the code paths the issue depends on, not just the states of the issues it names: a closed issue can leave the interface the row needs unbuilt or different.
 - **One push per round.** Finish the local checks, then push once. Don't push while CI runs on the previous head unless that run is already red; each push restarts every job.
 - **Stack on an accepted interface.** On the G1 critical path, the next package starts on its prerequisite's branch once the prerequisite's interface is review-accepted, without waiting for its merge.
+- **Deletion first (D-244).** Among startable rows, start those that delete old-core code, and the rows that unblock them, before new features; report the old core's remaining lines to Mark weekly.
 - **Keep the critical path parallel.** Run G1 critical-path packages in parallel wherever they touch disjoint files (the conflict guard above still applies).
 - **Models by tier.** Tier-A builders run on Opus, the strongest model; tier B and C builders run on Sonnet (D-121 item 7). Never switch a running session's model: if its build is done, review the PR in a fresh session instead of rebuilding it on another model.
 - **Fix a flake the second time.** A flaky test seen a second time gets an issue and a fix, not another re-run.
