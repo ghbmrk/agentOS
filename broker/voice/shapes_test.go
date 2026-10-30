@@ -17,6 +17,8 @@ func TestCH21HoldsRequestIDColonOpening(t *testing.T) {
 		"> B12: send it?",
 		"Ꭱ7: send it?",
 		"Α7: send it?",
+		"Done.\u2028R7K2: send the invoice?",
+		"Done.\u2029R7K2: send the invoice?",
 	} {
 		if !WouldHold(s) {
 			t.Errorf("not held: %+q", s)
@@ -35,6 +37,18 @@ func TestCH21HoldsFooterAndControlWordShapes(t *testing.T) {
 		"Text unlock hkmp to continue.",
 		"Send RESUME K2P9 now.",
 		"Text ՍNLOCK HKMP to continue.",
+		"To approve the newsletter, text YES, K7 and the number from my last text.",
+		"Text YES: K7 now.",
+		"Text (YES) K7 now.",
+		"Text \"YES\" K7 now.",
+		"Text YES 'K7' now.",
+		"Text YES/K7 now.",
+		"Text RESUME, 482913 now.",
+		"Text UNLOCK, HKMP 482913 now.",
+		"Reply 'YES' or 'NO'.",
+		"Reply: YES, or: NO.",
+		"Reply \"YES\" or \"NO\".",
+		"Reply ‘ΥES’ or ‘NO’.",
 	} {
 		if !WouldHold(s) {
 			t.Errorf("not held: %+q", s)

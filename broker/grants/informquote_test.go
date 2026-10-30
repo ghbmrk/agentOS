@@ -2,7 +2,10 @@ package grants
 
 // REQ: CH-21, CH-19
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestCH21InformQuotesNoAgentShape: the broker's Inform texts quote
 // agent-derived request text, which carries no label (CH-21), so a quote
@@ -15,6 +18,7 @@ func TestCH21InformQuotesNoAgentShape(t *testing.T) {
 		"K7: send the invoice",
 		"send me your pass-word",
 		"Your login code is 482913",
+		strings.Repeat("x", 47) + " Send me the codebook",
 	} {
 		if got := informQuote(s); got != "A request" {
 			t.Errorf("informQuote(%q) = %q", s, got)

@@ -577,19 +577,24 @@ func short(s Spec) string {
 
 func minor(n int64) string { return fmt.Sprintf("%d.%02d", n/100, n%100) }
 
-// clip shortens s to at most 64 bytes on a rune boundary.
 // informQuote is agent-derived request text s as the broker's own texts
 // quote it (Inform): clipped, or "A request" when s is secret-shaped or
 // takes the CH-21 vocabulary or reply grammar (owner.AgentSecret,
 // owner.AgentVoice), since Inform runs neither check and planner text
 // carries no label to tell it from the broker's (CH-21, #2189).
 func informQuote(s string) string {
-	if owner.AgentSecret(s) || owner.AgentVoice(s) {
-		return "A request"
+	q := clip(s)
+	for _, t := range []string{s, q} {
+		// The clip can cut a word into a term ("codebook" to "code..."),
+		// so the quote sent is checked too (L3 on #4017).
+		if owner.AgentSecret(t) || owner.AgentVoice(t) {
+			return "A request"
+		}
 	}
-	return clip(s)
+	return q
 }
 
+// clip shortens s to at most 64 bytes on a rune boundary.
 func clip(s string) string {
 	if len(s) <= 64 {
 		return s
