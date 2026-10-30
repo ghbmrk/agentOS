@@ -34,8 +34,6 @@ var (
 	ErrVerify = errors.New("push: access point does not hold what was written")
 )
 
-var errTooBig = errors.New("push: output too large")
-
 // MaxFile bounds what Sync reads back from the access point, so a hostile
 // one cannot fill the enforcer's memory.
 const MaxFile = 1 << 20
@@ -205,13 +203,15 @@ func writeCmd(path string) string {
 func holds(c *ssh.Client, f ap.File) (bool, error) {
 	out, err := run(c, readCmd(f.Path), nil)
 	var exit *ssh.ExitError
-	if errors.As(err, &exit) || errors.Is(err, errTooBig) {
-		return false, nil // absent, unreadable or oversized: rewritten
+	if errors.As(err, &exit) {
+		return false, nil // cat failed: absent or unreadable
 	}
 	if err != nil {
 		return false, fmt.Errorf("push: read %s: %w", f.Path, err)
 	}
-	return bytes.Equal(out, f.Data), nil
+	// out is cut at MaxFile+1 bytes, so a longer file reads as drift and
+	// is rewritten.
+	return len(out) <= MaxFile && bytes.Equal(out, f.Data), nil
 }
 
 // run runs one command with stdin, returning at most MaxFile+1 bytes of
@@ -231,8 +231,8 @@ func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
 		return nil, err
 	}
 	b, rerr := io.ReadAll(io.LimitReader(out, MaxFile+1))
-	if rerr == nil && len(b) > MaxFile {
-		return nil, fmt.Errorf("%w: %q over %d bytes", errTooBig, cmd, MaxFile)
+	if len(b) > MaxFile {
+		return b, nil // cut off; Close ends the command rather than wait on it
 	}
 	if err := s.Wait(); err != nil {
 		return nil, err

@@ -34,8 +34,9 @@ type fakeAP struct {
 	logins  int
 	stuck   bool // ignores writes, like a full or read-only flash
 
-	failReload        int // the next this many reloads fail
-	active, maxActive int // logged-in connections now, and at most
+	readFails         map[string]bool // reads of these paths print the file, then exit 1
+	failReload        int             // the next this many reloads fail
+	active, maxActive int             // logged-in connections now, and at most
 }
 
 func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
@@ -134,6 +135,9 @@ func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
 				return 1
 			}
 			ch.Write(b)
+			if f.readFails[p] {
+				return 1
+			}
 			return 0
 		case writeCmd(p):
 			b, _ := io.ReadAll(ch)
@@ -395,5 +399,25 @@ func TestDefaultsAndLimit(t *testing.T) {
 	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
 	if res, err := p.Sync(context.Background(), big); err != nil || res.Applied {
 		t.Fatalf("default timeout, file at the limit: %+v %v", res, err)
+	}
+}
+
+// TestFailedReadIsDrift: a read that prints a file of exactly MaxFile
+// bytes but exits with an error does not count as holding it. Catches a
+// read that skips the exit status.
+func TestFailedReadIsDrift(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	data := bytes.Repeat([]byte("x"), MaxFile)
+	f.set(ap.PathNetwork, data)
+	f.mu.Lock()
+	f.readFails = map[string]bool{ap.PathNetwork: true}
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	res, err := p.Sync(context.Background(), []ap.File{{Path: ap.PathNetwork, Data: data}})
+	// The read-back after the write fails the same way, so Sync ends in
+	// ErrVerify; what counts is that the file was found as drift.
+	if !errors.Is(err, ErrVerify) || !slices.Contains(res.Drift, ap.PathNetwork) {
+		t.Fatalf("a failed read counted as holding the file: %+v %v", res, err)
 	}
 }
