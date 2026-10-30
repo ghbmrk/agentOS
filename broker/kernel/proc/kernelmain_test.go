@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -335,5 +336,71 @@ func TestTheKernelServesTheLinkSocket(t *testing.T) {
 	defer stop2()
 	if _, err := os.Stat(filepath.Join(n.dir, "l.sock")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a kernel with no -link-sock made one: %v", err)
+	}
+}
+
+// REQ: CH-4, CLK-1
+// MIG-4-exit-c2 (potency 1 on #3974): the kernel process pins the checker's
+// key exactly when it hands the checker's unit its clerk key. Started so, it
+// takes a code approval as one to check (refused here only because it names
+// no held step); started with no checker clerk, it has no key to check one
+// by. Revert mutant: `Checker: checker` dropped from RunKernel's config (the
+// first start then answers kernel.ErrNoChecker).
+func TestRunKernelPinsTheCheckerItHandsAKey(t *testing.T) {
+	var root [32]byte
+	for i := range root {
+		root[i] = byte(0x60 + i)
+	}
+	ck, err := clerkkey.Derive(&root, handoff.CheckerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sign, err := ck.Signer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := kernel.CodeStep{Plan: "none", Index: 0}
+	approval := kernel.SignCode(sign, []kernel.CodeStep{step})
+	run := func(withChecker bool) error {
+		t.Helper()
+		m := newMainBox(t)
+		if withChecker {
+			m.cfg.ClerkKeys = map[string]KeyClerk{handoff.CheckerName: {
+				Socket: filepath.Join(m.dir, "kc.sock"), Cgroup: "/agentos.slice/agentos-checker.service"}}
+		}
+		os.Remove(m.cfg.Up)
+		keys := handoff.KernelKeys{Log: [32]byte{7}, Head: headPriv, Slot: handoff.SlotTPM, ClerkRoot: root}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- RunKernel(ctx, m.cfg, keys, anchor(t, m.cfg.Log)) }()
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			if _, err := os.Stat(m.cfg.Up); err == nil {
+				break
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("the kernel did not come up: %v", err)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the kernel did not come up in time")
+			}
+		}
+		o := Owner{Conn{Socket: m.cfg.OwnerSock, UID: os.Getuid(), Timeout: 10 * time.Second}}
+		if err := o.Setup(setupAnchors()); err != nil {
+			t.Fatal(err)
+		}
+		err := o.ApproveCode(approval)
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatalf("the kernel stopped: %v", err)
+		}
+		return err
+	}
+	if err := run(true); !errors.Is(err, kernel.ErrCodeApproval) {
+		t.Fatalf("a kernel that hands the checker its key: %v, want the approval checked (ErrCodeApproval)", err)
+	}
+	if err := run(false); !errors.Is(err, kernel.ErrNoChecker) {
+		t.Fatalf("a kernel with no checker clerk: %v, want ErrNoChecker", err)
 	}
 }

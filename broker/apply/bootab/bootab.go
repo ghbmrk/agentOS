@@ -80,6 +80,9 @@ type Disk interface {
 	Slots() ([]string, error)
 	// Entries is the boot menu as written, and loader.conf's default.
 	Entries() (map[string]Entry, string, error)
+	// WriteEntry writes entry id booting e.UsrHash from slot e.Slot with
+	// e.Tries tries. The entry carries the image's sort-key and a version
+	// line, so systemd-boot orders it by version among agentOS entries.
 	WriteEntry(id string, e Entry) error
 	RemoveEntry(id string) error
 	// SetDefault sets loader.conf's default pattern; "" removes it.

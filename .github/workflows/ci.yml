@@ -131,6 +131,9 @@ jobs:
       - name: Every broker dialer is hooked into the home-network address guard (DEV-2)
         if: env.RECORDS != 'true'
         run: python tools/netguardcheck.py
+      - name: Every file a build could compile under broker/ is plain Go (REV-CHK-src, KRN-2)
+        if: env.RECORDS != 'true'
+        run: python tools/srclint.py
       - name: BOARD.md round-trips through its work-item issues (SIM-repo-1)
         run: python tools/board.py check
       - name: BOARD.md rows equal the live work-item issues (SIM-repo-2)

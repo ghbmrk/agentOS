@@ -1,9 +1,10 @@
 // Command agentos-clerk-model is the model clerk's process
 // (MIG-4-untrusted-exit-b2b, #2780(b), CLK-1, CLK-7): the only process that
-// holds the owner's plan login and API keys, under its own uid. It holds the
-// login sealed in its own slot (plan.Login) and serves the plan route's owner
-// calls (planbegin, planstate, planresume, planremove) to agentosd, whose
-// setup and Wi-Fi pages call them (#2780(b3)). Each sign-in's CLI runs in a
+// holds the owner's plan logins and API keys, under its own uid. It holds
+// each wired plan's login sealed in a slot of its own, plan-<name>
+// (plan.Login, PLAN-slots #1379 (a)), and serves the plan routes' owner
+// calls (planbegin, planstate, planresume, planremove, each naming its plan)
+// to agentosd, whose setup and Wi-Fi pages call them (#2780(b3)). Each sign-in's CLI runs in a
 // machine agentosd hosts, reached on agentosd's sign-in socket
 // (run.SignInSock), whose only way out is that sign-in guest's endpoint,
 // served here. It holds the API keys sealed in a second slot
@@ -134,36 +135,52 @@ func guard(c config) error {
 	return privfile.Check(c.dir, true)
 }
 
-// planSlot is the plan login's sealed slot in -dir, and keySlot the API
-// keys'; maxPlanSlot is either's most bytes: a login's tokens, or a few
-// keys, with room to spare. A form the next start would refuse is never
-// written.
+// keySlot is the API keys' sealed slot in -dir; maxPlanSlot is a plan
+// login's slot's or the keys' most bytes: a login's tokens, or a few keys,
+// with room to spare. A form the next start would refuse is never written.
 const (
-	planSlot    = "plan-codex"
 	keySlot     = "api-keys"
 	maxPlanSlot = 64 << 10
 )
 
+// planSlot is plan name's sealed slot in -dir. Codex's is plan-codex, the
+// name it had as the only plan, so a stored login survives.
+func planSlot(name string) string { return "plan-" + name }
+
+// planRoute is one wired plan: its declaration and how its sign-in CLI
+// shows its link and code.
+type planRoute struct {
+	d      plan.Declaration
+	prompt run.SignInPrompt
+}
+
+// declarations are the wired plans, each a qualified route (HLD-3): a plan
+// is listed only once a release wires it. A variable so tests can wire a
+// second plan.
+var declarations = func(guard *netguard.Policy) []planRoute {
+	return []planRoute{{plan.Codex(guard), run.CodexSignIn()}}
+}
+
 var errSlotTooLarge = errors.New("agentos-clerk-model: the plan login's slot is too large")
 
-// openStore opens the plan login's slot in dir: a plain file of this uid's
-// alone, or none; anything else refuses the start, since it is the
-// directory's tampering, not the slot's. Its value is opened, and checked
-// against the plan, when plan.New binds it (newLogin).
-func openStore(dir string, s clerk.Sealer) (*plan.Store, error) {
+// openStore opens the slot in dir: a plain file of this uid's alone, or
+// none; anything else refuses the start, since it is the directory's
+// tampering, not the slot's. Its value is opened, and checked against the
+// plan, when plan.New binds it (newLogin).
+func openStore(dir, slot string, s clerk.Sealer) (*plan.Store, error) {
 	store := plan.NewStore(s, func(b []byte) error {
 		if len(b) > maxPlanSlot {
 			return errSlotTooLarge
 		}
-		return privfile.WriteAtomic(dir, planSlot, b, nil)
+		return privfile.WriteAtomic(dir, slot, b, nil)
 	})
-	b, err := readSlot(dir, planSlot)
+	b, err := readSlot(dir, slot)
 	if err != nil {
 		return nil, err
 	}
 	if len(b) > maxPlanSlot {
 		// Not a form this process writes: it starts signed out (newLogin).
-		log.Printf("agentos-clerk-model: the plan login's slot is over %d bytes; starting signed out", maxPlanSlot)
+		log.Printf("agentos-clerk-model: the plan login's slot %s is over %d bytes; starting signed out", slot, maxPlanSlot)
 		b = nil
 	}
 	store.Load(b)
@@ -213,9 +230,10 @@ func openKeys(dir string, s clerk.Sealer) (*model.Keys, error) {
 	return keys, nil
 }
 
-// serve reads the key from keyFile, opens the plan login and serves the
-// owner socket until ctx ends or it stops serving. A slot another key
-// sealed, or one sealed for another plan, refuses the start.
+// serve reads the key from keyFile, opens each wired plan's login and
+// serves the owner socket until ctx ends or it stops serving. A slot
+// another key sealed, or one sealed for another plan, starts that plan
+// signed out and leaves the others as they were (newLogin).
 func serve(ctx context.Context, c config, keyFile *os.File) error {
 	k, err := clerkkey.Read(keyFile, clerkName)
 	if err != nil {
@@ -231,17 +249,29 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 	if err != nil {
 		return err
 	}
-	store, err := openStore(c.dir, sealer)
-	if err != nil {
-		return err
-	}
 	guard, err := netGuard(ctx, &netguard.Sources{}, netWatchEvery)
 	if err != nil {
 		return err
 	}
-	login, err := newLogin(plan.Codex(guard), store)
-	if err != nil {
-		return err
+	signIns := proc.Conn{Socket: c.signInSock, UID: c.agentosdUID}
+	var hosts []*run.PlanHost
+	for _, r := range declarations(guard) {
+		// Each plan has its own slot and its own Login, so a placeholder
+		// one mints resolves at no other.
+		store, err := openStore(c.dir, planSlot(r.d.Name), sealer)
+		if err != nil {
+			return err
+		}
+		login, err := newLogin(r.d, store)
+		if err != nil {
+			return err
+		}
+		hosts = append(hosts, &run.PlanHost{
+			Plan:    r.d.Name,
+			Login:   login,
+			Prompt:  r.prompt,
+			Workers: run.SignInSock{Host: signIns, Login: login, SandboxUID: c.agentosdUID},
+		})
 	}
 	keys, err := openKeys(c.dir, sealer)
 	if err != nil {
@@ -253,22 +283,12 @@ func serve(ctx context.Context, c config, keyFile *os.File) error {
 		return err
 	}
 	apis.Log = func(line string) { log.Print(line) }
-	h := &run.PlanHost{
-		Login:  login,
-		APIs:   apis,
-		Prompt: run.CodexSignIn(),
-		Workers: run.SignInSock{
-			Host:       proc.Conn{Socket: c.signInSock, UID: c.agentosdUID},
-			Login:      login,
-			SandboxUID: c.agentosdUID,
-		},
-	}
 	ln, err := run.ListenPlanOwner(c.ownerSock, c.agentosdUID)
 	if err != nil {
 		return err
 	}
 	done := make(chan error, 2)
-	go func() { done <- fmt.Errorf("the owner socket: %w", run.ServePlanOwner(ln, h)) }()
+	go func() { done <- fmt.Errorf("the owner socket: %w", run.ServePlanOwner(ln, apis, hosts...)) }()
 	if c.modelSock != "" {
 		mln, err := run.ListenModel(c.modelSock, c.plannerUID)
 		if err != nil {
@@ -301,7 +321,7 @@ func newLogin(d plan.Declaration, store *plan.Store) (*plan.Login, error) {
 	if b, _ := store.MarshalBinary(); err == nil || len(b) == 0 {
 		return login, err
 	}
-	log.Printf("agentos-clerk-model: the plan login's slot does not open under this key; starting signed out")
+	log.Printf("agentos-clerk-model: the %s plan login's slot does not open under this key or plan; starting signed out", d.Name)
 	store.Load(nil)
 	return plan.New(d, store, nil)
 }
