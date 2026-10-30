@@ -4,6 +4,7 @@ package action_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -112,7 +113,7 @@ type done struct {
 // asked to do.
 type radio struct{ did []done }
 
-func (r *radio) Act(device string, a action.Act, route string) error {
+func (r *radio) Act(_ context.Context, device string, a action.Act, route string) error {
 	r.did = append(r.did, done{device, a, route})
 	return nil
 }
@@ -121,7 +122,7 @@ var errRadio = errors.New("radio down")
 
 type failing struct{}
 
-func (failing) Act(string, action.Act, string) error { return errRadio }
+func (failing) Act(context.Context, string, action.Act, string) error { return errRadio }
 
 type memStore struct{ b []byte }
 
@@ -754,11 +755,11 @@ func TestActionLinkLimitIsItsOwn(t *testing.T) {
 // hung is an actuator that does not answer until released.
 type hung struct{ release chan struct{} }
 
-func (h hung) Act(string, action.Act, string) error { <-h.release; return nil }
+func (h hung) Act(context.Context, string, action.Act, string) error { <-h.release; return nil }
 
 type panicking struct{}
 
-func (panicking) Act(string, action.Act, string) error { panic("driver bug") }
+func (panicking) Act(context.Context, string, action.Act, string) error { panic("driver bug") }
 
 // NET-6: a hung actuator does not hold the policy lock, which the
 // channel's relocks share, past the book's timeout; the tap is reported as
@@ -771,10 +772,13 @@ func TestHungActuatorReleasesLock(t *testing.T) {
 	const bound = 50 * time.Millisecond
 	g := newRigWith(t, func(c *page.Config) { c.Act, c.Lock, c.ActTimeout = h, &mu, bound })
 	_, id, ch := g.open(action.Link(rp, "door", action.Unlock, ""))
-	start := time.Now()
-	w := g.tap("/do", id, ch, g.p)
-	if took := time.Since(start); took > bound+2*time.Second {
-		t.Fatalf("the tap took %v", took)
+	tapped := make(chan *httptest.ResponseRecorder, 1)
+	go func() { tapped <- g.tap("/do", id, ch, g.p) }()
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-tapped:
+	case <-time.After(bound + 2*time.Second):
+		t.Fatal("the tap is still waiting on the hung actuator")
 	}
 	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "check the device") {
 		t.Fatalf("hung: %d %s", w.Code, w.Body)
@@ -801,5 +805,66 @@ func TestHungActuatorReleasesLock(t *testing.T) {
 	c, _ := b.Issue(home(), "heater", action.On, "", 0)
 	if _, err := b.Redeem(home(), c.ID, p.sign(c.Msg), 1); err == nil {
 		t.Fatal("a panicking actuator reported done")
+	}
+}
+
+// link is one device's ordered link, kept as the Actuator contract asks:
+// it checks ctx and sends in one step under the lock that orders its
+// writes. sent is what reached the device, in order.
+type link struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (l *link) Act(ctx context.Context, _ string, a action.Act, _ string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	l.sent = append(l.sent, string(a))
+	return nil
+}
+
+func (l *link) relock() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, "lock")
+}
+
+// NET-6: the lock relocks. An unlock that timed out never reaches the
+// device after the relock the channel sends once the policy lock is free,
+// however short the book's timeout.
+func TestTimedOutUnlockNeverFollowsRelock(t *testing.T) {
+	p := newPhone(t)
+	for _, bound := range []time.Duration{time.Nanosecond, time.Microsecond} {
+		timeouts := 0
+		for range 2000 {
+			l := &link{}
+			b, err := action.NewBook(p.public(), l, bound)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policyLock sync.Mutex
+			c, _ := b.Issue(home(), "door", action.Unlock, "", 0)
+			policyLock.Lock()
+			_, err = b.Redeem(home(), c.ID, p.sign(c.Msg), 1)
+			policyLock.Unlock()
+			if errors.Is(err, action.ErrTimeout) {
+				timeouts++
+			}
+			policyLock.Lock()
+			l.relock()
+			policyLock.Unlock()
+			time.Sleep(20 * time.Microsecond) // let a stray unlock try to land
+			l.mu.Lock()
+			if last := l.sent[len(l.sent)-1]; last != "lock" {
+				t.Fatalf("bound %v: sent %v, the unlock landed after the relock", bound, l.sent)
+			}
+			l.mu.Unlock()
+		}
+		if timeouts == 0 {
+			t.Fatalf("bound %v: no run timed out, the test proves nothing", bound)
+		}
 	}
 }

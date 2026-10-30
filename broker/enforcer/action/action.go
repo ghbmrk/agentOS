@@ -19,6 +19,7 @@
 package action
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -78,14 +79,16 @@ func Acts() []Act { return []Act{On, Open, Fly, Unlock, Disarm, Off, Arm} }
 // driver behind it (slice q, a camera's settings channel), wired by the
 // daemon (slice l). route is empty except for Fly.
 //
-// Act must return within Timeout. The book stops waiting then and reports
-// ErrTimeout, so a hung call cannot hold the policy lock the page takes
-// around Redeem, which the channel's relocks share. An act already sent
-// when the book stops waiting must stay ordered before every later command
-// to the same device (the radio host sends a stack's commands in order on
-// one link), so a relock that lands after a timeout still wins.
+// ctx ends when the book stops waiting (at most Timeout after the call),
+// and Redeem returns ErrTimeout then, so a hung call cannot hold the
+// policy lock the page takes around Redeem, which the channel's relocks
+// share. Act must check ctx and send in one step on the device's ordered
+// link (under the lock that orders that link's writes): it never starts a
+// send once ctx has ended. A send that started before then is ordered
+// before every command sent after Redeem returned, so a relock that lands
+// after a timeout always wins.
 type Actuator interface {
-	Act(device string, a Act, route string) error
+	Act(ctx context.Context, device string, a Act, route string) error
 }
 
 // Window is how long a challenge lasts: the short window NET-6 names.
@@ -203,10 +206,13 @@ func (b *Book) Redeem(doc policy.Document, id string, sig []byte, nowMS int64) (
 }
 
 // call runs the actuator for c and waits for it at most the book's
-// timeout. A call still running then is left to finish on its own; its
-// result is dropped. A panicking actuator is a failed act, not a crash of
-// the enforcer.
+// timeout, the deadline of the ctx Act gets, so once call returns
+// ErrTimeout no send of c can start (the Actuator contract). A call still
+// running then is left to return on its own; its result is dropped. A
+// panicking actuator is a failed act, not a crash of the enforcer.
 func (b *Book) call(c Challenge) error {
+	ctx, cancel := context.WithTimeout(context.Background(), b.timeout)
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		defer func() {
@@ -214,14 +220,12 @@ func (b *Book) call(c Challenge) error {
 				done <- errPanicked
 			}
 		}()
-		done <- b.act.Act(c.Device, c.Act, c.Route)
+		done <- b.act.Act(ctx, c.Device, c.Act, c.Route)
 	}()
-	t := time.NewTimer(b.timeout)
-	defer t.Stop()
 	select {
 	case err := <-done:
 		return err
-	case <-t.C:
+	case <-ctx.Done():
 		return ErrTimeout
 	}
 }
