@@ -1,6 +1,8 @@
 package channel
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -84,23 +86,26 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	defer c.release()
 	now := c.cfg.Now()
 	ev := Event{At: now}
+	// Names are read for the log before act runs, so a removed device is
+	// still logged by its name.
+	cur := c.cfg.Policy.Current()
 	var reply wire.Msg
 	var code wire.Code
 	switch m := m.(type) {
 	case wire.Command:
-		ev.Kind, ev.ID, ev.Device, ev.What = KindCommand, m.ID, m.Device, verbWords[m.Verb]
+		ev.Kind, ev.ID, ev.Device, ev.What = KindCommand, m.ID, logName(cur, m.Device), verbWords[m.Verb]
 		if m.Verb == wire.VerbLevel {
 			ev.What = fmt.Sprintf("level %d", m.Level)
 		}
 		code, ev.Reason = c.gate(KindCommand, func() (wire.Code, string) { return c.command(m, now.UnixMilli()) })
 	case wire.Tighten:
-		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, m.Device, tightenKinds[m.Kind]
+		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, logName(cur, m.Device), tightenKinds[m.Kind]
 		if m.Kind == wire.RemovePair {
-			ev.Device = m.A + "," + m.B
+			ev.Device = logName(cur, m.A) + "," + logName(cur, m.B)
 		}
 		code, ev.Reason = c.gate(KindTighten, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
-		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, m.Device, readWords[m.What]
+		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
 		code, ev.Reason = c.gate(KindRead, func() (wire.Code, string) {
 			var code wire.Code
@@ -155,6 +160,18 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		return reply
 	}
 	return wire.Result{ID: ev.ID, Code: code}
+}
+
+// logName is how the log names a device the core sent: its ID if the
+// signed policy names it, else "unknown " and the SHA-256 of the name, so
+// every name in the log is one the owner signed and the core cannot write
+// words into the owner's record (#3758).
+func logName(d policy.Document, s string) string {
+	if s == "" || d.Device(s) != nil {
+		return s
+	}
+	h := sha256.Sum256([]byte(s))
+	return "unknown " + hex.EncodeToString(h[:])
 }
 
 // gate runs act unless the channel is paused, after counting k; a kind

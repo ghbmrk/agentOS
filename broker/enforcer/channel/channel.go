@@ -104,7 +104,8 @@ type Config struct {
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
-// token the wire already checked; nothing else of the peer's is in it.
+// device ID the signed policy holds (another name only as its hash,
+// logName); nothing else of the peer's is in it.
 type Event struct {
 	At     time.Time
 	Kind   Kind
