@@ -32,15 +32,26 @@ pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted b
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root
 
-# Daemon packages b (#3945). Their reads refuse a link (O_NOFOLLOW); what
-# is left is unlink(2), link(2) and mkdir, which act on a link at the final
-# name itself and never follow it, and reads that follow a link on purpose.
+# Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
+# modem/at refuse a link (O_NOFOLLOW). What is left: unlink(2) and link(2),
+# which act on a link at the final name itself and never follow it; reads of
+# kernel-served procfs and sysfs files; and change's bodies mkdir and the
+# reads in accel, budget, change, localsrv, owner and question, control-path
+# packages that may not import syscall (ARC-2: daemon/arc2_test.go,
+# owner/arc2_test.go), of state in root-held /var/lib/agentos (tmpfiles.d:
+# 0700 root root), which no other uid can write.
+allow broker/accel/accel.go readTrim os.ReadFile a GPU's sysfs vendor attribute, served by the kernel; no uid plants a link in sysfs
+allow broker/budget/budget.go meminfoMB os.Open /proc/meminfo (agentosd's only caller), served by the kernel; no uid plants a link in procfs
+allow broker/change/store.go FileStore.Load os.ReadFile a state file agentosd and localui keep in root-held /var/lib/agentos (kept-replies.json, card-latch.json)
+allow broker/change/store.go DirContent.Get os.ReadFile a body in the .d directory beside such a state file, root-held
+allow broker/localsrv/setup.go FileRecord.Load os.ReadFile agentosd's -setup-record, /var/lib/agentos/setup.json, root-held
+allow broker/owner/state.go FileStore.Load os.ReadFile agentosd's -owner-state, /var/lib/agentos/owner.json, root-held; recovery Lstat-checks a restored copy first
+allow broker/question/question.go New os.ReadFile agentosd's -questions book, in root-held /var/lib/agentos
 allow broker/backup/target.go DirTarget.PutTable os.Remove unlink(2) of the temp file os.CreateTemp just made in the target directory; unlink removes a link at the name itself and never follows it
 allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a link at its new path and refuses an existing one, so a planted name fails the put (ErrExists)
 allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
-allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside its FileStore's state file; agentosd's kept replies and localui's card latch default to root-held /var/lib/agentos (tmpfiles.d: 0700 root root), which no other uid can write
+allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside its FileStore's state file; agentosd's kept replies and localui's card latch default to root-held /var/lib/agentos
 allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
 allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
 allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile procfs route, neighbour and ipv6_route tables, served by the kernel, and resolv.conf in root-owned /run/systemd/resolve and /etc, where /etc/resolv.conf is a link to systemd-resolved's file on purpose
-allow broker/owner/state.go FileStore.Load os.ReadFile owner.json in root-held /var/lib/agentos (agentosd -owner-state; tmpfiles.d: 0700 root root), and recovery checks the restored copy with Lstat first; owner may not import syscall (ARC-2), so it cannot ask for O_NOFOLLOW

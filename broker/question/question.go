@@ -5,14 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -404,7 +402,7 @@ func New(cfg Config) (*Book, error) {
 	if cfg.Path == "" {
 		return b, nil
 	}
-	raw, err := readFile(cfg.Path)
+	raw, err := os.ReadFile(cfg.Path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -1559,15 +1557,4 @@ func (b *Book) leaveWait(machine string) {
 	if b.waiters[machine]--; b.waiters[machine] <= 0 {
 		delete(b.waiters, machine)
 	}
-}
-
-// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
-// question book is never a link, so one there was planted.
-func readFile(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(f)
 }

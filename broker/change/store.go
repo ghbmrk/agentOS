@@ -4,11 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/durable"
 )
@@ -52,7 +50,7 @@ func (m *MemStore) Save(b []byte) error {
 type FileStore struct{ Path string }
 
 func (f FileStore) Load() ([]byte, error) {
-	b, err := readFile(f.Path)
+	b, err := os.ReadFile(f.Path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -131,7 +129,7 @@ func (d DirContent) path(name string) string {
 }
 
 func (d DirContent) Get(name string) ([]byte, error) {
-	b, err := readFile(d.path(name))
+	b, err := os.ReadFile(d.path(name))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -155,14 +153,3 @@ func (d DirContent) Delete(name string) error {
 
 // Bodies is the directory beside the state file, Path with ".d" added.
 func (f FileStore) Bodies() Content { return DirContent{Dir: f.Path + ".d"} }
-
-// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): a
-// state file or body is never a link, so one there was planted.
-func readFile(p string) ([]byte, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(f)
-}

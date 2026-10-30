@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/admission"
 	"github.com/ghbmrk/agentos/broker/cgroup"
@@ -170,7 +169,7 @@ func MemTotalMB(path string) (int64, error) { return meminfoMB(path, "MemTotal")
 func MemAvailableMB(path string) (int64, error) { return meminfoMB(path, "MemAvailable") }
 
 func meminfoMB(path, key string) (int64, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
