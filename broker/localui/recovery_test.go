@@ -38,6 +38,7 @@ type fakeRecoveryOps struct {
 	lostState localapi.RecoveryLostState
 	lostCard  []byte
 	lostErr   error
+	doneErr   error // RecoveryLostDone's answer
 }
 
 var testBegun = localapi.RecoveryBegun{Old: strings.Repeat("a1", 16), Next: strings.Repeat("b2", 16), Challenge: []byte("0123456789abcdef0123456789abcdef")}

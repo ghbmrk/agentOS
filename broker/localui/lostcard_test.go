@@ -58,7 +58,7 @@ func (f *fakeRecoveryOps) RecoveryLostCard(context.Context, string) ([]byte, err
 func (f *fakeRecoveryOps) RecoveryLostDone(context.Context, string) error {
 	f.lost = append(f.lost, "done")
 	f.lostCard, f.lostState.Ready = nil, false
-	return nil
+	return f.doneErr
 }
 
 var lostTap = url.Values{"step": {"lost"}, "ad": {base64.StdEncoding.EncodeToString([]byte("ad"))},
@@ -123,7 +123,7 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	}
 	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
 	p := r.get("/recovery/new")
-	if !strings.Contains(p, text) || strings.Contains(p, `name="cancel"`) || !strings.Contains(p, "already opens my store") {
+	if !strings.Contains(p, text) || strings.Contains(p, `name="cancel"`) || !strings.Contains(p, "recovery key already opens my store") {
 		t.Fatalf("the made card's page:\n%s", p)
 	}
 	// Another visit shows the same display; the kernel is read once.
@@ -183,5 +183,29 @@ func TestLostCardOnlyToItsSession(t *testing.T) {
 	}
 	if _, err := d.Page(); err == nil {
 		t.Fatal("the replaced display still holds the card")
+	}
+}
+
+// A kernel that restarted after the page read the card answers the
+// confirm with no card: the card the owner confirmed still opens the
+// store, so the confirm is done; any other refusal keeps the card shown.
+func TestLostCardConfirmAfterAKernelRestart(t *testing.T) {
+	r := newRecoveryRig(t)
+	r.signIn()
+	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
+	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	group := func() url.Values {
+		_, g := r.srv.lost.display.Asks()
+		return url.Values{"group": {strings.Split(text, "-")[g-1]}}
+	}
+	r.f.lostCard = bytes.Clone(bits)
+	r.get("/recovery/new")
+	r.f.doneErr = Refused(localapi.ErrRecoveryUnavailable)
+	if w := r.post("/recovery/new", group()); w.Code == http.StatusSeeOther || r.srv.lost.display == nil {
+		t.Fatalf("an unavailable kernel finished the confirm: %d", w.Code)
+	}
+	r.f.doneErr = Refused(localapi.ErrRecoveryNoCard)
+	if w := r.post("/recovery/new", group()); w.Code != http.StatusSeeOther || r.srv.lost.display != nil {
+		t.Fatalf("no card at the confirm: %d", w.Code)
 	}
 }

@@ -246,8 +246,8 @@ func recoveryWrongTap(err error) bool {
 // says what is in effect; each says to keep every card (recoveryKeepAll).
 const (
 	recoveryKeepAll     = "Keep all your cards until a replacement says Done: only then do I know which one opens my store."
-	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I take a backup sealed to the new key within a minute."
-	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I finish moving backups to the new key within a few minutes."
+	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your older cards, whose recovery keys no longer open my store. I take a backup sealed to the new key within a minute."
+	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your older cards, whose recovery keys no longer open my store. I finish moving backups to the new key within a few minutes."
 	recoveryUnsureText  = "I couldn't tell whether that finished. " + recoveryKeepAll + " Try the tap again."
 	recoveryCancelText  = "Cancelled. " + recoveryKeepAll
 	recoveryExpiredText = "That replacement took too long and was dropped. " + recoveryKeepAll + " Then start again."
@@ -505,7 +505,7 @@ func init() {
 <script>{{passkeyjs}}</script>
 {{else if eq .Step "lost"}}
 <h2>Tap your hardware key to ask for a new card</h2>
-<p>When I next restart I make a new card and replace your recovery key with it at once, before you see it; then this page shows it. Your old card stops opening my store. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
+<p>When I next restart I make a new card and replace your recovery key with it at once, before you see it; then this page shows it. Your old card's recovery key stops opening my store; its passphrase still does. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
 <p>From: <span class="mono">{{if .Old}}{{.Old}}{{else}}none (I have no backup key yet){{end}}</span><br>To: a new key I make when I restart</p>
 <form method="post" action="/recovery/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="lost"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key to ask for a new card</button></p>
@@ -530,7 +530,7 @@ func init() {
 {{else if .Lost.Filed}}<p>Your request for a new card waits for my next restart.</p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="restart"><button>Restart now</button></form>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="withdraw"><button class="plain">Withdraw the request</button></form>
-{{else}}<p>If no card you hold opens my store, I can make a new one when I restart, after one of your hardware keys approves it. Use this only when the whole card is lost: until you confirm the new card, nobody holds one that opens my store. If you asked before and restarted but I show no new card here, I lost it before you saw it: ask again.</p>
+{{else}}<p>If no card you hold opens my store, I can make a new one when I restart, after one of your hardware keys approves it. Use this only when the whole card is lost: until you confirm the new card, nobody holds a recovery key that opens my store. If you asked before and restarted but I show no new card here, I lost it before you saw it: ask again.</p>
 <p><a href="/recovery/lost">Ask for a new card</a></p>
 {{end}}{{end}}
 {{template "foot"}}{{end}}`))

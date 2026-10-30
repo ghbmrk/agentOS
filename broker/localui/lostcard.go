@@ -86,10 +86,10 @@ type lostState struct {
 // The lost-card route's fixed lines. None names a value.
 const (
 	lostFiledText    = "Your request for a new card is filed. When I restart I make the new card, and this page shows it. Restart me now, or I carry it out at my next restart within a week."
-	lostRestartText  = "I restart as soon as no call or task is running, usually within a minute. Then open this page again to see your new card."
+	lostRestartText  = "I restart as soon as no call or task is running; once a month a check of my software runs first and takes a few minutes more. Then open this page again to see your new card."
 	lostWithdrawText = "Your request for a new card is withdrawn. Your current card stays in effect."
-	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: it is the only card that opens my store, and the backups I take from now on open with it."
-	lostGoneText     = "I no longer hold your new card: I restarted before you confirmed it. My store already takes the new key, so nobody holds a card that opens it. Ask for a new card again."
+	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its recovery key is the only one that opens my store, and the backups I take from now on open with it. Your old card's passphrase still opens my store."
+	lostGoneText     = "I no longer hold your new card: I restarted before you confirmed it. My store already takes the new recovery key, so nobody holds a recovery key that opens it. Ask for a new card again."
 	lostNoTapText    = "Nothing was filed. Tap again with one of your hardware keys."
 )
 

@@ -414,7 +414,7 @@ func TestMadeCardOffersNoCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(must(d.Page()))
-	if strings.Contains(page, `name="cancel"`) || strings.Contains(page, "stays in effect") || !strings.Contains(page, "already opens my store") {
+	if strings.Contains(page, `name="cancel"`) || strings.Contains(page, "stays in effect") || !strings.Contains(page, "recovery key already opens my store") {
 		t.Fatalf("made card page: %q", page)
 	}
 	h := d.Handler(paired, "/recovery/")
