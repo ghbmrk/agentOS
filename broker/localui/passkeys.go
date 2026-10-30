@@ -2,9 +2,12 @@ package localui
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
 	"time"
@@ -169,6 +172,8 @@ type passkeysView struct {
 	// Challenge is the tap's challenge, base64: the enrolment's, or the
 	// confirmed phone passkey's CutChallenge.
 	Challenge string
+	// Tok binds the enrolment's Challenge to the phone (passkeyToken).
+	Tok       string
 	Confirm   localapi.Passkey
 	Err, Done string
 }
@@ -180,6 +185,16 @@ func formBytes(v string, max int) ([]byte, bool) {
 	}
 	b, err := base64.StdEncoding.DecodeString(v)
 	return b, err == nil && len(b) > 0 && len(b) <= max
+}
+
+// passkeyToken binds an enrolment's challenge, as agentosd returned it,
+// to the signed-in phone, so a wrong tap's retry shows only a challenge
+// this UI was given, never one the form made up (#3239 item 2). Its input
+// is kept apart from formToken's.
+func (s *Server) passkeyToken(sess, ch string) string {
+	m := hmac.New(sha256.New, s.formKey)
+	fmt.Fprintf(m, "passkey\x00%s\x00%s", sess, ch)
+	return hex.EncodeToString(m.Sum(nil))
 }
 
 // passkeysPage serves /passkeys/ behind sign-in (CH-7), only with an RP ID
@@ -232,6 +247,7 @@ func (s *Server) passkeysPage(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		v.Step, v.Challenge = "tap", base64.StdEncoding.EncodeToString(c)
+		v.Tok = s.passkeyToken(tok, v.Challenge)
 		s.render(w, "passkeys", v)
 		return
 	case "finish":
@@ -243,10 +259,11 @@ func (s *Server) passkeysPage(w http.ResponseWriter, r *http.Request) {
 			err = s.cfg.Passkeys.Finish(ctx, tok, ad, cd, sig)
 		}
 		// A wrong tap stays on the tap step with the begun challenge, which
-		// the form carries back; agentosd still holds the point.
-		ch, ok := formBytes(f.Get("ch"), localapi.PasskeyChallenge)
-		if wrongTap(err) && ok && len(ch) == localapi.PasskeyChallenge {
-			v.Step, v.Challenge, v.Err = "tap", base64.StdEncoding.EncodeToString(ch), TapAgainText
+		// the form carries back under this UI's token; agentosd still holds
+		// the point.
+		ch := f.Get("ch")
+		if wrongTap(err) && hmac.Equal([]byte(f.Get("tok")), []byte(s.passkeyToken(tok, ch))) {
+			v.Step, v.Challenge, v.Tok, v.Err = "tap", ch, f.Get("tok"), TapAgainText
 			s.render(w, "passkeys", v)
 			return
 		}
@@ -343,7 +360,7 @@ func init() {
 <p class="err" id="pk-msg"></p>
 {{if eq .Step "tap"}}
 <p>Now tap one of your hardware keys. It signs to add the new passkey; nothing is added until it does.</p>
-<form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="finish"><input type="hidden" name="ch" value="{{.Challenge}}"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
+<form method="post" action="/passkeys/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="finish"><input type="hidden" name="ch" value="{{.Challenge}}"><input type="hidden" name="tok" value="{{.Tok}}"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key</button></p>
 <p><a href="/passkeys/">Cancel</a></p>
 {{else if eq .Step "confirm"}}

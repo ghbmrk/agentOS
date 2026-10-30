@@ -274,7 +274,11 @@ func TestAWrongTapStaysOnTheTapStep(t *testing.T) {
 	if !strings.Contains(p, `name="ch" value="`+ch+`"`) {
 		t.Fatalf("the finish form lacks the challenge:\n%s", p)
 	}
-	tap := url.Values{"step": {"finish"}, "ch": {ch}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
+	m := regexp.MustCompile(`name="tok" value="([0-9a-f]{64})"`).FindStringSubmatch(p)
+	if m == nil {
+		t.Fatalf("the finish form lacks the token:\n%s", p)
+	}
+	tap := url.Values{"step": {"finish"}, "ch": {ch}, "tok": {m[1]}, "ad": {enc([]byte("ad"))}, "cd": {enc([]byte("cd"))}, "sig": {enc([]byte("sig"))}}
 	for _, c := range []string{localapi.ErrPasskeyBadAssertion, localapi.ErrPasskeyNotAnchor} {
 		fp.err = Refused(c)
 		p = html.UnescapeString(r.post("/passkeys/", tap).Body.String())
@@ -291,10 +295,16 @@ func TestAWrongTapStaysOnTheTapStep(t *testing.T) {
 	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
 		t.Fatal("a stale finish stayed on the tap step")
 	}
+	// A challenge this UI did not give out is never shown back (#3239
+	// item 2): one the form made up, or one without its token.
 	fp.err = Refused(localapi.ErrPasskeyBadAssertion)
-	tap.Set("ch", enc([]byte("short")))
-	if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) {
-		t.Fatal("a bad challenge was shown back")
+	made := enc([]byte("fedcba9876543210fedcba9876543210"))
+	for _, bad := range []url.Values{{"ch": {made}, "tok": {m[1]}}, {"ch": {ch}, "tok": {""}}, {"ch": {made}, "tok": {r.srv.passkeyToken("another phone", made)}}} {
+		tap.Set("ch", bad.Get("ch"))
+		tap.Set("tok", bad.Get("tok"))
+		if p = r.post("/passkeys/", tap).Body.String(); strings.Contains(p, `id="pk-tap"`) || strings.Contains(p, made) {
+			t.Fatalf("a challenge not given out was shown back: %v", bad)
+		}
 	}
 	// The script asks the browser for a security key at the tap.
 	if !strings.Contains(passkeyJS, `hints: ["security-key"]`) || strings.Count(passkeyJS, "navigator.credentials.get(") != 1 {
