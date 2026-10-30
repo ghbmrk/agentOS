@@ -282,16 +282,18 @@ func labelWords(l string) string {
 	return "not containable"
 }
 
+// holdWords is a hold's line. A device under any hold loses its pairs
+// (policy.Document.Unpatched, broker/enforcer/nft), so each line says so.
 func holdWords(h policy.Hold, on bool) string {
 	switch {
 	case h.Kind == policy.HoldFix && on:
-		return fmt.Sprintf("Hold back security fixes for %s: it stays open to the flaws they fix.", h.Device)
+		return fmt.Sprintf("Hold back security fixes for %s: it stays open to the flaws they fix, and its pairs with other devices stop until no hold is left on it.", h.Device)
 	case h.Kind == policy.HoldFix:
-		return fmt.Sprintf("Stop holding back security fixes for %s.", h.Device)
+		return fmt.Sprintf("Stop holding back security fixes for %s: its pairs with other devices apply again once no hold is left on it.", h.Device)
 	case on:
-		return fmt.Sprintf("Freeze %s's firmware: it gets no updates, security fixes included.", h.Device)
+		return fmt.Sprintf("Freeze %s's firmware: it gets no updates, security fixes included, and its pairs with other devices stop until no hold is left on it.", h.Device)
 	}
-	return fmt.Sprintf("Unfreeze %s's firmware.", h.Device)
+	return fmt.Sprintf("Unfreeze %s's firmware: its pairs with other devices apply again once no hold is left on it.", h.Device)
 }
 
 func window(r policy.StandingRule) string {

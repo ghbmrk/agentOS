@@ -968,3 +968,24 @@ func TestHoldOnLockNamesRisk(t *testing.T) {
 		t.Fatalf("pending: %+v", p)
 	}
 }
+
+// NET-7: a hold cuts the device's pairs (nft drops an unpatched device's
+// pairs), so the line the owner signs says so, and the line lifting it says
+// they apply again.
+func TestHoldNamesLostPairs(t *testing.T) {
+	paired := edit(7, func(d *policy.Document) { d.Pairs = []policy.Pair{{A: "cam", B: "tv"}} })
+	for _, kind := range []string{policy.HoldFirmware, policy.HoldFix} {
+		held := edit(8, func(d *policy.Document) {
+			d.Pairs = []policy.Pair{{A: "cam", B: "tv"}}
+			d.Holds = []policy.Hold{{Device: "tv", Kind: kind}}
+		})
+		on := strings.Join(Describe(paired, held), "\n")
+		if !strings.Contains(on, "tv") || !strings.Contains(on, "its pairs with other devices stop until no hold is left on it") {
+			t.Errorf("%s on: the line does not say the pairs stop: %q", kind, on)
+		}
+		off := strings.Join(Describe(held, paired), "\n")
+		if !strings.Contains(off, "its pairs with other devices apply again once no hold is left on it") {
+			t.Errorf("%s off: the line does not say the pairs apply again: %q", kind, off)
+		}
+	}
+}
