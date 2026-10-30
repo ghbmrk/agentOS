@@ -19,6 +19,7 @@ func TestForms(t *testing.T) {
 		"64:ff9b:1::a9fe:a9fe", "64:ff9b:1:a9fe:a9:fe00::", "2002:a9fe:a9fe::1",
 		"fe80::5efe:a9fe:a9fe%eth0", "fe80::200:5efe:a9fe:a9fe",
 		"2001:0:a9fe:a9fe::", "2001:0:4136:e378:8000:63bf:5601:5601",
+		"::ffff:0:a9fe:a9fe", "::ffff:0:a9fe:a9fe%eth0",
 	} {
 		if !slices.Contains(Forms(netip.MustParseAddr(s)), meta) {
 			t.Errorf("%s: %v lacks %s", s, Forms(netip.MustParseAddr(s)), meta)
@@ -27,6 +28,7 @@ func TestForms(t *testing.T) {
 	for _, s := range []string{
 		"169.254.169.253", "fe80::a9fe:a9fe", "2003:a9fe:a9fe::1", "fe80::100:5efe:a9fe:a9fe",
 		"64:ff9b:2::a9fe:a9fe", "2001:1:a9fe:a9fe::", "1::a9fe:a9fe", "::1",
+		"::fffe:0:a9fe:a9fe", "::ffff:1:a9fe:a9fe", "1::ffff:0:a9fe:a9fe",
 	} {
 		if slices.Contains(Forms(netip.MustParseAddr(s)), meta) {
 			t.Errorf("%s gives %s", s, meta)
