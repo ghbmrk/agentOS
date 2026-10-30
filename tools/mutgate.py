@@ -274,7 +274,9 @@ def cmd_report(args):
 def broker_diff(base, head):
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
-        ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
+        # --src-prefix/--dst-prefix: diff.noprefix or diff.dstPrefix would drop every file from added_lines (#4115).
+        ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", "--src-prefix=a/", "--dst-prefix=b/",
+         f"{base}...{head}", "--", "broker"],
         # errors="replace" below: with --text a binary file's bytes are diff lines, and need not be UTF-8.
         cwd=ROOT, capture_output=True, check=True,
     # Bytes decoded here: text=True would turn a lone \r into \n and number the lines wrongly (#4028).
