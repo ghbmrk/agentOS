@@ -220,7 +220,8 @@ def broker_diff(base, head):
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
         ["git", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
+        # errors="replace": with --text a binary file's bytes are diff lines, and need not be UTF-8.
+        cwd=ROOT, capture_output=True, text=True, errors="replace", check=True,
     ).stdout
 
 

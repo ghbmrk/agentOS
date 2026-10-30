@@ -180,6 +180,7 @@ class Claimed(unittest.TestCase):
             (pkg / "a_test.go").write_text("package netguard\n// REQ: CRED-1\n")
             # A `-diff` attribute must not hide the marker as a binary file (L3 on #4026).
             (pkg / ".gitattributes").write_text("*.go -diff\n")
+            (pkg / "blob.bin").write_bytes(b"\xbb\xff\n")  # not UTF-8, as broker/ already tracks
             (pathlib.Path(d) / "docs").mkdir()
             (pathlib.Path(d) / "docs" / "x.md").write_text("REQ: CRED-1\n")
             git("add", "-A")
