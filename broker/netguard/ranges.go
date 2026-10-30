@@ -17,7 +17,11 @@
 // not use it.
 package netguard
 
-import "net/netip"
+import (
+	"net/netip"
+
+	"github.com/ghbmrk/agentos/broker/kernel/ipform"
+)
 
 type rng struct {
 	prefix netip.Prefix
@@ -80,34 +84,10 @@ var special6 = mustRanges([][2]string{
 
 var nat64 = netip.MustParsePrefix("64:ff9b::/96")
 
-// forms returns the address and every IPv4 address it embeds: the
-// unmapped form of an IPv4-mapped address, the low 32 bits of a NAT64
-// address, the IPv4 inside a 6to4 address, and the IPv4 an ISATAP
-// interface ID carries. Each is checked, so an embedded private address
-// cannot hide in a global-looking IPv6 one.
-func forms(a netip.Addr) []netip.Addr {
-	a = a.WithZone("")
-	if a.Is4In6() {
-		return []netip.Addr{a.Unmap()}
-	}
-	out := []netip.Addr{a}
-	if !a.Is6() {
-		return out
-	}
-	b := a.As16()
-	v4 := func(o int) netip.Addr { return netip.AddrFrom4([4]byte{b[o], b[o+1], b[o+2], b[o+3]}) }
-	if nat64.Contains(a) {
-		out = append(out, v4(12))
-	}
-	if b[0] == 0x20 && b[1] == 0x02 { // 6to4
-		out = append(out, v4(2))
-	}
-	// ISATAP: interface ID 0000:5efe or 0200:5efe, then the IPv4 address.
-	if (b[8] == 0 || b[8] == 2) && b[9] == 0 && b[10] == 0x5e && b[11] == 0xfe {
-		out = append(out, v4(12))
-	}
-	return out
-}
+// forms is the address and every IPv4 address it embeds (ipform.Forms).
+// Each is checked, so an embedded private or decoy address cannot hide in a
+// global-looking IPv6 one.
+var forms = ipform.Forms
 
 // Special reports whether a is not a global unicast address by the IANA
 // special-purpose registries, and which entry says so. An address that

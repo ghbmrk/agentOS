@@ -50,3 +50,4 @@ known github.com/google/go-tpm/tpm2/transport/linuxtpm -- the unlock step opens 
 known github.com/google/go-tpm/tpm2/transport/linuxudstpm -- the unlock step's swtpm socket
 known github.com/ghbmrk/agentos/broker/decoy -- the kernel folds the decoy table event and looks refused keys up in it (KRN-12, DECOY-b)
 known github.com/ghbmrk/agentos/broker/decoy/match -- the kernel's outbound path matches plan steps against the table (KRN-12, DECOY-b)
+known github.com/ghbmrk/agentos/broker/kernel/ipform -- the kernel's plan check and netguard reduce an IPv6 address to the IPv4 addresses it carries (KRN-12, DEV-2, DECOY-b)

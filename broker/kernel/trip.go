@@ -17,6 +17,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/decoy"
 	"github.com/ghbmrk/agentos/broker/decoy/match"
+	"github.com/ghbmrk/agentos/broker/kernel/ipform"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
 
@@ -274,9 +275,11 @@ func (s *State) tripOf(p Plan) *Trip {
 		sort.Strings(names)
 		for _, n := range names {
 			if a, ok := destOf(st.Args[n]); ok {
-				if id, ok := d.m.Dest(a); ok {
-					t.Cause, t.Entry = CauseDest, id
-					return t
+				for _, f := range ipform.Forms(a) {
+					if id, ok := d.m.Dest(f); ok {
+						t.Cause, t.Entry = CauseDest, id
+						return t
+					}
 				}
 			}
 		}
