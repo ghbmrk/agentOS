@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/recall"
 )
 
 // planLoginVault holds one plan-login entry, a JSON token set, and
@@ -25,8 +24,8 @@ func planLoginVault(t *testing.T) (*Vault, map[string]string) {
 	t.Cleanup(func() { v.Close() })
 	fields := map[string]string{}
 	for _, f := range []string{"access_token", "refresh_token", "id_token"} {
-		// No "sk-" prefix, so recall's own pattern scrubber does not
-		// catch it and the vault redactor is what the tests see.
+		// No "sk-" prefix, so a pattern scrubber would not catch it and
+		// the vault redactor is what the tests see.
 		fields[f] = strings.Replace(string(canary(t)), "sk-canary-", "plcanary", 1)
 	}
 	set := map[string]any{"account_id": "acct-x"}
@@ -121,31 +120,6 @@ func TestPlanLoginFieldAbsentFromJournal(t *testing.T) {
 	}
 	if n != len(fields) {
 		t.Fatalf("replayed %d egress records, want %d", n, len(fields))
-	}
-}
-
-// Recall canary absence per field: text that echoes a bare token is
-// stored redacted. Recall's own scrubber also drops high-entropy runs, so
-// the test checks that the vault redactor, which runs first, took it.
-func TestPlanLoginFieldAbsentFromRecall(t *testing.T) {
-	v, fields := planLoginVault(t)
-	r, _ := v.Redactor()
-	ix, err := recall.Open(recall.NewMemDir(), recall.WithVaultRedactor(func(s string) string { return string(r.Redact([]byte(s))) }))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for f, c := range fields {
-		id, err := ix.Ingest(recall.Item{Source: recall.Source{Kind: "file", Ref: "/log/" + f}, Text: "codex said " + c})
-		if err != nil {
-			t.Fatal(err)
-		}
-		it, ok := ix.Get(id)
-		if !ok {
-			t.Fatalf("%s: item %s not found", f, id)
-		}
-		if strings.Contains(it.Text, c) || !strings.Contains(it.Text, Placeholder) {
-			t.Fatalf("recall holds %s, or the vault redactor missed it: %q", f, it.Text)
-		}
 	}
 }
 

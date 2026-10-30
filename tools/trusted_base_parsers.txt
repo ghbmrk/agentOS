@@ -32,7 +32,6 @@ inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own c
 inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
 parser github.com/ghbmrk/agentos/broker/edgelink -- frames and handshakes from the edge
-inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its own records
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
 inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/infer/supervise -- starts the inference service; decodes nothing
@@ -51,7 +50,6 @@ inert  github.com/ghbmrk/agentos/broker/kernel/privfile -- checks and replaces a
 inert  github.com/ghbmrk/agentos/broker/procguard -- process hardening; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/provagent -- declares plan routes as values
 inert  github.com/ghbmrk/agentos/broker/quota -- sets disk quotas; decodes nothing
-inert  github.com/ghbmrk/agentos/broker/recall -- reads its own index
 inert  github.com/ghbmrk/agentos/broker/reversible -- declarations as values
 inert  github.com/ghbmrk/agentos/broker/routerule -- rule types as values
 inert  github.com/ghbmrk/agentos/broker/sendrules -- recipient rules over parsed values
