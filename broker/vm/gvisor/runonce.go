@@ -181,7 +181,7 @@ func sandboxGroup(parentPath, name string, mem int64) (*cgroup.Group, error) {
 		return nil, err
 	}
 	stale := &cgroup.Group{Path: filepath.Join(parent.Path, name)}
-	if _, err := os.Stat(stale.Path); err == nil {
+	if _, err := os.Lstat(stale.Path); err == nil {
 		ctx, cancel := context.WithTimeout(context.Background(), oneShotCleanup)
 		stale.Kill(ctx)
 		cancel()
