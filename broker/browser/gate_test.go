@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/kernel"
 )
 
 // The test binary doubles as a scripted driver: with BROWSER_FAKE_DRIVER set it
@@ -107,6 +109,10 @@ func fakeDriver() {
 			r = esc
 		}
 		if string(r) == `"exit"` {
+			// The request is logged before the driver dies, and the gate
+			// sees the loss only when the pipe closes after that, so a test
+			// whose click must reach the driver and lose its answer is
+			// ordered by construction, not by a timing bound (#4083).
 			os.Exit(3)
 		}
 		os.Stdout.Write(append(r, '\n'))
@@ -158,12 +164,6 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 	g.refs = map[string]link{"e1": plainLink, "e2": plainLink}
 	return &harness{g: g, log: log, ws: ws}
 }
-
-// lostBound is the Timeout of a test whose driver reads a click and then
-// hangs, so its answer is lost after the write. The fake must log the
-// click before the gate stops it; a starved runner can hold the fake off
-// its read for longer than a short bound (#4052).
-const lostBound = 3 * time.Second
 
 // plainLink is a link whose click can only read a page.
 var plainLink = link{role: "link", name: "Kettle", target: "https://shop.example.test/products/kettle"}
@@ -530,6 +530,39 @@ func TestHungDriverTimesOutAndStops(t *testing.T) {
 	}
 	if r := h.do(t, `{"v":0,"verb":"click","ref":"e1"}`); r.Error != "stopped" {
 		t.Fatalf("got %+v", r)
+	}
+}
+
+// An effect whose driver hangs is lost once the gate times out, however
+// far the driver got: the kernel holds it unknown, never unsent, and it is
+// sent at most once (KRN-8, D-147). The lost-click tests order the read
+// with a driver that exits after it (#4083); this one keeps the timeout
+// path, so it asserts nothing about whether the driver read the click
+// before it was stopped. Each bound is set only once the rig is up.
+func TestHungEffectIsLost(t *testing.T) {
+	h := newHarness(t, map[string]any{"click": "hang"}, "", 0)
+	h.g.cfg.LoggedOut = true
+	h.g.refs["e6"] = link{role: "button", name: "Send message"}
+	r := newClerkRig(t, h)
+	h.g.cfg.Timeout = 300 * time.Millisecond
+	r.run(t, 0, "p1", r.root, read(`{"v":0,"verb":"click","ref":"e6"}`))
+	if s := r.step("p1"); s.Phase != kernel.PUnknown || !strings.Contains(s.Detail, "timeout") {
+		t.Fatalf("logged-out click: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, h, "click"); len(got) > 1 {
+		t.Fatalf("driver got %q", got)
+	}
+
+	r = newCart(t, map[string]any{"click": "hang"}, 0)
+	r.h.g.cfg.Timeout = 300 * time.Millisecond
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a := r.stepApproval(t, "ask")
+	r.run(t, 2, "buy", r.approve(t, a.Print), submitStep(a, pressOrder))
+	if s := r.step("buy"); s.Phase != kernel.PUnknown || !strings.Contains(s.Detail, "timeout") {
+		t.Fatalf("approved submit: phase %s (%s)", s.Phase, s.Detail)
+	}
+	if got := forwarded(t, r.h, "click"); len(got) > 1 {
+		t.Fatalf("driver got %q", got)
 	}
 }
 

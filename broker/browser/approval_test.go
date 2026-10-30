@@ -267,7 +267,7 @@ func TestRedactedTargetsHaveDifferentPrints(t *testing.T) {
 // clerk, as after a restart, probes it unknown. One refused unsent probes
 // notdone (KRN-8).
 func TestLostSubmitParksAfterRestart(t *testing.T) {
-	r := newCart(t, map[string]any{"click": "hang"}, lostBound)
+	r := newCart(t, map[string]any{"click": "exit"}, 0)
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
 	k := r.approve(t, a.Print)
@@ -306,7 +306,7 @@ func TestLostSubmitParksAfterRestart(t *testing.T) {
 // for a plain link, and with no record, as after a restart with no refs,
 // any line naming a ref is unknown (KRN-8, D-147).
 func TestLoggedOutProbeUsesWhatDoJudged(t *testing.T) {
-	h := newHarness(t, map[string]any{"click": "hang"}, "", lostBound)
+	h := newHarness(t, map[string]any{"click": "exit"}, "", 0)
 	h.g.cfg.LoggedOut = true
 	h.g.refs["e6"] = link{role: "button", name: "Send message"}
 	r := newClerkRig(t, h)
@@ -569,7 +569,7 @@ func TestSameControlOnAnotherPageIsAnotherPrint(t *testing.T) {
 // A refused redo of a written submit leaves its record standing: Probe
 // stays unknown, so the kernel never takes it for unsent (KRN-8).
 func TestRefusedRedoKeepsTheWrittenRecord(t *testing.T) {
-	r := newCart(t, map[string]any{"click": "hang"}, lostBound)
+	r := newCart(t, map[string]any{"click": "exit"}, 0)
 	r.run(t, 1, "ask", r.root, read(pressOrder))
 	a := r.stepApproval(t, "ask")
 	k := r.approve(t, a.Print)
