@@ -96,7 +96,7 @@ var (
 	sideProc    = Peer{UID: 2002}
 	pageProc    = Peer{UID: 1001}
 	channelProc = Peer{UID: 1002}
-	drivers     = map[string]Peer{"front-lock": frontProc, "side-lock": sideProc, "back-lock": sideProc}
+	drivers     = map[string]Peer{"front-lock": frontProc, "side-lock": sideProc, "back-lock": sideProc, "back-door": sideProc}
 )
 
 type rig struct {
@@ -449,10 +449,11 @@ func (f *failDisk) Save(b []byte) error {
 	return f.mem.Save(b)
 }
 
-// TestSaveFailureChangesNothing: when the sealed state cannot be saved,
-// Admit and Prune report it and the store keeps what it had, so memory
-// never runs ahead of the disk.
-func TestSaveFailureChangesNothing(t *testing.T) {
+// TestSaveFailureFailsClosed: when the sealed state cannot be saved,
+// Admit reports it and holds nothing, and Prune reports it but erases in
+// memory all the same, so a cancelled secret is never released to a
+// device re-added under its name without one (Security on #4073).
+func TestSaveFailureFailsClosed(t *testing.T) {
 	r := newRig(t)
 	disk := &failDisk{}
 	r.disk = &disk.mem
@@ -462,7 +463,7 @@ func TestSaveFailureChangesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := r.admit("front-lock")
+	r.admit("front-lock")
 
 	disk.fail = true
 	next := r.seal("side-lock")
@@ -475,20 +476,40 @@ func TestSaveFailureChangesNothing(t *testing.T) {
 	}
 	r.land()
 
+	// Removed while the disk refuses: erased in memory, error reported.
 	cur := r.eng.Current()
 	cur.Devices = slices.DeleteFunc(cur.Devices, func(d policy.Device) bool { return d.ID == "front-lock" })
 	r.propose(cur, "This closes something on a safety-list device.\nRemove the device front-lock.\n")
 	if err := r.store.Prune(); err == nil {
 		t.Error("Prune did not report the failed save")
 	}
-	if fp, ok := r.store.Fingerprint("front-lock"); !ok || fp != pairseal.Hash(env) {
-		t.Error("an erase that was never saved changed the store")
+	if _, ok := r.store.Fingerprint("front-lock"); ok {
+		t.Error("a removed device's secret is still held after a failed save")
+	}
+
+	// Cancelled while the disk refuses, then the name re-added with no
+	// secret: nothing is released.
+	disk.fail = false
+	env := r.seal("back-door")
+	prop, sig = r.propose(with(r.eng.Current(), lock("back-door")), addDiff("back-door", env))
+	if err := r.store.Admit("back-door", env, prop, sig); err != nil {
+		t.Fatal(err)
+	}
+	disk.fail = true
+	if err := r.eng.Cancel(r.eng.Pending()[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.Prune(); err == nil {
+		t.Error("Prune did not report the failed save")
+	}
+	r.propose(with(r.eng.Current(), lock("back-door")), "This opens something.\nAdd the device back-door.\n")
+	r.store.Prune()
+	r.land()
+	if _, err := r.store.Release("back-door", sideProc); !errors.Is(err, ErrNoSecret) {
+		t.Errorf("a cancelled secret was released after failed saves: %v", err)
 	}
 	disk.fail = false
 	if err := r.store.Prune(); err != nil {
 		t.Fatal(err)
-	}
-	if _, ok := r.store.Fingerprint("front-lock"); ok {
-		t.Error("removed device's secret still held")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,13 +135,20 @@ func TestNoSecretOnChannel(t *testing.T) {
 		cl.do(wire.Command{ID: id + 1, Device: "lock", Verb: wire.VerbOn}),
 		cl.do(wire.Tighten{ID: id + 2, Kind: wire.IsolateDevice, Device: "lock"}),
 	)
-	all := fmt.Sprintf("%#v %#v", replies, r.events())
-	if bytes.Contains([]byte(all), lockCanary) {
-		t.Fatal("a channel reply or log line carries the secret")
-	}
+	// Every reply as the core receives it: its encoded frame, every byte
+	// field included (Security on #4073: %#v prints bytes as hex).
 	for _, m := range replies {
-		if rep, ok := m.(wire.ReadReply); ok && bytes.Contains(rep.Body, lockCanary) {
-			t.Fatalf("read reply %d carries the secret", rep.ID)
+		f, err := wire.Encode(wire.ToCore, m)
+		if err != nil {
+			t.Fatalf("encode %T: %v", m, err)
 		}
+		if bytes.Contains(f.Payload, lockCanary) {
+			t.Fatalf("a %T reply carries the secret", m)
+		}
+	}
+	// Log events hold only strings and numbers, which %+v prints as they
+	// are.
+	if strings.Contains(fmt.Sprintf("%+v", r.events()), string(lockCanary)) {
+		t.Fatal("a channel log line carries the secret")
 	}
 }

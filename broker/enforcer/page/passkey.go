@@ -71,6 +71,7 @@ var (
 	errRefused   = errors.New("the passkey did not approve this change")
 	errMoved     = errors.New("the policy changed since this page was drawn; open the link again")
 	errSealed    = errors.New("the device's sealed secret is missing or not the one this change names; nothing was added")
+	errStuck     = errors.New("the device's secret was refused but this change could not be withdrawn; cancel it on the home page")
 )
 
 func newID() string {
@@ -304,16 +305,17 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.secret != nil {
 		if err := s.cfg.Secrets.Admit(c.secret.device, sealed, c.prop, sig); err != nil {
-			if out.Pending != "" {
-				s.cfg.Policy.Cancel(out.Pending)
+			if out.Pending == "" || s.cfg.Policy.Cancel(out.Pending) != nil {
+				fail(w, http.StatusInternalServerError, errStuck)
+				return
 			}
-			s.cfg.Secrets.Prune()
+			s.cfg.Secrets.Prune() // fails closed: an unsaved erase still holds in memory
 			fail(w, http.StatusConflict, errSealed)
 			return
 		}
 	}
 	if s.cfg.Secrets != nil {
-		s.cfg.Secrets.Prune()
+		s.cfg.Secrets.Prune() // fails closed, as above
 	}
 	res := map[string]any{"applied": out.Applied}
 	if out.Pending != "" {

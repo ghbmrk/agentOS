@@ -234,15 +234,18 @@ func (s *Store) Prune() error {
 		return nil
 	}
 	old := s.st
-	if err := s.save(st); err != nil {
-		return err
-	}
+	err := s.save(st)
+	// Fail closed: an erase the disk refused still happens in memory, so
+	// a cancelled or removed device's secret is never released; the next
+	// Prune that saves (at the latest the daemon's at start) erases it on
+	// disk too.
+	s.st = st
 	for d, r := range old.Secrets {
 		if _, kept := st.Secrets[d]; !kept {
 			clear(r.Secret)
 		}
 	}
-	return nil
+	return err
 }
 
 // clone copies the state's map, not the secrets it points to.
