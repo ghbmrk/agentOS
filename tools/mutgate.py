@@ -85,20 +85,54 @@ def survivors(results_dir):
     return out
 
 
+_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote(name):
+    """Git's C-style quoted file name (`"b/h\\303\\251.go"`) as text."""
+    out, i = bytearray(), 1
+    while i < len(name) - 1:
+        c = name[i]
+        if c != "\\":
+            out += c.encode()
+        elif name[i + 1] in _ESC:
+            out.append(_ESC[name[i + 1]])
+            i += 1
+        else:
+            out.append(int(name[i + 1:i + 4], 8))
+            i += 3
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _header_path(raw):
+    """The repo path a `+++ ` header names, or None for /dev/null or a non-b/ name (#4105)."""
+    name = raw[4:].rstrip("\t")  # git appends a TAB after a name that holds a space
+    if name.startswith('"'):
+        name = _unquote(name)
+    return name[2:] if name.startswith("b/") else None
+
+
 def added_lines(diff_text):
     """({path: set(line)} of added lines, set of paths whose added lines carry a REQ marker)."""
-    added, marked, path, line = {}, set(), None, 0
+    added, marked, path, line, in_hunk = {}, set(), None, 0, False
     # split("\n"), not splitlines(): that also breaks on \r, \x0b, \x0c, \x1c-\x1e, \x85, U+2028 and
     # U+2029, which a Go comment can carry, and every later added line would be numbered one low (#4028).
     for raw in diff_text.split("\n"):
-        if raw.startswith("+++ "):
-            path = raw[6:] if raw.startswith("+++ b/") else None
+        # Every line inside a hunk starts with space, + , - or \, so `diff ` can only be a file
+        # header and a `+++ ` line is a header only before the first @@ (an added `++ x` is not one).
+        if raw.startswith("diff "):
+            in_hunk, path = False, None
             continue
         m = HUNK.match(raw)
         if m:
-            line = int(m.group(1))
+            in_hunk, line = True, int(m.group(1))
             continue
-        if path is None or raw.startswith(("--- ", "diff ")):
+        if not in_hunk:
+            if raw.startswith("+++ "):
+                path = _header_path(raw)
+            continue
+        if path is None or raw.startswith("\\"):  # "\ No newline at end of file" is no line (#4103)
             continue
         if raw.startswith("+"):
             added.setdefault(path, set()).add(line)
@@ -240,7 +274,7 @@ def cmd_report(args):
 def broker_diff(base, head):
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
-        ["git", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
+        ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
         # errors="replace" below: with --text a binary file's bytes are diff lines, and need not be UTF-8.
         cwd=ROOT, capture_output=True, check=True,
     # Bytes decoded here: text=True would turn a lone \r into \n and number the lines wrongly (#4028).

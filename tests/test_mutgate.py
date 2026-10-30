@@ -64,6 +64,35 @@ class Gate(unittest.TestCase):
             self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 12, "X")]}),
                              [("hint", "broker/hint/hint.go", 12, "X")], repr(ch))
 
+    def test_added_lines_skip_the_no_newline_marker(self):
+        # #4103: the marker after a rewritten unterminated last line is not a line.
+        diff = ("diff --git a/broker/x/a.go b/broker/x/a.go\n--- a/broker/x/a.go\n+++ b/broker/x/a.go\n"
+                "@@ -2 +2,2 @@\n-old\n\\ No newline at end of file\n+n1\n+n2\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3}})
+        diff += "\\ No newline at end of file\n"
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3}})
+        # a LIVED mutant on the first added line is read, not skipped
+        diff = diff.replace("broker/x/a.go", "broker/hint/hint.go").replace("+n1", "+n1\n+// REQ: CRED-1")
+        self.assertEqual(mutgate.violations(diff, {"hint": [("hint.go", 2, "X")]}),
+                         [("hint", "broker/hint/hint.go", 2, "X")])
+
+    def test_added_lines_read_quoted_and_tab_suffixed_headers(self):
+        # #4105: git quotes a non-ASCII name and appends a TAB after a name with a space.
+        for header, path in (('"b/broker/hint/h\\303\\251.go"', "broker/hint/h\u00e9.go"),
+                             ("b/broker/hint/a b.go\t", "broker/hint/a b.go"),
+                             ('"b/broker/hint/q\\"\\\\t.go"', 'broker/hint/q"\\t.go')):
+            diff = f"diff --git a/x b/x\n--- a/x\n+++ {header}\n@@ -1,0 +2 @@\n+x\n"
+            self.assertEqual(mutgate.added_lines(diff)[0], {path: {2}}, header)
+        gone = "diff --git a/x b/x\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+        self.assertEqual(mutgate.added_lines(gone)[0], {})
+
+    def test_added_line_starting_plus_plus_space_is_not_a_header(self):
+        diff = ("diff --git a/broker/x/a.go b/broker/x/a.go\n--- a/broker/x/a.go\n+++ b/broker/x/a.go\n"
+                "@@ -1,0 +2,4 @@\n+a\n+++ b\n+c\n+d\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3, 4, 5}})
+        diff = diff.replace("+++ b\n", "+++ b/other.go\n")
+        self.assertEqual(mutgate.added_lines(diff)[0], {"broker/x/a.go": {2, 3, 4, 5}})
+
     def test_gate_numbers_lines_by_newline_only_on_a_real_diff(self):
         # #4028: git's own diff, read as text, would turn a lone \r into a line break too.
         with tempfile.TemporaryDirectory() as d:
