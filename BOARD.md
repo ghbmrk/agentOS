@@ -119,10 +119,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
-| CH-19r | Held content classed as a code expires within owner-set hours (1-24, default 1); its pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089, D-239; release; serves CH-19; failure path: an away owner gets a pointer to a dead code, while the box stores live secrets for 30 days) | #669; after #3931 | queued |
+| CH-19r | Held content classed as a code expires within owner-set hours (1-24, default 1); its pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089, D-239; release; serves CH-19; failure path: an away owner gets a pointer to a dead code, while the box stores live secrets for 30 days) | #669; after #3931 | building |
 | CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #669 | queued |
 | CH-21 | [Name and first-person voice](briefs/CH-21.md) | CH-12 strings; P2-3 | queued (split into CH-21a to CH-21e) |
-| CH-21f | [Box name at setup: suggested name, owner-name field, contact card](briefs/CH-21b.md) | CH-21b | building (tier A; the setup half of the CH-21b brief) |
 | CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | building (tier A; security first; start from #231's `withholdAgent`, `AskForCode`, `ReplyGrammar`, branch `pkg/ch-21-name-voice-draft` kept) |
 | UX3-6 | [Inspect every approval item over the owner channel](briefs/UX3-6.md) | L1 read-only command grammar; primary; unclaimed | queued (A; from #405) |
 | CH-20w | [Evidence delivery](briefs/CH-20w.md) | CH-20 merged; P2-6m wired into the vault process; — | queued (blocked on mail wiring) |
@@ -146,8 +145,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-decoys | Decoy logins per provider that keeps the owner's secrets, made through CLK-8 sign-up; a decoy sign-in is a proof naming the provider and starts its LOCKDOWN list; secrets made at run time (KRN-10). | A21 and G2 passed; TN-witness-key, CLK-8 sign-up row | queued (release; sub A; tier A; after A21 and G2) |
 | CH-photo-heic-wire | CH-photo-heic-wire: reserve the photo one-shot's 960 MiB in RES-2/HW-4 admission, one run at a time, when CH-photo-c wires photo.Decoder; consider building agentos-photo with -tags noasm (later; from #3124 reviews) | #3124 | queued (later; tier A) |
 | CH-21f-wire | agentosd starts the owner channel with the setup names | CH-21f-wire | queued (tier A; release finding of #948) |
-| CH-21f-text | Pairing reply no longer names the contact agentOS | CH-21f-text | queued (later finding of #948) |
-| CH-21f-unsent | Unsent-pairing note names no step the page lacks | CH-21f-unsent | queued (tier A; release finding of #3913) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -211,7 +208,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-account-plan-guests | Unconnected accounts listed to guests through `resources` as "exists, not connected", service name and kind only, private content (PLN-7, PLN-3). | #3189; a `resources` server | queued (release; tier A) |
 | TN-alert-guard-a22 | A22 contract run: confirm Gmail's own Received protocol on SMTP, POP, import and insert mail, which the alert guard's provider-hop rule rests on (TN-alert-guard-forged-ar). | #3201 | queued (release; tier A) |
 | TN-account-plan-imap-scope | IMAP account plan folder scope: i10 wording covers shared-namespace APPEND (or skip non-personal namespaces); spam on servers without SPECIAL-USE recorded or excluded. | #3247 | queued (later; tier A) |
-| ONB-9-text | ONB-9-text: L1 spec-diff: a CH-11 control word (e.g. `KEEP <plan> <n>%`) that raises a pool's reserve by text, as ONB-9 promises; lowering stays on the page (CH-11, ONB-9, KEY-6) | none | queued (release; tier C, SPEC.md) |
 
 ## Devices, hardware and image (SPEC §13-14)
 
@@ -226,7 +222,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HW-3t | Supported-host text and test (HW-3, HW-7; brief to write) | — | building (C) |
 | RES-5a | RES-5a: usage pools read per window, named as the provider names them; lowering the reserve takes a passkey; spend by route (RES-5, ONB-9, KEY-6) | none | building (tier A; brief briefs/RES-5a.md, PR #3930) |
 | WS-image | [Workstation image: the signed image installs on a dedicated machine and loads GPU drivers under Secure Boot](briefs/WS-image.md) | CTRL-uki, NET-seg, G1 | queued (after G1, D-104; HW-9, HW-11; tier A) |
-| VM-forget-hung-flake | `TestCAP8ExecReturnsWhenTheRuntimeIgnoresCancellation` (broker/vm/worker_test.go:289) flakes under -race in CI: "ForgetSince waited 539.6948ms behind a hung runtime" on PR #1277, which does not touch broker/vm; make the timing bound robust or root-cause it (release, CI flake, runs 38430841965 and 40926273732) | PR #1277 CI (run 38430841965) | building (release; tier A; second sighting, OPERATING §5) |
 | S8-W1-tunnel-peer | S8-W1-tunnel-peer: restate the tunnel's SO_PEERCRED check against gVisor's shared host UID (later; L3 on PR #1315) | #1014 | queued |
 | S8-W1 l1 | S8-W1 l1: Pin #1419's surviving config, launch and wrapper mutants, and the G1, bwrap-missing, apply_patch, stub-path and WORK real-path notes (later; Potency/L3 on #1419) | S8-W1 (#1419) | queued (later; tier A; from #1419) |
 | TREE-refusal-visible | A guest refusal of a managed-tree answer is one console log line and the owner sees nothing. Fix: reword the line, then show a STATUS line when the guest's version lags. Serves CAP-5, OWN-14 (later, tier B; UX U-1 of #1449) | TREE-refusal-visible | queued (later; tier B; #1449 UX U-1) |
@@ -298,7 +293,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-r | ENF-r: safety-device secrets on the enforcer: sealed hand-off at pairing, enforcer store, no core copy (STO-4, STO-3) | #3658, #3659, #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-s | ENF-s: safety-list approvals on the enforcer page: asserted tightenings, once-only turn-on or open (NET-4, NET-6) | #3658, #3659 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-t | ENF-t: the enforcer's Thread and Matter stacks in confined processes, Matter on the C++ SDK (NET-2 Confined radio stacks; D-231) | #3669 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF | ENF-e2: device class and ports in the enforcer policy; camera stream path and port-narrowed core and edge rules (NET-2 Device paths, Cameras) | #3661 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-names | ENF-names: enforcer names refuse Unicode separators, C1 and bidi controls; unknown devices logged by hash (NET-2 Channel) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | DECOY-c | DECOY-c: edge link matcher, edge placements, edge heartbeat (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-d | DECOY-d: enforcer drop-and-trip on fixed decoy addresses, core heartbeat (KRN-12, NET-2) | #3660, #3661, #3666 | queued(tier A; lane primary; brief briefs/DECOY.md) |
@@ -349,7 +343,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HOST-1b | [No hardware-clock writes](briefs/HOST-1b.md) | P2-1 image | queued (part 2; part 1 merged (#177); part 2 queued on P2-2w (R1 needs the live page)) |
 | HOST-1c | [Firmware-change disclosure and BitLocker prevention](briefs/HOST-1c.md) | HOST-1a, P2-2 | queued (part 2; part 1 merged (#183); part 2 queued (needs P2-2)) |
 | HOST-1d | [Internal-disk opt-in](briefs/HOST-1d.md) | HOST-1a, P2-2, P2-4 | queued |
-| UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p minimum split promoted to Release in LATER.md (D-079 spec-diff); primary; unclaimed | building (A; from #405) |
 | UX4-2 | [Visible phone fallback and actionable errors](briefs/UX4-2.md) | P2-2w c4; primary; unclaimed | queued (A; from #417) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | building (C) |
 | FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md); also signs the raw image file and checks it in both the flasher and `agentos-seller`, which today trusts a main-built CI image by its SHA256SUMS only (I8, C3; from #1099 review) | CTRL-claim, G1 | queued (after G1, D-104; HW-10, A1; tier A) |
@@ -404,24 +397,24 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
 | EDGE-link-core-c2c later findings | EDGE-link-core-c2c later findings: a .link allowlist in the tree checks, the edge image's own link naming and address, ARP on the link, a stale link-set element, a long comment (later findings from the #3834 reviews). | EDGE-link-core-c2c #3459 | queued (later; tier A; one session) |
 | REV-CHK-src | Plain-Go source lint for `broker/`: no assembly, cgo, `go:linkname` or unknown build tag outside an allow list, so every boundary lint holds for the files it parses (sightings #3356, #3640, #3754, #3818, #3043). | #3897 | building |
-| REV-CHK-mut | Run `tools/mutgate.py` in CI on the tier-A packages a PR touches; it exists but no workflow runs it (surviving mutants on #2885, #3310, #3488, #3554). | #3897 | building |
 | REV-CHK-names | One hostile-text corpus (blank, zero-width, bidi, tag, control, invalid UTF-8) run against every name check, plus a lint that each name check runs it (#3284, #3438, #3871). | #3897 | building |
 | REV-CHK-crlf | Every gate-list reader in `tools/` refuses a lone CR and other hidden line breaks (#1347/#1583, #3721). | #3897 | building |
 | REV-CHK-save | Every `privfile.WriteAtomic` caller's package tests the crash path with a non-nil `stop` (disk side of #3311, #3444, #3476, #3434, #3868, #3881). | #3897 | queued (later) |
 | REV-CHK-links-kernel | REV-CHK-links-kernel: root-side path operations in the kernel side go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-links-agentosd | REV-CHK-links-agentosd: root-side path operations in `agentosd` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
-| REV-CHK-links-update | REV-CHK-links-update: root-side path operations in `broker/update` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
 | REV-CHK-links-vm | REV-CHK-links-vm: root-side path operations in `broker/vm` and its subpackages go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
-| REV-CHK-links-daemon-a | REV-CHK-links-daemon-a: root-side path operations in `sockets`, `cgroup`, `guest`, `loops` and `infer/supervise` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
-| REV-CHK-links-daemon-b | REV-CHK-links-daemon-b: root-side path operations in fourteen small daemon packages go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
+| REV-CHK-links-daemon-a | REV-CHK-links-daemon-a: root-side path operations in `sockets`, `cgroup`, `guest`, `loops` and `infer/supervise` go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
+| REV-CHK-links-daemon-b | REV-CHK-links-daemon-b: root-side path operations in fourteen small daemon packages go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
 | REV-CHK-links-e2e | REV-CHK-links-e2e: root-side path operations in the image test harness (`boxe2e`) go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-links-udev | REV-CHK-links-udev: the path lint counts binaries a udev rule runs (`agentos-hostdisk`) as root-side | #3900 | queued |
-| REV-CHK-crlf-b | trace.git_tree refuses invalid UTF-8 in old_core.txt; doclint.baseline_growth reads the base strictly (#3939 release findings). | #3939 | queued |
 | REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | queued |
 | REV-CHK-links-privfile | REV-CHK-links-privfile: `WriteAtomic` refuses a directory that fails `Check`, so its remove and rename cannot be redirected by another uid | #3951 | building |
-| REV-CHK-mut-mark | Put `tools/mutgate.py` on the gate-file list (`premerge.py` MARK_PATHS), so a PR cannot weaken the mutation gate on L3 alone (Security finding on #3948). | #3948 | queued |
-| REV-CHK-mut-names | The mutation gate's run fails when a gremlins `file_name` with a LIVED mutant is not a file in the package, so a changed name format cannot pass silently (Security finding on #3948). | #3948 | queued |
-| UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief to write) | — | queued (A) |
+| UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief briefs/UPD-7w.md, #4001) | #4001 (brief); build after #3979 and #3994 merge | queued (A; ready to build once #3979 and #3994 merge) |
+| REV-CHK-links-update-r | REV-CHK-links-update-r: drive sources open beneath their root; the remove allow line names Fetch's parent bound | #3979 | queued |
+| REV-CHK-links-update-l | REV-CHK-links-update-l: saved TUF metadata read fails closed; store parent chain root-only; tighter link test | #3979 | queued |
+| REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | queued |
+| VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | queued |
+| VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | queued |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -440,6 +433,14 @@ issue #3742: body has no board-row block
 issue #3771: title 'INFER-llama follow-ups: probe timeout, leftover socket dir, setsid grandchild, adapter-level checks, wording' does not start with '<ID>: '
 issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #3872: body has no board-row block
-issue #3882: body has no board-row block
 issue #3883: body has no board-row block
+issue #4002: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4009: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4015: body has no board-row block
+issue #4016: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4018: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4019: body has no board-row block
+issue #4020: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```

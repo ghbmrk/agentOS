@@ -13,6 +13,8 @@
 # OUT/ccache), which CI caches. Outputs in OUT: camnode-BOARD.{disk.img,slot.img,slot.json,
 # boot.img} and SHA256SUMS; the Buildroot tree stays in OUT/br.
 set -euo pipefail
+# A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
+export GOWORK=off
 BOARD=${1:?usage: build.sh cm4|qemu OUT [VERSION]}
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../.." && pwd)
 OUT=$(realpath -m "${2:?usage: build.sh cm4|qemu OUT [VERSION]}")

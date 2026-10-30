@@ -92,7 +92,10 @@ def git_tree(root, ref):
         size = int(out[i:header_end].split()[2])
         body = out[header_end + 1:header_end + 1 + size]
         i = header_end + 2 + size
-        tree[n] = body.decode(errors="ignore")
+        # The old-core list decodes with "replace" so old_core_dirs refuses an invalid byte rather
+        # than dropping it ("broker/jou\xffrnal" read as broker/journal, #3952). Other files keep
+        # "ignore": a dropped byte can only join a marker, so the ratchet over-counts, never under.
+        tree[n] = body.decode(errors="replace" if n == OLD_CORE else "ignore")
     return tree
 
 

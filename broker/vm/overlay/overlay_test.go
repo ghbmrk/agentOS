@@ -657,3 +657,26 @@ func TestMeasurePathLimitIsExact(t *testing.T) {
 		}
 	}
 }
+
+// chmod refuses a link at the path rather than changing its target's mode,
+// so a link a guest left in a layer cannot turn a mode the broker sets onto
+// a host file (REV-CHK-links, #3943).
+func TestChmodRefusesALink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	must(t, os.WriteFile(target, nil, 0o600))
+	link := filepath.Join(dir, "link")
+	must(t, os.Symlink(target, link))
+	if err := chmod(link, 0o4777); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("chmod through a link = %v, want ELOOP", err)
+	}
+	if fi, err := os.Stat(target); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("target after chmod through a link: %v, %v; want 0600 unchanged", fi.Mode(), err)
+	}
+	for _, p := range []string{target, dir} {
+		must(t, chmod(p, 0o750))
+		if fi, err := os.Lstat(p); err != nil || fi.Mode().Perm() != 0o750 {
+			t.Fatalf("chmod %s: %v, %v; want 0750", p, fi.Mode(), err)
+		}
+	}
+}
