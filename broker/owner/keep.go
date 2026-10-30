@@ -103,7 +103,7 @@ func (c *Channel) disclose(s string) string {
 }
 
 // withheld reports whether text is one of the texts that stand in for a
-// withheld one, which go without AgentPrefix.
+// withheld one: the broker's words, not the agent's.
 func withheld(text string) bool {
 	return text == Hidden || text == HiddenPointer || text == HeldCode || text == HeldCodePointer || codePointers[text]
 }

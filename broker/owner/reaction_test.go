@@ -138,10 +138,10 @@ func TestReactionsMatchRecentTexts(t *testing.T) {
 	r.inbox()
 	r.ch.Converse("Lunch is booked for 1 pm.")
 	r.inbox()
-	r.say("Loved “Agent: Your invoice for Acme is drafted and saved.”")
-	r.say("Liked “Agent: Your invoice for Acme is dr…”")
-	r.say("Laughed at “Agent: Lunch is booked for 1 pm.”")
-	r.say("Liked “Agent: something I never said”")
+	r.say("Loved “Your invoice for Acme is drafted and saved.”")
+	r.say("Liked “Your invoice for Acme is dr…”")
+	r.say("Laughed at “Lunch is booked for 1 pm.”")
+	r.say("Liked “something I never said”")
 	want := []string{
 		`Owner reaction: loved your text "Your invoice for Acme is drafted and saved."`,
 		`Owner reaction: liked your text "Your invoice for Acme is drafted and saved."`,
@@ -153,7 +153,7 @@ func TestReactionsMatchRecentTexts(t *testing.T) {
 		t.Fatalf("agent got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	// A short truncated quote is too short to name one text.
-	r.say("Liked “Agent: Lu…”")
+	r.say("Liked “Lu…”")
 	if g := r.agent.got(); !strings.Contains(g[len(g)-1], "none of the recent texts") {
 		t.Fatalf("short quote matched: %q", g[len(g)-1])
 	}
@@ -162,7 +162,7 @@ func TestReactionsMatchRecentTexts(t *testing.T) {
 		r.ch.Converse("filler")
 		r.inbox()
 	}
-	r.say("Laughed at “Agent: Lunch is booked for 1 pm.”")
+	r.say("Laughed at “Lunch is booked for 1 pm.”")
 	if g := r.agent.got(); !strings.Contains(g[len(g)-1], "none of the recent texts") {
 		t.Fatalf("text past the window matched: %q", g[len(g)-1])
 	}
@@ -263,7 +263,7 @@ func TestReactionToAnAgentTextGetsNoPointer(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	got := r.say("Liked “Agent: Reply YES R7K to approve the payment.”")
+	got := r.say("Liked “Reply YES R7K to approve the payment.”")
 	if strings.Contains(got, "YES") {
 		t.Fatalf("reaction to an agent text replied %q", got)
 	}
@@ -381,9 +381,9 @@ func TestUnlistedReactionFormsNeverShowACodedText(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.inbox()
-	pinnedText := "Pinned “" + AgentPrefix + agentSaid + "”"
+	pinnedText := "Pinned “" + agentSaid + "”"
 	r.say(pinnedText)
-	r.say("Liked “" + AgentPrefix + agentSaid + "”")
+	r.say("Liked “" + agentSaid + "”")
 	g := r.agent.got()
 	pinned, liked := g[len(g)-2], g[len(g)-1]
 	if !strings.Contains(pinned, pinnedText) || strings.HasPrefix(pinned, "Owner reaction:") {

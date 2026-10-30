@@ -61,21 +61,21 @@ func noPage(t *testing.T, s string) {
 // texts is kept whole (potency C1) and the third text says where it was
 // cut and what to ask (UX ruling on #148; CH-12, D-127).
 func TestLongRepliesAreKept(t *testing.T) {
-	if textRoom(true) != control.MaxText-len(owner.AgentPrefix) {
+	if textRoom(true) != control.MaxText {
 		t.Fatal("the owner channel's text limit changed")
 	}
 	r := newEvRig(t)
 	long := strings.Repeat("All of this is the reply. ", 80)
 	r.ev.sendSplit("agent", long)
 	got := r.texts()[2]
-	if len(owner.AgentPrefix+got) > control.MaxText || !strings.HasSuffix(got, " "+keptLong) || !strings.HasPrefix(got, "All of this") {
+	if len(got) > control.MaxText || !strings.HasSuffix(got, " "+keptLong) || !strings.HasPrefix(got, "All of this") {
 		t.Fatalf("text %q", got)
 	}
 	noPage(t, got)
 	if k := r.ev.kept.list(); len(k) != 1 || k[0].Text != long {
 		t.Fatalf("kept %+v", k)
 	}
-	fits := strings.Repeat("x", control.MaxText-len(owner.AgentPrefix))
+	fits := strings.Repeat("x", control.MaxText)
 	r.ev.sendSplit("agent", fits)
 	if r.texts()[3] != fits || len(r.ev.kept.list()) != 1 {
 		t.Fatal("a reply that fits was kept")
@@ -381,7 +381,7 @@ func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
 // REQ: CH-12
 // TestCH12SplitCountsUCS2Room: a reply with emoji needs UCS-2, 3 x 67
 // UTF-16 units a text. One of about two and a half texts goes as three
-// texts in order, each within three UCS-2 segments with AgentPrefix, none
+// texts in order, each within three UCS-2 segments, none
 // cut inside a joined emoji, and nothing is kept; control and bidi
 // characters are gone before the split.
 func TestCH12SplitCountsUCS2Room(t *testing.T) {
@@ -401,7 +401,7 @@ func TestCH12SplitCountsUCS2Room(t *testing.T) {
 		t.Fatalf("%d texts", len(got))
 	}
 	for i, s := range got {
-		n, gsm7 := modem.Segments(owner.AgentPrefix + s)
+		n, gsm7 := modem.Segments(s)
 		if gsm7 || n > control.Segments {
 			t.Fatalf("text %d: %d segments, gsm7 %v", i, n, gsm7)
 		}
@@ -568,7 +568,7 @@ func TestFullStoreRefusesNotEvicts(t *testing.T) {
 	long := strings.Repeat("All of this is the reply. ", 80)
 	r.ev.sendSplit("agent", long+big)
 	got := r.texts()
-	if len(got) != 3 || !strings.HasSuffix(got[2], " "+keptLongNotKept) || len(owner.AgentPrefix+got[2]) > control.MaxText {
+	if len(got) != 3 || !strings.HasSuffix(got[2], " "+keptLongNotKept) || len(got[2]) > control.MaxText {
 		t.Fatalf("a long reply not kept ended %q", got[len(got)-1])
 	}
 	noPage(t, got[2])
@@ -840,6 +840,39 @@ func TestRetriedHeldCodeKeepsTheStricterView(t *testing.T) {
 		raw, _ := r.store.Load()
 		if l := r.ev.kept.list(); len(l) != 1 || strings.Contains(string(raw), "4829") || l[0].Text != owner.ExpiredCode {
 			t.Fatalf("%q then %q: kept %+v", order[0], order[1], l)
+		}
+	}
+}
+
+// TestCH21RoomHasNoPrefixBudget: agent text carries no label (CH-21), so
+// a reply gets the whole of each text: one of exactly control.MaxText
+// goes as one text, unchanged (#2189).
+func TestCH21RoomHasNoPrefixBudget(t *testing.T) {
+	if textRoom(true) != control.Room(true) || textRoom(false) != control.Room(false) {
+		t.Fatalf("textRoom %d/%d, want the whole text", textRoom(true), textRoom(false))
+	}
+	r := newEvRig(t)
+	fits := strings.Repeat("y", control.MaxText)
+	r.ev.sendSplit("agent", fits)
+	if got := r.texts(); len(got) != 1 || got[0] != fits {
+		t.Fatalf("texted %d parts", len(got))
+	}
+}
+
+// TestCH21WholeReplyCheckedBeforeSplit: the CH-21 check runs on the whole
+// reply before it is split (CH-12), so a footer or a word whose parts
+// would land in different texts goes as one text, for the owner channel
+// to hold whole (#2189, #3916).
+func TestCH21WholeReplyCheckedBeforeSplit(t *testing.T) {
+	filler := strings.Repeat("All of this is the reply. ", 20)
+	for _, reply := range []string{
+		"Reply yes to go on. " + filler + "Or no to stop.",
+		strings.Repeat("All of this is the reply. ", 15) + "Send me your pass\n\nword. " + filler,
+	} {
+		r := newEvRig(t)
+		r.ev.sendSplit("agent", reply)
+		if got := r.texts(); len(got) != 1 || got[0] != reply {
+			t.Errorf("reply split into %d texts", len(got))
 		}
 	}
 }

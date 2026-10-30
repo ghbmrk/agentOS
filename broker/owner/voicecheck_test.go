@@ -75,14 +75,14 @@ func TestCodeAskHeldInQuietHoursStaysHeld(t *testing.T) {
 }
 
 // TestOrdinaryAgentTextPasses: text free of the vocabulary and the reply
-// grammar goes as before, behind the agent prefix.
+// grammar goes as written, with no label (CH-21).
 func TestOrdinaryAgentTextPasses(t *testing.T) {
 	r := pacedRig(t, quiet22to7(), 12, 0)
 	for _, s := range []string{"Lunch is booked for noon.", "Yes, the hedge is done.", "No rush on the hedge."} {
 		if err := r.ch.Converse(s); err != nil {
 			t.Fatal(err)
 		}
-		if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+s {
+		if got := r.sentTexts(); len(got) != 1 || got[0] != s {
 			t.Fatalf("Converse(%q) sent %q", s, got)
 		}
 	}

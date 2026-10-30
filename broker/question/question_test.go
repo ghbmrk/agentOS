@@ -350,7 +350,7 @@ func TestBrokerBoundsDefaultAndDeadline(t *testing.T) {
 		{Text: "Is it ４８２９１３?", Default: "x", Wait: time.Hour},
 		{Text: "Which?", Default: "undo b12", Wait: time.Hour},
 		{Text: "Long choice?", Default: "a", Choices: []string{"a", strings.Repeat("c", MaxChoice+1)}, Wait: time.Hour},
-		// Rendered past one owner text (control.MaxText less the agent prefix).
+		// Rendered past one owner text (control.MaxText).
 		{Text: strings.Repeat("q", MaxText), Default: strings.Repeat("a", MaxChoice),
 			Choices: []string{strings.Repeat("a", MaxChoice), strings.Repeat("b", MaxChoice), strings.Repeat("c", MaxChoice), strings.Repeat("d", MaxChoice)}, Wait: time.Hour},
 	}
@@ -735,7 +735,7 @@ func TestPacingIsFairAndSurvivesARestart(t *testing.T) {
 	r.b.Tick(context.Background())
 	// lin2 leads the text; lin1's questions only share it (PQ1), so
 	// lin1 takes no more of the budget.
-	if got := r.texts(); len(got) != 2 || !strings.HasPrefix(got[1], "Q102: ") || !strings.Contains(got[1], " Q101: ") {
+	if got := r.texts(); len(got) != 2 || !strings.HasPrefix(got[1], "Question Q102: ") || !strings.Contains(got[1], " Question Q101: ") {
 		t.Fatalf("texts %q", got)
 	}
 	if st, _ := r.b.Status(context.Background(), "lin2", "a", "m2"); st.State != Waiting {

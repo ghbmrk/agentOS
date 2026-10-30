@@ -71,7 +71,7 @@ func TestStopLedFormOnAForgottenReplyGetsTheStopHint(t *testing.T) {
 	r.inbox()
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	got := r.say("STOP “Agent: " + forgottenReply + "”")
+	got := r.say("STOP “" + forgottenReply + "”")
 	hintFirst(t, "STOP-led form on a forgotten reply", got)
 	if strings.Contains(got, forgottenWords) {
 		t.Fatalf("reply echoed the forgotten reply: %q", got)
@@ -89,7 +89,7 @@ func TestListedFormAfterADeletionLeavesTheStopHintWindowUnspent(t *testing.T) {
 	}
 	r.inbox()
 	r.ch.ForgetRecent()
-	got := r.say("Liked “Loved “Agent: " + forgottenReply + "””")
+	got := r.say("Liked “Loved “" + forgottenReply + "””")
 	if got != readAsReaction {
 		t.Fatalf("listed form after a deletion replied %q, want %q", got, readAsReaction)
 	}
@@ -121,7 +121,7 @@ func TestLockedStopLedFormOnAForgottenReplyGetsTheStopHintFirst(t *testing.T) {
 	r.inbox()
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	got := r.say("STOP “Agent: " + forgottenReply + "”")
+	got := r.say("STOP “" + forgottenReply + "”")
 	if !strings.Contains(got, "held for") {
 		t.Fatalf("locked reaction replied %q, want it held", got)
 	}

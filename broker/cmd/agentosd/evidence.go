@@ -155,17 +155,19 @@ func (e *evidence) run(ctx context.Context) {
 // (CH-12, D-127); one longer than that is kept whole and the third text
 // ends with keptLong, or with keptLongNotKept if it could not be kept.
 // The reply is stripped of control and bidi characters first
-// (control.StripControls), then CH-19's check runs on the whole of it as
-// written, stripped and with its controls removed (owner.AgentSecret): a
-// secret-shaped reply goes as one text, as written, which the owner
-// channel keeps whole and replaces with its pointer, so no code is split
-// past the check. A text that does not go stops the rest, so none arrives
+// (control.StripControls), then the CH-19 and CH-21 checks run on the
+// whole of it as written, stripped and with its controls removed
+// (owner.AgentSecret, owner.AgentVoice): a reply either matches goes as
+// one text, as written, which the owner channel keeps whole and replaces
+// with its pointer, so no code or reply grammar is split past the checks
+// (CH-12). The channel also checks each text joined to the ones before it
+// since the owner's last message. A text that does not go stops the rest, so none arrives
 // out of order, and the reply is kept; if it cannot be, the owner is told.
 // What is kept for the local UI is the stripped reply too.
 func (e *evidence) sendSplit(machine, text string) {
 	raw := text
 	text = control.StripControls(text)
-	if owner.AgentSecret(raw) {
+	if owner.AgentSecret(raw) || owner.AgentVoice(raw) {
 		e.send(machine, raw)
 		return
 	}
@@ -204,10 +206,10 @@ func (e *evidence) send(machine, text string) {
 // maxReplyTexts is how many texts one agent reply may take (CH-12).
 const maxReplyTexts = 3
 
-// textRoom is what one text leaves for agent text after AgentPrefix, in
-// units of its encoding (control.Units): 3 x 153 septets for GSM-7, 3 x 67
-// UTF-16 units for UCS-2 (CH-12).
-func textRoom(gsm7 bool) int { return control.Room(gsm7) - len(owner.AgentPrefix) }
+// textRoom is what one text leaves for agent text, which carries no label
+// (CH-21), in units of its encoding (control.Units): 3 x 153 septets for
+// GSM-7, 3 x 67 UTF-16 units for UCS-2 (CH-12).
+func textRoom(gsm7 bool) int { return control.Room(gsm7) }
 
 // splitReply cuts text into at most maxReplyTexts parts, each within one
 // text in the encoding the rest of the reply needs from where it starts
@@ -236,7 +238,7 @@ func splitReplyEnd(text, end string) (parts []string, cut bool) {
 	return append(parts, strings.TrimSpace(rest[:i])+" "+end), true
 }
 
-// fits says s fits one text after AgentPrefix.
+// fits says s fits one text.
 func fits(s string) bool {
 	n, gsm7 := control.Units(s)
 	return n <= textRoom(gsm7)

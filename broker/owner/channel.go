@@ -192,6 +192,12 @@ type Channel struct {
 	resumeTexts []time.Time
 	held        *heldMsg
 	recent      recentWindow // texts to the owner a reaction may mark (CH-11)
+	// sinceOwner are the agent texts checkAgent let through since the
+	// owner's last message, oldest first, at most maxSinceOwner: the
+	// CH-19 and CH-21 checks run on each new one joined to them (CH-12).
+	// agentMu guards it, so a text is checked and added in one step.
+	agentMu    sync.Mutex
+	sinceOwner []string
 	// reactMu orders a reaction event's delivery against ForgetRecent: an
 	// event is checked and delivered under its read lock, and a deletion
 	// clears the window under its write lock (CAP-3). It is taken before mu.
@@ -381,6 +387,9 @@ type route struct {
 // Handle processes one text from number from and returns the texts to send
 // back to it.
 func (c *Channel) Handle(ctx context.Context, from, text string) []string {
+	if c.IsOwner(from) {
+		c.ownerSpoke()
+	}
 	if out, ok := c.stopNow(ctx, from, text); ok {
 		c.recordReplies(from, out)
 		return out
@@ -1161,14 +1170,11 @@ func (c *Channel) UndoOpen() bool {
 	return len(c.queued) > 0
 }
 
-// AgentPrefix starts every text Notify sends, so agent-written text can
-// never pass for one of the broker's own templates (an approval request,
-// a code prompt).
-const AgentPrefix = "Agent: "
-
 // Notify texts the owner content that did not come from the broker's own
-// templates, such as an agent's answer, behind AgentPrefix. Secret-shaped
-// content becomes a pointer to the local UI (CH-19).
+// templates, such as an agent's answer, with no label (CH-21): the CH-21
+// check (AgentVoice), not a marker, keeps it from passing for one of the
+// broker's own templates (an approval request, a code prompt).
+// Secret-shaped content becomes a pointer to the local UI (CH-19).
 // It is paced as ClassAgent (CH-15).
 func (c *Channel) Notify(text string) error {
 	return c.NotifyAs(ClassAgent, text)
