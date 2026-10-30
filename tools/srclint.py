@@ -305,18 +305,15 @@ def scan(root, tags):
 
 def load_allow(path):
     """{path: kinds}. A line is `path kind[,kind...] reason`; blank lines and `#` lines are skipped. A
-    control character or a line break other than LF fails: a line must mean what it shows."""
+    control character, a line break other than LF or a byte that is not UTF-8 fails: a line must mean what it shows."""
     allow = {}
     path = pathlib.Path(path)
     if not path.exists():
         return allow
-    try:
-        text = path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise SystemExit(f"srclint: {path}: not UTF-8 ({e})")
+    text = path.read_bytes().decode("utf-8", "replace")  # a byte that is not UTF-8 reads as U+FFFD, refused on its line
     for n, raw in enumerate(text.split("\n"), 1):
         bad = [c for c in raw if (ord(c) < 32 and c != "\t") or 0x7F <= ord(c) <= 0x9F
-               or c in "  "]
+               or c in "  \ufffd"]
         if bad:
             raise SystemExit(f"srclint: {path}:{n}: control or line-break character {bad[0]!r}")
         line = raw.strip()
