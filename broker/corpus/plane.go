@@ -7,7 +7,6 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/loops"
-	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // Relay takes a replayed text through a guest machine as untrusted input
@@ -52,7 +51,7 @@ type Relay interface {
 func PlaneChecks(r Relay) []loops.ClosedCheck {
 	return []loops.ClosedCheck{
 		{Name: CodeFilter, Payload: CodePayload, Deliver: func(ctx context.Context, s string) (bool, error) {
-			if len(owner.AgentPrefix+s) > control.MaxText {
+			if len(s) > control.MaxText {
 				return false, errOverOneText
 			}
 			sent, err := r.Reply(ctx, s)

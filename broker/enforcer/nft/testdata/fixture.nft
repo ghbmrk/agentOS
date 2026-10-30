@@ -7,6 +7,7 @@ table inet enforcer {
 	counter inbound { }
 	counter blocked { }
 	counter core_device { }
+	counter core_stream { }
 	counter edge_device { }
 	counter edge_in { }
 	counter ra_dropped { }
@@ -123,11 +124,12 @@ table inet enforcer {
 		iifname "ap0.*" oifname "wan0" meta l4proto { tcp, udp } th dport { 53, 853 } log prefix "enf dns " counter name "dns_outside" drop
 		iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept
 		iifname "ap0.101" oifname "wan0" ip6 daddr @d101_6 accept
-		iifname "edge0" oifname "ap0.101" log prefix "enf edge-dev 101 " counter name "edge_device" accept
-		iifname "core0" oifname "ap0.102" log prefix "enf core-dev 102 " counter name "core_device" accept
+		iifname "edge0" oifname "ap0.101" tcp dport { 80 } log prefix "enf edge-dev 101 " counter name "edge_device" accept
+		iifname "core0" oifname "ap0.102" tcp dport { 80 } log prefix "enf core-dev 102 " counter name "core_device" accept
+		iifname "core0" oifname "ap0.102" udp dport { 123 } log prefix "enf core-dev 102 " counter name "core_device" accept
 		iifname "ap0.103" oifname "wan0" ip daddr @d103_4 accept
 		iifname "ap0.103" oifname "wan0" ip6 daddr @d103_6 accept
-		iifname "core0" oifname "ap0.105" log prefix "enf core-dev 105 " counter name "core_device" accept
+		iifname "core0" oifname "ap0.104" tcp dport { 554 } log prefix "enf core-stream 104 " counter name "core_stream" accept
 		iifname "ap0.106" oifname "ap0.107" accept
 		iifname "ap0.107" oifname "ap0.106" accept
 		log prefix "enf drop " counter name "blocked" drop

@@ -24,7 +24,7 @@ var thirdPerson = regexp.MustCompile(`(?i)\b(the box|this box|the agent)\b|\bage
 // pending lists top-level broker directories not yet swept. Each later
 // CH-21 part deletes its entries; the list may only shrink.
 var pending = map[string]string{
-	"owner": "CH-21e", // AgentPrefix "Agent: " goes only with CH-21e's withhold check
+	"owner": "CH-21 owner sweep", // AgentPrefix went in #2189; "the box"/"the agent" literals remain
 }
 
 // literals returns the string literals of every non-test Go file under

@@ -11,9 +11,9 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// room is what one GSM-7 text leaves for agent text once AgentPrefix is
-// added.
-const room = control.MaxText - len(owner.AgentPrefix)
+// room is what one GSM-7 text leaves for agent text, which carries no
+// label (CH-21).
+const room = control.MaxText
 
 // sentences is n bytes or a little more of whole sentences.
 func sentences(n int) string {
@@ -36,8 +36,8 @@ func TestLongReplyArrivesWhole(t *testing.T) {
 		t.Fatalf("%d texts: %q", len(got), got)
 	}
 	for _, s := range got {
-		if len(owner.AgentPrefix+s) > control.MaxText {
-			t.Fatalf("text over one text: %d bytes", len(owner.AgentPrefix+s))
+		if len(s) > control.MaxText {
+			t.Fatalf("text over one text: %d bytes", len(s))
 		}
 		if !strings.HasSuffix(s, ".") || strings.Contains(s, keptLong) {
 			t.Fatalf("text not cut at a sentence end: %q", s)
@@ -62,7 +62,7 @@ func TestTooLongReplyIsCutInTheThirdText(t *testing.T) {
 		t.Fatalf("%d texts", len(got))
 	}
 	for i, s := range got {
-		if len(owner.AgentPrefix+s) > control.MaxText {
+		if len(s) > control.MaxText {
 			t.Fatalf("text %d over one text", i)
 		}
 		if (i == 2) != strings.HasSuffix(s, " "+keptLong) {

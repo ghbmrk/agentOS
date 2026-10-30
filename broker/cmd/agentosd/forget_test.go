@@ -577,7 +577,7 @@ type keepingMachines struct {
 
 func (m *keepingMachines) ForgetSince(_ context.Context, lineage string, _ time.Time) error {
 	if len(m.calls) == 0 {
-		m.kept.keep("reply built from CANARY-mail")
+		m.kept.keep("long", "reply built from CANARY-mail")
 	}
 	m.calls = append(m.calls, lineage)
 	return nil
@@ -592,7 +592,7 @@ func TestNoReplyKeptDuringTheRewindSurvives(t *testing.T) {
 	k := newFakeKernel()
 	k.add("s1", "Alice", 1, map[string]int64{"a.1": 1000, "b.1": 2000})
 	kept := &keptReplies{store: change.FileStore{Path: filepath.Join(dir, "kept.json")}, now: time.Now}
-	kept.keep("old reply")
+	kept.keep("long", "old reply")
 	m := &keepingMachines{kept: kept}
 	rw := openEraseRewind(filepath.Join(dir, eraseRewoundFile), t.Logf)
 	fail := errors.New("read-only")

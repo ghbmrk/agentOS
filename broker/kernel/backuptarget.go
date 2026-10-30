@@ -133,6 +133,17 @@ func (t BackupTarget) shape() bool {
 	return false
 }
 
+// addable is shape plus the rules a new add must also meet, which replay
+// does not re-check, so a target logged before a rule came still folds and
+// keeps the count later adds' signatures name (#3901): no locator path
+// element led or trailed by a space, which the page shows without it.
+func (t BackupTarget) addable() bool {
+	return t.shape() && !slices.ContainsFunc(strings.Split(t.Locator, "/"), padded)
+}
+
+// padded reports a path element led or trailed by a space, or only space.
+func padded(e string) bool { return strings.TrimSpace(e) != e }
+
 // invisible reports a character the page cannot show: unprintable, or
 // printable but default-ignorable (a joiner, a variation selector, a filler).
 func invisible(c rune) bool {
@@ -252,6 +263,9 @@ func (s *State) applyBackup(e Entry) error {
 // BackupTargetHash(State.TargetsAdded(), t). It is a widening, so it anchors.
 func (k *Kernel) BackupTarget(now int64, t BackupTarget, c key.Cosign) error {
 	b := backupTarget{t, c}
+	if !t.addable() {
+		return ErrTarget
+	}
 	if err := k.s.targetOK(b); err != nil {
 		return err
 	}

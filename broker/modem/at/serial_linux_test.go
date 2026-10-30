@@ -63,3 +63,18 @@ func TestOpenSerialIsRawSoCRAndCtrlZPassUnchanged(t *testing.T) {
 		t.Fatalf("host side read %q", got)
 	}
 }
+
+// The in-image e2e run opens its pty through the sysroot's dev/ttyUSB2 link,
+// and udev's /dev/serial/by-id names are links too, so OpenSerial follows one.
+func TestOpenSerialFollowsALink(t *testing.T) {
+	_, slave := openPTY(t)
+	link := t.TempDir() + "/ttyUSB2"
+	if err := os.Symlink(slave, link); err != nil {
+		t.Fatal(err)
+	}
+	port, err := OpenSerial(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port.Close()
+}

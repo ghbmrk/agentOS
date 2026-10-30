@@ -132,7 +132,7 @@ func TestANestedFormOnAnAgentTextIsStillChat(t *testing.T) {
 	}
 	r.inbox()
 	before := len(r.agent.got())
-	r.say("Pinned “Liked “Agent: " + forgottenReply + "””")
+	r.say("Pinned “Liked “" + forgottenReply + "””")
 	got := r.agent.got()[before:]
 	if len(got) != 1 || !strings.Contains(got[0], "Pinned") {
 		t.Fatalf("agent got %q, want the owner's words as chat", got)
@@ -150,7 +150,7 @@ func TestANestedFormOnAForgottenReplyIsNotChat(t *testing.T) {
 	r.inbox()
 	r.ch.ForgetRecent()
 	before := len(r.agent.got())
-	if got := r.say("Pinned “Liked “Agent: " + forgottenReply + "””"); got != readAsReaction {
+	if got := r.say("Pinned “Liked “" + forgottenReply + "””"); got != readAsReaction {
 		t.Fatalf("owner got %q, want %q", got, readAsReaction)
 	}
 	noForgottenText(t, r.agent.got()[before:])
@@ -227,7 +227,7 @@ func TestAnUnlistedFormOnAnAgentReplyIsChatAfterARestart(t *testing.T) {
 	r.inbox()
 	r.ch = r.open()
 	before := len(r.agent.got())
-	r.say("Pinned “Agent: " + forgottenReply + "”")
+	r.say("Pinned “" + forgottenReply + "”")
 	got := r.agent.got()[before:]
 	if len(got) != 1 || !strings.Contains(got[0], "Pinned") {
 		t.Fatalf("agent got %q, want the owner's words as chat", got)
@@ -313,7 +313,7 @@ func TestACutNestOnAnAgentTextIsStillChat(t *testing.T) {
 	}
 	r.inbox()
 	before := len(r.agent.got())
-	r.say("Pinned “Liked “Agent: " + forgottenReply[:40] + "…")
+	r.say("Pinned “Liked “" + forgottenReply[:40] + "…")
 	got := r.agent.got()[before:]
 	if len(got) != 1 || !strings.Contains(got[0], "Pinned") {
 		t.Fatalf("agent got %q, want the owner's words as chat", got)

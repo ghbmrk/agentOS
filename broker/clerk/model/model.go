@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sync"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -26,9 +27,17 @@ type Usage struct {
 	Pool     *PoolReading
 }
 
-// PoolReading is the provider's figure for a usage pool: per mille used, and
-// when it resets (unix ms).
-type PoolReading struct{ Used, ResetAt int64 }
+// PoolReading is the provider's figure for a usage pool, window by window.
+type PoolReading struct{ Windows []PoolWindow }
+
+// PoolWindow is one window's figure: its ID in the kernel, per mille used,
+// when it resets (unix ms; 0 when the answer did not say), and the window's
+// declared length, which a full window with no reset time falls back to
+// before kernel.PoolWindowMS.
+type PoolWindow struct {
+	Window               string
+	Used, ResetAt, Every int64
+}
 
 // Provider makes the call. It holds the credential; nothing else does. On an
 // error it still returns any usage it knows, and the clerk meters a Reported
@@ -58,7 +67,7 @@ type Ledger interface {
 	Meter(now int64, a kernel.Admitted, route string, amount int64, source string) error
 	Hold(now int64, plan string, rf *key.Refusal) error
 	AdmitPool(now int64, pool string) *key.Refusal
-	ReadPool(now int64, pool string, used, resetAt int64) error
+	ReadPool(now int64, pool string, windows []kernel.WindowReading) error
 }
 
 // Clerk is the model clerk. Once a log write it owes fails (spend that
@@ -218,19 +227,28 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	merr := c.owe(now, func(now int64) error { return c.Ledger.Meter(now, a, route, amount, src) })
-	if p.Pool != "" && u.Pool != nil {
-		used, reset := u.Pool.Used, u.Pool.ResetAt
-		if reset <= now {
-			reset = now + kernel.PoolWindowMS
+	if p.Pool != "" && u.Pool != nil && len(u.Pool.Windows) > 0 {
+		ws := make([]kernel.WindowReading, len(u.Pool.Windows))
+		for i, w := range u.Pool.Windows {
+			reset := w.ResetAt
+			if reset <= now && w.Every > 0 {
+				reset = now + w.Every
+			}
+			if reset <= now {
+				reset = now + kernel.PoolWindowMS
+			}
+			ws[i] = kernel.WindowReading{Window: w.Window, Used: w.Used, ResetAt: reset}
 		}
 		_ = c.owe(now, func(now int64) error {
-			if now >= reset {
-				return nil // the pool has reset since the reading
-			}
-			if c.Ledger.ReadPool(now, p.Pool, used, reset) == nil {
+			// A window that has reset since the reading is not read again.
+			ws := slices.DeleteFunc(slices.Clone(ws), func(w kernel.WindowReading) bool { return now >= w.ResetAt })
+			if len(ws) == 0 || c.Ledger.ReadPool(now, p.Pool, ws) == nil {
 				return nil
 			}
-			return c.Ledger.ReadPool(now, p.Pool, kernel.PoolFull, reset)
+			for i := range ws {
+				ws[i].Used = kernel.PoolFull
+			}
+			return c.Ledger.ReadPool(now, p.Pool, ws)
 		})
 	}
 	return merr

@@ -60,13 +60,19 @@ CASES = {
         "assumptions_ids.legacy": assumptions_ids.legacy,
         "assumptions_ids.growth": _legacy_growth,
     },
-    "tools/brief_acceptance_baseline.txt": {"doclint.brief_baseline": doclint.brief_baseline},
+    "tools/brief_acceptance_baseline.txt": {
+        "doclint.brief_baseline": doclint.brief_baseline,
+        # The base branch's copy, as --base-baseline passes it; the head is this tree's clean list.
+        "doclint.baseline_growth": lambda t: list(doclint.baseline_growth(ROOT, t / "tools/brief_acceptance_baseline.txt")),
+    },
     "tools/netguard_allow.txt": {"netguardcheck.load_allow": lambda t: netguardcheck.load_allow(t / "tools/netguard_allow.txt")},
     "tools/g1_scope_g2.txt": {"g1_scope.parse_list": _g2_list},
 }
 
 # Each is a line end to some reader (read_text, splitlines or str.split) or a character a
-# reader may drop, so a line holding one can mean other than it shows.
+# reader may drop, so a line holding one can mean other than it shows. A lone surrogate is
+# written as the raw byte it escapes (surrogateescape), so "\udcff" puts an invalid UTF-8
+# 0xFF in the file, which errors="ignore" would drop (#3952).
 BREAKS = {
     "lone CR": "\r",
     "CRLF": "\r\n",
@@ -75,6 +81,7 @@ BREAKS = {
     "PS U+2029": " ",
     "NUL": "\0",
     "form feed": "\f",
+    "invalid UTF-8 0xFF": "\udcff",
 }
 
 
@@ -83,7 +90,7 @@ def reads(name, reader, text):
     with tempfile.TemporaryDirectory() as d:
         tree = pathlib.Path(d)
         (tree / name).parent.mkdir(parents=True, exist_ok=True)
-        (tree / name).write_bytes(text.encode("utf-8"))
+        (tree / name).write_bytes(text.encode("utf-8", "surrogateescape"))
         try:
             reader(tree)
         except SystemExit as e:
