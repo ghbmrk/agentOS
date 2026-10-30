@@ -15,6 +15,8 @@ package push
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -66,7 +68,8 @@ type Result struct {
 	// Drift is the paths whose content on the access point differed from
 	// the config before the Sync (absent counts).
 	Drift []string
-	// Applied reports that files were written (and then reloaded).
+	// Applied reports that at least one file was written and the
+	// reload after it succeeded.
 	Applied bool
 }
 
@@ -110,26 +113,29 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 			res.Drift = append(res.Drift, f.Path)
 		}
 	}
-	// A write that fails does not stop the reload: the files already
-	// written are on the access point and would not read as drift next
-	// time, so they are applied now, and the write error is returned.
-	var werr error
+	// A write that fails does not stop the others or the reload: the
+	// files written are on the access point and would not read as drift
+	// next time, so every file is tried and the reload runs, and the
+	// errors are returned together.
+	var errs []error
+	wrote := 0
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
-			if _, err := run(c, writeCmd(f.Path), f.Data); err != nil {
-				werr = fmt.Errorf("push: write %s: %w", f.Path, err)
-				break
+			if _, err := run(c, writeCmd(f.Path, f.Data), f.Data); err != nil {
+				errs = append(errs, fmt.Errorf("push: write %s: %w", f.Path, err))
+				continue
 			}
+			wrote++
 		}
 	}
-	_, rerr := run(c, applyCmd, nil)
-	if werr != nil {
-		return res, werr
+	if _, err := run(c, applyCmd, nil); err != nil {
+		errs = append(errs, fmt.Errorf("push: reload: %w", err))
+	} else {
+		res.Applied = wrote > 0
 	}
-	if rerr != nil {
-		return res, fmt.Errorf("push: reload: %w", rerr)
+	if len(errs) > 0 {
+		return res, errors.Join(errs...)
 	}
-	res.Applied = len(res.Drift) > 0
 	for _, f := range files {
 		same, err := holds(c, f)
 		if err != nil {
@@ -205,8 +211,16 @@ func tmpPath(path string) string {
 }
 
 func readCmd(path string) string { return readPrefix + path }
-func writeCmd(path string) string {
-	return "umask 077 && cat > " + tmpPath(path) + " && mv -f " + tmpPath(path) + " " + path
+
+// writeCmd stores data at path: it reads stdin into the path's temporary
+// file and moves that over path only if the file's SHA-256 is data's, so
+// a stdin cut short (a dropped connection, a deadline) leaves path alone;
+// a failed move or check removes the temporary file. The hash is hex.
+func writeCmd(path string, data []byte) string {
+	sum := sha256.Sum256(data)
+	t := tmpPath(path)
+	return "umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
+		" ] && mv -f " + t + " " + path + " || { rm -f " + t + "; false; }"
 }
 
 // holds reports whether the access point's file at f.Path is exactly

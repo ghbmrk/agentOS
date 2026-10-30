@@ -35,6 +35,7 @@ type fakeAP struct {
 	stuck   bool // ignores writes, like a full or read-only flash
 
 	failWrite         map[string]bool // writes of these paths fail
+	cut               map[string]bool // stdin of writes to these paths ends halfway
 	readFails         map[string]bool // reads of these paths print the file, then exit 1
 	failReload        int             // the next this many reloads fail
 	active, maxActive int             // logged-in connections now, and at most
@@ -129,6 +130,22 @@ func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
 		return 0
 	}
 	for _, p := range ap.Paths {
+		if strings.HasPrefix(cmd, "umask 077 && cat > "+tmpPath(p)+" ") {
+			b, _ := io.ReadAll(ch)
+			if f.cut[p] {
+				b = b[:len(b)/2] // stdin ended early
+			}
+			// The access point's own check: the hash in the command must
+			// be that of what arrived, or nothing is moved into place.
+			if cmd != writeCmd(p, b) || f.failWrite[p] {
+				return 1
+			}
+			f.writes++
+			if !f.stuck {
+				f.files[p] = b
+			}
+			return 0
+		}
 		switch cmd {
 		case readCmd(p):
 			b, ok := f.files[p]
@@ -138,16 +155,6 @@ func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
 			ch.Write(b)
 			if f.readFails[p] {
 				return 1
-			}
-			return 0
-		case writeCmd(p):
-			b, _ := io.ReadAll(ch)
-			if f.failWrite[p] {
-				return 1
-			}
-			f.writes++
-			if !f.stuck {
-				f.files[p] = b
 			}
 			return 0
 		}
@@ -394,7 +401,7 @@ func TestTempFilePerPath(t *testing.T) {
 	// The write command itself uses its path's file and no other's.
 	for _, p := range ap.Paths {
 		for _, q := range ap.Paths {
-			if has := strings.Contains(writeCmd(p), tmpPath(q)); has != (p == q) {
+			if has := strings.Contains(writeCmd(p, nil), tmpPath(q)); has != (p == q) {
 				t.Errorf("write command for %s names the temporary file of %s: %v", p, q, has)
 			}
 		}
@@ -470,5 +477,87 @@ func TestFailedWriteStillReloads(t *testing.T) {
 	}
 	if !bytes.Equal(f.get(ap.PathWireless), config()[1].Data) {
 		t.Fatal("the written file is not in place")
+	}
+}
+
+// TestCutWriteNotMovedInPlace: a write whose stdin ends early leaves the
+// file on the access point as it was, and the next Sync writes it whole.
+// Catches a half-written config moved into place by a dropped connection.
+func TestCutWriteNotMovedInPlace(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	old := []byte("config dropbear\n\toption PasswordAuth 'off'\n")
+	f.set(ap.PathAuthKeys, old)
+	f.mu.Lock()
+	f.cut = map[string]bool{ap.PathAuthKeys: true}
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := p.Sync(context.Background(), config()); err == nil {
+		t.Fatal("a cut write was not reported")
+	}
+	if !bytes.Equal(f.get(ap.PathAuthKeys), old) {
+		t.Fatalf("a half-written file was moved into place: %q", f.get(ap.PathAuthKeys))
+	}
+	f.mu.Lock()
+	f.cut = nil
+	f.mu.Unlock()
+	if _, err := p.Sync(context.Background(), config()); err != nil || !bytes.Equal(f.get(ap.PathAuthKeys), config()[2].Data) {
+		t.Fatalf("the next sync did not write it whole: %v", err)
+	}
+}
+
+// TestFailedWriteDoesNotBlockLaterFiles: a write that fails on every Sync
+// does not keep a later file from being written, so a revoked key in
+// wireless is applied although network cannot be written.
+func TestFailedWriteDoesNotBlockLaterFiles(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failWrite = map[string]bool{ap.PathNetwork: true}
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	res, err := p.Sync(context.Background(), config())
+	if err == nil || !res.Applied {
+		t.Fatalf("sync: %+v %v", res, err)
+	}
+	if !bytes.Equal(f.get(ap.PathWireless), config()[1].Data) || !bytes.Equal(f.get(ap.PathAuthKeys), config()[2].Data) {
+		t.Fatal("a file after the failing one was not written")
+	}
+	if _, _, applies, _ := f.n(); applies != 1 {
+		t.Fatalf("applies = %d", applies)
+	}
+}
+
+// TestWriteAndReloadErrorsBothReturned: when a write and the reload both
+// fail, both are in the error, and Applied stays false.
+func TestWriteAndReloadErrorsBothReturned(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failWrite = map[string]bool{ap.PathNetwork: true}
+	f.failReload = 1
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	res, err := p.Sync(context.Background(), config())
+	if err == nil || res.Applied || !strings.Contains(err.Error(), "write "+ap.PathNetwork) || !strings.Contains(err.Error(), "reload") {
+		t.Fatalf("sync: %+v %v", res, err)
+	}
+}
+
+// TestNothingWrittenNotApplied: when every write fails, Applied is false
+// although the reload ran.
+func TestNothingWrittenNotApplied(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failWrite = map[string]bool{}
+	for _, p := range ap.Paths {
+		f.failWrite[p] = true
+	}
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	res, err := p.Sync(context.Background(), config())
+	if err == nil || res.Applied {
+		t.Fatalf("sync: %+v %v", res, err)
 	}
 }
