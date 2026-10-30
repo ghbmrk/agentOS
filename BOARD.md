@@ -62,7 +62,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-recovery-r4b | MIG-4-recovery-r4b: the owner page's lost-card route: a hardware-key tap files the kernel-approved request, the box restarts, the page shows the new card and the kernel wipes it on confirm (REC-4). | MIG-4-recovery-r3, r4a; agentosd serial | queued (release; tier A; slice r4b of #3391) |
 | KRN-forget-c | The owner's Forget surface: a signed-in page step with a passkey tap (option A) or a FORGET word with a texted code (option B), calling KRN-forget's find and confirm (LOG-4, CH-3, CH-26). | #3179; a decision between A and B | queued (release; sub A; tier A; size M; needs decision) |
 | MAIL-reader-sock | The mail clerk's quarantined read (inbox.Ask) as a frame to a main-side reader process that calls the model clerk (PLN-2, D-154 rule 4). | MAIL-main, #2780 | queued (release; tier A) |
-| MIG-4-adapters-b | MIG-4-adapters-b: delete `recall` and `events` (CAP-3). | MIG-4-adapters-a; #2574; #2571 | building (tier A; slice b of #2579) |
 | MIG-4-adapters-c | MIG-4-adapters-c: the recall directory at rest is removed only once every held lineage is settled and told; STATUS's unknown line gets an owner step (CAP-3, LOG-4). | agentosd slot | queued (release; tier A; slice c of #2579) |
 | MIG-4-adapters-d | MIG-4-adapters-d: `modelroute` off `journal` and `egress`; router denials become a coalesced log line. | #3402; agentosd slot | queued (tier A; slice d of #2579) |
 | MIG-4-adapters-f2 | MIG-4-adapters-f2: the owner's follow approval reaches the kernel; agentosd hosts the follow clerk; the daemon's follow executor is deleted (CH-10, KRN-4). | MIG-4-adapters-f1; agentosd slot | queued (tier A; slice f2 of #2579) |
@@ -91,6 +90,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-local-zone-lint | Lint: reject time.Local writes in Go tests outside TestMain (second sighting after #3181, #3865). | MIG-4-local-zone-lint | queued (later) |
 | MIG-4-exit-c2-unit | MIG-4-exit-c2-unit: the checker's unit (kernel-handed key, loaded sealed seed), the keeper's codes socket and the unlock, kernel and enrollment flags on the image (CH-4, CLK-1). | #3683 (c2); image queue | queued (release; tier A; follow-up of MIG-4-exit-c2; size S) |
 | DECOY-b-wire | DECOY-b-wire: first-boot table, call trips over the kernel socket, texts and resume (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
+| MIG-4-untrusted-reconnect-a4 | Passkey follow-ups from the #4057 reviews: a race test that fails fast, and a retry challenge tied to the begun point. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
 
 ## Harness and operating model
 
@@ -311,6 +311,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CAM-clerk-broken-slot | CAM-clerk-broken-slot: a camera whose sealed slot fails at start is kept, unswept and shown as refused, while the others run (DEV-7, DEV-10) | CAM-clerk (d) (#3514, #3868) | building (release; tier A; from #3868 delta L3 point 2) |
 | ENF-helpers | ENF-helpers: paired helper machines in the enforcer policy; the core's path to them and the Wake-on-LAN relay's list (NET-2 Segments, HW-11) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | IMG-reproduce-deflake | IMG-reproduce-deflake: the release record lists every /usr file's hash, reproduce names the differing file, and that file builds the same twice. | — | queued (release; tier B; size S; from #4037 and main CI) |
+| CAM-clerk-kept-expiry | CAM-clerk-kept-expiry: a camera kept back by a failing sealed slot still has its capture expire on time (DEV-7) | CAM-clerk-broken-slot (#3968, #4050) | queued (release; tier A; from #4050 Security 1 and combined 1) |
+| CAM-clerk-broken-slot-later | CAM-clerk-broken-slot-later: test the broken camera's pin and run guards, retry a briefly failed slot, tidy two dead lines (DEV-3, DEV-10) | CAM-clerk-broken-slot (#3968, #4050) | queued (later; tier A; from #4050 reviews) |
 
 ## Model routes and the Codex lane
 
@@ -404,7 +406,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-e2e | REV-CHK-links-e2e: root-side path operations in the image test harness (`boxe2e`) go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-links-udev | REV-CHK-links-udev: the path lint counts binaries a udev rule runs (`agentos-hostdisk`) as root-side | #3900 | queued |
 | REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | queued |
-| REV-CHK-links-privfile | REV-CHK-links-privfile: `WriteAtomic` refuses a directory that fails `Check`, so its remove and rename cannot be redirected by another uid | #3951 | building |
 | UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief briefs/UPD-7w.md, #4001) | #4001 (brief); build after #3979 and #3994 merge | queued (A; ready to build once #3979 and #3994 merge) |
 | REV-CHK-links-update-r | REV-CHK-links-update-r: drive sources open beneath their root; the remove allow line names Fetch's parent bound | #3979 | queued |
 | REV-CHK-links-update-l | REV-CHK-links-update-l: saved TUF metadata read fails closed; store parent chain root-only; tighter link test | #3979 | queued |
@@ -419,6 +420,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2, UPD-7w (#3961) | queued (A) |
 | BROWSER-logged-out-flake | `TestLoggedOutEffectIsParkedNotResent` (broker/browser/clerk_test.go:202) fails under -race on main, twice in a row: "driver got []"; make the wait on the driver's recorded forward robust without weakening the KRN-8 check (release, CI timing flake, runs 41044163075 and 41044987726) | main CI runs 41044163075 and 41044987726 | building (release; tier A; second sighting, OPERATING §5) |
+| BROWSER-lost-bound | The four lost-click browser tests keep a 300 ms bound that a starved runner can still outrun after #4056; give them 3 s without changing what they assert (release, Security finding on #4056) | #4056 Security review | building (release; tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
