@@ -218,12 +218,12 @@ func (d *decoder) pad(n int) error {
 }
 
 func (d *decoder) take(n int) ([]byte, error) {
-	if n > len(d.b)-d.off {
+	rest := d.b[d.off:]
+	if n > len(rest) {
 		return nil, wireErr("truncated")
 	}
-	b := d.b[d.off : d.off+n]
 	d.off += n
-	return b, nil
+	return rest[:n:n], nil
 }
 
 func (d *decoder) u32() (uint32, error) {
