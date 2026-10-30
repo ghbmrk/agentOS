@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,9 @@ type fakeAP struct {
 	writes  int
 	logins  int
 	stuck   bool // ignores writes, like a full or read-only flash
+
+	failReload        int // the next this many reloads fail
+	active, maxActive int // logged-in connections now, and at most
 }
 
 func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
@@ -77,7 +81,10 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	}
 	f.mu.Lock()
 	f.logins++
+	f.active++
+	f.maxActive = max(f.maxActive, f.active)
 	f.mu.Unlock()
+	defer func() { f.mu.Lock(); f.active--; f.mu.Unlock() }()
 	go ssh.DiscardRequests(reqs)
 	for nc := range chans {
 		if nc.ChannelType() != "session" {
@@ -112,6 +119,10 @@ func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if cmd == applyCmd {
+		if f.failReload > 0 {
+			f.failReload--
+			return 1
+		}
 		f.applies++
 		return 0
 	}
@@ -199,7 +210,7 @@ func TestDriftRepushed(t *testing.T) {
 		t.Fatalf("first sync: %+v %v", res, err)
 	}
 	res, err = p.Sync(ctx, config())
-	if _, _, applies, _ := f.n(); err != nil || res.Applied || len(res.Drift) != 0 || applies != 1 {
+	if _, _, applies, _ := f.n(); err != nil || res.Applied || len(res.Drift) != 0 || applies != 2 {
 		t.Fatalf("in-sync sync: %+v %v applies=%d", res, err, applies)
 	}
 
@@ -216,7 +227,9 @@ func TestDriftRepushed(t *testing.T) {
 	f.mu.Lock()
 	delete(f.files, ap.PathAuthKeys)
 	f.mu.Unlock()
-	if res, err := p.Sync(ctx, config()); err != nil || len(res.Drift) != 1 || res.Drift[0] != ap.PathAuthKeys {
+	_, writes, _, _ = f.n()
+	res, err = p.Sync(ctx, config())
+	if _, w, _, _ := f.n(); err != nil || len(res.Drift) != 1 || res.Drift[0] != ap.PathAuthKeys || w != writes+1 {
 		t.Fatalf("deleted file: %+v %v", res, err)
 	}
 
@@ -296,9 +309,79 @@ func TestVerifyAndPaths(t *testing.T) {
 	if _, err := p.Sync(context.Background(), bad); !errors.Is(err, ErrPath) || func() bool { l, _, _, _ := f.n(); return l != logins }() {
 		t.Fatalf("other path: %v", err)
 	}
+	// An oversized file is not read whole: it counts as drift and is
+	// rewritten, so a hostile access point cannot stop the re-pushes.
 	f.set(ap.PathNetwork, bytes.Repeat([]byte("x"), MaxFile+1))
+	res, err := p.Sync(context.Background(), config())
+	if err != nil || !slices.Contains(res.Drift, ap.PathNetwork) || !bytes.Equal(f.get(ap.PathNetwork), config()[0].Data) {
+		t.Fatalf("oversized file: %+v %v", res, err)
+	}
+}
+
+// TestFailedReloadFinished: a Sync whose reload fails after its writes is
+// finished by the next, which finds the files in place and reloads them.
+// Catches a revoked password that keeps working because the reload that
+// would drop it failed once and was never tried again.
+func TestFailedReloadFinished(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failReload = 1
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
 	if _, err := p.Sync(context.Background(), config()); err == nil {
-		t.Fatal("read an oversized file")
+		t.Fatal("a failed reload was not reported")
+	}
+	if _, _, applies, _ := f.n(); applies != 0 {
+		t.Fatalf("applies = %d", applies)
+	}
+	if res, err := p.Sync(context.Background(), config()); err != nil || len(res.Drift) != 0 {
+		t.Fatalf("second sync: %+v %v", res, err)
+	}
+	if _, _, applies, _ := f.n(); applies != 1 {
+		t.Fatalf("the files in place were never reloaded: applies = %d", applies)
+	}
+}
+
+// TestSyncsDoNotOverlap: two Syncs of one Pusher never hold two
+// connections to the access point at once, so they cannot interleave
+// their writes. Catches a shared temporary file swapped between two
+// pushes.
+func TestSyncsDoNotOverlap(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := p.Sync(context.Background(), config()); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.maxActive != 1 {
+		t.Fatalf("%d connections at once", f.maxActive)
+	}
+}
+
+// TestTempFilePerPath: each path is written through a temporary file of
+// its own, on /etc, so no two writes can share one.
+func TestTempFilePerPath(t *testing.T) {
+	seen := map[string]string{}
+	for _, p := range ap.Paths {
+		tp := tmpPath(p)
+		if !strings.HasPrefix(tp, "/etc/") || strings.Count(tp, "/") != 2 || strings.ContainsAny(tp, " ;|&$`'\"") {
+			t.Errorf("temporary file for %s: %q", p, tp)
+		}
+		if q, dup := seen[tp]; dup {
+			t.Errorf("%s and %s share %s", p, q, tp)
+		}
+		seen[tp] = p
 	}
 }
 

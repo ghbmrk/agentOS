@@ -148,7 +148,7 @@ func TestSetupNetworkOnlyBeforeEnrolment(t *testing.T) {
 		!strings.Contains(got, "option network 'owner'") || strings.Contains(got, "household") || strings.Contains(got, "guests") {
 		t.Fatalf("before enrolment:\n%s", got)
 	}
-	if _, err := Config(fixturePolicy(), l, k); !errors.Is(err, ErrKeys) {
+	if _, err := Config(fixturePolicy(), l, k); !errors.Is(err, ErrKeys) || !strings.Contains(err.Error(), "devices before enrolment") {
 		t.Errorf("devices before enrolment: %v", err)
 	}
 	if c, ok := k.NetworkCard(l, NetSetup); !ok || c.Password != k.Setup {

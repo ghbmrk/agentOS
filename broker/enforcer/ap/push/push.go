@@ -20,6 +20,8 @@ import (
 	"io"
 	"net"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -31,6 +33,8 @@ var (
 	ErrPath   = errors.New("push: not an access point path")
 	ErrVerify = errors.New("push: access point does not hold what was written")
 )
+
+var errTooBig = errors.New("push: output too large")
 
 // MaxFile bounds what Sync reads back from the access point, so a hostile
 // one cannot fill the enforcer's memory.
@@ -53,6 +57,9 @@ type Pusher struct {
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Timeout bounds one Sync; zero is 30 seconds.
 	Timeout time.Duration
+
+	// mu keeps two Syncs of one access point from overlapping.
+	mu sync.Mutex
 }
 
 // Result is what one Sync did.
@@ -60,16 +67,20 @@ type Result struct {
 	// Drift is the paths whose content on the access point differed from
 	// the config before the Sync (absent counts).
 	Drift []string
-	// Applied reports that files were written and the access point told
-	// to reload them.
+	// Applied reports that files were written (and then reloaded).
 	Applied bool
 }
 
 // Sync makes the access point hold exactly files: it reads each back,
-// writes those that differ, reloads, and reads them all back again. A
-// Sync that fails leaves the access point's files as written so far but
-// not reloaded; the next Sync finds them as drift.
+// writes those that differ, reloads, and reads them all back again. It
+// reloads on every Sync, drift or not, so a Sync that failed after its
+// writes (a reload that errored, a connection that dropped) is finished
+// by the next one: reload_config applies only configs that changed since
+// its last run, so an in-sync reload is a no-op. Syncs of one Pusher run
+// one at a time.
 func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, f := range files {
 		if !slices.Contains(ap.Paths, f.Path) {
 			return Result{}, fmt.Errorf("%w: %q", ErrPath, f.Path)
@@ -99,9 +110,6 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 			res.Drift = append(res.Drift, f.Path)
 		}
 	}
-	if len(res.Drift) == 0 {
-		return res, nil
-	}
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
 			if _, err := run(c, writeCmd(f.Path), f.Data); err != nil {
@@ -112,7 +120,7 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	if _, err := run(c, applyCmd, nil); err != nil {
 		return res, fmt.Errorf("push: reload: %w", err)
 	}
-	res.Applied = true
+	res.Applied = len(res.Drift) > 0
 	for _, f := range files {
 		same, err := holds(c, f)
 		if err != nil {
@@ -179,12 +187,17 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 const (
 	readPrefix = "cat "
 	applyCmd   = "reload_config"
-	tmpPath    = "/etc/agentos-ap.new"
 )
+
+// tmpPath is the temporary file for path: one per path, so no two writes
+// share one, and on /etc's own filesystem.
+func tmpPath(path string) string {
+	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + ".new"
+}
 
 func readCmd(path string) string { return readPrefix + path }
 func writeCmd(path string) string {
-	return "umask 077 && cat > " + tmpPath + " && mv -f " + tmpPath + " " + path
+	return "umask 077 && cat > " + tmpPath(path) + " && mv -f " + tmpPath(path) + " " + path
 }
 
 // holds reports whether the access point's file at f.Path is exactly
@@ -192,8 +205,8 @@ func writeCmd(path string) string {
 func holds(c *ssh.Client, f ap.File) (bool, error) {
 	out, err := run(c, readCmd(f.Path), nil)
 	var exit *ssh.ExitError
-	if errors.As(err, &exit) {
-		return false, nil // cat failed: absent or unreadable
+	if errors.As(err, &exit) || errors.Is(err, errTooBig) {
+		return false, nil // absent, unreadable or oversized: rewritten
 	}
 	if err != nil {
 		return false, fmt.Errorf("push: read %s: %w", f.Path, err)
@@ -219,7 +232,7 @@ func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
 	}
 	b, rerr := io.ReadAll(io.LimitReader(out, MaxFile+1))
 	if rerr == nil && len(b) > MaxFile {
-		return nil, fmt.Errorf("push: %q output over %d bytes", cmd, MaxFile)
+		return nil, fmt.Errorf("%w: %q over %d bytes", errTooBig, cmd, MaxFile)
 	}
 	if err := s.Wait(); err != nil {
 		return nil, err
