@@ -209,10 +209,10 @@ func (h *host) save() error {
 // decoder refuses now is logged and left in the file and the store, so its
 // retained capture is kept and still expires on time, and every other
 // camera's sweep goes on. A camera the store refuses (its sealed key
-// slot failing) is held back from the sweep (Store.Keep), so its capture
-// is kept, and is not connected: STATUS shows it refused, and the owner's
-// disconnect erases it (#3968); its capture still expires at its
-// retention (#4064), and each sweep retries it (retry). Every other camera
+// slot failing) is kept (Store.Keep): its key and directory stay and its
+// capture expires at its retention (#4064). It is not connected: STATUS
+// shows it refused, the owner's disconnect erases it (#3968), and each
+// periodic sweep retries it first (retry). Every other camera
 // starts.
 func (h *host) start(ctx context.Context) error {
 	st, err := load(h.dir)
@@ -630,7 +630,8 @@ func (h *host) status() []string {
 	return out
 }
 
-// tick runs the periodic sweep and the DEV-8 flushes until ctx ends; then
+// tick retries the broken cameras, then runs the DEV-8 flushes and the
+// periodic sweep, until ctx ends; then
 // it stops every runner and writes the open segments.
 func (h *host) tick(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)

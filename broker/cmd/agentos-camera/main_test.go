@@ -1126,4 +1126,13 @@ func TestBrokenSlotRetried(t *testing.T) {
 	if err := b.h.setCapture("porch", "off"); err != nil {
 		t.Fatalf("a change on the retried camera was refused: %v", err)
 	}
+	// A broken camera with no retention says that nothing is kept.
+	b.h.mu.Lock()
+	b.h.broken["porch"] = true
+	b.h.st.Cameras[0].RetentionSec = 0
+	b.h.mu.Unlock()
+	want = "camera porch: refused: its capture store did not open, retried each minute; nothing is kept; disconnect it on the local page"
+	if !strings.Contains(b.status(), want) {
+		t.Fatalf("STATUS:\n%s", b.status())
+	}
 }
