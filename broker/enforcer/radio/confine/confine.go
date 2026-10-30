@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -104,8 +105,10 @@ type Spec struct {
 
 // Proc is a running stack.
 type Proc struct {
-	cmd *exec.Cmd
-	net *os.File // its network namespace
+	cmd  *exec.Cmd
+	net  *os.File      // its network namespace, unless it joined another's
+	keep chan struct{} // holds the thread that started a joined stack
+	once sync.Once
 }
 
 // Arg0 marks the re-exec of the enforcer's own binary that confines itself
@@ -211,15 +214,21 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		ExtraFiles:  extra,
 		SysProcAttr: attr,
 	}
+	proc := &Proc{cmd: cmd}
 	start := cmd.Start
 	if s.Net != nil {
-		start = func() error { return inNetns(s.Net.net, cmd.Start) }
+		if s.Net.net == nil {
+			ours.Close()
+			return nil, nil, ErrJoin
+		}
+		proc.keep = make(chan struct{})
+		start = func() error { return inNetns(s.Net.net, cmd.Start, proc.keep) }
 	}
 	if err := start(); err != nil {
+		proc.release()
 		ours.Close()
 		return nil, nil, fmt.Errorf("confine: start %s: %w", p.Name, err)
 	}
-	proc := &Proc{cmd: cmd}
 	fail := func(err error) (*Proc, *os.File, error) {
 		proc.Stop()
 		ours.Close()
@@ -234,7 +243,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		proc.net = f
 	}
 	if hold {
-		if err := inNetns(proc.net, func() error { return setupLinks(p.Links) }); err != nil {
+		if err := inNetns(proc.net, func() error { return setupLinks(p.Links) }, nil); err != nil {
 			return fail(err)
 		}
 		if _, err := release.Write([]byte{1}); err != nil {
@@ -248,7 +257,19 @@ func Start(s Spec) (*Proc, *os.File, error) {
 func (p *Proc) Pid() int { return p.cmd.Process.Pid }
 
 // Wait waits for the stack to exit.
-func (p *Proc) Wait() error { return p.cmd.Wait() }
+func (p *Proc) Wait() error {
+	err := p.cmd.Wait()
+	p.release()
+	return err
+}
+
+// release lets the thread that started a joined stack exit, once the stack
+// has been reaped.
+func (p *Proc) release() {
+	if p.keep != nil {
+		p.once.Do(func() { close(p.keep) })
+	}
+}
 
 // Stop kills the stack and reaps it.
 func (p *Proc) Stop() error {
@@ -256,45 +277,39 @@ func (p *Proc) Stop() error {
 	if p.net != nil {
 		p.net.Close()
 	}
-	return p.cmd.Wait()
+	err := p.cmd.Wait()
+	p.release()
+	return err
 }
 
-// InNet runs fn on an OS thread inside the stack's network namespace and
-// then returns the thread to the enforcer's own. It is for the enforcer's
-// tests and setup; a process fn starts runs in that namespace.
+// InNet runs fn on an OS thread inside the stack's network namespace; the
+// thread is then discarded. It is for the enforcer's tests; a process fn
+// starts runs in that namespace.
 func (p *Proc) InNet(fn func() error) error {
 	if p.net == nil {
 		return errors.New("confine: the stack shares another's network namespace")
 	}
-	return inNetns(p.net, fn)
+	return inNetns(p.net, fn, nil)
 }
 
-// inNetns runs fn on a locked OS thread moved into the network namespace
-// ns, then moves the thread back. If it cannot move back, the thread stays
-// locked and exits with its goroutine, so no other code runs there.
-func inNetns(ns *os.File, fn func() error) error {
+// inNetns runs fn on a fresh locked OS thread moved into the network
+// namespace ns. The thread never moves back, since inside a user namespace
+// it may lack the right to re-enter the enforcer's own: it stays locked and
+// exits with its goroutine, once keep closes (nil: at once), so no other
+// code runs there. A child fn starts holds Pdeathsig on that thread, so
+// keep must outlive it.
+func inNetns(ns *os.File, fn func() error, keep <-chan struct{}) error {
 	errc := make(chan error, 1)
 	go func() {
-		runtime.LockOSThread()
-		own, err := os.Open(fmt.Sprintf("/proc/self/task/%d/ns/net", syscall.Gettid()))
-		if err != nil {
-			runtime.UnlockOSThread()
-			errc <- err
-			return
-		}
-		defer own.Close()
+		runtime.LockOSThread() // never unlocked: the thread exits with this goroutine
 		if err := setns(ns, syscall.CLONE_NEWNET); err != nil {
-			runtime.UnlockOSThread()
 			errc <- fmt.Errorf("setns: %w", err)
 			return
 		}
-		ferr := fn()
-		if err := setns(own, syscall.CLONE_NEWNET); err != nil {
-			errc <- fmt.Errorf("setns back: %w", err) // the thread is not unlocked: it exits
-			return
+		errc <- fn()
+		if keep != nil {
+			<-keep
 		}
-		runtime.UnlockOSThread()
-		errc <- ferr
 	}()
 	return <-errc
 }
