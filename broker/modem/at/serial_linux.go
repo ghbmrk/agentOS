@@ -10,7 +10,8 @@ import (
 // OpenSerial opens a USB serial interface in raw mode: no echo, no line
 // editing, no CR/LF translation, 8 data bits, reads returning whatever has
 // arrived. USB CDC ignores the baud rate; 115200 is set for adapters that
-// do not.
+// do not. It follows a link on purpose: udev's /dev/serial/by-id names and
+// the e2e sysroot's dev/ttyUSB2 are links to the real node.
 func OpenSerial(path string) (io.ReadWriteCloser, error) {
 	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
 	if err != nil {
