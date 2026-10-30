@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/decoy"
@@ -321,5 +322,39 @@ func TestCallTripStopsCallOnly(t *testing.T) {
 	r.plan("p1", r.ck, st(key.Trash, "m1"))
 	if r.status("p1") != kernel.SActive {
 		t.Fatal("planning stopped")
+	}
+}
+
+// A trip entry written past the kernel folds only when it names a table
+// entry, and an exit name is short; resumes count up, so each signs anew.
+func TestTripEntryBounds(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	n := tb.Len()
+	es := r.k.Log().Entries()
+	for _, id := range []int{-1, 0, n - 1, n} {
+		last := es[len(es)-1]
+		es = append(es, kernel.Entry{Seq: last.Seq + 1, At: last.At, Type: kernel.TTrip, V: 1,
+			Body: json.RawMessage(fmt.Sprintf(`{"cause":"destination","exit":"egress","entry":%d,"response":"call"}`, id))})
+	}
+	re, err := kernel.Replay(r.anchors(), es)
+	must(t, err)
+	if ts := re.Trips(); len(ts) != 2 || ts[0].Entry != 0 || ts[1].Entry != n-1 {
+		t.Fatalf("folded trips %+v, want entries 0 and %d only", ts, n-1)
+	}
+
+	exit := "e" + strings.Repeat("x", 31)
+	must(t, r.k.CallTrip(1, exit, decoy.Metadata))
+	if err := r.k.CallTrip(1, exit+"x", decoy.Metadata); err == nil {
+		t.Fatal("a 33-byte exit name")
+	}
+
+	for i := 0; i < 2; i++ {
+		r.plan(fmt.Sprintf("full%d", i), r.ck, st(key.Trash, entry(t, tb, decoy.PHostEnv).Value))
+		n, last, ok := r.k.State().TripResume()
+		if !ok || n != i {
+			t.Fatalf("resume %d is numbered %d", i, n)
+		}
+		must(t, r.k.ResumeTrip(2, key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))))
 	}
 }
