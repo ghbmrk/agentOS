@@ -172,7 +172,7 @@ func TestSuiteGrowthIsRunAgain(t *testing.T) {
 	}
 }
 
-// A failure is never kept either: a held-out run that passes later passes.
+// A held-out failure is not kept: a run that passes later passes.
 func TestFailureIsRunAgain(t *testing.T) {
 	f, v := ordinary(t, Options{})
 	r := passing()
@@ -184,6 +184,39 @@ func TestFailureIsRunAgain(t *testing.T) {
 	r.cand[SuiteHeldOut] = sc(SuiteHeldOut, 10, 9)
 	if got, err := q.Requalify(context.Background(), v); err != nil || !got.Passed {
 		t.Fatalf("second: %+v, %v; want passed", got, err)
+	}
+}
+
+// A security failure is final on that suite, across restarts: a later run
+// that passes every case does not pass (#4033 Security delta point 1). A
+// new suite digest runs it afresh, and another candidate is not affected.
+func TestSecurityFailureIsFinalOnItsSuite(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := passing()
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39)
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed {
+		t.Fatalf("first: %+v, %v; want failed", got, err)
+	}
+	r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 40)
+	got, err := requalifier(t, f, r).Requalify(context.Background(), v)
+	if err != nil || got.Passed || got.Reason != SuiteSecurity {
+		t.Fatalf("retry on the same suite: %+v, %v; want failed on security", got, err)
+	}
+	// Another candidate on the same suite is judged on its own.
+	f.release(3, nil)
+	f.publish(0, 1)
+	res, err := f.check(Options{})
+	if err != nil || res.Release == nil {
+		t.Fatal(res.Release, err)
+	}
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), res.Release); err != nil || !got.Passed {
+		t.Fatalf("another candidate: %+v, %v; want passed", got, err)
+	}
+	// A grown suite (new digest) runs the first candidate afresh.
+	grown := Score{Suite: SuiteSecurity, Digest: "d2", Cases: 41, Passed: 41}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = grown, grown
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("new suite: %+v, %v; want passed", got, err)
 	}
 }
 

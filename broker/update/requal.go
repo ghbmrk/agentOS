@@ -65,10 +65,13 @@ type Requalifier struct {
 }
 
 // requalState is the saved record: the security suite's floor, which only
-// grows (HLD-3). No verdict is kept: each call runs the suites as they are
-// now, so a suite that gained a case since is never skipped.
+// grows (HLD-3), and, per candidate, the digest of the security suite it
+// failed. No verdict is kept, so a suite that gained a case since a pass is
+// run, and held-out or replay noise is retried; but a security failure is
+// final on that suite, so a retry never turns one into a pass.
 type requalState struct {
-	Floor int `json:"security_floor"`
+	Floor  int               `json:"security_floor"`
+	Failed map[string]string `json:"security_failed"`
 }
 
 // NewRequalifier keeps its record at path. A nil runner is allowed: every
@@ -115,7 +118,16 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		if s == SuiteSecurity {
 			st.Floor = max(st.Floor, base.Cases)
 		}
-		if detail := judge(cand, base, st.Floor); detail != "" {
+		detail := judge(cand, base, st.Floor)
+		if s == SuiteSecurity {
+			key := refKey(out.Ref)
+			if detail != "" {
+				st.Failed[key] = cand.Digest
+			} else if st.Failed[key] == cand.Digest {
+				detail = "failed this security suite before"
+			}
+		}
+		if detail != "" {
 			out.Reason, out.Detail = s, detail
 			break
 		}
@@ -125,6 +137,10 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		return Verdict{}, err
 	}
 	return out, nil
+}
+
+func refKey(r Ref) string {
+	return fmt.Sprintf("%d:%s:%s", r.Version, r.UsrRootHash, r.ManifestSHA256)
 }
 
 // run is one Runner call whose score must be for the suite it asked for
@@ -167,7 +183,7 @@ func judge(cand, base Score, floor int) string {
 }
 
 func (q *Requalifier) load() (requalState, error) {
-	var st requalState
+	st := requalState{Failed: map[string]string{}}
 	b, err := readFile(q.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
@@ -177,6 +193,9 @@ func (q *Requalifier) load() (requalState, error) {
 	}
 	if err := json.Unmarshal(b, &st); err != nil {
 		return requalState{}, fmt.Errorf("update: requalification record: %w", err)
+	}
+	if st.Failed == nil {
+		st.Failed = map[string]string{}
 	}
 	return st, nil
 }
