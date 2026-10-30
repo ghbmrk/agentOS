@@ -94,6 +94,8 @@ jobs:
           command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
           grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
           grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
+      - name: dnsmasq for the enforcer's resolver tests (ENF-f, #3664)
+        run: sudo apt-get update -q && sudo apt-get install -yq dnsmasq-base
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}

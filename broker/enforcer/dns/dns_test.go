@@ -198,12 +198,14 @@ func TestGenerateRefuses(t *testing.T) {
 }
 
 func TestHostname(t *testing.T) {
-	for _, ok := range []string{"a.b", "core.example", "x-1.y2.example", strings.Repeat("a", 63) + ".example"} {
+	// The character ranges' ends, and the longest name, are accepted.
+	longest := strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("a", 61) // 253 bytes
+	for _, ok := range []string{"a.b", "z.z", "0.9", "a0z9.b-c", "core.example", "x-1.y2.example", strings.Repeat("a", 63) + ".example", longest} {
 		if !Hostname(ok) {
 			t.Errorf("%q refused", ok)
 		}
 	}
-	for _, bad := range []string{"", "a", "-a.b", "a-.b", "a..b", ".a.b", "a.b.", "A.b", "a_b.c", "a/b.c", "a#b.c", "a b.c", "a,b.c", "*.a.b", "a.b\n", strings.Repeat("a.", 127) + "aa"} {
+	for _, bad := range []string{"", "a", "-a.b", "`.b", "{.b", "/.b", ":.b", longest + "a", "a-.b", "a..b", ".a.b", "a.b.", "A.b", "a_b.c", "a/b.c", "a#b.c", "a b.c", "a,b.c", "*.a.b", "a.b\n", strings.Repeat("a.", 127) + "aa"} {
 		if Hostname(bad) {
 			t.Errorf("%q accepted", bad)
 		}
@@ -211,6 +213,28 @@ func TestHostname(t *testing.T) {
 }
 
 // TestDnsmasqAccepts: dnsmasq's own syntax check passes each file.
+// TestSetupBounds: the ends of what check accepts.
+func TestSetupBounds(t *testing.T) {
+	l := fixtureLayout()
+	try := func(mod func(*Setup)) error {
+		s := fixtureSetup()
+		mod(&s)
+		_, err := Generate(fixturePolicy(), l, s)
+		return err
+	}
+	for bits, ok := range map[int]bool{15: false, 16: true, 28: true, 29: false} {
+		p := netip.PrefixFrom(netip.MustParseAddr("10.0.0.0"), bits)
+		if err := try(func(s *Setup) { s.Nets[0].Prefix4 = p }); (err == nil) != ok {
+			t.Errorf("IPv4 /%d: %v", bits, err)
+		}
+	}
+	for path, ok := range map[string]bool{"/AZ/az/09/a-b_c.d": true, "/a@b": false, "/a[b": false, "/a`b": false, "/a{b": false, "/a:b": false, "/a,b": false, "/a/../b": false} {
+		if err := try(func(s *Setup) { s.LeaseFile = path }); (err == nil) != ok {
+			t.Errorf("lease file %q: %v", path, err)
+		}
+	}
+}
+
 func TestDnsmasqAccepts(t *testing.T) {
 	bin := dnsmasq(t)
 	f := generate(t)
