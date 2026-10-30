@@ -44,10 +44,6 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4042 (ENF-names, #3758): broker/enforcer/channel/, which the G2 list does not name (D-198).
-# Remove once #4042 merges.
-exempt-pr 4042
-
 # #4051 (ENF-g, #3662): broker/enforcer/ap/ (with push/), which the G2 list does not name
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
