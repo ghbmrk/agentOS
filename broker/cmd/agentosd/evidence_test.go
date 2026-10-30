@@ -1,6 +1,6 @@
 package main
 
-// REQ: CH-20, CH-19, CH-10, CAP-3, CH-3
+// REQ: CH-20, CH-19, CH-21, CH-10, CAP-3, CH-3
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/modem"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
@@ -60,21 +61,21 @@ func noPage(t *testing.T, s string) {
 // texts is kept whole (potency C1) and the third text says where it was
 // cut and what to ask (UX ruling on #148; CH-12, D-127).
 func TestLongRepliesAreKept(t *testing.T) {
-	if textRoom(true) != control.MaxText-len(owner.AgentPrefix) {
+	if textRoom(true) != control.MaxText {
 		t.Fatal("the owner channel's text limit changed")
 	}
 	r := newEvRig(t)
 	long := strings.Repeat("All of this is the reply. ", 80)
 	r.ev.sendSplit("agent", long)
 	got := r.texts()[2]
-	if len(owner.AgentPrefix+got) > control.MaxText || !strings.HasSuffix(got, " "+keptLong) || !strings.HasPrefix(got, "All of this") {
+	if len(got) > control.MaxText || !strings.HasSuffix(got, " "+keptLong) || !strings.HasPrefix(got, "All of this") {
 		t.Fatalf("text %q", got)
 	}
 	noPage(t, got)
 	if k := r.ev.kept.list(); len(k) != 1 || k[0].Text != long {
 		t.Fatalf("kept %+v", k)
 	}
-	fits := strings.Repeat("x", control.MaxText-len(owner.AgentPrefix))
+	fits := strings.Repeat("x", control.MaxText)
 	r.ev.sendSplit("agent", fits)
 	if r.texts()[3] != fits || len(r.ev.kept.list()) != 1 {
 		t.Fatal("a reply that fits was kept")
@@ -85,12 +86,12 @@ func TestLongRepliesAreKept(t *testing.T) {
 // every kept reply, which may quote the deleted record (security C6).
 func TestADeletionForgetsKeptReplies(t *testing.T) {
 	r := newEvRig(t)
-	r.ev.kept.keep("quotes the record")
+	r.ev.kept.keep("long", "quotes the record")
 	n, err := r.ev.kept.forget()
 	if n != 0 || err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("forgot %d %v %d", n, err, len(r.ev.kept.list()))
 	}
-	r.ev.kept.keep("again")
+	r.ev.kept.keep("long", "again")
 	if _, err := r.ev.kept.forget(); err != nil || len(r.ev.kept.list()) != 0 {
 		t.Fatalf("again: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestDEL1f1DeletionReachesTheOutbox(t *testing.T) {
 	}
 	src := &forgettingOutbox{fakeOutbox: fakeOutbox{sent: r.texts}}
 	src.add("quotes the record")
-	r.ev.kept.keep("quotes it too")
+	r.ev.kept.keep("long", "quotes it too")
 	r.ev.serve(src)
 	if _, err := r.ev.kept.forget(); err != nil {
 		t.Fatalf("forget: %v", err)
@@ -380,7 +381,7 @@ func TestGuestReactionIsRefusedToTheGuest(t *testing.T) {
 // REQ: CH-12
 // TestCH12SplitCountsUCS2Room: a reply with emoji needs UCS-2, 3 x 67
 // UTF-16 units a text. One of about two and a half texts goes as three
-// texts in order, each within three UCS-2 segments with AgentPrefix, none
+// texts in order, each within three UCS-2 segments, none
 // cut inside a joined emoji, and nothing is kept; control and bidi
 // characters are gone before the split.
 func TestCH12SplitCountsUCS2Room(t *testing.T) {
@@ -400,7 +401,7 @@ func TestCH12SplitCountsUCS2Room(t *testing.T) {
 		t.Fatalf("%d texts", len(got))
 	}
 	for i, s := range got {
-		n, gsm7 := modem.Segments(owner.AgentPrefix + s)
+		n, gsm7 := modem.Segments(s)
 		if gsm7 || n > control.Segments {
 			t.Fatalf("text %d: %d segments, gsm7 %v", i, n, gsm7)
 		}
@@ -494,6 +495,384 @@ func TestEvidenceSettingIsNotYet(t *testing.T) {
 	for _, msg := range []string{"EVIDENCE", "EMAIL REPLIES", "EVIDENCE TO nobody", "email replies to the landlord", "Email the reply to me"} {
 		if r, _ := cfg.Settings(context.Background(), msg, true); r != "loops" {
 			t.Errorf("%q: %q", msg, r)
+		}
+	}
+}
+
+// TestKeptSurvivesRestart (HELD-2): what was kept is still listed, with
+// the same id, kind and text, by a store opened again on the same file.
+func TestKeptSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kept.json")
+	ev := newEvidence(path, defaultKeepFor, t.Logf)
+	if err := ev.kept.Keep(owner.KeptCode, "I fixed the code."); err != nil {
+		t.Fatal(err)
+	}
+	before := ev.kept.list()
+	after := newEvidence(path, defaultKeepFor, t.Logf).kept.list()
+	if len(before) != 1 || before[0].ID == "" || !slices.Equal(before, after) || after[0].Kind != owner.KeptCode || after[0].Text != "I fixed the code." {
+		t.Fatalf("kept %+v, after a restart %+v", before, after)
+	}
+}
+
+// TestKeptExpiresOnlyByTime (HELD-2): 25 items are all kept (no count
+// eviction); on day 29 they are listed, on day 30 + 1 s each is a stub
+// with no text, on the page as on disk once swept, and 30 days later the
+// stubs are gone.
+func TestKeptExpiresOnlyByTime(t *testing.T) {
+	r := newEvRig(t)
+	const canary = "CANARY-held-482913"
+	for i := range 25 {
+		if err := r.ev.kept.keep(localapi.HeldLong, fmt.Sprintf("%s %d", canary, i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := r.now
+	r.now = start.Add(29 * 24 * time.Hour)
+	l := r.ev.kept.list()
+	if len(l) != 25 || l[0].Text != canary+" 0" || l[0].Expired {
+		t.Fatalf("day 29: %d kept", len(l))
+	}
+	r.now = start.Add(defaultKeepFor + time.Second)
+	h := r.ev.kept.held()
+	if len(h.Items) != 25 || !h.Items[0].Expired || h.Items[0].Text != "" || h.Items[0].ID != l[24].ID {
+		t.Fatalf("day 30 + 1 s: %+v", h.Items[0])
+	}
+	r.ev.kept.sweep()
+	if raw, _ := r.store.Load(); strings.Contains(string(raw), canary) {
+		t.Fatal("an expired text is still on disk")
+	}
+	r.now = start.Add(defaultKeepFor + stubFor + time.Second)
+	if l := r.ev.kept.list(); len(l) != 0 {
+		t.Fatalf("stubs outlived their 30 days: %d", len(l))
+	}
+}
+
+// TestFullStoreRefusesNotEvicts (HELD-2): an item that would take the file
+// past its byte cap is refused, every older item stays as it was, and the
+// owner channel then says the text could not be kept.
+func TestFullStoreRefusesNotEvicts(t *testing.T) {
+	r := newEvRig(t)
+	big := strings.Repeat("x", maxKeptBytes/3)
+	for i := range 2 {
+		if err := r.ev.kept.keep(localapi.HeldLong, big+fmt.Sprint(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := r.store.Load()
+	if err := r.ev.kept.Keep(owner.KeptSecret, big); !errors.Is(err, errKeptFull) {
+		t.Fatalf("a full store kept it: %v", err)
+	}
+	if after, _ := r.store.Load(); string(after) != string(before) {
+		t.Fatal("a refused keep changed the older items")
+	}
+	long := strings.Repeat("All of this is the reply. ", 80)
+	r.ev.sendSplit("agent", long+big)
+	got := r.texts()
+	if len(got) != 3 || !strings.HasSuffix(got[2], " "+keptLongNotKept) || len(got[2]) > control.MaxText {
+		t.Fatalf("a long reply not kept ended %q", got[len(got)-1])
+	}
+	noPage(t, got[2])
+}
+
+// TestUnsentNotKeptIsTold: a reply that did not go and could not be kept
+// is logged, and the owner is told in the broker's own words.
+func TestUnsentNotKeptIsTold(t *testing.T) {
+	r := newEvRig(t)
+	r.ev.kept.store = failStore{}
+	var told []string
+	r.ev.inform = func(s string) error { told = append(told, s); return nil }
+	n := 0
+	r.ev.notify = func(string) error {
+		if n++; n == 2 {
+			return errNoSend
+		}
+		return nil
+	}
+	r.ev.sendSplit("agent", strings.Repeat("A reply in two texts. ", 30))
+	if len(told) != 1 || told[0] != unsentNotKept {
+		t.Fatalf("told %q", told)
+	}
+	noPage(t, unsentNotKept)
+}
+
+type failStore struct{}
+
+func (failStore) Load() ([]byte, error) { return nil, nil }
+func (failStore) Save([]byte) error     { return errors.New("disk full") }
+
+// TestHeldListsNewestFirst: the page's view lists what is kept newest
+// first, then the expired stubs, and reading it removes nothing (HELD-3).
+func TestHeldListsNewestFirst(t *testing.T) {
+	r := newEvRig(t)
+	start := r.now
+	for i, k := range []string{owner.KeptSecret, owner.KeptCode, localapi.HeldUnsent} {
+		r.now = start.Add(time.Duration(i) * 24 * time.Hour)
+		if err := r.ev.kept.keep(k, k+" text"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.now = start.Add(defaultKeepFor + time.Hour)
+	for range 2 {
+		h := r.ev.kept.held()
+		if len(h.Items) != 3 || h.Items[0].Kind != localapi.HeldUnsent || h.Items[1].Kind != owner.KeptCode || !h.Items[2].Expired || h.Items[2].Kind != owner.KeptSecret {
+			t.Fatalf("held %+v", h.Items)
+		}
+	}
+	if owner.KeptSecret != localapi.HeldSecret || owner.KeptCode != localapi.HeldCode {
+		t.Fatal("the owner channel's kinds are not the page's")
+	}
+}
+
+// TestRetriedKeepIsKeptOnce: a held text offered again while it is still
+// kept, as a retried owner question is on every try (#3986 L3 1; owner's
+// TestRetriedHeldTextKeepsAskingTheKeeper), is kept once, so retries
+// never fill the store; another kind, or the same text once expired, is a
+// new item.
+func TestRetriedKeepIsKeptOnce(t *testing.T) {
+	r := newEvRig(t)
+	const q = "I fixed the code. Shall I push it?"
+	for range 120 {
+		if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l := r.ev.kept.list(); len(l) != 1 {
+		t.Fatalf("kept %d copies of one retried text", len(l))
+	}
+	if err := r.ev.kept.keep(localapi.HeldUnsent, q); err != nil {
+		t.Fatal(err)
+	}
+	r.now = r.now.Add(defaultKeepFor + time.Second)
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); len(l) != 3 || l[2].Expired {
+		t.Fatalf("kept %+v", l)
+	}
+}
+
+// TestLegacyKeptGetsAStableID: a reply kept before items had ids is
+// listed with one, the same before and after its text expires.
+func TestLegacyKeptGetsAStableID(t *testing.T) {
+	r := newEvRig(t)
+	if err := r.store.Save([]byte(`[{"text":"an old reply","at":"2026-10-04T09:00:00Z"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	live := r.ev.kept.list()
+	r.now = r.now.Add(defaultKeepFor)
+	r.ev.kept.sweep()
+	stub := r.ev.kept.list()
+	if len(live) != 1 || live[0].ID == "" || len(stub) != 1 || !stub[0].Expired || stub[0].ID != live[0].ID {
+		t.Fatalf("live %+v, stub %+v", live, stub)
+	}
+}
+
+// TestNotKeptTextsGiveAStep: each could-not-be-kept text fits one GSM-7
+// segment, names no page, and says what the owner can do (CH-12);
+// keptLongNotKept fits where keptLong would.
+func TestNotKeptTextsGiveAStep(t *testing.T) {
+	for _, s := range []string{keptLongNotKept, unsentNotKept} {
+		if n, gsm := modem.Segments(s); !gsm || n != 1 || !strings.Contains(s, "Ask me") {
+			t.Fatalf("%q", s)
+		}
+		noPage(t, s)
+	}
+	if len(keptLongNotKept) > len(keptLong) {
+		t.Fatal("keptLongNotKept is longer than keptLong")
+	}
+}
+
+// TestRepeatNearExpiryLastsFromItsPointer: the same text withheld again a
+// minute before the first copy expires is kept for keepFor from then, so
+// the page still shows it 2 minutes after the second pointer and until
+// 30 days after it, as one item with the first id, listed newest (#3986
+// delta L3 1; HELD-1, HELD-2).
+func TestRepeatNearExpiryLastsFromItsPointer(t *testing.T) {
+	r := newEvRig(t)
+	const q = "Your code is 482913"
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ev.kept.Keep(owner.KeptSecret, "other"); err != nil {
+		t.Fatal(err)
+	}
+	first := r.ev.kept.list()[0].ID
+	r.now = r.now.Add(defaultKeepFor - time.Minute)
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	second := r.now
+	r.now = second.Add(2 * time.Minute)
+	h := r.ev.kept.held()
+	if len(h.Items) != 2 || h.Items[0].Expired || h.Items[0].Text != q || h.Items[0].ID != first || !h.Items[0].At.Equal(second) {
+		t.Fatalf("2 minutes after the second pointer: %+v", h.Items)
+	}
+	r.now = second.Add(defaultKeepFor - time.Second)
+	if l := r.ev.kept.list(); len(l) != 2 || l[1].Expired || l[1].Text != q {
+		t.Fatalf("day 30 after the second pointer: %+v", l)
+	}
+	r.now = second.Add(defaultKeepFor)
+	if l := r.ev.kept.list(); !l[1].Expired {
+		t.Fatal("kept past keepFor from its latest pointer")
+	}
+}
+
+// TestHeldCodeExpiresAtTheHour (CODEH-4): a code the owner channel kept is
+// readable until the owner-set hour; from then the page shows the item
+// with its other text readable and the code expired, the swept file no
+// longer holds the code, and the item stays until its kept days end. A
+// key kept beside it keeps its days (CH-19, #906).
+func TestHeldCodeExpiresAtTheHour(t *testing.T) {
+	const code = "482913"
+	text := "Hi, your Acme verification code is " + code + ". Ask me if it fails."
+	for _, hours := range []int{1, 24} {
+		r := newEvRig(t)
+		r.ev.kept.codeFor, _ = codeFor(hours)
+		if err := r.ev.kept.Keep(owner.KeptOneTime, text); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.ev.kept.Keep(owner.KeptSecret, "key AKIACANARY0000000000"); err != nil {
+			t.Fatal(err)
+		}
+		start := r.now
+		r.now = start.Add(time.Duration(hours)*time.Hour - time.Second)
+		if h := r.ev.kept.held(); h.Items[1].Text != text || h.Items[1].CodeExpired {
+			t.Fatalf("%dh: before the hour %+v", hours, h.Items[1])
+		}
+		r.now = start.Add(time.Duration(hours) * time.Hour)
+		h := r.ev.kept.held()
+		want := "Hi, your Acme verification code is " + owner.ExpiredCode + ". Ask me if it fails."
+		if it := h.Items[1]; it.Text != want || !it.CodeExpired || it.Expired || it.Kind != localapi.HeldOneTime {
+			t.Fatalf("%dh: at the hour %+v", hours, it)
+		}
+		if it := h.Items[0]; it.Text != "key AKIACANARY0000000000" || it.CodeExpired {
+			t.Fatalf("%dh: the key went with the code: %+v", hours, it)
+		}
+		r.ev.kept.sweep()
+		if raw, _ := r.store.Load(); strings.Contains(string(raw), code) || !strings.Contains(string(raw), "Ask me if it fails.") {
+			t.Fatalf("%dh: swept file %s", hours, raw)
+		}
+		r.now = start.Add(defaultKeepFor - time.Second)
+		if l := r.ev.kept.list(); len(l) != 2 || l[0].Expired || l[0].Text != want {
+			t.Fatalf("%dh: the item did not keep its days: %+v", hours, l)
+		}
+	}
+}
+
+// TestCodeHoursBound (CODEH-5): -code-hours takes 1 to 24 and defaults to
+// 1; anything else is refused (CH-19, #906).
+func TestCodeHoursBound(t *testing.T) {
+	for h, ok := range map[int]bool{-1: false, 0: false, 1: true, 12: true, 24: true, 25: false} {
+		d, err := codeFor(h)
+		if (err == nil) != ok || ok && d != time.Duration(h)*time.Hour {
+			t.Errorf("codeFor(%d) = %v, %v", h, d, err)
+		}
+	}
+	r := newEvRig(t)
+	if err := r.ev.kept.Keep(owner.KeptOneTime, "code 482913"); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); l[0].CodeUntil != r.now.Add(time.Hour) || defaultCodeFor != time.Hour {
+		t.Fatalf("default code hours: %+v", l[0])
+	}
+}
+
+// TestHeldCodeBesideAKeyExpires (CODEH-7, #4014 L3 1): a code kept beside
+// a key leaves the disk at the hour while the key stays for its days, and
+// a kept code the stored text cannot show expires with the whole text.
+func TestHeldCodeBesideAKeyExpires(t *testing.T) {
+	r := newEvRig(t)
+	for _, text := range []string{"Your login code is 482913 and your key is AKIACANARY0000000000", "co de 482913"} {
+		if err := r.ev.kept.Keep(owner.KeptOneTime, text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.now = r.now.Add(time.Hour)
+	r.ev.kept.sweep()
+	raw, _ := r.store.Load()
+	if strings.Contains(string(raw), "482913") || !strings.Contains(string(raw), "AKIACANARY0000000000") {
+		t.Fatalf("swept file %s", raw)
+	}
+	if l := r.ev.kept.list(); len(l) != 2 || l[1].Text != owner.ExpiredCode || !l[1].CodeExpired || l[1].Expired {
+		t.Fatalf("kept %+v", l)
+	}
+}
+
+// TestHeldCodeShowsItsExpiredView (CODEH-8, #4014 delta L3): at the hour a
+// code kept with KeepCode reads as the view the owner channel gave, and
+// the swept file holds neither code.
+func TestHeldCodeShowsItsExpiredView(t *testing.T) {
+	r := newEvRig(t)
+	text := "Your code is 482913. Also verifi cation 4829 13"
+	if err := r.ev.kept.KeepCode(text, owner.ExpiredView("Your code is 482913. Also verifi\x07cation 4829\x0713")); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); l[0].Text != text {
+		t.Fatalf("before the hour %+v", l[0])
+	}
+	r.now = r.now.Add(time.Hour)
+	r.ev.kept.sweep()
+	raw, _ := r.store.Load()
+	if strings.Contains(string(raw), "4829") {
+		t.Fatalf("swept file %s", raw)
+	}
+	if l := r.ev.kept.list(); l[0].Text != owner.ExpiredCode || !l[0].CodeExpired {
+		t.Fatalf("at the hour %+v", l[0])
+	}
+}
+
+// TestRetriedHeldCodeKeepsTheStricterView (CODEH-9, #4014 Security): a
+// code text kept once as received with a control and once clean is kept
+// once, and at the hour shows the stricter view, so the code a control
+// hid does not outlive its hours, in either order.
+func TestRetriedHeldCodeKeepsTheStricterView(t *testing.T) {
+	hidden := "Your code is 482913. Also verifi\x07cation 4829\x0713"
+	clean := "Your code is 482913. Also verifi cation 4829 13"
+	for _, order := range [][]string{{hidden, clean}, {clean, hidden}} {
+		r := newEvRig(t)
+		for _, in := range order {
+			if err := r.ev.kept.KeepCode(control.StripControls(in), owner.ExpiredView(in)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.now = r.now.Add(time.Hour)
+		r.ev.kept.sweep()
+		raw, _ := r.store.Load()
+		if l := r.ev.kept.list(); len(l) != 1 || strings.Contains(string(raw), "4829") || l[0].Text != owner.ExpiredCode {
+			t.Fatalf("%q then %q: kept %+v", order[0], order[1], l)
+		}
+	}
+}
+
+// TestCH21RoomHasNoPrefixBudget: agent text carries no label (CH-21), so
+// a reply gets the whole of each text: one of exactly control.MaxText
+// goes as one text, unchanged (#2189).
+func TestCH21RoomHasNoPrefixBudget(t *testing.T) {
+	if textRoom(true) != control.Room(true) || textRoom(false) != control.Room(false) {
+		t.Fatalf("textRoom %d/%d, want the whole text", textRoom(true), textRoom(false))
+	}
+	r := newEvRig(t)
+	fits := strings.Repeat("y", control.MaxText)
+	r.ev.sendSplit("agent", fits)
+	if got := r.texts(); len(got) != 1 || got[0] != fits {
+		t.Fatalf("texted %d parts", len(got))
+	}
+}
+
+// TestCH21WholeReplyCheckedBeforeSplit: the CH-21 check runs on the whole
+// reply before it is split (CH-12), so a footer or a word whose parts
+// would land in different texts goes as one text, for the owner channel
+// to hold whole (#2189, #3916).
+func TestCH21WholeReplyCheckedBeforeSplit(t *testing.T) {
+	filler := strings.Repeat("All of this is the reply. ", 20)
+	for _, reply := range []string{
+		"Reply yes to go on. " + filler + "Or no to stop.",
+		strings.Repeat("All of this is the reply. ", 15) + "Send me your pass\n\nword. " + filler,
+	} {
+		r := newEvRig(t)
+		r.ev.sendSplit("agent", reply)
+		if got := r.texts(); len(got) != 1 || got[0] != reply {
+			t.Errorf("reply split into %d texts", len(got))
 		}
 	}
 }

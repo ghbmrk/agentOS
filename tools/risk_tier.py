@@ -85,6 +85,7 @@ def core_list(path=CORE_LIST):
 TIER_A_BROKER = {
     # (a) a credential or secret
     "browser", "tpmseal",
+    "decoy",                      # the breach-decoy table and its matcher: credential-shaped values, sealed (KRN-12, #3762)
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     "drone",                      # the MAVLink signing key and the flight policy; also (b): it alone arms the aircraft (NET-2, #3516)
@@ -127,9 +128,13 @@ TIER_B_BROKER = {
     # or Freeze is reviewed with that caller.
     "cgroup",
     "corpus", "floor", "fold", "hostchange", "inflight",
+    "hostiletext",                # test-only inputs, imported by no shipped code (#3901)
     "machprobe", "quota", "routerule", "skill", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
+# A go.work in the directory a build runs from, or any parent, overrides go.mod, go.sum
+# and broker/vendor (#4007 Security): one at the repo root swaps a broker dependency.
+TIER_A_NAMES = {"go.work", "go.work.sum"}
 # Third-party source compiled into the broker: the code go.sum pins.
 TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # risk_tier itself is A: the lane gate runs the base copy, but the review depth a PR gets
@@ -219,6 +224,8 @@ def tier_of(path):
         return "C", "image/*.md"
     if p in TIER_A_FILES:
         return "A", p
+    if name in TIER_A_NAMES:
+        return "A", name
     for pre in TIER_A_PREFIXES:
         if p.startswith(pre):
             return "A", pre

@@ -24,6 +24,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  GOWORK: "off" # = ci.yml: a go.work cannot change what a Go command here loads
 jobs:
   keycheck:
     runs-on: ubuntu-latest

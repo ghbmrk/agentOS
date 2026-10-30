@@ -33,6 +33,31 @@ func TestNumberCodeSaysWhenThePairedTextDidNotGo(t *testing.T) {
 	}
 }
 
+// CH-21f-unsent: when the SIM reports no number, the owner types theirs and
+// the host step has no contact card, so the unsent note sends the owner to
+// the code's sender, not to a setup step the page never shows.
+func TestUnsentNoteNamesNoMissingStepWhenTheSIMHasNoNumber(t *testing.T) {
+	r := newRig(t)
+	r.hooks.progress.Online = true
+	r.hooks.noNumber = true
+	r.hooks.sendFails = func(text string) bool { return strings.HasPrefix(text, "agentOS is running on") }
+	r.get("/setup")
+	r.post("/setup/number", url.Values{"number": {"+1 555 000 0001"}})
+	code := regexp.MustCompile(`[0-9]{6}`).FindString(r.hooks.sent[0].Text)
+	r.post("/setup/number-code", url.Values{"code": {code}})
+	page := html.UnescapeString(r.get("/setup"))
+	if !strings.Contains(page, errPairedUnsent.Error()) {
+		t.Fatalf("no note: %s", page)
+	}
+	if strings.Contains(page, "/box.vcf") {
+		t.Fatal("a SIM with no number offered a contact card")
+	}
+	if note := errPairedUnsent.Error(); strings.Contains(note, "later") || strings.Contains(note, "in setup") ||
+		!strings.Contains(note, "the number my code came from as a contact") {
+		t.Fatalf("the note promises a step the page lacks: %q", note)
+	}
+}
+
 // #1293: a PAIR text's reply that did not go is sent once more after the
 // retry wait, so the owner still gets the box's text.
 func TestPairTextsSendAFailedReplyAgain(t *testing.T) {

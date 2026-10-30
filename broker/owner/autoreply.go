@@ -56,10 +56,14 @@ type watchedLine struct {
 	c *Channel
 }
 
-func (w watchedLine) Send(to, text string) error {
+func (w watchedLine) Send(to, text string) error { return w.send(to, text, false) }
+
+// send is Send, recording a text to the owner as the agent's words when
+// agent is set (sendOwner).
+func (w watchedLine) send(to, text string, agent bool) error {
 	err := w.failed(w.Modem.Send(to, text))
 	if err == nil && to == w.c.cfg.Owner {
-		w.c.remember(sentText{text: text, at: w.c.cfg.Now()})
+		w.c.remember(sentText{text: text, at: w.c.cfg.Now(), agent: agent})
 	}
 	return err
 }
@@ -174,7 +178,7 @@ func (c *Channel) QueueAutoReply(ar AutoReply) (QueueResult, error) {
 		field(to, 40), field(firstLine(ar.Body), 60), q.SendAt.In(c.cfg.Location).Format("15:04"), id)
 	c.mu.Unlock()
 	// Not held (grants paces auto-replies), but counted (CH-15).
-	if err := c.sendCounted(text); err != nil {
+	if err := c.sendCounted(text, false); err != nil {
 		c.mu.Lock()
 		delete(c.queued, id)
 		c.retireLocked(id, now)

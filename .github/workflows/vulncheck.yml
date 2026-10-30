@@ -20,6 +20,7 @@ concurrency:
 # The scanners are built with the toolchain go.mod names; nothing downloads another.
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 jobs:
   # CI-docs: a records-only change adds no dependency; the daily schedule always scans.
   scope:

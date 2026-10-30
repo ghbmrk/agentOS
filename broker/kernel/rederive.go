@@ -38,7 +38,7 @@ func (d derived) String() string { return d.typ + " " + string(d.body) }
 
 // Rederive folds es from empty and, before each decision in it, derives that
 // decision again from the state so far at the entry's own time, with the same
-// pure functions the live kernel used (Admit, Next, the send check, PoolDue),
+// pure functions the live kernel used (Admit, Next, the send check, WindowDue),
 // and compares bytes. Inputs (owner actions, plans, clerk answers and probes,
 // metered usage, pool readings) are folded as given: the log is where they
 // enter (KRN-1). So a log prefix reproduces every decision in it, and the
@@ -96,9 +96,10 @@ func entry(typ string, body any) derived {
 // and whether e is a decision at all.
 func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]derived, bool) {
 	var ref struct {
-		Plan string `json:"plan"`
-		Code string `json:"code"`
-		Pool string `json:"pool"`
+		Plan   string `json:"plan"`
+		Code   string `json:"code"`
+		Pool   string `json:"pool"`
+		Window string `json:"window"`
 	}
 	switch e.Type {
 	case TPlanAccepted, TPlanRejected:
@@ -119,8 +120,8 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		return cands, true
 	case TPoolReset:
 		_ = json.Unmarshal(e.Body, &ref)
-		if s.PoolDue(e.At, ref.Pool) {
-			return []derived{entry(TPoolReset, poolReset{ref.Pool})}, true
+		if s.WindowDue(e.At, ref.Pool, ref.Window) {
+			return []derived{entry(TPoolReset, poolReset{ref.Pool, ref.Window})}, true
 		}
 		return nil, true
 	case TEdgeEnrolled, TEdgeCandidate:

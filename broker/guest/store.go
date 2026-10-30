@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -76,7 +78,7 @@ func openStore(path string) (*store, error) {
 	if path == "" {
 		return s, nil
 	}
-	b, err := os.ReadFile(path)
+	b, err := readNoFollow(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -326,6 +328,17 @@ func writeFile(path string, b []byte) error {
 	}
 	defer d.Close()
 	return d.Sync()
+}
+
+// readNoFollow reads path whole; a link at path fails with ELOOP, so a link
+// planted at the inbox file is never read through.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 // tempPrefix is durable.TempPrefix, which agentosd's start-up sweep removes

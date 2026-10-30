@@ -137,16 +137,14 @@ func (c *Channel) readReaction(text string) (reaction, bool) {
 	if _, ok := c.recent.matchGuarded(quote, now); ok {
 		return unlisted, true
 	}
-	// After a deletion an unlisted form quoting an agent text may quote a
-	// forgotten reply, which as chat would reach the agent whole: read it
-	// as a reaction until the forgotten texts are past the window (CAP-3,
-	// #2360). A forgotten text no longer matches, so its event matches none.
+	// After a deletion an unlisted form may quote a forgotten reply, which
+	// as chat would reach the agent whole: read it as a reaction until the
+	// forgotten texts are past the window (CAP-3, #2360), as a listed form
+	// is above. Agent text carries no label (CH-21), so the quote cannot
+	// tell a forgotten reply from other text; every unlisted form counts.
+	// A forgotten text no longer matches, so its event matches none.
 	if c.recent.forgotWithin(now) {
-		for _, l := range quoteLayers(quote) {
-			if strings.HasPrefix(normQuote(l), normQuote(AgentPrefix)) {
-				return unlisted, true
-			}
-		}
+		return unlisted, true
 	}
 	return reaction{}, false
 }
@@ -180,6 +178,7 @@ type sentText struct {
 	text    string
 	at      time.Time
 	request bool     // an approval request (sendRequest)
+	agent   bool     // the agent's words (sendOwner), not the broker's
 	ids     []string // the requests it asks, from the broker's record
 	local   bool     // approvable on the local page only
 	// restored marks a guarded text read back from State.Guarded after a
@@ -193,7 +192,7 @@ type sentText struct {
 // The agent's own text is never guarded: its digits already passed
 // Disclose.
 func (t sentText) guarded() bool {
-	return t.restored || t.request || (!strings.HasPrefix(t.text, AgentPrefix) && carriesCode.MatchString(t.text))
+	return t.restored || t.request || (!t.agent && carriesCode.MatchString(t.text))
 }
 
 // recentWindow is the window of texts to the owner.
@@ -566,10 +565,10 @@ func (c *Channel) reactionEvent(rx reaction) (event, pointer string) {
 	switch {
 	case t.request:
 		event = fmt.Sprintf("Owner reaction: %s an approval request (not shown). A reaction does not answer it.", rx.kind)
-	case strings.HasPrefix(t.text, AgentPrefix):
+	case t.agent:
 		// The agent's own text: no pointer, so the broker never vouches
 		// for replies the agent's words name.
-		return fmt.Sprintf("Owner reaction: %s your text %q", rx.kind, strings.TrimPrefix(t.text, AgentPrefix)), ""
+		return fmt.Sprintf("Owner reaction: %s your text %q", rx.kind, t.text), ""
 	case t.restored || carriesCode.MatchString(t.text):
 		event = fmt.Sprintf("Owner reaction: %s a text from the box with a code in it (not shown).", rx.kind)
 	default:

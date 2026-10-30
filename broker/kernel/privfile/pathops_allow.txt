@@ -9,39 +9,140 @@
 #     them; the line fails once the package has no use left to cover.
 # A line that matches no use fails, so this file only shrinks as rows land.
 
+# broker/sockets, cgroup, guest, loops, infer/supervise (#3944). unlink(2),
+# rename(2), mkdir(2) and bind(2) follow no link at the final name, and
+# os.RemoveAll descends with O_NOFOLLOW; only the last component is held by
+# these lines (the lint's bound). cgroup2 (kernfs) has no symlink(2), so no
+# uid, a delegate included, can plant a link among a group's files.
+allow broker/cgroup/cgroup.go Open os.ReadFile cgroup.controllers and cgroup.subtree_control of agentosd's delegated group, in cgroup2, where no uid can make a link
+allow broker/cgroup/cgroup.go Group.Child os.Mkdir a machine's group in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cgroup/cgroup.go Group.PidsMax os.ReadFile the group's pids.max, in cgroup2, where no uid can make a link
+allow broker/cgroup/cgroup.go ReadPressure os.Open a group's memory.pressure in cgroup2, or /proc/pressure/memory in procfs; neither lets any uid make a link
+allow broker/cgroup/cgroup.go writeFile os.WriteFile a group's control file in cgroup2, where no uid can make a link (and none can be created there)
+allow broker/cgroup/cgroup.go writeFile os.Remove rmdir of an empty group in cgroup2; unlink and rmdir follow no link at the name
+allow broker/cgroup/cgroup.go Group.event os.ReadFile the group's cgroup.events, in cgroup2, where no uid can make a link
+allow broker/cgroup/component.go Group.Component os.Mkdir a component's group in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cgroup/component.go Group.OOMKills os.ReadFile the group's memory.events, in cgroup2, where no uid can make a link
+allow broker/guest/plane.go New os.MkdirAll the guest plane's directory, -sockets/guests: /run/agentos/guests, inside agentosd's 0700 (later 0711) root-owned socket directory, which no other uid can write
+allow broker/guest/plane.go New os.Chmod that directory, just made or found by MkdirAll in the root-owned socket directory
+allow broker/guest/plane.go Plane.Open os.RemoveAll a machine's services directory in the root-held guests directory; RemoveAll follows no link a guest left inside it
+allow broker/guest/plane.go Plane.Open os.Mkdir a machine's services directory in the root-held guests directory
+allow broker/guest/plane.go Plane.close os.RemoveAll a machine's services directory in the root-held guests directory, as Plane.Open
+allow broker/guest/store.go writeFile os.Rename the inbox's CreateTemp file over the inbox, both in -guest-inbox's root-held /var/lib/agentos (tmpfiles: 0700 root); rename(2) replaces a link at the name, never follows it
+allow broker/guest/store.go writeFile os.Remove the CreateTemp file this call made in root-held /var/lib/agentos
+allow broker/guest/store.go writeFile os.Open the inbox's directory, root-held /var/lib/agentos, to sync it
+allow broker/infer/supervise/supervise.go Supervisor.run os.Remove the service's sockets, in agentosd's 0700 root directory (-infer-socket: /run/agentos/infer); the service gets the listener's fd, never the directory
+allow broker/infer/supervise/supervise.go Supervisor.listen os.MkdirAll the service's socket directory inside agentosd's root-owned /run/agentos
+allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that directory, which the Lstat just before shows is a directory, not a link, in root-owned /run/agentos
+allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
+allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
+allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
+allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
+allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
+allow broker/sockets/sockets.go secureDir os.Mkdir the socket directory itself, in that root-owned parent; mkdir(2) follows no link
+allow broker/sockets/sockets.go secureDir os.Chmod the socket directory, which the Lstat just before shows is a directory, not a link, owned by this uid
+allow broker/sockets/sockets.go Server.Start os.Remove a stale socket at the name in the checked 0700 socket directory, which no other uid can write
+allow broker/sockets/sockets.go Server.Start os.Chown the socket bind(2) just made, in the checked 0700 socket directory, which no other uid can write to swap it
+allow broker/sockets/sockets.go Server.Start os.Chmod that socket, and the checked directory itself (0711 once a group socket is up)
+
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
+allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made
+allow broker/update/store.go InitStore os.MkdirAll makes the store directory its caller names; outside tests and updatetest only agentos-release calls it, on a directory inside its own os.MkdirTemp directory, and no unit starts agentos-release (agentosd opens an existing store, Store{Dir})
+allow broker/update/repo.go Init os.MkdirAll only agentos-release calls Init, as the maintainer on the maintainer's machine (no unit starts it), in the repository directory the maintainer names
+allow broker/update/repo.go Repo.storeTarget os.Open only agentos-release calls it (AddRelease), as the maintainer, on a release file the maintainer names on its command line, which may be a link on purpose
+allow broker/update/repo.go Repo.storeTarget os.MkdirAll only agentos-release calls it (AddRelease), as the maintainer, under the repository directory the maintainer names
+allow broker/update/keys.go readPEM os.ReadFile only agentos-release calls LoadPublicKey and LoadPrivateKey, as the maintainer, on key files the maintainer names on its command line, which may be links on purpose
+allow broker/update/keys.go LoadPrivateKey os.Stat only agentos-release calls it, as the maintainer, on a key file the maintainer names; the mode check reads the key the maintainer pointed at, link or not
+
+# broker/vm, vm/gvisor, vm/overlay (#3943). agentosd's -machines directory
+# (/var/lib/agentos/machines, under tmpfiles' 0700 root /var/lib/agentos)
+# and every directory vm.Open and gvisor make in it are root's alone:
+# "root-held" below. Besides the broker, only a guest writes there, and
+# only inside its own layer (disk/upper, through its overlay mount at root)
+# while it runs; a snapshot's fs is a copy of a paused or stopped layer.
+# mkdir(2), unlink(2) and link(2) follow no link at the final name, and
+# os.RemoveAll descends with O_NOFOLLOW, so a link a guest left inside a
+# layer is removed, never followed.
+allow broker/vm/vm.go Open os.MkdirAll StateDir and its machines and snapshots directories, made 0700 inside root-held /var/lib/agentos
+allow broker/vm/vm.go Open os.Chmod the same three directories, root-held; no guest or other uid reaches them
+allow broker/vm/vm.go Manager.startFrom os.MkdirAll the machine directory and its root mount point, both root-held; the top of a mounted overlay is a directory, never a link
+allow broker/vm/vm.go Manager.startFrom os.RemoveAll the overlay work directory in root-held disk/; only overlayfs writes in it, never the guest
+allow broker/vm/vm.go Manager.startFrom os.Mkdir the overlay work directory in root-held disk/
+allow broker/vm/vm.go Manager.limitDisk os.MkdirAll the machine's disk/ directory, root-held, outside its layer
+allow broker/vm/vm.go Manager.writeLayer os.RemoveAll a stopped machine's upper and work directories, in root-held disk/; RemoveAll follows no link the guest left in them
+allow broker/vm/vm.go Manager.writeLayer os.Mkdir a fresh upper directory in root-held disk/
+allow broker/vm/vm.go writeSeed os.MkdirAll seed directories in a fresh upper no guest has run on, so the broker made every directory on the path
+allow broker/vm/vm.go writeSeed os.OpenFile a seed file in that fresh upper, with O_EXCL, which refuses a link at the name
+allow broker/vm/vm.go Manager.captureAs os.Mkdir mem in the snapshot stage publishDir just made, root-held
+allow broker/vm/vm.go Manager.withdrawLocked os.RemoveAll a snapshot directory in root-held snapshots/
+allow broker/vm/vm.go Manager.load os.RemoveAll an unpublished snapshot directory in root-held snapshots/
+allow broker/vm/vm.go removeAll os.RemoveAll a retired machine directory in root-held machines/
+allow broker/vm/vm.go removeAll os.Remove unlink: a snapshot's meta.json, at the top of its root-held directory, which only the broker writes
+allow broker/vm/vm.go publishSnap os.Remove the snapshot's meta.json, at the top of its root-held directory
+allow broker/vm/vm.go publishSnap os.RemoveAll the root-held snapshot directory whose publish failed
+allow broker/vm/vm.go readJSON os.ReadFile a machine's or snapshot's meta.json, at the top of its root-held directory, which only the broker writes
+allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory, root-held
+allow broker/vm/forget.go Manager.removeSnapshot os.Remove the snapshot's meta.json, at the top of its root-held directory
+allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the root-held snapshot directory
+allow broker/vm/prune.go Manager.Prune os.RemoveAll snapshot directories in root-held snapshots/
+allow broker/vm/sleep.go treeHash os.Open a file WalkDir found (it follows no link) and d.Info, an lstat, showed regular, in a root-held snapshot no guest runs on
+allow broker/vm/gvisor/gvisor.go Runtime.launch os.MkdirAll r.StateDir, runsc's --root: agentosd's machines/runsc, root-held
+allow broker/vm/gvisor/gvisor.go keepConsole os.OpenFile console.log in the root-held machine directory, or exec.log in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go notRun os.Open runsc's --log file, which Exec's CreateTemp made in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go fileTail os.Open console.log in the root-held machine directory
+allow broker/vm/gvisor/gvisor.go clipped os.Open a runsc log file Exec's CreateTemp made in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go writeBundle os.MkdirAll the machine's bundle directory, root-held beside its layer
+allow broker/vm/gvisor/gvisor.go writeBundle os.WriteFile config.json in the root-held bundle directory, which no guest reaches
+allow broker/vm/gvisor/gvisor.go Runtime.Exec os.MkdirAll runsc's --root, root-held
+allow broker/vm/gvisor/gvisor.go Runtime.Exec os.Remove the pid and log files CreateTemp made in runsc's root-held --root
+allow broker/vm/gvisor/gvisor.go Runtime.Exec os.ReadFile the pid file CreateTemp made in runsc's root-held --root, written by runsc outside the sandbox
+allow broker/vm/gvisor/runonce.go Runtime.RunOnce os.RemoveAll the one-shot's directory in runsc's root-held --root
+allow broker/vm/gvisor/runonce.go Runtime.RunOnce os.MkdirAll runsc's root-held --root
+allow broker/vm/gvisor/runonce.go writeOneShotBundle os.MkdirAll the one-shot's bundle directory in runsc's root-held --root
+allow broker/vm/gvisor/runonce.go writeOneShotBundle os.WriteFile config.json in that root-held bundle directory
+allow broker/vm/gvisor/stream.go Runtime.StartStream os.RemoveAll the stream's directory in runsc's root-held --root
+allow broker/vm/gvisor/stream.go Runtime.StartStream os.MkdirAll runsc's root-held --root
+allow broker/vm/overlay/delete.go mountsUnder os.ReadFile /proc/self/mountinfo, served by the kernel; no uid plants a link in procfs
+allow broker/vm/overlay/overlay.go Put os.RemoveAll a path in a layer no guest runs on (dst is never mounted) whose parents Lookup and ensureParents leave real directories, checked by Lstat
+allow broker/vm/overlay/overlay.go Put os.Mkdir a path in an unmounted layer whose parents are checked directories, as for RemoveAll
+allow broker/vm/overlay/overlay.go copyObj os.Mkdir a name under directories this copy made itself (Copy refuses an existing dst; a Put path has checked parents)
+allow broker/vm/overlay/overlay.go copyObj os.Link prev is a file this copy just made and dst a new name under directories it made
 
 pending broker/kernel/proc #3940 the kernel side
 pending broker/cmd/agentos-unlock #3940 the kernel side
 pending broker/cmd/agentos-enroll #3940 the kernel side
 pending broker/clerk/seal #3940 the kernel side
 pending broker/cmd/agentosd #3941 agentosd
-pending broker/update #3942 update
-pending broker/vm #3943 vm
-pending broker/vm/gvisor #3943 vm
-pending broker/vm/overlay #3943 vm
-pending broker/sockets #3944 daemon packages a
-pending broker/cgroup #3944 daemon packages a
-pending broker/guest #3944 daemon packages a
-pending broker/loops #3944 daemon packages a
-pending broker/infer/supervise #3944 daemon packages a
-pending broker/clock #3945 daemon packages b
-pending broker/backup #3945 daemon packages b
-pending broker/quota #3945 daemon packages b
-pending broker/change #3945 daemon packages b
-pending broker/netguard #3945 daemon packages b
-pending broker/modem/at #3945 daemon packages b
-pending broker/follow #3945 daemon packages b
-pending broker/question #3945 daemon packages b
-pending broker/owner #3945 daemon packages b
-pending broker/meter #3945 daemon packages b
-pending broker/localsrv #3945 daemon packages b
-pending broker/claim #3945 daemon packages b
-pending broker/budget #3945 daemon packages b
-pending broker/accel #3945 daemon packages b
 pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root
+
+# Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
+# modem/at's sysfs reads refuse a link (O_NOFOLLOW). What is left: the serial
+# port open, which follows udev and e2e links on purpose; unlink(2) and
+# link(2), which act on a link at the final name itself and never follow it;
+# reads of kernel-served procfs and sysfs files; reads only the e2e/boxe2e
+# harness makes as root, in a throwaway CI VM; and change's bodies mkdir and
+# the reads in accel, budget, change, localsrv, owner and question,
+# control-path packages that may not import syscall (ARC-2:
+# daemon/arc2_test.go, owner/arc2_test.go), of agentosd's state in root-held
+# /var/lib/agentos (tmpfiles.d: 0700 root root), which no other uid can write.
+allow broker/accel/accel.go readTrim os.ReadFile a GPU's sysfs vendor attribute, served by the kernel; no uid plants a link in sysfs
+allow broker/budget/budget.go meminfoMB os.Open /proc/meminfo (agentosd's only caller), served by the kernel; no uid plants a link in procfs
+allow broker/change/store.go FileStore.Load os.ReadFile agentosd's kept-replies.json in root-held /var/lib/agentos; the other root-side reader is the e2e/boxe2e harness (Seal of /var/lib/agentos/claim.json, root-held, and Claimed of agentos-localui's own /var/lib/agentos-localui/claim.json), which runs as root only in a throwaway CI VM (#3946's scope)
+allow broker/change/store.go DirContent.Get os.ReadFile a body in the .d directory beside agentosd's state file in root-held /var/lib/agentos
+allow broker/localsrv/setup.go FileRecord.Load os.ReadFile agentosd's -setup-record, /var/lib/agentos/setup.json, root-held
+allow broker/owner/state.go FileStore.Load os.ReadFile agentosd's -owner-state, /var/lib/agentos/owner.json, root-held
+allow broker/question/question.go New os.ReadFile agentosd's -questions book, in root-held /var/lib/agentos
+allow broker/backup/target.go DirTarget.PutTable os.Remove unlink(2) of the temp file os.CreateTemp just made in the target directory; unlink removes a link at the name itself and never follows it
+allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a link at its new path and refuses an existing one, so a planted name fails the put (ErrExists)
+allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
+allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
+allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
+allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
+allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
+allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile its only root-side reader is the e2e/boxe2e harness (no root binary links netguard); procfs route, neighbour and ipv6_route tables are served by the kernel, and /etc/resolv.conf must follow its stock link into systemd-resolve's /run/systemd/resolve, image/ASSUMPTIONS.md I23's named exception: readers parse it as resolver configuration, and resolved already answers every DNS query
+allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it; its only root-side caller, boxe2e, opens /dev/pts/N in kernel-served devpts

@@ -51,7 +51,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"kernel/privfile", "localapi", "owner", "pageca", "sockets"},
+	"localsrv": {"boxname", "kernel/privfile", "localapi", "owner", "pageca", "sockets"},
 	// The owner page's authority (#3153): the standard library's crypto
 	// and the private-file helpers; its Sealer is clerk.Sealer's method
 	// set, so it links no clerk (which brings crypto/tls and net/http).
@@ -287,19 +287,26 @@ var enforcer = map[string]struct {
 	"enforcer/policy":   {[]string{"kernel/key"}, droneForbid},
 	"enforcer/wire":     {nil, droneForbid},
 	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer/alert":    {[]string{"enforcer/wire"}, droneForbid},               // slice h: texts and light
+	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
+	// The radio host (slice k) speaks to each stack over a socket pair; its
+	// launcher alone starts the stacks and installs their seccomp filter.
+	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
+	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
 }
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
-// enforcerExec is the one enforcer package that starts a process: the
-// firewall loader runs nft (ENF decision 4, slice e), and it imports nothing
-// from the enforcer, so no other enforcer package links os/exec through it.
-const enforcerExec = "enforcer/nft/load"
+// enforcerExec are the enforcer packages that start a process: the
+// firewall loader runs nft (ENF decision 4, slice e) and the radio launcher
+// starts the confined stacks (decision 6, slice k). Neither imports from the
+// enforcer, so no other enforcer package links os/exec through them.
+var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 
 // enforcerWeb is the one enforcer package that links net/http and
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
@@ -375,7 +382,7 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package yet; only the page
 // (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
-// (enforcerExec, slice e) launches a process. Slice l (the daemon) widens
+// and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	list, err := exec.Command("go", "list", "-C", "..", "./enforcer/...").Output()
@@ -384,7 +391,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if p != module+enforcerExec && p != module+enforcerWeb {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb {
 			rest = append(rest, p)
 		}
 	}
@@ -415,12 +422,14 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		}
 	}
 	check(rest, forbiddenDeps)
-	for _, p := range []string{enforcerExec, enforcerWeb} {
+	for _, p := range append(slices.Clone(enforcerExec), enforcerWeb) {
 		if own[p] {
 			t.Errorf("an enforcer package other than %s links it", p)
 		}
 	}
-	check([]string{module + enforcerExec}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
+	for _, p := range enforcerExec {
+		check([]string{module + p}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
+	}
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }))
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))

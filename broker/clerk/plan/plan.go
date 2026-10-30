@@ -99,6 +99,9 @@ type Field struct {
 type Declaration struct {
 	// Name is the plan, and the clerk's one slot.
 	Name string
+	// Title is the plan as the owner names it, as PLAN <Title> ON spells
+	// it (CH-11): "ChatGPT".
+	Title string
 	// Version is the declaration's; a release that requalifies the route
 	// after an unswappable answer gives it a new one.
 	Version string
@@ -315,6 +318,9 @@ func New(d Declaration, store *Store, roots *x509.CertPool) (*Login, error) {
 
 func (p *Login) validate() error {
 	d := p.d
+	if err := d.Pool.valid(); err != nil {
+		return fmt.Errorf("clerk: plan %q: %w", d.Name, err)
+	}
 	switch d.Mode {
 	case Permitted, Unconfirmed, NotAllowed:
 	default:
@@ -701,6 +707,12 @@ func (p *Login) BeginSignIn(guest string) error {
 
 // Mode is the declaration's read of the provider's terms (CLK-7).
 func (p *Login) Mode() Mode { return p.d.Mode }
+
+// Title is the plan as the owner names it.
+func (p *Login) Title() string { return p.d.Title }
+
+// Pool is the plan's pool as the provider names it.
+func (p *Login) Pool() Pool { return p.d.Pool }
 
 // Signing reports whether guest is a sign-in guest (BeginSignIn), whether
 // or not its sign-in has committed.
@@ -1467,6 +1479,7 @@ func Codex(guard *netguard.Policy) Declaration {
 	const run, auth = "chatgpt.com", "auth.openai.com"
 	return Declaration{
 		Name:    "codex",
+		Title:   "ChatGPT",
 		Version: "codex-0.162.1-1",
 		// OpenAI's terms allow it: Codex is the default plan route (CLK-7).
 		Mode: Permitted,
@@ -1532,7 +1545,10 @@ func Codex(guard *netguard.Policy) Declaration {
 			},
 		},
 		// The 5-hour and weekly windows of the one Codex pool (#809).
-		Pool:  Pool{Windows: []string{"X-Codex-Primary-", "X-Codex-Secondary-"}, Reached: "X-Codex-Rate-Limit-Reached-Type"},
+		Pool: Pool{ID: "codex", Name: "ChatGPT Codex", Windows: []Window{
+			{ID: "5h", Prefix: "X-Codex-Primary-", Label: "5-hour limit", Every: 5 * 3600 * 1000},
+			{ID: "7d", Prefix: "X-Codex-Secondary-", Label: "week", Every: 7 * 24 * 3600 * 1000},
+		}, Reached: "X-Codex-Rate-Limit-Reached-Type"},
 		Guard: guard,
 	}
 }

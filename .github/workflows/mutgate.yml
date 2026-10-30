@@ -1,0 +1,119 @@
+name: mutgate
+# REV-CHK-mut (#3899, briefs/REV-CHK.md): the MUT-tierA gate (tools/mutgate.py, #1814) on every
+# pull request. A PR that adds a `REQ:` marker in a tier-A broker package fails when gremlins
+# finds a LIVED mutant on a line the PR adds there: the tests run that line but do not check it.
+# Gremlins runs only on those packages (`mutgate.py claimed`), one job each, and only on the lines
+# the PR adds (`run --git`): the only lines the gate reads. A PR that claims none runs no gremlins
+# and passes. The `mutgate` job is the one result to read.
+on:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+env:
+  GOTOOLCHAIN: local
+  GOWORK: "off"
+jobs:
+  claimed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.claimed.outputs.packages }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the diff reads the base commit
+      # The merge commit's first parent is the base it was built on; the event's base sha can be
+      # older, and then main's own later REQ lines would count as this PR's (#3948).
+      - name: The base this merge commit was built on
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
+          echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      - name: Tier-A packages this PR claims coverage in
+        id: claimed
+        run: |
+          pkgs=$(python3 -I tools/mutgate.py claimed --git "$BASE" --json)
+          echo "$pkgs"
+          echo "packages=$pkgs" >> "$GITHUB_OUTPUT"
+  mutants:
+    needs: claimed
+    if: ${{ needs.claimed.outputs.packages != '[]' }}
+    runs-on: ubuntu-latest
+    # One package per job (as broker-race shards), so a slow package does not hold the others.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version: "1.26.10" # = broker/go.mod's toolchain line; checked below
+          cache: false
+      - name: Go is the toolchain go.mod names
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' "$GITHUB_WORKSPACE/broker/go.mod")
+          got=$(go version | awk '{print $3}')
+          [ -n "$want" ] && [ "$got" = "$want" ] || { echo "Go is $got; broker/go.mod names $want" >&2; exit 1; }
+      # Pinned as tools/mutgate.py's docstring says; the Go checksum database verifies the fetch.
+      # A proxy read can fail mid-stream (#3768), so it is tried three times, then the job fails.
+      - name: Install gremlins
+        run: |
+          for t in 1 2 3; do
+            go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0 && break
+            echo "try $t of 3 failed" >&2
+            [ "$t" = 3 ] && { echo "::error::gremlins install failed 3 times; the gate cannot run"; exit 1; }
+            sleep $((t * 15))
+          done
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      # The merge commit's first parent is the base it was built on; the event's base sha can be
+      # older, and then main's own later REQ lines would count as this PR's (#3948).
+      - name: The base this merge commit was built on
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
+          echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      # loops' canary-round test runs tools/canary.py, whose targets run as the runner's first
+      # subordinate id in a user namespace (tools/ASSUMPTIONS.md D13); gremlins' coverage run
+      # needs it as broker-race does. Kept equal to ci.yml's step by tests/test_workflows.py.
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
+      - name: Gremlins on the package
+        env:
+          PKG: ${{ matrix.pkg }}
+        run: python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"
+      - name: Survivors
+        run: python3 -I tools/mutgate.py report mutants
+      - name: Gate (MUT-tierA)
+        run: python3 -I tools/mutgate.py gate mutants --git "$BASE"
+  mutgate:
+    needs: [claimed, mutants]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: The claim ran and every claimed package passed
+        env:
+          CLAIMED: ${{ needs.claimed.result }}
+          MUTANTS: ${{ needs.mutants.result }}
+          PACKAGES: ${{ needs.claimed.outputs.packages }}
+        run: |
+          echo "claimed: $CLAIMED ($PACKAGES); mutants: $MUTANTS"
+          [ "$CLAIMED" = success ] || exit 1
+          if [ "$PACKAGES" = "[]" ]; then [ "$MUTANTS" = skipped ]; else [ "$MUTANTS" = success ]; fi

@@ -1,0 +1,49 @@
+package backup
+
+// A link planted at a file this package reads is refused, not followed
+// (REV-CHK-links, #3945).
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"syscall"
+	"testing"
+)
+
+// plantLink makes p a link to a real file holding b, as another uid that could
+// write p's directory would.
+func plantLink(t *testing.T, p string, b []byte) {
+	t.Helper()
+	real := p + ".real"
+	if err := os.WriteFile(real, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPlantedLinksAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	d := DirTarget{Dir: dir}
+	id := "00112233445566778899aabbccddeeff"
+	p, err := d.path(id, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantLink(t, p, []byte("table"))
+	if _, err := d.GetTable(id, 1); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("GetTable of a linked table: %v, want ELOOP", err)
+	}
+	if err := d.PutTable(id, 1, []byte("new")); !errors.Is(err, ErrExists) {
+		t.Fatalf("PutTable over a planted name: %v, want ErrExists", err)
+	}
+	link := filepath.Join(t.TempDir(), "dir")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := (DirTarget{Dir: link}).DeleteTable(id, 1); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("a target directory that is a link: %v, want ENOTDIR from its sync (O_DIRECTORY|O_NOFOLLOW)", err)
+	}
+}

@@ -157,7 +157,7 @@ func (admitAll) Hold(int64, string, *key.Refusal) error { return nil }
 
 func (admitAll) AdmitPool(int64, string) *key.Refusal { return nil }
 
-func (admitAll) ReadPool(int64, string, int64, int64) error { return nil }
+func (admitAll) ReadPool(int64, string, []kernel.WindowReading) error { return nil }
 
 // serveMeter serves b's kernel's meter side on a fresh socket that admits
 // this uid, and returns a Conn to it.
