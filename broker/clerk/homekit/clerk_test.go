@@ -801,3 +801,54 @@ func TestDialsGoThroughTheGuard(t *testing.T) {
 		t.Fatalf("open with no guard: %v", err)
 	}
 }
+
+// b2a design point 5: remove-pairing names the box's own pairing ID only,
+// over the pinned session; the accessory then refuses pair-verify, and a
+// second controller's pairing is untouched.
+func TestRemovePairingRemovesOnlyOwn(t *testing.T) {
+	acc := newFakeAccessory(t)
+	other, _, _ := ed25519.GenerateKey(rand.Reader)
+	acc.ctrls["00000000-0000-4000-8000-000000000002"] = other
+	c, _ := newClerk(t, acc, &bus{})
+	d := connectOne(t, c)
+	l, err := c.Open(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RemovePairing(); err != nil {
+		t.Fatal(err)
+	}
+	acc.mu.Lock()
+	removed, reqs, left := acc.removed, acc.pairings, len(acc.ctrls)
+	acc.mu.Unlock()
+	if len(reqs) != 1 || string(reqs[0][tlvIdentifier]) != c.Keys.PairingID() || len(removed) != 1 || left != 1 {
+		t.Fatalf("removed %q of %d requests; %d controllers left", removed, len(reqs), left)
+	}
+	if _, err := l.Poll(); err == nil {
+		t.Fatal("the link outlived its removed pairing")
+	}
+	if _, err := c.Open(context.Background(), d); err == nil || errors.Is(err, ErrIdentity) || d.Off {
+		t.Fatalf("open after remove-pairing: %v, off %v", err, d.Off)
+	}
+}
+
+// An accessory that refuses remove-pairing returns its error and still
+// ends the link.
+func TestRemovePairingRefused(t *testing.T) {
+	acc := newFakeAccessory(t)
+	c, _ := newClerk(t, acc, &bus{})
+	d := connectOne(t, c)
+	l, err := c.Open(context.Background(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc.mu.Lock()
+	clear(acc.ctrls)
+	acc.mu.Unlock()
+	if err := l.RemovePairing(); err == nil {
+		t.Fatal("a refused remove-pairing succeeded")
+	}
+	if _, err := l.Poll(); err == nil {
+		t.Fatal("the link outlived a refused remove-pairing")
+	}
+}
