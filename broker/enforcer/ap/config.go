@@ -305,7 +305,7 @@ func (w *uci) section(typ, name string, kv ...string) {
 		w.b.WriteString(" '" + name + "'")
 	}
 	w.b.WriteString("\n")
-	for i := 0; i+1 < len(kv); i += 2 {
+	for i := 0; i < len(kv); i += 2 { // kv is always pairs
 		if kv[i+1] == "" {
 			continue
 		}

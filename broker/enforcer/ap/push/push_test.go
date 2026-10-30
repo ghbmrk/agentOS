@@ -286,3 +286,16 @@ func TestVerifyAndPaths(t *testing.T) {
 		t.Fatal("read an oversized file")
 	}
 }
+
+// TestDefaultsAndLimit: a zero Timeout means 30 seconds, not none, and a
+// file of exactly MaxFile bytes is read back whole.
+func TestDefaultsAndLimit(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	big := []ap.File{{Path: ap.PathNetwork, Data: bytes.Repeat([]byte("x"), MaxFile)}}
+	f.set(ap.PathNetwork, big[0].Data)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me}
+	if res, err := p.Sync(context.Background(), big); err != nil || res.Applied {
+		t.Fatalf("default timeout, file at the limit: %+v %v", res, err)
+	}
+}

@@ -327,3 +327,42 @@ func (k Keys) clone() Keys {
 }
 
 func itoa(n int) string { return vname(n)[1:] }
+
+// TestValueRules: the character and length rules every UCI value passes,
+// at each boundary, so a value one past a limit is refused and one at it
+// is kept.
+func TestValueRules(t *testing.T) {
+	for _, c := range []struct {
+		fn   func(string) bool
+		s    string
+		want bool
+	}{
+		{word, "!", true}, {word, "~", true}, {word, " ", false}, {word, "\x7f", false}, {word, "a b", false},
+		{word, "'", false}, {word, `"`, false}, {word, `\`, false}, {word, "#", false}, {word, "", false},
+		{word, strings.Repeat("a", 255), true}, {word, strings.Repeat("a", 256), false}, {word, "é", false},
+		{ssid, "Home", true}, {ssid, "Home 2", true}, {ssid, " Home", false}, {ssid, "Home ", false}, {ssid, "", false},
+		{ssid, strings.Repeat("a", 32), true}, {ssid, strings.Repeat("a", 33), false}, {ssid, "a'b", false},
+		{ifname, "eth0", true}, {ifname, "a_b-9", true}, {ifname, "AZaz09_-", true}, {ifname, "-eth", false},
+		{ifname, strings.Repeat("a", 10), true}, {ifname, strings.Repeat("a", 11), false}, {ifname, "", false},
+		{ifname, "eth.0", false}, {ifname, "a/b", false}, {ifname, "a:b", false}, {ifname, "a@b", false},
+		{ifname, "a[b", false}, {ifname, "a`b", false}, {ifname, "a{b", false},
+	} {
+		if got := c.fn(c.s); got != c.want {
+			t.Errorf("%q: got %v", c.s, got)
+		}
+	}
+	for v, ok := range map[int]bool{1: false, 2: true, 4094: true, 4095: false} {
+		l := fixtureLayout()
+		l.Admin = v
+		if err := l.Check(); (err == nil) != ok {
+			t.Errorf("admin VLAN %d: %v", v, err)
+		}
+	}
+	for n, ok := range map[int]bool{7: false, 8: true, 63: true, 64: false} {
+		k := fixtureKeys()
+		k.Guests = strings.Repeat("G", n)
+		if _, err := Config(fixturePolicy(), fixtureLayout(), k); (err == nil) != ok {
+			t.Errorf("password of %d: %v", n, err)
+		}
+	}
+}
