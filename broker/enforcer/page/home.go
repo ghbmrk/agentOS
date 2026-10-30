@@ -46,6 +46,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 		"Blocked":     waiting && !c.class.Tightening,
 		"ID":          id,
 		"Challenge":   chal(c.msg),
+		"Sealed":      c.secret != nil,
 	})
 }
 

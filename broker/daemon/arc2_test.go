@@ -288,7 +288,7 @@ var enforcer = map[string]struct {
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal"}, enforcerWebForbid},
 	// Asserted safety-list actions (slice s): once-only owner challenges;
 	// the page serves them and the daemon wires their actuator.
 	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
@@ -296,6 +296,24 @@ var enforcer = map[string]struct {
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
 	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
+	// Safety-list devices' secrets (slice r, decision 10): the sealed
+	// envelope both ends import, standard library only, and the enforcer's
+	// store, which neither the page nor the channel links.
+	"enforcer/pairseal":  {nil, droneForbid},
+	"enforcer/devsecret": {[]string{"kernel/key", "enforcer/policy", "enforcer/pairseal"}, droneForbid},
+}
+
+// coreEnforcer are the core packages that link an enforcer package: the
+// core's half of a shared format, never the enforcer's logic (ENF brief,
+// guard files). TestCoreLinksOnlyEnforcerFormats holds that for every core
+// package.
+var coreEnforcer = map[string]struct {
+	allowed []string
+	forbid  []string
+}{
+	// The pairing clerks' sealing helper (slice r): seals to the
+	// enforcer's pairing key with pairseal and holds no private key.
+	"clerk/enfpair": {[]string{"enforcer/pairseal"}, forbiddenStd},
 }
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
@@ -350,6 +368,32 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	}
 	for pkg, rule := range enforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+	for pkg, rule := range coreEnforcer {
+		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
+	}
+}
+
+// TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
+// package except as coreEnforcer allows, so the core links no enforcer
+// logic, its device-secret store above all (STO-4).
+func TestCoreLinksOnlyEnforcerFormats(t *testing.T) {
+	out, err := exec.Command("go", "list", "-C", "..", "-f", "{{.ImportPath}}{{range .Imports}} {{.}}{{end}}", "./...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Fields(line)
+		pkg := strings.TrimPrefix(f[0], module)
+		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") {
+			continue
+		}
+		for _, im := range f[1:] {
+			rel := strings.TrimPrefix(im, module)
+			if (rel == "enforcer" || strings.HasPrefix(rel, "enforcer/")) && !contains(coreEnforcer[pkg].allowed, rel) {
+				t.Errorf("core package %s links enforcer package %s", pkg, rel)
+			}
+		}
 	}
 }
 
