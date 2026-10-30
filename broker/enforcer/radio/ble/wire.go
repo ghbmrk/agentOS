@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -13,8 +14,8 @@ import (
 // Bluetooth device controls (GATT values, UUIDs, names), so the decoder
 // takes nothing on trust: both byte orders, every padding byte zero, bools
 // 0 or 1, strings valid UTF-8 with no NUL, object paths and signatures
-// well formed, no unix fds, a message at most MaxMessage bytes and values
-// nested at most maxDepth deep.
+// well formed, no unix fds, a message at most MaxMessage bytes, and
+// nesting bounded by maxDepth.
 
 // ObjectPath is a D-Bus object path ('o').
 type ObjectPath string
@@ -67,8 +68,8 @@ const (
 	// MaxMessage bounds one message, header and body. BlueZ's largest
 	// answer the stack asks for is GetManagedObjects, a few KiB per device.
 	MaxMessage = 1 << 20
-	// maxDepth bounds container nesting (arrays, structs, dict entries and
-	// variants together), below the specification's 64.
+	// maxDepth bounds a signature's container nesting, and variants
+	// nested in variants, each below the specification's 64.
 	maxDepth = 32
 	maxSig   = 255
 )
@@ -175,31 +176,25 @@ func align(c byte) int {
 	return 1 // y, g, v
 }
 
-// validPath reports whether p is a well-formed object path.
+// validPath reports whether p is a well-formed object path: "/", or
+// non-empty segments of [A-Za-z0-9_] each after a slash.
 func validPath(p string) bool {
 	if p == "/" {
 		return true
 	}
-	if len(p) < 2 || p[0] != '/' || p[len(p)-1] == '/' {
+	segs := strings.Split(p, "/")
+	if segs[0] != "" || len(segs) < 2 {
 		return false
 	}
-	seg := 0
-	for i := 1; i < len(p); i++ {
-		c := p[i]
-		switch {
-		case c == '/':
-			if seg == 0 {
-				return false
-			}
-			seg = 0
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_':
-			seg++
-		default:
+	for _, seg := range segs[1:] {
+		if seg == "" || strings.Trim(seg, pathChars) != "" {
 			return false
 		}
 	}
 	return true
 }
+
+const pathChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
 
 // decoder reads values from one message buffer; offsets are from the
 // message's start, which alignment is relative to.
@@ -223,7 +218,7 @@ func (d *decoder) pad(n int) error {
 }
 
 func (d *decoder) take(n int) ([]byte, error) {
-	if n < 0 || n > len(d.b)-d.off {
+	if n > len(d.b)-d.off {
 		return nil, wireErr("truncated")
 	}
 	b := d.b[d.off : d.off+n]
@@ -315,9 +310,6 @@ func (d *decoder) value(t *typ, depth int) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if n > uint32(len(d.b)) {
-			return nil, wireErr("truncated")
-		}
 		s, err := d.str(int(n))
 		if err != nil {
 			return nil, err
@@ -361,17 +353,19 @@ func (d *decoder) value(t *typ, depth int) (any, error) {
 		if err := d.pad(align(t.elem.code)); err != nil {
 			return nil, err
 		}
-		if n > uint32(len(d.b)-d.off) {
-			return nil, wireErr("array overruns the message")
-		}
-		end := d.off + int(n)
 		if t.elem.code == 'y' {
-			b, _ := d.take(int(n))
+			b, err := d.take(int(n))
+			if err != nil {
+				return nil, err
+			}
 			return append([]byte{}, b...), nil
 		}
+		// No bound check before the loop: every element takes at least a
+		// byte, so a length past the message fails in take.
+		end := d.off + int(n)
 		out := []any{}
 		for d.off < end {
-			v, err := d.value(t.elem, depth+1)
+			v, err := d.value(t.elem, depth)
 			if err != nil {
 				return nil, err
 			}
@@ -384,7 +378,7 @@ func (d *decoder) value(t *typ, depth int) (any, error) {
 	case '(':
 		out := make([]any, len(t.fields))
 		for i, f := range t.fields {
-			v, err := d.value(f, depth+1)
+			v, err := d.value(f, depth)
 			if err != nil {
 				return nil, err
 			}
@@ -392,11 +386,11 @@ func (d *decoder) value(t *typ, depth int) (any, error) {
 		}
 		return out, nil
 	case '{':
-		k, err := d.value(t.fields[0], depth+1)
+		k, err := d.value(t.fields[0], depth)
 		if err != nil {
 			return nil, err
 		}
-		v, err := d.value(t.fields[1], depth+1)
+		v, err := d.value(t.fields[1], depth)
 		if err != nil {
 			return nil, err
 		}
@@ -437,10 +431,7 @@ func (e *encoder) str(s string) error {
 	return nil
 }
 
-func (e *encoder) value(t *typ, v any, depth int) error {
-	if depth > maxDepth {
-		return wireErr("nested too deep")
-	}
+func (e *encoder) value(t *typ, v any) error {
 	e.pad(align(t.code))
 	bad := func() error { return wireErr("value %T for type %q", v, t.code) }
 	switch t.code {
@@ -546,7 +537,7 @@ func (e *encoder) value(t *typ, v any, depth int) error {
 		if err := e.str(string(x.Sig)); err != nil {
 			return err
 		}
-		return e.value(ts[0], x.Value, depth+1)
+		return e.value(ts[0], x.Value)
 	case 'a':
 		at := len(e.b)
 		e.b = append(e.b, 0, 0, 0, 0)
@@ -564,7 +555,7 @@ func (e *encoder) value(t *typ, v any, depth int) error {
 				return bad()
 			}
 			for _, x := range xs {
-				if err := e.value(t.elem, x, depth+1); err != nil {
+				if err := e.value(t.elem, x); err != nil {
 					return err
 				}
 			}
@@ -576,7 +567,7 @@ func (e *encoder) value(t *typ, v any, depth int) error {
 			return bad()
 		}
 		for i, f := range t.fields {
-			if err := e.value(f, xs[i], depth+1); err != nil {
+			if err := e.value(f, xs[i]); err != nil {
 				return err
 			}
 		}
@@ -585,10 +576,10 @@ func (e *encoder) value(t *typ, v any, depth int) error {
 		if !ok {
 			return bad()
 		}
-		if err := e.value(t.fields[0], x.Key, depth+1); err != nil {
+		if err := e.value(t.fields[0], x.Key); err != nil {
 			return err
 		}
-		return e.value(t.fields[1], x.Value, depth+1)
+		return e.value(t.fields[1], x.Value)
 	default:
 		return bad()
 	}
@@ -644,13 +635,13 @@ func (m *Message) Encode() ([]byte, error) {
 	}
 	e := &encoder{b: []byte{'l', m.Type, m.Flags, 1, 0, 0, 0, 0}}
 	e.b = le.AppendUint32(e.b, m.Serial)
-	if err := e.value(headerTyp, fields, 0); err != nil {
+	if err := e.value(headerTyp, fields); err != nil {
 		return nil, err
 	}
 	e.pad(8)
 	start := len(e.b)
 	for i, t := range ts {
-		if err := e.value(t, m.Body[i], 0); err != nil {
+		if err := e.value(t, m.Body[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -704,10 +695,9 @@ func frameLen(h []byte) (int, error) {
 // Decode parses one whole message, refusing anything malformed, trailing
 // bytes included.
 func Decode(b []byte) (*Message, error) {
-	if len(b) < 16 {
-		return nil, wireErr("truncated")
-	}
-	n, err := frameLen(b)
+	var h [16]byte
+	copy(h[:], b)
+	n, err := frameLen(h[:]) // at least 16, so a shorter b fails below
 	if err != nil {
 		return nil, err
 	}

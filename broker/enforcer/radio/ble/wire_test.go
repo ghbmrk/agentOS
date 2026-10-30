@@ -172,15 +172,6 @@ func TestWireRefusesMalformed(t *testing.T) {
 			t.Errorf("signature %q: %v", sig, err)
 		}
 	}
-	// Variants nested past maxDepth.
-	var v any = Variant{Sig: "y", Value: uint8(1)}
-	nest := &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "v", Body: []any{v}}
-	for i := 0; i <= maxDepth; i++ {
-		nest.Body[0] = Variant{Sig: "v", Value: nest.Body[0]}
-	}
-	if _, err := nest.Encode(); err == nil {
-		t.Error("encoded variants nested past maxDepth")
-	}
 }
 
 // withField encodes m with one extra header field.
@@ -194,11 +185,110 @@ func withField(t *testing.T, m *Message, code byte, sig Signature, v any) []byte
 		[]any{uint8(3), Variant{Sig: "s", Value: m.Member}},
 		[]any{code, Variant{Sig: sig, Value: v}},
 	}
-	if err := e.value(headerTyp, fields, 0); err != nil {
+	if err := e.value(headerTyp, fields); err != nil {
 		t.Fatal(err)
 	}
 	e.pad(8)
 	return e.b
+}
+
+// raw is a signal whose body is the given bytes under the given
+// signature, unchecked: the faults an encoder never makes.
+func raw(t *testing.T, sig string, body []byte) []byte {
+	t.Helper()
+	e := &encoder{b: []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0}}
+	fields := []any{
+		[]any{uint8(1), Variant{Sig: "o", Value: ObjectPath("/")}},
+		[]any{uint8(2), Variant{Sig: "s", Value: "a.b"}},
+		[]any{uint8(3), Variant{Sig: "s", Value: "C"}},
+	}
+	if sig != "" {
+		fields = append(fields, []any{uint8(8), Variant{Sig: "g", Value: Signature(sig)}})
+	}
+	if err := e.value(headerTyp, fields); err != nil {
+		t.Fatal(err)
+	}
+	e.pad(8)
+	le.PutUint32(e.b[4:], uint32(len(body)))
+	return append(e.b, body...)
+}
+
+// TestWireBounds: each bound holds exactly at its limit: accepted at it,
+// refused one past it.
+func TestWireBounds(t *testing.T) {
+	ok := func(name string, b []byte) {
+		t.Helper()
+		if _, err := Decode(b); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	bad := func(name string, b []byte) {
+		t.Helper()
+		if _, err := Decode(b); err == nil {
+			t.Errorf("%s: decoded", name)
+		}
+	}
+	// Signatures: length 255, nesting 32, of arrays and of structs.
+	for _, c := range []struct {
+		sig  string
+		good bool
+	}{
+		{strings.Repeat("y", maxSig), true}, {strings.Repeat("y", maxSig+1), false},
+		{strings.Repeat("a", maxDepth) + "y", true}, {strings.Repeat("a", maxDepth+1) + "y", false},
+		{strings.Repeat("(", maxDepth) + "y" + strings.Repeat(")", maxDepth), true},
+		{strings.Repeat("(", maxDepth+1) + "y" + strings.Repeat(")", maxDepth+1), false},
+		{"a", false}, {"(y", false}, {"a{sv", false},
+	} {
+		if _, err := parseSig(c.sig); (err == nil) != c.good {
+			t.Errorf("signature of %d bytes starting %.3q: %v", len(c.sig), c.sig, err)
+		}
+	}
+	// Variants in variants: 32 deep decodes, 33 does not.
+	nest := func(k int) []byte {
+		return append(bytes.Repeat([]byte{1, 'v', 0}, k), 1, 'y', 0, 7)
+	}
+	ok("variants 32 deep", raw(t, "v", nest(maxDepth-1)))
+	bad("variants 33 deep", raw(t, "v", nest(maxDepth)))
+	// Values that run past the body inside a consistent frame.
+	bad("padding past the end", raw(t, "yu", []byte{1}))
+	bad("uint32 past the end", raw(t, "u", []byte{1, 2}))
+	bad("byte array past the end", raw(t, "ay", []byte{9, 0, 0, 0, 1}))
+	bad("array past the end", raw(t, "au", []byte{8, 0, 0, 0, 1, 0, 0, 0}))
+	bad("string past the end", raw(t, "s", []byte{9, 0, 0, 0, 'a', 0}))
+	ok("array ending at the end", raw(t, "au", []byte{4, 0, 0, 0, 1, 0, 0, 0}))
+	bad("short header", []byte{'l', 4, 0, 1, 0, 0, 0, 0, 1, 0, 0})
+	// An unknown header field is ignored, as the specification says.
+	ok("header field 10", withField(t, &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C"}, 10, "s", "x"))
+	ok("header field 255", withField(t, &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C"}, 255, "s", "x"))
+	// Object paths.
+	for p, good := range map[string]bool{"/": true, "/a/b_9": true, "": false, "a": false, "/a/": false, "//": false, "/a//b": false, "/a-b": false} {
+		if validPath(p) != good {
+			t.Errorf("object path %q: valid %v", p, !good)
+		}
+	}
+	// The encoder refuses a NUL in a string.
+	if _, err := (&Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "s", Body: []any{"a\x00b"}}).Encode(); err == nil {
+		t.Error("encoded a string holding NUL")
+	}
+	// A message of exactly MaxMessage bytes goes both ways; one more does not.
+	big := func(n int) *Message {
+		return &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "ay", Body: []any{make([]byte, n)}}
+	}
+	over := len(mustEncode(t, big(0)))
+	b := mustEncode(t, big(MaxMessage-over))
+	if len(b) != MaxMessage {
+		t.Fatalf("built %d bytes", len(b))
+	}
+	ok("MaxMessage bytes", b)
+	if _, err := big(MaxMessage - over + 1).Encode(); err == nil {
+		t.Error("encoded MaxMessage+1 bytes")
+	}
+	b = append(b, 0)
+	le.PutUint32(b[4:], le.Uint32(b[4:])+1)
+	bad("MaxMessage+1 bytes", b)
+	if _, err := frameLen(b[:16]); err == nil {
+		t.Error("frameLen took MaxMessage+1")
+	}
 }
 
 // FuzzDecode: the decoder never panics, and whatever it accepts encodes to

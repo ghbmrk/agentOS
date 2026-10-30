@@ -47,7 +47,7 @@ const busDriver = "org.freedesktop.DBus"
 // Dial connects to the bus at the socket path, authenticates and says
 // Hello.
 func Dial(path string, signal func(*Message)) (*Bus, error) {
-	c, err := net.DialTimeout("unix", path, 5*time.Second)
+	c, err := net.Dial("unix", path) // a Unix socket connects at once or fails
 	if err != nil {
 		return nil, err
 	}

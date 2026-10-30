@@ -98,6 +98,8 @@ type fakeBluez struct {
 	uids      []uint32
 	serial    uint32
 	connected bool
+	rules     []string // AddMatch rules
+	badSerial bool     // a call's serial was not one more than the last
 	wmu       sync.Mutex
 }
 
@@ -201,6 +203,7 @@ func (f *fakeBluez) send(c net.Conn, m *Message) {
 }
 
 func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
+	next := uint32(1)
 	for {
 		m, err := readMessage(r)
 		if err != nil {
@@ -209,6 +212,12 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 		if m.Type != typeCall {
 			continue
 		}
+		if driver && m.Serial != next {
+			f.mu.Lock()
+			f.badSerial = true
+			f.mu.Unlock()
+		}
+		next++
 		reply := &Message{Type: typeReturn, ReplySerial: m.Serial, Destination: m.Sender}
 		fail := func(name string) { reply.Type, reply.ErrorName = typeError, name }
 		var after []*Message
@@ -221,6 +230,9 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 			case "GetNameOwner":
 				reply.Sig, reply.Body = "s", []any{bluezName}
 			case "AddMatch":
+				f.mu.Lock()
+				f.rules = append(f.rules, m.Body[0].(string))
+				f.mu.Unlock()
 			default:
 				fail("org.freedesktop.DBus.Error.UnknownMethod")
 			}
@@ -247,6 +259,8 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 			case ifaceObjMgr + ".GetManagedObjects":
 				reply.Sig, reply.Body = "a{oa{sa{sv}}}", []any{managed(scalePath, map[string]string{"char0011": testUUID, "char0014": controlUUID})}
 			case ifaceChar + ".WriteValue":
+				// The device answers on the measurement characteristic.
+				after = []*Message{propsChanged(0, bluezName, measurePath, m.Body[0].([]byte))}
 			case ifaceChar + ".StartNotify":
 				// A forged notification from another peer, one on a
 				// characteristic nobody subscribed to, then BlueZ's own.
@@ -395,11 +409,29 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 	if _, err := h.Call(radio.Request{Op: radio.OpWrite, Device: "scale", Char: "control", Data: []byte{1, 2}}); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := h.Call(radio.Request{Op: radio.OpDisconnect, Device: "scale"}); err != nil {
-		t.Fatalf("disconnect: %v", err)
+	select {
+	case n := <-notes:
+		if n.Char != "measure" || !bytes.Equal(n.Data, []byte{1, 2}) {
+			t.Errorf("notification %+v", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no notification after the write")
+	}
+	// A disconnect forgets the device's subscriptions and characteristic
+	// paths: after a reconnect, a write looks its characteristic up again,
+	// and the device's answer on the unsubscribed measurement is dropped.
+	for _, r := range []radio.Request{
+		{Op: radio.OpDisconnect, Device: "scale"},
+		{Op: radio.OpConnect, Device: "scale"},
+		{Op: radio.OpWrite, Device: "scale", Char: "control", Data: []byte{3}},
+		{Op: radio.OpRead, Device: "scale"}, // after the answer, on the same link
+	} {
+		if _, err := h.Call(r); err != nil {
+			t.Fatalf("%s: %v", r.Op, err)
+		}
 	}
 	if len(notes) != 0 {
-		t.Errorf("extra notifications: %+v", <-notes)
+		t.Errorf("notification after the disconnect: %+v", <-notes)
 	}
 
 	want := []call{
@@ -410,10 +442,26 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 		{"/", ifaceObjMgr, "GetManagedObjects", nil},
 		{controlPath, ifaceChar, "WriteValue", []any{[]byte{1, 2}, []any{}}},
 		{scalePath, ifaceDevice, "Disconnect", nil},
+		{scalePath, ifaceDevice, "Connect", nil},
+		{"/", ifaceObjMgr, "GetManagedObjects", nil},
+		{controlPath, ifaceChar, "WriteValue", []any{[]byte{3}, []any{}}},
+		{scalePath, ifaceProps, "Get", []any{ifaceDevice, "Connected"}},
 	}
 	got := f.record()
 	if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
 		t.Errorf("BlueZ saw\n%#v\nwant\n%#v", got, want)
+	}
+	f.mu.Lock()
+	rules, badSerial := slices.Clone(f.rules), f.badSerial
+	f.mu.Unlock()
+	if want := []string{
+		"type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path_namespace='/org/bluez/hci0'",
+		"type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.bluez'",
+	}; !slices.Equal(rules, want) {
+		t.Errorf("match rules %q", rules)
+	}
+	if badSerial {
+		t.Error("the stack's call serials do not count up from 1")
 	}
 	for _, c := range got {
 		if !slices.Contains(busCalls, struct{ Iface, Member string }{c.Iface, c.Member}) {
@@ -478,6 +526,27 @@ type nopNetConn struct{ net.Conn }
 
 func (nopNetConn) Close() error { return nil }
 
+// TestNotifyBounds: a notification of radio.MaxData bytes reaches the
+// host; one byte more is dropped, not cut.
+func TestNotifyBounds(t *testing.T) {
+	var out, log bytes.Buffer
+	s := newFuzzStack()
+	s.srv = radio.NewServer(radio.StackBLE, bufConn{&out})
+	s.log = &log
+	s.signal(propsChanged(1, bluezName, measurePath, make([]byte, radio.MaxData+1)))
+	if out.Len() != 0 {
+		t.Errorf("a %d-byte notification was sent", radio.MaxData+1)
+	}
+	s.signal(propsChanged(1, bluezName, measurePath, make([]byte, radio.MaxData)))
+	if out.Len() == 0 || log.Len() != 0 {
+		t.Errorf("a %d-byte notification: sent %d bytes, logged %q", radio.MaxData, out.Len(), log.String())
+	}
+}
+
+type bufConn struct{ *bytes.Buffer }
+
+func (bufConn) Close() error { return nil }
+
 // TestConfigRefusesMalformed: the stack's argument is decoded strictly.
 func TestConfigRefusesMalformed(t *testing.T) {
 	good, err := testConfig("/run/bus").Arg()
@@ -495,9 +564,21 @@ func TestConfigRefusesMalformed(t *testing.T) {
 		strings.Replace(good, `"/run/bus"`, `"run/bus"`, 1),
 		strings.Replace(good, `"Adapter"`, `"Extra":1,"Adapter"`, 1),
 		good + "{}",
+		strings.Replace(good, `"scale"`, `"sc\u007fale"`, 1),
+		strings.Replace(good, `"scale"`, `"`+strings.Repeat("s", radio.MaxName+1)+`"`, 1),
+		good + strings.Repeat(" ", maxConfig+1-len(good)),
 	} {
 		if _, err := ParseConfig(arg); err == nil {
-			t.Errorf("accepted %s", arg)
+			t.Errorf("accepted %.80s", arg)
+		}
+	}
+	for _, arg := range []string{
+		strings.Replace(good, `"scale"`, `"sc~ale!"`, 1),
+		strings.Replace(good, `"scale"`, `"`+strings.Repeat("s", radio.MaxName)+`"`, 1),
+		good + strings.Repeat(" ", maxConfig-len(good)),
+	} {
+		if _, err := ParseConfig(arg); err != nil {
+			t.Errorf("refused %.80s: %v", arg, err)
 		}
 	}
 }
