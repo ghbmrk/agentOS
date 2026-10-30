@@ -9,6 +9,42 @@
 #     them; the line fails once the package has no use left to cover.
 # A line that matches no use fails, so this file only shrinks as rows land.
 
+# broker/sockets, cgroup, guest, loops, infer/supervise (#3944). unlink(2),
+# rename(2), mkdir(2) and bind(2) follow no link at the final name, and
+# os.RemoveAll descends with O_NOFOLLOW; only the last component is held by
+# these lines (the lint's bound). cgroup2 (kernfs) has no symlink(2), so no
+# uid, a delegate included, can plant a link among a group's files.
+allow broker/cgroup/cgroup.go Open os.ReadFile cgroup.controllers and cgroup.subtree_control of agentosd's delegated group, in cgroup2, where no uid can make a link
+allow broker/cgroup/cgroup.go Group.Child os.Mkdir a machine's group in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cgroup/cgroup.go Group.PidsMax os.ReadFile the group's pids.max, in cgroup2, where no uid can make a link
+allow broker/cgroup/cgroup.go ReadPressure os.Open a group's memory.pressure in cgroup2, or /proc/pressure/memory in procfs; neither lets any uid make a link
+allow broker/cgroup/cgroup.go writeFile os.WriteFile a group's control file in cgroup2, where no uid can make a link (and none can be created there)
+allow broker/cgroup/cgroup.go writeFile os.Remove rmdir of an empty group in cgroup2; unlink and rmdir follow no link at the name
+allow broker/cgroup/cgroup.go Group.event os.ReadFile the group's cgroup.events, in cgroup2, where no uid can make a link
+allow broker/cgroup/component.go Group.Component os.Mkdir a component's group in agentosd's cgroup2 group; mkdir(2) follows no link and cgroup2 holds none
+allow broker/cgroup/component.go Group.OOMKills os.ReadFile the group's memory.events, in cgroup2, where no uid can make a link
+allow broker/guest/plane.go New os.MkdirAll the guest plane's directory, -sockets/guests: /run/agentos/guests, inside agentosd's 0700 (later 0711) root-owned socket directory, which no other uid can write
+allow broker/guest/plane.go New os.Chmod that directory, just made or found by MkdirAll in the root-owned socket directory
+allow broker/guest/plane.go Plane.Open os.RemoveAll a machine's services directory in the root-held guests directory; RemoveAll follows no link a guest left inside it
+allow broker/guest/plane.go Plane.Open os.Mkdir a machine's services directory in the root-held guests directory
+allow broker/guest/plane.go Plane.close os.RemoveAll a machine's services directory in the root-held guests directory, as Plane.Open
+allow broker/guest/store.go writeFile os.Rename the inbox's CreateTemp file over the inbox, both in -guest-inbox's root-held /var/lib/agentos (tmpfiles: 0700 root); rename(2) replaces a link at the name, never follows it
+allow broker/guest/store.go writeFile os.Remove the CreateTemp file this call made in root-held /var/lib/agentos
+allow broker/guest/store.go writeFile os.Open the inbox's directory, root-held /var/lib/agentos, to sync it
+allow broker/infer/supervise/supervise.go Supervisor.run os.Remove the service's sockets, in agentosd's 0700 root directory (-infer-socket: /run/agentos/infer); the service gets the listener's fd, never the directory
+allow broker/infer/supervise/supervise.go Supervisor.listen os.MkdirAll the service's socket directory inside agentosd's root-owned /run/agentos
+allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that directory, which the Lstat just before shows is a directory, not a link, in root-owned /run/agentos
+allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
+allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
+allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
+allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
+allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
+allow broker/sockets/sockets.go secureDir os.Mkdir the socket directory itself, in that root-owned parent; mkdir(2) follows no link
+allow broker/sockets/sockets.go secureDir os.Chmod the socket directory, which the Lstat just before shows is a directory, not a link, owned by this uid
+allow broker/sockets/sockets.go Server.Start os.Remove a stale socket at the name in the checked 0700 socket directory, which no other uid can write
+allow broker/sockets/sockets.go Server.Start os.Chown the socket bind(2) just made, in the checked 0700 socket directory, which no other uid can write to swap it
+allow broker/sockets/sockets.go Server.Start os.Chmod that socket, and the checked directory itself (0711 once a group socket is up)
+
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
 allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made
@@ -78,11 +114,6 @@ pending broker/cmd/agentos-unlock #3940 the kernel side
 pending broker/cmd/agentos-enroll #3940 the kernel side
 pending broker/clerk/seal #3940 the kernel side
 pending broker/cmd/agentosd #3941 agentosd
-pending broker/sockets #3944 daemon packages a
-pending broker/cgroup #3944 daemon packages a
-pending broker/guest #3944 daemon packages a
-pending broker/loops #3944 daemon packages a
-pending broker/infer/supervise #3944 daemon packages a
 pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
