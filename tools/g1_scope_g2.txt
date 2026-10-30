@@ -48,10 +48,6 @@ allow evals/slice-inbox/
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
 
-# #4055 (ENF-f, #3664): broker/enforcer/dns/, mdns/, wol/ and nft/, which the G2 list does not
-# name (D-198). Remove once #4055 merges.
-exempt-pr 4055
-
 # #4037 (DECOY-b, #3763): broker/decoy/match/, which the G2 list does not name (D-198). Remove once
 # #4037 merges.
 exempt-pr 4037
