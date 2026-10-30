@@ -303,11 +303,11 @@ func TestAReconnectWrittenButNotSyncedIsUnknown(t *testing.T) {
 	d := r.stage("u", grant)
 	file := filepath.Join(r.dir, secretsName)
 	before, _ := os.ReadFile(file)
-	sync := privfile.SyncDir
-	t.Cleanup(func() { privfile.SyncDir = sync })
-	privfile.SyncDir = func(string) error { return errors.New("synthetic sync failure") }
+	sync := privfile.SyncFile
+	t.Cleanup(func() { privfile.SyncFile = sync })
+	privfile.SyncFile = func(*os.File) error { return errors.New("synthetic sync failure") }
 	st, _ := r.reconnect("u", r.approve(d), "web", d)
-	privfile.SyncDir = sync
+	privfile.SyncFile = sync
 	if after, _ := os.ReadFile(file); bytes.Equal(before, after) {
 		t.Fatal("the new grant was not renamed into place")
 	}
