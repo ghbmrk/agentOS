@@ -646,7 +646,12 @@ func main() {
 		if !validRPID(passkeyRPID) || seat == nil || cfg.PageSocket == nil {
 			log.Fatal("-passkey-rp-id must be the owner page's name, with -kernel-owner and -localui-uid")
 		}
-		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID)
+		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID, alertOwner(func() *owner.Channel {
+			if d := served.Load(); d != nil {
+				return d.Owner()
+			}
+			return nil
+		}))
 	}
 	if seat != nil {
 		if cfg.PageSocket != nil {
@@ -1335,6 +1340,19 @@ func informOwner(own func() *owner.Channel) func(string) error {
 	return func(text string) error {
 		if ch := own(); ch != nil {
 			return ch.Inform(text)
+		}
+		return errors.New("no owner channel")
+	}
+}
+
+// alertOwner sends a broker notice the owner must act on if it was not
+// theirs, such as a passkey enrolment (#3228), as security class: never
+// held by quiet hours or the hourly allowance, so a page cannot time one
+// to sit unread (CH-15).
+func alertOwner(own func() *owner.Channel) func(string) error {
+	return func(text string) error {
+		if ch := own(); ch != nil {
+			return ch.Post(owner.ClassSecurity, text)
 		}
 		return errors.New("no owner channel")
 	}
