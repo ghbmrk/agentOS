@@ -108,12 +108,13 @@ func (s *Session) fail(err error) {
 // do sends one request and returns its response, passing any events that
 // arrive first to OnEvent. Any transport or framing error ends the session.
 func (s *Session) do(method, path string, body []byte) (*response, error) {
+	return s.doType(method, path, "application/hap+json", body)
+}
+
+// doType is do with the body's content type.
+func (s *Session) doType(method, path, ct string, body []byte) (*response, error) {
 	if s.err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrClosed, s.err)
-	}
-	ct := ""
-	if body != nil {
-		ct = "application/hap+json"
 	}
 	if err := writeRequest(s.w, method, path, s.host, ct, body); err != nil {
 		s.fail(err)
@@ -538,4 +539,24 @@ func parseValues(body []byte) ([]Value, error) {
 		out = append(out, Value{ID{c.AID, c.IID}, v})
 	}
 	return out, nil
+}
+
+// RemovePairing removes the controller id's pairing over the session (HAP
+// R2 5.12; DEV-4 `delete-remote`, AdminRows). The caller passes only its
+// own pairing ID: the box is the only admin and lists or removes no other
+// controller. The accessory ends the session once its own controller's
+// pairing is gone, so the session is closed after the answer.
+func (s *Session) RemovePairing(id string) error {
+	if err := checkPairingID(id); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.unlock()
+	r, err := s.doType("POST", "/pairings", pairingTLV, encodeTLV(tb(tlvState, 1), tb(tlvMethod, methodRemovePairing), ts(tlvIdentifier, id)))
+	if err != nil {
+		return err
+	}
+	_, err = pairAnswer(r, "/pairings", 2)
+	s.fail(ErrClosed)
+	return err
 }

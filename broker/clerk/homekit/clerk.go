@@ -343,6 +343,20 @@ func (l *Link) Write(typ string, value any) error {
 	return l.step(func() error { return l.s.Write(ch.ID, value) })
 }
 
+// RemovePairing sends HAP remove-pairing for the box's own pairing over
+// this pinned session (`delete-remote`, AdminRows; DEV-4) and ends the
+// link. It takes no pairing ID: the box removes only its own (D-182 design
+// point 3), and the host then drops the device (b2a design point 5).
+func (l *Link) RemovePairing() error {
+	err := l.step(func() error { return l.s.RemovePairing(l.c.Keys.PairingID()) })
+	l.Close()
+	if err != nil {
+		return err
+	}
+	l.c.log("homekit: removed my pairing with accessory %s for %s", l.d.Pin.AccessoryID, l.d.Name)
+	return nil
+}
+
 // ConfirmBounds records the owner's confirmed bounds for a setpoint (DEV-5).
 // Only a row with an in-bounds verb takes bounds, and they must lie inside
 // the characteristic's declared range.

@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/pageca"
@@ -229,6 +230,27 @@ var ErrNoKeyTable = errors.New("run: a kernel needs its subject-key table's dire
 // ErrNoContentDir: nor with nowhere to keep sealed items.
 var ErrNoContentDir = errors.New("run: a kernel needs its content stores' directory")
 
+// CheckerPin is the checker's key the kernel admits code approvals by
+// (kernel.PinChecker, MIG-4-exit-c2): the signer of the clerk key it hands
+// the checker's unit, so only that unit signs under it. None when the
+// checker is not one of the clerks it hands keys to.
+func CheckerPin(clerks map[string]KeyClerk, root *[clerkkey.Len]byte) (ed25519.PublicKey, error) {
+	if _, ok := clerks[handoff.CheckerName]; !ok {
+		return nil, nil
+	}
+	k, err := clerkkey.Derive(root, handoff.CheckerName)
+	if err != nil {
+		return nil, err
+	}
+	sign, err := k.Signer()
+	k.Wipe()
+	if err != nil {
+		return nil, err
+	}
+	defer clear(sign)
+	return sign.Public().(ed25519.PublicKey), nil
+}
+
 // RunKernel is the kernel process (STO-2b): hardened against its peers, it
 // opens the log, the subject-key table and the content stores under keys,
 // serves OwnerSide, MeterSide, LinkSide given its socket and each content
@@ -278,6 +300,10 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	if moved {
 		first = nil
 	}
+	checker, err := CheckerPin(cfg.ClerkKeys, &keys.ClerkRoot)
+	if err != nil {
+		return err
+	}
 	clock := func() int64 { return time.Now().UnixMilli() }
 	h, err := OpenKernel(KernelConfig{
 		Log: cfg.Log, Anchor: anchor, Key: keys.Log,
@@ -285,7 +311,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 		Anchors: keys.Anchors, Clerks: cfg.Clerks, KeyDir: cfg.KeyDir,
 		ContentDir: cfg.ContentDir, Stores: slices.Sorted(maps.Keys(cfg.Content)),
 		BackupDir: cfg.BackupDir, Recipient: keys.Recipient, PageCA: keys.PageCA,
-		FirstEdge: first, LinkKey: keys.LinkKey, Clock: clock,
+		FirstEdge: first, LinkKey: keys.LinkKey, Checker: checker, Clock: clock,
 	}, clock())
 	if err != nil {
 		return err
