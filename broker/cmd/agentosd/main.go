@@ -646,7 +646,12 @@ func main() {
 		if !validRPID(passkeyRPID) || seat == nil || cfg.PageSocket == nil {
 			log.Fatal("-passkey-rp-id must be the owner page's name, with -kernel-owner and -localui-uid")
 		}
-		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID)
+		cfg.PageSocket.Passkeys = newPasskeys(*seat, passkeyRPID, informOwner(func() *owner.Channel {
+			if d := served.Load(); d != nil {
+				return d.Owner()
+			}
+			return nil
+		}))
 	}
 	if seat != nil {
 		if cfg.PageSocket != nil {

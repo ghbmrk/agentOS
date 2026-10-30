@@ -15,6 +15,7 @@ import (
 	"errors"
 	"math/big"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -106,6 +107,7 @@ type testKernel struct {
 	err       error // when set, every call answers it
 	refuse    bool  // Enroll answers the kernel's refusal in its words
 	enrollErr error // when set, Enroll alone answers it
+	lostReply bool  // Enroll enrols, then answers ErrUnreachable
 
 	mu      sync.Mutex
 	entered chan struct{} // when set, Enroll signals it on entry
@@ -164,7 +166,11 @@ func (k *testKernel) Enroll(_ context.Context, e key.Enrollment) error {
 	if k.refuse {
 		return kernelsock.Refused{Text: kernel.ErrNotEnrolled.Error()}
 	}
-	return k.answer(k.k.Enroll(time.Now().UnixMilli(), e))
+	err := k.answer(k.k.Enroll(time.Now().UnixMilli(), e))
+	if k.lostReply {
+		return kernelsock.ErrUnreachable
+	}
+	return err
 }
 
 func (k *testKernel) Unenroll(_ context.Context, u key.Unenrollment) error {
@@ -197,13 +203,14 @@ type passkeyRig struct {
 	k       *testKernel
 	p       *passkeys
 	now     time.Time
+	told    []string // the owner's notices
 }
 
 func newPasskeyRig(t *testing.T) *passkeyRig {
 	r := &passkeyRig{t: t, anchors: []*authenticator{newAuthenticator(t), newAuthenticator(t)}, now: time.Unix(1_800_000_000, 0)}
 	r.store = &kernel.MemStore{}
 	r.k = bootKernel(t, r.store, r.anchorKeys())
-	r.p = newPasskeys(r.k, testRP)
+	r.p = newPasskeys(r.k, testRP, func(text string) error { r.told = append(r.told, text); return nil })
 	r.p.Now = func() time.Time { return r.now }
 	return r
 }
@@ -421,7 +428,7 @@ func TestCutOffAnAnchorIsRefusedBeforeTheKernel(t *testing.T) {
 		t.Fatalf("enrolling a cut-off phone: %v", err)
 	}
 	// Restart both: the list is the log's.
-	p2 := newPasskeys(bootKernel(t, r.store, r.anchorKeys()), testRP)
+	p2 := newPasskeys(bootKernel(t, r.store, r.anchorKeys()), testRP, nil)
 	l, err := p2.List(context.Background())
 	if err != nil || len(l.Enrolled) != 0 || len(l.CutOff) != 1 || l.CutOff[0].ID != id {
 		t.Fatalf("after restart %+v, %v", l, err)
@@ -488,7 +495,7 @@ func TestNoKernelTextReachesThePage(t *testing.T) {
 		}
 	}
 	setup := bootKernel(t, &kernel.MemStore{}, nil)
-	p := newPasskeys(setup, testRP)
+	p := newPasskeys(setup, testRP, nil)
 	phone := newAuthenticator(t)
 	_, err := p.List(context.Background())
 	if code(err) != localapi.ErrPasskeySetup {
@@ -609,8 +616,8 @@ func TestTwoFinishesInOneSessionEnrolOnce(t *testing.T) {
 	if err := <-second; err != nil {
 		t.Fatalf("the second takes the first's answer: %v", err)
 	}
-	if r.k.enrolls != 1 {
-		t.Fatalf("%d Enroll calls", r.k.enrolls)
+	if r.k.enrolls != 1 || len(r.told) != 1 {
+		t.Fatalf("%d Enroll calls, %d notices", r.k.enrolls, len(r.told))
 	}
 	if es := r.enrolled(); len(es) != 1 || es[0].Passkey != phone.public(t) {
 		t.Fatalf("enrolled %+v", es)
@@ -666,7 +673,7 @@ func TestAPageOnAnotherRPIDEnrolsNothing(t *testing.T) {
 	anchor := newAuthenticator(t)
 	anchor.rp = pageRP
 	k := bootKernel(t, &kernel.MemStore{}, []key.PublicKey{anchor.public(t)})
-	p := newPasskeys(k, testRP)
+	p := newPasskeys(k, testRP, nil)
 	phone := newAuthenticator(t)
 	phone.rp = pageRP
 	c, err := p.Begin(context.Background(), "s1", phone.point(t))
@@ -679,5 +686,59 @@ func TestAPageOnAnotherRPIDEnrolsNothing(t *testing.T) {
 	}
 	if es, _ := k.k.State().Enrollments(); k.enrolls != 0 || len(es) != 0 {
 		t.Fatalf("enrolled %+v (%d calls)", es, k.enrolls)
+	}
+}
+
+// Each enrolment tells the owner once, naming the new key and the hardware
+// key that signed it, so a key a compromised page slipped under the
+// owner's tap is seen (#3228). A refused one tells nothing.
+func TestAnEnrolmentIsAnnouncedOnce(t *testing.T) {
+	r := newPasskeyRig(t)
+	phone := newAuthenticator(t)
+	r.k.refuse = true
+	if err := r.enrol("s1", phone, r.anchors[1]); code(err) != localapi.ErrPasskeyRefused {
+		t.Fatalf("the kernel's refusal: %v", err)
+	}
+	if len(r.told) != 0 {
+		t.Fatalf("a refused enrolment told the owner %q", r.told)
+	}
+	r.k.refuse = false
+	if err := r.enrol("s1", phone, r.anchors[1]); err != nil {
+		t.Fatal(err)
+	}
+	want := "A phone passkey was added: " + fingerprint(phone.public(t)) + ", approved by hardware key " +
+		fingerprint(r.anchors[1].public(t)) + ". If you didn't add it, cut it off on the passkey page."
+	if len(r.told) != 1 || r.told[0] != want {
+		t.Fatalf("told %q, want once %q", r.told, want)
+	}
+	// Enrolling a live key again tells nothing new.
+	r.enrol("s2", phone, r.anchors[0])
+	if len(r.told) != 1 {
+		t.Fatalf("enrolling it again told %q", r.told)
+	}
+}
+
+// An Enroll whose answer is lost after the kernel logged it is still
+// announced, once: the retry the page offers finds it enrolled (#3228).
+func TestALostEnrolAnswerIsStillAnnounced(t *testing.T) {
+	r := newPasskeyRig(t)
+	phone := newAuthenticator(t)
+	c, err := r.p.Begin(context.Background(), "s1", phone.point(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad, cd, sig := r.anchors[0].get(t, c)
+	r.k.lostReply = true
+	if err := r.p.Finish(context.Background(), "s1", ad, cd, sig); code(err) != localapi.ErrPasskeyUnavailable {
+		t.Fatalf("a lost answer: %v", err)
+	}
+	r.k.lostReply = false
+	if len(r.told) != 1 {
+		t.Fatalf("after the lost answer, told %q", r.told)
+	}
+	r.p.Finish(context.Background(), "s1", ad, cd, sig) // the page's retry
+	if len(r.told) != 1 || !strings.Contains(r.told[0], fingerprint(phone.public(t))) ||
+		!strings.Contains(r.told[0], fingerprint(r.anchors[0].public(t))) {
+		t.Fatalf("told %q", r.told)
 	}
 }
