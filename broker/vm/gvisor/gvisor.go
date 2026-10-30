@@ -547,7 +547,7 @@ func clipped(path string) []byte {
 }
 
 func size(path string) int64 {
-	fi, err := os.Stat(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return 0
 	}

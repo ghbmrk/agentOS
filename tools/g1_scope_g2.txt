@@ -45,29 +45,9 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #3861 (CLK-model-running-deflake, #3776): a test in broker/cmd/agentos-clerk-model/, which
-# the G2 list does not name (D-198). Remove once #3861 merges.
-exempt-pr 3861
-
-# #3868 (CAM-clerk-host, #3514, #3625): broker/cmd/agentos-camera/, which the G2 list does not
-# name (D-198). Remove once #3868 merges.
-exempt-pr 3868
-
-# #3873 (ENF-class, #3748): broker/enforcer/channel/, nft/ and page/, which the G2 list does not
-# name (D-198). Remove once #3873 merges.
-exempt-pr 3873
-
 # #3874 (ENF-e2, #3753): broker/enforcer/nft/, which the G2 list does not name (D-198). Remove
 # once #3874 merges.
 exempt-pr 3874
-
-# #3875 (DECOY-a, #3762): broker/decoy/, which the G2 list does not name (D-198). Remove once
-# #3875 merges.
-exempt-pr 3875
-
-# #3846 (ENF-d-preauth, #3755): broker/enforcer/channel/, which the G2 list does not name
-# (D-198). Remove once #3846 merges.
-exempt-pr 3846
 
 # #3908 (ENF-k, #3669): broker/enforcer/radio/, which the G2 list does not name (D-198).
 # Remove once #3908 merges.
@@ -84,6 +64,19 @@ exempt-pr 3935
 # #3957 (REV-CHK-names, #3901): broker/enforcer/policy/, wire/ and broker/internal/hostiletext/,
 # which the G2 list does not name (D-198). Remove once #3957 merges.
 exempt-pr 3957
+
+# #3976 (DEV-homekit-b2a, #3891): broker/cmd/agentos-homekit/, which the G2 list does not
+# name (D-198). Remove once #3976 merges.
+exempt-pr 3976
+
+# #3973 (PLAN-slots, #1379 (a)): broker/cmd/agentos-clerk-model/, which the G2 list does not
+# name (D-198). Remove once #3973 merges.
+exempt-pr 3973
+
+# #3974 (MIG-4-exit-c2, #3683): broker/cmd/agentos-a8scan/main.go, a one-line needle that
+# TestEveryStorePurposeIsANeedle forces, which the G2 list does not name (D-198). Remove once
+# #3974 merges.
+exempt-pr 3974
 
 # Project machinery and records.
 allow .claude/
