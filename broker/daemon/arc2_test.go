@@ -286,6 +286,9 @@ var enforcer = map[string]struct {
 	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
+	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice f: dnsmasq configuration
+	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the pair relay
+	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the Wake-on-LAN relay
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal"}, enforcerWebForbid},

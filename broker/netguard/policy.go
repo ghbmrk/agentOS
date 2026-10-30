@@ -126,7 +126,13 @@ type DenyEvent struct {
 	Port    uint16
 	Purpose Purpose
 	Reason  string
+	// Decoy is set when the address is a decoy destination (Config.Decoy):
+	// the caller logs a trip, and only this call stopped (KRN-12).
+	Decoy bool
 }
+
+// ReasonDecoy is the refusal of a decoy destination.
+const ReasonDecoy = "decoy address"
 
 // Resolver is the part of *net.Resolver the policy uses.
 type Resolver interface {
@@ -149,6 +155,10 @@ type Config struct {
 	Quick func() (Network, error)
 	// OnDeny, when set, is called for each refusal.
 	OnDeny func(DenyEvent)
+	// Decoy, when set, reports whether an address is a decoy destination
+	// (KRN-12): the decoy table's, in plain form. Each form of the address
+	// connected to, after any redirect, is checked before any pin.
+	Decoy func(netip.Addr) bool
 	// Connect, when set, replaces the final connect to a checked literal
 	// address. It is a test seam: production leaves it nil.
 	Connect func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -162,6 +172,7 @@ type Policy struct {
 	source  func() (Network, error)
 	quick   func() (Network, error)
 	onDeny  func(DenyEvent)
+	decoy   func(netip.Addr) bool
 	timeout time.Duration
 
 	// connect dials a checked literal address; tests replace it.
@@ -181,7 +192,7 @@ type Policy struct {
 
 // New returns a policy.
 func New(cfg Config) *Policy {
-	p := &Policy{res: cfg.Resolver, source: cfg.Source, quick: cfg.Quick, onDeny: cfg.OnDeny, timeout: cfg.Timeout}
+	p := &Policy{res: cfg.Resolver, source: cfg.Source, quick: cfg.Quick, onDeny: cfg.OnDeny, decoy: cfg.Decoy, timeout: cfg.Timeout}
 	if p.res == nil {
 		p.res = p.Resolver()
 	}
@@ -496,7 +507,7 @@ func (p *Policy) Check(ctx context.Context, a netip.Addr, port uint16, proto str
 		if errors.As(err, &de) {
 			reason = de.Reason
 		}
-		p.onDeny(DenyEvent{Addr: a, Port: port, Purpose: r.purpose, Reason: reason})
+		p.onDeny(DenyEvent{Addr: a, Port: port, Purpose: r.purpose, Reason: reason, Decoy: reason == ReasonDecoy})
 	}
 	return err
 }
@@ -529,6 +540,11 @@ func (p *Policy) check(ctx context.Context, r request, a netip.Addr, port uint16
 func (p *Policy) checkOnce(r request, a netip.Addr, port uint16, proto string) (chan struct{}, error) {
 	if !a.IsValid() {
 		return nil, &DeniedError{a, "unparsable address"}
+	}
+	for _, f := range forms(a) {
+		if p.decoy != nil && p.decoy(f) {
+			return nil, &DeniedError{a, ReasonDecoy}
+		}
 	}
 	p.mu.RLock()
 	n, pins, hold := p.net, p.pins, p.hold
