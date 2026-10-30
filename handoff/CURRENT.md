@@ -34,7 +34,7 @@ Written by sub A (this project's Decisions thread) at Mark's request, so sub B c
 
 **Who owns what, to stop today's collisions** (two D-244s; allowlist-file conflicts forced full re-reviews)
 - **Decision IDs:** sub B numbers its new rows from **D-300** up and sub A continues from D-246, until the waste-sweep PR's automatic IDs land.
-- **Process docs** (CLAUDE.md, AGENTS.md, PLAN.md, docs/OPERATING.md, docs/LANES.md, role skills): only the waste-sweep PR edits them until it merges (thread cmsg_01R91wiieBzMSvPKFsAJVvuKPLhCRLR3dg61qXtt7n6Siw). Sub B files process changes as issues meanwhile.
+- **Process docs** (CLAUDE.md, AGENTS.md, PLAN.md, docs/OPERATING.md, docs/LANES.md, role skills): only the waste-sweep PR (#4041) edits them until it merges (thread cmsg_01R91wiieBzMSvPKFsAJVvuKPLhCRLR3dg61qXtt7n6Siw). PRs that still claim D-245 (#3976, #4035, #4036) renumber after #4041 merges. Sub B files process changes as issues meanwhile.
 - **Rows:** claim with `state:building` plus a comment naming the branch and the sub, and never start a row whose files an open PR touches (D-111).
 
 **Sub A threads still running (don't duplicate them)**
@@ -44,9 +44,9 @@ Written by sub A (this project's Decisions thread) at Mark's request, so sub B c
 - The waste-sweep process PR: fixes (d) to (f) and the one-review-thread wording, as one gate-file PR, so it needs a Security accept, which is sub B's to start. Fixes (a) and (b) wait on Mark's call about retiring G2.
 
 **Sub B, in this order**
-1. **Reviews sub A can't start.** First: **#4033** (UPD-5 re-test rebuild plus the ship gate, issue #4031, head 472a5a34 at writing). It is tier A but not a gate-file PR, so it needs one L3+lens thread and one Security thread. Its gate lifts only once the sandbox runner (#4032) is done, so #4032 is the next build row. Then: For every open PR whose latest verdict comment lists a review owed, run one L3+lens thread and, where tier A or `premerge.py --needs-mark` requires, one Security thread. The last accept arms (CLAUDE.md).
+1. **Reviews sub A can't start.** First: **#4033** (UPD-5 re-test rebuild plus the ship gate, issue #4031, head 472a5a34 at writing). It is tier A but not a gate-file PR, so it needs one L3+lens thread and one Security thread. Its gate lifts only once the sandbox runner (#4032) is done, so #4032 is the next build row. Next is **#4041**, the waste-sweep process PR (D-246, a tier-A gate file), which needs one L3+lens thread and one Security thread. Then: For every open PR whose latest verdict comment lists a review owed, run one L3+lens thread and, where tier A or `premerge.py --needs-mark` requires, one Security thread. The last accept arms (CLAUDE.md).
 2. **Idle PRs with no owner**, blockers as of 11:00Z (take each over or close it with its row requeued, D-098):
-   - #3949: every review accepts, but CI's `checks` job is red. It needs a builder fix.
+   - #3949: every review accepts, but CI's `checks` job is red because `tests/test_list_readers.py` is missing a reader case. The waste-sweep thread is pushing the fix, after which a test-only delta review is owed.
    - #3973: needs a merge from main, then a Security review.
    - #3976: `g1-freeze` is red because it has no D-198 exempt-pr companion. A Security delta is owed at 41911480.
    - #3991: needs a merge from main, and a Security delta is owed at 8f8e8d7.
