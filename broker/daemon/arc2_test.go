@@ -287,6 +287,8 @@ var enforcer = map[string]struct {
 	"enforcer/policy":   {[]string{"kernel/key"}, droneForbid},
 	"enforcer/wire":     {nil, droneForbid},
 	"enforcer/channel":  {[]string{"enforcer/policy", "enforcer/wire"}, droneForbid},
+	"enforcer/alert":    {[]string{"enforcer/wire"}, droneForbid},               // slice h: texts and light
+	"enforcer/heads":    {[]string{"kernel/key", "enforcer/wire"}, droneForbid}, // slice h: owner sub-key revocations (STO-4)
 	"enforcer/nft":      {[]string{"enforcer/policy"}, droneForbid},
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
