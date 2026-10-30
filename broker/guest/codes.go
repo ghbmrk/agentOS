@@ -38,7 +38,7 @@ var codes = set(
 	"not-owner-approved", "grant-not-staged", "not-this-clerk",
 	"no-account", "sign-in-refused", "no-sign-in", "address", "notgmail",
 	"plan-not-allowed", "plan-consent", "signin-busy", "signin-code", "signin-failed",
-	"signin-timed-out", "signin-stopped", "requalify", "plan-refused", "plan-meter",
+	"signin-timed-out", "signin-stopped", "requalify", "plan-refused", "plan-meter", "plan-unknown",
 
 	// broker/clerk/model: an API call's refusals and failures.
 	"private", "nokey", "body", "upstream", "answer",

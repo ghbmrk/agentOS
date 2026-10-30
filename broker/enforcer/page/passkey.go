@@ -172,21 +172,35 @@ type assertion struct {
 // verification, challenge (STO-4, NET-4 Passkey rules). On success it
 // records whether the passkey is synced.
 func (s *Server) signature(a assertion, msg []byte) ([]byte, error) {
+	sig, flags, err := parseAssertion(a)
+	if err != nil || !s.cfg.Owner.Verify(msg, sig) {
+		return nil, errRefused
+	}
+	s.synced(flags)
+	return sig, nil
+}
+
+// parseAssertion is a in key.AssertionSig's encoding, and its
+// authenticator-data flags.
+func parseAssertion(a assertion) ([]byte, byte, error) {
 	var ka key.Assertion
 	var err1, err2, err3 error
 	ka.AuthenticatorData, err1 = base64.RawURLEncoding.DecodeString(a.AuthenticatorData)
 	ka.ClientDataJSON, err2 = base64.RawURLEncoding.DecodeString(a.ClientDataJSON)
 	ka.Signature, err3 = base64.RawURLEncoding.DecodeString(a.Signature)
 	if err := errors.Join(err1, err2, err3); err != nil {
-		return nil, errRefused
+		return nil, 0, errRefused
 	}
 	sig, err := key.AssertionSig(ka)
-	if err != nil || !s.cfg.Owner.Verify(msg, sig) {
-		return nil, errRefused
+	if err != nil || len(ka.AuthenticatorData) < 37 { // rpIdHash, flags, counter
+		return nil, 0, errRefused
 	}
-	f := ka.AuthenticatorData[32]
+	return sig, ka.AuthenticatorData[32], nil
+}
+
+// synced records the BE and BS flags of a verified assertion.
+func (s *Server) synced(f byte) {
 	s.sync = syncState{Known: true, Eligible: f&0x08 != 0, Backed: f&0x10 != 0}
-	return sig, nil
 }
 
 func readJSON(r *http.Request, v any) error {

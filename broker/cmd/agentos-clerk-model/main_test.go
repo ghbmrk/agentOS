@@ -25,6 +25,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/plan"
 	"github.com/ghbmrk/agentos/broker/clerk/run"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
+	"github.com/ghbmrk/agentos/broker/netguard"
 )
 
 func must(t *testing.T, err error) {
@@ -160,14 +161,20 @@ func TestTheKeyMustBeTheModelClerks(t *testing.T) {
 // stop. The token is a synthetic canary.
 func sealedSlot(t *testing.T, dir string, k [32]byte) {
 	t.Helper()
+	sealedSlotAs(t, dir, planSlot("codex"), "codex", k)
+}
+
+// sealedSlotAs is sealedSlot into slot, sealed for plan sealedFor.
+func sealedSlotAs(t *testing.T, dir, slot, sealedFor string, k [32]byte) {
+	t.Helper()
 	ck := clerkkey.Key{Name: clerkName, Key: k}
 	sk, err := ck.Sealer()
 	must(t, err)
 	s, err := clerk.NewAESSealer(sk)
 	must(t, err)
-	b, err := s.Seal([]byte(`{"tokens":{"access_token":"canary-not-a-token"},"stop":"`+plan.StopRefused+`"}`), []byte("agentos/clerk/plan/codex"))
+	b, err := s.Seal([]byte(`{"tokens":{"access_token":"canary-not-a-token"},"stop":"`+plan.StopRefused+`"}`), []byte("agentos/clerk/plan/"+sealedFor))
 	must(t, err)
-	must(t, os.WriteFile(filepath.Join(dir, planSlot), b, 0o600))
+	must(t, os.WriteFile(filepath.Join(dir, slot), b, 0o600))
 }
 
 // host is a fake of agentosd's sign-in socket, on its wire: it records
@@ -285,24 +292,24 @@ func TestThePlanLoginIsSealedInTheClerksOwnSlot(t *testing.T) {
 	c := testConfig(t)
 	sealedSlot(t, c.dir, k)
 	owner := running(t, c, k)
-	st, err := owner.State()
+	st, err := owner.State("codex")
 	if err != nil || !st.SignedIn || st.Stopped != plan.StopRefused || st.Mode != plan.Permitted {
 		t.Fatalf("state = %+v, %v; want the sealed login, stopped refused", st, err)
 	}
-	must(t, owner.Remove())
-	if b, err := os.ReadFile(filepath.Join(c.dir, planSlot)); err != nil || len(b) != 0 {
+	must(t, owner.Remove("codex"))
+	if b, err := os.ReadFile(filepath.Join(c.dir, planSlot("codex"))); err != nil || len(b) != 0 {
 		t.Fatalf("after planremove the slot holds %d bytes, %v", len(b), err)
 	}
 
 	open := testConfig(t)
 	sealedSlot(t, open.dir, k)
-	must(t, os.Chmod(filepath.Join(open.dir, planSlot), 0o640))
+	must(t, os.Chmod(filepath.Join(open.dir, planSlot("codex")), 0o640))
 	if err := refused(t, open, k); err == nil {
 		t.Error("a slot another uid can read opened")
 	}
 	link := testConfig(t)
 	sealedSlot(t, filepath.Dir(link.dir), k)
-	must(t, os.Symlink(filepath.Join(filepath.Dir(link.dir), planSlot), filepath.Join(link.dir, planSlot)))
+	must(t, os.Symlink(filepath.Join(filepath.Dir(link.dir), planSlot("codex")), filepath.Join(link.dir, planSlot("codex"))))
 	if err := refused(t, link, k); err == nil {
 		t.Error("a slot that is a link opened")
 	}
@@ -316,7 +323,7 @@ func TestPlanBeginRunsTheSignInOnAgentosdsSocket(t *testing.T) {
 	c := testConfig(t)
 	h := &host{routes: shortDir(t)}
 	h.serve(t, c.signInSock)
-	b, err := running(t, c, [32]byte{7}).Begin()
+	b, err := running(t, c, [32]byte{7}).Begin("codex")
 	if err != nil || b.Code != "" || b.Detail != run.DSignInFailed {
 		t.Fatalf("planbegin = %+v, %v; want %s and no code", b, err, run.DSignInFailed)
 	}
@@ -358,32 +365,32 @@ func TestAnUnopenableSlotStartsSignedOut(t *testing.T) {
 	for name, write := range map[string]func(dir string){
 		"another key's": func(dir string) { sealedSlot(t, dir, [32]byte{8}) },
 		"damaged": func(dir string) {
-			must(t, os.WriteFile(filepath.Join(dir, planSlot), []byte("not a sealed slot"), 0o600))
+			must(t, os.WriteFile(filepath.Join(dir, planSlot("codex")), []byte("not a sealed slot"), 0o600))
 		},
 		"oversized": func(dir string) {
-			must(t, os.WriteFile(filepath.Join(dir, planSlot), make([]byte, maxPlanSlot+1), 0o600))
+			must(t, os.WriteFile(filepath.Join(dir, planSlot("codex")), make([]byte, maxPlanSlot+1), 0o600))
 		},
 	} {
 		c := testConfig(t)
 		write(c.dir)
-		before, err := os.ReadFile(filepath.Join(c.dir, planSlot))
+		before, err := os.ReadFile(filepath.Join(c.dir, planSlot("codex")))
 		must(t, err)
 		owner := running(t, c, k)
-		st, err := owner.State()
+		st, err := owner.State("codex")
 		if err != nil || st.SignedIn || st.Stopped != "" {
 			t.Errorf("%s slot: state = %+v, %v; want signed out and not stopped", name, st, err)
 			continue
 		}
-		if after, _ := os.ReadFile(filepath.Join(c.dir, planSlot)); string(after) != string(before) {
+		if after, _ := os.ReadFile(filepath.Join(c.dir, planSlot("codex"))); string(after) != string(before) {
 			t.Errorf("%s slot: changed before any write", name)
 		}
-		must(t, owner.Remove())
-		if b, err := os.ReadFile(filepath.Join(c.dir, planSlot)); err != nil || len(b) != 0 {
+		must(t, owner.Remove("codex"))
+		if b, err := os.ReadFile(filepath.Join(c.dir, planSlot("codex"))); err != nil || len(b) != 0 {
 			t.Errorf("%s slot: the owner's write left %d bytes, %v", name, len(b), err)
 		}
 		again := testConfig(t)
 		again.dir = c.dir
-		if st, err := running(t, again, k).State(); err != nil || st.SignedIn {
+		if st, err := running(t, again, k).State("codex"); err != nil || st.SignedIn {
 			t.Errorf("%s slot: after the write a start reads %+v, %v", name, st, err)
 		}
 	}
@@ -458,5 +465,64 @@ func TestServesModelCallsToThePlannerOnly(t *testing.T) {
 		if ops := k.seen(); len(ops) == 0 || ops[0] != "admitspend" {
 			t.Fatalf("the planner's call: %v; the meter saw %v", err, ops)
 		}
+	}
+}
+
+// wireSecondPlan wires a second plan, "other" (Codex's declaration renamed),
+// beside Codex for the test.
+func wireSecondPlan(t *testing.T) {
+	orig := declarations
+	t.Cleanup(func() { declarations = orig })
+	declarations = func(guard *netguard.Policy) []planRoute {
+		other := plan.Codex(guard)
+		other.Name, other.Version = "other", "other-1"
+		return append(orig(guard), planRoute{other, run.CodexSignIn()})
+	}
+}
+
+// CLK-1, PLAN-slots (#1379 (a)): each wired declaration opens its own
+// sealed slot, plan-<name>. An existing plan-codex slot still opens signed
+// in; a slot sealed for another plan starts that plan signed out and leaves
+// the others alone; one plan's write touches only its own slot.
+func TestPlanSlotsPerDeclaration(t *testing.T) {
+	if got := declarations(nil); len(got) != 1 || got[0].d.Name != "codex" {
+		t.Fatalf("wired plans: %d", len(got))
+	}
+	wireSecondPlan(t)
+	k := [32]byte{7}
+	c := testConfig(t)
+	sealedSlot(t, c.dir, k)
+	// Codex's login, copied into the other plan's slot.
+	sealedSlotAs(t, c.dir, planSlot("other"), "codex", k)
+	codex, err := os.ReadFile(filepath.Join(c.dir, planSlot("codex")))
+	must(t, err)
+	owner := running(t, c, k)
+	if st, err := owner.State("codex"); err != nil || !st.SignedIn || st.Stopped != plan.StopRefused {
+		t.Fatalf("codex: %+v, %v; want its stored login", st, err)
+	}
+	if st, err := owner.State("other"); err != nil || st.SignedIn || st.Stopped != "" {
+		t.Fatalf("other: %+v, %v; want signed out", st, err)
+	}
+	must(t, owner.Remove("other"))
+	if b, err := os.ReadFile(filepath.Join(c.dir, planSlot("other"))); err != nil || len(b) != 0 {
+		t.Fatalf("other's remove left %d bytes in its slot, %v", len(b), err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(c.dir, planSlot("codex"))); string(b) != string(codex) {
+		t.Fatal("other's remove changed codex's slot")
+	}
+	if st, err := owner.State("codex"); err != nil || !st.SignedIn {
+		t.Fatalf("codex after other's remove: %+v, %v", st, err)
+	}
+	if _, err := owner.State("nope"); err == nil {
+		t.Fatal("an unwired plan answered")
+	}
+	ents, err := os.ReadDir(c.dir)
+	must(t, err)
+	var names []string
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	if want := []string{"plan-codex", "plan-other"}; !slices.Equal(names, want) {
+		t.Fatalf("slots %v, want %v", names, want)
 	}
 }

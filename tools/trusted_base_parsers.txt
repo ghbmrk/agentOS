@@ -34,7 +34,6 @@ inert  github.com/ghbmrk/agentos/broker/daemon -- wiring; decodes only its own c
 inert  github.com/ghbmrk/agentos/broker/daemon/journalowner -- maps the journal engine's STOP report and list onto control's types; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/durable -- file replacement; decodes nothing
 parser github.com/ghbmrk/agentos/broker/edgelink -- frames and handshakes from the edge
-inert  github.com/ghbmrk/agentos/broker/events -- in-process event bus over its own records
 inert  github.com/ghbmrk/agentos/broker/grants -- reads its own store
 inert  github.com/ghbmrk/agentos/broker/guesterr -- builds guest-visible text; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/infer/supervise -- starts the inference service; decodes nothing
@@ -53,7 +52,6 @@ inert  github.com/ghbmrk/agentos/broker/kernel/privfile -- checks and replaces a
 inert  github.com/ghbmrk/agentos/broker/procguard -- process hardening; decodes nothing
 inert  github.com/ghbmrk/agentos/broker/provagent -- declares plan routes as values
 inert  github.com/ghbmrk/agentos/broker/quota -- sets disk quotas; decodes nothing
-inert  github.com/ghbmrk/agentos/broker/recall -- reads its own index
 inert  github.com/ghbmrk/agentos/broker/reversible -- declarations as values
 inert  github.com/ghbmrk/agentos/broker/routerule -- rule types as values
 inert  github.com/ghbmrk/agentos/broker/sendrules -- recipient rules over parsed values
@@ -70,6 +68,9 @@ inert github.com/ghbmrk/agentos/broker/clerk/check -- checks a request the kerne
 parser github.com/ghbmrk/agentos/broker/clerk/devhost -- a device driver's wire messages and the device's frames (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/devslot -- the driver wire's messages, from the host or a driver's process (DEVSLOT-drivers b2a)
 parser github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step's hand-off on descriptor 3
+parser github.com/ghbmrk/agentos/broker/clerk/codecheck -- owner codes and the held steps they approve, from agentosd (uncertain; classed parser)
+inert  github.com/ghbmrk/agentos/broker/clerk/codecheck/totp -- computes and compares six-digit codes; decodes nothing
+inert  github.com/ghbmrk/agentos/broker/clerk/codecheck/wire -- socket between trusted processes (agentosd and the checker); decodes only the checker's bounded answer
 parser github.com/ghbmrk/agentos/broker/clerk/inbox -- mail headers and listings from the owner's mail provider
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapconn -- IMAP server responses, in the mail clerk's connection process (go-imap; #2937 gap 2)
 parser github.com/ghbmrk/agentos/broker/clerk/inbox/imapsmtp -- pre-auth lines and SMTP replies

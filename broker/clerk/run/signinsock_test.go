@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,7 @@ type stubHost struct {
 	args  []signInArgs
 	fail  map[string]error
 	route string // signinroute's answer, if not dir/guest
+	ended bool   // signinread answers that the CLI exited
 }
 
 func (s *stubHost) serve(t *testing.T) string {
@@ -63,7 +65,10 @@ func (s *stubHost) serve(t *testing.T) string {
 			case "signinstop":
 				os.RemoveAll(filepath.Join(s.dir, a.Guest))
 			case "signinread":
-				return json.Marshal(signInRead{Printed: "code", Exited: false})
+				s.mu.Lock()
+				ended := s.ended
+				s.mu.Unlock()
+				return json.Marshal(signInRead{Printed: "code", Exited: ended})
 			}
 			return nil, nil
 		})
@@ -84,7 +89,7 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	w, err := s.Start(ctx, "signin-1")
+	w, err := s.Start(ctx, "codex", "signin-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,21 +112,21 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 	}
 	host.mu.Lock()
 	want := []string{"signinroute", "signinstart", "signinread", "signinread", "signinstop"}
-	if !slices.Equal(host.calls, want) || slices.ContainsFunc(host.args, func(a signInArgs) bool { return a != signInArgs{Guest: "signin-1"} }) {
+	if !slices.Equal(host.calls, want) || slices.ContainsFunc(host.args, func(a signInArgs) bool { return a != signInArgs{Guest: "signin-1", Plan: "codex"} }) {
 		t.Fatalf("calls %v %+v", host.calls, host.args)
 	}
 	host.calls = nil
 	host.fail["signinstart"] = errors.New("signin: the sign-in machine did not start")
 	host.mu.Unlock()
 
-	if _, err := s.Start(ctx, "signin-2"); err == nil {
+	if _, err := s.Start(ctx, "codex", "signin-2"); err == nil {
 		t.Fatal("a refused start returned a worker")
 	}
 	host.mu.Lock()
 	delete(host.fail, "signinstart")
 	host.route = filepath.Join(dir, "elsewhere")
 	host.mu.Unlock()
-	if _, err := s.Start(ctx, "signin-3"); err == nil {
+	if _, err := s.Start(ctx, "codex", "signin-3"); err == nil {
 		t.Fatal("a route not named for the guest was served")
 	}
 	host.mu.Lock()
@@ -131,7 +136,7 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 	host.route = ""
 	host.fail["signinroute"] = errors.New("signin: a guest is lowercase letters, digits and dashes, at most 64")
 	host.mu.Unlock()
-	if _, err := s.Start(ctx, "../x"); err == nil {
+	if _, err := s.Start(ctx, "codex", "../x"); err == nil {
 		t.Fatal("a refused route started")
 	}
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
@@ -139,7 +144,49 @@ func TestSignInSockStartsOnTheGuestsRoute(t *testing.T) {
 	}
 	done, stop := context.WithCancel(ctx)
 	stop()
-	if _, err := s.Start(done, "signin-3"); err == nil {
+	if _, err := s.Start(done, "codex", "signin-3"); err == nil {
 		t.Fatal("a start after ctx ended")
+	}
+}
+
+// Each of the four calls to agentosd's sign-in host carries the plan of the
+// PlanHost that began the sign-in, beside its guest, so a host with one
+// sign-in machine per plan (#3927) starts the right one (CLK-7, PLN-5).
+func TestSignInSockNamesThePlan(t *testing.T) {
+	dir, _ := filepath.EvalSymlinks(t.TempDir())
+	host := &stubHost{dir: dir, fail: map[string]error{}, ended: true}
+	sock := host.serve(t)
+	var ca, cb atomic.Int32
+	la, _ := planLoginAt(t, plan.Permitted, tokenProvider(&ca, nil))
+	lb := namedLogin(t, "other", plan.Permitted, tokenProvider(&cb, nil))
+	conn := proc.Conn{Socket: sock, UID: os.Getuid()}
+	// Link only bounds a hang: the stub's CLI exits at its first read, so
+	// each sign-in ends on that read, not on a timer.
+	times := SignInTimes{Poll: time.Millisecond, Link: time.Minute, Wall: time.Minute}
+	for _, h := range []*PlanHost{
+		{Plan: "codex", Login: la, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: la, SandboxUID: os.Getuid()}, Times: times},
+		{Plan: "other", Login: lb, Prompt: CodexSignIn(), Workers: SignInSock{Host: conn, Login: lb, SandboxUID: os.Getuid()}, Times: times},
+	} {
+		host.mu.Lock()
+		host.calls, host.args = nil, nil
+		host.mu.Unlock()
+		// The stub's CLI exits before printing a link: the sign-in fails at
+		// its first read and is stopped, having made every call.
+		if b := h.Begin(context.Background()); b.Detail != DSignInFailed {
+			t.Fatalf("%s: begun %+v", h.Plan, b)
+		}
+		host.mu.Lock()
+		calls, args := host.calls, host.args
+		host.mu.Unlock()
+		for _, op := range []string{"signinroute", "signinstart", "signinread", "signinstop"} {
+			if !slices.Contains(calls, op) {
+				t.Errorf("%s: no %s in %v", h.Plan, op, calls)
+			}
+		}
+		for i, a := range args {
+			if a.Plan != h.Plan || !strings.HasPrefix(a.Guest, "signin-") {
+				t.Errorf("%s: %s carried %+v", h.Plan, calls[i], a)
+			}
+		}
 	}
 }

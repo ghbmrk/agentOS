@@ -47,6 +47,10 @@ type passkeys struct {
 
 	mu      sync.Mutex
 	pending map[string]pendingKey // by page session
+
+	// waiting, when set (tests only), is called as a Finish starts waiting
+	// for the one under way on its point.
+	waiting func()
 }
 
 type pendingKey struct {
@@ -214,6 +218,9 @@ func (p *passkeys) Finish(ctx context.Context, session string, authData, clientD
 	}
 	if f := k.f; f != nil {
 		p.mu.Unlock()
+		if p.waiting != nil {
+			p.waiting()
+		}
 		select {
 		case <-f.done:
 			return f.err

@@ -318,9 +318,9 @@ class RiskTierTest(unittest.TestCase):
                 self.assertIn(pkg, rt.TIER_A_BROKER)
         # Security #1700 delta f1/f2 and P/UX/L3 delta f1 (#1654): durable
         # writes keys, the vault and root.json (a); boxname parses the owner's
-        # NAME text and runs the CH-21 check (c); events and recall hold
-        # CRED-1 custody (a). Each is listed by criterion and is never B.
-        for pkg in ("durable", "boxname", "events", "recall"):
+        # NAME text and runs the CH-21 check (c). Each is listed by criterion
+        # and is never B.
+        for pkg in ("durable", "boxname"):
             with self.subTest(promoted=pkg):
                 self.assertIn(pkg, rt.TIER_A_BROKER)
                 self.assertNotIn(pkg, rt.TIER_B_BROKER)
@@ -409,13 +409,9 @@ class RiskTierTest(unittest.TestCase):
     def test_allow_line_packages_are_a(self):
         allowed = rt.core_list()[2]
         # change holds journal.Engine.Authorize/Dispatch and grants.Gate.Authorize/Dispatch.
-        self.assertIn("recall", allowed)
         self.assertIn("change", allowed)
         self.assertEqual(rt.tier_of("broker/change/change.go"),
                          ("A", "core list: broker/change/"))
-        # recall also meets criterion (a) (CRED-1 custody), so TIER_A_BROKER
-        # names it and its reason shows first.
-        self.assertEqual(rt.tier_of("broker/recall/recall.go"), ("A", "broker/recall/"))
         for pkg in sorted(allowed):
             with self.subTest(pkg=pkg):
                 self.assertEqual(rt.tier_of(f"broker/{pkg}/x.go")[0], "A")
