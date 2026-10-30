@@ -13,10 +13,11 @@ var HeldOps = []string{OpHeld}
 
 // The kinds of a HeldItem.
 const (
-	HeldSecret = "secret" // may carry a code or key (CH-19)
-	HeldCode   = "code"   // mentioned a code (CH-21)
-	HeldLong   = "long"   // too long to text
-	HeldUnsent = "unsent" // a text that did not go
+	HeldSecret  = "secret"  // may carry a key (CH-19)
+	HeldOneTime = "onetime" // carried a code, kept for hours (CH-19, #906)
+	HeldCode    = "code"    // mentioned a code (CH-21)
+	HeldLong    = "long"    // too long to text
+	HeldUnsent  = "unsent"  // a text that did not go
 )
 
 // HeldItem is one kept text. An expired one is a stub: no text.
@@ -26,6 +27,8 @@ type HeldItem struct {
 	At      time.Time `json:"at"`
 	Text    string    `json:"text,omitempty"`
 	Expired bool      `json:"expired,omitempty"`
+	// CodeExpired says the item's code has expired (CH-19, #906).
+	CodeExpired bool `json:"code_expired,omitempty"`
 }
 
 // HeldList is OpHeld's answer: the kept items newest first, then the

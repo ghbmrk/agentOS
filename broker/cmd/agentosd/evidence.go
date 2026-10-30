@@ -320,7 +320,7 @@ func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
 	if ch := d.Owner(); ch != nil && e.page {
 		ch.SetKeeper(e.kept)
 	}
-	go e.kept.sweepEvery(ctx, time.Hour)
+	go e.kept.sweepEvery(ctx, time.Minute)
 	go e.run(ctx)
 	e.poke()
 }
@@ -367,16 +367,28 @@ func converse(channel func() *owner.Channel) func(string) error {
 // file in the box's state directory, saved atomically (change.FileStore).
 // Each expires only by time, keepFor after it was kept; its text is then
 // dropped and a stub stays for stubFor more, so the page can say it has
-// expired. Nothing is evicted by count: a new item that would take the
+// expired. A code the owner channel kept (owner.KeptOneTime) is kept only
+// codeFor; then its text reads with the code expired (owner.ExpiredView),
+// and the item keeps its days (CH-19, #906). Nothing is evicted by count: a new item that would take the
 // file past maxKeptBytes is refused, and its sender says it could not be
 // kept. A deletion's reach (CAP-3) forgets them all, stubs too (forget).
 const (
 	defaultKeepFor = 30 * 24 * time.Hour
+	defaultCodeFor = time.Hour
 	stubFor        = 30 * 24 * time.Hour
 	maxKeptBytes   = 1 << 20
 )
 
 var errKeptFull = errors.New("kept replies are full")
+
+// codeFor is how long a kept code stays readable: -code-hours, 1 to 24
+// (CH-19, #906).
+func codeFor(hours int) (time.Duration, error) {
+	if hours < 1 || hours > 24 {
+		return 0, errors.New("-code-hours must be 1 to 24")
+	}
+	return time.Duration(hours) * time.Hour, nil
+}
 
 type keptReply struct {
 	ID   string    `json:"id,omitempty"`
@@ -385,6 +397,12 @@ type keptReply struct {
 	At   time.Time `json:"at"`
 	// Expired marks a stub: its text is gone.
 	Expired bool `json:"expired,omitempty"`
+	// CodeUntil is when a kept code expires; CodeExpired marks a text
+	// whose code has (CH-19, #906).
+	CodeUntil   time.Time `json:"code_until,omitzero"`
+	CodeExpired bool      `json:"code_expired,omitempty"`
+	// CodeGone is the text to show from CodeUntil (owner.ExpiredView).
+	CodeGone string `json:"code_gone,omitempty"`
 }
 
 type keptReplies struct {
@@ -394,6 +412,9 @@ type keptReplies struct {
 	// keepFor is how long an item is kept (-kept-days); zero is
 	// defaultKeepFor.
 	keepFor time.Duration
+	// codeFor is how long a kept code stays readable (-code-hours); zero
+	// is defaultCodeFor.
+	codeFor time.Duration
 
 	mu sync.Mutex
 
@@ -489,7 +510,16 @@ func tellHeldDropped(ch *owner.Channel, n int) error {
 
 // Keep keeps a text the owner channel withheld (owner.Keeper).
 func (k *keptReplies) Keep(kind, text string) error {
+	if kind == owner.KeptOneTime {
+		return k.KeepCode(text, owner.ExpireCodes(text))
+	}
 	return k.keep(kind, text)
+}
+
+// KeepCode keeps a code the owner channel withheld, with the text to show
+// once it expires (owner.Keeper).
+func (k *keptReplies) KeepCode(text, expired string) error {
+	return k.keepWith(owner.KeptOneTime, text, expired)
 }
 
 // keep adds text of kind, or refuses it, logging why without the text.
@@ -499,13 +529,32 @@ func (k *keptReplies) Keep(kind, text string) error {
 // keeps its id but takes this keep's time, and moves to the end, so it
 // lasts keepFor from the latest pointer to it (HELD-1, HELD-2).
 func (k *keptReplies) keep(kind, text string) error {
+	return k.keepWith(kind, text, "")
+}
+
+// keepWith is keep, with what a KeptOneTime text shows once its code
+// expires.
+func (k *keptReplies) keepWith(kind, text, codeGone string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	l, err := k.loadLocked()
 	if err == nil {
 		item := keptReply{ID: randHex(8), Kind: kind, Text: text, At: k.now()}
+		if kind == owner.KeptOneTime {
+			codeFor := k.codeFor
+			if codeFor <= 0 {
+				codeFor = defaultCodeFor
+			}
+			item.CodeUntil, item.CodeGone = item.At.Add(codeFor), codeGone
+		}
 		if i := slices.IndexFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }); i >= 0 {
 			item.ID = l[i].ID
+			if g := l[i].CodeGone; g != "" && g != item.CodeGone {
+				// Copies kept from different texts as received can
+				// differ in what a control hid: keep the stricter view,
+				// the whole text gone (#4014 Security).
+				item.CodeGone = owner.ExpiredCode
+			}
 			l = slices.Delete(l, i, i+1)
 		}
 		err = k.saveLocked(append(l, item))
@@ -608,7 +657,7 @@ func (k *keptReplies) list() []keptReply {
 func (k *keptReplies) held() localapi.HeldList {
 	var live, stubs []localapi.HeldItem
 	for _, r := range slices.Backward(k.list()) {
-		it := localapi.HeldItem{ID: r.ID, Kind: r.Kind, At: r.At, Text: r.Text, Expired: r.Expired}
+		it := localapi.HeldItem{ID: r.ID, Kind: r.Kind, At: r.At, Text: r.Text, Expired: r.Expired, CodeExpired: r.CodeExpired}
 		if r.Expired {
 			stubs = append(stubs, it)
 		} else {
@@ -618,8 +667,9 @@ func (k *keptReplies) held() localapi.HeldList {
 	return localapi.HeldList{Items: append(live, stubs...)}
 }
 
-// loadLocked reads the kept items as of now: one past keepFor is a stub,
-// and a stub past stubFor more is gone. A store it cannot read is an
+// loadLocked reads the kept items as of now: a code past its CodeUntil
+// reads as expired, one past keepFor is a stub, and a stub past stubFor
+// more is gone. A store it cannot read is an
 // error, so keep never writes over it.
 func (k *keptReplies) loadLocked() ([]keptReply, error) {
 	raw, err := k.store.Load()
@@ -643,6 +693,13 @@ func (k *keptReplies) loadLocked() ([]keptReply, error) {
 			// stays the same once its text has expired and been swept.
 			sum := sha256.Sum256([]byte(r.At.UTC().Format(time.RFC3339Nano) + "\x00" + r.Text))
 			r.ID = hex.EncodeToString(sum[:8])
+		}
+		if !r.CodeUntil.IsZero() && !now.Before(r.CodeUntil) {
+			gone := r.CodeGone
+			if gone == "" {
+				gone = owner.ExpireCodes(r.Text)
+			}
+			r.Text, r.CodeUntil, r.CodeGone, r.CodeExpired = gone, time.Time{}, "", true
 		}
 		age := now.Sub(r.At)
 		switch {
