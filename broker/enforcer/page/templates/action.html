@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve an action: {{.Name}}</title>
+<link rel="stylesheet" href="/page.css">
+<script src="/page.js" defer></script>
+</head>
+<body>
+<h1>Approve an action</h1>
+<p>Your home enforcer drew this action itself. Approve it only if it is what you meant.</p>
+<ul class="diff">
+<li>{{.Line}}</li>
+<li>Good once, until {{.Until}}</li>
+</ul>
+<p class="consequence">{{.Consequence}}</p>
+<button id="do" data-id="{{.ID}}" data-challenge="{{.Challenge}}" data-rp="{{.Name}}">Approve with your passkey</button>
+<p id="result" role="status"></p>
+</body>
+</html>
