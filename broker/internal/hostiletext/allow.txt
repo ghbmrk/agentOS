@@ -12,6 +12,7 @@ clerk/clerkkey ValidName ASCII regex; #3953
 clerk/inbox dnsName ASCII DNS labels; #3953
 cmd/agentos-link ifaceName ASCII interface names; #3953
 enforcer/page dnsName ASCII DNS labels; #3953
+enforcer/radio name printable ASCII, no space; #3953
 kernel/proc ValidStoreName ASCII regex; #3953
 pageca ValidName DNS name, needs a dotted wrapper; #3953
 sipsign hostName ASCII host or IP; #3953
@@ -24,6 +25,7 @@ clerk shape builds a request declaration from an op; its values are checked by r
 cmd/agentos-camdecode/camdecode shape parses WIDTHxHEIGHT with strconv.Atoi
 cmd/agentos-egress adapterName looks a name up in the fixed adapter list
 kernel FirstAnchors.shape checks setup keys, not text
+localui setup.name handles the names form; its text is checked by boxname.Shape and boxname.Check
 loops plainName looks a finding up in a fixed map (frozen old-core loops, D-139)
 owner parseName parses a NAME command; its argument is checked by boxname.Shape
 skill/format IsFileName fixed-pattern path regex
