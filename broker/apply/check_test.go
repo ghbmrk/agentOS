@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -230,7 +231,7 @@ func (cr *crig) config() CheckConfig {
 			}
 			return q.Requalify(ctx, v)
 		},
-		State: checkState0{cr}, Zone: time.UTC}
+		State: checkState0{cr}}
 }
 
 func (cr *crig) newCheck() *Check {
@@ -279,7 +280,7 @@ func (cr *crig) lineIs(want string) {
 }
 
 func soakText(v int64, until time.Time) string {
-	return fmt.Sprintf(soakLine, v, until.UTC().Format("2 Jan 2006"))
+	return fmt.Sprintf(soakLine, v, until.Local().Format("2 Jan 2006"))
 }
 
 // The stable gate end to end on the real applier: the soak, then an
@@ -377,26 +378,38 @@ func TestSightingUsesLatestAndSoakUsesEarliest(t *testing.T) {
 	})
 }
 
-// Sightings older than twice MaxSoakDays are pruned, except one still
-// offered, whose soak never starts again.
-// Mutant: prune by age alone; never prune.
+// A sighting is kept for exactly twice MaxSoakDays once its image is no
+// longer offered; one still offered is kept, so its soak never restarts.
+// Mutant: change the bound or its comparison; prune by age alone.
 func TestOldSightingsPruned(t *testing.T) {
+	keep := 2 * update.MaxSoakDays * 24 * time.Hour
 	cr := newCheckRig(t, update.ChannelStable)
 	cr.m.add(2, update.ChannelStable, false, "two")
 	cr.mustStep()
-	first := cr.c.st.Seen
-	cr.days(2*update.MaxSoakDays + 1)
+	two := maps.Clone(cr.c.st.Seen)
 	cr.m.add(3, update.ChannelStable, false, "three")
+	cr.days(1)
 	cr.mustStep() // two is no longer offered
-	cr.days(2*update.MaxSoakDays + 1)
-	cr.mustStep()
-	if len(cr.c.st.Seen) != 1 {
-		t.Fatalf("sightings %v", cr.c.st.Seen)
-	}
+	three := map[string]time.Time{}
 	for k, at := range cr.c.st.Seen {
-		if _, ok := first[k]; ok || !at.Equal(cr.clk.now().Add(-time.Duration(2*update.MaxSoakDays+1)*24*time.Hour)) {
-			t.Fatalf("sighting %s at %v", k, at)
+		if _, ok := two[k]; !ok {
+			three[k] = at
 		}
+	}
+	cr.clk.add(keep - 24*time.Hour)
+	cr.mustStep()
+	if len(cr.c.st.Seen) != 2 {
+		t.Fatalf("pruned at the bound: %v", cr.c.st.Seen)
+	}
+	cr.clk.add(time.Second)
+	cr.mustStep()
+	if !maps.Equal(cr.c.st.Seen, three) {
+		t.Fatalf("after the bound: %v, want %v", cr.c.st.Seen, three)
+	}
+	cr.days(1) // three is past the bound but still offered
+	cr.mustStep()
+	if !maps.Equal(cr.c.st.Seen, three) {
+		t.Fatalf("offered sighting moved: %v, want %v", cr.c.st.Seen, three)
 	}
 }
 
@@ -766,7 +779,7 @@ func TestMirrorFailureSchedulesNothing(t *testing.T) {
 // segment, names no reason code, and ends saying what the owner needs.
 func TestCheckLinesAreOneGSM7Segment(t *testing.T) {
 	const v = math.MaxInt64
-	c := &Check{cfg: CheckConfig{Zone: time.UTC}}
+	c := &Check{}
 	until := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	lines := []string{checkPinned,
 		fmt.Sprintf(securityLine, v), fmt.Sprintf(unavailableLine, v), fmt.Sprintf(requalFailLine, v), fmt.Sprintf(checkFellBack, v)}

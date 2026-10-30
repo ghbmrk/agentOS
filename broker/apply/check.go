@@ -24,8 +24,8 @@ type Releaser interface {
 }
 
 // CheckConfig configures NewCheck. Every function field is required; Own
-// may be nil (the box attests nothing), SoakDays and MinPasses default to
-// 7 and 1, and Zone to time.Local.
+// may be nil (the box attests nothing); StableReady raises SoakDays and
+// MinPasses to 7 and 1.
 type CheckConfig struct {
 	Store   *update.Store
 	Applier Releaser
@@ -52,7 +52,6 @@ type CheckConfig struct {
 	State     Store
 	SoakDays  int
 	MinPasses int
-	Zone      *time.Location
 }
 
 // Adoption states in the check's record.
@@ -93,15 +92,6 @@ func NewCheck(cfg CheckConfig) (*Check, error) {
 	if cfg.Store == nil || cfg.Applier == nil || cfg.Mirrors == nil || cfg.Attestors == nil || cfg.Attestations == nil ||
 		cfg.Channel == nil || cfg.Earliest == nil || cfg.Latest == nil || cfg.Trusted == nil || cfg.Requalify == nil || cfg.State == nil {
 		return nil, errors.New("apply: check: Store, Applier, Mirrors, Attestors, Attestations, Channel, Earliest, Latest, Trusted, Requalify and State are required")
-	}
-	if cfg.SoakDays <= 0 {
-		cfg.SoakDays = update.MinSoakDays
-	}
-	if cfg.MinPasses <= 0 {
-		cfg.MinPasses = 1
-	}
-	if cfg.Zone == nil {
-		cfg.Zone = time.Local
 	}
 	c := &Check{cfg: cfg}
 	b, err := cfg.State.Load()
@@ -317,7 +307,7 @@ func (c *Check) waitLine(version int64, w update.Wait) string {
 		if w.Until.IsZero() {
 			return fmt.Sprintf(soakOpenLine, version)
 		}
-		return fmt.Sprintf(soakLine, version, w.Until.In(c.cfg.Zone).Format("2 Jan 2006"))
+		return fmt.Sprintf(soakLine, version, w.Until.Local().Format("2 Jan 2006"))
 	case update.WaitNoAttestor:
 		return fmt.Sprintf(noAttestorLine, version)
 	case update.WaitPinned:
