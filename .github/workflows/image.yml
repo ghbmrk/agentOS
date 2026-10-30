@@ -28,6 +28,8 @@ on:
       - "broker/daemon/**"
       - "broker/cmd/agentosd/**"
       - "broker/cmd/agentos-localui/**"
+      # The /usr slot activator's disk adapter, tested on a loop device below (UPD-b3 (c1)).
+      - "broker/apply/bootab/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
       # The local inference service and the pins of what the image ships with it (INFER-image).
@@ -104,6 +106,12 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo git clone -q https://github.com/systemd/mkosi /opt/mkosi
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
+      - name: Disk adapter on a loop device (UPD-b3 (c1))
+        # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
+        run: |
+          (cd broker && go test -c -o "$RUNNER_TEMP/bootab.test" ./apply/bootab)
+          sudo modprobe dm-verity
+          sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
