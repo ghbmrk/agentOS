@@ -108,10 +108,13 @@ jobs:
           sudo git -C /opt/mkosi -c advice.detachedHead=false checkout -q 26673f65e17ae099bb0cf65928fe70c93b8a6a37  # v24.3
       - name: Disk adapter on a loop device (UPD-b3 (c1))
         # As root: a GPT on a loop device, the booted slot held by dm-verity (broker/apply/bootab).
+        # A skipped test exits 0, so the step also requires the loop test's PASS line.
+        shell: bash  # with pipefail, so tee keeps the test's exit status
         run: |
           (cd broker && go test -c -o "$RUNNER_TEMP/bootab.test" ./apply/bootab)
           sudo modprobe dm-verity
-          sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1
+          sudo env AGENTOS_BOOTAB_LOOP=1 "$RUNNER_TEMP/bootab.test" -test.run '^TestLinux' -test.v -test.count=1 | tee "$RUNNER_TEMP/bootab.log"
+          grep -q -- '^--- PASS: TestLinuxSlotsOnALoopDevice ' "$RUNNER_TEMP/bootab.log"
       - name: Build image
         shell: bash  # with pipefail, so tee keeps the build's exit status
         run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"
