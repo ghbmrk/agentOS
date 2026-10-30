@@ -3,6 +3,8 @@ package boxname
 // REQ: CH-21
 
 import (
+	"bytes"
+	"crypto/rand"
 	"errors"
 	"strings"
 	"testing"
@@ -80,5 +82,50 @@ func TestShapeIsTheSyntacticPart(t *testing.T) {
 		if Shape(s) {
 			t.Errorf("Shape(%q) = true", s)
 		}
+	}
+}
+
+// TestSuggestPassesCheck: setup offers a made-up full name the owner keeps
+// or overwrites (SPEC CH-21), so every name Suggest can return passes the
+// name check, and a draw that is the owner's name is drawn again.
+func TestSuggestPassesCheck(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 32; i++ {
+		for j := 0; j < 32; j++ {
+			n, err := Suggest(bytes.NewReader([]byte{byte(i), byte(j)}), "")
+			if err != nil {
+				t.Fatalf("Suggest(%d, %d): %v", i, j, err)
+			}
+			if got, err := Check(n, ""); err != nil || got != n || !strings.Contains(n, " ") {
+				t.Errorf("Suggest gave %q, which Check reads as %q, %v", n, got, err)
+			}
+			seen[n] = true
+		}
+	}
+	if len(seen) != 32*32 {
+		t.Errorf("%d distinct names, want %d", len(seen), 32*32)
+	}
+	// The high bits are ignored, so each byte value picks one name.
+	a, _ := Suggest(bytes.NewReader([]byte{3, 0}), "")
+	b, _ := Suggest(bytes.NewReader([]byte{3 + 32, 0 + 64}), "")
+	if a != "Dave Smith" || b != a {
+		t.Errorf("Suggest(3, 0) = %q, Suggest(35, 64) = %q; want both Dave Smith", a, b)
+	}
+	if n, err := Suggest(rand.Reader, ""); err != nil || n == "" {
+		t.Errorf("Suggest(rand.Reader) = %q, %v", n, err)
+	}
+}
+
+// TestSuggestNotOwnerName: a suggestion is never the owner's own name.
+func TestSuggestNotOwnerName(t *testing.T) {
+	n, err := Suggest(bytes.NewReader([]byte{3, 0, 3, 0, 4, 1}), "dave  SMITH")
+	if err != nil || n != "Ella Jones" {
+		t.Errorf("Suggest = %q, %v; want the third draw, Ella Jones", n, err)
+	}
+	if _, err := Suggest(bytes.NewReader(bytes.Repeat([]byte{3, 0}, suggestTries)), "Dave Smith"); !errors.Is(err, ErrNoSuggestion) {
+		t.Errorf("every draw the owner's name: %v, want ErrNoSuggestion", err)
+	}
+	if _, err := Suggest(bytes.NewReader([]byte{1}), ""); !errors.Is(err, ErrNoSuggestion) {
+		t.Errorf("short reader: %v, want ErrNoSuggestion", err)
 	}
 }
