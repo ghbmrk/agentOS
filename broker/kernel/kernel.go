@@ -31,11 +31,11 @@ func Admit(s *State, p Plan, now int64) (key.ID, []key.ID, *key.Refusal) {
 	if p.ID == "" || len(p.Steps) == 0 || len(p.Steps) > MaxSteps {
 		return key.ID{}, nil, &key.Refusal{Code: CPlan, Detail: "empty, unnamed or over the step limit"}
 	}
-	if s.decoys.stopped {
-		return key.ID{}, nil, &key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}
-	}
 	if t := s.tripOf(p); t != nil {
 		return key.ID{}, nil, &key.Refusal{Code: CTrip, Detail: t.Cause}
+	}
+	if s.decoys.stopped {
+		return key.ID{}, nil, &key.Refusal{Code: CTripped, Detail: "planning is stopped after a trip"}
 	}
 	v, err := VerifyPlan(p, s.owners(p.Key))
 	if err != nil {

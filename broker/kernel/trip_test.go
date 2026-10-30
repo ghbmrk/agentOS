@@ -288,14 +288,28 @@ func TestTripResumeNeedsPasskey(t *testing.T) {
 		t.Fatalf("forged entries lifted a trip's pause: %v", err)
 	}
 
-	// Another decoy cited during the pause is refused `tripped` and logs no
-	// trip, so the signature made before it still lifts the pause.
+	// Another decoy under the same key during the pause is logged but pauses
+	// nothing new, so the signature made before it still stands; one under
+	// another key pauses that key too, and the earlier signature no longer
+	// lifts it.
 	early := key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))
 	r.plan("p2", r.ck, st(key.Trash, entry(t, tb, decoy.PHostJackpot).Value))
-	if r.k.State().Plans["p2"].Reject != kernel.CTripped || len(r.k.State().Trips()) != 1 {
-		t.Fatal("a plan during the pause logged a trip")
+	if r.k.State().Plans["p2"].Reject != kernel.CTrip || len(r.k.State().Trips()) != 2 {
+		t.Fatal("a trip during the pause was not logged")
 	}
-	must(t, r.k.ResumeTrip(4, early))
+	if _, l2, _ := r.k.State().TripResume(); l2 != last {
+		t.Fatal("a trip that paused nothing new moved the resume")
+	}
+	other := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "other"}), 1<<40)
+	r.plan("p2b", other, st(key.Trash, entry(t, tb, decoy.PHostDotfile).Value))
+	if tr := r.trips(3); tr.Response != kernel.RespFull || !r.k.State().Changes.Paused[tr.Scopes[0]] {
+		t.Fatalf("a full trip during the pause did not pause its key: %+v", tr)
+	}
+	if err := r.k.ResumeTrip(3, early); !errors.Is(err, kernel.ErrTripSig) {
+		t.Fatalf("a resume signed before a trip that paused another key: %v", err)
+	}
+	n, last, _ = r.k.State().TripResume()
+	must(t, r.k.ResumeTrip(4, key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))))
 	if r.k.State().Tripped() || r.k.State().Changes.Paused[root] {
 		t.Fatal("the passkey did not lift the pause")
 	}
@@ -440,12 +454,12 @@ func honeyKey(t *testing.T, tb decoy.Table, task string) (key.Key, key.Key, pair
 }
 
 // While a trip's pause is in force, a hostile session that keeps citing
-// honey keys or decoy values is refused `tripped` and logs no trip, so it
-// neither floods texts nor moves what the owner's resume signs; an exit's
-// call trip meanwhile is logged but does not void that signature either
-// (KRN-12 Response, KEY-4). Catches an intruder keeping the owner from
-// resuming.
-func TestRepeatTripsDuringAPauseLogNothing(t *testing.T) {
+// honey keys or decoy values under keys already paused still trips (its
+// session stops, each trip is logged) but sends no new full text and does
+// not move what the owner's resume signs; an exit's call trip meanwhile
+// does not void that signature either (KRN-12 Response, KEY-4). Catches an
+// intruder keeping the owner from resuming, or a trip lost in a pause.
+func TestRepeatTripsDuringAPauseKeepTheResume(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
 	must(t, r.k.OpenTask(0, "t1"))
@@ -458,17 +472,20 @@ func TestRepeatTripsDuringAPauseLogNothing(t *testing.T) {
 	signed := key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))
 
 	_, hk, intruder := honeyKey(t, tb, "t1")
-	for i := 0; i < 20; i++ {
-		id := fmt.Sprintf("again%d", i)
-		p := kernel.SignPlan(kernel.Plan{ID: id, Key: hk, Steps: []kernel.PlanStep{st(key.Trash, entry(t, tb, decoy.PHostDotfile).Value)}}, intruder.priv)
-		must(t, r.k.Submit(int64(i), p))
-		if r.k.State().Plans[id].Reject != kernel.CTripped {
-			t.Fatalf("%s: refused %q, want %q", id, r.k.State().Plans[id].Reject, kernel.CTripped)
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("honey%d", i)
+		must(t, r.k.Submit(int64(i), kernel.SignPlan(kernel.Plan{ID: id, Key: hk, Steps: []kernel.PlanStep{st(key.Trash, "m")}}, intruder.priv)))
+		r.plan(fmt.Sprintf("again%d", i), r.ck, st(key.Trash, entry(t, tb, decoy.PHostDotfile).Value))
+		if r.k.State().Plans[id].Reject != kernel.CTrip {
+			t.Fatalf("%s: refused %q, want %q", id, r.k.State().Plans[id].Reject, kernel.CTrip)
 		}
 	}
 	must(t, r.k.CallTrip(30, kernel.ExitEgress, decoy.Metadata))
-	if got := len(r.k.State().Trips()); got != 2 {
-		t.Fatalf("%d trips logged during the pause, want the first and the call", got)
+	if got := len(r.k.State().Trips()); got != 22 {
+		t.Fatalf("%d trips logged, want every one of 22", got)
+	}
+	if got := len(r.k.State().SecurityTexts()); got != 3 {
+		t.Fatalf("%d texts, want one full, one session and one call", got)
 	}
 	if n2, last2, _ := r.k.State().TripResume(); n2 != n || last2 != last {
 		t.Fatalf("the resume moved from (%d, %d) to (%d, %d)", n, last, n2, last2)
@@ -476,6 +493,9 @@ func TestRepeatTripsDuringAPauseLogNothing(t *testing.T) {
 	must(t, r.k.ResumeTrip(31, signed))
 	if r.k.State().Tripped() {
 		t.Fatal("the owner's signature did not lift the pause")
+	}
+	if _, ok := r.k.State().Task("t1", 32); ok {
+		t.Fatal("the honey session outlived its trip")
 	}
 	r.replays()
 }
@@ -582,6 +602,12 @@ func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
 		t.Fatalf("trip %+v", tr)
 	}
 	r.sessionOnly("t1", "t2", 2)
+
+	// A key that claims no task has no session: the full response.
+	must(t, r.k.Submit(3, kernel.Plan{ID: "unsigned2", Key: r.ck, Steps: []kernel.PlanStep{step}}))
+	if tr := r.trips(2); tr.Response != kernel.RespFull || !r.k.State().Tripped() {
+		t.Fatalf("an unverified key with no task: trip %+v", tr)
+	}
 }
 
 // A honey key cited through Extend or in an Issue batch is refused and
@@ -598,10 +624,18 @@ func TestHoneyKeyTripsAtEveryKeyCheck(t *testing.T) {
 	honey, hk, _ := honeyKey(t, tb, "t1")
 
 	var rf *key.Refusal
+	// A plan that is not held is not stopped: only that request is refused.
+	r.plan("live", r.serve("t2"), st(key.Trash, "m1"))
+	if err := r.k.Extend(3, hk, "live"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+		t.Fatalf("a honey key extending a plan not held: %v", err)
+	}
+	if tr := r.trips(1); tr.Response != kernel.RespCall || r.status("live") != kernel.SActive {
+		t.Fatalf("extend on a plan not held: trip %+v, plan %s", tr, r.status("live"))
+	}
 	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
 		t.Fatalf("a honey key extending a hold: %v", err)
 	}
-	tr := r.trips(1)
+	tr := r.trips(2)
 	if tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespSession || tr.Plan != "t1" || tr.Session == "" {
 		t.Fatalf("extend trip %+v", tr)
 	}
@@ -612,7 +646,7 @@ func TestHoneyKeyTripsAtEveryKeyCheck(t *testing.T) {
 	if err := r.k.Issue(4, approve([]key.Key{honey}, r.owner, r.spare), honey); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
 		t.Fatalf("a honey key in an Issue batch: %v", err)
 	}
-	if tr := r.trips(2); tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespCall || tr.Plan != "" || tr.Session != "" {
+	if tr := r.trips(3); tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespCall || tr.Plan != "" || tr.Session != "" {
 		t.Fatalf("issue trip %+v", tr)
 	}
 	if _, ok := r.k.State().Grants[honey.Tip()]; ok {

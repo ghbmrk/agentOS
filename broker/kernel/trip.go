@@ -40,11 +40,12 @@ import (
 // placed on the host, the edge or in the sealed store, or sent with no
 // planner session behind it, gets the full response: the keys of its scope
 // are paused and planning stops, until the owner resumes with a passkey on
-// the owner page (ResumeTrip), never a texted RESUME (KEY-4, CH-11). While
-// that holds, every plan is refused `tripped` before it is checked for a
-// trip, so repeats log nothing. Every trip is logged with a fixed-template
-// security text (CH-15); repeats of a session or call trip within
-// TextWindow share the first one's text.
+// the owner page (ResumeTrip), never a texted RESUME (KEY-4, CH-11). A trip
+// while that holds still narrows: its session stops and its scope pauses.
+// Only a full trip that pauses a key not already paused moves what the
+// resume signs, so repeats cannot void it. Every trip is logged with a
+// fixed-template security text (CH-15); a full trip that pauses nothing new,
+// and repeats of a session or call trip within TextWindow, send none.
 
 // Trip entry types.
 const (
@@ -98,6 +99,7 @@ type Trip struct {
 	Scopes   []key.ID `json:"scopes,omitempty"`  // the keys a full response pauses
 	Seq      uint64   `json:"-"`
 	At       int64    `json:"-"`
+	fresh    bool     // a full trip that set what the resume signs
 }
 
 type tripResumed struct {
@@ -171,18 +173,19 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	return err
 }
 
-// TripResumeHash names the n-th trip resume, lifting the pause the full trip
-// logged at last set, so a signature never replays. No full trip is logged
-// while that pause holds (Admit refuses `tripped` first), and session and
-// call trips do not move last, so nothing a hostile session sends voids it.
+// TripResumeHash names the n-th trip resume, lifting every pause up to the
+// full trip logged at last, so a signature never replays and never lifts a
+// key a later trip paused. A trip that pauses no key not already paused,
+// and every session or call trip, leaves last as it is, so a hostile session
+// repeating trips cannot void the owner's signature.
 func TripResumeHash(n int, last uint64) [32]byte {
 	b := binary.BigEndian.AppendUint64([]byte("agentos.trip.resume.v1\x00"), uint64(n))
 	return sha256.Sum256(binary.BigEndian.AppendUint64(b, last))
 }
 
 // TripResume is what the owner page asks the passkey to sign: the resume's
-// number and the full trip that set the pause; ok is false when no trip's
-// pause is in force.
+// number and the newest full trip that paused something new; ok is false
+// when no trip's pause is in force.
 func (s *State) TripResume() (n int, last uint64, ok bool) {
 	d := &s.decoys
 	if !d.held() {
@@ -226,13 +229,13 @@ var tripTexts = map[string]string{
 }
 
 // SecurityTexts is the texts for the owner line to send, oldest first: one
-// per full trip, and one per session or call trip unless one of its
-// response was texted within TextWindow before it.
+// per full trip that paused something new, and one per session or call trip
+// unless one of its response was texted within TextWindow before it.
 func (s *State) SecurityTexts() []SecurityText {
 	var out []SecurityText
 	sent := map[string]int64{}
 	for _, t := range s.decoys.log {
-		if at, ok := sent[t.Response]; ok && t.Response != RespFull && t.At-at < TextWindow {
+		if at, ok := sent[t.Response]; t.Response == RespFull && !t.fresh || t.Response != RespFull && ok && t.At-at < TextWindow {
 			continue
 		}
 		sent[t.Response] = t.At
@@ -260,9 +263,10 @@ func (d *trips) honeyOf(ky key.Key) (int, bool) {
 // needs the full response gives it whatever else the plan cites (KRN-12);
 // otherwise the first of a honey key, a table value in the steps and a table
 // destination names the session-only trip. The planner session is the task
-// the key's own links name, verified or not: a key that does not verify
-// can only claim a session, never turn a sandbox or view value into a
-// box-wide stop.
+// the key's well-formed links name, verified or not: a forged claim can stop
+// only the session it names. A key with no such claim (no task, or a
+// malformed chain) has no session, so a sandbox or view value under it gets
+// the full response.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
 	if !d.set {
@@ -329,8 +333,8 @@ func destOf(v string) (netip.Addr, bool) {
 }
 
 // honeyTrip refuses a key check outside Admit (Extend, Issue) that cites a
-// honey key, and logs its trip: it stops the session of plan, when one is
-// named, else only that request (KRN-12 Trips, Response).
+// honey key, and logs its trip: it stops the session of plan when plan is
+// held on its spend, else only that request (KRN-12 Trips, Response).
 func (k *Kernel) honeyTrip(now int64, plan string, keys ...key.Key) error {
 	d := &k.s.decoys
 	if !d.set {
@@ -342,8 +346,8 @@ func (k *Kernel) honeyTrip(now int64, plan string, keys ...key.Key) error {
 			continue
 		}
 		t := Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespCall}
-		if p := k.s.Plans[plan]; p != nil {
-			t.Response, t.Plan, t.Session = RespSession, plan, p.Plan.Task()
+		if _, held := k.s.SpendHeld[plan]; held && k.s.Plans[plan] != nil {
+			t.Response, t.Plan, t.Session = RespSession, plan, k.s.Plans[plan].Plan.Task()
 		}
 		if _, err := k.emit(now, TTrip, t); err != nil {
 			return err
@@ -374,7 +378,8 @@ func (s *State) resumeOK(b tripResumed) bool {
 // entry, and a session or scopes only where its response stops them. A
 // plan's trip comes only in the rejection of that plan (rejected is its ID);
 // a trip entry is an input, either an exit's call trip or a honey key at
-// Extend (the held plan's session) or Issue (that request alone).
+// Extend (the session of a plan held on its spend) or Issue (that request
+// alone).
 func (s *State) tripOK(t Trip, rejected string) bool {
 	d := &s.decoys
 	if !d.set || t.Entry < 0 || t.Entry >= len(d.entries) || t.Exit == "" {
@@ -394,8 +399,9 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 		if rejected != "" {
 			return t.Plan == rejected
 		}
+		_, held := s.SpendHeld[t.Plan]
 		p := s.Plans[t.Plan]
-		return honey && p != nil && t.Session == p.Plan.Task()
+		return honey && held && p != nil && t.Session == p.Plan.Task()
 	case RespFull:
 		return t.Plan != "" && t.Plan == rejected && t.Session == ""
 	case RespCall:
@@ -408,19 +414,24 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 func (s *State) addTrip(t Trip, e Entry) {
 	d := &s.decoys
 	t.Seq, t.At = e.Seq, e.At
-	d.log = append(d.log, t)
 	if t.Response == RespFull {
-		d.stopped, d.full = true, e.Seq
+		t.fresh = !d.stopped
 		if d.paused == nil {
 			d.paused = map[key.ID]bool{}
 		}
 		for _, id := range t.Scopes {
 			if _, ok := d.paused[id]; !ok {
 				d.paused[id] = s.Changes.Paused[id]
+				t.fresh = true
 			}
 			s.Changes.Paused[id] = true
 		}
+		d.stopped = true
+		if t.fresh {
+			d.full = e.Seq
+		}
 	}
+	d.log = append(d.log, t)
 	if t.Session != "" {
 		s.stopSession(t.Session)
 	}
