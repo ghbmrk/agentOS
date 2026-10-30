@@ -465,6 +465,42 @@ jobs:
           # Per-machine disk quotas on a prjquota file system (RES-4, SR2-3).
           sudo env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache AGENTOS_REQUIRE_QUOTA=1 \
             go test -count=1 -v -run '^(TestMachinesGetTheStateFileSystemsQuota|TestMachineDiskWithQuotasAddsNoLine)$' ./cmd/agentosd
+      - name: Camera clerk's decoder in its own unit (CAM-clerk-image)
+        # The image's agentos-keeper-camera.service as shipped, its sandbox, user and delegated group,
+        # under this runner's systemd, with only ExecStart= (the clerk's decoder start, as a test) and the
+        # key's OpenFile= replaced: runsc starts rootless as the clerk's user, beside its leaf of the
+        # unit's group (CAM-host-11). Debian lets an unprivileged user make a user namespace; Ubuntu's
+        # AppArmor does not, so the step lifts that as the box has it. Fails unless the test passed.
+        working-directory: broker
+        run: |
+          set -eu
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          L=/usr/local/lib/agentos-ci-camera
+          S=../image/mkosi/mkosi.extra/usr/lib/systemd/system
+          U=$S/agentos-keeper-camera.service
+          G="sudo env PATH=$PATH GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache"
+          sudo mkdir -p $L/root/proc $L/root/dev $L/root/sys
+          $G CGO_ENABLED=0 go build -o $L/root/oneshot ./vm/gvisor/testdata/oneshot
+          $G go test -c -o $L/camera.test ./cmd/agentos-camera
+          sudo chmod -R a+rX $L
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentos-camera
+          sudo install -d -m 0700 -o agentos-camera -g agentos-camera /var/lib/agentos-camera
+          sudo install -m 0644 $U $S/agentos-keeper.slice /etc/systemd/system/
+          sudo install -D -m 0644 $S/agentos-keeper-.service.d/90-keeper.conf /etc/systemd/system/agentos-keeper-.service.d/90-keeper.conf
+          cg=$(grep -o -- '-cgroup /[^ ]*' $U | cut -d' ' -f2)
+          rr=$(grep -o -- '-runsc-root /[^ ]*' $U | cut -d' ' -f2)
+          printf '%s\n' '[Unit]' 'ConditionPathExists=' '[Service]' 'Type=oneshot' 'Restart=no' 'OpenFile=' 'ExecStart=' \
+            "ExecStart=$L/camera.test -test.run=TestDecoderStartsInTheUnitsSandbox -test.v -test.count=1" \
+            "Environment=AGENTOS_RUNSC=/usr/local/bin/runsc AGENTOS_CAMERA_CGROUP=$cg AGENTOS_RUNSC_ROOT=$rr AGENTOS_DECODE_ROOT=$L/root" \
+            | sudo install -D -m 0644 /dev/stdin /etc/systemd/system/agentos-keeper-camera.service.d/99-ci.conf
+          sudo systemctl daemon-reload
+          rc=0
+          sudo systemctl start agentos-keeper-camera.service || rc=$?
+          sudo journalctl -u agentos-keeper-camera.service -o cat --no-pager > /tmp/camera-unit.log || true
+          tail -n 80 /tmp/camera-unit.log
+          [ "$rc" -eq 0 ]
+          grep -q -- '^--- PASS: TestDecoderStartsInTheUnitsSandbox' /tmp/camera-unit.log
+          ! grep -q -- '--- SKIP' /tmp/camera-unit.log
       - name: agentosd calls the kernel as the owner side (#2682)
         # As agentosd.service runs: root with no_new_privs. Each call takes the owner side's uid on
         # one thread and gives it back; the tests skip off root, so the step fails unless they ran.
