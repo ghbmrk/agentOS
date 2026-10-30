@@ -21,7 +21,12 @@ import (
 type Releaser interface {
 	Schedule(v *update.Verified, adoption string) error
 	FellBack(version int64) bool
+	Withdraw(adoption, why string) error
 }
+
+// WhyStable is the Withdraw reason when the owner moves a box to stable
+// while an ordinary release adopted on fast is pending.
+const WhyStable = "stable"
 
 // CheckConfig configures NewCheck. Every function field is required; Own
 // may be nil (the box attests nothing); StableReady raises SoakDays and
@@ -65,6 +70,9 @@ const (
 type adoption struct {
 	Ref   update.Ref `json:"ref"`
 	State string     `json:"state"`
+	// Fast: an ordinary release adopted on the fast channel, which the
+	// stable gate never judged.
+	Fast bool `json:"fast,omitempty"`
 }
 
 // checkState is the check's saved record: when each release image was
@@ -145,6 +153,11 @@ func (c *Check) Step(ctx context.Context) error {
 	if err != nil || (channel != update.ChannelStable && channel != update.ChannelFast) {
 		c.setLine(checkPinned)
 		return nil
+	}
+	if channel == update.ChannelStable {
+		if err := c.withdrawFast(); err != nil {
+			return err
+		}
 	}
 	// The one read of the attestor lists for this step (SR3-6f-1).
 	allow, interim, err := c.cfg.Attestors()
@@ -282,7 +295,7 @@ func (c *Check) offer(ctx context.Context, rel *update.Verified, channel string)
 			return nil
 		}
 	}
-	id, err := c.mint(ref)
+	id, err := c.mint(ref, channel == update.ChannelFast && !v.Security())
 	if err != nil {
 		return err
 	}
@@ -328,9 +341,40 @@ func (c *Check) adopted(ref update.Ref) bool {
 	return false
 }
 
+// withdrawFast withdraws every staged ordinary release adopted on fast,
+// so a box moved to stable installs nothing its stable gate did not pass
+// (UPD-4, UPD-5). The withdrawn adoption is dropped and offered again
+// under the stable gate. A release already being installed is refused
+// with ErrApplying and installs (the applier's handover boundary, A14);
+// any other refusal fails the step, and the next step tries again.
+func (c *Check) withdrawFast() error {
+	c.mu.Lock()
+	var ids []string
+	for id, a := range c.st.Adoptions {
+		if a.State == adStaged && a.Fast {
+			ids = append(ids, id)
+		}
+	}
+	c.mu.Unlock()
+	slices.Sort(ids)
+	for _, id := range ids {
+		err := c.cfg.Applier.Withdraw(id, WhyStable)
+		if errors.Is(err, ErrApplying) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := c.settle(id, adDropped, []string{adStaged}, []string{adFailed}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // mint saves a new adoption for ref as staged and returns its ID,
 // upd:<version>:<n>; the save comes before any Schedule.
-func (c *Check) mint(ref update.Ref) (string, error) {
+func (c *Check) mint(ref update.Ref, fast bool) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	next := c.st
@@ -340,7 +384,7 @@ func (c *Check) mint(ref update.Ref) (string, error) {
 	if next.Adoptions == nil {
 		next.Adoptions = map[string]adoption{}
 	}
-	next.Adoptions[id] = adoption{Ref: ref, State: adStaged}
+	next.Adoptions[id] = adoption{Ref: ref, State: adStaged, Fast: fast}
 	if err := c.saveLocked(next); err != nil {
 		return "", err
 	}

@@ -152,6 +152,8 @@ type crig struct {
 	mirrors []update.Source // nil: the test mirror
 	looked  int             // Mirrors calls
 	sched   []scheduled
+	// withdrawErr: the applier refuses every Withdraw with it.
+	withdrawErr error
 }
 
 // lateStager is the applier's Stager: the check, made after the applier.
@@ -175,6 +177,13 @@ func (a recApplier) Schedule(v *update.Verified, id string) error {
 }
 
 func (a recApplier) FellBack(version int64) bool { return a.cr.a.FellBack(version) }
+
+func (a recApplier) Withdraw(id, why string) error {
+	if a.cr.withdrawErr != nil {
+		return a.cr.withdrawErr
+	}
+	return a.cr.a.Withdraw(id, why)
+}
 
 type checkState0 struct{ cr *crig }
 
@@ -542,7 +551,7 @@ func TestStagerAnswersAcrossRestart(t *testing.T) {
 	ref := func(v int64) update.Ref { return update.Ref{Version: v, UsrRootHash: "r", ManifestSHA256: "m"} }
 	var ids []string
 	for v := int64(2); v <= 5; v++ {
-		id, err := cr.c.mint(ref(v))
+		id, err := cr.c.mint(ref(v), false)
 		cr.must(err)
 		ids = append(ids, id)
 	}
@@ -553,6 +562,9 @@ func TestStagerAnswersAcrossRestart(t *testing.T) {
 		cr.must(c.StageDropped(ctx, ids[2]))
 	}
 	cr.must(c.StageDropped(ctx, ids[1])) // a failed adoption stays failed
+	if err := c.ConfirmStaged(ids[1]); err == nil || permanent(err) {
+		t.Fatalf("confirm of a failed adoption: %v", err)
+	}
 	if err := c.StageDropped(ctx, ids[0]); !permanent(err) {
 		t.Fatalf("drop of a confirmed adoption: %v", err)
 	}
@@ -574,7 +586,7 @@ func TestStagerAnswersAcrossRestart(t *testing.T) {
 	}
 	// A newer confirmation prunes settled adoptions below it, never a
 	// staged one.
-	id, err := c.mint(ref(6))
+	id, err := c.mint(ref(6), false)
 	cr.must(err)
 	cr.must(c.ConfirmStaged(id))
 	left := cr.newCheck().st.Adoptions
@@ -583,6 +595,19 @@ func TestStagerAnswersAcrossRestart(t *testing.T) {
 	}
 	if err := c.StageDropped(ctx, ids[2]); !permanent(err) {
 		t.Fatalf("pruned adoption: %v", err)
+	}
+	// A dropped adoption can still settle as confirmed or failed: an
+	// abandon that never took lets its release boot (A14).
+	late := make([]string, 2)
+	for i := range late {
+		late[i], _ = c.mint(ref(8), false)
+		cr.must(c.StageDropped(ctx, late[i]))
+	}
+	cr.must(c.ConfirmStaged(late[0]))
+	cr.must(c.StageFailed(ctx, late[1]))
+	left = cr.newCheck().st.Adoptions
+	if left[late[0]].State != adConfirmed || left[late[1]].State != adFailed {
+		t.Fatalf("from dropped: %+v %+v", left[late[0]], left[late[1]])
 	}
 }
 
@@ -724,6 +749,63 @@ func TestChannelChange(t *testing.T) {
 	fs.days(1)
 	fs.mustStep()
 	fs.takenAre("upd:2:1", "upd:2:2")
+}
+
+// UPD-4, UPD-5: a box moved from fast to stable while an ordinary
+// release adopted on fast is pending installs nothing the stable gate did
+// not pass: the adoption is withdrawn and the release offered again under
+// the stable gate. A security fix adopted on fast stays.
+// Mutant: skip withdrawFast; withdraw every staged adoption.
+func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.takenAre("upd:2:1")
+	cr.channel = update.ChannelStable
+	// A release being installed is left to install (ErrApplying); any
+	// other refusal, or a failed save of the drop, fails the step and the
+	// next step tries again.
+	cr.withdrawErr = ErrApplying
+	cr.mustStep()
+	cr.withdrawErr = errors.New("state unwritable")
+	if err := cr.step(); err == nil {
+		t.Fatal("a refused withdraw passed")
+	}
+	cr.withdrawErr, cr.failAt = nil, `"dropped"`
+	if err := cr.step(); err == nil {
+		t.Fatal("an unsaved drop passed")
+	}
+	cr.failAt = ""
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if len(cr.act.installed) != 0 {
+		t.Fatalf("installed %v on stable with no gate", cr.act.installed)
+	}
+	if got := cr.c.st.Adoptions["upd:2:1"].State; got != adDropped {
+		t.Fatalf("adoption %q", got)
+	}
+	cr.run, cr.pass = &runner{}, true
+	cr.days(7)
+	cr.mustStep()
+	cr.takenAre("upd:2:1", "upd:2:2")
+	if cr.requals != 1 {
+		t.Fatalf("requalified %d times", cr.requals)
+	}
+
+	sec := newCheckRig(t, update.ChannelFast)
+	sec.pass = true
+	sec.m.add(2, update.ChannelStable, true, "two")
+	sec.mustStep()
+	sec.channel = update.ChannelStable
+	sec.mustStep()
+	if got := sec.c.st.Adoptions["upd:2:1"].State; got != adStaged {
+		t.Fatalf("security fix withdrawn: %q", got)
+	}
+	sec.takenAre("upd:2:1")
 }
 
 // A9: a security fix dropped because its attestor left the list is
