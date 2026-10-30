@@ -6,7 +6,7 @@ Board section: Devices, hardware and image (SPEC §13-14). Work item #4094, appr
 
 ## The gap
 
-Every box runs Debian's generic `linux-image-amd64`: 4,230 loadable modules and 2,651 built-in options, made for every PC. The code agentOS runs needs a small part of that. The rest is still reachable. An unprivileged process can make the kernel load about 330 modules (measured below), and about 188 of them only through unprivileged user namespaces, which nothing on the boxes uses. Recent local kernel exploits mostly come in through those paths: nf_tables, user-namespace mounts, AF_ALG, packet schedulers, and old protocol families.
+Every box runs Debian's generic `linux-image-amd64`: 4,230 loadable modules and 2,651 built-in options, made for every PC. The code agentOS runs needs a small part of that. The rest is still reachable. An unprivileged process can make the kernel load about 329 modules (measured below), and 188 of them only through unprivileged user namespaces, which nothing on the core or the edge uses (the enforcer's spiked Thread confinement does; Needs per box). Recent local kernel exploits mostly come in through those paths: nf_tables, user-namespace mounts, AF_ALG, packet schedulers, and old protocol families.
 
 - **Failure path:** a guest that escapes its gVisor sandbox (PLN-6), or any compromised unprivileged service on the core, edge or enforcer, opens a user namespace. It makes the kernel load nf_tables, a scheduler or a filesystem the box never uses, triggers a known bug in it, and becomes root on the host. That root reaches the sealed store, the clerks and the enforcer channel (KRN-2), on a box whose code never needed that kernel path.
 
@@ -32,8 +32,8 @@ Config values come from the config file. Runtime values come from the booted VM,
 | Lockdown LSM | `SECURITY_LOCKDOWN_LSM=y`, `_EARLY=y`, `LOCK_DOWN_KERNEL_FORCE_NONE=y`, `LOCK_DOWN_IN_EFI_SECURE_BOOT=y`; VM: `[none] integrity confidentiality` | Under Secure Boot (shim, HW-5) the kernel locks itself to **integrity**. Booted with Secure Boot off, it is **none**. Confidentiality is never set. |
 | Module signing | `MODULE_SIG=y`, `MODULE_SIG_FORCE` not set, `MODULE_FORCE_LOAD=y`, `MODULE_UNLOAD=y` | Integrity lockdown enforces signatures, so a module must be Debian-signed. With Secure Boot off, unsigned modules load (taint only). Any Debian-signed module loads, from any path, for root. |
 | Other LSMs (VM `lsm`) | `lockdown,capability,landlock,yama,apparmor,tomoyo,bpf,ipe,ima,evm` | IPE is built in (`SECURITY_IPE=y`, dm-verity properties), but its policies must be signed by a key in the secondary or platform keyring (`IPE_POLICY_SIG_*`). LoadPin is not built. AppArmor is active with no profile from the image. |
-| Unprivileged user namespaces | `USER_NS=y`; `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=11491` | **On.** This is the largest single door in the probe (188 modules plus the code already loaded). |
-| Unprivileged BPF | `BPF_UNPRIV_DEFAULT_OFF=y`; `kernel.unprivileged_bpf_disabled=2`; `net.core.bpf_jit_harden=0`; `BPF_JIT_ALWAYS_ON` not set | **Off** for unprivileged users already. Privileged BPF stays on (systemd uses it for `DeviceAllow=`, 12 uses in the image's units). |
+| Unprivileged user namespaces | `USER_NS=y`; `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=11485` | **On.** This is the largest single door in the probe (188 modules plus the code already loaded). |
+| Unprivileged BPF | `BPF_UNPRIV_DEFAULT_OFF=y`; `kernel.unprivileged_bpf_disabled=2`; `net.core.bpf_jit_harden=0`; `BPF_JIT_ALWAYS_ON` not set | **Off** for unprivileged users already. Privileged BPF stays on (systemd uses it for `DeviceAllow=`, 9 lines in the image's units). |
 | io_uring | `IO_URING=y`; `kernel.io_uring_disabled=0` | On for everyone. |
 | userfaultfd | `USERFAULTFD=y`; `vm.unprivileged_userfaultfd=0` | Unprivileged users may only use it on their own memory (kernel-fault handling is refused). |
 | kexec | `KEXEC=y`, `KEXEC_FILE=y`, `KEXEC_SIG=y`; `kernel.kexec_load_disabled=0` | Integrity lockdown allows only signed kexec. With Secure Boot off, root can kexec anything. |
@@ -44,21 +44,21 @@ Config values come from the config file. Runtime values come from the booted VM,
 
 ## Measured: what an unprivileged process can make the kernel load
 
-These are modules that appeared in the booted VM when uid 1000 with no groups ran the probe. **142 load with no namespace at all, and 188 more load once the process creates a user namespace: 330 in total.** These counts are lower bounds (Method, step 3). On the real image, some of these are already loaded at boot, such as ext4, vfat, erofs and nf_tables on the core. For those, the code is reachable whether or not autoload happens, and only closing the path (the namespace, the socket family) removes it.
+These are modules that appeared in the booted VM when uid 1000 with no groups ran the probe. **141 load with no namespace at all, and 188 more load once the process creates a user namespace: 329 in total.** These counts are lower bounds (Method, step 3). On the real image, some of these are already loaded at boot, such as ext4, vfat, erofs and nf_tables on the core. For those, the code is reachable whether or not autoload happens, and only closing the path (the namespace, the socket family) removes it.
 
 | Trigger | Without a namespace | Loaded |
 |---|---|---|
-| `socket()` families and protocols | 52 | sctp, l2tp (ip, ip6, ppp, netlink), pppoe, pptp, appletalk, atm, can, bluetooth, nfc, phonet, qrtr, rxrpc, kcm, smc, llc2, af_key, xfrm_user, af_alg, crypto_user, vsock (+vmci, virtio, loopback), mpls_router, gre, ib_core, scsi_transport_iscsi |
-| Generic netlink family lookup | 25 | wireguard, openvswitch, ip_vs, gtp, macsec, batman_adv, nbd, cfg80211, drop_monitor, nsh, psample, bridge, nf_conntrack, nf_nat, nf_conncount |
-| AF_ALG bind (`crypto-*` names) | 67 | algif_{hash,skcipher,aead,rng} and 60 cipher, hash and mode modules (des, blowfish, twofish, serpent, camellia, cast5/6, md4, rmd160, wp512, streebog, ecrdsa, pcrypt, intel_qat, ...) |
+| `socket()` families and protocols | 51 | sctp, l2tp (ip, ip6, ppp, netlink), pppoe, pptp, appletalk, atm, can, bluetooth, nfc, phonet, qrtr, rxrpc, kcm, smc, llc2, af_key, xfrm_user, af_alg, crypto_user, vsock (+vmci, virtio, loopback), mpls_router, gre, ib_core, scsi_transport_iscsi |
+| Generic netlink family lookup | 24 | wireguard, openvswitch, ip_vs, gtp, macsec, batman_adv, nbd, cfg80211, drop_monitor, nsh, psample, bridge, nf_conntrack, nf_nat, nf_conncount |
+| AF_ALG bind (`crypto-*` names) | 66 | algif_{hash,skcipher,aead,rng} and 62 cipher, hash and mode modules (des, blowfish, twofish, serpent, camellia, cast5/6, md4, rmd160, wp512, streebog, ecrdsa, pcrypt, intel_qat, ...) |
 | `mount()` | 0 | Needs CAP_SYS_ADMIN |
 
 | Trigger | Only inside `unshare -Urn` | Loaded |
 |---|---|---|
-| `mount()` of each `fs-*` name | 90 | btrfs, xfs, f2fs, bcachefs, ntfs3, hfs/hfsplus, jfs, reiserfs, ocfs2, gfs2, nilfs2, udf, ubifs, jffs2, cifs, nfs, nfsd, ceph, 9p, coda, overlay, squashfs, erofs, ext4, vfat, exfat, efivarfs, binfmt_misc, configfs, gadgetfs, usb_f_fs, vboxsf, ... (the mount fails, but the module loads first) |
-| `ip link add type ...` | 26 | dummy, veth, bonding, team, vxlan, geneve, ip_gre/ip6_gre, ipip, sit, ip6_tunnel, vti/vti6, xfrm_interface, vrf, ifb, nlmon, hsr, vcan, vxcan, tls |
-| nftables rules (`nft`) | 40 | nf_tables, nft_ct, nft_nat, nft_masq, nft_redir, nft_reject (inet, bridge), nft_fib, nft_socket, nft_tproxy, nft_synproxy, nft_osf, nft_queue, nft_xfrm, nft_hash, nft_numgen, nft_limit, nft_quota, nft_log, nft_connlimit, nft_dup_netdev, nf_flow_table, ... |
-| `tc` qdiscs, filters and actions | 37 | sch_{netem,cake,htb,hfsc,qfq,drr,taprio,cbs,etf,fq,fq_pie,pie,hhf,sfb,sfq,multiq,mqprio,skbprio,plug,prio,codel,ingress}, cls_{u32,flower,bpf,basic,matchall,fw,route,cgroup,flow}, act_{ct,ctinfo,connmark} |
+| `mount()` of each `fs-*` name | 89 | btrfs, xfs, f2fs, bcachefs, ntfs3, hfs/hfsplus, jfs, reiserfs, ocfs2, gfs2, nilfs2, udf, ubifs, jffs2, cifs, nfs, nfsd, ceph, 9p, coda, overlay, squashfs, erofs, ext4, vfat, exfat, efivarfs, binfmt_misc, configfs, gadgetfs, usb_f_fs, vboxsf, ... (the mount fails, but the module loads first) |
+| `ip link add type ...` | 25 | dummy, veth, bonding, team, vxlan, geneve, ip_gre/ip6_gre, ipip, sit, ip6_tunnel, vti/vti6, xfrm_interface, vrf, ifb, nlmon, hsr, vcan, vxcan, tls |
+| nftables rules (`nft`) | 39 | nf_tables, nft_ct, nft_nat, nft_masq, nft_redir, nft_reject (inet, bridge), nft_fib, nft_socket, nft_tproxy, nft_synproxy, nft_osf, nft_queue, nft_xfrm, nft_hash, nft_numgen, nft_limit, nft_quota, nft_log, nft_connlimit, nft_dup_netdev, nf_flow_table, ... |
+| `tc` qdiscs, filters and actions | 36 | sch_{netem,cake,htb,hfsc,qfq,drr,taprio,cbs,etf,fq,fq_pie,pie,hhf,sfb,sfq,multiq,mqprio,skbprio,plug,prio,codel,ingress}, cls_{u32,flower,bpf,basic,matchall,fw,route,cgroup,flow}, act_{ct,ctinfo,connmark} |
 
 Debian already removes the autoload aliases of DCCP, RDS, TIPC, X.25, AX.25 and similar families. The modules are still shipped, and root can load them.
 
@@ -73,34 +73,35 @@ Debian already removes the autoload aliases of DCCP, RDS, TIPC, X.25, AX.25 and 
 | IPv4, IPv6, Unix, netlink route, AF_PACKET (built in) | yes | yes | yes | networkd's DHCP client; `broker/netguard/netlink_linux.go`; dnsmasq on the enforcer (ENF decision 5) |
 | nf_tables | root only (inet, bridge) | root only | root only (inet, NAT, VLAN sets) | `image/mkosi/mkosi.extra/usr/lib/agentos/inbound.nft`, `broker/netguard/inbound.go` (`table bridge`), ENF decision 4 |
 | 802.1Q VLANs, bridge | bridge family only | no | yes | ENF per-device VLANs (`broker/enforcer/nft`, `dns`, `wol`) |
-| User namespaces | root only (agentosd starts runsc; the inference supervisor clones with `CLONE_NEWUSER` from root, `broker/infer/supervise/supervise.go` `jail`) | no planner, no sandbox (HW-15) | no (radio confinement filters `unshare`/`setns`, `broker/enforcer/radio/confine/filter.go`) | Nothing creates one unprivileged on the host. Codex's bwrap runs inside the gVisor sandbox, whose namespaces are gVisor's own. |
+| User namespaces | root only (agentosd starts runsc; the inference supervisor clones with `CLONE_NEWUSER` from root, `broker/infer/supervise/supervise.go` `jail`) | no planner, no sandbox (HW-15) | yes, as designed: the Thread profile drops to `nobody` and then runs `unshare -Urn` (`spikes/ENF-radio/run.sh`), an unprivileged user namespace; the Zigbee profile and `broker/enforcer/radio/confine` (CLONE_NEWNET\|NEWIPC from root) need none | On the core and the edge nothing creates one unprivileged. Codex's bwrap runs inside the gVisor sandbox, whose namespaces are gVisor's own. On the enforcer, slice q can create the Thread namespace from root with a `nobody` mapping, as `supervise.go` does, so the sysctl can still go to 0 there. |
 | Unprivileged BPF | no | no | no | Already off |
 | Privileged BPF | yes (systemd `DeviceAllow=`) | yes | yes | image units |
 | io_uring | none found | none found | none found | Go's runtime and gVisor's systrap platform do not use host io_uring (inference; part b's boot test confirms) |
 | AF_ALG | root only, at most (cryptsetup may probe a cipher through it when formatting, inference) | no | no | `cryptsetup-bin` in `mkosi.conf` |
 | SCTP, L2TP, PPP, AppleTalk, ATM, CAN, NFC, Phonet, QRTR, RxRPC, KCM, SMC, AF_KEY, VSOCK, MPLS, IPVS, Open vSwitch, WireGuard, GTP, MACsec, batman-adv, NBD, cfg80211/mac80211 | no | no | no | No use in code or briefs; the core and the edge never turn on Wi-Fi (D-178) |
-| Tunnels and virtual links (vxlan, geneve, gre, ipip, sit, vti, bond, team, vrf, veth, dummy) | no | no | VLAN only | gVisor runs `--network=none` or `host`, so it needs no veth or tun |
+| Tunnels and virtual links (vxlan, geneve, gre, ipip, sit, vti, bond, team, vrf, veth, dummy) | no | no | VLAN, and dummy (`infra0` in the Thread namespace, ENF decision 6, `spikes/ENF-radio/README.md`) | gVisor runs `--network=none` or `host`, so it needs no veth or tun |
 | tc qdiscs, classifiers, actions | fq_codel only (built in, the default qdisc) | same | same | No `tc` use in code |
-| KVM, vhost, tun | not today (runsc runs on the default systrap platform, with no `-platform` flag) | no | no | PLN-6 allows a microVM later (S5 browser): keep KVM on the core only if that path is taken |
+| KVM, vhost, tun | not today (runsc runs on the default systrap platform, with no `-platform` flag) | no | tun only (`ot-daemon`'s `wpan0` via `TUNSETIFF`, `spikes/ENF-radio/README.md`) | PLN-6 allows a microVM later (S5 browser): keep KVM on the core only if that path is taken |
 | Filesystems | ext4 (root), vfat (ESP), erofs (`/usr`), dm-verity, dm-crypt, tmpfs, proc, sysfs, cgroup2, devpts, mqueue, securityfs, bpf | ext4, vfat, erofs, verity | same as the edge, with dm-crypt if it seals | `image/mkosi/mkosi.repart`; all other 50-odd filesystems unused (overlay included: guests use `--overlay2=none`) |
 | GPU and NPU | amdgpu, i915, xe, intel_vpu, amdxdna (whichever the box has) | no | no | `broker/accel/accel.go` (inference, core only) |
 | TPM 2.0 (`tpm_crb`, `tpm_tis`, built in) | yes (`/dev/tpmrm0`, sealed store) | not used today | yes if its image seals (ENF slice m) | `broker/tpmseal`, units' `DeviceAllow=/dev/tpmrm0` |
-| Cellular modem | option, usb_wwan, usbserial (AT over ttyUSB, owner line) | the same (second line) | no | `broker/modem/at/udev/71-agentos-modem.rules`; no QMI, MBIM or PPP data path (calls ride SIP over IP, `broker/modem/sipline`) |
+| Cellular modem | option, usb_wwan, usbserial (AT over ttyUSB, owner line) | the same (second line) | no | `broker/modem/at/udev/71-agentos-modem.rules`; no QMI, MBIM or PPP data path |
+| Modem call audio | snd_usb_audio and the ALSA core (the Quectel's USB Audio Class card; `broker/modem/at/vendor.go` `Audio: AudioUAC`, `broker/modem/at/audio.go`) | the same, for a second-line Quectel | no | the rules file's "Quectel call audio (USB Audio Class card)"; `broker/modem/sipline` is the VoIP second line (ADP-12), not the modem's audio |
 | USB Ethernet | for the edge link when ports 1 and 2 are taken (r8152, ax88179_178a, cdc_ether) | the same, on the edge's end | no | HW-15; I19 holds any other USB link down, but the driver still loads |
 | Thread, Zigbee and Bluetooth radios | no (Bluetooth already blocked) | no (the same) | btusb plus bluetooth; cdc_acm or cp210x for the nRF52840 and EFR32 dongles | ENF decision 11, slice j |
 | Wired NIC | Realtek r8169 (M6 Ultra, unverified) | r8169 (NucBox 5, unverified) | Intel igc (V1410's i226-V, unverified) | `hardware/M6-hardware-test-steps.md`; check with `lspci -k` when the hardware arrives |
 | 32-bit and x32 ABIs, `modify_ldt`, `uselib` | no | no | no | Go amd64 binaries, llama-server amd64; gVisor runs no 32-bit guests |
 | kexec, hibernation | no | no | no | A/B update reboots through systemd-boot (UPD-1) |
 | tty line disciplines beyond n_tty | no | no | no | The modem uses the default discipline |
-| Media, sound, IIO, HID, comedi, InfiniBand, MTD, watchdogs other than the board's | no | no | the board's watchdog (NET-2 Hardening) | Cameras and the drone reach the core over the network (`image/camnode`) |
+| Media, sound other than USB audio, IIO, HID, comedi, InfiniBand, MTD, watchdogs other than the board's | no | no | the board's watchdog (NET-2 Hardening) | Cameras and the drone reach the core over the network (`image/camnode`) |
 
-**Reading across the table:** no box needs unprivileged user namespaces, io_uring, unprivileged AF_ALG, any socket family outside inet, inet6, unix, netlink and packet, any tc beyond fq_codel, or the 32-bit ABIs. By estimate, each box needs well under 100 of the 4,230 modules: the rows above plus their dependencies. Part b produces the exact list from `lsmod` on a booted box per role.
+**Reading across the table:** the core and the edge need no unprivileged user namespaces (the enforcer's Thread profile does as spiked, unless it moves to a root-created namespace), and no box needs io_uring, unprivileged AF_ALG, any socket family outside inet, inet6, unix, netlink and packet, any tc beyond fq_codel, or the 32-bit ABIs. By estimate, each box needs well under 100 of the 4,230 modules: the rows above plus their dependencies. Part b produces the exact list from `lsmod` on a booted box per role.
 
 ## What part b can turn off without changing the kernel binary
 
 Debian's own kernel already provides these knobs. Part b sets them in `image/` and its boot tests check each one on the booted box. They are listed here as inputs to part b, not decided here.
 
-- `kernel.unprivileged_userns_clone=0`: closes the 188 namespace-only modules, and the namespace path into code already loaded, such as nf_tables. (Part b's boot test must show runsc and the inference supervisor still start; both clone from root.)
+- `kernel.unprivileged_userns_clone=0`: closes the 188 namespace-only modules, and the namespace path into code already loaded, such as nf_tables. (Part b's boot test must show runsc and the inference supervisor still start; both clone from root. On the enforcer it needs slice q to create the Thread namespace from root first.)
 - `kernel.io_uring_disabled=2`, `kernel.kexec_load_disabled=1`, `dev.tty.ldisc_autoload=0`, `kernel.sysrq=0`, `kernel.kptr_restrict=2`, `kernel.yama.ptrace_scope=2` (or 3), `fs.protected_fifos=1`, `fs.protected_regular=2`, `net.core.bpf_jit_harden=2`.
 - `ia32_emulation=0`, `lockdown=integrity` (so a box booted with Secure Boot off still locks down) and `module.sig_enforce=1` on the command line. The command line is covered by TPM measurement (HW-5a), not by Secure Boot.
 - Remove the unneeded module files from the image (`/usr` is erofs on dm-verity, so a removed module cannot come back by autoload), or blocklist them per role with `install <m> /bin/false`, which the image already does for Bluetooth. Part b checks whether mkosi v24.3's `KernelModulesExclude=` applies to the main image. If it does not, `RemoveFiles=` does.
