@@ -681,3 +681,38 @@ func TestNotKeptTextsGiveAStep(t *testing.T) {
 		t.Fatal("keptLongNotKept is longer than keptLong")
 	}
 }
+
+// TestRepeatNearExpiryLastsFromItsPointer: the same text withheld again a
+// minute before the first copy expires is kept for keepFor from then, so
+// the page still shows it 2 minutes after the second pointer and until
+// 30 days after it, as one item with the first id, listed newest (#3986
+// delta L3 1; HELD-1, HELD-2).
+func TestRepeatNearExpiryLastsFromItsPointer(t *testing.T) {
+	r := newEvRig(t)
+	const q = "Your code is 482913"
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.ev.kept.Keep(owner.KeptSecret, "other"); err != nil {
+		t.Fatal(err)
+	}
+	first := r.ev.kept.list()[0].ID
+	r.now = r.now.Add(defaultKeepFor - time.Minute)
+	if err := r.ev.kept.Keep(owner.KeptCode, q); err != nil {
+		t.Fatal(err)
+	}
+	second := r.now
+	r.now = second.Add(2 * time.Minute)
+	h := r.ev.kept.held()
+	if len(h.Items) != 2 || h.Items[0].Expired || h.Items[0].Text != q || h.Items[0].ID != first || !h.Items[0].At.Equal(second) {
+		t.Fatalf("2 minutes after the second pointer: %+v", h.Items)
+	}
+	r.now = second.Add(defaultKeepFor - time.Second)
+	if l := r.ev.kept.list(); len(l) != 2 || l[1].Expired || l[1].Text != q {
+		t.Fatalf("day 30 after the second pointer: %+v", l)
+	}
+	r.now = second.Add(defaultKeepFor)
+	if l := r.ev.kept.list(); !l[1].Expired {
+		t.Fatal("kept past keepFor from its latest pointer")
+	}
+}

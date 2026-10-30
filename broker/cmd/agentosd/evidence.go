@@ -495,17 +495,20 @@ func (k *keptReplies) Keep(kind, text string) error {
 // keep adds text of kind, or refuses it, logging why without the text.
 // A text of the same kind still kept is kept once: a sender that retries,
 // such as an owner question while the line is down, is withheld and kept
-// on every try, and copies would fill the store (#3986).
+// on every try, and copies would fill the store (#3986). The one copy
+// keeps its id but takes this keep's time, and moves to the end, so it
+// lasts keepFor from the latest pointer to it (HELD-1, HELD-2).
 func (k *keptReplies) keep(kind, text string) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	l, err := k.loadLocked()
-	if err == nil && slices.ContainsFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }) {
-		return nil
-	}
 	if err == nil {
-		l = append(l, keptReply{ID: randHex(8), Kind: kind, Text: text, At: k.now()})
-		err = k.saveLocked(l)
+		item := keptReply{ID: randHex(8), Kind: kind, Text: text, At: k.now()}
+		if i := slices.IndexFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }); i >= 0 {
+			item.ID = l[i].ID
+			l = slices.Delete(l, i, i+1)
+		}
+		err = k.saveLocked(append(l, item))
 	}
 	if err != nil && k.logf != nil {
 		k.logf("a %s reply was not kept: %v", kind, err)
