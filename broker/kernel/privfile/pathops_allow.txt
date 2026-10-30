@@ -33,7 +33,8 @@ pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by 
 pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root
 
 # Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
-# modem/at refuse a link (O_NOFOLLOW). What is left: unlink(2) and link(2),
+# modem/at's sysfs reads refuse a link (O_NOFOLLOW). What is left: the serial
+# port open, unlink(2) and link(2),
 # which act on a link at the final name itself and never follow it; reads of
 # kernel-served procfs and sysfs files; and change's bodies mkdir and the
 # reads in accel, budget, change, localsrv, owner and question, control-path
@@ -55,3 +56,4 @@ allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a lin
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
 allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
 allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile procfs route, neighbour and ipv6_route tables, served by the kernel, and resolv.conf in root-owned /run/systemd/resolve and /etc, where /etc/resolv.conf is a link to systemd-resolved's file on purpose
+allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it
