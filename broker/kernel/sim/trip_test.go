@@ -128,13 +128,15 @@ func TestTripDeterministic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
-		if got.Checked[kernel.TTrip] == 0 {
-			t.Fatalf("seed %d: no plan trip re-derived: %v", seed, got.Checked)
+		if got.Checked[kernel.TPlanRejected] == 0 {
+			t.Fatalf("seed %d: no plan rejection re-derived: %v", seed, got.Checked)
 		}
 
-		// A plan's trip logged with another response is a divergence.
+		// A plan's trip, logged in its rejection, altered to another
+		// response is a divergence.
+		altered := false
 		for i, e := range es {
-			if e.Type != kernel.TTrip || !bytes.Contains(e.Body, []byte(`"plan"`)) {
+			if e.Type != kernel.TPlanRejected || !bytes.Contains(e.Body, []byte(`"trip":{`)) {
 				continue
 			}
 			bad := append([]kernel.Entry(nil), es...)
@@ -143,7 +145,11 @@ func TestTripDeterministic(t *testing.T) {
 			if _, err := kernel.Rederive(anchors, k.Box(), bad); !errors.As(err, &d) || d.Seq != e.Seq {
 				t.Fatalf("seed %d: an altered trip at %d gave %v", seed, e.Seq, err)
 			}
+			altered = true
 			break
+		}
+		if !altered {
+			t.Fatalf("seed %d: no plan trip logged", seed)
 		}
 	}
 }

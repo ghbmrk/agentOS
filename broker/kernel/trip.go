@@ -27,7 +27,9 @@ import (
 // or extends one (a key signed by no root, which the key check refuses like
 // any other, KEY-1), or when its steps carry a table value or name a table
 // destination: the kernel's outbound path, checked when the plan is decided,
-// before any step can leave. An exit outside the kernel, such as the core's
+// before any step can leave. Its trip is logged in its rejection's entry, so
+// no crash parts them. A honey key cited at the kernel's other key checks,
+// Extend and Issue, trips too. An exit outside the kernel, such as the core's
 // egress, reports a connection it refused at a decoy address (CallTrip).
 //
 // A trip narrows at once with no owner step (KEY-3, KEY-6), in one of three
@@ -38,8 +40,11 @@ import (
 // placed on the host, the edge or in the sealed store, or sent with no
 // planner session behind it, gets the full response: the keys of its scope
 // are paused and planning stops, until the owner resumes with a passkey on
-// the owner page (ResumeTrip), never a texted RESUME (KEY-4, CH-11). Every
-// trip is logged and queues one fixed-template security text (CH-15).
+// the owner page (ResumeTrip), never a texted RESUME (KEY-4, CH-11). While
+// that holds, every plan is refused `tripped` before it is checked for a
+// trip, so repeats log nothing. Every trip is logged with a fixed-template
+// security text (CH-15); repeats of a session or call trip within
+// TextWindow share the first one's text.
 
 // Trip entry types.
 const (
@@ -77,6 +82,10 @@ var (
 	ErrTripSig    = errors.New("kernel: a trip resume is a live passkey's signature over TripResumeHash")
 )
 
+// TextWindow is how long after a session or call trip's text a repeat of its
+// response sends none (CH-15): a hostile session cannot flood the owner line.
+const TextWindow = key.DayMS / 24
+
 // Trip is one logged trip: what tripped, where, and what it stopped. Seq and
 // At are the fold's. A trip names its table entry by index, never by value.
 type Trip struct {
@@ -93,7 +102,7 @@ type Trip struct {
 
 type tripResumed struct {
 	N    int        `json:"n"`
-	Last uint64     `json:"last"` // the newest trip it lifts
+	Last uint64     `json:"last"` // the full trip that set the pause it lifts
 	By   key.Cosign `json:"by"`
 }
 
@@ -107,7 +116,8 @@ type trips struct {
 	// paused is the keys a trip paused, which only ResumeTrip lifts, each
 	// to whether the owner had paused it before: that pause stays.
 	paused  map[key.ID]bool
-	stopped bool // planning stopped by a trip
+	stopped bool   // planning stopped by a trip
+	full    uint64 // the newest full trip, which set the pause
 	resumes int
 }
 
@@ -144,7 +154,8 @@ func (k *Kernel) LogDecoyTable(now int64, t decoy.Table) error {
 
 // CallTrip logs a trip an exit reports: a connection it refused because its
 // address at connect time, after any redirect, was a table destination
-// (KRN-12 Trips). Only that call stopped.
+// (KRN-12 Trips). Only that call stopped. It is an input, so it neither
+// waits on nor moves a pause's resume.
 func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	if exit == ExitKernel || exit == "" || len(exit) > 32 || !utf8.ValidString(exit) {
 		return errors.New("kernel: a call trip names its exit")
@@ -160,22 +171,24 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 	return err
 }
 
-// TripResumeHash names the n-th trip resume, lifting every trip up to the
-// one logged at last, so a signature never replays and never lifts a trip
-// logged after it was made.
+// TripResumeHash names the n-th trip resume, lifting the pause the full trip
+// logged at last set, so a signature never replays. No full trip is logged
+// while that pause holds (Admit refuses `tripped` first), and session and
+// call trips do not move last, so nothing a hostile session sends voids it.
 func TripResumeHash(n int, last uint64) [32]byte {
 	b := binary.BigEndian.AppendUint64([]byte("agentos.trip.resume.v1\x00"), uint64(n))
 	return sha256.Sum256(binary.BigEndian.AppendUint64(b, last))
 }
 
 // TripResume is what the owner page asks the passkey to sign: the resume's
-// number and the newest trip; ok is false when no trip's pause is in force.
+// number and the full trip that set the pause; ok is false when no trip's
+// pause is in force.
 func (s *State) TripResume() (n int, last uint64, ok bool) {
 	d := &s.decoys
 	if !d.held() {
 		return 0, 0, false
 	}
-	return d.resumes, d.log[len(d.log)-1].Seq, true
+	return d.resumes, d.full, true
 }
 
 // ResumeTrip lifts every trip's pause and planning stop on the owner's
@@ -209,47 +222,58 @@ type SecurityText struct {
 var tripTexts = map[string]string{
 	RespFull:    "Security: a decoy was used, so something in me is breached. I paused the keys it came from and stopped planning. Nothing resumes until you open my owner page and use your passkey.",
 	RespSession: "Security: a planner session reached for a decoy, as injected content can make it. I refused that step and stopped only that session; planning goes on.",
-	RespCall:    "Security: one of my services tried to connect to a decoy address. I refused that one connection; nothing else stopped.",
+	RespCall:    "Security: one of my services reached for a decoy. I refused that one request; nothing else stopped.",
 }
 
-// SecurityTexts is one text per trip, oldest first, for the owner line to
-// send.
+// SecurityTexts is the texts for the owner line to send, oldest first: one
+// per full trip, and one per session or call trip unless one of its
+// response was texted within TextWindow before it.
 func (s *State) SecurityTexts() []SecurityText {
-	out := make([]SecurityText, len(s.decoys.log))
-	for i, t := range s.decoys.log {
-		out[i] = SecurityText{t.Seq, tripTexts[t.Response]}
+	var out []SecurityText
+	sent := map[string]int64{}
+	for _, t := range s.decoys.log {
+		if at, ok := sent[t.Response]; ok && t.Response != RespFull && t.At-at < TextWindow {
+			continue
+		}
+		sent[t.Response] = t.At
+		out = append(out, SecurityText{t.Seq, tripTexts[t.Response]})
 	}
 	return out
 }
 
 func (d *trips) held() bool { return d.stopped || len(d.paused) > 0 }
 
+// honeyOf is the table entry of the honey key ky is or extends.
+func (d *trips) honeyOf(ky key.Key) (int, bool) {
+	k := key.Key{Root: ky.Root}
+	for i := 0; i <= len(ky.Links); i++ {
+		k.Links = ky.Links[:i]
+		if id, ok := d.honey[k.Tip()]; ok {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
 // tripOf is the trip plan p is, or nil: pure over the state, so Admit, the
-// trip entry decide logs after it, and Rederive agree (KRN-6). A table value
-// that needs the full response gives it whatever else the plan cites (KRN-12);
+// rejection decide logs, and Rederive agree (KRN-6). A table value that
+// needs the full response gives it whatever else the plan cites (KRN-12);
 // otherwise the first of a honey key, a table value in the steps and a table
-// destination names the session-only trip.
+// destination names the session-only trip. The planner session is the task
+// the key's own links name, verified or not: a key that does not verify
+// can only claim a session, never turn a sandbox or view value into a
+// box-wide stop.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
 	if !d.set {
 		return nil
 	}
 	var hit *Trip
-	ky := key.Key{Root: p.Key.Root}
-	for i := 0; i <= len(p.Key.Links); i++ {
-		ky.Links = p.Key.Links[:i]
-		if id, ok := d.honey[ky.Tip()]; ok {
-			hit = &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: key.TaskOf(p.Key)}
-			break
-		}
+	session := key.TaskOf(p.Key)
+	if id, ok := d.honeyOf(p.Key); ok {
+		hit = &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: session}
 	}
-	session := ""
 	v, err := VerifyPlan(p, s.owners(p.Key))
-	if err == nil {
-		session = v.Limits.Task
-	} else if hit != nil {
-		session = hit.Session
-	}
 	steps, _ := json.Marshal(p.Steps)
 	for _, id := range d.m.Scan(append([]byte(p.ID+"\n"), steps...)).Trips {
 		if pl := d.entries[id].Place; session == "" || pl != decoy.PSandboxEnv && pl != decoy.PPlannerView {
@@ -304,26 +328,55 @@ func destOf(v string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// tripped is the trip decide logs after refusing plan id with CTrip.
-func (k *Kernel) tripped(now int64, id string) error {
-	t := k.s.tripOf(k.s.Plans[id].Plan)
-	if t == nil {
+// honeyTrip refuses a key check outside Admit (Extend, Issue) that cites a
+// honey key, and logs its trip: it stops the session of plan, when one is
+// named, else only that request (KRN-12 Trips, Response).
+func (k *Kernel) honeyTrip(now int64, plan string, keys ...key.Key) error {
+	d := &k.s.decoys
+	if !d.set {
 		return nil
 	}
-	_, err := k.emit(now, TTrip, *t)
-	return err
+	for _, ky := range keys {
+		id, ok := d.honeyOf(ky)
+		if !ok {
+			continue
+		}
+		t := Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespCall}
+		if p := k.s.Plans[plan]; p != nil {
+			t.Response, t.Plan, t.Session = RespSession, plan, p.Plan.Task()
+		}
+		if _, err := k.emit(now, TTrip, t); err != nil {
+			return err
+		}
+		return &key.Refusal{Code: CTrip, Detail: CauseHoneyKey}
+	}
+	return nil
+}
+
+// rejection is decide's entry for refusing plan p with r: a trip refusal
+// carries its trip, so both are one append (CH-15).
+func (s *State) rejection(p *PlanState, r *key.Refusal) planRejected {
+	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail}
+	if r.Code == CTrip {
+		b.Trip = s.tripOf(p.Plan)
+	}
+	return b
 }
 
 // resumeOK checks a trip resume as a fold must: the next resume, over the
-// newest trip, signed by a live passkey.
+// full trip that set the pause, signed by a live passkey.
 func (s *State) resumeOK(b tripResumed) bool {
 	n, last, ok := s.TripResume()
 	return ok && b.N == n && b.Last == last && key.In(s.Passkeys(), b.By.By) && b.By.Over(TripResumeHash(n, last))
 }
 
-// tripOK checks a trip entry's shape: known cause, exit and response, a
-// table entry, and a session or scopes only where its response stops them.
-func (d *trips) tripOK(t Trip) bool {
+// tripOK checks a trip's shape: known cause, exit and response, a table
+// entry, and a session or scopes only where its response stops them. A
+// plan's trip comes only in the rejection of that plan (rejected is its ID);
+// a trip entry is an input, either an exit's call trip or a honey key at
+// Extend (the held plan's session) or Issue (that request alone).
+func (s *State) tripOK(t Trip, rejected string) bool {
+	d := &s.decoys
 	if !d.set || t.Entry < 0 || t.Entry >= len(d.entries) || t.Exit == "" {
 		return false
 	}
@@ -332,15 +385,45 @@ func (d *trips) tripOK(t Trip) bool {
 	default:
 		return false
 	}
+	honey := t.Cause == CauseHoneyKey && t.Exit == ExitKernel && d.entries[t.Entry].Kind == decoy.KHoneyKey
 	switch t.Response {
 	case RespSession:
-		return t.Plan != "" && len(t.Scopes) == 0
+		if t.Plan == "" || len(t.Scopes) != 0 {
+			return false
+		}
+		if rejected != "" {
+			return t.Plan == rejected
+		}
+		p := s.Plans[t.Plan]
+		return honey && p != nil && t.Session == p.Plan.Task()
 	case RespFull:
-		return t.Plan != "" && t.Session == ""
+		return t.Plan != "" && t.Plan == rejected && t.Session == ""
 	case RespCall:
-		return t.Exit != ExitKernel && t.Session == "" && len(t.Scopes) == 0 && t.Plan == ""
+		return rejected == "" && t.Session == "" && len(t.Scopes) == 0 && t.Plan == "" && (t.Exit != ExitKernel || honey)
 	}
 	return false
+}
+
+// addTrip folds trip t, logged in entry e.
+func (s *State) addTrip(t Trip, e Entry) {
+	d := &s.decoys
+	t.Seq, t.At = e.Seq, e.At
+	d.log = append(d.log, t)
+	if t.Response == RespFull {
+		d.stopped, d.full = true, e.Seq
+		if d.paused == nil {
+			d.paused = map[key.ID]bool{}
+		}
+		for _, id := range t.Scopes {
+			if _, ok := d.paused[id]; !ok {
+				d.paused[id] = s.Changes.Paused[id]
+			}
+			s.Changes.Paused[id] = true
+		}
+	}
+	if t.Session != "" {
+		s.stopSession(t.Session)
+	}
 }
 
 // applyTrip folds a decoy entry. One that fails its check changes nothing.
@@ -367,25 +450,8 @@ func (s *State) applyTrip(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if !d.tripOK(t) {
-			return nil
-		}
-		t.Seq, t.At = e.Seq, e.At
-		d.log = append(d.log, t)
-		if t.Response == RespFull {
-			d.stopped = true
-			if d.paused == nil {
-				d.paused = map[key.ID]bool{}
-			}
-			for _, id := range t.Scopes {
-				if _, ok := d.paused[id]; !ok {
-					d.paused[id] = s.Changes.Paused[id]
-				}
-				s.Changes.Paused[id] = true
-			}
-		}
-		if t.Session != "" {
-			s.stopSession(t.Session)
+		if s.tripOK(t, "") {
+			s.addTrip(t, e)
 		}
 	case TTripResumed:
 		b, err := body[tripResumed](e)
