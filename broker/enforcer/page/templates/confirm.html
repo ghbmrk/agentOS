@@ -17,7 +17,7 @@
 {{if .Blocked}}
 <p class="blocked">Another change is waiting to apply. Cancel it on the <a href="/">home page</a> or let it apply first, then open this link again.</p>
 {{else}}
-<button id="approve" data-id="{{.ID}}" data-challenge="{{.Challenge}}" data-rp="{{.Name}}">Approve with your passkey</button>
+<button id="approve" data-id="{{.ID}}" data-challenge="{{.Challenge}}" data-rp="{{.Name}}"{{if .Sealed}} data-sealed="1"{{end}}>Approve with your passkey</button>
 {{end}}
 <p id="result" role="status"></p>
 </body>

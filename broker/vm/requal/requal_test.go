@@ -149,12 +149,61 @@ func TestSuiteWithoutSourceFailsClosed(t *testing.T) {
 
 func TestEmptySuiteBootsNothing(t *testing.T) {
 	sb := &fakeSandbox{}
-	sc, err := runner(t, sb, allSuites(cases{}, echo)).Run(context.Background(), release(t), update.SuiteReplay)
+	r := runner(t, sb, allSuites(cases{}, echo))
+	sc, err := r.Run(context.Background(), release(t), update.SuiteReplay)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sc.Cases != 0 || sc.Passed != 0 || sc.Digest == "" || sb.starts != 0 {
 		t.Fatalf("score %+v after %d starts, want 0 of 0 and no boot", sc, sb.starts)
+	}
+	// Through slice a's rule: empty held-out and replay suites pass, but an
+	// empty security suite fails, so a fresh box holds its releases.
+	v, st := updatetest.Box(t, 2, false, map[string][]byte{"host-image/usr.img": []byte("usr-2")})
+	q, err := update.NewRequalifier(st, r, filepath.Join(t.TempDir(), "requal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := q.Requalify(context.Background(), v); err != nil || got.Passed || got.Reason != update.SuiteSecurity {
+		t.Fatalf("Requalify = %+v, %v; want failed on security", got, err)
+	}
+}
+
+// errSource answers its cases together with an error.
+type errSource struct{ c cases }
+
+var errCases = errors.New("cases unreadable")
+
+func (s errSource) Cases(context.Context) ([]Case, error) { return s.c, errCases }
+
+func TestSourceErrorIsAnError(t *testing.T) {
+	ctx := context.Background()
+	for name, src := range map[string]errSource{"no cases": {}, "with cases": {three()}} {
+		t.Run(name, func(t *testing.T) {
+			sb := &fakeSandbox{}
+			// Security is whole and passing, so only the erring held-out
+			// source stands between this candidate and a passed verdict.
+			suites := allSuites(three(), echo)
+			suites[update.SuiteHeldOut] = Suite{src, echo}
+			suites[update.SuiteSecurity] = Suite{cases{{ID: "s1", Input: []byte("p"), Expect: []byte("p")}}, echo}
+			r := runner(t, sb, suites)
+			for _, rel := range []*update.Verified{nil, release(t)} {
+				if _, err := r.Run(ctx, rel, update.SuiteHeldOut); !errors.Is(err, errCases) {
+					t.Fatalf("err %v, want the source's error", err)
+				}
+			}
+			if sb.starts != 0 {
+				t.Fatalf("%d boots on a source error, want none", sb.starts)
+			}
+			v, st := updatetest.Box(t, 2, false, map[string][]byte{"host-image/usr.img": []byte("usr-2")})
+			q, err := update.NewRequalifier(st, r, filepath.Join(t.TempDir(), "requal.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := q.Requalify(ctx, v); err == nil || got.Passed {
+				t.Fatalf("Requalify = %+v, %v; want an error", got, err)
+			}
+		})
 	}
 }
 
@@ -317,6 +366,24 @@ func TestUnadmittedCountsOnReplayOnly(t *testing.T) {
 		if sc.Unadmitted != want {
 			t.Errorf("%s: unadmitted %d, want %d", s, sc.Unadmitted, want)
 		}
+	}
+}
+
+func TestNegativeUnadmittedCountsAsNone(t *testing.T) {
+	// A grader's negative count on one case must not cancel another case's
+	// unadmitted steps.
+	g := func(c Case, out []byte) Grade {
+		if c.ID == "a" {
+			return Grade{Pass: true, Unadmitted: -5}
+		}
+		return Grade{Pass: true, Unadmitted: 1}
+	}
+	sc, err := runner(t, &fakeSandbox{}, allSuites(three(), g)).Run(context.Background(), release(t), update.SuiteReplay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.Unadmitted != 2 {
+		t.Fatalf("unadmitted %d, want 2", sc.Unadmitted)
 	}
 }
 

@@ -7,19 +7,20 @@ package ipform
 import "net/netip"
 
 // The IPv6 prefixes through which an IPv4 destination can be named: the
-// well-known and local-use NAT64 prefixes (RFC 6052, RFC 8215), 6to4
-// (RFC 3056) and Teredo (RFC 4380).
+// well-known and local-use NAT64 prefixes (RFC 6052, RFC 8215), SIIT's
+// IPv4-translated prefix (RFC 6145), 6to4 (RFC 3056) and Teredo (RFC 4380).
 var (
 	nat64      = netip.MustParsePrefix("64:ff9b::/96")
 	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48")
+	siit       = netip.MustParsePrefix("::ffff:0:0:0/96")
 	sixToFour  = netip.MustParsePrefix("2002::/16")
 	teredo     = netip.MustParsePrefix("2001::/32")
 )
 
 // Forms is a without its zone, then every IPv4 address it embeds:
 // IPv4-mapped (alone, unmapped), IPv4-compatible, NAT64 (well-known, and
-// local-use at its /48 and /96 positions), 6to4, ISATAP and Teredo (its
-// server and its client).
+// local-use at its /48 and /96 positions), SIIT IPv4-translated, 6to4,
+// ISATAP and Teredo (its server and its client).
 func Forms(a netip.Addr) []netip.Addr {
 	a = a.WithZone("").Unmap()
 	out := []netip.Addr{a}
@@ -30,7 +31,7 @@ func Forms(a netip.Addr) []netip.Addr {
 	v4 := func(i, j, k, l int) netip.Addr { return netip.AddrFrom4([4]byte{b[i], b[j], b[k], b[l]}) }
 	tail := v4(12, 13, 14, 15)
 	switch {
-	case nat64.Contains(a):
+	case nat64.Contains(a), siit.Contains(a):
 		out = append(out, tail)
 	case nat64Local.Contains(a):
 		out = append(out, tail, v4(6, 7, 9, 10))
