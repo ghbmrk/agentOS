@@ -61,6 +61,10 @@ exempt-pr 4050
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
 
+# #4055 (ENF-f, #3664): broker/enforcer/dns/, mdns/, wol/ and nft/, which the G2 list does not
+# name (D-198). Remove once #4055 merges.
+exempt-pr 4055
+
 # #3976 (DEV-homekit-b2a, #3891): broker/cmd/agentos-homekit/, which the G2 list does not
 # name (D-198). Remove once #3976 merges.
 exempt-pr 3976
