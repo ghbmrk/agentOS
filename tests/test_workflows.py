@@ -32,6 +32,17 @@ def steps(text):
         yield m.group(2), "\n".join(body)
 
 
+def job_steps(text, job):
+    """Return [(name, step text)] for each step of a top-level job, in order."""
+    m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", text, re.M | re.S)
+    assert m, job
+    out = []
+    for block in re.split(r"^(?=      - )", m.group(1), flags=re.M)[1:]:
+        name = re.match(r"      - (?:uses: \S+\n\s+)?name: (.*)", block)
+        out.append((name.group(1).strip() if name else "", block.rstrip()))
+    return out
+
+
 # CTRL-lane-gate r3 (#1347, Security R3 and L3 on #1583): lane-gate.yml must run only the
 # base's code and fail closed. Every line that is not blank or a whole-line comment must equal
 # this pin, in order, so no edit can add `if:` or `continue-on-error:`, swap the action, point
@@ -574,6 +585,18 @@ class WorkflowTest(unittest.TestCase):
         # PREMERGE-wire (#1860): the context the ruleset must require is the one the workflow posts.
         ops = (WORKFLOWS.parent.parent / "docs" / "OPERATING.md").read_text()
         self.assertIn("requires the `premerge` status", ops)
+
+    def test_mutants_job_sets_up_the_canary_sandbox_as_broker_race_does(self):
+        # REV-CHK-mut-userns (#4010): gremlins' coverage run on loops runs the canary-round
+        # test, whose sandbox needs subordinate ids and unprivileged user namespaces (tools/
+        # ASSUMPTIONS.md D13). The mutants job sets them up with broker-race's own step, first.
+        want = "Subordinate ids for the canary sandbox"
+        race = dict(job_steps((WORKFLOWS / "ci.yml").read_text(), "broker-race"))
+        mut = job_steps((WORKFLOWS / "mutgate.yml").read_text(), "mutants")
+        names = [n for n, _ in mut]
+        self.assertIn(want, names)
+        self.assertLess(names.index(want), names.index("Gremlins on the package"))
+        self.assertEqual(dict(mut)[want], race[want])
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"
