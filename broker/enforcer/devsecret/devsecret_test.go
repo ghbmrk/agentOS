@@ -435,3 +435,60 @@ func TestSealedAtRestAndErased(t *testing.T) {
 		t.Error("the secret is on disk unsealed")
 	}
 }
+
+// failDisk refuses every save once fail is set.
+type failDisk struct {
+	mem
+	fail bool
+}
+
+func (f *failDisk) Save(b []byte) error {
+	if f.fail {
+		return errors.New("disk full")
+	}
+	return f.mem.Save(b)
+}
+
+// TestSaveFailureChangesNothing: when the sealed state cannot be saved,
+// Admit and Prune report it and the store keeps what it had, so memory
+// never runs ahead of the disk.
+func TestSaveFailureChangesNothing(t *testing.T) {
+	r := newRig(t)
+	disk := &failDisk{}
+	r.disk = &disk.mem
+	var err error
+	r.store, err = Open(Config{Owner: r.o.public(), Key: r.key, Policy: r.eng, Box: r.box, Disk: disk,
+		Process: func(d string) (Peer, bool) { p, ok := drivers[d]; return p, ok }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := r.admit("front-lock")
+
+	disk.fail = true
+	next := r.seal("side-lock")
+	prop, sig := r.propose(with(r.eng.Current(), lock("side-lock")), addDiff("side-lock", next))
+	if err := r.store.Admit("side-lock", next, prop, sig); err == nil {
+		t.Error("Admit did not report the failed save")
+	}
+	if _, ok := r.store.Fingerprint("side-lock"); ok {
+		t.Error("a secret is held that was never saved")
+	}
+	r.land()
+
+	cur := r.eng.Current()
+	cur.Devices = slices.DeleteFunc(cur.Devices, func(d policy.Device) bool { return d.ID == "front-lock" })
+	r.propose(cur, "This closes something on a safety-list device.\nRemove the device front-lock.\n")
+	if err := r.store.Prune(); err == nil {
+		t.Error("Prune did not report the failed save")
+	}
+	if fp, ok := r.store.Fingerprint("front-lock"); !ok || fp != pairseal.Hash(env) {
+		t.Error("an erase that was never saved changed the store")
+	}
+	disk.fail = false
+	if err := r.store.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.store.Fingerprint("front-lock"); ok {
+		t.Error("removed device's secret still held")
+	}
+}
