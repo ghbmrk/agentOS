@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -456,4 +457,81 @@ func dhcpv6(t *testing.T, x *host) bool {
 		answered = err == nil
 	})
 	return answered
+}
+
+// TestSpoofedSourceDropped: a packet whose source address is not routed
+// back out of the interface it came in on is dropped, so a rooted core
+// cannot answer the enforcer's own upstream DNS query in the resolver's
+// name (the answer would fill an allow set), and a device cannot pose as
+// the core. The real answer still arrives. Catches a forged answer that
+// fills an allow set (NET-2 The core's list, A18 Segments).
+func TestSpoofedSourceDropped(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	before := h.counter(Spoofed)
+	// The enforcer asks an "upstream" (an echo at netAllow:5300) from a
+	// fixed port, so conntrack holds the flow a forged answer would ride.
+	within(t, h.hosts["isp"], func() {
+		up, err := net.ListenPacket("udp4", netAllow+":5300")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { up.Close() })
+		go func() {
+			b := make([]byte, 64)
+			for {
+				n, from, err := up.ReadFrom(b)
+				if err != nil {
+					return
+				}
+				up.WriteTo(b[:n], from)
+			}
+		}()
+	})
+	local := &net.UDPAddr{IP: net.ParseIP(enfWAN), Port: 40053}
+	pc, err := net.ListenUDP("udp4", local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.WriteToUDP([]byte("query"), &net.UDPAddr{IP: net.ParseIP(netAllow), Port: 5300}); err != nil {
+		t.Fatal(err)
+	}
+	// The core forges the answer from the upstream's address and port.
+	spoof := func(from, src, dst string, sport, dport int, payload string) {
+		x := h.hosts[from]
+		h.in(x, "ip", "addr", "add", src+"/32", "dev", "lo")
+		within(t, x, func() {
+			c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP(src), Port: sport}, &net.UDPAddr{IP: net.ParseIP(dst), Port: dport})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			for range 3 {
+				c.Write([]byte(payload))
+			}
+		})
+	}
+	time.Sleep(100 * time.Millisecond)
+	spoof("core", netAllow, enfWAN, 5300, 40053, "forged")
+	// A device poses as the core to the enforcer's resolver port.
+	spoof("101", "10.50.0.2", enfAddr("core"), 5300, 53, "as-core")
+	var got []string
+	pc.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 64)
+	for {
+		n, from, err := pc.ReadFromUDP(buf)
+		if err != nil {
+			break
+		}
+		got = append(got, from.String()+" "+string(buf[:n]))
+	}
+	if !slices.Equal(got, []string{netAllow + ":5300 query"}) {
+		t.Errorf("the enforcer's upstream socket read %q, want only the real answer", got)
+	}
+	if n := h.counter(Spoofed) - before; n < 6 {
+		t.Errorf("spoofed counter moved %d, want at least 6", n)
+	}
 }

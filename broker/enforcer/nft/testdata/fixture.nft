@@ -13,6 +13,7 @@ table inet enforcer {
 	counter ra_dropped { }
 	counter dns_outside { }
 	counter dns_redirect { }
+	counter spoofed { }
 	counter ap_admin { }
 	counter isp { }
 	counter core_edge { }
@@ -76,6 +77,13 @@ table inet enforcer {
 	set d103_6 {
 		type ipv6_addr;
 		flags timeout;
+	}
+	chain rpf {
+		type filter hook prerouting priority raw; policy accept;
+		iif "lo" accept
+		ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
+		ip6 saddr :: meta l4proto ipv6-icmp accept
+		fib saddr . iif oif missing counter name "spoofed" drop
 	}
 	chain input {
 		type filter hook input priority filter; policy drop;

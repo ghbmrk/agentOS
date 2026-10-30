@@ -301,7 +301,13 @@ func TestPairOnly(t *testing.T) {
 			if s.port == 5353 {
 				c = socks[s.from]
 			} else {
-				pc, err := net.ListenPacket("udp4", ":"+strconv.Itoa(s.port))
+				// Its own send must not loop back to this host's mDNS
+				// socket, so a sender hearing its own mark means the relay
+				// reflected it.
+				lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
+					return rc.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_LOOP, 0) })
+				}}
+				pc, err := lc.ListenPacket(context.Background(), "udp4", ":"+strconv.Itoa(s.port))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -346,15 +352,12 @@ func TestPairOnly(t *testing.T) {
 		"ap0.107": {"sensor-a-answer"},
 		"ap0.106": {"sensor-b-query"},
 	}
-	// A host's second socket hears its own sends on its own host; that is
-	// not the relay, so a sender's own marks are dropped from what it heard.
-	own := map[string][]string{}
-	for _, s := range sends {
-		own[s.from] = append(own[s.from], s.mark)
-	}
+	// No socket loops its sends back, so all a host hears came from the
+	// relay: a mark heard by its own sender was reflected onto the
+	// interface it came in on.
 	floods := 0
 	for ifc := range socks {
-		got := slices.DeleteFunc(slices.Clone(heard[ifc]), func(s string) bool { return s == "flood" || slices.Contains(own[ifc], s) })
+		got := slices.DeleteFunc(slices.Clone(heard[ifc]), func(s string) bool { return s == "flood" })
 		floods += len(heard[ifc]) - len(got)
 		slices.Sort(got)
 		if !slices.Equal(got, want[ifc]) {

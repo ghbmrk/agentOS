@@ -61,12 +61,13 @@ const (
 	RADropped   = "ra_dropped"   // router advertisements from any segment
 	DNSOutside  = "dns_outside"  // a device's outside or encrypted DNS
 	DNSRedirect = "dns_redirect" // a device's port-53 traffic answered by the enforcer
+	Spoofed     = "spoofed"      // a source address not routed back out of its interface
 	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
 	ISPDrop     = "isp"          // the ISP router's admin or LAN
 	CoreEdge    = "core_edge"    // between the core's and the edge's segments
 )
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, APAdminDrop, ISPDrop, CoreEdge}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // only on the interfaces of signed pairs, and the Wake-on-LAN relay hears
@@ -331,6 +332,21 @@ func Compile(d policy.Document, l Layout) (string, error) {
 
 	served := "{ " + strings.Join([]string{q(l.Owner), q(l.Household), q(l.Guests), q(l.Admin), q(l.Core), T}, ", ") + " }"
 	edge, core, wan := q(l.Edge), q(l.Core), q(l.WAN)
+
+	// Reverse path, on every interface: a packet whose source address is
+	// not routed back out of the interface it came in on is dropped before
+	// conntrack or any service sees it, so no segment can pose as the
+	// upstream resolver, the internet or another segment, and a forged
+	// answer never reaches the resolver that fills the allow sets (NET-2
+	// The core's list). The unspecified sources of a DHCP request and of
+	// IPv6 address setup have no route and pass to the rules below.
+	w.open("chain rpf")
+	w.line("type filter hook prerouting priority raw; policy accept;")
+	w.line(`iif "lo" accept`)
+	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
+	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
+	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
+	w.close()
 
 	w.open("chain input")
 	w.line("type filter hook input priority filter; policy drop;")
