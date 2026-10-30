@@ -10,7 +10,7 @@ import (
 // and with the hour's texts spent, and does not count toward the hour,
 // as the channel's own replies to the owner's texts do not. Like Notify,
 // secret-shaped content is kept and becomes a pointer to the local UI
-// (CH-19, keep.go) and the rest goes behind AgentPrefix. Callers pass a reply bound to one
+// (CH-19, keep.go) and the rest goes with no label (CH-21). Callers pass a reply bound to one
 // owner message (guest POST /owner/reply), so the owner's own texts
 // bound how many go, or an agent question while the owner's task chat
 // is open, which the question book bounds itself (#2363); other agent
@@ -28,7 +28,7 @@ func (c *Channel) Converse(text string) error {
 	}
 	c.ackSend.Lock()
 	defer c.ackSend.Unlock()
-	if err := c.cfg.Modem.Send(c.cfg.Owner, agentText(text)); err != nil {
+	if err := c.sendOwner(agentText(text)); err != nil {
 		return err
 	}
 	c.mu.Lock()

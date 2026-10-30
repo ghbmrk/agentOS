@@ -14,7 +14,7 @@ import (
 
 // REQ: CH-15, CH-19
 // A reply to the owner's message is conversation: in quiet hours with
-// the hour's texts spent it goes at once, behind the agent prefix, is
+// the hour's texts spent it goes at once, with no label, is
 // never held and spends nothing. A secret-shaped reply still becomes the
 // pointer.
 func TestConverseIsNeverPaced(t *testing.T) {
@@ -35,7 +35,7 @@ func TestConverseIsNeverPaced(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.sentTexts()
-	if len(got) != 2 || got[0] != AgentPrefix+"Your invoice is drafted." || got[1] != Hidden {
+	if len(got) != 2 || got[0] != "Your invoice is drafted." || got[1] != Hidden {
 		t.Fatalf("Converse in quiet hours sent %q, want the prefixed reply and the pointer", got)
 	}
 	if len(r.held()) != 0 {
@@ -56,6 +56,7 @@ func TestConverseIsNeverPaced(t *testing.T) {
 // before the reaction and CH-19 checks read the text.
 func TestCH12ConverseSendsEmojiWhole(t *testing.T) {
 	r := pacedRig(t, quiet22to7(), 23, 0)
+	r.ucs2 = true
 	if err := r.ch.Converse("Done 👍\nSee you at 3"); err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +65,10 @@ func TestCH12ConverseSendsEmojiWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := r.sentTexts()
-	if len(got) != 2 || got[0] != AgentPrefix+"Done 👍\nSee you at 3" {
+	if len(got) != 2 || got[0] != "Done 👍\nSee you at 3" {
 		t.Fatalf("Converse sent %q", got)
 	}
-	if n, gsm7 := modem.Segments(got[1]); gsm7 || n != control.Segments || !strings.HasPrefix(long, strings.TrimPrefix(got[1], AgentPrefix)) {
+	if n, gsm7 := modem.Segments(got[1]); gsm7 || n != control.Segments || !strings.HasPrefix(long, got[1]) {
 		t.Fatalf("long emoji reply: %d segments, gsm7 %v", n, gsm7)
 	}
 	if strings.Count(got[1], "👩") != strings.Count(got[1], "💻") {
@@ -96,7 +97,7 @@ func TestCH12ConverseSendsEmojiWhole(t *testing.T) {
 	if err := r.ch.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked 🎉\nThursday 9am" {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Booked 🎉\nThursday 9am" {
 		t.Fatalf("released %q", got)
 	}
 }
@@ -204,7 +205,7 @@ func TestCH12CcInsideATokenStillWithholds(t *testing.T) {
 	if err := r.ch.Converse("Booked\x01Thursday 9am"); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked Thursday 9am" {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Booked Thursday 9am" {
 		t.Fatalf("sent %q", got)
 	}
 }
@@ -234,7 +235,7 @@ func TestCH15WindowOpenRepliesUnpaced(t *testing.T) {
 	if err := r.ch.Converse("Booked for 8pm."); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != AgentPrefix+"Booked for 8pm." {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != "Booked for 8pm." {
 		t.Fatalf("reply in the open chat: %q, want it sent at once", got)
 	}
 	if a := r.ch.Allowance(r.clock()); a != 0 {

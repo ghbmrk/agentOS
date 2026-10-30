@@ -180,12 +180,12 @@ func TestCallersUseTheirClass(t *testing.T) {
 		t.Fatalf("paced texts sent in quiet hours: %q", got)
 	}
 
-	// The owner's urgent agent class lets agent replies through, with the
-	// agent prefix.
+	// The owner's urgent agent class lets agent replies through, with no
+	// label (CH-21).
 	u := pacedOwner(t, quiet22to7(ownerch.ClassAgent), at23)
 	ev = &evidence{notify: u.ch.Notify, logf: t.Logf}
 	ev.send("agent", "Your invoice is drafted.")
-	if got := u.sent(); len(got) != 1 || !strings.HasPrefix(got[0], ownerch.AgentPrefix) {
+	if got := u.sent(); len(got) != 1 || got[0] != "Your invoice is drafted." {
 		t.Fatalf("urgent agent text: %q", got)
 	}
 }

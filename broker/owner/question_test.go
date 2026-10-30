@@ -13,7 +13,7 @@ import (
 // TestQuestionTagsAndLengthFitTheChannel: a question's tag (Q100-Q999) is
 // never an approval request ID, so "YES Q104" is no approval reply and
 // "Q104 yes" no channel word; and the longest question the broker accepts
-// fits one owner text behind the agent prefix, so Fit cuts nothing.
+// fits one owner text, so Fit cuts nothing.
 func TestQuestionTagsAndLengthFitTheChannel(t *testing.T) {
 	for _, tag := range []string{"Q100", "Q104", "Q999"} {
 		if isID(tag) {
@@ -26,11 +26,11 @@ func TestQuestionTagsAndLengthFitTheChannel(t *testing.T) {
 			t.Errorf("%s yes parsed as a channel word", tag)
 		}
 	}
-	if question.MaxRendered+len(AgentPrefix) > control.MaxText {
-		t.Fatalf("MaxRendered %d + prefix %d > %d", question.MaxRendered, len(AgentPrefix), control.MaxText)
+	if question.MaxRendered > control.MaxText {
+		t.Fatalf("MaxRendered %d > %d", question.MaxRendered, control.MaxText)
 	}
 	long := strings.Repeat("x", question.MaxRendered)
-	if got := control.Fit(AgentPrefix + long); got != AgentPrefix+long {
+	if got := control.Fit(long); got != long {
 		t.Fatal("Fit cut a text of MaxRendered")
 	}
 }

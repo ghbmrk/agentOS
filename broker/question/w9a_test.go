@@ -154,7 +154,7 @@ func TestAnAgedQuestionLeadsAndAsksAhead(t *testing.T) {
 	r.advance(11 * time.Minute) // lin1's question is 20 minutes old
 	r.b.Tick(context.Background())
 	got := r.texts()
-	if len(got) != 2 || !strings.HasPrefix(got[1], "Q101: Taxi home?") {
+	if len(got) != 2 || !strings.HasPrefix(got[1], "Question Q101: Taxi home?") {
 		t.Fatalf("texts %q", got)
 	}
 	if aged[len(aged)-1] != true || aged[1] != false {

@@ -23,7 +23,7 @@ func TestADeletionForgetsTheOwnerChannelsRecentReplies(t *testing.T) {
 	}
 	r.sent()
 	say := func(s string) string { return strings.Join(r.ch.Handle(context.Background(), ownerNum, s), " | ") }
-	quote := "Liked “Agent: The Acme contract renews…”"
+	quote := "Liked “The Acme contract renews…”"
 	if got := say(quote); !strings.Contains(got, "reaction is held") {
 		t.Fatalf("locked reaction: %q", got)
 	}
@@ -44,7 +44,7 @@ func TestAReplyInFlightAcrossADeletionIsForgottenOnSettle(t *testing.T) {
 	ev := newEvRig(t).ev
 	ev.wireOwner(func() *ownerch.Channel { return r.ch })
 	say := func(s string) string { return strings.Join(r.ch.Handle(context.Background(), ownerNum, s), " | ") }
-	quote := "Liked “Agent: The Acme contract renews…”"
+	quote := "Liked “The Acme contract renews…”"
 
 	ev.kept.fmu.Lock()
 	gen := ev.kept.gen

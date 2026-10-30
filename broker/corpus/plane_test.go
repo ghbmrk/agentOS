@@ -27,7 +27,7 @@ func (f fakeRelay) Reply(_ context.Context, s string) (string, error) {
 	if !f.open[CodeFilter] && owner.SecretShaped(s) {
 		return "hidden", f.err
 	}
-	return owner.AgentPrefix + s, f.err
+	return s, f.err
 }
 
 func (f fakeRelay) Label(_ context.Context, s string) (bool, error) {
