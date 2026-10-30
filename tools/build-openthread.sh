@@ -1,21 +1,23 @@
 #!/bin/sh
 # Builds the enforcer's Thread stack, OpenThread's ot-daemon (D-231,
-# spikes/ENF-radio), from the pinned commit below: border routing, the SRP
+# spikes/ENF-radio), from the commit pinned in
+# broker/enforcer/radio/thread/openthread.pin: border routing, the SRP
 # server and its advertising proxy, the DNS-SD server and discovery proxy,
 # and OpenThread's own mDNS, with no otbr-agent, Avahi, D-Bus or web UI.
 # Its command socket's base name is relative, so it lives in the state
 # directory the stack runs in (thread.Socket); its settings go where
 # --data-path says (thread.DaemonArgs). The image (slice m) installs the
-# result; this file is the build pin.
+# result.
 #
 # With --sim it also builds OpenThread's simulated RCP and FTD node, which
 # radio::TestSrpReachesController runs. Needs git, cmake, ninja and a C++
-# compiler. Usage: build-ot.sh OUTDIR [--sim]
+# compiler. Usage: build-openthread.sh OUTDIR [--sim]
 set -eu
 
-# openthread/openthread main at 2026-10-29; its mbedtls submodule is pinned
-# by this commit's tree.
-OT_COMMIT=e577777c308f6c87e5da3056239231a8fc147cb2
+# Its mbedtls submodule is pinned by that commit's tree.
+PIN=$(dirname "$0")/../broker/enforcer/radio/thread/openthread.pin
+OT_COMMIT=$(sed -n 's/^commit \([0-9a-f]\{40\}\)$/\1/p' "$PIN")
+[ -n "$OT_COMMIT" ]
 
 OUT=$1
 SIM=${2:-}

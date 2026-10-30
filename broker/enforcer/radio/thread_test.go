@@ -226,7 +226,7 @@ func TestStackOnlyDeclaredOps(t *testing.T) {
 }
 
 // TestSrpReachesController (NET-2 Confined radio stacks; spikes/ENF-radio
-// consequence 1): ot-daemon, built by build-ot.sh and run under
+// consequence 1): ot-daemon, built by tools/build-openthread.sh and run under
 // confine.Thread with a simulated radio, forms a network through the
 // adapter; a simulated Thread node joins it and registers a service over
 // SRP; and a process in the Matter controller's profile, joined to the
@@ -240,9 +240,9 @@ func TestSrpReachesController(t *testing.T) {
 	src := os.Getenv("AGENTOS_OT_BIN")
 	if src == "" {
 		if os.Getenv("CI") != "" {
-			t.Fatal("AGENTOS_OT_BIN unset: build it with broker/enforcer/radio/thread/build-ot.sh")
+			t.Fatal("AGENTOS_OT_BIN unset: build it with tools/build-openthread.sh")
 		}
-		t.Skip("AGENTOS_OT_BIN unset (broker/enforcer/radio/thread/build-ot.sh)")
+		t.Skip("AGENTOS_OT_BIN unset (tools/build-openthread.sh)")
 	}
 	const uid, matterUID = 4243, 4244
 	root, err := os.MkdirTemp("", "thread")

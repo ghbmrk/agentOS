@@ -1,6 +1,6 @@
 // Package thread runs the enforcer's Thread stack (NET-2 Confined radio
 // stacks; briefs/ENF.md slice t, D-231): OpenThread's ot-daemon, built from
-// the pinned source in build-ot.sh with border routing, the SRP server and
+// the pinned source in tools/build-openthread.sh with border routing, the SRP server and
 // advertising proxy and its own mDNS, confined by confine.Thread, and the
 // adapter, a second confined process that is the stack's end of the radio
 // host's interface. The adapter sends ot-daemon only the commands on its
@@ -30,7 +30,7 @@ const (
 )
 
 // Socket is ot-daemon's command socket, relative to its state directory:
-// build-ot.sh sets the daemon's socket base name to a relative path, and
+// tools/build-openthread.sh sets the daemon's socket base name to a relative path, and
 // both processes run in that directory.
 const Socket = "openthread-" + Netif + ".sock"
 

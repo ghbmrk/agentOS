@@ -502,16 +502,16 @@ jobs:
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('broker/enforcer/radio/thread/build-ot.sh') }}
+          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: Build OpenThread from its pin (ENF-t)
         if: steps.otcache.outputs.cache-hit != 'true'
-        run: sh broker/enforcer/radio/thread/build-ot.sh /tmp/ot-bin --sim
+        run: sh tools/build-openthread.sh /tmp/ot-bin --sim
       - name: OpenThread build cache upload (ENF-t)
         if: steps.otcache.outputs.cache-hit != 'true'
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('broker/enforcer/radio/thread/build-ot.sh') }}
+          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: The enforcer's Thread stack, confined (ENF-t, #3702)
         # ot-daemon from the pin runs in the Thread profile's user namespace, created by root, on a
         # simulated radio; a simulated node's SRP service must resolve from the Matter profile over
