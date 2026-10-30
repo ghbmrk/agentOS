@@ -241,7 +241,7 @@ func main() {
 	var diskReserveMB, machineDiskMB, agentMemMB int64
 	var diskQuota string
 	var keptPath, setupRecord string
-	var keptDays int
+	var keptDays, codeHours int
 	var learnDir, routingSocket string
 	var cgroupVouched, modemBridge, ownerMessage bool
 	var noticeSocket string
@@ -319,6 +319,7 @@ func main() {
 	flag.Int64Var(&workerMaxMB, "worker-max-mb", 2048, "the largest memory budget one worker may ask for, MB; admission still decides (RES-2)")
 	flag.StringVar(&keptPath, "kept-replies", "/var/lib/agentos/kept-replies.json", "agent replies too long for a text or that could not be sent, and texts the owner channel held back, kept for the local page (CH-19, CH-20)")
 	flag.IntVar(&keptDays, "kept-days", 30, "days a kept reply or held-back text stays readable on the local page (CH-19)")
+	flag.IntVar(&codeHours, "code-hours", int(defaultCodeFor/time.Hour), "hours a code in a held-back text stays readable on the local page, 1 to 24 (CH-19)")
 	qcfg := defaultQuestionConfig("/var/lib/agentos")
 	flag.StringVar(&qcfg.Path, "questions", qcfg.Path, "agents' questions to the owner, kept across restarts (P3-8)")
 	flag.StringVar(&qcfg.ClockPath, "clock-state", qcfg.ClockPath, "the clock check's state (P2-9)")
@@ -605,7 +606,12 @@ func main() {
 	if keptDays < 1 {
 		log.Fatal("-kept-days must be at least 1")
 	}
+	keptCodeFor, err := codeFor(codeHours)
+	if err != nil {
+		log.Fatal(err)
+	}
 	ev := newEvidence(keptPath, time.Duration(keptDays)*24*time.Hour, log.Printf)
+	ev.kept.codeFor = keptCodeFor
 	ev.wire(&cfg)
 	// What the owner channel withholds is kept for the owner page and
 	// pointed to only when the page is served (CH-19, CH-21, #993).

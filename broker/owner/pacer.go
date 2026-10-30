@@ -368,7 +368,8 @@ func (c *Channel) checkAgent(text string) (string, error) {
 		return s, err
 	}
 	if AgentSecret(text) {
-		return c.withhold(KeptSecret, s), nil
+		// withhold strips it, but classes it as received (#4014).
+		return c.withhold(KeptSecret, text), nil
 	}
 	if AgentVoice(text) {
 		holdVoice()

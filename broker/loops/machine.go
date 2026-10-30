@@ -666,12 +666,12 @@ func cpusEffective(dir string) (int, error) {
 		return 0, errors.New("no cgroup")
 	}
 	for d := dir; ; d = filepath.Dir(d) {
-		b, err := os.ReadFile(filepath.Join(d, "cpuset.cpus.effective"))
+		b, err := readNoFollow(filepath.Join(d, "cpuset.cpus.effective"))
 		if err == nil {
 			return cpuCount(strings.TrimSpace(string(b)))
 		}
 		parent := filepath.Dir(d)
-		if _, err := os.Stat(filepath.Join(parent, "cgroup.controllers")); parent == d || err != nil {
+		if _, err := os.Lstat(filepath.Join(parent, "cgroup.controllers")); parent == d || err != nil {
 			return 0, errors.New("no cpuset.cpus.effective")
 		}
 	}
@@ -775,13 +775,24 @@ func (p *ExhaustProbe) limited(m PressedMachine, kind string) bool {
 	return false
 }
 
+// readNoFollow reads path whole without following a link at it (ELOOP) or
+// blocking on a FIFO: the corpus, and the machine's cgroup files.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
 // cgroupInt reads a cgroup v2 file holding one positive integer; "max",
 // a missing file or no cgroup is no value.
 func cgroupInt(dir, file string) (int64, bool) {
 	if dir == "" {
 		return 0, false
 	}
-	b, err := os.ReadFile(filepath.Join(dir, file))
+	b, err := readNoFollow(filepath.Join(dir, file))
 	if err != nil {
 		return 0, false
 	}
@@ -797,7 +808,7 @@ func cgroupCounter(dir, file, key string) (int64, error) {
 	if dir == "" {
 		return 0, errors.New("no cgroup")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, file))
+	b, err := readNoFollow(filepath.Join(dir, file))
 	if pe := (*fs.PathError)(nil); errors.As(err, &pe) {
 		err = pe.Err // no host path in the run's error
 	}

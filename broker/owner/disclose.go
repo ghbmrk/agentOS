@@ -1,9 +1,15 @@
 package owner
 
 import (
+	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/ghbmrk/agentos/broker/control"
 )
 
 // Hidden replaces an outbound text that looks like it carries a code or a
@@ -45,14 +51,24 @@ const codeReach = 4
 var signIn = regexp.MustCompile(`(?i)\bsign\s+in\b`)
 
 // SecretShaped reports whether s carries a known token format or a short
-// code next to a code word (CH-19). It runs on folded text, so fullwidth
-// or other Unicode digits and look-alike letters do not slip past, and it
-// joins adjacent digit groups, so "482 913" and "4 8 2 9 1 3" read as one
-// code. The code-word check also runs on each of CheckFolds' CH-12 folds
-// (#2181), with the code words matched by their folds.
+// code next to a code word (CH-19): TokenShaped or CodeShaped.
 func SecretShaped(s string) bool {
-	f := signIn.ReplaceAllString(fold(s), "signin")
-	if tokenFormats.MatchString(f) || codeNearWord(f, func(w string) bool { return codeWords[strings.ToUpper(w)] }) {
+	return TokenShaped(s) || CodeShaped(s)
+}
+
+// TokenShaped reports whether s, folded, carries a known token format.
+func TokenShaped(s string) bool {
+	return tokenFormats.MatchString(fold(s))
+}
+
+// CodeShaped reports whether s carries a short code next to a code word
+// (CH-19). It runs on folded text, so fullwidth or other Unicode digits
+// and look-alike letters do not slip past, and it joins adjacent digit
+// groups, so "482 913" and "4 8 2 9 1 3" read as one code. The check also
+// runs on each of CheckFolds' CH-12 folds (#2181), with the code words
+// matched by their folds.
+func CodeShaped(s string) bool {
+	if codeNearWord(signIn.ReplaceAllString(fold(s), "signin"), func(w string) bool { return codeWords[strings.ToUpper(w)] }) {
 		return true
 	}
 	for _, f := range CheckFolds(s) {
@@ -126,4 +142,166 @@ func Disclose(s string) string {
 		return Hidden
 	}
 	return s
+}
+
+// AgentToken and AgentCode split AgentSecret into its two classes, in the
+// same three readings (CH-19, #906).
+func AgentToken(text string) bool {
+	return TokenShaped(text) || TokenShaped(control.StripControls(text)) || TokenShaped(control.JoinControls(text))
+}
+
+func AgentCode(text string) bool {
+	return CodeShaped(text) || CodeShaped(control.StripControls(text)) || CodeShaped(control.JoinControls(text))
+}
+
+// ExpiredCode stands in for a code once its hours have passed (CH-19,
+// #906). It holds no code word and no digit, so it adds no code shape.
+const ExpiredCode = "[expired]"
+
+// ExpireCodes returns text with its codes replaced by ExpiredCode, the
+// rest left readable (CH-19, #906). It replaces the code-like words next
+// to a code word, then, if a code shape is still found, every code-like
+// word, and then, if one still is, the whole text, so what it returns is
+// never AgentCode. Callers pass a text the patterns found a code in: when
+// text itself is not AgentCode (the code showed only before its controls
+// were stripped), the code cannot be found in it, so the whole text goes.
+func ExpireCodes(text string) string {
+	if !AgentCode(text) {
+		return ExpiredCode
+	}
+	words := textWords(text)
+	for _, all := range []bool{false, true} {
+		out := text
+		for _, w := range slices.Backward(codesIn(words, all)) {
+			out = out[:w.i] + ExpiredCode + out[w.j:]
+		}
+		if !AgentCode(out) {
+			return out
+		}
+	}
+	return ExpiredCode
+}
+
+// ExpiredView is what a held text received as text shows once its code
+// expires: ExpireCodes of the text as kept, stripped of controls. A
+// control or bidi character the strip changed may have hidden a code the
+// kept text no longer shows, so then the whole text goes (CH-19, #906,
+// #4014 L3).
+func ExpiredView(text string) string {
+	s := control.StripControls(text)
+	if s != text {
+		return ExpiredCode
+	}
+	return ExpireCodes(s)
+}
+
+// CodeKind names the kind of code text carries, never its value: "a
+// code of 6 digits" when every code next to a code word is that many digits,
+// otherwise "a code" (CH-19, #906).
+func CodeKind(text string) string {
+	n := 0
+	for _, w := range codesIn(textWords(text), false) {
+		d := utf8.RuneCountInString(w.digits)
+		if d == 0 || n != 0 && d != n {
+			return "a code"
+		}
+		n = d
+	}
+	if n == 0 {
+		return "a code"
+	}
+	return fmt.Sprintf("a code of %d digits", n)
+}
+
+// word is one word of a text, at bytes [i, j). digits holds its digits
+// when it is digits only, adjacent digit groups joined as codeNearWord
+// joins them.
+type word struct {
+	i, j   int
+	text   string
+	digits string
+}
+
+// textWords splits text into words as codeNearWord does, keeping where
+// each is, with Unicode letters, digits and marks as word characters.
+func textWords(text string) []word {
+	var out []word
+	start := -1
+	end := func(j int) {
+		w := word{i: start, j: j, text: text[start:j]}
+		if allNumber(w.text) {
+			w.digits = w.text
+			if n := len(out); n > 0 && out[n-1].digits != "" && utf8.RuneCountInString(out[n-1].digits+w.text) <= 10 {
+				out[n-1].j, out[n-1].digits = j, out[n-1].digits+w.text
+				out[n-1].text = text[out[n-1].i:j]
+				return
+			}
+		}
+		out = append(out, w)
+	}
+	for i, r := range text {
+		in := unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '-'
+		switch {
+		case in && start < 0:
+			start = i
+		case !in && start >= 0:
+			end(i)
+			start = -1
+		}
+	}
+	if start >= 0 {
+		end(len(text))
+	}
+	return out
+}
+
+// codesIn returns the code-like words of words: those within codeReach of
+// a code word, or with all, every one.
+func codesIn(words []word, all bool) []word {
+	near := make([]bool, len(words))
+	for i, w := range words {
+		if !isCodeWord(w.text) && !(strings.EqualFold(w.text, "sign") && i+1 < len(words) && strings.EqualFold(words[i+1].text, "in")) {
+			continue
+		}
+		for j := max(0, i-codeReach); j <= min(len(words)-1, i+codeReach+1); j++ {
+			near[j] = true
+		}
+	}
+	var out []word
+	for i, w := range words {
+		if (all || near[i]) && codeLikeWord(w) {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// isCodeWord reports whether w, or one of its folds, is a code word.
+func isCodeWord(w string) bool {
+	if codeWords[strings.ToUpper(fold(w))] {
+		return true
+	}
+	return slices.ContainsFunc(CheckFolds(w), func(f string) bool { return foldCodeWord.MatchString(strings.TrimSpace(f)) })
+}
+
+// codeLikeWord is codeLike on a word's folded text, or 4-10 joined
+// digits.
+func codeLikeWord(w word) bool {
+	if n := utf8.RuneCountInString(w.digits); n > 0 {
+		return n >= 4 && n <= 10
+	}
+	return codeLike(fold(w.text)) || hasNumber(w.text) && utf8.RuneCountInString(w.text) >= 4 && utf8.RuneCountInString(w.text) <= 10
+}
+
+func allNumber(s string) bool {
+	for _, r := range s {
+		if !unicode.IsNumber(r) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func hasNumber(s string) bool {
+	return strings.IndexFunc(s, unicode.IsNumber) >= 0
 }

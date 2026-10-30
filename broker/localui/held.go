@@ -11,7 +11,8 @@ import (
 // place of a text: what the owner channel held back, and agent replies
 // too long to text or that did not go. Each is shown as plain text,
 // escaped and with no link made live, and reading it removes nothing; an
-// expired one says so in one line.
+// expired one says so in one line, and one whose code has expired says so
+// beside its kind (CH-19, #906).
 
 type heldView struct {
 	Items, Expired []heldItemView
@@ -27,10 +28,11 @@ const heldUnreachable = "I can't show held messages right now. Reload to try aga
 // heldKinds names each kind on the page; a reply kept before kinds were
 // recorded has none.
 var heldKinds = map[string]string{
-	localapi.HeldSecret: "Held back: it may contain a code or key",
-	localapi.HeldCode:   "Held back: it mentioned a code",
-	localapi.HeldLong:   "Too long to text",
-	localapi.HeldUnsent: "Did not send",
+	localapi.HeldSecret:  "Held back: it may contain a code or key",
+	localapi.HeldOneTime: "Held back: it had a code in it",
+	localapi.HeldCode:    "Held back: it mentioned a code",
+	localapi.HeldLong:    "Too long to text",
+	localapi.HeldUnsent:  "Did not send",
 }
 
 // held serves the Held page behind sign-in (CH-7, CH-8).
@@ -64,6 +66,9 @@ func (s *Server) held(w http.ResponseWriter, r *http.Request) {
 		kind, ok := heldKinds[it.Kind]
 		if !ok {
 			kind = "Agent reply"
+		}
+		if it.CodeExpired {
+			kind += "; the code has expired"
 		}
 		v.Items = append(v.Items, heldItemView{Date: it.At.Local().Format("2 Jan 2006, 15:04"), Kind: kind, Text: it.Text})
 	}

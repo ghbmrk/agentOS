@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -20,7 +19,7 @@ type CorpusItem struct {
 
 // LoadCorpus reads a corpus's items.json.
 func LoadCorpus(path string) ([]CorpusItem, error) {
-	b, err := os.ReadFile(path)
+	b, err := readNoFollow(path)
 	if err != nil {
 		return nil, err
 	}

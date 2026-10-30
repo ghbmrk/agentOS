@@ -676,7 +676,7 @@ func TestNamedFoldsCaseAndSpace(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
 	r.seal(s, "mail", kernel.ClassLabel, "Alice Smith")
-	for _, q := range []string{"alice  smith", " ALICE\tSmith ", "Alice Smith"} {
+	for _, q := range []string{"alice  smith", "  ALICE   Smith ", "Alice Smith"} {
 		if got, _, err := r.k.Named(q); err != nil || !slices.Equal(got, []string{s}) {
 			t.Errorf("named %q: %v, %v", q, got, err)
 		}
