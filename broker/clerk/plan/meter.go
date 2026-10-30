@@ -99,7 +99,7 @@ func (p Pool) reading(h http.Header) *Reading {
 	var latest int64
 	for _, w := range p.Windows {
 		var reset int64
-		if s, err := strconv.ParseInt(strings.TrimSpace(h.Get(w.Prefix+"Reset-At")), 10, 64); err == nil && s > 0 && s <= math.MaxInt64/1000 {
+		if s, err := strconv.ParseInt(strings.TrimSpace(h.Get(w.Prefix+"Reset-At")), 10, 64); err == nil && s >= 1 && s <= math.MaxInt64/1000 {
 			reset = s * 1000
 		}
 		latest = max(latest, reset)
