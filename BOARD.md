@@ -119,7 +119,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CH-20p | [Kept replies on the local page](briefs/CH-20p.md) | CH-20, P2-2 | queued |
 | CH-20a | [Bounded attachments in `mail.deliver`](briefs/CH-20a.md) | CH-20w | queued (needs security review) |
 | CH-20m | [MORE for a redirected reply](briefs/CH-20m.md) | CH-20w | queued |
-| CH-19r | Held content classed as a code expires within owner-set hours (1-24, default 1); its pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089, D-239; release; serves CH-19; failure path: an away owner gets a pointer to a dead code, while the box stores live secrets for 30 days) | #669; after #3931 | queued |
+| CH-19r | Held content classed as a code expires within owner-set hours (1-24, default 1); its pointer names source and kind without the value ("a 6-digit code from your bank's email") (D-089, D-239; release; serves CH-19; failure path: an away owner gets a pointer to a dead code, while the box stores live secrets for 30 days) | #669; after #3931 | building |
 | CH-19m | Measure false holds of the CH-21 vocabulary check (agent output to the owner) on real task results and set a target rate (D-089; release; serves CH-19; failure path: ordinary replies such as "I fixed the code" are routinely held, so the owner learns to ignore the pointer) | #669 | queued |
 | CH-21 | [Name and first-person voice](briefs/CH-21.md) | CH-12 strings; P2-3 | queued (split into CH-21a to CH-21e) |
 | CH-21e | [Agent text asking for a code is withheld; welcome-text code line](briefs/CH-21e.md) | CH-21b | building (tier A; security first; start from #231's `withholdAgent`, `AskForCode`, `ReplyGrammar`, branch `pkg/ch-21-name-voice-draft` kept) |
@@ -145,7 +145,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TN-decoys | Decoy logins per provider that keeps the owner's secrets, made through CLK-8 sign-up; a decoy sign-in is a proof naming the provider and starts its LOCKDOWN list; secrets made at run time (KRN-10). | A21 and G2 passed; TN-witness-key, CLK-8 sign-up row | queued (release; sub A; tier A; after A21 and G2) |
 | CH-photo-heic-wire | CH-photo-heic-wire: reserve the photo one-shot's 960 MiB in RES-2/HW-4 admission, one run at a time, when CH-photo-c wires photo.Decoder; consider building agentos-photo with -tags noasm (later; from #3124 reviews) | #3124 | queued (later; tier A) |
 | CH-21f-wire | agentosd starts the owner channel with the setup names | CH-21f-wire | queued (tier A; release finding of #948) |
-| CH-21f-unsent | Unsent-pairing note names no step the page lacks | CH-21f-unsent | building (tier A; release finding of #3913) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -344,7 +343,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HOST-1b | [No hardware-clock writes](briefs/HOST-1b.md) | P2-1 image | queued (part 2; part 1 merged (#177); part 2 queued on P2-2w (R1 needs the live page)) |
 | HOST-1c | [Firmware-change disclosure and BitLocker prevention](briefs/HOST-1c.md) | HOST-1a, P2-2 | queued (part 2; part 1 merged (#183); part 2 queued (needs P2-2)) |
 | HOST-1d | [Internal-disk opt-in](briefs/HOST-1d.md) | HOST-1a, P2-2, P2-4 | queued |
-| UX3-7 | [Truthful, bounded withheld-result retrieval](briefs/UX3-7.md) | CH-20p minimum split promoted to Release in LATER.md (D-079 spec-diff); primary; unclaimed | building (A; from #405) |
 | UX4-2 | [Visible phone fallback and actionable errors](briefs/UX4-2.md) | P2-2w c4; primary; unclaimed | queued (A; from #417) |
 | UPD-7t | Soak plus attestations test and marker (UPD-7; brief to write) | — | building (C) |
 | FLASH-1 | [Signed flasher for Windows, Mac and Linux: verify the signature, write the stick, show the pairing QR](briefs/FLASH-1.md); also signs the raw image file and checks it in both the flasher and `agentos-seller`, which today trusts a main-built CI image by its SHA256SUMS only (I8, C3; from #1099 review) | CTRL-claim, G1 | queued (after G1, D-104; HW-10, A1; tier A) |
@@ -409,11 +407,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-daemon-b | REV-CHK-links-daemon-b: root-side path operations in fourteen small daemon packages go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | building |
 | REV-CHK-links-e2e | REV-CHK-links-e2e: root-side path operations in the image test harness (`boxe2e`) go through `privfile`, O_NOFOLLOW or a reasoned allow line | #3900 | queued |
 | REV-CHK-links-udev | REV-CHK-links-udev: the path lint counts binaries a udev rule runs (`agentos-hostdisk`) as root-side | #3900 | queued |
-| REV-CHK-crlf-b | trace.git_tree refuses invalid UTF-8 in old_core.txt; doclint.baseline_growth reads the base strictly (#3939 release findings). | #3939 | building |
 | REV-CHK-names-2 | Run the hostile-text corpus through the remaining name checks; fix boxname.Shape, recovery validName and kernel name, which accept fillers or blanks (#3901 follow-up). | #3901 | queued |
 | REV-CHK-links-privfile | REV-CHK-links-privfile: `WriteAtomic` refuses a directory that fails `Check`, so its remove and rename cannot be redirected by another uid | #3951 | building |
-| REV-CHK-mut-mark | Put `tools/mutgate.py` on the gate-file list (`premerge.py` MARK_PATHS), so a PR cannot weaken the mutation gate on L3 alone (Security finding on #3948). | #3948 | building |
-| REV-CHK-mut-names | The mutation gate's run fails when a gremlins `file_name` with a LIVED mutant is not a file in the package, so a changed name format cannot pass silently (Security finding on #3948). | #3948 | building |
 | UPD-7w | Wire the stable-release gate into a release check (UPD-5, UPD-7; brief briefs/UPD-7w.md, #4001) | #4001 (brief); build after #3979 and #3994 merge | queued (A; ready to build once #3979 and #3994 merge) |
 | REV-CHK-links-update-r | REV-CHK-links-update-r: drive sources open beneath their root; the remove allow line names Fetch's parent bound | #3979 | queued |
 | REV-CHK-links-update-l | REV-CHK-links-update-l: saved TUF metadata read fails closed; store parent chain root-only; tighter link test | #3979 | queued |
@@ -441,4 +436,11 @@ issue #3872: body has no board-row block
 issue #3883: body has no board-row block
 issue #4002: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4009: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4015: body has no board-row block
+issue #4016: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4018: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4019: body has no board-row block
+issue #4020: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
