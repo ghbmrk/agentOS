@@ -39,8 +39,9 @@ func CoreSet(v6 bool) string { return "core" + fam(v6) }
 // vlan with the addresses its allow list resolves to.
 func DeviceSet(vlan int, v6 bool) string { return "d" + strconv.Itoa(vlan) + fam(v6) }
 
-// TrafficSet is the set that counts, per address, the bytes the device on
-// vlan exchanged on connections the ruleset accepted, both ways (NET-5):
+// TrafficSet is the set that counts, per internet address, the bytes the
+// device on vlan exchanged on connections the ruleset accepted, both ways
+// (NET-5):
 // at most TrafficSize addresses per family, each dropped a day after its
 // last packet. TrafficOut and TrafficIn are the device's byte counters for
 // the same connections. Slice i's summaries read them; nothing is kept per
@@ -454,17 +455,18 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
-	// Each device's traffic on accepted connections is counted, by
-	// address, before the accept below (NET-5). Only established packets
-	// count, so an address the device was refused never enters its set.
+	// Each device's traffic on accepted connections is counted before the
+	// accept below (NET-5). Only established packets count: an address the
+	// device was refused never enters its set, and neither does the sender
+	// of a related packet such as an ICMP error, which anyone can forge.
 	if len(counted) > 0 {
 		var outs, ins []string
 		for _, v := range counted {
 			outs = append(outs, q(v.iface)+" : jump "+trafficChain(v.vlan, "out"))
 			ins = append(ins, q(v.iface)+" : jump "+trafficChain(v.vlan, "in"))
 		}
-		w.line("ct state established,related iifname vmap { " + strings.Join(outs, ", ") + " }")
-		w.line("ct state established,related oifname vmap { " + strings.Join(ins, ", ") + " }")
+		w.line("ct state established iifname vmap { " + strings.Join(outs, ", ") + " }")
+		w.line("ct state established oifname vmap { " + strings.Join(ins, ", ") + " }")
 	}
 	w.line("ct state established,related accept")
 	w.line("iifname " + wan + ` log prefix ` + q(LogInbound) + ` counter name ` + q(Inbound) + " drop")
@@ -542,18 +544,20 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("drop")
 	w.close()
 
-	// A device's counting chains: what it sends is counted by destination,
-	// what it receives by source.
+	// A device's counting chains: all its bytes are counted, and its
+	// internet traffic by address, what it sends by destination and what it
+	// receives by source. A peer at home (a box, a paired device, a person
+	// on Owner or Household) is never recorded by address (NET-1).
 	for _, v := range counted {
 		for _, dir := range []string{"out", "in"} {
-			c, addr := TrafficOut(v.vlan), "daddr"
+			c, addr, side := TrafficOut(v.vlan), "daddr", "oifname "
 			if dir == "in" {
-				c, addr = TrafficIn(v.vlan), "saddr"
+				c, addr, side = TrafficIn(v.vlan), "saddr", "iifname "
 			}
 			w.open("chain " + trafficChain(v.vlan, dir))
 			w.line("counter name " + q(c))
-			w.line("update @" + TrafficSet(v.vlan, false) + " { ip " + addr + " counter }")
-			w.line("update @" + TrafficSet(v.vlan, true) + " { ip6 " + addr + " counter }")
+			w.line(side + wan + " update @" + TrafficSet(v.vlan, false) + " { ip " + addr + " counter }")
+			w.line(side + wan + " update @" + TrafficSet(v.vlan, true) + " { ip6 " + addr + " counter }")
 			w.close()
 		}
 	}

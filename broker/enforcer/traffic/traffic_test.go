@@ -15,8 +15,6 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-func layout() nft.Layout { return nft.Layout{Trunk: "ap0", Guests: "gst0", Core: "core0"} }
-
 func doc() policy.Document {
 	return policy.Document{
 		Version: 1,
@@ -54,7 +52,7 @@ func listing(n int) []byte {
 
 func reader(n int) (*Reader, *Log) {
 	log := NewLog("ap0")
-	return &Reader{Policy: doc, Layout: layout(), List: func() ([]byte, error) { return listing(n), nil }, Log: log}, log
+	return &Reader{Policy: doc, List: func() ([]byte, error) { return listing(n), nil }, Log: log}, log
 }
 
 // keys is every JSON object key in b, at any depth.
@@ -112,7 +110,7 @@ func TestSummaryShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := keys(t, b), []string{"addr", "blocked", "blocked_to", "bytes_in", "bytes_out", "count", "destinations", "device", "more_blocked", "more_destinations"}; !slices.Equal(got, want) {
+	if got, want := keys(t, b), []string{"addr", "blocked", "blocked_to", "bytes_in", "bytes_out", "count", "destinations", "device", "more_blocked", "more_destinations", "truncated"}; !slices.Equal(got, want) {
 		t.Errorf("summary keys %q, want %q", got, want)
 	}
 	var s Summary
@@ -124,6 +122,9 @@ func TestSummaryShape(t *testing.T) {
 	}
 	if len(s.Destinations) != Top || s.MoreDestinations != 12-Top || s.Destinations[0] != (Dest{"11.0.0.11", 1100}) || s.Destinations[Top-1] != (Dest{"11.0.0.4", 400}) {
 		t.Errorf("destinations: %+v, %d more", s.Destinations, s.MoreDestinations)
+	}
+	if s.Truncated {
+		t.Error("a device with room left is marked truncated")
 	}
 	if s.Blocked != 3 || !slices.Equal(s.BlockedTo, []Dest{{"11.0.0.200", 2}, {"1.1.1.1", 1}}) || s.MoreBlocked != 0 {
 		t.Errorf("blocked: %d %+v", s.Blocked, s.BlockedTo)
@@ -140,8 +141,24 @@ func TestSummaryShape(t *testing.T) {
 	for i := range 500 {
 		blog.Line(fmt.Sprintf("enf drop IN=ap0.101 OUT=wan0 SRC=10.101.0.2 DST=11.1.%d.%d LEN=60", i/250, i%250), 2000)
 	}
-	if b, _ := busy.Read("tv"); len(b) > 1024 {
+	b, _ = busy.Read("tv")
+	if len(b) > 1024 {
 		t.Errorf("a busy device's summary is %d bytes", len(b))
+	}
+	// Truncated marks a full counting set, or a full refusal log, alone.
+	for name, c := range map[string]struct {
+		dests   int
+		refused int
+		want    bool
+	}{"room": {nft.TrafficSize - 1, nft.TrafficSize - 1, false}, "set full": {nft.TrafficSize, 0, true}, "log full": {3, nft.TrafficSize, true}} {
+		r, log := reader(c.dests)
+		for i := range c.refused {
+			log.Line(fmt.Sprintf("enf drop IN=ap0.101 OUT=wan0 DST=11.2.0.%d", i), 1)
+		}
+		var got Summary
+		if b, err := r.Read("tv"); err != nil || json.Unmarshal(b, &got) != nil || got.Truncated != c.want {
+			t.Errorf("%s: truncated %v, want %v (%v)", name, got.Truncated, c.want, err)
+		}
 	}
 	if n, by := blog.of(101); n != 500 || len(by) != nft.TrafficSize {
 		t.Errorf("the refusal log keeps %d addresses for %d refusals", len(by), n)
@@ -165,7 +182,7 @@ func TestSummaryShape(t *testing.T) {
 	// A camera with no traffic, and a radio lock with no IP path: zero.
 	for _, id := range []string{"cam", "lock"} {
 		b, err := r.Read(id)
-		if err != nil || string(b) != `{"device":"`+id+`","bytes_out":0,"bytes_in":0,"destinations":[],"more_destinations":0,"blocked":0,"blocked_to":[],"more_blocked":0}` {
+		if err != nil || string(b) != `{"device":"`+id+`","bytes_out":0,"bytes_in":0,"destinations":[],"more_destinations":0,"blocked":0,"blocked_to":[],"more_blocked":0,"truncated":false}` {
 			t.Errorf("%s: %s %v", id, b, err)
 		}
 	}

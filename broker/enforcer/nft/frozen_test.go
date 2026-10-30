@@ -4,11 +4,14 @@ package nft
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"net"
 	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -69,7 +72,8 @@ func TestFrozenIsolated(t *testing.T) {
 }
 
 // NET-5: the ruleset counts each device's bytes on accepted connections,
-// by address, both ways, and never counts an address it refused, so a
+// by address, both ways, and never counts an address it refused either
+// way (out to an unlisted host, in from the internet), so a
 // summary's destinations are only what the device reached. The counting
 // sets read back through the loader's listing.
 func TestDeviceTrafficCounted(t *testing.T) {
@@ -86,8 +90,35 @@ func TestDeviceTrafficCounted(t *testing.T) {
 	h.expect(
 		probe{from: "101", addr: netAllow, port: 80, want: connected, why: "allow list"},
 		probe{from: "101", addr: netOther, port: 80, why: "refused"},
+		probe{from: "isp", addr: devAddr(101), port: 80, why: "refused inbound from the internet"},
 		probe{from: "guest", addr: netOther, port: 80, want: connected, why: "a guest"},
+		probe{from: "household", addr: devAddr(105), port: 80, want: connected, why: "Household casts to its paired printer"},
 	)
+	// An unpaired device forges an ICMP error about the edge's open
+	// connection to the TV: conntrack calls it related, and it must not
+	// enter either device's counts.
+	var edgeConn net.Conn
+	within(t, h.hosts["edge"], func() {
+		var err error
+		if edgeConn, err = net.DialTimeout("tcp", devAddr(101)+":80", 2*time.Second); err != nil {
+			t.Fatalf("the edge to the TV's control port: %v", err)
+		}
+	})
+	defer edgeConn.Close()
+	lport := uint16(edgeConn.LocalAddr().(*net.TCPAddr).Port)
+	within(t, h.hosts["102"], func() {
+		c, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
+		if err != nil {
+			t.Fatalf("raw ICMP socket: %v", err)
+		}
+		defer c.Close()
+		for range 3 {
+			if _, err := c.WriteTo(icmpUnreachable(devAddr(101), segNets["edge"]+".2", 80, lport), &net.IPAddr{IP: net.ParseIP(devAddr(101))}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	time.Sleep(200 * time.Millisecond)
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {
 		t.Fatal(err)
@@ -139,10 +170,43 @@ func TestDeviceTrafficCounted(t *testing.T) {
 			t.Errorf("set %s counted %q", name, vals)
 		}
 	}
+	if counters[TrafficIn(102)] != 0 || counters[TrafficOut(102)] != 0 {
+		t.Errorf("a forged ICMP error counted for its sender: %d %d", counters[TrafficOut(102)], counters[TrafficIn(102)])
+	}
 	if !strings.Contains(string(b), `"name": "t101_4"`) && !strings.Contains(string(b), `"name":"t101_4"`) {
 		t.Error("the listing lacks the TV's counting set")
 	}
 	if _, err := (load.Loader{Bin: nftBin}).List(context.Background(), "enforcer; flush ruleset"); err == nil {
 		t.Error("List took a table name that is not an identifier")
 	}
+}
+
+// icmpUnreachable is an ICMP host-unreachable message about a TCP packet
+// from src:sport to dst:dport, as a router on that path would send it.
+func icmpUnreachable(src, dst string, sport, dport uint16) []byte {
+	inner := make([]byte, 28)
+	inner[0], inner[8], inner[9] = 0x45, 64, 6
+	binary.BigEndian.PutUint16(inner[2:], 40)
+	copy(inner[12:16], net.ParseIP(src).To4())
+	copy(inner[16:20], net.ParseIP(dst).To4())
+	binary.BigEndian.PutUint16(inner[10:], checksum(inner[:20]))
+	binary.BigEndian.PutUint16(inner[20:], sport)
+	binary.BigEndian.PutUint16(inner[22:], dport)
+	msg := append([]byte{3, 1, 0, 0, 0, 0, 0, 0}, inner...)
+	binary.BigEndian.PutUint16(msg[2:], checksum(msg))
+	return msg
+}
+
+func checksum(b []byte) uint16 {
+	var sum uint32
+	for i := 0; i+1 < len(b); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(b[i:]))
+	}
+	if len(b)%2 == 1 {
+		sum += uint32(b[len(b)-1]) << 8
+	}
+	for sum>>16 != 0 {
+		sum = sum&0xffff + sum>>16
+	}
+	return ^uint16(sum)
 }

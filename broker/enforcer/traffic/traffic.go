@@ -51,8 +51,8 @@ var (
 
 // Summary is one Devices-network device's traffic. BytesOut and BytesIn
 // count the connections the firewall accepted since the ruleset was last
-// loaded; Destinations are the addresses it exchanged traffic with in the
-// last day, by bytes; Blocked counts the packets it was refused in Log's
+// loaded; Destinations are the internet addresses it exchanged traffic
+// with in the last day, by bytes; Blocked counts the packets it was refused in Log's
 // window, and BlockedTo where, by packets.
 type Summary struct {
 	Device           string `json:"device"`
@@ -63,6 +63,9 @@ type Summary struct {
 	Blocked          uint64 `json:"blocked"`
 	BlockedTo        []Dest `json:"blocked_to"`
 	MoreBlocked      int    `json:"more_blocked"`
+	// Truncated says a counting set or the refusal log was full, so
+	// addresses past the first nft.TrafficSize are missing.
+	Truncated bool `json:"truncated"`
 }
 
 // Dest is one address and its count: bytes for a destination, packets for
@@ -85,8 +88,6 @@ type Guests struct {
 type Reader struct {
 	// Policy is the policy in force (policy.Engine.Current).
 	Policy func() policy.Document
-	// Layout is the firewall's layout, for the trunk's name.
-	Layout nft.Layout
 	// List is the firewall table as nft's JSON (load.Loader.List with
 	// nft.Table).
 	List func() ([]byte, error)
@@ -127,7 +128,9 @@ func (r *Reader) Read(device string) ([]byte, error) {
 	s.BytesOut, s.BytesIn = c[nft.TrafficOut(vlan)], c[nft.TrafficIn(vlan)]
 	dests := map[netip.Addr]uint64{}
 	for _, v6 := range []bool{false, true} {
-		for a, n := range sets[nft.TrafficSet(vlan, v6)] {
+		set := sets[nft.TrafficSet(vlan, v6)]
+		s.Truncated = s.Truncated || len(set) >= nft.TrafficSize
+		for a, n := range set {
 			dests[a] += n
 		}
 	}
@@ -135,6 +138,7 @@ func (r *Reader) Read(device string) ([]byte, error) {
 	if r.Log != nil {
 		var refused map[netip.Addr]uint64
 		s.Blocked, refused = r.Log.of(vlan)
+		s.Truncated = s.Truncated || len(refused) >= nft.TrafficSize
 		s.BlockedTo, s.MoreBlocked = top(refused)
 	}
 	return json.Marshal(s)
