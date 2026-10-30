@@ -7,8 +7,12 @@ import (
 )
 
 // Hidden replaces an outbound text that looks like it carries a code or a
-// key (CH-19).
-const Hidden = "I held back a message because it may contain a code or key. Read it on my Wi-Fi page."
+// key when it could not be kept for the owner page: it names no page
+// (CH-19, D-079). HiddenPointer replaces it once it is kept (keep.go).
+const (
+	Hidden        = "I held back a message because it may contain a code or key, and I could not keep it. Ask me to put it another way."
+	HiddenPointer = "I held back a message because it may contain a code or key. Read it on my Wi-Fi page."
+)
 
 // tokenFormats are known secret formats. They are fixed patterns, not
 // inference (ARC-2); Loop 2 regressions add to them (LOOP-10).
@@ -113,9 +117,10 @@ func codeLike(w string) bool {
 }
 
 // Disclose is the filter for owner-bound text whose content did not come
-// from the broker's own templates: secret-shaped text becomes a pointer to
-// the local UI. Broker-rendered texts carrying the broker's own CH-10 codes
-// do not pass through it.
+// from the broker's own templates: secret-shaped text becomes Hidden, which
+// says it was not kept; the channel's own filter keeps it and points to it
+// (Channel.disclose). Broker-rendered texts carrying the broker's own CH-10
+// codes do not pass through it.
 func Disclose(s string) string {
 	if SecretShaped(s) {
 		return Hidden

@@ -39,7 +39,7 @@ func (d DirSource) Open(name string) (io.ReadCloser, error) {
 	if !validTargetPath(name) {
 		return nil, fmt.Errorf("bad repository path %q", name)
 	}
-	return os.Open(filepath.Join(string(d), filepath.FromSlash(name)))
+	return os.OpenFile(filepath.Join(string(d), filepath.FromSlash(name)), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 }
 
 // Size limits for what a box reads before checking it.
@@ -266,7 +266,7 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{Dir: dir}
-	if _, err := os.Stat(s.p("root.json")); err == nil {
+	if _, err := os.Lstat(s.p("root.json")); err == nil {
 		return nil, errors.New("update store already initialised")
 	}
 	if err := durable.WriteFile(s.p("root.json"), root, 0o600); err != nil {
@@ -277,10 +277,25 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 
 func (s *Store) p(n string) string { return filepath.Join(s.Dir, n) }
 
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3942): a
+// store, drive or repository file is never a link, so one there was planted.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// remove is os.Remove, which unlinks a link at p itself and never follows
+// it; it is the package's only os.Remove, so pathops_allow.txt names it once.
+func remove(p string) error { return os.Remove(p) }
+
 // Installed reads the installed release.
 func (s *Store) Installed() (Installed, error) {
 	var in Installed
-	b, err := os.ReadFile(s.p("installed.json"))
+	b, err := readFile(s.p("installed.json"))
 	if err != nil {
 		return in, err
 	}
@@ -484,7 +499,7 @@ func (v *Verified) Fetch(src Source, targetPath, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer remove(tmp.Name())
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(rc, f.Length+1))
 	if err == nil {
@@ -530,7 +545,7 @@ type Result struct {
 // lock serializes checks and commits across processes sharing Dir, so two
 // writers cannot interleave saved metadata and lower the rollback floor.
 func (s *Store) lock() (func(), error) {
-	f, err := os.OpenFile(s.p(".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(s.p(".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +636,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rootBytes, err := os.ReadFile(s.p("root.json"))
+	rootBytes, err := readFile(s.p("root.json"))
 	if err != nil {
 		return Result{}, err
 	}
@@ -693,7 +708,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	// Timestamp: the saved one first, for rollback protection. If a root
 	// rotation changed the timestamp key it no longer verifies and is
 	// dropped (TUF 5.3.11).
-	if b, err := os.ReadFile(s.p("timestamp.json")); err == nil {
+	if b, err := readFile(s.p("timestamp.json")); err == nil {
 		tm.UpdateTimestamp(b)
 	}
 	tsBytes, err := readMeta(src, "metadata/timestamp.json")
@@ -711,7 +726,7 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, fmt.Errorf("%w: no timestamp", ErrBadRepository)
 	}
 
-	if b, err := os.ReadFile(s.p("snapshot.json")); err == nil {
+	if b, err := readFile(s.p("snapshot.json")); err == nil {
 		tm.UpdateSnapshot(b, true)
 	}
 	sm := tm.Timestamp.Signed.Meta["snapshot.json"]
@@ -820,7 +835,7 @@ func addKeys(seen map[string]bool, root *metadata.Metadata[metadata.RootType]) {
 
 func (s *Store) seenKeys() (map[string]bool, error) {
 	seen := map[string]bool{}
-	b, err := os.ReadFile(s.p("seen_keys.json"))
+	b, err := readFile(s.p("seen_keys.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return seen, nil
 	}
@@ -919,7 +934,7 @@ func (s *Store) writeAllowList(allowed, pinned map[string]bool) error {
 		fmt.Fprintf(h, "%d:%s\n", len(list), strings.Join(list, ","))
 	}
 	d := hex.EncodeToString(h.Sum(nil)) + "\n"
-	if b, err := os.ReadFile(s.p(allowListFile)); err == nil && string(b) == d {
+	if b, err := readFile(s.p(allowListFile)); err == nil && string(b) == d {
 		return nil
 	}
 	return durable.WriteFile(s.p(allowListFile), []byte(d), 0o600)
@@ -948,7 +963,7 @@ func (s *Store) recordOutside() error {
 // caller fails closed; ErrNoAnchor (a PC with no TPM) leaves the file
 // alone deciding, and is logged once.
 func (s *Store) outsideListed() (bool, error) {
-	_, err := os.Stat(s.p(outsideFile))
+	_, err := os.Lstat(s.p(outsideFile))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
@@ -985,7 +1000,7 @@ var noAnchorLogged atomic.Bool
 // sticky record is part of it, so no later list brings back a policy the
 // interim rule held under.
 func (s *Store) policy() (string, error) {
-	b, err := os.ReadFile(s.p(allowListFile))
+	b, err := readFile(s.p(allowListFile))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
@@ -1194,7 +1209,7 @@ func (s *Store) Stage(v *Verified) error {
 // Staged reads the staged release; ok is false when none is staged.
 func (s *Store) Staged() (Staged, bool, error) {
 	var st Staged
-	b, err := os.ReadFile(s.p("staged.json"))
+	b, err := readFile(s.p("staged.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return st, false, nil
 	}
@@ -1234,7 +1249,7 @@ func (s *Store) CommitStaged(version int64) error {
 		ManifestPath: st.ManifestPath, ManifestSHA256: st.ManifestSHA256}); err != nil {
 		return err
 	}
-	return os.Remove(s.p("staged.json"))
+	return remove(s.p("staged.json"))
 }
 
 // CommitRelease is CommitStaged for exactly the release r, and safe to
@@ -1284,7 +1299,7 @@ func (s *Store) CommitRelease(r Ref) error {
 
 // removeStaged removes staged.json durably; a missing file is no error.
 func (s *Store) removeStaged() error {
-	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return durable.SyncDir(s.Dir)
@@ -1299,7 +1314,7 @@ func (s *Store) DropStaged() error {
 		return err
 	}
 	defer unlock()
-	if err := os.Remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := remove(s.p("staged.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -1323,7 +1338,7 @@ var ErrPolicyMoved = errors.New("update: attestor policy changed since the relea
 // since its check: a key rotation or revocation, or newer targets, may no
 // longer vouch for it (L3 on #133).
 func (s *Store) trustUnchanged(v *Verified) error {
-	rb, err := os.ReadFile(s.p("root.json"))
+	rb, err := readFile(s.p("root.json"))
 	if err != nil {
 		return err
 	}
@@ -1331,7 +1346,7 @@ func (s *Store) trustUnchanged(v *Verified) error {
 	if err != nil {
 		return classify(err)
 	}
-	sb, err := os.ReadFile(s.p("snapshot.json"))
+	sb, err := readFile(s.p("snapshot.json"))
 	if err != nil {
 		return err
 	}

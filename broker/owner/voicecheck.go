@@ -9,11 +9,14 @@ import (
 )
 
 // HeldCode replaces agent text that mentions a code or takes the reply
-// grammar (CH-21): only the broker's own texts ask for a code. Nothing
-// keeps held text for the Wi-Fi page yet (#890), so this is CH-21's
-// could-not-be-kept text, not its pointer; #890's keep switches it to the
-// pointer.
-const HeldCode = "I held back a message because it mentioned a code, and I could not keep it. Ask me to put it another way."
+// grammar (CH-21) when it could not be kept for the owner page: only the
+// broker's own texts ask for a code, and this one names no page.
+// HeldCodePointer, CH-21's held text, replaces it once it is kept
+// (keep.go).
+const (
+	HeldCode        = "I held back a message because it mentioned a code, and I could not keep it. Ask me to put it another way."
+	HeldCodePointer = "I held back a message because it mentioned a code. Read it on my Wi-Fi page."
+)
 
 // The vocabulary and the reply grammar are the spec's, not a model (ARC-2).
 // Ordinary task text that uses the words is held; the spec says those

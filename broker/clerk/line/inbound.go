@@ -1,5 +1,7 @@
 package line
 
+import "strings"
+
 // MainNumberText answers the owner when they text the second line, as
 // modem/secondline's does (its copy, since the clerk does not link that
 // package).
@@ -37,7 +39,7 @@ type Reply struct {
 // number reaches no planner: it gets MainNumberText, at most once an hour.
 // Any other text is an untrusted item, logged as one (D-154 rule 7).
 func (c *Clerk) Inbound(t Text) (*Item, *Reply) {
-	if !t.Named && sameNumber(t.From, c.cfg.Numbers.Owner) {
+	if !t.Named && ownerSender(t.From, c.cfg.Numbers.Owner) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.lastMain != 0 && t.At-c.lastMain < mainEvery {
@@ -54,4 +56,30 @@ func (c *Clerk) Inbound(t Text) (*Item, *Reply) {
 	c.log(Entry{Kind: EntryInbound, From: it.Sender, Words: t.Words, Label: Label})
 	c.mu.Unlock()
 	return it, nil
+}
+
+// ownerSender says a vouched sender is the owner's number: exactly when it
+// is E.164, else only as the owner's national form, a trunk 0 allowed and
+// no country code (#3882). sameNumber's suffix rule, right for recipients,
+// would read a foreign number ending in the owner's digits as the owner.
+func ownerSender(from, owner string) bool {
+	if from == "" || owner == "" {
+		return false
+	}
+	if from == owner {
+		return true
+	}
+	n := strings.TrimPrefix(owner, "+")
+	d, plus := strings.CutPrefix(from, "+")
+	d = strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, d)
+	if plus {
+		return d == n
+	}
+	d = strings.TrimLeft(d, "0")
+	return len(d) >= 7 && len(d) < len(n) && strings.HasSuffix(n, d)
 }

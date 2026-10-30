@@ -350,12 +350,12 @@ func (s *Store) ProjectRoot() ([]byte, error) {
 
 // projectAnchor is ProjectRoot; the caller holds the lock and has settled.
 func (s *Store) projectAnchor() ([]byte, error) {
-	if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
-		return os.ReadFile(s.p("root.json"))
+	if _, err := os.Lstat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+		return readFile(s.p("root.json"))
 	} else if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(s.p(projectFile))
+	b, err := readFile(s.p(projectFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -392,7 +392,7 @@ type Followed struct {
 // follows the project.
 func (s *Store) Following() (Followed, error) {
 	var src Followed
-	b, err := os.ReadFile(s.p(sourceFile))
+	b, err := readFile(s.p(sourceFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return src, nil
 	}
@@ -414,7 +414,7 @@ func (s *Store) TrustedRoot() ([]byte, error) {
 	if err := s.settle(); err != nil {
 		return nil, err
 	}
-	return os.ReadFile(s.p("root.json"))
+	return readFile(s.p("root.json"))
 }
 
 // followFault, set only by tests, fails the switch before a step, as a
@@ -552,7 +552,7 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 	// The chain being left: Check keeps its keys in seen_keys only once
 	// it rotates, and they must never count once the box stops trusting
 	// them as signers (C8).
-	cur, err := os.ReadFile(s.p("root.json"))
+	cur, err := readFile(s.p("root.json"))
 	if err != nil {
 		return err
 	}
@@ -591,7 +591,7 @@ func (s *Store) follow(root []byte, approved, name string, o Options, admit func
 	// later switch back walks from (OSS-10w-r). It only raises the floor
 	// a switch back must meet, so a crash after it narrows.
 	if name != "" {
-		if _, err := os.Stat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Lstat(s.p(sourceFile)); errors.Is(err, os.ErrNotExist) {
 			if err := durable.WriteFile(s.p(projectFile), cur, 0o600); err != nil {
 				return err
 			}
@@ -638,7 +638,7 @@ func (s *Store) finishFollow(src Followed) error {
 		if err := step(n); err != nil {
 			return err
 		}
-		if err := os.Remove(s.p(n + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := remove(s.p(n + ".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -646,7 +646,7 @@ func (s *Store) finishFollow(src Followed) error {
 		return err
 	}
 	if src.Name == "" {
-		if err := os.Remove(s.p(sourceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := remove(s.p(sourceFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	} else {
@@ -658,7 +658,7 @@ func (s *Store) finishFollow(src Followed) error {
 	if err := step("done"); err != nil {
 		return err
 	}
-	if err := os.Remove(s.p(followFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := remove(s.p(followFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return durable.SyncDir(s.Dir)
@@ -669,7 +669,7 @@ func (s *Store) finishFollow(src Followed) error {
 // needs no settling, since a release checked under the old root fails
 // trustUnchanged once the root is written.
 func (s *Store) settle() error {
-	b, err := os.ReadFile(s.p(followFile))
+	b, err := readFile(s.p(followFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -680,7 +680,7 @@ func (s *Store) settle() error {
 	if err := json.Unmarshal(b, &want); err != nil {
 		return fmt.Errorf("update: unreadable switch record: %v", err)
 	}
-	root, err := os.ReadFile(s.p("root.json"))
+	root, err := readFile(s.p("root.json"))
 	if err != nil {
 		return err
 	}
@@ -689,7 +689,7 @@ func (s *Store) settle() error {
 	}
 	// The root was never written: the old chain stands. What was written
 	// (seen keys, the interim flag) only narrows.
-	if err := os.Remove(s.p(followFile)); err != nil {
+	if err := remove(s.p(followFile)); err != nil {
 		return err
 	}
 	return durable.SyncDir(s.Dir)
