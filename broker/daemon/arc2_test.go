@@ -314,7 +314,7 @@ var stdExceptions = map[string][]string{
 	"sockets":         {"net", "syscall"}, // Unix listeners, SO_PEERCRED, flock
 	"cmd/agentosd":    {"syscall"},        // signal numbers for shutdown
 	"journal":         {"syscall"},        // flock on the journal file
-	"kernel/privfile": {"syscall"},        // O_NOFOLLOW, *at calls on the open directory, and Stat_t for the owner-only check
+	"kernel/privfile": {"syscall"},        // O_NOFOLLOW and Stat_t for the owner-only check
 	"pageca":          {"net", "syscall"}, // x509's excluded IP ranges are net.IPNet; O_NOFOLLOW and Stat_t for the sealed file
 	"loops":           {"syscall"},        // O_NOFOLLOW, O_NONBLOCK for the tamper digest (P3-4b-4c-nofollow)
 }

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 )
 
@@ -53,39 +52,31 @@ func ownOnly(path string, fi os.FileInfo, dir bool) error {
 // by a crash is never read and is replaced here. stop, for tests only, ends
 // the write after step i as a crash would; nil runs every step.
 //
-// dir is opened once, not followed if it is a link, and refused unless no
-// other uid can write it (openDir); the removal, create and rename then work
-// on that open directory, so another uid can neither swap name.tmp for a link
-// that the rename installs at name nor swap dir itself (#3954).
+// dir is opened once as an os.Root and refused unless it was not a link and
+// no other uid can write it (openDir); the removal, create and rename then
+// work on that open directory, so another uid can neither swap name.tmp for
+// a link that the rename installs at name nor swap dir itself (#3954).
 func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
-	d, err := openDir(dir)
+	r, err := openDir(dir)
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	fd, tmp := int(d.Fd()), name+".tmp"
+	defer r.Close()
+	tmp := name + ".tmp"
 	var f *os.File
 	steps := []func() error{
 		func() error {
-			if err := syscall.Unlinkat(fd, tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return &os.PathError{Op: "remove", Path: filepath.Join(dir, tmp), Err: err}
+			if err := r.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
 			}
-			t, err := syscall.Openat(fd, tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o600)
-			if err != nil {
-				return &os.PathError{Op: "open", Path: filepath.Join(dir, tmp), Err: err}
-			}
-			f = os.NewFile(uintptr(t), filepath.Join(dir, tmp))
-			return nil
+			var err error
+			f, err = r.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+			return err
 		},
 		func() error { _, err := f.Write(b); return err },
 		func() error { return f.Sync() },
 		func() error { return f.Close() },
-		func() error {
-			if err := syscall.Renameat(fd, tmp, fd, name); err != nil { // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is sealed content, not a lifecycle, and the next step syncs the directory
-				return &os.LinkError{Op: "rename", Old: filepath.Join(dir, tmp), New: filepath.Join(dir, name), Err: err}
-			}
-			return nil
-		},
+		func() error { return r.Rename(tmp, name) }, // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the new core cannot list here; this is sealed content, not a lifecycle, and the next step syncs the directory
 		func() error {
 			if err := SyncDir(dir); err != nil {
 				return fmt.Errorf("%w: %w", ErrUnsynced, err)
@@ -110,35 +101,41 @@ func WriteAtomic(dir, name string, b []byte, stop func(i int) bool) error {
 	return nil
 }
 
-// openDir opens dir without following a link at it, and refuses it unless
-// it is a directory that no other uid can write: owned by this uid or root,
-// with no group or other write bit. That is weaker than Check, which also
-// refuses a readable directory, because some callers' directories are
-// legitimately 0755 (agentosd's StateDirectoryMode). ACLs are not read.
-func openDir(dir string) (*os.File, error) {
-	d, err := os.OpenFile(dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+// openDir opens dir as a root and refuses it unless it is a directory, not
+// a link, that no other uid can write: owned by this uid or root, with no
+// group or other write bit. os.OpenRoot follows a link at dir, so the opened
+// directory must be the one an Lstat of dir names afterwards. The rule is
+// weaker than Check, which also refuses a readable directory, because some
+// callers' directories are legitimately 0755 (agentosd's
+// StateDirectoryMode). ACLs are not read.
+func openDir(dir string) (*os.Root, error) {
+	r, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
-	fi, err := d.Stat()
+	fi, err := r.Stat(".")
+	if err == nil {
+		var li os.FileInfo
+		if li, err = os.Lstat(dir); err == nil && !os.SameFile(fi, li) {
+			err = fmt.Errorf("run: %s: a link, or swapped while opened", dir)
+		}
+	}
+	if err == nil {
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		switch {
+		case !ok:
+			err = fmt.Errorf("run: %s: no owner", dir)
+		case int(st.Uid) != os.Geteuid() && st.Uid != 0:
+			err = fmt.Errorf("run: %s: owned by uid %d, not this uid or root", dir, st.Uid)
+		case fi.Mode().Perm()&0o022 != 0:
+			err = fmt.Errorf("run: %s: other uids can write it (%v)", dir, fi.Mode().Perm())
+		}
+	}
 	if err != nil {
-		d.Close()
+		r.Close()
 		return nil, err
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	switch {
-	case !ok:
-		err = fmt.Errorf("run: %s: no owner", dir)
-	case int(st.Uid) != os.Geteuid() && st.Uid != 0:
-		err = fmt.Errorf("run: %s: owned by uid %d, not this uid or root", dir, st.Uid)
-	case fi.Mode().Perm()&0o022 != 0:
-		err = fmt.Errorf("run: %s: other uids can write it (%v)", dir, fi.Mode().Perm())
-	}
-	if err != nil {
-		d.Close()
-		return nil, err
-	}
-	return d, nil
+	return r, nil
 }
 
 // ErrStopped ends a write that its stop hook stopped, as a crash would.
