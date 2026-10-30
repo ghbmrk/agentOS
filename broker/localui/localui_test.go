@@ -83,6 +83,7 @@ type fakeHooks struct {
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool            // the box cannot text: BoxNumber answers "", false
+	noNumber    bool            // the SIM reports no number: BoxNumber answers "", true
 	keyErr      error           // ConnectAPIKey's answer when set; nothing is stored
 	deviceErr   error           // StartDeviceCode's answer when set
 	deviceLink  string          // StartDeviceCode's link when set
@@ -104,6 +105,9 @@ func (f *fakeHooks) BoxNumber() (string, bool) {
 	defer f.mu.Unlock()
 	if f.noTexts {
 		return "", false
+	}
+	if f.noNumber {
+		return "", true
 	}
 	return boxNum, true
 }
