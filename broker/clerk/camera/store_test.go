@@ -759,3 +759,48 @@ func TestAddTakesAKeptCamera(t *testing.T) {
 		t.Fatal("the kept retention's sweep went on after the Add")
 	}
 }
+
+// slowKeys holds Make until release closes, after telling entered.
+type slowKeys struct {
+	SegmentKeys
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (k slowKeys) Make(camera string) error {
+	close(k.entered)
+	<-k.release
+	return k.SegmentKeys.Make(camera)
+}
+
+// REQ: DEV-7
+// TestSweepWaitsForAdd: a sweep that runs while Add takes a camera back
+// (a restart's Add, or a kept camera's retry) waits for its retention, so
+// capture within that retention stays: neither the kept retention nor
+// the new camera's unset one deletes it.
+func TestSweepWaitsForAdd(t *testing.T) {
+	r := newStoreRig(t, nil)
+	r.s.Add(testID, time.Hour)
+	r.feed(t, testID, 3, time.Second)
+	r.s.Flush()
+	want := len(r.segments(t, testID))
+	k := slowKeys{nil, make(chan struct{}), make(chan struct{})}
+	r.open(t, func(c *StoreConfig) { k.SegmentKeys = c.Keys; c.Keys = k })
+	r.s.Keep(testID, 0)
+	added := make(chan error, 1)
+	go func() { added <- r.s.Add(testID, time.Hour) }()
+	<-k.entered
+	swept := make(chan error, 1)
+	go func() { swept <- r.s.Sweep() }()
+	time.Sleep(50 * time.Millisecond) // a sweep that does not wait runs now
+	close(k.release)
+	if err := <-added; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-swept; err != nil {
+		t.Fatal(err)
+	}
+	if got := len(r.segments(t, testID)); got != want {
+		t.Fatalf("a sweep beside Add left %d of %d segments", got, want)
+	}
+}

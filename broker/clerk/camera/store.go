@@ -204,12 +204,6 @@ func (s *Store) Add(camera string, retention time.Duration) error {
 		return ErrNode
 	}
 	s.mu.Lock()
-	if s.cams[camera] != nil {
-		s.mu.Unlock()
-		return ErrNode
-	}
-	h := &held{}
-	s.cams[camera] = h
 	k := s.kept[camera]
 	s.mu.Unlock()
 	if k != nil {
@@ -218,9 +212,25 @@ func (s *Store) Add(camera string, retention time.Duration) error {
 		k.mu.Lock()
 		defer k.mu.Unlock()
 	}
-	if err := s.setRetention(camera, h, retention); err != nil {
+	// h is locked before it is published, so no sweep reads it before its
+	// retention is set: a sweep under its zero value would delete capture
+	// still within the owner's retention.
+	h := &held{}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s.mu.Lock()
+	if s.cams[camera] != nil || s.kept[camera] != k {
+		s.mu.Unlock()
+		return ErrNode
+	}
+	s.cams[camera] = h
+	s.mu.Unlock()
+	if err := s.setRetentionLocked(camera, h, retention); err != nil {
+		h.gone = true
 		s.mu.Lock()
-		delete(s.cams, camera)
+		if s.cams[camera] == h {
+			delete(s.cams, camera)
+		}
 		s.mu.Unlock()
 		return err
 	}
@@ -275,11 +285,16 @@ func (s *Store) SetRetention(camera string, retention time.Duration) error {
 }
 
 func (s *Store) setRetention(camera string, h *held, retention time.Duration) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return s.setRetentionLocked(camera, h, retention)
+}
+
+// setRetentionLocked is setRetention held under h.mu.
+func (s *Store) setRetentionLocked(camera string, h *held, retention time.Duration) error {
 	if retention < 0 || retention > MaxRetention {
 		return ErrRetention
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.gone {
 		return ErrUnknown
 	}
