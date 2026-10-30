@@ -348,9 +348,11 @@ func (c *Channel) NotifyNow(text string) error {
 }
 
 // checkAgent strips agent-derived text of control and bidi characters
-// (control.StripControls), refuses a reaction form, and discloses it
-// (AgentSecret), so the reaction check and CH-19 read the text the
-// owner's phone shows (CH-12). Callers send the text it returns.
+// (control.StripControls), refuses a reaction form, discloses it
+// (AgentSecret), and holds text that mentions a code or takes the reply
+// grammar (AgentVoice, CH-21), so the reaction check, CH-19 and CH-21
+// read the text the owner's phone shows (CH-12). Callers send the text it
+// returns.
 func checkAgent(text string) (string, error) {
 	s := control.StripControls(text)
 	if err := refuseReaction(s); err != nil {
@@ -358,6 +360,10 @@ func checkAgent(text string) (string, error) {
 	}
 	if AgentSecret(text) {
 		return Hidden, nil
+	}
+	if AgentVoice(text) {
+		holdVoice()
+		return HeldCode, nil
 	}
 	return s, nil
 }
@@ -372,13 +378,16 @@ func AgentSecret(text string) bool {
 	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
 }
 
-// agentText strips and discloses agent-derived text, prefixes it with
-// AgentPrefix unless it was withheld, and fits it to one text in the
+// agentText strips, discloses and checks agent-derived text, prefixes it
+// with AgentPrefix unless it was withheld, and fits it to one text in the
 // encoding it needs, emoji and line breaks kept (CH-12).
 func agentText(text string) string {
-	if text != Hidden {
+	if text != Hidden && text != HeldCode {
 		if AgentSecret(text) {
 			text = Hidden
+		} else if AgentVoice(text) {
+			holdVoice()
+			text = HeldCode
 		} else {
 			text = AgentPrefix + control.StripControls(text)
 		}
