@@ -774,7 +774,16 @@ func TestParse(t *testing.T) {
 	if c, err := parse(append(append([]string{}, good...), "-page-ca-file", "/p2", "-page-ca-cert", "/c/a"), io.Discard); err != nil || c.pageCAFile != "/p2" {
 		t.Fatalf("enroll with a staged authority: %+v %v", c, err)
 	}
+	if c, err := parse([]string{"-codes", "-state", "/s", "-setup-dir", "/d"}, io.Discard); err != nil || !c.codes {
+		t.Fatalf("codes: %+v %v", c, err)
+	}
+	if c, err := parse(append(append([]string{}, good...), "-code-seed-file", "/d/code-seed"), io.Discard); err != nil || c.codeSeed != "/d/code-seed" {
+		t.Fatalf("enroll with a staged code seed: %+v %v", c, err)
+	}
 	for _, bad := range [][]string{
+		{"-codes", "-state", "/s"},
+		{"-codes", "-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-cert", "/c/a"},
+		append(append([]string{}, good...), "-code-seed-file", "code-seed"),
 		{"-stage-page-ca", "-page-ca-file", "/s/p"},
 		{"-stage-page-ca", "-page-ca-file", "p", "-page-ca-cert", "/c/a"},
 		{"-stage-page-ca", "-take-factors", "-state", "/s", "-setup-dir", "/d", "-page-ca-file", "/s/p", "-page-ca-cert", "/c/a"},
