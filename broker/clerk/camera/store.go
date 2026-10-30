@@ -130,6 +130,9 @@ type Store struct {
 
 	mu   sync.Mutex
 	cams map[string]*held
+	// kept are connected cameras Add refused: the sweep leaves their
+	// directories and keys alone until Erase.
+	kept map[string]bool
 }
 
 // held is one camera's capture. mu orders its frames, writes and erase;
@@ -179,7 +182,7 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Store{cfg: cfg, cams: map[string]*held{}}, nil
+	return &Store{cfg: cfg, cams: map[string]*held{}, kept: map[string]bool{}}, nil
 }
 
 // Format prints no field, whatever the verb.
@@ -210,6 +213,24 @@ func (s *Store) Add(camera string, retention time.Duration) error {
 		delete(s.cams, camera)
 		s.mu.Unlock()
 		return err
+	}
+	s.mu.Lock()
+	delete(s.kept, camera)
+	s.mu.Unlock()
+	return nil
+}
+
+// Keep holds back the sweep from a connected camera that Add refused (its
+// sealed key slot failing): its directory and key stay until Erase or a
+// later Add, and a frame for it is refused (#3968).
+func (s *Store) Keep(camera string) error {
+	if !idRe.MatchString(camera) {
+		return ErrNode
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cams[camera] == nil {
+		s.kept[camera] = true
 	}
 	return nil
 }
@@ -364,6 +385,7 @@ func (s *Store) Erase(camera string) error {
 	s.mu.Lock()
 	h := s.cams[camera]
 	delete(s.cams, camera)
+	delete(s.kept, camera)
 	s.mu.Unlock()
 	if h != nil {
 		h.mu.Lock()
@@ -423,8 +445,9 @@ func (s *Store) ids() []string {
 // Sweep is the retention sweep: an open segment past its span is written;
 // a segment past its camera's retention is deleted; a camera with no
 // retention, or not added, keeps nothing on disk, and one not added loses
-// its key too (a camera disconnected while the store was down). Run it
-// after Add has taken every connected camera, then on a timer.
+// its key too (a camera disconnected while the store was down); one Kept
+// is left as it is. Run it after Add has taken (or Keep has held) every
+// connected camera, then on a timer.
 func (s *Store) Sweep() error {
 	now := s.cfg.Now()
 	var werr, first error
@@ -463,7 +486,7 @@ func (s *Store) Sweep() error {
 		// erase and lose its new key.
 		s.mu.Lock()
 		switch {
-		case s.cams[id] != nil:
+		case s.cams[id] != nil, s.kept[id]:
 		case !idRe.MatchString(id):
 			keep(os.RemoveAll(filepath.Join(s.cfg.Dir, id)))
 		default:

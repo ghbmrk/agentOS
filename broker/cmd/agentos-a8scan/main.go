@@ -298,10 +298,12 @@ var clerkPurposes = map[string]string{
 	"agentos.clerk.key.v1":     "key of clerk ",
 	"agentos.clerk.sealer.v1":  "sealer key of clerk ",
 	"agentos.clerk.handles.v1": "handle secret of clerk ",
+	"agentos.clerk.signer.v1":  "signing key of clerk ",
 }
 
 // clerkNeedles are clerk c's keys under the clerk root key: the key the
-// kernel hands it, and the sealer key and handle secret it derives.
+// kernel hands it, and the sealer key, handle secret and signing key it
+// derives.
 func clerkNeedles(root []byte, c string) ([]Needle, error) {
 	var r [clerkkey.Len]byte
 	copy(r[:], root)
@@ -317,10 +319,15 @@ func clerkNeedles(root []byte, c string) ([]Needle, error) {
 	if err != nil {
 		return nil, err
 	}
+	sg, err := k.Signer()
+	if err != nil {
+		return nil, err
+	}
 	return []Needle{
 		{Name: "key of clerk " + c, Value: bytes.Clone(k.Key[:])},
 		{Name: "sealer key of clerk " + c, Value: sl},
 		{Name: "handle secret of clerk " + c, Value: hs},
+		{Name: "signing key of clerk " + c, Value: sg.Seed()},
 	}, nil
 }
 

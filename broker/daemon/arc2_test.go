@@ -119,7 +119,7 @@ var controlPath = map[string][]string{
 	// It hosts the follow clerk on kernel/proc's clerk socket, under the
 	// owner's anchors read with clerk/handoff (#3430); kernel/proc serves
 	// and dials only unix sockets (netOK in inference_test.go).
-	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "recall", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
+	"cmd/agentosd": {"daemon", "admission", "cgroup", "budget", "accel", "vm", "vm/gvisor", "guest", "meter", "modelroute", "journal", "owner", "change", "loops", "question", "clock", "grants", "workers", "quota", "modemlink", "guesterr", "localapi", "localsrv", "sockets", "follow", "update", "bridgeproto", "modem", "control", "mail", "mail/mailsock", "verb", "provagent", "owner/notice", "owner/notice/noticesock", "infer", "infer/supervise", "vision", "vision/supervise", "checker/checkersock", "localsrv/accountsock", "owner/kernelsock", "kernel/key", "kernel/privfile", "backup", "kernel/proc", "follow/followclerk", "clerk/handoff"},
 }
 
 // compositionRoot links the machine plane, so its transitive dependencies
@@ -193,11 +193,6 @@ var guestPlane = map[string]struct {
 	// and the anchor co-signature check (kernel/key) that makes enrolment
 	// the owner's tier-4 step; no socket, process or system call of its own.
 	"vision/faces": {[]string{"vision", "kernel/key"}, forbiddenStd},
-	// Recall (CAP-3) and the event bus (CAP-4) are broker state served to
-	// guests as tools: no network clients, no processes, no inference
-	// beyond the in-process hashing embedder (DEP-1).
-	"recall": {nil, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
-	"events": {[]string{"recall"}, []string{"net", "net/http", "os/exec", "plugin", "unsafe", "C"}},
 	// Worker machines (CAP-8): served to guests as tools over the machine
 	// manager; no journal, no executors, no network clients, no processes
 	// (commands run through vm/gvisor's runsc exec).
@@ -293,7 +288,10 @@ var enforcer = map[string]struct {
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action"}, enforcerWebForbid},
+	// Asserted safety-list actions (slice s): once-only owner challenges;
+	// the page serves them and the daemon wires their actuator.
+	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},

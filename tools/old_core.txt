@@ -6,7 +6,6 @@
 broker/journal
 broker/grants
 broker/vault
-broker/recall
 broker/egress
 broker/holder
 broker/checker

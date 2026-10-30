@@ -19,6 +19,10 @@ const (
 	tlvSeparator     = 0xff
 )
 
+// methodRemovePairing is the /pairings method that removes one pairing
+// (HAP R2 table 5-3).
+const methodRemovePairing = 4
+
 // Bounds on accessory TLV8 (hostile input): pairing messages are under a
 // kilobyte; nothing here needs more than 4 KiB or 16 items.
 const (
