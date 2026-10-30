@@ -42,10 +42,11 @@ import (
 // are paused and planning stops, until the owner resumes with a passkey on
 // the owner page (ResumeTrip), never a texted RESUME (KEY-4, CH-11). A trip
 // while that holds still narrows: its session stops and its scope pauses.
-// Only a full trip that pauses a key not already paused moves what the
-// resume signs, so repeats cannot void it. Every trip is logged with a
-// fixed-template security text (CH-15); a full trip that pauses nothing new,
-// and repeats of a session or call trip within TextWindow, send none.
+// Only a full trip none of whose IDs (root, links, account) is already
+// paused moves what the resume signs; a key a session derives shares its
+// root and account, so deriving fresh keys cannot void it. Every trip is logged with a fixed-template
+// security text (CH-15); a full trip sharing an ID already paused, and
+// repeats of a session or call trip within TextWindow, send none.
 
 // Trip entry types.
 const (
@@ -175,17 +176,18 @@ func (k *Kernel) CallTrip(now int64, exit string, a netip.Addr) error {
 
 // TripResumeHash names the n-th trip resume, lifting every pause up to the
 // full trip logged at last, so a signature never replays and never lifts a
-// key a later trip paused. A trip that pauses no key not already paused,
-// and every session or call trip, leaves last as it is, so a hostile session
-// repeating trips cannot void the owner's signature.
+// key a later trip paused under a root and account not paused before. A
+// full trip sharing any ID already paused, and every session or call trip,
+// leaves last as it is: a hostile session can derive keys but never a root,
+// so repeats cannot void the owner's signature.
 func TripResumeHash(n int, last uint64) [32]byte {
 	b := binary.BigEndian.AppendUint64([]byte("agentos.trip.resume.v1\x00"), uint64(n))
 	return sha256.Sum256(binary.BigEndian.AppendUint64(b, last))
 }
 
 // TripResume is what the owner page asks the passkey to sign: the resume's
-// number and the newest full trip that paused something new; ok is false
-// when no trip's pause is in force.
+// number and the newest full trip sharing no ID already paused; ok is
+// false when no trip's pause is in force.
 func (s *State) TripResume() (n int, last uint64, ok bool) {
 	d := &s.decoys
 	if !d.held() {
@@ -229,7 +231,7 @@ var tripTexts = map[string]string{
 }
 
 // SecurityTexts is the texts for the owner line to send, oldest first: one
-// per full trip that paused something new, and one per session or call trip
+// per full trip sharing no ID already paused, and one per session or call trip
 // unless one of its response was texted within TextWindow before it.
 func (s *State) SecurityTexts() []SecurityText {
 	var out []SecurityText
@@ -419,10 +421,15 @@ func (s *State) addTrip(t Trip, e Entry) {
 		if d.paused == nil {
 			d.paused = map[key.ID]bool{}
 		}
+		seen := false // any ID of the chain or its account already paused
+		for _, id := range t.Scopes {
+			_, ok := d.paused[id]
+			seen = seen || ok
+		}
+		t.fresh = t.fresh || len(t.Scopes) > 0 && !seen
 		for _, id := range t.Scopes {
 			if _, ok := d.paused[id]; !ok {
 				d.paused[id] = s.Changes.Paused[id]
-				t.fresh = true
 			}
 			s.Changes.Paused[id] = true
 		}

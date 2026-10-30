@@ -480,9 +480,13 @@ func TestRepeatTripsDuringAPauseKeepTheResume(t *testing.T) {
 			t.Fatalf("%s: refused %q, want %q", id, r.k.State().Plans[id].Reject, kernel.CTrip)
 		}
 	}
+	// Keys the session derives afresh share the paused root and account.
+	for i := 0; i < 5; i++ {
+		r.plan(fmt.Sprintf("derived%d", i), r.derive(key.LimitUses(int64(i+1))), st(key.Trash, entry(t, tb, decoy.PHostJackpot).Value))
+	}
 	must(t, r.k.CallTrip(30, kernel.ExitEgress, decoy.Metadata))
-	if got := len(r.k.State().Trips()); got != 22 {
-		t.Fatalf("%d trips logged, want every one of 22", got)
+	if got := len(r.k.State().Trips()); got != 27 {
+		t.Fatalf("%d trips logged, want every one of 27", got)
 	}
 	if got := len(r.k.State().SecurityTexts()); got != 3 {
 		t.Fatalf("%d texts, want one full, one session and one call", got)
@@ -571,6 +575,8 @@ func TestPlanTripIsInItsRejection(t *testing.T) {
 	for _, body := range []string{
 		fmt.Sprintf(`{"cause":"value","exit":"kernel","entry":%d,"response":"full","plan":"ok"}`, ix),
 		fmt.Sprintf(`{"cause":"value","exit":"kernel","entry":%d,"response":"session","plan":"ok","session":"t1"}`, ix),
+		// a honey key at Extend names only a plan held on its spend
+		fmt.Sprintf(`{"cause":"honey-key","exit":"kernel","entry":%d,"response":"session","plan":"ok","session":"t1"}`, entryIndex(t, tb2, entry(t, tb2, decoy.PPlannerView))),
 	} {
 		l := base[len(base)-1]
 		es := append(slices.Clone(base), kernel.Entry{Seq: l.Seq + 1, At: l.At, Type: kernel.TTrip, V: 1, Body: json.RawMessage(body)})
