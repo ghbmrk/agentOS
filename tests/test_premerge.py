@@ -150,7 +150,8 @@ class PremergeTest(unittest.TestCase):
         git(self.r, "checkout", "-q", "main")
         self.resolve("DECISIONS.md", "| D-3 | main |\n")
         git(self.r, "checkout", "-q", "pr")
-        subprocess.run(["git", "merge", "-q", "main"], cwd=self.r, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
         self.resolve("DECISIONS.md", "| D-3 | main |\n| D-4 | mine |\n")
         self.assertEqual(self.check(reviewed), ["DECISIONS.md"])  # note.md still names D-3, now main's row
         self.write("note.md", "Per D-4, the PR does this.\n")
@@ -169,7 +170,8 @@ class PremergeTest(unittest.TestCase):
         self.write("x_allow.txt", "# header\nallow a\nallow b\nallow m\n")
         self.commit("main")
         git(self.r, "checkout", "-q", "pr")
-        merge = subprocess.run(["git", "merge", "-q", "main"], cwd=self.r, capture_output=True)
+        merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
         self.assertNotEqual(merge.returncode, 0, "the merge was meant to conflict")
         return reviewed
 
@@ -199,7 +201,8 @@ class PremergeTest(unittest.TestCase):
         self.write("b.txt", "b\nc\n")
         self.commit("main")
         git(self.r, "checkout", "-q", "pr")
-        subprocess.run(["git", "merge", "-q", "main"], cwd=self.r, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
         self.write("b.txt", "c\nb\n")
         self.commit("reordered")
         self.assertEqual(self.check(reviewed), ["b.txt"])
