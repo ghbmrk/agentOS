@@ -218,7 +218,8 @@ def cmd_report(args):
 
 def broker_diff(base, head):
     return subprocess.run(
-        ["git", "diff", "-U0", f"{base}...{head}", "--", "broker"],
+        # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
+        ["git", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
 
