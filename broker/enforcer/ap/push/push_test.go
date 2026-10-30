@@ -218,15 +218,24 @@ func TestDriftRepushed(t *testing.T) {
 	}
 
 	// Watch: drift between ticks is put back by the next one.
+	// The test waits for Watch to return, and a Sync that the cancel
+	// itself cuts short is not a failure.
 	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
 	reports := make(chan Result, 16)
-	go p.Watch(wctx, 20*time.Millisecond, func() ([]ap.File, error) { return config(), nil }, func(r Result, err error) {
-		if err != nil {
-			t.Errorf("watch: %v", err)
-		}
-		reports <- r
-	})
+	go func() {
+		defer close(done)
+		p.Watch(wctx, 20*time.Millisecond, func() ([]ap.File, error) { return config(), nil }, func(r Result, err error) {
+			if err != nil && wctx.Err() == nil {
+				t.Errorf("watch: %v", err)
+			}
+			select {
+			case reports <- r:
+			default:
+			}
+		})
+	}()
 	<-reports
 	f.set(ap.PathNetwork, []byte("config interface 'lan'\n\toption proto 'static'\n"))
 	deadline := time.After(5 * time.Second)
