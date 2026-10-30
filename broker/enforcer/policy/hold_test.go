@@ -89,3 +89,25 @@ func TestFreezeIsLoosening(t *testing.T) {
 		t.Errorf("a hold already in force: %+v", got)
 	}
 }
+
+// NET-3, NET-7: Linked is the firewall's rule for a pair's end (nft
+// TestPathsFollowLinked checks the two agree): an Owner or Household
+// device always, a Devices-network device only with a Wi-Fi identity,
+// unisolated and unheld, anything else never. Catches a hold that leaves
+// a device's pairs open, or one that cuts a whole network's.
+func TestLinked(t *testing.T) {
+	d := edit(2, func(d *Document) {
+		d.Devices = append(d.Devices,
+			Device{ID: "phone", Network: NetOwner},
+			Device{ID: "laptop", Network: NetHousehold},
+			Device{ID: "guest", Network: NetGuests},
+			Device{ID: "old", Network: NetDevices, WiFi: "vlan106", Isolated: true})
+		d.Holds = []Hold{{Device: "cam", Kind: HoldFirmware}, {Device: "laptop", Kind: HoldFix}, {Device: "phone", Kind: HoldFirmware}}
+	})
+	want := map[string]bool{"phone": true, "laptop": true, "tv": true, "plug": true, "cam": false, "lock": false, "guest": false, "old": false, "nobody": false}
+	for id, w := range want {
+		if got := d.Linked(id); got != w {
+			t.Errorf("Linked(%q) = %v, want %v", id, got, w)
+		}
+	}
+}

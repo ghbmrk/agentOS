@@ -80,6 +80,24 @@ func Describe(old, next policy.Document) []string {
 	for _, h := range holdsMinus(old.Holds, next.Holds) {
 		add("%s", holdWords(h, false))
 	}
+	// NET-3, NET-7: a hold, an isolation or a lost Wi-Fi identity cuts a
+	// signed pair's path without removing the pair, so say which pairs
+	// stop, start again, or are signed without a path.
+	for _, p := range next.Pairs {
+		is := next.Linked(p.A) && next.Linked(p.B)
+		if !slices.Contains(old.Pairs, p) {
+			if !is {
+				add("%s and %s cannot talk to each other while %s.", p.A, p.B, unlinked(next, p))
+			}
+			continue
+		}
+		switch was := old.Linked(p.A) && old.Linked(p.B); {
+		case was && !is:
+			add("%s and %s stop talking to each other while %s.", p.A, p.B, unlinked(next, p))
+		case !was && is:
+			add("%s and %s talk to each other again.", p.A, p.B)
+		}
+	}
 	// NET-7: a lock or an alarm is held only on a screen that names the
 	// risk; the policy refuses a diff without one line per such hold.
 	for _, h := range policy.RiskHolds(old, next) {
@@ -282,18 +300,42 @@ func labelWords(l string) string {
 	return "not containable"
 }
 
-// holdWords is a hold's line. A device under any hold loses its pairs
-// (policy.Document.Unpatched, broker/enforcer/nft), so each line says so.
 func holdWords(h policy.Hold, on bool) string {
 	switch {
 	case h.Kind == policy.HoldFix && on:
-		return fmt.Sprintf("Hold back security fixes for %s: it stays open to the flaws they fix, and its pairs with other devices stop until no hold is left on it.", h.Device)
+		return fmt.Sprintf("Hold back security fixes for %s: it stays open to the flaws they fix.", h.Device)
 	case h.Kind == policy.HoldFix:
-		return fmt.Sprintf("Stop holding back security fixes for %s: its pairs with other devices apply again once no hold is left on it.", h.Device)
+		return fmt.Sprintf("Stop holding back security fixes for %s.", h.Device)
 	case on:
-		return fmt.Sprintf("Freeze %s's firmware: it gets no updates, security fixes included, and its pairs with other devices stop until no hold is left on it.", h.Device)
+		return fmt.Sprintf("Freeze %s's firmware: it gets no updates, security fixes included.", h.Device)
 	}
-	return fmt.Sprintf("Unfreeze %s's firmware: its pairs with other devices apply again once no hold is left on it.", h.Device)
+	return fmt.Sprintf("Unfreeze %s's firmware.", h.Device)
+}
+
+// unlinked is why the pair p has no path in d: each end that is not
+// policy.Document.Linked, and why.
+func unlinked(d policy.Document, p policy.Pair) string {
+	var why []string
+	for _, id := range []string{p.A, p.B} {
+		dev := d.Device(id)
+		switch {
+		case dev == nil || d.Linked(id):
+			continue
+		case dev.Network != policy.NetDevices:
+			why = append(why, fmt.Sprintf("%s is on the %s network", id, dev.Network))
+			continue
+		}
+		if dev.WiFi == "" {
+			why = append(why, fmt.Sprintf("%s has no Wi-Fi identity", id))
+		}
+		if dev.Isolated {
+			why = append(why, fmt.Sprintf("%s is isolated", id))
+		}
+		if d.Unpatched(id) {
+			why = append(why, fmt.Sprintf("%s's updates are held back", id))
+		}
+	}
+	return strings.Join(why, " and ")
 }
 
 func window(r policy.StandingRule) string {

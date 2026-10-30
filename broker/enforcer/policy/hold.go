@@ -12,9 +12,9 @@ var ErrRiskNotShown = errors.New("policy: a hold on a lock or alarm needs a conf
 
 // Unpatched reports whether the device's firmware is frozen or a security
 // fix is held back for it (NET-7): either way it counts as unpatched, so
-// the firewall isolates it and cuts its outbound access to its allow list
-// (broker/enforcer/nft). Both holds are loosenings, so only the owner can
-// set them, and lifting one is a loosening too.
+// none of its pairs has a path (Linked) while its outbound access stays
+// its allow list (broker/enforcer/nft). Both holds are loosenings, so only
+// the owner can set them, and lifting one is a loosening too.
 func (d Document) Unpatched(device string) bool {
 	for _, h := range d.Holds {
 		if h.Device == device {
@@ -22,6 +22,24 @@ func (d Document) Unpatched(device string) bool {
 		}
 	}
 	return false
+}
+
+// Linked reports whether a pair with the device has a path at the
+// device's end (NET-3, NET-7). An Owner or Household device always does,
+// since that end is the whole network; a Devices-network device only with
+// a Wi-Fi identity (its VLAN), not isolated and not unpatched; any other
+// device never. broker/enforcer/nft compiles a pair to a path only when
+// both ends are linked, and the page says when a change breaks or makes
+// one.
+func (d Document) Linked(device string) bool {
+	dev := d.Device(device)
+	switch {
+	case dev == nil:
+		return false
+	case dev.Network == NetOwner || dev.Network == NetHousehold:
+		return true
+	}
+	return dev.Network == NetDevices && dev.WiFi != "" && !dev.Isolated && !d.Unpatched(device)
 }
 
 // Risk is what a hold on a device of class risks, for a lock or an alarm,

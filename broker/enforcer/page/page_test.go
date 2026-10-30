@@ -969,23 +969,62 @@ func TestHoldOnLockNamesRisk(t *testing.T) {
 	}
 }
 
-// NET-7: a hold cuts the device's pairs (nft drops an unpatched device's
-// pairs), so the line the owner signs says so, and the line lifting it says
-// they apply again.
+// NET-3, NET-7: a hold cuts a pair's path only where the firewall does
+// (policy.Document.Linked), and the screen says which pairs stop and start
+// again, and why: a held Devices-network device's pair stops; a held
+// Household device's pair, which keeps its path, gets no such line; lifting
+// one of two holds, or the hold on an isolated or VLAN-less device, starts
+// nothing; and a pair signed without a path says why.
 func TestHoldNamesLostPairs(t *testing.T) {
-	paired := edit(7, func(d *policy.Document) { d.Pairs = []policy.Pair{{A: "cam", B: "tv"}} })
-	for _, kind := range []string{policy.HoldFirmware, policy.HoldFix} {
-		held := edit(8, func(d *policy.Document) {
-			d.Pairs = []policy.Pair{{A: "cam", B: "tv"}}
-			d.Holds = []policy.Hold{{Device: "tv", Kind: kind}}
+	doc := func(v uint64, holds []policy.Hold, f func(d *policy.Document)) policy.Document {
+		return edit(v, func(d *policy.Document) {
+			d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
+			d.Pairs = []policy.Pair{{A: "cam", B: "tv"}, {A: "laptop", B: "cam"}}
+			d.Holds = holds
+			if f != nil {
+				f(d)
+			}
 		})
-		on := strings.Join(Describe(paired, held), "\n")
-		if !strings.Contains(on, "tv") || !strings.Contains(on, "its pairs with other devices stop until no hold is left on it") {
-			t.Errorf("%s on: the line does not say the pairs stop: %q", kind, on)
+	}
+	tv := []policy.Hold{{Device: "tv", Kind: policy.HoldFirmware}}
+	for _, c := range []struct {
+		name      string
+		old, next policy.Document
+		want      []string
+	}{
+		{"freeze", doc(7, nil, nil), doc(8, tv, nil), []string{"cam and tv stop talking to each other while tv's updates are held back."}},
+		{"hold", doc(7, nil, nil), doc(8, []policy.Hold{{Device: "tv", Kind: policy.HoldFix}}, nil), []string{"cam and tv stop talking to each other while tv's updates are held back."}},
+		{"unfreeze", doc(7, tv, nil), doc(8, nil, nil), []string{"cam and tv talk to each other again."}},
+		{"from Household", doc(7, nil, nil), doc(8, []policy.Hold{{Device: "cam", Kind: policy.HoldFirmware}}, nil), []string{
+			"cam and tv stop talking to each other while cam's updates are held back.",
+			"laptop and cam stop talking to each other while cam's updates are held back.",
+		}},
+		{"household", doc(7, nil, nil), doc(8, []policy.Hold{{Device: "laptop", Kind: policy.HoldFirmware}}, nil), nil},
+		{"one of two", doc(7, append(tv, policy.Hold{Device: "tv", Kind: policy.HoldFix}), nil), doc(8, tv, nil), nil},
+		{"isolated", doc(7, tv, func(d *policy.Document) { dev(d, "tv").Isolated = true }), doc(8, nil, func(d *policy.Document) { dev(d, "tv").Isolated = true }), nil},
+		{"no VLAN", doc(7, []policy.Hold{{Device: "lock", Kind: policy.HoldFirmware}}, func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "lock"}) }),
+			doc(8, nil, func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "lock"}) }), nil},
+		{"isolate", doc(7, nil, nil), doc(8, nil, func(d *policy.Document) { dev(d, "tv").Isolated = true }), []string{"cam and tv stop talking to each other while tv is isolated."}},
+		{"a guest", doc(7, nil, nil), doc(8, nil, func(d *policy.Document) {
+			d.Devices = append(d.Devices, policy.Device{ID: "visitor", Network: policy.NetGuests})
+			d.Pairs = append(d.Pairs, policy.Pair{A: "visitor", B: "tv"})
+		}), []string{"visitor and tv cannot talk to each other while visitor is on the " + policy.NetGuests + " network."}},
+		{"signed without a path", doc(7, tv, nil), doc(8, tv, func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "lock", B: "tv"}) }),
+			[]string{"lock and tv cannot talk to each other while lock has no Wi-Fi identity and tv's updates are held back."}},
+	} {
+		for _, d := range []policy.Document{c.old, c.next} {
+			if _, err := policy.Encode(d); err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
 		}
-		off := strings.Join(Describe(held, paired), "\n")
-		if !strings.Contains(off, "its pairs with other devices apply again once no hold is left on it") {
-			t.Errorf("%s off: the line does not say the pairs apply again: %q", kind, off)
+		var got []string
+		for _, l := range Describe(c.old, c.next) {
+			if strings.Contains(l, "talk") && !strings.HasPrefix(l, "Let ") {
+				got = append(got, l)
+			}
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: pair lines %q, want %q", c.name, got, c.want)
 		}
 	}
 }

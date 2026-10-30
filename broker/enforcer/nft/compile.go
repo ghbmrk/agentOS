@@ -126,10 +126,6 @@ type device struct {
 	vlan  int
 	iface string
 	d     policy.Device
-	// unpatched: its firmware is frozen or a security fix is held back
-	// (NET-7), so it is isolated: no signed pair opens a path to or from
-	// it, and its outbound access stays its allow list.
-	unpatched bool
 }
 
 // Path rules (NET-2 Device paths, Cameras and microphones), from the
@@ -198,7 +194,7 @@ func devices(d policy.Document, l Layout) ([]device, error) {
 			return nil, fmt.Errorf("%w: devices %q and %q share VLAN %d", ErrPolicy, other, dev.ID, n)
 		}
 		seen[n] = dev.ID
-		out = append(out, device{vlan: n, iface: l.Trunk + "." + strconv.Itoa(n), d: dev, unpatched: d.Unpatched(dev.ID)})
+		out = append(out, device{vlan: n, iface: l.Trunk + "." + strconv.Itoa(n), d: dev})
 	}
 	slices.SortFunc(out, func(a, b device) int { return a.vlan - b.vlan })
 	return out, nil
@@ -215,8 +211,9 @@ type Path struct {
 // pairs compiles the signed pairs (NET-3, NET-2 Device paths). A pair is
 // between two Devices-network devices, or from an Owner or Household
 // device to one: those two networks share one password each, so that side
-// of the pair is the whole network. A pair with an isolated, unpatched
-// (NET-7) or VLAN-less device has no path.
+// of the pair is the whole network. A pair has a path only when both ends
+// are policy.Document.Linked: never with an isolated, unpatched (NET-7) or
+// VLAN-less device.
 func pairs(d policy.Document, l Layout, devs []device) ([]Path, error) {
 	byID := map[string]device{}
 	for _, v := range devs {
@@ -235,7 +232,7 @@ func pairs(d policy.Document, l Layout, devs []device) ([]Path, error) {
 			return "", false, false, fmt.Errorf("%w: pair with %q on %q", ErrPolicy, id, dev.Network)
 		}
 		v, ok := byID[id]
-		return v.iface, true, ok && !v.d.Isolated && !v.unpatched, nil
+		return v.iface, true, ok && d.Linked(id), nil
 	}
 	var out []Path
 	for _, p := range d.Pairs {

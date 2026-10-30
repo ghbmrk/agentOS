@@ -71,6 +71,28 @@ func TestFrozenIsolated(t *testing.T) {
 	)
 }
 
+// NET-3, NET-7: a pair has a path exactly when both its ends are
+// policy.Document.Linked, the rule the page states to the owner, under
+// holds on every network's devices and an isolation. Catches the page
+// and the firewall disagreeing about which pairs a hold cuts.
+func TestPathsFollowLinked(t *testing.T) {
+	household := fixturePolicy()
+	household.Holds = []policy.Hold{{Device: "laptop", Kind: policy.HoldFirmware}}
+	for name, d := range map[string]policy.Document{"fixture": fixturePolicy(), "frozen": frozenPolicy(), "household hold": household} {
+		for _, p := range d.Pairs {
+			one := d
+			one.Pairs = []policy.Pair{p}
+			paths, err := Paths(one, fixtureLayout())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if linked := d.Linked(p.A) && d.Linked(p.B); linked != (len(paths) == 1) {
+				t.Errorf("%s: pair %+v linked %v, paths %+v", name, p, linked, paths)
+			}
+		}
+	}
+}
+
 // NET-5: the ruleset counts each device's bytes on accepted connections,
 // by address, both ways, and never counts an address it refused either
 // way (out to an unlisted host, in from the internet), so a
