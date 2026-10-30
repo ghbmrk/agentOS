@@ -1,6 +1,6 @@
 package quota
 
-// A link planted at a file this package reads is refused, not followed
+// A link or FIFO planted at a directory this package opens is refused, not followed
 // (REV-CHK-links, #3945).
 
 import (
@@ -10,19 +10,6 @@ import (
 	"syscall"
 	"testing"
 )
-
-// plantLink makes p a link to a real file holding b, as another uid that could
-// write p's directory would.
-func plantLink(t *testing.T, p string, b []byte) {
-	t.Helper()
-	real := p + ".real"
-	if err := os.WriteFile(real, b, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(real, p); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestPlantedLinksAreRefused(t *testing.T) {
 	dir := t.TempDir()
@@ -40,5 +27,4 @@ func TestPlantedLinksAreRefused(t *testing.T) {
 	if err := (&FS{dir: dir}).Limit(fifo, 1, 0, 0); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("Limit on a FIFO: %v, want ENOTDIR, not a hang", err)
 	}
-	_ = plantLink
 }
