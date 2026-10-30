@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -765,5 +766,36 @@ func TestTheEnrolmentNoticeIsNotHeldBack(t *testing.T) {
 	// joins the groups.
 	if !owner.SecretShaped("approved by hardware key 9f48 889a 51b9") {
 		t.Fatal("the filter no longer reads a spaced fingerprint as a code; the dashes can go")
+	}
+}
+
+// The enrolment notice is security class: a page that holds the owner's tap
+// and finishes it in quiet hours, with the hour's texts spent, still has
+// the owner told at once, never held or dropped behind later texts
+// (#3228, CH-15). main.go wires it through alertOwner.
+func TestTheEnrolmentNoticeIsNeverHeld(t *testing.T) {
+	o := pacedOwner(t, quiet22to7(), at23)
+	for range owner.DefaultTextsPerHour {
+		if err := o.ch.Post(owner.ClassSecurity, "Alert."); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o.sent()
+	r := newPasskeyRig(t)
+	r.p.Tell = alertOwner(func() *owner.Channel { return o.ch })
+	phone := newAuthenticator(t)
+	if err := r.enrol("s1", phone, r.anchors[0]); err != nil {
+		t.Fatal(err)
+	}
+	want := enrolledNotice(phone.public(t), r.anchors[0].public(t))
+	if got := o.sent(); len(got) != 1 || got[0] != want {
+		t.Fatalf("sent %q, want at once %q", got, want)
+	}
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "newPasskeys(*seat, passkeyRPID, alertOwner(") {
+		t.Fatal("main.go no longer wires the enrolment notice through alertOwner")
 	}
 }

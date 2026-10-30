@@ -44,8 +44,8 @@ type passkeys struct {
 	K    passkeyKernel
 	RPID string
 	Now  func() time.Time
-	// Tell texts the owner (informOwner): each phone passkey this agentosd
-	// enrols is announced once (#3228).
+	// Tell texts the owner (alertOwner, never held): each phone passkey
+	// this agentosd enrols is announced once (#3228).
 	Tell func(string) error
 
 	mu      sync.Mutex
