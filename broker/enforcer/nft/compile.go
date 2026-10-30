@@ -52,20 +52,31 @@ const (
 	GuestsOut   = "guests_out"
 	GuestsIn    = "guests_in"
 	GuestsConns = "guests_conns"
-	Inbound     = "inbound"     // new connections from the internet
-	Blocked     = "blocked"     // forwarded traffic no rule allowed
-	CoreDevice  = "core_device" // connections the core starts to a device's control port
-	CoreStream  = "core_stream" // connections the core starts to a camera's or microphone's stream port
-	EdgeDevice  = "edge_device" // connections the edge starts to a device
-	EdgeIn      = "edge_in"     // anything the edge sends the enforcer itself
-	RADropped   = "ra_dropped"  // router advertisements from any segment
-	DNSOutside  = "dns_outside" // a device's outside or encrypted DNS
-	APAdminDrop = "ap_admin"    // the access point's admin from anywhere but the admin port
-	ISPDrop     = "isp"         // the ISP router's admin or LAN
-	CoreEdge    = "core_edge"   // between the core's and the edge's segments
+	Inbound     = "inbound"      // new connections from the internet
+	Blocked     = "blocked"      // forwarded traffic no rule allowed
+	CoreDevice  = "core_device"  // connections the core starts to a device's control port
+	CoreStream  = "core_stream"  // connections the core starts to a camera's or microphone's stream port
+	EdgeDevice  = "edge_device"  // connections the edge starts to a device
+	EdgeIn      = "edge_in"      // anything the edge sends the enforcer itself
+	RADropped   = "ra_dropped"   // router advertisements from any segment
+	DNSOutside  = "dns_outside"  // a device's outside or encrypted DNS
+	DNSRedirect = "dns_redirect" // a device's port-53 traffic answered by the enforcer
+	Spoofed     = "spoofed"      // a source address not routed back out of its interface
+	APAdminDrop = "ap_admin"     // the access point's admin from anywhere but the admin port
+	ISPDrop     = "isp"          // the ISP router's admin or LAN
+	CoreEdge    = "core_edge"    // between the core's and the edge's segments
 )
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, APAdminDrop, ISPDrop, CoreEdge}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge}
+
+// The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
+// only on the interfaces of signed pairs, and the Wake-on-LAN relay hears
+// the core only.
+const (
+	MDNSPort  = 5353
+	MDNSGroup = "224.0.0.251"
+	WoLPort   = 9
+)
 
 // Addresses that are not the internet (the IANA special-purpose blocks
 // that route nowhere public). No segment reaches them through the WAN.
@@ -158,11 +169,12 @@ func devices(d policy.Document, l Layout) ([]device, error) {
 	return out, nil
 }
 
-// path is one signed pair compiled to interfaces: from may start
-// connections to to, and both may when both are devices.
-type path struct {
-	from, to string
-	both     bool
+// Path is one signed pair compiled to interfaces: From may start
+// connections to To, and both may when Both (two devices). Slice f's mDNS
+// relay passes records along the same paths (Paths).
+type Path struct {
+	From, To string
+	Both     bool
 }
 
 // pairs compiles the signed pairs (NET-3, NET-2 Device paths). A pair is
@@ -170,7 +182,7 @@ type path struct {
 // device to one: those two networks share one password each, so that side
 // of the pair is the whole network. A pair with an isolated or VLAN-less
 // device has no path.
-func pairs(d policy.Document, l Layout, devs []device) ([]path, error) {
+func pairs(d policy.Document, l Layout, devs []device) ([]Path, error) {
 	byID := map[string]device{}
 	for _, v := range devs {
 		byID[v.d.ID] = v
@@ -190,7 +202,7 @@ func pairs(d policy.Document, l Layout, devs []device) ([]path, error) {
 		v, ok := byID[id]
 		return v.iface, true, ok && !v.d.Isolated, nil
 	}
-	var out []path
+	var out []Path
 	for _, p := range d.Pairs {
 		a, aDev, aLive, err := end(p.A)
 		if err != nil {
@@ -205,32 +217,74 @@ func pairs(d policy.Document, l Layout, devs []device) ([]path, error) {
 			return nil, fmt.Errorf("%w: pair %q-%q has no device on the devices network", ErrPolicy, p.A, p.B)
 		case !aLive || !bLive:
 		case aDev && bDev:
-			out = append(out, path{from: a, to: b, both: true})
+			out = append(out, Path{From: a, To: b, Both: true})
 		case aDev:
-			out = append(out, path{from: b, to: a})
+			out = append(out, Path{From: b, To: a})
 		default:
-			out = append(out, path{from: a, to: b})
+			out = append(out, Path{From: a, To: b})
 		}
 	}
-	slices.SortFunc(out, func(x, y path) int { return strings.Compare(x.from+" "+x.to, y.from+" "+y.to) })
+	slices.SortFunc(out, func(x, y Path) int { return strings.Compare(x.From+" "+x.To, y.From+" "+y.To) })
 	return slices.Compact(out), nil
+}
+
+// compiled checks the layout and the document and gives the devices with a
+// VLAN and the signed pairs' paths, which every export below shares.
+func compiled(d policy.Document, l Layout) ([]device, []Path, error) {
+	if err := l.Check(); err != nil {
+		return nil, nil, err
+	}
+	if _, err := policy.Encode(d); err != nil {
+		return nil, nil, fmt.Errorf("%w: %v", ErrPolicy, err)
+	}
+	devs, err := devices(d, l)
+	if err != nil {
+		return nil, nil, err
+	}
+	paths, err := pairs(d, l, devs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return devs, paths, nil
+}
+
+// Paths is the signed pairs' paths the ruleset opens, which are the only
+// paths slice f's mDNS relay passes records on (NET-3 Casting).
+func Paths(d policy.Document, l Layout) ([]Path, error) {
+	_, paths, err := compiled(d, l)
+	return paths, err
+}
+
+// AllowSet is one allow set the ruleset declares and the names whose
+// answers slice f's resolver puts in it.
+type AllowSet struct {
+	Set4, Set6 string
+	Names      []string
+}
+
+// AllowSets is every allow set the ruleset declares: the core's, with its
+// signed destinations, then each device's that reaches the internet, with
+// its allow list, by VLAN. A device the ruleset gives no internet has no
+// set, so no answer reaches it (NET-2 The core's list, NET-3).
+func AllowSets(d policy.Document, l Layout) ([]AllowSet, error) {
+	devs, _, err := compiled(d, l)
+	if err != nil {
+		return nil, err
+	}
+	out := []AllowSet{{Set4: CoreSet(false), Set6: CoreSet(true), Names: slices.Clone(d.Destinations)}}
+	for _, v := range devs {
+		if v.internet() {
+			out = append(out, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true), Names: slices.Clone(v.d.Allow)})
+		}
+	}
+	return out, nil
 }
 
 // Compile is the ruleset for one policy document on one layout: a single
 // text that starts by flushing the running ruleset, so loading it replaces
 // everything in one transaction. The same inputs give the same bytes.
 func Compile(d policy.Document, l Layout) (string, error) {
-	if err := l.Check(); err != nil {
-		return "", err
-	}
-	if _, err := policy.Encode(d); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrPolicy, err)
-	}
-	devs, err := devices(d, l)
-	if err != nil {
-		return "", err
-	}
-	paths, err := pairs(d, l, devs)
+	devs, paths, err := compiled(d, l)
 	if err != nil {
 		return "", err
 	}
@@ -279,6 +333,21 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	served := "{ " + strings.Join([]string{q(l.Owner), q(l.Household), q(l.Guests), q(l.Admin), q(l.Core), T}, ", ") + " }"
 	edge, core, wan := q(l.Edge), q(l.Core), q(l.WAN)
 
+	// Reverse path, on every interface: a packet whose source address is
+	// not routed back out of the interface it came in on is dropped before
+	// conntrack or any service sees it, so no segment can pose as the
+	// upstream resolver, the internet or another segment, and a forged
+	// answer never reaches the resolver that fills the allow sets (NET-2
+	// The core's list). The unspecified sources of a DHCP request and of
+	// IPv6 address setup have no route and pass to the rules below.
+	w.open("chain rpf")
+	w.line("type filter hook prerouting priority raw; policy accept;")
+	w.line(`iif "lo" accept`)
+	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
+	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
+	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
+	w.close()
+
 	w.open("chain input")
 	w.line("type filter hook input priority filter; policy drop;")
 	w.line(`iif "lo" accept`)
@@ -297,6 +366,28 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("iifname " + served + " tcp dport 53 accept")
 	w.line("iifname { " + q(l.Owner) + ", " + q(l.Admin) + " } tcp dport " + port(l.PagePort) + " accept")
 	w.line("iifname " + core + " tcp dport " + port(l.ChannelPort) + " accept")
+	// Slice f's relays: the Wake-on-LAN relay hears only the core, and the
+	// mDNS relay only the two ends of a signed pair (NET-2, NET-3).
+	w.line("iifname " + core + " udp dport " + strconv.Itoa(WoLPort) + " accept")
+	var ends []string
+	for _, p := range paths {
+		for _, e := range []string{p.From, p.To} {
+			if !slices.Contains(ends, q(e)) {
+				ends = append(ends, q(e))
+			}
+		}
+	}
+	if len(ends) > 0 {
+		slices.Sort(ends)
+		w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
+	}
+	w.close()
+
+	// A device's DNS to anywhere is answered by the enforcer's own
+	// resolver (NET-3), so only names on a list resolve.
+	w.open("chain prerouting")
+	w.line("type nat hook prerouting priority dstnat; policy accept;")
+	w.line("iifname " + T + " meta l4proto { tcp, udp } th dport 53 counter name " + q(DNSRedirect) + " redirect")
 	w.close()
 
 	w.open("chain forward")
@@ -356,9 +447,9 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		}
 	}
 	for _, p := range paths {
-		if p.both {
-			w.line("iifname " + q(p.from) + " oifname " + q(p.to) + " accept")
-			w.line("iifname " + q(p.to) + " oifname " + q(p.from) + " accept")
+		if p.Both {
+			w.line("iifname " + q(p.From) + " oifname " + q(p.To) + " accept")
+			w.line("iifname " + q(p.To) + " oifname " + q(p.From) + " accept")
 		}
 	}
 	w.line(`log prefix "enf drop " counter name ` + q(Blocked) + " drop")
@@ -377,8 +468,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("oifname " + wan + " accept")
 	w.line("iifname " + q(l.Owner) + " oifname " + core + " tcp dport " + port(l.CorePagePort) + " accept")
 	for _, p := range paths {
-		if !p.both {
-			w.line("iifname " + q(p.from) + " oifname " + q(p.to) + " accept")
+		if !p.Both {
+			w.line("iifname " + q(p.From) + " oifname " + q(p.To) + " accept")
 		}
 	}
 	w.line("drop")
