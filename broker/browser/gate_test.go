@@ -564,6 +564,16 @@ func TestHungEffectIsLost(t *testing.T) {
 	if got := forwarded(t, r.h, "click"); len(got) > 1 {
 		t.Fatalf("driver got %q", got)
 	}
+
+	// The clerk holds any written post unknown, so submit's own lost bit
+	// is checked at the gate.
+	r = newCart(t, map[string]any{"click": "hang"}, 0)
+	r.h.g.cfg.Timeout = 300 * time.Millisecond
+	r.run(t, 1, "ask", r.root, read(pressOrder))
+	a = r.stepApproval(t, "ask")
+	if res, written, lost := r.h.g.submit(context.Background(), []byte(pressOrder), a.To, a.Print, false, nil); res.Error != "timeout" || !written || !lost {
+		t.Fatalf("gate submit: %+v written=%v lost=%v", res, written, lost)
+	}
 }
 
 func TestDriverExitIsReportedNotHidden(t *testing.T) {
