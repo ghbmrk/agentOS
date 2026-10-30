@@ -15,13 +15,13 @@ Every row is tier A. A suite with no source is an error from the runner, which `
 | Row | What | Scope | After |
 |---|---|---|---|
 | **b1** (#4032) | The host-side runner: cases from the installed release, a sandbox session per suite run, scoring by host graders, fail closed | `broker/vm/requal/` | #4033 |
-| b2 | The production sandbox: the release's `/usr` image, checked against its `UsrRootHash`, run read-only under gVisor with no network and one case socket; plus the in-image case driver it talks to | `broker/vm/`, `image/` | b1 |
-| b3 | Security suite as log data: §16's injection tests and HLD-5's minimized regression cases, append-only, removable only by an owner key; its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
-| b4 | Held-out suite: one outcome record per goal (KRN-9) and the dev/held-out split (HLD-3); its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
-| b5 | Replay suite: recorded clerk responses in the log, and the host check that counts steps the recorded keys would not admit (HLD-2) | kernel and clerk (D-159 row first), `broker/vm/requal/` | b1, b4 |
-| b6 | Wiring: `update.NewRequalifier` with the runner, passed to UPD-7w's check in `cmd/agentosd` | `broker/cmd/agentosd/` | b2, UPD-7w (#3961) |
+| b2 (#4044) | The production sandbox: the release's `/usr` image, checked against its `UsrRootHash`, run read-only under gVisor with no network and one case socket; plus the in-image case driver it talks to | `broker/vm/`, `image/` | b1 |
+| b3 (#4045) | Security suite as log data: §16's injection tests and HLD-5's minimized regression cases, append-only, removable only by an owner key; its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
+| b4 (#4046) | Held-out suite: one outcome record per goal (KRN-9) and the dev/held-out split (HLD-3); its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
+| b5 (#4047) | Replay suite: recorded clerk responses in the log, and the host check that counts steps the recorded keys would not admit (HLD-2) | kernel and clerk (D-159 row first), `broker/vm/requal/` | b1, b4 |
+| b6 (#4048) | Wiring: `update.NewRequalifier` with the runner, passed to UPD-7w's check in `cmd/agentosd` | `broker/cmd/agentosd/` | b2, UPD-7w (#3961) |
 
-b2 to b6 are filed as their own `work-item` issues when b1's PR opens; each one's builder writes its full brief section here.
+b2 to b6 are their own `work-item` issues; each one's builder writes its full brief section here.
 
 ## b1: the host-side runner
 
