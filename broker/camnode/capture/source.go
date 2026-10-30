@@ -134,7 +134,9 @@ func (c *Camera) run(stop chan struct{}, open func() (func() (camwire.Frame, err
 		defer c.wg.Done()
 		for {
 			// A closed stop wins over a restart that came due in the same
-			// instant, so a halted camera never starts another producer.
+			// instant, so a camera that sees stop closed starts no producer.
+			// One opened as stop closes is killed by its watcher, and halt
+			// waits for it.
 			select {
 			case <-stop:
 				return

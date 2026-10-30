@@ -293,9 +293,9 @@ func TestCameraRunsEncoder(t *testing.T) {
 }
 
 // TestHaltedCameraStartsNothing: a producer whose stop is already closed
-// opens nothing, even when its restart is due at the same moment (the
-// "encoder started with the stream off" flake). Revert mutant: run without
-// its stop check before open.
+// opens nothing, with its restart due at once. It reaches the check before
+// open on the first pass, which is the check that also stops a restart
+// chosen as stop closes. Revert mutant: run without that check.
 func TestHaltedCameraStartsNothing(t *testing.T) {
 	c := New(Config{Restart: time.Nanosecond})
 	stop := make(chan struct{})
