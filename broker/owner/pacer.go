@@ -206,7 +206,7 @@ func (c *Channel) PostAbout(class Class, text string, subjects []string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.postHeld(class, HeldText{Text: control.Fit(Disclose(text)), Subjects: append([]string(nil), subjects...)})
+	return c.postHeld(class, HeldText{Text: control.Fit(c.disclose(text)), Subjects: append([]string(nil), subjects...)})
 }
 
 // checkPacing fails a bad saved setting closed to the defaults (QH-1).
@@ -227,7 +227,7 @@ func (c *Channel) Post(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	return c.post(class, control.Fit(Disclose(text)), false)
+	return c.post(class, control.Fit(c.disclose(text)), false)
 }
 
 // postTemplate is Post for a broker template, such as an alert carrying
@@ -297,7 +297,7 @@ func (c *Channel) NotifyAs(class Class, text string) error {
 	if c.cfg.Modem == nil {
 		return errors.New("owner: no modem")
 	}
-	text, err := checkAgent(text)
+	text, err := c.checkAgent(text)
 	if err != nil {
 		return err
 	}
@@ -326,7 +326,7 @@ func (c *Channel) NotifyNow(text string) error {
 	if c.cfg.Modem == nil {
 		return ErrNoModem
 	}
-	text, err := checkAgent(text)
+	text, err := c.checkAgent(text)
 	if err != nil {
 		return err
 	}
@@ -348,16 +348,23 @@ func (c *Channel) NotifyNow(text string) error {
 }
 
 // checkAgent strips agent-derived text of control and bidi characters
-// (control.StripControls), refuses a reaction form, and discloses it
-// (AgentSecret), so the reaction check and CH-19 read the text the
-// owner's phone shows (CH-12). Callers send the text it returns.
-func checkAgent(text string) (string, error) {
+// (control.StripControls), refuses a reaction form, discloses it
+// (AgentSecret), and holds text that mentions a code or takes the reply
+// grammar (AgentVoice, CH-21), so the reaction check, CH-19 and CH-21
+// read the text the owner's phone shows (CH-12). Withheld text is kept
+// for the owner page before its pointer is returned (withhold). Callers
+// send the text it returns.
+func (c *Channel) checkAgent(text string) (string, error) {
 	s := control.StripControls(text)
 	if err := refuseReaction(s); err != nil {
 		return s, err
 	}
 	if AgentSecret(text) {
-		return Hidden, nil
+		return c.withhold(KeptSecret, s), nil
+	}
+	if AgentVoice(text) {
+		holdVoice()
+		return c.withhold(KeptCode, s), nil
 	}
 	return s, nil
 }
@@ -372,13 +379,18 @@ func AgentSecret(text string) bool {
 	return SecretShaped(text) || SecretShaped(control.StripControls(text)) || SecretShaped(control.JoinControls(text))
 }
 
-// agentText strips and discloses agent-derived text, prefixes it with
-// AgentPrefix unless it was withheld, and fits it to one text in the
-// encoding it needs, emoji and line breaks kept (CH-12).
+// agentText strips, discloses and checks agent-derived text, prefixes it
+// with AgentPrefix unless it was withheld, and fits it to one text in the
+// encoding it needs, emoji and line breaks kept (CH-12). Callers pass what
+// checkAgent returned, so its own checks find nothing more; if they did,
+// nothing was kept, so the text says so (CH-19).
 func agentText(text string) string {
-	if text != Hidden {
+	if !withheld(text) {
 		if AgentSecret(text) {
 			text = Hidden
+		} else if AgentVoice(text) {
+			holdVoice()
+			text = HeldCode
 		} else {
 			text = AgentPrefix + control.StripControls(text)
 		}

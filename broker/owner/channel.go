@@ -182,7 +182,9 @@ type Channel struct {
 	undo atomic.Pointer[UndoHook]
 	// current confirms a held text's subjects at send (SetCurrent).
 	current atomic.Pointer[CurrentHook]
-	resume  *resumeCode
+	// keeper keeps withheld text for the owner page (SetKeeper, keep.go).
+	keeper atomic.Pointer[Keeper]
+	resume *resumeCode
 	// lineFailed is when the box's line last failed to send (unix nanos
 	// of cfg.Now), so a queued reply's silence is not read as the
 	// owner's over a line that was down (security B1(a) on PW3).

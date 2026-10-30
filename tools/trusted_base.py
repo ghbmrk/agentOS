@@ -71,15 +71,31 @@ class MeasureError(Exception):
     pass
 
 
+def list_lines(text, where):
+    """(number, line) for each "\n"-separated line of a list file, refusing any character outside
+    printable ASCII: splitlines() also ends a line at "\r", U+2028 and others, so a break hidden in
+    a comment would make a line mean other than it shows (REV-CHK-crlf, #3902)."""
+    for n, line in enumerate(text.split("\n"), 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            raise MeasureError(f"{where}:{n}: character {bad[0]!r} outside printable ASCII")
+        yield n, line
+
+
+def read_list(path):
+    """A list file's text, line ends untranslated (read_text() turns "\r" into "\n")."""
+    return pathlib.Path(path).read_bytes().decode("utf-8", "replace")
+
+
 def trusted_mains(tree):
     """The `wiring cmd/<name>` lines of the tree's core list, as ./cmd/<name>."""
     path = pathlib.Path(tree) / CORE_LIST
     try:
-        text = path.read_text()
+        text = read_list(path)
     except OSError as e:
         raise MeasureError(f"cannot read {path}: {e}")
     mains = []
-    for line in text.splitlines():
+    for _, line in list_lines(text, path):
         w = line.split("#", 1)[0].split()
         if len(w) == 2 and w[0] == "wiring" and w[1].startswith("cmd/"):
             mains.append("./" + w[1])
@@ -143,7 +159,7 @@ def packages(tree, targets=None):
 def parse_registry(text, where=REGISTRY):
     """[(pattern, kind)] from `parser|inert <pattern> -- <reason>` lines."""
     rules, seen = [], set()
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in list_lines(text, where):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
@@ -255,13 +271,13 @@ def read_rules(tree, required):
         if required:
             raise MeasureError(f"{path} is missing")
         return []
-    return parse_registry(path.read_text(), str(path))
+    return parse_registry(read_list(path), str(path))
 
 
 def parse_core(text, where=CORE):
     """{"root": dirs, "allow": patterns, "known": import paths} from the core file's lines."""
     core = {"root": set(), "allow": set(), "known": set()}
-    for n, line in enumerate(text.splitlines(), 1):
+    for n, line in list_lines(text, where):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
@@ -283,7 +299,7 @@ def parse_core(text, where=CORE):
 
 def read_core(tree):
     path = pathlib.Path(tree) / CORE
-    return parse_core(path.read_text(), str(path)) if path.exists() else None
+    return parse_core(read_list(path), str(path)) if path.exists() else None
 
 
 def measure_core(tree, core):

@@ -44,11 +44,17 @@ CORE_LIST = pathlib.Path(__file__).resolve().parent.parent / "broker" / "core" /
 def core_list(path=CORE_LIST):
     """Return (core, wiring, allowed) package sets from the core list; exit if unreadable."""
     try:
-        text = path.read_text()
+        text = path.read_bytes().decode("utf-8", "replace")
     except OSError as e:
         sys.exit(f"risk_tier: cannot read the core list: {e}")
     core, wiring, allowed = set(), set(), set()
-    for n, line in enumerate(text.splitlines(), 1):
+    # Split on "\n" only and refuse anything outside printable ASCII, comments included:
+    # read_text() and splitlines() also end a line at "\r", U+2028 and others, so a break
+    # hidden in a comment would make a line mean other than it shows (REV-CHK-crlf, #3902).
+    for n, line in enumerate(text.split("\n"), 1):
+        bad = [c for c in line if not " " <= c <= "~"]
+        if bad:
+            sys.exit(f"risk_tier: {path}:{n}: character {bad[0]!r} outside printable ASCII")
         w = line.split()
         if not w or w[0].startswith("#"):
             continue
@@ -79,6 +85,7 @@ def core_list(path=CORE_LIST):
 TIER_A_BROKER = {
     # (a) a credential or secret
     "browser", "tpmseal",
+    "decoy",                      # the breach-decoy table and its matcher: credential-shaped values, sealed (KRN-12, #3762)
     "durable",                    # writes keys, the vault file and root.json, and sets their mode
     "pageca",                     # the owner page's name-constrained authority and its sealed key (CH-9, #3153)
     "drone",                      # the MAVLink signing key and the flight policy; also (b): it alone arms the aircraft (NET-2, #3516)

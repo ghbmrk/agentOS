@@ -311,8 +311,7 @@ form { margin: .6em 0 1.2em; }
 {{else}}{{if not .SMSLink}}<p>I do not know my own number yet, so you cannot text me first. Enter your number and I will text you a code.</p>
 {{else}}<p><a class="button" href="{{.SMSLink}}">Text my box</a></p>
 <p class="muted">Your messages app opens with my number and a code filled in. Press Send, then come back here.</p>
-<p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>
-<p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
+<p class="muted">Or text <span class="mono">PAIR {{.PairCode}}</span> to <span class="mono">{{.BoxNumber}}</span>. The setup code on your card works too.</p>{{end}}
 <details{{if not .SMSLink}} open{{end}}><summary>Enter your number{{if .SMSLink}} instead{{end}}</summary>
 <form method="post" action="/setup/number"><label>Your mobile number<input type="tel" name="number" placeholder="+1 555 010 0000" autocomplete="tel"></label><button>Text me a code</button></form>
 {{if .NumTo}}<form method="post" action="/setup/number-code"><label>Code texted to {{.NumTo}}<input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"></label><button>Confirm</button></form>{{end}}
@@ -357,6 +356,10 @@ form { margin: .6em 0 1.2em; }
 <form method="post" action="/setup/recovery"><label><input type="checkbox" name="stored" value="1"> I stored the recovery sheet</label><br><button>Continue</button></form>
 
 {{else if eq .Step "host"}}
+<h2>My name</h2>
+<p>I made up a name for myself. Keep it or type another; people I write to on your behalf see it.</p>
+<form method="post" action="/setup/name"><label>My name<input type="text" name="name" value="{{.BoxName}}" maxlength="32" autocomplete="off" required></label><label>Your name (optional)<input type="text" name="owner_name" value="{{.OwnerName}}" maxlength="32" autocomplete="name"></label><button>Save names</button></form>
+{{if .BoxNumber}}<p><a href="/box.vcf">Save my number as a contact</a></p>{{end}}
 <h2>5. This PC</h2>
 <p>This PC becomes your box's trusted PC, so it restarts by itself after a power cut.</p>
 <form method="post" action="/setup/host"><label><input type="checkbox" name="not_mine" value="1"> This is not my PC</label><br><button>Continue</button></form>

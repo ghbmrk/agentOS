@@ -77,6 +77,10 @@ type Config struct {
 	// tap on the passkey page's name. When unset, Passkeys that also serve
 	// the backup ops (AgentosdPasskeys, on the same socket) serve it.
 	Backups Backups
+	// Cameras, when set, serves the Cameras page at /cameras/ behind
+	// sign-in (CAM-clerk part d, #3514): the tier-4 connect, capture
+	// turn-on, retention and re-pin steps, and the disconnect.
+	Cameras Cameras
 	// Recovery, when set with Passkeys, serves the Recovery key page at
 	// /recovery/ behind sign-in (REC-4, r4a): its tap is on the passkey
 	// page's name. When unset, Passkeys that also serve the recovery ops
@@ -290,6 +294,7 @@ func (s *Server) routes() {
 	s.Mount("/approvals", "Approvals", http.HandlerFunc(s.approvals))
 	s.Mount("/follow", "Update source", http.HandlerFunc(s.follow))
 	s.Mount("/paused", "Paused", http.HandlerFunc(s.paused))
+	s.Mount("/held", "Held messages", http.HandlerFunc(s.held))
 	if s.cfg.SecondLine != nil {
 		s.Mount("/second-line", "Second line", http.HandlerFunc(s.secondLine))
 	}
@@ -307,6 +312,9 @@ func (s *Server) routes() {
 	}
 	if s.cfg.Backups != nil {
 		s.Mount("/backups", "Backups", http.HandlerFunc(s.backupsPage))
+	}
+	if s.cfg.Cameras != nil {
+		s.Mount("/cameras", "Cameras", http.HandlerFunc(s.camerasPage))
 	}
 	if s.cfg.Recovery != nil {
 		s.Mount("/recovery", "Recovery key", http.HandlerFunc(s.recoveryPage))
@@ -910,7 +918,9 @@ func (s *Server) contact(w http.ResponseWriter, r *http.Request) {
 	if h := reachedHost(r); !s.cfg.HTTPS && r.TLS == nil && h != "" {
 		page = h
 	}
-	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:agentOS\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
+	// The name holds only letters, spaces, hyphens and apostrophes
+	// (boxname.Check), none of which vCard escapes.
+	io.WriteString(w, "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:"+s.setup.cardName()+"\r\nTEL;TYPE=CELL:"+n+"\r\nURL:http://"+page+"/\r\nEND:VCARD\r\n")
 }
 
 var msgs = map[string]string{

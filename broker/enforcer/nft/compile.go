@@ -54,7 +54,8 @@ const (
 	GuestsConns = "guests_conns"
 	Inbound     = "inbound"     // new connections from the internet
 	Blocked     = "blocked"     // forwarded traffic no rule allowed
-	CoreDevice  = "core_device" // connections the core starts to a device
+	CoreDevice  = "core_device" // connections the core starts to a device's control port
+	CoreStream  = "core_stream" // connections the core starts to a camera's or microphone's stream port
 	EdgeDevice  = "edge_device" // connections the edge starts to a device
 	EdgeIn      = "edge_in"     // anything the edge sends the enforcer itself
 	RADropped   = "ra_dropped"  // router advertisements from any segment
@@ -64,7 +65,7 @@ const (
 	CoreEdge    = "core_edge"   // between the core's and the edge's segments
 )
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, EdgeDevice, EdgeIn, RADropped, DNSOutside, APAdminDrop, ISPDrop, CoreEdge}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, APAdminDrop, ISPDrop, CoreEdge}
 
 // Addresses that are not the internet (the IANA special-purpose blocks
 // that route nowhere public). No segment reaches them through the WAN.
@@ -85,15 +86,36 @@ type device struct {
 	d     policy.Device
 }
 
-// Path rules (NET-2 Device paths), from the document's fields: a device
-// reaches the internet (its allow set) only while its vendor cloud is
-// allowed; an everyday device with its cloud is online and the edge relays
-// it; an everyday device without is offline and the core reaches it
-// directly. A safety-list device is reached by neither box. An isolated
-// device gets nothing.
+// Path rules (NET-2 Device paths, Cameras and microphones), from the
+// document's fields: a device reaches the internet (its allow set) only
+// while its vendor cloud is allowed; an everyday device with its cloud is
+// online and the edge reaches its control ports; an everyday device
+// without is offline and the core reaches its control ports. Of a
+// safety-list device, the core reaches only an offline camera's or
+// microphone's stream ports, and the edge nothing. An isolated device gets
+// nothing.
 func (v device) internet() bool { return !v.d.Isolated && v.d.VendorCloud }
 func (v device) online() bool   { return !v.d.Isolated && v.d.Everyday && v.d.VendorCloud }
 func (v device) offline() bool  { return !v.d.Isolated && v.d.Everyday && !v.d.VendorCloud }
+func (v device) stream() bool   { return !v.d.Isolated && v.d.Recorder() && !v.d.VendorCloud }
+
+// dports is one match per protocol for ports, such as "tcp dport { 80, 443 }",
+// in a fixed order; none for no ports.
+func dports(ports []policy.Port) []string {
+	var out []string
+	for _, proto := range []string{policy.ProtoTCP, policy.ProtoUDP} {
+		var nums []string
+		for _, p := range ports {
+			if p.Proto == proto {
+				nums = append(nums, port(p.Num))
+			}
+		}
+		if len(nums) > 0 {
+			out = append(out, proto+" dport { "+strings.Join(nums, ", ")+" }")
+		}
+	}
+	return out
+}
 
 // VLAN reads a device's Wi-Fi identity, "vlan<N>" with N from 2 to 4094 in
 // its shortest form; ok is false for anything else.
@@ -319,11 +341,18 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line("iifname " + i + " oifname " + wan + " ip daddr @" + DeviceSet(v.vlan, false) + " accept")
 			w.line("iifname " + i + " oifname " + wan + " ip6 daddr @" + DeviceSet(v.vlan, true) + " accept")
 		}
-		if v.online() {
-			w.line("iifname " + edge + " oifname " + i + ` log prefix "enf edge-dev ` + vl + ` " counter name ` + q(EdgeDevice) + " accept")
+		for _, m := range dports(v.d.Control) {
+			if v.online() {
+				w.line("iifname " + edge + " oifname " + i + " " + m + ` log prefix "enf edge-dev ` + vl + ` " counter name ` + q(EdgeDevice) + " accept")
+			}
+			if v.offline() {
+				w.line("iifname " + core + " oifname " + i + " " + m + ` log prefix "enf core-dev ` + vl + ` " counter name ` + q(CoreDevice) + " accept")
+			}
 		}
-		if v.offline() {
-			w.line("iifname " + core + " oifname " + i + ` log prefix "enf core-dev ` + vl + ` " counter name ` + q(CoreDevice) + " accept")
+		for _, m := range dports(v.d.Stream) {
+			if v.stream() {
+				w.line("iifname " + core + " oifname " + i + " " + m + ` log prefix "enf core-stream ` + vl + ` " counter name ` + q(CoreStream) + " accept")
+			}
 		}
 	}
 	for _, p := range paths {
