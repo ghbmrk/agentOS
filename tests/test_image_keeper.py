@@ -515,6 +515,7 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertEqual(sorted(check.KEEPER_PATHS), sorted({arg(e, "state"), arg(e, "log").rsplit("/", 1)[0],
                                                              arg(e, "passphrase-file").rsplit("/", 1)[0],
                                                              arg(exec_args(MAIL), "dir"),
+                                                         arg(exec_args(UNITS / "agentos-keeper-camera.service"), "dir"),
                                                              arg(e, "first-edge").rsplit("/", 1)[0]}))
 
     def test_the_kernel_owns_its_socket_directory_when_it_binds(self):
