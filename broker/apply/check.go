@@ -90,9 +90,15 @@ type checkState struct {
 type Check struct {
 	cfg  CheckConfig
 	step sync.Mutex // one Step at a time
-	mu   sync.Mutex // st and line
+	mu   sync.Mutex // st, line, lineV and held
 	st   checkState
 	line string
+	// lineV: the version line names, or 0.
+	lineV int64
+	// held: fast adoptions whose stable Withdraw the applier refused in
+	// the last step, by ID, with their versions; while one is still
+	// staged, the applier's own line names its version and Line is "".
+	held map[string]int64
 }
 
 // NewCheck loads the check's record.
@@ -126,18 +132,28 @@ const (
 	requalFailLine  = "Update %d did not pass my own tests, so I am holding it. Nothing is needed from you."
 	checkFellBack   = "Update %d did not start cleanly before, so I will not try it again. Nothing is needed from you."
 	checkPinned     = "Automatic updates are off because you pinned your update channel; unpin it to get them again."
+	checkUnreadable = "I cannot read your update channel setting, so I am not checking for updates; I will try again. Nothing is needed from you."
 )
 
-// Line is the check's STATUS line, or "".
+// Line is the check's STATUS line, or "": "" too while the applier is
+// withdrawing the release it names, whose own line says so.
 func (c *Check) Line() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	for id, v := range c.held {
+		if v == c.lineV && c.st.Adoptions[id].State == adStaged {
+			return ""
+		}
+	}
 	return c.line
 }
 
-func (c *Check) setLine(s string) {
+func (c *Check) setLine(s string) { c.setLineV(s, 0) }
+
+// setLineV sets the line, naming version v.
+func (c *Check) setLineV(s string, v int64) {
 	c.mu.Lock()
-	c.line = s
+	c.line, c.lineV = s, v
 	c.mu.Unlock()
 }
 
@@ -150,7 +166,11 @@ func (c *Check) Step(ctx context.Context) error {
 		return nil // first boot keeps its own path (UPD-3, A8)
 	}
 	channel, err := c.cfg.Channel()
-	if err != nil || (channel != update.ChannelStable && channel != update.ChannelFast) {
+	if err != nil {
+		c.setLine(checkUnreadable)
+		return nil
+	}
+	if channel != update.ChannelStable && channel != update.ChannelFast {
 		c.setLine(checkPinned)
 		return nil
 	}
@@ -265,18 +285,23 @@ func (c *Check) offer(ctx context.Context, rel *update.Verified, channel string)
 	}
 	w, err := v.StableReady(atts, c.cfg.Own, channel, seen, now, c.cfg.SoakDays, c.cfg.MinPasses)
 	if errors.Is(err, update.ErrNeedsAttestation) {
-		c.setLine(fmt.Sprintf(securityLine, ref.Version))
+		c.setLineV(fmt.Sprintf(securityLine, ref.Version), ref.Version)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if !w.Ready {
-		c.setLine(c.waitLine(ref.Version, w))
+		if !ok {
+			w.Until = time.Time{} // an untrusted clock dates nothing
+		} else if late, lok := c.cfg.Latest(ctx); !lok || !w.Until.After(late) {
+			w.Until = time.Time{} // never a date already past
+		}
+		c.setLineV(c.waitLine(ref.Version, w), ref.Version)
 		return nil
 	}
 	if c.cfg.Applier.FellBack(ref.Version) {
-		c.setLine(fmt.Sprintf(checkFellBack, ref.Version))
+		c.setLineV(fmt.Sprintf(checkFellBack, ref.Version), ref.Version)
 		return nil
 	}
 	if c.adopted(ref) {
@@ -288,10 +313,10 @@ func (c *Check) offer(ctx context.Context, rel *update.Verified, channel string)
 		verdict, err := c.cfg.Requalify(ctx, v)
 		switch {
 		case err != nil || verdict.Reason == update.RequalUnavailable:
-			c.setLine(fmt.Sprintf(unavailableLine, ref.Version))
+			c.setLineV(fmt.Sprintf(unavailableLine, ref.Version), ref.Version)
 			return nil
 		case !verdict.Passed:
-			c.setLine(fmt.Sprintf(requalFailLine, ref.Version))
+			c.setLineV(fmt.Sprintf(requalFailLine, ref.Version), ref.Version)
 			return nil
 		}
 	}
@@ -300,9 +325,16 @@ func (c *Check) offer(ctx context.Context, rel *update.Verified, channel string)
 		return err
 	}
 	err = c.cfg.Applier.Schedule(v, id)
+	if err != nil {
+		// Settled here, so a refusal the applier never settles (ErrRetired,
+		// a lost save) does not strand the release (#4102).
+		if derr := c.unschedule(id, err); derr != nil {
+			return derr
+		}
+	}
 	switch {
 	case errors.Is(err, ErrFellBack):
-		c.setLine(fmt.Sprintf(checkFellBack, ref.Version))
+		c.setLineV(fmt.Sprintf(checkFellBack, ref.Version), ref.Version)
 		return nil
 	case err == nil, errors.Is(err, ErrApplying), errors.Is(err, ErrRefused):
 		// The applier's own STATUS line says what happens next; a refusal
@@ -359,9 +391,18 @@ func (c *Check) withdrawFast() error {
 	}
 	c.mu.Unlock()
 	slices.Sort(ids)
+	held := map[string]int64{}
+	defer func() {
+		c.mu.Lock()
+		c.held = held
+		c.mu.Unlock()
+	}()
 	for _, id := range ids {
 		err := c.cfg.Applier.Withdraw(id, WhyStable)
 		if errors.Is(err, ErrApplying) {
+			c.mu.Lock()
+			held[id] = c.st.Adoptions[id].Ref.Version
+			c.mu.Unlock()
 			continue
 		}
 		if err != nil {
@@ -372,6 +413,26 @@ func (c *Check) withdrawFast() error {
 		}
 	}
 	return nil
+}
+
+// unschedule settles adoption id after Schedule refused it with err. A
+// refusal made before the applier took anything leaves no trace, so a
+// release refused on every step does not grow the record (#4102); the
+// applier's StageDropped of it is then refused as unknown, for good
+// (A16). Any other error (a failed save may leave the release pending in
+// memory, so it may still install and be confirmed) drops it.
+func (c *Check) unschedule(id string, err error) error {
+	for _, e := range []error{ErrRetired, ErrFellBack, ErrApplying, ErrRefused, update.ErrRollback, update.ErrNotChecked} {
+		if errors.Is(err, e) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			next := c.st
+			next.Adoptions = maps.Clone(c.st.Adoptions)
+			delete(next.Adoptions, id)
+			return c.saveLocked(next)
+		}
+	}
+	return c.settle(id, adDropped, []string{adStaged}, []string{adFailed})
 }
 
 // mint saves a new adoption for ref as staged and returns its ID,

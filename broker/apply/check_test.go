@@ -377,14 +377,42 @@ func TestSightingUsesLatestAndSoakUsesEarliest(t *testing.T) {
 		cr.run, cr.pass = &runner{}, true
 		cr.m.add(2, update.ChannelStable, false, "two")
 		cr.mustStep()
-		cr.days(8)
 		cr.earlyNo = true
 		cr.mustStep()
+		cr.lineIs(fmt.Sprintf(soakOpenLine, 2)) // its date is still ahead by Latest
+		cr.days(8)
+		cr.mustStep()
 		cr.takenAre()
+		// An untrusted clock dates nothing: the soak date is long past.
+		cr.lineIs(fmt.Sprintf(soakOpenLine, 2))
 		cr.m.add(3, update.ChannelStable, true, "three")
 		cr.mustStep()
 		cr.takenAre("upd:3:1")
 	})
+}
+
+// CH-12: the soak line never shows a date already past. With Earliest
+// behind the clock, the soak is judged unfinished after its date has
+// passed by Latest, and the line has no date.
+// Mutant: drop the Latest comparison.
+func TestSoakLineNeverDatesThePast(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelStable)
+	cr.early = -48 * time.Hour
+	cr.m.add(2, update.ChannelStable, false, "two")
+	start := cr.clk.now()
+	cr.mustStep()
+	cr.lineIs(soakText(2, start.Add(7*24*time.Hour)))
+	cr.days(8)
+	cr.mustStep()
+	cr.takenAre()
+	cr.lineIs(fmt.Sprintf(soakOpenLine, 2))
+	// No trusted Latest: no date can be checked against it.
+	cr.days(-7)
+	cr.mustStep()
+	cr.lineIs(soakText(2, start.Add(7*24*time.Hour)))
+	cr.lateNo = true
+	cr.mustStep()
+	cr.lineIs(fmt.Sprintf(soakOpenLine, 2))
 }
 
 // A sighting is kept for exactly twice MaxSoakDays once its image is no
@@ -431,19 +459,22 @@ func TestFastSchedulesAtOnce(t *testing.T) {
 }
 
 // UPD-4: a pinned box, or one whose channel cannot be read or is unknown,
-// checks nothing and schedules nothing, a security fix included.
-// Mutant: treat an error as stable.
+// checks nothing and schedules nothing, a security fix included. An
+// unreadable channel never says the owner pinned it (CH-12).
+// Mutant: treat an error as stable; show the pinned line for an error.
 func TestPinnedOrUnreadableChannelSchedulesNothing(t *testing.T) {
 	for _, tc := range []struct {
-		ch  string
-		err error
-	}{{"pinned", nil}, {"", nil}, {"beta", nil}, {update.ChannelStable, errors.New("settings unreadable")}} {
+		ch   string
+		err  error
+		line string
+	}{{"pinned", nil, checkPinned}, {"", nil, checkPinned}, {"beta", nil, checkPinned},
+		{update.ChannelStable, errors.New("settings unreadable"), checkUnreadable}} {
 		cr := newCheckRig(t, tc.ch)
 		cr.chErr, cr.pass = tc.err, true
 		cr.m.add(2, update.ChannelStable, true, "two")
 		cr.mustStep()
 		cr.takenAre()
-		cr.lineIs(checkPinned)
+		cr.lineIs(tc.line)
 		if cr.looked != 0 {
 			t.Fatalf("%q: mirrors read", tc.ch)
 		}
@@ -872,6 +903,8 @@ func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
 	if want := fmt.Sprintf(stableWontStartLine, 2); during != want {
 		t.Fatalf("status while installing %q, want %q", during, want)
 	}
+	// One line names update 2: the applier's, while it withdraws it.
+	ex.lineIs("")
 	if pt := ex.a.st.Applying; pt == nil || !pt.Withdrawing || !pt.Stable || pt.Pinned {
 		t.Fatalf("point %+v", pt)
 	}
@@ -887,6 +920,17 @@ func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
 	}
 	if got := ex.c.st.Adoptions["upd:2:1"].State; got != adDropped {
 		t.Fatalf("executing adoption %q", got)
+	}
+	// Withdrawn, the applier says nothing more of it, and the check's
+	// soak line is the one line.
+	if got := ex.a.Status(); got != "" {
+		t.Fatalf("applier status %q", got)
+	}
+	if got := ex.c.Line(); !strings.HasPrefix(got, "Update 2 installs after ") {
+		t.Fatalf("line %q", got)
+	}
+	if got := ex.a.Digest(); len(got) != 0 {
+		t.Fatalf("digest %q", got)
 	}
 }
 
@@ -1020,7 +1064,7 @@ func TestCheckLinesAreOneGSM7Segment(t *testing.T) {
 	const v = math.MaxInt64
 	c := &Check{}
 	until := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
-	lines := []string{checkPinned,
+	lines := []string{checkPinned, checkUnreadable,
 		fmt.Sprintf(securityLine, v), fmt.Sprintf(unavailableLine, v), fmt.Sprintf(requalFailLine, v), fmt.Sprintf(checkFellBack, v)}
 	for _, w := range []update.Wait{{Reason: update.WaitSoak, Until: until}, {Reason: update.WaitSoak},
 		{Reason: update.WaitAttestations, Need: 1}, {Reason: update.WaitNoAttestor}} {
@@ -1040,5 +1084,133 @@ func TestCheckLinesAreOneGSM7Segment(t *testing.T) {
 		if l != checkPinned && !strings.HasSuffix(l, " Nothing is needed from you.") {
 			t.Errorf("no owner step: %q", l)
 		}
+	}
+}
+
+// #4112: a stable Withdraw refused because the boot cannot be read is
+// saved, so a process restart before the next Tick still never restarts
+// into the fast release.
+// Mutant: return the refusal without marking the point.
+func TestStableWithdrawSurvivesUnreadBootAndRestart(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	cr.act.onInstall = func() { cr.inCall = true }
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	cr.act.bootedErr = errors.New("boot unreadable")
+	cr.channel = update.ChannelStable
+	cr.mustStep()
+	if got, want := cr.a.Status(), fmt.Sprintf(stableMayStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	cr.act.bootedErr = nil
+	cr.restart()
+	cr.must(cr.a.Resume(ctx))
+	cr.inCall = false
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick after the restart: %v %v", ok, err)
+	}
+	if cr.act.restarts != 0 || cr.a.st.Applying != nil {
+		t.Fatalf("restarts %d, applying %+v", cr.act.restarts, cr.a.st.Applying)
+	}
+	if got := cr.c.st.Adoptions["upd:2:1"].State; got != adDropped {
+		t.Fatalf("adoption %q", got)
+	}
+}
+
+// A refusal's reason is the one asked for: an owner UNDO of a point
+// withdrawn for a move to stable keeps the stable line, and a security
+// withdraw saves its own cause, so it survives a process restart.
+// Mutant: record any other reason as security; skip the security save.
+func TestWithdrawReasonsKeepTheirCause(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	cr.act.onInstall = func() { cr.inCall = true }
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	cr.act.abandonErr = errors.New("activator busy")
+	cr.channel = update.ChannelStable
+	cr.mustStep()
+	if err := cr.a.Withdraw("upd:2:1", "undo"); !errors.Is(err, ErrApplying) {
+		t.Fatalf("undo: %v", err)
+	}
+	if got, want := cr.a.Status(), fmt.Sprintf(stableMayStartLine, 2); got != want {
+		t.Fatalf("after undo %q, want %q", got, want)
+	}
+	if err := cr.a.Withdraw("upd:2:1", WhySecurity); !errors.Is(err, ErrApplying) {
+		t.Fatalf("security: %v", err)
+	}
+	cr.restart()
+	if got, want := cr.a.Status(), fmt.Sprintf(mayStartLine, 2); got != want {
+		t.Fatalf("after restart %q, want %q", got, want)
+	}
+}
+
+// #4102: a Schedule refusal the applier never settles does not strand
+// the release. A refusal before the applier took anything leaves no
+// record, so a release refused on every step does not grow it; any other
+// error drops the adoption, and the next step offers the release again.
+// Mutant: leave the adoption staged on an error; keep refused adoptions.
+func TestScheduleRefusalsSettleInTheCheck(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	cr.m.add(2, update.ChannelFast, false, "two")
+	cr.state.Fail = errors.New("disk full")
+	if err := cr.step(); err == nil {
+		t.Fatal("a failed applier save passed")
+	}
+	if got := cr.c.st.Adoptions["upd:2:1"].State; got != adDropped {
+		t.Fatalf("after a failed save %q", got)
+	}
+	cr.state.Fail = nil
+	cr.restart()
+	cr.mustStep()
+	cr.takenAre("upd:2:2")
+
+	ref := newCheckRig(t, update.ChannelFast)
+	ref.m.add(2, update.ChannelFast, false, "two")
+	ref.a.st.Retired = []string{"upd:2:1"} // a lost check state reuses an ID
+	if err := ref.step(); !errors.Is(err, ErrRetired) {
+		t.Fatalf("retired: %v", err)
+	}
+	for range 3 {
+		ref.a.st.Applying = &point{Adoption: "other"} // the applier refuses with ErrApplying
+		ref.mustStep()
+	}
+	if n := len(ref.c.st.Adoptions); n != 0 {
+		t.Fatalf("record grew to %d: %+v", n, ref.c.st.Adoptions)
+	}
+	ref.a.st.Applying = nil
+	ref.mustStep()
+	if got := ref.taken(); len(got) != 1 {
+		t.Fatalf("taken %q", got)
+	}
+}
+
+// A confirmed or failed adoption counts as adopted, so the release is
+// not offered again; a dropped one does not.
+// Mutant: count only staged adoptions.
+func TestAdoptedCountsSettledAdoptions(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	r := func(v int64) update.Ref { return update.Ref{Version: v, UsrRootHash: "h", ManifestSHA256: "m"} }
+	for v, settle := range map[int64]func(string) error{
+		2: cr.c.ConfirmStaged,
+		3: func(id string) error { return cr.c.StageFailed(ctx, id) },
+		4: func(id string) error { return cr.c.StageDropped(ctx, id) },
+	} {
+		id, err := cr.c.mint(r(v), false)
+		cr.must(err)
+		cr.must(settle(id))
+	}
+	if !cr.c.adopted(r(2)) || !cr.c.adopted(r(3)) || cr.c.adopted(r(4)) {
+		t.Fatalf("adopted: confirmed %v, failed %v, dropped %v", cr.c.adopted(r(2)), cr.c.adopted(r(3)), cr.c.adopted(r(4)))
 	}
 }

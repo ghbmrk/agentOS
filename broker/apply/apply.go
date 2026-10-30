@@ -235,6 +235,10 @@ const (
 	// donePinned: the owner pinned the update channel after the handover,
 	// so the release was withdrawn before any boot took it (#3699).
 	donePinned = "pinned"
+	// doneStable: the owner moved the box to stable after the handover,
+	// so the release was withdrawn before any boot took it; the release
+	// check's own line says when it comes (UPD-4, UPD-5).
+	doneStable = "stable"
 )
 
 // maxUnrecorded is how many times Install runs for one release with no
@@ -740,8 +744,11 @@ func abandonOwed(pt *point) bool { return !pt.Abandoned }
 // withdrawnKind is the outcome of a handover withdrawn before any boot
 // took it.
 func withdrawnKind(pt *point) string {
-	if pt.Pinned {
+	switch {
+	case pt.Pinned:
 		return donePinned
+	case pt.Stable:
+		return doneStable
 	}
 	return doneNotHanded
 }
@@ -801,7 +808,9 @@ func (a *Applier) Withdraw(adoption, why string) error {
 }
 
 // withdrawInstalledLocked is Withdraw of the apply in flight (SR3-4f-3a).
-// A refused security or stable Withdraw is recorded (SR3-4f-3 B2); a
+// A refused security or stable Withdraw is recorded (SR3-4f-3 B2). Its
+// reason is the one asked for; any other reason, which reaches here only
+// for a point already withdrawing, keeps that point's own cause, and a
 // security refusal of the same adoption keeps its reason.
 func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
 	if why != WhySecurity && why != WhyStable && !pt.Withdrawing {
@@ -810,10 +819,17 @@ func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
 	err := a.undoHandoverLocked(pt, why)
 	var h handoverError
 	if errors.As(err, &h) { // security, stable, or already withdrawing
-		if a.refused.adoption == pt.Adoption && a.refused.why == WhySecurity || why != WhyStable {
-			why = WhySecurity
+		r := why
+		if r != WhySecurity && r != WhyStable {
+			r = WhySecurity
+			if pt.Stable {
+				r = WhyStable
+			}
 		}
-		a.refused = refusal{adoption: pt.Adoption, starts: h.starts, why: why}
+		if a.refused.adoption == pt.Adoption && a.refused.why == WhySecurity {
+			r = WhySecurity
+		}
+		a.refused = refusal{adoption: pt.Adoption, starts: h.starts, why: r}
 	}
 	return err
 }
@@ -829,10 +845,41 @@ func (a *Applier) undoHandoverLocked(pt *point, why string) error {
 		return handoverError{starts: true}
 	}
 	ctx := context.Background()
-	if b, err := a.cfg.Activator.Booted(ctx); err != nil || b.ID != pt.BootID {
+	b, err := a.cfg.Activator.Booted(ctx)
+	if err != nil {
+		// Unread, the boot is still the handover's: Resume settled any
+		// new boot when this process started. Marked durably, so a process
+		// restart before the next Tick never restarts into it (#4112).
+		if err := a.markLocked(pt, why); err != nil {
+			return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
+		}
+		return handoverError{starts: true}
+	}
+	if b.ID != pt.BootID {
 		return handoverError{starts: true} // a new boot is Resume's to settle
 	}
 	return a.withdrawLocked(ctx, pt, why)
+}
+
+// markLocked saves pt as withdrawing for why, unless it already is; a
+// security withdraw of a point withdrawn for a move to stable saves its
+// own cause over it.
+func (a *Applier) markLocked(pt *point, why string) error {
+	if pt.Withdrawing && !(why == WhySecurity && pt.Stable) {
+		return nil
+	}
+	marked := *pt
+	if !pt.Withdrawing {
+		marked.Withdrawing, marked.Pinned = true, why == whyPin
+	}
+	marked.Stable = why == WhyStable
+	next := a.st
+	next.Applying = &marked
+	if err := a.save(next); err != nil {
+		return err
+	}
+	a.st = next
+	return nil
 }
 
 // withdrawLocked undoes pt's handover in the boot it was handed over in,
@@ -841,18 +888,12 @@ func (a *Applier) undoHandoverLocked(pt *point, why string) error {
 // (SR3-4f-3a). why: whyPin (the owner pinned the update channel, #3699),
 // WhyStable or WhySecurity.
 func (a *Applier) withdrawLocked(ctx context.Context, pt *point, why string) error {
-	if !pt.Withdrawing {
-		marked := *pt
-		marked.Withdrawing, marked.Pinned, marked.Stable = true, why == whyPin, why == WhyStable
-		next := a.st
-		next.Applying = &marked
-		if err := a.save(next); err != nil {
-			// Not durable, and nothing abandoned: a reboot boots the
-			// counted entry (#3852).
-			return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
-		}
-		a.st, pt = next, &marked
+	if err := a.markLocked(pt, why); err != nil {
+		// Not durable, and nothing abandoned: a reboot boots the counted
+		// entry (#3852).
+		return fmt.Errorf("%w: %w", handoverError{starts: true}, err)
 	}
+	pt = a.st.Applying
 	if err := a.withdrawHandoverLocked(ctx, pt); err != nil {
 		return fmt.Errorf("%w: %w", handoverError{starts: abandonOwed(a.st.Applying)}, err)
 	}
@@ -1640,7 +1681,7 @@ func (a *Applier) Status() string {
 		return unrecordedText(l.Version, n, prev)
 	case l.Kind == donePinned && a.cfg.Paused():
 		return pinnedText(l.Version, n, prev)
-	case l.Kind == donePinned:
+	case l.Kind == donePinned, l.Kind == doneStable:
 		if prev {
 			return previousRootText(n)
 		}
@@ -1656,7 +1697,7 @@ func (a *Applier) Digest() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	l := a.st.Last
-	if l == nil || l.Told || l.Kind == doneNotHanded {
+	if l == nil || l.Told || l.Kind == doneNotHanded || l.Kind == doneStable {
 		return nil
 	}
 	l.Told = true
