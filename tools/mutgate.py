@@ -35,6 +35,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -84,18 +85,54 @@ def survivors(results_dir):
     return out
 
 
+_ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote(name):
+    """Git's C-style quoted file name (`"b/h\\303\\251.go"`) as text."""
+    out, i = bytearray(), 1
+    while i < len(name) - 1:
+        c = name[i]
+        if c != "\\":
+            out += c.encode()
+        elif name[i + 1] in _ESC:
+            out.append(_ESC[name[i + 1]])
+            i += 1
+        else:
+            out.append(int(name[i + 1:i + 4], 8))
+            i += 3
+        i += 1
+    return out.decode("utf-8", "replace")
+
+
+def _header_path(raw):
+    """The repo path a `+++ ` header names, or None for /dev/null or a non-b/ name (#4105)."""
+    name = raw[4:].rstrip("\t")  # git appends a TAB after a name that holds a space
+    if name.startswith('"'):
+        name = _unquote(name)
+    return name[2:] if name.startswith("b/") else None
+
+
 def added_lines(diff_text):
     """({path: set(line)} of added lines, set of paths whose added lines carry a REQ marker)."""
-    added, marked, path, line = {}, set(), None, 0
-    for raw in diff_text.splitlines():
-        if raw.startswith("+++ "):
-            path = raw[6:] if raw.startswith("+++ b/") else None
+    added, marked, path, line, in_hunk = {}, set(), None, 0, False
+    # split("\n"), not splitlines(): that also breaks on \r, \x0b, \x0c, \x1c-\x1e, \x85, U+2028 and
+    # U+2029, which a Go comment can carry, and every later added line would be numbered one low (#4028).
+    for raw in diff_text.split("\n"):
+        # Every line inside a hunk starts with space, + , - or \, so `diff ` can only be a file
+        # header and a `+++ ` line is a header only before the first @@ (an added `++ x` is not one).
+        if raw.startswith("diff "):
+            in_hunk, path = False, None
             continue
         m = HUNK.match(raw)
         if m:
-            line = int(m.group(1))
+            in_hunk, line = True, int(m.group(1))
             continue
-        if path is None or raw.startswith(("--- ", "diff ")):
+        if not in_hunk:
+            if raw.startswith("+++ "):
+                path = _header_path(raw)
+            continue
+        if path is None or raw.startswith("\\"):  # "\ No newline at end of file" is no line (#4103)
             continue
         if raw.startswith("+"):
             added.setdefault(path, set()).add(line)
@@ -161,19 +198,31 @@ def cmd_run(args):
     out.mkdir(parents=True, exist_ok=True)
     added = added_lines(broker_diff(args.git, "HEAD"))[0] if args.git else None
     bad = 0
+    # Gremlins reads .gremlins.yaml from broker/ and the package directory, and GREMLINS_* from the
+    # environment: a PR-added file with `dry-run: true` would leave no LIVED mutant. An explicit
+    # --config file is the only one it reads, and the environment is cleared of GREMLINS_* (#4027).
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GREMLINS_")}
+    cfgdir = tempfile.TemporaryDirectory()
+    cfg = pathlib.Path(cfgdir.name) / "gremlins.yaml"
+    cfg.write_text("{}\n")
     for pkg in pkgs:
         dest = out / (pkg.replace("/", "__") + ".json")
         if args.git:
-            r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", args.git, "-o", str(dest)],
-                               cwd=BROKER / pkg, env={**os.environ, **DIFF_GIT_CONFIG})
+            r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", args.git, "--config", str(cfg),
+                                "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
         else:
-            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "-o", str(dest)], cwd=BROKER)
+            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), "-o", str(dest)],
+                               cwd=BROKER, env=env)
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
         elif not shape_ok(json.loads(dest.read_text())):
             # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
             print(f"mutgate: {dest} is not gremlins' files[].mutations[] shape", file=sys.stderr)
+            bad += 1
+        elif dry := dry_run(json.loads(dest.read_text())):
+            # RUNNABLE is a mutant gremlins found and did not run: no verdict, so no LIVED either (#4027).
+            print(f"mutgate: {dest} holds {dry} mutants gremlins did not run (dry-run?)", file=sys.stderr)
             bad += 1
         elif unknown := foreign_names(json.loads(dest.read_text()), BROKER / pkg):
             # violations() joins broker/<pkg>/<file_name>; another name format would match no line (#3956).
@@ -184,7 +233,13 @@ def cmd_run(args):
             print(f"mutgate: gremlins skipped mutants on lines this diff adds in broker/{pkg}/: {skipped}",
                   file=sys.stderr)
             bad += 1
+    cfgdir.cleanup()
     return 1 if bad else 0
+
+
+def dry_run(data):
+    """How many mutants gremlins left RUNNABLE, which it does only when it ran none of them."""
+    return sum(m["status"] == "RUNNABLE" for f in data["files"] for m in f.get("mutations") or [])
 
 
 def foreign_names(data, pkg_dir):
@@ -219,10 +274,11 @@ def cmd_report(args):
 def broker_diff(base, head):
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
-        ["git", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
-        # errors="replace": with --text a binary file's bytes are diff lines, and need not be UTF-8.
-        cwd=ROOT, capture_output=True, text=True, errors="replace", check=True,
-    ).stdout
+        ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
+        # errors="replace" below: with --text a binary file's bytes are diff lines, and need not be UTF-8.
+        cwd=ROOT, capture_output=True, check=True,
+    # Bytes decoded here: text=True would turn a lone \r into \n and number the lines wrongly (#4028).
+    ).stdout.decode("utf-8", errors="replace")
 
 
 def cmd_claimed(args):

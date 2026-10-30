@@ -15,8 +15,13 @@
 // alarm arm, each on a once-only challenge naming the device, the action
 // and a short window.
 //
+// It also takes a safety-list device's sealed secret with the add-device
+// change that names it (slice r, decision 10) and hands it to the
+// enforcer's store through Secrets, which can only admit, never read.
+//
 // It is enforcer code: it imports the standard library, broker/kernel/key,
-// broker/enforcer/policy and broker/enforcer/action only (broker/daemon/arc2_test.go). Its
+// broker/enforcer/policy, broker/enforcer/action and
+// broker/enforcer/pairseal only (broker/daemon/arc2_test.go). Its
 // assumptions are in ASSUMPTIONS.md.
 package page
 
@@ -44,6 +49,17 @@ type Policy interface {
 	Pending() []policy.Pending
 	Propose(next policy.Proposal, sig []byte, nowMS int64) (policy.Outcome, error)
 	Cancel(id string) error
+}
+
+// Secrets is the part of the enforcer's device-secret store
+// (devsecret.Store) the page drives: it admits a sealed secret with the
+// owner's approval of the add-device change that names it, and prunes
+// secrets whose change was cancelled. It has no method that returns a
+// secret, so the page reads none (STO-4). The page holds Config.Lock
+// around every call.
+type Secrets interface {
+	Admit(device string, sealed []byte, prop policy.Proposal, sig []byte) error
+	Prune() error
 }
 
 // Channel is the enforcer channel's pause, which only the page lifts (NET-2
@@ -74,9 +90,12 @@ type Config struct {
 	Channel Channel // nil until slice d is wired
 	// Act carries out the owner's asserted actions on safety-list devices
 	// (slice s); nil serves none.
-	Act  action.Actuator
-	Cert tls.Certificate
-	Now  func() time.Time // nil means time.Now
+	Act action.Actuator
+	// Secrets takes safety-list devices' sealed secrets (slice r); nil
+	// refuses every link that carries one.
+	Secrets Secrets
+	Cert    tls.Certificate
+	Now     func() time.Time // nil means time.Now
 }
 
 var (

@@ -28,7 +28,10 @@ document.addEventListener("DOMContentLoaded", () => {
   if (a) a.addEventListener("click", async () => {
     a.disabled = true;
     try {
-      const r = await post("/approve", { id: a.dataset.id, ...(await tap(a.dataset.challenge, a.dataset.rp)) });
+      // A device's sealed secret rides the link's fragment, which the
+      // browser never sent; it goes back with the tap (ENF decision 10).
+      const sealed = a.dataset.sealed ? { sealed: location.hash.slice(1) } : {};
+      const r = await post("/approve", { id: a.dataset.id, ...sealed, ...(await tap(a.dataset.challenge, a.dataset.rp)) });
       say(r.applied ? "Applied." : "Approved. It applies at " + r.due + " unless you cancel it on the home page.");
     } catch (e) { say("Not approved: " + e.message); }
   });

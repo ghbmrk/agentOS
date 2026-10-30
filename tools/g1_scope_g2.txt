@@ -44,33 +44,25 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4042 (ENF-names, #3758): broker/enforcer/channel/, which the G2 list does not name (D-198).
-# Remove once #4042 merges.
-exempt-pr 4042
-
-# #4049 (ENF-s, #3694): broker/enforcer/action/ and broker/enforcer/page/, which the G2 list does
-# not name (D-198). Remove once #4049 merges.
-exempt-pr 4049
-
-# #4050 (CAM-clerk-rollback-test + CAM-clerk-broken-slot, #3967/#3968): broker/cmd/agentos-camera/,
-# which the G2 list does not name (D-198). Remove once #4050 merges.
-exempt-pr 4050
-
 # #4051 (ENF-g, #3662): broker/enforcer/ap/ (with push/), which the G2 list does not name
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
 
-# #4055 (ENF-f, #3664): broker/enforcer/dns/, mdns/, wol/ and nft/, which the G2 list does not
-# name (D-198). Remove once #4055 merges.
-exempt-pr 4055
+# #4088 (ENF-i, #3667): broker/enforcer/traffic/, which the G2 list does not name (D-198). Remove
+# once #4088 merges.
+exempt-pr 4088
+
+# #4092 (ENF-k-ptrace, #4091): broker/enforcer/radio/, which the G2 list does not name (D-198).
+# Remove once #4092 merges.
+exempt-pr 4092
+
+# #4073 (ENF-r, #3692): broker/enforcer/pairseal/, broker/enforcer/devsecret/ and
+# broker/clerk/enfpair/, which the G2 list does not name (D-198). Remove once #4073 merges.
+exempt-pr 4073
 
 # #4058 (CAM-clerk-image, #3867): broker/cmd/agentos-camera/, which the G2 list does not name
 # (D-198). Remove once #4058 merges.
 exempt-pr 4058
-
-# #3973 (PLAN-slots, #1379 (a)): broker/cmd/agentos-clerk-model/, which the G2 list does not
-# name (D-198). Remove once #3973 merges.
-exempt-pr 3973
 
 # Project machinery and records.
 allow .claude/
