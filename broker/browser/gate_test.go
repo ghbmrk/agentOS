@@ -159,6 +159,12 @@ func newHarness(t *testing.T, replies map[string]any, file string, timeout time.
 	return &harness{g: g, log: log, ws: ws}
 }
 
+// lostBound is the Timeout of a test whose driver reads a click and then
+// hangs, so its answer is lost after the write. The fake must log the
+// click before the gate stops it; a starved runner can hold the fake off
+// its read for longer than a short bound (#4052).
+const lostBound = 3 * time.Second
+
 // plainLink is a link whose click can only read a page.
 var plainLink = link{role: "link", name: "Kettle", target: "https://shop.example.test/products/kettle"}
 

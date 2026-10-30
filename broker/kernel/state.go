@@ -91,6 +91,7 @@ var schema = map[string]int{
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1, TCodeApproved: 1,
+	TDecoyTable: 1, TTrip: 1, TTripResumed: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -104,7 +105,7 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet || typ == TBackupTarget ||
-		typ == TEdgeEnrolled || typ == TRecoveryRotate || typ == TCodeApproved
+		typ == TEdgeEnrolled || typ == TRecoveryRotate || typ == TCodeApproved || typ == TTripResumed
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -399,6 +400,7 @@ type State struct {
 	owing    map[string]bool // erased subjects a store has not confirmed
 	targets  []KeptTarget    // backup destinations, in the order added (backuptarget.go)
 	edge     edgeState       // edge keys (edge.go)
+	decoys   trips           // the decoy table and its trips (trip.go)
 	Order    []string
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
@@ -896,8 +898,10 @@ func (s *State) Apply(e Entry) error {
 			s.Changes.Revoked[b.ID] = true
 		case TKeyPaused:
 			s.Changes.Paused[b.ID] = true
-		default:
-			delete(s.Changes.Paused, b.ID)
+		case TKeyResumed:
+			if _, tripped := s.decoys.paused[b.ID]; !tripped { // a trip's pause lifts only with the passkey
+				delete(s.Changes.Paused, b.ID)
+			}
 		}
 	case TSpendReserved:
 		b, err := body[spendReserved](e)
@@ -945,7 +949,9 @@ func (s *State) Apply(e Entry) error {
 			t.ended = true // an ended task never comes back
 		}
 	case TResume:
-		s.Stopped, s.Changes.Stopped = false, false
+		if !s.decoys.held() { // ErrTripResume
+			s.Stopped, s.Changes.Stopped = false, false
+		}
 	case TPlanSubmit:
 		b, err := body[Plan](e)
 		if err != nil {
@@ -1105,6 +1111,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyEdge(e)
 	case TCodeApproved:
 		return s.applyCode(e)
+	case TDecoyTable, TTrip, TTripResumed:
+		return s.applyTrip(e)
 	default:
 		return ErrUnknown
 	}
