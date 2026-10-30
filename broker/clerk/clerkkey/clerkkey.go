@@ -9,6 +9,7 @@
 package clerkkey
 
 import (
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"errors"
@@ -139,6 +140,19 @@ func (k Key) Sealer() ([]byte, error) { return k.derive("agentos.clerk.sealer.v1
 // HandleSecret keys the handles the clerk shows the planner in place of an
 // account's own names (inbox.NewAccount). The caller wipes it.
 func (k Key) HandleSecret() ([]byte, error) { return k.derive("agentos.clerk.handles.v1") }
+
+// Signer is the key a clerk signs with, such as the checker's code
+// approvals (kernel.SignCode), which the kernel verifies against the same
+// derivation from the clerk root key it holds (MIG-4-exit-c2). The caller
+// wipes it.
+func (k Key) Signer() (ed25519.PrivateKey, error) {
+	seed, err := k.derive("agentos.clerk.signer.v1")
+	if err != nil {
+		return nil, err
+	}
+	defer clear(seed)
+	return ed25519.NewKeyFromSeed(seed), nil
+}
 
 // derive binds the clerk's name into each key, so two clerks handed the same
 // bytes by mistake still seal apart.

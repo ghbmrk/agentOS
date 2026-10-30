@@ -32,6 +32,11 @@
 // write, and hands the key to the kernel, which shows it on the owner's
 // page. A request that is not one is ignored, with one line on stderr, and
 // the box starts as ever.
+//
+// With -checker-seed, it also writes the owner's code-generator seed from
+// the store, sealed under the checker's clerk key, to a file only root
+// reads, for the checker's unit to load at each start (CH-4, MIG-4-exit-c2).
+// The kernel hands the checker that key, so the kernel never holds the seed.
 package main
 
 import (
@@ -57,10 +62,12 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
+	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/tpmseal"
 )
 
@@ -97,6 +104,9 @@ type config struct {
 	// file, from whose first entry the step pins the anchors (#2995); ""
 	// for both writes no file.
 	clerkAnchors, log string
+	// checkerSeed is the checker's sealed seed file (MIG-4-exit-c2), an
+	// absolute path; "" writes none.
+	checkerSeed string
 	// request is the owner's lost-card request file (D-201 route B), an
 	// absolute path; "" reads none.
 	request string
@@ -123,6 +133,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&c.gid, "gid", -1, "the kernel's gid")
 	fs.StringVar(&c.clerkAnchors, "clerk-anchors", "", "the clerks' anchors file, an absolute path; none without it")
 	fs.StringVar(&c.log, "log", "", "the kernel's log file, an absolute path, with -clerk-anchors")
+	fs.StringVar(&c.checkerSeed, "checker-seed", "", "the checker's sealed code seed file, an absolute path; none without it")
 	fs.StringVar(&c.request, "recovery-request", "", "the owner's lost-card request file, an absolute path; none without it")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -137,6 +148,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-clerk-anchors and -log come together")
 	case c.clerkAnchors != "" && (!filepath.IsAbs(c.clerkAnchors) || !filepath.IsAbs(c.log)):
 		return c, errors.New("-clerk-anchors and -log are absolute paths")
+	case c.checkerSeed != "" && !filepath.IsAbs(c.checkerSeed):
+		return c, errors.New("-checker-seed is an absolute path")
 	case c.request != "" && !filepath.IsAbs(c.request):
 		return c, errors.New("-recovery-request is an absolute path")
 	}
@@ -259,6 +272,9 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	}
 	if k.ClerkRoot, err = st.ClerkRoot(); err != nil {
 		return nil, err
+	}
+	if c.checkerSeed != "" {
+		writeCheckerSeed(c.checkerSeed, st, &k.ClerkRoot)
 	}
 	if c.clerkAnchors != "" {
 		ca, err := clerkAnchors(st, k, c.log)
@@ -583,6 +599,69 @@ func putClerkAnchors(path string, anchors []key.PublicKey) error {
 		return err
 	}
 	return os.Rename(f.Name(), path) // durable:exempt lifecycle:exempt durable is old core (tools/old_core.txt), so the trusted unlock step cannot link it; the anchors are public, rewritten each boot, and pinned in the store
+}
+
+// writeCheckerSeed makes path hold the store's code seed sealed under the
+// checker's clerk key (handoff.SealCodeSeed, MIG-4-exit-c2): a file only
+// this step's uid (root on the box) reads, in a directory of that uid's
+// alone, for the checker's unit to load at each start. The kernel hands the
+// checker the key, so neither the kernel, which cannot read the file, nor
+// a reader of the file holds the seed. A store with no seed removes it, so
+// a checker never starts on an earlier boot's. A failure is said, the file
+// is removed, and the kernel still starts: only the codes go without.
+func writeCheckerSeed(path string, st *seal.Store, root *[32]byte) {
+	if err := putCheckerSeed(path, st, root); err != nil {
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the checker's code seed: %v\n", err)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "agentos-unlock: remove %s: %v\n", path, err)
+		}
+	}
+}
+
+func putCheckerSeed(path string, st *seal.Store, root *[32]byte) error {
+	dir := filepath.Dir(path)
+	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	ds, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 || int(ds.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s is not a directory of mine alone", dir)
+	}
+	raw, ok, err := st.Get(handoff.CheckerSeedEntry)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	s, err := handoff.ParseCodeSeed(raw)
+	clear(raw)
+	if err != nil {
+		return fmt.Errorf("in my store: %w", err)
+	}
+	defer s.Wipe()
+	k, err := clerkkey.Derive(root, handoff.CheckerName)
+	if err != nil {
+		return err
+	}
+	sealer, err := k.Sealer()
+	k.Wipe()
+	if err != nil {
+		return err
+	}
+	defer clear(sealer)
+	blob, err := handoff.SealCodeSeed(sealer, s)
+	if err != nil {
+		return err
+	}
+	return privfile.WriteAtomic(dir, filepath.Base(path), blob, nil)
 }
 
 // tpmSelections is every PCR selection of the store's tpm slots' boot
