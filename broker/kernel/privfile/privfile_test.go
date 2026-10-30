@@ -74,7 +74,8 @@ func TestWriteAtomicRefusesALinkedDir(t *testing.T) {
 
 // WriteAtomic works in the directory it opened: dir swapped for a link
 // after name.tmp is closed (as another uid that can write dir's parent
-// could) still gets the rename, and the link's target gets nothing.
+// could) still gets the rename and the sync, and the link's target gets
+// nothing.
 func TestWriteAtomicStaysInTheDirItOpened(t *testing.T) {
 	parent, decoy := t.TempDir(), t.TempDir()
 	dir, moved := filepath.Join(parent, "d"), filepath.Join(parent, "moved")
@@ -96,8 +97,8 @@ func TestWriteAtomicStaysInTheDirItOpened(t *testing.T) {
 		return false
 	}
 	err := WriteAtomic(dir, "f", []byte("canary"), swap)
-	if !errors.Is(err, ErrUnsynced) {
-		t.Errorf("the sync of a swapped dir: got %v, want ErrUnsynced", err)
+	if err != nil {
+		t.Errorf("a write whose dir was swapped mid-way: %v", err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(moved, "f")); string(b) != "canary" {
 		t.Errorf("the opened directory holds %q", b)
@@ -107,7 +108,8 @@ func TestWriteAtomicStaysInTheDirItOpened(t *testing.T) {
 	}
 }
 
-// SyncDir neither hangs on a FIFO nor follows a link to one (#3954 comment).
+// Neither WriteAtomic nor SyncDir hangs on a FIFO at dir or follows a link
+// to one (#3954 comment; #3991 Security 1).
 func TestSyncDirRefusesAFIFO(t *testing.T) {
 	d := t.TempDir()
 	fifo, link := filepath.Join(d, "fifo"), filepath.Join(d, "link")
@@ -117,16 +119,22 @@ func TestSyncDirRefusesAFIFO(t *testing.T) {
 	if err := os.Symlink(fifo, link); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{fifo, link} {
-		done := make(chan error, 1)
-		go func() { done <- SyncDir(p) }()
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Errorf("SyncDir(%s) synced a FIFO", filepath.Base(p))
+	calls := map[string]func(string) error{
+		"SyncDir":     SyncDir,
+		"WriteAtomic": func(dir string) error { return WriteAtomic(dir, "f", []byte("canary"), nil) },
+	}
+	for name, call := range calls {
+		for _, p := range []string{fifo, link} {
+			done := make(chan error, 1)
+			go func() { done <- call(p) }()
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Errorf("%s(%s) took a FIFO for a directory", name, filepath.Base(p))
+				}
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s(%s) hangs on a FIFO", name, filepath.Base(p))
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("SyncDir(%s) hangs on a FIFO", filepath.Base(p))
 		}
 	}
 }
