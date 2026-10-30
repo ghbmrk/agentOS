@@ -6,7 +6,8 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
-// The fixture home: one device per path NET-2 names, a radio-only lock, a
+// The fixture home: one device per path NET-2 names, an offline camera, an
+// everyday device with no control port (the printer), a radio-only lock, a
 // device-to-device pair, a Household-to-device pair and an isolated device.
 // The netns tests build this same layout.
 func fixtureLayout() Layout {
@@ -27,10 +28,10 @@ func fixturePolicy() policy.Document {
 		Version:      7,
 		Destinations: []string{"core.example"},
 		Devices: []policy.Device{
-			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true},
-			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Everyday: true},
+			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}}},
+			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}, {Proto: policy.ProtoUDP, Num: 123}}},
 			{ID: "plug", Network: policy.NetDevices, WiFi: "vlan103", Allow: []string{"plug.example"}, VendorCloud: true, Class: policy.ClassPlug, Secure: "off"},
-			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan104", Class: policy.ClassCamera},
+			{ID: "cam", Network: policy.NetDevices, WiFi: "vlan104", Class: policy.ClassCamera, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}}, Stream: []policy.Port{{Proto: policy.ProtoTCP, Num: 554}}},
 			{ID: "printer", Network: policy.NetDevices, WiFi: "vlan105", Everyday: true},
 			{ID: "sensor-a", Network: policy.NetDevices, WiFi: "vlan106", Class: policy.ClassSensor},
 			{ID: "sensor-b", Network: policy.NetDevices, WiFi: "vlan107", Class: policy.ClassSensor},

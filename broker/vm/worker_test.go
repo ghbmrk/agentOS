@@ -260,36 +260,54 @@ func TestREV5ExecRaisesAndChecksUnderTheWorkersLock(t *testing.T) {
 
 // A runtime that ignores cancellation holds the worker for at most
 // ExecGrace past the timeout, and erasure gets the worker after it (L3
-// MUST-1 on #146; F1).
+// MUST-1 on #146; F1). The runtime stays hung until the test ends, so
+// neither Exec nor ForgetSince can return by the runtime finishing. Each
+// bound is three ExecGraces: two of slack for a loaded -race runner
+// (#1304: ForgetSince took 686ms past a 50ms ExecGrace), while a wait
+// that ignored ExecGrace, or scaled it, still fails.
 func TestCAP8ExecReturnsWhenTheRuntimeIgnoresCancellation(t *testing.T) {
 	old := ExecGrace
-	ExecGrace = 50 * time.Millisecond
+	ExecGrace = time.Second
 	t.Cleanup(func() { ExecGrace = old })
+	bound := 3 * ExecGrace
 	e := newEnv(t, 4096)
+	t.Cleanup(func() { close(e.rt.hang) })
 	agent := e.create("agent", admission.Experiment, 500)
 	_, err := e.m.CreateWorker(bg, "wk-a", agent.Lineage, workerSpec(Public))
 	must(t, err)
-	start := time.Now()
-	r, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, 20*time.Millisecond)
-	if d := time.Since(start); d > 500*time.Millisecond {
-		t.Fatalf("exec returned after %v", d)
-	}
+	var r ExecResult
+	returnsWithin(t, "exec", 20*time.Millisecond+bound, func() {
+		r, err = e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, 20*time.Millisecond)
+	})
 	if err != nil || !r.TimedOut {
 		t.Fatalf("exec = %+v, %v; want a timed-out result", r, err)
 	}
+	returnsWithin(t, "the first command's start", bound, func() { <-e.rt.hung })
 	done := make(chan error, 1)
 	go func() {
 		_, err := e.m.Exec(bg, "wk-a", Command{Argv: []string{"hang"}}, time.Minute)
 		done <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
-	start = time.Now()
-	must(t, e.m.ForgetSince(bg, agent.Lineage, start.Add(-time.Hour)))
-	if d := time.Since(start); d > 500*time.Millisecond {
-		t.Fatalf("ForgetSince waited %v behind a hung runtime", d)
-	}
-	if err := <-done; err == nil {
+	returnsWithin(t, "the second command's start", bound, func() { <-e.rt.hung })
+	returnsWithin(t, "ForgetSince", bound, func() {
+		err = e.m.ForgetSince(bg, agent.Lineage, time.Now().Add(-time.Hour))
+	})
+	must(t, err)
+	returnsWithin(t, "the abandoned command", bound, func() { err = <-done })
+	if err == nil {
 		t.Fatal("the abandoned command reported success")
+	}
+}
+
+// returnsWithin fails the test if f has not returned within d.
+func returnsWithin(t *testing.T, what string, d time.Duration, f func()) {
+	t.Helper()
+	ch := make(chan struct{})
+	go func() { f(); close(ch) }()
+	select {
+	case <-ch:
+	case <-time.After(d):
+		t.Fatalf("%s took over %v", what, d)
 	}
 }
 

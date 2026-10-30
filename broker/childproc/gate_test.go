@@ -39,13 +39,19 @@ var exempt = map[string]string{
 	// ruleset on stdin (ENF decision 4). Only the enforcer may import it
 	// (within), and arc2_test.go lets no other enforcer package link it.
 	"enforcer/nft/load": "the enforcer's firewall loader runs nft -f; enforcer code cannot import childproc (ENF-e)",
+	// The radio launcher (ENF-k) starts each radio stack as its own user
+	// in empty namespaces, then re-executes itself to install the stack's
+	// seccomp filter and exec the stack (syscall.Exec) with an empty
+	// environment. Same reason and same limits as the loader.
+	"enforcer/radio/confine": "the enforcer's radio launcher starts and execs the confined radio stacks; enforcer code cannot import childproc (ENF-k)",
 }
 
 // within names the exempt packages, by the same key, that are cut only
 // from the paths of importers under one directory; any other importer
 // reaches os/exec through them and fails the gate (#3754 Security 1).
 var within = map[string]string{
-	"enforcer/nft/load": "enforcer",
+	"enforcer/nft/load":      "enforcer",
+	"enforcer/radio/confine": "enforcer",
 }
 
 // inPlace names the packages, by the same key as exempt, that may name
