@@ -2,6 +2,7 @@ package handoff
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -70,5 +71,68 @@ func TestSealedCodeSeedOpensOnlyUnderTheCheckersKey(t *testing.T) {
 	}
 	if _, err := OpenCodeSeed(key, blob[:len(blob)-1]); err == nil {
 		t.Fatal("a cut file opened")
+	}
+}
+
+// Each bound on the seed's forms holds at its exact edge: the largest seed,
+// step 0 and the largest step are kept, and one past each is refused. Fails
+// if a bound is off by one either way.
+func TestCodeSeedBoundsHoldAtTheirEdges(t *testing.T) {
+	for name, v := range map[string]CodeSeed{
+		"largest seed": {Seed: make([]byte, MaxCodeSeed)},
+		"step 0":       {Seed: []byte{1}, Step: 0},
+		"largest step": {Seed: []byte{1}, Step: 1 << 62},
+	} {
+		b, err := EncodeCodeSeed(v)
+		if err != nil {
+			t.Fatalf("%s: not encoded: %v", name, err)
+		}
+		if got, err := ParseCodeSeed(b); err != nil || got.Step != v.Step || !bytes.Equal(got.Seed, v.Seed) {
+			t.Fatalf("%s: not parsed: %+v %v", name, got, err)
+		}
+	}
+	form := func(step uint64, seed int) []byte {
+		b := append([]byte(codeSeedTag), make([]byte, 8)...)
+		binary.BigEndian.PutUint64(b[len(codeSeedTag):], step)
+		return append(b, make([]byte, seed)...)
+	}
+	for name, b := range map[string][]byte{
+		"step past the largest": form(1<<62+1, 1),
+		"seed past the largest": form(1, MaxCodeSeed+1),
+		"empty seed":            form(1, 0),
+	} {
+		if _, err := ParseCodeSeed(b); !errors.Is(err, ErrCodeSeed) {
+			t.Errorf("%s: parsed", name)
+		}
+	}
+
+	key := bytes.Repeat([]byte{1}, 32)
+	blob, err := SealCodeSeed(key, CodeSeed{Seed: make([]byte, MaxCodeSeed), Step: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blob) != MaxSealedSeed {
+		t.Fatalf("the largest sealed file is %d bytes, not MaxSealedSeed %d", len(blob), MaxSealedSeed)
+	}
+	if got, err := OpenCodeSeed(key, blob); err != nil || got.Step != 3 {
+		t.Fatalf("the largest sealed file did not open: %v", err)
+	}
+	if _, err := OpenCodeSeed(key, append(bytes.Clone(blob), 0)); !errors.Is(err, ErrCodeSeed) {
+		t.Fatalf("a file past MaxSealedSeed: %v", err)
+	}
+	least, err := SealCodeSeed(key, CodeSeed{Seed: []byte{1}, Step: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(least) != MinSealedSeed {
+		t.Fatalf("the least sealed file is %d bytes, not MinSealedSeed %d", len(least), MinSealedSeed)
+	}
+	if got, err := OpenCodeSeed(key, least); err != nil || got.Step != 4 {
+		t.Fatalf("the least sealed file did not open: %v", err)
+	}
+	for n := len(sealedSeedTag); n < MinSealedSeed; n++ {
+		if _, err := OpenCodeSeed(key, least[:n]); !errors.Is(err, ErrCodeSeed) {
+			t.Fatalf("a file of %d bytes: %v", n, err)
+		}
 	}
 }

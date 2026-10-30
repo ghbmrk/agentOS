@@ -35,8 +35,12 @@ const codeSeedTag = "agentos-checker-seed/v1\n"
 // as a seed.
 const sealedSeedTag = "agentos-checker-seed-sealed/v1\n"
 
-// MaxSealedSeed bounds the sealed file.
-const MaxSealedSeed = len(sealedSeedTag) + 12 + len(codeSeedTag) + 8 + MaxCodeSeed + 16
+// MaxSealedSeed and MinSealedSeed bound the sealed file: the tag, GCM's
+// nonce, a seed's form of MaxCodeSeed or of one byte, and GCM's tag.
+const (
+	MaxSealedSeed = len(sealedSeedTag) + 12 + len(codeSeedTag) + 8 + MaxCodeSeed + 16
+	MinSealedSeed = len(sealedSeedTag) + 12 + len(codeSeedTag) + 8 + 1 + 16
+)
 
 var ErrCodeSeed = errors.New("handoff: the code seed is damaged or missing")
 
@@ -111,7 +115,7 @@ func OpenCodeSeed(key, blob []byte) (CodeSeed, error) {
 		return CodeSeed{}, err
 	}
 	rest, ok := bytes.CutPrefix(blob, []byte(sealedSeedTag))
-	if !ok || len(blob) > MaxSealedSeed || len(rest) < g.NonceSize()+g.Overhead() {
+	if !ok || len(blob) > MaxSealedSeed || len(blob) < MinSealedSeed {
 		return CodeSeed{}, ErrCodeSeed
 	}
 	plain, err := g.Open(nil, rest[:g.NonceSize()], rest[g.NonceSize():], []byte(sealedSeedTag))

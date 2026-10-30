@@ -230,9 +230,16 @@ func (c *Checker) Handler() http.Handler {
 	return mux
 }
 
+// The verify socket's server limits.
+const (
+	headerTimeout = 10 * time.Second
+	maxHeader     = 64 << 10
+	idleTimeout   = 2 * time.Minute
+)
+
 // Serve serves ln until it fails.
 func (c *Checker) Serve(ln net.Listener) error {
-	s := &http.Server{Handler: c.Handler(), ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 64 << 10, IdleTimeout: 2 * time.Minute}
+	s := &http.Server{Handler: c.Handler(), ReadHeaderTimeout: headerTimeout, MaxHeaderBytes: maxHeader, IdleTimeout: idleTimeout}
 	return s.Serve(ln)
 }
 

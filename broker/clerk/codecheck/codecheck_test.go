@@ -170,6 +170,26 @@ func TestVerifiedCodeSignsOnlyTheNamedSteps(t *testing.T) {
 	if _, err := c.Verify(code(seed, clk.now()), 0, true, steps(kernel.MaxCodeSteps+1)); err == nil {
 		t.Fatal("a code approved more steps than the kernel admits")
 	}
+	clk.add(30 * time.Second)
+	most := steps(kernel.MaxCodeSteps)
+	if r, err := c.Verify(code(seed, clk.now()), 0, true, most); err != nil || !r.OK || r.Approval == nil ||
+		!ed25519.Verify(pub, kernel.CodeMsg(most), r.Approval.Sig) {
+		t.Fatalf("a code for the most steps the kernel admits: %+v %v", r, err)
+	}
+}
+
+// The state file reads back at its edges: a last step of 0 opens, a
+// negative one does not. Fails if New's bound on the step is off by one.
+func TestStateFileStepBound(t *testing.T) {
+	for raw, ok := range map[string]bool{`{"last_step":0}`: true, `{"last_step":-1}`: false} {
+		state := filepath.Join(t.TempDir(), "state.json")
+		if err := os.WriteFile(state, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(Config{StatePath: state}); (err == nil) != ok {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
 }
 
 // The lockout (CH-4): MaxWrongCounted wrong codes pause the counted bucket,
