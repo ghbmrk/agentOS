@@ -17,6 +17,8 @@
 # needs, plus Go and python3. Network: the llama.cpp source on github.com and the model on
 # huggingface.co (with its CDN).
 set -eu
+# A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
+export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 PINS=$REPO/broker/cmd/agentos-infer/llama.pins
 pin() { sed -n "s/^$1=//p" "$PINS"; }

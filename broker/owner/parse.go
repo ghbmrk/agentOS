@@ -20,12 +20,23 @@ type reply struct {
 // fields upper-cases letters and digits and splits on everything else, as
 // control.Parse does.
 func fields(msg string) []string {
-	return strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			return unicode.ToUpper(r)
+	return strings.Fields(strings.Map(unicode.ToUpper, parserGaps(msg)))
+}
+
+// wordRune is a rune the reply parser keeps in a word: a letter or a
+// decimal digit. Every other rune separates words.
+func wordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+
+// parserGaps is s with every rune that is not a wordRune read as a space,
+// as the reply parser reads it (fields). The CH-21 check reads agent text
+// this way too, so the two cannot drift (Security on #4017).
+func parserGaps(s string) string {
+	return strings.Map(func(r rune) rune {
+		if wordRune(r) {
+			return r
 		}
 		return ' '
-	}, msg))
+	}, s)
 }
 
 // parseReply reports whether msg is one of the owner channel's words.

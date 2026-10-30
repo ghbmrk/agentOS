@@ -108,15 +108,18 @@ type (
 		Percent int64        `json:"percent"`
 		Cosigns []key.Cosign `json:"cosigns"`
 	}
+	spentArgs struct {
+		Since int64 `json:"since"`
+	}
 	extendArgs struct {
 		Ext  key.Key `json:"ext"`
 		Plan string  `json:"plan"`
 	}
 	poolArgs struct {
-		Pool    string `json:"pool"`
-		Reserve int64  `json:"reserve,omitempty"`
-		Used    int64  `json:"used,omitempty"`
-		ResetAt int64  `json:"reset_at,omitempty"`
+		Pool    string                 `json:"pool"`
+		Reserve int64                  `json:"reserve,omitempty"`
+		Cosigns []key.Cosign           `json:"cosigns,omitempty"`
+		Windows []kernel.WindowReading `json:"windows,omitempty"`
 	}
 	approveArgs struct {
 		Task     string              `json:"task"`
@@ -245,8 +248,10 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	}),
 	"extend":  act(func(k *kernel.Kernel, now int64, a extendArgs) error { return k.Extend(now, a.Ext, a.Plan) }),
 	"setline": act(func(k *kernel.Kernel, now int64, a lineArgs) error { return k.SetLine(now, a.Percent, a.Cosigns...) }),
-	"reserve": act(func(k *kernel.Kernel, now int64, a poolArgs) error { return k.Reserve(now, a.Pool, a.Reserve) }),
-	"issue":   act(func(k *kernel.Kernel, now int64, a issueArgs) error { return k.Issue(now, a.Cosigns, a.Keys...) }),
+	"reserve": act(func(k *kernel.Kernel, now int64, a poolArgs) error {
+		return k.Reserve(now, a.Pool, a.Reserve, a.Cosigns...)
+	}),
+	"issue": act(func(k *kernel.Kernel, now int64, a issueArgs) error { return k.Issue(now, a.Cosigns, a.Keys...) }),
 	"approvetask": act(func(k *kernel.Kernel, now int64, a approveArgs) error {
 		return k.ApproveTask(now, a.Task, a.Approval)
 	}),
@@ -263,7 +268,8 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 	"status":      read(func(s *kernel.State, _ int64, _ none) []kernel.Unsettled { return s.Status() }),
 	"linechanges": read(func(s *kernel.State, _ int64, _ none) int { return s.LineChanges() }),
 	"spendheld":   read(func(s *kernel.State, _ int64, _ none) map[string]kernel.SpendHold { return s.SpendHeld }),
-	"pools":       read(func(s *kernel.State, _ int64, _ none) map[string]kernel.Pool { return s.Pools }),
+	"pools":       read(func(s *kernel.State, now int64, _ none) map[string]kernel.Pool { return s.PoolsAt(now) }),
+	"spent":       read(func(s *kernel.State, _ int64, a spentArgs) map[string]int64 { return s.Spent(a.Since) }),
 	"anchors":     read(func(s *kernel.State, _ int64, _ none) []key.PublicKey { return s.Anchors }),
 	"enrollments": read(func(s *kernel.State, _ int64, _ none) enrolled {
 		es, un := s.Enrollments()
@@ -404,7 +410,7 @@ var MeterSide = Side{name: "meter", ops: map[string]op{
 	"hold":      act(func(k *kernel.Kernel, now int64, a spendArgs) error { return k.Hold(now, a.Plan, a.Rf) }),
 	"admitpool": act(func(k *kernel.Kernel, now int64, a poolArgs) error { return refusal(k.AdmitPool(now, a.Pool)) }),
 	"readpool": act(func(k *kernel.Kernel, now int64, a poolArgs) error {
-		return k.ReadPool(now, a.Pool, a.Used, a.ResetAt)
+		return k.ReadPool(now, a.Pool, a.Windows)
 	}),
 }}
 
@@ -654,7 +660,7 @@ func init() {
 		kernel.ErrNotText, kernel.ErrNotAGrant, kernel.ErrLife, kernel.ErrTask, kernel.ErrTaskOpen, kernel.ErrTaskApproval,
 		kernel.ErrBroken, kernel.ErrNotAdmitted, key.ErrMalformed, key.ErrWrongOwner, key.ErrBadSig, key.ErrLoosens, key.ErrNotHolder,
 		key.ErrUnknownKind, key.ErrUncaveated, ErrArgs, kernel.ErrSetupClosed, kernel.ErrSetupKeys, ErrSetupOnly,
-		kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
+		kernel.ErrReserveSig, kernel.ErrTargetSig, kernel.ErrTarget, kernel.ErrTargetExists, kernel.ErrNoTarget,
 		kernel.ErrContentClosed, kernel.ErrSubject, kernel.ErrErased, kernel.ErrLabel,
 		kernel.ErrStore, kernel.ErrSubjectKey, kernel.ErrItem, kernel.ErrLineage,
 		kernel.ErrRotateSig, kernel.ErrRotate, ErrApprovalStale, ErrNotApproved, handoff.ErrApproval, handoff.ErrApprovalExpired, ErrNoRecoveryCard,
@@ -803,8 +809,12 @@ func (o Owner) Extend(ext key.Key, plan string) error {
 func (o Owner) SetLine(percent int64, cos ...key.Cosign) error {
 	return o.Call("setline", lineArgs{percent, cos}, nil)
 }
-func (o Owner) Reserve(pool string, reserve int64) error {
-	return o.Call("reserve", poolArgs{Pool: pool, Reserve: reserve}, nil)
+
+// Reserve sets what is kept of pool for the owner. A lowering needs a live
+// passkey's cosign over kernel.ReserveHash, else kernel.ErrReserveSig, and a
+// big one a second, one an anchor, else kernel.ErrNeedsCosign (RES-5a).
+func (o Owner) Reserve(pool string, reserve int64, cos ...key.Cosign) error {
+	return o.Call("reserve", poolArgs{Pool: pool, Reserve: reserve, Cosigns: cos}, nil)
 }
 func (o Owner) Issue(cos []key.Cosign, keys ...key.Key) error {
 	return o.Call("issue", issueArgs{cos, keys}, nil)
@@ -833,7 +843,17 @@ func (o Owner) SpendHeld() (m map[string]kernel.SpendHold, err error) {
 	err = o.Call("spendheld", nil, &m)
 	return
 }
+
+// Pools is every pool as it stands now: its windows, the live reserve, a
+// lowering still in its hold and when it goes live, and the change count a
+// lowering signs.
 func (o Owner) Pools() (m map[string]kernel.Pool, err error) { err = o.Call("pools", nil, &m); return }
+
+// Spent is metered spend per route since a time, for the last two days only.
+func (o Owner) Spent(since int64) (m map[string]int64, err error) {
+	err = o.Call("spent", spentArgs{since}, &m)
+	return
+}
 
 // Anchors is the owner's hardware keys as setup logged them, in order: the
 // owner side lists them and finds which one signed an enrollment (#2779a).
@@ -1001,8 +1021,8 @@ func (m Meter) Hold(_ int64, plan string, rf *key.Refusal) error {
 func (m Meter) AdmitPool(_ int64, pool string) *key.Refusal {
 	return asRefusal(m.Call("admitpool", poolArgs{Pool: pool}, nil))
 }
-func (m Meter) ReadPool(_ int64, pool string, used, resetAt int64) error {
-	return m.Call("readpool", poolArgs{Pool: pool, Used: used, ResetAt: resetAt}, nil)
+func (m Meter) ReadPool(_ int64, pool string, windows []kernel.WindowReading) error {
+	return m.Call("readpool", poolArgs{Pool: pool, Windows: windows}, nil)
 }
 
 // Content is a content clerk's seam over its content socket (ContentSide).

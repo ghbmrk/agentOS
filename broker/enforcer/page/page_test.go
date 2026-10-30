@@ -741,6 +741,13 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Class":       func(d *policy.Device) { d.Class, d.Secure = policy.ClassSensor, "" },
 		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
 		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
+		"Control":     func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
+	}
+	// A stream port only a camera or microphone carries, and a change
+	// from one of those classes to the other, so these rows run on one.
+	recorders := map[string]func(d *policy.Device){
+		"Class":  func(d *policy.Device) { d.Class = policy.ClassMicrophone },
+		"Stream": func(d *policy.Device) { d.Stream = append(d.Stream, policy.Port{Proto: policy.ProtoUDP, Num: 554}) },
 	}
 	docs := map[string]func(d *policy.Document){
 		"Version":      nil, // the page picks it; it is in the serial, not the diff
@@ -763,9 +770,9 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Device": func(h *policy.Hold) { h.Device = "tv" }, "Kind": func(h *policy.Hold) { h.Kind = policy.HoldFix },
 	}
 	for ty, m := range map[reflect.Type][]string{
-		reflect.TypeOf(policy.Device{}): keys(devs), reflect.TypeOf(policy.Document{}): keys(docs),
+		reflect.TypeOf(policy.Device{}): keys(devs, recorders), reflect.TypeOf(policy.Document{}): keys(docs),
 		reflect.TypeOf(policy.StandingRule{}): keys(rules), reflect.TypeOf(policy.Pair{}): keys(pairs),
-		reflect.TypeOf(policy.Hold{}): keys(holds),
+		reflect.TypeOf(policy.Hold{}): keys(holds), reflect.TypeOf(policy.Port{}): {"Num", "Proto"},
 	} {
 		var fields []string
 		for i := range ty.NumField() {
@@ -781,6 +788,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		d.Pairs = []policy.Pair{{A: "cam", B: "lock"}}
 		d.Standing = []policy.StandingRule{{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: 1000, ToMS: 2000}}
 		d.Holds = []policy.Hold{{Device: "cam", Kind: policy.HoldFirmware}}
+		dev(d, "cam").Class, dev(d, "cam").Stream = policy.ClassCamera, []policy.Port{{Proto: policy.ProtoTCP, Num: 554}}
 	})
 	differs := func(name string, a, b policy.Document) {
 		if _, err := policy.Encode(b); err != nil {
@@ -804,6 +812,13 @@ func TestEveryFieldRendered(t *testing.T) {
 	}
 	for name, f := range devs {
 		differs("a new device's "+name, added(nil), added(f))
+	}
+	for name, f := range recorders {
+		camera := func(v *policy.Device) {
+			v.Class, v.Stream = policy.ClassCamera, []policy.Port{{Proto: policy.ProtoTCP, Num: 554}}
+		}
+		differs("a new camera's "+name, added(camera), added(func(v *policy.Device) { camera(v); f(v) }))
+		differs("the camera's "+name, base, func() policy.Document { d := clone(base); f(dev(&d, "cam")); return d }())
 	}
 	// Each field changed on a device, pair, rule or hold already there.
 	for name, f := range devs {
@@ -840,13 +855,15 @@ func TestEveryFieldRendered(t *testing.T) {
 	}
 }
 
-func keys[V any](m map[string]V) []string {
+func keys[V any](ms ...map[string]V) []string {
 	var out []string
-	for k := range m {
-		out = append(out, k)
+	for _, m := range ms {
+		for k := range m {
+			out = append(out, k)
+		}
 	}
 	slices.Sort(out)
-	return out
+	return slices.Compact(out) // a field may have a row in more than one map
 }
 
 // NET-4: the page's certificate lasts no more than Apple's 825 days, and

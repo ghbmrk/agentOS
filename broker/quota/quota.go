@@ -41,7 +41,7 @@ type FS struct {
 
 // Open checks that dir's file system enforces project quotas.
 func Open(dir string) (*FS, error) {
-	f, err := os.Open(dir)
+	f, err := openDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (q *FS) Limit(dir string, id uint32, bytes, inodes int64) error {
 	if id == 0 {
 		return errors.New("quota: project 0 is every untagged file")
 	}
-	f, err := os.Open(dir)
+	f, err := openDir(dir)
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func Project(path string) (uint32, error) {
 
 // Usage reports project id's use and limits.
 func (q *FS) Usage(id uint32) (Usage, error) {
-	f, err := os.Open(q.dir)
+	f, err := openDir(q.dir)
 	if err != nil {
 		return Usage{}, err
 	}
@@ -134,10 +134,17 @@ func Enforced(fn func() error) error { return enforced(fn) }
 
 // Clear removes project id's limits, for a machine destroyed.
 func (q *FS) Clear(id uint32) error {
-	f, err := os.Open(q.dir)
+	f, err := openDir(q.dir)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	return setLimits(f, id, 0, 0)
+}
+
+// openDir opens a directory to tag or query it, refusing a link or any
+// other kind at the path (REV-CHK-links, #3945): a FIFO planted there would
+// hang the open.
+func openDir(p string) (*os.File, error) {
+	return os.OpenFile(p, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 }

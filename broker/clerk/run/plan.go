@@ -207,7 +207,10 @@ func hasImage(v any) bool {
 func usage(u plan.Used) model.Usage {
 	m := model.Usage{In: u.In, Out: u.Out, Reported: u.Reported}
 	if u.Pool != nil {
-		m.Pool = &model.PoolReading{Used: u.Pool.Used, ResetAt: u.Pool.ResetAt}
+		m.Pool = &model.PoolReading{}
+		for _, w := range u.Pool.Windows {
+			m.Pool.Windows = append(m.Pool.Windows, model.PoolWindow{Window: w.Window, Used: w.Used, ResetAt: w.ResetAt, Every: w.Every})
+		}
 	}
 	return m
 }

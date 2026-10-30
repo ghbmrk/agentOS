@@ -41,8 +41,6 @@
   {"id": "DEBIAN-CVE-2025-69720", "issue": 2919, "where": "image", "package": "ncurses", "why": "Image package ncurses 6.5+20250216-2; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2025-8941", "issue": 2919, "where": "image", "package": "pam", "why": "Image package pam 1.7.0-5; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-102010", "issue": 2919, "where": "image", "package": "gcc-14", "why": "Image package gcc-14 14.2.0-19; Debian 13 has no fix. Fails again once Debian ships one."},
-  {"id": "DEBIAN-CVE-2026-102473", "issue": 2919, "where": "image", "package": "dash", "why": "Image package dash 0.5.12-12; Debian 13 has no fix. Fails again once Debian ships one."},
-  {"id": "DEBIAN-CVE-2026-102474", "issue": 2919, "where": "image", "package": "dash", "why": "Image package dash 0.5.12-12; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-113351", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-115506", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},
   {"id": "DEBIAN-CVE-2026-117610", "issue": 2919, "where": "image", "package": "expat", "why": "Image package expat 2.9.0-1~deb13u1; Debian 13 has no fix. Fails again once Debian ships one."},

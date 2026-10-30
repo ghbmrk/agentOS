@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,7 +164,7 @@ func TestPlanSignInShowsTheProvidersPageAndCode(t *testing.T) {
 	}
 	cli.waitStopped(t)
 	until(t, "the sign-in to end", func() bool { return h.State().Last != "" })
-	if st := h.State(); st != (PlanState{Mode: plan.Permitted, SignedIn: true, Last: DSignedIn}) {
+	if st := h.State(); !reflect.DeepEqual(bare(st), PlanState{Mode: plan.Permitted, SignedIn: true, Last: DSignedIn}) {
 		t.Fatalf("after the sign-in: %+v", st)
 	}
 	if login.Signing(guest) {
@@ -346,7 +347,7 @@ func TestPlanOwnerSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli.waitStopped(t)
-	if st, err := o.State(); err != nil || st != (PlanState{Mode: plan.Permitted, Last: DSignInStopped}) {
+	if st, err := o.State(); err != nil || !reflect.DeepEqual(bare(st), PlanState{Mode: plan.Permitted, Last: DSignInStopped}) {
 		t.Fatalf("after remove: %+v %v", st, err)
 	}
 	if d, err := o.Resume(); err != nil || d != "" {
@@ -438,7 +439,7 @@ func TestPlanSignInLateApprovalAfterTheWall(t *testing.T) {
 	if code := <-exchanged; code == 200 {
 		t.Fatal("the late code exchange was answered")
 	}
-	if st := h.State(); st != (PlanState{Mode: plan.Permitted, Last: DSignInTimedOut}) {
+	if st := h.State(); !reflect.DeepEqual(bare(st), PlanState{Mode: plan.Permitted, Last: DSignInTimedOut}) {
 		t.Fatalf("after the late approval: %+v", st)
 	}
 	if login.Signing(guest) || login.SignedIn(guest) {
@@ -587,4 +588,37 @@ func TestPlanSignInWaitsOutARemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	cli.waitStopped(t)
+}
+
+// bare is st without the plan's names, which TestPlanStateNamesThePoolWithoutFigures checks.
+func bare(st PlanState) PlanState {
+	st.Title, st.Pool = "", PlanPool{}
+	return st
+}
+
+// planstate names the plan, its pool and its windows as the declaration
+// does, and the routes that draw on the pool, with no figure: the owner side
+// reads those from the kernel (CLK-7, ONB-9).
+// REQ: CLK-7, ONB-9
+func TestPlanStateNamesThePoolWithoutFigures(t *testing.T) {
+	login, _ := planLoginAt(t, plan.Permitted, http.NotFoundHandler())
+	h := &PlanHost{Login: login, Routes: []string{"codex-plan"}, Prompt: CodexSignIn(), Times: quick}
+	sock := filepath.Join(shortDir(t), "owner.sock")
+	ln, err := ListenPlanOwner(sock, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go ServePlanOwner(ln, h)
+	want := PlanPool{ID: "codex", Name: "ChatGPT Codex", Windows: []PlanWindow{{"5h", "5-hour limit"}, {"7d", "week"}}, Routes: []string{"codex-plan"}}
+	st, err := PlanOwner{proc.Conn{Socket: sock, UID: os.Getuid()}}.State()
+	if err != nil || st.Title != "ChatGPT" || !reflect.DeepEqual(st.Pool, want) || !reflect.DeepEqual(h.State(), st) {
+		t.Fatalf("planstate %+v %v, want ChatGPT %+v", st, err, want)
+	}
+	b, _ := json.Marshal(st)
+	for _, figure := range []string{"used", "reset", "percent", "reserve", "X-Codex"} {
+		if strings.Contains(strings.ToLower(string(b)), strings.ToLower(figure)) {
+			t.Fatalf("planstate carries %q: %s", figure, b)
+		}
+	}
 }

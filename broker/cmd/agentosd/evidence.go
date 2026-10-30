@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/control"
 	"github.com/ghbmrk/agentos/broker/daemon"
 	"github.com/ghbmrk/agentos/broker/guest"
+	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -30,8 +33,14 @@ type evidence struct {
 	// notify texts the owner an agent reply (owner.Channel.Converse, which
 	// adds the prefix and runs CH-19's filter).
 	notify func(string) error
+	// inform texts the owner one of the broker's own notices
+	// (owner.Channel.Inform).
+	inform func(string) error
 	kept   *keptReplies
 	logf   func(string, ...any)
+	// page says the owner page is served, so the owner channel may point
+	// to what it keeps there (owner.Channel.SetKeeper, CH-12).
+	page bool
 
 	// wake tells the worker the guest plane's outbox has new replies;
 	// src is that outbox, once the plane is open (DEL-1b).
@@ -47,15 +56,20 @@ type replySource interface {
 
 type replySourceBox struct{ s replySource }
 
-// Fixed wording, in the box's first-person voice (UX U7).
+// Fixed wording, in the box's first-person voice (UX U7). The
+// could-not-be-kept texts name no page (CH-19, CH-12); keptLongNotKept is
+// no longer than keptLong, so it fits where keptLong would.
 const (
-	keptLong       = "Cut here. Ask me to send it in shorter parts."
-	evidenceNotYet = "Emailing private replies is not in this build yet."
+	keptLong        = "Cut here. Ask me to send it in shorter parts."
+	keptLongNotKept = "Cut here, not kept. Ask me for shorter parts."
+	unsentNotKept   = "A reply did not go, and I could not keep it. Ask me to send it again."
+	evidenceNotYet  = "Emailing private replies is not in this build yet."
 )
 
-// newEvidence keeps undelivered replies at keptPath.
-func newEvidence(keptPath string, logf func(string, ...any)) *evidence {
-	return &evidence{kept: &keptReplies{store: change.FileStore{Path: keptPath}, now: time.Now, logf: logf},
+// newEvidence keeps undelivered and withheld replies at keptPath for
+// keepFor (CH-19).
+func newEvidence(keptPath string, keepFor time.Duration, logf func(string, ...any)) *evidence {
+	return &evidence{kept: &keptReplies{store: change.FileStore{Path: keptPath}, now: time.Now, logf: logf, keepFor: keepFor},
 		logf: logf, wake: make(chan struct{}, 1)}
 }
 
@@ -139,36 +153,47 @@ func (e *evidence) run(ctx context.Context) {
 
 // sendSplit texts a reply as up to maxReplyTexts consecutive texts
 // (CH-12, D-127); one longer than that is kept whole and the third text
-// ends with keptLong. The reply is stripped of control and bidi
-// characters first (control.StripControls), then CH-19's check runs on
-// the whole of it as written, stripped and with its controls removed
-// (owner.AgentSecret): a secret-shaped reply goes as one text, as
-// written, which the owner channel replaces with its local-UI pointer, so no code is split
-// past the check. A text that does not go stops the rest, so none arrives
-// out of order, and the reply is kept. What is kept for the local UI is
-// the stripped reply too.
+// ends with keptLong, or with keptLongNotKept if it could not be kept.
+// The reply is stripped of control and bidi characters first
+// (control.StripControls), then the CH-19 and CH-21 checks run on the
+// whole of it as written, stripped and with its controls removed
+// (owner.AgentSecret, owner.AgentVoice): a reply either matches goes as
+// one text, as written, which the owner channel keeps whole and replaces
+// with its pointer, so no code or reply grammar is split past the checks
+// (CH-12). The channel also checks each text joined to the ones before it
+// since the owner's last message. A text that does not go stops the rest, so none arrives
+// out of order, and the reply is kept; if it cannot be, the owner is told.
+// What is kept for the local UI is the stripped reply too.
 func (e *evidence) sendSplit(machine, text string) {
 	raw := text
 	text = control.StripControls(text)
-	if owner.AgentSecret(raw) {
-		if n, gsm7 := control.Units(text); n > textRoom(gsm7) {
-			e.kept.keep(text)
-		}
+	if owner.AgentSecret(raw) || owner.AgentVoice(raw) {
 		e.send(machine, raw)
 		return
 	}
 	parts, cut := splitReply(text)
-	if cut {
-		e.kept.keep(text)
+	if cut && e.kept.keep(localapi.HeldLong, text) != nil {
+		parts, _ = splitReplyEnd(text, keptLongNotKept)
 	}
 	for i, p := range parts {
 		if err := e.notify(p); err != nil {
 			e.logf("reply from %s not sent (text %d of %d): %v", machine, i+1, len(parts), err)
-			if len(parts) > 1 && !cut {
-				e.kept.keep(text)
+			if len(parts) > 1 && !cut && e.kept.keep(localapi.HeldUnsent, text) != nil {
+				e.tellNotKept()
 			}
 			return
 		}
+	}
+}
+
+// tellNotKept tells the owner an unsent reply could not be kept, in the
+// broker's own words.
+func (e *evidence) tellNotKept() {
+	if e.inform == nil {
+		return
+	}
+	if err := e.inform(unsentNotKept); err != nil {
+		e.logf("reply not kept; owner not told: %v", err)
 	}
 }
 
@@ -181,10 +206,10 @@ func (e *evidence) send(machine, text string) {
 // maxReplyTexts is how many texts one agent reply may take (CH-12).
 const maxReplyTexts = 3
 
-// textRoom is what one text leaves for agent text after AgentPrefix, in
-// units of its encoding (control.Units): 3 x 153 septets for GSM-7, 3 x 67
-// UTF-16 units for UCS-2 (CH-12).
-func textRoom(gsm7 bool) int { return control.Room(gsm7) - len(owner.AgentPrefix) }
+// textRoom is what one text leaves for agent text, which carries no label
+// (CH-21), in units of its encoding (control.Units): 3 x 153 septets for
+// GSM-7, 3 x 67 UTF-16 units for UCS-2 (CH-12).
+func textRoom(gsm7 bool) int { return control.Room(gsm7) }
 
 // splitReply cuts text into at most maxReplyTexts parts, each within one
 // text in the encoding the rest of the reply needs from where it starts
@@ -195,6 +220,11 @@ func textRoom(gsm7 bool) int { return control.Room(gsm7) - len(owner.AgentPrefix
 // never a stub; failing all of these, the last word boundary, else a rune
 // boundary outside any joined emoji (control.Prefix).
 func splitReply(text string) (parts []string, cut bool) {
+	return splitReplyEnd(text, keptLong)
+}
+
+// splitReplyEnd is splitReply with end in place of keptLong.
+func splitReplyEnd(text, end string) (parts []string, cut bool) {
 	rest := strings.TrimSpace(text)
 	for len(parts) < maxReplyTexts-1 && !fits(rest) {
 		i := cutAt(rest, control.Prefix(rest, roomOf(rest)))
@@ -204,11 +234,11 @@ func splitReply(text string) (parts []string, cut bool) {
 	if fits(rest) {
 		return append(parts, rest), false
 	}
-	i := cutAt(rest, control.Prefix(rest, roomOf(rest)-1-len(keptLong)))
-	return append(parts, strings.TrimSpace(rest[:i])+" "+keptLong), true
+	i := cutAt(rest, control.Prefix(rest, roomOf(rest)-1-len(end)))
+	return append(parts, strings.TrimSpace(rest[:i])+" "+end), true
 }
 
-// fits says s fits one text after AgentPrefix.
+// fits says s fits one text.
 func fits(s string) bool {
 	n, gsm7 := control.Units(s)
 	return n <= textRoom(gsm7)
@@ -285,9 +315,14 @@ func (e *evidence) wire(cfg *daemon.Config) {
 	}
 }
 
-// attach starts routing through the running daemon's owner channel.
+// attach starts routing through the running daemon's owner channel, and,
+// with the owner page served, keeps what the channel withholds for it.
 func (e *evidence) attach(ctx context.Context, d *daemon.Daemon) {
 	e.wireOwner(d.Owner)
+	if ch := d.Owner(); ch != nil && e.page {
+		ch.SetKeeper(e.kept)
+	}
+	go e.kept.sweepEvery(ctx, time.Minute)
 	go e.run(ctx)
 	e.poke()
 }
@@ -303,6 +338,13 @@ func randHex(n int) string {
 // A deletion's reach also clears the channel's recent texts (#2360).
 func (e *evidence) wireOwner(channel func() *owner.Channel) {
 	e.notify = converse(channel)
+	e.inform = func(text string) error {
+		ch := channel()
+		if ch == nil {
+			return errors.New("no owner channel")
+		}
+		return ch.Inform(text)
+	}
 	if e.kept != nil {
 		e.kept.attachOwner(channel)
 	}
@@ -321,24 +363,60 @@ func converse(channel func() *owner.Channel) func(string) error {
 	}
 }
 
-// Kept replies: a reply that could not be sent, or was too long for
-// maxReplyTexts texts, waits here for the box's local page (BOARD CH-20p): at most
-// maxKept, none past keepReplies, in a 0600 file in the box's state
-// directory. A deletion's reach (CAP-3) forgets them all (forget).
+// Kept replies (CH-19, CH-20p): a reply that could not be sent or was
+// too long for maxReplyTexts texts, and every text the owner channel
+// withheld (owner.Keeper), wait here for the box's local page, in a 0600
+// file in the box's state directory, saved atomically (change.FileStore).
+// Each expires only by time, keepFor after it was kept; its text is then
+// dropped and a stub stays for stubFor more, so the page can say it has
+// expired. A code the owner channel kept (owner.KeptOneTime) is kept only
+// codeFor; then its text reads with the code expired (owner.ExpiredView),
+// and the item keeps its days (CH-19, #906). Nothing is evicted by count: a new item that would take the
+// file past maxKeptBytes is refused, and its sender says it could not be
+// kept. A deletion's reach (CAP-3) forgets them all, stubs too (forget).
 const (
-	maxKept     = 20
-	keepReplies = 7 * 24 * time.Hour
+	defaultKeepFor = 30 * 24 * time.Hour
+	defaultCodeFor = time.Hour
+	stubFor        = 30 * 24 * time.Hour
+	maxKeptBytes   = 1 << 20
 )
 
+var errKeptFull = errors.New("kept replies are full")
+
+// codeFor is how long a kept code stays readable: -code-hours, 1 to 24
+// (CH-19, #906).
+func codeFor(hours int) (time.Duration, error) {
+	if hours < 1 || hours > 24 {
+		return 0, errors.New("-code-hours must be 1 to 24")
+	}
+	return time.Duration(hours) * time.Hour, nil
+}
+
 type keptReply struct {
-	Text string    `json:"text"`
+	ID   string    `json:"id,omitempty"`
+	Kind string    `json:"kind,omitempty"`
+	Text string    `json:"text,omitempty"`
 	At   time.Time `json:"at"`
+	// Expired marks a stub: its text is gone.
+	Expired bool `json:"expired,omitempty"`
+	// CodeUntil is when a kept code expires; CodeExpired marks a text
+	// whose code has (CH-19, #906).
+	CodeUntil   time.Time `json:"code_until,omitzero"`
+	CodeExpired bool      `json:"code_expired,omitempty"`
+	// CodeGone is the text to show from CodeUntil (owner.ExpiredView).
+	CodeGone string `json:"code_gone,omitempty"`
 }
 
 type keptReplies struct {
 	store change.Store
 	now   func() time.Time
 	logf  func(string, ...any)
+	// keepFor is how long an item is kept (-kept-days); zero is
+	// defaultKeepFor.
+	keepFor time.Duration
+	// codeFor is how long a kept code stays readable (-code-hours); zero
+	// is defaultCodeFor.
+	codeFor time.Duration
 
 	mu sync.Mutex
 
@@ -432,20 +510,107 @@ func tellHeldDropped(ch *owner.Channel, n int) error {
 	return ch.Post(owner.ClassApproval, fmt.Sprintf("A deletion dropped %d held agent texts.", n))
 }
 
-func (k *keptReplies) keep(text string) {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	l := append(k.loadLocked(), keptReply{Text: text, At: k.now()})
-	if len(l) > maxKept {
-		l = l[len(l)-maxKept:]
+// Keep keeps a text the owner channel withheld (owner.Keeper).
+func (k *keptReplies) Keep(kind, text string) error {
+	if kind == owner.KeptOneTime {
+		return k.KeepCode(text, owner.ExpireCodes(text))
 	}
-	k.saveLocked(l)
+	return k.keep(kind, text)
 }
 
-func (k *keptReplies) saveLocked(l []keptReply) {
-	b, _ := json.Marshal(l)
-	if err := k.store.Save(b); err != nil && k.logf != nil {
-		k.logf("kept replies not saved: %v", err)
+// KeepCode keeps a code the owner channel withheld, with the text to show
+// once it expires (owner.Keeper).
+func (k *keptReplies) KeepCode(text, expired string) error {
+	return k.keepWith(owner.KeptOneTime, text, expired)
+}
+
+// keep adds text of kind, or refuses it, logging why without the text.
+// A text of the same kind still kept is kept once: a sender that retries,
+// such as an owner question while the line is down, is withheld and kept
+// on every try, and copies would fill the store (#3986). The one copy
+// keeps its id but takes this keep's time, and moves to the end, so it
+// lasts keepFor from the latest pointer to it (HELD-1, HELD-2).
+func (k *keptReplies) keep(kind, text string) error {
+	return k.keepWith(kind, text, "")
+}
+
+// keepWith is keep, with what a KeptOneTime text shows once its code
+// expires.
+func (k *keptReplies) keepWith(kind, text, codeGone string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	l, err := k.loadLocked()
+	if err == nil {
+		item := keptReply{ID: randHex(8), Kind: kind, Text: text, At: k.now()}
+		if kind == owner.KeptOneTime {
+			codeFor := k.codeFor
+			if codeFor <= 0 {
+				codeFor = defaultCodeFor
+			}
+			item.CodeUntil, item.CodeGone = item.At.Add(codeFor), codeGone
+		}
+		if i := slices.IndexFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }); i >= 0 {
+			item.ID = l[i].ID
+			if g := l[i].CodeGone; g != "" && g != item.CodeGone {
+				// Copies kept from different texts as received can
+				// differ in what a control hid: keep the stricter view,
+				// the whole text gone (#4014 Security).
+				item.CodeGone = owner.ExpiredCode
+			}
+			l = slices.Delete(l, i, i+1)
+		}
+		err = k.saveLocked(append(l, item))
+	}
+	if err != nil && k.logf != nil {
+		k.logf("a %s reply was not kept: %v", kind, err)
+	}
+	return err
+}
+
+// saveLocked saves l, or refuses it past maxKeptBytes.
+func (k *keptReplies) saveLocked(l []keptReply) error {
+	b, err := json.Marshal(l)
+	if err != nil {
+		return err
+	}
+	if len(b) > maxKeptBytes {
+		return errKeptFull
+	}
+	return k.store.Save(b)
+}
+
+// sweep saves the kept items as they now read, so an expired item's text
+// leaves the disk and an old stub goes.
+func (k *keptReplies) sweep() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	raw, err := k.store.Load()
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	l, err := k.loadLocked()
+	if err == nil {
+		var b []byte
+		if b, err = json.Marshal(l); err == nil && string(b) != string(raw) {
+			err = k.store.Save(b)
+		}
+	}
+	if err != nil && k.logf != nil {
+		k.logf("kept replies not swept: %v", err)
+	}
+}
+
+// sweepEvery sweeps every d until ctx is done.
+func (k *keptReplies) sweepEvery(ctx context.Context, d time.Duration) {
+	t := time.NewTicker(d)
+	defer t.Stop()
+	for {
+		k.sweep()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 
@@ -480,23 +645,72 @@ func (k *keptReplies) drop() error {
 	return k.store.Save([]byte("[]"))
 }
 
-// list returns the kept replies, oldest first.
+// list returns the kept items as they now read, oldest first: expired
+// ones as stubs. Reading changes nothing.
 func (k *keptReplies) list() []keptReply {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.loadLocked()
+	l, _ := k.loadLocked()
+	return l
 }
 
-func (k *keptReplies) loadLocked() []keptReply {
-	raw, err := k.store.Load()
-	var l, out []keptReply
-	if err != nil || json.Unmarshal(raw, &l) != nil {
-		return nil
-	}
-	for _, r := range l {
-		if k.now().Sub(r.At) < keepReplies {
-			out = append(out, r)
+// held is the owner page's view (localapi.OpHeld): the items still kept,
+// newest first, then the stubs, newest first.
+func (k *keptReplies) held() localapi.HeldList {
+	var live, stubs []localapi.HeldItem
+	for _, r := range slices.Backward(k.list()) {
+		it := localapi.HeldItem{ID: r.ID, Kind: r.Kind, At: r.At, Text: r.Text, Expired: r.Expired, CodeExpired: r.CodeExpired}
+		if r.Expired {
+			stubs = append(stubs, it)
+		} else {
+			live = append(live, it)
 		}
 	}
-	return out
+	return localapi.HeldList{Items: append(live, stubs...)}
+}
+
+// loadLocked reads the kept items as of now: a code past its CodeUntil
+// reads as expired, one past keepFor is a stub, and a stub past stubFor
+// more is gone. A store it cannot read is an
+// error, so keep never writes over it.
+func (k *keptReplies) loadLocked() ([]keptReply, error) {
+	raw, err := k.store.Load()
+	if err != nil {
+		return nil, err
+	}
+	var l, out []keptReply
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &l); err != nil {
+			return nil, err
+		}
+	}
+	keepFor := k.keepFor
+	if keepFor <= 0 {
+		keepFor = defaultKeepFor
+	}
+	now := k.now()
+	for _, r := range l {
+		if r.ID == "" {
+			// Kept before items had ids: one from what it holds, so it
+			// stays the same once its text has expired and been swept.
+			sum := sha256.Sum256([]byte(r.At.UTC().Format(time.RFC3339Nano) + "\x00" + r.Text))
+			r.ID = hex.EncodeToString(sum[:8])
+		}
+		if !r.CodeUntil.IsZero() && !now.Before(r.CodeUntil) {
+			gone := r.CodeGone
+			if gone == "" {
+				gone = owner.ExpireCodes(r.Text)
+			}
+			r.Text, r.CodeUntil, r.CodeGone, r.CodeExpired = gone, time.Time{}, "", true
+		}
+		age := now.Sub(r.At)
+		switch {
+		case age >= keepFor+stubFor:
+			continue
+		case age >= keepFor:
+			r.Text, r.Expired = "", true
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 
 	"github.com/sigstore/sigstore/pkg/signature"
 	"github.com/theupdateframework/go-tuf/v2/metadata"
@@ -36,20 +37,20 @@ func Keygen(base string) (ed25519.PublicKey, error) {
 		return nil, err
 	}
 	if err := writeNew(base+".pub", pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pder}), 0o644); err != nil {
-		os.Remove(base + ".key")
+		remove(base + ".key")
 		return nil, err
 	}
 	return pub, nil
 }
 
 func writeNew(name string, b []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(b); err != nil {
 		f.Close()
-		os.Remove(name)
+		remove(name)
 		return err
 	}
 	return f.Close()

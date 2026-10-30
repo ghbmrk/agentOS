@@ -181,7 +181,7 @@ func TestOWN4AckCarriesNoAgentContent(t *testing.T) {
 	r.say("book a table")
 	a.fire(5 * time.Second)
 	got := r.sentTexts()
-	if len(got) != 1 || got[0] != AckText || strings.HasPrefix(got[0], AgentPrefix) {
+	if len(got) != 1 || got[0] != AckText {
 		t.Fatalf("acknowledgement in quiet hours: %q", got)
 	}
 	r.ch.mu.Lock()
