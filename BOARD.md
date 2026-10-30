@@ -78,7 +78,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | KRN-pin-audit | KRN-pin-audit: a replay given no pinned roots no longer reports a false divergence on a pinned plan (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | KRN-pin-anchors | KRN-pin-anchors: the pinned key is checked against anchors logged later, and against re-anchors (KRN-4). | KRN-pin (#3701) | queued (later; tier A; from #3701 review) |
 | CLK-8-line | CLK-8-line: the second-line clerk: third-party texts through the `send` verb on an owner-held calling account, never the owner's number; E.164 recipients the clerk verified or the owner fixed; one rate budget; transcripts logged; inbound as untrusted data (CLK-8, CH-1, DEP-3, KEY-2). Rebuild under D-227. | part a: none; part b: a, #3686 (d1), #3685 (p), Mark's D-154 rule 3 answer; part c: b, #3685 (p) | building (release; tier A; brief briefs/CLK-8-line.md; part a in PR #3881) |
-| DECOY-b | DECOY-b: kernel trips, automatic narrowing, passkey resume (KRN-12) | #3762 | building(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-e | DECOY-e: sandbox, host and sealed-store placements, honey keys, three decoy wallets (KRN-12) | #3762, #3763, #3764 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | DECOY-f | DECOY-f: scheduled sim drills with targets; stale drill shows broken in STATUS (KRN-12) | #3763, #3764, #3765, #3766 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | ENF-attest | Core-to-enforcer attestation channel: the enforcer verifies the core booted the signed image (attestation key enrolled at HW-5a, measured values pinned) before it accepts "core reflashed" (KRN-12, REC-5, HW-5a) | #3796, #3797 (PR #3798); brief to write | queued(later; tier A; one session) |
@@ -90,8 +89,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-exit-c2-unit | MIG-4-exit-c2-unit: the checker's unit (kernel-handed key, loaded sealed seed), the keeper's codes socket and the unlock, kernel and enrollment flags on the image (CH-4, CLK-1). | #3683 (c2); image queue | queued (release; tier A; follow-up of MIG-4-exit-c2; size S) |
 | DECOY-b-wire | DECOY-b-wire: first-boot table, call trips over the kernel socket, texts and resume (KRN-12) | #3763 | queued(tier A; lane primary; brief briefs/DECOY.md) |
 | MIG-4-untrusted-reconnect-a4 | Passkey follow-ups from the #4057 reviews: a race test that fails fast, and a retry challenge tied to the begun point. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
-| DECOY-b-harden | DECOY-b-harden: bounded repeat trips and resume, trip logged with its rejection, honey keys at every key check, outbound scan past the plan (KRN-12) | #3763 | queued(release; tier A; size M; from #4037 reviews) |
+| DECOY-b-harden | DECOY-b-harden: bounded repeat trips and resume, trip logged with its rejection, honey keys at every key check, outbound scan past the plan (KRN-12) | #3763 | building(release; tier A; size M; from #4037 reviews) |
 | MIG-4-untrusted-reconnect-a5 | Passkey enrolment notice follow-ups from the #4076 reviews: retry a lost notice, fresh enrolment challenges, fingerprint strength and form. | MIG-4-untrusted-reconnect-a | queued (later; tier A) |
+| DECOY-b-scan | DECOY-b-scan: the decoy matcher on the model clerk's outbound body and the edge link (KRN-12 Trips) | #3763 | queued(release; tier A; size M; from #4037 L3 4, split from #4070; after #4039) |
 
 ## Harness and operating model
 
@@ -319,6 +319,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-dns-per-device | ENF-dns-per-device: per-device resolver views (NET-3 Devices) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-g-b | ENF-g-b: grouped Wi-Fi password on the device card; note that devices join on 2.4 GHz only (NET-3) | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-g-c | ENF-g-c: access point hardening: no SHA-1 host key, LuCI off, AP-side command allowlist (NET-3) | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-k-ptrace | ENF-k-ptrace: the radio confinement test's ptrace probe must not stop the host's PID 1 (NET-2) | #3669 | building (tier A; lane primary; from ENF-k #3669 CI) |
+| KERNEL-trim | KERNEL-trim: measure the image kernel's attack surface; trimmed, locked-down configs for core, edge and enforcer; CVE-class reduction and signed-kernel cost (HW-5a) | none (part a); the image queue (parts b and c) | building (tier A; lane primary; brief briefs/KERNEL-trim.md) |
+| SPEC-struct-1 | SPEC-struct-1: structural bounds enforced outside the core: egress byte caps (HW-12/NET-2), bind-or-bound credentials (CLK-9), breach ceiling (CLK-10/11), erase by class (LOG-4) | none | building (tier B; L1 spec-diff; design cross-silo-structure-spec-change-2026-10-30.md Part 1) |
 
 ## Model routes and the Codex lane
 
