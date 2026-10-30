@@ -359,7 +359,9 @@ func TestTurnOnNeedsNamedOnceChallenge(t *testing.T) {
 		"isolated":     func(d *policy.Document) { d.Devices[0].Isolated = true },
 		"removed":      func(d *policy.Document) { d.Devices = d.Devices[1:] },
 		"reclassified": func(d *policy.Document) { d.Devices[0].Class = policy.ClassOven },
-		"everyday":     func(d *policy.Document) { d.Devices[0].Everyday, d.Devices[0].Class, d.Devices[0].Secure = true, "", "" },
+		"everyday": func(d *policy.Document) {
+			d.Devices[0].Everyday, d.Devices[0].Class, d.Devices[0].Secure = true, "", ""
+		},
 	} {
 		b, r := newBook(t, p)
 		c, _ := b.Issue(home(), "heater", action.On, "", 0)
