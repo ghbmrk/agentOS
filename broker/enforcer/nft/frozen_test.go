@@ -96,7 +96,8 @@ func TestDeviceTrafficCounted(t *testing.T) {
 	)
 	// An unpaired device forges an ICMP error about the edge's open
 	// connection to the TV: conntrack calls it related, and it must not
-	// enter either device's counts.
+	// count for its sender (the TV's side is pinned by the internet case
+	// below, since the TV's set records only internet peers).
 	var edgeConn net.Conn
 	within(t, h.hosts["edge"], func() {
 		var err error
@@ -114,6 +115,31 @@ func TestDeviceTrafficCounted(t *testing.T) {
 		defer c.Close()
 		for range 3 {
 			if _, err := c.WriteTo(icmpUnreachable(devAddr(101), segNets["edge"]+".2", 80, lport), &net.IPAddr{IP: net.ParseIP(devAddr(101))}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	// And from the internet: a host forges an ICMP error about the TV's
+	// own connection to its allow list, which the enforcer un-NATs and
+	// forwards to the TV as related. Its sender must not enter the TV's
+	// destinations.
+	var tvConn net.Conn
+	within(t, h.hosts["101"], func() {
+		var err error
+		if tvConn, err = net.DialTimeout("tcp", netAllow+":80", 2*time.Second); err != nil {
+			t.Fatalf("the TV to its allow list: %v", err)
+		}
+	})
+	defer tvConn.Close()
+	tvPort := uint16(tvConn.LocalAddr().(*net.TCPAddr).Port) // masquerade keeps a free port
+	within(t, h.hosts["isp"], func() {
+		c, err := net.ListenPacket("ip4:icmp", netOther)
+		if err != nil {
+			t.Fatalf("raw ICMP socket: %v", err)
+		}
+		defer c.Close()
+		for range 3 {
+			if _, err := c.WriteTo(icmpUnreachable(enfWAN, netAllow, tvPort, 80), &net.IPAddr{IP: net.ParseIP(enfWAN)}); err != nil {
 				t.Fatal(err)
 			}
 		}

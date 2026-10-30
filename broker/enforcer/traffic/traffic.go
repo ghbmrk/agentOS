@@ -64,7 +64,7 @@ type Summary struct {
 	BlockedTo        []Dest `json:"blocked_to"`
 	MoreBlocked      int    `json:"more_blocked"`
 	// Truncated says a counting set or the refusal log was full, so
-	// addresses past the first nft.TrafficSize are missing.
+	// addresses past the first nft.TrafficSize may be missing.
 	Truncated bool `json:"truncated"`
 }
 
