@@ -20,9 +20,7 @@ func BusPolicy(user string) (string, error) {
 		return "", fmt.Errorf("ble: bus policy user %q", user)
 	}
 	var b strings.Builder
-	b.WriteString(`<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
- "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
-<!-- agentOS enforcer BLE stack (broker/enforcer/radio/ble.BusPolicy); generated, do not edit. -->
+	b.WriteString(`<!-- agentOS enforcer BLE stack (broker/enforcer/radio/ble.BusPolicy); generated, do not edit. -->
 <busconfig>
   <policy user="` + user + `">
     <deny own="*"/>

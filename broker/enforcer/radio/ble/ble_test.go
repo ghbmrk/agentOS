@@ -638,9 +638,7 @@ func TestBusPolicyRefusesUndeclaredCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	bus := filepath.Join(dir, "bus")
-	conf := `<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
- "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
-<busconfig>
+	conf := `<busconfig>
   <listen>unix:path=` + bus + `</listen>
   <auth>EXTERNAL</auth>
   <policy context="default">
