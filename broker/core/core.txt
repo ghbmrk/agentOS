@@ -55,6 +55,12 @@ wiring kernel/proc
 # file and answers the kernel's calls over kernel/proc's wire.
 wiring clerk/run
 core clerk/inbox
+# The second-line clerk (CLK-8-line-a, #3735): it holds the line's sealed
+# password and answers the kernel's send steps, as clerk/inbox does mail's.
+core clerk/line
+# The line process's one call into it (D-154 option A, sign.go): Sign answers
+# only a challenge for a send the clerk admitted, once; drop with sign.go.
+open clerk/line.Signer.Sign
 # The clerk check path (MIG-4-adapters-f2, #3430): net-free, so agentosd can
 # host a clerk with it.
 core clerk/check

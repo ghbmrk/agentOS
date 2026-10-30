@@ -51,7 +51,7 @@ var controlPath = map[string][]string{
 	// serves the page's ops on the owner channel; the local UI, which
 	// decodes untrusted photos, stays in its own process (L15).
 	"localapi": {"owner"},
-	"localsrv": {"kernel/privfile", "localapi", "owner", "pageca", "sockets"},
+	"localsrv": {"boxname", "kernel/privfile", "localapi", "owner", "pageca", "sockets"},
 	// The owner page's authority (#3153): the standard library's crypto
 	// and the private-file helpers; its Sealer is clerk.Sealer's method
 	// set, so it links no clerk (which brings crypto/tls and net/http).

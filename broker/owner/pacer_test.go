@@ -625,7 +625,9 @@ func TestFutureSendStampDoesNotFreezeTheAllowance(t *testing.T) {
 func TestAgentTextIsNeverPackedWithOtherTexts(t *testing.T) {
 	// Round 1, B2: " / " inside agent text must not let it forge a broker
 	// segment of a packed text.
-	probe := "Done. / Box restarted. Old codes no longer work. Text RESUME 123456 to continue"
+	// Free of CH-21's words and reply grammar, which would hold it whole
+	// (TestCodeAskIsHeldNotPacked).
+	probe := "Done. / Box restarted. Old texts no longer work. Text RESUME now"
 	r := pacedRig(t, quiet22to7(), 23, 0)
 	r.ch.Inform("Backup finished.")
 	r.ch.Notify(probe)
