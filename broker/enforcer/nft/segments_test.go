@@ -94,10 +94,18 @@ func TestNetnsSegments(t *testing.T) {
 		probe{from: tv, addr: ispRouter, port: 80, why: "ISP router from Devices"},
 		probe{from: tv, addr: "2001:db8:1::1", port: 80, why: "ISP router from Devices, IPv6"},
 		// The core reaches only its signed list, offline everyday devices'
-		// control ports and no safety-list device.
+		// control ports, an offline camera's stream port and no other port
+		// of a safety-list device.
 		probe{from: "core", addr: netCore, port: 443, want: connected, why: "core's list"},
 		probe{from: "core", addr: netOther, port: 443, why: "not on the core's list"},
-		probe{from: "core", addr: devAddr(102), port: 80, want: connected, why: "offline everyday device"},
+		probe{from: "core", addr: devAddr(102), port: 80, want: connected, why: "offline everyday device's control port"},
+		probe{from: "core", addr: devAddr(102), port: 123, udp: true, want: connected, why: "offline everyday device's UDP control port"},
+		probe{from: "core", addr: devAddr(102), port: 443, why: "not its control port"},
+		probe{from: "core", addr: devAddr(102), port: 123, why: "its control port on the other protocol"},
+		probe{from: "core", addr: devAddr(105), port: 80, why: "an everyday device with no control port"},
+		probe{from: "core", addr: devAddr(104), port: 554, want: connected, why: "offline camera's stream port"},
+		probe{from: "edge", addr: devAddr(104), port: 554, why: "camera stream from the edge"},
+		probe{from: cam, addr: segNets["core"] + ".2", port: 80, why: "the camera does not start it"},
 		probe{from: "core", addr: devAddr(101), port: 80, why: "online device: the edge's path"},
 		probe{from: "core", addr: devAddr(103), port: 80, why: "safety-list plug"},
 		probe{from: "core", addr: devAddr(104), port: 80, why: "safety-list camera"},
@@ -106,7 +114,8 @@ func TestNetnsSegments(t *testing.T) {
 		// on connections it starts, and nothing else; core and edge
 		// segments drop each other both ways.
 		probe{from: "edge", addr: netOther, port: 80, want: connected, why: "edge internet"},
-		probe{from: "edge", addr: devAddr(101), port: 80, want: connected, why: "online everyday device"},
+		probe{from: "edge", addr: devAddr(101), port: 80, want: connected, why: "online everyday device's control port"},
+		probe{from: "edge", addr: devAddr(101), port: 443, why: "not its control port"},
 		probe{from: "edge", addr: devAddr(102), port: 80, why: "offline device"},
 		probe{from: "edge", addr: devAddr(103), port: 80, why: "safety-list device"},
 		probe{from: tv, addr: segNets["edge"] + ".2", port: 80, why: "the device does not start it"},
@@ -142,7 +151,7 @@ func TestNetnsSegments(t *testing.T) {
 	for _, c := range counters {
 		after[c] = h.counter(c)
 	}
-	for _, c := range []string{Inbound, Blocked, CoreDevice, EdgeDevice, DNSOutside, APAdminDrop, ISPDrop, CoreEdge, GuestsOut, GuestsIn, GuestsConns, RADropped} {
+	for _, c := range []string{Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, DNSOutside, APAdminDrop, ISPDrop, CoreEdge, GuestsOut, GuestsIn, GuestsConns, RADropped} {
 		if c == RADropped && !h.v6 {
 			continue
 		}

@@ -64,6 +64,7 @@ class NeededTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
+        self.put("usr/bin/bash", b"\x7fELF")
 
     def put(self, rel, data):
         p = self.root / rel
@@ -123,10 +124,14 @@ class NeededTest(unittest.TestCase):
             self.assertEqual(drop.main(str(self.root)), 1)
         self.assertEqual(calls[0][:3], ["mkosi-chroot", "dpkg-query", "-L"])
         self.assertEqual(calls[1][:4], ["mkosi-chroot", "dpkg", "--purge", "--force-depends"])
-        self.assertEqual(calls[2][:5], ["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential"])
+        self.assertEqual(calls[2][:2], ["mkosi-chroot", "dpkg-divert"])
+        self.assertEqual(calls[3][:5], ["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential"])
+        self.assertEqual(calls[4][:5], ["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential"])
         self.assertEqual(set(calls[0][3:]), set(drop.DROP))
-        self.assertEqual(set(calls[1][4:]), set(drop.DROP) - set(drop.ESSENTIAL))
-        self.assertEqual(calls[2][5:], list(drop.ESSENTIAL))
+        self.assertEqual(set(calls[1][4:]), set(drop.DROP) - set(drop.ESSENTIAL) - {"dash"})
+        self.assertEqual(calls[3][5:], ["dash"])
+        self.assertEqual(calls[4][5:], list(drop.ESSENTIAL))
+        self.assertEqual(len(calls), 5)
 
     def test_main_fails_on_a_script_a_dropped_program_runs(self):
         def run(argv, **kw):
@@ -179,6 +184,47 @@ class NeededTest(unittest.TestCase):
         purged = [p for c in calls if c[1:3] == ["dpkg", "--purge"] for p in c if not p.startswith("-")]
         self.assertTrue(set(krb5 + ("libkeyutils1",)) <= set(purged))
 
+    def test_dash_goes_and_sh_is_bash(self):
+        # dash's postrm and debianutils' trigger run /bin/sh, so sh is diverted and relinked to bash
+        # before dash is purged, alone; debconf's purge step needs perl, so the ESSENTIAL call is last.
+        self.assertEqual(drop.DROP["dash"][0], "dash")
+        self.assertNotIn("dash", drop.ESSENTIAL + drop.PARTIAL)
+        os.symlink("dash", self.root / "usr/bin/sh")
+        calls, seen = [], {}
+
+        def run(argv, **kw):
+            calls.append(argv)
+            if argv[-1] == "dash" and "--purge" in argv:
+                seen["sh"] = os.readlink(self.root / "usr/bin/sh")
+            return mock.Mock(stdout="/bin/sh\n/usr/bin/sh\n/usr/bin/dash\n")
+
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "FILES", ()), \
+                mock.patch.object(drop, "PERL_TOOLS", {}):
+            self.assertEqual(drop.main(str(self.root)), 0)
+        divert = ["mkosi-chroot", "dpkg-divert", "--local", "--no-rename", "--divert", "/usr/bin/sh.distrib",
+                  "--add", "/usr/bin/sh"]
+        purge_dash = ["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential", "dash"]
+        essential = calls.index(["mkosi-chroot", "dpkg", "--purge", "--force-depends", "--force-remove-essential",
+                                 *drop.ESSENTIAL])
+        self.assertLess(calls.index(divert), calls.index(purge_dash))
+        self.assertLess(calls.index(purge_dash), essential)
+        self.assertEqual(seen["sh"], "bash")
+        self.assertEqual(os.readlink(self.root / "usr/bin/sh"), "bash")
+        self.assertFalse(os.path.lexists(self.root / "usr/bin/sh.new"))
+
+    def test_no_bash_means_dash_stays(self):
+        (self.root / "usr/bin/bash").unlink()
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(stdout="")
+
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "FILES", ()):
+            with self.assertRaises(SystemExit):
+                drop.main(str(self.root))
+        self.assertEqual(calls, [])
+
     def test_bzip2_goes_with_dpkg_deb(self):
         # dpkg-deb is libbz2's only user (traced in trixie with the image's own package list). The
         # account tools (passwd, login.defs, adduser and libsemanage2's chain) came only with polkitd,
@@ -228,6 +274,25 @@ class InterpreterTest(unittest.TestCase):
             "usr/sbin/b: runs perl, which a dropped package shipped",
         ])
         self.assertEqual(drop.interpreter_violations(str(self.root), {"/usr/bin/tar"}), [])
+
+    def test_sh_scripts_pass_once_sh_is_bash(self):
+        # dash's file list holds /usr/bin/sh, which main relinks to bash, so only /usr/bin/dash is gone.
+        self.put("usr/lib/agentos/health", b"#!/bin/sh\n")
+        self.put("usr/bin/e", b"#!/usr/bin/env sh\n")
+        self.put("usr/bin/d", b"#!/bin/dash\n")
+        self.put("usr/bin/bash", b"\x7fELF")
+        os.symlink("dash", self.root / "usr/bin/sh")
+
+        def run(argv, **kw):
+            return mock.Mock(stdout="/bin/sh\n/usr/bin/dash\n/usr/share/man/man1/dash.1.gz\n")
+
+        with mock.patch.object(drop.subprocess, "run", run), mock.patch.object(drop, "FILES", ()), \
+                mock.patch.object(drop, "PERL_TOOLS", {}), mock.patch("sys.stderr") as err:
+            self.assertEqual(drop.main(str(self.root)), 1)
+        printed = "".join(c.args[0] for c in err.write.call_args_list)
+        self.assertIn("usr/bin/d: runs /usr/bin/dash, which a dropped package shipped", printed)
+        self.assertNotIn("health", printed)
+        self.assertNotIn("usr/bin/e", printed)
 
     def test_an_allowed_package_keeps_its_scripts_and_a_stale_one_fails(self):
         self.put("usr/sbin/adduser", b"#! /usr/bin/perl -T\n")
