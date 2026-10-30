@@ -299,6 +299,10 @@ var enforcer = map[string]struct {
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
 	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
+	// Thread's adapter (slice t, D-231): ot-daemon's command socket on one
+	// side, the radio host's interface on the other; the daemon starts both
+	// through confine.
+	"enforcer/radio/thread": {[]string{"enforcer/radio"}, droneForbid},
 	// Safety-list devices' secrets (slice r, decision 10): the sealed
 	// envelope both ends import, standard library only, and the enforcer's
 	// store, which neither the page nor the channel links.

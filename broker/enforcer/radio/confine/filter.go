@@ -18,6 +18,7 @@ const (
 	sysSocketpair = 53
 	sysSeccomp    = 317
 	sysCloseRange = 436
+	sysSetns      = 308
 
 	closeRangeCloexec = 4 // CLOSE_RANGE_CLOEXEC
 
@@ -26,27 +27,38 @@ const (
 	cloneNew = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000
 )
 
-// denied are syscalls no radio stack needs (spikes/ENF-radio): they widen
-// what an exploit of the stack reaches (other namespaces, mounts, the
-// kernel's attack surface, other processes). x86-64 numbers. A per-stack
-// allowlist recorded on hardware replaces this list later (ASSUMPTIONS
-// ENF-k-3); the deny list is the floor.
-var denied = []uint32{
-	101,           // ptrace
-	165, 166, 155, // mount, umount2, pivot_root
-	161, 272, 308, // chroot, unshare, setns
-	321,      // bpf
-	246, 320, // kexec_load, kexec_file_load
-	175, 313, 176, // init_module, finit_module, delete_module
-	250, 248, 249, // keyctl, add_key, request_key
-	298, 323, // perf_event_open, userfaultfd
-	310, 311, // process_vm_readv, process_vm_writev
-	169, 167, 168, // reboot, swapon, swapoff
-	163, 172, 173, // acct, iopl, ioperm
-	425, 426, 427, // io_uring_setup, io_uring_enter, io_uring_register
-	428, 429, 430, // open_tree, move_mount, fsopen (the new mount API)
-	431, 432, 433, // fsconfig, fsmount, fspick
-	442, // mount_setattr
+// denied is one syscall no radio stack needs (spikes/ENF-radio): each
+// widens what an exploit of the stack reaches (other namespaces, mounts,
+// the kernel's attack surface, other processes). x86-64 numbers. A
+// per-stack allowlist recorded on hardware replaces this list later
+// (ASSUMPTIONS ENF-k-3); the deny list is the floor.
+type denied struct {
+	Nr   uint32
+	Name string
+}
+
+// denyList is the filter's one table of denied calls. The namespace and
+// mount entry points are held to the kernel's own syscall list by
+// TestDenyListCoversKernel, so a new entry point fails a test instead of
+// slipping through (ENF-j delta L3, #3702).
+var denyList = []denied{
+	{101, "ptrace"},
+	{165, "mount"}, {166, "umount2"}, {155, "pivot_root"},
+	{161, "chroot"}, {272, "unshare"}, {308, "setns"},
+	{321, "bpf"},
+	{246, "kexec_load"}, {320, "kexec_file_load"},
+	{175, "init_module"}, {313, "finit_module"}, {176, "delete_module"},
+	{250, "keyctl"}, {248, "add_key"}, {249, "request_key"},
+	{298, "perf_event_open"}, {323, "userfaultfd"},
+	{310, "process_vm_readv"}, {311, "process_vm_writev"},
+	{169, "reboot"}, {167, "swapon"}, {168, "swapoff"},
+	{163, "acct"}, {172, "iopl"}, {173, "ioperm"},
+	{425, "io_uring_setup"}, {426, "io_uring_enter"}, {427, "io_uring_register"},
+	// The new mount API, and the mount table's readers.
+	{428, "open_tree"}, {429, "move_mount"}, {430, "fsopen"},
+	{431, "fsconfig"}, {432, "fsmount"}, {433, "fspick"},
+	{442, "mount_setattr"}, {457, "statmount"}, {458, "listmount"},
+	{467, "open_tree_attr"},
 }
 
 type insn struct {
@@ -67,13 +79,15 @@ func errno(e syscall.Errno) uint32     { return retErrno | uint32(e) }
 // ABI; EPERM for the denied calls, clone with a CLONE_NEW* flag, and
 // socket or socketpair outside families; ENOSYS for clone3, whose flags
 // seccomp cannot read, so libc falls back to clone.
-func filter(families []int) []insn {
+func filter(families []int) []insn { return filterOf(denyList, families) }
+
+func filterOf(deny []denied, families []int) []insn {
 	p := []insn{
 		ldAbs(4), jeq(auditArchX8664, 1, 0), ret(retKill),
 		ldAbs(0), jset(x32Bit, 0, 1), ret(retKill),
 	}
-	for _, nr := range denied {
-		p = append(p, jeq(nr, 0, 1), ret(errno(syscall.EPERM)))
+	for _, d := range deny {
+		p = append(p, jeq(d.Nr, 0, 1), ret(errno(syscall.EPERM)))
 	}
 	p = append(p, jeq(sysClone3, 0, 1), ret(errno(syscall.ENOSYS)))
 	p = append(p, jeq(sysClone, 0, 4), ldAbs(16), jset(cloneNew, 0, 1), ret(errno(syscall.EPERM)), ldAbs(0))

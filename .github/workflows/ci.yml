@@ -497,6 +497,35 @@ jobs:
           python3 -I ../tools/require_ran.py < /tmp/clerk-mail-test.json \
             github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail.TestRealMailClerkAsRoot || exit 1
           [ "$rc" -eq 0 ]
+      - name: OpenThread build cache (ENF-t)
+        id: otcache
+        uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/ot-bin
+          key: ot-bin-${{ runner.os }}-${{ hashFiles('broker/enforcer/radio/thread/build-ot.sh') }}
+      - name: Build OpenThread from its pin (ENF-t)
+        if: steps.otcache.outputs.cache-hit != 'true'
+        run: sh broker/enforcer/radio/thread/build-ot.sh /tmp/ot-bin --sim
+      - name: OpenThread build cache upload (ENF-t)
+        if: steps.otcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: /tmp/ot-bin
+          key: ot-bin-${{ runner.os }}-${{ hashFiles('broker/enforcer/radio/thread/build-ot.sh') }}
+      - name: The enforcer's Thread stack, confined (ENF-t, #3702)
+        # ot-daemon from the pin runs in the Thread profile's user namespace, created by root, on a
+        # simulated radio; a simulated node's SRP service must resolve from the Matter profile over
+        # mDNS on infra0. As root with no_new_privs, as the enforcer runs; the step fails on a skip.
+        working-directory: broker
+        run: |
+          rc=0
+          sudo setpriv --no-new-privs env "PATH=$PATH" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \
+            AGENTOS_OT_BIN=/tmp/ot-bin \
+            go test -count=1 -json -run '^(TestSrpReachesController|TestStacksConfined)$' ./enforcer/radio > /tmp/thread-test.json || rc=$?
+          python3 -I ../tools/require_ran.py < /tmp/thread-test.json \
+            github.com/ghbmrk/agentos/broker/enforcer/radio.TestSrpReachesController \
+            github.com/ghbmrk/agentos/broker/enforcer/radio.TestStacksConfined || exit 1
+          [ "$rc" -eq 0 ]
       - name: Root-gated Go tests no other step runs (CI-root-go, #3539)
         # A test that skips off root is green in every other job (#3536: a renamed wire tag passed
         # CI). root_tests.py fails unless each root-gated test runs in a root step whose require_ran.py
