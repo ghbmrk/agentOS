@@ -2593,7 +2593,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	wait := d.Approved && local && !g.confirmed[d.Ref]
 	g.mu.Unlock()
 	if unstaged && hold != "" && own != nil {
-		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", informQuote(hold)))
+		_ = own.Inform(fmt.Sprintf("%s was not sent: its draft or staged copy could not be made. Ask your agent again if still needed.", owner.InformQuote(hold)))
 	}
 	if changed && own != nil {
 		// The page has already said "Approved" (L3 SHOULD on #178, CH-12).
@@ -2616,7 +2616,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		if st, err := eng.Get(d.Ref); err == nil && changeAction(st.Intent.Action) && st.Intent.Origin == "change" {
 			step = "Nothing is needed."
 		}
-		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", informQuote(d.Request), step))
+		_ = own.Inform(fmt.Sprintf("%s did not run: it changed after my Wi-Fi page showed it. %s", owner.InformQuote(d.Request), step))
 	}
 	if !wait {
 		g.settle(d.Ref)
@@ -2735,7 +2735,7 @@ func (g *Gate) hold(d owner.Decision) {
 		g.mu.Unlock()
 		g.closeIntent(d.Ref, "the approval did not match its request; ask again with a new request_id")
 		if own != nil {
-			_ = own.Inform(fmt.Sprintf("%s did not run: its approval did not match its request. Ask your agent again if still needed.", informQuote(d.Hold)))
+			_ = own.Inform(fmt.Sprintf("%s did not run: its approval did not match its request. Ask your agent again if still needed.", owner.InformQuote(d.Hold)))
 		}
 		return
 	}
@@ -2789,7 +2789,7 @@ func (g *Gate) afterHold(st journal.Status, hold string, n int) {
 		own := g.own
 		g.mu.Unlock()
 		if own != nil {
-			_ = own.Inform(fmt.Sprintf("%s not sent: its draft changed after you approved it. Send it from your mail app if you still want it.", informQuote(hold)))
+			_ = own.Inform(fmt.Sprintf("%s not sent: its draft changed after you approved it. Send it from your mail app if you still want it.", owner.InformQuote(hold)))
 		}
 	case st.State == journal.Denied || st.State == journal.NotApplied:
 		g.unstage(st.Intent, hold, n)
@@ -2828,7 +2828,7 @@ func (g *Gate) unstage(p journal.Intent, hold string, n int) {
 	own := g.own
 	g.mu.Unlock()
 	if st := g.runDerived(in); st.State != journal.Succeeded && own != nil {
-		_ = own.Inform(fmt.Sprintf("%s did not run, but its draft or staged copy could not be removed, so it was left as is.", informQuote(hold)))
+		_ = own.Inform(fmt.Sprintf("%s did not run, but its draft or staged copy could not be removed, so it was left as is.", owner.InformQuote(hold)))
 	}
 }
 

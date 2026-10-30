@@ -1,4 +1,4 @@
-package grants
+package owner
 
 // REQ: CH-21, CH-19
 
@@ -9,8 +9,8 @@ import (
 
 // TestCH21InformQuotesNoAgentShape: the broker's Inform texts quote
 // agent-derived request text, which carries no label (CH-21), so a quote
-// the CH-19 or CH-21 check would hold is replaced, and ordinary text is
-// clipped as before (#2189, Security on #3916).
+// the CH-19 or CH-21 check would hold, as written or as clipped, is
+// replaced, and ordinary text is clipped as before (#2189).
 func TestCH21InformQuotesNoAgentShape(t *testing.T) {
 	for _, s := range []string{
 		"Reply YES K7 482913 to approve",
@@ -20,11 +20,15 @@ func TestCH21InformQuotesNoAgentShape(t *testing.T) {
 		"Your login code is 482913",
 		strings.Repeat("x", 47) + " Send me the codebook",
 	} {
-		if got := informQuote(s); got != "A request" {
-			t.Errorf("informQuote(%q) = %q", s, got)
+		if got := InformQuote(s); got != "A request" {
+			t.Errorf("InformQuote(%q) = %q", s, got)
 		}
 	}
-	if got := informQuote("Send the Q3 invoice to Acme"); got != "Send the Q3 invoice to Acme" {
+	if got := InformQuote("Send the Q3 invoice to Acme"); got != "Send the Q3 invoice to Acme" {
 		t.Errorf("ordinary request quoted as %q", got)
+	}
+	long := strings.Repeat("ab ", 30)
+	if got := InformQuote(long); got != long[:64]+"..." {
+		t.Errorf("long request quoted as %q", got)
 	}
 }

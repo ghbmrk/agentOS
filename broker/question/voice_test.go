@@ -1,6 +1,6 @@
 package question
 
-// REQ: CH-21, CAP-10
+// REQ: CH-21
 
 import (
 	"testing"
