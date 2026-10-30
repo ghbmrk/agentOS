@@ -590,11 +590,12 @@ func TestLogNamesOnlySignedDevices(t *testing.T) {
 	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: forged})
 	cl.code(wire.Tighten{ID: 3, Kind: wire.IsolateDevice, Device: forged})
 	cl.code(wire.Tighten{ID: 4, Kind: wire.RemovePair, A: forged, B: "tv"})
+	cl.code(wire.Tighten{ID: 7, Kind: wire.RemovePair, A: "tv", B: forged})
 	cl.code(cmd(5, "lamp", wire.VerbOn))
 	if c := cl.code(wire.Tighten{ID: 6, Kind: wire.RemoveDevice, Device: "lamp"}); c != wire.OK || r.eng.Current().Device("lamp") != nil {
 		t.Fatalf("remove lamp: %v", c)
 	}
-	want := map[uint64]string{1: unknown, 2: unknown, 3: unknown, 4: unknown + ",tv", 5: "lamp", 6: "lamp"}
+	want := map[uint64]string{1: unknown, 2: unknown, 3: unknown, 4: unknown + ",tv", 5: "lamp", 6: "lamp", 7: "tv," + unknown}
 	got := map[uint64]string{}
 	for _, e := range r.events()[n:] {
 		if strings.Contains(e.Device, forged) {
