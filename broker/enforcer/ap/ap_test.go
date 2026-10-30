@@ -151,6 +151,12 @@ func TestSetupNetworkOnlyBeforeEnrolment(t *testing.T) {
 	if _, err := Config(fixturePolicy(), l, k); !errors.Is(err, ErrKeys) {
 		t.Errorf("devices before enrolment: %v", err)
 	}
+	if c, ok := k.NetworkCard(l, NetSetup); !ok || c.Password != k.Setup {
+		t.Errorf("setup card before enrolment: %+v", c)
+	}
+	if _, ok := k.NetworkCard(l, policy.NetOwner); ok {
+		t.Error("an Owner card before enrolment")
+	}
 	if err := k.Enrol(); err != nil {
 		t.Fatal(err)
 	}

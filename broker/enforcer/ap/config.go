@@ -1,6 +1,7 @@
 package ap
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -162,7 +163,7 @@ func devices(d policy.Document, l Layout, k Keys) ([]DeviceKey, error) {
 		}
 		out = append(out, dk)
 	}
-	slices.SortFunc(out, func(a, b DeviceKey) int { return a.VLAN - b.VLAN })
+	slices.SortFunc(out, func(a, b DeviceKey) int { return cmp.Compare(a.VLAN, b.VLAN) })
 	return out, nil
 }
 
