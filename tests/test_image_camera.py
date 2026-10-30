@@ -145,8 +145,10 @@ class CameraClerkUnitTest(unittest.TestCase):
             self.assertEqual(s[k], v, k)
         self.assertNotIn("DeviceAllow", s)
         self.assertNotIn(CAMERA.name, check.TPM_UNITS)
-        # runsc makes these namespaces for each sandbox, rootless; no others (CAM-host-11).
-        self.assertEqual(s["RestrictNamespaces"].split(), ["user", "mnt", "pid", "net", "ipc", "uts"])
+        # runsc makes its namespaces for each sandbox, rootless, and the clerk starts it with clone3 (into its
+        # group), which systemd's namespace filter answers with ENOSYS: no RestrictNamespaces= (CAM-host-11).
+        self.assertNotIn("RestrictNamespaces", s)
+        self.assertIn("UseCgroupFD: true", (ROOT / "broker/vm/gvisor/runonce.go").read_text())
         # The sentry and gofer filter their own calls; the unit still refuses what no sandbox makes.
         self.assertEqual(exec_lines(CAMERA, "SystemCallFilter"), ["~@cpu-emulation @obsolete @raw-io @reboot @swap"])
         self.assertEqual(s["SystemCallErrorNumber"], "EPERM")

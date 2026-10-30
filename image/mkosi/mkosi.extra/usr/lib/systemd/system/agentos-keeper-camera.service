@@ -64,10 +64,11 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 # What runsc needs and the mail clerk's unit refuses (CAM-host-11): the user, mount, pid, network, IPC and UTS
-# namespaces it makes for each sandbox; the system calls its sentry and gofer make, which they filter
-# themselves (gVisor's own seccomp) but those below; write-and-execute memory for the sentry's guest code; and a writable
-# cgroup tree, where the delegation's ownership leaves only this unit's group the clerk's to write.
-RestrictNamespaces=user mnt pid net ipc uts
+# namespaces it makes for each sandbox, so no RestrictNamespaces= (systemd's filter answers every clone3 with
+# ENOSYS, and the clerk starts runsc with clone3, straight into its sandbox's group); the system calls its
+# sentry and gofer make, which they filter themselves (gVisor's own seccomp) but those below; write-and-execute
+# memory for the sentry's guest code; and a writable cgroup tree, where the delegation's ownership leaves only
+# this unit's group the clerk's to write.
 # Still none of the calls no sandbox makes: CPU emulation, raw I/O, swap, reboot and the obsolete ones (with
 # ProtectClock= and ProtectKernelModules=, the clock's and the modules'). A call outside fails with EPERM.
 SystemCallFilter=~@cpu-emulation @obsolete @raw-io @reboot @swap
