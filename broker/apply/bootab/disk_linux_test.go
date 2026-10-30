@@ -71,7 +71,7 @@ func efiVar(s string) []byte {
 }
 
 func entryText(version int, hash string) string {
-	return fmt.Sprintf("title AgentOS\nsort-key agentos\nversion %d\nlinux /EFI/Linux/vmlinuz-6.12\ninitrd /EFI/Linux/initrd-6.12\noptions quiet usrhash=%s console=ttyS0\n", version, hash)
+	return fmt.Sprintf("title agentOS\nsort-key agentos\nversion %d\nlinux /EFI/Linux/vmlinuz-6.12\ninitrd /EFI/Linux/initrd-6.12\noptions quiet usrhash=%s console=ttyS0\n", version, hash)
 }
 
 // fixture is a Linux over device (a new GPT image file when "") with
@@ -194,8 +194,8 @@ func TestLinuxEFIDefault(t *testing.T) {
 
 // TestLinuxEntries: the menu is read with counter-less IDs, tries from
 // the file name, and each entry's slot from the partition UUIDs its
-// usrhash= finds; WriteEntry writes the image's title, sort-key and
-// version lines over the running entry's kernel; RemoveEntry and
+// usrhash= finds; WriteEntry writes the image's sort-key and version
+// lines over the running entry's title and kernel; RemoveEntry and
 // SetDefault edit the ESP.
 func TestLinuxEntries(t *testing.T) {
 	need(t, "sfdisk")
@@ -337,8 +337,9 @@ func TestLinuxRefusesLongLabels(t *testing.T) {
 	l := fixture(t, "", hashN)
 	before := run(t, "", "sfdisk", "--json", l.Device)
 	for _, label := range []string{strings.Repeat("x", 30), "agentos 1", "agentos_é", ""} {
-		if err := l.SetSlotLabel("b", label); err == nil {
-			t.Errorf("SetSlotLabel(%q) succeeded", label)
+		// Refused for the label itself, not by a later step.
+		if err := l.SetSlotLabel("b", label); err == nil || !strings.Contains(err.Error(), "is not a GPT name") {
+			t.Errorf("SetSlotLabel(%q) = %v, want a refusal of the label", label, err)
 		}
 	}
 	if after := run(t, "", "sfdisk", "--json", l.Device); after != before {
@@ -388,24 +389,26 @@ func TestLinuxRefusesLinks(t *testing.T) {
 		}
 	}
 	for _, c := range []struct {
-		name string
-		path func(*bootab.Linux) string
-		op   func(*bootab.Linux) error
+		name  string
+		path  func(*bootab.Linux) string
+		op    func(*bootab.Linux) error
+		errno syscall.Errno
 	}{
-		{"ESP", func(l *bootab.Linux) string { return l.ESP }, func(l *bootab.Linux) error { _, _, err := l.Entries(); return err }},
-		{"ESP sync", func(l *bootab.Linux) string { return l.ESP }, func(l *bootab.Linux) error { return l.SyncESP() }},
-		{"entries dir", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/entries") }, func(l *bootab.Linux) error { return l.RemoveEntry("agentos_1.conf") }},
-		{"entry", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/entries/agentos_1.conf") }, func(l *bootab.Linux) error { _, _, err := l.Entries(); return err }},
-		{"loader.conf", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/loader.conf") }, func(l *bootab.Linux) error { return l.SetDefault("") }},
-		{"loader dir", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader") }, func(l *bootab.Linux) error { return l.SetDefault("x") }},
-		{"EFI variable", func(l *bootab.Linux) string { return filepath.Join(l.EFIVars, "LoaderEntrySelected-"+loaderGUID) }, func(l *bootab.Linux) error { _, err := l.Selected(); return err }},
-		{"cmdline", func(l *bootab.Linux) string { return filepath.Join(l.Proc, "cmdline") }, func(l *bootab.Linux) error { _, err := l.Cmdline(); return err }},
+		{"ESP", func(l *bootab.Linux) string { return l.ESP }, func(l *bootab.Linux) error { _, _, err := l.Entries(); return err }, syscall.ENOTDIR},
+		{"ESP sync", func(l *bootab.Linux) string { return l.ESP }, func(l *bootab.Linux) error { return l.SyncESP() }, syscall.ENOTDIR},
+		{"entries dir", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/entries") }, func(l *bootab.Linux) error { return l.RemoveEntry("agentos_1.conf") }, syscall.ENOTDIR},
+		{"entry", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/entries/agentos_1.conf") }, func(l *bootab.Linux) error { _, _, err := l.Entries(); return err }, syscall.ELOOP},
+		{"loader.conf", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader/loader.conf") }, func(l *bootab.Linux) error { return l.SetDefault("") }, syscall.ELOOP},
+		{"loader dir", func(l *bootab.Linux) string { return filepath.Join(l.ESP, "loader") }, func(l *bootab.Linux) error { return l.SetDefault("x") }, syscall.ENOTDIR},
+		{"EFI variable", func(l *bootab.Linux) string { return filepath.Join(l.EFIVars, "LoaderEntrySelected-"+loaderGUID) }, func(l *bootab.Linux) error { _, err := l.Selected(); return err }, syscall.ELOOP},
+		{"cmdline", func(l *bootab.Linux) string { return filepath.Join(l.Proc, "cmdline") }, func(l *bootab.Linux) error { _, err := l.Cmdline(); return err }, syscall.ELOOP},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := fixture(t, "", hashN)
 			link(t, c.path(l))
-			if err := c.op(l); err == nil {
-				t.Error("followed a symlink")
+			// The open's own errno, not a later step's on a bad descriptor.
+			if err := c.op(l); !errors.Is(err, c.errno) {
+				t.Errorf("err = %v, want %v: a symlink is never followed", err, c.errno)
 			}
 		})
 	}
@@ -416,8 +419,8 @@ func TestLinuxRefusesLinks(t *testing.T) {
 		if err := os.Symlink(target, filepath.Join(l.EFIVars, "LoaderEntryDefault-"+loaderGUID)); err != nil {
 			t.Fatal(err)
 		}
-		if err := l.SetEFIDefault("agentos_1.conf"); err == nil {
-			t.Error("wrote through a symlinked variable")
+		if err := l.SetEFIDefault("agentos_1.conf"); !errors.Is(err, syscall.ELOOP) {
+			t.Errorf("SetEFIDefault through a symlinked variable: %v, want ELOOP", err)
 		}
 		if b, _ := os.ReadFile(target); string(b) != "keep" {
 			t.Errorf("link target changed to %q", b)
@@ -581,5 +584,145 @@ func TestLinuxSlotsOnALoopDevice(t *testing.T) {
 	}
 	if s, err := l.BootedSlot(); err != nil || s != "a" {
 		t.Errorf("BootedSlot after the GPT writes = %q, %v", s, err)
+	}
+}
+
+// TestLinuxReadBounds: /proc files, EFI variables, entries and loader.conf
+// are read whole up to their bound and refused one byte over it; an EFI
+// variable of attributes alone, or of a NUL alone, reads as "".
+func TestLinuxReadBounds(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	id := filepath.Join(l.Proc, "sys/kernel/random/boot_id")
+	if err := os.WriteFile(id, []byte(strings.Repeat("f", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := l.BootID(); err != nil || got != strings.Repeat("f", 64) {
+		t.Errorf("BootID of 64 bytes = %q, %v", got, err)
+	}
+	if err := os.WriteFile(id, []byte(strings.Repeat("f", 65)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := l.BootID(); err == nil {
+		t.Errorf("BootID of 65 bytes = %q, want an error", got)
+	}
+
+	def := filepath.Join(l.EFIVars, "LoaderEntryDefault-"+loaderGUID)
+	for _, b := range [][]byte{{7, 0, 0, 0}, efiVar("")} {
+		if err := os.WriteFile(def, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if v, err := l.EFIDefault(); err != nil || v != "" {
+			t.Errorf("EFIDefault of %x = %q, %v; want \"\"", b, v, err)
+		}
+	}
+
+	// loader.conf of exactly the bound, its last line unterminated, is
+	// kept whole when a default is added.
+	const maxESPFile = 64 << 10
+	conf := filepath.Join(l.ESP, "loader/loader.conf")
+	body := "timeout 0\n# " + strings.Repeat("x", maxESPFile-len("timeout 0\n# ")-1) + "y"
+	if err := os.WriteFile(conf, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetDefault("agentos_1.conf"); err != nil {
+		t.Fatalf("SetDefault over a loader.conf of %d bytes: %v", len(body), err)
+	}
+	if got := readESP(t, l, "loader/loader.conf"); got != body+"\ndefault agentos_1.conf\n" {
+		t.Errorf("loader.conf lost bytes: %d bytes, ends %q", len(got), got[max(0, len(got)-30):])
+	}
+	if err := os.WriteFile(conf, []byte(body+"z"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetDefault("agentos_1.conf"); err == nil {
+		t.Error("SetDefault over a loader.conf one byte over the bound succeeded")
+	}
+}
+
+// TestLinuxSetDefaultEdits: loader.conf keeps every line but its default
+// lines (a blank-looking line too), a stale temporary file does not stop
+// the write, and with no loader.conf a default creates it while removing
+// one leaves it absent.
+func TestLinuxSetDefaultEdits(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	conf := filepath.Join(l.ESP, "loader/loader.conf")
+	if err := os.WriteFile(conf, []byte("timeout 0\n   \ndefault old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.ESP, "loader/.loader.conf.tmp"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetDefault("new"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readESP(t, l, "loader/loader.conf"); got != "timeout 0\n   \ndefault new\n" {
+		t.Errorf("loader.conf = %q", got)
+	}
+	if err := os.Remove(conf); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.SetDefault(""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(conf); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("removing the default created loader.conf: %v", err)
+	}
+	if err := l.SetDefault("new"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readESP(t, l, "loader/loader.conf"); got != "default new\n" {
+		t.Errorf("loader.conf created as %q", got)
+	}
+}
+
+// TestLinuxEntryTries: WriteEntry takes tries 0 to 9 and Blessed, and
+// refuses any other count.
+func TestLinuxEntryTries(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	data, verity, _ := bootab.PartitionUUIDs(hashN1)
+	run(t, "", "sfdisk", "-q", "--part-uuid", l.Device, "4", data)
+	run(t, "", "sfdisk", "-q", "--part-uuid", l.Device, "5", verity)
+	for tries, file := range map[int]string{0: "agentos_2+0.conf", 9: "agentos_2+9.conf", bootab.Blessed: "agentos_2.conf"} {
+		if err := l.WriteEntry("agentos_2.conf", bootab.Entry{Slot: "b", UsrHash: hashN1, Tries: tries}); err != nil {
+			t.Errorf("WriteEntry with tries %d: %v", tries, err)
+		}
+		if err := os.Remove(filepath.Join(l.ESP, "loader/entries", file)); err != nil {
+			t.Errorf("tries %d: %v", tries, err)
+		}
+	}
+	for _, tries := range []int{-2, 10} {
+		if err := l.WriteEntry("agentos_2.conf", bootab.Entry{Slot: "b", UsrHash: hashN1, Tries: tries}); err == nil {
+			t.Errorf("WriteEntry with tries %d succeeded", tries)
+		}
+	}
+}
+
+// TestLinuxSlotsByPartitionNumber: slots pair partitions by number, not
+// by the order sfdisk lists them in, for any node name that ends in the
+// number (sda9, nvme0n1p10, or the number alone).
+func TestLinuxSlotsByPartitionNumber(t *testing.T) {
+	need(t, "sfdisk")
+	l := fixture(t, "", hashN)
+	data, verity, _ := bootab.PartitionUUIDs(hashN)
+	other, otherVerity, _ := bootab.PartitionUUIDs(hashN1)
+	part := func(node, typ, uuid string) string {
+		return fmt.Sprintf(`{"node": %q, "type": %q, "uuid": %q}`, node, typ, uuid)
+	}
+	const usr, usrVerity = "8484680C-9521-48C6-9C11-B0720656F69E", "77FF5F63-E7B6-4633-ACF4-1565B864C0E6"
+	table := `{"partitiontable": {"label": "gpt", "partitions": [` + strings.Join([]string{
+		part("/dev/nvme0n1p10", usr, other), part("20", usrVerity, otherVerity),
+		part("/dev/sda9", usr, data), part("19", usrVerity, verity),
+	}, ",") + `]}}`
+	l.Run = func(name string, arg ...string) ([]byte, error) {
+		if name != "/usr/sbin/sfdisk" || strings.Join(arg, " ") != "--json "+l.Device {
+			return nil, fmt.Errorf("unexpected %s %v", name, arg)
+		}
+		return []byte(table), nil
+	}
+	es, _, err := l.Entries()
+	if err != nil || es["agentos_1.conf"].Slot != "a" {
+		t.Errorf("Entries = %+v, %v; want agentos_1.conf on slot a (partitions 9 and 19)", es, err)
 	}
 }

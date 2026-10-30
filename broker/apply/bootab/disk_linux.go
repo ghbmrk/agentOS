@@ -43,6 +43,14 @@ const efiAttrs = 0x7
 // immutable, and bootctl clears it before a write or delete.
 const fsImmutable = 0x10
 
+// getFlags and setFlags are FS_IOC_GETFLAGS and FS_IOC_SETFLAGS. Only
+// root can set the immutable flag, so the unprivileged tests stand in
+// for them to check clearImmutable.
+var (
+	getFlags = func(fd int) (uint32, error) { return unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS) }
+	setFlags = func(fd int, flags uint32) error { return unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(flags)) }
+)
+
 // The tools the adapter runs, by absolute path so no $PATH lookup picks
 // them, and the whole environment they get (util-linux, cryptsetup-bin).
 const (
@@ -210,14 +218,14 @@ func clearImmutable(path string) error {
 		return err
 	}
 	defer unix.Close(fd)
-	flags, err := unix.IoctlGetUint32(fd, unix.FS_IOC_GETFLAGS)
+	flags, err := getFlags(fd)
 	if errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) {
 		return nil
 	}
 	if err != nil || flags&fsImmutable == 0 {
 		return err
 	}
-	return unix.IoctlSetPointerInt(fd, unix.FS_IOC_SETFLAGS, int(flags&^fsImmutable))
+	return setFlags(fd, flags&^fsImmutable)
 }
 
 // setEFIVar writes name's string in one write, as efivarfs requires; ""
@@ -228,10 +236,11 @@ func (l *Linux) setEFIVar(name, v string) error {
 		return err
 	}
 	if v == "" {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
+		err := os.Remove(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
 		}
-		return nil
+		return err
 	}
 	b := binary.LittleEndian.AppendUint32(nil, efiAttrs)
 	for _, c := range utf16.Encode([]rune(v + "\x00")) {
@@ -241,11 +250,8 @@ func (l *Linux) setEFIVar(name, v string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	_, err = f.Write(b)
+	return errors.Join(err, f.Close())
 }
 
 // stripCounter is an entry ID without boot counting's +LEFT-DONE, which
@@ -401,7 +407,7 @@ func (l *Linux) BootedSlot() (string, error) {
 func (l *Linux) espDir(rel string) (int, error) {
 	fd, err := unix.Open(l.ESP, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, fmt.Errorf("bootab: ESP %s: %w", l.ESP, err)
+		return fd, fmt.Errorf("bootab: ESP %s: %w", l.ESP, err)
 	}
 	for _, c := range strings.Split(rel, "/") {
 		if c == "" {
@@ -410,7 +416,7 @@ func (l *Linux) espDir(rel string) (int, error) {
 		next, err := unix.Openat(fd, c, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		unix.Close(fd)
 		if err != nil {
-			return -1, fmt.Errorf("bootab: ESP %s/%s: %w", l.ESP, rel, err)
+			return next, fmt.Errorf("bootab: ESP %s/%s: %w", l.ESP, rel, err)
 		}
 		fd = next
 	}
@@ -466,7 +472,7 @@ func writeAt(dir int, name string, b []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return unix.Renameat(dir, tmp, dir, name)
+	return unix.Renameat(dir, tmp, dir, name) // durable:exempt lifecycle:exempt the ESP is reached through O_NOFOLLOW directory fds, which durable cannot take; boot entries, not a store; SyncESP's syncfs makes the rename durable
 }
 
 // espEntry is one entry file: its name on the ESP, its text and what it
@@ -617,10 +623,10 @@ func (l *Linux) Entries() (map[string]Entry, string, error) {
 
 // WriteEntry writes entry id (agentos_<version>.conf) as the file
 // agentos_<version>+<tries>.conf, or with no counter when e.Tries is
-// Blessed. Its title, sort-key and version lines are the image's
+// Blessed. Its sort-key and version lines are the image's
 // (finish_image.py), so systemd-boot orders it by version among the
-// entries that share the sort-key; its linux, initrd and options lines are
-// the running entry's, with usrhash= set to e.UsrHash. e.Slot must be the
+// entries that share the sort-key; its title, linux, initrd and options
+// lines are the running entry's, with usrhash= set to e.UsrHash. e.Slot must be the
 // slot whose partition UUIDs that hash finds.
 func (l *Linux) WriteEntry(id string, e Entry) error {
 	m := entryName.FindStringSubmatch(id)
@@ -658,10 +664,14 @@ func (l *Linux) WriteEntry(id string, e Entry) error {
 	if len(tmpl) != 1 {
 		return fmt.Errorf("bootab: %d blessed entries boot the running usrhash=%s, want 1 to copy the kernel from", len(tmpl), running)
 	}
-	lines := []string{"title AgentOS", "sort-key agentos", "version " + m[1]}
+	var title, body []string
 	for _, ln := range strings.Split(strings.TrimRight(tmpl[0].text, "\n"), "\n") {
 		f := strings.Fields(ln)
-		if len(f) == 0 || f[0] == "title" || f[0] == "version" || f[0] == "sort-key" {
+		if len(f) == 0 || f[0] == "version" || f[0] == "sort-key" {
+			continue
+		}
+		if f[0] == "title" {
+			title = append(title, ln)
 			continue
 		}
 		if f[0] == "options" {
@@ -672,8 +682,9 @@ func (l *Linux) WriteEntry(id string, e Entry) error {
 			}
 			ln = strings.Join(f, " ")
 		}
-		lines = append(lines, ln)
+		body = append(body, ln)
 	}
+	lines := append(append(title, "sort-key agentos", "version "+m[1]), body...)
 	text := strings.Join(lines, "\n") + "\n"
 	if h, err := entryHash(text); err != nil || h != e.UsrHash {
 		return fmt.Errorf("bootab: entry %s would boot usrhash=%s (%v), want %s", id, h, err, e.UsrHash)
@@ -883,15 +894,26 @@ func (l *Linux) SetSlotUUIDs(s, data, verity string) error {
 	return l.syncDevice()
 }
 
-// SetSlotLabel labels slot s as the image does: the data partition label,
-// the verity partition label + "_verity", and EmptyLabel on both.
-func (l *Linux) SetSlotLabel(s, label string) error {
+// verityLabel is the verity partition's label for data label label:
+// label + "_verity", or EmptyLabel for EmptyLabel. Both must be GPT names
+// of plain ASCII, so the two never diverge by truncation.
+func verityLabel(label string) (string, error) {
 	vl := label + "_verity"
 	if label == EmptyLabel {
 		vl = EmptyLabel
 	}
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(label) || len(vl) > maxGPTName {
-		return fmt.Errorf("bootab: label %q (verity %q) is not a GPT name of at most %d ASCII characters", label, vl, maxGPTName)
+		return "", fmt.Errorf("bootab: label %q (verity %q) is not a GPT name of at most %d ASCII characters", label, vl, maxGPTName)
+	}
+	return vl, nil
+}
+
+// SetSlotLabel labels slot s as the image does: the data partition label,
+// the verity partition label + "_verity", and EmptyLabel on both.
+func (l *Linux) SetSlotLabel(s, label string) error {
+	vl, err := verityLabel(label)
+	if err != nil {
+		return err
 	}
 	p, err := l.slot(s)
 	if err != nil {
