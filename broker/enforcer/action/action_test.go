@@ -116,6 +116,12 @@ func (r *radio) Act(device string, a action.Act, route string) error {
 	return nil
 }
 
+var errRadio = errors.New("radio down")
+
+type failing struct{}
+
+func (failing) Act(string, action.Act, string) error { return errRadio }
+
 type memStore struct{ b []byte }
 
 func (m *memStore) Load() ([]byte, error) { return m.b, nil }
@@ -298,12 +304,53 @@ func TestTurnOnNeedsNamedOnceChallenge(t *testing.T) {
 		{"heater", action.Open, ""}, {"door", action.On, ""}, {"valve", action.On, ""},
 		{"siren", action.On, ""}, {"sensor", action.On, ""}, {"lamp", action.On, ""},
 		{"nobody", action.On, ""}, {"drone", action.Fly, ""}, {"heater", action.On, "route"},
-		{"heater", "explode", ""}, {"heat\x00er", action.On, ""}, {strings.Repeat("h", 65), action.On, ""},
+		{"heater", "explode", ""},
 	}
 	for _, r := range refused {
 		if _, err := b.Issue(home(), r.device, r.act, r.route, 0); err == nil {
 			t.Errorf("challenge issued for %q %q %q", r.device, r.act, r.route)
 		}
+	}
+
+	// Names are short printable ASCII with no space or separator, so no
+	// field of the signed message can forge another; the edges are held.
+	named := home()
+	for _, id := range []string{strings.Repeat("h", 64), "heater~2", "a!"} {
+		named.Devices = append(named.Devices, safe(id, policy.ClassHeater, "off"))
+	}
+	for _, id := range []string{strings.Repeat("h", 64), "heater~2", "a!"} {
+		if _, err := b.Issue(named, id, action.On, "", 0); err != nil {
+			t.Errorf("%q refused: %v", id, err)
+		}
+	}
+	for _, id := range []string{strings.Repeat("h", 65), "heat er", "heat\x00er", "heat\x7fer", "h\u00e9", ""} {
+		if _, err := b.Issue(named, id, action.On, "", 0); !errors.Is(err, action.ErrMalformed) {
+			t.Errorf("%q: %v, want malformed", id, err)
+		}
+		if _, err := b.Issue(named, "drone", action.Fly, id, 0); !errors.Is(err, action.ErrMalformed) {
+			t.Errorf("route %q: %v, want malformed", id, err)
+		}
+	}
+
+	// The radio failing: the tap is spent and the failure reported.
+	fb, err := action.NewBook(p.public(), failing{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := fb.Issue(home(), "heater", action.On, "", 0)
+	if _, err := fb.Redeem(home(), c.ID, p.sign(c.Msg), 1); !errors.Is(err, errRadio) {
+		t.Fatalf("radio failure: %v", err)
+	}
+	if _, err := fb.Redeem(home(), c.ID, p.sign(c.Msg), 1); !errors.Is(err, action.ErrGone) {
+		t.Fatalf("after a radio failure: %v", err)
+	}
+
+	// The links name the act, and only Fly carries a route.
+	if l := action.Link(rp, "drone", action.Fly, "roof"); l != "https://"+rp+"/a?a=fly&d=drone&r=roof" {
+		t.Errorf("fly link %s", l)
+	}
+	if l := action.Link(rp, "heater", action.On, ""); l != "https://"+rp+"/a?a=on&d=heater" {
+		t.Errorf("on link %s", l)
 	}
 
 	// A device isolated, removed or reclassified after its challenge was
