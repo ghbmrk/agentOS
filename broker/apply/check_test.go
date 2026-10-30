@@ -875,6 +875,32 @@ func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
 	}
 }
 
+// A security refusal of the apply in flight keeps its reason when a move
+// to stable is refused for it too: STATUS still says it failed a
+// security check.
+// Mutant: let the stable refusal replace the security one.
+func TestStableRefusalKeepsSecurityReason(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	var got string
+	cr.act.onInstall = func() {
+		for _, why := range []string{WhySecurity, WhyStable} {
+			if err := cr.a.Withdraw("upd:2:1", why); !errors.Is(err, ErrApplying) {
+				t.Errorf("%s withdraw while installing: %v", why, err)
+			}
+		}
+		got = cr.a.Status()
+	}
+	if _, err := cr.a.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(wontStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+}
+
 // The fast mark is saved: a check reloaded from its state between the
 // fast adoption and the stable step still withdraws the release.
 // Mutant: do not persist Fast.
