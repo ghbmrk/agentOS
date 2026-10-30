@@ -83,22 +83,35 @@ pending broker/cgroup #3944 daemon packages a
 pending broker/guest #3944 daemon packages a
 pending broker/loops #3944 daemon packages a
 pending broker/infer/supervise #3944 daemon packages a
-pending broker/clock #3945 daemon packages b
-pending broker/backup #3945 daemon packages b
-pending broker/quota #3945 daemon packages b
-pending broker/change #3945 daemon packages b
-pending broker/netguard #3945 daemon packages b
-pending broker/modem/at #3945 daemon packages b
-pending broker/follow #3945 daemon packages b
-pending broker/question #3945 daemon packages b
-pending broker/owner #3945 daemon packages b
-pending broker/meter #3945 daemon packages b
-pending broker/localsrv #3945 daemon packages b
-pending broker/claim #3945 daemon packages b
-pending broker/budget #3945 daemon packages b
-pending broker/accel #3945 daemon packages b
 pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/kernel/privfile #3954 WriteAtomic checks no dir and a root caller (question) passes an unchecked one; SyncDir opens dir by path, so a planted link to a FIFO would hang root
+
+# Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
+# modem/at's sysfs reads refuse a link (O_NOFOLLOW). What is left: the serial
+# port open, which follows udev and e2e links on purpose; unlink(2) and
+# link(2), which act on a link at the final name itself and never follow it;
+# reads of kernel-served procfs and sysfs files; reads only the e2e/boxe2e
+# harness makes as root, in a throwaway CI VM; and change's bodies mkdir and
+# the reads in accel, budget, change, localsrv, owner and question,
+# control-path packages that may not import syscall (ARC-2:
+# daemon/arc2_test.go, owner/arc2_test.go), of agentosd's state in root-held
+# /var/lib/agentos (tmpfiles.d: 0700 root root), which no other uid can write.
+allow broker/accel/accel.go readTrim os.ReadFile a GPU's sysfs vendor attribute, served by the kernel; no uid plants a link in sysfs
+allow broker/budget/budget.go meminfoMB os.Open /proc/meminfo (agentosd's only caller), served by the kernel; no uid plants a link in procfs
+allow broker/change/store.go FileStore.Load os.ReadFile agentosd's kept-replies.json in root-held /var/lib/agentos; the other root-side reader is the e2e/boxe2e harness (Seal of /var/lib/agentos/claim.json, root-held, and Claimed of agentos-localui's own /var/lib/agentos-localui/claim.json), which runs as root only in a throwaway CI VM (#3946's scope)
+allow broker/change/store.go DirContent.Get os.ReadFile a body in the .d directory beside agentosd's state file in root-held /var/lib/agentos
+allow broker/localsrv/setup.go FileRecord.Load os.ReadFile agentosd's -setup-record, /var/lib/agentos/setup.json, root-held
+allow broker/owner/state.go FileStore.Load os.ReadFile agentosd's -owner-state, /var/lib/agentos/owner.json, root-held
+allow broker/question/question.go New os.ReadFile agentosd's -questions book, in root-held /var/lib/agentos
+allow broker/backup/target.go DirTarget.PutTable os.Remove unlink(2) of the temp file os.CreateTemp just made in the target directory; unlink removes a link at the name itself and never follows it
+allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a link at its new path and refuses an existing one, so a planted name fails the put (ErrExists)
+allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
+allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
+allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
+allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
+allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
+allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile its only root-side reader is the e2e/boxe2e harness (no root binary links netguard); procfs route, neighbour and ipv6_route tables are served by the kernel, and /etc/resolv.conf must follow its stock link into systemd-resolve's /run/systemd/resolve, image/ASSUMPTIONS.md I23's named exception: readers parse it as resolver configuration, and resolved already answers every DNS query
+allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it; its only root-side caller, boxe2e, opens /dev/pts/N in kernel-served devpts
