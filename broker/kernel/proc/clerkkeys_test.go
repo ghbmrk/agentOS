@@ -316,3 +316,36 @@ func TestRunKernelNeedsTheClerkRootToHandKeys(t *testing.T) {
 		t.Fatalf("the log was opened: %v", err)
 	}
 }
+
+// REQ: CH-4, CLK-1
+// The checker's pin (MIG-4-exit-c2): the kernel admits code approvals
+// under the signer of the very key it hands the checker's unit, and pins
+// none when it hands the checker no key. Fails if the kernel's pin and the
+// checker's signer could part, or if a box with no checker pinned a key.
+func TestCheckerPinIsTheHandedKeysSigner(t *testing.T) {
+	var root [clerkkey.Len]byte
+	for i := range root {
+		root[i] = byte(0x70 + i)
+	}
+	clerks := map[string]KeyClerk{handoff.CheckerName: {Socket: "/run/k", Cgroup: "/agentos.slice/agentos-checker.service"}}
+	pin, err := CheckerPin(clerks, &root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := clerkkey.Derive(&root, handoff.CheckerName)
+	sign, _ := k.Signer()
+	if !pin.Equal(sign.Public()) {
+		t.Fatal("the pin is not the checker's signer")
+	}
+	mail, _ := clerkkey.Derive(&root, "mail")
+	ms, _ := mail.Signer()
+	if pin.Equal(ms.Public()) {
+		t.Fatal("the pin is another clerk's signer")
+	}
+	if pin, err := CheckerPin(map[string]KeyClerk{"mail": {}}, &root); pin != nil || err != nil {
+		t.Fatalf("no checker unit pinned %x, %v", pin, err)
+	}
+	if _, err := CheckerPin(clerks, &[clerkkey.Len]byte{}); err == nil {
+		t.Fatal("an empty clerk root pinned a key")
+	}
+}

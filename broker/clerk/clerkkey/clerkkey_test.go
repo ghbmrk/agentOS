@@ -181,3 +181,27 @@ func TestDeriveGivesEachClerkItsOwnStableKey(t *testing.T) {
 		t.Errorf("an empty root derived a key: %v", err)
 	}
 }
+
+// REQ: CLK-1
+// A clerk's signing key (MIG-4-exit-c2): stable for one key, apart from its
+// sealer and from another clerk's signer, so the kernel's pin of the
+// checker's key matches no other clerk's.
+func TestSignerIsStableAndApart(t *testing.T) {
+	k := testKey("checker")
+	a, err := k.Signer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := k.Signer()
+	s, _ := k.Sealer()
+	o, _ := testKey("mail").Signer()
+	if !a.Equal(b) {
+		t.Fatal("one key gave two signers: the kernel's pin would not match after a restart")
+	}
+	if bytes.Equal(a.Seed(), s) || a.Equal(o) {
+		t.Fatal("the signer is the sealer, or two clerks share a signer")
+	}
+	if _, err := (Key{Name: "Bad"}).Signer(); !errors.Is(err, ErrKey) {
+		t.Fatalf("a bad name signed: %v", err)
+	}
+}
