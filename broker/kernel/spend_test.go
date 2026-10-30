@@ -4,6 +4,7 @@ package kernel_test
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -847,5 +848,19 @@ func TestAFullWindowInTheLogWithNoResetTimeIsNeverDue(t *testing.T) {
 	r.boot(2)
 	if r.k.State().WindowDue(1<<40, "p", "5h") || r.k.State().PoolOpen(1<<40, "p") {
 		t.Fatal("a full window with no reset time is due")
+	}
+}
+
+// A model.used logged at a time near the int64 floor replays without a
+// panic and keeps no spend (L3 delta on d1e27c8c).
+func TestSpendAtTheInt64FloorReplays(t *testing.T) {
+	r := newRig(t)
+	body := map[string]any{"task": "t1", "route": "api", "amount": 3, "source": "provider"}
+	_, err := r.k.Log().Append(math.MinInt64+5, kernel.TModelUsed, 1, body)
+	must(t, err)
+	must(t, r.k.Log().Anchor())
+	r.boot(2)
+	if got := r.k.State().Spent(math.MinInt64); len(got) != 0 {
+		t.Fatalf("spent %v", got)
 	}
 }
