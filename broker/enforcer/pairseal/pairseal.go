@@ -158,6 +158,11 @@ func Seal(to Recipient, device string, secret []byte) ([]byte, error) {
 	if !to.valid() {
 		return nil, ErrRecipient
 	}
+	return seal(to, device, secret)
+}
+
+// seal is Seal without its checks.
+func seal(to Recipient, device string, secret []byte) ([]byte, error) {
 	eph, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
@@ -170,7 +175,7 @@ func Seal(to Recipient, device string, secret []byte) ([]byte, error) {
 	ssM, ctM := to.ek.Encapsulate()
 	defer clear(ssM)
 	head := append(append([]byte(magic), eph.PublicKey().Bytes()...), ctM...)
-	aead, err := seal(ssM, ssX, head, to, device)
+	aead, err := envelopeAEAD(ssM, ssX, head, to, device)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +203,7 @@ func (k *Key) Open(device string, env []byte) ([]byte, error) {
 		return nil, ErrOpen
 	}
 	defer clear(ssM)
-	aead, err := seal(ssM, ssX, env[:headerLen], k.Recipient(), device)
+	aead, err := envelopeAEAD(ssM, ssX, env[:headerLen], k.Recipient(), device)
 	if err != nil {
 		return nil, ErrOpen
 	}
@@ -209,15 +214,13 @@ func (k *Key) Open(device string, env []byte) ([]byte, error) {
 	return out, nil
 }
 
-// seal is the envelope's AEAD: an X-Wing-style combiner, as backup's, with
+// envelopeAEAD is the envelope's AEAD: an X-Wing-style combiner, as backup's, with
 // both shared secrets as HKDF input and the header (both ciphertexts), the
 // recipient's keys and the device in its info, so a swapped half, another
 // recipient or another device changes the key.
-func seal(ssM, ssX, head []byte, to Recipient, device string) (cipher.AEAD, error) {
+func envelopeAEAD(ssM, ssX, head []byte, to Recipient, device string) (cipher.AEAD, error) {
 	rHash := sha256.Sum256(to.Bytes())
-	info := make([]byte, 0, len(head)+64+len(device))
-	info = append(info, "agentos.enforcer.pairseal.v1\x00"...)
-	info = append(info, head...)
+	info := append([]byte("agentos.enforcer.pairseal.v1\x00"), head...)
 	info = append(info, rHash[:]...)
 	info = append(info, device...)
 	ikm := append(bytes.Clone(ssM), ssX...)

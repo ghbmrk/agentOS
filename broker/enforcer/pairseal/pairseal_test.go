@@ -5,6 +5,7 @@ package pairseal
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +98,42 @@ func TestKeyAndRecipientRoundTrip(t *testing.T) {
 	}
 	if _, err := KeyFromSeed(make([]byte, SeedLen+1)); !errors.Is(err, ErrRecipient) {
 		t.Error("long seed accepted")
+	}
+}
+
+// TestBounds: a device ID of 253 bytes and the printable ASCII ends are
+// sealable, 254 bytes is not; secrets of 1 and MaxSecret bytes seal and
+// open, and an envelope holding an empty or an over-long secret, sealed
+// past Seal's checks, does not open.
+func TestBounds(t *testing.T) {
+	k, _ := NewKey()
+	for _, d := range []string{strings.Repeat("a", 253), "!", "~", "!lock~"} {
+		if !Device(d) {
+			t.Errorf("device %q refused", d)
+		}
+	}
+	for _, d := range []string{strings.Repeat("a", 254), " ", "\x7f"} {
+		if Device(d) {
+			t.Errorf("device %q accepted", d)
+		}
+	}
+	for _, n := range []int{1, MaxSecret} {
+		s := bytes.Repeat([]byte{7}, n)
+		env, err := Seal(k.Recipient(), "lock", s)
+		if err != nil {
+			t.Fatalf("%d bytes: %v", n, err)
+		}
+		if got, err := k.Open("lock", env); err != nil || !bytes.Equal(got, s) {
+			t.Errorf("%d bytes do not open: %v", n, err)
+		}
+	}
+	for _, n := range []int{0, MaxSecret + 1} {
+		env, err := seal(k.Recipient(), "lock", make([]byte, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := k.Open("lock", env); !errors.Is(err, ErrOpen) {
+			t.Errorf("an envelope of a %d-byte secret opens", n)
+		}
 	}
 }
