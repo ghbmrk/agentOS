@@ -46,6 +46,31 @@ b2 to b6 are their own `work-item` issues; each one's builder writes its full br
 
 **Scope:** `broker/vm/requal/requal.go`, `requal_test.go`, `ASSUMPTIONS.md`; `briefs/UPD-5r-b.md`. No new import outside the module; `broker/vm/` is open under the G2 freeze; not trusted core.
 
+## b3: the security suite held as log data
+
+Work item #4045. Written 2026-10-30 against main at 55a15c74 (after #4099).
+
+**Kernel** (`broker/kernel/suite.go`, trusted core; D-159 row first). Three entry types, version 1:
+- `security.case` (`AddSecurityCase`): `SecurityCase{ID; Input, Expect []byte}`. The kernel checks shape only: an ID of 1 to 128 of `A-Za-z0-9._/-` never used before (a dropped case's ID included), a non-empty input of at most 8 KiB and expectation of at most 1 KiB, and room (at most 4096 live cases; a full suite refuses, never drops). It anchors, so a rollback past it is caught (KRN-7).
+- `security.dropped` (`DropSecurityCase`): HLD-3's owner key. A live passkey's co-signature over `SecurityDropHash(n, id)`, n the drops logged so far. A widening (KEY-4): it anchors, and it is live after `GrantHold` with the case still in the suite and listed by `SecurityPending`. Revoking its passkey in the hold cancels it (D-146).
+- `security.kept` (`KeepSecurityCase`): the owner cancels a drop in its hold.
+- `State.SecuritySuite(now)` gives the live cases in the order added and how many were dropped. The fold checks every entry again.
+
+**Host** (`broker/vm/requal/security.go`). `SecuritySuite(SuiteLog)` is the suite's `Suite`: a `DroppedSource` over the kernel's cases, graded by `GradeSecurity`. A nil log is `ErrNoSource`. A case's input is `SecurityInput{Content, Canary}`, its expectation a JSON object of named measures, and the driver's answer `SecurityReport{Measures, Outputs}`. A case passes only when every expected measure is reported with its value and the canary is in no string of the answer, raw or decoded, in any case. A malformed case fails. `InjectionCase(id, text)` turns each item of the release corpus (`broker/corpus`) into a case: ID `injection/<id>`, slot filled, canary derived from the ID, and EVL-3's `outside`, `leaks` and `unlogged` measures expected 0.
+
+**Floor** (`broker/update/requal.go`). `Score.Dropped` carries the owner's drops. The security floor counts `Cases + Dropped`, and candidate and baseline must report the same drops. An owner drop then keeps the floor, where before it would have held every release for good, and any other shrink still fails.
+
+**Not here.** The kernel socket frames to read, seed, drop and keep, and the owner page's notice, go in a follow-up row, because #4108 holds `kernel/proc/kernelsock.go` (D-111). Wiring is b6.
+
+**Requirement IDs:** UPD-5, HLD-3, HLD-5, EVL-3, KEY-4.
+
+**Acceptance tests:**
+- `broker/kernel/suite_test.go`: `TestSecurityCasesAreLogData`, `TestSecurityCaseShapeAndIDsNeverReused`, `TestFullSecuritySuiteRefusesAndDropsNothing`, `TestSecurityDropNeedsTheOwnersPasskey`, `TestSecurityDropWaitsTheHold`, `TestKeepCancelsADropAndItsSignatureNeverReplays`, `TestRevokedPasskeyCancelsItsDropInTheHold`, `TestUnanchoredSecurityDropDoesNotSurviveARestart`.
+- `broker/vm/requal/security_test.go`: `TestShippedInjectionTestsAreTheSecuritySuite` (at least one case), `TestSecurityGraderIsStructural`, `TestSecuritySuiteWithoutALogFailsClosed`, `TestRequalifyOnTheSuiteInTheLog`, `TestNegativeDropCountIsAnError`.
+- `broker/update/requal_test.go`: `TestOwnerDroppedSecurityCasesKeepTheFloor`.
+
+**Scope:** `broker/kernel/suite.go`, `suite_test.go`, `state.go`, `rederive.go`, `ASSUMPTIONS.md`; `broker/vm/requal/requal.go`, `security.go`, `security_test.go`, `ASSUMPTIONS.md`; `broker/update/requal.go`, `requal_test.go`, `ASSUMPTIONS.md`; this brief. The kernel adds no import.
+
 ## Estimate
 
 b1: about 150 lines of code and 300 of tests, 60k to 90k tokens. b2 and b5 are the large rows.
