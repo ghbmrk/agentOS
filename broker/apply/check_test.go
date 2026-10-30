@@ -600,7 +600,9 @@ func TestStagerAnswersAcrossRestart(t *testing.T) {
 	// abandon that never took lets its release boot (A14).
 	late := make([]string, 2)
 	for i := range late {
-		late[i], _ = c.mint(ref(8), false)
+		id, err := c.mint(ref(8), false)
+		cr.must(err)
+		late[i] = id
 		cr.must(c.StageDropped(ctx, late[i]))
 	}
 	cr.must(c.ConfirmStaged(late[0]))
@@ -806,6 +808,113 @@ func TestFastToStableWithdrawsPendingRelease(t *testing.T) {
 		t.Fatalf("security fix withdrawn: %q", got)
 	}
 	sec.takenAre("upd:2:1")
+
+	// Handed over, the restart held by a call: the stable step undoes the
+	// handover, so the release never boots on a stable box (Security
+	// round 2 on #4075).
+	ho := newCheckRig(t, update.ChannelFast)
+	ho.m.add(2, update.ChannelStable, false, "two")
+	ho.mustStep()
+	ho.clk.add(7 * time.Hour)
+	ho.act.onInstall = func() { ho.inCall = true }
+	if ok, err := ho.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	if pt := ho.a.st.Applying; pt == nil || !pt.Installed {
+		t.Fatalf("not handed over: %+v", pt)
+	}
+	ho.channel = update.ChannelStable
+	ho.mustStep()
+	ho.inCall = false
+	if ok, err := ho.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick after the switch: %v %v", ok, err)
+	}
+	if ho.act.restarts != 0 || ho.act.abandoned != 1 || ho.a.st.Applying != nil {
+		t.Fatalf("restarts %d, abandoned %d, applying %+v", ho.act.restarts, ho.act.abandoned, ho.a.st.Applying)
+	}
+	if got := ho.c.st.Adoptions["upd:2:1"].State; got != adDropped {
+		t.Fatalf("handed-over adoption %q", got)
+	}
+
+	// The install still executing: the refusal is recorded, execute marks
+	// the point withdrawing, and the next Tick undoes it.
+	ex := newCheckRig(t, update.ChannelFast)
+	ex.m.add(2, update.ChannelStable, false, "two")
+	ex.mustStep()
+	ex.clk.add(7 * time.Hour)
+	var during string
+	ex.act.onInstall = func() {
+		ex.channel = update.ChannelStable
+		if err := ex.step(); err != nil {
+			t.Errorf("step while installing: %v", err)
+		}
+		during = ex.a.Status()
+	}
+	ex.act.abandonErr = errors.New("activator busy")
+	if ok, err := ex.a.Tick(ctx); ok || err == nil {
+		t.Fatalf("installing tick: %v %v", ok, err)
+	}
+	if want := fmt.Sprintf(stableWontStartLine, 2); during != want {
+		t.Fatalf("status while installing %q, want %q", during, want)
+	}
+	if pt := ex.a.st.Applying; pt == nil || !pt.Withdrawing || !pt.Stable || pt.Pinned {
+		t.Fatalf("point %+v", pt)
+	}
+	if got, want := ex.a.Status(), fmt.Sprintf(stableMayStartLine, 2); got != want {
+		t.Fatalf("status %q, want %q", got, want)
+	}
+	ex.act.abandonErr = nil
+	if ok, err := ex.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if ex.act.restarts != 0 || ex.act.abandoned != 1 || ex.a.st.Applying != nil {
+		t.Fatalf("restarts %d, abandoned %d, applying %+v", ex.act.restarts, ex.act.abandoned, ex.a.st.Applying)
+	}
+	if got := ex.c.st.Adoptions["upd:2:1"].State; got != adDropped {
+		t.Fatalf("executing adoption %q", got)
+	}
+}
+
+// The fast mark is saved: a check reloaded from its state between the
+// fast adoption and the stable step still withdraws the release.
+// Mutant: do not persist Fast.
+func TestFastMarkSurvivesCheckReload(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.c = cr.newCheck()
+	cr.channel = update.ChannelStable
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	if ok, err := cr.a.Tick(context.Background()); ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	if len(cr.act.installed) != 0 {
+		t.Fatalf("installed %v on stable with no gate", cr.act.installed)
+	}
+}
+
+// A fast adoption that booted and was confirmed stays: the stable step
+// leaves it, succeeds and offers a security fix.
+// Mutant: withdraw a fast adoption whatever its state.
+func TestConfirmedFastAdoptionKeepsStableStep(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	if ok, err := cr.a.Tick(ctx); !ok || err != nil {
+		t.Fatalf("tick: %v %v", ok, err)
+	}
+	cr.restart()
+	cr.must(cr.a.Resume(ctx))
+	if got := cr.c.st.Adoptions["upd:2:1"].State; got != adConfirmed {
+		t.Fatalf("adoption %q", got)
+	}
+	cr.channel, cr.pass = update.ChannelStable, true
+	cr.m.add(3, update.ChannelStable, true, "three")
+	cr.mustStep()
+	cr.takenAre("upd:2:1", "upd:3:2")
 }
 
 // A9: a security fix dropped because its attestor left the list is

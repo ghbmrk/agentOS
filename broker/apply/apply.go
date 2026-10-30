@@ -211,6 +211,10 @@ type point struct {
 	// Pinned: it is withdrawn because the owner pinned the update
 	// channel (UPD-4, #3699), not for a failed security check.
 	Pinned bool `json:"pinned,omitempty"`
+	// Stable: it is withdrawn because the owner moved the box to the
+	// stable channel after a fast adoption (UPD-4, UPD-5), not for a
+	// failed security check.
+	Stable bool `json:"stable,omitempty"`
 	// Abandoned: the withdrawal's Abandon took. Unset on a withdrawal,
 	// the counted entry may still boot (#3832, #3852).
 	Abandoned bool `json:"abandoned,omitempty"`
@@ -311,9 +315,10 @@ type Applier struct {
 	// restarting: the point restartIfHandedOver is restarting into; a
 	// Withdraw of it is refused from then on (SR3-4f-3 B1).
 	restarting string
-	// refused: a security Withdraw of the apply in flight was refused
-	// for this adoption, in this process (SR3-4f-3 B2). Its release is
-	// never restarted into, and a pending release of it never installs.
+	// refused: a security or stable Withdraw of the apply in flight was
+	// refused for this adoption, in this process (SR3-4f-3 B2). Its
+	// release is never restarted into, and a pending release of it never
+	// installs.
 	refused refusal
 	// asked: the plan this process submitted and Do has not answered,
 	// and when; no second plan is submitted for Quiet after it, so a
@@ -322,11 +327,12 @@ type Applier struct {
 	askedAt time.Time
 }
 
-// refusal: a security Withdraw of adoption refused; starts says whether
-// its image may start before it is undone.
+// refusal: a Withdraw of adoption for why (WhySecurity or WhyStable)
+// refused; starts says whether its image may start before it is undone.
 type refusal struct {
 	adoption string
 	starts   bool
+	why      string
 }
 
 // New loads the applier's state. A pending release is not kept across a
@@ -655,7 +661,7 @@ func (a *Applier) restartIfHandedOver(ctx context.Context) (bool, error) {
 	if pt != nil && a.cfg.Paused() {
 		// Pinned after the handover: withdrawn before any boot takes it
 		// (UPD-4, #3699).
-		err := a.withdrawLocked(ctx, pt, true)
+		err := a.withdrawLocked(ctx, pt, whyPin)
 		a.mu.Unlock()
 		return false, err
 	}
@@ -740,9 +746,13 @@ func withdrawnKind(pt *point) string {
 }
 
 // WhySecurity is the change pipeline's reason for a revert after a
-// failed security check (change.WhySecurity): the only reason Withdraw
-// undoes a handover (SR3-4f-3a).
+// failed security check (change.WhySecurity). It and WhyStable are the
+// reasons Withdraw undoes a handover (SR3-4f-3a).
 const WhySecurity = "security"
+
+// whyPin is withdrawLocked's reason for the owner's pin of the update
+// channel (#3699).
+const whyPin = "pin"
 
 // Withdraw gives up adoption for the change pipeline's revert of a staged
 // adoption for why (SR3-4f-2a). A pending release of it is dropped; the
@@ -757,7 +767,9 @@ const WhySecurity = "security"
 // Handover() true, with one exception (SR3-4f-3a): for a failed security
 // check, once the activator took the release and in the boot it was
 // handed over in, the handover is undone (Abandon, DropStaged) and the
-// adoption dropped, with no fallback recorded. That is marked durably
+// adoption dropped, with no fallback recorded. A box moved to stable
+// (WhyStable) is the same: a fast adoption it handed over never boots
+// past the stable gate (UPD-4, UPD-5). That is marked durably
 // first, so the release is never restarted into even when a step fails;
 // a failure is the same refusal with the cause wrapped, and the next Tick
 // or Withdraw finishes it. An owner's UNDO or a regression revert keeps
@@ -788,20 +800,24 @@ func (a *Applier) Withdraw(adoption, why string) error {
 }
 
 // withdrawInstalledLocked is Withdraw of the apply in flight (SR3-4f-3a).
-// A refused security Withdraw is recorded (SR3-4f-3 B2).
+// A refused security or stable Withdraw is recorded (SR3-4f-3 B2); a
+// security refusal of the same adoption keeps its reason.
 func (a *Applier) withdrawInstalledLocked(pt *point, why string) error {
-	if why != WhySecurity && !pt.Withdrawing {
+	if why != WhySecurity && why != WhyStable && !pt.Withdrawing {
 		return handoverError{}
 	}
-	err := a.undoHandoverLocked(pt)
+	err := a.undoHandoverLocked(pt, why)
 	var h handoverError
-	if errors.As(err, &h) { // security, or already withdrawing
-		a.refused = refusal{adoption: pt.Adoption, starts: h.starts}
+	if errors.As(err, &h) { // security, stable, or already withdrawing
+		if a.refused.adoption == pt.Adoption && a.refused.why == WhySecurity || why != WhyStable {
+			why = WhySecurity
+		}
+		a.refused = refusal{adoption: pt.Adoption, starts: h.starts, why: why}
 	}
 	return err
 }
 
-func (a *Applier) undoHandoverLocked(pt *point) error {
+func (a *Applier) undoHandoverLocked(pt *point, why string) error {
 	switch {
 	case a.executing, !pt.Installed:
 		// executing first: the activator may be mid-install, and Booted
@@ -815,17 +831,18 @@ func (a *Applier) undoHandoverLocked(pt *point) error {
 	if b, err := a.cfg.Activator.Booted(ctx); err != nil || b.ID != pt.BootID {
 		return handoverError{starts: true} // a new boot is Resume's to settle
 	}
-	return a.withdrawLocked(ctx, pt, false)
+	return a.withdrawLocked(ctx, pt, why)
 }
 
 // withdrawLocked undoes pt's handover in the boot it was handed over in,
 // marked durably first, so it is never restarted into even when a step
 // fails, and a reboot of the old root is not taken for a fallback
-// (SR3-4f-3a). pinned: the owner pinned the update channel (#3699).
-func (a *Applier) withdrawLocked(ctx context.Context, pt *point, pinned bool) error {
+// (SR3-4f-3a). why: whyPin (the owner pinned the update channel, #3699),
+// WhyStable or WhySecurity.
+func (a *Applier) withdrawLocked(ctx context.Context, pt *point, why string) error {
 	if !pt.Withdrawing {
 		marked := *pt
-		marked.Withdrawing, marked.Pinned = true, pinned
+		marked.Withdrawing, marked.Pinned, marked.Stable = true, why == whyPin, why == WhyStable
 		next := a.st
 		next.Applying = &marked
 		if err := a.save(next); err != nil {
@@ -883,7 +900,7 @@ func (a *Applier) Pin(ctx context.Context) error {
 	if b.ID != pt.BootID {
 		return nil // booted since the handover: Resume's to settle
 	}
-	err = a.withdrawLocked(ctx, pt, true)
+	err = a.withdrawLocked(ctx, pt, whyPin)
 	a.settleLocked(ctx)
 	return err
 }
@@ -1154,6 +1171,7 @@ func (a *Applier) execute(ctx context.Context, id string) kernel.Result {
 	pt2 := *a.st.Applying
 	pt2.Installed = true
 	pt2.Withdrawing = a.refused.adoption != "" && a.refused.adoption == pt2.Adoption // B2
+	pt2.Stable = pt2.Withdrawing && a.refused.why == WhyStable
 	next.Applying = &pt2
 	if next.Pending == p {
 		next.Pending = nil
@@ -1501,11 +1519,29 @@ func (a *Applier) refLocked(pt *point) (update.Ref, error) {
 }
 
 // The STATUS lines for an apply whose security Withdraw was refused or
-// is under way (SR3-4f-3 B6).
+// is under way (SR3-4f-3 B6), and for one withdrawn because the owner
+// moved the box to stable (UPD-4, UPD-5).
 const (
-	wontStartLine = "Update %d failed a security check; I will not start it. Nothing is needed from you."
-	mayStartLine  = "Update %d failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+	wontStartLine       = "Update %d failed a security check; I will not start it. Nothing is needed from you."
+	mayStartLine        = "Update %d failed a security check while it was being installed; it may start before I can undo it. Nothing is needed from you."
+	stableWontStartLine = "You moved to the stable channel, so I will not start update %d until it is ready for stable. Nothing is needed from you."
+	stableMayStartLine  = "You moved to the stable channel while update %d was being installed; it may start before I can undo it. Nothing is needed from you."
 )
+
+// withdrawingLine is STATUS for update v being withdrawn: for a failed
+// security check, or stable when the owner moved the box to stable;
+// starts: it may start before it is undone.
+func withdrawingLine(v int64, stable, starts bool) string {
+	switch {
+	case stable && starts:
+		return fmt.Sprintf(stableMayStartLine, v)
+	case stable:
+		return fmt.Sprintf(stableWontStartLine, v)
+	case starts:
+		return fmt.Sprintf(mayStartLine, v)
+	}
+	return fmt.Sprintf(wontStartLine, v)
+}
 
 // The lines for a release the activator took (#3829), and for one
 // withdrawn because the owner pinned the update channel after the
@@ -1569,16 +1605,11 @@ func (a *Applier) Status() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
-	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned && a.st.Applying.Abandoned:
-		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
 	case a.st.Applying != nil && a.st.Applying.Withdrawing && !a.st.Applying.Pinned:
-		// Its Abandon is not recorded: a reboot boots it (#3852).
-		return fmt.Sprintf(mayStartLine, a.st.Applying.To)
+		// Its Abandon not recorded, a reboot boots it (#3852).
+		return withdrawingLine(a.st.Applying.To, a.st.Applying.Stable, !a.st.Applying.Abandoned)
 	case a.st.Applying != nil && a.refused.adoption != "" && a.refused.adoption == a.st.Applying.Adoption:
-		if a.refused.starts {
-			return fmt.Sprintf(mayStartLine, a.st.Applying.To)
-		}
-		return fmt.Sprintf(wontStartLine, a.st.Applying.To)
+		return withdrawingLine(a.st.Applying.To, a.refused.why == WhyStable, a.refused.starts)
 	case a.st.Applying != nil && a.st.Applying.Installed:
 		return a.installedLineLocked(a.st.Applying)
 	case a.st.Pending != nil && a.rel != nil:

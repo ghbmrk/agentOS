@@ -344,9 +344,11 @@ func (c *Check) adopted(ref update.Ref) bool {
 // withdrawFast withdraws every staged ordinary release adopted on fast,
 // so a box moved to stable installs nothing its stable gate did not pass
 // (UPD-4, UPD-5). The withdrawn adoption is dropped and offered again
-// under the stable gate. A release already being installed is refused
-// with ErrApplying and installs (the applier's handover boundary, A14);
-// any other refusal fails the step, and the next step tries again.
+// under the stable gate. A release handed over in this boot is undone;
+// one still installing is refused with ErrApplying and marked so it
+// never boots, and the applier drops it (A14). Only one that may already
+// start (a restart under way, a new boot) stays, at the first boot of the
+// new slot. Any other refusal fails the step, and the next step retries.
 func (c *Check) withdrawFast() error {
 	c.mu.Lock()
 	var ids []string
