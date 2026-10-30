@@ -47,8 +47,9 @@ type Pusher struct {
 	// Signer is the enforcer's own SSH key (ap.Layout.EnforcerKey is its
 	// public half).
 	Signer ssh.Signer
-	// Dial opens the TCP connection; slice l binds it to the admin port.
-	// Nil uses a plain dialer.
+	// Dial opens the TCP connection on the wired admin port; slice l
+	// binds it there. There is no default, so a pusher nobody bound
+	// reaches nothing.
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Timeout bounds one Sync; zero is 30 seconds.
 	Timeout time.Duration
@@ -147,14 +148,10 @@ func (p *Pusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]a
 }
 
 func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
-	if p.HostKey == nil || p.Signer == nil {
-		return nil, errors.New("push: no pinned host key or enforcer key")
+	if p.HostKey == nil || p.Signer == nil || p.Dial == nil {
+		return nil, errors.New("push: no pinned host key, enforcer key or admin-port dialer")
 	}
-	dial := p.Dial
-	if dial == nil {
-		dial = (&net.Dialer{}).DialContext
-	}
-	conn, err := dial(ctx, "tcp", p.Addr)
+	conn, err := p.Dial(ctx, "tcp", p.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("push: dial: %w", err)
 	}

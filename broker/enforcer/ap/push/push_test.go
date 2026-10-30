@@ -162,6 +162,9 @@ func (f *fakeAP) get(path string) []byte {
 	return f.files[path]
 }
 
+// dial is the tests' admin-port dialer: loopback to the fake.
+var dial = (&net.Dialer{}).DialContext
+
 func enforcerKey(t *testing.T) ssh.Signer {
 	_, k, _ := ed25519.GenerateKey(rand.Reader)
 	s, err := ssh.NewSignerFromKey(k)
@@ -188,7 +191,7 @@ func config() []ap.File {
 func TestDriftRepushed(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
-	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Timeout: 5 * time.Second}
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
 	ctx := context.Background()
 
 	res, err := p.Sync(ctx, config())
@@ -261,15 +264,18 @@ func TestPinnedHostKey(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
 	other := enforcerKey(t).PublicKey()
-	p := &Pusher{Addr: f.addr, HostKey: other, Signer: me, Timeout: 5 * time.Second}
+	p := &Pusher{Addr: f.addr, HostKey: other, Signer: me, Dial: dial, Timeout: 5 * time.Second}
 	if _, err := p.Sync(context.Background(), config()); err == nil || !strings.Contains(err.Error(), "host key") {
 		t.Fatalf("other host key: %v", err)
 	}
 	if logins, writes, _, files := f.n(); logins != 0 || writes != 0 || files != 0 {
 		t.Fatal("config reached an access point with the wrong host key")
 	}
-	if _, err := (&Pusher{Addr: f.addr, Signer: me}).Sync(context.Background(), config()); err == nil {
+	if _, err := (&Pusher{Addr: f.addr, Signer: me, Dial: dial}).Sync(context.Background(), config()); err == nil {
 		t.Fatal("synced with no pinned host key")
+	}
+	if _, err := (&Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me}).Sync(context.Background(), config()); err == nil {
+		t.Fatal("synced with no admin-port dialer")
 	}
 }
 
@@ -280,7 +286,7 @@ func TestVerifyAndPaths(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
 	f.setStuck(true)
-	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Timeout: 5 * time.Second}
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
 	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrVerify) {
 		t.Fatalf("stuck access point: %v", err)
 	}
@@ -303,7 +309,7 @@ func TestDefaultsAndLimit(t *testing.T) {
 	f := newFakeAP(t, me.PublicKey())
 	big := []ap.File{{Path: ap.PathNetwork, Data: bytes.Repeat([]byte("x"), MaxFile)}}
 	f.set(ap.PathNetwork, big[0].Data)
-	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me}
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
 	if res, err := p.Sync(context.Background(), big); err != nil || res.Applied {
 		t.Fatalf("default timeout, file at the limit: %+v %v", res, err)
 	}
