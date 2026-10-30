@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -318,5 +319,34 @@ func TestStreamRealMemoryCap(t *testing.T) {
 	run.Stop()
 	if _, err := os.Stat(filepath.Join(os.Getenv("AGENTOS_CGROUP_PARENT"), "stream-it")); !os.IsNotExist(err) {
 		t.Errorf("stream's cgroup left: %v", err)
+	}
+}
+
+// TestRootlessRunsInItsOwnUserNamespace: a Runtime that is Rootless
+// passes runsc --rootless among the pinned global flags, so runsc makes the
+// user namespace it needs as the caller's own uid (a clerk under its own
+// user, CLK-1, CAM-host-11); one that is not never does.
+func TestRootlessRunsInItsOwnUserNamespace(t *testing.T) {
+	for _, rootless := range []bool{false, true} {
+		r, d := streamRig(t, "echo")
+		r.Rootless = rootless
+		run, err := r.StartStream(context.Background(), streamIn(d))
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.In().Write([]byte("x"))
+		if _, err := io.ReadFull(run.Out(), make([]byte, 1)); err != nil {
+			t.Fatal(err)
+		}
+		run.Stop()
+		<-run.Done()
+		for _, c := range calls(t, d) {
+			sub := strings.Fields(c)
+			i := slices.IndexFunc(sub, func(w string) bool { return !strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "/") })
+			got := slices.Contains(sub[:i], "--rootless")
+			if got != rootless {
+				t.Errorf("Rootless %v: runsc %q", rootless, c)
+			}
+		}
 	}
 }

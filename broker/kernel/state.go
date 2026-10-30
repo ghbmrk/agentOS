@@ -247,6 +247,7 @@ type (
 		Cause  uint64 `json:"cause"`
 		Code   string `json:"code"`
 		Detail string `json:"detail"`
+		Trip   *Trip  `json:"trip,omitempty"` // a trip refusal's trip (trip.go)
 	}
 	planCancel struct {
 		Plan   string `json:"plan"`
@@ -898,6 +899,9 @@ func (s *State) Apply(e Entry) error {
 			s.Changes.Revoked[b.ID] = true
 		case TKeyPaused:
 			s.Changes.Paused[b.ID] = true
+			if _, tripped := s.decoys.paused[b.ID]; tripped {
+				s.decoys.paused[b.ID] = true // the owner's own pause outlives the trip's resume
+			}
 		case TKeyResumed:
 			if _, tripped := s.decoys.paused[b.ID]; !tripped { // a trip's pause lifts only with the passkey
 				delete(s.Changes.Paused, b.ID)
@@ -980,6 +984,9 @@ func (s *State) Apply(e Entry) error {
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Seq == b.Cause && p.Status == SPending {
 			p.Status, p.Reject = SRejected, b.Code
+			if b.Trip != nil && b.Code == CTrip && s.tripOK(*b.Trip, b.Plan) {
+				s.addTrip(*b.Trip, e)
+			}
 		}
 	case TPlanCancel:
 		b, err := body[planCancel](e)

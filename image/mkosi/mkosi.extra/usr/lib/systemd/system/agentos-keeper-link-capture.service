@@ -34,10 +34,10 @@ Restart=on-failure
 RestartSec=2
 StandardError=journal
 # Root, with only what it needs: start the reader under the link's ids and kill it. No
-# CAP_DAC_OVERRIDE, so the kernel's, the mail clerk's and the setup factors' directories stay closed
+# CAP_DAC_OVERRIDE, so the kernel's, the clerks' and the setup factors' directories stay closed
 # to it by their modes; the factors' are root's, so they are masked as well.
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL
-TemporaryFileSystem=/run/agentos-setup:ro /var/lib/agentos-kernel:ro /var/lib/agentos-mail:ro
+TemporaryFileSystem=/run/agentos-setup:ro /var/lib/agentos-kernel:ro /var/lib/agentos-mail:ro /var/lib/agentos-camera:ro
 ReadWritePaths=/run/agentos-link-capture
 LimitCORE=0
 UMask=0077
