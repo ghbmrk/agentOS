@@ -5,6 +5,11 @@ name: mutgate
 # Gremlins runs only on those packages (`mutgate.py claimed`), one job each, and only on the lines
 # the PR adds (`run --git`): the only lines the gate reads. A PR that claims none runs no gremlins
 # and passes. The `mutgate` job is the one result to read.
+# The `mutants` jobs run the PR's own Go tests, which can write anything in that job (the JSON,
+# tools/, $GITHUB_ENV), so they only hand gremlins' JSON on as an artifact. No job that decides
+# runs PR code or the PR's copy of the gate: `claimed` and `mutgate` replace tools/ and
+# broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
+# them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106).
 on:
   pull_request:
 permissions:
@@ -34,6 +39,12 @@ jobs:
         run: |
           [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
           echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      # The gate's code and the tier list it reads are the base's: removed first, so a file the PR
+      # adds under tools/ (a module risk_tier would import) does not survive the checkout (#4106).
+      - name: The base copy of the gate
+        run: |
+          rm -rf tools broker/core/core.txt
+          git checkout "$BASE" -- tools broker/core/core.txt
       - name: Tier-A packages this PR claims coverage in
         id: claimed
         run: |
@@ -102,8 +113,13 @@ jobs:
         run: python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"
       - name: Survivors
         run: python3 -I tools/mutgate.py report mutants
-      - name: Gate (MUT-tierA)
-        run: python3 -I tools/mutgate.py gate mutants --git "$BASE"
+      # Data for the `mutgate` job, which decides; nothing here after the gremlins step is trusted.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: mutants-${{ strategy.job-index }}
+          path: mutants/
+          if-no-files-found: error
+          retention-days: 7
   mutgate:
     needs: [claimed, mutants]
     if: ${{ !cancelled() }}
@@ -119,3 +135,34 @@ jobs:
           echo "claimed: $CLAIMED ($PACKAGES); mutants: $MUTANTS"
           [ "$CLAIMED" = success ] || exit 1
           if [ "$PACKAGES" = "[]" ]; then [ "$MUTANTS" = skipped ]; else [ "$MUTANTS" = success ]; fi
+      # A fresh runner where no PR code has run. The PR tree is read only as data: its diff and file names.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: The base this merge commit was built on
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        env:
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
+          echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      - name: The base copy of the gate
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        run: |
+          rm -rf tools broker/core/core.txt
+          git checkout "$BASE" -- tools broker/core/core.txt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        with:
+          pattern: mutants-*
+          path: ${{ runner.temp }}/mutants
+          merge-multiple: true
+      # verify recomputes the claim from the diff, needs a readable result for each claimed package,
+      # rechecks it as `run` does, then gates: the JSON is the PR's data, never its verdict.
+      - name: Gate (MUT-tierA)
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        env:
+          RESULTS: ${{ runner.temp }}/mutants
+        run: python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"
