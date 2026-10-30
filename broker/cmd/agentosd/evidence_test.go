@@ -820,3 +820,26 @@ func TestHeldCodeShowsItsExpiredView(t *testing.T) {
 		t.Fatalf("at the hour %+v", l[0])
 	}
 }
+
+// TestRetriedHeldCodeKeepsTheStricterView (CODEH-9, #4014 Security): a
+// code text kept once as received with a control and once clean is kept
+// once, and at the hour shows the stricter view, so the code a control
+// hid does not outlive its hours, in either order.
+func TestRetriedHeldCodeKeepsTheStricterView(t *testing.T) {
+	hidden := "Your code is 482913. Also verifi\x07cation 4829\x0713"
+	clean := "Your code is 482913. Also verifi cation 4829 13"
+	for _, order := range [][]string{{hidden, clean}, {clean, hidden}} {
+		r := newEvRig(t)
+		for _, in := range order {
+			if err := r.ev.kept.KeepCode(control.StripControls(in), owner.ExpiredView(in)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r.now = r.now.Add(time.Hour)
+		r.ev.kept.sweep()
+		raw, _ := r.store.Load()
+		if l := r.ev.kept.list(); len(l) != 1 || strings.Contains(string(raw), "4829") || l[0].Text != owner.ExpiredCode {
+			t.Fatalf("%q then %q: kept %+v", order[0], order[1], l)
+		}
+	}
+}

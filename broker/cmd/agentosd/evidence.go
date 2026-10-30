@@ -549,6 +549,12 @@ func (k *keptReplies) keepWith(kind, text, codeGone string) error {
 		}
 		if i := slices.IndexFunc(l, func(r keptReply) bool { return !r.Expired && r.Kind == kind && r.Text == text }); i >= 0 {
 			item.ID = l[i].ID
+			if g := l[i].CodeGone; g != "" && g != item.CodeGone {
+				// Copies kept from different texts as received can
+				// differ in what a control hid: keep the stricter view,
+				// the whole text gone (#4014 Security).
+				item.CodeGone = owner.ExpiredCode
+			}
 			l = slices.Delete(l, i, i+1)
 		}
 		err = k.saveLocked(append(l, item))
