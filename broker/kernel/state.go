@@ -79,12 +79,14 @@ const (
 
 // schema is each entry type's body version. key.issued is 2: its body became
 // a grant batch (#2663), so a log written before cannot fold it as one
-// (#2670 item 4).
+// (#2670 item 4). pool.read and pool.reset are 2, per window, and
+// pool.reserve.lowered is 2, signed and held (RES-5a): a version 1 entry is
+// refused, not misread.
 var schema = map[string]int{
 	TKeyIssued: 2, TKeyRevoked: 1, TKeyPaused: 1, TKeyResumed: 1, TEnrolled: 1, TUnenrolled: 1, TLine: 1, TStop: 1, TResume: 1,
 	TPlanSubmit: 1, TPlanAccepted: 1, TPlanRejected: 1, TPlanCancel: 1,
 	TStepHeld: 1, TStepDispatch: 1, TStepResult: 1, TStepProbed: 1, TStepUndone: 1, TStepRetried: 1,
-	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 1, TReserveUp: 1, TReserveDown: 1, TPoolReset: 1,
+	TModelUsed: 1, TSpendReserved: 1, TSpendHeld: 1, TSpendExtend: 1, TPoolRead: 2, TReserveUp: 1, TReserveDown: 2, TPoolReset: 2,
 	TTaskOpened: 1, TTaskApproved: 1, TTaskEnded: 1, TAnchorsSet: 1,
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
@@ -233,21 +235,6 @@ type (
 		Plan string  `json:"plan"`
 		Key  key.Key `json:"key"`
 	}
-	// poolRead is the provider's own figure for a pool (RES-5), in per mille.
-	poolRead struct {
-		Pool    string `json:"pool"`
-		Used    int64  `json:"used"`
-		ResetAt int64  `json:"reset_at"`
-	}
-	// poolReset reopens a pool at the reset time the provider gave: it clears the
-	// reading, so it widens and needs an anchor (RES-5, KRN-7).
-	poolReset struct {
-		Pool string `json:"pool"`
-	}
-	poolReserve struct {
-		Pool    string `json:"pool"`
-		Reserve int64  `json:"reserve"` // per mille of the pool kept for the owner
-	}
 	planAccepted struct {
 		Plan   string   `json:"plan"`
 		Cause  uint64   `json:"cause"`
@@ -358,29 +345,6 @@ type SpendHold struct {
 	Root, Funding key.ID
 }
 
-// Pool is what the log knows of one usage pool (RES-5).
-type Pool struct{ Used, ResetAt, Reserve int64 }
-
-// PoolOpen reports whether work may draw on a pool: below the owner's reserve.
-func (s *State) PoolOpen(name string) bool {
-	p, ok := s.Pools[name]
-	return !ok || p.Used+p.Reserve < PoolFull
-}
-
-// PoolDue reports whether a pool at its reserve has passed the reset time the
-// provider gave, which is the cooldown. The reopening is a logged widening.
-func (s *State) PoolDue(now int64, name string) bool {
-	p := s.Pools[name]
-	return !s.PoolOpen(name) && p.ResetAt > 0 && now >= p.ResetAt
-}
-
-// PoolWindowMS is the window a pool is declared to reset over (RES-5): the
-// cooldown of a full pool whose reading gave no usable reset time.
-const PoolWindowMS = 5 * 3600 * 1000
-
-// PoolFull is a whole pool, in per mille.
-const PoolFull = 1000
-
 type usedRec struct {
 	Seq uint64
 	key.Use
@@ -428,6 +392,7 @@ type State struct {
 	// Extended maps a plan to the extension key its later calls are charged to.
 	Extended map[string]key.Key
 	Pools    map[string]Pool
+	spent    []spentRec // metered spend by route, the last SpentKeepMS (pool.go)
 	tasks    map[string]*taskState
 	subjects map[string]*subjectState // erase.go
 	items    map[Hash]itemOf
@@ -957,6 +922,7 @@ func (s *State) Apply(e Entry) error {
 		for _, id := range b.Scopes {
 			s.uses[id] = append(s.uses[id], usedRec{e.Seq, key.Use{At: e.At, Amount: b.Amount, Task: s.planTask(b.Task)}})
 		}
+		s.spend(e.At, b.Route, b.Amount)
 	case TSpendHeld:
 		b, err := body[spendHeld](e)
 		if err != nil {
@@ -970,30 +936,8 @@ func (s *State) Apply(e Entry) error {
 		}
 		delete(s.SpendHeld, b.Plan)
 		s.Extended[b.Plan] = b.Key
-	case TPoolRead:
-		b, err := body[poolRead](e)
-		if err != nil {
-			return err
-		}
-		p := s.Pools[b.Pool]
-		p.Used, p.ResetAt = b.Used, b.ResetAt
-		s.Pools[b.Pool] = p
-	case TPoolReset:
-		b, err := body[poolReset](e)
-		if err != nil {
-			return err
-		}
-		p := s.Pools[b.Pool]
-		p.Used, p.ResetAt = 0, 0
-		s.Pools[b.Pool] = p
-	case TReserveUp, TReserveDown:
-		b, err := body[poolReserve](e)
-		if err != nil {
-			return err
-		}
-		p := s.Pools[b.Pool]
-		p.Reserve = b.Reserve
-		s.Pools[b.Pool] = p
+	case TPoolRead, TPoolReset, TReserveUp, TReserveDown:
+		return s.applyPool(e)
 	case TStop:
 		s.Stopped, s.Changes.Stopped = true, true
 		s.Stops++

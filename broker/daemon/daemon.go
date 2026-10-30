@@ -235,6 +235,9 @@ type PageSocket struct {
 	// Certify is the kernel's certify, which signs the page's serving key
 	// (CH-9, MIG-4-recovery-f2); nil serves the page over HTTP only.
 	Certify localsrv.Certifier
+	// Held lists what was kept for the page in place of a text (#993);
+	// nil leaves its op unregistered.
+	Held func() localapi.HeldList
 }
 
 // PageForget is FORGET as the page serves it; unlocked is whether the
@@ -490,6 +493,7 @@ func Run(ctx context.Context, cfg Config) (*Daemon, error) {
 		lcfg.Backups, lcfg.BackupNotes = cfg.PageSocket.Backups, cfg.PageSocket.BackupNotes
 		lcfg.Recovery = cfg.PageSocket.Recovery
 		lcfg.Certify = cfg.PageSocket.Certify
+		lcfg.Held = cfg.PageSocket.Held
 		if f := cfg.PageSocket.Forget; f != nil {
 			lcfg.ForgetTasks, lcfg.Forget = f.PageTasks, f.PageForget
 		}

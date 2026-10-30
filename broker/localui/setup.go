@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/change"
 	"github.com/ghbmrk/agentos/broker/firstboot"
@@ -143,7 +144,12 @@ type SetupState struct {
 	// long as the SetupStore does; agentosd's owed record (#1544) restores
 	// it after a restart and holds finish on its own.
 	Unsaved map[string]bool `json:"unsaved,omitempty"`
-	Done    bool            `json:"done"`
+	// Name is the box's name (CH-21): the suggestion the paired phone was
+	// first shown, or the name the owner typed over it. OwnerName is the
+	// owner's own name, "" when not given. Finish hands both to agentosd.
+	Name      string `json:"name,omitempty"`
+	OwnerName string `json:"owner_name,omitempty"`
+	Done      bool   `json:"done"`
 }
 
 // SetupStore persists SetupState.
@@ -480,6 +486,7 @@ func (u *setup) routes(mux *http.ServeMux) {
 		"/setup/number":      u.number,
 		"/setup/number-code": u.numberCode,
 		"/setup/claim":       u.claim,
+		"/setup/name":        u.name,
 		"/setup/codes":       u.codes,
 		"/setup/recovery":    u.recovery,
 		"/setup/host":        u.host,
@@ -559,6 +566,9 @@ type setupView struct {
 	// Unsaved is the retry box of each provider whose answer did not
 	// save (#1467).
 	Unsaved map[string]*privateBox
+	// BoxName and OwnerName fill the names form on the step after
+	// pairing (CH-21).
+	BoxName, OwnerName string
 	// Refresh reloads the page only while it waits on the box and has
 	// nothing to type into (ONB-4).
 	Refresh string
@@ -627,6 +637,19 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.PairCode = u.pair[key]
 	case "codes":
 		v.CodesShown = u.shown && u.shownGen == u.gen
+	case "host":
+		// The names come on the host step, which shows nothing one-time:
+		// a names post reloads the page, and on the codes step that would
+		// hide an unscanned key (UX on #3913). The phone that paired is
+		// first shown the suggestion here, and it is kept: Name is what
+		// finish sends unless the owner types another. A store that fails
+		// to save still offers it.
+		if u.st.Name == "" {
+			if n, err := boxname.Suggest(u.s.cfg.Rand, u.st.OwnerName); err == nil && u.save(func(s *SetupState) { s.Name = n }) != nil {
+				u.st.Name = n
+			}
+		}
+		v.BoxName, v.OwnerName = u.st.Name, u.st.OwnerName
 	case "card":
 		// No page authority, no card (HW-1): the page says so in the
 		// step's fixed line rather than offering a card it cannot show.
@@ -646,6 +669,10 @@ func (u *setup) page(w http.ResponseWriter, r *http.Request) {
 		v.CanText = ok
 		if ok && phoneRe.MatchString(n) {
 			v.BoxNumber, v.SMSLink = n, smsLink(n, "PAIR "+v.PairCode)
+		}
+	case "host":
+		if n, ok := u.s.cfg.Hooks.BoxNumber(); ok && phoneRe.MatchString(n) {
+			v.BoxNumber = n
 		}
 	case "codes":
 		if v.CodesShown {
@@ -827,7 +854,7 @@ func pairedText(host string) string {
 	if host == "" {
 		host = "this PC"
 	}
-	return "agentOS is running on " + host + ". This is your box's number; save it as agentOS."
+	return "agentOS is running on " + host + ". This is your box's number."
 }
 
 // number is the typing fallback for pairing (ONB-6): the owner types their
@@ -909,7 +936,9 @@ func (u *setup) numberCode(r *http.Request, key string) error {
 
 // errPairedUnsent is the number step's note when the paired text did not
 // go (#1293). The pairing stands, so the page moves on and shows it once.
-var errPairedUnsent = errors.New("You are paired, but my text did not go. Save the number my code came from as agentOS.")
+// It names no setup step: the host step's contact card is missing when the
+// SIM does not report its number (CH-21f-unsent).
+var errPairedUnsent = errors.New("You are paired, but my text did not go. Save the number my code came from as a contact.")
 
 // claim lets the phone that types the texted page code continue setup,
 // after a pairing by the card's setup code. Three wrong codes or an expired
@@ -995,7 +1024,72 @@ func (u *setup) restart(r *http.Request, key string) error {
 	u.device, u.parked, u.lapsed, u.answer = map[string][3]string{}, map[string][3]string{}, map[string][3]string{}, map[string]bool{}
 	return u.save(func(s *SetupState) {
 		s.Owner, s.Device, s.Codes, s.Recovery, s.Host, s.HostTrusted = "", "", false, false, false, false
+		s.Name, s.OwnerName = "", ""
 	})
+}
+
+// Names are the names the owner chose at setup (CH-21): Box, the box's
+// name, and Owner, the owner's own name. Either may be "".
+type Names struct{ Box, Owner string }
+
+// NamedFinish is Hooks whose finish also takes the names: setup calls
+// FinishNamed instead of Finish when Hooks has it.
+type NamedFinish interface {
+	FinishNamed(ownerNumber string, n Names) error
+}
+
+// cardName is the name on the box's contact card: the box's name, else
+// "agentOS". The card is offered only with the names form (L3 on #3913):
+// one offered before the name is drawn and kept would carry a name that a
+// restart could draw again differently.
+func (u *setup) cardName() string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.st.Name != "" {
+		return u.st.Name
+	}
+	return "agentOS"
+}
+
+// name keeps or replaces the box's name and records the owner's own name
+// (CH-21), from the phone that paired only: before pairing, any phone on
+// the Wi-Fi may run setup's steps, but none may name the box.
+func (u *setup) name(r *http.Request, key string) error {
+	owner := strings.TrimSpace(r.PostFormValue("owner_name"))
+	if owner != "" && !boxname.Shape(owner) {
+		return errOwnerNameShape
+	}
+	owner = strings.Join(strings.Fields(owner), " ")
+	n, err := boxname.Check(r.PostFormValue("name"), owner)
+	if err != nil {
+		return nameError(err)
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.st.Owner == "" || key != u.st.Device {
+		return errors.New("Text your box first; then you can name it.")
+	}
+	if !u.st.Codes {
+		return errors.New("Add approval codes first; then you can name me.")
+	}
+	return u.save(func(s *SetupState) { s.Name, s.OwnerName = n, owner })
+}
+
+var errOwnerNameShape = errors.New("Your name is up to 32 letters, spaces, hyphens and apostrophes. Leave it empty if you prefer.")
+
+// nameError is boxname's reason as the names form's sentence.
+func nameError(err error) error {
+	switch {
+	case errors.Is(err, boxname.ErrShape):
+		return errors.New("My name is 1 to 32 letters, spaces, hyphens and apostrophes. Nothing changed.")
+	case errors.Is(err, boxname.ErrControlWord):
+		return errors.New("That is one of my control words, so it can't be my name. Nothing changed.")
+	case errors.Is(err, boxname.ErrReserved):
+		return errors.New(`My name can't contain "agentOS" or "assistant". Nothing changed.`)
+	case errors.Is(err, boxname.ErrOwnerName):
+		return errors.New("That is your own name; pick another for me. Nothing changed.")
+	}
+	return errors.New("Nothing changed. Try again.")
 }
 
 // codes confirms code-generator enrollment with one entered code (ONB-3)
@@ -1471,6 +1565,7 @@ func (u *setup) maybeFinish() {
 	}
 	u.finishing = true
 	who := u.st.Owner
+	names := Names{Box: u.st.Name, Owner: u.st.OwnerName}
 	u.mu.Unlock()
 	defer func() { u.mu.Lock(); u.finishing = false; u.mu.Unlock() }()
 	// agentosd keeps each answer owed to the vault in its own record,
@@ -1503,7 +1598,11 @@ func (u *setup) maybeFinish() {
 	if !connected {
 		return
 	}
-	if err := u.s.cfg.Hooks.Finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
+	finish := u.s.cfg.Hooks.Finish
+	if nf, ok := u.s.cfg.Hooks.(NamedFinish); ok {
+		finish = func(who string) error { return nf.FinishNamed(who, names) }
+	}
+	if err := finish(who); err != nil && !u.s.cfg.Hooks.AlreadySetUp() {
 		msg := "Could not finish setup. Try again."
 		switch {
 		case errors.Is(err, ErrCodesUnavailable):

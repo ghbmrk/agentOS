@@ -4,12 +4,14 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
-// The owner's name for a source: 1 to MaxName printable characters on one
-// line, no leading or trailing space, and at most MaxNameDigits digits, so
+// The owner's name for a source: 1 to MaxName printable characters of valid
+// UTF-8 on one line, none of them default-ignorable (a filler, a grapheme
+// joiner) or a variation selector, no leading or trailing space, and at most MaxNameDigits digits, so
 // the name can carry a year but never a code, even spaced out (security
 // R1 on #180; codes are 6 digits). It reaches the owner in broker-voiced
 // texts.
@@ -29,9 +31,12 @@ var lookAlike = regexp.MustCompile(owner.FoldPattern("agentosproject"))
 // character and digit rules above, and no look-alike of the project's own
 // name (#957, CH-10).
 func NameOK(name string) bool {
+	if !utf8.ValidString(name) {
+		return false
+	}
 	n, digits := 0, 0
 	for _, c := range name {
-		if !unicode.IsPrint(c) {
+		if !unicode.IsPrint(c) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, c) || unicode.Is(unicode.Variation_Selector, c) {
 			return false
 		}
 		if unicode.IsDigit(c) {

@@ -32,8 +32,12 @@ var (
 	}
 )
 
+// CodeLine is what the welcome text says once about codes (CH-21): agent
+// text that asks for one is withheld, so only the broker's own texts do.
+const CodeLine = "I only ask for a code in a text that ends with the reply options."
+
 // AllSetText is the first message after setup (ONB-8): three example tasks
-// suited to what is connected, plus HELP. When no provider may see private
+// suited to what is connected, plus HELP and CodeLine. When no provider may see private
 // data (CAP-9), private tasks would have no route, so only PUBLIC tasks
 // without accounts are suggested. It fits CH-12: GSM-7, at most three segments.
 func AllSetText(connected []string, privateOK bool) string {
@@ -60,5 +64,5 @@ func AllSetText(connected []string, privateOK bool) string {
 			ex[i] = "PUBLIC " + ex[i]
 		}
 	}
-	return "All set. Text me a task, for example:\n1. " + ex[0] + "\n2. " + ex[1] + "\n3. " + ex[2] + "\nHELP for commands."
+	return "All set. Text me a task, for example:\n1. " + ex[0] + "\n2. " + ex[1] + "\n3. " + ex[2] + "\nHELP for commands.\n" + CodeLine
 }

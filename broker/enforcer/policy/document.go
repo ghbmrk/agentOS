@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The networks NET-2 Segments names. A device sits on one of the last two;
@@ -83,15 +85,95 @@ type Device struct {
 	// devices). The zero value is on it, so a device nobody classified
 	// fails safe; setting it is a loosening, so only the owner can.
 	Everyday bool `json:"everyday"`
+	// Class is a safety-list device's class (NET-2 Safety devices), from
+	// the closed list below; empty for a device of unknown type, and always
+	// empty for an everyday device. Setting or changing it is a loosening.
+	Class string `json:"class"`
 	// Secure names a safety-list device's one secure-direction command,
-	// such as a lock's "lock" (NET-2 Safety devices); empty for none.
+	// such as a lock's "lock" (NET-2 Safety devices); empty for none. Only
+	// the one name its class allows is valid (Nameable).
 	Secure string `json:"secure"`
 	// Label is how far the enforcer can contain the device (NET-1), from
 	// qualification and the enforcer's observation, never from what the
 	// device reports: LabelContained, LabelExceptRadio, or empty for not
 	// containable, so a device nobody labelled promises nothing.
 	Label string `json:"label"`
+	// Control is the device's control ports: the only ports the box that
+	// runs an everyday device reaches, the core while it is offline and
+	// the edge while it is online (NET-2 Device paths). A device with
+	// none is reached by neither box.
+	Control []Port `json:"control"`
+	// Stream is a camera's or microphone's stream ports: the only ports
+	// the core reaches on a safety-list device, and only while it has no
+	// vendor cloud (NET-2 Cameras and microphones). Empty for any other
+	// class.
+	Stream []Port `json:"stream"`
 }
+
+// The NET-2 safety classes a device can carry; the empty class is unknown
+// type. A primary heater and a valve that feeds sprinklers, heating or a
+// medical supply have classes of their own so that they cannot be named.
+const (
+	ClassLock           = "lock"
+	ClassValve          = "valve"
+	ClassFeedValve      = "feed-valve" // feeds sprinklers, heating or a medical supply
+	ClassHeater         = "heater"
+	ClassPrimaryHeating = "primary-heating"
+	ClassOven           = "oven"
+	ClassPlug           = "plug"
+	ClassRelay          = "relay"
+	ClassGarageDoor     = "garage-door"
+	ClassDrone          = "drone"
+	ClassCamera         = "camera"
+	ClassMicrophone     = "microphone"
+	ClassAlarm          = "alarm"
+	ClassSiren          = "siren"
+	ClassSensor         = "sensor"
+)
+
+// classSecure is each class's one nameable secure direction, empty for a
+// class that cannot be named (NET-2 Safety devices): a camera, microphone,
+// alarm, siren or sensor gets no command, and primary heating and a
+// feeding valve cannot be named.
+var classSecure = map[string]string{
+	ClassLock:           "lock",
+	ClassValve:          "shut",
+	ClassFeedValve:      "",
+	ClassHeater:         "off",
+	ClassPrimaryHeating: "",
+	ClassOven:           "off",
+	ClassPlug:           "off",
+	ClassRelay:          "off",
+	ClassGarageDoor:     "close",
+	ClassDrone:          "return-to-dock",
+	ClassCamera:         "",
+	ClassMicrophone:     "",
+	ClassAlarm:          "",
+	ClassSiren:          "",
+	ClassSensor:         "",
+}
+
+// Nameable reports whether a device of class may be named safe for the
+// secure-direction command secure: the one name its class allows, and
+// none for an unknown or unnamable class.
+func Nameable(class, secure string) bool {
+	want, ok := classSecure[class]
+	return ok && want != "" && secure == want
+}
+
+// Recorder reports whether the device is a camera or a microphone.
+func (d Device) Recorder() bool { return d.Class == ClassCamera || d.Class == ClassMicrophone }
+
+// Port is one TCP or UDP port on a device.
+type Port struct {
+	Proto string `json:"proto"` // ProtoTCP or ProtoUDP
+	Num   uint16 `json:"num"`   // 1 to 65535
+}
+
+const (
+	ProtoTCP = "tcp"
+	ProtoUDP = "udp"
+)
 
 // The NET-1 labels a device can carry; the empty label is not containable.
 const (
@@ -201,6 +283,7 @@ func (d Document) normal() Document {
 	devs := make([]Device, len(d.Devices))
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
+		dev.Control, dev.Stream = ports(dev.Control), ports(dev.Stream)
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -226,6 +309,17 @@ func (d Document) normal() Document {
 	return d
 }
 
+func ports(s []Port) []Port {
+	out := append([]Port{}, s...)
+	slices.SortFunc(out, func(a, b Port) int {
+		if c := strings.Compare(a.Proto, b.Proto); c != 0 {
+			return c
+		}
+		return int(a.Num) - int(b.Num)
+	})
+	return slices.Compact(out)
+}
+
 func sorted(s []string) []string {
 	out := append([]string{}, s...)
 	slices.Sort(out)
@@ -233,8 +327,11 @@ func sorted(s []string) []string {
 }
 
 // check refuses a document with a nameless or duplicate device, a Wi-Fi
-// identity that is not a name, an unknown network or label, a drone reference that is not a hash, a pair, rule or
-// hold naming no device, or an empty window.
+// identity that is not a name, an unknown network, label, class or port, an
+// everyday device with a safety class, a secure command its class cannot be
+// named for, a stream port on a device that is not a camera or microphone, a
+// drone reference that is not a hash, a pair, rule or hold naming no device,
+// or an empty window.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	for i, dev := range d.Devices {
@@ -258,8 +355,22 @@ func (d Document) check() error {
 		if dev.Label != "" && dev.Label != LabelContained && dev.Label != LabelExceptRadio {
 			return bad("device %q label %q", dev.ID, dev.Label)
 		}
-		if dev.Secure != "" && (dev.Everyday || !name(dev.Secure)) {
-			return bad("device %q: a secure command %q needs a safety-list device", dev.ID, dev.Secure)
+		if _, ok := classSecure[dev.Class]; dev.Class != "" && !ok {
+			return bad("device %q class %q", dev.ID, dev.Class)
+		}
+		if dev.Everyday && dev.Class != "" {
+			return bad("device %q: class %q is on the safety list", dev.ID, dev.Class)
+		}
+		if dev.Secure != "" && (dev.Everyday || !Nameable(dev.Class, dev.Secure)) {
+			return bad("device %q: a %q cannot be named safe for %q", dev.ID, dev.Class, dev.Secure)
+		}
+		if len(dev.Stream) > 0 && !dev.Recorder() {
+			return bad("device %q: stream ports need a camera or microphone", dev.ID)
+		}
+		for _, p := range append(slices.Clone(dev.Control), dev.Stream...) {
+			if (p.Proto != ProtoTCP && p.Proto != ProtoUDP) || p.Num == 0 {
+				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
+			}
 		}
 	}
 	if d.Drone != "" && !hash(d.Drone) {
@@ -301,14 +412,15 @@ func hash(s string) bool {
 	return err == nil && strings.ToLower(s) == s
 }
 
-// name is a non-empty token with no space, control character or slash, so
-// it cannot split a serial or a rendered line.
+// name is a non-empty token of valid UTF-8 with no space, slash, control,
+// format (bidi, zero-width, tag), filler or variation selector character, so
+// it cannot split a serial or a rendered line, or show as another (#3901).
 func name(s string) bool {
-	if s == "" || len(s) > 253 {
+	if s == "" || len(s) > 253 || !utf8.ValidString(s) {
 		return false
 	}
 	for _, c := range s {
-		if c <= ' ' || c == 0x7f || c == '/' {
+		if c == ' ' || c == '/' || !unicode.IsPrint(c) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, c) || unicode.Is(unicode.Variation_Selector, c) {
 			return false
 		}
 	}

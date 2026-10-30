@@ -396,7 +396,7 @@
   },
   "broker/voice/ASSUMPTIONS.md": {
     "1a5f3ef8d86e4b3268b92cbf242069010abe821e95f7c7f49fb7c39aa75cbc57": 1,
-    "6a6b1b8c29e900c63e3243e66877977091ba0d1bce5e07b5a2a8117891144764": 1,
+    "ad340f6740ee862bf67b8baec25903e421e797ed7322d15498508ba06f585bb5": 1,
     "fe5b8e07cac8d4e32ec0d4a2ec041b5e421839f041b2171973442e24a2bba8b2": 1
   },
   "decisions/D-114.md": {
@@ -415,12 +415,6 @@
   },
   "guest/openclaw/openclaw.json5": {
     "9a4be47698a0e9a550524a53dd554fe8c796a1c2257660e768ce2ce6d6e1bd78": 1
-  },
-  "image/ASSUMPTIONS.md": {
-    "3875e54ae48ed851a0458fcb9ec0fc903d81f9f6b3e108ca90bcb9842bc196bf": 1,
-    "d4c0d5fdcf82b330fe1b6cbd1148aad1bda1322105674b70c5162d1be1fee4ec": 1,
-    "e0d8c6bbb8fbbd4b2c9876b7d7f783952dea01f0249db13bc5698fdd5f12f779": 1,
-    "f7a85ab39ef8d8ce57fdacc34b150596d8f5296655e9b493dac38c3aa508d2e4": 1
   },
   "image/build.sh": {
     "6af3a1cb90d128d8ed97af623803556244e6cf3e455fd29c10a0f162bf6e736c": 1

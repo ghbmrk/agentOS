@@ -646,6 +646,12 @@ func TestEntryTypesAreClosed(t *testing.T) {
 	if _, err := r.k.Log().Append(0, kernel.TKeyIssued, 1, struct{}{}); !errors.Is(err, kernel.ErrUnknown) {
 		t.Fatalf("a key.issued body from before grant batches: %v", err)
 	}
+	// A pool entry from before windows and the signed lowering (RES-5a).
+	for _, typ := range []string{kernel.TPoolRead, kernel.TPoolReset, kernel.TReserveDown} {
+		if _, err := r.k.Log().Append(0, typ, 1, struct{}{}); !errors.Is(err, kernel.ErrUnknown) {
+			t.Fatalf("a version 1 %s must be refused, not misread: %v", typ, err)
+		}
+	}
 }
 
 // REQ: KRN-8

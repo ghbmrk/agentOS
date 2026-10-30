@@ -83,6 +83,7 @@ type fakeHooks struct {
 	// unavailable: the vault's enrollment was never opened for setup.
 	unavailable bool
 	noTexts     bool            // the box cannot text: BoxNumber answers "", false
+	noNumber    bool            // the SIM reports no number: BoxNumber answers "", true
 	keyErr      error           // ConnectAPIKey's answer when set; nothing is stored
 	deviceErr   error           // StartDeviceCode's answer when set
 	deviceLink  string          // StartDeviceCode's link when set
@@ -104,6 +105,9 @@ func (f *fakeHooks) BoxNumber() (string, bool) {
 	defer f.mu.Unlock()
 	if f.noTexts {
 		return "", false
+	}
+	if f.noNumber {
+		return "", true
 	}
 	return boxNum, true
 }
@@ -819,8 +823,8 @@ func TestAllSetText(t *testing.T) {
 		if n, gsm := modem.Segments(s); !gsm || n > 3 {
 			t.Fatalf("breaks CH-12: %d segments: %q", n, s)
 		}
-		if !strings.HasSuffix(s, "HELP for commands.") || strings.Count(s, "\n") != 4 {
-			t.Fatalf("not three examples and HELP: %q", s)
+		if !strings.HasSuffix(s, "HELP for commands.\n"+CodeLine) || strings.Count(s, "\n") != 5 || strings.Count(s, CodeLine) != 1 {
+			t.Fatalf("not three examples, HELP and the code line once: %q", s)
 		}
 		for _, c := range conn {
 			if !strings.Contains(s, accountExamples[c]) {

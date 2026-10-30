@@ -92,13 +92,24 @@ def git_tree(root, ref):
         size = int(out[i:header_end].split()[2])
         body = out[header_end + 1:header_end + 1 + size]
         i = header_end + 2 + size
-        tree[n] = body.decode(errors="ignore")
+        # The old-core list decodes with "replace" so old_core_dirs refuses an invalid byte rather
+        # than dropping it ("broker/jou\xffrnal" read as broker/journal, #3952). Other files keep
+        # "ignore": a dropped byte can only join a marker, so the ratchet over-counts, never under.
+        tree[n] = body.decode(errors="replace" if n == OLD_CORE else "ignore")
     return tree
 
 
 def old_core_dirs(tree):
-    return [l.strip() for l in tree.get(OLD_CORE, "").splitlines()
-            if l.strip() and not l.startswith("#")]
+    # "\n" only, printable ASCII only: splitlines() also ends a line at "\r", U+2028 and
+    # others, so a break hidden in a comment would add a line (REV-CHK-crlf, #3902).
+    dirs = []
+    for n, l in enumerate(tree.get(OLD_CORE, "").split("\n"), 1):
+        bad = [c for c in l if not " " <= c <= "~"]
+        if bad:
+            raise SystemExit(f"{OLD_CORE}:{n}: character {bad[0]!r} outside printable ASCII")
+        if l.strip() and not l.startswith("#"):
+            dirs.append(l.strip())
+    return dirs
 
 
 def under(path, d):

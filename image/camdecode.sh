@@ -19,6 +19,8 @@
 # start-up references socket, bind and sendto (pthread_create's resolver state); nothing else may.
 # A change to any pinned value here needs a NET-2 review.
 set -eu
+# A go.work in the repo would override broker/go.mod, go.sum and vendor/ (#4007 Security).
+export GOWORK=off
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)
 ROOT=$(realpath -m "$1"); LICENSES=$(realpath -m "$2"); lib=$(realpath -m "$3")
 

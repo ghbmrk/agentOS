@@ -23,7 +23,7 @@ import (
 // REQ: CH-15
 // An agent reply from the evidence outbox, wired by wireOwner as attach
 // wires it, is conversation: in quiet hours and with the hour's texts
-// spent it goes at once behind the agent prefix, and with no owner
+// spent it goes at once with no label, and with no owner
 // channel yet it fails rather than sends. The source check pins that
 // attach wires through wireOwner and that nothing else sets e.notify, so
 // reverting attach to the paced Notify fails here.
@@ -38,7 +38,7 @@ func TestAgentReplyIsConversation(t *testing.T) {
 	ev := &evidence{logf: t.Logf}
 	ev.wireOwner(func() *ownerch.Channel { return r.ch })
 	ev.send("agent", "Your invoice is drafted.")
-	if got := r.sent(); len(got) != 1 || got[0] != ownerch.AgentPrefix+"Your invoice is drafted." {
+	if got := r.sent(); len(got) != 1 || got[0] != "Your invoice is drafted." {
 		t.Fatalf("agent reply in quiet hours past the allowance: %q, want it sent at once", got)
 	}
 	ev.wireOwner(func() *ownerch.Channel { return nil })

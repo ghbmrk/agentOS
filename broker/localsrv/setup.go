@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/boxname"
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/localapi"
 	"github.com/ghbmrk/agentos/broker/sockets"
@@ -92,6 +93,25 @@ var (
 	EnrollPaused = errors.New("enrollment paused")
 )
 
+// finishNames is a finish's box name and owner name in boxname's normal
+// form, and false when either is given and fails the CH-21 name check.
+func finishNames(a localapi.Finish) (name, owner string, ok bool) {
+	if a.OwnerName != "" {
+		if !boxname.Shape(a.OwnerName) {
+			return "", "", false
+		}
+		owner = strings.Join(strings.Fields(a.OwnerName), " ")
+	}
+	if a.Name != "" {
+		n, err := boxname.Check(a.Name, owner)
+		if err != nil {
+			return "", "", false
+		}
+		name = n
+	}
+	return name, owner, true
+}
+
 // EnrollsPerMinute bounds new seeds: each enroll writes one to the vault.
 const EnrollsPerMinute = 6
 
@@ -103,6 +123,11 @@ type SetupRecord struct {
 	Enrolled bool   `json:"enrolled"`
 	Finished bool   `json:"finished"`
 	Owner    string `json:"owner,omitempty"`
+	// Name and OwnerName are the box's name and the owner's own name as
+	// finish took them (CH-21), each "" when the page gave none. They
+	// pass boxname.Check and boxname.Shape.
+	Name      string `json:"name,omitempty"`
+	OwnerName string `json:"owner_name,omitempty"`
 	// Owed maps a provider the vault lists to the owner's private-data
 	// answer that the vault has not confirmed (#1544, CAP-9). It is
 	// written before the vault is asked and cleared once the vault
@@ -341,6 +366,10 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 	if !phoneRe.MatchString(a.Owner) {
 		return nil, errBadArgs
 	}
+	name, ownerName, ok := finishNames(a)
+	if !ok {
+		return nil, errBadArgs
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -377,7 +406,7 @@ func (s *Setup) finish(_ context.Context, _ sockets.Peer, args json.RawMessage) 
 		return nil, errFailed
 	}
 	next := s.rec
-	next.Finished, next.Owner = true, a.Owner
+	next.Finished, next.Owner, next.Name, next.OwnerName = true, a.Owner, name, ownerName
 	if s.cfg.Record.Save(next) != nil {
 		s.mu.Unlock()
 		return nil, errFailed
