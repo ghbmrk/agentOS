@@ -2,8 +2,9 @@ name: mutgate
 # REV-CHK-mut (#3899, briefs/REV-CHK.md): the MUT-tierA gate (tools/mutgate.py, #1814) on every
 # pull request. A PR that adds a `REQ:` marker in a tier-A broker package fails when gremlins
 # finds a LIVED mutant on a line the PR adds there: the tests run that line but do not check it.
-# Gremlins runs only on those packages (`mutgate.py claimed`), one job each; a PR that claims
-# none runs no gremlins and passes. The `mutgate` job is the one result to read.
+# Gremlins runs only on those packages (`mutgate.py claimed`), one job each, and only on the lines
+# the PR adds (`run --git`): the only lines the gate reads. A PR that claims none runs no gremlins
+# and passes. The `mutgate` job is the one result to read.
 on:
   pull_request:
 permissions:
@@ -13,6 +14,7 @@ concurrency:
   cancel-in-progress: true
 env:
   GOTOOLCHAIN: local
+  GOWORK: "off"
 jobs:
   claimed:
     runs-on: ubuntu-latest
@@ -81,10 +83,21 @@ jobs:
         run: |
           [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
           echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      # loops' canary-round test runs tools/canary.py, whose targets run as the runner's first
+      # subordinate id in a user namespace (tools/ASSUMPTIONS.md D13); gremlins' coverage run
+      # needs it as broker-race does. Kept equal to ci.yml's step by tests/test_workflows.py.
+      - name: Subordinate ids for the canary sandbox
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          command -v newuidmap && command -v newgidmap || sudo apt-get install -yq uidmap
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subuid || sudo usermod --add-subuids 100000-165535 "$(id -un)"
+          grep -qE "^($(id -un)|$(id -u)):" /etc/subgid || sudo usermod --add-subgids 100000-165535 "$(id -un)"
       - name: Gremlins on the package
         env:
           PKG: ${{ matrix.pkg }}
-        run: python3 -I tools/mutgate.py run "$PKG" --out mutants
+        run: python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"
       - name: Survivors
         run: python3 -I tools/mutgate.py report mutants
       - name: Gate (MUT-tierA)

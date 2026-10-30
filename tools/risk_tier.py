@@ -132,6 +132,9 @@ TIER_B_BROKER = {
     "machprobe", "quota", "routerule", "skill", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
+# A go.work in the directory a build runs from, or any parent, overrides go.mod, go.sum
+# and broker/vendor (#4007 Security): one at the repo root swaps a broker dependency.
+TIER_A_NAMES = {"go.work", "go.work.sum"}
 # Third-party source compiled into the broker: the code go.sum pins.
 TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # risk_tier itself is A: the lane gate runs the base copy, but the review depth a PR gets
@@ -221,6 +224,8 @@ def tier_of(path):
         return "C", "image/*.md"
     if p in TIER_A_FILES:
         return "A", p
+    if name in TIER_A_NAMES:
+        return "A", name
     for pre in TIER_A_PREFIXES:
         if p.startswith(pre):
             return "A", pre

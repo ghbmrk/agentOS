@@ -1,10 +1,12 @@
 package at
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // Found is one qualified modem on the USB bus.
@@ -86,8 +88,15 @@ func padBusDev(bus, dev string) string {
 	return pad(bus) + "/" + pad(dev)
 }
 
+// readTrim reads a sysfs or procfs attribute, a plain file, refusing a link
+// at p (REV-CHK-links, #3945).
 func readTrim(p string) string {
-	b, err := os.ReadFile(p)
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
 	if err != nil {
 		return ""
 	}

@@ -3,6 +3,7 @@ package backup
 import (
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // Target is where a backup's key-table objects live. Each call is durable
@@ -95,7 +97,7 @@ func (d DirTarget) path(id string, gen uint64) (string, error) {
 }
 
 func (d DirTarget) syncDir() error {
-	f, err := os.Open(d.Dir)
+	f, err := os.OpenFile(d.Dir, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
@@ -139,7 +141,7 @@ func (d DirTarget) GetTable(id string, gen uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(p)
+	b, err := readFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNoTable
 	}
@@ -182,3 +184,14 @@ func (d DirTarget) Tables(id string) ([]uint64, error) {
 }
 
 func (DirTarget) AppendOnly() bool { return false }
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): a key
+// table is never a link, so one in the target directory was planted.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
