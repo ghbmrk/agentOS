@@ -111,7 +111,7 @@ func TestRequalifyFailures(t *testing.T) {
 			s.Unadmitted = 1
 			r.cand[SuiteReplay] = s
 		}, SuiteReplay},
-		{"security case fails", func(r *fakeRunner) { r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 39) }, SuiteSecurity},
+		{"security case fails", func(r *fakeRunner) { r.cand[SuiteSecurity] = sc(SuiteSecurity, 40, 37) }, SuiteSecurity},
 		{"security suite empty", func(r *fakeRunner) {
 			r.cand[SuiteSecurity], r.base[SuiteSecurity] = sc(SuiteSecurity, 0, 0), sc(SuiteSecurity, 0, 0)
 		}, SuiteSecurity},
@@ -129,6 +129,9 @@ func TestRequalifyFailures(t *testing.T) {
 			got, err := requalifier(t, f, r).Requalify(context.Background(), v)
 			if err != nil || got.Passed || got.Reason != c.reason || got.Detail == "" {
 				t.Fatalf("got %+v, %v; want failed on %s with a detail", got, err, c.reason)
+			}
+			if c.name == "security case fails" && got.Detail != "3 security cases fail" {
+				t.Fatalf("detail %q, want the failing count", got.Detail)
 			}
 		})
 	}

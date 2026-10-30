@@ -65,10 +65,12 @@ type Requalifier struct {
 }
 
 // requalState is the saved record: the security suite's floor (it only
-// grows, HLD-3) and the verdict for each candidate.
+// grows, HLD-3) and the verdict for each candidate against Base, the
+// installed release.
 type requalState struct {
 	Floor    int                `json:"security_floor"`
-	Verdicts map[string]Verdict `json:"verdicts,omitempty"`
+	Base     Ref                `json:"base"`
+	Verdicts map[string]Verdict `json:"verdicts"`
 }
 
 // NewRequalifier keeps its record at path. A nil runner is allowed: every
@@ -107,8 +109,12 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 	if err != nil {
 		return Verdict{}, err
 	}
+	if st.Base != out.Base {
+		// Verdicts against another installed release are stale.
+		st = requalState{Floor: st.Floor, Base: out.Base, Verdicts: map[string]Verdict{}}
+	}
 	key := refKey(out.Ref)
-	if old, ok := st.Verdicts[key]; ok && old.Base == out.Base {
+	if old, ok := st.Verdicts[key]; ok {
 		return old, nil
 	}
 	for _, s := range suites {
@@ -130,15 +136,6 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		}
 	}
 	out.Passed = out.Reason == ""
-	// Verdicts against another installed release are stale.
-	for k, old := range st.Verdicts {
-		if old.Base != out.Base {
-			delete(st.Verdicts, k)
-		}
-	}
-	if st.Verdicts == nil {
-		st.Verdicts = map[string]Verdict{}
-	}
 	st.Verdicts[key] = out
 	if err := q.save(st); err != nil {
 		return Verdict{}, err
@@ -186,7 +183,7 @@ func judge(cand, base Score, floor int) string {
 }
 
 func (q *Requalifier) load() (requalState, error) {
-	var st requalState
+	st := requalState{Verdicts: map[string]Verdict{}}
 	b, err := readFile(q.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return st, nil
