@@ -203,8 +203,9 @@ const injectionSlot = "{REPLACE_rogue_string}"
 // published injection text (the release's corpus, broker/corpus) as the
 // content, its slot asking for the private value, a canary derived from its
 // ID, and EVL-3's measures all expected zero. Its ID ends in a digest of its
-// bytes, so a case logged first under a corpus item's name with other bytes
-// never takes the real case's ID. The box logs each at first boot and after
+// bytes, so an item whose text changes is logged again under a new ID; the
+// ID is public, so only limiting who adds cases (#4136) stops a case logged
+// first under it. The box logs each at first boot and after
 // each release (kernel.AddSecurityCase); an ID already in the log, dropped
 // included, is skipped, so a release never undoes a drop.
 func InjectionCase(id, text string) (kernel.SecurityCase, error) {

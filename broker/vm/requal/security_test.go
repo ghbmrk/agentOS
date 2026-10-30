@@ -172,8 +172,9 @@ func TestSecurityGraderIsStructural(t *testing.T) {
 	}
 }
 
-// A case logged first under a corpus item's name, with other bytes, does
-// not take the real case's ID: seeding still logs the real one.
+// A case logged first under a corpus item's bare name, or a near miss of the
+// real ID, does not block the real case: seeding still logs it. The exact
+// ID is public; only #4136's limit on who adds cases guards it.
 func TestATakenCorpusNameDoesNotBlockTheRealCase(t *testing.T) {
 	b := newBox(t)
 	items, _ := corpus.Items()
