@@ -272,7 +272,7 @@ func TestPoolRefusesAtTheReserveUntilReset(t *testing.T) {
 // gives the window's own declared length first (plan.Window.Every); the
 // kernel's fallback is PoolWindowMS. Another window keeps its own reset.
 func TestAFullWindowWithoutResetFallsBackToItsLength(t *testing.T) {
-	for name, resetAt := range map[string]int64{"none": 0, "past": 50} {
+	for name, resetAt := range map[string]int64{"none": 0, "past": 50, "now": 100} {
 		r := newRig(t)
 		must(t, r.k.ReadPool(100, "p", []kernel.WindowReading{{Window: "5h", Used: 1000, ResetAt: resetAt}, {Window: "7d", Used: 10, ResetAt: 1 << 40}}))
 		if w := r.k.State().Pools["p"].Windows; w["5h"].ResetAt != 100+kernel.PoolWindowMS || w["7d"].ResetAt != 1<<40 {
@@ -760,6 +760,12 @@ func TestABigLoweringNeedsTwoPasskeysOneAnAnchor(t *testing.T) {
 	}
 	must(t, r.k.Reserve(4, "q", 300))
 	must(t, r.k.Reserve(5, "q", 0, lower(r, "q", 0, phone))) // 700 to 1000: one passkey
+	must(t, r.k.Reserve(8, "a", 600))
+	if err := r.k.Reserve(9, "a", 100, lower(r, "a", 100, phone)); !errors.Is(err, kernel.ErrNeedsCosign) {
+		t.Fatalf("600 to 100 takes 400 to 900: %v, want ErrNeedsCosign", err)
+	}
+	must(t, r.k.Reserve(10, "b", 500))
+	must(t, r.k.Reserve(11, "b", 400, lower(r, "b", 400, phone))) // 500 to 600: one passkey
 	must(t, r.k.Reserve(6, "w", 1000))
 	if err := r.k.Reserve(7, "w", 990, lower(r, "w", 990, phone)); !errors.Is(err, kernel.ErrNeedsCosign) {
 		t.Fatalf("any lowering from 1000 is big: %v", err)
@@ -780,12 +786,16 @@ func TestSpentSumsRoutesSinceAndPrunesPastTwoDays(t *testing.T) {
 	if got := r.k.State().Spent(0); got["api"] != 13 {
 		t.Fatalf("spent in the last two days: %v", got)
 	}
+	must(t, r.meter(2*day+1, "t1", "plan", 1, "provider"))
+	if got := r.k.State().Spent(0); got["api"] != 13 {
+		t.Fatalf("spend exactly two days old is kept: %v", got)
+	}
 	must(t, r.meter(2*day+10, "t1", "api", 7, "provider"))
 	for _, boot := range []bool{false, true} {
 		if boot {
 			r.boot(2*day + 11)
 		}
-		if got := r.k.State().Spent(0); got["api"] != 10 || got["plan"] != 5 {
+		if got := r.k.State().Spent(0); got["api"] != 10 || got["plan"] != 6 {
 			t.Fatalf("boot %v: spend older than two days is pruned: %v", boot, got)
 		}
 	}
@@ -797,8 +807,8 @@ func TestSpentSumsRoutesSinceAndPrunesPastTwoDays(t *testing.T) {
 func TestAnUnsignedLoweringInTheLogIsNotFolded(t *testing.T) {
 	r := newRig(t)
 	must(t, r.k.Reserve(1, "p", 300))
-	for _, cos := range [][]key.Cosign{nil, {lower(r, "q", 0, r.owner)}} {
-		body := map[string]any{"pool": "p", "reserve": 0, "cosigns": cos}
+	for to, cos := range map[int64][]key.Cosign{0: nil, 1: {lower(r, "q", 1, r.owner)}, 300: {lower(r, "p", 300, r.owner)}} {
+		body := map[string]any{"pool": "p", "reserve": to, "cosigns": cos}
 		_, err := r.k.Log().Append(2, kernel.TReserveDown, 2, body)
 		must(t, err)
 	}
@@ -806,5 +816,36 @@ func TestAnUnsignedLoweringInTheLogIsNotFolded(t *testing.T) {
 	r.boot(3)
 	if got := r.k.State().Pools["p"]; got.Reserve != 300 || got.Lowering != nil || got.Changes != 1 {
 		t.Fatalf("an unsigned lowering was folded: %+v", got)
+	}
+}
+
+// Two windows due at once both reset, each logged (RES-5, KRN-7).
+func TestWindowsDueTogetherEachReset(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.Reserve(1, "p", 100))
+	must(t, r.k.ReadPool(2, "p", []kernel.WindowReading{{Window: "5h", Used: 950, ResetAt: 1_000}, {Window: "7d", Used: 950, ResetAt: 1_000}}))
+	if !r.k.State().WindowDue(1_000, "p", "7d") || r.k.State().WindowDue(999, "p", "7d") {
+		t.Fatal("a window is due from its reset time")
+	}
+	if rf := r.k.AdmitPool(1_000, "p"); rf != nil {
+		t.Fatalf("both windows reset: %v", rf)
+	}
+	es := r.k.Log().Entries()
+	if a, b := es[len(es)-2], es[len(es)-1]; a.Type != kernel.TPoolReset || b.Type != kernel.TPoolReset {
+		t.Fatalf("each reset is logged: %s %s", a.Type, b.Type)
+	}
+}
+
+// A full window written past the kernel with no reset time is never due: an
+// entry the kernel did not normalize reopens nothing (KRN-1, KRN-7).
+func TestAFullWindowInTheLogWithNoResetTimeIsNeverDue(t *testing.T) {
+	r := newRig(t)
+	body := map[string]any{"pool": "p", "windows": []map[string]any{{"window": "5h", "used": 1000, "reset_at": 0}}}
+	_, err := r.k.Log().Append(1, kernel.TPoolRead, 2, body)
+	must(t, err)
+	must(t, r.k.Log().Anchor())
+	r.boot(2)
+	if r.k.State().WindowDue(1<<40, "p", "5h") || r.k.State().PoolOpen(1<<40, "p") {
+		t.Fatal("a full window with no reset time is due")
 	}
 }

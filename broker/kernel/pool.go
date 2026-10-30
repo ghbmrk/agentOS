@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -157,10 +158,8 @@ func (s *State) Spent(since int64) map[string]int64 {
 
 func (s *State) spend(at int64, route string, amount int64) {
 	s.spent = append(s.spent, spentRec{at, route, amount})
-	i := 0
-	for i < len(s.spent) && s.spent[i].At < at-SpentKeepMS {
-		i++
-	}
+	// The record just appended is inside the span, so i is never -1.
+	i := slices.IndexFunc(s.spent, func(r spentRec) bool { return r.At >= at-SpentKeepMS })
 	s.spent = s.spent[i:]
 }
 
