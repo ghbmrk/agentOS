@@ -168,6 +168,8 @@ allow broker/claim/
 allow broker/clock/
 allow broker/control/
 allow broker/daemon/
+# The decoy table and matcher (DECOY-a #3762), which the kernel links from DECOY-b (#3763, D-232).
+allow broker/decoy/
 allow broker/durable/
 allow broker/edgelink/
 allow broker/egress/
