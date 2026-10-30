@@ -10,8 +10,10 @@ survives.
                                              the tier-A packages where the diff BASE...HEAD adds a
                                              REQ marker: the only ones the gate can fail, so the
                                              only ones CI runs gremlins on (REV-CHK-mut, #3899)
-  tools/mutgate.py run [PKG...] [--out DIR]  run gremlins per package (default: all tier A),
-                                             one JSON file per package in DIR (default mutants/)
+  tools/mutgate.py run [PKG...] [--out DIR] [--git BASE]
+                                             run gremlins per package (default: all tier A),
+                                             one JSON file per package in DIR (default mutants/);
+                                             with --git, only on lines the diff BASE...HEAD adds
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD]
                                              exit 1 if the diff BASE...HEAD adds a REQ marker
@@ -21,10 +23,14 @@ The gate's claim: a diff that adds `REQ: ID` to a file under broker/<pkg>/ says 
 tests cover ID. A LIVED mutant on a line that diff added to a non-test .go file in the same
 package is code those tests run (gremlins mutates only covered code) but do not check. Not
 covered mutants are not failures here; gremlins' coverage run is the only judge of "covered".
+The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
+added lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins skipped a
+mutant on an added line, so a diff gremlins reads differently cannot pass the gate empty.
 Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -131,15 +137,37 @@ def violations(diff_text, live):
     return found
 
 
+# gremlins -D runs `git diff --merge-base BASE` in its own cwd and matches the file names to
+# mutant paths relative to the package directory, one range per hunk from its first added line.
+# Run from the package directory, relative names and no context lines make both exact.
+DIFF_GIT_CONFIG = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "diff.relative", "GIT_CONFIG_VALUE_0": "true",
+                   "GIT_CONFIG_KEY_1": "diff.context", "GIT_CONFIG_VALUE_1": "0"}
+
+
+def skipped_added(data, pkg, added):
+    """Added lines of non-test files directly in broker/<pkg>/ where gremlins skipped a mutant, sorted."""
+    return sorted(
+        (f["file_name"], m["line"])
+        for f in data["files"] if not f["file_name"].endswith("_test.go")
+        for m in f.get("mutations") or []
+        if m["status"] == "SKIPPED" and m["line"] in added.get(f"broker/{pkg}/{f['file_name']}", ())
+    )
+
+
 def cmd_run(args):
     pkgs = args.pkg or tier_a_packages()
     # Absolute: gremlins runs in broker/, so a relative -o would name a directory there (#3947).
     out = pathlib.Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    added = added_lines(broker_diff(args.git, "HEAD"))[0] if args.git else None
     bad = 0
     for pkg in pkgs:
         dest = out / (pkg.replace("/", "__") + ".json")
-        r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "-o", str(dest)], cwd=BROKER)
+        if args.git:
+            r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", args.git, "-o", str(dest)],
+                               cwd=BROKER / pkg, env={**os.environ, **DIFF_GIT_CONFIG})
+        else:
+            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "-o", str(dest)], cwd=BROKER)
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
@@ -147,7 +175,23 @@ def cmd_run(args):
             # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
             print(f"mutgate: {dest} is not gremlins' files[].mutations[] shape", file=sys.stderr)
             bad += 1
+        elif unknown := foreign_names(json.loads(dest.read_text()), BROKER / pkg):
+            # violations() joins broker/<pkg>/<file_name>; another name format would match no line (#3956).
+            print(f"mutgate: {dest} names LIVED mutants in {unknown}, not files in broker/{pkg}/", file=sys.stderr)
+            bad += 1
+        elif added is not None and (skipped := skipped_added(json.loads(dest.read_text()), pkg, added)):
+            # The gate reads these lines; a skip there means gremlins' diff is not this one.
+            print(f"mutgate: gremlins skipped mutants on lines this diff adds in broker/{pkg}/: {skipped}",
+                  file=sys.stderr)
+            bad += 1
     return 1 if bad else 0
+
+
+def foreign_names(data, pkg_dir):
+    """file_names carrying a LIVED mutant that are not a file directly in pkg_dir, sorted."""
+    names = {f["file_name"] for f in data["files"]
+             if any(m["status"] == "LIVED" for m in f.get("mutations") or [])}
+    return sorted(n for n in names if "/" in n or "\\" in n or not (pkg_dir / n).is_file())
 
 
 def shape_ok(data):
@@ -174,8 +218,10 @@ def cmd_report(args):
 
 def broker_diff(base, head):
     return subprocess.run(
-        ["git", "diff", "-U0", f"{base}...{head}", "--", "broker"],
-        cwd=ROOT, capture_output=True, text=True, check=True,
+        # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
+        ["git", "diff", "-U0", "--text", f"{base}...{head}", "--", "broker"],
+        # errors="replace": with --text a binary file's bytes are diff lines, and need not be UTF-8.
+        cwd=ROOT, capture_output=True, text=True, errors="replace", check=True,
     ).stdout
 
 
@@ -205,6 +251,7 @@ def main(argv=None):
     p = sub.add_parser("run")
     p.add_argument("pkg", nargs="*")
     p.add_argument("--out", default="mutants")
+    p.add_argument("--git", metavar="BASE")
     p = sub.add_parser("report")
     p.add_argument("dir")
     p = sub.add_parser("gate")

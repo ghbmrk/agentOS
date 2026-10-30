@@ -47,6 +47,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -219,7 +220,7 @@ func Open(cfg Config) (*Meter, error) {
 	if m.slot < 1 {
 		m.slot = 1
 	}
-	b, err := os.ReadFile(cfg.Path)
+	b, err := readFile(cfg.Path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
@@ -969,4 +970,15 @@ func WithGoal(ctx context.Context, goal string) context.Context {
 func GoalFrom(ctx context.Context) string {
 	g, _ := ctx.Value(goalKey{}).(string)
 	return g
+}
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
+// meter state file is never a link, so one there was planted.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

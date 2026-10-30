@@ -36,11 +36,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/durable"
@@ -830,7 +832,7 @@ func (g *Guard) load() {
 	if g.cfg.StatePath == "" {
 		return
 	}
-	b, err := os.ReadFile(g.cfg.StatePath)
+	b, err := readFile(g.cfg.StatePath)
 	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
@@ -960,7 +962,7 @@ func (g *Guard) startLocked() time.Time { return g.cfg.Now().Add(-g.cfg.Elapsed(
 // learned or no readable file; then the clock is left as the kernel set it.
 // The estimate stays unverified: the guard's floor still bounds it.
 func BootEstimate(statePath string, rtc time.Time, hostID string) (time.Time, bool) {
-	b, err := os.ReadFile(statePath)
+	b, err := readFile(statePath)
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -972,4 +974,16 @@ func BootEstimate(statePath string, rtc time.Time, hostID string) (time.Time, bo
 		return time.Time{}, false // learned on another PC, or this one unnamed (L3 on #177)
 	}
 	return rtc.Add(-v.Offset), true
+}
+
+// readFile is os.ReadFile refusing a link at p (REV-CHK-links, #3945): the
+// state file is never a link, so one there was planted, and the sysfs and
+// procfs files RTC, HostID and bootID read are plain files.
+func readFile(p string) ([]byte, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
 }

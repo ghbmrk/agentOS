@@ -572,7 +572,7 @@ func Put(dst, src View, rel string) error {
 		if err := os.Lchown(p, int(e.Uid), int(e.Gid)); err != nil {
 			return err
 		}
-		if err := os.Chmod(p, e.Mode); err != nil {
+		if err := chmod(p, e.Mode); err != nil {
 			return err
 		}
 		syncGuestXattrs(filepath.Join(from, rel), p)
@@ -675,7 +675,7 @@ func copyObj(src, dst string, links map[[2]uint64]string) error {
 	if err := os.Lchown(dst, int(st.Uid), int(st.Gid)); err != nil {
 		return err
 	}
-	if err := os.Chmod(dst, fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)); err != nil {
+	if err := chmod(dst, fi.Mode()&(fs.ModePerm|fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky)); err != nil {
 		return err
 	}
 	if err := copyXattrs(src, dst); err != nil {
@@ -684,6 +684,19 @@ func copyObj(src, dst string, links map[[2]uint64]string) error {
 	at := syscall.NsecToTimespec(syscall.TimespecToNsec(st.Atim))
 	mt := syscall.NsecToTimespec(syscall.TimespecToNsec(st.Mtim))
 	return syscall.UtimesNano(dst, []syscall.Timespec{at, mt})
+}
+
+// chmod sets the mode of the file or directory at p through a handle
+// opened without following a link there, so a link the guest left in a
+// layer is refused (ELOOP) rather than its target's mode changed
+// (REV-CHK-links, #3943).
+func chmod(p string, mode fs.FileMode) error {
+	f, err := os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Chmod(mode)
 }
 
 const ficlone = 0x40049409 // FICLONE ioctl: share extents (reflink)

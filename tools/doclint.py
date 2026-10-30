@@ -109,7 +109,10 @@ def acceptance_named(text, line):
 
 
 def brief_baseline(root):
-    f = root / "tools" / "brief_acceptance_baseline.txt"
+    return baseline_names(root / "tools" / "brief_acceptance_baseline.txt")
+
+
+def baseline_names(f):
     if not f.is_file():
         return set()
     # Bytes and "\n" only: read_text() and split() also break at "\r", U+2028 and others, so a
@@ -233,7 +236,7 @@ def lint(root):
 
 def baseline_growth(root, base_file):
     """Baseline entries the PR added to the list in base_file (the base branch's copy)."""
-    base = set(pathlib.Path(base_file).read_text().split()) if pathlib.Path(base_file).is_file() else set()
+    base = baseline_names(pathlib.Path(base_file))  # the same refusal as the head copy (#3952)
     for name in sorted(brief_baseline(pathlib.Path(root)) - base):
         yield f"tools/brief_acceptance_baseline.txt: {name} is new in the baseline; the baseline only shrinks, so name the brief's acceptance tests instead"
 
