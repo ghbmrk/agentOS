@@ -716,3 +716,63 @@ func TestRepeatNearExpiryLastsFromItsPointer(t *testing.T) {
 		t.Fatal("kept past keepFor from its latest pointer")
 	}
 }
+
+// TestHeldCodeExpiresAtTheHour (CODEH-4): a code the owner channel kept is
+// readable until the owner-set hour; from then the page shows the item
+// with its other text readable and the code expired, the swept file no
+// longer holds the code, and the item stays until its kept days end. A
+// key kept beside it keeps its days (CH-19, #906).
+func TestHeldCodeExpiresAtTheHour(t *testing.T) {
+	const code = "482913"
+	text := "Hi, your Acme verification code is " + code + ". Ask me if it fails."
+	for _, hours := range []int{1, 24} {
+		r := newEvRig(t)
+		r.ev.kept.codeFor, _ = codeFor(hours)
+		if err := r.ev.kept.Keep(owner.KeptOneTime, text); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.ev.kept.Keep(owner.KeptSecret, "key AKIACANARY0000000000"); err != nil {
+			t.Fatal(err)
+		}
+		start := r.now
+		r.now = start.Add(time.Duration(hours)*time.Hour - time.Second)
+		if h := r.ev.kept.held(); h.Items[1].Text != text || h.Items[1].CodeExpired {
+			t.Fatalf("%dh: before the hour %+v", hours, h.Items[1])
+		}
+		r.now = start.Add(time.Duration(hours) * time.Hour)
+		h := r.ev.kept.held()
+		want := "Hi, your Acme verification code is " + owner.ExpiredCode + ". Ask me if it fails."
+		if it := h.Items[1]; it.Text != want || !it.CodeExpired || it.Expired || it.Kind != localapi.HeldOneTime {
+			t.Fatalf("%dh: at the hour %+v", hours, it)
+		}
+		if it := h.Items[0]; it.Text != "key AKIACANARY0000000000" || it.CodeExpired {
+			t.Fatalf("%dh: the key went with the code: %+v", hours, it)
+		}
+		r.ev.kept.sweep()
+		if raw, _ := r.store.Load(); strings.Contains(string(raw), code) || !strings.Contains(string(raw), "Ask me if it fails.") {
+			t.Fatalf("%dh: swept file %s", hours, raw)
+		}
+		r.now = start.Add(defaultKeepFor - time.Second)
+		if l := r.ev.kept.list(); len(l) != 2 || l[0].Expired || l[0].Text != want {
+			t.Fatalf("%dh: the item did not keep its days: %+v", hours, l)
+		}
+	}
+}
+
+// TestCodeHoursBound (CODEH-5): -code-hours takes 1 to 24 and defaults to
+// 1; anything else is refused (CH-19, #906).
+func TestCodeHoursBound(t *testing.T) {
+	for h, ok := range map[int]bool{-1: false, 0: false, 1: true, 12: true, 24: true, 25: false} {
+		d, err := codeFor(h)
+		if (err == nil) != ok || ok && d != time.Duration(h)*time.Hour {
+			t.Errorf("codeFor(%d) = %v, %v", h, d, err)
+		}
+	}
+	r := newEvRig(t)
+	if err := r.ev.kept.Keep(owner.KeptOneTime, "code 482913"); err != nil {
+		t.Fatal(err)
+	}
+	if l := r.ev.kept.list(); l[0].CodeUntil != r.now.Add(time.Hour) || defaultCodeFor != time.Hour {
+		t.Fatalf("default code hours: %+v", l[0])
+	}
+}

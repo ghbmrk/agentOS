@@ -62,3 +62,23 @@ func TestHeldPageEmptyAndUnreachable(t *testing.T) {
 		t.Fatalf("empty:\n%s", p)
 	}
 }
+
+// TestHeldPageSaysCodeExpired (CODEH-6): a held item whose code has
+// expired is still shown, its other text readable, and says beside its
+// kind that the code has expired; one whose code is live does not
+// (CH-19, #906).
+func TestHeldPageSaysCodeExpired(t *testing.T) {
+	a := newApprovalRig(t)
+	at := time.Date(2026, 10, 3, 9, 30, 0, 0, time.Local)
+	list := localapi.HeldList{Items: []localapi.HeldItem{
+		{ID: "b1", Kind: localapi.HeldOneTime, At: at.Add(time.Hour), Text: "Your Acme code is CANARY-live"},
+		{ID: "b0", Kind: localapi.HeldOneTime, At: at, Text: "Your Acme code is [expired]. Sign in soon.", CodeExpired: true},
+	}}
+	a.srv.SetOwner(a.pageWith(a.ch, localsrv.Config{Held: func() localapi.HeldList { return list }}))
+	a.signIn()
+	p := a.get("/held/")
+	if strings.Count(p, "Held back: it had a code in it") != 2 || strings.Count(p, "the code has expired") != 1 ||
+		!strings.Contains(p, "Your Acme code is [expired]. Sign in soon.") || !strings.Contains(p, "CANARY-live") {
+		t.Fatalf("page:\n%s", p)
+	}
+}

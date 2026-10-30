@@ -37,7 +37,8 @@ func (k *recKeeper) Keep(kind, text string) error {
 var heldCases = []struct {
 	name, text, kept, kind, pointer, notKept string
 }{
-	{"secret", "Your Acme verification\x07 code is 482913", "Your Acme verification code is 482913", KeptSecret, HiddenPointer, Hidden},
+	{"secret", "Your Acme key\x07 is AKIACANARY0000000000", "Your Acme key is AKIACANARY0000000000", KeptSecret, HiddenPointer, Hidden},
+	{"onetime", "Your Acme verification\x07 code is 482913", "Your Acme verification code is 482913", KeptOneTime, CodePointer("a code of 6 digits", fromAgent), Hidden},
 	{"code", "I fixed the code‮ you asked about.", "I fixed the code you asked about.", KeptCode, HeldCodePointer, HeldCode},
 }
 
@@ -72,7 +73,8 @@ func TestHeldTextIsKeptBeforePointer(t *testing.T) {
 }
 
 // TestBrokerTextIsKeptBeforePointer (HELD-1): the channel's own Post
-// keeps a secret-shaped text before pointing to it too (CH-12).
+// keeps a secret-shaped text before pointing to it too (CH-12), and a
+// code's pointer names the broker as its source (CH-19, #906).
 func TestBrokerTextIsKeptBeforePointer(t *testing.T) {
 	r := pacedRig(t, quiet22to7(), 12, 0)
 	k := &recKeeper{phone: r.phone}
@@ -80,7 +82,7 @@ func TestBrokerTextIsKeptBeforePointer(t *testing.T) {
 	if err := r.ch.Post(ClassUpdate, "Your Acme verification code is 482913"); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.sentTexts(); len(got) != 1 || got[0] != HiddenPointer || len(k.kinds) != 1 || k.kinds[0] != KeptSecret || k.sent[0] != 0 {
+	if got := r.sentTexts(); len(got) != 1 || got[0] != CodePointer("a code of 6 digits", fromNotice) || len(k.kinds) != 1 || k.kinds[0] != KeptOneTime || k.sent[0] != 0 {
 		t.Fatalf("sent %q, kept %q", got, k.kinds)
 	}
 }
@@ -138,14 +140,18 @@ func TestHoldLogCarriesNoText(t *testing.T) {
 // text is one GSM-7 segment, goes without the agent prefix, and only the
 // pointers name the page.
 func TestPointersAreOneTextAndNotHeldAgain(t *testing.T) {
-	for _, s := range []string{Hidden, HiddenPointer, HeldCode, HeldCodePointer} {
+	stands := []string{Hidden, HiddenPointer, HeldCode, HeldCodePointer}
+	for p := range codePointers {
+		stands = append(stands, p)
+	}
+	for _, s := range stands {
 		if n, gsm := modem.Segments(s); !gsm || n != 1 {
 			t.Fatalf("%q is %d segments (GSM-7 %v)", s, n, gsm)
 		}
 		if got := agentText(s); got != s {
 			t.Fatalf("agentText(%q) = %q", s, got)
 		}
-		pointer := s == HiddenPointer || s == HeldCodePointer
+		pointer := s == HiddenPointer || s == HeldCodePointer || codePointers[s]
 		// CH-12: a not-kept text says what the owner can do.
 		if !pointer && !strings.HasSuffix(s, "Ask me to put it another way.") {
 			t.Fatalf("%q gives no next step", s)
