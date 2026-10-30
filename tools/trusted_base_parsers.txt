@@ -17,6 +17,9 @@ inert  github.com/ghbmrk/agentos/broker/accel -- reads the host's own device fil
 inert  github.com/ghbmrk/agentos/broker/admission -- in-process admission arithmetic
 parser github.com/ghbmrk/agentos/broker/backup -- backup objects and key tables read back from a backup target
 inert  github.com/ghbmrk/agentos/broker/budget -- declares and applies cgroup budgets
+inert  github.com/ghbmrk/agentos/broker/decoy -- decodes only the table the kernel itself logged or sealed (KRN-12)
+inert  github.com/ghbmrk/agentos/broker/decoy/match -- matches fixed byte forms and addresses; builds no structure
+inert  github.com/ghbmrk/agentos/broker/kernel/ipform -- reads fixed byte positions of one address; builds no structure
 parser github.com/ghbmrk/agentos/broker/camwire -- frames, settings bundles and image manifests from a camera node or the enforcer, and the owner's passkey assertions
 parser github.com/ghbmrk/agentos/broker/clerk/camera -- frame headers and status from camera nodes, and their TLS handshakes; agentos-camdecode runs in the sandbox
 parser github.com/ghbmrk/agentos/broker/clerk/homekit -- TLV8, encrypted session frames, HTTP and EVENT/1.0 responses and /accessories and /characteristics JSON from HomeKit accessories (DEV-homekit a, b1)
