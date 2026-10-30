@@ -39,6 +39,11 @@
 // starts again. It never runs over a store, a log, or another store's locked
 // pins on this TPM: it refuses with fixed words and changes nothing.
 //
+// -codes is setup's approval-code step before the Owner Card, and
+// -code-seed-file the confirmed seed it staged, which enrollment refuses to
+// start without and keeps in the store for the unlock step to hand the
+// checker (CH-4, MIG-4-exit-c2; codes.go).
+//
 // -rotate re-seals the tpm slot under a new policy key, re-signing the boot
 // paths the slot was enrolled with (never this boot's PCRs, which the unlock
 // step capped), and rewrites the pins (ASSUMPTIONS STO-2c-b); -delete frees a store's NV indexes and removes it.
@@ -101,6 +106,9 @@ func main() {
 	if err == nil && c.takeFactors {
 		os.Exit(takeFactorsMain(c, os.Stdin, os.Stdout, os.Stderr))
 	}
+	if err == nil && c.codes {
+		os.Exit(codesMain(c, os.Stdin, os.Stdout, os.Stderr, time.Now()))
+	}
 	if err == nil && c.stagePageCA {
 		err = stagePageCA(c.pageCAFile, c.pageCACert, c.built)
 	} else if err == nil {
@@ -147,6 +155,10 @@ type config struct {
 	rotate, delete                   bool
 	rotateRecovery                   bool
 	stagePageCA, takeFactors         bool
+	// codes is setup's approval-code step (codes.go); codeSeed is the
+	// staged seed enrollment keeps, "" for none.
+	codes    bool
+	codeSeed string
 	// pageCAFile is the staged page authority (-stage-page-ca writes it,
 	// enrollment stores it), "" for enrollment to make its own;
 	// pageCACert is its published certificate. setupDir is where
@@ -190,7 +202,9 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&c.takeFactors, "take-factors", false, "take the confirmed Owner Card's factors: one request on stdin, one word on stdout")
 	fs.StringVar(&c.pageCAFile, "page-ca-file", "", "the staged page authority, a root-only file")
 	fs.StringVar(&c.pageCACert, "page-ca-cert", "", "the staged page authority's published certificate")
-	fs.StringVar(&c.setupDir, "setup-dir", "", "the directory -take-factors writes the Owner Card's factors in")
+	fs.StringVar(&c.setupDir, "setup-dir", "", "the directory -take-factors writes the Owner Card's factors in, and -codes the staged code seed")
+	fs.BoolVar(&c.codes, "codes", false, "setup's approval codes: one request on stdin, one answer on stdout")
+	fs.StringVar(&c.codeSeed, "code-seed-file", "", "the confirmed staged code seed, which I keep in the store and remove")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -205,7 +219,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		}
 	}
 	modes := 0
-	for _, m := range []bool{c.rotate, c.delete, c.rotateRecovery, c.stagePageCA, c.takeFactors} {
+	for _, m := range []bool{c.rotate, c.delete, c.rotateRecovery, c.stagePageCA, c.takeFactors, c.codes} {
 		if m {
 			modes++
 		}
@@ -214,7 +228,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	case fs.NArg() != 0:
 		return c, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	case modes > 1:
-		return c, errors.New("-rotate, -rotate-recovery, -delete, -stage-page-ca and -take-factors are separate runs")
+		return c, errors.New("-rotate, -rotate-recovery, -delete, -stage-page-ca, -take-factors and -codes are separate runs")
 	case c.stagePageCA:
 		if !filepath.IsAbs(c.pageCAFile) || !filepath.IsAbs(c.pageCACert) {
 			return c, errors.New("-stage-page-ca needs absolute -page-ca-file and -page-ca-cert")
@@ -224,7 +238,9 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("an absolute -state is required")
 	case c.takeFactors && (!filepath.IsAbs(c.setupDir) || !filepath.IsAbs(c.pageCACert)):
 		return c, errors.New("-take-factors needs absolute -setup-dir and -page-ca-cert")
-	case c.rotate || c.delete || c.rotateRecovery || c.takeFactors:
+	case c.codes && !filepath.IsAbs(c.setupDir):
+		return c, errors.New("-codes needs an absolute -setup-dir")
+	case c.rotate || c.delete || c.rotateRecovery || c.takeFactors || c.codes:
 	case !filepath.IsAbs(c.anchorDir) || !filepath.IsAbs(c.log):
 		return c, errors.New("absolute -anchor-dir and -log are required")
 	case c.kernelUID <= 0 || c.kernelGID <= 0:
@@ -233,6 +249,8 @@ func parse(args []string, stderr io.Writer) (config, error) {
 		return c, errors.New("-passphrase-file and -recovery-file are required: a store never has only its tpm slot")
 	case c.firstEdge != "" && !filepath.IsAbs(c.firstEdge):
 		return c, errors.New("-first-edge must be absolute")
+	case c.codeSeed != "" && !filepath.IsAbs(c.codeSeed):
+		return c, errors.New("-code-seed-file must be absolute")
 	case (c.pageCAFile == "") != (c.pageCACert == ""),
 		c.pageCAFile != "" && (!filepath.IsAbs(c.pageCAFile) || !filepath.IsAbs(c.pageCACert)):
 		return c, errors.New("-page-ca-file and -page-ca-cert go together, both absolute")
@@ -326,6 +344,15 @@ func enroll(c config, t transport.TPM) error {
 		}
 		defer clear(pca)
 	}
+	// So does the confirmed code seed (§12.1 step 5 before the card).
+	var seed handoff.CodeSeed
+	if c.codeSeed != "" {
+		var err error
+		if seed, err = confirmedSeed(c.codeSeed); err != nil {
+			return err
+		}
+		defer seed.Wipe()
+	}
 	srk, err := tpmseal.Identity(t)
 	if err != nil {
 		return err
@@ -418,6 +445,17 @@ func enroll(c config, t transport.TPM) error {
 	if err := putLinkKeys(c, st); err != nil {
 		return err
 	}
+	if c.codeSeed != "" {
+		v, err := handoff.EncodeCodeSeed(seed)
+		if err != nil {
+			return err
+		}
+		err = st.Put(handoff.CheckerSeedEntry, v)
+		clear(v)
+		if err != nil {
+			return err
+		}
+	}
 	if err := c.step("slots"); err != nil {
 		return err
 	}
@@ -458,13 +496,18 @@ func enroll(c config, t transport.TPM) error {
 	return c.commitAndDrop()
 }
 
-// commitAndDrop puts the store in place, then removes the link port's
-// capture file, whose key the store now holds (or, at a restore, never
-// will). A crash between the two leaves the file, which no later
+// commitAndDrop puts the store in place, then removes the staged code
+// seed and the link port's capture file, whose values the store now holds
+// (or, at a restore, the capture never will). A crash between the two leaves the file, which no later
 // enrollment of this store reads: one never reruns over a store.
 func (c config) commitAndDrop() error {
 	if err := commit(c); err != nil {
 		return err
+	}
+	if c.codeSeed != "" {
+		if err := os.Remove(c.codeSeed); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("agentos-enroll: remove the staged code seed: %w", err)
+		}
 	}
 	if c.firstEdge == "" {
 		return nil

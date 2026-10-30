@@ -43,6 +43,12 @@ func pairExchange(w io.Writer, br *bufio.Reader, host, path string, wantState by
 	if err != nil {
 		return nil, err
 	}
+	return pairAnswer(r, path, wantState)
+}
+
+// pairAnswer decodes one TLV8 answer from path and checks its state; an
+// accessory error item becomes its error.
+func pairAnswer(r *response, path string, wantState byte) (tlvMap, error) {
 	if r.event || r.status != 200 {
 		return nil, fmt.Errorf("%w: %s answered status %d", ErrProtocol, path, r.status)
 	}
