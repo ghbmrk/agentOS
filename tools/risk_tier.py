@@ -127,6 +127,7 @@ TIER_B_BROKER = {
     # or Freeze is reviewed with that caller.
     "cgroup",
     "corpus", "floor", "fold", "hostchange", "inflight",
+    "internal",                   # internal/hostiletext: test-only inputs, imported by no shipped code (#3901)
     "machprobe", "quota", "routerule", "skill", "test", "voice",
 }
 TIER_A_FILES = {"broker/go.mod", "broker/go.sum"}
