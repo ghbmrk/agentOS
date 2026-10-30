@@ -293,7 +293,10 @@ var enforcer = map[string]struct {
 	"enforcer/nft/load": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" })},
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action"}, enforcerWebForbid},
+	// Asserted safety-list actions (slice s): once-only owner challenges;
+	// the page serves them and the daemon wires their actuator.
+	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
