@@ -274,10 +274,10 @@ def cmd_report(args):
 def broker_diff(base, head):
     return subprocess.run(
         # --text: a `-diff` .gitattributes line would otherwise hide a file's lines as binary.
-        # The prefix, colour, external-diff and textconv options pin the format: git config such as diff.noprefix,
-        # color.ui=always, diff.external or a diff.<driver>.textconv would otherwise empty added_lines (#4115).
+        # The prefix, colour, external-diff, textconv and rename options pin the format: git config such as diff.noprefix,
+        # color.ui=always, diff.external a diff.<driver>.textconv or diff.renames=copies would otherwise hide added lines (#4115).
         ["git", "-c", "core.quotepath=off", "diff", "-U0", "--text", "--src-prefix=a/", "--dst-prefix=b/",
-         "--no-color", "--no-ext-diff", "--no-textconv", f"{base}...{head}", "--", "broker"],
+         "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", f"{base}...{head}", "--", "broker"],
         # errors="replace" below: with --text a binary file's bytes are diff lines, and need not be UTF-8.
         cwd=ROOT, capture_output=True, check=True,
     # Bytes decoded here: text=True would turn a lone \r into \n and number the lines wrongly (#4028).
