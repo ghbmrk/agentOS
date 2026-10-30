@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/internal/hostiletext"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // Every name the kernel shapes refuses the hostile-text corpus (#3901): a

@@ -1,6 +1,6 @@
 # Hostile-text corpus: assumptions
 
-Built for REV-CHK-names (#3901, brief `briefs/REV-CHK.md`). `broker/internal/hostiletext` is a test-only corpus that every name or label check runs, and a lint that each check does. The rules the four checked packages now apply are recorded here too, rather than in `broker/kernel` and `broker/enforcer/policy`'s own files, which open PRs (#3855, #3873, #3874) are editing. Each row is a reading a reviewer may want to change.
+Built for REV-CHK-names (#3901, brief `briefs/REV-CHK.md`). `broker/hostiletext` is a test-only corpus that every name or label check runs, and a lint that each check does. The rules the four checked packages now apply are recorded here too, rather than in `broker/kernel` and `broker/enforcer/policy`'s own files, which open PRs (#3855, #3873, #3874) are editing. Each row is a reading a reviewer may want to change.
 
 | ID | Assumption | Spec basis | If it changes |
 |---|---|---|---|

@@ -87,7 +87,7 @@ func scan(root string, skip []string) (checks []check, runs map[string]map[strin
 			return nil
 		}
 		for _, im := range f.Imports {
-			if path, _ := strconv.Unquote(im.Path.Value); strings.HasSuffix(path, "/internal/hostiletext") {
+			if path, _ := strconv.Unquote(im.Path.Value); strings.HasSuffix(path, "/hostiletext") {
 				imports = append(imports, rel)
 			}
 		}
@@ -163,7 +163,7 @@ func allowLines(t *testing.T) map[string]string {
 // and being deleted, so no new test goes there.
 func oldCore(t *testing.T) []string {
 	t.Helper()
-	b, err := os.ReadFile("../../../tools/old_core.txt")
+	b, err := os.ReadFile("../../tools/old_core.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func oldCore(t *testing.T) []string {
 // Every name check in broker/ runs the corpus, or has an allow line with
 // its reason; a stale allow line fails (#3901).
 func TestEveryNameCheckRunsTheCorpus(t *testing.T) {
-	checks, runs, _, err := scan("../..", oldCore(t))
+	checks, runs, _, err := scan("..", oldCore(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func (T) Name() string { return "" }
 		t.Fatalf("uncovered %q, want %q", got, want)
 	}
 	write("foo/foo_test.go", `package foo
-import ("testing"; "x/internal/hostiletext")
+import ("testing"; "x/hostiletext")
 func TestNames(t *testing.T) {
 	hostiletext.Run(t, validFooName)
 	hostiletext.Run(t, func(s string) bool { return T{s}.shape() })
@@ -261,7 +261,7 @@ func TestNames(t *testing.T) {
 
 // The corpus is for tests only: no non-test broker file imports it.
 func TestOnlyTestsImport(t *testing.T) {
-	_, _, imports, err := scan("../..", nil)
+	_, _, imports, err := scan("..", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

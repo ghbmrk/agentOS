@@ -5,7 +5,7 @@ package wire
 import (
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/internal/hostiletext"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // A name the channel carries refuses the hostile-text corpus as

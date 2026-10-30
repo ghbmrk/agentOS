@@ -5,7 +5,7 @@ package follow
 import (
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/internal/hostiletext"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // The owner's name for a source reaches the owner in broker-voiced texts, so

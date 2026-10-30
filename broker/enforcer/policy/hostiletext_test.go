@@ -5,7 +5,7 @@ package policy
 import (
 	"testing"
 
-	"github.com/ghbmrk/agentos/broker/internal/hostiletext"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // A policy token (a device, rule or host name, a command, a Wi-Fi identity)
