@@ -70,12 +70,13 @@ const (
 var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
-// only on the interfaces of signed pairs, and the Wake-on-LAN relay hears
-// the core only.
+// and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
+// Wake-on-LAN relay hears the core only.
 const (
-	MDNSPort  = 5353
-	MDNSGroup = "224.0.0.251"
-	WoLPort   = 9
+	MDNSPort   = 5353
+	MDNSGroup  = "224.0.0.251"
+	MDNSGroup6 = "ff02::fb"
+	WoLPort    = 9
 )
 
 // Addresses that are not the internet (the IANA special-purpose blocks
@@ -380,6 +381,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	if len(ends) > 0 {
 		slices.Sort(ends)
 		w.line("iifname { " + strings.Join(ends, ", ") + " } ip daddr " + MDNSGroup + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
+		w.line("iifname { " + strings.Join(ends, ", ") + " } ip6 daddr " + MDNSGroup6 + " udp dport " + strconv.Itoa(MDNSPort) + " accept")
 	}
 	w.close()
 

@@ -152,8 +152,9 @@ func run(t *testing.T, name string, args ...string) {
 }
 
 // newHost is a namespace joined to the enforcer by a veth pair: the
-// enforcer's end is ifc with 10.<n>.0.1, the host's eth0 has 10.<n>.0.2.
-func newHost(t *testing.T, ifc string, n int) int {
+// enforcer's end is ifc with 10.<n>.0.1 and fd00:<n>::1, the host's eth0
+// has 10.<n>.0.2 and fd00:<n>::2.
+func newHost(t *testing.T, ifc string, n int, v6 bool) int {
 	cmd := exec.Command("unshare", "-n", "sleep", "3600")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -180,6 +181,23 @@ func newHost(t *testing.T, ifc string, n int) int {
 	in("ip", "addr", "add", fmt.Sprintf("10.%d.0.2/24", n), "dev", "eth0")
 	in("ip", "link", "set", "eth0", "up")
 	in("ip", "route", "add", "default", "via", fmt.Sprintf("10.%d.0.1", n))
+	if v6 {
+		run(t, "ip", "addr", "add", fmt.Sprintf("fd00:%d::1/64", n), "dev", ifc, "nodad")
+		in("ip", "addr", "add", fmt.Sprintf("fd00:%d::2/64", n), "dev", "eth0", "nodad")
+		// The link-local addresses mDNS sends from must finish duplicate
+		// address detection first.
+		for i := 0; ; i++ {
+			a, _ := exec.Command("ip", "-6", "addr", "show", "dev", ifc, "tentative").Output()
+			b, _ := exec.Command("nsenter", "-t", strconv.Itoa(pid), "-n", "--", "ip", "-6", "addr", "show", "dev", "eth0", "tentative").Output()
+			if len(a) == 0 && len(b) == 0 {
+				break
+			}
+			if i > 500 {
+				t.Fatalf("%s: addresses still tentative", ifc)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	return pid
 }
 
@@ -206,9 +224,18 @@ func within(t *testing.T, pid int, f func()) {
 	runtime.UnlockOSThread()
 }
 
-// mdnsSocket is a socket on a host's eth0 at the group's port, a member of
-// the group there.
-func mdnsSocket(t *testing.T, pid int) *net.UDPConn {
+// group is where a host sends mDNS in one family.
+func group(v6 bool) *net.UDPAddr {
+	if v6 {
+		return &net.UDPAddr{IP: Group6.Addr().AsSlice(), Port: int(Group6.Port()), Zone: "eth0"}
+	}
+	return net.UDPAddrFromAddrPort(Group)
+}
+
+// mdnsSocket is a socket on a host's eth0 at the given port (the group's
+// for 5353), a member of the group there, that does not hear its own
+// sends.
+func mdnsSocket(t *testing.T, pid int, v6 bool, port int) *net.UDPConn {
 	var c *net.UDPConn
 	within(t, pid, func() {
 		lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
@@ -219,15 +246,27 @@ func mdnsSocket(t *testing.T, pid int) *net.UDPConn {
 					serr = err
 					return
 				}
+				s := int(fd)
+				serr = unix.SetsockoptInt(s, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+				if v6 {
+					mreq := &unix.IPv6Mreq{Multiaddr: Group6.Addr().As16(), Interface: uint32(ifi.Index)}
+					serr = errors.Join(serr, unix.SetsockoptInt(s, unix.IPPROTO_IPV6, unix.IPV6_MULTICAST_HOPS, 255),
+						unix.SetsockoptInt(s, unix.IPPROTO_IPV6, unix.IPV6_MULTICAST_LOOP, 0),
+						unix.SetsockoptIPv6Mreq(s, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq))
+					return
+				}
 				mreq := &unix.IPMreqn{Multiaddr: Group.Addr().As4(), Ifindex: int32(ifi.Index)}
-				serr = errors.Join(unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1),
-					unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_TTL, 255),
-					unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_LOOP, 0),
-					unix.SetsockoptIPMreqn(int(fd), unix.IPPROTO_IP, unix.IP_ADD_MEMBERSHIP, mreq))
+				serr = errors.Join(serr, unix.SetsockoptInt(s, unix.IPPROTO_IP, unix.IP_MULTICAST_TTL, 255),
+					unix.SetsockoptInt(s, unix.IPPROTO_IP, unix.IP_MULTICAST_LOOP, 0),
+					unix.SetsockoptIPMreqn(s, unix.IPPROTO_IP, unix.IP_ADD_MEMBERSHIP, mreq))
 			})
 			return serr
 		}}
-		pc, err := lc.ListenPacket(context.Background(), "udp4", "0.0.0.0:5353")
+		network, addr := "udp4", "0.0.0.0:"+strconv.Itoa(port)
+		if v6 {
+			network, addr = "udp6", "[::]:"+strconv.Itoa(port)
+		}
+		pc, err := lc.ListenPacket(context.Background(), network, addr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -237,13 +276,34 @@ func mdnsSocket(t *testing.T, pid int) *net.UDPConn {
 	return c
 }
 
+func hasKernelIPv6() bool {
+	_, err := os.Stat("/proc/net/if_inet6")
+	return err == nil
+}
+
 // TestPairOnly: real packets between namespaces, through the loaded
-// ruleset and the relay: a Devices record reaches only its paired
-// device's network, never Owner, and nothing else is reflected. Catches a
-// general reflector (NET-3 Casting).
+// ruleset and the relay, over IPv4 and IPv6: a Devices record reaches only
+// its paired device's network, never Owner, and nothing else is
+// reflected. Catches a general reflector (NET-3 Casting). Of what a
+// paired device says, only its own records arrive: a record naming
+// another link's address, a name its paired network claims, or a service
+// on a foreign host is dropped (#4069); IPv6 mDNS is relayed as IPv4 is
+// (#4081).
 func TestPairOnly(t *testing.T) {
+	for _, v6 := range []bool{false, true} {
+		t.Run(map[bool]string{false: "IPv4", true: "IPv6"}[v6], func(t *testing.T) { pairOnly(t, v6) })
+	}
+}
+
+func pairOnly(t *testing.T, v6 bool) {
 	if !inNetns(t) {
 		return
+	}
+	if v6 && !hasKernelIPv6() {
+		if required() {
+			t.Fatal("the kernel has no IPv6")
+		}
+		t.Skip("the kernel has no IPv6")
 	}
 	l := fixtureLayout()
 	text, err := nft.Compile(fixturePolicy(), l)
@@ -259,9 +319,11 @@ func TestPairOnly(t *testing.T) {
 	}
 	hosts := map[string]int{}
 	socks := map[string]*net.UDPConn{}
+	nets := map[string]int{}
 	for i, ifc := range []string{"own0", "hh0", "ap0.101", "ap0.105", "ap0.106", "ap0.107", "ap0.108"} {
-		hosts[ifc] = newHost(t, ifc, 10+i)
-		socks[ifc] = mdnsSocket(t, hosts[ifc])
+		nets[ifc] = 10 + i
+		hosts[ifc] = newHost(t, ifc, nets[ifc], v6)
+		socks[ifc] = mdnsSocket(t, hosts[ifc], v6, 5353)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -274,55 +336,66 @@ func TestPairOnly(t *testing.T) {
 	})
 	time.Sleep(200 * time.Millisecond)
 
-	// Each sender sends one marked packet; then every host reports what it
-	// heard.
-	type send struct {
-		from     string
-		response bool
-		port     int
-		mark     string
+	// addr is the host's address on ifc's link, in this run's family.
+	addr := func(ifc string) string {
+		if v6 {
+			return fmt.Sprintf("fd00:%d::2", nets[ifc])
+		}
+		return fmt.Sprintf("10.%d.0.2", nets[ifc])
 	}
-	sends := []send{
-		{"ap0.105", true, 5353, "printer-answer"},
-		{"hh0", false, 5353, "laptop-query"},
-		{"ap0.101", true, 5353, "tv-answer"},
-		{"ap0.105", false, 5353, "printer-query"},
-		{"hh0", true, 5353, "laptop-announce"},
-		{"own0", false, 5353, "phone-query"},
-		{"ap0.108", true, 5353, "isolated-answer"},
-		{"ap0.106", true, 5353, "sensor-a-answer"},
-		{"ap0.107", false, 5353, "sensor-b-query"},
-		{"ap0.105", true, 40000, "printer-wrong-port"},
+	answer := func(ifc string, marks ...string) *message {
+		var rs []record
+		for _, m := range marks {
+			rs = append(rs, a(m+".local", addr(ifc), 120))
+		}
+		return response(rs, nil)
+	}
+	query := func(mark string) *message {
+		return &message{questions: []question{{dn(mark + ".local"), typeA, 1}}}
+	}
+	// The printer's answer carries, besides its own record, a record for
+	// another link's address, one for a name its paired network claims,
+	// and a service on a foreign host.
+	printer := answer("ap0.105", "printer-answer", "core-page")
+	printer.answers = append(printer.answers,
+		a("laptop-spoof.local", addr("hh0"), 120),
+		srv("Fake._smb._tcp.local", "laptop-spoof.local", 120))
+	laptopQuery := query("laptop-query")
+	laptopQuery.answers = []record{a("laptop-known.local", addr("hh0"), 120)}
+	sends := []struct {
+		from string
+		m    *message
+		port int
+	}{
+		{"hh0", answer("hh0", "laptop-announce", "core-page"), 5353}, // claims core-page first
+		{"ap0.105", printer, 5353},
+		{"hh0", laptopQuery, 5353},
+		{"ap0.101", answer("ap0.101", "tv-answer"), 5353},
+		{"ap0.105", query("printer-query"), 5353},
+		{"own0", query("phone-query"), 5353},
+		{"ap0.108", answer("ap0.108", "isolated-answer"), 5353},
+		{"ap0.106", answer("ap0.106", "sensor-a-answer"), 5353},
+		{"ap0.107", query("sensor-b-query"), 5353},
+		{"ap0.105", answer("ap0.105", "printer-wrong-port"), 40000},
 	}
 	for _, s := range sends {
+		c := socks[s.from]
+		if s.port != 5353 {
+			// Its own send must not loop back to this host's mDNS socket,
+			// so a sender hearing its own mark means the relay reflected it.
+			c = mdnsSocket(t, hosts[s.from], v6, s.port)
+		}
 		within(t, hosts[s.from], func() {
-			pkt := append(header(s.response), s.mark...)
-			var c *net.UDPConn
-			if s.port == 5353 {
-				c = socks[s.from]
-			} else {
-				// Its own send must not loop back to this host's mDNS
-				// socket, so a sender hearing its own mark means the relay
-				// reflected it.
-				lc := net.ListenConfig{Control: func(_, _ string, rc syscall.RawConn) error {
-					return rc.Control(func(fd uintptr) { unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_LOOP, 0) })
-				}}
-				pc, err := lc.ListenPacket(context.Background(), "udp4", ":"+strconv.Itoa(s.port))
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer pc.Close()
-				c = pc.(*net.UDPConn)
-			}
-			if _, err := c.WriteToUDP(pkt, net.UDPAddrFromAddrPort(Group)); err != nil {
+			if _, err := c.WriteToUDP(s.m.bytes(), group(v6)); err != nil {
 				t.Fatal(err)
 			}
 		})
+		time.Sleep(20 * time.Millisecond) // the claim is heard before the answer
 	}
 	// A flood from the printer: the rate limit passes at most a burst.
 	within(t, hosts["ap0.105"], func() {
 		for range 200 {
-			socks["ap0.105"].WriteToUDP(append(header(true), "flood"...), net.UDPAddrFromAddrPort(Group))
+			socks["ap0.105"].WriteToUDP(answer("ap0.105", "flood").bytes(), group(v6))
 		}
 	})
 	heard := map[string][]string{}
@@ -332,15 +405,31 @@ func TestPairOnly(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			buf := make([]byte, 1500)
+			buf := make([]byte, 9000)
 			c.SetReadDeadline(time.Now().Add(time.Second))
 			for {
 				n, _, err := c.ReadFromUDP(buf)
 				if err != nil {
 					return
 				}
+				m, ok := parse(buf[:n])
 				mu.Lock()
-				heard[ifc] = append(heard[ifc], string(buf[12:n]))
+				if !ok {
+					heard[ifc] = append(heard[ifc], "malformed")
+					mu.Unlock()
+					continue
+				}
+				if len(m.authority)+len(m.additional) > 0 {
+					heard[ifc] = append(heard[ifc], "extra sections")
+				}
+				var got []string
+				for _, q := range m.questions {
+					got = append(got, "?"+q.name[0])
+				}
+				for _, r := range m.answers {
+					got = append(got, r.name[0])
+				}
+				heard[ifc] = append(heard[ifc], strings.Join(got, " "))
 				mu.Unlock()
 			}
 		}()
@@ -348,9 +437,9 @@ func TestPairOnly(t *testing.T) {
 	wg.Wait()
 	want := map[string][]string{
 		"hh0":     {"printer-answer"},
-		"ap0.105": {"laptop-query"},
+		"ap0.105": {"?laptop-query"},
 		"ap0.107": {"sensor-a-answer"},
-		"ap0.106": {"sensor-b-query"},
+		"ap0.106": {"?sensor-b-query"},
 	}
 	// No socket loops its sends back, so all a host hears came from the
 	// relay: a mark heard by its own sender was reflected onto the
@@ -361,7 +450,7 @@ func TestPairOnly(t *testing.T) {
 		floods += len(heard[ifc]) - len(got)
 		slices.Sort(got)
 		if !slices.Equal(got, want[ifc]) {
-			t.Errorf("%s heard %v, want %v", ifc, got, want[ifc])
+			t.Errorf("%s heard %q, want %q", ifc, got, want[ifc])
 		}
 	}
 	if floods == 0 || floods > burst {
