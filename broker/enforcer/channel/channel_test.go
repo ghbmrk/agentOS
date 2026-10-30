@@ -3,15 +3,19 @@ package channel
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 // REQ: NET-2, DEV-2
@@ -539,5 +543,69 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 	if r.alerts.paused != 1 {
 		t.Errorf("paused alerts %d", r.alerts.paused)
+	}
+}
+
+// TestLogNamesOnlySignedDevices (NET-2 Channel, #3758): the enforcer's log
+// is the owner's record, so the core cannot write words into it. A name
+// carrying any hostile-text entry (a line or paragraph separator, NEL or
+// another C1 control, a bidi override or isolate) ends the connection and
+// is not logged; a well-formed name the signed policy does not hold is
+// logged only as "unknown " and its SHA-256, in every kind and in both of a
+// pair's members; a device the policy names is logged by its ID, also when
+// the tightening removes it. Catches a forged "resumed by the owner" line.
+// Revert mutant: logName returning s for every name.
+func TestLogNamesOnlySignedDevices(t *testing.T) {
+	r := newRig(t, nil)
+	n := len(r.events())
+	for _, e := range hostiletext.Hidden {
+		h := "a" + e.Text + "b"
+		if len(h) > wire.MaxName {
+			continue
+		}
+		place := strings.Repeat("x", len(h))
+		good, err := wire.Encode(wire.ToEnforcer, cmd(1, place, wire.VerbOn))
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := bytes.Replace(good.Payload, []byte(place), []byte(h), 1)
+		r.advance(time.Hour) // the hello and refusal buckets are not under test here
+		if cl := r.dial(); !cl.closed(frameBytes(wire.TCommand, p)) {
+			t.Errorf("%s: connection not ended", e.Name)
+		}
+	}
+	for _, e := range r.events()[n:] {
+		if e.Device != "" || (e.Kind != KindHello && e.Kind != KindFrame) {
+			t.Errorf("a hostile name was logged: %+v", e)
+		}
+	}
+
+	forged := "resumed-by-the-owner"
+	sum := sha256.Sum256([]byte(forged))
+	unknown := "unknown " + hex.EncodeToString(sum[:])
+	r.advance(time.Hour)
+	cl := r.dial()
+	n = len(r.events())
+	cl.code(cmd(1, forged, wire.VerbOff))
+	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: forged})
+	cl.code(wire.Tighten{ID: 3, Kind: wire.IsolateDevice, Device: forged})
+	cl.code(wire.Tighten{ID: 4, Kind: wire.RemovePair, A: forged, B: "tv"})
+	cl.code(wire.Tighten{ID: 7, Kind: wire.RemovePair, A: "tv", B: forged})
+	cl.code(cmd(5, "lamp", wire.VerbOn))
+	if c := cl.code(wire.Tighten{ID: 6, Kind: wire.RemoveDevice, Device: "lamp"}); c != wire.OK || r.eng.Current().Device("lamp") != nil {
+		t.Fatalf("remove lamp: %v", c)
+	}
+	want := map[uint64]string{1: unknown, 2: unknown, 3: unknown, 4: unknown + ",tv", 5: "lamp", 6: "lamp", 7: "tv," + unknown}
+	got := map[uint64]string{}
+	for _, e := range r.events()[n:] {
+		if strings.Contains(e.Device, forged) {
+			t.Errorf("the core's name was logged: %+v", e)
+		}
+		if e.Kind != KindHello { // the hello's line may land after dial returns
+			got[e.ID] = e.Device
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("logged devices %v, want %v", got, want)
 	}
 }
