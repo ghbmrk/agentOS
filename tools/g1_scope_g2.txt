@@ -44,10 +44,6 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4051 (ENF-g, #3662): broker/enforcer/ap/ (with push/), which the G2 list does not name
-# (D-198). Remove once #4051 merges.
-exempt-pr 4051
-
 # #4127 (ENF-k2, #3906): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
 # Remove once #4127 merges.
 exempt-pr 4127
@@ -87,6 +83,10 @@ exempt-pr 4171
 # #4166 (DEV-homekit-b2c, #3894): broker/cmd/agentos-homekit/, which the G2 list does not name
 # (D-198). Remove once #4166 merges.
 exempt-pr 4166
+
+# #4182 (ENF-g-b): broker/enforcer/ap/, which the G2 list does not name (D-198). Remove once #4182
+# merges.
+exempt-pr 4182
 
 # Project machinery and records.
 allow .claude/
