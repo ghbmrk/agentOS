@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -392,12 +393,15 @@ func pairOnly(t *testing.T, v6 bool) {
 		})
 		time.Sleep(20 * time.Millisecond) // the claim is heard before the answer
 	}
-	// A flood from the printer: the rate limit passes at most a burst.
+	// A flood from the printer: the rate limit passes at most a burst,
+	// and what it refills while the flood is sent.
+	start := time.Now()
 	within(t, hosts["ap0.105"], func() {
 		for range 200 {
 			socks["ap0.105"].WriteToUDP(answer("ap0.105", "flood").bytes(), group(v6))
 		}
 	})
+	sent := time.Now()
 	heard := map[string][]string{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -453,8 +457,8 @@ func pairOnly(t *testing.T, v6 bool) {
 			t.Errorf("%s heard %q, want %q", ifc, got, want[ifc])
 		}
 	}
-	if floods == 0 || floods > burst {
-		t.Errorf("%d of 200 flood packets passed; want 1 to %d", floods, burst)
+	if most := burst + int(math.Ceil(sent.Sub(start).Seconds()*perSec)); floods == 0 || floods > most {
+		t.Errorf("%d of 200 flood packets passed; want 1 to %d", floods, most)
 	}
 	if !slices.Contains(heard["hh0"], "printer-answer") || len(heard["own0"]) != 0 {
 		t.Errorf("the Owner network heard %v", heard["own0"])

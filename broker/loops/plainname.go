@@ -31,6 +31,7 @@ var fuzzNames = map[string]string{
 	"inbox.FuzzPostURL":             "the check that sends an unsubscribe only to a public web address",
 	"loops.FuzzParseText":           "the check that reads your settings texts",
 	"mail.FuzzParse":                "the check that reads incoming mail",
+	"mdns.FuzzParse":                "the check that reads mDNS messages your paired devices send",
 	"modemlink.FuzzInbound":         "the check that reads messages from the modem",
 	"owner.FuzzParseReply":          "the check that reads your replies",
 	"recovery.FuzzParseRecoveryKey": "the check that reads a typed recovery key",
