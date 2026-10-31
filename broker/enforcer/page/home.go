@@ -5,13 +5,32 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
 )
 
 var funcs = template.FuncMap{
-	"label": labelWords,
-	"when":  func(ms int64) string { return time.UnixMilli(ms).UTC().Format("Mon 2 Jan 2006 15:04:05 UTC") },
-	"lines": func(b []byte) []string { return strings.Split(strings.TrimSpace(string(b)), "\n") },
-	"ascii": ascii,
+	"label":  labelWords,
+	"when":   func(ms int64) string { return time.UnixMilli(ms).UTC().Format("Mon 2 Jan 2006 15:04:05 UTC") },
+	"lines":  func(b []byte) []string { return strings.Split(strings.TrimSpace(string(b)), "\n") },
+	"ascii":  ascii,
+	"sealed": sealedLine,
+}
+
+// shortLine is pairseal.Statement's line as the page shows it: the
+// envelope's hash cut to pairseal.ShortHash characters, the whole hash
+// beside it in a details element. The diff the owner signs keeps the
+// whole line (UX on #4073).
+type shortLine struct{ Text, Hash string }
+
+// sealedLine is line shown short when it is pairseal.Statement's line,
+// and nil for every other line, which the page shows as it is.
+func sealedLine(line string) *shortLine {
+	device, hash, ok := pairseal.ParseStatement(line)
+	if !ok {
+		return nil
+	}
+	return &shortLine{Text: pairseal.Statement(device, hash[:pairseal.ShortHash]+"…"), Hash: hash}
 }
 
 // confirm is the confirm screen for a proposal link: the change drawn by

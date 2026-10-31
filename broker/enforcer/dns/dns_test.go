@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -73,12 +75,25 @@ func generate(t *testing.T) Files {
 	return f
 }
 
-// TestGolden: the fixture's three files, byte for byte. Read the diff when
-// it changes: these lines are what decides which names resolve and which
-// sets they fill.
+// TestGolden: the fixture's files, byte for byte, one per listed view.
+// Read the diff when it changes: these lines are what decides which names
+// resolve and which sets they fill.
 func TestGolden(t *testing.T) {
 	f := generate(t)
-	for name, got := range map[string]string{"listed.conf": f.Listed, "people.conf": f.People, "dhcp.conf": f.DHCP} {
+	files := map[string]string{"people.conf": f.People, "dhcp.conf": f.DHCP}
+	for _, v := range f.Listed {
+		files["listed-"+v.Iface+".conf"] = v.Conf
+	}
+	if !*update {
+		have, err := filepath.Glob(filepath.Join("testdata", "*.conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(have) != len(files) {
+			t.Errorf("testdata holds %d files, the fixture makes %d", len(have), len(files))
+		}
+	}
+	for name, got := range files {
 		path := filepath.Join("testdata", name)
 		if *update {
 			if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
@@ -96,30 +111,65 @@ func TestGolden(t *testing.T) {
 	}
 }
 
-// TestListedNamesOnly: the listed instance forwards only listed names,
-// each exactly, and fills only the sets of the lists that name it; a
-// device without internet has no set, and nothing names the edge.
-// Catches a resolver that forwards any name or fills the wrong set.
+func has(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+"\n") }
+
+// TestListedNamesOnly: each listed view answers on its own interface
+// alone and forwards only its own list's names, each exactly, filling only
+// its own list's set; a device without internet resolves nothing, and
+// nothing names the edge. Catches a resolver that forwards any name, one
+// that answers a device with another list's names (ENF-f-4), or one that
+// fills the wrong set.
 func TestListedNamesOnly(t *testing.T) {
 	f := generate(t)
-	has := func(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+"\n") }
-	for _, l := range []string{
-		"server=/core.example/198.51.100.53#53",
-		"local=/*.core.example/",
-		"nftset=/core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
-		"nftset=/updates.core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
-		"nftset=/tv.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
-		"nftset=/cdn.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6,4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
-		"cache-size=0",
-		"interface=core0", "interface=ap0.101", "interface=ap0.102", "interface=ap0.108",
+	var ifaces []string
+	for _, v := range f.Listed {
+		ifaces = append(ifaces, v.Iface)
+	}
+	if want := []string{"core0", "ap0.101", "ap0.102", "ap0.103", "ap0.108"}; !slices.Equal(ifaces, want) {
+		t.Fatalf("views %v, want %v", ifaces, want)
+	}
+	core, d101, d102, d103, d108 := f.Listed[0].Conf, f.Listed[1].Conf, f.Listed[2].Conf, f.Listed[3].Conf, f.Listed[4].Conf
+	for conf, lines := range map[string][]string{
+		core: {
+			"interface=core0",
+			"server=/core.example/198.51.100.53#53",
+			"local=/*.core.example/",
+			"nftset=/core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
+			"nftset=/updates.core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
+		},
+		d101: {
+			"interface=ap0.101",
+			"nftset=/tv.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
+			"nftset=/cdn.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
+		},
+		d102: {"interface=ap0.102"},
+		d103: {
+			"interface=ap0.103",
+			"nftset=/plug.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
+			"nftset=/cdn.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
+		},
+		d108: {"interface=ap0.108"},
 	} {
-		if !has(f.Listed, l) {
-			t.Errorf("listed.conf lacks %q", l)
+		for _, l := range append(lines, "cache-size=0", "max-ttl=300", "no-resolv") {
+			if !has(conf, l) {
+				t.Errorf("listed view lacks %q:\n%s", l, conf)
+			}
+		}
+		if n := strings.Count(conf, "\ninterface="); n != 1 {
+			t.Errorf("listed view answers on %d interfaces:\n%s", n, conf)
 		}
 	}
-	for _, s := range []string{"speaker.example", "old.example", "server=198", "edge0", "wan0", "apm0", "own0", "gst0", "log-queries", "dhcp"} {
-		if strings.Contains(f.Listed, s) {
-			t.Errorf("listed.conf has %q", s)
+	for conf, absent := range map[string][]string{
+		core: {"tv.example", "cdn.example", "plug.example", "d10"},
+		d101: {"core.example", "plug.example", "core_", "d103", "d102", "d108"},
+		d102: {"server=", "nftset", "speaker.example"},
+		d103: {"core.example", "tv.example", "core_", "d101"},
+		d108: {"server=", "nftset", "old.example"},
+	} {
+		for _, s := range append(absent, "server=198", "edge0", "wan0", "apm0", "own0", "gst0", "log-queries", "dhcp") {
+			if strings.Contains(conf, s) {
+				t.Errorf("listed view has %q:\n%s", s, conf)
+			}
 		}
 	}
 	for _, s := range []string{"nftset", "edge0", "wan0", "apm0", "core0", "ap0.", "log-queries", "dhcp"} {
@@ -137,30 +187,102 @@ func TestListedNamesOnly(t *testing.T) {
 	}
 	// No line of any file comes from anything but the generator's own
 	// words, the layout, the setup and checked names.
-	for _, file := range []string{f.Listed, f.People, f.DHCP} {
+	for _, file := range append(confs(f), f.People, f.DHCP) {
 		if strings.ContainsAny(file, "\r\t\"'") {
 			t.Errorf("a file holds a quoting character:\n%s", file)
 		}
 	}
 }
 
+func confs(f Files) []string {
+	var out []string
+	for _, v := range f.Listed {
+		out = append(out, v.Conf)
+	}
+	return out
+}
+
+// TestViewsAreOwnLists: for any home of devices whose lists overlap, each
+// device's view forwards exactly its own list's names, filling only its
+// own set, and the core's view exactly the core's list. Catches a view
+// that leaks a name between lists, whichever devices a home has (ENF-f-4).
+func TestViewsAreOwnLists(t *testing.T) {
+	named := 0
+	pool := []string{"a.example", "b.example", "c.example", "d.example", "core.example"}
+	for seed := range 64 {
+		d := policy.Document{Version: 1, Destinations: []string{pool[seed%5], pool[(seed+2)%5]}}
+		want := map[string][]string{"core0": d.Destinations}
+		sets := map[string]string{"core0": nft.CoreSet(false) + "," + nft.CoreSet(true)}
+		for i := range 1 + seed%4 {
+			var allow []string
+			for j, n := range pool {
+				if (seed>>j+i)%3 == 0 {
+					allow = append(allow, n)
+				}
+			}
+			vlan := 200 + i
+			id := "dev" + strconv.Itoa(i)
+			dev := policy.Device{ID: id, Network: policy.NetDevices, WiFi: "vlan" + strconv.Itoa(vlan), Allow: allow, VendorCloud: true, Everyday: true}
+			d.Devices = append(d.Devices, dev)
+			iface := "ap0." + strconv.Itoa(vlan)
+			if len(allow) > 0 {
+				want[iface] = allow
+				sets[iface] = nft.DeviceSet(vlan, false) + "," + nft.DeviceSet(vlan, true)
+			}
+		}
+		f, err := Generate(d, fixtureLayout(), fixtureSetup())
+		if err != nil {
+			t.Fatalf("seed %d: %v", seed, err)
+		}
+		if len(f.Listed) != 1+len(d.Devices) {
+			t.Fatalf("seed %d: %d views for %d devices", seed, len(f.Listed), len(d.Devices))
+		}
+		for _, v := range f.Listed {
+			var got []string
+			for _, ln := range strings.Split(v.Conf, "\n") {
+				if rest, ok := strings.CutPrefix(ln, "nftset=/"); ok {
+					name, spec, _ := strings.Cut(rest, "/")
+					got = append(got, name)
+					named++
+					s4, s6, _ := strings.Cut(sets[v.Iface], ",")
+					if spec != "4#inet#"+nft.Table+"#"+s4+",6#inet#"+nft.Table+"#"+s6 {
+						t.Errorf("seed %d: %s fills %q", seed, v.Iface, spec)
+					}
+				}
+			}
+			w := slices.Clone(want[v.Iface])
+			slices.Sort(w)
+			if w = slices.Compact(w); !slices.Equal(got, w) {
+				t.Errorf("seed %d: %s resolves %v, want %v", seed, v.Iface, got, w)
+			}
+		}
+	}
+	if named < 200 {
+		t.Errorf("only %d names across every view: the homes test too little", named)
+	}
+}
+
 func TestGenerateRefuses(t *testing.T) {
 	l := fixtureLayout()
 	for name, mod := range map[string]func(*policy.Document, *Setup){
-		"edge DHCP":      func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Edge },
-		"WAN DHCP":       func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.WAN },
-		"AP mgmt DHCP":   func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.APMgmt },
-		"unknown iface":  func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = "eth9" },
-		"trunk itself":   func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk },
-		"bad VLAN":       func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk + ".0101" },
-		"net twice":      func(_ *policy.Document, s *Setup) { s.Nets[1].Iface = s.Nets[0].Iface },
-		"public prefix":  func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("203.0.113.0/24") },
-		"unmasked":       func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.1/24") },
-		"tiny prefix":    func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.0/30") },
-		"v6 not /64":     func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix6 = netip.MustParsePrefix("fd00:10::/56") },
-		"no upstream":    func(_ *policy.Document, s *Setup) { s.Upstream = nil },
-		"private up":     func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") },
-		"loopback up":    func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") },
+		"edge DHCP":     func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Edge },
+		"WAN DHCP":      func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.WAN },
+		"AP mgmt DHCP":  func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.APMgmt },
+		"unknown iface": func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = "eth9" },
+		"trunk itself":  func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk },
+		"bad VLAN":      func(_ *policy.Document, s *Setup) { s.Nets[0].Iface = l.Trunk + ".0101" },
+		"net twice":     func(_ *policy.Document, s *Setup) { s.Nets[1].Iface = s.Nets[0].Iface },
+		"public prefix": func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("203.0.113.0/24") },
+		"unmasked":      func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.1/24") },
+		"tiny prefix":   func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.0/30") },
+		"v6 not /64":    func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix6 = netip.MustParsePrefix("fd00:10::/56") },
+		"no upstream":   func(_ *policy.Document, s *Setup) { s.Upstream = nil },
+		"private up":    func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") },
+		"loopback up":   func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") },
+		"served v6 up": func(_ *policy.Document, s *Setup) {
+			s.Nets[5].Prefix6 = netip.MustParsePrefix("2001:db8:101::/64")
+			s.Upstream = append(s.Upstream, netip.MustParseAddrPort("[2001:db8:101::53]:53"))
+		},
 		"lease relative": func(_ *policy.Document, s *Setup) { s.LeaseFile = "dhcp.leases" },
 		"lease quoting":  func(_ *policy.Document, s *Setup) { s.LeaseFile = "/var/lib/a b" },
 		"name upper":     func(d *policy.Document, _ *Setup) { d.Destinations = []string{"Core.example"} },
@@ -212,7 +334,6 @@ func TestHostname(t *testing.T) {
 	}
 }
 
-// TestDnsmasqAccepts: dnsmasq's own syntax check passes each file.
 // TestSetupBounds: the ends of what check accepts.
 func TestSetupBounds(t *testing.T) {
 	l := fixtureLayout()
@@ -228,6 +349,17 @@ func TestSetupBounds(t *testing.T) {
 			t.Errorf("IPv4 /%d: %v", bits, err)
 		}
 	}
+	// An upstream just outside a served IPv6 prefix is accepted, one at
+	// either end of it is not (ENF-f-5).
+	for up, ok := range map[string]bool{"2001:db8:100:ffff:ffff:ffff:ffff:ffff": true, "2001:db8:101::": false, "2001:db8:101::ffff:ffff:ffff:ffff": false, "2001:db8:102::": true} {
+		err := try(func(s *Setup) {
+			s.Nets[5].Prefix6 = netip.MustParsePrefix("2001:db8:101::/64")
+			s.Upstream = []netip.AddrPort{netip.AddrPortFrom(netip.MustParseAddr(up), 53)}
+		})
+		if (err == nil) != ok {
+			t.Errorf("upstream %s: %v", up, err)
+		}
+	}
 	for path, ok := range map[string]bool{"/AZ/az/09/a-b_c.d": true, "/a@b": false, "/a[b": false, "/a`b": false, "/a{b": false, "/a:b": false, "/a,b": false, "/a/../b": false} {
 		if err := try(func(s *Setup) { s.LeaseFile = path }); (err == nil) != ok {
 			t.Errorf("lease file %q: %v", path, err)
@@ -235,11 +367,16 @@ func TestSetupBounds(t *testing.T) {
 	}
 }
 
+// TestDnsmasqAccepts: dnsmasq's own syntax check passes each file.
 func TestDnsmasqAccepts(t *testing.T) {
 	bin := dnsmasq(t)
 	f := generate(t)
 	dir := t.TempDir()
-	for name, text := range map[string]string{"listed": f.Listed, "people": f.People, "dhcp": f.DHCP} {
+	files := map[string]string{"people": f.People, "dhcp": f.DHCP}
+	for _, v := range f.Listed {
+		files["listed-"+v.Iface] = v.Conf
+	}
+	for name, text := range files {
 		path := filepath.Join(dir, name+".conf")
 		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
 			t.Fatal(err)
