@@ -177,7 +177,7 @@ func (o *owner) sign(t *testing.T, msg []byte) []byte {
 // unanswered past their timeout, and ends at the next. A stack that
 // reads every request and answers none is a slow device until then.
 func TestUnansweredBoundEndsLink(t *testing.T) {
-	h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}, Timeout: time.Millisecond})
+	h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}, Timeout: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
