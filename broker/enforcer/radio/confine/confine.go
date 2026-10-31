@@ -107,7 +107,7 @@ type Spec struct {
 type Proc struct {
 	cmd  *exec.Cmd
 	net  *os.File      // its network namespace, unless it joined another's
-	keep chan struct{} // holds the thread that started a joined stack
+	keep chan struct{} // holds the thread that started the stack
 	once sync.Once
 }
 
@@ -214,17 +214,20 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		ExtraFiles:  extra,
 		SysProcAttr: attr,
 	}
-	proc := &Proc{cmd: cmd}
-	start := cmd.Start
+	// The child's Pdeathsig fires when the OS thread that forked it exits,
+	// and the runtime ends a thread whose goroutine exits locked (as
+	// inNetns's do), so the fork runs on a thread of its own that outlives
+	// the child.
+	proc := &Proc{cmd: cmd, keep: make(chan struct{})}
+	var ns *os.File
 	if s.Net != nil {
 		if s.Net.net == nil {
 			ours.Close()
 			return nil, nil, ErrJoin
 		}
-		proc.keep = make(chan struct{})
-		start = func() error { return inNetns(s.Net.net, cmd.Start, proc.keep) }
+		ns = s.Net.net
 	}
-	if err := start(); err != nil {
+	if err := inNetns(ns, cmd.Start, proc.keep); err != nil {
 		proc.release()
 		ours.Close()
 		return nil, nil, fmt.Errorf("confine: start %s: %w", p.Name, err)
@@ -263,12 +266,10 @@ func (p *Proc) Wait() error {
 	return err
 }
 
-// release lets the thread that started a joined stack exit, once the stack
-// has been reaped.
+// release lets the thread that started the stack exit, once the stack has
+// been reaped.
 func (p *Proc) release() {
-	if p.keep != nil {
-		p.once.Do(func() { close(p.keep) })
-	}
+	p.once.Do(func() { close(p.keep) })
 }
 
 // Stop kills the stack and reaps it.
@@ -293,7 +294,7 @@ func (p *Proc) InNet(fn func() error) error {
 }
 
 // inNetns runs fn on a fresh locked OS thread moved into the network
-// namespace ns. The thread never moves back, since inside a user namespace
+// namespace ns (nil: left in the enforcer's own). The thread never moves back, since inside a user namespace
 // it may lack the right to re-enter the enforcer's own: it stays locked and
 // exits with its goroutine, once keep closes (nil: at once), so no other
 // code runs there. A child fn starts holds Pdeathsig on that thread, so
@@ -302,9 +303,11 @@ func inNetns(ns *os.File, fn func() error, keep <-chan struct{}) error {
 	errc := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the thread exits with this goroutine
-		if err := setns(ns, syscall.CLONE_NEWNET); err != nil {
-			errc <- fmt.Errorf("setns: %w", err)
-			return
+		if ns != nil {
+			if err := setns(ns, syscall.CLONE_NEWNET); err != nil {
+				errc <- fmt.Errorf("setns: %w", err)
+				return
+			}
 		}
 		errc <- fn()
 		if keep != nil {

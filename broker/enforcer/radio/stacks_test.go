@@ -3,11 +3,14 @@ package radio
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -299,4 +302,49 @@ func TestStacksConfined(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestStackOutlivesEndedThreads (NET-2 Confined radio stacks): a stack's
+// Pdeathsig is tied to the OS thread that forked it, and the runtime ends
+// any thread whose goroutine exits locked to it (as the enforcer's own
+// namespace work does), so a stack forked from a shared thread is killed
+// at random. Many such goroutines run after the start; the stack still
+// answers. Catches a stack forked from a thread other code can end.
+func TestStackOutlivesEndedThreads(t *testing.T) {
+	if !asRoot(t) {
+		return
+	}
+	dir, err := os.MkdirTemp("", "radio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.Chmod(dir, 0o755)
+	bin := filepath.Join(dir, "radio.test")
+	copyFile(t, os.Args[0], bin)
+	proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
+		Args: []string{probeArg, filepath.Join(dir, "none"), filepath.Join(dir, "none.sock")}, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proc.Stop()
+	var wg sync.WaitGroup
+	for range 256 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runtime.LockOSThread() // never unlocked: this thread ends
+		}()
+	}
+	wg.Wait()
+	time.Sleep(200 * time.Millisecond)
+	h, err := NewHost(Config{Devices: []Device{scale}, Timeout: 20 * time.Second,
+		Notify: func(Notification) {}, Log: func(string) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Attach(StackBLE, conn)
+	if _, err := h.State(scale.Name); err != nil {
+		t.Fatalf("the stack after threads ended: %v", err)
+	}
 }
