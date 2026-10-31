@@ -72,7 +72,7 @@ func be16(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
 const (
 	maxQuestions = 64
 	maxRecords   = 128
-	maxSteps     = 1024
+	maxSteps     = 4096
 )
 
 // reader reads one message: its labels are cut from one copy of it, and
@@ -455,6 +455,22 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	isIns := func(n name) bool {
 		return n.instance() && (pi[n.key()] || ins.has(n.key(), now)) && !elsewhere(n.key())
 	}
+	// The service types the sender has an instance of, built once, when
+	// the packet enumerates them.
+	var types map[string]bool
+	hasType := func(k string) bool {
+		if types == nil {
+			types = map[string]bool{}
+			for _, ks := range [][]string{live(ins, now), slices.Collect(maps.Keys(pi))} {
+				for _, k := range ks {
+					if !elsewhere(k) {
+						types[parentKey(k)] = true
+					}
+				}
+			}
+		}
+		return types[k]
+	}
 	keep := func(r record) bool {
 		if r.class&0x7FFF != classIN || !r.name.shown() || !r.target.shown() {
 			return false
@@ -469,9 +485,7 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		case typePTR:
 			if r.name.key() == services.key() {
 				// A service type, if the sender has an instance of it.
-				return r.target.serviceType() && slices.ContainsFunc(slices.Concat(live(ins, now), slices.Collect(maps.Keys(pi))), func(k string) bool {
-					return parentKey(k) == r.target.key() && !elsewhere(k)
-				})
+				return r.target.serviceType() && hasType(r.target.key())
 			}
 			// An instance, from its type or a subtype of it.
 			if !isIns(r.target) {

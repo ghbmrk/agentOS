@@ -613,13 +613,21 @@ func TestParseBounded(t *testing.T) {
 	}
 	// The costliest names are many short labels, entered again and again
 	// by pointer: the message's step budget ends them.
-	if _, ok := parse(labels(7)); !ok {
+	if _, ok := parse(labels(31)); !ok {
 		t.Error("refused a message within the step budget")
 	}
-	if _, ok := parse(labels(8)); ok {
+	if _, ok := parse(labels(32)); ok {
 		t.Error("parsed a message over the step budget")
 	}
-	for _, w := range [][]byte{worst(maxRecords), labels(7)} {
+	// A whole enumeration of maxRecords service types fits the budget.
+	var enum []record
+	for i := range maxRecords {
+		enum = append(enum, ptr("_services._dns-sd._udp.local", fmt.Sprintf("_s%d._tcp.local", i), 120))
+	}
+	if _, ok := parse(response(enum, nil).bytes()); !ok {
+		t.Error("refused an enumeration of maxRecords service types")
+	}
+	for _, w := range [][]byte{worst(maxRecords), labels(31)} {
 		if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 4*maxRecords {
 			t.Errorf("a costliest message within the caps costs %v allocations", allocs)
 		}
@@ -713,6 +721,11 @@ func TestReadLimitBeforeParse(t *testing.T) {
 	r.handle("hh0", 5353, announce("later"), t0.Add(time.Second/readPerSec))
 	if !r.f.claimed["hh0"].has(dn("later.local").key(), t0) {
 		t.Error("the read limit did not refill")
+	}
+	// Past the limit a packet is not even parsed: it costs nothing.
+	costly := labels(31)
+	if allocs := testing.AllocsPerRun(10, func() { r.handle("hh0", 5353, costly, t0) }); allocs != 0 {
+		t.Errorf("a packet past the read limit was parsed (%v allocations)", allocs)
 	}
 	// The printer's answer goes to Household, once.
 	out, outs := r.handle("ap0.105", 5353, response([]record{a("printer.local", "10.13.0.2", 120)}, nil).bytes(), t0)
