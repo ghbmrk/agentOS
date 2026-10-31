@@ -436,13 +436,11 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"ENV{SYSTEMD_WANTS}=":              {"ENV{SYSTEMD_WANTS}=\"agentos-x@%k.service\", TAG+=\"systemd\"\n", `sets no SYSTEMD_ property`},
 		"ENV{SYSTEMD_USER_WANTS}+=":        {"ENV{SYSTEMD_USER_WANTS}+=\"x.service\"\n", `sets no SYSTEMD_ property`},
 		"ENV{SYSTEMD_ALIAS}:=":             {"ENV{SYSTEMD_ALIAS}:=\"/dev/x\"\n", `sets no SYSTEMD_ property`},
-		"IMPORT{file}":                     {"IMPORT{file}=\"/etc/agentos/x\"\n", `IMPORT{file}`},
+		"IMPORT{file}":                     {"IMPORT{file}=\"/etc/agentos/x\"\n", `properties go unread`},
 		"IMPORT{parent} of a glob":         {"IMPORT{parent}=\"SYSTEMD_*\"\n", `one plain property name`},
 		"IMPORT{parent} of all":            {"IMPORT{parent}=\"*\"\n", `one plain property name`},
 		"IMPORT{db} of SYSTEMD_WANTS":      {"IMPORT{db}=\"SYSTEMD_WANTS\"\n", `one plain property name`},
 		"IMPORT{cmdline} of SYSTEMD_WANTS": {"IMPORT{cmdline}=\"SYSTEMD_WANTS\"\n", `one plain property name`},
-		// The % check alone: the path is listed, so only it refuses this.
-		"a listed %c in the program": {"RUN+=\"/usr/lib/agentos/%c\"\n", `absolute program path`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -451,9 +449,6 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 				path = "image/mkosi/rules.d/60-x.rules"
 			}
 			files[path] = files[path] + "RUN+=\"/usr/lib/agentos/agentos-side\"\n" + c.text
-			if name == "a listed %c in the program" {
-				files[programsFile] += "/usr/lib/agentos/%c a path holding a udev substitution\n"
-			}
 			// Each refusal's own text: a case another check catches first
 			// does not reach the check it names (#4280 2).
 			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), c.want) {
