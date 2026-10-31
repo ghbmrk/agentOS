@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -595,17 +596,147 @@ func TestLogNamesOnlySignedDevices(t *testing.T) {
 	if c := cl.code(wire.Tighten{ID: 6, Kind: wire.RemoveDevice, Device: "lamp"}); c != wire.OK || r.eng.Current().Device("lamp") != nil {
 		t.Fatalf("remove lamp: %v", c)
 	}
-	want := map[uint64]string{1: unknown, 2: unknown, 3: unknown, 4: unknown + ",tv", 5: "lamp", 6: "lamp", 7: "tv," + unknown}
-	got := map[uint64]string{}
+	want := map[uint64][2]string{1: {unknown, ""}, 2: {unknown, ""}, 3: {unknown, ""}, 4: {unknown, "tv"}, 5: {"lamp", ""}, 6: {"lamp", ""}, 7: {"tv", unknown}}
+	got := map[uint64][2]string{}
 	for _, e := range r.events()[n:] {
-		if strings.Contains(e.Device, forged) {
+		if strings.Contains(e.Device+e.Other, forged) {
 			t.Errorf("the core's name was logged: %+v", e)
 		}
 		if e.Kind != KindHello { // the hello's line may land after dial returns
-			got[e.ID] = e.Device
+			got[e.ID] = [2]string{e.Device, e.Other}
 		}
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("logged devices %v, want %v", got, want)
+	}
+}
+
+// TestLogPairUnambiguous (NET-2 Channel, #4066): signed IDs may hold a
+// comma, so a pair logged as one joined string could name two pairs the
+// same way. Each member has its own field, and two pairs that join the
+// same way log differently. Revert mutant: Device = A + "," + B.
+func TestLogPairUnambiguous(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	n := len(r.events())
+	cl.code(wire.Tighten{ID: 1, Kind: wire.RemovePair, A: "a,b", B: "c"})
+	cl.code(wire.Tighten{ID: 2, Kind: wire.RemovePair, A: "a", B: "b,c"})
+	got := map[uint64][2]string{}
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindTighten {
+			got[e.ID] = [2]string{e.Device, e.Other}
+		}
+	}
+	want := map[uint64][2]string{1: {"a,b", "c"}, 2: {"a", "b,c"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("logged pairs %v, want %v", got, want)
+	}
+}
+
+// TestShortName (NET-2 Channel, #4066): the owner's line shows an unsigned
+// name as "unknown" and 12 hex digits, which still tells repeated unknown
+// names apart, and the event keeps the full hash for the detail view. A
+// signed ID shows as itself, and no form shows the core's words.
+func TestShortName(t *testing.T) {
+	d := home()
+	full := logName(d, "resumed-by-the-owner")
+	short := Short(full)
+	sum := sha256.Sum256([]byte("resumed-by-the-owner"))
+	if want := "unknown " + hex.EncodeToString(sum[:6]); short != want {
+		t.Errorf("Short(%q) = %q, want %q", full, short, want)
+	}
+	if other := Short(logName(d, "resumed-by-the-owner2")); other == short {
+		t.Errorf("two unknown names show the same: %q", other)
+	}
+	for _, s := range []string{"lamp", "unknown", "", "a,b"} {
+		if got := Short(logName(d, s)); got != s {
+			t.Errorf("Short of signed %q = %q", s, got)
+		}
+	}
+}
+
+// countingPolicy counts the policy copies the channel takes.
+type countingPolicy struct {
+	Policy
+	mu sync.Mutex
+	n  int
+}
+
+func (p *countingPolicy) Current() policy.Document {
+	p.mu.Lock()
+	p.n++
+	p.mu.Unlock()
+	return p.Policy.Current()
+}
+
+func (p *countingPolicy) take() int { p.mu.Lock(); defer p.mu.Unlock(); n := p.n; p.n = 0; return n }
+
+// TestOnePolicyCopyPerRequest (#4066): the channel takes at most one sorted
+// deep copy of the policy per request, paused or not, and none for a
+// request that names no device (an export read, an announce). Revert
+// mutant: command or read calling Policy.Current() again.
+func TestOnePolicyCopyPerRequest(t *testing.T) {
+	var cp *countingPolicy
+	r := newRig(t, func(c *Config) { cp = &countingPolicy{Policy: c.Policy}; c.Policy = cp })
+	cl := r.dial()
+	reqs := []wire.Msg{
+		cmd(1, "lamp", wire.VerbOn),
+		cmd(2, "heater", wire.VerbOff),
+		wire.Read{ID: 3, What: wire.ReadState, Device: "lamp"},
+		wire.Read{ID: 4, What: wire.ReadFingerprint, Device: "lock"},
+		wire.Tighten{ID: 6, Kind: wire.IsolateDevice, Device: "tv"},
+	}
+	none := []wire.Msg{wire.Announce{ID: 9}, wire.Read{ID: 5, What: wire.ReadExport}}
+	check := func(when string) {
+		for _, m := range reqs {
+			cp.take()
+			cl.do(m)
+			if n := cp.take(); n > 1 {
+				t.Errorf("%s: %T took %d policy copies", when, m, n)
+			}
+		}
+		for _, m := range none {
+			cp.take()
+			cl.do(m)
+			if n := cp.take(); n != 0 {
+				t.Errorf("%s: %+v took %d policy copies", when, m, n)
+			}
+		}
+	}
+	check("open")
+	r.ch.mu.Lock()
+	r.ch.paused = true
+	r.ch.mu.Unlock()
+	check("paused")
+}
+
+// TestPausedLogsNames (NET-2 Channel, #4066): a request the paused channel
+// refuses is still logged by the names the signed policy holds, a pair's
+// members each in its own field and an unsigned name only as its hash.
+// Revert mutant: names set after gate, or blanked when paused.
+func TestPausedLogsNames(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	r.ch.mu.Lock()
+	r.ch.paused = true
+	r.ch.mu.Unlock()
+	n := len(r.events())
+	cl.code(cmd(1, "lamp", wire.VerbOn))
+	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: "heater"})
+	cl.code(wire.Tighten{ID: 3, Kind: wire.RemovePair, A: "a,b", B: "c"})
+	cl.code(cmd(4, "resumed-by-the-owner", wire.VerbOff))
+	sum := sha256.Sum256([]byte("resumed-by-the-owner"))
+	want := map[uint64][2]string{1: {"lamp", ""}, 2: {"heater", ""}, 3: {"a,b", "c"}, 4: {"unknown " + hex.EncodeToString(sum[:]), ""}}
+	got := map[uint64][2]string{}
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindCommand || e.Kind == KindRead || e.Kind == KindTighten {
+			if e.Code != wire.Paused {
+				t.Errorf("not refused as paused: %+v", e)
+			}
+			got[e.ID] = [2]string{e.Device, e.Other}
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("paused log names %v, want %v", got, want)
 	}
 }

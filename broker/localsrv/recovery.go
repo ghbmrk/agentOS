@@ -36,8 +36,12 @@ type Recovery interface {
 	LostWithdraw(ctx context.Context) error
 	// Restart restarts the box.
 	Restart(ctx context.Context) error
-	// LostCard is the new card's bits the kernel holds.
-	LostCard(ctx context.Context) ([]byte, error)
+	// LostCardBegin returns the challenge a hardware key signs to see the
+	// new card the kernel holds, and the card's ID (#4128).
+	LostCardBegin(ctx context.Context) (localapi.RecoveryLostCardBegun, error)
+	// LostCard is the new card's bits the kernel holds, under the hardware
+	// key whose get() assertion over LostCardBegin's challenge this is.
+	LostCard(ctx context.Context, authData, clientData, sig []byte) (localapi.RecoveryLostCard, error)
 	// LostDone has the kernel wipe them.
 	LostDone(ctx context.Context) error
 }
@@ -75,16 +79,16 @@ func (s *Server) recoveryOps() map[string]sockets.Handler {
 				return nil, s.cfg.Recovery.Restart(ctx)
 			})
 		},
-		localapi.OpRecoveryLostCard: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+		localapi.OpRecoveryLostCardBegin: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 			return s.recoverySession(args, func() (any, error) {
-				b, err := s.cfg.Recovery.LostCard(ctx)
-				if err == nil && len(b) != localapi.RecoveryCardLen {
-					clear(b)
+				b, err := s.cfg.Recovery.LostCardBegin(ctx)
+				if err == nil && (len(b.Challenge) != localapi.PasskeyChallenge || len(b.ID) != localapi.RecoveryIDLen) {
 					err = sockets.Code(localapi.ErrRecoveryUnavailable)
 				}
-				return localapi.RecoveryLostCard{Card: b}, err
+				return b, err
 			})
 		},
+		localapi.OpRecoveryLostCard: s.recoveryLostCard,
 		localapi.OpRecoveryLostDone: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
 			return s.recoverySession(args, func() (any, error) { return nil, s.cfg.Recovery.LostDone(ctx) })
 		},
@@ -188,4 +192,36 @@ func (s *Server) recoveryLost(ctx context.Context, _ sockets.Peer, args json.Raw
 		return nil, recoveryErr(err)
 	}
 	return nil, nil
+}
+
+func (s *Server) recoveryLostCard(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.RecoveryLost
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || !assertionPart(in.AuthenticatorData) || !assertionPart(in.ClientDataJSON) || !assertionPart(in.Signature) {
+		return nil, errBadArgs
+	}
+	if !s.allowPerMinute(&s.recoveryRotates, RecoveryRotatesPerMinute) {
+		return nil, errLimited
+	}
+	c, err := s.cfg.Recovery.LostCard(ctx, in.AuthenticatorData, in.ClientDataJSON, in.Signature)
+	if err == nil && (len(c.Card) != localapi.RecoveryCardLen || len(c.ID) != localapi.RecoveryIDLen) {
+		err = sockets.Code(localapi.ErrRecoveryUnavailable)
+	}
+	if err != nil {
+		clear(c.Card)
+		return nil, recoveryErr(err)
+	}
+	return wipedCard(c), nil
+}
+
+// wipedCard encodes as a localapi.RecoveryLostCard and clears the card's
+// bits once encoded, so agentosd keeps no copy after the frame (#4128).
+type wipedCard localapi.RecoveryLostCard
+
+func (c wipedCard) MarshalJSON() ([]byte, error) {
+	defer clear(c.Card)
+	return json.Marshal(localapi.RecoveryLostCard(c))
 }

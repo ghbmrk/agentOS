@@ -430,6 +430,30 @@ func TestMadeCardOffersNoCancel(t *testing.T) {
 	}
 }
 
+// REQ: REC-4
+// MIG-4-recovery-r4e (#4160): a made card's recovery sheet prints its
+// mark, so the owner can tell it from a card made before; a card with no
+// mark prints none, and the mark is escaped like any page text.
+func TestMadeCardPrintsItsMark(t *testing.T) {
+	for mark, want := range map[string]string{"AB12-CD34": "Card mark: <span class=\"mono\">AB12-CD34</span>", "": ""} {
+		d, err := NewDisplay(DisplayConfig{Rotate: &Parts{Recovery: true}, Made: true, Authority: testAuthority(t), Mark: mark, Provision: func(*Card) error { return nil }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		page := string(must(d.Page()))
+		if want != "" && !strings.Contains(page, want) || want == "" && strings.Contains(page, "Card mark") {
+			t.Fatalf("mark %q: %q", mark, page)
+		}
+	}
+	d, err := NewDisplay(DisplayConfig{Rotate: &Parts{Recovery: true}, Made: true, Authority: testAuthority(t), Mark: "<b>", Provision: func(*Card) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page := string(must(d.Page())); strings.Contains(page, "Card mark: <span class=\"mono\"><b>") {
+		t.Fatal("the mark is not escaped")
+	}
+}
+
 func must(b []byte, err error) []byte {
 	if err != nil {
 		panic(err)

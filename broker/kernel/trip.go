@@ -36,7 +36,8 @@ import (
 // responses. A honey key, a table destination, and a value placed in the
 // planner sandbox or its view that a planner session sends stop only that
 // session: the plan is refused and its task ends, and planning goes on. A
-// refused connection at an exit stops only that call. Any other value, one
+// refused connection at an exit, and a honey key at Extend or Issue, which
+// only the owner side calls, stop only that call. Any other value, one
 // placed on the host, the edge or in the sealed store, or sent with no
 // planner session behind it, gets the full response: the keys of its scope
 // are paused and planning stops, until the owner resumes with a passkey on
@@ -226,8 +227,8 @@ type SecurityText struct {
 
 var tripTexts = map[string]string{
 	RespFull:    "Security: a decoy was used, so something in me is breached. I paused the keys it came from and stopped planning. Nothing resumes until you open my owner page and use your passkey.",
-	RespSession: "Security: a planner session reached for a decoy, as injected content can make it. I refused that step and stopped only that session; planning goes on.",
-	RespCall:    "Security: one of my services reached for a decoy. I refused that one request; nothing else stopped.",
+	RespSession: "Security: a planner session reached for a decoy, as injected content can make it. I refused that step and stopped only that session; planning goes on. Repeats in the next hour are logged, not texted.",
+	RespCall:    "Security: one of my services reached for a decoy. I refused that one request; nothing else stopped. Repeats in the next hour are logged, not texted.",
 }
 
 // SecurityTexts is the texts for the owner line to send, oldest first: one
@@ -335,9 +336,10 @@ func destOf(v string) (netip.Addr, bool) {
 }
 
 // honeyTrip refuses a key check outside Admit (Extend, Issue) that cites a
-// honey key, and logs its trip: it stops the session of plan when plan is
-// held on its spend, else only that request (KRN-12 Trips, Response).
-func (k *Kernel) honeyTrip(now int64, plan string, keys ...key.Key) error {
+// honey key, and logs its trip: that request alone stops. Both are owner-side
+// calls no planner session makes, so no session is stopped (KRN-12 Trips,
+// Response).
+func (k *Kernel) honeyTrip(now int64, keys ...key.Key) error {
 	d := &k.s.decoys
 	if !d.set {
 		return nil
@@ -348,9 +350,6 @@ func (k *Kernel) honeyTrip(now int64, plan string, keys ...key.Key) error {
 			continue
 		}
 		t := Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespCall}
-		if _, held := k.s.SpendHeld[plan]; held && k.s.Plans[plan] != nil {
-			t.Response, t.Plan, t.Session = RespSession, plan, k.s.Plans[plan].Plan.Task()
-		}
 		if _, err := k.emit(now, TTrip, t); err != nil {
 			return err
 		}
@@ -379,9 +378,9 @@ func (s *State) resumeOK(b tripResumed) bool {
 // tripOK checks a trip's shape: known cause, exit and response, a table
 // entry, and a session or scopes only where its response stops them. A
 // plan's trip comes only in the rejection of that plan (rejected is its ID);
-// a trip entry is an input, either an exit's call trip or a honey key at
-// Extend (the session of a plan held on its spend) or Issue (that request
-// alone).
+// a trip entry is an input, a call trip only: an exit's, or a honey key at
+// Extend or Issue. So no recorded input, such as a spend.held, lets one
+// stop a session or pause a key.
 func (s *State) tripOK(t Trip, rejected string) bool {
 	d := &s.decoys
 	if !d.set || t.Entry < 0 || t.Entry >= len(d.entries) || t.Exit == "" {
@@ -395,15 +394,7 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 	honey := t.Cause == CauseHoneyKey && t.Exit == ExitKernel && d.entries[t.Entry].Kind == decoy.KHoneyKey
 	switch t.Response {
 	case RespSession:
-		if t.Plan == "" || len(t.Scopes) != 0 {
-			return false
-		}
-		if rejected != "" {
-			return t.Plan == rejected
-		}
-		_, held := s.SpendHeld[t.Plan]
-		p := s.Plans[t.Plan]
-		return honey && held && p != nil && t.Session == p.Plan.Task()
+		return t.Plan != "" && t.Plan == rejected && len(t.Scopes) == 0
 	case RespFull:
 		return t.Plan != "" && t.Plan == rejected && t.Session == ""
 	case RespCall:

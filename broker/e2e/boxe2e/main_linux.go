@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -176,7 +177,7 @@ func (d *driver) harness() error {
 	if err := os.MkdirAll(filepath.Dir(pageDropIn), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
+	if err := writeNoFollow(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
 		return err
 	}
 	for _, c := range [][]string{{"systemctl", "daemon-reload"}, {"systemctl", "restart", "agentos-localui.service"}} {
@@ -304,12 +305,12 @@ func seal() error {
 	if err := claim.Seal(change.FileStore{Path: claim.StatePath}, code, rand.Reader, func(string) {}); err != nil {
 		return fmt.Errorf("seal: %w", err)
 	}
-	return os.WriteFile(codeFile, []byte(code), 0o600)
+	return writeNoFollow(codeFile, []byte(code), 0o600)
 }
 
 // claim claims the box from the phone with the code sealed before boot.
 func (d *driver) claim() error {
-	b, err := os.ReadFile(codeFile)
+	b, err := readNoFollow(codeFile)
 	if err != nil {
 		return fmt.Errorf("the seal run left no claim code: %w", err)
 	}
@@ -509,7 +510,7 @@ func (d *driver) card() error {
 	}
 	// The card prints the published page certificate's fingerprint
 	// (OWN-card-flow-b-3), read before the confirm: enrollment removes it.
-	pub, err := os.ReadFile(publishedAuthority)
+	pub, err := readNoFollow(publishedAuthority)
 	if err != nil {
 		return fmt.Errorf("no published page certificate before the confirm: %v", err)
 	}
@@ -526,7 +527,7 @@ func (d *driver) card() error {
 	if err := waitGone(publishedAuthority, 2*time.Minute); err != nil {
 		return err
 	}
-	b, err := os.ReadFile(cardLatch)
+	b, err := readNoFollow(cardLatch)
 	if err != nil {
 		return err
 	}
@@ -544,7 +545,7 @@ func (d *driver) card() error {
 func waitGone(path string, wait time.Duration) error {
 	end := time.Now().Add(wait)
 	for {
-		_, err := os.Stat(path)
+		_, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -632,7 +633,7 @@ func (d *driver) workerDiag(what, out string) string {
 				argv = unitArgv
 			}
 			args, _ := argv()
-			b, _ := os.ReadFile(execLogPath(args))
+			b, _ := readNoFollow(execLogPath(args))
 			return string(b)
 		}
 	}
@@ -724,21 +725,35 @@ func signInOutFile(machines string) string {
 }
 
 // workerOutFile is file name in the workspace of the newest provider
-// worker under the machines directory, at its end, "" for none.
+// worker under the machines directory, at its end, "" for none. The
+// workspace is in the guest's upper layer, where the guest may have made
+// any name a link, so the path is resolved inside the layer (os.Root): a
+// link that leads out of it is refused, never read as root (#3946).
 func workerOutFile(machines, name string) string {
 	cwd := provagent.Builtins()[egress.Codex().Provider].Cwd
-	paths, _ := filepath.Glob(filepath.Join(machines, "machines", vm.ProviderPrefix+"*", "disk", "upper", cwd, name))
+	rel := filepath.Join(strings.TrimPrefix(cwd, "/"), name)
+	uppers, _ := filepath.Glob(filepath.Join(machines, "machines", vm.ProviderPrefix+"*", "disk", "upper"))
 	var best string
 	var at time.Time
-	for _, p := range paths {
-		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && !fi.ModTime().Before(at) {
-			best, at = p, fi.ModTime()
+	for _, u := range uppers {
+		r, err := os.OpenRoot(u)
+		if err != nil {
+			continue
 		}
+		if fi, err := r.Lstat(rel); err == nil && fi.Mode().IsRegular() && !fi.ModTime().Before(at) {
+			best, at = u, fi.ModTime()
+		}
+		r.Close()
 	}
 	if best == "" {
 		return ""
 	}
-	f, err := os.Open(best)
+	r, err := os.OpenRoot(best)
+	if err != nil {
+		return ""
+	}
+	defer r.Close()
+	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return ""
 	}
