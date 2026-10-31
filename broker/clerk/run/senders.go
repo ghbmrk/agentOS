@@ -80,7 +80,9 @@ func loadSenders(dir string, s clerk.Sealer, slot string) sealedSenders {
 	return r
 }
 
-func saveSenders(dir string, s clerk.Sealer, slot string, r sealedSenders) error {
+// saveSenders seals r as dir's record of senders for the account at slot.
+// stop, for tests only, is privfile.WriteAtomic's; nil runs every step.
+func saveSenders(dir string, s clerk.Sealer, slot string, r sealedSenders, stop func(i int) bool) error {
 	var plain bytes.Buffer
 	if err := gob.NewEncoder(&plain).Encode(r); err != nil {
 		return err
@@ -93,7 +95,7 @@ func saveSenders(dir string, s clerk.Sealer, slot string, r sealedSenders) error
 	if len(blob) > maxSendersRec {
 		return errors.New("run: the record of who writes to the owner is past its bound")
 	}
-	return privfile.WriteAtomic(dir, sendersFile, blob, nil)
+	return privfile.WriteAtomic(dir, sendersFile, blob, stop)
 }
 
 // sendersState is how far the senders read is, for the world and STATUS.
@@ -164,7 +166,7 @@ func (h *MailHost) readSenders() (more bool) {
 		}
 		// A record that cannot be saved stands in memory; the next start
 		// reads again from the one saved before.
-		_ = saveSenders(h.dir, h.cfg.Sealer, slot, *rec)
+		_ = saveSenders(h.dir, h.cfg.Sealer, slot, *rec, nil)
 	}
 	st := sendersFull
 	switch {
