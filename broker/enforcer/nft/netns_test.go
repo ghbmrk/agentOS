@@ -126,8 +126,48 @@ func (h *home) newHost(name string) *host {
 	}
 	x := &host{name: name, pid: cmd.Process.Pid}
 	h.hosts[name] = x
+	h.quiet(x)
 	h.in(x, "ip", "link", "set", "lo", "up")
 	return x
+}
+
+// quiet stops host x's kernel from starting IPv6 traffic of its own: no
+// router solicitations (three, four seconds apart, so the last lands about
+// nine seconds after its link comes up) and no duplicate address
+// detection. Left on, they reach the enforcer at times the test does not
+// choose and move counters such as edge_in inside a window that expects
+// them still. The defaults are what a device gets when its interface
+// arrives in this namespace, so they are set before it does. Every probe
+// the tests care about is sent by the test itself.
+func (h *home) quiet(x *host) {
+	if !h.v6 {
+		return
+	}
+	within(h.t, x, func() {
+		for _, scope := range []string{"default", "all"} {
+			for _, k := range []string{"accept_ra", "router_solicitations", "dad_transmits"} {
+				path := "/proc/sys/net/ipv6/conf/" + scope + "/" + k
+				if err := os.WriteFile(path, []byte("0"), 0); err != nil {
+					h.t.Fatalf("%s: %s: %v", x.name, path, err)
+				}
+			}
+		}
+	})
+}
+
+// mac is the hardware address of host x's interface ifc, read in x's
+// namespace. It must not come from /sys/class/net: sysfs lists the
+// interfaces of the namespace that mounted it, which is the machine's, not
+// x's, so a read there is another device's address or no file at all.
+func (h *home) mac(x *host, ifc string) string {
+	h.t.Helper()
+	out := h.in(x, "ip", "-o", "link", "show", "dev", ifc)
+	f := strings.Fields(out)
+	i := slices.Index(f, "link/ether")
+	if i < 0 || i+1 >= len(f) {
+		h.t.Fatalf("%s %s: no hardware address in %q", x.name, ifc, out)
+	}
+	return f[i+1]
 }
 
 // in runs a command in host x's namespace.
