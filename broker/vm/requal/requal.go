@@ -33,6 +33,14 @@ type Source interface {
 	Cases(ctx context.Context) ([]Case, error)
 }
 
+// DroppedSource is a Source whose suite the owner can shrink by passkey
+// (HLD-3): it gives the cases and how many the owner dropped, read at once,
+// so the security floor counts the drops and no other shrink (update.Score).
+type DroppedSource interface {
+	Source
+	CasesDropped(ctx context.Context) ([]Case, int, error)
+}
+
 // Grade is a grader's judgement of one output. Unadmitted counts replayed
 // steps the recorded keys would not have admitted (HLD-2).
 type Grade struct {
@@ -95,7 +103,19 @@ func (r *Runner) Run(ctx context.Context, rel *update.Verified, suite string) (u
 	if rel != nil && !rel.OK() {
 		return update.Score{}, errors.New("requal: release is not checked")
 	}
-	cases, err := s.Source.Cases(ctx)
+	var (
+		cases   []Case
+		dropped int
+		err     error
+	)
+	if ds, ok := s.Source.(DroppedSource); ok {
+		cases, dropped, err = ds.CasesDropped(ctx)
+	} else {
+		cases, err = s.Source.Cases(ctx)
+	}
+	if err == nil && dropped < 0 {
+		err = errors.New("negative drop count")
+	}
 	if err != nil {
 		return update.Score{}, fmt.Errorf("requal: %s cases: %w", suite, err)
 	}
@@ -103,7 +123,7 @@ func (r *Runner) Run(ctx context.Context, rel *update.Verified, suite string) (u
 	if err != nil {
 		return update.Score{}, fmt.Errorf("requal: %s: %w", suite, err)
 	}
-	sc := update.Score{Suite: suite, Digest: digest, Cases: len(cases)}
+	sc := update.Score{Suite: suite, Digest: digest, Cases: len(cases), Dropped: dropped}
 	if len(cases) == 0 {
 		return sc, nil
 	}

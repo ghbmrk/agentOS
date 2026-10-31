@@ -267,6 +267,13 @@ func (h *home) dnsmasq(x *host, name, text string) {
 	time.Sleep(300 * time.Millisecond)
 }
 
+// listed starts every listed view.
+func (h *home) listed(f Files) {
+	for _, v := range f.Listed {
+		h.dnsmasq(nil, "listed-"+v.Iface, v.Conf)
+	}
+}
+
 func (h *home) listen(x *host, port int) {
 	within(h.t, x, func() {
 		ln, err := net.Listen("tcp4", ":"+strconv.Itoa(port))
@@ -364,8 +371,9 @@ const (
 // TestOnlyResolvedAddressesAllowed: the core and a device reach a listed
 // name's address only once the enforcer's own resolver returned it; an
 // address it did not return, a subdomain, an unlisted name, another
-// list's name and an offline device's list open nothing, and a device's
-// port-53 traffic to an outside resolver is answered by the enforcer.
+// list's name and an offline device's list open nothing; another list's
+// name is not even answered; and a device's port-53 traffic to an outside
+// resolver is answered by its own view.
 // Catches a core dialing an unlisted address under a listed name (NET-2
 // The core's list, NET-3).
 func TestOnlyResolvedAddressesAllowed(t *testing.T) {
@@ -374,7 +382,7 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	}
 	h := build(t, false)
 	f := generate(t)
-	h.dnsmasq(nil, "listed", f.Listed)
+	h.listed(f)
 	h.dnsmasq(nil, "people", f.People)
 
 	// Before any answer, nothing is open: the sets start empty.
@@ -396,11 +404,22 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	expect("core0", coreDNS, "sub.core.example", nxdomain)
 	expect("core0", coreDNS, "updates.core.example", 0, cdnAddr)
 	expect("ap0.101", tvDNS, "tv.example", 0, tvAddr)
-	// Another list's name resolves but fills only that list's set.
-	expect("ap0.101", tvDNS, "plug.example", 0, plugAddr)
+	expect("ap0.101", tvDNS, "cdn.example", 0, cdnAddr)
+	expect("core0", tvDNS, "tv.example", noAnswer)
+	// Another list's name is refused in a device's own view, and in
+	// another device's, which the redirect makes its own, so it neither
+	// learns that list's address nor fills that list's set (ENF-f-4).
+	expect("ap0.101", tvDNS, "plug.example", refused)
+	expect("ap0.101", "10.103.0.1", "plug.example", refused)
+	expect("ap0.101", tvDNS, "core.example", refused)
+	expect("core0", coreDNS, "tv.example", refused)
+	if got := h.set(nft.DeviceSet(103, false)); len(got) != 0 {
+		t.Errorf("another device's queries filled the plug's set: %v", got)
+	}
 	expect("ap0.101", tvDNS, "unlisted.example", refused)
 	// Port 53 to an outside resolver is the enforcer's answer.
 	expect("ap0.103", "9.9.9.9", "cdn.example", 0, cdnAddr)
+	expect("ap0.103", "9.9.9.9", "plug.example", 0, plugAddr)
 	expect("ap0.103", upstreamAddr, "unlisted.example", refused)
 	// An offline device's list is never resolved: it has no set.
 	expect("ap0.102", spkDNS, "speaker.example", refused)
@@ -420,9 +439,9 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 		{"ap0.101", tvAddr, true, "returned for its listed name"},
 		{"ap0.101", plugAddr, false, "another device's name"},
 		{"ap0.101", coreAddr, false, "the core's name"},
-		{"ap0.101", cdnAddr, true, "on its list: an answer fills every set whose list names it"},
+		{"ap0.101", cdnAddr, true, "returned for its listed name"},
 		{"ap0.103", cdnAddr, true, "returned, through the redirect"},
-		{"ap0.103", plugAddr, true, "returned for its listed name to another device's query"},
+		{"ap0.103", plugAddr, true, "returned for its listed name, through the redirect"},
 		{"ap0.102", speakerOut, false, "an offline device"},
 	} {
 		if got := h.reaches(c.from, c.addr); got != c.want {
@@ -443,9 +462,10 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	}
 }
 
-// TestNoServiceOnEdge: with no ruleset loaded at all, the three instances
-// still answer neither DNS nor DHCP on the edge's segment, while a device
-// gets a lease (NET-2 Segments, Hardening: DNS and DHCP only on the
+// TestNoServiceOnEdge: with no ruleset loaded at all, the instances still
+// answer neither DNS nor DHCP on the edge's segment, and no listed view
+// answers a query that arrives on another view's interface, while a
+// device gets a lease (NET-2 Segments, Hardening: DNS and DHCP only on the
 // networks the enforcer serves). Catches a listener on the edge's segment
 // that only the firewall hides.
 func TestNoServiceOnEdge(t *testing.T) {
@@ -463,12 +483,23 @@ func TestNoServiceOnEdge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.dnsmasq(nil, "listed", f.Listed)
+	h.listed(f)
 	h.dnsmasq(nil, "people", f.People)
 	h.dnsmasq(nil, "dhcp", strings.Replace(f.DHCP, fixtureSetup().LeaseFile, filepath.Join(t.TempDir(), "leases"), 1))
 
 	if rcode, _ := h.resolve("edge0", "10.60.0.1", "core.example"); rcode != noAnswer {
 		t.Errorf("the edge's segment got a DNS answer (rcode %d)", rcode)
+	}
+	// Each view answers only on its own interface, even with no ruleset
+	// to redirect a query: one sent to another view's address arriving on
+	// a different interface gets nothing (ENF-f-4).
+	for _, c := range [][3]string{{"core0", tvDNS, "tv.example"}, {"ap0.101", "10.103.0.1", "plug.example"}, {"ap0.101", coreDNS, "core.example"}} {
+		if rcode, _ := h.resolve(c[0], c[1], c[2]); rcode != noAnswer {
+			t.Errorf("%s asked %s's view for %s: rcode %d", c[0], c[1], c[2], rcode)
+		}
+	}
+	if rcode, _ := h.resolve("ap0.101", tvDNS, "tv.example"); rcode != 0 {
+		t.Errorf("control: the TV got rcode %d", rcode)
 	}
 	if rcode, _ := h.resolve("core0", coreDNS, "core.example"); rcode != 0 {
 		t.Errorf("control: the core got rcode %d", rcode)
