@@ -100,3 +100,35 @@ func TestRecoveryRotateIsKnown(t *testing.T) {
 		t.Fatalf("rederive %+v", got)
 	}
 }
+
+// MIG-4-recovery-r4c (#4128): only a hardware key's tap over the card's
+// own ID shows the lost-card route's new card. A phone passkey's, a
+// stranger's, another card's or a rotation's signature refuses, as does an
+// ID out of shape; none logs. Catches an owner-page session signed in with
+// the phone passkey alone reading the only recovery key that opens the
+// store.
+func TestRecoveryCardTapNeedsAnAnchor(t *testing.T) {
+	r := newRig(t)
+	phone, stranger := gen(8), gen(9)
+	must(t, r.k.Enroll(0, key.Enroll(r.owner.pass, phone.pk)))
+	h := kernel.RecoveryCardHash(ridNext)
+	before := r.k.Log().Len()
+	for name, c := range map[string]key.Cosign{
+		"none":          {},
+		"phone passkey": key.Approve(phone.pass, h),
+		"stranger":      key.Approve(stranger.pass, h),
+		"another card":  key.Approve(r.owner.pass, kernel.RecoveryCardHash(ridOld)),
+		"rotation":      key.Approve(r.owner.pass, kernel.RecoveryRotateHash(ridOld, "")),
+	} {
+		if err := r.k.RecoveryCardTap(ridNext, c); !errors.Is(err, kernel.ErrRotateSig) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if err := r.k.RecoveryCardTap("NEXT", key.Approve(r.owner.pass, kernel.RecoveryCardHash("NEXT"))); !errors.Is(err, kernel.ErrRotateSig) {
+		t.Fatalf("an ID out of shape: %v", err)
+	}
+	must(t, r.k.RecoveryCardTap(ridNext, key.Approve(r.spare.pass, h)))
+	if r.k.Log().Len() != before {
+		t.Fatal("a card tap logged")
+	}
+}

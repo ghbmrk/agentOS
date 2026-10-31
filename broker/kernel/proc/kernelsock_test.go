@@ -1098,26 +1098,56 @@ func TestASetupOnlyKernelTakesNoLinkCall(t *testing.T) {
 // wipes it; then the call refuses, and done again changes nothing. The key
 // is in no log entry nor in any backup taken while it is held, and a
 // restart holds none (the page then tells the owner to ask again).
-// Revert mutants: RecoveryCardDone leaving the key (the read after done
-// answers it); HoldRecoveryCard taking a key of any length (the 19-byte
-// hold reads back).
+// MIG-4-recovery-r4c (#4128): recoverycardid names the card by its backup
+// recipient's ID, and recoverycard answers only on an anchor's signature
+// over that ID's kernel.RecoveryCardHash: a phone passkey's, or one over
+// another card, gets no bits. Revert mutants: RecoveryCardDone leaving the
+// key (the read after done answers it); HoldRecoveryCard taking a key of
+// any length (the 19-byte hold reads back); RecoveryCard skipping the tap
+// check (the phone's read answers).
 func TestNewRecoveryHeldUntilDone(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	b.subject()
 	dir := b.addTarget("drive", false)
 	o := serveOwner(t, b.h, func() int64 { return b.now })
-	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+	tap := func(priv ed25519.PrivateKey, id string) key.Cosign {
+		return key.Approve(key.Ed25519Signer(priv), kernel.RecoveryCardHash(id))
+	}
+	if _, err := o.RecoveryCardID(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("no card made at this boot: %v", err)
 	}
 	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.CardKeyLen-1))
-	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+	if _, err := o.RecoveryCardID(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("a short key was held: %v", err)
 	}
 	rec := bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)
+	sk, err := handoff.StoreRecoveryKey(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := recipientID(t, sk)
 	held := bytes.Clone(rec)
 	b.h.HoldRecoveryCard(held)
+	if got, err := o.RecoveryCardID(); err != nil || got != id {
+		t.Fatalf("the card's ID: %q, %v; want %q", got, err, id)
+	}
+	phonePub, phonePriv := gen(8)
+	if err := b.h.With(func(k *kernel.Kernel) error {
+		return k.Enroll(b.now, key.Enroll(key.Ed25519Signer(ownerPriv), key.Ed25519(phonePub)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]key.Cosign{
+		"phone":      tap(phonePriv, id),
+		"other card": tap(ownerPriv, recipientID(t, testRK)),
+		"none":       {},
+	} {
+		if got, err := o.RecoveryCard(c); !errors.Is(err, kernel.ErrRotateSig) || got != nil {
+			t.Fatalf("%s: %x, %v", name, got, err)
+		}
+	}
 	for range 2 {
-		if got, err := o.RecoveryCard(); err != nil || !bytes.Equal(got, rec) {
+		if got, err := o.RecoveryCard(tap(sparePriv, id)); err != nil || !bytes.Equal(got, rec) {
 			t.Fatalf("the card: %x, %v", got, err)
 		}
 	}
@@ -1144,7 +1174,7 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+	if _, err := o.RecoveryCard(tap(ownerPriv, id)); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("after done: %v", err)
 	}
 	if !bytes.Equal(held, make([]byte, len(held))) {
@@ -1153,8 +1183,25 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 	b.h.HoldRecoveryCard(bytes.Clone(rec))
 	b.restart()
 	o = serveOwner(t, b.h, func() int64 { return b.now })
-	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
+	if _, err := o.RecoveryCardID(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("after a restart: %v", err)
+	}
+}
+
+// MIG-4-recovery-r4c (#4128): the card's bits recoverycard answers are
+// cleared once encoded, so the kernel keeps only its held copy.
+func TestRecoveryCardReadClearsOnceEncoded(t *testing.T) {
+	bits := bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)
+	raw, err := json.Marshal(any(recoveryCardRead{bits}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back recoveryCardRead
+	if err := json.Unmarshal(raw, &back); err != nil || !bytes.Equal(back.Key, bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)) {
+		t.Fatalf("decoded %x, %v", back.Key, err)
+	}
+	if !bytes.Equal(bits, make([]byte, len(bits))) {
+		t.Fatal("the encoded bits stay in memory")
 	}
 }
 

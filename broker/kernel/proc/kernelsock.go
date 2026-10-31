@@ -198,6 +198,14 @@ type (
 	recoveryCardRead struct {
 		Key []byte `json:"key"`
 	}
+	// recoveryCardArgs is an anchor's signature over the card's
+	// kernel.RecoveryCardHash; recoveryCardID names the card.
+	recoveryCardArgs struct {
+		Cosign key.Cosign `json:"cosign"`
+	}
+	recoveryCardID struct {
+		ID string `json:"id"`
+	}
 	// recipientArgs is the new recipient in its wire form and its approval.
 	recipientArgs struct {
 		Recipient []byte `json:"recipient"`
@@ -362,9 +370,21 @@ var OwnerSide = Side{name: "owner", ops: map[string]op{
 		return nil, h.SwitchRecipient(now, a.Recipient, a.Approval)
 	},
 	// The lost-card route (D-201 route B): the key the unlock step made at
-	// this boot, for the new card, until the owner confirms it.
-	"recoverycard": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
-		b, err := h.RecoveryCard()
+	// this boot, for the new card, until the owner confirms it, shown on
+	// an anchor's tap over its ID (#4128).
+	"recoverycardid": func(h *Kernel, _ int64, _ json.RawMessage) (any, error) {
+		id, err := h.RecoveryCardID()
+		if err != nil {
+			return nil, err
+		}
+		return recoveryCardID{id}, nil
+	},
+	"recoverycard": func(h *Kernel, _ int64, raw json.RawMessage) (any, error) {
+		var a recoveryCardArgs
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, ErrArgs
+		}
+		b, err := h.RecoveryCard(a.Cosign)
 		if err != nil {
 			return nil, err
 		}
@@ -928,17 +948,34 @@ func (o Owner) RecoveryRotate(next string, c key.Cosign) ([]byte, error) {
 	return r.Approval, err
 }
 
+// MarshalJSON encodes the card's bits and clears them, so no copy stays
+// once the frame is written (#4128).
+func (r recoveryCardRead) MarshalJSON() ([]byte, error) {
+	defer clear(r.Key)
+	return json.Marshal(struct {
+		Key []byte `json:"key"`
+	}{r.Key})
+}
+
 // SwitchRecipient makes r, in its wire form, the backup recipient, on the
 // card-route approval RecoveryRotate gave for it.
 func (o Owner) SwitchRecipient(r, approval []byte) error {
 	return o.Call("recipient", recipientArgs{r, approval}, nil)
 }
 
+// RecoveryCardID is the held card's backup recipient ID.
+func (o Owner) RecoveryCardID() (string, error) {
+	var r recoveryCardID
+	err := o.Call("recoverycardid", nil, &r)
+	return r.ID, err
+}
+
 // RecoveryCard is the recovery key the unlock step made at this boot on
-// the lost-card route, for the new card; ErrNoRecoveryCard once confirmed.
-func (o Owner) RecoveryCard() ([]byte, error) {
+// the lost-card route, for the new card, on an anchor's signature c over
+// kernel.RecoveryCardHash of its ID; ErrNoRecoveryCard once confirmed.
+func (o Owner) RecoveryCard(c key.Cosign) ([]byte, error) {
 	var r recoveryCardRead
-	err := o.Call("recoverycard", nil, &r)
+	err := o.Call("recoverycard", recoveryCardArgs{c}, &r)
 	return r.Key, err
 }
 
