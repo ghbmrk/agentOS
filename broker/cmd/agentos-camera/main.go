@@ -11,7 +11,7 @@
 //	    -cgroup /sys/fs/cgroup/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service
 //
 // -cgroup is the clerk's own unit's group, delegated to its user: the clerk
-// moves itself into its leaf there before anything else, and each decoder
+// moves itself into its leaf there once it holds its key, and each decoder
 // sandbox's group is made beside it. runsc runs as the clerk's uid, in a
 // user namespace it makes (gvisor.Runtime.Rootless).
 //

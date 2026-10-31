@@ -110,7 +110,12 @@ func TestNoStreamBeforeTurnOn(t *testing.T) {
 	}
 
 	stop := r.start(func(ctx context.Context) error { return r.c.Capture(ctx, step) })
-	waitFor(t, "the step's frames", func() bool { return r.fr.len() == 2 })
+	// The node writes the status after the frames, so a task ended on the
+	// frames alone can cancel before the clerk has read it.
+	waitFor(t, "the step's frames and status", func() bool {
+		_, ok := r.c.LastStatus(testID)
+		return r.fr.len() == 2 && ok
+	})
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Capture at task end = %v", err)
 	}
