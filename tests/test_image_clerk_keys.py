@@ -220,29 +220,44 @@ class ClerkKeyTreeTest(unittest.TestCase):
     def test_a_socket_whose_service_has_a_specifier_is_refused(self):
         # Service=agentos-keeper-%N.service in mail.socket would start the mail clerk (#4264 Security 6543099224).
         write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nService=agentos-keeper-%N.service\n")
-        self.assertEqual(self.v(), ["etc/systemd/system/mail.socket: Service=agentos-keeper-%N.service; a specifier may "
-                                    "expand to a keyed clerk, which the tree check does not model (#4210)"])
+        why = "starts %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
+        self.assertEqual(self.v(), ["etc/systemd/system/mail.socket: " + why % c for c in check.KEYED_CLERKS])
+        # A stock template socket's specifier that can name no keeper unit passes both rules (trixie's journald).
+        write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nAccept=yes\n"
+              "Service=systemd-journald@%i.service\n")
+        self.assertEqual(self.v(), [])
+        self.assertEqual(check.keeper_violations(self.root), [])
         # The unlock unit's own socket rule refuses it too.
         write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nService=agentos-keeper-%i.service\n")
         self.assertIn("mail.socket: starts agentos-keeper-%i.service with its sockets; nothing reaches the unlock step "
                       "past descriptor 2 (#2899)", check.keeper_violations(self.root))
 
     # REQ: CLK-1
-    def test_a_numbered_user_manager_is_refused(self):
+    def test_a_user_manager_instance_is_refused(self):
         # user@.service's %i passes as a login's manager; an instance under a number the tree starts does not
         # (#4264 L3 6543012125).
         sysdir = self.root / "etc/systemd/system"
         (sysdir / "multi-user.target.wants").mkdir(parents=True, exist_ok=True)
         (sysdir / "multi-user.target.wants/user@998.service").symlink_to("/usr/lib/systemd/system/user@.service")
         self.assertEqual(self.v(), ["etc/systemd/system/multi-user.target.wants/user@998.service: starts a per-user "
-                                    "manager under a uid, which may be a keyed clerk's (#4210)"])
+                                    "manager, whose user may be a keyed clerk's (#4210)"])
         (sysdir / "multi-user.target.wants/user@998.service").unlink()
         write(self.root, "etc/systemd/system/x.service", "[Unit]\nWants=user@998.service\n")
-        self.assertEqual(self.v(), ["etc/systemd/system/x.service: Wants=user@998.service starts a per-user manager "
-                                    "under a uid, which may be a keyed clerk's (#4210)"])
+        self.assertEqual(self.v(), ["etc/systemd/system/x.service: Wants=user@998.service starts a per-user manager, "
+                                    "whose user may be a keyed clerk's (#4210)"])
         (sysdir / "x.service").unlink()
+        for name in ("agentos-homekit", "998", "%i"):
+            with self.subTest(name):
+                write(self.root, "etc/systemd/system/x.service", "[Unit]\nWants=user@%s.service\n" % name)
+                self.assertEqual(len(self.v()), 1, self.v())
+                (sysdir / "x.service").unlink()
+        write(self.root, "var/lib/systemd/linger/agentos-homekit")
+        self.assertEqual(self.v(), ["var/lib/systemd/linger: lingering users; logind would start a per-user manager "
+                                    "under each at boot, which may be a keyed clerk's (#4210)"])
+        (self.root / "var/lib/systemd/linger/agentos-homekit").unlink()
+        self.assertEqual(self.v(), [])
         write(self.root, "etc/systemd/system/user@998.service", "[Service]\n")
-        self.assertEqual(self.v(), ["etc/systemd/system/user@998.service: a per-user manager under a uid, which may be "
+        self.assertEqual(self.v(), ["etc/systemd/system/user@998.service: a per-user manager, whose user may be "
                                     "a keyed clerk's (#4210)"])
 
     def test_a_driver_entry_is_no_keeper_clerk(self):

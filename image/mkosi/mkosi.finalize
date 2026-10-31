@@ -1508,7 +1508,7 @@ KERNEL_EXEC = config_lines(b"[Service]\n" + KERNEL_EXEC_TEXT)[0][2]
 # driver template's, which driver_violations holds to its rendered text. Read from the constant.
 _KW = KERNEL_EXEC.split()
 KEYED_CLERKS = tuple(KEEPER_PREFIX + _KW[i + 1].split("=", 1)[0] + ".service" for i in range(len(_KW) - 1)
-                     if _KW[i] == "-clerk-key" and not _KW[i + 1].startswith("driver-"))
+                     if _KW[i] == "-clerk-key" and not re.match(r"driver-[^=]", _KW[i + 1]))
 # The keyed clerks that reach the home network alone (NET-2): IPAddressDeny=any and only these allowed.
 HOME_ONLY_CLERKS = ("agentos-keeper-camera.service", "agentos-keeper-homekit.service")
 HOME_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7",
@@ -1516,9 +1516,10 @@ HOME_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
 # Stock units whose User= takes a specifier, with the one value each may set: systemd's per-user
 # manager, which logind starts for a login, and no clerk's user logs in (sysusers' nologin shell).
 SPECIFIER_USERS = (("user@.service", "%i"),)
-# An instance of it under a number: a unit name the tree may not hold, link or pull in, since that
-# number may be a keyed clerk's uid (#4264 L3 6543012125).
-USER_INSTANCE = re.compile(r"user@[0-9]+\.service")
+# An instance of it: a unit name the tree may not hold, link or pull in, since its instance may be a
+# keyed clerk's uid or name (#4264 L3 6543012125, 6543269658); nor may logind start one at boot (linger).
+USER_INSTANCE = re.compile(r"user@.+\.service")
+LINGER_DIR = "var/lib/systemd/linger"
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
@@ -1650,7 +1651,7 @@ def keeper_violations(root):
     for n in sorted(set(sockets)):
         files = unit_with_dropins(root, dirs, n)
         svc = ini_last(files, "Socket", "Service") or n[:-len(".socket")] + ".service"
-        if svc.startswith("unreadable ") or "%" in svc or svc in UNLOCK_UNITS or \
+        if svc.startswith("unreadable ") or any(may_name(svc, u) for u in UNLOCK_UNITS) or \
                 n[:-len(".socket")] + ".service" in UNLOCK_UNITS:
             out.append("%s: starts %s with its sockets; nothing reaches the unlock step past descriptor 2 (#2899)"
                        % (n, svc))
@@ -1729,7 +1730,7 @@ def clerk_key_violations(root):
                     out.append("%s: IPAddressDeny=%s IPAddressAllow=%s; a home-only clerk denies any and allows "
                                "the home ranges alone (NET-2, #4210)" % (name, " ".join(deny), " ".join(allow)))
                 # An allow on any slice above the unit lets a packet through whatever the unit denies.
-                for sl in parent_slices(ini_last(files, "Service", "Slice") or "system.slice"):
+                for sl in parent_slices(KEEPER_SLICE):  # keeper_unit_violations pins its Slice=
                     sl_files = unit_with_dropins(root, dirs, sl) or slice_dropins(root, sl)
                     up = ini_words(sl_files, "Slice", "IPAddressAllow")
                     if up:
@@ -1737,6 +1738,9 @@ def clerk_key_violations(root):
                                    "(NET-2, #4210)" % (sl, " ".join(up), sl, name))
         except ValueError as e:
             unreadable(name, e)
+    if tree_dir(root, LINGER_DIR) and tree_listdir(root, tree_dir(root, LINGER_DIR)):
+        out.append("%s: lingering users; logind would start a per-user manager under each at boot, which may be a "
+                   "keyed clerk's (#4210)" % LINGER_DIR)
     for user, names in sorted(users.items()):
         if len(names) > 1:
             out.append("%s: User=%s is also %s's; a keyed clerk's user is its own (#4210)"
@@ -1751,11 +1755,11 @@ def clerk_key_violations(root):
                     for f in conf_files(root, [rel]):
                         out += clerk_user_violations(f, n[:-2], clerk_users)
                 else:  # .wants, .requires, .upholds: a link here starts the unit it names.
-                    out += ["%s/%s: starts a per-user manager under a uid, which may be a keyed clerk's (#4210)"
+                    out += ["%s/%s: starts a per-user manager, whose user may be a keyed clerk's (#4210)"
                             % (rel, m) for m in sorted(tree_listdir(root, rel)) if USER_INSTANCE.fullmatch(m)]
                 continue
             if USER_INSTANCE.fullmatch(n):
-                out.append("%s: a per-user manager under a uid, which may be a keyed clerk's (#4210)" % rel)
+                out.append("%s: a per-user manager, whose user may be a keyed clerk's (#4210)" % rel)
                 continue
             if stat.S_ISLNK(st.st_mode):
                 try:
@@ -1774,11 +1778,8 @@ def clerk_key_violations(root):
             if n.endswith(".socket"):
                 svc = ini_last([f] + unit_with_dropins(root, dirs, n)[1:], "Socket", "Service") or \
                     n[:-len(".socket")] + ".service"
-                if "%" in svc:
-                    out.append("%s: Service=%s; a specifier may expand to a keyed clerk, which the tree check does not "
-                               "model (#4210)" % (rel, svc))
                 for c in KEYED_CLERKS:
-                    if c in (svc, n[:-len(".socket")] + ".service"):
+                    if may_name(svc, c) or c == n[:-len(".socket")] + ".service":
                         out.append("%s: starts %s with its sockets; a keyed clerk is handed no socket, which its "
                                    "IP list would not filter (#4210)" % (rel, c))
             out += clerk_user_violations(f, n, clerk_users)
@@ -1798,7 +1799,7 @@ def clerk_user_violations(f, unit, clerk_users):
     out = []
     for s, k, v in lines:
         if any(USER_INSTANCE.fullmatch(w) for w in v.split()):
-            out.append("%s: %s=%s starts a per-user manager under a uid, which may be a keyed clerk's (#4210)"
+            out.append("%s: %s=%s starts a per-user manager, whose user may be a keyed clerk's (#4210)"
                        % (f.rel, k, v))
         if k != "User" or not v:
             continue
@@ -1829,12 +1830,17 @@ def slice_dropins(root, name):
                       + ["%s/slice.d" % d for d in UNIT_PATHS])
 
 
+def may_name(v, name):
+    """Whether setting value V, each specifier and variable in it standing for any text, can be NAME
+    (a socket's Service=systemd-journald@%i.service cannot be a keeper unit; agentos-keeper-%N.service can)."""
+    parts = re.split(r"%.|\$\{[^}]*\}|\$\w+|[%$]", v)
+    return bool(re.fullmatch(".*".join(re.escape(p) for p in parts), name, re.S))
+
+
 def specifier_reaches(v, clerk_users):
     """Whether User= value V, its specifiers and variables standing for any text, can be a keyed clerk's
     user or a number."""
-    parts = re.split(r"%.|\$\{[^}]*\}|\$\w+|[%$]", v)
-    pat = re.compile(".*".join(re.escape(p) for p in parts) + r"\Z", re.S)
-    return any(pat.match(u) for u in clerk_users) or bool(pat.match("1"))
+    return any(may_name(v, u) for u in clerk_users) or may_name(v, "1")
 
 
 # The other parsers that run with an empty root, as a driver does: the mail clerk's IMAP connection
