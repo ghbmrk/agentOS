@@ -72,6 +72,10 @@ exempt-pr 4132
 # Remove once #4133 merges.
 exempt-pr 4133
 
+# #4183 (ENF-netns-flake, #4161): broker/enforcer/nft/ test files, which the G2 list does not name
+# (D-198). Remove once #4183 merges.
+exempt-pr 4183
+
 # #4135 (CAM-clerk-kept-expiry): broker/clerk/camera/ and broker/cmd/agentos-camera/, which the G2 list does not name (D-198).
 # Remove once #4135 merges.
 exempt-pr 4135
