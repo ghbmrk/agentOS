@@ -80,7 +80,7 @@ exempt-pr 4145
 # Remove once #4258 merges.
 exempt-pr 4258
 
-# #4287 (ENF-q, #3675): broker/enforcer/locks/ and broker/daemon/arc2_test.go, which the G2 list does not name (D-198).
+# #4287 (ENF-q, #3675): broker/enforcer/locks/, which the G2 list does not name (D-198).
 # Remove once #4287 merges.
 exempt-pr 4287
 
