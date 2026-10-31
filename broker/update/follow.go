@@ -392,6 +392,9 @@ type Followed struct {
 // follows the project.
 func (s *Store) Following() (Followed, error) {
 	var src Followed
+	if err := safeDir(s.Dir); err != nil {
+		return src, err
+	}
 	b, err := readFile(s.p(sourceFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return src, nil

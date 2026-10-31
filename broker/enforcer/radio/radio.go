@@ -25,9 +25,13 @@ import (
 // Stack names one radio stack, and so one confined process.
 type Stack string
 
-// StackBLE is Bluetooth Low Energy on BlueZ (ENF decision 6). Slice t adds
-// Thread and Matter (D-231).
-const StackBLE Stack = "ble"
+// StackBLE is Bluetooth Low Energy on BlueZ (ENF decision 6). StackThread
+// is OpenThread's ot-daemon behind its adapter (package thread; D-231).
+// Slice t adds Matter.
+const (
+	StackBLE    Stack = "ble"
+	StackThread Stack = "thread"
+)
 
 // Op is one operation a stack may be asked for.
 type Op string
@@ -60,6 +64,9 @@ const (
 // its acceptance test.
 var Declared = map[Stack][]Op{
 	StackBLE: {OpRead, OpConnect, OpDisconnect, OpWrite, OpSubscribe},
+	// Thread serves one device, the network itself, and only its read:
+	// Thread devices are commanded through Matter.
+	StackThread: {OpRead},
 }
 
 // Code is a stack's answer to one request.
