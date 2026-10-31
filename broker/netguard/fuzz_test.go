@@ -308,17 +308,20 @@ var fuzzSeeds = [][]byte{
 // Seeds the controls drive: a router answers once; the gateway moves during
 // both requests of a refresh; a refresh is answered; a router answers, then
 // seven others do, and on the return its router is silent, so its address
-// is still within the bound and still refused.
+// is still within the bound and still refused; the same, then one more
+// answers and the target is silent again, so the silent read must have
+// made it the most recent.
 var (
 	seedAnswered   = []byte{2, 0, 1, 2, 0, 1, 1, 0}
 	seedMovedTwice = []byte{2, 0, 1, 2, 0, 1, 2, 1, 2, 1, 3}
 	seedRefreshed  = []byte{2, 0, 1, 2, 0, 1, 2, 0}
 	seedBoundEdge  = []byte{9, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 6, 2, 0, 0, 1, 2, 0, 0, 2, 2, 0, 0, 3, 2, 0, 0, 4, 2, 0, 0, 5, 2, 0, 0, 7, 2, 0, 0, 8, 2, 0, 0, 6, 2, 3}
+	seedSilentKeep = []byte{9, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 6, 2, 0, 0, 1, 2, 0, 0, 2, 2, 0, 0, 3, 2, 0, 0, 4, 2, 0, 0, 5, 2, 0, 0, 7, 2, 0, 0, 8, 2, 0, 0, 6, 2, 3, 0, 9, 2, 0, 0, 6, 2, 3}
 )
 
 // controlSeeds go in both targets' corpora too, so the fuzz run itself, not
 // only the controls, drives a refresh across two moves (FUZZ-1).
-var controlSeeds = [][]byte{seedAnswered, seedMovedTwice, seedRefreshed, seedBoundEdge}
+var controlSeeds = [][]byte{seedAnswered, seedMovedTwice, seedRefreshed, seedBoundEdge, seedSilentKeep}
 
 // FuzzSourcesRead (FUZZ-1): over any sequence of router moves, before or
 // after a router's answer, Read and ReadLocal return only an external
