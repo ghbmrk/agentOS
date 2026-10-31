@@ -60,7 +60,7 @@ class CameraClerkUnitTest(unittest.TestCase):
     # REQ: CLK-1
     def test_the_kernel_hands_the_key_to_this_unit_alone(self):
         keys = self.clerk_keys()
-        self.assertEqual(sorted(keys), ["camera", "mail"])
+        self.assertEqual(sorted(keys), ["camera", "homekit", "mail"])
         sock, cg = keys["camera"]
         drop = ini(UNITS / "agentos-keeper-.service.d/90-keeper.conf")["Service"]
         self.assertEqual(cg, slice_cgroup(drop["Slice"], CAMERA.name))
@@ -102,7 +102,7 @@ class CameraClerkUnitTest(unittest.TestCase):
         build = (ROOT / "image/build.sh").read_text()
         self.assertIn('sh "$HERE/camdecode.sh" "$STAGE%s"' % arg(self.c, "decode-root"), build)
         self.assertIn('install -m 0755 "$OUT/gvisor/runsc" "$STAGE%s"' % arg(self.c, "runsc"), build)
-        self.assertRegex(build, r"(?s)for cmd in agentosd .*\bagentos-camera; do")
+        self.assertRegex(build, r"(?s)for cmd in agentosd [^;]*\bagentos-camera\b[^;]*; do")
         # runsc's state and the owner socket: the clerk's runtime directory, which the main side may reach.
         run = "/run/" + self.svc["RuntimeDirectory"]
         self.assertEqual(arg(self.c, "owner-sock").rsplit("/", 1)[0], run)

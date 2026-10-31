@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -77,6 +78,9 @@ type host struct {
 type home struct {
 	t     *testing.T
 	hosts map[string]*host
+	// v6 is whether the kernel has IPv6; each link then also gets a
+	// global /64 (see link) and its link-local addresses.
+	v6 bool
 }
 
 func run(t *testing.T, name string, args ...string) string {
@@ -109,7 +113,53 @@ func (h *home) newHost(name string) *host {
 	x := &host{name: name, pid: cmd.Process.Pid}
 	h.hosts[name] = x
 	h.in(x, "ip", "link", "set", "lo", "up")
+	if h.v6 {
+		h.in(x, "sh", "-c", noDAD)
+	}
 	return x
+}
+
+// noDAD turns duplicate address detection off in a namespace, so every
+// IPv6 address, link-local ones included, is usable at once.
+const noDAD = "echo 0 > /proc/sys/net/ipv6/conf/all/accept_dad && echo 0 > /proc/sys/net/ipv6/conf/default/accept_dad"
+
+// has6 reports whether the IPv6 checks can run; in CI a kernel with no
+// IPv6 fails the test instead.
+func (h *home) has6() bool {
+	h.t.Helper()
+	if !h.v6 {
+		if required() {
+			h.t.Fatal("the kernel has no IPv6")
+		}
+		h.t.Log("the kernel has no IPv6: the IPv6 checks do not run")
+	}
+	return h.v6
+}
+
+// global6 is the enforcer's global IPv6 address on the link whose IPv4
+// prefix is 10.n.0.0/24: 2001:db8:n::1, its host's ::2.
+func global6(p netip.Prefix) netip.Prefix {
+	return netip.MustParsePrefix(fmt.Sprintf("2001:db8:%d::/64", p.Addr().As4()[1]))
+}
+
+// linkLocal is the enforcer's link-local address on ifc.
+func (h *home) linkLocal(ifc string) string {
+	h.t.Helper()
+	i, err := net.InterfaceByName(ifc)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	as, err := i.Addrs()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	for _, a := range as {
+		if ip, ok := a.(*net.IPNet); ok && ip.IP.IsLinkLocalUnicast() && ip.IP.To4() == nil {
+			return ip.IP.String()
+		}
+	}
+	h.t.Fatalf("%s has no link-local address", ifc)
+	return ""
 }
 
 func (h *home) in(x *host, args ...string) string {
@@ -129,6 +179,13 @@ func (h *home) link(x *host, ifc string, p netip.Prefix) {
 	h.in(x, "ip", "addr", "add", xa.String()+bits, "dev", "eth0")
 	h.in(x, "ip", "link", "set", "eth0", "up")
 	h.in(x, "ip", "route", "add", "default", "via", enf.String())
+	if h.v6 && p.Addr().As4()[0] == 10 {
+		g := global6(p)
+		enf6, x6 := g.Addr().Next(), g.Addr().Next().Next()
+		run(h.t, "ip", "addr", "add", enf6.String()+"/64", "dev", ifc, "nodad")
+		h.in(x, "ip", "addr", "add", x6.String()+"/64", "dev", "eth0", "nodad")
+		h.in(x, "ip", "-6", "route", "add", "default", "via", enf6.String())
+	}
 }
 
 // within runs f with the calling thread in x's network namespace (nil:
@@ -198,6 +255,10 @@ func build(t *testing.T, bare bool) *home {
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Stat("/proc/net/if_inet6"); err == nil {
+		h.v6 = true
+		run(t, "sh", "-c", noDAD)
+	}
 	run(t, "ip", "link", "set", "lo", "up")
 	isp := h.newHost("isp")
 	run(t, "ip", "link", "add", "wan0", "type", "veth", "peer", "name", "eth0", "netns", strconv.Itoa(isp.pid))
@@ -216,8 +277,6 @@ func build(t *testing.T, bare bool) *home {
 	}
 	edge := h.newHost("edge0")
 	h.link(edge, l.Edge, netip.MustParsePrefix("10.60.0.0/24"))
-	plug := h.newHost("ap0.103")
-	h.link(plug, "ap0.103", netip.MustParsePrefix("10.103.0.0/24"))
 	if !bare {
 		text, err := nft.Compile(fixturePolicy(), l)
 		if err != nil {
@@ -309,12 +368,19 @@ func (h *home) reaches(from, addr string) bool {
 // noAnswer is the rcode resolve reports when nothing answered.
 const noAnswer = -1
 
-// resolve asks server for name's A records from host from, and gives the
-// reply's rcode and addresses.
+// resolve asks server for name's A records from host from over UDP, and
+// gives the reply's rcode and addresses.
 func (h *home) resolve(from, server, name string) (int, []string) {
+	return h.ask(from, "udp", server, name)
+}
+
+// ask asks server (an IPv6 one may carry a zone) for name's A records from
+// host from over network, udp or tcp, and gives the reply's rcode and
+// addresses.
+func (h *home) ask(from, network, server, name string) (int, []string) {
 	rcode, addrs := noAnswer, []string(nil)
 	within(h.t, h.hosts[from], func() {
-		c, err := net.Dial("udp4", net.JoinHostPort(server, "53"))
+		c, err := net.DialTimeout(network, net.JoinHostPort(server, "53"), time.Second)
 		if err != nil {
 			return
 		}
@@ -325,10 +391,27 @@ func (h *home) resolve(from, server, name string) (int, []string) {
 		}
 		q = append(q, 0, 0, 1, 0, 1)
 		c.SetDeadline(time.Now().Add(time.Second))
-		c.Write(q)
 		r := make([]byte, 1500)
-		n, err := c.Read(r)
-		if err != nil || n < 12 {
+		var n int
+		if network == "tcp" {
+			// RFC 1035 4.2.2: each message is preceded by its length.
+			if _, err := c.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(q))), q...)); err != nil {
+				return
+			}
+			if _, err := io.ReadFull(c, r[:2]); err != nil {
+				return
+			}
+			n = int(binary.BigEndian.Uint16(r))
+			if _, err := io.ReadFull(c, r[:n]); err != nil {
+				return
+			}
+		} else {
+			c.Write(q)
+			if n, err = c.Read(r); err != nil {
+				return
+			}
+		}
+		if n < 12 {
 			return
 		}
 		r = r[:n]
@@ -391,14 +474,45 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 			t.Errorf("%s reaches %s before resolving it", from, addr)
 		}
 	}
-	expect := func(from, server, name string, rcode int, addrs ...string) {
+	expectOn := func(network, from, server, name string, rcode int, addrs ...string) {
 		t.Helper()
-		got, gotAddrs := h.resolve(from, server, name)
+		got, gotAddrs := h.ask(from, network, server, name)
 		if got != rcode || !slices.Equal(gotAddrs, addrs) {
-			t.Errorf("%s asks %s for %s: rcode %d %v, want %d %v", from, server, name, got, gotAddrs, rcode, addrs)
+			t.Errorf("%s asks %s for %s over %s: rcode %d %v, want %d %v", from, server, name, network, got, gotAddrs, rcode, addrs)
 		}
 	}
+	expect := func(from, server, name string, rcode int, addrs ...string) {
+		t.Helper()
+		expectOn("udp", from, server, name, rcode, addrs...)
+	}
 	const refused, nxdomain = 5, 3
+	// Over IPv6 too, before any answer fills a set: another view's global
+	// address, or the core's, reaches the device's own view through the
+	// redirect, which refuses the name; another view's link-local address
+	// is on another link, so nothing answers; and the core gets nothing
+	// from a device's view. Over UDP and TCP alike (ENF-f-4).
+	if h.has6() {
+		tvLL, plugLL, coreLL := h.linkLocal("ap0.101"), h.linkLocal("ap0.103"), h.linkLocal("core0")
+		for _, nw := range []string{"udp", "tcp"} {
+			expectOn(nw, "ap0.101", "2001:db8:103::1", "plug.example", refused)
+			expectOn(nw, "ap0.101", "2001:db8:50::1", "core.example", refused)
+			expectOn(nw, "ap0.101", plugLL+"%eth0", "plug.example", noAnswer)
+			expectOn(nw, "ap0.101", coreLL+"%eth0", "core.example", noAnswer)
+			expectOn(nw, "core0", "2001:db8:103::1", "plug.example", noAnswer)
+			expectOn(nw, "core0", "2001:db8:101::1", "tv.example", noAnswer)
+			expectOn(nw, "core0", tvLL+"%eth0", "tv.example", noAnswer)
+		}
+		for _, set := range []string{nft.CoreSet(false), nft.DeviceSet(101, false), nft.DeviceSet(103, false)} {
+			if got := h.set(set); len(got) != 0 {
+				t.Errorf("IPv6 queries from another view filled %s: %v", set, got)
+			}
+		}
+		// Control: the TV's own view answers on both its addresses.
+		for _, nw := range []string{"udp", "tcp"} {
+			expectOn(nw, "ap0.101", "2001:db8:101::1", "tv.example", 0, tvAddr)
+			expectOn(nw, "ap0.101", tvLL+"%eth0", "tv.example", 0, tvAddr)
+		}
+	}
 	expect("core0", coreDNS, "core.example", 0, coreAddr)
 	expect("core0", coreDNS, "unlisted.example", refused)
 	expect("core0", coreDNS, "sub.core.example", nxdomain)
@@ -409,10 +523,14 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	// Another list's name is refused in a device's own view, and in
 	// another device's, which the redirect makes its own, so it neither
 	// learns that list's address nor fills that list's set (ENF-f-4).
-	expect("ap0.101", tvDNS, "plug.example", refused)
-	expect("ap0.101", "10.103.0.1", "plug.example", refused)
-	expect("ap0.101", tvDNS, "core.example", refused)
-	expect("core0", coreDNS, "tv.example", refused)
+	for _, nw := range []string{"udp", "tcp"} {
+		expectOn(nw, "ap0.101", tvDNS, "plug.example", refused)
+		expectOn(nw, "ap0.101", "10.103.0.1", "plug.example", refused)
+		expectOn(nw, "ap0.101", tvDNS, "core.example", refused)
+		expectOn(nw, "ap0.101", coreDNS, "core.example", refused)
+		expectOn(nw, "core0", coreDNS, "tv.example", refused)
+		expectOn(nw, "core0", tvDNS, "tv.example", noAnswer)
+	}
 	if got := h.set(nft.DeviceSet(103, false)); len(got) != 0 {
 		t.Errorf("another device's queries filled the plug's set: %v", got)
 	}
@@ -473,8 +591,8 @@ func TestNoServiceOnEdge(t *testing.T) {
 		return
 	}
 	h := build(t, true)
-	// IPv4 leases only: the edge's silence is the same for both families,
-	// and TestDnsmasqAccepts checks the IPv6 lines.
+	// IPv4 leases only: the links' IPv6 addresses are the harness's own
+	// (link), and TestDnsmasqAccepts checks the IPv6 lease lines.
 	s := fixtureSetup()
 	for i := range s.Nets {
 		s.Nets[i].Prefix6 = netip.Prefix{}
@@ -492,17 +610,38 @@ func TestNoServiceOnEdge(t *testing.T) {
 	}
 	// Each view answers only on its own interface, even with no ruleset
 	// to redirect a query: one sent to another view's address arriving on
-	// a different interface gets nothing (ENF-f-4).
-	for _, c := range [][3]string{{"core0", tvDNS, "tv.example"}, {"ap0.101", "10.103.0.1", "plug.example"}, {"ap0.101", coreDNS, "core.example"}} {
-		if rcode, _ := h.resolve(c[0], c[1], c[2]); rcode != noAnswer {
-			t.Errorf("%s asked %s's view for %s: rcode %d", c[0], c[1], c[2], rcode)
+	// a different interface gets nothing, over UDP or TCP, and over IPv6
+	// at another view's global or link-local address (ENF-f-4).
+	silent := [][3]string{{"core0", tvDNS, "tv.example"}, {"ap0.101", "10.103.0.1", "plug.example"}, {"ap0.101", coreDNS, "core.example"}}
+	answers := [][3]string{{"ap0.101", tvDNS, "tv.example"}, {"core0", coreDNS, "core.example"}}
+	if h.has6() {
+		tvLL, plugLL, coreLL, edgeLL := h.linkLocal("ap0.101"), h.linkLocal("ap0.103"), h.linkLocal("core0"), h.linkLocal("edge0")
+		silent = append(silent,
+			[3]string{"edge0", "2001:db8:60::1", "core.example"},
+			[3]string{"edge0", edgeLL + "%eth0", "core.example"},
+			[3]string{"core0", "2001:db8:101::1", "tv.example"},
+			[3]string{"core0", tvLL + "%eth0", "tv.example"},
+			[3]string{"ap0.101", "2001:db8:103::1", "plug.example"},
+			[3]string{"ap0.101", plugLL + "%eth0", "plug.example"},
+			[3]string{"ap0.101", "2001:db8:50::1", "core.example"},
+			[3]string{"ap0.101", coreLL + "%eth0", "core.example"})
+		answers = append(answers,
+			[3]string{"ap0.101", "2001:db8:101::1", "tv.example"},
+			[3]string{"ap0.101", tvLL + "%eth0", "tv.example"},
+			[3]string{"core0", "2001:db8:50::1", "core.example"},
+			[3]string{"core0", coreLL + "%eth0", "core.example"})
+	}
+	for _, nw := range []string{"udp", "tcp"} {
+		for _, c := range silent {
+			if rcode, _ := h.ask(c[0], nw, c[1], c[2]); rcode != noAnswer {
+				t.Errorf("%s asked %s's view for %s over %s: rcode %d", c[0], c[1], c[2], nw, rcode)
+			}
 		}
-	}
-	if rcode, _ := h.resolve("ap0.101", tvDNS, "tv.example"); rcode != 0 {
-		t.Errorf("control: the TV got rcode %d", rcode)
-	}
-	if rcode, _ := h.resolve("core0", coreDNS, "core.example"); rcode != 0 {
-		t.Errorf("control: the core got rcode %d", rcode)
+		for _, c := range answers {
+			if rcode, _ := h.ask(c[0], nw, c[1], c[2]); rcode != 0 {
+				t.Errorf("control: %s asked %s for %s over %s: rcode %d", c[0], c[1], c[2], nw, rcode)
+			}
+		}
 	}
 	// dnsmasq checks an address is free (a ping) before it offers it, so
 	// each offer waits seconds, one after another; the probes run together.
@@ -526,11 +665,12 @@ func TestNoServiceOnEdge(t *testing.T) {
 			t.Errorf("DHCP offer to %s: %v, want %v", from, got[from], want)
 		}
 	}
-	// No dnsmasq socket is bound to the edge's address or to a wildcard
-	// address on the DNS port.
-	out := run(t, "ss", "-Hlnup")
+	// No dnsmasq socket is bound to any of the edge's addresses or to a
+	// wildcard address on the DNS port.
+	out := run(t, "ss", "-Hlntup")
 	for _, ln := range strings.Split(out, "\n") {
-		if strings.Contains(ln, "10.60.0.1:") || strings.Contains(ln, "0.0.0.0:53 ") || strings.Contains(ln, "*:53 ") {
+		if strings.Contains(ln, "10.60.0.1:") || strings.Contains(ln, "2001:db8:60::1]") || strings.Contains(ln, "%edge0") ||
+			strings.Contains(ln, "0.0.0.0:53 ") || strings.Contains(ln, "[::]:53 ") || strings.Contains(ln, "*:53 ") {
 			t.Errorf("listener: %s", ln)
 		}
 	}
