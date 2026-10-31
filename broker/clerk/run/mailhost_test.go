@@ -618,7 +618,7 @@ func TestToldMarksOnlyTheAccountShown(t *testing.T) {
 			h.notify(true, "the new account's own warm-up end") // a read after setup told it
 			last := back[len(back)-1]
 			fresh := sealedSeen{Log: inbox.SeenLog{Since: today}}
-			if err := saveSeen(h.dir, testSealer(), slotOf(last), fresh); err != nil {
+			if err := saveSeen(h.dir, testSealer(), slotOf(last), fresh, nil); err != nil {
 				t.Fatal(err)
 			}
 			h.reading = nil
@@ -654,7 +654,7 @@ func TestToldLeavesTheWarmUpEndItDidNotCover(t *testing.T) {
 	}
 	now, _ := time.Parse(time.DateOnly, today)
 	rec := sealedSeen{Log: inbox.SeenLog{Since: now.AddDate(0, 0, -100).Format(time.DateOnly)}}
-	if err := saveSeen(r.h.dir, testSealer(), slotOf(other), rec); err != nil {
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(other), rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	r.moved()
@@ -731,7 +731,7 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 	now, _ := time.Parse(time.DateOnly, today)
 	s := MailSettings{Address: imaptest.User, IMAP: r.imap, SMTP: r.srv.SMTP}
 	rec := sealedSeen{Log: inbox.SeenLog{Since: now.AddDate(0, 0, -100).Format(time.DateOnly)}}
-	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec); err != nil {
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	restart := func() {
@@ -771,7 +771,7 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 
 	// Nor when the re-read is still in flight as the owner side says it was
 	// shown: that read began from the record before it kept the telling.
-	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec); err != nil {
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	restart()
@@ -795,7 +795,7 @@ func TestTheWarmUpsEndIsToldUntilShown(t *testing.T) {
 
 	// An unshown warm-up notice was about the account as it was: a change of
 	// account drops it.
-	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec); err != nil {
+	if err := saveSeen(r.h.dir, testSealer(), slotOf(s), rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	restart()

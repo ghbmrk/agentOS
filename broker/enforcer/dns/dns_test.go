@@ -54,14 +54,17 @@ func fixturePolicy() policy.Document {
 const upstreamAddr = "198.51.100.53"
 
 func fixtureSetup() Setup {
+	// The plug's and the isolated TV's VLANs are served with no DHCP.
 	nets := []Net{
-		{Iface: "own0", Prefix4: netip.MustParsePrefix("10.10.0.0/24"), Prefix6: netip.MustParsePrefix("fd00:10::/64")},
-		{Iface: "hh0", Prefix4: netip.MustParsePrefix("10.20.0.0/24")},
-		{Iface: "gst0", Prefix4: netip.MustParsePrefix("10.30.0.0/24")},
-		{Iface: "adm0", Prefix4: netip.MustParsePrefix("10.40.0.0/24")},
-		{Iface: "core0", Prefix4: netip.MustParsePrefix("10.50.0.0/24")},
-		{Iface: "ap0.101", Prefix4: netip.MustParsePrefix("10.101.0.0/24")},
-		{Iface: "ap0.102", Prefix4: netip.MustParsePrefix("10.102.0.0/24")},
+		{Iface: "own0", Prefix4: netip.MustParsePrefix("10.10.0.0/24"), Prefix6: netip.MustParsePrefix("fd00:10::/64"), DHCP: true},
+		{Iface: "hh0", Prefix4: netip.MustParsePrefix("10.20.0.0/24"), DHCP: true},
+		{Iface: "gst0", Prefix4: netip.MustParsePrefix("10.30.0.0/24"), DHCP: true},
+		{Iface: "adm0", Prefix4: netip.MustParsePrefix("10.40.0.0/24"), DHCP: true},
+		{Iface: "core0", Prefix4: netip.MustParsePrefix("10.50.0.0/24"), DHCP: true},
+		{Iface: "ap0.101", Prefix4: netip.MustParsePrefix("10.101.0.0/24"), DHCP: true},
+		{Iface: "ap0.102", Prefix4: netip.MustParsePrefix("10.102.0.0/24"), DHCP: true},
+		{Iface: "ap0.103", Prefix4: netip.MustParsePrefix("10.103.0.0/24")},
+		{Iface: "ap0.108", Prefix4: netip.MustParsePrefix("10.108.0.0/24")},
 	}
 	return Setup{Upstream: []netip.AddrPort{netip.MustParseAddrPort(upstreamAddr + ":53")}, Nets: nets, LeaseFile: "/var/lib/agentos-enforcer/dhcp.leases"}
 }
@@ -213,6 +216,7 @@ func TestViewsAreOwnLists(t *testing.T) {
 		d := policy.Document{Version: 1, Destinations: []string{pool[seed%5], pool[(seed+2)%5]}}
 		want := map[string][]string{"core0": d.Destinations}
 		sets := map[string]string{"core0": nft.CoreSet(false) + "," + nft.CoreSet(true)}
+		s := fixtureSetup()
 		for i := range 1 + seed%4 {
 			var allow []string
 			for j, n := range pool {
@@ -225,12 +229,13 @@ func TestViewsAreOwnLists(t *testing.T) {
 			dev := policy.Device{ID: id, Network: policy.NetDevices, WiFi: "vlan" + strconv.Itoa(vlan), Allow: allow, VendorCloud: true, Everyday: true}
 			d.Devices = append(d.Devices, dev)
 			iface := "ap0." + strconv.Itoa(vlan)
+			s.Nets = append(s.Nets, Net{Iface: iface, Prefix4: netip.MustParsePrefix("10." + strconv.Itoa(vlan) + ".0.0/24")})
 			if len(allow) > 0 {
 				want[iface] = allow
 				sets[iface] = nft.DeviceSet(vlan, false) + "," + nft.DeviceSet(vlan, true)
 			}
 		}
-		f, err := Generate(d, fixtureLayout(), fixtureSetup())
+		f, err := Generate(d, fixtureLayout(), s)
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
@@ -331,6 +336,40 @@ func TestHostname(t *testing.T) {
 		if Hostname(bad) {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+}
+
+// TestUpstreamOnEveryServedNet: an upstream inside any served network's
+// prefix is refused, whether or not the network has DHCP, and a setup that
+// leaves out any interface an instance answers on is refused, so no
+// served prefix escapes the check. Catches an upstream reached through a
+// served segment, where the reverse-path filter cannot tell its answers
+// from a forger's (NET-2 Segments, ENF-f-5).
+func TestUpstreamOnEveryServedNet(t *testing.T) {
+	l := fixtureLayout()
+	nets, leased := 0, 0
+	for i, n := range fixtureSetup().Nets {
+		s := fixtureSetup()
+		s.Nets[i].Prefix6 = netip.MustParsePrefix("2001:db8:" + strconv.Itoa(i) + "::/64")
+		if _, err := Generate(fixturePolicy(), l, s); err != nil {
+			t.Fatalf("%s with a global /64: %v", n.Iface, err)
+		}
+		s.Upstream = append(s.Upstream, netip.MustParseAddrPort("[2001:db8:"+strconv.Itoa(i)+"::53]:53"))
+		if _, err := Generate(fixturePolicy(), l, s); !errors.Is(err, ErrConfig) {
+			t.Errorf("upstream on %s (DHCP %v): %v", n.Iface, n.DHCP, err)
+		}
+		s = fixtureSetup()
+		s.Nets = slices.Delete(s.Nets, i, i+1)
+		if _, err := Generate(fixturePolicy(), l, s); !errors.Is(err, ErrConfig) {
+			t.Errorf("setup without %s: %v", n.Iface, err)
+		}
+		nets++
+		if n.DHCP {
+			leased++
+		}
+	}
+	if nets == leased || leased == 0 {
+		t.Fatalf("the fixture has %d networks, %d with DHCP: it needs both kinds", nets, leased)
 	}
 }
 

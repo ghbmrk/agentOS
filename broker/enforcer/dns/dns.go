@@ -17,7 +17,7 @@
 //   - People answers Owner, Household, Guests and the admin port with any
 //     name, filling no set: those networks reach the internet anyway.
 //   - DHCP serves addresses, with the enforcer as router and resolver, on
-//     the networks the setup names, and answers no DNS.
+//     the networks the setup marks, and answers no DNS.
 //
 // No instance names the edge's segment, the WAN or the access point's
 // management interface, and Generate refuses a setup that would (NET-2
@@ -46,13 +46,15 @@ var ErrConfig = errors.New("dns: configuration refused")
 // ruleset load emptying it (ASSUMPTIONS ENF-f-3).
 const MaxTTL = 300
 
-// Net is one network the enforcer serves DHCP on: its interface and its
-// IPv4 prefix, and optionally an IPv6 /64. The enforcer's own address is
-// the prefix's first host; leases start at the tenth.
+// Net is one network an instance answers on: its interface, the prefixes
+// of the enforcer's addresses there (IPv4, and optionally an IPv6 /64),
+// and whether the enforcer serves DHCP on it. The enforcer's own address
+// is each prefix's first host; leases start at the tenth.
 type Net struct {
 	Iface   string
 	Prefix4 netip.Prefix
 	Prefix6 netip.Prefix // zero for none
+	DHCP    bool
 }
 
 // Setup is the enforcer's own resolver and addressing. Like nft.Layout it
@@ -60,9 +62,11 @@ type Net struct {
 type Setup struct {
 	// Upstream is the enforcer's outside resolvers, global addresses only.
 	Upstream []netip.AddrPort
-	// Nets is every network the enforcer serves DHCP on. The listed and
-	// people instances answer DNS on the interfaces their rule names,
-	// whether or not they are here.
+	// Nets is every network an instance answers on, with the prefixes of
+	// every address the enforcer holds there: the Owner, Household,
+	// Guests, admin and core interfaces and each listed device's VLAN. A
+	// setup that leaves one out is refused, so no served prefix escapes the
+	// upstream check (ASSUMPTIONS ENF-f-5). DHCP serves the ones marked.
 	Nets []Net
 	// LeaseFile is the absolute path of the DHCP lease file.
 	LeaseFile string
@@ -90,9 +94,6 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	if err != nil {
 		return Files{}, err
 	}
-	if err := s.check(l); err != nil {
-		return Files{}, err
-	}
 	// One listed instance per view: the core's segment with the core's
 	// list, then each device with a VLAN with its own. A device without
 	// an allow set gets an instance with no names, which refuses every
@@ -109,6 +110,14 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 			viewSets = append(viewSets, setOf[nft.DeviceSet(n, false)])
 		}
 	}
+	peopleIfaces := []string{l.Owner, l.Household, l.Guests, l.Admin}
+	answered := slices.Clone(peopleIfaces)
+	for _, v := range views {
+		answered = append(answered, v.Iface)
+	}
+	if err := s.check(l, answered); err != nil {
+		return Files{}, err
+	}
 	for i, set := range viewSets {
 		conf, err := s.listed(views[i].Iface, set)
 		if err != nil {
@@ -118,7 +127,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	}
 
 	var people lines
-	people.common([]string{l.Owner, l.Household, l.Guests, l.Admin})
+	people.common(peopleIfaces)
 	people.add("domain-needed")
 	people.add("bogus-priv")
 	for _, u := range s.Upstream {
@@ -127,8 +136,12 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 
 	var dhcp lines
 	var ifaces []string
+	var leased []Net
 	for _, n := range s.Nets {
-		ifaces = append(ifaces, n.Iface)
+		if n.DHCP {
+			ifaces = append(ifaces, n.Iface)
+			leased = append(leased, n)
+		}
 	}
 	dhcp.add("port=0")
 	dhcp.common(ifaces)
@@ -136,7 +149,7 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	dhcp.add("dhcp-authoritative")
 	dhcp.add("dhcp-option=option:dns-server,0.0.0.0")
 	v6 := false
-	for _, n := range s.Nets {
+	for _, n := range leased {
 		first, last := hosts4(n.Prefix4)
 		// dnsmasq serves a range on the interface whose address is in it.
 		dhcp.add("dhcp-range=" + first.String() + "," + last.String() + ",12h")
@@ -184,10 +197,11 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 
 // check refuses a setup that names an interface the layout does not serve
 // (the edge's segment, the WAN and the access point's management
-// interface among them), a prefix that is not a masked private block, an
-// upstream that is not a global address or is on a served network, or a
-// lease file path that needs quoting.
-func (s Setup) check(l nft.Layout) error {
+// interface among them), leaves out one an instance answers on (answered),
+// holds a prefix that is not a masked private block, an upstream that is
+// not a global address or is on a served network, or a lease file path
+// that needs quoting.
+func (s Setup) check(l nft.Layout, answered []string) error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrConfig}, a...)...) }
 	if len(s.Upstream) == 0 {
 		return bad("no upstream resolver")
@@ -210,7 +224,7 @@ func (s Setup) check(l nft.Layout) error {
 		seen = append(seen, n.Iface)
 		vlan, isDev := strings.CutPrefix(n.Iface, l.Trunk+".")
 		if _, ok := nft.VLAN("vlan" + vlan); !slices.Contains(served, n.Iface) && !(isDev && ok) {
-			return bad("no DHCP on %q", n.Iface)
+			return bad("%q is not a served network", n.Iface)
 		}
 		p := n.Prefix4
 		if !p.IsValid() || !p.Addr().Is4() || p != p.Masked() || !p.Addr().IsPrivate() || p.Bits() < 16 || p.Bits() > 28 {
@@ -220,13 +234,18 @@ func (s Setup) check(l nft.Layout) error {
 			return bad("%s: IPv6 prefix %v", n.Iface, q)
 		}
 	}
+	for _, i := range answered {
+		if !slices.Contains(seen, i) {
+			return bad("no network for %q, which an instance answers on", i)
+		}
+	}
 	// An upstream on a served network would be reached through that
 	// network, where the reverse-path filter cannot tell its answers from
-	// a forger's there (ASSUMPTIONS ENF-f-5). IPv4 prefixes are private and
-	// upstreams are not, so only an IPv6 prefix can hold one.
+	// a forger's there (ASSUMPTIONS ENF-f-5). Every served network is in
+	// Nets, with or without DHCP, so every served prefix is checked.
 	for _, u := range s.Upstream {
 		for _, n := range s.Nets {
-			if n.Prefix6.Contains(u.Addr()) {
+			if n.Prefix4.Contains(u.Addr()) || n.Prefix6.Contains(u.Addr()) {
 				return bad("upstream %v is on %s", u, n.Iface)
 			}
 		}

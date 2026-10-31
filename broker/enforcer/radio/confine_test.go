@@ -38,6 +38,10 @@ func TestMain(m *testing.M) {
 		probeStack(os.Args[2], os.Args[3])
 		return
 	}
+	if len(os.Args) == 5 && os.Args[1] == netProbeArg {
+		probeNet(os.Args[2], os.Args[3], os.Args[4])
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == idleArg {
 		io.Copy(io.Discard, os.Stdin)
 		return

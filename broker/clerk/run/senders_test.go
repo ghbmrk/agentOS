@@ -339,14 +339,14 @@ func TestSenderRecordIsSealedAndIncremental(t *testing.T) {
 			return privfile.WriteAtomic(r.dir, sendersFile, bad, nil)
 		}, false},
 		{"too large", func() error { return privfile.WriteAtomic(r.dir, sendersFile, make([]byte, maxSendersRec+1), nil) }, false},
-		{"another account's", func() error { return saveSenders(r.dir, testSealer(), slot+"x", rec) }, false},
-		{"another key's", func() error { return saveSenders(r.dir, other, slot, rec) }, false},
+		{"another account's", func() error { return saveSenders(r.dir, testSealer(), slot+"x", rec, nil) }, false},
+		{"another key's", func() error { return saveSenders(r.dir, other, slot, rec, nil) }, false},
 		{"past a bound, not marked", func() error {
 			big := sealedSenders{Rec: inbox.SendersRecord{Sources: rec.Rec.Sources, Senders: rec.Rec.Senders, Sent: map[string]bool{}}}
 			for i := range inbox.ContactsMax + 1 {
 				big.Rec.Sent[fmt.Sprintf("c%d@many.test", i)] = true
 			}
-			return saveSenders(r.dir, testSealer(), slot, big)
+			return saveSenders(r.dir, testSealer(), slot, big, nil)
 		}, false},
 	} {
 		if err := c.write(); err != nil {

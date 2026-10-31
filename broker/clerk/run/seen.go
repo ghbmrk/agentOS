@@ -93,7 +93,9 @@ func loadSeen(dir string, s clerk.Sealer, slot string) (r sealedSeen, st seenSta
 	return r, seenLoaded
 }
 
-func saveSeen(dir string, s clerk.Sealer, slot string, r sealedSeen) error {
+// saveSeen seals r as dir's record of read mail for the account at slot.
+// stop, for tests only, is privfile.WriteAtomic's; nil runs every step.
+func saveSeen(dir string, s clerk.Sealer, slot string, r sealedSeen, stop func(i int) bool) error {
 	var plain bytes.Buffer
 	if err := gob.NewEncoder(&plain).Encode(r); err != nil {
 		return err
@@ -106,7 +108,7 @@ func saveSeen(dir string, s clerk.Sealer, slot string, r sealedSeen) error {
 	if len(blob) > maxSeen {
 		return errors.New("run: the record of read mail is past its bound")
 	}
-	return privfile.WriteAtomic(dir, seenFile, blob, nil)
+	return privfile.WriteAtomic(dir, seenFile, blob, stop)
 }
 
 // markTold records that the owner has read the end of the warm-up, so it is
@@ -118,7 +120,7 @@ func markTold(dir string, s clerk.Sealer, slot string) error {
 		return nil
 	}
 	r.Told = true
-	return saveSeen(dir, s, slot, r)
+	return saveSeen(dir, s, slot, r, nil)
 }
 
 // MailStatus is what the mail clerk tells the owner about unsubscribing.
@@ -273,7 +275,7 @@ func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, sl
 		if kept.Seen != nil {
 			st.Lines = append(st.Lines, began(loaded)...)
 			rec.Log = kept
-			if err := saveSeen(dir, s, slot, rec); err != nil {
+			if err := saveSeen(dir, s, slot, rec, nil); err != nil {
 				st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. "+tryAgain(mark))
 			}
 		}
@@ -295,7 +297,7 @@ func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, sl
 		st.WarmedUp = warmedUp(n)
 	}
 	rec.Log = kept
-	if err := saveSeen(dir, s, slot, rec); err != nil {
+	if err := saveSeen(dir, s, slot, rec, nil); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
 		// The read stood, so the next save is the next read's: when the
