@@ -76,6 +76,10 @@ exempt-pr 4145
 # Remove once #4204 merges.
 exempt-pr 4204
 
+# #4252 (ENF-k-ptrace-2, #4116): broker/enforcer/radio/, which the G2 list does not name (D-198).
+# Remove once #4252 merges.
+exempt-pr 4252
+
 # #4206 (ENF-s-cd, #4138 and #4131): broker/enforcer/action/, page/ and radio/, which the G2 list does
 # not name (D-198). Remove once #4206 merges.
 exempt-pr 4206
