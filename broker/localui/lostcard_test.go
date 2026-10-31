@@ -250,7 +250,10 @@ func TestLostCardPhonePasskeySessionGetsNoBits(t *testing.T) {
 // MIG-4-recovery-r4e (#4160), done-when: once the kernel holds no card,
 // the page names the card in effect by its mark after a restart before the
 // confirm, and a superseded card is told apart: the line names it as no
-// longer in effect. A card another session confirmed, and nothing ever
+// longer in effect. MIG-4-recovery-r4d (L3 on #4226): superseded means only
+// that the recipient changed, which route A does while the card's
+// passphrase stays in the store, so the line never says that passphrase
+// opens nothing. A card another session confirmed, and nothing ever
 // shown, each have their own line. The first step carries the same line.
 func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 	r := newRecoveryRig(t)
@@ -262,7 +265,7 @@ func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 		"restarted before the confirm": {localapi.RecoveryLostState{Shown: testLostID, InEffect: true},
 			[]string{"I restarted before you confirmed", "The card in effect is marked " + testLostMark, "a card with another mark does not", "ask for a new card again"}},
 		"superseded": {localapi.RecoveryLostState{Shown: testLostID},
-			[]string{"marked " + testLostMark + ", is no longer in effect", "neither its passphrase nor its recovery key opens my store"}},
+			[]string{"marked " + testLostMark + ", is no longer in effect", "its recovery key does not open my store", "Its passphrase still does, unless a later request for a new card replaced it"}},
 		"confirmed elsewhere": {localapi.RecoveryLostState{Shown: testLostID, Confirmed: true, InEffect: true},
 			[]string{"marked " + testLostMark + ", is confirmed and in effect"}},
 		"nothing shown": {localapi.RecoveryLostState{}, []string{lostNoCardText}},
@@ -281,6 +284,9 @@ func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 		if c.st.Shown != "" && !strings.Contains(first, c.want[0]) {
 			t.Errorf("%s: the first step lacks %q", name, c.want[0])
 		}
+	}
+	if strings.Contains(lostNoCard(localapi.RecoveryLostState{Shown: testLostID}), "neither its passphrase") {
+		t.Fatal("the superseded line says the card's passphrase opens nothing")
 	}
 	// Two cards' lines differ by their marks.
 	other := localapi.RecoveryLostState{Shown: "77aa" + "01bc" + strings.Repeat("0d", 12)}

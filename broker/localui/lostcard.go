@@ -116,7 +116,7 @@ const (
 const (
 	lostGoneText       = "I restarted before you confirmed your new card, so I no longer hold it. The card in effect is marked %s: if you printed or saved the card with that mark, keep it, as its passphrase and recovery key open my store; a card with another mark does not. If you hold none with that mark, ask for a new card again."
 	lostConfirmedText  = "Your new card, marked %s, is confirmed and in effect, and I keep no copy of it: its passphrase and recovery key open my store, and a card with another mark does not."
-	lostSupersededText = "The new card I showed you before, marked %s, is no longer in effect: neither its passphrase nor its recovery key opens my store. If no card you hold opens my store, ask for a new card."
+	lostSupersededText = "The new card I showed you before, marked %s, is no longer in effect: its recovery key does not open my store. Its passphrase still does, unless a later request for a new card replaced it. If no card you hold opens my store, ask for a new card."
 	lostNoCardText     = "I hold no new card to show. If no card you hold opens my store, ask for a new card."
 )
 
