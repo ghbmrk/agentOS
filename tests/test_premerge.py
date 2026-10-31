@@ -884,6 +884,45 @@ class PremergeTest(unittest.TestCase):
         sec = self.rec("accept", sha, "<!-- record: security -->\n", at="2")
         self.assertEqual(self.lens_run([l3, lens, sec]), (0, ["same"]))
 
+    def test_check_gate_reads_markers_from_the_record_block_only(self):
+        # #4261: a marker on a line of its own outside the comment's record block (the paragraph holding its first
+        # Record line) is quoted text: it neither hides a review's own record nor lends it one (seen on #4216).
+        git(self.r, "checkout", "-q", "-b", "pr")
+        (self.r / "tools").mkdir()
+        self.write("tools/premerge.py", "x\n")
+        sha = self.commit("gate")
+        quoting = lambda marks, quoted, at: self.rec("accept", sha, f"{marks}\nNext: owed\n{quoted}\n", at=at)
+        l3 = self.rec("accept", sha, "<!-- record: combined -->\n", at="0")
+        lens = self.rec("accept", sha, "<!-- record: ux -->\n<!-- record: potency -->\n", at="1")
+        sec = self.rec("accept", sha, "<!-- record: security -->\n", at="2")
+        self.assertEqual(self.lens_run([l3, lens, sec]), (0, ["same"]))
+        # the combined review quoting the security marker is a combined record, not a security one; the real one counts
+        q_sec = "\n<!-- record: security -->"
+        self.assertEqual(self.lens_run([lens, sec, quoting("<!-- record: combined -->", q_sec, "3")]), (0, ["same"]))
+        # a Security review quoting the combined or l3 marker is still the separate Security record, and not an L3 one
+        for q in ("\n<!-- record: combined -->", "\n<!-- record: l3 -->", "\n```\n<!-- record: combined -->\n```"):
+            qs = quoting("<!-- record: security -->", q, "3")
+            self.assertEqual(self.lens_run([l3, lens, qs]), (0, ["same"]), q)
+            self.assertEqual(self.lens_run([lens, qs]), (1, ["no-verdict"]), q)
+        # UX and Potency markers count only where the lens posts its own
+        q_pot = quoting("<!-- record: ux -->", "\n<!-- record: potency -->", "1")
+        self.assertEqual(self.lens_run([l3, q_pot, sec]), (1, ["needs-lens", "potency"]))
+        q_ux = quoting("<!-- record: potency -->", "\n<!-- record: ux -->", "1")
+        self.assertEqual(self.lens_run([l3, q_ux, sec]), (1, ["needs-lens", "ux"]))
+        # a marker only in a quoted paragraph is no record, so it neither counts nor supersedes
+        bare = lambda q, at, v="accept": self.rec(v, sha, f"\n{q}\n", at=at)
+        for q in ("<!-- record: ux -->\n<!-- record: potency -->", "<!-- record: combined -->", "<!-- record: security -->"):
+            self.assertEqual(self.lens_run([bare(q, "0")]), (1, ["no-verdict"]), q)
+        self.assertEqual(self.lens_run([l3, lens, sec, bare("<!-- record: security -->", "3", v="fix-list")]),
+                         (0, ["same"]))
+        # a quoted Record line with a marker under it is not the comment's record either
+        fence = f"\n```\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: security -->\n```"
+        self.assertEqual(self.lens_run([l3, lens, sec, quoting("<!-- record: combined -->", fence, "3")]),
+                         (0, ["same"]))
+        quoted_fix = {**self.rec("fix-list", sha, "<!-- record: combined -->\n", at="3")}
+        quoted_fix["body"] = f"Verdict: fix-list\nCause: defect\n{fence}\n"
+        self.assertEqual(self.lens_run([l3, lens, sec, quoted_fix]), (0, ["same"]))
+
     def test_lenses_owed_by_tier(self):
         owed = premerge.lenses_owed
         self.assertEqual(owed(["b.md", "docs/x.md"]), [])  # tier C
