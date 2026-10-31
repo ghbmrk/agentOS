@@ -96,6 +96,10 @@ exempt-pr 4206
 # Remove once #4254 merges.
 exempt-pr 4254
 
+# #4295 (ENF-names-d, #4249): broker/enforcer/channel/ and wire/ tests, comments and ASSUMPTIONS, which the G2 list does not name (D-198).
+# Remove once #4295 merges.
+exempt-pr 4295
+
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
