@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -170,4 +171,42 @@ func (o *owner) sign(t *testing.T, msg []byte) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+// ENF-k-6: a link stays while at most maxExpired requests are left
+// unanswered past their timeout, and ends at the next. A stack that
+// reads every request and answers none is a slow device until then.
+func TestUnansweredBoundEndsLink(t *testing.T) {
+	h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}, Timeout: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, stack := net.Pipe()
+	t.Cleanup(func() { host.Close() })
+	go func() {
+		for {
+			var r Request
+			if read(stack, &r) != nil {
+				return
+			}
+		}
+	}()
+	h.Attach(StackBLE, host)
+	alive := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		l := h.links[StackBLE]
+		return l != nil && !l.dead
+	}
+	for i := range maxExpired + 1 {
+		if !alive() {
+			t.Fatalf("the link ended after %d unanswered, want %d", i, maxExpired+1)
+		}
+		if _, err := h.Call(Request{Op: OpRead, Device: "door"}); !errors.Is(err, ErrTimeout) {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if alive() {
+		t.Fatalf("the link stayed after %d unanswered", maxExpired+1)
+	}
 }
