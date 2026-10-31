@@ -101,6 +101,8 @@ type radio struct {
 	// actFails makes Act carry out the act and then report an error, as
 	// a link that drops after the write does.
 	actFails error
+	// hang makes Lock on a device wait for its channel, as a hung stack.
+	hang map[string]chan struct{}
 }
 
 type fakeLock struct {
@@ -151,6 +153,9 @@ func (r *radio) Act(ctx context.Context, device string, a action.Act, route stri
 }
 
 func (r *radio) Lock(ctx context.Context, device string) error {
+	if r.hang[device] != nil {
+		<-r.hang[device]
+	}
 	r.mu.Lock()
 	r.calls = append(r.calls, "lock "+device)
 	l, err := r.dev(device)
@@ -216,11 +221,17 @@ type alerts struct {
 	mu    sync.Mutex
 	kinds []alert.Kind
 	fail  error
+	block chan struct{} // when set, Raise waits for it
 }
 
 func (a *alerts) Raise(k alert.Kind, device string) (alert.Record, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.block != nil {
+		a.mu.Unlock()
+		<-a.block // the core stopped reading the channel
+		a.mu.Lock()
+	}
 	if a.fail != nil {
 		return alert.Record{}, a.fail
 	}
@@ -313,6 +324,12 @@ func newRig(t *testing.T, now time.Time) *rig {
 		t.Fatal(err)
 	}
 	r.book = b
+	t.Cleanup(g.Close)
+	// The daemon ticks once before it attaches any stack (Seen).
+	r.tick()
+	r.radio.mu.Lock()
+	r.radio.calls = nil
+	r.radio.mu.Unlock()
 	return r
 }
 
@@ -326,6 +343,7 @@ func (r *rig) tap(device string, a action.Act) error {
 		return err
 	}
 	_, err = r.book.Redeem(r.doc, c.ID, r.phone.sign(c.Msg), r.now())
+	r.gate.WaitTold()
 	return err
 }
 
@@ -338,7 +356,11 @@ func (r *rig) second(device string, a action.Act) error {
 	return r.gate.Confirm(s.ID, r.phone.sign(s.Msg))
 }
 
-func (r *rig) tick() { r.gate.Tick(r.doc) }
+func (r *rig) tick() {
+	r.gate.Tick(r.doc)
+	r.gate.WaitWork()
+	r.gate.WaitTold()
+}
 
 func (r *rig) logged(sub string) bool {
 	r.mu.Lock()

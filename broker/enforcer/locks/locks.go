@@ -34,6 +34,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,9 +57,10 @@ const (
 	// [07:00, 22:00): any other time is unusual (ENF-q-3).
 	UsualFrom = 7
 	UsualTo   = 22
-	// MaxEvents bounds the lock reports held between ticks; past it the
-	// reports are dropped and every lock relocks (ENF-q-6).
-	MaxEvents = 64
+	// MaxRules bounds the distinct keypad rules kept for one device's
+	// unlock reports between ticks; past it the lock relocks at once
+	// (ENF-q-6).
+	MaxRules = 4
 	// expectFor is how long a report of the enforcer's own act counts as
 	// that act, so it is not logged twice.
 	expectFor = action.Timeout + 5*time.Second
@@ -151,7 +153,7 @@ type Second struct {
 }
 
 // Gate holds the lock rules. It is the action.Actuator for every unlock
-// and disarm (Act), and is safe for concurrent use.
+// and disarm (Act), and is safe for concurrent use. Close stops it.
 type Gate struct {
 	cfg Config
 
@@ -166,11 +168,35 @@ type Gate struct {
 	expect map[string]time.Time // device+report -> own act counts until
 	sent   map[string][]Code    // lock -> codes last pushed (PINs dropped)
 	retry  map[string]time.Time // lock -> next code push try
-	events []Event              // reports since the last Tick
-	flood  bool                 // reports were dropped
+	busy   map[string]bool      // lock -> its relock or code push is running
+
+	// The radio's reports since the last Tick, one entry per device and
+	// report, for the locks and alarms the last Tick's policy holds.
+	known   map[string]policy.Device
+	reports map[string]*seenReport
+	dropped int
+
+	// Alerts wait here for the teller, one entry per kind and device, so
+	// neither Act nor Tick waits on the alert log, whose texts the core
+	// carries (ENF-q-11).
+	tells   map[tell]bool
+	telling bool
+	wake    chan struct{}
+	done    chan struct{}
 }
 
-// New returns a gate over cfg.
+type seenReport struct {
+	n     int
+	rules []string // the distinct keypad rules named, at most MaxRules
+	over  bool     // more than MaxRules were named
+}
+
+type tell struct {
+	kind   alert.Kind
+	device string
+}
+
+// New returns a gate over cfg and starts its teller.
 func New(cfg Config) (*Gate, error) {
 	if cfg.Owner.Alg() != key.AlgES256 || cfg.Driver == nil || cfg.Alerts == nil || cfg.Codes == nil || cfg.Zone == nil || cfg.Log == nil {
 		return nil, errors.New("locks: config incomplete")
@@ -178,12 +204,19 @@ func New(cfg Config) (*Gate, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Gate{
+	g := &Gate{
 		cfg: cfg, seconds: map[string]Second{}, permits: map[string]int64{},
 		due: map[string]time.Time{}, pend: map[string]time.Time{}, failed: map[string]bool{}, expect: map[string]time.Time{},
-		sent: map[string][]Code{}, retry: map[string]time.Time{},
-	}, nil
+		sent: map[string][]Code{}, retry: map[string]time.Time{}, busy: map[string]bool{},
+		known: map[string]policy.Device{}, reports: map[string]*seenReport{},
+		tells: map[tell]bool{}, wake: make(chan struct{}, 1), done: make(chan struct{}),
+	}
+	go g.teller()
+	return g, nil
 }
+
+// Close stops the teller. Alerts still waiting are dropped.
+func (g *Gate) Close() { close(g.done) }
 
 // Unusual reports whether t is an unusual time in zone: outside
 // [UsualFrom, UsualTo) by the zone's own clock.
@@ -243,7 +276,10 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 	return nil
 }
 
-// told logs an unlock or disarm, and texts it at an unusual time.
+// told logs an unlock, disarm or relock of device, and texts an unlock or
+// disarm at an unusual time. It never waits on the alert log: the teller
+// raises the alert, once for repeats of one kind on one device, which the
+// alert log folds anyway.
 func (g *Gate) told(device string, r Report, unusual bool) {
 	var k alert.Kind
 	switch {
@@ -259,8 +295,40 @@ func (g *Gate) told(device string, r Report, unusual bool) {
 	case r == Locked:
 		k = alert.RoutineLock
 	}
-	if _, err := g.cfg.Alerts.Raise(k, device); err != nil {
-		g.cfg.Log(fmt.Sprintf("locks: alert for %s not raised: %v", device, err))
+	g.mu.Lock()
+	g.tells[tell{k, device}] = true
+	g.mu.Unlock()
+	select {
+	case g.wake <- struct{}{}:
+	default:
+	}
+}
+
+// teller raises the waiting alerts, one at a time.
+// A raise the core holds up holds up only the alerts behind it.
+func (g *Gate) teller() {
+	for {
+		select {
+		case <-g.done:
+			return
+		case <-g.wake:
+		}
+		for {
+			g.mu.Lock()
+			batch := g.tells
+			g.telling = len(batch) > 0
+			if !g.telling {
+				g.mu.Unlock()
+				break
+			}
+			g.tells = map[tell]bool{}
+			g.mu.Unlock()
+			for t := range batch {
+				if _, err := g.cfg.Alerts.Raise(t.kind, t.device); err != nil {
+					g.cfg.Log(fmt.Sprintf("locks: alert for %s not raised: %v", t.device, err))
+				}
+			}
+		}
 	}
 }
 
@@ -329,94 +397,135 @@ func (g *Gate) Confirm(id string, sig []byte) error {
 
 // Seen takes one report from a device's stack. It never blocks and never
 // calls the driver, so the radio host's read loop may call it; Tick acts
-// on it.
+// on it. Reports are kept per device and report, and only for the locks
+// and alarms the last Tick's policy holds, so a stack that floods cannot
+// crowd out another device's report (ENF-q-6). The daemon ticks once
+// before it attaches any stack.
 func (g *Gate) Seen(e Event) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if len(g.events) >= MaxEvents {
-		g.flood = true
+	dev, ok := g.known[e.Device]
+	if !ok || !fits(dev, e.Report) {
+		g.dropped++
 		return
 	}
-	g.events = append(g.events, e)
+	k := e.Device + "\x00" + strconv.Itoa(int(e.Report))
+	p := g.reports[k]
+	if p == nil {
+		p = &seenReport{}
+		g.reports[k] = p
+	}
+	p.n++
+	if e.Rule != "" && !p.over && !slices.Contains(p.rules, e.Rule) {
+		if len(p.rules) >= MaxRules {
+			p.over = true
+		} else {
+			p.rules = append(p.rules, e.Rule)
+		}
+	}
+}
+
+// fits reports whether dev can make report r: a lock locks and unlocks,
+// an alarm disarms.
+func fits(dev policy.Device, r Report) bool {
+	switch r {
+	case Unlocked, Locked:
+		return lock(dev)
+	case Disarmed:
+		return !dev.Everyday && dev.Class == policy.ClassAlarm
+	}
+	return false
 }
 
 // Tick applies doc, the policy in force, at now: it acts on the reports
-// since the last tick, pushes each lock's keypad codes when they change,
-// and relocks every lock that is due. The daemon calls it about once a
-// second, never under the policy lock the page holds around a redeem.
+// since the last tick, then starts, for each lock whose last one has
+// ended, its relock when due and its keypad-code push when the codes
+// changed. It does not wait for them, so one stack that hangs delays no
+// other lock. The daemon calls it about once a second, never under the
+// policy lock the page holds around a redeem.
 func (g *Gate) Tick(doc policy.Document) {
 	now := g.cfg.Now()
-	g.mu.Lock()
-	events, flood := g.events, g.flood
-	g.events, g.flood = nil, false
-	g.mu.Unlock()
-
-	if flood {
-		g.cfg.Log("locks: too many reports from the radio; reports dropped, relocking every lock")
-		g.mu.Lock()
-		for _, dev := range doc.Devices {
-			if lock(dev) {
-				g.relockBy(dev.ID, now)
-			}
+	known := map[string]policy.Device{}
+	for _, dev := range doc.Devices {
+		if fits(dev, Unlocked) || fits(dev, Disarmed) {
+			known[dev.ID] = dev
 		}
-		g.mu.Unlock()
 	}
-	for _, e := range events {
-		g.seen(doc, e, now)
+	g.mu.Lock()
+	reports, dropped := g.reports, g.dropped
+	g.known, g.reports, g.dropped = known, map[string]*seenReport{}, 0
+	for l := range g.due {
+		if _, ok := known[l]; !ok || !lock(known[l]) {
+			delete(g.due, l)
+		}
+	}
+	g.mu.Unlock()
+	if dropped > 0 {
+		g.cfg.Log(fmt.Sprintf("locks: %d reports for devices that cannot make them, dropped", dropped))
+	}
+	keys := make([]string, 0, len(reports))
+	for k := range reports {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		device, r, _ := strings.Cut(k, "\x00")
+		n, _ := strconv.Atoi(r)
+		g.seen(doc, device, Report(n), reports[k], now)
 	}
 	for _, dev := range doc.Devices {
-		if lock(dev) {
-			g.codes(doc, dev.ID, now)
+		if !lock(dev) {
+			continue
+		}
+		g.mu.Lock()
+		run := !g.busy[dev.ID]
+		g.busy[dev.ID] = true
+		g.mu.Unlock()
+		if run {
+			go g.work(doc, dev.ID, now)
 		}
 	}
-	g.relock(doc, now)
 }
 
 // lock reports whether dev is a lock on the safety list.
 func lock(dev policy.Device) bool { return !dev.Everyday && dev.Class == policy.ClassLock }
 
-// seen acts on one report: an unlock at an unusual time is texted, any
-// other logged, unless it is the enforcer's own act already told; an
-// unlock relocks after RelockAfter, or at once when it used a keypad code
-// whose rule is not open on that lock now.
-func (g *Gate) seen(doc policy.Document, e Event, now time.Time) {
-	dev := doc.Device(e.Device)
-	switch {
-	case dev == nil || dev.Everyday:
-		g.cfg.Log("locks: a report for a device not on the safety list, dropped")
-		return
-	case e.Report == Unlocked || e.Report == Locked:
-		if dev.Class != policy.ClassLock {
-			g.cfg.Log("locks: a lock report from " + e.Device + ", which is not a lock, dropped")
-			return
-		}
-	case e.Report == Disarmed:
-		if dev.Class != policy.ClassAlarm {
-			g.cfg.Log("locks: a disarm report from " + e.Device + ", which is not an alarm, dropped")
-			return
-		}
-	default:
-		g.cfg.Log("locks: an unknown report from " + e.Device + ", dropped")
+// seen acts on one device's reports of one kind: one may be the enforcer's
+// own act, already told; the rest are logged, an unlock or disarm at an
+// unusual time texted. An unlock relocks after RelockAfter, or at once
+// when it named a keypad rule that is not an open code rule on that lock,
+// or more rules than MaxRules.
+func (g *Gate) seen(doc policy.Document, device string, r Report, p *seenReport, now time.Time) {
+	if dev := doc.Device(device); dev == nil || !fits(*dev, r) {
 		return
 	}
 	g.mu.Lock()
-	k := e.Device + "\x00" + strconv.Itoa(int(e.Report))
-	own := now.Before(g.expect[k])
+	k := device + "\x00" + strconv.Itoa(int(r))
+	n := p.n
+	if now.Before(g.expect[k]) {
+		n--
+	}
 	delete(g.expect, k)
 	refused := false
-	if e.Report == Unlocked {
-		at := now.Add(RelockAfter)
-		if e.Rule != "" && !open(doc, e.Device, e.Rule, now) {
-			refused, at = true, now
+	if r == Unlocked {
+		refused = p.over
+		for _, rule := range p.rules {
+			if !open(doc, device, rule, now) {
+				refused = true
+			}
 		}
-		g.unlockAt(e.Device, at)
+		at := now.Add(RelockAfter)
+		if refused {
+			at = now
+		}
+		g.unlockAt(device, at)
 	}
 	g.mu.Unlock()
 	if refused {
-		g.cfg.Log("locks: " + e.Device + " was unlocked with a keypad code outside its signed window; relocking it now")
+		g.cfg.Log("locks: " + device + " was unlocked with a keypad code outside its signed window; relocking it now")
 	}
-	if !own {
-		g.told(e.Device, e.Report, Unusual(now, g.cfg.Zone))
+	if n > 0 {
+		g.told(device, r, Unusual(now, g.cfg.Zone))
 	}
 }
 
@@ -429,6 +538,17 @@ func open(doc policy.Document, device, rule string, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+// work relocks lock if it is due, then pushes its keypad codes.
+func (g *Gate) work(doc policy.Document, lock string, now time.Time) {
+	defer func() {
+		g.mu.Lock()
+		delete(g.busy, lock)
+		g.mu.Unlock()
+	}()
+	g.relock(lock, now)
+	g.codes(doc, lock, now)
 }
 
 // codes pushes lock's keypad codes when the set open now differs from what
@@ -475,54 +595,43 @@ func (g *Gate) codes(doc policy.Document, lock string, now time.Time) {
 
 func sameCode(a, b Code) bool { return a.Rule == b.Rule && a.FromMS == b.FromMS && a.ToMS == b.ToMS }
 
-// relock locks every lock that is due. A relock that fails is tried again
-// after retryAfter, logged once until one succeeds. A lock no longer in the
-// policy is dropped.
-func (g *Gate) relock(doc policy.Document, now time.Time) {
+// relock locks l if it is due. A relock that fails is tried again after
+// retryAfter, logged once until one succeeds.
+func (g *Gate) relock(l string, now time.Time) {
 	g.mu.Lock()
-	var due []string
-	for l, at := range g.due {
-		if dev := doc.Device(l); dev == nil || !lock(*dev) {
-			delete(g.due, l)
-			continue
-		}
-		if !now.Before(at) {
-			due = append(due, l)
-		}
+	at, ok := g.due[l]
+	if !ok || now.Before(at) {
+		g.mu.Unlock()
+		return
 	}
+	g.expect[l+"\x00"+strconv.Itoa(int(Locked))] = now.Add(expectFor)
+	delete(g.pend, l)
 	g.mu.Unlock()
-	slices.Sort(due)
-	for _, l := range due {
-		ctx, cancel := context.WithTimeout(context.Background(), action.Timeout)
-		g.mu.Lock()
-		g.expect[l+"\x00"+strconv.Itoa(int(Locked))] = now.Add(expectFor)
-		delete(g.pend, l)
+	ctx, cancel := context.WithTimeout(context.Background(), action.Timeout)
+	err := g.cfg.Driver.Lock(ctx, l)
+	cancel()
+	g.mu.Lock()
+	if err != nil {
+		delete(g.expect, l+"\x00"+strconv.Itoa(int(Locked)))
+		g.due[l] = now.Add(retryAfter)
+		first := !g.failed[l]
+		g.failed[l] = true
 		g.mu.Unlock()
-		err := g.cfg.Driver.Lock(ctx, l)
-		cancel()
-		g.mu.Lock()
-		if err != nil {
-			delete(g.expect, l+"\x00"+strconv.Itoa(int(Locked)))
-			g.due[l] = now.Add(retryAfter)
-			first := !g.failed[l]
-			g.failed[l] = true
-			g.mu.Unlock()
-			if first {
-				g.cfg.Log(fmt.Sprintf("locks: relocking %s failed, trying again: %v", l, err))
-			}
-			continue
+		if first {
+			g.cfg.Log(fmt.Sprintf("locks: relocking %s failed, trying again: %v", l, err))
 		}
-		// An unlock while this relock ran needs its own relock, even
-		// when it came after the lock command did.
-		if p, ok := g.pend[l]; ok {
-			g.due[l] = p
-		} else if at, ok := g.due[l]; ok && !now.Before(at) {
-			delete(g.due, l)
-		}
-		delete(g.failed, l)
-		g.mu.Unlock()
-		g.told(l, Locked, false)
+		return
 	}
+	// An unlock while this relock ran needs its own relock, even when it
+	// came after the lock command did.
+	if p, ok := g.pend[l]; ok {
+		g.due[l] = p
+	} else {
+		delete(g.due, l)
+	}
+	delete(g.failed, l)
+	g.mu.Unlock()
+	g.told(l, Locked, false)
 }
 
 // digits is a keypad code: MinPIN to MaxPIN ASCII digits.

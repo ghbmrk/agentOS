@@ -5,6 +5,7 @@ package locks_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"testing"
 	"time"
@@ -93,9 +94,10 @@ func TestBadCodeNotPushedAndPushRetried(t *testing.T) {
 	}
 	r.radio.fail = nil
 	r.clock.add(2 * time.Second)
+	n := count(r.radio.did(), "codes front 1")
 	r.tick()
-	if c := r.radio.codesOn("front"); len(c) != 0 {
-		t.Errorf("pushed before the retry wait: %+v", c)
+	if got := count(r.radio.did(), "codes front 1"); got != n {
+		t.Errorf("pushed before the retry wait: %v", r.radio.did())
 	}
 	r.clock.add(5 * time.Second)
 	r.tick()
@@ -441,14 +443,15 @@ func TestRelocksAfterInterval(t *testing.T) {
 	if r.radio.unlocked("back") {
 		t.Error("an unlock by the vendor app or a key was not relocked")
 	}
-	// A flood of reports is dropped and every lock relocks at once.
-	r.radio.locks["front"].unlocked, r.radio.locks["back"].unlocked = true, true
-	for i := 0; i < locks.MaxEvents+1; i++ {
-		r.gate.Seen(locks.Event{Device: "tv", Report: locks.Unlocked})
+	// A report naming more keypad rules than MaxRules relocks at once.
+	r.radio.locks["front"].unlocked = true
+	for i := 0; i <= locks.MaxRules; i++ {
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked, Rule: "plumber"})
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked, Rule: fmt.Sprintf("r%d", i)})
 	}
 	r.tick()
-	if r.radio.unlocked("front") || r.radio.unlocked("back") || !r.logged("too many reports") {
-		t.Error("a flood of reports did not relock every lock")
+	if r.radio.unlocked("front") {
+		t.Error("an unlock naming too many rules was not relocked at once")
 	}
 	// The relock is due before the unlock is sent, so an unlock whose
 	// answer never came is still relocked.
@@ -564,6 +567,7 @@ func TestFrozenDeviceIsolated(t *testing.T) {
 	r := newRig(t, at(10, 0))
 	r.doc = frozen
 	r.radio.locks["gate"] = &fakeLock{unlocked: true}
+	r.tick()
 	r.gate.Seen(locks.Event{Device: "gate", Report: locks.Unlocked})
 	r.tick()
 	r.clock.add(locks.RelockAfter)
@@ -639,6 +643,8 @@ func TestSecondAndCodeBounds(t *testing.T) {
 			t.Fatal(err)
 		}
 		gate.Tick(r.doc)
+		gate.WaitWork()
+		gate.Close()
 		if got := len(r.radio.codesOn("front")) == 1; got != want {
 			t.Errorf("a %d-character code %q set: %v, want %v", len(pin), pin, got, want)
 		}
@@ -722,5 +728,120 @@ func TestFailedActReportIsStillTold(t *testing.T) {
 	r.tick()
 	if !r.alerts.has(alert.RoutineLock) {
 		t.Errorf("a lock report after a failed relock was dropped: %v", r.alerts.kinds)
+	}
+}
+
+// A core that stops reading the channel holds up only the alert log, never
+// a relock or a code push: neither Act nor Tick waits on the alerts. Catches
+// a hostile core that keeps every door unlocked by stalling one text
+// (Security review on #4287, point 2).
+func TestStalledAlertsCannotStopRelock(t *testing.T) {
+	r := newRig(t, at(3, 0))
+	block := make(chan struct{})
+	defer close(block)
+	r.alerts.mu.Lock()
+	r.alerts.block = block
+	r.alerts.mu.Unlock()
+	r.radio.locks["back"].unlocked = true
+	r.gate.Seen(locks.Event{Device: "back", Report: locks.Unlocked})
+	r.gate.Seen(locks.Event{Device: "alarm", Report: locks.Disarmed})
+	done := make(chan struct{})
+	go func() {
+		r.gate.Tick(r.doc)
+		r.gate.WaitWork()
+		if err := r.second("front", action.Unlock); err != nil {
+			t.Error(err)
+		}
+		c, _ := r.book.Issue(r.doc, "front", action.Unlock, "", r.now())
+		if _, err := r.book.Redeem(r.doc, c.ID, r.phone.sign(c.Msg), r.now()); err != nil {
+			t.Errorf("an unlock with the alert log stalled: %v", err)
+		}
+		r.clock.add(locks.RelockAfter)
+		r.gate.Tick(r.doc)
+		r.gate.WaitWork()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Tick or Act waited on the stalled alert log")
+	}
+	if r.radio.unlocked("back") || r.radio.unlocked("front") {
+		t.Errorf("a lock stayed unlocked while the alert log was stalled: %v", r.radio.did())
+	}
+}
+
+// One stack's flood of reports cannot crowd out another device's: reports
+// for devices that cannot make them are dropped before they count, and a
+// device's own repeats fold into one entry. The 03:00 unlock and disarm
+// sent after the flood are still texted (Security review on #4287, point 3).
+func TestReportFloodCannotHideAnother(t *testing.T) {
+	r := newRig(t, at(3, 0))
+	for i := 0; i < 10000; i++ {
+		r.gate.Seen(locks.Event{Device: fmt.Sprintf("x%d", i), Report: locks.Unlocked})
+		r.gate.Seen(locks.Event{Device: "tv", Report: locks.Unlocked})
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Locked})
+	}
+	r.gate.Seen(locks.Event{Device: "back", Report: locks.Unlocked})
+	r.gate.Seen(locks.Event{Device: "alarm", Report: locks.Disarmed})
+	r.tick()
+	if !r.alerts.has(alert.UnusualUnlock) || !r.alerts.has(alert.UnusualDisarm) {
+		t.Errorf("a flood hid a 03:00 unlock or disarm: %v", r.alerts.kinds)
+	}
+	if !r.logged("20000 reports for devices that cannot make them") {
+		t.Error("the dropped reports were not logged")
+	}
+}
+
+// A stack that hangs on one lock's relock delays no other lock's relock.
+func TestHungStackDelaysNoOtherLock(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	hang := make(chan struct{})
+	r.radio.hang = map[string]chan struct{}{"front": hang}
+	r.radio.locks["front"].unlocked, r.radio.locks["back"].unlocked = true, true
+	r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked})
+	r.gate.Seen(locks.Event{Device: "back", Report: locks.Unlocked})
+	r.tick() // takes the reports; nothing is due yet
+	r.clock.add(locks.RelockAfter)
+	r.gate.Tick(r.doc)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.radio.unlocked("back") && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if r.radio.unlocked("back") {
+		t.Error("a hung relock of the front door held up the back door's")
+	}
+	close(hang)
+	r.gate.WaitWork()
+	if r.radio.unlocked("front") {
+		t.Error("the front door was not relocked once its stack answered")
+	}
+}
+
+// A report naming more than MaxRules rules relocks at once even when every
+// rule is open, and a tick with nothing dropped logs no drop.
+func TestReportRuleBound(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	for i := 0; i <= locks.MaxRules; i++ {
+		r.doc.Standing = append(r.doc.Standing, policy.StandingRule{ID: fmt.Sprintf("c%d", i), Device: "front", Action: locks.ActionCode, FromMS: at(9, 0).UnixMilli(), ToMS: at(12, 0).UnixMilli()})
+	}
+	r.tick()
+	if r.logged("reports for devices") {
+		t.Error("a drop logged with nothing dropped")
+	}
+	r.radio.locks["front"].unlocked = true
+	for i := 0; i < locks.MaxRules; i++ {
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked, Rule: fmt.Sprintf("c%d", i)})
+	}
+	r.tick()
+	if !r.radio.unlocked("front") {
+		t.Fatalf("%d open rules relocked at once", locks.MaxRules)
+	}
+	for i := 0; i <= locks.MaxRules; i++ {
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked, Rule: fmt.Sprintf("c%d", i)})
+	}
+	r.tick()
+	if r.radio.unlocked("front") {
+		t.Errorf("%d rules, all open, did not relock at once", locks.MaxRules+1)
 	}
 }
