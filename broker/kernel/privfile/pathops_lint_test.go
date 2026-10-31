@@ -361,6 +361,11 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"a NUL that udev splits at":   "# old\x00RUN+=\"/usr/lib/agentos/agentos-side\"\n",
 		"a byte past ASCII":           "RUN+=\"/usr/lib/agentos/agentos\u2010side\"\n",
 		"a rule under image, refused": "RUN+=\"/bin/sh -c x\"\n",
+		"a core_pattern sysctl":       "SYSCTL{kernel.core_pattern}=\"|/usr/lib/agentos/agentos-side %p\"\n",
+		"a modprobe sysctl":           "SYSCTL{kernel.modprobe}=\"/usr/lib/agentos/agentos-side\"\n",
+		"an ATTR path":                "ATTR{../../kernel/uevent_helper}=\"/usr/lib/agentos/agentos-side\"\n",
+		"an ATTR [subsystem/device]":  "ATTR{[module/x]parameters}=\"y\"\n",
+		"an ATTRS path":               "ATTRS{device/x}==\"y\"\n",
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -649,11 +654,14 @@ func rootBinaries(root string) ([]string, error) {
 // udev rule may run (#4257).
 const programsFile = "broker/kernel/privfile/udev_programs.txt"
 
-// ruleKeys are the keys udev(7) defines; a rule using any other fails.
+// ruleKeys are the keys udev(7) defines, less SYSCTL: a sysctl write such as
+// kernel.core_pattern="|/path" or kernel.modprobe makes the kernel run a
+// program as root, so it is refused rather than read. A rule using any other
+// key fails.
 var ruleKeys = map[string]bool{
 	"ACTION": true, "DEVPATH": true, "KERNEL": true, "KERNELS": true, "NAME": true, "SYMLINK": true,
 	"SUBSYSTEM": true, "SUBSYSTEMS": true, "DRIVER": true, "DRIVERS": true, "ATTR": true, "ATTRS": true,
-	"SYSCTL": true, "ENV": true, "CONST": true, "TAG": true, "TAGS": true, "TEST": true, "PROGRAM": true,
+	"ENV": true, "CONST": true, "TAG": true, "TAGS": true, "TEST": true, "PROGRAM": true,
 	"RESULT": true, "IMPORT": true, "OPTIONS": true, "OWNER": true, "GROUP": true, "MODE": true,
 	"SECLABEL": true, "RUN": true, "LABEL": true, "GOTO": true,
 }
@@ -661,6 +669,9 @@ var ruleKeys = map[string]bool{
 // ruleToken is one KEY[{attr}] OP "value" of a rule line, with what follows
 // it: blanks and at most one comma.
 var ruleToken = regexp.MustCompile(`^([A-Z]+)(\{([^{}"\\ \t]*)\})?[ \t]*(==|!=|\+=|-=|:=|=)[ \t]*"([^"\\]*)"[ \t]*(?:,[ \t]*)?`)
+
+// ruleAttr is an ATTR or ATTRS name the reader accepts.
+var ruleAttr = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // ruleArg is a word a listed program may take after its path: no shell or
 // udev quoting, escape or $ substitution.
@@ -773,7 +784,13 @@ func rulePrograms(text string) ([]ruleProgram, error) {
 			rest = rest[len(m[0]):]
 			key, hasAttr, attr, value := m[1], m[2] != "", m[3], m[5]
 			if !ruleKeys[key] {
-				return nil, fmt.Errorf("%d: key %s is not one of udev(7)'s", n, key)
+				return nil, fmt.Errorf("%d: key %s is not one of udev(7)'s, or is SYSCTL", n, key)
+			}
+			// An ATTR name is a path under the device's sysfs directory, so
+			// a / or [subsystem/device] form could reach another file (the
+			// kernel's uevent_helper among them); only a plain name is read.
+			if (key == "ATTR" || key == "ATTRS") && !ruleAttr.MatchString(attr) {
+				return nil, fmt.Errorf("%d: %s{%s}; an attribute name is letters, digits and _ only", n, key, attr)
 			}
 			program := false
 			switch key {

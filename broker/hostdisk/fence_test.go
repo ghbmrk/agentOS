@@ -31,8 +31,8 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 	// reads what each name resolves to (#4256).
 	var files int
 	for _, p := range goList(t, ".", "../cmd/agentos-hostdisk") {
-		if p.ignored != "" {
-			t.Errorf("%s: files outside the build go unchecked: %s", p.path, p.ignored)
+		if p.unread != "" {
+			t.Errorf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, p.unread)
 		}
 		srcs := map[string]string{}
 		for _, n := range strings.Fields(p.goFiles) {
@@ -117,6 +117,8 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 		"Symlink": true, "Link": true, "Mount": true, "Unmount": true, "Swapon": true,
 		"WriteAt": true, "StartProcess": true, "O_EXCL": true, "Sync": true, "Fsync": true,
 		"Ioctl": true, "Syscall": true, "RawSyscall": true, "Fd": true, "NewFile": true,
+		// os.Root's OpenFile takes write flags the fence does not read.
+		"OpenRoot": true, "OpenInRoot": true,
 	}
 	forbiddenText := []string{"sync_file_range", "BLKDISCARD", "discard", "ioctl"}
 	var problems []string
@@ -194,6 +196,16 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 				if _, isPkg := obj.(*types.PkgName); isPkg {
 					return true
 				}
+				// os.Root, however a value of it arrives (a parameter, a
+				// field), and each of its methods.
+				if isPkgObj(obj, "os", "Root") {
+					fail("%s: uses os.Root", fs.Position(x.Pos()))
+				}
+				if f, ok := obj.(*types.Func); ok {
+					if recv := f.Type().(*types.Signature).Recv(); recv != nil && isOSRoot(recv.Type()) {
+						fail("%s: uses os.Root's %s", fs.Position(x.Pos()), f.Name())
+					}
+				}
 				// By resolution: a name from another package that a dot
 				// import brings in bare counts as its selector would.
 				if forbiddenSel[obj.Name()] && obj.Pkg().Path() != pkgPath {
@@ -218,6 +230,15 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 	return problems
 }
 
+// isOSRoot reports whether t is os.Root or a pointer to it.
+func isOSRoot(t types.Type) bool {
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	n, ok := t.(*types.Named)
+	return ok && isPkgObj(n.Obj(), "os", "Root")
+}
+
 // callee is the identifier a call's function expression names.
 func callee(e ast.Expr) *ast.Ident {
 	switch x := e.(type) {
@@ -240,7 +261,7 @@ func isPkgObj(obj types.Object, path, name string) bool {
 	return true
 }
 
-type listed struct{ path, dir, goFiles, ignored, export string }
+type listed struct{ path, dir, goFiles, unread, export string }
 
 var (
 	exportsOnce sync.Once
@@ -254,7 +275,7 @@ var (
 func goList(t *testing.T, pkgs ...string) []listed {
 	t.Helper()
 	exportsOnce.Do(func() {
-		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}}\t{{.Export}}"}, pkgs...)
+		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}\t{{.Export}}"}, pkgs...)
 		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net/http")
 		cmd := exec.Command("go", args...)
 		cmd.Env = append(os.Environ(), "GOFLAGS=")
@@ -273,7 +294,7 @@ func goList(t *testing.T, pkgs ...string) []listed {
 				exportsErr = fmt.Errorf("go list: unexpected line %q", line)
 				return
 			}
-			exports[f[0]] = listed{f[0], f[1], f[2], f[3], f[4]}
+			exports[f[0]] = listed{f[0], f[1], f[2], strings.TrimSpace(f[3]), f[4]}
 		}
 		for _, p := range pkgs {
 			cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}", p)
