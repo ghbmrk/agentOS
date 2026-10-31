@@ -159,12 +159,15 @@ type Gate struct {
 	seconds map[string]Second    // issued, not yet confirmed
 	permits map[string]int64     // device+act -> confirmed until (ms)
 	due     map[string]time.Time // lock -> when to relock
-	failed  map[string]bool      // lock -> a relock failed (logged once)
-	expect  map[string]time.Time // device+report -> own act counts until
-	sent    map[string][]Code    // lock -> codes last pushed (PINs dropped)
-	retry   map[string]time.Time // lock -> next code push try
-	events  []Event              // reports since the last Tick
-	flood   bool                 // reports were dropped
+	// pend is the earliest relock deadline of the unlocks since that
+	// lock's last relock began, so a relock in flight cannot clear one.
+	pend   map[string]time.Time
+	failed map[string]bool      // lock -> a relock failed (logged once)
+	expect map[string]time.Time // device+report -> own act counts until
+	sent   map[string][]Code    // lock -> codes last pushed (PINs dropped)
+	retry  map[string]time.Time // lock -> next code push try
+	events []Event              // reports since the last Tick
+	flood  bool                 // reports were dropped
 }
 
 // New returns a gate over cfg.
@@ -177,7 +180,7 @@ func New(cfg Config) (*Gate, error) {
 	}
 	return &Gate{
 		cfg: cfg, seconds: map[string]Second{}, permits: map[string]int64{},
-		due: map[string]time.Time{}, failed: map[string]bool{}, expect: map[string]time.Time{},
+		due: map[string]time.Time{}, pend: map[string]time.Time{}, failed: map[string]bool{}, expect: map[string]time.Time{},
 		sent: map[string][]Code{}, retry: map[string]time.Time{},
 	}, nil
 }
@@ -221,7 +224,7 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 	report := Disarmed
 	if a == action.Unlock {
 		report = Unlocked
-		g.relockBy(device, now.Add(RelockAfter))
+		g.unlockAt(device, now.Add(RelockAfter))
 	}
 	g.expect[device+"\x00"+strconv.Itoa(int(report))] = now.Add(expectFor)
 	g.mu.Unlock()
@@ -229,6 +232,11 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 		return err
 	}
 	if err := g.cfg.Driver.Act(ctx, device, a, ""); err != nil {
+		// The act may still have reached the device (action.Actuator), so
+		// the lock's own report of it must be told, not taken as ours.
+		g.mu.Lock()
+		delete(g.expect, device+"\x00"+strconv.Itoa(int(report)))
+		g.mu.Unlock()
 		return err
 	}
 	g.told(device, report, unusual)
@@ -253,6 +261,14 @@ func (g *Gate) told(device string, r Report, unusual bool) {
 	}
 	if _, err := g.cfg.Alerts.Raise(k, device); err != nil {
 		g.cfg.Log(fmt.Sprintf("locks: alert for %s not raised: %v", device, err))
+	}
+}
+
+// unlockAt records an unlock of lock that must relock by at. Under g.mu.
+func (g *Gate) unlockAt(lock string, at time.Time) {
+	g.relockBy(lock, at)
+	if p, ok := g.pend[lock]; !ok || at.Before(p) {
+		g.pend[lock] = at
 	}
 }
 
@@ -393,7 +409,7 @@ func (g *Gate) seen(doc policy.Document, e Event, now time.Time) {
 		if e.Rule != "" && !open(doc, e.Device, e.Rule, now) {
 			refused, at = true, now
 		}
-		g.relockBy(e.Device, at)
+		g.unlockAt(e.Device, at)
 	}
 	g.mu.Unlock()
 	if refused {
@@ -480,11 +496,13 @@ func (g *Gate) relock(doc policy.Document, now time.Time) {
 		ctx, cancel := context.WithTimeout(context.Background(), action.Timeout)
 		g.mu.Lock()
 		g.expect[l+"\x00"+strconv.Itoa(int(Locked))] = now.Add(expectFor)
+		delete(g.pend, l)
 		g.mu.Unlock()
 		err := g.cfg.Driver.Lock(ctx, l)
 		cancel()
 		g.mu.Lock()
 		if err != nil {
+			delete(g.expect, l+"\x00"+strconv.Itoa(int(Locked)))
 			g.due[l] = now.Add(retryAfter)
 			first := !g.failed[l]
 			g.failed[l] = true
@@ -494,9 +512,11 @@ func (g *Gate) relock(doc policy.Document, now time.Time) {
 			}
 			continue
 		}
-		// A later unlock may have pushed the deadline while this relock
-		// ran; keep that one.
-		if at, ok := g.due[l]; ok && !now.Before(at) {
+		// An unlock while this relock ran needs its own relock, even
+		// when it came after the lock command did.
+		if p, ok := g.pend[l]; ok {
+			g.due[l] = p
+		} else if at, ok := g.due[l]; ok && !now.Before(at) {
 			delete(g.due, l)
 		}
 		delete(g.failed, l)

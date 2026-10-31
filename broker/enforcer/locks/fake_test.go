@@ -95,6 +95,12 @@ type radio struct {
 	locks map[string]*fakeLock
 	calls []string // every command, in order
 	fail  error    // when set, every command fails
+	// afterLock runs after a lock command reached the lock, before its
+	// answer returns.
+	afterLock func()
+	// actFails makes Act carry out the act and then report an error, as
+	// a link that drops after the write does.
+	actFails error
 }
 
 type fakeLock struct {
@@ -141,19 +147,22 @@ func (r *radio) Act(ctx context.Context, device string, a action.Act, route stri
 	default:
 		return errors.New("radio: not declared")
 	}
-	return nil
+	return r.actFails
 }
 
 func (r *radio) Lock(ctx context.Context, device string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.calls = append(r.calls, "lock "+device)
 	l, err := r.dev(device)
-	if err != nil {
-		return err
+	if err == nil {
+		l.unlocked = false
 	}
-	l.unlocked = false
-	return nil
+	hook := r.afterLock
+	r.mu.Unlock()
+	if hook != nil {
+		hook() // the lock command was sent; its answer is not back yet
+	}
+	return err
 }
 
 func (r *radio) SetCodes(ctx context.Context, device string, codes []locks.Code) error {

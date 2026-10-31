@@ -653,3 +653,74 @@ func TestSecondAndCodeBounds(t *testing.T) {
 		t.Error("an alert the log refused was not logged")
 	}
 }
+
+// An unlock that lands while a relock is waiting for the lock's answer
+// still relocks after its own interval: the relock in flight does not
+// clear its deadline. Catches a door left unlocked with no relock due
+// (L3 review on #4287, point 1).
+func TestUnlockDuringRelockStillRelocks(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.add(locks.RelockAfter)
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.radio.afterLock = func() { close(entered); <-release }
+	done := make(chan struct{})
+	go func() { r.tick(); close(done) }()
+	<-entered
+	r.radio.afterLock = nil
+	r.clock.add(500 * time.Millisecond)
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	r.clock.add(locks.RelockAfter)
+	r.tick()
+	if r.radio.unlocked("front") {
+		t.Errorf("the door is unlocked after the second unlock's interval: %v", r.radio.did())
+	}
+}
+
+// An unlock or disarm whose answer failed may still have happened
+// (action.Actuator), so the lock's own report of it is told: at 03:00 it
+// is texted. Catches a radio that drops the answer to hide a 3 a.m.
+// unlock (L3 review on #4287, point 2).
+func TestFailedActReportIsStillTold(t *testing.T) {
+	for _, c := range []struct {
+		device string
+		act    action.Act
+		report locks.Report
+		text   alert.Kind
+	}{{"front", action.Unlock, locks.Unlocked, alert.UnusualUnlock}, {"alarm", action.Disarm, locks.Disarmed, alert.UnusualDisarm}} {
+		r := newRig(t, at(3, 0))
+		r.radio.actFails = errors.New("link dropped after the write")
+		if err := r.second(c.device, c.act); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.tap(c.device, c.act); err == nil {
+			t.Fatal("a failed act reported success")
+		}
+		r.gate.Seen(locks.Event{Device: c.device, Report: c.report})
+		r.tick()
+		if !r.alerts.has(c.text) {
+			t.Errorf("a 03:00 %s the device reported after a failed answer was not texted: %v", c.act, r.alerts.kinds)
+		}
+	}
+	// A relock whose answer failed: the lock's report of "locked" is
+	// logged, not taken as the enforcer's own.
+	r := newRig(t, at(10, 0))
+	r.radio.locks["front"].unlocked = true
+	r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked})
+	r.tick()
+	r.clock.add(locks.RelockAfter)
+	r.radio.fail = errors.New("no answer")
+	r.tick()
+	r.radio.fail = nil
+	r.gate.Seen(locks.Event{Device: "front", Report: locks.Locked})
+	r.tick()
+	if !r.alerts.has(alert.RoutineLock) {
+		t.Errorf("a lock report after a failed relock was dropped: %v", r.alerts.kinds)
+	}
+}
