@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,11 +22,14 @@ import (
 // hardware key's tap over the change agentosd names files a request for
 // the next restart, the page offers the restart (the weekly reboot's
 // unit, which waits out a call or accepted work), and after it the page
-// shows the card the box made, through card.Display, until the owner
-// confirms it, when the kernel wipes its copy. The card is already in
-// effect when shown (card.DisplayConfig.Made): the store changed at boot.
-// The tap's challenge depends only on the recipient agentosd names, so
-// this page keeps nothing between the steps but the card's display.
+// shows the card the box made, through card.Display, on a second hardware
+// key's tap over the card's ID (#4128), until the owner confirms it, when
+// the kernel wipes its copy. The card is already in effect when shown
+// (card.DisplayConfig.Made): the store changed at boot. The page names it
+// by its mark, which the card prints, so after the kernel lets it go the
+// page can still say which card is in effect (#4160). Each tap's
+// challenge depends only on IDs agentosd names, so this page keeps
+// nothing between the steps but the card's display.
 
 func (a AgentosdPasskeys) RecoveryLostBegin(ctx context.Context, session string) (localapi.RecoveryLostBegun, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
@@ -56,12 +62,21 @@ func (a AgentosdPasskeys) RecoveryRestart(ctx context.Context, session string) e
 	return a.sessionCall(ctx, localapi.OpRecoveryRestart, session)
 }
 
-func (a AgentosdPasskeys) RecoveryLostCard(ctx context.Context, session string) ([]byte, error) {
+func (a AgentosdPasskeys) RecoveryLostCardBegin(ctx context.Context, session string) (localapi.RecoveryLostCardBegun, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	var out localapi.RecoveryLostCardBegun
+	err := a.Owner.Call(ctx, localapi.OpRecoveryLostCardBegin, localapi.RecoverySession{Token: session}, &out)
+	return out, err
+}
+
+func (a AgentosdPasskeys) RecoveryLostCard(ctx context.Context, session string, authData, clientData, sig []byte) (localapi.RecoveryLostCard, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	var out localapi.RecoveryLostCard
-	err := a.Owner.Call(ctx, localapi.OpRecoveryLostCard, localapi.RecoverySession{Token: session}, &out)
-	return out.Card, err
+	err := a.Owner.Call(ctx, localapi.OpRecoveryLostCard, localapi.RecoveryLost{Token: session,
+		AuthenticatorData: authData, ClientDataJSON: clientData, Signature: sig}, &out)
+	return out, err
 }
 
 func (a AgentosdPasskeys) RecoveryLostDone(ctx context.Context, session string) error {
@@ -89,19 +104,68 @@ const (
 	lostRestartText  = "I restart as soon as no call or task is running; once a month a check of my software runs first and takes a few minutes more. Then open this page again to see your new card."
 	lostWithdrawText = "Your request for a new card is withdrawn: I make no new card at my next restart."
 	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its recovery key is the only recovery key that opens my store, and the backups I take from now on open with it. Your old card's passphrase still opens my store."
-	lostGoneText     = "I restarted before you confirmed your new card, so I no longer hold it. If you printed or saved it, it is in effect: its recovery key opens my store, so keep it. If not, ask for a new card again. Your old card's passphrase still opens my store."
 	lostNoTapText    = "Nothing was filed. Tap again with one of your hardware keys."
+	lostNoShowText   = "Nothing is shown. Tap again with one of your hardware keys."
+	lostPhoneText    = "That tap was a phone passkey's. Only one of your hardware keys can show your new card. Tap again, and choose your hardware key."
 )
+
+// The lines for a card the kernel no longer holds, by what the last card a
+// page showed is now (#4160); each names that card by its mark.
+const (
+	lostGoneText       = "I restarted before you confirmed your new card, so I no longer hold it. The card in effect is marked %s: if you printed or saved the card with that mark, keep it, as its recovery key opens my store; a card with another mark does not. If you hold none with that mark, ask for a new card again. Your old card's passphrase still opens my store."
+	lostConfirmedText  = "Your new card, marked %s, is confirmed and in effect, and I keep no copy of it: its recovery key opens my store, and a card with another mark does not."
+	lostSupersededText = "The new card I showed you before, marked %s, is no longer in effect: its recovery key does not open my store. If no card you hold opens my store, ask for a new card. Your old card's passphrase still opens my store."
+	lostNoCardText     = "I hold no new card to show. If no card you hold opens my store, ask for a new card."
+)
+
+// cardMark is the mark of the card whose backup recipient ID is id: its
+// first 32 bits, in two groups, printed on the card (card.DisplayConfig.Mark).
+func cardMark(id string) string {
+	if len(id) < 8 {
+		return ""
+	}
+	return strings.ToUpper(id[:4] + "-" + id[4:8])
+}
+
+// lostNoCard is the line for a card the kernel no longer holds, from st.
+func lostNoCard(st localapi.RecoveryLostState) string {
+	switch m := cardMark(st.Shown); {
+	case m == "":
+		return lostNoCardText
+	case !st.InEffect:
+		return fmt.Sprintf(lostSupersededText, m)
+	case st.Confirmed:
+		return fmt.Sprintf(lostConfirmedText, m)
+	default:
+		return fmt.Sprintf(lostGoneText, m)
+	}
+}
 
 // lostText is the owner's wording for each refusal on this route.
 func lostText(err error) string {
 	switch {
 	case refused(err, localapi.ErrRecoveryNoCard):
-		return lostGoneText
+		return lostNoCardText
 	case refused(err, localapi.ErrRecoveryStale):
 		return "Something changed since you started: the request was withdrawn, or the recovery key changed. Start again."
 	}
 	return recoveryText(err)
+}
+
+// lostCardText is lostText on the card's page: no card reads where the
+// last card shown stands, and a missing page authority says so.
+func (s *Server) lostCardText(ctx context.Context, tok string, err error) string {
+	switch {
+	case errors.Is(err, card.ErrNoAuthority):
+		return firstboot.ErrNoAuthority.Error()
+	case refused(err, localapi.ErrRecoveryNotAnchor):
+		return lostPhoneText
+	case refused(err, localapi.ErrRecoveryNoCard):
+		if st, err := s.cfg.Recovery.RecoveryLostState(ctx, tok); err == nil {
+			return lostNoCard(st)
+		}
+	}
+	return lostText(err)
 }
 
 // lostView fills the first step's lost-card state; a failed read shows
@@ -111,6 +175,9 @@ func (s *Server) lostView(tok string, v *recoveryView) {
 	defer cancel()
 	if st, err := s.cfg.Recovery.RecoveryLostState(ctx, tok); err == nil {
 		v.Lost = st
+		if st.Shown != "" && !st.Ready && !st.Filed {
+			v.LostNote = lostNoCard(st)
+		}
 	}
 }
 
@@ -169,59 +236,101 @@ func (s *Server) lostTapPage(w http.ResponseWriter, r *http.Request, tok string)
 }
 
 // lostCardPage serves /recovery/new: the card the box made, to the session
-// that opened it, until it is confirmed. A display for another session, or
-// past its time, goes; the kernel still holds the card, so it is read
-// again for this one.
+// that opened it, until it is confirmed. A session with no display of it
+// is asked for a hardware key's tap over the card's ID first (#4128), and
+// the tap's post opens its display; a display for another session, or
+// past its time, goes.
 func (s *Server) lostCardPage(w http.ResponseWriter, r *http.Request, tok string) {
 	if tok == "" {
 		http.Redirect(w, r, "/recovery/", http.StatusSeeOther)
 		return
 	}
-	d, err := s.lostDisplay(r.Context(), tok)
+	if d := s.lostDisplay(tok); d != nil {
+		mine := func(r *http.Request) bool {
+			s.lost.mu.Lock()
+			defer s.lost.mu.Unlock()
+			return s.lost.display == d && s.lost.starter == tokenKey(cookieToken(r))
+		}
+		d.Handler(mine, "/recovery/?lost=done").ServeHTTP(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", vaultCSP)
+	v := recoveryView{RP: s.cfg.PasskeyRPID}
+	ctx, cancel := context.WithTimeout(r.Context(), callTimeout)
+	defer cancel()
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Bad request", http.StatusBadRequest)
+			return
+		}
+		err := s.lostShow(ctx, tok, r.PostForm)
+		if err == nil {
+			http.Redirect(w, r, "/recovery/new", http.StatusSeeOther)
+			return
+		}
+		v.Err = lostNoShowText
+		if !errors.Is(err, errNoTap) {
+			v.Err = s.lostCardText(ctx, tok, err)
+		}
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	b, err := s.cfg.Recovery.RecoveryLostCardBegin(ctx, tok)
 	if err != nil {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", vaultCSP)
-		v := recoveryView{RP: s.cfg.PasskeyRPID, Err: lostText(err)}
-		if errors.Is(err, card.ErrNoAuthority) {
-			v.Err = firstboot.ErrNoAuthority.Error()
+		if v.Err == "" {
+			v.Err = s.lostCardText(ctx, tok, err)
 		}
 		s.render(w, "recovery", v)
 		return
 	}
-	mine := func(r *http.Request) bool {
-		s.lost.mu.Lock()
-		defer s.lost.mu.Unlock()
-		return s.lost.display == d && s.lost.starter == tokenKey(cookieToken(r))
-	}
-	d.Handler(mine, "/recovery/?lost=done").ServeHTTP(w, r)
+	w.Header().Set("Content-Security-Policy", passkeyCSP)
+	v.Step, v.Mark, v.Challenge = "show", cardMark(b.ID), base64.StdEncoding.EncodeToString(b.Challenge)
+	s.render(w, "recovery", v)
 }
 
-// lostDisplay is tok's display of the made card, made from the kernel's
-// copy when there is none.
-func (s *Server) lostDisplay(ctx context.Context, tok string) (*card.Display, error) {
+// errNoTap: the post carried no tap.
+var errNoTap = errors.New("localui: no tap")
+
+// lostDisplay is tok's display of the made card, or nil; a display for
+// another session, or past its time, goes.
+func (s *Server) lostDisplay(tok string) *card.Display {
 	s.lost.mu.Lock()
 	d, mine := s.lost.display, s.lost.starter == tokenKey(tok) && s.cfg.Now().Before(s.lost.until)
 	if d != nil && !mine {
 		s.lost.display = nil
 	}
 	s.lost.mu.Unlock()
-	if d != nil {
-		if mine {
-			return d, nil
-		}
+	if d != nil && !mine {
 		d.Discard()
+		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, callTimeout)
-	defer cancel()
-	bits, err := s.cfg.Recovery.RecoveryLostCard(ctx, tok)
-	defer clear(bits)
+	return d
+}
+
+// lostShow reads the card on the posted hardware key's tap and makes it
+// tok's display, printing its mark.
+func (s *Server) lostShow(ctx context.Context, tok string, f url.Values) error {
+	ad, ok1 := formBytes(f.Get("ad"), localapi.MaxPasskeyAssertion)
+	cd, ok2 := formBytes(f.Get("cd"), localapi.MaxPasskeyAssertion)
+	sig, ok3 := formBytes(f.Get("sig"), localapi.MaxPasskeyAssertion)
+	if f.Get("step") != "show" || !ok1 || !ok2 || !ok3 {
+		return errNoTap
+	}
+	c, err := s.cfg.Recovery.RecoveryLostCard(ctx, tok, ad, cd, sig)
+	defer clear(c.Card)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if len(bits) != localapi.RecoveryCardLen {
-		return nil, Refused(localapi.ErrRecoveryUnavailable)
+	if len(c.Card) != localapi.RecoveryCardLen || len(c.ID) != localapi.RecoveryIDLen {
+		return Refused(localapi.ErrRecoveryUnavailable)
 	}
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(c.Card))
 	var auth []byte
 	if s.cfg.PageAuthority != nil {
 		auth = s.cfg.PageAuthority()
@@ -230,7 +339,7 @@ func (s *Server) lostDisplay(ctx context.Context, tok string) (*card.Display, er
 	if gen == nil {
 		gen = card.Generate
 	}
-	d, err = card.NewDisplay(card.DisplayConfig{Rotate: &card.Parts{Recovery: true}, Made: true, Authority: auth,
+	d, err := card.NewDisplay(card.DisplayConfig{Rotate: &card.Parts{Recovery: true}, Made: true, Authority: auth, Mark: cardMark(c.ID),
 		// The card's other parts are drawn only to fill the card the
 		// display checks whole; it keeps the recovery key alone.
 		Generate: func(rd io.Reader) (*card.Card, error) {
@@ -242,7 +351,7 @@ func (s *Server) lostDisplay(ctx context.Context, tok string) (*card.Display, er
 		},
 		Provision: func(*card.Card) error { return s.lostConfirmed(tok) }})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	s.lost.mu.Lock()
 	old := s.lost.display
@@ -251,7 +360,7 @@ func (s *Server) lostDisplay(ctx context.Context, tok string) (*card.Display, er
 	if old != nil {
 		old.Discard()
 	}
-	return d, nil
+	return nil
 }
 
 // lostConfirmed is the display's provision: the kernel wipes its copy. A
