@@ -486,7 +486,7 @@ def sri(data):
 class InlinedTest(unittest.TestCase):
     # #4153 (Security finding 1 on #4152): copies a bundler put in a package's files.
     def test_marks_name_each_copy_and_its_version(self):
-        files, marks = vulncheck.tarball_marks(tgz({
+        files, marks, _ = vulncheck.tarball_marks(tgz({
             "dist/a.mjs": "//#region node_modules/.pnpm/minimatch@10.2.6/node_modules/minimatch/dist/esm/index.js\n"
                           'x(__commonJS({"node_modules/.pnpm/@scope+pkg@1.2.3-beta.1_peer@2.0.0/node_modules/@scope/pkg/i.js"(){}}))\n'
                           # the store directory and the package differ: a link, not a copy
@@ -505,6 +505,105 @@ class InlinedTest(unittest.TestCase):
                                  ("ajv", "8.20.0"): {"lib/bundle.js.LICENSE"}, ("ws", "8.21.3"): {"lib/bundle.js.LICENSE"},
                                  ("core-js", "3.50.0"): {"third_party/THIRD_PARTY_NOTICES"},
                                  ("tslib", "2.8.1"): {"third_party/THIRD_PARTY_NOTICES"}})
+
+    # REQ: EVL-5. #4197: bundler marks that name a package but no version.
+    def test_unversioned_marks_name_the_package_and_not_a_version(self):
+        body = "\n".join([
+            "// node_modules/colors/lib/styles.js",                        # esbuild path comment
+            "//#region node_modules/@scope/pkg/dist/index.js",             # rolldown region
+            'var a = __commonJS({"node_modules/ws/lib/buffer-util.js"(exports, module) {',
+            '/***/ "./node_modules/left-pad/index.js":',                   # webpack module key
+            'x(__commonJS({"node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"(e){}}))',  # nested: ajv
+            "  // ../../node_modules/yaml/dist/index.js",                  # a path above the cwd
+            # a pnpm store path names its version: a versioned mark, and its src/node_modules is its own
+            '"node_modules/.pnpm/debug@4.4.0_x@1.0.0/node_modules/debug/src/node.js"(e){}',
+            '"node_modules/.pnpm/b@1.0.0/node_modules/b/src/node_modules/internal/x.js"(e){}',
+            # a key into another package's store directory gives no version for the one it names
+            '"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/index.js"(e){}',
+            '"node_modules/holder/x.js"(e){}',                             # the package itself
+            # not marks: a runtime path, a call argument, prose in a comment, a directory
+            'path.join(store, "node_modules/openclaw/package.json")',
+            'require("node_modules/fs-extra/lib/index.js")',
+            "// node_modules/npm/node_modules/node-gyp/lib depending on the",
+            '"node_modules/dir/"(e){}',
+        ]).encode()
+        self.assertEqual(vulncheck.unversioned_marks(body, "holder"), {
+            "colors": {"node_modules/colors/lib/styles.js"},
+            "@scope/pkg": {"node_modules/@scope/pkg/dist/index.js"},
+            "ws": {"node_modules/ws/lib/buffer-util.js"},
+            "left-pad": {"./node_modules/left-pad/index.js"},
+            "ajv": {"node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"},
+            "yaml": {"../../node_modules/yaml/dist/index.js"},
+            "brace-expansion": {"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/index.js"}})
+
+    def test_only_a_sidecar_or_notice_for_the_file_gives_its_versions(self):
+        key = lambda n: f'__commonJS({{"node_modules/{n}/index.js"(e){{}}}})\n'
+        _, marks, bare = vulncheck.tarball_marks(tgz({
+            "lib/utilsBundle.js": key("ws") + key("ip-address"),
+            "lib/utilsBundle.js.LICENSE": "- ws@8.0.0 (https://example.invalid)\n",
+            # a sidecar gives versions for its own file only
+            "lib/other.js": key("ws"),
+            # a sidecar of a non-script file is not a notice for the directory
+            "lib/webp_codec.wasm": "", "lib/webp_codec.LICENSE": "- ws@7.0.0\n",
+            # a notice that is no file's sidecar covers its directory and below, within its package
+            "third_party/NOTICES": "Name: lodash-es\nVersion: 4.17.21\n",
+            "third_party/x/bundle.js": "// node_modules/lodash-es/a.js\n",
+            "third_party/node_modules/dep/bundle.js": "// node_modules/lodash-es/a.js\n",
+            # a pnpm mark for the same package in the same file names another copy, not this one
+            "dist/worker.mjs": key("debug") + '"node_modules/.pnpm/debug@4.4.0/node_modules/debug/src/node.js"(e){}\n',
+        }), ("holder", "1.0.0"))
+        self.assertEqual({f: {n: v for n, (_, v) in d.items()} for f, d in bare.items()}, {
+            "lib/utilsBundle.js": {"ws": {"8.0.0"}, "ip-address": set()},
+            "lib/other.js": {"ws": set()},
+            "third_party/x/bundle.js": {"lodash-es": {"4.17.21"}},
+            "third_party/node_modules/dep/bundle.js": {"lodash-es": set()},
+            "dist/worker.mjs": {"debug": set()}})
+        # Every version a notice lists is still a copy the scan checks.
+        self.assertIn(("ws", "7.0.0"), marks)
+
+    def bundle_tarballs(self):
+        key = lambda n: f'__commonJS({{"node_modules/{n}/index.js"(e){{}}}})\n'
+        return self.mirror(
+            pw_1={"lib/utilsBundle.js": key("ws") + key("ip-address"),
+                  "lib/utilsBundle.js.LICENSE": "- ws@8.0.0\n- ip-address@10.2.0\n"},
+            oc_1={"dist/worker.mjs": key("ws") + key("ip-address"), "dist/extra.mjs": key("ws") + key("yaml"),
+                  "dist/lone.mjs": key("socks")})
+
+    def test_an_unversioned_mark_fails_unless_an_entry_gives_its_version(self):
+        tbs, mirror = self.bundle_tarballs()
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [], mirror)
+        self.assertEqual(sorted(p.split(" (marked")[0] for p in probs), [
+            "l: oc@1:dist/extra.mjs inlines ws", "l: oc@1:dist/extra.mjs inlines yaml",
+            "l: oc@1:dist/lone.mjs inlines socks",
+            "l: oc@1:dist/worker.mjs inlines ip-address", "l: oc@1:dist/worker.mjs inlines ws"])
+        self.assertEqual(set(copies), {("ws", "8.0.0"), ("ip-address", "10.2.0")})
+        entries = [{"holder": "oc@1", "copy": "socks@2.8.0", "files": ["dist/lone.mjs"], "why": "x"},
+                   {"holder": "oc@1", "bundle": "pw@1:lib/utilsBundle.js", "files": ["dist/worker.mjs"], "why": "x"}]
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, entries, mirror)
+        self.assertEqual(sorted(p.split(" (marked")[0] for p in probs),
+                         ["l: oc@1:dist/extra.mjs inlines ws", "l: oc@1:dist/extra.mjs inlines yaml"])
+        self.assertEqual(copies, {("ws", "8.0.0"): {"pw@1:lib/utilsBundle.js.LICENSE", "oc@1:dist/worker.mjs"},
+                                  ("ip-address", "10.2.0"): {"pw@1:lib/utilsBundle.js.LICENSE", "oc@1:dist/worker.mjs"},
+                                  ("socks", "2.8.0"): {"oc@1:dist/lone.mjs"}})
+
+    def test_a_bundle_entry_fails_when_its_files_are_not_that_bundles_copy(self):
+        tbs, mirror = self.bundle_tarballs()
+        # dist/extra.mjs marks yaml, which the bundle does not: it is not the bundle's copy.
+        entry = {"holder": "oc@1", "bundle": "pw@1:lib/utilsBundle.js", "files": ["dist/extra.mjs"], "why": "x"}
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [entry], mirror)
+        self.assertIn("l: oc@1:dist/extra.mjs marks node_modules/yaml/index.js, which pw@1:lib/utilsBundle.js "
+                      "does not; its files are not that bundle's copy, so requalify the entry", probs)
+        self.assertNotIn("oc@1:dist/extra.mjs", set().union(*copies.values()))
+        # A bundle this lockfile does not install, or a file of it with no unversioned marks.
+        for bundle in ("pw@2:lib/utilsBundle.js", "pw@1:lib/utilsBundle.js.LICENSE"):
+            _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": bundle, "files": ["dist/worker.mjs"]}], mirror)
+            self.assertEqual(sum("checks nothing; requalify it" in p for p in probs), 1, probs)
+        # A file of the holder with no unversioned marks: the entry checks nothing there.
+        tbs, mirror = self.mirror(pw_1={"lib/u.js": '"node_modules/ws/i.js"(e){}', "lib/u.js.LICENSE": "- ws@8.0.0\n"},
+                                  oc_1={"dist/min.mjs": "minified"})
+        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": "pw@1:lib/u.js", "files": ["dist/min.mjs"]}], mirror)
+        self.assertEqual(probs, ["l: oc@1:dist/min.mjs has no unversioned marks, so the inlined entry for pw@1:lib/u.js "
+                                 "checks nothing there; requalify it"])
 
     def test_lockfile_tarballs_and_the_entries_with_none(self):
         lock = {"packages": {
@@ -583,10 +682,13 @@ class InlinedTest(unittest.TestCase):
 
     def test_inlined_entry_shape(self):
         good = {"holder": "oc@1", "copy": "@s/m@2", "files": ["dist/w.mjs"], "why": "minified"}
-        self.assertEqual(vulncheck.inlined_problems([good]), [])
+        bundle = {"holder": "oc@1", "bundle": "@s/pw@1:lib/u.js", "files": ["dist/w.mjs"], "why": "same keys"}
+        self.assertEqual(vulncheck.inlined_problems([good, bundle]), [])
         for bad in ({**good, "holder": "oc"}, {**good, "copy": "@s/m"}, {**good, "files": []},
                     {**good, "files": "dist/w.mjs"}, {**good, "why": ""}, {**good, "extra": 1},
-                    {k: v for k, v in good.items() if k != "why"}, "oc@1"):
+                    {k: v for k, v in good.items() if k != "why"}, "oc@1",
+                    {**good, "bundle": "pw@1:lib/u.js"}, {**bundle, "bundle": "pw@1"}, {**bundle, "bundle": "pw:lib/u.js"},
+                    {**bundle, "bundle": 1}):
             self.assertEqual(len(vulncheck.inlined_problems([bad])), 1, bad)
 
     def test_bad_inlined_entries_stop_the_scan(self):

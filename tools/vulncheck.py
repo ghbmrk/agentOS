@@ -18,9 +18,14 @@ run      govulncheck on each Go target of assurance/vulncheck.json, an OSV scan 
              files, which no lockfile lists (#4153). Each tarball an npm lockfile installs is
              fetched, checked against the lockfile's sha512 integrity, and read for the marks
              that name such a copy and its version: a pnpm store path in a module marker or
-             require key, and a license sidecar or notice listing a bundle's packages. A copy
-             with no mark (a minified bundle) is listed in the config's "inlined", and that
-             entry fails once no lockfile installs its holder at the version it names.
+             require key, and a license sidecar or notice listing a bundle's packages. A bundler
+             mark that names a package but no version (an esbuild module key or path comment,
+             a rolldown region, outside a pnpm store) fails unless a sidecar or notice for that
+             file, or an "inlined" entry, gives that package's version there (#4197). A copy
+             with no mark (a minified bundle) is listed in the config's "inlined", as is a file
+             that copies another installed package's bundle (taking that bundle's versions, and
+             failing on any mark the bundle lacks); an entry fails once no lockfile installs its
+             holder at the version it names.
          A record names the vulnerability (its ID or any alias), the package and version it
          accepts (a Debian image record names only its source package), the issue that records
          why it is accepted, and the reason; a record accepts no other package or version. With --check-issues each cited issue must be an open
@@ -80,6 +85,7 @@ STDLIB = "stdlib"
 OSV_OK = (0, 1)
 RECORD_KEYS = {"id", "issue", "why", "where", "package", "version"}
 INLINED_KEYS = {"holder", "copy", "files", "why"}
+INLINED_BUNDLE_KEYS = {"holder", "bundle", "files", "why"}
 # The `where` of every image finding, and of every record that accepts one.
 IMAGE = "image"
 # What mkosi.postinst writes to the image build's output directory.
@@ -101,17 +107,27 @@ CONTROL_FAILS = {("gomod", "GO-0000-0001"), ("gomod", "GO-0000-0002"),
                  ("gomod", "AGENTOS-VULNCHECK-FORK-1"),
                  ("npm/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"),
                  ("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1")}
-CONTROL_FAILS |= {("npm/package-lock.json", f"AGENTOS-VULNCHECK-INLINED-{n}") for n in (1, 2, 3)}
+CONTROL_FAILS |= {("npm/package-lock.json", f"AGENTOS-VULNCHECK-INLINED-{n}") for n in (1, 2, 3, 4)}
 CONTROL_INFO = {("gomod", "GO-0000-0003")}
 # The inlined plants in agentos-bundle's tarball (#4153), as (ID, package, version): a copy a pnpm
-# store path marks, one its license sidecar lists, one the config's inlined entry names, and
-# left-pad 0.9.0, which the record accepting left-pad 1.0.0 must not accept: it is the one
-# failure left once the records apply.
+# store path marks, one its license sidecar lists, one the config's inlined entry names, one an
+# unversioned module key marks and its sidecar gives the version of (#4197), and left-pad 0.9.0,
+# which the record accepting left-pad 1.0.0 must not accept: it is the one failure left once the
+# records apply.
 CONTROL_INLINED = {("AGENTOS-VULNCHECK-INLINED-1", "agentos-inlined", "1.0.0"),
                    ("AGENTOS-VULNCHECK-INLINED-2", "agentos-listed", "2.0.0"),
                    ("AGENTOS-VULNCHECK-INLINED-3", "agentos-unmarked", "3.0.0"),
+                   ("AGENTOS-VULNCHECK-INLINED-4", "agentos-bare", "4.0.0"),
                    ("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
 CONTROL_STILL_FAILS = {("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
+# The unversioned marks (#4197) no sidecar, notice or entry resolves, as (holder:file, package),
+# which fail in both runs: a module key into another package's pnpm store directory and an esbuild
+# path comment. dist/bare.js's key takes its sidecar's version, dist/region/region.mjs's rolldown
+# region its directory's NOTICE, and dist/again.js's key the bundle entry's (dist/bare.js's).
+CONTROL_UNVERSIONED = {("agentos-bundle@1.0.0:dist/marked.mjs", "agentos-decoy"),
+                       ("agentos-bundle@1.0.0:dist/orphan.js", "agentos-orphan")}
+# The files each plant's finding names (#4197): the bundle entry adds dist/again.js to the sidecar's.
+CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined in agentos-bundle@1.0.0:dist/again.js (+1)")
 # The image plants: binary libplant1 of source agentos-plant 1.0-1, queried by its source, whose
 # advisory Debian has fixed (in 1.0-2), so no record can accept it; and agentos-nofix, whose
 # advisory has no fix, which the fixture's record accepts. agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
@@ -124,7 +140,9 @@ CONTROL_CONFIG = {
     "osv_sources": ["npm/package-lock.json"],
     "skip_paths": [],
     "inlined": [{"holder": "agentos-bundle@1.0.0", "copy": "agentos-unmarked@3.0.0", "files": ["dist/min.js"],
-                 "why": "control: a minified copy with no mark"}],
+                 "why": "control: a minified copy with no mark"},
+                {"holder": "agentos-bundle@1.0.0", "bundle": "agentos-bundle@1.0.0:dist/bare.js",
+                 "files": ["dist/again.js"], "why": "control: a file that copies another file's bundle"}],
     "accepted": [
         {"id": "CVE-0000-0001", "issue": 1, "why": "control: accepted by alias",
          "package": "example.com/dep", "version": "v1.0.0"},
@@ -142,6 +160,8 @@ CONTROL_CONFIG = {
          "where": "npm/package-lock.json", "package": "agentos-listed", "version": "2.0.0"},
         {"id": "AGENTOS-VULNCHECK-INLINED-3", "issue": 1, "why": "control: an unmarked copy",
          "where": "npm/package-lock.json", "package": "agentos-unmarked", "version": "3.0.0"},
+        {"id": "GHSA-0000-0000-0104", "issue": 1, "why": "control: a copy an unversioned key marks, by alias",
+         "where": "npm/package-lock.json", "package": "agentos-bare", "version": "4.0.0"},
         {"id": "AGENTOS-VULNCHECK-DEB-1", "issue": 1, "why": "control: Debian has fixed it, so this "
          "cannot accept it", "where": IMAGE, "package": "agentos-plant"},
         {"id": "CVE-0000-0105", "issue": 1, "why": "control: no Debian fix; accepted by alias",
@@ -457,12 +477,56 @@ NOTICE_MARK = re.compile(r"^Name: ((?:@[\w.-]+/)?[\w.-]+)[ \t]*\n(?:(?!Name:).*\
 SCRIPTS = (".js", ".mjs", ".cjs")
 NOTICE = re.compile(r"licen[cs]e|notice", re.I)
 NPM_LOCK = "package-lock.json"
+# Bundler marks that name an inlined module by its path and so its package, but not always its
+# version (#4197): a line comment holding only the path (esbuild's "// node_modules/ws/lib/x.js",
+# rolldown's "//#region node_modules/ws/lib/x.js"), and a quoted path used as a module key
+# (esbuild's __commonJS({"node_modules/ws/lib/x.js"(exports, module) {...}}), webpack's
+# "./node_modules/ws/lib/x.js": ...). The package is the path's last node_modules/<name>. A
+# path a PNPM_MARK names a version for is versioned; any other is an unversioned mark, which
+# fails unless a sidecar or notice for that file, or an "inlined" entry, gives that package's
+# version there.
+_MARK_PATH = rb"((?:[\w.@+-]+/)*?node_modules/[^\s\"'`()]+?\.\w+)"
+COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region)? +" + _MARK_PATH + rb"[ \t]*\r?$", re.M)
+KEY_MARK = re.compile(rb"[\"'`]" + _MARK_PATH + rb"[\"'`][(:]")
+MODULE_SEG = re.compile(rb"node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
 
 
 def at(spec):
     """(name, version) of "name@version"; a scoped name keeps its leading @."""
     name, _, version = spec.rpartition("@")
     return name, version
+
+
+def bundle_ref(spec):
+    """(name, version, path) of "name@version:path", the bundle an "inlined" entry's files copy."""
+    pkg, _, path = spec.partition(":")
+    return (*at(pkg), path)
+
+
+def unversioned_marks(body, own):
+    """{package: the mark paths naming it} for the unversioned bundler marks in one script."""
+    out = {}
+    for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body):
+        if any(d.replace(b"+", b"/") == n for d, _, n in PNPM_MARK.findall(path)):
+            continue  # a pnpm store path: the copy and its version are a mark already
+        names = [n for n in MODULE_SEG.findall(path) if n != b".pnpm"]
+        if names and names[-1].decode() != own:
+            out.setdefault(names[-1].decode(), set()).add(path.decode())
+    return out
+
+
+def notice_scope(notice, scripts, files):
+    """The scripts a license or notice file gives versions for. A sidecar (another file's name,
+    or its name without the extension, and a suffix: utilsBundle.js.LICENSE, webp_codec.LICENSE
+    beside webp_codec.wasm) gives them for that file only; any other notice for the scripts in
+    its directory and below, within its package (no node_modules/ between)."""
+    d, _, base = notice.rpartition("/")
+    side = {f for f in files if f.rpartition("/")[0] == d and not NOTICE.search(f.rpartition("/")[2])
+            and any(base.startswith(n + ".") for n in (f.rpartition("/")[2], f.rpartition("/")[2].rpartition(".")[0]) if n)}
+    if side:
+        return side & scripts
+    pre = d + "/" if d else ""
+    return {s for s in scripts if s.startswith(pre) and "node_modules/" not in s[len(pre):].rpartition("/")[0] + "/"}
 
 
 def lock_tarballs(lock, where):
@@ -502,10 +566,11 @@ def fetch_tarball(resolved, integrity, mirror=None):
 
 
 def tarball_marks(data, own):
-    """The files of a package tarball (without the leading package/), and for each inlined
-    copy its marks name, (name, version) -> the files that name it. OWN, the package itself,
-    is not a copy."""
-    files, marks = set(), {}
+    """What a package tarball's marks say about its inlined copies: its files (without the
+    leading package/); (name, version) -> the files whose marks name that copy; and for each
+    script with unversioned marks (#4197), {package: (its mark paths, the versions its sidecar
+    or notices give)}. OWN, (name, version) of the package itself, is not a copy."""
+    files, marks, by_file, bare = set(), {}, {}, {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
         for m in t:
             if not m.isfile():
@@ -521,29 +586,46 @@ def tarball_marks(data, own):
             if script:
                 found += [(n.decode(), v.decode()) for d, v, n in PNPM_MARK.findall(body)
                           if d.decode().replace("+", "/") == n.decode()]
+                if u := unversioned_marks(body, own[0]):
+                    bare[rel] = u
             if notice:
                 text = body.decode("utf-8", "replace")
                 found += LIST_MARK.findall(text) + NOTICE_MARK.findall(text)
+            found = [k for k in found if k != own]
+            by_file[rel] = (script, found)
             for k in found:
-                if k != own:
-                    marks.setdefault(k, set()).add(rel)
-    return files, marks
+                marks.setdefault(k, set()).add(rel)
+    scripts = {rel for rel, (script, _) in by_file.items() if script}
+    # Only a sidecar or notice gives a bundle's versions: a pnpm mark for the same package in the
+    # same file names another copy (OpenClaw's worker.mjs holds its own debug and playwright-core's).
+    known = {rel: set() for rel in bare}
+    for n, (script, found) in by_file.items():
+        if not script and found:
+            for rel in notice_scope(n, scripts, files) & set(bare):
+                known[rel].update(found)
+    unversioned = {rel: {name: (paths, {v for k, v in known[rel] if k == name}) for name, paths in names.items()}
+                   for rel, names in bare.items()}
+    return files, marks, unversioned
 
 
 def inlined_problems(entries):
-    """Shape problems in the config's "inlined" list: copies with no mark, each as
-    {holder: name@version, copy: name@version, files: [the holder's files holding it], why}."""
+    """Shape problems in the config's "inlined" list: copies whose marks give no version, each
+    as {holder: name@version, copy: name@version, files: [the holder's files holding it], why},
+    or files that copy another installed package's bundle, as {holder, bundle:
+    name@version:path, files, why}, whose marks and versions the bundle's give (#4197)."""
     problems = []
     for n, e in enumerate(entries):
         tag = f"inlined[{n}]"
         if not isinstance(e, dict):
             problems.append(f"{tag}: not an object")
             continue
-        if set(e) != INLINED_KEYS:
-            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)}")
+        if set(e) not in (INLINED_KEYS, INLINED_BUNDLE_KEYS):
+            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)} or {sorted(INLINED_BUNDLE_KEYS)}")
             continue
+        if "bundle" in e and (not isinstance(e["bundle"], str) or not all(bundle_ref(e["bundle"]))):
+            problems.append(f"{tag}: bundle must be name@version:path")
         for k in ("holder", "copy"):
-            if not isinstance(e[k], str) or not all(at(e[k])):
+            if k in e and (not isinstance(e[k], str) or not all(at(e[k]))):
                 problems.append(f"{tag}: {k} must be name@version")
         if not isinstance(e["files"], list) or not e["files"] or not all(isinstance(f, str) and f for f in e["files"]):
             problems.append(f"{tag}: files must list the holder's files that hold the copy")
@@ -555,26 +637,68 @@ def inlined_problems(entries):
 def inlined_copies(where, tarballs, entries, mirror=None):
     """(name, version) -> the holders' files that hold it, for one lockfile's tarballs, with
     the entries of the config's "inlined" that one of them holds; and the problems."""
-    copies, problems, held = {}, [], {}
+    copies, problems, held, bare = {}, [], {}, {}
 
     def read(t):
         name, version, resolved, integrity = t
         return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        for holder, (files, marks) in pool.map(read, tarballs):
+        for holder, (files, marks, unversioned) in pool.map(read, tarballs):
             held[holder] = files
+            bare[holder] = unversioned
             for k, fs in marks.items():
                 copies.setdefault(k, set()).update(f"{holder}:{f}" for f in fs)
-    for e in entries:
+    # Entries naming a copy first: a bundle entry takes the versions its bundle ends up with.
+    for e in sorted(entries, key=lambda e: "bundle" in e):
         if e["holder"] not in held:
             continue
+        what = e.get("copy") or e["bundle"]
         missing = sorted(set(e["files"]) - held[e["holder"]])
         if missing:
             problems.append(f"{where}: {e['holder']} has no {missing[0]}, which the inlined entry for "
-                            f"{e['copy']} names; requalify it")
-        copies.setdefault(at(e["copy"]), set()).update(f"{e['holder']}:{f}" for f in e["files"])
+                            f"{what} names; requalify it")
+        marked = bare[e["holder"]]
+        if "copy" in e:
+            name, version = at(e["copy"])
+            copies.setdefault((name, version), set()).update(f"{e['holder']}:{f}" for f in e["files"])
+            for f in e["files"]:
+                if name in marked.get(f, {}):
+                    marked[f][name][1].add(version)
+            continue
+        name, version, path = bundle_ref(e["bundle"])
+        src = bare.get(f"{name}@{version}", {}).get(path)
+        if src is None:
+            problems.append(f"{where}: {e['bundle']} is not a file with unversioned marks in a tarball this "
+                            f"lockfile installs, so the inlined entry for {e['holder']} checks nothing; requalify it")
+            continue
+        for f in e["files"]:
+            if f not in marked:
+                problems.append(f"{where}: {e['holder']}:{f} has no unversioned marks, so the inlined entry "
+                                f"for {e['bundle']} checks nothing there; requalify it")
+                continue
+            extra = sorted(p for n, (paths, _) in marked[f].items()
+                           for p in paths - src.get(n, (set(), set()))[0])
+            if extra:
+                problems.append(f"{where}: {e['holder']}:{f} marks {extra[0]}, which {e['bundle']} does not; "
+                                "its files are not that bundle's copy, so requalify the entry")
+                continue
+            for n, (_, versions) in marked[f].items():
+                for v in src[n][1]:
+                    versions.add(v)
+                    copies.setdefault((n, v), set()).add(f"{e['holder']}:{f}")
+    for holder in sorted(bare):
+        for f, names in sorted(bare[holder].items()):
+            for n, (paths, versions) in sorted(names.items()):
+                if not versions:
+                    problems.append(unversioned_problem(where, holder, f, n, paths))
     return copies, problems, set(held)
+
+
+def unversioned_problem(where, holder, f, name, paths):
+    return (f"{where}: {holder}:{f} inlines {name} (marked {sorted(paths)[0]}) with no version: no "
+            "sidecar or notice for that file names one; add an \"inlined\" entry naming its "
+            "version, or the installed bundle the file copies (#4197)")
 
 
 def inlined_findings(where, doc, copies):
@@ -630,7 +754,7 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
         found, probs = inlined_findings(where, doc, copies)
         findings += found
         problems += probs
-    problems += [f"inlined: no lockfile installs {e['holder']}, so the entry for {e['copy']} checks "
+    problems += [f"inlined: no lockfile installs {e['holder']}, so the entry for {e.get('copy') or e['bundle']} checks "
                  "nothing; requalify the holder's unmarked copies and update it" for e in entries
                  if e["holder"] not in holders]
     return findings, problems
@@ -834,6 +958,19 @@ def summary(findings, problems, unused, out=None):
     return not failing and not problems
 
 
+UNVERSIONED = re.compile(r"^npm/package-lock\.json: (\S+) inlines (\S+) \(marked ")
+
+
+def control_unversioned(probs):
+    """The problems but the unversioned marks CONTROL_UNVERSIONED plants, and a problem if those
+    are not exactly the ones reported."""
+    got = {m.groups() for m in map(UNVERSIONED.match, probs) if m}
+    rest = [p for p in probs if not UNVERSIONED.match(p)]
+    if got != CONTROL_UNVERSIONED:
+        rest.append(f"unversioned marks: want {sorted(CONTROL_UNVERSIONED)}, got {sorted(got)}")
+    return rest
+
+
 def control():
     """Run the scan on the fixture with planted databases; return problems with the result."""
     problems = []
@@ -851,7 +988,7 @@ def control():
         bare = {**CONTROL_CONFIG, "accepted": []}
         findings, probs, _ = scan(bare, FIXTURE, **kw)
         summary(findings, probs, [])
-        problems += [f"no records: {p}" for p in probs]
+        problems += [f"no records: {p}" for p in control_unversioned(probs)]
         fails = {(f["where"], f["id"]) for f in findings if f["fails"]}
         info = {(f["where"], f["id"]) for f in findings if not f["fails"]}
         if fails != CONTROL_FAILS:
@@ -861,9 +998,11 @@ def control():
         inlined = {(f["id"], f["module"], f["version"]) for f in findings if f["level"] == "inlined"}
         if inlined != CONTROL_INLINED:
             problems.append(f"inlined plants: want {sorted(CONTROL_INLINED)}, got {sorted(inlined)}")
+        if CONTROL_BARE_FILES not in {(f["id"], f["package"]) for f in findings}:
+            problems.append(f"the bundle entry's file: want the finding {CONTROL_BARE_FILES}")
         findings, probs, unused = scan(CONTROL_CONFIG, FIXTURE, **kw)
         summary(findings, probs, unused)
-        problems += [f"with records: {p}" for p in probs]
+        problems += [f"with records: {p}" for p in control_unversioned(probs)]
         failing = {(f["id"], f["module"], f["version"]) for f in findings if verdict(f) == "FAIL"}
         if failing != CONTROL_STILL_FAILS or unused:
             problems.append(f"the fixture's records must clear every planted failure but "
