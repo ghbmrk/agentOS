@@ -248,6 +248,11 @@ func (e *Engine) Pending() []Pending { return slices.Clone(e.st.Pending) }
 // is a new, higher version like any other, classified by what it changes
 // (NET-2 Recovery).
 func (e *Engine) Propose(next Proposal, sig []byte, nowMS int64) (Outcome, error) {
+	// A hold on a lock or an alarm is signed only over a screen that names
+	// the risk (NET-7 Freeze), checked before anything is spent.
+	if err := riskShown(e.cur, next.Doc, next.Diff); err != nil {
+		return Outcome{}, err
+	}
 	k, err := Verify(e.owner, e.st.Spent, next, sig)
 	if err != nil {
 		return Outcome{}, err
