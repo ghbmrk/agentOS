@@ -204,6 +204,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 **Acceptance tests:**
 1. NET-2: `radio::TestRadioCannotChangeRule`: the radio process's credentials cannot open the policy store or the page's socket. Catches a radio exploit reaching the rules.
 2. NET-2: `radio::TestOnlyDeclaredOps`. Catches a wide radio interface.
+3. NET-2, A18 (ENF-k2-rx, #4196): `ble::TestBusPolicyRefusesOtherPeers` and `ble::TestReadDecodesOnlyWanted`: no other bus peer's call or signal reaches the BLE stack, and a body it would drop is never decoded. Catches a compromised bus peer flooding the stack.
 **Size:** about 110k. **Depends on:** ENF-d.
 
 ### ENF-l (#3670): the daemon and lifecycle (integration owner)

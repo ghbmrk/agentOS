@@ -286,8 +286,22 @@ func TestWireBounds(t *testing.T) {
 	b = append(b, 0)
 	le.PutUint32(b[4:], le.Uint32(b[4:])+1)
 	bad("MaxMessage+1 bytes", b)
-	if _, err := frameLen(b[:16]); err == nil {
+	if _, _, err := frameLen(b[:16]); err == nil {
 		t.Error("frameLen took MaxMessage+1")
+	}
+	// Header fields of exactly maxHeader bytes are measured; one more is too long.
+	h := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
+	for _, c := range []struct {
+		fields uint32
+		head   int
+		err    error
+	}{{maxHeader, 16 + maxHeader, nil}, {maxHeader + 1, 16 + maxHeader + 8, errTooLong}, {1, 24, nil}} {
+		le.PutUint32(h[4:], 3)
+		le.PutUint32(h[12:], c.fields)
+		head, n, err := frameLen(h)
+		if head != c.head || n != c.head+3 || !errors.Is(err, c.err) {
+			t.Errorf("header fields of %d bytes: %d, %d, %v", c.fields, head, n, err)
+		}
 	}
 }
 
