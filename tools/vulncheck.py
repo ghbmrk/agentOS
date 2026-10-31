@@ -22,10 +22,17 @@ run      govulncheck on each Go target of assurance/vulncheck.json, an OSV scan 
              mark that names a package but no version (an esbuild module key or path comment,
              a rolldown region, outside a pnpm store) fails unless a sidecar or notice for that
              file, or an "inlined" entry, gives that package's version there (#4197). A copy
-             with no mark (a minified bundle) is listed in the config's "inlined", as is a file
-             that copies another installed package's bundle (taking that bundle's versions, and
-             failing on any mark the bundle lacks); an entry fails once no lockfile installs its
-             holder at the version it names.
+             with no mark (a minified bundle) is found by its string literals (#4234): a script
+             holding FP_MIN or more literals that only one package's own unminified, unmarked
+             scripts hold, where that package has an OSV advisory at any version, fails unless a
+             mark, sidecar, notice or "inlined" entry names it there. Fingerprints come from the
+             lockfile's tarballs, the packages they ship whole under node_modules/, and the
+             registry's tarball of each package a mark or entry names with a version no lockfile
+             installs. The config's "inlined" names such a copy's version, a file that copies
+             another installed package's bundle (taking that bundle's versions, and failing on
+             any mark the bundle lacks), or a lookalike: a file whose matching literals are
+             another package's code (failing once they match nothing); an entry fails once no
+             lockfile installs its holder at the version it names.
          A record names the vulnerability (its ID or any alias), the package and version it
          accepts (a Debian image record names only its source package), the issue that records
          why it is accepted, and the reason; a record accepts no other package or version. With --check-issues each cited issue must be an open
@@ -74,6 +81,7 @@ import sys
 import tarfile
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -127,6 +135,11 @@ CONTROL_STILL_FAILS = {("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
 CONTROL_UNVERSIONED = {("agentos-bundle@1.0.0:dist/marked.mjs", "agentos-decoy"),
                        ("agentos-bundle@1.0.0:dist/nested.js", "agentos-nested"),
                        ("agentos-bundle@1.0.0:dist/orphan.js", "agentos-orphan")}
+# The unmarked copies (#4234), as (holder:file, package), which fail in both runs: minified files
+# with no mark holding the literals of left-pad, which the lockfile installs, and of agentos-inlined,
+# which only a mark names, so its fingerprint comes from the registry (the mirror's registry.json).
+CONTROL_UNMARKED = {("agentos-bundle@1.0.0:dist/packed.js", "left-pad"),
+                    ("agentos-bundle@1.0.0:dist/fetched.js", "agentos-inlined")}
 # The files each plant's finding names (#4197): the bundle entry adds dist/again.js to the sidecar's.
 CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined in agentos-bundle@1.0.0:dist/again.js (+1)")
 # The image plants: binary libplant1 of source agentos-plant 1.0-1, queried by its source, whose
@@ -493,6 +506,39 @@ COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region| CONCATENATED MODULE:)? +" + _M
 KEY_MARK = re.compile(rb"[\"'`]" + _MARK_PATH + rb"[\"'`][(:]")
 TURBOPACK_MARK = re.compile(rb"[\"'`]\[project\]/" + _MARK_PATH + rb"(?: [^\"'`\n]*)?[\"'`]")
 MODULE_SEG = re.compile(rb"node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
+# Unmarked copies (#4234): a minified bundle can drop every mark, but it keeps the string literals
+# of the code it copied. A package's fingerprint is the literals of FP_LEN characters in its own
+# scripts that no other package's own scripts hold. Its own scripts are the unminified ones in its
+# tarball that no mark, sidecar or notice says hold a copy (a bundle's literals are its copies' as
+# much as its own), whether the package is installed, shipped whole under another package's
+# node_modules/, or only named with a version by a mark elsewhere (then read from the registry).
+# Only a package with an OSV advisory, at any version, has a fingerprint: a copy of any other
+# cannot fail. A script holding FP_MIN or more of one package's fingerprint holds a copy of it,
+# unless its marks, sidecar, notices or an entry name that package.
+FP_LEN = (24, 200)
+FP_MIN = 5
+# A minified script: half its bytes or more sit in lines longer than MINIFIED_LINE bytes.
+MINIFIED_LINE = 1000
+REGISTRY = "https://registry.npmjs.org"
+OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
+LITERAL = re.compile(rb'"((?:[^"\\\n]|\\.){%d,%d})"|\'((?:[^\'\\\n]|\\.){%d,%d})\'|`((?:[^`\\$\n]|\\.){%d,%d})`'
+                     % (FP_LEN * 3))
+INLINED_LOOKALIKE_KEYS = {"holder", "lookalike", "files", "why"}
+
+
+# Text between two literals that a scan misaligned on a quote inside another literal: code, which a
+# minifier rewrites, not a literal it keeps.
+CODE = re.compile(rb"[;{}]|&&|\|\||===?|!==?|=>|\$\{|\b(?:return|typeof|function|var|const|let|this)\b")
+
+
+def literals(body):
+    """The quoted string literals of FP_LEN characters in one script that read as text, not code."""
+    return {lit for a, b, c in LITERAL.findall(body) if not CODE.search(lit := a or b or c)}
+
+
+def minified(body):
+    """Whether one script is minified: built output, which can hold copies no mark names."""
+    return 2 * sum(len(line) for line in body.split(b"\n") if len(line) > MINIFIED_LINE) >= len(body) > 0
 
 
 def at(spec):
@@ -508,13 +554,15 @@ def bundle_ref(spec):
 
 
 def mark_owner(path):
-    """(package, versioned) for one bundler mark path, or None if it names no package. The path
-    belongs to the last package of its chain of node_modules/<name>/ steps that each follow a
-    package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/) names
-    its version, any other step does not (pnpm's hoisted .pnpm/node_modules/ among them), and a
-    node_modules/ deeper inside a package (its own src/node_modules/) is that package's own
-    source. A chain step the walk cannot read fails closed: the path is an unversioned mark of
-    whatever follows its last node_modules/ (#4197)."""
+    """(package, versioned, unreadable) for one bundler mark path, or None if it names no package.
+    The path belongs to the last package of its chain of node_modules/<name>/ steps that each
+    follow a package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/)
+    names its version, any other step does not (pnpm's hoisted .pnpm/node_modules/ among them), and
+    a node_modules/ deeper inside a package (its own src/node_modules/) is that package's own
+    source. A step MODULE_SEG cannot read (a legacy name, a store directory with no node_modules/
+    after it) fails closed: it names its own text, unversioned, and the walk goes on from there
+    (#4281); the mark stays unreadable, so it is never taken for the bundling package's own path. A step
+    with no "/" after it is a file, not a package (#4278)."""
     store = [m for m in PNPM_MARK.finditer(path) if m.group(1).replace(b"+", b"/") == m.group(3)]
     if store:
         pos, name, versioned = store[-1].end(), store[-1].group(3), True
@@ -522,35 +570,40 @@ def mark_owner(path):
         pos, name, versioned = path.find(b"node_modules/"), None, False
         if pos < 0:
             return None
+    unreadable = False
     while path.startswith(b"node_modules/", pos):
         m = MODULE_SEG.match(path, pos)
-        if not m:
-            return unreadable_owner(path)
-        pos = m.end()
-        if m.group(1) == b".pnpm":
-            if not path.startswith(b"node_modules/", pos):  # else pnpm's hoisted .pnpm/node_modules/
-                pos = path.find(b"/", pos) + 1  # the store directory, which node_modules/ must follow
-                if not pos or not path.startswith(b"node_modules/", pos):
-                    return unreadable_owner(path)
+        if m and m.group(1) == b".pnpm":
+            pos = m.end()
+            if path.startswith(b"node_modules/", pos):
+                continue  # pnpm's hoisted .pnpm/node_modules/
+            end = path.find(b"/", pos)
+            if end < 0:
+                break  # a file in the store directory itself
+            step, pos = path[pos:end], end + 1  # the store directory, which node_modules/ must follow
+            if not path.startswith(b"node_modules/", pos):
+                name, versioned, unreadable = step, False, True
             continue
-        name, versioned = m.group(1), False
-    return name.decode(), versioned
-
-
-def unreadable_owner(path):
-    """An unversioned mark of what follows the path's last node_modules/: its first one or, for a
-    scope, two steps, or the whole path when nothing follows."""
-    steps = path.rpartition(b"node_modules/")[2].split(b"/")
-    name = b"/".join(steps[:2] if steps[0].startswith(b"@") else steps[:1])
-    return (name or path).decode(), False
+        if m:
+            name, versioned, pos = m.group(1), False, m.end()  # after an unreadable step, still unreadable
+            continue
+        start = pos + len(b"node_modules/")
+        end = path.find(b"/", start)
+        if end >= 0 and path.startswith(b"@", start):
+            end = path.find(b"/", end + 1)
+        if end < 0:
+            break  # a file directly in node_modules/
+        name, versioned, unreadable, pos = path[start:end], False, True, end + 1
+    return None if name is None else (name.decode(), versioned, unreadable)
 
 
 def unversioned_marks(body, own):
-    """{package: the mark paths naming it} for the unversioned bundler marks in one script."""
+    """{package: the mark paths naming it} for the unversioned bundler marks in one script. A mark
+    of OWN is the script's own source, unless a step of it was unreadable."""
     out = {}
     for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body) + TURBOPACK_MARK.findall(body):
         o = mark_owner(path)
-        if o and not o[1] and o[0] != own:
+        if o and not o[1] and (o[0] != own or o[2]):
             out.setdefault(o[0], set()).add(path.decode())
     return out
 
@@ -608,12 +661,14 @@ def fetch_tarball(resolved, integrity, mirror=None):
     return data
 
 
-def tarball_marks(data, own):
+def tarball_marks(data, own, prints=None):
     """What a package tarball's marks say about its inlined copies: its files (without the
     leading package/); (name, version) -> the files whose marks name that copy; and for each
     script with unversioned marks (#4197), {package: (its mark paths, the versions its sidecar
-    or notices give)}. OWN, (name, version) of the package itself, is not a copy."""
-    files, marks, by_file, bare = set(), {}, {}, {}
+    or notices give)}. OWN, (name, version) of the package itself, is not a copy. PRINTS, when
+    given, gets for each script (its string literals, the packages its marks, sidecar or notices
+    name, whether it is minified), for the unmarked-copy check (#4234)."""
+    files, marks, by_file, bare, lits = set(), {}, {}, {}, {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
         for m in t:
             if not m.isfile():
@@ -631,6 +686,8 @@ def tarball_marks(data, own):
                           if d.decode().replace("+", "/") == n.decode()]
                 if u := unversioned_marks(body, own[0]):
                     bare[rel] = u
+                if prints is not None:
+                    lits[rel] = (literals(body), minified(body))
             if notice:
                 text = body.decode("utf-8", "replace")
                 found += LIST_MARK.findall(text) + NOTICE_MARK.findall(text)
@@ -648,23 +705,35 @@ def tarball_marks(data, own):
                 known[rel].update(found)
     unversioned = {rel: {name: (paths, {v for k, v in known[rel] if k == name}) for name, paths in names.items()}
                    for rel, names in bare.items()}
+    if prints is not None:
+        named = {rel: {n for n, _ in found} | set(bare.get(rel, ())) for rel, (_, found) in by_file.items()}
+        for n, (script, found) in by_file.items():
+            if not script and found:
+                for rel in notice_scope(n, scripts, files):
+                    named[rel].update(k for k, _ in found)
+        prints.update({rel: (ls, named[rel], mini) for rel, (ls, mini) in lits.items()})
     return files, marks, unversioned
 
 
 def inlined_problems(entries):
     """Shape problems in the config's "inlined" list: copies whose marks give no version, each
     as {holder: name@version, copy: name@version, files: [the holder's files holding it], why},
-    or files that copy another installed package's bundle, as {holder, bundle:
-    name@version:path, files, why}, whose marks and versions the bundle's give (#4197)."""
+    files that copy another installed package's bundle, as {holder, bundle:
+    name@version:path, files, why}, whose marks and versions the bundle's give (#4197), or files
+    that match a package's fingerprint without holding a copy of it, as {holder, lookalike: name,
+    files, why}, the why saying whose code the matching literals are (#4234)."""
     problems = []
     for n, e in enumerate(entries):
         tag = f"inlined[{n}]"
         if not isinstance(e, dict):
             problems.append(f"{tag}: not an object")
             continue
-        if set(e) not in (INLINED_KEYS, INLINED_BUNDLE_KEYS):
-            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)} or {sorted(INLINED_BUNDLE_KEYS)}")
+        if set(e) not in (INLINED_KEYS, INLINED_BUNDLE_KEYS, INLINED_LOOKALIKE_KEYS):
+            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)}, {sorted(INLINED_BUNDLE_KEYS)} "
+                            f"or {sorted(INLINED_LOOKALIKE_KEYS)}")
             continue
+        if "lookalike" in e and (not isinstance(e["lookalike"], str) or not e["lookalike"].strip()):
+            problems.append(f"{tag}: lookalike must name the package whose fingerprint the files match")
         if "bundle" in e and (not isinstance(e["bundle"], str) or not all(bundle_ref(e["bundle"]))):
             problems.append(f"{tag}: bundle must be name@version:path")
         for k in ("holder", "copy"):
@@ -677,35 +746,45 @@ def inlined_problems(entries):
     return problems
 
 
-def inlined_copies(where, tarballs, entries, mirror=None):
+def inlined_copies(where, tarballs, entries, mirror, advised):
     """(name, version) -> the holders' files that hold it, for one lockfile's tarballs, with
-    the entries of the config's "inlined" that one of them holds; and the problems."""
-    copies, problems, held, bare = {}, [], {}, {}
+    the entries of the config's "inlined" that one of them holds; and the problems. ADVISED maps
+    a set of package names to those with an OSV advisory (advised_names): only those have a
+    fingerprint (#4234)."""
+    copies, problems, held, bare, prints = {}, [], {}, {}, {}
 
     def read(t):
         name, version, resolved, integrity = t
-        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version))
+        p = {}
+        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version), p), p
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        for holder, (files, marks, unversioned) in pool.map(read, tarballs):
+        for holder, (files, marks, unversioned), p in pool.map(read, tarballs):
             held[holder] = files
             bare[holder] = unversioned
+            prints[holder] = p
             for k, fs in marks.items():
                 copies.setdefault(k, set()).update(f"{holder}:{f}" for f in fs)
     # Entries naming a copy first: a bundle entry takes the versions its bundle ends up with.
+    named = {}  # (holder, file) -> the packages an entry names there
     for e in sorted(entries, key=lambda e: "bundle" in e):
         if e["holder"] not in held:
             continue
-        what = e.get("copy") or e["bundle"]
+        what = e.get("copy") or e.get("bundle") or e["lookalike"]
         missing = sorted(set(e["files"]) - held[e["holder"]])
         if missing:
             problems.append(f"{where}: {e['holder']} has no {missing[0]}, which the inlined entry for "
                             f"{what} names; requalify it")
         marked = bare[e["holder"]]
+        if "lookalike" in e:
+            for f in e["files"]:
+                named.setdefault((e["holder"], f), set()).add(e["lookalike"])
+            continue
         if "copy" in e:
             name, version = at(e["copy"])
             copies.setdefault((name, version), set()).update(f"{e['holder']}:{f}" for f in e["files"])
             for f in e["files"]:
+                named.setdefault((e["holder"], f), set()).add(name)
                 if name in marked.get(f, {}):
                     marked[f][name][1].add(version)
             continue
@@ -730,12 +809,155 @@ def inlined_copies(where, tarballs, entries, mirror=None):
                 for v in src[n][1]:
                     versions.add(v)
                     copies.setdefault((n, v), set()).add(f"{e['holder']}:{f}")
+            named.setdefault((e["holder"], f), set()).update(prints.get(f"{name}@{version}", {}).get(path, ((), (), False))[1])
+    installed = {at(h) for h in held}
+    shipped = {o[0] for scripts in prints.values() for rel in scripts if "node_modules/" in rel
+               and (o := mark_owner(rel.encode()))}  # packages a tarball ships whole
+    names = {n for n, _ in installed} | {n for n, _ in copies} | shipped
+    has = advised(names)
+    # The copies marks or entries name with a version, at versions no tarball here installs: the
+    # registry's tarball of each gives its fingerprint.
+    wanted = sorted(k for k in copies if k[0] in has and k not in installed)
+
+    def source(k):
+        p = {}
+        data, problem = registry_tarball(*k, mirror)
+        if data:
+            tarball_marks(data, k, p)
+        return f"{k[0]}@{k[1]}", p, problem
+
+    sources = dict(prints)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        for spec, p, problem in pool.map(source, wanted):
+            sources[spec] = p
+            if problem:
+                problems.append(f"{where}: {problem}")
+    problems += unmarked_problems(where, prints, fingerprints(sources, has), named, entries)
     for holder in sorted(bare):
         for f, names in sorted(bare[holder].items()):
             for n, (paths, versions) in sorted(names.items()):
                 if not versions:
                     problems.append(unversioned_problem(where, holder, f, n, paths))
     return copies, problems, set(held)
+
+
+def fingerprints(sources, has):
+    """{literal: package} for each literal that only one package's own scripts hold, where that
+    package is in HAS. SOURCES maps name@version to tarball_marks' PRINTS for its tarball. A
+    script under node_modules/<name>/ in a tarball is <name>'s, shipped whole; any other is the
+    tarball's own package's. A minified script, or one that a mark, sidecar or notice says holds
+    a copy, is no package's own: a bundle's literals are its copies' as much as its own."""
+    own = {}
+    for spec, scripts in sources.items():
+        for rel, (ls, marked, mini) in scripts.items():
+            if marked or mini:
+                continue
+            if "node_modules/" in rel:
+                o = mark_owner(rel.encode())
+                if not o or o[2]:
+                    continue
+                name = o[0]
+            else:
+                name = at(spec)[0]
+            own.setdefault(name, set()).update(ls)
+    owners = {}
+    for name, ls in own.items():
+        for lit in ls:
+            owners[lit] = None if lit in owners else name
+    return {lit: name for lit, name in owners.items() if name in has}
+
+
+def unmarked_problems(where, prints, owner_of, named, entries):
+    """The scripts that hold FP_MIN or more literals of one package's fingerprint (OWNER_OF, from
+    fingerprints) while nothing names that package there (#4234): no mark, sidecar or notice, and
+    no entry (NAMED: (holder, file) -> the packages entries name there). The holder, and a
+    package its tarball ships whole under node_modules/<name>/, hold their own literals. A
+    lookalike entry whose files match no fingerprint of its package is a problem."""
+    problems, matched = [], set()
+    for holder, scripts in sorted(prints.items()):
+        for rel, (ls, marked, _) in sorted(scripts.items()):
+            own = mark_owner(rel.encode())
+            own = {at(holder)[0], own[0]} if own else {at(holder)[0]}
+            hits = {}
+            for lit in ls:
+                if (n := owner_of.get(lit)) and n not in own:
+                    hits.setdefault(n, []).append(lit)
+            for n, lits in sorted(hits.items()):
+                if len(lits) < FP_MIN:
+                    continue
+                matched.add((holder, rel, n))
+                if n in marked or n in named.get((holder, rel), ()):
+                    continue
+                problems.append(f"{where}: {holder}:{rel} holds {len(lits)} string literals only {n}'s own files "
+                                f"hold (e.g. {min(lits).decode('utf-8', 'replace')!r}), but no mark, sidecar, "
+                                f"notice or entry names {n} there: an unmarked copy. Add an \"inlined\" entry naming "
+                                "its version, or a lookalike entry saying whose code they are (#4234)")
+    for e in entries:
+        if "lookalike" in e and e["holder"] in prints:
+            for f in e["files"]:
+                if (e["holder"], f, e["lookalike"]) not in matched:
+                    problems.append(f"{where}: {e['holder']}:{f} matches no fingerprint of {e['lookalike']}, so the "
+                                    "lookalike entry checks nothing there; requalify it")
+    return problems
+
+
+def registry_tarball(name, version, mirror=None):
+    """(the registry's tarball of name@version, checked against the registry's sha512 integrity,
+    or None; a problem when it cannot be read). With a mirror (the control's offline copies),
+    its registry.json stands in for the registry's version documents."""
+    spec = f"{name}@{version}"
+    try:
+        if mirror:
+            dist = json.loads((pathlib.Path(mirror) / "registry.json").read_text()).get(spec)
+        else:
+            url = f"{REGISTRY}/{urllib.parse.quote(name, safe='@')}/{urllib.parse.quote(version)}"
+            with urllib.request.urlopen(url, timeout=120) as resp:
+                dist = json.load(resp).get("dist")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        dist = None
+        why = f"could not read it ({e})"
+    else:
+        why = "the registry has no such version"
+    integrity = (dist or {}).get("integrity", "")
+    if not dist:
+        return None, f"{spec}, which a mark or entry names: {why}, so no fingerprint finds its unmarked copies (#4234)"
+    if not integrity.startswith("sha512-") or not str(dist.get("tarball", "")).startswith("https://"):
+        return None, (f"{spec}, which a mark or entry names: the registry gives no https tarball with a sha512 "
+                      "integrity, so no fingerprint finds its unmarked copies (#4234)")
+    return fetch_tarball(dist["tarball"], integrity, mirror), None
+
+
+def advised_names(names, env=None, offline=False, opener=urllib.request.urlopen):
+    """The NAMES (npm packages) with an OSV advisory at any version, withdrawn ones included: from
+    the offline database osv-scanner reads when OFFLINE, else from OSV's batch query, which with
+    no version returns every advisory for the package."""
+    names = sorted(names)
+    if offline:
+        path = pathlib.Path((env or {}).get("OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY", "")) / "osv-scalibr" / "npm" / "all.zip"
+        found = set()
+        try:
+            with zipfile.ZipFile(path) as z:
+                for f in z.namelist():
+                    for a in json.loads(z.read(f)).get("affected") or []:
+                        if (a.get("package") or {}).get("ecosystem") == "npm":
+                            found.add(a["package"].get("name"))
+        except (OSError, ValueError, zipfile.BadZipFile) as e:
+            raise ScanError(f"{path}: unreadable OSV database ({e})")
+        return found & set(names)
+    out = set()
+    for i in range(0, len(names), 1000):
+        chunk = names[i:i + 1000]
+        body = json.dumps({"queries": [{"package": {"name": n, "ecosystem": "npm"}} for n in chunk]}).encode()
+        req = urllib.request.Request(OSV_QUERYBATCH, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with opener(req, timeout=120) as resp:
+                results = json.load(resp).get("results")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise ScanError(f"{OSV_QUERYBATCH}: the advisory query failed ({e})")
+        if not isinstance(results, list) or len(results) != len(chunk):
+            raise ScanError(f"{OSV_QUERYBATCH}: the advisory query answered {len(results or [])} of {len(chunk)} packages")
+        out |= {n for n, r in zip(chunk, results) if (r or {}).get("vulns")}
+    return out
 
 
 def unversioned_problem(where, holder, f, name, paths):
@@ -785,7 +1007,8 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
         problems += probs
         if not tarballs:
             continue
-        copies, probs, held = inlined_copies(where, tarballs, entries, mirror)
+        copies, probs, held = inlined_copies(where, tarballs, entries, mirror,
+                                             lambda names: advised_names(names, env, offline))
         problems += probs
         holders |= held
         if not copies:
@@ -797,7 +1020,7 @@ def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
         found, probs = inlined_findings(where, doc, copies)
         findings += found
         problems += probs
-    problems += [f"inlined: no lockfile installs {e['holder']}, so the entry for {e.get('copy') or e['bundle']} checks "
+    problems += [f"inlined: no lockfile installs {e['holder']}, so the entry for {e.get('copy') or e.get('bundle') or e['lookalike']} checks "
                  "nothing; requalify the holder's unmarked copies and update it" for e in entries
                  if e["holder"] not in holders]
     return findings, problems
@@ -1002,15 +1225,19 @@ def summary(findings, problems, unused, out=None):
 
 
 UNVERSIONED = re.compile(r"^npm/package-lock\.json: (\S+) inlines (\S+) \(marked ")
+UNMARKED = re.compile(r"^npm/package-lock\.json: (\S+) holds \d+ string literals only (\S+)'s own files hold ")
 
 
 def control_unversioned(probs):
-    """The problems but the unversioned marks CONTROL_UNVERSIONED plants, and a problem if those
-    are not exactly the ones reported."""
-    got = {m.groups() for m in map(UNVERSIONED.match, probs) if m}
-    rest = [p for p in probs if not UNVERSIONED.match(p)]
-    if got != CONTROL_UNVERSIONED:
-        rest.append(f"unversioned marks: want {sorted(CONTROL_UNVERSIONED)}, got {sorted(got)}")
+    """The problems but the unversioned marks CONTROL_UNVERSIONED and the unmarked copies
+    CONTROL_UNMARKED plant, and a problem if those are not exactly the ones reported."""
+    rest = probs
+    for pattern, want, what in ((UNVERSIONED, CONTROL_UNVERSIONED, "unversioned marks"),
+                                (UNMARKED, CONTROL_UNMARKED, "unmarked copies")):
+        got = {m.groups() for m in map(pattern.match, rest) if m}
+        rest = [p for p in rest if not pattern.match(p)]
+        if got != want:
+            rest.append(f"{what}: want {sorted(want)}, got {sorted(got)}")
     return rest
 
 

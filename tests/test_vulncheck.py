@@ -20,6 +20,7 @@ import tarfile
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -479,6 +480,10 @@ def tgz(files):
     return raw.getvalue()
 
 
+def NO_ADVISORIES(names):
+    return set()
+
+
 def sri(data):
     return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
 
@@ -529,6 +534,14 @@ class InlinedTest(unittest.TestCase):
             '"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"(e){}',
             '"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"(e){}',
             '"node_modules/b~ar/x.js"(e){}',                              # a legacy name MODULE_SEG cannot read
+            # #4281: the walk goes on from an unreadable step, so a copy's own src/node_modules/<holder>
+            # is not the holder's path, and an unreadable chain never reads as the holder itself
+            '"node_modules/x~y/node_modules/ws6/src/node_modules/holder/x.js"(e){}',
+            '"node_modules/x~y/node_modules/holder/y.js"(e){}',
+            # #4278: a hoisted package's own src/node_modules/<holder> is its source, as for any package
+            '"node_modules/.pnpm/node_modules/ws7/src/node_modules/holder/x.js"(e){}',
+            # #4278: a file directly in node_modules/ or the store names no package
+            '"node_modules/foo.js"(e){}', '"node_modules/.pnpm/x.js"(e){}',
             '"ns:node_modules/ns-pkg/i.js"(e){}',                          # esbuild namespace
             "// CONCATENATED MODULE: ./node_modules/concat/index.js",      # webpack
             '"[project]/node_modules/turbo/index.js [app-ssr] (ecmascript)", (ctx) => {',  # Turbopack
@@ -552,10 +565,14 @@ class InlinedTest(unittest.TestCase):
             "ns-pkg": {"node_modules/ns-pkg/i.js"},
             "hoisted": {"node_modules/.pnpm/node_modules/hoisted/x.js"},
             "deep": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"},
-            "stray": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js"},
-            "ws2": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js"},
+            # a store directory node_modules/ does not follow: the walk names it and stops there
+            "odd": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js",
+                    "node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js",
+                    "node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"},
             "ws3": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/x~y/node_modules/ws3/x.js"},
-            "ws4": {"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"},
+            "ws6": {"node_modules/x~y/node_modules/ws6/src/node_modules/holder/x.js"},
+            "holder": {"node_modules/x~y/node_modules/holder/y.js"},
+            "ws7": {"node_modules/.pnpm/node_modules/ws7/src/node_modules/holder/x.js"},
             "@s/ws5": {"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"},
             "b~ar": {"node_modules/b~ar/x.js"},
             "concat": {"./node_modules/concat/index.js"},
@@ -606,7 +623,7 @@ class InlinedTest(unittest.TestCase):
 
     def test_an_unversioned_mark_fails_unless_an_entry_gives_its_version(self):
         tbs, mirror = self.bundle_tarballs()
-        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [], mirror)
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [], mirror, NO_ADVISORIES)
         self.assertEqual(sorted(p.split(" (marked")[0] for p in probs), [
             "l: oc@1:dist/extra.mjs inlines ws", "l: oc@1:dist/extra.mjs inlines yaml",
             "l: oc@1:dist/lone.mjs inlines socks",
@@ -614,7 +631,7 @@ class InlinedTest(unittest.TestCase):
         self.assertEqual(set(copies), {("ws", "8.0.0"), ("ip-address", "10.2.0")})
         entries = [{"holder": "oc@1", "copy": "socks@2.8.0", "files": ["dist/lone.mjs"], "why": "x"},
                    {"holder": "oc@1", "bundle": "pw@1:lib/utilsBundle.js", "files": ["dist/worker.mjs"], "why": "x"}]
-        copies, probs, _ = vulncheck.inlined_copies("l", tbs, entries, mirror)
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, entries, mirror, NO_ADVISORIES)
         self.assertEqual(sorted(p.split(" (marked")[0] for p in probs),
                          ["l: oc@1:dist/extra.mjs inlines ws", "l: oc@1:dist/extra.mjs inlines yaml"])
         self.assertEqual(copies, {("ws", "8.0.0"): {"pw@1:lib/utilsBundle.js.LICENSE", "oc@1:dist/worker.mjs"},
@@ -628,22 +645,22 @@ class InlinedTest(unittest.TestCase):
         tbs2, mirror2 = self.mirror(pw_1={"lib/u.js": key}, oc_1={"dist/w.mjs": key})
         entries = [{"holder": "oc@1", "bundle": "pw@1:lib/u.js", "files": ["dist/w.mjs"], "why": "x"},
                    {"holder": "pw@1", "copy": "socks@2.8.0", "files": ["lib/u.js"], "why": "x"}]
-        copies, probs, _ = vulncheck.inlined_copies("l", tbs2, entries, mirror2)
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs2, entries, mirror2, NO_ADVISORIES)
         self.assertEqual((copies, probs), ({("socks", "2.8.0"): {"pw@1:lib/u.js", "oc@1:dist/w.mjs"}}, []))
         # dist/extra.mjs marks yaml, which the bundle does not: it is not the bundle's copy.
         entry = {"holder": "oc@1", "bundle": "pw@1:lib/utilsBundle.js", "files": ["dist/extra.mjs"], "why": "x"}
-        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [entry], mirror)
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [entry], mirror, NO_ADVISORIES)
         self.assertIn("l: oc@1:dist/extra.mjs marks node_modules/yaml/index.js, which pw@1:lib/utilsBundle.js "
                       "does not; its files are not that bundle's copy, so requalify the entry", probs)
         self.assertNotIn("oc@1:dist/extra.mjs", set().union(*copies.values()))
         # A bundle this lockfile does not install, or a file of it with no unversioned marks.
         for bundle in ("pw@2:lib/utilsBundle.js", "pw@1:lib/utilsBundle.js.LICENSE"):
-            _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": bundle, "files": ["dist/worker.mjs"]}], mirror)
+            _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": bundle, "files": ["dist/worker.mjs"]}], mirror, NO_ADVISORIES)
             self.assertEqual(sum("checks nothing; requalify it" in p for p in probs), 1, probs)
         # A file of the holder with no unversioned marks: the entry checks nothing there.
         tbs, mirror = self.mirror(pw_1={"lib/u.js": '"node_modules/ws/i.js"(e){}', "lib/u.js.LICENSE": "- ws@8.0.0\n"},
                                   oc_1={"dist/min.mjs": "minified"})
-        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": "pw@1:lib/u.js", "files": ["dist/min.mjs"]}], mirror)
+        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "bundle": "pw@1:lib/u.js", "files": ["dist/min.mjs"]}], mirror, NO_ADVISORIES)
         self.assertEqual(probs, ["l: oc@1:dist/min.mjs has no unversioned marks, so the inlined entry for pw@1:lib/u.js "
                                  "checks nothing there; requalify it"])
 
@@ -685,13 +702,13 @@ class InlinedTest(unittest.TestCase):
     def test_an_unmarked_copy_comes_from_its_entry_while_its_holder_holds_its_files(self):
         tbs, mirror = self.mirror(oc_1={"dist/w.mjs": "minified", "dist/x.mjs": ""})
         entry = {"holder": "oc@1", "copy": "minimatch@10.2.6", "files": ["dist/w.mjs"], "why": "x"}
-        copies, probs, held = vulncheck.inlined_copies("l", tbs, [entry], mirror)
+        copies, probs, held = vulncheck.inlined_copies("l", tbs, [entry], mirror, NO_ADVISORIES)
         self.assertEqual((copies, probs, held), ({("minimatch", "10.2.6"): {"oc@1:dist/w.mjs"}}, [], {"oc@1"}))
-        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "files": ["dist/gone.mjs"]}], mirror)
+        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "files": ["dist/gone.mjs"]}], mirror, NO_ADVISORIES)
         self.assertEqual(len(probs), 1, probs)
         self.assertIn("requalify", probs[0])
         # Another holder version: the entry names nothing this lockfile installs.
-        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "holder": "oc@2"}], mirror)
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "holder": "oc@2"}], mirror, NO_ADVISORIES)
         self.assertEqual((copies, probs), ({}, []))
 
     def test_an_entry_whose_holder_no_lockfile_installs_is_a_problem(self):
@@ -737,6 +754,186 @@ class InlinedTest(unittest.TestCase):
         fs, probs, _ = vulncheck.scan({"go_targets": ["broker"], "osv_sources": ["a"], "inlined": [{}]}, ROOT)
         self.assertEqual((fs, len(probs)), ([], 1))
 
+
+
+def lits(tag, n=6):
+    """N string literals of FP_LEN characters that read as text, unique to TAG."""
+    return [f"{tag} fingerprint literal number {i:02d}" for i in range(n)]
+
+
+def own(tag, n=6):
+    """An unminified script whose literals are TAG's own."""
+    return "".join(f'exports.m{i} = "{lit}";\n' for i, lit in enumerate(lits(tag, n)))
+
+
+def packed(tag, n=6):
+    """A minified script, with no mark, holding N of TAG's literals."""
+    return "var p=[" + ",".join(f'"{lit}"' for lit in lits(tag, n)) + "],q=" + "0+" * vulncheck.MINIFIED_LINE + "0\n"
+
+
+def all_advised(names):
+    return set(names)
+
+
+class UnmarkedTest(unittest.TestCase):
+    # REQ: EVL-5. #4234: a minified copy that carries no mark is found by its string literals.
+    def mirror(self, registry=(), **tarballs):
+        """The tarballs (name_version -> files) as a lockfile's, and REGISTRY's (the same shape) as
+        the registry's, in one mirror directory."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d, out, reg = pathlib.Path(tmp.name), [], {}
+        for spec, files in [*tarballs.items(), *dict(registry).items()]:
+            name, version = spec.split("_")
+            data = tgz(files)
+            (d / f"{name}-{version}.tgz").write_bytes(data)
+            url = f"https://r/{name}/-/{name}-{version}.tgz"
+            if spec in tarballs:
+                out.append((name, version, url, sri(data)))
+            else:
+                reg[f"{name}@{version}"] = {"tarball": url, "integrity": sri(data)}
+        (d / "registry.json").write_text(json.dumps(reg))
+        return out, tmp.name
+
+    def problems(self, entries=(), advised=all_advised, registry=(), **tarballs):
+        tbs, mirror = self.mirror(registry, **tarballs)
+        return [p for p in vulncheck.inlined_copies("l", tbs, list(entries), mirror, advised)[1]]
+
+    def test_minified_means_most_bytes_in_long_lines(self):
+        self.assertTrue(vulncheck.minified(packed("x").encode()))
+        self.assertFalse(vulncheck.minified(own("x").encode()))
+        self.assertFalse(vulncheck.minified(b""))
+        # One long line (a Unicode table) in a long readable file is not minification.
+        self.assertFalse(vulncheck.minified(b"x" * 1200 + b"\n" + b"var a = 1;\n" * 200))
+
+    def test_a_minified_copy_with_no_mark_fails(self):
+        probs = self.problems(x_1={"index.js": own("x")}, oc_1={"dist/w.mjs": packed("x")})
+        self.assertEqual(len(probs), 1, probs)
+        self.assertTrue(probs[0].startswith("l: oc@1:dist/w.mjs holds 6 string literals only x's own files hold"), probs[0])
+        # Fewer than FP_MIN literals is not a copy.
+        self.assertEqual(self.problems(x_1={"index.js": own("x")}, oc_1={"dist/w.mjs": packed("x", vulncheck.FP_MIN - 1)}), [])
+
+    def test_only_a_package_with_an_advisory_has_a_fingerprint(self):
+        tarballs = dict(x_1={"index.js": own("x")}, y_1={"index.js": own("y")},
+                        oc_1={"dist/w.mjs": packed("x") + packed("y")})
+        probs = self.problems(advised=lambda names: {"y"} & names, **tarballs)
+        self.assertEqual([p.split(" holds")[0] + " " + p.split("only ")[1].split("'s")[0] for p in probs],
+                         ["l: oc@1:dist/w.mjs y"])
+        self.assertEqual(self.problems(advised=NO_ADVISORIES, **tarballs), [])
+
+    def test_a_mark_sidecar_notice_or_entry_naming_the_package_clears_it(self):
+        x = {"index.js": own("x")}
+        cases = [
+            ({"dist/w.mjs": '"node_modules/.pnpm/x@1/node_modules/x/index.js"(e){};' + packed("x")}, []),
+            ({"dist/w.mjs": packed("x"), "dist/w.mjs.LICENSE": "- x@1\n"}, []),
+            ({"dist/w.mjs": packed("x"), "NOTICE": "Name: x\nVersion: 1\n"}, []),
+            ({"dist/w.mjs": packed("x")}, [{"holder": "oc@1", "copy": "x@1", "files": ["dist/w.mjs"], "why": "w"}]),
+            ({"dist/w.mjs": packed("x")}, [{"holder": "oc@1", "lookalike": "x", "files": ["dist/w.mjs"], "why": "w"}]),
+        ]
+        for files, entries in cases:
+            self.assertEqual(self.problems(entries, x_1=x, oc_1=files), [], (files, entries))
+        # A file a bundle entry names takes the packages the bundle's marks name.
+        bundle = {"lib/u.js": '"node_modules/x/index.js"(e){};' + packed("x"), "lib/u.js.LICENSE": "- x@1\n"}
+        entry = {"holder": "oc@1", "bundle": "pw@1:lib/u.js", "files": ["dist/w.mjs"], "why": "w"}
+        self.assertEqual(self.problems([entry], x_1=x, pw_1=bundle,
+                                       oc_1={"dist/w.mjs": '"node_modules/x/index.js"(e){};' + packed("x")}), [])
+
+    def test_a_lookalike_entry_that_matches_nothing_is_a_problem(self):
+        entry = {"holder": "oc@1", "lookalike": "x", "files": ["dist/w.mjs"], "why": "w"}
+        probs = self.problems([entry], x_1={"index.js": own("x")}, oc_1={"dist/w.mjs": packed("y")})
+        self.assertEqual(probs, ["l: oc@1:dist/w.mjs matches no fingerprint of x, so the lookalike entry checks "
+                                 "nothing there; requalify it"])
+
+    def test_a_bundle_is_no_packages_own(self):
+        # oc's own minified bundle holds z's code, and so does pw's: neither is z, and neither
+        # bundle is oc's or pw's own, so no fingerprint names either as the other's copy.
+        self.assertEqual(self.problems(oc_1={"dist/a.mjs": packed("z")}, pw_1={"lib/b.js": packed("z")}), [])
+        # A script whose marks say it holds a copy is no package's own either.
+        marked = '//#region node_modules/z/index.js\n' + own("z")
+        self.assertEqual(self.problems(oc_1={"dist/a.mjs": marked, "dist/a.mjs.LICENSE": "- z@1\n"},
+                                       pw_1={"lib/b.js": packed("z")}, registry={"z_1": {"index.js": ""}}), [])
+
+    def test_a_literal_two_packages_own_is_neither_ones_fingerprint(self):
+        self.assertEqual(self.problems(x_1={"index.js": own("c")}, y_1={"index.js": own("c")},
+                                       oc_1={"dist/w.mjs": packed("c")}), [])
+
+    def test_a_package_shipped_whole_under_node_modules_has_a_fingerprint(self):
+        probs = self.problems(npm_1={"node_modules/undici/lib/a.js": own("undici")},
+                              oc_1={"dist/w.mjs": packed("undici")})
+        self.assertEqual([p.split(" holds")[0] for p in probs], ["l: oc@1:dist/w.mjs"])
+        self.assertIn("only undici's own files hold", probs[0])
+        # Its own holder does not hold a copy of it.
+        self.assertEqual(self.problems(npm_1={"node_modules/undici/lib/a.js": own("undici"),
+                                              "node_modules/undici/lib/b.js": packed("undici")}), [])
+
+    def test_a_package_only_a_mark_names_takes_its_fingerprint_from_the_registry(self):
+        # q@2 is named by pw's sidecar, and no lockfile installs it.
+        pw = {"lib/u.js": '"node_modules/q/index.js"(e){};' + packed("q"), "lib/u.js.LICENSE": "- q@2\n"}
+        probs = self.problems(pw_1=pw, oc_1={"dist/w.mjs": packed("q")}, registry={"q_2": {"index.js": own("q")}})
+        self.assertEqual([p.split(" holds")[0] for p in probs], ["l: oc@1:dist/w.mjs"])
+        # Not in the registry: the fingerprint is missing, which fails.
+        probs = self.problems(pw_1=pw, oc_1={"dist/w.mjs": packed("q")})
+        self.assertEqual(probs, ["l: q@2, which a mark or entry names: the registry has no such version, so no "
+                                 "fingerprint finds its unmarked copies (#4234)"])
+        # A package with no advisory is not fetched at all.
+        self.assertEqual(self.problems(advised=NO_ADVISORIES, pw_1=pw, oc_1={"dist/w.mjs": packed("q")}), [])
+
+    def test_a_registry_tarball_must_match_the_registrys_integrity(self):
+        tbs, mirror = self.mirror(registry={"q_2": {"index.js": own("q")}})
+        reg = pathlib.Path(mirror) / "registry.json"
+        doc = json.loads(reg.read_text())
+        self.assertIsNotNone(vulncheck.registry_tarball("q", "2", mirror)[0])
+        reg.write_text(json.dumps({"q@2": {**doc["q@2"], "integrity": sri(b"other")}}))
+        with self.assertRaisesRegex(vulncheck.ScanError, "integrity"):
+            vulncheck.registry_tarball("q", "2", mirror)
+        for bad in ({**doc["q@2"], "integrity": "sha1-AAAA"}, {**doc["q@2"], "tarball": "http://r/q-2.tgz"}):
+            reg.write_text(json.dumps({"q@2": bad}))
+            data, problem = vulncheck.registry_tarball("q", "2", mirror)
+            self.assertIsNone(data)
+            self.assertIn("no https tarball with a sha512 integrity", problem)
+
+    def test_advised_names_reads_the_offline_database(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        d = pathlib.Path(tmp.name) / "osv-scalibr" / "npm"
+        d.mkdir(parents=True)
+        with zipfile.ZipFile(d / "all.zip", "w") as z:
+            z.writestr("A.json", json.dumps({"id": "A", "affected": [{"package": {"name": "x", "ecosystem": "npm"}}]}))
+            z.writestr("B.json", json.dumps({"id": "B", "affected": [{"package": {"name": "y", "ecosystem": "PyPI"}}]}))
+        env = {"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": tmp.name}
+        self.assertEqual(vulncheck.advised_names({"x", "y", "z"}, env, offline=True), {"x"})
+        with self.assertRaisesRegex(vulncheck.ScanError, "unreadable OSV database"):
+            vulncheck.advised_names({"x"}, {"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": tmp.name + "/none"}, offline=True)
+
+    def test_advised_names_asks_osv_for_every_version_in_batches(self):
+        asked = []
+
+        def opener(req, timeout):
+            queries = json.loads(req.data)["queries"]
+            asked.append(len(queries))
+            self.assertEqual(req.full_url, vulncheck.OSV_QUERYBATCH)
+            self.assertTrue(all(set(q["package"]) == {"name", "ecosystem"} for q in queries))  # no version
+            return io.BytesIO(json.dumps({"results": [{"vulns": [{"id": "A"}]} if q["package"]["name"].endswith("7")
+                                                      else {} for q in queries]}).encode())
+
+        names = {f"p{i}" for i in range(1500)}
+        self.assertEqual(vulncheck.advised_names(names, opener=opener), {n for n in names if n.endswith("7")})
+        self.assertEqual(asked, [1000, 500])
+        for answer in (lambda req, timeout: io.BytesIO(b'{"results": []}'),
+                       lambda req, timeout: io.BytesIO(b"not json")):
+            with self.assertRaises(vulncheck.ScanError):
+                vulncheck.advised_names({"x"}, opener=answer)
+
+        def down(req, timeout):
+            raise urllib.error.URLError("down")
+        with self.assertRaisesRegex(vulncheck.ScanError, "advisory query failed"):
+            vulncheck.advised_names({"x"}, opener=down)
+
+    def test_lookalike_entry_shape(self):
+        good = {"holder": "oc@1", "lookalike": "x", "files": ["dist/w.mjs"], "why": "y's code, not x's"}
+        self.assertEqual(vulncheck.inlined_problems([good]), [])
+        for bad in ({**good, "lookalike": ""}, {**good, "lookalike": 1}, {**good, "copy": "x@1"}):
+            self.assertEqual(len(vulncheck.inlined_problems([bad])), 1, bad)
 
 class ConfigTest(unittest.TestCase):
     def test_config_is_valid_and_targets_exist(self):
