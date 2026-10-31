@@ -494,7 +494,6 @@ issue #4040: body has no board-row block
 issue #4284: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4306: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4332: body has no board-row block
-issue #4336: body has no board-row block
 issue #4338: body has no board-row block
 issue #4339: body has no board-row block
 ```
