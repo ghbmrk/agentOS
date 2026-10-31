@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/binary"
 	"errors"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -469,9 +470,10 @@ func (r *reader) name() string {
 // Name reports whether s is a token the channel carries as a device, host
 // or rule name: 1 to MaxName bytes of UTF-8 with no space, slash, control,
 // format (bidi, zero-width, tag), filler or variation selector character,
-// as broker/enforcer/policy names them (#3901).
+// as broker/enforcer/policy names them (#3901), and that is not "unknown"
+// in any case, the word policy.Unknown reserves (#4185).
 func Name(s string) bool {
-	if s == "" || len(s) > MaxName || !utf8.ValidString(s) {
+	if s == "" || len(s) > MaxName || !utf8.ValidString(s) || strings.EqualFold(s, "unknown") {
 		return false
 	}
 	for _, c := range s {
