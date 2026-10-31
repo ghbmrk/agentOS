@@ -84,6 +84,10 @@ exempt-pr 4139
 # Remove once #4145 merges.
 exempt-pr 4145
 
+# #4204 (ENF-dns-v6-views, #4143): broker/enforcer/dns/, which the G2 list does not name (D-198).
+# Remove once #4204 merges.
+exempt-pr 4204
+
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
