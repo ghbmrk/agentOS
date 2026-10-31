@@ -87,7 +87,7 @@ class ClerkKeyTreeTest(unittest.TestCase):
                 (self.root / SYSTEM / (clerk + ".d/99-x.conf")).unlink()
                 write(self.root, SYSTEM + stem + ".socket", "[Socket]\nListenStream=0.0.0.0:80\n")
                 write(self.root, SYSTEM + "other.socket", "[Socket]\nListenStream=1.2.3.4:1\nService=%s\n" % clerk)
-                why = "starts %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
+                why = "may start %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
                 self.assertEqual(self.v(), ["usr/lib/systemd/system/%s.socket: %s" % (stem, why % clerk),
                                             "usr/lib/systemd/system/other.socket: %s" % (why % clerk)])
                 for n in (stem + ".socket", "other.socket"):
@@ -98,7 +98,7 @@ class ClerkKeyTreeTest(unittest.TestCase):
     def test_a_socket_unit_s_drop_in_naming_a_clerk_is_refused(self):
         write(self.root, "etc/systemd/system/later.socket", "[Socket]\nListenStream=::\n")
         write(self.root, "etc/systemd/system/later.socket.d/99-x.conf", "[Socket]\nService=%s\n" % HOMEKIT)
-        self.assertEqual(self.v(), ["etc/systemd/system/later.socket: starts %s with its sockets; a keyed clerk is "
+        self.assertEqual(self.v(), ["etc/systemd/system/later.socket: may start %s with its sockets; a keyed clerk is "
                                     "handed no socket, which its IP list would not filter (#4210)" % HOMEKIT])
 
     # REQ: CLK-1
@@ -220,7 +220,7 @@ class ClerkKeyTreeTest(unittest.TestCase):
     def test_a_socket_whose_service_has_a_specifier_is_refused(self):
         # Service=agentos-keeper-%N.service in mail.socket would start the mail clerk (#4264 Security 6543099224).
         write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nService=agentos-keeper-%N.service\n")
-        why = "starts %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
+        why = "may start %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
         self.assertEqual(self.v(), ["etc/systemd/system/mail.socket: " + why % c for c in check.KEYED_CLERKS])
         # A stock template socket's specifier that can name no keeper unit passes both rules (trixie's journald).
         write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nAccept=yes\n"
@@ -263,6 +263,41 @@ class ClerkKeyTreeTest(unittest.TestCase):
     def test_a_driver_entry_is_no_keeper_clerk(self):
         # The kernel sends driver-<d> to the driver's template (clerkCgroup); the keeper's list follows it.
         self.assertFalse([c for c in check.KEYED_CLERKS if "driver" in c])
+
+    # REQ: CLK-1
+    def test_a_later_empty_or_invalid_assignment_hides_nothing(self):
+        # systemd keeps a socket's earlier Service= past an empty or unloadable one, and an earlier DynamicUser= past
+        # an invalid one; the rules read every assignment (#4264 Security 6543535789).
+        why = "may start %s with its sockets; a keyed clerk is handed no socket, which its IP list would not filter (#4210)"
+        for later in ("Service=\n", "Service=x@.service\n"):
+            for where in ("file", "drop-in"):
+                with self.subTest((later, where)):
+                    text = "[Socket]\nListenStream=/run/x\nService=%s\n" % MAIL
+                    write(self.root, "etc/systemd/system/x.socket", text + (later if where == "file" else ""))
+                    if where == "drop-in":
+                        write(self.root, "etc/systemd/system/x.socket.d/99-x.conf", "[Socket]\n" + later)
+                    try:
+                        self.assertEqual(self.v(), ["etc/systemd/system/x.socket: " + why % MAIL])
+                    finally:
+                        (self.root / "etc/systemd/system/x.socket").unlink()
+                        if where == "drop-in":
+                            (self.root / "etc/systemd/system/x.socket.d/99-x.conf").unlink()
+                    # The unlock unit's rule, the same way.
+                    write(self.root, "etc/systemd/system/y.socket", "[Socket]\nListenStream=/run/y\n"
+                          "Service=agentos-keeper-kernel.service\n" + later)
+                    try:
+                        self.assertIn("y.socket: starts agentos-keeper-kernel.service with its sockets; nothing reaches "
+                                      "the unlock step past descriptor 2 (#2899)", check.keeper_violations(self.root))
+                    finally:
+                        (self.root / "etc/systemd/system/y.socket").unlink()
+        self.assertEqual(self.v(), [])
+        for text in ("[Service]\nSockets=x.socket\nSockets=\n", "[Install]\nAlias=hk.service\nAlias=\n"):
+            with self.subTest(text):
+                self.dropin(HOMEKIT, text)
+                self.assertEqual(len(self.v()), 1, self.v())
+        self.dropin(HOMEKIT, "[Service]\nDynamicUser=yes\nDynamicUser=maybe\n")
+        self.assertEqual(self.v(), ["%s: User=agentos-homekit; a keyed clerk runs under a named user of its own (#4210)"
+                                    % HOMEKIT])
 
     def test_the_whole_check_runs_it(self):
         self.dropin(HOMEKIT, "[Service]\nSockets=x.socket\n")

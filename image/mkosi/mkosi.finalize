@@ -1537,6 +1537,20 @@ def unit_with_dropins(root, dirs, name):
                                + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
 
 
+def ini_all(files, section, key):
+    """Every non-empty value of SECTION.KEY across FILES, whatever comes after it: for a rule that must not
+    rest on how systemd treats an empty or an invalid later assignment (some settings keep the earlier
+    value, #4264 Security 6543535789). ValueError as ini_words."""
+    val = []
+    for f in files:
+        try:
+            lines = config_lines(f.content())
+        except (OSError, Unparsable) as e:
+            raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
+        val += [v for s, k, v in lines if (s, k) == (section, key) and v]
+    return val
+
+
 def ini_entries(files, section, key):
     """Every value of SECTION.KEY across FILES in order, an empty one resetting the list: for
     settings where each assignment adds one entry (DeviceAllow=, Exec*=). ValueError as ini_words."""
@@ -1650,11 +1664,14 @@ def keeper_violations(root):
             out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
     for n in sorted(set(sockets)):
         files = unit_with_dropins(root, dirs, n)
-        svc = ini_last(files, "Socket", "Service") or n[:-len(".socket")] + ".service"
-        if svc.startswith("unreadable ") or any(may_name(svc, u) for u in UNLOCK_UNITS) or \
-                n[:-len(".socket")] + ".service" in UNLOCK_UNITS:
-            out.append("%s: starts %s with its sockets; nothing reaches the unlock step past descriptor 2 (#2899)"
-                       % (n, svc))
+        try:
+            svcs = ini_all(files, "Socket", "Service") + [n[:-len(".socket")] + ".service"]
+        except ValueError as e:
+            svcs = [str(e)]
+        for svc in svcs:
+            if svc.startswith("unreadable ") or any(may_name(svc, u) for u in UNLOCK_UNITS):
+                out.append("%s: starts %s with its sockets; nothing reaches the unlock step past descriptor 2 (#2899)"
+                           % (n, svc))
     for n in sorted(set(paths)):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
     out += sysusers_tpm_violations(root)
@@ -1713,12 +1730,12 @@ def clerk_key_violations(root):
             continue  # test_image_keeper checks the image ships each clerk; an absent one gets no key.
         try:
             for key in ("Sockets", "Alias"):
-                v = ini_words(files, "Install" if key == "Alias" else "Service", key)
+                v = ini_all(files, "Install" if key == "Alias" else "Service", key)
                 if v:
                     out.append("%s: %s=%s; a keyed clerk is handed no socket and has no alias (#4210)"
                                % (name, key, " ".join(v)))
             user = ini_last(files, "Service", "User") or ""
-            dynamic = (ini_last(files, "Service", "DynamicUser") or "").lower() in TRUE_WORDS
+            dynamic = any(v.lower() not in FALSE_WORDS for v in ini_all(files, "Service", "DynamicUser"))
             if user in ("", "root", "0") or user.isdigit() or any(c in user for c in "%$ ") or dynamic:
                 out.append("%s: User=%s; a keyed clerk runs under a named user of its own (#4210)" % (name, user))
             else:
@@ -1732,7 +1749,7 @@ def clerk_key_violations(root):
                 # An allow on any slice above the unit lets a packet through whatever the unit denies.
                 for sl in parent_slices(KEEPER_SLICE):  # keeper_unit_violations pins its Slice=
                     sl_files = unit_with_dropins(root, dirs, sl) or slice_dropins(root, sl)
-                    up = ini_words(sl_files, "Slice", "IPAddressAllow")
+                    up = ini_all(sl_files, "Slice", "IPAddressAllow")
                     if up:
                         out.append("%s: IPAddressAllow=%s on %s, above %s; a home-only clerk's slices allow nothing "
                                    "(NET-2, #4210)" % (sl, " ".join(up), sl, name))
@@ -1776,11 +1793,14 @@ def clerk_key_violations(root):
             else:
                 f = Conf(root, rel)
             if n.endswith(".socket"):
-                svc = ini_last([f] + unit_with_dropins(root, dirs, n)[1:], "Socket", "Service") or \
-                    n[:-len(".socket")] + ".service"
+                try:
+                    svcs = ini_all([f] + unit_with_dropins(root, dirs, n)[1:], "Socket", "Service")
+                except ValueError as e:
+                    unreadable(rel, e)
+                    svcs = []
                 for c in KEYED_CLERKS:
-                    if may_name(svc, c) or c == n[:-len(".socket")] + ".service":
-                        out.append("%s: starts %s with its sockets; a keyed clerk is handed no socket, which its "
+                    if c == n[:-len(".socket")] + ".service" or any(may_name(v, c) for v in svcs):
+                        out.append("%s: may start %s with its sockets; a keyed clerk is handed no socket, which its "
                                    "IP list would not filter (#4210)" % (rel, c))
             out += clerk_user_violations(f, n, clerk_users)
     return out
