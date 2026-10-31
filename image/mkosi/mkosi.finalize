@@ -30,6 +30,7 @@ mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
 import fnmatch
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -151,12 +152,14 @@ WORLD_WRITABLE = ("tmp", "var/tmp", "dev/shm", "dev/mqueue", "run/lock")
 # #1702: directories a service user or a login user owns on the box. agentos-localui serves the
 # LAN-facing setup page from var/lib/agentos-localui, the vault's user from var/lib/agentos-egress;
 # DynamicUser services live under var/lib/private, and people under home and run/user; the egress,
-# localui, mail clerk, camera clerk and edge link units' RuntimeDirectory= lives under run, and the clerks'
-# users own var/lib/agentos-mail (MAIL-unit) and var/lib/agentos-camera (CAM-clerk-image).
+# localui, mail clerk, camera clerk, HomeKit clerk and edge link units' RuntimeDirectory= lives under run, and
+# the clerks' users own var/lib/agentos-mail (MAIL-unit), var/lib/agentos-camera (CAM-clerk-image) and
+# var/lib/agentos-homekit (DEV-homekit-b2c).
 # A link into one is refused like one into WORLD_WRITABLE.
 SERVICE_DIRS = ("var/lib/agentos-localui", "var/lib/agentos-egress", "home", "run/user", "var/lib/private",
                 "run/agentos-egress", "run/agentos-localui", "run/agentos-mail", "var/lib/agentos-mail",
-                "run/agentos-link", "run/agentos-camera", "var/lib/agentos-camera")
+                "run/agentos-link", "run/agentos-camera", "var/lib/agentos-camera", "run/agentos-homekit",
+                "var/lib/agentos-homekit")
 # #1702 (delta 2): the only links the tree may hold into what the box mounts, by the link's path and
 # its exact target. Anything else that reaches a box mount is refused (world_writable_link): the box
 # makes what is there at boot (/proc/self/root, /proc/<pid>/cwd and /dev/fd are links to wherever the
@@ -1414,14 +1417,14 @@ KEEPER_PREFIX = "agentos-keeper-"
 KEEPER_SLICE = "agentos-keeper.slice"
 KEEPER_UNITS = ("agentos-keeper-enroll.service", "agentos-keeper-kernel.service", "agentos-keeper-rotate@.service",
                 "agentos-keeper-pageca.service", "agentos-keeper-setup@.service", "agentos-keeper-mail.service",
-                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service")
+                "agentos-keeper-link-capture.service", "agentos-keeper-camera.service", "agentos-keeper-homekit.service")
 # The keeper's state: the sealed store, the kernel's log and anchor, the Owner Card's factors that
 # setup leaves for enrollment, the mail clerk's sealed Secrets (MAIL-unit) and the first edge's capture
-# that enrollment takes (EDGE-link-core c2c), and the camera clerk's sealed store and retained capture
-# (CAM-clerk-image). No main-side unit sees it; the image makes each at boot
-# (tmpfiles.d).
+# that enrollment takes (EDGE-link-core c2c), the camera clerk's sealed store and retained capture
+# (CAM-clerk-image), and the HomeKit clerk's sealed store and devices file (DEV-homekit-b2c). No main-side
+# unit sees it; the image makes each at boot (tmpfiles.d).
 KEEPER_PATHS = ("/var/lib/agentos-store", "/var/lib/agentos-kernel", "/run/agentos-setup", "/var/lib/agentos-mail",
-                "/run/agentos-link-capture", "/var/lib/agentos-camera")
+                "/run/agentos-link-capture", "/var/lib/agentos-camera", "/var/lib/agentos-homekit")
 # Settings whose files the service manager opens as root and hands to the unit, past its mask and
 # DAC (#2981): each value's path, as the field after FIELD ':'s (None: the whole value), with a
 # prefix stripped.
@@ -1586,7 +1589,8 @@ def keeper_violations(root):
       StartLimitIntervalSec= in [Unit], and no failure or start-limit action that reboots, which would
       restart it on every boot. Its one reboot is ExecStopPost=KERNEL_REBOOT (#2998); it sets no
       OnFailure= or OnSuccess=, and no other command names a REBOOT_WORDS tool. With that line, an
-      ExecStartPre= is KERNEL_UP_CLEAR."""
+      ExecStartPre= is KERNEL_UP_CLEAR.
+    - CLK-1 (DEV-homekit-b2c): clerk_violations, on each clerk the kernel hands a key to."""
     root = str(root)
     dirs, out = unit_dirs(root)
     names, sockets, paths = set(), [], []
@@ -1614,7 +1618,121 @@ def keeper_violations(root):
                        % (n, svc))
     for n in sorted(set(paths)):
         out += keeper_path_violations(n, unit_with_dropins(root, dirs, n))
+    out += clerk_violations(root, dirs, names)
     out += sysusers_tpm_violations(root)
+    return out
+
+
+# CLK-1 (DEV-homekit-b2c): the kernel hands each clerk its key at every start of the clerk's unit, on a
+# socket of its own, to a process in that unit's cgroup (-clerk-key NAME=SOCKET,CGROUP; MAIL-keys). A
+# clerk's network is the home network's private and link-local ranges (NET-2, DEV-2), the ranges the
+# device-driver host reaches, unless it is one of WORLD_CLERKS, which end their own TLS to a provider
+# (D-154 rule 3). A new clerk therefore starts with no exit past the home network.
+CLERK_KEY_FLAG = "-clerk-key"
+HOME_NETS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7", "fe80::/10"))
+WORLD_CLERKS = ("agentos-keeper-mail.service",)
+ROOT_USERS = ("", "root", "0")
+
+
+def keeper_cgroup(unit):
+    """The cgroup systemd gives keeper unit UNIT: a slice's name nests at each "-" (systemd.slice(5))."""
+    parts = KEEPER_SLICE[:-len(".slice")].split("-")
+    return "/" + "/".join("-".join(parts[:i + 1]) + ".slice" for i in range(len(parts))) + "/" + unit
+
+
+def clerk_keys(files):
+    """(name, socket, cgroup) of each -clerk-key entry on the kernel's ExecStart= in FILES, or a word the
+    check cannot read as one. ValueError as ini_words."""
+    starts = ini_entries(files, "Service", "ExecStart")
+    words = starts[-1].split() if starts else []
+    out = []
+    for i, w in enumerate(words):
+        if w != CLERK_KEY_FLAG and not w.startswith(CLERK_KEY_FLAG + "="):
+            continue
+        v = w[len(CLERK_KEY_FLAG) + 1:] if "=" in w else (words[i + 1] if i + 1 < len(words) else "")
+        m = re.fullmatch(r"([a-z][a-z0-9-]*)=(/[^,]+),(/[^,]+)", v)
+        out.append(m.groups() if m else v)
+    return out
+
+
+def clerk_violations(root, dirs, names):
+    """CLK-1, NET-2: each clerk the kernel's unit (UNLOCK_UNITS) names with -clerk-key runs in a
+    KEEPER_UNITS unit that the tree ships, whose cgroup the entry names; under a User= of its own, not
+    root, not dynamic, and no other agentos service's (NAMES); takes its key from that one socket alone
+    (OpenFile=SOCKET:clerk-key, its only OpenFile=); and, unless it is one of WORLD_CLERKS, denies
+    every address (IPAddressDeny=any) but HOME_NETS, which IPAddressAllow= stays inside. Each name,
+    socket and unit is named once."""
+    out = []
+    for kname in UNLOCK_UNITS:
+        files = unit_with_dropins(root, dirs, kname)
+        if files is None:
+            continue
+        try:
+            keys = clerk_keys(files)
+        except ValueError as e:
+            out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (kname, e))
+            continue
+        users = {}
+        for n in sorted(names):
+            try:
+                u = ini_last(unit_with_dropins(root, dirs, n), "Service", "User")
+            except ValueError:
+                continue  # keeper_unit_violations reports it
+            users.setdefault(u, []).append(n)
+        seen = set()
+        for k in keys:
+            if isinstance(k, str):
+                out.append("%s: -clerk-key %s is not name=/socket,/cgroup (CLK-1)" % (kname, k))
+                continue
+            cname, sock, cg = k
+            unit = cg.rsplit("/", 1)[1]
+            for what in (("name", cname), ("socket", sock), ("unit", unit)):
+                if what in seen:
+                    out.append("%s: -clerk-key names %s %s twice; each clerk has its own (CLK-1)" % ((kname,) + what))
+                seen.add(what)
+            if unit not in KEEPER_UNITS or cg != keeper_cgroup(unit):
+                out.append("%s: -clerk-key %s hands its key to %s, not a keeper unit's cgroup (CLK-1, D-154)"
+                           % (kname, cname, cg))
+                continue
+            cfiles = unit_with_dropins(root, dirs, unit)
+            if cfiles is None:
+                out.append("%s: -clerk-key %s names %s, which the tree does not ship (CLK-1)" % (kname, cname, unit))
+                continue
+            try:
+                out += clerk_unit_violations(unit, cfiles, sock, users)
+            except ValueError as e:
+                out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (unit, e))
+    return out
+
+
+def clerk_unit_violations(unit, files, sock, users):
+    """clerk_violations' rules for one clerk's UNIT, read from FILES, keyed on SOCK; USERS maps each
+    User= value to the agentos services that set it. ValueError as ini_words."""
+    out = []
+    user = ini_last(files, "Service", "User") or ""
+    if user in ROOT_USERS or user.isdigit() or (ini_last(files, "Service", "DynamicUser") or "").lower() in TRUE_WORDS:
+        out.append("%s: User=%s; a clerk runs under a named user of its own (CLK-1)" % (unit, user))
+    elif users.get(user, [unit]) != [unit]:
+        out.append("%s: User=%s is also %s's; a clerk's user is its own (CLK-1)"
+                   % (unit, user, ", ".join(n for n in users[user] if n != unit)))
+    opens = ini_entries(files, "Service", "OpenFile")
+    if opens != [sock + ":clerk-key"]:
+        out.append("%s: OpenFile is %s; a clerk takes its key from %s alone, as descriptor 3 (CLK-1)"
+                   % (unit, opens or "unset", sock))
+    if unit in WORLD_CLERKS:
+        return out
+    if ini_words(files, "Service", "IPAddressDeny") != ["any"]:
+        out.append("%s: IPAddressDeny is not any; a clerk reaches the home network alone (NET-2)" % unit)
+    allow = ini_words(files, "Service", "IPAddressAllow")
+    for w in allow:
+        try:
+            net = ipaddress.ip_network(w, strict=False)
+        except ValueError:
+            out.append("%s: IPAddressAllow=%s: the tree check does not model it (NET-2)" % (unit, w))
+            continue
+        if not any(net.version == h.version and net.subnet_of(h) for h in HOME_NETS):
+            out.append("%s: IPAddressAllow=%s is outside the home network (NET-2)" % (unit, w))
     return out
 
 
