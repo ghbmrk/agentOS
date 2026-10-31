@@ -300,6 +300,11 @@ var enforcer = map[string]struct {
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
 	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
+	// The access point (slice g): ap renders its config from the policy,
+	// with VLANs read by the firewall's own rule; push alone carries it
+	// over SSH (enforcerSSH).
+	"enforcer/ap":      {[]string{"enforcer/policy", "enforcer/nft"}, droneForbid},
+	"enforcer/ap/push": {[]string{"enforcer/ap", "golang.org/x/crypto/ssh"}, droneForbid},
 	// Safety-list devices' secrets (slice r, decision 10): the sealed
 	// envelope both ends import, standard library only, and the enforcer's
 	// store, which neither the page nor the channel links.
@@ -332,6 +337,20 @@ var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
 // other enforcer package imports it.
 const enforcerWeb = "enforcer/page"
+
+// enforcerSSH is the one enforcer package that links a third-party
+// package: the access point pusher (slice g) reaches OpenWrt's admin over
+// SSH with a pinned host key. OpenWrt's admin paths are SSH or HTTP, the
+// enforcer links no HTTP client, and golang.org/x/crypto/ssh is the Go
+// project's own client, so reuse beats writing SSH again. It may link
+// exactly enforcerSSHDeps, and no other enforcer package imports it.
+const enforcerSSH = "enforcer/ap/push"
+
+var enforcerSSHDeps = []string{
+	"golang.org/x/crypto/ssh", "golang.org/x/crypto/ssh/internal/bcrypt_pbkdf", "golang.org/x/crypto/blowfish",
+	"golang.org/x/crypto/chacha20", "golang.org/x/crypto/curve25519", "golang.org/x/crypto/internal/alias",
+	"golang.org/x/crypto/internal/poly1305", "golang.org/x/crypto/cryptobyte", "golang.org/x/crypto/cryptobyte/asn1",
+}
 
 var forbiddenStd = []string{"net", "net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "syscall", "unsafe", "C"}
 
@@ -426,7 +445,8 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
-// decision 1, STO-4), and no third-party package yet; only the page
+// decision 1, STO-4), and no third-party package but the access point
+// pusher's SSH client (enforcerSSH, slice g); only the page
 // (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
 // and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
@@ -437,12 +457,12 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerSSH {
 			rest = append(rest, p)
 		}
 	}
 	own := map[string]bool{}
-	check := func(pkgs []string, forbidden []string) {
+	check := func(pkgs []string, forbidden []string, third ...string) {
 		out, err := exec.Command("go", append([]string{"list", "-C", "..", "-deps"}, pkgs...)...).Output()
 		if err != nil {
 			t.Fatalf("go list: %v", err)
@@ -461,14 +481,16 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 					t.Errorf("the enforcer links %s", dep)
 				}
 			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
-				t.Errorf("the enforcer links third-party %s", dep)
+				if !slices.Contains(third, dep) {
+					t.Errorf("the enforcer links third-party %s", dep)
+				}
 			case contains(forbidden, dep):
 				t.Errorf("%v link %s", pkgs, dep)
 			}
 		}
 	}
 	check(rest, forbiddenDeps)
-	for _, p := range append(slices.Clone(enforcerExec), enforcerWeb) {
+	for _, p := range append(slices.Clone(enforcerExec), enforcerWeb, enforcerSSH) {
 		if own[p] {
 			t.Errorf("an enforcer package other than %s links it", p)
 		}
@@ -477,6 +499,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		check([]string{module + p}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
 	}
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }))
+	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}
