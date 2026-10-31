@@ -193,7 +193,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	now, _ := time.Parse(time.DateOnly, today)
 	at := func(days int) string { return now.AddDate(0, 0, -days).Format(time.DateOnly) }
 	rec := sealedSeen{Log: inbox.SeenLog{Since: at(10)}}
-	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 80).Format("2 January 2006")+", I") || st.WarmedUp != "" {
@@ -204,7 +204,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 		{From: "old@shop.test", ID: strings.Repeat("ab", 16), Date: at(95)},
 		{From: "new@shop.test", ID: strings.Repeat("cd", 16), Date: at(5)},
 	}}}
-	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, st := r.opened(today)
@@ -226,7 +226,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 	// The boundary: a record 89 days old still warms up; at 90 days it has
 	// ended, and mail read exactly 90 days ago counts while 89 does not.
 	rec = sealedSeen{Log: inbox.SeenLog{Since: at(89)}}
-	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, st := r.opened(today); !has(st.Lines, "Until "+now.AddDate(0, 0, 1).Format("2 January 2006")) || st.WarmedUp != "" {
@@ -236,7 +236,7 @@ func TestTheWarmUpsEndIsToldOnce(t *testing.T) {
 		{From: "ninety@shop.test", ID: strings.Repeat("ef", 16), Date: at(90)},
 		{From: "eightynine@shop.test", ID: strings.Repeat("01", 16), Date: at(89)},
 	}}}
-	if err := saveSeen(r.dir, testSealer(), r.slot, rec); err != nil {
+	if err := saveSeen(r.dir, testSealer(), r.slot, rec, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, st := r.opened(today); has(st.Lines, "Until") || st.WarmedUp != warmedUp(1) {
@@ -272,7 +272,7 @@ func TestTheSeenRecordFollowsItsAccount(t *testing.T) {
 		t.Fatalf("another account kept the old record (%v)", err)
 	}
 	r.slot = slotOf(s)
-	if err := saveSeen(r.dir, testSealer(), r.slot, sealedSeen{}); err != nil {
+	if err := saveSeen(r.dir, testSealer(), r.slot, sealedSeen{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := RemoveMail(r.dir, sec); err != nil {

@@ -34,6 +34,12 @@ var errSecretsTooLarge = errors.New("run: secrets file too large")
 // another clerk's process cannot open them. A missing file is an empty store.
 // Nothing here migrates or repairs: a form that does not load is an error.
 func OpenSecrets(dir string, s clerk.Sealer) (*clerk.Secrets, error) {
+	return openSecrets(dir, s, nil)
+}
+
+// openSecrets is OpenSecrets; stop, for tests only, is every write's
+// privfile.WriteAtomic stop.
+func openSecrets(dir string, s clerk.Sealer, stop func(i int) bool) (*clerk.Secrets, error) {
 	if err := privfile.Check(dir, true); err != nil {
 		return nil, err
 	}
@@ -43,7 +49,7 @@ func OpenSecrets(dir string, s clerk.Sealer) (*clerk.Secrets, error) {
 		if len(b) > maxSecrets {
 			return errSecretsTooLarge
 		}
-		return privfile.WriteAtomic(dir, secretsName, b, nil)
+		return privfile.WriteAtomic(dir, secretsName, b, stop)
 	})
 	f, err := os.OpenFile(filepath.Join(dir, secretsName), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {

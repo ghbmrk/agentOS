@@ -40,9 +40,6 @@ import (
 // on main, each with the issue that gives its calls a seam and a test.
 const crashPending = `
 pending broker/kernel/proc #4190 nil stop on main when the lint landed
-pending broker/clerk/camera #4191 nil stop on main when the lint landed
-pending broker/clerk/codecheck #4191 nil stop on main when the lint landed
-pending broker/clerk/run #4191 nil stop on main when the lint landed
 pending broker/cmd/agentos-camera #4192 nil stop on main when the lint landed
 pending broker/cmd/agentos-clerk-model #4192 nil stop on main when the lint landed
 pending broker/cmd/agentos-enroll #4192 nil stop on main when the lint landed
