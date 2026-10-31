@@ -111,6 +111,10 @@ type Event struct {
 	Kind   Kind
 	ID     uint64
 	Device string
+	// Other is a removed pair's second member; Device is its first. Each
+	// has its own field because a signed ID may hold any separator a
+	// joined string would use (#4066).
+	Other  string
 	What   string // the verb, tightening or read, in fixed words
 	Code   wire.Code
 	Reason string // fixed text
