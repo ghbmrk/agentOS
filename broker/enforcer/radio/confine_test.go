@@ -105,9 +105,18 @@ func probeStack(policy, page string) {
 // ptraceChild seizes a child the probe started, so the probe never touches
 // a process it did not start: attaching to pid 1 stopped the runner's init
 // (#4091). PTRACE_SEIZE runs PTRACE_ATTACH's permission checks without
-// stopping the tracee. The child is the stack's own, same user, so only the
-// confinement's seccomp floor refuses it. No child means no verdict.
-func ptraceChild(try func(error) string) string {
+// stopping the tracee.
+//
+// A refused seize alone does not show the filter: the kernel also answers
+// EPERM under Yama's ptrace_scope 2, and ESRCH for a child that has gone
+// (#4116). So the probe first sends a malformed seize, with a nonzero addr,
+// which the kernel answers EIO before it checks any permission or the
+// target's state (ptrace_attach), or ESRCH when no such pid exists. Only a
+// filter in front of the call turns it into EPERM, so a confined "refused" needs both seizes to read EPERM,
+// and the unconfined control needs the seize to succeed and the malformed
+// one to read EIO. Anything else is no verdict. It takes the probes' try
+// for their shared call, but no single error is a verdict here.
+func ptraceChild(func(error) string) string {
 	cmd := exec.Command("/proc/self/exe", idleArg)
 	stdin, err := cmd.StdinPipe()
 	if err == nil {
@@ -121,11 +130,20 @@ func ptraceChild(try func(error) string) string {
 		stdin.Close()
 		cmd.Wait()
 	}()
-	_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, 0x4206 /* PTRACE_SEIZE */, uintptr(cmd.Process.Pid), 0)
-	if e == 0 {
+	seize := func(addr uintptr) syscall.Errno {
+		_, _, e := syscall.RawSyscall(syscall.SYS_PTRACE, 0x4206 /* PTRACE_SEIZE */, uintptr(cmd.Process.Pid), addr)
+		return e
+	}
+	malformed := seize(1)
+	e := seize(0)
+	fmt.Fprintf(os.Stderr, "ptrace: malformed seize: %d (%v), seize: %d (%v)\n", malformed, malformed, e, e)
+	switch {
+	case malformed == syscall.EPERM && e == syscall.EPERM:
+		return "refused"
+	case malformed == syscall.EIO && e == 0:
 		return "allowed"
 	}
-	return try(e)
+	return fmt.Sprintf("untested: malformed seize %d, seize %d", malformed, e)
 }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
