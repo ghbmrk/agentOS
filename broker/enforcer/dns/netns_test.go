@@ -385,19 +385,30 @@ func (h *home) resolve(from, server, name string) (int, []string) {
 // packet never sent (#4221).
 func (h *home) ask(from, network, server, name string) (int, []string) {
 	h.t.Helper()
+	rcode, addrs, arrived := h.send(from, network, server, name, true)
+	if arrived == 0 {
+		h.t.Errorf("%s's query to %s over %s never reached the enforcer", from, server, network)
+	}
+	return rcode, addrs
+}
+
+// send asks as ask does, pinning a link-local server only if pin, and
+// also gives how many of the query's packets reached the enforcer on
+// from's own interface.
+func (h *home) send(from, network, server, name string, pin bool) (int, []string, int) {
+	h.t.Helper()
 	a := netip.MustParseAddr(server)
 	dial := server
 	if a.Is6() && a.IsLinkLocalUnicast() {
-		h.pin(from, a)
+		if pin {
+			h.pin(from, a)
+		}
 		dial += "%eth0"
 	}
 	arrived := h.arrivals(from, a)
 	before := arrived()
 	rcode, addrs := h.query(from, network, dial, name)
-	if arrived() == before {
-		h.t.Errorf("%s's query to %s over %s never reached the enforcer", from, server, network)
-	}
-	return rcode, addrs
+	return rcode, addrs, arrived() - before
 }
 
 // pin gives host from a permanent neighbour entry for a, mapping it to the
@@ -694,6 +705,17 @@ func TestNoServiceOnEdge(t *testing.T) {
 	answers := [][3]string{{"ap0.101", tvDNS, "tv.example"}, {"core0", coreDNS, "core.example"}}
 	if h.has6() {
 		tvLL, plugLL, coreLL, edgeLL := h.linkLocal("ap0.101"), h.linkLocal("ap0.103"), h.linkLocal("core0"), h.linkLocal("edge0")
+		// The probe's own control: unpinned, a query to another view's
+		// link-local address never leaves the device, the silence that
+		// passed before #4221; pinned, it reaches the enforcer.
+		for _, nw := range []string{"udp", "tcp"} {
+			if rcode, _, n := h.send("ap0.101", nw, plugLL, "plug.example", false); n != 0 || rcode != noAnswer {
+				t.Errorf("unpinned, the plug's link-local address reached the enforcer from the TV over %s: %d packets, rcode %d", nw, n, rcode)
+			}
+		}
+		if _, _, n := h.send("ap0.101", "udp", plugLL, "plug.example", true); n == 0 {
+			t.Error("pinned, the TV's query to the plug's link-local address never reached the enforcer")
+		}
 		silent = append(silent,
 			[3]string{"edge0", "2001:db8:60::1", "core.example"},
 			[3]string{"edge0", edgeLL, "core.example"},
