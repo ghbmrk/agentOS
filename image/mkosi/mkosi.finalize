@@ -1628,7 +1628,8 @@ def keeper_violations(root):
 # clerk's network is the home network's private and link-local ranges (NET-2, DEV-2), the ranges the
 # device-driver host reaches, unless it is one of WORLD_CLERKS, which end their own TLS to a provider
 # (D-154 rule 3). A new clerk therefore starts with no exit past the home network.
-CLERK_KEY_FLAG = "-clerk-key"
+# Go's flag package reads a flag with one dash or two, its value after "=" or as the next word.
+CLERK_KEY_FLAGS = ("-clerk-key", "--clerk-key")
 HOME_NETS = tuple(ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7", "fe80::/10"))
 WORLD_CLERKS = ("agentos-keeper-mail.service",)
@@ -1648,9 +1649,11 @@ def clerk_keys(files):
     words = starts[-1].split() if starts else []
     out = []
     for i, w in enumerate(words):
-        if w != CLERK_KEY_FLAG and not w.startswith(CLERK_KEY_FLAG + "="):
+        flag, eq, v = w.partition("=")
+        if flag not in CLERK_KEY_FLAGS:
             continue
-        v = w[len(CLERK_KEY_FLAG) + 1:] if "=" in w else (words[i + 1] if i + 1 < len(words) else "")
+        if not eq:
+            v = words[i + 1] if i + 1 < len(words) else ""
         m = re.fullmatch(r"([a-z][a-z0-9-]*)=(/[^,]+),(/[^,]+)", v)
         out.append(m.groups() if m else v)
     return out
@@ -1662,9 +1665,11 @@ def clerk_violations(root, dirs, names):
     root, not dynamic, and no other agentos service's (NAMES), with no Group= but that user's and no
     SupplementaryGroups=; takes its key from that one socket alone
     (OpenFile=SOCKET:clerk-key, its only OpenFile=); and, unless it is one of WORLD_CLERKS, denies
-    every address (IPAddressDeny=any) but HOME_NETS, which IPAddressAllow= stays inside. Each name,
-    socket and unit is named once, and every keeper unit that takes a clerk's key (OpenFile=...:clerk-key)
-    is named, so dropping a clerk's entry cannot take its unit out of these rules."""
+    every address (IPAddressDeny=any) but HOME_NETS, which IPAddressAllow= stays inside, and no slice
+    above it sets IPAddressAllow= (systemd adds a parent slice's list to the unit's). Each name, socket
+    and unit is named once; every keeper unit that takes a clerk's key (OpenFile=...:clerk-key) is
+    named, so dropping a clerk's entry cannot take its unit out of these rules; and no other agentos
+    service opens a clerk's socket, or any key socket beside them."""
     out = []
     for kname in UNLOCK_UNITS:
         files = unit_with_dropins(root, dirs, kname)
@@ -1675,24 +1680,30 @@ def clerk_violations(root, dirs, names):
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (kname, e))
             continue
+        # Every service's User=, the image's own and any other, so a clerk's user is its alone.
         users = {}
-        for n in sorted(names):
+        for n in sorted({n for d in dirs for n in tree_listdir(root, d) if n.endswith(".service") and "@." not in n}):
             try:
                 u = ini_last(unit_with_dropins(root, dirs, n), "Service", "User")
-            except ValueError:
-                continue  # keeper_unit_violations reports it
+            except (ValueError, OSError):
+                continue  # keeper_unit_violations reports an agentos one
             users.setdefault(u, []).append(n)
         seen = set()
-        keyed = {k[2].rsplit("/", 1)[1] for k in keys if not isinstance(k, str)}
+        good = [k for k in keys if not isinstance(k, str)]
+        keyed = {k[2].rsplit("/", 1)[1] for k in good}
+        by_sock = {k[1]: k[2].rsplit("/", 1)[1] for k in good}
+        key_dirs = {k[1].rsplit("/", 1)[0] + "/key-" for k in good}
         for n in sorted(names):
-            if not n.startswith(KEEPER_PREFIX) or n in keyed:
-                continue
             try:
                 opens = ini_entries(unit_with_dropins(root, dirs, n), "Service", "OpenFile")
             except ValueError:
                 continue  # keeper_unit_violations reports it
-            if any(re.search(r":clerk-key(:|$)", v) for v in opens):
+            if n.startswith(KEEPER_PREFIX) and n not in keyed and any(re.search(r":clerk-key(:|$)", v) for v in opens):
                 out.append("%s: takes a clerk's key but %s names no -clerk-key for it (CLK-1)" % (n, kname))
+            for v in opens:
+                path = v.split(":", 1)[0]
+                if by_sock.get(path, n) != n or (path not in by_sock and path.startswith(tuple(key_dirs))):
+                    out.append("%s: OpenFile=%s opens a clerk's key socket that is not its own (CLK-1)" % (n, v))
         for k in keys:
             if isinstance(k, str):
                 out.append("%s: -clerk-key %s is not name=/socket,/cgroup (CLK-1)" % (kname, k))
@@ -1713,8 +1724,28 @@ def clerk_violations(root, dirs, names):
                 continue
             try:
                 out += clerk_unit_violations(unit, cfiles, sock, users)
+                if unit not in WORLD_CLERKS:
+                    out += clerk_slice_violations(root, dirs, unit)
             except ValueError as e:
                 out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (unit, e))
+    return out
+
+
+def clerk_slice_violations(root, dirs, unit):
+    """NET-2: systemd adds every parent slice's IPAddressAllow= to a unit's (the root slice's, then each
+    on down to KEEPER_SLICE, where keeper_unit_violations holds a keeper unit), so none may set one above
+    a home-only clerk's UNIT. A slice the tree lacks is still read for its drop-ins. ValueError as
+    ini_words."""
+    out = []
+    parts = KEEPER_SLICE[:-len(".slice")].split("-")
+    for s in ["-.slice"] + ["-".join(parts[:i + 1]) + ".slice" for i in range(len(parts))]:
+        files = unit_with_dropins(root, dirs, s) or conf_files(
+            root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(s)]
+            + ["%s/slice.d" % d for d in UNIT_PATHS])
+        allow = ini_words(files, "Slice", "IPAddressAllow")
+        if allow:
+            out.append("%s: %s sets IPAddressAllow=%s, which systemd adds to the clerk's own; a clerk reaches "
+                       "the home network alone (NET-2)" % (unit, s, " ".join(allow)))
     return out
 
 

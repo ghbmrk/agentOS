@@ -218,6 +218,53 @@ class ClerkTreeTest(test_image_keeper.KeeperTreeTest):
         write_dropin.write_text("[Service]\nIPAddressDeny=\n")
         self.refused(self.UNIT, "IPAddressDeny", "NET-2")
 
+    # REQ: CLK-1
+    def test_a_key_entry_in_any_flag_spelling_is_read(self):
+        # Go's flag package takes one dash or two, with "=" or the next word: each is the kernel's entry.
+        kernel = "agentos-keeper-kernel.service"
+        old = "-clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service"
+        for flag in ("--clerk-key ", "-clerk-key=", "--clerk-key="):
+            with self.subTest(flag=flag):
+                self.setUp()
+                self.edit(kernel, old, flag + "homekit=/run/agentos-kernel/key-homekit.sock,/system.slice/agentos-egress.service")
+                self.refused(kernel, "not a keeper unit's cgroup", "CLK-1")
+
+    # REQ: CLK-1
+    def test_another_unit_opening_a_clerk_s_key_socket_is_refused(self):
+        # The Security repro on 4349946: the key handed by "--clerk-key" to a main-side unit with network.
+        kernel = "agentos-keeper-kernel.service"
+        old = "-clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service"
+        line = "OpenFile=/run/agentos-kernel/key-homekit.sock:clerk-key\n"
+        self.edit(kernel, old, "--clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/system.slice/agentos-egress.service")
+        self.edit(self.UNIT, line, "")
+        self.add("agentos-egress.service", "Service", line.strip())
+        self.refused(kernel, "not a keeper unit's cgroup", "CLK-1")
+        # With the entry intact, another unit opening the clerk's socket, or a key socket beside it.
+        for sock in ("/run/agentos-kernel/key-homekit.sock", "/run/agentos-kernel/key-other.sock"):
+            with self.subTest(sock=sock):
+                self.setUp()
+                self.add("agentos-egress.service", "Service", "OpenFile=%s:clerk-key" % sock)
+                self.refused("agentos-egress.service", "OpenFile=%s" % sock, "not its own", "CLK-1")
+
+    # REQ: CLK-1
+    def test_a_user_shared_with_any_other_service_is_refused(self):
+        write_unit = self.root / "usr/lib/systemd/system/other.service"
+        write_unit.write_text("[Service]\nUser=agentos-homekit\nExecStart=/usr/bin/true\n")
+        self.refused(self.UNIT, "also other.service's", "CLK-1")
+
+    # REQ: NET-2
+    def test_a_parent_slice_that_widens_the_network_is_refused(self):
+        for s in ("agentos-keeper.slice", "agentos.slice", "-.slice"):
+            with self.subTest(slice=s):
+                self.setUp()
+                d = self.root / "etc/systemd/system" / (s + ".d")
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "50-wide.conf").write_text("[Slice]\nIPAddressAllow=any\n")
+                self.refused(self.UNIT, s + " sets IPAddressAllow=any", "NET-2")
+        # The mail clerk, a world clerk, is not held to it; the shipped slices set no list.
+        self.setUp()
+        self.assertEqual(self.clerk_v(), [])
+
     # REQ: NET-2
     def test_only_a_named_world_clerk_leaves_the_home_network(self):
         self.assertEqual(check.WORLD_CLERKS, ("agentos-keeper-mail.service",))
