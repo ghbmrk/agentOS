@@ -179,7 +179,7 @@ class Gate(unittest.TestCase):
             data = {"files": [{"file_name": "a.go", "mutations": [
                 {"type": "T", "status": "LIVED", "line": 3},
                 {"type": "T", "status": "KILLED", "line": 4}]}]}
-            (pathlib.Path(d) / "vm__gvisor.json").write_text(json.dumps(data))
+            (pathlib.Path(d) / "vm+gvisor.json").write_text(json.dumps(data))
             self.assertEqual(mutgate.survivors(d), {"vm/gvisor": [("a.go", 3, "T")]})
             self.assertEqual(mutgate.package_of("broker/vm/gvisor/a.go"), "vm/gvisor")
 
@@ -548,6 +548,9 @@ class Verify(unittest.TestCase):
             res = pathlib.Path(d) / "res"
             res.mkdir()
             for name, data in results.items():
+                # "mutants-0/netguard.json": one directory per artifact, as download-artifact lays them out.
+                name = name if "/" in name else f"mutants-0/{name}"
+                (res / name).parent.mkdir(exist_ok=True)
                 (res / name).write_text(data if isinstance(data, str) else json.dumps(data))
             return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "verify",
                                    str(res), "--git", "HEAD~1"], capture_output=True, text=True)
@@ -572,7 +575,54 @@ class Verify(unittest.TestCase):
             with self.subTest(results):
                 r = self.verify(results)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-                self.assertIn("no readable result for netguard", r.stderr)
+                self.assertTrue("no readable result for netguard" in r.stderr
+                                or "0 results for netguard" in r.stderr, r.stderr)
+
+    def test_a_result_in_two_artifacts_fails(self):
+        # Code in one package's job could upload a second, clean copy of another package's result.
+        r = self.verify({"mutants-0/netguard.json": self.result("LIVED"),
+                         "mutants-1/netguard.json": self.result("KILLED")})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("2 results for netguard", r.stderr)
+
+    def test_twin_packages_each_need_their_own_result(self):
+        # The repro on #4154: broker/netguard/sub and broker/netguard__sub both claimed; the LIVED
+        # mutant in netguard/sub is read whatever the twin's result says.
+        with tempfile.TemporaryDirectory() as d:
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+            shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+            git("init", "-q")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+            for rel in ("netguard/sub", "netguard__sub"):
+                pkg = pathlib.Path(d) / "broker" / rel
+                pkg.mkdir(parents=True)
+                (pkg / "a.go").write_text("package sub\nvar a = 1 + 1\n")
+                (pkg / "a_test.go").write_text("package sub\n// REQ: CRED-1\n")
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+            res = pathlib.Path(d) / "res"
+            for i, (rel, status) in enumerate((("netguard/sub", "LIVED"), ("netguard__sub", "KILLED"))):
+                (res / f"mutants-{i}").mkdir(parents=True)
+                (res / f"mutants-{i}" / mutgate.result_name(rel)).write_text(json.dumps(self.result(status)))
+            r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "verify",
+                                str(res), "--git", "HEAD~1"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/netguard/sub/a.go:2 ARITHMETIC_BASE survives", r.stdout)
+
+    def test_result_names_are_one_to_one(self):
+        # Security on #4154: `a/b` and `a__b` both mapped to a__b.json, and one stood in for the other.
+        names = ["netguard/sub", "netguard__sub", "netguard_sub", "netguard/s/ub", "netguard.sub"]
+        self.assertEqual(len({mutgate.result_name(n) for n in names}), len(names))
+        for n in names:
+            self.assertTrue(mutgate.PKG_NAME.fullmatch(n))
+            self.assertNotIn("+", n)
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("netguard/sub", "netguard__sub"):
+                (pathlib.Path(d) / mutgate.result_name(n)).write_text(json.dumps(
+                    {"files": [{"file_name": "a.go", "mutations": [{"type": "T", "status": "LIVED", "line": 1}]}]}))
+            self.assertEqual(sorted(mutgate.survivors(d)), ["netguard/sub", "netguard__sub"])
 
     def test_each_check_run_makes_fails_verify_too(self):
         for data, want in (
@@ -662,7 +712,7 @@ class Workflow(unittest.TestCase):
         self.assertNotIn("verify", mutants)
         # The jobs that decide never run Go and run tools/ only after it is the base's copy.
         restore = ('        run: |\n          rm -rf tools broker/core/core.txt\n'
-                   '          git checkout "$BASE" -- tools broker/core/core.txt\n')
+                   '          git archive "$BASE" tools broker/core/core.txt | tar -x\n')
         for name in ("claimed", "mutgate"):
             body = job(self.text, name)
             self.assertNotRegex(body, r"\bgo (test|build|run|install)\b|setup-go|gremlins unleash", name)
@@ -679,8 +729,8 @@ class Workflow(unittest.TestCase):
             "name: The claim ran and every claimed package passed",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
             "name: The base this merge commit was built on",
-            "name: The base copy of the gate",
             "uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0",
+            "name: The base copy of the gate",
             "name: Gate (MUT-tierA)",
         ])
         for st in steps[1:]:
@@ -688,16 +738,16 @@ class Workflow(unittest.TestCase):
         self.assertIn("persist-credentials: false", steps[1])
         self.assertIn("fetch-depth: 0", steps[1])
         self.assertIn('[ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ]', steps[2])
-        self.assertIn("pattern: mutants-*", steps[4])
-        self.assertIn("path: ${{ runner.temp }}/mutants", steps[4])
-        self.assertIn("merge-multiple: true", steps[4])
+        self.assertIn("pattern: mutants-*", steps[3])
+        self.assertIn("path: ${{ runner.temp }}/mutants", steps[3])
+        self.assertNotIn("merge-multiple", steps[3])  # one directory per artifact: verify refuses a duplicate
         self.assertIn("RESULTS: ${{ runner.temp }}/mutants", steps[5])
         self.assertIn('python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"', steps[5])
 
     def test_base_copy_step_drops_files_the_pr_adds_under_tools(self):
         # A PR-added tools/fnmatch.py would be imported by risk_tier under the base's mutgate.py.
         script = job(self.text, "mutgate").split("name: The base copy of the gate\n", 1)[1]
-        script = "\n".join(l[10:] for l in script.split("run: |\n", 1)[1].split("\n      - ", 1)[0].split("\n"))
+        script = "\n".join(l[10:] for l in re.split(r"\n      [-#] ", script.split("run: |\n", 1)[1], maxsplit=1)[0].split("\n"))
         with tempfile.TemporaryDirectory() as d:
             git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
             (pathlib.Path(d) / "tools").mkdir()
@@ -710,13 +760,15 @@ class Workflow(unittest.TestCase):
             (pathlib.Path(d) / "tools" / "mutgate.py").write_text("pr\n")
             (pathlib.Path(d) / "tools" / "fnmatch.py").write_text("pr\n")
             (pathlib.Path(d) / "broker" / "core" / "core.txt").write_text("pr\n")
+            # Security on #4154: a PR's attributes must not rewrite the base copy's bytes.
+            (pathlib.Path(d) / ".gitattributes").write_text("* text eol=crlf\n")
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
             base = git("rev-parse", "HEAD~1").stdout.strip()
             subprocess.run(["bash", "-ec", script], cwd=d, check=True, env={"BASE": base, "PATH": "/usr/bin:/bin"})
             self.assertEqual(sorted(f.name for f in (pathlib.Path(d) / "tools").iterdir()), ["mutgate.py"])
-            self.assertEqual((pathlib.Path(d) / "tools" / "mutgate.py").read_text(), "base\n")
-            self.assertEqual((pathlib.Path(d) / "broker" / "core" / "core.txt").read_text(), "base\n")
+            self.assertEqual((pathlib.Path(d) / "tools" / "mutgate.py").read_bytes(), b"base\n")
+            self.assertEqual((pathlib.Path(d) / "broker" / "core" / "core.txt").read_bytes(), b"base\n")
 
 
 if __name__ == "__main__":

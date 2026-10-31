@@ -19,9 +19,9 @@ survives.
                                              exit 1 if the diff BASE...HEAD adds a REQ marker
                                              to a package and adds a line carrying a LIVED mutant
   tools/mutgate.py verify DIR --git BASE [HEAD]
-                                             `gate`, after checking that DIR holds a readable
-                                             result for every package `claimed` names, as `run`
-                                             checks it: what CI's trusted job runs (#4106)
+                                             `gate`, after checking that DIR/*/ holds exactly
+                                             one readable result for every package `claimed`
+                                             names, as `run` checks it: CI's trusted job (#4106)
 
 The gate's claim: a diff that adds `REQ: ID` to a file under broker/<pkg>/ says the package's
 tests cover ID. A LIVED mutant on a line that diff added to a non-test .go file in the same
@@ -36,6 +36,7 @@ base commit and decides with `verify` (#4106).
 Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
+import glob
 import json
 import os
 import pathlib
@@ -76,11 +77,17 @@ def tier_a_packages(broker=BROKER):
     return out
 
 
+def result_name(pkg):
+    """The JSON file name of a package's result: `/` as `+`, which PKG_NAME never holds, so no two
+    packages share one (`a/b` and `a__b` did, and one's result stood in for the other's, #4106)."""
+    return pkg.replace("/", "+") + ".json"
+
+
 def survivors(results_dir):
     """{package: [(file, line, type)]} of LIVED mutants in the per-package JSON files."""
     out = {}
     for f in sorted(pathlib.Path(results_dir).glob("*.json")):
-        pkg = f.stem.replace("__", "/")
+        pkg = f.stem.replace("+", "/")
         out[pkg] = survivors_of(json.loads(f.read_text()))
     return out
 
@@ -241,7 +248,7 @@ def cmd_run(args):
     cfg = pathlib.Path(cfgdir.name) / "gremlins.yaml"
     cfg.write_text("{}\n")
     for pkg in pkgs:
-        dest = out / (pkg.replace("/", "__") + ".json")
+        dest = out / result_name(pkg)
         if args.git:
             r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", args.git, "--config", str(cfg),
                                 *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
@@ -264,7 +271,14 @@ def cmd_verify(args):
     added = added_lines(diff)[0]
     live, bad = {}, 0
     for pkg in claimed(diff):
-        f = pathlib.Path(args.dir) / (pkg.replace("/", "__") + ".json")
+        # Each mutants job's artifact is its own directory, so a result named twice (a job writing
+        # another package's) is refused rather than one copy picked.
+        found = sorted(pathlib.Path(args.dir).glob(f"*/{glob.escape(result_name(pkg))}"))
+        if len(found) != 1:
+            print(f"mutgate: {len(found)} results for {pkg} in {args.dir}, not one: {found}", file=sys.stderr)
+            bad += 1
+            continue
+        f = found[0]
         try:
             data = json.loads(f.read_text())
         except (OSError, ValueError) as e:
