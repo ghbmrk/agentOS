@@ -334,14 +334,15 @@ func TestTurnOnNeedsNamedOnceChallenge(t *testing.T) {
 		}
 	}
 
-	// The radio failing: the tap is spent and the failure reported.
+	// The radio failing: the tap is spent and the failure reported as an
+	// act that may have run, naming the challenge.
 	fb, err := action.NewBook(p.public(), failing{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c, _ := fb.Issue(home(), "heater", action.On, "", 0)
-	if _, err := fb.Redeem(home(), c.ID, p.sign(c.Msg), 1); !errors.Is(err, errRadio) {
-		t.Fatalf("radio failure: %v", err)
+	if got, err := fb.Redeem(home(), c.ID, p.sign(c.Msg), 1); !errors.Is(err, errRadio) || !errors.Is(err, action.ErrUnsure) || got.ID != c.ID {
+		t.Fatalf("radio failure: %v, %+v", err, got)
 	}
 	if _, err := fb.Redeem(home(), c.ID, p.sign(c.Msg), 1); !errors.Is(err, action.ErrGone) {
 		t.Fatalf("after a radio failure: %v", err)
@@ -402,6 +403,7 @@ type rig struct {
 	e      *policy.Engine
 	r      *radio
 	s      *page.Server
+	logs   []string
 	now    time.Time
 	remote netip.Addr
 }
@@ -433,7 +435,8 @@ func newRigWith(t *testing.T, set func(*page.Config)) *rig {
 		Name: rp, Owner: p.public(),
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
-		Policy: e, Act: g.r, Cert: cert.Leaf,
+		Policy: e, Act: g.r, Cert: cert.Leaf, Zone: time.UTC,
+		Log: func(l string) { g.logs = append(g.logs, l) },
 		Now: func() time.Time { return g.now },
 	}
 	if set != nil {
@@ -665,7 +668,7 @@ func TestServedOnlyAtHome(t *testing.T) {
 
 	for name, at := range others {
 		_, err := page.New(page.Config{
-			Name: rp, Owner: g.p.public(), Policy: g.e, Act: g.r,
+			Name: rp, Owner: g.p.public(), Policy: g.e, Act: g.r, Zone: time.UTC, Log: func(string) {},
 			Addrs: []netip.AddrPort{netip.AddrPortFrom(at, 443)},
 			Allow: []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		})
@@ -805,6 +808,41 @@ func TestHungActuatorReleasesLock(t *testing.T) {
 	c, _ := b.Issue(home(), "heater", action.On, "", 0)
 	if _, err := b.Redeem(home(), c.ID, p.sign(c.Msg), 1); err == nil {
 		t.Fatal("a panicking actuator reported done")
+	}
+}
+
+// NET-6, NET-2 alerts: a tap whose act timed out, failed or panicked may
+// still have reached the device, so the page tells the owner to check the
+// device, never that it did nothing, and writes one line to the
+// enforcer's log naming the act and the device. A page that acts with no
+// log is refused. Catches a panic after the send reported as "did not do
+// it" (#4138, items 2 and 3).
+func TestUnsureActIsLoggedAndSaysCheck(t *testing.T) {
+	h := hung{make(chan struct{})}
+	defer close(h.release)
+	for name, act := range map[string]action.Actuator{"hung": h, "failing": failing{}, "panicking": panicking{}} {
+		g := newRigWith(t, func(c *page.Config) { c.Act, c.ActTimeout = act, 20*time.Millisecond })
+		_, id, ch := g.open(action.Link(rp, "door", action.Unlock, ""))
+		w := g.tap("/do", id, ch, g.p)
+		if w.Code == http.StatusOK || !strings.Contains(w.Body.String(), "may still do it; check the device") || strings.Contains(w.Body.String(), "did not do it") {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+		if len(g.logs) != 1 || !strings.HasPrefix(g.logs[0], "action: unlock on door may have run: ") || strings.Contains(g.logs[0], "\n") {
+			t.Errorf("%s: logged %q", name, g.logs)
+		}
+	}
+	g := newRig(t)
+	_, id, ch := g.open(action.Link(rp, "heater", action.On, ""))
+	if w := g.tap("/do", id, ch, g.p); w.Code != http.StatusOK || len(g.logs) != 0 {
+		t.Errorf("a done act: %d, logged %q", w.Code, g.logs)
+	}
+	_, err := page.New(page.Config{
+		Name: rp, Owner: g.p.public(), Policy: g.e, Act: g.r, Zone: time.UTC,
+		Addrs: []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443)},
+		Allow: []netip.Prefix{netip.PrefixFrom(ownerAddr, 32)},
+	})
+	if !errors.Is(err, page.ErrConfig) {
+		t.Errorf("a page that acts with no log: %v, want refused", err)
 	}
 }
 
