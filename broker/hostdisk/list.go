@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // loaderDevicePartUUID is systemd-boot's EFI variable naming the GPT
@@ -22,48 +23,33 @@ type device interface {
 	io.Closer
 }
 
-// betweenLstatAndOpen lets a test swap the path in openSame's window.
-var betweenLstatAndOpen = func(string) {}
-
-// errNotNode is a device path that is a link, is not the kind of file
-// asked for, or changed between the Lstat and the open.
-var errNotNode = errors.New("hostdisk: device path is not a device node, or changed")
+// errNotNode is a device path that is not the kind of file asked for.
+var errNotNode = errors.New("hostdisk: device path is not a block device node")
 
 // isBlock reports a block device node: a device that is not a character
-// device. A link (ModeSymlink) is neither.
+// device.
 func isBlock(m os.FileMode) bool {
 	return m&os.ModeDevice != 0 && m&os.ModeCharDevice == 0
 }
 
 // openReadOnly opens a block device read-only. os.OpenFile adds
-// O_CLOEXEC on Linux; a test checks the open file's flags. It follows no
-// link (#3950), through openSame. A refusal is an open failure: the disk is
-// listed with ProblemOpen, and a root disk that cannot be opened for the
-// loader cross-check gives HealthMismatch (H6, H7).
+// O_CLOEXEC on Linux; a test checks the open file's flags. A refusal is an
+// open failure: the disk is listed with ProblemOpen, and a root disk that
+// cannot be opened for the loader cross-check gives HealthMismatch (H6, H7).
 func openReadOnly(path string) (device, error) {
-	return openSame(path, isBlock)
+	return openNode(path, isBlock)
 }
 
-// openSame opens path read-only only if Lstat finds a file of the kind ok
-// accepts (so not a link) and the open file is that same file (device and
-// inode), so a link swapped in between is refused. HW-8's source fence
-// keeps syscall out of the package, so O_NOFOLLOW is not at hand; this
-// check gives the same guarantee for the final name.
-func openSame(path string, ok func(os.FileMode) bool) (*os.File, error) {
-	before, err := os.Lstat(path)
+// openNode opens path read-only, refusing a link at it (O_NOFOLLOW, #3950)
+// and never waiting on a FIFO (O_NONBLOCK, which a block device's reads
+// ignore), and keeps the file only if ok accepts its mode.
+func openNode(path string, ok func(os.FileMode) bool) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !ok(before.Mode()) {
-		return nil, errNotNode
-	}
-	betweenLstatAndOpen(path)
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return nil, err
-	}
-	after, err := f.Stat()
-	if err != nil || !os.SameFile(before, after) {
+	fi, err := f.Stat()
+	if err != nil || !ok(fi.Mode()) {
 		f.Close()
 		return nil, errNotNode
 	}

@@ -163,13 +163,11 @@ allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, fo
 
 # broker/hostdisk (#3950), linked by agentos-hostdisk, which the 59 udev rule
 # runs as root. The command uses System's zero value only, so every path is
-# under /sys, /proc/self or /dev. The existence checks use os.Lstat, and the
-# device open checks its file is the one Lstat found (openSame). The rest
-# reads kernel-served files: sysfs and procfs refuse symlink(2), link(2)
+# under /sys, /proc/self or /dev. The existence checks use os.Lstat and the
+# device open uses O_NOFOLLOW (openNode). The rest reads kernel-served files: sysfs and procfs refuse symlink(2), link(2)
 # and mknod(2) from any uid, so every link on those paths is the kernel's, and
 # efivarfs takes no links either. sysfs names (/sys/block/<name>, device) are
 # such kernel links, so these reads must follow them.
 allow broker/hostdisk/list.go System.readTrim os.ReadFile a sysfs attribute (model, removable, size, logical_block_size) of a /sys/block entry; the links on the path are sysfs's own and no uid can make one there
 allow broker/hostdisk/list.go System.mounts os.Open /proc/self/mountinfo; /proc/self is procfs's own link and no uid can make one in procfs
 allow broker/hostdisk/list.go System.loaderPartition os.ReadFile systemd-boot's LoaderDevicePartUUID variable in efivarfs under /sys/firmware/efi/efivars, where no uid can make a link
-allow broker/hostdisk/list.go openSame os.OpenFile opens no link and only the file it checked: os.Lstat first requires the kind openReadOnly asks for (a block node, so not a link), and after the read-only open the fd's fstat must be os.SameFile (device and inode) with that Lstat, so a link swapped in between is refused; the open cannot add O_NOFOLLOW because HW-8's source fence (fence_test.go) keeps syscall out of the package and allows os.O_RDONLY alone

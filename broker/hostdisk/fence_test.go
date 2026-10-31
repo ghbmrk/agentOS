@@ -7,9 +7,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // REQ: HW-8
@@ -20,7 +23,7 @@ import (
 func TestSourceCannotWriteOrMount(t *testing.T) {
 	dirs := []string{".", "../cmd/agentos-hostdisk"}
 	forbiddenImports := map[string]bool{
-		"os/exec": true, "syscall": true, "golang.org/x/sys/unix": true,
+		"os/exec": true, "golang.org/x/sys/unix": true,
 		"net": true, "net/http": true, "unsafe": true,
 	}
 	forbiddenSel := map[string]bool{
@@ -48,10 +51,17 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			syscallName := ""
 			for _, im := range f.Imports {
 				path, _ := strconv.Unquote(im.Path.Value)
 				if forbiddenImports[path] {
 					t.Errorf("%s imports %s", p, path)
+				}
+				if path == "syscall" {
+					syscallName = "syscall"
+					if im.Name != nil {
+						t.Errorf("%s imports syscall under another name", p)
+					}
 				}
 			}
 			ast.Inspect(f, func(n ast.Node) bool {
@@ -76,12 +86,19 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 					if forbiddenSel[x.Sel.Name] {
 						t.Errorf("%s: uses %s", fs.Position(x.Pos()), x.Sel.Name)
 					}
+					// syscall is imported only for the two open flags that
+					// keep a device open from following a link or blocking
+					// (#3950); any other name in it fails.
+					if id, ok := x.X.(*ast.Ident); ok && syscallName != "" && id.Name == syscallName && !syscallFlags[x.Sel.Name] {
+						t.Errorf("%s: uses syscall.%s", fs.Position(x.Pos()), x.Sel.Name)
+					}
 				case *ast.CallExpr:
 					if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
 						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" && sel.Sel.Name == "OpenFile" {
-							// OpenFile is allowed only with the read-only flag.
+							// OpenFile is allowed only with the read-only flag,
+							// alone or with syscall.O_NOFOLLOW|syscall.O_NONBLOCK.
 							if len(x.Args) < 2 || !isRDONLY(x.Args[1]) {
-								t.Errorf("%s: os.OpenFile without os.O_RDONLY alone", fs.Position(x.Pos()))
+								t.Errorf("%s: os.OpenFile without os.O_RDONLY alone or with O_NOFOLLOW and O_NONBLOCK", fs.Position(x.Pos()))
 							}
 						}
 					}
@@ -107,13 +124,34 @@ func types(e ast.Expr) string {
 	return "?"
 }
 
+// syscallFlags are the only syscall names the package may use.
+var syscallFlags = map[string]bool{"O_NOFOLLOW": true, "O_NONBLOCK": true}
+
+// isRDONLY accepts os.O_RDONLY alone, or ORed with exactly
+// syscall.O_NOFOLLOW and syscall.O_NONBLOCK: neither can write.
 func isRDONLY(e ast.Expr) bool {
-	sel, ok := e.(*ast.SelectorExpr)
-	if !ok {
+	var names []string
+	var walk func(e ast.Expr) bool
+	walk = func(e ast.Expr) bool {
+		switch x := e.(type) {
+		case *ast.BinaryExpr:
+			return x.Op == token.OR && walk(x.X) && walk(x.Y)
+		case *ast.SelectorExpr:
+			id, ok := x.X.(*ast.Ident)
+			if !ok {
+				return false
+			}
+			names = append(names, id.Name+"."+x.Sel.Name)
+			return true
+		}
 		return false
 	}
-	id, ok := sel.X.(*ast.Ident)
-	return ok && id.Name == "os" && sel.Sel.Name == "O_RDONLY"
+	if !walk(e) {
+		return false
+	}
+	sort.Strings(names)
+	got := strings.Join(names, "|")
+	return got == "os.O_RDONLY" || got == "os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK"
 }
 
 // The device opener asks for read-only access with close-on-exec
@@ -125,7 +163,7 @@ func TestOpenReadOnly(t *testing.T) {
 	}
 	// A test cannot make a block node, so a regular file stands in for one
 	// through the opener openReadOnly calls.
-	f, err := openSame(p, os.FileMode.IsRegular)
+	f, err := openNode(p, os.FileMode.IsRegular)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,65 +191,93 @@ func TestOpenReadOnly(t *testing.T) {
 	t.Fatal("no flags line")
 }
 
-// The device opener follows no link and opens only a block node (#3950):
-// a link at the path is refused whatever it points at, as are a regular file
-// and a character device, and so is a path whose file changes between the
-// Lstat and the open.
+// The device opener follows no link, never waits on a FIFO and keeps only a
+// block node (#3950): a link at the path is refused whatever it points at,
+// as are a regular file, a character device, a directory and a FIFO.
 func TestOpenReadOnlyRefusesALinkOrANonBlockNode(t *testing.T) {
 	dir := t.TempDir()
 	disk := filepath.Join(dir, "disk")
 	if err := os.WriteFile(disk, make([]byte, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for name, target := range map[string]string{"sda": disk, "sdb": "/dev/null", "sdc": dir} {
+	fifo := filepath.Join(dir, "fifo")
+	if err := mkfifo(fifo); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"sda": disk, "sdb": "/dev/null", "sdc": dir, "sdd": fifo} {
 		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, p := range []string{filepath.Join(dir, "sda"), filepath.Join(dir, "sdb"), filepath.Join(dir, "sdc"), disk, "/dev/null", dir} {
+	for _, p := range []string{"sda", "sdb", "sdc", "sdd", "disk", "fifo"} {
+		p = filepath.Join(dir, p)
+		done := make(chan error, 1)
+		go func() {
+			d, err := openReadOnly(p)
+			if err == nil {
+				d.Close()
+			}
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("openReadOnly(%s) opened a link or a file that is no block node", p)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("openReadOnly(%s) blocked", p)
+		}
+	}
+	for _, p := range []string{"/dev/null", dir} {
 		if d, err := openReadOnly(p); err == nil {
 			d.Close()
-			t.Errorf("openReadOnly(%s) opened a link or a file that is no block node", p)
+			t.Errorf("openReadOnly(%s) opened a file that is no block node", p)
 		}
+	}
+	// A link to a regular file is refused even where the mode would pass:
+	// the refusal is the open's own.
+	if f, err := openNode(filepath.Join(dir, "sda"), os.FileMode.IsRegular); err == nil {
+		f.Close()
+		t.Fatal("openNode followed a link")
 	}
 	// A real block node opens, where the test can read one.
-	if ents, _ := os.ReadDir("/sys/block"); len(ents) > 0 {
-		for _, e := range ents {
-			p := filepath.Join("/dev", strings.ReplaceAll(e.Name(), "!", "/"))
-			if f, err := os.Open(p); err == nil {
-				f.Close()
-				d, err := openReadOnly(p)
-				if err != nil {
-					t.Errorf("openReadOnly(%s), a block node this uid can open: %v", p, err)
-				} else {
-					d.Close()
-				}
-				break
+	ents, _ := os.ReadDir("/sys/block")
+	for _, e := range ents {
+		p := filepath.Join("/dev", strings.ReplaceAll(e.Name(), "!", "/"))
+		if f, err := os.Open(p); err == nil {
+			f.Close()
+			d, err := openReadOnly(p)
+			if err != nil {
+				t.Errorf("openReadOnly(%s), a block node this uid can open: %v", p, err)
+			} else {
+				d.Close()
 			}
+			break
 		}
-	}
-	// A link swapped in after the Lstat: the open follows it, and the
-	// device and inode check refuses the file it reaches.
-	if f, err := openSame(disk, os.FileMode.IsRegular); err != nil {
-		t.Fatal(err)
-	} else {
-		f.Close()
-	}
-	other := filepath.Join(dir, "other")
-	if err := os.WriteFile(other, make([]byte, 4096), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	defer func(f func(string)) { betweenLstatAndOpen = f }(betweenLstatAndOpen)
-	betweenLstatAndOpen = func(p string) {
-		if err := os.Remove(p); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(other, p); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if f, err := openSame(disk, os.FileMode.IsRegular); err == nil {
-		f.Close()
-		t.Fatal("opened the file a link swapped in after the Lstat reaches")
 	}
 }
+
+// The fence admits syscall only for the two open flags.
+func TestFenceAdmitsOnlyTheOpenFlags(t *testing.T) {
+	for src, want := range map[string]bool{
+		"os.O_RDONLY": true,
+		"os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK":             true,
+		"syscall.O_NONBLOCK|os.O_RDONLY|syscall.O_NOFOLLOW":             true,
+		"os.O_RDONLY|syscall.O_NOFOLLOW":                                false,
+		"os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK":               false,
+		"os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|os.O_CREATE": false,
+		"os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECT":               false,
+		"os.O_RDONLY+syscall.O_NOFOLLOW+syscall.O_NONBLOCK":             false,
+		"flags": false,
+	} {
+		e, err := parser.ParseExpr(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isRDONLY(e); got != want {
+			t.Errorf("isRDONLY(%s) = %v, want %v", src, got, want)
+		}
+	}
+}
+
+func mkfifo(p string) error { return syscall.Mkfifo(p, 0o644) }

@@ -239,7 +239,7 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"broker/side/side.go":              "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
 		"broker/cmd/agentos-side/main.go":  "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
 		"image/mkosi/agentos-side.service": "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
-		rule:                               "ACTION==\"remove\", GOTO=\"end\"\nRUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\nENV{X}=\"agentos-side-old\"\nOWNER=\"agentos-side\", GROUP:=\"agentos-side\", MODE=\"0600\"\n",
+		rule:                               "ACTION==\"remove\", GOTO=\"end\"\nRUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\nENV{X}=\"agentos-sid\"\nOWNER=\"agentos-side\", GROUP:=\"agentos-side\", MODE=\"0600\"\n",
 		"broker/side/udev/README":          "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
 	}
 	set := func(t *testing.T, files map[string]string) []string {
@@ -251,7 +251,7 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		return bins
 	}
 	if bins := set(t, files); len(bins) != 0 {
-		t.Fatalf("a rule naming only other programs or the binary's account, a file that is no .rules, a unit with User=: got %q, want none", bins)
+		t.Fatalf("a rule naming only other programs, a prefix of the name or the binary's account, a file that is no .rules, a unit with User=: got %q, want none", bins)
 	}
 	for name, text := range map[string]string{
 		"RUN+=":                        "ACTION==\"add\", RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
@@ -266,6 +266,13 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"after a comment ending in \\": "# old rule \\\nRUN+=\"/usr/lib/agentos/agentos-side\"\n",
 		"a commented rule":             "# RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
 		"a rule under image":           "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+		"after ; in sh -c":             "RUN+=\"/bin/sh -c 'true;/usr/lib/agentos/agentos-side'\"\n",
+		"after | in sh -c":             "RUN+=\"/bin/sh -c 'echo|agentos-side'\"\n",
+		"inside ( )":                   "RUN+=\"/bin/sh -c '(agentos-side %k)'\"\n",
+		"before a closing '":           "RUN+=\"/bin/sh -c 'agentos-side'\"\n",
+		"inside backticks":             "RUN+=\"/bin/sh -c 'x=`agentos-side`'\"\n",
+		"after &&":                     "RUN+=\"/bin/sh -c 'true&&agentos-side'\"\n",
+		"after >":                      "RUN+=\"/bin/sh -c 'x>/dev/null;agentos-side'\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -529,24 +536,21 @@ func rootBinaries(root string) ([]string, error) {
 	return out, nil
 }
 
-// ruleWord splits a udev rule file into words: quotes, operators, commas and
-// spaces separate them, so a path keeps its slashes. ruleOwner is an OWNER=
-// or GROUP= value, which names an account (agentos-modem is both a binary
-// and a user), never a program.
-var (
-	ruleWord  = regexp.MustCompile(`[^\s",=+!:{}$%]+`)
-	ruleOwner = regexp.MustCompile(`\b(?:OWNER|GROUP)\s*:?=\s*"[^"]*"`)
-)
+// ruleOwner is an OWNER= or GROUP= value, which names an account
+// (agentos-modem is both a binary and a user), never a program.
+var ruleOwner = regexp.MustCompile(`\b(?:OWNER|GROUP)\s*:?=\s*"[^"]*"`)
 
-// ruleBinaries adds the package of every broker binary a .rules file under
-// image/ or broker/ names anywhere: any word whose last path element is the
-// binary's name, absolute or not, in any key but OWNER and GROUP, in a
-// comment or a continuation. udev
-// runs RUN, PROGRAM and IMPORT{program} values as root, resolves a bare name
-// in /usr/lib/udev, and can take the program from an ENV value
-// (RUN+="$env{X}"), so reading only those keys, or only absolute paths,
-// could drop a root binary; every name counting is an over-approximation
-// that never does (#3950).
+// ruleBinaries adds the package of every broker binary whose name a .rules
+// file under image/ or broker/ contains anywhere outside an OWNER= or GROUP=
+// value: as a path or bare, in any key, inside a shell command (sh -c
+// 'a;agentos-x'), in a comment or a continuation. udev runs RUN, PROGRAM
+// and IMPORT{program} values as root, resolves a bare name in
+// /usr/lib/udev, and can take the program from an ENV value
+// (RUN+="$env{X}"), so reading only those keys, or only whole words, could
+// drop a root binary; a substring match is an over-approximation that adds
+// names but never drops one (#3950). Bound: a name a rule or a shell
+// assembles from pieces, and a program another program's output names, are
+// held by review.
 func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) error {
 	for _, dir := range []string{"image", "broker"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
@@ -562,8 +566,9 @@ func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) err
 			if err != nil {
 				return err
 			}
-			for _, word := range ruleWord.FindAllString(ruleOwner.ReplaceAllString(string(b), ""), -1) {
-				if pkg, ok := pkgs[filepath.Base(word)]; ok {
+			text := ruleOwner.ReplaceAllString(string(b), "")
+			for name, pkg := range pkgs {
+				if strings.Contains(text, name) {
 					seen[pkg] = true
 				}
 			}
