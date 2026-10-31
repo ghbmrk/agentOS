@@ -51,18 +51,28 @@ class RunTest(unittest.TestCase):
     def test_modules_run_concurrently_up_to_jobs(self):
         runner, peak = self.fake()
         names = [f"test_{i}" for i in range(8)]
-        results = unit_tests.run(names, "/r", 4, runner=runner)
+        lines = []
+        results = unit_tests.run(names, "/r", 4, runner=runner, progress=lines.append)
         self.assertEqual(sorted(results), names)
         self.assertEqual(peak[0], 4)
+        self.assertEqual(len(lines), 8)
+        self.assertTrue(lines[-1].startswith("8/8 "), lines)
 
     def test_serial_modules_run_alone_after_the_pool(self):
         log = []
         runner, _ = self.fake(log=log)
         names = ["test_a", "test_b", "test_c", "test_d"]
         with mock.patch.dict(unit_tests.SERIAL, {"test_b": "shares a fixed port"}):
-            results = unit_tests.run(names, "/r", 4, runner=runner)
+            results = unit_tests.run(names, "/r", 4, runner=runner, progress=lambda line: None)
         self.assertEqual(sorted(results), names)
         self.assertEqual(log[-1], ("test_b", 1))
+
+    def test_the_biggest_module_starts_first(self):
+        log = []
+        runner, _ = self.fake(log=log, delay=0)
+        names = unit_tests.modules()
+        unit_tests.run(names, "/r", 1, runner=runner, progress=lambda line: None)
+        self.assertEqual(log[0][0], max(names, key=unit_tests.size))
 
     def test_a_failed_or_missing_module_fails_the_step(self):
         names = ["test_a", "test_b", "test_c"]

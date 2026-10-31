@@ -4,7 +4,8 @@
 ci.yml's unit-test step. Each module runs as `python -m unittest discover -s tests -p <module>.py
 -v` under `strace -f -y`, which writes <dir>/<module>.trace for tests/records_audit.py
 (CI-PATHS), exactly as the serial loop did; only the number running at a time changes. A
-module's output is buffered and printed whole, in name order, so logs do not interleave.
+module's output is buffered and printed whole, in name order, so logs do not interleave; a
+line per finished module shows progress meanwhile.
 Exit 1 if any module failed or did not run. A module listed in SERIAL runs alone after the
 pool drains: one that cannot share the runner with another module goes there, with its reason.
 
@@ -40,17 +41,28 @@ def run_one(module, trace_dir, root=ROOT):
     return module, p.returncode, time.monotonic() - start, p.stdout.decode("utf-8", "replace")
 
 
-def run(names, trace_dir, jobs, runner=run_one):
+def size(module, root=ROOT):
+    try:
+        return (root / "tests" / f"{module}.py").stat().st_size
+    except OSError:
+        return 0
+
+
+def run(names, trace_dir, jobs, runner=run_one, progress=lambda line: print(line, end="", flush=True)):
     """Run names (SERIAL ones last, one at a time) and return {module: (rc, seconds, output)}."""
-    pooled = [m for m in names if m not in SERIAL]
+    # Biggest file first: the longest module (test_image, about 7 min) must not start last.
+    pooled = sorted((m for m in names if m not in SERIAL), key=lambda m: -size(m))
     results = {}
+
+    def done(module, rc, secs, out):
+        results[module] = (rc, secs, out)
+        progress(f"{len(results)}/{len(names)} {module} {'ok' if rc == 0 else 'FAILED'} {secs:.0f}s\n")
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        for module, rc, secs, out in pool.map(lambda m: runner(m, trace_dir), pooled):
-            results[module] = (rc, secs, out)
+        for f in concurrent.futures.as_completed([pool.submit(runner, m, trace_dir) for m in pooled]):
+            done(*f.result())
     for m in names:
         if m in SERIAL:
-            module, rc, secs, out = runner(m, trace_dir)
-            results[module] = (rc, secs, out)
+            done(*runner(m, trace_dir))
     return results
 
 

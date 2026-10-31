@@ -427,12 +427,8 @@ class WiringTest(unittest.TestCase):
         unit, check = unit.split("\n      - ", 2)[:2]
         self.assertIn("        if: env.RECORDS != 'true'\n", unit)
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
-        self.assertIn('          for f in tests/test*.py; do\n'
-                      '            m=$(basename "$f" .py)\n'
-                      '            strace -f --seccomp-bpf -q -y -e trace=open,openat,openat2 -e signal=none '
-                      '-o "$RUNNER_TEMP/reads/$m.trace" \\\n'
-                      '              python -m unittest discover -s tests -p "$m.py" -v || rc=1\n'
-                      '          done\n          exit $rc', unit)
+        # tools/unit_tests.py runs each module under strace into its own trace (test_unit_tests).
+        self.assertTrue(unit.endswith('          python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
         self.assertEqual(check.splitlines()[1:], ["        if: env.RECORDS != 'true'",
                          '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 

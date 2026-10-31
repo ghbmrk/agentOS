@@ -6,7 +6,7 @@ Board section: Harness and operating model. Work item #4304.
 
 **Requirements:** no new IDs. CI-PATHS still holds: each module runs in its own process tree under `strace -f -y` and writes one `<module>.trace` that `tests/records_audit.py` reads; a failed or unrun module fails the step.
 
-**Scope:** `.github/workflows/ci.yml` (the "Unit tests" step only), `tools/unit_tests.py` (new), `tests/test_unit_tests.py` (new), `tests/test_ci_scope.py` (its assertion on that step). Audit numbers go to the PR body and the project's files, not the repo.
+**Scope:** `.github/workflows/ci.yml` (the "Unit tests" step only), `tools/unit_tests.py` (new), `tests/test_unit_tests.py` (new), `tests/test_ci_scope.py` and `tests/test_image.py` (their assertions on that step). Audit numbers go to the PR body and the project's files, not the repo.
 
 **Acceptance tests:** `tests/test_unit_tests.py` (every module runs once with its own trace path, a failed or missing module fails the run, output is grouped per module, SERIAL modules run alone) and `test_full_unit_tests_audit_record_reads_against_the_records_step` in `tests/test_ci_scope.py`.
 
