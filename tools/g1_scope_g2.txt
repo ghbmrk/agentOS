@@ -128,6 +128,10 @@ exempt-pr 4297
 # Remove once #4250 merges.
 exempt-pr 4250
 
+# #4352 (#4316): broker/enforcer/dns/ASSUMPTIONS.md and netns_test.go, which the G2 list does not name (D-198).
+# Remove once #4352 merges.
+exempt-pr 4352
+
 # #4290 (ENF-c, #3663): broker/enforcer/enrol/, page/ and policy/, which the G2 list does not name (D-198).
 # Remove once #4290 merges.
 exempt-pr 4290
