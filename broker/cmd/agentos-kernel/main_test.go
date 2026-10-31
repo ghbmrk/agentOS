@@ -63,24 +63,43 @@ func TestEveryPeerUIDIsRefusedToTheKernel(t *testing.T) {
 // REQ: CLK-1
 // MAIL-keys: -clerk-key names a clerk, its key socket and the one unit the
 // kernel hands that clerk's key to; each part is checked and a clerk is
-// named once.
+// named once. KEYS-route-by-cgroup (#4210): the unit is the clerk's own
+// keeper unit, named by the entry's own name, or a driver's template.
 func TestClerkKeyFlags(t *testing.T) {
-	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/clerk-mail.key,/agentos-keeper.slice/agentos-keeper-mail.service",
-		"-clerk-key", "driver-hue=/run/agentos-kernel/clerk-driver-hue.key,/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service"), io.Discard)
-	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/clerk-mail.key", Cgroup: "/agentos-keeper.slice/agentos-keeper-mail.service"}) ||
-		c.ClerkKeys["driver-hue"].Cgroup != "/system.slice/system-agentos\\x2ddriver.slice/agentos-driver@hue.service" {
+	const mail = "/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service"
+	const hue = "/agentos.slice/agentos-drivers.slice/agentos-driver-hue@.service"
+	c, err := parse(append(slices.Clone(good), "-clerk-key", "mail=/run/agentos-kernel/key-mail.sock,"+mail,
+		"-clerk-key", "driver-hue=/run/agentos-kernel/key-driver-hue.sock,"+hue), io.Discard)
+	if err != nil || c.ClerkKeys["mail"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/key-mail.sock", Cgroup: mail}) ||
+		c.ClerkKeys["driver-hue"] != (proc.KeyClerk{Socket: "/run/agentos-kernel/key-driver-hue.sock", Cgroup: hue}) {
 		t.Fatalf("parse: %+v %v", c.ClerkKeys, err)
 	}
 	for _, bad := range []string{
-		"mail=/k,/s.slice/a.service,x", "Mail=/k,/s.slice/a.service", "mail=k,/s.slice/a.service", "mail=/k,agentos-keeper-mail.service",
-		"mail=/k,/s.slice/agentos-keeper-mail", "mail=/k", "=/k,/a.service", "mail=/k,/s.slice/a b.service", "mail=/k,/s.slice/../a.service",
-		"mail=/k,/s.slice//a.service", "mail=/k,/s.slice/a.service/", "mail=/k,/",
+		"mail=/k," + mail + ",x", "Mail=/k," + mail, "mail=k," + mail, "mail=/k", "=/k," + mail, "mail=/k,",
+		// A cgroup outside the keeper's slice, whatever its unit's name.
+		"mail=/k,/agentos-keeper.slice/agentos-keeper-mail.service", "mail=/k,/system.slice/agentos-keeper-mail.service",
+		"mail=/k,/agentos.slice/agentosd.service/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service",
+		"mail=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service/x.service",
+		"mail=/k,/agentos.slice/agentos-mail.service", "mail=/k,/agentos.slice/agentos-drivers.slice/agentos-driver-mail@.service",
+		// A keeper unit, or a driver's, whose name is not the entry's.
+		"mail=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service",
+		"mail=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-kernel.service",
+		"mail=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail@.service",
+		"mail=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail2.service",
+		"driver-hue=/k,/agentos.slice/agentos-drivers.slice/agentos-driver-lock@.service",
+		"driver-hue=/k,/agentos.slice/agentos-drivers.slice/agentos-driver-hue.service",
+		"driver-hue=/k,/agentos.slice/agentos-keeper.slice/agentos-keeper-hue.service",
+		"driver-hue=/k,/agentos.slice/agentos-drivers.slice/agentos-driver-hue@1-2-3.service",
+		// Spellings of the same path are not the path.
+		"mail=/k,/agentos.slice//agentos-keeper.slice/agentos-keeper-mail.service",
+		"mail=/k,/agentos.slice/./agentos-keeper.slice/agentos-keeper-mail.service",
+		"mail=/k," + mail + "/", "mail=/k, " + mail,
 	} {
 		if _, err := parse(append(slices.Clone(good), "-clerk-key", bad), io.Discard); err == nil {
 			t.Errorf("-clerk-key %q accepted", bad)
 		}
 	}
-	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,/a.service", "-clerk-key", "mail=/b,/b.service")
+	twice := append(slices.Clone(good), "-clerk-key", "mail=/a,"+mail, "-clerk-key", "mail=/b,"+mail)
 	if _, err := parse(twice, io.Discard); err == nil {
 		t.Error("a clerk's key given twice was accepted")
 	}
