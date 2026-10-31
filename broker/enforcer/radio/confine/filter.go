@@ -91,14 +91,28 @@ func filterOf(deny []denied, families []int) []insn {
 	}
 	p = append(p, jeq(sysClone3, 0, 1), ret(errno(syscall.ENOSYS)))
 	p = append(p, jeq(sysClone, 0, 4), ldAbs(16), jset(cloneNew, 0, 1), ret(errno(syscall.EPERM)), ldAbs(0))
-	// socket and socketpair: allow a listed family, refuse the rest.
-	n := uint8(len(families))
+	// socket and socketpair: allow a listed family, refuse the rest; of
+	// netlink, only route netlink, so a stack holding CAP_NET_ADMIN in its
+	// own namespaces never reaches nf_tables or another netlink family
+	// (ENF-t Security finding).
 	for _, nr := range []uint32{sysSocket, sysSocketpair} {
-		p = append(p, jeq(nr, 0, n+3), ldAbs(16))
+		k := uint8(len(families))
+		b := []insn{ldAbs(16)}
+		netlink := false
 		for i, f := range families {
-			p = append(p, jeq(uint32(f), n-uint8(i), 0))
+			if f == syscall.AF_NETLINK {
+				netlink = true
+				b = append(b, jeq(uint32(f), k+1-uint8(i), 0)) // to the protocol check
+			} else {
+				b = append(b, jeq(uint32(f), k-uint8(i), 0)) // to allow
+			}
 		}
-		p = append(p, ret(errno(syscall.EPERM)), ret(retAllow))
+		b = append(b, ret(errno(syscall.EPERM)), ret(retAllow))
+		if netlink {
+			b = append(b, ldAbs(32), jeq(syscall.NETLINK_ROUTE, 0, 1), ret(retAllow), ret(errno(syscall.EPERM)))
+		}
+		p = append(p, jeq(nr, 0, uint8(len(b))))
+		p = append(p, b...)
 	}
 	return append(p, ret(retAllow))
 }

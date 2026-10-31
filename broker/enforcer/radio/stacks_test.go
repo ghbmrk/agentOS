@@ -73,6 +73,8 @@ func probeNet(kind, policy, page string) {
 	out["bt"] = try(sock(31, syscall.SOCK_RAW, 1))
 	out["inet"] = try(sock(syscall.AF_INET, syscall.SOCK_DGRAM, 0))
 	out["netlink"] = try(sock(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_ROUTE))
+	// nf_tables, which CAP_NET_ADMIN in the stack's own namespace would reach.
+	out["nfnl"] = try(sock(syscall.AF_NETLINK, syscall.SOCK_RAW, syscall.NETLINK_NETFILTER))
 	if err := sock(syscall.AF_INET6, syscall.SOCK_DGRAM, 0); err == syscall.EAFNOSUPPORT {
 		out["inet6"] = "no-ipv6"
 	} else {
@@ -166,7 +168,8 @@ func cloneNewNet() error {
 // as its own user in a user and network namespace the enforcer created as
 // root, holding only CAP_NET_ADMIN and CAP_NET_RAW there; it can create
 // wpan0 but sees only lo, wpan0 and infra0, cannot read or write the
-// policy store or reach the page, cannot enter a new namespace or mount,
+// policy store or reach the page, opens no netlink but route netlink (so
+// not nf_tables), cannot enter a new namespace or mount,
 // and runs with no-new-privileges under the seccomp filter. The Matter
 // controller, joined to that namespace as another user, sees the same
 // links with no capability at all. Catches a stack run unconfined.
@@ -220,7 +223,7 @@ func TestStacksConfined(t *testing.T) {
 		}
 		return got
 	}
-	refused := []string{"policy-r", "policy-w", "page", "packet",
+	refused := []string{"policy-r", "policy-w", "page", "packet", "nfnl",
 		"bt", "unshare-user", "unshare-mnt", "clone-net",
 		"setns", "mount", "fsopen", "setuid0", "ptrace"}
 	confined := func(t *testing.T, got map[string]string, uid int, capEff string) {

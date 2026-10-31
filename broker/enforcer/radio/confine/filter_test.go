@@ -15,13 +15,15 @@ import (
 
 // run evaluates a seccomp program the way the kernel does, over the
 // instructions filter emits, for one call: nr, the architecture word and
-// args[0]'s low word.
-func run(t *testing.T, p []insn, nr, arch, arg0 uint32) uint32 {
+// the low words of its first arguments.
+func run(t *testing.T, p []insn, nr, arch uint32, args ...uint32) uint32 {
 	t.Helper()
 	var data [64]byte
 	binary.LittleEndian.PutUint32(data[0:], nr)
 	binary.LittleEndian.PutUint32(data[4:], arch)
-	binary.LittleEndian.PutUint32(data[16:], arg0)
+	for i, a := range args {
+		binary.LittleEndian.PutUint32(data[16+8*i:], a)
+	}
 	var a uint32
 	for pc := 0; pc < len(p); pc++ {
 		i := p[pc]
@@ -86,6 +88,25 @@ func TestFilterDeniesEachEntry(t *testing.T) {
 	} {
 		if got := run(t, p, c.nr, c.arch, c.arg0); got != c.want {
 			t.Errorf("%s: %#x, want %#x", c.what, got, c.want)
+		}
+	}
+	// Of netlink, a stack with the family gets only route netlink, and
+	// every listed family around it still opens.
+	fam = []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK}
+	p = filter(fam)
+	for _, nr := range []uint32{sysSocket, sysSocketpair} {
+		for _, f := range fam {
+			if got := run(t, p, nr, auditArchX8664, uint32(f), syscall.SOCK_RAW, 0); got != retAllow {
+				t.Errorf("call %d, family %d: %#x, want allowed", nr, f, got)
+			}
+		}
+		for _, proto := range []uint32{syscall.NETLINK_NETFILTER, syscall.NETLINK_AUDIT, syscall.NETLINK_XFRM, syscall.NETLINK_GENERIC, 0xffff} {
+			if got := run(t, p, nr, auditArchX8664, syscall.AF_NETLINK, syscall.SOCK_RAW, proto); got != eperm {
+				t.Errorf("call %d, netlink protocol %d: %#x, want EPERM", nr, proto, got)
+			}
+		}
+		if got := run(t, p, nr, auditArchX8664, syscall.AF_PACKET, syscall.SOCK_RAW, 0); got != eperm {
+			t.Errorf("call %d, an unlisted family: %#x, want EPERM", nr, got)
 		}
 	}
 }
