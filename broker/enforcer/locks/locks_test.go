@@ -845,3 +845,33 @@ func TestReportRuleBound(t *testing.T) {
 		t.Errorf("%d rules, all open, did not relock at once", locks.MaxRules+1)
 	}
 }
+
+// An unlock still on its way to the lock when a due relock runs and lands
+// keeps its own relock: the relock does not clear the deadline of an
+// unlock whose command has not returned (Security delta on #4287, point 1).
+func TestUnlockInFlightDuringRelockStillRelocks(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	r.radio.locks["front"].unlocked = true
+	r.gate.Seen(locks.Event{Device: "front", Report: locks.Unlocked})
+	r.tick() // due at 10:01
+	r.clock.set(at(10, 1))
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.radio.holdAct = func() { close(entered); <-release }
+	errc := make(chan error, 1)
+	go func() { errc <- r.gate.Act(context.Background(), "front", action.Unlock, "") }()
+	<-entered
+	r.radio.holdAct = nil
+	r.gate.Tick(r.doc) // the due relock runs and lands first
+	r.gate.WaitWork()
+	close(release)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		r.clock.add(locks.RelockAfter)
+		r.tick()
+	}
+	if r.radio.unlocked("front") {
+		t.Errorf("front stays unlocked 10 minutes after the owner's unlock landed: %v", r.radio.did())
+	}
+}

@@ -261,15 +261,24 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 	}
 	g.expect[device+"\x00"+strconv.Itoa(int(report))] = now.Add(expectFor)
 	g.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return err
+	err := ctx.Err()
+	if err == nil {
+		err = g.cfg.Driver.Act(ctx, device, a, "")
 	}
-	if err := g.cfg.Driver.Act(ctx, device, a, ""); err != nil {
+	g.mu.Lock()
+	if report == Unlocked {
+		// A relock that ran while the unlock was on its way may have
+		// landed first, so the unlock's own relock is due again from when
+		// the unlock returned, whatever the answer.
+		g.unlockAt(device, g.cfg.Now().Add(RelockAfter))
+	}
+	if err != nil {
 		// The act may still have reached the device (action.Actuator), so
 		// the lock's own report of it must be told, not taken as ours.
-		g.mu.Lock()
 		delete(g.expect, device+"\x00"+strconv.Itoa(int(report)))
-		g.mu.Unlock()
+	}
+	g.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	g.told(device, report, unusual)
@@ -457,6 +466,11 @@ func (g *Gate) Tick(doc policy.Document) {
 	for l := range g.due {
 		if _, ok := known[l]; !ok || !lock(known[l]) {
 			delete(g.due, l)
+		}
+	}
+	for l := range g.pend {
+		if !lock(known[l]) {
+			delete(g.pend, l)
 		}
 	}
 	g.mu.Unlock()

@@ -103,6 +103,8 @@ type radio struct {
 	actFails error
 	// hang makes Lock on a device wait for its channel, as a hung stack.
 	hang map[string]chan struct{}
+	// holdAct runs before Act sends its command.
+	holdAct func()
 }
 
 type fakeLock struct {
@@ -131,6 +133,9 @@ func (r *radio) dev(device string) (*fakeLock, error) {
 }
 
 func (r *radio) Act(ctx context.Context, device string, a action.Act, route string) error {
+	if r.holdAct != nil {
+		r.holdAct() // the stack has the command and has not sent it yet
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := ctx.Err(); err != nil {
