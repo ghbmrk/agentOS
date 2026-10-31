@@ -60,6 +60,14 @@ exempt-pr 4183
 # Remove once #4227 merges.
 exempt-pr 4227
 
+# #4269 (ENF-k2-rx2): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
+# Remove once #4269 merges.
+exempt-pr 4269
+
+# #4270 (ENF-light, #4165): broker/enforcer/alert/, which the G2 list does not name (D-198).
+# Remove once #4270 merges.
+exempt-pr 4270
+
 # #4135 (CAM-clerk-kept-expiry): broker/clerk/camera/ and broker/cmd/agentos-camera/, which the G2 list does not name (D-198).
 # Remove once #4135 merges.
 exempt-pr 4135
@@ -68,6 +76,10 @@ exempt-pr 4135
 # Remove once #4238 merges.
 exempt-pr 4238
 
+# #4274 (ap/push flake fix, #4248): broker/enforcer/ap/push/push_test.go, which the G2 list does not name (D-198).
+# Remove once #4274 merges.
+exempt-pr 4274
+
 # #4139 (ENF-dns): broker/enforcer/dns/, which the G2 list does not name (D-198).
 # Remove once #4139 merges.
 exempt-pr 4139
@@ -75,6 +87,14 @@ exempt-pr 4139
 # #4145 (ENF-mdns-records): broker/enforcer/mdns/ and nft/, which the G2 list does not name (D-198).
 # Remove once #4145 merges.
 exempt-pr 4145
+
+# #4258 (ENF-netns-mac, #4189): broker/enforcer/nft/ test files, which the G2 list does not name (D-198).
+# Remove once #4258 merges.
+exempt-pr 4258
+
+# #4287 (ENF-q, #3675): broker/enforcer/locks/, which the G2 list does not name (D-198).
+# Remove once #4287 merges.
+exempt-pr 4287
 
 # #4204 (ENF-dns-v6-views, #4143): broker/enforcer/dns/, which the G2 list does not name (D-198).
 # Remove once #4204 merges.
@@ -96,6 +116,10 @@ exempt-pr 4254
 # Remove once #4149 merges.
 exempt-pr 4149
 
+# #4297 (ENF-mdns-cost, #4232): broker/enforcer/mdns/, which the G2 list does not name (D-198).
+# Remove once #4297 merges.
+exempt-pr 4297
+
 # #4250 (ENF-t-probe, #4233): broker/enforcer/radio/, which the G2 list does not name (D-198).
 # Remove once #4250 merges.
 exempt-pr 4250
@@ -111,6 +135,10 @@ exempt-pr 4212
 # #4182 (ENF-g-b): broker/enforcer/ap/, which the G2 list does not name (D-198). Remove once #4182
 # merges.
 exempt-pr 4182
+
+# #4260 (ENF-r-follow-3, #4200): broker/enforcer/devsecret/devsecret.go comment fix, which the G2 list does not name (D-198).
+# Remove once #4260 merges.
+exempt-pr 4260
 
 # #4216 (ENF-k2-rx, #4196): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
 # Remove once #4216 merges.

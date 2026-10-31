@@ -141,8 +141,8 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		if json.Unmarshal(e.Body, &b) != nil {
 			return nil, true
 		}
-		if t, ok := b.again(s); ok {
-			return []derived{entry(TTripOwner, ownerTrip{b.Op, b.Key, t})}, true
+		if _, d, ok := b.again(s); ok {
+			return []derived{d}, true
 		}
 		return nil, true
 	}
