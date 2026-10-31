@@ -5953,6 +5953,7 @@ UNIT_DEVICES = {
     "agentos-modem.service": ("agentos-modem", "closed; char-ttyUSB rw, char-alsa rw"),
     "agentos-devices.service": ("agentos-devices", "private"),
     "agentos-imapconn@.service": ("agentos-imapconn", "private"),
+    "agentos-camdecode@.service": ("camdec-%i", "private"),
 }
 DEVICE_POLICY_EXEMPT = {"agentosd.service": "IMG-4 (#917)"}
 

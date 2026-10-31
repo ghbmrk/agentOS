@@ -32,6 +32,8 @@ enable agentos-keeper-mail.service
 enable agentos-imapconn.socket
 # The camera clerk, after the kernel, which hands it its key (CAM-clerk-image).
 enable agentos-keeper-camera.service
+# Its decoder sessions' socket: one sandbox per session, under a user of its own (CAM-decoder-uid).
+enable agentos-camdecode.socket
 # The HomeKit clerk, after the kernel, which hands it its key (DEV-homekit-b2c).
 enable agentos-keeper-homekit.service
 # The edge link (EDGE-link-core c2c): the first edge's capture before the store, then the served link
