@@ -10,9 +10,14 @@ package privfile
 // the per-PR race run compiles (raceRun) sets it: a non-nil value keyed or
 // assigned to that field's name, or a non-nil argument in that parameter's
 // place in a call of that function, after the receiver in a method
-// expression. A nil in parentheses, converted to any type (generic and
-// imported ones too), given alone to another package's function, or held in
-// a variable nothing assigns counts as nil (nilish). A directory that fails
+// expression. Names resolve as the go tool would within the test file's own
+// package (the directory's package, or its external _test package, which
+// also sees the directory's package through its import), not across the two;
+// a name another package declares cannot be resolved, so a call through one
+// (other.X.Save) counts only if its stop is set whether or not other.X is a
+// type. A nil in parentheses, converted to any type, given alone to a function
+// of another package, or held in a variable nothing in its package assigns
+// counts as nil (nilish). A directory that fails
 // today has a pending line in crashPending naming the issue that adds its
 // seam and test; the line covers every call there, new ones included, as the
 // path lint's pending lines do. A pending line for a directory that passes
@@ -25,11 +30,11 @@ package privfile
 // review, the substance of #3311, #3476, #3868 and #3881). A stop forwarded
 // through a second function is not followed: a test sets the field, or calls
 // the function, that the WriteAtomic call reads. A nil that only flow shows
-// (a variable assigned nil after its declaration, a function of this
-// directory returning nil, a field of a nil-valued struct, *new(T), a
+// (a variable assigned nil after its declaration, a function returning
+// nil, a field of a nil-valued struct, *new(T), a
 // missing map entry) counts as set, as does a package variable when any
-// variable of its name is assigned; a method value (f := (*S).Save) is not
-// seen as one. A local or package variable shadowing
+// variable of its name in that package is assigned; a method value
+// (f := (*S).Save) is not seen as one. A local or package variable shadowing
 // the privfile import, calls in a pending directory, Go outside broker/, and
 // broker/third_party and every vendor, testdata and dot-named directory at
 // any depth are outside the check.
@@ -260,6 +265,50 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 		files = map[string]string{"broker/side/side.go": param, "broker/side/side_test.go": "package side\n\nfunc f() { (Save)(\"d\", nil, func(int) bool { return true }) }\n"}
 		if problems := lint(t, files, ""); len(problems) != 0 {
 			t.Fatalf("got %q, want none", problems)
+		}
+	})
+	t.Run("names resolve in the test file's own package, values are never receivers", func(t *testing.T) {
+		store := call + "type S struct{ dir string; stop func(int) bool }\n\nfunc (s *S) Put(b []byte) error { return privfile.WriteAtomic(s.dir, \"f\", b, s.stop) }\n\ntype Store struct{ dir string }\n\nfunc (s *Store) Save(b []byte, stop func(int) bool, n int) error { return privfile.WriteAtomic(s.dir, \"f\", b, stop) }\n\nfunc hook(f func(int) bool) func(int) bool { return f }\n\nfunc Hook(f func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar hooks int\n\nvar NoStop func(int) bool\n\nvar none func(int) bool\n\nvar Chain = none\n"
+		ext := "package side_test\n\nimport \"example.test/broker/side\"\n\n"
+		setField := "package side\n\nvar _ = S{stop: func(int) bool { return true }}\n"
+		setSave := "package side\n\nfunc g(s *Store) { s.Save(nil, func(int) bool { return true }, 3) }\n"
+		const field, save = "sets the stop field stop", "calls Save with a non-nil stop"
+		for name, c := range map[string]struct{ a, b, want string }{
+			"an index of a package var's field":                            {"package side\n\ntype fixture struct{ Store []*Store }\n\nvar fx fixture\n", "package side\n\nfunc f(b []byte) { fx.Store[0].Save(b, nil, 3) }\n", save},
+			"a package var's field":                                        {"package side\n\ntype fixture struct{ Store *Store }\n\nvar fx fixture\n", "package side\n\nfunc f() { fx.Store.Save(nil, nil, 3) }\n", save},
+			"an external package var named as the type":                    {ext + "var Store = &side.Store{}\n", "package side_test\n\nfunc f() { Store.Save(nil, nil, 3) }\n", save},
+			"another package's operand, nil either way":                    {"", "package side\n\nimport \"example.test/broker/other\"\n\nfunc f() { other.Store.Save(nil, nil, 3) }\n", save},
+			"an external test's own type, named as the package's function": {"", ext + "type hook func(int) bool\n\nvar _ = side.S{stop: hook(nil)}\n", field},
+			"an import named as the package's var":                         {"", ext + "import \"example.test/broker/hooks\"\n\nvar _ = side.S{stop: hooks.Hook(nil)}\n", field},
+			"the package's nil var, from an external test":                 {"", ext + "var _ = side.S{stop: side.NoStop}\n", field},
+			"the package's var copying its nil var, from an external test": {"", ext + "var _ = side.S{stop: side.Chain}\n", field},
+			"the package's nil var, dot-imported":                          {"", "package side_test\n\nimport . \"example.test/broker/side\"\n\nvar _ = S{stop: NoStop}\n", field},
+		} {
+			t.Run(name, func(t *testing.T) {
+				other := setField
+				if c.want == field {
+					other = setSave
+				}
+				files := map[string]string{"broker/side/side.go": store, "broker/side/b_test.go": c.b, "broker/side/c_test.go": other}
+				if c.a != "" {
+					files["broker/side/a_test.go"] = c.a
+				}
+				one(t, lint(t, files, ""), c.want)
+			})
+		}
+		hook := "func(int) bool { return true }"
+		for name, c := range map[string]struct{ b, other string }{
+			"the package's function given nil, from an external test": {ext + "var _ = side.S{stop: side.Hook(nil)}\n", setSave},
+			"another package's operand, set either way":               {"package side\n\nimport \"example.test/broker/other\"\n\nfunc f() { other.Store.Save(nil, " + hook + ", " + hook + ") }\n", setField},
+			"a method expression of the external type":                {ext + "func f(s *side.Store) { (*side.Store).Save(s, nil, " + hook + ", 3) }\n", setField},
+			"a method expression of the dot-imported type":            {"package side_test\n\nimport . \"example.test/broker/side\"\n\nfunc f(s *Store) { (*Store).Save(s, nil, " + hook + ", 3) }\n", setField},
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := map[string]string{"broker/side/side.go": store, "broker/side/b_test.go": c.b, "broker/side/c_test.go": c.other}
+				if problems := lint(t, files, ""); len(problems) != 0 {
+					t.Fatalf("got %q, want none", problems)
+				}
+			})
 		}
 	})
 	t.Run("a method expression call's receiver argument is not the stop", func(t *testing.T) {
@@ -514,7 +563,8 @@ func crashLintDir(dir, rel, importPath string) ([]string, error) {
 		}
 		walk(f)
 	}
-	fields, calls := testSets(tests, newDirDecls(append(srcs, tests...)))
+	self := strings.TrimSuffix(importPath, "/kernel/privfile") + strings.TrimPrefix(rel, "broker")
+	fields, calls := testSets(tests, newDirDecls(srcs, tests, self))
 	for _, s := range seams {
 		switch {
 		case s.field != "" && !fields[s.field]:
@@ -616,55 +666,71 @@ func typeName(e ast.Expr) string {
 	}
 }
 
-// dirDecls is what nilish and methodExprType know about one directory's
-// package-level names, by name across its source and test files.
-type dirDecls struct {
-	types    map[string]bool      // type names
-	funcs    map[string]bool      // function names (not methods)
-	pkgObjs  map[*ast.Object]bool // test files' package-level objects, which nilish reads by name
-	vars     map[string]ast.Expr  // var name to its value; nil when declared without one
-	assigned map[string]bool      // names assigned with = or whose address is taken anywhere
-	objs     map[*ast.Object]bool // test-file locals assigned with = or whose address is taken
+// pkgDecls is one package's package-level names, read across its files: the
+// directory's package (source and in-package test files) or its external
+// _test package.
+type pkgDecls struct {
+	types    map[string]bool     // type names
+	values   map[string]bool     // function, variable and constant names
+	vars     map[string]ast.Expr // var name to its value; nil when declared without one
+	assigned map[string]bool     // names assigned with = or whose address is taken anywhere in the package
 }
 
-func newDirDecls(files []*ast.File) dirDecls {
-	d := dirDecls{types: map[string]bool{}, funcs: map[string]bool{}, pkgObjs: map[*ast.Object]bool{}, vars: map[string]ast.Expr{}, assigned: map[string]bool{}, objs: map[*ast.Object]bool{}}
-	mark := func(e ast.Expr) {
-		if id, ok := ast.Unparen(e).(*ast.Ident); ok {
-			d.assigned[id.Name] = true
-			if id.Obj != nil {
-				d.objs[id.Obj] = true
-			}
-		}
+// dirDecls is what the resolution below knows about one directory. A name
+// resolves in the package of the file that uses it, never across the
+// directory's two packages, and a name another package declares is known
+// only when that package is the directory's own (an external test's import).
+type dirDecls struct {
+	pkgs map[string]*pkgDecls // by package name
+	self string               // the directory's import path
+	src  string               // the directory's non-test package name
+	objs map[*ast.Object]bool // test-file locals assigned with = or whose address is taken
+	pkgL map[*ast.Object]bool // test files' package-level objects, which resolve by name
+}
+
+func newDirDecls(srcs, tests []*ast.File, self string) dirDecls {
+	d := dirDecls{pkgs: map[string]*pkgDecls{}, self: self, objs: map[*ast.Object]bool{}, pkgL: map[*ast.Object]bool{}}
+	if len(srcs) > 0 {
+		d.src = srcs[0].Name.Name
 	}
-	for _, f := range files {
+	for _, f := range append(append([]*ast.File{}, srcs...), tests...) {
+		p := d.pkg(f)
 		if f.Scope != nil {
 			for _, o := range f.Scope.Objects {
-				d.pkgObjs[o] = true
+				d.pkgL[o] = true
+			}
+		}
+		mark := func(e ast.Expr) {
+			if id, ok := ast.Unparen(e).(*ast.Ident); ok {
+				p.assigned[id.Name] = true
+				if id.Obj != nil {
+					d.objs[id.Obj] = true
+				}
 			}
 		}
 		for _, decl := range f.Decls {
-			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil {
-				d.funcs[fd.Name.Name] = true
-			}
-			g, ok := decl.(*ast.GenDecl)
-			if !ok {
+			if fd, ok := decl.(*ast.FuncDecl); ok {
+				if fd.Recv == nil {
+					p.values[fd.Name.Name] = true
+				}
 				continue
 			}
+			g := decl.(*ast.GenDecl)
 			for _, spec := range g.Specs {
 				switch sp := spec.(type) {
 				case *ast.TypeSpec:
-					d.types[sp.Name.Name] = true
+					p.types[sp.Name.Name] = true
 				case *ast.ValueSpec:
-					if g.Tok != token.VAR {
-						continue
-					}
 					for i, n := range sp.Names {
+						p.values[n.Name] = true
+						if g.Tok != token.VAR {
+							continue
+						}
 						switch len(sp.Values) {
 						case 0:
-							d.vars[n.Name] = nil
+							p.vars[n.Name] = nil
 						case len(sp.Names):
-							d.vars[n.Name] = sp.Values[i]
+							p.vars[n.Name] = sp.Values[i]
 						default: // one multi-value call: unknown
 							mark(n)
 						}
@@ -700,45 +766,153 @@ func newDirDecls(files []*ast.File) dirDecls {
 	return d
 }
 
+func (d dirDecls) pkg(f *ast.File) *pkgDecls {
+	p := d.pkgs[f.Name.Name]
+	if p == nil {
+		p = &pkgDecls{types: map[string]bool{}, values: map[string]bool{}, vars: map[string]ast.Expr{}, assigned: map[string]bool{}}
+		d.pkgs[f.Name.Name] = p
+	}
+	return p
+}
+
+// kind is what an expression resolves to.
+type kind int
+
+const (
+	unknown kind = iota // another package's name, a builtin, or unresolved
+	isType
+	isValue
+	isImport
+)
+
+// fileRes resolves names as one test file sees them.
+type fileRes struct {
+	d       dirDecls
+	p       *pkgDecls
+	imports map[string]string // import name to path
+	dot     *pkgDecls         // the directory's package, when this file dot-imports it
+}
+
+func (d dirDecls) file(f *ast.File) fileRes {
+	r := fileRes{d: d, p: d.pkg(f), imports: map[string]string{}}
+	for _, imp := range f.Imports {
+		path, _ := strconv.Unquote(imp.Path.Value)
+		name := path[strings.LastIndex(path, "/")+1:]
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		if name == "." && path == d.self && d.src != "" && d.pkgs[d.src] != r.p {
+			r.dot = d.pkgs[d.src]
+		}
+		r.imports[name] = path
+	}
+	return r
+}
+
+// ident resolves a name: a local by its object, a package-level name in this
+// file's package or in the directory's package when the file dot-imports it,
+// else an import name of this file.
+func (r fileRes) ident(id *ast.Ident) kind {
+	if id.Obj != nil && !r.d.pkgL[id.Obj] {
+		switch id.Obj.Kind {
+		case ast.Typ:
+			return isType
+		case ast.Var, ast.Fun, ast.Con:
+			return isValue
+		}
+		return unknown
+	}
+	switch {
+	case r.p.types[id.Name]:
+		return isType
+	case r.p.values[id.Name]:
+		return isValue
+	case r.dot != nil && r.dot.types[id.Name]:
+		return isType
+	case r.dot != nil && r.dot.values[id.Name]:
+		return isValue
+	case r.imports[id.Name] != "":
+		return isImport
+	}
+	return unknown
+}
+
+// selfDecls is the directory's own package as an external test reaches it
+// through the import named pkg, or nil.
+func (r fileRes) selfDecls(pkg *ast.Ident) *pkgDecls {
+	if r.ident(pkg) == isImport && r.imports[pkg.Name] == r.d.self && r.d.src != "" {
+		return r.d.pkgs[r.d.src]
+	}
+	return nil
+}
+
+// classify says whether e is a type or a value, and the type's name: S for
+// S, *S, S[int], S[int, string], (*S) and, from an external test, side.S.
+func (r fileRes) classify(e ast.Expr) (kind, string) {
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		return r.ident(x), x.Name
+	case *ast.StarExpr:
+		return r.classify(x.X)
+	case *ast.IndexExpr:
+		return r.classify(x.X) // a type's instantiation or a value's index
+	case *ast.IndexListExpr:
+		return r.classify(x.X)
+	case *ast.SelectorExpr:
+		pkg, ok := ast.Unparen(x.X).(*ast.Ident)
+		if !ok || r.ident(pkg) != isImport {
+			return isValue, "" // a field or method of a value, or a method expression
+		}
+		if p := r.selfDecls(pkg); p != nil {
+			switch {
+			case p.types[x.Sel.Name]:
+				return isType, x.Sel.Name
+			case p.values[x.Sel.Name]:
+				return isValue, ""
+			}
+		}
+		return unknown, "" // another package's name
+	case *ast.FuncLit, *ast.CallExpr, *ast.CompositeLit, *ast.BasicLit, *ast.TypeAssertExpr, *ast.UnaryExpr, *ast.BinaryExpr, *ast.SliceExpr:
+		return isValue, ""
+	case *ast.FuncType, *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.InterfaceType, *ast.StructType:
+		return isType, ""
+	}
+	return unknown, ""
+}
+
 // nilish reports whether a test's value is nil however it is spelled: nil in
-// parentheses, a call given only a nil value whose callee isFunc does not
-// show to be a function (so every conversion, and also an imported
-// function's call), or a variable that no statement assigns and whose
-// declaration gives it no value or a nil one.
-func (d dirDecls) nilish(e ast.Expr, seen map[any]bool) bool {
+// parentheses; a call given only a nil value whose callee does not resolve to
+// a value (a conversion to any type, and also a call of a function from a
+// package other than the directory's own, which cannot be resolved); or a
+// variable no statement assigns whose declaration gives it no value or a nil
+// one, including the directory's own package variable read from an external
+// test.
+func (r fileRes) nilish(e ast.Expr, seen map[any]bool) bool {
 	switch x := ast.Unparen(e).(type) {
 	case *ast.Ident:
 		if x.Name == "nil" {
 			return true
 		}
-		pkg := x.Obj == nil || d.pkgObjs[x.Obj] // package level, declared in this file or another
-		var key any = x.Obj                     // a local, by its object
-		if pkg {
-			key = x.Name // a package-level name, by name
+		if x.Obj == nil || r.d.pkgL[x.Obj] { // package level, declared in this file or another
+			p := r.p
+			if !p.types[x.Name] && !p.values[x.Name] && r.dot != nil {
+				p = r.dot
+			}
+			return r.pkgVarNil(p, x.Name, seen)
 		}
-		if seen[key] {
+		if seen[x.Obj] || x.Obj.Kind != ast.Var || r.d.objs[x.Obj] {
 			return false
 		}
-		seen[key] = true
-		if pkg {
-			v, ok := d.vars[x.Name]
-			return ok && !d.assigned[x.Name] && (v == nil || d.nilish(v, seen))
-		}
-		if x.Obj.Kind != ast.Var || d.objs[x.Obj] {
-			return false
-		}
+		seen[x.Obj] = true
 		switch decl := x.Obj.Decl.(type) {
 		case *ast.ValueSpec:
-			if decl == nil {
-				return false
-			}
 			for i, n := range decl.Names {
 				if n.Obj == x.Obj {
 					switch len(decl.Values) {
 					case 0:
 						return true
 					case len(decl.Names):
-						return d.nilish(decl.Values[i], seen)
+						return r.nilish(decl.Values[i], seen)
 					}
 				}
 			}
@@ -746,61 +920,62 @@ func (d dirDecls) nilish(e ast.Expr, seen map[any]bool) bool {
 			if len(decl.Lhs) == len(decl.Rhs) {
 				for i, l := range decl.Lhs {
 					if id, ok := l.(*ast.Ident); ok && id.Obj == x.Obj {
-						return d.nilish(decl.Rhs[i], seen)
+						return r.nilish(decl.Rhs[i], seen)
 					}
 				}
 			}
 		}
 		return false
-	case *ast.CallExpr:
-		return len(x.Args) == 1 && d.nilish(x.Args[0], seen) && !d.isFunc(x.Fun)
-	}
-	return false
-}
-
-// isFunc reports whether a call's callee is known to be a function rather
-// than a type: a function literal, a function or function variable declared
-// in a test's scope or in the directory, or a method of a value. Anything
-// else (a type expression, a generic instantiation of one, or a name from
-// another package, function or type alike) is not.
-func (d dirDecls) isFunc(fun ast.Expr) bool {
-	fun = ast.Unparen(fun)
-	switch e := fun.(type) {
-	case *ast.IndexExpr:
-		fun = ast.Unparen(e.X)
-	case *ast.IndexListExpr:
-		fun = ast.Unparen(e.X)
-	}
-	switch e := fun.(type) {
-	case *ast.FuncLit:
-		return true
-	case *ast.Ident:
-		if e.Obj != nil && !d.pkgObjs[e.Obj] {
-			return e.Obj.Kind == ast.Fun || e.Obj.Kind == ast.Var
-		}
-		_, v := d.vars[e.Name]
-		return d.funcs[e.Name] || v
 	case *ast.SelectorExpr:
-		id, ok := ast.Unparen(e.X).(*ast.Ident)
-		if !ok {
-			return true // a method of a computed value
+		if pkg, ok := ast.Unparen(x.X).(*ast.Ident); ok {
+			if p := r.selfDecls(pkg); p != nil {
+				return r.pkgVarNil(p, x.Sel.Name, seen)
+			}
 		}
-		if id.Obj != nil && !d.pkgObjs[id.Obj] {
-			return id.Obj.Kind == ast.Var // a method of a local value
+		return false
+	case *ast.CallExpr:
+		if len(x.Args) != 1 || !r.nilish(x.Args[0], seen) {
+			return false
 		}
-		_, v := d.vars[id.Name]
-		return v // a method of a package variable; else another package's name
+		k, _ := r.classify(x.Fun)
+		return k != isValue
 	}
 	return false
 }
 
-// testCall is one call a test makes of a function or method: recv names the
-// type when the call is a method expression such as (*S).Save(s, b, stop),
-// whose first argument is the receiver; set holds the argument places given
-// a non-nil value, counted after any receiver.
+// pkgVarNil reports whether package p's variable name is nil: declared with
+// no value or a nil one, and assigned nowhere in p. The directory's own
+// package's values are read in its own scope.
+func (r fileRes) pkgVarNil(p *pkgDecls, name string, seen map[any]bool) bool {
+	key := [2]any{p, name}
+	if seen[key] {
+		return false
+	}
+	seen[key] = true
+	v, ok := p.vars[name]
+	if !ok || p.assigned[name] {
+		return false
+	}
+	if v == nil {
+		return true
+	}
+	if p != r.p { // the directory's package, read from its external test
+		return fileRes{d: r.d, p: p, imports: map[string]string{}}.nilish(v, seen)
+	}
+	return r.nilish(v, seen)
+}
+
+// testCall is one call a test makes of a function or method: set holds the
+// argument places given a non-nil value. recv names the type when the call
+// is a method expression such as (*S).Save(s, b, stop), whose first argument
+// is the receiver, and set is counted after it. When the operand is another
+// package's name (pkg.X.Save), either reading may be the real one, so shifted
+// holds the places counted after the first argument and the call counts only
+// where both readings give a non-nil value.
 type testCall struct {
-	recv string
-	set  map[int]bool
+	recv         string
+	either       bool
+	set, shifted map[int]bool
 }
 
 type testCalls map[string][]testCall
@@ -809,8 +984,15 @@ type testCalls map[string][]testCall
 // non-nil value. A method expression of another type is another function.
 func (c testCalls) sets(s stopSeam) bool {
 	for _, call := range c[s.fn] {
-		if (call.recv == "" || call.recv == s.recv) && call.set[s.index] {
-			return true
+		switch {
+		case call.either:
+			if call.set[s.index] && call.shifted[s.index] {
+				return true
+			}
+		case call.recv == "" || call.recv == s.recv:
+			if call.set[s.index] {
+				return true
+			}
 		}
 	}
 	return false
@@ -820,8 +1002,18 @@ func (c testCalls) sets(s stopSeam) bool {
 // to, and for each function or method name the calls the tests make of it.
 func testSets(tests []*ast.File, d dirDecls) (fields map[string]bool, calls testCalls) {
 	fields, calls = map[string]bool{}, testCalls{}
-	nonNil := func(e ast.Expr) bool { return !d.nilish(e, map[any]bool{}) }
 	for _, f := range tests {
+		r := d.file(f)
+		nonNil := func(e ast.Expr) bool { return !r.nilish(e, map[any]bool{}) }
+		places := func(args []ast.Expr) map[int]bool {
+			set := map[int]bool{}
+			for i, a := range args {
+				if nonNil(a) {
+					set[i] = true
+				}
+			}
+			return set
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.KeyValueExpr:
@@ -845,51 +1037,24 @@ func testSets(tests []*ast.File, d dirDecls) (fields map[string]bool, calls test
 					name = fn.Name
 				case *ast.SelectorExpr:
 					name = fn.Sel.Name
-					if r := d.methodExprType(fn.X); r != "" && len(args) > 0 {
-						c.recv, args = r, args[1:]
+					if pkg, ok := ast.Unparen(fn.X).(*ast.Ident); ok && r.ident(pkg) == isImport {
+						break // pkg.F(...), a package's function
+					}
+					switch k, t := r.classify(fn.X); {
+					case k == isType && len(args) > 0:
+						c.recv, args = t, args[1:]
+					case k == unknown && len(args) > 0:
+						c.either, c.shifted = true, places(args[1:])
 					}
 				}
 				if name == "" {
 					return true
 				}
-				c.set = map[int]bool{}
-				for i, a := range args {
-					if nonNil(a) {
-						c.set[i] = true
-					}
-				}
+				c.set = places(args)
 				calls[name] = append(calls[name], c)
 			}
 			return true
 		})
 	}
 	return fields, calls
-}
-
-// methodExprType returns the type a method expression's operand names: S in
-// S.Save, (*S).Save, (*S[int]).Save and (*pkg.S).Save, when the directory declares a type of
-// that name and the operand is not a local value, as s is in (*s).Save.
-func (d dirDecls) methodExprType(x ast.Expr) string {
-	for {
-		switch e := ast.Unparen(x).(type) {
-		case *ast.StarExpr:
-			x = e.X
-			continue
-		case *ast.IndexExpr: // a generic type's instantiation, S[int]
-			x = e.X
-			continue
-		case *ast.IndexListExpr:
-			x = e.X
-			continue
-		case *ast.Ident:
-			if (e.Obj == nil || e.Obj.Kind == ast.Typ) && d.types[e.Name] {
-				return e.Name
-			}
-		case *ast.SelectorExpr:
-			if id, ok := e.X.(*ast.Ident); ok && id.Obj == nil && d.types[e.Sel.Name] {
-				return e.Sel.Name
-			}
-		}
-		return ""
-	}
 }
