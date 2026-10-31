@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -50,35 +51,128 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// testStack is the stack as the enforcer runs it, after two probes of what
-// an exploit inside it would try first: a raw HCI socket, and, when probe
-// is "bus", a BlueZ call outside busCalls on its own bus connection. Either
-// one succeeding exits before the stack serves, so the host's call fails.
+// testStack is the stack as the enforcer runs it, after probes of what an
+// exploit inside it would try first: a raw HCI socket, and, by probe, its
+// own bus connection's sends ("bus", probeSend) or receipts ("rx",
+// probeReceive). Any probe failing exits before the stack serves, so the
+// host's call fails.
 func testStack(cfg, probe string) int {
 	fd, err := syscall.Socket(31 /* AF_BLUETOOTH */, syscall.SOCK_RAW, 1 /* BTPROTO_HCI */)
 	if err != syscall.EPERM {
 		fmt.Fprintf(os.Stderr, "raw HCI socket: fd %d, %v\n", fd, err)
 		return 3
 	}
-	if probe == "bus" {
-		c, _ := ParseConfig(cfg)
-		b, err := Dial(c.Bus, func(*Message) {})
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "dial: %v\n", err)
+	c, _ := ParseConfig(cfg)
+	probes := map[string]func(string) error{"bus": probeSend, "rx": probeReceive}
+	if p := probes[probe]; p != nil {
+		if err := p(c.Bus); err != nil {
+			fmt.Fprintf(os.Stderr, "probe %s: %v\n", probe, err)
 			return 4
 		}
-		_, err = b.Call(bluez, "/org/bluez/hci0", "org.bluez.Adapter1", "StartDiscovery", "", 5*time.Second)
-		var ce *CallError
-		if !errors.As(err, &ce) || ce.Name != "org.freedesktop.DBus.Error.AccessDenied" {
-			fmt.Fprintf(os.Stderr, "StartDiscovery: %v\n", err)
-			return 4
-		}
-		b.Close()
 	}
 	if err := Main([]string{cfg}); err != nil {
 		fmt.Fprintf(os.Stderr, "stack: %v\n", err)
 	}
 	return 0
+}
+
+// testIface names the probes' messages, and testPeer the other bus
+// peer's service.
+const (
+	testIface = "org.agentos.test"
+	testPeer  = "org.agentos.test.Peer"
+)
+
+var denied = "org.freedesktop.DBus.Error.AccessDenied"
+
+// probeSend, on its own connection, makes calls outside the policy (an
+// adapter call on BlueZ, a bus driver call the stack never makes, a call on
+// another service) and broadcasts a Leak signal, then marks its end with
+// GetManagedObjects on "/". Each call must be refused by the bus.
+func probeSend(bus string) error {
+	b, err := Dial(bus, allSignals(func(*Message) {}))
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+	for _, c := range []struct {
+		dest          string
+		path          ObjectPath
+		iface, member string
+	}{
+		{bluez, "/org/bluez/hci0", "org.bluez.Adapter1", "StartDiscovery"},
+		{busDriver, "/org/freedesktop/DBus", busDriver, "ListNames"},
+		{busDriver, "/org/freedesktop/DBus", busDriver, "StartServiceByName"},
+		{testPeer, "/", "org.freedesktop.DBus.Peer", "Ping"},
+	} {
+		sig, args := Signature(""), []any(nil)
+		if c.member == "StartServiceByName" {
+			sig, args = "su", []any{testPeer, uint32(0)}
+		}
+		_, err := b.Call(c.dest, c.path, c.iface, c.member, sig, 5*time.Second, args...)
+		if ce := (*CallError)(nil); !errors.As(err, &ce) || ce.Name != denied {
+			return fmt.Errorf("%s.%s on %s: %v", c.iface, c.member, c.dest, err)
+		}
+	}
+	if err := emit(b, &Message{Type: typeSignal, Path: "/", Interface: testIface, Member: "Leak"}); err != nil {
+		return err
+	}
+	_, err = b.Call(bluez, "/", ifaceObjMgr, "GetManagedObjects", "", 5*time.Second)
+	return err
+}
+
+// probeReceive, on its own connection, asks for every signal, marks that
+// with GetManagedObjects on "/", and then takes signals until BlueZ's
+// Sentinel: any other testIface signal before it, which only another peer
+// sends, fails, and so does no signal from the bus driver.
+func probeReceive(bus string) error {
+	sigs := make(chan *Message, 64)
+	b, err := Dial(bus, allSignals(func(m *Message) { sigs <- m }))
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+	if _, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "AddMatch", "s", 5*time.Second, "type='signal'"); err != nil {
+		return err
+	}
+	if _, err := b.Call(bluez, "/", ifaceObjMgr, "GetManagedObjects", "", 5*time.Second); err != nil {
+		return err
+	}
+	driver := false
+	for {
+		select {
+		case m := <-sigs:
+			switch {
+			case m.Sender == busDriver:
+				driver = true
+			case m.Interface == testIface && m.Member == "Sentinel":
+				if !driver {
+					return errors.New("no signal from the bus driver")
+				}
+				return nil
+			case m.Interface == testIface:
+				return fmt.Errorf("took %s from %s", m.Member, m.Sender)
+			}
+		case <-time.After(10 * time.Second):
+			return errors.New("no Sentinel")
+		}
+	}
+}
+
+// emit sends m, a signal, on b.
+func emit(b *Bus, m *Message) error {
+	b.mu.Lock()
+	b.serial++
+	m.Serial = b.serial
+	b.mu.Unlock()
+	raw, err := m.Encode()
+	if err != nil {
+		return err
+	}
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	_, err = b.conn.Write(raw)
+	return err
 }
 
 type call struct {
@@ -101,6 +195,7 @@ type fakeBluez struct {
 	rules     []string // AddMatch rules
 	badSerial bool     // a call's serial was not one more than the last
 	wmu       sync.Mutex
+	busConn   net.Conn // join's connection to the bus
 }
 
 func (f *fakeBluez) record() []call {
@@ -163,6 +258,7 @@ func (f *fakeBluez) join(path string) {
 		f.t.Fatal(err)
 	}
 	f.t.Cleanup(func() { c.Close() })
+	f.busConn = c
 	r := bufio.NewReader(c)
 	io.WriteString(c, "\x00AUTH EXTERNAL "+hex.EncodeToString([]byte(strconv.Itoa(os.Getuid())))+"\r\n")
 	if l, err := r.ReadString('\n'); err != nil || !strings.HasPrefix(l, "OK ") {
@@ -175,7 +271,7 @@ func (f *fakeBluez) join(path string) {
 	} {
 		f.send(c, m)
 		for {
-			got, err := readMessage(r)
+			got, err := readMessage(r, all)
 			if err != nil {
 				f.t.Fatal(err)
 			}
@@ -205,7 +301,7 @@ func (f *fakeBluez) send(c net.Conn, m *Message) {
 func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 	next := uint32(1)
 	for {
-		m, err := readMessage(r)
+		m, err := readMessage(r, all)
 		if err != nil {
 			return
 		}
@@ -314,24 +410,106 @@ func malformed() []byte {
 	return b
 }
 
-// TestReadSkipsWhatDoesNotDecode: a frame too long or one that does not
-// decode is read whole and skipped, so the next message still arrives; a
-// frame with no byte order loses the stream and ends the read.
+// TestReadSkipsWhatDoesNotDecode: a frame too long, one whose header
+// fields are too long, one whose header or body does not decode, and one
+// keep refuses are each read past and skipped, so the next message still
+// arrives; a frame with no byte order loses the stream and ends the read.
 func TestReadSkipsWhatDoesNotDecode(t *testing.T) {
 	good := mustEncode(t, propsChanged(2, bluezName, measurePath, []byte{1}))
-	r := bytes.NewReader(slices.Concat(oversized(), malformed(), good, []byte("x234567890123456")))
-	for i, want := range []error{errSkipped, errSkipped, nil} {
-		m, err := readMessage(r)
+	longHead := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
+	le.PutUint32(longHead[12:], maxHeader+1)
+	longHead = append(longHead, make([]byte, maxHeader+8)...)
+	badHead := withField(t, &Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C"}, 1, "s", "/x")
+	le.PutUint32(badHead[4:], 8)
+	badHead = append(badHead, make([]byte, 8)...)
+	refused := mustEncode(t, propsChanged(3, ":1.9", measurePath, []byte{1}))
+	r := bytes.NewReader(slices.Concat(oversized(), longHead, badHead, malformed(), refused, good, []byte("x234567890123456")))
+	for i, want := range []error{errSkipped, errSkipped, errSkipped, errSkipped, errSkipped, nil} {
+		m, err := readMessage(r, func(m *Message) bool { return m.Sender == bluezName })
 		if !errors.Is(err, want) || (want == nil && m.Serial != 2) {
 			t.Fatalf("message %d: %v, %+v", i, err, m)
 		}
 	}
-	if _, err := readMessage(r); err == nil || errors.Is(err, errSkipped) {
+	if _, err := readMessage(r, all); err == nil || errors.Is(err, errSkipped) {
 		t.Fatalf("no byte order: %v", err)
 	}
 	short := oversized()[:MaxMessage-4]
-	if _, err := readMessage(bytes.NewReader(short)); err == nil || errors.Is(err, errSkipped) {
+	if _, err := readMessage(bytes.NewReader(short), all); err == nil || errors.Is(err, errSkipped) {
 		t.Fatalf("a long frame cut short: %v", err)
+	}
+	// Cut short in a skipped body, a kept body, or a header.
+	for _, b := range [][]byte{badHead[:len(badHead)-1], refused[:len(refused)-1], good[:len(good)-1], good[:20]} {
+		if _, err := readMessage(bytes.NewReader(b), func(m *Message) bool { return m.Sender == bluezName }); err == nil || errors.Is(err, errSkipped) {
+			t.Fatalf("a frame cut short at %d: %v", len(b), err)
+		}
+	}
+}
+
+// TestReadDecodesOnlyWanted (NET-2, A18): the stack reads a signal's
+// header before its body, so a 0.8 MB PropertiesChanged from a peer other
+// than BlueZ is read past undecoded, allocating under an eighth of its
+// size, while the same from BlueZ decodes (and allocates more than its
+// size). A reply is decoded only while its call waits, and a method call
+// never. Catches a bus peer inflating bodies in the stack until a memory
+// cap kills it.
+func TestReadDecodesOnlyWanted(t *testing.T) {
+	s := newFuzzStack()
+	flood := func(sender string) []byte {
+		props := make([]any, 50000)
+		for i := range props {
+			props[i] = Entry{Key: "k", Value: Variant{Sig: "y", Value: uint8(i)}}
+		}
+		return mustEncode(t, &Message{Type: typeSignal, Serial: 1, Sender: sender, Path: measurePath, Interface: ifaceProps,
+			Member: "PropertiesChanged", Sig: "sa{sv}as", Body: []any{ifaceChar, props, []any{}}})
+	}
+	// Each frame goes through a live read loop, the stack's own Signals
+	// deciding, followed by a reply whose arrival says the frame is done.
+	client, server := net.Pipe()
+	defer server.Close()
+	b := &Bus{conn: client, sigs: s, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
+	s.bus = b
+	go b.readLoop(bufio.NewReader(client))
+	serial := uint32(100)
+	read := func(frame []byte) uint64 {
+		serial++
+		done := make(chan *Message, 1)
+		b.mu.Lock()
+		b.calls[serial] = done
+		b.mu.Unlock()
+		in := slices.Concat(frame, mustEncode(t, &Message{Type: typeReturn, Serial: 1, ReplySerial: serial}))
+		var m0, m1 runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m0)
+		go server.Write(in)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the read loop stopped")
+		}
+		runtime.ReadMemStats(&m1)
+		return m1.TotalAlloc - m0.TotalAlloc
+	}
+	forged := flood(":1.9")
+	if n := read(forged); n > uint64(len(forged)/8) {
+		t.Errorf("another peer's %d-byte signal: %d bytes allocated", len(forged), n)
+	}
+	if n := read(flood(bluezName)); n < uint64(len(forged)) {
+		t.Errorf("BlueZ's %d-byte signal: %d bytes allocated", len(forged), n)
+	}
+	b.calls[5] = make(chan *Message, 1)
+	for _, c := range []struct {
+		m    *Message
+		want bool
+	}{
+		{&Message{Type: typeReturn, ReplySerial: 5}, true},
+		{&Message{Type: typeError, ReplySerial: 5}, true},
+		{&Message{Type: typeReturn, ReplySerial: 6}, false},
+		{&Message{Type: typeError, ReplySerial: 6}, false},
+		{&Message{Type: typeCall, Serial: 5}, false},
+	} {
+		if b.wants(c.m) != c.want {
+			t.Errorf("%+v: wanted %v", c.m, !c.want)
+		}
 	}
 }
 
@@ -667,7 +845,7 @@ func TestNoRawHCI(t *testing.T) {
 	dir := sharedDir(t)
 	f := &fakeBluez{t: t}
 	f.serve(filepath.Join(dir, "bus"))
-	connectConfined(t, dir, filepath.Join(dir, "bus"), "", 4242, false)
+	connectConfined(t, dir, filepath.Join(dir, "bus"), "", 4242, false, nil)
 	if got := f.record(); len(got) != 1 || got[0].Member != "Connect" {
 		t.Errorf("BlueZ saw %+v, want one Connect", got)
 	}
@@ -680,26 +858,94 @@ func TestNoRawHCI(t *testing.T) {
 
 // TestBusPolicyRefusesUndeclaredCalls (NET-2 Confined radio stacks): on a
 // real dbus-daemon whose default policy allows everything, BusPolicy for
-// the stack's user makes the daemon refuse a BlueZ call outside busCalls
-// (the adapter's StartDiscovery, sent by the confined process on its own
-// connection) before it reaches BlueZ, while the stack's declared calls
-// still go through. Catches an exploited stack using BlueZ beyond its ops.
+// the stack's user makes the daemon refuse, before it is delivered, every
+// message the confined process sends on its own connection outside the
+// declared calls: an adapter call on BlueZ, bus driver calls the stack
+// never makes, a call on another service and a broadcast signal (probeSend),
+// while the stack's declared calls still go through. Catches an exploited
+// stack using BlueZ beyond its ops, or reaching any other service on the
+// bus.
 func TestBusPolicyRefusesUndeclaredCalls(t *testing.T) {
 	if !asRoot(t) {
 		return
 	}
+	dir, bus, uid := policyBus(t)
+	f := &fakeBluez{t: t}
+	f.join(bus)
+	leaks := make(chan *Message, 8)
+	peer := testBusPeer(t, bus, func(m *Message) {
+		if m.Interface == testIface {
+			leaks <- m
+		}
+	})
+	if _, err := peer.Call(busDriver, "/org/freedesktop/DBus", busDriver, "AddMatch", "s", 5*time.Second, "type='signal',interface='"+testIface+"'"); err != nil {
+		t.Fatal(err)
+	}
+	connectConfined(t, dir, bus, "bus", uid, true, func() {
+		probed(t, f)
+		barrier(t, peer)
+		select {
+		case m := <-leaks:
+			t.Errorf("another peer took the stack's %s signal", m.Member)
+		default:
+		}
+	})
+	var saw []string
+	for _, c := range f.record() {
+		saw = append(saw, c.Member)
+	}
+	if want := []string{"GetManagedObjects", "Connect", "Get", "GetManagedObjects", "StartNotify", "GetManagedObjects", "WriteValue", "Disconnect"}; !slices.Equal(saw, want) {
+		t.Errorf("BlueZ saw %v, want %v (and never StartDiscovery)", saw, want)
+	}
+}
+
+// TestBusPolicyRefusesOtherPeers (NET-2, A18): on the same daemon,
+// another bus peer's method call to the stack's connection is refused,
+// and its unicast and broadcast signals never reach it, while the bus
+// driver's and BlueZ's still do (probeReceive). Catches a compromised
+// peer on the enforcer's bus (a Thread or Matter stack) flooding the BLE
+// stack until BlueZ's replies miss their timeout.
+func TestBusPolicyRefusesOtherPeers(t *testing.T) {
+	if !asRoot(t) {
+		return
+	}
+	dir, bus, uid := policyBus(t)
+	f := &fakeBluez{t: t}
+	f.join(bus)
+	peer := testBusPeer(t, bus, func(*Message) {})
+	connectConfined(t, dir, bus, "rx", uid, false, func() {
+		probed(t, f)
+		stack := nameOf(t, peer, uid)
+		_, err := peer.Call(stack, "/", testIface, "Poke", "", 5*time.Second)
+		if ce := (*CallError)(nil); !errors.As(err, &ce) || ce.Name != denied {
+			t.Errorf("another peer's call to the stack: %v", err)
+		}
+		for _, dest := range []string{stack, ""} {
+			if err := emit(peer, &Message{Type: typeSignal, Path: "/", Interface: testIface, Member: "Flood", Destination: dest}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		barrier(t, peer)
+		f.send(f.busConn, &Message{Type: typeSignal, Path: "/", Interface: testIface, Member: "Sentinel", Destination: stack})
+	})
+}
+
+// policyBus starts a dbus-daemon whose default policy allows everything,
+// with BusPolicy for nobody, a user both this machine and CI's runner name
+// (dbus-daemon's policy names users), and returns a directory that user
+// can reach, the bus socket and nobody's uid.
+func policyBus(t *testing.T) (dir, bus string, uid uint32) {
+	t.Helper()
 	daemon, err := exec.LookPath("dbus-daemon")
 	if err != nil {
 		t.Fatalf("dbus-daemon: %v", err)
 	}
-	dir := sharedDir(t)
-	// dbus-daemon's policy names users, so the stack runs as a user both
-	// this machine and CI's runner name: nobody.
+	dir = sharedDir(t)
 	nobody, err := user.Lookup("nobody")
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid, err := strconv.Atoi(nobody.Uid)
+	n, err := strconv.Atoi(nobody.Uid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -710,7 +956,7 @@ func TestBusPolicyRefusesUndeclaredCalls(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "ble.conf"), []byte(policy), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	bus := filepath.Join(dir, "bus")
+	bus = filepath.Join(dir, "bus")
 	conf := `<busconfig>
   <listen>unix:path=` + bus + `</listen>
   <auth>EXTERNAL</auth>
@@ -735,26 +981,78 @@ func TestBusPolicyRefusesUndeclaredCalls(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 	if _, err := bufio.NewReader(out).ReadString('\n'); err != nil {
 		t.Fatalf("dbus-daemon did not start: %v", err)
 	}
-	f := &fakeBluez{t: t}
-	f.join(bus)
-	connectConfined(t, dir, bus, "bus", uint32(uid), true)
-	var saw []string
-	for _, c := range f.record() {
-		saw = append(saw, c.Member)
+	return dir, bus, uint32(n)
+}
+
+// testBusPeer is another peer on the bus, as root, owning testPeer.
+func testBusPeer(t *testing.T, bus string, signal func(*Message)) *Bus {
+	t.Helper()
+	b, err := Dial(bus, allSignals(signal))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := []string{"Connect", "Get", "GetManagedObjects", "StartNotify", "GetManagedObjects", "WriteValue", "Disconnect"}; !slices.Equal(saw, want) {
-		t.Errorf("BlueZ saw %v, want %v (and never StartDiscovery)", saw, want)
+	t.Cleanup(b.Close)
+	if _, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "RequestName", "su", 5*time.Second, testPeer, uint32(4)); err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// probed waits for a probe's end mark: GetManagedObjects on "/".
+func probed(t *testing.T, f *fakeBluez) {
+	t.Helper()
+	for range 100 {
+		for _, c := range f.record() {
+			if c.Member == "GetManagedObjects" && c.Path == "/" {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("the probe never finished")
+}
+
+// barrier returns once the bus has handled everything b sent before it.
+func barrier(t *testing.T, b *Bus) {
+	t.Helper()
+	if _, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "GetId", "", 5*time.Second); err != nil {
+		t.Fatal(err)
 	}
 }
 
+// nameOf is the unique name of the one connection uid has on b's bus.
+func nameOf(t *testing.T, b *Bus, uid uint32) string {
+	t.Helper()
+	r, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "ListNames", "", 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, n := range r[0].([]any) {
+		n := n.(string)
+		if !strings.HasPrefix(n, ":") {
+			continue
+		}
+		u, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "GetConnectionUnixUser", "s", 5*time.Second, n)
+		if err == nil && u[0] == uid {
+			got = append(got, n)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("connections of uid %d: %v", uid, got)
+	}
+	return got[0]
+}
+
 // connectConfined starts the stack confined as uid (and the same gid), with probe passed to
-// testStack, and connects the scale through the host; full also reads,
-// subscribes (and takes the notification), writes and disconnects.
-func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool) {
+// testStack, runs during (if any) while the probe runs, and connects the
+// scale through the host; full also reads, subscribes (and takes the
+// notification), writes and disconnects.
+func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool, during func()) {
 	t.Helper()
 	bin := filepath.Join(dir, "ble.test")
 	b, err := os.ReadFile(os.Args[0])
@@ -777,6 +1075,9 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 		t.Fatal(err)
 	}
 	defer proc.Stop()
+	if during != nil {
+		during()
+	}
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
 	h.Attach(radio.StackBLE, conn)
@@ -856,3 +1157,12 @@ func (w testLog) Write(b []byte) (int, error) {
 	w.t.Logf("%s", bytes.TrimRight(b, "\n"))
 	return len(b), nil
 }
+
+// all keeps every message.
+func all(*Message) bool { return true }
+
+// allSignals wants every signal and gives it to the function.
+type allSignals func(*Message)
+
+func (allSignals) wants(*Message) bool { return true }
+func (f allSignals) signal(m *Message) { f(m) }

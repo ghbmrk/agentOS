@@ -16,11 +16,10 @@ import (
 
 // Bus is one connection to a D-Bus message bus over a Unix socket,
 // authenticated as this process's uid (SASL EXTERNAL), with no unix fd
-// passing. Calls wait for their reply; signals go to one callback, run on
-// the read loop, which must not call back into Bus.
+// passing. Calls wait for their reply; signals go to Signals.
 type Bus struct {
-	conn   net.Conn
-	signal func(*Message)
+	conn net.Conn
+	sigs Signals
 
 	wmu sync.Mutex
 
@@ -44,9 +43,17 @@ func (e *CallError) Error() string { return "ble: bus error " + e.Name }
 
 const busDriver = "org.freedesktop.DBus"
 
+// Signals takes a bus's signals. wants reads a signal's header, its body
+// not yet decoded; only a signal it wants is decoded and goes to signal.
+// Both run on the read loop and must not call back into Bus.
+type Signals interface {
+	wants(*Message) bool
+	signal(*Message)
+}
+
 // Dial connects to the bus at the socket path, authenticates and says
 // Hello.
-func Dial(path string, signal func(*Message)) (*Bus, error) {
+func Dial(path string, sigs Signals) (*Bus, error) {
 	c, err := net.Dial("unix", path) // a Unix socket connects at once or fails
 	if err != nil {
 		return nil, err
@@ -68,7 +75,7 @@ func Dial(path string, signal func(*Message)) (*Bus, error) {
 		return nil, err
 	}
 	c.SetDeadline(time.Time{})
-	b := &Bus{conn: c, signal: signal, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
+	b := &Bus{conn: c, sigs: sigs, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
 	go b.readLoop(r)
 	if _, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "Hello", "", 5*time.Second); err != nil {
 		b.Close()
@@ -130,15 +137,17 @@ func (b *Bus) Call(dest string, path ObjectPath, iface, member string, sig Signa
 	}
 }
 
-// readLoop takes messages until the connection ends. A message that is too
-// long or does not decode is skipped, so a bus peer that sends one (any
-// peer may send this process a signal) cannot end the stack; a caller
-// whose reply was skipped times out. A reply goes to its caller (a late one is dropped); a signal goes
-// to the callback; a method call to this process is not answered, since it
-// serves nothing on the bus.
+// readLoop takes messages until the connection ends. A message is decoded
+// only when its header shows it is wanted: a reply some call still waits
+// for, or a signal Signals wants. Anything else, and a message that is too
+// long or does not decode, is skipped, so a bus peer that sends one (any
+// peer may send this process a signal, unless the bus policy stops it)
+// can neither end the stack nor make it decode a body; a caller whose
+// reply was skipped times out. A method call to this process is never
+// answered, since it serves nothing on the bus.
 func (b *Bus) readLoop(r *bufio.Reader) {
 	for {
-		m, err := readMessage(r)
+		m, err := readMessage(r, b.wants)
 		if errors.Is(err, errSkipped) {
 			continue
 		}
@@ -156,36 +165,71 @@ func (b *Bus) readLoop(r *bufio.Reader) {
 				ch <- m
 			}
 		case typeSignal:
-			b.signal(m)
+			b.sigs.signal(m)
 		}
 	}
 }
 
-func readMessage(r io.Reader) (*Message, error) {
+// wants reads a message's header.
+func (b *Bus) wants(m *Message) bool {
+	switch m.Type {
+	case typeReturn, typeError:
+		b.mu.Lock()
+		_, ok := b.calls[m.ReplySerial]
+		b.mu.Unlock()
+		return ok
+	case typeSignal:
+		return b.sigs.wants(m)
+	}
+	return false
+}
+
+// readMessage reads one message, decoding its body only if keep takes its
+// header; a message keep refuses is read past and skipped.
+func readMessage(r io.Reader, keep func(*Message) bool) (*Message, error) {
 	var h [16]byte
 	if _, err := io.ReadFull(r, h[:]); err != nil {
 		return nil, err
 	}
-	n, err := frameLen(h[:])
+	head, n, err := frameLen(h[:])
 	if errors.Is(err, errTooLong) {
-		if _, err := io.CopyN(io.Discard, r, int64(n-16)); err != nil {
-			return nil, err
-		}
-		return nil, errSkipped
+		return nil, skip(r, n-16)
 	}
 	if err != nil {
 		return nil, err // no byte order: the stream is lost
 	}
-	b := make([]byte, n)
+	b := make([]byte, head) // the body's buffer waits for keep
 	copy(b, h[:])
 	if _, err := io.ReadFull(r, b[16:]); err != nil {
 		return nil, err
 	}
-	m, err := Decode(b)
+	m, d, err := header(b)
 	if err != nil {
+		if err := skip(r, n-head); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %v", errSkipped, err)
+	}
+	if !keep(m) {
+		return nil, skip(r, n-head)
+	}
+	b = append(b, make([]byte, n-head)...)
+	if _, err := io.ReadFull(r, b[head:]); err != nil {
+		return nil, err
+	}
+	d.b = b
+	if err := m.body(d); err != nil {
 		return nil, fmt.Errorf("%w: %v", errSkipped, err)
 	}
 	return m, nil
+}
+
+// skip reads past n bytes, then reports the message skipped.
+func skip(r io.Reader, n int) error {
+	if _, err := io.CopyN(io.Discard, r, int64(n)); err != nil {
+		return err
+	}
+	return errSkipped
 }
 
 // errSkipped is a whole message read and dropped.
