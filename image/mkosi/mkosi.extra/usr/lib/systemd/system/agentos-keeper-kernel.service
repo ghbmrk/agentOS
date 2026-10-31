@@ -12,7 +12,7 @@
 # (D-146); the kernel calls the mail clerk on its socket, admitting only its uid, and hands it its key
 # on a socket only the service manager starting agentos-keeper-mail.service, in that unit's cgroup,
 # is answered on (MAIL-keys); the camera clerk's key likewise, to agentos-keeper-camera.service alone
-# (CAM-clerk-image). The edge link (EDGE-link-core c2c): agentos-link asks the kernel about the
+# (CAM-clerk-image), and the HomeKit clerk's to agentos-keeper-homekit.service alone (DEV-homekit-b2c). The edge link (EDGE-link-core c2c): agentos-link asks the kernel about the
 # edge's key and has it sign the link's TLS on one more socket, admitting only the link's uid. A
 # slice's name nests at each "-", so the keeper's slice is under
 # agentos.slice.
@@ -49,6 +49,7 @@ ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var
         -clerk mail=/run/agentos-mail/kernel.sock,@uid:agentos-mail \
         -clerk-key mail=/run/agentos-kernel/key-mail.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service \
         -clerk-key camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service \
+        -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \
         -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \
         -up /run/agentos-kernel/up
 # #2998: after the cap, a restart in this boot is refused at the unseal, so a kernel that came up (its
