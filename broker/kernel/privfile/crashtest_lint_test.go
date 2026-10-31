@@ -198,17 +198,20 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 	})
 	t.Run("a nil the test spells another way does not count", func(t *testing.T) {
 		for name, test := range map[string]string{
-			"parenthesised":                  "var _ = S{stop: (nil)}\n",
-			"assigned in parentheses":        "func f(s *S) { s.stop = ((nil)) }\n",
-			"a func-type conversion":         "var _ = S{stop: (func(int) bool)(nil)}\n",
-			"a named-type conversion":        "type hook func(int) bool\n\nvar _ = S{stop: hook(nil)}\n",
-			"a generic type's conversion":    "type hook[T any] func(int) bool\n\nvar _ = S{stop: hook[int](nil)}\n",
-			"an imported type's conversion":  "import \"example.test/broker/hooks\"\n\nvar _ = S{stop: hooks.Hook(nil)}\n",
-			"an imported function given nil": "import \"example.test/broker/hooks\"\n\nvar _ = S{stop: (hooks.Wrap)(nil)}\n",
-			"a local never set":              "func f() { var h func(int) bool; _ = S{stop: h} }\n",
-			"a local set to nil":             "func f() { h := (func(int) bool)(nil); _ = S{stop: h} }\n",
-			"a package var never set":        "var h func(int) bool\n\nvar _ = S{stop: h}\n",
-			"a chain of nil variables":       "var h func(int) bool\n\nfunc f() { g := h; _ = S{stop: g} }\n",
+			"parenthesised":                     "var _ = S{stop: (nil)}\n",
+			"assigned in parentheses":           "func f(s *S) { s.stop = ((nil)) }\n",
+			"a func-type conversion":            "var _ = S{stop: (func(int) bool)(nil)}\n",
+			"a named-type conversion":           "type hook func(int) bool\n\nvar _ = S{stop: hook(nil)}\n",
+			"a generic type's conversion":       "type hook[T any] func(int) bool\n\nvar _ = S{stop: hook[int](nil)}\n",
+			"an imported type's conversion":     "import \"example.test/broker/hooks\"\n\nvar _ = S{stop: hooks.Hook(nil)}\n",
+			"an imported function given nil":    "import \"example.test/broker/hooks\"\n\nvar _ = S{stop: (hooks.Wrap)(nil)}\n",
+			"a local never set":                 "func f() { var h func(int) bool; _ = S{stop: h} }\n",
+			"a local set to nil":                "func f() { h := (func(int) bool)(nil); _ = S{stop: h} }\n",
+			"a local var given nil":             "func f() { var h = (func(int) bool)(nil); _ = S{stop: h} }\n",
+			"a typed local var given nil":       "func f() { var h func(int) bool = nil; _ = S{stop: h} }\n",
+			"a local copying a nil package var": "var h func(int) bool\n\nfunc f() { h := h; _ = S{stop: h} }\n",
+			"a package var never set":           "var h func(int) bool\n\nvar _ = S{stop: h}\n",
+			"a chain of nil variables":          "var h func(int) bool\n\nfunc f() { g := h; _ = S{stop: g} }\n",
 		} {
 			t.Run(name, func(t *testing.T) {
 				files := map[string]string{"broker/side/side.go": field, "broker/side/side_test.go": "package side\n\n" + test}
@@ -218,17 +221,24 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 		files := map[string]string{"broker/side/side.go": param, "broker/side/side_test.go": "package side\n\nfunc f() { var h func(int) bool; Save(\"d\", nil, (h)) }\n"}
 		one(t, lint(t, files, ""), "no test in broker/side calls Save with a non-nil stop")
 		for name, test := range map[string]string{
-			"a local set to a func":           "func f() { h := func(int) bool { return true }; _ = S{stop: h} }\n",
-			"a local assigned later":          "func f() { var h func(int) bool; h = func(int) bool { return true }; _ = S{stop: h} }\n",
-			"a local set through &":           "func set(p *func(int) bool) {}\n\nfunc f() { var h func(int) bool; set(&h); _ = S{stop: h} }\n",
-			"a package var set later":         "var h func(int) bool\n\nfunc init() { h = func(int) bool { return true } }\n\nvar _ = S{stop: h}\n",
-			"a call given nil":                "func wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap(nil)}\n",
-			"a local's method given nil":      "type W struct{}\n\nfunc (W) Wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nfunc f() { var w W; _ = S{stop: w.Wrap(nil)} }\n",
-			"a generic function given nil":    "func wrap[T any](func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap[int](nil)}\n",
-			"a conversion of a hook":          "type hook func(int) bool\n\nvar _ = S{stop: hook(func(int) bool { return true })}\n",
-			"a local redeclared by :=":        "func g() (func(int) bool, error) { return func(int) bool { return true }, nil }\n\nfunc f() { h := (func(int) bool)(nil); h, err := g(); _, _ = err, S{stop: h} }\n",
-			"a local set by range =":          "func f(hs []func(int) bool) { var h func(int) bool; for _, h = range hs {}; _ = S{stop: h} }\n",
-			"a field assigned in parentheses": "func f(s *S) { (s.stop) = func(int) bool { return true } }\n",
+			"a local set to a func":                      "func f() { h := func(int) bool { return true }; _ = S{stop: h} }\n",
+			"a local assigned later":                     "func f() { var h func(int) bool; h = func(int) bool { return true }; _ = S{stop: h} }\n",
+			"a local set through &":                      "func set(p *func(int) bool) {}\n\nfunc f() { var h func(int) bool; set(&h); _ = S{stop: h} }\n",
+			"a package var set later":                    "var h func(int) bool\n\nfunc init() { h = func(int) bool { return true } }\n\nvar _ = S{stop: h}\n",
+			"a call given nil":                           "func wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap(nil)}\n",
+			"a local's method given nil":                 "type W struct{}\n\nfunc (W) Wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nfunc f() { var w W; _ = S{stop: w.Wrap(nil)} }\n",
+			"a generic function given nil":               "func wrap[T any](func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap[int](nil)}\n",
+			"a conversion of a hook":                     "type hook func(int) bool\n\nvar _ = S{stop: hook(func(int) bool { return true })}\n",
+			"a local redeclared by :=":                   "func g() (func(int) bool, error) { return func(int) bool { return true }, nil }\n\nfunc f() { h := (func(int) bool)(nil); h, err := g(); _, _ = err, S{stop: h} }\n",
+			"a local set by range =":                     "func f(hs []func(int) bool) { var h func(int) bool; for _, h = range hs {}; _ = S{stop: h} }\n",
+			"a field assigned in parentheses":            "func f(s *S) { (s.stop) = func(int) bool { return true } }\n",
+			"a function literal given nil":               "var _ = S{stop: func(func(int) bool) func(int) bool { return func(int) bool { return true } }(nil)}\n",
+			"a local function variable given nil":        "func wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nfunc f() { w := wrap; _ = S{stop: w(nil)} }\n",
+			"a computed value's method given nil":        "type W struct{}\n\nfunc (W) Wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nfunc mk() W { return W{} }\n\nvar _ = S{stop: mk().Wrap(nil)}\n",
+			"a package var's method given nil":           "type W struct{}\n\nfunc (W) Wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar w W\n\nvar _ = S{stop: w.Wrap(nil)}\n",
+			"a two-parameter generic function given nil": "func wrap[T, U any](func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap[int, string](nil)}\n",
+			"a local assigned in parentheses":            "func f() { var h func(int) bool; (h) = func(int) bool { return true }; _ = S{stop: h} }\n",
+			"a package var from a multi-value call":      "func g() (func(int) bool, error) { return func(int) bool { return true }, nil }\n\nvar h, err = g()\n\nvar _ = S{stop: h}\n",
 		} {
 			t.Run(name, func(t *testing.T) {
 				files := map[string]string{"broker/side/side.go": field, "broker/side/side_test.go": "package side\n\n" + test}
@@ -283,6 +293,13 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 		files["broker/side/side_test.go"] = "package side_test\n\nimport \"example.test/broker/side\"\n\nfunc f(s *side.S[int]) { (*side.S[int]).Save(s, nil, " + hook + ") }\n"
 		if problems := lint(t, files, ""); len(problems) != 0 {
 			t.Fatalf("a generic method expression with a stop: got %q, want none", problems)
+		}
+		generic2 := call + "type S[T, U any] struct{ dir string }\n\nfunc (s *S[T, U]) Save(b []byte, stop func(int) bool) error { return privfile.WriteAtomic(s.dir, \"f\", b, stop) }\n"
+		files = map[string]string{"broker/side/side.go": generic2, "broker/side/side_test.go": "package side\n\nfunc f(s *S[int, string]) { (*S[int, string]).Save(s, []byte{1}, nil) }\n"}
+		one(t, lint(t, files, ""), "no test in broker/side calls Save with a non-nil stop")
+		files["broker/side/side_test.go"] = "package side\n\nfunc f(s *S[int, string]) { (*S[int, string]).Save(s, nil, " + hook + ") }\n"
+		if problems := lint(t, files, ""); len(problems) != 0 {
+			t.Fatalf("a two-parameter generic method expression with a stop: got %q, want none", problems)
 		}
 	})
 	t.Run("a pending directory passes until it is clean", func(t *testing.T) {
@@ -688,17 +705,22 @@ func newDirDecls(files []*ast.File) dirDecls {
 // show to be a function (so every conversion, and also an imported
 // function's call), or a variable that no statement assigns and whose
 // declaration gives it no value or a nil one.
-func (d dirDecls) nilish(e ast.Expr, seen map[string]bool) bool {
+func (d dirDecls) nilish(e ast.Expr, seen map[any]bool) bool {
 	switch x := ast.Unparen(e).(type) {
 	case *ast.Ident:
 		if x.Name == "nil" {
 			return true
 		}
-		if seen[x.Name] {
+		pkg := x.Obj == nil || d.pkgObjs[x.Obj] // package level, declared in this file or another
+		var key any = x.Obj                     // a local, by its object
+		if pkg {
+			key = x.Name // a package-level name, by name
+		}
+		if seen[key] {
 			return false
 		}
-		seen[x.Name] = true
-		if x.Obj == nil || d.pkgObjs[x.Obj] { // package level, declared in this file or another
+		seen[key] = true
+		if pkg {
 			v, ok := d.vars[x.Name]
 			return ok && !d.assigned[x.Name] && (v == nil || d.nilish(v, seen))
 		}
@@ -798,7 +820,7 @@ func (c testCalls) sets(s stopSeam) bool {
 // to, and for each function or method name the calls the tests make of it.
 func testSets(tests []*ast.File, d dirDecls) (fields map[string]bool, calls testCalls) {
 	fields, calls = map[string]bool{}, testCalls{}
-	nonNil := func(e ast.Expr) bool { return !d.nilish(e, map[string]bool{}) }
+	nonNil := func(e ast.Expr) bool { return !d.nilish(e, map[any]bool{}) }
 	for _, f := range tests {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
