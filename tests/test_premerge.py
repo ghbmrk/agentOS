@@ -963,6 +963,9 @@ class PremergeTest(unittest.TestCase):
         cap["body"] = cap["body"].replace("Verdict: accept", "Verdict: Accept")
         self.assertEqual(self.lens_run([lens, cap]), (1, ["no-verdict"]))
         self.assertEqual(self.lens_run([l3, lens, cap]), (0, ["same"]))
+        # only a comment whose first line is a Verdict line is a verdict, whatever record it carries
+        reply = {**sec, "created_at": "4", "updated_at": "4", "body": sec["body"].replace("Verdict: accept", "Re: accept")}
+        self.assertEqual(self.lens_run([l3, lens, sec, late("fix-list"), reply]), need)
         # a fence left open runs to the end of the comment, as Markdown renders it, so an accept's record in it is quoted
         self.assertEqual(self.lens_run([l3, lens, {**sec, "body": sec["body"].replace("# t\n", "# t\n```\n")}]),
                          (1, UN))
