@@ -98,10 +98,16 @@ func (p Plan) Route(iface string, srcPort uint16, pkt []byte) []string {
 }
 
 // Rate limits per interface, over both families: a device that floods
-// gets its packets dropped, not multiplied onto a network.
+// gets its packets dropped, not multiplied onto a network. Every packet
+// heard is parsed for the names it claims, so parsing has its own, wider
+// limit, taken before any parsing: a flood costs the enforcer at most
+// readBurst packets at once and readPerSec a second per interface, each
+// bounded by parse's own caps.
 const (
-	burst  = 40
-	perSec = 20
+	burst      = 40
+	perSec     = 20
+	readBurst  = 100
+	readPerSec = 50
 )
 
 // maxPacket is the largest packet relayed; a larger one is dropped, never
@@ -116,17 +122,23 @@ const (
 	ipv6MulticastAll = 29
 )
 
-// bucket is one interface's rate limit.
+// bucket is one interface's rate limit: size tokens at most, refilled at
+// rate a second.
 type bucket struct {
-	mu     sync.Mutex
-	tokens float64
-	last   time.Time
+	mu         sync.Mutex
+	size, rate float64
+	tokens     float64
+	last       time.Time
+}
+
+func newBucket(size, rate float64, now time.Time) *bucket {
+	return &bucket{size: size, rate: rate, tokens: size, last: now}
 }
 
 func (b *bucket) take(now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*perSec)
+	b.tokens = min(b.size, b.tokens+now.Sub(b.last).Seconds()*b.rate)
 	b.last = now
 	if b.tokens < 1 {
 		return false
@@ -160,7 +172,7 @@ func Serve(ctx context.Context, plan Plan) error {
 	if hasIPv6() {
 		families = append(families, true)
 	}
-	buckets := map[string]*bucket{}
+	buckets, reads := map[string]*bucket{}, map[string]*bucket{}
 	for _, name := range ifaces {
 		for _, v6 := range families {
 			c, err := listen(name, v6)
@@ -169,7 +181,8 @@ func Serve(ctx context.Context, plan Plan) error {
 			}
 			conns[side{name, v6}] = c
 		}
-		buckets[name] = &bucket{tokens: burst, last: time.Now()}
+		buckets[name] = newBucket(burst, perSec, time.Now())
+		reads[name] = newBucket(readBurst, readPerSec, time.Now())
 	}
 	f := NewFilter()
 	var wg sync.WaitGroup
@@ -182,6 +195,9 @@ func Serve(ctx context.Context, plan Plan) error {
 				dst = &net.UDPAddr{IP: Group6.Addr().AsSlice(), Port: int(Group6.Port())}
 			}
 			relay(c, func(pkt []byte, port uint16, now time.Time) {
+				if !reads[s.name].take(now) {
+					return
+				}
 				outs := plan.Route(s.name, port, pkt)
 				m, ok := parse(pkt)
 				if !ok {

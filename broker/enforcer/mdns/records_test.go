@@ -2,6 +2,7 @@ package mdns
 
 import (
 	"bytes"
+	"fmt"
 	"net/netip"
 	"reflect"
 	"slices"
@@ -323,6 +324,7 @@ func TestMine(t *testing.T) {
 		{"10.13.0.2", true}, {"fd00:13::abcd", true}, {"10.13.0.1", false}, {"fd00:13::1", false},
 		{"10.14.0.2", false}, {"fe80::2", false}, {"224.0.0.251", false}, {"ff02::fb", false},
 		{"0.0.0.0", false}, {"::ffff:10.13.0.2", false},
+		{"10.13.0.0", false}, {"10.13.0.255", false}, {"10.13.0.254", true}, {"fd00:13::", true},
 	} {
 		if got := mine(printerLink, netip.MustParseAddr(c.addr).AsSlice()); got != c.want {
 			t.Errorf("mine(%s) = %v", c.addr, got)
@@ -330,6 +332,14 @@ func TestMine(t *testing.T) {
 	}
 	if mine(printerLink, []byte{10, 13, 0}) {
 		t.Error("a 3-byte address is mine")
+	}
+	// A /31 has no network or broadcast address.
+	p31 := []netip.Prefix{netip.MustParsePrefix("10.20.0.0/31")}
+	if !mine(p31, netip.MustParseAddr("10.20.0.1").AsSlice()) {
+		t.Error("a /31's other address is not mine")
+	}
+	if got := broadcast(netip.MustParsePrefix("10.13.0.1/22")); got != netip.MustParseAddr("10.13.3.255") {
+		t.Errorf("broadcast of /22 = %v", got)
 	}
 	// A link-local prefix makes no address the device's.
 	if mine([]netip.Prefix{netip.MustParsePrefix("fe80::1/10")}, netip.MustParseAddr("fe80::2").AsSlice()) {
@@ -503,5 +513,127 @@ func TestHostileLabelsRefused(t *testing.T) {
 	out, ok := parse(NewFilter().Pass("hh0", nil, q, t0))
 	if !ok || len(out.questions) != 1 || out.questions[0].name[0] != "printer" {
 		t.Errorf("query passed %+v", out)
+	}
+}
+
+// worst is a message of n records, each an A record whose name is a
+// pointer to one 255-byte name: the most name each record can cost.
+func worst(n int) []byte {
+	b := []byte{0, 0, 0x84, 0, 0, 0, byte(n >> 8), byte(n), 0, 0, 0, 0}
+	first := len(b)
+	for i := range 4 {
+		l := 63
+		if i == 3 {
+			l = 61
+		}
+		b = append(b, byte(l))
+		b = append(b, bytes.Repeat([]byte{'x'}, l)...)
+	}
+	b = append(b, 0, 0, typeA, 0, 1, 0, 0, 0, 120, 0, 4, 10, 13, 0, 2)
+	for range n - 1 {
+		b = append(b, 0xC0|byte(first>>8), byte(first), 0, typeA, 0, 1, 0, 0, 0, 120, 0, 4, 10, 13, 0, 2)
+	}
+	return b
+}
+
+// TestParseBounded: a message with more questions or records than the
+// caps is refused before any is read, and the costliest message within
+// them costs a bounded amount, so a flood of crafted packets cannot buy
+// unbounded work per packet.
+func TestParseBounded(t *testing.T) {
+	if _, ok := parse(worst(maxRecords)); !ok {
+		t.Fatal("refused a message at the record cap")
+	}
+	if _, ok := parse(worst(maxRecords + 1)); ok {
+		t.Error("parsed a message over the record cap")
+	}
+	if b := worst(540); len(b) > maxPacket {
+		t.Fatalf("the crafted packet is %d bytes", len(b))
+	} else if _, ok := parse(b); ok {
+		t.Error("parsed a 540-record packet")
+	}
+	q := func(n int) []byte {
+		b := []byte{0, 0, 0, 0, byte(n >> 8), byte(n), 0, 0, 0, 0, 0, 0}
+		for range n {
+			b = append(b, 1, 'a', 0, 0, 1, 0, 1)
+		}
+		return b
+	}
+	if _, ok := parse(q(maxQuestions)); !ok {
+		t.Error("refused a message at the question cap")
+	}
+	if _, ok := parse(q(maxQuestions + 1)); ok {
+		t.Error("parsed a message over the question cap")
+	}
+	// Records split across sections count together.
+	b := worst(maxRecords)
+	b[7], b[9], b[11] = maxRecords-2, 1, 2
+	if _, ok := parse(b); ok {
+		t.Error("parsed a message over the record cap across sections")
+	}
+	b[11] = 1
+	if _, ok := parse(b); !ok {
+		t.Error("refused a message at the record cap across sections")
+	}
+	w := worst(maxRecords)
+	if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 8*maxRecords {
+		t.Errorf("the worst message within the caps costs %v allocations", allocs)
+	}
+}
+
+// TestFullClaimsFailClosed: while another interface's claimed names are
+// full of live names, no name is a sender's own, since the name the full
+// table would hold may be missing from it.
+func TestFullClaimsFailClosed(t *testing.T) {
+	f := NewFilter()
+	var rs []record
+	for i := range maxNames {
+		rs = append(rs, a(fmt.Sprintf("h%d.local", i), "10.11.0.2", 120))
+	}
+	for i := 0; i < len(rs); i += 100 {
+		f.Hear("hh0", response(rs[i:min(i+100, len(rs))], nil), t0)
+	}
+	own := response([]record{a("laptop.local", "10.13.0.2", 120)}, nil)
+	if got := passed(t, f, "ap0.105", printerLink, own, t0); got != nil {
+		t.Errorf("passed with Household's claims full: %v", got)
+	}
+	// Once one claim ends the table is not full.
+	f.claimed["hh0"][dn("h0.local").key()] = t0
+	if got := passed(t, f, "ap0.105", printerLink, own, t0); len(got) != 1 {
+		t.Errorf("passed %v once a claim ended", got)
+	}
+	// A sender's own full table does not count against it.
+	g := NewFilter()
+	for i := 0; i < len(rs); i += 100 {
+		g.Hear("ap0.105", response(rs[i:min(i+100, len(rs))], nil), t0)
+	}
+	if got := passed(t, g, "ap0.105", printerLink, own, t0); len(got) != 1 {
+		t.Errorf("its own full claims blocked the sender: %v", got)
+	}
+}
+
+// TestBucket: a bucket gives its size at once, then one token per 1/rate
+// seconds.
+func TestBucket(t *testing.T) {
+	b := newBucket(3, 2, t0)
+	for i := range 3 {
+		if !b.take(t0) {
+			t.Fatalf("token %d refused", i)
+		}
+	}
+	if b.take(t0) || b.take(t0.Add(499*time.Millisecond)) {
+		t.Error("a token past the size")
+	}
+	if !b.take(t0.Add(500 * time.Millisecond)) {
+		t.Error("no token after 1/rate")
+	}
+	if b.take(t0.Add(500 * time.Millisecond)) {
+		t.Error("two tokens after 1/rate")
+	}
+	// It never holds more than its size.
+	for i := range 4 {
+		if got := b.take(t0.Add(time.Hour)); got != (i < 3) {
+			t.Errorf("after an hour, take %d = %v", i, got)
+		}
 	}
 }

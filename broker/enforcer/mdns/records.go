@@ -64,12 +64,22 @@ type message struct {
 
 func be16(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
 
+// Caps on one message's questions and records, which bound the work of
+// reading it: each name costs at most 255 bytes however its pointers
+// chain. An mDNS message from one host, even one announcing every
+// service it has, holds far fewer (RFC 6762 §6, RFC 6763 §12).
+const (
+	maxQuestions = 64
+	maxRecords   = 128
+)
+
 // parse reads a whole DNS message. It fails on anything malformed:
 // truncated sections, bytes after the last record, forward or reserved
 // name pointers, names over 255 bytes, or A, AAAA, PTR, SRV or TXT
-// rdata of the wrong shape.
+// rdata of the wrong shape; and on more than maxQuestions questions or
+// maxRecords records, before reading any.
 func parse(b []byte) (*message, bool) {
-	if len(b) < 12 {
+	if len(b) < 12 || be16(b[4:]) > maxQuestions || int(be16(b[6:]))+int(be16(b[8:]))+int(be16(b[10:])) > maxRecords {
 		return nil, false
 	}
 	m := &message{id: be16(b), flags: be16(b[2:])}
@@ -294,7 +304,7 @@ func (w *writer) name(n name) {
 const (
 	claimHold = 24 * time.Hour
 	ownHold   = 4500 * time.Second
-	maxNames  = 256 // per interface and table; more are not learned
+	maxNames  = 1024 // per interface and table; more are not learned
 )
 
 type names map[string]time.Time
@@ -315,6 +325,12 @@ func (t names) add(k string, until, now time.Time) {
 }
 
 func (t names) has(k string, now time.Time) bool { return t[k].After(now) }
+
+// full: t holds maxNames live names, so a name it would hold may be
+// missing from it.
+func (t names) full(now time.Time) bool {
+	return len(t) >= maxNames && !slices.ContainsFunc(slices.Collect(maps.Values(t)), func(u time.Time) bool { return !u.After(now) })
+}
 
 // Filter is the relay's memory of names: for each interface, the names
 // claimed by what was heard there, and the host and instance names its
@@ -375,13 +391,20 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// A name claimed on another interface is not the sender's; nor is any
+	// name while another interface's claims are full, since the one it
+	// would hold may be missing.
+	var full bool
+	for i, t := range f.claimed {
+		full = full || i != iface && t.full(now)
+	}
 	elsewhere := func(k string) bool {
 		for i, t := range f.claimed {
 			if i != iface && t.has(k, now) {
 				return true
 			}
 		}
-		return false
+		return full
 	}
 	hosts, ins := table(f.hosts, iface), table(f.ins, iface)
 	rs := slices.Concat(m.answers, m.additional)
@@ -479,16 +502,26 @@ func live(t names, now time.Time) []string {
 }
 
 // mine: a is a host address on the link, in one of its prefixes, never
-// the enforcer's own address, a link-local one or a group.
+// the enforcer's own address, a link-local one, a group, or an IPv4
+// prefix's network or broadcast address.
 func mine(link []netip.Prefix, b []byte) bool {
 	a, _ := netip.AddrFromSlice(b)
 	if !a.IsGlobalUnicast() {
 		return false
 	}
 	for _, p := range link {
-		if p.Addr() != a && !p.Addr().IsLinkLocalUnicast() && p.Masked().Contains(a) {
+		if p.Addr() != a && !p.Addr().IsLinkLocalUnicast() && p.Masked().Contains(a) && (!a.Is4() || p.Bits() > 30 || a != p.Masked().Addr() && a != broadcast(p)) {
 			return true
 		}
 	}
 	return false
+}
+
+// broadcast is an IPv4 prefix's broadcast address.
+func broadcast(p netip.Prefix) netip.Addr {
+	b := p.Masked().Addr().As4()
+	for i := p.Bits(); i < 32; i++ {
+		b[i/8] |= 0x80 >> (i % 8)
+	}
+	return netip.AddrFrom4(b)
 }
