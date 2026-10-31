@@ -744,8 +744,10 @@ func TestPausedLogsNames(t *testing.T) {
 // TestOwnerLine (NET-2 Channel, Texts and calls, #4185): the owner's line
 // for a removed pair shows both members, an unsigned one as "unknown" and
 // 12 hex digits, in either order; the detail view shows its full hash; a
-// line without an ID, a name or a verdict word has no gap for one. Revert
-// mutants: Line printing Device alone, or a name without Short.
+// line without an ID, a name or a verdict word has no gap for one; and no
+// line carries a time, which the renderer shows in the owner's zone
+// (NET-4), so none can show UTC. Revert mutants: Line printing Device
+// alone, a name without Short, or render writing e.At.
 func TestOwnerLine(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
@@ -756,12 +758,11 @@ func TestOwnerLine(t *testing.T) {
 	cl.code(cmd(9, "lamp", wire.VerbOn))
 	sum := sha256.Sum256([]byte(forged))
 	short, full := "unknown "+hex.EncodeToString(sum[:6]), "unknown "+hex.EncodeToString(sum[:])
-	at := r.now.UTC().Format(time.RFC3339)
 	pair := ": refused, not a closed-list tightening of the policy in force"
 	want := map[uint64][2]string{
-		7: {at + " tighten #7 remove-pair tv / " + short + pair, at + " tighten #7 remove-pair tv / " + full + pair},
-		8: {at + " tighten #8 remove-pair " + short + " / tv" + pair, at + " tighten #8 remove-pair " + full + " / tv" + pair},
-		9: {at + " command #9 on lamp: done", at + " command #9 on lamp: done"},
+		7: {"tighten #7 remove-pair tv / " + short + pair, "tighten #7 remove-pair tv / " + full + pair},
+		8: {"tighten #8 remove-pair " + short + " / tv" + pair, "tighten #8 remove-pair " + full + " / tv" + pair},
+		9: {"command #9 on lamp: done", "command #9 on lamp: done"},
 	}
 	got := map[uint64][2]string{}
 	for _, e := range r.events()[n:] {
@@ -772,7 +773,7 @@ func TestOwnerLine(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("lines\n%v\nwant\n%v", got, want)
 	}
-	if got, want := (Event{At: start, Kind: KindPause, Reason: "resumed by the owner on the page"}).Line(), start.UTC().Format(time.RFC3339)+" pause: resumed by the owner on the page"; got != want {
+	if got, want := (Event{At: start, Kind: KindPause, Reason: "resumed by the owner on the page"}).Line(), "pause: resumed by the owner on the page"; got != want {
 		t.Errorf("pause line %q, want %q", got, want)
 	}
 }

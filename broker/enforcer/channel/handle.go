@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
@@ -211,7 +210,8 @@ var codeWords = map[wire.Code]string{
 // and a removed pair's two members both, so a renderer that takes it can
 // neither drop the second member nor print a full hash (#4185). Each name
 // is one token, or "unknown" and its digits, and the members are split by
-// " / ", which no signed ID holds.
+// " / ", which no signed ID holds. It carries no time: the renderer shows
+// e.At in the owner's zone, as the page shows every time (NET-4).
 func (e Event) Line() string { return e.render(Short) }
 
 // Detail is e as the detail view shows it: Line with each unknown name's
@@ -220,7 +220,7 @@ func (e Event) Detail() string { return e.render(func(s string) string { return 
 
 func (e Event) render(show func(string) string) string {
 	var b strings.Builder
-	b.WriteString(e.At.UTC().Format(time.RFC3339) + " " + string(e.Kind))
+	b.WriteString(string(e.Kind))
 	if e.ID != 0 {
 		fmt.Fprintf(&b, " #%d", e.ID)
 	}
