@@ -158,12 +158,14 @@ func (s *Server) enrolFinish(w http.ResponseWriter, r *http.Request) {
 	if !res.Due.IsZero() {
 		out["due"] = s.when(res.Due.UnixMilli())
 	} else {
-		code, err := qrOf(res.Card.QR)
-		if err != nil {
-			fail(w, http.StatusInternalServerError, errors.New("enrolled, but the Owner network's QR could not be drawn; its name and password are below"))
-			return
+		// The passkey is enrolled and the setup network is gone, so the
+		// answer always carries the card; a QR that cannot be drawn is
+		// only left out.
+		network := map[string]any{"ssid": res.Card.SSID, "password": res.Card.Shown}
+		if code, err := qrOf(res.Card.QR); err == nil {
+			network["qr"] = code
 		}
-		out["network"] = map[string]any{"ssid": res.Card.SSID, "password": res.Card.Shown, "qr": code}
+		out["network"] = network
 	}
 	writeJSON(w, http.StatusOK, out)
 }

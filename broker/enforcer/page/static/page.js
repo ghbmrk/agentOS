@@ -66,7 +66,8 @@ function shown(r) {
     document.getElementById("network").hidden = false;
     document.getElementById("ssid").textContent = r.network.ssid;
     document.getElementById("password").textContent = r.network.password;
-    drawQR(document.getElementById("qr"), r.network.qr);
+    if (r.network.qr) drawQR(document.getElementById("qr"), r.network.qr);
+    else document.getElementById("qr").hidden = true;
     const pw = r.network.password.replace(/ /g, "");
     document.getElementById("last4").addEventListener("input", e => {
       document.getElementById("joined").hidden = e.target.value.replace(/ /g, "").toUpperCase() !== pw.slice(-4).toUpperCase();
@@ -115,9 +116,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const c = await post("/challenge", { action: b.dataset.action, target: b.dataset.target });
       const r = await post("/act", { id: c.id, action: b.dataset.action, ...(await tap(c.challenge, c.rp_id)) });
       if (r.recovery) {
-        // The used recovery code is spent; its replacement shows only now.
-        b.parentElement.hidden = true;
-        say("Cancelled. Your old recovery code no longer works. Write down your new one and keep it safe at home; it is shown only now: " + r.recovery);
+        // The used recovery code is spent; its replacement shows only now,
+        // where the owner just tapped.
+        const box = b.parentElement, code = document.createElement("p");
+        box.replaceChildren(code);
+        code.className = "code";
+        code.textContent = r.recovery;
+        box.prepend("Cancelled. Your old recovery code no longer works. Write down this new one and keep it safe at home. It is shown only now.");
         return;
       }
       say("Done.");
