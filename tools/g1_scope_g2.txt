@@ -44,10 +44,6 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4125 (ENF-t, #3702): broker/enforcer/radio/ (with radio/thread/ and radio/confine/), which the G2
-# list does not name (D-198). Remove once #4125 merges.
-exempt-pr 4125
-
 # #4132 (ENF-names-b): broker/enforcer/channel/, which the G2 list does not name (D-198).
 # Remove once #4132 merges.
 exempt-pr 4132
@@ -83,6 +79,10 @@ exempt-pr 4206
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
+
+# #4250 (ENF-t-probe, #4233): broker/enforcer/radio/, which the G2 list does not name (D-198).
+# Remove once #4250 merges.
+exempt-pr 4250
 
 # #4171 (ENF-r-follow-2): broker/enforcer/devsecret/, which the G2 list does not name (D-198).
 # Remove once #4171 merges.
