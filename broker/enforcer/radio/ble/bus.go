@@ -198,7 +198,7 @@ func readMessage(r io.Reader, keep func(*Message) bool) (*Message, error) {
 	if err != nil {
 		return nil, err // no byte order: the stream is lost
 	}
-	b := make([]byte, head) // the body's buffer waits for keep
+	b := make([]byte, head) // at most 16+maxHeader+7; the body's buffer waits for keep
 	copy(b, h[:])
 	if _, err := io.ReadFull(r, b[16:]); err != nil {
 		return nil, err
@@ -213,7 +213,7 @@ func readMessage(r io.Reader, keep func(*Message) bool) (*Message, error) {
 	if !keep(m) {
 		return nil, skip(r, n-head)
 	}
-	b = append(b, make([]byte, n-head)...)
+	b = append(b, make([]byte, n-head)...) // at most MaxMessage in all
 	if _, err := io.ReadFull(r, b[head:]); err != nil {
 		return nil, err
 	}
@@ -225,8 +225,8 @@ func readMessage(r io.Reader, keep func(*Message) bool) (*Message, error) {
 }
 
 // skip reads past n bytes, then reports the message skipped.
-func skip(r io.Reader, n int) error {
-	if _, err := io.CopyN(io.Discard, r, int64(n)); err != nil {
+func skip(r io.Reader, n int64) error {
+	if _, err := io.CopyN(io.Discard, r, n); err != nil {
 		return err
 	}
 	return errSkipped
