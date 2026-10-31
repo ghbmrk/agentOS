@@ -1,0 +1,7 @@
+config dropbear 'main'
+	option enable '1'
+	option Interface 'admin'
+	option Port '22'
+	option PasswordAuth 'off'
+	option RootPasswordAuth 'off'
+	option RootLogin '1'

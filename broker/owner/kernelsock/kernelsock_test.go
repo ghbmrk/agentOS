@@ -900,7 +900,7 @@ func TestRecoveryCardReachesTheKernel(t *testing.T) {
 	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("no card made at this boot: %v", err)
 	}
-	rec := bytes.Repeat([]byte{0x42}, handoff.RecoveryLen)
+	rec := bytes.Repeat([]byte{0x42}, handoff.CardKeyLen)
 	h.HoldRecoveryCard(bytes.Clone(rec))
 	if got, err := o.RecoveryCard(ctx); err != nil || !bytes.Equal(got, rec) {
 		t.Fatalf("the card: %x, %v", got, err)

@@ -11,7 +11,7 @@
 <h1>Approve a change</h1>
 <p>Your home enforcer drew this change itself. Approve it only if it is what you meant.</p>
 <ul class="diff">
-{{range .Lines}}<li>{{.}}</li>
+{{range .Lines}}<li>{{template "diffline" .}}</li>
 {{end}}</ul>
 <p class="consequence">{{.Consequence}}</p>
 {{if .Blocked}}

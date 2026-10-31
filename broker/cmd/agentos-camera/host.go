@@ -83,7 +83,7 @@ var (
 	errExists  = errors.New("camera: a camera with that name is connected")
 	errUnknown = errors.New("camera: no camera with that name is connected")
 	errState   = errors.New("camera: the cameras file does not load")
-	errBroken  = errors.New("camera: the camera's capture store did not open; disconnect it")
+	errBroken  = errors.New("camera: the camera's capture store did not open; it is retried each minute, or disconnect it, which erases its capture")
 )
 
 // node reads and checks a record: the clerk's Node, pin included.
@@ -151,8 +151,9 @@ type host struct {
 	ctx    context.Context
 	runs   map[string]context.CancelFunc
 	// broken are the cameras the store refused at start (#3968): kept in
-	// the file, unswept, never connected, and shown as refused until the
-	// owner disconnects them.
+	// the file, their capture expiring at their retention but their key
+	// and directory left, never connected, shown as refused, and retried
+	// each sweep until the store takes them or the owner disconnects them.
 	broken  map[string]bool
 	wg      sync.WaitGroup
 	started bool
@@ -208,9 +209,11 @@ func (h *host) save() error {
 // decoder refuses now is logged and left in the file and the store, so its
 // retained capture is kept and still expires on time, and every other
 // camera's sweep goes on. A camera the store refuses (its sealed key
-// slot failing) is held back from the sweep (Store.Keep), so its capture
-// is kept, and is not connected: STATUS shows it refused, and the owner's
-// disconnect erases it (#3968). Every other camera starts.
+// slot failing) is kept (Store.Keep): its key and directory stay and its
+// capture expires at its retention (#4064). It is not connected: STATUS
+// shows it refused, the owner's disconnect erases it (#3968), and each
+// periodic sweep retries it first (retry). Every other camera
+// starts.
 func (h *host) start(ctx context.Context) error {
 	st, err := load(h.dir)
 	if err != nil {
@@ -221,7 +224,7 @@ func (h *host) start(ctx context.Context) error {
 	h.ctx, h.st, h.runs, h.broken = ctx, st, map[string]context.CancelFunc{}, map[string]bool{}
 	for _, r := range st.Cameras {
 		if err := h.store.Add(r.ID, r.retention()); err != nil {
-			if kerr := h.store.Keep(r.ID); kerr != nil {
+			if kerr := h.store.Keep(r.ID, r.retention()); kerr != nil {
 				return fmt.Errorf("camera %s: its capture store did not open: %w", r.ID, err)
 			}
 			h.broken[r.ID] = true
@@ -245,6 +248,34 @@ func (h *host) start(ctx context.Context) error {
 		h.run(r)
 	}
 	return nil
+}
+
+// retry adds each broken camera to the store again (#4065): a sealed slot
+// that failed only briefly takes its camera back without a restart, or a
+// disconnect that would erase its capture. A camera the store takes is
+// connected and started as at start.
+func (h *host) retry() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var back []record
+	for _, r := range h.st.Cameras {
+		if !h.broken[r.ID] || h.store.Add(r.ID, r.retention()) != nil {
+			continue
+		}
+		delete(h.broken, r.ID)
+		h.log("camera " + r.ID + ": its capture store opened on a retry")
+		if err := h.live(r); err != nil {
+			h.log("camera " + r.ID + ": not connected on a retry: " + err.Error())
+		}
+		back = append(back, r)
+	}
+	if len(back) == 0 {
+		return
+	}
+	h.pins()
+	for _, r := range back {
+		h.run(r)
+	}
 }
 
 // live connects r to the clerk and the decoder, undoing what it did on a
@@ -575,13 +606,17 @@ func (h *host) status() []string {
 		out = append(out, "cameras: stopped (STOP); no stream opens until RESUME")
 	}
 	for _, r := range h.st.Cameras {
-		if h.broken[r.ID] {
-			out = append(out, "camera "+r.ID+": refused: its capture store did not open; its capture is kept; disconnect it on the local page")
-			continue
-		}
 		ret := "memory only"
 		if r.RetentionSec > 0 {
 			ret = "kept " + r.retention().String()
+		}
+		if h.broken[r.ID] {
+			kept := "nothing is kept; disconnect it on the local page"
+			if r.RetentionSec > 0 {
+				kept = "its capture is " + ret + ", then deleted; disconnecting it on the local page erases that capture now"
+			}
+			out = append(out, "camera "+r.ID+": refused: its capture store did not open, retried each minute; "+kept)
+			continue
 		}
 		out = append(out, fmt.Sprintf("camera %s: capture %s, %s", r.ID, r.Capture, ret))
 	}
@@ -595,7 +630,8 @@ func (h *host) status() []string {
 	return out
 }
 
-// tick runs the periodic sweep and the DEV-8 flushes until ctx ends; then
+// tick retries the broken cameras, then runs the DEV-8 flushes and the
+// periodic sweep, until ctx ends; then
 // it stops every runner and writes the open segments.
 func (h *host) tick(ctx context.Context, every time.Duration) {
 	t := time.NewTicker(every)
@@ -614,6 +650,7 @@ func (h *host) tick(ctx context.Context, every time.Duration) {
 			}
 			return
 		case <-t.C:
+			h.retry()
 			h.clerk.Flush()
 			if err := h.store.Sweep(); err != nil {
 				h.log("camera: sweep failed: " + err.Error())

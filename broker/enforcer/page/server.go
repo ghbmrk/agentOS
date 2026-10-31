@@ -89,8 +89,10 @@ type Config struct {
 	Lock    sync.Locker
 	Channel Channel // nil until slice d is wired
 	// Act carries out the owner's asserted actions on safety-list devices
-	// (slice s); nil serves none.
-	Act action.Actuator
+	// (slice s); nil serves none. ActTimeout bounds each call, and so how
+	// long a tap holds Lock: zero means action.Timeout, and more is refused.
+	Act        action.Actuator
+	ActTimeout time.Duration
 	// Secrets takes safety-list devices' sealed secrets (slice r); nil
 	// refuses every link that carries one.
 	Secrets Secrets
@@ -108,6 +110,7 @@ type Server struct {
 	mu    sync.Mutex // the page's own state below
 	chals map[string]*challenge
 	links []int64 // recent proposal-link times, for the limit
+	acts  []int64 // recent action-link times, for their own limit
 	last  uint64  // the highest version the page has drawn a challenge for
 	sync  syncState
 	tmpl  *template.Template
@@ -150,7 +153,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, chals: map[string]*challenge{}, tmpl: t}
 	if cfg.Act != nil {
-		if s.book, err = action.NewBook(cfg.Owner, cfg.Act); err != nil {
+		if s.book, err = action.NewBook(cfg.Owner, cfg.Act, cfg.ActTimeout); err != nil {
 			return nil, err
 		}
 	}

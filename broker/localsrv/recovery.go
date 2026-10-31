@@ -11,9 +11,10 @@ import (
 )
 
 // Recovery is the owner side's recovery-key ops (cmd/agentosd, REC-4
-// r4a), so localsrv links no kernel. Every error is a sockets.Code from
-// localapi.RecoveryCodes, or ErrBadArgs; any other reaches the page as
-// ErrRecoveryUnavailable, so no kernel or keeper text does.
+// r4a and r4b), so localsrv links no kernel. Every error is a
+// sockets.Code from localapi.RecoveryCodes, ErrBadArgs or ErrLimited; any
+// other reaches the page as ErrRecoveryUnavailable, so no kernel or keeper
+// text does.
 type Recovery interface {
 	// Begin returns the challenge a hardware key signs to make next the
 	// recovery key.
@@ -22,6 +23,23 @@ type Recovery interface {
 	// factor, under the hardware key whose get() assertion over Begin's
 	// challenge this is.
 	Rotate(ctx context.Context, factor string, secret, next, authData, clientData, sig []byte) (localapi.RecoveryDone, error)
+	// LostBegin returns the challenge a hardware key signs to ask for a
+	// new card at the next restart (r4b).
+	LostBegin(ctx context.Context) (localapi.RecoveryLostBegun, error)
+	// Lost files the kernel's approval for the next restart, under the
+	// hardware key whose get() assertion over LostBegin's challenge this
+	// is.
+	Lost(ctx context.Context, authData, clientData, sig []byte) error
+	// LostState is where a lost-card request stands.
+	LostState(ctx context.Context) (localapi.RecoveryLostState, error)
+	// LostWithdraw removes a filed request.
+	LostWithdraw(ctx context.Context) error
+	// Restart restarts the box.
+	Restart(ctx context.Context) error
+	// LostCard is the new card's bits the kernel holds.
+	LostCard(ctx context.Context) ([]byte, error)
+	// LostDone has the kernel wipe them.
+	LostDone(ctx context.Context) error
 }
 
 // RecoveryRotatesPerMinute bounds rotations on the socket: each opens the
@@ -33,13 +51,50 @@ func (s *Server) recoveryOps() map[string]sockets.Handler {
 	return map[string]sockets.Handler{
 		localapi.OpRecoveryBegin:  s.recoveryBegin,
 		localapi.OpRecoveryRotate: s.recoveryRotate,
+		localapi.OpRecoveryLostBegin: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) {
+				b, err := s.cfg.Recovery.LostBegin(ctx)
+				if err == nil && (len(b.Challenge) != localapi.PasskeyChallenge || b.Old != "" && len(b.Old) != localapi.RecoveryIDLen) {
+					err = sockets.Code(localapi.ErrRecoveryUnavailable)
+				}
+				return b, err
+			})
+		},
+		localapi.OpRecoveryLost: s.recoveryLost,
+		localapi.OpRecoveryLostState: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) { return s.cfg.Recovery.LostState(ctx) })
+		},
+		localapi.OpRecoveryLostWithdraw: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) { return nil, s.cfg.Recovery.LostWithdraw(ctx) })
+		},
+		localapi.OpRecoveryRestart: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) {
+				if !s.allowPerMinute(&s.recoveryRotates, RecoveryRotatesPerMinute) {
+					return nil, errLimited
+				}
+				return nil, s.cfg.Recovery.Restart(ctx)
+			})
+		},
+		localapi.OpRecoveryLostCard: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) {
+				b, err := s.cfg.Recovery.LostCard(ctx)
+				if err == nil && len(b) != localapi.RecoveryCardLen {
+					clear(b)
+					err = sockets.Code(localapi.ErrRecoveryUnavailable)
+				}
+				return localapi.RecoveryLostCard{Card: b}, err
+			})
+		},
+		localapi.OpRecoveryLostDone: func(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+			return s.recoverySession(args, func() (any, error) { return nil, s.cfg.Recovery.LostDone(ctx) })
+		},
 	}
 }
 
 // recoveryErr is err as one of the closed set of codes.
 func recoveryErr(err error) error {
 	var c sockets.Code
-	if errors.As(err, &c) && (slices.Contains(localapi.RecoveryCodes, string(c)) || c == errBadArgs) {
+	if errors.As(err, &c) && (slices.Contains(localapi.RecoveryCodes, string(c)) || c == errBadArgs || c == errLimited) {
 		return c
 	}
 	return sockets.Code(localapi.ErrRecoveryUnavailable)
@@ -97,4 +152,40 @@ func (s *Server) recoveryRotate(ctx context.Context, _ sockets.Peer, args json.R
 		return nil, recoveryErr(err)
 	}
 	return d, nil
+}
+
+// recoverySession runs op for a frame that carries a valid session alone,
+// answering its error as one of the closed set of codes.
+func (s *Server) recoverySession(args json.RawMessage, op func() (any, error)) (any, error) {
+	var in localapi.RecoverySession
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil {
+		return nil, errBadArgs
+	}
+	v, err := op()
+	if err != nil {
+		return nil, recoveryErr(err)
+	}
+	return v, nil
+}
+
+func (s *Server) recoveryLost(ctx context.Context, _ sockets.Peer, args json.RawMessage) (any, error) {
+	var in localapi.RecoveryLost
+	err := decode(args, &in)
+	if !s.valid(in.Token) {
+		return nil, errUnauthorized
+	}
+	if err != nil || !assertionPart(in.AuthenticatorData) || !assertionPart(in.ClientDataJSON) || !assertionPart(in.Signature) {
+		return nil, errBadArgs
+	}
+	if !s.allowPerMinute(&s.recoveryRotates, RecoveryRotatesPerMinute) {
+		return nil, errLimited
+	}
+	if err := s.cfg.Recovery.Lost(ctx, in.AuthenticatorData, in.ClientDataJSON, in.Signature); err != nil {
+		return nil, recoveryErr(err)
+	}
+	return nil, nil
 }

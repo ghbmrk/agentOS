@@ -513,3 +513,81 @@ func TestSaveFailureFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestPruneRetriesFailedSave: after a Prune whose save failed, the next
+// Prune saves the erase even though nothing is left to erase in memory,
+// so the erased secret is gone on disk too, not only at the next Admit or
+// restart (L3 on #4073).
+// REQ: STO-4
+func TestPruneRetriesFailedSave(t *testing.T) {
+	r := newRig(t)
+	disk := &failDisk{}
+	r.disk = &disk.mem
+	open := func() *Store {
+		t.Helper()
+		s, err := Open(Config{Owner: r.o.public(), Key: r.key, Policy: r.eng, Box: r.box, Disk: disk,
+			Process: func(d string) (Peer, bool) { p, ok := drivers[d]; return p, ok }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	r.store = open()
+	r.admit("front-lock")
+
+	disk.fail = true
+	cur := r.eng.Current()
+	cur.Devices = slices.DeleteFunc(cur.Devices, func(d policy.Device) bool { return d.ID == "front-lock" })
+	r.propose(cur, "This closes something on a safety-list device.\nRemove the device front-lock.\n")
+	if err := r.store.Prune(); err == nil {
+		t.Fatal("Prune did not report the failed save")
+	}
+	if _, ok := open().Fingerprint("front-lock"); !ok {
+		t.Fatal("the failed save reached the disk")
+	}
+	if err := r.store.Prune(); err == nil {
+		t.Error("a second Prune on a refusing disk did not retry the save")
+	}
+
+	disk.fail = false
+	if err := r.store.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := open().Fingerprint("front-lock"); ok {
+		t.Error("the erased secret is still on disk after a later Prune")
+	}
+	saved := slices.Clone(disk.b)
+	if err := r.store.Prune(); err != nil || !bytes.Equal(disk.b, saved) {
+		t.Errorf("a Prune with nothing owed saved again: %v", err)
+	}
+}
+
+// TestEverydayLosesSecret: a safety-list device a later signed change
+// makes everyday gets no secret and Prune erases it, as for a removed
+// device (L3 on #4073).
+// REQ: STO-4, NET-2
+func TestEverydayLosesSecret(t *testing.T) {
+	r := newRig(t)
+	r.admit("front-lock")
+	r.admit("side-lock")
+	cur := r.eng.Current()
+	for i, d := range cur.Devices {
+		if d.ID == "front-lock" {
+			cur.Devices[i] = policy.Device{ID: d.ID, Network: d.Network, Everyday: true}
+		}
+	}
+	r.propose(cur, "This opens something.\nMove the device front-lock off the safety list.\n")
+	r.land()
+	if _, err := r.store.Release("front-lock", frontProc); !errors.Is(err, ErrNoSecret) {
+		t.Errorf("an everyday device's secret released: %v", err)
+	}
+	if err := r.store.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.store.Fingerprint("front-lock"); ok {
+		t.Error("an everyday device's secret still held")
+	}
+	if got, err := r.store.Release("side-lock", sideProc); err != nil || !bytes.Equal(got, canary) {
+		t.Errorf("the other lock lost its secret: %v", err)
+	}
+}

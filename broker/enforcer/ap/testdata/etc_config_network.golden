@@ -1,0 +1,127 @@
+config interface 'loopback'
+	option device 'lo'
+	option proto 'static'
+	option ipaddr '127.0.0.1'
+	option netmask '255.0.0.0'
+
+config device
+	option name 'eth0'
+	option ipv6 '0'
+
+config device
+	option name 'eth1'
+	option ipv6 '0'
+
+config device
+	option type '8021q'
+	option ifname 'eth0'
+	option vid '99'
+	option name 'eth0.99'
+	option ipv6 '0'
+
+config interface 'admin'
+	option device 'eth0.99'
+	option proto 'static'
+	option ipaddr '10.70.0.2/24'
+
+config device
+	option type '8021q'
+	option ifname 'eth0'
+	option vid '10'
+	option name 'eth0.10'
+	option ipv6 '0'
+
+config device
+	option name 'br-owner'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth0.10'
+
+config interface 'owner'
+	option device 'br-owner'
+	option proto 'none'
+
+config device
+	option type '8021q'
+	option ifname 'eth0'
+	option vid '20'
+	option name 'eth0.20'
+	option ipv6 '0'
+
+config device
+	option name 'br-household'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth0.20'
+
+config interface 'household'
+	option device 'br-household'
+	option proto 'none'
+
+config device
+	option type '8021q'
+	option ifname 'eth0'
+	option vid '30'
+	option name 'eth0.30'
+	option ipv6 '0'
+
+config device
+	option name 'br-guests'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth0.30'
+
+config interface 'guests'
+	option device 'br-guests'
+	option proto 'none'
+
+config device
+	option type '8021q'
+	option ifname 'eth1'
+	option vid '101'
+	option name 'eth1.101'
+	option ipv6 '0'
+
+config device
+	option name 'br-v101'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth1.101'
+
+config interface 'v101'
+	option device 'br-v101'
+	option proto 'none'
+
+config device
+	option type '8021q'
+	option ifname 'eth1'
+	option vid '102'
+	option name 'eth1.102'
+	option ipv6 '0'
+
+config device
+	option name 'br-v102'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth1.102'
+
+config interface 'v102'
+	option device 'br-v102'
+	option proto 'none'
+
+config device
+	option type '8021q'
+	option ifname 'eth1'
+	option vid '104'
+	option name 'eth1.104'
+	option ipv6 '0'
+
+config device
+	option name 'br-v104'
+	option type 'bridge'
+	option ipv6 '0'
+	list ports 'eth1.104'
+
+config interface 'v104'
+	option device 'br-v104'
+	option proto 'none'
