@@ -68,6 +68,10 @@ const (
 	// MaxMessage bounds one message, header and body. BlueZ's largest
 	// answer the stack asks for is GetManagedObjects, a few KiB per device.
 	MaxMessage = 1 << 20
+	// maxHeader bounds a message's header fields, which are decoded before
+	// the reader knows who sent the message: a few names and a path, each
+	// short, plus the bus's own fields.
+	maxHeader = 1 << 12
 	// maxDepth bounds a signature's container nesting, and variants
 	// nested in variants, each below the specification's 64.
 	maxDepth = 32
@@ -76,8 +80,9 @@ const (
 
 var ErrWire = errors.New("ble: malformed bus message")
 
-// errTooLong is a message longer than MaxMessage; frameLen still says how
-// long, so the reader can step over it.
+// errTooLong is a message longer than MaxMessage, or with header fields
+// longer than maxHeader; frameLen still says how long, so the reader can
+// step over it.
 var errTooLong = fmt.Errorf("%w: message too long", ErrWire)
 
 func wireErr(format string, a ...any) error {
@@ -675,8 +680,9 @@ func (m *Message) required() error {
 	return nil
 }
 
-// frameLen reads a message's total length from its first 16 bytes.
-func frameLen(h []byte) (int, error) {
+// frameLen reads, from a message's first 16 bytes, the length of its
+// header (fields and padding included) and of the whole message.
+func frameLen(h []byte) (head, n int, err error) {
 	var order binary.ByteOrder
 	switch h[0] {
 	case 'l':
@@ -684,16 +690,15 @@ func frameLen(h []byte) (int, error) {
 	case 'B':
 		order = binary.BigEndian
 	default:
-		return 0, wireErr("byte order %q", h[0])
+		return 0, 0, wireErr("byte order %q", h[0])
 	}
 	body, fields := uint64(order.Uint32(h[4:])), uint64(order.Uint32(h[12:]))
-	n := 16 + fields
-	n += (8 - n%8) % 8
-	n += body
-	if n > MaxMessage {
-		return int(n), errTooLong
+	hl := 16 + fields
+	hl += (8 - hl%8) % 8
+	if hl+body > MaxMessage || fields > maxHeader {
+		return int(hl), int(hl + body), errTooLong
 	}
-	return int(n), nil
+	return int(hl), int(hl + body), nil
 }
 
 // Decode parses one whole message, refusing anything malformed, trailing
@@ -701,24 +706,38 @@ func frameLen(h []byte) (int, error) {
 func Decode(b []byte) (*Message, error) {
 	var h [16]byte
 	copy(h[:], b)
-	n, err := frameLen(h[:]) // at least 16, so a shorter b fails below
+	_, n, err := frameLen(h[:]) // at least 16, so a shorter b fails below
 	if err != nil {
 		return nil, err
 	}
 	if n != len(b) {
 		return nil, wireErr("length %d, header says %d", len(b), n)
 	}
+	m, d, err := header(b)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.body(d); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// header parses the header of the message b starts with, which frameLen
+// has measured: b holds at least the header, and the body is not read.
+// The decoder it returns stands at the body's start.
+func header(b []byte) (*Message, *decoder, error) {
 	d := &decoder{b: b, off: 12, order: binary.LittleEndian}
 	if b[0] == 'B' {
 		d.order = binary.BigEndian
 	}
 	m := &Message{Type: b[1], Flags: b[2], Serial: d.order.Uint32(b[8:])}
 	if m.Type < typeCall || m.Type > typeSignal || b[3] != 1 || m.Serial == 0 {
-		return nil, wireErr("header")
+		return nil, nil, wireErr("header")
 	}
 	fs, err := d.value(headerTyp, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	seen := map[byte]bool{}
 	for _, f := range fs.([]any) {
@@ -728,7 +747,7 @@ func Decode(b []byte) (*Message, error) {
 			continue // unknown fields are ignored (the specification)
 		}
 		if seen[code] || v.Sig != fieldSig[code] {
-			return nil, wireErr("header field %d", code)
+			return nil, nil, wireErr("header field %d", code)
 		}
 		seen[code] = true
 		switch code {
@@ -750,29 +769,35 @@ func Decode(b []byte) (*Message, error) {
 			m.Sig = v.Value.(Signature)
 		case 9:
 			if v.Value.(uint32) != 0 {
-				return nil, wireErr("unix fds")
+				return nil, nil, wireErr("unix fds")
 			}
 		}
 	}
 	if err := m.required(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := d.pad(8); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	return m, d, nil
+}
+
+// body decodes m's body from d, which header left at the body's start and
+// whose buffer has since been made the whole message.
+func (m *Message) body(d *decoder) error {
 	ts, err := parseSig(string(m.Sig))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, t := range ts {
 		v, err := d.value(t, 0)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		m.Body = append(m.Body, v)
 	}
-	if d.off != len(b) {
-		return nil, wireErr("body length")
+	if d.off != len(d.b) {
+		return wireErr("body length")
 	}
-	return m, nil
+	return nil
 }
