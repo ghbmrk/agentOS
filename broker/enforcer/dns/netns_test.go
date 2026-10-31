@@ -74,6 +74,9 @@ func inNetns(t *testing.T) bool {
 type host struct {
 	name string
 	pid  int
+	// ifc is the enforcer's end of the host's link (set by link): pin and
+	// arrivals go by it, never by the host's name.
+	ifc string
 }
 
 type home struct {
@@ -175,6 +178,7 @@ func (h *home) in(x *host, args ...string) string {
 // the enforcer.
 func (h *home) link(x *host, ifc string, p netip.Prefix) {
 	enf, xa := p.Addr().Next(), p.Addr().Next().Next()
+	x.ifc = ifc
 	bits := "/" + strconv.Itoa(p.Bits())
 	run(h.t, "ip", "link", "add", ifc, "type", "veth", "peer", "name", "eth0", "netns", strconv.Itoa(x.pid))
 	run(h.t, "ip", "addr", "add", enf.String()+bits, "dev", ifc)
@@ -278,7 +282,9 @@ func build(t *testing.T, bare bool) *home {
 	for _, n := range fixtureSetup().Nets {
 		h.link(h.newHost(n.Iface), n.Iface, n.Prefix4)
 	}
-	edge := h.newHost("edge0")
+	// The edge's host is named apart from the enforcer's interface on its
+	// link, so pin and arrivals are seen to go by the link, not the name.
+	edge := h.newHost("edge")
 	h.link(edge, l.Edge, netip.MustParsePrefix("10.60.0.0/24"))
 	if !bare {
 		text, err := nft.Compile(fixturePolicy(), l)
@@ -380,7 +386,7 @@ func (h *home) resolve(from, server, name string) (int, []string) {
 // ask asks server for name's A records from host from over network, udp
 // or tcp, and gives the reply's rcode and addresses. A link-local server is
 // asked on from's own link, sent straight to the enforcer's end of it
-// (pin). Every query must reach the enforcer on from's own interface,
+// (pin). Every query must reach the enforcer on its end of from's link,
 // whatever then answers it, so no expected silence is the silence of a
 // packet never sent (#4221).
 func (h *home) ask(from, network, server, name string) (int, []string) {
@@ -394,7 +400,7 @@ func (h *home) ask(from, network, server, name string) (int, []string) {
 
 // send asks as ask does, pinning a link-local server only if pin, and
 // also gives how many of the query's packets reached the enforcer on
-// from's own interface.
+// its end of from's link.
 func (h *home) send(from, network, server, name string, pin bool) (int, []string, int) {
 	h.t.Helper()
 	a := netip.MustParseAddr(server)
@@ -416,17 +422,29 @@ func (h *home) send(from, network, server, name string, pin bool) (int, []string
 // answers neighbour solicitations only for its own link's addresses, so
 // without it a query to another link's link-local address is never sent.
 func (h *home) pin(from string, a netip.Addr) {
-	i, err := net.InterfaceByName(from)
+	i, err := net.InterfaceByName(h.enforcerEnd(from))
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	h.in(h.hosts[from], "ip", "-6", "neigh", "replace", a.String(), "lladdr", i.HardwareAddr.String(), "dev", "eth0", "nud", "permanent")
 }
 
+// enforcerEnd is the enforcer's interface on host from's link.
+func (h *home) enforcerEnd(from string) string {
+	h.t.Helper()
+	x, ok := h.hosts[from]
+	if !ok || x.ifc == "" {
+		h.t.Fatalf("%s has no link to the enforcer", from)
+	}
+	return x.ifc
+}
+
 // arrivals counts the port-53 packets that reach the enforcer on
-// interface ifc addressed to a, before any ruleset chain sees them: a
-// counter in a table of the test's own, ahead of every enforcer hook.
-func (h *home) arrivals(ifc string, a netip.Addr) func() int {
+// the enforcer's end of host from's link addressed to a, before any ruleset
+// chain sees them: a counter in a table of the test's own, ahead of every
+// enforcer hook.
+func (h *home) arrivals(from string, a netip.Addr) func() int {
+	ifc := h.enforcerEnd(from)
 	key := ifc + " " + a.String()
 	name, ok := h.counters[key]
 	if !ok {
@@ -629,7 +647,7 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	// An offline device's list is never resolved: it has no set.
 	expect("ap0.102", spkDNS, "speaker.example", refused)
 	// The edge's segment has no resolver.
-	expect("edge0", "10.60.0.1", "core.example", noAnswer)
+	expect("edge", "10.60.0.1", "core.example", noAnswer)
 
 	for _, c := range []struct {
 		from, addr string
@@ -692,7 +710,7 @@ func TestNoServiceOnEdge(t *testing.T) {
 	h.dnsmasq(nil, "people", f.People)
 	h.dnsmasq(nil, "dhcp", strings.Replace(f.DHCP, fixtureSetup().LeaseFile, filepath.Join(t.TempDir(), "leases"), 1))
 
-	if rcode, _ := h.resolve("edge0", "10.60.0.1", "core.example"); rcode != noAnswer {
+	if rcode, _ := h.resolve("edge", "10.60.0.1", "core.example"); rcode != noAnswer {
 		t.Errorf("the edge's segment got a DNS answer (rcode %d)", rcode)
 	}
 	// Each view answers only on its own interface, even with no ruleset
@@ -717,8 +735,8 @@ func TestNoServiceOnEdge(t *testing.T) {
 			t.Error("pinned, the TV's query to the plug's link-local address never reached the enforcer")
 		}
 		silent = append(silent,
-			[3]string{"edge0", "2001:db8:60::1", "core.example"},
-			[3]string{"edge0", edgeLL, "core.example"},
+			[3]string{"edge", "2001:db8:60::1", "core.example"},
+			[3]string{"edge", edgeLL, "core.example"},
 			[3]string{"core0", "2001:db8:101::1", "tv.example"},
 			[3]string{"core0", tvLL, "tv.example"},
 			[3]string{"ap0.101", "2001:db8:103::1", "plug.example"},
@@ -745,7 +763,7 @@ func TestNoServiceOnEdge(t *testing.T) {
 	}
 	// dnsmasq checks an address is free (a ping) before it offers it, so
 	// each offer waits seconds, one after another; the probes run together.
-	offers := map[string]bool{"edge0": false, "ap0.101": true, "own0": true, "core0": true}
+	offers := map[string]bool{"edge": false, "ap0.101": true, "own0": true, "core0": true}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	got := map[string]bool{}
