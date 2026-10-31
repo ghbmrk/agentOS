@@ -1,0 +1,7 @@
+# The only programs a udev rule under image/ or broker/ may run (RUN,
+# RUN{program}, PROGRAM, IMPORT{program}), read by pathops_lint_test.go
+# (#4257). One line per program: its absolute path, then what it is. A
+# broker binary's package joins the root side; anything else says why it
+# starts no broker binary, and review checks that. A line no rule runs fails.
+/usr/lib/agentos/agentos-hostdisk HW-8's disk classifier (broker/cmd/agentos-hostdisk), run by 59-agentos-host-disks.rules as IMPORT{program}; a broker binary, so its packages are root-side
+/usr/lib/agentos/host-disk-unlink a /bin/sh script (image/mkosi/mkosi.extra/usr/lib/agentos/host-disk-unlink) that removes /dev/disk/by-* links with readlink, realpath and rm only; it starts no broker binary
