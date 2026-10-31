@@ -319,6 +319,12 @@ func TestOnlyTripsLight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Another alert on the tripped box is not a trip: lifting the cut
+	// leaves it open on the page.
+	edgeFault, err := r.a.Raise(SafetyOff, "edge")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.a.Lifted("core"); err != nil {
 		t.Fatal(err)
 	}
@@ -327,6 +333,12 @@ func TestOnlyTripsLight(t *testing.T) {
 		t.Fatal(err)
 	}
 	red("device trip still open")
+	if got := r.a.Log()[r.a.byID[edgeFault.ID]]; !got.Open {
+		t.Fatalf("lifting a cut closed a non-trip alert: %+v", got)
+	}
+	if err := r.a.Resolve(edgeFault.ID); err != nil {
+		t.Fatal(err)
+	}
 	if got := r.a.Log()[r.a.byID[edge.ID]]; got.Open || got.Resolved.IsZero() {
 		t.Fatalf("lifted trip still open: %+v", got)
 	}

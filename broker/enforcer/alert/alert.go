@@ -87,7 +87,7 @@ var kinds = map[Kind]spec{
 	FailedUnlocks:    {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
 	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
 	RoutineLock:      {LogOnly, true, "%s locked."},
-	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows what it cut; its light stays red until you lift that cut or clear this there."},
+	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window
