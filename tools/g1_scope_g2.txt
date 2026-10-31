@@ -100,6 +100,10 @@ exempt-pr 4254
 # Remove once #4149 merges.
 exempt-pr 4149
 
+# #4297 (ENF-mdns-cost, #4232): broker/enforcer/mdns/, which the G2 list does not name (D-198).
+# Remove once #4297 merges.
+exempt-pr 4297
+
 # #4250 (ENF-t-probe, #4233): broker/enforcer/radio/, which the G2 list does not name (D-198).
 # Remove once #4250 merges.
 exempt-pr 4250
