@@ -17,6 +17,20 @@ table inet enforcer {
 	counter ap_admin { }
 	counter isp { }
 	counter core_edge { }
+	counter t101_out { }
+	counter t101_in { }
+	counter t102_out { }
+	counter t102_in { }
+	counter t103_out { }
+	counter t103_in { }
+	counter t104_out { }
+	counter t104_in { }
+	counter t105_out { }
+	counter t105_in { }
+	counter t106_out { }
+	counter t106_in { }
+	counter t107_out { }
+	counter t107_in { }
 	set isp_4 {
 		type ipv4_addr;
 		flags interval;
@@ -78,6 +92,90 @@ table inet enforcer {
 		type ipv6_addr;
 		flags timeout;
 	}
+	set t101_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t101_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t102_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t102_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t103_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t103_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t104_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t104_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t105_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t105_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t106_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t106_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t107_4 {
+		type ipv4_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
+	set t107_6 {
+		type ipv6_addr;
+		size 64;
+		flags dynamic,timeout;
+		timeout 1d;
+	}
 	chain rpf {
 		type filter hook prerouting priority raw; policy accept;
 		iif "lo" accept
@@ -115,6 +213,8 @@ table inet enforcer {
 		oifname "gst0" counter name "guests_in"
 		iifname "gst0" ct state new counter name "guests_conns"
 		ct state invalid drop
+		ct state established iifname vmap { "ap0.101" : jump t101_out_count, "ap0.102" : jump t102_out_count, "ap0.103" : jump t103_out_count, "ap0.104" : jump t104_out_count, "ap0.105" : jump t105_out_count, "ap0.106" : jump t106_out_count, "ap0.107" : jump t107_out_count }
+		ct state established oifname vmap { "ap0.101" : jump t101_in_count, "ap0.102" : jump t102_in_count, "ap0.103" : jump t103_in_count, "ap0.104" : jump t104_in_count, "ap0.105" : jump t105_in_count, "ap0.106" : jump t106_in_count, "ap0.107" : jump t107_in_count }
 		ct state established,related accept
 		iifname "wan0" log prefix "enf inbound " counter name "inbound" drop
 		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 accept
@@ -161,6 +261,76 @@ table inet enforcer {
 		iifname "own0" oifname "core0" tcp dport 443 accept
 		iifname "hh0" oifname "ap0.105" accept
 		drop
+	}
+	chain t101_out_count {
+		counter name "t101_out"
+		oifname "wan0" update @t101_4 { ip daddr counter }
+		oifname "wan0" update @t101_6 { ip6 daddr counter }
+	}
+	chain t101_in_count {
+		counter name "t101_in"
+		iifname "wan0" update @t101_4 { ip saddr counter }
+		iifname "wan0" update @t101_6 { ip6 saddr counter }
+	}
+	chain t102_out_count {
+		counter name "t102_out"
+		oifname "wan0" update @t102_4 { ip daddr counter }
+		oifname "wan0" update @t102_6 { ip6 daddr counter }
+	}
+	chain t102_in_count {
+		counter name "t102_in"
+		iifname "wan0" update @t102_4 { ip saddr counter }
+		iifname "wan0" update @t102_6 { ip6 saddr counter }
+	}
+	chain t103_out_count {
+		counter name "t103_out"
+		oifname "wan0" update @t103_4 { ip daddr counter }
+		oifname "wan0" update @t103_6 { ip6 daddr counter }
+	}
+	chain t103_in_count {
+		counter name "t103_in"
+		iifname "wan0" update @t103_4 { ip saddr counter }
+		iifname "wan0" update @t103_6 { ip6 saddr counter }
+	}
+	chain t104_out_count {
+		counter name "t104_out"
+		oifname "wan0" update @t104_4 { ip daddr counter }
+		oifname "wan0" update @t104_6 { ip6 daddr counter }
+	}
+	chain t104_in_count {
+		counter name "t104_in"
+		iifname "wan0" update @t104_4 { ip saddr counter }
+		iifname "wan0" update @t104_6 { ip6 saddr counter }
+	}
+	chain t105_out_count {
+		counter name "t105_out"
+		oifname "wan0" update @t105_4 { ip daddr counter }
+		oifname "wan0" update @t105_6 { ip6 daddr counter }
+	}
+	chain t105_in_count {
+		counter name "t105_in"
+		iifname "wan0" update @t105_4 { ip saddr counter }
+		iifname "wan0" update @t105_6 { ip6 saddr counter }
+	}
+	chain t106_out_count {
+		counter name "t106_out"
+		oifname "wan0" update @t106_4 { ip daddr counter }
+		oifname "wan0" update @t106_6 { ip6 daddr counter }
+	}
+	chain t106_in_count {
+		counter name "t106_in"
+		iifname "wan0" update @t106_4 { ip saddr counter }
+		iifname "wan0" update @t106_6 { ip6 saddr counter }
+	}
+	chain t107_out_count {
+		counter name "t107_out"
+		oifname "wan0" update @t107_4 { ip daddr counter }
+		oifname "wan0" update @t107_6 { ip6 daddr counter }
+	}
+	chain t107_in_count {
+		counter name "t107_in"
+		iifname "wan0" update @t107_4 { ip saddr counter }
+		iifname "wan0" update @t107_6 { ip6 saddr counter }
 	}
 	chain output {
 		type filter hook output priority filter; policy accept;
