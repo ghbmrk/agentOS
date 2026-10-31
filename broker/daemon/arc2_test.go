@@ -299,6 +299,7 @@ var enforcer = map[string]struct {
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
+	"enforcer/radio/ble":     {[]string{"enforcer/radio"}, droneForbid}, // #3906: BlueZ's D-Bus client, its own codec (no godbus: it links os/exec)
 	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
 	// The access point (slice g): ap renders its config from the policy,
 	// with VLANs read by the firewall's own rule; push alone carries it
