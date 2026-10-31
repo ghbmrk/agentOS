@@ -28,6 +28,7 @@ import (
 type FileKeys struct {
 	dir  string
 	aead cipher.AEAD
+	stop func(i int) bool // tests: crash Put's file write after step i
 }
 
 const keyExt = ".key"
@@ -72,7 +73,7 @@ func (f *FileKeys) Put(subject string, k kernel.SubjectKey) error {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(f.dir, subject+keyExt, f.aead.Seal(nonce, nonce, k[:], keyAAD(subject)), nil)
+	return privfile.WriteAtomic(f.dir, subject+keyExt, f.aead.Seal(nonce, nonce, k[:], keyAAD(subject)), f.stop)
 }
 
 func (f *FileKeys) Get(subject string) (kernel.SubjectKey, bool, error) {
