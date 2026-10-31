@@ -113,6 +113,15 @@ type DisplayConfig struct {
 	// of a new passphrase, a group of a new recovery key, or else one
 	// check value of the new parts.
 	Rotate *Parts
+	// Made, with Rotate, says the new parts are already in effect (the
+	// lost-card route, D-201 route B: the box made them at boot): the
+	// page offers no cancel and does not say the current card stays, and
+	// the confirm only records that the owner holds them.
+	Made bool
+	// Mark, with Made, is the new card's mark (#4160): its recovery sheet
+	// prints it, and the Recovery key page names the card in effect by
+	// it, so the owner can tell this card from one made before. Public.
+	Mark string
 	// Discarded, when set, runs once when the display discards an
 	// unconfirmed card: the page's cancel, or a provisioner's ErrDiscard.
 	// A rotation's wire cancels the vault's pending rotation here, so the
@@ -134,6 +143,7 @@ type Display struct {
 	group     int    // 0-based recovery key group asked for; -1 for none
 	check     checkKind
 	rotate    bool
+	made      bool
 	provision func(*Card) error
 	journal   func(string)
 	discardFn func()
@@ -187,7 +197,7 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 	d := &Display{c: c, word: -1, group: -1, provision: cfg.Provision, journal: cfg.Journal, discardFn: cfg.Discarded}
 	ask := Parts{Passphrase: true, Recovery: true}
 	if cfg.Rotate != nil {
-		ask, d.rotate = *cfg.Rotate, true
+		ask, d.rotate, d.made = *cfg.Rotate, true, cfg.Made
 		keepParts(c, ask)
 		switch {
 		case ask.Passphrase || ask.Recovery:
@@ -196,7 +206,7 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 		default:
 			d.check = checkGrid
 		}
-		d.sheet, err = rotationHTML(c, ask, fp)
+		d.sheet, err = rotationHTML(c, ask, fp, cfg.Mark)
 	} else {
 		d.sheet, err = HTML(c, fp)
 	}
@@ -269,9 +279,9 @@ func (d *Display) pageLocked(problem string) ([]byte, error) {
 	var ctl bytes.Buffer
 	v := struct {
 		Prompt, Problem    string
-		Rotate             bool
+		Rotate, Made       bool
 		Word, Group, Check bool
-	}{d.Prompt(), problem, d.rotate, d.word >= 0, d.group >= 0, d.check != checkNone}
+	}{d.Prompt(), problem, d.rotate, d.made, d.word >= 0, d.group >= 0, d.check != checkNone}
 	if err := controlsTmpl.Execute(&ctl, v); err != nil {
 		return nil, err
 	}
@@ -447,7 +457,7 @@ func (d *Display) Handler(paired func(*http.Request) bool, next string) http.Han
 				http.Error(w, "Bad form.", http.StatusBadRequest)
 				return
 			}
-			if d.rotate && r.PostFormValue("cancel") == "1" {
+			if d.rotate && !d.made && r.PostFormValue("cancel") == "1" {
 				if d.Discard() != nil {
 					d.gone(w)
 					return
@@ -547,7 +557,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <div class="noprint" style="font-family:system-ui,sans-serif;border:2px solid #000;padding:4mm;margin:4mm">
 <style>@media print{.noprint{display:none}}</style>
 <h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
-<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
+<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Made}} This new card's recovery key already opens my store, and your old card's recovery key no longer does.{{else if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
 <form method="post">
 <p>{{.Prompt}}</p>
@@ -558,7 +568,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 {{end}}
 <button type="submit">Confirm</button></p>
 </form>
-{{if .Rotate}}<form method="post"><input type="hidden" name="cancel" value="1"><p><button type="submit">Cancel: keep my current card</button></p></form>
+{{if and .Rotate (not .Made)}}<form method="post"><input type="hidden" name="cancel" value="1"><p><button type="submit">Cancel: keep my current card</button></p></form>
 {{end}}
 </div>
 `))

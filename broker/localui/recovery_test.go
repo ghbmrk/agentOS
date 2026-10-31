@@ -33,6 +33,14 @@ type fakeRecoveryOps struct {
 	beginErr,
 	rotateErr error
 	switched bool
+	// The lost-card ops (lostcard_test.go).
+	lost      []string
+	lostState localapi.RecoveryLostState
+	lostCard  []byte
+	lostID    string // the card's ID; testLostID when ""
+	cardErr   error  // RecoveryLostCard's answer
+	lostErr   error
+	doneErr   error // RecoveryLostDone's answer
 }
 
 var testBegun = localapi.RecoveryBegun{Old: strings.Repeat("a1", 16), Next: strings.Repeat("b2", 16), Challenge: []byte("0123456789abcdef0123456789abcdef")}

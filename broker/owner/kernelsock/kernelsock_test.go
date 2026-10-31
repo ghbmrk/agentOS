@@ -897,12 +897,25 @@ func TestRecoveryCardReachesTheKernel(t *testing.T) {
 	go proc.ServeKernel(ln, h, proc.OwnerSide, func() int64 { return time.Now().UnixMilli() })
 	o := Owner{Socket: path, UID: os.Getuid(), As: testOwnerUID}
 
-	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+	if _, err := o.RecoveryCardID(ctx); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("no card made at this boot: %v", err)
 	}
-	rec := bytes.Repeat([]byte{0x42}, handoff.RecoveryLen)
+	rec := bytes.Repeat([]byte{0x42}, handoff.CardKeyLen)
 	h.HoldRecoveryCard(bytes.Clone(rec))
-	if got, err := o.RecoveryCard(ctx); err != nil || !bytes.Equal(got, rec) {
+	id, err := o.RecoveryCardID(ctx)
+	if err != nil || len(id) != 32 {
+		t.Fatalf("the card's ID: %q, %v", id, err)
+	}
+	if !bytes.Equal(CardMsg(id), key.CosignMsg(kernel.RecoveryCardHash(id))) {
+		t.Fatal("CardMsg is not the message the kernel checks")
+	}
+	// MIG-4-recovery-r4c (#4128): a signature over another card's message
+	// is ErrRotateSig and reads no bits; the anchor's over CardMsg(id) does.
+	other := strings.Repeat("0a", 16)
+	if got, err := o.RecoveryCard(ctx, key.Approve(as[0], kernel.RecoveryCardHash(other))); !errors.Is(err, ErrRotateSig) || got != nil {
+		t.Fatalf("another card's tap: %x, %v", got, err)
+	}
+	if got, err := o.RecoveryCard(ctx, key.Approve(as[0], kernel.RecoveryCardHash(id))); err != nil || !bytes.Equal(got, rec) {
 		t.Fatalf("the card: %x, %v", got, err)
 	}
 	for range 2 {
@@ -910,7 +923,7 @@ func TestRecoveryCardReachesTheKernel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := o.RecoveryCard(ctx); !errors.Is(err, ErrNoRecoveryCard) {
+	if _, err := o.RecoveryCardID(ctx); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 }

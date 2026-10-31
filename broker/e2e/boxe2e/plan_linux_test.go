@@ -265,3 +265,53 @@ func TestHW10SignInOutputIsReadFromTheWorkersLayer(t *testing.T) {
 		t.Fatal("machinesDir does not follow -machines")
 	}
 }
+
+// The worker's layer is the guest's, so a link it made there is never
+// read through as root: not at the file's name, not as a workspace
+// directory leading out of the layer (#3946). The harness's named files
+// refuse a link at the final name.
+func TestWorkerOutputRefusesTheGuestsLinks(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "host-file")
+	if err := os.WriteFile(secret, []byte("host-only canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd := "var/lib/agentos-work"
+	upper := func(id string) string { return filepath.Join(dir, "machines", id, "disk", "upper") }
+	// A link at the output's name.
+	ws := filepath.Join(upper("pw-a"), cwd)
+	if err := os.MkdirAll(ws, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(ws, ".agentos-signin")); err != nil {
+		t.Fatal(err)
+	}
+	// A workspace that is a link out of the layer.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, ".agentos-signin"), []byte("host-only canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b := filepath.Join(upper("pw-b"), cwd)
+	if err := os.MkdirAll(filepath.Dir(b), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, b); err != nil {
+		t.Fatal(err)
+	}
+	if got := signInOutFile(dir); got != "" {
+		t.Fatalf("read %q through the guest's link", got)
+	}
+	latch := filepath.Join(t.TempDir(), "card-latch.json")
+	if err := os.Symlink(secret, latch); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readNoFollow(latch); err == nil {
+		t.Fatalf("readNoFollow read %q through a link", got)
+	}
+	if err := writeNoFollow(latch, []byte("x"), 0o600); err == nil {
+		t.Fatal("writeNoFollow wrote through a link")
+	}
+	if got, _ := os.ReadFile(secret); string(got) != "host-only canary" {
+		t.Fatalf("the link's target now holds %q", got)
+	}
+}

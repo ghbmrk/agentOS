@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -254,4 +255,29 @@ func HashHex(env []byte) string { h := Hash(env); return hex.EncodeToString(h[:]
 // opens the envelope only for a signed diff that holds this exact line.
 func Statement(device, hash string) string {
 	return fmt.Sprintf("Hand %s's secret to the enforcer, sealed as %s: only the radio process that drives %s can read it, and agentOS keeps no copy.", device, hash, device)
+}
+
+// ShortHash is how many hex characters of an envelope's hash the page
+// shows in Statement's line; the line the owner signs keeps all of them.
+const ShortHash = 12
+
+// ParseStatement is the device and hash of line if line is Statement's
+// line for a device ID and a lowercase hex hash, so the page can show the
+// hash short without changing the signed text.
+func ParseStatement(line string) (device, hash string, ok bool) {
+	rest, ok := strings.CutPrefix(line, "Hand ")
+	if !ok {
+		return "", "", false
+	}
+	device, rest, ok = strings.Cut(rest, "'s secret to the enforcer, sealed as ")
+	if !ok {
+		return "", "", false
+	}
+	hash, _, _ = strings.Cut(rest, ":")
+	b, err := hex.DecodeString(hash)
+	if err != nil || len(b) != HashLen || hex.EncodeToString(b) != hash || !Device(device) ||
+		Statement(device, hash) != line {
+		return "", "", false
+	}
+	return device, hash, true
 }

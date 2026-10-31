@@ -19,9 +19,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/kernel"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/pageca"
 	"github.com/ghbmrk/agentos/broker/procguard"
 )
@@ -186,11 +188,13 @@ func (h *Kernel) Setup(now int64, f kernel.FirstAnchors) error {
 // at this boot, the owner confirmed the card, or the kernel restarted.
 var ErrNoRecoveryCard = errors.New("run: I hold no new recovery key to show; if you have not written down the new card, ask for one again")
 
-// recoveryCard is the new recovery key, guarded by its own lock so the
-// kernel's lock is never held for it.
+// recoveryCard is the new recovery key and its backup recipient's ID,
+// which names the card to the anchor that taps to see it, guarded by its
+// own lock so the kernel's lock is never held for it.
 type recoveryCard struct {
 	mu  sync.Mutex
 	key []byte
+	id  string
 }
 
 // HoldRecoveryCard takes key, the hand-off's NewRecovery, to hold until
@@ -199,17 +203,50 @@ func (h *Kernel) HoldRecoveryCard(key []byte) {
 	h.card.mu.Lock()
 	defer h.card.mu.Unlock()
 	clear(h.card.key)
-	h.card.key = nil
-	if len(key) == handoff.RecoveryLen {
-		h.card.key = key
+	h.card.key, h.card.id = nil, ""
+	if id, err := cardID(key); err == nil {
+		h.card.key, h.card.id = key, id
+	} else {
+		clear(key)
 	}
 }
 
-// RecoveryCard is a copy of the new recovery key, or ErrNoRecoveryCard.
-func (h *Kernel) RecoveryCard() ([]byte, error) {
+// cardID is the backup recipient's ID for a card's handoff.CardKeyLen
+// bits: the store's recipient once the unlock step put them in.
+func cardID(bits []byte) (string, error) {
+	rec, err := handoff.StoreRecoveryKey(bits)
+	if err != nil {
+		return "", err
+	}
+	defer clear(rec)
+	r, err := backup.RecipientFor(rec)
+	return r.ID(), err
+}
+
+// RecoveryCardID is the held card's recipient ID, or ErrNoRecoveryCard.
+func (h *Kernel) RecoveryCardID() (string, error) {
 	h.card.mu.Lock()
 	defer h.card.mu.Unlock()
 	if h.card.key == nil {
+		return "", ErrNoRecoveryCard
+	}
+	return h.card.id, nil
+}
+
+// RecoveryCard is a copy of the new recovery key, on an anchor's signature
+// c over kernel.RecoveryCardHash of its ID (#4128); ErrNoRecoveryCard, or
+// kernel.ErrRotateSig for any other signature.
+func (h *Kernel) RecoveryCard(c key.Cosign) ([]byte, error) {
+	id, err := h.RecoveryCardID()
+	if err != nil {
+		return nil, err
+	}
+	if err := h.With(func(k *kernel.Kernel) error { return k.RecoveryCardTap(id, c) }); err != nil {
+		return nil, err
+	}
+	h.card.mu.Lock()
+	defer h.card.mu.Unlock()
+	if h.card.key == nil || h.card.id != id {
 		return nil, ErrNoRecoveryCard
 	}
 	return bytes.Clone(h.card.key), nil

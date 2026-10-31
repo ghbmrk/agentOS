@@ -115,6 +115,11 @@ open kernel.BackupTargetHash
 # D-201): the owner side builds the challenge a hardware key signs; the
 # kernel recomputes it and checks the cosign against its own anchors.
 open kernel.RecoveryRotateHash
+# A pure hash naming one lost-card route card to show (REC-4,
+# MIG-4-recovery-r4c, #4128): the owner side builds the challenge a hardware
+# key signs; the kernel recomputes it and checks the cosign against its own
+# anchors before it shows the card.
+open kernel.RecoveryCardHash
 
 # The one way in: an intent goes to the journal. The gate's Submit is the
 # same call behind the gate's refusal of broker-reserved intent IDs.
