@@ -19,20 +19,36 @@ import (
 	"github.com/ghbmrk/agentos/broker/owner/kernelsock"
 )
 
-// cardKernel is rotKernel holding a card the unlock step made.
+// cardKernel is rotKernel holding a card the unlock step made, named id;
+// it shows the card on the real kernel's tap check.
 type cardKernel struct {
 	*rotKernel
 	card []byte
+	id   string
 	err  error
 }
 
-func (k *cardKernel) RecoveryCard(context.Context) ([]byte, error) {
+func (k *cardKernel) RecoveryCardID(context.Context) (string, error) {
+	*k.log = append(*k.log, "recoverycardid")
+	if k.err != nil {
+		return "", k.err
+	}
+	if k.card == nil {
+		return "", kernelsock.ErrNoRecoveryCard
+	}
+	return k.id, nil
+}
+
+func (k *cardKernel) RecoveryCard(_ context.Context, c key.Cosign) ([]byte, error) {
 	*k.log = append(*k.log, "recoverycard")
 	if k.err != nil {
 		return nil, k.err
 	}
 	if k.card == nil {
 		return nil, kernelsock.ErrNoRecoveryCard
+	}
+	if err := k.k.RecoveryCardTap(k.id, c); err != nil {
+		return nil, fmt.Errorf("%w (%v)", kernelsock.ErrRotateSig, err)
 	}
 	return bytes.Clone(k.card), nil
 }
@@ -55,7 +71,8 @@ func newLostRig(t *testing.T, recipient string) *lostRig {
 	r := &lostRig{rotRig: newRotRig(t, recipient)}
 	r.ck = &cardKernel{rotKernel: r.rk}
 	r.booted = time.Now().Add(-time.Hour)
-	r.l = &lostCard{K: r.ck, S: newBackupSchedule(r.ck), Request: filepath.Join(t.TempDir(), "recovery-request"),
+	dir := t.TempDir()
+	r.l = &lostCard{K: r.ck, S: newBackupSchedule(r.ck), Request: filepath.Join(dir, "recovery-request"), Shown: filepath.Join(dir, "recovery-card-shown"),
 		Reboot: func(context.Context) error { r.reboots++; return nil }, Booted: func() time.Time { return r.booted }}
 	return r
 }
@@ -176,33 +193,134 @@ func TestLostCardStateRestartAndWithdraw(t *testing.T) {
 	}
 }
 
-// After the restart the card the kernel holds reaches the page and its
-// confirm wipes it; a kernel that restarted before (it holds none) is
-// ErrRecoveryNoCard, so the page tells the owner to ask again.
-func TestLostCardShownThenWiped(t *testing.T) {
+// hold has the kernel hold a new card named id, the store's recipient now
+// (the unlock step changed both), and returns its bits.
+func (r *lostRig) hold(id string, b byte) []byte {
+	bits := bytes.Repeat([]byte{b}, localapi.RecoveryCardLen)
+	r.ck.card, r.ck.id, r.rk.recipient = bytes.Clone(bits), id, id
+	return bits
+}
+
+// show taps anchor over the card's challenge and returns the card.
+func (r *lostRig) show(anchor int) (localapi.RecoveryLostCard, error) {
+	r.t.Helper()
+	ctx := context.Background()
+	b, err := r.l.LostCardBegin(ctx)
+	if err != nil {
+		return localapi.RecoveryLostCard{}, err
+	}
+	ad, cd, sig := r.anchors[anchor].get(r.t, b.Challenge)
+	return r.l.LostCard(ctx, ad, cd, sig)
+}
+
+// MIG-4-recovery-r4c (#4128): the card the kernel holds reaches the page
+// only on a hardware key's tap over its own ID. Begin names the card and
+// reads no bits; a phone passkey's tap is refused before the kernel is
+// asked for the bits, a tap over another card's challenge or none is a bad
+// assertion; an anchor's tap answers the bits and the ID, and the shown
+// file names that card, root's alone. Revert mutant: LostCard skipping
+// tapper (the phone's tap answers bits).
+func TestLostCardShowsOnlyOnAHardwareKeysTap(t *testing.T) {
+	id := strings.Repeat("ab", 16)
 	r := newLostRig(t, "")
 	ctx := context.Background()
-	bits := bytes.Repeat([]byte{0x3c}, localapi.RecoveryCardLen)
-	r.ck.card = bytes.Clone(bits)
-	if st, err := r.l.LostState(ctx); err != nil || !st.Ready || st.Filed {
+	bits := r.hold(id, 0x3c)
+	b, err := r.l.LostCardBegin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch := key.Challenge(kernelsock.CardMsg(id)); b.ID != id || !bytes.Equal(b.Challenge, ch[:]) {
+		t.Fatalf("begun %+v", b)
+	}
+	phone := newAuthenticator(t)
+	if err := r.enrol("s", phone, r.anchors[0]); err != nil {
+		t.Fatal(err)
+	}
+	ad, cd, sig := phone.get(t, b.Challenge)
+	if got, err := r.l.LostCard(ctx, ad, cd, sig); code(err) != localapi.ErrRecoveryNotAnchor || got.Card != nil {
+		t.Fatalf("phone tap: %x, %v", got.Card, err)
+	}
+	other := key.Challenge(kernelsock.CardMsg(strings.Repeat("cd", 16)))
+	ad, cd, sig = r.anchors[0].get(t, other[:])
+	if _, err := r.l.LostCard(ctx, ad, cd, sig); code(err) != localapi.ErrRecoveryBadAssertion {
+		t.Fatalf("a tap over another card: %v", err)
+	}
+	if _, err := r.l.LostCard(ctx, []byte{1}, []byte{2}, []byte{3}); code(err) != localapi.ErrRecoveryBadAssertion {
+		t.Fatalf("no tap: %v", err)
+	}
+	if r.count("recoverycard") != 0 || r.l.readShown() != (shown{}) {
+		t.Fatalf("asked for the bits without a hardware key's tap: %v", r.log)
+	}
+	got, err := r.show(1)
+	if err != nil || !bytes.Equal(got.Card, bits) || got.ID != id {
+		t.Fatalf("card %+v %v", got, err)
+	}
+	if fi, err := os.Stat(r.l.Shown); err != nil || fi.Mode().Perm() != 0o600 || r.l.readShown() != (shown{ID: id}) {
+		t.Fatalf("shown file: %v %v %+v", fi.Mode(), err, r.l.readShown())
+	}
+}
+
+// After the restart the card the kernel holds reaches the page and its
+// confirm wipes it and records the confirm; a kernel that restarted
+// before (it holds none) is ErrRecoveryNoCard.
+func TestLostCardShownThenWiped(t *testing.T) {
+	id := strings.Repeat("ab", 16)
+	r := newLostRig(t, "")
+	ctx := context.Background()
+	bits := r.hold(id, 0x3c)
+	if st, err := r.l.LostState(ctx); err != nil || st != (localapi.RecoveryLostState{Ready: true}) {
 		t.Fatalf("ready: %+v %v", st, err)
 	}
-	if got, err := r.l.LostCard(ctx); err != nil || !bytes.Equal(got, bits) {
-		t.Fatalf("card %x %v", got, err)
+	if r.count("recoverycard") != 0 {
+		t.Fatalf("the state read the bits: %v", r.log)
+	}
+	if got, err := r.show(0); err != nil || !bytes.Equal(got.Card, bits) {
+		t.Fatalf("card %x %v", got.Card, err)
 	}
 	must(t, r.l.LostDone(ctx))
 	if r.count("recoverycarddone") != 1 {
 		t.Fatalf("calls %v", r.log)
 	}
-	if _, err := r.l.LostCard(ctx); code(err) != localapi.ErrRecoveryNoCard {
+	if _, err := r.l.LostCardBegin(ctx); code(err) != localapi.ErrRecoveryNoCard {
 		t.Fatalf("after the confirm: %v", err)
 	}
-	if st, err := r.l.LostState(ctx); err != nil || st.Ready {
+	if st, err := r.l.LostState(ctx); err != nil || st != (localapi.RecoveryLostState{Shown: id, Confirmed: true, InEffect: true}) {
 		t.Fatalf("after the confirm: %+v %v", st, err)
 	}
 	r.ck.err = kernelsock.ErrSetupOnly
-	if _, err := r.l.LostCard(ctx); code(err) != localapi.ErrRecoverySetup {
+	if _, err := r.l.LostCardBegin(ctx); code(err) != localapi.ErrRecoverySetup {
 		t.Fatalf("setup-only kernel: %v", err)
+	}
+}
+
+// MIG-4-recovery-r4e (#4160): once the kernel holds no card, the state
+// names the last card a page showed and says whether it is in effect and
+// confirmed. A restart before the confirm leaves it in effect,
+// unconfirmed; a second round's card, made but never shown, supersedes it,
+// which then reads as not in effect; nothing shown reads as nothing. A
+// shown file that does not read as a record is none.
+func TestLostCardStateNamesTheCardInEffect(t *testing.T) {
+	first, second := strings.Repeat("ab", 16), strings.Repeat("cd", 16)
+	r := newLostRig(t, "")
+	ctx := context.Background()
+	r.hold(first, 0x3c)
+	if _, err := r.show(0); err != nil {
+		t.Fatal(err)
+	}
+	r.ck.card = nil // the box restarted before the confirm
+	if st, err := r.l.LostState(ctx); err != nil || st != (localapi.RecoveryLostState{Shown: first, InEffect: true}) {
+		t.Fatalf("restarted before the confirm: %+v %v", st, err)
+	}
+	r.hold(second, 0x5a) // asked again; the next restart made another
+	r.ck.card = nil      // and a restart lost it before it was shown
+	if st, err := r.l.LostState(ctx); err != nil || st != (localapi.RecoveryLostState{Shown: first}) {
+		t.Fatalf("superseded: %+v %v", st, err)
+	}
+	if err := os.WriteFile(r.l.Shown, []byte(`{"id":"../x"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := r.l.LostState(ctx); err != nil || st != (localapi.RecoveryLostState{}) {
+		t.Fatalf("a shown file out of shape: %+v %v", st, err)
 	}
 }
 
@@ -217,13 +335,13 @@ func TestLostCardLogsNoSecret(t *testing.T) {
 	ad, cd, sig := r.anchors[0].get(t, b.Challenge)
 	must(t, r.l.Lost(ctx, ad, cd, sig))
 	must(t, r.l.Restart(ctx))
-	r.ck.card = bytes.Repeat([]byte{0x3c}, localapi.RecoveryCardLen)
-	if _, err := r.l.LostCard(ctx); err != nil {
+	r.hold(strings.Repeat("ab", 16), 0x3c)
+	if _, err := r.show(0); err != nil {
 		t.Fatal(err)
 	}
 	must(t, r.l.LostDone(ctx))
 	out := buf.String()
-	for _, line := range []string{LogLostFiled, LogLostRestart, LogLostDone} {
+	for _, line := range []string{LogLostFiled, LogLostRestart, LogLostShown, LogLostDone} {
 		if !strings.Contains(out, line) {
 			t.Errorf("no %q", line)
 		}

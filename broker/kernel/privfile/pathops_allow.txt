@@ -114,10 +114,25 @@ pending broker/cmd/agentos-unlock #3940 the kernel side
 pending broker/cmd/agentos-enroll #3940 the kernel side
 pending broker/clerk/seal #3940 the kernel side
 pending broker/cmd/agentosd #3941 agentosd
-pending broker/e2e/boxe2e #3946 the e2e image harness
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
+
+# broker/e2e/boxe2e (#3946), the in-image e2e harness, root only in a CI VM
+# (image/e2e/agentos-e2e.service). Its reads and writes of named files open
+# with O_NOFOLLOW, a worker's output is read through os.Root in the guest's
+# layer, and the pty is chowned through its fd. What is left acts in
+# directories only root writes: /run itself, /run/systemd/system and
+# /run/agentos-e2e, which agentos-e2e-seal.service makes as root.
+allow broker/e2e/boxe2e/main_linux.go driver.harness os.MkdirAll the page's drop-in directory under /run/systemd/system, root-owned 0755, which no other uid writes
+allow broker/e2e/boxe2e/main_linux.go driver.claim os.Remove unlink(2) of the claim code in /run/agentos-e2e, which agentos-e2e-seal.service makes as root; unlink removes a link at the name and never follows it
+allow broker/e2e/boxe2e/stub_linux.go serveStub os.MkdirAll the stub's directory, /run/agentos-e2e-stub, in root-owned /run, which no other uid writes
+allow broker/e2e/boxe2e/stub_linux.go serveStub os.Chmod that directory and the socket bind(2) just made in it; only root writes /run and the directory, so no other uid can swap either
+allow broker/e2e/boxe2e/stub_linux.go serveStub os.Remove a stale socket in that root-only-writable directory; unlink follows no link at the name
+allow broker/e2e/boxe2e/stub_linux.go serveStub os.Chown the socket bind(2) just made in that root-only-writable directory, which no other uid can swap
+allow broker/e2e/boxe2e/sysroot.go buildSysroot os.RemoveAll the fake sysfs tree, /run/agentos-e2e-sysroot, in root-owned /run; RemoveAll descends with O_NOFOLLOW
+allow broker/e2e/boxe2e/sysroot.go buildSysroot os.MkdirAll directories of that tree, which RemoveAll just cleared and only root writes
+allow broker/e2e/boxe2e/sysroot.go buildSysroot os.WriteFile sysfs attribute files in directories this call just made, which only root writes
 
 # Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
 # modem/at's sysfs reads refuse a link (O_NOFOLLOW). What is left: the serial

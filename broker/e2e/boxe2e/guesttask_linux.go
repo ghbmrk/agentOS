@@ -52,7 +52,7 @@ func (d *driver) providerTask() error {
 		sock = agentSock
 	}
 	err := until(sockWait, func() (bool, error) {
-		_, err := os.Stat(sock)
+		_, err := os.Lstat(sock)
 		return err == nil, err
 	})
 	if err != nil {

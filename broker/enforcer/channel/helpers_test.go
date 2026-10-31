@@ -76,6 +76,10 @@ func home() policy.Document {
 	d.Devices[1].Allow = []string{"ads.example", "cdn.example"}
 	d.Devices[1].VendorCloud = true
 	add("speaker", true, safety{})
+	// IDs a comma may join wrongly, for the pair's log fields (#4066).
+	for _, id := range []string{"a", "a,b", "c", "b,c"} {
+		add(id, true, safety{})
+	}
 	d.Pairs = []policy.Pair{{A: "speaker", B: "tv"}}
 	for id, s := range safetyDevices {
 		add(id, false, s)

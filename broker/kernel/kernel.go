@@ -354,7 +354,7 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
 func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
-	if err := k.honeyTrip(now, "", keys...); err != nil {
+	if err := k.honeyTrip(now, keys...); err != nil {
 		return err
 	}
 	if _, err := k.s.grants(keys, cos, now); err != nil {
@@ -561,7 +561,7 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
 func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
-	if err := k.honeyTrip(now, plan, ext); err != nil {
+	if err := k.honeyTrip(now, ext); err != nil {
 		return err
 	}
 	h, ok := k.s.SpendHeld[plan]

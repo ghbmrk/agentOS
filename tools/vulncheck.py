@@ -14,8 +14,16 @@ run      govulncheck on each Go target of assurance/vulncheck.json, an OSV scan 
              line names (broker/third_party/go-imap is upstream go-imap v1.2.1). govulncheck
              sees no version for such a module and matches nothing, and the fork is vendored
              code, so presence alone fails; a record accepts one the fork has fixed.
-         A record names the vulnerability (its ID or any alias), the issue that records why it
-         is accepted, and the reason. With --check-issues each cited issue must be an open
+           - Inlined: any vulnerability in a package a bundler copied into another package's
+             files, which no lockfile lists (#4153). Each tarball an npm lockfile installs is
+             fetched, checked against the lockfile's sha512 integrity, and read for the marks
+             that name such a copy and its version: a pnpm store path in a module marker or
+             require key, and a license sidecar or notice listing a bundle's packages. A copy
+             with no mark (a minified bundle) is listed in the config's "inlined", and that
+             entry fails once no lockfile installs its holder at the version it names.
+         A record names the vulnerability (its ID or any alias), the package and version it
+         accepts (a Debian image record names only its source package), the issue that records
+         why it is accepted, and the reason; a record accepts no other package or version. With --check-issues each cited issue must be an open
          issue (not a PR) on GITHUB_REPOSITORY that names the record's id in its title or
          body, read with GITHUB_TOKEN; closing the issue withdraws the acceptance.
 image    An OSV scan of the Debian packages in a built image: DIR holds the dpkg status
@@ -47,6 +55,8 @@ Usage:
 Exit 0 pass, 1 unaccepted findings or a failed check, 2 a scanner or usage error.
 """
 import argparse
+import base64
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -68,7 +78,8 @@ FIXTURE = ROOT / "tests" / "fixtures" / "vulncheck"
 STDLIB = "stdlib"
 # osv-scanner: 0 nothing found, 1 vulnerabilities found; anything else is an error.
 OSV_OK = (0, 1)
-RECORD_KEYS = {"id", "issue", "why", "where", "package"}
+RECORD_KEYS = {"id", "issue", "why", "where", "package", "version"}
+INLINED_KEYS = {"holder", "copy", "files", "why"}
 # The `where` of every image finding, and of every record that accepts one.
 IMAGE = "image"
 # What mkosi.postinst writes to the image build's output directory.
@@ -90,7 +101,17 @@ CONTROL_FAILS = {("gomod", "GO-0000-0001"), ("gomod", "GO-0000-0002"),
                  ("gomod", "AGENTOS-VULNCHECK-FORK-1"),
                  ("npm/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1"),
                  ("ignored/package-lock.json", "AGENTOS-VULNCHECK-CONTROL-1")}
+CONTROL_FAILS |= {("npm/package-lock.json", f"AGENTOS-VULNCHECK-INLINED-{n}") for n in (1, 2, 3)}
 CONTROL_INFO = {("gomod", "GO-0000-0003")}
+# The inlined plants in agentos-bundle's tarball (#4153), as (ID, package, version): a copy a pnpm
+# store path marks, one its license sidecar lists, one the config's inlined entry names, and
+# left-pad 0.9.0, which the record accepting left-pad 1.0.0 must not accept: it is the one
+# failure left once the records apply.
+CONTROL_INLINED = {("AGENTOS-VULNCHECK-INLINED-1", "agentos-inlined", "1.0.0"),
+                   ("AGENTOS-VULNCHECK-INLINED-2", "agentos-listed", "2.0.0"),
+                   ("AGENTOS-VULNCHECK-INLINED-3", "agentos-unmarked", "3.0.0"),
+                   ("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
+CONTROL_STILL_FAILS = {("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
 # The image plants: binary libplant1 of source agentos-plant 1.0-1, queried by its source, whose
 # advisory Debian has fixed (in 1.0-2), so no record can accept it; and agentos-nofix, whose
 # advisory has no fix, which the fixture's record accepts. agentos-fixed is at its advisory's fixed version, and agentos-removed (source agentos-gone,
@@ -102,14 +123,25 @@ CONTROL_CONFIG = {
     "go_targets": ["gomod"],
     "osv_sources": ["npm/package-lock.json"],
     "skip_paths": [],
+    "inlined": [{"holder": "agentos-bundle@1.0.0", "copy": "agentos-unmarked@3.0.0", "files": ["dist/min.js"],
+                 "why": "control: a minified copy with no mark"}],
     "accepted": [
-        {"id": "CVE-0000-0001", "issue": 1, "why": "control: accepted by alias"},
-        {"id": "GO-0000-0002", "issue": 1, "why": "control: accepted by ID", "where": "gomod"},
-        {"id": "GHSA-0000-0000-0001", "issue": 1, "why": "control: accepted by alias",
-         "where": "npm/package-lock.json"},
+        {"id": "CVE-0000-0001", "issue": 1, "why": "control: accepted by alias",
+         "package": "example.com/dep", "version": "v1.0.0"},
+        {"id": "GO-0000-0002", "issue": 1, "why": "control: accepted by ID", "where": "gomod",
+         "package": "example.com/quiet", "version": "v1.0.0"},
+        {"id": "GHSA-0000-0000-0001", "issue": 1, "why": "control: accepted by alias for 1.0.0 only",
+         "where": "npm/package-lock.json", "package": "left-pad", "version": "1.0.0"},
         {"id": "AGENTOS-VULNCHECK-CONTROL-1", "issue": 1, "why": "control: accepted by ID",
-         "where": "ignored/package-lock.json"},
-        {"id": "CVE-0000-0102", "issue": 1, "why": "control: fork accepted by alias", "where": "gomod"},
+         "where": "ignored/package-lock.json", "package": "left-pad", "version": "1.0.0"},
+        {"id": "CVE-0000-0102", "issue": 1, "why": "control: fork accepted by alias", "where": "gomod",
+         "package": "example.com/fork", "version": "v1.2.1"},
+        {"id": "AGENTOS-VULNCHECK-INLINED-1", "issue": 1, "why": "control: a marked copy",
+         "where": "npm/package-lock.json", "package": "agentos-inlined", "version": "1.0.0"},
+        {"id": "GHSA-0000-0000-0102", "issue": 1, "why": "control: a listed copy, by alias",
+         "where": "npm/package-lock.json", "package": "agentos-listed", "version": "2.0.0"},
+        {"id": "AGENTOS-VULNCHECK-INLINED-3", "issue": 1, "why": "control: an unmarked copy",
+         "where": "npm/package-lock.json", "package": "agentos-unmarked", "version": "3.0.0"},
         {"id": "AGENTOS-VULNCHECK-DEB-1", "issue": 1, "why": "control: Debian has fixed it, so this "
          "cannot accept it", "where": IMAGE, "package": "agentos-plant"},
         {"id": "CVE-0000-0105", "issue": 1, "why": "control: no Debian fix; accepted by alias",
@@ -201,16 +233,28 @@ def _vulns(pkg, where, package, version):
     return out
 
 
+def source(res, root):
+    """The path of one osv-scanner result's source, relative to ROOT."""
+    p = pathlib.Path(res["source"]["path"])
+    return (p.resolve().relative_to(pathlib.Path(root).resolve()) if p.is_absolute() else p).as_posix()
+
+
+def npm_lockfiles(doc, root, skip):
+    """The npm lockfiles an osv-scanner report read packages from, outside skip_paths: the
+    inlined scan reads the tarballs of each."""
+    return sorted({source(r, root) for r in doc.get("results") or [] if r.get("packages")
+                   and pathlib.PurePosixPath(source(r, root)).name == NPM_LOCK
+                   and not under(source(r, root), skip)})
+
+
 def osv_findings(doc, root, skip, expected, go_targets=()):
     """Findings from an osv-scanner JSON report, and the problems with what it scanned.
 
     Go packages are left to govulncheck, so a go.mod outside every Go target (and outside
     skip_paths) is a problem: neither scanner would check its dependencies."""
-    root = pathlib.Path(root).resolve()
     found, scanned, problems = [], set(), []
     for res in doc.get("results") or []:
-        p = pathlib.Path(res["source"]["path"])
-        rel = (p.resolve().relative_to(root) if p.is_absolute() else p).as_posix()
+        rel = source(res, root)
         if under(rel, skip):
             continue
         if pathlib.PurePosixPath(rel).name == "go.mod" and not under(rel, go_targets):
@@ -247,21 +291,27 @@ def record_problems(records):
             problems.append(f"{tag}: no reason")
         if "where" in r and (not isinstance(r["where"], str) or not r["where"].strip()):
             problems.append(f"{tag}: where must name a Go target or lockfile")
-        if (r.get("where") == IMAGE) != ("package" in r):
-            problems.append(f"{tag}: an image record, and only an image record, names its source package")
-        elif "package" in r and (not isinstance(r["package"], str) or not r["package"].strip()):
-            problems.append(f"{tag}: package must name a Debian source package")
+        if not isinstance(r.get("package"), str) or not r["package"].strip():
+            problems.append(f"{tag}: package must name the package it accepts (a Debian source "
+                            "package for an image record)")
+        if r.get("where") == IMAGE:
+            if "version" in r:
+                problems.append(f"{tag}: an image record names no version; it accepts only an "
+                                "advisory Debian has not fixed")
+        elif not isinstance(r.get("version"), str) or not r["version"].strip():
+            problems.append(f"{tag}: version must name the exact version it accepts (#4153)")
     return problems
 
 
 def apply_records(findings, records):
-    """Mark each failing finding a record accepts; return the records nothing used."""
+    """Mark each failing finding a record accepts; return the records nothing used. A record
+    accepts only its package, and outside the image only its exact version (#4153)."""
     used = set()
     for f in findings:
         names = {f["id"], *f["aliases"]}
         for n, r in enumerate(records):
             if (r["id"] in names and r.get("where", f["where"]) == f["where"]
-                    and r.get("package", f["module"]) == f["module"]):
+                    and r["package"] == f["module"] and r.get("version", f["version"]) == f["version"]):
                 f["accepted_by"] = r["issue"]
                 used.add(n)
                 break
@@ -392,6 +442,200 @@ def run_forks(where, target_dir, env=None, offline=False):
     return fork_findings(where, doc, forks)
 
 
+# Inlined copies (#4153): a package a bundler copied into another package's files. No lockfile
+# lists it, so the OSV lockfile scan cannot see it and an override cannot reach it. These marks
+# name one with its version:
+#   - a pnpm store path in a bundle's module marker or require key,
+#     node_modules/.pnpm/<name, "/" as "+">@<version>[_<peers>]/node_modules/<name>/;
+#   - in a license sidecar or notice, a "- <name>@<version>" or "%% <name>@<version>" line
+#     listing what a bundle holds, or a "Name: <name>" block with its "Version: <version>".
+PNPM_MARK = re.compile(rb"node_modules/\.pnpm/((?:@[\w.-]+\+)?[\w.-]+)@(\d[^_/\s\"'`]*)"
+                       rb"(?:_[^/\s\"'`]*)?/node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
+LIST_MARK = re.compile(r"^(?:- |%% )((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.+-]*)", re.M)
+NOTICE_MARK = re.compile(r"^Name: ((?:@[\w.-]+/)?[\w.-]+)[ \t]*\n(?:(?!Name:).*\n){0,8}?"
+                         r"Version: (\d[\w.+-]*)", re.M)
+SCRIPTS = (".js", ".mjs", ".cjs")
+NOTICE = re.compile(r"licen[cs]e|notice", re.I)
+NPM_LOCK = "package-lock.json"
+
+
+def at(spec):
+    """(name, version) of "name@version"; a scoped name keeps its leading @."""
+    name, _, version = spec.rpartition("@")
+    return name, version
+
+
+def lock_tarballs(lock, where):
+    """(name, version, resolved, integrity) of each tarball an npm lockfile installs, and the
+    entries it names none for. A bundled entry (inBundle) ships inside its parent's tarball,
+    and a link is a directory in the tree, so neither has a tarball of its own."""
+    packages = lock.get("packages")
+    if not packages:
+        return [], [f"{where}: no packages map (lockfileVersion 2 or 3), so the inlined scan reads nothing"]
+    out, problems = [], []
+    for key, e in packages.items():
+        if not key or e.get("inBundle") or e.get("link"):
+            continue
+        r, i = e.get("resolved", ""), e.get("integrity", "")
+        if not (r.startswith("https://") and i.startswith("sha512-")):
+            problems.append(f"{where}: {key} names no https tarball with a sha512 integrity, so "
+                            "the inlined scan cannot read it")
+            continue
+        out.append((e.get("name") or key.rpartition("node_modules/")[2], e.get("version", ""), r, i))
+    return out, problems
+
+
+def fetch_tarball(resolved, integrity, mirror=None):
+    """The tarball's bytes, which must match the lockfile's sha512 integrity. With a mirror
+    (the control's offline copies), it is read from the file of the URL's last name there."""
+    if mirror:
+        data = (pathlib.Path(mirror) / resolved.rpartition("/")[2]).read_bytes()
+    else:
+        try:
+            with urllib.request.urlopen(resolved, timeout=120) as resp:
+                data = resp.read()
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError(f"{resolved}: could not fetch it ({e})")
+    if hashlib.sha512(data).digest() != base64.b64decode(integrity.removeprefix("sha512-")):
+        raise ScanError(f"{resolved}: does not match the lockfile's integrity")
+    return data
+
+
+def tarball_marks(data, own):
+    """The files of a package tarball (without the leading package/), and for each inlined
+    copy its marks name, (name, version) -> the files that name it. OWN, the package itself,
+    is not a copy."""
+    files, marks = set(), {}
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
+        for m in t:
+            if not m.isfile():
+                continue
+            rel = m.name.partition("/")[2]
+            files.add(rel)
+            base = rel.rpartition("/")[2]
+            script, notice = base.endswith(SCRIPTS), bool(NOTICE.search(base))
+            if not (script or notice):
+                continue
+            body = t.extractfile(m).read()
+            found = []
+            if script:
+                found += [(n.decode(), v.decode()) for d, v, n in PNPM_MARK.findall(body)
+                          if d.decode().replace("+", "/") == n.decode()]
+            if notice:
+                text = body.decode("utf-8", "replace")
+                found += LIST_MARK.findall(text) + NOTICE_MARK.findall(text)
+            for k in found:
+                if k != own:
+                    marks.setdefault(k, set()).add(rel)
+    return files, marks
+
+
+def inlined_problems(entries):
+    """Shape problems in the config's "inlined" list: copies with no mark, each as
+    {holder: name@version, copy: name@version, files: [the holder's files holding it], why}."""
+    problems = []
+    for n, e in enumerate(entries):
+        tag = f"inlined[{n}]"
+        if not isinstance(e, dict):
+            problems.append(f"{tag}: not an object")
+            continue
+        if set(e) != INLINED_KEYS:
+            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)}")
+            continue
+        for k in ("holder", "copy"):
+            if not isinstance(e[k], str) or not all(at(e[k])):
+                problems.append(f"{tag}: {k} must be name@version")
+        if not isinstance(e["files"], list) or not e["files"] or not all(isinstance(f, str) and f for f in e["files"]):
+            problems.append(f"{tag}: files must list the holder's files that hold the copy")
+        if not isinstance(e["why"], str) or not e["why"].strip():
+            problems.append(f"{tag}: no reason (how the copy and its version were identified)")
+    return problems
+
+
+def inlined_copies(where, tarballs, entries, mirror=None):
+    """(name, version) -> the holders' files that hold it, for one lockfile's tarballs, with
+    the entries of the config's "inlined" that one of them holds; and the problems."""
+    copies, problems, held = {}, [], {}
+
+    def read(t):
+        name, version, resolved, integrity = t
+        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        for holder, (files, marks) in pool.map(read, tarballs):
+            held[holder] = files
+            for k, fs in marks.items():
+                copies.setdefault(k, set()).update(f"{holder}:{f}" for f in fs)
+    for e in entries:
+        if e["holder"] not in held:
+            continue
+        missing = sorted(set(e["files"]) - held[e["holder"]])
+        if missing:
+            problems.append(f"{where}: {e['holder']} has no {missing[0]}, which the inlined entry for "
+                            f"{e['copy']} names; requalify it")
+        copies.setdefault(at(e["copy"]), set()).update(f"{e['holder']}:{f}" for f in e["files"])
+    return copies, problems, set(held)
+
+
+def inlined_findings(where, doc, copies):
+    """Findings for one lockfile's inlined copies from an osv-scanner report of the custom
+    lockfile inlined_lockfile wrote, and the copies it did not report."""
+    found, scanned = [], set()
+    for res in doc.get("results") or []:
+        for pkg in res.get("packages") or []:
+            meta = pkg["package"]
+            k = (meta.get("name"), meta.get("version"))
+            if meta.get("ecosystem") != "npm" or k not in copies:
+                continue
+            scanned.add(k)
+            files = sorted(copies[k])
+            more = f" (+{len(files) - 1})" if len(files) > 1 else ""
+            for f in _vulns(pkg, where, f"npm:{k[0]} inlined in {files[0]}{more}", k[1]):
+                f["level"] = "inlined"
+                found.append(f)
+    problems = [f"{where}: the inlined scan reported nothing for {n}@{v}"
+                for n, v in sorted(set(copies) - scanned)]
+    return sorted(found, key=lambda x: (x["id"], x["module"], x["version"])), problems
+
+
+def inlined_lockfile(copies, path):
+    """osv-scanner's custom lockfile format, listing each inlined copy."""
+    pkgs = [{"package": {"name": n, "version": v, "ecosystem": "npm"}} for n, v in sorted(copies)]
+    pathlib.Path(path).write_text(json.dumps({"results": [{"source": {"path": "inlined", "type": "lockfile"},
+                                                           "packages": pkgs}]}))
+
+
+def run_inlined(root, lockfiles, entries, env=None, offline=False, mirror=None):
+    """Findings and problems for the inlined copies in the tarballs of each npm lockfile, and
+    an entry of the config's "inlined" whose holder no lockfile installs."""
+    findings, problems, holders = [], [], set()
+    for where in lockfiles:
+        try:
+            lock = json.loads((pathlib.Path(root) / where).read_text())
+        except (OSError, ValueError) as e:
+            raise ScanError(f"{where}: unreadable lockfile: {e}")
+        tarballs, probs = lock_tarballs(lock, where)
+        problems += probs
+        if not tarballs:
+            continue
+        copies, probs, held = inlined_copies(where, tarballs, entries, mirror)
+        problems += probs
+        holders |= held
+        if not copies:
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = pathlib.Path(tmp) / "osv-scanner.json"
+            inlined_lockfile(copies, lock_path)
+            doc = osv_scan(["source", "-L", f"osv-scanner:{lock_path}"], tmp, env, offline)
+        found, probs = inlined_findings(where, doc, copies)
+        findings += found
+        problems += probs
+    problems += [f"inlined: no lockfile installs {e['holder']}, so the entry for {e['copy']} checks "
+                 "nothing; requalify the holder's unmarked copies and update it" for e in entries
+                 if e["holder"] not in holders]
+    return findings, problems
+
+
 def image_archive(src, dest):
     """A one-layer docker-archive holding SRC's dpkg status and os-release where a Debian
     tree keeps them, the input osv-scanner's image scan reads: its dpkg extractor takes the
@@ -511,9 +755,10 @@ def run_image(src, env=None, offline=False):
     return image_findings(doc)
 
 
-def scan(config, root, go_db=None, osv_env=None, offline=False):
-    """Findings and problems for one tree; records applied, issues not checked."""
-    problems = record_problems(config.get("accepted", []))
+def scan(config, root, go_db=None, osv_env=None, offline=False, mirror=None):
+    """Findings and problems for one tree; records applied, issues not checked. MIRROR holds
+    the control's offline copies of the tarballs its lockfiles name."""
+    problems = record_problems(config.get("accepted", [])) + inlined_problems(config.get("inlined", []))
     records = [r for r in config.get("accepted", []) if r.get("where") != IMAGE]
     for key in ("go_targets", "osv_sources"):
         if not config.get(key):
@@ -527,11 +772,15 @@ def scan(config, root, go_db=None, osv_env=None, offline=False):
         forks, fork_problems = run_forks(t, d, osv_env, offline)
         findings += forks
         problems += fork_problems
-    osv, osv_problems = osv_findings(run_osv(root, osv_env, offline), root,
-                                     config.get("skip_paths", []), config["osv_sources"],
-                                     config["go_targets"])
+    doc = run_osv(root, osv_env, offline)
+    skip = config.get("skip_paths", [])
+    osv, osv_problems = osv_findings(doc, root, skip, config["osv_sources"], config["go_targets"])
     findings += osv
     problems += osv_problems
+    inlined, inlined_probs = run_inlined(root, npm_lockfiles(doc, root, skip), config.get("inlined", []),
+                                         osv_env, offline, mirror)
+    findings += inlined
+    problems += inlined_probs
     unused = apply_records([f for f in findings if f["fails"]], records)
     return findings, problems, unused
 
@@ -597,7 +846,7 @@ def control():
             with zipfile.ZipFile(eco / "all.zip", "w") as z:
                 for f in sorted((FIXTURE / "osvdb" / name).glob("*.json")):
                     z.write(f, f.name)
-        kw = dict(go_db=(FIXTURE / "godb").as_uri(), offline=True,
+        kw = dict(go_db=(FIXTURE / "godb").as_uri(), offline=True, mirror=FIXTURE / "tarballs",
                   osv_env={"OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY": tmp})
         bare = {**CONTROL_CONFIG, "accepted": []}
         findings, probs, _ = scan(bare, FIXTURE, **kw)
@@ -609,10 +858,17 @@ def control():
             problems.append(f"planted failures: want {sorted(CONTROL_FAILS)}, got {sorted(fails)}")
         if info != CONTROL_INFO:
             problems.append(f"unreachable non-vendored: want {sorted(CONTROL_INFO)}, got {sorted(info)}")
+        inlined = {(f["id"], f["module"], f["version"]) for f in findings if f["level"] == "inlined"}
+        if inlined != CONTROL_INLINED:
+            problems.append(f"inlined plants: want {sorted(CONTROL_INLINED)}, got {sorted(inlined)}")
         findings, probs, unused = scan(CONTROL_CONFIG, FIXTURE, **kw)
+        summary(findings, probs, unused)
         problems += [f"with records: {p}" for p in probs]
-        if not summary(findings, probs, unused) or unused:
-            problems.append("the fixture's records did not clear every planted failure")
+        failing = {(f["id"], f["module"], f["version"]) for f in findings if verdict(f) == "FAIL"}
+        if failing != CONTROL_STILL_FAILS or unused:
+            problems.append(f"the fixture's records must clear every planted failure but "
+                            f"{sorted(CONTROL_STILL_FAILS)}: still failing {sorted(failing)}, "
+                            f"unused {[r['id'] for r in unused]}")
 
         img = dict(osv_env=kw["osv_env"], offline=True)
         findings, probs, _ = scan_image(bare, FIXTURE / IMAGE, **img)
