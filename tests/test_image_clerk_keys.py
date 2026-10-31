@@ -199,6 +199,56 @@ class ClerkKeyTreeTest(unittest.TestCase):
         self.dropin(HOMEKIT, "[Service]\nUser=agentos-homekit\x00\n")
         self.assertTrue(any("never passes what it cannot read" in v for v in self.v()), self.v())
 
+    # REQ: NET-2
+    def test_an_allow_on_a_slice_above_a_home_only_clerk_is_refused(self):
+        # systemd applies every parent slice's allow list, and an allow beats the unit's deny (#4264 Security 6543099224).
+        for rel in ("agentos-keeper.slice.d/99-x.conf", "agentos.slice.d/99-x.conf", "-.slice.d/99-x.conf",
+                    "slice.d/99-x.conf", "agentos-.slice.d/99-x.conf"):
+            with self.subTest(rel):
+                write(self.root, "etc/systemd/system/" + rel, "[Slice]\nIPAddressAllow=any\n")
+                try:
+                    got = self.v()
+                    self.assertTrue(got and all("a home-only clerk's slices allow nothing (NET-2, #4210)" in g
+                                                for g in got), got)
+                    self.assertTrue(any(HOMEKIT in g for g in got) and any(CAMERA in g for g in got), got)
+                finally:
+                    (self.root / "etc/systemd/system" / rel).unlink()
+        self.assertEqual(self.v(), [])
+        self.assertEqual(check.parent_slices("agentos-keeper.slice"), ["-.slice", "agentos.slice", "agentos-keeper.slice"])
+
+    # REQ: CLK-1
+    def test_a_socket_whose_service_has_a_specifier_is_refused(self):
+        # Service=agentos-keeper-%N.service in mail.socket would start the mail clerk (#4264 Security 6543099224).
+        write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nService=agentos-keeper-%N.service\n")
+        self.assertEqual(self.v(), ["etc/systemd/system/mail.socket: Service=agentos-keeper-%N.service; a specifier may "
+                                    "expand to a keyed clerk, which the tree check does not model (#4210)"])
+        # The unlock unit's own socket rule refuses it too.
+        write(self.root, "etc/systemd/system/mail.socket", "[Socket]\nListenStream=/run/x\nService=agentos-keeper-%i.service\n")
+        self.assertIn("mail.socket: starts agentos-keeper-%i.service with its sockets; nothing reaches the unlock step "
+                      "past descriptor 2 (#2899)", check.keeper_violations(self.root))
+
+    # REQ: CLK-1
+    def test_a_numbered_user_manager_is_refused(self):
+        # user@.service's %i passes as a login's manager; an instance under a number the tree starts does not
+        # (#4264 L3 6543012125).
+        sysdir = self.root / "etc/systemd/system"
+        (sysdir / "multi-user.target.wants").mkdir(parents=True, exist_ok=True)
+        (sysdir / "multi-user.target.wants/user@998.service").symlink_to("/usr/lib/systemd/system/user@.service")
+        self.assertEqual(self.v(), ["etc/systemd/system/multi-user.target.wants/user@998.service: starts a per-user "
+                                    "manager under a uid, which may be a keyed clerk's (#4210)"])
+        (sysdir / "multi-user.target.wants/user@998.service").unlink()
+        write(self.root, "etc/systemd/system/x.service", "[Unit]\nWants=user@998.service\n")
+        self.assertEqual(self.v(), ["etc/systemd/system/x.service: Wants=user@998.service starts a per-user manager "
+                                    "under a uid, which may be a keyed clerk's (#4210)"])
+        (sysdir / "x.service").unlink()
+        write(self.root, "etc/systemd/system/user@998.service", "[Service]\n")
+        self.assertEqual(self.v(), ["etc/systemd/system/user@998.service: a per-user manager under a uid, which may be "
+                                    "a keyed clerk's (#4210)"])
+
+    def test_a_driver_entry_is_no_keeper_clerk(self):
+        # The kernel sends driver-<d> to the driver's template (clerkCgroup); the keeper's list follows it.
+        self.assertFalse([c for c in check.KEYED_CLERKS if "driver" in c])
+
     def test_the_whole_check_runs_it(self):
         self.dropin(HOMEKIT, "[Service]\nSockets=x.socket\n")
         self.assertIn("%s: Sockets=x.socket; a keyed clerk is handed no socket and has no alias (#4210)" % HOMEKIT,
