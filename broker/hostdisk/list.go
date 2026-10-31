@@ -137,7 +137,7 @@ func (s System) diskOf(dir string, depth int, out map[string]bool) bool {
 	if hasPrefix(name, stackedPrefix) {
 		return false // a dm or md device with no slaves yet: cannot tell
 	}
-	if _, err := os.Stat(filepath.Join(real, "partition")); err == nil {
+	if _, err := os.Lstat(filepath.Join(real, "partition")); err == nil {
 		name = filepath.Base(filepath.Dir(real))
 	}
 	out[name] = true
@@ -335,7 +335,7 @@ func (s System) Classify(name string) Class {
 	if !validName.MatchString(name) || hasPrefix(name, virtualPrefix) {
 		return ClassUnknown
 	}
-	if _, err := os.Stat(filepath.Join(s.Sys, "block", name)); err != nil {
+	if _, err := os.Lstat(filepath.Join(s.Sys, "block", name)); err != nil {
 		return ClassUnknown
 	}
 	disks := map[string]bool{}
