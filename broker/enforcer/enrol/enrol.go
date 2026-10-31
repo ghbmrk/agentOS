@@ -204,7 +204,6 @@ type Book struct {
 	tix   map[string]*ticket
 }
 
-// ticket is one enrolment between its code and its new passkey's tap.
 // ticket is one Begin waiting for its Finish. It is good only for the
 // state that issued it: every save drops all tickets.
 type ticket struct {
