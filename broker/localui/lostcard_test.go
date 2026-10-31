@@ -164,7 +164,12 @@ func TestLostCardNeedsTheTap(t *testing.T) {
 func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
-	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
+	// Every byte differs, so the page's split of the card (the key's bits,
+	// then the passphrase's seed) is pinned (Security on #4226).
+	bits := make([]byte, localapi.RecoveryCardLen)
+	for i := range bits {
+		bits[i] = byte(0x6b + 7*i)
+	}
 	r.f.lostCard, r.f.lostState = bytes.Clone(bits), localapi.RecoveryLostState{Ready: true}
 	if p := r.get("/recovery/"); !strings.Contains(p, `href="/recovery/new"`) {
 		t.Fatal("a ready card is not offered")
