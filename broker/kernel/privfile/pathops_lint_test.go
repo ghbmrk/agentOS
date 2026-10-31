@@ -22,8 +22,10 @@ package privfile
 //
 // Bound: an allow line's reason is held by review, as is a link planted
 // through a path the reason deems safe (a parent directory another uid can
-// write). Calls outside pathOps (os.Lstat, os.ReadDir, os.Symlink, os.Chtimes,
-// os.Truncate, os.CreateTemp, os.MkdirTemp, syscall and unix path calls), a
+// write). Every call outside pathOps (among them os.Lstat, os.ReadDir,
+// os.Symlink, os.Chtimes, os.Truncate, os.CreateTemp, os.MkdirTemp, os.DirFS,
+// os.CopyFS, filepath.EvalSymlinks, Glob and Walk, a unix socket's
+// net.Listen, and syscall and unix path calls), a
 // binary that a script rather than a unit or runKinds file starts (a listed
 // program's reason included), the properties a listed IMPORT{program} or a
 // udev builtin sets, a modprobe.d or sysctl.d file kept outside a directory
@@ -564,6 +566,8 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a binfmt.d file":               {extra + "usr/lib/binfmt.d/x.conf", "", `reads no such file`},
 		"a program udev finds by name":  {extra + "usr/lib/udev/agentos-side", "", `reads no such file`},
 		"a hwdb file":                   {extra + "etc/udev/hwdb.d/60-x.hwdb", "", `reads no such file`},
+		"an init.d script":              {extra + "etc/init.d/agentos-x", "", `reads no such file`},
+		"an rc.local":                   {extra + "etc/rc.local", "", `reads no such file`},
 		"a build into a generator dir":  {"image/build.sh", "go build -o \"$STAGE/usr/lib/systemd/system-generators/agentos-gen\" ./cmd/agentos-side\n", `a directory root runs whole`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
@@ -873,8 +877,10 @@ type runKind struct {
 // helper keys name a program the kernel runs as root; and any file in a
 // directory whose every file root runs (system and environment generators,
 // system-sleep and system-shutdown hooks, udev's own directory, where a
-// rule finds a bare name), registers as an interpreter (binfmt.d) or reads
-// for device properties (udev's hwdb.d, which can set SYSTEMD_WANTS, #4276).
+// rule finds a bare name, and init.d and rc.local, which systemd's sysv and
+// rc-local generators make root units of, should either come back),
+// registers as an interpreter (binfmt.d) or reads for device properties
+// (udev's hwdb.d, which can set SYSTEMD_WANTS, #4276).
 // The lint reads none of the last, so none may ship.
 var runKinds = []runKind{
 	{"udev rules file", func(rel string) bool { return strings.HasSuffix(rel, ".rules") }, rulePrograms},
@@ -886,7 +892,7 @@ var runKinds = []runKind{
 // runDirs are the directories, as path suffixes, of runKinds' last kind.
 var runDirs = []string{
 	"systemd/system-generators", "systemd/system-environment-generators", "systemd/system-sleep",
-	"systemd/system-shutdown", "binfmt.d", "lib/udev", "udev/hwdb.d",
+	"systemd/system-shutdown", "binfmt.d", "lib/udev", "udev/hwdb.d", "init.d",
 }
 
 // confIn matches a .conf file directly in a directory named dir, the only
@@ -895,8 +901,12 @@ func confIn(dir string) func(string) bool {
 	return func(rel string) bool { return strings.HasSuffix(rel, ".conf") && path.Base(path.Dir(rel)) == dir }
 }
 
-// inRunDir matches a file directly in one of runDirs; rel is slash-separated.
+// inRunDir matches a file directly in one of runDirs, or an rc.local;
+// rel is slash-separated.
 func inRunDir(rel string) bool {
+	if path.Base(rel) == "rc.local" {
+		return true
+	}
 	dir := "/" + path.Dir(rel)
 	for _, d := range runDirs {
 		if strings.HasSuffix(dir, "/"+d) {
