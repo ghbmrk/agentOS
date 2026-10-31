@@ -193,7 +193,8 @@ func (s *Store) Fingerprint(device string) ([pairseal.HashLen]byte, bool) {
 // Release is device's secret for p, only if p is the process that drives
 // device (Config.Process) and the add-device change it came with has
 // landed: the device is a safety-list device in the policy in force at or
-// above that version, and that change is no longer waiting. The caller gets its own copy.
+// above that version, and that change is no longer waiting. The caller
+// gets its own copy.
 func (s *Store) Release(device string, p Peer) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,10 +219,10 @@ func (s *Store) waiting(r record) bool {
 
 // Prune erases every secret that is neither waiting on its add-device
 // change nor landed with it: its device was removed or made everyday, or
-// its change was cancelled. The page calls it after every change it approves or cancels
-// and the daemon after every change that lands, under the policy lock, so
-// a cancelled secret is gone before another change could add a device of
-// the same name without one.
+// its change was cancelled. The page calls it after every change it
+// approves or cancels and the daemon after every change that lands, under
+// the policy lock, so a cancelled secret is gone before another change
+// could add a device of the same name without one.
 func (s *Store) Prune() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
