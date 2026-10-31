@@ -317,8 +317,8 @@ def _violations(root):
             + bluetooth_violations(root) + sysctl_byte_violations(root) + network_violations(root)
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
-            + noexec_violations(root) + keeper_violations(root) + assembly_violations(root)
-            + driver_violations(root))
+            + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
+            + assembly_violations(root) + driver_violations(root))
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of
@@ -1480,6 +1480,41 @@ FULL_PRIVILEGE_COMMANDS = (
     ("agentos-keeper-link-capture.service", "ExecStopPost", "+/usr/bin/sh -c '[ -e /var/lib/agentos-store/store ] || "
      "exec /usr/sbin/nft flush set inet agentos_inbound link'"),
 )
+# KEYS-route-by-cgroup (#4210): the kernel's command line, exactly as its unit ships it. The kernel
+# itself hands each -clerk-key entry's key only to that entry's own keeper unit (clerkCgroup in
+# broker/cmd/agentos-kernel), whatever the line says; this pin keeps the line, and with it every entry,
+# to the reviewed text, so no other -exec, flag, spelling or systemd rewriting reaches the unlock step.
+# It is compared, after every drop-in, to the one ExecStart= systemd reads, not parsed. A change to the
+# kernel's line changes this text in the same PR.
+KERNEL_EXEC_TEXT = b"""ExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store /var/lib/agentos-store/store \\
+        -recovery-request /var/lib/agentos/recovery-request \\
+        -clerk-anchors /run/agentos-keeper/anchors -log /var/lib/agentos-kernel/log \\
+        -uid @uid:agentos-kernel -gid @gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- \\
+        -log /var/lib/agentos-kernel/log -anchor-dir /var/lib/agentos-kernel/anchor \\
+        -keys-dir /var/lib/agentos-kernel/keys -content-dir /var/lib/agentos-kernel/content \\
+        -backup-dir /var/lib/agentos-kernel/backups \\
+        -owner-sock /run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner \\
+        -meter-sock /run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model \\
+        -clerk mail=/run/agentos-mail/kernel.sock,@uid:agentos-mail \\
+        -clerk-key mail=/run/agentos-kernel/key-mail.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service \\
+        -clerk-key camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service \\
+        -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \\
+        -link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link \\
+        -up /run/agentos-kernel/up
+"""
+KERNEL_EXEC = config_lines(b"[Service]\n" + KERNEL_EXEC_TEXT)[0][2]
+# The clerks the kernel hands a key to: each -clerk-key entry of that pinned line, whose unit is
+# KEEPER_PREFIX + its name + ".service" (the kernel's rule). Read from the constant, not the tree.
+_KW = KERNEL_EXEC.split()
+KEYED_CLERKS = tuple(KEEPER_PREFIX + _KW[i + 1].split("=", 1)[0] + ".service"
+                     for i in range(len(_KW) - 1) if _KW[i] == "-clerk-key")
+# The keyed clerks that reach the home network alone (NET-2): IPAddressDeny=any and only these allowed.
+HOME_ONLY_CLERKS = ("agentos-keeper-camera.service", "agentos-keeper-homekit.service")
+HOME_RANGES = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7",
+               "fe80::/10")
+# Stock units whose User= takes a specifier, with the one value each may set: systemd's per-user
+# manager, which logind starts for a login, and no clerk's user logs in (sysusers' nologin shell).
+SPECIFIER_USERS = (("user@.service", "%i"),)
 EXEC_KEYS = ("ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost", "ExecReload", "ExecStop",
              "ExecStopPost")
 TRUE_WORDS = ("1", "yes", "y", "true", "t", "on")
@@ -1639,6 +1674,127 @@ def keeper_path_violations(name, files):
         if not v.startswith("/") or ".." in norm.split("/") or not under(norm, KEEPER_PATHS):
             out.append("%s: %s=%s is outside the keeper's state (D-154)" % (name, k, v))
     return out
+
+
+def clerk_key_violations(root):
+    """KEYS-route-by-cgroup (#4210; CLK-1, NET-2), every unit read with all its drop-ins:
+    - The unlock unit (UNLOCK_UNITS) runs ExecStart=KERNEL_EXEC alone, byte for byte.
+    - A keyed clerk (KEYED_CLERKS) is handed no socket by the service manager: no Sockets=, no .socket
+      unit that names it in Service= or shares its name; and it has no alias, whose drop-ins the check
+      does not model (no link in a unit directory resolving to it, no [Install] Alias=).
+    - A keyed clerk runs under a User= of its own, named, not root: no unit file or drop-in in the tree
+      but the clerk's own file and its NAME.d sets that User=, and none sets a numeric User= (sysusers
+      allocates a clerk's uid at boot, so the check cannot tell a number from it) or one with a
+      specifier that could expand to a clerk's user or a number, but SPECIFIER_USERS.
+    - A HOME_ONLY_CLERKS clerk ends with IPAddressDeny=any and allows HOME_RANGES alone."""
+    root = str(root)
+    dirs, out = unit_dirs(root)
+
+    def unreadable(name, e):
+        out.append("%s: %s; the tree check never passes what it cannot read (#4210)" % (name, e))
+
+    try:
+        kernel = unit_with_dropins(root, dirs, UNLOCK_UNITS[0])
+        if kernel is not None and ini_entries(kernel, "Service", "ExecStart") != [KERNEL_EXEC]:
+            out.append("%s: ExecStart= is not the pinned kernel line (KERNEL_EXEC); the kernel's line and every "
+                       "-clerk-key entry change only with it (#4210)" % UNLOCK_UNITS[0])
+    except ValueError as e:
+        unreadable(UNLOCK_UNITS[0], e)
+    users = {}
+    for name in KEYED_CLERKS:
+        files = unit_with_dropins(root, dirs, name)
+        if files is None:
+            continue  # test_image_keeper checks the image ships each clerk; an absent one gets no key.
+        try:
+            for key in ("Sockets", "Alias"):
+                v = ini_words(files, "Install" if key == "Alias" else "Service", key)
+                if v:
+                    out.append("%s: %s=%s; a keyed clerk is handed no socket and has no alias (#4210)"
+                               % (name, key, " ".join(v)))
+            user = ini_last(files, "Service", "User") or ""
+            dynamic = (ini_last(files, "Service", "DynamicUser") or "").lower() in TRUE_WORDS
+            if user in ("", "root", "0") or user.isdigit() or any(c in user for c in "%$ ") or dynamic:
+                out.append("%s: User=%s; a keyed clerk runs under a named user of its own (#4210)" % (name, user))
+            else:
+                users.setdefault(user, []).append(name)
+            if name in HOME_ONLY_CLERKS:
+                deny = ini_words(files, "Service", "IPAddressDeny")
+                allow = ini_words(files, "Service", "IPAddressAllow")
+                if "any" not in deny or any(a not in HOME_RANGES for a in allow):
+                    out.append("%s: IPAddressDeny=%s IPAddressAllow=%s; a home-only clerk denies any and allows "
+                               "the home ranges alone (NET-2, #4210)" % (name, " ".join(deny), " ".join(allow)))
+        except ValueError as e:
+            unreadable(name, e)
+    for user, names in sorted(users.items()):
+        if len(names) > 1:
+            out.append("%s: User=%s is also %s's; a keyed clerk's user is its own (#4210)"
+                       % (names[1], user, names[0]))
+    clerk_users = {u: n[0] for u, n in users.items()}
+    for d in dirs:
+        for n in sorted(tree_listdir(root, d)):
+            rel = d + "/" + n
+            st = tree_lstat(root, rel)
+            if stat.S_ISDIR(st.st_mode):
+                if n.endswith(".d"):
+                    for f in conf_files(root, [rel]):
+                        out += clerk_user_violations(f, n[:-2], clerk_users)
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                try:
+                    target = tree_chase(root, rel)[0]
+                except OSError:
+                    continue  # Conf.content refuses it wherever systemd would read it.
+                if target == "/dev/null":
+                    continue  # a mask
+                if target.rsplit("/", 1)[-1] in KEYED_CLERKS and n != target.rsplit("/", 1)[-1]:
+                    out.append("%s: an alias of %s; the tree check does not model a keyed clerk's aliases (#4210)"
+                               % (rel, target.rsplit("/", 1)[-1]))
+                    continue
+                f = Conf(root, target)
+            else:
+                f = Conf(root, rel)
+            if n.endswith(".socket"):
+                svc = ini_last([f] + unit_with_dropins(root, dirs, n)[1:], "Socket", "Service") or \
+                    n[:-len(".socket")] + ".service"
+                for c in KEYED_CLERKS:
+                    if c in (svc, n[:-len(".socket")] + ".service"):
+                        out.append("%s: starts %s with its sockets; a keyed clerk is handed no socket, which its "
+                                   "IP list would not filter (#4210)" % (rel, c))
+            out += clerk_user_violations(f, n, clerk_users)
+    return out
+
+
+def clerk_user_violations(f, unit, clerk_users):
+    """clerk_key_violations' user rule for one unit file or drop-in F, which applies to UNIT (a drop-in
+    directory's unit, or a "-" prefix or a type, which apply to more than one)."""
+    try:
+        lines = config_lines(f.content())
+    except FileNotFoundError:
+        return []
+    except (OSError, Unparsable) as e:
+        return ["%s: unreadable (%s); the tree check never passes what it cannot read (#4210)"
+                % (f.rel, e.strerror if isinstance(e, OSError) else e)]
+    out = []
+    for s, k, v in lines:
+        if k != "User" or not v:
+            continue
+        if v in clerk_users and unit != clerk_users[v]:
+            out.append("%s: User=%s is %s's; no other unit runs as a keyed clerk's user (#4210)"
+                       % (f.rel, v, clerk_users[v]))
+        elif v.isdigit() and v != "0":
+            out.append("%s: User=%s; a number may be a keyed clerk's uid, which sysusers allocates at boot (#4210)"
+                       % (f.rel, v))
+        elif any(c in v for c in "%$") and (unit, v) not in SPECIFIER_USERS and specifier_reaches(v, clerk_users):
+            out.append("%s: User=%s may expand to a keyed clerk's user or a number (#4210)" % (f.rel, v))
+    return out
+
+
+def specifier_reaches(v, clerk_users):
+    """Whether User= value V, its specifiers and variables standing for any text, can be a keyed clerk's
+    user or a number."""
+    parts = re.split(r"%.|\$\{[^}]*\}|\$\w+|[%$]", v)
+    pat = re.compile(".*".join(re.escape(p) for p in parts) + r"\Z", re.S)
+    return any(pat.match(u) for u in clerk_users) or bool(pat.match("1"))
 
 
 # The other parsers that run with an empty root, as a driver does: the mail clerk's IMAP connection
