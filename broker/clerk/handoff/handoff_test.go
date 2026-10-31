@@ -727,7 +727,7 @@ func (a Approval) bodyUnchecked() []byte {
 // hands none. Any other length is refused at both ends. Revert mutant:
 // NewRecovery dropped from Wipe (the wipe check fails).
 func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
-	rec := bytes.Repeat([]byte{0x5a}, RecoveryLen)
+	rec := bytes.Repeat([]byte{0x5a}, CardKeyLen)
 	keys := testKeys()
 	keys.NewRecovery = rec
 	b, err := keys.Marshal()
@@ -740,7 +740,7 @@ func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	}
 	held := k.NewRecovery
 	k.Wipe()
-	if k.NewRecovery != nil || !bytes.Equal(held, make([]byte, RecoveryLen)) {
+	if k.NewRecovery != nil || !bytes.Equal(held, make([]byte, CardKeyLen)) {
 		t.Fatal("Wipe left the new recovery key")
 	}
 	if k, err := ReadKeys(pipeWith(t, get(t, testKeys().Marshal))); err != nil || k.NewRecovery != nil {
@@ -748,7 +748,7 @@ func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 	}
 	// Its length sits right after the slot.
 	o := bytes.Index(b, append([]byte{byte(len(SlotTPM))}, SlotTPM...)) + 1 + len(SlotTPM)
-	if b[o] != RecoveryLen || !bytes.Equal(b[o+1:o+1+RecoveryLen], rec) {
+	if b[o] != CardKeyLen || !bytes.Equal(b[o+1:o+1+CardKeyLen], rec) {
 		t.Fatalf("new recovery key not at %d", o)
 	}
 	splice := func(skip int, with ...byte) []byte {
@@ -757,15 +757,15 @@ func TestKernelKeysCarryTheNewRecovery(t *testing.T) {
 		return append(w, b[o+skip:]...)
 	}
 	for name, w := range map[string][]byte{
-		"short": splice(1+RecoveryLen, append([]byte{RecoveryLen - 1}, rec[1:]...)...),
-		"long":  splice(1+RecoveryLen, append([]byte{RecoveryLen + 1, 0}, rec...)...),
+		"short": splice(1+CardKeyLen, append([]byte{CardKeyLen - 1}, rec[1:]...)...),
+		"long":  splice(1+CardKeyLen, append([]byte{CardKeyLen + 1, 0}, rec...)...),
 		"none":  b[:o],
 	} {
 		if _, err := ReadKeys(pipeWith(t, w)); !errors.Is(err, ErrHandoff) {
 			t.Errorf("wire %s: got %v, want ErrHandoff", name, err)
 		}
 	}
-	for _, n := range []int{1, RecoveryLen - 1, RecoveryLen + 1} {
+	for _, n := range []int{1, CardKeyLen - 1, CardKeyLen + 1} {
 		k := testKeys()
 		k.NewRecovery = make([]byte, n)
 		if _, err := k.Marshal(); !errors.Is(err, ErrHandoff) {

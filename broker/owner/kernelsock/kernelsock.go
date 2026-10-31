@@ -532,8 +532,9 @@ var ErrNoRecoveryCard = errors.New("kernelsock: the kernel holds no new recovery
 // TestRecoveryCardReachesTheKernel keeps them the same.
 const noRecoveryCardText = "run: I hold no new recovery key to show; if you have not written down the new card, ask for one again"
 
-// RecoveryCard is the recovery key the unlock step made at this boot, 32
-// bytes, or ErrNoRecoveryCard.
+// RecoveryCard is the new card's bits the unlock step made at this boot
+// (handoff.CardKeyLen bytes, which card.RecoveryKeyText prints), or
+// ErrNoRecoveryCard.
 func (o Owner) RecoveryCard(ctx context.Context) ([]byte, error) {
 	var r struct {
 		Key []byte `json:"key"`
