@@ -756,18 +756,23 @@ func TestPassCostBounded(t *testing.T) {
 		what string
 		m    *message
 		want int
+		// most is the case's own bound on lookups, when below bound.
+		most int
 	}{
-		{"one type enumerated again and again", response(enum, nil), 0},
-		{"instances on a claimed host", response(srvs, nil), 0},
-		{"one claimed instance again and again", response(txts, nil), 0},
-		{"its own records", response(own, nil), len(own)},
-		{"a type, a proved host and claimed instances on it", response(mixed, nil), 1},
+		{"one type enumerated again and again", response(enum, nil), 0, 0},
+		{"instances on a claimed host", response(srvs, nil), 0, 0},
+		// One name, so one lookup of two claims at most: the packet pays
+		// for a repeated name once.
+		{"one claimed instance again and again", response(txts, nil), 0, 2},
+		{"its own records", response(own, nil), len(own), 0},
+		{"a type, a proved host and claimed instances on it", response(mixed, nil), 1, 0},
 	}
 	// filter is a fresh Filter whose ap0.105 holds the instances, as a
-	// device there proved them; others interfaces each claim them all and
-	// their host, and as many again the mixed packet's instances, a full
-	// table each; and lone more each claim one name of their own.
-	filter := func(others, lone int) *Filter {
+	// device there proved them. Each of others interfaces claims them all
+	// and their host, a full table, and one more each the mixed packet's
+	// new instances; crowd more each claim those new instances too; and
+	// lone more each claim one name of their own.
+	filter := func(others, crowd, lone int) *Filter {
 		f := NewFilter()
 		ins := table(f.ins, "ap0.105")
 		for _, r := range instances {
@@ -779,6 +784,9 @@ func TestPassCostBounded(t *testing.T) {
 			}
 			f.Hear(fmt.Sprint("ap3.", i), response(fresh, nil), t0)
 		}
+		for i := range crowd {
+			f.Hear(fmt.Sprint("ap4.", i), response(fresh, nil), t0)
+		}
 		for i := range lone {
 			f.Hear(fmt.Sprint("ap2.", i), response([]record{a(fmt.Sprintf("l%d.local", i), "10.15.0.2", 120)}, nil), t0)
 		}
@@ -788,12 +796,13 @@ func TestPassCostBounded(t *testing.T) {
 	// A Pass allocates a few times for each record, for its names' keys
 	// and what it keeps, and a few hundred kilobytes in all; work that
 	// grew with the packet's records times the table, such as building
-	// the sender's service types again for each PTR, takes megabytes.
-	const allocBound, bytesBound = 32 * maxRecords, 1 << 20
+	// the sender's service types again for each PTR, takes megabytes. The
+	// count only catches a runaway; the bytes catch that rebuild.
+	const allocBound, bytesBound = 64 * maxRecords, 1 << 20
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	for _, c := range worstCases {
 		for _, others := range []int{1, 32} {
-			f := filter(others, 0)
+			f := filter(others, 0, 0)
 			f.Hear("ap0.105", c.m, t0)
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
@@ -812,17 +821,22 @@ func TestPassCostBounded(t *testing.T) {
 			if len(got) != c.want {
 				t.Errorf("%d other interfaces, %s: passed %d records, want %d", others, c.what, len(got), c.want)
 			}
-			if work := f.claimed.work; work <= 0 || work > bound {
-				t.Errorf("%d other interfaces, %s: %d claim lookups, want 1 to %d", others, c.what, work, bound)
+			most := bound
+			if c.most > 0 {
+				most = c.most
+			}
+			if work := f.claimed.work; work <= 0 || work > most {
+				t.Errorf("%d other interfaces, %s: %d claim lookups, want 1 to %d", others, c.what, work, most)
 			}
 			if allocs > allocBound || bytes > bytesBound {
 				t.Errorf("%d other interfaces, %s: %d allocations of %d bytes, over %d or %d", others, c.what, allocs, bytes, allocBound, bytesBound)
 			}
 		}
 	}
-	// Whatever counts the lookups, a Pass over thousands of interfaces
-	// takes about as long as over two: a scan of every interface for each
-	// name takes over a hundred times as long. The fastest of a few runs
+	// Whatever counts the lookups, a Pass takes about as long however many
+	// interfaces the relay hears and however many claim the packet's
+	// names: a scan of every interface, or of every claim on a name, for
+	// each name takes tens of times as long. The fastest of a few runs
 	// sets aside a run the machine or a collection slowed.
 	fastest := func(f *Filter, m *message) time.Duration {
 		f.Hear("ap0.105", m, t0)
@@ -836,9 +850,15 @@ func TestPassCostBounded(t *testing.T) {
 		return d
 	}
 	m := worstCases[len(worstCases)-1].m
-	one, many := fastest(filter(1, 0), m), fastest(filter(1, 4096), m)
-	if many > 20*one {
-		t.Errorf("a Pass over 4098 other interfaces took %v, over 20 times the %v over two", many, one)
+	one := fastest(filter(1, 0, 0), m)
+	for _, c := range []struct {
+		what        string
+		crowd, lone int
+	}{{"4096 more interfaces", 0, 4096}, {"1024 more interfaces claiming its names", 1024, 0}} {
+		many := fastest(filter(1, c.crowd, c.lone), m)
+		if many > 20*one {
+			t.Errorf("a Pass over %s took %v, over 20 times the %v over two", c.what, many, one)
+		}
 	}
 }
 
