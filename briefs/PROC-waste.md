@@ -23,5 +23,5 @@ Work item: #4040. From Mark's waste sweep (2026-10-30) and his "A, one thread, f
 
 | # | Assumption | Basis | If it changes |
 |---|---|---|---|
-| PW-a1 | Every `*_allow.txt` checker reads its entries as an unordered set of lines. | `pathops_lint_test.go` and `tools/netguardcheck.py` match each line on its own. | A file whose order matters is renamed off the pattern. |
+| PW-a1 | Every `*_allow.txt` checker reads its entries as an unordered set of lines. | `pathops_lint_test.go`, `tools/netguardcheck.py` and `tools/srclint.py` match each line on its own, split on `\n` only. | A file whose order matters is renamed off the pattern. |
 | PW-a2 | A renumbered decision's only references live in the PR's own files or its body. | Rows cite each other by ID; the merge gates read base-tree rows only. | A gate that reads head-tree IDs re-checks the renumber. |

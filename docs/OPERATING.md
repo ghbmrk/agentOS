@@ -95,7 +95,7 @@ Checks run cheapest first; each stage sees only what passed the one before. A PR
 | 1. CI | all | GitHub Actions | the PR | checks; tier in the step summary | green |
 | 2. Mechanical checks | where useful | Haiku subagent, under 100k tokens | diff, markers, logs | notes in the PR | nothing flagged |
 | 3. L3 review | all | fresh session per PR (or per small batch of tier-C PRs); strongest model for tier A | diff, cited IDs, the brief | verdict in the PR (format below) | accept |
-| 4. Lens screen | A, B | fresh-context subagent of the L3 thread | §4 checklist below | a verdict comment per lens (shape below) | no blocker open |
+| 4. Lens screen | A, B | L3's fresh-context subagent, same model | §4 checklist below | a verdict comment per lens (shape below) | no blocker open |
 | 4a. Security section | A | separate fresh session, strongest model | the same | a verdict comment marked `security` | signed |
 | 5. Merge | all | the session that posts the last required accept on a green head arms auto-merge (§7); no separate merge worker | — | — | stages above passed |
 

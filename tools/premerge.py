@@ -352,14 +352,14 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
     """True when DECISIONS.md conflicted in the replay only where both sides appended table rows at one spot (an
     empty base section), and `head` keeps both sides' rows, every conflict in the same order: the reviewed rows
     first or main's first. Main's rows stay verbatim; a reviewed row may differ only in its first-cell ID (a
-    renumbering past main's rows, #4030), when no other file the PR changes names its old ID. Any other conflict,
-    line or order reads as changed."""
+    renumbering past main's rows, #4030), when no other file the PR changes, and no line of this one outside main's
+    rows and ID cells, names its old ID. Any other conflict, line or order reads as changed."""
     if path != "DECISIONS.md":
         return False
     text, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     if not text or not want:
         return False
-    out, block, side, conflicts = ([], []), None, 0, 0  # (line, reviewed side) pairs
+    out, block, side, conflicts = ([], []), None, 0, 0  # (line, side) pairs: True reviewed, False main's, None outside
     for line in text.splitlines(keepends=True):
         bare = line.rstrip(b"\n")
         if block is None:
@@ -367,7 +367,7 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
                 block, side = ([], []), 0
             else:
                 for o in out:
-                    o.append((line, False))
+                    o.append((line, None))
         elif side == 0 and bare.startswith(b"||||||| "):
             side = 1  # base section: must stay empty
         elif side == 1 and bare == b"=======":
@@ -385,18 +385,25 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
     lines = want.splitlines(keepends=True)
     for o in out:
         old = set()
-        if len(o) == len(lines) and all(x == y or (mine and ROW_ID.sub(b"|#|", x) == ROW_ID.sub(b"|#|", y)
+        if len(o) == len(lines) and all(x == y or (mine and ROW_ID.match(x) and ROW_ID.match(y)
+                                                   and ROW_ID.sub(b"|#|", x) == ROW_ID.sub(b"|#|", y)
                                                    and not old.add(ROW_ID.match(x).group().strip(b"| ")))
                                         for (x, mine), y in zip(o, lines)):
-            return not old or not _cited(cwd, onto, head, old, path)
+            # The PR's rows and lines outside main's rows, read without ID cells, must not name an old ID (#4041).
+            rest = b"".join(ROW_ID.sub(b"|#|", y) for (_, mine), y in zip(o, lines) if mine is not False)
+            return not old or not (_names(old, rest) or _cited(cwd, onto, head, old, path))
     return False
 
 
 def _cited(cwd, onto, head, ids, path):
     """True when a file other than `path` that onto..head changes names one of `ids` as a word in `head`."""
-    word = re.compile(rb"(?<![\w-])(?:" + b"|".join(map(re.escape, sorted(ids))) + rb")(?![\w-])")
     files = [f for f in _git(cwd, *DIFF, onto, head).decode(errors="surrogateescape").split("\0") if f and f != path]
-    return any(word.search(_git(cwd, "show", f"{head}:{f}", ok=(0, 128))) for f in files)
+    return any(_names(ids, _git(cwd, "show", f"{head}:{f}", ok=(0, 128))) for f in files)
+
+
+def _names(ids, text):
+    """True when `text` names one of `ids` as a word."""
+    return bool(re.search(rb"(?<![\w-])(?:" + b"|".join(map(re.escape, sorted(ids))) + rb")(?![\w-])", text))
 
 
 def _lines_kept(cwd, tree, head, path, reviewed, onto):
@@ -408,7 +415,8 @@ def _lines_kept(cwd, tree, head, path, reviewed, onto):
     bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
     if len(bases) != 1 or not _same_mode(cwd, tree, head, path):
         return False
-    pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).splitlines())
+    # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
+    pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
                           for t in (reviewed, bases[0], onto, head))
     return main + (pr - mb) - (mb - pr) == want
 

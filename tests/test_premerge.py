@@ -157,6 +157,15 @@ class PremergeTest(unittest.TestCase):
         self.write("note.md", "Per D-4, the PR does this.\n")
         self.commit("cite the new ID")
         self.assertEqual(sorted(self.check(reviewed)), ["note.md"])
+        # A reviewed row that cites another reviewed row's old ID, or any row whose ID cell was dropped, reads changed.
+        for main, pr, rows in (("| D-2 | main |\n| D-3 | main2 |\n", "| D-2 | mine |\n| D-3 | amends D-2 |\n",
+                                "| D-2 | main |\n| D-3 | main2 |\n| D-4 | mine |\n| D-5 | amends D-2 |\n"),
+                               ("| D-2 | main |\n", "| D-3 | mine |\n", "| D-2 | main |\n|#| mine |\n")):
+            with self.subTest(rows=rows):
+                self.setUp()
+                reviewed = self.decisions_conflict(main="| D-1 | base |\n" + main, pr="| D-1 | base |\n" + pr)
+                self.resolve("DECISIONS.md", rows)
+                self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
 
     def allow_conflict(self):
         """The PR drops the last line of x_allow.txt while main appends after it (#3991); returns the reviewed head."""
@@ -193,6 +202,23 @@ class PremergeTest(unittest.TestCase):
                 self.write("x_allow.txt", text)
                 self.commit("resolved")
                 self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+        # The readers split on \n only, so a reviewed line holding \r is one entry; splitting it adds an unreviewed one.
+        self.setUp()
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# h\nallow a\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "# h\nallow a\nallow p why\rallow q why\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# h\nallow a\nallow m\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                       cwd=self.r, capture_output=True)
+        self.write("x_allow.txt", "# h\nallow a\nallow m\nallow p why\nallow q why\n")
+        self.commit("resolved")
+        self.assertEqual(self.check(reviewed), ["x_allow.txt"])
 
     def test_a_list_not_named_allow_keeps_line_order(self):
         reviewed = self.pr()
