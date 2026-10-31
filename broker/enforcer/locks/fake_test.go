@@ -209,6 +209,17 @@ func (r *radio) unlocked(device string) bool {
 	return r.locks[device].unlocked
 }
 
+// acts is every unlock and disarm the radio was asked for.
+func (r *radio) acts() []string {
+	var out []string
+	for _, c := range r.did() {
+		if strings.HasPrefix(c, "unlock ") || strings.HasPrefix(c, "disarm ") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (r *radio) did() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

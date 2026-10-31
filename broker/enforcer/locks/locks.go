@@ -262,27 +262,31 @@ func (g *Gate) Act(ctx context.Context, device string, a action.Act, route strin
 	g.expect[device+"\x00"+strconv.Itoa(int(report))] = now.Add(expectFor)
 	g.mu.Unlock()
 	err := ctx.Err()
-	if err == nil {
+	sent := err == nil
+	if sent {
 		err = g.cfg.Driver.Act(ctx, device, a, "")
 	}
 	g.mu.Lock()
-	if report == Unlocked {
+	if sent && report == Unlocked {
 		// A relock that ran while the unlock was on its way may have
 		// landed first, so the unlock's own relock is due again from when
 		// the unlock returned, whatever the answer.
 		g.unlockAt(device, g.cfg.Now().Add(RelockAfter))
 	}
 	if err != nil {
-		// The act may still have reached the device (action.Actuator), so
-		// the lock's own report of it must be told, not taken as ours.
+		// Nothing was sent, or the act may still have reached the device
+		// (action.Actuator): either way a report of it from now on is told,
+		// not taken as ours.
 		delete(g.expect, device+"\x00"+strconv.Itoa(int(report)))
 	}
 	g.mu.Unlock()
-	if err != nil {
-		return err
+	if sent {
+		// Told on an error too: a report that came before the error was
+		// taken as ours. A doubled line is cheap; a missing 03:00 text is
+		// not.
+		g.told(device, report, unusual)
 	}
-	g.told(device, report, unusual)
-	return nil
+	return err
 }
 
 // told logs an unlock, disarm or relock of device, and texts an unlock or
@@ -626,13 +630,20 @@ func (g *Gate) relock(l string, now time.Time) {
 	cancel()
 	g.mu.Lock()
 	if err != nil {
-		delete(g.expect, l+"\x00"+strconv.Itoa(int(Locked)))
+		// The lock may have locked anyway: a report of it from now on is
+		// told, and one that came first, taken as ours, is told here.
+		k := l + "\x00" + strconv.Itoa(int(Locked))
+		_, unreported := g.expect[k]
+		delete(g.expect, k)
 		g.due[l] = now.Add(retryAfter)
 		first := !g.failed[l]
 		g.failed[l] = true
 		g.mu.Unlock()
 		if first {
 			g.cfg.Log(fmt.Sprintf("locks: relocking %s failed, trying again: %v", l, err))
+		}
+		if !unreported {
+			g.told(l, Locked, false)
 		}
 		return
 	}

@@ -875,3 +875,98 @@ func TestUnlockInFlightDuringRelockStillRelocks(t *testing.T) {
 		t.Errorf("front stays unlocked 10 minutes after the owner's unlock landed: %v", r.radio.did())
 	}
 }
+
+// An unlock or disarm whose lock reports it before the driver's error
+// returns is still told: the report was taken as the enforcer's own act,
+// so the failed act tells itself (combined delta on #4287, point 2).
+func TestFailedActReportedFirstIsStillTold(t *testing.T) {
+	for _, c := range []struct {
+		device string
+		act    action.Act
+		report locks.Report
+		text   alert.Kind
+	}{{"front", action.Unlock, locks.Unlocked, alert.UnusualUnlock}, {"alarm", action.Disarm, locks.Disarmed, alert.UnusualDisarm}} {
+		r := newRig(t, at(3, 0))
+		if err := r.second(c.device, c.act); err != nil {
+			t.Fatal(err)
+		}
+		entered, release := make(chan struct{}), make(chan struct{})
+		r.radio.holdAct = func() { close(entered); <-release }
+		r.radio.actFails = errors.New("link dropped after the write")
+		errc := make(chan error, 1)
+		go func() { errc <- r.gate.Act(context.Background(), c.device, c.act, "") }()
+		<-entered
+		r.gate.Seen(locks.Event{Device: c.device, Report: c.report}) // the device did it
+		r.tick()
+		close(release)
+		if err := <-errc; err == nil {
+			t.Fatal("a failed act reported success")
+		}
+		r.gate.WaitTold()
+		if !r.alerts.has(c.text) {
+			t.Errorf("a 03:00 %s reported before its error was never texted: %v", c.act, r.alerts.kinds)
+		}
+	}
+	// An act whose context had ended sends nothing and tells nothing.
+	r := newRig(t, at(10, 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := r.gate.Act(ctx, "front", action.Unlock, ""); err == nil {
+		t.Fatal("an act with an ended context ran")
+	}
+	r.gate.WaitTold()
+	if len(r.radio.acts()) != 0 || r.alerts.has(alert.RoutineUnlock) {
+		t.Errorf("an act with an ended context reached the radio or was told: %v %v", r.radio.did(), r.alerts.kinds)
+	}
+}
+
+// An unlock that started before a due relock began and whose command
+// lands after the lock command is relocked after its own interval
+// (combined delta on #4287, point 1).
+func TestUnlockStartedBeforeRelockLandsAfter(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.set(at(10, 0).Add(locks.RelockAfter - time.Second))
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.radio.holdAct = func() { close(entered); <-release }
+	errc := make(chan error, 1)
+	go func() { errc <- r.gate.Act(context.Background(), "front", action.Unlock, "") }()
+	<-entered
+	r.radio.holdAct = nil
+	r.clock.add(time.Second)
+	r.gate.Tick(r.doc)
+	r.gate.WaitWork()
+	close(release)
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+	r.clock.add(10 * time.Minute)
+	r.tick()
+	if r.radio.unlocked("front") {
+		t.Errorf("door still unlocked 10 minutes after the second unlock: %v", r.radio.did())
+	}
+}
+
+// A relock whose lock reports "locked" before the error returns still
+// logs the lock.
+func TestFailedRelockReportedFirstIsLogged(t *testing.T) {
+	r := newRig(t, at(10, 0))
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.add(locks.RelockAfter)
+	r.radio.afterLock = func() {
+		r.gate.Seen(locks.Event{Device: "front", Report: locks.Locked})
+		r.gate.Tick(r.doc) // takes the report as the relock's own
+	}
+	r.radio.fail = errors.New("answer lost")
+	r.gate.Tick(r.doc)
+	r.gate.WaitWork()
+	r.radio.fail, r.radio.afterLock = nil, nil
+	r.gate.WaitTold()
+	if !r.alerts.has(alert.RoutineLock) {
+		t.Errorf("a relock reported before its error was not logged: %v", r.alerts.kinds)
+	}
+}
