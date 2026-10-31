@@ -48,10 +48,6 @@ allow evals/slice-inbox/
 # (D-198). Remove once #4051 merges.
 exempt-pr 4051
 
-# #4088 (ENF-i, #3667): broker/enforcer/traffic/, which the G2 list does not name (D-198). Remove
-# once #4088 merges.
-exempt-pr 4088
-
 # #4127 (ENF-k2, #3906): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
 # Remove once #4127 merges.
 exempt-pr 4127
@@ -59,10 +55,6 @@ exempt-pr 4127
 # #4125 (ENF-t, #3702): broker/enforcer/radio/ (with radio/thread/ and radio/confine/), which the G2
 # list does not name (D-198). Remove once #4125 merges.
 exempt-pr 4125
-
-# #4122 (ENF-r-follow, #4119): broker/enforcer/devsecret/, page/ and pairseal/, which the G2 list
-# does not name (D-198). Remove once #4122 merges.
-exempt-pr 4122
 
 # #4132 (ENF-names-b): broker/enforcer/channel/, which the G2 list does not name (D-198).
 # Remove once #4132 merges.
@@ -87,6 +79,10 @@ exempt-pr 4145
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
+
+# #4171 (ENF-r-follow-2): broker/enforcer/devsecret/, which the G2 list does not name (D-198).
+# Remove once #4171 merges.
+exempt-pr 4171
 
 # Project machinery and records.
 allow .claude/
