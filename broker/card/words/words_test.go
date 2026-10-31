@@ -69,3 +69,35 @@ func TestFromCardKey(t *testing.T) {
 // vector is FromCardKey of twenty 0x5a bytes, computed apart from this code
 // (RFC 5869 HKDF-SHA256 in Python's hmac, the same draw).
 const vector = "vagrancy swiftness tactile unaired unsightly certify cringe"
+
+// The draw itself, on streams made to hit its edges: a value of exactly
+// 8*Count is skipped and the one below it is kept; a stream that runs out,
+// even mid-pair, gives no phrase; the phrase is built in one allocation
+// sized for the longest seven words, so no partial copy is left behind.
+// Catches a boundary off by one (a biased word, or a read past the stream)
+// and an undersized buffer that reallocates and leaves a copy.
+func TestPhraseDraw(t *testing.T) {
+	pair := func(v int) []byte { return []byte{byte(v >> 8), byte(v)} }
+	var s []byte
+	s = append(s, pair(8*Count)...)   // skipped
+	s = append(s, pair(8*Count-1)...) // kept: word Count-1
+	for i := range PerPassphrase - 1 {
+		s = append(s, pair(i)...)
+	}
+	out, ok := phrase(s)
+	ws := strings.Split(string(out), " ")
+	if !ok || len(ws) != PerPassphrase || ws[0] != Word(Count-1) || ws[1] != Word(0) || ws[PerPassphrase-1] != Word(PerPassphrase-2) {
+		t.Fatalf("phrase = %q, %v", out, ok)
+	}
+	if longest != 9 || cap(out) != PerPassphrase*(longest+1) {
+		t.Fatalf("longest word %d, buffer %d", longest, cap(out))
+	}
+	// Every value rejected, with an odd byte left over: no phrase.
+	if out, ok := phrase(bytes.Repeat([]byte{0xff}, 15)); ok || out != nil {
+		t.Fatalf("a rejected stream gave %q", out)
+	}
+	// Six words and half a pair: no phrase.
+	if out, ok := phrase(append(s[2:2+2*(PerPassphrase-1)], 0)); ok || out != nil {
+		t.Fatalf("a short stream gave %q", out)
+	}
+}

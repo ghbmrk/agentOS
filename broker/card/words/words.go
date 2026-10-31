@@ -77,10 +77,20 @@ func FromCardKey(cardKey []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	out, ok := phrase(s)
+	if !ok {
+		return nil, ErrCardKey
+	}
+	return out, nil
+}
+
+// phrase draws PerPassphrase words from s, two bytes a word, skipping a
+// value at or past 8*Count; ok is false if s runs out first.
+func phrase(s []byte) (out []byte, ok bool) {
 	// Sized for the longest phrase, so no partial copy is left behind.
-	out := make([]byte, 0, PerPassphrase*(longest+1))
+	out = make([]byte, 0, PerPassphrase*(longest+1))
 	n := 0
-	for i := 0; i < len(s) && n < PerPassphrase; i += 2 {
+	for i := 0; i+1 < len(s) && n < PerPassphrase; i += 2 {
 		v := int(s[i])<<8 | int(s[i+1])
 		if v >= 8*Count {
 			continue
@@ -93,7 +103,7 @@ func FromCardKey(cardKey []byte) ([]byte, error) {
 	}
 	if n < PerPassphrase {
 		clear(out)
-		return nil, ErrCardKey
+		return nil, false
 	}
-	return out, nil
+	return out, true
 }
