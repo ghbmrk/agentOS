@@ -12,7 +12,9 @@ package privfile
 // call that follows links (pathOps) fails unless it is os.OpenFile with
 // O_NOFOLLOW, goes through privfile, or has an allow line in
 // pathops_allow.txt naming the file, the function and the call, with a
-// reason a review checks.
+// reason a review checks. A udev rule runs its RUN+=, PROGRAM== and
+// IMPORT{program}= programs as root, so the binaries those name count too
+// (#3950).
 //
 // Bound: an allow line's reason is held by review, as is a link planted
 // through a path the reason deems safe (a parent directory another uid can
@@ -229,6 +231,57 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	})
 }
 
+func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
+	files := map[string]string{
+		"broker/side/side.go":                    "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
+		"broker/cmd/agentos-side/main.go":        "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
+		"image/mkosi/agentos-side.service":       "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
+		"broker/side/udev/59-agentos-side.rules": "# RUN+=\"/usr/lib/agentos/agentos-side %k\"\nACTION==\"remove\", GOTO=\"end\"\n",
+	}
+	set := func(t *testing.T, files map[string]string) []string {
+		t.Helper()
+		bins, err := rootBinaries(fakeRepo(t, files))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bins
+	}
+	if bins := set(t, files); len(bins) != 0 {
+		t.Fatalf("a commented rule and a unit with User=: got %q, want none", bins)
+	}
+	for name, rule := range map[string]string{
+		"RUN+=":              "ACTION==\"add\", RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
+		"RUN{program}+=":     "RUN{program}+=\"/usr/lib/agentos/agentos-side\"\n",
+		"IMPORT{program}=":   "ENV{DEVTYPE}==\"disk\", IMPORT{program}=\"/usr/lib/agentos/agentos-side classify %k\"\n",
+		"PROGRAM==":          "PROGRAM==\"/usr/lib/agentos/agentos-side %k\", SYMLINK+=\"x\"\n",
+		"a wrapper's word":   "RUN+=\"/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side\"\n",
+		"a continued line":   "ACTION==\"add\", \\\n  RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+		"a rule under image": "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := clone(files)
+			path := "broker/side/udev/59-agentos-side.rules"
+			if name == "a rule under image" {
+				path = "image/mkosi/rules.d/60-x.rules"
+			}
+			files[path] = rule
+			if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+				t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
+			}
+			if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+				t.Fatalf("the rule's binary linked package: got %q, want its os.Remove refused", problems)
+			}
+		})
+	}
+	t.Run("a program that is no broker binary", func(t *testing.T) {
+		files := clone(files)
+		files["broker/side/udev/59-agentos-side.rules"] = "RUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\n"
+		if bins := set(t, files); len(bins) != 0 {
+			t.Fatalf("got %q, want none", bins)
+		}
+	})
+}
+
 func TestStaleAllowEntryFails(t *testing.T) {
 	files := map[string]string{"broker/side/side.go": "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n"}
 	for name, line := range map[string]string{
@@ -387,7 +440,8 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 }
 
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
-// of the binaries a unit under image/ starts as root.
+// of the binaries a unit under image/ starts as root, or a udev rule under
+// image/ or broker/ runs (udev runs as root).
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file name -> path
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
@@ -463,11 +517,65 @@ func rootBinaries(root string) ([]string, error) {
 			}
 		}
 	}
+	rules, err := ruleBinaries(root, pkgs)
+	if err != nil {
+		return nil, err
+	}
+	for _, pkg := range rules {
+		seen[pkg] = true
+	}
 	var out []string
 	for pkg := range seen {
 		out = append(out, pkg)
 	}
 	sort.Strings(out)
+	return out, nil
+}
+
+// udevProgram matches the keys whose value udev runs: RUN, PROGRAM and
+// IMPORT{program}.
+var udevProgram = regexp.MustCompile(`\b(?:RUN(?:\{\w+\})?|PROGRAM|IMPORT\{program\})\s*[+:!=]+\s*"([^"]*)"`)
+
+// ruleBinaries returns the packages of the binaries the udev rules under
+// image/ and broker/ run, by an absolute path in a RUN, PROGRAM or
+// IMPORT{program} value.
+func ruleBinaries(root string, pkgs map[string]string) ([]string, error) {
+	var out []string
+	for _, dir := range []string{"image", "broker"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return filepath.SkipDir
+				}
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(p, ".rules") {
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			// A trailing backslash continues a rule onto the next line.
+			text := strings.ReplaceAll(string(b), "\\\n", " ")
+			for _, line := range strings.Split(text, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					continue
+				}
+				for _, m := range udevProgram.FindAllStringSubmatch(line, -1) {
+					for _, word := range strings.Fields(m[1]) {
+						if pkg, ok := pkgs[filepath.Base(word)]; ok && strings.HasPrefix(word, "/") {
+							out = append(out, pkg)
+						}
+					}
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	return out, nil
 }
 

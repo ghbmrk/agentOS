@@ -160,3 +160,13 @@ allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a l
 allow broker/netguard/netlink.go routeGateway os.ReadFile /proc/net/route, served by the kernel; no uid plants a link in procfs
 allow broker/netguard/sources.go Sources.ReadLocal os.ReadFile its only root-side reader is the e2e/boxe2e harness (no root binary links netguard); procfs route, neighbour and ipv6_route tables are served by the kernel, and /etc/resolv.conf must follow its stock link into systemd-resolve's /run/systemd/resolve, image/ASSUMPTIONS.md I23's named exception: readers parse it as resolver configuration, and resolved already answers every DNS query
 allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, found by Discover under root-owned devtmpfs /dev, where udev's /dev/serial/by-id links are legitimate; the in-image e2e run reaches its pty through the sysroot's dev/ttyUSB2 link (boxe2e/sysroot.go), so the open must follow it; its only root-side caller, boxe2e, opens /dev/pts/N in kernel-served devpts
+
+# broker/hostdisk (#3950): the host-disk helper agentos-hostdisk that the udev rules run as root. Every
+# path is under /sys, /proc or /dev (System.Sys, Mountinfo, Dev), none of which any uid can plant a link
+# in; a removable disk's own contents are never opened by path, only the block node is read.
+allow broker/hostdisk/list.go openReadOnly os.OpenFile a block node under /dev (devtmpfs, root-only), read-only; a removable disk's contents hold no link on this path
+allow broker/hostdisk/list.go System.readTrim os.ReadFile an attribute of a /sys/block entry; sysfs lets no uid make a link
+allow broker/hostdisk/list.go System.diskOf os.Stat the partition attribute of a resolved /sys/block entry, in sysfs, where no uid can make a link
+allow broker/hostdisk/list.go System.mounts os.Open /proc/self/mountinfo, in procfs, where no uid can make a link
+allow broker/hostdisk/list.go System.loaderPartition os.ReadFile an EFI variable in efivarfs under /sys/firmware/efi, where no uid can make a link
+allow broker/hostdisk/list.go System.Classify os.Stat a /sys/block entry, in sysfs, where no uid can make a link
