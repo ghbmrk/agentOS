@@ -1,0 +1,31 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-INLINED-4",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "GHSA-0000-0000-0104"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py's inlined scan (a copy an unversioned module key marks, whose version a sidecar gives, inlined again in a file an inlined bundle entry names); not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "agentos-bare",
+    "ecosystem": "npm"
+   },
+   "ranges": [
+    {
+     "type": "SEMVER",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "4.0.1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
