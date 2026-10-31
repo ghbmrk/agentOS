@@ -701,6 +701,51 @@ func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	}
 }
 
+// A honey key at Extend on a plan extended once and held again pauses the
+// earlier extension's whole chain, the envelope's root and links included,
+// and the key funding the hold, as well as the plan's scope (KRN-12
+// Response, KEY-6). Catches an owner-side trip that leaves the envelope
+// funding a held plan live while planning is stopped (#4241).
+func TestHoneyKeyAtExtendPausesTheEarlierExtension(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	env := envelope(r, 500, 800)
+	exhaust(r, "t1", 100)
+	ext := extension(r, env, key.LimitSpendTask(300))
+	must(t, r.k.Extend(3, ext, "t1"))
+	must(t, r.meter(4, "t1", "api", 300, "provider"))
+	rf := r.admit(5, "t1", 1)
+	if rf == nil {
+		t.Fatal("the extension should be used up")
+	}
+	must(t, r.k.Hold(5, "t1", rf))
+	h := r.k.State().SpendHeld["t1"]
+	if h.Funding != ext.Tip() {
+		t.Fatalf("the hold is funded by %s, want the extension %s", h.Funding, ext.Tip())
+	}
+	_, hk, _ := honeyKey(t, tb, "t1")
+	if err := r.k.Extend(6, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+		t.Fatalf("a honey key extending t1 again: %v", err)
+	}
+	tr := r.trips(1, 1)
+	var want []key.ID
+	for i := 0; i <= len(ext.Links); i++ {
+		want = append(want, key.Key{Root: ext.Root, Links: ext.Links[:i]}.Tip())
+	}
+	want = append(want, key.Key{Root: env.Root}.Tip(), env.Tip(), h.Funding)
+	want = append(want, r.k.State().Plans["t1"].Scopes...)
+	ch := r.k.State().Changes
+	for _, id := range want {
+		if !ch.Paused[id] || !slices.Contains(tr.Scopes, id) {
+			t.Fatalf("%s not paused by %v", id, tr.Scopes)
+		}
+	}
+	if rf := r.admit(7, "t1", 1); rf == nil {
+		t.Fatal("the paused extension still funds t1")
+	}
+}
+
 // fullText is the full response's text, from a host value's trip.
 func (r *rig) fullText(t *testing.T) string {
 	r2 := newRig(t)
@@ -710,9 +755,11 @@ func (r *rig) fullText(t *testing.T) string {
 }
 
 // No recorded input alone pauses a key: a trip entry at the kernel's exit,
-// a trip.owner entry whose key is no honey key, and one whose trip is not
-// the one its key derives fold nothing, and Rederive reports each (KRN-6).
-// Catches a forged entry pausing the owner's keys or stopping planning.
+// a trip.owner entry whose key is no honey key, one whose trip is not the
+// one its key derives, and one whose body is not the one the kernel logs
+// fold nothing, and Rederive reports each (KRN-6); the derived one folds and
+// Rederive accepts it. Catches a forged entry pausing the owner's keys or
+// stopping planning, and a body the fold takes that Rederive reports.
 func TestOwnerTripIsDerivedAgain(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
@@ -732,6 +779,7 @@ func TestOwnerTripIsDerivedAgain(t *testing.T) {
 		"owner trip, no honey key": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, cb, full(r.ck.Tip()))),
 		"owner trip, forged scope": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(r.ck.Tip()))),
 		"owner trip, unknown op":   forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"pause","key":%s,"trip":%s}`, hb, full(honey.Tip()))),
+		"owner trip, extra field":  forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s,"x":1}`, hb, full(honey.Tip()))),
 	} {
 		re, err := kernel.Replay(r.anchors(), es)
 		must(t, err)
@@ -743,10 +791,14 @@ func TestOwnerTripIsDerivedAgain(t *testing.T) {
 			t.Fatalf("%s: rederive %v", name, err)
 		}
 	}
-	re, err := kernel.Replay(r.anchors(), forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(honey.Tip()))))
+	derived := forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(honey.Tip())))
+	re, err := kernel.Replay(r.anchors(), derived)
 	must(t, err)
 	if !re.Tripped() {
 		t.Fatal("the derived owner trip did not fold")
+	}
+	if _, err := kernel.Rederive(r.anchors(), r.k.Box(), derived); err != nil {
+		t.Fatalf("the derived owner trip: rederive %v", err)
 	}
 }
 
