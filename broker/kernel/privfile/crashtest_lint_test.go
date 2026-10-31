@@ -5,13 +5,17 @@ package privfile
 // caller's package to test it: #3311, #3444, #3476, #3434, #3868 and #3881
 // were each a save whose failure path no test reached until review found it.
 // So every WriteAtomic call in a non-test file under broker/ (this package
-// aside) passes stop as a struct field or as a parameter of the function the
-// call is in, and a _test.go file in the caller's directory sets it: a
-// non-nil value keyed or assigned to that field's name, or a non-nil argument
-// in that parameter's place in a call of that function. A directory that
-// fails today has a pending line in crashPending naming the issue that adds
-// its seam and test; a pending line for a directory that passes fails, so the
-// list only shrinks.
+// aside) passes stop as a struct field or as a parameter of the function or
+// method the call is in, and a _test.go file in the caller's directory that
+// the per-PR race run compiles (raceRun) sets it: a non-nil value keyed or
+// assigned to that field's name, or a non-nil argument in that parameter's
+// place in a call of that function, after the receiver in a method
+// expression. A nil spelled in parentheses, converted to a type, or held in
+// a variable nothing assigns counts as nil (nilish). A directory that fails
+// today has a pending line in crashPending naming the issue that adds its
+// seam and test; the line covers every call there, new ones included, as the
+// path lint's pending lines do. A pending line for a directory that passes
+// fails, so the list only shrinks.
 //
 // Bound: the check is by name, not by type or flow. A test that sets a field
 // of the same name on another type, or calls another function of the same
@@ -19,13 +23,18 @@ package privfile
 // that memory, disk and what the owner was told agree after the stop (held by
 // review, the substance of #3311, #3476, #3868 and #3881). A stop forwarded
 // through a second function is not followed: a test sets the field, or calls
-// the function, that the WriteAtomic call reads. A local or package variable
-// shadowing the privfile import, calls in a pending directory, and Go outside
-// broker/ or under broker/third_party are outside the check.
+// the function, that the WriteAtomic call reads. A nil that only flow shows
+// (a variable assigned nil after its declaration, a function returning nil,
+// a field of a nil-valued struct) counts as set, and a method value
+// (f := (*S).Save) is not seen as one. A local or package variable shadowing
+// the privfile import, calls in a pending directory, Go outside broker/, and
+// broker/third_party and every vendor, testdata and dot-named directory at
+// any depth are outside the check.
 
 import (
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/parser"
 	"go/token"
 	"os"
@@ -157,6 +166,92 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 			t.Fatalf("got %q, want none", problems)
 		}
 	})
+	t.Run("a test file the per-PR race run does not compile does not count", func(t *testing.T) {
+		set := "package side\n\nvar _ = S{stop: func(int) bool { return true }}\n"
+		for name, file := range map[string]string{
+			"an underscore name":      "_side_test.go",
+			"a dot name":              ".side_test.go",
+			"go:build ignore":         "side_test.go",
+			"a tag CI sets elsewhere": "side_test.go",
+			"another GOARCH":          "side_arm64_test.go",
+			"another GOOS":            "side_windows_test.go",
+		} {
+			t.Run(name, func(t *testing.T) {
+				test := set
+				switch name {
+				case "go:build ignore":
+					test = "//go:build ignore\n\n" + set
+				case "a tag CI sets elsewhere":
+					test = "//go:build sitl\n\n" + set
+				}
+				files := map[string]string{"broker/side/side.go": field, "broker/side/" + file: test}
+				one(t, lint(t, files, ""), "no test in broker/side sets the stop field")
+			})
+		}
+		files := map[string]string{"broker/side/side.go": field, "broker/side/side_linux_test.go": "//go:build linux && amd64 && race\n\n" + set}
+		if problems := lint(t, files, ""); len(problems) != 0 {
+			t.Fatalf("a file the race run compiles: got %q, want none", problems)
+		}
+	})
+	t.Run("a nil the test spells another way does not count", func(t *testing.T) {
+		for name, test := range map[string]string{
+			"parenthesised":            "var _ = S{stop: (nil)}\n",
+			"assigned in parentheses":  "func f(s *S) { s.stop = ((nil)) }\n",
+			"a func-type conversion":   "var _ = S{stop: (func(int) bool)(nil)}\n",
+			"a named-type conversion":  "type hook func(int) bool\n\nvar _ = S{stop: hook(nil)}\n",
+			"a local never set":        "func f() { var h func(int) bool; _ = S{stop: h} }\n",
+			"a local set to nil":       "func f() { h := (func(int) bool)(nil); _ = S{stop: h} }\n",
+			"a package var never set":  "var h func(int) bool\n\nvar _ = S{stop: h}\n",
+			"a chain of nil variables": "var h func(int) bool\n\nfunc f() { g := h; _ = S{stop: g} }\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := map[string]string{"broker/side/side.go": field, "broker/side/side_test.go": "package side\n\n" + test}
+				one(t, lint(t, files, ""), "no test in broker/side sets the stop field")
+			})
+		}
+		files := map[string]string{"broker/side/side.go": param, "broker/side/side_test.go": "package side\n\nfunc f() { var h func(int) bool; Save(\"d\", nil, (h)) }\n"}
+		one(t, lint(t, files, ""), "no test in broker/side calls Save with a non-nil stop")
+		for name, test := range map[string]string{
+			"a local set to a func":   "func f() { h := func(int) bool { return true }; _ = S{stop: h} }\n",
+			"a local assigned later":  "func f() { var h func(int) bool; h = func(int) bool { return true }; _ = S{stop: h} }\n",
+			"a local set through &":   "func set(p *func(int) bool) {}\n\nfunc f() { var h func(int) bool; set(&h); _ = S{stop: h} }\n",
+			"a package var set later": "var h func(int) bool\n\nfunc init() { h = func(int) bool { return true } }\n\nvar _ = S{stop: h}\n",
+			"a call given nil":        "func wrap(func(int) bool) func(int) bool { return func(int) bool { return true } }\n\nvar _ = S{stop: wrap(nil)}\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := map[string]string{"broker/side/side.go": field, "broker/side/side_test.go": "package side\n\n" + test}
+				if problems := lint(t, files, ""); len(problems) != 0 {
+					t.Fatalf("got %q, want none", problems)
+				}
+			})
+		}
+	})
+	t.Run("a method expression call's receiver argument is not the stop", func(t *testing.T) {
+		method := call + "type S struct{ dir string }\n\nfunc (s *S) Save(b []byte, stop func(int) bool) error { return privfile.WriteAtomic(s.dir, \"f\", b, stop) }\n\ntype T struct{}\n\nfunc (T) Save(b []byte, stop func(int) bool) error { return nil }\n"
+		hook := "func(int) bool { return true }"
+		for name, test := range map[string]string{
+			"(*S).Save with a nil stop":            "package side\n\nfunc f(s *S) { (*S).Save(s, []byte{1}, nil) }\n",
+			"another type's method expression":     "package side\n\nfunc f(t T) { T.Save(t, nil, " + hook + ") }\n",
+			"an external (*side.S).Save, nil stop": "package side_test\n\nimport \"example.test/broker/side\"\n\nfunc f(s *side.S) { (*side.S).Save(s, []byte{1}, nil) }\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := map[string]string{"broker/side/side.go": method, "broker/side/side_test.go": test}
+				one(t, lint(t, files, ""), "no test in broker/side calls Save with a non-nil stop")
+			})
+		}
+		for name, test := range map[string]string{
+			"(*S).Save with a stop":          "package side\n\nfunc f(s *S) { (*S).Save(s, nil, " + hook + ") }\n",
+			"an external (*side.S).Save":     "package side_test\n\nimport \"example.test/broker/side\"\n\nfunc f(s *side.S) { (*side.S).Save(s, nil, " + hook + ") }\n",
+			"a method call on a dereference": "package side\n\nfunc f(s *S) { (*s).Save(nil, " + hook + ") }\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := map[string]string{"broker/side/side.go": method, "broker/side/side_test.go": test}
+				if problems := lint(t, files, ""); len(problems) != 0 {
+					t.Fatalf("got %q, want none", problems)
+				}
+			})
+		}
+	})
 	t.Run("a pending directory passes until it is clean", func(t *testing.T) {
 		nilCall := call + "func Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, nil) }\n"
 		if problems := lint(t, map[string]string{"broker/side/side.go": nilCall}, "pending broker/side #1 its seam\n"); len(problems) != 0 {
@@ -254,9 +349,10 @@ func crashLint(root, pendingText string) ([]string, error) {
 
 // stopSeam is where the stop of the WriteAtomic call at pos, in function
 // caller, comes from: a field of that name, or the parameter at index of the
-// named function fn.
+// named function or method fn.
 type stopSeam struct {
 	field, fn string
+	recv      string // fn's receiver type name, if fn is a method
 	index     int
 	pos       token.Pos
 	caller    string
@@ -275,11 +371,23 @@ func crashLintDir(dir, rel, importPath string) ([]string, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, parser.SkipObjectResolution)
+		test := strings.HasSuffix(e.Name(), "_test.go")
+		mode := parser.SkipObjectResolution
+		if test {
+			ok, err := raceRun.MatchFile(dir, e.Name())
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			mode = 0 // test files keep the parser's scopes, which nilish reads
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, mode)
 		if err != nil {
 			return nil, err
 		}
-		if strings.HasSuffix(e.Name(), "_test.go") {
+		if test {
 			tests = append(tests, f)
 		} else {
 			srcs = append(srcs, f)
@@ -356,12 +464,12 @@ func crashLintDir(dir, rel, importPath string) ([]string, error) {
 		}
 		walk(f)
 	}
-	fields, calls := testSets(tests)
+	fields, calls := testSets(tests, newDirDecls(append(srcs, tests...)))
 	for _, s := range seams {
 		switch {
 		case s.field != "" && !fields[s.field]:
 			report(s.pos, s.caller, fmt.Sprintf("calls privfile.WriteAtomic with stop field %s, but no test in %s sets the stop field %s to a non-nil value", s.field, rel, s.field))
-		case s.fn != "" && !calls[s.fn][s.index]:
+		case s.fn != "" && !calls.sets(s):
 			report(s.pos, s.caller, fmt.Sprintf("calls privfile.WriteAtomic with its parameter as stop, but no test in %s calls %s with a non-nil stop", rel, s.fn))
 		}
 	}
@@ -401,7 +509,11 @@ func seamOf(stop ast.Expr, stack []ast.Node) (stopSeam, string) {
 				for _, n := range names {
 					if n.Name == e.Name {
 						if fd, ok := stack[i].(*ast.FuncDecl); ok {
-							return stopSeam{fn: fd.Name.Name, index: index}, ""
+							s := stopSeam{fn: fd.Name.Name, index: index}
+							if fd.Recv != nil && len(fd.Recv.List) == 1 {
+								s.recv = typeName(fd.Recv.List[0].Type)
+							}
+							return s, ""
 						}
 						return stopSeam{}, "calls privfile.WriteAtomic with stop " + e.Name + ", a function literal's parameter that no test can name" + want
 					}
@@ -423,15 +535,192 @@ func enclosingName(stack []ast.Node) string {
 	return "package scope"
 }
 
-// testSets returns the field names the tests key or assign a non-nil value
-// to, and for each function or method name the argument places a test call
-// fills with a non-nil value.
-func testSets(tests []*ast.File) (fields map[string]bool, calls map[string]map[int]bool) {
-	fields, calls = map[string]bool{}, map[string]map[int]bool{}
-	nonNil := func(e ast.Expr) bool {
-		id, ok := e.(*ast.Ident)
-		return !ok || id.Name != "nil"
+// raceRun is the build the per-PR race run (ci.yml: `go test -race` on an
+// amd64 Linux runner, no -tags) gives each package. A test file it does not
+// compile (a _ or . name, `//go:build ignore`, a tag only another workflow
+// sets, another GOOS or GOARCH) runs on no PR's required check, so it cannot
+// carry the crash test.
+var raceRun = func() build.Context {
+	c := build.Default
+	c.GOOS, c.GOARCH, c.CgoEnabled = "linux", "amd64", true
+	c.BuildTags = []string{"race"}
+	return c
+}()
+
+// typeName is the name a receiver type ends in: S for S, *S, (*S), S[T]
+// and *S[T, U]; "" for anything else.
+func typeName(e ast.Expr) string {
+	for {
+		switch x := ast.Unparen(e).(type) {
+		case *ast.StarExpr:
+			e = x.X
+		case *ast.IndexExpr:
+			e = x.X
+		case *ast.IndexListExpr:
+			e = x.X
+		case *ast.Ident:
+			return x.Name
+		default:
+			return ""
+		}
 	}
+}
+
+// dirDecls is what nilish and methodExprType know about one directory's
+// package-level names, by name across its source and test files.
+type dirDecls struct {
+	types    map[string]bool      // type names
+	vars     map[string]ast.Expr  // var name to its value; nil when declared without one
+	assigned map[string]bool      // names assigned with = or whose address is taken anywhere
+	objs     map[*ast.Object]bool // test-file locals assigned with = or whose address is taken
+}
+
+func newDirDecls(files []*ast.File) dirDecls {
+	d := dirDecls{types: map[string]bool{}, vars: map[string]ast.Expr{}, assigned: map[string]bool{}, objs: map[*ast.Object]bool{}}
+	mark := func(e ast.Expr) {
+		if id, ok := ast.Unparen(e).(*ast.Ident); ok {
+			d.assigned[id.Name] = true
+			if id.Obj != nil {
+				d.objs[id.Obj] = true
+			}
+		}
+	}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			g, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range g.Specs {
+				switch sp := spec.(type) {
+				case *ast.TypeSpec:
+					d.types[sp.Name.Name] = true
+				case *ast.ValueSpec:
+					if g.Tok != token.VAR {
+						continue
+					}
+					for i, n := range sp.Names {
+						switch len(sp.Values) {
+						case 0:
+							d.vars[n.Name] = nil
+						case len(sp.Names):
+							d.vars[n.Name] = sp.Values[i]
+						default: // one multi-value call: unknown
+							mark(n)
+						}
+					}
+				}
+			}
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				if n.Tok != token.DEFINE {
+					for _, l := range n.Lhs {
+						mark(l)
+					}
+				}
+			case *ast.UnaryExpr:
+				if n.Op == token.AND {
+					mark(n.X)
+				}
+			}
+			return true
+		})
+	}
+	return d
+}
+
+// nilish reports whether a test's value is nil however it is spelled: nil in
+// parentheses, a conversion of a nil value to a type (a type expression, or a
+// name the directory declares as a type), or a variable that no statement
+// assigns and whose declaration gives it no value or a nil one. A call of a
+// function given nil is not.
+func (d dirDecls) nilish(e ast.Expr, seen map[string]bool) bool {
+	switch x := ast.Unparen(e).(type) {
+	case *ast.Ident:
+		if x.Name == "nil" {
+			return true
+		}
+		if seen[x.Name] {
+			return false
+		}
+		seen[x.Name] = true
+		if x.Obj == nil { // package level, declared in this file or another
+			v, ok := d.vars[x.Name]
+			return ok && !d.assigned[x.Name] && (v == nil || d.nilish(v, seen))
+		}
+		if x.Obj.Kind != ast.Var || d.objs[x.Obj] {
+			return false
+		}
+		switch decl := x.Obj.Decl.(type) {
+		case *ast.ValueSpec:
+			if decl == nil {
+				return false
+			}
+			for i, n := range decl.Names {
+				if n.Obj == x.Obj {
+					switch len(decl.Values) {
+					case 0:
+						return true
+					case len(decl.Names):
+						return d.nilish(decl.Values[i], seen)
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if len(decl.Lhs) == len(decl.Rhs) {
+				for i, l := range decl.Lhs {
+					if id, ok := l.(*ast.Ident); ok && id.Obj == x.Obj {
+						return d.nilish(decl.Rhs[i], seen)
+					}
+				}
+			}
+		}
+		return false
+	case *ast.CallExpr:
+		if len(x.Args) != 1 || !d.nilish(x.Args[0], seen) {
+			return false
+		}
+		switch fun := ast.Unparen(x.Fun).(type) {
+		case *ast.FuncType, *ast.StarExpr, *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.InterfaceType:
+			return true
+		case *ast.Ident:
+			return (fun.Obj != nil && fun.Obj.Kind == ast.Typ) || (fun.Obj == nil && d.types[fun.Name])
+		case *ast.SelectorExpr:
+			return d.types[fun.Sel.Name]
+		}
+	}
+	return false
+}
+
+// testCall is one call a test makes of a function or method: recv names the
+// type when the call is a method expression such as (*S).Save(s, b, stop),
+// whose first argument is the receiver; set holds the argument places given
+// a non-nil value, counted after any receiver.
+type testCall struct {
+	recv string
+	set  map[int]bool
+}
+
+type testCalls map[string][]testCall
+
+// sets reports whether a test call of s.fn gives its stop parameter a
+// non-nil value. A method expression of another type is another function.
+func (c testCalls) sets(s stopSeam) bool {
+	for _, call := range c[s.fn] {
+		if (call.recv == "" || call.recv == s.recv) && call.set[s.index] {
+			return true
+		}
+	}
+	return false
+}
+
+// testSets returns the field names the tests key or assign a non-nil value
+// to, and for each function or method name the calls the tests make of it.
+func testSets(tests []*ast.File, d dirDecls) (fields map[string]bool, calls testCalls) {
+	fields, calls = map[string]bool{}, testCalls{}
+	nonNil := func(e ast.Expr) bool { return !d.nilish(e, map[string]bool{}) }
 	for _, f := range tests {
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
@@ -442,33 +731,59 @@ func testSets(tests []*ast.File) (fields map[string]bool, calls map[string]map[i
 			case *ast.AssignStmt:
 				if len(n.Lhs) == len(n.Rhs) {
 					for i, l := range n.Lhs {
-						if sel, ok := l.(*ast.SelectorExpr); ok && nonNil(n.Rhs[i]) {
+						if sel, ok := ast.Unparen(l).(*ast.SelectorExpr); ok && nonNil(n.Rhs[i]) {
 							fields[sel.Sel.Name] = true
 						}
 					}
 				}
 			case *ast.CallExpr:
 				var name string
-				switch fn := n.Fun.(type) {
+				var c testCall
+				args := n.Args
+				switch fn := ast.Unparen(n.Fun).(type) {
 				case *ast.Ident:
 					name = fn.Name
 				case *ast.SelectorExpr:
 					name = fn.Sel.Name
+					if r := d.methodExprType(fn.X); r != "" && len(args) > 0 {
+						c.recv, args = r, args[1:]
+					}
 				}
 				if name == "" {
 					return true
 				}
-				for i, a := range n.Args {
+				c.set = map[int]bool{}
+				for i, a := range args {
 					if nonNil(a) {
-						if calls[name] == nil {
-							calls[name] = map[int]bool{}
-						}
-						calls[name][i] = true
+						c.set[i] = true
 					}
 				}
+				calls[name] = append(calls[name], c)
 			}
 			return true
 		})
 	}
 	return fields, calls
+}
+
+// methodExprType returns the type a method expression's operand names: S in
+// S.Save, (*S).Save and (*pkg.S).Save, when the directory declares a type of
+// that name and the operand is not a local value, as s is in (*s).Save.
+func (d dirDecls) methodExprType(x ast.Expr) string {
+	for {
+		switch e := ast.Unparen(x).(type) {
+		case *ast.StarExpr:
+			x = e.X
+			continue
+		case *ast.Ident:
+			if (e.Obj == nil || e.Obj.Kind == ast.Typ) && d.types[e.Name] {
+				return e.Name
+			}
+		case *ast.SelectorExpr:
+			if id, ok := e.X.(*ast.Ident); ok && id.Obj == nil && d.types[e.Sel.Name] {
+				return e.Sel.Name
+			}
+		}
+		return ""
+	}
 }
