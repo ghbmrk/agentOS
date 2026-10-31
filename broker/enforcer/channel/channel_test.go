@@ -673,8 +673,8 @@ func (p *countingPolicy) take() int { p.mu.Lock(); defer p.mu.Unlock(); n := p.n
 
 // TestOnePolicyCopyPerRequest (#4066): the channel takes at most one sorted
 // deep copy of the policy per request, paused or not, and none for a
-// request that names no device. Revert mutant: command or read calling
-// Policy.Current() again.
+// request that names no device (an export read, an announce). Revert
+// mutant: command or read calling Policy.Current() again.
 func TestOnePolicyCopyPerRequest(t *testing.T) {
 	var cp *countingPolicy
 	r := newRig(t, func(c *Config) { cp = &countingPolicy{Policy: c.Policy}; c.Policy = cp })
@@ -684,9 +684,9 @@ func TestOnePolicyCopyPerRequest(t *testing.T) {
 		cmd(2, "heater", wire.VerbOff),
 		wire.Read{ID: 3, What: wire.ReadState, Device: "lamp"},
 		wire.Read{ID: 4, What: wire.ReadFingerprint, Device: "lock"},
-		wire.Read{ID: 5, What: wire.ReadExport},
 		wire.Tighten{ID: 6, Kind: wire.IsolateDevice, Device: "tv"},
 	}
+	none := []wire.Msg{wire.Announce{ID: 9}, wire.Read{ID: 5, What: wire.ReadExport}}
 	check := func(when string) {
 		for _, m := range reqs {
 			cp.take()
@@ -695,10 +695,12 @@ func TestOnePolicyCopyPerRequest(t *testing.T) {
 				t.Errorf("%s: %T took %d policy copies", when, m, n)
 			}
 		}
-		cp.take()
-		cl.do(wire.Announce{ID: 9})
-		if n := cp.take(); n != 0 {
-			t.Errorf("%s: an announce took %d policy copies", when, n)
+		for _, m := range none {
+			cp.take()
+			cl.do(m)
+			if n := cp.take(); n != 0 {
+				t.Errorf("%s: %+v took %d policy copies", when, m, n)
+			}
 		}
 	}
 	check("open")
@@ -706,4 +708,35 @@ func TestOnePolicyCopyPerRequest(t *testing.T) {
 	r.ch.paused = true
 	r.ch.mu.Unlock()
 	check("paused")
+}
+
+// TestPausedLogsNames (NET-2 Channel, #4066): a request the paused channel
+// refuses is still logged by the names the signed policy holds, a pair's
+// members each in its own field and an unsigned name only as its hash.
+// Revert mutant: names set after gate, or blanked when paused.
+func TestPausedLogsNames(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	r.ch.mu.Lock()
+	r.ch.paused = true
+	r.ch.mu.Unlock()
+	n := len(r.events())
+	cl.code(cmd(1, "lamp", wire.VerbOn))
+	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: "heater"})
+	cl.code(wire.Tighten{ID: 3, Kind: wire.RemovePair, A: "a,b", B: "c"})
+	cl.code(cmd(4, "resumed-by-the-owner", wire.VerbOff))
+	sum := sha256.Sum256([]byte("resumed-by-the-owner"))
+	want := map[uint64][2]string{1: {"lamp", ""}, 2: {"heater", ""}, 3: {"a,b", "c"}, 4: {"unknown " + hex.EncodeToString(sum[:]), ""}}
+	got := map[uint64][2]string{}
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindCommand || e.Kind == KindRead || e.Kind == KindTighten {
+			if e.Code != wire.Paused {
+				t.Errorf("not refused as paused: %+v", e)
+			}
+			got[e.ID] = [2]string{e.Device, e.Other}
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("paused log names %v, want %v", got, want)
+	}
 }

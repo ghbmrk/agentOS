@@ -86,7 +86,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	defer c.release()
 	now := c.cfg.Now()
 	ev := Event{At: now}
-	// The three kinds that name a device take one copy of the policy, and
+	// The requests that name a device take one copy of the policy, and
 	// read names from it for the log before act runs, so a removed device
 	// is still logged by its name; command and read check against the same
 	// copy (#4066).
@@ -108,7 +108,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 		code, ev.Reason = c.gate(KindTighten, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
-		cur := c.cfg.Policy.Current()
+		var cur policy.Document // an export names no device
+		if m.What != wire.ReadExport {
+			cur = c.cfg.Policy.Current()
+		}
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
 		code, ev.Reason = c.gate(KindRead, func() (wire.Code, string) {
