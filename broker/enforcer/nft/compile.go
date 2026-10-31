@@ -572,7 +572,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 
 	w.open("chain " + live("forward"))
 	for _, r := range fwd {
-		for _, s := range r.live() {
+		for _, s := range r.later() {
 			w.line(s)
 		}
 	}
@@ -580,7 +580,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 
 	w.open("chain " + live("people"))
 	for _, r := range people {
-		for _, s := range r.live() {
+		for _, s := range r.later() {
 			w.line(s)
 		}
 	}

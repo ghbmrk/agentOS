@@ -60,11 +60,8 @@ func family(v6 bool) string {
 // first is the rule as it reads a connection's first packet.
 func (r rule) first() string {
 	var p []string
-	if r.in != "" {
-		p = append(p, "iifname "+r.in)
-	}
-	if r.out != "" {
-		p = append(p, "oifname "+r.out)
+	if i := ifaces(r.in, r.out); i != "" {
+		p = append(p, i)
 	}
 	for _, m := range r.m {
 		p = append(p, m.pkt)
@@ -75,12 +72,12 @@ func (r rule) first() string {
 	return strings.Join(append(p, r.verdict), " ")
 }
 
-// live is the rule as it reads a later packet's connection: in the
+// later is the rule as it reads a later packet's connection: in the
 // original direction the packet crosses the interfaces the first packet
 // did, in the reply direction the other way. Accept becomes return, so the
 // packet goes on to be counted and accepted; a jump becomes a goto, so the
 // target's return ends the live check too.
-func (r rule) live() []string {
+func (r rule) later() []string {
 	verdict := r.verdict
 	switch {
 	case verdict == "accept":
@@ -96,18 +93,20 @@ func (r rule) live() []string {
 	if r.in == "" && r.out == "" {
 		return []string{tail}
 	}
-	ifs := func(in, out string) string {
-		var p []string
-		if in != "" {
-			p = append(p, "iifname "+in)
-		}
-		if out != "" {
-			p = append(p, "oifname "+out)
-		}
-		return strings.Join(p, " ")
-	}
 	return []string{
-		"ct direction original " + ifs(r.in, r.out) + " " + tail,
-		"ct direction reply " + ifs(r.out, r.in) + " " + tail,
+		"ct direction original " + ifaces(r.in, r.out) + " " + tail,
+		"ct direction reply " + ifaces(r.out, r.in) + " " + tail,
 	}
+}
+
+// ifaces is the interface part of a rule; "" for neither.
+func ifaces(in, out string) string {
+	var p []string
+	if in != "" {
+		p = append(p, "iifname "+in)
+	}
+	if out != "" {
+		p = append(p, "oifname "+out)
+	}
+	return strings.Join(p, " ")
 }
