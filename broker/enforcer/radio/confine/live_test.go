@@ -68,8 +68,8 @@ const (
 )
 
 // liveCases is every filter rule the live probes claim: each of
-// stacks_test.go's namespace and mount keys, and the rest of the mount
-// API a capable process reaches. The interpreter model
+// stacks_test.go's namespace and mount keys, and the other mount calls
+// on the list but pivot_root, open_tree_attr, statmount and listmount. The interpreter model
 // (TestFilterDeniesEachEntry) covers every line of the list; this table
 // shows the kernel itself refusing these with the filter's EPERM, in a
 // process the kernel would otherwise let make them.
@@ -107,8 +107,10 @@ var probeDirs = []string{"t", "u", "m", "v"}
 
 // attempt makes one call in a single-threaded child forked for it, so the
 // kernel sees one thread (it refuses unshare(CLONE_NEWUSER) to a threaded
-// caller with EINVAL, which a probe would misread as a refusal) and what
-// the call changes ends with the child. The child inherits the filter. It
+// caller with EINVAL, which a probe would misread as a refusal) and a
+// namespace it makes ends with it; a mount change stays in the probe's
+// mount namespace, which ends with the probe. The child inherits the
+// filter. It
 // returns the call's errno, 0 for success, or an error when the child did
 // not exit (the filter killed it).
 func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {

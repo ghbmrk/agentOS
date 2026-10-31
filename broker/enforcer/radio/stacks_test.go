@@ -164,7 +164,8 @@ func createTun(name string) error {
 }
 
 // attempt makes one call in a child forked for it, which has one thread
-// and inherits the filter, so what the call changes ends with the child.
+// and inherits the filter, so a namespace it makes ends with it (a mount
+// would stay in the stack's mount namespace).
 // It returns the call's errno (0: it succeeded), or an error when the
 // child did not exit on its own.
 func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {
