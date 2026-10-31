@@ -19,7 +19,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
-// TestDecodersLeaveTheUnitsGroup: before anything else the clerk moves
+// TestDecodersLeaveTheUnitsGroup: once it holds its key the clerk moves
 // itself into its leaf of -cgroup, and its decoders run rootless under
 // runsc with -runsc-root's state (CAM-host-11).
 func TestDecodersLeaveTheUnitsGroup(t *testing.T) {

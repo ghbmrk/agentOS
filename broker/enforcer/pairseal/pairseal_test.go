@@ -137,3 +137,35 @@ func TestBounds(t *testing.T) {
 		}
 	}
 }
+
+// TestParseStatement: Statement's line reads back as its device and hash,
+// and no other line does: another sentence, a short, upper-case or
+// non-hex hash, a device ID Device refuses, or a changed tail (UX on
+// #4073: the page shows the hash short, the signed line keeps it whole).
+// REQ: STO-4
+func TestParseStatement(t *testing.T) {
+	k, _ := NewKey()
+	env, err := Seal(k.Recipient(), "front-lock", canary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := HashHex(env)
+	if d, got, ok := ParseStatement(Statement("front-lock", h)); !ok || d != "front-lock" || got != h {
+		t.Fatalf("Statement's line read as %q %q %v", d, got, ok)
+	}
+	for _, line := range []string{
+		"",
+		"Add the device front-lock.",
+		"Hand front-lock's key to the enforcer, sealed as " + h + ".",
+		Statement("front-lock", h[:ShortHash]),
+		Statement("front-lock", strings.ToUpper(h)),
+		Statement("front-lock", "z"+h[1:]),
+		Statement("front lock", h),
+		Statement("front-lock", h) + " ",
+		strings.Replace(Statement("front-lock", h), "agentOS keeps no copy", "agentOS keeps a copy", 1),
+	} {
+		if d, got, ok := ParseStatement(line); ok || d != "" || got != "" {
+			t.Errorf("%q read as a statement: %q %q", line, d, got)
+		}
+	}
+}

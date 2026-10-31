@@ -122,8 +122,9 @@ func TestAddDeviceHandsOverSealedSecret(t *testing.T) {
 	env, _ := pairseal.Seal(k.Recipient(), "front", lockSecret)
 	h := pairseal.HashHex(env)
 	body, id, ch := g.openSealed(sealedLink(addFront, "front", h))
-	if !strings.Contains(body, template_escape(pairseal.Statement("front", h))) || !strings.Contains(body, `data-sealed="1"`) {
-		t.Fatalf("the screen does not name the sealed secret:\n%s", body)
+	if !strings.Contains(body, template_escape(pairseal.Statement("front", h[:pairseal.ShortHash]+"…"))) ||
+		!strings.Contains(body, "<code>"+h+"</code>") || !strings.Contains(body, `data-sealed="1"`) {
+		t.Fatalf("the screen does not name the sealed secret, hash short and in full:\n%s", body)
 	}
 	if strings.Contains(body, string(lockSecret)) {
 		t.Fatal("the screen shows the secret")
@@ -136,6 +137,14 @@ func TestAddDeviceHandsOverSealedSecret(t *testing.T) {
 	}
 	if _, err := st.Release("front", frontStack); err == nil {
 		t.Error("released before the change landed")
+	}
+	// The owner signed the whole line; the home page shows it short too.
+	if diff := string(g.e.Pending()[0].Diff); !strings.Contains(diff, "\n"+pairseal.Statement("front", h)+"\n") {
+		t.Errorf("the signed diff lacks the whole line:\n%s", diff)
+	}
+	if home := g.do(http.MethodGet, "/", nil).Body.String(); !strings.Contains(home, template_escape(pairseal.Statement("front", h[:pairseal.ShortHash]+"…"))) ||
+		!strings.Contains(home, "<code>"+h+"</code>") {
+		t.Errorf("the home page does not show the waiting line short:\n%s", home)
 	}
 
 	// Cancel on the page: the secret goes with the change.
@@ -212,8 +221,12 @@ func TestSealedLinkRefusals(t *testing.T) {
 	} {
 		g.now = g.now.Add(LinkWindow) // past the link limit
 		_, id, ch := g.openSealed(sealedLink(addFront, "front", c.hash))
-		if w := g.approveSealed(id, g.a.get(ch), c.env); w.Code != c.code {
+		w := g.approveSealed(id, g.a.get(ch), c.env)
+		if w.Code != c.code {
 			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+		if c.env != nil && !strings.Contains(w.Body.String(), "pair the device again") {
+			t.Errorf("%s: the refusal names no next step: %s", name, w.Body)
 		}
 		if _, ok := st.Fingerprint("front"); ok || len(g.e.Pending()) != 0 || g.e.Current().Device("front") != nil {
 			t.Errorf("%s: something was added or held", name)

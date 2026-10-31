@@ -37,6 +37,10 @@ type Score struct {
 	// Unadmitted counts replayed steps the recorded keys would not have
 	// admitted (HLD-2); only the replay suite has any.
 	Unadmitted int `json:"unadmitted,omitempty"`
+	// Dropped counts the cases the owner's passkey dropped from the suite
+	// (HLD-3), so Cases plus Dropped is every case the suite has held,
+	// which the security floor counts; only the security suite has any.
+	Dropped int `json:"dropped,omitempty"`
 }
 
 // Runner runs one suite against a release in a sandbox. A nil release is
@@ -129,7 +133,7 @@ func (q *Requalifier) Requalify(ctx context.Context, v *Verified) (Verdict, erro
 		}
 		out.Scores = append(out.Scores, cand)
 		if s == SuiteSecurity {
-			st.Floor = max(st.Floor, base.Cases)
+			st.Floor = max(st.Floor, base.Cases+base.Dropped)
 		}
 		detail := judge(cand, base, st.Floor)
 		if s == SuiteSecurity {
@@ -178,16 +182,17 @@ func (q *Requalifier) run(ctx context.Context, rel *Verified, suite string) (Sco
 	if err != nil {
 		return Score{}, fmt.Errorf("update: requalify %s: %w", suite, err)
 	}
-	if sc.Suite != suite || sc.Digest == "" || sc.Cases < 0 || sc.Passed < 0 || sc.Passed > sc.Cases || sc.Unadmitted < 0 {
+	if sc.Suite != suite || sc.Digest == "" || sc.Cases < 0 || sc.Passed < 0 || sc.Passed > sc.Cases || sc.Unadmitted < 0 || sc.Dropped < 0 {
 		return Score{}, fmt.Errorf("update: requalify %s: malformed score %+v", suite, sc)
 	}
 	return sc, nil
 }
 
 // judge is HLD-2 and HLD-3's rule for one suite: "" passes, otherwise the
-// reason. floor is the most security cases ever run on this box.
+// reason. floor is the most security cases this box has ever held, the
+// owner's drops included.
 func judge(cand, base Score, floor int) string {
-	if cand.Digest != base.Digest || cand.Cases != base.Cases {
+	if cand.Digest != base.Digest || cand.Cases != base.Cases || cand.Dropped != base.Dropped {
 		return "candidate and baseline ran different suites"
 	}
 	switch cand.Suite {
@@ -196,8 +201,8 @@ func judge(cand, base Score, floor int) string {
 			return fmt.Sprintf("%d replayed steps the recorded keys would not admit", cand.Unadmitted)
 		}
 	case SuiteSecurity:
-		if cand.Cases == 0 || cand.Cases < floor {
-			return fmt.Sprintf("security suite has %d cases, fewer than %d", cand.Cases, max(floor, 1))
+		if cand.Cases == 0 || cand.Cases+cand.Dropped < floor {
+			return fmt.Sprintf("security suite has %d cases and %d dropped by the owner, fewer than %d", cand.Cases, cand.Dropped, max(floor, 1))
 		}
 		if cand.Passed < cand.Cases {
 			return fmt.Sprintf("%d security cases fail", cand.Cases-cand.Passed)

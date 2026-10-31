@@ -130,13 +130,15 @@ type Store struct {
 
 	mu   sync.Mutex
 	cams map[string]*held
-	// kept are connected cameras Add refused: the sweep leaves their
-	// directories and keys alone until Erase.
-	kept map[string]bool
+	// kept are connected cameras Add refused, each with its owner's
+	// retention: the sweep goes on expiring their segments by name but
+	// leaves their directories and keys alone until Erase or an Add.
+	kept map[string]*held
 }
 
-// held is one camera's capture. mu orders its frames, writes and erase;
-// it is taken before Store.mu.
+// held is one camera's capture, or a kept camera's retention. mu orders
+// its frames, writes, sweeps and erase; it is taken before Store.mu, and a
+// kept camera's before an added one's.
 type held struct {
 	mu        sync.Mutex
 	gone      bool
@@ -182,7 +184,7 @@ func NewStore(cfg StoreConfig) (*Store, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	return &Store{cfg: cfg, cams: map[string]*held{}, kept: map[string]bool{}}, nil
+	return &Store{cfg: cfg, cams: map[string]*held{}, kept: map[string]*held{}}, nil
 }
 
 // Format prints no field, whatever the verb.
@@ -195,42 +197,79 @@ func (s *Store) log(id, line string) {
 }
 
 // Add takes a connected camera with the owner's retention: zero is none,
-// so its capture stays in memory.
+// so its capture stays in memory. A kept camera is taken back (a retried
+// slot, #4065), and its kept retention's sweep ends with the Add.
 func (s *Store) Add(camera string, retention time.Duration) error {
 	if !idRe.MatchString(camera) {
 		return ErrNode
+	}
+	s.mu.Lock()
+	k := s.kept[camera]
+	s.mu.Unlock()
+	if k != nil {
+		// Held through the Add, so no sweep under the kept retention runs
+		// beside the added camera's first writes.
+		k.mu.Lock()
+		defer k.mu.Unlock()
+	}
+	// h is locked before it is published, so no sweep reads it before its
+	// retention is set: a sweep under its zero value would delete capture
+	// still within the owner's retention.
+	h := &held{}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s.mu.Lock()
+	if s.cams[camera] != nil || s.kept[camera] != k {
+		s.mu.Unlock()
+		return ErrNode
+	}
+	s.cams[camera] = h
+	s.mu.Unlock()
+	if err := s.setRetentionLocked(camera, h, retention); err != nil {
+		h.gone = true
+		s.mu.Lock()
+		if s.cams[camera] == h {
+			delete(s.cams, camera)
+		}
+		s.mu.Unlock()
+		return err
+	}
+	if k != nil {
+		k.gone = true
+		s.mu.Lock()
+		if s.kept[camera] == k {
+			delete(s.kept, camera)
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// Keep holds a connected camera that Add refused (its sealed key slot
+// failing) with the owner's retention (#3968, #4064): each sweep still
+// deletes its segments past that retention, by their names, which needs
+// no key (CAM-clerk-13), but never touches its key or removes its
+// directory, which stay until Erase or a later Add. A frame for it is
+// refused. A camera Add took is refused.
+func (s *Store) Keep(camera string, retention time.Duration) error {
+	if !idRe.MatchString(camera) {
+		return ErrNode
+	}
+	if retention < 0 || retention > MaxRetention {
+		return ErrRetention
 	}
 	s.mu.Lock()
 	if s.cams[camera] != nil {
 		s.mu.Unlock()
 		return ErrNode
 	}
-	h := &held{}
-	s.cams[camera] = h
+	old := s.kept[camera]
+	s.kept[camera] = &held{retention: retention}
 	s.mu.Unlock()
-	if err := s.setRetention(camera, h, retention); err != nil {
-		s.mu.Lock()
-		delete(s.cams, camera)
-		s.mu.Unlock()
-		return err
-	}
-	s.mu.Lock()
-	delete(s.kept, camera)
-	s.mu.Unlock()
-	return nil
-}
-
-// Keep holds back the sweep from a connected camera that Add refused (its
-// sealed key slot failing): its directory and key stay until Erase or a
-// later Add, and a frame for it is refused (#3968).
-func (s *Store) Keep(camera string) error {
-	if !idRe.MatchString(camera) {
-		return ErrNode
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cams[camera] == nil {
-		s.kept[camera] = true
+	if old != nil {
+		old.mu.Lock()
+		old.gone = true
+		old.mu.Unlock()
 	}
 	return nil
 }
@@ -246,11 +285,16 @@ func (s *Store) SetRetention(camera string, retention time.Duration) error {
 }
 
 func (s *Store) setRetention(camera string, h *held, retention time.Duration) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return s.setRetentionLocked(camera, h, retention)
+}
+
+// setRetentionLocked is setRetention held under h.mu.
+func (s *Store) setRetentionLocked(camera string, h *held, retention time.Duration) error {
 	if retention < 0 || retention > MaxRetention {
 		return ErrRetention
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.gone {
 		return ErrUnknown
 	}
@@ -267,7 +311,7 @@ func (s *Store) setRetention(camera string, h *held, retention time.Duration) er
 		h.dropPending()
 		kerr = s.cfg.Keys.Erase(camera)
 	}
-	if _, err := s.sweepCamera(camera, retention, s.cfg.Now()); err != nil || kerr != nil {
+	if _, err := s.sweepCamera(camera, retention, s.cfg.Now(), true); err != nil || kerr != nil {
 		s.log(camera, "capture not deleted")
 		return ErrErase
 	}
@@ -383,10 +427,15 @@ func (s *Store) Erase(camera string) error {
 		return ErrNode
 	}
 	s.mu.Lock()
-	h := s.cams[camera]
+	h, k := s.cams[camera], s.kept[camera]
 	delete(s.cams, camera)
 	delete(s.kept, camera)
 	s.mu.Unlock()
+	if k != nil {
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		k.gone = true
+	}
 	if h != nil {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -431,11 +480,15 @@ func (s *Store) Flush() error {
 	return first
 }
 
-func (s *Store) ids() []string {
+func (s *Store) ids() []string { return s.names(s.cams) }
+
+func (s *Store) keptIDs() []string { return s.names(s.kept) }
+
+func (s *Store) names(m map[string]*held) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ids := make([]string, 0, len(s.cams))
-	for id := range s.cams {
+	ids := make([]string, 0, len(m))
+	for id := range m {
 		ids = append(ids, id)
 	}
 	slices.Sort(ids)
@@ -445,9 +498,10 @@ func (s *Store) ids() []string {
 // Sweep is the retention sweep: an open segment past its span is written;
 // a segment past its camera's retention is deleted; a camera with no
 // retention, or not added, keeps nothing on disk, and one not added loses
-// its key too (a camera disconnected while the store was down); one Kept
-// is left as it is. Run it after Add has taken (or Keep has held) every
-// connected camera, then on a timer.
+// its key too (a camera disconnected while the store was down). One Kept
+// has its segments expired the same way, by name, but keeps its key and
+// its directory (#4064). Run it after Add has taken (or Keep has held)
+// every connected camera, then on a timer.
 func (s *Store) Sweep() error {
 	now := s.cfg.Now()
 	var werr, first error
@@ -468,13 +522,30 @@ func (s *Store) Sweep() error {
 					werr = err
 				}
 			}
-			n, err := s.sweepCamera(id, h.retention, now)
+			n, err := s.sweepCamera(id, h.retention, now, true)
 			keep(err)
 			if n > 0 {
 				s.log(id, strconv.Itoa(n)+" segments deleted at the end of their retention")
 			}
 		}
 		h.mu.Unlock()
+	}
+	for _, id := range s.keptIDs() {
+		s.mu.Lock()
+		k := s.kept[id]
+		s.mu.Unlock()
+		if k == nil {
+			continue
+		}
+		k.mu.Lock()
+		if !k.gone {
+			n, err := s.sweepCamera(id, k.retention, now, false)
+			keep(err)
+			if n > 0 {
+				s.log(id, strconv.Itoa(n)+" segments deleted at the end of their retention (kept camera)")
+			}
+		}
+		k.mu.Unlock()
 	}
 	des, err := os.ReadDir(s.cfg.Dir)
 	if err != nil {
@@ -486,7 +557,7 @@ func (s *Store) Sweep() error {
 		// erase and lose its new key.
 		s.mu.Lock()
 		switch {
-		case s.cams[id] != nil, s.kept[id]:
+		case s.cams[id] != nil, s.kept[id] != nil:
 		case !idRe.MatchString(id):
 			keep(os.RemoveAll(filepath.Join(s.cfg.Dir, id)))
 		default:
@@ -517,8 +588,9 @@ func parseSegment(name string) (Segment, bool) {
 
 // sweepCamera deletes camera's segments that retention no longer keeps,
 // and any file the store did not write whole; it reports the segments
-// deleted. Held under the camera's lock.
-func (s *Store) sweepCamera(camera string, retention time.Duration, now time.Time) (int, error) {
+// deleted. With rmdir, a retention of zero removes the directory too; a
+// kept camera's stays. Held under the camera's lock.
+func (s *Store) sweepCamera(camera string, retention time.Duration, now time.Time, rmdir bool) (int, error) {
 	dir := filepath.Join(s.cfg.Dir, camera)
 	fi, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -562,7 +634,7 @@ func (s *Store) sweepCamera(camera string, retention time.Duration, now time.Tim
 			first = err
 		}
 	}
-	if retention == 0 && first == nil {
+	if rmdir && retention == 0 && first == nil {
 		if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 			first = err
 		} else if err := privfile.SyncDir(s.cfg.Dir); err != nil {

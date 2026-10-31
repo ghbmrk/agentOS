@@ -1,0 +1,7 @@
+config dnsmasq
+	option port '0'
+	option noresolv '1'
+	option localuse '0'
+
+config odhcpd 'odhcpd'
+	option maindhcp '0'
