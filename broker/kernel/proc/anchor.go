@@ -99,6 +99,11 @@ func anchorMsg(rec []byte) []byte { return append([]byte(domainAnchor), rec...) 
 // logPath exists: a head file deleted on a box with a log is never replaced
 // by a fresh one.
 func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) error {
+	return initCounterAnchor(dir, logPath, c, sign, nil)
+}
+
+// initCounterAnchor is InitCounterAnchor with a test's write stop.
+func initCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey, stop func(i int) bool) error {
 	if err := privfile.Check(dir, true); err != nil {
 		return err
 	}
@@ -120,7 +125,7 @@ func InitCounterAnchor(dir, logPath string, c Counter, sign ed25519.PrivateKey) 
 	if err != nil {
 		return err
 	}
-	return privfile.WriteAtomic(dir, anchorName, b, nil)
+	return privfile.WriteAtomic(dir, anchorName, b, stop)
 }
 
 // OpenCounterAnchor loads the head file in dir and checks it against the
