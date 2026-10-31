@@ -295,24 +295,50 @@ func NewFilterFrom(f *Filter) *Filter {
 	return g
 }
 
-// TestNamesBounded: an interface's tables hold at most maxNames live
-// names; a full table learns nothing new until a name expires.
+// TestNamesBounded: an interface's tables hold at most maxNames names; a
+// full one drops its expired names for a new one, or else the one ending
+// soonest, and renews a name it holds in place.
 func TestNamesBounded(t *testing.T) {
 	tb := names{}
 	for i := range maxNames {
-		tb.add(string(rune(i)), t0.Add(time.Duration(i+1)*time.Second), t0)
+		tb.add(fmt.Sprint(i), t0.Add(time.Duration(i+1)*time.Second), t0)
 	}
-	tb.add("new", t0.Add(time.Hour), t0)
-	if tb.has("new", t0) || len(tb) != maxNames {
-		t.Fatalf("a full table took a name (%d)", len(tb))
+	tb.add("0", t0.Add(time.Hour), t0) // a known name is renewed
+	if !tb.has("0", t0.Add(time.Minute)) || len(tb) != maxNames {
+		t.Fatalf("a known name was not renewed in place (%d)", len(tb))
 	}
-	tb.add(string(rune(0)), t0.Add(time.Hour), t0) // a known name is renewed
-	if !tb.has(string(rune(0)), t0.Add(time.Minute)) {
-		t.Error("a known name was not renewed in a full table")
+	tb.add("new", t0.Add(time.Hour), t0) // none expired: "1" ends soonest
+	if !tb.has("new", t0) || tb.has("1", t0) || !tb.has("2", t0) || len(tb) != maxNames {
+		t.Errorf("a full table did not drop the name ending soonest (%d)", len(tb))
 	}
-	tb.add("new", t0.Add(time.Hour), t0.Add(2*time.Second)) // one has expired
-	if !tb.has("new", t0.Add(2*time.Second)) || len(tb) != maxNames {
+	tb.add("newer", t0.Add(time.Hour), t0.Add(4*time.Second)) // "2" and "3" have expired
+	if !tb.has("newer", t0.Add(4*time.Second)) || len(tb) != maxNames-1 || !tb.has("4", t0.Add(4*time.Second)) {
 		t.Errorf("expired names were not dropped for a new one (%d)", len(tb))
+	}
+}
+
+// TestClaimsHoldPastAFlood: a device that floods its own interface with
+// names fills only its own table, so another device still passes, and a
+// network's name heard last is held however many came before.
+func TestClaimsHoldPastAFlood(t *testing.T) {
+	f := NewFilter()
+	var rs []record
+	for i := range maxNames + 10 {
+		rs = append(rs, a(fmt.Sprintf("d%d.local", i), "10.14.0.2", 120))
+	}
+	for i := 0; i < len(rs); i += 100 {
+		f.Hear("ap0.106", response(rs[i:min(i+100, len(rs))], nil), t0)
+	}
+	own := response([]record{a("printer.local", "10.13.0.2", 120)}, nil)
+	if got := passed(t, f, "ap0.105", printerLink, own, t0); len(got) != 1 {
+		t.Errorf("a flooded table elsewhere blocked the printer: %v", got)
+	}
+	for i := 0; i < len(rs); i += 100 {
+		f.Hear("hh0", response(rs[i:min(i+100, len(rs))], nil), t0)
+	}
+	f.Hear("hh0", response([]record{a("laptop.local", "10.11.0.2", 120)}, nil), t0.Add(time.Second))
+	if got := passed(t, f, "ap0.105", printerLink, response([]record{a("laptop.local", "10.13.0.2", 120)}, nil), t0.Add(time.Second)); got != nil {
+		t.Errorf("a name heard after a full table passed: %v", got)
 	}
 }
 
@@ -575,41 +601,34 @@ func TestParseBounded(t *testing.T) {
 	if _, ok := parse(b); !ok {
 		t.Error("refused a message at the record cap across sections")
 	}
-	w := worst(maxRecords)
-	if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 8*maxRecords {
-		t.Errorf("the worst message within the caps costs %v allocations", allocs)
+	// The costliest names are many short labels, entered again and again
+	// by pointer: the message's step budget ends them.
+	if _, ok := parse(labels(7)); !ok {
+		t.Error("refused a message within the step budget")
+	}
+	if _, ok := parse(labels(8)); ok {
+		t.Error("parsed a message over the step budget")
+	}
+	for _, w := range [][]byte{worst(maxRecords), labels(7)} {
+		if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 4*maxRecords {
+			t.Errorf("a costliest message within the caps costs %v allocations", allocs)
+		}
 	}
 }
 
-// TestFullClaimsFailClosed: while another interface's claimed names are
-// full of live names, no name is a sender's own, since the name the full
-// table would hold may be missing from it.
-func TestFullClaimsFailClosed(t *testing.T) {
-	f := NewFilter()
-	var rs []record
-	for i := range maxNames {
-		rs = append(rs, a(fmt.Sprintf("h%d.local", i), "10.11.0.2", 120))
+// labels is a response whose first record's name is 127 one-byte labels
+// (255 bytes) and whose refs more records point at it: 127 + 128*refs
+// steps.
+func labels(refs int) []byte {
+	b := []byte{0, 0, 0x84, 0, 0, 0, 0, byte(refs + 1), 0, 0, 0, 0}
+	for range 127 {
+		b = append(b, 1, 'x')
 	}
-	for i := 0; i < len(rs); i += 100 {
-		f.Hear("hh0", response(rs[i:min(i+100, len(rs))], nil), t0)
+	b = append(b, 0, 0, typeA, 0, 1, 0, 0, 0, 120, 0, 4, 10, 13, 0, 2)
+	for range refs {
+		b = append(b, 0xC0, 12, 0, typeA, 0, 1, 0, 0, 0, 120, 0, 4, 10, 13, 0, 2)
 	}
-	own := response([]record{a("laptop.local", "10.13.0.2", 120)}, nil)
-	if got := passed(t, f, "ap0.105", printerLink, own, t0); got != nil {
-		t.Errorf("passed with Household's claims full: %v", got)
-	}
-	// Once one claim ends the table is not full.
-	f.claimed["hh0"][dn("h0.local").key()] = t0
-	if got := passed(t, f, "ap0.105", printerLink, own, t0); len(got) != 1 {
-		t.Errorf("passed %v once a claim ended", got)
-	}
-	// A sender's own full table does not count against it.
-	g := NewFilter()
-	for i := 0; i < len(rs); i += 100 {
-		g.Hear("ap0.105", response(rs[i:min(i+100, len(rs))], nil), t0)
-	}
-	if got := passed(t, g, "ap0.105", printerLink, own, t0); len(got) != 1 {
-		t.Errorf("its own full claims blocked the sender: %v", got)
-	}
+	return b
 }
 
 // TestBucket: a bucket gives its size at once, then one token per 1/rate
@@ -635,5 +654,59 @@ func TestBucket(t *testing.T) {
 		if got := b.take(t0.Add(time.Hour)); got != (i < 3) {
 			t.Errorf("after an hour, take %d = %v", i, got)
 		}
+	}
+}
+
+// TestNamePointerHops: a name may follow at most maxHops pointers, so a
+// chain of pointers to pointers buys no unbounded work.
+func TestNamePointerHops(t *testing.T) {
+	// chain is a response whose first record, of a type parse does not
+	// read, holds a chain of pointers to its own name "a"; the second, a
+	// PTR, points at the chain's head, so its target takes hops pointers.
+	chain := func(hops int) []byte {
+		b := []byte{0, 0, 0x84, 0, 0, 0, 0, 2, 0, 0, 0, 0}
+		b = append(b, 1, 'a', 0) // offset 12: "a"
+		b = append(b, 0, 99, 0, 1, 0, 0, 0, 1)
+		rdl := len(b)
+		b = append(b, 0, 0)
+		prev := 12
+		for range hops - 1 {
+			at := len(b)
+			b = append(b, 0xC0|byte(prev>>8), byte(prev))
+			prev = at
+		}
+		b[rdl], b[rdl+1] = byte((len(b)-rdl-2)>>8), byte(len(b)-rdl-2)
+		b = append(b, 0xC0, 12, 0, typePTR, 0, 1, 0, 0, 0, 1, 0, 2, 0xC0|byte(prev>>8), byte(prev))
+		return b
+	}
+	if _, ok := parse(chain(maxHops)); !ok {
+		t.Error("refused a name of maxHops pointers")
+	}
+	if _, ok := parse(chain(maxHops + 1)); ok {
+		t.Error("parsed a name of more than maxHops pointers")
+	}
+}
+
+// TestReadLimitBeforeParse: past readBurst packets at once an interface's
+// packets are not even read, so what they claim is not heard; within it,
+// they are.
+func TestReadLimitBeforeParse(t *testing.T) {
+	r := newRelayer(plan(t), func(string) []netip.Prefix { return printerLink }, t0)
+	announce := func(n string) []byte { return response([]record{a(n+".local", "10.11.0.2", 120)}, nil).bytes() }
+	for i := range readBurst {
+		r.handle("hh0", 5353, announce(fmt.Sprint("x", i)), t0)
+	}
+	r.handle("hh0", 5353, announce("late"), t0)
+	if !r.f.claimed["hh0"].has(dn("x0.local").key(), t0) || r.f.claimed["hh0"].has(dn("late.local").key(), t0) {
+		t.Error("the read limit did not stop the packet past its burst")
+	}
+	r.handle("hh0", 5353, announce("later"), t0.Add(time.Second/readPerSec))
+	if !r.f.claimed["hh0"].has(dn("later.local").key(), t0) {
+		t.Error("the read limit did not refill")
+	}
+	// The printer's answer goes to Household, once.
+	out, outs := r.handle("ap0.105", 5353, response([]record{a("printer.local", "10.13.0.2", 120)}, nil).bytes(), t0)
+	if out == nil || !slices.Equal(outs, []string{"hh0"}) {
+		t.Errorf("the printer's answer went to %v", outs)
 	}
 }

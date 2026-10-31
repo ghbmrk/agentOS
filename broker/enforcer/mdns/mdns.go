@@ -172,7 +172,7 @@ func Serve(ctx context.Context, plan Plan) error {
 	if hasIPv6() {
 		families = append(families, true)
 	}
-	buckets, reads := map[string]*bucket{}, map[string]*bucket{}
+	r := newRelayer(plan, prefixes, time.Now())
 	for _, name := range ifaces {
 		for _, v6 := range families {
 			c, err := listen(name, v6)
@@ -181,10 +181,7 @@ func Serve(ctx context.Context, plan Plan) error {
 			}
 			conns[side{name, v6}] = c
 		}
-		buckets[name] = newBucket(burst, perSec, time.Now())
-		reads[name] = newBucket(readBurst, readPerSec, time.Now())
 	}
-	f := NewFilter()
 	var wg sync.WaitGroup
 	for s, c := range conns {
 		wg.Add(1)
@@ -195,22 +192,7 @@ func Serve(ctx context.Context, plan Plan) error {
 				dst = &net.UDPAddr{IP: Group6.Addr().AsSlice(), Port: int(Group6.Port())}
 			}
 			relay(c, func(pkt []byte, port uint16, now time.Time) {
-				if !reads[s.name].take(now) {
-					return
-				}
-				outs := plan.Route(s.name, port, pkt)
-				m, ok := parse(pkt)
-				if !ok {
-					return
-				}
-				f.Hear(s.name, m, now)
-				if len(outs) == 0 || !buckets[s.name].take(now) {
-					return
-				}
-				out := f.Pass(s.name, prefixes(s.name), m, now)
-				if out == nil || len(out) > maxPacket {
-					return
-				}
+				out, outs := r.handle(s.name, port, pkt, now)
 				for _, o := range outs {
 					if s.v6 {
 						dst.Zone = o
@@ -236,6 +218,46 @@ func hasIPv6() bool {
 		syscall.Close(fd)
 	}
 	return !errors.Is(err, syscall.EAFNOSUPPORT)
+}
+
+// relayer is what the relay does with one packet, apart from its sockets.
+type relayer struct {
+	plan          Plan
+	f             *Filter
+	link          func(iface string) []netip.Prefix
+	reads, passes map[string]*bucket // read before parsing; passed on
+}
+
+func newRelayer(plan Plan, link func(string) []netip.Prefix, now time.Time) *relayer {
+	r := &relayer{plan: plan, f: NewFilter(), link: link, reads: map[string]*bucket{}, passes: map[string]*bucket{}}
+	for _, name := range plan.Ifaces() {
+		r.reads[name] = newBucket(readBurst, readPerSec, now)
+		r.passes[name] = newBucket(burst, perSec, now)
+	}
+	return r
+}
+
+// handle is the message pkt, heard on iface from port, rebuilds to and
+// the interfaces it goes out on; none if it is over the read limit,
+// malformed, carried by no pair, over the rate limit or left empty.
+func (r *relayer) handle(iface string, port uint16, pkt []byte, now time.Time) ([]byte, []string) {
+	if !r.reads[iface].take(now) {
+		return nil, nil
+	}
+	m, ok := parse(pkt)
+	if !ok {
+		return nil, nil
+	}
+	r.f.Hear(iface, m, now)
+	outs := r.plan.Route(iface, port, pkt)
+	if len(outs) == 0 || !r.passes[iface].take(now) {
+		return nil, nil
+	}
+	out := r.f.Pass(iface, r.link(iface), m, now)
+	if out == nil || len(out) > maxPacket {
+		return nil, nil
+	}
+	return out, outs
 }
 
 // relay reads c until it closes, handing each packet no larger than

@@ -64,28 +64,40 @@ type message struct {
 
 func be16(b []byte) uint16 { return uint16(b[0])<<8 | uint16(b[1]) }
 
-// Caps on one message's questions and records, which bound the work of
-// reading it: each name costs at most 255 bytes however its pointers
-// chain. An mDNS message from one host, even one announcing every
-// service it has, holds far fewer (RFC 6762 §6, RFC 6763 §12).
+// Caps on one message, which bound the work of reading it: its
+// questions, its records, and maxSteps labels and pointers read across
+// all its names, however they chain. An mDNS message from one host, even
+// one announcing every service it has, holds far fewer (RFC 6762 §6,
+// RFC 6763 §12).
 const (
 	maxQuestions = 64
 	maxRecords   = 128
+	maxSteps     = 1024
 )
+
+// reader reads one message: its labels are cut from one copy of it, and
+// steps is what is left of its maxSteps.
+type reader struct {
+	b     []byte
+	s     string
+	steps int
+}
 
 // parse reads a whole DNS message. It fails on anything malformed:
 // truncated sections, bytes after the last record, forward or reserved
 // name pointers, names over 255 bytes, or A, AAAA, PTR, SRV or TXT
 // rdata of the wrong shape; and on more than maxQuestions questions or
-// maxRecords records, before reading any.
+// maxRecords records, before reading any; and once its names have taken
+// maxSteps labels and pointers.
 func parse(b []byte) (*message, bool) {
 	if len(b) < 12 || be16(b[4:]) > maxQuestions || int(be16(b[6:]))+int(be16(b[8:]))+int(be16(b[10:])) > maxRecords {
 		return nil, false
 	}
+	rd := &reader{b: b, s: string(b), steps: maxSteps}
 	m := &message{id: be16(b), flags: be16(b[2:])}
 	off := 12
 	for range be16(b[4:]) {
-		n, next, ok := readName(b, off)
+		n, next, ok := rd.name(off)
 		if !ok || next+4 > len(b) {
 			return nil, false
 		}
@@ -94,7 +106,7 @@ func parse(b []byte) (*message, bool) {
 	}
 	for i, s := range []*[]record{&m.answers, &m.authority, &m.additional} {
 		for range be16(b[6+2*i:]) {
-			r, next, ok := readRecord(b, off)
+			r, next, ok := rd.record(off)
 			if !ok {
 				return nil, false
 			}
@@ -105,8 +117,9 @@ func parse(b []byte) (*message, bool) {
 	return m, off == len(b)
 }
 
-func readRecord(b []byte, off int) (record, int, bool) {
-	n, off, ok := readName(b, off)
+func (rd *reader) record(off int) (record, int, bool) {
+	b := rd.b
+	n, off, ok := rd.name(off)
 	if !ok || off+10 > len(b) {
 		return record{}, 0, false
 	}
@@ -126,13 +139,13 @@ func readRecord(b []byte, off int) (record, int, bool) {
 		ok = txtValid(rdata)
 		r.data = rdata
 	case typePTR:
-		r.target, off, ok = readName(b, start)
+		r.target, off, ok = rd.name(start)
 		ok = ok && off == end
 	case typeSRV:
 		ok = len(rdata) > 6
 		if ok {
 			r.data = rdata[:6]
-			r.target, off, ok = readName(b, start+6)
+			r.target, off, ok = rd.name(start + 6)
 			ok = ok && off == end
 		}
 	}
@@ -151,14 +164,25 @@ func txtValid(b []byte) bool {
 	return true
 }
 
-// readName reads the name at off and returns it with the offset after it.
+// name reads the name at off and returns it with the offset after it.
 // A pointer may only point back, before itself, so every pointer chain
-// ends; the 255-byte bound ends a chain that keeps adding labels.
-func readName(b []byte, off int) (name, int, bool) {
+// ends; the 255-byte bound ends a chain that keeps adding labels, and
+// maxHops one of pointers to pointers. Each label and pointer takes a
+// step of the message's budget, so its names together cost a bounded
+// amount of work.
+const maxHops = 16
+
+func (rd *reader) name(off int) (name, int, bool) {
+	b := rd.b
 	var n name
-	end, size := -1, 1
+	end, size, hops := -1, 1, 0
 	for off < len(b) {
 		c := int(b[off])
+		if c != 0 {
+			if rd.steps--; rd.steps < 0 {
+				return nil, 0, false
+			}
+		}
 		switch {
 		case c == 0:
 			if end < 0 {
@@ -167,7 +191,7 @@ func readName(b []byte, off int) (name, int, bool) {
 			return n, end, true
 		case c&0xC0 == 0xC0 && off+1 < len(b):
 			p := (c&0x3F)<<8 | int(b[off+1])
-			if p >= off {
+			if hops++; p >= off || hops > maxHops {
 				return nil, 0, false
 			}
 			if end < 0 {
@@ -178,7 +202,7 @@ func readName(b []byte, off int) (name, int, bool) {
 			if size += 1 + c; size > 255 {
 				return nil, 0, false
 			}
-			n = append(n, string(b[off+1:off+1+c]))
+			n = append(n, rd.s[off+1:off+1+c])
 			off += 1 + c
 		default:
 			return nil, 0, false
@@ -309,28 +333,28 @@ const (
 
 type names map[string]time.Time
 
-// add notes k until until, unless the table is full of live names.
+// add notes k until until. A full table first drops its expired names,
+// then, if none had expired, the one ending soonest: only what is heard on
+// one interface fills that interface's table, and a host there could take
+// any name on its own link anyway.
 func (t names) add(k string, until, now time.Time) {
 	if _, ok := t[k]; !ok && len(t) >= maxNames {
+		soonest := ""
 		for k, u := range t {
 			if !u.After(now) {
 				delete(t, k)
+			} else if soonest == "" || u.Before(t[soonest]) {
+				soonest = k
 			}
 		}
 		if len(t) >= maxNames {
-			return
+			delete(t, soonest)
 		}
 	}
 	t[k] = until
 }
 
 func (t names) has(k string, now time.Time) bool { return t[k].After(now) }
-
-// full: t holds maxNames live names, so a name it would hold may be
-// missing from it.
-func (t names) full(now time.Time) bool {
-	return len(t) >= maxNames && !slices.ContainsFunc(slices.Collect(maps.Values(t)), func(u time.Time) bool { return !u.After(now) })
-}
 
 // Filter is the relay's memory of names: for each interface, the names
 // claimed by what was heard there, and the host and instance names its
@@ -391,20 +415,13 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// A name claimed on another interface is not the sender's; nor is any
-	// name while another interface's claims are full, since the one it
-	// would hold may be missing.
-	var full bool
-	for i, t := range f.claimed {
-		full = full || i != iface && t.full(now)
-	}
 	elsewhere := func(k string) bool {
 		for i, t := range f.claimed {
 			if i != iface && t.has(k, now) {
 				return true
 			}
 		}
-		return full
+		return false
 	}
 	hosts, ins := table(f.hosts, iface), table(f.ins, iface)
 	rs := slices.Concat(m.answers, m.additional)
