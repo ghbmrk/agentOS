@@ -354,7 +354,7 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.b.Finish(id2, c.sign(msg2)); !errors.Is(err, ErrPhase) {
+	if _, err := g.b.Finish(id2, c.sign(msg2)); !errors.Is(err, ErrGone) {
 		t.Errorf("second ticket swapped the replacement: %v", err)
 	}
 	if want := g.now.Add(Wait); !res.Due.Equal(want) || len(res.Recovery) != CodeLen || res.Recovery == code {
@@ -522,6 +522,27 @@ func TestFactoryResetKeepsPolicyBlocksLoosening(t *testing.T) {
 	}
 	if out, err := g.propose(b, edit(home(0), g.now.UnixMilli()+10, "tv", "x.example")); err != nil || out.Pending == "" {
 		t.Errorf("new owner's loosening: %+v %v", out, err)
+	}
+
+	// A stolen recovery code's ticket, begun before a reset, does not
+	// start a replacement against the passkey enrolled after it.
+	g2, _, code2 := enrolled(t)
+	x := newAuthenticator(t)
+	id, msg, err := g2.b.Begin(code2, x.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g2.b.FactoryReset(caseCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g2.enrol(newAuthenticator(t), caseCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g2.b.Finish(id, x.sign(msg)); !errors.Is(err, ErrGone) {
+		t.Errorf("ticket from before the reset: %v", err)
+	}
+	if _, ok := g2.b.Recovery(); ok {
+		t.Error("a ticket from before the reset started a replacement")
 	}
 }
 

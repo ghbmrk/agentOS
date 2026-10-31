@@ -205,8 +205,9 @@ type Book struct {
 }
 
 // ticket is one enrolment between its code and its new passkey's tap.
+// ticket is one Begin waiting for its Finish. It is good only for the
+// state that issued it: every save drops all tickets.
 type ticket struct {
-	phase   Phase
 	pk      key.PublicKey
 	msg     []byte
 	expires int64
@@ -461,7 +462,7 @@ func (b *Book) Begin(code string, pk key.PublicKey) (id string, msg []byte, err 
 	}
 	id = hex.EncodeToString(idb)
 	msg = append([]byte(DomainEnrol+id+"\x00"), pk.Encode()...)
-	b.tix[id] = &ticket{phase: b.st.Phase, pk: pk, msg: msg, expires: now + TicketLife.Milliseconds()}
+	b.tix[id] = &ticket{pk: pk, msg: msg, expires: now + TicketLife.Milliseconds()}
 	return id, msg, nil
 }
 
@@ -485,7 +486,7 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 	defer b.mu.Unlock()
 	t, ok := b.tix[id]
 	delete(b.tix, id)
-	if !ok || t.expires <= b.nowMS() || t.phase != b.st.Phase {
+	if !ok || t.expires <= b.nowMS() {
 		return Result{}, ErrGone
 	}
 	if !t.pk.Verify(t.msg, sig) {
@@ -509,9 +510,6 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		b.cfg.Alerts.Raise(alert.Enrolment, "")
 		return Result{Recovery: code, Card: card}, nil
 	case Enrolled:
-		if st.Pending != nil {
-			return Result{}, ErrPhase // one replacement at a time, and never swapped
-		}
 		due := b.nowMS() + Wait.Milliseconds()
 		st.Pending = &replacement{Key: t.pk.Encode(), Recovery: rec, DueMS: due}
 		if err := b.save(st); err != nil {
@@ -689,6 +687,10 @@ func (b *Book) Keep(p policy.Proposal, sig []byte) error {
 
 // save writes st and, only if that succeeds, makes it the book's state.
 func (b *Book) save(st state) error {
+	// A ticket begun under the state before this one authorises nothing
+	// under it: not after an enrolment, a recovery started, cancelled or
+	// applied, or a reset.
+	clear(b.tix)
 	if err := st.check(b.cfg.Name); err != nil {
 		return err
 	}
