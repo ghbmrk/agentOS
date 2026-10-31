@@ -1,0 +1,4 @@
+# The Thread stack's build pin (ENF-t, D-231): openthread/openthread main
+# at 2026-10-29. tools/build-openthread.sh builds ot-daemon from it; the
+# image (slice m) installs the result.
+commit e577777c308f6c87e5da3056239231a8fc147cb2

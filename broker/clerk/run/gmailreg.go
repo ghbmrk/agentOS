@@ -56,8 +56,9 @@ func loadReg(dir string, s clerk.Sealer) (r clerk.Registration, ok bool) {
 	return clerk.Registration{ID: g.ID, Secret: g.Secret}, true
 }
 
-// saveReg seals r as dir's kept registration, replacing any before.
-func saveReg(dir string, s clerk.Sealer, r clerk.Registration) error {
+// saveReg seals r as dir's kept registration, replacing any before. stop,
+// for tests only, is privfile.WriteAtomic's; nil runs every step.
+func saveReg(dir string, s clerk.Sealer, r clerk.Registration, stop func(i int) bool) error {
 	plain, err := json.Marshal(gmailRegistration{r.ID, r.Secret})
 	if err != nil {
 		return err
@@ -70,7 +71,7 @@ func saveReg(dir string, s clerk.Sealer, r clerk.Registration) error {
 	if len(blob) > maxReg {
 		return errors.New("run: the registration is past its bound")
 	}
-	return privfile.WriteAtomic(dir, regFile, blob, nil)
+	return privfile.WriteAtomic(dir, regFile, blob, stop)
 }
 
 // keepReg keeps the registration grant was sealed with, the grant a sign-in
@@ -86,5 +87,5 @@ func keepReg(dir string, s clerk.Sealer, grant []byte) error {
 	if json.Unmarshal(grant, &g) != nil || g.ID == "" || g.Secret == "" {
 		return errors.New("run: the grant holds no registration")
 	}
-	return saveReg(dir, s, clerk.Registration{ID: g.ID, Secret: g.Secret})
+	return saveReg(dir, s, clerk.Registration{ID: g.ID, Secret: g.Secret}, nil)
 }

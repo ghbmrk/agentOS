@@ -82,6 +82,10 @@ type Checker struct {
 	last    int64
 	counted []time.Time
 	silent  []time.Time
+
+	// writeStop, for tests only, is the spent step's privfile.WriteAtomic
+	// stop; nil runs every step.
+	writeStop func(i int) bool
 }
 
 // New reads the state file, if there is one, and returns a checker that
@@ -189,7 +193,7 @@ func (c *Checker) Verify(code string, after int64, counted bool, steps []kernel.
 		return wire.Result{}, nil
 	}
 	raw, _ := json.Marshal(persisted{LastStep: step})
-	if err := privfile.WriteAtomic(c.dir, c.name, raw, nil); err != nil {
+	if err := privfile.WriteAtomic(c.dir, c.name, raw, c.writeStop); err != nil {
 		return wire.Result{}, errState
 	}
 	c.last = step

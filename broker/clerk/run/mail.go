@@ -175,7 +175,7 @@ func setMail(dir string, sec *clerk.Secrets, s MailSettings, password string, st
 	}
 	mailMu.Lock()
 	defer mailMu.Unlock()
-	return switchMail(dir, sec, s, b, func() error { return sec.Put(slotOf(s), clerk.KindStatic, []byte(password)) }, stop)
+	return switchMail(dir, sec, s, b, func() error { return sec.Put(slotOf(s), clerk.KindStatic, []byte(password)) }, stop, nil)
 }
 
 // checkSetup is SetMail's refusals of what the owner entered.
@@ -223,20 +223,22 @@ func setGmail(dir string, sec *clerk.Secrets, address string, stop func(i int) b
 	if !sec.Has(slotOf(s)) {
 		return ErrNoGrant
 	}
-	return switchMail(dir, sec, s, b, func() error { return nil }, stop)
+	return switchMail(dir, sec, s, b, func() error { return nil }, stop, nil)
 }
 
 // switchMail is setup's steps after its checks, with mailMu held: put the
 // account's secret (put), write the settings b, drop another account's
-// records of read mail and senders, drop every other mail slot.
-func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put func() error, stop func(i int) bool) error {
+// records of read mail and senders, drop every other mail slot. stop ends
+// the steps after step i, as a crash would; write, for tests only, is the
+// settings write's privfile.WriteAtomic stop. nil runs every step.
+func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put func() error, stop, write func(i int) bool) error {
 	cur := slotOf(s)
 	prev, perr := readMail(dir)
 	same := perr == nil && slotOf(prev) == cur
 	had := sec.Has(cur)
 	steps := []func() error{
 		put,
-		func() error { return privfile.WriteAtomic(dir, mailSettings, b, nil) },
+		func() error { return privfile.WriteAtomic(dir, mailSettings, b, write) },
 		func() error {
 			// Another account's records of read mail and of senders do not
 			// load under this one; dropping them makes the restart a new
@@ -252,9 +254,13 @@ func switchMail(dir string, sec *clerk.Secrets, s MailSettings, b []byte, put fu
 		if err := step(); err != nil {
 			// A secret put for an account whose settings did not write goes
 			// again, so the account before keeps a store holding its own
-			// secret only and still opens (CLK-1, #3030).
+			// secret only and still opens (CLK-1, #3030). Settings that did
+			// write, a failed write past its rename (privfile.ErrUnsynced),
+			// name this account, so its secret stays.
 			if i == 1 && !had {
-				err = errors.Join(err, sec.Remove(cur))
+				if now, rerr := readMail(dir); rerr != nil || slotOf(now) != cur {
+					err = errors.Join(err, sec.Remove(cur))
+				}
 			}
 			return err
 		}

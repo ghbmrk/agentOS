@@ -44,25 +44,9 @@ since 2026-10-17T17:06:19Z
 # directory"). It is on main, so it is allowed here and #2545's exemption is gone.
 allow evals/slice-inbox/
 
-# #4051 (ENF-g, #3662): broker/enforcer/ap/ (with push/), which the G2 list does not name
-# (D-198). Remove once #4051 merges.
-exempt-pr 4051
-
-# #4088 (ENF-i, #3667): broker/enforcer/traffic/, which the G2 list does not name (D-198). Remove
-# once #4088 merges.
-exempt-pr 4088
-
-# #4127 (ENF-k2, #3906): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
-# Remove once #4127 merges.
-exempt-pr 4127
-
 # #4125 (ENF-t, #3702): broker/enforcer/radio/ (with radio/thread/ and radio/confine/), which the G2
 # list does not name (D-198). Remove once #4125 merges.
 exempt-pr 4125
-
-# #4122 (ENF-r-follow, #4119): broker/enforcer/devsecret/, page/ and pairseal/, which the G2 list
-# does not name (D-198). Remove once #4122 merges.
-exempt-pr 4122
 
 # #4132 (ENF-names-b): broker/enforcer/channel/, which the G2 list does not name (D-198).
 # Remove once #4132 merges.
@@ -99,6 +83,22 @@ exempt-pr 4206
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
+
+# #4171 (ENF-r-follow-2): broker/enforcer/devsecret/, which the G2 list does not name (D-198).
+# Remove once #4171 merges.
+exempt-pr 4171
+
+# #4212 (DEV-homekit-b2c, #3894; replaces #4166): broker/cmd/agentos-homekit/, which the G2 list does
+# not name (D-198). Remove once #4212 merges.
+exempt-pr 4212
+
+# #4182 (ENF-g-b): broker/enforcer/ap/, which the G2 list does not name (D-198). Remove once #4182
+# merges.
+exempt-pr 4182
+
+# #4216 (ENF-k2-rx, #4196): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
+# Remove once #4216 merges.
+exempt-pr 4216
 
 # Project machinery and records.
 allow .claude/
