@@ -523,7 +523,12 @@ class InlinedTest(unittest.TestCase):
             '"node_modules/c/src/node_modules/internal/x.js"(e){}',      # npm layout: c's own source
             '"node_modules/.pnpm/node_modules/hoisted/x.js"(e){}',       # pnpm's hoisted directory
             '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"(e){}',
-            '"node_modules/.pnpm/odd/x/node_modules/stray/x.js"(e){}',   # a walk that breaks: still named
+            '"node_modules/.pnpm/odd/x/node_modules/stray/x.js"(e){}',   # a walk that breaks fails closed
+            '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js"(e){}',
+            '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/x~y/node_modules/ws3/x.js"(e){}',
+            '"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"(e){}',
+            '"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"(e){}',
+            '"node_modules/b~ar/x.js"(e){}',                              # a legacy name MODULE_SEG cannot read
             '"ns:node_modules/ns-pkg/i.js"(e){}',                          # esbuild namespace
             "// CONCATENATED MODULE: ./node_modules/concat/index.js",      # webpack
             '"[project]/node_modules/turbo/index.js [app-ssr] (ecmascript)", (ctx) => {',  # Turbopack
@@ -548,6 +553,11 @@ class InlinedTest(unittest.TestCase):
             "hoisted": {"node_modules/.pnpm/node_modules/hoisted/x.js"},
             "deep": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"},
             "stray": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js"},
+            "ws2": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js"},
+            "ws3": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/x~y/node_modules/ws3/x.js"},
+            "ws4": {"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"},
+            "@s/ws5": {"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"},
+            "b~ar": {"node_modules/b~ar/x.js"},
             "concat": {"./node_modules/concat/index.js"},
             "turbo": {"node_modules/turbo/index.js"},
             "turbo2": {"node_modules/turbo2/a.js"}, "turbo3": {"node_modules/turbo3/a.js"},

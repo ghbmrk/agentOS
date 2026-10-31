@@ -511,8 +511,10 @@ def mark_owner(path):
     """(package, versioned) for one bundler mark path, or None if it names no package. The path
     belongs to the last package of its chain of node_modules/<name>/ steps that each follow a
     package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/) names
-    its version, any other step does not, and a node_modules/ deeper inside a package (its own
-    src/node_modules/) is that package's own source (#4197)."""
+    its version, any other step does not (pnpm's hoisted .pnpm/node_modules/ among them), and a
+    node_modules/ deeper inside a package (its own src/node_modules/) is that package's own
+    source. A chain step the walk cannot read fails closed: the path is an unversioned mark of
+    whatever follows its last node_modules/ (#4197)."""
     store = [m for m in PNPM_MARK.finditer(path) if m.group(1).replace(b"+", b"/") == m.group(3)]
     if store:
         pos, name, versioned = store[-1].end(), store[-1].group(3), True
@@ -520,18 +522,27 @@ def mark_owner(path):
         pos, name, versioned = path.find(b"node_modules/"), None, False
         if pos < 0:
             return None
-    while (m := MODULE_SEG.match(path, pos)):
+    while path.startswith(b"node_modules/", pos):
+        m = MODULE_SEG.match(path, pos)
+        if not m:
+            return unreadable_owner(path)
         pos = m.end()
         if m.group(1) == b".pnpm":
             if not path.startswith(b"node_modules/", pos):  # else pnpm's hoisted .pnpm/node_modules/
-                pos = path.find(b"/", pos) + 1 or len(path)  # the store directory; its node_modules/ follows
+                pos = path.find(b"/", pos) + 1  # the store directory, which node_modules/ must follow
+                if not pos or not path.startswith(b"node_modules/", pos):
+                    return unreadable_owner(path)
             continue
         name, versioned = m.group(1), False
-    if name is None:
-        # A path the walk cannot follow still names a package: its last node_modules/<name>/.
-        names = [n for n in MODULE_SEG.findall(path) if n != b".pnpm"]
-        return (names[-1].decode(), False) if names else None
     return name.decode(), versioned
+
+
+def unreadable_owner(path):
+    """An unversioned mark of what follows the path's last node_modules/: its first one or, for a
+    scope, two steps, or the whole path when nothing follows."""
+    steps = path.rpartition(b"node_modules/")[2].split(b"/")
+    name = b"/".join(steps[:2] if steps[0].startswith(b"@") else steps[:1])
+    return (name or path).decode(), False
 
 
 def unversioned_marks(body, own):
