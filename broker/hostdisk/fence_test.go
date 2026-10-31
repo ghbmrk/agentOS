@@ -73,6 +73,10 @@ func TestFenceRefusesSyntheticSources(t *testing.T) {
 		"an OpenFile flag beyond the pair": head + "func f(p string) { os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|os.O_CREATE, 0) }\n",
 		"an OpenFile flag variable":        head + "var fl = os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK\n\nfunc f(p string) { os.OpenFile(p, fl, 0) }\n",
 		"os.WriteFile":                     "package hostdisk\n\nimport \"os\"\n\nvar _ = os.WriteFile\n",
+		"io/ioutil":                        "package hostdisk\n\nimport \"io/ioutil\"\n\nfunc f() { w, _ := ioutil.TempFile(\"/dev\", \"x\"); _ = w }\n",
+		"another broker package":           "package hostdisk\n\nimport \"github.com/ghbmrk/agentos/broker/kernel/privfile\"\n\nvar _ = privfile.WriteAtomic\n",
+		"net":                              "package hostdisk\n\nimport \"net\"\n\nvar _ = net.Dial\n",
+		"os/exec":                          "package hostdisk\n\nimport \"os/exec\"\n\nvar _ = exec.Command\n",
 		"os.CreateTemp":                    "package hostdisk\n\nimport \"os\"\n\nvar _ = os.CreateTemp\n",
 		"os.MkdirTemp":                     "package hostdisk\n\nimport \"os\"\n\nvar _ = os.MkdirTemp\n",
 		"os.Chtimes":                       "package hostdisk\n\nimport \"os\"\n\nvar _ = os.Chtimes\n",
@@ -111,9 +115,17 @@ func fenceFile(t *testing.T, src string) []string {
 // judges each name by the object it resolves to (#4256).
 func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []string {
 	t.Helper()
-	forbiddenImports := map[string]bool{
-		"os/exec": true, "golang.org/x/sys/unix": true,
-		"net": true, "net/http": true, "unsafe": true,
+	// The only imports the package and its command may use: what they use
+	// today, none of which writes a path (os and syscall are fenced by
+	// name below). Any other package, io/ioutil, os/exec, unsafe, a network
+	// package or another broker package among them, fails, since its
+	// functions could write under names the fence does not list (#4268
+	// Security B3). Adding one is a reviewed edit here.
+	allowedImports := map[string]bool{
+		"bufio": true, "encoding/binary": true, "encoding/json": true, "errors": true, "fmt": true,
+		"hash/crc32": true, "io": true, "math/bits": true, "os": true, "path/filepath": true,
+		"regexp": true, "sort": true, "strconv": true, "strings": true, "syscall": true,
+		"github.com/ghbmrk/agentos/broker/hostdisk": true,
 	}
 	forbiddenSel := map[string]bool{
 		"O_RDWR": true, "O_WRONLY": true, "O_APPEND": true, "O_CREATE": true, "O_TRUNC": true,
@@ -151,8 +163,8 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 	for _, f := range files {
 		for _, im := range f.Imports {
 			path, _ := strconv.Unquote(im.Path.Value)
-			if forbiddenImports[path] {
-				fail("%s imports %s", fs.Position(im.Pos()).Filename, path)
+			if !allowedImports[path] {
+				fail("%s imports %s, which the fence does not admit", fs.Position(im.Pos()).Filename, path)
 			}
 			if path == "syscall" && im.Name != nil {
 				fail("%s imports syscall under another name", fs.Position(im.Pos()).Filename)
@@ -286,7 +298,7 @@ func goList(t *testing.T) []listed {
 	t.Helper()
 	listOnce.Do(func() {
 		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}\t{{.Export}}"}, fenced...)
-		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net/http")
+		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net", "io/ioutil", "github.com/ghbmrk/agentos/broker/kernel/privfile")
 		cmd := exec.Command("go", args...)
 		cmd.Env = append(os.Environ(), "GOFLAGS=")
 		out, err := cmd.Output()
