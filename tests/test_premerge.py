@@ -958,6 +958,26 @@ class PremergeTest(unittest.TestCase):
         qfix = self.rec("fix-list", sha, "<!-- record: security -->\nNext: owed\n\n<!-- record: combined -->\n", at="3")
         self.assertEqual(self.lens_run([l3, lens, sec, qfix]), (1, ["not-accepted"]))
         self.assertEqual(premerge.verdict([sec, qfix], 7, security=True), ("fix-list", sha[:7]))
+        # the verdict word is read case-blind: a capitalised Accept quoting combined is still the Security record only
+        cap = {**quoting("<!-- record: security -->", "\n<!-- record: combined -->", "3")}
+        cap["body"] = cap["body"].replace("Verdict: accept", "Verdict: Accept")
+        self.assertEqual(self.lens_run([lens, cap]), (1, ["no-verdict"]))
+        self.assertEqual(self.lens_run([l3, lens, cap]), (0, ["same"]))
+        # a fence left open runs to the end of the comment, as Markdown renders it, so an accept's record in it is quoted
+        self.assertEqual(self.lens_run([l3, lens, {**sec, "body": sec["body"].replace("# t\n", "# t\n```\n")}]),
+                         (1, UN))
+
+    def test_verdict_reads_large_comments_in_linear_time(self):
+        # #4262 review: a fence regex over every comment was quadratic, so anyone's large comments could stall the gate.
+        import time
+        rec = f"Record: PR #7 · package X-1 · head {'a' * 7}\n<!-- record: security -->\n"
+        fences = "```x\n" * 20000
+        comments = [{"author_association": who, "created_at": str(n), "updated_at": str(n),
+                     "body": f"Verdict: accept\n{fences}{rec}"} for n, who in enumerate(["NONE", "OWNER"] * 5)]
+        t = time.monotonic()
+        for kw in ({}, {"security": True}, {"lens": "ux"}, {"lens": "potency"}):
+            premerge.verdict(comments, 7, **kw)
+        self.assertLess(time.monotonic() - t, 5)
 
     def test_lenses_owed_by_tier(self):
         owed = premerge.lenses_owed

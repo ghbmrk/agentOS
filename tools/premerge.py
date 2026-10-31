@@ -105,7 +105,7 @@ _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*
 _MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
 # The lines a record block runs on under its Record line; a fenced block is quoted text (#4261).
 _HEADER = re.compile(r"<!-- record: \S+ -->$|\s*$")
-_FENCE = re.compile(r"^(`{3,}|~{3,})[^`\n]*\n.*?^\1[ \t]*$", re.M | re.S)
+_FENCE = re.compile(r"(`{3,}|~{3,})[^`]*$")
 
 
 def _record_block(body):
@@ -115,7 +115,14 @@ def _record_block(body):
     under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
     neither hide the review's own record nor lend it one (#4261). Otherwise `placed` is false and the whole comment is
     returned."""
-    lines = _FENCE.sub("", body).split("\n")
+    lines, fence = [], None
+    for line in body.split("\n"):  # one pass: a fence left open runs to the end, as Markdown renders it
+        if fence is None and _FENCE.match(line):
+            fence = _FENCE.match(line).group(1)
+        elif fence is None:
+            lines.append(line)
+        elif line.rstrip(" \t") == fence:
+            fence = None
     at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
     if at is None:
         return body, False
@@ -152,6 +159,8 @@ def verdict(comments, pr, security=False, lens=None):
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
+        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+            continue
         own, placed = _record_block(body)
         # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
         # quoted or misplaced marker or record can only make it count, which fails closed.
@@ -165,10 +174,10 @@ def verdict(comments, pr, security=False, lens=None):
             if security and placed and _L3.search(own):
                 marked = None
         misplaced = accept and not placed
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and (misplaced or not rec):
+        if marked and (misplaced or not rec):
             if misplaced or not _RECORD.search(read):
                 found = ("unparsed", None)
-        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
+        elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
