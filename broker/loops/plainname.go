@@ -63,6 +63,7 @@ var fuzzNames = map[string]string{
 	"vision.FuzzVisionReply":        "the check that reads what the camera vision service reports",
 	"channel.FuzzParse":             "the check that reads what the enforcer box is asked to do",
 	"radio.FuzzUp":                  "the check that reads what the enforcer box's radios answer",
+	"ble.FuzzDecode":                "the check that reads what the enforcer box's Bluetooth service says",
 }
 
 // probePrefix starts the socket probe's subject ("socket.<machine>").
