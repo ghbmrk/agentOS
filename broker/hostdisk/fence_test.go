@@ -30,9 +30,9 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 	// the build leaves out would go unchecked, so one fails), and the fence
 	// reads what each name resolves to (#4256).
 	var files int
-	for _, p := range goList(t) {
-		if p.unread != "" {
-			t.Errorf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, p.unread)
+	for i, p := range goList(t) {
+		if u := unread(t, fenced[i]); u != "" {
+			t.Errorf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, u)
 		}
 		srcs := map[string]string{}
 		for _, n := range strings.Fields(p.goFiles) {
@@ -50,6 +50,48 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 	if files < 3 {
 		t.Fatalf("only %d source files checked", files)
 	}
+}
+
+// Each kind of file the fence does not read is reported (Security R1 on
+// #4268): one the build leaves out, a cgo file, assembly and a syso object.
+func TestFenceReportsUnreadFiles(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"go.mod":      "module example.test/x\n\ngo 1.22\n",
+		"x.go":        "package x\n",
+		"ignored.go":  "//go:build ignore\n\npackage x\n",
+		"cgo.go":      "package x\n\nimport \"C\"\n",
+		"asm_amd64.s": "",
+		"asm_arm64.s": "",
+		"blob.syso":   "",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := unread(t, dir)
+	for _, want := range []string{"ignored.go", "cgo.go", ".s", "blob.syso"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("unread files %q lack %s", got, want)
+		}
+	}
+	if strings.Contains(got, "x.go ") || strings.HasPrefix(got, "x.go") {
+		t.Errorf("unread files %q include the read x.go", got)
+	}
+}
+
+// unread lists the files in dir's package the fence does not read: those
+// the build leaves out, cgo, assembly and syso.
+func unread(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("go", "list", "-f", "{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}", ".")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOFLAGS=")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list %s: %v", dir, err)
+	}
+	return strings.Join(strings.Fields(string(out)), " ")
 }
 
 // The fence refuses each way out it names, on synthetic sources: in
@@ -95,6 +137,13 @@ func TestFenceRefusesSyntheticSources(t *testing.T) {
 		"a dot import of os, write":    "package hostdisk\n\nimport . \"os\"\n\nvar _ = WriteFile\n",
 		"os.OpenFile as a value":       "package hostdisk\n\nimport \"os\"\n\nvar open = os.OpenFile\n\nfunc f(p string) { open(p, 2, 0) }\n",
 		"literal flags":                "package hostdisk\n\nimport \"os\"\n\nfunc f(p string) { os.OpenFile(p, 0, 0) }\n",
+		// Security B1 on #4268: os.Root's OpenFile takes any flags.
+		"os.OpenRoot":               "package hostdisk\n\nimport \"os\"\n\nfunc f() { r, _ := os.OpenRoot(\"/dev\"); r.OpenFile(\"sda\", 2, 0) }\n",
+		"os.OpenRoot as a value":    "package hostdisk\n\nimport \"os\"\n\nvar o = os.OpenRoot\n",
+		"an os.Root parameter":      "package hostdisk\n\nimport \"os\"\n\nfunc f(r *os.Root) { r.OpenFile(\"sda\", 2, 0) }\n",
+		"an os.Root method value":   "package hostdisk\n\nimport \"os\"\n\nfunc f(r any) { g := r.(*os.Root).OpenFile; g(\"sda\", 2, 0) }\n",
+		"a dot-imported OpenInRoot": "package hostdisk\n\nimport . \"os\"\n\nvar _ = OpenInRoot\n",
+		"an embedded os.Root":       "package hostdisk\n\nimport \"os\"\n\ntype dev struct{ *os.Root }\n\nfunc f(d dev) { d.OpenFile(\"sda\", 2, 0) }\n",
 	} {
 		if problems := fenceFile(t, src); len(problems) == 0 {
 			t.Errorf("%s: the fence passed it", name)
@@ -279,7 +328,7 @@ func isPkgObj(obj types.Object, path, name string) bool {
 	return true
 }
 
-type listed struct{ path, dir, goFiles, unread, export string }
+type listed struct{ path, dir, goFiles, export string }
 
 // fenced are the directories HW-8's fence covers: the package and its
 // command.
@@ -297,7 +346,7 @@ var (
 func goList(t *testing.T) []listed {
 	t.Helper()
 	listOnce.Do(func() {
-		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}\t{{.Export}}"}, fenced...)
+		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{.Export}}"}, fenced...)
 		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net", "io/ioutil", "github.com/ghbmrk/agentos/broker/kernel/privfile")
 		cmd := exec.Command("go", args...)
 		cmd.Env = append(os.Environ(), "GOFLAGS=")
@@ -313,11 +362,11 @@ func goList(t *testing.T) []listed {
 		byDir := map[string]listed{}
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			f := strings.Split(line, "\t")
-			if len(f) != 5 {
+			if len(f) != 4 {
 				listErr = fmt.Errorf("go list: unexpected line %q", line)
 				return
 			}
-			l := listed{f[0], f[1], f[2], strings.TrimSpace(f[3]), f[4]}
+			l := listed{f[0], f[1], f[2], f[3]}
 			exports[l.path], byDir[l.dir] = l, l
 		}
 		for _, d := range fenced {
