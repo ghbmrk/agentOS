@@ -296,8 +296,9 @@ func NewFilterFrom(f *Filter) *Filter {
 }
 
 // TestNamesBounded: an interface's tables hold at most maxNames names; a
-// full one drops its expired names for a new one, or else the one ending
-// soonest, and renews a name it holds in place.
+// full one renews a name it holds in place, and for a new one drops its
+// expired names and then the ones ending soonest until an eighth is free,
+// so the next adds do not sweep again.
 func TestNamesBounded(t *testing.T) {
 	tb := names{}
 	for i := range maxNames {
@@ -307,13 +308,22 @@ func TestNamesBounded(t *testing.T) {
 	if !tb.has("0", t0.Add(time.Minute)) || len(tb) != maxNames {
 		t.Fatalf("a known name was not renewed in place (%d)", len(tb))
 	}
-	tb.add("new", t0.Add(time.Hour), t0) // none expired: "1" ends soonest
-	if !tb.has("new", t0) || tb.has("1", t0) || !tb.has("2", t0) || len(tb) != maxNames {
-		t.Errorf("a full table did not drop the name ending soonest (%d)", len(tb))
+	keep := maxNames - maxNames/8
+	tb.add("new", t0.Add(time.Hour), t0) // none expired: "1" to "128" end soonest
+	if !tb.has("new", t0) || tb.has("128", t0) || !tb.has("129", t0) || len(tb) != keep+1 {
+		t.Fatalf("a full table did not drop the names ending soonest (%d)", len(tb))
 	}
-	tb.add("newer", t0.Add(time.Hour), t0.Add(4*time.Second)) // "2" and "3" have expired
-	if !tb.has("newer", t0.Add(4*time.Second)) || len(tb) != maxNames-1 || !tb.has("4", t0.Add(4*time.Second)) {
-		t.Errorf("expired names were not dropped for a new one (%d)", len(tb))
+	for i := range maxNames/8 - 1 {
+		tb.add(fmt.Sprint("new", i), t0.Add(time.Hour), t0)
+	}
+	if !tb.has("129", t0) || len(tb) != maxNames {
+		t.Fatalf("a table swept again before it was full (%d)", len(tb))
+	}
+	// At 200 s "129" to "199" have expired; then "200" to "256" end soonest.
+	now := t0.Add(200 * time.Second)
+	tb.add("newer", t0.Add(time.Hour), now)
+	if !tb.has("newer", now) || tb.has("256", now) || !tb.has("257", now) || len(tb) != keep+1 {
+		t.Errorf("expired names were not dropped first (%d)", len(tb))
 	}
 }
 

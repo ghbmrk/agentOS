@@ -328,30 +328,43 @@ func (w *writer) name(n name) {
 const (
 	claimHold = 24 * time.Hour
 	ownHold   = 4500 * time.Second
-	maxNames  = 1024 // per interface and table; more are not learned
+	maxNames  = 1024 // per interface and table; a full one sweeps
 )
 
 type names map[string]time.Time
 
-// add notes k until until. A full table first drops its expired names,
-// then, if none had expired, the one ending soonest: only what is heard on
-// one interface fills that interface's table, and a host there could take
-// any name on its own link anyway.
+// add notes k until until. A full table first sweeps: it drops its
+// expired names and then, until an eighth of it is free, the ones ending
+// soonest, so each sweep is paid for by the adds that fill it again. Only
+// what is heard on one interface fills that interface's table, and a host
+// there could take any name on its own link anyway.
 func (t names) add(k string, until, now time.Time) {
 	if _, ok := t[k]; !ok && len(t) >= maxNames {
-		soonest := ""
-		for k, u := range t {
-			if !u.After(now) {
-				delete(t, k)
-			} else if soonest == "" || u.Before(t[soonest]) {
-				soonest = k
-			}
-		}
-		if len(t) >= maxNames {
-			delete(t, soonest)
-		}
+		t.sweep(now)
 	}
 	t[k] = until
+}
+
+func (t names) sweep(now time.Time) {
+	ends := make([]time.Time, 0, len(t))
+	for k, u := range t {
+		if !u.After(now) {
+			delete(t, k)
+		} else {
+			ends = append(ends, u)
+		}
+	}
+	keep := maxNames - maxNames/8
+	if len(ends) <= keep {
+		return
+	}
+	slices.SortFunc(ends, time.Time.Compare)
+	cut := ends[len(ends)-keep-1]
+	for k, u := range t {
+		if !u.After(cut) {
+			delete(t, k)
+		}
+	}
 }
 
 func (t names) has(k string, now time.Time) bool { return t[k].After(now) }
