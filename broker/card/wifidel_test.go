@@ -20,7 +20,7 @@ func TestCardPrintsThePageByItsName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, Parts{Setup: true}, testFingerprint(t))
+	rot, err := rotationHTML(c, Parts{Setup: true}, testFingerprint(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestCardCarriesNoWiFi(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, allParts, testFingerprint(t))
+	rot, err := rotationHTML(c, allParts, testFingerprint(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func cardPages(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rot, err := rotationHTML(c, allParts, testFingerprint(t))
+	rot, err := rotationHTML(c, allParts, testFingerprint(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}

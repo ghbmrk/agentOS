@@ -532,14 +532,33 @@ var ErrNoRecoveryCard = errors.New("kernelsock: the kernel holds no new recovery
 // TestRecoveryCardReachesTheKernel keeps them the same.
 const noRecoveryCardText = "run: I hold no new recovery key to show; if you have not written down the new card, ask for one again"
 
+// CardMsg is the message a hardware key signs to see the new card whose
+// backup recipient ID is id (RecoveryCardID):
+// key.CosignMsg(kernel.RecoveryCardHash(id)).
+func CardMsg(id string) []byte { return key.CosignMsg(kernel.RecoveryCardHash(id)) }
+
+// RecoveryCardID is the backup recipient ID of the new card the kernel
+// holds, which names it, or ErrNoRecoveryCard. It reads no bits.
+func (o Owner) RecoveryCardID(ctx context.Context) (string, error) {
+	var r struct {
+		ID string `json:"id"`
+	}
+	err := typed(o.call(ctx, "recoverycardid", nil, &r))
+	return r.ID, err
+}
+
 // RecoveryCard is the new card's bits the unlock step made at this boot
-// (handoff.CardKeyLen bytes, which card.RecoveryKeyText prints), or
-// ErrNoRecoveryCard.
-func (o Owner) RecoveryCard(ctx context.Context) ([]byte, error) {
+// (handoff.CardKeyLen bytes, which card.RecoveryKeyText prints), on a
+// hardware key's signature c over CardMsg of its ID (#4128), or
+// ErrNoRecoveryCard. A phone passkey's, or one over another card, is
+// ErrRotateSig.
+func (o Owner) RecoveryCard(ctx context.Context, c key.Cosign) ([]byte, error) {
 	var r struct {
 		Key []byte `json:"key"`
 	}
-	err := typed(o.call(ctx, "recoverycard", nil, &r))
+	err := typed(o.call(ctx, "recoverycard", struct {
+		Cosign key.Cosign `json:"cosign"`
+	}{c}, &r))
 	return r.Key, err
 }
 

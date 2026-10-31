@@ -130,9 +130,9 @@ func HTML(c *Card, fp string) ([]byte, error) {
 // sections of the parts in p, each the same as on the full card, with a
 // line that every other part stays as on the current card, and the page
 // authority's lines (fp), whatever the parts: the owner may keep only the
-// newest sheet.
-func rotationHTML(c *Card, p Parts, fp string) ([]byte, error) {
-	v := rotView{view: view{Card: c, BoxPage: BoxPage, Authority: newAuthorityView(fp)}, Parts: p}
+// newest sheet. A recovery sheet prints mark, when set (#4160).
+func rotationHTML(c *Card, p Parts, fp, mark string) ([]byte, error) {
+	v := rotView{view: view{Card: c, BoxPage: BoxPage, Authority: newAuthorityView(fp)}, Parts: p, Mark: mark}
 	var err error
 	if p.Passphrase {
 		if v.PassQR, err = QRSVG(c.VaultPassphrase); err != nil {
@@ -161,6 +161,7 @@ func rotationHTML(c *Card, p Parts, fp string) ([]byte, error) {
 type rotView struct {
 	view
 	Parts Parts
+	Mark  string
 }
 
 var rotationTmpl = template.Must(template.New("rotation").Parse(`<!doctype html>
@@ -219,7 +220,8 @@ I cannot print this again; keep the card.</p></div>
 <h1>Recovery key</h1>
 <p class="note">Tear off and store somewhere safe, apart from the drive and the grid. It restores your box onto new hardware and replaces a lost phone or number. I cannot print this again, so keep this sheet.</p>
 <p class="mono big">{{.RecoveryKey}}</p>
-</section>
+{{with .Mark}}<p class="note">Card mark: <span class="mono">{{.}}</span>. My Recovery key page names the card in effect by its mark.</p>
+{{end}}</section>
 {{end}}</body></html>
 `))
 
