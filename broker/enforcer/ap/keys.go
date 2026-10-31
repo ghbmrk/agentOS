@@ -122,18 +122,30 @@ func (k *Keys) Rekey(id string) error {
 
 // Card is what the enforcer's page shows the owner for one network or
 // device: the network name, the password, and a Wi-Fi QR code's text.
+// Shown is the password as the page prints it, in groups of four with a
+// space between them so a person typing it into a device's app or with a
+// remote keeps their place; the key and the QR text use Password. Note,
+// when set, is a sentence the page prints under the card.
 type Card struct {
 	SSID, Password, QR string
+	Shown, Note        string
 }
 
 // DeviceCard is the card for one device's password, for the enforcer's
-// page only (NET-3: shown only on its own page).
+// page only (NET-3: shown only on its own page). Its note names the one
+// band devices join on (ENF-g-7), so an owner pairing a device that lacks
+// that band sees why it never joins.
 func (k Keys) DeviceCard(l Layout, id string) (Card, bool) {
 	dk, ok := k.Device[id]
 	if !ok {
 		return Card{}, false
 	}
-	return card(l.SSID.Devices, dk.Password), true
+	c := card(l.SSID.Devices, dk.Password)
+	if len(l.Radios) > 0 {
+		b := band(l.Radios[0].Band)
+		c.Note = "Devices join on " + b + " Wi-Fi only: a device without " + b + " cannot join."
+	}
+	return c, true
 }
 
 // NetworkCard is the card for the setup network before enrolment, or for
@@ -157,11 +169,43 @@ func (k Keys) NetworkCard(l Layout, network string) (Card, bool) {
 const NetSetup = "setup"
 
 // card is the Wi-Fi QR text that phones read (the WIFI: URI form), with
-// the SSID's special characters escaped. Passwords are base32 and need no
-// escaping.
+// the SSID's and the password's special characters escaped: generated
+// passwords are base32 and have none, but the setup password is the
+// sticker's.
 func card(ssid, pw string) Card {
-	esc := strings.NewReplacer(`\`, `\\`, `;`, `\;`, `,`, `\,`, `:`, `\:`, `"`, `\"`).Replace(ssid)
-	return Card{SSID: ssid, Password: pw, QR: "WIFI:T:WPA;S:" + esc + ";P:" + pw + ";;"}
+	esc := strings.NewReplacer(`\`, `\\`, `;`, `\;`, `,`, `\,`, `:`, `\:`, `"`, `\"`).Replace
+	return Card{SSID: ssid, Password: pw, QR: "WIFI:T:WPA;S:" + esc(ssid) + ";P:" + esc(pw) + ";;", Shown: grouped(pw)}
+}
+
+// grouped is pw in groups of four separated by spaces. A password that
+// already holds a space is shown as it is, since regrouping it would hide
+// which spaces are part of it.
+func grouped(pw string) string {
+	if strings.Contains(pw, " ") {
+		return pw
+	}
+	r := []rune(pw)
+	var parts []string
+	for len(r) > 4 {
+		parts = append(parts, string(r[:4]))
+		r = r[4:]
+	}
+	return strings.Join(append(parts, string(r)), " ")
+}
+
+// band is an OpenWrt radio band as the owner reads it.
+func band(b string) string {
+	switch b {
+	case "2g":
+		return "2.4 GHz"
+	case "5g":
+		return "5 GHz"
+	case "6g":
+		return "6 GHz"
+	case "60g":
+		return "60 GHz"
+	}
+	return b
 }
 
 // password is 26 base32 characters (130 bits) from the system's random
