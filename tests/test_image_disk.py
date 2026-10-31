@@ -90,7 +90,7 @@ class DiskBudgetTest(unittest.TestCase):
     def test_guard_passes_and_samples_when_the_budget_is_there(self):
         rc, out = self.run_step("Disk budget", avail_mb=31 * 1024, used_mb=50000)
         self.assertEqual(rc, 0, out)
-        self.assertIn("disk budget: image build needs 30 GB free on /, runner has 31 GB", out)
+        self.assertIn("::notice title=disk budget::image build needs 30 GB free on /, runner has 31 GB", out)
         self.assertEqual((self.t / "temp" / "disk.base").read_text().strip(), "50000")
         samples = self.t / "temp" / "disk.samples"
         for _ in range(50):
