@@ -289,6 +289,7 @@ var enforcer = map[string]struct {
 	"enforcer/dns":      {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice f: dnsmasq configuration
 	"enforcer/mdns":     {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the pair relay
 	"enforcer/wol":      {[]string{"enforcer/nft"}, droneForbid},                    // slice f: the Wake-on-LAN relay
+	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice i: traffic summaries
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal"}, enforcerWebForbid},

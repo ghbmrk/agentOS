@@ -11,8 +11,9 @@ enable agentos-localui.service
 enable agentos-modem.service
 enable agentos-modem-env.path
 enable agentos-drive-id.service
-# The weekly reboot (UPD-10).
+# The weekly reboot (UPD-10), and its restart for a lost-card request (REC-4).
 enable agentos-reboot.timer
+enable agentos-recovery-restart.path
 # The monthly restore drill's report, after the drill's reboot (#2932).
 enable agentos-drill-report.service
 # The keeper (STO-2c): the first-boot page authority, enrollment, then the unlock step that becomes
@@ -29,6 +30,8 @@ enable agentos-keeper-rotate.socket
 enable agentos-keeper-mail.service
 # Its IMAP connection process's socket: one parser process per session (#3015).
 enable agentos-imapconn.socket
+# The camera clerk, after the kernel, which hands it its key (CAM-clerk-image).
+enable agentos-keeper-camera.service
 # The edge link (EDGE-link-core c2c): the first edge's capture before the store, then the served link
 # after the kernel.
 enable agentos-keeper-link-capture.service
