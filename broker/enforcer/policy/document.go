@@ -412,11 +412,17 @@ func hash(s string) bool {
 	return err == nil && strings.ToLower(s) == s
 }
 
+// Unknown is the word the enforcer's channel log puts before the hash of a
+// name the signed policy does not hold. No token is it, in any case, so a
+// signed ID never reads as that marker on the owner's line (#4185).
+const Unknown = "unknown"
+
 // name is a non-empty token of valid UTF-8 with no space, slash, control,
 // format (bidi, zero-width, tag), filler or variation selector character, so
-// it cannot split a serial or a rendered line, or show as another (#3901).
+// it cannot split a serial or a rendered line, or show as another (#3901),
+// and that is not Unknown (#4185).
 func name(s string) bool {
-	if s == "" || len(s) > 253 || !utf8.ValidString(s) {
+	if s == "" || len(s) > 253 || !utf8.ValidString(s) || strings.EqualFold(s, Unknown) {
 		return false
 	}
 	for _, c := range s {

@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
@@ -172,8 +174,8 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 // logName is how the log names a device the core sent: its ID if the
 // signed policy names it, else unknownWord and the SHA-256 of the name, so
 // every name in the log is one the owner signed and the core cannot write
-// words into the owner's record (#3758). A signed ID holds no space
-// (policy.name), so the two forms never meet.
+// words into the owner's record (#3758). A signed ID holds no space and is
+// never the word itself (policy.name, #4185), so the two forms never meet.
 func logName(d policy.Document, s string) string {
 	if s == "" || d.Device(s) != nil {
 		return s
@@ -183,7 +185,7 @@ func logName(d policy.Document, s string) string {
 }
 
 const (
-	unknownWord = "unknown "
+	unknownWord = policy.Unknown + " "
 	// shortHex is how many hex digits of an unknown name's hash the
 	// owner's line shows: enough to tell repeated unknown names apart.
 	shortHex = 12
@@ -198,6 +200,45 @@ func Short(logged string) string {
 		return logged[:len(unknownWord)+shortHex]
 	}
 	return logged
+}
+
+var codeWords = map[wire.Code]string{
+	wire.Refused: "refused", wire.NeedsOwner: "needs the owner", wire.RateLimited: "rate-limited",
+	wire.Paused: "paused", wire.Failed: "failed",
+}
+
+// Line is e as the owner's log line shows it: every name through Short,
+// and a removed pair's two members both, so a renderer that takes it can
+// neither drop the second member nor print a full hash (#4185). Each name
+// is one token, or "unknown" and its digits, and the members are split by
+// " / ", which no signed ID holds.
+func (e Event) Line() string { return e.render(Short) }
+
+// Detail is e as the detail view shows it: Line with each unknown name's
+// full hash.
+func (e Event) Detail() string { return e.render(func(s string) string { return s }) }
+
+func (e Event) render(show func(string) string) string {
+	var b strings.Builder
+	b.WriteString(e.At.UTC().Format(time.RFC3339) + " " + string(e.Kind))
+	if e.ID != 0 {
+		fmt.Fprintf(&b, " #%d", e.ID)
+	}
+	if e.What != "" {
+		b.WriteString(" " + e.What)
+	}
+	if e.Device != "" {
+		b.WriteString(" " + show(e.Device))
+	}
+	if e.Other != "" {
+		b.WriteString(" / " + show(e.Other))
+	}
+	b.WriteString(":")
+	if w := codeWords[e.Code]; w != "" {
+		b.WriteString(" " + w + ",")
+	}
+	b.WriteString(" " + e.Reason)
+	return b.String()
 }
 
 // gate runs act unless the channel is paused, after counting k; a kind
