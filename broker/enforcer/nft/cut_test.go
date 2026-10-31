@@ -6,6 +6,7 @@ import (
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,19 @@ func (h *home) hold(why, from, to, addr string, port int) *held {
 			t.Fatalf("%s: listen: %v", why, err)
 		}
 		ln = l.(*net.TCPListener)
+		// A device on IPv6 says one word to its gateway first, as a real
+		// one does when it joins (router solicitation, address checks),
+		// which quiet() turns off here: the enforcer learns its link
+		// address from that solicitation. Left silent, the enforcer's own
+		// solicitation over the fixture's VLANs went unanswered in CI (its
+		// neighbour entry stayed INCOMPLETE, no rule dropped anything) and
+		// the dial timed out under the unchanged ruleset.
+		if gw, ok := strings.CutSuffix(addr, "::2"); ok && strings.HasPrefix(addr, "fd00:") {
+			if c, err := net.Dial("udp", net.JoinHostPort(gw+"::1", "9")); err == nil {
+				c.Write([]byte{0})
+				c.Close()
+			}
+		}
 	})
 	defer ln.Close()
 	x := &held{why: why}
