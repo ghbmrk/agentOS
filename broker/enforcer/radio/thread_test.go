@@ -269,6 +269,11 @@ func TestSrpReachesController(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &logWriter{t: t}
+	defer func() {
+		if t.Failed() {
+			logs.dump()
+		}
+	}()
 	daemon, iface, err := confine.Start(confine.Spec{Profile: confine.Thread(uid, uid), Path: filepath.Join(bin, "ot-daemon"),
 		Args: args, Dir: state, Self: self, Stderr: logs})
 	if err != nil {
@@ -352,7 +357,6 @@ func TestSrpReachesController(t *testing.T) {
 			return
 		}
 	}
-	logs.dump()
 	t.Fatalf("the Matter controller's namespace did not resolve the SRP service; heard %q", heard)
 }
 
