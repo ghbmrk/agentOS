@@ -783,7 +783,7 @@ func TestOwnerLine(t *testing.T) {
 // fails here rather than letting the core send a name that reads as the
 // marker. A lookalike such as "unknоwn" (Cyrillic о) passes both checks;
 // only the owner can sign it, and it shows as itself, one token with no
-// digits, so it never takes the marker's "unknown" and hex form.
+// space, so it never takes the marker's two-part "unknown" and hex form.
 func TestReservedWord(t *testing.T) {
 	for _, s := range []string{policy.Unknown, strings.ToUpper(policy.Unknown), strings.ToUpper(policy.Unknown[:1]) + policy.Unknown[1:]} {
 		if wire.Name(s) {
