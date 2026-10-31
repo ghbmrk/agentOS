@@ -88,6 +88,10 @@ exempt-pr 4252
 # not name (D-198). Remove once #4206 merges.
 exempt-pr 4206
 
+# #4254 (ENF-dns-ll-probe #4221, ENF-dns-tidy #4223): broker/enforcer/dns/, which the G2 list does not name (D-198).
+# Remove once #4254 merges.
+exempt-pr 4254
+
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
