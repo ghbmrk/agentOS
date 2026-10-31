@@ -3,6 +3,8 @@ package page
 import (
 	"errors"
 	"net/http"
+	"slices"
+	"strconv"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
@@ -27,7 +29,29 @@ func actConsequence(a action.Act) string {
 	case action.Off, action.Arm:
 		return "This can stop the device's alerts to your phone. It happens as soon as you approve, once."
 	}
-	return "This happens as soon as you approve, once, and only before the time shown."
+	return "This happens as soon as you approve, once, and only within " + minutes(action.Window) + "."
+}
+
+// minutes is a whole-minute duration in the page's words. The screen
+// names the window as a length, never as a clock time, so the owner never
+// converts a time zone.
+func minutes(d time.Duration) string {
+	if n := int(d / time.Minute); n != 1 {
+		return strconv.Itoa(n) + " minutes"
+	}
+	return "1 minute"
+}
+
+// actLink counts one action link against LinkLimit on its own count, so a
+// flood of proposal links cannot delay an action link, nor the reverse.
+func (s *Server) actLink() bool {
+	now := s.nowMS()
+	s.acts = slices.DeleteFunc(s.acts, func(t int64) bool { return t <= now-LinkWindow.Milliseconds() })
+	if len(s.acts) >= LinkLimit {
+		return false
+	}
+	s.acts = append(s.acts, now)
+	return true
 }
 
 // action is the screen for an asserted action link (slice s): the act,
@@ -43,7 +67,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
-	ok := s.link()
+	ok := s.actLink()
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, errLimited.Error(), http.StatusTooManyRequests)
@@ -74,7 +98,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "action.html", map[string]any{
 		"Name":        s.cfg.Name,
 		"Line":        line,
-		"Until":       time.UnixMilli(c.ExpiresMS).UTC().Format("15:04:05 UTC"),
+		"Window":      minutes(action.Window),
 		"Consequence": actConsequence(a),
 		"ID":          c.ID,
 		"Challenge":   chal(c.Msg),
@@ -84,7 +108,9 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 // do takes the owner's tap on an action challenge: the book spends the
 // challenge whether or not the tap verifies, checks it against the policy
 // in force and carries the act out at once. The policy lock is held until
-// the act is done, so no change to the device lands in between.
+// the act is done, so no change to the device lands in between, and never
+// longer than the book's timeout (Config.ActTimeout), so a hung actuator
+// cannot hold back the channel's relocks.
 func (s *Server) do(w http.ResponseWriter, r *http.Request) {
 	var a assertion
 	if err := readJSON(r, &a); err != nil {
@@ -104,6 +130,9 @@ func (s *Server) do(w http.ResponseWriter, r *http.Request) {
 		return
 	case err == action.ErrMoved:
 		fail(w, http.StatusConflict, err)
+		return
+	case err == action.ErrTimeout:
+		fail(w, http.StatusGatewayTimeout, err)
 		return
 	case err != nil:
 		fail(w, http.StatusBadGateway, errDevice)
