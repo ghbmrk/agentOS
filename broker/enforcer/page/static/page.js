@@ -113,7 +113,13 @@ document.addEventListener("DOMContentLoaded", () => {
     b.disabled = true;
     try {
       const c = await post("/challenge", { action: b.dataset.action, target: b.dataset.target });
-      await post("/act", { id: c.id, action: b.dataset.action, ...(await tap(c.challenge, c.rp_id)) });
+      const r = await post("/act", { id: c.id, action: b.dataset.action, ...(await tap(c.challenge, c.rp_id)) });
+      if (r.recovery) {
+        // The used recovery code is spent; its replacement shows only now.
+        b.parentElement.hidden = true;
+        say("Cancelled. Your old recovery code no longer works. Write down your new one and keep it safe at home; it is shown only now: " + r.recovery);
+        return;
+      }
       say("Done.");
       location.reload();
     } catch (e) { say("Not done: " + e.message); b.disabled = false; }

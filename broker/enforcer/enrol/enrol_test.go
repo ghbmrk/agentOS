@@ -253,6 +253,12 @@ func TestFirstPasskeyNeedsSetupSecret(t *testing.T) {
 	if _, _, err := g.b.Begin(caseCode, other); !errors.Is(err, ErrKey) {
 		t.Errorf("other RP ID: %v", err)
 	}
+	// A case-code ticket begun before another passkey enrolled does not
+	// finish afterwards, as a replacement no recovery code authorised.
+	early, earlyMsg, err := g.b.Begin(caseCode, x.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The code with a passkey that does not sign its ticket enrols nothing.
 	id, msg, err := g.b.Begin(caseCode, a.Public())
 	if err != nil {
@@ -280,6 +286,12 @@ func TestFirstPasskeyNeedsSetupSecret(t *testing.T) {
 	}
 	if !slices.Equal(g.alerts.raised, []alert.Kind{alert.Enrolment}) {
 		t.Errorf("alerts %v", g.alerts.raised)
+	}
+	if _, err := g.b.Finish(early, x.sign(earlyMsg)); !errors.Is(err, ErrGone) {
+		t.Errorf("case-code ticket finished after enrolment: %v", err)
+	}
+	if _, ok := g.b.Recovery(); ok || g.b.Owner() != a.Public() {
+		t.Error("a case-code ticket started a replacement")
 	}
 	// The policy is a's now: a's tap applies a version.
 	if _, err := g.propose(a, home(1)); err != nil {
@@ -331,9 +343,19 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	if err := g.b.FactoryReset(code); !errors.Is(err, ErrCode) {
 		t.Errorf("reset by the recovery code: %v", err)
 	}
+	// Two tickets begun together: the second never swaps the replacement
+	// the first started.
+	c := newAuthenticator(t)
+	id2, msg2, err := g.b.Begin(code, c.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
 	res, err := g.enrol(b, code)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := g.b.Finish(id2, c.sign(msg2)); !errors.Is(err, ErrPhase) {
+		t.Errorf("second ticket swapped the replacement: %v", err)
 	}
 	if want := g.now.Add(Wait); !res.Due.Equal(want) || len(res.Recovery) != CodeLen || res.Recovery == code {
 		t.Errorf("result %+v, want due %v", res, want)
@@ -355,13 +377,25 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 		t.Fatalf("applied early: %v %v", done, err)
 	}
 	// The owner cancels it with the passkey in force (the page's tap).
-	if err := g.b.Cancel(); err != nil {
+	fresh, err := g.b.Cancel()
+	if err != nil {
 		t.Fatal(err)
 	}
 	g.now = g.now.Add(time.Hour)
 	if done, _ := g.b.Tick(); done || g.b.Owner() != a.Public() || g.alerts.recovery {
 		t.Fatal("a cancelled recovery applied")
 	}
+	// The code that started it is spent: it cannot start another, and
+	// neither can the code the cancelled replacement was shown.
+	for _, old := range []string{code, res.Recovery} {
+		if _, _, err := g.b.Begin(old, newAuthenticator(t).Public()); !errors.Is(err, ErrCode) {
+			t.Errorf("spent recovery code after cancel: %v", err)
+		}
+	}
+	if len(fresh) != CodeLen || fresh == code {
+		t.Fatalf("new recovery code %q", fresh)
+	}
+	code = fresh
 
 	// Again, uncancelled: a's loosening signed meanwhile is dropped when b
 	// takes over.

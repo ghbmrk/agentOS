@@ -100,18 +100,21 @@ func (g *enrolRig) enrolAs(a *authenticator, code string) (int, map[string]any) 
 }
 
 // tapAct is the home page's act button for action, tapped by a.
-func (g *enrolRig) tapAct(a *authenticator, action string) int {
+func (g *enrolRig) tapAct(a *authenticator, action string) (int, map[string]any) {
 	g.t.Helper()
 	w := g.do(http.MethodPost, "/challenge", map[string]string{"action": action, "target": ""})
 	if w.Code != http.StatusOK {
-		return w.Code
+		return w.Code, nil
 	}
 	var c map[string]string
 	json.Unmarshal(w.Body.Bytes(), &c)
 	as := a.get(c["challenge"])
 	as.ID = c["id"]
 	body := map[string]any{"id": as.ID, "action": action, "authenticator_data": as.AuthenticatorData, "client_data_json": as.ClientDataJSON, "signature": as.Signature}
-	return g.do(http.MethodPost, "/act", body).Code
+	w = g.do(http.MethodPost, "/act", body)
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return w.Code, out
 }
 
 // TestEnrolmentScreens: in factory state only the enrolment screens
@@ -193,15 +196,22 @@ func TestEnrolmentScreens(t *testing.T) {
 	if w := g.do(http.MethodGet, "/", nil); !strings.Contains(w.Body.String(), "Cancel the recovery") || !strings.Contains(w.Body.String(), "PST") {
 		t.Errorf("home does not show the recovery:\n%s", w.Body)
 	}
-	if code := g.tapAct(b, ActCancelRecovery); code != http.StatusForbidden {
+	if code, _ := g.tapAct(b, ActCancelRecovery); code != http.StatusForbidden {
 		t.Errorf("the waiting passkey cancelled: %d", code)
 	}
-	if code := g.tapAct(a, ActCancelRecovery); code != http.StatusOK {
-		t.Fatalf("cancel: %d", code)
+	code, out = g.tapAct(a, ActCancelRecovery)
+	fresh, _ := out["recovery"].(string)
+	if code != http.StatusOK || len(strings.ReplaceAll(fresh, " ", "")) != enrol.CodeLen {
+		t.Fatalf("cancel: %d %v", code, out)
 	}
 	if _, ok := g.book.Recovery(); ok {
 		t.Fatal("recovery still waiting after cancel")
 	}
+	// The code that started it is spent; the owner was shown its successor.
+	if code, _ := g.enrolAs(b, recovery); code != http.StatusForbidden {
+		t.Errorf("spent recovery code: %d", code)
+	}
+	recovery = strings.ReplaceAll(fresh, " ", "")
 
 	// Uncancelled, it applies after the wait; a's page takes no tap.
 	if code, _ := g.enrolAs(b, recovery); code != http.StatusOK {
@@ -211,17 +221,17 @@ func TestEnrolmentScreens(t *testing.T) {
 	if done, err := g.book.Tick(); !done || err != nil {
 		t.Fatalf("tick: %v %v", done, err)
 	}
-	if code := g.tapAct(a, ActKeep); code != http.StatusForbidden {
+	if code, _ := g.tapAct(a, ActKeep); code != http.StatusForbidden {
 		t.Errorf("old passkey's page after recovery: %d", code)
 	}
 	g.build()
 	if w := g.do(http.MethodGet, "/", nil); !strings.Contains(w.Body.String(), "Keep my rules") {
 		t.Errorf("home does not ask to keep the rules:\n%s", w.Body)
 	}
-	if code := g.tapAct(a, ActKeep); code != http.StatusForbidden {
+	if code, _ := g.tapAct(a, ActKeep); code != http.StatusForbidden {
 		t.Errorf("old passkey kept: %d", code)
 	}
-	if code := g.tapAct(b, ActKeep); code != http.StatusOK || !g.book.Kept() {
+	if code, _ := g.tapAct(b, ActKeep); code != http.StatusOK || !g.book.Kept() {
 		t.Fatalf("keep: %d", code)
 	}
 	// The policy is b's: b approves a change.
@@ -239,7 +249,7 @@ func TestEnrolmentScreens(t *testing.T) {
 	if w := g.do(http.MethodPost, "/enrol/reset", map[string]string{"code": caseCode}); w.Code != http.StatusOK {
 		t.Fatalf("reset: %d %s", w.Code, w.Body)
 	}
-	if code := g.tapAct(b, ActResume); code != http.StatusForbidden {
+	if code, _ := g.tapAct(b, ActResume); code != http.StatusForbidden {
 		t.Errorf("tap after reset: %d", code)
 	}
 	if w := g.do(http.MethodGet, "/enrol", nil); !strings.Contains(w.Body.String(), "factory reset") {

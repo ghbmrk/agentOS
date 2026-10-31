@@ -509,6 +509,9 @@ func (b *Book) Finish(id string, sig []byte) (Result, error) {
 		b.cfg.Alerts.Raise(alert.Enrolment, "")
 		return Result{Recovery: code, Card: card}, nil
 	case Enrolled:
+		if st.Pending != nil {
+			return Result{}, ErrPhase // one replacement at a time, and never swapped
+		}
 		due := b.nowMS() + Wait.Milliseconds()
 		st.Pending = &replacement{Key: t.pk.Encode(), Recovery: rec, DueMS: due}
 		if err := b.save(st); err != nil {
@@ -557,21 +560,27 @@ func (b *Book) take(st *state) error {
 	return b.pol.Disown() // until the new passkey keeps it
 }
 
-// Cancel drops the replacement waiting. The page calls it only after a
-// tap of the passkey in force (NET-4).
-func (b *Book) Cancel() error {
+// Cancel drops the replacement waiting and spends the recovery code that
+// started it: whoever used it cannot start another, and the owner is
+// shown, once, the new code that replaces it. The page calls it only
+// after a tap of the passkey in force (NET-4).
+func (b *Book) Cancel() (string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.st.Pending == nil {
-		return ErrPhase
+		return "", ErrPhase
+	}
+	code, rec, err := b.code()
+	if err != nil {
+		return "", err
 	}
 	st := b.st
-	st.Pending = nil
+	st.Pending, st.Recovery = nil, &rec
 	if err := b.save(st); err != nil {
-		return err
+		return "", err
 	}
 	b.cfg.Alerts.Recovery(false)
-	return nil
+	return code, nil
 }
 
 // Tick puts the waiting replacement in force once Wait has passed: its

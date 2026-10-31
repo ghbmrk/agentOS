@@ -438,7 +438,11 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 	case ActKeep:
 		err = s.cfg.Enrol.Keep(c.prop, sig)
 	case ActCancelRecovery:
-		err = s.cfg.Enrol.Cancel()
+		var code string
+		if code, err = s.cfg.Enrol.Cancel(); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"done": true, "recovery": grouped(code)})
+			return
+		}
 	case ActCancel:
 		s.cfg.Lock.Lock()
 		err = s.cfg.Policy.Cancel(c.target)
