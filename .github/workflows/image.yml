@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      DISK_NEED_GB: "24" # IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see "Disk budget"
+      DISK_NEED_GB: "999" # TEMPORARY guard proof, reverted next commit; IMG-disk (#4317): measured peak growth 15 GB (build a, boots included); see "Disk budget"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
