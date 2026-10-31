@@ -33,6 +33,10 @@ import (
 
 const rp = "enforcer.home.arpa"
 
+// zone is the owner's time zone in the tests: not UTC, so a time shown in
+// UTC is caught.
+var zone = time.FixedZone("PST", -8*60*60)
+
 // The test home's segments: the Owner network and the admin port may reach
 // the page; nothing else may.
 var (
@@ -147,7 +151,7 @@ func newRig(t *testing.T) *rig {
 		Name: rp, Owner: a.Public(),
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
-		Policy: e, Channel: g.ch, Cert: g.cert.Leaf,
+		Policy: e, Channel: g.ch, Cert: g.cert.Leaf, Zone: zone,
 		Now: func() time.Time { return g.now },
 	})
 	if err != nil {
@@ -401,7 +405,7 @@ func TestFalseDiffShowsTrueDiff(t *testing.T) {
 
 	// The core's names cannot reorder a line: a right-to-left override is
 	// shown escaped.
-	lines := Describe(home(1), edit(2, func(d *policy.Document) { dev(d, "tv").Allow = []string{"a.example", "moc.\u202eevil"} }))
+	lines := Describe(home(1), edit(2, func(d *policy.Document) { dev(d, "tv").Allow = []string{"a.example", "moc.\u202eevil"} }), zone)
 	if !slices.Contains(lines, `Let tv reach "moc.\u202eevil".`) {
 		t.Errorf("an override shown raw: %q", lines)
 	}
@@ -794,8 +798,8 @@ func TestEveryFieldRendered(t *testing.T) {
 		if _, err := policy.Encode(b); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if slices.Equal(Describe(base, a), Describe(base, b)) {
-			t.Errorf("%s: the diff does not show it: %q", name, Describe(base, b))
+		if slices.Equal(Describe(base, a, zone), Describe(base, b, zone)) {
+			t.Errorf("%s: the diff does not show it: %q", name, Describe(base, b, zone))
 		}
 	}
 	// A device added with each field set, against the same device without.
@@ -836,7 +840,7 @@ func TestEveryFieldRendered(t *testing.T) {
 	if _, err := policy.Encode(heat(policy.ClassHeater)); err != nil {
 		t.Fatal(err)
 	}
-	if a, b := Describe(heat(policy.ClassHeater), heat(policy.ClassHeater)), Describe(heat(policy.ClassHeater), heat(policy.ClassPlug)); slices.Equal(a, b) {
+	if a, b := Describe(heat(policy.ClassHeater), heat(policy.ClassHeater), zone), Describe(heat(policy.ClassHeater), heat(policy.ClassPlug), zone); slices.Equal(a, b) {
 		t.Errorf("a heater recorded as a plug: the diff does not show it: %q", b)
 	}
 	for name, f := range docs {
@@ -909,13 +913,13 @@ func TestDroneShownSafely(t *testing.T) {
 	if _, err := policy.Encode(next); err == nil {
 		t.Error("the policy took a drone reference that is not a hash")
 	}
-	diff := string(diffText(policy.Classify(policy.Document{}, next), Describe(policy.Document{}, next)))
+	diff := string(diffText(policy.Classify(policy.Document{}, next), Describe(policy.Document{}, next, zone)))
 	if strings.Contains(diff, "\nNothing above applies") || strings.ContainsRune(diff, '‮') {
 		t.Errorf("drone text reaches the diff raw: %q", diff)
 	}
 	// And a new lock's at-once command shows (blocker 1).
 	lock := policy.Document{Version: 2, Devices: []policy.Device{{ID: "frontdoor", Network: policy.NetDevices, Secure: "unlock"}}}
-	if got := strings.Join(Describe(policy.Document{}, lock), "\n"); !strings.Contains(got, "frontdoor's command unlock apply at once") {
+	if got := strings.Join(Describe(policy.Document{}, lock, zone), "\n"); !strings.Contains(got, "frontdoor's command unlock apply at once") {
 		t.Errorf("a new device's at-once command is hidden: %s", got)
 	}
 }
@@ -926,7 +930,7 @@ func TestDroneShownSafely(t *testing.T) {
 func TestSafetyListMoveClassLine(t *testing.T) {
 	listed := policy.Document{Version: 1, Devices: []policy.Device{{ID: "lamp", Network: policy.NetDevices, Class: policy.ClassPlug, Secure: "off"}}}
 	everyday := policy.Document{Version: 2, Devices: []policy.Device{{ID: "lamp", Network: policy.NetDevices, Everyday: true}}}
-	for name, lines := range map[string][]string{"off the list": Describe(listed, everyday), "onto the list": Describe(everyday, listed)} {
+	for name, lines := range map[string][]string{"off the list": Describe(listed, everyday, zone), "onto the list": Describe(everyday, listed, zone)} {
 		got := strings.Join(lines, "\n")
 		if strings.Contains(got, "unknown type") {
 			t.Errorf("%s: %q", name, got)
@@ -947,7 +951,7 @@ func TestHoldOnLockNamesRisk(t *testing.T) {
 		d.Holds = []policy.Hold{{Device: "lock", Kind: policy.HoldFirmware}, {Device: "lock", Kind: policy.HoldFix}, {Device: "tv", Kind: policy.HoldFirmware}}
 	})
 	risk := policy.Risk(policy.ClassLock)
-	lines := Describe(home(1), next)
+	lines := Describe(home(1), next, zone)
 	if n := strings.Count(strings.Join(lines, "\n"), risk); n != 2 {
 		t.Fatalf("risk shown %d times for two holds on a lock: %q", n, lines)
 	}
@@ -1019,7 +1023,7 @@ func TestHoldNamesLostPairs(t *testing.T) {
 			}
 		}
 		var got []string
-		for _, l := range Describe(c.old, c.next) {
+		for _, l := range Describe(c.old, c.next, zone) {
 			if strings.Contains(l, "talk") && !strings.HasPrefix(l, "Let ") {
 				got = append(got, l)
 			}
@@ -1027,5 +1031,47 @@ func TestHoldNamesLostPairs(t *testing.T) {
 		if !slices.Equal(got, c.want) {
 			t.Errorf("%s: pair lines %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// NET-4 (the owner understands what the page asks): every time the page
+// shows, on the confirm screen, in the approval's answer and on the home
+// page, is in the owner's zone with its name, never in UTC, so an owner in
+// UTC-8 reads a loosening's due time as the hour it applies. A page with
+// no zone is refused. Catches a time drawn by another rule (#4131).
+func TestTimesInOwnersZone(t *testing.T) {
+	g := newRig(t)
+	from := time.Date(2026, 11, 2, 17, 30, 0, 0, time.UTC).UnixMilli() // 09:30 PST
+	next := edit(2, func(d *policy.Document) {
+		d.Standing = []policy.StandingRule{{ID: "plumber", Device: "lock", Action: "keypad-code", FromMS: from, ToMS: from + time.Hour.Milliseconds()}}
+	})
+	noUTC := func(screen, body string, want ...string) {
+		t.Helper()
+		if strings.Contains(body, "UTC") || strings.Contains(body, "Z\"") {
+			t.Errorf("%s shows a time in UTC:\n%s", screen, body)
+		}
+		for _, w := range want {
+			if !strings.Contains(body, w) {
+				t.Errorf("%s does not show %q:\n%s", screen, w, body)
+			}
+		}
+	}
+	body, id, ch := g.open(next, "")
+	noUTC("the confirm screen", body, "from Mon 2 Nov 2026 09:30 PST to Mon 2 Nov 2026 10:30 PST")
+	w := g.approve(id, g.a.get(ch))
+	if w.Code != http.StatusOK || len(g.e.Pending()) != 1 {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	due := clock(g.e.Pending()[0].DueMS, zone)
+	if !strings.HasSuffix(due, " PST") {
+		t.Fatalf("due %q is not in the owner's zone", due)
+	}
+	noUTC("the approval's answer", w.Body.String(), due)
+	noUTC("the home page", g.do(http.MethodGet, "/", nil).Body.String(), "Applies at "+due, "09:30 PST")
+
+	c := g.s.cfg
+	c.Zone = nil
+	if _, err := New(c); !errors.Is(err, ErrConfig) {
+		t.Errorf("a page with no zone: %v, want refused", err)
 	}
 }
