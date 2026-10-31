@@ -1681,7 +1681,8 @@ def clerk_violations(root, dirs, names):
     above it sets IPAddressAllow= (systemd adds a parent slice's list to the unit's). Each name, socket
     and unit is named once; every keeper unit that takes a clerk's key (OpenFile=...:clerk-key) is
     named, so dropping a clerk's entry cannot take its unit out of these rules; and no service in the
-    tree opens a KERNEL_KEY_PREFIX socket but its own (key_socket_owner). The kernel's ExecStart= holds
+    tree has the manager open a KERNEL_KEY_PREFIX socket for it (manager_paths) but its own, by
+    OpenFile= (key_socket_owner). The kernel's ExecStart= holds
     no word systemd rewrites (REWRITTEN) and none naming clerk-key that is not read as an entry."""
     out = []
     for kname in UNLOCK_UNITS:
@@ -1705,6 +1706,7 @@ def clerk_violations(root, dirs, names):
                 files = unit_with_dropins(root, dirs, n)
                 u = ini_last(files, "Service", "User")
                 opens = ini_entries(files, "Service", "OpenFile")
+                managed = manager_paths(files)
             except (ValueError, OSError) as e:
                 if "@." not in n and n in names:
                     continue  # keeper_unit_violations reports an agentos one
@@ -1714,10 +1716,11 @@ def clerk_violations(root, dirs, names):
                 users.setdefault(u, []).append(n)
             if n.startswith(KEEPER_PREFIX) and n not in keyed and any(re.search(r":clerk-key(:|$)", v) for v in opens):
                 out.append("%s: takes a clerk's key but %s names no -clerk-key for it (CLK-1)" % (n, kname))
-            for v in opens:
-                path = posixpath.normpath(v.split(":", 1)[0])
-                if path.startswith(KERNEL_KEY_PREFIX) and key_socket_owner(path, by_sock) != n:
-                    out.append("%s: OpenFile=%s opens a kernel key socket that is not its own (CLK-1)" % (n, v))
+            # What the manager opens for the unit (MANAGER_FILES: LoadCredential= connects to a socket too).
+            for key, v, path in managed:
+                path = posixpath.normpath(path)
+                if path.startswith(KERNEL_KEY_PREFIX) and (key != "OpenFile" or key_socket_owner(path, by_sock) != n):
+                    out.append("%s: %s=%s opens a kernel key socket that is not its own (CLK-1)" % (n, key, v))
         for k in keys:
             if isinstance(k, str):
                 out.append("%s: ExecStart= word %s is not a -clerk-key entry the check reads (name=/socket,/cgroup, "

@@ -265,6 +265,7 @@ class ClerkTreeTest(test_image_keeper.KeeperTreeTest):
         # By its path, whatever the descriptor's name, from any service in the tree, the image's or not.
         for unit, line in (("agentos-egress.service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key"),
                            ("agentos-egress.service", "OpenFile=/run/./agentos-kernel/key-homekit.sock:key"),
+                           ("agentos-egress.service", "LoadCredential=k:/run/agentos-kernel/key-homekit.sock"),
                            ("foo.service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key")):
             with self.subTest(unit=unit, line=line):
                 self.setUp()
@@ -282,6 +283,9 @@ class ClerkTreeTest(test_image_keeper.KeeperTreeTest):
         self.setUp()
         self.add(self.UNIT, "Service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key")
         self.refused(self.UNIT, "OpenFile", "CLK-1")
+        self.setUp()
+        self.add(self.UNIT, "Service", "LoadCredential=k:/run/agentos-kernel/key-homekit.sock")
+        self.refused(self.UNIT, "LoadCredential=", "opens a kernel key socket that is not its own", "CLK-1")
 
     # REQ: CLK-1
     def test_a_user_shared_with_any_other_service_is_refused(self):
