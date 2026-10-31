@@ -917,21 +917,32 @@ class PremergeTest(unittest.TestCase):
         fence = f"\n```\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: security -->\n```"
         self.assertEqual(self.lens_run([l3, lens, sec, quoting("<!-- record: combined -->", fence, "3")]),
                          (0, ["same"]))
+        # the record block spans blank lines between its own lines (#4100's shape) and a lens's opening paragraph
+        rec = f"Record: PR #7 · package X-1 · head {sha[:7]}"
+        spread = lambda v, mark, at: {**sec, "created_at": at, "updated_at": at, "body": f"Verdict: {v}\n\n{rec}\n\n{mark}\n"}
+        self.assertEqual(self.lens_run([spread("accept", "<!-- record: combined -->", "0"), lens, sec]), (0, ["same"]))
+        need = (1, ["needs-security", "tools/premerge.py"])
+        self.assertEqual(self.lens_run([l3, lens, sec, spread("fix-list", "<!-- record: security -->", "3")]), need)
+        lensy = {**sec, "body": f"Verdict: accept\n\nprose\n\n{rec}\n<!-- record: security -->\n\nNext: arm\n"}
+        self.assertEqual(self.lens_run([l3, lens, lensy]), (0, ["same"]))
         # a comment with no marker in its record block has a misplaced one: it reads as unparsed and supersedes, so
-        # a fix-list with a blank line before its marker, or its record fenced, cannot leave an accept standing
+        # a fix-list with prose before its marker, or its record fenced, cannot leave an accept standing
         UN = UNPARSED("security")
-        for gap in ("\n", " \n", "\n\nbody\n\n"):
-            self.assertEqual(self.lens_run([l3, lens, sec, self.rec("fix-list", sha, gap + "<!-- record: security -->\n",
-                                                                    at="3")]), (1, UN), repr(gap))
-        self.assertEqual(self.lens_run([self.rec("accept", sha, "\n<!-- record: combined -->\n", at="0")]),
+        late = self.rec("fix-list", sha, "\nprose\n\n<!-- record: security -->\n", at="3")
+        self.assertEqual(self.lens_run([l3, lens, sec, late]), (1, UN))
+        self.assertEqual(self.lens_run([self.rec("accept", sha, "prose\n<!-- record: combined -->\n", at="0")]),
                          (1, UNPARSED("l3")))
-        fenced = {**sec, "created_at": "3", "updated_at": "3", "body": f"Verdict: fix-list\nCause: defect\n{fence}\n"}
-        self.assertEqual(self.lens_run([l3, lens, sec, fenced]), (1, UN))
-        # with no Record line the first paragraph is the record block: quotes after it neither count nor parse
-        norec = lambda tail: {**sec, "body": "Verdict: accept\n# t\n<!-- record: security -->\n\n" + tail}
-        self.assertEqual(self.lens_run([l3, lens, norec("<!-- record: combined -->\n")]), (1, UN))
+        for fixed in (fence, fence.replace("```", "~~~")):
+            fenced = {**sec, "created_at": "3", "updated_at": "3", "body": f"Verdict: fix-list\nCause: defect\n{fixed}\n"}
+            self.assertEqual(self.lens_run([l3, lens, sec, fenced]), (1, UN), fixed)
+        # misplaced security and combined markers together still read as an unparsed Security record
+        both = {**late, "body": late["body"] + "<!-- record: combined -->\n"}
+        self.assertEqual(self.lens_run([lens, sec, both]), (1, UNPARSED("l3")))
+        self.assertEqual(premerge.verdict([sec, both], 7, security=True), ("unparsed", None))
+        # with no Record line the block is read around the first line: a fenced Record for another PR does not parse it
         other = f"```\nRecord: PR #8 · package X-1 · head {sha[:7]}\n```\n"
-        self.assertEqual(self.lens_run([l3, lens, norec(other)]), (1, UN))
+        norec = {**sec, "body": "Verdict: accept\n<!-- record: security -->\n\n" + other}
+        self.assertEqual(self.lens_run([l3, lens, norec]), (1, UN))
 
     def test_lenses_owed_by_tier(self):
         owed = premerge.lenses_owed

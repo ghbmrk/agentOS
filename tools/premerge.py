@@ -101,19 +101,28 @@ _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 # A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
-_MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
 _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
+_MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
+# The lines a record block runs on under its Record line; a fenced block is quoted text (#4261).
+_HEADER = re.compile(r"<!-- record: \S+ -->$|\s*$")
+_FENCE = re.compile(r"^(`{3,}|~{3,})[^`\n]*\n.*?^\1[ \t]*$", re.M | re.S)
 
 
 def _record_block(body):
-    """(text, placed): where a comment's Record line and markers are read from, and whether that is its own record block.
+    """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
 
-    The record block is the paragraph holding the comment's first `Record:` line outside a code fence, else its first
-    paragraph. When it carries a marker, markers and Record lines anywhere else are quoted text: they neither hide the
-    review's own record nor lend it one (#4261). When it carries none, the whole comment is read and any marker in it
-    is misplaced, which reads as unparsed (fails closed) rather than as no record."""
-    paras = re.split(r"\n\s*\n", re.sub(r"^```.*?^```[^\n]*$", "", body, flags=re.M | re.S))
-    own = next((p for p in paras if re.search(r"^Record:", p, re.M)), paras[0])
+    The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
+    under it. When it carries a marker, markers and Record lines anywhere else are quoted text: they
+    neither hide the review's own record nor lend it one (#4261). Otherwise the whole comment is read and any marker
+    in it is misplaced: it reads as unparsed (fails closed), so a misshapen fix-list still supersedes an accept."""
+    lines = _FENCE.sub("", body).split("\n")
+    at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
+    if at is None:
+        return body, False
+    end = at + 1
+    while end < len(lines) and _HEADER.match(lines[end]):
+        end += 1
+    own = "\n".join(lines[at:end])
     return (own, True) if _MARKER.search(own) else (body, False)
 
 
@@ -148,12 +157,12 @@ def verdict(comments, pr, security=False, lens=None):
         if lens:
             marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", own, re.M)
         else:
-            marked = (_SECURITY.search(own) and not _L3.search(own)) if security else _L3.search(own)
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not rec:
-            if not _RECORD.search(own):
+            marked = _SECURITY.search(own) if security else _L3.search(own)
+            if security and placed and _L3.search(own):
+                marked = None
+        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and (not placed or not rec):
+            if not placed or not _RECORD.search(own):
                 found = ("unparsed", None)
-        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not placed:
-            found = ("unparsed", None)
         elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
