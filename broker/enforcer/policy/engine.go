@@ -31,6 +31,7 @@ var (
 	ErrNoPending     = errors.New("policy: no such pending change")
 	ErrCorrupt       = errors.New("policy: stored state does not verify")
 	ErrPending       = errors.New("policy: another loosening is waiting; cancel it or let it apply first")
+	ErrNotSame       = errors.New("policy: a rekey must keep the policy in force unchanged")
 )
 
 // Store keeps the engine's state across restarts: the enforcer's sealed
@@ -311,6 +312,70 @@ func (e *Engine) Cancel(id string) error {
 	st := e.st
 	st.Pending = slices.Delete(slices.Clone(st.Pending), i, i+1)
 	return e.save(st)
+}
+
+// Rekey moves the policy in force to a newly enrolled owner passkey
+// (NET-4 Enrolment and recovery; slice c, ASSUMPTIONS ENF-a-2). The new
+// passkey signs next: the policy in force, unchanged but for a version
+// above every one spent, with the page's diff saying so. That version
+// becomes the base and the steps before it fold into it, so the stored
+// state holds nothing signed by the passkey it replaces and a restart
+// opens it with owner alone. A loosening the old passkey signed does not
+// carry over: Rekey refuses while one waits (ErrPending), and enrolment
+// cancels it first. An engine that holds nothing yet (factory state:
+// no base, no steps, nothing pending) takes owner with no signature, since
+// there is nothing to carry.
+func (e *Engine) Rekey(owner key.PublicKey, next Proposal, sig []byte) error {
+	if len(e.st.Pending) != 0 {
+		return ErrPending
+	}
+	if owner.Alg() != key.AlgES256 {
+		return ErrNotOwner
+	}
+	if e.st.Base == nil && len(e.st.Steps) == 0 && sig == nil {
+		e.owner = owner
+		return nil
+	}
+	same := e.cur.normal()
+	same.Version = next.Doc.Version
+	want, err := Encode(same)
+	if err != nil {
+		return err
+	}
+	doc, err := Encode(next.Doc)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(doc, want) {
+		return ErrNotSame
+	}
+	k, err := Verify(owner, e.st.Spent, next, sig)
+	if err != nil {
+		return err
+	}
+	st := state{Base: &Signed{Key: k, Doc: doc, Diff: next.Diff}, Steps: []Step{}, Pending: []Pending{}, Seq: e.st.Seq, Spent: next.Doc.Version}
+	if err := e.save(st); err != nil {
+		return err
+	}
+	e.owner = owner
+	e.cur = next.Doc.normal()
+	return nil
+}
+
+// Disown makes the engine take no signed proposal until Rekey names a
+// passkey: Propose refuses every one (ErrNotOwner), while tightenings with
+// no assertion still apply. Enrolment calls it when the passkey in force
+// is not the one the stored versions are signed by: after a factory reset
+// (no passkey; NET-2 Hardening: no loosening until a new one enrols) and
+// after a replacement, until the new passkey keeps the policy (slice c).
+// A waiting loosening must be cancelled first, since landing it re-checks
+// signatures (ErrPending).
+func (e *Engine) Disown() error {
+	if len(e.st.Pending) != 0 {
+		return ErrPending
+	}
+	e.owner = key.PublicKey{}
+	return nil
 }
 
 // Tick applies the pending loosening if it is due at now, and returns its
