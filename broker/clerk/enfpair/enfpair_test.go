@@ -6,8 +6,8 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -35,12 +35,20 @@ func TestCoreKeepsNoCopy(t *testing.T) {
 		t.Fatalf("the caller's plaintext was not erased: %q", secret)
 	}
 
-	// Everything the helper holds, field by field.
-	dump := fmt.Sprintf("%#v %#v", h.to, h.held)
-	for _, env := range h.held {
-		dump += string(env)
+	// Everything the helper holds, field by field: a field added to Helper
+	// fails here until it is named below with what it may hold.
+	known := map[string]bool{
+		"to":   true, // the enforcer's public pairing key
+		"mu":   true,
+		"held": true, // sealed envelopes only
 	}
-	if strings.Contains(dump, string(canary)) {
+	hv := reflect.ValueOf(h).Elem()
+	for i := range hv.NumField() {
+		if f := hv.Type().Field(i); !known[f.Name] {
+			t.Errorf("Helper.%s is unchecked: name it in TestCoreKeepsNoCopy's list", f.Name)
+		}
+	}
+	if b := held(hv, map[uintptr]bool{}); bytes.Contains(b, canary) {
 		t.Fatal("the helper holds the secret")
 	}
 	w, ok := h.Waiting("front-lock")
@@ -72,6 +80,52 @@ func TestCoreKeepsNoCopy(t *testing.T) {
 	if _, err := h.Seal("bad id", bad); err == nil || !bytes.Equal(bad, make([]byte, len(canary))) {
 		t.Errorf("a refused seal left the plaintext: %v %q", err, bad)
 	}
+}
+
+// held is every byte v holds, through every field, element, map entry
+// and pointer, unexported or not.
+func held(v reflect.Value, seen map[uintptr]bool) []byte {
+	switch v.Kind() {
+	case reflect.String:
+		return []byte(v.String())
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return bytes.Clone(v.Bytes())
+		}
+		fallthrough
+	case reflect.Array:
+		var b []byte
+		for i := range v.Len() {
+			b = append(b, held(v.Index(i), seen)...)
+		}
+		return b
+	case reflect.Struct:
+		var b []byte
+		for i := range v.NumField() {
+			b = append(b, held(v.Field(i), seen)...)
+		}
+		return b
+	case reflect.Map:
+		var b []byte
+		for it := v.MapRange(); it.Next(); {
+			b = append(append(b, held(it.Key(), seen)...), held(it.Value(), seen)...)
+		}
+		return b
+	case reflect.Pointer:
+		if v.IsNil() || seen[v.Pointer()] {
+			return nil
+		}
+		seen[v.Pointer()] = true
+		return held(v.Elem(), seen)
+	case reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return held(v.Elem(), seen)
+	case reflect.Uint8:
+		return []byte{byte(v.Uint())}
+	}
+	return nil
 }
 
 // TestLinkCarriesHashAndFragment: the link names the device and the hash

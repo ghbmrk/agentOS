@@ -15,7 +15,7 @@
 {{if .Pending}}{{range .Pending}}
 <div class="pending">
 <p>Applies at {{when .DueMS}} unless you cancel it.</p>
-<ul class="diff">{{range lines .Diff}}<li>{{.}}</li>{{end}}</ul>
+<ul class="diff">{{range lines .Diff}}<li>{{template "diffline" .}}</li>{{end}}</ul>
 <button class="act" data-action="cancel" data-target="{{.ID}}" data-rp="{{$.Name}}">Cancel with your passkey</button>
 </div>
 {{end}}{{else}}<p>Nothing.</p>{{end}}

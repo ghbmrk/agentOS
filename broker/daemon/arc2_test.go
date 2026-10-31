@@ -395,7 +395,7 @@ func TestCoreLinksOnlyEnforcerFormats(t *testing.T) {
 		for _, im := range f[1:] {
 			rel := strings.TrimPrefix(im, module)
 			if (rel == "enforcer" || strings.HasPrefix(rel, "enforcer/")) && !contains(coreEnforcer[pkg].allowed, rel) {
-				t.Errorf("core package %s links enforcer package %s", pkg, rel)
+				t.Errorf("core package %s links enforcer package %s: list it in coreEnforcer with a reason, or, if %s is enforcer code outside broker/enforcer (cmd/agentos-enforcer, kernel/enforcer), add the case that skips it here", pkg, rel, pkg)
 			}
 		}
 	}
