@@ -30,7 +30,7 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 	// the build leaves out would go unchecked, so one fails), and the fence
 	// reads what each name resolves to (#4256).
 	var files int
-	for _, p := range goList(t, ".", "../cmd/agentos-hostdisk") {
+	for _, p := range goList(t) {
 		if p.unread != "" {
 			t.Errorf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, p.unread)
 		}
@@ -73,6 +73,11 @@ func TestFenceRefusesSyntheticSources(t *testing.T) {
 		"an OpenFile flag beyond the pair": head + "func f(p string) { os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|os.O_CREATE, 0) }\n",
 		"an OpenFile flag variable":        head + "var fl = os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK\n\nfunc f(p string) { os.OpenFile(p, fl, 0) }\n",
 		"os.WriteFile":                     "package hostdisk\n\nimport \"os\"\n\nvar _ = os.WriteFile\n",
+		"os.CreateTemp":                    "package hostdisk\n\nimport \"os\"\n\nvar _ = os.CreateTemp\n",
+		"os.MkdirTemp":                     "package hostdisk\n\nimport \"os\"\n\nvar _ = os.MkdirTemp\n",
+		"os.Chtimes":                       "package hostdisk\n\nimport \"os\"\n\nvar _ = os.Chtimes\n",
+		"os.Lchown":                        "package hostdisk\n\nimport \"os\"\n\nvar _ = os.Lchown\n",
+		"os.CopyFS":                        "package hostdisk\n\nimport \"os\"\n\nvar _ = os.CopyFS\n",
 		// #4256: names count by what they resolve to, not how they are
 		// spelled. A local struct spelled syscall makes the flags
 		// O_RDWR|O_CREAT; an os import under another name opens with
@@ -119,6 +124,7 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 		"Ioctl": true, "Syscall": true, "RawSyscall": true, "Fd": true, "NewFile": true,
 		// os.Root's OpenFile takes write flags the fence does not read.
 		"OpenRoot": true, "OpenInRoot": true,
+		"CreateTemp": true, "MkdirTemp": true, "Chtimes": true, "Lchown": true, "CopyFS": true,
 	}
 	forbiddenText := []string{"sync_file_range", "BLKDISCARD", "discard", "ioctl"}
 	var problems []string
@@ -214,7 +220,7 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 				// syscall is imported only for the two open flags that keep a
 				// device open from following a link or blocking (#3950); any
 				// other name in it fails.
-				if obj.Pkg().Path() == "syscall" && !syscallFlags[obj.Name()] {
+				if obj.Pkg().Path() == "syscall" && !syscallFlags[obj.Name()] && !forbiddenSel[obj.Name()] {
 					fail("%s: uses syscall.%s", fs.Position(x.Pos()), obj.Name())
 				}
 			}
@@ -263,19 +269,23 @@ func isPkgObj(obj types.Object, path, name string) bool {
 
 type listed struct{ path, dir, goFiles, unread, export string }
 
+// fenced are the directories HW-8's fence covers: the package and its
+// command.
+var fenced = []string{".", "../cmd/agentos-hostdisk"}
+
 var (
-	exportsOnce sync.Once
-	exports     map[string]listed
-	exportsErr  error
-	firstPkgs   []listed
+	listOnce sync.Once
+	exports  map[string]listed // import path -> listing, with export data
+	fencePkg []listed          // the fenced packages, in fenced's order
+	listErr  error
 )
 
-// goList lists pkgs and every package they or the fence's synthetic sources
-// import, with export data; the first entries returned are pkgs, in order.
-func goList(t *testing.T, pkgs ...string) []listed {
+// goList lists the fenced packages and every package they or the fence's
+// synthetic sources import, with export data, once per test binary.
+func goList(t *testing.T) []listed {
 	t.Helper()
-	exportsOnce.Do(func() {
-		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}\t{{.Export}}"}, pkgs...)
+	listOnce.Do(func() {
+		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}\t{{.Export}}"}, fenced...)
 		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net/http")
 		cmd := exec.Command("go", args...)
 		cmd.Env = append(os.Environ(), "GOFLAGS=")
@@ -284,39 +294,39 @@ func goList(t *testing.T, pkgs ...string) []listed {
 			if ee, ok := err.(*exec.ExitError); ok {
 				err = fmt.Errorf("%v\n%s", err, ee.Stderr)
 			}
-			exportsErr = fmt.Errorf("go list: %v", err)
+			listErr = fmt.Errorf("go list: %v", err)
 			return
 		}
 		exports = map[string]listed{}
+		byDir := map[string]listed{}
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			f := strings.Split(line, "\t")
 			if len(f) != 5 {
-				exportsErr = fmt.Errorf("go list: unexpected line %q", line)
+				listErr = fmt.Errorf("go list: unexpected line %q", line)
 				return
 			}
-			exports[f[0]] = listed{f[0], f[1], f[2], strings.TrimSpace(f[3]), f[4]}
+			l := listed{f[0], f[1], f[2], strings.TrimSpace(f[3]), f[4]}
+			exports[l.path], byDir[l.dir] = l, l
 		}
-		for _, p := range pkgs {
-			cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}", p)
-			cmd.Env = append(os.Environ(), "GOFLAGS=")
-			out, err := cmd.Output()
-			if err != nil {
-				exportsErr = fmt.Errorf("go list %s: %v", p, err)
+		for _, d := range fenced {
+			abs, err := filepath.Abs(d)
+			if err != nil || byDir[abs].path == "" {
+				listErr = fmt.Errorf("go list did not list %s (%v)", d, err)
 				return
 			}
-			firstPkgs = append(firstPkgs, exports[strings.TrimSpace(string(out))])
+			fencePkg = append(fencePkg, byDir[abs])
 		}
 	})
-	if exportsErr != nil {
-		t.Fatal(exportsErr)
+	if listErr != nil {
+		t.Fatal(listErr)
 	}
-	return firstPkgs
+	return fencePkg
 }
 
 // exportImporter imports a package from the export data go list found.
 func exportImporter(t *testing.T, fs *token.FileSet) types.Importer {
 	t.Helper()
-	goList(t, ".", "../cmd/agentos-hostdisk")
+	goList(t)
 	return importer.ForCompiler(fs, "gc", func(path string) (io.ReadCloser, error) {
 		if exports[path].export == "" {
 			return nil, fmt.Errorf("no export data for %s", path)

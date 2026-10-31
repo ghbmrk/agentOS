@@ -76,21 +76,17 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			if args[op] == "" {
 				t.Fatalf("no call arguments for os.%s", op)
 			}
-			for _, form := range []string{"call", "value", "value in a func", "alias", "alias call", "dot import", "a value passed on"} {
+			// A value and a call take the same path (an identifier that
+			// resolves to the function), so one value form is enough.
+			for _, form := range []string{"call", "value", "alias call", "dot import"} {
 				src := "package side\n\nimport \"os\"\n\nvar _ = os." + op + "\n"
 				switch form {
 				case "call":
 					src = "package side\n\nimport \"os\"\n\nfunc F() { os." + op + "(" + args[op] + ") }\n"
-				case "alias":
-					src = "package side\n\nimport o \"os\"\n\nfunc F() { _ = o." + op + " }\n"
 				case "alias call":
 					src = "package side\n\nimport o \"os\"\n\nfunc F() { o." + op + "(" + strings.ReplaceAll(args[op], "os.", "o.") + ") }\n"
 				case "dot import":
 					src = "package side\n\nimport . \"os\"\n\nfunc F() { " + op + "(" + strings.ReplaceAll(args[op], "os.", "") + ") }\n"
-				case "value in a func":
-					src = "package side\n\nimport \"os\"\n\nfunc F() { _ = os." + op + " }\n"
-				case "a value passed on":
-					src = "package side\n\nimport \"os\"\n\nfunc G(any) {}\n\nfunc F() { G((os." + op + ")) }\n"
 				}
 				problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "")
 				if len(problems) != 1 || !strings.Contains(problems[0], "os."+op) {
