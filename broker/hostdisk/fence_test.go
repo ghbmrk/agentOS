@@ -22,6 +22,62 @@ import (
 // and has no call or import that writes, mounts, swaps or runs a program.
 func TestSourceCannotWriteOrMount(t *testing.T) {
 	dirs := []string{".", "../cmd/agentos-hostdisk"}
+	var files int
+	for _, dir := range dirs {
+		paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range paths {
+			if strings.HasSuffix(p, "_test.go") {
+				continue
+			}
+			files++
+			src, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, problem := range fenceProblems(t, p, string(src)) {
+				t.Error(problem)
+			}
+		}
+	}
+	if files < 3 {
+		t.Fatalf("only %d source files checked", files)
+	}
+}
+
+// The fence refuses each way out it names, on synthetic sources: in
+// particular every syscall name but the two open flags, under the plain
+// import name or any other (#3950).
+func TestFenceRefusesSyntheticSources(t *testing.T) {
+	const head = "package hostdisk\n\nimport (\n\t\"os\"\n\t\"syscall\"\n)\n\n"
+	ok := head + "func f(p string) (*os.File, error) {\n\treturn os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)\n}\n"
+	if problems := fenceProblems(t, "ok.go", ok); len(problems) != 0 {
+		t.Fatalf("the device open as written: %q, want none", problems)
+	}
+	for name, src := range map[string]string{
+		"syscall.Pwrite":                   head + "func f() { syscall.Pwrite(0, nil, 0); _ = os.O_RDONLY }\n",
+		"syscall.Open":                     head + "func f() { syscall.Open(\"x\", 0, 0); _ = os.O_RDONLY }\n",
+		"syscall.Mmap as a value":          head + "var _ = syscall.Mmap\nvar _ = os.O_RDONLY\n",
+		"syscall.O_RDWR":                   head + "var _ = syscall.O_RDWR\nvar _ = os.O_RDONLY\n",
+		"syscall.Mount":                    head + "var _ = syscall.Mount\nvar _ = os.O_RDONLY\n",
+		"a renamed syscall":                "package hostdisk\n\nimport s \"syscall\"\n\nvar _ = s.O_NOFOLLOW\n",
+		"a dot import of syscall":          "package hostdisk\n\nimport . \"syscall\"\n\nvar _ = O_NOFOLLOW\n",
+		"golang.org/x/sys/unix":            "package hostdisk\n\nimport \"golang.org/x/sys/unix\"\n\nvar _ = unix.O_NOFOLLOW\n",
+		"an OpenFile flag beyond the pair": head + "func f(p string) { os.OpenFile(p, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|os.O_CREATE, 0) }\n",
+		"an OpenFile flag variable":        head + "var fl = os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK\n\nfunc f(p string) { os.OpenFile(p, fl, 0) }\n",
+		"os.WriteFile":                     "package hostdisk\n\nimport \"os\"\n\nvar _ = os.WriteFile\n",
+	} {
+		if problems := fenceProblems(t, "x.go", src); len(problems) == 0 {
+			t.Errorf("%s: the fence passed it", name)
+		}
+	}
+}
+
+// fenceProblems is the HW-8 fence on one source file.
+func fenceProblems(t *testing.T, p, src string) []string {
+	t.Helper()
 	forbiddenImports := map[string]bool{
 		"os/exec": true, "golang.org/x/sys/unix": true,
 		"net": true, "net/http": true, "unsafe": true,
@@ -35,80 +91,86 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 		"Ioctl": true, "Syscall": true, "RawSyscall": true, "Fd": true, "NewFile": true,
 	}
 	forbiddenText := []string{"sync_file_range", "BLKDISCARD", "discard", "ioctl"}
-	var files int
-	for _, dir := range dirs {
-		paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
-		if err != nil {
-			t.Fatal(err)
+	var problems []string
+	fail := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, p, src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syscallName := ""
+	for _, im := range f.Imports {
+		path, _ := strconv.Unquote(im.Path.Value)
+		if forbiddenImports[path] {
+			fail("%s imports %s", p, path)
 		}
-		for _, p := range paths {
-			if strings.HasSuffix(p, "_test.go") {
-				continue
+		if path == "syscall" {
+			syscallName = "syscall"
+			if im.Name != nil {
+				fail("%s imports syscall under another name", p)
 			}
-			files++
-			fs := token.NewFileSet()
-			f, err := parser.ParseFile(fs, p, nil, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			syscallName := ""
-			for _, im := range f.Imports {
-				path, _ := strconv.Unquote(im.Path.Value)
-				if forbiddenImports[path] {
-					t.Errorf("%s imports %s", p, path)
-				}
-				if path == "syscall" {
-					syscallName = "syscall"
-					if im.Name != nil {
-						t.Errorf("%s imports syscall under another name", p)
-					}
-				}
-			}
-			ast.Inspect(f, func(n ast.Node) bool {
-				switch x := n.(type) {
-				case *ast.BasicLit:
-					for _, w := range forbiddenText {
-						if strings.Contains(strings.ToLower(x.Value), w) {
-							t.Errorf("%s: literal mentions %s", fs.Position(x.Pos()), w)
-						}
-					}
-				case *ast.FuncDecl:
-					// The open device never leaves the package: no exported
-					// function or method returns a file or the device.
-					if x.Name.IsExported() && x.Type.Results != nil {
-						for _, r := range x.Type.Results.List {
-							if s := types(r.Type); strings.Contains(s, "File") || strings.Contains(s, "device") || strings.Contains(s, "Reader") {
-								t.Errorf("%s: exported %s returns %s", fs.Position(x.Pos()), x.Name.Name, s)
-							}
-						}
-					}
-				case *ast.SelectorExpr:
-					if forbiddenSel[x.Sel.Name] {
-						t.Errorf("%s: uses %s", fs.Position(x.Pos()), x.Sel.Name)
-					}
-					// syscall is imported only for the two open flags that
-					// keep a device open from following a link or blocking
-					// (#3950); any other name in it fails.
-					if id, ok := x.X.(*ast.Ident); ok && syscallName != "" && id.Name == syscallName && !syscallFlags[x.Sel.Name] {
-						t.Errorf("%s: uses syscall.%s", fs.Position(x.Pos()), x.Sel.Name)
-					}
-				case *ast.CallExpr:
-					if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
-						if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" && sel.Sel.Name == "OpenFile" {
-							// OpenFile is allowed only with the read-only flag,
-							// alone or with syscall.O_NOFOLLOW|syscall.O_NONBLOCK.
-							if len(x.Args) < 2 || !isRDONLY(x.Args[1]) {
-								t.Errorf("%s: os.OpenFile without os.O_RDONLY alone or with O_NOFOLLOW and O_NONBLOCK", fs.Position(x.Pos()))
-							}
-						}
-					}
-				}
-				return true
-			})
 		}
 	}
-	if files < 3 {
-		t.Fatalf("only %d source files checked", files)
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.BasicLit:
+			for _, w := range forbiddenText {
+				if strings.Contains(strings.ToLower(x.Value), w) {
+					fail("%s: literal mentions %s", fs.Position(x.Pos()), w)
+				}
+			}
+		case *ast.FuncDecl:
+			// The open device never leaves the package: no exported
+			// function or method returns a file or the device.
+			if x.Name.IsExported() && x.Type.Results != nil {
+				for _, r := range x.Type.Results.List {
+					if s := types(r.Type); strings.Contains(s, "File") || strings.Contains(s, "device") || strings.Contains(s, "Reader") {
+						fail("%s: exported %s returns %s", fs.Position(x.Pos()), x.Name.Name, s)
+					}
+				}
+			}
+		case *ast.SelectorExpr:
+			if forbiddenSel[x.Sel.Name] {
+				fail("%s: uses %s", fs.Position(x.Pos()), x.Sel.Name)
+			}
+			// syscall is imported only for the two open flags that keep a
+			// device open from following a link or blocking (#3950); any
+			// other name in it fails.
+			if id, ok := x.X.(*ast.Ident); ok && syscallName != "" && id.Name == syscallName && !syscallFlags[x.Sel.Name] {
+				fail("%s: uses syscall.%s", fs.Position(x.Pos()), x.Sel.Name)
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "os" && sel.Sel.Name == "OpenFile" {
+					// OpenFile is allowed only with the read-only flag,
+					// alone or with syscall.O_NOFOLLOW|syscall.O_NONBLOCK.
+					if len(x.Args) < 2 || !isRDONLY(x.Args[1]) {
+						fail("%s: os.OpenFile without os.O_RDONLY alone or with O_NOFOLLOW and O_NONBLOCK", fs.Position(x.Pos()))
+					}
+				}
+			}
+		}
+		return true
+	})
+	return problems
+}
+
+// isBlock accepts only a block device node, as uid-independent unit
+// cases: the real-node case below needs a node this uid can open.
+func TestIsBlock(t *testing.T) {
+	for m, want := range map[os.FileMode]bool{
+		os.ModeDevice:                     true,
+		os.ModeDevice | 0o660:             true,
+		os.ModeDevice | os.ModeCharDevice: false,
+		0o644:                             false,
+		os.ModeDir:                        false,
+		os.ModeSymlink:                    false,
+		os.ModeNamedPipe:                  false,
+		os.ModeSocket:                     false,
+	} {
+		if got := isBlock(m); got != want {
+			t.Errorf("isBlock(%v) = %v, want %v", m, got, want)
+		}
 	}
 }
 

@@ -272,6 +272,8 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"before a closing '":           "RUN+=\"/bin/sh -c 'agentos-side'\"\n",
 		"inside backticks":             "RUN+=\"/bin/sh -c 'x=`agentos-side`'\"\n",
 		"after &&":                     "RUN+=\"/bin/sh -c 'true&&agentos-side'\"\n",
+		"spelled with \\x escapes":     "RUN+=e\"/usr/lib/agentos/agentos\\x2dside\"\n",
+		"spelled with octal escapes":   "RUN+=e\"/usr/lib/agentos/\\141gentos-side\"\n",
 		"after >":                      "RUN+=\"/bin/sh -c 'x>/dev/null;agentos-side'\"\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -540,6 +542,10 @@ func rootBinaries(root string) ([]string, error) {
 // (agentos-modem is both a binary and a user), never a program.
 var ruleOwner = regexp.MustCompile(`\b(?:OWNER|GROUP)\s*:?=\s*"[^"]*"`)
 
+// ruleEscape is a C escape a udev e"..." value may spell a byte with: \xHH
+// or \NNN octal.
+var ruleEscape = regexp.MustCompile(`\\(?:x[0-9a-fA-F]{2}|[0-7]{3})`)
+
 // ruleBinaries adds the package of every broker binary whose name a .rules
 // file under image/ or broker/ contains anywhere outside an OWNER= or GROUP=
 // value: as a path or bare, in any key, inside a shell command (sh -c
@@ -548,9 +554,9 @@ var ruleOwner = regexp.MustCompile(`\b(?:OWNER|GROUP)\s*:?=\s*"[^"]*"`)
 // /usr/lib/udev, and can take the program from an ENV value
 // (RUN+="$env{X}"), so reading only those keys, or only whole words, could
 // drop a root binary; a substring match is an over-approximation that adds
-// names but never drops one (#3950). Bound: a name a rule or a shell
-// assembles from pieces, and a program another program's output names, are
-// held by review.
+// names but never drops one (#3950). Escapes (\xHH, \NNN) are decoded
+// first. Bound: a name a rule or a shell assembles from pieces, and a
+// program another program's output names, are held by review.
 func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) error {
 	for _, dir := range []string{"image", "broker"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
@@ -567,8 +573,21 @@ func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) err
 				return err
 			}
 			text := ruleOwner.ReplaceAllString(string(b), "")
+			// Also the text with each \xHH or \NNN escape decoded, so a name
+			// an e"..." value spells with escapes counts too.
+			decoded := ruleEscape.ReplaceAllStringFunc(text, func(e string) string {
+				base, digits := 8, e[1:]
+				if e[1] == 'x' {
+					base, digits = 16, e[2:]
+				}
+				v, err := strconv.ParseUint(digits, base, 8)
+				if err != nil {
+					return e
+				}
+				return string([]byte{byte(v)})
+			})
 			for name, pkg := range pkgs {
-				if strings.Contains(text, name) {
+				if strings.Contains(text, name) || strings.Contains(decoded, name) {
 					seen[pkg] = true
 				}
 			}
