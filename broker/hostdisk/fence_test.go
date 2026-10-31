@@ -123,12 +123,13 @@ func TestOpenReadOnly(t *testing.T) {
 	if err := os.WriteFile(p, make([]byte, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	d, err := openReadOnly(p)
+	// A test cannot make a block node, so a regular file stands in for one
+	// through the opener openReadOnly calls.
+	f, err := openSame(p, os.FileMode.IsRegular)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
-	f := d.(*os.File)
+	defer f.Close()
 	if _, err := f.Write([]byte{1}); err == nil {
 		t.Fatal("device opened writable")
 	}
@@ -150,4 +151,67 @@ func TestOpenReadOnly(t *testing.T) {
 		}
 	}
 	t.Fatal("no flags line")
+}
+
+// The device opener follows no link and opens only a block node (#3950):
+// a link at the path is refused whatever it points at, as are a regular file
+// and a character device, and so is a path whose file changes between the
+// Lstat and the open.
+func TestOpenReadOnlyRefusesALinkOrANonBlockNode(t *testing.T) {
+	dir := t.TempDir()
+	disk := filepath.Join(dir, "disk")
+	if err := os.WriteFile(disk, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{"sda": disk, "sdb": "/dev/null", "sdc": dir} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, p := range []string{filepath.Join(dir, "sda"), filepath.Join(dir, "sdb"), filepath.Join(dir, "sdc"), disk, "/dev/null", dir} {
+		if d, err := openReadOnly(p); err == nil {
+			d.Close()
+			t.Errorf("openReadOnly(%s) opened a link or a file that is no block node", p)
+		}
+	}
+	// A real block node opens, where the test can read one.
+	if ents, _ := os.ReadDir("/sys/block"); len(ents) > 0 {
+		for _, e := range ents {
+			p := filepath.Join("/dev", strings.ReplaceAll(e.Name(), "!", "/"))
+			if f, err := os.Open(p); err == nil {
+				f.Close()
+				d, err := openReadOnly(p)
+				if err != nil {
+					t.Errorf("openReadOnly(%s), a block node this uid can open: %v", p, err)
+				} else {
+					d.Close()
+				}
+				break
+			}
+		}
+	}
+	// A link swapped in after the Lstat: the open follows it, and the
+	// device and inode check refuses the file it reaches.
+	if f, err := openSame(disk, os.FileMode.IsRegular); err != nil {
+		t.Fatal(err)
+	} else {
+		f.Close()
+	}
+	other := filepath.Join(dir, "other")
+	if err := os.WriteFile(other, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer func(f func(string)) { betweenLstatAndOpen = f }(betweenLstatAndOpen)
+	betweenLstatAndOpen = func(p string) {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f, err := openSame(disk, os.FileMode.IsRegular); err == nil {
+		f.Close()
+		t.Fatal("opened the file a link swapped in after the Lstat reaches")
+	}
 }
