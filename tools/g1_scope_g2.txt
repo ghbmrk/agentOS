@@ -152,6 +152,10 @@ exempt-pr 4260
 # Remove once #4216 merges.
 exempt-pr 4216
 
+# #4350 (CAM-decoder-uid): broker/cmd/agentos-camera/ and broker/cmd/agentos-camdecode-host/, which the G2 list does not name (D-198).
+# Remove once #4350 merges.
+exempt-pr 4350
+
 # Project machinery and records.
 allow .claude/
 allow .github/
