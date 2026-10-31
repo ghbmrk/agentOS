@@ -697,8 +697,10 @@ func main() {
 				cfg.PageSocket.Backups = &backupChoice{K: *seat, S: bs}
 				// The Recovery key page (REC-4, r4a): its tap is on the
 				// same name, and a switch the kernel missed is retried.
+				// The lost card's route (r4b) files its request for
+				// the next restart's unlock step.
 				rf := newRecoveryFlow(*seat, bs)
-				cfg.PageSocket.Recovery = rf
+				cfg.PageSocket.Recovery = recoveryOps{rf, newLostCard(*seat, bs)}
 				go rf.run(ctx, backupCheckEvery)
 			}
 		}

@@ -347,6 +347,20 @@ class WeeklyRebootTest(unittest.TestCase):
         self.assertIn("enable agentos-reboot.timer", preset)
         self.assertTrue(os.access(REBOOT, os.X_OK))
 
+    # REQ: REC-4
+    def test_a_lost_card_request_restarts_through_the_weekly_unit(self):
+        """MIG-4-recovery-r4b: agentosd starts no process, so the Recovery key page's restart is a
+        trigger in /run that starts the weekly reboot's unit, which waits out a busy box. /run is
+        emptied at boot, so the trigger cannot restart the box again."""
+        p = ini(UNITS / "agentos-recovery-restart.path")
+        self.assertEqual(p["Path"]["PathExists"], "/run/agentos-recovery-restart")
+        self.assertEqual(p["Path"]["Unit"], "agentos-reboot.service")
+        self.assertEqual(p["Install"]["WantedBy"], "paths.target")
+        preset = (MK / "mkosi.extra/usr/lib/systemd/system-preset/50-agentos.preset").read_text().splitlines()
+        self.assertIn("enable agentos-recovery-restart.path", preset)
+        go = (ROOT / "broker/cmd/agentosd/lostcard.go").read_text()
+        self.assertIn('const restartTrigger = "/run/agentos-recovery-restart"', go)
+
 
 class BootProbeTest(unittest.TestCase):
     """CI's boot test plants an executable in each writable mount and expects it refused."""

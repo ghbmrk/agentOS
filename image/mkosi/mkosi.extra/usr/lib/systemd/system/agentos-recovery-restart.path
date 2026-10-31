@@ -1,0 +1,13 @@
+# Restarts the box for the owner's lost-card request (REC-4, MIG-4-recovery-r4b, D-201 route B):
+# agentosd writes the trigger once the owner asks on the Recovery key page, and the weekly reboot's
+# unit runs, which waits out a call or accepted work (UPD-6). /run is emptied at every boot, so the
+# trigger never outlives the restart it asked for.
+[Unit]
+Description=agentOS restart for a lost-card request
+
+[Path]
+PathExists=/run/agentos-recovery-restart
+Unit=agentos-reboot.service
+
+[Install]
+WantedBy=paths.target
