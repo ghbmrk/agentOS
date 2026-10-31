@@ -357,14 +357,19 @@ func fuzzSourcesRead(t fuzzT, b []byte, pl fuzzPlant) {
 // router's external address is filed, that address is denied. Filed models
 // Sources' bound on its own: a read that returns an external address files
 // it under that gateway as the most recent, and a gateway pushed past the
-// maxGatewayExternals most recent is forgotten, so its silent router is
-// then a never-seen one (N9; #2641, #4208).
+// filedBound most recent is forgotten, so its silent router is then a
+// never-seen one (N9; #2641, #4208).
 func FuzzGatewayPolicy(f *testing.F) {
 	for _, b := range append(fuzzSeeds, controlSeeds...) {
 		f.Add(b)
 	}
 	f.Fuzz(func(t *testing.T, b []byte) { fuzzGatewayPolicy(t, b, fuzzPlant{}) })
 }
+
+// filedBound is the number of gateways N9 says Sources keeps, written here
+// and not taken from maxGatewayExternals, so a change to the code's bound
+// fails the oracle.
+const filedBound = 8
 
 func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 	in := &fuzzBytes{b: b}
@@ -380,7 +385,7 @@ func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 		if err == nil && m.External.IsValid() {
 			out := []filing{{keyOf(m), m.External}}
 			for _, f := range filed {
-				if f.key != keyOf(m) && len(out) < maxGatewayExternals {
+				if f.key != keyOf(m) && len(out) < filedBound {
 					out = append(out, f)
 				}
 			}
