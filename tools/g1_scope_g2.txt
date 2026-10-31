@@ -132,6 +132,10 @@ exempt-pr 4250
 # Remove once #4290 merges.
 exempt-pr 4290
 
+# #4356 (#4354): broker/enforcer/alert/ test file, which the G2 list does not name (D-198).
+# Remove once #4356 merges.
+exempt-pr 4356
+
 # #4171 (ENF-r-follow-2): broker/enforcer/devsecret/, which the G2 list does not name (D-198).
 # Remove once #4171 merges.
 exempt-pr 4171
