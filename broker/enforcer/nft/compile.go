@@ -144,8 +144,8 @@ func (v device) stream() bool   { return !v.d.Isolated && v.d.Recorder() && !v.d
 
 // dports is one match per protocol for ports, such as "tcp dport { 80, 443 }",
 // in a fixed order; none for no ports.
-func dports(ports []policy.Port) []string {
-	var out []string
+func dports(ports []policy.Port) []match {
+	var out []match
 	for _, proto := range []string{policy.ProtoTCP, policy.ProtoUDP} {
 		var nums []string
 		for _, p := range ports {
@@ -154,7 +154,7 @@ func dports(ports []policy.Port) []string {
 			}
 		}
 		if len(nums) > 0 {
-			out = append(out, proto+" dport { "+strings.Join(nums, ", ")+" }")
+			out = append(out, l4Ports(proto, "{ "+strings.Join(nums, ", ")+" }"))
 		}
 	}
 	return out
@@ -445,15 +445,106 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("iifname " + T + " meta l4proto { tcp, udp } th dport 53 counter name " + q(DNSRedirect) + " redirect")
 	w.close()
 
+	// The forward chain's rules after the established accept decide a
+	// connection's first packet. The same rules, read from each
+	// connection's own record (ct.go), make the live chain, which every
+	// established or related packet passes first: a connection lives only
+	// while the ruleset in force would still admit its first packet, so a
+	// load that removes a path ends the connections open along it, both
+	// ways (NET-3, NET-7).
+	g := q(l.Guests)
+	var fwd []rule
+	add := func(in, out, tail, verdict string, m ...match) {
+		fwd = append(fwd, rule{in: in, out: out, m: m, tail: tail, verdict: verdict})
+	}
+	logged := func(prefix, counter string) string {
+		return "log prefix " + q(prefix) + " counter name " + q(counter)
+	}
+	add(wan, "", logged(LogInbound, Inbound), "drop")
+	add(g, wan, "", "accept", daddr(false, "!= @isp_4"), daddr(false, "!= @nonglobal_4"))
+	add(g, wan, "", "accept", daddr(true, "!= @isp_6"), daddr(true, "!= @nonglobal_6"))
+	add(g, "", "", "drop")
+	add("{ "+q(l.Owner)+", "+q(l.Household)+" }", "", "", "jump people")
+	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(false, "@ap_4"))
+	add(q(l.Admin), q(l.APMgmt), "", "accept", daddr(true, "@ap_6"))
+	add("", "", logged(LogAPAdmin, APAdminDrop), "drop", daddr(false, "@ap_4"))
+	add("", "", logged(LogAPAdmin, APAdminDrop), "drop", daddr(true, "@ap_6"))
+	add("", "", logged(LogISP, ISPDrop), "drop", daddr(false, "@isp_4"))
+	add("", "", logged(LogISP, ISPDrop), "drop", daddr(true, "@isp_6"))
+	add("", wan, logged(LogNonGlobal, Blocked), "drop", daddr(false, "@nonglobal_4"))
+	add("", wan, logged(LogNonGlobal, Blocked), "drop", daddr(true, "@nonglobal_6"))
+	add(edge, core, logged(LogCoreEdge, CoreEdge), "drop")
+	add(core, edge, logged(LogCoreEdge, CoreEdge), "drop")
+	// From here on, oifname WAN is the internet.
+	add(q(l.Admin), core, "", "accept", l4Ports("tcp", port(l.CorePagePort)))
+	add(edge, wan, "", "accept")
+	add(core, wan, "", "accept", resolved(false, CoreSet(false)))
+	add(core, wan, "", "accept", resolved(true, CoreSet(true)))
+	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
+	// before any allow set is consulted (NET-3).
+	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(false, "@doh_4"))
+	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(true, "@doh_6"))
+	add(T, wan, logged(LogDNS, DNSOutside), "drop", match{"meta l4proto { tcp, udp } th dport { 53, 853 }", "ct protocol { tcp, udp } ct original proto-dst { 53, 853 }"})
+	for _, v := range devs {
+		i := q(v.iface)
+		vl := strconv.Itoa(v.vlan)
+		if v.internet() {
+			add(i, wan, "", "accept", resolved(false, DeviceSet(v.vlan, false)))
+			add(i, wan, "", "accept", resolved(true, DeviceSet(v.vlan, true)))
+		}
+		for _, m := range dports(v.d.Control) {
+			if v.online() {
+				add(edge, i, `log prefix "enf edge-dev `+vl+` " counter name `+q(EdgeDevice), "accept", m)
+			}
+			if v.offline() {
+				add(core, i, `log prefix "enf core-dev `+vl+` " counter name `+q(CoreDevice), "accept", m)
+			}
+		}
+		for _, m := range dports(v.d.Stream) {
+			if v.stream() {
+				add(core, i, `log prefix "enf core-stream `+vl+` " counter name `+q(CoreStream), "accept", m)
+			}
+		}
+	}
+	for _, p := range paths {
+		if p.Both {
+			add(q(p.From), q(p.To), "", "accept")
+			add(q(p.To), q(p.From), "", "accept")
+		}
+	}
+	add("", "", logged(LogDrop, Blocked), "drop")
+
+	// Owner and Household: the internet, their signed pairs and, from Owner
+	// only, the core's page (CH-9). They are not inspected (NET-1), so what
+	// they are refused is dropped without a log line or a counter.
+	var people []rule
+	padd := func(in, out, verdict string, m ...match) {
+		people = append(people, rule{in: in, out: out, m: m, verdict: verdict})
+	}
+	padd("", "", "drop", daddr(false, "@ap_4"))
+	padd("", "", "drop", daddr(true, "@ap_6"))
+	padd("", "", "drop", daddr(false, "@isp_4"))
+	padd("", "", "drop", daddr(true, "@isp_6"))
+	padd("", wan, "drop", daddr(false, "@nonglobal_4"))
+	padd("", wan, "drop", daddr(true, "@nonglobal_6"))
+	padd("", wan, "accept")
+	padd(q(l.Owner), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
+	for _, p := range paths {
+		if !p.Both {
+			padd(q(p.From), q(p.To), "accept")
+		}
+	}
+	padd("", "", "drop")
+
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
 	// Guests: counted only as a whole network, never per device or per
 	// destination, and never logged (NET-3).
-	g := q(l.Guests)
 	w.line("iifname " + g + " counter name " + q(GuestsOut))
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
+	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
 	// device was refused never enters its set, and neither does the sender
@@ -468,79 +559,31 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		w.line("ct state established oifname vmap { " + strings.Join(ins, ", ") + " }")
 	}
 	w.line("ct state established,related accept")
-	w.line("iifname " + wan + ` log prefix ` + q(LogInbound) + ` counter name ` + q(Inbound) + " drop")
-	w.line("iifname " + g + " oifname " + wan + " ip daddr != @isp_4 ip daddr != @nonglobal_4 accept")
-	w.line("iifname " + g + " oifname " + wan + " ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 accept")
-	w.line("iifname " + g + " drop")
-	w.line("iifname { " + q(l.Owner) + ", " + q(l.Household) + " } jump people")
-	w.line("iifname " + q(l.Admin) + " oifname " + q(l.APMgmt) + " ip daddr @ap_4 accept")
-	w.line("iifname " + q(l.Admin) + " oifname " + q(l.APMgmt) + " ip6 daddr @ap_6 accept")
-	w.line(`ip daddr @ap_4 log prefix ` + q(LogAPAdmin) + ` counter name ` + q(APAdminDrop) + " drop")
-	w.line(`ip6 daddr @ap_6 log prefix ` + q(LogAPAdmin) + ` counter name ` + q(APAdminDrop) + " drop")
-	w.line(`ip daddr @isp_4 log prefix ` + q(LogISP) + ` counter name ` + q(ISPDrop) + " drop")
-	w.line(`ip6 daddr @isp_6 log prefix ` + q(LogISP) + ` counter name ` + q(ISPDrop) + " drop")
-	w.line("oifname " + wan + ` ip daddr @nonglobal_4 log prefix ` + q(LogNonGlobal) + ` counter name ` + q(Blocked) + " drop")
-	w.line("oifname " + wan + ` ip6 daddr @nonglobal_6 log prefix ` + q(LogNonGlobal) + ` counter name ` + q(Blocked) + " drop")
-	w.line("iifname " + edge + " oifname " + core + ` log prefix ` + q(LogCoreEdge) + ` counter name ` + q(CoreEdge) + " drop")
-	w.line("iifname " + core + " oifname " + edge + ` log prefix ` + q(LogCoreEdge) + ` counter name ` + q(CoreEdge) + " drop")
-	// From here on, oifname WAN is the internet.
-	w.line("iifname " + q(l.Admin) + " oifname " + core + " tcp dport " + port(l.CorePagePort) + " accept")
-	w.line("iifname " + edge + " oifname " + wan + " accept")
-	w.line("iifname " + core + " oifname " + wan + " ip daddr @" + CoreSet(false) + " accept")
-	w.line("iifname " + core + " oifname " + wan + " ip6 daddr @" + CoreSet(true) + " accept")
-	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
-	// before any allow set is consulted (NET-3).
-	w.line("iifname " + T + " oifname " + wan + ` ip daddr @doh_4 log prefix ` + q(LogDNS) + ` counter name ` + q(DNSOutside) + " drop")
-	w.line("iifname " + T + " oifname " + wan + ` ip6 daddr @doh_6 log prefix ` + q(LogDNS) + ` counter name ` + q(DNSOutside) + " drop")
-	w.line("iifname " + T + " oifname " + wan + ` meta l4proto { tcp, udp } th dport { 53, 853 } log prefix ` + q(LogDNS) + ` counter name ` + q(DNSOutside) + " drop")
-	for _, v := range devs {
-		i := q(v.iface)
-		vl := strconv.Itoa(v.vlan)
-		if v.internet() {
-			w.line("iifname " + i + " oifname " + wan + " ip daddr @" + DeviceSet(v.vlan, false) + " accept")
-			w.line("iifname " + i + " oifname " + wan + " ip6 daddr @" + DeviceSet(v.vlan, true) + " accept")
-		}
-		for _, m := range dports(v.d.Control) {
-			if v.online() {
-				w.line("iifname " + edge + " oifname " + i + " " + m + ` log prefix "enf edge-dev ` + vl + ` " counter name ` + q(EdgeDevice) + " accept")
-			}
-			if v.offline() {
-				w.line("iifname " + core + " oifname " + i + " " + m + ` log prefix "enf core-dev ` + vl + ` " counter name ` + q(CoreDevice) + " accept")
-			}
-		}
-		for _, m := range dports(v.d.Stream) {
-			if v.stream() {
-				w.line("iifname " + core + " oifname " + i + " " + m + ` log prefix "enf core-stream ` + vl + ` " counter name ` + q(CoreStream) + " accept")
-			}
-		}
+	for _, r := range fwd {
+		w.line(r.first())
 	}
-	for _, p := range paths {
-		if p.Both {
-			w.line("iifname " + q(p.From) + " oifname " + q(p.To) + " accept")
-			w.line("iifname " + q(p.To) + " oifname " + q(p.From) + " accept")
-		}
-	}
-	w.line(`log prefix ` + q(LogDrop) + ` counter name ` + q(Blocked) + " drop")
 	w.close()
 
-	// Owner and Household: the internet, their signed pairs and, from Owner
-	// only, the core's page (CH-9). They are not inspected (NET-1), so what
-	// they are refused is dropped without a log line or a counter.
 	w.open("chain people")
-	w.line("ip daddr @ap_4 drop")
-	w.line("ip6 daddr @ap_6 drop")
-	w.line("ip daddr @isp_4 drop")
-	w.line("ip6 daddr @isp_6 drop")
-	w.line("oifname " + wan + " ip daddr @nonglobal_4 drop")
-	w.line("oifname " + wan + " ip6 daddr @nonglobal_6 drop")
-	w.line("oifname " + wan + " accept")
-	w.line("iifname " + q(l.Owner) + " oifname " + core + " tcp dport " + port(l.CorePagePort) + " accept")
-	for _, p := range paths {
-		if !p.Both {
-			w.line("iifname " + q(p.From) + " oifname " + q(p.To) + " accept")
+	for _, r := range people {
+		w.line(r.first())
+	}
+	w.close()
+
+	w.open("chain " + live("forward"))
+	for _, r := range fwd {
+		for _, s := range r.live() {
+			w.line(s)
 		}
 	}
-	w.line("drop")
+	w.close()
+
+	w.open("chain " + live("people"))
+	for _, r := range people {
+		for _, s := range r.live() {
+			w.line(s)
+		}
+	}
 	w.close()
 
 	// A device's counting chains: all its bytes are counted, and its

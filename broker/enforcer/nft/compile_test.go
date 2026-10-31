@@ -129,7 +129,7 @@ func TestPathsFollowTheDocument(t *testing.T) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0"`} {
+	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}
