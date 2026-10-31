@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,6 +82,8 @@ type home struct {
 	// v6 is whether the kernel has IPv6; each link then also gets a
 	// global /64 (see link) and its link-local addresses.
 	v6 bool
+	// counters names each arrivals counter by interface and address.
+	counters map[string]string
 }
 
 func run(t *testing.T, name string, args ...string) string {
@@ -179,7 +182,7 @@ func (h *home) link(x *host, ifc string, p netip.Prefix) {
 	h.in(x, "ip", "addr", "add", xa.String()+bits, "dev", "eth0")
 	h.in(x, "ip", "link", "set", "eth0", "up")
 	h.in(x, "ip", "route", "add", "default", "via", enf.String())
-	if h.v6 && p.Addr().As4()[0] == 10 {
+	if h.v6 {
 		g := global6(p)
 		enf6, x6 := g.Addr().Next(), g.Addr().Next().Next()
 		run(h.t, "ip", "addr", "add", enf6.String()+"/64", "dev", ifc, "nodad")
@@ -374,10 +377,82 @@ func (h *home) resolve(from, server, name string) (int, []string) {
 	return h.ask(from, "udp", server, name)
 }
 
-// ask asks server (an IPv6 one may carry a zone) for name's A records from
-// host from over network, udp or tcp, and gives the reply's rcode and
-// addresses.
+// ask asks server for name's A records from host from over network, udp
+// or tcp, and gives the reply's rcode and addresses. A link-local server is
+// asked on from's own link, sent straight to the enforcer's end of it
+// (pin). Every query must reach the enforcer on from's own interface,
+// whatever then answers it, so no expected silence is the silence of a
+// packet never sent (#4221).
 func (h *home) ask(from, network, server, name string) (int, []string) {
+	h.t.Helper()
+	a := netip.MustParseAddr(server)
+	dial := server
+	if a.Is6() && a.IsLinkLocalUnicast() {
+		h.pin(from, a)
+		dial += "%eth0"
+	}
+	arrived := h.arrivals(from, a)
+	before := arrived()
+	rcode, addrs := h.query(from, network, dial, name)
+	if arrived() == before {
+		h.t.Errorf("%s's query to %s over %s never reached the enforcer", from, server, network)
+	}
+	return rcode, addrs
+}
+
+// pin gives host from a permanent neighbour entry for a, mapping it to the
+// hardware address of the enforcer's end of from's link. The enforcer
+// answers neighbour solicitations only for its own link's addresses, so
+// without it a query to another link's link-local address is never sent.
+func (h *home) pin(from string, a netip.Addr) {
+	i, err := net.InterfaceByName(from)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.in(h.hosts[from], "ip", "-6", "neigh", "replace", a.String(), "lladdr", i.HardwareAddr.String(), "dev", "eth0", "nud", "permanent")
+}
+
+// arrivals counts the port-53 packets that reach the enforcer on
+// interface ifc addressed to a, before any ruleset chain sees them: a
+// counter in a table of the test's own, ahead of every enforcer hook.
+func (h *home) arrivals(ifc string, a netip.Addr) func() int {
+	key := ifc + " " + a.String()
+	name, ok := h.counters[key]
+	if !ok {
+		if h.counters == nil {
+			h.counters = map[string]string{}
+			run(h.t, "nft", "add table inet probe; add chain inet probe in { type filter hook prerouting priority -500; }")
+		}
+		name = "c" + strconv.Itoa(len(h.counters))
+		h.counters[key] = name
+		family := "ip"
+		if a.Is6() {
+			family = "ip6"
+		}
+		run(h.t, "nft", "add counter inet probe "+name+"; add rule inet probe in iifname "+strconv.Quote(ifc)+" "+family+" daddr "+a.String()+" meta l4proto { tcp, udp } th dport 53 counter name "+name)
+	}
+	return func() int {
+		var out struct {
+			Nftables []struct {
+				Counter *struct{ Packets int } `json:"counter"`
+			} `json:"nftables"`
+		}
+		if err := json.Unmarshal([]byte(run(h.t, "nft", "-j", "list", "counter", "inet", "probe", name)), &out); err != nil {
+			h.t.Fatal(err)
+		}
+		for _, o := range out.Nftables {
+			if o.Counter != nil {
+				return o.Counter.Packets
+			}
+		}
+		h.t.Fatalf("counter %s missing", name)
+		return 0
+	}
+}
+
+// query asks server for name's A records from host from over network, and
+// gives the reply's rcode and addresses.
+func (h *home) query(from, network, server, name string) (int, []string) {
 	rcode, addrs := noAnswer, []string(nil)
 	within(h.t, h.hosts[from], func() {
 		c, err := net.DialTimeout(network, net.JoinHostPort(server, "53"), time.Second)
@@ -487,20 +562,21 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	}
 	const refused, nxdomain = 5, 3
 	// Over IPv6 too, before any answer fills a set: another view's global
-	// address, or the core's, reaches the device's own view through the
-	// redirect, which refuses the name; another view's link-local address
-	// is on another link, so nothing answers; and the core gets nothing
-	// from a device's view. Over UDP and TCP alike (ENF-f-4).
+	// or link-local address, or the core's, reaches the device's own view
+	// through the redirect, which refuses the name (the link-local query
+	// sent to the enforcer's end of the device's own link, #4221); and the
+	// core gets nothing from a device's view. Over UDP and TCP alike
+	// (ENF-f-4).
 	if h.has6() {
 		tvLL, plugLL, coreLL := h.linkLocal("ap0.101"), h.linkLocal("ap0.103"), h.linkLocal("core0")
 		for _, nw := range []string{"udp", "tcp"} {
 			expectOn(nw, "ap0.101", "2001:db8:103::1", "plug.example", refused)
 			expectOn(nw, "ap0.101", "2001:db8:50::1", "core.example", refused)
-			expectOn(nw, "ap0.101", plugLL+"%eth0", "plug.example", noAnswer)
-			expectOn(nw, "ap0.101", coreLL+"%eth0", "core.example", noAnswer)
+			expectOn(nw, "ap0.101", plugLL, "plug.example", refused)
+			expectOn(nw, "ap0.101", coreLL, "core.example", refused)
 			expectOn(nw, "core0", "2001:db8:103::1", "plug.example", noAnswer)
 			expectOn(nw, "core0", "2001:db8:101::1", "tv.example", noAnswer)
-			expectOn(nw, "core0", tvLL+"%eth0", "tv.example", noAnswer)
+			expectOn(nw, "core0", tvLL, "tv.example", noAnswer)
 		}
 		for _, set := range []string{nft.CoreSet(false), nft.DeviceSet(101, false), nft.DeviceSet(103, false)} {
 			if got := h.set(set); len(got) != 0 {
@@ -510,7 +586,7 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 		// Control: the TV's own view answers on both its addresses.
 		for _, nw := range []string{"udp", "tcp"} {
 			expectOn(nw, "ap0.101", "2001:db8:101::1", "tv.example", 0, tvAddr)
-			expectOn(nw, "ap0.101", tvLL+"%eth0", "tv.example", 0, tvAddr)
+			expectOn(nw, "ap0.101", tvLL, "tv.example", 0, tvAddr)
 		}
 	}
 	expect("core0", coreDNS, "core.example", 0, coreAddr)
@@ -611,25 +687,27 @@ func TestNoServiceOnEdge(t *testing.T) {
 	// Each view answers only on its own interface, even with no ruleset
 	// to redirect a query: one sent to another view's address arriving on
 	// a different interface gets nothing, over UDP or TCP, and over IPv6
-	// at another view's global or link-local address (ENF-f-4).
+	// at another view's global or link-local address (ENF-f-4). ask checks
+	// each query reached the enforcer on the asker's own interface, so the
+	// silence is the enforcer's, not a packet never sent (#4221).
 	silent := [][3]string{{"core0", tvDNS, "tv.example"}, {"ap0.101", "10.103.0.1", "plug.example"}, {"ap0.101", coreDNS, "core.example"}}
 	answers := [][3]string{{"ap0.101", tvDNS, "tv.example"}, {"core0", coreDNS, "core.example"}}
 	if h.has6() {
 		tvLL, plugLL, coreLL, edgeLL := h.linkLocal("ap0.101"), h.linkLocal("ap0.103"), h.linkLocal("core0"), h.linkLocal("edge0")
 		silent = append(silent,
 			[3]string{"edge0", "2001:db8:60::1", "core.example"},
-			[3]string{"edge0", edgeLL + "%eth0", "core.example"},
+			[3]string{"edge0", edgeLL, "core.example"},
 			[3]string{"core0", "2001:db8:101::1", "tv.example"},
-			[3]string{"core0", tvLL + "%eth0", "tv.example"},
+			[3]string{"core0", tvLL, "tv.example"},
 			[3]string{"ap0.101", "2001:db8:103::1", "plug.example"},
-			[3]string{"ap0.101", plugLL + "%eth0", "plug.example"},
+			[3]string{"ap0.101", plugLL, "plug.example"},
 			[3]string{"ap0.101", "2001:db8:50::1", "core.example"},
-			[3]string{"ap0.101", coreLL + "%eth0", "core.example"})
+			[3]string{"ap0.101", coreLL, "core.example"})
 		answers = append(answers,
 			[3]string{"ap0.101", "2001:db8:101::1", "tv.example"},
-			[3]string{"ap0.101", tvLL + "%eth0", "tv.example"},
+			[3]string{"ap0.101", tvLL, "tv.example"},
 			[3]string{"core0", "2001:db8:50::1", "core.example"},
-			[3]string{"core0", coreLL + "%eth0", "core.example"})
+			[3]string{"core0", coreLL, "core.example"})
 	}
 	for _, nw := range []string{"udp", "tcp"} {
 		for _, c := range silent {
