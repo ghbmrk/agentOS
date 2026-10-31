@@ -529,6 +529,14 @@ class InlinedTest(unittest.TestCase):
             '"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"(e){}',
             '"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"(e){}',
             '"node_modules/b~ar/x.js"(e){}',                              # a legacy name MODULE_SEG cannot read
+            # #4281: the walk goes on from an unreadable step, so a copy's own src/node_modules/<holder>
+            # is not the holder's path, and an unreadable chain never reads as the holder itself
+            '"node_modules/x~y/node_modules/ws6/src/node_modules/holder/x.js"(e){}',
+            '"node_modules/x~y/node_modules/holder/y.js"(e){}',
+            # #4278: a hoisted package's own src/node_modules/<holder> is its source, as for any package
+            '"node_modules/.pnpm/node_modules/ws7/src/node_modules/holder/x.js"(e){}',
+            # #4278: a file directly in node_modules/ or the store names no package
+            '"node_modules/foo.js"(e){}', '"node_modules/.pnpm/x.js"(e){}',
             '"ns:node_modules/ns-pkg/i.js"(e){}',                          # esbuild namespace
             "// CONCATENATED MODULE: ./node_modules/concat/index.js",      # webpack
             '"[project]/node_modules/turbo/index.js [app-ssr] (ecmascript)", (ctx) => {',  # Turbopack
@@ -552,10 +560,14 @@ class InlinedTest(unittest.TestCase):
             "ns-pkg": {"node_modules/ns-pkg/i.js"},
             "hoisted": {"node_modules/.pnpm/node_modules/hoisted/x.js"},
             "deep": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"},
-            "stray": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js"},
-            "ws2": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js"},
+            # a store directory node_modules/ does not follow: the walk names it and stops there
+            "odd": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js",
+                    "node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/odd/x/node_modules/ws2/x.js",
+                    "node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"},
             "ws3": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/x~y/node_modules/ws3/x.js"},
-            "ws4": {"node_modules/holder/node_modules/.pnpm/odd/x/node_modules/ws4/x.js"},
+            "ws6": {"node_modules/x~y/node_modules/ws6/src/node_modules/holder/x.js"},
+            "holder": {"node_modules/x~y/node_modules/holder/y.js"},
+            "ws7": {"node_modules/.pnpm/node_modules/ws7/src/node_modules/holder/x.js"},
             "@s/ws5": {"node_modules/@odd~scope/pkg/node_modules/@s/ws5/x.js"},
             "b~ar": {"node_modules/b~ar/x.js"},
             "concat": {"./node_modules/concat/index.js"},

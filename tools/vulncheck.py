@@ -493,6 +493,26 @@ COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region| CONCATENATED MODULE:)? +" + _M
 KEY_MARK = re.compile(rb"[\"'`]" + _MARK_PATH + rb"[\"'`][(:]")
 TURBOPACK_MARK = re.compile(rb"[\"'`]\[project\]/" + _MARK_PATH + rb"(?: [^\"'`\n]*)?[\"'`]")
 MODULE_SEG = re.compile(rb"node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
+# Unmarked copies (#4234): a minified bundle can drop every mark, but it keeps the string literals
+# of the code it copied. A package's fingerprint is the literals of FP_LEN characters in its own
+# scripts (not under a node_modules/ in its tarball, and holding no marked copy) that no other
+# installed package's own scripts hold; a script holding FP_MIN or more of one package's
+# fingerprint holds a copy of it, unless its marks, sidecar, notices or an entry name that package.
+FP_LEN = (24, 200)
+FP_MIN = 5
+LITERAL = re.compile(rb'"((?:[^"\\\n]|\\.){%d,%d})"|\'((?:[^\'\\\n]|\\.){%d,%d})\'|`((?:[^`\\$\n]|\\.){%d,%d})`'
+                     % (FP_LEN * 3))
+INLINED_LOOKALIKE_KEYS = {"holder", "lookalike", "files", "why"}
+
+
+# Text between two literals that a scan misaligned on a quote inside another literal: code, which a
+# minifier rewrites, not a literal it keeps.
+CODE = re.compile(rb"[;{}]|&&|\|\||===?|!==?|=>|\$\{|\b(?:return|typeof|function|var|const|let|this)\b")
+
+
+def literals(body):
+    """The quoted string literals of FP_LEN characters in one script that read as text, not code."""
+    return {lit for a, b, c in LITERAL.findall(body) if not CODE.search(lit := a or b or c)}
 
 
 def at(spec):
@@ -508,13 +528,15 @@ def bundle_ref(spec):
 
 
 def mark_owner(path):
-    """(package, versioned) for one bundler mark path, or None if it names no package. The path
-    belongs to the last package of its chain of node_modules/<name>/ steps that each follow a
-    package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/) names
-    its version, any other step does not (pnpm's hoisted .pnpm/node_modules/ among them), and a
-    node_modules/ deeper inside a package (its own src/node_modules/) is that package's own
-    source. A chain step the walk cannot read fails closed: the path is an unversioned mark of
-    whatever follows its last node_modules/ (#4197)."""
+    """(package, versioned, unreadable) for one bundler mark path, or None if it names no package.
+    The path belongs to the last package of its chain of node_modules/<name>/ steps that each
+    follow a package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/)
+    names its version, any other step does not (pnpm's hoisted .pnpm/node_modules/ among them), and
+    a node_modules/ deeper inside a package (its own src/node_modules/) is that package's own
+    source. A step MODULE_SEG cannot read (a legacy name, a store directory with no node_modules/
+    after it) fails closed: it names its own text, unversioned, and the walk goes on from there
+    (#4281); the mark stays unreadable, so it is never taken for the bundling package's own path. A step
+    with no "/" after it is a file, not a package (#4278)."""
     store = [m for m in PNPM_MARK.finditer(path) if m.group(1).replace(b"+", b"/") == m.group(3)]
     if store:
         pos, name, versioned = store[-1].end(), store[-1].group(3), True
@@ -522,35 +544,40 @@ def mark_owner(path):
         pos, name, versioned = path.find(b"node_modules/"), None, False
         if pos < 0:
             return None
+    unreadable = False
     while path.startswith(b"node_modules/", pos):
         m = MODULE_SEG.match(path, pos)
-        if not m:
-            return unreadable_owner(path)
-        pos = m.end()
-        if m.group(1) == b".pnpm":
-            if not path.startswith(b"node_modules/", pos):  # else pnpm's hoisted .pnpm/node_modules/
-                pos = path.find(b"/", pos) + 1  # the store directory, which node_modules/ must follow
-                if not pos or not path.startswith(b"node_modules/", pos):
-                    return unreadable_owner(path)
+        if m and m.group(1) == b".pnpm":
+            pos = m.end()
+            if path.startswith(b"node_modules/", pos):
+                continue  # pnpm's hoisted .pnpm/node_modules/
+            end = path.find(b"/", pos)
+            if end < 0:
+                break  # a file in the store directory itself
+            step, pos = path[pos:end], end + 1  # the store directory, which node_modules/ must follow
+            if not path.startswith(b"node_modules/", pos):
+                name, versioned, unreadable = step, False, True
             continue
-        name, versioned = m.group(1), False
-    return name.decode(), versioned
-
-
-def unreadable_owner(path):
-    """An unversioned mark of what follows the path's last node_modules/: its first one or, for a
-    scope, two steps, or the whole path when nothing follows."""
-    steps = path.rpartition(b"node_modules/")[2].split(b"/")
-    name = b"/".join(steps[:2] if steps[0].startswith(b"@") else steps[:1])
-    return (name or path).decode(), False
+        if m:
+            name, versioned, pos = m.group(1), False, m.end()  # after an unreadable step, still unreadable
+            continue
+        start = pos + len(b"node_modules/")
+        end = path.find(b"/", start)
+        if end >= 0 and path.startswith(b"@", start):
+            end = path.find(b"/", end + 1)
+        if end < 0:
+            break  # a file directly in node_modules/
+        name, versioned, unreadable, pos = path[start:end], False, True, end + 1
+    return None if name is None else (name.decode(), versioned, unreadable)
 
 
 def unversioned_marks(body, own):
-    """{package: the mark paths naming it} for the unversioned bundler marks in one script."""
+    """{package: the mark paths naming it} for the unversioned bundler marks in one script. A mark
+    of OWN is the script's own source, unless a step of it was unreadable."""
     out = {}
     for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body) + TURBOPACK_MARK.findall(body):
         o = mark_owner(path)
-        if o and not o[1] and o[0] != own:
+        if o and not o[1] and (o[0] != own or o[2]):
             out.setdefault(o[0], set()).add(path.decode())
     return out
 
@@ -608,12 +635,14 @@ def fetch_tarball(resolved, integrity, mirror=None):
     return data
 
 
-def tarball_marks(data, own):
+def tarball_marks(data, own, prints=None):
     """What a package tarball's marks say about its inlined copies: its files (without the
     leading package/); (name, version) -> the files whose marks name that copy; and for each
     script with unversioned marks (#4197), {package: (its mark paths, the versions its sidecar
-    or notices give)}. OWN, (name, version) of the package itself, is not a copy."""
-    files, marks, by_file, bare = set(), {}, {}, {}
+    or notices give)}. OWN, (name, version) of the package itself, is not a copy. PRINTS, when
+    given, gets each script's string literals and the packages its marks, sidecar or notices
+    name, for the unmarked-copy check (#4234)."""
+    files, marks, by_file, bare, lits = set(), {}, {}, {}, {}
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as t:
         for m in t:
             if not m.isfile():
@@ -631,6 +660,8 @@ def tarball_marks(data, own):
                           if d.decode().replace("+", "/") == n.decode()]
                 if u := unversioned_marks(body, own[0]):
                     bare[rel] = u
+                if prints is not None:
+                    lits[rel] = literals(body)
             if notice:
                 text = body.decode("utf-8", "replace")
                 found += LIST_MARK.findall(text) + NOTICE_MARK.findall(text)
@@ -648,23 +679,35 @@ def tarball_marks(data, own):
                 known[rel].update(found)
     unversioned = {rel: {name: (paths, {v for k, v in known[rel] if k == name}) for name, paths in names.items()}
                    for rel, names in bare.items()}
+    if prints is not None:
+        named = {rel: {n for n, _ in found} | set(bare.get(rel, ())) for rel, (_, found) in by_file.items()}
+        for n, (script, found) in by_file.items():
+            if not script and found:
+                for rel in notice_scope(n, scripts, files):
+                    named[rel].update(k for k, _ in found)
+        prints.update({rel: (ls, named[rel]) for rel, ls in lits.items()})
     return files, marks, unversioned
 
 
 def inlined_problems(entries):
     """Shape problems in the config's "inlined" list: copies whose marks give no version, each
     as {holder: name@version, copy: name@version, files: [the holder's files holding it], why},
-    or files that copy another installed package's bundle, as {holder, bundle:
-    name@version:path, files, why}, whose marks and versions the bundle's give (#4197)."""
+    files that copy another installed package's bundle, as {holder, bundle:
+    name@version:path, files, why}, whose marks and versions the bundle's give (#4197), or files
+    that match a package's fingerprint without holding a copy of it, as {holder, lookalike: name,
+    files, why}, the why saying whose code the matching literals are (#4234)."""
     problems = []
     for n, e in enumerate(entries):
         tag = f"inlined[{n}]"
         if not isinstance(e, dict):
             problems.append(f"{tag}: not an object")
             continue
-        if set(e) not in (INLINED_KEYS, INLINED_BUNDLE_KEYS):
-            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)} or {sorted(INLINED_BUNDLE_KEYS)}")
+        if set(e) not in (INLINED_KEYS, INLINED_BUNDLE_KEYS, INLINED_LOOKALIKE_KEYS):
+            problems.append(f"{tag}: needs exactly the keys {sorted(INLINED_KEYS)}, {sorted(INLINED_BUNDLE_KEYS)} "
+                            f"or {sorted(INLINED_LOOKALIKE_KEYS)}")
             continue
+        if "lookalike" in e and (not isinstance(e["lookalike"], str) or not e["lookalike"].strip()):
+            problems.append(f"{tag}: lookalike must name the package whose fingerprint the files match")
         if "bundle" in e and (not isinstance(e["bundle"], str) or not all(bundle_ref(e["bundle"]))):
             problems.append(f"{tag}: bundle must be name@version:path")
         for k in ("holder", "copy"):
@@ -680,32 +723,40 @@ def inlined_problems(entries):
 def inlined_copies(where, tarballs, entries, mirror=None):
     """(name, version) -> the holders' files that hold it, for one lockfile's tarballs, with
     the entries of the config's "inlined" that one of them holds; and the problems."""
-    copies, problems, held, bare = {}, [], {}, {}
+    copies, problems, held, bare, prints = {}, [], {}, {}, {}
 
     def read(t):
         name, version, resolved, integrity = t
-        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version))
+        p = {}
+        return f"{name}@{version}", tarball_marks(fetch_tarball(resolved, integrity, mirror), (name, version), p), p
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        for holder, (files, marks, unversioned) in pool.map(read, tarballs):
+        for holder, (files, marks, unversioned), p in pool.map(read, tarballs):
             held[holder] = files
             bare[holder] = unversioned
+            prints[holder] = p
             for k, fs in marks.items():
                 copies.setdefault(k, set()).update(f"{holder}:{f}" for f in fs)
     # Entries naming a copy first: a bundle entry takes the versions its bundle ends up with.
+    named = {}  # (holder, file) -> the packages an entry names there
     for e in sorted(entries, key=lambda e: "bundle" in e):
         if e["holder"] not in held:
             continue
-        what = e.get("copy") or e["bundle"]
+        what = e.get("copy") or e.get("bundle") or e["lookalike"]
         missing = sorted(set(e["files"]) - held[e["holder"]])
         if missing:
             problems.append(f"{where}: {e['holder']} has no {missing[0]}, which the inlined entry for "
                             f"{what} names; requalify it")
         marked = bare[e["holder"]]
+        if "lookalike" in e:
+            for f in e["files"]:
+                named.setdefault((e["holder"], f), set()).add(e["lookalike"])
+            continue
         if "copy" in e:
             name, version = at(e["copy"])
             copies.setdefault((name, version), set()).update(f"{e['holder']}:{f}" for f in e["files"])
             for f in e["files"]:
+                named.setdefault((e["holder"], f), set()).add(name)
                 if name in marked.get(f, {}):
                     marked[f][name][1].add(version)
             continue
@@ -730,12 +781,65 @@ def inlined_copies(where, tarballs, entries, mirror=None):
                 for v in src[n][1]:
                     versions.add(v)
                     copies.setdefault((n, v), set()).add(f"{e['holder']}:{f}")
+            named.setdefault((e["holder"], f), set()).update(prints.get(f"{name}@{version}", {}).get(path, ((), ()))[1])
+    problems += unmarked_problems(where, prints, named, entries)
     for holder in sorted(bare):
         for f, names in sorted(bare[holder].items()):
             for n, (paths, versions) in sorted(names.items()):
                 if not versions:
                     problems.append(unversioned_problem(where, holder, f, n, paths))
     return copies, problems, set(held)
+
+
+def fingerprints(prints):
+    """{package: the literals of its own scripts that no other package's own scripts hold}. Its own
+    scripts are those outside a node_modules/ in its tarball that no mark, sidecar or notice says
+    hold a copy: a bundle's literals are its copies' as much as its own."""
+    own = {}
+    for holder, scripts in prints.items():
+        name = at(holder)[0]
+        for rel, (ls, marked) in scripts.items():
+            if "node_modules/" not in rel and not marked:
+                own.setdefault(name, set()).update(ls)
+    seen = {}
+    for name, ls in own.items():
+        for lit in ls:
+            seen[lit] = None if lit in seen else name
+    return {lit: name for lit, name in seen.items() if name}
+
+
+def unmarked_problems(where, prints, named, entries):
+    """The scripts that hold FP_MIN or more literals of an installed package's fingerprint while
+    nothing names that package there (#4234): no mark, sidecar or notice, and no entry. The
+    package itself, and a package its tarball ships whole under node_modules/<name>/, hold their
+    own literals. A lookalike entry whose files match no fingerprint of its package is a problem."""
+    owner_of = fingerprints(prints)
+    problems, matched = [], set()
+    for holder, scripts in sorted(prints.items()):
+        for rel, (ls, marked) in sorted(scripts.items()):
+            own = mark_owner(rel.encode())
+            own = {at(holder)[0], own[0]} if own else {at(holder)[0]}
+            hits = {}
+            for lit in ls:
+                if (n := owner_of.get(lit)) and n not in own:
+                    hits.setdefault(n, []).append(lit)
+            for n, lits in sorted(hits.items()):
+                if len(lits) < FP_MIN:
+                    continue
+                matched.add((holder, rel, n))
+                if n in marked or n in named.get((holder, rel), ()):
+                    continue
+                problems.append(f"{where}: {holder}:{rel} holds {len(lits)} string literals only {n}'s own files "
+                                f"hold (e.g. {min(lits).decode('utf-8', 'replace')!r}), but no mark, sidecar, "
+                                f"notice or entry names {n} there: an unmarked copy. Add an \"inlined\" entry naming "
+                                "its version, or a lookalike entry saying whose code they are (#4234)")
+    for e in entries:
+        if "lookalike" in e and e["holder"] in prints:
+            for f in e["files"]:
+                if (e["holder"], f, e["lookalike"]) not in matched:
+                    problems.append(f"{where}: {e['holder']}:{f} matches no fingerprint of {e['lookalike']}, so the "
+                                    "lookalike entry checks nothing there; requalify it")
+    return problems
 
 
 def unversioned_problem(where, holder, f, name, paths):
