@@ -378,20 +378,19 @@ func (k *Kernel) honeyTrip(now int64, op, plan string, keys ...key.Key) error {
 	return nil
 }
 
-// again derives b's trip from the state alone; ok only when b logged it.
-func (b ownerTrip) again(s *State) (Trip, bool) {
+// again derives b's trip and its whole entry from the state alone; the fold
+// and Rederive take only that body, byte for byte (KRN-6).
+func (b ownerTrip) again(s *State) (Trip, derived, bool) {
 	t := s.ownerTripOf(b.Op, b.Trip.Plan, b.Key)
 	if t == nil {
-		return Trip{}, false
+		return Trip{}, derived{}, false
 	}
-	x, _ := json.Marshal(t)
-	y, _ := json.Marshal(b.Trip)
-	return *t, bytes.Equal(x, y)
+	return *t, entry(TTripOwner, ownerTrip{b.Op, b.Key, *t}), true
 }
 
 // ownerTripOf is the trip of owner call op citing ky, or nil: pure over the
 // state. It pauses the honey key's own IDs and, at Extend, the held plan's
-// scope and its funding key's chain, an earlier extension's included.
+// scope and its extension's chain, which hold its funding key (Hold).
 func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 	d := &s.decoys
 	if !d.set || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
@@ -410,14 +409,13 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 		}
 	}
 	add(chain(ky)...)
-	if h, held := s.SpendHeld[plan]; held && op == OpExtend {
+	if _, held := s.SpendHeld[plan]; held && op == OpExtend {
 		if p := s.Plans[plan]; p != nil {
 			add(p.Scopes...)
 		}
 		if ext, ok := s.Extended[plan]; ok {
 			add(chain(ext)...)
 		}
-		add(h.Funding)
 	}
 	return &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespFull, Plan: plan, Scopes: scopes}
 }
@@ -530,7 +528,7 @@ func (s *State) applyTrip(e Entry) error {
 		if err != nil {
 			return err
 		}
-		if t, ok := b.again(s); ok {
+		if t, d, ok := b.again(s); ok && bytes.Equal(d.body, e.Body) {
 			s.addTrip(t, e)
 		}
 	case TTripResumed:

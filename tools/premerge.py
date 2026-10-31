@@ -102,6 +102,35 @@ _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 # A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
 _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
+_MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
+# The lines a record block runs on under its Record line; a fenced block is quoted text (#4261).
+_HEADER = re.compile(r"<!-- record: \S+ -->$|\s*$")
+_FENCE = re.compile(r"(`{3,}|~{3,})[^`]*$")
+
+
+def _record_block(body):
+    """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
+
+    The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
+    under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
+    neither hide the review's own record nor lend it one (#4261). Otherwise `placed` is false and the whole comment is
+    returned."""
+    lines, fence = [], None
+    for line in body.split("\n"):  # one pass: a fence left open runs to the end, as Markdown renders it
+        if fence is None and _FENCE.match(line):
+            fence = _FENCE.match(line).group(1)
+        elif fence is None:
+            lines.append(line)
+        elif line.rstrip(" \t") == fence:
+            fence = None
+    at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
+    if at is None:
+        return body, False
+    end = at + 1
+    while end < len(lines) and _HEADER.match(lines[end]):
+        end += 1
+    own = "\n".join(lines[at:end])
+    return (own, True) if _MARKER.search(own) else (body, False)
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -121,22 +150,34 @@ def verdict(comments, pr, security=False, lens=None):
 
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
+    An accept's markers and Record line count only in the comment's record block, and an accept whose marker is only
+    outside it reads as `unparsed` (`_record_block`, #4261); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
-        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
+        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+            continue
+        own, placed = _record_block(body)
+        # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
+        # quoted or misplaced marker or record can only make it count, which fails closed.
+        accept = first.split(":", 1)[-1].strip().lower() == "accept"
+        read = own if accept else body
+        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", read, re.M)
         if lens:
-            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", body, re.M)
+            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", read, re.M)
         else:
-            marked = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not rec:
-            if not _RECORD.search(body):
+            marked = _SECURITY.search(read) if security else _L3.search(read)
+            if security and placed and _L3.search(own):
+                marked = None
+        misplaced = accept and not placed
+        if marked and (misplaced or not rec):
+            if misplaced or not _RECORD.search(read):
                 found = ("unparsed", None)
-        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
+        elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
