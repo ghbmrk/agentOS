@@ -19,10 +19,16 @@
 // change that names it (slice r, decision 10) and hands it to the
 // enforcer's store through Secrets, which can only admit, never read.
 //
+// It also serves the enrolment and recovery screens (slice c, package
+// enrol): the first passkey by the case code, a replacement by the
+// recovery code after its wait, a factory reset, and the new passkey's
+// keeping of the policy. Until a passkey is enrolled, or once the one it
+// was built for is no longer in force, it serves only those screens.
+//
 // It is enforcer code: it imports the standard library, broker/kernel/key,
-// broker/enforcer/policy, broker/enforcer/action and
-// broker/enforcer/pairseal only (broker/daemon/arc2_test.go). Its
-// assumptions are in ASSUMPTIONS.md.
+// broker/enforcer/policy, broker/enforcer/action, broker/enforcer/pairseal,
+// broker/enforcer/enrol and rsc.io/qr only (broker/daemon/arc2_test.go).
+// Its assumptions are in ASSUMPTIONS.md.
 package page
 
 import (
@@ -38,6 +44,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
+	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 )
@@ -75,7 +82,17 @@ type Config struct {
 	// https://Name and the owner's passkey's RP ID is Name (NET-4).
 	Name string
 	// Owner is the enrolled owner's passkey, an ES256 credential on Name.
+	// With Enrol set it is Enrol.Owner() when the daemon built the page,
+	// and the zero key before any passkey is enrolled; the page takes a tap
+	// only while it is still the one in force.
 	Owner key.PublicKey
+	// Enrol is the enforcer's enrolment state (slice c); nil serves no
+	// enrolment screens.
+	Enrol *enrol.Book
+	// CA is the enforcer's root certificate (Cert.Root, DER) and CoreCA the
+	// core's page authority (CH-9), served for the phone to install at
+	// enrolment; nil serves none.
+	CA, CoreCA []byte
 	// Addrs are the enforcer's own addresses on the Owner network and the
 	// wired admin port: the only ones the page listens on.
 	Addrs []netip.AddrPort
@@ -128,11 +145,16 @@ var files embed.FS
 
 // New checks cfg and returns the page.
 func New(cfg Config) (*Server, error) {
-	if !dnsName(cfg.Name) || cfg.Owner.Alg() != key.AlgES256 || cfg.Policy == nil {
+	if !dnsName(cfg.Name) || cfg.Policy == nil {
 		return nil, ErrConfig
 	}
-	if want, err := key.ES256(cfg.Name, cfg.Owner.Bytes()); err != nil || want != cfg.Owner {
-		return nil, ErrConfig // the passkey must be bound to the enforcer's own name
+	if cfg.Owner.Valid() || cfg.Enrol == nil {
+		if cfg.Owner.Alg() != key.AlgES256 {
+			return nil, ErrConfig
+		}
+		if want, err := key.ES256(cfg.Name, cfg.Owner.Bytes()); err != nil || want != cfg.Owner {
+			return nil, ErrConfig // the passkey must be bound to the enforcer's own name
+		}
 	}
 	if len(cfg.Addrs) == 0 || len(cfg.Allow) == 0 || cfg.Zone == nil || (cfg.Act != nil && cfg.Log == nil) {
 		return nil, ErrConfig
@@ -159,7 +181,7 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s.tmpl = t
-	if cfg.Act != nil {
+	if cfg.Act != nil && cfg.Owner.Valid() {
 		if s.book, err = action.NewBook(cfg.Owner, cfg.Act, cfg.ActTimeout); err != nil {
 			return nil, err
 		}
@@ -266,6 +288,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cross-origin", http.StatusForbidden)
 		return
 	}
+	if s.cfg.Enrol != nil && s.enrolRoute(w, r) {
+		return
+	}
+	if !s.live() {
+		if r.Method == http.MethodGet && r.URL.Path == "/" && s.cfg.Enrol != nil {
+			http.Redirect(w, r, "/enrol", http.StatusSeeOther)
+		} else if r.Method == http.MethodGet && (r.URL.Path == "/page.js" || r.URL.Path == "/page.css") {
+			s.static(w, r)
+		} else {
+			http.Error(w, errEnrolFirst.Error(), http.StatusForbidden)
+		}
+		return
+	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/":
 		s.home(w, r)
@@ -294,6 +329,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// enrolRoute serves the enrolment screens, whether or not a passkey is in
+// force, and reports whether r was one of them.
+func (s *Server) enrolRoute(w http.ResponseWriter, r *http.Request) bool {
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/enrol":
+		s.enrolScreen(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == "/enrol/enforcer.crt":
+		s.certificate(w, s.cfg.CA)
+	case r.Method == http.MethodGet && r.URL.Path == "/enrol/core.crt":
+		s.certificate(w, s.cfg.CoreCA)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/enrol/"):
+		if !s.sameOrigin(r) {
+			http.Error(w, "cross-origin", http.StatusForbidden)
+			return true
+		}
+		switch r.URL.Path {
+		case "/enrol/begin":
+			s.enrolBegin(w, r)
+		case "/enrol/finish":
+			s.enrolFinish(w, r)
+		case "/enrol/reset":
+			s.enrolReset(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // headers refuse framing by any origin, agentOS's included (NET-4), and

@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
 	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -150,14 +151,7 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
 	s.cfg.Lock.Unlock()
-	floor := max(cur.Version, s.last)
-	for _, p := range pend {
-		if d, err := policy.Decode(p.Doc); err == nil {
-			floor = max(floor, d.Version)
-		}
-	}
-	next.Version = max(floor+1, uint64(max(s.nowMS(), 0)))
-	s.last = next.Version
+	next.Version = s.version(cur, pend)
 	base, err := policy.Hash(cur)
 	if err != nil {
 		return nil, nil, err
@@ -183,6 +177,20 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, errMalformed
 	}
 	return &challenge{kind: "propose", prop: prop, class: class, base: base, secret: ref, msg: key.RootMsg(root)}, lines, nil
+}
+
+// version picks the next version a challenge signs: above the policy in
+// force, the loosening waiting and the last version the page drew, and at
+// least the clock's milliseconds (ENF-b-2). s.mu is held.
+func (s *Server) version(cur policy.Document, pend []policy.Pending) uint64 {
+	floor := max(cur.Version, s.last)
+	for _, p := range pend {
+		if d, err := policy.Decode(p.Doc); err == nil {
+			floor = max(floor, d.Version)
+		}
+	}
+	s.last = max(floor+1, uint64(max(s.nowMS(), 0)))
+	return s.last
 }
 
 // hexHash is a SHA-256 in lowercase hex, as pairseal.HashHex writes it.
@@ -352,6 +360,20 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusNotFound, errMalformed)
 			return
 		}
+	case ActCancelRecovery:
+		if s.cfg.Enrol == nil || req.Target != "" {
+			fail(w, http.StatusNotFound, errMalformed)
+			return
+		}
+		if _, ok := s.cfg.Enrol.Recovery(); !ok {
+			fail(w, http.StatusNotFound, enrol.ErrPhase)
+			return
+		}
+	case ActKeep:
+		if s.cfg.Enrol == nil || req.Target != "" {
+			fail(w, http.StatusNotFound, errMalformed)
+			return
+		}
 	default:
 		fail(w, http.StatusBadRequest, errMalformed)
 		return
@@ -359,12 +381,25 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := &challenge{kind: req.Action, target: req.Target}
+	if req.Action == ActKeep {
+		s.cfg.Lock.Lock()
+		cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
+		s.cfg.Lock.Unlock()
+		p, root, err := s.cfg.Enrol.KeepProposal(s.version(cur, pend))
+		if err != nil {
+			fail(w, http.StatusConflict, plainErr(err))
+			return
+		}
+		c.prop, c.msg = p, key.RootMsg(root)
+	}
 	id, err := s.put(c)
 	if err != nil {
 		fail(w, http.StatusTooManyRequests, err)
 		return
 	}
-	c.msg = actMsg(req.Action, req.Target, id)
+	if c.msg == nil {
+		c.msg = actMsg(req.Action, req.Target, id)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": id, "challenge": chal(c.msg), "rp_id": s.cfg.Name})
 }
 
@@ -394,11 +429,16 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusGone, err)
 		return
 	}
-	if _, err := s.signature(a.assertion, c.msg); err != nil {
+	sig, err := s.signature(a.assertion, c.msg)
+	if err != nil {
 		fail(w, http.StatusForbidden, err)
 		return
 	}
 	switch c.kind {
+	case ActKeep:
+		err = s.cfg.Enrol.Keep(c.prop, sig)
+	case ActCancelRecovery:
+		err = s.cfg.Enrol.Cancel()
 	case ActCancel:
 		s.cfg.Lock.Lock()
 		err = s.cfg.Policy.Cancel(c.target)
