@@ -592,3 +592,64 @@ func countKind(ks []alert.Kind, want alert.Kind) int {
 	}
 	return n
 }
+
+// The second challenges' bounds: at most action.MaxLive wait at once, one
+// expired at exactly its window's end no longer counts and is gone, and a
+// keypad code is 4 to 12 digits. An alert the log refuses is logged.
+func TestSecondAndCodeBounds(t *testing.T) {
+	r := newRig(t, at(3, 0))
+	var first locks.Second
+	for i := 0; i < action.MaxLive; i++ {
+		s, err := r.gate.Second(r.doc, "front", action.Unlock)
+		if err != nil {
+			t.Fatalf("challenge %d: %v", i, err)
+		}
+		if i == 0 {
+			first = s
+		}
+	}
+	if _, err := r.gate.Second(r.doc, "front", action.Unlock); !errors.Is(err, locks.ErrLimited) {
+		t.Errorf("challenge %d: %v, want ErrLimited", action.MaxLive+1, err)
+	}
+	r.clock.add(action.Window)
+	if err := r.gate.Confirm(first.ID, r.phone.sign(first.Msg)); !errors.Is(err, locks.ErrGone) {
+		t.Errorf("a second assertion at its expiry: %v", err)
+	}
+	if _, err := r.gate.Second(r.doc, "front", action.Unlock); err != nil {
+		t.Errorf("expired challenges still count: %v", err)
+	}
+	// A confirmed second assertion is spent at exactly its expiry.
+	s, _ := r.gate.Second(r.doc, "front", action.Unlock)
+	if err := r.gate.Confirm(s.ID, r.phone.sign(s.Msg)); err != nil {
+		t.Fatal(err)
+	}
+	r.clock.add(action.Window - time.Millisecond)
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Errorf("a second assertion a millisecond before its expiry: %v", err)
+	}
+
+	for pin, want := range map[string]bool{"123": false, "1234": true, "123456789012": true, "1234567890123": false, "12a4": false} {
+		r := newRig(t, at(9, 30))
+		r.doc.Standing = []policy.StandingRule{{ID: "x", Device: "front", Action: locks.ActionCode, FromMS: at(9, 0).UnixMilli(), ToMS: at(10, 0).UnixMilli()}}
+		gate, err := locks.New(locks.Config{
+			Owner: r.phone.public(), Driver: r.radio, Alerts: r.alerts, Zone: zone, Now: r.clock.Now, Log: func(string) {},
+			Codes: func(string, string) ([]byte, error) { return []byte(pin), nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		gate.Tick(r.doc)
+		if got := len(r.radio.codesOn("front")) == 1; got != want {
+			t.Errorf("a %d-character code %q set: %v, want %v", len(pin), pin, got, want)
+		}
+	}
+
+	r = newRig(t, at(10, 0))
+	r.alerts.fail = errors.New("journal full")
+	if err := r.tap("front", action.Unlock); err != nil {
+		t.Fatal(err)
+	}
+	if !r.logged("not raised") {
+		t.Error("an alert the log refused was not logged")
+	}
+}

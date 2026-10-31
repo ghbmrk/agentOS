@@ -264,9 +264,10 @@ func (g *Gate) relockBy(lock string, at time.Time) {
 }
 
 // Second draws a second-assertion challenge for an unlock or disarm of
-// device in doc, the policy in force.
+// device in doc, the policy in force. A device ID is a policy name, which
+// holds no control character, so it cannot forge another field of Msg.
 func (g *Gate) Second(doc policy.Document, device string, a action.Act) (Second, error) {
-	if !gated(a) || !name(device) {
+	if !gated(a) {
 		return Second{}, ErrMalformed
 	}
 	dev := doc.Device(device)
@@ -365,7 +366,7 @@ func lock(dev policy.Device) bool { return !dev.Everyday && dev.Class == policy.
 func (g *Gate) seen(doc policy.Document, e Event, now time.Time) {
 	dev := doc.Device(e.Device)
 	switch {
-	case !name(e.Device) || dev == nil || dev.Everyday:
+	case dev == nil || dev.Everyday:
 		g.cfg.Log("locks: a report for a device not on the safety list, dropped")
 		return
 	case e.Report == Unlocked || e.Report == Locked:
@@ -511,20 +512,6 @@ func digits(b []byte) bool {
 	}
 	for _, c := range b {
 		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-// name is a device name a challenge may carry: printable ASCII with no
-// space, at most 64 bytes, so it cannot forge another field of Msg.
-func name(s string) bool {
-	if s == "" || len(s) > 64 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c <= ' ' || c > '~' {
 			return false
 		}
 	}

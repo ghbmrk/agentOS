@@ -206,11 +206,15 @@ func (r *radio) codesOn(device string) []locks.Code {
 type alerts struct {
 	mu    sync.Mutex
 	kinds []alert.Kind
+	fail  error
 }
 
 func (a *alerts) Raise(k alert.Kind, device string) (alert.Record, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.fail != nil {
+		return alert.Record{}, a.fail
+	}
 	if _, err := alert.Words(k, device); err != nil {
 		return alert.Record{}, err
 	}
