@@ -179,8 +179,9 @@ func TestNetnsSegments(t *testing.T) {
 
 // TestCopiedMACGetsOwnList: a device that joins on its own VLAN with
 // another device's hardware address gets its own
-// (here empty) allow list, not the other device's. Catches identity by
-// hardware address.
+// (here empty) allow list, not the other device's, and keeps what its own
+// policy allows, so the silent probes cannot pass because the copy cut
+// the impostor off. Catches identity by hardware address.
 func TestCopiedMACGetsOwnList(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -202,6 +203,11 @@ func TestCopiedMACGetsOwnList(t *testing.T) {
 		probe{from: "102", addr: netAllow, port: 80, why: "the copied MAC's allow list"},
 		probe{from: "102", addr: devAddr(103), port: 80, why: "the copied device itself"},
 		probe{from: "103", addr: netAllow, port: 80, want: connected, why: "the real device keeps its list"},
+		// Controls: the impostor's own reach still works with the copied
+		// address, out (its DNS, which the enforcer answers) and in (the
+		// core to its control port).
+		probe{from: "102", addr: netAllow, port: 53, want: connected, why: "control: the impostor's own DNS"},
+		probe{from: "core", addr: devAddr(102), port: 80, want: connected, why: "control: the core to the impostor's control port"},
 	)
 	text, _ := Compile(fixturePolicy(), fixtureLayout())
 	for _, s := range []string{"ether", "saddr 10.", "saddr fd"} {
