@@ -4,6 +4,7 @@ workflow that runs it on pull requests (REV-CHK-mut, #3899).
 Gremlins itself is not run: the gate reads its JSON, so fixtures stand in for it.
 """
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -116,6 +117,62 @@ class Gate(unittest.TestCase):
                                 "--git", "HEAD~1"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:3 ARITHMETIC_BASE survives", r.stdout)
+
+    def test_gate_reads_a_real_diff_whatever_the_git_prefix_config(self):
+        # #4115: prefix, colour and external-diff git config must not drop the PR's added lines.
+        for key, value in (("diff.noprefix", "true"), ("diff.mnemonicPrefix", "true"), ("diff.dstPrefix", "w/"),
+                           ("color.ui", "always"), ("diff.external", "true")):
+            with self.subTest(key), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+                shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+                pkg = pathlib.Path(d) / "broker" / "hint"
+                pkg.mkdir(parents=True)
+                (pkg / "hint.go").write_text("package hint\n")
+                git("init", "-q")
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+                (pkg / "hint.go").write_text("package hint\nvar a = 1 + 1\n")
+                (pkg / "hint_test.go").write_text("package hint\n// REQ: CRED-1\n")
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+                res = pathlib.Path(d) / "res"
+                res.mkdir()
+                (res / "hint.json").write_text(json.dumps({"files": [{"file_name": "hint.go", "mutations": [
+                    {"status": "LIVED", "line": 2, "type": "ARITHMETIC_BASE"}]}], "mutants_lived": 1}))
+                env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": key, "GIT_CONFIG_VALUE_0": value}
+                r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "gate",
+                                    str(res), "--git", "HEAD~1"], capture_output=True, text=True, env=env)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("broker/hint/hint.go:2 ARITHMETIC_BASE survives", r.stdout)
+
+    def test_gate_counts_a_copied_file_as_added_whatever_diff_renames_says(self):
+        # #4115: with diff.renames=copies a new file copied from another shows only the lines that differ.
+        for value in ("true", "copies"):
+            with self.subTest(value), tempfile.TemporaryDirectory() as d:
+                git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+                shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+                pkg = pathlib.Path(d) / "broker" / "hint"
+                pkg.mkdir(parents=True)
+                body = "package hint\n" + "".join(f"var v{i} = {i}\n" for i in range(20))
+                (pkg / "a.go").write_text(body)
+                git("init", "-q")
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+                (pkg / "a.go").write_text(body + "var other = 2\n")  # git copies only from a modified file
+                (pkg / "b.go").write_text(body + "var extra = 1\n")
+                (pkg / "hint_test.go").write_text("package hint\n// REQ: CRED-1\n")
+                git("add", "-A")
+                git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+                res = pathlib.Path(d) / "res"
+                res.mkdir()
+                (res / "hint.json").write_text(json.dumps({"files": [{"file_name": "b.go", "mutations": [
+                    {"status": "LIVED", "line": 5, "type": "ARITHMETIC_BASE"}]}], "mutants_lived": 1}))
+                env = {**os.environ, "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "diff.renames",
+                       "GIT_CONFIG_VALUE_0": value}
+                r = subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), "gate",
+                                    str(res), "--git", "HEAD~1"], capture_output=True, text=True, env=env)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("broker/hint/b.go:5 ARITHMETIC_BASE survives", r.stdout)
 
     def test_survivors_reads_lived_only_and_nested_package_names(self):
         with tempfile.TemporaryDirectory() as d:

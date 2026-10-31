@@ -43,6 +43,27 @@ func (l Loader) Load(ctx context.Context, ruleset string) error {
 	return nil
 }
 
+// List is the table as nft's JSON (`nft -j list table inet <table>`): its
+// counters and its sets with their elements' counters, which slice i's
+// traffic summaries read (broker/enforcer/traffic). The table name must be
+// a plain identifier.
+func (l Loader) List(ctx context.Context, table string) ([]byte, error) {
+	if !strings.HasPrefix(l.Bin, "/") {
+		return nil, fmt.Errorf("load: nft path %q is not absolute", l.Bin)
+	}
+	if table == "" || strings.TrimLeft(table, "abcdefghijklmnopqrstuvwxyz_") != "" {
+		return nil, fmt.Errorf("load: table name %q", table)
+	}
+	cmd := exec.CommandContext(ctx, l.Bin, "-j", "list", "table", "inet", table)
+	cmd.Env = []string{}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("load: listing %s: %v: %s", table, err, firstLine(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
 func firstLine(s string) string {
 	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
 	if len(s) > 200 {
