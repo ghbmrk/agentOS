@@ -8,21 +8,26 @@ package privfile
 // removal or read (#3282, #3382, #3624). The root side is derived, not
 // listed: every binary a shipped systemd unit starts with no User= or
 // DynamicUser= (or on an Exec line with a + or ! prefix), every binary a
-// udev rule file under image/ or broker/ runs (udev runs RUN, PROGRAM and
-// IMPORT{program} as root, #3950; a rule may run only a path
-// udev_programs.txt lists, #4257), and the module's packages those binaries
-// link. Each package is type-checked, and in those packages each identifier
-// that resolves to a path-based os function that follows links (pathOps)
-// fails, whatever name spells it (#4256), unless it is os.OpenFile with the
-// real O_NOFOLLOW, goes through privfile, or has an allow line in
-// pathops_allow.txt naming the file, the function and the call, with a
-// reason a review checks.
+// file under image/ or broker/ makes root run (runKinds: a udev rule's RUN,
+// PROGRAM or IMPORT{program}, #3950; a modprobe.d install or remove command,
+// #4279; a sysctl.d usermode helper), each only a path root_programs.txt
+// lists (#4257), and the module's packages those binaries link. A udev rule
+// sets no property that makes systemd start a unit (#4276), and no file
+// ships in a directory root runs whole. Each package is type-checked, and in
+// those packages each identifier that resolves to a path-based os or
+// io/ioutil function that follows links (pathOps, #4272) fails, whatever
+// name spells it (#4256), unless it is os.OpenFile with the real O_NOFOLLOW,
+// goes through privfile, or has an allow line in pathops_allow.txt naming
+// the file, the function and the call, with a reason a review checks.
 //
 // Bound: an allow line's reason is held by review, as is a link planted
 // through a path the reason deems safe (a parent directory another uid can
 // write). Calls outside pathOps (os.Lstat, os.ReadDir, os.Symlink, os.Chtimes,
-// os.Truncate, syscall and unix path calls), a binary that a script rather
-// than a unit or udev rule starts, a binary built by a line
+// os.Truncate, os.CreateTemp, os.MkdirTemp, syscall and unix path calls), a
+// binary that a script rather than a unit or runKinds file starts (a listed
+// program's reason included), the properties a listed IMPORT{program} or a
+// udev builtin sets, a modprobe.d or sysctl.d file kept outside a directory
+// of that name and installed by a script, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
 // operations of non-root host processes are outside the check.
@@ -39,6 +44,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -46,11 +52,39 @@ import (
 	"testing"
 )
 
-// pathOps are the path-based os calls the brief names (briefs/REV-CHK.md).
-var pathOps = map[string]bool{
-	"Open": true, "OpenFile": true, "Create": true, "ReadFile": true, "WriteFile": true,
-	"Remove": true, "RemoveAll": true, "Rename": true, "Chmod": true, "Chown": true,
-	"Mkdir": true, "MkdirAll": true, "Stat": true, "Link": true,
+// pathOps are, by import path, the path-based calls that follow links: the
+// os calls the brief names (briefs/REV-CHK.md), and io/ioutil's path
+// functions, each a wrapper of an os call that follows links the same way
+// (#4272). A use and an allow line spell one as the package's last path
+// element, a dot and the name: os.Remove, ioutil.WriteFile.
+var pathOps = map[string]map[string]bool{
+	"os": {
+		"Open": true, "OpenFile": true, "Create": true, "ReadFile": true, "WriteFile": true,
+		"Remove": true, "RemoveAll": true, "Rename": true, "Chmod": true, "Chown": true,
+		"Mkdir": true, "MkdirAll": true, "Stat": true, "Link": true,
+	},
+	"io/ioutil": {"ReadFile": true, "WriteFile": true, "ReadDir": true, "TempFile": true, "TempDir": true},
+}
+
+// pathOpName is how a use spells a package-level function, and whether the
+// function is in pathOps (a method, such as one of *os.File, never is).
+func pathOpName(obj types.Object) (string, bool) {
+	f, ok := obj.(*types.Func)
+	if !ok || f.Pkg() == nil || f.Type().(*types.Signature).Recv() != nil || !pathOps[f.Pkg().Path()][f.Name()] {
+		return "", false
+	}
+	return path.Base(f.Pkg().Path()) + "." + f.Name(), true
+}
+
+// isPathOpName reports whether an allow line's call names a pathOps entry.
+func isPathOpName(name string) bool {
+	q, fn, ok := strings.Cut(name, ".")
+	for pkg, ops := range pathOps {
+		if ok && path.Base(pkg) == q && ops[fn] {
+			return true
+		}
+	}
+	return false
 }
 
 const allowFile = "pathops_allow.txt"
@@ -68,29 +102,35 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 		// Each source compiles: the lint type-checks the package and a type
 		// error fails it, so a refusal here is the use's own.
 		args := map[string]string{
-			"Open": `""`, "OpenFile": `"", os.O_RDONLY, 0`, "Create": `""`, "ReadFile": `""`, "WriteFile": `"", nil, 0`,
-			"Remove": `""`, "RemoveAll": `""`, "Rename": `"", ""`, "Chmod": `"", 0`, "Chown": `"", 0, 0`,
-			"Mkdir": `"", 0`, "MkdirAll": `"", 0`, "Stat": `""`, "Link": `"", ""`,
+			"os.Open": `""`, "os.OpenFile": `"", os.O_RDONLY, 0`, "os.Create": `""`, "os.ReadFile": `""`, "os.WriteFile": `"", nil, 0`,
+			"os.Remove": `""`, "os.RemoveAll": `""`, "os.Rename": `"", ""`, "os.Chmod": `"", 0`, "os.Chown": `"", 0, 0`,
+			"os.Mkdir": `"", 0`, "os.MkdirAll": `"", 0`, "os.Stat": `""`, "os.Link": `"", ""`,
+			"ioutil.ReadFile": `""`, "ioutil.WriteFile": `"", nil, 0`, "ioutil.ReadDir": `""`, "ioutil.TempFile": `"", ""`, "ioutil.TempDir": `"", ""`,
 		}
-		for op := range pathOps {
-			if args[op] == "" {
-				t.Fatalf("no call arguments for os.%s", op)
-			}
-			// A value and a call take the same path (an identifier that
-			// resolves to the function), so one value form is enough.
-			for _, form := range []string{"call", "value", "alias call", "dot import"} {
-				src := "package side\n\nimport \"os\"\n\nvar _ = os." + op + "\n"
-				switch form {
-				case "call":
-					src = "package side\n\nimport \"os\"\n\nfunc F() { os." + op + "(" + args[op] + ") }\n"
-				case "alias call":
-					src = "package side\n\nimport o \"os\"\n\nfunc F() { o." + op + "(" + strings.ReplaceAll(args[op], "os.", "o.") + ") }\n"
-				case "dot import":
-					src = "package side\n\nimport . \"os\"\n\nfunc F() { " + op + "(" + strings.ReplaceAll(args[op], "os.", "") + ") }\n"
+		for pkg, ops := range pathOps {
+			q := path.Base(pkg)
+			for op := range ops {
+				name := q + "." + op
+				a := args[name]
+				if a == "" {
+					t.Fatalf("no call arguments for %s", name)
 				}
-				problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "")
-				if len(problems) != 1 || !strings.Contains(problems[0], "os."+op) {
-					t.Errorf("os.%s as a %s: got %q, want one problem", op, form, problems)
+				// A value and a call take the same path (an identifier that
+				// resolves to the function), so one value form is enough.
+				for _, form := range []string{"call", "value", "alias call", "dot import"} {
+					src := "package side\n\nimport \"" + pkg + "\"\n\nvar _ = " + name + "\n"
+					switch form {
+					case "call":
+						src = "package side\n\nimport \"" + pkg + "\"\n\nfunc F() { " + name + "(" + a + ") }\n"
+					case "alias call":
+						src = "package side\n\nimport o \"" + pkg + "\"\n\nfunc F() { o." + op + "(" + strings.ReplaceAll(a, q+".", "o.") + ") }\n"
+					case "dot import":
+						src = "package side\n\nimport . \"" + pkg + "\"\n\nfunc F() { " + op + "(" + strings.ReplaceAll(a, q+".", "") + ") }\n"
+					}
+					problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "")
+					if len(problems) != 1 || !strings.Contains(problems[0], " calls "+name+" ") {
+						t.Errorf("%s as a %s: got %q, want one problem", name, form, problems)
+					}
 				}
 			}
 		}
@@ -139,6 +179,19 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			}
 		}
 	})
+	t.Run("an io/ioutil path call is its own, allowed by its own line", func(t *testing.T) {
+		files := map[string]string{"broker/side/side.go": "package side\n\nimport \"io/ioutil\"\n\nfunc Save(p string) error { return ioutil.WriteFile(p, nil, 0o600) }\n\nfunc Read(p string) { ioutil.ReadAll(nil); ioutil.NopCloser(nil) }\n"}
+		problems := lintFiles(t, files, "")
+		if len(problems) != 1 || !strings.Contains(problems[0], "Save calls ioutil.WriteFile") {
+			t.Fatalf("got %q, want only ioutil.WriteFile refused (ReadAll and NopCloser take no path)", problems)
+		}
+		if problems := lintFiles(t, files, "allow broker/side/side.go Save os.WriteFile reason\n"); len(problems) != 2 {
+			t.Fatalf("an os.WriteFile line: got %q, want the use refused and the line stale", problems)
+		}
+		if problems := lintFiles(t, files, "allow broker/side/side.go Save ioutil.WriteFile reason\n"); len(problems) != 0 {
+			t.Fatalf("allowed: got %q, want none", problems)
+		}
+	})
 	t.Run("a dot import of os is resolved", func(t *testing.T) {
 		src := "package side\n\nimport . \"os\"\n\nfunc F(p string) { Remove(p) }\n"
 		problems := lintFiles(t, map[string]string{"broker/side/side.go": src}, "")
@@ -149,14 +202,31 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			t.Fatalf("allowed: got %q, want none", problems)
 		}
 	})
-	t.Run("a type error fails the lint", func(t *testing.T) {
+	t.Run("a package that does not build fails the lint", func(t *testing.T) {
+		// go list -export compiles each package, so it stops here first.
 		bins := []string{"./cmd/agentos-side"}
 		root := fakeRepo(t, map[string]string{
 			"broker/side/side.go":             "package side\n\nimport \"os\"\n\nfunc F() { os.Remove() }\n",
 			"broker/cmd/agentos-side/main.go": "package main\n\nimport _ \"example.test/broker/side\"\n\nfunc main() {}\n",
 		})
-		if _, err := rootSideUses(root, bins); err == nil {
-			t.Fatal("a package that does not type-check was linted")
+		if _, err := rootSideUses(root, bins); err == nil || !strings.Contains(err.Error(), "go list (") {
+			t.Fatalf("a package that does not build: got %v, want go list's error", err)
+		}
+	})
+	t.Run("a type error fails the type check", func(t *testing.T) {
+		// checkTypes reads again what go list compiled; a source the gc
+		// compiler passes and go/types refuses would reach this branch the
+		// same way (#4280 1).
+		for src, bad := range map[string]bool{"package side\n\nvar X int = \"s\"\n": true, "package side\n\nvar X int = 1\n": false} {
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "side.go", src, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = checkTypes(fset, nil, "example.test/broker/side", "amd64", []*ast.File{f})
+			if bad != (err != nil) || bad && !strings.Contains(err.Error(), "type-checking example.test/broker/side (amd64)") {
+				t.Errorf("%q: got %v, want an error %v", src, err, bad)
+			}
 		}
 	})
 	t.Run("through privfile passes", func(t *testing.T) {
@@ -290,7 +360,7 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 		"broker/side/side.go":              "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
 		"broker/cmd/agentos-side/main.go":  "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
 		"image/mkosi/agentos-side.service": "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
-		rule:                               "ACTION==\"remove\", GOTO=\"end\"\nRUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\nENV{X}=\"agentos-side\"\nOWNER=\"agentos-side\", GROUP:=\"agentos-side\", MODE=\"0600\"\n# RUN+=\"/usr/lib/agentos/agentos-side\"\n  # RUN+=\"/bin/sh -c 'agentos-side'\"\nLABEL=\"end\"\n",
+		rule:                               "ACTION==\"remove\", GOTO=\"end\"\nENV{SYSTEMD_READY}=\"0\", ENV{SYSTEMD_WANTS}==\"x\", IMPORT{parent}=\"AGENTOS_DISK\", IMPORT{db}=\"ID_X\"\nRUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\nENV{X}=\"agentos-side\"\nOWNER=\"agentos-side\", GROUP:=\"agentos-side\", MODE=\"0600\"\n# RUN+=\"/usr/lib/agentos/agentos-side\"\n  # RUN+=\"/bin/sh -c 'agentos-side'\"\nLABEL=\"end\"\n",
 		"broker/side/udev/README":          "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
 		programsFile:                       "# synthetic\n/usr/lib/agentos/host-disk-unlink a script\n/usr/lib/agentos/agentos-side the binary under test\n",
 	}
@@ -302,7 +372,7 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 	base := clone(files)
 	base[programsFile] = "/usr/lib/agentos/host-disk-unlink a script\n"
 	if bins, err := set(t, base); err != nil || len(bins) != 0 {
-		t.Fatalf("a rule running only another program, naming the binary in an ENV value, an account or a comment, and a file that is no .rules: got %q, %v, want none", bins, err)
+		t.Fatalf("a rule running only another program, naming the binary in an ENV value, an account or a comment, setting SYSTEMD_READY, matching SYSTEMD_WANTS, importing plain names, and a file that is no .rules: got %q, %v, want none", bins, err)
 	}
 	for name, text := range map[string]string{
 		"RUN+=":                    "ACTION==\"add\", RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
@@ -328,40 +398,51 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 			}
 		})
 	}
-	for name, text := range map[string]string{
-		"a wrapper's word":            "RUN+=\"/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side\"\n",
-		"a bare name udev resolves":   "RUN+=\"agentos-side %k\"\n",
-		"a name an ENV value holds":   "ENV{P}=\"/usr/lib/agentos/agentos-side\"\nRUN+=\"$env{P}\"\n",
-		"a $ substitution in an arg":  "RUN+=\"/usr/lib/agentos/agentos-side $env{P}\"\n",
-		"a %c in the program":         "RUN+=\"/usr/lib/agentos/%c\"\n",
-		"a continued line":            "ACTION==\"add\", \\\n  RUN+=\"/usr/lib/agentos/agentos-side\"\n",
-		"a comment ending in \\":      "# old rule \\\nRUN+=\"/usr/lib/agentos/agentos-side\"\n",
-		"sh -c":                       "RUN+=\"/bin/sh -c true;/usr/lib/agentos/agentos-side\"\n",
-		"sh -c with quotes":           "RUN+=\"/bin/sh -c 'agentos-side'\"\n",
-		"a quoted arg":                "RUN+=\"/usr/lib/agentos/agentos-side 'a b'\"\n",
-		"a shell backslash escape":    "RUN+=\"/usr/lib/agentos/host-disk-unlink agentos\\-side\"\n",
-		"udev \\x escapes":            "RUN+=e\"/usr/lib/agentos/agentos\\x2dside\"\n",
-		"udev octal escapes":          "RUN+=e\"/usr/lib/agentos/\\141gentos-side\"\n",
-		"an e\"...\" value":           "RUN+=e\"/usr/lib/agentos/agentos-side\"\n",
-		"an escaped quote":            "RUN+=\"/usr/lib/agentos/host-disk-unlink \\\"x\"\n",
-		"a single-quoted value":       "RUN+='/usr/lib/agentos/agentos-side'\n",
-		"an unlisted path":            "RUN+=\"/usr/lib/agentos/agentos-other\"\n",
-		"a key udev(7) lacks":         "RUNX+=\"/usr/lib/agentos/agentos-side\"\n",
-		"a lower-case key":            "run+=\"/usr/lib/agentos/agentos-side\"\n",
-		"RUN{other}":                  "RUN{prog}+=\"/usr/lib/agentos/agentos-side\"\n",
-		"IMPORT{other}":               "IMPORT{programs}=\"/usr/lib/agentos/agentos-side\"\n",
-		"PROGRAM{x}":                  "PROGRAM{x}==\"/usr/lib/agentos/agentos-side\"\n",
-		"text after a value":          "RUN+=\"/usr/lib/agentos/agentos-side\" x\n",
-		"an unclosed value":           "RUN+=\"/usr/lib/agentos/agentos-side\n",
-		"a CR that udev splits at":    "# old\rRUN+=\"/usr/lib/agentos/agentos-side\"\n",
-		"a NUL that udev splits at":   "# old\x00RUN+=\"/usr/lib/agentos/agentos-side\"\n",
-		"a byte past ASCII":           "RUN+=\"/usr/lib/agentos/agentos\u2010side\"\n",
-		"a rule under image, refused": "RUN+=\"/bin/sh -c x\"\n",
-		"a core_pattern sysctl":       "SYSCTL{kernel.core_pattern}=\"|/usr/lib/agentos/agentos-side %p\"\n",
-		"a modprobe sysctl":           "SYSCTL{kernel.modprobe}=\"/usr/lib/agentos/agentos-side\"\n",
-		"an ATTR path":                "ATTR{../../kernel/uevent_helper}=\"/usr/lib/agentos/agentos-side\"\n",
-		"an ATTR [subsystem/device]":  "ATTR{[module/x]parameters}=\"y\"\n",
-		"an ATTRS path":               "ATTRS{device/x}==\"y\"\n",
+	for name, c := range map[string]struct{ text, want string }{
+		"a wrapper's word":            {"RUN+=\"/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side\"\n", `with-uids", which`},
+		"a bare name udev resolves":   {"RUN+=\"agentos-side %k\"\n", `absolute program path`},
+		"a name an ENV value holds":   {"ENV{P}=\"/usr/lib/agentos/agentos-side\"\nRUN+=\"$env{P}\"\n", `absolute program path`},
+		"a $ substitution in an arg":  {"RUN+=\"/usr/lib/agentos/agentos-side $env{P}\"\n", `may not hold`},
+		"a %c in the program":         {"RUN+=\"/usr/lib/agentos/%c\"\n", `absolute program path`},
+		"a continued line":            {"ACTION==\"add\", \\\n  RUN+=\"/usr/lib/agentos/agentos-side\"\n", `a backslash`},
+		"a comment ending in \\":      {"# old rule \\\nRUN+=\"/usr/lib/agentos/agentos-side\"\n", `a backslash`},
+		"sh -c":                       {"RUN+=\"/bin/sh -c true;/usr/lib/agentos/agentos-side\"\n", `may not hold`},
+		"sh -c with quotes":           {"RUN+=\"/bin/sh -c 'agentos-side'\"\n", `may not hold`},
+		"a quoted arg":                {"RUN+=\"/usr/lib/agentos/agentos-side 'a b'\"\n", `may not hold`},
+		"a shell backslash escape":    {"RUN+=\"/usr/lib/agentos/host-disk-unlink agentos\\-side\"\n", `a backslash`},
+		"udev \\x escapes":            {"RUN+=e\"/usr/lib/agentos/agentos\\x2dside\"\n", `a backslash`},
+		"udev octal escapes":          {"RUN+=e\"/usr/lib/agentos/\\141gentos-side\"\n", `a backslash`},
+		"an e\"...\" value":           {"RUN+=e\"/usr/lib/agentos/agentos-side\"\n", `is not KEY`},
+		"an escaped quote":            {"RUN+=\"/usr/lib/agentos/host-disk-unlink \\\"x\"\n", `a backslash`},
+		"a single-quoted value":       {"RUN+='/usr/lib/agentos/agentos-side'\n", `is not KEY`},
+		"an unlisted path":            {"RUN+=\"/usr/lib/agentos/agentos-other\"\n", `agentos-other", which`},
+		"a key udev(7) lacks":         {"RUNX+=\"/usr/lib/agentos/agentos-side\"\n", `is not one of udev(7)'s`},
+		"a lower-case key":            {"run+=\"/usr/lib/agentos/agentos-side\"\n", `is not KEY`},
+		"RUN{other}":                  {"RUN{prog}+=\"/usr/lib/agentos/agentos-side\"\n", `want RUN, RUN{program}`},
+		"IMPORT{other}":               {"IMPORT{programs}=\"/usr/lib/agentos/agentos-side\"\n", `want program, builtin`},
+		"PROGRAM{x}":                  {"PROGRAM{x}==\"/usr/lib/agentos/agentos-side\"\n", `PROGRAM takes no attribute`},
+		"text after a value":          {"RUN+=\"/usr/lib/agentos/agentos-side\" x\n", `is not KEY`},
+		"an unclosed value":           {"RUN+=\"/usr/lib/agentos/agentos-side\n", `is not KEY`},
+		"a CR that udev splits at":    {"# old\rRUN+=\"/usr/lib/agentos/agentos-side\"\n", `byte 0xd`},
+		"a NUL that udev splits at":   {"# old\x00RUN+=\"/usr/lib/agentos/agentos-side\"\n", `byte 0x0`},
+		"a byte past ASCII":           {"RUN+=\"/usr/lib/agentos/agentos\u2010side\"\n", `byte 0xe2`},
+		"a rule under image, refused": {"RUN+=\"/bin/sh -c x\"\n", `/bin/sh", which`},
+		"a core_pattern sysctl":       {"SYSCTL{kernel.core_pattern}=\"|/usr/lib/agentos/agentos-side %p\"\n", `is not one of udev(7)'s`},
+		"a modprobe sysctl":           {"SYSCTL{kernel.modprobe}=\"/usr/lib/agentos/agentos-side\"\n", `is not one of udev(7)'s`},
+		"an ATTR path":                {"ATTR{../../kernel/uevent_helper}=\"/usr/lib/agentos/agentos-side\"\n", `an attribute name`},
+		"an ATTR [subsystem/device]":  {"ATTR{[module/x]parameters}=\"y\"\n", `an attribute name`},
+		"an ATTRS path":               {"ATTRS{device/x}==\"y\"\n", `an attribute name`},
+		// #4276: a property systemd reads to start a unit.
+		"ENV{SYSTEMD_WANTS}=":              {"ENV{SYSTEMD_WANTS}=\"agentos-x@%k.service\", TAG+=\"systemd\"\n", `sets no SYSTEMD_ property`},
+		"ENV{SYSTEMD_USER_WANTS}+=":        {"ENV{SYSTEMD_USER_WANTS}+=\"x.service\"\n", `sets no SYSTEMD_ property`},
+		"ENV{SYSTEMD_ALIAS}:=":             {"ENV{SYSTEMD_ALIAS}:=\"/dev/x\"\n", `sets no SYSTEMD_ property`},
+		"IMPORT{file}":                     {"IMPORT{file}=\"/etc/agentos/x\"\n", `IMPORT{file}`},
+		"IMPORT{parent} of a glob":         {"IMPORT{parent}=\"SYSTEMD_*\"\n", `one plain property name`},
+		"IMPORT{parent} of all":            {"IMPORT{parent}=\"*\"\n", `one plain property name`},
+		"IMPORT{db} of SYSTEMD_WANTS":      {"IMPORT{db}=\"SYSTEMD_WANTS\"\n", `one plain property name`},
+		"IMPORT{cmdline} of SYSTEMD_WANTS": {"IMPORT{cmdline}=\"SYSTEMD_WANTS\"\n", `one plain property name`},
+		// The % check alone: the path is listed, so only it refuses this.
+		"a listed %c in the program": {"RUN+=\"/usr/lib/agentos/%c\"\n", `absolute program path`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -369,9 +450,14 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 			if name == "a rule under image, refused" {
 				path = "image/mkosi/rules.d/60-x.rules"
 			}
-			files[path] = files[path] + "RUN+=\"/usr/lib/agentos/agentos-side\"\n" + text
-			if bins, err := set(t, files); err == nil {
-				t.Fatalf("got %q and no error, want the rule refused", bins)
+			files[path] = files[path] + "RUN+=\"/usr/lib/agentos/agentos-side\"\n" + c.text
+			if name == "a listed %c in the program" {
+				files[programsFile] += "/usr/lib/agentos/%c a path holding a udev substitution\n"
+			}
+			// Each refusal's own text: a case another check catches first
+			// does not reach the check it names (#4280 2).
+			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %q, %v, want the rule refused with %q", bins, err, c.want)
 			}
 		})
 	}
@@ -405,16 +491,116 @@ func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
 	})
 }
 
+// A modprobe.d install or remove command and a sysctl.d usermode helper are
+// run by root too, so they are read like a udev rule's programs (#4279); a
+// file in a directory root runs whole, or a hwdb file that can set a unit's
+// SYSTEMD_WANTS (#4276), is refused, being read by no reader.
+func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
+	const (
+		modprobe = "image/mkosi/mkosi.extra/usr/lib/modprobe.d/agentos-x.conf"
+		sysctl   = "image/mkosi/mkosi.extra/usr/lib/sysctl.d/99-agentos-x.conf"
+		extra    = "image/mkosi/mkosi.extra/"
+	)
+	files := map[string]string{
+		"broker/side/side.go":                     "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
+		"broker/cmd/agentos-side/main.go":         "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
+		"image/mkosi/agentos-side.service":        "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
+		modprobe:                                  "# agentos-side\nblacklist btusb\n\talias usb:v1 btusb\noptions btusb x=1\nsoftdep btusb pre: btmtk\nweakdep btusb btmtk\ninstall btusb /bin/false\n",
+		sysctl:                                    "; agentos-side\n# kernel.modprobe=/usr/lib/agentos/agentos-side\nkernel.core_pattern = core.%p\nfs.suid_dumpable=0\n-kernel.hotplug\n-net.ipv4.ip_forward = 0\n",
+		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
+		"image/mkosi/agentos-x.conf":              "install btusb /usr/lib/agentos/agentos-side\nkernel.modprobe=/usr/lib/agentos/agentos-side\n",
+		extra + "usr/lib/udev/rules.d/60-x.rules": "KERNEL==\"x\", MODE=\"0600\"\n",
+		programsFile:                              "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
+	}
+	set := func(t *testing.T, files map[string]string) ([]string, error) {
+		t.Helper()
+		return rootBinaries(fakeRepo(t, files))
+	}
+	base := clone(files)
+	base[programsFile] = "/bin/false exits 1\n"
+	if bins, err := set(t, base); err != nil || len(bins) != 0 {
+		t.Fatalf("files that run only /bin/false, name the binary in a comment, a non-helper key or a pipe-less core_pattern, or sit outside a modprobe.d or sysctl.d directory: got %q, %v, want none", bins, err)
+	}
+	for name, c := range map[string]struct{ path, text string }{
+		"an install command":             {modprobe, "install btusb /usr/lib/agentos/agentos-side --quiet\n"},
+		"a remove command":               {modprobe, "remove btusb /usr/lib/agentos/agentos-side\n"},
+		"an indented install":            {modprobe, "  install\tbtusb /usr/lib/agentos/agentos-side\n"},
+		"a modprobe.d under broker":      {"broker/side/modprobe.d/x.conf", "install btusb /usr/lib/agentos/agentos-side\n"},
+		"a core_pattern pipe":            {sysctl, "kernel.core_pattern = |/usr/lib/agentos/agentos-side %p\n"},
+		"a core_pattern pipe, no blanks": {sysctl, "kernel.core_pattern=| /usr/lib/agentos/agentos-side\n"},
+		"kernel.modprobe":                {sysctl, "kernel.modprobe=/usr/lib/agentos/agentos-side\n"},
+		"kernel.hotplug":                 {sysctl, "kernel.hotplug = /usr/lib/agentos/agentos-side\n"},
+		"kernel.poweroff_cmd":            {sysctl, "kernel.poweroff_cmd=/usr/lib/agentos/agentos-side\n"},
+		"a - prefixed helper":            {sysctl, "-kernel.modprobe=/usr/lib/agentos/agentos-side\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := clone(files)
+			files[c.path] += c.text
+			if bins, err := set(t, files); err != nil || len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+				t.Fatalf("got %q, %v, want [./cmd/agentos-side]", bins, err)
+			}
+			if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+				t.Fatalf("the program's linked package: got %q, want its os.Remove refused", problems)
+			}
+		})
+	}
+	for name, c := range map[string]struct{ path, text, want string }{
+		"a command modprobe.d(5) lacks": {modprobe, "include /etc/agentos\n", `not a modprobe.d(5) command`},
+		"an install with no command":    {modprobe, "install btusb\n", `takes a module and a command`},
+		"a second shell command":        {modprobe, "install btusb /bin/false; /usr/lib/agentos/agentos-side\n", `may not hold`},
+		"$CMDLINE_OPTS":                 {modprobe, "install btusb /usr/lib/agentos/agentos-side $CMDLINE_OPTS\n", `may not hold`},
+		"a quoted word":                 {modprobe, "remove btusb /bin/false 'x'\n", `may not hold`},
+		"a bare name":                   {modprobe, "install btusb agentos-side\n", `absolute program path`},
+		"a continued line":              {modprobe, "install btusb \\\n/usr/lib/agentos/agentos-side\n", `a backslash`},
+		"a CR":                          {modprobe, "# x\rinstall btusb /usr/lib/agentos/agentos-side\n", `byte 0xd`},
+		"an unlisted install":           {modprobe, "install btusb /usr/lib/agentos/agentos-other\n", `agentos-other", which`},
+		"a glob key":                    {sysctl, "kernel.core_*=|/usr/lib/agentos/agentos-side\n", `plain dotted key`},
+		"a slash key":                   {sysctl, "kernel/modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
+		"an empty component":            {sysctl, "kernel..modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
+		"a leading dot":                 {sysctl, ".kernel.modprobe=/usr/lib/agentos/agentos-side\n", `plain dotted key`},
+		"a key with no value":           {sysctl, "kernel.modprobe\n", `plain dotted key`},
+		"a binfmt_misc register":        {sysctl, "fs.binfmt_misc.register=:x:E::bin::/usr/lib/agentos/agentos-side:\n", `registers an interpreter`},
+		"a helper with a $":             {sysctl, "kernel.modprobe=$X\n", `absolute program path`},
+		"an unlisted core_pattern pipe": {sysctl, "kernel.core_pattern=|/usr/lib/agentos/agentos-other\n", `agentos-other", which`},
+		"a generator":                   {extra + "usr/lib/systemd/system-generators/agentos-gen", "#!/bin/sh\n", `reads no such file`},
+		"an environment generator":      {extra + "usr/lib/systemd/system-environment-generators/x", "", `reads no such file`},
+		"a sleep hook":                  {extra + "usr/lib/systemd/system-sleep/x", "", `reads no such file`},
+		"a shutdown hook":               {extra + "usr/lib/systemd/system-shutdown/x", "", `reads no such file`},
+		"a binfmt.d file":               {extra + "usr/lib/binfmt.d/x.conf", "", `reads no such file`},
+		"a program udev finds by name":  {extra + "usr/lib/udev/agentos-side", "", `reads no such file`},
+		"a hwdb file":                   {extra + "etc/udev/hwdb.d/60-x.hwdb", "", `reads no such file`},
+		"a build into a generator dir":  {"image/build.sh", "go build -o \"$STAGE/usr/lib/systemd/system-generators/agentos-gen\" ./cmd/agentos-side\n", `a directory root runs whole`},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := clone(files)
+			files[c.path] += c.text
+			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
+			}
+		})
+	}
+	t.Run("the shipped files", func(t *testing.T) {
+		// root_programs.txt lists /bin/false and /usr/bin/false only for
+		// agentos-no-bluetooth.conf and 99-agentos-nodump.conf: were either
+		// file unread, its line would be stale and this would fail.
+		if _, err := rootBinaries(repoRoot(t)); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestStaleAllowEntryFails(t *testing.T) {
 	files := map[string]string{"broker/side/side.go": "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n"}
 	for name, line := range map[string]string{
-		"another function":  "allow broker/side/side.go Keep os.Remove reason\n",
-		"another call":      "allow broker/side/side.go Drop os.Rename reason\n",
-		"a missing file":    "allow broker/side/gone.go Drop os.Remove reason\n",
-		"a non-root file":   "allow broker/elsewhere/x.go Drop os.Remove reason\n",
-		"a doubled line":    "allow broker/side/side.go Drop os.Remove reason\nallow broker/side/side.go Drop os.Remove again\n",
-		"a pending package": "pending broker/elsewhere #1 reason\n",
-		"a malformed line":  "allow broker/side/side.go Drop\n",
+		"another function":     "allow broker/side/side.go Keep os.Remove reason\n",
+		"another call":         "allow broker/side/side.go Drop os.Rename reason\n",
+		"a missing file":       "allow broker/side/gone.go Drop os.Remove reason\n",
+		"a non-root file":      "allow broker/elsewhere/x.go Drop os.Remove reason\n",
+		"a doubled line":       "allow broker/side/side.go Drop os.Remove reason\nallow broker/side/side.go Drop os.Remove again\n",
+		"a pending package":    "pending broker/elsewhere #1 reason\n",
+		"a malformed line":     "allow broker/side/side.go Drop\n",
+		"a call ioutil lacks":  "allow broker/side/side.go Drop ioutil.Remove reason\n",
+		"a package not listed": "allow broker/side/side.go Drop syscall.Unlink reason\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if problems := lintFiles(t, files, "allow broker/side/side.go Drop os.Remove reason\n"+line); len(problems) == 0 {
@@ -506,7 +692,7 @@ func lintRepo(t *testing.T, root, allowText string) []string {
 	}
 	usedAllow, usedPending := map[string]bool{}, map[string]bool{}
 	for _, u := range uses {
-		key := u.file + " " + u.fn + " os." + u.op
+		key := u.file + " " + u.fn + " " + u.op
 		if _, ok := allows[key]; ok {
 			usedAllow[key] = true
 			continue
@@ -515,7 +701,7 @@ func lintRepo(t *testing.T, root, allowText string) []string {
 			usedPending[filepath.ToSlash(filepath.Dir(u.file))] = true
 			continue
 		}
-		problems = append(problems, fmt.Sprintf("%s:%d: %s calls os.%s by path; use privfile, os.OpenFile with O_NOFOLLOW, or add \"allow %s <reason>\"", u.file, u.line, u.fn, u.op, key))
+		problems = append(problems, fmt.Sprintf("%s:%d: %s calls %s by path; use privfile, os.OpenFile with O_NOFOLLOW, or add \"allow %s <reason>\"", u.file, u.line, u.fn, u.op, key))
 	}
 	for key := range allows {
 		if !usedAllow[key] {
@@ -540,7 +726,7 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 		}
 		f := strings.Fields(line)
 		switch {
-		case f[0] == "allow" && len(f) >= 5 && strings.HasPrefix(f[3], "os.") && pathOps[strings.TrimPrefix(f[3], "os.")]:
+		case f[0] == "allow" && len(f) >= 5 && isPathOpName(f[3]):
 			key := strings.Join(f[1:4], " ")
 			if _, dup := allows[key]; dup {
 				bad = append(bad, fmt.Sprintf("%s line %d: a second allow line for %q", allowFile, i+1, key))
@@ -552,14 +738,15 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 			}
 			pending[f[1]] = strings.Join(f[2:], " ")
 		default:
-			bad = append(bad, fmt.Sprintf("%s line %d: want \"allow <file> <func> os.<Call> <reason>\" or \"pending <dir> #<issue> <reason>\", got %q", allowFile, i+1, line))
+			bad = append(bad, fmt.Sprintf("%s line %d: want \"allow <file> <func> <pkg>.<Call> <reason>\" or \"pending <dir> #<issue> <reason>\", got %q", allowFile, i+1, line))
 		}
 	}
 	return allows, pending, bad
 }
 
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
-// of the binaries a unit under image/ starts as root or a udev rule names.
+// of the binaries a unit under image/ starts as root or a runKinds file
+// names.
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file name -> path
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
@@ -635,7 +822,7 @@ func rootBinaries(root string) ([]string, error) {
 			}
 		}
 	}
-	if err := ruleBinaries(root, pkgs, seen); err != nil {
+	if err := runBinaries(root, pkgs, seen); err != nil {
 		return nil, err
 	}
 	var out []string
@@ -647,8 +834,8 @@ func rootBinaries(root string) ([]string, error) {
 }
 
 // programsFile lists, relative to the repository root, the only programs a
-// udev rule may run (#4257).
-const programsFile = "broker/kernel/privfile/udev_programs.txt"
+// runKinds file may make root run (#4257, #4276, #4279).
+const programsFile = "broker/kernel/privfile/root_programs.txt"
 
 // ruleKeys are the keys udev(7) defines, less SYSCTL: a sysctl write such as
 // kernel.core_pattern="|/path" or kernel.modprobe makes the kernel run a
@@ -666,33 +853,83 @@ var ruleKeys = map[string]bool{
 // it: blanks and at most one comma.
 var ruleToken = regexp.MustCompile(`^([A-Z]+)(\{([^{}"\\ \t]*)\})?[ \t]*(==|!=|\+=|-=|:=|=)[ \t]*"([^"\\]*)"[ \t]*(?:,[ \t]*)?`)
 
-// ruleAttr is an ATTR or ATTRS name the reader accepts.
+// ruleAttr is a plain name: an ATTR or ATTRS name, or a property an IMPORT
+// copies in.
 var ruleAttr = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
 
 // ruleArg is a word a listed program may take after its path: no shell or
 // udev quoting, escape or $ substitution.
 var ruleArg = regexp.MustCompile(`^[A-Za-z0-9_./:=%+@,-]+$`)
 
-// ruleBinaries reads every .rules file under image/ and broker/ the way udev
-// does and adds the package of each broker binary a rule runs. udev runs
-// RUN, RUN{program}, PROGRAM and IMPORT{program} values as root (#3950), and
-// a program's name could hide behind a shell (sh -c 'a;agentos-x'), a bare
+// runKind is a kind of file under image/ or broker/ that makes root run a
+// program: which paths are of it, and the reader that returns each program
+// one names. A kind with no reader is refused outright.
+type runKind struct {
+	what  string
+	match func(rel string) bool
+	read  func(text string) ([]ruleProgram, error)
+}
+
+// runKinds are the files that make root run a program, the channels
+// image/mkosi/mkosi.finalize's exec.allow holds: a udev rules file (#3950);
+// a modprobe.d file, whose install and remove commands root's /bin/sh runs
+// when a module loads or unloads, through udev's kmod builtin, modprobe or
+// the kernel's request_module (#4279); a sysctl.d file, whose usermode
+// helper keys name a program the kernel runs as root; and any file in a
+// directory whose every file root runs (system and environment generators,
+// system-sleep and system-shutdown hooks, udev's own directory, where a
+// rule finds a bare name), registers as an interpreter (binfmt.d) or reads
+// for device properties (udev's hwdb.d, which can set SYSTEMD_WANTS, #4276).
+// The lint reads none of the last, so none may ship.
+var runKinds = []runKind{
+	{"udev rules file", func(rel string) bool { return strings.HasSuffix(rel, ".rules") }, rulePrograms},
+	{"modprobe.d file", confIn("modprobe.d"), modprobePrograms},
+	{"sysctl.d file", confIn("sysctl.d"), sysctlPrograms},
+	{"file in a directory root runs whole or reads for properties", inRunDir, nil},
+}
+
+// runDirs are the directories, as path suffixes, of runKinds' last kind.
+var runDirs = []string{
+	"systemd/system-generators", "systemd/system-environment-generators", "systemd/system-sleep",
+	"systemd/system-shutdown", "binfmt.d", "lib/udev", "udev/hwdb.d",
+}
+
+// confIn matches a .conf file directly in a directory named dir, the only
+// files kmod and systemd-sysctl read there.
+func confIn(dir string) func(string) bool {
+	return func(rel string) bool { return strings.HasSuffix(rel, ".conf") && path.Base(path.Dir(rel)) == dir }
+}
+
+// inRunDir matches a file directly in one of runDirs; rel is slash-separated.
+func inRunDir(rel string) bool {
+	dir := "/" + path.Dir(rel)
+	for _, d := range runDirs {
+		if strings.HasSuffix(dir, "/"+d) {
+			return true
+		}
+	}
+	return false
+}
+
+// runBinaries reads every runKinds file under image/ and broker/ as its
+// consumer does and adds the package of each broker binary one runs. A
+// program's name could hide behind a shell (sh -c 'a;agentos-x'), a bare
 // name udev resolves in /usr/lib/udev, an $env{X} substitution, or a udev
 // or shell escape (agentos\x2dx, agentos\-x). Rather than decode each form,
-// the reader refuses them (#4257): a rules file may hold only printable
-// ASCII, no backslash anywhere (so no escape and no continuation), only
-// udev(7)'s keys in plain "..." values, and each program value must be an
-// absolute path programsFile lists, then words of ruleArg. A listed path
-// that no rule runs fails too, so the list only holds what ships. Bound:
-// what a listed program itself starts (host-disk-unlink is a script) is
-// held by review of the list's reason.
-func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) error {
-	// A repository with no list lets a rule run nothing.
+// the readers refuse them (#4257): a file may hold only printable ASCII, no
+// backslash anywhere (so no escape and no continuation), only its format's
+// keys or commands, and each program must be an absolute path programsFile
+// lists, then words of ruleArg. A listed path that no file runs fails too,
+// so the list only holds what ships. Bound: what a listed program itself
+// starts (host-disk-unlink is a script) is held by review of the list's
+// reason.
+func runBinaries(root string, pkgs map[string]string, seen map[string]bool) error {
+	// A repository with no list lets a file run nothing.
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	listed := map[string]bool{} // listed path -> a rule runs it
+	listed := map[string]bool{} // listed path -> a file runs it
 	for i, line := range strings.Split(string(b), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -711,21 +948,35 @@ func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) err
 				return filepath.SkipDir
 			case err != nil:
 				return err
-			case d.IsDir() || !strings.HasSuffix(p, ".rules"):
+			case d.IsDir():
 				return nil
+			}
+			rel, _ := filepath.Rel(root, p)
+			rel = filepath.ToSlash(rel)
+			var kind *runKind
+			for i := range runKinds {
+				if runKinds[i].match(rel) {
+					kind = &runKinds[i]
+					break
+				}
+			}
+			switch {
+			case kind == nil:
+				return nil
+			case kind.read == nil:
+				return fmt.Errorf("%s: a %s; the lint reads no such file, so none may ship", rel, kind.what)
 			}
 			b, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
-			rel, _ := filepath.Rel(root, p)
-			progs, err := rulePrograms(string(b))
+			progs, err := kind.read(string(b))
 			if err != nil {
-				return fmt.Errorf("%s:%v", filepath.ToSlash(rel), err)
+				return fmt.Errorf("%s:%v", rel, err)
 			}
 			for _, prog := range progs {
 				if _, ok := listed[prog.path]; !ok {
-					return fmt.Errorf("%s:%d: a rule runs %q, which %s does not list; a rule may run only a listed absolute path", filepath.ToSlash(rel), prog.line, prog.path, programsFile)
+					return fmt.Errorf("%s:%d: runs %q, which %s does not list; a %s may run only a listed absolute path", rel, prog.line, prog.path, programsFile, kind.what)
 				}
 				listed[prog.path] = true
 				if pkg, ok := pkgs[filepath.Base(prog.path)]; ok {
@@ -740,7 +991,7 @@ func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) err
 	}
 	for path, used := range listed {
 		if !used {
-			return fmt.Errorf("%s lists %s, which no rule runs", programsFile, path)
+			return fmt.Errorf("%s lists %s, which no file runs", programsFile, path)
 		}
 	}
 	return nil
@@ -751,42 +1002,80 @@ type ruleProgram struct {
 	line int
 }
 
-// rulePrograms parses one rules file and returns the program each RUN,
-// RUN{program}, PROGRAM and IMPORT{program} value runs, or an error naming
-// the first line it refuses. udev splits lines at \n, \r and NUL and skips a
-// line whose first non-blank byte is #; refusing every byte but printable
-// ASCII, tab and \n makes its split and this one the same.
-func rulePrograms(text string) ([]ruleProgram, error) {
-	var progs []ruleProgram
+// eachLine calls fn with each line of text that is neither blank nor, after
+// leading blanks, a comment (a line starting with a byte of comments). Every
+// consumer here ends a line at \n (udev and systemd-sysctl also at \r and
+// NUL) and kmod joins a line ending in a backslash; refusing every byte but
+// printable ASCII and tab, and any backslash, makes each split this one.
+func eachLine(text, comments string, fn func(n int, line string) error) error {
 	for i, line := range strings.Split(text, "\n") {
 		n := i + 1
 		for _, c := range []byte(line) {
 			if c != '\t' && (c < 0x20 || c > 0x7e) {
-				return nil, fmt.Errorf("%d: byte %#x; a rules file holds only printable ASCII and tabs", n, c)
+				return fmt.Errorf("%d: byte %#x; the file holds only printable ASCII and tabs", n, c)
 			}
 		}
 		if strings.Contains(line, "\\") {
-			return nil, fmt.Errorf("%d: a backslash; no escape or continuation is read, so none may be written", n)
+			return fmt.Errorf("%d: a backslash; no escape or continuation is read, so none may be written", n)
 		}
 		rest := strings.TrimLeft(line, " \t")
-		if rest == "" || rest[0] == '#' {
+		if rest == "" || strings.ContainsRune(comments, rune(rest[0])) {
 			continue
 		}
+		if err := fn(n, rest); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// programOf is the program a command's words run: an absolute path with no
+// % substitution, then words of ruleArg.
+func programOf(n int, what string, words []string) (ruleProgram, error) {
+	if len(words) == 0 || !strings.HasPrefix(words[0], "/") || strings.Contains(words[0], "%") {
+		return ruleProgram{}, fmt.Errorf("%d: %s %q does not start with an absolute program path", n, what, strings.Join(words, " "))
+	}
+	for _, w := range words {
+		if !ruleArg.MatchString(w) {
+			return ruleProgram{}, fmt.Errorf("%d: %s %q: word %q has a character a program value may not hold", n, what, strings.Join(words, " "), w)
+		}
+	}
+	return ruleProgram{path: words[0], line: n}, nil
+}
+
+// systemdProp reports whether a device property is one systemd reads to act
+// on: SYSTEMD_WANTS and SYSTEMD_USER_WANTS start the units they name when a
+// device tagged systemd appears, as root unless the unit says otherwise, and
+// the unit may come from a package rather than image/ (#4276). Only
+// SYSTEMD_READY, which only stops units, is not.
+func systemdProp(name string) bool {
+	return strings.HasPrefix(name, "SYSTEMD_") && name != "SYSTEMD_READY"
+}
+
+// rulePrograms parses one rules file and returns the program each RUN,
+// RUN{program}, PROGRAM and IMPORT{program} value runs, or an error naming
+// the first line it refuses.
+func rulePrograms(text string) ([]ruleProgram, error) {
+	var progs []ruleProgram
+	err := eachLine(text, "#", func(n int, rest string) error {
 		for rest != "" {
 			m := ruleToken.FindStringSubmatch(rest)
 			if m == nil {
-				return nil, fmt.Errorf("%d: %q is not KEY[{attr}]OP\"value\" with a plain value", n, rest)
+				return fmt.Errorf("%d: %q is not KEY[{attr}]OP\"value\" with a plain value", n, rest)
 			}
 			rest = rest[len(m[0]):]
-			key, hasAttr, attr, value := m[1], m[2] != "", m[3], m[5]
+			key, hasAttr, attr, op, value := m[1], m[2] != "", m[3], m[4], m[5]
 			if !ruleKeys[key] {
-				return nil, fmt.Errorf("%d: key %s is not one of udev(7)'s, or is SYSCTL", n, key)
+				return fmt.Errorf("%d: key %s is not one of udev(7)'s, or is SYSCTL", n, key)
 			}
 			// An ATTR name is a path under the device's sysfs directory, so
 			// a / or [subsystem/device] form could reach another file (the
 			// kernel's uevent_helper among them); only a plain name is read.
 			if (key == "ATTR" || key == "ATTRS") && !ruleAttr.MatchString(attr) {
-				return nil, fmt.Errorf("%d: %s{%s}; an attribute name is letters, digits and _ only", n, key, attr)
+				return fmt.Errorf("%d: %s{%s}; an attribute name is letters, digits and _ only", n, key, attr)
+			}
+			if key == "ENV" && op != "==" && op != "!=" && systemdProp(attr) {
+				return fmt.Errorf("%d: ENV{%s}%s; a rule sets no SYSTEMD_ property but SYSTEMD_READY", n, attr, op)
 			}
 			program := false
 			switch key {
@@ -795,38 +1084,109 @@ func rulePrograms(text string) ([]ruleProgram, error) {
 				case !hasAttr || attr == "program":
 					program = true
 				case attr != "builtin":
-					return nil, fmt.Errorf("%d: RUN{%s}; want RUN, RUN{program} or RUN{builtin}", n, attr)
+					return fmt.Errorf("%d: RUN{%s}; want RUN, RUN{program} or RUN{builtin}", n, attr)
 				}
 			case "PROGRAM":
 				if hasAttr {
-					return nil, fmt.Errorf("%d: PROGRAM takes no attribute", n)
+					return fmt.Errorf("%d: PROGRAM takes no attribute", n)
 				}
 				program = true
 			case "IMPORT":
 				switch attr {
 				case "program":
 					program = true
-				case "builtin", "file", "db", "cmdline", "parent":
+				case "builtin":
+				case "db", "cmdline", "parent":
+					// These copy properties in by name or glob; a plain
+					// name keeps a SYSTEMD_ property out.
+					if !ruleAttr.MatchString(value) || systemdProp(value) {
+						return fmt.Errorf("%d: IMPORT{%s}=%q; want one plain property name, not a glob or a SYSTEMD_ property but SYSTEMD_READY", n, attr, value)
+					}
+				case "file":
+					return fmt.Errorf("%d: IMPORT{file}; the file's properties go unread, so it may set a SYSTEMD_ property", n)
 				default:
-					return nil, fmt.Errorf("%d: IMPORT{%s}; want program, builtin, file, db, cmdline or parent", n, attr)
+					return fmt.Errorf("%d: IMPORT{%s}; want program, builtin, db, cmdline or parent", n, attr)
 				}
 			}
 			if !program {
 				continue
 			}
-			words := strings.Fields(value)
-			if len(words) == 0 || !strings.HasPrefix(words[0], "/") || strings.Contains(words[0], "%") {
-				return nil, fmt.Errorf("%d: %s=%q does not start with an absolute program path", n, key, value)
+			p, err := programOf(n, key+"=", strings.Fields(value))
+			if err != nil {
+				return err
 			}
-			for _, w := range words {
-				if !ruleArg.MatchString(w) {
-					return nil, fmt.Errorf("%d: %s=%q: word %q has a character a program value may not hold", n, key, value, w)
-				}
-			}
-			progs = append(progs, ruleProgram{path: words[0], line: n})
+			progs = append(progs, p)
 		}
-	}
-	return progs, nil
+		return nil
+	})
+	return progs, err
+}
+
+// modprobeCmds are the commands of modprobe.d(5), as kmod 34 reads them.
+var modprobeCmds = map[string]bool{"alias": true, "blacklist": true, "install": true, "remove": true, "options": true, "softdep": true, "weakdep": true}
+
+// modprobePrograms parses one modprobe.d file and returns the program each
+// install and remove command runs (kmod hands the command to /bin/sh -c, so
+// plain words keep a second command and $CMDLINE_OPTS out), or an error
+// naming the first line it refuses.
+func modprobePrograms(text string) ([]ruleProgram, error) {
+	var progs []ruleProgram
+	err := eachLine(text, "#", func(n int, line string) error {
+		f := strings.Fields(line)
+		switch {
+		case !modprobeCmds[f[0]]:
+			return fmt.Errorf("%d: %q is not a modprobe.d(5) command", n, f[0])
+		case f[0] != "install" && f[0] != "remove":
+			return nil
+		case len(f) < 3:
+			return fmt.Errorf("%d: %s takes a module and a command", n, f[0])
+		}
+		p, err := programOf(n, f[0]+" "+f[1], f[2:])
+		if err != nil {
+			return err
+		}
+		progs = append(progs, p)
+		return nil
+	})
+	return progs, err
+}
+
+// sysctlKey is a dotted sysctl name: systemd-sysctl also takes / separators,
+// empty components and globs, which the reader refuses rather than resolves.
+var sysctlKey = regexp.MustCompile(`^-?[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
+
+// sysctlHelpers are the sysctls that name a program the kernel runs as root:
+// kernel.core_pattern when it starts with |, and the modprobe, uevent and
+// poweroff usermode helpers.
+var sysctlHelpers = map[string]bool{"kernel.core_pattern": true, "kernel.modprobe": true, "kernel.hotplug": true, "kernel.poweroff_cmd": true}
+
+// sysctlPrograms parses one sysctl.d file as systemd-sysctl does and returns
+// the program each helper sysctl names, or an error naming the first line it
+// refuses: a key that is not plain dotted, or one under fs.binfmt_misc,
+// whose register file adds an interpreter.
+func sysctlPrograms(text string) ([]ruleProgram, error) {
+	var progs []ruleProgram
+	err := eachLine(text, "#;", func(n int, line string) error {
+		k, v, ok := strings.Cut(line, "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch {
+		case !sysctlKey.MatchString(k) || !ok && !strings.HasPrefix(k, "-"):
+			return fmt.Errorf("%d: %q is not a plain dotted key = value", n, line)
+		case strings.HasPrefix(strings.TrimPrefix(k, "-"), "fs.binfmt_misc."):
+			return fmt.Errorf("%d: %s registers an interpreter", n, k)
+		}
+		k = strings.TrimPrefix(k, "-")
+		if !sysctlHelpers[k] || !ok || k == "kernel.core_pattern" && !strings.HasPrefix(v, "|") {
+			return nil
+		}
+		p, err := programOf(n, k+"=", strings.Fields(strings.TrimPrefix(v, "|")))
+		if err != nil {
+			return err
+		}
+		progs = append(progs, p)
+		return nil
+	})
+	return progs, err
 }
 
 // dropinDirs are the drop-in directories systemd reads for a unit:
@@ -847,7 +1207,7 @@ func dropinDirs(name string) []string {
 	return dirs
 }
 
-var buildOut = regexp.MustCompile(`-o\s+"?[^"\s]*/([A-Za-z0-9._-]+)"?\s+"?(\./[A-Za-z0-9_./-]+)"?`)
+var buildOut = regexp.MustCompile(`-o\s+"?([^"\s]*)/([A-Za-z0-9._-]+)"?\s+"?(\./[A-Za-z0-9_./-]+)"?`)
 
 // binaryPackages maps an installed binary's name to its broker package:
 // broker/cmd/<name>, and each "go build ... -o <dir>/<name> ./<pkg>" line in
@@ -879,11 +1239,14 @@ func binaryPackages(root string) (map[string]string, error) {
 				return err
 			}
 			for _, m := range buildOut.FindAllStringSubmatch(string(b), -1) {
-				if !strings.Contains(m[2], "$") {
-					if _, err := os.Stat(filepath.Join(root, "broker", m[2])); err == nil {
-						pkgs[m[1]] = filepath.ToSlash(filepath.Clean(m[2]))
-						if !strings.HasPrefix(pkgs[m[1]], ".") {
-							pkgs[m[1]] = "./" + pkgs[m[1]]
+				if inRunDir(m[1] + "/" + m[2]) {
+					return fmt.Errorf("%s builds %s into %s, a directory root runs whole or reads for properties", p, m[3], m[1])
+				}
+				if !strings.Contains(m[3], "$") {
+					if _, err := os.Stat(filepath.Join(root, "broker", m[3])); err == nil {
+						pkgs[m[2]] = filepath.ToSlash(filepath.Clean(m[3]))
+						if !strings.HasPrefix(pkgs[m[2]], ".") {
+							pkgs[m[2]] = "./" + pkgs[m[2]]
 						}
 					}
 				}
@@ -898,7 +1261,7 @@ func binaryPackages(root string) (map[string]string, error) {
 }
 
 type use struct {
-	file, fn, op string // file is relative to the repository root
+	file, fn, op string // file is relative to the repository root; op as pathOpName spells it
 	line         int
 }
 
@@ -953,10 +1316,9 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 				}
 				files = append(files, f)
 			}
-			info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-			conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", arch)}
-			if _, err := conf.Check(p.path, fset, files, info); err != nil {
-				return nil, fmt.Errorf("type-checking %s (%s): %v", p.path, arch, err)
+			info, err := checkTypes(fset, imp, p.path, arch, files)
+			if err != nil {
+				return nil, err
 			}
 			for _, f := range files {
 				rel, err := filepath.Rel(root, fset.Position(f.Pos()).Filename)
@@ -975,8 +1337,19 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 	return uses, nil
 }
 
+// checkTypes type-checks one package's files for arch, recording what each
+// identifier resolves to; any type error fails it.
+func checkTypes(fset *token.FileSet, imp types.Importer, pkgPath, arch string, files []*ast.File) (*types.Info, error) {
+	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", arch)}
+	if _, err := conf.Check(pkgPath, fset, files, info); err != nil {
+		return nil, fmt.Errorf("type-checking %s (%s): %v", pkgPath, arch, err)
+	}
+	return info, nil
+}
+
 // fileUses finds each identifier in the file that resolves to a pathOps
-// function of package os, called or not (a selector on any import name, a
+// function, called or not (a selector on any import name, a
 // dot import's bare name, a value), with the top-level function (Type.Method
 // for a method, the first name for a package-level var) it sits in. A
 // method of *os.File is not one: it works on an open file, not a path. An
@@ -994,8 +1367,8 @@ func fileUses(fset *token.FileSet, f *ast.File, info *types.Info, rel string) []
 					safe[id] = true
 				}
 			case *ast.Ident:
-				if f, ok := info.Uses[n].(*types.Func); ok && !safe[n] && isFunc(f, "os", f.Name()) && pathOps[f.Name()] {
-					uses = append(uses, use{file: rel, fn: fn, op: f.Name(), line: fset.Position(n.Pos()).Line})
+				if op, ok := pathOpName(info.Uses[n]); ok && !safe[n] {
+					uses = append(uses, use{file: rel, fn: fn, op: op, line: fset.Position(n.Pos()).Line})
 				}
 			}
 			return true
