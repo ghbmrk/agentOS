@@ -1187,12 +1187,12 @@ func TestStoreRecoveryKeyIsTheCards(t *testing.T) {
 
 // printed is the store key of the card that prints bits, read back from
 // its text as the owner types it.
-func printed(t *testing.T, bits []byte) []byte {
+func printed(t *testing.T, made []byte) []byte {
 	t.Helper()
-	if len(bits) != handoff.CardKeyLen {
-		t.Fatalf("card bits of %d bytes", len(bits))
+	if len(made) != handoff.MadeCardLen {
+		t.Fatalf("a made card of %d bytes", len(made))
 	}
-	k, err := card.StoreRecoveryKey(card.RecoveryKeyText([handoff.CardKeyLen]byte(bits)))
+	k, err := card.StoreRecoveryKey(card.RecoveryKeyText([handoff.CardKeyLen]byte(made[:handoff.CardKeyLen])))
 	must(t, err)
 	return k
 }
@@ -1328,7 +1328,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	release()
 	res := <-done
 	k := res.k
-	if res.err != nil || len(k.NewRecovery) != handoff.CardKeyLen || res.out != "" {
+	if res.err != nil || len(k.NewRecovery) != handoff.MadeCardLen || res.out != "" {
 		t.Fatalf("the lost-card unlock: %v, card of %d bytes, stderr %q", res.err, len(k.NewRecovery), res.out)
 	}
 	// The printed card's key opens the store (#3410).
@@ -1340,7 +1340,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatal("the old passphrase still opens the store")
 	}
 	// The new card's passphrase, as the page prints it, opens the store.
-	pass, err := words.FromCardKey(k.NewRecovery)
+	pass, err := words.FromSeed(k.NewRecovery[handoff.CardKeyLen:])
 	must(t, err)
 	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
 	must(t, err)
@@ -1376,7 +1376,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	must(t, err)
 	tap := key.Approve(key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))), kernel.RecoveryCardHash(id))
 	bits, err := r.owner().RecoveryCard(tap)
-	if err != nil || len(bits) != handoff.CardKeyLen {
+	if err != nil || len(bits) != handoff.MadeCardLen {
 		t.Fatalf("the kernel's card: %v (output %s)", err, out)
 	}
 	newKey := printed(t, bits)
@@ -1397,7 +1397,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	st, err = seal.Unlock(r.store, seal.Recovery{Key: newKey})
 	must(t, err)
 	st.Close()
-	pass, err = words.FromCardKey(bits)
+	pass, err = words.FromSeed(bits[handoff.CardKeyLen:])
 	must(t, err)
 	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
 	must(t, err)
@@ -1405,6 +1405,55 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
 		t.Fatal("the first new card's passphrase still opens the store")
 	}
+}
+
+// REQ: REC-4, STO-2
+// MIG-4-recovery-r4d (#4130, Security finding on head b368e33): the made
+// card's passphrase is independent of its recovery key, so once route A
+// later replaces that key, the retired key's bits derive nothing that
+// opens the store, while the card's passphrase still does (route A keeps
+// it, as for any card the owner holds).
+// Revert mutant: the passphrase drawn from the key's bits (a passphrase
+// derived from the retired bits opens the store).
+func TestLostCardPassphraseOutlivesNoRetiredKey(t *testing.T) {
+	r := lostRig(t)
+	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
+	k, out, err := r.unlockOnce(nil)
+	if err != nil || len(k.NewRecovery) != handoff.MadeCardLen {
+		t.Fatalf("the lost-card unlock: %v, stderr %q", err, out)
+	}
+	made := k.NewRecovery
+	pass, err := words.FromSeed(made[handoff.CardKeyLen:])
+	must(t, err)
+	// Route A's write (agentos-enroll -rotate-recovery): the recovery slot
+	// alone, with a new recipient.
+	st, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)})
+	must(t, err)
+	var rid string
+	for _, sl := range st.Slots() {
+		if sl.Kind == seal.KindRecovery {
+			rid = sl.ID
+		}
+	}
+	later := bytes.Repeat([]byte{0x42}, seal.RecoveryLen)
+	_, err = st.ReplaceAndPut(handoff.RecipientEntry, recipientEntry(t, later), seal.Swap{ID: rid, F: seal.Recovery{Key: later}})
+	st.Close()
+	must(t, err)
+	if _, err := seal.Unlock(r.store, seal.Recovery{Key: printed(t, made)}); err == nil {
+		t.Fatal("the retired recovery key still opens the store")
+	}
+	// No 16 bytes of the retired key's bits give the store's passphrase.
+	bits := made[:handoff.CardKeyLen]
+	for i := 0; i+16 <= len(bits); i++ {
+		p, err := words.FromSeed(bits[i : i+16])
+		must(t, err)
+		if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: p}); err == nil {
+			t.Fatalf("a passphrase from the retired bits at %d opens the store", i)
+		}
+	}
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	must(t, err)
+	st.Close()
 }
 
 // REQ: REC-4
@@ -1556,7 +1605,7 @@ func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
 	if left, err := os.ReadFile(r.request); err != nil || !bytes.Equal(left, b) {
 		t.Fatalf("the request was not left for a tpm boot: %v", err)
 	}
-	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != handoff.CardKeyLen {
+	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != handoff.MadeCardLen {
 		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery != nil)
 	}
 }

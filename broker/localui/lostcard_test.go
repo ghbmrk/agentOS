@@ -156,9 +156,9 @@ func TestLostCardNeedsTheTap(t *testing.T) {
 // MIG-4-recovery-r4c (#4128): the page first asks a hardware key's tap
 // over the card, naming its mark, and reads no bits for that; the card
 // printed carries the same mark (#4160). MIG-4-recovery-r4d (#4130): the
-// card also prints the passphrase the unlock step derived from the same
-// bits (words.FromCardKey), the confirm asks a word of it, and the done
-// line says the old card's passphrase no longer opens the store and how to
+// card also prints the passphrase the unlock step derived from the seed
+// after the key's bits (words.FromSeed), the confirm asks a word of it,
+// and the done line says the old card's passphrase no longer opens the store and how to
 // replace it. Revert mutants: the display without the passphrase (the
 // page lacks it); lostDoneText saying the old passphrase still works.
 func TestLostCardShownThenConfirmWipes(t *testing.T) {
@@ -169,8 +169,8 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	if p := r.get("/recovery/"); !strings.Contains(p, `href="/recovery/new"`) {
 		t.Fatal("a ready card is not offered")
 	}
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
-	pass, err := words.FromCardKey(bits)
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
+	pass, err := words.FromSeed(bits[localapi.RecoveryCardKeyLen:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestLostCardPhonePasskeySessionGetsNoBits(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
 	r.f.lostCard = bytes.Clone(bits)
 	p := html.UnescapeString(r.post("/recovery/new", url.Values{"step": {"show"}}).Body.String())
 	if !strings.Contains(p, lostNoShowText) || strings.Contains(p, text) || fmt.Sprint(r.f.lost) != "[cardbegin]" {
@@ -320,8 +320,8 @@ func TestLostCardConfirmAfterAKernelRestart(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
-	pass, err := words.FromCardKey(bits)
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
+	pass, err := words.FromSeed(bits[localapi.RecoveryCardKeyLen:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestLostCardPageRestartBeforeConfirm(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
 	r.f.lostCard, r.f.lostState = bytes.Clone(bits), localapi.RecoveryLostState{Ready: true}
 	if p := r.show(); !strings.Contains(p, text) {
 		t.Fatal("the card is not shown")

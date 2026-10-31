@@ -105,7 +105,7 @@ const (
 	lostFiledText    = "Your request for a new card is filed. When I restart I make the new card, and this page shows it. Restart me now, or I carry it out at my next restart within a week."
 	lostRestartText  = "I restart as soon as no call or task is running; once a month a check of my software runs first and takes a few minutes more. Then open this page again to see your new card."
 	lostWithdrawText = "Your request for a new card is withdrawn: I make no new card at my next restart."
-	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its passphrase and recovery key are the only ones that open my store, and the backups I take from now on open with its recovery key. Your old card's passphrase and recovery key no longer open my store: the new card replaces it whole, so if you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place, and destroy the old card if you find it."
+	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its passphrase and recovery key are the only ones that open my store, and the backups I take from now on open with its recovery key. Your old card's passphrase and recovery key no longer open my store: so if you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place, and destroy the old card if you find it."
 	lostNoTapText    = "Nothing was filed. Tap again with one of your hardware keys."
 	lostNoShowText   = "Nothing is shown. Tap again with one of your hardware keys."
 	lostPhoneText    = "That tap was a phone passkey's. Only one of your hardware keys can show your new card. Tap again, and choose your hardware key."
@@ -332,10 +332,10 @@ func (s *Server) lostShow(ctx context.Context, tok string, f url.Values) error {
 	if len(c.Card) != localapi.RecoveryCardLen || len(c.ID) != localapi.RecoveryIDLen {
 		return Refused(localapi.ErrRecoveryUnavailable)
 	}
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(c.Card))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(c.Card[:localapi.RecoveryCardKeyLen]))
 	// The passphrase the unlock step put in the store's passphrase slot
-	// with the key (MIG-4-recovery-r4d): it derives from the same bits.
-	pass, err := words.FromCardKey(c.Card)
+	// with the key (MIG-4-recovery-r4d), from the seed after the key's bits.
+	pass, err := words.FromSeed(c.Card[localapi.RecoveryCardKeyLen:])
 	if err != nil {
 		return Refused(localapi.ErrRecoveryUnavailable)
 	}

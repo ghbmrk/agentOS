@@ -28,13 +28,13 @@ func TestWordlistIsEFFLarge(t *testing.T) {
 }
 
 // The lost-card passphrase (MIG-4-recovery-r4d): seven listed words in the
-// slot's form, the same for the same bits, unrelated for other bits, and
-// none for bits that are not a card's.
+// slot's form, the same for the same seed, unrelated for another seed,
+// and none for bytes that are not a seed.
 // Catches a draw that differs between the unlock step and the page, or
 // one that maps two cards to one passphrase.
-func TestFromCardKey(t *testing.T) {
-	bits := bytes.Repeat([]byte{0x5a}, cardKeyLen)
-	a, err := FromCardKey(bits)
+func TestFromSeed(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x5a}, seedLen)
+	a, err := FromSeed(seed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,28 +47,28 @@ func TestFromCardKey(t *testing.T) {
 			t.Fatalf("word %q is not on the list", w)
 		}
 	}
-	if b, _ := FromCardKey(bytes.Clone(bits)); !bytes.Equal(a, b) {
-		t.Fatal("the same bits gave two passphrases")
+	if b, _ := FromSeed(bytes.Clone(seed)); !bytes.Equal(a, b) {
+		t.Fatal("the same seed gave two passphrases")
 	}
 	// A fixed vector, so a change to the draw cannot pass both sides.
 	if got := string(a); got != vector {
-		t.Fatalf("passphrase for 0x5a bits = %q", got)
+		t.Fatalf("passphrase for the 0x5a seed = %q", got)
 	}
-	other := bytes.Clone(bits)
-	other[cardKeyLen-1] ^= 1
-	if c, _ := FromCardKey(other); bytes.Equal(a, c) {
-		t.Fatal("two cards' bits gave one passphrase")
+	other := bytes.Clone(seed)
+	other[seedLen-1] ^= 1
+	if c, _ := FromSeed(other); bytes.Equal(a, c) {
+		t.Fatal("two seeds gave one passphrase")
 	}
-	for _, n := range []int{0, cardKeyLen - 1, cardKeyLen + 1, 32} {
-		if _, err := FromCardKey(make([]byte, n)); err != ErrCardKey {
+	for _, n := range []int{0, seedLen - 1, seedLen + 1, 32} {
+		if _, err := FromSeed(make([]byte, n)); err != ErrSeed {
 			t.Fatalf("%d bytes: %v", n, err)
 		}
 	}
 }
 
-// vector is FromCardKey of twenty 0x5a bytes, computed apart from this code
+// vector is FromSeed of sixteen 0x5a bytes, computed apart from this code
 // (RFC 5869 HKDF-SHA256 in Python's hmac, the same draw).
-const vector = "vagrancy swiftness tactile unaired unsightly certify cringe"
+const vector = "pried unmoved vending cabdriver stopwatch equivocal ankle"
 
 // The draw itself, on streams made to hit its edges: a value of exactly
 // 8*Count is skipped and the one below it is kept; a stream that runs out,

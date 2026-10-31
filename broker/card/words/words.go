@@ -1,11 +1,11 @@
 // Package words is the Owner Card's passphrase wordlist, EFF's large list,
 // and the passphrase of a card the box makes on the lost-card route
-// (D-201 route B, MIG-4-recovery-r4d). That passphrase derives from the
-// new card's recovery key bits, so the unlock step, which puts it in the
-// store's passphrase slot, and the owner's page, which prints it, agree on
-// it while the kernel holds and hands those bits alone. It reveals nothing
-// of the bits (HKDF is one-way): the recovery key opens the store and its
-// backups, the passphrase only the store.
+// (D-201 route B, MIG-4-recovery-r4d). That passphrase derives from a
+// random seed the made card carries beside its recovery key's bits, never
+// from those bits, so a recovery key the owner later replaces derives
+// nothing that still opens the store. The unlock step, which puts the
+// passphrase in the store's passphrase slot, and the owner's page, which
+// prints it, derive it alike from the seed the kernel holds.
 package words
 
 import (
@@ -30,8 +30,8 @@ const (
 	// PerPassphrase is a card passphrase's length in words: 90 bits, above
 	// STO-2's 80.
 	PerPassphrase = 7
-	// cardKeyLen is a card's recovery key bits (handoff.CardKeyLen).
-	cardKeyLen = 20
+	// seedLen is a made card's passphrase seed (handoff.PassSeedLen).
+	seedLen = 16
 )
 
 var (
@@ -59,27 +59,27 @@ func Index(w string) (int, bool) {
 	return i, ok
 }
 
-// ErrCardKey: the bits are not a card's recovery key.
-var ErrCardKey = errors.New("words: not a card's recovery key")
+// ErrSeed: the bytes are not a passphrase seed.
+var ErrSeed = errors.New("words: not a passphrase seed")
 
-// FromCardKey is the passphrase of the card the box made with recovery key
-// bits cardKey: PerPassphrase words, lower case, one space apart (the form
-// the passphrase slot takes), drawn without bias from HKDF-SHA256 of the
-// bits, two bytes a word, a value at or past 8*Count skipped. The caller
-// owns and clears the result.
-func FromCardKey(cardKey []byte) ([]byte, error) {
-	if len(cardKey) != cardKeyLen {
-		return nil, ErrCardKey
+// FromSeed is the passphrase of the card the box made with passphrase seed
+// seed: PerPassphrase words, lower case, one space apart (the form the
+// passphrase slot takes), drawn without bias from HKDF-SHA256 of the seed,
+// two bytes a word, a value at or past 8*Count skipped. The caller owns and
+// clears the result.
+func FromSeed(seed []byte) ([]byte, error) {
+	if len(seed) != seedLen {
+		return nil, ErrSeed
 	}
 	// 32 draws: fewer than seven of them below 8*Count has odds under 2^-90.
-	s, err := hkdf.Key(sha256.New, cardKey, nil, "agentos.card.lost-passphrase.v1", 64)
+	s, err := hkdf.Key(sha256.New, seed, nil, "agentos.card.lost-passphrase.v1", 64)
 	defer clear(s)
 	if err != nil {
 		return nil, err
 	}
 	out, ok := phrase(s)
 	if !ok {
-		return nil, ErrCardKey
+		return nil, ErrSeed
 	}
 	return out, nil
 }

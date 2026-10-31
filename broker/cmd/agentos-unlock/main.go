@@ -29,9 +29,9 @@
 // (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
 // the kernel approved for the store's current backup recipient makes a new
 // card, replaces the recovery slot, the passphrase slot and the recipient
-// with its recovery key and passphrase in one write, and hands the card's
-// bits to the kernel, which shows the card on the owner's page. A request that is not one is ignored, with one line on stderr, and
-// the box starts as ever.
+// with its recovery key and passphrase in one write, and hands the card
+// to the kernel, which shows it on the owner's page. A request that is not
+// one is ignored, with one line on stderr, and the box starts as ever.
 //
 // With -checker-seed, it also writes the owner's code-generator seed from
 // the store, sealed under the checker's clerk key, to a file only root
@@ -224,7 +224,7 @@ func unlock(c config, pins pinSource) ([]byte, error) {
 	if request != nil {
 		k.NewRecovery, err = lostCard(st, request, k.Head.Public().(ed25519.PublicKey), time.Now().UnixMilli())
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the recovery key you hold: your lost-card request: %v\n", err)
+			fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the card you hold: your lost-card request: %v\n", err)
 		} else if err := os.Remove(c.request); err != nil {
 			fmt.Fprintf(os.Stderr, "agentos-unlock: remove the lost-card request I carried out: %v\n", err)
 		}
@@ -323,7 +323,7 @@ func takeRequest(c config) ([]byte, func()) {
 			return b, release
 		}
 	}
-	fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the recovery key you hold: your lost-card request: %v\n", err)
+	fmt.Fprintf(os.Stderr, "agentos-unlock: I start on the card you hold: your lost-card request: %v\n", err)
 	return nil, func() {}
 }
 
@@ -369,9 +369,11 @@ func lockStore(dir string) (func(), error) {
 // backup recipient st holds now ("" for none): it makes a new card, puts
 // its recovery key in st's one recovery slot, its passphrase in st's one
 // passphrase slot (MIG-4-recovery-r4d) and its recipient in RecipientEntry,
-// in one write (seal.Store.ReplaceAndPut), and returns the new card's bits
-// (handoff.CardKeyLen), from which that key and passphrase derive. So the
-// lost card's passphrase stops opening the store with its recovery key.
+// in one write (seal.Store.ReplaceAndPut), and returns the new card
+// (handoff.MadeCardLen): the bits that key derives from, then the seed the
+// passphrase derives from. So the lost card's passphrase stops opening the
+// store with its recovery key, and the two stay independent: a recovery
+// key replaced later (route A) derives nothing still in the store.
 // Any error changes nothing. Once the recipient has changed the request no
 // longer matches, so it is carried out at most once.
 func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64) ([]byte, error) {
@@ -396,16 +398,17 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 	if len(slot[seal.KindRecovery]) != 1 || len(slot[seal.KindPassphrase]) != 1 {
 		return nil, fmt.Errorf("my store holds %d recovery and %d passphrase slots, not one of each", len(slot[seal.KindRecovery]), len(slot[seal.KindPassphrase]))
 	}
-	// The new card's 160 bits, which the page prints; the slots and the
-	// recipient take the key derived from them, as from any card (#3406),
-	// and the passphrase derived from them (words.FromCardKey).
-	bits := make([]byte, handoff.CardKeyLen)
+	// The new card's 160 bits, which the page prints, and its passphrase's
+	// seed, drawn apart; the slots and the recipient take the key derived
+	// from the bits, as from any card (#3406), and the passphrase from the
+	// seed (words.FromSeed).
+	bits := make([]byte, handoff.MadeCardLen)
 	rand.Read(bits)
-	rec, err := handoff.StoreRecoveryKey(bits)
+	rec, err := handoff.StoreRecoveryKey(bits[:handoff.CardKeyLen])
 	defer clear(rec)
 	var pass []byte
 	if err == nil {
-		pass, err = words.FromCardKey(bits)
+		pass, err = words.FromSeed(bits[handoff.CardKeyLen:])
 	}
 	defer clear(pass)
 	var next backup.Recipient
