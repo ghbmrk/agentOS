@@ -134,6 +134,10 @@ type Store struct {
 	// retention: the sweep goes on expiring their segments by name but
 	// leaves their directories and keys alone until Erase or an Add.
 	kept map[string]*held
+
+	// writeStop, for tests only, is each segment write's
+	// privfile.WriteAtomic stop; nil runs every step.
+	writeStop func(i int) bool
 }
 
 // held is one camera's capture, or a kept camera's retention. mu orders
@@ -726,7 +730,7 @@ func (s *Store) seal(camera string, h *held) error {
 		}
 	}
 	if err == nil {
-		err = privfile.WriteAtomic(dir, name, file, nil)
+		err = privfile.WriteAtomic(dir, name, file, s.writeStop)
 	}
 	if err != nil && !errors.Is(err, privfile.ErrUnsynced) {
 		s.log(camera, "segment not written")

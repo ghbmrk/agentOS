@@ -1,0 +1,31 @@
+{
+ "schema_version": "1.6.0",
+ "id": "AGENTOS-VULNCHECK-INLINED-1",
+ "modified": "2026-01-01T00:00:00Z",
+ "published": "2026-01-01T00:00:00Z",
+ "aliases": [
+  "GHSA-0000-0000-0101"
+ ],
+ "summary": "Synthetic control entry for tools/vulncheck.py's inlined scan (a copy marked by a pnpm store path); not a real vulnerability.",
+ "affected": [
+  {
+   "package": {
+    "name": "agentos-inlined",
+    "ecosystem": "npm"
+   },
+   "ranges": [
+    {
+     "type": "SEMVER",
+     "events": [
+      {
+       "introduced": "0"
+      },
+      {
+       "fixed": "1.0.1"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
