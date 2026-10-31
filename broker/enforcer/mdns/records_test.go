@@ -285,7 +285,12 @@ func TestOwnNamesLearned(t *testing.T) {
 // times.
 func NewFilterFrom(f *Filter) *Filter {
 	g := NewFilter()
-	for _, p := range []struct{ from, to map[string]names }{{f.claimed, g.claimed}, {f.hosts, g.hosts}, {f.ins, g.ins}} {
+	for i, t := range f.claimed.by {
+		for k, u := range t {
+			g.claimed.add(i, k, u, u)
+		}
+	}
+	for _, p := range []struct{ from, to map[string]names }{{f.hosts, g.hosts}, {f.ins, g.ins}} {
 		for i, t := range p.from {
 			p.to[i] = names{}
 			for k, u := range t {
@@ -303,19 +308,19 @@ func NewFilterFrom(f *Filter) *Filter {
 func TestNamesBounded(t *testing.T) {
 	tb := names{}
 	for i := range maxNames {
-		tb.add(fmt.Sprint(i), t0.Add(time.Duration(i+1)*time.Second), t0)
+		tb.add(fmt.Sprint(i), t0.Add(time.Duration(i+1)*time.Second), t0, nil)
 	}
-	tb.add("0", t0.Add(time.Hour), t0) // a known name is renewed
+	tb.add("0", t0.Add(time.Hour), t0, nil) // a known name is renewed
 	if !tb.has("0", t0.Add(time.Minute)) || len(tb) != maxNames {
 		t.Fatalf("a known name was not renewed in place (%d)", len(tb))
 	}
 	keep := maxNames - maxNames/8
-	tb.add("new", t0.Add(time.Hour), t0) // none expired: "1" to "128" end soonest
+	tb.add("new", t0.Add(time.Hour), t0, nil) // none expired: "1" to "128" end soonest
 	if !tb.has("new", t0) || tb.has("128", t0) || !tb.has("129", t0) || len(tb) != keep+1 {
 		t.Fatalf("a full table did not drop the names ending soonest (%d)", len(tb))
 	}
 	for i := range maxNames/8 - 1 {
-		tb.add(fmt.Sprint("new", i), t0.Add(time.Hour), t0)
+		tb.add(fmt.Sprint("new", i), t0.Add(time.Hour), t0, nil)
 	}
 	if !tb.has("129", t0) || len(tb) != maxNames {
 		t.Fatalf("a table swept again before it was full (%d)", len(tb))
@@ -323,14 +328,14 @@ func TestNamesBounded(t *testing.T) {
 	// Names ending together are dropped only as many as need be.
 	same := names{}
 	for i := range maxNames {
-		same.add(fmt.Sprint(i), t0.Add(time.Hour), t0)
+		same.add(fmt.Sprint(i), t0.Add(time.Hour), t0, nil)
 	}
-	if same.add("new", t0.Add(time.Hour), t0); len(same) != keep+1 {
+	if same.add("new", t0.Add(time.Hour), t0, nil); len(same) != keep+1 {
 		t.Errorf("a sweep of names ending together left %d", len(same))
 	}
 	// At 200 s "129" to "199" have expired; then "200" to "256" end soonest.
 	now := t0.Add(200 * time.Second)
-	tb.add("newer", t0.Add(time.Hour), now)
+	tb.add("newer", t0.Add(time.Hour), now, nil)
 	if !tb.has("newer", now) || tb.has("256", now) || !tb.has("257", now) || len(tb) != keep+1 {
 		t.Errorf("expired names were not dropped first (%d)", len(tb))
 	}
@@ -359,6 +364,47 @@ func TestClaimsHoldPastAFlood(t *testing.T) {
 	if got := passed(t, f, "ap0.105", printerLink, response([]record{a("laptop.local", "10.13.0.2", 120)}, nil), t0.Add(time.Second)); got != nil {
 		t.Errorf("a name heard after a full table passed: %v", got)
 	}
+}
+
+// TestClaimsIndex: the index names exactly the interfaces whose tables
+// hold a name: a sweep of one interface's table takes only that
+// interface out of it, and a claim found expired leaves both.
+func TestClaimsIndex(t *testing.T) {
+	c := claims{by: map[string]names{}, at: map[string]map[string]bool{}}
+	k := dn("laptop.local").key()
+	c.add("a", k, t0.Add(time.Second), t0)
+	c.add("b", k, t0.Add(2*time.Hour), t0)
+	for i := range maxNames - 1 {
+		c.add("a", fmt.Sprint(i), t0.Add(time.Hour), t0)
+	}
+	c.add("a", "new", t0.Add(time.Hour), t0) // the sweep drops k first
+	if c.by["a"].has(k, t0) || !c.elsewhere(k, "a", t0) || c.elsewhere(k, "b", t0) || !c.elsewhere(k, "c", t0) {
+		t.Errorf("after a sweep of a: %v", c.at[k])
+	}
+	consistent := func() {
+		t.Helper()
+		n := 0
+		for i, tb := range c.by {
+			for k := range tb {
+				if !c.at[k][i] {
+					t.Errorf("%s holds %q but the index does not say so", i, k)
+				}
+			}
+			n += len(tb)
+		}
+		for _, is := range c.at {
+			n -= len(is)
+		}
+		if n != 0 {
+			t.Errorf("the index has %d entries no table holds", -n)
+		}
+	}
+	consistent()
+	later := t0.Add(3 * time.Hour)
+	if c.elsewhere(k, "c", later) || c.by["b"].has(k, t0) || c.at[k] != nil {
+		t.Errorf("an expired claim was not dropped: %v", c.at[k])
+	}
+	consistent()
 }
 
 func TestMine(t *testing.T) {
@@ -636,9 +682,95 @@ func TestParseBounded(t *testing.T) {
 	if _, ok := parse(response(enum, nil).bytes()); !ok {
 		t.Error("refused an enumeration of maxRecords service types")
 	}
-	for _, w := range [][]byte{worst(maxRecords), labels(31)} {
-		if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 4*maxRecords {
+	// Many names on one: every question, owner and target a pointer to
+	// the longest name the step budget allows that many names.
+	if _, ok := parse(shared(11)); !ok {
+		t.Error("refused a message of many names within the step budget")
+	}
+	if _, ok := parse(shared(12)); ok {
+		t.Error("parsed a message of many names over the step budget")
+	}
+	// Every name is a slice of the message's labels, so however its names
+	// are shaped a message costs a few allocations, growing its slices.
+	for _, w := range [][]byte{worst(maxRecords), labels(31), shared(11)} {
+		if allocs := testing.AllocsPerRun(10, func() { parse(w) }); allocs > 48 {
 			t.Errorf("a costliest message within the caps costs %v allocations", allocs)
+		}
+	}
+}
+
+// shared is a response of maxQuestions questions and maxRecords PTRs
+// whose every name and target points at the first question's name of n
+// labels: n + (1+n) steps for each of its other 319 names.
+func shared(n int) []byte {
+	b := []byte{0, 0, 0x84, 0, 0, maxQuestions, 0, maxRecords, 0, 0, 0, 0}
+	for range n {
+		b = append(b, 1, 'x')
+	}
+	b = append(b, 0, 0, typePTR, 0, 1)
+	for range maxQuestions - 1 {
+		b = append(b, 0xC0, 12, 0, typePTR, 0, 1)
+	}
+	for range maxRecords {
+		b = append(b, 0xC0, 12, 0, typePTR, 0, 1, 0, 0, 0, 120, 0, 2, 0xC0, 12)
+	}
+	return b
+}
+
+// TestPassCostBounded: the costliest responses a device can send, against
+// full tables whose every name is claimed on other interfaces, cost Pass
+// a bounded number of claim lookups, the same however many interfaces
+// the relay hears. A packet that repeats a record or a service type pays
+// for it once, and a name claimed on many interfaces is one lookup.
+func TestPassCostBounded(t *testing.T) {
+	var instances, enum, srvs, txts []record
+	// A full table on each other interface: maxNames-1 instances and their host.
+	for i := range maxNames - 1 {
+		instances = append(instances, srv(fmt.Sprintf("i%d._x._tcp.local", i), "h.local", 120))
+	}
+	for i := range maxRecords {
+		enum = append(enum, ptr("_services._dns-sd._udp.local", "_x._tcp.local", 120))
+		srvs = append(srvs, srv(fmt.Sprintf("i%d._x._tcp.local", i), "h.local", 120))
+		txts = append(txts, txt("i0._x._tcp.local", 120))
+	}
+	// And the device's own records, which no other interface claims, so a
+	// lookup that went through every interface's table would find nothing.
+	own := []record{a("own.local", "10.13.0.2", 120), ptr("_services._dns-sd._udp.local", "_y._tcp.local", 120)}
+	for i := range maxRecords - 2 {
+		own = append(own, srv(fmt.Sprintf("o%d._y._tcp.local", i), "own.local", 120))
+	}
+	worstCases := map[string]*message{
+		"one type enumerated again and again":  response(enum, nil),
+		"instances on a claimed host":          response(srvs, nil),
+		"one claimed instance again and again": response(txts, nil),
+		"its own records":                      response(own, nil),
+	}
+	const bound = 2*maxNames + 4*maxRecords
+	for _, others := range []int{1, 32} {
+		f := NewFilter()
+		ins := table(f.ins, "ap0.105")
+		for _, r := range instances {
+			ins.add(r.name.key(), t0.Add(ownHold), t0, nil)
+		}
+		claimed := slices.Concat(instances, []record{a("h.local", "10.14.0.2", 120)})
+		for i := range others {
+			for j := 0; j < len(claimed); j += maxRecords {
+				f.Hear(fmt.Sprint("ap0.", 200+i), response(claimed[j:min(j+maxRecords, len(claimed))], nil), t0)
+			}
+		}
+		for what, m := range worstCases {
+			f.Hear("ap0.105", m, t0)
+			before := f.claimed.work
+			want := 0
+			if what == "its own records" {
+				want = len(m.answers)
+			}
+			if got := passed(t, f, "ap0.105", printerLink, m, t0); len(got) != want {
+				t.Errorf("%d other interfaces, %s: passed %d records, want %d", others, what, len(got), want)
+			}
+			if work := f.claimed.work - before; work <= 0 || work > bound {
+				t.Errorf("%d other interfaces, %s: %d claim lookups, over %d", others, what, work, bound)
+			}
 		}
 	}
 }
@@ -724,11 +856,11 @@ func TestReadLimitBeforeParse(t *testing.T) {
 		r.handle("hh0", 5353, announce(fmt.Sprint("x", i)), t0)
 	}
 	r.handle("hh0", 5353, announce("late"), t0)
-	if !r.f.claimed["hh0"].has(dn("x0.local").key(), t0) || r.f.claimed["hh0"].has(dn("late.local").key(), t0) {
+	if !r.f.claimed.by["hh0"].has(dn("x0.local").key(), t0) || r.f.claimed.by["hh0"].has(dn("late.local").key(), t0) {
 		t.Error("the read limit did not stop the packet past its burst")
 	}
 	r.handle("hh0", 5353, announce("later"), t0.Add(time.Second/readPerSec))
-	if !r.f.claimed["hh0"].has(dn("later.local").key(), t0) {
+	if !r.f.claimed.by["hh0"].has(dn("later.local").key(), t0) {
 		t.Error("the read limit did not refill")
 	}
 	// Past the limit a packet is not even parsed: it costs nothing.

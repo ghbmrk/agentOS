@@ -76,11 +76,13 @@ const (
 )
 
 // reader reads one message: its labels are cut from one copy of it, and
-// steps is what is left of its maxSteps.
+// every name is a slice of labels, so a name costs no allocation of its
+// own; steps is what is left of its maxSteps.
 type reader struct {
-	b     []byte
-	s     string
-	steps int
+	b      []byte
+	s      string
+	steps  int
+	labels []string
 }
 
 // parse reads a whole DNS message. It fails on anything malformed:
@@ -174,7 +176,7 @@ const maxHops = 16
 
 func (rd *reader) name(off int) (name, int, bool) {
 	b := rd.b
-	var n name
+	start := len(rd.labels)
 	end, size, hops := -1, 1, 0
 	for off < len(b) {
 		c := int(b[off])
@@ -188,7 +190,7 @@ func (rd *reader) name(off int) (name, int, bool) {
 			if end < 0 {
 				end = off + 1
 			}
-			return n, end, true
+			return rd.labels[start:len(rd.labels):len(rd.labels)], end, true
 		case c&0xC0 == 0xC0 && off+1 < len(b):
 			p := (c&0x3F)<<8 | int(b[off+1])
 			if hops++; p >= off || hops > maxHops {
@@ -202,7 +204,7 @@ func (rd *reader) name(off int) (name, int, bool) {
 			if size += 1 + c; size > 255 {
 				return nil, 0, false
 			}
-			n = append(n, rd.s[off+1:off+1+c])
+			rd.labels = append(rd.labels, rd.s[off+1:off+1+c])
 			off += 1 + c
 		default:
 			return nil, 0, false
@@ -337,43 +339,95 @@ type names map[string]time.Time
 // expired names and then, until an eighth of it is free, the ones ending
 // soonest, so each sweep is paid for by the adds that fill it again. Only
 // what is heard on one interface fills that interface's table, and a host
-// there could take any name on its own link anyway.
-func (t names) add(k string, until, now time.Time) {
+// there could take any name on its own link anyway. dropped, if not nil,
+// is told each name the sweep drops.
+func (t names) add(k string, until, now time.Time, dropped func(string)) {
 	if _, ok := t[k]; !ok && len(t) >= maxNames {
-		t.sweep(now)
+		t.sweep(now, dropped)
 	}
 	t[k] = until
 }
 
-func (t names) sweep(now time.Time) {
+func (t names) sweep(now time.Time, dropped func(string)) {
+	drop := func(k string) {
+		delete(t, k)
+		if dropped != nil {
+			dropped(k)
+		}
+	}
 	held := make([]string, 0, len(t))
 	for k, u := range t {
 		if !u.After(now) {
-			delete(t, k)
+			drop(k)
 		} else {
 			held = append(held, k)
 		}
 	}
-	if drop := len(held) - (maxNames - maxNames/8); drop > 0 {
+	if n := len(held) - (maxNames - maxNames/8); n > 0 {
 		slices.SortFunc(held, func(a, b string) int { return t[a].Compare(t[b]) })
-		for _, k := range held[:drop] {
-			delete(t, k)
+		for _, k := range held[:n] {
+			drop(k)
 		}
 	}
 }
 
 func (t names) has(k string, now time.Time) bool { return t[k].After(now) }
 
+// claims is the names claimed on each interface, in a table per
+// interface, and an index from each name to the interfaces whose tables
+// hold it, so whether a name is claimed elsewhere is one lookup however
+// many interfaces the relay hears.
+type claims struct {
+	by map[string]names
+	at map[string]map[string]bool
+	// work counts the claims looked at, which a test bounds.
+	work int
+}
+
+func (c *claims) add(iface, k string, until, now time.Time) {
+	table(c.by, iface).add(k, until, now, func(d string) { c.unindex(d, iface) })
+	if c.at[k] == nil {
+		c.at[k] = map[string]bool{}
+	}
+	c.at[k][iface] = true
+}
+
+func (c *claims) unindex(k, iface string) {
+	delete(c.at[k], iface)
+	if len(c.at[k]) == 0 {
+		delete(c.at, k)
+	}
+}
+
+// elsewhere: an interface other than iface holds a claim on k until
+// after now. A claim found expired is dropped, as a sweep would, so each
+// is looked at once: the work is iface's own claim and the first other.
+func (c *claims) elsewhere(k, iface string, now time.Time) bool {
+	for i := range c.at[k] {
+		c.work++
+		switch {
+		case i == iface:
+		case c.by[i].has(k, now):
+			return true
+		default:
+			delete(c.by[i], k)
+			c.unindex(k, i)
+		}
+	}
+	return false
+}
+
 // Filter is the relay's memory of names: for each interface, the names
 // claimed by what was heard there, and the host and instance names its
 // sender showed are its own.
 type Filter struct {
-	mu                  sync.Mutex
-	claimed, hosts, ins map[string]names
+	mu         sync.Mutex
+	claimed    claims
+	hosts, ins map[string]names
 }
 
 func NewFilter() *Filter {
-	return &Filter{claimed: map[string]names{}, hosts: map[string]names{}, ins: map[string]names{}}
+	return &Filter{claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}}, hosts: map[string]names{}, ins: map[string]names{}}
 }
 
 func table(m map[string]names, iface string) names {
@@ -394,14 +448,13 @@ func (f *Filter) Hear(iface string, m *message, now time.Time) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	t := table(f.claimed, iface)
 	for _, r := range rs {
 		n := r.name
 		if r.typ == typePTR {
 			n = r.target
 		}
 		if r.typ != typePTR || n.instance() {
-			t.add(n.key(), now.Add(claimHold), now)
+			f.claimed.add(iface, n.key(), now.Add(claimHold), now)
 		}
 	}
 }
@@ -423,14 +476,10 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	elsewhere := func(k string) bool {
-		for i, t := range f.claimed {
-			if i != iface && t.has(k, now) {
-				return true
-			}
-		}
-		return false
-	}
+	// A packet costs a bounded number of claim lookups whatever it
+	// repeats: one or two for each of its records, and, if it enumerates
+	// service types, one for each of the sender's instances.
+	elsewhere := func(k string) bool { return f.claimed.elsewhere(k, iface, now) }
 	hosts, ins := table(f.hosts, iface), table(f.ins, iface)
 	rs := slices.Concat(m.answers, m.additional)
 	// The packet's own proof first: its hosts, then the instances on them;
@@ -441,18 +490,21 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 			ph[r.name.key()] = true
 		}
 	}
-	isHost := func(n name) bool { return (ph[n.key()] || hosts.has(n.key(), now)) && !elsewhere(n.key()) }
+	isHost := func(n name) bool { k := n.key(); return (ph[k] || hosts.has(k, now)) && !elsewhere(k) }
 	for _, r := range rs {
 		if r.typ == typeSRV && r.name.instance() && isHost(r.target) {
 			pi[r.name.key()] = true
 		}
 	}
 	isIns := func(n name) bool {
-		return n.instance() && (pi[n.key()] || ins.has(n.key(), now)) && !elsewhere(n.key())
+		k := n.key()
+		return n.instance() && (pi[k] || ins.has(k, now)) && !elsewhere(k)
 	}
 	// The sender's instances by service type, built once, when the packet
-	// enumerates types; a type passes if one of them is not claimed elsewhere.
+	// enumerates types; a type passes if one of them is not claimed
+	// elsewhere, decided once a packet.
 	var types map[string][]string
+	typeSeen := map[string]bool{}
 	hasType := func(k string) bool {
 		if types == nil {
 			types = map[string][]string{}
@@ -462,7 +514,12 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 				}
 			}
 		}
-		return slices.ContainsFunc(types[k], func(k string) bool { return !elsewhere(k) })
+		v, ok := typeSeen[k]
+		if !ok {
+			v = slices.ContainsFunc(types[k], func(k string) bool { return !elsewhere(k) })
+			typeSeen[k] = v
+		}
+		return v
 	}
 	keep := func(r record) bool {
 		if r.class&0x7FFF != classIN || !r.name.shown() || !r.target.shown() {
@@ -507,7 +564,7 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		case r.ttl == 0:
 			delete(t, r.name.key())
 		default:
-			t.add(r.name.key(), now.Add(min(time.Duration(r.ttl)*time.Second, ownHold)), now)
+			t.add(r.name.key(), now.Add(min(time.Duration(r.ttl)*time.Second, ownHold)), now, nil)
 		}
 	}
 	if len(kept) == 0 {
