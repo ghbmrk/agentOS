@@ -777,3 +777,27 @@ func TestOwnerLine(t *testing.T) {
 		t.Errorf("pause line %q, want %q", got, want)
 	}
 }
+
+// TestReservedWord (NET-2 Channel, #4249): wire.Name refuses the word
+// policy.Unknown reserves, in any case, so renaming one without the other
+// fails here rather than letting the core send a name that reads as the
+// marker. A lookalike such as "unknоwn" (Cyrillic о) passes both checks;
+// only the owner can sign it, and it shows as itself, one token with no
+// digits, so it never takes the marker's "unknown" and hex form.
+func TestReservedWord(t *testing.T) {
+	for _, s := range []string{policy.Unknown, strings.ToUpper(policy.Unknown), strings.ToUpper(policy.Unknown[:1]) + policy.Unknown[1:]} {
+		if wire.Name(s) {
+			t.Errorf("wire.Name(%q) = true, want the word policy.Unknown reserves refused", s)
+		}
+	}
+	look := "unknоwn"
+	if !wire.Name(look) {
+		t.Fatalf("wire.Name(%q) = false", look)
+	}
+	if got := Short(look); got != look {
+		t.Errorf("Short(%q) = %q, want it shown as itself", look, got)
+	}
+	if got := Short(logName(home(), look)); !strings.HasPrefix(got, unknownWord) || len(got) != len(unknownWord)+shortHex {
+		t.Errorf("unsigned lookalike shows as %q, want the marker and its digits", got)
+	}
+}
