@@ -14,7 +14,8 @@
 # compiler. Usage: build-openthread.sh OUTDIR [--sim]
 set -eu
 
-# Its mbedtls submodule is pinned by that commit's tree.
+# Its mbedtls submodule (and that one's framework submodule) is pinned by
+# that commit's tree.
 PIN=$(dirname "$0")/../broker/enforcer/radio/thread/openthread.pin
 OT_COMMIT=$(sed -n 's/^commit \([0-9a-f]\{40\}\)$/\1/p' "$PIN")
 [ -n "$OT_COMMIT" ]
@@ -27,7 +28,7 @@ git init -q "$W/src"
 git -C "$W/src" fetch -q --depth 1 https://github.com/openthread/openthread "$OT_COMMIT"
 git -C "$W/src" checkout -q FETCH_HEAD
 [ "$(git -C "$W/src" rev-parse HEAD)" = "$OT_COMMIT" ]
-git -C "$W/src" submodule update -q --init --depth 1 third_party/mbedtls/repo
+git -C "$W/src" submodule update -q --init --recursive --depth 1 third_party/mbedtls/repo
 
 SOCK='-DOPENTHREAD_POSIX_CONFIG_DAEMON_SOCKET_BASENAME=\"openthread-%s\"'
 cmake -S "$W/src" -B "$W/posix" -GNinja -DCMAKE_BUILD_TYPE=Release \
