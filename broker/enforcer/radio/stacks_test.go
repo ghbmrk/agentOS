@@ -50,17 +50,9 @@ func probeNet(kind, policy, page string) {
 		}
 		return err
 	}
-	raw := func(nr uintptr, args ...uintptr) error {
-		var a [3]uintptr
-		copy(a[:], args)
-		r, _, e := syscall.Syscall(nr, a[0], a[1], a[2])
-		if e != 0 {
-			return e
-		}
-		syscall.Close(int(r))
-		return nil
-	}
 	out := map[string]string{}
+	var keep [][]byte // the C strings the calls below point at
+	defer runtime.KeepAlive(&keep)
 	_, err := os.ReadFile(policy)
 	out["policy-r"] = try(err)
 	out["policy-w"] = try(os.WriteFile(filepath.Join(filepath.Dir(policy), "next.json"), []byte("{}"), 0o600))
@@ -80,21 +72,42 @@ func probeNet(kind, policy, page string) {
 	} else {
 		out["inet6"] = try(err)
 	}
-	out["unshare-user"] = try(syscall.Unshare(syscall.CLONE_NEWUSER))
-	out["unshare-mnt"] = try(syscall.Unshare(syscall.CLONE_NEWNS))
-	out["clone-net"] = try(cloneNewNet())
-	if f, err := os.Open("/proc/self/ns/net"); err == nil {
-		_, _, e := syscall.RawSyscall(308 /* setns */, f.Fd(), syscall.CLONE_NEWNET, 0)
-		f.Close()
-		if e != 0 {
-			out["setns"] = try(e)
-		} else {
-			out["setns"] = "allowed"
+	// The namespace and mount calls, each in a single-threaded child of
+	// its own (forkCall): a threaded caller gets EINVAL for
+	// unshare(CLONE_NEWUSER) whatever the filter says, so only EPERM
+	// counts as refused. This profile lacks the capability for most of
+	// them, so its EPERM may be the kernel's; confine's
+	// TestFilterRefusesLive shows each is the filter's, in a process the
+	// kernel would let make them (#4233).
+	nsCall := func(nr uintptr, a ...uintptr) string {
+		var v [6]uintptr
+		copy(v[:], a)
+		e, err := attempt(nr, v)
+		switch {
+		case err != nil:
+			return "untested: " + err.Error()
+		case e == syscall.EPERM:
+			return try(e)
+		case e == 0:
+			return "allowed"
 		}
+		fmt.Fprintf(os.Stderr, "%s: %v\n", kind, e)
+		return "untested: " + e.Error()
 	}
-	out["mount"] = try(syscall.Mount("none", "/tmp", "tmpfs", 0, ""))
-	tmpfs := []byte("tmpfs\x00")
-	out["fsopen"] = try(raw(430, uintptr(unsafe.Pointer(&tmpfs[0])), 0))
+	cstr := func(s string) uintptr {
+		b := append([]byte(s), 0)
+		keep = append(keep, b)
+		return uintptr(unsafe.Pointer(&b[0]))
+	}
+	out["unshare-user"] = nsCall(syscall.SYS_UNSHARE, syscall.CLONE_NEWUSER)
+	out["unshare-mnt"] = nsCall(syscall.SYS_UNSHARE, syscall.CLONE_NEWNS)
+	out["clone-net"] = nsCall(syscall.SYS_CLONE, syscall.CLONE_NEWNET|uintptr(syscall.SIGCHLD))
+	if f, err := os.Open("/proc/self/ns/net"); err == nil {
+		out["setns"] = nsCall(308 /* setns */, f.Fd(), syscall.CLONE_NEWNET)
+		f.Close()
+	}
+	out["mount"] = nsCall(syscall.SYS_MOUNT, cstr("none"), cstr("/tmp"), cstr("tmpfs"), 0, cstr(""))
+	out["fsopen"] = nsCall(430 /* fsopen */, cstr("tmpfs"), 0)
 	out["setuid0"] = try(syscall.Setuid(0))
 	out["ptrace"] = ptraceChild(try)
 	if kind == "thread" {
@@ -150,18 +163,37 @@ func createTun(name string) error {
 	return nil
 }
 
-// cloneNewNet is a raw clone(CLONE_NEWNET) whose child exits at once.
-func cloneNewNet() error {
-	pid, _, e := syscall.RawSyscall6(syscall.SYS_CLONE, syscall.CLONE_NEWNET|uintptr(syscall.SIGCHLD), 0, 0, 0, 0, 0)
+// attempt makes one call in a child forked for it, which has one thread
+// and inherits the filter, so what the call changes ends with the child.
+// It returns the call's errno (0: it succeeded), or an error when the
+// child did not exit on its own.
+func attempt(nr uintptr, a [6]uintptr) (syscall.Errno, error) {
+	pid, e := forkCall(nr, a)
 	if e != 0 {
-		return e
-	}
-	if pid == 0 {
-		syscall.RawSyscall(syscall.SYS_EXIT_GROUP, 0, 0, 0)
+		return 0, fmt.Errorf("fork: %v", e)
 	}
 	var ws syscall.WaitStatus
-	syscall.Wait4(int(pid), &ws, 0, nil)
-	return nil
+	if _, err := syscall.Wait4(pid, &ws, 0, nil); err != nil {
+		return 0, err
+	}
+	if !ws.Exited() {
+		return 0, fmt.Errorf("child ended by %v", ws.Signal())
+	}
+	return syscall.Errno(ws.ExitStatus()), nil
+}
+
+// forkCall forks; the child makes the call and exits with its errno,
+// running only raw system calls with no stack check, as the runtime's own
+// fork does.
+//
+//go:nosplit
+func forkCall(nr uintptr, a [6]uintptr) (int, syscall.Errno) {
+	pid, _, e := syscall.RawSyscall6(syscall.SYS_CLONE, uintptr(syscall.SIGCHLD), 0, 0, 0, 0, 0)
+	if e == 0 && pid == 0 {
+		_, _, e = syscall.RawSyscall6(nr, a[0], a[1], a[2], a[3], a[4], a[5])
+		syscall.RawSyscall(syscall.SYS_EXIT_GROUP, uintptr(e), 0, 0)
+	}
+	return int(pid), e
 }
 
 // TestStacksConfined (NET-2 Confined radio stacks): the Thread stack runs
