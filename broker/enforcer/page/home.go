@@ -11,10 +11,21 @@ import (
 
 var funcs = template.FuncMap{
 	"label":  labelWords,
-	"when":   func(ms int64) string { return time.UnixMilli(ms).UTC().Format("Mon 2 Jan 2006 15:04:05 UTC") },
 	"lines":  func(b []byte) []string { return strings.Split(strings.TrimSpace(string(b)), "\n") },
 	"ascii":  ascii,
 	"sealed": sealedLine,
+}
+
+// when is a time as the page shows it: in the owner's zone, with the
+// zone's name, so the owner converts nothing (NET-4). Every time on the
+// page is drawn by it.
+func (s *Server) when(ms int64) string {
+	return clock(ms, s.cfg.Zone)
+}
+
+// clock is ms in zone, to the minute, with the zone's name.
+func clock(ms int64, zone *time.Location) string {
+	return time.UnixMilli(ms).In(zone).Format("Mon 2 Jan 2006 15:04 MST")
 }
 
 // shortLine is pairseal.Statement's line as the page shows it: the
@@ -38,7 +49,7 @@ func sealedLine(line string) *shortLine {
 // challenge one tap signs for exactly that diff.
 func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	if !s.link() {
+	if !s.limit(&s.links) {
 		s.mu.Unlock()
 		http.Error(w, errLimited.Error(), http.StatusTooManyRequests)
 		return

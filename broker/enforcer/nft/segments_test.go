@@ -186,11 +186,14 @@ func TestCopiedMACGetsOwnList(t *testing.T) {
 		return
 	}
 	h := build(t)
-	plugMAC := strings.Fields(h.in(h.hosts["103"], "cat", "/sys/class/net/eth0/address"))[0]
+	plugMAC := h.mac(h.hosts["103"], "eth0")
 	impostor := h.hosts["102"] // the offline speaker: no internet of its own
 	h.in(impostor, "ip", "link", "set", "eth0", "down")
 	h.in(impostor, "ip", "link", "set", "eth0", "address", plugMAC)
 	h.in(impostor, "ip", "link", "set", "eth0", "up")
+	if got := h.mac(impostor, "eth0"); got != plugMAC {
+		t.Fatalf("the impostor has %s, want the copied %s", got, plugMAC)
+	}
 	h.in(impostor, "ip", "route", "replace", "default", "via", "10.102.0.1")
 	h.expect(
 		probe{from: "102", addr: netAllow, port: 80, why: "the copied MAC's allow list"},

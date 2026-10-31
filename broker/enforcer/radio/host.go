@@ -1,6 +1,7 @@
 package radio
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -128,7 +129,15 @@ func (h *Host) Attach(s Stack, conn Conn) error {
 // Call sends r to the stack that serves r.Device and waits for its answer.
 // The op must be declared for that stack, and a characteristic must be one
 // the policy lists for the device; otherwise nothing is sent.
-func (h *Host) Call(r Request) ([]byte, error) {
+func (h *Host) Call(r Request) ([]byte, error) { return h.Send(context.Background(), r) }
+
+// Send is Call for a caller with a deadline of its own (an asserted
+// action, action.Actuator): it checks ctx under the lock that orders the
+// link's writes, in the same step as the write, so it never starts a send
+// once ctx has ended, and a send it did start is ordered before every
+// later one on the link (a relock). It stops waiting for the answer when
+// ctx ends, as at Config.Timeout.
+func (h *Host) Send(ctx context.Context, r Request) ([]byte, error) {
 	d, ok := h.devices[r.Device]
 	if !ok {
 		h.cfg.Log(fmt.Sprintf("radio: refused %s for unknown device", r.Op))
@@ -161,6 +170,13 @@ func (h *Host) Call(r Request) ([]byte, error) {
 	timer := time.NewTimer(h.cfg.Timeout)
 	defer timer.Stop()
 	l.wmu.Lock()
+	if err := ctx.Err(); err != nil {
+		l.wmu.Unlock()
+		h.mu.Lock()
+		delete(l.pending, r.ID)
+		h.mu.Unlock()
+		return nil, err
+	}
 	err := l.conn.SetWriteDeadline(deadline)
 	if err == nil {
 		err = write(l.conn, r)
@@ -185,21 +201,27 @@ func (h *Host) Call(r Request) ([]byte, error) {
 		}
 		return nil, ErrFailed
 	case <-timer.C:
-		// A late answer is dropped, not taken as unasked; a stack that
-		// leaves too many unanswered is dead.
-		h.mu.Lock()
-		_, still := l.pending[r.ID]
-		delete(l.pending, r.ID)
-		if still {
-			l.expired[r.ID] = r.Device
-		}
-		dead := len(l.expired) > maxExpired
-		h.mu.Unlock()
-		if dead {
-			h.fail(l, "too many requests unanswered")
-		}
-		return nil, ErrTimeout
+		return nil, h.expire(l, r)
+	case <-ctx.Done():
+		return nil, h.expire(l, r)
 	}
+}
+
+// expire gives up waiting for r's answer. A late answer is dropped, not
+// taken as unasked; a stack that leaves too many unanswered is dead.
+func (h *Host) expire(l *link, r Request) error {
+	h.mu.Lock()
+	_, still := l.pending[r.ID]
+	delete(l.pending, r.ID)
+	if still {
+		l.expired[r.ID] = r.Device
+	}
+	dead := len(l.expired) > maxExpired
+	h.mu.Unlock()
+	if dead {
+		h.fail(l, "too many requests unanswered")
+	}
+	return ErrTimeout
 }
 
 // verbs maps the channel's device verbs to ops.

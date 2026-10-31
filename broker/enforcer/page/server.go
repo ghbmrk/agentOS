@@ -91,8 +91,14 @@ type Config struct {
 	// Act carries out the owner's asserted actions on safety-list devices
 	// (slice s); nil serves none. ActTimeout bounds each call, and so how
 	// long a tap holds Lock: zero means action.Timeout, and more is refused.
+	// Log takes one line for each act that may have run without the page
+	// knowing (timed out, failed, panicked); it is required with Act.
 	Act        action.Actuator
 	ActTimeout time.Duration
+	Log        func(string)
+	// Zone is the owner's time zone, the enforcer's configured one: every
+	// time the page shows is in it, never in UTC (NET-4).
+	Zone *time.Location
 	// Secrets takes safety-list devices' sealed secrets (slice r); nil
 	// refuses every link that carries one.
 	Secrets Secrets
@@ -128,7 +134,7 @@ func New(cfg Config) (*Server, error) {
 	if want, err := key.ES256(cfg.Name, cfg.Owner.Bytes()); err != nil || want != cfg.Owner {
 		return nil, ErrConfig // the passkey must be bound to the enforcer's own name
 	}
-	if len(cfg.Addrs) == 0 || len(cfg.Allow) == 0 {
+	if len(cfg.Addrs) == 0 || len(cfg.Allow) == 0 || cfg.Zone == nil || (cfg.Act != nil && cfg.Log == nil) {
 		return nil, ErrConfig
 	}
 	for _, a := range cfg.Addrs {
@@ -147,11 +153,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	t, err := template.New("").Funcs(funcs).ParseFS(files, "templates/*.html")
+	s := &Server{cfg: cfg, chals: map[string]*challenge{}}
+	t, err := template.New("").Funcs(funcs).Funcs(template.FuncMap{"when": s.when}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, chals: map[string]*challenge{}, tmpl: t}
+	s.tmpl = t
 	if cfg.Act != nil {
 		if s.book, err = action.NewBook(cfg.Owner, cfg.Act, cfg.ActTimeout); err != nil {
 			return nil, err
