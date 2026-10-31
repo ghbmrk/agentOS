@@ -52,17 +52,41 @@ exempt-pr 4051
 # once #4088 merges.
 exempt-pr 4088
 
-# #4092 (ENF-k-ptrace, #4091): broker/enforcer/radio/, which the G2 list does not name (D-198).
-# Remove once #4092 merges.
-exempt-pr 4092
+# #4127 (ENF-k2, #3906): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
+# Remove once #4127 merges.
+exempt-pr 4127
 
-# #4073 (ENF-r, #3692): broker/enforcer/pairseal/, broker/enforcer/devsecret/ and
-# broker/clerk/enfpair/, which the G2 list does not name (D-198). Remove once #4073 merges.
-exempt-pr 4073
+# #4125 (ENF-t, #3702): broker/enforcer/radio/ (with radio/thread/ and radio/confine/), which the G2
+# list does not name (D-198). Remove once #4125 merges.
+exempt-pr 4125
 
-# #4058 (CAM-clerk-image, #3867): broker/cmd/agentos-camera/, which the G2 list does not name
-# (D-198). Remove once #4058 merges.
-exempt-pr 4058
+# #4122 (ENF-r-follow, #4119): broker/enforcer/devsecret/, page/ and pairseal/, which the G2 list
+# does not name (D-198). Remove once #4122 merges.
+exempt-pr 4122
+
+# #4132 (ENF-names-b): broker/enforcer/channel/, which the G2 list does not name (D-198).
+# Remove once #4132 merges.
+exempt-pr 4132
+
+# #4133 (ENF-s-b): broker/enforcer/action/ and page/ (with page/templates/), which the G2 list does not name (D-198).
+# Remove once #4133 merges.
+exempt-pr 4133
+
+# #4135 (CAM-clerk-kept-expiry): broker/clerk/camera/ and broker/cmd/agentos-camera/, which the G2 list does not name (D-198).
+# Remove once #4135 merges.
+exempt-pr 4135
+
+# #4139 (ENF-dns): broker/enforcer/dns/, which the G2 list does not name (D-198).
+# Remove once #4139 merges.
+exempt-pr 4139
+
+# #4145 (ENF-mdns-records): broker/enforcer/mdns/ and nft/, which the G2 list does not name (D-198).
+# Remove once #4145 merges.
+exempt-pr 4145
+
+# #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
+# Remove once #4149 merges.
+exempt-pr 4149
 
 # Project machinery and records.
 allow .claude/
