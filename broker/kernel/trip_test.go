@@ -1,6 +1,6 @@
 package kernel_test
 
-// REQ: KRN-12, KEY-3, KEY-4, KEY-6
+// REQ: KRN-12, KRN-6, KEY-3, KEY-4, KEY-6
 
 import (
 	"bytes"
@@ -846,4 +846,94 @@ func TestOwnerPauseAfterTripOutlivesResume(t *testing.T) {
 		t.Fatal("the resume lifted the owner's own pause")
 	}
 	r.replays()
+}
+
+// A honey key given in-process with a link that is not valid UTF-8, at
+// Extend or Issue, still trips in full: the trip is derived from the key as
+// the log holds it, so the fold and Rederive derive the same one and the
+// pause holds (KRN-6, KRN-12 Response). Catches a refused call whose trip
+// folds to nothing because the log's JSON rewrote the key (#4283 item 1).
+func TestHoneyKeyNotUTF8StillPauses(t *testing.T) {
+	for _, op := range []string{kernel.OpExtend, kernel.OpIssue} {
+		r := newRig(t)
+		tb := r.decoys()
+		modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+		exhaust(r, "t1", 100)
+		honey, hk, _ := honeyKey(t, tb, "t1\xff")
+		var logged key.Key
+		b, _ := json.Marshal(hk)
+		must(t, json.Unmarshal(b, &logged))
+		if logged.Tip() == hk.Tip() {
+			t.Fatal("the log's JSON should rewrite the key's link")
+		}
+		var err error
+		if op == kernel.OpExtend {
+			err = r.k.Extend(3, hk, "t1")
+		} else {
+			err = r.k.Issue(3, approve([]key.Key{hk}, r.owner, r.spare), hk)
+		}
+		var rf *key.Refusal
+		if !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+			t.Fatalf("%s: %v", op, err)
+		}
+		tr := r.trips(1, 1)
+		want := []key.ID{honey.Tip(), logged.Tip()}
+		if op == kernel.OpExtend {
+			want = append(want, r.k.State().Plans["t1"].Scopes...)
+		}
+		for _, id := range want {
+			if !r.k.State().Changes.Paused[id] || !slices.Contains(tr.Scopes, id) {
+				t.Fatalf("%s: %s not paused by %v", op, id, tr.Scopes)
+			}
+		}
+		if !r.k.State().Tripped() {
+			t.Fatalf("%s: planning not stopped", op)
+		}
+	}
+}
+
+// A honey key at Extend naming a plan that is not held pauses only the
+// honey key's own chain: Extend would refuse that plan, so its scope is not
+// what the key touched (KRN-12 Response, "paused what it touched"). Catches
+// a cited plan ID pausing an unrelated active plan's keys (#4283 item 5).
+func TestHoneyKeyAtExtendOfAnUnheldPlanPausesOnlyItself(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	honey, hk, _ := honeyKey(t, tb, "t1")
+	var rf *key.Refusal
+	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+		t.Fatalf("a honey key extending an unheld plan: %v", err)
+	}
+	tr := r.trips(1, 1)
+	if want := []key.ID{honey.Tip(), hk.Tip()}; !slices.Equal(tr.Scopes, want) {
+		t.Fatalf("scopes %v, want the honey chain %v", tr.Scopes, want)
+	}
+	for _, id := range r.k.State().Plans["t1"].Scopes {
+		if r.k.State().Changes.Paused[id] {
+			t.Fatalf("the unheld plan's scope %s was paused", id)
+		}
+	}
+}
+
+// Only an active plan is held or admits spend: a plan that is pending or
+// has ended has no scope to fund, so a hold on it would leave a later
+// Extend's trip pausing nothing of it (LOG-7, KRN-12 Response). Catches a
+// hold logged on a plan that is not running (#4283 item 2).
+func TestOnlyAnActivePlanIsHeld(t *testing.T) {
+	r := newRig(t)
+	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
+	must(t, r.meter(1, "t1", "api", 100, "provider"))
+	rf := r.admit(2, "t1", 1)
+	if rf == nil {
+		t.Fatal("plan should be exhausted")
+	}
+	must(t, r.k.Cancel(3, "t1"))
+	var got *key.Refusal
+	if err := r.k.Hold(4, "t1", rf); !errors.As(err, &got) || got.Code != kernel.CPlan {
+		t.Fatalf("a hold on a cancelled plan: %v", err)
+	}
+	if _, held := r.k.State().SpendHeld["t1"]; held {
+		t.Fatal("the cancelled plan was held")
+	}
 }
