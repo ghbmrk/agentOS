@@ -194,6 +194,7 @@ func TestClaimedNamesStayTheirs(t *testing.T) {
 		srv("Cached._ipp._tcp.local", "printer.local", 120),
 		srv("Mine._smb._tcp.local", "laptop.local", 120),
 		ptr("_services._dns-sd._udp.local", "_ipp._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_hap._tcp.local", 120), // its only instance is claimed
 	}, nil)
 	want := []string{
 		"an cached.local 10.13.0.2",

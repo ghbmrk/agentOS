@@ -450,21 +450,19 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	isIns := func(n name) bool {
 		return n.instance() && (pi[n.key()] || ins.has(n.key(), now)) && !elsewhere(n.key())
 	}
-	// The service types the sender has an instance of, built once, when
-	// the packet enumerates them.
-	var types map[string]bool
+	// The sender's instances by service type, built once, when the packet
+	// enumerates types; a type passes if one of them is not claimed elsewhere.
+	var types map[string][]string
 	hasType := func(k string) bool {
 		if types == nil {
-			types = map[string]bool{}
+			types = map[string][]string{}
 			for _, ks := range [][]string{live(ins, now), slices.Collect(maps.Keys(pi))} {
 				for _, k := range ks {
-					if !elsewhere(k) {
-						types[parentKey(k)] = true
-					}
+					types[parentKey(k)] = append(types[parentKey(k)], k)
 				}
 			}
 		}
-		return types[k]
+		return slices.ContainsFunc(types[k], func(k string) bool { return !elsewhere(k) })
 	}
 	keep := func(r record) bool {
 		if r.class&0x7FFF != classIN || !r.name.shown() || !r.target.shown() {
