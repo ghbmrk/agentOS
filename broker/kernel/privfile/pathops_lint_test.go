@@ -7,8 +7,10 @@ package privfile
 // other uid that can plant one in a directory on it redirects the write,
 // removal or read (#3282, #3382, #3624). The root side is derived, not
 // listed: every binary a shipped systemd unit starts with no User= or
-// DynamicUser= (or on an Exec line with a + or ! prefix), and the module's
-// packages that binary links. In those packages each use of a path-based os
+// DynamicUser= (or on an Exec line with a + or ! prefix), every binary a
+// udev rule file under image/ or broker/ names (udev runs RUN, PROGRAM and
+// IMPORT{program} as root, #3950), and the module's packages those binaries
+// link. In those packages each use of a path-based os
 // call that follows links (pathOps) fails unless it is os.OpenFile with
 // O_NOFOLLOW, goes through privfile, or has an allow line in
 // pathops_allow.txt naming the file, the function and the call, with a
@@ -17,8 +19,8 @@ package privfile
 // Bound: an allow line's reason is held by review, as is a link planted
 // through a path the reason deems safe (a parent directory another uid can
 // write). Calls outside pathOps (os.Lstat, os.ReadDir, os.Symlink, os.Chtimes,
-// os.Truncate, syscall and unix path calls), a binary that a udev rule or a
-// script rather than a unit starts (#3950), a binary built by a line
+// os.Truncate, syscall and unix path calls), a binary that a script rather
+// than a unit or udev rule starts, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
 // operations of non-root host processes are outside the check.
@@ -229,6 +231,68 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	})
 }
 
+// A udev rule runs its programs as root, so a broker binary a .rules file
+// names joins the root side wherever the name sits (#3950).
+func TestRootSideSetCountsUdevRulePrograms(t *testing.T) {
+	const rule = "broker/side/udev/59-agentos-side.rules"
+	files := map[string]string{
+		"broker/side/side.go":              "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
+		"broker/cmd/agentos-side/main.go":  "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
+		"image/mkosi/agentos-side.service": "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
+		rule:                               "ACTION==\"remove\", GOTO=\"end\"\nRUN+=\"/usr/lib/agentos/host-disk-unlink %k\"\nENV{X}=\"agentos-sid\"\nOWNER=\"agentos-side\", GROUP:=\"agentos-side\", MODE=\"0600\"\n",
+		"broker/side/udev/README":          "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+	}
+	set := func(t *testing.T, files map[string]string) []string {
+		t.Helper()
+		bins, err := rootBinaries(fakeRepo(t, files))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bins
+	}
+	if bins := set(t, files); len(bins) != 0 {
+		t.Fatalf("a rule naming only other programs, a prefix of the name or the binary's account, a file that is no .rules, a unit with User=: got %q, want none", bins)
+	}
+	for name, text := range map[string]string{
+		"RUN+=":                        "ACTION==\"add\", RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
+		"RUN{program}+=":               "RUN{program}+=\"/usr/lib/agentos/agentos-side\"\n",
+		"IMPORT{program}=":             "ENV{DEVTYPE}==\"disk\", IMPORT{program}=\"/usr/lib/agentos/agentos-side classify %k\"\n",
+		"PROGRAM==":                    "PROGRAM==\"/usr/lib/agentos/agentos-side %k\", SYMLINK+=\"x\"\n",
+		"PROGRAM!= with no spaces":     "PROGRAM!=\"agentos-side\",GOTO=\"end\"\n",
+		"a wrapper's word":             "RUN+=\"/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side\"\n",
+		"a bare name udev resolves":    "RUN+=\"agentos-side %k\"\n",
+		"a name an ENV value holds":    "ENV{P}=\"/usr/lib/agentos/agentos-side\"\nRUN+=\"$env{P}\"\n",
+		"a continued line":             "ACTION==\"add\", \\\n  RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+		"after a comment ending in \\": "# old rule \\\nRUN+=\"/usr/lib/agentos/agentos-side\"\n",
+		"a commented rule":             "# RUN+=\"/usr/lib/agentos/agentos-side %k\"\n",
+		"a rule under image":           "RUN+=\"/usr/lib/agentos/agentos-side\"\n",
+		"after ; in sh -c":             "RUN+=\"/bin/sh -c 'true;/usr/lib/agentos/agentos-side'\"\n",
+		"after | in sh -c":             "RUN+=\"/bin/sh -c 'echo|agentos-side'\"\n",
+		"inside ( )":                   "RUN+=\"/bin/sh -c '(agentos-side %k)'\"\n",
+		"before a closing '":           "RUN+=\"/bin/sh -c 'agentos-side'\"\n",
+		"inside backticks":             "RUN+=\"/bin/sh -c 'x=`agentos-side`'\"\n",
+		"after &&":                     "RUN+=\"/bin/sh -c 'true&&agentos-side'\"\n",
+		"spelled with \\x escapes":     "RUN+=e\"/usr/lib/agentos/agentos\\x2dside\"\n",
+		"spelled with octal escapes":   "RUN+=e\"/usr/lib/agentos/\\141gentos-side\"\n",
+		"after >":                      "RUN+=\"/bin/sh -c 'x>/dev/null;agentos-side'\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := clone(files)
+			path := rule
+			if name == "a rule under image" {
+				path = "image/mkosi/rules.d/60-x.rules"
+			}
+			files[path] = files[path] + text
+			if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+				t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
+			}
+			if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+				t.Fatalf("the rule's binary's linked package: got %q, want its os.Remove refused", problems)
+			}
+		})
+	}
+}
+
 func TestStaleAllowEntryFails(t *testing.T) {
 	files := map[string]string{"broker/side/side.go": "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n"}
 	for name, line := range map[string]string{
@@ -387,7 +451,7 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 }
 
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
-// of the binaries a unit under image/ starts as root.
+// of the binaries a unit under image/ starts as root or a udev rule names.
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file name -> path
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
@@ -463,12 +527,77 @@ func rootBinaries(root string) ([]string, error) {
 			}
 		}
 	}
+	if err := ruleBinaries(root, pkgs, seen); err != nil {
+		return nil, err
+	}
 	var out []string
 	for pkg := range seen {
 		out = append(out, pkg)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// ruleOwner is an OWNER= or GROUP= value, which names an account
+// (agentos-modem is both a binary and a user), never a program.
+var ruleOwner = regexp.MustCompile(`\b(?:OWNER|GROUP)\s*:?=\s*"[^"]*"`)
+
+// ruleEscape is a C escape a udev e"..." value may spell a byte with: \xHH
+// or \NNN octal.
+var ruleEscape = regexp.MustCompile(`\\(?:x[0-9a-fA-F]{2}|[0-7]{3})`)
+
+// ruleBinaries adds the package of every broker binary whose name a .rules
+// file under image/ or broker/ contains anywhere outside an OWNER= or GROUP=
+// value: as a path or bare, in any key, inside a shell command (sh -c
+// 'a;agentos-x'), in a comment or a continuation. udev runs RUN, PROGRAM
+// and IMPORT{program} values as root, resolves a bare name in
+// /usr/lib/udev, and can take the program from an ENV value
+// (RUN+="$env{X}"), so reading only those keys, or only whole words, could
+// drop a root binary; a substring match is an over-approximation that adds
+// names but never drops one (#3950). Escapes (\xHH, \NNN) are decoded
+// first. Bound: a name a rule or a shell assembles from pieces, and a
+// program another program's output names, are held by review.
+func ruleBinaries(root string, pkgs map[string]string, seen map[string]bool) error {
+	for _, dir := range []string{"image", "broker"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
+			switch {
+			case err != nil && os.IsNotExist(err):
+				return filepath.SkipDir
+			case err != nil:
+				return err
+			case d.IsDir() || !strings.HasSuffix(p, ".rules"):
+				return nil
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			text := ruleOwner.ReplaceAllString(string(b), "")
+			// Also the text with each \xHH or \NNN escape decoded, so a name
+			// an e"..." value spells with escapes counts too.
+			decoded := ruleEscape.ReplaceAllStringFunc(text, func(e string) string {
+				base, digits := 8, e[1:]
+				if e[1] == 'x' {
+					base, digits = 16, e[2:]
+				}
+				v, err := strconv.ParseUint(digits, base, 8)
+				if err != nil {
+					return e
+				}
+				return string([]byte{byte(v)})
+			})
+			for name, pkg := range pkgs {
+				if strings.Contains(text, name) || strings.Contains(decoded, name) {
+					seen[pkg] = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dropinDirs are the drop-in directories systemd reads for a unit:
