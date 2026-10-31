@@ -101,3 +101,25 @@ func (k *Kernel) RecoveryRotate(now int64, old, next string, c key.Cosign) error
 	}
 	return k.owner(now, TRecoveryRotate, b)
 }
+
+// DomainRecoveryCard starts the message an anchor signs to see the
+// lost-card route's new card (MIG-4-recovery-r4c, #4128).
+const DomainRecoveryCard = "agentos.recovery.card.v1\x00"
+
+// RecoveryCardHash names showing the new card whose backup recipient ID is
+// id, so a tap to see one card never shows another.
+func RecoveryCardHash(id string) [32]byte {
+	return sha256.Sum256(append([]byte(DomainRecoveryCard), id...))
+}
+
+// RecoveryCardTap is nil when c is an anchor's signature over
+// RecoveryCardHash(id), and ErrRotateSig otherwise: the new card holds the
+// only recovery key that opens the store until the owner confirms it, so
+// only a hardware key's tap shows it, never a phone passkey's. A read, it
+// logs nothing.
+func (k *Kernel) RecoveryCardTap(id string, c key.Cosign) error {
+	if !RecipientID(id) || !key.In(k.s.Anchors, c.By) || !c.Over(RecoveryCardHash(id)) {
+		return ErrRotateSig
+	}
+	return nil
+}

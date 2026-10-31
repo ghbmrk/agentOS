@@ -4,6 +4,7 @@ package action_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -17,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +113,7 @@ type done struct {
 // asked to do.
 type radio struct{ did []done }
 
-func (r *radio) Act(device string, a action.Act, route string) error {
+func (r *radio) Act(_ context.Context, device string, a action.Act, route string) error {
 	r.did = append(r.did, done{device, a, route})
 	return nil
 }
@@ -120,7 +122,7 @@ var errRadio = errors.New("radio down")
 
 type failing struct{}
 
-func (failing) Act(string, action.Act, string) error { return errRadio }
+func (failing) Act(context.Context, string, action.Act, string) error { return errRadio }
 
 type memStore struct{ b []byte }
 
@@ -166,7 +168,7 @@ func device(d policy.Document, id string) policy.Device {
 
 func newBook(t *testing.T, p *phone) (*action.Book, *radio) {
 	r := &radio{}
-	b, err := action.NewBook(p.public(), r)
+	b, err := action.NewBook(p.public(), r, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +335,7 @@ func TestTurnOnNeedsNamedOnceChallenge(t *testing.T) {
 	}
 
 	// The radio failing: the tap is spent and the failure reported.
-	fb, err := action.NewBook(p.public(), failing{})
+	fb, err := action.NewBook(p.public(), failing{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +406,10 @@ type rig struct {
 	remote netip.Addr
 }
 
-func newRig(t *testing.T) *rig {
+func newRig(t *testing.T) *rig { t.Helper(); return newRigWith(t, nil) }
+
+// newRigWith is newRig with cfg changed by set before the page is made.
+func newRigWith(t *testing.T, set func(*page.Config)) *rig {
 	t.Helper()
 	p := newPhone(t)
 	e, err := policy.Open(p.public(), &memStore{})
@@ -424,13 +429,17 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.s, err = page.New(page.Config{
+	cfg := page.Config{
 		Name: rp, Owner: p.public(),
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443), netip.AddrPortFrom(adminAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32), netip.PrefixFrom(adminAddr, 32)},
 		Policy: e, Act: g.r, Cert: cert.Leaf,
 		Now: func() time.Time { return g.now },
-	})
+	}
+	if set != nil {
+		set(&cfg)
+	}
+	g.s, err = page.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,6 +671,200 @@ func TestServedOnlyAtHome(t *testing.T) {
 		})
 		if !errors.Is(err, page.ErrConfig) {
 			t.Errorf("page listens on %s: %v", name, err)
+		}
+	}
+}
+
+// NET-4: the action screen tells the owner what to do. It names the
+// window as a length, never as a clock time in a zone the owner must
+// convert, and every refusal of a tap says what to do next.
+func TestActionScreenWording(t *testing.T) {
+	g := newRig(t)
+	link := action.Link(rp, "heater", action.On, "")
+	body, id, ch := g.open(link)
+	if !strings.Contains(body, "within 2 minutes") {
+		t.Fatalf("the screen does not name the window:\n%s", body)
+	}
+	if regexp.MustCompile(`UTC|\d\d:\d\d`).MatchString(body) {
+		t.Fatalf("the screen shows a clock time:\n%s", body)
+	}
+
+	nextStep := func(w *httptest.ResponseRecorder, code int, words ...string) {
+		t.Helper()
+		var res struct{ Error string }
+		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != code {
+			t.Fatalf("%d %s, want %d", w.Code, w.Body, code)
+		}
+		for _, want := range words {
+			if !strings.Contains(res.Error, want) {
+				t.Errorf("%q does not say %q", res.Error, want)
+			}
+		}
+	}
+	// Another passkey: refused, and told to open the link and approve
+	// with the passkey.
+	nextStep(g.tap("/do", id, ch, newPhone(t)), http.StatusForbidden, "open the link again", "approve with your passkey")
+	// The same challenge again: spent, and told to open the link again.
+	nextStep(g.tap("/do", id, ch, g.p), http.StatusGone, "open the link again")
+	// The device changed under the screen: told to open the link again
+	// (the book's own test holds when it is returned).
+	if !strings.Contains(action.ErrMoved.Error(), "open the link again") {
+		t.Errorf("%q has no next step", action.ErrMoved)
+	}
+	if len(g.r.did) != 0 {
+		t.Fatalf("a refused tap acted: %v", g.r.did)
+	}
+}
+
+// NET-6: opening action links and proposal links are limited on separate
+// counts, so a flood of either from the Owner network cannot delay the
+// other's approval.
+func TestActionLinkLimitIsItsOwn(t *testing.T) {
+	g := newRig(t)
+	plink, err := action.TighteningLink(rp, g.e.Current(), policy.Op{Kind: policy.CutVendorCloud, Device: "cam"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alink := action.Link(rp, "heater", action.On, "")
+	flood := func(link string) {
+		t.Helper()
+		for i := 0; ; i++ {
+			w, _ := g.do(http.MethodGet, link, nil)
+			if w.Code == http.StatusTooManyRequests {
+				if i != page.LinkLimit {
+					t.Fatalf("%s limited after %d, want %d", link, i, page.LinkLimit)
+				}
+				return
+			}
+			if w.Code != http.StatusOK || i > page.LinkLimit {
+				t.Fatalf("%s: %d %s", link, w.Code, w.Body)
+			}
+		}
+	}
+	flood(plink)
+	_, id, ch := g.open(alink) // proposal links spent: an action still opens
+	if w := g.tap("/do", id, ch, g.p); w.Code != http.StatusOK {
+		t.Fatalf("tap: %d %s", w.Code, w.Body)
+	}
+
+	g.now = g.now.Add(page.LinkWindow)
+	flood(alink)
+	g.open(plink) // action links spent: a proposal still opens
+}
+
+// hung is an actuator that does not answer until released.
+type hung struct{ release chan struct{} }
+
+func (h hung) Act(context.Context, string, action.Act, string) error { <-h.release; return nil }
+
+type panicking struct{}
+
+func (panicking) Act(context.Context, string, action.Act, string) error { panic("driver bug") }
+
+// NET-6: a hung actuator does not hold the policy lock, which the
+// channel's relocks share, past the book's timeout; the tap is reported as
+// not answered, with what to do next. The bound can only be tightened, and
+// a panicking actuator is a failed act, not a crash.
+func TestHungActuatorReleasesLock(t *testing.T) {
+	h := hung{make(chan struct{})}
+	defer close(h.release)
+	var mu sync.Mutex
+	const bound = 50 * time.Millisecond
+	g := newRigWith(t, func(c *page.Config) { c.Act, c.Lock, c.ActTimeout = h, &mu, bound })
+	_, id, ch := g.open(action.Link(rp, "door", action.Unlock, ""))
+	tapped := make(chan *httptest.ResponseRecorder, 1)
+	go func() { tapped <- g.tap("/do", id, ch, g.p) }()
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-tapped:
+	case <-time.After(bound + 2*time.Second):
+		t.Fatal("the tap is still waiting on the hung actuator")
+	}
+	if w.Code != http.StatusGatewayTimeout || !strings.Contains(w.Body.String(), "check the device") {
+		t.Fatalf("hung: %d %s", w.Code, w.Body)
+	}
+	if !mu.TryLock() {
+		t.Fatal("the policy lock is still held after the timeout")
+	}
+	mu.Unlock()
+
+	p := newPhone(t)
+	for _, d := range []time.Duration{-time.Second, action.Timeout + time.Nanosecond} {
+		if _, err := action.NewBook(p.public(), &radio{}, d); err == nil {
+			t.Errorf("timeout %v accepted", d)
+		}
+	}
+	if _, err := action.NewBook(p.public(), &radio{}, action.Timeout); err != nil {
+		t.Errorf("timeout %v refused: %v", action.Timeout, err)
+	}
+
+	b, err := action.NewBook(p.public(), panicking{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := b.Issue(home(), "heater", action.On, "", 0)
+	if _, err := b.Redeem(home(), c.ID, p.sign(c.Msg), 1); err == nil {
+		t.Fatal("a panicking actuator reported done")
+	}
+}
+
+// link is one device's ordered link, kept as the Actuator contract asks:
+// it checks ctx and sends in one step under the lock that orders its
+// writes. sent is what reached the device, in order.
+type link struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (l *link) Act(ctx context.Context, _ string, a action.Act, _ string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	l.sent = append(l.sent, string(a))
+	return nil
+}
+
+func (l *link) relock() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, "lock")
+}
+
+// NET-6: the lock relocks. An unlock that timed out never reaches the
+// device after the relock the channel sends once the policy lock is free,
+// however short the book's timeout.
+func TestTimedOutUnlockNeverFollowsRelock(t *testing.T) {
+	p := newPhone(t)
+	for _, bound := range []time.Duration{time.Nanosecond, time.Microsecond} {
+		timeouts := 0
+		for range 2000 {
+			l := &link{}
+			b, err := action.NewBook(p.public(), l, bound)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policyLock sync.Mutex
+			c, _ := b.Issue(home(), "door", action.Unlock, "", 0)
+			policyLock.Lock()
+			_, err = b.Redeem(home(), c.ID, p.sign(c.Msg), 1)
+			policyLock.Unlock()
+			if errors.Is(err, action.ErrTimeout) {
+				timeouts++
+			}
+			policyLock.Lock()
+			l.relock()
+			policyLock.Unlock()
+			time.Sleep(20 * time.Microsecond) // let a stray unlock try to land
+			l.mu.Lock()
+			if last := l.sent[len(l.sent)-1]; last != "lock" {
+				t.Fatalf("bound %v: sent %v, the unlock landed after the relock", bound, l.sent)
+			}
+			l.mu.Unlock()
+		}
+		if timeouts == 0 {
+			t.Fatalf("bound %v: no run timed out, the test proves nothing", bound)
 		}
 	}
 }

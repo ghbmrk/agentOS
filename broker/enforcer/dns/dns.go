@@ -1,16 +1,18 @@
 // Package dns generates the enforcer's dnsmasq configuration (SPEC NET-2
 // The core's list, Hardening, NET-3; briefs/ENF.md slice f, decision 5).
 //
-// Three dnsmasq instances run, each from one generated file:
+// Several dnsmasq instances run, each from one generated file:
 //
-//   - Listed answers the core's segment and every Devices VLAN. It resolves
-//     only the names on the core's signed list and the devices' allow
-//     lists, each name exactly (its subdomains get NXDOMAIN, every other
-//     name REFUSED), and puts each answer's addresses into the nft allow
-//     sets of the lists that name it (nftset=). Only addresses its own
-//     resolver returned enter an allow set, so a core or device that dials
-//     any other address under a listed name is dropped. It keeps no cache,
-//     so every answer comes from upstream and fills the sets again after a
+//   - Listed instances, one per view: one answers the core's segment, and
+//     one each Devices VLAN. Each resolves only its own list's names (the
+//     core's signed list, or that device's allow list), each name exactly
+//     (its subdomains get NXDOMAIN, every other name REFUSED), and puts
+//     each answer's addresses into that list's nft allow set (nftset=). A
+//     device so never learns another list's addresses, and its queries for
+//     them never leave the enforcer. Only addresses its own resolver
+//     returned enter an allow set, so a core or device that dials any
+//     other address under a listed name is dropped. None keeps a cache, so
+//     every answer comes from upstream and fills the set again after a
 //     ruleset load.
 //   - People answers Owner, Household, Guests and the admin port with any
 //     name, filling no set: those networks reach the internet anyway.
@@ -66,9 +68,18 @@ type Setup struct {
 	LeaseFile string
 }
 
-// Files is the three instances' configuration files.
+// Files is every instance's configuration file.
 type Files struct {
-	Listed, People, DHCP string
+	// Listed is one listed instance per view: the core's first, then each
+	// device VLAN's in the document's order.
+	Listed       []Listed
+	People, DHCP string
+}
+
+// Listed is one listed instance: the interface it alone answers on, and
+// its configuration file.
+type Listed struct {
+	Iface, Conf string
 }
 
 // Generate is the configuration for one policy document on one layout. The
@@ -82,46 +93,28 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 	if err := s.check(l); err != nil {
 		return Files{}, err
 	}
-	// The listed instance serves the core and every device with a VLAN,
-	// whether or not it has an allow set: one without resolves nothing.
-	listedIfaces := []string{l.Core}
+	// One listed instance per view: the core's segment with the core's
+	// list, then each device with a VLAN with its own. A device without
+	// an allow set gets an instance with no names, which refuses every
+	// query (ASSUMPTIONS ENF-f-4).
+	setOf := map[string]nft.AllowSet{}
+	for _, set := range sets {
+		setOf[set.Set4] = set
+	}
+	views := []Listed{{Iface: l.Core}}
+	viewSets := []nft.AllowSet{setOf[nft.CoreSet(false)]}
 	for _, dev := range d.Devices {
 		if n, ok := nft.VLAN(dev.WiFi); ok && dev.Network == policy.NetDevices {
-			listedIfaces = append(listedIfaces, l.Trunk+"."+strconv.Itoa(n))
+			views = append(views, Listed{Iface: l.Trunk + "." + strconv.Itoa(n)})
+			viewSets = append(viewSets, setOf[nft.DeviceSet(n, false)])
 		}
 	}
-	// Each name once, with every set whose list names it.
-	byName := map[string][]nft.AllowSet{}
-	for _, set := range sets {
-		for _, n := range set.Names {
-			if !Hostname(n) {
-				return Files{}, fmt.Errorf("%w: %q is not a DNS host name", ErrConfig, n)
-			}
-			byName[n] = append(byName[n], set)
+	for i, set := range viewSets {
+		conf, err := s.listed(views[i].Iface, set)
+		if err != nil {
+			return Files{}, err
 		}
-	}
-	names := make([]string, 0, len(byName))
-	for n := range byName {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-
-	var listed lines
-	listed.common(listedIfaces)
-	listed.add("cache-size=0")
-	listed.add("max-ttl=" + strconv.Itoa(MaxTTL))
-	for _, n := range names {
-		for _, u := range s.Upstream {
-			listed.add("server=/" + n + "/" + upstream(u))
-		}
-		// Exactly the name: its subdomains are answered locally, which
-		// is NXDOMAIN, and never forwarded (ASSUMPTIONS ENF-f-2).
-		listed.add("local=/*." + n + "/")
-		var specs []string
-		for _, set := range byName[n] {
-			specs = append(specs, "4#inet#"+nft.Table+"#"+set.Set4, "6#inet#"+nft.Table+"#"+set.Set6)
-		}
-		listed.add("nftset=/" + n + "/" + strings.Join(specs, ","))
+		views[i].Conf = conf
 	}
 
 	var people lines
@@ -161,14 +154,39 @@ func Generate(d policy.Document, l nft.Layout, s Setup) (Files, error) {
 		dhcp.add("enable-ra")
 		dhcp.add("dhcp-option=option6:dns-server,[::]")
 	}
-	return Files{Listed: listed.String(), People: people.String(), DHCP: dhcp.String()}, nil
+	return Files{Listed: views, People: people.String(), DHCP: dhcp.String()}, nil
+}
+
+// listed is the listed instance for one view: it answers on iface alone
+// and forwards only set's names, each filling set alone.
+func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
+	names := slices.Clone(set.Names)
+	slices.Sort(names)
+	names = slices.Compact(names)
+	var w lines
+	w.common([]string{iface})
+	w.add("cache-size=0")
+	w.add("max-ttl=" + strconv.Itoa(MaxTTL))
+	for _, n := range names {
+		if !Hostname(n) {
+			return "", fmt.Errorf("%w: %q is not a DNS host name", ErrConfig, n)
+		}
+		for _, u := range s.Upstream {
+			w.add("server=/" + n + "/" + upstream(u))
+		}
+		// Exactly the name: its subdomains are answered locally, which
+		// is NXDOMAIN, and never forwarded (ASSUMPTIONS ENF-f-2).
+		w.add("local=/*." + n + "/")
+		w.add("nftset=/" + n + "/4#inet#" + nft.Table + "#" + set.Set4 + ",6#inet#" + nft.Table + "#" + set.Set6)
+	}
+	return w.String(), nil
 }
 
 // check refuses a setup that names an interface the layout does not serve
 // (the edge's segment, the WAN and the access point's management
 // interface among them), a prefix that is not a masked private block, an
-// upstream that is not a global address, or a lease file path that needs
-// quoting.
+// upstream that is not a global address or is on a served network, or a
+// lease file path that needs quoting.
 func (s Setup) check(l nft.Layout) error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrConfig}, a...)...) }
 	if len(s.Upstream) == 0 {
@@ -200,6 +218,17 @@ func (s Setup) check(l nft.Layout) error {
 		}
 		if q := n.Prefix6; q.IsValid() && (!q.Addr().Is6() || q.Addr().Is4In6() || q != q.Masked() || q.Bits() != 64 || q.Addr().Zone() != "") {
 			return bad("%s: IPv6 prefix %v", n.Iface, q)
+		}
+	}
+	// An upstream on a served network would be reached through that
+	// network, where the reverse-path filter cannot tell its answers from
+	// a forger's there (ASSUMPTIONS ENF-f-5). IPv4 prefixes are private and
+	// upstreams are not, so only an IPv6 prefix can hold one.
+	for _, u := range s.Upstream {
+		for _, n := range s.Nets {
+			if n.Prefix6.Contains(u.Addr()) {
+				return bad("upstream %v is on %s", u, n.Iface)
+			}
 		}
 	}
 	return nil

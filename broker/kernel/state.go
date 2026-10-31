@@ -91,7 +91,7 @@ var schema = map[string]int{
 	TSubjectOpened: 1, TContentStored: 1, TSubjectErased: 1, TEraseConfirmed: 1, TContentRead: 1,
 	TBackupTarget: 1, TBackupUntarget: 1, TBackupTaken: 1, TRecoveryRotate: 1,
 	TEdgeEnrolled: 1, TEdgeCandidate: 1, TEdgeRevoked: 1, TEdgeCut: 1, TCodeApproved: 1,
-	TDecoyTable: 1, TTrip: 1, TTripResumed: 1,
+	TDecoyTable: 1, TTrip: 1, TTripResumed: 1, TSecurityCase: 1, TSecurityDrop: 1, TSecurityKept: 1,
 }
 
 // Known reports whether the log may hold this type at this version.
@@ -100,12 +100,13 @@ func Known(typ string, v int) bool { got, ok := schema[typ]; return ok && got ==
 // Widening entries grant power back: a resume, a key, a passkey, the first
 // anchors (setup), the owner's RETRY,
 // which lets an effect that may have happened run again, and the spend and
-// pool entries that reopen budget, a backup destination and an edge key. Only one that an anchor covers counts
+// pool entries that reopen budget, a backup destination, an edge key and a
+// security case drop (HLD-3). Only one that an anchor covers counts
 // after a restart (KRN-7, KRN-8).
 func Widening(typ string) bool {
 	return typ == TResume || typ == TKeyIssued || typ == TKeyResumed || typ == TEnrolled || typ == TLine || typ == TStepRetried ||
 		typ == TReserveDown || typ == TSpendExtend || typ == TPoolReset || typ == TTaskApproved || typ == TAnchorsSet || typ == TBackupTarget ||
-		typ == TEdgeEnrolled || typ == TRecoveryRotate || typ == TCodeApproved || typ == TTripResumed
+		typ == TEdgeEnrolled || typ == TRecoveryRotate || typ == TCodeApproved || typ == TTripResumed || typ == TSecurityDrop
 }
 
 // PlanStep is all a planner writes of a step: the verb, the clerk, the
@@ -402,6 +403,7 @@ type State struct {
 	targets  []KeptTarget    // backup destinations, in the order added (backuptarget.go)
 	edge     edgeState       // edge keys (edge.go)
 	decoys   trips           // the decoy table and its trips (trip.go)
+	sec      security        // the security suite (suite.go)
 	Order    []string
 	uses     map[key.ID][]usedRec
 	reserved map[uint64]*spendReserved   // open reservations by entry
@@ -889,6 +891,7 @@ func (s *State) Apply(e Entry) error {
 				s.Changes.Revoked[id] = true
 			}
 		}
+		s.cancelDrops(b.Passkey, e.At)
 	case TKeyRevoked, TKeyPaused, TKeyResumed:
 		b, err := body[keyID](e)
 		if err != nil {
@@ -1120,6 +1123,8 @@ func (s *State) Apply(e Entry) error {
 		return s.applyCode(e)
 	case TDecoyTable, TTrip, TTripResumed:
 		return s.applyTrip(e)
+	case TSecurityCase, TSecurityDrop, TSecurityKept:
+		return s.applySecurity(e)
 	default:
 		return ErrUnknown
 	}

@@ -37,6 +37,8 @@ type fakeRecoveryOps struct {
 	lost      []string
 	lostState localapi.RecoveryLostState
 	lostCard  []byte
+	lostID    string // the card's ID; testLostID when ""
+	cardErr   error  // RecoveryLostCard's answer
 	lostErr   error
 	doneErr   error // RecoveryLostDone's answer
 }
