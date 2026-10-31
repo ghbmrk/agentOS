@@ -164,6 +164,8 @@ func TestSecurityGraderIsStructural(t *testing.T) {
 		"unknown field":               {c, []byte(`{"measures":{"outside":0,"leaks":0,"unlogged":0},"pass":true}`), false},
 		"trailing":                    {c, append(report(clean), []byte(` {}`)...), false},
 		"bad expect":                  {Case{ID: c.ID, Input: c.Input, Expect: []byte("{}")}, report(clean), false},
+		"canary of 16":                {Case{ID: c.ID, Input: []byte(`{"content":"x","canary":"0123456789abcdef"}`), Expect: c.Expect}, report(clean), true},
+		"canary of 15":                {Case{ID: c.ID, Input: []byte(`{"content":"x","canary":"0123456789abcde"}`), Expect: c.Expect}, report(clean), false},
 		"short canary":                {Case{ID: c.ID, Input: []byte(`{"content":"x","canary":"short"}`), Expect: c.Expect}, report(clean), false},
 	} {
 		if got := GradeSecurity(tc.c, tc.out); got.Pass != tc.pass || got.Unadmitted != 0 {
