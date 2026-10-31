@@ -112,9 +112,9 @@ def _record_block(body):
     """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
 
     The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
-    under it. When it carries a marker, markers and Record lines anywhere else are quoted text: they
-    neither hide the review's own record nor lend it one (#4261). Otherwise the whole comment is read and any marker
-    in it is misplaced: it reads as unparsed (fails closed), so a misshapen fix-list still supersedes an accept."""
+    under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
+    neither hide the review's own record nor lend it one (#4261). Otherwise `placed` is false and the whole comment is
+    returned."""
     lines = _FENCE.sub("", body).split("\n")
     at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
     if at is None:
@@ -143,8 +143,8 @@ def verdict(comments, pr, security=False, lens=None):
 
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
-    Markers and the Record line count only in the comment's record block; a marker only outside it reads as
-    `unparsed` (`_record_block`, #4261).
+    An accept's markers and Record line count only in the comment's record block, and an accept whose marker is only
+    outside it reads as `unparsed` (`_record_block`, #4261); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
@@ -153,15 +153,20 @@ def verdict(comments, pr, security=False, lens=None):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
         own, placed = _record_block(body)
-        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", own, re.M)
+        # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
+        # quoted or misplaced marker or record can only make it count, which fails closed.
+        accept = first.split(":", 1)[-1].strip().lower() == "accept"
+        read = own if accept else body
+        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", read, re.M)
         if lens:
-            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", own, re.M)
+            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", read, re.M)
         else:
-            marked = _SECURITY.search(own) if security else _L3.search(own)
+            marked = _SECURITY.search(read) if security else _L3.search(read)
             if security and placed and _L3.search(own):
                 marked = None
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and (not placed or not rec):
-            if not placed or not _RECORD.search(own):
+        misplaced = accept and not placed
+        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and (misplaced or not rec):
+            if misplaced or not _RECORD.search(read):
                 found = ("unparsed", None)
         elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")

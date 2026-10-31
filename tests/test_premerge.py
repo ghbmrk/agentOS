@@ -885,8 +885,9 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.lens_run([l3, lens, sec]), (0, ["same"]))
 
     def test_check_gate_reads_markers_from_the_record_block_only(self):
-        # #4261: a marker on a line of its own outside the comment's record block (the paragraph holding its first
-        # Record line) is quoted text: it neither hides a review's own record nor lends it one (seen on #4216).
+        # #4261: in an accept, a marker on a line of its own outside the comment's record block (its first unfenced
+        # Record line and the marker and blank lines under it) is quoted text: it neither hides the review's own
+        # record nor lends it one. Any other verdict reads the whole comment, so a quote there fails closed.
         git(self.r, "checkout", "-q", "-b", "pr")
         (self.r / "tools").mkdir()
         self.write("tools/premerge.py", "x\n")
@@ -911,8 +912,9 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.lens_run([l3, q_ux, sec]), (1, ["needs-lens", "ux"]))
         # a quoted Record line before the comment's own block names no head
         ghost = f"```\nRecord: PR #7 · package X-1 · head {'f' * 7}\n```\n\n"
-        ahead = {**sec, "body": sec["body"].replace("# t\n", "# t\n" + ghost)}
-        self.assertEqual(self.lens_run([l3, lens, ahead]), (0, ["same"]))
+        for g in (ghost, ghost.replace("```", "~~~")):
+            ahead = {**sec, "body": sec["body"].replace("# t\n", "# t\n" + g)}
+            self.assertEqual(self.lens_run([l3, lens, ahead]), (0, ["same"]), g)
         # a fenced Record line under the comment's own block is not its record either
         fence = f"\n```\nRecord: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: security -->\n```"
         self.assertEqual(self.lens_run([l3, lens, sec, quoting("<!-- record: combined -->", fence, "3")]),
@@ -925,24 +927,37 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.lens_run([l3, lens, sec, spread("fix-list", "<!-- record: security -->", "3")]), need)
         lensy = {**sec, "body": f"Verdict: accept\n\nprose\n\n{rec}\n<!-- record: security -->\n\nNext: arm\n"}
         self.assertEqual(self.lens_run([l3, lens, lensy]), (0, ["same"]))
-        # a comment with no marker in its record block has a misplaced one: it reads as unparsed and supersedes, so
-        # a fix-list with prose before its marker, or its record fenced, cannot leave an accept standing
+        # an accept with no marker in its record block has a misplaced one: it reads as unparsed and supersedes
         UN = UNPARSED("security")
-        late = self.rec("fix-list", sha, "\nprose\n\n<!-- record: security -->\n", at="3")
-        self.assertEqual(self.lens_run([l3, lens, sec, late]), (1, UN))
+        late = lambda v: self.rec(v, sha, "\nprose\n\n<!-- record: security -->\n", at="3")
+        self.assertEqual(self.lens_run([l3, lens, late("accept")]), (1, UN))
+        self.assertEqual(self.lens_run([l3, lens, sec, late("accept")]), (1, UN))
         self.assertEqual(self.lens_run([self.rec("accept", sha, "prose\n<!-- record: combined -->\n", at="0")]),
                          (1, UNPARSED("l3")))
-        for fixed in (fence, fence.replace("```", "~~~")):
-            fenced = {**sec, "created_at": "3", "updated_at": "3", "body": f"Verdict: fix-list\nCause: defect\n{fixed}\n"}
-            self.assertEqual(self.lens_run([l3, lens, sec, fenced]), (1, UN), fixed)
-        # misplaced security and combined markers together still read as an unparsed Security record
-        both = {**late, "body": late["body"] + "<!-- record: combined -->\n"}
-        self.assertEqual(self.lens_run([lens, sec, both]), (1, UNPARSED("l3")))
-        self.assertEqual(premerge.verdict([sec, both], 7, security=True), ("unparsed", None))
-        # with no Record line the block is read around the first line: a fenced Record for another PR does not parse it
         other = f"```\nRecord: PR #8 · package X-1 · head {sha[:7]}\n```\n"
         norec = {**sec, "body": "Verdict: accept\n<!-- record: security -->\n\n" + other}
         self.assertEqual(self.lens_run([l3, lens, norec]), (1, UN))
+        # any other verdict counts wherever its marker and Record line sit, so it cannot leave an accept standing:
+        # prose before the marker, a fenced record, a second lens after prose, a first record block for another PR
+        self.assertEqual(self.lens_run([l3, lens, sec, late("fix-list")]), need)
+        for fixed in (fence, fence.replace("```", "~~~")):
+            fenced = {**sec, "created_at": "3", "updated_at": "3", "body": f"Verdict: fix-list\nCause: defect\n{fixed}\n"}
+            self.assertEqual(self.lens_run([l3, lens, sec, fenced]), need, fixed)
+        second = self.rec("fix-list", sha, "<!-- record: security -->\n\nprose\n<!-- record: combined -->\n", at="3")
+        self.assertEqual(self.lens_run([l3, lens, sec, second]), (1, ["not-accepted"]))
+        self.assertEqual(premerge.verdict([sec, second], 7, security=True), ("fix-list", sha[:7]))
+        two = {**sec, "created_at": "3", "updated_at": "3", "body": (
+            f"Verdict: fix-list\nRecord: PR #8 · package X-1 · head {sha[:7]}\n<!-- record: security -->\n\n"
+            f"Record: PR #7 · package X-1 · head {sha[:7]}\n<!-- record: security -->\n")}
+        self.assertEqual(self.lens_run([l3, lens, sec, two]), need)
+        # misplaced security and combined markers in a fix-list read as both a Security and an L3 fix-list
+        both = {**late("fix-list"), "body": late("fix-list")["body"] + "<!-- record: combined -->\n"}
+        self.assertEqual(self.lens_run([l3, lens, sec, both]), (1, ["not-accepted"]))
+        self.assertEqual(premerge.verdict([sec, both], 7, security=True), ("fix-list", sha[:7]))
+        # a Security fix-list quoting the combined marker also reads as an L3 fix-list: closed, never open
+        qfix = self.rec("fix-list", sha, "<!-- record: security -->\nNext: owed\n\n<!-- record: combined -->\n", at="3")
+        self.assertEqual(self.lens_run([l3, lens, sec, qfix]), (1, ["not-accepted"]))
+        self.assertEqual(premerge.verdict([sec, qfix], 7, security=True), ("fix-list", sha[:7]))
 
     def test_lenses_owed_by_tier(self):
         owed = premerge.lenses_owed
