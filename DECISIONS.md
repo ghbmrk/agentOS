@@ -276,3 +276,4 @@ Per-team section (OPERATING §7): the codex team appends only here; its IDs are 
 
 | ID | Date | Status | Decision | Source |
 |---|---|---|---|---|
+| D-260 | 2026-10-31 | active | After a core trip (KRN-12, #4209 point 2), reads (lock and door state included) and traffic summaries also pause until the passkey restore; only the heartbeat flows. Commands and tightenings already pause. A tripped core is untrusted and its internet is cut, so neither is needed | Mark, Decisions thread: tapped "Pause them" (card cmsg_01R63S2yrPkq32thy8WQCuvDY5WFmsVQGN46vzNGWgYMW4), 2026-10-31 |
