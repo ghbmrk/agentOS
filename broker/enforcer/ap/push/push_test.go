@@ -8,8 +8,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -22,13 +24,21 @@ import (
 )
 
 // fakeAP is an SSH server that holds files and understands exactly the
-// three commands push sends; anything else fails the test.
+// four commands push sends; anything else fails the test. Like an access
+// point's shell, it keeps running a command after the client has closed
+// the connection, and it models the access point's lock (apLock, taken
+// only by a command that starts with flock) and token file (token, which
+// a command checks only if it carries the check).
 type fakeAP struct {
 	t       *testing.T
 	addr    string
 	hostKey ssh.PublicKey
+	apLock  sync.Mutex // the access point's flock on lockPath
 	mu      sync.Mutex
 	files   map[string][]byte
+	token   string   // tokenPath's content
+	events  []string // what took effect, in order: "claim 1", "write 1 <path>", "refused 1 <path>", "reload 1"
+	hold    *hold    // holds one write after its stdin has arrived
 	applies int
 	writes  int
 	logins  int
@@ -38,6 +48,7 @@ type fakeAP struct {
 	cut        map[string]bool // stdin of writes to these paths ends halfway
 	readFails  map[string]bool // reads of these paths print the file, then exit 1
 	failReload int             // the next this many reloads fail
+	failClaim  bool            // claims fail, as on an access point without flock
 
 	// newest is the login number of the newest connection that has run
 	// a command; interleaved is set when an older one runs a command
@@ -45,6 +56,44 @@ type fakeAP struct {
 	newest      int
 	interleaved bool
 }
+
+// hold stalls the write of path on connection login once its stdin has
+// arrived: before it takes the access point's lock (a command the
+// access point starts late) or while it holds it (one it is slow to
+// finish). The write then runs to its end whatever the client did.
+type hold struct {
+	login   int
+	path    string
+	inLock  bool
+	arrived chan struct{} // closed when the held write has its stdin
+	release chan struct{} // the test closes it to let the write go on
+	done    chan struct{} // closed when the held write has ended
+}
+
+func (f *fakeAP) holdWrite(login int, path string, inLock bool) *hold {
+	h := &hold{login: login, path: path, inLock: inLock, arrived: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
+	f.mu.Lock()
+	f.hold = h
+	f.mu.Unlock()
+	f.t.Cleanup(func() {
+		select {
+		case <-h.release:
+		default:
+			close(h.release)
+		}
+	})
+	return h
+}
+
+func (f *fakeAP) event(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+
+// tokenRE finds a Sync's token in a command: 32 hex digits standing
+// alone, which a 64-digit hash is not.
+var tokenRE = regexp.MustCompile(`\b[0-9a-f]{32}\b`)
 
 func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
 	t.Helper()
@@ -123,38 +172,15 @@ func (f *fakeAP) session(login int, ch ssh.Channel, reqs <-chan *ssh.Request) {
 
 func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if login < f.newest {
 		f.interleaved = true
 	}
 	f.newest = max(f.newest, login)
-	if cmd == applyCmd {
-		if f.failReload > 0 {
-			f.failReload--
-			return 1
-		}
-		f.applies++
-		return 0
-	}
+	f.mu.Unlock()
 	for _, p := range ap.Paths {
-		if strings.HasPrefix(cmd, "umask 077 && cat > "+tmpPath(p)+" ") {
-			b, _ := io.ReadAll(ch)
-			if f.cut[p] {
-				b = b[:len(b)/2] // stdin ended early
-			}
-			// The access point's own check: the hash in the command must
-			// be that of what arrived, or nothing is moved into place.
-			if cmd != writeCmd(p, b) || f.failWrite[p] {
-				return 1
-			}
-			f.writes++
-			if !f.stuck {
-				f.files[p] = b
-			}
-			return 0
-		}
-		switch cmd {
-		case readCmd(p):
+		if cmd == readCmd(p) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			b, ok := f.files[p]
 			if !ok {
 				return 1
@@ -165,6 +191,91 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 			}
 			return 0
 		}
+	}
+	tok := tokenRE.FindString(cmd)
+	// What the shell does with the command's two guards: the lock only
+	// if the command takes it, the token check only if it carries one.
+	takesLock := strings.HasPrefix(cmd, "{ flock -x 9 && ") && strings.HasSuffix(cmd, "; } 9>"+lockPath)
+	checks := strings.Contains(cmd, owns(tok)+" && ")
+	lock := func() func() {
+		if !takesLock {
+			return func() {}
+		}
+		f.apLock.Lock()
+		return f.apLock.Unlock
+	}
+	stale := func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return checks && f.token != tok
+	}
+	switch {
+	case tok != "" && cmd == claimCmd(tok):
+		defer lock()()
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failClaim {
+			return 1
+		}
+		f.token = tok
+		f.events = append(f.events, fmt.Sprint("claim ", login))
+		return 0
+	case tok != "" && cmd == applyCmd(tok):
+		defer lock()()
+		if stale() {
+			f.event(fmt.Sprint("refused ", login, " reload"))
+			return 1
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.failReload > 0 {
+			f.failReload--
+			return 1
+		}
+		f.applies++
+		f.events = append(f.events, fmt.Sprint("reload ", login))
+		return 0
+	}
+	for _, p := range ap.Paths {
+		if !strings.Contains(cmd, "cat > "+tmpPath(p)+" ") {
+			continue
+		}
+		b, _ := io.ReadAll(ch)
+		f.mu.Lock()
+		h := f.hold
+		f.mu.Unlock()
+		held := h != nil && h.login == login && h.path == p
+		if held {
+			defer close(h.done)
+			close(h.arrived)
+			if !h.inLock {
+				<-h.release
+			}
+		}
+		defer lock()()
+		if held && h.inLock {
+			<-h.release
+		}
+		if stale() {
+			f.event(fmt.Sprint("refused ", login, " ", p))
+			return 1
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.cut[p] {
+			b = b[:len(b)/2] // stdin ended early
+		}
+		// The access point's own check: the hash in the command must
+		// be that of what arrived, or nothing is moved into place.
+		if cmd != writeCmd(p, tok, b) || f.failWrite[p] {
+			return 1
+		}
+		f.writes++
+		if !f.stuck {
+			f.files[p] = b
+		}
+		f.events = append(f.events, fmt.Sprint("write ", login, " ", p))
+		return 0
 	}
 	f.t.Errorf("the access point was sent an unknown command %q", cmd)
 	return 127
@@ -411,7 +522,7 @@ func TestTempFilePerPath(t *testing.T) {
 	// The write command itself uses its path's file and no other's.
 	for _, p := range ap.Paths {
 		for _, q := range ap.Paths {
-			if has := strings.Contains(writeCmd(p, nil), tmpPath(q)); has != (p == q) {
+			if has := strings.Contains(writeCmd(p, token(), nil), tmpPath(q)); has != (p == q) {
 				t.Errorf("write command for %s names the temporary file of %s: %v", p, q, has)
 			}
 		}
@@ -569,5 +680,137 @@ func TestNothingWrittenNotApplied(t *testing.T) {
 	res, err := p.Sync(context.Background(), config())
 	if err == nil || res.Applied {
 		t.Fatalf("sync: %+v %v", res, err)
+	}
+}
+
+// revoked is config() with a second station whose password has since
+// been revoked: what a Sync that timed out was still writing.
+func revoked() []ap.File {
+	c := config()
+	c[1].Data = append(bytes.Clone(c[1].Data), "config wifi-station\n\toption vid '102'\n\toption key 'CANARYREVOKEDAAAAAAAAAAAAA'\n"...)
+	return c
+}
+
+// TestLateWriteOfTimedOutSyncRefused: a Sync times out while the access
+// point has not yet started its write of the wireless file, which carries
+// a password since revoked; the command keeps running there after the
+// client has gone. The next Sync writes the config without that password.
+// When the old write then runs, it finds the newer claim and does
+// nothing, so the revoked password stays out. Catches a late write of a
+// timed-out Sync putting back an older config (ENF-g-8, #4313).
+func TestLateWriteOfTimedOutSyncRefused(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, false)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 5 * time.Second
+	if _, err := p.Sync(context.Background(), config()); err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	close(h.release)
+	<-h.done
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("the timed-out Sync's late write put back %q", got)
+	}
+	f.mu.Lock()
+	last := f.events[len(f.events)-1]
+	f.mu.Unlock()
+	if last != "refused 1 "+ap.PathWireless {
+		t.Fatalf("last event %q", last)
+	}
+	if res, err := p.Sync(context.Background(), config()); err != nil || len(res.Drift) != 0 {
+		t.Fatalf("sync after: %+v %v", res, err)
+	}
+}
+
+// TestSlowWriteEndsBeforeNextClaim: a Sync times out while its write
+// holds the access point's lock. The next Sync's claim waits for that
+// write to end, so the old write and every command of the new Sync run
+// one after the other, and the new Sync's write lands last. Catches two
+// Syncs' writes sharing a temporary file at once (ENF-g-8, #4313).
+func TestSlowWriteEndsBeforeNextClaim(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, true)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 5 * time.Second
+	errc := make(chan error, 1)
+	go func() {
+		_, err := p.Sync(context.Background(), config())
+		errc <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // the new claim is waiting on the lock
+	f.mu.Lock()
+	early := slices.Contains(f.events, "claim 2")
+	f.mu.Unlock()
+	close(h.release)
+	if err := <-errc; err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	<-h.done
+	if early {
+		t.Fatal("the next Sync claimed the access point while the old write held its lock")
+	}
+	f.mu.Lock()
+	ev := slices.Clone(f.events)
+	f.mu.Unlock()
+	old, claim := slices.Index(ev, "write 1 "+ap.PathWireless), slices.Index(ev, "claim 2")
+	if old < 0 || claim < old {
+		t.Fatalf("events %q", ev)
+	}
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("wireless holds %q", got)
+	}
+}
+
+// TestFailedClaimWritesNothing: an access point that cannot take the
+// claim (no flock, a full /tmp) gets no write and no reload, and the
+// Sync fails. Catches a Sync that writes without holding the claim.
+func TestFailedClaimWritesNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.mu.Lock()
+	f.failClaim = true
+	f.mu.Unlock()
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := p.Sync(context.Background(), config()); err == nil || !strings.Contains(err.Error(), "claim") {
+		t.Fatalf("sync: %v", err)
+	}
+	if _, writes, applies, files := f.n(); writes != 0 || applies != 0 || files != 0 {
+		t.Fatalf("writes=%d applies=%d files=%d", writes, applies, files)
+	}
+}
+
+// TestCommandsTakeTheLock: the claim, every write and the reload run
+// under the access point's lock, the write and the reload only while
+// their Sync's token is the newest, and the reload does not pass the
+// lock's descriptor to what it starts. Each Sync draws a new token.
+func TestCommandsTakeTheLock(t *testing.T) {
+	tok := token()
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(tok) || tok == token() {
+		t.Fatalf("token %q", tok)
+	}
+	cmds := []string{claimCmd(tok), applyCmd(tok)}
+	for _, p := range ap.Paths {
+		cmds = append(cmds, writeCmd(p, tok, []byte("x")))
+	}
+	for i, c := range cmds {
+		if !strings.HasPrefix(c, "{ flock -x 9 && ") || !strings.HasSuffix(c, "; } 9>"+lockPath) {
+			t.Errorf("not under the lock: %q", c)
+		}
+		if i > 0 && !strings.HasPrefix(c, "{ flock -x 9 && "+owns(tok)+" && ") {
+			t.Errorf("does not check the token first: %q", c)
+		}
+	}
+	if !strings.Contains(applyCmd(tok), "reload_config 9>&-;") {
+		t.Errorf("reload keeps the lock's descriptor: %q", applyCmd(tok))
 	}
 }
