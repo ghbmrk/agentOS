@@ -18,6 +18,10 @@ survives.
   tools/mutgate.py gate DIR --git BASE [HEAD]
                                              exit 1 if the diff BASE...HEAD adds a REQ marker
                                              to a package and adds a line carrying a LIVED mutant
+  tools/mutgate.py verify DIR --git BASE [HEAD]
+                                             `gate`, after checking that DIR/*/ holds exactly
+                                             one readable result for every package `claimed`
+                                             names, as `run` checks it: CI's trusted job (#4106)
 
 The gate's claim: a diff that adds `REQ: ID` to a file under broker/<pkg>/ says the package's
 tests cover ID. A LIVED mutant on a line that diff added to a non-test .go file in the same
@@ -26,9 +30,13 @@ covered mutants are not failures here; gremlins' coverage run is the only judge 
 The gate reads no other line, and gremlins tests each mutant alone, so `run --git` mutates only
 added lines (60-minute timeouts on #4014) and the gate decides the same; `run` fails if gremlins skipped a
 mutant on an added line, so a diff gremlins reads differently cannot pass the gate empty.
+CI runs the PR's tests in the `mutants` jobs, and a test can write anything there, so those jobs
+only hand their JSON on as data; the `mutgate` job, which runs no PR code, takes this file from the
+base commit and decides with `verify` (#4106).
 Install: go install github.com/go-gremlins/gremlins/cmd/gremlins@v0.6.0
 """
 import argparse
+import glob
 import json
 import os
 import pathlib
@@ -69,20 +77,29 @@ def tier_a_packages(broker=BROKER):
     return out
 
 
+def result_name(pkg):
+    """The JSON file name of a package's result: `/` as `+`, which PKG_NAME never holds, so no two
+    packages share one (`a/b` and `a__b` did, and one's result stood in for the other's, #4106)."""
+    return pkg.replace("/", "+") + ".json"
+
+
 def survivors(results_dir):
     """{package: [(file, line, type)]} of LIVED mutants in the per-package JSON files."""
     out = {}
     for f in sorted(pathlib.Path(results_dir).glob("*.json")):
-        pkg = f.stem.replace("__", "/")
-        data = json.loads(f.read_text())
-        live = [
-            (m_file["file_name"], m["line"], m["type"])
-            for m_file in data.get("files") or []
-            for m in m_file.get("mutations") or []
-            if m.get("status") == "LIVED"
-        ]
-        out[pkg] = sorted(live)
+        pkg = f.stem.replace("+", "/")
+        out[pkg] = survivors_of(json.loads(f.read_text()))
     return out
+
+
+def survivors_of(data):
+    """[(file, line, type)] of LIVED mutants in one package's gremlins JSON, sorted."""
+    return sorted(
+        (m_file["file_name"], m["line"], m["type"])
+        for m_file in data.get("files") or []
+        for m in m_file.get("mutations") or []
+        if m.get("status") == "LIVED"
+    )
 
 
 _ESC = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
@@ -177,8 +194,16 @@ def violations(diff_text, live):
 # gremlins -D runs `git diff --merge-base BASE` in its own cwd and matches the file names to
 # mutant paths relative to the package directory, one range per hunk from its first added line.
 # Run from the package directory, relative names and no context lines make both exact.
-DIFF_GIT_CONFIG = {"GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": "diff.relative", "GIT_CONFIG_VALUE_0": "true",
-                   "GIT_CONFIG_KEY_1": "diff.context", "GIT_CONFIG_VALUE_1": "0"}
+# diff.renames=false: broker_diff passes --no-renames, so a moved file's lines are added lines there,
+# and gremlins must mutate them too or `run` fails on its skips (#4147).
+DIFF_GIT_CONFIG = {"GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "diff.relative", "GIT_CONFIG_VALUE_0": "true",
+                   "GIT_CONFIG_KEY_1": "diff.context", "GIT_CONFIG_VALUE_1": "0",
+                   "GIT_CONFIG_KEY_2": "diff.renames", "GIT_CONFIG_VALUE_2": "false"}
+
+# gremlins walks every directory below the one it is given and names a mutant by its path from
+# there, so a subpackage's file carries a `/`. The gate joins bare names only (foreign_names), and a
+# subpackage is its own package with its own claim: `run` mutates only the package's own files (#4025).
+SUBDIRS = ["--exclude-files", "/"]
 
 
 def skipped_added(data, pkg, added):
@@ -189,6 +214,23 @@ def skipped_added(data, pkg, added):
         for m in f.get("mutations") or []
         if m["status"] == "SKIPPED" and m["line"] in added.get(f"broker/{pkg}/{f['file_name']}", ())
     )
+
+
+def result_problem(data, pkg, pkg_dir, added):
+    """Why gremlins' JSON for pkg cannot be read as its verdicts, or None. `run` and `verify` both ask."""
+    if not shape_ok(data):
+        # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
+        return "is not gremlins' files[].mutations[] shape"
+    if dry := dry_run(data):
+        # RUNNABLE is a mutant gremlins found and did not run: no verdict, so no LIVED either (#4027).
+        return f"holds {dry} mutants gremlins did not run (dry-run?)"
+    if unknown := foreign_names(data, pkg_dir):
+        # violations() joins broker/<pkg>/<file_name>; another name format would match no line (#3956).
+        return f"names LIVED mutants in {unknown}, not files in broker/{pkg}/"
+    if added is not None and (skipped := skipped_added(data, pkg, added)):
+        # The gate reads these lines; a skip there means gremlins' diff is not this one.
+        return f"gremlins skipped mutants on lines this diff adds in broker/{pkg}/: {skipped}"
+    return None
 
 
 def cmd_run(args):
@@ -206,35 +248,51 @@ def cmd_run(args):
     cfg = pathlib.Path(cfgdir.name) / "gremlins.yaml"
     cfg.write_text("{}\n")
     for pkg in pkgs:
-        dest = out / (pkg.replace("/", "__") + ".json")
+        dest = out / result_name(pkg)
         if args.git:
             r = subprocess.run(["gremlins", "unleash", str(BROKER / pkg), "-D", args.git, "--config", str(cfg),
-                                "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
+                                *SUBDIRS, "-o", str(dest)], cwd=BROKER / pkg, env={**env, **DIFF_GIT_CONFIG})
         else:
-            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), "-o", str(dest)],
+            r = subprocess.run(["gremlins", "unleash", f"./{pkg}", "--config", str(cfg), *SUBDIRS, "-o", str(dest)],
                                cwd=BROKER, env=env)
         if r.returncode != 0 or not dest.exists():
             print(f"mutgate: gremlins failed on {pkg} (exit {r.returncode})", file=sys.stderr)
             bad += 1
-        elif not shape_ok(json.loads(dest.read_text())):
-            # survivors() would read nothing from another shape and the gate would pass (ASSUMPTIONS D33).
-            print(f"mutgate: {dest} is not gremlins' files[].mutations[] shape", file=sys.stderr)
-            bad += 1
-        elif dry := dry_run(json.loads(dest.read_text())):
-            # RUNNABLE is a mutant gremlins found and did not run: no verdict, so no LIVED either (#4027).
-            print(f"mutgate: {dest} holds {dry} mutants gremlins did not run (dry-run?)", file=sys.stderr)
-            bad += 1
-        elif unknown := foreign_names(json.loads(dest.read_text()), BROKER / pkg):
-            # violations() joins broker/<pkg>/<file_name>; another name format would match no line (#3956).
-            print(f"mutgate: {dest} names LIVED mutants in {unknown}, not files in broker/{pkg}/", file=sys.stderr)
-            bad += 1
-        elif added is not None and (skipped := skipped_added(json.loads(dest.read_text()), pkg, added)):
-            # The gate reads these lines; a skip there means gremlins' diff is not this one.
-            print(f"mutgate: gremlins skipped mutants on lines this diff adds in broker/{pkg}/: {skipped}",
-                  file=sys.stderr)
+        elif problem := result_problem(json.loads(dest.read_text()), pkg, BROKER / pkg, added):
+            print(f"mutgate: {dest} {problem}", file=sys.stderr)
             bad += 1
     cfgdir.cleanup()
     return 1 if bad else 0
+
+
+def cmd_verify(args):
+    """The gate on JSON that PR code wrote (#4106): every claimed package has a readable result, then gate."""
+    diff = broker_diff(args.git, args.head)
+    added = added_lines(diff)[0]
+    live, bad = {}, 0
+    for pkg in claimed(diff):
+        # Each mutants job's artifact is its own directory, so a result named twice (a job writing
+        # another package's) is refused rather than one copy picked.
+        found = sorted(pathlib.Path(args.dir).glob(f"*/{glob.escape(result_name(pkg))}"))
+        if len(found) != 1:
+            print(f"mutgate: {len(found)} results for {pkg} in {args.dir}, not one: {found}", file=sys.stderr)
+            bad += 1
+            continue
+        f = found[0]
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            print(f"mutgate: no readable result for {pkg} ({f}: {e})", file=sys.stderr)
+            bad += 1
+            continue
+        if problem := result_problem(data, pkg, BROKER / pkg, added):
+            print(f"mutgate: {f} {problem}", file=sys.stderr)
+            bad += 1
+            continue
+        live[pkg] = survivors_of(data)
+    if bad:
+        return 1
+    return report_violations(violations(diff, live))
 
 
 def dry_run(data):
@@ -291,7 +349,10 @@ def cmd_claimed(args):
 
 
 def cmd_gate(args):
-    found = violations(broker_diff(args.git, args.head), survivors(args.dir))
+    return report_violations(violations(broker_diff(args.git, args.head), survivors(args.dir)))
+
+
+def report_violations(found):
     for pkg, path, line, kind in found:
         print(f"mutgate: {path}:{line} {kind} survives, in package {pkg} where this PR claims REQ coverage")
     if found:
@@ -317,11 +378,16 @@ def main(argv=None):
     p.add_argument("dir")
     p.add_argument("--git", required=True, metavar="BASE")
     p.add_argument("head", nargs="?", default="HEAD")
+    p = sub.add_parser("verify")
+    p.add_argument("dir")
+    p.add_argument("--git", required=True, metavar="BASE")
+    p.add_argument("head", nargs="?", default="HEAD")
     args = ap.parse_args(argv)
     if args.cmd == "packages":
         print("\n".join(tier_a_packages()))
         return 0
-    return {"claimed": cmd_claimed, "run": cmd_run, "report": cmd_report, "gate": cmd_gate}[args.cmd](args)
+    return {"claimed": cmd_claimed, "run": cmd_run, "report": cmd_report, "gate": cmd_gate,
+            "verify": cmd_verify}[args.cmd](args)
 
 
 if __name__ == "__main__":

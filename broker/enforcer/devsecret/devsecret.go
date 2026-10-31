@@ -87,6 +87,9 @@ type Store struct {
 	cfg Config
 	mu  sync.Mutex
 	st  state
+	// dirty is set while the disk holds a secret st has erased: a Prune
+	// whose save failed. The next Prune saves while it is set.
+	dirty bool
 }
 
 // state is what the store keeps, sealed by Box.
@@ -189,8 +192,8 @@ func (s *Store) Fingerprint(device string) ([pairseal.HashLen]byte, bool) {
 
 // Release is device's secret for p, only if p is the process that drives
 // device (Config.Process) and the add-device change it came with has
-// landed: the device is in the policy in force at or above that version,
-// and that change is no longer waiting. The caller gets its own copy.
+// landed: the device is a safety-list device in the policy in force at or
+// above that version, and that change is no longer waiting. The caller gets its own copy.
 func (s *Store) Release(device string, p Peer) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,7 +208,8 @@ func (s *Store) Release(device string, p Peer) ([]byte, error) {
 }
 
 func (s *Store) landed(r record, device string, cur policy.Document) bool {
-	return cur.Device(device) != nil && r.Version <= cur.Version && !s.waiting(r)
+	dev := cur.Device(device)
+	return dev != nil && !dev.Everyday && r.Version <= cur.Version && !s.waiting(r)
 }
 
 func (s *Store) waiting(r record) bool {
@@ -213,8 +217,8 @@ func (s *Store) waiting(r record) bool {
 }
 
 // Prune erases every secret that is neither waiting on its add-device
-// change nor landed with it: its device was removed, or its change was
-// cancelled. The page calls it after every change it approves or cancels
+// change nor landed with it: its device was removed or made everyday, or
+// its change was cancelled. The page calls it after every change it approves or cancels
 // and the daemon after every change that lands, under the policy lock, so
 // a cancelled secret is gone before another change could add a device of
 // the same name without one.
@@ -230,16 +234,17 @@ func (s *Store) Prune() error {
 			gone = true
 		}
 	}
-	if !gone {
+	if !gone && !s.dirty {
 		return nil
 	}
 	old := s.st
 	err := s.save(st)
 	// Fail closed: an erase the disk refused still happens in memory, so
-	// a cancelled or removed device's secret is never released; the next
-	// Prune that saves (at the latest the daemon's at start) erases it on
-	// disk too.
+	// a cancelled or removed device's secret is never released, and dirty
+	// makes every later Prune retry the save until one succeeds (as does
+	// any Admit, which saves the erased state too).
 	s.st = st
+	s.dirty = err != nil
 	for d, r := range old.Secrets {
 		if _, kept := st.Secrets[d]; !kept {
 			clear(r.Secret)
@@ -272,5 +277,6 @@ func (s *Store) save(st state) error {
 		return err
 	}
 	s.st = st
+	s.dirty = false
 	return nil
 }

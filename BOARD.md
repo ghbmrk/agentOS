@@ -109,6 +109,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VULN-openclaw-undici | Bump openclaw and npm in the guest once their bundled undici includes the GHSA-xjj6-f33q-929c fix (8.12.2 / 6.29.1). | #2855 | queued (release; tier A) |
 | CODEX-toolsh-outer-proc | CODEX-toolsh-outer-proc: agentos-toolsh fails at random in a pid namespace with an outer /proc (bwrap's /proc lookup); fail-closed. Serves CRED-5, A14 (later; from CODEX-pidns-cause) | CODEX-pidns-cause (#1616) | queued (later; from CODEX-pidns-cause) |
 | CI-vendor-retry | CI-vendor-retry: the 'Vendored code equals go.sum' step retries `go mod vendor` on a Go-proxy error (run 40937780390), as #3768 did for the vulncheck install | #3768 | queued (later; tier A; gate path) |
+| VULN-openclaw-glob | Bump npm in the guest once it bundles minimatch >= 11.0.1 and glob >= 14.0.2 (GHSA-g3hv-75wg-m249, GHSA-3g3m-2fjr-6pw4). | #2855 | building (release; tier A) |
+| VULN-scan-inlined | VULN-scan-inlined: vulncheck sees packages inlined in the guest dist, and acceptance records name the package and version they accept | VULN-openclaw-glob (#4151), Security findings on #4152 | queued (release; tier A) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -279,7 +281,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-g | ENF-g: access point config from the enforcer: four networks, per-device Wi-Fi passwords on per-device VLANs, admin only from the wired port (NET-3) | #3661 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-c | ENF-c: enforcer enrolment, recovery code, factory reset; setup network replaced at enrolment (NET-4, NET-2 Hardening, HW-10, D-178) | #3659, #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-h | ENF-h: enforcer texts, calls and status light; log head copies and revoked keys (NET-2 Texts and calls, STO-1, STO-4, KEY-7) | #3660 | building(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-i | ENF-i: per-device traffic summaries; vendor firmware freeze and hold as loosenings; frozen devices isolated (NET-5, NET-7) | #3658, #3661, #3664 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-l | ENF-l: agentos-enforcer daemon and its lifecycle matrix (integration owner for the enforcer rows; NET-2, STO-5) | ENF-a to ENF-i, ENF-k, ENF-r, ENF-s | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-m | ENF-m: enforcer signed image: read-only A/B, Secure Boot, watchdog, own key and feed (NET-2 Hardening) | #3670; brief question 1 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-n | ENF-n: A18 home-control clauses in VMs against the enforcer image (A18, A19 home control, G6) | #3671 | queued(tier A; lane primary; brief briefs/ENF.md) |
@@ -320,15 +321,16 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-e-related | ENF-e-related: forged ICMP errors between unpaired devices are dropped and logged (A18 Segments) | #3667 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-i-risk | ENF-i-risk: risk line for holds on unknown-type devices and sirens? (NET-7) | #3667 | queued(tier A; lane primary; later, recheck) |
 | ENF-k-ptrace-2 | ENF-k-ptrace-2: the radio ptrace probe's refusal must come from the seccomp floor only (NET-2) | #4091 | queued (tier A; lane primary; later, from #4092 reviews) |
-| SPEC-struct-2 | SPEC-struct-2: the cross-silo layer: fact classes and effect classes, states over facts, audience from graph facts, outside readers, one limit table, task envelope, replay-proposed states, class-level journey (CLK-14, KEY-2/PLN-3, DEV-6/8, PUB-1, LOG-7, KEY-4, HLD-4, A23) | #4095 | queued (tier B; L1 spec-diff; design cross-silo-structure-spec-change-2026-10-30.md Part 2) |
 | ENF-r-follow | ENF-r-follow: safety-list recheck on release, erase retry and comment, Helper field test, short hash and next step in the owner text (NET-2, STO-3, STO-4, CH-12) | #3692 | queued (release; tier A; from the #4073 reviews) |
-| SPEC-struct-2b | SPEC-struct-2b: #4120 review follow-ups: verb counts in every effect class it reaches, destruction and the breach ceiling, envelope and reader enforcement notes (CLK-14, CLK-11, KEY-4, PUB-1) | #4117 | queued (tier B; L1 spec-diff) |
+| SPEC-struct-2b | SPEC-struct-2b: #4120 review follow-ups: verb counts in every effect class it reaches, destruction and the breach ceiling, envelope and reader enforcement notes (CLK-14, CLK-11, KEY-4, PUB-1) | #4117 | building (tier B; L1 spec-diff) |
 | ENF-s-c | ENF-s-c: enforcer page times in the owner's local time, not UTC | #4068 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | CAM-decoder-uid | CAM-decoder-uid: each camera decoder sandbox runs under a uid of its own, not the clerk's (CLK-1, NET-2) | CAM-clerk-image (#3867, #4058) | queued (release; tier A; from #4058 Security 1) |
 | ENF-s-d | ENF-s-d: radio host send that honours the act's deadline, and a log line for a timed-out act | #4068 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-cut-conntrack | ENF-cut-conntrack: a cut path also ends its open connections (NET-3, NET-7) | #3667 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-dns-v6-views | ENF-dns-v6-views: IPv6 view separation test; upstream check over every served prefix | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-mdns-pin | ENF-mdns-pin: a signed pair pins the mDNS names and service types its device may announce (NET-3 Casting) | #3664 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| CAM-capture flake | CAM-capture-flake: make TestCameraRunsEncoder and TestNoStreamBeforeTurnOn wait on a signal, not a delay (CAM-node) | #3513 | building(tier B; lane primary) |
+| ENF-sni-ech-drop | ENF-sni-ech-drop: the enforcer drops core-segment connections whose server name it cannot read or its own lookup did not return for that address (PUB-1, NET-2) | #4124, #4111 | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -428,6 +430,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-vm-r | REV-CHK-links-vm-r: correct the `clipped` allow reason; check the `-machines` parent the vm allow lines rest on | #3987 | queued |
 | VULN-debian-sh-env | VULN-debian-sh-env: bash-as-sh imports `BASH_FUNC_*`, `SHELLOPTS` and `BASHOPTS`; record the constraint and pin childproc's allowlist against them | #3966 | queued |
 | VULN-initrd-scan | VULN-initrd-scan: `vulncheck.py image` scans the initrd's packages too, not only the main tree's dpkg status | #3966 | queued |
+| REV-CHK-mut-later | REV-CHK-mut-later: four LIVED mutants in broker/owner/name.go on main need tests; mutgate run excludes subdirectories of the package under test | mutgate 60-minute timeout fix (#4014 run 40998714847) | building (release) |
 | UPD-5r-b2 | production requalification sandbox: a release's /usr image under gVisor (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; lifts the stable ship gate with b3-b6) |
 | UPD-5r-b3 | security suite held as log data (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
@@ -435,13 +438,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2, UPD-7w (#3961) | queued (A) |
 | BROWSER-read-hook | If the lost-click browser tests flake again after #4071, add a test hook for when the fake driver has read stdin instead of raising the bound (later) | #4071 coordinator note | building (later; tier A) |
 | UPD-7w-l | Release check follow-ups from the #4075 reviews: an unsettled Schedule refusal, adoption record growth, a test for adopted() (UPD-1, UPD-5) | UPD-7w (#3961) | queued (later; tier A) |
-| REV-CHK-mut-selftest | `mutgate` job runs the PR's own Go tests in the same workspace before `mutgate.py gate`, so a test can fake KILLED or overwrite `mutants/` and `tools/`; run the gate step from the base copy of tools with the JSON as an artifact (later, found by Security on #4035) | #4035 Security comment 6531808440 | queued (later) |
+| REV-CHK-mut-selftest | `mutgate` job runs the PR's own Go tests in the same workspace before `mutgate.py gate`, so a test can fake KILLED or overwrite `mutants/` and `tools/`; run the gate step from the base copy of tools with the JSON as an artifact (release, found by Security on #4035) | #4035 Security comment 6531808440 | building (release) |
 | UPD-7w-r | A stable withdraw refused on a failed boot read is lost on a process restart, so a fast release can boot on a stable box (UPD-4, UPD-5) | UPD-7w (#3961) | queued (release; tier A) |
-| REV-CHK-mut-prefix | `mutgate.py` `broker_diff()` relies on git's default `a/` `b/` prefixes: with `diff.noprefix` or `diff.dstPrefix` every file is dropped and the gate passes on an empty set; pin `--src-prefix=a/ --dst-prefix=b/` (release, found by Security on #4107) | #4107 Security comment 6533208389 | queued (release; tier C, gate file; follows #4107) |
 | MIG-4-recovery-r4c | MIG-4-recovery-r4c: anchor a hardware-key tap before the lost-card page shows the new card | MIG-4-recovery-r4b (#4108) | queued (release; tier A; from #4108 Security point 2) |
 | MIG-4-recovery-r4d | MIG-4-recovery-r4d: D-201 route B also rotates the passphrase slot and the new card prints both | MIG-4-recovery-r4b (#4108) | queued (release; tier A; D-201 supersede) |
 | UPD-5r-b3s | security suite over the kernel socket: seed, read, drop, keep, notice (brief briefs/UPD-5r-b.md, b3) | UPD-5r-b3 (#4045), #4108 | queued (A; trusted core: kernel/proc) |
 | UPD-7w-f | Release check post-cap follow-ups from #4075: an Unsure drop settled by the applier hides its line; tests for the empty boot guard and the one-line rule (CH-12, UPD-1) | UPD-7w (#3961) | queued (release; tier A) |
+| REV-CHK-mut-gremlins-renames | REV-CHK-mut-gremlins-renames: gremlins diff detects renames while mutgate counts renamed lines as added (false block); add diff.renames=false to DIFF_GIT_CONFIG | MUT-tierA (#4118) Security comment 6535148930 | building (release) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -470,8 +473,6 @@ issue #4019: body has no board-row block
 issue #4020: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4025: body has no board-row block
 issue #4040: body has no board-row block
 issue #4129: title 'ENF-g follow-ups: grouped password and 2.4 GHz note on the Wi-Fi cards' does not start with '<ID>: '
-issue #4147: body has no board-row block
 ```

@@ -35,6 +35,14 @@ import (
 type Recovery interface {
 	RecoveryBegin(ctx context.Context, session string, next []byte) (localapi.RecoveryBegun, error)
 	RecoveryRotate(ctx context.Context, session, factor string, secret, next, authData, clientData, sig []byte) (localapi.RecoveryDone, error)
+	// The lost-card route (r4b, lostcard.go).
+	RecoveryLostBegin(ctx context.Context, session string) (localapi.RecoveryLostBegun, error)
+	RecoveryLost(ctx context.Context, session string, authData, clientData, sig []byte) error
+	RecoveryLostState(ctx context.Context, session string) (localapi.RecoveryLostState, error)
+	RecoveryLostWithdraw(ctx context.Context, session string) error
+	RecoveryRestart(ctx context.Context, session string) error
+	RecoveryLostCard(ctx context.Context, session string) ([]byte, error)
+	RecoveryLostDone(ctx context.Context, session string) error
 }
 
 // recoveryCallFor bounds the rotation call: the keeper stretches a
@@ -238,8 +246,8 @@ func recoveryWrongTap(err error) bool {
 // says what is in effect; each says to keep every card (recoveryKeepAll).
 const (
 	recoveryKeepAll     = "Keep all your cards until a replacement says Done: only then do I know which one opens my store."
-	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I take a backup sealed to the new key within a minute."
-	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your older cards, which no longer open my store. I finish moving backups to the new key within a few minutes."
+	recoveryDoneText    = "Done. Your new card is in effect: keep it safe, and destroy your older cards, whose recovery keys no longer open my store. I take a backup sealed to the new key within a minute."
+	recoveryLaterText   = "Done. Your new card is in effect: keep it safe, and destroy your older cards, whose recovery keys no longer open my store. I finish moving backups to the new key within a few minutes."
 	recoveryUnsureText  = "I couldn't tell whether that finished. " + recoveryKeepAll + " Try the tap again."
 	recoveryCancelText  = "Cancelled. " + recoveryKeepAll
 	recoveryExpiredText = "That replacement took too long and was dropped. " + recoveryKeepAll + " Then start again."
@@ -253,6 +261,8 @@ type recoveryView struct {
 	Old, Next string
 	Challenge string
 	Err, Done string
+	// Lost is where a lost-card request stands (r4b), on the first step.
+	Lost localapi.RecoveryLostState
 }
 
 // recoveryPage serves /recovery/ behind sign-in, and the new card at
@@ -275,13 +285,24 @@ func (s *Server) recoveryPage(w http.ResponseWriter, r *http.Request) {
 		d.Handler(mine, "/recovery/").ServeHTTP(w, r)
 		return
 	}
-	if r.URL.Path != "/" {
+	switch r.URL.Path {
+	case "/lost":
+		s.lostTapPage(w, r, tok)
+		return
+	case "/new":
+		s.lostCardPage(w, r, tok)
+		return
+	case "/":
+	default:
 		http.NotFound(w, r)
 		return
 	}
 	v := recoveryView{RP: s.cfg.PasskeyRPID}
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
+		if r.URL.Query().Get("lost") == "done" {
+			v.Done = lostDoneText
+		}
 		s.recoveryShow(w, tok, v)
 		return
 	case http.MethodPost:
@@ -313,6 +334,8 @@ func (s *Server) recoveryPage(w http.ResponseWriter, r *http.Request) {
 		v.Done = recoveryCancelText
 	case "rotate":
 		v.Err, v.Done = s.recoveryRotate(r, tok, p)
+	case "lost", "withdraw", "restart":
+		v.Err, v.Done = s.lostStep(r, tok)
 	default:
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
@@ -334,6 +357,9 @@ func (s *Server) recoveryShow(w http.ResponseWriter, tok string, v recoveryView)
 		} else if v.Err == "" && v.Done == "" {
 			v.Step = "card"
 		}
+	}
+	if v.Step == "" {
+		s.lostView(tok, &v)
 	}
 	s.render(w, "recovery", v)
 }
@@ -477,6 +503,14 @@ func init() {
 <p><button type="button" id="pk-tap">Tap a hardware key to replace it</button></p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="cancel"><button class="plain">Cancel</button></form>
 <script>{{passkeyjs}}</script>
+{{else if eq .Step "lost"}}
+<h2>Tap your hardware key to ask for a new card</h2>
+<p>When I next restart I make a new card and replace your recovery key with it at once, before you see it; then this page shows it. Your old card's recovery key stops opening my store; its passphrase still does. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
+<p>From: <span class="mono">{{if .Old}}{{.Old}}{{else}}none (I have no backup key yet){{end}}</span><br>To: a new key I make when I restart</p>
+<form method="post" action="/recovery/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="lost"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
+<p><button type="button" id="pk-tap">Tap a hardware key to ask for a new card</button></p>
+<p><a href="/recovery/">Back</a></p>
+<script>{{passkeyjs}}</script>
 {{else if eq .Step "card"}}
 <p>Your new card is waiting. <a href="/recovery/card">Show it and confirm it</a>.</p>
 <form method="post" action="/recovery/"><input type="hidden" name="step" value="cancel"><button class="plain">Cancel</button></form>
@@ -489,6 +523,15 @@ func init() {
 <label>Or your recovery key<textarea name="recovery" rows="2" autocomplete="off" spellcheck="false" maxlength="128"></textarea></label>
 <p><button>Continue</button></p></form>
 <script>{{shrinkjs}}</script>
-{{end}}
+<h2>Lost your card?</h2>
+{{if .Lost.Ready}}<p>Your new card is ready. <a href="/recovery/new">Show it and confirm it</a>.</p>
+{{else if .Lost.Ignored}}<p>My last restart did not make your new card: the request lapsed, or your recovery key changed since. Withdraw it, then ask again.</p>
+<form method="post" action="/recovery/"><input type="hidden" name="step" value="withdraw"><button class="plain">Withdraw the request</button></form>
+{{else if .Lost.Filed}}<p>Your request for a new card waits for my next restart.</p>
+<form method="post" action="/recovery/"><input type="hidden" name="step" value="restart"><button>Restart now</button></form>
+<form method="post" action="/recovery/"><input type="hidden" name="step" value="withdraw"><button class="plain">Withdraw the request</button></form>
+{{else}}<p>If no card you hold opens my store, I can make a new one when I restart, after one of your hardware keys approves it. Use this only when the whole card is lost: from my restart until you print or save the new card, nobody holds a recovery key that opens my store. If you asked before and restarted but I show no new card here, I no longer hold it: if you printed or saved it, keep it, as it is in effect; if not, ask again.</p>
+<p><a href="/recovery/lost">Ask for a new card</a></p>
+{{end}}{{end}}
 {{template "foot"}}{{end}}`))
 }

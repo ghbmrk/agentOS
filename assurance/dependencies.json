@@ -212,6 +212,26 @@
       "file": "broker/vendor/github.com/pion/srtp/v3/srtp_cipher.go",
       "host": "tools.ietf.org",
       "why": "A comment URL citing a spec; never contacted (P2-3b)."
+    },
+    {
+      "file": "broker/vendor/golang.org/x/crypto/ssh/doc.go",
+      "host": "cvsweb.openbsd.org",
+      "why": "Reference link in a doc comment of golang.org/x/crypto/ssh, the enforcer's access point pusher's SSH client (ENF-g, #3662); a comment, never contacted."
+    },
+    {
+      "file": "broker/vendor/golang.org/x/crypto/ssh/doc.go",
+      "host": "www.iana.org",
+      "why": "Reference link in a doc comment of golang.org/x/crypto/ssh, the enforcer's access point pusher's SSH client (ENF-g, #3662); a comment, never contacted."
+    },
+    {
+      "file": "broker/vendor/golang.org/x/crypto/ssh/doc.go",
+      "host": "datatracker.ietf.org",
+      "why": "Reference link in a doc comment of golang.org/x/crypto/ssh, the enforcer's access point pusher's SSH client (ENF-g, #3662); a comment, never contacted."
+    },
+    {
+      "file": "broker/vendor/golang.org/x/crypto/ssh/doc.go",
+      "host": "go.dev",
+      "why": "Reference link in a doc comment of golang.org/x/crypto/ssh, the enforcer's access point pusher's SSH client (ENF-g, #3662); a comment, never contacted."
     }
   ]
 }
