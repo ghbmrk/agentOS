@@ -265,6 +265,9 @@ func InitStore(dir string, root []byte, installed int64) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	if err := safeDir(dir); err != nil {
+		return nil, err
+	}
 	s := &Store{Dir: dir}
 	if _, err := os.Lstat(s.p("root.json")); err == nil {
 		return nil, errors.New("update store already initialised")
@@ -288,6 +291,51 @@ func readFile(p string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// readSaved is readFile where a missing file is nil bytes and no error. Any
+// other failure, a planted link included, fails the caller instead of
+// reading as no saved file, which would drop the rollback floor
+// (REV-CHK-links-update-l, #3990).
+func readSaved(p string) ([]byte, error) {
+	b, err := readFile(p)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return b, err
+}
+
+// safeDir refuses a store directory that a uid other than root or this
+// process's could replace or relink (REV-CHK-links-update-l, #3990):
+// readFile refuses a link only as the last component, so the directory and
+// every parent must be a real directory, not a link, owned by root or this
+// uid and writable by no other. A sticky parent such as /tmp may be
+// writable by all, since no other uid may rename or remove what it does
+// not own; the store directory itself may not.
+func safeDir(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	euid := uint32(os.Geteuid())
+	for p := abs; ; p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		switch {
+		case !fi.IsDir():
+			return fmt.Errorf("update store: %s is not a directory", p)
+		case !ok || st.Uid != 0 && st.Uid != euid:
+			return fmt.Errorf("update store: %s is not owned by root or uid %d", p, euid)
+		case fi.Mode().Perm()&0o022 != 0 && (p == abs || fi.Mode()&os.ModeSticky == 0):
+			return fmt.Errorf("update store: %s is writable by other uids", p)
+		}
+		if filepath.Dir(p) == p {
+			return nil
+		}
+	}
+}
+
 // remove is os.Remove, which unlinks a link at p itself and never follows
 // it; it is the package's only os.Remove, so pathops_allow.txt names it once.
 func remove(p string) error { return os.Remove(p) }
@@ -295,6 +343,9 @@ func remove(p string) error { return os.Remove(p) }
 // Installed reads the installed release.
 func (s *Store) Installed() (Installed, error) {
 	var in Installed
+	if err := safeDir(s.Dir); err != nil {
+		return in, err
+	}
 	b, err := readFile(s.p("installed.json"))
 	if err != nil {
 		return in, err
@@ -545,6 +596,9 @@ type Result struct {
 // lock serializes checks and commits across processes sharing Dir, so two
 // writers cannot interleave saved metadata and lower the rollback floor.
 func (s *Store) lock() (func(), error) {
+	if err := safeDir(s.Dir); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(s.p(".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, err
@@ -708,8 +762,12 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 	// Timestamp: the saved one first, for rollback protection. If a root
 	// rotation changed the timestamp key it no longer verifies and is
 	// dropped (TUF 5.3.11).
-	if b, err := readFile(s.p("timestamp.json")); err == nil {
-		tm.UpdateTimestamp(b)
+	saved, err := readSaved(s.p("timestamp.json"))
+	if err != nil {
+		return Result{}, err
+	}
+	if saved != nil {
+		tm.UpdateTimestamp(saved)
 	}
 	tsBytes, err := readMeta(src, "metadata/timestamp.json")
 	if err != nil {
@@ -726,8 +784,11 @@ func (s *Store) check(src Source, o Options) (Result, error) {
 		return Result{}, fmt.Errorf("%w: no timestamp", ErrBadRepository)
 	}
 
-	if b, err := readFile(s.p("snapshot.json")); err == nil {
-		tm.UpdateSnapshot(b, true)
+	if saved, err = readSaved(s.p("snapshot.json")); err != nil {
+		return Result{}, err
+	}
+	if saved != nil {
+		tm.UpdateSnapshot(saved, true)
 	}
 	sm := tm.Timestamp.Signed.Meta["snapshot.json"]
 	if sm == nil {
@@ -1000,6 +1061,9 @@ var noAnchorLogged atomic.Bool
 // sticky record is part of it, so no later list brings back a policy the
 // interim rule held under.
 func (s *Store) policy() (string, error) {
+	if err := safeDir(s.Dir); err != nil {
+		return "", err
+	}
 	b, err := readFile(s.p(allowListFile))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
@@ -1209,6 +1273,9 @@ func (s *Store) Stage(v *Verified) error {
 // Staged reads the staged release; ok is false when none is staged.
 func (s *Store) Staged() (Staged, bool, error) {
 	var st Staged
+	if err := safeDir(s.Dir); err != nil {
+		return st, false, err
+	}
 	b, err := readFile(s.p("staged.json"))
 	if errors.Is(err, os.ErrNotExist) {
 		return st, false, nil

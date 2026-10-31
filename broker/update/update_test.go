@@ -633,7 +633,112 @@ func TestPlantedLinksAreRefused(t *testing.T) {
 	if _, err := DirSource(h.repo.Dir).Open("metadata/timestamp.json"); !errors.Is(err, syscall.ELOOP) {
 		t.Fatalf("repository file as a link: %v, want ELOOP", err)
 	}
-	if res, err := h.check(Options{}); err == nil && res.Release != nil {
-		t.Fatal("check read a linked timestamp")
+	if _, err := h.check(Options{}); !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("check over a linked repository timestamp: %v, want ELOOP", err)
+	}
+}
+
+// A saved timestamp or snapshot that cannot be read fails the check, so a
+// link planted there cannot drop the rollback floor (REV-CHK-links-update-l,
+// #3990).
+func TestSavedMetadataReadFailsClosed(t *testing.T) {
+	for _, name := range []string{"timestamp.json", "snapshot.json"} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			f.release(2, nil)
+			f.publish(0, 1)
+			if _, err := f.check(Options{}); err != nil {
+				t.Fatal(err)
+			}
+			p := f.store.p(name)
+			b, err := os.ReadFile(p)
+			f.must(err)
+			real := filepath.Join(f.dir, name+".real")
+			f.must(os.WriteFile(real, b, 0o600))
+			f.must(os.Remove(p))
+			f.must(os.Symlink(real, p))
+			if _, err := f.check(Options{}); !errors.Is(err, syscall.ELOOP) {
+				t.Fatalf("check over a linked saved %s: %v, want ELOOP", name, err)
+			}
+			// A directory there is not a missing file either.
+			f.must(os.Remove(p))
+			f.must(os.Mkdir(p, 0o700))
+			if _, err := f.check(Options{}); err == nil {
+				t.Fatalf("check over a saved %s that is a directory passed", name)
+			}
+			// Only a missing file reads as none saved.
+			f.must(os.Remove(p))
+			if _, err := f.check(Options{}); err != nil {
+				t.Fatalf("check with no saved %s: %v", name, err)
+			}
+		})
+	}
+}
+
+// The store directory and every parent must be a real directory that only
+// root or the box's own uid can change; a sticky parent may be writable by
+// all, the store itself may not (REV-CHK-links-update-l, #3990).
+func TestStoreParentChainIsOwnOnly(t *testing.T) {
+	f := newFixture(t)
+	f.release(2, nil)
+	f.publish(0, 1)
+	box := f.store.Dir
+	parent := filepath.Dir(box)
+	calls := map[string]func() error{
+		"Check":     func() error { _, err := f.check(Options{}); return err },
+		"Installed": func() error { _, err := f.store.Installed(); return err },
+		"Staged":    func() error { _, _, err := f.store.Staged(); return err },
+		"Following": func() error { _, err := f.store.Following(); return err },
+		"policy":    func() error { _, err := f.store.policy(); return err },
+	}
+	refused := func(what string) {
+		t.Helper()
+		for name, call := range calls {
+			if err := call(); err == nil || !strings.Contains(err.Error(), "update store:") {
+				t.Errorf("%s: %s: %v, want refused", what, name, err)
+			}
+		}
+	}
+	allowed := func(what string) {
+		t.Helper()
+		for name, call := range calls {
+			if err := call(); err != nil {
+				t.Errorf("%s: %s: %v", what, name, err)
+			}
+		}
+	}
+	allowed("own 0700 chain")
+
+	f.must(os.Chmod(parent, 0o777))
+	refused("a parent writable by all")
+	root, err := readFile(f.store.p("root.json"))
+	f.must(err)
+	if _, err := InitStore(filepath.Join(parent, "box2"), root, 1); err == nil || !strings.Contains(err.Error(), "update store:") {
+		t.Errorf("InitStore under a parent writable by all: %v, want refused", err)
+	}
+	f.must(os.Chmod(parent, 0o770))
+	refused("a parent writable by its group")
+	f.must(os.Chmod(parent, os.ModeSticky|0o777))
+	allowed("a sticky parent writable by all")
+	f.must(os.Chmod(parent, 0o700))
+
+	f.must(os.Chmod(box, os.ModeSticky|0o777))
+	refused("the store itself writable by all, sticky")
+	f.must(os.Chmod(box, 0o700))
+
+	// A link anywhere in the chain is refused, not only as the last
+	// component: here the store is reached through a linked parent.
+	linked := filepath.Join(f.dir, "linked")
+	f.must(os.Symlink(parent, linked))
+	f.store.Dir = filepath.Join(linked, filepath.Base(box))
+	refused("a linked parent")
+	f.store.Dir = box
+	allowed("the chain restored")
+
+	if os.Geteuid() == 0 {
+		// Only root can give a directory to another uid.
+		f.must(os.Chown(parent, 65534, 65534))
+		refused("a parent owned by another uid")
+		f.must(os.Chown(parent, 0, 0))
 	}
 }
