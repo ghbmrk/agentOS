@@ -41,6 +41,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/kernel/privfile"
 	"github.com/ghbmrk/agentos/broker/kernel/proc"
 	"github.com/ghbmrk/agentos/broker/netguard"
+	"github.com/ghbmrk/agentos/broker/procguard"
 	"github.com/ghbmrk/agentos/broker/sockets"
 )
 
@@ -110,6 +111,12 @@ func start(args []string, stderr io.Writer, keyFile *os.File) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	// Not as its owner side's uid, and not dumpable, before the key is
+	// read (CLK-1): no process under its uid can read the controller key
+	// from its memory.
+	if err := procguard.Isolate(c.ownerUID); err != nil {
+		return err
+	}
 	sec, err := openSecrets(c.dir, keyFile)
 	if err != nil {
 		return err

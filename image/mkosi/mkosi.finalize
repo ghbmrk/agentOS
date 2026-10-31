@@ -1659,10 +1659,12 @@ def clerk_keys(files):
 def clerk_violations(root, dirs, names):
     """CLK-1, NET-2: each clerk the kernel's unit (UNLOCK_UNITS) names with -clerk-key runs in a
     KEEPER_UNITS unit that the tree ships, whose cgroup the entry names; under a User= of its own, not
-    root, not dynamic, and no other agentos service's (NAMES); takes its key from that one socket alone
+    root, not dynamic, and no other agentos service's (NAMES), with no Group= but that user's and no
+    SupplementaryGroups=; takes its key from that one socket alone
     (OpenFile=SOCKET:clerk-key, its only OpenFile=); and, unless it is one of WORLD_CLERKS, denies
     every address (IPAddressDeny=any) but HOME_NETS, which IPAddressAllow= stays inside. Each name,
-    socket and unit is named once."""
+    socket and unit is named once, and every keeper unit that takes a clerk's key (OpenFile=...:clerk-key)
+    is named, so dropping a clerk's entry cannot take its unit out of these rules."""
     out = []
     for kname in UNLOCK_UNITS:
         files = unit_with_dropins(root, dirs, kname)
@@ -1681,6 +1683,16 @@ def clerk_violations(root, dirs, names):
                 continue  # keeper_unit_violations reports it
             users.setdefault(u, []).append(n)
         seen = set()
+        keyed = {k[2].rsplit("/", 1)[1] for k in keys if not isinstance(k, str)}
+        for n in sorted(names):
+            if not n.startswith(KEEPER_PREFIX) or n in keyed:
+                continue
+            try:
+                opens = ini_entries(unit_with_dropins(root, dirs, n), "Service", "OpenFile")
+            except ValueError:
+                continue  # keeper_unit_violations reports it
+            if any(re.search(r":clerk-key(:|$)", v) for v in opens):
+                out.append("%s: takes a clerk's key but %s names no -clerk-key for it (CLK-1)" % (n, kname))
         for k in keys:
             if isinstance(k, str):
                 out.append("%s: -clerk-key %s is not name=/socket,/cgroup (CLK-1)" % (kname, k))
@@ -1716,6 +1728,10 @@ def clerk_unit_violations(unit, files, sock, users):
     elif users.get(user, [unit]) != [unit]:
         out.append("%s: User=%s is also %s's; a clerk's user is its own (CLK-1)"
                    % (unit, user, ", ".join(n for n in users[user] if n != unit)))
+    group = ini_last(files, "Service", "Group")
+    if group not in (None, user) or ini_words(files, "Service", "SupplementaryGroups"):
+        out.append("%s: Group=%s, SupplementaryGroups=%s; a clerk's group is its own user's alone (CLK-1)"
+                   % (unit, group, " ".join(ini_words(files, "Service", "SupplementaryGroups"))))
     opens = ini_entries(files, "Service", "OpenFile")
     if opens != [sock + ":clerk-key"]:
         out.append("%s: OpenFile is %s; a clerk takes its key from %s alone, as descriptor 3 (CLK-1)"

@@ -153,6 +153,21 @@ class ClerkTreeTest(test_image_keeper.KeeperTreeTest):
         self.refused(self.UNIT, "a named user of its own", "CLK-1")
 
     # REQ: CLK-1
+    def test_another_group_is_refused(self):
+        self.edit(self.UNIT, "Group=agentos-homekit\n", "Group=root\n")
+        self.refused(self.UNIT, "Group=root", "CLK-1")
+        self.setUp()
+        self.add(self.UNIT, "Service", "SupplementaryGroups=agentos-camera")
+        self.refused(self.UNIT, "SupplementaryGroups=agentos-camera", "CLK-1")
+
+    # REQ: CLK-1
+    def test_a_keyed_unit_the_kernel_does_not_name_is_refused(self):
+        kernel = "agentos-keeper-kernel.service"
+        line = "        -clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service \\\n"
+        self.edit(kernel, line, "")
+        self.refused(self.UNIT, "names no -clerk-key", "CLK-1")
+
+    # REQ: CLK-1
     def test_another_unit_s_user_is_refused(self):
         self.edit(self.UNIT, "User=agentos-homekit\n", "User=agentos-camera\n")
         self.refused(self.UNIT, "also agentos-keeper-camera.service's", "CLK-1")
