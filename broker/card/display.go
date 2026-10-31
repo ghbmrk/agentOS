@@ -118,6 +118,10 @@ type DisplayConfig struct {
 	// page offers no cancel and does not say the current card stays, and
 	// the confirm only records that the owner holds them.
 	Made bool
+	// Mark, with Made, is the new card's mark (#4160): its recovery sheet
+	// prints it, and the Recovery key page names the card in effect by
+	// it, so the owner can tell this card from one made before. Public.
+	Mark string
 	// Discarded, when set, runs once when the display discards an
 	// unconfirmed card: the page's cancel, or a provisioner's ErrDiscard.
 	// A rotation's wire cancels the vault's pending rotation here, so the
@@ -202,7 +206,7 @@ func NewDisplay(cfg DisplayConfig) (*Display, error) {
 		default:
 			d.check = checkGrid
 		}
-		d.sheet, err = rotationHTML(c, ask, fp)
+		d.sheet, err = rotationHTML(c, ask, fp, cfg.Mark)
 	} else {
 		d.sheet, err = HTML(c, fp)
 	}
