@@ -491,7 +491,7 @@ NPM_LOCK = "package-lock.json"
 _MARK_PATH = rb"(?:[\w-]+:)?((?:[\w.@+-]+/)*?node_modules/[^\s\"'`()]+?\.\w+)"
 COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region| CONCATENATED MODULE:)? +" + _MARK_PATH + rb"[ \t]*\r?$", re.M)
 KEY_MARK = re.compile(rb"[\"'`]" + _MARK_PATH + rb"[\"'`][(:]")
-TURBOPACK_MARK = re.compile(rb"[\"'`]\[project\]/" + _MARK_PATH + rb"(?: \[[\w-]+\])* \([\w-]+\)[\"'`]")
+TURBOPACK_MARK = re.compile(rb"[\"'`]\[project\]/" + _MARK_PATH + rb"(?: [^\"'`\n]*)?[\"'`]")
 MODULE_SEG = re.compile(rb"node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
 
 
@@ -523,10 +523,15 @@ def mark_owner(path):
     while (m := MODULE_SEG.match(path, pos)):
         pos = m.end()
         if m.group(1) == b".pnpm":
-            pos = path.find(b"/", pos) + 1 or len(path)  # the store directory; its node_modules/ follows
+            if not path.startswith(b"node_modules/", pos):  # else pnpm's hoisted .pnpm/node_modules/
+                pos = path.find(b"/", pos) + 1 or len(path)  # the store directory; its node_modules/ follows
             continue
         name, versioned = m.group(1), False
-    return (name.decode(), versioned) if name else None
+    if name is None:
+        # A path the walk cannot follow still names a package: its last node_modules/<name>/.
+        names = [n for n in MODULE_SEG.findall(path) if n != b".pnpm"]
+        return (names[-1].decode(), False) if names else None
+    return name.decode(), versioned
 
 
 def unversioned_marks(body, own):

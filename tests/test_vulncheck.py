@@ -521,9 +521,14 @@ class InlinedTest(unittest.TestCase):
             # but a node_modules/ directly under a package root is a nested install: its own package
             '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"(e){}',
             '"node_modules/c/src/node_modules/internal/x.js"(e){}',      # npm layout: c's own source
+            '"node_modules/.pnpm/node_modules/hoisted/x.js"(e){}',       # pnpm's hoisted directory
+            '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"(e){}',
+            '"node_modules/.pnpm/odd/x/node_modules/stray/x.js"(e){}',   # a walk that breaks: still named
             '"ns:node_modules/ns-pkg/i.js"(e){}',                          # esbuild namespace
             "// CONCATENATED MODULE: ./node_modules/concat/index.js",      # webpack
             '"[project]/node_modules/turbo/index.js [app-ssr] (ecmascript)", (ctx) => {',  # Turbopack
+            '"[project]/node_modules/turbo2/a.js [app-ssr] (ecmascript, async loader) <locals>"',
+            '"[project]/node_modules/turbo3/a.js"',
             # a key into another package's store directory gives no version for the one it names
             '"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/index.js"(e){}',
             '"node_modules/holder/x.js"(e){}',                             # the package itself
@@ -540,8 +545,12 @@ class InlinedTest(unittest.TestCase):
                    "node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"},
             "c": {"node_modules/c/src/node_modules/internal/x.js"},
             "ns-pkg": {"node_modules/ns-pkg/i.js"},
+            "hoisted": {"node_modules/.pnpm/node_modules/hoisted/x.js"},
+            "deep": {"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/.pnpm/node_modules/deep/x.js"},
+            "stray": {"node_modules/.pnpm/odd/x/node_modules/stray/x.js"},
             "concat": {"./node_modules/concat/index.js"},
             "turbo": {"node_modules/turbo/index.js"},
+            "turbo2": {"node_modules/turbo2/a.js"}, "turbo3": {"node_modules/turbo3/a.js"},
             "left-pad": {"./node_modules/left-pad/index.js"},
             "ajv": {"node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"},
             "yaml": {"../../node_modules/yaml/dist/index.js"},
