@@ -45,7 +45,7 @@ async function enrol(code, rp) {
 // drawQR draws a QR code's modules into an SVG element, with the standard
 // four-module quiet zone.
 function drawQR(svg, q) {
-  const n = q.size + 8, ns = "http://www.w3.org/2000/svg";
+  const n = q.size + 8, ns = svg.namespaceURI; // the SVG namespace, from the element itself
   svg.setAttribute("viewBox", "0 0 " + n + " " + n);
   svg.setAttribute("shape-rendering", "crispEdges");
   for (let y = 0; y < q.size; y++) for (let x = 0; x < q.size; x++) {
