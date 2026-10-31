@@ -24,6 +24,7 @@ attest Shape checks a hardware record's fields, not a name
 clerk shape builds a request declaration from an op; its values are checked by regexes inside
 cmd/agentos-camdecode/camdecode shape parses WIDTHxHEIGHT with strconv.Atoi
 cmd/agentos-egress adapterName looks a name up in the fixed adapter list
+enforcer/mdns readName decodes a DNS name off the wire; Pass refuses every name with a label labelNameOK refuses
 kernel FirstAnchors.shape checks setup keys, not text
 localui setup.name handles the names form; its text is checked by boxname.Shape and boxname.Check
 loops plainName looks a finding up in a fixed map (frozen old-core loops, D-139)

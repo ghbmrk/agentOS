@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/hostiletext"
 )
 
 func dn(s string) name { return name(strings.Split(s, ".")) }
@@ -468,4 +470,38 @@ func FuzzParse(f *testing.F) {
 			t.Fatalf("%+v\n%+v", m, back)
 		}
 	})
+}
+
+// TestHostileLabelsRefused: a label that is blank, invisible or hides
+// what it shows never passes, in a question or a record (hostiletext,
+// #3901), so a paired device cannot show a person a spoofed service name.
+func TestHostileLabelsRefused(t *testing.T) {
+	hostiletext.Run(t, labelNameOK)
+	for _, l := range []string{"My Printer", "Café", "Drucker-2", "o'clock.x"} {
+		if !labelNameOK(l) {
+			t.Errorf("refused %q", l)
+		}
+	}
+	spoof := "\u202eMark's Laptop"
+	m := response([]record{
+		a("printer.local", "10.13.0.2", 120),
+		srv(spoof+"._smb._tcp.local", "printer.local", 120),
+		srv("Printer._ipp._tcp.local", "printer.local", 120),
+		ptr("_ipp._tcp.local", "Printer._ipp._tcp.local", 120),
+		ptr("_smb._tcp.local", spoof+"._smb._tcp.local", 120),
+		a("print\u200ber.local", "10.13.0.2", 120),
+	}, nil)
+	want := []string{
+		"an printer.local 10.13.0.2",
+		"an Printer._ipp._tcp.local -> printer.local",
+		"an _ipp._tcp.local -> Printer._ipp._tcp.local",
+	}
+	if got := passed(t, NewFilter(), "ap0.105", printerLink, m, t0); !slices.Equal(got, want) {
+		t.Errorf("passed\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	q := &message{questions: []question{{dn(spoof + ".local"), typeA, 1}, {dn("printer.local"), typeA, 1}}}
+	out, ok := parse(NewFilter().Pass("hh0", nil, q, t0))
+	if !ok || len(out.questions) != 1 || out.questions[0].name[0] != "printer" {
+		t.Errorf("query passed %+v", out)
+	}
 }

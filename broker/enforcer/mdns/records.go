@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // DNS record types the relay passes (RFC 1035, 2782, 3596).
@@ -197,6 +199,28 @@ func (n name) key() string {
 	return string(b)
 }
 
+// shown: every label of n is one a person can read as it is: valid UTF-8,
+// not blank, with no control, format (bidi, zero-width, tag), separator
+// other than a plain space, variation selector or invisible filler. A
+// relayed name ends up in a person's device list, so a label that hides
+// or reorders what it shows is refused.
+func (n name) shown() bool {
+	return !slices.ContainsFunc(n, func(l string) bool { return !labelNameOK(l) })
+}
+
+func labelNameOK(l string) bool {
+	if !utf8.ValidString(l) || strings.TrimSpace(l) == "" {
+		return false
+	}
+	for _, r := range l {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) ||
+			unicode.Is(unicode.Zs, r) && r != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
 func (n name) local() bool { return len(n) > 1 && n.under("local") }
 
 func (n name) under(l string) bool { return len(n) > 0 && strings.EqualFold(n[len(n)-1], l) }
@@ -340,7 +364,7 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	out := &message{id: m.id, flags: m.flags &^ flagTC}
 	if m.flags&flagQR == 0 {
 		for _, q := range m.questions {
-			if q.name.local() && q.class&0x7FFF == classIN {
+			if q.name.local() && q.name.shown() && q.class&0x7FFF == classIN {
 				out.questions = append(out.questions, q)
 			}
 		}
@@ -379,7 +403,7 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		return n.instance() && (pi[n.key()] || ins.has(n.key(), now)) && !elsewhere(n.key())
 	}
 	keep := func(r record) bool {
-		if r.class&0x7FFF != classIN {
+		if r.class&0x7FFF != classIN || !r.name.shown() || !r.target.shown() {
 			return false
 		}
 		switch r.typ {
