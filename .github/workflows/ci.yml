@@ -192,7 +192,7 @@ jobs:
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
   broker:
     # The required check (CI-SHARD, #1868): passes only when every race shard and the checks
-    # job passed. Skipped with them on a records-only change, as before the split.
+    # job passed. On a records-only change it passes with them (CI-par-4).
     needs: [broker-race, broker-checks]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
