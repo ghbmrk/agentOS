@@ -530,7 +530,7 @@ func TestSecurityTextsCoalesce(t *testing.T) {
 	// A coalesced text says repeats follow unseen, so one text is not read
 	// as one event.
 	for _, tx := range r.k.State().SecurityTexts() {
-		if !strings.HasSuffix(tx.Text, " Repeats in the next hour are logged, not texted.") {
+		if !strings.HasSuffix(tx.Text, " Repeats this hour are logged, not texted.") {
 			t.Fatalf("a coalescing text does not say repeats are logged: %q", tx.Text)
 		}
 	}
@@ -642,44 +642,141 @@ func TestUnverifiedKeyStopsItsSessionOnly(t *testing.T) {
 	}
 }
 
-// A honey key cited through Extend or in an Issue batch is refused and
-// trips like one in a plan, but stops only that request: both are owner-side
-// calls no planner session makes, so a held plan stays held, and neither
-// pauses keys or stops planning (KRN-12 Trips, "citing one is a trip").
-// Catches a honey key that logs nothing on a key check outside Admit.
-func TestHoneyKeyTripsAtEveryKeyCheck(t *testing.T) {
+// A honey key cited through Extend or in an Issue batch is refused and gets
+// the full response: both are owner-side calls no planner session makes, so
+// planner-view content reached the owner path (KRN-12 Response, "Any other
+// decoy value gets the full response"). Extend pauses the honey key's IDs
+// and the held plan's scope and funding key, Issue the honey key's IDs; both
+// stop planning until the passkey resume. Catches an owner-side breach that
+// stops only one request.
+func TestHoneyKeyAtOwnerSideTripsFull(t *testing.T) {
 	r := newRig(t)
 	tb := r.decoys()
-	must(t, r.k.OpenTask(0, "t2"))
 	modelPlan(r, "t1", modelKey(r, "m1", key.LimitSpendTask(100)))
 	exhaust(r, "t1", 100)
 	honey, hk, _ := honeyKey(t, tb, "t1")
+	other := r.grant(key.Issue(r.owner.pass, key.Root{Clerk: "mail", Verbs: []key.Verb{key.Trash}, Serial: "other"}), 1<<40)
 
 	var rf *key.Refusal
-	r.plan("live", r.serve("t2"), st(key.Trash, "m1"))
-	for i, plan := range []string{"live", "t1"} {
-		if err := r.k.Extend(3, hk, plan); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
-			t.Fatalf("a honey key extending %s: %v", plan, err)
-		}
-		if tr := r.trips(i+1, 1); tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespCall || tr.Plan != "" || tr.Session != "" {
-			t.Fatalf("extend %s: trip %+v", plan, tr)
+	if err := r.k.Extend(3, hk, "t1"); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+		t.Fatalf("a honey key extending t1: %v", err)
+	}
+	tr := r.trips(1, 1)
+	if tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespFull || tr.Plan != "t1" || tr.Session != "" {
+		t.Fatalf("extend trip %+v", tr)
+	}
+	ch, p := r.k.State().Changes, r.k.State().Plans["t1"]
+	want := append([]key.ID{honey.Tip(), hk.Tip(), r.k.State().SpendHeld["t1"].Funding}, p.Scopes...)
+	for _, id := range want {
+		if !ch.Paused[id] || !slices.Contains(tr.Scopes, id) {
+			t.Fatalf("scope %s not paused by %v", id, tr.Scopes)
 		}
 	}
-	if _, held := r.k.State().SpendHeld["t1"]; !held || r.status("t1") != kernel.SActive || r.status("live") != kernel.SActive {
-		t.Fatalf("a honey key at Extend moved a plan: t1 %s, live %s", r.status("t1"), r.status("live"))
+	if !r.k.State().Tripped() {
+		t.Fatal("planning not stopped")
+	}
+	if rf := r.admits("p2", other, 4); rf == nil || rf.Code != kernel.CTripped {
+		t.Fatalf("a plan under another key after an owner-side trip: %v", rf)
+	}
+	if r.k.State().SecurityTexts()[0].Text != r.fullText(t) {
+		t.Fatal("an owner-side trip sent other than the full text")
+	}
+	n, last, _ := r.k.State().TripResume()
+	must(t, r.k.ResumeTrip(5, key.Approve(r.owner.pass, kernel.TripResumeHash(n, last))))
+	if r.k.State().Tripped() {
+		t.Fatal("the passkey resume left the trip in force")
 	}
 
-	if err := r.k.Issue(4, approve([]key.Key{honey}, r.owner, r.spare), honey); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
+	r2 := newRig(t)
+	tb2 := r2.decoys()
+	honey2, _, _ := honeyKey(t, tb2, "t1")
+	if err := r2.k.Issue(4, approve([]key.Key{honey2}, r2.owner, r2.spare), honey2); !errors.As(err, &rf) || rf.Code != kernel.CTrip {
 		t.Fatalf("a honey key in an Issue batch: %v", err)
 	}
-	if tr := r.trips(3, 1); tr.Cause != kernel.CauseHoneyKey || tr.Response != kernel.RespCall || tr.Plan != "" || tr.Session != "" {
+	if tr := r2.trips(1, 1); tr.Response != kernel.RespFull || tr.Plan != "" || !slices.Equal(tr.Scopes, []key.ID{honey2.Tip()}) || !r2.k.State().Tripped() {
 		t.Fatalf("issue trip %+v", tr)
 	}
-	if _, ok := r.k.State().Grants[honey.Tip()]; ok {
+	if _, ok := r2.k.State().Grants[honey2.Tip()]; ok {
 		t.Fatal("the honey key was granted")
 	}
-	if r.k.State().Tripped() || len(r.k.State().Changes.Paused) != 0 {
-		t.Fatal("a honey key at a key check paused keys or stopped planning")
+}
+
+// fullText is the full response's text, from a host value's trip.
+func (r *rig) fullText(t *testing.T) string {
+	r2 := newRig(t)
+	tb := r2.decoys()
+	r2.plan("p", r2.ck, st(key.Trash, entry(t, tb, decoy.PHostEnv).Value))
+	return r2.k.State().SecurityTexts()[0].Text
+}
+
+// No recorded input alone pauses a key: a trip entry at the kernel's exit,
+// a trip.owner entry whose key is no honey key, and one whose trip is not
+// the one its key derives fold nothing, and Rederive reports each (KRN-6).
+// Catches a forged entry pausing the owner's keys or stopping planning.
+func TestOwnerTripIsDerivedAgain(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	honey, _, _ := honeyKey(t, tb, "t1")
+	base := r.k.Log().Entries()
+	forge := func(typ, body string) []kernel.Entry {
+		last := base[len(base)-1]
+		return append(slices.Clone(base), kernel.Entry{Seq: last.Seq + 1, At: last.At, Type: typ, V: 1, Body: json.RawMessage(body)})
+	}
+	hb, _ := json.Marshal(honey)
+	cb, _ := json.Marshal(r.ck)
+	full := func(scope key.ID) string {
+		return fmt.Sprintf(`{"cause":"honey-key","exit":"kernel","entry":%d,"response":"full","scopes":[%q]}`, honeyEntry(t, tb), scope)
+	}
+	for name, es := range map[string][]kernel.Entry{
+		"call trip at the kernel":  forge(kernel.TTrip, fmt.Sprintf(`{"cause":"honey-key","exit":"kernel","entry":%d,"response":"call"}`, honeyEntry(t, tb))),
+		"owner trip, no honey key": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, cb, full(r.ck.Tip()))),
+		"owner trip, forged scope": forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(r.ck.Tip()))),
+		"owner trip, unknown op":   forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"pause","key":%s,"trip":%s}`, hb, full(honey.Tip()))),
+	} {
+		re, err := kernel.Replay(r.anchors(), es)
+		must(t, err)
+		if len(re.Trips()) != 0 || re.Tripped() || len(re.Changes.Paused) != 0 {
+			t.Fatalf("%s folded a trip", name)
+		}
+		var d *kernel.Divergence
+		if _, err := kernel.Rederive(r.anchors(), r.k.Box(), es); !errors.As(err, &d) {
+			t.Fatalf("%s: rederive %v", name, err)
+		}
+	}
+	re, err := kernel.Replay(r.anchors(), forge(kernel.TTripOwner, fmt.Sprintf(`{"op":"issue","key":%s,"trip":%s}`, hb, full(honey.Tip()))))
+	must(t, err)
+	if !re.Tripped() {
+		t.Fatal("the derived owner trip did not fold")
+	}
+}
+
+// honeyEntry is the table index of the honey key.
+func honeyEntry(t *testing.T, tb decoy.Table) int {
+	for i, e := range tb.Entries() {
+		if e.Kind == decoy.KHoneyKey {
+			return i
+		}
+	}
+	t.Fatal("no honey key")
+	return -1
+}
+
+// Every security text fits one SMS segment (CH-12).
+func TestSecurityTextsFitOneSegment(t *testing.T) {
+	r := newRig(t)
+	tb := r.decoys()
+	must(t, r.k.OpenTask(0, "t1"))
+	r.plan("s", r.serve("t1"), st(key.Trash, entry(t, tb, decoy.PSandboxEnv).Value))
+	must(t, r.k.CallTrip(1, kernel.ExitEgress, decoy.Metadata))
+	r.plan("f", r.ck, st(key.Trash, entry(t, tb, decoy.PHostEnv).Value))
+	texts := r.k.State().SecurityTexts()
+	if len(texts) != 3 {
+		t.Fatalf("%d texts, want one of each response", len(texts))
+	}
+	for _, tx := range texts {
+		if len(tx.Text) > 160 {
+			t.Fatalf("%d characters: %q", len(tx.Text), tx.Text)
+		}
 	}
 }
 
