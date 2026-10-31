@@ -34,7 +34,8 @@ SOCK='-DOPENTHREAD_POSIX_CONFIG_DAEMON_SOCKET_BASENAME=\"openthread-%s\"'
 cmake -S "$W/src" -B "$W/posix" -GNinja -DCMAKE_BUILD_TYPE=Release \
 	-DOT_PLATFORM=posix -DOT_DAEMON=ON -DOT_READLINE=OFF -DOT_FTD=ON -DOT_MTD=OFF -DOT_RCP=OFF \
 	-DOT_PLATFORM_NETIF=ON -DOT_PLATFORM_UDP=ON \
-	-DOT_BORDER_ROUTING=ON -DOT_SRP_SERVER=ON -DOT_SRP_ADV_PROXY=ON -DOT_MDNS=ON \
+	-DOT_BORDER_ROUTER=ON -DOT_BORDER_ROUTING=ON -DOT_SLAAC=ON -DOT_SERVICE=ON -DOT_NETDATA_PUBLISHER=ON \
+	-DOT_SRP_SERVER=ON -DOT_SRP_ADV_PROXY=ON -DOT_MDNS=ON \
 	-DOT_DNSSD_SERVER=ON -DOT_DNSSD_DISCOVERY_PROXY=ON -DOT_ECDSA=ON \
 	-DCMAKE_C_FLAGS="$SOCK" -DCMAKE_CXX_FLAGS="$SOCK" >"$W/posix.log" 2>&1 || { cat "$W/posix.log"; exit 1; }
 ninja -C "$W/posix" ot-daemon >>"$W/posix.log" 2>&1 || { tail -100 "$W/posix.log"; exit 1; }
@@ -44,7 +45,7 @@ install -m 0755 "$W/posix/src/posix/ot-daemon" "$OUT/ot-daemon"
 if [ "$SIM" = --sim ]; then
 	cmake -S "$W/src" -B "$W/sim" -GNinja -DCMAKE_BUILD_TYPE=Release \
 		-DOT_PLATFORM=simulation -DOT_FTD=ON -DOT_MTD=OFF -DOT_RCP=ON \
-		-DOT_SRP_CLIENT=ON -DOT_ECDSA=ON >"$W/sim.log" 2>&1 || { cat "$W/sim.log"; exit 1; }
+		-DOT_SRP_CLIENT=ON -DOT_ECDSA=ON -DOT_SLAAC=ON -DOT_SERVICE=ON >"$W/sim.log" 2>&1 || { cat "$W/sim.log"; exit 1; }
 	ninja -C "$W/sim" ot-cli-ftd ot-rcp >>"$W/sim.log" 2>&1 || { tail -100 "$W/sim.log"; exit 1; }
 	install -m 0755 "$W/sim/examples/apps/cli/ot-cli-ftd" "$OUT/ot-cli-ftd"
 	install -m 0755 "$W/sim/examples/apps/ncp/ot-rcp" "$OUT/ot-rcp"
