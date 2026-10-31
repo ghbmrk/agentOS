@@ -309,12 +309,14 @@ func readSaved(p string) ([]byte, error) {
 // every parent must be a real directory, not a link, owned by root or this
 // uid and writable by no other. A sticky parent such as /tmp may be
 // writable by all, since no other uid may rename or remove what it does
-// not own; the store directory itself may not.
+// not own; the store directory itself may not. A relative directory is
+// refused: the kernel resolves it from the real working directory, which
+// $PWD may not name, so the path checked could differ from the one opened.
 func safeDir(dir string) error {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return err
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("update store: %s is not an absolute path", dir)
 	}
+	abs := filepath.Clean(dir)
 	euid := uint32(os.Geteuid())
 	for p := abs; ; p = filepath.Dir(p) {
 		fi, err := os.Lstat(p)

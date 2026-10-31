@@ -690,6 +690,8 @@ func TestStoreParentChainIsOwnOnly(t *testing.T) {
 		"Staged":    func() error { _, _, err := f.store.Staged(); return err },
 		"Following": func() error { _, err := f.store.Following(); return err },
 		"policy":    func() error { _, err := f.store.policy(); return err },
+		// TrustedRoot takes only the store lock, so it pins lock's check.
+		"TrustedRoot": func() error { _, err := f.store.TrustedRoot(); return err },
 	}
 	refused := func(what string) {
 		t.Helper()
@@ -734,6 +736,13 @@ func TestStoreParentChainIsOwnOnly(t *testing.T) {
 	refused("a linked parent")
 	f.store.Dir = box
 	allowed("the chain restored")
+
+	// A relative store path is refused, since the kernel resolves it from
+	// the real working directory, which $PWD need not name.
+	t.Chdir(parent)
+	f.store.Dir = filepath.Base(box)
+	refused("a relative store path")
+	f.store.Dir = box
 
 	if os.Geteuid() == 0 {
 		// Only root can give a directory to another uid.
