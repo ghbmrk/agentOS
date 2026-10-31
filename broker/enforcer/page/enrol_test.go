@@ -153,11 +153,15 @@ func TestEnrolmentScreens(t *testing.T) {
 	if code, out := g.enrolAs(a, "WRONG"); code != http.StatusForbidden {
 		t.Errorf("wrong code: %d %v", code, out)
 	}
-	// A cross-origin post is refused before the book sees it.
+	// A cross-origin post is refused before the book sees it, also from
+	// a browser that sends no Sec-Fetch-Site: the enrolment routes check
+	// the Origin themselves (CH-9).
 	der, _ := x509.MarshalPKIXPublicKey(&a.priv.PublicKey)
-	if w := g.do(http.MethodPost, "/enrol/begin", map[string]string{"code": caseCode, "public_key": base64.RawURLEncoding.EncodeToString(der)},
-		"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"); w.Code != http.StatusForbidden {
-		t.Errorf("cross-origin begin: %d", w.Code)
+	for _, path := range []string{"/enrol/begin", "/enrol/finish", "/enrol/reset"} {
+		if w := g.do(http.MethodPost, path, map[string]string{"code": caseCode, "public_key": base64.RawURLEncoding.EncodeToString(der)},
+			"Origin", "https://evil.example", "Sec-Fetch-Site", ""); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "cross-origin") {
+			t.Errorf("cross-origin %s: %d %s", path, w.Code, w.Body)
+		}
 	}
 	code, out := g.enrolAs(a, caseCode)
 	if code != http.StatusOK {
