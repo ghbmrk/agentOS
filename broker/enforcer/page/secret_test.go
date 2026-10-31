@@ -67,7 +67,7 @@ func secretRig(t *testing.T) (*rig, *devsecret.Store, *pairseal.Key) {
 		Name: rp, Owner: g.a.Public(),
 		Addrs:  []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443)},
 		Allow:  []netip.Prefix{netip.PrefixFrom(ownerAddr, 32)},
-		Policy: g.e, Channel: g.ch, Cert: g.cert.Leaf, Secrets: st,
+		Policy: g.e, Channel: g.ch, Cert: g.cert.Leaf, Secrets: st, Zone: zone,
 		Now: func() time.Time { return g.now },
 	})
 	if err != nil {

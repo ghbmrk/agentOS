@@ -110,7 +110,7 @@ var safetyDevices = map[string]safety{
 	"sensor":          {policy.ClassSensor, ""},
 	"primary-heating": {policy.ClassPrimaryHeating, ""}, // cannot be named
 	"feed-valve":      {policy.ClassFeedValve, ""},      // cannot be named
-	"unknown":         {"", ""},
+	"untyped":         {"", ""},                         // a device of unknown type
 	"unnamed-valve":   {policy.ClassValve, ""},
 }
 

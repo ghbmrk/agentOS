@@ -188,7 +188,7 @@ func Run(c Config, conn io.ReadWriteCloser, log io.Writer) error {
 		s.byPath[s.devicePath(d)] = d.Name
 	}
 	s.srv = radio.NewServer(radio.StackBLE, conn)
-	bus, err := Dial(c.Bus, s.signal)
+	bus, err := Dial(c.Bus, s)
 	if err != nil {
 		conn.Close()
 		return err
@@ -423,25 +423,39 @@ func (s *stack) forget(device string) {
 	}
 }
 
-// signal takes one bus signal. Only BlueZ's own PropertiesChanged on a
-// subscribed characteristic, carrying a byte-array Value, becomes a
-// notification; anything else is dropped. BlueZ's name changing owner ends
-// the stack.
+// wants reads a signal's header, before its body is decoded: only the bus
+// driver's NameOwnerChanged, and PropertiesChanged from BlueZ's unique
+// name, are taken, and nothing before start.
+func (s *stack) wants(m *Message) bool {
+	s.mu.Lock()
+	owner := s.owner
+	s.mu.Unlock()
+	switch {
+	case owner == "":
+		return false // before start: nothing is subscribed
+	case m.Sender == busDriver:
+		return m.Interface == busDriver && m.Member == "NameOwnerChanged" && m.Sig == "sss"
+	}
+	return m.Sender == owner && m.Interface == ifaceProps && m.Member == "PropertiesChanged" && m.Sig == "sa{sv}as"
+}
+
+// signal takes one bus signal wants takes, and drops any other. Only
+// BlueZ's own PropertiesChanged on a subscribed characteristic, carrying a
+// byte-array Value, becomes a notification. BlueZ's name changing owner
+// ends the stack.
 func (s *stack) signal(m *Message) {
+	if !s.wants(m) {
+		return
+	}
 	s.mu.Lock()
 	owner := s.owner
 	sb, ok := s.subs[m.Path]
 	s.mu.Unlock()
-	switch {
-	case owner == "":
-		return // before start: nothing is subscribed
-	case m.Sender == busDriver:
-		if m.Interface == busDriver && m.Member == "NameOwnerChanged" && len(m.Body) == 3 && m.Body[0] == bluez && m.Body[2] != owner {
+	if m.Sender == busDriver {
+		if m.Body[0] == bluez && m.Body[2] != owner {
 			fmt.Fprintf(s.log, "ble: BlueZ changed owner\n")
 			go s.bus.Close()
 		}
-		return
-	case m.Sender != owner || m.Interface != ifaceProps || m.Member != "PropertiesChanged" || m.Sig != "sa{sv}as":
 		return
 	}
 	changed, _ := m.Body[1].([]any)

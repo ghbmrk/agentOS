@@ -2,15 +2,14 @@ package page
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
-	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
 )
-
-var errDevice = errors.New("the device did not do it; open the link again to retry")
 
 // actWords is each asserted action in the page's words.
 var actWords = map[action.Act]string{
@@ -42,18 +41,6 @@ func minutes(d time.Duration) string {
 	return "1 minute"
 }
 
-// actLink counts one action link against LinkLimit on its own count, so a
-// flood of proposal links cannot delay an action link, nor the reverse.
-func (s *Server) actLink() bool {
-	now := s.nowMS()
-	s.acts = slices.DeleteFunc(s.acts, func(t int64) bool { return t <= now-LinkWindow.Milliseconds() })
-	if len(s.acts) >= LinkLimit {
-		return false
-	}
-	s.acts = append(s.acts, now)
-	return true
-}
-
 // action is the screen for an asserted action link (slice s): the act,
 // drawn by the enforcer from the signed policy, and the once-only challenge
 // one tap signs for exactly that act on that device in that window. Like a
@@ -67,7 +54,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
-	ok := s.actLink()
+	ok := s.limit(&s.acts)
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, errLimited.Error(), http.StatusTooManyRequests)
@@ -105,6 +92,15 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// unsureWhy is why an act may have run, for the log: the actuator's error
+// quoted, so it stays one line.
+func unsureWhy(err error) string {
+	if errors.Is(err, action.ErrTimeout) {
+		return "no answer in time"
+	}
+	return strconv.Quote(strings.TrimPrefix(err.Error(), action.ErrUnsure.Error()+": "))
+}
+
 // do takes the owner's tap on an action challenge: the book spends the
 // challenge whether or not the tap verifies, checks it against the policy
 // in force and carries the act out at once. The policy lock is held until
@@ -119,8 +115,12 @@ func (s *Server) do(w http.ResponseWriter, r *http.Request) {
 	}
 	sig, flags, _ := parseAssertion(a) // a nil sig is refused, and spends the challenge
 	s.cfg.Lock.Lock()
-	_, err := s.book.Redeem(s.cfg.Policy.Current(), a.ID, sig, s.nowMS())
+	c, err := s.book.Redeem(s.cfg.Policy.Current(), a.ID, sig, s.nowMS())
 	s.cfg.Lock.Unlock()
+	if errors.Is(err, action.ErrTimeout) || errors.Is(err, action.ErrUnsure) {
+		// The act may have run: the owner's history shows it (NET-2).
+		s.cfg.Log(fmt.Sprintf("action: %s on %s may have run: %s", c.Act, ascii(c.Device), unsureWhy(err)))
+	}
 	switch {
 	case err == action.ErrGone:
 		fail(w, http.StatusGone, err)
@@ -135,7 +135,7 @@ func (s *Server) do(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusGatewayTimeout, err)
 		return
 	case err != nil:
-		fail(w, http.StatusBadGateway, errDevice)
+		fail(w, http.StatusBadGateway, action.ErrUnsure)
 		return
 	}
 	s.mu.Lock()
