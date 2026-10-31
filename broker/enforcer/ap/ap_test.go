@@ -323,6 +323,74 @@ func TestCardOnlyFromKeys(t *testing.T) {
 	}
 }
 
+// TestCardShowsPasswordGrouped (#4129, #4084): every card shows the
+// password in groups of four that join back to exactly the password, while
+// the QR text carries the password itself, escaped where a sticker's
+// password holds a character the WIFI: form reserves.
+func TestCardShowsPasswordGrouped(t *testing.T) {
+	l, k := fixtureLayout(), fixtureKeys()
+	var cards []Card
+	for id := range k.Device {
+		c, _ := k.DeviceCard(l, id)
+		cards = append(cards, c)
+	}
+	for _, n := range []string{policy.NetOwner, policy.NetHousehold, policy.NetGuests} {
+		c, _ := k.NetworkCard(l, n)
+		cards = append(cards, c)
+	}
+	fresh := Keys{}
+	if err := fresh.Enrol(); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := fresh.NetworkCard(l, policy.NetOwner)
+	cards = append(cards, c)
+	for _, c := range cards {
+		groups := strings.Split(c.Shown, " ")
+		for i, g := range groups {
+			if len(g) == 0 || len(g) > 4 || (i < len(groups)-1 && len(g) != 4) {
+				t.Fatalf("shown %q: group %q", c.Shown, g)
+			}
+		}
+		if strings.Join(groups, "") != c.Password || !strings.Contains(c.QR, ";P:"+c.Password+";") || strings.Contains(c.QR, c.Shown) {
+			t.Fatalf("card %+v", c)
+		}
+	}
+	tv, _ := k.DeviceCard(l, "core-held-id-tv")
+	if tv.Shown != "CANA RYTV AAAA AAAA AAAA AAAA AA" {
+		t.Errorf("shown %q", tv.Shown)
+	}
+	sticker := Keys{Setup: "my;sticker:pw"}
+	if err := sticker.check(); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := sticker.NetworkCard(l, NetSetup); c.Shown != "my;s tick er:p w" || c.QR != `WIFI:T:WPA;S:Home setup;P:my\;sticker\:pw;;` {
+		t.Errorf("sticker card %+v", c)
+	}
+}
+
+// TestDeviceCardNamesBand (#4129, #4084): devices join on the first radio
+// only (ENF-g-7), so the device card names that radio's band and the
+// network cards carry no note.
+func TestDeviceCardNamesBand(t *testing.T) {
+	l, k := fixtureLayout(), fixtureKeys()
+	c, ok := k.DeviceCard(l, "core-held-id-tv")
+	if !ok || c.Note != "Devices join on 2.4 GHz Wi-Fi only: a device without 2.4 GHz cannot join." {
+		t.Fatalf("device card note %q", c.Note)
+	}
+	for _, n := range []string{policy.NetOwner, policy.NetHousehold, policy.NetGuests} {
+		if c, ok := k.NetworkCard(l, n); !ok || c.Note != "" {
+			t.Errorf("%s card note %q", n, c.Note)
+		}
+	}
+	if c, _ := (Keys{Setup: "CANARYSETUPAAAAAAAAAAAAAAA"}).NetworkCard(l, NetSetup); c.Note != "" {
+		t.Errorf("setup card note %q", c.Note)
+	}
+	l.Radios[0].Band = "5g"
+	if c, _ := k.DeviceCard(l, "core-held-id-tv"); !strings.Contains(c.Note, "5 GHz") || strings.Contains(c.Note, "2.4") {
+		t.Errorf("first radio on 5 GHz: note %q", c.Note)
+	}
+}
+
 func (k Keys) clone() Keys {
 	c := k
 	c.Device = map[string]DeviceKey{}
