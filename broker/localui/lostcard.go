@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/card/words"
 	"github.com/ghbmrk/agentos/broker/firstboot"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
@@ -25,7 +26,8 @@ import (
 // shows the card the box made, through card.Display, on a second hardware
 // key's tap over the card's ID (#4128), until the owner confirms it, when
 // the kernel wipes its copy. The card is already in effect when shown
-// (card.DisplayConfig.Made): the store changed at boot. The page names it
+// (card.DisplayConfig.Made): the store changed at boot, its passphrase and
+// recovery key replacing the old card's (#4130). The page names it
 // by its mark, which the card prints, so after the kernel lets it go the
 // page can still say which card is in effect (#4160). Each tap's
 // challenge depends only on IDs agentosd names, so this page keeps
@@ -103,7 +105,7 @@ const (
 	lostFiledText    = "Your request for a new card is filed. When I restart I make the new card, and this page shows it. Restart me now, or I carry it out at my next restart within a week."
 	lostRestartText  = "I restart as soon as no call or task is running; once a month a check of my software runs first and takes a few minutes more. Then open this page again to see your new card."
 	lostWithdrawText = "Your request for a new card is withdrawn: I make no new card at my next restart."
-	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its recovery key is the only recovery key that opens my store, and the backups I take from now on open with it. Your old card's passphrase still opens my store."
+	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its passphrase and recovery key are the only ones that open my store, and the backups I take from now on open with its recovery key. Your old card's passphrase and recovery key no longer open my store: the new card replaces it whole, so if you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place, and destroy the old card if you find it."
 	lostNoTapText    = "Nothing was filed. Tap again with one of your hardware keys."
 	lostNoShowText   = "Nothing is shown. Tap again with one of your hardware keys."
 	lostPhoneText    = "That tap was a phone passkey's. Only one of your hardware keys can show your new card. Tap again, and choose your hardware key."
@@ -112,9 +114,9 @@ const (
 // The lines for a card the kernel no longer holds, by what the last card a
 // page showed is now (#4160); each names that card by its mark.
 const (
-	lostGoneText       = "I restarted before you confirmed your new card, so I no longer hold it. The card in effect is marked %s: if you printed or saved the card with that mark, keep it, as its recovery key opens my store; a card with another mark does not. If you hold none with that mark, ask for a new card again. Your old card's passphrase still opens my store."
-	lostConfirmedText  = "Your new card, marked %s, is confirmed and in effect, and I keep no copy of it: its recovery key opens my store, and a card with another mark does not."
-	lostSupersededText = "The new card I showed you before, marked %s, is no longer in effect: its recovery key does not open my store. If no card you hold opens my store, ask for a new card. Your old card's passphrase still opens my store."
+	lostGoneText       = "I restarted before you confirmed your new card, so I no longer hold it. The card in effect is marked %s: if you printed or saved the card with that mark, keep it, as its passphrase and recovery key open my store; a card with another mark does not. If you hold none with that mark, ask for a new card again."
+	lostConfirmedText  = "Your new card, marked %s, is confirmed and in effect, and I keep no copy of it: its passphrase and recovery key open my store, and a card with another mark does not."
+	lostSupersededText = "The new card I showed you before, marked %s, is no longer in effect: neither its passphrase nor its recovery key opens my store. If no card you hold opens my store, ask for a new card."
 	lostNoCardText     = "I hold no new card to show. If no card you hold opens my store, ask for a new card."
 )
 
@@ -331,6 +333,14 @@ func (s *Server) lostShow(ctx context.Context, tok string, f url.Values) error {
 		return Refused(localapi.ErrRecoveryUnavailable)
 	}
 	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(c.Card))
+	// The passphrase the unlock step put in the store's passphrase slot
+	// with the key (MIG-4-recovery-r4d): it derives from the same bits.
+	pass, err := words.FromCardKey(c.Card)
+	if err != nil {
+		return Refused(localapi.ErrRecoveryUnavailable)
+	}
+	phrase := string(pass)
+	clear(pass)
 	var auth []byte
 	if s.cfg.PageAuthority != nil {
 		auth = s.cfg.PageAuthority()
@@ -339,13 +349,13 @@ func (s *Server) lostShow(ctx context.Context, tok string, f url.Values) error {
 	if gen == nil {
 		gen = card.Generate
 	}
-	d, err := card.NewDisplay(card.DisplayConfig{Rotate: &card.Parts{Recovery: true}, Made: true, Authority: auth, Mark: cardMark(c.ID),
+	d, err := card.NewDisplay(card.DisplayConfig{Rotate: &card.Parts{Passphrase: true, Recovery: true}, Made: true, Authority: auth, Mark: cardMark(c.ID),
 		// The card's other parts are drawn only to fill the card the
-		// display checks whole; it keeps the recovery key alone.
+		// display checks whole; it keeps the passphrase and recovery key.
 		Generate: func(rd io.Reader) (*card.Card, error) {
 			c, err := gen(rd)
 			if err == nil {
-				c.RecoveryKey = text
+				c.VaultPassphrase, c.RecoveryKey = phrase, text
 			}
 			return c, err
 		},

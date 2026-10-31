@@ -39,6 +39,7 @@ known github.com/ghbmrk/agentos/broker/kernel/privfile -- kernel/proc checks its
 known github.com/ghbmrk/agentos/broker/sockets -- kernel/proc serves its frames on a sockets listener
 known github.com/ghbmrk/agentos/broker/procguard -- kernel/proc runs procguard.Isolate at start
 known github.com/ghbmrk/agentos/broker/clerk/handoff -- the unlock step hands the kernel its keys on descriptor 3
+known github.com/ghbmrk/agentos/broker/card/words -- the unlock step puts the lost card's passphrase, from its bits, in the passphrase slot (MIG-4-recovery-r4d)
 known github.com/ghbmrk/agentos/broker/clerk/clerkkey -- the kernel derives each clerk's key and hands it to that clerk's unit (MAIL-keys, D-210)
 known github.com/ghbmrk/agentos/broker/pageca -- the kernel holds the page authority: certify and every backup (D-186, MIG-4-recovery-f1)
 known github.com/ghbmrk/agentos/broker/tpmseal -- the sealed store's tpm slot and the log anchor's counter

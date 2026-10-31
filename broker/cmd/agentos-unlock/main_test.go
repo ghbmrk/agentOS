@@ -33,6 +33,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/card/words"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
@@ -165,6 +166,7 @@ type rig struct {
 	dir, store, bin    string
 	policy             *ecdsa.PrivateKey
 	recovery           []byte
+	passphrase         []byte // the store's passphrase slot's, on a lostRig
 	anchor             []byte
 	kernelUID, kernelG int
 	ownerUID, meterUID int
@@ -1206,6 +1208,10 @@ func lostRig(t *testing.T) *rig {
 	must(t, err)
 	defer st.Close()
 	must(t, st.Put(handoff.RecipientEntry, recipientEntry(t, r.recovery)))
+	// The card's passphrase slot, as enrollment makes it.
+	r.passphrase = []byte("correct horse battery staple")
+	_, err = st.AddSlot(seal.Passphrase{Phrase: r.passphrase})
+	must(t, err)
 	return r
 }
 
@@ -1284,13 +1290,15 @@ func (r *rig) unlockOnce(pass []byte) (handoff.KernelKeys, string, error) {
 // REQ: REC-4, BAK-1
 // MIG-4-recovery-r3, D-201 route B: on a boot that opens the tpm slot, the
 // owner's lost-card request, approved by the kernel for the store's current
-// recipient, makes a new recovery key: the old key opens nothing, the new
-// one opens the store, the store's recipient and the one handed are the new
-// key's, and the other slots are kept. The step waits for the store's lock,
+// recipient, makes a new card: the old card's recovery key and passphrase
+// open nothing (MIG-4-recovery-r4d), the new card's both open the store,
+// the store's recipient and the one handed are the new key's, and the
+// other slots are kept. The step waits for the store's lock,
 // and the request is gone once carried out. The kernel the step becomes
 // holds the key for the owner's page until the card is confirmed.
 // Revert mutants: lostCard's ReplaceAndPut writing the slot alone (the
-// recipient checks fail); takeRequest taking no lock (the wait check fails).
+// recipient checks fail); the passphrase swap dropped (the old passphrase
+// opens the store); takeRequest taking no lock (the wait check fails).
 func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r := lostRig(t)
 	slots := func() []seal.SlotInfo {
@@ -1328,7 +1336,16 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
 		t.Fatal("the old recovery key still opens the store")
 	}
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: next})
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+		t.Fatal("the old passphrase still opens the store")
+	}
+	// The new card's passphrase, as the page prints it, opens the store.
+	pass, err := words.FromCardKey(k.NewRecovery)
+	must(t, err)
+	st, err := seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	must(t, err)
+	st.Close()
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: next})
 	must(t, err)
 	v, _, err := st.Get(handoff.RecipientEntry)
 	must(t, err)
@@ -1341,14 +1358,15 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatalf("slots %d, were %d", len(after), len(before))
 	}
 	for i := range after {
-		if after[i].Kind != before[i].Kind || after[i].Kind != seal.KindRecovery && after[i].ID != before[i].ID {
+		card := after[i].Kind == seal.KindRecovery || after[i].Kind == seal.KindPassphrase
+		if after[i].Kind != before[i].Kind || card == (after[i].ID == before[i].ID) {
 			t.Fatalf("slot %d changed: %+v, was %+v", i, after[i], before[i])
 		}
 	}
 	if _, err := os.Lstat(r.request); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the request is still there: %v", err)
 	}
-	r.recovery = next
+	r.recovery, r.passphrase = next, pass
 
 	// The whole boot: the kernel holds the key until the card is confirmed.
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
@@ -1379,6 +1397,14 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	st, err = seal.Unlock(r.store, seal.Recovery{Key: newKey})
 	must(t, err)
 	st.Close()
+	pass, err = words.FromCardKey(bits)
+	must(t, err)
+	st, err = seal.Unlock(r.store, seal.Passphrase{Phrase: pass})
+	must(t, err)
+	st.Close()
+	if _, err := seal.Unlock(r.store, seal.Passphrase{Phrase: r.passphrase}); err == nil {
+		t.Fatal("the first new card's passphrase still opens the store")
+	}
 }
 
 // REQ: REC-4
@@ -1388,8 +1414,8 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 // key and recipient. No request says nothing.
 // Revert mutants: the route check dropped (the card-route request
 // rotates); the Old check dropped (the stale request rotates); O_NOFOLLOW
-// dropped (the link rotates); the one-recovery-slot check weakened to none
-// (a store with two recovery slots has one replaced).
+// dropped (the link rotates); the one-recovery-slot or one-passphrase-slot
+// check weakened to none (a store with two has one replaced).
 func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	r := lostRig(t)
 	old := recipientOf(t, r.recovery)
@@ -1464,25 +1490,48 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	}
 
 	// A store holding two recovery slots, as an interrupted rotation could
-	// leave it, is refused whole: replacing one would leave the other old
-	// key opening the store.
-	two := lostRig(t)
-	st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
-	must(t, err)
-	_, err = st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
-	st.Close()
-	must(t, err)
-	two.ask(lostCardApproval(recipientOf(t, two.recovery)))
-	was, err := os.ReadFile(two.store)
-	must(t, err)
-	k, said, err := two.unlockOnce(nil)
-	now, rerr := os.ReadFile(two.store)
-	must(t, rerr)
-	if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
-		t.Errorf("two recovery slots: %v, new key %v, store changed %v", err, k.NewRecovery != nil, !bytes.Equal(was, now))
-	}
-	if strings.Count(said, "\n") != 1 || !strings.Contains(said, "lost-card request") {
-		t.Errorf("two recovery slots: stderr %q, want one line on the request", said)
+	// leave it, or two passphrase slots, is refused whole: replacing one
+	// would leave the other old factor opening the store. So is one with no
+	// passphrase slot, which the new card's passphrase would not open.
+	for _, c := range []struct {
+		name  string
+		shape func(*seal.Store) error
+	}{
+		{"two recovery slots", func(st *seal.Store) error {
+			_, err := st.AddSlot(seal.Recovery{Key: bytes.Repeat([]byte{7}, seal.RecoveryLen)})
+			return err
+		}},
+		{"two passphrase slots", func(st *seal.Store) error {
+			_, err := st.AddSlot(seal.Passphrase{Phrase: []byte("another passphrase slot here")})
+			return err
+		}},
+		{"no passphrase slot", func(st *seal.Store) error {
+			for _, sl := range st.Slots() {
+				if sl.Kind == seal.KindPassphrase {
+					return st.RemoveSlot(sl.ID)
+				}
+			}
+			return nil
+		}},
+	} {
+		two := lostRig(t)
+		st, err := seal.Unlock(two.store, seal.Recovery{Key: two.recovery})
+		must(t, err)
+		err = c.shape(st)
+		st.Close()
+		must(t, err)
+		two.ask(lostCardApproval(recipientOf(t, two.recovery)))
+		was, err := os.ReadFile(two.store)
+		must(t, err)
+		k, said, err := two.unlockOnce(nil)
+		now, rerr := os.ReadFile(two.store)
+		must(t, rerr)
+		if err != nil || k.NewRecovery != nil || !bytes.Equal(k.Recipient, recipientWire(t, two.recovery)) || !bytes.Equal(was, now) {
+			t.Errorf("%s: %v, new key %v, store changed %v", c.name, err, k.NewRecovery != nil, !bytes.Equal(was, now))
+		}
+		if strings.Count(said, "\n") != 1 || !strings.Contains(said, "lost-card request") {
+			t.Errorf("%s: stderr %q, want one line on the request", c.name, said)
+		}
 	}
 }
 
@@ -1494,12 +1543,7 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 // passphrase unlock rotates).
 func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
 	r := lostRig(t)
-	phrase := []byte("correct horse battery staple")
-	st, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery})
-	must(t, err)
-	_, err = st.AddSlot(seal.Passphrase{Phrase: phrase})
-	must(t, err)
-	st.Close()
+	phrase := r.passphrase
 	b := r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	was, err := os.ReadFile(r.store)
 	must(t, err)

@@ -1,0 +1,99 @@
+// Package words is the Owner Card's passphrase wordlist, EFF's large list,
+// and the passphrase of a card the box makes on the lost-card route
+// (D-201 route B, MIG-4-recovery-r4d). That passphrase derives from the
+// new card's recovery key bits, so the unlock step, which puts it in the
+// store's passphrase slot, and the owner's page, which prints it, agree on
+// it while the kernel holds and hands those bits alone. It reveals nothing
+// of the bits (HKDF is one-way): the recovery key opens the store and its
+// backups, the passphrase only the store.
+package words
+
+import (
+	"crypto/hkdf"
+	"crypto/sha256"
+	_ "embed"
+	"errors"
+	"strings"
+)
+
+// effLarge is EFF's large wordlist (7,776 words, five dice per word),
+// byte-identical to eff_large_wordlist.txt as EFF publishes it; a test pins
+// its SHA-256. Licensed CC BY 3.0 US by the Electronic Frontier Foundation:
+// https://www.eff.org/deeplinks/2016/07/new-wordlists-random-passphrases
+//
+//go:embed eff_large_wordlist.txt
+var effLarge []byte
+
+const (
+	// Count is the list's length.
+	Count = 7776
+	// PerPassphrase is a card passphrase's length in words: 90 bits, above
+	// STO-2's 80.
+	PerPassphrase = 7
+	// cardKeyLen is a card's recovery key bits (handoff.CardKeyLen).
+	cardKeyLen = 20
+)
+
+var (
+	list    []string
+	index   = map[string]int{}
+	longest int
+)
+
+func init() {
+	for _, line := range strings.Split(strings.TrimSpace(string(effLarge)), "\n") {
+		if _, w, ok := strings.Cut(line, "\t"); ok {
+			index[w] = len(list)
+			list = append(list, w)
+			longest = max(longest, len(w))
+		}
+	}
+}
+
+// Word is the list's word i, for 0 <= i < Count.
+func Word(i int) string { return list[i] }
+
+// Index is w's place in the list, if it is on it.
+func Index(w string) (int, bool) {
+	i, ok := index[w]
+	return i, ok
+}
+
+// ErrCardKey: the bits are not a card's recovery key.
+var ErrCardKey = errors.New("words: not a card's recovery key")
+
+// FromCardKey is the passphrase of the card the box made with recovery key
+// bits cardKey: PerPassphrase words, lower case, one space apart (the form
+// the passphrase slot takes), drawn without bias from HKDF-SHA256 of the
+// bits, two bytes a word, a value at or past 8*Count skipped. The caller
+// owns and clears the result.
+func FromCardKey(cardKey []byte) ([]byte, error) {
+	if len(cardKey) != cardKeyLen {
+		return nil, ErrCardKey
+	}
+	// 32 draws: fewer than seven of them below 8*Count has odds under 2^-90.
+	s, err := hkdf.Key(sha256.New, cardKey, nil, "agentos.card.lost-passphrase.v1", 64)
+	defer clear(s)
+	if err != nil {
+		return nil, err
+	}
+	// Sized for the longest phrase, so no partial copy is left behind.
+	out := make([]byte, 0, PerPassphrase*(longest+1))
+	n := 0
+	for i := 0; i < len(s) && n < PerPassphrase; i += 2 {
+		v := int(s[i])<<8 | int(s[i+1])
+		if v >= 8*Count {
+			continue
+		}
+		if n > 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, list[v%Count]...)
+		n++
+	}
+	if n < PerPassphrase {
+		clear(out)
+		return nil, ErrCardKey
+	}
+	return out, nil
+}

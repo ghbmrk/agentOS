@@ -28,9 +28,9 @@
 // With -recovery-request, it also carries out the owner's lost-card request
 // (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
 // the kernel approved for the store's current backup recipient makes a new
-// recovery key, replaces the recovery slot and the recipient with it in one
-// write, and hands the key to the kernel, which shows it on the owner's
-// page. A request that is not one is ignored, with one line on stderr, and
+// card, replaces the recovery slot, the passphrase slot and the recipient
+// with its recovery key and passphrase in one write, and hands the card's
+// bits to the kernel, which shows the card on the owner's page. A request that is not one is ignored, with one line on stderr, and
 // the box starts as ever.
 //
 // With -checker-seed, it also writes the owner's code-generator seed from
@@ -62,6 +62,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/card/words"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
@@ -365,11 +366,13 @@ func lockStore(dir string) (func(), error) {
 
 // lostCard carries out request, a lost-card approval (handoff.Approval,
 // route B) the kernel signed with head, the store's head key, for the
-// backup recipient st holds now ("" for none): it makes a new recovery
-// key and puts it in st's one recovery slot, and its recipient in
-// RecipientEntry, in one write (seal.Store.ReplaceAndPut), and returns the
-// new card's bits (handoff.CardKeyLen), from which that key derives. Any
-// error changes nothing. Once the recipient has changed the request no
+// backup recipient st holds now ("" for none): it makes a new card, puts
+// its recovery key in st's one recovery slot, its passphrase in st's one
+// passphrase slot (MIG-4-recovery-r4d) and its recipient in RecipientEntry,
+// in one write (seal.Store.ReplaceAndPut), and returns the new card's bits
+// (handoff.CardKeyLen), from which that key and passphrase derive. So the
+// lost card's passphrase stops opening the store with its recovery key.
+// Any error changes nothing. Once the recipient has changed the request no
 // longer matches, so it is carried out at most once.
 func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64) ([]byte, error) {
 	a, err := handoff.VerifyApproval(head, request, now)
@@ -386,21 +389,25 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 	if a.Old != old {
 		return nil, errStale
 	}
-	var slot []string
+	slot := map[seal.Kind][]string{}
 	for _, sl := range st.Slots() {
-		if sl.Kind == seal.KindRecovery {
-			slot = append(slot, sl.ID)
-		}
+		slot[sl.Kind] = append(slot[sl.Kind], sl.ID)
 	}
-	if len(slot) != 1 {
-		return nil, fmt.Errorf("my store holds %d recovery slots, not one", len(slot))
+	if len(slot[seal.KindRecovery]) != 1 || len(slot[seal.KindPassphrase]) != 1 {
+		return nil, fmt.Errorf("my store holds %d recovery and %d passphrase slots, not one of each", len(slot[seal.KindRecovery]), len(slot[seal.KindPassphrase]))
 	}
-	// The new card's 160 bits, which the page prints; the slot and the
-	// recipient take the key derived from them, as from any card (#3406).
+	// The new card's 160 bits, which the page prints; the slots and the
+	// recipient take the key derived from them, as from any card (#3406),
+	// and the passphrase derived from them (words.FromCardKey).
 	bits := make([]byte, handoff.CardKeyLen)
 	rand.Read(bits)
 	rec, err := handoff.StoreRecoveryKey(bits)
 	defer clear(rec)
+	var pass []byte
+	if err == nil {
+		pass, err = words.FromCardKey(bits)
+	}
+	defer clear(pass)
 	var next backup.Recipient
 	if err == nil {
 		next, err = backup.RecipientFor(rec)
@@ -414,15 +421,17 @@ func lostCard(st *seal.Store, request []byte, head ed25519.PublicKey, now int64)
 		return nil, err
 	}
 	// A directory sync that fails after the rename still leaves the new
-	// slot and recipient in place (seal.Store.commit): only the new key
+	// slots and recipient in place (seal.Store.commit): only the new card
 	// opens the store, so it is handed on.
-	id, err := st.ReplaceAndPut(slot[0], seal.Recovery{Key: rec}, handoff.RecipientEntry, v)
-	if id == "" {
+	id, err := st.ReplaceAndPut(handoff.RecipientEntry, v,
+		seal.Swap{ID: slot[seal.KindRecovery][0], F: seal.Recovery{Key: rec}},
+		seal.Swap{ID: slot[seal.KindPassphrase][0], F: seal.Passphrase{Phrase: pass}})
+	if id == nil {
 		clear(bits)
 		return nil, err
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agentos-unlock: the new recovery key is in place; my store's directory sync failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "agentos-unlock: the new card is in place; my store's directory sync failed: %v\n", err)
 	}
 	return bits, nil
 }

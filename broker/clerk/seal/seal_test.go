@@ -502,7 +502,7 @@ func TestReplaceAndPutIsOneWrite(t *testing.T) {
 	id := s.Slots()[0].ID
 	next := recovery(t)
 	restore := seal.FailWrite(errors.New("disk full"))
-	_, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
+	_, err := s.ReplaceAndPut("backup/recipient", []byte("new recipient"), seal.Swap{ID: id, F: next})
 	restore()
 	if err == nil {
 		t.Fatal("ReplaceAndPut hid the write's error")
@@ -519,10 +519,11 @@ func TestReplaceAndPutIsOneWrite(t *testing.T) {
 		t.Fatalf("the new key after a failed write: got %v, want ErrWrongFactor", err)
 	}
 
-	nid, err := s.ReplaceAndPut(id, next, "backup/recipient", []byte("new recipient"))
-	if err != nil || nid == "" || nid == id {
-		t.Fatalf("ReplaceAndPut: %q, %v", nid, err)
+	nids, err := s.ReplaceAndPut("backup/recipient", []byte("new recipient"), seal.Swap{ID: id, F: next})
+	if err != nil || len(nids) != 1 || nids[0] == id {
+		t.Fatalf("ReplaceAndPut: %q, %v", nids, err)
 	}
+	nid := nids[0]
 	if _, err := seal.Unlock(path, old); !errors.Is(err, seal.ErrWrongFactor) {
 		t.Fatalf("the old key after the write: got %v, want ErrWrongFactor", err)
 	}
@@ -534,11 +535,72 @@ func TestReplaceAndPutIsOneWrite(t *testing.T) {
 			t.Fatalf("after the write the slots are %v", got)
 		}
 	}
-	if _, err := s.ReplaceAndPut("0123456789abcdef", recovery(t), "backup/recipient", nil); !errors.Is(err, seal.ErrNoSlot) {
+	if _, err := s.ReplaceAndPut("backup/recipient", nil, seal.Swap{ID: "0123456789abcdef", F: recovery(t)}); !errors.Is(err, seal.ErrNoSlot) {
 		t.Fatalf("an unknown slot: got %v, want ErrNoSlot", err)
 	}
-	if _, err := s.ReplaceAndPut(nid, recovery(t), "Bad Name", nil); err == nil {
+	if _, err := s.ReplaceAndPut("Bad Name", nil, seal.Swap{ID: nid, F: recovery(t)}); err == nil {
 		t.Fatal("a bad entry name was taken")
 	}
 	unlock(t, path, next)
+}
+
+// The lost-card route's write (MIG-4-recovery-r4d): the recovery and
+// passphrase slots and the recipient change together or not at all.
+// Catches a write that replaces the recovery slot and leaves the old
+// passphrase opening the store, or a slot named twice taking two new slots.
+func TestReplaceAndPutSwapsBothSlots(t *testing.T) {
+	old := recovery(t)
+	oldPass := seal.Passphrase{Phrase: []byte("seven words from the lost card here")}
+	path, s := create(t, old)
+	if _, err := s.AddSlot(oldPass); err != nil {
+		t.Fatal(err)
+	}
+	var rid, pid string
+	for _, sl := range s.Slots() {
+		switch sl.Kind {
+		case seal.KindRecovery:
+			rid = sl.ID
+		case seal.KindPassphrase:
+			pid = sl.ID
+		}
+	}
+	next := recovery(t)
+	nextPass := seal.Passphrase{Phrase: []byte("seven other words on the new card")}
+	if _, err := s.ReplaceAndPut("backup/recipient", []byte("new"), seal.Swap{ID: rid, F: next}, seal.Swap{ID: rid, F: nextPass}); !errors.Is(err, seal.ErrNoSlot) {
+		t.Fatalf("a slot named twice: got %v, want ErrNoSlot", err)
+	}
+	if _, err := s.ReplaceAndPut("backup/recipient", []byte("new")); !errors.Is(err, seal.ErrNoSlot) {
+		t.Fatalf("no swaps: got %v, want ErrNoSlot", err)
+	}
+	restore := seal.FailWrite(errors.New("disk full"))
+	_, err := s.ReplaceAndPut("backup/recipient", []byte("new"), seal.Swap{ID: rid, F: next}, seal.Swap{ID: pid, F: nextPass})
+	restore()
+	if err == nil {
+		t.Fatal("ReplaceAndPut hid the write's error")
+	}
+	for _, f := range []seal.Factor{old, oldPass} {
+		unlock(t, path, f).Close()
+	}
+	for _, f := range []seal.Factor{next, nextPass} {
+		if _, err := seal.Unlock(path, f); !errors.Is(err, seal.ErrWrongFactor) {
+			t.Fatalf("a new factor after a failed write: got %v, want ErrWrongFactor", err)
+		}
+	}
+
+	ids, err := s.ReplaceAndPut("backup/recipient", []byte("new"), seal.Swap{ID: rid, F: next}, seal.Swap{ID: pid, F: nextPass})
+	if err != nil || len(ids) != 2 || ids[0] == rid || ids[1] == pid {
+		t.Fatalf("ReplaceAndPut: %q, %v", ids, err)
+	}
+	for _, f := range []seal.Factor{old, oldPass} {
+		if _, err := seal.Unlock(path, f); !errors.Is(err, seal.ErrWrongFactor) {
+			t.Fatalf("an old factor after the write: got %v, want ErrWrongFactor", err)
+		}
+	}
+	for _, f := range []seal.Factor{next, nextPass} {
+		st := unlock(t, path, f)
+		if v, _, _ := st.Get("backup/recipient"); string(v) != "new" || len(st.Slots()) != 2 {
+			t.Fatalf("after the write: entry %q, slots %v", v, st.Slots())
+		}
+		st.Close()
+	}
 }
