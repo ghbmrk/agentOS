@@ -52,12 +52,19 @@ func (h *home) hold(why, from, to, addr string, port int) *held {
 	})
 	defer ln.Close()
 	x := &held{why: why}
+	var dialErr error
 	within(t, h.hosts[from], func() {
-		var err error
-		if x.c, err = net.DialTimeout("tcp", net.JoinHostPort(addr, strconv.Itoa(port)), 2*time.Second); err != nil {
-			t.Fatalf("%s: dial: %v", why, err)
-		}
+		x.c, dialErr = net.DialTimeout("tcp", net.JoinHostPort(addr, strconv.Itoa(port)), 2*time.Second)
 	})
+	if dialErr != nil {
+		// What each side knows of the other, for a failure seen only in CI.
+		t.Logf("enforcer neighbours:\n%s", run(t, "ip", "neigh", "show"))
+		for _, n := range []string{from, to} {
+			t.Logf("%s:\n%s%s", n, h.in(h.hosts[n], "ip", "addr", "show"), h.in(h.hosts[n], "ip", "neigh", "show"))
+		}
+		t.Logf("blocked: %d, spoofed: %d", h.counter(Blocked), h.counter(Spoofed))
+		t.Fatalf("%s: dial: %v", why, dialErr)
+	}
 	ln.SetDeadline(time.Now().Add(2 * time.Second))
 	var err error
 	if x.s, err = ln.Accept(); err != nil {
