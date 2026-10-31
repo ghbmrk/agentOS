@@ -188,6 +188,9 @@ func TestCopiedMACGetsOwnList(t *testing.T) {
 	h := build(t)
 	plugMAC := h.mac(h.hosts["103"], "eth0")
 	impostor := h.hosts["102"] // the offline speaker: no internet of its own
+	if got := h.mac(impostor, "eth0"); got == plugMAC {
+		t.Fatalf("before the copy the impostor already has %s, the plug's address, so the copy would change nothing", got)
+	}
 	h.in(impostor, "ip", "link", "set", "eth0", "down")
 	h.in(impostor, "ip", "link", "set", "eth0", "address", plugMAC)
 	h.in(impostor, "ip", "link", "set", "eth0", "up")
