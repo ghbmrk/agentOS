@@ -60,9 +60,17 @@ exempt-pr 4133
 # (D-198). Remove once #4183 merges.
 exempt-pr 4183
 
+# #4227 (ENF-names-c, #4185): broker/enforcer/channel/, policy/ and wire/, which the G2 list does not name (D-198).
+# Remove once #4227 merges.
+exempt-pr 4227
+
 # #4135 (CAM-clerk-kept-expiry): broker/clerk/camera/ and broker/cmd/agentos-camera/, which the G2 list does not name (D-198).
 # Remove once #4135 merges.
 exempt-pr 4135
+
+# #4238 (ENF-cut-conntrack, #4141): broker/enforcer/nft/, which the G2 list does not name (D-198).
+# Remove once #4238 merges.
+exempt-pr 4238
 
 # #4139 (ENF-dns): broker/enforcer/dns/, which the G2 list does not name (D-198).
 # Remove once #4139 merges.
