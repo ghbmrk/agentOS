@@ -301,6 +301,10 @@ var enforcer = map[string]struct {
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
 	"enforcer/radio/ble":     {[]string{"enforcer/radio"}, droneForbid}, // #3906: BlueZ's D-Bus client, its own codec (no godbus: it links os/exec)
 	"enforcer/radio/confine": {nil, slices.DeleteFunc(slices.Clone(droneForbid), func(s string) bool { return s == "os/exec" || s == "unsafe" })},
+	// Thread's adapter (slice t, D-231): ot-daemon's command socket on one
+	// side, the radio host's interface on the other; the daemon starts both
+	// through confine.
+	"enforcer/radio/thread": {[]string{"enforcer/radio"}, droneForbid},
 	// The access point (slice g): ap renders its config from the policy,
 	// with VLANs read by the firewall's own rule; push alone carries it
 	// over SSH (enforcerSSH).
