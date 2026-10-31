@@ -3,6 +3,7 @@ package policy
 // REQ: NET-2, NET-4
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -38,5 +39,28 @@ func TestNameIsAtMost253Bytes(t *testing.T) {
 		if name(s) != want {
 			t.Errorf("name(%d bytes) = %v, want %v", len(s), !want, want)
 		}
+	}
+}
+
+// The word the channel log puts before an unsigned name's hash is no
+// token, in any case, so a signed device never reads as that marker on the
+// owner's line (#4185); a token that only starts with it is a name.
+// Revert mutant: name without the Unknown check.
+func TestUnknownIsReserved(t *testing.T) {
+	for s, want := range map[string]bool{
+		"unknown": false, "Unknown": false, "UNKNOWN": false,
+		"unknown-plug": true, "unknowns": true, "unknow": true,
+	} {
+		if name(s) != want {
+			t.Errorf("name(%q) = %v, want %v", s, !want, want)
+		}
+	}
+	d := edit(1, func(d *Document) {
+		u := *dev(d, "tv")
+		u.ID = Unknown
+		d.Devices = append(d.Devices, u)
+	})
+	if _, err := Encode(d); !errors.Is(err, ErrMalformed) {
+		t.Errorf("a device named %q signed: %v", Unknown, err)
 	}
 }

@@ -14,8 +14,9 @@ import (
 // with what each line does to the home. It reads only the two documents,
 // never anything agentOS says about them, so the core cannot show the owner
 // a false diff (NET-4 Loosening). The lines, joined, are the diff a
-// version's key commits to (policy.Proposal.Diff).
-func Describe(old, next policy.Document) []string {
+// version's key commits to (policy.Proposal.Diff). Times are in zone, the
+// owner's.
+func Describe(old, next policy.Document, zone *time.Location) []string {
 	old, next = plain(old), plain(next)
 	var out []string
 	add := func(f string, a ...any) { out = append(out, fmt.Sprintf(f, a...)) }
@@ -63,10 +64,10 @@ func Describe(old, next policy.Document) []string {
 		i := slices.IndexFunc(old.Standing, func(o policy.StandingRule) bool { return o.ID == r.ID })
 		switch {
 		case i < 0:
-			add("Add the standing rule %s: %s on %s, %s. The enforcer applies it by itself in that window.", r.ID, r.Action, r.Device, window(r))
+			add("Add the standing rule %s: %s on %s, %s. The enforcer applies it by itself in that window.", r.ID, r.Action, r.Device, window(r, zone))
 		case old.Standing[i] != r:
 			o := old.Standing[i]
-			add("Change the standing rule %s from %s on %s, %s, to %s on %s, %s.", r.ID, o.Action, o.Device, window(o), r.Action, r.Device, window(r))
+			add("Change the standing rule %s from %s on %s, %s, to %s on %s, %s.", r.ID, o.Action, o.Device, window(o, zone), r.Action, r.Device, window(r, zone))
 		}
 	}
 	for _, r := range old.Standing {
@@ -338,9 +339,8 @@ func unlinked(d policy.Document, p policy.Pair) string {
 	return strings.Join(why, " and ")
 }
 
-func window(r policy.StandingRule) string {
-	f := "Mon 2 Jan 2006 15:04 UTC"
-	return fmt.Sprintf("from %s to %s", time.UnixMilli(r.FromMS).UTC().Format(f), time.UnixMilli(r.ToMS).UTC().Format(f))
+func window(r policy.StandingRule, zone *time.Location) string {
+	return fmt.Sprintf("from %s to %s", clock(r.FromMS, zone), clock(r.ToMS, zone))
 }
 
 func minus(a, b []string) []string {

@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"slices"
 	"strconv"
@@ -84,9 +85,11 @@ func Acts() []Act { return []Act{On, Open, Fly, Unlock, Disarm, Off, Arm} }
 // policy lock the page takes around Redeem, which the channel's relocks
 // share. Act must check ctx and send in one step on the device's ordered
 // link (under the lock that orders that link's writes): it never starts a
-// send once ctx has ended. A send that started before then is ordered
-// before every command sent after Redeem returned, so a relock that lands
-// after a timeout always wins.
+// send once ctx has ended (the radio host's Send does). A send that
+// started before then is ordered before every command sent after Redeem
+// returned, so a relock that lands after a timeout always wins. An error
+// does not say the device did nothing: a write may have reached it before
+// the link failed, so Redeem reports every error as ErrUnsure.
 type Actuator interface {
 	Act(ctx context.Context, device string, a Act, route string) error
 }
@@ -114,9 +117,8 @@ var (
 	ErrNotOwner  = errors.New("your passkey did not approve this action; open the link again and approve with your passkey")
 	ErrMoved     = errors.New("the device changed since this page was drawn; open the link again")
 	ErrTimeout   = errors.New("the device did not answer in time and may still do it; check the device before you open the link again")
+	ErrUnsure    = errors.New("the device did not confirm it and may still do it; check the device before you open the link again")
 )
-
-var errPanicked = errors.New("action: the actuator failed")
 
 // Challenge is one tap the owner is asked for: one act on one device, good
 // once, until ExpiresMS.
@@ -183,7 +185,10 @@ func (b *Book) Issue(doc policy.Document, device string, a Act, route string, no
 // the owner's assertion over it (key.AssertionSig form), the window has
 // not passed and the device in doc, the policy in force, still takes the
 // act with the class it had, carries the act out at once. It waits for the
-// actuator at most the book's timeout and then returns ErrTimeout.
+// actuator at most the book's timeout and then returns ErrTimeout; an
+// actuator that fails or panics is ErrUnsure, wrapped with which. Either
+// way the act may have run, so the challenge is returned with the error,
+// naming it for the enforcer's log.
 func (b *Book) Redeem(doc policy.Document, id string, sig []byte, nowMS int64) (Challenge, error) {
 	b.mu.Lock()
 	c, ok := b.live[id]
@@ -199,10 +204,7 @@ func (b *Book) Redeem(doc policy.Document, id string, sig []byte, nowMS int64) (
 	if dev == nil || dev.Class != c.Class || !Takes(*dev, c.Act) {
 		return Challenge{}, ErrMoved
 	}
-	if err := b.call(c); err != nil {
-		return Challenge{}, err
-	}
-	return c, nil
+	return c, b.call(c)
 }
 
 // call runs the actuator for c and waits for it at most the book's
@@ -217,10 +219,14 @@ func (b *Book) call(c Challenge) error {
 	go func() {
 		defer func() {
 			if recover() != nil {
-				done <- errPanicked
+				done <- fmt.Errorf("%w: the actuator panicked", ErrUnsure)
 			}
 		}()
-		done <- b.act.Act(ctx, c.Device, c.Act, c.Route)
+		if err := b.act.Act(ctx, c.Device, c.Act, c.Route); err != nil {
+			done <- fmt.Errorf("%w: the actuator failed: %w", ErrUnsure, err)
+			return
+		}
+		done <- nil
 	}()
 	select {
 	case err := <-done:

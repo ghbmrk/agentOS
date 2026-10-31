@@ -66,7 +66,8 @@ type Setup struct {
 	// every address the enforcer holds there: the Owner, Household,
 	// Guests, admin and core interfaces and each listed device's VLAN. A
 	// setup that leaves one out is refused, so no served prefix escapes the
-	// upstream check (ASSUMPTIONS ENF-f-5). DHCP serves the ones marked.
+	// upstream check (ASSUMPTIONS ENF-f-5). DHCP serves the ones marked,
+	// and a setup that marks none is refused.
 	Nets []Net
 	// LeaseFile is the absolute path of the DHCP lease file.
 	LeaseFile string
@@ -198,9 +199,9 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 // check refuses a setup that names an interface the layout does not serve
 // (the edge's segment, the WAN and the access point's management
 // interface among them), leaves out one an instance answers on (answered),
-// holds a prefix that is not a masked private block, an upstream that is
-// not a global address or is on a served network, or a lease file path
-// that needs quoting.
+// marks no network for DHCP, holds a prefix that is not a masked private
+// block, an upstream that is not a global address or is on a served
+// network, or a lease file path that needs quoting.
 func (s Setup) check(l nft.Layout, answered []string) error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrConfig}, a...)...) }
 	if len(s.Upstream) == 0 {
@@ -233,6 +234,12 @@ func (s Setup) check(l nft.Layout, answered []string) error {
 		if q := n.Prefix6; q.IsValid() && (!q.Addr().Is6() || q.Addr().Is4In6() || q != q.Masked() || q.Bits() != 64 || q.Addr().Zone() != "") {
 			return bad("%s: IPv6 prefix %v", n.Iface, q)
 		}
+	}
+	// The DHCP instance names exactly the networks marked; with none it
+	// would name no interface, which in dnsmasq means every interface but
+	// loopback, the edge's segment and the WAN among them.
+	if !slices.ContainsFunc(s.Nets, func(n Net) bool { return n.DHCP }) {
+		return bad("no network is served DHCP")
 	}
 	for _, i := range answered {
 		if !slices.Contains(seen, i) {

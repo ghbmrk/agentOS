@@ -131,10 +131,20 @@ func derive(s *State, e Entry, head ed25519.PublicKey, refused *derived) ([]deri
 		return nil, true
 	case TTrip:
 		// A plan's trip is in its rejection, derived with it; a trip entry
-		// is an input (an exit's call trip, a honey key at Extend or Issue)
-		// only in a shape the fold takes, else a divergence.
+		// is an input (an exit's call trip) only in a shape the fold takes,
+		// else a divergence.
 		var t Trip
 		return nil, json.Unmarshal(e.Body, &t) != nil || !s.tripOK(t, "")
+	case TTripOwner:
+		// The call and its key are the owner's; the trip is derived again.
+		var b ownerTrip
+		if json.Unmarshal(e.Body, &b) != nil {
+			return nil, true
+		}
+		if _, d, ok := b.again(s); ok {
+			return []derived{d}, true
+		}
+		return nil, true
 	}
 	// A type the kernel adds is a decision with no derivation until it is
 	// listed here or derived above, so none is folded unchecked by default.

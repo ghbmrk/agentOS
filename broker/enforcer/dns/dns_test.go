@@ -282,8 +282,13 @@ func TestGenerateRefuses(t *testing.T) {
 		"tiny prefix":   func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix4 = netip.MustParsePrefix("10.10.0.0/30") },
 		"v6 not /64":    func(_ *policy.Document, s *Setup) { s.Nets[0].Prefix6 = netip.MustParsePrefix("fd00:10::/56") },
 		"no upstream":   func(_ *policy.Document, s *Setup) { s.Upstream = nil },
-		"private up":    func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") },
-		"loopback up":   func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") },
+		"no DHCP": func(_ *policy.Document, s *Setup) {
+			for i := range s.Nets {
+				s.Nets[i].DHCP = false
+			}
+		},
+		"private up":  func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("192.168.1.1:53") },
+		"loopback up": func(_ *policy.Document, s *Setup) { s.Upstream[0] = netip.MustParseAddrPort("127.0.0.1:53") },
 		"served v6 up": func(_ *policy.Document, s *Setup) {
 			s.Nets[5].Prefix6 = netip.MustParsePrefix("2001:db8:101::/64")
 			s.Upstream = append(s.Upstream, netip.MustParseAddrPort("[2001:db8:101::53]:53"))
