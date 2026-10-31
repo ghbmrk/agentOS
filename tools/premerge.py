@@ -101,17 +101,20 @@ _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 # D-137: a gate-file or tier-A PR also needs a Security accept in a comment of its own, so one review cannot count twice.
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 # A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
+_MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
 _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
 
 
 def _record_block(body):
-    """The comment's own record lines: the paragraph holding its first `Record:` line outside a code fence, else its
-    first paragraph.
+    """(text, placed): where a comment's Record line and markers are read from, and whether that is its own record block.
 
-    Markers and Record lines anywhere else (a fenced example, a Next line naming another review) are text, so they
-    can neither hide a review's own record nor lend it one (#4261)."""
+    The record block is the paragraph holding the comment's first `Record:` line outside a code fence, else its first
+    paragraph. When it carries a marker, markers and Record lines anywhere else are quoted text: they neither hide the
+    review's own record nor lend it one (#4261). When it carries none, the whole comment is read and any marker in it
+    is misplaced, which reads as unparsed (fails closed) rather than as no record."""
     paras = re.split(r"\n\s*\n", re.sub(r"^```.*?^```[^\n]*$", "", body, flags=re.M | re.S))
-    return next((p for p in paras if re.search(r"^Record:", p, re.M)), paras[0])
+    own = next((p for p in paras if re.search(r"^Record:", p, re.M)), paras[0])
+    return (own, True) if _MARKER.search(own) else (body, False)
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -131,7 +134,8 @@ def verdict(comments, pr, security=False, lens=None):
 
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
-    Markers and the Record line count only in the comment's record block (`_record_block`, #4261).
+    Markers and the Record line count only in the comment's record block; a marker only outside it reads as
+    `unparsed` (`_record_block`, #4261).
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
@@ -139,7 +143,7 @@ def verdict(comments, pr, security=False, lens=None):
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
         first = body.split("\n", 1)[0].strip()
-        own = _record_block(body)
+        own, placed = _record_block(body)
         rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", own, re.M)
         if lens:
             marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", own, re.M)
@@ -148,6 +152,8 @@ def verdict(comments, pr, security=False, lens=None):
         if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not rec:
             if not _RECORD.search(own):
                 found = ("unparsed", None)
+        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not placed:
+            found = ("unparsed", None)
         elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
