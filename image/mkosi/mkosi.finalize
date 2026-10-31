@@ -33,6 +33,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import posixpath
 import re
 import stat
 import sys
@@ -1630,6 +1631,12 @@ def keeper_violations(root):
 # (D-154 rule 3). A new clerk therefore starts with no exit past the home network.
 # Go's flag package reads a flag with one dash or two, its value after "=" or as the next word.
 CLERK_KEY_FLAGS = ("-clerk-key", "--clerk-key")
+# What systemd rewrites in a command line before the program sees it (quotes, $VAR and ${VAR}, %
+# specifiers, escapes): a kernel ExecStart= word holding one is not what the check reads, so it is refused.
+REWRITTEN = re.compile(r"[\"'$%\\]")
+# The kernel's key sockets: each is opened only by the unit the kernel hands that key to, a clerk's by
+# its -clerk-key entry and a driver's (DRIVER_KEY_SOCKET) by its own template.
+KERNEL_KEY_PREFIX = "/run/agentos-kernel/key-"
 HOME_NETS = tuple(ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "fc00::/7", "fe80::/10"))
 WORLD_CLERKS = ("agentos-keeper-mail.service",)
@@ -1649,8 +1656,13 @@ def clerk_keys(files):
     words = starts[-1].split() if starts else []
     out = []
     for i, w in enumerate(words):
+        if REWRITTEN.search(w):
+            out.append(w)
+            continue
         flag, eq, v = w.partition("=")
         if flag not in CLERK_KEY_FLAGS:
+            if "clerk-key" in w and not (i > 0 and words[i - 1] in CLERK_KEY_FLAGS):
+                out.append(w)
             continue
         if not eq:
             v = words[i + 1] if i + 1 < len(words) else ""
@@ -1668,8 +1680,9 @@ def clerk_violations(root, dirs, names):
     every address (IPAddressDeny=any) but HOME_NETS, which IPAddressAllow= stays inside, and no slice
     above it sets IPAddressAllow= (systemd adds a parent slice's list to the unit's). Each name, socket
     and unit is named once; every keeper unit that takes a clerk's key (OpenFile=...:clerk-key) is
-    named, so dropping a clerk's entry cannot take its unit out of these rules; and no other agentos
-    service opens a clerk's socket, or any key socket beside them."""
+    named, so dropping a clerk's entry cannot take its unit out of these rules; and no service in the
+    tree opens a KERNEL_KEY_PREFIX socket but its own (key_socket_owner). The kernel's ExecStart= holds
+    no word systemd rewrites (REWRITTEN) and none naming clerk-key that is not read as an entry."""
     out = []
     for kname in UNLOCK_UNITS:
         files = unit_with_dropins(root, dirs, kname)
@@ -1680,33 +1693,36 @@ def clerk_violations(root, dirs, names):
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (kname, e))
             continue
-        # Every service's User=, the image's own and any other, so a clerk's user is its alone.
-        users = {}
-        for n in sorted({n for d in dirs for n in tree_listdir(root, d) if n.endswith(".service") and "@." not in n}):
-            try:
-                u = ini_last(unit_with_dropins(root, dirs, n), "Service", "User")
-            except (ValueError, OSError):
-                continue  # keeper_unit_violations reports an agentos one
-            users.setdefault(u, []).append(n)
         seen = set()
         good = [k for k in keys if not isinstance(k, str)]
         keyed = {k[2].rsplit("/", 1)[1] for k in good}
-        by_sock = {k[1]: k[2].rsplit("/", 1)[1] for k in good}
-        key_dirs = {k[1].rsplit("/", 1)[0] + "/key-" for k in good}
-        for n in sorted(names):
+        by_sock = {posixpath.normpath(k[1]): k[2].rsplit("/", 1)[1] for k in good}
+        # Every service in the tree, the image's own and any other: its User=, so a clerk's user is its
+        # alone, and its OpenFile= paths, so only a key's own unit opens a kernel key socket.
+        users = {}
+        for n in sorted({n for d in dirs for n in tree_listdir(root, d) if n.endswith(".service")}):
             try:
-                opens = ini_entries(unit_with_dropins(root, dirs, n), "Service", "OpenFile")
-            except ValueError:
-                continue  # keeper_unit_violations reports it
+                files = unit_with_dropins(root, dirs, n)
+                u = ini_last(files, "Service", "User")
+                opens = ini_entries(files, "Service", "OpenFile")
+            except (ValueError, OSError) as e:
+                if "@." not in n and n in names:
+                    continue  # keeper_unit_violations reports an agentos one
+                out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (n, e))
+                continue
+            if "@." not in n:
+                users.setdefault(u, []).append(n)
             if n.startswith(KEEPER_PREFIX) and n not in keyed and any(re.search(r":clerk-key(:|$)", v) for v in opens):
                 out.append("%s: takes a clerk's key but %s names no -clerk-key for it (CLK-1)" % (n, kname))
             for v in opens:
-                path = v.split(":", 1)[0]
-                if by_sock.get(path, n) != n or (path not in by_sock and path.startswith(tuple(key_dirs))):
-                    out.append("%s: OpenFile=%s opens a clerk's key socket that is not its own (CLK-1)" % (n, v))
+                path = posixpath.normpath(v.split(":", 1)[0])
+                if path.startswith(KERNEL_KEY_PREFIX) and key_socket_owner(path, by_sock) != n:
+                    out.append("%s: OpenFile=%s opens a kernel key socket that is not its own (CLK-1)" % (n, v))
         for k in keys:
             if isinstance(k, str):
-                out.append("%s: -clerk-key %s is not name=/socket,/cgroup (CLK-1)" % (kname, k))
+                out.append("%s: ExecStart= word %s is not a -clerk-key entry the check reads (name=/socket,/cgroup, "
+                           "with nothing systemd rewrites); the tree check never passes what it cannot read (CLK-1)"
+                           % (kname, k))
                 continue
             cname, sock, cg = k
             unit = cg.rsplit("/", 1)[1]
@@ -1729,6 +1745,15 @@ def clerk_violations(root, dirs, names):
             except ValueError as e:
                 out.append("%s: %s; the tree check never passes what it cannot read (CLK-1)" % (unit, e))
     return out
+
+
+def key_socket_owner(path, by_sock):
+    """The one unit that may open kernel key socket PATH: a clerk's (BY_SOCK, from the kernel's entries)
+    or a driver's template (DRIVER_KEY_SOCKET), or None."""
+    if path in by_sock:
+        return by_sock[path]
+    m = re.fullmatch(re.escape(DRIVER_KEY_SOCKET).replace(re.escape("{name}"), "([a-z][a-z0-9-]{0,18})"), path)
+    return "agentos-driver-%s@.service" % m.group(1) if m else None
 
 
 def clerk_slice_violations(root, dirs, unit):

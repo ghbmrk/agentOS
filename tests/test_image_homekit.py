@@ -247,6 +247,43 @@ class ClerkTreeTest(test_image_keeper.KeeperTreeTest):
                 self.refused("agentos-egress.service", "OpenFile=%s" % sock, "not its own", "CLK-1")
 
     # REQ: CLK-1
+    def test_an_entry_systemd_would_rewrite_is_refused(self):
+        # Security on bd383b9: systemd unquotes and expands a command line before the kernel reads it, so
+        # an entry the check cannot read as written never passes, wherever it sends the key.
+        kernel = "agentos-keeper-kernel.service"
+        old = "-clerk-key homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service"
+        for new in ('"-clerk-key=homekit=/run/agentos-kernel/hk.sock,/system.slice/agentos-egress.service"',
+                    "'--clerk-key' homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service",
+                    "${CK}", "$CK", "-clerk-key %i", "-clerk\\x2dkey homekit=/x,/y"):
+            with self.subTest(new=new):
+                self.setUp()
+                self.edit(kernel, old, new)
+                self.refused(kernel, "not a -clerk-key entry the check reads", "CLK-1")
+
+    # REQ: CLK-1
+    def test_a_kernel_key_socket_opened_by_any_other_service_is_refused(self):
+        # By its path, whatever the descriptor's name, from any service in the tree, the image's or not.
+        for unit, line in (("agentos-egress.service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key"),
+                           ("agentos-egress.service", "OpenFile=/run/./agentos-kernel/key-homekit.sock:key"),
+                           ("foo.service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key")):
+            with self.subTest(unit=unit, line=line):
+                self.setUp()
+                if unit == "foo.service":
+                    (self.root / "usr/lib/systemd/system/foo.service").write_text(
+                        "[Service]\nExecStart=/usr/bin/true\n%s\n" % line)
+                else:
+                    self.add(unit, "Service", line)
+                self.refused(unit, "opens a kernel key socket that is not its own", "CLK-1")
+        # A driver's template opens its own key socket, and only its own.
+        self.assertEqual(check.key_socket_owner(check.DRIVER_KEY_SOCKET.format(name="fixture"), {}),
+                         "agentos-driver-fixture@.service")
+        self.assertIsNone(check.key_socket_owner("/run/agentos-kernel/key-homekit.sock", {}))
+        # The clerk's own unit, adding a second descriptor on its socket under another name, is refused too.
+        self.setUp()
+        self.add(self.UNIT, "Service", "OpenFile=/run/agentos-kernel/key-homekit.sock:key")
+        self.refused(self.UNIT, "OpenFile", "CLK-1")
+
+    # REQ: CLK-1
     def test_a_user_shared_with_any_other_service_is_refused(self):
         write_unit = self.root / "usr/lib/systemd/system/other.service"
         write_unit.write_text("[Service]\nUser=agentos-homekit\nExecStart=/usr/bin/true\n")
