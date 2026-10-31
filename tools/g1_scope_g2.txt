@@ -84,6 +84,10 @@ exempt-pr 4149
 # Remove once #4171 merges.
 exempt-pr 4171
 
+# #4166 (DEV-homekit-b2c, #3894): broker/cmd/agentos-homekit/, which the G2 list does not name
+# (D-198). Remove once #4166 merges.
+exempt-pr 4166
+
 # Project machinery and records.
 allow .claude/
 allow .github/
