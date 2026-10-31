@@ -108,14 +108,16 @@ func (s *Server) take(id, kind string) (*challenge, error) {
 	return c, nil
 }
 
-// link counts one proposal link against LinkLimit.
-func (s *Server) link() bool {
+// limit counts one link against LinkLimit on times, its kind's own count
+// (s.links for proposal links, s.acts for action links), so a flood of one
+// kind cannot delay the other. s.mu is held.
+func (s *Server) limit(times *[]int64) bool {
 	now := s.nowMS()
-	s.links = slices.DeleteFunc(s.links, func(t int64) bool { return t <= now-LinkWindow.Milliseconds() })
-	if len(s.links) >= LinkLimit {
+	*times = slices.DeleteFunc(*times, func(t int64) bool { return t <= now-LinkWindow.Milliseconds() })
+	if len(*times) >= LinkLimit {
 		return false
 	}
-	s.links = append(s.links, now)
+	*times = append(*times, now)
 	return true
 }
 
@@ -161,7 +163,7 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, err
 	}
 	class := policy.Classify(cur, next)
-	lines := Describe(cur, next)
+	lines := Describe(cur, next, s.cfg.Zone)
 	if lines[0] == noChange {
 		return nil, nil, errMalformed
 	}
@@ -320,7 +322,7 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request) {
 	res := map[string]any{"applied": out.Applied}
 	if out.Pending != "" {
 		res["pending"] = out.Pending
-		res["due"] = time.UnixMilli(out.DueMS).UTC().Format(time.RFC3339)
+		res["due"] = s.when(out.DueMS)
 	}
 	writeJSON(w, http.StatusOK, res)
 }
