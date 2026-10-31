@@ -1,9 +1,10 @@
 package alert
 
-// REQ: NET-2
+// REQ: NET-2, KRN-12
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -82,19 +83,19 @@ func newRigCore(t *testing.T, j *journal, c *core) *rig {
 	return r
 }
 
-// TestDroppedTextStillOnLight (NET-2 Texts and calls): a text the core
-// refuses, and one it takes and drops, still show red on the light, stay
-// open on the page and stay in the log, across a restart; only the
-// enforcer's page resolves them, and the light goes off only then.
-// Catches reliance on the core.
-func TestDroppedTextStillOnLight(t *testing.T) {
+// TestDroppedTripStillOnLight (NET-2 Texts and calls, KRN-12): a trip
+// whose text the core refuses, and a call it takes and drops, stay open on
+// the page and in the log across a restart; the trip keeps the light red
+// until the page resolves it, and only the page resolves either. Catches
+// reliance on the core.
+func TestDroppedTripStillOnLight(t *testing.T) {
 	j := &journal{}
 	r := newRig(t, j)
 	if c := r.bulb.now(); c != Off {
 		t.Fatalf("light %v before any alert", c)
 	}
 	r.core.refuse = true
-	refused, err := r.a.Raise(UnusualUnlock, "front-door")
+	refused, err := r.a.Raise(Trip, "edge")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +112,10 @@ func TestDroppedTextStillOnLight(t *testing.T) {
 	}
 	for _, r := range []*rig{r, newRigCore(t, j, &core{refuse: true})} {
 		if c := r.bulb.now(); c != Red {
-			t.Fatalf("light %v with two unresolved alerts", c)
+			t.Fatalf("light %v with a trip unresolved", c)
 		}
 		st := r.a.Status()
-		if len(st.Open) != 2 || st.Open[0].Device != "front-door" || st.Open[1].Device != "back-door" {
+		if len(st.Open) != 2 || st.Open[0].Device != "edge" || st.Open[1].Device != "back-door" {
 			t.Fatalf("open on the page: %v", st.Open)
 		}
 		if len(r.a.Log()) != 2 {
@@ -125,26 +126,51 @@ func TestDroppedTextStillOnLight(t *testing.T) {
 	// The core coming back is offered the refused text again; taking it
 	// resolves nothing.
 	r2 := newRig(t, j)
-	if len(r2.core.got) != 1 || !strings.Contains(r2.core.got[0].Text, "front-door") {
+	if len(r2.core.got) != 1 || !strings.Contains(r2.core.got[0].Text, "edge") {
 		t.Fatalf("resent on the core's return: %v", r2.core.got)
 	}
 	if c := r2.bulb.now(); c != Red {
 		t.Fatalf("light %v after the core took the text", c)
 	}
-	if err := r2.a.Resolve(refused.ID); err != nil {
-		t.Fatal(err)
-	}
-	if c := r2.bulb.now(); c != Red {
-		t.Fatalf("light %v with one alert still open", c)
-	}
 	if err := r2.a.Resolve(dropped.ID); err != nil {
 		t.Fatal(err)
 	}
+	if c := r2.bulb.now(); c != Red {
+		t.Fatalf("light %v with the trip still open", c)
+	}
+	if err := r2.a.Resolve(refused.ID); err != nil {
+		t.Fatal(err)
+	}
 	if c := r2.bulb.now(); c != Off {
-		t.Fatalf("light %v once the owner resolved both", c)
+		t.Fatalf("light %v once the owner resolved the trip", c)
 	}
 	if err := r2.a.Resolve(dropped.ID); !errors.Is(err, ErrUnknown) {
 		t.Fatalf("resolving twice: %v", err)
+	}
+}
+
+// TestDroppedTextStillOnPage (NET-2 Texts and calls): a text the core
+// refuses and a call it drops stay open on the page across a restart with
+// the light off, and only the page resolves them. Catches reliance on the
+// core, and a routine alert read as an attack (D-254).
+func TestDroppedTextStillOnPage(t *testing.T) {
+	j := &journal{}
+	r := newRig(t, j)
+	r.core.refuse = true
+	refused, err := r.a.Raise(UnusualUnlock, "front-door")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.core.refuse = false
+	if _, err := r.a.Raise(DoorForced, "back-door"); err != nil {
+		t.Fatal(err)
+	}
+	r2 := newRig(t, j)
+	if st := r2.a.Status(); len(st.Open) != 2 || st.Colour != Off || r2.bulb.now() != Off {
+		t.Fatalf("after a restart: %+v, light %v", st, r2.bulb.now())
+	}
+	if err := r2.a.Resolve(refused.ID); err != nil || len(r2.a.Status().Open) != 1 {
+		t.Fatalf("resolve on the page: %v %+v", err, r2.a.Status().Open)
 	}
 }
 
@@ -204,9 +230,14 @@ func TestWordsFixed(t *testing.T) {
 			t.Fatalf("kind %d's words do not cross the wire: %v", k, err)
 		}
 		// Every text opens an alert only the page clears, so every text
-		// says so, with no condition on it (UX fix-lists on #3909).
-		if s.delivery == Text && !strings.HasSuffix(w, "its light stays red until you do.") {
-			t.Fatalf("kind %d's text does not say the light stays red until cleared: %q", k, w)
+		// sends the owner there, with no condition on it (UX fix-lists on
+		// #3909); only a trip's text names the light, which shows only
+		// trips (D-254).
+		if s.delivery == Text && !strings.Contains(w, "enforcer's page at home") {
+			t.Fatalf("kind %d's text does not send the owner to the page: %q", k, w)
+		}
+		if strings.Contains(w, "light") != (k == Trip) {
+			t.Fatalf("kind %d's text and the light: %q", k, w)
 		}
 		want := Text
 		switch {
@@ -229,34 +260,98 @@ func TestWordsFixed(t *testing.T) {
 	}
 }
 
-// The light: recovery pending is red with nothing open; the core down is
-// amber; a paused channel is red and resolves only by resuming.
-func TestLightStates(t *testing.T) {
+// TestOnlyTripsLight (NET-2 Texts and calls, KRN-12, D-254): an
+// unusual-time unlock, a recovery-code use, an enrolment, a paused
+// channel, a pending recovery and a silent core each leave the light off
+// and show on the page; a trip at the enforcer, from any box or device,
+// turns it red until its cut lifts or the owner resolves it on the page.
+// Catches routine alerts keeping the light red, so a real trip is read as
+// routine.
+func TestOnlyTripsLight(t *testing.T) {
 	r := newRig(t, &journal{})
-	r.a.Recovery(true)
-	if r.bulb.now() != Red {
-		t.Fatal("recovery pending is not red")
+	off := func(what string) {
+		t.Helper()
+		if c, st := r.bulb.now(), r.a.Status(); c != Off || st.Colour != Off {
+			t.Fatalf("%s: light %v, status %v", what, c, st.Colour)
+		}
 	}
-	r.a.Recovery(false)
+	for _, e := range []struct {
+		k   Kind
+		dev string
+	}{{UnusualUnlock, "front-door"}, {UnusualDisarm, "hall"}, {RecoveryCodeUsed, ""}, {Enrolment, ""},
+		{SafetyOff, "boiler"}, {SafetyShut, "main-valve"}, {HeadFork, ""},
+		{AlarmTriggered, "hall"}, {DoorForced, "back-door"}, {FailedUnlocks, "front-door"}} {
+		if _, err := r.a.Raise(e.k, e.dev); err != nil {
+			t.Fatal(err)
+		}
+		off(fmt.Sprintf("kind %d", e.k))
+	}
+	r.a.Paused()
+	off("paused channel")
+	r.a.Recovery(true)
+	off("recovery pending")
 	r.a.Core(false)
-	if r.bulb.now() != Amber {
-		t.Fatal("core down is not amber")
+	off("core silent")
+	st := r.a.Status()
+	if len(st.Open) != 11 || !st.Recovery || !st.CoreDown {
+		t.Fatalf("not on the page: %d open, recovery %v, core down %v", len(st.Open), st.Recovery, st.CoreDown)
 	}
 	r.a.Core(true)
-	r.a.Paused()
-	st := r.a.Status()
-	if r.bulb.now() != Red || len(st.Open) != 1 || st.Open[0].Kind != ChannelPaused {
-		t.Fatalf("paused: %+v", st)
+	r.a.Recovery(false)
+
+	red := func(what string) {
+		t.Helper()
+		if c, st := r.bulb.now(), r.a.Status(); c != Red || st.Colour != Red {
+			t.Fatalf("%s: light %v, status %v", what, c, st.Colour)
+		}
 	}
-	if err := r.a.Resolve(st.Open[0].ID); !errors.Is(err, ErrResolved) {
+	// A trip from the edge and one from a device: lifting one cut leaves
+	// the other's light; lifting a cut with no trip changes nothing.
+	edge, err := r.a.Raise(Trip, "edge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	red("edge trip")
+	if !strings.Contains(r.core.got[len(r.core.got)-1].Text, "edge touched a decoy") {
+		t.Fatalf("trip text: %v", r.core.got[len(r.core.got)-1])
+	}
+	cam, err := r.a.Raise(Trip, "camera-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.a.Lifted("core"); err != nil {
+		t.Fatal(err)
+	}
+	red("no core trip to lift")
+	if err := r.a.Lifted("edge"); err != nil {
+		t.Fatal(err)
+	}
+	red("device trip still open")
+	if got := r.a.Log()[r.a.byID[edge.ID]]; got.Open || got.Resolved.IsZero() {
+		t.Fatalf("lifted trip still open: %+v", got)
+	}
+	if err := r.a.Resolve(cam.ID); err != nil {
+		t.Fatal(err)
+	}
+	off("both trips resolved")
+	// A repeat trip from the core after its cut lifted is a new alert.
+	if _, err := r.a.Raise(Trip, "core"); err != nil {
+		t.Fatal(err)
+	}
+	red("core trip")
+	if err := r.a.Lifted("core"); err != nil {
+		t.Fatal(err)
+	}
+	off("core cut lifted")
+
+	// A paused channel still resolves only by resuming it.
+	p := r.a.Status().Open
+	i := slices.IndexFunc(p, func(r Record) bool { return r.Kind == ChannelPaused })
+	if err := r.a.Resolve(p[i].ID); !errors.Is(err, ErrResolved) {
 		t.Fatalf("resolving a pause without resuming: %v", err)
 	}
-	if err := r.a.Resumed(); err != nil || r.bulb.now() != Off {
-		t.Fatalf("resumed: %v %v", err, r.bulb.now())
-	}
-	r.a.SafetyOff("boiler", wire.VerbOff)
-	if len(r.core.got) != 2 || !strings.Contains(r.core.got[1].Text, "boiler") {
-		t.Fatalf("safety off: %v", r.core.got)
+	if err := r.a.Resumed(); err != nil || len(r.a.Status().Open) != 10 {
+		t.Fatalf("resumed: %v %d", err, len(r.a.Status().Open))
 	}
 }
 
