@@ -435,7 +435,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | UPD-5r-b4 | held-out suite from owner outcome records (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032) | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b5 | replay suite from recorded clerk responses (brief briefs/UPD-5r-b.md) | UPD-5r-b1 (#4032), UPD-5r-b4 | queued (A; trusted-core growth, D-159 row first) |
 | UPD-5r-b6 | wire the requalification runner into the release check (brief briefs/UPD-5r-b.md) | UPD-5r-b2, UPD-7w (#3961) | queued (A) |
-| MIG-4-recovery-r4d | MIG-4-recovery-r4d: D-201 route B also rotates the passphrase slot and the new card prints both | MIG-4-recovery-r4b (#4108) | queued (release; tier A; D-201 supersede) |
 | UPD-5r-b3s | security suite over the kernel socket: seed, read, drop, keep, notice (brief briefs/UPD-5r-b.md, b3) | UPD-5r-b3 (#4045), #4108 | queued (A; trusted core: kernel/proc) |
 | MIG-4-recovery-r4f | MIG-4-recovery-r4f: the lost-card confirm marks the shown record only for the card it wipes | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 Security finding 1) |
 | MIG-4-recovery-r4g | MIG-4-recovery-r4g: the lost-card state keeps filed and ready when the shown card's recipient read fails | MIG-4-recovery-r4c (#4170) | queued (release; tier A; from #4170 L3) |
