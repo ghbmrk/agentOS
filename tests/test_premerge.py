@@ -125,13 +125,113 @@ class PremergeTest(unittest.TestCase):
                 self.assertEqual(self.check(reviewed), [])
 
     def test_decisions_resolution_that_edits_drops_or_adds_a_row_is_changed(self):
-        for rows in ("| D-2 | main |\n| D-4 | mine |\n", "| D-2 | main |\n", "| D-3 | mine |\n",
+        for rows in ("| D-2 | main |\n| D-4 | other |\n", "| D-2 | main |\n", "| D-3 | mine |\n", "| D-4 | main |\n| D-3 | mine |\n",
                      "| D-2 | main |\n| D-3 | mine |\n| D-5 | extra |\n", "| D-2 | main |\n| D-3 | mine |\n| D-2 | main |\n"):
             with self.subTest(rows=rows):
                 self.setUp()
                 reviewed = self.decisions_conflict()
                 self.resolve("DECISIONS.md", rows)
                 self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
+    def test_decisions_reviewed_row_renumbered_past_mains_is_same_unless_cited(self):
+        # #4030: two PRs took D-244; the later one renumbered its row and owed a delta review for one cell.
+        for rows in ("| D-2 | main |\n| D-4 | mine |\n", "| D-4 | mine |\n| D-2 | main |\n"):
+            with self.subTest(rows=rows):
+                self.setUp()
+                reviewed = self.decisions_conflict(main="| D-1 | base |\n| D-3 | main |\n")
+                self.resolve("DECISIONS.md", rows.replace("D-2 ", "D-3 "))
+                self.assertEqual(self.check(reviewed), [])
+        self.setUp()
+        git(self.r, "checkout", "-q", "main")
+        self.resolve("DECISIONS.md", "", base=True)
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("note.md", "Per D-3, the PR does this.\n")
+        reviewed = self.resolve("DECISIONS.md", "| D-3 | mine |\n")
+        git(self.r, "checkout", "-q", "main")
+        self.resolve("DECISIONS.md", "| D-3 | main |\n")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+        self.resolve("DECISIONS.md", "| D-3 | main |\n| D-4 | mine |\n")
+        self.assertEqual(self.check(reviewed), ["DECISIONS.md"])  # note.md still names D-3, now main's row
+        self.write("note.md", "Per D-4, the PR does this.\n")
+        self.commit("cite the new ID")
+        self.assertEqual(sorted(self.check(reviewed)), ["note.md"])
+        # A reviewed row that cites another reviewed row's old ID, or any row whose ID cell was dropped, reads changed.
+        for main, pr, rows in (("| D-2 | main |\n| D-3 | main2 |\n", "| D-2 | mine |\n| D-3 | amends D-2 |\n",
+                                "| D-2 | main |\n| D-3 | main2 |\n| D-4 | mine |\n| D-5 | amends D-2 |\n"),
+                               ("| D-2 | main |\n", "| D-3 | mine |\n", "| D-2 | main |\n|#| mine |\n")):
+            with self.subTest(rows=rows):
+                self.setUp()
+                reviewed = self.decisions_conflict(main="| D-1 | base |\n" + main, pr="| D-1 | base |\n" + pr)
+                self.resolve("DECISIONS.md", rows)
+                self.assertEqual(self.check(reviewed), ["DECISIONS.md"])
+
+    def allow_conflict(self):
+        """The PR drops the last line of x_allow.txt while main appends after it (#3991); returns the reviewed head."""
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# header\nallow a\nallow b\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "# header\nallow a\nallow p\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# header\nallow a\nallow b\nallow m\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        merge = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+        self.assertNotEqual(merge.returncode, 0, "the merge was meant to conflict")
+        return reviewed
+
+    def test_allowlist_conflict_kept_both_sides_is_same_in_any_order(self):
+        for text in ("# header\nallow a\nallow p\nallow m\n", "# header\nallow a\nallow m\nallow p\n"):
+            with self.subTest(text=text):
+                self.setUp()
+                reviewed = self.allow_conflict()
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), [])
+
+    def test_allowlist_resolution_that_adds_drops_or_keeps_a_removed_line_is_changed(self):
+        for text in ("# header\nallow a\nallow b\nallow p\nallow m\n", "# header\nallow a\nallow p\n",
+                     "# header\nallow a\nallow p\nallow m\nallow x\n", "# header\nallow a\nallow p\nallow p\nallow m\n"):
+            with self.subTest(text=text):
+                self.setUp()
+                reviewed = self.allow_conflict()
+                self.write("x_allow.txt", text)
+                self.commit("resolved")
+                self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+        # The readers split on \n only, so a reviewed line holding \r is one entry; splitting it adds an unreviewed one.
+        self.setUp()
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# h\nallow a\n")
+        self.commit("allow")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("x_allow.txt", "# h\nallow a\nallow p why\rallow q why\n")
+        reviewed = self.commit("pr")
+        git(self.r, "checkout", "-q", "main")
+        self.write("x_allow.txt", "# h\nallow a\nallow m\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                       cwd=self.r, capture_output=True)
+        self.write("x_allow.txt", "# h\nallow a\nallow m\nallow p why\nallow q why\n")
+        self.commit("resolved")
+        self.assertEqual(self.check(reviewed), ["x_allow.txt"])
+
+    def test_a_list_not_named_allow_keeps_line_order(self):
+        reviewed = self.pr()
+        self.write("b.txt", "c\nb\n")
+        git(self.r, "checkout", "-q", "main")
+        self.write("b.txt", "b\nc\n")
+        self.commit("main")
+        git(self.r, "checkout", "-q", "pr")
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "merge", "-q", "main"],
+                               cwd=self.r, capture_output=True)
+        self.write("b.txt", "c\nb\n")
+        self.commit("reordered")
+        self.assertEqual(self.check(reviewed), ["b.txt"])
 
     def test_decisions_conflict_on_an_edited_row_is_changed_even_if_both_kept(self):
         # A non-empty base section: both sides changed D-1, so keeping both is not two appends.
