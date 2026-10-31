@@ -180,7 +180,7 @@ func ptr[T any](v T) *T { return &v }
 // twice, and a fresh clerk probes it unknown too; one that succeeded probes
 // done (KRN-8, D-147).
 func TestLoggedOutEffectIsParkedNotResent(t *testing.T) {
-	h := newHarness(t, map[string]any{"click": "hang"}, "", lostBound)
+	h := newHarness(t, map[string]any{"click": "exit"}, "", 0)
 	h.g.cfg.LoggedOut = true
 	h.g.refs["e6"] = link{role: "button", name: "Send message"}
 	r := newClerkRig(t, h)
