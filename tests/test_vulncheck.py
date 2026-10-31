@@ -521,6 +521,9 @@ class InlinedTest(unittest.TestCase):
             # but a node_modules/ directly under a package root is a nested install: its own package
             '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"(e){}',
             '"node_modules/c/src/node_modules/internal/x.js"(e){}',      # npm layout: c's own source
+            '"ns:node_modules/ns-pkg/i.js"(e){}',                          # esbuild namespace
+            "// CONCATENATED MODULE: ./node_modules/concat/index.js",      # webpack
+            '"[project]/node_modules/turbo/index.js [app-ssr] (ecmascript)", (ctx) => {',  # Turbopack
             # a key into another package's store directory gives no version for the one it names
             '"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/index.js"(e){}',
             '"node_modules/holder/x.js"(e){}',                             # the package itself
@@ -536,6 +539,9 @@ class InlinedTest(unittest.TestCase):
             "ws": {"node_modules/ws/lib/buffer-util.js",
                    "node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"},
             "c": {"node_modules/c/src/node_modules/internal/x.js"},
+            "ns-pkg": {"node_modules/ns-pkg/i.js"},
+            "concat": {"./node_modules/concat/index.js"},
+            "turbo": {"node_modules/turbo/index.js"},
             "left-pad": {"./node_modules/left-pad/index.js"},
             "ajv": {"node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"},
             "yaml": {"../../node_modules/yaml/dist/index.js"},
@@ -552,6 +558,8 @@ class InlinedTest(unittest.TestCase):
             # sidecar whose script is missing
             "lib/webp_codec.wasm": "", "lib/webp_codec.LICENSE": "- ws@7.0.0\n",
             "lib/gone.js.LICENSE": "- ws@6.0.0\n",
+            # a script's sidecar is for that script only, not one of another extension
+            "lib/a.mjs": key("ws"), "lib/a.js.LICENSE": "- ws@5.0.0\n",
             # a notice that is no file's sidecar covers its directory and below, within its package
             "third_party/NOTICES": "Name: lodash-es\nVersion: 4.17.21\n",
             "third_party/x/bundle.js": "// node_modules/lodash-es/a.js\n",
@@ -562,6 +570,7 @@ class InlinedTest(unittest.TestCase):
         self.assertEqual({f: {n: v for n, (_, v) in d.items()} for f, d in bare.items()}, {
             "lib/utilsBundle.js": {"ws": {"8.0.0"}, "ip-address": set()},
             "lib/other.js": {"ws": set()},
+            "lib/a.mjs": {"ws": set()},
             "third_party/x/bundle.js": {"lodash-es": {"4.17.21"}},
             "third_party/node_modules/dep/bundle.js": {"lodash-es": set()},
             "dist/worker.mjs": {"debug": set()}})

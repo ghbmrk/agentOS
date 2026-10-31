@@ -121,10 +121,11 @@ CONTROL_INLINED = {("AGENTOS-VULNCHECK-INLINED-1", "agentos-inlined", "1.0.0"),
                    ("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
 CONTROL_STILL_FAILS = {("AGENTOS-VULNCHECK-CONTROL-1", "left-pad", "0.9.0")}
 # The unversioned marks (#4197) no sidecar, notice or entry resolves, as (holder:file, package),
-# which fail in both runs: a module key into another package's pnpm store directory and an esbuild
-# path comment. dist/bare.js's key takes its sidecar's version, dist/region/region.mjs's rolldown
+# which fail in both runs: a module key into another package's pnpm store directory, one for a
+# package nested under a store package's root, and an esbuild path comment. dist/bare.js's key takes its sidecar's version, dist/region/region.mjs's rolldown
 # region its directory's NOTICE, and dist/again.js's key the bundle entry's (dist/bare.js's).
 CONTROL_UNVERSIONED = {("agentos-bundle@1.0.0:dist/marked.mjs", "agentos-decoy"),
+                       ("agentos-bundle@1.0.0:dist/nested.js", "agentos-nested"),
                        ("agentos-bundle@1.0.0:dist/orphan.js", "agentos-orphan")}
 # The files each plant's finding names (#4197): the bundle entry adds dist/again.js to the sidecar's.
 CONTROL_BARE_FILES = ("AGENTOS-VULNCHECK-INLINED-4", "npm:agentos-bare inlined in agentos-bundle@1.0.0:dist/again.js (+1)")
@@ -485,9 +486,12 @@ NPM_LOCK = "package-lock.json"
 # path a PNPM_MARK names a version for is versioned; any other is an unversioned mark, which
 # fails unless a sidecar or notice for that file, or an "inlined" entry, gives that package's
 # version there.
-_MARK_PATH = rb"((?:[\w.@+-]+/)*?node_modules/[^\s\"'`()]+?\.\w+)"
-COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region)? +" + _MARK_PATH + rb"[ \t]*\r?$", re.M)
+# Also esbuild's namespaced paths ("ns:node_modules/..."), webpack's "// CONCATENATED MODULE:
+# ./node_modules/..." comments, and Turbopack's "[project]/node_modules/... [ssr] (ecmascript)" ids.
+_MARK_PATH = rb"(?:[\w-]+:)?((?:[\w.@+-]+/)*?node_modules/[^\s\"'`()]+?\.\w+)"
+COMMENT_MARK = re.compile(rb"^[ \t]*//(?:#region| CONCATENATED MODULE:)? +" + _MARK_PATH + rb"[ \t]*\r?$", re.M)
 KEY_MARK = re.compile(rb"[\"'`]" + _MARK_PATH + rb"[\"'`][(:]")
+TURBOPACK_MARK = re.compile(rb"[\"'`]\[project\]/" + _MARK_PATH + rb"(?: \[[\w-]+\])* \([\w-]+\)[\"'`]")
 MODULE_SEG = re.compile(rb"node_modules/((?:@[\w.-]+/)?[\w.-]+)/")
 
 
@@ -528,7 +532,7 @@ def mark_owner(path):
 def unversioned_marks(body, own):
     """{package: the mark paths naming it} for the unversioned bundler marks in one script."""
     out = {}
-    for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body):
+    for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body) + TURBOPACK_MARK.findall(body):
         o = mark_owner(path)
         if o and not o[1] and o[0] != own:
             out.setdefault(o[0], set()).add(path.decode())
