@@ -188,7 +188,7 @@ func Run(c Config, conn io.ReadWriteCloser, log io.Writer) error {
 		s.byPath[s.devicePath(d)] = d.Name
 	}
 	s.srv = radio.NewServer(radio.StackBLE, conn)
-	bus, err := Dial(c.Bus, s.wants, s.signal)
+	bus, err := Dial(c.Bus, s)
 	if err != nil {
 		conn.Close()
 		return err

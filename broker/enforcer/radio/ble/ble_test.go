@@ -90,7 +90,7 @@ var denied = "org.freedesktop.DBus.Error.AccessDenied"
 // another service) and broadcasts a Leak signal, then marks its end with
 // GetManagedObjects on "/". Each call must be refused by the bus.
 func probeSend(bus string) error {
-	b, err := Dial(bus, all, func(*Message) {})
+	b, err := Dial(bus, allSignals(func(*Message) {}))
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,7 @@ func probeSend(bus string) error {
 // sends, fails, and so does no signal from the bus driver.
 func probeReceive(bus string) error {
 	sigs := make(chan *Message, 64)
-	b, err := Dial(bus, all, func(m *Message) { sigs <- m })
+	b, err := Dial(bus, allSignals(func(m *Message) { sigs <- m }))
 	if err != nil {
 		return err
 	}
@@ -462,22 +462,40 @@ func TestReadDecodesOnlyWanted(t *testing.T) {
 		return mustEncode(t, &Message{Type: typeSignal, Serial: 1, Sender: sender, Path: measurePath, Interface: ifaceProps,
 			Member: "PropertiesChanged", Sig: "sa{sv}as", Body: []any{ifaceChar, props, []any{}}})
 	}
-	read := func(b []byte, keep func(*Message) bool) (uint64, error) {
+	// Each frame goes through a live read loop, the stack's own Signals
+	// deciding, followed by a reply whose arrival says the frame is done.
+	client, server := net.Pipe()
+	defer server.Close()
+	b := &Bus{conn: client, sigs: s, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
+	s.bus = b
+	go b.readLoop(bufio.NewReader(client))
+	serial := uint32(100)
+	read := func(frame []byte) uint64 {
+		serial++
+		done := make(chan *Message, 1)
+		b.mu.Lock()
+		b.calls[serial] = done
+		b.mu.Unlock()
+		in := slices.Concat(frame, mustEncode(t, &Message{Type: typeReturn, Serial: 1, ReplySerial: serial}))
 		var m0, m1 runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&m0)
-		_, err := readMessage(bytes.NewReader(b), keep)
+		go server.Write(in)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the read loop stopped")
+		}
 		runtime.ReadMemStats(&m1)
-		return m1.TotalAlloc - m0.TotalAlloc, err
+		return m1.TotalAlloc - m0.TotalAlloc
 	}
 	forged := flood(":1.9")
-	if n, err := read(forged, s.wants); !errors.Is(err, errSkipped) || n > uint64(len(forged)/8) {
-		t.Errorf("another peer's %d-byte signal: %v, %d bytes allocated", len(forged), err, n)
+	if n := read(forged); n > uint64(len(forged)/8) {
+		t.Errorf("another peer's %d-byte signal: %d bytes allocated", len(forged), n)
 	}
-	if n, err := read(flood(bluezName), s.wants); err != nil || n < uint64(len(forged)) {
-		t.Errorf("BlueZ's %d-byte signal: %v, %d bytes allocated", len(forged), err, n)
+	if n := read(flood(bluezName)); n < uint64(len(forged)) {
+		t.Errorf("BlueZ's %d-byte signal: %d bytes allocated", len(forged), n)
 	}
-	b := s.bus
 	b.calls[5] = make(chan *Message, 1)
 	for _, c := range []struct {
 		m    *Message
@@ -973,7 +991,7 @@ func policyBus(t *testing.T) (dir, bus string, uid uint32) {
 // testBusPeer is another peer on the bus, as root, owning testPeer.
 func testBusPeer(t *testing.T, bus string, signal func(*Message)) *Bus {
 	t.Helper()
-	b, err := Dial(bus, all, signal)
+	b, err := Dial(bus, allSignals(signal))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1142,3 +1160,9 @@ func (w testLog) Write(b []byte) (int, error) {
 
 // all keeps every message.
 func all(*Message) bool { return true }
+
+// allSignals wants every signal and gives it to the function.
+type allSignals func(*Message)
+
+func (allSignals) wants(*Message) bool { return true }
+func (f allSignals) signal(m *Message) { f(m) }

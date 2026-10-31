@@ -17,7 +17,8 @@ var driverCalls = []string{"Hello", "GetNameOwner", "AddMatch"}
 // the bus driver and busCalls to BlueZ; and it denies every message the
 // user receives except from the bus driver and BlueZ. A user policy is
 // applied after the default and group policies, so it holds however the
-// distribution's BlueZ policy reads, and it holds against the stack's
+// distribution's BlueZ policy reads (a mandatory or at_console policy is
+// applied after it, so the image installs none), and it holds against the stack's
 // process itself: an exploit with its own D-Bus encoder still cannot start
 // discovery, pair, power the adapter or reach another service on the bus,
 // and no other bus peer can flood it.

@@ -16,12 +16,10 @@ import (
 
 // Bus is one connection to a D-Bus message bus over a Unix socket,
 // authenticated as this process's uid (SASL EXTERNAL), with no unix fd
-// passing. Calls wait for their reply; signals go to one callback, run on
-// the read loop, which must not call back into Bus.
+// passing. Calls wait for their reply; signals go to Signals.
 type Bus struct {
-	conn   net.Conn
-	want   func(*Message) bool
-	signal func(*Message)
+	conn net.Conn
+	sigs Signals
 
 	wmu sync.Mutex
 
@@ -45,10 +43,17 @@ func (e *CallError) Error() string { return "ble: bus error " + e.Name }
 
 const busDriver = "org.freedesktop.DBus"
 
+// Signals takes a bus's signals. wants reads a signal's header, its body
+// not yet decoded; only a signal it wants is decoded and goes to signal.
+// Both run on the read loop and must not call back into Bus.
+type Signals interface {
+	wants(*Message) bool
+	signal(*Message)
+}
+
 // Dial connects to the bus at the socket path, authenticates and says
-// Hello. want reads a signal's header, body not yet decoded; only a signal
-// it wants is decoded and goes to signal.
-func Dial(path string, want func(*Message) bool, signal func(*Message)) (*Bus, error) {
+// Hello.
+func Dial(path string, sigs Signals) (*Bus, error) {
 	c, err := net.Dial("unix", path) // a Unix socket connects at once or fails
 	if err != nil {
 		return nil, err
@@ -70,7 +75,7 @@ func Dial(path string, want func(*Message) bool, signal func(*Message)) (*Bus, e
 		return nil, err
 	}
 	c.SetDeadline(time.Time{})
-	b := &Bus{conn: c, want: want, signal: signal, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
+	b := &Bus{conn: c, sigs: sigs, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
 	go b.readLoop(r)
 	if _, err := b.Call(busDriver, "/org/freedesktop/DBus", busDriver, "Hello", "", 5*time.Second); err != nil {
 		b.Close()
@@ -134,7 +139,7 @@ func (b *Bus) Call(dest string, path ObjectPath, iface, member string, sig Signa
 
 // readLoop takes messages until the connection ends. A message is decoded
 // only when its header shows it is wanted: a reply some call still waits
-// for, or a signal want takes. Anything else, and a message that is too
+// for, or a signal Signals wants. Anything else, and a message that is too
 // long or does not decode, is skipped, so a bus peer that sends one (any
 // peer may send this process a signal, unless the bus policy stops it)
 // can neither end the stack nor make it decode a body; a caller whose
@@ -160,7 +165,7 @@ func (b *Bus) readLoop(r *bufio.Reader) {
 				ch <- m
 			}
 		case typeSignal:
-			b.signal(m)
+			b.sigs.signal(m)
 		}
 	}
 }
@@ -174,7 +179,7 @@ func (b *Bus) wants(m *Message) bool {
 		b.mu.Unlock()
 		return ok
 	case typeSignal:
-		return b.want(m)
+		return b.sigs.wants(m)
 	}
 	return false
 }
