@@ -155,6 +155,42 @@ func TestSecuritySuiteOnlyGrows(t *testing.T) {
 	}
 }
 
+// HLD-3: the suite shrinks only by an owner key. Cases the owner's passkey
+// dropped count toward the floor, so a suite shrunk by the owner still
+// passes, one shrunk without a drop still fails, and a candidate and
+// baseline reporting different drops ran different suites (UPD-5r-b3).
+func TestOwnerDroppedSecurityCasesKeepTheFloor(t *testing.T) {
+	f, v := ordinary(t, Options{})
+	r := passing()
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || !got.Passed {
+		t.Fatalf("first: %+v, %v", got, err)
+	}
+	dropped := Score{Suite: SuiteSecurity, Digest: "d3", Cases: 38, Passed: 38, Dropped: 2}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = dropped, dropped
+	got, err := requalifier(t, f, r).Requalify(context.Background(), v)
+	if err != nil || !got.Passed {
+		t.Fatalf("after the owner dropped 2: %+v, %v; want passed", got, err)
+	}
+	if got.Scores[2].Dropped != 2 {
+		t.Fatalf("scores %+v", got.Scores)
+	}
+	short := dropped
+	short.Dropped = 1
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = short, short
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed || got.Reason != SuiteSecurity ||
+		got.Detail != "security suite has 38 cases and 1 dropped by the owner, fewer than 40" {
+		t.Fatalf("one case gone without a drop: %+v, %v; want failed on security", got, err)
+	}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = dropped, short
+	if got, err := requalifier(t, f, r).Requalify(context.Background(), v); err != nil || got.Passed || got.Detail != "candidate and baseline ran different suites" {
+		t.Fatalf("drops differ: %+v, %v", got, err)
+	}
+	r.cand[SuiteSecurity], r.base[SuiteSecurity] = Score{Suite: SuiteSecurity, Digest: "d3", Cases: 38, Passed: 38, Dropped: -1}, dropped
+	if _, err := requalifier(t, f, r).Requalify(context.Background(), v); err == nil {
+		t.Fatal("a negative drop count is a malformed score")
+	}
+}
+
 // A pass is never reused: a security case added since (HLD-5) is run, and
 // a release that fails it does not pass (#4033 L3 point 2).
 func TestSuiteGrowthIsRunAgain(t *testing.T) {

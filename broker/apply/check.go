@@ -518,8 +518,10 @@ type errNotMinted struct{ id, why string }
 func (e errNotMinted) Error() string   { return "apply: check: adoption " + e.id + " " + e.why }
 func (e errNotMinted) Permanent() bool { return true }
 
-// settle moves adoption id from one of the states from to state to. It is
-// a no-op success when the adoption is already in to or one of done.
+// settle moves adoption id from one of the states from to state to, and
+// makes an unsure one sure: the applier has settled it. An adoption
+// already in to or one of done keeps its state, and is a no-op success
+// once sure.
 // Saved before it returns.
 func (c *Check) settle(id, to string, from, done []string) error {
 	c.mu.Lock()
@@ -529,7 +531,13 @@ func (c *Check) settle(id, to string, from, done []string) error {
 	case !ok:
 		return errNotMinted{id, "is unknown"}
 	case a.State == to || slices.Contains(done, a.State):
-		return nil
+		if !a.Unsure {
+			return nil
+		}
+		// The applier dropped it, so it no longer holds the release: the
+		// drop is sure and Line shows its version again (CH-12, #4146).
+		// The state stays, so a failed one stays failed.
+		to = a.State
 	case !slices.Contains(from, a.State):
 		if a.State == adConfirmed {
 			return errNotMinted{id, "is confirmed"}
@@ -538,7 +546,7 @@ func (c *Check) settle(id, to string, from, done []string) error {
 	}
 	next := c.st
 	next.Adoptions = maps.Clone(c.st.Adoptions)
-	a.State = to
+	a.State, a.Unsure = to, false
 	next.Adoptions[id] = a
 	return c.saveLocked(next)
 }

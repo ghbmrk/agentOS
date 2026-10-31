@@ -6,7 +6,9 @@ Unit tests read synthetic scanner output. TestControl runs the real scanners aga
 planted fixture when both are on PATH (the vulncheck workflow installs them and also runs
 `vulncheck.py control` as its own step).
 """
+import base64
 import contextlib
+import hashlib
 import io
 import json
 import pathlib
@@ -145,6 +147,10 @@ class OsvFindingsTest(unittest.TestCase):
         self.assertEqual([f["id"] for f in fs], ["Q"])
 
 
+# The package and version every fail() finding names, for a record that accepts it.
+M = {"package": "m", "version": "v1.0.0"}
+
+
 def fail(fid, where="t", aliases=()):
     return {"id": fid, "aliases": list(aliases), "where": where, "fails": True, "level": "symbol",
             "module": "m", "version": "v1.0.0", "package": "p", "function": "F", "fixed": ""}
@@ -154,9 +160,9 @@ class RecordsTest(unittest.TestCase):
     def test_a_record_accepts_by_id_or_alias_and_where(self):
         # TN-vulncheck-d
         fs = [fail("GO-1", aliases=["CVE-1"]), fail("GO-2"), fail("GO-3", where="other")]
-        recs = [{"id": "CVE-1", "issue": 10, "why": "x"},
-                {"id": "GO-3", "issue": 11, "why": "x", "where": "t"},
-                {"id": "GO-7", "issue": 12, "why": "x"}]
+        recs = [{"id": "CVE-1", "issue": 10, "why": "x", **M},
+                {"id": "GO-3", "issue": 11, "why": "x", "where": "t", **M},
+                {"id": "GO-7", "issue": 12, "why": "x", **M}]
         unused = vulncheck.apply_records(fs, recs)
         self.assertEqual([f.get("accepted_by") for f in fs], [10, None, None])
         self.assertEqual([r["id"] for r in unused], ["GO-3", "GO-7"])
@@ -165,12 +171,23 @@ class RecordsTest(unittest.TestCase):
         self.assertIn("unused record: GO-7", out.getvalue())
         self.assertTrue(vulncheck.summary(fs[:1], [], [], io.StringIO()))
 
+    def test_a_record_accepts_only_its_package_and_version(self):
+        # #4153 (Security finding 2 on #4152): a record for minimatch 10.2.5 must not accept
+        # an upgraded or other copy that the same advisory is later widened to cover.
+        fs = [{**fail("GHSA-1"), "module": "minimatch", "version": v} for v in ("10.2.5", "11.0.3")]
+        fs.append({**fail("GHSA-1"), "module": "glob", "version": "10.2.5"})
+        rec = {"id": "GHSA-1", "issue": 4, "why": "x", "package": "minimatch", "version": "10.2.5"}
+        self.assertEqual(vulncheck.apply_records(fs, [rec]), [])
+        self.assertEqual([vulncheck.verdict(f) for f in fs], ["accepted #4", "FAIL", "FAIL"])
+
     def test_record_shape(self):
-        good = {"id": "GO-1", "issue": 5, "why": "unreachable in our build, see issue"}
+        good = {"id": "GO-1", "issue": 5, "why": "unreachable in our build, see issue", **M}
         self.assertEqual(vulncheck.record_problems([good, {**good, "where": "broker"}]), [])
         for bad in ({**good, "issue": "5"}, {**good, "issue": 0}, {**good, "issue": True},
                     {**good, "why": " "}, {k: v for k, v in good.items() if k != "id"},
-                    {**good, "extra": 1}, {**good, "where": ""}, "GO-1"):
+                    {**good, "extra": 1}, {**good, "where": ""}, "GO-1",
+                    {k: v for k, v in good.items() if k != "package"}, {**good, "package": " "},
+                    {k: v for k, v in good.items() if k != "version"}, {**good, "version": ""}):
             self.assertEqual(len(vulncheck.record_problems([bad])), 1, bad)
 
     def test_bad_records_stop_the_scan(self):
@@ -218,7 +235,7 @@ class RecordsTest(unittest.TestCase):
 
     def test_check_issues_without_a_token_fails(self):
         # TN-vulncheck-d: in CI an acceptance that cannot be checked is a failure, not a pass.
-        rec = {"id": "GO-1", "issue": 1, "why": "x"}
+        rec = {"id": "GO-1", "issue": 1, "why": "x", **M}
         saved, env = vulncheck.scan, dict(vulncheck.os.environ)
         vulncheck.scan = lambda config, root: ([{**fail("GO-1"), "accepted_by": 1}], [], [])
         tmp = tempfile.TemporaryDirectory()
@@ -409,18 +426,20 @@ class ImageTest(unittest.TestCase):
 
     def test_image_records_apply_only_to_the_image_scan_and_their_package(self):
         recs = [{"id": "DSA-1", "issue": 1, "why": "x", "where": "image", "package": "m"},
-                {"id": "DSA-2", "issue": 1, "why": "x"},
+                {"id": "DSA-2", "issue": 1, "why": "x", **M},
                 {"id": "DSA-3", "issue": 1, "why": "x", "where": "image", "package": "other"}]
         found = [{**fail(i), "where": "image"} for i in ("DSA-1", "DSA-2", "DSA-3")]
         fs, probs, unused = self.scan(recs, found)
         self.assertEqual(([vulncheck.verdict(f) for f in fs], probs), (["accepted #1", "FAIL", "FAIL"], []))
         self.assertEqual([r["id"] for r in unused], ["DSA-3"])
 
-    def test_an_image_record_names_its_package_and_only_an_image_record_does(self):
+    def test_an_image_record_names_its_source_package_and_no_version(self):
+        # Debian's fix decides an image record, so it names no version; every other record does.
         good = {"id": "DSA-1", "issue": 1, "why": "x"}
         self.assertEqual(vulncheck.record_problems([{**good, "where": "image", "package": "curl"}]), [])
         for bad in ({**good, "where": "image"}, {**good, "package": "curl"},
-                    {**good, "where": "broker", "package": "curl"}, {**good, "where": "image", "package": " "}):
+                    {**good, "where": "broker", "package": "curl"}, {**good, "where": "image", "package": " "},
+                    {**good, "where": "image", "package": "curl", "version": "1.0-1"}):
             self.assertEqual(len(vulncheck.record_problems([bad])), 1, bad)
 
     def test_check_issues_partitions_the_records(self):
@@ -448,10 +467,138 @@ class ImageTest(unittest.TestCase):
         self.assertIn("fix: rebuild the image", out.getvalue())
         self.assertNotIn("or add a record", out.getvalue())
 
+def tgz(files):
+    """A gzipped npm tarball holding FILES (path -> text) under package/."""
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as t:
+        for name, text in files.items():
+            data = text.encode()
+            ti = tarfile.TarInfo(f"package/{name}")
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+    return raw.getvalue()
+
+
+def sri(data):
+    return "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode()
+
+
+class InlinedTest(unittest.TestCase):
+    # #4153 (Security finding 1 on #4152): copies a bundler put in a package's files.
+    def test_marks_name_each_copy_and_its_version(self):
+        files, marks = vulncheck.tarball_marks(tgz({
+            "dist/a.mjs": "//#region node_modules/.pnpm/minimatch@10.2.6/node_modules/minimatch/dist/esm/index.js\n"
+                          'x(__commonJS({"node_modules/.pnpm/@scope+pkg@1.2.3-beta.1_peer@2.0.0/node_modules/@scope/pkg/i.js"(){}}))\n'
+                          # the store directory and the package differ: a link, not a copy
+                          '"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/i.js"\n'
+                          # the package's own path is not a copy
+                          '"node_modules/.pnpm/holder@1.0.0/node_modules/holder/x.js"\n'
+                          # a list line outside a license or notice file is not a mark
+                          "- listed@9.9.9\n",
+            "lib/bundle.js.LICENSE": "- ajv@8.20.0 (https://example.invalid)\n%% ws@8.21.3 NOTICES AND INFORMATION BEGIN HERE\n",
+            "third_party/THIRD_PARTY_NOTICES": "Name: core-js\nURL: https://example.invalid\nVersion: 3.50.0\n"
+                                               "License: MIT\n\nName: no-version\nLicense: MIT\n\nName: tslib\nVersion: 2.8.1\n",
+            "README.md": "node_modules/.pnpm/readme@1.0.0/node_modules/readme/\n",
+        }), ("holder", "1.0.0"))
+        self.assertEqual(files, {"dist/a.mjs", "lib/bundle.js.LICENSE", "third_party/THIRD_PARTY_NOTICES", "README.md"})
+        self.assertEqual(marks, {("minimatch", "10.2.6"): {"dist/a.mjs"}, ("@scope/pkg", "1.2.3-beta.1"): {"dist/a.mjs"},
+                                 ("ajv", "8.20.0"): {"lib/bundle.js.LICENSE"}, ("ws", "8.21.3"): {"lib/bundle.js.LICENSE"},
+                                 ("core-js", "3.50.0"): {"third_party/THIRD_PARTY_NOTICES"},
+                                 ("tslib", "2.8.1"): {"third_party/THIRD_PARTY_NOTICES"}})
+
+    def test_lockfile_tarballs_and_the_entries_with_none(self):
+        lock = {"packages": {
+            "": {"name": "root"},
+            "node_modules/a": {"version": "1.0.0", "resolved": "https://r/a-1.0.0.tgz", "integrity": "sha512-A"},
+            "node_modules/a/node_modules/b": {"version": "2.0.0", "inBundle": True},
+            "node_modules/c": {"resolved": "packages/c", "link": True},
+            "node_modules/d": {"version": "1.0.0", "resolved": "http://r/d.tgz", "integrity": "sha512-D"},
+            "node_modules/e": {"version": "1.0.0", "resolved": "https://r/e.tgz", "integrity": "sha1-E"},
+            "node_modules/x/node_modules/@s/f": {"version": "3.0.0", "resolved": "https://r/f.tgz", "integrity": "sha512-F"}}}
+        tbs, probs = vulncheck.lock_tarballs(lock, "l")
+        self.assertEqual(tbs, [("a", "1.0.0", "https://r/a-1.0.0.tgz", "sha512-A"),
+                               ("@s/f", "3.0.0", "https://r/f.tgz", "sha512-F")])
+        self.assertEqual(len(probs), 2, probs)
+        self.assertEqual(len(vulncheck.lock_tarballs({"lockfileVersion": 1}, "l")[1]), 1)
+
+    def test_a_tarball_must_match_its_integrity(self):
+        data = tgz({"index.js": ""})
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (pathlib.Path(tmp.name) / "a-1.0.0.tgz").write_bytes(data)
+        self.assertEqual(vulncheck.fetch_tarball("https://r/a/-/a-1.0.0.tgz", sri(data), tmp.name), data)
+        with self.assertRaisesRegex(vulncheck.ScanError, "integrity"):
+            vulncheck.fetch_tarball("https://r/a/-/a-1.0.0.tgz", sri(b"other"), tmp.name)
+
+    def mirror(self, **tarballs):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = []
+        for spec, files in tarballs.items():
+            name, version = spec.split("_")
+            data = tgz(files)
+            (pathlib.Path(tmp.name) / f"{name}-{version}.tgz").write_bytes(data)
+            out.append((name, version, f"https://r/{name}/-/{name}-{version}.tgz", sri(data)))
+        return out, tmp.name
+
+    def test_an_unmarked_copy_comes_from_its_entry_while_its_holder_holds_its_files(self):
+        tbs, mirror = self.mirror(oc_1={"dist/w.mjs": "minified", "dist/x.mjs": ""})
+        entry = {"holder": "oc@1", "copy": "minimatch@10.2.6", "files": ["dist/w.mjs"], "why": "x"}
+        copies, probs, held = vulncheck.inlined_copies("l", tbs, [entry], mirror)
+        self.assertEqual((copies, probs, held), ({("minimatch", "10.2.6"): {"oc@1:dist/w.mjs"}}, [], {"oc@1"}))
+        _, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "files": ["dist/gone.mjs"]}], mirror)
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("requalify", probs[0])
+        # Another holder version: the entry names nothing this lockfile installs.
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs, [{**entry, "holder": "oc@2"}], mirror)
+        self.assertEqual((copies, probs), ({}, []))
+
+    def test_an_entry_whose_holder_no_lockfile_installs_is_a_problem(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        (pathlib.Path(tmp.name) / "package-lock.json").write_text(json.dumps({"packages": {"": {}}}))
+        entry = {"holder": "oc@1", "copy": "minimatch@10.2.6", "files": ["dist/w.mjs"], "why": "x"}
+        fs, probs = vulncheck.run_inlined(tmp.name, ["package-lock.json"], [entry])
+        self.assertEqual(fs, [])
+        self.assertEqual(len(probs), 1, probs)
+        self.assertIn("no lockfile installs oc@1", probs[0])
+
+    def test_every_vulnerability_in_an_inlined_copy_fails(self):
+        copies = {("minimatch", "10.2.6"): {"oc@1:dist/a.mjs", "oc@1:dist/b.mjs"}, ("ws", "8.0.0"): {"oc@1:dist/a.mjs"},
+                  ("ajv", "8.0.0"): {"pw@1:lib/u.js.LICENSE"}}
+        doc = osv_doc(("inlined", [osv_pkg("minimatch", "10.2.6", "npm", "GHSA-1"), osv_pkg("ws", "8.0.0", "npm")]))
+        fs, probs = vulncheck.inlined_findings("l", doc, copies)
+        self.assertEqual([(f["id"], f["module"], f["version"], f["level"], f["fails"]) for f in fs],
+                         [("GHSA-1", "minimatch", "10.2.6", "inlined", True)])
+        self.assertEqual(fs[0]["package"], "npm:minimatch inlined in oc@1:dist/a.mjs (+1)")
+        self.assertEqual(probs, ["l: the inlined scan reported nothing for ajv@8.0.0"])
+
+    def test_the_inlined_scan_reads_each_npm_lockfile_the_osv_scan_read(self):
+        doc = osv_doc(("/r/guest/a/package-lock.json", [pkg("x", "npm", "P")]),
+                      ("/r/guest/b/package-lock.json", []),
+                      ("/r/tests/fixtures/vulncheck/npm/package-lock.json", [pkg("x", "npm", "P")]),
+                      ("/r/guest/c/requirements.txt", [pkg("y", "PyPI", "Q")]))
+        self.assertEqual(vulncheck.npm_lockfiles(doc, "/r", ["tests/fixtures/vulncheck"]),
+                         ["guest/a/package-lock.json"])
+
+    def test_inlined_entry_shape(self):
+        good = {"holder": "oc@1", "copy": "@s/m@2", "files": ["dist/w.mjs"], "why": "minified"}
+        self.assertEqual(vulncheck.inlined_problems([good]), [])
+        for bad in ({**good, "holder": "oc"}, {**good, "copy": "@s/m"}, {**good, "files": []},
+                    {**good, "files": "dist/w.mjs"}, {**good, "why": ""}, {**good, "extra": 1},
+                    {k: v for k, v in good.items() if k != "why"}, "oc@1"):
+            self.assertEqual(len(vulncheck.inlined_problems([bad])), 1, bad)
+
+    def test_bad_inlined_entries_stop_the_scan(self):
+        fs, probs, _ = vulncheck.scan({"go_targets": ["broker"], "osv_sources": ["a"], "inlined": [{}]}, ROOT)
+        self.assertEqual((fs, len(probs)), ([], 1))
+
+
 class ConfigTest(unittest.TestCase):
     def test_config_is_valid_and_targets_exist(self):
         cfg = json.loads(vulncheck.CONFIG.read_text())
         self.assertEqual(vulncheck.record_problems(cfg["accepted"]), [])
+        self.assertEqual(vulncheck.inlined_problems(cfg["inlined"]), [])
         self.assertIn("broker", cfg["go_targets"])
         for t in cfg["go_targets"]:
             self.assertTrue((ROOT / t / "go.mod").exists(), t)

@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1411,5 +1412,119 @@ func TestLineHeldOnlyForTheWithdrawnVersion(t *testing.T) {
 		if got := c.Line() != ""; got != tc.want {
 			t.Errorf("held %v, line for %d shown %v, want %v", tc.held, tc.v, got, tc.want)
 		}
+	}
+}
+
+// namesOnce fails unless STATUS and the check's line together name
+// update v exactly once (CH-12).
+func (cr *crig) namesOnce(when string, v int64) {
+	cr.t.Helper()
+	status, line := cr.a.Status(), cr.c.Line()
+	re := regexp.MustCompile(fmt.Sprintf(`(?i)\bupdate %d\b`, v))
+	if n := len(re.FindAllString(status+"\n"+line, -1)); n != 1 {
+		cr.t.Fatalf("%s: update %d named %d times: status %q, line %q", when, v, n, status, line)
+	}
+}
+
+// CH-12, UPD-1: a fast adoption whose stable Withdraw the applier
+// refused (staged, or dropped unsure after a failed applier save) is
+// named once while the applier withdraws it, and once after the applier
+// drops it: the applier then says nothing, and the check's own line
+// names the version again (#4146).
+// Mutant: leave Unsure set when the applier drops a dropped adoption;
+// show the check's line while the applier names the version.
+func TestWithdrawnVersionNamedOnceEndToEnd(t *testing.T) {
+	for _, kind := range []string{"staged", "unsure"} {
+		cr := newCheckRig(t, update.ChannelFast)
+		ctx := context.Background()
+		cr.m.add(2, update.ChannelStable, false, "two")
+		if kind == "unsure" {
+			cr.state.Fail = errors.New("disk full")
+			if err := cr.step(); err == nil {
+				t.Fatalf("%s: a failed applier save passed", kind)
+			}
+			cr.state.Fail = nil
+			if a := cr.c.st.Adoptions["upd:2:1"]; a.State != adDropped || !a.Unsure {
+				t.Fatalf("%s: adoption %+v", kind, a)
+			}
+		} else {
+			cr.mustStep()
+		}
+		cr.clk.add(7 * time.Hour)
+		cr.act.onInstall = func() { cr.inCall = true }
+		if ok, err := cr.a.Tick(ctx); ok || err != nil {
+			t.Fatalf("%s: handover tick: %v %v", kind, ok, err)
+		}
+		cr.act.abandonErr = errors.New("activator busy")
+		cr.channel = update.ChannelStable
+		cr.mustStep()
+		if got, want := cr.a.Status(), fmt.Sprintf(stableMayStartLine, 2); got != want {
+			t.Fatalf("%s: held status %q, want %q", kind, got, want)
+		}
+		cr.namesOnce(kind+": held", 2)
+		cr.act.abandonErr = nil
+		if err := cr.a.Withdraw("upd:2:1", WhyStable); err != nil {
+			t.Fatalf("%s: withdraw: %v", kind, err)
+		}
+		if _, err := cr.a.Tick(ctx); err != nil { // settles the drop
+			t.Fatalf("%s: tick: %v", kind, err)
+		}
+		cr.namesOnce(kind+": dropped", 2)
+		if a := cr.c.st.Adoptions["upd:2:1"]; a.State != adDropped || a.Unsure {
+			t.Fatalf("%s: after the applier's drop %+v", kind, a)
+		}
+	}
+}
+
+// A settle makes an unsure adoption sure and keeps a settled state: a
+// record saved before #4146 with a failed unsure adoption stays failed
+// when the applier drops it.
+// Mutant: move a done adoption to the asked state; keep Unsure.
+func TestSettleMakesUnsureSure(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	r := func(v int64) update.Ref { return update.Ref{Version: v, UsrRootHash: "h", ManifestSHA256: "m"} }
+	next := cr.c.st
+	next.Adoptions = map[string]adoption{
+		"upd:2:1": {Ref: r(2), State: adDropped, Unsure: true, Fast: true},
+		"upd:3:2": {Ref: r(3), State: adFailed, Unsure: true, Fast: true}}
+	cr.must(cr.c.saveLocked(next))
+	for _, id := range []string{"upd:2:1", "upd:3:2"} {
+		cr.must(cr.c.StageDropped(ctx, id))
+	}
+	if a := cr.c.st.Adoptions["upd:2:1"]; a.State != adDropped || a.Unsure {
+		t.Fatalf("dropped: %+v", a)
+	}
+	if a := cr.c.st.Adoptions["upd:3:2"]; a.State != adFailed || a.Unsure {
+		t.Fatalf("failed: %+v", a)
+	}
+}
+
+// UPD-1: a point saved with no boot ID, on a boot this process never
+// read, is not taken for the handover's: "" never matches "", so no
+// stable mark is saved and Resume still judges the boot (#4146).
+// Mutant: drop the guard that this process read a boot.
+func TestEmptyBootIDUnreadSavesNoMark(t *testing.T) {
+	cr := newCheckRig(t, update.ChannelFast)
+	ctx := context.Background()
+	cr.m.add(2, update.ChannelStable, false, "two")
+	cr.mustStep()
+	cr.clk.add(7 * time.Hour)
+	cr.act.onInstall = func() { cr.inCall = true }
+	if ok, err := cr.a.Tick(ctx); ok || err != nil {
+		t.Fatalf("handover tick: %v %v", ok, err)
+	}
+	cr.a.mu.Lock()
+	cr.a.st.Applying.BootID = ""
+	cr.must(cr.a.saveLocked())
+	cr.a.mu.Unlock()
+	cr.act.bootedErr = errors.New("boot unreadable")
+	cr.restart()
+	if err := cr.a.Withdraw("upd:2:1", WhyStable); !errors.Is(err, ErrApplying) {
+		t.Fatalf("withdraw: %v", err)
+	}
+	cr.restart()
+	if pt := cr.a.st.Applying; pt == nil || pt.Withdrawing || pt.Stable {
+		t.Fatalf("saved %+v", pt)
 	}
 }

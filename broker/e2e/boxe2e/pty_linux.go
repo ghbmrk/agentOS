@@ -57,12 +57,19 @@ func plugModem(carrier *modem.Carrier, uid int) (*pluggedModem, error) {
 		return nil, err
 	}
 	if uid >= 0 {
-		if err := os.Chown(slave, uid, -1); err != nil {
+		// Through the held descriptor, so no name is resolved.
+		f, ok := hold.(*os.File)
+		if !ok {
+			hold.Close()
+			master.Close()
+			return nil, fmt.Errorf("pty slave %T is not a file", hold)
+		}
+		if err := f.Chown(uid, -1); err != nil {
 			hold.Close()
 			master.Close()
 			return nil, err
 		}
-		if err := os.Chmod(slave, 0o600); err != nil {
+		if err := f.Chmod(0o600); err != nil {
 			hold.Close()
 			master.Close()
 			return nil, err
