@@ -503,24 +503,47 @@ def bundle_ref(spec):
     return (*at(pkg), path)
 
 
+def mark_owner(path):
+    """(package, versioned) for one bundler mark path, or None if it names no package. The path
+    belongs to the last package of its chain of node_modules/<name>/ steps that each follow a
+    package root directly: a pnpm store step (.pnpm/<name>@<version>/node_modules/<name>/) names
+    its version, any other step does not, and a node_modules/ deeper inside a package (its own
+    src/node_modules/) is that package's own source (#4197)."""
+    store = [m for m in PNPM_MARK.finditer(path) if m.group(1).replace(b"+", b"/") == m.group(3)]
+    if store:
+        pos, name, versioned = store[-1].end(), store[-1].group(3), True
+    else:
+        pos, name, versioned = path.find(b"node_modules/"), None, False
+        if pos < 0:
+            return None
+    while (m := MODULE_SEG.match(path, pos)):
+        pos = m.end()
+        if m.group(1) == b".pnpm":
+            pos = path.find(b"/", pos) + 1 or len(path)  # the store directory; its node_modules/ follows
+            continue
+        name, versioned = m.group(1), False
+    return (name.decode(), versioned) if name else None
+
+
 def unversioned_marks(body, own):
     """{package: the mark paths naming it} for the unversioned bundler marks in one script."""
     out = {}
     for path in COMMENT_MARK.findall(body) + KEY_MARK.findall(body):
-        if any(d.replace(b"+", b"/") == n for d, _, n in PNPM_MARK.findall(path)):
-            continue  # a pnpm store path: the copy and its version are a mark already
-        names = [n for n in MODULE_SEG.findall(path) if n != b".pnpm"]
-        if names and names[-1].decode() != own:
-            out.setdefault(names[-1].decode(), set()).add(path.decode())
+        o = mark_owner(path)
+        if o and not o[1] and o[0] != own:
+            out.setdefault(o[0], set()).add(path.decode())
     return out
 
 
 def notice_scope(notice, scripts, files):
     """The scripts a license or notice file gives versions for. A sidecar (another file's name,
     or its name without the extension, and a suffix: utilsBundle.js.LICENSE, webp_codec.LICENSE
-    beside webp_codec.wasm) gives them for that file only; any other notice for the scripts in
+    beside webp_codec.wasm) gives them for that file only, and a script's sidecar (X.js.LICENSE)
+    gives them to no other file even when X.js is missing; any other notice for the scripts in
     its directory and below, within its package (no node_modules/ between)."""
     d, _, base = notice.rpartition("/")
+    if (named := re.match(r"(.+\.[cm]?js)\.", base)):
+        return {f"{d}/{named.group(1)}" if d else named.group(1)} & scripts  # a script's sidecar, even with no script
     side = {f for f in files if f.rpartition("/")[0] == d and not NOTICE.search(f.rpartition("/")[2])
             and any(base.startswith(n + ".") for n in (f.rpartition("/")[2], f.rpartition("/")[2].rpartition(".")[0]) if n)}
     if side:

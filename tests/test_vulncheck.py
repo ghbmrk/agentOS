@@ -518,6 +518,9 @@ class InlinedTest(unittest.TestCase):
             # a pnpm store path names its version: a versioned mark, and its src/node_modules is its own
             '"node_modules/.pnpm/debug@4.4.0_x@1.0.0/node_modules/debug/src/node.js"(e){}',
             '"node_modules/.pnpm/b@1.0.0/node_modules/b/src/node_modules/internal/x.js"(e){}',
+            # but a node_modules/ directly under a package root is a nested install: its own package
+            '"node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"(e){}',
+            '"node_modules/c/src/node_modules/internal/x.js"(e){}',      # npm layout: c's own source
             # a key into another package's store directory gives no version for the one it names
             '"node_modules/.pnpm/minimatch@10.2.6/node_modules/brace-expansion/index.js"(e){}',
             '"node_modules/holder/x.js"(e){}',                             # the package itself
@@ -530,7 +533,9 @@ class InlinedTest(unittest.TestCase):
         self.assertEqual(vulncheck.unversioned_marks(body, "holder"), {
             "colors": {"node_modules/colors/lib/styles.js"},
             "@scope/pkg": {"node_modules/@scope/pkg/dist/index.js"},
-            "ws": {"node_modules/ws/lib/buffer-util.js"},
+            "ws": {"node_modules/ws/lib/buffer-util.js",
+                   "node_modules/.pnpm/foo@1.0.0/node_modules/foo/node_modules/ws/lib/x.js"},
+            "c": {"node_modules/c/src/node_modules/internal/x.js"},
             "left-pad": {"./node_modules/left-pad/index.js"},
             "ajv": {"node_modules/ajv-formats/node_modules/ajv/dist/ajv.js"},
             "yaml": {"../../node_modules/yaml/dist/index.js"},
@@ -543,8 +548,10 @@ class InlinedTest(unittest.TestCase):
             "lib/utilsBundle.js.LICENSE": "- ws@8.0.0 (https://example.invalid)\n",
             # a sidecar gives versions for its own file only
             "lib/other.js": key("ws"),
-            # a sidecar of a non-script file is not a notice for the directory
+            # a sidecar of a non-script file is not a notice for the directory, nor a script's
+            # sidecar whose script is missing
             "lib/webp_codec.wasm": "", "lib/webp_codec.LICENSE": "- ws@7.0.0\n",
+            "lib/gone.js.LICENSE": "- ws@6.0.0\n",
             # a notice that is no file's sidecar covers its directory and below, within its package
             "third_party/NOTICES": "Name: lodash-es\nVersion: 4.17.21\n",
             "third_party/x/bundle.js": "// node_modules/lodash-es/a.js\n",
@@ -588,6 +595,13 @@ class InlinedTest(unittest.TestCase):
 
     def test_a_bundle_entry_fails_when_its_files_are_not_that_bundles_copy(self):
         tbs, mirror = self.bundle_tarballs()
+        # The bundle entry takes the versions a copy entry gives the bundle, in either order.
+        key = '"node_modules/socks/index.js"(e){}'
+        tbs2, mirror2 = self.mirror(pw_1={"lib/u.js": key}, oc_1={"dist/w.mjs": key})
+        entries = [{"holder": "oc@1", "bundle": "pw@1:lib/u.js", "files": ["dist/w.mjs"], "why": "x"},
+                   {"holder": "pw@1", "copy": "socks@2.8.0", "files": ["lib/u.js"], "why": "x"}]
+        copies, probs, _ = vulncheck.inlined_copies("l", tbs2, entries, mirror2)
+        self.assertEqual((copies, probs), ({("socks", "2.8.0"): {"pw@1:lib/u.js", "oc@1:dist/w.mjs"}}, []))
         # dist/extra.mjs marks yaml, which the bundle does not: it is not the bundle's copy.
         entry = {"holder": "oc@1", "bundle": "pw@1:lib/utilsBundle.js", "files": ["dist/extra.mjs"], "why": "x"}
         copies, probs, _ = vulncheck.inlined_copies("l", tbs, [entry], mirror)
