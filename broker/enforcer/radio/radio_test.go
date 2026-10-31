@@ -74,7 +74,10 @@ func TestOnlyDeclaredOps(t *testing.T) {
 		if want := []Op{OpRead, OpConnect, OpDisconnect, OpWrite, OpSubscribe}; !slices.Equal(Declared[StackBLE], want) {
 			t.Fatalf("BLE declares %v, want %v", Declared[StackBLE], want)
 		}
-		if len(Declared) != 1 {
+		if want := []Op{OpRead}; !slices.Equal(Declared[StackThread], want) {
+			t.Fatalf("Thread declares %v, want %v", Declared[StackThread], want)
+		}
+		if len(Declared) != 2 {
 			t.Fatalf("stacks %v: a new stack comes with its own test", Declared)
 		}
 	})

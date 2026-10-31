@@ -119,7 +119,7 @@ func TestANewRegistrationReplacesTheKept(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := saveReg(dir, testSealer(), clerk.Registration{ID: "old-client", Secret: "old-secret"}); err != nil {
+	if err := saveReg(dir, testSealer(), clerk.Registration{ID: "old-client", Secret: "old-secret"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	owner := MailOwner{serveMail(t, NewMailHost(context.Background(), dir, sec, signInConfig(srv)), MailOwnerSide)}
