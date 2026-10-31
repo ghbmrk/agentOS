@@ -32,6 +32,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 
 	"github.com/ghbmrk/agentos/broker/backup"
+	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/clerk/clerkkey"
 	"github.com/ghbmrk/agentos/broker/clerk/handoff"
 	"github.com/ghbmrk/agentos/broker/clerk/seal"
@@ -1158,12 +1159,40 @@ func TestUnlockWritesTheClerksAnchors(t *testing.T) {
 	}
 }
 
-// handoff.RecoveryLen is the store's recovery key length, which the hand-off
-// package states without linking the store.
-func TestRecoveryLenIsTheStores(t *testing.T) {
-	if handoff.RecoveryLen != seal.RecoveryLen {
-		t.Fatalf("handoff.RecoveryLen %d, seal.RecoveryLen %d", handoff.RecoveryLen, seal.RecoveryLen)
+// REQ: REC-4
+// The bits the lost-card step hands on are a card's: the key the store
+// takes from them is the one card.StoreRecoveryKey reads from the printed
+// card, so the card the page shows opens the store. Revert mutant: another
+// HKDF info or length in handoff.StoreRecoveryKey.
+func TestStoreRecoveryKeyIsTheCards(t *testing.T) {
+	for range 8 {
+		var bits [handoff.CardKeyLen]byte
+		rand.Read(bits[:])
+		got, err := handoff.StoreRecoveryKey(bits[:])
+		must(t, err)
+		want, err := card.StoreRecoveryKey(card.RecoveryKeyText(bits))
+		must(t, err)
+		if !bytes.Equal(got, want) || len(got) != seal.RecoveryLen {
+			t.Fatalf("handoff's store key %x, the card's %x", got, want)
+		}
 	}
+	for _, n := range []int{0, handoff.CardKeyLen - 1, handoff.CardKeyLen + 1, seal.RecoveryLen} {
+		if _, err := handoff.StoreRecoveryKey(make([]byte, n)); err == nil {
+			t.Errorf("%d bits read as a card", n)
+		}
+	}
+}
+
+// printed is the store key of the card that prints bits, read back from
+// its text as the owner types it.
+func printed(t *testing.T, bits []byte) []byte {
+	t.Helper()
+	if len(bits) != handoff.CardKeyLen {
+		t.Fatalf("card bits of %d bytes", len(bits))
+	}
+	k, err := card.StoreRecoveryKey(card.RecoveryKeyText([handoff.CardKeyLen]byte(bits)))
+	must(t, err)
+	return k
 }
 
 // lostRig is a box whose store holds its recovery key's backup recipient,
@@ -1291,10 +1320,11 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	release()
 	res := <-done
 	k := res.k
-	if res.err != nil || len(k.NewRecovery) != seal.RecoveryLen || res.out != "" {
-		t.Fatalf("the lost-card unlock: %v, key of %d bytes, stderr %q", res.err, len(k.NewRecovery), res.out)
+	if res.err != nil || len(k.NewRecovery) != handoff.CardKeyLen || res.out != "" {
+		t.Fatalf("the lost-card unlock: %v, card of %d bytes, stderr %q", res.err, len(k.NewRecovery), res.out)
 	}
-	next := bytes.Clone(k.NewRecovery)
+	// The printed card's key opens the store (#3410).
+	next := printed(t, k.NewRecovery)
 	if _, err := seal.Unlock(r.store, seal.Recovery{Key: r.recovery}); err == nil {
 		t.Fatal("the old recovery key still opens the store")
 	}
@@ -1324,11 +1354,15 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	card, err := r.owner().RecoveryCard()
-	if err != nil || len(card) != seal.RecoveryLen || bytes.Equal(card, r.recovery) {
+	bits, err := r.owner().RecoveryCard()
+	if err != nil || len(bits) != handoff.CardKeyLen {
 		t.Fatalf("the kernel's card: %v (output %s)", err, out)
 	}
-	if v, err := r.owner().Backups(); err != nil || v.Recipient != recipientOf(t, card) {
+	newKey := printed(t, bits)
+	if bytes.Equal(newKey, r.recovery) {
+		t.Fatal("the kernel's card is the old one")
+	}
+	if v, err := r.owner().Backups(); err != nil || v.Recipient != recipientOf(t, newKey) {
 		t.Fatalf("the kernel's recipient after the rotation: %+v, %v", v, err)
 	}
 	must(t, r.owner().RecoveryCardDone())
@@ -1336,7 +1370,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 	r.shutdown(cmd, out)
-	st, err = seal.Unlock(r.store, seal.Recovery{Key: card})
+	st, err = seal.Unlock(r.store, seal.Recovery{Key: newKey})
 	must(t, err)
 	st.Close()
 }
@@ -1472,7 +1506,7 @@ func TestLostCardOnlyAfterTPMOpen(t *testing.T) {
 	if left, err := os.ReadFile(r.request); err != nil || !bytes.Equal(left, b) {
 		t.Fatalf("the request was not left for a tpm boot: %v", err)
 	}
-	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != seal.RecoveryLen {
+	if k, _, err := r.unlockOnce(nil); err != nil || len(k.NewRecovery) != handoff.CardKeyLen {
 		t.Fatalf("the next tpm boot: %v, new key %v", err, k.NewRecovery != nil)
 	}
 }

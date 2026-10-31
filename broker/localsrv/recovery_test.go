@@ -18,6 +18,8 @@ import (
 type fakeRecovery struct {
 	calls []string
 	err   error
+	card  []byte                      // LostCard's answer, when set
+	begun *localapi.RecoveryLostBegun // LostBegin's answer, when set
 }
 
 func (f *fakeRecovery) Begin(_ context.Context, next []byte) (localapi.RecoveryBegun, error) {
@@ -28,6 +30,47 @@ func (f *fakeRecovery) Begin(_ context.Context, next []byte) (localapi.RecoveryB
 func (f *fakeRecovery) Rotate(_ context.Context, factor string, secret, next, ad, cd, sig []byte) (localapi.RecoveryDone, error) {
 	f.calls = append(f.calls, fmt.Sprintf("rotate %s %d %x %x %x %x", factor, len(secret), next[:2], ad, cd, sig))
 	return localapi.RecoveryDone{Switched: true}, f.err
+}
+
+func (f *fakeRecovery) LostBegin(context.Context) (localapi.RecoveryLostBegun, error) {
+	f.calls = append(f.calls, "lostbegin")
+	if f.begun != nil {
+		return *f.begun, f.err
+	}
+	return localapi.RecoveryLostBegun{Old: strings.Repeat("a", 32), Challenge: make([]byte, 32)}, f.err
+}
+
+func (f *fakeRecovery) Lost(_ context.Context, ad, cd, sig []byte) error {
+	f.calls = append(f.calls, fmt.Sprintf("lost %x %x %x", ad, cd, sig))
+	return f.err
+}
+
+func (f *fakeRecovery) LostState(context.Context) (localapi.RecoveryLostState, error) {
+	f.calls = append(f.calls, "loststate")
+	return localapi.RecoveryLostState{Filed: true}, f.err
+}
+
+func (f *fakeRecovery) LostWithdraw(context.Context) error {
+	f.calls = append(f.calls, "withdraw")
+	return f.err
+}
+
+func (f *fakeRecovery) Restart(context.Context) error {
+	f.calls = append(f.calls, "restart")
+	return f.err
+}
+
+func (f *fakeRecovery) LostCard(context.Context) ([]byte, error) {
+	f.calls = append(f.calls, "lostcard")
+	if f.card != nil {
+		return bytes.Clone(f.card), f.err
+	}
+	return bytes.Repeat([]byte{9}, localapi.RecoveryCardLen), f.err
+}
+
+func (f *fakeRecovery) LostDone(context.Context) error {
+	f.calls = append(f.calls, "lostdone")
+	return f.err
 }
 
 func recoveryRig(t *testing.T) (*rig, *fakeRecovery) {
@@ -45,6 +88,13 @@ func recoveryArgs(tok string) map[string]any {
 		localapi.OpRecoveryBegin: localapi.RecoveryBegin{Token: tok, Next: testNext},
 		localapi.OpRecoveryRotate: localapi.RecoveryRotate{Token: tok, Factor: localapi.RecoveryFactorPassphrase,
 			Secret: []byte("alpha bravo"), Next: testNext, AuthenticatorData: []byte{1}, ClientDataJSON: []byte{2}, Signature: []byte{3}},
+		localapi.OpRecoveryLostBegin:    localapi.RecoverySession{Token: tok},
+		localapi.OpRecoveryLost:         localapi.RecoveryLost{Token: tok, AuthenticatorData: []byte{4}, ClientDataJSON: []byte{5}, Signature: []byte{6}},
+		localapi.OpRecoveryLostState:    localapi.RecoverySession{Token: tok},
+		localapi.OpRecoveryLostWithdraw: localapi.RecoverySession{Token: tok},
+		localapi.OpRecoveryRestart:      localapi.RecoverySession{Token: tok},
+		localapi.OpRecoveryLostCard:     localapi.RecoverySession{Token: tok},
+		localapi.OpRecoveryLostDone:     localapi.RecoverySession{Token: tok},
 	}
 }
 
@@ -68,7 +118,8 @@ func TestRecoveryOpsNeedALiveSession(t *testing.T) {
 			t.Errorf("%s: %v", op, err)
 		}
 	}
-	want := []string{"begin 0707", "rotate passphrase 11 0707 01 02 03"}
+	want := []string{"begin 0707", "rotate passphrase 11 0707 01 02 03", "lostbegin", "lost 04 05 06", "loststate",
+		"withdraw", "restart", "lostcard", "lostdone"}
 	if fmt.Sprint(f.calls) != fmt.Sprint(want) {
 		t.Fatalf("calls %v", f.calls)
 	}
@@ -149,5 +200,82 @@ func TestRecoveryRefusalsAreTheClosedSet(t *testing.T) {
 		if _, err := r.call(localapi.OpRecoveryBegin, recoveryArgs(tok)[localapi.OpRecoveryBegin]); code(err) != localapi.ErrRecoveryUnavailable {
 			t.Errorf("begin with %v: %v", e, err)
 		}
+	}
+}
+
+// REQ: REC-4
+// The lost-card frames (r4b) are bounded before anything reaches the owner
+// side; taps and restarts share the rotations' bound; a card of any other
+// length than a card's bits is unavailable, so the page never prints a
+// wrong card.
+func TestRecoveryLostFramesAreBounded(t *testing.T) {
+	r, f := recoveryRig(t)
+	tok := r.signIn()
+	one := []byte{1}
+	big := make([]byte, localapi.MaxPasskeyAssertion+1)
+	for i, a := range []localapi.RecoveryLost{
+		{Token: tok, ClientDataJSON: one, Signature: one},
+		{Token: tok, AuthenticatorData: one, ClientDataJSON: one},
+		{Token: tok, AuthenticatorData: one, ClientDataJSON: big, Signature: one},
+	} {
+		if _, err := r.call(localapi.OpRecoveryLost, a); code(err) != localapi.ErrBadArgs {
+			t.Errorf("case %d: %v", i, err)
+		}
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("reached the owner side: %v", f.calls)
+	}
+	for _, n := range []int{0, localapi.RecoveryCardLen - 1, localapi.RecoveryKeyLen} {
+		f.card = make([]byte, n)
+		if _, err := r.call(localapi.OpRecoveryLostCard, localapi.RecoverySession{Token: tok}); code(err) != localapi.ErrRecoveryUnavailable {
+			t.Errorf("a card of %d bytes: %v", n, err)
+		}
+	}
+	f.card = nil
+	var got localapi.RecoveryLostCard
+	if v, err := r.call(localapi.OpRecoveryLostCard, localapi.RecoverySession{Token: tok}); err != nil {
+		t.Fatal(err)
+	} else {
+		got = v.(localapi.RecoveryLostCard)
+	}
+	if len(got.Card) != localapi.RecoveryCardLen {
+		t.Fatalf("card %x", got.Card)
+	}
+	f.err = sockets.Code(localapi.ErrRecoveryNoCard)
+	if _, err := r.call(localapi.OpRecoveryLostCard, localapi.RecoverySession{Token: tok}); code(err) != localapi.ErrRecoveryNoCard {
+		t.Fatalf("no card: %v", err)
+	}
+	f.err = nil
+	for i := range RecoveryRotatesPerMinute + 1 {
+		op, args := localapi.OpRecoveryLost, recoveryArgs(tok)[localapi.OpRecoveryLost]
+		if i%2 == 1 {
+			op, args = localapi.OpRecoveryRestart, recoveryArgs(tok)[localapi.OpRecoveryRestart]
+		}
+		_, err := r.call(op, args)
+		if want := i == RecoveryRotatesPerMinute; (code(err) == localapi.ErrLimited) != want {
+			t.Fatalf("%s %d: %v", op, i, err)
+		}
+	}
+}
+
+// A lost-card begin answer out of shape (a challenge of another length, or
+// a recipient ID that is neither none nor RecoveryIDLen) is unavailable,
+// so the page never asks a tap over it; one from a box with no recipient
+// passes.
+func TestRecoveryLostBeginShape(t *testing.T) {
+	r, f := recoveryRig(t)
+	tok := r.signIn()
+	for i, b := range []localapi.RecoveryLostBegun{
+		{Old: strings.Repeat("a", 32), Challenge: make([]byte, 31)},
+		{Old: strings.Repeat("a", 31), Challenge: make([]byte, 32)},
+	} {
+		f.begun = &b
+		if _, err := r.call(localapi.OpRecoveryLostBegin, localapi.RecoverySession{Token: tok}); code(err) != localapi.ErrRecoveryUnavailable {
+			t.Errorf("case %d: %v", i, err)
+		}
+	}
+	f.begun = &localapi.RecoveryLostBegun{Challenge: make([]byte, 32)}
+	if _, err := r.call(localapi.OpRecoveryLostBegin, localapi.RecoverySession{Token: tok}); err != nil {
+		t.Fatalf("no recipient yet: %v", err)
 	}
 }

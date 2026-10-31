@@ -1099,7 +1099,7 @@ func TestASetupOnlyKernelTakesNoLinkCall(t *testing.T) {
 // is in no log entry nor in any backup taken while it is held, and a
 // restart holds none (the page then tells the owner to ask again).
 // Revert mutants: RecoveryCardDone leaving the key (the read after done
-// answers it); HoldRecoveryCard taking a key of any length (the 31-byte
+// answers it); HoldRecoveryCard taking a key of any length (the 19-byte
 // hold reads back).
 func TestNewRecoveryHeldUntilDone(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
@@ -1109,11 +1109,11 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("no card made at this boot: %v", err)
 	}
-	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.RecoveryLen-1))
+	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.CardKeyLen-1))
 	if _, err := o.RecoveryCard(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("a short key was held: %v", err)
 	}
-	rec := bytes.Repeat([]byte{0x5e}, handoff.RecoveryLen)
+	rec := bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)
 	held := bytes.Clone(rec)
 	b.h.HoldRecoveryCard(held)
 	for range 2 {

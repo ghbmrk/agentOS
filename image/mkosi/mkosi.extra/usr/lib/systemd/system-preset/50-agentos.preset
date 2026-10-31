@@ -11,8 +11,9 @@ enable agentos-localui.service
 enable agentos-modem.service
 enable agentos-modem-env.path
 enable agentos-drive-id.service
-# The weekly reboot (UPD-10).
+# The weekly reboot (UPD-10), and its restart for a lost-card request (REC-4).
 enable agentos-reboot.timer
+enable agentos-recovery-restart.path
 # The monthly restore drill's report, after the drill's reboot (#2932).
 enable agentos-drill-report.service
 # The keeper (STO-2c): the first-boot page authority, enrollment, then the unlock step that becomes

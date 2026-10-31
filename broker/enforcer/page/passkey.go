@@ -70,7 +70,7 @@ var (
 	errGone      = errors.New("this approval has expired or was already used; open the link again")
 	errRefused   = errors.New("the passkey did not approve this change")
 	errMoved     = errors.New("the policy changed since this page was drawn; open the link again")
-	errSealed    = errors.New("the device's sealed secret is missing or not the one this change names; nothing was added")
+	errSealed    = errors.New("the device's sealed secret is missing or not the one this change names; nothing was added; pair the device again")
 	errStuck     = errors.New("the device's secret was refused but this change could not be withdrawn; cancel it on the home page")
 )
 
