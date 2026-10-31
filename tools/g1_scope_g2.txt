@@ -76,6 +76,10 @@ exempt-pr 4135
 # Remove once #4238 merges.
 exempt-pr 4238
 
+# #4274 (ap/push flake fix, #4248): broker/enforcer/ap/push/push_test.go, which the G2 list does not name (D-198).
+# Remove once #4274 merges.
+exempt-pr 4274
+
 # #4139 (ENF-dns): broker/enforcer/dns/, which the G2 list does not name (D-198).
 # Remove once #4139 merges.
 exempt-pr 4139
