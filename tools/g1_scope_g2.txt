@@ -60,6 +60,14 @@ exempt-pr 4183
 # Remove once #4227 merges.
 exempt-pr 4227
 
+# #4269 (ENF-k2-rx2): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
+# Remove once #4269 merges.
+exempt-pr 4269
+
+# #4270 (ENF-light, #4165): broker/enforcer/alert/, which the G2 list does not name (D-198).
+# Remove once #4270 merges.
+exempt-pr 4270
+
 # #4135 (CAM-clerk-kept-expiry): broker/clerk/camera/ and broker/cmd/agentos-camera/, which the G2 list does not name (D-198).
 # Remove once #4135 merges.
 exempt-pr 4135
