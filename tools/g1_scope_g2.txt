@@ -80,6 +80,10 @@ exempt-pr 4183
 # Remove once #4135 merges.
 exempt-pr 4135
 
+# #4238 (ENF-cut-conntrack, #4141): broker/enforcer/nft/, which the G2 list does not name (D-198).
+# Remove once #4238 merges.
+exempt-pr 4238
+
 # #4139 (ENF-dns): broker/enforcer/dns/, which the G2 list does not name (D-198).
 # Remove once #4139 merges.
 exempt-pr 4139
