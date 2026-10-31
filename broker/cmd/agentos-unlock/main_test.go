@@ -1354,11 +1354,17 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 	r.ask(lostCardApproval(recipientOf(t, r.recovery)))
 	cmd, out := r.boot()
 	r.up(cmd, out)
-	bits, err := r.owner().RecoveryCard()
+	id, err := r.owner().RecoveryCardID()
+	must(t, err)
+	tap := key.Approve(key.Ed25519Signer(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{1}, 32))), kernel.RecoveryCardHash(id))
+	bits, err := r.owner().RecoveryCard(tap)
 	if err != nil || len(bits) != handoff.CardKeyLen {
 		t.Fatalf("the kernel's card: %v (output %s)", err, out)
 	}
 	newKey := printed(t, bits)
+	if id != recipientOf(t, newKey) {
+		t.Fatal("the card's ID is not its recipient's")
+	}
 	if bytes.Equal(newKey, r.recovery) {
 		t.Fatal("the kernel's card is the old one")
 	}
@@ -1366,7 +1372,7 @@ func TestLostCardRequestReplacesAtBoot(t *testing.T) {
 		t.Fatalf("the kernel's recipient after the rotation: %+v, %v", v, err)
 	}
 	must(t, r.owner().RecoveryCardDone())
-	if _, err := r.owner().RecoveryCard(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("after the confirm: %v", err)
 	}
 	r.shutdown(cmd, out)
@@ -1449,7 +1455,7 @@ func TestLostCardRequestIgnoredUnlessValid(t *testing.T) {
 	if v, err := r.owner().Backups(); err != nil || v.Recipient != old {
 		t.Fatalf("the kernel's recipient: %+v, %v", v, err)
 	}
-	if _, err := r.owner().RecoveryCard(); !errors.Is(err, proc.ErrNoRecoveryCard) {
+	if _, err := r.owner().RecoveryCardID(); !errors.Is(err, proc.ErrNoRecoveryCard) {
 		t.Fatalf("a kernel with no new key: %v", err)
 	}
 	r.shutdown(cmd, out)

@@ -201,6 +201,7 @@ table inet enforcer {
 		iifname "core0" tcp dport 7443 accept
 		iifname "core0" udp dport 9 accept
 		iifname { "ap0.105", "ap0.106", "ap0.107", "hh0" } ip daddr 224.0.0.251 udp dport 5353 accept
+		iifname { "ap0.105", "ap0.106", "ap0.107", "hh0" } ip6 daddr ff02::fb udp dport 5353 accept
 	}
 	chain prerouting {
 		type nat hook prerouting priority dstnat; policy accept;

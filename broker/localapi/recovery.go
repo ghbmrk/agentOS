@@ -28,7 +28,7 @@ const (
 // RecoveryOps lists the recovery-key ops, the lost-card ones too, for the
 // disjointness test.
 var RecoveryOps = []string{OpRecoveryBegin, OpRecoveryRotate, OpRecoveryLostBegin, OpRecoveryLost, OpRecoveryLostState,
-	OpRecoveryLostWithdraw, OpRecoveryRestart, OpRecoveryLostCard, OpRecoveryLostDone}
+	OpRecoveryLostWithdraw, OpRecoveryRestart, OpRecoveryLostCardBegin, OpRecoveryLostCard, OpRecoveryLostDone}
 
 // The recovery-key ops' fixed refusals, beside ErrUnauthorized, ErrBadArgs
 // and ErrLimited. Each changed nothing. No kernel or keeper text reaches
@@ -140,8 +140,14 @@ const (
 	// OpRecoveryRestart (RecoverySession) restarts the box through the
 	// weekly reboot's unit, which waits out a call or accepted work.
 	OpRecoveryRestart = "page_recovery_restart"
-	// OpRecoveryLostCard (RecoverySession) answers a RecoveryLostCard: the
-	// new card's bits the kernel holds, or ErrRecoveryNoCard.
+	// OpRecoveryLostCardBegin (RecoverySession) answers a
+	// RecoveryLostCardBegun: the challenge a hardware key signs to see the
+	// new card the kernel holds, or ErrRecoveryNoCard. It reads no bits.
+	OpRecoveryLostCardBegin = "page_recovery_lost_card_begin"
+	// OpRecoveryLostCard (RecoveryLost) takes the hardware key's get()
+	// assertion over that challenge and answers a RecoveryLostCard: the
+	// new card's bits the kernel holds, or ErrRecoveryNoCard. A phone
+	// passkey's tap gets ErrRecoveryNotAnchor and no bits (#4128).
 	OpRecoveryLostCard = "page_recovery_lost_card"
 	// OpRecoveryLostDone (RecoverySession) has the kernel wipe them, once
 	// the owner has confirmed the card.
@@ -181,14 +187,31 @@ type RecoveryLost struct {
 // RecoveryLostState is where a lost-card request stands. Filed: one waits
 // for a restart. Ignored: the last restart did not carry it out (it
 // lapsed, or the recovery key changed since), and it waits to be
-// withdrawn. Ready: the kernel holds a new card to show.
+// withdrawn. Ready: the kernel holds a new card to show. Shown is the
+// backup recipient ID (RecoveryIDLen) of the last new card a page was
+// shown, "" when none (#4160); Confirmed says the owner confirmed it,
+// InEffect that it is the store's recipient now, so its recovery key opens
+// the store.
 type RecoveryLostState struct {
-	Filed   bool `json:"filed"`
-	Ignored bool `json:"ignored"`
-	Ready   bool `json:"ready"`
+	Filed     bool   `json:"filed"`
+	Ignored   bool   `json:"ignored"`
+	Ready     bool   `json:"ready"`
+	Shown     string `json:"shown"`
+	Confirmed bool   `json:"confirmed"`
+	InEffect  bool   `json:"in_effect"`
 }
 
-// RecoveryLostCard is the new card's RecoveryCardLen bits.
+// RecoveryLostCardBegun is the challenge for the hardware key's get() to
+// see the new card whose backup recipient ID (RecoveryIDLen) is ID, which
+// the page shows as the card's mark and prints on it.
+type RecoveryLostCardBegun struct {
+	ID        string `json:"id"`
+	Challenge []byte `json:"challenge"`
+}
+
+// RecoveryLostCard is the new card's RecoveryCardLen bits and its backup
+// recipient ID.
 type RecoveryLostCard struct {
 	Card []byte `json:"card"`
+	ID   string `json:"id"`
 }
