@@ -132,13 +132,14 @@ func (h *home) newHost(name string) *host {
 }
 
 // quiet stops host x's kernel from starting IPv6 traffic of its own: no
-// router solicitations (three, four seconds apart, so the last lands about
-// nine seconds after its link comes up) and no duplicate address
-// detection. Left on, they reach the enforcer at times the test does not
-// choose and move counters such as edge_in inside a window that expects
-// them still. The defaults are what a device gets when its interface
-// arrives in this namespace, so they are set before it does. Every probe
-// the tests care about is sent by the test itself.
+// router solicitations (since Linux 4.9 they never stop by default: the
+// second about four seconds after the first, each gap after about double
+// the last, all to ff02::2, which the forwarding enforcer has joined) and
+// no duplicate address detection. Left on, they reach the enforcer at
+// times the test does not choose and move counters such as edge_in inside
+// a window that expects them still. The defaults are what a device gets
+// when its interface arrives in this namespace, so they are set before it
+// does. Every probe the tests care about is sent by the test itself.
 func (h *home) quiet(x *host) {
 	if !h.v6 {
 		return
