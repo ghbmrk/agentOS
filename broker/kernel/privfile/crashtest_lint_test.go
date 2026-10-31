@@ -15,11 +15,13 @@ package privfile
 // The proof fails closed (REV-CHK-save-later, #4214). The directory's
 // package, with its in-package tests, and then its external test package are
 // type-checked with go/types, and every other import is left unresolved, so
-// nothing another package declares is ever proof. A stop is set only when it
-// is a function literal, a function or method the checker resolves, a local
-// declared with one of these and never assigned, address-taken or selected
-// afterwards, or a call of a function this directory declares with one
-// unnamed result whose every return is one of these (nonNil). Every other
+// nothing declared outside this directory is ever proof. A stop is set only
+// when it is a function literal, a function or method the checker resolves,
+// a local declared with one of these and never assigned, address-taken or
+// selected afterwards, or a call of a function this directory declares whose
+// whole body is one return of one of these, so no defer can recover a panic
+// into nil (nonNil). A method promoted from an embedded type is refused,
+// since a field of an unloaded embedded type could shadow it. Every other
 // shape, nil spelled any way included, counts as nil: a package variable, a
 // parameter, a conversion, any other call. A hook the lint cannot prove is a
 // false fail, which the test fixes by writing the hook inline.
@@ -35,8 +37,9 @@ package privfile
 // or checks that memory, disk and what the owner was told agree after the
 // stop (held by review, the substance of #3311, #3476, #3868 and #3881). A
 // stop forwarded through a second function is not followed: a test sets the
-// field, or calls the function, that the WriteAtomic call reads. A local or
-// package variable shadowing the privfile import, calls in a pending
+// field, or calls the function, that the WriteAtomic call reads. A source
+// local shadowing the stop parameter's name, a local or package variable
+// shadowing the privfile import, calls in a pending
 // directory, Go outside broker/, and broker/third_party and every vendor,
 // testdata and dot-named directory at any depth are outside the check.
 
@@ -203,39 +206,45 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 		ext := "package side_test\n\nimport \"example.test/broker/side\"\n\n"
 		hooks := "import \"example.test/broker/hooks\"\n\n"
 		fails := map[string][]string{
-			"parenthesised nil":                   {"package side\n\nvar _ = S{stop: (nil)}\n"},
-			"nil assigned in parentheses":         {"package side\n\nfunc f(s *S) { (s.stop) = ((nil)) }\n"},
-			"a func-type conversion":              {"package side\n\nvar _ = S{stop: (func(int) bool)(nil)}\n"},
-			"a named-type conversion":             {"package side\n\ntype hook func(int) bool\n\nvar _ = S{stop: hook(nil)}\n"},
-			"a generic type's conversion":         {"package side\n\ntype hook[T any] func(int) bool\n\nvar _ = S{stop: hook[int](nil)}\n"},
-			"a conversion of a literal":           {"package side\n\ntype hook func(int) bool\n\nvar _ = S{stop: hook(func(int) bool { return true })}\n"},
-			"an imported type's conversion":       {"package side\n\n" + hooks + "var _ = S{stop: hooks.Hook(nil)}\n"},
-			"an imported function":                {"package side\n\n" + hooks + "var _ = S{stop: hooks.Always}\n"},
-			"an imported function's result":       {"package side\n\n" + hooks + "var _ = S{stop: hooks.At(2)}\n"},
-			"a local never set":                   {"package side\n\nfunc f() { var h func(int) bool; _ = S{stop: h} }\n"},
-			"a local declared nil":                {"package side\n\nfunc f() { var h func(int) bool = nil; _ = S{stop: h} }\n"},
-			"a local assigned after":              {"package side\n\nfunc f() { h := func(int) bool { return true }; h = nil; _ = S{stop: h} }\n"},
-			"a local assigned in parentheses":     {"package side\n\nfunc f() { h := func(int) bool { return true }; (h) = nil; _ = S{stop: h} }\n"},
-			"a local assigned in a closure":       {"package side\n\nfunc f() { h := func(int) bool { return true }; func() { h = nil }(); _ = S{stop: h} }\n"},
-			"a local set through &":               {"package side\n\nfunc clear(p *func(int) bool) { *p = nil }\n\nfunc f() { h := func(int) bool { return true }; clear(&h); _ = S{stop: h} }\n"},
-			"a local redeclared by :=":            {"package side\n\nfunc g() (func(int) bool, error) { return nil, nil }\n\nfunc f() { h := func(int) bool { return true }; h, err := g(); _, _ = err, S{stop: h} }\n"},
-			"a local set by range =":              {"package side\n\nfunc f(hs []func(int) bool) { h := func(int) bool { return true }; for _, h = range hs {}; _ = S{stop: h} }\n"},
-			"a local from a multi-value call":     {"package side\n\nfunc g() (func(int) bool, error) { return nil, nil }\n\nfunc f() { h, _ := g(); _ = S{stop: h} }\n"},
-			"a local copying a package var":       {"package side\n\nfunc f() { h := Set; _ = S{stop: h} }\n"},
-			"a parameter":                         {"package side\n\nfunc f(h func(int) bool) { _ = S{stop: h} }\n"},
-			"a package var":                       {"package side\n\nvar _ = S{stop: Set}\n"},
-			"a package var given a hook later":    {"package side\n\nvar h func(int) bool\n\nfunc init() { h = func(int) bool { return true } }\n\nvar _ = S{stop: h}\n"},
-			"a call that may return nil":          {"package side\n\nfunc g(ok bool) func(int) bool { if ok { return func(int) bool { return true } }; return nil }\n\nvar _ = S{stop: g(true)}\n"},
-			"a call that passes its argument on":  {"package side\n\nvar _ = S{stop: Hook(nil)}\n"},
-			"a call with a named result":          {"package side\n\nfunc g() (h func(int) bool) { defer func() { h = nil }(); return func(int) bool { return true } }\n\nvar _ = S{stop: g()}\n"},
-			"a local function variable's result":  {"package side\n\nfunc f() { g := StopAt; _ = S{stop: g(2)} }\n"},
-			"a field of a value":                  {"package side\n\ntype hooks struct{ h func(int) bool }\n\nvar _ = S{stop: hooks{}.h}\n"},
-			"the package's nil var, external":     {ext + "var _ = side.S{stop: side.NoStop}\n"},
-			"the package's var, dot-imported":     {"package side_test\n\nimport . \"example.test/broker/side\"\n\nvar _ = S{stop: NoStop}\n"},
-			"an external test's own conversion":   {ext + "type hook func(int) bool\n\nvar _ = side.S{stop: hook(nil)}\n"},
-			"a nil var declared in another file":  {"package side\n\n" + hooks + "var none = hooks.Hook(nil)\n", "package side\n\nvar _ = S{stop: none}\n"},
-			"a nil var a dot import declares":     {"package side_test\n\nimport . \"example.test/broker/side\"\n\nvar h = NoStop\n", "package side_test\n\nimport \"example.test/broker/side\"\n\nvar _ = side.S{stop: h}\n"},
-			"a hook only an ignored file defines": {"//go:build ignore\n\npackage side\n\nfunc always(int) bool { return true }\n", "package side\n\nvar _ = S{stop: always}\n"},
+			"parenthesised nil":                    {"package side\n\nvar _ = S{stop: (nil)}\n"},
+			"nil assigned in parentheses":          {"package side\n\nfunc f(s *S) { (s.stop) = ((nil)) }\n"},
+			"a func-type conversion":               {"package side\n\nvar _ = S{stop: (func(int) bool)(nil)}\n"},
+			"a named-type conversion":              {"package side\n\ntype hook func(int) bool\n\nvar _ = S{stop: hook(nil)}\n"},
+			"a generic type's conversion":          {"package side\n\ntype hook[T any] func(int) bool\n\nvar _ = S{stop: hook[int](nil)}\n"},
+			"a conversion of a literal":            {"package side\n\ntype hook func(int) bool\n\nvar _ = S{stop: hook(func(int) bool { return true })}\n"},
+			"an imported type's conversion":        {"package side\n\n" + hooks + "var _ = S{stop: hooks.Hook(nil)}\n"},
+			"an imported function":                 {"package side\n\n" + hooks + "var _ = S{stop: hooks.Always}\n"},
+			"an imported function's result":        {"package side\n\n" + hooks + "var _ = S{stop: hooks.At(2)}\n"},
+			"a local never set":                    {"package side\n\nfunc f() { var h func(int) bool; _ = S{stop: h} }\n"},
+			"a local declared nil":                 {"package side\n\nfunc f() { var h func(int) bool = nil; _ = S{stop: h} }\n"},
+			"a local assigned after":               {"package side\n\nfunc f() { h := func(int) bool { return true }; h = nil; _ = S{stop: h} }\n"},
+			"a local assigned in parentheses":      {"package side\n\nfunc f() { h := func(int) bool { return true }; (h) = nil; _ = S{stop: h} }\n"},
+			"a local assigned in a closure":        {"package side\n\nfunc f() { h := func(int) bool { return true }; func() { h = nil }(); _ = S{stop: h} }\n"},
+			"a local set through &":                {"package side\n\nfunc clear(p *func(int) bool) { *p = nil }\n\nfunc f() { h := func(int) bool { return true }; clear(&h); _ = S{stop: h} }\n"},
+			"a local redeclared by :=":             {"package side\n\nfunc g() (func(int) bool, error) { return nil, nil }\n\nfunc f() { h := func(int) bool { return true }; h, err := g(); _, _ = err, S{stop: h} }\n"},
+			"a local set by range =":               {"package side\n\nfunc f(hs []func(int) bool) { h := func(int) bool { return true }; for _, h = range hs {}; _ = S{stop: h} }\n"},
+			"a local from a multi-value call":      {"package side\n\nfunc g() (func(int) bool, error) { return nil, nil }\n\nfunc f() { h, _ := g(); _ = S{stop: h} }\n"},
+			"a local copying a package var":        {"package side\n\nfunc f() { h := Set; _ = S{stop: h} }\n"},
+			"a parameter":                          {"package side\n\nfunc f(h func(int) bool) { _ = S{stop: h} }\n"},
+			"a package var":                        {"package side\n\nvar _ = S{stop: Set}\n"},
+			"a package var given a hook later":     {"package side\n\nvar h func(int) bool\n\nfunc init() { h = func(int) bool { return true } }\n\nvar _ = S{stop: h}\n"},
+			"a call that may return nil":           {"package side\n\nfunc g(ok bool) func(int) bool { if ok { return func(int) bool { return true } }; return nil }\n\nvar _ = S{stop: g(true)}\n"},
+			"a call that passes its argument on":   {"package side\n\nvar _ = S{stop: Hook(nil)}\n"},
+			"a local cleared by a pointer method":  {"package side\n\ntype hook func(int) bool\n\nfunc (h *hook) clear() { *h = nil }\n\nfunc f() { var h hook = func(int) bool { return true }; h.clear(); _ = S{stop: h} }\n"},
+			"a call that recovers a panic":         {"package side\n\nfunc g() func(int) bool { defer func() { recover() }(); panic(1) }\n\nvar _ = S{stop: g()}\n"},
+			"a call that recovers before a return": {"package side\n\nfunc g() func(int) bool { defer func() { recover() }(); var m map[int]int; m[0] = 1; return func(int) bool { return true } }\n\nvar _ = S{stop: g()}\n"},
+			"a call with an empty body":            {"package side\n\nfunc g() func(int) bool { for {} }\n\nvar _ = S{stop: g()}\n"},
+			"a method an unloaded embed shadows":   {"package side\n\n" + hooks + "type inner struct{}\n\nfunc (inner) Stop(int) bool { return true }\n\ntype deep struct{ inner }\n\ntype W struct {\n\thooks.Base\n\tdeep\n}\n\nvar _ = S{stop: W{}.Stop}\n"},
+			"a call an unloaded embed shadows":     {"package side\n\n" + hooks + "type inner struct{}\n\nfunc (inner) At(i int) func(int) bool { return func(j int) bool { return j == i } }\n\ntype deep struct{ inner }\n\ntype W struct {\n\thooks.Base\n\tdeep\n}\n\nvar _ = S{stop: W{}.At(2)}\n"},
+			"a call with a named result":           {"package side\n\nfunc g() (h func(int) bool) { defer func() { h = nil }(); return func(int) bool { return true } }\n\nvar _ = S{stop: g()}\n"},
+			"a local function variable's result":   {"package side\n\nfunc f() { g := StopAt; _ = S{stop: g(2)} }\n"},
+			"a field of a value":                   {"package side\n\ntype hooks struct{ h func(int) bool }\n\nvar _ = S{stop: hooks{}.h}\n"},
+			"the package's nil var, external":      {ext + "var _ = side.S{stop: side.NoStop}\n"},
+			"the package's var, dot-imported":      {"package side_test\n\nimport . \"example.test/broker/side\"\n\nvar _ = S{stop: NoStop}\n"},
+			"an external test's own conversion":    {ext + "type hook func(int) bool\n\nvar _ = side.S{stop: hook(nil)}\n"},
+			"a nil var declared in another file":   {"package side\n\n" + hooks + "var none = hooks.Hook(nil)\n", "package side\n\nvar _ = S{stop: none}\n"},
+			"a nil var a dot import declares":      {"package side_test\n\nimport . \"example.test/broker/side\"\n\nvar h = NoStop\n", "package side_test\n\nimport \"example.test/broker/side\"\n\nvar _ = side.S{stop: h}\n"},
+			"a hook only an ignored file defines":  {"//go:build ignore\n\npackage side\n\nfunc always(int) bool { return true }\n", "package side\n\nvar _ = S{stop: always}\n"},
 		}
 		for name, tests := range fails {
 			t.Run(name, func(t *testing.T) {
@@ -718,12 +727,13 @@ func newProof(info *types.Info, files []*ast.File) *proof {
 
 // nonNil reports whether e is provably a non-nil function: a function
 // literal; a function or method the checker resolves (F, side.F, a method
-// value x.M, a method expression (*T).M); a local variable declared with one
-// such value and never assigned, address-taken or selected afterwards; or a
-// call of a function this directory declares with one unnamed result, every
-// return of which gives one such value (stopAt(2), where stopAt returns a
-// function literal). A package variable, a parameter, any other call, a
-// conversion and every name the checker leaves unresolved count as nil.
+// value x.M, a method expression (*T).M, but not one promoted from an
+// embedded type); a local variable declared with one such value and never
+// assigned, address-taken or selected afterwards; or a call of a function or
+// method this directory declares whose whole body is `return v` with v one
+// such value (stopAt(2), where stopAt returns a function literal). A package
+// variable, a parameter, any other call, a conversion and every name the
+// checker leaves unresolved count as nil.
 func (p *proof) nonNil(e ast.Expr) bool { return p.proved(e, 0) }
 
 func (p *proof) proved(e ast.Expr, depth int) bool {
@@ -732,31 +742,29 @@ func (p *proof) proved(e ast.Expr, depth int) bool {
 		case *ast.FuncLit:
 			return true
 		case *ast.CallExpr:
+			// A call of a function the directory declares whose body is one
+			// return statement, so no defer can recover a panic into a nil
+			// result and no other path returns.
+			if sel, ok := ast.Unparen(x.Fun).(*ast.SelectorExpr); ok && !p.direct(sel) {
+				return false
+			}
 			fn, _ := callee(p.info, x)
 			if fn == nil || p.decl[fn.Origin()] == nil {
 				return false
 			}
-			d := p.decl[fn.Origin()]
-			res := fn.Type().(*types.Signature).Results()
-			if res.Len() != 1 || res.At(0).Name() != "" {
-				return false // a named result can be changed by a deferred call
+			body := p.decl[fn.Origin()].Body.List
+			if len(body) != 1 {
+				return false
 			}
-			ok := true
-			ast.Inspect(d.Body, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.FuncLit:
-					return false
-				case *ast.ReturnStmt:
-					if len(n.Results) != 1 || !p.proved(n.Results[0], depth+1) {
-						ok = false
-					}
-				}
-				return ok
-			})
-			return ok
+			ret, ok := body[0].(*ast.ReturnStmt)
+			if !ok || len(ret.Results) != 1 {
+				return false
+			}
+			e = ret.Results[0]
+			continue
 		case *ast.SelectorExpr:
 			if s := p.info.Selections[x]; s != nil {
-				return s.Kind() == types.MethodVal || s.Kind() == types.MethodExpr
+				return p.direct(x) && (s.Kind() == types.MethodVal || s.Kind() == types.MethodExpr)
 			}
 			_, ok := p.info.Uses[x.Sel].(*types.Func)
 			return ok
@@ -807,6 +815,15 @@ func callee(info *types.Info, call *ast.CallExpr) (fn *types.Func, skip int) {
 	}
 	fn, _ = obj.(*types.Func)
 	return fn, skip
+}
+
+// direct reports whether sel is not a selection, or selects a field or
+// method the receiver's type declares itself. A promoted one is refused: a
+// shallower field of an embedded type the checker could not load (every
+// import but the directory's own) would shadow it in the real build.
+func (p *proof) direct(sel *ast.SelectorExpr) bool {
+	s := p.info.Selections[sel]
+	return s == nil || len(s.Index()) == 1
 }
 
 // testSets returns the field names the tests key or assign a provably
