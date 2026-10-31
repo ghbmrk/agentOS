@@ -325,8 +325,8 @@ func TestCardOnlyFromKeys(t *testing.T) {
 
 // TestCardShowsPasswordGrouped (#4129, #4084): every card shows the
 // password in groups of four that join back to exactly the password, while
-// the QR text carries the password itself; a password that already has a
-// space, as a sticker's may, is shown as it is.
+// the QR text carries the password itself, escaped where a sticker's
+// password holds a character the WIFI: form reserves.
 func TestCardShowsPasswordGrouped(t *testing.T) {
 	l, k := fixtureLayout(), fixtureKeys()
 	var cards []Card
@@ -359,12 +359,12 @@ func TestCardShowsPasswordGrouped(t *testing.T) {
 	if tv.Shown != "CANA RYTV AAAA AAAA AAAA AAAA AA" {
 		t.Errorf("shown %q", tv.Shown)
 	}
-	sticker := Keys{Setup: "my sticker; pw"}
-	if c, _ := sticker.NetworkCard(l, NetSetup); c.Shown != "my sticker; pw" || c.QR != `WIFI:T:WPA;S:Home setup;P:my sticker\; pw;;` {
-		t.Errorf("sticker card %+v", c)
+	sticker := Keys{Setup: "my;sticker:pw"}
+	if err := sticker.check(); err != nil {
+		t.Fatal(err)
 	}
-	if c, _ := (Keys{Setup: "ÅÄÖÅÄÖ"}).NetworkCard(l, NetSetup); c.Shown != "ÅÄÖÅ ÄÖ" {
-		t.Errorf("non-ASCII sticker shown %q", c.Shown)
+	if c, _ := sticker.NetworkCard(l, NetSetup); c.Shown != "my;s tick er:p w" || c.QR != `WIFI:T:WPA;S:Home setup;P:my\;sticker\:pw;;` {
+		t.Errorf("sticker card %+v", c)
 	}
 }
 

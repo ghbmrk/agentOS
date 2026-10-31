@@ -177,20 +177,16 @@ func card(ssid, pw string) Card {
 	return Card{SSID: ssid, Password: pw, QR: "WIFI:T:WPA;S:" + esc(ssid) + ";P:" + esc(pw) + ";;", Shown: grouped(pw)}
 }
 
-// grouped is pw in groups of four separated by spaces. A password that
-// already holds a space is shown as it is, since regrouping it would hide
-// which spaces are part of it.
+// grouped is pw in groups of four separated by spaces. Keys.check admits
+// only printable ASCII with no space, so no space in Shown is part of the
+// password; the page can tell the owner to type none of them.
 func grouped(pw string) string {
-	if strings.Contains(pw, " ") {
-		return pw
-	}
-	r := []rune(pw)
 	var parts []string
-	for len(r) > 4 {
-		parts = append(parts, string(r[:4]))
-		r = r[4:]
+	for len(pw) > 4 {
+		parts = append(parts, pw[:4])
+		pw = pw[4:]
 	}
-	return strings.Join(append(parts, string(r)), " ")
+	return strings.Join(append(parts, pw), " ")
 }
 
 // band is an OpenWrt radio band as the owner reads it.
