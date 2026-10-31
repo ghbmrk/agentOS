@@ -98,6 +98,9 @@ func startFake(t *testing.T, answers map[string]string) (*fakeDaemon, string) {
 					if !ok {
 						a = "Done\r\n"
 					}
+					if a == "" {
+						return // the session drops
+					}
 					io.WriteString(c, "> "+a)
 				}
 			}()
@@ -211,18 +214,31 @@ func TestStackOnlyDeclaredOps(t *testing.T) {
 		})
 	}
 
-	t.Run("bring-up fails closed", func(t *testing.T) {
-		_, sock := startFake(t, map[string]string{"thread start": "Error 13: InvalidState\r\n"})
-		_, done := adapter(t, sock, network)
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Error("the adapter served after ot-daemon refused to start")
+	// Bring-up fails closed, and only ot-daemon's answer that it has no
+	// dataset forms a network: a failed read of the dataset never replaces
+	// the network and its key.
+	for _, c := range []struct{ what, cmd, answer string }{
+		{"ot-daemon refuses to start", "thread start", "Error 13: InvalidState\r\n"},
+		{"the dataset read drops", "dataset active -x", ""},
+		{"the dataset read errs", "dataset active -x", "Error 7: InvalidArgs\r\n"},
+		{"the dataset read is hostile", "dataset active -x", strings.Repeat("x", 2000) + "\r\nDone\r\n"},
+	} {
+		t.Run("bring-up fails closed: "+c.what, func(t *testing.T) {
+			f, sock := startFake(t, map[string]string{c.cmd: c.answer})
+			_, done := adapter(t, sock, network)
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Error("the adapter served")
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("the adapter served")
 			}
-		case <-time.After(5 * time.Second):
-			t.Error("the adapter served after ot-daemon refused to start")
-		}
-	})
+			if c.cmd == "dataset active -x" && slices.Contains(f.commands(), "dataset init new") {
+				t.Errorf("a failed dataset read formed a new network: %q", f.commands())
+			}
+		})
+	}
 }
 
 // TestSrpReachesController (NET-2 Confined radio stacks; spikes/ENF-radio

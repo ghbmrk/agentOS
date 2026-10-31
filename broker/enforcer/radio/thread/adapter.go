@@ -40,6 +40,8 @@ const (
 var (
 	ErrCommand = errors.New("thread: command not on the adapter's list")
 	ErrCLI     = errors.New("thread: ot-daemon's answer refused")
+	// errNoDataset is ot-daemon's answer when no network was ever formed.
+	errNoDataset = errors.New("thread: no active dataset")
 )
 
 // Status is a read of the Thread network.
@@ -129,6 +131,8 @@ func (c *cli) exchange(cmd string) ([]string, error) {
 		switch {
 		case s == "Done":
 			return out, nil
+		case s == "Error 23: NotFound" && cmd == "dataset active -x":
+			return nil, errNoDataset
 		case strings.HasPrefix(s, "Error "):
 			return nil, fmt.Errorf("thread: %s: %s", cmd, s)
 		case s != "":
@@ -139,14 +143,19 @@ func (c *cli) exchange(cmd string) ([]string, error) {
 }
 
 // bringUp forms a network the first time (ot-daemon keeps its dataset in
-// its state directory) and starts it with the SRP server on.
+// its state directory) and starts it with the SRP server on. Only
+// ot-daemon's own answer that there is no dataset forms one: any other
+// failure fails bring-up, since forming anew would replace the network's
+// key and cut off every device joined to it.
 func (c *cli) bringUp() error {
-	if _, err := c.do("dataset active -x"); err != nil {
+	if _, err := c.do("dataset active -x"); errors.Is(err, errNoDataset) {
 		for _, cmd := range []string{"dataset init new", "dataset commit active"} {
 			if _, err := c.do(cmd); err != nil {
 				return err
 			}
 		}
+	} else if err != nil {
+		return err
 	}
 	for _, cmd := range []string{"srp server enable", "ifconfig up", "thread start"} {
 		if _, err := c.do(cmd); err != nil {

@@ -111,6 +111,45 @@ func TestFilterDeniesEachEntry(t *testing.T) {
 	}
 }
 
+// pinned is the deny list as reviewed, by x86-64 number. A line dropped
+// from the table, or renumbered, fails here even where no other test
+// reaches it (a call the build host's headers lack, or one outside the
+// namespace and mount class).
+var pinned = map[string]uint32{
+	"ptrace": 101, "mount": 165, "umount2": 166, "pivot_root": 155, "chroot": 161, "unshare": 272, "setns": 308,
+	"bpf": 321, "kexec_load": 246, "kexec_file_load": 320,
+	"init_module": 175, "finit_module": 313, "delete_module": 176,
+	"keyctl": 250, "add_key": 248, "request_key": 249, "perf_event_open": 298, "userfaultfd": 323,
+	"process_vm_readv": 310, "process_vm_writev": 311, "reboot": 169, "swapon": 167, "swapoff": 168,
+	"acct": 163, "iopl": 172, "ioperm": 173,
+	"io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+	"open_tree": 428, "move_mount": 429, "fsopen": 430, "fsconfig": 431, "fsmount": 432, "fspick": 433,
+	"mount_setattr": 442, "statmount": 457, "listmount": 458, "open_tree_attr": 467,
+}
+
+// TestDenyListIsPinned (NET-2 Confined radio stacks): the deny list holds
+// exactly the reviewed calls under their numbers. Catches a table line
+// dropped with no test that reaches it (ENF-t combined review).
+func TestDenyListIsPinned(t *testing.T) {
+	got := map[string]uint32{}
+	for _, d := range denyList {
+		if _, dup := got[d.Name]; dup {
+			t.Errorf("%s is listed twice", d.Name)
+		}
+		got[d.Name] = d.Nr
+	}
+	for name, nr := range pinned {
+		if g, ok := got[name]; !ok || g != nr {
+			t.Errorf("%s: listed as %d (present %v), want %d", name, g, ok, nr)
+		}
+	}
+	for name := range got {
+		if _, ok := pinned[name]; !ok {
+			t.Errorf("%s is listed but not pinned: review it, then pin it", name)
+		}
+	}
+}
+
 // entryPoint matches the kernel's namespace and mount entry points by
 // name, so a call the kernel adds to that class (as open_tree_attr was in
 // Linux 6.15) must join the deny list.
