@@ -534,8 +534,9 @@ func (c *Check) settle(id, to string, from, done []string) error {
 		if !a.Unsure {
 			return nil
 		}
-		// An unsure drop the applier drops again left it, so Line shows
-		// its version again (CH-12, #4146); a failed one stays failed.
+		// The applier dropped it, so it no longer holds the release: the
+		// drop is sure and Line shows its version again (CH-12, #4146).
+		// The state stays, so a failed one stays failed.
 		to = a.State
 	case !slices.Contains(from, a.State):
 		if a.State == adConfirmed {
