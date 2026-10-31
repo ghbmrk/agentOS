@@ -2,6 +2,7 @@ package hostdisk
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // loaderDevicePartUUID is systemd-boot's EFI variable naming the GPT
@@ -21,12 +23,35 @@ type device interface {
 	io.Closer
 }
 
+// errNotNode is a device path that is not the kind of file asked for.
+var errNotNode = errors.New("hostdisk: device path is not a block device node")
+
+// isBlock reports a block device node: a device that is not a character
+// device.
+func isBlock(m os.FileMode) bool {
+	return m&os.ModeDevice != 0 && m&os.ModeCharDevice == 0
+}
+
 // openReadOnly opens a block device read-only. os.OpenFile adds
-// O_CLOEXEC on Linux; a test checks the open file's flags.
+// O_CLOEXEC on Linux; a test checks the open file's flags. A refusal is an
+// open failure: the disk is listed with ProblemOpen, and a root disk that
+// cannot be opened for the loader cross-check gives HealthMismatch (H6, H7).
 func openReadOnly(path string) (device, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	return openNode(path, isBlock)
+}
+
+// openNode opens path read-only, refusing a link at it (O_NOFOLLOW, #3950)
+// and never waiting on a FIFO (O_NONBLOCK, which a block device's reads
+// ignore), and keeps the file only if ok accepts its mode.
+func openNode(path string, ok func(os.FileMode) bool) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil || !ok(fi.Mode()) {
+		f.Close()
+		return nil, errNotNode
 	}
 	return f, nil
 }
@@ -137,7 +162,7 @@ func (s System) diskOf(dir string, depth int, out map[string]bool) bool {
 	if hasPrefix(name, stackedPrefix) {
 		return false // a dm or md device with no slaves yet: cannot tell
 	}
-	if _, err := os.Stat(filepath.Join(real, "partition")); err == nil {
+	if _, err := os.Lstat(filepath.Join(real, "partition")); err == nil {
 		name = filepath.Base(filepath.Dir(real))
 	}
 	out[name] = true
@@ -335,7 +360,7 @@ func (s System) Classify(name string) Class {
 	if !validName.MatchString(name) || hasPrefix(name, virtualPrefix) {
 		return ClassUnknown
 	}
-	if _, err := os.Stat(filepath.Join(s.Sys, "block", name)); err != nil {
+	if _, err := os.Lstat(filepath.Join(s.Sys, "block", name)); err != nil {
 		return ClassUnknown
 	}
 	disks := map[string]bool{}

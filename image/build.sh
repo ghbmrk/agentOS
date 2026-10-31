@@ -34,10 +34,11 @@ STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"
 # The broker, the vault process, the owner page, the modem bridge, the keeper: enrollment, the
 # unlock step and the kernel (STO-2c) and the mail clerk (MAIL-unit), and the host-disk helper the udev rules below run (HOST-1a),
 # static and path-free. No access point or Wi-Fi join (D-178). The device-driver host (DEVSLOT b2b). The
-# core's end of the edge link (EDGE-link-core c2c). The camera clerk (CAM-clerk-image).
+# core's end of the edge link (EDGE-link-core c2c). The camera clerk (CAM-clerk-image). The HomeKit clerk
+# (DEV-homekit-b2c).
 for cmd in agentosd agentos-egress agentos-localui agentos-modem \
 	agentos-enroll agentos-unlock agentos-kernel agentos-clerk-mail agentos-hostdisk agentos-devices agentos-link \
-	agentos-camera; do
+	agentos-camera agentos-homekit; do
 	(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 		-o "$STAGE/usr/lib/agentos/$cmd" "./cmd/$cmd")
 done
