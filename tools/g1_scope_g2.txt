@@ -136,6 +136,10 @@ exempt-pr 4290
 # Remove once #4171 merges.
 exempt-pr 4171
 
+# #4309 (#4247): broker/enforcer/radio/ and broker/enforcer/action/ASSUMPTIONS.md (tests and docs), which the G2 list does not name (D-198).
+# Remove once #4309 merges.
+exempt-pr 4309
+
 # #4212 (DEV-homekit-b2c, #3894; replaces #4166): broker/cmd/agentos-homekit/, which the G2 list does
 # not name (D-198). Remove once #4212 merges.
 exempt-pr 4212

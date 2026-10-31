@@ -8,9 +8,11 @@
 // own fixed wording (Kind's closed list), sent as a channel message to the
 // kernel for the owner line (channel.Alert). The core can drop, delay,
 // forge or falsely confirm any of them, so nothing it sends resolves an
-// alert: the enforcer's own log, page and light are the record. The light,
-// a Thread bulb only the enforcer drives, shows red for every unresolved
-// alert and any recovery pending, whatever happened to the text.
+// alert: the enforcer's own log and page are the record. The light, a
+// Thread bulb only the enforcer drives, is saved for a known attack
+// (D-254): it shows red only while a trip at the enforcer (KRN-12) is
+// unresolved, whatever happened to its text. Every other alert, a pending
+// recovery and a silent core show on the page.
 //
 // It is enforcer code: it imports the standard library and
 // broker/enforcer/wire only (broker/daemon/arc2_test.go). Its assumptions
@@ -50,6 +52,10 @@ const (
 	// Logged only.
 	RoutineUnlock
 	RoutineLock
+	// A trip at the enforcer (KRN-12): traffic to a decoy address, a byte
+	// cap passed, a malformed or excessive channel message. The only kind
+	// that lights the bulb. Last, so journalled kinds keep their numbers.
+	Trip
 )
 
 // Delivery is how a kind reaches the owner.
@@ -68,19 +74,20 @@ type spec struct {
 }
 
 var kinds = map[Kind]spec{
-	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home; its light stays red until you do."},
-	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home; its light stays red until you do."},
-	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, cancel it on the enforcer's page at home now. Clear this there too; its light stays red until you do."},
-	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home; its light stays red until you do."},
-	ChannelPaused:    {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home; its light stays red until you do."},
-	SafetyOff:        {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too; its light stays red until you do."},
-	SafetyShut:       {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too; its light stays red until you do."},
-	HeadFork:         {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home; its light stays red until you do."},
+	UnusualUnlock:    {Text, true, "Enforcer: %s was unlocked at an unusual time. Clear it on the enforcer's page at home."},
+	UnusualDisarm:    {Text, true, "Enforcer: %s was disarmed at an unusual time. Clear it on the enforcer's page at home."},
+	RecoveryCodeUsed: {Text, false, "Enforcer: the recovery code was used to enrol a new passkey. If it was not you, cancel it on the enforcer's page at home now. Clear this there too."},
+	Enrolment:        {Text, false, "Enforcer: a passkey was enrolled on the enforcer. Clear it on the enforcer's page at home."},
+	ChannelPaused:    {Text, false, "Enforcer: the core's channel sent too much and is paused. Home devices keep their last rules. Resume it on the enforcer's page at home."},
+	SafetyOff:        {Text, true, "Enforcer: %s was switched off by the core. Turning it back on needs the enforcer's page at home. Clear this there too."},
+	SafetyShut:       {Text, true, "Enforcer: %s was shut by the core. Opening it again needs the enforcer's page at home. Clear this there too."},
+	HeadFork:         {Text, false, "Enforcer: the core's log does not match the copy the enforcer keeps. The core may have been rolled back. Choose what to do on the enforcer's page at home."},
 	AlarmTriggered:   {Call, true, "Enforcer: the alarm %s was triggered."},
 	DoorForced:       {Call, true, "Enforcer: %s was forced open."},
 	FailedUnlocks:    {Call, true, "Enforcer: repeated failed attempts to unlock %s."},
 	RoutineUnlock:    {LogOnly, true, "%s unlocked."},
 	RoutineLock:      {LogOnly, true, "%s locked."},
+	Trip:             {Text, true, "Enforcer: %s touched a decoy or broke a limit, a known attack. The enforcer's page at home shows whether it was cut off or needs your passkey there to isolate it; its light stays red until the cut lifts or you clear this there."},
 }
 
 // Fold windows: a repeat of an open alert within its delivery's window
@@ -123,9 +130,8 @@ func Words(k Kind, device string) (string, error) {
 type Colour uint8
 
 const (
-	Off   Colour = iota // nothing unresolved, the core up
-	Amber               // the core down or silent, nothing unresolved
-	Red                 // an unresolved alert or a recovery pending
+	Off Colour = iota // no trip unresolved
+	Red               // a trip at the enforcer unresolved (D-254)
 )
 
 // Light is the enforcer-only Thread bulb, driven through the radio host
@@ -159,7 +165,7 @@ type Record struct {
 	Resolved time.Time `json:"resolved,omitzero"`
 }
 
-// Status is the light's inputs and what it shows.
+// Status is the page's view and what the light shows.
 type Status struct {
 	Open     []Record
 	Recovery bool
@@ -269,9 +275,9 @@ func (a *Alerts) write(r Record) error {
 	return nil
 }
 
-// Raise logs one event, and for a text or call keeps it open, turns the
-// light red and sends it. The log line and the light come first, so a
-// dropped or refused text still shows (P6); a journal error is returned
+// Raise logs one event, and for a text or call keeps it open, shows the
+// light (red for a trip) and sends it. The log line and the light come
+// first, so a dropped or refused text still shows (P6); a journal error is returned
 // after the light and the send. An event of a kind already open for the
 // same device counts on that alert; it sends nothing more within the
 // delivery's fold window after the owner was last told, so a burst costs
@@ -321,8 +327,8 @@ func (a *Alerts) open(k Kind, device string) int {
 }
 
 // send offers r to the kernel and records whether it took it. A refusal
-// changes nothing else: the alert stays open and the light red, and Core
-// offers it again when the core is back.
+// changes nothing else: the alert stays open (a trip's light red), and
+// Core offers it again when the core is back.
 func (a *Alerts) send(r Record) Record {
 	d, _ := r.Kind.Delivery()
 	w := wire.Alert{Kind: wire.AlertText, Text: r.Text}
@@ -406,8 +412,24 @@ func (a *Alerts) resolve(i int) error {
 	return nil
 }
 
-// Recovery sets whether a recovery is pending (slice c): red until it
-// ends.
+// Lifted resolves every open trip from device; the page calls it once
+// the owner's passkey has lifted that cut in full (NET-4). The light goes
+// off when no trip is left open.
+func (a *Alerts) Lifted(device string) error {
+	a.mu.Lock()
+	var err error
+	for i := range a.log {
+		if r := a.log[i]; r.Open && r.Kind == Trip && r.Device == device {
+			err = errors.Join(err, a.resolve(i))
+		}
+	}
+	a.mu.Unlock()
+	a.show()
+	return err
+}
+
+// Recovery sets whether a recovery is pending (slice c), for the page; the
+// light does not show it (D-254).
 func (a *Alerts) Recovery(pending bool) {
 	a.mu.Lock()
 	a.recovery = pending
@@ -416,8 +438,8 @@ func (a *Alerts) Recovery(pending bool) {
 }
 
 // Core sets whether the core is up (slice l, from the channel and the
-// heartbeat). Coming up, every open alert the kernel never took is offered
-// again.
+// heartbeat), for the page; the light does not show it (D-254). Coming
+// up, every open alert the kernel never took is offered again.
 func (a *Alerts) Core(up bool) {
 	a.mu.Lock()
 	a.coreDown = !up
@@ -436,7 +458,8 @@ func (a *Alerts) Core(up bool) {
 	}
 }
 
-// Status is the light's inputs and colour, for the page.
+// Status is what the page shows: open alerts, a pending recovery, the
+// core down, and the light's colour.
 func (a *Alerts) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -446,11 +469,8 @@ func (a *Alerts) Status() Status {
 			s.Open = append(s.Open, r)
 		}
 	}
-	switch {
-	case len(s.Open) > 0 || s.Recovery:
+	if slices.ContainsFunc(s.Open, func(r Record) bool { return r.Kind == Trip }) {
 		s.Colour = Red
-	case s.CoreDown:
-		s.Colour = Amber
 	}
 	return s
 }

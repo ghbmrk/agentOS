@@ -681,8 +681,11 @@ func (m *Message) required() error {
 }
 
 // frameLen reads, from a message's first 16 bytes, the length of its
-// header (fields and padding included) and of the whole message.
-func frameLen(h []byte) (head, n int, err error) {
+// header (fields and padding included) and of the whole message. The
+// lengths are int64: two declared uint32 lengths sum past 1<<32, which an
+// int would wrap on a 32-bit build, so the reader would skip the wrong
+// number of bytes and lose the stream.
+func frameLen(h []byte) (head, n int64, err error) {
 	var order binary.ByteOrder
 	switch h[0] {
 	case 'l':
@@ -696,9 +699,9 @@ func frameLen(h []byte) (head, n int, err error) {
 	hl := 16 + fields
 	hl += (8 - hl%8) % 8
 	if hl+body > MaxMessage || fields > maxHeader {
-		return int(hl), int(hl + body), errTooLong
+		return int64(hl), int64(hl + body), errTooLong
 	}
-	return int(hl), int(hl + body), nil
+	return int64(hl), int64(hl + body), nil
 }
 
 // Decode parses one whole message, refusing anything malformed, trailing
@@ -710,7 +713,7 @@ func Decode(b []byte) (*Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	if n != len(b) {
+	if n != int64(len(b)) {
 		return nil, wireErr("length %d, header says %d", len(b), n)
 	}
 	m, d, err := header(b)
