@@ -319,6 +319,14 @@ func TestNamesBounded(t *testing.T) {
 	if !tb.has("129", t0) || len(tb) != maxNames {
 		t.Fatalf("a table swept again before it was full (%d)", len(tb))
 	}
+	// Names ending together are dropped only as many as need be.
+	same := names{}
+	for i := range maxNames {
+		same.add(fmt.Sprint(i), t0.Add(time.Hour), t0)
+	}
+	if same.add("new", t0.Add(time.Hour), t0); len(same) != keep+1 {
+		t.Errorf("a sweep of names ending together left %d", len(same))
+	}
 	// At 200 s "129" to "199" have expired; then "200" to "256" end soonest.
 	now := t0.Add(200 * time.Second)
 	tb.add("newer", t0.Add(time.Hour), now)

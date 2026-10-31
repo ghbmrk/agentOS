@@ -346,22 +346,17 @@ func (t names) add(k string, until, now time.Time) {
 }
 
 func (t names) sweep(now time.Time) {
-	ends := make([]time.Time, 0, len(t))
+	held := make([]string, 0, len(t))
 	for k, u := range t {
 		if !u.After(now) {
 			delete(t, k)
 		} else {
-			ends = append(ends, u)
+			held = append(held, k)
 		}
 	}
-	keep := maxNames - maxNames/8
-	if len(ends) <= keep {
-		return
-	}
-	slices.SortFunc(ends, time.Time.Compare)
-	cut := ends[len(ends)-keep-1]
-	for k, u := range t {
-		if !u.After(cut) {
+	if drop := len(held) - (maxNames - maxNames/8); drop > 0 {
+		slices.SortFunc(held, func(a, b string) int { return t[a].Compare(t[b]) })
+		for _, k := range held[:drop] {
 			delete(t, k)
 		}
 	}
