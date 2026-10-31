@@ -76,6 +76,10 @@ const (
 
 var ErrWire = errors.New("ble: malformed bus message")
 
+// errTooLong is a message longer than MaxMessage; frameLen still says how
+// long, so the reader can step over it.
+var errTooLong = fmt.Errorf("%w: message too long", ErrWire)
+
 func wireErr(format string, a ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrWire}, a...)...)
 }
@@ -687,7 +691,7 @@ func frameLen(h []byte) (int, error) {
 	n += (8 - n%8) % 8
 	n += body
 	if n > MaxMessage {
-		return 0, wireErr("message too long")
+		return int(n), errTooLong
 	}
 	return int(n), nil
 }

@@ -92,10 +92,12 @@ func (c Config) check() error {
 			return fmt.Errorf("ble: config: device %q", d.Name)
 		}
 		seen[d.Name] = true
+		uuids := map[string]bool{}
 		for n, u := range d.Chars {
-			if !name(n) || !reUUID.MatchString(u) {
+			if !name(n) || !reUUID.MatchString(u) || uuids[u] {
 				return fmt.Errorf("ble: config: device %q characteristic %q", d.Name, n)
 			}
+			uuids[u] = true
 		}
 	}
 	return nil
@@ -157,6 +159,7 @@ type sub struct{ device, char string }
 type stack struct {
 	cfg     Config
 	devices map[string]Device
+	byPath  map[ObjectPath]string // device object path -> device name
 	srv     *radio.Server
 	bus     *Bus
 	log     io.Writer
@@ -178,10 +181,11 @@ func Run(c Config, conn io.ReadWriteCloser, log io.Writer) error {
 	if c.Bus == "" {
 		c.Bus = SystemBus
 	}
-	s := &stack{cfg: c, devices: map[string]Device{}, log: log,
+	s := &stack{cfg: c, devices: map[string]Device{}, byPath: map[ObjectPath]string{}, log: log,
 		chars: map[[2]string]ObjectPath{}, subs: map[ObjectPath]sub{}}
 	for _, d := range c.Devices {
 		s.devices[d.Name] = d
+		s.byPath[s.devicePath(d)] = d.Name
 	}
 	s.srv = radio.NewServer(radio.StackBLE, conn)
 	bus, err := Dial(c.Bus, s.signal)
@@ -440,10 +444,20 @@ func (s *stack) signal(m *Message) {
 	case m.Sender != owner || m.Interface != ifaceProps || m.Member != "PropertiesChanged" || m.Sig != "sa{sv}as":
 		return
 	}
+	changed, _ := m.Body[1].([]any)
+	if m.Body[0] == ifaceDevice {
+		// The device dropped the link: BlueZ ends its notifications and may
+		// number its objects anew on reconnect, as after a disconnect op.
+		if c, ok := prop(changed, "Connected").(bool); ok && !c {
+			if d, ok := s.byPath[m.Path]; ok {
+				s.forget(d)
+			}
+		}
+		return
+	}
 	if !ok || m.Body[0] != ifaceChar {
 		return
 	}
-	changed, _ := m.Body[1].([]any)
 	v, ok := prop(changed, "Value").([]byte)
 	if !ok || len(v) > radio.MaxData {
 		return

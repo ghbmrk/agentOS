@@ -130,13 +130,18 @@ func (b *Bus) Call(dest string, path ObjectPath, iface, member string, sig Signa
 	}
 }
 
-// readLoop takes messages until the connection ends or one does not
-// decode. A reply goes to its caller (a late one is dropped); a signal goes
+// readLoop takes messages until the connection ends. A message that is too
+// long or does not decode is skipped, so a bus peer that sends one (any
+// peer may send this process a signal) cannot end the stack; a caller
+// whose reply was skipped times out. A reply goes to its caller (a late one is dropped); a signal goes
 // to the callback; a method call to this process is not answered, since it
 // serves nothing on the bus.
 func (b *Bus) readLoop(r *bufio.Reader) {
 	for {
 		m, err := readMessage(r)
+		if errors.Is(err, errSkipped) {
+			continue
+		}
 		if err != nil {
 			b.end(err)
 			return
@@ -162,16 +167,29 @@ func readMessage(r io.Reader) (*Message, error) {
 		return nil, err
 	}
 	n, err := frameLen(h[:])
+	if errors.Is(err, errTooLong) {
+		if _, err := io.CopyN(io.Discard, r, int64(n-16)); err != nil {
+			return nil, err
+		}
+		return nil, errSkipped
+	}
 	if err != nil {
-		return nil, err
+		return nil, err // no byte order: the stream is lost
 	}
 	b := make([]byte, n)
 	copy(b, h[:])
 	if _, err := io.ReadFull(r, b[16:]); err != nil {
 		return nil, err
 	}
-	return Decode(b)
+	m, err := Decode(b)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errSkipped, err)
+	}
+	return m, nil
 }
+
+// errSkipped is a whole message read and dropped.
+var errSkipped = errors.New("ble: message skipped")
 
 func (b *Bus) end(err error) {
 	b.mu.Lock()

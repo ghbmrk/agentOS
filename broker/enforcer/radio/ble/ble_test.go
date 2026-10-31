@@ -221,6 +221,7 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 		reply := &Message{Type: typeReturn, ReplySerial: m.Serial, Destination: m.Sender}
 		fail := func(name string) { reply.Type, reply.ErrorName = typeError, name }
 		var after []*Message
+		var rawAfter [][]byte // frames no encoder makes: any bus peer may send them
 		switch {
 		case driver && m.Destination == busDriver:
 			reply.Sender = busDriver
@@ -252,6 +253,9 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 				f.mu.Lock()
 				f.connected = m.Member == "Connect"
 				f.mu.Unlock()
+				if driver && m.Member == "Connect" {
+					rawAfter = [][]byte{oversized(), malformed()}
+				}
 			case ifaceProps + ".Get":
 				f.mu.Lock()
 				reply.Sig, reply.Body = "v", []any{Variant{Sig: "b", Value: f.connected}}
@@ -280,6 +284,11 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 			fail("org.freedesktop.DBus.Error.ServiceUnknown")
 		}
 		f.send(c, reply)
+		for _, b := range rawAfter {
+			f.wmu.Lock()
+			c.Write(b)
+			f.wmu.Unlock()
+		}
 		for _, s := range after {
 			s.Destination = m.Sender
 			if !driver {
@@ -287,6 +296,69 @@ func (f *fakeBluez) loop(c net.Conn, r *bufio.Reader, driver bool) {
 			}
 			f.send(c, s)
 		}
+	}
+}
+
+// oversized is a signal frame one byte past MaxMessage, as a stock bus
+// (32 MiB limit) delivers from any peer.
+func oversized() []byte {
+	b := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
+	le.PutUint32(b[4:], MaxMessage-16+1)
+	return append(b, make([]byte, MaxMessage-16+1)...)
+}
+
+// malformed is a whole frame that does not decode: a signal whose bool is 2.
+func malformed() []byte {
+	b, _ := (&Message{Type: typeSignal, Serial: 1, Path: "/", Interface: "a.b", Member: "C", Sig: "b", Body: []any{true}}).Encode()
+	b[len(b)-4] = 2
+	return b
+}
+
+// TestReadSkipsWhatDoesNotDecode: a frame too long or one that does not
+// decode is read whole and skipped, so the next message still arrives; a
+// frame with no byte order loses the stream and ends the read.
+func TestReadSkipsWhatDoesNotDecode(t *testing.T) {
+	good := mustEncode(t, propsChanged(2, bluezName, measurePath, []byte{1}))
+	r := bytes.NewReader(slices.Concat(oversized(), malformed(), good, []byte("x234567890123456")))
+	for i, want := range []error{errSkipped, errSkipped, nil} {
+		m, err := readMessage(r)
+		if !errors.Is(err, want) || (want == nil && m.Serial != 2) {
+			t.Fatalf("message %d: %v, %+v", i, err, m)
+		}
+	}
+	if _, err := readMessage(r); err == nil || errors.Is(err, errSkipped) {
+		t.Fatalf("no byte order: %v", err)
+	}
+	short := oversized()[:MaxMessage-4]
+	if _, err := readMessage(bytes.NewReader(short)); err == nil || errors.Is(err, errSkipped) {
+		t.Fatalf("a long frame cut short: %v", err)
+	}
+}
+
+// TestDeviceDropForgets: BlueZ reporting the device's link down forgets its
+// characteristic paths and subscriptions, as a disconnect op does; the same
+// signal from another peer, or for another object, changes nothing.
+func TestDeviceDropForgets(t *testing.T) {
+	s := newFuzzStack()
+	s.chars[[2]string{"scale", "measure"}] = measurePath
+	drop := func(sender string, path ObjectPath, connected bool) *Message {
+		return &Message{Type: typeSignal, Serial: 1, Sender: sender, Path: path, Interface: ifaceProps,
+			Member: "PropertiesChanged", Sig: "sa{sv}as", Body: []any{ifaceDevice,
+				[]any{Entry{Key: "Connected", Value: Variant{Sig: "b", Value: connected}}}, []any{}}}
+	}
+	for _, m := range []*Message{
+		drop(":1.9", scalePath, false),
+		drop(bluezName, "/org/bluez/hci0/dev_11_22_33_44_55_66", false),
+		drop(bluezName, scalePath, true),
+	} {
+		s.signal(m)
+		if len(s.chars) != 1 || len(s.subs) != 1 {
+			t.Fatalf("%s %s: forgot the scale", m.Sender, m.Path)
+		}
+	}
+	s.signal(drop(bluezName, scalePath, false))
+	if len(s.chars) != 0 || len(s.subs) != 0 {
+		t.Errorf("the link dropped and the stack kept %v %v", s.chars, s.subs)
 	}
 }
 
@@ -310,7 +382,7 @@ func managed(dev ObjectPath, chars map[string]string) []any {
 }
 
 func newFuzzStack() *stack {
-	s := &stack{devices: map[string]Device{}, log: io.Discard, owner: bluezName,
+	s := &stack{devices: map[string]Device{}, byPath: map[ObjectPath]string{scalePath: "scale"}, log: io.Discard, owner: bluezName,
 		chars: map[[2]string]ObjectPath{}, subs: map[ObjectPath]sub{measurePath: {"scale", "measure"}}}
 	s.srv = radio.NewServer(radio.StackBLE, nopConn{})
 	s.bus = &Bus{conn: nopNetConn{}, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
@@ -567,6 +639,7 @@ func TestConfigRefusesMalformed(t *testing.T) {
 		strings.Replace(good, `"scale"`, `"sc\u007fale"`, 1),
 		strings.Replace(good, `"scale"`, `"`+strings.Repeat("s", radio.MaxName+1)+`"`, 1),
 		good + strings.Repeat(" ", maxConfig+1-len(good)),
+		strings.Replace(good, controlUUID, testUUID, 1), // two names, one UUID
 	} {
 		if _, err := ParseConfig(arg); err == nil {
 			t.Errorf("accepted %.80s", arg)
