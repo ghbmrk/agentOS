@@ -105,7 +105,7 @@ const (
 	lostFiledText    = "Your request for a new card is filed. When I restart I make the new card, and this page shows it. Restart me now, or I carry it out at my next restart within a week."
 	lostRestartText  = "I restart as soon as no call or task is running; once a month a check of my software runs first and takes a few minutes more. Then open this page again to see your new card."
 	lostWithdrawText = "Your request for a new card is withdrawn: I make no new card at my next restart."
-	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its passphrase and recovery key are the only ones that open my store, and the backups I take from now on open with its recovery key. Your old card's passphrase and recovery key no longer open my store: so if you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place, and destroy the old card if you find it."
+	lostDoneText     = "Done. Your new card is confirmed and I keep no copy of it. Keep it safe: its passphrase and recovery key are the only ones that open my store, and the backups I take from now on open with its recovery key. Your old card's passphrase and recovery key no longer open my store. If you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place. If you find the old card, destroy it."
 	lostNoTapText    = "Nothing was filed. Tap again with one of your hardware keys."
 	lostNoShowText   = "Nothing is shown. Tap again with one of your hardware keys."
 	lostPhoneText    = "That tap was a phone passkey's. Only one of your hardware keys can show your new card. Tap again, and choose your hardware key."

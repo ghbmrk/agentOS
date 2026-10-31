@@ -207,7 +207,7 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	if !strings.Contains(p, lostDoneText) {
 		t.Fatal("no done line")
 	}
-	for _, s := range []string{"Your old card's passphrase and recovery key no longer open my store", "put the new card's passphrase there in its place"} {
+	for _, s := range []string{"Your old card's passphrase and recovery key no longer open my store. ", "If you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place. ", "If you find the old card, destroy it."} {
 		if !strings.Contains(lostDoneText, s) {
 			t.Errorf("the done line lacks %q", s)
 		}
