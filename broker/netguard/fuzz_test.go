@@ -306,16 +306,19 @@ var fuzzSeeds = [][]byte{
 }
 
 // Seeds the controls drive: a router answers once; the gateway moves during
-// both requests of a refresh; a refresh is answered.
+// both requests of a refresh; a refresh is answered; a router answers, then
+// seven others do, and on the return its router is silent, so its address
+// is still within the bound and still refused.
 var (
 	seedAnswered   = []byte{2, 0, 1, 2, 0, 1, 1, 0}
 	seedMovedTwice = []byte{2, 0, 1, 2, 0, 1, 2, 1, 2, 1, 3}
 	seedRefreshed  = []byte{2, 0, 1, 2, 0, 1, 2, 0}
+	seedBoundEdge  = []byte{9, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 6, 2, 0, 0, 1, 2, 0, 0, 2, 2, 0, 0, 3, 2, 0, 0, 4, 2, 0, 0, 5, 2, 0, 0, 7, 2, 0, 0, 8, 2, 0, 0, 6, 2, 3}
 )
 
 // controlSeeds go in both targets' corpora too, so the fuzz run itself, not
 // only the controls, drives a refresh across two moves (FUZZ-1).
-var controlSeeds = [][]byte{seedAnswered, seedMovedTwice, seedRefreshed}
+var controlSeeds = [][]byte{seedAnswered, seedMovedTwice, seedRefreshed, seedBoundEdge}
 
 // FuzzSourcesRead (FUZZ-1): over any sequence of router moves, before or
 // after a router's answer, Read and ReadLocal return only an external
@@ -351,7 +354,11 @@ func fuzzSourcesRead(t fuzzT, b []byte, pl fuzzPlant) {
 
 // FuzzGatewayPolicy (FUZZ-1): over any sequence of router moves, quick
 // reads and full refreshes, while the policy's learned gateway is one whose
-// router's external address was filed, that address is denied.
+// router's external address is filed, that address is denied. Filed models
+// Sources' bound on its own: a read that returns an external address files
+// it under that gateway as the most recent, and a gateway pushed past the
+// maxGatewayExternals most recent is forgotten, so its silent router is
+// then a never-seen one (N9; #2641, #4208).
 func FuzzGatewayPolicy(f *testing.F) {
 	for _, b := range append(fuzzSeeds, controlSeeds...) {
 		f.Add(b)
@@ -363,11 +370,21 @@ func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 	in := &fuzzBytes{b: b}
 	h := newFuzzHost(in)
 	s := h.sources()
-	filed := map[gatewayKey]netip.Addr{}
+	type filing struct {
+		key gatewayKey
+		ext netip.Addr
+	}
+	var filed []filing // most recent first
 	read := func() (Network, error) {
 		m, err := s.Read()
-		if m.External.IsValid() {
-			filed[keyOf(m)] = m.External
+		if err == nil && m.External.IsValid() {
+			out := []filing{{keyOf(m), m.External}}
+			for _, f := range filed {
+				if f.key != keyOf(m) && len(out) < maxGatewayExternals {
+					out = append(out, f)
+				}
+			}
+			filed = out
 		}
 		return m, err
 	}
@@ -394,8 +411,13 @@ func fuzzGatewayPolicy(t fuzzT, b []byte, pl fuzzPlant) {
 		p.mu.RLock()
 		k := keyOf(p.net)
 		p.mu.RUnlock()
-		ext, ok := filed[k]
-		if !k.gw.IsValid() || !ok {
+		var ext netip.Addr
+		for _, f := range filed {
+			if f.key == k {
+				ext = f.ext
+			}
+		}
+		if !k.gw.IsValid() || !ext.IsValid() {
 			continue
 		}
 		if err := pl.doCheck(p, ctx, ext, 443, "tcp"); !errors.Is(err, ErrDenied) {
@@ -686,6 +708,7 @@ func TestFuzzGatewayPolicyReportsAPlantedDefect(t *testing.T) {
 	}{
 		"swallowed second move": {seedMovedTwice, fuzzPlant{refresh: swallow}, "ErrGatewayMoved only when"},
 		"allowed external":      {seedRefreshed, fuzzPlant{check: allowAll}, "its router's external"},
+		"allowed at the bound":  {seedBoundEdge, fuzzPlant{check: allowAll}, "after a refresh on gateway"},
 	} {
 		var rec recorder
 		if !rec.reports(func(ft fuzzT) { fuzzGatewayPolicy(ft, c.in, c.pl) }, c.want) {
