@@ -3,6 +3,7 @@ package wire
 // REQ: NET-2, NET-4
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/hostiletext"
@@ -23,9 +24,10 @@ func TestUnknownIsReserved(t *testing.T) {
 	for s, want := range map[string]bool{
 		"unknown": false, "Unknown": false, "UNKNOWN": false,
 		"unknown-plug": true, "unknowns": true, "unknow": true,
+		strings.Repeat("a", MaxName): true, strings.Repeat("a", MaxName+1): false,
 	} {
 		if Name(s) != want {
-			t.Errorf("Name(%q) = %v, want %v", s, !want, want)
+			t.Errorf("Name(%.20q, %d bytes) = %v, want %v", s, len(s), !want, want)
 		}
 	}
 	if _, err := Encode(ToEnforcer, Command{ID: 1, Device: "unknown", Verb: VerbOn}); err == nil {
