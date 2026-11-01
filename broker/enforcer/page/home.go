@@ -98,14 +98,24 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	devs := plain(cur).Devices
+	keep, recovery := false, ""
+	if s.cfg.Enrol != nil {
+		keep = !s.cfg.Enrol.Kept()
+		if due, ok := s.cfg.Enrol.Recovery(); ok {
+			recovery = s.when(due.UnixMilli())
+		}
+	}
 	s.render(w, "home.html", map[string]any{
-		"Name":    s.cfg.Name,
-		"Version": cur.Version,
-		"Pending": pend,
-		"Sync":    sync,
-		"Channel": channel,
-		"Devices": devs,
-		"Limits":  Limits,
+		"Keep":     keep,
+		"Recovery": recovery,
+		"Enrol":    s.cfg.Enrol != nil,
+		"Name":     s.cfg.Name,
+		"Version":  cur.Version,
+		"Pending":  pend,
+		"Sync":     sync,
+		"Channel":  channel,
+		"Devices":  devs,
+		"Limits":   Limits,
 	})
 }
 

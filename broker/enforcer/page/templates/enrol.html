@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home enforcer: {{.Name}}</title>
+<link rel="stylesheet" href="/page.css">
+<script src="/page.js" defer></script>
+</head>
+<body>
+<h1>Home enforcer</h1>
+{{if or (eq .Phase "factory") (eq .Phase "reset")}}
+{{if eq .Phase "reset"}}<p class="warn">This enforcer was factory reset. Your rules still apply, but nothing can be loosened until you enrol a passkey.</p>{{end}}
+<h2>Enrol your passkey</h2>
+<p>This passkey approves every change to your home network from now on. Only this page, at home, ever asks for it.</p>
+{{if or .CA .CoreCA}}
+<p>First install the certificates, then come back here:</p>
+<ul>
+{{if .CA}}<li><a href="/enrol/enforcer.crt">This enforcer's certificate</a></li>{{end}}
+{{if .CoreCA}}<li><a href="/enrol/core.crt">agentOS's certificate</a>: check that the fingerprint your phone shows matches the one on your Owner Card. If it does not, stop and install nothing.</li>{{end}}
+</ul>
+{{end}}
+<form id="enrol" data-rp="{{.Name}}">
+<label>Code printed inside the enforcer's case<br><input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+<p><button type="submit">Enrol a passkey</button></p>
+</form>
+{{else}}
+<h2>Lost your passkey?</h2>
+{{if .Due}}
+<p class="warn">A new passkey is already waiting. It replaces the current one at {{.Due}} unless the current passkey cancels it on the <a href="/">home page</a>.</p>
+{{else}}
+<p>Type the recovery code you saved when you enrolled. A new passkey replaces your current one 10 minutes later. You get a text now, and the home page shows the change until then, so whoever holds the current passkey can cancel it.</p>
+<form id="enrol" data-rp="{{.Name}}">
+<label>Recovery code<br><input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+<p><button type="submit">Enrol a new passkey</button></p>
+</form>
+{{end}}
+<h2>Factory reset</h2>
+<p>If you lost both your passkey and your recovery code, reset with the code printed inside the enforcer's case. Your rules keep applying, your Wi-Fi stays as it is, and nothing can be loosened until you enrol a new passkey here with the same code.</p>
+<form id="reset">
+<label>Code printed inside the enforcer's case<br><input name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+<p><button type="submit">Reset</button></p>
+</form>
+{{end}}
+<div id="shown" hidden>
+<h2>Your recovery code</h2>
+<p>Write it down and keep it somewhere safe at home. It is shown only now. It can replace your passkey if you lose it.</p>
+<p class="code" id="recovery"></p>
+<p id="due"></p>
+<div id="network" hidden>
+<h2>Your Owner Wi-Fi</h2>
+<p>The setup Wi-Fi is gone. Save this network now: it is the only one that reaches this page and agentOS's. It is shown only now.</p>
+<p>Network: <span id="ssid"></span><br>Password: <span class="code" id="password"></span></p>
+<svg id="qr" class="qr" role="img" aria-label="Wi-Fi QR code"></svg>
+<label>To confirm you saved it, type the password's last four characters<br><input id="last4" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>
+<p id="joined" hidden>Now join that network, then open this page again.</p>
+</div>
+</div>
+<p id="result" role="status"></p>
+</body>
+</html>
