@@ -61,6 +61,17 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	for _, p := range pairsMinus(old.Pairs, next.Pairs) {
 		add("Stop %s and %s talking to each other directly.", p.A, p.B)
 	}
+	// NET-3 Casting (#4401): the relay passes a Devices-network device's
+	// announcements only for the names it pins, so a pair with none is
+	// signed knowing nothing on that side will be found. Said once: when
+	// the pair, the last pin's removal or the move onto Devices is signed.
+	for _, p := range next.Pairs {
+		for _, s := range [][2]string{{p.A, p.B}, {p.B, p.A}} {
+			if unpinned(next, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, s[0])) {
+				add("%s will not show up on %s for casting or printing: it has no mDNS names pinned, so none of its announcements cross the pair.", s[0], s[1])
+			}
+		}
+	}
 	for _, r := range next.Standing {
 		i := slices.IndexFunc(old.Standing, func(o policy.StandingRule) bool { return o.ID == r.ID })
 		switch {
@@ -222,6 +233,13 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	}
 	describePorts(o, d, add)
 	describeMDNS(o, d, add)
+}
+
+// unpinned: id is a Devices-network device in d that pins no mDNS name,
+// so it announces nothing across its pairs (nft.Announces).
+func unpinned(d policy.Document, id string) bool {
+	v := d.Device(id)
+	return v != nil && v.Network == policy.NetDevices && len(v.MDNS) == 0
 }
 
 // describeMDNS is each mDNS name d pins or unpins against o (NET-3
