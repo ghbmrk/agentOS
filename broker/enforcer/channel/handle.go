@@ -252,8 +252,8 @@ func (e Event) render(show func(string) string) string {
 // over its rate trips the core (count). While a trip is in force every
 // request is answered Paused, logged and never tripped again for being
 // paused; at the Reflashed stage a traffic summary (summary set) acts
-// again and the rest wait for the passkey restore (D-260, D-262). The
-// refusal pause holds everything until the owner resumes it.
+// again and the rest wait for the passkey restore (D-260, D-262). Past the
+// refusal rate every request waits, RateLimited, until it refills.
 func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
 	if !c.count(k) {
 		return wire.Paused, "burst of " + string(k) + ": tripped the core"
@@ -270,16 +270,21 @@ func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wi
 		}
 		return wire.Paused, "the core tripped: paused until the owner's passkey restore"
 	}
-	if c.paused {
-		return wire.Paused, "the channel is paused until the owner resumes it on the page"
+	if !c.buckets[KindRefused].has(c.cfg.Now()) {
+		return wire.RateLimited, refusalWait
 	}
 	return act()
 }
 
+// refusalWait is the reason a request past the refusal rate is refused.
+// Counting it takes nothing from the empty bucket, so the rate refills
+// while the core keeps asking.
+const refusalWait = "too many refusals: refused until the refusal rate refills"
+
 // count takes one from k's bucket. An empty bucket is a burst past the
-// rate: a core trip, or for KindRefused a pause until the owner resumes
-// it. It reports whether the request is inside the rate. The caller holds
-// c.mu.
+// rate, a core trip, except KindRefused's, which only makes requests wait
+// (gate). It reports whether the request is inside the rate. The caller
+// holds c.mu.
 func (c *Channel) count(k Kind) bool {
 	now := c.cfg.Now()
 	if c.buckets[k].take(now) {
@@ -290,11 +295,6 @@ func (c *Channel) count(k Kind) bool {
 		c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(k), Reason: reason})
 		c.queueTrip(reason)
 		return false
-	}
-	if !c.paused {
-		c.paused = true
-		c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of refusals: paused until the owner resumes it on the page"})
-		c.queued = append(c.queued, c.cfg.Alerts.Paused)
 	}
 	return false
 }

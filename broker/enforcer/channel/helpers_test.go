@@ -139,9 +139,8 @@ func (r *radio) calls() []string {
 }
 
 type alerts struct {
-	mu     sync.Mutex
-	off    []string
-	paused int
+	mu  sync.Mutex
+	off []string
 	// reenter, if set, runs inside each call, as slice h's alerts will
 	// when they send a text back through the channel.
 	reenter func()
@@ -150,16 +149,6 @@ type alerts struct {
 func (a *alerts) SafetyOff(device string, v wire.Verb) {
 	a.mu.Lock()
 	a.off = append(a.off, device+" "+verbWords[v])
-	f := a.reenter
-	a.mu.Unlock()
-	if f != nil {
-		f()
-	}
-}
-
-func (a *alerts) Paused() {
-	a.mu.Lock()
-	a.paused++
 	f := a.reenter
 	a.mu.Unlock()
 	if f != nil {

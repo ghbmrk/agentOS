@@ -21,10 +21,9 @@
 // carries the heartbeat, still connects; at the "core reflashed" step the
 // traffic summaries flow again, and everything else waits for the owner's
 // passkey restore (D-260, D-262). Refusals, which the kernel cannot
-// foresee, have their own rate, and a burst of them pauses the channel
-// until the owner resumes it on the enforcer's page (Resume), with no trip;
-// nothing on the channel resumes it. A failed hello is dropped and never
-// pauses or trips it. Every request is logged, and a channel command that
+// foresee, have their own rate with no trip: past it, every request is
+// refused RateLimited until the rate refills by itself, with no owner
+// step. A failed hello is dropped and never trips it. Every request is logged, and a channel command that
 // turns a heater off or shuts a valve texts the owner.
 //
 // It is enforcer code: it imports the standard library, broker/kernel/key
@@ -67,11 +66,9 @@ type Heads interface {
 }
 
 // Alerts is the enforcer's texts and light (slice h). The channel calls it
-// when a command turned a heater off or shut a valve, and when a burst of
-// refusals paused the channel.
+// when a command turned a heater off or shut a valve.
 type Alerts interface {
 	SafetyOff(device string, v wire.Verb)
-	Paused()
 }
 
 // Stage is how far a core trip has lifted (KRN-12 Response, D-260, D-262).
@@ -134,9 +131,6 @@ type Config struct {
 	Now func() time.Time
 	// Limits overrides DefaultLimits per kind.
 	Limits map[Kind]Limit
-	// Paused is the refusal pause the daemon kept across a restart; the
-	// trip's stage is Cut's.
-	Paused bool
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
@@ -169,12 +163,11 @@ var (
 const MaxOutstanding = 64
 
 // Channel is the enforcer's end. One Channel serves every connection the
-// daemon accepts from the core, so a pause outlives a reconnect.
+// daemon accepts from the core, so its rates outlive a reconnect.
 type Channel struct {
 	cfg Config
 
 	mu          sync.Mutex
-	paused      bool
 	buckets     map[Kind]*bucket
 	outstanding map[uint64]bool
 	session     *session
@@ -201,7 +194,7 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	c := &Channel{cfg: cfg, paused: cfg.Paused, buckets: map[Kind]*bucket{}, outstanding: map[uint64]bool{}}
+	c := &Channel{cfg: cfg, buckets: map[Kind]*bucket{}, outstanding: map[uint64]bool{}}
 	now := cfg.Now()
 	for k, l := range DefaultLimits {
 		if o, ok := cfg.Limits[k]; ok {
@@ -210,30 +203,6 @@ func New(cfg Config) (*Channel, error) {
 		c.buckets[k] = newBucket(l, now)
 	}
 	return c, nil
-}
-
-// Paused reports whether a burst of refusals paused the channel.
-func (c *Channel) Paused() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.paused
-}
-
-// Resume unpauses the channel and refills every bucket. Only the
-// enforcer's page calls it, after the owner's passkey at home (NET-6,
-// slice b); no message on the channel reaches it.
-func (c *Channel) Resume() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.paused {
-		return
-	}
-	c.paused = false
-	now := c.cfg.Now()
-	for _, b := range c.buckets {
-		b.fill(now)
-	}
-	c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "resumed by the owner on the page"})
 }
 
 // Serve runs one connection from the core: rw is the TLS stream the daemon
@@ -258,7 +227,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if c.cfg.Revoked(c.cfg.Core) {
 		return c.preAuth("the core's channel key is revoked", ErrRevoked)
 	}
-	// Only the authenticated core counts toward a pause (#3755).
+	// Only the authenticated core counts toward a trip (#3755).
 	c.mu.Lock()
 	c.count(KindHello)
 	c.release()
@@ -347,8 +316,8 @@ func (c *Channel) queueTrip(reason string) {
 
 // preAuth logs and drops a connection that failed before the core
 // authenticated, and returns err. It counts in KindPreAuth's bucket, which
-// never pauses: anyone who reaches the port can fail a hello, and a pause
-// would shut the real core out until the owner resumes it at home (#3755).
+// never trips: anyone who reaches the port can fail a hello, and a trip
+// would cut the real core until the owner's restore at home (#3755).
 // Past the bucket one line says the drops go unlogged, so a flood cannot
 // fill the log; the next line logged after the bucket refills ends that.
 func (c *Channel) preAuth(reason string, err error) error {
@@ -360,7 +329,7 @@ func (c *Channel) preAuth(reason string, err error) error {
 		c.cfg.Log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
 		c.preAuthQuiet = true
-		c.cfg.Log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the channel is not paused"})
+		c.cfg.Log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
 	}
 	return err
 }

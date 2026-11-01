@@ -256,9 +256,6 @@ func TestBurstTrips(t *testing.T) {
 				}
 				cl.do(flood(id))
 			}
-			if r.ch.Paused() || r.alerts.paused != 0 {
-				t.Error("a burst past the rate paused the channel instead of only tripping")
-			}
 			n := len(r.radio.calls())
 			r.advance(24 * time.Hour)
 			cl = r.dial()
@@ -295,49 +292,50 @@ func TestBurstTrips(t *testing.T) {
 		cl.do(cmd(uint64(i), "lamp", wire.VerbOn))
 		r.advance(2 * time.Second)
 	}
-	if r.cut.trips() != 0 || r.ch.Paused() {
-		t.Error("an honest pace tripped or paused the channel")
+	if r.cut.trips() != 0 {
+		t.Error("an honest pace tripped the core")
 	}
 }
 
-// TestRefusalBurstPauses (NET-2 Channel): refusals have their own rate,
+// TestRefusalBurstWaits (NET-2 Channel): refusals have their own rate,
 // which the kernel cannot check before sending, since it cannot know a
-// request will be refused; a burst of them pauses the whole channel with
-// no trip, and texts the owner. While paused nothing acts; only Resume,
-// which the page calls after the owner's passkey, opens it again.
-func TestRefusalBurstPauses(t *testing.T) {
+// request will be refused. Past it every request is refused RateLimited
+// with no trip, that answer is not itself counted, and the rate refills by
+// itself with no owner step, however hard the core keeps asking. Revert
+// mutant: the bucket check removed (refusals unbounded).
+func TestRefusalBurstWaits(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
 	var id uint64
-	for !r.ch.Paused() {
+	for {
 		id++
 		if id > 1000 {
-			t.Fatal("never paused")
+			t.Fatal("refusals never limited")
 		}
-		cl.do(cmd(id, "heater", wire.VerbOn))
+		if cl.code(cmd(id, "heater", wire.VerbOn)) == wire.RateLimited {
+			break
+		}
 	}
-	if r.alerts.paused != 1 || r.cut.trips() != 0 {
-		t.Errorf("paused alerts %d, trips %d, want 1 and 0", r.alerts.paused, r.cut.trips())
+	if int(id) != DefaultLimits[KindRefused].Burst+1 {
+		t.Errorf("limited after %d refusals, want %d", id-1, DefaultLimits[KindRefused].Burst)
 	}
 	n := len(r.radio.calls())
-	r.advance(24 * time.Hour)
-	cl = r.dial()
-	for _, m := range []wire.Msg{
-		cmd(id+1, "lamp", wire.VerbOn),
-		wire.Tighten{ID: id + 3, Kind: wire.CutVendorCloud, Device: "tv"},
-		wire.Read{ID: id + 4, What: wire.ReadExport},
-		wire.Head{ID: id + 5},
-	} {
-		if c := cl.code(m); c != wire.Paused {
-			t.Errorf("%T while paused: %v", m, c)
+	every := DefaultLimits[KindRefused].Every
+	// The core keeps asking, an honest command every few seconds, for
+	// under one refill: each waits.
+	for range 10 {
+		id++
+		if c := cl.code(cmd(id, "lamp", wire.VerbOn)); c != wire.RateLimited {
+			t.Fatalf("past the refusal rate: %v", c)
 		}
+		r.advance(every / 20)
 	}
-	if len(r.radio.calls()) != n || !r.eng.Current().Device("tv").VendorCloud {
-		t.Error("a request acted while paused")
+	if len(r.radio.calls()) != n || r.cut.trips() != 0 {
+		t.Fatal("a request acted, or the core tripped, past the refusal rate")
 	}
-	r.ch.Resume()
-	if c := cl.code(cmd(id+6, "lamp", wire.VerbOff)); c != wire.OK {
-		t.Errorf("after resume: %v", c)
+	r.advance(every)
+	if c := cl.code(cmd(id+1, "lamp", wire.VerbOff)); c != wire.OK {
+		t.Errorf("after the refusal rate refilled: %v", c)
 	}
 }
 
@@ -378,8 +376,8 @@ func TestPreAuthNeverPauses(t *testing.T) {
 	r.mu.Lock()
 	r.revoked = false
 	r.mu.Unlock()
-	if r.ch.Paused() || r.alerts.paused != 0 || r.cut.trips() != 0 {
-		t.Fatal("failed hellos paused the channel or tripped the core")
+	if r.cut.trips() != 0 {
+		t.Fatal("failed hellos tripped the core")
 	}
 	var logged int
 	for _, e := range r.events() {
@@ -469,7 +467,6 @@ func TestHandshake(t *testing.T) {
 	if !cl.closed(frameBytes(cmdFrame.Type, cmdFrame.Payload)) {
 		t.Error("a revoked key's open connection kept going")
 	}
-	r.ch.Resume()
 	cl = r.connect()
 	if !cl.closed(helloFrame(t, r)) {
 		t.Error("a revoked key's hello was accepted")
@@ -572,13 +569,12 @@ func TestSinksRequired(t *testing.T) {
 
 // TestAlertsMayUseChannel (NET-2 Texts and calls): the alerts sink runs
 // after the channel lets go of its lock, so slice h can send its text back
-// through the channel from inside SafetyOff or Paused without a deadlock.
+// through the channel from inside SafetyOff without a deadlock.
 // Revert mutant: calling Alerts under c.mu (Security finding on #3750).
 func TestAlertsMayUseChannel(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
 	r.alerts.reenter = func() {
-		r.ch.Paused()
 		r.ch.Alert(wire.Alert{Kind: wire.AlertText, Text: "The heater in the hall was turned off."})
 	}
 	cl.send(cmd(1, "heater", wire.VerbOff))
@@ -587,16 +583,6 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
 		t.Fatalf("result: %+v", m)
-	}
-
-	r.alerts.reenter = func() { r.ch.Paused() }
-	var id uint64 = 1
-	for !r.ch.Paused() {
-		id++
-		cl.do(cmd(id, "heater", wire.VerbOn)) // refused, until the refusals pause it
-	}
-	if r.alerts.paused != 1 {
-		t.Errorf("paused alerts %d", r.alerts.paused)
 	}
 }
 
@@ -758,22 +744,18 @@ func TestOnePolicyCopyPerRequest(t *testing.T) {
 		}
 	}
 	check("open")
-	r.ch.mu.Lock()
-	r.ch.paused = true
-	r.ch.mu.Unlock()
-	check("paused")
+	r.cut.set(Tripped)
+	check("tripped")
 }
 
-// TestPausedLogsNames (NET-2 Channel, #4066): a request the paused channel
-// refuses is still logged by the names the signed policy holds, a pair's
+// TestPausedLogsNames (NET-2 Channel, #4066): a request the tripped channel
+// pauses is still logged by the names the signed policy holds, a pair's
 // members each in its own field and an unsigned name only as its hash.
 // Revert mutant: names set after gate, or blanked when paused.
 func TestPausedLogsNames(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
-	r.ch.mu.Lock()
-	r.ch.paused = true
-	r.ch.mu.Unlock()
+	r.cut.set(Tripped)
 	n := len(r.events())
 	cl.code(cmd(1, "lamp", wire.VerbOn))
 	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: "heater"})
@@ -827,8 +809,8 @@ func TestOwnerLine(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("lines\n%v\nwant\n%v", got, want)
 	}
-	if got, want := (Event{At: start, Kind: KindPause, Reason: "resumed by the owner on the page"}).Line(), "pause: resumed by the owner on the page"; got != want {
-		t.Errorf("pause line %q, want %q", got, want)
+	if got, want := (Event{At: start, Kind: KindTrip, What: string(KindCommand), Reason: "burst of command past the rate: tripped the core"}).Line(), "trip command: burst of command past the rate: tripped the core"; got != want {
+		t.Errorf("trip line %q, want %q", got, want)
 	}
 }
 
@@ -862,7 +844,7 @@ func TestReservedWord(t *testing.T) {
 // core's hello, which carries the heartbeat, still connects. At the "core
 // reflashed" step only traffic summaries act again; the passkey restore
 // opens the rest. Revert mutants: Reflashed letting a command through; a
-// Paused answer counted as a refusal, which pauses the reopened summaries.
+// Paused answer counted as a refusal, which holds the reopened summaries.
 func TestTripPausesUntilRestore(t *testing.T) {
 	r := newRig(t, nil)
 	r.cut.set(Tripped)
@@ -919,12 +901,22 @@ func TestTripPausesUntilRestore(t *testing.T) {
 		t.Fatal("a request acted while tripped")
 	}
 	r.cut.set(Reflashed)
+	// Straight after the step, a kernel's run of Paused answers past the
+	// refusal bucket leaves the reopened summaries answering.
+	for i := range 2 * DefaultLimits[KindRefused].Burst {
+		if c := cl.code(cmd(uint64(2000+i), "lamp", wire.VerbOn)); c != wire.Paused {
+			t.Fatalf("reflashed: %v", c)
+		}
+	}
+	if c := cl.code(wire.Read{ID: 2100, What: wire.ReadTraffic, Device: "lamp"}); c != wire.OK {
+		t.Fatalf("reflashed: a summary after a run of Paused answers: %v", c)
+	}
 	check("reflashed", 12, map[string]wire.Code{"summary": wire.OK})
 	r.cut.set(Open)
 	check("restored", 1, map[string]wire.Code{"command": wire.OK, "tighten": wire.OK, "state": wire.OK, "export": wire.OK,
 		"fingerprint": wire.OK, "summary": wire.OK, "announce": wire.OK, "head": wire.OK, "entry": wire.OK})
-	if r.cut.trips() != 0 || r.ch.Paused() {
-		t.Errorf("trips %d, paused %v: a paused request tripped or paused the channel", r.cut.trips(), r.ch.Paused())
+	if r.cut.trips() != 0 {
+		t.Errorf("%d trips: a paused request tripped the core", r.cut.trips())
 	}
 }
 
