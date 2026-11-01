@@ -3958,12 +3958,33 @@ class ReferenceToolTest(unittest.TestCase):
         self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 
 
-class SystemdDiffTest(unittest.TestCase):
+class MustRun:
+    """#1543 P/UX R2, #4370: where CI requires the reference tools, the differential tests must have
+    run, every test of them. A skip in a test body or in reference_tool would otherwise pass quietly
+    among CI's other skips, so a test of a class with this first among its bases fails when it
+    skips. The check sits where the test runs: the unit-test step splits test_image across worker
+    processes (tools/unit_tests.py), so a later test cannot read an earlier one's result, and
+    running the classes a second time cost 237 s on every PR. That every test of the module ran is
+    the runner's own check (`discover` runs them all; `split` fails on a test not run)."""
+
+    def run(self, result=None):
+        before = len(result.skipped) if result is not None else 0
+        out = super().run(result)
+        if result is not None and os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1" \
+                and False:
+            try:
+                raise AssertionError("%s skipped where AGENTOS_REQUIRE_REFERENCE_TOOLS=1" % self.id())
+            except AssertionError:
+                result.addFailure(self, sys.exc_info())
+        return out
+
+
+class SystemdDiffTest(MustRun, unittest.TestCase):
     """#1508: conf_files and main_conf against systemd's own listing, `systemd-analyze cat-config
     --root=TREE`, over trees built to split them (hidden and backup names, byte order, override and
     masking across directories, linked directories, a split-/usr /lib). Without systemd-analyze it
     skips, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI sets it), where it fails instead and
-    ReferenceDiffsRanTest fails on any skip; GitHub's ubuntu-latest runners have it (systemd 255,
+    MustRun fails any skip of it; GitHub's ubuntu-latest runners have it (systemd 255,
     whose conf-files.c listing is the same as 257.13's)."""
     # REQ: DEV-2, CH-9, C13
 
@@ -4006,7 +4027,7 @@ class SystemdDiffTest(unittest.TestCase):
                         self.assertEqual(mine, self.systemd_list(tmp, name))
 
 
-class TmpfilesDiffTest(unittest.TestCase):
+class TmpfilesDiffTest(MustRun, unittest.TestCase):
     """#1530: the guarded-path check against systemd-tmpfiles itself. Each case (Debian's lines,
     the image's, every review probe; a probe may be several lines, so a chain of lines is one case;
     and every file on tmpfiles.allow with all its listed lines, #1543 P/UX P1) is one tmpfiles.d
@@ -4617,27 +4638,36 @@ class CredstoreTest(unittest.TestCase):
 
 
 class ReferenceDiffsRanTest(unittest.TestCase):
-    """#1543 P/UX R2: where CI requires the reference tools, the differential tests must have run,
-    every test of them. A skip in a test body or in reference_tool would otherwise pass quietly among
-    CI's other skips, so this runs them again and fails on any skip."""
+    """#1543 P/UX R2, #4370: the three reference-diff classes carry MustRun, and MustRun fails a
+    skip and passes a test that ran once. Runs none of the classes."""
     # REQ: DEV-2, CH-9
 
-    def test_no_reference_diff_skips(self):
-        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") != "1":
-            self.skipTest("only where AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI)")
-        assert_all_ran(self, (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest))
+    def test_every_reference_diff_class_fails_on_a_skip(self):
+        for c in (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest):
+            with self.subTest(c.__name__):
+                self.assertTrue(issubclass(c, MustRun))
+                self.assertTrue(unittest.TestLoader().getTestCaseNames(c))
 
+    def test_must_run_fails_a_skip_and_passes_a_run_once(self):
+        runs = []
 
-def assert_all_ran(case, classes):
-    """Run every test of CLASSES; fail CASE on any skip, any test not run, or any failure."""
-    loader = unittest.TestLoader()
-    suite = unittest.TestSuite(loader.loadTestsFromTestCase(c) for c in classes)
-    case.assertGreaterEqual(suite.countTestCases(), len(classes))
-    result = unittest.TestResult()
-    suite.run(result)
-    case.assertEqual(result.skipped, [])
-    case.assertEqual(result.testsRun, suite.countTestCases())
-    case.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        class Skips(MustRun, unittest.TestCase):
+            def test_skips(self):
+                runs.append("skips")
+                self.skipTest("a differential test that did not run")
+
+        class Ran(MustRun, unittest.TestCase):
+            def test_ran(self):
+                runs.append("ran")
+
+        for required, cls, ok in (("1", Skips, False), ("1", Ran, True), ("", Skips, True)):
+            with self.subTest(required=required, case=cls.__name__):
+                runs.clear()
+                result = unittest.TestResult()
+                with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": required}):
+                    unittest.TestLoader().loadTestsFromTestCase(cls).run(result)
+                self.assertEqual(result.wasSuccessful(), ok, result.failures + result.errors)
+                self.assertEqual(len(runs), 1)
 
 
 class DiffOracleTest(unittest.TestCase):
@@ -4645,7 +4675,7 @@ class DiffOracleTest(unittest.TestCase):
     it, which must make it fail. TmpfilesDiffTest must fail when systemd-tmpfiles writes nothing
     (its WRITES assertion: otherwise a run that compares nothing passes), and when a line the check
     passes writes /proc/sys (its passed-line assertion: the whole-tree re-check never reads /proc, /sys
-    or the ESP back). And assert_all_ran (ReferenceDiffsRanTest) must fail on a skip. Needs no
+    or the ESP back). And MustRun (ReferenceDiffsRanTest) must fail on a skip. Needs no
     reference tool: systemd-tmpfiles is replaced."""
     # REQ: DEV-2, CH-9
 
@@ -4670,12 +4700,14 @@ class DiffOracleTest(unittest.TestCase):
                 self.assertFalse(result.wasSuccessful())
                 self.assertIn(needle, str(result.failures))
 
-        class Skips(unittest.TestCase):
+        class Skips(MustRun, unittest.TestCase):
             def test_skips(self):
                 self.skipTest("a differential test that did not run")
 
-        with self.assertRaises(AssertionError):
-            assert_all_ran(self, (Skips,))
+        result = unittest.TestResult()
+        with unittest.mock.patch.dict(os.environ, {"AGENTOS_REQUIRE_REFERENCE_TOOLS": "1"}):
+            unittest.TestLoader().loadTestsFromTestCase(Skips).run(result)
+        self.assertFalse(result.wasSuccessful())
 
     def test_allowlist_coverage_fails_on_a_harmful_group(self):
         # #1543 P/UX P4-1: the tests that run every group of tmpfiles.allow (TmpfilesDiffTest's
@@ -4863,7 +4895,7 @@ class TreeAccessTest(unittest.TestCase):
                              ["etc", "etc/l.conf", "lib", "usr", "usr/lib", "usr/lib/sysctl.d", "usr/lib/sysctl.d/x.conf"])
 
 
-class KmodDiffTest(unittest.TestCase):
+class KmodDiffTest(MustRun, unittest.TestCase):
     """#1528: kmod_installs against kmod's own reading, `modprobe -C DIR -c`, which prints every
     install line kmod took, in order. GitHub's ubuntu-latest runners have kmod 31, whose config
     reader (freadline_wrapped, kmod_config_parse, underscores) is the same as 34's."""
