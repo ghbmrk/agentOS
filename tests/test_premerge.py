@@ -843,26 +843,101 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(run([l3, sec(), rec("accept", new, "<!-- record: combined -->\n", at="2"),
                               sec(head=new, at="3")]), (0, ["same"]))
 
+    def bot_run(self, ref, run=None, output=None):
+        """`--bot ref` with `run` (a dict, written as run.json) and `output` (zip members, written as the artifact)."""
+        import json
+        import zipfile
+        d = pathlib.Path(self._d.name + ".bot")
+        d.mkdir(exist_ok=True)
+        extra = []
+        if run is not None:
+            (d / "run.json").write_text(json.dumps(run))
+            extra += ["--run", str(d / "run.json")]
+        if output is not None:
+            with zipfile.ZipFile(d / "out.zip", "w") as z:
+                for name, data in output:
+                    z.writestr(name, data)
+            extra += ["--output", str(d / "out.zip")]
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", ref, *extra, "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        return r.returncode, r.stdout.split()
+
+    def main_run(self, workflow="trace.yml", **kw):
+        sha = git(self.r, "rev-parse", "main")
+        return {"id": 9, "path": ".github/workflows/" + workflow, "event": "schedule", "head_sha": sha,
+                "repository": {"full_name": "o/r"}, "head_repository": {"full_name": "o/r"}, **kw}
+
     def test_bot_gate(self):
         # PREMERGE-wire (#1860): the generated-file bot PRs carry no L3 verdict, so `--bot` passes
         # them only when the branch is a known bot branch and the diff is that bot's file alone.
         git(self.r, "checkout", "-q", "-b", "pr")
-        def run(ref):
-            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", ref, "--base", "main"],
-                               cwd=self.r, capture_output=True, text=True)
-            return r.returncode, r.stdout.split()
-        self.assertEqual(run("bot/trace"), (1, ["not-bot"]))  # empty change
+        ok = lambda ref="bot/trace", wf="trace.yml", out=b"t\n": self.bot_run(ref, self.main_run(wf), [(ref[4:].upper() + ".md", out)])
+        self.assertEqual(ok(), (1, ["not-bot"]))  # empty change
         self.write("TRACE.md", "t\n")
         self.commit("trace")
-        self.assertEqual(run("bot/trace"), (0, ["bot"]))
+        self.assertEqual(ok(), (0, ["bot"]))
         for ref in ("bot/metrics", "bot/board"):  # another bot's file
-            self.assertEqual(run(ref), (1, ["not-bot", "TRACE.md"]), ref)
+            self.assertEqual(ok(ref, ref[4:] + ".yml"), (1, ["not-bot", "TRACE.md"]), ref)
         # not a bot branch; bot/records went with records.yml (#2235)
         for ref in ("pkg/x", "bot/trace2", "xbot/trace", "bot/trace/x", "bot/records"):
-            self.assertEqual(run(ref), (1, ["not-bot"]), ref)
+            self.assertEqual(self.bot_run(ref, self.main_run(), [("TRACE.md", b"t\n")]), (1, ["not-bot"]), ref)
         self.write("b.txt", "x\n")
         self.commit("smuggled code")
-        self.assertEqual(run("bot/trace"), (1, ["not-bot", "b.txt"]))
+        self.assertEqual(ok(), (1, ["not-bot", "b.txt"]))
+
+    def test_bot_gate_needs_the_bots_own_run(self):
+        # MAIN-PROT-3 (#757): the diff being TRACE.md alone is not enough. Anyone who can push can push a
+        # hand-edited TRACE.md to bot/trace under the bot's git name, or from a branch workflow with an
+        # Actions token, so the file must equal the artifact a run of main's own trace.yml uploaded.
+        git(self.r, "checkout", "-q", "-b", "side")
+        self.write("x.txt", "branch code\n")
+        side = self.commit("a branch's own commit")
+        git(self.r, "checkout", "-q", "main")
+        git(self.r, "checkout", "-q", "-b", "pr")
+        self.write("TRACE.md", "t\n")
+        self.commit("trace")
+        good = [("TRACE.md", b"t\n")]
+        self.assertEqual(self.bot_run("bot/trace", self.main_run(), good), (0, ["bot"]))
+        for event in ("workflow_dispatch", "push"):
+            self.assertEqual(self.bot_run("bot/trace", self.main_run(event=event), good), (0, ["bot"]), event)
+        unproven = lambda why: (1, ["bot-unproven", why])
+        self.assertEqual(self.bot_run("bot/trace"), unproven("no-run"))
+        self.assertEqual(self.bot_run("bot/trace", self.main_run()), unproven("no-run"))
+        self.assertEqual(self.bot_run("bot/trace", output=good), unproven("no-run"))
+        # The content: hand-edited, an extra member, a renamed member, an empty or broken zip.
+        for out in ([("TRACE.md", b"hand-edited\n")], [("TRACE.md", b"t\n"), ("x", b"")], [("trace.md", b"t\n")],
+                    [("TRACE.md", b"t")], [("TRACE.md", b"t\nmore\n")], []):
+            self.assertEqual(self.bot_run("bot/trace", self.main_run(), out), unproven("output"), out)
+        (pathlib.Path(self._d.name + ".bot") / "broken.zip").write_bytes(b"PK not a zip")
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/trace", "--run",
+                            str(pathlib.Path(self._d.name + ".bot") / "run.json"), "--output",
+                            str(pathlib.Path(self._d.name + ".bot") / "broken.zip"), "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.split()), unproven("output"))
+        # The run: another workflow, a non-main trigger, a fork's run, a run on a branch's own commit.
+        for kw in ({"path": ".github/workflows/metrics.yml"}, {"path": ".github/workflows/x.yml"},
+                   {"path": ".github/workflows/trace.yml@refs/heads/side"}, {"path": None},
+                   {"event": "pull_request"}, {"event": "pull_request_target"}, {"event": "workflow_run"}, {"event": None},
+                   {"head_repository": {"full_name": "fork/r"}}, {"head_repository": None},
+                   {"repository": None, "head_repository": None}):
+            self.assertEqual(self.bot_run("bot/trace", self.main_run(**kw), good), unproven("run"), kw)
+        for sha in (side, "f" * 40, "HEAD", "main", "-" + "a" * 39, None, 7):
+            self.assertEqual(self.bot_run("bot/trace", self.main_run(head_sha=sha), good), unproven("run-not-on-main"), sha)
+        # Not run JSON at all.
+        for bad in ([], "x", 1):
+            self.assertEqual(self.bot_run("bot/trace", bad, good), unproven("run"), bad)
+        # Each bot answers to its own workflow only.
+        git(self.r, "checkout", "-q", "main")
+        git(self.r, "checkout", "-q", "-b", "board")
+        self.write("BOARD.md", "b\n")
+        self.commit("board")
+        board = [("BOARD.md", b"b\n")]
+        self.assertEqual(self.bot_run("bot/board", self.main_run("board.yml"), board), (0, ["bot"]))
+        self.assertEqual(self.bot_run("bot/board", self.main_run("trace.yml"), board), unproven("run"))
+        # A usage error, not a pass: two heads.
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/board", "HEAD", "HEAD"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
 
     def test_bot_gate_records_is_gone(self):
         # #2235: records.yml was its only writer, so a bot/records branch of new review files is hand-made and needs a verdict.

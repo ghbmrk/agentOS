@@ -4,7 +4,7 @@
   tools/premerge.py [--base origin/main] <reviewed-sha> [head]
   tools/premerge.py --needs-mark [--base origin/main] [head]   (--needs-mark in any position)
   tools/premerge.py --check <comments.json> <pr-number> [--base origin/main] [head]
-  tools/premerge.py --bot <head-ref> [--base origin/main] [head]
+  tools/premerge.py --bot <head-ref> --run <run.json> --output <artifact.zip> [--base origin/main] [head]
 
 Replays the reviewed commit onto the base content `head` carries (`git merge-tree` of the reviewed
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
@@ -46,9 +46,14 @@ it. Likewise a verdict comment whose `Record:` line does not parse (a package ID
 `unresolved-record <kind>` the same way (#3856). Never edit a posted verdict, post a new comment instead. SPEC.md needs nothing extra (D-137 supersedes D-130's `Transcribes:` and `Mark-approved:` lines).
 
 `--bot` is the gate form for the generated-file bot PRs, which carry no verdict (PREMERGE-wire, #1860): it
-prints `bot` (exit 0) only when `head-ref` is one of the BOT branches and base..head changes nothing but that
-bot's output. Otherwise it
-prints `not-bot <files>` and exits 1. The caller checks that the branch is this repository's, not a fork's.
+prints `bot` (exit 0) only when `head-ref` is one of the BOT branches, base..head changes nothing but that
+bot's output, and that output is the bot's (MAIN-PROT-3, #757): byte-equal to the one file in `output`, the
+artifact zip of `run`, an Actions run (its API JSON) of that bot's own workflow file on a commit of `base`.
+Git authors are free text and any pusher's branch workflow gets a GitHub Actions token, so the proof is the
+run: a workflow on a commit of main is reviewed code, and only a run's own jobs upload its artifacts.
+Otherwise it prints `not-bot <files>` (the diff) or `bot-unproven <why>` and exits 1. The caller checks that
+the branch is this repository's, not a fork's, and fetches the run and artifact the head commit's `Bot-Run:`
+trailer names.
 """
 import collections
 import importlib.util
@@ -59,6 +64,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
@@ -200,26 +206,55 @@ def _replayed(cwd, reviewed, onto):
     return out.split(b"\n", 1)[0].decode()
 
 
-# Bot branch -> (pattern every changed path must fullmatch, git statuses allowed). Writers: trace.yml,
-# metrics.yml, board.yml. bot/records left with records.yml (cut 4, #2234; #2235).
+# Bot branch -> (its one output file, git statuses allowed, the workflow that writes it). bot/records left with
+# records.yml (cut 4, #2234; #2235).
 BOT = {
-    "bot/trace": (re.compile(r"TRACE\.md"), "AM"),
-    "bot/metrics": (re.compile(r"METRICS\.md"), "AM"),
-    "bot/board": (re.compile(r"BOARD\.md"), "AM"),
+    "bot/trace": ("TRACE.md", "AM", ".github/workflows/trace.yml"),
+    "bot/metrics": ("METRICS.md", "AM", ".github/workflows/metrics.yml"),
+    "bot/board": ("BOARD.md", "AM", ".github/workflows/board.yml"),
 }
+# A run on main's own triggers; `pull_request*` and `workflow_run` runs carry other code or other inputs.
+BOT_EVENTS = {"schedule", "workflow_dispatch", "push"}
 
 
 def bot_outside(cwd, ref, head="HEAD", base="origin/main"):
     """Paths of base..head outside bot branch `ref`'s output; None when `ref` is not a bot branch or the diff is empty."""
     if ref not in BOT:
         return None
-    pattern, statuses = BOT[ref]
+    name, statuses, _ = BOT[ref]
     onto = _git(cwd, "merge-base", base, head).decode().strip()
     out = _git(cwd, *DIFF[:-2], "--name-status", "-z", onto, head).decode(errors="surrogateescape").split("\0")
     pairs = list(zip(out[0::2], out[1::2]))
     if not pairs:
         return None
-    return [f for st, f in pairs if st not in statuses or not pattern.fullmatch(f)]
+    return [f for st, f in pairs if st not in statuses or f != name]
+
+
+def bot_unproven(cwd, ref, run, output, head="HEAD", base="origin/main"):
+    """Why `head`'s copy of bot `ref`'s file is not proven the bot's, or None when it is (MAIN-PROT-3, #757).
+
+    Proven: `run` (Actions API JSON) is a run of the bot's workflow file, on a main trigger, in its own repository,
+    at a commit `base` contains, so the code that made the output is reviewed; and `output` (that run's artifact
+    zip) holds exactly the one file, byte-equal to the head's. A run's artifacts come only from its own jobs."""
+    name, _, workflow = BOT[ref]
+    repo = (run.get("repository") or {}).get("full_name")
+    if run.get("path") != workflow or run.get("event") not in BOT_EVENTS or not repo or \
+            (run.get("head_repository") or {}).get("full_name") != repo:
+        return "run"
+    sha = run.get("head_sha")
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha) or \
+            subprocess.run(["git", "merge-base", "--is-ancestor", sha, base], cwd=cwd, capture_output=True).returncode:
+        return "run-not-on-main"
+    want = _git(cwd, "--literal-pathspecs", "show", f"{head}:{name}")
+    try:
+        with zipfile.ZipFile(output) as z:
+            infos = z.infolist()
+            # Sizes first, so a large or bomb entry is never inflated.
+            if [i.filename for i in infos] != [name] or infos[0].file_size != len(want) or z.read(infos[0]) != want:
+                return "output"
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError, ValueError):
+        return "output"
+    return None
 
 
 ROW_ID = re.compile(rb"^\| *[A-Za-z]+-?\d+[a-z]? *\|", re.M)
@@ -564,11 +599,29 @@ def main(argv):
             print(__doc__)
             return 2
         ref, args = args[1], args[2:]
-        if args[:1] == ["--base"]:
-            base, args = args[1], args[2:]
-        outside = bot_outside(".", ref, args[0] if args else "HEAD", base)
-        print("bot" if outside == [] else " ".join(["not-bot", *(outside or [])]))
-        return 0 if outside == [] else 1
+        run = output = None
+        while args[:1] in (["--run"], ["--output"], ["--base"]) and len(args) > 1:
+            if args[0] == "--run":
+                run = args[1]
+            elif args[0] == "--output":
+                output = args[1]
+            else:
+                base = args[1]
+            args = args[2:]
+        if len(args) > 1:
+            print(__doc__)
+            return 2
+        head = args[0] if args else "HEAD"
+        outside = bot_outside(".", ref, head, base)
+        if outside != []:
+            print(" ".join(["not-bot", *(outside or [])]))
+            return 1
+        try:
+            why = bot_unproven(".", ref, json.load(open(run)), output, head, base) if run and output else "no-run"
+        except (OSError, ValueError, AttributeError):
+            why = "run"
+        print("bot-unproven " + why if why else "bot")
+        return 1 if why else 0
     if args[:1] == ["--base"]:
         base, args = args[1], args[2:]
     if needs_mark:
