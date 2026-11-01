@@ -410,6 +410,22 @@ class WorkflowTest(unittest.TestCase):
         self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
         self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
 
+    def test_trace_and_metrics_cross_jobs_as_an_artifact(self):
+        # #1832: TRACE.md outgrew the 128 KiB env limit as base64 (trace run 41303991176: "Argument list too long"),
+        # and MAIN-PROT-3 (#757) needs the artifact as the proof premerge --bot compares the PR with. Each writer
+        # uploads its file from the read-only job, the commit job copies only that file in, and commits with Bot-Run.
+        for name, f in (("trace", "TRACE.md"), ("metrics", "METRICS.md"), ("board", "BOARD.md")):
+            text = (WORKFLOWS / f"{name}.yml").read_text()
+            gen, commit = text.split("\n  commit:\n", 1)
+            self.assertNotIn("base64", text, name)
+            uploads = [s for a, s in steps(gen) if a.startswith("actions/upload-artifact@")]
+            downloads = [s for a, s in steps(commit) if a.startswith("actions/download-artifact@")]
+            self.assertEqual((len(uploads), len(downloads)), (1, 1), name)
+            self.assertRegex(uploads[0], rf"name: {name}\n\s+path: {f}\n", name)
+            self.assertRegex(downloads[0], rf"name: {name}\n\s+path: \$\{{\{{ runner\.temp \}}\}}/{name}$", name)
+            self.assertIn(f'cp "$RUNNER_TEMP/{name}/{f}" {f}', commit, name)
+            self.assertRegex(commit, r'git commit -qm "[^"]+" -m "Bot-Run: \$GITHUB_RUN_ID" -- ' + f, name)
+
     def test_board_renders_on_a_schedule_not_per_issue_event(self):
         # BOARD-debounce (#3099): a render per issue event merged one main commit per label burst,
         # and main's strict up-to-date rule put every open PR behind each one. Renders run on a
