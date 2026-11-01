@@ -74,7 +74,7 @@ func Serve(ctx context.Context, conn net.Conn, cfg Config) error {
 	rw := conn
 	hctx, hcancel := context.WithCancel(ctx)
 	defer hcancel()
-	hup, err := hangup(hctx, sc)
+	hup, err := hangup(hctx, sc, hangupPoll)
 	if err != nil {
 		return fmt.Errorf("decodehost: the session's connection: %w", err)
 	}
@@ -101,10 +101,15 @@ func Serve(ctx context.Context, conn net.Conn, cfg Config) error {
 	return nil
 }
 
+// hangupPoll is how long, in milliseconds, each of hangup's polls waits
+// before it checks ctx again.
+const hangupPoll = 1000
+
 // hangup is closed once the peer of conn, a stream socket, has shut down
 // its side or closed it (POLLRDHUP, POLLHUP or POLLERR), whatever data is
-// still unread, or once ctx is done. It reads nothing from conn.
-func hangup(ctx context.Context, conn syscall.Conn) (<-chan struct{}, error) {
+// still unread, or once ctx is done, which it checks every pollMs. It
+// reads nothing from conn.
+func hangup(ctx context.Context, conn syscall.Conn, pollMs int) (<-chan struct{}, error) {
 	rc, err := conn.SyscallConn()
 	if err != nil {
 		return nil, err
@@ -115,17 +120,23 @@ func hangup(ctx context.Context, conn syscall.Conn) (<-chan struct{}, error) {
 		rc.Control(func(fd uintptr) {
 			for ctx.Err() == nil {
 				pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLRDHUP}}
-				n, err := unix.Poll(pfd, 1000)
+				_, err := unix.Poll(pfd, pollMs)
 				if err == unix.EINTR {
 					continue
 				}
-				if err != nil || n > 0 && pfd[0].Revents&(unix.POLLRDHUP|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+				if err != nil || hungUp(pfd[0].Revents) {
 					return
 				}
 			}
 		})
 	}()
 	return ch, nil
+}
+
+// hungUp says whether poll's revents for a stream socket show its peer
+// gone. A poll that timed out leaves them 0.
+func hungUp(revents int16) bool {
+	return revents&(unix.POLLRDHUP|unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0
 }
 
 // leaf is the process's own group in the unit's.

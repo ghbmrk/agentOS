@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/clerk/camera"
 	"github.com/ghbmrk/agentos/broker/cmd/agentos-camdecode/camdecode"
 	"github.com/ghbmrk/agentos/broker/vm/gvisor"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -319,5 +321,70 @@ func TestOwnCgroup(t *testing.T) {
 		if got != want || (want == "") != (err != nil) {
 			t.Errorf("OwnCgroup(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+}
+
+// A peer that shut down its side, closed or failed ends the session; a
+// poll that timed out, or saw only data waiting, does not.
+func TestHungUp(t *testing.T) {
+	for _, c := range []struct {
+		revents int16
+		want    bool
+	}{
+		{0, false},
+		{unix.POLLIN, false},
+		{unix.POLLRDHUP, true},
+		{unix.POLLIN | unix.POLLRDHUP, true},
+		{unix.POLLHUP, true},
+		{unix.POLLERR, true},
+		{unix.POLLNVAL, true},
+	} {
+		if got := hungUp(c.revents); got != c.want {
+			t.Errorf("hungUp(%#x) = %v, want %v", c.revents, got, c.want)
+		}
+	}
+}
+
+// hangup stays open across its polls while the peer is there, whatever
+// the peer sends, and closes once the peer shuts down its side.
+func TestHangupWaitsForThePeer(t *testing.T) {
+	const poll = 10
+	dir, err := os.MkdirTemp("", "hup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	ln, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	peer, err := net.Dial("unix", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	conn, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	hup, err := hangup(context.Background(), conn.(syscall.Conn), poll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Write([]byte("frames")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-hup:
+		t.Fatal("hangup closed while the peer was there")
+	case <-time.After(20 * poll * time.Millisecond):
+	}
+	peer.(*net.UnixConn).CloseWrite()
+	select {
+	case <-hup:
+	case <-time.After(5 * time.Second):
+		t.Fatal("hangup stayed open after the peer shut down its side")
 	}
 }
