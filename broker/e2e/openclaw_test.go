@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -40,7 +39,7 @@ import (
 // machine's key and the kernel's seam takes it once; the machine is
 // snapshotted after the call (REV-1); the answer comes
 // back to the owner. The owner's message raises the machine to private
-// (REV-5). The gateway serves no Control UI (ARC-7, #4417).
+// (REV-5). The gateway serves no Control UI (PLN-5, #4417).
 //
 // It needs root, AGENTOS_RUNSC (a runsc binary), and AGENTOS_OPENCLAW_ROOTFS
 // (a root built by guest/openclaw/build-rootfs.sh).
@@ -313,10 +312,11 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rt := &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")}
 	m, err := vm.Open(ctx, vm.Config{
 		StateDir:  filepath.Join(dir, "machines"),
 		Images:    map[string]string{"openclaw": rootfs},
-		Runtime:   &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")},
+		Runtime:   rt,
 		Admit:     adm,
 		NoCgroups: true,
 		NoQuota:   true,
@@ -389,7 +389,7 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
 	}
-	noControlUI(t, runsc, filepath.Join(dir, "runsc"), rootfs)
+	noControlUI(t, rt, rootfs)
 }
 
 // controlUIProbe runs inside the guest. For each path it asks the gateway
@@ -409,15 +409,44 @@ const crypto = require("crypto");
 })().catch(e => { console.error(String(e)); process.exit(1); });
 `
 
+// controlUIProbePin is the OpenClaw version noControlUI was checked on. On
+// it the Control UI is served at the gateway's root with no token, so a 404
+// or 401 there means the UI is off. A later pin may move the UI under
+// another base path or behind auth, where the same answers would pass with
+// the UI on; TestControlUIProbePin fails until the probe is rechecked on the
+// new pin (#4425).
+const controlUIProbePin = "2026.10.9"
+
+// TestControlUIProbePin fails when guest/openclaw/build-rootfs.sh moves off
+// the OpenClaw version noControlUI was checked on. It needs no root, so the
+// pin bump's own PR fails here, not only on the gVisor runner.
+func TestControlUIProbePin(t *testing.T) {
+	b, err := os.ReadFile("../../guest/openclaw/build-rootfs.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^OPENCLAW_VERSION=(\S+)$`).FindAllSubmatch(b, -1)
+	if len(m) != 1 {
+		t.Fatalf("build-rootfs.sh: %d OPENCLAW_VERSION lines, want one", len(m))
+	}
+	if got := string(m[0][1]); got != controlUIProbePin {
+		t.Fatalf("OpenClaw pin is %s, but noControlUI was checked on %s: with gateway.controlUi.enabled true on the new pin, "+
+			"find where the gateway serves the Control UI (base path, auth) and point the probe there, then set controlUIProbePin (#4425)",
+			got, controlUIProbePin)
+	}
+}
+
 // noControlUI checks that the guest's gateway does not serve OpenClaw's
-// Control UI (#4417, ARC-7): agentOS never uses it, and its assets inline
+// Control UI (#4417, PLN-5): agentOS never uses it, and its assets inline
 // the DOMPurify and KaTeX copies accepted under #4302. OpenClaw serves it by
 // default whenever dist/control-ui is present, so only the profile's
 // gateway.controlUi.enabled false keeps it off. The probe asks for the UI's
 // root and for the two assets that hold those copies, and fails if any
 // comes back as the file in the image or carries the UI's build marker. A
 // gateway the probe cannot reach fails the test, so a dead gateway is no pass.
-func noControlUI(t *testing.T, runsc, root, rootfs string) {
+// The probe runs through the machine's own runtime, with its runsc flags
+// and fixed environment.
+func noControlUI(t *testing.T, rt *gvisor.Runtime, rootfs string) {
 	t.Helper()
 	ui := filepath.Join(rootfs, "opt/openclaw/node_modules/openclaw/dist/control-ui")
 	paths, want := []string{"/"}, map[string]string{}
@@ -436,11 +465,18 @@ func noControlUI(t *testing.T, runsc, root, rootfs string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	args := append([]string{"--root", root, "--platform=systrap", "--network=none", "--ignore-cgroups",
-		"--overlay2=none", "--host-uds=open", "exec", "agent_", "/usr/local/bin/node", "-e", controlUIProbe}, paths...)
-	out, err := exec.CommandContext(ctx, runsc, args...).Output()
+	res, err := rt.Exec(ctx, "agent", vm.Command{
+		Argv:      append([]string{"/usr/local/bin/node", "-e", controlUIProbe}, paths...),
+		MaxOutput: 1 << 20,
+	})
 	if err != nil {
-		t.Fatalf("control UI probe: %v: %s", err, out)
+		// runsc's own messages go to the runtime's exec log, not to err.
+		log, _ := os.ReadFile(filepath.Join(rt.StateDir, "exec.log"))
+		t.Fatalf("control UI probe: %v\nexec.log:\n%s", err, log)
+	}
+	out := res.Stdout
+	if res.ExitCode != 0 || res.Truncated {
+		t.Fatalf("control UI probe: exit %d (truncated %v)\nstdout: %s\nstderr: %s", res.ExitCode, res.Truncated, out, res.Stderr)
 	}
 	var got map[string]struct {
 		Status int
