@@ -9,7 +9,9 @@ entry and the /usr partitions are one release: the build verifies the split /usr
 its hash tree against that hash with veritysetup, and the manifest records both.
 Uses mtools on the raw image, so no loop devices or mounts are needed. Before mkosi runs, it also
 stages the build's device drivers into the image tree (DEVSLOT-image), and the manifest carries
-their list.
+their list. Beside the release it writes agentos_VERSION.usr.list, every /usr file's hash and
+metadata read back from the verified partition with fsck.erofs (#4059), so two builds whose /usr
+root hashes differ name the differing file.
 Usage: finish_image.py OUTDIR VERSION [DRIVERS_JSON]; finish_image.py --stage-drivers DRIVERS STAGE CHECKER"""
 import errno
 import hashlib
@@ -19,10 +21,12 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import stat
 import struct
 import subprocess
 import sys
+import tempfile
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 # Linux swap (IMG-nodump): the broker's memory holds the Owner Card passphrase (card C13).
@@ -452,6 +456,48 @@ def verify_usr(data, tree, roothash):
         raise ValueError("/usr does not verify against usrhash=%s" % roothash)
 
 
+# One line per entry of the /usr list, a JSON array of these fields (#4059). digest: a file's
+# sha256, a link's target, a device's major:minor, else "". Extended attributes are not listed:
+# fsck.erofs 1.7 does not extract them, so a difference only there reads as same files, other layout.
+USR_LIST_FIELDS = ("path", "type", "mode", "uid", "gid", "mtime_ns", "nlink", "size", "digest")
+USR_TYPES = ((stat.S_ISREG, "f"), (stat.S_ISDIR, "d"), (stat.S_ISLNK, "l"), (stat.S_ISCHR, "c"),
+             (stat.S_ISBLK, "b"), (stat.S_ISFIFO, "p"), (stat.S_ISSOCK, "s"))
+
+
+def usr_list(root):
+    """The /usr list of the tree at ROOT: one JSON line per entry below it, sorted by path."""
+    root = pathlib.Path(root)
+    lines = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            path = pathlib.Path(dirpath) / n
+            st = path.lstat()
+            kind = next(c for test, c in USR_TYPES if test(st.st_mode))
+            digest = (sha256(path) if kind == "f" else os.readlink(path) if kind == "l"
+                      else "%d:%d" % (os.major(st.st_rdev), os.minor(st.st_rdev)) if kind in "cb" else "")
+            lines.append(json.dumps([path.relative_to(root).as_posix(), kind, "%04o" % stat.S_IMODE(st.st_mode),
+                                     st.st_uid, st.st_gid, st.st_mtime_ns, st.st_nlink if kind != "d" else 0,
+                                     st.st_size if kind == "f" else 0, digest]))
+    return sorted(lines, key=lambda ln: json.loads(ln)[0])
+
+
+def write_usr_list(data, dst):
+    """Write DATA's (the /usr erofs partition's) /usr list to DST, from a copy fsck.erofs extracts
+    with owners, modes, times and hard links kept beside DST, and removed again."""
+    dst = pathlib.Path(dst)
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix=".usr-list-", dir=dst.parent))
+    try:
+        subprocess.run(["fsck.erofs", "--extract=%s" % (tmp / "usr"), "--preserve", str(data)], check=True,
+                       stdout=subprocess.DEVNULL)
+        lines = usr_list(tmp / "usr")
+    finally:
+        shutil.rmtree(tmp)
+    if not lines:
+        raise ValueError("/usr list of %s is empty" % data)
+    dst.write_text("\n".join(lines) + "\n")
+    return len(lines)
+
+
 def partition_table(img):
     return json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
 
@@ -519,6 +565,7 @@ def main(out, version, drivers_json=None):
     if bad:
         sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s; a key that ships in "
                  "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
+    print("/usr list: %d entries" % write_usr_list(data, out / ("agentos_%s.usr.list" % version)))
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files, boot, drivers)
