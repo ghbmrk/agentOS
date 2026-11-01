@@ -515,3 +515,44 @@ func TestShortWriteLeavesNoFragment(t *testing.T) {
 		t.Fatalf("%d lines after reopen, want the one written whole", n)
 	}
 }
+
+// TestLiftKeepsClosedTripTime (KRN-12, ENF-h-a2): lifting a cut again
+// later leaves a trip it already closed as it was: its Resolved time, in
+// the log and in the journal after a restart, stays the first lift's, so
+// the page never shows a wrong lift time for a standing record. Catches
+// Lifted rewriting closed trips (dropping its Open test).
+func TestLiftKeepsClosedTripTime(t *testing.T) {
+	j := &journal{}
+	now := time.Date(2026, 10, 29, 3, 0, 0, 0, time.UTC)
+	a, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: j,
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip, err := a.Raise(Trip, "edge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	first := now
+	if err := a.Lifted("edge"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := a.Lifted("edge"); err != nil {
+		t.Fatal(err)
+	}
+	check := func(what string, log []Record) {
+		t.Helper()
+		i := slices.IndexFunc(log, func(r Record) bool { return r.ID == trip.ID })
+		if i < 0 || log[i].Open || !log[i].Resolved.Equal(first) {
+			t.Fatalf("%s: closed trip %+v, want resolved at %v", what, log, first)
+		}
+	}
+	check("log", a.Log())
+	b, err := New(Config{Send: (&core{}).Send, Light: &bulb{}, Journal: j})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("after restart", b.Log())
+}
