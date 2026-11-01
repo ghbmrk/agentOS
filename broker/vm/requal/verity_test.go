@@ -228,6 +228,69 @@ func TestCandidateMountNeedsARunner(t *testing.T) {
 	}
 }
 
+// TestCutOffOpenClosesWithItsOwnContext: an open cut off by the run's
+// context still closes the device it may have made, on a context of its
+// own.
+func TestCutOffOpenClosesWithItsOwnContext(t *testing.T) {
+	rel, src := signedUsr(t, usrFiles)
+	ctx, cancel := context.WithCancel(context.Background())
+	var closeErr error = errors.New("close not called")
+	v := &VerityImages{Source: src, Staging: t.TempDir(), Run: func(c context.Context, _ string, arg ...string) error {
+		if arg[0] == "open" {
+			cancel()
+			return c.Err()
+		}
+		closeErr = c.Err()
+		return nil
+	}}
+	if _, err := v.Mount(ctx, rel, t.TempDir()); err == nil {
+		t.Fatal("Mount passed a cut-off open")
+	}
+	if closeErr != nil {
+		t.Fatalf("device close: %v, want a live context", closeErr)
+	}
+}
+
+// TestCandidateUnmountStopsAtABusyMount: an unmount that fails leaves the
+// device open and the files in place, and a later call finishes; once
+// done, a further call closes nothing twice.
+func TestCandidateUnmountStopsAtABusyMount(t *testing.T) {
+	rel, src := signedUsr(t, usrFiles)
+	staging := t.TempDir()
+	l := toolLog{}
+	v := l.images(&VerityImages{Source: src, Staging: staging})
+	unmount, err := v.Mount(context.Background(), rel, filepath.Join(t.TempDir(), "usr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.fail = "umount"
+	if err := unmount(); err == nil {
+		t.Fatal("unmount passed a busy mount")
+	}
+	if last := l.calls[len(l.calls)-1]; last != "umount usr" {
+		t.Fatalf("after a failed umount: %q", l.calls)
+	}
+	if es, _ := os.ReadDir(staging); len(es) != 1 {
+		t.Fatalf("staging holds %d entries under a mounted device, want 1", len(es))
+	}
+	l.fail = ""
+	if err := unmount(); err != nil {
+		t.Fatal(err)
+	}
+	if err := unmount(); err != nil {
+		t.Fatal(err)
+	}
+	var closes int
+	for _, c := range l.calls {
+		if strings.HasPrefix(c, veritysetup+" close") {
+			closes++
+		}
+	}
+	if closes != 1 {
+		t.Fatalf("%d device closes, want 1: %q", closes, l.calls)
+	}
+}
+
 func TestUncheckedReleaseIsNotMounted(t *testing.T) {
 	var l toolLog
 	v := l.images(&VerityImages{Staging: t.TempDir()})

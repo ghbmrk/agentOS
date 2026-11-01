@@ -453,6 +453,35 @@ func TestCloseRetriesAFailedUnmount(t *testing.T) {
 	}
 }
 
+// TestCloseNeverRemovesWhatIsUnderUsr: the root is removed one known
+// directory at a time, so a file still under usr (a mount that did not go)
+// stays and Close reports it.
+func TestCloseNeverRemovesWhatIsUnderUsr(t *testing.T) {
+	st := &fakeStreams{eval: echoEval}
+	im := &leavesFile{}
+	sb := newSandbox(t, st, &fakeImages{}, func(c *SandboxConfig) { c.Images = im })
+	sess, err := sb.Start(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Close(); err == nil {
+		t.Fatal("Close passed a root it could not remove")
+	}
+	if _, err := os.Stat(im.file); err != nil {
+		t.Fatalf("the file under usr was removed: %v", err)
+	}
+}
+
+type leavesFile struct{ file string }
+
+func (l *leavesFile) Mount(_ context.Context, _ *update.Verified, at string) (func() error, error) {
+	l.file = filepath.Join(at, "still-mounted")
+	if err := os.WriteFile(l.file, nil, 0o600); err != nil {
+		return nil, err
+	}
+	return func() error { return nil }, nil
+}
+
 type failingUnmount struct {
 	fails    *int
 	unmounts int
