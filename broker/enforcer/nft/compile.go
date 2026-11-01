@@ -527,7 +527,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	padd("", "", "drop", daddr(true, "@isp_6"))
 	padd("", wan, "drop", daddr(false, "@nonglobal_4"))
 	padd("", wan, "drop", daddr(true, "@nonglobal_6"))
-	padd("", wan, "accept")
+	padd(q(l.Owner), wan, "accept")
+	padd(q(l.Household), wan, "accept")
 	padd(q(l.Owner), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
 	for _, p := range paths {
 		if !p.Both {
@@ -535,6 +536,28 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		}
 	}
 	padd("", "", "drop")
+
+	// Every accept binds its connection to its interface pair (live.go,
+	// bind), so every accept names one interface each way.
+	idx := map[string]uint32{}
+	for k, n := range []string{l.WAN, l.Owner, l.Household, l.Guests, l.Admin, l.Core, l.Edge, l.APMgmt} {
+		idx[q(n)] = 0x1001 + uint32(k)
+	}
+	for _, v := range devs {
+		idx[q(v.iface)] = uint32(v.vlan)
+	}
+	for _, rs := range [][]rule{fwd, people} {
+		for i, r := range rs {
+			if r.verdict != "accept" {
+				continue
+			}
+			m, ok := bind(idx, r.in, r.out)
+			if !ok {
+				return "", fmt.Errorf("nft: an accept from %s to %s is not one interface each way", r.in, r.out)
+			}
+			rs[i].mark = m
+		}
+	}
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")

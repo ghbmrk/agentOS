@@ -1,6 +1,9 @@
 package nft
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // A connection lives only while the ruleset in force would still admit its
 // first packet (NET-3, NET-7). Each forward rule is written twice: once as
@@ -17,12 +20,48 @@ import "strings"
 // live form checks only the address family there; the path itself (the
 // device's internet, the core's list) is still checked.
 
+// An accept binds its connection to the interfaces its first packet
+// crossed: it sets the connection's mark to that interface pair, and its
+// live form passes a later packet only on a connection with the same mark
+// (#4286). Conntrack calls an ICMP error related to whichever connection
+// its inner header names, whoever sent it; without the mark, a segment
+// with its own path out of the same interface (any segment with internet
+// access) could forge an error into another segment's internet connection
+// and have it masqueraded to that connection's peer, or one into a
+// device's connection from a paired device. With it, such an error matches
+// no live accept and is dropped.
+//
+// The mark is the pair's interface numbers, the egress in the high 16 bits
+// and the ingress in the low: a device interface is its VLAN (2 to 4094),
+// the layout's own interfaces 0x1001 upwards in a fixed order. The numbers
+// depend on nothing a load changes but the interfaces themselves, so a load
+// that keeps a path keeps its connections' marks valid. Mark 0, which a
+// connection has unless an accept set it (one opened before this ruleset
+// was first loaded), matches no live accept.
+//
+// Bound to an interface pair, not to a host: two hosts on one segment
+// (two guests, two people on Household) share their pair, so the mark
+// cannot tell one's connection from the other's.
+
+// bind is the mark of a connection that enters on in and leaves on out,
+// each a quoted interface name the ruleset uses; ok is false when either
+// is not one interface of idx.
+func bind(idx map[string]uint32, in, out string) (string, bool) {
+	i, iok := idx[in]
+	o, ook := idx[out]
+	if !iok || !ook {
+		return "", false
+	}
+	return fmt.Sprintf("0x%08x", o<<16|i), true
+}
+
 // rule is one rule of the forward or people chain.
 type rule struct {
 	in, out string  // iifname and oifname operands; "" matches any
 	m       []match // further matches
 	tail    string  // the log and counter part, on the first form only
 	verdict string  // accept, drop, or jump <chain>
+	mark    string  // an accept's connection mark (bind); "" otherwise
 }
 
 // match is one match in its two forms: on the packet, and on the
@@ -66,6 +105,9 @@ func (r rule) first() string {
 	for _, m := range r.m {
 		p = append(p, m.pkt)
 	}
+	if r.mark != "" {
+		p = append(p, "ct mark set "+r.mark)
+	}
 	if r.tail != "" {
 		p = append(p, r.tail)
 	}
@@ -88,6 +130,9 @@ func (r rule) later() []string {
 	var ms []string
 	for _, m := range r.m {
 		ms = append(ms, m.ct)
+	}
+	if r.mark != "" {
+		ms = append(ms, "ct mark "+r.mark)
 	}
 	tail := strings.Join(append(ms, verdict), " ")
 	if r.in == "" && r.out == "" {
