@@ -545,7 +545,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
 		"image/mkosi/agentos-x.conf":              "install btusb /usr/lib/agentos/agentos-side\nkernel.modprobe=/usr/lib/agentos/agentos-side\n",
 		extra + "usr/lib/udev/rules.d/60-x.rules": "KERNEL==\"x\", MODE=\"0600\"\n",
-		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 root root -\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nw /sys/class/leds/x/trigger - - - - none\nR /var/tmp/agentos-x\n",
+		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 root root -\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nw /sys/class/leds/x/trigger - - - - none\nR /var/tmp/agentos-x\nd /var/tmp/agentos-y 1777 root root -\nd /run/agentos-y :0750 root root -\nz /run/agentos-y ~0755\n",
 		extra + "usr/lib/tmpfiles.d/README": "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n",
 		programsFile:                        "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
 	}
@@ -633,6 +633,11 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles specifier path":       {tmpfiles, "w /proc/sys/kernel/%a - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
 		"a tmpfiles unclean path":         {tmpfiles, "w /proc/sys/kernel/../kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
 		"a tmpfiles type it lacks":        {tmpfiles, "ww /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles base64 argument":      {tmpfiles, "w~ /proc/sys/kernel/core_pattern - - - - fC91c3IvbGliL2FnZW50b3MvYWdlbnRvcy1zaWRlICVw\n", `no ~ or ^ modifier`},
+		"a tmpfiles credential argument":  {tmpfiles, "w^ /proc/sys/kernel/modprobe - - - - agentos.helper\n", `no ~ or ^ modifier`},
+		"a tmpfiles setuid mode":          {tmpfiles, "z /usr/lib/agentos/agentos-side 4755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles setgid mode":          {tmpfiles, "Z /usr/lib/agentos 2755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles masked setuid mode":   {tmpfiles, "d /var/lib/agentos-x ~6755 root root -\n", `no setuid or setgid`},
 		"a tmpfiles magic link":           {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
 		"a tmpfiles mode on a helper":     {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
 		"a tmpfiles w to a file":          {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys or /sys`},
@@ -1300,8 +1305,14 @@ func helperProgram(n int, k, v string) (ruleProgram, bool, error) {
 }
 
 // tmpfilesType is a tmpfiles.d(5) type: a letter, an optional +, then
-// modifiers.
-var tmpfilesType = regexp.MustCompile(`^([A-Za-z])(\+?)([-!=~^$?]*)$`)
+// modifiers. The ~ (base64) and ^ (credential) modifiers make the argument
+// something other than the text the reader sees, so neither is taken.
+var tmpfilesType = regexp.MustCompile(`^([A-Za-z])(\+?)([-!=$?]*)$`)
+
+// tmpfilesMode is a tmpfiles.d(5) mode the reader takes: - or octal, with
+// its optional ~ or : prefix, and no setuid or setgid bit, which would
+// make a file run as its owner, root among them, for any user (#4381).
+var tmpfilesMode = regexp.MustCompile(`^(-|[~:]?[0-7]{3}|[~:]?[0-1][0-7]{3})$`)
 
 // tmpfilesPlain are the tmpfiles.d(5) types that only make a directory or
 // subvolume, set a mode or owner, or ignore or remove what is at a path.
@@ -1326,7 +1337,10 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 	err := eachLine(text, "#", func(n int, line string) error {
 		f := strings.Fields(line)
 		if len(f) < 2 || !tmpfilesType.MatchString(f[0]) || !tmpfilesPath.MatchString(f[1]) || path.Clean(f[1]) != f[1] {
-			return fmt.Errorf("%d: %q is not a tmpfiles.d type and a plain absolute path", n, line)
+			return fmt.Errorf("%d: %q is not a tmpfiles.d type and a plain absolute path; no ~ or ^ modifier is read", n, line)
+		}
+		if len(f) > 2 && !tmpfilesMode.MatchString(f[2]) {
+			return fmt.Errorf("%d: mode %q; want - or an octal mode with no setuid or setgid bit", n, f[2])
 		}
 		m := tmpfilesType.FindStringSubmatch(f[0])
 		typ, p := m[1]+m[2], f[1]
