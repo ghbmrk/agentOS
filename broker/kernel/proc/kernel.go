@@ -80,7 +80,8 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
-	// unlogged are the item files the start found that no entry names.
+	// unlogged are the item files the start found in a store that no
+	// entry names in that store.
 	unlogged []string
 	// bk is the backups (backup.go); nil with no BackupDir.
 	bk *backups
@@ -157,17 +158,16 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		stores := map[string]kernel.ContentStore{}
+		var found map[string][]kernel.Hash
 		if err == nil && cfg.ContentDir != "" {
-			if stores, err = OpenContentStores(cfg.ContentDir, cfg.Stores); err != nil {
+			if stores, found, err = OpenContentStores(cfg.ContentDir, cfg.Stores); err != nil {
 				st.Close()
 				return nil, fmt.Errorf("run: the content stores: %w", err)
 			}
 		}
 		if err == nil {
 			h.content, err = k.OpenContent(keys, stores, now)
-		}
-		if err == nil {
-			h.unlogged, err = unlogged(k.State(), stores)
+			h.unlogged = unlogged(k.State(), found)
 		}
 		if err != nil {
 			st.Close()
@@ -191,8 +191,8 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
 
-// Unlogged is what the start found in the content stores that no entry
-// names, as store/hash.
+// Unlogged is every item file the start found in a content store that no
+// entry names in that store, as store/hash.
 func (h *Kernel) Unlogged() []string { return h.unlogged }
 
 // Tick starts the backup re-seals due (reseal) without waiting for them,

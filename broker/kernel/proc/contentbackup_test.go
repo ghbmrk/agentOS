@@ -263,8 +263,9 @@ func TestARestoreRefusesContentThatIsNotWhole(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: a restore took it", name)
 		}
-		if des, _ := os.ReadDir(r); len(des) != 0 {
-			t.Fatalf("%s (%v): the refused restore left %v", name, err, des)
+		// The lock file stays (restoreLock); nothing else may.
+		if left := slices.DeleteFunc(names(t, r), func(f string) bool { return f == restoreLock }); len(left) != 0 {
+			t.Fatalf("%s (%v): the refused restore left %v", name, err, left)
 		}
 	}
 

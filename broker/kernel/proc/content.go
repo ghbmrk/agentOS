@@ -52,101 +52,99 @@ var ErrStoreName = errors.New("run: a content store's name is 1 to 32 of a-z, 0-
 // each of names, made if missing, and each store directory already there,
 // so a store no longer named still has its items erased. A temporary a
 // torn write left is removed: its item was never logged (kernel.Seal puts
-// before it logs). A directory or file open to another uid is refused.
-func OpenContentStores(dir string, names []string) (map[string]kernel.ContentStore, error) {
+// before it logs). A directory or file open to another uid is refused. It
+// returns the stores and, by store, the items each holds (unlogged).
+func OpenContentStores(dir string, names []string) (map[string]kernel.ContentStore, map[string][]kernel.Hash, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := privfile.Check(dir, true); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	all := map[string]bool{}
 	for _, n := range names {
 		if !ValidStoreName(n) {
-			return nil, fmt.Errorf("%w: %q", ErrStoreName, n)
+			return nil, nil, fmt.Errorf("%w: %q", ErrStoreName, n)
 		}
 		all[n] = true
 	}
 	des, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, de := range des {
 		if ValidStoreName(de.Name()) {
 			all[de.Name()] = true
 		}
 	}
-	out := map[string]kernel.ContentStore{}
+	out, found := map[string]kernel.ContentStore{}, map[string][]kernel.Hash{}
 	for n := range all {
-		c, err := openFileContent(filepath.Join(dir, n))
+		c, items, err := openFileContent(filepath.Join(dir, n))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out[n] = c
+		out[n], found[n] = c, items
 	}
-	return out, privfile.SyncDir(dir)
+	return out, found, privfile.SyncDir(dir)
 }
 
-func openFileContent(dir string) (*FileContent, error) {
+// openFileContent opens the store at dir and returns the items it holds.
+func openFileContent(dir string) (*FileContent, []kernel.Hash, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := privfile.Check(dir, true); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := dropTemps(dir); err != nil {
-		return nil, err
+	des, err := dropTemps(dir)
+	if err != nil {
+		return nil, nil, err
 	}
-	return &FileContent{dir: dir}, nil
+	var items []kernel.Hash
+	for _, de := range des {
+		x, _ := strings.CutSuffix(de.Name(), itemExt)
+		if b, err := hex.DecodeString(x); err == nil && len(b) == len(kernel.Hash{}) && itemName(kernel.Hash(b)) == de.Name() {
+			items = append(items, kernel.Hash(b))
+		}
+	}
+	return &FileContent{dir: dir}, items, nil
 }
 
-// dropTemps removes every temporary a torn write left in dir, and syncs it.
-func dropTemps(dir string) error {
+// dropTemps removes every temporary a torn write left in dir, syncs it, and
+// returns what dir held.
+func dropTemps(dir string) ([]os.DirEntry, error) {
 	des, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, de := range des {
 		if strings.HasSuffix(de.Name(), tmpExt) {
 			if err := os.Remove(filepath.Join(dir, de.Name())); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return privfile.SyncDir(dir)
+	return des, privfile.SyncDir(dir)
 }
 
 func itemName(h kernel.Hash) string { return hex.EncodeToString(h[:]) + itemExt }
 
-// unlogged names, as store/hash, every item file the log does not name in
-// its store: a put a crash stopped after its rename (kernel.Seal puts
-// before it logs). They are kept, as unnamed keys are: a log older than
-// the stores that the anchor still takes (entries after the last anchored
-// one) cannot tell them from items whose entries it lost (#4368).
-func unlogged(s *kernel.State, stores map[string]kernel.ContentStore) ([]string, error) {
+// unlogged names, as store/hash, every item found in a store that the log
+// does not name in that store: a put a crash stopped after its rename
+// (kernel.Seal puts before it logs), or a copy in another store's folder.
+// They are kept, as unnamed keys are: a stale log the anchor still takes
+// cannot tell them from items whose entries it lost (#4368).
+func unlogged(s *kernel.State, found map[string][]kernel.Hash) []string {
 	var out []string
-	for name, cs := range stores {
-		f, ok := cs.(*FileContent)
-		if !ok {
-			continue
-		}
-		des, err := os.ReadDir(f.dir)
-		if err != nil {
-			return nil, err
-		}
-		for _, de := range des {
-			x, _ := strings.CutSuffix(de.Name(), itemExt)
-			b, err := hex.DecodeString(x)
-			if err != nil || len(b) != len(kernel.Hash{}) || itemName(kernel.Hash(b)) != de.Name() {
-				continue
-			}
-			if st, ok := s.ItemStore(kernel.Hash(b)); !ok || st != name {
-				out = append(out, name+"/"+x)
+	for name, items := range found {
+		for _, h := range items {
+			if st, ok := s.ItemStore(h); !ok || st != name {
+				out = append(out, name+"/"+hex.EncodeToString(h[:]))
 			}
 		}
 	}
 	slices.Sort(out)
-	return out, nil
+	return out
 }
 
 func (f *FileContent) Put(h kernel.Hash, ct []byte) error {

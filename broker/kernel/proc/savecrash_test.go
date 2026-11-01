@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
@@ -101,7 +102,7 @@ func fileContent(t *testing.T, b *bbox) (*FileKeys, *FileContent) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stores, err := OpenContentStores(b.cfg.ContentDir, b.cfg.Stores)
+	stores, _, err := OpenContentStores(b.cfg.ContentDir, b.cfg.Stores)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,6 +450,164 @@ func TestTheStartReportCountsEachKind(t *testing.T) {
 	} {
 		if got := startReport(c.r, c.u); !strings.Contains(got, c.want) {
 			t.Fatalf("report %q, want %q", got, c.want)
+		}
+	}
+}
+
+// REQ: LOG-4
+// A stale copy of the log that the anchor still takes (the entries after
+// the last owner action are missing) opens and deletes nothing: the
+// subject it lacks is an unnamed key and its item an unlogged one, and
+// once the real log is back the item reads and nothing is missing
+// (Security, #4395). Revert mutant: the start deleting unnamed keys or
+// unlogged items.
+func TestAStaleLogTheAnchorTakesDeletesNothing(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	b.addTarget("drive", false)
+	old := b.logBytes()
+	sub := b.subject()
+	item := b.seal(sub, []byte(canary))
+	real := b.logBytes()
+	b.h.Close()
+	if err := os.WriteFile(b.cfg.Log, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if got := b.h.Content(); !slices.Equal(got.Unnamed, []string{sub}) || len(got.Missing) != 0 {
+		t.Fatalf("the stale start reported %+v, want only %s unnamed", got, sub)
+	}
+	if got, want := b.h.Unlogged(), []string{"vision/" + hex.EncodeToString(item[:])}; !slices.Equal(got, want) {
+		t.Fatalf("the stale start reported unlogged %q, want %q", got, want)
+	}
+	b.h.Close()
+	if err := os.WriteFile(b.cfg.Log, real, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.open()
+	if got := b.h.Content(); len(got.Missing)+len(got.Unnamed) != 0 || len(b.h.Unlogged()) != 0 {
+		t.Fatalf("with the real log back the start reported %+v and unlogged %q", got, b.h.Unlogged())
+	}
+	if !readsBack(t, b, item) {
+		t.Fatal("with the real log back the item does not read")
+	}
+}
+
+// REQ: LOG-4
+// Only an item file under its canonical name (lowercase hex, .item) is an
+// item: an uppercase-hex name or a bare hash is neither reported nor
+// removed (#4414). Revert mutant: unlogged without its name check.
+func TestOnlyACanonicalItemNameIsReportedUnlogged(t *testing.T) {
+	b := newBBox(t, recipientWire(t, testRK))
+	h := sha256.Sum256([]byte("not logged"))
+	x := hex.EncodeToString(h[:])
+	odd := []string{strings.ToUpper(x) + itemExt, x}
+	for _, f := range odd {
+		if err := os.WriteFile(filepath.Join(b.storeDir(), f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.restart()
+	if got := b.h.Unlogged(); len(got) != 0 {
+		t.Fatalf("the start reported unlogged %q for non-item names", got)
+	}
+	if got := names(t, b.storeDir()); !slices.Equal(got, slices.Sorted(slices.Values(odd))) {
+		t.Fatalf("the store holds %q, want %q kept", got, odd)
+	}
+}
+
+// REQ: BAK-1
+// A restore holds the lock beside the content folder over its sweep and
+// its staging: a second restore into the same parent while the first is
+// writing is refused and removes nothing, the first then completes whole,
+// and once it is over the second runs (#4413). Revert mutants: no lock
+// (the second's sweep removes the first's live staging); the lock taken
+// after the sweep.
+func TestARestoreHoldsTheLockOverItsSweep(t *testing.T) {
+	ct := []byte("a sealed item")
+	sec := map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))}
+	parent := t.TempDir()
+	paused, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	first := objectWith(t, sec)
+	go func() {
+		once := false
+		done <- restoreSections(first, nil, filepath.Join(parent, "a"), func(int) bool {
+			if !once {
+				once = true
+				close(paused)
+				<-release
+			}
+			return false
+		})
+	}()
+	<-paused
+	if err := RestoreSections(objectWith(t, sec), nil, filepath.Join(parent, "b")); !errors.Is(err, ErrRestoreLocked) {
+		close(release)
+		<-done
+		t.Fatalf("a restore beside a running one: %v, want ErrRestoreLocked", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("the first restore: %v", err)
+	}
+	want := []string{itemName(sha256.Sum256(ct))}
+	if got := names(t, filepath.Join(parent, "a", "vision")); !slices.Equal(got, want) {
+		t.Fatalf("the first restore put back %q", got)
+	}
+	if err := RestoreSections(objectWith(t, sec), nil, filepath.Join(parent, "b")); err != nil {
+		t.Fatalf("the second restore once the first is over: %v", err)
+	}
+	if got := names(t, filepath.Join(parent, "b", "vision")); !slices.Equal(got, want) {
+		t.Fatalf("the second restore put back %q", got)
+	}
+	if got := stages(t, parent); len(got) != 0 {
+		t.Fatalf("stagings left: %q", got)
+	}
+}
+
+// REQ: BAK-1
+// A restore that cannot take its lock, list the content folder's parent or
+// remove a crashed staging there stops with that error and puts nothing
+// in place (#4413). Revert mutants: each of those errors ignored.
+func TestARestoreStopsOnAParentItCannotUse(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the modes; CI runs these as a plain user")
+	}
+	ct := []byte("a sealed item")
+	for _, c := range []struct {
+		name string
+		mode os.FileMode
+		// at makes what c locks down, in parent, and returns it.
+		at func(parent string) string
+	}{
+		{"lock", 0o500, func(p string) string { return p }},
+		{"list", 0o300, func(p string) string {
+			// The lock is there already, so only the listing fails.
+			if err := os.WriteFile(filepath.Join(p, restoreLock), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"remove", 0o500, func(p string) string {
+			left := filepath.Join(p, restoreStage+"crash")
+			if err := os.MkdirAll(filepath.Join(left, "vision"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return left
+		}},
+	} {
+		parent := t.TempDir()
+		dir := c.at(parent)
+		if err := os.Chmod(dir, c.mode); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o700) })
+		obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
+		if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("no %s: %v, want a permission error", c.name, err)
+		}
+		os.Chmod(dir, 0o700)
+		if _, err := os.Stat(filepath.Join(parent, "content")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("no %s: the content folder is in place: %v", c.name, err)
 		}
 	}
 }
