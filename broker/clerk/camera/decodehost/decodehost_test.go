@@ -203,6 +203,9 @@ func TestServeRefusesABadSpec(t *testing.T) {
 	if err := Serve(context.Background(), c, Config{Start: st.start, Root: "/r", MemBytes: 1}); !errors.Is(err, ErrConfig) {
 		t.Errorf("no cgroup: %v", err)
 	}
+	if err := Serve(context.Background(), c, Config{Start: st.start, Root: "/r", Cgroup: "/c"}); !errors.Is(err, ErrConfig) {
+		t.Errorf("no memory cap: %v", err)
+	}
 }
 
 // TestServeEndsWithTheSandbox: a sandbox that exits ends the session,

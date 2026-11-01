@@ -490,6 +490,8 @@ jobs:
           sudo mkdir -p $L/root/proc $L/root/dev $L/root/sys
           $G CGO_ENABLED=0 go build -o $L/root/oneshot ./vm/gvisor/testdata/oneshot
           $G go test -c -o $L/camdecode.test ./cmd/agentos-camdecode-host
+          # The clerk's user cannot read the runner's checkout.
+          sudo install -m 0644 ../tools/camdecode_sessions.py $L/
           sudo chmod -R a+rX $L
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin agentos-camera
           # The clerk's directories as the image makes them, and every path the main side's mask names.
@@ -508,7 +510,7 @@ jobs:
           sudo systemctl daemon-reload || { sudo journalctl -b --no-pager -n 150 -o short-precise; exit 1; }
           sudo systemctl start agentos-camdecode.socket
           rc=0
-          sudo setpriv --reuid=agentos-camera --regid=agentos-camera --clear-groups python3 -I ../tools/camdecode_sessions.py \
+          sudo setpriv --reuid=agentos-camera --regid=agentos-camera --clear-groups python3 -I $L/camdecode_sessions.py \
             /run/agentos-camdecode/conn.sock "$(id -u agentos-camera)" > /tmp/camdecode-sessions.log 2>&1 || rc=$?
           cat /tmp/camdecode-sessions.log
           # Another user is refused the socket.
