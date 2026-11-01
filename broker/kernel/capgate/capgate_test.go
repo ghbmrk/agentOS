@@ -486,8 +486,12 @@ func TestEarlierDayAfterPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.Paused()
+	c.step(time.Nanosecond) // asked after the pause, so only the day can refuse it
 	if err := g.Summary(g.Ask(), 4, capped(1000, 0, "backup")); !errors.Is(err, ErrSummary) {
 		t.Fatalf("an earlier day after a pause: %v", err)
+	}
+	if err := g.Summary(g.Ask(), 5, capped(1000, 0, "backup")); err != nil {
+		t.Fatalf("the same day after a pause: %v", err)
 	}
 }
 
