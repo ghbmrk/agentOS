@@ -521,9 +521,11 @@ jobs:
           sudo setpriv --reuid=agentos-camera --regid=agentos-camera --clear-groups python3 -I $L/camdecode_sessions.py \
             /run/agentos-camdecode/conn.sock "$(id -u agentos-camera)" > /tmp/camdecode-sessions.log 2>&1 || rc=$?
           cat /tmp/camdecode-sessions.log
-          # Another user is refused the socket.
-          ! sudo setpriv --reuid=nobody --regid=nogroup --clear-groups python3 -I -c \
-            'import socket; socket.socket(socket.AF_UNIX).connect("/run/agentos-camdecode/conn.sock")' 2>/dev/null
+          # Another user is refused the socket (an "if", since set -e ignores a "!" command).
+          if sudo setpriv --reuid=nobody --regid=nogroup --clear-groups python3 -I -c \
+            'import socket; socket.socket(socket.AF_UNIX).connect("/run/agentos-camdecode/conn.sock")' 2>/dev/null; then
+            echo "FAIL: nobody opened a decoder session"; exit 1
+          fi
           sudo journalctl -u 'agentos-camdecode@*' -o cat --no-pager > /tmp/camdecode-unit.log || true
           tail -n 80 /tmp/camdecode-unit.log
           [ "$rc" -eq 0 ]

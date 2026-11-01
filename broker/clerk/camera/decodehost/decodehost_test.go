@@ -30,6 +30,7 @@ type sandbox struct {
 	inR, outR *io.PipeReader
 	inW, outW *io.PipeWriter
 	done      chan struct{}
+	stopped   chan struct{}
 	once      sync.Once
 }
 
@@ -37,7 +38,7 @@ func (p *sandbox) In() io.Writer         { return p.inW }
 func (p *sandbox) Out() io.Reader        { return p.outR }
 func (p *sandbox) Done() <-chan struct{} { return p.done }
 func (p *sandbox) Stop() {
-	p.once.Do(func() { p.inW.Close(); p.inR.Close(); p.outW.Close(); p.outR.Close() })
+	p.once.Do(func() { close(p.stopped); p.inW.Close(); p.inR.Close(); p.outW.Close(); p.outR.Close() })
 	<-p.done
 }
 
@@ -46,6 +47,9 @@ type starts struct {
 	mu      sync.Mutex
 	streams []gvisor.Stream
 	running int
+	// hung, if set, makes each sandbox read nothing and write nothing
+	// until it is stopped or hung is closed.
+	hung chan struct{}
 }
 
 func (s *starts) start(_ context.Context, st gvisor.Stream) (camera.Proc, error) {
@@ -53,7 +57,16 @@ func (s *starts) start(_ context.Context, st gvisor.Stream) (camera.Proc, error)
 	if err != nil {
 		return nil, err
 	}
-	p := &sandbox{done: make(chan struct{})}
+	p := &sandbox{done: make(chan struct{}), stopped: make(chan struct{})}
+	run := func(in io.Reader, out io.Writer) { camdecode.Run(in, out, c) }
+	if s.hung != nil {
+		run = func(io.Reader, io.Writer) {
+			select {
+			case <-s.hung:
+			case <-p.stopped:
+			}
+		}
+	}
 	p.inR, p.inW = io.Pipe()
 	p.outR, p.outW = io.Pipe()
 	s.mu.Lock()
@@ -62,7 +75,8 @@ func (s *starts) start(_ context.Context, st gvisor.Stream) (camera.Proc, error)
 	s.mu.Unlock()
 	go func() {
 		defer close(p.done)
-		camdecode.Run(p.inR, p.outW, c)
+		go func() { <-p.stopped; p.inR.Close(); p.outW.Close() }()
+		run(p.inR, p.outW)
 		p.outW.Close()
 		s.mu.Lock()
 		s.running--
@@ -229,6 +243,49 @@ func TestServeEndsWithTheSandbox(t *testing.T) {
 	}
 	if n, running := st.state(); n != 1 || running != 0 {
 		t.Errorf("%d started, %d running", n, running)
+	}
+}
+
+// TestServeEndsWhenTheClerkHangsUpOnAHungSandbox: a sandbox that stops
+// reading its input still ends with the session. The clerk's hang-up is
+// seen on the socket, not by the copy blocked writing into the sandbox,
+// so the sandbox is stopped and the unit's process ends.
+func TestServeEndsWhenTheClerkHangsUpOnAHungSandbox(t *testing.T) {
+	st := &starts{hung: make(chan struct{})}
+	defer close(st.hung)
+	sock, served := unit(t, st)
+	p, err := camera.DialDecoder(sock)(context.Background(), camera.Spec{Video: picture, Thermal: lepton})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the sandbox", func() bool { n, _ := st.state(); return n == 1 })
+	// Fill the socket and the copy: the sandbox takes none of it.
+	go func() {
+		b := make([]byte, 1<<16)
+		for {
+			if _, err := p.In().Write(b); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+	stopped := make(chan struct{})
+	go func() { p.Stop(); close(stopped) }()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session outlived the clerk's hang-up")
+	}
+	if _, running := st.state(); running != 0 {
+		t.Error("the hung sandbox still runs")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Error("the clerk's Stop waited past the unit's close")
 	}
 }
 
