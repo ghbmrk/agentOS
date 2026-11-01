@@ -116,6 +116,10 @@ exempt-pr 4254
 # Remove once #4295 merges.
 exempt-pr 4295
 
+# #4377 (ENF-cap-trip part a, #4174): broker/enforcer/channel/, traffic/ and wire/, and broker/daemon/arc2_test.go, which the G2 list does not name (D-198).
+# Remove once #4377 merges.
+exempt-pr 4377
+
 # #4149 (CAM-4148): broker/camnode/capture/ and broker/clerk/camera/, which the G2 list does not name (D-198).
 # Remove once #4149 merges.
 exempt-pr 4149
