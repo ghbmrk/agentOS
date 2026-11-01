@@ -2,6 +2,7 @@ package radio_test
 
 import (
 	"bufio"
+	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/radio"
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/confine"
@@ -242,13 +245,17 @@ func TestStackOnlyDeclaredOps(t *testing.T) {
 }
 
 // TestSrpReachesController (NET-2 Confined radio stacks; spikes/ENF-radio
-// consequence 1): ot-daemon, built by tools/build-openthread.sh and run under
-// confine.Thread with a simulated radio, forms a network through the
-// adapter; a simulated Thread node joins it and registers a service over
-// SRP; and a process in the Matter controller's profile, joined to the
-// Thread namespace, resolves that service over mDNS on infra0, the
-// namespace having no LAN interface. Catches the spike's one unverified
-// inference (that ot-daemon advertises on a dummy link).
+// consequence 1; #4369): ot-daemon, built static and position-independent
+// by tools/build-openthread.sh (checked) and run under confine.Thread with its view
+// (its state and run directories, a simulated radio's serial device, the
+// tun device and /dev/urandom, and nothing else), forms a network through
+// the adapter, which sees only the run directory; a simulated Thread node
+// joins it and registers a service over SRP; and a process in the Matter
+// controller's profile, joined to the Thread namespace and seeing only
+// its storage, resolves that service over mDNS on infra0, the namespace
+// having no LAN interface. Catches the spike's one unverified inference
+// (that ot-daemon advertises on a dummy link), and a Thread, adapter or
+// Matter view that leaves out what its stack needs.
 func TestSrpReachesController(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
@@ -266,39 +273,60 @@ func TestSrpReachesController(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
-	os.Chmod(root, 0o755)
-	bin := filepath.Join(root, "bin")
-	state := filepath.Join(root, "state")
-	os.Mkdir(bin, 0o755)
-	os.Mkdir(state, 0o700)
-	if err := os.Chown(state, uid, uid); err != nil {
+	if root, err = filepath.EvalSymlinks(root); err != nil {
 		t.Fatal(err)
 	}
+	os.Chmod(root, 0o755)
+	bin := filepath.Join(root, "bin")
+	os.Mkdir(bin, 0o755)
+	own := func(name string, uid int) string {
+		d := filepath.Join(root, name)
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(d, uid, uid); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	state, run, storage := own("state", uid), own("run", uid), own("matter", matterUID)
 	for _, f := range []string{"ot-daemon", "ot-rcp", "ot-cli-ftd"} {
 		copyExe(t, filepath.Join(src, f), filepath.Join(bin, f))
 	}
 	self := filepath.Join(bin, "radio.test")
 	copyExe(t, os.Args[0], self)
-
-	args, err := thread.DaemonArgs("spinel+hdlc+forkpty://"+filepath.Join(bin, "ot-rcp")+"?forkpty-arg=1", state, true)
-	if err != nil {
-		t.Fatal(err)
-	}
+	staticPIE(t, filepath.Join(bin, "ot-daemon"))
 	logs := &logWriter{t: t}
 	defer func() {
 		if t.Failed() {
 			logs.dump()
 		}
 	}()
-	daemon, iface, err := confine.Start(confine.Spec{Profile: confine.Thread(uid, uid), Path: filepath.Join(bin, "ot-daemon"),
-		Args: args, Dir: state, Self: self, Stderr: logs})
+
+	// The simulated radio and node run outside the stack, in the test's
+	// own network namespace, where they reach each other over lo; the
+	// radio's end of a pty is the serial device ot-daemon opens, as it
+	// opens the RCP's on the enforcer.
+	tty, rcp := simRadio(t, filepath.Join(bin, "ot-rcp"), uid, logs)
+	defer func() { rcp.Process.Kill(); rcp.Wait() }()
+
+	args, err := thread.DaemonArgs("spinel+hdlc+uart://"+tty+"?uart-baudrate=115200", state, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon, iface, err := confine.Start(confine.Spec{Profile: confine.Thread(uid, uid, state, run, tty),
+		Path: filepath.Join(bin, "ot-daemon"), Args: args, Dir: run, Self: self, Stderr: logs})
 	if err != nil {
 		t.Fatal(err)
 	}
 	iface.Close()
 	defer daemon.Stop()
-	ad, conn, err := confine.Start(confine.Spec{Profile: confine.ThreadAdapter(uid, uid), Path: self,
-		Args: []string{thread.AdapterArg}, Dir: state, Self: self, Stderr: logs})
+	// The adapter is this cgo-linked test binary, so its view also has the
+	// loader; the enforcer's binary is static.
+	adapter := confine.ThreadAdapter(uid, uid, run)
+	adapter.View = append(adapter.View, confine.Loader()...)
+	ad, conn, err := confine.Start(confine.Spec{Profile: adapter, Path: self,
+		Args: []string{thread.AdapterArg}, Dir: run, Self: self, Stderr: logs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,12 +351,12 @@ func TestSrpReachesController(t *testing.T) {
 
 	// The test, as root, reads the dataset off ot-daemon's socket to hand
 	// to the simulated node (the adapter never returns it).
-	dataset, err := ask(filepath.Join(state, thread.Socket), "dataset active -x")
+	dataset, err := ask(filepath.Join(run, thread.Socket), "dataset active -x")
 	if err != nil || len(dataset) != 1 {
 		t.Fatalf("dataset: %q %v", dataset, err)
 	}
 
-	// The simulated node shares the namespace's lo with the simulated RCP.
+	// The simulated node shares the test's lo with the simulated RCP.
 	nodeDir := filepath.Join(root, "node")
 	os.MkdirAll(filepath.Join(nodeDir, "tmp"), 0o755)
 	node := exec.Command(filepath.Join(bin, "ot-cli-ftd"), "2")
@@ -338,7 +366,7 @@ func TestSrpReachesController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := daemon.InNet(node.Start); err != nil {
+	if err := node.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { node.Process.Kill(); node.Wait() }()
@@ -349,7 +377,9 @@ func TestSrpReachesController(t *testing.T) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	matter, mconn, err := confine.Start(confine.Spec{Profile: confine.Matter(matterUID, matterUID), Net: daemon,
+	mp := confine.Matter(matterUID, matterUID, storage)
+	mp.View = append(mp.View, confine.Loader()...)
+	matter, mconn, err := confine.Start(confine.Spec{Profile: mp, Net: daemon,
 		Path: self, Args: []string{mdnsArg, "_agentos._udp"}, Self: self, Stderr: logs})
 	if err != nil {
 		t.Fatal(err)
@@ -374,6 +404,66 @@ func TestSrpReachesController(t *testing.T) {
 		}
 	}
 	t.Fatalf("the Matter controller's namespace did not resolve the SRP service; heard %q", heard)
+}
+
+// staticPIE fails unless the binary at p is static, as its view (no
+// loader) needs, and position-independent, so it keeps ASLR: an ET_DYN
+// with no interpreter (#4445 Security).
+func staticPIE(t *testing.T, p string) {
+	t.Helper()
+	f, err := elf.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.Type != elf.ET_DYN {
+		t.Errorf("%s is %v, want ET_DYN (static-pie)", p, f.Type)
+	}
+	for _, pr := range f.Progs {
+		if pr.Type == elf.PT_INTERP {
+			t.Errorf("%s names a loader; its view holds none", p)
+		}
+	}
+}
+
+// simRadio starts the simulated RCP, node 1, on a pty's master side and
+// returns the pty's other side, the serial device ot-daemon opens, owned
+// by the Thread stack's user.
+func simRadio(t *testing.T, rcp string, uid int, logs io.Writer) (string, *exec.Cmd) {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	if err := unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		t.Fatal(err)
+	}
+	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tty := fmt.Sprintf("/dev/pts/%d", n)
+	if err := os.Chown(tty, uid, uid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tty, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The test holds the device open too, so the master side sees no
+	// hangup before ot-daemon opens it (the RCP exits on one).
+	held, err := os.OpenFile(tty, os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { held.Close() })
+	cmd := exec.Command(rcp, "1")
+	cmd.Dir = filepath.Dir(rcp)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = master, master, logs
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return tty, cmd
 }
 
 // ask sends one command to ot-daemon's socket and returns its lines.

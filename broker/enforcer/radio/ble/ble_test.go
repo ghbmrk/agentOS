@@ -1090,10 +1090,9 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 		probe = "none"
 	}
 	// The view is the test's bus, and the loader this cgo-linked (so
-	// dynamic) test binary needs; the enforcer's binary is static. A
-	// path the host lacks is left out.
+	// dynamic) test binary needs; the enforcer's binary is static.
 	p := confine.BLE(uid, uid)
-	p.View = []string{bus, "/lib", "/lib64", "/usr/lib", "/usr/lib64"}
+	p.View = append([]confine.Entry{{Path: bus, Kind: confine.Socket}}, confine.Loader()...)
 	proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 		Args: []string{stackArg, arg, probe}, Stderr: testLog{t}})
 	if err != nil {
@@ -1191,3 +1190,17 @@ type allSignals func(*Message)
 
 func (allSignals) wants(*Message) bool { return true }
 func (f allSignals) signal(m *Message) { f(m) }
+
+// TestBusIsTheViewsBus (NET-2; #4384): the bus a stack dials by default is
+// the one socket confine.BLE's view shows it. ble cannot import confine
+// (it would link os/exec, which only confine may; childproc's gate), so
+// the two constants are held equal here. Catches the view and the client
+// drifting apart, which would leave the stack no bus.
+func TestBusIsTheViewsBus(t *testing.T) {
+	if SystemBus != confine.SystemBus {
+		t.Errorf("ble dials %s; confine.BLE's view shows %s", SystemBus, confine.SystemBus)
+	}
+	if v := confine.BLE(1, 1).View; len(v) != 1 || v[0] != (confine.Entry{Path: SystemBus, Kind: confine.Socket}) {
+		t.Errorf("confine.BLE's view %+v", v)
+	}
+}

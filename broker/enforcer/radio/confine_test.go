@@ -148,19 +148,19 @@ func ptraceChild(func(error) string) string {
 	return fmt.Sprintf("untested: malformed seize %d, seize %d", malformed, e)
 }
 
-// loader is what this test binary needs to run in a view: it links cgo
-// (net), so it is dynamic, while the enforcer's binary is static
-// (image/build.sh). A path the host lacks is left out of the view.
-var loader = []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64"}
-
-// bleProbe is the BLE profile with its view widened by the loader, and by
-// /proc, which probeStack reads for its interfaces and execs itself from
-// for its ptrace target. The policy and the page stay outside the view.
-func bleProbe(uid uint32) confine.Profile {
-	p := confine.BLE(uid, uid)
-	p.View = slices.Concat(p.View, loader, []string{"/proc"})
+// probeView widens a profile's view by what this test binary needs to run
+// as its stack: the loader, since it links cgo (net) and so is dynamic,
+// while the enforcer's binary is static (image/build.sh); and /proc,
+// which the probes read for their interfaces and status and exec
+// themselves from for their ptrace target. The policy and the page stay
+// outside the view.
+func probeView(p confine.Profile) confine.Profile {
+	p.View = slices.Concat(p.View, confine.Loader(), []confine.Entry{{Path: "/proc", Kind: confine.Dir}})
 	return p
 }
+
+// bleProbe is the BLE profile widened by probeView.
+func bleProbe(uid uint32) confine.Profile { return probeView(confine.BLE(uid, uid)) }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
 // again as root of a user namespace that maps the runner's subordinate ids
