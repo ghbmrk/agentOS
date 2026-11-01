@@ -294,7 +294,7 @@ class ClashTest(unittest.TestCase):
         step = ci[ci.index("python tests/records_audit.py"):]
         step = step[step.index("\n      - "):][1:]
         step = step[:step.index("\n      - ")]
-        self.assertEqual(step.splitlines()[1:], ["        if: env.RECORDS != 'true'",
+        self.assertEqual(step.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                                                  '        run: python tests/clash_audit.py "$RUNNER_TEMP/reads"'])
 
 
