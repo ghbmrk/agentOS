@@ -122,6 +122,10 @@ type Config struct {
 	Fingerprint func(device string) ([wire.HashLen]byte, bool)
 	// Traffic is a device's traffic summary (slice i).
 	Traffic func(device string) ([]byte, error)
+	// Counts is the enforcer's byte-cap counts as of the request
+	// (broker/enforcer/traffic Counter.Counts after a fresh reading), the
+	// summary the kernel's check reads (NET-2 Byte caps, #4174).
+	Counts func() (wire.Counts, error)
 	// Answer hands the core's answer to a device challenge back to the
 	// device that asked (slice k).
 	Answer func(id uint64, data []byte)

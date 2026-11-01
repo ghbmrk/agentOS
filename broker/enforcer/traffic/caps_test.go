@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 )
 
 // REQ: NET-2, KRN-12, A18
@@ -30,15 +32,22 @@ func reading(gen uint64, edge uint64, kv ...any) Reading {
 	return r
 }
 
-func group(t *testing.T, cs Counts, dest string) Group {
+// grp is a count group as the tests read it: its names, cap and count.
+type grp struct {
+	Dests []string
+	Cap   uint64
+	Count uint64
+}
+
+func groupOf(t *testing.T, cs wire.Counts, dest string) grp {
 	t.Helper()
 	for _, g := range cs.Groups {
-		if slices.Contains(g.Dests, dest) {
-			return g
+		if slices.Contains(g.Names(), dest) {
+			return grp{g.Names(), g.Cap(), g.Count}
 		}
 	}
 	t.Fatalf("no group holds %s in %+v", dest, cs.Groups)
-	return Group{}
+	return grp{}
 }
 
 // TestCapEdgeAtTheEnforcer: a group's count at its cap passes and one byte
@@ -74,7 +83,7 @@ func TestEveryReadByteCountsOnce(t *testing.T) {
 	c.Add(reading(1, 0, addrA, 40))
 	c.Add(reading(1, 0, addrA, 40))
 	c.Add(reading(1, 0, addrA, 70)) // a retransmission of 30 bytes
-	if g := group(t, c.Counts(), "a.example"); g.Count != 70 {
+	if g := groupOf(t, c.Counts(), "a.example"); g.Count != 70 {
 		t.Fatalf("count %d, want 70", g.Count)
 	}
 }
@@ -90,7 +99,7 @@ func TestCounterRestarts(t *testing.T) {
 	c.Add(reading(2, 5, addrA, 70)) // reloaded: 70 more, 5 more
 	c.Add(reading(2, 5, addrA, 10)) // fell within Gen 2: restarted, 10 more
 	cs := c.Counts()
-	if g := group(t, cs, "a.example"); g.Count != 140 {
+	if g := groupOf(t, cs, "a.example"); g.Count != 140 {
 		t.Fatalf("count %d, want 60+70+10", g.Count)
 	}
 	if cs.EdgeCount != 25 {
@@ -113,7 +122,7 @@ func TestGroupsMergeAndAdd(t *testing.T) {
 		t.Fatalf("groups %+v, want two", cs.Groups)
 	}
 	c.Resolved("b.example", addrA) // now shares a.example's address
-	g := group(t, c.Counts(), "a.example")
+	g := groupOf(t, c.Counts(), "a.example")
 	if !slices.Equal(g.Dests, []string{"a.example", "b.example"}) || g.Cap != 200 || g.Count != 170 {
 		t.Fatalf("merged group %+v, want both, cap 200, count 170", g)
 	}
@@ -135,8 +144,8 @@ func TestEveryCappedDestinationHasACount(t *testing.T) {
 	cs := c.Counts()
 	var all []string
 	for _, g := range cs.Groups {
-		all = append(all, g.Dests...)
-		if g.Count != 0 || g.Cap != 100 {
+		all = append(all, g.Names()...)
+		if g.Count != 0 || g.Cap() != 100 {
 			t.Fatalf("fresh group %+v", g)
 		}
 	}
@@ -159,18 +168,18 @@ func TestTheDayRestartsOnTheEnforcersClock(t *testing.T) {
 	c.Resolved("a.example", addrA)
 	c.Add(reading(1, 30, addrA, 90))
 	clk.t = noon.Add(12*time.Hour - time.Nanosecond)
-	if g := group(t, c.Counts(), "a.example"); g.Count != 90 {
+	if g := groupOf(t, c.Counts(), "a.example"); g.Count != 90 {
 		t.Fatalf("before midnight: %d", g.Count)
 	}
 	clk.t = noon.Add(12 * time.Hour)
 	cs := c.Counts()
-	if cs.Day != Day(noon)+1 || group(t, cs, "a.example").Count != 0 || cs.EdgeCount != 0 {
+	if cs.Day != Day(noon)+1 || groupOf(t, cs, "a.example").Count != 0 || cs.EdgeCount != 0 {
 		t.Fatalf("after midnight: %+v", cs)
 	}
 	c.Add(reading(1, 30, addrA, 150)) // 60 more today
 	clk.t = noon                      // set back a day
 	cs = c.Counts()
-	if cs.Day != Day(noon)+1 || group(t, cs, "a.example").Count != 60 {
+	if cs.Day != Day(noon)+1 || groupOf(t, cs, "a.example").Count != 60 {
 		t.Fatalf("clock set back: %+v", cs)
 	}
 }
@@ -187,7 +196,7 @@ func TestCarriedOverAddressKeepsItsGroup(t *testing.T) {
 	if o := c.Add(reading(1, 0, addrA, 60)); len(o) != 0 {
 		t.Fatalf("carried over: %+v", o)
 	}
-	if g := group(t, c.Counts(), "a.example"); g.Count != 50 {
+	if g := groupOf(t, c.Counts(), "a.example"); g.Count != 50 {
 		t.Fatalf("carried over count %d, want 50", g.Count)
 	}
 }
@@ -217,12 +226,12 @@ func TestRetiredDestinationKeepsItsCap(t *testing.T) {
 	if o := c.Add(reading(1, 0, addrB, 90)); len(o) != 0 {
 		t.Fatalf("after b.example left the list: %+v", o)
 	}
-	if g := group(t, c.Counts(), "b.example"); g.Cap != 100 || g.Count != 90 {
+	if g := groupOf(t, c.Counts(), "b.example"); g.Cap != 100 || g.Count != 90 {
 		t.Fatalf("retired group %+v", g)
 	}
 	clk.t = noon.Add(36 * time.Hour)
 	for _, g := range c.Counts().Groups {
-		if slices.Contains(g.Dests, "b.example") {
+		if slices.Contains(g.Names(), "b.example") {
 			t.Fatalf("b.example still counted two days later: %+v", g)
 		}
 	}
@@ -258,12 +267,12 @@ func TestYesterdaysSharedAddressMergesOnlyWhenLive(t *testing.T) {
 		t.Fatalf("yesterday's shared address, idle today: %d groups, want 2", n)
 	}
 	c.Add(reading(1, 0, addrA, 1))
-	if g := group(t, c.Counts(), "a.example"); len(g.Dests) != 2 || g.Count != 1 {
+	if g := groupOf(t, c.Counts(), "a.example"); len(g.Dests) != 2 || g.Count != 1 {
 		t.Fatalf("yesterday's shared address carrying bytes today: %+v", g)
 	}
 	clk.t = noon.Add(37 * time.Hour) // a day later, idle
 	c.Resolved("b.example", addrA)
-	if g := group(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
+	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
 		t.Fatalf("re-resolved for b.example alone today: %+v", g)
 	}
 }

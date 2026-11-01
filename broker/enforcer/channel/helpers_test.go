@@ -248,9 +248,12 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 		Cut:         r.cut,
 		Fingerprint: func(string) ([wire.HashLen]byte, bool) { return sha256.Sum256([]byte("fp")), true },
 		Traffic:     func(d string) ([]byte, error) { return []byte("traffic of " + d), nil },
-		Answer:      func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
-		Log:         func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
-		Now:         func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
+		Counts: func() (wire.Counts, error) {
+			return wire.Counts{Day: 1, Groups: []wire.CountGroup{{Dests: []wire.CountDest{{Name: "a.example", Cap: 9}}, Count: 3}}}, nil
+		},
+		Answer: func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
+		Log:    func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
+		Now:    func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
 	}
 	if cfg != nil {
 		cfg(&c)

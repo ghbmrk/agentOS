@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -856,6 +857,7 @@ func TestTripPausesUntilRestore(t *testing.T) {
 			"export":      wire.Read{ID: id + 3, What: wire.ReadExport},
 			"fingerprint": wire.Read{ID: id + 4, What: wire.ReadFingerprint, Device: "lock"},
 			"summary":     wire.Read{ID: id + 5, What: wire.ReadTraffic, Device: "lamp"},
+			"counts":      wire.Read{ID: id + 9, What: wire.ReadCounts},
 			"announce":    wire.Announce{ID: id + 6},
 			"head":        wire.Head{ID: id + 7},
 			"entry":       wire.Entry{ID: id + 8, Body: []byte{1}},
@@ -870,7 +872,7 @@ func TestTripPausesUntilRestore(t *testing.T) {
 		for range rounds {
 			cl := r.dial()
 			n := len(r.events())
-			id += 10
+			id += 20
 			for name, m := range requests(id) {
 				w, ok := want[name]
 				if !ok {
@@ -911,10 +913,10 @@ func TestTripPausesUntilRestore(t *testing.T) {
 	if c := cl.code(wire.Read{ID: 2100, What: wire.ReadTraffic, Device: "lamp"}); c != wire.OK {
 		t.Fatalf("reflashed: a summary after a run of Paused answers: %v", c)
 	}
-	check("reflashed", 12, map[string]wire.Code{"summary": wire.OK})
+	check("reflashed", 12, map[string]wire.Code{"summary": wire.OK, "counts": wire.OK})
 	r.cut.set(Open)
 	check("restored", 1, map[string]wire.Code{"command": wire.OK, "tighten": wire.OK, "state": wire.OK, "export": wire.OK,
-		"fingerprint": wire.OK, "summary": wire.OK, "announce": wire.OK, "head": wire.OK, "entry": wire.OK})
+		"fingerprint": wire.OK, "summary": wire.OK, "counts": wire.OK, "announce": wire.OK, "head": wire.OK, "entry": wire.OK})
 	if r.cut.trips() != 0 {
 		t.Errorf("%d trips: a paused request tripped the core", r.cut.trips())
 	}
@@ -937,5 +939,54 @@ func TestTruncatedFrameOnlyEnds(t *testing.T) {
 	<-cl.done
 	if r.cut.trips() != 0 {
 		t.Fatal("a truncated frame tripped the core")
+	}
+}
+
+// TestCountRead (NET-2 Byte caps, #4174): the count read names no device
+// and returns the enforcer's counts in the shared format's one encoding,
+// which the kernel decodes; with no counts source it is refused, and a
+// source that fails answers Failed, never a partial count. An honest
+// kernel reading once each wire.SummaryInterval for a day, and once at
+// exactly twice it after a gap, is never limited or tripped. Revert
+// mutant: ReadCounts left out of summaryRead (TestTripPausesUntilRestore).
+func TestCountRead(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	rep, ok := cl.do(wire.Read{ID: 1, What: wire.ReadCounts}).(wire.ReadReply)
+	if !ok {
+		t.Fatalf("count read: %+v", rep)
+	}
+	cs, err := wire.DecodeCounts(rep.Body)
+	if err != nil || cs.Day != 1 || len(cs.Groups) != 1 || cs.Groups[0].Count != 3 || cs.Groups[0].Cap() != 9 {
+		t.Fatalf("counts %+v, %v", cs, err)
+	}
+	for i := range 24 * 60 {
+		r.advance(wire.SummaryInterval)
+		if c := cl.code(wire.Read{ID: uint64(10 + i), What: wire.ReadCounts}); c != wire.OK {
+			t.Fatalf("read %d at the summary interval: %v", i, c)
+		}
+	}
+	r.advance(2 * wire.SummaryInterval)
+	if c := cl.code(wire.Read{ID: 5000, What: wire.ReadCounts}); c != wire.OK || r.cut.trips() != 0 {
+		t.Fatalf("read at twice the interval: %v, %d trips", c, r.cut.trips())
+	}
+
+	none := newRig(t, func(c *Config) { c.Counts = nil })
+	if c := none.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Refused {
+		t.Errorf("no counts source: %v", c)
+	}
+	broken := newRig(t, func(c *Config) {
+		c.Counts = func() (wire.Counts, error) { return wire.Counts{}, errors.New("nft down") }
+	})
+	if c := broken.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Failed {
+		t.Errorf("failing source: %v", c)
+	}
+	bad := newRig(t, func(c *Config) {
+		c.Counts = func() (wire.Counts, error) {
+			return wire.Counts{Groups: []wire.CountGroup{{Count: 1}}}, nil // an empty group: outside the format
+		}
+	})
+	if c := bad.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Failed {
+		t.Errorf("source outside the format: %v", c)
 	}
 }

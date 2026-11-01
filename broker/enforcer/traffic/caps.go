@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 )
 
 // This file is the enforcer's byte-cap count (SPEC NET-2 Byte caps, D-248,
@@ -45,22 +47,14 @@ const (
 	BoxEdge Box = 2
 )
 
-// Group is one cap group on the enforcer's day: its destinations, sorted,
-// their one cap and the bytes the core sent them.
-type Group struct {
-	Dests []string
-	Cap   uint64
-	Count uint64
-}
-
-// Counts is the count the kernel reads (NET-2 Byte caps): the enforcer's
-// day, every capped core destination in exactly one group, and the edge
-// segment's cap and count.
-type Counts struct {
-	Day       uint32
-	Groups    []Group
-	EdgeCap   uint64
-	EdgeCount uint64
+// group is one cap group on the enforcer's day: its destinations, sorted,
+// each one's own cap, their one cap (the sum, saturating) and the bytes
+// the core sent them.
+type group struct {
+	dests []string
+	own   []uint64
+	cap   uint64
+	count uint64
 }
 
 // Overrun is a cap passed: a trip at the enforcer that cuts Box. A core
@@ -76,10 +70,6 @@ type Overrun struct {
 // Day is t's enforcer day: whole days since the Unix epoch, in UTC, so the
 // day has no zone or daylight-saving change to get wrong.
 func Day(t time.Time) uint32 { return uint32(t.Unix() / 86400) }
-
-// pastCap is the cap edge both sides share: at the cap passes, past it
-// trips. It moves to the shared format definition (wire.PastCap, #4375).
-func pastCap(count, cap uint64) bool { return count > cap }
 
 // Counter holds the day's counts. It is safe for concurrent use; use
 // NewCounter.
@@ -178,15 +168,24 @@ func delta(last, n uint64) uint64 {
 	return n - last
 }
 
-// Counts is the day's counts as the kernel reads them. The caller adds a
-// reading taken at the request first, so the count holds every byte the
-// firewall counted before it (ASSUMPTIONS ENF-cap-3).
-func (c *Counter) Counts() Counts {
+// Counts is the day's counts as the kernel reads them, the body of the
+// channel's count read (wire.ReadCounts). The caller adds a reading taken
+// at the request first, so the count holds every byte the firewall
+// counted before it (ASSUMPTIONS ENF-cap-3).
+func (c *Counter) Counts() wire.Counts {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.roll()
 	groups, _ := c.groups()
-	return Counts{Day: c.day, Groups: groups, EdgeCap: c.caps.Edge, EdgeCount: c.edge}
+	out := wire.Counts{Day: c.day, Groups: make([]wire.CountGroup, 0, len(groups)), EdgeCap: c.caps.Edge, EdgeCount: c.edge}
+	for _, g := range groups {
+		wg := wire.CountGroup{Count: g.count}
+		for i, d := range g.dests {
+			wg.Dests = append(wg.Dests, wire.CountDest{Name: d, Cap: g.own[i]})
+		}
+		out.Groups = append(out.Groups, wg)
+	}
+	return out
 }
 
 // roll starts a new day when the enforcer's clock reaches one. A clock
@@ -211,7 +210,7 @@ func (c *Counter) roll() {
 
 // groups is the day's cap groups and the bytes no destination resolved to.
 // The caller holds c.mu.
-func (c *Counter) groups() ([]Group, uint64) {
+func (c *Counter) groups() ([]group, uint64) {
 	parent := map[string]string{}
 	var find func(string) string
 	find = func(d string) string {
@@ -249,16 +248,16 @@ func (c *Counter) groups() ([]Group, uint64) {
 			first = find(first)
 		}
 	}
-	by := map[string]*Group{}
+	by := map[string]*group{}
 	for d := range parent {
 		r := find(d)
 		g := by[r]
 		if g == nil {
-			g = &Group{}
+			g = &group{}
 			by[r] = g
 		}
-		g.Dests = append(g.Dests, d)
-		g.Cap = sat(g.Cap, capOf(d))
+		g.dests = append(g.dests, d)
+		g.cap = sat(g.cap, capOf(d))
 	}
 	var stray uint64
 	for a, n := range c.bytes {
@@ -268,16 +267,19 @@ func (c *Counter) groups() ([]Group, uint64) {
 			continue
 		}
 		for d := range ds {
-			by[find(d)].Count = sat(by[find(d)].Count, n)
+			by[find(d)].count = sat(by[find(d)].count, n)
 			break // every destination of a is in one group
 		}
 	}
-	out := make([]Group, 0, len(by))
+	out := make([]group, 0, len(by))
 	for _, g := range by {
-		slices.Sort(g.Dests)
+		slices.Sort(g.dests)
+		for _, d := range g.dests {
+			g.own = append(g.own, capOf(d))
+		}
 		out = append(out, *g)
 	}
-	slices.SortFunc(out, func(a, b Group) int { return cmp.Compare(a.Dests[0], b.Dests[0]) })
+	slices.SortFunc(out, func(a, b group) int { return cmp.Compare(a.dests[0], b.dests[0]) })
 	return out, stray
 }
 
@@ -286,14 +288,14 @@ func (c *Counter) overruns() []Overrun {
 	groups, stray := c.groups()
 	var out []Overrun
 	for _, g := range groups {
-		if pastCap(g.Count, g.Cap) {
-			out = append(out, Overrun{Box: BoxCore, Dests: g.Dests, Cap: g.Cap, Count: g.Count})
+		if wire.PastCap(g.count, g.cap) {
+			out = append(out, Overrun{Box: BoxCore, Dests: g.dests, Cap: g.cap, Count: g.count})
 		}
 	}
-	if pastCap(stray, 0) {
+	if wire.PastCap(stray, 0) {
 		out = append(out, Overrun{Box: BoxCore, Count: stray})
 	}
-	if pastCap(c.edge, c.caps.Edge) {
+	if wire.PastCap(c.edge, c.caps.Edge) {
 		out = append(out, Overrun{Box: BoxEdge, Cap: c.caps.Edge, Count: c.edge})
 	}
 	return out

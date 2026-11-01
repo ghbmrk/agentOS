@@ -79,10 +79,10 @@ var tightenKinds = map[wire.TightenKind]string{
 
 // summaryRead are the reads that are traffic summaries, which resume at the
 // "core reflashed" step (D-262).
-var summaryRead = map[wire.ReadWhat]bool{wire.ReadTraffic: true}
+var summaryRead = map[wire.ReadWhat]bool{wire.ReadTraffic: true, wire.ReadCounts: true}
 
 var readWords = map[wire.ReadWhat]string{
-	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic",
+	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic", wire.ReadCounts: "byte counts",
 }
 
 // handle acts on one decoded message and returns the reply.
@@ -113,8 +113,8 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 		code, ev.Reason = c.gate(KindTighten, false, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
-		var cur policy.Document // an export names no device
-		if m.What != wire.ReadExport {
+		var cur policy.Document // an export or a count read names no device
+		if m.Device != "" {
 			cur = c.cfg.Policy.Current()
 		}
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
@@ -359,7 +359,7 @@ func (c *Channel) tighten(m wire.Tighten, nowMS int64) (wire.Code, string) {
 func (c *Channel) read(cur policy.Document, m wire.Read) ([]byte, wire.Code, string) {
 	var body []byte
 	var err error
-	if m.What != wire.ReadExport {
+	if m.Device != "" {
 		dev := cur.Device(m.Device)
 		if dev == nil {
 			return nil, wire.Refused, "no such device in the signed policy"
@@ -387,6 +387,14 @@ func (c *Channel) read(cur policy.Document, m wire.Read) ([]byte, wire.Code, str
 			return nil, wire.Refused, "no traffic summaries"
 		}
 		body, err = c.cfg.Traffic(m.Device)
+	case wire.ReadCounts:
+		if c.cfg.Counts == nil {
+			return nil, wire.Refused, "no byte-cap counts"
+		}
+		var cs wire.Counts
+		if cs, err = c.cfg.Counts(); err == nil {
+			body, err = wire.EncodeCounts(cs)
+		}
 	}
 	if err != nil || len(body) > wire.MaxReply {
 		return nil, wire.Failed, "the source did not answer within the reply cap"
