@@ -557,7 +557,7 @@ var controlsTmpl = template.Must(template.New("controls").Parse(`
 <div class="noprint" style="font-family:system-ui,sans-serif;border:2px solid #000;padding:4mm;margin:4mm">
 <style>@media print{.noprint{display:none}}</style>
 <h1>{{if .Rotate}}Your new card parts{{else}}Your Owner Card{{end}}</h1>
-<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Made}} This new card's recovery key already opens my store, and your old card's recovery key no longer does.{{else if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
+<p><b>Print it now, or save it.</b> I keep no copy once you confirm.{{if .Made}}{{if .Word}} This new card's passphrase and recovery key already open my store, and your old card's no longer do.{{else}} This new card's recovery key already opens my store, and your old card's recovery key no longer does.{{end}}{{else if .Rotate}} Until you confirm, your current card stays in effect.{{end}} Do not take a screenshot or a photo: those end up in your phone's cloud.</p>
 <p><button type="button" onclick="window.print()">Print</button> <a href="?save=1">Save as a file</a></p>
 <form method="post">
 <p>{{.Prompt}}</p>

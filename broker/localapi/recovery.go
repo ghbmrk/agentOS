@@ -159,9 +159,15 @@ const (
 // and then the owner asks again.
 const ErrRecoveryNoCard = "recovery no card"
 
-// RecoveryCardLen is the length of the new card's bits (handoff.CardKeyLen,
-// card.RecoveryKeyText's argument).
-const RecoveryCardLen = 20
+// RecoveryCardKeyLen is the length of the new card's recovery key bits
+// (handoff.CardKeyLen, card.RecoveryKeyText's argument), and
+// RecoveryCardLen that of the whole card the kernel hands: those bits,
+// then the passphrase's seed (handoff.MadeCardLen; card/words.FromSeed's
+// argument).
+const (
+	RecoveryCardKeyLen = 20
+	RecoveryCardLen    = RecoveryCardKeyLen + 16
+)
 
 // RecoverySession carries the session alone.
 type RecoverySession struct {
@@ -209,7 +215,7 @@ type RecoveryLostCardBegun struct {
 	Challenge []byte `json:"challenge"`
 }
 
-// RecoveryLostCard is the new card's RecoveryCardLen bits and its backup
+// RecoveryLostCard is the new card's RecoveryCardLen bytes and its backup
 // recipient ID.
 type RecoveryLostCard struct {
 	Card []byte `json:"card"`
