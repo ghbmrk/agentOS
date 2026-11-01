@@ -174,6 +174,9 @@ func (s *session) stop() {
 	}
 }
 
+// maxReason bounds the case-error text kept from the driver.
+const maxReason = 1 << 10
+
 // errCase is the driver reporting that a case could not run; the driver
 // is still in turn, so its session goes on.
 var errCase = errors.New("requal: case error")
@@ -240,6 +243,9 @@ func (s *session) exchange(ctx context.Context, st Stream, input []byte) ([]byte
 		case wire.Answer:
 			return body, nil
 		case wire.CaseError:
+			if len(body) > maxReason {
+				body = body[:maxReason]
+			}
 			return nil, fmt.Errorf("%w: %q", errCase, body)
 		case wire.ModelCall:
 			k, b := s.model(ctx, body)
@@ -275,17 +281,18 @@ func (s *session) model(ctx context.Context, req []byte) (byte, []byte) {
 
 // Close kills the driver, unmounts the release's /usr and removes the
 // root. The root is removed one known directory at a time, never
-// recursively, so a /usr that would not unmount is never walked.
+// recursively, so a /usr that would not unmount is never walked; a Close
+// after one that failed tries the unmount again.
 func (s *session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return nil
-	}
 	s.closed = true
 	s.stop()
-	if err := s.unmount(); err != nil {
-		return fmt.Errorf("requal: unmount /usr: %w", err)
+	if s.unmount != nil {
+		if err := s.unmount(); err != nil {
+			return fmt.Errorf("requal: unmount /usr: %w", err)
+		}
+		s.unmount = nil
 	}
 	var errs []error
 	for _, d := range rootDirs {

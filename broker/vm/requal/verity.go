@@ -118,13 +118,15 @@ func (v *VerityImages) Mount(ctx context.Context, rel *update.Verified, at strin
 		return nil, err
 	}
 	dev := "agentos-" + name
-	if err := v.tool(ctx, veritysetup, "open", data, dev, hash, m.UsrRootHash); err != nil {
-		clean()
-		return nil, err
-	}
 	closeDev := func() error {
 		// Its own context: the run's may have ended.
 		return v.tool(context.Background(), veritysetup, "close", dev)
+	}
+	if err := v.tool(ctx, veritysetup, "open", data, dev, hash, m.UsrRootHash); err != nil {
+		// An open cut off by its context may have made the device.
+		closeDev()
+		clean()
+		return nil, err
 	}
 	if err := v.mnt("/dev/mapper/"+dev, at, "erofs", usrFlags); err != nil {
 		closeDev()

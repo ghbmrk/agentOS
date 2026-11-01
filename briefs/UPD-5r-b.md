@@ -59,7 +59,7 @@ Work item #4044. Written 2026-11-01 against main at 81047349. The issue's "in-im
 1. `Start` refuses an unchecked release, makes a fresh root under `Staging` (`usr` and empty `proc`, `dev`, `sys`, `tmp`), mounts the release's /usr at `usr` through `Images` and boots `DriverPath` from it as a `gvisor.Stream` (no network, read-only root, uid 65534, no capabilities, cgroup memory cap). Any failure undoes what was made.
 2. `Run` sends the case and reads frames bounded by `MaxOutput`. When the case's context ends, the driver is killed and `Run` returns the context's error, never output after the deadline. A frame out of turn, over the bound, or a broken channel kills it too; the next case boots a fresh driver from the same root. A case error keeps the driver.
 3. A model request is counted against `ModelCalls` for the session before it reaches `Models`; past the budget, with no channel, or when the call fails, the driver gets a refusal with a fixed text.
-4. `Close` kills the driver, unmounts /usr and removes the root one known directory at a time, never recursively.
+4. `Close` kills the driver, unmounts /usr and removes the root one known directory at a time, never recursively; after a failed unmount it leaves the root and a later `Close` tries again.
 
 **Images** (`broker/vm/requal/verity.go`). `VerityImages` fetches a candidate's `host-image/usr.img` and `usr.verity` through `Verified.Fetch`, runs `veritysetup open` under the manifest's `UsrRootHash`, and mounts the device as erofs, read-only, `nosuid`, `nodev`; unmounting closes the device and removes the files. The installed release (nil) is the running /usr, bound read-only only when the booted `usrhash=` equals the store's installed hash.
 
@@ -68,7 +68,7 @@ Work item #4044. Written 2026-11-01 against main at 81047349. The issue's "in-im
 **Requirement IDs:** UPD-5, HLD-2.
 
 **Acceptance tests:**
-- `broker/vm/requal/sandbox_test.go`: `TestSandboxRunsTheDriverFromTheReleasesUsr`, `TestSandboxKillsAGuestThatIgnoresTheDeadline`, `TestNoOutputAfterTheDeadline`, `TestOutputIsBounded`, `TestModelCallsAreMeteredPerSession`, `TestModelCallsWithoutAChannelAreRefused`, `TestModelCallThatFailsIsRefusedAndSpent`, `TestCaseErrorKeepsTheDriver`, `TestFrameOutOfTurnEndsTheDriver`, `TestSandboxRefusesAnUncheckedRelease`, `TestSandboxStartUnwinds`, `TestNewSandboxNeedsEveryLimit`.
+- `broker/vm/requal/sandbox_test.go`: `TestSandboxRunsTheDriverFromTheReleasesUsr`, `TestSandboxKillsAGuestThatIgnoresTheDeadline`, `TestNoOutputAfterTheDeadline`, `TestAnswerAtTheDeadlineIsNotReturned`, `TestDeadlineReachesTheModelChannel`, `TestOutputIsBounded`, `TestModelCallsAreMeteredPerSession`, `TestModelBudgetSurvivesARestart`, `TestCaseErrorTextIsClipped`, `TestCloseRetriesAFailedUnmount`, `TestModelCallsWithoutAChannelAreRefused`, `TestModelCallThatFailsIsRefusedAndSpent`, `TestCaseErrorKeepsTheDriver`, `TestFrameOutOfTurnEndsTheDriver`, `TestSandboxRefusesAnUncheckedRelease`, `TestSandboxStartUnwinds`, `TestNewSandboxNeedsEveryLimit`.
 - `broker/vm/requal/sandbox_real_test.go` (root, real runsc): `TestRealShippedDriverAnswersUnderGVisor`, `TestRealDeafDriverIsKilledAtTheDeadline`.
 - `broker/vm/requal/verity_test.go`: `TestCandidateUsrIsCheckedAgainstItsRootHash`, `TestCandidateMountUnwinds`, `TestUncheckedReleaseIsNotMounted`, `TestInstalledUsrIsTheBootedOne`.
 - `broker/vm/requal/wire/wire_test.go`: `TestFramesRoundTrip`, `TestFrameOverTheBoundIsRefused`, `TestTruncatedFrameIsAnError`.

@@ -52,7 +52,7 @@ func TestFrameOverTheBoundIsRefused(t *testing.T) {
 func TestTruncatedFrameIsAnError(t *testing.T) {
 	var b bytes.Buffer
 	Write(&b, Answer, []byte("abc"))
-	for _, n := range []int{2, 7} {
+	for _, n := range []int{2, 5, 7} {
 		if _, _, err := Read(bytes.NewReader(b.Bytes()[:n]), 8); err == nil || err == io.EOF {
 			t.Fatalf("%d of 8 bytes: %v, want an unexpected end", n, err)
 		}

@@ -154,7 +154,7 @@ func TestCandidateMountUnwinds(t *testing.T) {
 		want  []string
 	}{
 		{"no hash tree", map[string][]byte{"host-image/usr.img": []byte("x")}, "", nil},
-		{"open fails", usrFiles, veritysetup + " open", []string{"open"}},
+		{"open fails", usrFiles, veritysetup + " open", []string{"open", "close"}},
 		{"mount fails", usrFiles, "mount", []string{"open", "mount", "close"}},
 	} {
 		rel, src := signedUsr(t, tc.files)
