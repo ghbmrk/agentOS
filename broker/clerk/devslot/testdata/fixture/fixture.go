@@ -45,7 +45,7 @@ func Declaration() devslot.Declaration {
 			{Name: "answer", Channel: "control", Kind: devslot.GATTWrite, Prefix: []byte{OpAnswer}, Min: 1 + tagLen, Max: 1 + tagLen},
 			{Name: "get", Channel: "control", Kind: devslot.GATTWrite, Prefix: []byte{OpGet}, Min: 1, Max: 1},
 		},
-		Operations:  []devslot.Operation{{Name: "read-temperature", Verb: key.Read, Shapes: []string{"answer", "get"}}},
+		Operations:  []devslot.Operation{{Name: "read-temperature", Verb: key.Read, Shapes: []string{"answer", "get"}, MaxWrites: 2}},
 		Readings:    []string{"temperature"},
 		MaxRead:     2 + 6*maxReadings,
 		MaxReadings: maxReadings,
