@@ -116,7 +116,8 @@ func TestPathsFollowTheDocument(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return strings.Contains(got, s)
+		// The connection marks are TestEveryAcceptBound's.
+		return strings.Contains(markSet.ReplaceAllString(got, ""), s)
 	}
 	d := fixturePolicy()
 	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept`

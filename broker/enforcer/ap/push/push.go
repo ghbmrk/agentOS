@@ -8,13 +8,14 @@
 // golang.org/x/crypto/ssh (broker/daemon/arc2_test.go): OpenWrt's admin
 // paths are SSH or HTTP, the enforcer links no HTTP client, and an SSH
 // client is not code to write again. Every command it runs is one of
-// three fixed strings over a path from ap.Paths; file contents go only on
-// stdin, never into a command.
+// four fixed strings over a path from ap.Paths, a hash and a Sync's
+// token; file contents go only on stdin, never into a command.
 package push
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -59,7 +60,9 @@ type Pusher struct {
 	Timeout time.Duration
 
 	// mu keeps two Syncs of this Pusher from overlapping; there is one
-	// Pusher per access point (ENF-g-8).
+	// Pusher per access point (ENF-g-8). It cannot order a command a
+	// timed-out Sync left running on the access point against the next
+	// Sync's; the access point's lock and token do (claimCmd).
 	mu sync.Mutex
 }
 
@@ -80,7 +83,8 @@ type Result struct {
 // write that failed, a connection that dropped) is finished by the next
 // one: reload_config applies only configs that changed since
 // its last run, so an in-sync reload is a no-op. Syncs of one Pusher run
-// one at a time.
+// one at a time, and once a Sync has claimed the access point, no command
+// an earlier Sync left running there writes or reloads (claimCmd).
 func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -103,6 +107,10 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
 
+	tok := token()
+	if _, err := run(c, claimCmd(tok), nil); err != nil {
+		return Result{}, fmt.Errorf("push: claim: %w", err)
+	}
 	var res Result
 	for _, f := range files {
 		same, err := holds(c, f)
@@ -121,14 +129,14 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	wrote := 0
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
-			if _, err := run(c, writeCmd(f.Path, f.Data), f.Data); err != nil {
+			if _, err := run(c, writeCmd(f.Path, tok, f.Data), f.Data); err != nil {
 				errs = append(errs, fmt.Errorf("push: write %s: %w", f.Path, err))
 				continue
 			}
 			wrote++
 		}
 	}
-	if _, err := run(c, applyCmd, nil); err != nil {
+	if _, err := run(c, applyCmd(tok), nil); err != nil {
 		errs = append(errs, fmt.Errorf("push: reload: %w", err))
 	} else {
 		res.Applied = wrote > 0
@@ -195,32 +203,88 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 	return ssh.NewClient(sc, chans, reqs), nil
 }
 
-// The three commands. A path is always one of ap.Paths, which hold no
+// The commands. A path is always one of ap.Paths, which hold no
 // character a shell reads specially; the temporary file sits on /etc's
 // own filesystem, so mv replaces the file in one rename, and umask keeps
 // the passwords readable by root only.
+//
+// A Sync that times out closes the connection without waiting for the
+// command it was running, which can keep running on the access point
+// (ENF-g-8, #4313). So each Sync first claims the access point: under the
+// access point's lock (busybox flock on lockPath) it writes a fresh
+// random token to tokenPath and removes every temporary file. A write
+// reads stdin into a temporary file of its own path and token and checks
+// its hash with no lock held, so a write whose stdin never ends holds
+// nothing; only the move into place, and the reload, take the lock, and
+// they run only while tokenPath still holds their own Sync's token. A
+// command a timed-out Sync left behind therefore either moves its file
+// before the next Sync's claim, which waits for the lock, or finds the
+// newer token and does nothing: a late old write cannot put back an
+// older config, such as a revoked password. Reads take no lock: mv
+// replaces a file in one rename. The lock and token are on the access
+// point's tmpfs, so a reboot, which ends every command, also clears them.
 const (
 	readPrefix = "cat "
-	applyCmd   = "reload_config"
+	lockPath   = "/tmp/agentos-ap.lock"
+	tokenPath  = "/tmp/agentos-ap.sync"
 )
 
-// tmpPath is the temporary file for path: one per path, so no two writes
-// share one, and on /etc's own filesystem.
-func tmpPath(path string) string {
-	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + ".new"
+// token is a Sync's claim on the access point: 128 random bits in hex.
+func token() string {
+	var b [16]byte
+	rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
+// locked runs cmd holding the access point's lock on file descriptor 9,
+// which the shell keeps open, and so the lock held, until cmd ends.
+func locked(cmd string) string {
+	return "{ flock -x 9 && " + cmd + "; } 9>" + lockPath
+}
+
+// owns is true on the access point only while tok is the newest claim.
+func owns(tok string) string {
+	return "[ \"$(cat " + tokenPath + ")\" = " + tok + " ]"
+}
+
+// tmpGlob matches every temporary file tmpPath names.
+const tmpGlob = "/etc/agentos-ap-*.new"
+
+// claimCmd makes tok the newest claim and removes the temporary files
+// of earlier Syncs, which a reboot mid-write would otherwise leave on
+// /etc. A write of an earlier Sync still running then fails its hash
+// check or its move.
+func claimCmd(tok string) string {
+	return locked("echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
+}
+
+// applyCmd reloads while tok is the newest claim. reload_config does not
+// get the lock's descriptor, so nothing it starts can hold the lock.
+func applyCmd(tok string) string {
+	return locked(owns(tok) + " && reload_config 9>&-")
+}
+
+// tmpPath is the temporary file for path in the Sync holding tok: one per
+// path and Sync, so no two writes share one, and on /etc's own
+// filesystem.
+func tmpPath(path, tok string) string {
+	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + "." + tok + ".new"
 }
 
 func readCmd(path string) string { return readPrefix + path }
 
-// writeCmd stores data at path: it reads stdin into the path's temporary
-// file and moves that over path only if the file's SHA-256 is data's, so
-// a stdin cut short (a dropped connection, a deadline) leaves path alone;
-// a failed move or check removes the temporary file. The hash is hex.
-func writeCmd(path string, data []byte) string {
+// writeCmd stores data at path while tok is the newest claim: it reads
+// stdin into the temporary file and, only if the file's SHA-256 is
+// data's, takes the lock and moves it over path while tok is the newest
+// claim, so a stdin cut short (a dropped connection, a deadline) leaves
+// path alone. Reading and the hash take no lock, so a stdin that never
+// ends holds up no other Sync. A failed check, a newer claim or a failed
+// move removes the temporary file. The hash is hex.
+func writeCmd(path, tok string, data []byte) string {
 	sum := sha256.Sum256(data)
-	t := tmpPath(path)
+	t := tmpPath(path, tok)
 	return "umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
-		" ] && mv -f " + t + " " + path + " || { rm -f " + t + "; false; }"
+		" ] && " + locked(owns(tok)+" && mv -f "+t+" "+path) + " || { rm -f " + t + "; false; }"
 }
 
 // holds reports whether the access point's file at f.Path is exactly

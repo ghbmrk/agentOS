@@ -243,7 +243,7 @@ func (s *Store) Prune() error {
 	// Fail closed: an erase the disk refused still happens in memory, so
 	// a cancelled or removed device's secret is never released, and dirty
 	// makes every later Prune retry the save until one succeeds (as does
-	// any Admit, which saves the erased state too).
+	// a successful Admit, which saves the erased state too).
 	s.st = st
 	s.dirty = err != nil
 	for d, r := range old.Secrets {
