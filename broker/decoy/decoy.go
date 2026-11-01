@@ -111,6 +111,9 @@ func (e Entry) String() string {
 // GoString is String, for %#v.
 func (e Entry) GoString() string { return e.String() }
 
+// MarshalJSON is String, for JSON and slog's JSON handler (#3876).
+func (e Entry) MarshalJSON() ([]byte, error) { return json.Marshal(e.String()) }
+
 // Table is the box's one decoy table. The zero Table is empty.
 type Table struct{ entries []Entry }
 

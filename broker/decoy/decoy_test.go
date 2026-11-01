@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"log/slog"
 	"math"
 	mrand "math/rand/v2"
 	"net/netip"
@@ -401,6 +402,14 @@ func TestTableSealedAndReplayed(t *testing.T) {
 	}
 	// Printing a table or an entry shows no value.
 	printed := fmt.Sprintf("%v %+v %#v %s %v %#v", tab, tab, tab, tab.Entries(), tab.Entries()[0], tab.Entries()[0])
+	// Nor does JSON, or a slog JSON handler (#3876).
+	js, err := json.Marshal(tab.Entries())
+	if err != nil || !bytes.Contains(js, []byte(`"decoy anthropic at sandbox.env to `)) {
+		t.Fatalf("JSON of the entries: %s, %v", js, err)
+	}
+	var lb bytes.Buffer
+	slog.New(slog.NewJSONHandler(&lb, nil)).Info("x", "entry", tab.Entries()[0], "entries", tab.Entries())
+	printed += string(js) + lb.String()
 	for _, e := range tab.Entries() {
 		if e.Value != "" && strings.Contains(printed, e.Value) {
 			t.Fatalf("printing shows %v's value", e)
