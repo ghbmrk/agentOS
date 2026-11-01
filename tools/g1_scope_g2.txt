@@ -124,6 +124,10 @@ exempt-pr 4149
 # Remove once #4297 merges.
 exempt-pr 4297
 
+# #4375 (KRN-cap-first a, #4173): broker/enforcer/wire/, which the G2 list does not name (D-198).
+# Remove once #4375 merges.
+exempt-pr 4375
+
 # #4250 (ENF-t-probe, #4233): broker/enforcer/radio/, which the G2 list does not name (D-198).
 # Remove once #4250 merges.
 exempt-pr 4250
