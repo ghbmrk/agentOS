@@ -133,12 +133,21 @@ func (v *VerityImages) Mount(ctx context.Context, rel *update.Verified, at strin
 		clean()
 		return nil, err
 	}
+	// Each step is done once, so a call after one that failed part way
+	// goes on from where it stopped.
+	var unmounted, closed bool
 	return func() error {
-		if err := v.umnt(at); err != nil {
-			return err
+		if !unmounted {
+			if err := v.umnt(at); err != nil {
+				return err
+			}
+			unmounted = true
 		}
-		if err := closeDev(); err != nil {
-			return err
+		if !closed {
+			if err := closeDev(); err != nil {
+				return err
+			}
+			closed = true
 		}
 		return clean()
 	}, nil

@@ -182,6 +182,40 @@ func TestCandidateMountUnwinds(t *testing.T) {
 	}
 }
 
+// TestCandidateUnmountRetriesFromWhereItStopped: an unmount whose device
+// close failed goes on with the close when called again, never a second
+// unmount.
+func TestCandidateUnmountRetriesFromWhereItStopped(t *testing.T) {
+	rel, src := signedUsr(t, usrFiles)
+	staging := t.TempDir()
+	l := toolLog{}
+	v := l.images(&VerityImages{Source: src, Staging: staging})
+	unmount, err := v.Mount(context.Background(), rel, filepath.Join(t.TempDir(), "usr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.fail = veritysetup + " close"
+	if err := unmount(); err == nil {
+		t.Fatal("unmount passed a failed close")
+	}
+	l.fail = ""
+	if err := unmount(); err != nil {
+		t.Fatal(err)
+	}
+	var umounts int
+	for _, c := range l.calls {
+		if strings.HasPrefix(c, "umount") {
+			umounts++
+		}
+	}
+	if umounts != 1 || !strings.HasPrefix(l.calls[len(l.calls)-1], veritysetup+" close") {
+		t.Fatalf("calls %q, want one umount and the close retried", l.calls)
+	}
+	if es, _ := os.ReadDir(staging); len(es) != 0 {
+		t.Fatalf("staging holds %d entries", len(es))
+	}
+}
+
 func TestUncheckedReleaseIsNotMounted(t *testing.T) {
 	var l toolLog
 	v := l.images(&VerityImages{Staging: t.TempDir()})

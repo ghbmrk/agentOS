@@ -235,8 +235,6 @@ func TestNoOutputAfterTheDeadline(t *testing.T) {
 	}
 }
 
-// TestDeadlineReachesTheModelChannel: a model call in flight gets the
-// case's context, so a deadline ends it and Run returns.
 // lateCtx is a context whose deadline passes as the answer is read, with
 // no Done signal, so only Run's check after the answer can catch it.
 type lateCtx struct {
@@ -297,6 +295,8 @@ func TestAnswerAtTheDeadlineIsNotReturned(t *testing.T) {
 	}
 }
 
+// TestDeadlineReachesTheModelChannel: a model call in flight gets the
+// case's context, so a deadline ends it and Run returns.
 func TestDeadlineReachesTheModelChannel(t *testing.T) {
 	st := &fakeStreams{eval: func(<-chan struct{}) drv.Evaluator {
 		return func(in []byte, m drv.Models) ([]byte, error) { return m.Call(in) }
@@ -304,8 +304,9 @@ func TestDeadlineReachesTheModelChannel(t *testing.T) {
 	sb := newSandbox(t, st, &fakeImages{}, func(c *SandboxConfig) {
 		c.Models = func(ctx context.Context, _ []byte) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
 	})
+	// No deferred Close: a Run that hung holds the session's lock, and the
+	// test must fail on its guard rather than block.
 	sess, _ := sb.Start(context.Background(), nil)
-	defer sess.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
@@ -315,6 +316,7 @@ func TestDeadlineReachesTheModelChannel(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("Run = %v, want the deadline", err)
 		}
+		sess.Close()
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run hung past the deadline while a model call was in flight")
 	}

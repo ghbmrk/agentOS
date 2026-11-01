@@ -70,7 +70,7 @@ Work item #4044. Written 2026-11-01 against main at 81047349. The issue's "in-im
 **Acceptance tests:**
 - `broker/vm/requal/sandbox_test.go`: `TestSandboxRunsTheDriverFromTheReleasesUsr`, `TestSandboxKillsAGuestThatIgnoresTheDeadline`, `TestNoOutputAfterTheDeadline`, `TestAnswerAtTheDeadlineIsNotReturned`, `TestDeadlineReachesTheModelChannel`, `TestOutputIsBounded`, `TestModelCallsAreMeteredPerSession`, `TestModelBudgetSurvivesARestart`, `TestCaseErrorTextIsClipped`, `TestCloseRetriesAFailedUnmount`, `TestModelCallsWithoutAChannelAreRefused`, `TestModelCallThatFailsIsRefusedAndSpent`, `TestCaseErrorKeepsTheDriver`, `TestFrameOutOfTurnEndsTheDriver`, `TestSandboxRefusesAnUncheckedRelease`, `TestSandboxStartUnwinds`, `TestNewSandboxNeedsEveryLimit`.
 - `broker/vm/requal/sandbox_real_test.go` (root, real runsc): `TestRealShippedDriverAnswersUnderGVisor`, `TestRealDeafDriverIsKilledAtTheDeadline`.
-- `broker/vm/requal/verity_test.go`: `TestCandidateUsrIsCheckedAgainstItsRootHash`, `TestCandidateMountUnwinds`, `TestUncheckedReleaseIsNotMounted`, `TestInstalledUsrIsTheBootedOne`.
+- `broker/vm/requal/verity_test.go`: `TestCandidateUsrIsCheckedAgainstItsRootHash`, `TestCandidateMountUnwinds`, `TestCandidateUnmountRetriesFromWhereItStopped`, `TestUncheckedReleaseIsNotMounted`, `TestInstalledUsrIsTheBootedOne`.
 - `broker/vm/requal/wire/wire_test.go`: `TestFramesRoundTrip`, `TestFrameOverTheBoundIsRefused`, `TestTruncatedFrameIsAnError`.
 - `broker/vm/requal/driver/driver_test.go`: `TestShippedDriverRefusesEveryCase`, `TestDriverAnswersAndCallsModels`, `TestCaseErrorIsClipped`, `TestFrameOutOfTurnEndsTheDriver`.
 
