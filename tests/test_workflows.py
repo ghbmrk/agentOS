@@ -621,7 +621,10 @@ class WorkflowTest(unittest.TestCase):
         names = [n for n, _ in mut]
         self.assertIn(want, names)
         self.assertLess(names.index(want), names.index("Gremlins on the package"))
-        self.assertEqual(dict(mut)[want], race[want])
+        # broker-race's copy also skips on a records-only change (CI-par-4); the rest is the same.
+        guard = "        if: steps.scope.outputs.records != 'true'\n"
+        self.assertIn(guard, race[want])
+        self.assertEqual(dict(mut)[want], race[want].replace(guard, "", 1))
 
     def test_steps_finds_steps(self):
         sample = "jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          x: 1\n      - run: echo\n"

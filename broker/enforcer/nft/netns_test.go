@@ -213,9 +213,14 @@ const (
 	net6Other = "2001:db8:ff::20"
 )
 
-func devAddr(vlan int) string   { return fmt.Sprintf("10.%d.0.2", vlan) }
-func devAddr6(vlan int) string  { return fmt.Sprintf("fd00:%d::2", vlan) }
+func devAddr(vlan int) string  { return fmt.Sprintf("10.%d.0.2", vlan) }
+func devAddr6(vlan int) string { return fmt.Sprintf("fd00:%d::2", vlan) }
+
 func enfAddr(seg string) string { return segNets[seg] + ".1" }
+
+// devMAC is the hardware address of the device on vlan: locally
+// administered unicast, one per VLAN.
+func devMAC(vlan int) string { return fmt.Sprintf("02:00:00:00:%02x:%02x", vlan>>8, vlan&0xff) }
 
 var segNets = map[string]string{"owner": "10.10.0", "household": "10.20.0", "guest": "10.30.0", "admin": "10.40.0", "core": "10.50.0", "edge": "10.60.0", "apm": "10.70.0"}
 
@@ -320,6 +325,9 @@ func (h *home) device(ap *host, vlan int) *host {
 	} else {
 		run(t, "ip", "link", "add", ifc, "type", "veth", "peer", "name", "eth0", "netns", strconv.Itoa(x.pid))
 	}
+	// A VLAN takes its parent's hardware address, so on the trunk every
+	// device would share the AP's: give each its own, as real devices have.
+	h.in(x, "ip", "link", "set", "eth0", "address", devMAC(vlan))
 	h.address(x, ifc, fmt.Sprintf("10.%d.0.1/24", vlan), devAddr(vlan)+"/24", fmt.Sprintf("fd00:%d::1/64", vlan), devAddr6(vlan)+"/64")
 	return x
 }

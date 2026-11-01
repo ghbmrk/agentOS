@@ -18,6 +18,7 @@ Each fact has one home; other files point to it rather than restate it ([docs/OP
 | [BOARD.md](BOARD.md) | generated | Index of live work packages, rendered from the `work-item` issues by tools/board.py; change an issue, not a row. | board.yml |
 | `briefs/<ID>.md` | state | One package's brief: goal, IDs, scope, dependencies, estimate. | L1 |
 | [docs/LANES.md](docs/LANES.md) | state | Which subscription owns which directories during the migration, and any other team's lane. | either peer subscription |
+| [docs/spec-quotes-2026-10-18.md](docs/spec-quotes-2026-10-18.md) | state | Mark's verbatim words behind the dated "(Mark, 2026-10-18 hh:mmZ)" citations in SPEC.md. | any |
 | [docs/conv-3-triage.md](docs/conv-3-triage.md) | record | Frozen record of the pre-MIG-1 convergence push: the open-PR classes and close list (D-090). Removed in PLAN step 5. | nobody |
 | [docs/conv-2-reaudit.md](docs/conv-2-reaudit.md) | record | Frozen record of the pre-MIG-1 convergence push: the re-audit of queued and building rows. Removed in PLAN step 5. | nobody |
 | [docs/conv-5-uncovered.md](docs/conv-5-uncovered.md) | record | Frozen record of the pre-MIG-1 convergence push: what blocked each then-uncovered v0.12 ID. Removed in PLAN step 5. | nobody |

@@ -17,8 +17,8 @@ Attackers: a rooted core (holds the channel, the owner line and every camera's v
 - **P8. Safety-list devices act only on the owner's word at home (NET-6, STO-3, STO-4).** Every turn-on or open needs a once-only, named, short-window assertion on the page; their secrets live only on the enforcer.
 - **P3. The channel is three fixed-schema kinds (NET-2 Channel, DEV-2).** Device commands, closed-list tightenings, reads. Parsed strictly, rate-limited, a burst pauses it until the owner resumes it on the page. For a safety-list device: reads, lock and relock, and only the one named secure-direction command; a drone's return to dock.
 - **P4. Default deny on every segment (NET-2 Segments, NET-3).** Per-device allow lists, the core's signed destination list resolved by the enforcer's own resolver, an edge segment that hears nothing from the enforcer, Guests counted only as a whole, no inbound from the internet.
-- **P5. Fails safe to the last signed policy (NET-2, STO-5).** Core down, silent or hostile changes nothing; the light and the page say so.
-- **P6. The enforcer's own record is the truth (NET-2 Texts and calls).** Alerts show on its light, page and log even when the core drops or forges the text.
+- **P5. Fails safe to the last signed policy (NET-2, STO-5).** Core down, silent or hostile changes nothing; the page says so.
+- **P6. The enforcer's own record is the truth (NET-2 Texts and calls).** Alerts show on its page and log, and a trip at the enforcer on its light (D-254), even when the core drops or forges the text.
 - **P7. Policy is keys (STO-4).** Lists and rules are KEY-1 keys rooted in the owner's passkey and checked with `broker/kernel/key`, with no second rule system; versions only rise.
 
 ## Decisions (the brief's; a builder who finds one wrong stops and comments on the work item)
@@ -76,12 +76,12 @@ Slice l wires every piece into `agentos-enforcer` and owns this matrix as one ta
 | Enrolment* | First passkey enrolled with the setup secret; recovery code shown once; setup network replaced by the Owner network; core's claim pages reachable from Owner only | c, g |
 | Normal | Policy version N enforced; channel open | a, d, e, l |
 | Loosening pending, then power loss | Pending loosening survives restart with its original deadline; cancel still works | a, l |
-| Core down or silent* | Last signed policy enforced; light and page say core down | h, l |
+| Core down or silent* | Last signed policy enforced; page says core down | h, l |
 | Channel burst* | Channel paused; resumes only from the page | d, b |
 | Older policy offered | Refused without a fresh assertion; with one, it is a loosening | a, b |
 | Update applied, self-check fails* (VM only: slice n) | Rolled back to the other slot; policy unchanged | m |
 | Factory reset with the case code | Policy kept; no loosening until a new passkey is enrolled | c, l |
-| Recovery code used | Replacement passkey only, after 10 minutes; text, page alert, light | c, h |
+| Recovery code used | Replacement passkey only, after 10 minutes; text and page alert | c, h |
 | Core key revoked (KEY-7) | Channel refuses the revoked sub-key; head copies keep the revocation | h, o |
 | Safety-list device paired | Secret held by the enforcer, released only to that device's process; core holds no copy | r, l |
 | Safety-list turn-on asserted | Runs once inside its window; a replay or a channel request is refused | s, l |
@@ -119,7 +119,7 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-c (#3663): enrolment, recovery and factory reset (NET-4 Enrolment and recovery, NET-2 Hardening, HW-10, D-178)
 
 **Scope:** `broker/enforcer/enrol/` (new), the page's enrolment and recovery screens under `broker/enforcer/page/` (templates and handlers only).
-**Builds:** the setup secret (printed in the case; the enforcer stores only its verifier), first-passkey enrolment over the setup network, the recovery code (generated on the enforcer, shown once, stored as a verifier), replacement-passkey enrolment after the 10-minute wait with a text, page alert and light, the handover that tells slice g to replace the setup network with the Owner network and shows its password and Wi-Fi QR only on the page, and factory reset by the case code (keeps the policy, blocks loosenings until a new passkey enrols). Passkey revocation is not a tightening (NET-4).
+**Builds:** the setup secret (printed in the case; the enforcer stores only its verifier), first-passkey enrolment over the setup network, the recovery code (generated on the enforcer, shown once, stored as a verifier), replacement-passkey enrolment after the 10-minute wait with a text and page alert, the handover that tells slice g to replace the setup network with the Owner network and shows its password and Wi-Fi QR only on the page, and factory reset by the case code (keeps the policy, blocks loosenings until a new passkey enrols). Passkey revocation is not a tightening (NET-4).
 **Acceptance tests:**
 1. NET-4: `enrol::TestFirstPasskeyNeedsSetupSecret`. Catches enrolment by whoever reaches the setup network.
 2. NET-4: `enrol::TestRecoveryCodeEnrolsAfterWaitOnly`: only a replacement passkey, only after 10 minutes, cancelable by the current passkey, with an alert at start. Catches instant takeover by a stolen code.
@@ -173,9 +173,9 @@ Each slice: one session, strongest model, tests first (CLAUDE.md), every touched
 ### ENF-h (#3666): texts, the light and head copies (NET-2 Texts and calls, STO-1, STO-4, KEY-7)
 
 **Scope:** `broker/enforcer/alert/`, `broker/enforcer/heads/` (new).
-**Builds:** the fixed-wording texts and calls (the closed list in NET-2: ask or alert needing action by text, urgent safety event by call), sent as a channel message to the kernel for the owner line; the light's states (alert raised, recovery pending, core down, channel paused); the alert log; the head-copy store (kernel heads signed by its sub-key under the head domain, key-change entries, erase entries) and the revocation set the channel checks.
+**Builds:** the fixed-wording texts and calls (the closed list in NET-2: ask or alert needing action by text, urgent safety event by call), sent as a channel message to the kernel for the owner line; the light, red only for an unresolved trip at the enforcer (D-254), and the page's states (alert raised, recovery pending, core down, channel paused); the alert log; the head-copy store (kernel heads signed by its sub-key under the head domain, key-change entries, erase entries) and the revocation set the channel checks.
 **Acceptance tests:**
-1. NET-2: `alert::TestDroppedTextStillOnLight`. Catches reliance on the core.
+1. NET-2: `alert::TestDroppedTripStillOnLight`, `alert::TestOnlyTripsLight`. Catch reliance on the core, and a routine alert read as an attack.
 2. NET-2: `alert::TestRoutineUnlockLoggedNotTexted`. Catches noise the owner pays for.
 3. STO-1: `heads::TestKeepsEveryHeadRefusesFork`. Catches a rollback anchor that forgets.
 4. KEY-7: `heads::TestRevokedSubKeyRefused`. Catches a stolen core's key still working.

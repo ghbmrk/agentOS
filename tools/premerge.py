@@ -10,7 +10,8 @@ Replays the reviewed commit onto the base content `head` carries (`git merge-tre
 commit with the merge-base of `base` and `head`) and compares that tree with `head`'s, file by file:
 bytes, binary content and modes count, except that an ASSUMPTIONS.md differing only in its rows' first-cell ids (a renumbering after a main-merge) reads as same,
 and so does a DECISIONS.md whose only replay conflicts are table rows both sides appended at one spot, resolved by
-keeping both sides' rows verbatim, either side first (#3224, #3233). A replay file that fails a cheap gate never reads
+keeping both sides' rows verbatim, either side first (#3224, #3233), the PR's rows renumbered or not when no other PR file names an old ID (#4030),
+and so does a `*_allow.txt` whose lines are main's plus the PR's line changes, in any order (#3991). A replay file that fails a cheap gate never reads
 same as is: a duplicate row ID (doclint) in an ASSUMPTIONS.md or DECISIONS.md, or an ASSUMPTIONS.md row that
 `merge=union` brought back (in the merge base and main, not in the reviewed commit). A head that resolves each union
 hunk without those rows, keeping its rows inside the hunk, reads same (#3400, #3401), unless `git merge-file`
@@ -102,6 +103,35 @@ _L3 = re.compile(r"^<!-- record: (?:l3|combined) -->$", re.M)
 _SECURITY = re.compile(r"^<!-- record: security -->$", re.M)
 # A well-formed Record line for some PR: one for another PR is that PR's record, not an unparsed one.
 _RECORD = re.compile(r"^Record: PR #\d+ · package \S+ · head [0-9a-f]{7,40}\s*$", re.M)
+_MARKER = re.compile(r"^<!-- record: \S+ -->$", re.M)
+# The lines a record block runs on under its Record line; a fenced block is quoted text (#4261).
+_HEADER = re.compile(r"<!-- record: \S+ -->$|\s*$")
+_FENCE = re.compile(r"(`{3,}|~{3,})[^`]*$")
+
+
+def _record_block(body):
+    """(text, placed): where a comment's Record line and markers are read from, and whether that is its record block.
+
+    The record block is the comment's first `Record:` line outside a code fence and the run of marker and blank lines
+    under it. When it carries a marker, an accept's markers and Record lines anywhere else are quoted text: they
+    neither hide the review's own record nor lend it one (#4261). Otherwise `placed` is false and the whole comment is
+    returned."""
+    lines, fence = [], None
+    for line in body.split("\n"):  # one pass: a fence left open runs to the end, as Markdown renders it
+        if fence is None and _FENCE.match(line):
+            fence = _FENCE.match(line).group(1)
+        elif fence is None:
+            lines.append(line)
+        elif line.rstrip(" \t") == fence:
+            fence = None
+    at = next((n for n, line in enumerate(lines) if line.startswith("Record:")), None)
+    if at is None:
+        return body, False
+    end = at + 1
+    while end < len(lines) and _HEADER.match(lines[end]):
+        end += 1
+    own = "\n".join(lines[at:end])
+    return (own, True) if _MARKER.search(own) else (body, False)
 
 
 # A tier-A diff confined to assurance tooling gets no UX pass (OPERATING §4 step 2, D-086).
@@ -121,22 +151,34 @@ def verdict(comments, pr, security=False, lens=None):
 
     With `security`, of the newest trusted Security verdict comment that carries no L3 marker instead;
     with `lens`, of the newest trusted verdict comment carrying that lens's marker.
+    An accept's markers and Record line count only in the comment's record block, and an accept whose marker is only
+    outside it reads as `unparsed` (`_record_block`, #4261); any other verdict reads the whole comment, so it fails closed.
     A qualifying comment edited after posting (updated_at missing or different from created_at) reads as verdict
     `edited`, which is never an accept, until a later comment supersedes it: a verdict is the text that was reviewed.
     A qualifying comment with no well-formed Record line for any PR reads as `unparsed` the same way (#3611)."""
     found = None
     for c in sorted(comments, key=lambda c: c.get("created_at") or ""):
         body = c.get("body") or ""
-        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", body, re.M)
         first = body.split("\n", 1)[0].strip()
+        if c.get("author_association") not in TRUSTED or not first.startswith("Verdict:"):
+            continue
+        own, placed = _record_block(body)
+        # Only an accept is held to its record block (#4261); any other verdict reads the whole comment, as before, so a
+        # quoted or misplaced marker or record can only make it count, which fails closed.
+        accept = first.split(":", 1)[-1].strip().lower() == "accept"
+        read = own if accept else body
+        rec = re.search(rf"^Record: PR #{int(pr)} · package \S+ · head ([0-9a-f]{{7,40}})\s*$", read, re.M)
         if lens:
-            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", body, re.M)
+            marked = re.search(rf"^<!-- record: {re.escape(lens)} -->$", read, re.M)
         else:
-            marked = (_SECURITY.search(body) and not _L3.search(body)) if security else _L3.search(body)
-        if c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked and not rec:
-            if not _RECORD.search(body):
+            marked = _SECURITY.search(read) if security else _L3.search(read)
+            if security and placed and _L3.search(own):
+                marked = None
+        misplaced = accept and not placed
+        if marked and (misplaced or not rec):
+            if misplaced or not _RECORD.search(read):
                 found = ("unparsed", None)
-        elif c.get("author_association") in TRUSTED and first.startswith("Verdict:") and marked:
+        elif marked:
             edited = c.get("updated_at") != c.get("created_at") or not c.get("created_at")
             found = ("edited" if edited else first.split(":", 1)[1].strip().lower(), rec.group(1))
     return found
@@ -349,14 +391,16 @@ def _stale_dropped(cwd, tree, head, path, reviewed, onto):
 
 def _appends_kept(cwd, tree, head, path, reviewed, onto):
     """True when DECISIONS.md conflicted in the replay only where both sides appended table rows at one spot (an
-    empty base section), and `head` keeps both sides' rows verbatim, every conflict in the same order: the
-    reviewed rows first or main's first. Any other conflict, line or order reads as changed."""
+    empty base section), and `head` keeps both sides' rows, every conflict in the same order: the reviewed rows
+    first or main's first. Main's rows stay verbatim; a reviewed row may differ only in its first-cell ID (a
+    renumbering past main's rows, #4030), when no other file the PR changes, and no line of this one outside main's
+    rows and ID cells, names its old ID. Any other conflict, line or order reads as changed."""
     if path != "DECISIONS.md":
         return False
     text, want = (_git(cwd, "show", f"{t}:{path}", ok=(0, 128)) for t in (tree, head))
     if not text or not want:
         return False
-    out, block, side, conflicts = ([], []), None, 0, 0
+    out, block, side, conflicts = ([], []), None, 0, 0  # (line, side) pairs: True reviewed, False main's, None outside
     for line in text.splitlines(keepends=True):
         bare = line.rstrip(b"\n")
         if block is None:
@@ -364,7 +408,7 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
                 block, side = ([], []), 0
             else:
                 for o in out:
-                    o.append(line)
+                    o.append((line, None))
         elif side == 0 and bare.startswith(b"||||||| "):
             side = 1  # base section: must stay empty
         elif side == 1 and bare == b"=======":
@@ -374,11 +418,48 @@ def _appends_kept(cwd, tree, head, path, reviewed, onto):
             out[1].extend(block[1] + block[0])
             block, conflicts = None, conflicts + 1
         elif side in (0, 2) and line.startswith(b"|"):
-            block[side // 2].append(line)
+            block[side // 2].append((line, side == 0))
         else:
             return False
-    return (block is None and conflicts > 0 and want in (b"".join(out[0]), b"".join(out[1]))
-            and not _duplicate_id(want) and _same_mode(cwd, tree, head, path))
+    if block is not None or conflicts == 0 or _duplicate_id(want) or not _same_mode(cwd, tree, head, path):
+        return False
+    lines = want.splitlines(keepends=True)
+    for o in out:
+        old = set()
+        if len(o) == len(lines) and all(x == y or (mine and ROW_ID.match(x) and ROW_ID.match(y)
+                                                   and ROW_ID.sub(b"|#|", x) == ROW_ID.sub(b"|#|", y)
+                                                   and not old.add(ROW_ID.match(x).group().strip(b"| ")))
+                                        for (x, mine), y in zip(o, lines)):
+            # The PR's rows and lines outside main's rows, read without ID cells, must not name an old ID (#4041).
+            rest = b"".join(ROW_ID.sub(b"|#|", y) for (_, mine), y in zip(o, lines) if mine is not False)
+            return not old or not (_names(old, rest) or _cited(cwd, onto, head, old, path))
+    return False
+
+
+def _cited(cwd, onto, head, ids, path):
+    """True when a file other than `path` that onto..head changes names one of `ids` as a word in `head`."""
+    files = [f for f in _git(cwd, *DIFF, onto, head).decode(errors="surrogateescape").split("\0") if f and f != path]
+    return any(_names(ids, _git(cwd, "show", f"{head}:{f}", ok=(0, 128))) for f in files)
+
+
+def _names(ids, text):
+    """True when `text` names one of `ids` as a word."""
+    return bool(re.search(rb"(?<![\w-])(?:" + b"|".join(map(re.escape, sorted(ids))) + rb")(?![\w-])", text))
+
+
+def _lines_kept(cwd, tree, head, path, reviewed, onto):
+    """True when `path` is an allowlist (`*_allow.txt`, one entry per line, order free) and `head`'s lines, as a
+    multiset, are main's plus the lines the reviewed commit added less those it removed: a main-merge that kept
+    both sides of a conflict at one spot (#3991) reads as same in any order. Any other line reads as changed."""
+    if not path.endswith("_allow.txt"):
+        return False
+    bases = _git(cwd, "merge-base", "--all", reviewed, onto).decode().split()
+    if len(bases) != 1 or not _same_mode(cwd, tree, head, path):
+        return False
+    # Split on \n only, as the readers do: bytes.splitlines() also splits on \r and would count unread entries (#4041).
+    pr, mb, main, want = (collections.Counter(_git(cwd, "show", f"{t}:{path}", ok=(0, 128)).split(b"\n"))
+                          for t in (reviewed, bases[0], onto, head))
+    return main + (pr - mb) - (mb - pr) == want
 
 
 def compare(cwd, reviewed, head="HEAD", base="origin/main"):
@@ -392,6 +473,7 @@ def compare(cwd, reviewed, head="HEAD", base="origin/main"):
     kept = {f for f in touched.split("\0") if f and f not in differ and _broken(cwd, tree, f, reviewed, onto)}
     return sorted(kept | {f for f in differ if not _renumbered_only(cwd, tree, head, f, reviewed, onto)
                           and not _appends_kept(cwd, tree, head, f, reviewed, onto)
+                          and not _lines_kept(cwd, tree, head, f, reviewed, onto)
                           and not _stale_dropped(cwd, tree, head, f, reviewed, onto)})
 
 

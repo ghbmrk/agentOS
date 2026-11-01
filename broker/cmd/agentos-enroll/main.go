@@ -1232,8 +1232,8 @@ func rotateRecovery(c config, in io.Reader) error {
 	// slot and recipient in place (seal.Store.commit): the store opens only
 	// with the new key, so the answer is ok, and the reason goes to the
 	// journal.
-	id, err := st.ReplaceAndPut(slot[0], seal.Recovery{Key: r.Next}, handoff.RecipientEntry, v)
-	if id == "" {
+	id, err := st.ReplaceAndPut(handoff.RecipientEntry, v, seal.Swap{ID: slot[0], F: seal.Recovery{Key: r.Next}})
+	if id == nil {
 		return fmt.Errorf("%w: %w", errStoreOpen, err)
 	}
 	if err != nil {
