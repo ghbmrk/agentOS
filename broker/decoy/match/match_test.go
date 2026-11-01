@@ -148,6 +148,13 @@ func TestDestForms(t *testing.T) {
 			t.Errorf("%s does not trip", s)
 		}
 	}
+	// A zoned table address is held zoneless, so either form trips.
+	zm := match.New(nil, map[netip.Addr]int{netip.MustParseAddr("2001:db8::7%eth0"): 3})
+	for _, s := range []string{"2001:db8::7", "2001:db8::7%eth1"} {
+		if id, ok := zm.Dest(netip.MustParseAddr(s)); !ok || id != 3 {
+			t.Errorf("%s against a zoned table address: %d, %v", s, id, ok)
+		}
+	}
 	// A destination named in text is no trip: a page that names the
 	// metadata address is refused at connect time, not read as a leak.
 	if r := m.Scan([]byte("see http://169.254.169.254/latest/meta-data/")); len(r.Trips) != 0 {
