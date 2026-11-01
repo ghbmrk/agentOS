@@ -18,6 +18,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import mmap
 import os
 import pathlib
 import re
@@ -481,21 +482,94 @@ def usr_list(root):
     return sorted(lines, key=lambda ln: json.loads(ln)[0])
 
 
+EROFS_MAGIC = 0xE0F5E1E2
+EROFS_PLAIN, EROFS_INLINE = 0, 2  # the uncompressed data layouts, the only ones a directory has here
+EROFS_INCOMPAT_KNOWN = 0xFF  # erofs-utils 1.7's features; a later one (48-bit inodes 0x100) may move fields
+
+
+def erofs_inodes(data):
+    """Map each path below the root of erofs image DATA to its inode's (mode, uid, gid), read from the
+    on-disk inodes (#4470): fsck.erofs 1.7 extracts a setuid or setgid file without the bit, and
+    dump.erofs prints only the low 9 mode bits. A layout this reader does not know raises ValueError."""
+    with open(data, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as img:
+        return erofs_walk(data, img)
+
+
+def erofs_walk(data, img):
+    magic, blkbits, root = struct.unpack_from("<I8xBxH", img, 1024)
+    if magic != EROFS_MAGIC:
+        raise ValueError("%s is not erofs" % data)
+    if struct.unpack_from("<I", img, 1024 + 80)[0] & ~EROFS_INCOMPAT_KNOWN:
+        raise ValueError("%s uses an erofs feature this reader does not know" % data)
+    bs, meta = 1 << blkbits, struct.unpack_from("<I", img, 1024 + 40)[0] << blkbits
+
+    def inode(nid):
+        off = meta + 32 * nid
+        fmt, xcount, mode = struct.unpack_from("<HHH", img, off)
+        if fmt & 1:  # extended, 64 bytes
+            size, u, uid, gid = struct.unpack_from("<QI4xII", img, off + 8)
+            isize = 64
+        else:  # compact, 32 bytes
+            size, u, uid, gid = struct.unpack_from("<I4xI4xHH", img, off + 8)
+            isize = 32
+        tail = off + isize + (12 + 4 * (xcount - 1) if xcount else 0)
+        return mode, uid, gid, (fmt >> 1) & 7, size, u, tail
+
+    def entries(nid):
+        mode, _, _, layout, size, u, tail = inode(nid)
+        if layout not in (EROFS_PLAIN, EROFS_INLINE):
+            raise ValueError("%s: directory inode %d has data layout %d" % (data, nid, layout))
+        full = size if layout == EROFS_PLAIN else size - size % bs
+        body = img[u * bs:u * bs + full] + img[tail:tail + size - full]
+        if len(body) != size:
+            raise ValueError("%s: directory inode %d runs past the image" % (data, nid))
+        for b in range(0, size, bs):
+            blk = body[b:b + bs]
+            count = struct.unpack_from("<8xH", blk)[0] // 12
+            ents = [struct.unpack_from("<QH", blk, 12 * i) for i in range(count)] + [(0, len(blk))]
+            for (child, start), (_, end) in zip(ents, ents[1:]):
+                name = blk[start:end].split(b"\0", 1)[0]
+                if name not in (b".", b".."):
+                    yield os.fsdecode(name), child
+
+    out, todo = {}, [("", root)]
+    while todo:
+        prefix, nid = todo.pop()
+        for name, child in entries(nid):
+            path = prefix + name
+            if path in out or "/" in name or not name:
+                raise ValueError("%s: bad or repeated directory entry %r" % (data, path))
+            mode, uid, gid = inode(child)[:3]
+            out[path] = (mode, uid, gid)
+            if stat.S_ISDIR(mode):
+                todo.append((path + "/", child))
+    return out
+
+
 def write_usr_list(data, dst):
     """Write DATA's (the /usr erofs partition's) /usr list to DST, from a copy fsck.erofs extracts
-    with owners, modes, times and hard links kept beside DST, and removed again."""
+    with times and hard links kept beside DST, and removed again. Each entry's mode and owner are
+    the partition's inode's, never the copy's (#4470), and the copy must hold the same paths and types."""
     dst = pathlib.Path(dst)
     tmp = pathlib.Path(tempfile.mkdtemp(prefix=".usr-list-", dir=dst.parent))
     try:
         subprocess.run(["fsck.erofs", "--extract=%s" % (tmp / "usr"), "--preserve", str(data)], check=True,
                        stdout=subprocess.DEVNULL)
-        lines = usr_list(tmp / "usr")
+        rows = [json.loads(ln) for ln in usr_list(tmp / "usr")]
     finally:
         shutil.rmtree(tmp)
-    if not lines:
+    if not rows:
         raise ValueError("/usr list of %s is empty" % data)
-    dst.write_text("\n".join(lines) + "\n")
-    return len(lines)
+    inodes = erofs_inodes(data)
+    if sorted(inodes) != [r[0] for r in rows]:
+        raise ValueError("%s: fsck.erofs extracted other paths than its inodes name" % data)
+    for r in rows:
+        mode, uid, gid = inodes[r[0]]
+        if next(c for test, c in USR_TYPES if test(mode)) != r[1]:
+            raise ValueError("%s: %s extracted as another type than its inode's" % (data, r[0]))
+        r[2:5] = "%04o" % stat.S_IMODE(mode), uid, gid
+    dst.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return len(rows)
 
 
 def partition_table(img):
