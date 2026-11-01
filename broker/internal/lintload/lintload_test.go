@@ -180,13 +180,16 @@ func TestOnlyTestsImportTheLoader(t *testing.T) {
 	for _, f := range importers {
 		t.Errorf("%s imports %s; import it only from _test.go files", f, self)
 	}
-	// The scan sees a tagged non-test importer, and not a test one.
+	// The scan sees a tagged non-test importer and a raw-string import, and
+	// not a test one.
 	dir := module(t, map[string]string{
 		"a/a.go":      "//go:build agentos_x\n\npackage a\n\nimport _ \"example.test/m/lintload\"\n",
+		"c/c.go":      "package c\n\nimport _ `example.test/m/lintload`\n",
 		"b/b_test.go": "package b\n\nimport _ \"example.test/m/lintload\"\n",
 	})
-	if got, err := loaderImporters(dir, "example.test/m/lintload"); err != nil || len(got) != 1 || !strings.HasSuffix(got[0], "a/a.go") {
-		t.Fatalf("synthetic: got %q, %v, want a/a.go alone", got, err)
+	got, err := loaderImporters(dir, "example.test/m/lintload")
+	if err != nil || len(got) != 2 || !strings.HasSuffix(got[0], "a/a.go") || !strings.HasSuffix(got[1], "c/c.go") {
+		t.Fatalf("synthetic: got %q, %v, want a/a.go and the raw-string c/c.go", got, err)
 	}
 }
 
@@ -210,7 +213,7 @@ func loaderImporters(root, self string) ([]string, error) {
 			return err
 		}
 		for _, im := range f.Imports {
-			if im.Path.Value == strconv.Quote(self) {
+			if path, err := strconv.Unquote(im.Path.Value); err != nil || path == self {
 				found = append(found, p)
 			}
 		}
