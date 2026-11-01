@@ -427,8 +427,9 @@ func TestPlanSignInLateApprovalAfterTheWall(t *testing.T) {
 	}
 	_, guest := cli.started()
 	exchanged := make(chan int, 1)
+	exchange := codeRequest(t, login, guest)
 	go func() {
-		code, _ := serve(PlanGuest{Login: login, Guest: guest}, codeRequest(t, login, guest))
+		code, _ := serve(PlanGuest{Login: login, Guest: guest}, exchange)
 		exchanged <- code
 	}()
 	<-reached

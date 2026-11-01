@@ -1109,7 +1109,7 @@ func (p *Login) answerHeader(k string) bool {
 }
 
 // device makes a device step and reads its answer whole: one too large to
-// read is dropped. It records the user code a step declares for guest, and
+// read, or with a body that is not a JSON object, is dropped. It records the user code a step declares for guest, and
 // swaps each declared secret for a new placeholder of guest's, so no secret
 // reaches the guest (CLK-1). A step that declares a secret passes an error
 // answer's status only, and drops an answer that lacks one of its secrets or
@@ -1123,12 +1123,20 @@ func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Respon
 		return nil, DUndeclared
 	}
 	body, code := a.body, ""
-	held := map[string]signSecret{}
-	if a.status == http.StatusOK && (e.UserCode != "" || len(e.Secret) > 0) {
-		obj, err := strictObject(a.body)
-		if err != nil && len(e.Secret) > 0 {
+	if a.status != http.StatusOK && len(e.Secret) > 0 {
+		body = nil
+	}
+	// A body passes only as this clerk's own encoding of a JSON object, so
+	// an escaped secret has one written form for the leak check.
+	var obj map[string]any
+	if len(body) > 0 {
+		var err error
+		if obj, err = strictObject(body); err != nil {
 			return nil, DSecret
 		}
+	}
+	held := map[string]signSecret{}
+	if a.status == http.StatusOK {
 		if c, ok := obj[e.UserCode].(string); ok && e.UserCode != "" && c != "" && len(c) <= maxDevice {
 			code = c
 		}
@@ -1141,26 +1149,14 @@ func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Respon
 			held[k] = signSecret{ph: ph, real: v}
 			obj[k] = ph
 		}
-		if len(e.Secret) > 0 {
-			if body, err = encodeJSON(obj); err != nil {
-				return nil, DSecret
-			}
-		}
-	} else if len(e.Secret) > 0 {
-		body = nil
 	}
-	prior := p.heldSecrets(guest)
-	if len(prior) > 0 && len(held) == 0 && len(body) > 0 {
-		// The guest holds secrets: only a body in the canonical form the
-		// leak check reads passes.
-		obj, err := strictObject(body)
-		if err != nil {
-			return nil, DSecret
-		}
+	if obj != nil {
+		var err error
 		if body, err = encodeJSON(obj); err != nil {
 			return nil, DSecret
 		}
 	}
+	prior := p.heldSecrets(guest)
 	out := p.answer(&http.Response{StatusCode: a.status, Status: fmt.Sprintf("%d %s", a.status, http.StatusText(a.status)),
 		Header: a.header, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body))}, "")
 	for _, s := range held {
