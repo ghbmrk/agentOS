@@ -3971,7 +3971,7 @@ class MustRun:
         before = len(result.skipped) if result is not None else 0
         out = super().run(result)
         if result is not None and os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1" \
-                and False:
+                and len(result.skipped) > before:
             try:
                 raise AssertionError("%s skipped where AGENTOS_REQUIRE_REFERENCE_TOOLS=1" % self.id())
             except AssertionError:
