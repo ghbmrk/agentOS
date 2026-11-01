@@ -1,0 +1,66 @@
+# One camera decoder session (CAM-decoder-uid, #4134; CLK-1, NET-2, RES-2): the clerk's connection on
+# agentos-camdecode.socket is standard input; agentos-camdecode-host reads the session's shapes and
+# runs the decoder in a gVisor sandbox, rootless, beside its leaf of this unit's delegated group, and
+# copies frames between the two. The property: a sandbox escape lands as this unit's user, a dynamic
+# one per connection (User= names the instance), which owns no file on the box, is no other session's
+# and is not the clerk's, so it cannot read the clerk's sealed store or capture, signal the clerk, or
+# replace its owner socket; it has no network, and sees no keeper path (the main side's mask).
+[Unit]
+Description=agentOS camera decoder: one session
+CollectMode=inactive-or-failed
+
+[Service]
+ExecStart=/usr/lib/agentos/agentos-camdecode-host -runsc /usr/lib/agentos/runsc -runsc-root /tmp/runsc \
+        -decode-root /usr/lib/agentos/images/camdecode
+DynamicUser=yes
+User=camdec-%i
+StandardInput=socket
+StandardOutput=null
+StandardError=journal
+# Sessions run at once, so each also gets its own pid namespace: none sees or signals another's.
+PrivatePIDs=yes
+# runsc's state and the sandbox's bundle: this unit's own /tmp (DynamicUser= makes it private).
+PrivateTmp=yes
+# The group's controllers are the process's to give the sandbox (broker/cgroup Controllers): it moves
+# into its leaf, and the sandbox's group, with the decoder's memory cap, is made beside it.
+Delegate=cpu io memory pids
+# RES-2: the sandbox's 512 MiB and 256 tasks (camera.DefaultDecodeMem, gvisor's oneShotPids) and the
+# process's 64 MiB and 32 tasks above them.
+MemoryMax=576M
+TasksMax=288
+LimitCORE=0
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateIPC=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# What runsc needs (CAM-host-11): the user, mount, pid, network, IPC and UTS namespaces it makes for
+# the sandbox, so no RestrictNamespaces= (systemd's filter answers every clone3 with ENOSYS, and the
+# process starts runsc with clone3, straight into the sandbox's group); the system calls its sentry and
+# gofer make, which they filter themselves (gVisor's own seccomp) but those below; write-and-execute
+# memory for the sentry's guest code; and a writable cgroup tree, where the delegation's ownership
+# leaves only this unit's group its user's.
+# Still none of the calls no sandbox makes: CPU emulation, raw I/O, swap, reboot and the obsolete ones (with
+# ProtectClock= and ProtectKernelModules=, the clock's and the modules'). A call outside fails with EPERM.
+SystemCallFilter=~@cpu-emulation @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+PrivateDevices=yes
+DevicePolicy=closed
+# No network: the sandbox has none (runsc --network=none), and nor does this unit.
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+# No code from writable storage (UPD-10): only the read-only, verity-checked /usr executes.
+NoExecPaths=/
+ExecPaths=/usr

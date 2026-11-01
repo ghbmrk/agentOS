@@ -660,7 +660,7 @@ class WiringTest(unittest.TestCase):
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
         run = "          python3 -I ../tools/require_ran.py"
         rc = '          [ "$rc" -eq 0 ]\n'
-        nxt = "      - name: Camera clerk's decoder in its own unit"
+        nxt = "      - name: Camera decoder sessions in their own unit"
         job = "\n  machines:\n"
         # Each edit, as (old, new) applied once, stops the step failing on a skipped or missing test.
         edits = {
