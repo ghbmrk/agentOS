@@ -3954,7 +3954,8 @@ class ReferenceToolTest(unittest.TestCase):
         step = ci[ci.index("- name: Unit tests"):]
         step = step[:step.index("\n      - ")]
         self.assertIn('AGENTOS_REQUIRE_REFERENCE_TOOLS: "1"', step)
-        self.assertIn("unittest discover -s tests", step)
+        self.assertIn("python tools/unit_tests.py", step)
+        self.assertIn('"unittest", "discover", "-s", "tests"', (ROOT / "tools/unit_tests.py").read_text())
 
 
 class SystemdDiffTest(unittest.TestCase):

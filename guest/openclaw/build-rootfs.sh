@@ -7,10 +7,10 @@
 # Needs: curl, xz, sha256sum, go, and the host's /bin/sh and coreutils, which
 # are copied in with their libraries for OpenClaw's exec tool.
 set -eu
-NODE_VERSION=v24.21.0
-NODE_SHA256=fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6
-OPENCLAW_VERSION=2026.9.8
-OPENCLAW_INTEGRITY=sha512-G+JkNUhtpDE3cXR4AEi2NyyG9fqI/T2WUSl8ZnR8AATH8Dh1kC3qYFL7wwPoZtgHiP/cszA86PEiE0PDysxb9Q==
+NODE_VERSION=v24.22.2
+NODE_SHA256=48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75
+OPENCLAW_VERSION=2026.10.9
+OPENCLAW_INTEGRITY=sha512-KbIl0/7an0/nKBo92FnJg7LFcEpFVQyOgSRfHNE9yxELg1Ebql7BmBsdLL+1dDOLZnQtuwjt6Hy45CCrmYdJNA==
 MODEL=${MODEL:-broker-default}
 
 here=$(cd "$(dirname "$0")" && pwd)

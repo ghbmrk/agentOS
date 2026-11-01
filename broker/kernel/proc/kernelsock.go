@@ -194,7 +194,7 @@ type (
 	approvalRead struct {
 		Approval []byte `json:"approval"`
 	}
-	// recoveryCardRead is the new card's bits, handoff.CardKeyLen bytes.
+	// recoveryCardRead is the new card, handoff.MadeCardLen bytes.
 	recoveryCardRead struct {
 		Key []byte `json:"key"`
 	}

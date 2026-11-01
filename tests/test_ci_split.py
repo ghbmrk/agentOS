@@ -143,7 +143,7 @@ class WiringTest(unittest.TestCase):
 
     def test_broker_passes_only_when_its_parts_pass(self):
         broker = job(self.ci, "broker")
-        self.assertIn("needs: [scope, broker-race, broker-checks]", broker)
+        self.assertIn("needs: [broker-race, broker-checks]", broker)
         self.assertIn("RACE: ${{ needs.broker-race.result }}", broker)
         self.assertIn("CHECKS: ${{ needs.broker-checks.result }}", broker)
         self.assertIn('[ "$RACE" = success ] && [ "$CHECKS" = success ]', broker)
