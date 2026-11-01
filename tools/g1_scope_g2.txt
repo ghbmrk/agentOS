@@ -172,6 +172,10 @@ exempt-pr 4343
 # Remove once #4260 merges.
 exempt-pr 4260
 
+# #4371 (#4215): broker/enforcer/radio/confine/ and radio test files and ASSUMPTIONS.md, which the G2 list does not name (D-198).
+# Remove once #4371 merges.
+exempt-pr 4371
+
 # #4216 (ENF-k2-rx, #4196): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
 # Remove once #4216 merges.
 exempt-pr 4216
