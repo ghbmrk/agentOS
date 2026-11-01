@@ -355,7 +355,8 @@ func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
 // Owner actions. The owner channel authenticates them; the kernel only records.
 
 func (k *Kernel) Issue(now int64, cos []key.Cosign, keys ...key.Key) error {
-	if err := k.honeyTrip(now, OpIssue, "", keys...); err != nil {
+	keys, err := k.ownerKeys(now, OpIssue, "", keys...)
+	if err != nil {
 		return err
 	}
 	if _, err := k.s.grants(keys, cos, now); err != nil {
@@ -559,9 +560,11 @@ func (k *Kernel) Hold(now int64, plan string, rf *key.Refusal) error {
 // charged through the shared chain prefix, bound all extensions together
 // (LOG-7). Later calls of the plan are charged to ext.
 func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
-	if err := k.honeyTrip(now, OpExtend, plan, ext); err != nil {
+	logged, err := k.ownerKeys(now, OpExtend, plan, ext)
+	if err != nil {
 		return err
 	}
+	ext = logged[0]
 	h, ok := k.s.SpendHeld[plan]
 	if !ok {
 		return &key.Refusal{Code: CNotHeld, Detail: plan}
@@ -576,11 +579,7 @@ func (k *Kernel) Extend(now int64, ext key.Key, plan string) error {
 	if v.Root() == h.Root || slices.Contains(v.IDs, h.Funding) {
 		return &key.Refusal{Code: CExtension, Detail: "a held key cannot release itself"}
 	}
-	bounded := false
-	for _, c := range v.Limits.Caps {
-		bounded = bounded || c.Kind == key.KSpendTask
-	}
-	if !bounded {
+	if !slices.ContainsFunc(v.Limits.Caps, func(c key.Cap) bool { return c.Kind == key.KSpendTask }) {
 		return &key.Refusal{Code: CExtension, Detail: "no per-task cap"}
 	}
 	if r := v.Spend(k.s.Plans[plan].Plan.Task(), 1, key.Context{Now: now, Changes: &k.s.Changes, Ledger: k.s.Ledger()}); r != nil {
