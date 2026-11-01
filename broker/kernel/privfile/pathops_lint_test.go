@@ -643,12 +643,15 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles magic link":              {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
 		"a tmpfiles mode on a helper":        {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
 		"a tmpfiles w to a file":             {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
-		"a tmpfiles uevent_helper":           {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n", `not /sys/class or /sys/devices`},
-		"a tmpfiles mode on uevent_helper":   {tmpfiles, "z /sys/kernel/uevent_helper 0666 nobody -\n", `not /sys/class or /sys/devices`},
-		"a tmpfiles mode on a module helper": {tmpfiles, "z /sys/module/drbd/parameters/usermode_helper 0666\n", `not /sys/class or /sys/devices`},
-		"a tmpfiles w to a device":           {tmpfiles, "w /sys/class/leds/x/trigger - - - - none\n", `writes only under /proc/sys`},
-		"a tmpfiles cgroup file":             {tmpfiles, "z /sys/fs/cgroup/x/cgroup.procs 0666\n", `not /sys/class or /sys/devices`},
-		"a tmpfiles module helper":           {tmpfiles, "w /sys/module/drbd/parameters/usermode_helper - - - - /usr/lib/agentos/agentos-side\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles uevent_helper":           {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n", `the only line in /sys`},
+		"a tmpfiles mode on uevent_helper":   {tmpfiles, "z /sys/kernel/uevent_helper 0666 nobody -\n", `the only line in /sys`},
+		"a tmpfiles mode on a module helper": {tmpfiles, "z /sys/module/drbd/parameters/usermode_helper 0666\n", `the only line in /sys`},
+		"a tmpfiles w to a device":           {tmpfiles, "w /sys/class/leds/x/trigger - - - - none\n", `the only line in /sys`},
+		"a tmpfiles link to a module":        {tmpfiles, "z /sys/class/net/eth0/driver/module/parameters/usermode_helper 0666\n", `the only line in /sys`},
+		"a tmpfiles devices path":            {tmpfiles, "z /sys/devices/platform/x/brightness 0666\n", `the only line in /sys`},
+		"a tmpfiles Z on a device":           {tmpfiles, "Z /sys/class/leds/x/brightness 0660\n", `the only line in /sys`},
+		"a tmpfiles cgroup file":             {tmpfiles, "z /sys/fs/cgroup/x/cgroup.procs 0666\n", `the only line in /sys`},
+		"a tmpfiles module helper":           {tmpfiles, "w /sys/module/drbd/parameters/usermode_helper - - - - /usr/lib/agentos/agentos-side\n", `the only line in /sys`},
 		"a tmpfiles f":                       {tmpfiles, "f /etc/rc.local 0755 - - - /usr/lib/agentos/agentos-side\n", `type f writes`},
 		"a tmpfiles L":                       {tmpfiles, "L+ /etc/systemd/system-generators/x - - - - /usr/lib/agentos/agentos-side\n", `type L+ writes`},
 		"a tmpfiles C":                       {tmpfiles, "C /etc/udev/rules.d - - - - /usr/share/agentos/rules.d\n", `type C writes`},
@@ -1381,10 +1384,14 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 			return fmt.Errorf("%d: %s is in /proc but not /proc/sys", n, p)
 		// sysfs holds root helpers the reader does not know (uevent_helper,
 		// module parameters such as drbd's usermode_helper, cgroup v1
-		// release_agent), so a line there names a device's own attribute
-		// or is refused, whatever its type (#4381).
-		case strings.HasPrefix(p, "/sys/") && !strings.HasPrefix(p, "/sys/class/") && !strings.HasPrefix(p, "/sys/devices/"):
-			return fmt.Errorf("%d: %s is in /sys but not /sys/class or /sys/devices", n, p)
+		// release_agent), and its links (a device's driver/module,
+		// iommu_group) lead from a device to them, and systemd-tmpfiles
+		// follows links on the path. So the only sysfs line read is a z on
+		// /sys/class/<class>/<device>/<attribute>: the one link is the
+		// device's own, into /sys/devices, and the attribute is its file
+		// (#4381).
+		case (p == "/sys" || strings.HasPrefix(p, "/sys/")) && (typ != "z" || !strings.HasPrefix(p, "/sys/class/") || strings.Count(p, "/") != 5):
+			return fmt.Errorf("%d: %s %s; the only line in /sys is a z on /sys/class/<class>/<device>/<attribute>", n, f[0], p)
 		case typ != "w" && typ != "w+" && sysctlHelpers[key]:
 			return fmt.Errorf("%d: %s on %s; a helper is only written, with w", n, f[0], p)
 		case typ == "w" || typ == "w+":
