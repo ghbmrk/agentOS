@@ -37,7 +37,7 @@ Cost per merged package = (calls × context per call × read price + writes + ou
 
 Levers in order of effect:
 
-1. **Cut rework.** Raise the first-pass rate and build only what the first release needs (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
+1. **Cut rework.** Raise the first-pass rate and build only what the acceptance tests need (§2, §4). L3 cause codes (§4) say which part of the pipeline the rework comes from.
 2. **Fewer cold starts, then smaller context.** Count cold starts per merged PR and cut them: pick the model at spawn, don't wake idle sessions, hand off before a long idle (§5). Then small briefs, a short BOARD index and compaction at 200k keep each call's context small.
 3. **Fewer calls per package.** One package per session; batch reviews (§4).
 4. **Route by model price.** Use the cheapest model that keeps quality, and check with tests rather than with a more expensive model (§5).
@@ -45,26 +45,24 @@ Levers in order of effect:
 
 The budget rules themselves are the agentos-budget skill (CLAUDE.md §Budget); the calibration history behind them is in git history before MIG-1.
 
-## 2. Finding triage: blocker, release, later
+## 2. Finding triage: blocker or required work item
 
 Every finding (L3, lens, CI soak, an agent's own observation) gets one class at the moment it is raised. Whoever raises it assigns the class; the reviewer can correct it.
 
 | Class | Meaning | Where it goes |
 |---|---|---|
 | **blocker** | Breaks a requirement the PR cites, or an invariant. | Fixed in the same PR before merge. |
-| **release** | Needed to pass an acceptance test in SPEC §18 (A1–A21) or an invariant, but not in this PR's scope. The finding names that test or invariant and one failure path: what goes wrong without it. | A new `work-item` issue labelled `class:release`, named in the PR's Findings line. |
-| **later** | Anything else: polish, hardening beyond the spec, nice-to-have wording. | An issue labelled `class:later` (one line). No package is started for it before the first release ships. |
+| **work item** | Anything else: out of this PR's scope, or only on lines the diff doesn't change. The finding names the acceptance test or invariant it serves (or the polish it is) and one failure path. | A new `work-item` issue labelled `class:release`, named in the PR's Findings line. It must close before its row counts as done (D-250). |
 
-The PR's Findings line also names every `class:later` issue the PR closes, including one outside its brief's scope; the reviewer checks the line against the diff.
+Nothing is deferred: there is no release to defer to, so a finding is fixed in the PR or becomes a required work item. The PR's Findings line also names every work-item issue the PR closes, including one outside its brief's scope; the reviewer checks the line against the diff.
 
-Security findings on tier-A broker paths are never `later` unless they are purely wording. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is `release` only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are `later`. When unsure between blocker and release, pick blocker. When unsure between release and later, class it `later` with the tag `recheck` and say so (D-086).
+Security findings on tier-A broker paths are blockers when they are on the PR's own lines. On assurance tooling (`tools/depaudit*`, `tools/canary*`, `assurance/`), a finding is a blocker only if it can make the tool report a pass on a real violation (a false pass); the tool's messages, diagnostics and remedy text are work items. When unsure between blocker and work item, pick blocker (D-086).
 
-- **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is `later` unless it is a blocker on the cited IDs, a false pass, or an exploit path.
-- **Diff scope.** A blocker cites a head-side `path:line` the PR's diff adds or changes: the defect itself, or the PR's line that newly reaches or breaks older code (a new call site, a changed argument). `python3 tools/difflines.py path:line ...` prints `in-diff` or `unchanged` for each. A finding only on unchanged lines is pre-existing code: `release` or `later`, never a blocker, however severe (a tier-A security one is `release` at least). Blocking a PR on code it didn't write adds rounds without making the PR any less safe; the old defect is tracked as its own issue.
-- **One review, one package.** The release findings from one PR's reviews go into one follow-up brief, with one `work-item` issue per finding grouped under it, not one package each.
-- **Pre-release sweep.** Before the first release ships, one session re-reads every `recheck` and every tier-A `class:later` issue (and the archived docs/LATER-HISTORY.md) and promotes any that now block an acceptance test.
+- **Follow-up depth.** A finding raised on a follow-up of a follow-up (a row whose source is itself a review finding on a follow-up row) is a work item unless it is a blocker on the cited IDs, a false pass, or an exploit path.
+- **Diff scope.** A blocker cites a head-side `path:line` the PR's diff adds or changes: the defect itself, or the PR's line that newly reaches or breaks older code (a new call site, a changed argument). `python3 tools/difflines.py path:line ...` prints `in-diff` or `unchanged` for each. A finding only on unchanged lines is pre-existing code: a work item, never a blocker, however severe. Blocking a PR on code it didn't write adds rounds without making the PR any less safe; the old defect is tracked as its own issue.
+- **One review, one package.** The work-item findings from one PR's reviews go into one follow-up brief, with one `work-item` issue per finding grouped under it, not one package each.
 
-The critical-path audit of the board lives on the issues: each open row's issue carries `class:release` or `class:later` (the 2026-10-10 audit is in docs/LATER-HISTORY.md). The coordinator does not start `later` rows, nor rows labelled `frozen`: D-098's freeze, which `board.py` sets from the row's "frozen until G2" state and `check --repo` holds to it. A row moves to release, by relabelling its issue, only with the acceptance test it now blocks.
+Each open row's issue carries `class:release` (the 2026-10-10 audit is in docs/LATER-HISTORY.md). The coordinator does not start rows labelled `frozen`: D-098's freeze, which `board.py` sets from the row's "frozen until G2" state and `check --repo` holds to it. Existing `class:later` issues are promoted to rows or closed, and no new ones are made (D-250).
 
 ## 3. Risk tiers
 
@@ -108,7 +106,7 @@ Never a standing reviewer session: the one long-lived reviewer cost 27% of the f
 - `spec-gap`: SPEC.md is ambiguous or silent on what the PR had to decide.
 - `brief-gap`: the brief left out something the package needed.
 - `defect`: the code breaks a cited requirement or an invariant.
-- `scope`: the review asks for something outside the cited IDs; such points are `release` or `later` (§2), not blockers, and the verdict should normally have been accept.
+- `scope`: the review asks for something outside the cited IDs; such points are work items (§2), not blockers, and the verdict should normally have been accept.
 
 **Blocker evidence.** Each blocker point names, after its class, the in-diff `path:line` (§2 "Diff scope") and a `Repro:`: the failing test, command, mutant or input the reviewer ran that shows the failure. Where no run can show it (a power cut, a race the harness can't force), the point gives the failure path step by step instead, and before the fix-list posts a fresh verifier session, given only the diff and that point, checks the path. The verifier runs on Sonnet for tiers B and C and on the review's own model for tier A (§5: tier-A reviews use the strongest model). On tiers B and C a point the verifier can't confirm is posted as `release` at the lowest, never `later` (§2: when unsure between blocker and release, pick blocker). On tier A it stays a blocker unless the verifier refutes it, naming the step of the path that can't happen. A false blocker spends a builder wake and a delta review for nothing, while a verifier session on every blocker would add a cold start to every fix-list; on 2026-10-17's fix-lists (#2141, #2143, #2149, #2154) every blocker already carried a reproduction and was real, so the verifier runs only where none exists.
 
@@ -139,7 +137,7 @@ Next: fix 1, then a delta L3 review; owed: none
 
 A lens verdict has the same shape, with its own lens in the marker, for example `<!-- record: security -->`.
 
-Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). The builder answers each finding, whatever the verdict, with a line `Finding <blocker|release|later>: <fixed|wrong|intentional|didn't-matter>` in a PR conversation comment, not an inline review-thread reply: the review-noise count (#2168) reads conversation comments only, so an inline answer goes uncounted. METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
+Each fix-list point cites a requirement ID or a concrete defect and carries its class (§2). The builder answers each finding, whatever the verdict, with a line `Finding <blocker|release>: <fixed|wrong|intentional|didn't-matter>` in a PR conversation comment, not an inline review-thread reply: the review-noise count (#2168) reads conversation comments only, so an inline answer goes uncounted. METRICS counts causes per week, so L4 can tell whether to fix the spec, the briefs, the builders or the reviewers.
 
 The verdict comment's last line states the PR's next step and the reviews still owed (for example `Next: merge on green CI; owed: none`), so the comment alone tells a cold session what happens next (§5, §7).
 
