@@ -37,15 +37,19 @@ func chains(text string) map[string][]string {
 // chains binds its connection to its own interface pair, and every live
 // accept passes only a connection with that pair's mark, in both
 // directions. The mark is one value per interface pair, never shared by
-// two, and a load that keeps a path keeps its mark, so adding or removing
+// two and the same in an accept and in its live form (#4367), and a load
+// that keeps a path keeps its mark, so adding or removing
 // another device neither cuts a kept connection nor hands its mark to
 // another path. Catches an accept added without a binding, which would let
-// a segment with the same exit forge a related packet into its connections.
+// a segment with the same exit forge a related packet into its connections,
+// and a live mark that differs from its accept's, which would cut every
+// connection on that path after its first packet.
 func TestEveryAcceptBound(t *testing.T) {
 	more := fixturePolicy()
 	more.Devices = append(more.Devices[:2:2], more.Devices[3:]...) // the plug removed
 	more.Devices = append(more.Devices, policy.Device{ID: "far", Network: policy.NetDevices, WiFi: "vlan4094", Allow: []string{"far.example"}, VendorCloud: true})
 	byPair := map[string]string{} // mark -> "in out", across both documents
+	byMark := map[string]string{} // "in out" -> mark, across both documents
 	lines := map[string]bool{}    // every TV line of the fixture
 	for i, d := range []policy.Document{fixturePolicy(), more} {
 		text, err := Compile(d, fixtureLayout())
@@ -53,6 +57,8 @@ func TestEveryAcceptBound(t *testing.T) {
 			t.Fatal(err)
 		}
 		cs := chains(text)
+		// The accepts come first, so each pair's mark is an accept's before
+		// any live form is checked against it.
 		for _, chain := range []string{"forward", "people", "forward_live", "people_live"} {
 			if len(cs[chain]) == 0 {
 				t.Fatalf("no chain %s", chain)
@@ -83,6 +89,12 @@ func TestEveryAcceptBound(t *testing.T) {
 					t.Errorf("mark %s is both %s and %s", m[4], was, pair)
 				}
 				byPair[m[4]] = pair
+				if was, ok := byMark[pair]; ok && was != m[4] {
+					t.Errorf("%s: %s has mark %s here and %s on its accept", chain, pair, m[4], was)
+				} else if !ok && live {
+					t.Errorf("%s: a live accept for %s, which no accept binds", chain, pair)
+				}
+				byMark[pair] = m[4]
 				if strings.Contains(l, `"ap0.101"`) {
 					if i == 0 {
 						lines[chain+": "+l] = true
@@ -98,5 +110,32 @@ func TestEveryAcceptBound(t *testing.T) {
 	}
 	if len(byPair) == 0 {
 		t.Fatal("no marks")
+	}
+}
+
+// NET-3 (#4367): an accept that does not name one interface each way is
+// refused, so it can never be written unbound; a well-formed one gets its
+// pair's mark. Compile's own rules always name one each way, so the check
+// is reached through bindAll directly.
+func TestBindAllRefuses(t *testing.T) {
+	idx := map[string]uint32{`"wan0"`: 0x1001, `"own0"`: 0x1002, `"hh0"`: 0x1003}
+	for name, r := range map[string]rule{
+		"no ingress":     {out: `"wan0"`, verdict: "accept"},
+		"no egress":      {in: `"own0"`, verdict: "accept"},
+		"a set":          {in: `{ "own0", "hh0" }`, out: `"wan0"`, verdict: "accept"},
+		"an unknown one": {in: `"ap0.*"`, out: `"wan0"`, verdict: "accept"},
+	} {
+		rs := []rule{{in: `"own0"`, out: `"wan0"`, verdict: "accept"}, r}
+		err := bindAll(idx, rs)
+		if err == nil || !strings.Contains(err.Error(), "not one interface each way") {
+			t.Errorf("%s: bound (err %v, mark %q)", name, err, rs[1].mark)
+		}
+	}
+	rs := []rule{{in: `"own0"`, out: `"wan0"`, verdict: "accept"}, {in: `"own0"`, verdict: "drop"}}
+	if err := bindAll(idx, rs); err != nil {
+		t.Fatal(err)
+	}
+	if rs[0].mark != "0x10011002" || rs[1].mark != "" {
+		t.Errorf("marks %q, %q; want 0x10011002 on the accept only", rs[0].mark, rs[1].mark)
 	}
 }

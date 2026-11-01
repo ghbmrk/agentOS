@@ -155,3 +155,21 @@ func ifaces(in, out string) string {
 	}
 	return strings.Join(p, " ")
 }
+
+// bindAll sets the mark of every accept in rs, and refuses an accept that
+// does not name one interface of idx each way: its connection could not be
+// bound, so a related packet forged into it would pass on any interface
+// its rule allows.
+func bindAll(idx map[string]uint32, rs []rule) error {
+	for i, r := range rs {
+		if r.verdict != "accept" {
+			continue
+		}
+		m, ok := bind(idx, r.in, r.out)
+		if !ok {
+			return fmt.Errorf("nft: an accept from %s to %s is not one interface each way", r.in, r.out)
+		}
+		rs[i].mark = m
+	}
+	return nil
+}

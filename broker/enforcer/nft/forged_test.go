@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,28 +139,57 @@ func hostPort(t *testing.T, a net.Addr) (string, int) {
 	return host, n
 }
 
-// NET-3, NET-2 Device paths (#4286): a related packet passes only on the
-// interfaces of the connection it names. Every segment with an internet
-// path forges an ICMP error, as conntrack reads it related to the TV's
-// open internet connection, and sends it toward the TV's peer: none
-// arrives, though each of those segments' own internet rule matches the
-// error's interfaces. A genuine error on the connection's own path (path
-// MTU, from the peer back to the TV) still arrives, and so does the plug's
-// error about its own internet connection, which shows the forgers'
-// channel works and the drop is the binding.
+// seg6 gives segment host seg an IPv6 address and default route, which
+// the fixture leaves out: only the devices have IPv6 there. The edge is
+// never given one, since its segment is IPv4 only (ENF-e-6).
+func (h *home) seg6(seg string) {
+	l := fixtureLayout()
+	ifc := map[string]string{"owner": l.Owner, "household": l.Household, "guest": l.Guests, "core": l.Core}[seg]
+	p := "fd10:" + strings.Split(segNets[seg], ".")[1] + "::"
+	run(h.t, "ip", "addr", "add", p+"1/64", "dev", ifc, "nodad")
+	h.in(h.hosts[seg], "ip", "addr", "add", p+"2/64", "dev", "eth0", "nodad")
+	h.in(h.hosts[seg], "ip", "-6", "route", "add", "default", "via", p+"1")
+}
+
+// NET-3, NET-2 Device paths (#4286, #4367): a related packet passes only on
+// the interfaces of the connection it names, in either direction and over
+// either family. Every segment with an internet path forges an ICMP error,
+// as conntrack reads it related to the TV's open internet connection: one
+// in the original direction, sent toward the TV's peer, and one in the
+// reply direction, sent to the enforcer's WAN address, which the NAT turns
+// back toward the TV. None arrives, though each original-direction forger's
+// own internet rule matches its error's interfaces. In the reply direction
+// the speaker, which the core reaches, forges an error into the core's
+// internet connection: the reply form of the core's rule to the speaker
+// matches its interfaces and port, so only the mark stops it. Genuine
+// errors on a connection's own path (path MTU, from the peer back to the TV
+// and to the core) still arrive, and so does the plug's error about its own
+// internet connection, which shows the forgers' channel works and the drop
+// is the binding.
 func TestForgedRelatedDropped(t *testing.T) {
 	if !inNetns(t) {
 		return
 	}
 	h := build(t)
-	type fam struct {
-		v6         bool
-		allow, wan string
+	text, err := Compile(cutPolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
 	}
-	fams := []fam{{false, netAllow, enfWAN}}
+	h.load(text)
+	h.fillSets()
+	run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, false), "{ "+netAllow+" }")
+	type fam struct {
+		v6                bool
+		allow, wan, cored string
+	}
+	fams := []fam{{false, netAllow, enfWAN, netCore}}
 	if h.v6 {
 		run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, true), "{ "+net6Allow+" }")
-		fams = append(fams, fam{true, net6Allow, "2001:db8:1::2"})
+		run(t, "nft", "add", "element", "inet", Table, CoreSet(true), "{ "+net6Allow+" }")
+		for _, seg := range []string{"owner", "household", "guest", "core"} {
+			h.seg6(seg)
+		}
+		fams = append(fams, fam{true, net6Allow, "2001:db8:1::2", net6Allow})
 	}
 	forgers := []string{"103", "guest", "owner", "household", "core", "edge"}
 	for _, f := range fams {
@@ -167,30 +197,42 @@ func TestForgedRelatedDropped(t *testing.T) {
 		if f.v6 {
 			tvAddr, plugAddr = devAddr6(101), devAddr6(103)
 		}
-		atPeer, atTV := h.hear("isp", f.v6), h.hear("101", f.v6)
+		atPeer, atTV, atCore := h.hear("isp", f.v6), h.hear("101", f.v6), h.hear("core", f.v6)
 		tv := h.hold("the TV to its allow list", "101", "isp", f.allow, 9211)
 		plug := h.hold("the plug to its allow list", "103", "isp", f.allow, 9212)
+		core := h.hold("the core to its list", "core", "isp", f.cored, 9100)
 		_, tvPort := hostPort(t, tv.c.LocalAddr())
 		_, plugPort := hostPort(t, plug.c.LocalAddr())
 		mWAN, tvMasq := hostPort(t, tv.s.RemoteAddr())
+		_, coreMasq := hostPort(t, core.s.RemoteAddr())
 
-		// The forgeries: each names the TV's connection as its device sees
-		// it, a packet from the peer to the TV.
+		// The forgeries. Original direction: each names the TV's
+		// connection as its device sees it, a packet from the peer to the
+		// TV. Reply direction: each names it as the peer sees it, a packet
+		// from the TV (the enforcer's WAN address after the NAT) to the
+		// peer.
 		var tag uint16 = 1300
-		forged := map[uint16]string{}
+		forged := map[uint16]string{}  // heard at the TV's peer
+		replied := map[uint16]string{} // heard at the TV
 		for _, from := range forgers {
-			if f.v6 && from != "103" {
-				continue // only the devices have IPv6 in the fixture
+			if f.v6 && from == "edge" {
+				continue // the edge's segment is IPv4 only (ENF-e-6)
 			}
 			tag++
 			forged[tag] = from
 			h.sendErr(from, "", f.allow, f.v6, icmpErr(f.v6, tag, f.allow, tvAddr, 9211, tvPort))
+			tag++
+			replied[tag] = from
+			h.sendErr(from, "", f.wan, f.v6, icmpErr(f.v6, tag, mWAN, f.allow, tvMasq, 9211))
 		}
+		const intoCore = 1390
+		h.sendErr("102", "", f.wan, f.v6, icmpErr(f.v6, intoCore, mWAN, f.cored, coreMasq, 9100))
 		// The plug's own error about its own connection, and the peer's
-		// genuine one back to the TV.
-		const own, genuine = 1400, 1401
+		// genuine ones back to the TV and the core.
+		const own, genuine, genuineCore = 1400, 1401, 1402
 		h.sendErr("103", "", f.allow, f.v6, icmpErr(f.v6, own, f.allow, plugAddr, 9212, plugPort))
 		h.sendErr("isp", f.allow, f.wan, f.v6, icmpErr(f.v6, genuine, mWAN, f.allow, tvMasq, 9211))
+		h.sendErr("isp", f.cored, f.wan, f.v6, icmpErr(f.v6, genuineCore, mWAN, f.cored, coreMasq, 9100))
 		time.Sleep(probeWait)
 
 		for tag, from := range forged {
@@ -198,12 +240,108 @@ func TestForgedRelatedDropped(t *testing.T) {
 				t.Errorf("v6 %v: an ICMP error %s forged about the TV's connection reached the TV's peer", f.v6, from)
 			}
 		}
+		for tag, from := range replied {
+			if atTV.has(tag) {
+				t.Errorf("v6 %v: a reply-direction ICMP error %s forged about the TV's connection reached the TV", f.v6, from)
+			}
+		}
+		if atCore.has(intoCore) {
+			t.Errorf("v6 %v: the speaker's reply-direction error about the core's internet connection reached the core", f.v6)
+		}
 		if !atPeer.has(own) {
 			t.Errorf("v6 %v: the plug's error about its own connection did not reach its peer", f.v6)
 		}
 		if !atTV.has(genuine) {
 			t.Errorf("v6 %v: the peer's path-MTU error did not reach the TV", f.v6)
 		}
-		h.expectOpen(true, tv, plug)
+		if !atCore.has(genuineCore) {
+			t.Errorf("v6 %v: the peer's path-MTU error did not reach the core", f.v6)
+		}
+		h.expectOpen(true, tv, plug, core)
 	}
+}
+
+// NET-3, A18 Segments (#4113): an ICMP error from a device to another
+// device it has no path to is dropped and logged. The speaker forges
+// errors about the edge's open connection to the TV, to each end, and the
+// plug one about a device pair's connection, to the pair's starting end:
+// none arrives, and each moves the blocked counter, which only the logged
+// refusal rules count. The same forgeries from Owner, Household and Guests
+// are dropped too, without a log line or a count (NET-1, NET-3: those
+// networks are never observed). A genuine error along an allowed path still
+// passes: from the pair's other end, and from the internet router on the
+// TV's own internet connection, so path-MTU discovery keeps working.
+func TestRelatedNeedsPath(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	text, err := Compile(cutPolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.load(text)
+	h.fillSets()
+	atTV, atEdge, at106 := h.hear("101", false), h.hear("edge", false), h.hear("106", false)
+	edge := h.hold("the edge to the TV", "edge", "101", devAddr(101), 9100)
+	pair := h.hold("a device pair", "106", "107", devAddr(107), 9301)
+	tv := h.hold("the TV to its allow list", "101", "isp", netAllow, 9213)
+	edgeAddr, edgePort := hostPort(t, edge.c.LocalAddr())
+	_, pairPort := hostPort(t, pair.c.LocalAddr())
+	mWAN, tvMasq := hostPort(t, tv.s.RemoteAddr())
+
+	type forgery struct {
+		from, to string
+		at       *tags
+		pkt      func(tag uint16) []byte
+	}
+	toTV := func(tag uint16) []byte { return icmpErr(false, tag, devAddr(101), edgeAddr, 9100, edgePort) }
+	toEdge := func(tag uint16) []byte { return icmpErr(false, tag, edgeAddr, devAddr(101), edgePort, 9100) }
+	toPair := func(tag uint16) []byte { return icmpErr(false, tag, devAddr(106), devAddr(107), pairPort, 9301) }
+	send := func(fs []forgery, tag uint16) map[uint16]forgery {
+		sent := map[uint16]forgery{}
+		for _, f := range fs {
+			tag++
+			sent[tag] = f
+			h.sendErr(f.from, "", f.to, false, f.pkt(tag))
+		}
+		time.Sleep(probeWait)
+		for tag, f := range sent {
+			if f.at.has(tag) {
+				t.Errorf("an ICMP error %s forged to %s arrived", f.from, f.to)
+			}
+		}
+		return sent
+	}
+
+	before := h.counter(Blocked)
+	devs := send([]forgery{
+		{"102", devAddr(101), atTV, toTV},
+		{"102", edgeAddr, atEdge, toEdge},
+		{"103", devAddr(106), at106, toPair},
+	}, 1500)
+	if n := h.counter(Blocked) - before; n != len(devs) {
+		t.Errorf("the devices' %d forged errors moved the blocked counter by %d", len(devs), n)
+	}
+	var unseen []forgery
+	for _, from := range []string{"owner", "household", "guest"} {
+		unseen = append(unseen, forgery{from, devAddr(101), atTV, toTV}, forgery{from, edgeAddr, atEdge, toEdge}, forgery{from, devAddr(106), at106, toPair})
+	}
+	before = h.counter(Blocked)
+	send(unseen, 1520)
+	if n := h.counter(Blocked) - before; n != 0 {
+		t.Errorf("errors forged from the networks never observed moved the blocked counter by %d", n)
+	}
+
+	const fromPair, fromRouter = 1600, 1601
+	h.sendErr("107", "", devAddr(106), false, icmpErr(false, fromPair, devAddr(106), devAddr(107), pairPort, 9301))
+	h.sendErr("isp", ispRouter, enfWAN, false, icmpErr(false, fromRouter, mWAN, netAllow, tvMasq, 9213))
+	time.Sleep(probeWait)
+	if !at106.has(fromPair) {
+		t.Error("the pair's genuine error did not reach the device that started the connection")
+	}
+	if !atTV.has(fromRouter) {
+		t.Error("the internet router's path-MTU error did not reach the TV")
+	}
+	h.expectOpen(true, edge, pair, tv)
 }

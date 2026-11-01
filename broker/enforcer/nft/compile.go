@@ -512,7 +512,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			add(q(p.To), q(p.From), "", "accept")
 		}
 	}
-	add("", "", logged(LogDrop, Blocked), "drop")
 
 	// Owner and Household: the internet, their signed pairs and, from Owner
 	// only, the core's page (CH-9). They are not inspected (NET-1), so what
@@ -535,7 +534,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			padd(q(p.From), q(p.To), "accept")
 		}
 	}
-	padd("", "", "drop")
 
 	// Every accept binds its connection to its interface pair (live.go,
 	// bind), so every accept names one interface each way.
@@ -547,17 +545,18 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
 	for _, rs := range [][]rule{fwd, people} {
-		for i, r := range rs {
-			if r.verdict != "accept" {
-				continue
-			}
-			m, ok := bind(idx, r.in, r.out)
-			if !ok {
-				return "", fmt.Errorf("nft: an accept from %s to %s is not one interface each way", r.in, r.out)
-			}
-			rs[i].mark = m
+		if err := bindAll(idx, rs); err != nil {
+			return "", err
 		}
 	}
+	// A related packet that reaches the end of a live chain names a
+	// connection that does not run on the interfaces it crossed: an ICMP
+	// error forged from another segment, or a genuine one about a connection
+	// a load cut (#4113, A18 Segments). It is dropped and, like any other
+	// refusal, logged and counted, except from the networks that are never
+	// observed (NET-1, NET-3); a cut connection's own later packets are
+	// dropped without a line, since a load can cut many at once.
+	related := "ct state related iifname != { " + g + ", " + q(l.Owner) + ", " + q(l.Household) + " } " + logged(LogDrop, Blocked) + " drop"
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
@@ -585,12 +584,14 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	for _, r := range fwd {
 		w.line(r.first())
 	}
+	w.line(logged(LogDrop, Blocked) + " drop")
 	w.close()
 
 	w.open("chain people")
 	for _, r := range people {
 		w.line(r.first())
 	}
+	w.line("drop")
 	w.close()
 
 	w.open("chain " + live("forward"))
@@ -599,6 +600,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line(s)
 		}
 	}
+	w.line(related)
+	w.line("drop")
 	w.close()
 
 	w.open("chain " + live("people"))
@@ -607,6 +610,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line(s)
 		}
 	}
+	w.line(related)
+	w.line("drop")
 	w.close()
 
 	// A device's counting chains: all its bytes are counted, and its

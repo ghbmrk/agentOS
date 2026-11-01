@@ -325,6 +325,7 @@ table inet enforcer {
 		ct direction reply iifname "ap0.107" oifname "ap0.106" ct mark 0x006b006a return
 		ct direction original iifname "ap0.107" oifname "ap0.106" ct mark 0x006a006b return
 		ct direction reply iifname "ap0.106" oifname "ap0.107" ct mark 0x006a006b return
+		ct state related iifname != { "gst0", "own0", "hh0" } log prefix "enf drop " counter name "blocked" drop
 		drop
 	}
 	chain people_live {
@@ -344,6 +345,7 @@ table inet enforcer {
 		ct direction reply iifname "core0" oifname "own0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061002 return
 		ct direction original iifname "hh0" oifname "ap0.105" ct mark 0x00691003 return
 		ct direction reply iifname "ap0.105" oifname "hh0" ct mark 0x00691003 return
+		ct state related iifname != { "gst0", "own0", "hh0" } log prefix "enf drop " counter name "blocked" drop
 		drop
 	}
 	chain t101_out_count {
