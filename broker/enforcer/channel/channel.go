@@ -231,9 +231,15 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if c.cfg.Revoked(c.cfg.Core) {
 		return c.preAuth("the core's channel key is revoked", ErrRevoked)
 	}
-	// Only the authenticated core counts toward a trip (#3755).
+	// Only the authenticated core counts toward a trip (#3755), and only
+	// while it is not already cut: after a trip its reconnects take their
+	// rate but trip nothing more (ENF-d-4).
 	c.mu.Lock()
-	c.count(KindHello)
+	if c.cfg.Cut.Stage() == Open {
+		c.count(KindHello)
+	} else {
+		c.buckets[KindHello].take(c.cfg.Now())
+	}
 	c.release()
 	mine, err := wire.SignHello(wire.RoleEnforcer, c.cfg.Key, exporter)
 	if err != nil {

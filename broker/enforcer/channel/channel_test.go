@@ -1006,6 +1006,9 @@ func TestPausedBurstTripsNothingMore(t *testing.T) {
 				t.Fatalf("stage %d: %v", st, c)
 			}
 		}
+		for range DefaultLimits[KindHello].Burst + 5 {
+			r.dial()
+		}
 		if r.cut.trips() != 0 || r.cut.Stage() != st {
 			t.Fatalf("stage %d: %d trips, stage now %d", st, r.cut.trips(), r.cut.Stage())
 		}
