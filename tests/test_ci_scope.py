@@ -22,47 +22,90 @@ def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
-def ci_jobs():
-    """ci.yml's jobs as {id: (job-level `if`, header lines, checks-job RECORDS env or None)}."""
-    ci = (WORKFLOWS / "ci.yml").read_text()
-    body = ci[ci.index("\njobs:\n") + len("\njobs:\n"):]
+ACTION = ROOT / ".github" / "actions" / "scope" / "action.yml"
+GUARD = "if: steps.scope.outputs.records != 'true'"
+SCOPE_STEP = ("      - uses: ./.github/actions/scope\n        id: scope\n        with:\n"
+              "          push: {}\n")
+CHECKOUT_DEPTH0 = ("      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2\n"
+                   "        with:\n"
+                   "          fetch-depth: 0 # {}\n"
+                   "          persist-credentials: false\n")
+
+
+def jobs_of(workflow):
+    """A workflow's jobs as {id: (job-level `if` or None, header lines, steps)}; steps are
+    [(step text, its `if` or None)] in order."""
+    text = (WORKFLOWS / workflow).read_text()
+    body = text[text.index("\njobs:\n") + len("\njobs:\n"):]
     jobs = {}
-    for m in re.finditer(r"^  ([a-z][a-z-]*):\n((?:(?!  [a-z][a-z-]*:\n).*\n)*)", body, re.M):
-        text = m.group(2)
-        cond = re.search(r"^    if: \$\{\{ (.*) \}\}$", text, re.M)
-        rec = re.search(r"^      RECORDS: \$\{\{ (.*) \}\}$", text, re.M)
-        header = [l for l in text.splitlines() if re.match(r"^    [a-z-]+:", l)]
-        jobs[m.group(1)] = (cond.group(1) if cond else None, header, rec.group(1) if rec else None)
+    for m in re.finditer(r"^  ([a-z][a-z-]*):\n((?:(?!  [a-z][a-z-]*:\n|[a-z]).*\n)*)", body, re.M):
+        job = m.group(2)
+        cond = re.search(r"^    if: (.*)$", job, re.M)
+        header = [l for l in job.splitlines() if re.match(r"^    [a-z-]+:", l)]
+        steps = []
+        for s in re.split(r"(?m)^(?=      - )", job)[1:]:
+            c = re.search(r"^        if: (.*)$", s, re.M)
+            steps.append((s, c.group(1) if c else None))
+        jobs[m.group(1)] = (cond.group(1) if cond else None, header, steps)
     return jobs
 
 
-def evaluate(expr, event, records):
-    """Evaluate the small Actions expression subset ci.yml uses: !, &&, ||, ==, !=, parentheses,
-    'strings', cancelled() and the two contexts github.event_name and needs.scope.outputs.records.
-    && and || return an operand, as in Actions. Anything else raises."""
-    ctx = {"github.event_name": event, "needs.scope.outputs.records": records}
-    tokens = re.findall(r"\s*(&&|\|\||==|!=|!|\(|\)|'[^']*'|cancelled\(\)|[a-z_][a-z_.-]*)", expr)
-    if "".join(tokens).replace(" ", "") != expr.replace(" ", ""):
-        raise ValueError(f"unsupported expression: {expr}")
-    py = []
-    for i, t in enumerate(tokens):
-        if t == "!" and tokens[i + 1:i + 2] != ["cancelled()"]:
-            raise ValueError(f"! binds tighter in Actions than not in Python: {expr}")
-        if t in ctx:
-            py.append(repr(ctx[t]))
-        elif t == "cancelled()":
-            py.append("False")
-        elif t in ("&&", "||", "!"):
-            py.append({"&&": " and ", "||": " or ", "!": " not "}[t])
-        elif t in ("==", "!=", "(", ")") or t.startswith("'"):
-            py.append(t)
-        else:
-            raise ValueError(f"unknown name {t} in {expr}")
-    return eval("".join(py), {"__builtins__": {}})  # noqa: S307 - tokens are whitelisted above
+def ci_jobs():
+    return jobs_of("ci.yml")
 
 
-# The jobs a records-only pull request skips (CI-docs); a push to main runs them (CI-mainguard).
-FILTERED = ("broker", "broker-race", "broker-checks", "machines", "hostcheck")
+def scoped_steps(steps):
+    """The steps after a job's scope step; asserts the job's first two steps are its full-depth
+    checkout and the scope step."""
+    first, second = steps[0][0], steps[1][0]
+    assert first.startswith(CHECKOUT_DEPTH0.split("#")[0]), first
+    assert second.startswith("      - uses: ./.github/actions/scope\n        id: scope\n"), second
+    return steps[2:]
+
+
+def run_scope_action(cwd, event, push, before="", sha="HEAD"):
+    """Run the action's one step in cwd as a runner would; return what it wrote to GITHUB_OUTPUT."""
+    text = ACTION.read_text()
+    run = text[text.index("      run: |\n") + len("      run: |\n"):]
+    script = "\n".join(l[8:] for l in run.splitlines())
+    with tempfile.TemporaryDirectory() as tmp:
+        out, summary = pathlib.Path(tmp, "out"), pathlib.Path(tmp, "summary")
+        out.touch()
+        sha = git(cwd, "rev-parse", sha).strip()
+        env = {"PATH": "/usr/bin:/bin", "EVENT": event, "BEFORE": before, "PUSH": push, "GITHUB_SHA": sha,
+               "RUNNER_TEMP": tmp, "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary)}
+        # The shell a composite step's `shell: bash` runs.
+        subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", script], cwd=cwd,
+                       env=env, check=True, capture_output=True, text=True)
+        return out.read_text()
+
+
+def scope_repo(d, base_has_tool=True):
+    """A repository whose HEAD is a pull_request-style test merge (HEAD^1 base, HEAD^2 branch)
+    of a records-only branch; the base carries tools/ci_scope.py unless base_has_tool is false."""
+    git(d, "init", "-q", "-b", "main")
+    git(d, "config", "user.email", "t@example.invalid")
+    git(d, "config", "user.name", "t")
+    root = pathlib.Path(d)
+    (root / "tools").mkdir()
+    if base_has_tool:
+        (root / "tools" / "ci_scope.py").write_text((ROOT / "tools" / "ci_scope.py").read_text())
+    (root / "LATER.md").write_text("a\n")
+    (root / "x.go").write_text("package x\n")
+    git(d, "add", "-A")
+    git(d, "commit", "-qm", "base")
+    git(d, "checkout", "-qb", "pr")
+    (root / "LATER.md").write_text("b\n")
+    git(d, "commit", "-qam", "records")
+    git(d, "checkout", "-q", "main")
+    (root / "x.go").write_text("package x // main moved on\n")
+    git(d, "commit", "-qam", "main")
+    git(d, "merge", "-q", "--no-ff", "-m", "test merge", "pr")
+
+
+# CI-par-4: the jobs whose steps a records-only change skips, and the jobs that always run in full.
+SCOPED = ("checks", "broker-race")
+FULL = ("broker", "broker-checks", "machines", "hostcheck")
 
 
 def ci_top_level(key):
@@ -165,23 +208,26 @@ class ScopeTest(unittest.TestCase):
             self.assertEqual(out.stdout, "full\n")
 
     def test_pull_request_scope_unchanged(self):
-        # CIMG-b: on a pull request a records-only change still skips the code jobs and runs
-        # the checks job's document steps; anything else, or a failed scope, runs them all.
+        # CIMG-b, CI-par-4: on a pull request a records-only change still skips the race shards'
+        # work and runs the checks job's document steps; anything else, or a failed scope, runs
+        # them all. No job waits for a scope job: the decision is each job's own second step.
         jobs = ci_jobs()
-        # Every trigger but push is scoped, and a pull request is one of them.
-        events = [e for e in ci_triggers() if e != "push"]
-        self.assertIn("pull_request", events)
-        for event in events:
-            for job in FILTERED:
-                cond = jobs[job][0]
-                self.assertFalse(evaluate(cond, event, "true"), (job, event))
-                self.assertTrue(evaluate(cond, event, ""), (job, event))
-            self.assertTrue(evaluate(jobs["checks"][0], event, "true"))
-            self.assertEqual(evaluate(jobs["checks"][2], event, "true"), "true", event)
-            self.assertNotEqual(evaluate(jobs["checks"][2], event, ""), "true", event)
-        # scope.yml still decides records-only from the PR's own diff.
-        wf = (WORKFLOWS / "scope.yml").read_text()
-        self.assertIn("pull_request) base=HEAD^1 head=HEAD^2 ;;", wf)
+        for job in SCOPED:
+            steps = scoped_steps(jobs[job][2])
+            self.assertIn(SCOPE_STEP.format("full # CI-mainguard"), jobs[job][2][1][0], job)
+            for text, cond in steps:
+                # Guarded, the records-only step, a main-only step, or a document check.
+                self.assertTrue(cond in (GUARD[4:], "steps.scope.outputs.records == 'true'")
+                                or cond is None and job == "checks"
+                                or cond.startswith("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+                                or job == "checks" and cond.startswith("github.") and "records" not in cond,
+                                (job, text.splitlines()[0], cond))
+        race = scoped_steps(jobs["broker-race"][2])
+        self.assertTrue(all(c and ("records != 'true'" in c or c.startswith("github.event_name == 'push'"))
+                            for _, c in race))
+        self.assertIn("go test -race", "".join(s for s, c in race if c == GUARD[4:]))
+        # The action decides records-only from the PR's own diff.
+        self.assertIn("pull_request) base=HEAD^1 head=HEAD^2 ;;", ACTION.read_text())
 
 
 # ci.yml's settings above its jobs, pinned so no top-level env or defaults reaches the machines job.
@@ -210,8 +256,6 @@ CI_PREAMBLE_LINES = [
 # change to this list.
 MACHINES_LINES = [
     '  machines:',
-    '    needs: scope',
-    "    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}",
     '    runs-on: ubuntu-latest',
     '    timeout-minutes: 60',
     '    steps:',
@@ -370,27 +414,84 @@ class WiringTest(unittest.TestCase):
     """The workflows fail safe: only an exact 'true' from scope skips anything."""
 
     def test_scope_runs_the_base_copy_and_defaults_to_full(self):
-        wf = (WORKFLOWS / "scope.yml").read_text()
+        wf = ACTION.read_text()
         self.assertIn('git show "$base:tools/ci_scope.py"', wf)
         self.assertIn("scope=full", wf)
         self.assertIn('if [ "$scope" = records ]; then', wf)
+        # A composite action of one shell step: it runs nothing but its own lines.
+        self.assertNotIn("uses:", wf)
+        self.assertEqual(wf.count("    - name:"), 1)
+        self.assertIn("  using: composite\n", wf)
+
+    def test_scope_action_answers_records_only_for_an_exact_records_change(self):
+        # CI-par-4: the action's own script, run on a test merge of a records-only branch.
+        with tempfile.TemporaryDirectory() as d:
+            scope_repo(d)
+            self.assertEqual(run_scope_action(d, "pull_request", "full"), "records=true\n")
+            self.assertEqual(run_scope_action(d, "pull_request", "scoped"), "records=true\n")
+            before = git(d, "rev-parse", "HEAD^1").strip()
+            # A push is scoped only where the caller asks for it (ci.yml: full, CI-mainguard).
+            self.assertEqual(run_scope_action(d, "push", "full", before=before), "")
+            self.assertEqual(run_scope_action(d, "push", "", before=before), "")
+            # The pushed range is the merge alone: its first parent to it adds only the PR's change.
+            self.assertEqual(run_scope_action(d, "push", "scoped", before=before), "records=true\n")
+            # From the base, the range also holds main's x.go change.
+            self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^1^").strip()), "")
+            self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^2^").strip(),
+                                              sha="HEAD^2"), "records=true\n")
+            for event in ("merge_group", "schedule", ""):
+                self.assertEqual(run_scope_action(d, event, "scoped"), "", event)
+
+    def test_scope_action_fails_safe(self):
+        # No base copy of tools/ci_scope.py, an unknown base, or a code change: full, never records.
+        with tempfile.TemporaryDirectory() as d:
+            scope_repo(d, base_has_tool=False)
+            self.assertEqual(run_scope_action(d, "pull_request", "full"), "")
+        with tempfile.TemporaryDirectory() as d:
+            scope_repo(d)
+            self.assertEqual(run_scope_action(d, "push", "scoped", before="0" * 40), "")
+            (pathlib.Path(d) / "x.go").write_text("package y\n")
+            git(d, "commit", "-qam", "code")
+            self.assertEqual(run_scope_action(d, "push", "scoped", before=git(d, "rev-parse", "HEAD^").strip()), "")
+
+    def test_no_job_waits_for_a_scope_job(self):
+        # CI-par-4 (#4336): the queue wait for a 5-second scope job came before every other job.
+        self.assertFalse((WORKFLOWS / "scope.yml").exists())
+        users = []
+        for wf in sorted(WORKFLOWS.glob("*.yml")):
+            text = "\n".join(l for l in wf.read_text().splitlines() if not l.lstrip().startswith("#"))
+            self.assertNotIn("needs.scope", text, wf.name)
+            self.assertNotRegex(text, r"needs: \[?[^\n]*\bscope\b", wf.name)
+            self.assertNotIn("workflows/scope.yml", text, wf.name)
+            text = wf.read_text()
+            if "uses: ./.github/actions/scope" in text:
+                users.append(wf.name)
+                push = "full # CI-mainguard" if wf.name == "ci.yml" else "scoped"
+                for job, (_, _, steps) in jobs_of(wf.name).items():
+                    if any("./.github/actions/scope" in s for s, _ in steps):
+                        scoped_steps(steps)
+                        self.assertIn(SCOPE_STEP.format(push), steps[1][0], (wf.name, job))
+                        self.assertIsNone(steps[1][1], (wf.name, job))
+                        self.assertEqual(text.count("./.github/actions/scope\n"), text.count("        id: scope\n"))
+        self.assertEqual(users, ["assurance.yml", "ci.yml", "vulncheck.yml"])
 
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
+        jobs = ci_jobs()
+        for job in SCOPED + FULL:
+            self.assertFalse([l for l in jobs[job][1] if l.startswith("    needs:")] and job != "broker", job)
+        # Only the required `broker` check waits, for the split jobs it gathers (CI-SHARD).
         ci = (WORKFLOWS / "ci.yml").read_text()
-        self.assertIn("uses: ./.github/workflows/scope.yml", ci)
-        cond = "    if: ${{ !cancelled() && (github.event_name == 'push' || needs.scope.outputs.records != 'true') }}\n"
-        for job in ("broker-race", "broker-checks", "machines", "hostcheck"):
-            self.assertIn(f"  {job}:\n    needs: scope\n" + cond, ci, job)
-        # The required `broker` check gathers the split jobs (CI-SHARD) and skips with them.
-        self.assertIn("    needs: [scope, broker-race, broker-checks]\n" + cond, ci)
-        self.assertIn("  checks:\n    needs: scope\n    if: ${{ !cancelled() }}\n", ci)
+        self.assertIn("  broker:\n", ci)
+        self.assertIn("    needs: [broker-race, broker-checks]\n    if: ${{ !cancelled() }}\n", ci)
+        for job in FULL:
+            self.assertFalse([s for s, c in jobs[job][2] if c and "records" in c], job)
         # The document checks never depend on scope.
         for step in ("python tools/trace.py && python tools/trace.py --check", "python tools/doclint.py",
                      "python tools/board.py check", "PRs must not change TRACE.md"):
             i = ci.index(step)
             step_text = ci[ci.rindex("- name:", 0, i):i]
-            self.assertNotIn("RECORDS", step_text, step)
-        self.assertIn("if: env.RECORDS == 'true'\n        run: python -m unittest tests.test_ci_scope tests.test_board", ci)
+            self.assertNotIn("records", step_text, step)
+        self.assertIn("if: steps.scope.outputs.records == 'true'\n        run: python -m unittest tests.test_ci_scope tests.test_board", ci)
 
     def test_go_jobs_restore_a_build_cache_and_the_records_run_checks_prose(self):
         # REQ: CI-PATHS
@@ -408,8 +509,7 @@ class WiringTest(unittest.TestCase):
             self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'",
                           body[:body.index("uses: actions/cache/save@")].rsplit("- name:", 1)[1], job)
             self.assertIn("go-build", save)
-        for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice",
-                     "tests.test_g1_scope.CheckTest", "tests.test_g1_scope.ListTest"):
+        for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice"):
             self.assertIn(name, records_audit.records_run_tests())
 
     def test_a_spec_only_change_runs_full_ci(self):
@@ -425,17 +525,17 @@ class WiringTest(unittest.TestCase):
         ci = (WORKFLOWS / "ci.yml").read_text()
         unit = ci[ci.index("      - name: Unit tests\n"):]
         unit, check = unit.split("\n      - ", 2)[:2]
-        self.assertIn("        if: env.RECORDS != 'true'\n", unit)
+        self.assertIn("        if: steps.scope.outputs.records != 'true'\n", unit)
         self.assertIn("          GOFLAGS: -buildvcs=false\n", unit)
         # tools/unit_tests.py runs each module under strace into its own trace (test_unit_tests).
         self.assertTrue(unit.endswith('          python tools/unit_tests.py "$RUNNER_TEMP/reads"'), unit)
-        self.assertEqual(check.splitlines()[1:], ["        if: env.RECORDS != 'true'",
+        self.assertEqual(check.splitlines()[1:], ["        if: steps.scope.outputs.records != 'true'",
                          '        run: python tests/records_audit.py "$RUNNER_TEMP/reads"'])
 
     def test_records_run_tests_reads_the_step_or_fails(self):
         # The list parse takes the run line in any YAML shape and fails rather than guess; -v is
         # the only option, since another (-k, -p) could keep a listed test from running.
-        step = "      - name: Docs\n        if: env.RECORDS == 'true'\n        run: {}\n"
+        step = "      - name: Docs\n        if: steps.scope.outputs.records == 'true'\n        run: {}\n"
         parse = records_audit.records_run_tests
         self.assertEqual(parse(step.format("python -m unittest tests.a tests.b -v")), ["tests.a", "tests.b"])
         self.assertEqual(parse(step.format("|\n          python -m unittest tests.a \\\n            tests.b")),
@@ -497,25 +597,29 @@ class WiringTest(unittest.TestCase):
             if re.search(r"^\s{0,4}(pull_request_target|workflow_run):", text, re.M):
                 self.assertNotIn("actions/cache", text, wf.name)
 
-    def test_assurance_skips_only_on_records(self):
-        wf = (WORKFLOWS / "assurance.yml").read_text()
-        self.assertIn("uses: ./.github/workflows/scope.yml", wf)
-        self.assertEqual(wf.count("needs.scope.outputs.records != 'true'"), wf.count("\n    runs-on:"))
+    def test_assurance_and_vulncheck_skip_only_on_records(self):
+        # Each scan job's steps after the scope step skip on records-only, or run regardless
+        # (an always() report upload, a schedule-only scan).
+        for wf in ("assurance.yml", "vulncheck.yml"):
+            jobs = jobs_of(wf)
+            self.assertTrue(jobs, wf)
+            for job, (cond, _, steps) in jobs.items():
+                self.assertIsNone(cond, (wf, job))
+                for text, c in scoped_steps(steps):
+                    self.assertTrue(c == GUARD[4:] or c in ("always()", "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}"),
+                                    (wf, job, text.splitlines()[0], c))
 
     def test_push_to_main_runs_every_job(self):
-        # CIMG-a: whatever scope says (records-only, empty or full), a push runs every job,
-        # and the checks job runs its full steps (RECORDS is not 'true').
+        # CIMG-a: whatever scope says, a push runs every job, and every job's full steps: no job
+        # has an `if:` but the broker gate's !cancelled(), and every scope step in ci.yml asks for
+        # a full push run, which the action gives (test_scope_action_answers_...).
         jobs = ci_jobs()
-        self.assertEqual(set(jobs), {"scope", "checks", *FILTERED})
-        for job, (cond, _, _) in jobs.items():
-            if job == "scope":
-                self.assertIsNone(cond)
-                continue
-            for records in ("true", "", "false"):
-                self.assertTrue(evaluate(cond, "push", records), (job, records))
-        rec = jobs["checks"][2]
-        for records in ("true", "", "false"):
-            self.assertNotEqual(evaluate(rec, "push", records), "true", records)
+        self.assertEqual(set(jobs), {*SCOPED, *FULL})
+        for job, (cond, _, steps) in jobs.items():
+            self.assertIn(cond, (None, "${{ !cancelled() }}"), job)
+        ci = (WORKFLOWS / "ci.yml").read_text()
+        self.assertEqual(ci.count("uses: ./.github/actions/scope\n"), ci.count(SCOPE_STEP.format("full # CI-mainguard")))
+        self.assertEqual(ci.count(SCOPE_STEP.format("full # CI-mainguard")), 2)
 
     def test_push_runs_only_on_main(self):
         # CIMG-a holds because push fires only for main: an unscoped push from any other
@@ -538,13 +642,8 @@ class WiringTest(unittest.TestCase):
             self.assertFalse([l for l in header if l.startswith("    name:")], job)
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("        shard: [0, 1, 2]", ci)
-        self.assertEqual(sorted(jobs), sorted(["scope", "checks", "broker", "broker-race",
+        self.assertEqual(sorted(jobs), sorted(["checks", "broker", "broker-race",
                                                "broker-checks", "machines", "hostcheck"]))
-
-    def test_evaluator_rejects_what_it_does_not_know(self):
-        for expr in ("github.ref == 'refs/heads/main'", "always()", "1 == 1", "!github.event_name == 'push'"):
-            with self.assertRaises(ValueError, msg=expr):
-                evaluate(expr, "push", "true")
 
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1

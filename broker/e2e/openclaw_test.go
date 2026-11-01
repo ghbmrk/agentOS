@@ -3,11 +3,13 @@ package e2e
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -29,7 +31,7 @@ import (
 
 // REQ: ARC-3, REV-1, REV-5, OP-1, CRED-1, ARC-6, ARC-7, OP-8
 //
-// TestIntegrationOpenClawGuest runs OpenClaw 2026.9.8, unmodified (ARC-3),
+// TestIntegrationOpenClawGuest runs OpenClaw 2026.10.9, unmodified (ARC-3),
 // as an agent machine under gVisor, with the guest bridge as PID 1 and the
 // machine's broker socket as its only way out. One owner message goes in
 // through the guest plane's inbox (ARC-6 (c)); a scripted model behind the
@@ -38,7 +40,7 @@ import (
 // machine's key and the kernel's seam takes it once; the machine is
 // snapshotted after the call (REV-1); the answer comes
 // back to the owner. The owner's message raises the machine to private
-// (REV-5).
+// (REV-5). The gateway serves no Control UI (ARC-7, #4417).
 //
 // It needs root, AGENTOS_RUNSC (a runsc binary), and AGENTOS_OPENCLAW_ROOTFS
 // (a root built by guest/openclaw/build-rootfs.sh).
@@ -386,5 +388,76 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	}
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
+	}
+	noControlUI(t, runsc, filepath.Join(dir, "runsc"), rootfs)
+}
+
+// controlUIProbe runs inside the guest. For each path it asks the gateway
+// on 18789 and prints the status, the body's SHA-256, and whether the body
+// carries the Control UI's build marker, as one JSON object.
+const controlUIProbe = `
+const crypto = require("crypto");
+(async () => {
+  const out = {};
+  for (const p of process.argv.slice(1)) {
+    const r = await fetch("http://127.0.0.1:18789" + p, { redirect: "manual" });
+    const b = Buffer.from(await r.arrayBuffer());
+    out[p] = { status: r.status, sha256: crypto.createHash("sha256").update(b).digest("hex"),
+      marker: b.includes("data-openclaw-control-ui-build-id") };
+  }
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(String(e)); process.exit(1); });
+`
+
+// noControlUI checks that the guest's gateway does not serve OpenClaw's
+// Control UI (#4417, ARC-7): agentOS never uses it, and its assets inline
+// the DOMPurify and KaTeX copies accepted under #4302. OpenClaw serves it by
+// default whenever dist/control-ui is present, so only the profile's
+// gateway.controlUi.enabled false keeps it off. The probe asks for the UI's
+// root and for the two assets that hold those copies, and fails if any
+// comes back as the file in the image or carries the UI's build marker. A
+// gateway the probe cannot reach fails the test, so a dead gateway is no pass.
+func noControlUI(t *testing.T, runsc, root, rootfs string) {
+	t.Helper()
+	ui := filepath.Join(rootfs, "opt/openclaw/node_modules/openclaw/dist/control-ui")
+	paths, want := []string{"/"}, map[string]string{}
+	for _, g := range []string{"markdown-runtime-*.js", "mermaid.min-*.js"} {
+		files, _ := filepath.Glob(filepath.Join(ui, "assets", g))
+		if len(files) != 1 {
+			t.Fatalf("control-ui assets %s: %v, want one file (has the OpenClaw pin moved?)", g, files)
+		}
+		b, err := os.ReadFile(files[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := "/assets/" + filepath.Base(files[0])
+		paths = append(paths, p)
+		want[p] = fmt.Sprintf("%x", sha256.Sum256(b))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	args := append([]string{"--root", root, "--platform=systrap", "--network=none", "--ignore-cgroups",
+		"--overlay2=none", "--host-uds=open", "exec", "agent_", "/usr/local/bin/node", "-e", controlUIProbe}, paths...)
+	out, err := exec.CommandContext(ctx, runsc, args...).Output()
+	if err != nil {
+		t.Fatalf("control UI probe: %v: %s", err, out)
+	}
+	var got map[string]struct {
+		Status int
+		Sha256 string
+		Marker bool
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("control UI probe output %q: %v", out, err)
+	}
+	t.Logf("control UI probe: %s", strings.TrimSpace(string(out)))
+	for _, p := range paths {
+		r, ok := got[p]
+		switch {
+		case !ok || r.Status == 0:
+			t.Errorf("control UI probe: no answer for %s", p)
+		case r.Marker || (want[p] != "" && r.Sha256 == want[p]):
+			t.Errorf("gateway serves the Control UI at %s (status %d): want gateway.controlUi.enabled false (#4417)", p, r.Status)
+		}
 	}
 }

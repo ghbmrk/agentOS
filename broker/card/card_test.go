@@ -2,14 +2,13 @@ package card
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"math"
 	"math/rand"
 	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/ghbmrk/agentos/broker/card/words"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -25,17 +24,6 @@ func mustGen(t *testing.T, seed int64) *Card {
 		t.Fatal(err)
 	}
 	return c
-}
-
-func TestWordlistIsEFFLarge(t *testing.T) {
-	// SHA-256 of eff_large_wordlist.txt as EFF publishes it.
-	sum := sha256.Sum256(effLarge)
-	if got := hex.EncodeToString(sum[:]); got != "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e" {
-		t.Fatalf("wordlist hash %s", got)
-	}
-	if len(words) != 7776 || words[0] != "abacus" || words[7775] != "zoom" {
-		t.Fatalf("wordlist parse: %d words", len(words))
-	}
 }
 
 // §3.1 and CRED-8: each card secret has at least the entropy the spec
@@ -240,12 +228,8 @@ func TestQRSVGMatchesTheCode(t *testing.T) {
 }
 
 func inList(w string) bool {
-	for _, x := range words {
-		if x == w {
-			return true
-		}
-	}
-	return false
+	_, ok := words.Index(w)
+	return ok
 }
 
 func htmlEsc(s string) string {
