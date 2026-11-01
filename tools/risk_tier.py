@@ -138,8 +138,7 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # still comes from the copy it merges, so an edit to it is held to the deepest review.
 # image/ builds what ships; .github/ builds the image,
 # gates merges and pushes to main; .claude/ holds agent permissions; tools/ci_scope
-# decides which CI jobs a change skips (CI-docs); tools/g1_scope and its lists decide
-# which paths a PR may touch during the G1 freeze (G1-freeze); tools/ci_split decides
+# decides which CI jobs a change skips (CI-docs); tools/ci_split decides
 # which broker packages each race shard runs (CI-SHARD).
 # tools/premerge decides which PRs need Mark and when an accepted head still holds; the
 # tests that pin the merge gates and the lens READMEs (review rules) left its Mark-only
@@ -149,9 +148,9 @@ TIER_A_BROKER_PREFIXES = ("broker/vendor/", "broker/third_party/")
 # disclosed (HW-8, RT-2 #801), so a C PR cannot allow-list a real host change.
 TIER_A_PREFIXES = (
     "assurance/", "tools/canary", "tools/depaudit", "tools/risk_tier", "tools/ci_scope",
-    "tools/g1_scope", "tools/ci_split", "tools/premerge", "tools/vulncheck", "tools/hostcheck",
+    "tools/ci_split", "tools/premerge", "tools/vulncheck", "tools/hostcheck",
     "tests/fixtures/vulncheck/",
-    "tests/test_premerge", "tests/test_risk_tier", "tests/test_ci_scope", "tests/test_g1_scope",
+    "tests/test_premerge", "tests/test_risk_tier", "tests/test_ci_scope",
     "tests/test_workflows", "tests/test_merge_queue", "tests/test_lane", "tests/test_hostcheck",
     "image/", ".github/", ".claude/",
 )

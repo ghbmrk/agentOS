@@ -55,7 +55,7 @@ Six steps, strictly in order where a step depends on the one before. Each step e
 - **Interfaces freeze at the end of step 2.** A change to them after that is a kernel PR at tier A with a delta of A20.
 - **A port deletes what it replaces.** No adapter layer between the old core and the new one, no feature flag between them, no copy kept for reference.
 - **The old-core ratchet.** A test marker that cites a retired ID (SPEC Appendix A) is an old-core marker. `tools/trace.py` counts them in TRACE.md. On every PR, CI runs `tools/trace.py --ratchet` against the base and fails if the old core grew: more old-core markers, more lines under a directory tools/old_core.txt lists (the D-139 packages), or more imports of one from outside them (their wiring). A port takes its directory off that list in the PR that deletes the directory's old files, and the ratchet fails the PR if any of them remain. The marker count is zero at the end of step 5.
-- **Gates.** G1 to G7 are SPEC §18's. The G2 freeze (tools/g1_scope_g2.txt) stays on; step 2's first PR widens it only by the two new directories. A20 and A21 run on every change to the kernel or clerks after they first pass.
+- **Gates.** G1 to G7 are SPEC §18's. A20 and A21 run on every change to the kernel or clerks after they first pass.
 
 ---
 
