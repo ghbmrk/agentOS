@@ -553,10 +553,13 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	// connection that does not run on the interfaces it crossed: an ICMP
 	// error forged from another segment, or a genuine one about a connection
 	// a load cut (#4113, A18 Segments). It is dropped and, like any other
-	// refusal, logged and counted, except from the networks that are never
-	// observed (NET-1, NET-3); a cut connection's own later packets are
-	// dropped without a line, since a load can cut many at once.
-	related := "ct state related iifname != { " + g + ", " + q(l.Owner) + ", " + q(l.Household) + " } " + logged(LogDrop, Blocked) + " drop"
+	// refusal, logged and counted, except to or from the networks that are
+	// never observed (NET-1, NET-3): its inner header would name one of
+	// their connections. Every packet people_live sees has an Owner or
+	// Household end, so only forward_live logs. A cut connection's own later
+	// packets are dropped without a line, since a load can cut many at once.
+	unseen := "{ " + g + ", " + q(l.Owner) + ", " + q(l.Household) + " }"
+	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " " + logged(LogDrop, Blocked) + " drop"
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
@@ -610,7 +613,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line(s)
 		}
 	}
-	w.line(related)
 	w.line("drop")
 	w.close()
 

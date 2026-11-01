@@ -90,7 +90,7 @@ func TestEveryAcceptBound(t *testing.T) {
 				}
 				byPair[m[4]] = pair
 				if was, ok := byMark[pair]; ok && was != m[4] {
-					t.Errorf("%s: %s has mark %s here and %s on its accept", chain, pair, m[4], was)
+					t.Errorf("%s: %s has mark %s here and %s on an earlier line", chain, pair, m[4], was)
 				} else if !ok && live {
 					t.Errorf("%s: a live accept for %s, which no accept binds", chain, pair)
 				}
