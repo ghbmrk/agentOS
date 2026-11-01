@@ -212,14 +212,17 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 // command it was running, which can keep running on the access point
 // (ENF-g-8, #4313). So each Sync first claims the access point: under the
 // access point's lock (busybox flock on lockPath) it writes a fresh
-// random token to tokenPath. Every write and reload takes the same lock
-// and runs only while tokenPath still holds its own Sync's token, so a
-// command a timed-out Sync left behind either finishes before the next
-// Sync's claim, which waits for the lock, or finds the newer token and
-// does nothing. A late old write therefore cannot put back an older
-// config, such as a revoked password. Reads take no lock: mv replaces a
-// file in one rename. Both files are on the access point's tmpfs, so a
-// reboot, which ends every command, also clears them.
+// random token to tokenPath and removes every temporary file. A write
+// reads stdin into a temporary file of its own path and token and checks
+// its hash with no lock held, so a write whose stdin never ends holds
+// nothing; only the move into place, and the reload, take the lock, and
+// they run only while tokenPath still holds their own Sync's token. A
+// command a timed-out Sync left behind therefore either moves its file
+// before the next Sync's claim, which waits for the lock, or finds the
+// newer token and does nothing: a late old write cannot put back an
+// older config, such as a revoked password. Reads take no lock: mv
+// replaces a file in one rename. The lock and token are on the access
+// point's tmpfs, so a reboot, which ends every command, also clears them.
 const (
 	readPrefix = "cat "
 	lockPath   = "/tmp/agentos-ap.lock"
@@ -244,9 +247,15 @@ func owns(tok string) string {
 	return "[ \"$(cat " + tokenPath + ")\" = " + tok + " ]"
 }
 
-// claimCmd makes tok the newest claim.
+// tmpGlob matches every temporary file tmpPath names.
+const tmpGlob = "/etc/agentos-ap-*.new"
+
+// claimCmd makes tok the newest claim and removes the temporary files
+// of earlier Syncs, which a reboot mid-write would otherwise leave on
+// /etc. A write of an earlier Sync still running then fails its hash
+// check or its move.
 func claimCmd(tok string) string {
-	return locked("echo " + tok + " > " + tokenPath)
+	return locked("echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
 }
 
 // applyCmd reloads while tok is the newest claim. reload_config does not
@@ -255,25 +264,27 @@ func applyCmd(tok string) string {
 	return locked(owns(tok) + " && reload_config 9>&-")
 }
 
-// tmpPath is the temporary file for path: one per path, so no two writes
-// share one, and on /etc's own filesystem.
-func tmpPath(path string) string {
-	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + ".new"
+// tmpPath is the temporary file for path in the Sync holding tok: one per
+// path and Sync, so no two writes share one, and on /etc's own
+// filesystem.
+func tmpPath(path, tok string) string {
+	return "/etc/agentos-ap" + strings.ReplaceAll(path, "/", "-") + "." + tok + ".new"
 }
 
 func readCmd(path string) string { return readPrefix + path }
 
 // writeCmd stores data at path while tok is the newest claim: it reads
-// stdin into the path's temporary file and moves that over path only if
-// the file's SHA-256 is data's, so a stdin cut short (a dropped
-// connection, a deadline) leaves path alone; a failed move or check
-// removes the temporary file. A write that finds a newer claim reads no
-// stdin and touches neither file. The hash is hex.
+// stdin into the temporary file and, only if the file's SHA-256 is
+// data's, takes the lock and moves it over path while tok is the newest
+// claim, so a stdin cut short (a dropped connection, a deadline) leaves
+// path alone. Reading and the hash take no lock, so a stdin that never
+// ends holds up no other Sync. A failed check, a newer claim or a failed
+// move removes the temporary file. The hash is hex.
 func writeCmd(path, tok string, data []byte) string {
 	sum := sha256.Sum256(data)
-	t := tmpPath(path)
-	return locked(owns(tok) + " && { umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
-		" ] && mv -f " + t + " " + path + " || { rm -f " + t + "; false; }; }")
+	t := tmpPath(path, tok)
+	return "umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
+		" ] && " + locked(owns(tok)+" && mv -f "+t+" "+path) + " || { rm -f " + t + "; false; }"
 }
 
 // holds reports whether the access point's file at f.Path is exactly

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -57,15 +58,16 @@ type fakeAP struct {
 	interleaved bool
 }
 
-// hold stalls the write of path on connection login once its stdin has
-// arrived: before it takes the access point's lock (a command the
-// access point starts late) or while it holds it (one it is slow to
-// finish). The write then runs to its end whatever the client did.
+// hold stalls the write of path on connection login: while its stdin is
+// still arriving (a command the access point starts late, or whose
+// stdin never ends) or once it holds the lock to move its file (one the
+// access point is slow to finish). The write then runs to its end
+// whatever the client did.
 type hold struct {
 	login   int
 	path    string
 	inLock  bool
-	arrived chan struct{} // closed when the held write has its stdin
+	arrived chan struct{} // closed when the held write has started
 	release chan struct{} // the test closes it to let the write go on
 	done    chan struct{} // closed when the held write has ended
 }
@@ -237,10 +239,18 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		return 0
 	}
 	for _, p := range ap.Paths {
-		if !strings.Contains(cmd, "cat > "+tmpPath(p)+" ") {
+		if !strings.Contains(cmd, "cat > "+tmpPath(p, tok)+" ") {
 			continue
 		}
-		b, _ := io.ReadAll(ch)
+		// The lock is taken where the command takes it: before stdin is
+		// read, or only for the move once the hash has checked.
+		lockFirst := takesLock
+		lockForMove := strings.Contains(cmd, " && { flock -x 9 && "+owns(tok)+" && mv -f ")
+		unlock := func() {}
+		defer func() { unlock() }()
+		if lockFirst {
+			unlock = lock()
+		}
 		f.mu.Lock()
 		h := f.hold
 		f.mu.Unlock()
@@ -249,12 +259,26 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 			defer close(h.done)
 			close(h.arrived)
 			if !h.inLock {
-				<-h.release
+				<-h.release // stdin still arriving
 			}
 		}
-		defer lock()()
+		b, _ := io.ReadAll(ch)
+		f.mu.Lock()
+		if f.cut[p] {
+			b = b[:len(b)/2] // stdin ended early
+		}
+		f.mu.Unlock()
+		// The access point's own check: the hash in the command must be
+		// that of what arrived, or nothing is moved into place.
+		if cmd != writeCmd(p, tok, b) {
+			return 1
+		}
+		if lockForMove && !lockFirst {
+			f.apLock.Lock()
+			unlock = f.apLock.Unlock
+		}
 		if held && h.inLock {
-			<-h.release
+			<-h.release // slow to move
 		}
 		if stale() {
 			f.event(fmt.Sprint("refused ", login, " ", p))
@@ -262,12 +286,7 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		if f.cut[p] {
-			b = b[:len(b)/2] // stdin ended early
-		}
-		// The access point's own check: the hash in the command must
-		// be that of what arrived, or nothing is moved into place.
-		if cmd != writeCmd(p, tok, b) || f.failWrite[p] {
+		if f.failWrite[p] {
 			return 1
 		}
 		f.writes++
@@ -506,23 +525,35 @@ func TestSyncsDoNotOverlap(t *testing.T) {
 }
 
 // TestTempFilePerPath: each path is written through a temporary file of
-// its own, on /etc, so no two writes can share one.
+// its own path and Sync, on /etc, so no two writes can share one, and
+// the claim's glob matches every one of them.
 func TestTempFilePerPath(t *testing.T) {
 	seen := map[string]string{}
+	tok, other := token(), token()
 	for _, p := range ap.Paths {
-		tp := tmpPath(p)
-		if !strings.HasPrefix(tp, "/etc/") || strings.Count(tp, "/") != 2 || strings.ContainsAny(tp, " ;|&$`'\"") {
-			t.Errorf("temporary file for %s: %q", p, tp)
+		for _, k := range []string{tok, other} {
+			tp := tmpPath(p, k)
+			if !strings.HasPrefix(tp, "/etc/") || strings.Count(tp, "/") != 2 || strings.ContainsAny(tp, " ;|&$`'\"*?[") {
+				t.Errorf("temporary file for %s: %q", p, tp)
+			}
+			if m, _ := path.Match(tmpGlob, tp); !m {
+				t.Errorf("the claim does not remove %s", tp)
+			}
+			if q, dup := seen[tp]; dup {
+				t.Errorf("%s and %s share %s", p, q, tp)
+			}
+			seen[tp] = p
 		}
-		if q, dup := seen[tp]; dup {
-			t.Errorf("%s and %s share %s", p, q, tp)
-		}
-		seen[tp] = p
 	}
-	// The write command itself uses its path's file and no other's.
+	for _, p := range ap.Paths {
+		if m, _ := path.Match(tmpGlob, p); m {
+			t.Errorf("the claim removes %s", p)
+		}
+	}
+	// The write command itself uses its path's and Sync's file and no other's.
 	for _, p := range ap.Paths {
 		for _, q := range ap.Paths {
-			if has := strings.Contains(writeCmd(p, token(), nil), tmpPath(q)); has != (p == q) {
+			if has := strings.Contains(writeCmd(p, tok, nil), tmpPath(q, tok)) && !strings.Contains(writeCmd(p, tok, nil), other); has != (p == q) {
 				t.Errorf("write command for %s names the temporary file of %s: %v", p, q, has)
 			}
 		}
@@ -789,28 +820,61 @@ func TestFailedClaimWritesNothing(t *testing.T) {
 	}
 }
 
-// TestCommandsTakeTheLock: the claim, every write and the reload run
-// under the access point's lock, the write and the reload only while
-// their Sync's token is the newest, and the reload does not pass the
-// lock's descriptor to what it starts. Each Sync draws a new token.
+// TestCommandsTakeTheLock: the claim, every write's move and the reload
+// run under the access point's lock, the move and the reload only while
+// their Sync's token is the newest; a write reads stdin with no lock
+// held; the claim removes earlier temporary files; and the reload does
+// not pass the lock's descriptor to what it starts. Each Sync draws a
+// new token.
 func TestCommandsTakeTheLock(t *testing.T) {
 	tok := token()
 	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(tok) || tok == token() {
 		t.Fatalf("token %q", tok)
 	}
-	cmds := []string{claimCmd(tok), applyCmd(tok)}
-	for _, p := range ap.Paths {
-		cmds = append(cmds, writeCmd(p, tok, []byte("x")))
-	}
-	for i, c := range cmds {
+	for _, c := range []string{claimCmd(tok), applyCmd(tok)} {
 		if !strings.HasPrefix(c, "{ flock -x 9 && ") || !strings.HasSuffix(c, "; } 9>"+lockPath) {
 			t.Errorf("not under the lock: %q", c)
 		}
-		if i > 0 && !strings.HasPrefix(c, "{ flock -x 9 && "+owns(tok)+" && ") {
-			t.Errorf("does not check the token first: %q", c)
+	}
+	if !strings.HasPrefix(applyCmd(tok), "{ flock -x 9 && "+owns(tok)+" && ") {
+		t.Errorf("reload does not check the token first: %q", applyCmd(tok))
+	}
+	if !strings.HasSuffix(claimCmd(tok), " && rm -f "+tmpGlob+"; } 9>"+lockPath) {
+		t.Errorf("claim leaves earlier temporary files: %q", claimCmd(tok))
+	}
+	for _, p := range ap.Paths {
+		c := writeCmd(p, tok, []byte("x"))
+		read, move, ok := strings.Cut(c, " && { flock -x 9 && "+owns(tok)+" && mv -f "+tmpPath(p, tok)+" "+p+"; } 9>"+lockPath)
+		if !ok || strings.Contains(read, "flock") || !strings.HasPrefix(read, "umask 077 && cat > "+tmpPath(p, tok)+" && ") || move != " || { rm -f "+tmpPath(p, tok)+"; false; }" {
+			t.Errorf("write does not read unlocked and move under the lock with the token checked: %q", c)
 		}
 	}
 	if !strings.Contains(applyCmd(tok), "reload_config 9>&-;") {
 		t.Errorf("reload keeps the lock's descriptor: %q", applyCmd(tok))
+	}
+}
+
+// TestEndlessStdinHoldsNothing: a timed-out Sync's write whose stdin never
+// ends on the access point (a link that dropped before its end) does not
+// hold up the next Syncs, which write and reload as usual. Catches a
+// write that takes the access point's lock before reading stdin, which
+// would keep every revocation off the access point until it rebooted.
+func TestEndlessStdinHoldsNothing(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	h := f.holdWrite(1, ap.PathWireless, false) // released only at cleanup
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+	if _, err := p.Sync(context.Background(), revoked()); err == nil {
+		t.Fatal("a Sync whose write never ended did not fail")
+	}
+	<-h.arrived
+	p.Timeout = 2 * time.Second
+	for i := range 2 {
+		if res, err := p.Sync(context.Background(), config()); err != nil || (i == 0) != res.Applied {
+			t.Fatalf("sync %d behind an endless write: %+v %v", i, res, err)
+		}
+	}
+	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
+		t.Fatalf("wireless holds %q", got)
 	}
 }
