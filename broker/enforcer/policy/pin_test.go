@@ -100,7 +100,11 @@ func TestMDNSNameHeldOnce(t *testing.T) {
 			d.Devices = append(d.Devices, Device{ID: "laptop", Network: NetHousehold, Everyday: true, MDNS: mdnsOf("laptop.local")})
 			dev(d, "speaker").MDNS = mdnsOf("Laptop.local")
 		}, []string{`"Laptop.local"`, "laptop's and speaker's"}},
-		{"one device, two cases", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("tv.local", "TV.local") }, []string{"tv's and tv's"}},
+		{"one device, two cases", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("tv.local", "TV.local") }, []string{`"tv.local" is listed twice for tv; keep one`}},
+		{"a name shown escaped", func(d *Document) {
+			dev(d, "tv").MDNS = mdnsOf("Caf\u00e9.local")
+			dev(d, "speaker").MDNS = mdnsOf("CAF\u00e9.local")
+		}, []string{`"Caf\u00e9.local" is speaker's and tv's`}},
 		{"A and a", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("A.local"); dev(d, "speaker").MDNS = mdnsOf("a.local") }, []string{"speaker's and tv's"}},
 		{"Z and z", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("Z.local"); dev(d, "speaker").MDNS = mdnsOf("z.local") }, []string{"speaker's and tv's"}},
 	} {

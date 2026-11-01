@@ -227,28 +227,33 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 // describeMDNS is each mDNS name d pins or unpins against o (NET-3
 // Casting, #4144): what a Devices-network device may announce across its
 // pairs, or a name held for an Owner or Household device. Names compare
-// exactly, so a change of case shows too.
+// exactly, so a change of case shows. A move onto or off the Devices
+// network changes what every name means, so then each old name is shown
+// unpinned and each new one pinned, in the new network's words.
 func describeMDNS(o, d policy.Device, add func(string, ...any)) {
 	has := func(s [][]string, n []string) bool {
 		return slices.ContainsFunc(s, func(m []string) bool { return slices.Equal(m, n) })
 	}
-	device := d.Network == policy.NetDevices
-	for _, n := range d.MDNS {
-		switch {
-		case has(o.MDNS, n):
-		case device:
-			add("Let %s announce the name %s to the networks and devices it is paired with; no other device may use it.", d.ID, ascii(policy.MDNSName(n)))
-		default:
-			add("Hold the name %s for %s: no paired device may announce it.", ascii(policy.MDNSName(n)), d.ID)
-		}
+	was, is := o.MDNS, d.MDNS
+	if (o.Network == policy.NetDevices) != (d.Network == policy.NetDevices) {
+		was, is = nil, nil
 	}
 	for _, n := range o.MDNS {
 		switch {
-		case has(d.MDNS, n):
+		case has(is, n):
 		case o.Network == policy.NetDevices:
 			add("Stop %s announcing the name %s to what it is paired with.", d.ID, ascii(policy.MDNSName(n)))
 		default:
 			add("Stop holding the name %s for %s.", ascii(policy.MDNSName(n)), d.ID)
+		}
+	}
+	for _, n := range d.MDNS {
+		switch {
+		case has(was, n):
+		case d.Network == policy.NetDevices:
+			add("Let %s announce the name %s to the networks and devices it is paired with; no other device may use it.", d.ID, ascii(policy.MDNSName(n)))
+		default:
+			add("Hold the name %s for %s: no paired device may announce it.", ascii(policy.MDNSName(n)), d.ID)
 		}
 	}
 }

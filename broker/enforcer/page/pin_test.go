@@ -66,7 +66,7 @@ func TestMDNSConflictOnTheScreen(t *testing.T) {
 	clash := strings.Replace(string(b), `"Dex"`, `"DEN"`, 1)
 	w := g.do(http.MethodGet, "/p?d="+base64.RawURLEncoding.EncodeToString([]byte(clash)), nil)
 	body := w.Body.String()
-	if w.Code != http.StatusBadRequest || !strings.Contains(body, `two devices announce one name: "Den._airplay._tcp.local" is cam's and tv's; rename one before signing`) {
+	if w.Code != http.StatusBadRequest || !strings.Contains(body, `one name is pinned twice: "Den._airplay._tcp.local" is cam's and tv's; rename one before signing`) {
 		t.Errorf("the clash: %d %s", w.Code, body)
 	}
 	if reChal.MatchString(body) {
@@ -74,5 +74,41 @@ func TestMDNSConflictOnTheScreen(t *testing.T) {
 	}
 	if screen, _, _ := g.open(ok, "names"); !strings.Contains(screen, "announce the name") {
 		t.Errorf("renamed, the screen lacks the names:\n%s", screen)
+	}
+}
+
+// TestMDNSMoveShowsNames: a move onto or off the Devices network changes
+// what each kept name means (held for the device, or announced by it), so
+// the screen names every kept name in the new network's words, both ways
+// (Security on #4397).
+func TestMDNSMoveShowsNames(t *testing.T) {
+	held := edit(1, func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true, MDNS: [][]string{{"macbook", "local"}}})
+	})
+	moved := clone(held)
+	dev(&moved, "laptop").Network, dev(&moved, "laptop").WiFi = policy.NetDevices, "vlan120"
+	moved.Devices = slices.Clone(moved.Devices)
+	for _, c := range []struct {
+		from, to policy.Document
+		want     []string
+	}{
+		{held, moved, []string{
+			"Stop holding the name macbook.local for laptop.",
+			"Let laptop announce the name macbook.local to the networks and devices it is paired with; no other device may use it.",
+		}},
+		{moved, held, []string{
+			"Stop laptop announcing the name macbook.local to what it is paired with.",
+			"Hold the name macbook.local for laptop: no paired device may announce it.",
+		}},
+	} {
+		if _, err := policy.Encode(c.to); err != nil {
+			t.Fatal(err)
+		}
+		got := Describe(c.from, c.to, zone)
+		for _, w := range c.want {
+			if !slices.Contains(got, w) {
+				t.Errorf("the screen lacks %q:\n%s", w, strings.Join(got, "\n"))
+			}
+		}
 	}
 }

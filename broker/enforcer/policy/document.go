@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -50,7 +51,7 @@ var (
 	ErrNotRising = errors.New("policy: version does not rise")
 	// ErrNameHeld: two devices pin one mDNS name (Device.MDNS). The error
 	// names the name and both devices, so the owner can rename one.
-	ErrNameHeld = errors.New("policy: two devices announce one name")
+	ErrNameHeld = errors.New("policy: one name is pinned twice")
 )
 
 // Document is one policy version: everything the enforcer enforces besides
@@ -463,8 +464,13 @@ func (d Document) check() error {
 				return bad("device %q mDNS name %q", dev.ID, n)
 			}
 			k := MDNSKey(n)
-			if other, ok := held[k]; ok {
-				return fmt.Errorf("%w: %q is %s's and %s's; rename one before signing", ErrNameHeld, MDNSName(n), other, dev.ID)
+			// The name is quoted in printable ASCII, as the signed screen
+			// shows it, so no letter in it reorders or imitates the line.
+			switch other, ok := held[k]; {
+			case ok && other == dev.ID:
+				return fmt.Errorf("%w: %s is listed twice for %s; keep one before signing", ErrNameHeld, strconv.QuoteToASCII(MDNSName(n)), dev.ID)
+			case ok:
+				return fmt.Errorf("%w: %s is %s's and %s's; rename one before signing", ErrNameHeld, strconv.QuoteToASCII(MDNSName(n)), other, dev.ID)
 			}
 			held[k] = dev.ID
 		}
