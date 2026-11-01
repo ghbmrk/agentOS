@@ -42,8 +42,8 @@ package privfile
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
 // operations of non-root host processes are outside the check, as is a bare
-// name a wrapper or shell resolves through PATH, or a $ in a later argument
-// a launcher runs (broker binaries sit in
+// name a wrapper or shell resolves through PATH, or a shell's own expansion
+// inside a root sh -c script (broker binaries sit in
 // /usr/lib/agentos, off PATH, but camnode's in /usr/bin), and a program a
 // wrapper runs from outside rootTrees that tmpfiles.d hands to another uid.
 
@@ -347,7 +347,8 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a blank after a backslash":             "[Service]\nSyslogIdentifier=x \\ \nExecStart=/usr/lib/agentos/agentos-side\n",
 		"a User= outside [Service]":             "[Unit]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n",
 		"literal $$ and %%":                     "[Service]\nExecStart=/usr/lib/agentos/agentos-side -x $$HOME 100%%\n",
-		"a variable in a later argument":        "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -owner ${X}\n",
+		"a variable in a later argument":        "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -owner ${AGENTOS_OWNER}\n",
+		"a shell's own $( in a script":          "[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -404,9 +405,15 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		// #4494 Security 2 and 3: a substitution hides what a wrapper runs.
 		"a specifier in a program":   {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/agentos-%i\n", `% specifier`},
 		"a specifier in an argument": {"image/mkosi/agentos-x@.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-%i\n", `% specifier`},
-		"a variable a wrapper runs":  {"image/mkosi/agentos-side.service", "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\nExecStart=/usr/lib/agentos/with-uids ${P}\n", `first argument`},
-		"a bare $ variable":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids $P\n", `first argument`},
-		"a CR":                       {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\rExecStart=/usr/lib/agentos/agentos-side\n", `a CR or NUL`},
+		"a variable a wrapper runs":  {"image/mkosi/agentos-side.service", "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\nExecStart=/usr/lib/agentos/with-uids ${P}\n", `holds a $ substitution`},
+		"a bare $ variable":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids $P\n", `holds a $ substitution`},
+		"a CR":                       {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\rExecStart=/usr/lib/agentos/agentos-side\n", `byte 0xd`},
+		// #4494 Security delta 1 and 2.
+		"a byte-order mark":               {"image/mkosi/agentos-side.service", "\xef\xbb\xbf[Service]\nExecStart=/usr/lib/agentos/agentos-side\n", `byte 0xef`},
+		"a variable a shell script runs":  {"image/mkosi/agentos-side.service", "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\nExecStart=/bin/sh -c 'exec ${P}'\n", `holds a $ substitution`},
+		"a variable not in unitVars":      {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -owner ${X}\n", `holds a $ substitution`},
+		"a listed variable inside a word": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/bin/env x${AGENTOS_OWNER}\n", `holds a $ substitution`},
+		"an unclosed listed variable":     {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side ${AGENTOS_OWNER\n", `holds a $ substitution`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -831,6 +838,33 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	})
 }
 
+func TestUnitVarsAreUsed(t *testing.T) {
+	used := map[string]bool{}
+	err := filepath.WalkDir(filepath.Join(repoRoot(t), "image"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !unitTypes[filepath.Ext(p)] && !strings.HasSuffix(p, ".conf") {
+			return err
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for name := range unitVars {
+			if strings.Contains(string(b), "${"+name+"}") {
+				used[name] = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name := range unitVars {
+		if !used[name] {
+			t.Errorf("unitVars lists %s, which no unit under image/ passes", name)
+		}
+	}
+}
+
 func TestStaleAllowEntryFails(t *testing.T) {
 	files := map[string]string{"broker/side/side.go": "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n"}
 	for name, line := range map[string]string{
@@ -1011,11 +1045,15 @@ type unitLine struct{ section, key, value string }
 // (systemd.syntax(7), conf-parser.c): a comment line is skipped, inside a
 // continued run too; a line whose last byte is a backslash that no
 // backslash escapes goes on with the next (a blank after it, or \\, ends
-// the line); and a key outside a [section] is ignored. A CR or NUL, which
-// would end a line where this reader does not, fails.
+// the line); and a key outside a [section] is ignored. Any byte but
+// printable ASCII, tab and LF fails: a CR or NUL would end a line where this
+// reader does not, and systemd drops a leading byte-order mark this reader
+// would keep.
 func unitLines(text string) ([]unitLine, error) {
-	if strings.ContainsAny(text, "\r\x00") {
-		return nil, fmt.Errorf("a CR or NUL byte; the reader splits lines only at LF, so none may be written")
+	for _, c := range []byte(text) {
+		if c != '\t' && c != '\n' && (c < 0x20 || c > 0x7e) {
+			return nil, fmt.Errorf("byte %#x; a unit file holds only printable ASCII, tabs and LF", c)
+		}
 	}
 	var out []unitLine
 	section, cur := "", ""
@@ -1081,19 +1119,31 @@ func execWords(v string) ([][]string, error) {
 	return append(cmds, cmd), nil
 }
 
-// substitutes reports whether w holds c (systemd's $ or %) other than as
-// the doubled literal cc.
+// unitVars are the variables a root command may pass, each as a whole
+// word, with what holds its value to data no wrapper runs. A name no
+// shipped Exec line passes fails (TestUnitVarsAreUsed).
+var unitVars = map[string]string{
+	"AGENTOS_OWNER": "agentosd.service's -owner value, from /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6); with-uids runs agentosd, its first argument, and passes this one on",
+}
+
+// substitutes reports whether w holds a substitution systemd makes: a %
+// specifier, or with c '$' a $NAME or ${NAME} ($$ is a literal $, and a $
+// before anything else, such as a shell's $(, is passed on as it is).
 func substitutes(w string, c byte) bool {
 	for i := 0; i < len(w); i++ {
-		if w[i] == c {
-			if i+1 < len(w) && w[i+1] == c {
-				i++
-				continue
-			}
+		switch {
+		case w[i] != c:
+		case i+1 < len(w) && w[i+1] == c:
+			i++
+		case c == '%' || i+1 < len(w) && (w[i+1] == '{' || w[i+1] == '_' || isAlnum(w[i+1])):
 			return true
 		}
 	}
 	return false
+}
+
+func isAlnum(b byte) bool {
+	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 // rootTrees are the trees root reads configuration and programs from: the
@@ -1255,9 +1305,6 @@ func rootBinaries(root string) ([]string, error) {
 				if strings.Contains(prefix, "|") || !strings.HasPrefix(prog, "/") || substitutes(prog, '$') || path.Clean(prog) != prog {
 					return nil, fmt.Errorf("%s: %s=%s: want a program that is a plain absolute path, with no | prefix, %% or $", filepath.ToSlash(rel), l.key, l.value)
 				}
-				if len(words) > 1 && substitutes(words[1], '$') {
-					return nil, fmt.Errorf("%s: %s=%s: a $ substitution in the first argument, which a wrapper runs; the reader cannot see its value", filepath.ToSlash(rel), l.key, l.value)
-				}
 				for _, w := range words {
 					if substitutes(w, '%') {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w)
@@ -1267,6 +1314,16 @@ func rootBinaries(root string) ([]string, error) {
 					continue
 				}
 				progs = append(progs, prog)
+				// systemd fills in $X and ${X} before a wrapper or shell runs
+				// the result, so a root command holds none but a whole-word
+				// ${X} of unitVars (#4494).
+				for _, w := range words[1:] {
+					name, whole := strings.CutPrefix(w, "${")
+					name, whole = strings.CutSuffix(name, "}")
+					if _, ok := unitVars[name]; !(ok && whole && strings.HasPrefix(w, "${")) && substitutes(w, '$') {
+						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
+					}
+				}
 				// A program's arguments may name another a wrapper (with-uids
 				// execs "$@") or shell runs: every absolute token counts, in a
 				// quoted shell script too.
@@ -1283,6 +1340,7 @@ func rootBinaries(root string) ([]string, error) {
 	if err := runBinaries(root, pkgs, seen, progs); err != nil {
 		return nil, err
 	}
+
 	var out []string
 	for pkg := range seen {
 		out = append(out, pkg)
