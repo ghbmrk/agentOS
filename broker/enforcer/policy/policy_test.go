@@ -365,7 +365,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label", "Control", "Stream", "MDNS"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},
@@ -997,7 +997,7 @@ func TestNamingByClass(t *testing.T) {
 	}
 	for class, named := range want {
 		for _, s := range append(names, "") {
-			d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Class: class, Secure: s}}}
+			d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Class: class, Secure: s, Safeguards: Needs(class)}}}
 			_, err := Encode(d)
 			if ok := s == "" || s == named; (err == nil) != ok {
 				t.Errorf("a %q named %q: %v, want valid %v", class, s, err, ok)
@@ -1010,6 +1010,104 @@ func TestNamingByClass(t *testing.T) {
 		d := Document{Version: 1, Devices: []Device{{ID: "d", Network: NetDevices, Everyday: true, Class: class}}}
 		if _, err := Encode(d); (err == nil) != (class == "") {
 			t.Errorf("an everyday %q: %v", class, err)
+		}
+	}
+}
+
+// NET-2 Safety devices: "a garage door can be named only if it has
+// obstruction reversal and a pre-close warning". The signed policy records
+// the safeguards a class needs (Device.Safeguards), by class, and refuses
+// a document that names such a device without every one, so the channel
+// never carries a close to a door that would not reverse or warn. A
+// safeguard its class does not need, or on an everyday device, is refused
+// too, so the screen never shows a fact that means nothing. Recording and
+// dropping one are loosenings. Revert mutants: check skipping the Named
+// test passes the door with one safeguard; Named ignoring classNeeds
+// passes it with none.
+func TestGarageNeedsSafeguards(t *testing.T) {
+	door := func(secure string, g ...string) Document {
+		return Document{Version: 1, Devices: []Device{{ID: "garage", Network: NetDevices, Class: ClassGarageDoor, Secure: secure, Safeguards: g}}}
+	}
+	rev, warn := SafeguardObstructionReversal, SafeguardPreCloseWarning
+	for _, c := range []struct {
+		name string
+		d    Document
+		ok   bool
+	}{
+		{"named with both", door("close", rev, warn), true},
+		{"named with both, unsorted and twice", door("close", warn, rev, warn), true},
+		{"named with no safeguard", door("close"), false},
+		{"named without a pre-close warning", door("close", rev), false},
+		{"named without obstruction reversal", door("close", warn), false},
+		{"recorded, not named", door("", rev), true},
+		{"not named, none recorded", door(""), true},
+		{"an unknown safeguard", door("close", rev, warn, "light-curtain"), false},
+		{"a safeguard on a plug", Document{Version: 1, Devices: []Device{{ID: "p", Network: NetDevices, Class: ClassPlug, Secure: "off", Safeguards: []string{rev}}}}, false},
+		{"a safeguard on an untyped device", Document{Version: 1, Devices: []Device{{ID: "u", Network: NetDevices, Safeguards: []string{rev}}}}, false},
+		{"a safeguard on an everyday device", Document{Version: 1, Devices: []Device{{ID: "e", Network: NetDevices, Everyday: true, Safeguards: []string{rev}}}}, false},
+	} {
+		b, err := Encode(c.d)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: %v, want valid %v", c.name, err, c.ok)
+			continue
+		}
+		if !c.ok {
+			if !errors.Is(err, ErrMalformed) {
+				t.Errorf("%s: %v, want ErrMalformed", c.name, err)
+			}
+			continue
+		}
+		got, err := Decode(b)
+		if err != nil {
+			t.Fatalf("%s: decode: %v", c.name, err)
+		}
+		dv := got.Devices[0]
+		if want := dv.Secure != ""; dv.Named() != want {
+			t.Errorf("%s: Named() = %v, want %v", c.name, dv.Named(), want)
+		}
+	}
+
+	// Named on its own, for a device no document checked: the channel
+	// carries a command only to a Named device.
+	for _, c := range []struct {
+		d    Device
+		want bool
+	}{
+		{Device{Class: ClassGarageDoor, Secure: "close", Safeguards: []string{rev, warn}}, true},
+		{Device{Class: ClassGarageDoor, Secure: "close", Safeguards: []string{rev}}, false},
+		{Device{Class: ClassGarageDoor, Secure: "close"}, false},
+		{Device{Class: ClassGarageDoor, Safeguards: []string{rev, warn}}, false},
+		{Device{Class: ClassGarageDoor, Secure: "close", Everyday: true, Safeguards: []string{rev, warn}}, false},
+		{Device{Class: ClassPlug, Secure: "off"}, true},
+		{Device{Class: ClassCamera, Secure: "off"}, false},
+	} {
+		if got := c.d.Named(); got != c.want {
+			t.Errorf("%+v: Named() = %v, want %v", c.d, got, c.want)
+		}
+	}
+
+	// A door with no safeguards encodes as before: the field is omitted.
+	if b, _ := Encode(door("")); strings.Contains(string(b), "safeguards") {
+		t.Errorf("an empty set is written: %s", b)
+	}
+	// Needs is a copy: changing it changes no class's needs.
+	n := Needs(ClassGarageDoor)
+	n[0] = "x"
+	if !slices.Equal(Needs(ClassGarageDoor), []string{rev, warn}) {
+		t.Error("Needs returned the table itself")
+	}
+
+	// Recording or dropping a safeguard, with or without the naming, is a
+	// loosening: neither is on NET-4's closed list.
+	for name, pair := range map[string][2]Document{
+		"record one":           {door(""), door("", rev)},
+		"record the second":    {door("", rev), door("", rev, warn)},
+		"name with both":       {door(""), door("close", rev, warn)},
+		"drop one, unnamed":    {door("", rev, warn), door("", rev)},
+		"drop both and unname": {door("close", rev, warn), door("")},
+	} {
+		if got := Classify(pair[0], pair[1]); got.Tightening {
+			t.Errorf("%s: classified as a tightening: %+v", name, got)
 		}
 	}
 }

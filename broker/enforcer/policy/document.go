@@ -97,6 +97,13 @@ type Device struct {
 	// such as a lock's "lock" (NET-2 Safety devices); empty for none. Only
 	// the one name its class allows is valid (Nameable).
 	Secure string `json:"secure"`
+	// Safeguards is what qualification found the device has that its
+	// class needs before it can be named (NET-2 Safety devices), such as a
+	// garage door's obstruction reversal and pre-close warning: a sorted
+	// set from the closed list below, each one its class needs (Needs).
+	// The owner records them on the signed screen, never the device.
+	// Recording or dropping one is a loosening.
+	Safeguards []string `json:"safeguards,omitempty"`
 	// Label is how far the enforcer can contain the device (NET-1), from
 	// qualification and the enforcer's observation, never from what the
 	// device reports: LabelContained, LabelExceptRadio, or empty for not
@@ -167,10 +174,49 @@ var classSecure = map[string]string{
 
 // Nameable reports whether a device of class may be named safe for the
 // secure-direction command secure: the one name its class allows, and
-// none for an unknown or unnamable class.
+// none for an unknown or unnamable class. A device so named also needs
+// every safeguard its class needs (Device.Named).
 func Nameable(class, secure string) bool {
 	want, ok := classSecure[class]
 	return ok && want != "" && secure == want
+}
+
+// The safeguards a device can be recorded as having (NET-2 Safety
+// devices). An actuator whose secure direction moves something that can
+// trap or strike a person stops and reverses when something is in its way,
+// and warns before it moves.
+const (
+	SafeguardObstructionReversal = "obstruction-reversal"
+	SafeguardPreCloseWarning     = "pre-close-warning"
+)
+
+// classNeeds is the safeguards each class needs before it can be named,
+// by class, never by make or model (NET-2: "a garage door can be named
+// only if it has obstruction reversal and a pre-close warning"). A class
+// added to NET-2 whose secure direction moves something onto a person
+// adds a row here.
+var classNeeds = map[string][]string{
+	ClassGarageDoor: {SafeguardObstructionReversal, SafeguardPreCloseWarning},
+}
+
+// Needs is the safeguards a device of class needs before it can be named,
+// sorted; none for most classes.
+func Needs(class string) []string { return slices.Clone(classNeeds[class]) }
+
+// Named reports whether d may carry its secure-direction command: its
+// class allows that name (Nameable) and it records every safeguard its
+// class needs. The signed policy refuses any other naming, so every
+// device in a policy in force that names a command is Named.
+func (d Device) Named() bool {
+	if d.Everyday || !Nameable(d.Class, d.Secure) {
+		return false
+	}
+	for _, s := range classNeeds[d.Class] {
+		if !slices.Contains(d.Safeguards, s) {
+			return false
+		}
+	}
+	return true
 }
 
 // Recorder reports whether the device is a camera or a microphone.
@@ -297,6 +343,9 @@ func (d Document) normal() Document {
 		dev.Allow = sorted(dev.Allow)
 		dev.Control, dev.Stream = ports(dev.Control), ports(dev.Stream)
 		dev.MDNS = mdnsNames(dev.MDNS)
+		if dev.Safeguards = sorted(dev.Safeguards); len(dev.Safeguards) == 0 {
+			dev.Safeguards = nil // omitted, as Decode reads it
+		}
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -414,7 +463,8 @@ func sorted(s []string) []string {
 // check refuses a document with a nameless or duplicate device, a Wi-Fi
 // identity that is not a name, an unknown network, label, class or port, an
 // everyday device with a safety class, a secure command its class cannot be
-// named for, a stream port on a device that is not a camera or microphone, a
+// named for or that lacks a safeguard its class needs, a safeguard its
+// class does not need, a stream port on a device that is not a camera or microphone, a
 // drone reference that is not a hash, a pair, rule or hold naming no device,
 // an empty window, or an mDNS name that is not one; and with ErrNameHeld
 // one mDNS name pinned twice.
@@ -448,8 +498,16 @@ func (d Document) check() error {
 		if dev.Everyday && dev.Class != "" {
 			return bad("device %q: class %q is on the safety list", dev.ID, dev.Class)
 		}
+		for _, g := range dev.Safeguards {
+			if !slices.Contains(classNeeds[dev.Class], g) { // an everyday device has no class
+				return bad("device %q: a %q records no safeguard %q", dev.ID, dev.Class, g)
+			}
+		}
 		if dev.Secure != "" && (dev.Everyday || !Nameable(dev.Class, dev.Secure)) {
 			return bad("device %q: a %q cannot be named safe for %q", dev.ID, dev.Class, dev.Secure)
+		}
+		if dev.Secure != "" && !dev.Named() {
+			return bad("device %q: a %q is named safe for %q only with %s recorded", dev.ID, dev.Class, dev.Secure, strings.Join(classNeeds[dev.Class], " and "))
 		}
 		if len(dev.Stream) > 0 && !dev.Recorder() {
 			return bad("device %q: stream ports need a camera or microphone", dev.ID)
