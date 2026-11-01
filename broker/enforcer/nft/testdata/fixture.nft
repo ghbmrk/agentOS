@@ -218,12 +218,12 @@ table inet enforcer {
 		ct state established oifname vmap { "ap0.101" : jump t101_in_count, "ap0.102" : jump t102_in_count, "ap0.103" : jump t103_in_count, "ap0.104" : jump t104_in_count, "ap0.105" : jump t105_in_count, "ap0.106" : jump t106_in_count, "ap0.107" : jump t107_in_count }
 		ct state established,related accept
 		iifname "wan0" log prefix "enf inbound " counter name "inbound" drop
-		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 accept
-		iifname "gst0" oifname "wan0" ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 accept
+		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 ct mark set 0x10011004 accept
+		iifname "gst0" oifname "wan0" ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 ct mark set 0x10011004 accept
 		iifname "gst0" drop
 		iifname { "own0", "hh0" } jump people
-		iifname "adm0" oifname "apm0" ip daddr @ap_4 accept
-		iifname "adm0" oifname "apm0" ip6 daddr @ap_6 accept
+		iifname "adm0" oifname "apm0" ip daddr @ap_4 ct mark set 0x10081005 accept
+		iifname "adm0" oifname "apm0" ip6 daddr @ap_6 ct mark set 0x10081005 accept
 		ip daddr @ap_4 log prefix "enf ap-admin " counter name "ap_admin" drop
 		ip6 daddr @ap_6 log prefix "enf ap-admin " counter name "ap_admin" drop
 		ip daddr @isp_4 log prefix "enf isp " counter name "isp" drop
@@ -232,23 +232,23 @@ table inet enforcer {
 		oifname "wan0" ip6 daddr @nonglobal_6 log prefix "enf nonglobal " counter name "blocked" drop
 		iifname "edge0" oifname "core0" log prefix "enf core-edge " counter name "core_edge" drop
 		iifname "core0" oifname "edge0" log prefix "enf core-edge " counter name "core_edge" drop
-		iifname "adm0" oifname "core0" tcp dport 443 accept
-		iifname "edge0" oifname "wan0" accept
-		iifname "core0" oifname "wan0" ip daddr @core_4 accept
-		iifname "core0" oifname "wan0" ip6 daddr @core_6 accept
+		iifname "adm0" oifname "core0" tcp dport 443 ct mark set 0x10061005 accept
+		iifname "edge0" oifname "wan0" ct mark set 0x10011007 accept
+		iifname "core0" oifname "wan0" ip daddr @core_4 ct mark set 0x10011006 accept
+		iifname "core0" oifname "wan0" ip6 daddr @core_6 ct mark set 0x10011006 accept
 		iifname "ap0.*" oifname "wan0" ip daddr @doh_4 log prefix "enf dns " counter name "dns_outside" drop
 		iifname "ap0.*" oifname "wan0" ip6 daddr @doh_6 log prefix "enf dns " counter name "dns_outside" drop
 		iifname "ap0.*" oifname "wan0" meta l4proto { tcp, udp } th dport { 53, 853 } log prefix "enf dns " counter name "dns_outside" drop
-		iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept
-		iifname "ap0.101" oifname "wan0" ip6 daddr @d101_6 accept
-		iifname "edge0" oifname "ap0.101" tcp dport { 80 } log prefix "enf edge-dev 101 " counter name "edge_device" accept
-		iifname "core0" oifname "ap0.102" tcp dport { 80 } log prefix "enf core-dev 102 " counter name "core_device" accept
-		iifname "core0" oifname "ap0.102" udp dport { 123 } log prefix "enf core-dev 102 " counter name "core_device" accept
-		iifname "ap0.103" oifname "wan0" ip daddr @d103_4 accept
-		iifname "ap0.103" oifname "wan0" ip6 daddr @d103_6 accept
-		iifname "core0" oifname "ap0.104" tcp dport { 554 } log prefix "enf core-stream 104 " counter name "core_stream" accept
-		iifname "ap0.106" oifname "ap0.107" accept
-		iifname "ap0.107" oifname "ap0.106" accept
+		iifname "ap0.101" oifname "wan0" ip daddr @d101_4 ct mark set 0x10010065 accept
+		iifname "ap0.101" oifname "wan0" ip6 daddr @d101_6 ct mark set 0x10010065 accept
+		iifname "edge0" oifname "ap0.101" tcp dport { 80 } ct mark set 0x00651007 log prefix "enf edge-dev 101 " counter name "edge_device" accept
+		iifname "core0" oifname "ap0.102" tcp dport { 80 } ct mark set 0x00661006 log prefix "enf core-dev 102 " counter name "core_device" accept
+		iifname "core0" oifname "ap0.102" udp dport { 123 } ct mark set 0x00661006 log prefix "enf core-dev 102 " counter name "core_device" accept
+		iifname "ap0.103" oifname "wan0" ip daddr @d103_4 ct mark set 0x10010067 accept
+		iifname "ap0.103" oifname "wan0" ip6 daddr @d103_6 ct mark set 0x10010067 accept
+		iifname "core0" oifname "ap0.104" tcp dport { 554 } ct mark set 0x00681006 log prefix "enf core-stream 104 " counter name "core_stream" accept
+		iifname "ap0.106" oifname "ap0.107" ct mark set 0x006b006a accept
+		iifname "ap0.107" oifname "ap0.106" ct mark set 0x006a006b accept
 		log prefix "enf drop " counter name "blocked" drop
 	}
 	chain people {
@@ -258,26 +258,27 @@ table inet enforcer {
 		ip6 daddr @isp_6 drop
 		oifname "wan0" ip daddr @nonglobal_4 drop
 		oifname "wan0" ip6 daddr @nonglobal_6 drop
-		oifname "wan0" accept
-		iifname "own0" oifname "core0" tcp dport 443 accept
-		iifname "hh0" oifname "ap0.105" accept
+		iifname "own0" oifname "wan0" ct mark set 0x10011002 accept
+		iifname "hh0" oifname "wan0" ct mark set 0x10011003 accept
+		iifname "own0" oifname "core0" tcp dport 443 ct mark set 0x10061002 accept
+		iifname "hh0" oifname "ap0.105" ct mark set 0x00691003 accept
 		drop
 	}
 	chain forward_live {
 		ct direction original iifname "wan0" drop
 		ct direction reply oifname "wan0" drop
-		ct direction original iifname "gst0" oifname "wan0" ct original ip daddr != @isp_4 ct original ip daddr != @nonglobal_4 return
-		ct direction reply iifname "wan0" oifname "gst0" ct original ip daddr != @isp_4 ct original ip daddr != @nonglobal_4 return
-		ct direction original iifname "gst0" oifname "wan0" ct original ip6 daddr != @isp_6 ct original ip6 daddr != @nonglobal_6 return
-		ct direction reply iifname "wan0" oifname "gst0" ct original ip6 daddr != @isp_6 ct original ip6 daddr != @nonglobal_6 return
+		ct direction original iifname "gst0" oifname "wan0" ct original ip daddr != @isp_4 ct original ip daddr != @nonglobal_4 ct mark 0x10011004 return
+		ct direction reply iifname "wan0" oifname "gst0" ct original ip daddr != @isp_4 ct original ip daddr != @nonglobal_4 ct mark 0x10011004 return
+		ct direction original iifname "gst0" oifname "wan0" ct original ip6 daddr != @isp_6 ct original ip6 daddr != @nonglobal_6 ct mark 0x10011004 return
+		ct direction reply iifname "wan0" oifname "gst0" ct original ip6 daddr != @isp_6 ct original ip6 daddr != @nonglobal_6 ct mark 0x10011004 return
 		ct direction original iifname "gst0" drop
 		ct direction reply oifname "gst0" drop
 		ct direction original iifname { "own0", "hh0" } goto people_live
 		ct direction reply oifname { "own0", "hh0" } goto people_live
-		ct direction original iifname "adm0" oifname "apm0" ct original ip daddr @ap_4 return
-		ct direction reply iifname "apm0" oifname "adm0" ct original ip daddr @ap_4 return
-		ct direction original iifname "adm0" oifname "apm0" ct original ip6 daddr @ap_6 return
-		ct direction reply iifname "apm0" oifname "adm0" ct original ip6 daddr @ap_6 return
+		ct direction original iifname "adm0" oifname "apm0" ct original ip daddr @ap_4 ct mark 0x10081005 return
+		ct direction reply iifname "apm0" oifname "adm0" ct original ip daddr @ap_4 ct mark 0x10081005 return
+		ct direction original iifname "adm0" oifname "apm0" ct original ip6 daddr @ap_6 ct mark 0x10081005 return
+		ct direction reply iifname "apm0" oifname "adm0" ct original ip6 daddr @ap_6 ct mark 0x10081005 return
 		ct original ip daddr @ap_4 drop
 		ct original ip6 daddr @ap_6 drop
 		ct original ip daddr @isp_4 drop
@@ -290,40 +291,40 @@ table inet enforcer {
 		ct direction reply iifname "core0" oifname "edge0" drop
 		ct direction original iifname "core0" oifname "edge0" drop
 		ct direction reply iifname "edge0" oifname "core0" drop
-		ct direction original iifname "adm0" oifname "core0" ct protocol tcp ct original proto-dst 443 return
-		ct direction reply iifname "core0" oifname "adm0" ct protocol tcp ct original proto-dst 443 return
-		ct direction original iifname "edge0" oifname "wan0" return
-		ct direction reply iifname "wan0" oifname "edge0" return
-		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv4 return
-		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv4 return
-		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv6 return
-		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv6 return
+		ct direction original iifname "adm0" oifname "core0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061005 return
+		ct direction reply iifname "core0" oifname "adm0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061005 return
+		ct direction original iifname "edge0" oifname "wan0" ct mark 0x10011007 return
+		ct direction reply iifname "wan0" oifname "edge0" ct mark 0x10011007 return
+		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv4 ct mark 0x10011006 return
+		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv4 ct mark 0x10011006 return
+		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv6 ct mark 0x10011006 return
+		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv6 ct mark 0x10011006 return
 		ct direction original iifname "ap0.*" oifname "wan0" ct original ip daddr @doh_4 drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct original ip daddr @doh_4 drop
 		ct direction original iifname "ap0.*" oifname "wan0" ct original ip6 daddr @doh_6 drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct original ip6 daddr @doh_6 drop
 		ct direction original iifname "ap0.*" oifname "wan0" ct protocol { tcp, udp } ct original proto-dst { 53, 853 } drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct protocol { tcp, udp } ct original proto-dst { 53, 853 } drop
-		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv4 return
-		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv4 return
-		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv6 return
-		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv6 return
-		ct direction original iifname "edge0" oifname "ap0.101" ct protocol tcp ct original proto-dst { 80 } return
-		ct direction reply iifname "ap0.101" oifname "edge0" ct protocol tcp ct original proto-dst { 80 } return
-		ct direction original iifname "core0" oifname "ap0.102" ct protocol tcp ct original proto-dst { 80 } return
-		ct direction reply iifname "ap0.102" oifname "core0" ct protocol tcp ct original proto-dst { 80 } return
-		ct direction original iifname "core0" oifname "ap0.102" ct protocol udp ct original proto-dst { 123 } return
-		ct direction reply iifname "ap0.102" oifname "core0" ct protocol udp ct original proto-dst { 123 } return
-		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv4 return
-		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv4 return
-		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv6 return
-		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv6 return
-		ct direction original iifname "core0" oifname "ap0.104" ct protocol tcp ct original proto-dst { 554 } return
-		ct direction reply iifname "ap0.104" oifname "core0" ct protocol tcp ct original proto-dst { 554 } return
-		ct direction original iifname "ap0.106" oifname "ap0.107" return
-		ct direction reply iifname "ap0.107" oifname "ap0.106" return
-		ct direction original iifname "ap0.107" oifname "ap0.106" return
-		ct direction reply iifname "ap0.106" oifname "ap0.107" return
+		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv4 ct mark 0x10010065 return
+		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv4 ct mark 0x10010065 return
+		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv6 ct mark 0x10010065 return
+		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv6 ct mark 0x10010065 return
+		ct direction original iifname "edge0" oifname "ap0.101" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00651007 return
+		ct direction reply iifname "ap0.101" oifname "edge0" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00651007 return
+		ct direction original iifname "core0" oifname "ap0.102" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00661006 return
+		ct direction reply iifname "ap0.102" oifname "core0" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00661006 return
+		ct direction original iifname "core0" oifname "ap0.102" ct protocol udp ct original proto-dst { 123 } ct mark 0x00661006 return
+		ct direction reply iifname "ap0.102" oifname "core0" ct protocol udp ct original proto-dst { 123 } ct mark 0x00661006 return
+		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv4 ct mark 0x10010067 return
+		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv4 ct mark 0x10010067 return
+		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv6 ct mark 0x10010067 return
+		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv6 ct mark 0x10010067 return
+		ct direction original iifname "core0" oifname "ap0.104" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
+		ct direction reply iifname "ap0.104" oifname "core0" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
+		ct direction original iifname "ap0.106" oifname "ap0.107" ct mark 0x006b006a return
+		ct direction reply iifname "ap0.107" oifname "ap0.106" ct mark 0x006b006a return
+		ct direction original iifname "ap0.107" oifname "ap0.106" ct mark 0x006a006b return
+		ct direction reply iifname "ap0.106" oifname "ap0.107" ct mark 0x006a006b return
 		drop
 	}
 	chain people_live {
@@ -335,12 +336,14 @@ table inet enforcer {
 		ct direction reply iifname "wan0" ct original ip daddr @nonglobal_4 drop
 		ct direction original oifname "wan0" ct original ip6 daddr @nonglobal_6 drop
 		ct direction reply iifname "wan0" ct original ip6 daddr @nonglobal_6 drop
-		ct direction original oifname "wan0" return
-		ct direction reply iifname "wan0" return
-		ct direction original iifname "own0" oifname "core0" ct protocol tcp ct original proto-dst 443 return
-		ct direction reply iifname "core0" oifname "own0" ct protocol tcp ct original proto-dst 443 return
-		ct direction original iifname "hh0" oifname "ap0.105" return
-		ct direction reply iifname "ap0.105" oifname "hh0" return
+		ct direction original iifname "own0" oifname "wan0" ct mark 0x10011002 return
+		ct direction reply iifname "wan0" oifname "own0" ct mark 0x10011002 return
+		ct direction original iifname "hh0" oifname "wan0" ct mark 0x10011003 return
+		ct direction reply iifname "wan0" oifname "hh0" ct mark 0x10011003 return
+		ct direction original iifname "own0" oifname "core0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061002 return
+		ct direction reply iifname "core0" oifname "own0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061002 return
+		ct direction original iifname "hh0" oifname "ap0.105" ct mark 0x00691003 return
+		ct direction reply iifname "ap0.105" oifname "hh0" ct mark 0x00691003 return
 		drop
 	}
 	chain t101_out_count {

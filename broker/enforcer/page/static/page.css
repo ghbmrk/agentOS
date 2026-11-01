@@ -4,3 +4,6 @@ body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 1rem auto; 
 button { font-size: 1.1rem; padding: .6rem 1rem; }
 table { border-collapse: collapse; }
 td, th { padding: .2rem .6rem; text-align: left; }
+.code { font-family: ui-monospace, monospace; font-size: 1.3rem; letter-spacing: .05em; }
+.qr { width: 14rem; height: 14rem; background: #fff; }
+input { font-size: 1.1rem; padding: .4rem; }
