@@ -417,22 +417,44 @@ const crypto = require("crypto");
 // new pin (#4425).
 const controlUIProbePin = "2026.10.9"
 
-// TestControlUIProbePin fails when guest/openclaw/build-rootfs.sh moves off
-// the OpenClaw version noControlUI was checked on. It needs no root, so the
-// pin bump's own PR fails here, not only on the gVisor runner.
+// TestControlUIProbePin fails when the guest's OpenClaw moves off the
+// version noControlUI was checked on. npm ci installs the version in
+// guest/openclaw/package-lock.json, so that is the one that counts;
+// package.json and build-rootfs.sh's OPENCLAW_VERSION must agree with it.
+// It needs no root, so the pin bump's own PR fails here, not only on the
+// gVisor runner.
 func TestControlUIProbePin(t *testing.T) {
-	b, err := os.ReadFile("../../guest/openclaw/build-rootfs.sh")
-	if err != nil {
+	read := func(name string) []byte {
+		b, err := os.ReadFile("../../guest/openclaw/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var lock struct {
+		Packages map[string]struct{ Version string } `json:"packages"`
+	}
+	if err := json.Unmarshal(read("package-lock.json"), &lock); err != nil {
 		t.Fatal(err)
 	}
-	m := regexp.MustCompile(`(?m)^OPENCLAW_VERSION=(\S+)$`).FindAllSubmatch(b, -1)
-	if len(m) != 1 {
-		t.Fatalf("build-rootfs.sh: %d OPENCLAW_VERSION lines, want one", len(m))
+	var pkg struct{ Dependencies map[string]string }
+	if err := json.Unmarshal(read("package.json"), &pkg); err != nil {
+		t.Fatal(err)
 	}
-	if got := string(m[0][1]); got != controlUIProbePin {
-		t.Fatalf("OpenClaw pin is %s, but noControlUI was checked on %s: with gateway.controlUi.enabled true on the new pin, "+
-			"find where the gateway serves the Control UI (base path, auth) and point the probe there, then set controlUIProbePin (#4425)",
-			got, controlUIProbePin)
+	script := "(none)"
+	if m := regexp.MustCompile(`(?m)^OPENCLAW_VERSION=(\S+)$`).FindAllSubmatch(read("build-rootfs.sh"), -1); len(m) == 1 {
+		script = string(m[0][1])
+	}
+	for _, v := range []struct{ where, got string }{
+		{"package-lock.json node_modules/openclaw", lock.Packages["node_modules/openclaw"].Version},
+		{"package.json dependencies", pkg.Dependencies["openclaw"]},
+		{"build-rootfs.sh OPENCLAW_VERSION", script},
+	} {
+		if v.got != controlUIProbePin {
+			t.Errorf("OpenClaw in %s is %q, but noControlUI was checked on %s: with gateway.controlUi.enabled true on the new pin, "+
+				"find where the gateway serves the Control UI (base path, auth) and point the probe there, then set controlUIProbePin (#4425)",
+				v.where, v.got, controlUIProbePin)
+		}
 	}
 }
 
@@ -470,9 +492,13 @@ func noControlUI(t *testing.T, rt *gvisor.Runtime, rootfs string) {
 		MaxOutput: 1 << 20,
 	})
 	if err != nil {
-		// runsc's own messages go to the runtime's exec log, not to err.
+		// runsc's own messages go to the runtime's exec log, not to err;
+		// its last 16 KiB are this probe's.
 		log, _ := os.ReadFile(filepath.Join(rt.StateDir, "exec.log"))
-		t.Fatalf("control UI probe: %v\nexec.log:\n%s", err, log)
+		if len(log) > 16<<10 {
+			log = log[len(log)-16<<10:]
+		}
+		t.Fatalf("control UI probe: %v\nstderr: %s\nexec.log (tail):\n%s", err, res.Stderr, log)
 	}
 	out := res.Stdout
 	if res.ExitCode != 0 || res.Truncated {
