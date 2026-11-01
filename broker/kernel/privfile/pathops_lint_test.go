@@ -36,23 +36,19 @@ package privfile
 // operations of non-root host processes are outside the check.
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 // pathOps are, by import path, the path-based calls that follow links: the
@@ -227,20 +223,29 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			t.Fatalf("a package that does not build: got %v, want go list's error", err)
 		}
 	})
-	t.Run("a type error fails the type check", func(t *testing.T) {
-		// checkTypes reads again what go list compiled; a source the gc
-		// compiler passes and go/types refuses would reach this branch the
-		// same way (#4280 1).
-		for src, bad := range map[string]bool{"package side\n\nvar X int = \"s\"\n": true, "package side\n\nvar X int = 1\n": false} {
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "side.go", src, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = checkTypes(fset, nil, "example.test/broker/side", "amd64", []*ast.File{f})
-			if bad != (err != nil) || bad && !strings.Contains(err.Error(), "type-checking example.test/broker/side (amd64)") {
-				t.Errorf("%q: got %v, want an error %v", src, err, bad)
-			}
+	t.Run("a file no build reads fails the lint", func(t *testing.T) {
+		bins := []string{"./cmd/agentos-side"}
+		for name, c := range map[string]struct {
+			file, src string
+			bad       bool
+		}{
+			"another tag":     {"tagged.go", "//go:build agentos_x\n\npackage side\n", true},
+			"assembly":        {"side_amd64.s", "", true},
+			"cgo":             {"cgo.go", "package side\n\nimport \"C\"\n", true},
+			"another GOOS":    {"side_darwin.go", "package side\n", false},
+			"go:build ignore": {"gen.go", "//go:build ignore\n\npackage main\n", false},
+		} {
+			t.Run(name, func(t *testing.T) {
+				root := fakeRepo(t, map[string]string{
+					"broker/side/side.go":             "package side\n",
+					"broker/side/" + c.file:           c.src,
+					"broker/cmd/agentos-side/main.go": "package main\n\nimport _ \"example.test/broker/side\"\n\nfunc main() {}\n",
+				})
+				_, err := rootSideUses(root, bins)
+				if c.bad != (err != nil) || c.bad && !strings.Contains(err.Error(), "broker/side/"+c.file) {
+					t.Fatalf("got %v, want an error naming the file %v", err, c.bad)
+				}
+			})
 		}
 	})
 	t.Run("through privfile passes", func(t *testing.T) {
@@ -1495,65 +1500,34 @@ type use struct {
 
 // rootSideUses lists the pathOps uses in the non-test files the module's
 // packages linked into bins hold, on each architecture the image builds.
-// Each package is type-checked against its dependencies' export data, so a
-// use is an identifier that resolves to the os function, whatever name or
-// import form spells it, and a type error fails the lint (#4256).
+// The shared lint loader type-checks each package against its
+// dependencies' export data, so a use is an identifier that resolves to the
+// os function, whatever name or import form spells it, and a type error
+// fails the lint (#4256); a file of those packages no build here reads, but
+// one of these platforms could compile, fails it too (#4273).
 func rootSideUses(root string, bins []string) ([]use, error) {
 	if len(bins) == 0 {
 		return nil, nil
 	}
 	seen := map[use]bool{}
 	var uses []use
+	var loads []*lintload.Loaded
 	for _, arch := range []string{"amd64", "arm64"} {
-		cmd := exec.Command("go", append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Export}}\t{{with .Module}}{{if .Main}}{{$.Dir}}\t{{join $.GoFiles \" \"}}{{end}}{{end}}"}, bins...)...)
-		cmd.Dir = filepath.Join(root, "broker")
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+arch, "GOFLAGS=")
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
+		l, err := lintload.Load(filepath.Join(root, "broker"), lintload.Build{
+			Env:    []string{"CGO_ENABLED=0", "GOOS=linux", "GOARCH=" + arch},
+			Module: true,
+		}, bins...)
 		if err != nil {
-			return nil, fmt.Errorf("go list (%s): %v\n%s", arch, err, stderr.String())
+			return nil, fmt.Errorf("go list (%s): %v", arch, err)
 		}
-		exports := map[string]string{}
-		type pkg struct{ path, dir, names string }
-		var main []pkg
-		sc := bufio.NewScanner(bytes.NewReader(out))
-		for sc.Scan() {
-			f := strings.Split(sc.Text(), "\t")
-			if len(f) < 2 {
-				return nil, fmt.Errorf("go list (%s): unexpected line %q", arch, sc.Text())
-			}
-			exports[f[0]] = f[1]
-			if len(f) == 4 {
-				main = append(main, pkg{f[0], f[2], f[3]})
-			}
-		}
-		fset := token.NewFileSet()
-		imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
-			if exports[path] == "" {
-				return nil, fmt.Errorf("no export data for %s", path)
-			}
-			return os.Open(exports[path])
-		})
-		for _, p := range main {
-			var files []*ast.File
-			for _, n := range strings.Fields(p.names) {
-				f, err := parser.ParseFile(fset, filepath.Join(p.dir, n), nil, 0)
+		loads = append(loads, l)
+		for _, p := range l.Packages {
+			for _, f := range p.Files {
+				rel, err := filepath.Rel(root, l.Fset.Position(f.Pos()).Filename)
 				if err != nil {
 					return nil, err
 				}
-				files = append(files, f)
-			}
-			info, err := checkTypes(fset, imp, p.path, arch, files)
-			if err != nil {
-				return nil, err
-			}
-			for _, f := range files {
-				rel, err := filepath.Rel(root, fset.Position(f.Pos()).Filename)
-				if err != nil {
-					return nil, err
-				}
-				for _, u := range fileUses(fset, f, info, filepath.ToSlash(rel)) {
+				for _, u := range fileUses(l.Fset, f, p.Info, filepath.ToSlash(rel)) {
 					if !seen[u] {
 						seen[u] = true
 						uses = append(uses, u)
@@ -1562,18 +1536,14 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 			}
 		}
 	}
-	return uses, nil
-}
-
-// checkTypes type-checks one package's files for arch, recording what each
-// identifier resolves to; any type error fails it.
-func checkTypes(fset *token.FileSet, imp types.Importer, pkgPath, arch string, files []*ast.File) (*types.Info, error) {
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: imp, Sizes: types.SizesFor("gc", arch)}
-	if _, err := conf.Check(pkgPath, fset, files, info); err != nil {
-		return nil, fmt.Errorf("type-checking %s (%s): %v", pkgPath, arch, err)
+	unread, err := lintload.Unread(loads...)
+	if err != nil {
+		return nil, err
 	}
-	return info, nil
+	if len(unread) > 0 {
+		return nil, fmt.Errorf("root-side files the lint does not read (another tag, cgo, assembly or syso): %s", strings.Join(unread, " "))
+	}
+	return uses, nil
 }
 
 // fileUses finds each identifier in the file that resolves to a pathOps

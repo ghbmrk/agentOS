@@ -1,15 +1,16 @@
 package change
 
 import (
+	"fmt"
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 	"sort"
-	"strings"
+	"sync"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 // REQ CONV-6-2, CONV-6-3 (brief IDs, briefs/CONV-6.md; no colon, as test_metrics.py
@@ -35,21 +36,11 @@ import (
 // than any that an error can satisfy alongside other methods, and Logf
 // outside broker/change.
 func TestLogfArgumentsCarryNoErrorText(t *testing.T) {
-	fset := logfFset
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
-	if err != nil {
-		t.Fatal(err)
+	l := logfLoad(t)
+	if unread, err := lintload.Unread(l); err != nil || len(unread) != 0 {
+		t.Fatalf("files the check does not read: %q (%v)", unread, err)
 	}
-	pkg, ok := pkgs["change"]
-	if !ok {
-		t.Fatal("package change not parsed")
-	}
-	var files []*ast.File
-	for _, f := range pkg.Files {
-		files = append(files, f)
-	}
+	fset, files := l.Fset, l.Packages[0].Files
 	calls, bad := logfErrorArgs(t, fset, files)
 	if calls == 0 {
 		t.Fatal("no Logf calls found; the check would pass vacuously")
@@ -115,11 +106,11 @@ func leaky(err error) string { return "class: " + err.Error() }
 		{"other format func", `func f(err error) { _ = fmt.Sprintf("x (%v)", err) }`, -1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, err := parser.ParseFile(logfFset, "synthetic.go", head+tc.body+"\n", 0)
+			f, err := parser.ParseFile(logfLoad(t).Fset, "synthetic.go", head+tc.body+"\n", 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			calls, bad := logfErrorArgs(t, logfFset, []*ast.File{f})
+			calls, bad := logfErrorArgs(t, logfLoad(t).Fset, []*ast.File{f})
 			if tc.bad < 0 {
 				if calls != 0 {
 					t.Errorf("counted %d Logf calls, want 0", calls)
@@ -136,12 +127,27 @@ func leaky(err error) string { return "class: " + err.Error() }
 	}
 }
 
-// logfFset and logfImporter are shared so the standard library is
-// type-checked from source once per run.
 var (
-	logfFset     = token.NewFileSet()
-	logfImporter = importer.ForCompiler(logfFset, "source", nil)
+	logfOnce   sync.Once
+	logfLoaded *lintload.Loaded
+	logfErr    error
 )
+
+// logfLoad loads package change through the shared lint loader, with
+// export data for what the synthetic sources import, once per run.
+func logfLoad(t *testing.T) *lintload.Loaded {
+	t.Helper()
+	logfOnce.Do(func() {
+		logfLoaded, logfErr = lintload.Load(".", lintload.Build{Also: []string{"errors", "fmt", "io/fs"}}, ".")
+		if logfErr == nil && len(logfLoaded.Packages) != 1 {
+			logfErr = fmt.Errorf("loaded %d packages, want change alone", len(logfLoaded.Packages))
+		}
+	})
+	if logfErr != nil {
+		t.Fatal(logfErr)
+	}
+	return logfLoaded
+}
 
 // logfErrorArgs type-checks files as one package and returns how many Logf
 // calls it saw and the position of each argument that carries error text.
@@ -152,7 +158,7 @@ func logfErrorArgs(t *testing.T, fset *token.FileSet, files []*ast.File) (int, [
 		Uses:  map[*ast.Ident]types.Object{},
 		Defs:  map[*ast.Ident]types.Object{},
 	}
-	conf := types.Config{Importer: logfImporter}
+	conf := types.Config{Importer: logfLoad(t).Importer}
 	if _, err := conf.Check("change", fset, files, info); err != nil {
 		t.Fatalf("type-check: %v", err)
 	}
