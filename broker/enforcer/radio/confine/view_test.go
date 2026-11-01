@@ -6,6 +6,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -202,9 +203,53 @@ func TestViewOnlyBusSocket(t *testing.T) {
 		t.Errorf("the stack holds capabilities %x, ambient CAP_SYS_ADMIN %d", got.Caps, got.Ambient)
 	}
 
-	if control := run("dial", nil); control.Bus != 0 || control.Other != 0 {
+	control := run("dial", nil)
+	if control.Bus != 0 || control.Other != 0 {
 		t.Errorf("without a view, dials: bus %v, other %v; the probe cannot see a missing view",
 			syscall.Errno(control.Bus), syscall.Errno(control.Other))
+	}
+	if control.Caps != [3]uint32{} || control.Ambient != 0 {
+		t.Errorf("without a view, the stack holds capabilities %x, ambient CAP_SYS_ADMIN %d", control.Caps, control.Ambient)
+	}
+}
+
+// TestStackWithoutArguments (NET-2): a stack started with no arguments of
+// its own still runs (Trampoline's argument count). Catches Trampoline
+// refusing, or skipping, a start whose only arguments are its own.
+func TestStackWithoutArguments(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to start a confined stack as another user")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("", "noargs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.Chmod(dir, 0o755)
+	bin := filepath.Join(dir, "confine.test")
+	b, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bin, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	truth, err := exec.LookPath("true")
+	if err != nil {
+		t.Skip("no true(1)")
+	}
+	proc, conn, err := Start(Spec{Profile: Profile{Name: "noargs", UID: viewUID, GID: viewUID}, Self: bin, Path: truth,
+		Stderr: testWriter{t}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	if err := proc.Wait(); err != nil {
+		t.Errorf("a stack with no arguments: %v", err)
 	}
 }
 
@@ -232,6 +277,13 @@ func TestStartRefusesBadView(t *testing.T) {
 	th.View = []string{SystemBus}
 	if _, _, err := Start(Spec{Profile: th, Path: "/nonexistent"}); err != ErrView {
 		t.Errorf("NetAdmin with a view: %v", err)
+	}
+	// Without a view, NetAdmin is no view error (the start may still fail
+	// off root, or exec nothing as root).
+	if proc, _, err := Start(Spec{Profile: Thread(1, 1), Path: "/nonexistent"}); err == ErrView {
+		t.Error("NetAdmin without a view refused as a view")
+	} else if err == nil {
+		proc.Stop()
 	}
 }
 

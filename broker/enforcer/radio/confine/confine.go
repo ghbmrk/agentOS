@@ -353,10 +353,13 @@ func setns(f *os.File, kind int) error {
 // TestMain). It never returns from a confined start: on any failure it
 // exits 126 before the stack runs.
 func Trampoline() {
-	if len(os.Args) < 4 || (os.Args[0] != Arg0 && os.Args[0] != ArgHold) {
+	if os.Args[0] != Arg0 && os.Args[0] != ArgHold {
 		return
 	}
-	err := confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:], os.Args[0] == ArgHold)
+	err := errors.New("confine: too few arguments")
+	if len(os.Args) >= 4 {
+		err = confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:], os.Args[0] == ArgHold)
+	}
 	fmt.Fprintf(os.Stderr, "confine: %v\n", err)
 	os.Exit(126)
 }
