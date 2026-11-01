@@ -275,27 +275,19 @@ func TestAKeyDeleteFailureIsReturned(t *testing.T) {
 }
 
 // A key no subject.opened names (a crash between Put and the log write, or
-// a log older than the table) is listed and deleted at start: no later
-// entry can name it, so it is key material the log does not account for
-// (#4368). A delete that fails stops the start, and the next one retries.
-func TestAKeyNoEntryNamesIsListedAndDeleted(t *testing.T) {
+// a log older than the table) is listed and kept: the log alone cannot
+// tell a crash's leftover from a key whose entries it lost.
+func TestAKeyNoEntryNamesIsListed(t *testing.T) {
 	r := newErig(t)
 	s := r.open()
 	orphan := "0123456789abcdef0123456789abcdef"
 	r.keys.Put(orphan, kernel.SubjectKey{1})
-	r.keys.failDelete = true
-	l, err := kernel.Open(kernel.Config{Store: r.log, Anchor: r.anchor, Pub: r.head.pub, Sign: r.head.priv, Rand: r.rnd})
-	must(t, err)
-	k, err := kernel.Boot(l, nil, nil, 0)
-	must(t, err)
-	if _, err := k.OpenContent(r.keys, map[string]kernel.ContentStore{}, 0); err == nil {
-		t.Fatal("a failed delete of an unnamed key did not stop the start")
-	}
-	r.keys.failDelete = false
 	if rep := r.boot(); !slices.Equal(rep.Unnamed, []string{orphan}) || rep.Missing != nil {
 		t.Fatalf("report %+v", rep)
 	}
-	if got, _ := r.keys.List(); !slices.Equal(got, []string{s}) {
+	want := []string{s, orphan}
+	slices.Sort(want)
+	if got, _ := r.keys.List(); !slices.Equal(got, want) {
 		t.Fatalf("keys after start %v", got)
 	}
 }

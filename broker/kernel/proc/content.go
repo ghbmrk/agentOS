@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -51,20 +52,8 @@ var ErrStoreName = errors.New("run: a content store's name is 1 to 32 of a-z, 0-
 // each of names, made if missing, and each store directory already there,
 // so a store no longer named still has its items erased. A temporary a
 // torn write left is removed: its item was never logged (kernel.Seal puts
-// before it logs); so is a restore's staging a crash left beside dir. A
-// directory or file open to another uid is refused.
+// before it logs). A directory or file open to another uid is refused.
 func OpenContentStores(dir string, names []string) (map[string]kernel.ContentStore, error) {
-	parent, err := os.ReadDir(filepath.Dir(dir))
-	if err != nil {
-		return nil, err
-	}
-	for _, de := range parent {
-		if strings.HasPrefix(de.Name(), restoreStage) {
-			if err := os.RemoveAll(filepath.Join(filepath.Dir(dir), de.Name())); err != nil {
-				return nil, err
-			}
-		}
-	}
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
 	}
@@ -129,10 +118,13 @@ func dropTemps(dir string) error {
 
 func itemName(h kernel.Hash) string { return hex.EncodeToString(h[:]) + itemExt }
 
-// dropUnlogged deletes every item file the log does not name in its store:
-// a put a crash stopped after its rename (kernel.Seal puts before it
-// logs), which no read reaches and no erase would delete (#4368).
-func dropUnlogged(s *kernel.State, stores map[string]kernel.ContentStore) error {
+// unlogged names, as store/hash, every item file the log does not name in
+// its store: a put a crash stopped after its rename (kernel.Seal puts
+// before it logs). They are kept, as unnamed keys are: a log older than
+// the stores that the anchor still takes (entries after the last anchored
+// one) cannot tell them from items whose entries it lost (#4368).
+func unlogged(s *kernel.State, stores map[string]kernel.ContentStore) ([]string, error) {
+	var out []string
 	for name, cs := range stores {
 		f, ok := cs.(*FileContent)
 		if !ok {
@@ -140,7 +132,7 @@ func dropUnlogged(s *kernel.State, stores map[string]kernel.ContentStore) error 
 		}
 		des, err := os.ReadDir(f.dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for _, de := range des {
 			x, _ := strings.CutSuffix(de.Name(), itemExt)
@@ -149,13 +141,12 @@ func dropUnlogged(s *kernel.State, stores map[string]kernel.ContentStore) error 
 				continue
 			}
 			if st, ok := s.ItemStore(kernel.Hash(b)); !ok || st != name {
-				if err := f.Delete(kernel.Hash(b)); err != nil {
-					return err
-				}
+				out = append(out, name+"/"+x)
 			}
 		}
 	}
-	return nil
+	slices.Sort(out)
+	return out, nil
 }
 
 func (f *FileContent) Put(h kernel.Hash, ct []byte) error {

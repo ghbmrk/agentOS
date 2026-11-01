@@ -21,10 +21,12 @@ import (
 // temporary, 1 write, 2 sync, 3 close, 4 rename, 5 sync the directory), as
 // a crash would, and the test checks that what the process holds and what
 // is on disk agree, then and after a restart. A save stopped after its
-// rename is reconciled at the next start (#4368): an unnamed key and an
-// unlogged item are deleted, the records file is joined with the log, a
-// snapshot or a restore's staging is removed, and the anchor's whole file
-// opens on no head.
+// rename is accounted for at the next start (#4368): an unnamed key and
+// an unlogged item are kept and reported (a stale log the anchor still
+// takes cannot tell them from a live subject's), the records file is
+// joined with the log, a snapshot is removed, a restore's staging is
+// removed by the next restore, and the anchor's whole file opens on no
+// head.
 
 // stopAt is a write stop that ends the write after step.
 func stopAt(step int) func(int) bool { return func(i int) bool { return i == step } }
@@ -111,11 +113,11 @@ func fileContent(t *testing.T, b *bbox) (*FileKeys, *FileContent) {
 
 // REQ: LOG-4
 // A subject whose key put is stopped is never opened: nothing is logged,
-// and the next start names a key the put left whole as unnamed and
-// deletes it, so the table holds only keys the log names. A later
-// subject opens and seals. Revert mutants: OpenSubject logging before the
-// put (a stopped put leaves a logged subject with no key, Missing);
-// OpenContent keeping an unnamed key (a key file left after the start).
+// the next start removes a temporary the put left and names a key it
+// left whole as unnamed, so the kernel's view of the table is what is on
+// disk. A later subject opens and seals. Revert mutants: OpenSubject
+// logging before the put (a stopped put leaves a logged subject with no
+// key, Missing); OpenFileKeys keeping a temporary.
 func TestASubjectKeyPutCrashDuringTheFileWrite(t *testing.T) {
 	for step := range 6 {
 		b := newBBox(t, recipientWire(t, testRK))
@@ -141,8 +143,12 @@ func TestASubjectKeyPutCrashDuringTheFileWrite(t *testing.T) {
 		if !slices.Equal(rep.Unnamed, onDisk) || len(rep.Missing) != 0 {
 			t.Fatalf("step %d: after a restart the start found %+v, on disk %q", step, rep, onDisk)
 		}
-		if got := names(t, b.cfg.KeyDir); len(got) != 0 {
-			t.Fatalf("step %d: after a restart the table holds %q", step, got)
+		var want []string
+		for _, sub := range onDisk {
+			want = append(want, sub+keyExt)
+		}
+		if got := names(t, b.cfg.KeyDir); !slices.Equal(got, want) {
+			t.Fatalf("step %d: after a restart the table holds %q, want %q", step, got, want)
 		}
 		for _, sub := range onDisk {
 			err := b.h.With(func(k *kernel.Kernel) error {
@@ -171,10 +177,10 @@ func readsBack(t *testing.T, b *bbox, h kernel.Hash) bool {
 // REQ: LOG-4
 // An item whose store put is stopped is never logged: the kernel refuses
 // to read it, before and after a restart, whether the put left nothing,
-// a temporary or the whole file, the next start removes either, and the
-// subject seals again. Revert mutants: Seal logging before the put (a
-// logged item whose file is missing); the start keeping an unlogged item
-// (dropUnlogged not called: the whole file stays).
+// a temporary (removed at the start) or the whole file (kept, and named
+// by the start's Unlogged), and the subject seals again. Revert mutants:
+// Seal logging before the put (a logged item whose file is missing); the
+// start not reporting an unlogged item.
 func TestAContentPutCrashDuringTheFileWrite(t *testing.T) {
 	for step := range 6 {
 		b := newBBox(t, recipientWire(t, testRK))
@@ -211,8 +217,15 @@ func TestAContentPutCrashDuringTheFileWrite(t *testing.T) {
 			}
 			b.restart()
 		}
-		if got := names(t, b.storeDir()); len(got) != 0 {
+		if got := names(t, b.storeDir()); len(got) != len(items) {
 			t.Fatalf("step %d: after a restart the store holds %q", step, got)
+		}
+		var want []string
+		for _, h := range items {
+			want = append(want, "vision/"+hex.EncodeToString(h[:]))
+		}
+		if got := b.h.Unlogged(); !slices.Equal(got, want) {
+			t.Fatalf("step %d: the start reported unlogged %q, want %q", step, got, want)
 		}
 		if h := b.seal(sub, []byte(canary)); !readsBack(t, b, h) {
 			t.Fatalf("step %d: the subject's next item does not read back", step)
@@ -351,10 +364,9 @@ func stages(t *testing.T, dir string) []string {
 // A restore stopped in an item's write at any step returns the stop,
 // leaves the content folder absent and drops its staging, so no restored
 // item is in place; a restore that a crash cut off, which runs no defer,
-// leaves its staging, and the next start removes it (#4368). Revert
+// leaves its staging, and the next restore removes it (#4368). Revert
 // mutants: the deferred RemoveAll dropped (a staging left after the
-// stop); OpenContentStores not removing a staging (one left after the
-// start).
+// stop); RestoreSections not removing an old staging.
 func TestARestoreStoppedInAnItemWrite(t *testing.T) {
 	ct := []byte("a sealed item")
 	for step := range 6 {
@@ -377,19 +389,21 @@ func TestARestoreStoppedInAnItemWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(left, itemName(sha256.Sum256(ct))), ct, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenContentStores(filepath.Join(parent, "content"), []string{"vision"}); err != nil {
+	obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
+	if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); err != nil {
 		t.Fatal(err)
 	}
 	if got := stages(t, parent); len(got) != 0 {
-		t.Fatalf("a crashed restore's staging stayed after the start: %q", got)
+		t.Fatalf("a crashed restore's staging stayed after the next restore: %q", got)
 	}
 }
 
 // REQ: LOG-4
-// The start keeps an item only in the store the log names it in: a copy
-// of a logged item in another store's folder is removed, and the logged
-// one still reads. Revert mutant: dropUnlogged ignoring the store.
-func TestAnItemInAStoreTheLogDoesNotNameIsRemoved(t *testing.T) {
+// The start names an item as unlogged unless the log names it in that
+// store: a copy of a logged item in another store's folder is reported
+// and kept, and the logged one still reads. Revert mutant: unlogged
+// ignoring the store.
+func TestAnItemInAStoreTheLogDoesNotNameIsReported(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	h := b.seal(b.subject(), []byte(canary))
 	ct, err := os.ReadFile(filepath.Join(b.storeDir(), itemName(h)))
@@ -404,10 +418,10 @@ func TestAnItemInAStoreTheLogDoesNotNameIsRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.restart()
-	if got := names(t, other); len(got) != 0 {
-		t.Fatalf("the other store holds %q", got)
+	if got, want := b.h.Unlogged(), []string{"other/" + hex.EncodeToString(h[:])}; !slices.Equal(got, want) {
+		t.Fatalf("unlogged %q, want %q", got, want)
 	}
-	if !readsBack(t, b, h) {
-		t.Fatal("the logged item does not read back")
+	if got := names(t, other); len(got) != 1 || !readsBack(t, b, h) {
+		t.Fatalf("the other store holds %q, or the logged item does not read back", got)
 	}
 }

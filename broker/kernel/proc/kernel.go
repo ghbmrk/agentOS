@@ -80,6 +80,8 @@ type Kernel struct {
 	clerks map[string]remote
 	// content is what the start found in the key table.
 	content kernel.ContentReport
+	// unlogged are the item files the start found that no entry names.
+	unlogged []string
 	// bk is the backups (backup.go); nil with no BackupDir.
 	bk *backups
 	// reseals is every backup re-seal running (reseal), and running each
@@ -114,10 +116,9 @@ type Kernel struct {
 // and none in the log, the kernel is setup-only (kernel.Setup): its sockets
 // serve only the setup step until the owner's hardware keys are logged.
 // With a KeyDir it then opens the subject-key table and the content stores
-// in ContentDir, re-applies every logged erase to them and deletes every
-// key and item no entry names (a save a crash stopped after its rename); a
-// store an erase names that is not there stays unconfirmed, and Tick
-// retries it.
+// in ContentDir, and re-applies every logged erase to them; a store an
+// erase names that is not there stays unconfirmed, and Tick retries it.
+// Keys and items no entry names are kept and reported (Content, Unlogged).
 func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 	if cfg.Anchor == nil || cfg.Sign == nil {
 		return nil, errors.New("run: a kernel needs an anchor and the head key")
@@ -166,7 +167,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 			h.content, err = k.OpenContent(keys, stores, now)
 		}
 		if err == nil {
-			err = dropUnlogged(k.State(), stores)
+			h.unlogged, err = unlogged(k.State(), stores)
 		}
 		if err != nil {
 			st.Close()
@@ -189,6 +190,10 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 // Content is what the start found in the subject-key table: subjects whose
 // key is missing, and keys no subject names.
 func (h *Kernel) Content() kernel.ContentReport { return h.content }
+
+// Unlogged is what the start found in the content stores that no entry
+// names, as store/hash.
+func (h *Kernel) Unlogged() []string { return h.unlogged }
 
 // Tick starts the backup re-seals due (reseal) without waiting for them,
 // then runs every plan as far as now allows. It takes the due calls under the
