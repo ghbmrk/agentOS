@@ -637,6 +637,9 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles credential argument":  {tmpfiles, "w^ /proc/sys/kernel/modprobe - - - - agentos.helper\n", `no ~ or ^ modifier`},
 		"a tmpfiles setuid mode":          {tmpfiles, "z /usr/lib/agentos/agentos-side 4755 root root -\n", `no setuid or setgid`},
 		"a tmpfiles setgid mode":          {tmpfiles, "Z /usr/lib/agentos 2755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles Z above a helper":     {tmpfiles, "Z /sys/kernel 0666 - -\n", `a directory above /sys/kernel/uevent_helper`},
+		"a tmpfiles z on /":               {tmpfiles, "z / 0755\n", `a directory above`},
+		"a tmpfiles release_agent":        {tmpfiles, "w /sys/fs/cgroup/x/release_agent - - - - /usr/lib/agentos/agentos-side\n", `release_agent`},
 		"a tmpfiles masked setuid mode":   {tmpfiles, "d /var/lib/agentos-x ~6755 root root -\n", `no setuid or setgid`},
 		"a tmpfiles magic link":           {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
 		"a tmpfiles mode on a helper":     {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
@@ -1321,6 +1324,13 @@ var tmpfilesMode = regexp.MustCompile(`^(-|[~:]?[0-7]{3}|[~:]?[0-1][0-7]{3})$`)
 // capability among them); only w is read, and only to /proc/sys or /sys.
 var tmpfilesPlain = map[string]bool{"d": true, "D": true, "e": true, "v": true, "q": true, "Q": true, "z": true, "Z": true, "x": true, "X": true, "r": true, "R": true}
 
+// tmpfilesHeld are the helper paths and binfmt_misc: a line other than w
+// on a directory above one (a recursive Z among them) is refused (#4381).
+var tmpfilesHeld = []string{
+	"/proc/sys/kernel/core_pattern", "/proc/sys/kernel/modprobe", "/proc/sys/kernel/hotplug",
+	"/proc/sys/kernel/poweroff_cmd", "/sys/kernel/uevent_helper", "/proc/sys/fs/binfmt_misc",
+}
+
 // tmpfilesPath is a path the reader resolves itself: absolute and clean,
 // with no % specifier, glob or blank.
 var tmpfilesPath = regexp.MustCompile(`^/[A-Za-z0-9_./@:+-]*$`)
@@ -1351,7 +1361,17 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 		case strings.HasPrefix(p, "/proc/sys/"):
 			key = strings.ReplaceAll(strings.TrimPrefix(p, "/proc/sys/"), "/", ".")
 		}
+		above := ""
+		for _, h := range tmpfilesHeld {
+			if typ != "w" && typ != "w+" && (p == "/" || strings.HasPrefix(h, p+"/")) {
+				above = h
+			}
+		}
 		switch {
+		case above != "":
+			return fmt.Errorf("%d: %s on %s, a directory above %s, whose mode decides who sets a program root runs", n, f[0], p, above)
+		case path.Base(p) == "release_agent":
+			return fmt.Errorf("%d: %s names a cgroup v1 release_agent, a program the kernel runs as root", n, p)
 		case key == "fs.binfmt_misc" || strings.HasPrefix(key, "fs.binfmt_misc."):
 			return fmt.Errorf("%d: %s is under /proc/sys/fs/binfmt_misc, which registers an interpreter", n, p)
 		case strings.HasPrefix(p, "/proc/") && key == "":
