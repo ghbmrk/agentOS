@@ -72,10 +72,23 @@ func (a *authenticator) sign(msg []byte) []byte {
 	return b
 }
 
-type memStore struct{ b []byte }
+// memStore keeps the last save; with failAt set, that save (counted from
+// 1) fails, as a stop before it would.
+type memStore struct {
+	b         []byte
+	n, failAt int
+}
+
+var errStopped = errors.New("stopped before the write")
 
 func (m *memStore) Load() ([]byte, error) { return m.b, nil }
-func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
+func (m *memStore) Save(b []byte) error {
+	if m.n++; m.n == m.failAt {
+		return errStopped
+	}
+	m.b = slices.Clone(b)
+	return nil
+}
 
 // fakeAlerts records what enrolment told the owner.
 type fakeAlerts struct {
@@ -372,7 +385,11 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	}
 	// Not before the wait, across a restart too.
 	g.now = g.now.Add(Wait - time.Millisecond)
+	g.alerts.recovery = false
 	g.reopen()
+	if !g.alerts.recovery {
+		t.Error("the page lost the recovery pending on restart")
+	}
 	if done, err := g.b.Tick(); done || err != nil || g.b.Owner() != a.Public() {
 		t.Fatalf("applied early: %v %v", done, err)
 	}
@@ -433,6 +450,10 @@ func TestRecoveryCodeEnrolsAfterWaitOnly(t *testing.T) {
 	before := g.e.Current()
 	if err := g.keep(a, uint64(g.now.UnixMilli())+3); err == nil {
 		t.Error("the old passkey kept the policy")
+	}
+	g.reopen() // stopped after a Keep that failed: the versions are still the old ones
+	if g.b.Kept() || !sameRules(before, g.e.Current()) {
+		t.Fatal("a failed keep moved the policy")
 	}
 	if err := g.keep(b, uint64(g.now.UnixMilli())+4); err != nil {
 		t.Fatal(err)
@@ -524,6 +545,18 @@ func TestFactoryResetKeepsPolicyBlocksLoosening(t *testing.T) {
 		t.Errorf("new owner's loosening: %+v %v", out, err)
 	}
 
+	// A reset drops a recovery waiting, and the page stops showing it.
+	g3, _, code3 := enrolled(t)
+	if _, err := g3.enrol(newAuthenticator(t), code3); err != nil || !g3.alerts.recovery {
+		t.Fatalf("recovery: %v", err)
+	}
+	if err := g3.b.FactoryReset(caseCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := g3.b.Recovery(); ok || g3.alerts.recovery {
+		t.Error("a recovery still shows after the reset")
+	}
+
 	// A stolen recovery code's ticket, begun before a reset, does not
 	// start a replacement against the passkey enrolled after it.
 	g2, _, code2 := enrolled(t)
@@ -600,4 +633,93 @@ func edit(d policy.Document, v int64, id, host string) policy.Document {
 		}
 	}
 	return d
+}
+
+// TestStopInsideKeep: a stop after the engine saved the kept policy and
+// before the book recorded it is finished on the next start, under the
+// new passkey (ENF-c-7).
+func TestStopInsideKeep(t *testing.T) {
+	g, a, code := enrolled(t)
+	b := newAuthenticator(t)
+	if _, err := g.enrol(b, code); err != nil {
+		t.Fatal(err)
+	}
+	g.now = g.now.Add(Wait)
+	if done, err := g.b.Tick(); !done || err != nil {
+		t.Fatal(err)
+	}
+	before := g.e.Current()
+	g.bs.failAt = g.bs.n + 2 // Keep's second book save
+	if err := g.keep(b, uint64(g.now.UnixMilli())); !errors.Is(err, errStopped) {
+		t.Fatalf("keep: %v", err)
+	}
+	g.bs.failAt = 0
+	g.reopen()
+	if !g.b.Kept() || !sameRules(before, g.e.Current()) {
+		t.Fatal("the stopped keep was not finished")
+	}
+	if _, err := g.propose(b, edit(home(0), g.now.UnixMilli()+1, "tv", "y.example")); err != nil {
+		t.Errorf("new passkey after the finished keep: %v", err)
+	}
+	if _, err := g.propose(a, edit(home(0), g.now.UnixMilli()+2, "tv", "z.example")); err == nil {
+		t.Error("old passkey after the finished keep")
+	}
+}
+
+// TestCodesAndTickets: codes compare as typed or as printed, a case code
+// shorter than MinCaseCode is refused, and at most MaxTickets enrolments
+// wait at once, each for TicketLife.
+func TestCodesAndTickets(t *testing.T) {
+	if got := Normal(" ab-Cd\tef "); got != "ABCDEF" {
+		t.Errorf("Normal: %q", got)
+	}
+	short := strings.Repeat("A", MinCaseCode-1)
+	if err := Provision(&memStore{}, short, nil); !errors.Is(err, ErrConfig) {
+		t.Errorf("case code of %d letters: %v", MinCaseCode-1, err)
+	}
+	if err := Provision(&memStore{}, short+"-A", nil); err != nil {
+		t.Errorf("case code of %d letters: %v", MinCaseCode, err)
+	}
+
+	g := newRig(t)
+	keys := make([]*authenticator, MaxTickets+1)
+	ids := make([]string, MaxTickets)
+	msgs := make([][]byte, MaxTickets)
+	for i := range keys {
+		keys[i] = newAuthenticator(t)
+	}
+	for i := range MaxTickets {
+		var err error
+		if ids[i], msgs[i], err = g.b.Begin(caseCode, keys[i].Public()); err != nil {
+			t.Fatalf("ticket %d: %v", i+1, err)
+		}
+	}
+	if _, _, err := g.b.Begin(caseCode, keys[MaxTickets].Public()); !errors.Is(err, ErrBusy) {
+		t.Errorf("ticket %d: %v", MaxTickets+1, err)
+	}
+	// One millisecond before TicketLife a ticket still works; at
+	// TicketLife it has gone, and its place is free.
+	g.now = g.now.Add(TicketLife - time.Millisecond)
+	if _, _, err := g.b.Begin(caseCode, keys[MaxTickets].Public()); !errors.Is(err, ErrBusy) {
+		t.Errorf("before TicketLife: %v", err)
+	}
+	g.now = g.now.Add(time.Millisecond)
+	if _, _, err := g.b.Begin(caseCode, keys[MaxTickets].Public()); err != nil {
+		t.Errorf("at TicketLife: %v", err)
+	}
+	if _, err := g.b.Finish(ids[0], keys[0].sign(msgs[0])); !errors.Is(err, ErrGone) {
+		t.Errorf("finish at TicketLife: %v", err)
+	}
+	// A ticket finished at its TicketLife has gone too.
+	id, msg, err := g.b.Begin(caseCode, keys[1].Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.now = g.now.Add(TicketLife)
+	if _, err := g.b.Finish(id, keys[1].sign(msg)); !errors.Is(err, ErrGone) {
+		t.Errorf("finish at TicketLife: %v", err)
+	}
+	if _, err := g.enrol(keys[1], caseCode); err != nil {
+		t.Errorf("a fresh ticket: %v", err)
+	}
 }
