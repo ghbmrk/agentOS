@@ -136,13 +136,25 @@ exempt-pr 4290
 # Remove once #4171 merges.
 exempt-pr 4171
 
+# #4309 (#4247): broker/enforcer/radio/ and broker/enforcer/action/ASSUMPTIONS.md (tests and docs), which the G2 list does not name (D-198).
+# Remove once #4309 merges.
+exempt-pr 4309
+
 # #4212 (DEV-homekit-b2c, #3894; replaces #4166): broker/cmd/agentos-homekit/, which the G2 list does
 # not name (D-198). Remove once #4212 merges.
 exempt-pr 4212
 
+# #4323 (#4286, tier A): broker/enforcer/nft/, which the G2 list does not name (D-198).
+# Remove once #4323 merges.
+exempt-pr 4323
+
 # #4182 (ENF-g-b): broker/enforcer/ap/, which the G2 list does not name (D-198). Remove once #4182
 # merges.
 exempt-pr 4182
+
+# #4343 (ENF-g-aplock, #4313): broker/enforcer/ap/, which the G2 list does not name (D-198).
+# Remove once #4343 merges.
+exempt-pr 4343
 
 # #4260 (ENF-r-follow-3, #4200): broker/enforcer/devsecret/devsecret.go comment fix, which the G2 list does not name (D-198).
 # Remove once #4260 merges.

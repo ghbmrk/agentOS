@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -293,7 +295,7 @@ func TestWireBounds(t *testing.T) {
 	h := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
 	for _, c := range []struct {
 		fields uint32
-		head   int
+		head   int64
 		err    error
 	}{{maxHeader, 16 + maxHeader, nil}, {maxHeader + 1, 16 + maxHeader + 8, errTooLong}, {1, 24, nil}} {
 		le.PutUint32(h[4:], 3)
@@ -303,6 +305,50 @@ func TestWireBounds(t *testing.T) {
 			t.Errorf("header fields of %d bytes: %d, %d, %v", c.fields, head, n, err)
 		}
 	}
+}
+
+// TestReadSkipsLargestDeclaredFrame: a frame declaring the largest body
+// and header fields the wire format allows, together past 1<<33 bytes, is
+// measured exactly, read past, and skipped, and the message after it
+// still arrives. Catches the declared length wrapping in an int on a
+// 32-bit build (it fails there on the int version: GOARCH=386), which left
+// the reader inside the frame, reading a forged body as the next message.
+func TestReadSkipsLargestDeclaredFrame(t *testing.T) {
+	h := []byte{'l', typeSignal, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}
+	le.PutUint32(h[4:], math.MaxUint32)
+	le.PutUint32(h[12:], math.MaxUint32)
+	const head = 16 + math.MaxUint32 + 1 // fields padded to 8
+	const n = head + math.MaxUint32
+	if gh, gn, err := frameLen(h); gh != head || gn != n || !errors.Is(err, errTooLong) {
+		t.Fatalf("frameLen: %d, %d, %v; want %d, %d, too long", gh, gn, err, int64(head), int64(n))
+	}
+	good := mustEncode(t, propsChanged(2, bluezName, measurePath, []byte{1}))
+	rest := &zeros{n: n - 16}
+	r := io.MultiReader(bytes.NewReader(h), rest, bytes.NewReader(good))
+	if _, err := readMessage(r, all); !errors.Is(err, errSkipped) {
+		t.Fatalf("largest frame: %v", err)
+	}
+	if rest.n != 0 {
+		t.Fatalf("%d bytes of the frame left unread", rest.n)
+	}
+	if m, err := readMessage(r, all); err != nil || m.Serial != 2 {
+		t.Fatalf("the message after it: %+v, %v", m, err)
+	}
+}
+
+// zeros reads n zero bytes without filling them: a skipped body is
+// discarded unread.
+type zeros struct{ n int64 }
+
+func (z *zeros) Read(p []byte) (int, error) {
+	if z.n == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > z.n {
+		p = p[:z.n]
+	}
+	z.n -= int64(len(p))
+	return len(p), nil
 }
 
 // FuzzDecode: the decoder never panics, and whatever it accepts encodes to

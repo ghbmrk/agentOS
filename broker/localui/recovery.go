@@ -510,7 +510,7 @@ func init() {
 <script>{{passkeyjs}}</script>
 {{else if eq .Step "lost"}}
 <h2>Tap your hardware key to ask for a new card</h2>
-<p>When I next restart I make a new card and replace your recovery key with it at once, before you see it; then this page shows it. Your old card's recovery key stops opening my store; its passphrase still does. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
+<p>When I next restart I make a new card and replace your passphrase and recovery key with its own at once, before you see it; then this page shows it. Your old card's passphrase and recovery key stop opening my store. Your hardware key signs exactly this change of backup key; check it, then tap.</p>
 <p>From: <span class="mono">{{if .Old}}{{.Old}}{{else}}none (I have no backup key yet){{end}}</span><br>To: a new key I make when I restart</p>
 <form method="post" action="/recovery/" id="pk-finish" data-rp="{{.RP}}" data-challenge="{{.Challenge}}"><input type="hidden" name="step" value="lost"><input type="hidden" name="ad"><input type="hidden" name="cd"><input type="hidden" name="sig"></form>
 <p><button type="button" id="pk-tap">Tap a hardware key to ask for a new card</button></p>

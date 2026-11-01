@@ -196,6 +196,7 @@ type fakeBluez struct {
 	badSerial bool     // a call's serial was not one more than the last
 	wmu       sync.Mutex
 	busConn   net.Conn // join's connection to the bus
+	peer      net.Conn // serve's last peer connection, the stack's
 }
 
 func (f *fakeBluez) record() []call {
@@ -243,6 +244,7 @@ func (f *fakeBluez) conn(c net.Conn) {
 	}
 	f.mu.Lock()
 	f.uids = append(f.uids, cred.Uid)
+	f.peer = c
 	f.mu.Unlock()
 	io.WriteString(c, "OK 0123456789abcdef0123456789abcdef\r\n")
 	if l, err := r.ReadString('\n'); err != nil || l != "BEGIN\r\n" {
@@ -284,6 +286,18 @@ func (f *fakeBluez) join(path string) {
 		}
 	}
 	go f.loop(c, r, false)
+}
+
+// inject writes a raw frame, as the bus, to serve's last peer.
+func (f *fakeBluez) inject(b []byte) {
+	f.mu.Lock()
+	c := f.peer
+	f.mu.Unlock()
+	f.wmu.Lock()
+	defer f.wmu.Unlock()
+	if _, err := c.Write(b); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func (f *fakeBluez) send(c net.Conn, m *Message) {
@@ -445,47 +459,46 @@ func TestReadSkipsWhatDoesNotDecode(t *testing.T) {
 	}
 }
 
-// TestReadDecodesOnlyWanted (NET-2, A18): the stack reads a signal's
-// header before its body, so a 0.8 MB PropertiesChanged from a peer other
-// than BlueZ is read past undecoded, allocating under an eighth of its
-// size, while the same from BlueZ decodes (and allocates more than its
-// size). A reply is decoded only while its call waits, and a method call
-// never. Catches a bus peer inflating bodies in the stack until a memory
-// cap kills it.
+// TestReadDecodesOnlyWanted (NET-2, A18): the stack, started by Run
+// against the fake bus, reads a signal's header before its body, so a
+// 0.8 MB PropertiesChanged from a peer other than BlueZ is read past
+// undecoded, allocating under an eighth of its size, while the same from
+// BlueZ decodes (and allocates more than its size). The frames reach the
+// connection Run dialled, so a Signals that Run or Main hands Dial in
+// place of the stack's own (one keeping everything) fails here. A reply
+// is decoded only while its call waits, and a method call never. Catches
+// a bus peer inflating bodies in the stack until a memory cap kills it.
 func TestReadDecodesOnlyWanted(t *testing.T) {
-	s := newFuzzStack()
+	dir := t.TempDir()
+	f := &fakeBluez{t: t}
+	f.serve(filepath.Join(dir, "bus"))
+	hostEnd, stackEnd := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- Run(testConfig(filepath.Join(dir, "bus")), stackEnd, testLog{t}) }()
+	h := hostFor(t, make(chan radio.Notification, 8))
+	h.Attach(radio.StackBLE, hostEnd)
+	// A read is Properties.Get on the bus, whose reply follows the frame
+	// in the stream: its answer says the stack has read the frame.
+	readOp := func() {
+		if _, err := h.Call(radio.Request{Op: radio.OpRead, Device: "scale"}); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+	readOp() // the stack is up, and its first call's lazy allocations are made
 	flood := func(sender string) []byte {
 		props := make([]any, 50000)
 		for i := range props {
 			props[i] = Entry{Key: "k", Value: Variant{Sig: "y", Value: uint8(i)}}
 		}
-		return mustEncode(t, &Message{Type: typeSignal, Serial: 1, Sender: sender, Path: measurePath, Interface: ifaceProps,
-			Member: "PropertiesChanged", Sig: "sa{sv}as", Body: []any{ifaceChar, props, []any{}}})
+		return mustEncode(t, &Message{Type: typeSignal, Serial: 1, Sender: sender, Destination: ":1.1", Path: measurePath,
+			Interface: ifaceProps, Member: "PropertiesChanged", Sig: "sa{sv}as", Body: []any{ifaceChar, props, []any{}}})
 	}
-	// Each frame goes through a live read loop, the stack's own Signals
-	// deciding, followed by a reply whose arrival says the frame is done.
-	client, server := net.Pipe()
-	defer server.Close()
-	b := &Bus{conn: client, sigs: s, calls: map[uint32]chan *Message{}, done: make(chan struct{})}
-	s.bus = b
-	go b.readLoop(bufio.NewReader(client))
-	serial := uint32(100)
 	read := func(frame []byte) uint64 {
-		serial++
-		done := make(chan *Message, 1)
-		b.mu.Lock()
-		b.calls[serial] = done
-		b.mu.Unlock()
-		in := slices.Concat(frame, mustEncode(t, &Message{Type: typeReturn, Serial: 1, ReplySerial: serial}))
 		var m0, m1 runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&m0)
-		go server.Write(in)
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("the read loop stopped")
-		}
+		f.inject(frame)
+		readOp()
 		runtime.ReadMemStats(&m1)
 		return m1.TotalAlloc - m0.TotalAlloc
 	}
@@ -496,7 +509,14 @@ func TestReadDecodesOnlyWanted(t *testing.T) {
 	if n := read(flood(bluezName)); n < uint64(len(forged)) {
 		t.Errorf("BlueZ's %d-byte signal: %d bytes allocated", len(forged), n)
 	}
-	b.calls[5] = make(chan *Message, 1)
+	hostEnd.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("the stack outlived its host link")
+	}
+
+	b := &Bus{calls: map[uint32]chan *Message{5: make(chan *Message, 1)}}
 	for _, c := range []struct {
 		m    *Message
 		want bool

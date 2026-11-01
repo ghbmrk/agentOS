@@ -547,8 +547,9 @@ func (o Owner) RecoveryCardID(ctx context.Context) (string, error) {
 	return r.ID, err
 }
 
-// RecoveryCard is the new card's bits the unlock step made at this boot
-// (handoff.CardKeyLen bytes, which card.RecoveryKeyText prints), on a
+// RecoveryCard is the new card the unlock step made at this boot
+// (handoff.MadeCardLen bytes: the bits card.RecoveryKeyText prints, then
+// the passphrase's seed), on a
 // hardware key's signature c over CardMsg of its ID (#4128), or
 // ErrNoRecoveryCard. A phone passkey's, or one over another card, is
 // ErrRotateSig.
