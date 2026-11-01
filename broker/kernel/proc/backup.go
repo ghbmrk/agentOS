@@ -159,12 +159,14 @@ type backups struct {
 	// kernel's lock (#3338).
 	writing *backupWrite
 	// For tests only: hook runs as each section opens, wrap, when set,
-	// wraps every target, saveErr, when set, fails every save, and link
-	// replaces os.Link in the snapshot.
+	// wraps every target, saveErr, when set, fails every save, link replaces
+	// os.Link in the snapshot, and stop ends the save's and the snapshot
+	// copy's file writes after step i.
 	hook    func()
 	wrap    func(backup.Target) backup.Target
 	saveErr func() error
 	link    func(src, dst string) error
+	stop    func(i int) bool
 }
 
 // openBackups opens the records in dir under logKey, made 0700 if missing,
@@ -343,7 +345,7 @@ func (bk *backups) save() error {
 	if len(b) > maxRecords {
 		return errors.New("run: the backup records are over 16 MiB")
 	}
-	return privfile.WriteAtomic(bk.dir, recordsName, b, nil)
+	return privfile.WriteAtomic(bk.dir, recordsName, b, bk.stop)
 }
 
 // saveRecord is the Set's save: the Record a re-seal returned replaces the
@@ -551,7 +553,7 @@ func (bk *backups) snapItems(s *backupSnap) error {
 		if err := os.Mkdir(dst, 0o700); err != nil {
 			return err
 		}
-		src := &FileContent{filepath.Join(bk.content, store)}
+		src := &FileContent{dir: filepath.Join(bk.content, store)}
 		for _, hh := range hs {
 			if err := bk.link(filepath.Join(src.dir, itemName(hh)), filepath.Join(dst, itemName(hh))); err == nil || errors.Is(err, os.ErrNotExist) {
 				continue
@@ -563,7 +565,7 @@ func (bk *backups) snapItems(s *backupSnap) error {
 			if err != nil {
 				return err
 			}
-			if err := privfile.WriteAtomic(dst, itemName(hh), ct, nil); err != nil {
+			if err := privfile.WriteAtomic(dst, itemName(hh), ct, bk.stop); err != nil {
 				return err
 			}
 		}
@@ -580,7 +582,7 @@ const itemFrame = sha256.Size + 4
 func (bk *backups) contentSources(snap backupSnap) []backup.Source {
 	var out []backup.Source
 	for _, store := range slices.Sorted(maps.Keys(snap.stores)) {
-		fc, hs := &FileContent{filepath.Join(snap.dir, store)}, snap.stores[store]
+		fc, hs := &FileContent{dir: filepath.Join(snap.dir, store)}, snap.stores[store]
 		out = append(out, backup.Source{Name: "content/" + store, Open: func() (io.ReadCloser, error) {
 			if bk.hook != nil {
 				bk.hook()

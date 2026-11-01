@@ -74,7 +74,7 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
-		if err := restoreItems(r, dir); err != nil {
+		if err := restoreItems(r, dir, nil); err != nil {
 			return fmt.Errorf("section %s: %w", sec.Name, err)
 		}
 		stores = append(stores, dir)
@@ -95,7 +95,7 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 
 // restoreItems writes each item framed in r into dir, checking its length
 // and that its hash is its ciphertext's, and refusing one twice.
-func restoreItems(r io.Reader, dir string) error {
+func restoreItems(r io.Reader, dir string, stop func(i int) bool) error {
 	seen := map[kernel.Hash]bool{}
 	for {
 		var hd [itemFrame]byte
@@ -120,7 +120,7 @@ func restoreItems(r io.Reader, dir string) error {
 			return ErrContentSection
 		}
 		seen[h] = true
-		if err := privfile.WriteAtomic(dir, itemName(h), ct, nil); err != nil {
+		if err := privfile.WriteAtomic(dir, itemName(h), ct, stop); err != nil {
 			return err
 		}
 	}

@@ -22,7 +22,10 @@ import (
 // key: erase destroys the key in FileKeys, then deletes the files. Put
 // writes atomically; Delete unlinks the file and syncs the directory, and
 // succeeds for an absent item.
-type FileContent struct{ dir string }
+type FileContent struct {
+	dir  string
+	stop func(i int) bool // tests: crash Put's file write after step i
+}
 
 const (
 	itemExt = ".item"
@@ -101,7 +104,7 @@ func openFileContent(dir string) (*FileContent, error) {
 			}
 		}
 	}
-	return &FileContent{dir}, privfile.SyncDir(dir)
+	return &FileContent{dir: dir}, privfile.SyncDir(dir)
 }
 
 func itemName(h kernel.Hash) string { return hex.EncodeToString(h[:]) + itemExt }
@@ -110,7 +113,7 @@ func (f *FileContent) Put(h kernel.Hash, ct []byte) error {
 	if len(ct) > maxSealed {
 		return kernel.ErrItem
 	}
-	return privfile.WriteAtomic(f.dir, itemName(h), ct, nil)
+	return privfile.WriteAtomic(f.dir, itemName(h), ct, f.stop)
 }
 
 // Get reads the item named h; kernel.Read checks it against h.

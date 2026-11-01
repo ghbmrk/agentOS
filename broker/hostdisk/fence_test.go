@@ -31,24 +31,55 @@ func TestSourceCannotWriteOrMount(t *testing.T) {
 	// reads what each name resolves to (#4256).
 	var files int
 	for i, p := range goList(t) {
-		if u := unread(t, fenced[i]); u != "" {
-			t.Errorf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, u)
-		}
-		srcs := map[string]string{}
-		for _, n := range strings.Fields(p.goFiles) {
-			b, err := os.ReadFile(filepath.Join(p.dir, n))
-			if err != nil {
-				t.Fatal(err)
-			}
-			srcs[filepath.Join(p.dir, n)] = string(b)
-			files++
-		}
-		for _, problem := range fenceProblems(t, p.path, srcs) {
+		problems, n := fencePackage(t, p, fenced[i])
+		for _, problem := range problems {
 			t.Error(problem)
 		}
+		files += n
 	}
 	if files < 3 {
 		t.Fatalf("only %d source files checked", files)
+	}
+}
+
+// fencePackage is the fence on one listed package whose directory is dir:
+// each file the fence does not read is a problem, and so is each finding in
+// the files it reads. It also returns how many files it read.
+func fencePackage(t *testing.T, p listed, dir string) ([]string, int) {
+	t.Helper()
+	var problems []string
+	if u := unread(t, dir); u != "" {
+		problems = append(problems, fmt.Sprintf("%s: files the fence does not read (outside the build, cgo, assembly or syso) go unchecked: %s", p.path, u))
+	}
+	srcs := map[string]string{}
+	for _, n := range strings.Fields(p.goFiles) {
+		b, err := os.ReadFile(filepath.Join(p.dir, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srcs[filepath.Join(p.dir, n)] = string(b)
+	}
+	return append(problems, fenceProblems(t, p.path, srcs)...), len(srcs)
+}
+
+// The fenced packages' check reports an unread file, and only then
+// (#4280 3): TestFenceReportsUnreadFiles covers what unread lists.
+func TestFencePackageReportsUnreadFiles(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"go.mod": "module example.test/x\n\ngo 1.22\n", "x.go": "package x\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := listed{path: "example.test/x", dir: dir, goFiles: "x.go"}
+	if problems, n := fencePackage(t, p, dir); len(problems) != 0 || n != 1 {
+		t.Fatalf("a package of one read file: got %q, %d files, want none, 1", problems, n)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ignored.go"), []byte("//go:build ignore\n\npackage x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if problems, _ := fencePackage(t, p, dir); len(problems) != 1 || !strings.Contains(problems[0], "go unchecked: ignored.go") {
+		t.Fatalf("a file the build leaves out: got %q, want it reported", problems)
 	}
 }
 
@@ -147,6 +178,30 @@ func TestFenceRefusesSyntheticSources(t *testing.T) {
 	} {
 		if problems := fenceFile(t, src); len(problems) == 0 {
 			t.Errorf("%s: the fence passed it", name)
+		}
+	}
+}
+
+// Each os.Root check refuses on its own: the type named with no method
+// used, and a method used on a value from os.OpenRoot, which forbiddenSel
+// also refuses, with the type never named.
+func TestFenceRefusesEachOSRootUse(t *testing.T) {
+	typeUse := func(p string) bool { return strings.HasSuffix(p, ": uses os.Root") }
+	methodUse := func(p string) bool { return strings.Contains(p, ": uses os.Root's OpenFile") }
+	for name, c := range map[string]struct {
+		src         string
+		want, other func(string) bool
+	}{
+		"the type": {"package hostdisk\n\nimport \"os\"\n\nfunc f(r *os.Root) { _ = r }\n", typeUse, methodUse},
+		"a method": {"package hostdisk\n\nimport \"os\"\n\nfunc f() { r, _ := os.OpenRoot(\"/dev\"); r.OpenFile(\"sda\", 2, 0) }\n", methodUse, typeUse},
+	} {
+		var got, other bool
+		problems := fenceFile(t, c.src)
+		for _, p := range problems {
+			got, other = got || c.want(p), other || c.other(p)
+		}
+		if !got || other {
+			t.Errorf("%s: got %q, want only its own os.Root check to refuse it", name, problems)
 		}
 	}
 }
@@ -264,7 +319,11 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 					return true
 				}
 				// os.Root, however a value of it arrives (a parameter, a
-				// field), and each of its methods.
+				// field), and each of its methods. Defence in depth: the
+				// import fence and forbiddenSel leave no way to reach a
+				// method without naming the type, so either check alone
+				// passes the synthetic sources; each has its own case in
+				// TestFenceRefusesEachOSRootUse (#4280 4).
 				if isPkgObj(obj, "os", "Root") {
 					fail("%s: uses os.Root", fs.Position(x.Pos()))
 				}

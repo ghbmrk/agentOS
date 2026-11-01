@@ -11,8 +11,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -208,5 +210,91 @@ func TestUnansweredBoundEndsLink(t *testing.T) {
 	}
 	if alive() {
 		t.Fatalf("the link stayed after %d unanswered", maxExpired+1)
+	}
+}
+
+// stalled is a stack's link whose first write stalls until release is
+// closed, so the write holds the link's write lock (a slow write).
+type stalled struct {
+	Conn
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (s *stalled) Write(p []byte) (int, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.Conn.Write(p)
+}
+
+// parkedOnWriteLock waits until a goroutine in Host.Send is parked on a
+// mutex: the second sender, queued behind the stalled write's lock.
+func parkedOnWriteLock(t *testing.T) {
+	buf := make([]byte, 1<<20)
+	for range 2000 {
+		for g := range strings.SplitSeq(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "radio.(*Host).Send") && strings.Contains(g, "sync.(*Mutex).Lock") && !strings.Contains(g, "(*stalled).Write") {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("the second send never queued on the write lock")
+}
+
+// ENF-k-8, NET-6 ("the lock relocks automatically"): Send checks its
+// caller's context after it holds the link's write lock, not before. A
+// send queued behind a slow write whose context ends while it waits
+// writes nothing; with a live context it writes after the slow one.
+// Catches a check moved ahead of wmu.Lock(), which passes the context
+// while the write lock is still held elsewhere and then sends a timed-out
+// unlock after the relock queued with it.
+func TestSendChecksContextUnderWriteLock(t *testing.T) {
+	for _, end := range []bool{true, false} {
+		h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}, Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := newRecorder(t, StackBLE)
+		conn := &stalled{Conn: rec.host.(Conn), entered: make(chan struct{}), release: make(chan struct{})}
+		if err := h.Attach(StackBLE, conn); err != nil {
+			t.Fatal(err)
+		}
+		slow := make(chan error, 1)
+		go func() {
+			_, err := h.Call(Request{Op: OpWrite, Device: "door", Char: "cmd", Data: []byte("slow")})
+			slow <- err
+		}()
+		<-conn.entered
+		ctx, cancel := context.WithCancel(context.Background())
+		queued := make(chan error, 1)
+		go func() {
+			_, err := h.Send(ctx, Request{Op: OpWrite, Device: "door", Char: "cmd", Data: []byte("queued")})
+			queued <- err
+		}()
+		parkedOnWriteLock(t)
+		if end {
+			cancel()
+		}
+		close(conn.release)
+		if err := <-slow; err != nil {
+			t.Fatalf("slow write: %v", err)
+		}
+		err = <-queued
+		cancel()
+		want := []string{"slow", "queued"}
+		if end {
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("context ended while queued: %v", err)
+			}
+			want = want[:1]
+		} else if err != nil {
+			t.Fatalf("live context: %v", err)
+		}
+		if got := writes(rec); !slices.Equal(got, want) {
+			t.Fatalf("context ended %v: the stack got %v, want %v", end, got, want)
+		}
 	}
 }
