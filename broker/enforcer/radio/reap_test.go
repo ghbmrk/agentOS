@@ -338,7 +338,7 @@ func TestWaitAndStopReapOnce(t *testing.T) {
 	os.Chmod(dir, 0o755)
 	bin := filepath.Join(dir, "radio.test")
 	copyFile(t, os.Args[0], bin)
-	for range 5 {
+	for range 20 {
 		proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
 			Args: []string{sleepArg}, Stderr: io.Discard})
 		if err != nil {
@@ -352,7 +352,13 @@ func TestWaitAndStopReapOnce(t *testing.T) {
 			waited <- syscall.Kill(pid, 0)
 		}()
 		time.Sleep(50 * time.Millisecond) // Wait is blocked in the reap
-		proc.Stop()
+		stopped := make(chan struct{})
+		go func() { proc.Stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(20 * time.Second):
+			t.Fatal("Stop never returned beside a Wait")
+		}
 		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
 			t.Errorf("after Stop beside a Wait: kill 0 = %v, want ESRCH (reaped)", err)
 		}
