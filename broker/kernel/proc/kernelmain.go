@@ -364,10 +364,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 			return fmt.Errorf("run: cut the edge at a start by my %s slot: %w", keys.Slot, err)
 		}
 	}
-	// Counts only, on stderr: no owner call reports the subjects yet.
-	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
-		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
-	}
+	fmt.Fprint(os.Stderr, startReport(h.Content(), h.Unlogged()))
 	type served struct {
 		path string
 		uid  int
@@ -485,4 +482,14 @@ func checkLogKey(path string, key [32]byte) error {
 		return ErrLogKey
 	}
 	return nil
+}
+
+// startReport is the start's stderr line on the key table and the stores,
+// counts only (no owner call reports the subjects yet), or "" when the
+// start found nothing to report.
+func startReport(r kernel.ContentReport, unlogged []string) string {
+	if len(r.Missing)+len(r.Unnamed)+len(unlogged) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names; the stores hold %d items no entry names\n", len(r.Missing), len(r.Unnamed), len(unlogged))
 }

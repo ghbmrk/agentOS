@@ -37,12 +37,17 @@ const keyExt = ".key"
 var ErrKeyFile = errors.New("run: a subject key file does not open as its subject's")
 
 // OpenFileKeys opens the table in dir, made 0700 if missing, sealed under
-// logKey. A directory or file open to another uid is refused.
+// logKey. A temporary a torn write left is removed: its key was never
+// logged (kernel.OpenSubject puts before it logs). A directory or file
+// open to another uid is refused.
 func OpenFileKeys(dir string, logKey [32]byte) (*FileKeys, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return nil, err
 	}
 	if err := privfile.Check(dir, true); err != nil {
+		return nil, err
+	}
+	if err := dropTemps(dir); err != nil {
 		return nil, err
 	}
 	b, err := aes.NewCipher(logKey[:])
