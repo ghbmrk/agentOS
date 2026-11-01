@@ -200,6 +200,8 @@ func TestUnread(t *testing.T) {
 		"a/tagged.go":      "//go:build agentos_x\n\npackage a\n",
 		"a/plus.go":        "// +build agentos_y\n\npackage a\n",
 		"a/block.go":       "/* header */\n\n//go:build agentos_z\n\npackage a\n",
+		"a/both.go":        "//go:build agentos_p && agentos_q\n\npackage a\n",
+		"a/cgotag.go":      "//go:build cgo && agentos_r\n\npackage a\n",
 		"a/cgo.go":         "package a\n\nimport \"C\"\n",
 		"a/asm_amd64.s":    "",
 		"a/blob.syso":      "",
@@ -219,7 +221,7 @@ func TestUnread(t *testing.T) {
 	for i := range got {
 		got[i] = filepath.Base(got[i])
 	}
-	if want := []string{"asm_amd64.s", "blob.syso", "block.go", "cgo.go", "plus.go", "tagged.go"}; !slices.Equal(got, want) {
+	if want := []string{"asm_amd64.s", "blob.syso", "block.go", "both.go", "cgo.go", "cgotag.go", "plus.go", "tagged.go"}; !slices.Equal(got, want) {
 		t.Fatalf("unread %q, want %q", got, want)
 	}
 	// A cgo build type-checks the cgo file's Go, but not its C.
