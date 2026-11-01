@@ -23,8 +23,10 @@
 // passkey restore (D-260, D-262). Refusals, which the kernel cannot
 // foresee, have their own rate with no trip: past it, every request is
 // refused RateLimited until the rate refills by itself, with no owner
-// step. A failed hello is dropped and never trips it. Every request is logged, and a channel command that
-// turns a heater off or shuts a valve texts the owner.
+// step. A failed hello is dropped and never trips it. Only the connection
+// whose hello was accepted last counts: a frame on an earlier one ends it
+// uncounted. Every request is logged, and a channel command that turns a
+// heater off or shuts a valve texts the owner.
 //
 // It is enforcer code: it imports the standard library, broker/kernel/key
 // through the policy, and the enforcer's own packages only
@@ -133,8 +135,6 @@ type Config struct {
 	Log func(Event)
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
-	// Limits overrides DefaultLimits per kind.
-	Limits map[Kind]Limit
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
@@ -161,6 +161,9 @@ var (
 	ErrRevoked   = errors.New("channel: the core's channel key is revoked")
 	ErrNoSession = errors.New("channel: no core connected")
 	ErrBusy      = errors.New("channel: too many challenges outstanding")
+	// ErrSuperseded ends a connection whose frame came after a later
+	// connection's hello was accepted (ENF-d-9).
+	ErrSuperseded = errors.New("channel: a later connection replaced this one")
 )
 
 // MaxOutstanding caps the device challenges waiting for an answer.
@@ -171,10 +174,17 @@ const MaxOutstanding = 64
 type Channel struct {
 	cfg Config
 
-	mu          sync.Mutex
-	buckets     map[Kind]*bucket
+	mu sync.Mutex
+	// buckets are the core's rates, one per wire.RateKind; refused and
+	// preAuthB are the enforcer's own.
+	buckets     map[wire.RateKind]*wire.Bucket
+	refused     *wire.Bucket
+	preAuthB    *wire.Bucket
 	outstanding map[uint64]bool
-	session     *session
+	// session is the connection whose hello the channel accepted last.
+	// Only its requests act or count: a frame on any other connection
+	// ends that connection uncounted (ENF-d-9).
+	session *session
 	// preAuthQuiet is set while failed hellos are over KindPreAuth's
 	// bucket and dropped unlogged.
 	preAuthQuiet bool
@@ -198,13 +208,11 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	c := &Channel{cfg: cfg, buckets: map[Kind]*bucket{}, outstanding: map[uint64]bool{}}
 	now := cfg.Now()
-	for k, l := range DefaultLimits {
-		if o, ok := cfg.Limits[k]; ok {
-			l = o
-		}
-		c.buckets[k] = newBucket(l, now)
+	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{},
+		refused: wire.NewBucket(refusedLimit, now), preAuthB: wire.NewBucket(preAuthLimit, now)}
+	for _, k := range wire.RateKinds {
+		c.buckets[k] = wire.NewBucket(wire.Rate(k), now)
 	}
 	return c, nil
 }
@@ -231,28 +239,31 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if c.cfg.Revoked(c.cfg.Core) {
 		return c.preAuth("the core's channel key is revoked", ErrRevoked)
 	}
+	mine, err := wire.SignHello(wire.RoleEnforcer, c.cfg.Key, exporter)
+	if err != nil {
+		return err
+	}
 	// Only the authenticated core counts toward a trip (#3755), and only
 	// while it is not already cut: after a trip its reconnects take their
 	// rate but trip nothing more (ENF-d-4).
 	c.mu.Lock()
 	if c.cfg.Cut.Stage() == Open {
-		c.count(KindHello)
+		c.count(wire.RateHello)
 	} else {
-		c.buckets[KindHello].take(c.cfg.Now())
+		c.buckets[wire.RateHello].Take(c.cfg.Now())
 	}
 	c.release()
-	mine, err := wire.SignHello(wire.RoleEnforcer, c.cfg.Key, exporter)
-	if err != nil {
-		return err
-	}
+	// This connection becomes the session before the enforcer's hello is
+	// written, and s.mu is held until it is, so no challenge or alert
+	// goes ahead of it. A kernel that has read the enforcer's hello knows
+	// no frame of an earlier connection counts after it (ENF-d-9).
 	s := &session{w: rw}
-	if err := s.send(mine); err != nil {
-		return err
-	}
+	s.mu.Lock()
 	c.mu.Lock()
 	c.session = s
 	c.mu.Unlock()
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindHello, Reason: "core connected"})
+	err = s.write(mine)
+	s.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
 		if c.session == s {
@@ -260,6 +271,10 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 		}
 		c.mu.Unlock()
 	}()
+	if err != nil {
+		return err
+	}
+	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindHello, Reason: "core connected"})
 
 	for {
 		f, err := wire.ReadFrame(rw, wire.ToEnforcer)
@@ -282,7 +297,11 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 		if c.cfg.Revoked(c.cfg.Core) {
 			return c.refuse(KindFrame, 0, "the core's channel key is revoked", ErrRevoked)
 		}
-		if out := c.handle(m); out != nil {
+		out, err := c.handle(s, m)
+		if err != nil {
+			return err
+		}
+		if out != nil {
 			if err := s.send(out); err != nil {
 				return err
 			}
@@ -295,7 +314,7 @@ func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
 	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
-	c.count(KindRefused)
+	c.countRefused()
 	return err
 }
 
@@ -334,7 +353,7 @@ func (c *Channel) preAuth(reason string, err error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.cfg.Now()
-	if c.buckets[KindPreAuth].take(now) {
+	if c.preAuthB.Take(now) {
 		c.preAuthQuiet = false
 		c.cfg.Log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
@@ -355,12 +374,17 @@ func (c *Channel) release() {
 }
 
 func (s *session) send(m wire.Msg) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.write(m)
+}
+
+// write sends m; the caller holds s.mu.
+func (s *session) write(m wire.Msg) error {
 	f, err := wire.Encode(wire.ToCore, m)
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return wire.WriteFrame(s.w, wire.ToCore, f)
 }
 

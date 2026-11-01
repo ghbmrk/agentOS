@@ -317,11 +317,11 @@ func TestRefusalBurstWaits(t *testing.T) {
 			break
 		}
 	}
-	if int(id) != DefaultLimits[KindRefused].Burst+1 {
-		t.Errorf("limited after %d refusals, want %d", id-1, DefaultLimits[KindRefused].Burst)
+	if int(id) != DefaultLimit(KindRefused).Burst+1 {
+		t.Errorf("limited after %d refusals, want %d", id-1, DefaultLimit(KindRefused).Burst)
 	}
 	n := len(r.radio.calls())
-	every := DefaultLimits[KindRefused].Every
+	every := DefaultLimit(KindRefused).Every
 	// The core keeps asking, an honest command every few seconds, for
 	// under one refill: each waits.
 	for range 10 {
@@ -386,7 +386,7 @@ func TestPreAuthNeverPauses(t *testing.T) {
 			logged++
 		}
 	}
-	if max := DefaultLimits[KindPreAuth].Burst + 1; logged > max {
+	if max := DefaultLimit(KindPreAuth).Burst + 1; logged > max {
 		t.Errorf("%d log lines for a flood of failed hellos, want at most %d", logged, max)
 	}
 
@@ -397,7 +397,7 @@ func TestPreAuthNeverPauses(t *testing.T) {
 
 	// The core's own reconnects past the rate trip it.
 	for i := 0; r.cut.trips() == 0; i++ {
-		if i > DefaultLimits[KindHello].Burst {
+		if i > DefaultLimit(KindHello).Burst {
 			t.Fatal("the core's reconnect flood never tripped")
 		}
 		r.dial()
@@ -887,25 +887,26 @@ func TestTripPausesUntilRestore(t *testing.T) {
 					t.Errorf("%s: a paused request logged no reason: %+v", stage, e)
 				}
 			}
-			r.advance(DefaultLimits[KindAnnounce].Every)
+			r.advance(DefaultLimit(KindAnnounce).Every)
 		}
 	}
 	// A kernel learns of the trip only from Paused answers: a quick run of
 	// them, past the refusal bucket, inside the command rate.
 	cl := r.dial()
-	for i := range 2 * DefaultLimits[KindRefused].Burst {
+	for i := range 2 * DefaultLimit(KindRefused).Burst {
 		if c := cl.code(cmd(uint64(1000+i), "lamp", wire.VerbOn)); c != wire.Paused {
 			t.Fatalf("tripped: %v", c)
 		}
 	}
 	check("tripped", 12, nil)
+	cl = r.dial() // check's connections replaced this one
 	if len(r.radio.calls()) != 0 || !r.eng.Current().Device("tv").VendorCloud {
 		t.Fatal("a request acted while tripped")
 	}
 	r.cut.set(Reflashed)
 	// Straight after the step, a kernel's run of Paused answers past the
 	// refusal bucket leaves the reopened summaries answering.
-	for i := range 2 * DefaultLimits[KindRefused].Burst {
+	for i := range 2 * DefaultLimit(KindRefused).Burst {
 		if c := cl.code(cmd(uint64(2000+i), "lamp", wire.VerbOn)); c != wire.Paused {
 			t.Fatalf("reflashed: %v", c)
 		}
@@ -1001,13 +1002,13 @@ func TestPausedBurstTripsNothingMore(t *testing.T) {
 	cl := r.dial()
 	for _, st := range []Stage{Tripped, Reflashed} {
 		r.cut.set(st)
-		for i := range DefaultLimits[KindCommand].Burst + 5 {
+		for i := range DefaultLimit(KindCommand).Burst + 5 {
 			if c := cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn)); c != wire.Paused {
 				t.Fatalf("stage %d: %v", st, c)
 			}
 		}
-		for range DefaultLimits[KindHello].Burst + 5 {
-			r.dial()
+		for range DefaultLimit(KindHello).Burst + 5 {
+			cl = r.dial() // each hello replaces the connection before it
 		}
 		if r.cut.trips() != 0 || r.cut.Stage() != st {
 			t.Fatalf("stage %d: %d trips, stage now %d", st, r.cut.trips(), r.cut.Stage())
@@ -1015,7 +1016,7 @@ func TestPausedBurstTripsNothingMore(t *testing.T) {
 		r.advance(time.Hour)
 	}
 	for i := 0; r.cut.trips() == 0; i++ {
-		if i > DefaultLimits[KindRead].Burst+1 {
+		if i > DefaultLimit(KindRead).Burst+1 {
 			t.Fatal("a summary burst at the Reflashed stage never tripped")
 		}
 		cl.do(wire.Read{ID: uint64(100 + i), What: wire.ReadCounts})
@@ -1030,7 +1031,7 @@ func TestPausedRequestsTakeTheirRate(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
 	r.cut.set(Tripped)
-	for i := range DefaultLimits[KindCommand].Burst {
+	for i := range DefaultLimit(KindCommand).Burst {
 		cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn))
 	}
 	r.cut.set(Open)
@@ -1041,7 +1042,7 @@ func TestPausedRequestsTakeTheirRate(t *testing.T) {
 
 	r = newRig(t, nil)
 	r.cut.set(Tripped)
-	for range DefaultLimits[KindHello].Burst {
+	for range DefaultLimit(KindHello).Burst {
 		r.dial()
 	}
 	r.cut.set(Open)

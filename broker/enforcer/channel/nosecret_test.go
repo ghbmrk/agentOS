@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/devsecret"
 	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
@@ -100,8 +99,6 @@ func TestNoSecretOnChannel(t *testing.T) {
 	st, env := heldLock(t)
 	r := newRig(t, func(c *Config) {
 		c.Fingerprint = st.Fingerprint
-		// Every refusal below is expected; none is a burst.
-		c.Limits = map[Kind]Limit{KindRefused: {Burst: 1000, Every: time.Millisecond}}
 	})
 	cl := r.dial()
 	var replies []wire.Msg
@@ -115,6 +112,9 @@ func TestNoSecretOnChannel(t *testing.T) {
 			if what == wire.ReadExport && d != "" || what != wire.ReadExport && d == "" {
 				continue
 			}
+			// Every refusal below is expected: a refill each read keeps the
+			// refusal rate from answering in place of the read.
+			r.advance(DefaultLimit(KindRefused).Every)
 			m := cl.do(wire.Read{ID: id, What: what, Device: d})
 			id++
 			replies = append(replies, m)
