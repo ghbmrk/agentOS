@@ -43,6 +43,7 @@ func TestMDNSNames(t *testing.T) {
 		}
 	}
 	hostiletext.Run(t, mdnsLabel)
+	hostiletext.Run(t, func(s string) bool { return mdnsName([]string{s, "local"}) })
 }
 
 // TestMDNSCanonical: a device's names are sorted by mDNS name and
