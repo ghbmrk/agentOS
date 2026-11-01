@@ -1086,6 +1086,21 @@ func TestGarageNeedsSafeguards(t *testing.T) {
 		}
 	}
 
+	// The set is canonical: order and repeats do not change the encoding,
+	// and an unsorted or repeated set does not decode (L3 on #4499).
+	canon, _ := Encode(door("close", rev, warn))
+	if b, _ := Encode(door("close", warn, rev, warn)); string(b) != string(canon) {
+		t.Errorf("order changes the encoding: %s, want %s", b, canon)
+	}
+	for _, alt := range []string{`"safeguards":["pre-close-warning","obstruction-reversal"]`, `"safeguards":["obstruction-reversal","obstruction-reversal","pre-close-warning"]`} {
+		bad := strings.Replace(string(canon), `"safeguards":["obstruction-reversal","pre-close-warning"]`, alt, 1)
+		if bad == string(canon) {
+			t.Fatalf("no safeguards in %s", canon)
+		}
+		if _, err := Decode([]byte(bad)); err == nil {
+			t.Errorf("decoded %s", alt)
+		}
+	}
 	// A door with no safeguards encodes as before: the field is omitted.
 	if b, _ := Encode(door("")); strings.Contains(string(b), "safeguards") {
 		t.Errorf("an empty set is written: %s", b)
