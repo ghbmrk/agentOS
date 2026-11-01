@@ -5,7 +5,7 @@ No requirement IDs: assurance tooling (D-086). A list file read with read_text()
 form feed and others) shows one line in an editor or a diff and gives the reader two, so a
 break hidden in a comment can add a `core`, `allow` or baseline line nobody sees (#1347, #1583,
 #3721). Each reader splits on "\\n" only and refuses any character outside printable ASCII,
-as tools/g1_scope.py does, naming the line.
+naming the line.
 
 CASES maps each list file to the functions that read it, each called on a tree holding a
 copy of the list. A new tools/*.txt with no case fails test_every_list_file_has_a_reader_case.
@@ -21,7 +21,6 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import assumptions_ids  # noqa: E402
 import doclint  # noqa: E402
-import g1_scope  # noqa: E402
 import netguardcheck  # noqa: E402
 import risk_tier  # noqa: E402
 import srclint  # noqa: E402
@@ -43,12 +42,6 @@ def _legacy_growth(tree):
     return list(assumptions_ids.growth(tree, clean))
 
 
-def _g2_list(tree):
-    # As g1_scope.main reads it.
-    text = (tree / "tools" / "g1_scope_g2.txt").read_bytes().decode("utf-8", "replace")
-    return g1_scope.parse_list(text, "g1_scope_g2.txt")
-
-
 CASES = {
     "broker/core/core.txt": {
         "risk_tier.core_list": lambda t: risk_tier.core_list.__wrapped__(t / "broker/core/core.txt"),
@@ -68,7 +61,6 @@ CASES = {
     },
     "tools/netguard_allow.txt": {"netguardcheck.load_allow": lambda t: netguardcheck.load_allow(t / "tools/netguard_allow.txt")},
     "tools/srclint_allow.txt": {"srclint.load_allow": lambda t: srclint.load_allow(t / "tools/srclint_allow.txt")},
-    "tools/g1_scope_g2.txt": {"g1_scope.parse_list": _g2_list},
 }
 
 # Each is a line end to some reader (read_text, splitlines or str.split) or a character a
@@ -97,7 +89,7 @@ def reads(name, reader, text):
             reader(tree)
         except SystemExit as e:
             return str(e.code)
-        except (trusted_base.MeasureError, g1_scope.ListError) as e:
+        except trusted_base.MeasureError as e:
             return str(e)
         return None
 
