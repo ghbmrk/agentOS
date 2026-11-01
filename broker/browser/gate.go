@@ -741,6 +741,13 @@ func (g *Gate) roundtrip(ctx context.Context, req Request) (Result, bool) {
 	if res.Snapshot != "" {
 		// Read before filtering: a redaction must not hide a link's target.
 		g.refs, g.page = parseRefs(res.Snapshot, res.URL), res.URL
+	} else if res.URL != g.page || req.Verb == "screenshot" {
+		// A ref names an element only in the driver's last snapshot of one
+		// document (K16). A reply from another page, or a screenshot (the
+		// driver snapshots again to check it), leaves the gate no refs it can
+		// match to what the driver will act on, so it keeps none until the
+		// next snapshot.
+		g.refs, g.shown, g.page = nil, nil, res.URL
 	}
 	read := res.Snapshot != ""
 	// The driver's count is not trusted: the gate reports its own.

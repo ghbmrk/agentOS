@@ -38,11 +38,14 @@ func fakeDriver() {
 	_ = json.Unmarshal([]byte(os.Getenv("BROWSER_FAKE_REPLIES")), &replies)
 	ws := os.Getenv("BROWSER_FAKE_WS")
 	seen := map[string]int{}
+	// The page the fake is on: a reply that names none stays on it, as the
+	// real driver's does (K16), and an unscripted navigate lands on its URL.
+	page := "https://shop.example.test/"
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
 		line := sc.Text()
 		fmt.Fprintf(log, "REQ %s\n", line)
-		var req struct{ Verb string }
+		var req struct{ Verb, URL string }
 		_ = json.Unmarshal([]byte(line), &req)
 		if req.Verb == "screenshot" || req.Verb == "download" || os.Getenv("BROWSER_FAKE_ANYFILE") == "1" {
 			// The file the driver says it wrote, or a link to a file outside
@@ -70,7 +73,10 @@ func fakeDriver() {
 		r, ok := replies[req.Verb]
 		if !ok {
 			// The real driver (S5 executor.py) puts the page URL on every reply.
-			r = json.RawMessage(`{"ok":true,"url":"https://shop.example.test/"}`)
+			if req.Verb == "navigate" {
+				page = req.URL
+			}
+			r, _ = json.Marshal(map[string]any{"ok": true, "url": page})
 		}
 		if len(r) > 0 && r[0] == '[' {
 			// A list scripts successive replies to the same verb.
@@ -114,6 +120,10 @@ func fakeDriver() {
 			// whose click must reach the driver and lose its answer is
 			// ordered by construction, not by a timing bound (#4083).
 			os.Exit(3)
+		}
+		var on struct{ URL *string }
+		if json.Unmarshal(r, &on) == nil && on.URL != nil {
+			page = *on.URL
 		}
 		os.Stdout.Write(append(r, '\n'))
 	}
