@@ -180,6 +180,10 @@ exempt-pr 4371
 # Remove once #4216 merges.
 exempt-pr 4216
 
+# #4407 (ENF-e-related #4113, ENF-ct-bind-3 #4367): broker/enforcer/nft/, which the G2 list does not name (D-198).
+# Remove once #4407 merges.
+exempt-pr 4407
+
 # #4350 (CAM-decoder-uid): broker/cmd/agentos-camera/ and broker/cmd/agentos-camdecode-host/, which the G2 list does not name (D-198).
 # Remove once #4350 merges.
 exempt-pr 4350
