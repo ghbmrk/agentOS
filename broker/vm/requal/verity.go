@@ -90,7 +90,7 @@ func (v *VerityImages) Mount(ctx context.Context, rel *update.Verified, at strin
 	if !hashRE.MatchString(m.UsrRootHash) {
 		return nil, errors.New("requal: release has no /usr root hash")
 	}
-	name, err := randomName()
+	name, err := newSessionID()
 	if err != nil {
 		return nil, err
 	}

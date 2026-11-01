@@ -97,7 +97,7 @@ func (b *sandbox) Start(ctx context.Context, rel *update.Verified) (Session, err
 	if rel != nil && !rel.OK() {
 		return nil, errors.New("requal: release is not checked")
 	}
-	name, err := randomName()
+	name, err := newSessionID()
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +130,7 @@ func (b *sandbox) Start(ctx context.Context, rel *update.Verified) (Session, err
 	return s, nil
 }
 
-func randomName() (string, error) {
+func newSessionID() (string, error) {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
