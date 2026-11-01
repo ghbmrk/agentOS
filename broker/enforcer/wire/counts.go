@@ -3,6 +3,7 @@ package wire
 import (
 	"encoding/binary"
 	"errors"
+	"strings"
 )
 
 // Counts is the body of a ReadCounts reply: the enforcer's own byte-cap
@@ -81,14 +82,14 @@ func DecodeCounts(b []byte) (Counts, error) {
 		var sum uint64
 		for j := 0; j < m && !r.bad; j++ {
 			d := CountDest{Name: r.name(), Cap: r.u64()}
-			if d.Name == "" || seen[d.Name] || (j > 0 && d.Name <= g.Dests[j-1].Name) || sum+d.Cap < sum {
+			if d.Name == "" || seen[d.Name] || (j > 0 && !after(d.Name, g.Dests[j-1].Name)) || sum+d.Cap < sum {
 				r.fail()
 				break
 			}
 			seen[d.Name], sum = true, sum+d.Cap
 			g.Dests = append(g.Dests, d)
 		}
-		if m == 0 || (len(c.Groups) > 0 && !r.bad && g.Dests[0].Name <= c.Groups[len(c.Groups)-1].Dests[0].Name) {
+		if m == 0 || (len(c.Groups) > 0 && !r.bad && !after(g.Dests[0].Name, c.Groups[len(c.Groups)-1].Dests[0].Name)) {
 			r.fail()
 		}
 		c.Groups = append(c.Groups, g)
@@ -98,6 +99,11 @@ func DecodeCounts(b []byte) (Counts, error) {
 	}
 	return c, nil
 }
+
+// after is whether a sorts strictly after b. A name equal to an earlier
+// one is also refused as named twice, so the order check is written
+// without a boundary to get wrong in either direction.
+func after(a, b string) bool { return strings.Compare(a, b) == 1 }
 
 // Cap is g's one cap, the sum of its destinations' caps; DecodeCounts
 // refuses a group whose sum overflows.

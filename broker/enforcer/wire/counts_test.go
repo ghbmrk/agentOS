@@ -74,6 +74,7 @@ func TestCountsOneForm(t *testing.T) {
 		"not a token":         {Groups: []CountGroup{{Dests: []CountDest{{"a example", 1}}}}},
 		"empty name":          {Groups: []CountGroup{{Dests: []CountDest{{"", 1}}}}},
 		"cap overflows":       {Groups: []CountGroup{{Dests: []CountDest{{"a.example", 1 << 63}, {"b.example", 1 << 63}}}}},
+		"cap overflows later": {Groups: []CountGroup{{Dests: []CountDest{{"a.example", 1 << 63}, {"b.example", 1 << 62}, {"c.example", 1 << 62}}}}},
 	}
 	for name, c := range bad {
 		if _, err := EncodeCounts(c); !errors.Is(err, ErrCounts) {
@@ -124,4 +125,37 @@ func mustEncodeRaw(c Counts) []byte {
 		}
 	}
 	return b
+}
+
+// TestCountsAtTheirLimits: a body of exactly MaxReply, a group of the most
+// destinations its count can name, and a destination capped at zero are
+// all the one form. Revert mutants: each limit in EncodeCounts and
+// DecodeCounts moved by one.
+func TestCountsAtTheirLimits(t *testing.T) {
+	// 24 header bytes, then 19+len(name) per one-destination group.
+	var full Counts
+	for left := MaxReply - 24; left > 0; {
+		n := min(MaxName, left-19)
+		name := fmt.Sprintf("%06d", len(full.Groups)) + strings.Repeat("x", n-6)
+		full.Groups = append(full.Groups, CountGroup{Dests: []CountDest{{name, 1}}})
+		left -= 19 + n
+	}
+	if b, err := EncodeCounts(full); err != nil || len(b) != MaxReply {
+		t.Fatalf("a body of exactly MaxReply: %d bytes, %v", len(b), err)
+	}
+	wide := Counts{Groups: []CountGroup{{}}}
+	for i := range 0xffff {
+		wide.Groups[0].Dests = append(wide.Groups[0].Dests, CountDest{fmt.Sprintf("d%05d", i), 1})
+	}
+	if _, err := EncodeCounts(wide); err != nil {
+		t.Fatalf("a group of 0xffff destinations: %v", err)
+	}
+	wide.Groups[0].Dests = append(wide.Groups[0].Dests, CountDest{"e", 1})
+	if _, err := EncodeCounts(wide); !errors.Is(err, ErrCounts) {
+		t.Fatalf("a group of 0x10000 destinations encoded: %v", err)
+	}
+	zero := Counts{Groups: []CountGroup{{Dests: []CountDest{{"a.example", 0}, {"b.example", 5}}}}}
+	if c, err := DecodeCounts(mustEncode(t, zero)); err != nil || c.Groups[0].Cap() != 5 {
+		t.Fatalf("a destination capped at zero: %+v, %v", c, err)
+	}
 }
