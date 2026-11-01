@@ -227,10 +227,11 @@ func TestHello(t *testing.T) {
 // TestImportsStandardLibraryOnly: the package imports only the standard
 // library and nothing that opens a socket, a file or a process, so both
 // ends link the same small codec (brief code layout: "standard library
-// only"). Revert mutant: an "os" or "net" import in a non-test file.
+// only"; time only for SummaryInterval). Revert mutant: an "os" or "net"
+// import in a non-test file.
 func TestImportsStandardLibraryOnly(t *testing.T) {
 	allowed := map[string]bool{
-		"crypto/ed25519": true, "encoding/binary": true, "errors": true, "io": true, "strings": true, "unicode": true, "unicode/utf8": true,
+		"crypto/ed25519": true, "encoding/binary": true, "errors": true, "io": true, "strings": true, "time": true, "unicode": true, "unicode/utf8": true,
 	}
 	files, err := filepath.Glob("*.go")
 	if err != nil {

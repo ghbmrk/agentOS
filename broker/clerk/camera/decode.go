@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/camwire"
-	"github.com/ghbmrk/agentos/broker/vm/gvisor"
 )
 
 // The decoder's device events (DEV-8), each under the clerk's limit.
@@ -84,7 +83,8 @@ type Decoded struct {
 	Pixels  []byte
 }
 
-// Proc is a running decoder sandbox; *gvisor.StreamRun is one.
+// Proc is a running decoder: its sandbox's stdin and stdout, here or in
+// its own unit (DialDecoder).
 type Proc interface {
 	In() io.Writer
 	Out() io.Reader
@@ -92,32 +92,37 @@ type Proc interface {
 	Stop()
 }
 
-// StartFunc starts a decoder sandbox.
-type StartFunc func(context.Context, gvisor.Stream) (Proc, error)
+// Spec is what one decoder session is started with: the camera's declared
+// shapes, from its node's bundle (Decoder.Add).
+type Spec struct{ Video, Thermal camwire.Shape }
 
-// GVisor is the StartFunc that runs decoders under rt.
-func GVisor(rt *gvisor.Runtime) StartFunc {
-	return func(ctx context.Context, s gvisor.Stream) (Proc, error) {
-		run, err := rt.StartStream(ctx, s)
-		if err != nil {
-			return nil, err
-		}
-		return run, nil
+// StartFunc starts a decoder for spec.
+type StartFunc func(context.Context, Spec) (Proc, error)
+
+// Argv is the sandbox decoder's command line for s.
+func (s Spec) Argv() []string {
+	return []string{decoderBinary, "-video", dims(s.Video), "-thermal", dims(s.Thermal)}
+}
+
+// CheckShapes refuses a video shape of no pixels or past maxVideoSide, and
+// a thermal one (zero for none) whose frame would not fit camwire's.
+func CheckShapes(video, thermal camwire.Shape) error {
+	if video.Width == 0 || video.Height == 0 || video.Width > maxVideoSide || video.Height > maxVideoSide {
+		return ErrShapes
 	}
+	if thermal != (camwire.Shape{}) && (thermal.Width == 0 || thermal.Height == 0 ||
+		camwire.ThermalHeaderLen+outLen(outThermal, thermal) > camwire.MaxThermal) {
+		return ErrShapes
+	}
+	return nil
 }
 
 // DecodeConfig is the decoder's wiring.
 type DecodeConfig struct {
 	Start StartFunc
-	// Root is the sandbox's read-only root, holding /agentos-camdecode.
-	Root string
-	// Cgroup is the cgroup v2 group each sandbox's own group is made
-	// under; it is required, since gVisor enforces no memory cap.
-	Cgroup   string
-	MemBytes int64
-	Stall    time.Duration
-	Idle     time.Duration
-	Queue    int
+	Stall time.Duration
+	Idle  time.Duration
+	Queue int
 	// Backoff bounds the wait before a faulted decoder is restarted.
 	Backoff Backoff
 	// Out takes each checked frame: the consumers' feed (the ring of part
@@ -133,7 +138,7 @@ type DecodeConfig struct {
 // The decoder's errors. Each is fixed text and carries nothing from the
 // node or the sandbox.
 var (
-	ErrDecodeConfig = errors.New("camera: decoder config needs a start, a root, a cgroup, an output and a report")
+	ErrDecodeConfig = errors.New("camera: decoder config needs a start, an output and a report")
 	ErrShapes       = errors.New("camera: declared shapes out of bounds")
 	ErrNotDecoding  = errors.New("camera: no decoder for this camera")
 	errIdle         = errors.New("idle")
@@ -171,11 +176,8 @@ type decodeCam struct {
 
 // NewDecoder checks cfg and fills its defaults.
 func NewDecoder(cfg DecodeConfig) (*Decoder, error) {
-	if cfg.Start == nil || cfg.Root == "" || cfg.Cgroup == "" || cfg.Out == nil || cfg.Report == nil {
+	if cfg.Start == nil || cfg.Out == nil || cfg.Report == nil {
 		return nil, ErrDecodeConfig
-	}
-	if cfg.MemBytes <= 0 {
-		cfg.MemBytes = DefaultDecodeMem
 	}
 	if cfg.Stall <= 0 {
 		cfg.Stall = DefaultStall
@@ -203,12 +205,8 @@ func (d *Decoder) Add(id string, video, thermal camwire.Shape) error {
 	if !idRe.MatchString(id) {
 		return ErrNode
 	}
-	if video.Width == 0 || video.Height == 0 || video.Width > maxVideoSide || video.Height > maxVideoSide {
-		return ErrShapes
-	}
-	if thermal != (camwire.Shape{}) && (thermal.Width == 0 || thermal.Height == 0 ||
-		camwire.ThermalHeaderLen+outLen(outThermal, thermal) > camwire.MaxThermal) {
-		return ErrShapes
+	if err := CheckShapes(video, thermal); err != nil {
+		return err
 	}
 	d.Remove(id)
 	d.mu.Lock()
@@ -390,8 +388,7 @@ func (d *Decoder) drain(c *decodeCam) {
 func (d *Decoder) session(c *decodeCam, first camwire.Frame, recovering bool) error {
 	ctx, cancel := context.WithCancel(c.ctx)
 	defer cancel()
-	argv := append([]string{decoderBinary}, "-video", dims(c.video), "-thermal", dims(c.thermal))
-	p, err := d.cfg.Start(ctx, gvisor.Stream{Name: "camdecode-" + c.id, Root: d.cfg.Root, Argv: argv, MemBytes: d.cfg.MemBytes, Cgroup: d.cfg.Cgroup})
+	p, err := d.cfg.Start(ctx, Spec{Video: c.video, Thermal: c.thermal})
 	if err != nil {
 		return errFault
 	}
@@ -400,7 +397,7 @@ func (d *Decoder) session(c *decodeCam, first camwire.Frame, recovering bool) er
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); end <- d.feed(ctx, c, s, p, first) }()
-	go func() { defer wg.Done(); end <- d.read(c, s, p, recovering) }()
+	go func() { defer wg.Done(); end <- d.read(ctx, c, s, p, recovering) }()
 	tick := time.NewTicker(d.cfg.Stall / 4)
 	defer tick.Stop()
 	var result error
@@ -501,9 +498,10 @@ func kindOf(t camwire.Type) int {
 // it is kept: its kind, its dimensions, a count no higher than the frames
 // of that kind fed, for a thermal frame the counter of the next one fed,
 // and then exactly the declared length of pixels. The first frame that
-// breaks a rule ends the session as a fault, and none reaches Out once c
-// is cut or removed.
-func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) error {
+// breaks a rule ends the session as a fault, and none reaches Out once the
+// session ends (c cut or removed, an idle, a fault): a Stop may read and
+// drop what is left.
+func (d *Decoder) read(ctx context.Context, c *decodeCam, s *decodeSession, p Proc, recovering bool) error {
 	var h [outHeaderLen]byte
 	for {
 		if _, err := io.ReadFull(p.Out(), h[:]); err != nil {
@@ -551,7 +549,7 @@ func (d *Decoder) read(c *decodeCam, s *decodeSession, p Proc, recovering bool) 
 			d.cfg.Log("camera " + c.id + ": decoder recovered")
 			d.cfg.Report(c.id, DecoderRecovered)
 		}
-		if c.ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return nil
 		}
 		d.cfg.Out(Decoded{Camera: c.id, Thermal: kind == outThermal, Width: w, Height: ht,

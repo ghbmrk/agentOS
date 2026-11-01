@@ -33,15 +33,36 @@ var (
 // The items are staged beside contentDir and moved into place only once
 // secs ends whole (io.EOF), so no restored item is in place before every
 // section's length and sum are checked (MIG-4-recovery-a-6). On an error
-// contentDir is as it was, and log holds bytes not to be trusted.
+// contentDir is as it was, and log holds bytes not to be trusted. A
+// staging a crash left beside contentDir is removed first.
 func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) error {
+	return restoreSections(secs, log, contentDir, nil)
+}
+
+// restoreStage begins a restore's staging directory's name; one a crash
+// left beside the content folder is removed by the next restore, which
+// runs before the kernel starts on it.
+const restoreStage = ".content-restore-"
+
+func restoreSections(secs *backup.Sections, log io.Writer, contentDir string, stop func(i int) bool) error {
 	if des, err := os.ReadDir(contentDir); err == nil && len(des) > 0 {
 		return ErrRestoreNotEmpty
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	parent := filepath.Dir(contentDir)
-	stage, err := os.MkdirTemp(parent, ".content-restore-")
+	left, err := os.ReadDir(parent)
+	if err != nil {
+		return err
+	}
+	for _, de := range left {
+		if strings.HasPrefix(de.Name(), restoreStage) {
+			if err := os.RemoveAll(filepath.Join(parent, de.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	stage, err := os.MkdirTemp(parent, restoreStage)
 	if err != nil {
 		return err
 	}
@@ -74,7 +95,7 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
-		if err := restoreItems(r, dir, nil); err != nil {
+		if err := restoreItems(r, dir, stop); err != nil {
 			return fmt.Errorf("section %s: %w", sec.Name, err)
 		}
 		stores = append(stores, dir)

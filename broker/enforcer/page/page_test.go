@@ -124,6 +124,10 @@ type rig struct {
 	now    time.Time
 	cert   Cert
 	remote netip.Addr
+	// The phone browser's anti-forgery cookie and token, from the last
+	// screen g.s drew (csrf.go); do posts with them.
+	cookie, token string
+	tokenOf       *Server
 }
 
 // newRig is a page over an engine holding home(1), on a fake clock.
@@ -184,12 +188,17 @@ func (g *rig) do(method, path string, body any, hdr ...string) *httptest.Respons
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
+	if method != http.MethodGet && g.tokenOf != g.s {
+		g.screen()
+	}
 	req := httptest.NewRequest(method, "https://"+rp+path, rd)
 	req.RemoteAddr = netip.AddrPortFrom(g.remote, 50000).String()
-	if method == http.MethodPost {
+	if method != http.MethodGet {
 		req.Header.Set("Origin", "https://"+rp)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Cookie", tokenCookie+"="+g.cookie)
+		req.Header.Set(tokenHeader, g.token)
 	} else {
 		req.Header.Set("Sec-Fetch-Site", "cross-site") // opened from a text
 		req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -205,7 +214,39 @@ func (g *rig) do(method, path string, body any, hdr ...string) *httptest.Respons
 	}
 	w := httptest.NewRecorder()
 	g.s.ServeHTTP(w, req)
+	g.keep(w)
 	return w
+}
+
+var reToken = regexp.MustCompile(`<meta name="enforcer-token" content="([A-Za-z0-9_-]+)">`)
+
+// keep keeps the anti-forgery cookie and token a screen of g.s set, as the
+// phone's browser would.
+func (g *rig) keep(w *httptest.ResponseRecorder) {
+	g.t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == tokenCookie {
+			m := reToken.FindStringSubmatch(w.Body.String())
+			if m == nil {
+				g.t.Fatalf("a screen set the cookie with no token:\n%s", w.Body)
+			}
+			g.cookie, g.token, g.tokenOf = c.Value, m[1], g.s
+		}
+	}
+}
+
+// screen opens a screen of g.s, for its token: the enrolment screen when
+// the page has one, else home.
+func (g *rig) screen() {
+	g.t.Helper()
+	path := "/"
+	if g.s.cfg.Enrol != nil {
+		path = "/enrol"
+	}
+	g.do(http.MethodGet, path, nil)
+	if g.tokenOf != g.s {
+		g.t.Fatalf("%s drew no token", path)
+	}
 }
 
 // linkFor is the proposal link the core would text for next.

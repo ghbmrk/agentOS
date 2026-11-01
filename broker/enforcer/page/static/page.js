@@ -16,8 +16,10 @@ async function tap(challenge, rp) {
 }
 
 async function post(path, body) {
-  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body), credentials: "omit" });
+  // The screen's anti-forgery token, sent with the cookie the screen set.
+  const token = document.querySelector('meta[name="enforcer-token"]').content;
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-Enforcer-Token": token },
+    body: JSON.stringify(body), credentials: "same-origin" });
   const j = await res.json();
   if (!res.ok) throw new Error(j.error || res.statusText);
   return j;

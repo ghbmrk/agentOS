@@ -100,11 +100,12 @@ jobs:
       # Preinstalled toolchains the job never uses go first; the guard below then checks the result.
       - name: Free runner disk
         run: |
-          echo "::notice title=disk budget::/ had$(df -h --output=avail / | tail -n 1) free before freeing the runner disk"
+          gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }
+          echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
             /opt/hostedtoolcache/CodeQL /usr/local/share/powershell /usr/local/share/chromium
           sudo docker image prune -a -f >/dev/null 2>&1 || true
-          echo "::notice title=disk budget::/ has$(df -h --output=avail / | tail -n 1) free after freeing the runner disk"
+          echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: broker/go.mod
@@ -146,7 +147,10 @@ jobs:
           while read -r m; do
             have=$(( $(df -BM --output=avail "$m" | tail -n 1 | tr -dc 0-9) / 1024 ))
             echo "::notice title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB"
-            [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; free more in \"Free runner disk\""; fail=1; }
+            # "Free runner disk" frees space on / only; a short mount of its own needs the build's writes moved.
+            if [ "$m" = / ]; then fix='free more in "Free runner disk"'
+            else fix="$m is its own file system, which \"Free runner disk\" does not free: move what every step of this job writes under $m to a directory on /, and put that directory in place of $m in this step's df line"; fi
+            [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; $fix"; fail=1; }
           done < "$RUNNER_TEMP/disk.mounts"
           [ "$fail" = 0 ]
           # Used MB summed over those file systems (awk reads "1234M" as 1234).
@@ -256,25 +260,29 @@ jobs:
             ${{ runner.temp }}/out/qemu-console*.log
           retention-days: 7
           if-no-files-found: warn
-      # A peak that rose and fell between two samples is missed, but it cannot rise faster than the
-      # job's disk takes writes, so the check adds the largest rise seen in one interval to the highest
-      # sample: the job fails when that bound reaches DISK_NEED_GB. The budget's headroom over the
-      # measured peak (24 GB over 15 GB in #4317) covers that bound and the build's growth to come.
+      # A peak that rose and fell between two samples is missed, so the check adds the largest rise
+      # seen in one interval to the highest sample, and the job fails when that bound reaches
+      # DISK_NEED_GB. The largest rise seen is only an estimate of such a peak: the budget's headroom
+      # over the measured peak (24 GB over 15 GB in #4317) is the real cover, for a missed peak and
+      # for the build's growth to come. Each part is rounded up to 0.1 GB and the bound is their sum,
+      # so the printed numbers add up and never understate.
       - name: Disk budget held
         if: always()
         shell: bash
         run: |
           [ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
           now=$("$RUNNER_TEMP/disk-used")
-          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now')"; exit 1; }
+          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
           echo "$now" >> "$RUNNER_TEMP/disk.samples"
           # Growth of the highest sample over the baseline, and the largest rise between two samples (MB).
           # An empty sample (one df that failed) is skipped; the final reading above always counts.
           read -r peak rise < <(awk -v b="$(cat "$RUNNER_TEMP/disk.base")" \
             'BEGIN {p = b; q = b} /^[0-9]+$/ {if ($1 > p) p = $1; if ($1 - q > r) r = $1 - q; q = $1} END {print p - b, r + 0}' "$RUNNER_TEMP/disk.samples")
-          grew=$(( (peak + rise) / 1024 ))
-          echo "::notice title=disk budget::the job grew its disk use by at most $grew GB of its $DISK_NEED_GB GB budget ($(( peak / 1024 )) GB sampled, plus $(( rise / 1024 )) GB, the largest rise in one sample interval, for a peak between samples)"
-          [ "$grew" -lt "$DISK_NEED_GB" ] || { echo "::error title=disk budget::image build used $grew GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB"; exit 1; }
+          # In tenths of a GB, each rounded up.
+          p=$(( (peak * 10 + 1023) / 1024 )); r=$(( (rise * 10 + 1023) / 1024 )); t=$(( p + r ))
+          gb() { echo "$(( $1 / 10 )).$(( $1 % 10 ))"; }
+          echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
+          [ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the build job's env)"; exit 1; }
   reproduce:
     # Two runners, one commit: the release must match: the /usr root hash, the boot entry, the
     # kernel and both initrds (IMG-2). A differing initrd is listed member by member.

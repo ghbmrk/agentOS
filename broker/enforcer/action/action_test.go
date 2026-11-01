@@ -406,6 +406,9 @@ type rig struct {
 	logs   []string
 	now    time.Time
 	remote netip.Addr
+	// The phone browser's anti-forgery cookie and token from the last
+	// screen the page drew; do posts with them.
+	cookie, token string
 }
 
 func newRig(t *testing.T) *rig { t.Helper(); return newRigWith(t, nil) }
@@ -466,6 +469,8 @@ func (g *rig) do(method, path string, body any) (w *httptest.ResponseRecorder, a
 		req.Header.Set("Origin", "https://"+rp)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Cookie", "__Host-enforcer="+g.cookie)
+		req.Header.Set("X-Enforcer-Token", g.token)
 	} else {
 		req.Header.Set("Sec-Fetch-Site", "cross-site") // opened from a text
 		req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -480,12 +485,18 @@ func (g *rig) do(method, path string, body any) (w *httptest.ResponseRecorder, a
 		}
 	}()
 	g.s.ServeHTTP(w, req)
+	for _, c := range w.Result().Cookies() {
+		if m := reToken.FindStringSubmatch(w.Body.String()); c.Name == "__Host-enforcer" && m != nil {
+			g.cookie, g.token = c.Value, m[1]
+		}
+	}
 	return w, false
 }
 
 var (
-	reID   = regexp.MustCompile(`data-id="([0-9a-f]+)"`)
-	reChal = regexp.MustCompile(`data-challenge="([A-Za-z0-9_-]+)"`)
+	reID    = regexp.MustCompile(`data-id="([0-9a-f]+)"`)
+	reChal  = regexp.MustCompile(`data-challenge="([A-Za-z0-9_-]+)"`)
+	reToken = regexp.MustCompile(`<meta name="enforcer-token" content="([A-Za-z0-9_-]+)">`)
 )
 
 // open opens a link and returns the screen, its challenge ID and the
