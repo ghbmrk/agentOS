@@ -832,11 +832,12 @@ class UnmarkedTest(unittest.TestCase):
         ]
         for files, entries in cases:
             self.assertEqual(self.problems(entries, x_1=x, oc_1=files), [], (files, entries))
-        # A file a bundle entry names takes the packages the bundle's marks name.
-        bundle = {"lib/u.js": '"node_modules/x/index.js"(e){};' + packed("x"), "lib/u.js.LICENSE": "- x@1\n"}
+        # A file a bundle entry names takes the packages the bundle's sidecar names, beyond its own marks.
+        bundle = {"lib/u.js": '"node_modules/x/index.js"(e){};', "lib/u.js.LICENSE": "- x@1\n- y@1\n"}
         entry = {"holder": "oc@1", "bundle": "pw@1:lib/u.js", "files": ["dist/w.mjs"], "why": "w"}
-        self.assertEqual(self.problems([entry], x_1=x, pw_1=bundle,
-                                       oc_1={"dist/w.mjs": '"node_modules/x/index.js"(e){};' + packed("x")}), [])
+        oc = {"dist/w.mjs": '"node_modules/x/index.js"(e){};' + packed("y")}
+        self.assertEqual(self.problems([entry], x_1=x, y_1={"index.js": own("y")}, pw_1=bundle, oc_1=oc), [])
+        self.assertEqual(len(self.problems([], x_1=x, y_1={"index.js": own("y")}, pw_1=bundle, oc_1=oc)), 2)
 
     def test_a_lookalike_entry_that_matches_nothing_is_a_problem(self):
         entry = {"holder": "oc@1", "lookalike": "x", "files": ["dist/w.mjs"], "why": "w"}
@@ -862,6 +863,11 @@ class UnmarkedTest(unittest.TestCase):
                               oc_1={"dist/w.mjs": packed("undici")})
         self.assertEqual([p.split(" holds")[0] for p in probs], ["l: oc@1:dist/w.mjs"])
         self.assertIn("only undici's own files hold", probs[0])
+        # A step the walk cannot read names no package to fingerprint.
+        self.assertEqual(self.problems(npm_1={"node_modules/we!rd/lib/a.js": own("w")}, oc_1={"dist/w.mjs": packed("w")}), [])
+        # A node_modules/ deeper in the package is no package shipped whole: its file is a copy.
+        probs = self.problems(x_1={"index.js": own("x")}, oc_1={"dist/vendor/node_modules/x/x.min.js": packed("x")})
+        self.assertEqual([p.split(" holds")[0] for p in probs], ["l: oc@1:dist/vendor/node_modules/x/x.min.js"])
         # Its own holder does not hold a copy of it.
         self.assertEqual(self.problems(npm_1={"node_modules/undici/lib/a.js": own("undici"),
                                               "node_modules/undici/lib/b.js": packed("undici")}), [])
@@ -913,14 +919,17 @@ class UnmarkedTest(unittest.TestCase):
             asked.append(len(queries))
             self.assertEqual(req.full_url, vulncheck.OSV_QUERYBATCH)
             self.assertTrue(all(set(q["package"]) == {"name", "ecosystem"} for q in queries))  # no version
-            return io.BytesIO(json.dumps({"results": [{"vulns": [{"id": "A"}]} if q["package"]["name"].endswith("7")
+            return io.BytesIO(json.dumps({"results": [{"vulns": [{"id": "A"}]} if q["package"]["name"][-1] in "7h"
+                                                      else {"next_page_token": "t"} if q["package"]["name"].endswith("8")
                                                       else {} for q in queries]}).encode())
 
         names = {f"p{i}" for i in range(1500)}
-        self.assertEqual(vulncheck.advised_names(names, opener=opener), {n for n in names if n.endswith("7")})
-        self.assertEqual(asked, [1000, 500])
+        # A result with a next page has advisories even when this page lists none.
+        self.assertEqual(vulncheck.advised_names(names, opener=opener), {n for n in names if n[-1] in "78"})
+        self.assertEqual(asked, [1000, 502])  # 999 names and the canary, then the rest
+        blank = lambda req, timeout: io.BytesIO(json.dumps({"results": [{}] * len(json.loads(req.data)["queries"])}).encode())
         for answer in (lambda req, timeout: io.BytesIO(b'{"results": []}'),
-                       lambda req, timeout: io.BytesIO(b"not json")):
+                       lambda req, timeout: io.BytesIO(b"not json"), blank):
             with self.assertRaises(vulncheck.ScanError):
                 vulncheck.advised_names({"x"}, opener=answer)
 

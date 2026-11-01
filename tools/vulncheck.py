@@ -521,6 +521,9 @@ FP_MIN = 5
 MINIFIED_LINE = 1000
 REGISTRY = "https://registry.npmjs.org"
 OSV_QUERYBATCH = "https://api.osv.dev/v1/querybatch"
+# A package with advisories that will not be withdrawn: each batch asks for it, and a batch that
+# finds none for it answered nothing, which fails the scan (as the image scan's curl canary).
+ADVISORY_CANARY = "lodash"
 LITERAL = re.compile(rb'"((?:[^"\\\n]|\\.){%d,%d})"|\'((?:[^\'\\\n]|\\.){%d,%d})\'|`((?:[^`\\$\n]|\\.){%d,%d})`'
                      % (FP_LEN * 3))
 INLINED_LOOKALIKE_KEYS = {"holder", "lookalike", "files", "why"}
@@ -811,8 +814,7 @@ def inlined_copies(where, tarballs, entries, mirror, advised):
                     copies.setdefault((n, v), set()).add(f"{e['holder']}:{f}")
             named.setdefault((e["holder"], f), set()).update(prints.get(f"{name}@{version}", {}).get(path, ((), (), False))[1])
     installed = {at(h) for h in held}
-    shipped = {o[0] for scripts in prints.values() for rel in scripts if "node_modules/" in rel
-               and (o := mark_owner(rel.encode()))}  # packages a tarball ships whole
+    shipped = {n for scripts in prints.values() for rel in scripts if (n := shipped_owner(rel))}
     names = {n for n, _ in installed} | {n for n, _ in copies} | shipped
     has = advised(names)
     # The copies marks or entries name with a version, at versions no tarball here installs: the
@@ -853,10 +855,9 @@ def fingerprints(sources, has):
             if marked or mini:
                 continue
             if "node_modules/" in rel:
-                o = mark_owner(rel.encode())
-                if not o or o[2]:
-                    continue
-                name = o[0]
+                name = shipped_owner(rel)
+                if not name:
+                    continue  # an unreadable step, or a node_modules/ inside the package: a copy
             else:
                 name = at(spec)[0]
             own.setdefault(name, set()).update(ls)
@@ -865,6 +866,14 @@ def fingerprints(sources, has):
         for lit in ls:
             owners[lit] = None if lit in owners else name
     return {lit: name for lit, name in owners.items() if name in has}
+
+
+def shipped_owner(rel):
+    """The package a tarball ships whole at REL, a path under its root node_modules/<name>/ that
+    the walk reads, or None. A node_modules/ deeper in the package (dist/vendor/node_modules/x/)
+    is no installed package: npm's packing drops those, so a file there is a copy like any other."""
+    o = mark_owner(rel.encode()) if rel.startswith("node_modules/") else None
+    return o[0] if o and not o[2] else None
 
 
 def unmarked_problems(where, prints, owner_of, named, entries):
@@ -876,8 +885,7 @@ def unmarked_problems(where, prints, owner_of, named, entries):
     problems, matched = [], set()
     for holder, scripts in sorted(prints.items()):
         for rel, (ls, marked, _) in sorted(scripts.items()):
-            own = mark_owner(rel.encode())
-            own = {at(holder)[0], own[0]} if own else {at(holder)[0]}
+            own = {at(holder)[0], shipped_owner(rel)} - {None}
             hits = {}
             for lit in ls:
                 if (n := owner_of.get(lit)) and n not in own:
@@ -945,8 +953,8 @@ def advised_names(names, env=None, offline=False, opener=urllib.request.urlopen)
             raise ScanError(f"{path}: unreadable OSV database ({e})")
         return found & set(names)
     out = set()
-    for i in range(0, len(names), 1000):
-        chunk = names[i:i + 1000]
+    for i in range(0, len(names), 999):
+        chunk = names[i:i + 999] + [ADVISORY_CANARY]
         body = json.dumps({"queries": [{"package": {"name": n, "ecosystem": "npm"}} for n in chunk]}).encode()
         req = urllib.request.Request(OSV_QUERYBATCH, data=body, headers={"Content-Type": "application/json"})
         try:
@@ -956,8 +964,12 @@ def advised_names(names, env=None, offline=False, opener=urllib.request.urlopen)
             raise ScanError(f"{OSV_QUERYBATCH}: the advisory query failed ({e})")
         if not isinstance(results, list) or len(results) != len(chunk):
             raise ScanError(f"{OSV_QUERYBATCH}: the advisory query answered {len(results or [])} of {len(chunk)} packages")
-        out |= {n for n, r in zip(chunk, results) if (r or {}).get("vulns")}
-    return out
+        # A next_page_token means more advisories remain, so the package has one (osv-scanner reads it so).
+        found = {n for n, r in zip(chunk, results) if (r or {}).get("vulns") or (r or {}).get("next_page_token")}
+        if ADVISORY_CANARY not in found:
+            raise ScanError(f"{OSV_QUERYBATCH}: the advisory query found nothing for {ADVISORY_CANARY}, so its answers are not read")
+        out |= found
+    return out & set(names)
 
 
 def unversioned_problem(where, holder, f, name, paths):
