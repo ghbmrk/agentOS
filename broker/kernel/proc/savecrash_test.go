@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -494,13 +495,14 @@ func TestAStaleLogTheAnchorTakesDeletesNothing(t *testing.T) {
 
 // REQ: LOG-4
 // Only an item file under its canonical name (lowercase hex, .item) is an
-// item: an uppercase-hex name or a bare hash is neither reported nor
-// removed (#4414). Revert mutant: unlogged without its name check.
+// item: an uppercase-hex name, a bare hash or a short hash is neither
+// reported nor removed (#4414). Revert mutants: the start without its name
+// check or its length check (a short hash then stops the start).
 func TestOnlyACanonicalItemNameIsReportedUnlogged(t *testing.T) {
 	b := newBBox(t, recipientWire(t, testRK))
 	h := sha256.Sum256([]byte("not logged"))
 	x := hex.EncodeToString(h[:])
-	odd := []string{strings.ToUpper(x) + itemExt, x}
+	odd := []string{strings.ToUpper(x) + itemExt, x, "ab" + itemExt}
 	for _, f := range odd {
 		if err := os.WriteFile(filepath.Join(b.storeDir(), f), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
@@ -567,7 +569,10 @@ func TestARestoreHoldsTheLockOverItsSweep(t *testing.T) {
 // REQ: BAK-1
 // A restore that cannot take its lock, list the content folder's parent or
 // remove a crashed staging there stops with that error and puts nothing
-// in place (#4413). Revert mutants: each of those errors ignored.
+// in place, and so does one whose lock file is a FIFO, a link or open to
+// other uids (#4413, Security on #4457). Revert mutants: each of those
+// errors ignored; the lock opened without O_NOFOLLOW, without O_NONBLOCK
+// (the test hangs) or without its CheckFile.
 func TestARestoreStopsOnAParentItCannotUse(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the modes; CI runs these as a plain user")
@@ -587,6 +592,29 @@ func TestARestoreStopsOnAParentItCannotUse(t *testing.T) {
 			}
 			return p
 		}},
+		{"plain lock file", 0o700, func(p string) string {
+			// A FIFO would hang an open that waits for a writer.
+			if err := syscall.Mkfifo(filepath.Join(p, restoreLock), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"lock file closed to others", 0o700, func(p string) string {
+			if err := os.WriteFile(filepath.Join(p, restoreLock), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+		{"lock file that is not a link", 0o700, func(p string) string {
+			own := filepath.Join(t.TempDir(), "own")
+			if err := os.WriteFile(own, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(own, filepath.Join(p, restoreLock)); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
 		{"remove", 0o500, func(p string) string {
 			left := filepath.Join(p, restoreStage+"crash")
 			if err := os.MkdirAll(filepath.Join(left, "vision"), 0o700); err != nil {
@@ -602,8 +630,8 @@ func TestARestoreStopsOnAParentItCannotUse(t *testing.T) {
 		}
 		t.Cleanup(func() { os.Chmod(dir, 0o700) })
 		obj := objectWith(t, map[string][]byte{"content/vision": frame(ct, uint32(len(ct)))})
-		if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); !errors.Is(err, fs.ErrPermission) {
-			t.Fatalf("no %s: %v, want a permission error", c.name, err)
+		if err := RestoreSections(obj, nil, filepath.Join(parent, "content")); err == nil || c.mode != 0o700 && !errors.Is(err, fs.ErrPermission) {
+			t.Fatalf("no %s: %v, want it refused", c.name, err)
 		}
 		os.Chmod(dir, 0o700)
 		if _, err := os.Stat(filepath.Join(parent, "content")); !errors.Is(err, os.ErrNotExist) {
