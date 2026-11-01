@@ -255,10 +255,9 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 		}
 		files = append(files, f)
 	}
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: load(t).Importer}
-	if _, err := conf.Check(pkgPath, fs, files, info); err != nil {
-		t.Fatalf("type-checking %s: %v", pkgPath, err)
+	_, info, err := load(t).Check(pkgPath, files)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, f := range files {
 		for _, im := range f.Imports {
@@ -428,7 +427,7 @@ func goList(t *testing.T) []listed {
 		p := byDir[abs]
 		var names []string
 		for _, f := range p.Files {
-			names = append(names, filepath.Base(l.Fset.Position(f.Package).Filename))
+			names = append(names, filepath.Base(l.Fset.File(f.Pos()).Name()))
 		}
 		out = append(out, listed{path: p.Path, dir: p.Dir, goFiles: strings.Join(names, " ")})
 	}
@@ -629,8 +628,8 @@ func TestFenceAdmitsOnlyTheOpenFlags(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-		if _, err := (&types.Config{Importer: load(t).Importer}).Check("x", fs, []*ast.File{f}, info); err != nil {
+		_, info, err := load(t).Check("x", []*ast.File{f})
+		if err != nil {
 			t.Fatalf("%s: %v", src, err)
 		}
 		e := f.Decls[len(f.Decls)-1].(*ast.GenDecl).Specs[0].(*ast.ValueSpec).Values[0]

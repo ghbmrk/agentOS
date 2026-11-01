@@ -1,10 +1,13 @@
 package lintload
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -66,6 +69,34 @@ func TestLoadFailsOnATypeError(t *testing.T) {
 	}
 }
 
+// Load type-checks every package through check, and check fails on a type
+// error: a source the gc compiler passes and go/types refuses would fail the
+// load the same way (#4280 1).
+func TestCheckFailsOnATypeError(t *testing.T) {
+	for src, bad := range map[string]bool{"package a\n\nvar X int = \"s\"\n": true, "package a\n\nvar X int = 1\n": false} {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "a.go", src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, info, err := check(fset, nil, nil, "example.test/m/a", []*ast.File{f})
+		if bad != (err != nil) || bad && !strings.Contains(err.Error(), "type-checking example.test/m/a") || !bad && info.Defs == nil {
+			t.Errorf("%q: got %v, want an error %v", src, err, bad)
+		}
+	}
+}
+
+// A line directive would make a file read as another wherever a lint names
+// files by position (Security R1 on #4443), so the load refuses one.
+func TestLoadRefusesALineDirective(t *testing.T) {
+	for _, d := range []string{"//line probe.go:1", "/*line probe.go:1*/"} {
+		dir := module(t, map[string]string{"a/a.go": "package a\n\n" + d + "\nvar X = 1\n"})
+		if _, err := Load(dir, linux, "./a"); err == nil || !strings.Contains(err.Error(), "line directive") {
+			t.Errorf("%s: got %v, want the directive refused", d, err)
+		}
+	}
+}
+
 // Under Tests a package is loaded with its in-package tests, and its
 // external test package imports that same source-checked package.
 func TestLoadTests(t *testing.T) {
@@ -95,6 +126,8 @@ func TestUnread(t *testing.T) {
 	dir := module(t, map[string]string{
 		"a/a.go":           "package a\n",
 		"a/tagged.go":      "//go:build agentos_x\n\npackage a\n",
+		"a/plus.go":        "// +build agentos_y\n\npackage a\n",
+		"a/block.go":       "/* header */\n\n//go:build agentos_z\n\npackage a\n",
 		"a/cgo.go":         "package a\n\nimport \"C\"\n",
 		"a/asm_amd64.s":    "",
 		"a/blob.syso":      "",
@@ -114,7 +147,7 @@ func TestUnread(t *testing.T) {
 	for i := range got {
 		got[i] = filepath.Base(got[i])
 	}
-	if want := []string{"asm_amd64.s", "blob.syso", "cgo.go", "tagged.go"}; !slices.Equal(got, want) {
+	if want := []string{"asm_amd64.s", "blob.syso", "block.go", "cgo.go", "plus.go", "tagged.go"}; !slices.Equal(got, want) {
 		t.Fatalf("unread %q, want %q", got, want)
 	}
 	// A cgo build type-checks the cgo file's Go, but not its C.
@@ -136,20 +169,52 @@ func TestUnread(t *testing.T) {
 }
 
 // The loader runs go list, so childproc's gate exempts it; that holds only
-// while no non-test file imports it, which this checks over the module.
+// while no non-test file imports it, under any build, which this checks by
+// reading every non-test Go file under broker/ (vendor and testdata aside).
 func TestOnlyTestsImportTheLoader(t *testing.T) {
 	const self = "github.com/ghbmrk/agentos/broker/internal/lintload"
-	cmd := exec.Command("go", "list", "-e", "-f", "{{.ImportPath}} {{join .Deps \" \"}}", "./...")
-	cmd.Dir = "../.."
-	cmd.Env = append(os.Environ(), "GOFLAGS=")
-	out, err := cmd.Output()
+	importers, err := loaderImporters("../..", self)
 	if err != nil {
-		t.Fatalf("go list: %v", err)
+		t.Fatal(err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		f := strings.Fields(line)
-		if len(f) > 0 && f[0] != self && slices.Contains(f[1:], self) {
-			t.Errorf("%s links %s from a non-test file; import it only from _test.go files", f[0], self)
+	for _, f := range importers {
+		t.Errorf("%s imports %s; import it only from _test.go files", f, self)
+	}
+	// The scan sees a tagged non-test importer, and not a test one.
+	dir := module(t, map[string]string{
+		"a/a.go":      "//go:build agentos_x\n\npackage a\n\nimport _ \"example.test/m/lintload\"\n",
+		"b/b_test.go": "package b\n\nimport _ \"example.test/m/lintload\"\n",
+	})
+	if got, err := loaderImporters(dir, "example.test/m/lintload"); err != nil || len(got) != 1 || !strings.HasSuffix(got[0], "a/a.go") {
+		t.Fatalf("synthetic: got %q, %v, want a/a.go alone", got, err)
+	}
+}
+
+func loaderImporters(root, self string) ([]string, error) {
+	var found []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
+		if d.IsDir() {
+			if n := d.Name(); n == "vendor" || n == "testdata" || strings.HasPrefix(n, ".") && p != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), p, nil, parser.ImportsOnly)
+		if err != nil {
+			return err
+		}
+		for _, im := range f.Imports {
+			if im.Path.Value == strconv.Quote(self) {
+				found = append(found, p)
+			}
+		}
+		return nil
+	})
+	return found, err
 }

@@ -54,7 +54,7 @@ type Loaded struct {
 	Fset     *token.FileSet
 	Packages []*Package     // the named packages (and under Module the main module's dependencies), dependencies first
 	Importer types.Importer // every listed package, from export data
-	Sizes    types.Sizes
+	sizes    types.Sizes
 	goos     string
 	goarch   string
 }
@@ -73,7 +73,8 @@ type listed struct {
 }
 
 // goVars are the variables the go command reads from the test's
-// environment; nothing else reaches it, and GOFLAGS is always empty, so a
+// environment; nothing else reaches it, GOFLAGS is empty and GOENV=off
+// keeps a go env file from setting it again, so a
 // lint loads the same packages wherever it runs. GOOS, GOARCH and
 // CGO_ENABLED come from a Build when it sets them, else the host's
 // defaults.
@@ -87,7 +88,7 @@ var goVars = []string{
 // Load lists patterns under b in dir and type-checks each package they
 // name.
 func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
-	env := []string{"GOFLAGS="}
+	env := []string{"GOFLAGS=", "GOENV=off"}
 	for _, k := range goVars {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
@@ -128,7 +129,7 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 		return nil, err
 	}
 
-	l := &Loaded{Fset: token.NewFileSet(), Sizes: types.SizesFor("gc", platform[1]), goos: platform[0], goarch: platform[1]}
+	l := &Loaded{Fset: token.NewFileSet(), sizes: types.SizesFor("gc", platform[1]), goos: platform[0], goarch: platform[1]}
 	export := map[string]string{}
 	var targets []listed
 	dec := json.NewDecoder(bytes.NewReader(out))
@@ -194,6 +195,18 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 			if err != nil {
 				return nil, err
 			}
+			// cgo's generated files (in the build cache) carry line
+			// directives back to the cgo file, which Unread always names.
+			for _, cg := range f.Comments {
+				if filepath.Dir(name) != p.Dir {
+					break
+				}
+				for _, c := range cg.List {
+					if strings.HasPrefix(c.Text, "//line ") || strings.HasPrefix(c.Text, "/*line ") {
+						return nil, fmt.Errorf("%s: a line directive would make the file read as another; lints name files by position", l.Fset.Position(c.Pos()))
+					}
+				}
+			}
 			lp.Files = append(lp.Files, f)
 		}
 		// A cgo file's C is out of go/types' sight, whichever build reads
@@ -202,11 +215,7 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 		for _, set := range [][]string{p.CgoFiles, p.SFiles, p.SysoFiles, p.CFiles, p.CXXFiles, p.HFiles, p.FFiles, p.MFiles, p.SwigFiles, p.SwigCXXFiles} {
 			lp.skipped = append(lp.skipped, set...)
 		}
-		for _, n := range p.IgnoredGoFiles {
-			if !strings.HasSuffix(n, "_test.go") {
-				lp.skipped = append(lp.skipped, n)
-			}
-		}
+		lp.skipped = append(lp.skipped, p.IgnoredGoFiles...)
 		imp := l.Importer
 		if len(p.ImportMap) > 0 || lp.XTest {
 			gc := importer.ForCompiler(l.Fset, "gc", lookup(p.ImportMap))
@@ -223,18 +232,8 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 				return gc.Import(path)
 			})
 		}
-		lp.Info = &types.Info{
-			Types:      map[ast.Expr]types.TypeAndValue{},
-			Defs:       map[*ast.Ident]types.Object{},
-			Uses:       map[*ast.Ident]types.Object{},
-			Implicits:  map[ast.Node]types.Object{},
-			Selections: map[*ast.SelectorExpr]*types.Selection{},
-			Scopes:     map[ast.Node]*types.Scope{},
-			Instances:  map[*ast.Ident]types.Instance{},
-		}
-		conf := types.Config{Importer: imp, Sizes: l.Sizes}
-		if lp.Types, err = conf.Check(path, l.Fset, lp.Files, lp.Info); err != nil {
-			return nil, fmt.Errorf("type-checking %s (%s/%s): %v", p.ImportPath, l.goos, l.goarch, err)
+		if lp.Types, lp.Info, err = check(l.Fset, imp, l.sizes, path, lp.Files); err != nil {
+			return nil, fmt.Errorf("%v (%s/%s)", err, l.goos, l.goarch)
 		}
 		checked[p.ImportPath] = lp.Types
 		l.Packages = append(l.Packages, lp)
@@ -243,19 +242,20 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 }
 
 // Skipped returns the base names of the files in the package's directory
-// the build left out or go/types cannot see (ignored, cgo, assembly, syso
-// and other non-Go sources), for a lint that refuses every one of them.
+// the build left out or go/types cannot see (ignored Go files, tests
+// included, cgo, assembly, syso and other non-Go sources), for a lint that
+// refuses every one of them.
 func (p *Package) Skipped() []string { return append([]string(nil), p.skipped...) }
 
 // Check type-checks files as package path against the load's export data,
 // for a lint's synthetic sources.
 func (l *Loaded) Check(path string, files []*ast.File) (*types.Package, *types.Info, error) {
-	return Check(l.Fset, l.Importer, l.Sizes, path, files)
+	return check(l.Fset, l.Importer, l.sizes, path, files)
 }
 
-// Check type-checks files as package path with imp, recording every Info
-// map; any type error fails it.
-func Check(fset *token.FileSet, imp types.Importer, sizes types.Sizes, path string, files []*ast.File) (*types.Package, *types.Info, error) {
+// check type-checks files as package path with imp, recording every Info
+// map; any type error fails it. Load checks every package through it.
+func check(fset *token.FileSet, imp types.Importer, sizes types.Sizes, path string, files []*ast.File) (*types.Package, *types.Info, error) {
 	info := &types.Info{
 		Types:      map[ast.Expr]types.TypeAndValue{},
 		Defs:       map[*ast.Ident]types.Object{},
@@ -290,10 +290,12 @@ func Unread(loads ...*Loaded) ([]string, error) {
 	for _, l := range loads {
 		for _, p := range l.Packages {
 			for _, f := range p.Files {
-				read[l.Fset.Position(f.Package).Filename] = true
+				read[l.Fset.File(f.Pos()).Name()] = true
 			}
 			for _, n := range p.skipped {
-				cands = append(cands, cand{p.Dir, n})
+				if !strings.HasSuffix(n, "_test.go") {
+					cands = append(cands, cand{p.Dir, n})
+				}
 			}
 			for _, n := range p.cgo {
 				cgo[filepath.Join(p.Dir, n)] = true
@@ -361,18 +363,18 @@ func reachable(dir, name, goos, goarch string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// Every //go:build or // +build line anywhere in the file gives free
+	// tags: more lines than go honours only adds sets to try, and
+	// MatchFile, go's own reading of the header, decides each one.
 	free := map[string]bool{"cgo": true}
 	for _, line := range strings.Split(string(src), "\n") {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "//") && !constraint.IsGoBuild(line) {
+		if !constraint.IsGoBuild(line) && !constraint.IsPlusBuild(line) {
 			continue
-		}
-		if !constraint.IsGoBuild(line) {
-			break // past the header: build lines must come before the package clause
 		}
 		x, err := constraint.Parse(line)
 		if err != nil {
-			return false, fmt.Errorf("%s: %v", filepath.Join(dir, name), err)
+			continue // go ignores a line it cannot parse as a constraint, and MatchFile reads the header itself
 		}
 		x.Eval(func(tag string) bool {
 			if !platformTags[tag] && !strings.HasPrefix(tag, "go1.") {

@@ -152,16 +152,20 @@ func TestEveryWriteAtomicCallerTestsACrash(t *testing.T) {
 		}
 	})
 	t.Run("a stop that is not a field or a named function's parameter fails", func(t *testing.T) {
-		for name, body := range map[string]string{
-			"a local":         "func Save(dir string) error { stop := func(int) bool { return false }; return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n",
-			"a literal":       "func Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, func(int) bool { return false }) }\n",
-			"a closure's own": "var Save = func(dir string, stop func(int) bool) error { return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n",
-			"a package var":   "var stop func(int) bool\n\nfunc Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n",
-			"a call's result": "func hook() func(int) bool { return nil }\n\nfunc Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, hook()) }\n",
+		// Each test sets whatever the shape lets it set, and the call site
+		// is still refused.
+		hook := "func(int) bool { return true }"
+		for name, c := range map[string]struct{ body, test, want string }{
+			"a local":                         {"func Save(dir string) error { stop := func(int) bool { return false }; return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n", "func f() { Save(\"d\") }\n", "a local or package variable"},
+			"a literal":                       {"func Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, func(int) bool { return false }) }\n", "func f() { Save(\"d\") }\n", "not a field or a parameter"},
+			"a closure's own":                 {"var Save = func(dir string, stop func(int) bool) error { return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n", "func f() { Save(\"d\", " + hook + ") }\n", "a function literal's parameter"},
+			"a package var":                   {"var stop func(int) bool\n\nfunc Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, stop) }\n", "func init() { stop = " + hook + " }\n", "a local or package variable"},
+			"a call's result":                 {"func hook() func(int) bool { return nil }\n\nfunc Save(dir string) error { return privfile.WriteAtomic(dir, \"f\", nil, hook()) }\n", "var _ = hook()\n", "not a field or a parameter"},
+			"a local shadowing the parameter": {"func Save(dir string, stop func(int) bool) error {\n\t{\n\t\tstop := func(int) bool { return false }\n\t\treturn privfile.WriteAtomic(dir, \"f\", nil, stop)\n\t}\n}\n", "func f() { Save(\"d\", " + hook + ") }\n", "a local or package variable"},
 		} {
 			t.Run(name, func(t *testing.T) {
-				files := map[string]string{"broker/side/side.go": call + body, "broker/side/side_test.go": "package side\n\nvar _ = Save\n"}
-				one(t, lint(t, files, ""), "broker/side/side.go")
+				files := map[string]string{"broker/side/side.go": call + c.body, "broker/side/side_test.go": "package side\n\n" + c.test}
+				one(t, lint(t, files, ""), c.want)
 			})
 		}
 	})
@@ -502,7 +506,7 @@ func crashLintDir(l *lintload.Loaded, pkgs []*lintload.Package, root, rel, impor
 	fset := l.Fset
 	var problems []string
 	report := func(pos token.Pos, fn, msg string) {
-		p := fset.Position(pos)
+		p := fset.PositionFor(pos, false)
 		problems = append(problems, fmt.Sprintf("%s/%s:%d: %s %s", rel, filepath.Base(p.Filename), p.Line, fn, msg))
 	}
 	// A non-test file that imports privfile and that the race run does not
@@ -520,7 +524,7 @@ func crashLintDir(l *lintload.Loaded, pkgs []*lintload.Package, root, rel, impor
 			self = p.Path
 		}
 		for _, f := range p.Files {
-			name := fset.Position(f.Package).Filename
+			name := fset.File(f.Pos()).Name()
 			read[name] = true
 			all = append(all, f)
 			if strings.HasSuffix(name, "_test.go") {
@@ -853,9 +857,8 @@ func (p *proof) local(o types.Object) bool {
 }
 
 // direct reports whether sel is not a selection, or selects a field or
-// method the receiver's type declares itself. A promoted one is refused: a
-// shallower field of an embedded type the checker could not load (every
-// import but the directory's own) would shadow it in the real build.
+// method the receiver's type declares itself. A promoted one is refused,
+// which keeps the proof to methods the directory's own types declare.
 func (p *proof) direct(sel *ast.SelectorExpr) bool {
 	s := p.info.Selections[sel]
 	return s == nil || len(s.Index()) == 1

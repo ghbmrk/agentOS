@@ -153,14 +153,9 @@ func logfLoad(t *testing.T) *lintload.Loaded {
 // calls it saw and the position of each argument that carries error text.
 func logfErrorArgs(t *testing.T, fset *token.FileSet, files []*ast.File) (int, []string) {
 	t.Helper()
-	info := &types.Info{
-		Types: map[ast.Expr]types.TypeAndValue{},
-		Uses:  map[*ast.Ident]types.Object{},
-		Defs:  map[*ast.Ident]types.Object{},
-	}
-	conf := types.Config{Importer: logfLoad(t).Importer}
-	if _, err := conf.Check("change", fset, files, info); err != nil {
-		t.Fatalf("type-check: %v", err)
+	_, info, err := logfLoad(t).Check("change", files)
+	if err != nil {
+		t.Fatal(err)
 	}
 	errIface := types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 	carriesError := func(e ast.Expr) bool {

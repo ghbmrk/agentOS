@@ -1523,7 +1523,7 @@ func rootSideUses(root string, bins []string) ([]use, error) {
 		loads = append(loads, l)
 		for _, p := range l.Packages {
 			for _, f := range p.Files {
-				rel, err := filepath.Rel(root, l.Fset.Position(f.Pos()).Filename)
+				rel, err := filepath.Rel(root, l.Fset.File(f.Pos()).Name())
 				if err != nil {
 					return nil, err
 				}
@@ -1566,7 +1566,7 @@ func fileUses(fset *token.FileSet, f *ast.File, info *types.Info, rel string) []
 				}
 			case *ast.Ident:
 				if op, ok := pathOpName(info.Uses[n]); ok && !safe[n] {
-					uses = append(uses, use{file: rel, fn: fn, op: op, line: fset.Position(n.Pos()).Line})
+					uses = append(uses, use{file: rel, fn: fn, op: op, line: fset.PositionFor(n.Pos(), false).Line})
 				}
 			}
 			return true
