@@ -2,7 +2,7 @@
 // as root, it opens the sealed store's tpm slot, derives the kernel's keys,
 // closes the store, and becomes the kernel process: it drops to the kernel's
 // uid and gid and execs the kernel main, with the keys on an inherited pipe
-// (descriptor 3):
+// (handoff.KeyFD):
 //
 //	agentos-unlock -store /var/lib/agentos-store/store -uid 980 -gid 980 \
 //	    -exec /usr/lib/agentos/agentos-kernel -- -log ... -owner-sock ...
@@ -10,7 +10,7 @@
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
 // it before the exec, and the kernel gets only the log key, the head key,
 // the clerk root key, the log anchor's counter and the owner's anchors on
-// descriptor 3, and one connection to the TPM on descriptor 4 for that
+// handoff.KeyFD, and one connection to the TPM on handoff.TPMFD for that
 // counter (LOG-2, STO-1), since the kernel's uid can open no TPM itself. Before that hand-off it caps
 // the slot's boot path (#2977), so that connection unseals nothing for the
 // rest of the boot. The box's policy key and the store's anchor come
@@ -22,8 +22,6 @@
 // out the owner's lost-card request (lostCard; REC-4, route B of D-201); with
 // -checker-seed, it writes the checker's sealed code seed (writeCheckerSeed;
 // CH-4, MIG-4-exit-c2). Each function's comment says how.
-//
-//go:debug containermaxprocs=0
 package main
 
 import (
@@ -64,9 +62,7 @@ func main() {
 	log.SetFlags(0)
 	c, err := parse(os.Args[1:], os.Stderr)
 	if err == nil {
-		if err = reserve(); err == nil {
-			err = unlockAndExec(c, storePins(c.store))
-		}
+		err = unlockAndExec(c, storePins(c.store))
 	}
 	log.Fatal(err)
 }
@@ -872,25 +868,17 @@ func getres(trap uintptr) (r, e, s int) {
 	return int(a), int(b), int(c)
 }
 
-// reserve holds handoff.KeyFD and handoff.TPMFD from the start, so no runtime
-// descriptor (the poller's; go:debug above shuts its cgroup file) is there for
-// inherit to overwrite: a poll on it before the exec kills the step (#4474).
-func reserve() error {
-	var p [2]int
-	if err := syscall.Pipe2(p[:], syscall.O_CLOEXEC); err != nil || p != [2]int{handoff.KeyFD, handoff.TPMFD} {
-		return fmt.Errorf("agentos-unlock: descriptors %d and %d are not free at my start (got %v, %v)", handoff.KeyFD, handoff.TPMFD, p, err)
-	}
-	return nil
-}
-
-// inherit moves each descriptor onto the number it maps to, over reserve's
-// placeholders, and makes every descriptor above them close-on-exec (Linux
-// 5.11), so only those and 0 to 2 reach the exec, none a parent left open.
+// inherit makes every descriptor above 2 close-on-exec (Linux 5.11), so none
+// a parent left open reaches the exec, then moves each onto the number it
+// maps to: handoff's, which no descriptor of the runtime's can be (#4474).
 func inherit(fds map[int]int) error {
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return err
+	}
 	for fd, want := range fds {
 		if err := syscall.Dup3(fd, want, 0); err != nil {
 			return err
 		}
 	}
-	return unix.CloseRange(handoff.TPMFD+1, ^uint(0), unix.CLOSE_RANGE_CLOEXEC)
+	return nil
 }
