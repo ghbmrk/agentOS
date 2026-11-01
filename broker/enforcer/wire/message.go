@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -64,6 +65,20 @@ const (
 	// ReadTraffic is a device's traffic summary (NET-5).
 	ReadTraffic ReadWhat = 4
 )
+
+// SummaryInterval is the interval between traffic summaries that this
+// format definition fixes (NET-2 The channel, D-255): the core asks for
+// one each interval, and the kernel takes a byte-cap count as fresh only
+// while it is no older than twice this, so one lost summary does not make
+// it stale (NET-2 Byte caps, broker/kernel/capgate). The enforcer and the
+// kernel both read it here, never a copy (ASSUMPTIONS ENF-d-w5).
+const SummaryInterval = time.Minute
+
+// PastCap is whether a byte count is past its cap: the count the enforcer
+// drops and trips on, and the one the kernel's check stops short of
+// (NET-2 Byte caps, D-255). A count at the cap is not past it. Both sides
+// call this one test, so they cannot disagree on the edge.
+func PastCap(count, cap uint64) bool { return count > cap }
 
 // Code is the enforcer's verdict on a request.
 type Code byte
