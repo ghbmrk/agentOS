@@ -167,6 +167,9 @@ class DiskBudgetTest(unittest.TestCase):
         rc, out = self.held(*(self.ramp(11) + [11 * 1024 + 1700]))
         self.assertEqual(rc, 0, out)
         self.assertIn("at most 14.4 GB of its 30 GB budget (12.7 GB sampled, plus 1.7 GB", out)
+        # A 205 MB part is 0.2002 GB: rounded up, it prints as 0.3.
+        rc, out = self.held(205)
+        self.assertIn("at most 0.6 GB of its 30 GB budget (0.3 GB sampled, plus 0.3 GB", out)
         for grew in ([1], [1023, 1024, 1025], self.ramp(9) + [9 * 1024 + 517, 4000]):
             rc, out = self.held(*grew)
             t, p, r = (float(x) for x in re.search(r"at most ([\d.]+) GB .*\(([\d.]+) GB sampled, plus ([\d.]+) GB", out).groups())
@@ -200,8 +203,9 @@ class DiskBudgetTest(unittest.TestCase):
         rc, out = self.run_step("Disk budget held")
         self.assertNotEqual(rc, 0, out)
         self.assertIn("::error title=disk budget::cannot read the disk use (got ''), so the budget is unchecked: "
-                      "df failed on a file system the \"Disk budget\" notices list; rerun the job, and if it "
-                      "fails again check that those mounts still exist when the job ends", out)
+                      "df read none of the file systems the \"Disk budget\" notices list, or %s/disk-used is gone; "
+                      "rerun the job, and if it fails again check that those mounts and that script still exist "
+                      "when the job ends" % (self.t / "temp"), out)
 
     def test_held_passes_quietly_when_the_guard_never_ran(self):
         rc, out = self.run_step("Disk budget held", avail_mb=0, used_mb=0)
@@ -235,9 +239,9 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         # #4434: "Free runner disk" frees only /, so a short mount of its own gets a step that works.
         self.assertIn("::error title=disk budget::unknown-cloud (no DMI vendor) runner: image build needs 30 GB free on %s, "
-                      "runner has 10 GB; %s is its own file system, which \"Free runner disk\" does not free: point "
-                      "what the build writes there at a directory on / in \"Build image\", and list that directory "
-                      "here\n" % (temp, temp), out)
+                      "runner has 10 GB; %s is its own file system, which \"Free runner disk\" does not free: move what "
+                      "every step of this job writes under %s to a directory on /, and put that directory in place of "
+                      "%s in this step's df line\n" % (temp, temp, temp, temp), out)
         self.assertNotIn("free more in", out)
         self.assertEqual(out.count("::error"), 1, out)
         # One notice per file system: /var/tmp and /root share "/" and are read once.

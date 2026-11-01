@@ -149,7 +149,7 @@ jobs:
             echo "::notice title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB"
             # "Free runner disk" frees space on / only; a short mount of its own needs the build's writes moved.
             if [ "$m" = / ]; then fix='free more in "Free runner disk"'
-            else fix="$m is its own file system, which \"Free runner disk\" does not free: point what the build writes there at a directory on / in \"Build image\", and list that directory here"; fi
+            else fix="$m is its own file system, which \"Free runner disk\" does not free: move what every step of this job writes under $m to a directory on /, and put that directory in place of $m in this step's df line"; fi
             [ "$have" -ge "$DISK_NEED_GB" ] || { echo "::error title=disk budget::$cloud runner: image build needs $DISK_NEED_GB GB free on $m, runner has $have GB; $fix"; fail=1; }
           done < "$RUNNER_TEMP/disk.mounts"
           [ "$fail" = 0 ]
@@ -272,7 +272,7 @@ jobs:
         run: |
           [ -s "$RUNNER_TEMP/disk.base" ] || { echo "disk budget: no baseline, the guard did not pass"; exit 0; }
           now=$("$RUNNER_TEMP/disk-used")
-          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df failed on a file system the \"Disk budget\" notices list; rerun the job, and if it fails again check that those mounts still exist when the job ends"; exit 1; }
+          [[ "$now" =~ ^[0-9]+$ ]] || { echo "::error title=disk budget::cannot read the disk use (got '$now'), so the budget is unchecked: df read none of the file systems the \"Disk budget\" notices list, or $RUNNER_TEMP/disk-used is gone; rerun the job, and if it fails again check that those mounts and that script still exist when the job ends"; exit 1; }
           echo "$now" >> "$RUNNER_TEMP/disk.samples"
           # Growth of the highest sample over the baseline, and the largest rise between two samples (MB).
           # An empty sample (one df that failed) is skipped; the final reading above always counts.
