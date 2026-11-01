@@ -211,10 +211,14 @@ func (h *Kernel) HoldRecoveryCard(key []byte) {
 	}
 }
 
-// cardID is the backup recipient's ID for a card's handoff.CardKeyLen
-// bits: the store's recipient once the unlock step put them in.
-func cardID(bits []byte) (string, error) {
-	rec, err := handoff.StoreRecoveryKey(bits)
+// cardID is the backup recipient's ID for a made card's handoff.MadeCardLen
+// bytes, from its recovery key's bits: the store's recipient once the
+// unlock step put them in.
+func cardID(card []byte) (string, error) {
+	if len(card) != handoff.MadeCardLen {
+		return "", handoff.ErrHandoff
+	}
+	rec, err := handoff.StoreRecoveryKey(card[:handoff.CardKeyLen])
 	if err != nil {
 		return "", err
 	}

@@ -80,13 +80,23 @@ const recipientXLen = 32
 // from this one.
 const recipientTag = "agentos-backup-recipient/v1\n"
 
-const handoffTag = "agentos-kernel-keys/v9\n"
+const handoffTag = "agentos-kernel-keys/v10\n"
 
 // CardKeyLen is a lost-card rotation's new key as the Owner Card prints
 // it: 160 bits (card.RecoveryKeyText), from which StoreRecoveryKey derives
 // the store's recovery key (MIG-4-recovery-len, #3406). The kernel holds
 // these bits, so the page can print the card that opens the store.
 const CardKeyLen = 20
+
+// PassSeedLen is the seed of a lost-card rotation's new passphrase
+// (card/words.FromSeed): drawn at random apart from the card's bits, so a
+// recovery key replaced later (route A) derives nothing that still opens
+// the store (MIG-4-recovery-r4d).
+const PassSeedLen = 16
+
+// MadeCardLen is a lost-card rotation's new card as the kernel holds it:
+// the recovery key's CardKeyLen bits, then the passphrase's seed.
+const MadeCardLen = CardKeyLen + PassSeedLen
 
 // StoreRecoveryKey is the store's recovery key, seal.RecoveryLen bytes,
 // for a card's CardKeyLen bits: card.StoreRecoveryKey's derivation (the
@@ -150,7 +160,7 @@ const maxAnchor = 2 + len(key.AlgES256) + 1 + 253 + 1 + 65 + 1
 // theirs, the count and
 // MaxAnchors ES256 keys. It is far below a pipe's 64 KiB buffer, so the
 // unlock step's write never waits for a reader.
-const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + CardKeyLen + 1 + MaxAnchors*maxAnchor
+const maxHandoff = len(handoffTag) + 32 + ed25519.SeedSize + 32 + maxCounter + 2 + RecipientLen + 2 + pageca.MaxSealed + 1 + ed25519.SeedSize + 1 + ed25519.PublicKeySize + 1 + MaxSlot + 1 + MadeCardLen + 1 + MaxAnchors*maxAnchor
 
 // maxCounter is the longest counter: three length-prefixed fields and a
 // handle.
@@ -187,9 +197,9 @@ type KernelKeys struct {
 	LinkKey   ed25519.PrivateKey // none or a whole key (LinkKeyEntry)
 	FirstEdge ed25519.PublicKey  // none or PublicKeySize bytes (FirstEdgeEntry)
 	Slot      string             // SlotTPM, or another slot's kind
-	// NewRecovery is the card bits of the recovery key the unlock step put
-	// in the store at this boot (D-201 route B), CardKeyLen bytes, or
-	// none. The kernel holds it only until the owner confirms the new card.
+	// NewRecovery is the card the unlock step put in the store at this
+	// boot (D-201 route B), MadeCardLen bytes: its recovery key's bits and
+	// its passphrase's seed; or none. The kernel holds it only until the owner confirms the new card.
 	NewRecovery []byte
 }
 
@@ -395,7 +405,7 @@ func (k KernelKeys) Marshal() ([]byte, error) {
 		len(k.Recipient) != 0 && !validRecipient(k.Recipient) || len(k.PageCA) != 0 && !validPageCA(k.PageCA) ||
 		len(k.LinkKey) != 0 && len(k.LinkKey) != ed25519.PrivateKeySize ||
 		len(k.FirstEdge) != 0 && len(k.FirstEdge) != ed25519.PublicKeySize || !validSlot(k.Slot) ||
-		len(k.NewRecovery) != 0 && len(k.NewRecovery) != CardKeyLen {
+		len(k.NewRecovery) != 0 && len(k.NewRecovery) != MadeCardLen {
 		return nil, ErrHandoff
 	}
 	b := make([]byte, 0, maxHandoff)
@@ -541,7 +551,7 @@ func parseKeys(b []byte) (KernelKeys, error) {
 		return KernelKeys{}, ErrHandoff
 	}
 	// None: no lost-card rotation ran at this boot.
-	rec, rest, ok := optional(rest, CardKeyLen)
+	rec, rest, ok := optional(rest, MadeCardLen)
 	if !ok || len(rest) < 1 {
 		return KernelKeys{}, ErrHandoff
 	}

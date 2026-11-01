@@ -10,7 +10,6 @@ package mdns
 // paired network or of another device.
 
 import (
-	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -476,10 +475,21 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// A packet costs a bounded number of claim lookups whatever it
-	// repeats: one or two for each of its records, and, if it enumerates
-	// service types, one for each of the sender's instances.
-	elsewhere := func(k string) bool { return f.claimed.elsewhere(k, iface, now) }
+	// Each name is looked up in the claims once a packet, however often
+	// the packet names it: its records' names and targets, and, if it
+	// enumerates service types, the sender's instances. A lookup looks at
+	// two live claims at most, and drops each expired one it meets, so pays
+	// for that once. So a packet costs at most 2*(maxNames + 2*maxRecords)
+	// looks at live claims, however many interfaces the relay hears.
+	seen := map[string]bool{}
+	elsewhere := func(k string) bool {
+		v, ok := seen[k]
+		if !ok {
+			v = f.claimed.elsewhere(k, iface, now)
+			seen[k] = v
+		}
+		return v
+	}
 	hosts, ins := table(f.hosts, iface), table(f.ins, iface)
 	rs := slices.Concat(m.answers, m.additional)
 	// The packet's own proof first: its hosts, then the instances on them;
@@ -507,9 +517,14 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 	typeSeen := map[string]bool{}
 	hasType := func(k string) bool {
 		if types == nil {
+			// Each instance once, though the packet may prove one the
+			// table already holds.
 			types = map[string][]string{}
-			for _, ks := range [][]string{live(ins, now), slices.Collect(maps.Keys(pi))} {
-				for _, k := range ks {
+			for k := range pi {
+				types[parentKey(k)] = append(types[parentKey(k)], k)
+			}
+			for _, k := range live(ins, now) {
+				if !pi[k] {
 					types[parentKey(k)] = append(types[parentKey(k)], k)
 				}
 			}
@@ -556,16 +571,18 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		}
 	}
 	// Then the sender's names are what it just proved, until their TTL; a
-	// goodbye (TTL 0) passes and ends the name.
+	// goodbye (TTL 0) passes and ends the name now.
 	for _, r := range kept {
-		t := map[uint16]names{typeA: hosts, typeAAAA: hosts, typeSRV: ins}[r.typ]
-		switch {
-		case t == nil:
-		case r.ttl == 0:
-			delete(t, r.name.key())
+		var t names
+		switch r.typ {
+		case typeA, typeAAAA:
+			t = hosts
+		case typeSRV:
+			t = ins
 		default:
-			t.add(r.name.key(), now.Add(min(time.Duration(r.ttl)*time.Second, ownHold)), now, nil)
+			continue
 		}
+		t.add(r.name.key(), now.Add(min(time.Duration(r.ttl)*time.Second, ownHold)), now, nil)
 	}
 	if len(kept) == 0 {
 		return nil

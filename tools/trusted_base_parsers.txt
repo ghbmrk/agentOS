@@ -23,6 +23,7 @@ inert  github.com/ghbmrk/agentos/broker/kernel/ipform -- reads fixed byte positi
 parser github.com/ghbmrk/agentos/broker/camwire -- frames, settings bundles and image manifests from a camera node or the enforcer, and the owner's passkey assertions
 parser github.com/ghbmrk/agentos/broker/clerk/camera -- frame headers and status from camera nodes, and their TLS handshakes; agentos-camdecode runs in the sandbox
 parser github.com/ghbmrk/agentos/broker/clerk/homekit -- TLV8, encrypted session frames, HTTP and EVENT/1.0 responses and /accessories and /characteristics JSON from HomeKit accessories (DEV-homekit a, b1)
+inert  github.com/ghbmrk/agentos/broker/card/words -- splits only its own embedded wordlist; draws words from HKDF output
 inert  github.com/ghbmrk/agentos/broker/cgroup -- reads the host kernel's cgroup files
 inert  github.com/ghbmrk/agentos/broker/checker/checkersock -- socket between trusted processes (agentosd and the checker)
 inert  github.com/ghbmrk/agentos/broker/childproc -- starts processes; decodes nothing
