@@ -490,21 +490,25 @@ func (c *Clerk) markSilent(n *node, id string) {
 // turnOff is DEV-3's refusal: the node is off and dialed no more until
 // the owner re-pins it, and the loss is logged and in STATUS (KRN-7). It
 // reports false, and changes nothing, when the owner re-pinned the node
-// after pin was dialed.
+// after pin was dialed. STATUS reads off only once the line and the event
+// are out (#4431); the delivery lock holds a re-pin until then, so the
+// owner's newer word still wins.
 func (c *Clerk) turnOff(n *node, pin Node) bool {
 	id := pin.ID
+	n.deliver.Lock()
+	defer n.deliver.Unlock()
 	c.mu.Lock()
 	// A re-pin that landed after this handshake is the owner's newer word.
 	stale := n.pin.Key != pin.Key
-	if !stale {
-		n.off = true
-	}
 	c.mu.Unlock()
 	if stale {
 		return false
 	}
 	c.log(id, "off: its key does not match the pin; re-pin it on the local page (KRN-7)")
 	c.event(id, KeyRefused)
+	c.mu.Lock()
+	n.off = true
+	c.mu.Unlock()
 	return true
 }
 
