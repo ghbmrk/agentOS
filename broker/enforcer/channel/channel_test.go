@@ -990,3 +990,31 @@ func TestCountRead(t *testing.T) {
 		t.Errorf("source outside the format: %v", c)
 	}
 }
+
+// TestPausedBurstTripsNothingMore (Security release on #4377): a paused
+// core that keeps asking past its rate trips nothing more, while tripped
+// or after the reflash step, so its retries never undo the owner's step;
+// a summary burst past the rate at the Reflashed stage, where summaries
+// act, still trips. Revert mutant: counting a paused request with count.
+func TestPausedBurstTripsNothingMore(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	for _, st := range []Stage{Tripped, Reflashed} {
+		r.cut.set(st)
+		for i := range DefaultLimits[KindCommand].Burst + 5 {
+			if c := cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn)); c != wire.Paused {
+				t.Fatalf("stage %d: %v", st, c)
+			}
+		}
+		if r.cut.trips() != 0 || r.cut.Stage() != st {
+			t.Fatalf("stage %d: %d trips, stage now %d", st, r.cut.trips(), r.cut.Stage())
+		}
+		r.advance(time.Hour)
+	}
+	for i := 0; r.cut.trips() == 0; i++ {
+		if i > DefaultLimits[KindRead].Burst+1 {
+			t.Fatal("a summary burst at the Reflashed stage never tripped")
+		}
+		cl.do(wire.Read{ID: uint64(100 + i), What: wire.ReadCounts})
+	}
+}

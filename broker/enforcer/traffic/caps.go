@@ -83,11 +83,16 @@ type Counter struct {
 	retired map[string]uint64
 	day     uint32
 
-	// dests is each address's destinations, from its latest day of
-	// resolution (resolved), so traffic that runs past midnight on an
-	// address not yet resolved again still counts against its group.
+	// dests is every destination the resolver answered with each address
+	// while the address stayed in use: it only grows until the address
+	// has gone a full day neither resolved nor carrying bytes, so a
+	// connection open across midnight stays counted against every
+	// destination it could be for (ASSUMPTIONS ENF-cap-3). resolved is
+	// the address's latest day of resolution, used is its latest day of
+	// resolution or bytes.
 	dests    map[netip.Addr]map[string]bool
 	resolved map[netip.Addr]uint32
+	used     map[netip.Addr]uint32
 
 	gen      uint64
 	seen     bool
@@ -101,7 +106,7 @@ type Counter struct {
 // caps.
 func NewCounter(now func() time.Time, caps Caps) *Counter {
 	c := &Counter{now: now, retired: map[string]uint64{}, dests: map[netip.Addr]map[string]bool{},
-		resolved: map[netip.Addr]uint32{}, last: map[netip.Addr]uint64{}, bytes: map[netip.Addr]uint64{}}
+		resolved: map[netip.Addr]uint32{}, used: map[netip.Addr]uint32{}, last: map[netip.Addr]uint64{}, bytes: map[netip.Addr]uint64{}}
 	c.caps = cloneCaps(caps)
 	c.day = Day(now())
 	return c
@@ -126,17 +131,18 @@ func (c *Counter) SetCaps(caps Caps) {
 }
 
 // Resolved records that the enforcer's own resolver answered dest with
-// addr. The first answer for addr on a day replaces its destinations from
-// earlier days.
+// addr. It adds dest to addr's destinations; none is dropped while addr
+// stays in use.
 func (c *Counter) Resolved(dest string, addr netip.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.roll()
 	addr = addr.Unmap()
-	if c.resolved[addr] != c.day || c.dests[addr] == nil {
-		c.dests[addr], c.resolved[addr] = map[string]bool{}, c.day
+	if c.dests[addr] == nil {
+		c.dests[addr] = map[string]bool{}
 	}
 	c.dests[addr][dest] = true
+	c.resolved[addr], c.used[addr] = c.day, c.day
 }
 
 // Add takes one reading and returns every cap now past. A counter lower
@@ -153,7 +159,10 @@ func (c *Counter) Add(r Reading) []Overrun {
 	c.gen, c.seen = r.Gen, true
 	for a, n := range r.Core {
 		a = a.Unmap()
-		c.bytes[a] = sat(c.bytes[a], delta(c.last[a], n))
+		if d := delta(c.last[a], n); d > 0 {
+			c.bytes[a] = sat(c.bytes[a], d)
+			c.used[a] = c.day
+		}
 		c.last[a] = n
 	}
 	c.edge = sat(c.edge, delta(c.lastEdge, r.Edge))
@@ -200,9 +209,12 @@ func (c *Counter) roll() {
 	clear(c.retired)
 	clear(c.bytes)
 	c.edge = 0
-	for a, rd := range c.resolved {
-		if rd+1 < d {
-			delete(c.resolved, a) // neither resolved nor carried over since yesterday
+	for a, u := range c.used {
+		if u+1 < d {
+			// Neither resolved nor carrying bytes for a full day: its
+			// connections are over, so its destinations start afresh.
+			delete(c.used, a)
+			delete(c.resolved, a)
 			delete(c.dests, a)
 		}
 	}

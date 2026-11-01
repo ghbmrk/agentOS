@@ -271,8 +271,104 @@ func TestYesterdaysSharedAddressMergesOnlyWhenLive(t *testing.T) {
 		t.Fatalf("yesterday's shared address carrying bytes today: %+v", g)
 	}
 	clk.t = noon.Add(37 * time.Hour) // a day later, idle
+	if n := len(c.Counts().Groups); n != 2 {
+		t.Fatalf("idle again: %d groups, want 2", n)
+	}
+	c.Resolved("b.example", addrA) // still in use since yesterday: keeps a.example
+	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 2 {
+		t.Fatalf("re-resolved the day after its bytes: %+v", g)
+	}
+	clk.t = noon.Add(85 * time.Hour) // a full idle day later
 	c.Resolved("b.example", addrA)
 	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
-		t.Fatalf("re-resolved for b.example alone today: %+v", g)
+		t.Fatalf("re-resolved for b.example alone after a full idle day: %+v", g)
+	}
+}
+
+// TestOpenConnectionAcrossTwoMidnights (Security blocker on #4377): a
+// connection resolved once and still sending two days later keeps
+// counting against its destination, not as stray bytes, however many
+// midnights it runs across. Revert mutant: pruning by the day of
+// resolution alone.
+func TestOpenConnectionAcrossTwoMidnights(t *testing.T) {
+	clk := &clock{time.Date(2026, 11, 1, 23, 59, 0, 0, time.UTC)}
+	c := NewCounter(clk.now, Caps{Core: map[string]uint64{"a.example": 1 << 40}})
+	c.Resolved("a.example", addrA)
+	var sent int
+	for h := range 50 {
+		clk.t = clk.t.Add(time.Hour)
+		sent += 10
+		if o := c.Add(reading(1, 0, addrA, sent)); len(o) != 0 {
+			t.Fatalf("hour %d: %+v", h, o)
+		}
+	}
+	if g := groupOf(t, c.Counts(), "a.example"); g.Count == 0 {
+		t.Fatalf("today's bytes not on a.example: %+v", g)
+	}
+}
+
+// TestReResolvedAddressKeepsItsOpenConnectionsGroup (Security blocker on
+// #4377): when a second destination is resolved to an address that a
+// first destination's connection still uses after midnight, the address
+// keeps both destinations, so the open connection's bytes count against
+// the merged group, never against the newcomer's cap alone. Revert
+// mutant: the day's first answer replacing the address's destinations.
+func TestReResolvedAddressKeepsItsOpenConnectionsGroup(t *testing.T) {
+	clk := &clock{time.Date(2026, 11, 1, 23, 0, 0, 0, time.UTC)}
+	caps := Caps{Core: map[string]uint64{"x.example": 100, "y.example": 1 << 30}}
+	c := NewCounter(clk.now, caps)
+	c.Resolved("y.example", addrA)
+	c.Add(reading(1, 0, addrA, 1000))
+	clk.t = clk.t.Add(2 * time.Hour) // past midnight, y's download still open
+	c.Resolved("x.example", addrA)
+	if o := c.Add(reading(1, 0, addrA, 6000)); len(o) != 0 {
+		t.Fatalf("y's open download counted against x alone: %+v", o)
+	}
+	g := groupOf(t, c.Counts(), "x.example")
+	if len(g.Dests) != 2 || g.Count != 5000 || g.Cap != 100+1<<30 {
+		t.Fatalf("group %+v", g)
+	}
+}
+
+// TestUnchangedCounterIsNotUse: the firewall keeps reporting an idle
+// address's counter at its old total, and that is not use, so after a full
+// idle day the address's destinations start afresh. Revert mutant: any
+// reading marking the address used.
+func TestUnchangedCounterIsNotUse(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	c.Resolved("b.example", addrA)
+	c.Add(reading(1, 0, addrA, 10))
+	for range 3 {
+		clk.t = clk.t.Add(24 * time.Hour)
+		c.Add(reading(1, 0, addrA, 10))
+	}
+	c.Resolved("b.example", addrA)
+	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
+		t.Fatalf("an idle address's old destinations kept: %+v", g)
+	}
+}
+
+// TestRetiredDestinationsIdleAddressIsSafe is the shape of a crash a
+// review found: an address whose destination left the list, read again
+// the next day with no new bytes, is neither counted nor a fault.
+func TestRetiredDestinationsIdleAddressIsSafe(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, Caps{Core: map[string]uint64{"x.example": 100, "a.example": 100}})
+	c.Resolved("x.example", addrA)
+	c.Add(reading(1, 0, addrA, 10))
+	c.SetCaps(Caps{Core: map[string]uint64{"a.example": 100}})
+	clk.t = clk.t.Add(24 * time.Hour)
+	if o := c.Add(reading(1, 0, addrA, 10)); len(o) != 0 {
+		t.Fatalf("an unchanged counter overran: %+v", o)
+	}
+	if g := groupOf(t, c.Counts(), "a.example"); g.Count != 0 || len(g.Dests) != 1 {
+		t.Fatalf("a.example took a retired destination's address: %+v", g)
+	}
+	// Its cap ended with the day it left the list (ENF-cap-5), so new
+	// bytes there are past a cap of zero.
+	if o := c.Add(reading(1, 0, addrA, 15)); len(o) != 1 || o[0].Cap != 0 || o[0].Count != 5 {
+		t.Fatalf("bytes to a destination off the list since yesterday: %+v", o)
 	}
 }

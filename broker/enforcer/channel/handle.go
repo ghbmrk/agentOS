@@ -248,27 +248,34 @@ func (e Event) render(show func(string) string) string {
 	return b.String()
 }
 
-// gate counts k and runs act unless the request may not act now. A kind
-// over its rate trips the core (count). While a trip is in force every
-// request is answered Paused, logged and never tripped again for being
-// paused; at the Reflashed stage a traffic summary (summary set) acts
-// again and the rest wait for the passkey restore (D-260, D-262). Past the
-// refusal rate every request waits, RateLimited, until it refills.
+// gate counts k and runs act unless the request may not act now. While a
+// trip is in force every request is answered Paused and logged; it still
+// takes its kind's rate, but a paused request past the rate trips nothing
+// more, so a paused core's retries never send a Reflashed stage back to
+// Tripped. At the Reflashed stage a traffic summary (summary set) acts
+// again and the rest wait for the passkey restore (D-260, D-262). A request
+// that may act and is past its kind's rate trips the core (count). Past
+// the refusal rate every request waits, RateLimited, until it refills.
 func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
-	if !c.count(k) {
-		return wire.Paused, "burst of " + string(k) + ": tripped the core"
-	}
+	var paused string
 	switch c.cfg.Cut.Stage() {
 	case Open:
 	case Reflashed:
 		if !summary {
-			return wire.Paused, "the core tripped: paused until the owner's passkey restore"
+			paused = "the core tripped: paused until the owner's passkey restore"
 		}
 	default: // Tripped, or a stage this code does not know
+		paused = "the core tripped: paused until the owner's passkey restore"
 		if summary {
-			return wire.Paused, "the core tripped: summaries paused until the core reflashed step"
+			paused = "the core tripped: summaries paused until the core reflashed step"
 		}
-		return wire.Paused, "the core tripped: paused until the owner's passkey restore"
+	}
+	if paused != "" {
+		c.buckets[k].take(c.cfg.Now())
+		return wire.Paused, paused
+	}
+	if !c.count(k) {
+		return wire.Paused, "burst of " + string(k) + ": tripped the core"
 	}
 	if !c.buckets[KindRefused].has(c.cfg.Now()) {
 		return wire.RateLimited, refusalWait
