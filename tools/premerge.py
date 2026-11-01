@@ -76,7 +76,7 @@ DIFF = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", 
 _CFG = r"(?:.*/)?"
 MARK_PATHS = re.compile(rf"{_CFG}CLAUDE(?:\.local)?\.md|{_CFG}AGENTS\.md|{_CFG}\.mcp\.json|{_CFG}\.claude(?:/.*)?|"
                         r"docs/OPERATING\.md|docs/LANES\.md|\.github/.*|broker/core/core\.txt|"
-                        r"tools/(risk_tier|premerge|trace|trusted_base|mutgate)\.py|tools/(old_core|trusted_core)\.txt|tools/(ci_scope|g1_scope)[^/]*|"
+                        r"tools/(risk_tier|premerge|trace|trusted_base|mutgate)\.py|tools/(old_core|trusted_core)\.txt|tools/ci_scope[^/]*|"
                         r"tests/test_premerge[^/]*|reviews/[^/]+/README[^/]*",
                         re.DOTALL)
 
