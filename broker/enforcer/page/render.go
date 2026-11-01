@@ -62,13 +62,14 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 		add("Stop %s and %s talking to each other directly.", p.A, p.B)
 	}
 	// NET-3 Casting (#4401): the relay passes a Devices-network device's
-	// announcements only for the names it pins, so a pair with none is
-	// signed knowing nothing on that side will be found. Said once: when
+	// announcements only for the names it pins, so a pair with a path and
+	// a side pinning none is signed knowing nothing on that side will be
+	// found. A pair with no path has its own line below. Said once: when
 	// the pair, the last pin's removal, the move onto Devices or the
 	// path's return is signed.
 	for _, p := range next.Pairs {
 		for _, s := range [][2]string{{p.A, p.B}, {p.B, p.A}} {
-			if unpinned(next, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, s[0])) {
+			if unpinned(next, p, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, p, s[0])) {
 				add("%s will not show up by name on %s: it has no mDNS names pinned, so none of its announcements cross the pair.", s[0], s[1])
 			}
 		}
@@ -236,12 +237,12 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	describeMDNS(o, d, add)
 }
 
-// unpinned: id is a Devices-network device in d with a path to its pairs
-// (Linked) that pins no mDNS name, so it announces nothing across them
-// (nft.Announces). A device with no path already has its own line.
-func unpinned(d policy.Document, id string) bool {
+// unpinned: pair p has a path in d (both ends Linked, as nft opens it)
+// and its end id is a Devices-network device that pins no mDNS name, so
+// it announces nothing across p (nft.Announces).
+func unpinned(d policy.Document, p policy.Pair, id string) bool {
 	v := d.Device(id)
-	return v != nil && v.Network == policy.NetDevices && len(v.MDNS) == 0 && d.Linked(id)
+	return v != nil && v.Network == policy.NetDevices && len(v.MDNS) == 0 && d.Linked(p.A) && d.Linked(p.B)
 }
 
 // describeMDNS is each mDNS name d pins or unpins against o (NET-3

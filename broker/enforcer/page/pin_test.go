@@ -121,7 +121,8 @@ func TestMDNSMoveShowsNames(t *testing.T) {
 // network with none, and when a pair's missing path returns; it is not
 // repeated on a later unrelated change, and a device that pins a name, a
 // person's (Owner or Household) device, or a device with no path to its
-// pair (no Wi-Fi identity, isolated, held back) gets no such line.
+// pair, or whose pair has none at either end (no Wi-Fi identity,
+// isolated, held back), gets no such line.
 func TestUnpinnedPairSaysSo(t *testing.T) {
 	line := func(d, other string) string {
 		return d + " will not show up by name on " + other + ": it has no mDNS names pinned, so none of its announcements cross the pair."
@@ -160,9 +161,12 @@ func TestUnpinnedPairSaysSo(t *testing.T) {
 	withPath := clone(noPath)
 	dev(&withPath, "lock").WiFi = "vlan103"
 	// Each exclusion starts from no pair, so only the missing path hides
-	// the line; lifting the isolation or the hold then shows it.
+	// the line, on both ends of the pair (cam's too, though cam itself has
+	// a path); lifting the isolation or the hold then shows it.
 	isolated := clone(paired)
 	dev(&isolated, "tv").Isolated = true
+	camOff := clone(paired)
+	dev(&camOff, "cam").Isolated = true
 	held := clone(paired)
 	held.Holds = []policy.Hold{{Device: "tv", Kind: policy.HoldFix}}
 	for _, c := range []struct {
@@ -180,10 +184,11 @@ func TestUnpinnedPairSaysSo(t *testing.T) {
 		{"owner's device", owner, ownerPaired, []string{line("tv", "phone")}, []string{line("phone", "tv")}},
 		{"no path", base, noPath, nil, []string{line("lock", "laptop")}},
 		{"path returns", noPath, withPath, []string{line("lock", "laptop")}, nil},
-		{"isolated", base, isolated, []string{line("cam", "tv")}, []string{line("tv", "laptop"), line("tv", "cam")}},
-		{"isolation lifted", isolated, paired, []string{line("tv", "laptop"), line("tv", "cam")}, []string{line("cam", "tv")}},
-		{"held back", base, held, []string{line("cam", "tv")}, []string{line("tv", "laptop"), line("tv", "cam")}},
-		{"hold lifted", held, paired, []string{line("tv", "laptop"), line("tv", "cam")}, []string{line("cam", "tv")}},
+		{"isolated", base, isolated, nil, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}},
+		{"isolation lifted", isolated, paired, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}, nil},
+		{"other end isolated", base, camOff, []string{line("tv", "laptop")}, []string{line("tv", "cam"), line("cam", "tv")}},
+		{"held back", base, held, nil, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}},
+		{"hold lifted", held, paired, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}, nil},
 	} {
 		if _, err := policy.Encode(c.to); err != nil {
 			t.Fatalf("%s: %v", c.name, err)
