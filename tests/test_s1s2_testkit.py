@@ -182,6 +182,36 @@ class S2HelpersTest(unittest.TestCase):
         self.assertFalse(s2.same_number("+15550100199", "+15550100198"))
         self.assertFalse(s2.same_number("", ""))
 
+    # Synthetic identifiers only (CLAUDE.md): 8901 2600 0000 0000 0000 is a made-up ICCID shape.
+    def test_shape_blanks_identifiers_and_keeps_the_form(self):  # S2-CONFIRM C13
+        self.assertEqual(s2.shape("+QCCID: 89012600000000000000"), "+QCCID: <20 digits>")
+        self.assertEqual(s2.shape('+CEREG: 2,1,"1A2B","01C2D3E4",7'), '+CEREG: 2,1,"<4 hex>","<8 hex>",7')
+        self.assertEqual(s2.shape("+CSQ: 23,99"), "+CSQ: 23,99")
+        self.assertEqual(s2.shape(None), "")
+
+    def test_number_form_never_returns_the_number(self):  # S2-CONFIRM C12
+        self.assertEqual(s2.number_form("+15550100199"), "international (+), 11 digits")
+        self.assertEqual(s2.number_form("0015550100199"), "international (00), 13 digits")
+        self.assertEqual(s2.number_form("05550100199"), "trunk prefix 0, 11 digits")
+        self.assertEqual(s2.number_form("5550100199"), "no prefix, 10 digits")
+        self.assertEqual(s2.number_form(""), "none")
+
+    def test_urc_keys(self):  # S2-CONFIRM C7
+        log = "(ttyUSB2): <-- '+QTONEDET: 49'\nother\n+QTONEDET: 35\n+RXDTMF: 7\n+QTONEDET: 7"
+        self.assertEqual(s2.urc_keys(log), "1#7")
+        self.assertEqual(s2.urc_keys(None), "")
+
+    def test_extra_keys_counts_speech_decoded_as_keys(self):  # S2-CONFIRM C10
+        self.assertEqual(s2.extra_keys("4271", "4271"), 0)
+        self.assertEqual(s2.extra_keys("427153", "4271"), 2)
+        self.assertEqual(s2.extra_keys("99", "4271"), 2)
+
+    def test_port_interfaces(self):  # S2-CONFIRM C3
+        ifs = {"ttyUSB2": "02", "ttyUSB4": "04"}
+        self.assertEqual(s2.port_interfaces(["cdc-wdm0 (qmi)", "ttyUSB2 (at)", "ttyUSB4 (audio)", "ttyUSB9 (gps)"],
+                                            ifs.get), "at ttyUSB2 if02, audio ttyUSB4 if04, gps ttyUSB9 if?")
+        self.assertEqual(s2.port_interfaces(None, ifs.get), "none listed")
+
 
 if __name__ == "__main__":
     unittest.main()
