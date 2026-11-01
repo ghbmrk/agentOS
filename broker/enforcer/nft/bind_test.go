@@ -132,6 +132,19 @@ func TestEveryAcceptBound(t *testing.T) {
 			}
 		}
 	}
+	// learn records a connection only after setting its label and reading
+	// it back, and passes one already labelled first (#4324): a record
+	// written before the label, or without it read back, lets another host
+	// add one of its own.
+	if len(cs[learnChain]) == 0 || cs[learnChain][0] != "ct label "+hostLabel+" accept" {
+		t.Errorf("learn does not first pass a recorded connection: %q", cs[learnChain])
+	}
+	for _, v6 := range []bool{false, true} {
+		want := "meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }"
+		if !slices.Contains(cs[learnChain], want) {
+			t.Errorf("learn lacks %q", want)
+		}
+	}
 	for _, v6 := range []bool{false, true} {
 		k := hostKey(v6) + " "
 		if !slices.ContainsFunc(cs[learnChain], func(l string) bool { return strings.Contains(l, "{ "+k+"}") }) ||

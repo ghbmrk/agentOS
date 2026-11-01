@@ -62,8 +62,8 @@ const TrafficSize = 64
 // first packet and the set holds at most HostSize per family, which bounds
 // what the shared segments can make the enforcer keep; a connection
 // without a record (it outlived its record, the set was full, or it was
-// open before the last load) has its host's own ICMP errors dropped,
-// never anyone else's passed.
+// open before the last load, under this ruleset or one without labels) has
+// its host's own ICMP errors dropped, never anyone else's passed.
 func HostSet(v6 bool) string { return "host" + fam(v6) }
 
 const (
@@ -718,12 +718,15 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// A connection is recorded once, from its first packet: conntrack calls
 	// every original-direction packet new until a reply comes, and another
 	// host could send one from the host's address and port to add a record
-	// of its own. The label is set before the record is added, so a
-	// connection whose record could not be written has none.
+	// of its own. The label is set, then read back, before the record is
+	// added: a connection conntrack created while no loaded rule used
+	// labels has no room for one, so setting it does nothing, and such a
+	// connection (open across the first load of a ruleset with labels) is
+	// never recorded; one whose record could not be written has none.
 	w.open("chain " + learnChain)
 	w.line("ct label " + hostLabel + " accept")
 	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
 	}
 	w.line("accept")
 	w.close()

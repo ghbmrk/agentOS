@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -331,5 +332,78 @@ func (g *tags) forget(tags ...uint16) {
 	defer g.mu.Unlock()
 	for _, t := range tags {
 		delete(g.got, t)
+	}
+}
+
+// NET-2 Device paths, NET-3 (#4324): a flow open across the first load of
+// a ruleset with host records, from one that used no conntrack labels (an
+// earlier version of this one), has no room for a label, so it is never
+// recorded: another guest's packet injected into it from its host's
+// address and port claims nothing, and its forgery is dropped; so is the
+// host's own error (fails closed). A new flow after the load is recorded
+// as usual. Catches a record written whenever setting the label did
+// nothing.
+func TestSharedLabelFreeLoad(t *testing.T) {
+	if !inNetns(t) {
+		return
+	}
+	h := build(t)
+	d := cutPolicy()
+	text, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := regexp.MustCompile(`ct label (set )?` + hostLabel + ` `)
+	free := strings.Replace(labels.ReplaceAllString(text, ""), "\t\taccept\n\t\tmeta nfproto", "\t\tmeta nfproto", 1)
+	if strings.Contains(free, "label") {
+		t.Fatal("the label-free ruleset still uses labels")
+	}
+	h.load(free)
+	h.fillSets()
+	h.share("guest")
+	peer := netOther
+	atPeer := h.hear("isp", false)
+	flow := func(port int) (string, int) {
+		var c net.Conn
+		within(t, h.hosts["guest"], func() {
+			var err error
+			if c, err = net.Dial("udp", net.JoinHostPort(peer, strconv.Itoa(port))); err != nil {
+				t.Fatal(err)
+			}
+			c.Write([]byte("first"))
+		})
+		t.Cleanup(func() { c.Close() })
+		return hostPort(t, c.LocalAddr())
+	}
+	inject := func(local string, lport, port int) {
+		within(t, h.hosts["guest2"], func() {
+			dl := net.Dialer{LocalAddr: &net.UDPAddr{IP: net.ParseIP(local), Port: lport}}
+			c, err := dl.Dial("udp", net.JoinHostPort(peer, strconv.Itoa(port)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.Write([]byte("injected"))
+			c.Close()
+		})
+		time.Sleep(100 * time.Millisecond)
+	}
+	h.in(h.hosts["guest2"], "ip", "addr", "add", segAddr("guest", 0)+"/32", "dev", "lo")
+
+	oldLocal, oldPort := flow(9601)
+	h.reload(d)
+	h.fillSets()
+	inject(oldLocal, oldPort, 9601)
+	newLocal, newPort := flow(9602)
+	inject(newLocal, newPort, 9602)
+	const oldForged, oldOwn, newForged, newOwn = 1801, 1802, 1803, 1804
+	h.sendErr("guest2", oldLocal, peer, false, udpErr(false, oldForged, peer, oldLocal, 9601, oldPort))
+	h.sendErr("guest", "", peer, false, udpErr(false, oldOwn, peer, oldLocal, 9601, oldPort))
+	h.sendErr("guest2", newLocal, peer, false, udpErr(false, newForged, peer, newLocal, 9602, newPort))
+	h.sendErr("guest", "", peer, false, udpErr(false, newOwn, peer, newLocal, 9602, newPort))
+	time.Sleep(probeWait)
+	for tag, want := range map[uint16]bool{oldForged: false, oldOwn: false, newForged: false, newOwn: true} {
+		if got := atPeer.has(tag); got != want {
+			t.Errorf("error %d (1801 forged and 1802 own on the flow open across the load, 1803 and 1804 on a new one) arrived %v, want %v", tag, got, want)
+		}
 	}
 }
