@@ -184,6 +184,10 @@ exempt-pr 4216
 # Remove once #4350 merges.
 exempt-pr 4350
 
+# #4397 (ENF-mdns-pin, #4144): broker/enforcer/nft/announce.go and its test, plus policy/pin_test.go and page/pin_test.go, which the G2 list does not name (D-198).
+# Remove once #4397 merges.
+exempt-pr 4397
+
 # Project machinery and records.
 allow .claude/
 allow .github/
