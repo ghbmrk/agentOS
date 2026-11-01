@@ -168,13 +168,13 @@ exempt-pr 4323
 # merges.
 exempt-pr 4182
 
-# #4343 (ENF-g-aplock, #4313): broker/enforcer/ap/, which the G2 list does not name (D-198).
-# Remove once #4343 merges.
-exempt-pr 4343
-
 # #4260 (ENF-r-follow-3, #4200): broker/enforcer/devsecret/devsecret.go comment fix, which the G2 list does not name (D-198).
 # Remove once #4260 merges.
 exempt-pr 4260
+
+# #4420 (ENF-g-aplock-later, #4386): broker/enforcer/ap/, which the G2 list does not name (D-198).
+# Remove once #4420 merges.
+exempt-pr 4420
 
 # #4371 (#4215): broker/enforcer/radio/confine/ and radio test files and ASSUMPTIONS.md, which the G2 list does not name (D-198).
 # Remove once #4371 merges.
