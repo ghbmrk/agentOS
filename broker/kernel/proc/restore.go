@@ -35,13 +35,22 @@ var (
 // section's length and sum are checked (MIG-4-recovery-a-6). On an error
 // contentDir is as it was, and log holds bytes not to be trusted.
 func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) error {
+	return restoreSections(secs, log, contentDir, nil)
+}
+
+// restoreStage begins a restore's staging directory's name; one a crash
+// left beside the content folder is removed at the next start
+// (OpenContentStores).
+const restoreStage = ".content-restore-"
+
+func restoreSections(secs *backup.Sections, log io.Writer, contentDir string, stop func(i int) bool) error {
 	if des, err := os.ReadDir(contentDir); err == nil && len(des) > 0 {
 		return ErrRestoreNotEmpty
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	parent := filepath.Dir(contentDir)
-	stage, err := os.MkdirTemp(parent, ".content-restore-")
+	stage, err := os.MkdirTemp(parent, restoreStage)
 	if err != nil {
 		return err
 	}
@@ -74,7 +83,7 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			return err
 		}
-		if err := restoreItems(r, dir, nil); err != nil {
+		if err := restoreItems(r, dir, stop); err != nil {
 			return fmt.Errorf("section %s: %w", sec.Name, err)
 		}
 		stores = append(stores, dir)

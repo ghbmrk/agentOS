@@ -353,16 +353,17 @@ type ContentReport struct {
 	// Missing are opened, unerased subjects whose key is missing or not
 	// their own: their content does not open.
 	Missing []string `json:"missing,omitempty"`
-	// Unnamed are keys no subject.opened names: a crash between Put and
-	// the log write, or a log older than the table. They are kept, since
-	// the log alone cannot tell which, and nothing reads them.
+	// Unnamed are keys no subject.opened names, deleted at start: a crash
+	// between Put and the log write, or a log older than the table. No
+	// entry can name them later (the log only appends), and a restore
+	// brings its own table, so the kernel could never use them.
 	Unnamed []string `json:"unnamed,omitempty"`
 }
 
 // OpenContent opens the subject-key table and the content stores, after
 // Boot, and re-applies every erase: it deletes the key of each erased
-// subject still in the table and retries the stores. Seal and Read refuse
-// until it has returned nil.
+// subject still in the table and every key no subject.opened names, and
+// retries the stores. Seal and Read refuse until it has returned nil.
 func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int64) (ContentReport, error) {
 	var rep ContentReport
 	listed, err := keys.List()
@@ -373,6 +374,9 @@ func (k *Kernel) OpenContent(keys Keys, stores map[string]ContentStore, now int6
 	for _, sub := range listed {
 		switch st := k.s.subjects[sub]; {
 		case st == nil:
+			if err := keys.Delete(sub); err != nil {
+				return ContentReport{}, err
+			}
 			rep.Unnamed = append(rep.Unnamed, sub)
 		case st.erased:
 			// A delete still owed stays listed in Unerased under KeyTable
