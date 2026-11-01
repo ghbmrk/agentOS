@@ -619,36 +619,40 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a request-key.conf":   {extra + "etc/request-key.conf", "create user * * /usr/lib/agentos/agentos-side %k\n", `reads no such file`},
 		"a request-key.d file": {extra + "etc/request-key.d/x.conf", "", `reads no such file`},
 		// #4342: a compiled hwdb sets properties as its sources do.
-		"an /etc/udev hwdb.bin":           {extra + "etc/udev/hwdb.bin", "", `reads no such file`},
-		"an /etc/systemd/hwdb hwdb.bin":   {extra + "etc/systemd/hwdb/hwdb.bin", "", `reads no such file`},
-		"a /usr/lib/systemd hwdb.bin":     {extra + "usr/lib/systemd/hwdb/hwdb.bin", "", `reads no such file`},
-		"a /usr/lib/udev hwdb.bin":        {extra + "usr/lib/udev/hwdb.bin", "", `reads no such file`},
-		"a tmpfiles binfmt_misc register": {tmpfiles, "w /proc/sys/fs/binfmt_misc/register - - - - :x:E::bin::/usr/lib/agentos/agentos-side:\n", `registers an interpreter`},
-		"a tmpfiles binfmt_misc mode":     {tmpfiles, "z /proc/sys/fs/binfmt_misc/status 0666\n", `registers an interpreter`},
-		"a tmpfiles unlisted helper":      {tmpfiles, "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-other\n", `agentos-other", which`},
-		"a tmpfiles specifier program":    {tmpfiles, "w /proc/sys/kernel/modprobe - - - - %S/agentos-side\n", `absolute program path`},
-		"a tmpfiles shell word":           {tmpfiles, "w /proc/sys/kernel/core_pattern - - - - |/bin/false;/usr/lib/agentos/agentos-side\n", `may not hold`},
-		"a tmpfiles glob path":            {tmpfiles, "w /proc/sys/kernel/modprob? - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
-		"a tmpfiles specifier path":       {tmpfiles, "w /proc/sys/kernel/%a - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
-		"a tmpfiles unclean path":         {tmpfiles, "w /proc/sys/kernel/../kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
-		"a tmpfiles type it lacks":        {tmpfiles, "ww /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
-		"a tmpfiles base64 argument":      {tmpfiles, "w~ /proc/sys/kernel/core_pattern - - - - fC91c3IvbGliL2FnZW50b3MvYWdlbnRvcy1zaWRlICVw\n", `no ~ or ^ modifier`},
-		"a tmpfiles credential argument":  {tmpfiles, "w^ /proc/sys/kernel/modprobe - - - - agentos.helper\n", `no ~ or ^ modifier`},
-		"a tmpfiles setuid mode":          {tmpfiles, "z /usr/lib/agentos/agentos-side 4755 root root -\n", `no setuid or setgid`},
-		"a tmpfiles setgid mode":          {tmpfiles, "Z /usr/lib/agentos 2755 root root -\n", `no setuid or setgid`},
-		"a tmpfiles Z above a helper":     {tmpfiles, "Z /sys/kernel 0666 - -\n", `a directory above /sys/kernel/uevent_helper`},
-		"a tmpfiles z on /":               {tmpfiles, "z / 0755\n", `a directory above`},
-		"a tmpfiles release_agent":        {tmpfiles, "w /sys/fs/cgroup/x/release_agent - - - - /usr/lib/agentos/agentos-side\n", `release_agent`},
-		"a tmpfiles masked setuid mode":   {tmpfiles, "d /var/lib/agentos-x ~6755 root root -\n", `no setuid or setgid`},
-		"a tmpfiles magic link":           {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
-		"a tmpfiles mode on a helper":     {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
-		"a tmpfiles w to a file":          {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
-		"a tmpfiles uevent_helper":        {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
-		"a tmpfiles module helper":        {tmpfiles, "w /sys/module/drbd/parameters/usermode_helper - - - - /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
-		"a tmpfiles f":                    {tmpfiles, "f /etc/rc.local 0755 - - - /usr/lib/agentos/agentos-side\n", `type f writes`},
-		"a tmpfiles L":                    {tmpfiles, "L+ /etc/systemd/system-generators/x - - - - /usr/lib/agentos/agentos-side\n", `type L+ writes`},
-		"a tmpfiles C":                    {tmpfiles, "C /etc/udev/rules.d - - - - /usr/share/agentos/rules.d\n", `type C writes`},
-		"a tmpfiles xattr":                {tmpfiles, "t /usr/lib/agentos/agentos-side - - - - security.capability=0sAQAAAg\n", `type t writes`},
+		"an /etc/udev hwdb.bin":              {extra + "etc/udev/hwdb.bin", "", `reads no such file`},
+		"an /etc/systemd/hwdb hwdb.bin":      {extra + "etc/systemd/hwdb/hwdb.bin", "", `reads no such file`},
+		"a /usr/lib/systemd hwdb.bin":        {extra + "usr/lib/systemd/hwdb/hwdb.bin", "", `reads no such file`},
+		"a /usr/lib/udev hwdb.bin":           {extra + "usr/lib/udev/hwdb.bin", "", `reads no such file`},
+		"a tmpfiles binfmt_misc register":    {tmpfiles, "w /proc/sys/fs/binfmt_misc/register - - - - :x:E::bin::/usr/lib/agentos/agentos-side:\n", `registers an interpreter`},
+		"a tmpfiles binfmt_misc mode":        {tmpfiles, "z /proc/sys/fs/binfmt_misc/status 0666\n", `registers an interpreter`},
+		"a tmpfiles unlisted helper":         {tmpfiles, "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-other\n", `agentos-other", which`},
+		"a tmpfiles specifier program":       {tmpfiles, "w /proc/sys/kernel/modprobe - - - - %S/agentos-side\n", `absolute program path`},
+		"a tmpfiles shell word":              {tmpfiles, "w /proc/sys/kernel/core_pattern - - - - |/bin/false;/usr/lib/agentos/agentos-side\n", `may not hold`},
+		"a tmpfiles glob path":               {tmpfiles, "w /proc/sys/kernel/modprob? - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles specifier path":          {tmpfiles, "w /proc/sys/kernel/%a - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles unclean path":            {tmpfiles, "w /proc/sys/kernel/../kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles type it lacks":           {tmpfiles, "ww /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles base64 argument":         {tmpfiles, "w~ /proc/sys/kernel/core_pattern - - - - fC91c3IvbGliL2FnZW50b3MvYWdlbnRvcy1zaWRlICVw\n", `no ~ or ^ modifier`},
+		"a tmpfiles credential argument":     {tmpfiles, "w^ /proc/sys/kernel/modprobe - - - - agentos.helper\n", `no ~ or ^ modifier`},
+		"a tmpfiles setuid mode":             {tmpfiles, "z /usr/lib/agentos/agentos-side 4755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles setgid mode":             {tmpfiles, "Z /usr/lib/agentos 2755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles Z above a helper":        {tmpfiles, "Z /sys/kernel 0666 - -\n", `a directory above /sys/kernel/uevent_helper`},
+		"a tmpfiles z on /":                  {tmpfiles, "z / 0755\n", `a directory above`},
+		"a tmpfiles release_agent":           {tmpfiles, "w /sys/fs/cgroup/x/release_agent - - - - /usr/lib/agentos/agentos-side\n", `release_agent`},
+		"a tmpfiles masked setuid mode":      {tmpfiles, "d /var/lib/agentos-x ~6755 root root -\n", `no setuid or setgid`},
+		"a tmpfiles magic link":              {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
+		"a tmpfiles mode on a helper":        {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
+		"a tmpfiles w to a file":             {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
+		"a tmpfiles uevent_helper":           {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles mode on uevent_helper":   {tmpfiles, "z /sys/kernel/uevent_helper 0666 nobody -\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles mode on a module helper": {tmpfiles, "z /sys/module/drbd/parameters/usermode_helper 0666\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles w to a device":           {tmpfiles, "w /sys/class/leds/x/trigger - - - - none\n", `writes only under /proc/sys`},
+		"a tmpfiles cgroup file":             {tmpfiles, "z /sys/fs/cgroup/x/cgroup.procs 0666\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles module helper":           {tmpfiles, "w /sys/module/drbd/parameters/usermode_helper - - - - /usr/lib/agentos/agentos-side\n", `not /sys/class or /sys/devices`},
+		"a tmpfiles f":                       {tmpfiles, "f /etc/rc.local 0755 - - - /usr/lib/agentos/agentos-side\n", `type f writes`},
+		"a tmpfiles L":                       {tmpfiles, "L+ /etc/systemd/system-generators/x - - - - /usr/lib/agentos/agentos-side\n", `type L+ writes`},
+		"a tmpfiles C":                       {tmpfiles, "C /etc/udev/rules.d - - - - /usr/share/agentos/rules.d\n", `type C writes`},
+		"a tmpfiles xattr":                   {tmpfiles, "t /usr/lib/agentos/agentos-side - - - - security.capability=0sAQAAAg\n", `type t writes`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -1375,6 +1379,12 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 			return fmt.Errorf("%d: %s is under /proc/sys/fs/binfmt_misc, which registers an interpreter", n, p)
 		case strings.HasPrefix(p, "/proc/") && key == "":
 			return fmt.Errorf("%d: %s is in /proc but not /proc/sys", n, p)
+		// sysfs holds root helpers the reader does not know (uevent_helper,
+		// module parameters such as drbd's usermode_helper, cgroup v1
+		// release_agent), so a line there names a device's own attribute
+		// or is refused, whatever its type (#4381).
+		case strings.HasPrefix(p, "/sys/") && !strings.HasPrefix(p, "/sys/class/") && !strings.HasPrefix(p, "/sys/devices/"):
+			return fmt.Errorf("%d: %s is in /sys but not /sys/class or /sys/devices", n, p)
 		case typ != "w" && typ != "w+" && sysctlHelpers[key]:
 			return fmt.Errorf("%d: %s on %s; a helper is only written, with w", n, f[0], p)
 		case typ == "w" || typ == "w+":
