@@ -349,7 +349,7 @@ func TestEndBetweenAskAndAnswer(t *testing.T) {
 		if err := g.Summary(tk, 1, capped(1000, 0, "backup")); err != nil {
 			t.Fatal(err)
 		}
-		c.step(Fresh - time.Second - gap)
+		c.step(Fresh - gap)                                 // exactly twice the interval after tk
 		if _, err := g.Reserve("backup", 250); err == nil { // 600 + 500
 			e.pass(500)
 			t.Fatalf("end %v after the ask forgotten: let through, enforcer at %d of 1000, tripped=%v", gap, e.count, e.tripped)
@@ -398,5 +398,51 @@ func TestSendInNoGroupCountsEverywhere(t *testing.T) {
 	}
 	if _, err := g.Reserve("x", 1); !errors.Is(err, ErrNoCount) {
 		t.Fatalf("x is in no group: %v", err)
+	}
+}
+
+// A second End keeps the first end time, so a late duplicate cannot hold a
+// send's bytes past the summary that holds them, nor, the other way, make a
+// send that ended after an ask look as if it ended before it.
+func TestSecondEndKeepsTheFirst(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := g.Reserve("backup", 250) // 500 reserved
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.step(time.Second)
+	tk := g.Ask()
+	c.step(time.Second)
+	g.End(s) // ended after tk: tk's count does not hold it
+	c.step(time.Second)
+	g.End(s) // a duplicate must not move the end
+	if err := g.Summary(tk, 1, capped(1000, 0, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("backup", 251); err == nil { // 500 + 502
+		t.Fatal("send forgotten")
+	}
+	// A summary asked after the first End but before the duplicate holds it.
+	c2 := newClock()
+	g2 := gate(c2)
+	if err := g2.Summary(g2.Ask(), 1, capped(1000, 0, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := g2.Reserve("backup", 250)
+	c2.step(time.Second)
+	g2.End(s2)
+	c2.step(time.Second)
+	tk2 := g2.Ask()
+	c2.step(time.Second)
+	g2.End(s2) // late duplicate, after tk2
+	if err := g2.Summary(tk2, 1, capped(1000, 500, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g2.Reserve("backup", 250); err != nil { // 500 + 500: held once
+		t.Fatalf("duplicate End moved the end past the ask: %v", err)
 	}
 }
