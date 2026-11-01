@@ -104,6 +104,10 @@ exempt-pr 4204
 # Remove once #4252 merges.
 exempt-pr 4252
 
+# #4393 (ENF-page-csrf, #4387): broker/enforcer/page/ and broker/enforcer/action/action_test.go, which the G2 list does not name (D-198).
+# Remove once #4393 merges.
+exempt-pr 4393
+
 # #4206 (ENF-s-cd, #4138 and #4131): broker/enforcer/action/, page/ and radio/, which the G2 list does
 # not name (D-198). Remove once #4206 merges.
 exempt-pr 4206
