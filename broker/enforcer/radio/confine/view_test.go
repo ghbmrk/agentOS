@@ -382,6 +382,8 @@ func TestViewOnlyItsEntries(t *testing.T) {
 	if got.Link != vState+" ok ok" {
 		t.Errorf("the symlink entry: %q, want its target, resolving", got.Link)
 	}
+	// Each entry's flags are exactly its own, but /proc's: a clone keeps
+	// the host mount's locked flags, and a runner's /proc is noexec too.
 	for p, f := range map[string]uint64{
 		at(vBus):    stRdonly | stNosuid | stNodev | stNoexec,
 		at(vState):  stNosuid | stNodev | stNoexec,
@@ -390,8 +392,8 @@ func TestViewOnlyItsEntries(t *testing.T) {
 		"/proc":     stRdonly | stNosuid | stNodev,
 		"/":         stRdonly | stNosuid | stNodev | stNoexec,
 	} {
-		if got.Flags[p] != f {
-			t.Errorf("%s: mount flags %#x, want %#x", p, got.Flags[p], f)
+		if g := got.Flags[p]; g != f && (p != "/proc" || g&f != f) {
+			t.Errorf("%s: mount flags %#x, want %#x", p, g, f)
 		}
 	}
 	if !slices.Equal(got.Roots, []string{"tmpfs"}) {
