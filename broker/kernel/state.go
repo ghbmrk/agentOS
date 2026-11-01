@@ -939,7 +939,9 @@ func (s *State) Apply(e Entry) error {
 		if err != nil {
 			return err
 		}
-		s.SpendHeld[b.Plan] = SpendHold{b.Code, b.Detail, b.Root, b.Funding}
+		if p := s.Plans[b.Plan]; p != nil && p.Status == SActive { // as funding (Hold): no other has a scope (#4321)
+			s.SpendHeld[b.Plan] = SpendHold{b.Code, b.Detail, b.Root, b.Funding}
+		}
 	case TSpendExtend:
 		b, err := body[spendExtended](e)
 		if err != nil {

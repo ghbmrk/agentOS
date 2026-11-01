@@ -512,7 +512,6 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			add(q(p.To), q(p.From), "", "accept")
 		}
 	}
-	add("", "", logged(LogDrop, Blocked), "drop")
 
 	// Owner and Household: the internet, their signed pairs and, from Owner
 	// only, the core's page (CH-9). They are not inspected (NET-1), so what
@@ -527,14 +526,50 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	padd("", "", "drop", daddr(true, "@isp_6"))
 	padd("", wan, "drop", daddr(false, "@nonglobal_4"))
 	padd("", wan, "drop", daddr(true, "@nonglobal_6"))
-	padd("", wan, "accept")
+	padd(q(l.Owner), wan, "accept")
+	padd(q(l.Household), wan, "accept")
 	padd(q(l.Owner), core, "accept", l4Ports("tcp", port(l.CorePagePort)))
 	for _, p := range paths {
 		if !p.Both {
 			padd(q(p.From), q(p.To), "accept")
 		}
 	}
-	padd("", "", "drop")
+
+	// Every accept binds its connection to its interface pair (live.go,
+	// bind), so every accept names one interface each way.
+	idx := map[string]uint32{}
+	for k, n := range []string{l.WAN, l.Owner, l.Household, l.Guests, l.Admin, l.Core, l.Edge, l.APMgmt} {
+		idx[q(n)] = 0x1001 + uint32(k)
+	}
+	for _, v := range devs {
+		idx[q(v.iface)] = uint32(v.vlan)
+	}
+	for _, rs := range [][]rule{fwd, people} {
+		if err := bindAll(idx, rs); err != nil {
+			return "", err
+		}
+	}
+	// A related packet that reaches the end of a live chain names a
+	// connection that does not run on the interfaces it crossed: an ICMP
+	// error forged from another segment, or a genuine one about a connection
+	// a load cut (#4113, A18 Segments). It is dropped and, like any other
+	// refusal, logged and counted, except when it touches the networks that
+	// are never observed (NET-1, NET-3): sent from or to one of them, or
+	// naming a connection with a Guests, Owner or Household end, which its
+	// inner header (and so the log line) would show. The connection's mark
+	// says which interfaces it runs on; an unbound one (mark 0, opened
+	// before this ruleset was loaded) may be theirs, so it is not logged
+	// either. Every packet people_live sees has an Owner or Household end,
+	// so only forward_live logs. A cut connection's own later packets are
+	// dropped without a line, since a load can cut many at once.
+	unseen := "{ " + g + ", " + q(l.Owner) + ", " + q(l.Household) + " }"
+	var lows, highs []string
+	for _, n := range []string{l.Guests, l.Owner, l.Household} {
+		lows = append(lows, fmt.Sprintf("0x%08x", idx[q(n)]))
+		highs = append(highs, fmt.Sprintf("0x%08x", idx[q(n)]<<16))
+	}
+	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " ct mark != 0x00000000 ct mark and 0x0000ffff != { " + strings.Join(lows, ", ") + " }" +
+		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } " + logged(LogDrop, Blocked) + " drop"
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")
@@ -562,12 +597,14 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	for _, r := range fwd {
 		w.line(r.first())
 	}
+	w.line(logged(LogDrop, Blocked) + " drop")
 	w.close()
 
 	w.open("chain people")
 	for _, r := range people {
 		w.line(r.first())
 	}
+	w.line("drop")
 	w.close()
 
 	w.open("chain " + live("forward"))
@@ -576,6 +613,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line(s)
 		}
 	}
+	w.line(related)
+	w.line("drop")
 	w.close()
 
 	w.open("chain " + live("people"))
@@ -584,6 +623,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 			w.line(s)
 		}
 	}
+	w.line("drop")
 	w.close()
 
 	// A device's counting chains: all its bytes are counted, and its

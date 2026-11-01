@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -22,7 +23,10 @@ import (
 // key: erase destroys the key in FileKeys, then deletes the files. Put
 // writes atomically; Delete unlinks the file and syncs the directory, and
 // succeeds for an absent item.
-type FileContent struct{ dir string }
+type FileContent struct {
+	dir  string
+	stop func(i int) bool // tests: crash Put's file write after step i
+}
 
 const (
 	itemExt = ".item"
@@ -90,27 +94,66 @@ func openFileContent(dir string) (*FileContent, error) {
 	if err := privfile.Check(dir, true); err != nil {
 		return nil, err
 	}
+	if err := dropTemps(dir); err != nil {
+		return nil, err
+	}
+	return &FileContent{dir: dir}, nil
+}
+
+// dropTemps removes every temporary a torn write left in dir, and syncs it.
+func dropTemps(dir string) error {
 	des, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, de := range des {
 		if strings.HasSuffix(de.Name(), tmpExt) {
 			if err := os.Remove(filepath.Join(dir, de.Name())); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return &FileContent{dir}, privfile.SyncDir(dir)
+	return privfile.SyncDir(dir)
 }
 
 func itemName(h kernel.Hash) string { return hex.EncodeToString(h[:]) + itemExt }
+
+// unlogged names, as store/hash, every item file the log does not name in
+// its store: a put a crash stopped after its rename (kernel.Seal puts
+// before it logs). They are kept, as unnamed keys are: a log older than
+// the stores that the anchor still takes (entries after the last anchored
+// one) cannot tell them from items whose entries it lost (#4368).
+func unlogged(s *kernel.State, stores map[string]kernel.ContentStore) ([]string, error) {
+	var out []string
+	for name, cs := range stores {
+		f, ok := cs.(*FileContent)
+		if !ok {
+			continue
+		}
+		des, err := os.ReadDir(f.dir)
+		if err != nil {
+			return nil, err
+		}
+		for _, de := range des {
+			x, _ := strings.CutSuffix(de.Name(), itemExt)
+			b, err := hex.DecodeString(x)
+			if err != nil || len(b) != len(kernel.Hash{}) || itemName(kernel.Hash(b)) != de.Name() {
+				continue
+			}
+			if st, ok := s.ItemStore(kernel.Hash(b)); !ok || st != name {
+				out = append(out, name+"/"+x)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
 
 func (f *FileContent) Put(h kernel.Hash, ct []byte) error {
 	if len(ct) > maxSealed {
 		return kernel.ErrItem
 	}
-	return privfile.WriteAtomic(f.dir, itemName(h), ct, nil)
+	return privfile.WriteAtomic(f.dir, itemName(h), ct, f.stop)
 }
 
 // Get reads the item named h; kernel.Read checks it against h.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -64,6 +65,20 @@ const (
 	// ReadTraffic is a device's traffic summary (NET-5).
 	ReadTraffic ReadWhat = 4
 )
+
+// SummaryInterval is the interval between traffic summaries that this
+// format definition fixes (NET-2 The channel, D-255): the core asks for
+// one each interval, and the kernel takes a byte-cap count as fresh only
+// while it is no older than twice this, so one lost summary does not make
+// it stale (NET-2 Byte caps, broker/kernel/capgate). The enforcer and the
+// kernel both read it here, never a copy (ASSUMPTIONS ENF-d-w5).
+const SummaryInterval = time.Minute
+
+// PastCap is whether a byte count is past its cap: the count the enforcer
+// drops and trips on, and the one the kernel's check stops short of
+// (NET-2 Byte caps, D-255). A count at the cap is not past it. Both sides
+// call this one test, so they cannot disagree on the edge.
+func PastCap(count, cap uint64) bool { return count > cap }
 
 // Code is the enforcer's verdict on a request.
 type Code byte
@@ -471,7 +486,8 @@ func (r *reader) name() string {
 // or rule name: 1 to MaxName bytes of UTF-8 with no space, slash, control,
 // format (bidi, zero-width, tag), filler or variation selector character,
 // as broker/enforcer/policy names them (#3901), and that is not "unknown"
-// in any case, the word policy.Unknown reserves (#4185).
+// in any case, the word policy.Unknown reserves (#4185). wire imports only
+// the standard library, so channel's TestReservedWord ties the two (#4249).
 func Name(s string) bool {
 	if s == "" || len(s) > MaxName || !utf8.ValidString(s) || strings.EqualFold(s, "unknown") {
 		return false

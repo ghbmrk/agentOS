@@ -292,10 +292,18 @@ var enforcer = map[string]struct {
 	"enforcer/traffic":  {[]string{"enforcer/nft", "enforcer/policy"}, droneForbid}, // slice i: traffic summaries
 	// The page is the enforcer's own HTTPS origin (slice b, NET-4), so it
 	// alone may serve HTTP and TLS; it still launches nothing.
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal"}, enforcerWebForbid},
+	// It also serves the enrolment screens (slice c) and draws the Owner
+	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "rsc.io/qr"}, enforcerWebForbid},
+	// Enrolment (slice c): the case code, the recovery code and the
+	// passkey's handover; it texts through the alert kinds.
+	"enforcer/enrol": {[]string{"kernel/key", "enforcer/policy", "enforcer/alert"}, droneForbid},
 	// Asserted safety-list actions (slice s): once-only owner challenges;
 	// the page serves them and the daemon wires their actuator.
 	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
+	// Lock rules (slice q): the second assertion, relock and keypad codes,
+	// as the actuator behind slice s's unlock and disarm challenges.
+	"enforcer/locks": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/alert"}, droneForbid},
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
@@ -328,7 +336,17 @@ var coreEnforcer = map[string]struct {
 	// The pairing clerks' sealing helper (slice r): seals to the
 	// enforcer's pairing key with pairseal and holds no private key.
 	"clerk/enfpair": {[]string{"enforcer/pairseal"}, forbiddenStd},
+	// The kernel's byte-cap check (#4173): the summary interval and the
+	// cap edge from the shared format definition, never a copy (D-255).
+	"kernel/capgate": {[]string{"enforcer/wire"}, forbiddenStd},
 }
+
+// enforcerWebDeps are the third-party packages the page links: rsc.io/qr
+// draws the Owner network's Wi-Fi QR at enrolment (HW-10). The enforcer
+// shares no code with agentOS, so the core's card package, which wraps
+// the same encoder, cannot be reused; the encoder is small, pure Go and
+// already vendored for the Owner Card.
+var enforcerWebDeps = []string{"rsc.io/qr", "rsc.io/qr/coding", "rsc.io/qr/gf256"}
 
 var enforcerWebForbid = []string{"net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"}
 
@@ -503,7 +521,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	for _, p := range enforcerExec {
 		check([]string{module + p}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "os/exec" }))
 	}
-	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }))
+	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }), enforcerWebDeps...)
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))

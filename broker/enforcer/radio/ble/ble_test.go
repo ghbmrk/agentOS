@@ -1089,7 +1089,12 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 	if probe == "" {
 		probe = "none"
 	}
-	proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(uid, uid), Self: bin, Path: bin,
+	// The view is the test's bus, and the loader this cgo-linked (so
+	// dynamic) test binary needs; the enforcer's binary is static. A
+	// path the host lacks is left out.
+	p := confine.BLE(uid, uid)
+	p.View = []string{bus, "/lib", "/lib64", "/usr/lib", "/usr/lib64"}
+	proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 		Args: []string{stackArg, arg, probe}, Stderr: testLog{t}})
 	if err != nil {
 		t.Fatal(err)

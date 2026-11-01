@@ -98,18 +98,35 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	devs := plain(cur).Devices
+	keep, recovery := false, ""
+	if s.cfg.Enrol != nil {
+		keep = !s.cfg.Enrol.Kept()
+		if due, ok := s.cfg.Enrol.Recovery(); ok {
+			recovery = s.when(due.UnixMilli())
+		}
+	}
 	s.render(w, "home.html", map[string]any{
-		"Name":    s.cfg.Name,
-		"Version": cur.Version,
-		"Pending": pend,
-		"Sync":    sync,
-		"Channel": channel,
-		"Devices": devs,
-		"Limits":  Limits,
+		"Keep":     keep,
+		"Recovery": recovery,
+		"Enrol":    s.cfg.Enrol != nil,
+		"Name":     s.cfg.Name,
+		"Version":  cur.Version,
+		"Pending":  pend,
+		"Sync":     sync,
+		"Channel":  channel,
+		"Devices":  devs,
+		"Limits":   Limits,
 	})
 }
 
+// render draws a screen with its own anti-forgery token (csrf.go).
 func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
+	tok, err := s.mint(w)
+	if err != nil {
+		http.Error(w, "page error", http.StatusInternalServerError)
+		return
+	}
+	data["Token"] = tok
 	var b strings.Builder
 	if err := s.tmpl.ExecuteTemplate(&b, name, data); err != nil {
 		http.Error(w, "page error", http.StatusInternalServerError)

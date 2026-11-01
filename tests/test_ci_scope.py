@@ -509,8 +509,7 @@ class WiringTest(unittest.TestCase):
             self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'",
                           body[:body.index("uses: actions/cache/save@")].rsplit("- name:", 1)[1], job)
             self.assertIn("go-build", save)
-        for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice",
-                     "tests.test_g1_scope.CheckTest", "tests.test_g1_scope.ListTest"):
+        for name in ("tests.test_risk_tier", "tests.test_product_name", "tests.test_specslice"):
             self.assertIn(name, records_audit.records_run_tests())
 
     def test_a_spec_only_change_runs_full_ci(self):
@@ -661,7 +660,7 @@ class WiringTest(unittest.TestCase):
         go = "          sudo setpriv --no-new-privs env \"PATH=$PATH\" GOTOOLCHAIN=local GOWORK=off HOME=/root GOCACHE=/tmp/gocache \\\n            AGENTOS_CGROUP_PARENT"
         run = "          python3 -I ../tools/require_ran.py"
         rc = '          [ "$rc" -eq 0 ]\n'
-        nxt = "      - name: Camera clerk's decoder in its own unit"
+        nxt = "      - name: Camera decoder sessions in their own unit"
         job = "\n  machines:\n"
         # Each edit, as (old, new) applied once, stops the step failing on a skipped or missing test.
         edits = {

@@ -1,0 +1,13 @@
+# The only programs a file under image/ or broker/ may make root run, read
+# by pathops_lint_test.go (#4257): a udev rule's RUN, RUN{program}, PROGRAM
+# or IMPORT{program}; a modprobe.d install or remove command (#4279); a
+# sysctl.d usermode helper (kernel.core_pattern's pipe, kernel.modprobe,
+# kernel.hotplug, kernel.poweroff_cmd), or a tmpfiles.d w line to one
+# (#4320). One line per program: its absolute path, then what it is. A
+# broker binary's package joins the root side; anything else says why it
+# starts no broker binary, and review checks that.
+# A line no file runs fails.
+/usr/lib/agentos/agentos-hostdisk HW-8's disk classifier (broker/cmd/agentos-hostdisk), run by 59-agentos-host-disks.rules as IMPORT{program}; a broker binary, so its packages are root-side
+/usr/lib/agentos/host-disk-unlink a /bin/sh script (image/mkosi/mkosi.extra/usr/lib/agentos/host-disk-unlink) that removes /dev/disk/by-* links with tr, readlink, realpath and rm only; it starts no broker binary
+/bin/false coreutils' false, which exits 1 and starts nothing; agentos-no-bluetooth.conf's install lines run it so btusb and btmtk never load
+/usr/bin/false coreutils' false, which exits 1 and starts nothing; 99-agentos-nodump.conf's kernel.core_pattern pipes each core dump to it, so the dump is discarded

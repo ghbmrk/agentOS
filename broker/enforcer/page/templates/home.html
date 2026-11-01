@@ -5,11 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Home enforcer: {{.Name}}</title>
 <link rel="stylesheet" href="/page.css">
+<meta name="enforcer-token" content="{{.Token}}">
 <script src="/page.js" defer></script>
 </head>
 <body>
 <h1>Home enforcer</h1>
 <p>Policy version {{.Version}}.</p>
+{{if .Recovery}}
+<div class="pending warn">
+<p>A new passkey is being enrolled with the recovery code. At {{.Recovery}} it replaces your passkey, and your passkey stops working. If this is not you, cancel it now.</p>
+<button class="act" data-action="cancel-recovery" data-target="" data-rp="{{.Name}}">Cancel the recovery with your passkey</button>
+</div>
+{{end}}
+{{if .Keep}}
+<div class="pending">
+<p>Your rules are still signed by the passkey this one replaced, so nothing can be loosened yet. Sign them as this passkey's to finish. Nothing in them changes.</p>
+<button class="act" data-action="keep" data-target="" data-rp="{{.Name}}">Keep my rules with this passkey</button>
+</div>
+{{end}}
 
 <h2>Waiting to apply</h2>
 {{if .Pending}}{{range .Pending}}
@@ -24,6 +37,8 @@
 {{if not .Sync.Known}}<p>Not known yet: it shows here after your next approval.</p>
 {{else if .Sync.Eligible}}<p class="warn">Your passkey is synced to your phone's cloud account. Anyone who takes over that account and is on your Owner Wi-Fi can use it.</p>
 {{else}}<p>Your passkey is kept on one device only and does not sync.</p>{{end}}
+
+{{if .Enrol}}<p><a href="/enrol">Lost passkey, recovery code or factory reset</a></p>{{end}}
 
 <h2>agentOS channel</h2>
 <p>The channel is {{.Channel}}.</p>

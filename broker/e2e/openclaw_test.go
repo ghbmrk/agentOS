@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,7 +30,7 @@ import (
 
 // REQ: ARC-3, REV-1, REV-5, OP-1, CRED-1, ARC-6, ARC-7, OP-8
 //
-// TestIntegrationOpenClawGuest runs OpenClaw 2026.9.8, unmodified (ARC-3),
+// TestIntegrationOpenClawGuest runs OpenClaw 2026.10.9, unmodified (ARC-3),
 // as an agent machine under gVisor, with the guest bridge as PID 1 and the
 // machine's broker socket as its only way out. One owner message goes in
 // through the guest plane's inbox (ARC-6 (c)); a scripted model behind the
@@ -38,7 +39,7 @@ import (
 // machine's key and the kernel's seam takes it once; the machine is
 // snapshotted after the call (REV-1); the answer comes
 // back to the owner. The owner's message raises the machine to private
-// (REV-5).
+// (REV-5). The gateway serves no Control UI (PLN-5, #4417).
 //
 // It needs root, AGENTOS_RUNSC (a runsc binary), and AGENTOS_OPENCLAW_ROOTFS
 // (a root built by guest/openclaw/build-rootfs.sh).
@@ -311,10 +312,11 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rt := &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")}
 	m, err := vm.Open(ctx, vm.Config{
 		StateDir:  filepath.Join(dir, "machines"),
 		Images:    map[string]string{"openclaw": rootfs},
-		Runtime:   &gvisor.Runtime{Bin: runsc, StateDir: filepath.Join(dir, "runsc")},
+		Runtime:   rt,
 		Admit:     adm,
 		NoCgroups: true,
 		NoQuota:   true,
@@ -386,5 +388,138 @@ func TestIntegrationOpenClawGuest(t *testing.T) {
 	}
 	if u := mtr.Usage("agent"); u.Calls < 2 || int(u.Calls) != calls {
 		t.Fatalf("meter counted %+v, model saw %d calls (OP-8)", u, calls)
+	}
+	noControlUI(t, rt, rootfs)
+}
+
+// controlUIProbe runs inside the guest. For each path it asks the gateway
+// on 18789 and prints the status, the body's SHA-256, and whether the body
+// carries the Control UI's build marker, as one JSON object.
+const controlUIProbe = `
+const crypto = require("crypto");
+(async () => {
+  const out = {};
+  for (const p of process.argv.slice(1)) {
+    const r = await fetch("http://127.0.0.1:18789" + p, { redirect: "manual" });
+    const b = Buffer.from(await r.arrayBuffer());
+    out[p] = { status: r.status, sha256: crypto.createHash("sha256").update(b).digest("hex"),
+      marker: b.includes("data-openclaw-control-ui-build-id") };
+  }
+  console.log(JSON.stringify(out));
+})().catch(e => { console.error(String(e)); process.exit(1); });
+`
+
+// controlUIProbePin is the OpenClaw version noControlUI was checked on. On
+// it the Control UI is served at the gateway's root with no token, so a 404
+// or 401 there means the UI is off. A later pin may move the UI under
+// another base path or behind auth, where the same answers would pass with
+// the UI on; TestControlUIProbePin fails until the probe is rechecked on the
+// new pin (#4425).
+const controlUIProbePin = "2026.10.9"
+
+// TestControlUIProbePin fails when the guest's OpenClaw moves off the
+// version noControlUI was checked on. npm ci installs the version in
+// guest/openclaw/package-lock.json, so that is the one that counts;
+// package.json and build-rootfs.sh's OPENCLAW_VERSION must agree with it.
+// It needs no root, so the pin bump's own PR fails here, not only on the
+// gVisor runner.
+func TestControlUIProbePin(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile("../../guest/openclaw/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var lock struct {
+		Packages map[string]struct{ Version string } `json:"packages"`
+	}
+	if err := json.Unmarshal(read("package-lock.json"), &lock); err != nil {
+		t.Fatal(err)
+	}
+	var pkg struct{ Dependencies map[string]string }
+	if err := json.Unmarshal(read("package.json"), &pkg); err != nil {
+		t.Fatal(err)
+	}
+	script := "(none)"
+	if m := regexp.MustCompile(`(?m)^OPENCLAW_VERSION=(\S+)$`).FindAllSubmatch(read("build-rootfs.sh"), -1); len(m) == 1 {
+		script = string(m[0][1])
+	}
+	for _, v := range []struct{ where, got string }{
+		{"package-lock.json node_modules/openclaw", lock.Packages["node_modules/openclaw"].Version},
+		{"package.json dependencies", pkg.Dependencies["openclaw"]},
+		{"build-rootfs.sh OPENCLAW_VERSION", script},
+	} {
+		if v.got != controlUIProbePin {
+			t.Errorf("OpenClaw in %s is %q, but noControlUI was checked on %s: with gateway.controlUi.enabled true on the new pin, "+
+				"find where the gateway serves the Control UI (base path, auth) and point the probe there, then set controlUIProbePin (#4425)",
+				v.where, v.got, controlUIProbePin)
+		}
+	}
+}
+
+// noControlUI checks that the guest's gateway does not serve OpenClaw's
+// Control UI (#4417, PLN-5): agentOS never uses it, and its assets inline
+// the DOMPurify and KaTeX copies accepted under #4302. OpenClaw serves it by
+// default whenever dist/control-ui is present, so only the profile's
+// gateway.controlUi.enabled false keeps it off. The probe asks for the UI's
+// root and for the two assets that hold those copies, and fails if any
+// comes back as the file in the image or carries the UI's build marker. A
+// gateway the probe cannot reach fails the test, so a dead gateway is no pass.
+// The probe runs through the machine's own runtime, with its runsc flags
+// and fixed environment.
+func noControlUI(t *testing.T, rt *gvisor.Runtime, rootfs string) {
+	t.Helper()
+	ui := filepath.Join(rootfs, "opt/openclaw/node_modules/openclaw/dist/control-ui")
+	paths, want := []string{"/"}, map[string]string{}
+	for _, g := range []string{"markdown-runtime-*.js", "mermaid.min-*.js"} {
+		files, _ := filepath.Glob(filepath.Join(ui, "assets", g))
+		if len(files) != 1 {
+			t.Fatalf("control-ui assets %s: %v, want one file (has the OpenClaw pin moved?)", g, files)
+		}
+		b, err := os.ReadFile(files[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := "/assets/" + filepath.Base(files[0])
+		paths = append(paths, p)
+		want[p] = fmt.Sprintf("%x", sha256.Sum256(b))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	res, err := rt.Exec(ctx, "agent", vm.Command{
+		Argv:      append([]string{"/usr/local/bin/node", "-e", controlUIProbe}, paths...),
+		MaxOutput: 1 << 20,
+	})
+	if err != nil {
+		// runsc's own messages go to the runtime's exec log, not to err;
+		// its last 16 KiB are this probe's.
+		log, _ := os.ReadFile(filepath.Join(rt.StateDir, "exec.log"))
+		if len(log) > 16<<10 {
+			log = log[len(log)-16<<10:]
+		}
+		t.Fatalf("control UI probe: %v\nstderr: %s\nexec.log (tail):\n%s", err, res.Stderr, log)
+	}
+	out := res.Stdout
+	if res.ExitCode != 0 || res.Truncated {
+		t.Fatalf("control UI probe: exit %d (truncated %v)\nstdout: %s\nstderr: %s", res.ExitCode, res.Truncated, out, res.Stderr)
+	}
+	var got map[string]struct {
+		Status int
+		Sha256 string
+		Marker bool
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("control UI probe output %q: %v", out, err)
+	}
+	t.Logf("control UI probe: %s", strings.TrimSpace(string(out)))
+	for _, p := range paths {
+		r, ok := got[p]
+		switch {
+		case !ok || r.Status == 0:
+			t.Errorf("control UI probe: no answer for %s", p)
+		case r.Marker || (want[p] != "" && r.Sha256 == want[p]):
+			t.Errorf("gateway serves the Control UI at %s (status %d): want gateway.controlUi.enabled false (#4417)", p, r.Status)
+		}
 	}
 }
