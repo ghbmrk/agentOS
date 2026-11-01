@@ -328,7 +328,7 @@ func (s *Stream) scan() {
 
 // Result scans what is pending and returns what the stream has found.
 func (s *Stream) Result() Result {
-	if s.pending > 0 {
+	if s.pending != 0 {
 		s.scan()
 	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
