@@ -391,28 +391,23 @@ func reachable(dir, name, goos, goarch string) (bool, error) {
 	if len(tags) > 12 {
 		return true, nil // too many to try: count it as reachable, so it fails closed
 	}
-	for set := 0; set < 1<<len(tags); set++ {
-		ctx := build.Default
-		ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled, ctx.BuildTags = goos, goarch, false, nil
-		for i, t := range tags {
-			if set&(1<<i) == 0 {
-				continue
-			}
-			if t == "cgo" {
-				ctx.CgoEnabled = true
-			} else {
-				ctx.BuildTags = append(ctx.BuildTags, t)
-			}
+	// Try each subset of the free tags: tag i is off, then on.
+	var try func(i int, on []string, cgo bool) (bool, error)
+	try = func(i int, on []string, cgo bool) (bool, error) {
+		if i == len(tags) {
+			ctx := build.Default
+			ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled, ctx.BuildTags = goos, goarch, cgo, on
+			return ctx.MatchFile(dir, name)
 		}
-		ok, err := ctx.MatchFile(dir, name)
-		if err != nil {
-			return false, err
+		if ok, err := try(i+1, on, cgo); ok || err != nil {
+			return ok, err
 		}
-		if ok {
-			return true, nil
+		if tags[i] == "cgo" {
+			return try(i+1, on, true)
 		}
+		return try(i+1, append(on[:len(on):len(on)], tags[i]), cgo)
 	}
-	return false, nil
+	return try(0, nil, false)
 }
 
 // overlay reads the -overlay file among flags, if any, as a map from each

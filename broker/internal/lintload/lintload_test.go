@@ -1,6 +1,7 @@
 package lintload
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -93,6 +94,77 @@ func TestLoadRefusesALineDirective(t *testing.T) {
 		dir := module(t, map[string]string{"a/a.go": "package a\n\n" + d + "\nvar X = 1\n"})
 		if _, err := Load(dir, linux, "./a"); err == nil || !strings.Contains(err.Error(), "line directive") {
 			t.Errorf("%s: got %v, want the directive refused", d, err)
+		}
+	}
+}
+
+// A partial build leaves out only what does not compile, and Module brings
+// in the main module's dependencies.
+func TestLoadPartialAndModule(t *testing.T) {
+	dir := module(t, map[string]string{
+		"bad/bad.go": "package bad\n\nvar X int = \"s\"\n",
+		"dep/dep.go": "package dep\n\nconst N = 1\n",
+		"top/top.go": "package top\n\nimport \"example.test/m/dep\"\n\nvar _ = dep.N\n",
+	})
+	paths := func(l *Loaded) []string {
+		var out []string
+		for _, p := range l.Packages {
+			out = append(out, p.Path)
+		}
+		return out
+	}
+	l, err := Load(dir, Build{Env: linux.Env, Partial: true}, "./bad", "./top")
+	if err != nil || !slices.Equal(paths(l), []string{"example.test/m/top"}) {
+		t.Fatalf("partial: got %v, %v, want top alone", l, err)
+	}
+	l, err = Load(dir, Build{Env: linux.Env, Module: true}, "./top")
+	if err != nil || !slices.Equal(paths(l), []string{"example.test/m/dep", "example.test/m/top"}) {
+		t.Fatalf("module: got %v, %v, want dep and top", l, err)
+	}
+}
+
+// Packages with no test variant share one importer, so a lint comparing an
+// imported object across them (core's interface pass) sees one object.
+func TestLoadSharesImports(t *testing.T) {
+	dir := module(t, map[string]string{
+		"c/c.go": "package c\n\ntype T struct{}\n",
+		"a/a.go": "package a\n\nimport \"example.test/m/c\"\n\nvar V c.T\n",
+		"b/b.go": "package b\n\nimport \"example.test/m/c\"\n\nvar V c.T\n",
+	})
+	l, err := Load(dir, linux, "./a", "./b")
+	if err != nil || len(l.Packages) != 2 {
+		t.Fatalf("got %v, %v", l, err)
+	}
+	ta := l.Packages[0].Types.Scope().Lookup("V").Type()
+	tb := l.Packages[1].Types.Scope().Lookup("V").Type()
+	if ta != tb {
+		t.Fatal("a and b see two c.T objects")
+	}
+	imp, err := l.Importer.Import("example.test/m/c")
+	if err != nil || imp.Scope().Lookup("T").Type() != ta {
+		t.Fatalf("the load's importer gives another c.T (%v)", err)
+	}
+}
+
+// reachable tries every subset of up to 12 free tags (cgo among them), and
+// counts a file with more as reachable, failing closed.
+func TestReachableTagCap(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, n int) {
+		var tags []string
+		for i := range n {
+			tags = append(tags, fmt.Sprintf("t%d", i))
+		}
+		src := "//go:build (" + strings.Join(tags, " || ") + ") && windows\n\npackage a\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("eleven.go", 11) // 12 free tags with cgo: tried, and no linux build compiles it
+	write("twelve.go", 12) // 13: past the cap
+	for name, want := range map[string]bool{"eleven.go": false, "twelve.go": true} {
+		if got, err := reachable(dir, name, "linux", "amd64"); err != nil || got != want {
+			t.Errorf("%s: reachable %v (%v), want %v", name, got, err, want)
 		}
 	}
 }
