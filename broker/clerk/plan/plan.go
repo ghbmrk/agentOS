@@ -1149,12 +1149,25 @@ func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Respon
 	} else if len(e.Secret) > 0 {
 		body = nil
 	}
+	prior := p.heldSecrets(guest)
+	if len(prior) > 0 && len(held) == 0 && len(body) > 0 {
+		// The guest holds secrets: only a body in the canonical form the
+		// leak check reads passes.
+		obj, err := strictObject(body)
+		if err != nil {
+			return nil, DSecret
+		}
+		if body, err = encodeJSON(obj); err != nil {
+			return nil, DSecret
+		}
+	}
 	out := p.answer(&http.Response{StatusCode: a.status, Status: fmt.Sprintf("%d %s", a.status, http.StatusText(a.status)),
 		Header: a.header, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body))}, "")
 	for _, s := range held {
-		if bytes.Contains(body, []byte(s.real)) || strings.Contains(s.ph, s.real) || headerHolds(out.Header, s.real) {
-			return nil, DSecret
-		}
+		prior = append(prior, s)
+	}
+	if leaks(body, out.Header, prior) {
+		return nil, DSecret
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1190,6 +1203,35 @@ func (p *Login) take(guest string, e Endpoint, get func(string) string, set func
 		set(k, p.secrets[guest][name].real)
 	}
 	return true
+}
+
+// heldSecrets are the device-step secrets guest holds placeholders for.
+func (p *Login) heldSecrets(guest string) []signSecret {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []signSecret
+	for _, s := range p.secrets[guest] {
+		out = append(out, s)
+	}
+	return out
+}
+
+// leaks reports whether body, h or a placeholder carries a secret's real
+// value, as is or as a JSON string writes it. body is raw or this clerk's
+// own encoding, so an escaped secret has one written form.
+func leaks(body []byte, h http.Header, secrets []signSecret) bool {
+	for _, s := range secrets {
+		forms := []string{s.real}
+		if q, err := encodeJSON(s.real); err == nil && len(q) > 2 {
+			forms = append(forms, string(q[1:len(q)-1]))
+		}
+		for _, f := range forms {
+			if bytes.Contains(body, []byte(f)) || headerHolds(h, f) || strings.Contains(s.ph, f) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func headerHolds(h http.Header, v string) bool {
@@ -1545,6 +1587,15 @@ func (p *Login) swap(a *planAnswer, guest string, signIn bool) (*http.Response, 
 		}
 		obj[k] = ph
 	}
+	out, err := encodeJSON(obj)
+	if err != nil {
+		p.cmu.Unlock()
+		return nil, DUnswappable
+	}
+	if signIn && leaks(out, nil, p.heldSecrets(guest)) {
+		p.cmu.Unlock()
+		return nil, DSecret
+	}
 	if err := p.save(next); err != nil {
 		p.cmu.Unlock()
 		return nil, DSave
@@ -1560,10 +1611,6 @@ func (p *Login) swap(a *planAnswer, guest string, signIn bool) (*http.Response, 
 	}
 	p.mu.Unlock()
 	p.cmu.Unlock()
-	out, err := encodeJSON(obj)
-	if err != nil {
-		return nil, DUnswappable
-	}
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: h, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,

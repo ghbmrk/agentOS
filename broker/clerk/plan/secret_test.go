@@ -168,6 +168,12 @@ func TestPlanSignInDropsAnAnswerThatWouldLeakASecret(t *testing.T) {
 		"echoed": func(w http.ResponseWriter) {
 			w.Write([]byte(`{"authorization_code":"real-code-1","code_verifier":"real-verifier-1","code_challenge":"real-code-1"}`))
 		},
+		"the device id echoed": func(w http.ResponseWriter) {
+			w.Write([]byte(`{"authorization_code":"real-code-1","code_verifier":"real-verifier-1","code_challenge":"real-device-1"}`))
+		},
+		"an escaped echo": func(w http.ResponseWriter) {
+			w.Write([]byte(`{"authorization_code":"real\"code","code_verifier":"real-verifier-1","code_challenge":"x real\u0022code"}`))
+		},
 		"in a header": func(w http.ResponseWriter) {
 			w.Header().Set("X-Request-Id", "real-verifier-1")
 			w.Write([]byte(`{"authorization_code":"real-code-1","code_verifier":"real-verifier-1"}`))
@@ -250,5 +256,77 @@ func TestPlanDeclarationKeepsSignInSecrets(t *testing.T) {
 		if _, err := plan.New(d, f.sec, f.roots); err == nil {
 			t.Errorf("%s: New accepted it", name)
 		}
+	}
+}
+
+// A device step that answers after its guest was forgotten is dropped and
+// leaves nothing held for it (DEnded).
+func TestPlanSignInDropsADeviceAnswerAfterForget(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	poll := deviceStepsUserCode(t, p, "s")
+	reached, open := make(chan struct{}), make(chan struct{})
+	f.device = func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+		close(reached)
+		<-open
+		w.Write([]byte(`{"authorization_code":"real-code-1","code_verifier":"real-verifier-1"}`))
+		return true
+	}
+	type done struct {
+		resp *http.Response
+		d    string
+	}
+	out := make(chan done, 1)
+	go func() {
+		resp, d := p.Do(context.Background(), "s", jsonReq("/api/accounts/deviceauth/token", poll), nil)
+		out <- done{resp, d}
+	}()
+	<-reached
+	p.Forget("s")
+	close(open)
+	if got := <-out; got.resp != nil || got.d != plan.DEnded {
+		t.Fatalf("a late device answer: %v %q", got.resp, got.d)
+	}
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	if resp, d := p.Do(context.Background(), "s", jsonReq("/api/accounts/deviceauth/token", poll), nil); resp != nil || d != plan.DPlaceholder {
+		t.Fatalf("the forgotten guest's device id: %v %q", resp, d)
+	}
+}
+
+// A code exchange whose answer carries a device-step secret in a field it
+// passes is dropped before the login is stored (DSecret).
+func TestPlanSignInDropsATokenAnswerEchoingASecret(t *testing.T) {
+	f := newPlanFix(t)
+	d := f.decl(t)
+	for i := range d.Token {
+		if d.Token[i].Name == "scope" {
+			d.Token[i].Pattern = `[a-z0-9-]{1,40}`
+		}
+	}
+	p, err := plan.New(d, f.sec, f.roots)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	form := deviceSteps(t, p, "s")
+	f.answer = func(w http.ResponseWriter, _ *http.Request, _ string) bool {
+		tok := f.tokens()
+		tok["scope"] = "real-verifier-1"
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(tok)
+		return true
+	}
+	if resp, d := p.Do(context.Background(), "s", formReq(form), nil); resp != nil || d != plan.DSecret {
+		t.Fatalf("an echoing token answer: %v %q", resp, d)
+	}
+	if p.Signed() || p.SignedIn("s") {
+		t.Fatal("an echoing token answer was stored")
 	}
 }
