@@ -1028,3 +1028,48 @@ func TestPinnedNamesOnly(t *testing.T) {
 		t.Error("pin changed a query")
 	}
 }
+
+// TestPinAlone: pins.pin on its own, without the record filter behind it
+// repeating its checks, so each of its own checks is shown to hold (L3 on
+// #4397): an SRV needs a pinned target as well as a pinned name, a TXT a
+// pinned name, an enumeration PTR the type of a pinned instance, and an
+// instance PTR a pinned target.
+func TestPinAlone(t *testing.T) {
+	p := newPins([][]string{{"printer", "local"}, {"Printer", "_ipp", "_tcp", "local"}})
+	m := response([]record{
+		a("PRINTER.local", "10.13.0.2", 120),
+		a("other.local", "10.13.0.2", 120),
+		srv("Printer._ipp._tcp.local", "printer.local", 120),
+		srv("Printer._ipp._tcp.local", "other.local", 120),
+		srv("Other._ipp._tcp.local", "printer.local", 120),
+		txt("Printer._ipp._tcp.local", 120),
+		txt("Other._ipp._tcp.local", 120),
+		ptr("_ipp._tcp.local", "Printer._ipp._tcp.local", 120),
+		ptr("_ipp._tcp.local", "Other._ipp._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_ipp._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_smb._tcp.local", 120),
+		{name: dn("printer.local"), typ: 13, class: 1, ttl: 120},
+	}, []record{a("printer.local", "fd00:13::2", 120), a("other.local", "fd00:13::2", 120)})
+	m.authority = []record{a("printer.local", "10.13.0.2", 120)}
+	out := p.pin(m)
+	var got []string
+	for i, s := range [][]record{out.answers, out.authority, out.additional} {
+		for _, r := range s {
+			got = append(got, describe(r, i))
+		}
+	}
+	want := []string{
+		"an PRINTER.local 10.13.0.2",
+		"an Printer._ipp._tcp.local -> printer.local",
+		"an Printer._ipp._tcp.local txt",
+		"an _ipp._tcp.local -> Printer._ipp._tcp.local",
+		"an _services._dns-sd._udp.local -> _ipp._tcp.local",
+		"ar printer.local fd00:13::2",
+	}
+	if !slices.Equal(got, want) || out.id != m.id || out.flags != m.flags {
+		t.Errorf("pin kept\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if (pins{}).pin(m).answers != nil {
+		t.Error("no pins kept records")
+	}
+}
