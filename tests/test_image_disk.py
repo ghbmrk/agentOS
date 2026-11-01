@@ -34,6 +34,14 @@ for p in (a for a in sys.argv[1:] if not a.startswith("-")):
     print(m if col == "target" else "%dM" % fs[m][0 if col == "avail" else 1])
 """
 
+# A stand-in sudo that runs nothing and logs each call's arguments, one call per line.
+# setUp puts it first on PATH for every test, so no step under test reaches a real sudo.
+FAKE_SUDO = """#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/sudo.log"
+"""
+# A sudo named by a path, or found on a PATH the script changes, would bypass the stand-in.
+SUDO_BYPASS = re.compile(r"/sudo\b|\bPATH=|\benv\s+(?:-\S+\s+)*-[a-zA-Z]*P|\bhash\s+-p")
+
 
 def build_steps():
     """The build job's steps as (name or uses, step text), read as text: CI's Python has no YAML."""
@@ -65,6 +73,9 @@ class DiskBudgetTest(unittest.TestCase):
         df = self.t / "bin" / "df"
         df.write_text(FAKE_DF)
         df.chmod(0o755)
+        sudo = self.t / "bin" / "sudo"
+        sudo.write_text(FAKE_SUDO)
+        sudo.chmod(0o755)
         (self.t / "temp").mkdir()
         self.procs = []
 
@@ -78,6 +89,10 @@ class DiskBudgetTest(unittest.TestCase):
 
     def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None):
         """Runs a step; FS maps mount points to (avail, used) MB, else one file system "/" has them."""
+        script = run_script(name)
+        # #4440: checked before the script runs, so a step that would reach a real sudo never runs here.
+        self.assertIsNone(SUDO_BYPASS.search(script), "%s names sudo so that PATH's stand-in is skipped" % name)
+        self.assertEqual((self.t / "bin" / "sudo").read_text(), FAKE_SUDO, "the sudo stand-in is gone")
         (self.t / "bin" / "fs.json").write_text(json.dumps(fs or {"/": (avail_mb, used_mb)}))
         dmi = self.t / "dmi"
         dmi.mkdir(exist_ok=True)
@@ -85,7 +100,7 @@ class DiskBudgetTest(unittest.TestCase):
             (dmi / "sys_vendor").write_text(vendor + "\n")
         env = dict(os.environ, PATH="%s:%s" % (self.t / "bin", os.environ["PATH"]),
                    RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi))
-        p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", run_script(name)], env=env,
+        p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", script], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              start_new_session=True)
         self.procs.append(p)
@@ -108,12 +123,16 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("runner has 29 GB; free more in \"Free runner disk\"", out)
 
     def test_free_runner_disk_notices_read_like_the_guard(self):
-        # #4434: one space, and GB as the guard writes it. sudo is a stand-in that does nothing.
-        sudo = self.t / "bin" / "sudo"
-        sudo.write_text("#!/bin/sh\nexit 0\n")
-        sudo.chmod(0o755)
+        # #4434: one space, and GB as the guard writes it. sudo is setUp's stand-in, which runs nothing.
+        script = run_script("Free runner disk")
+        # #4440: what the step deletes it deletes through sudo, so dropping sudo cannot run rm as the runner user.
+        self.assertEqual(re.findall(r"(?<!sudo )\b(?:rm|docker)\b", script), [], script)
         rc, out = self.run_step("Free runner disk", avail_mb=86 * 1024 + 500, used_mb=1000)
         self.assertEqual(rc, 0, out)
+        # Every sudo in the step reached the stand-in, the deletions among them.
+        calls = (self.t / "bin" / "sudo.log").read_text().splitlines()
+        self.assertEqual(len(calls), len(re.findall(r"\bsudo\b", script)), calls)
+        self.assertTrue(calls[0].startswith("rm -rf /usr/local/lib/android "), calls)
         self.assertIn("::notice title=disk budget::/ had 86 GB free before freeing the runner disk\n", out)
         self.assertIn("::notice title=disk budget::/ has 86 GB free after freeing the runner disk\n", out)
 
