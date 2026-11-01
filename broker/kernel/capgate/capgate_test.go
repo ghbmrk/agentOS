@@ -446,3 +446,47 @@ func TestSecondEndKeepsTheFirst(t *testing.T) {
 		t.Fatalf("duplicate End moved the end past the ask: %v", err)
 	}
 }
+
+// Sends in flight count against their own group's cap and no other's:
+// one byte over is refused with no trip, exactly at the cap passes, timed
+// at exactly twice the interval after the count's ask (Potency point 1).
+func TestInFlightCountsOnlyInItsGroup(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []string{"a"}, Cap: 1000}, {Dests: []string{"b"}, Cap: 1000}}); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		if _, err := g.Reserve("a", 10); err != nil { // 400 in flight to a
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.Reserve("b", 200); err != nil { // 400 in flight to b
+		t.Fatal(err)
+	}
+	c.step(Fresh)
+	e := &enforcer{cap: 1000, count: 400}          // b's bytes, all counted at b's group
+	if _, err := g.Reserve("b", 301); err == nil { // 400 + 602
+		e.pass(602)
+		t.Fatalf("b's own in-flight send skipped: enforcer at %d, tripped=%v", e.count, e.tripped)
+	}
+	if _, err := g.Reserve("b", 300); err != nil { // 400 + 600: a's bytes are not b's
+		t.Fatalf("another group's sends counted against b: %v", err)
+	}
+	if _, err := g.Reserve("a", 300); err != nil { // 400 + 600
+		t.Fatalf("b's sends counted against a: %v", err)
+	}
+}
+
+// After a pause the enforcer's day still never goes back.
+func TestEarlierDayAfterPause(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 5, capped(1000, 0, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	g.Paused()
+	if err := g.Summary(g.Ask(), 4, capped(1000, 0, "backup")); !errors.Is(err, ErrSummary) {
+		t.Fatalf("an earlier day after a pause: %v", err)
+	}
+}

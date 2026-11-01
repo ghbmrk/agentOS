@@ -130,7 +130,7 @@ func (g *Gate) Ask() Ticket {
 func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if t.epoch != g.epoch || (g.have && (t.at.Before(g.asked) || day < g.day)) {
+	if t.epoch != g.epoch || day < g.day || (g.have && t.at.Before(g.asked)) {
 		return ErrSummary
 	}
 	by := map[string]*Group{}
