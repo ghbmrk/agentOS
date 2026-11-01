@@ -658,10 +658,12 @@ func (w testWriter) Write(b []byte) (int, error) {
 // gives NetAdmin its user namespace with CAP_NET_ADMIN and CAP_NET_RAW,
 // both to Thread, which has both, gives a profile with neither no user or
 // mount namespace and no capability, and a fresh network namespace unless
-// the stack joins one. It runs without root, where the root-gated tests
+// the stack joins one; every stack gets a fresh IPC and PID namespace
+// (ENF-k-11). It runs without root, where the root-gated tests
 // skip.
 func TestProcAttr(t *testing.T) {
 	const userMnt = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
+	const ipcPid = syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID
 	plain := BLE(1, 1)
 	plain.View = nil
 	netAdmin := Thread(1, 1, "/s", "/r", "/d")
@@ -673,13 +675,13 @@ func TestProcAttr(t *testing.T) {
 		flags   uintptr
 		ambient []uintptr
 	}{
-		{"ble", BLE(1, 1), nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET | userMnt, []uintptr{capSysAdmin}},
-		{"no view", plain, nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET, nil},
-		{"thread", Thread(1, 1, "/s", "/r", "/d"), nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET | userMnt,
+		{"ble", BLE(1, 1), nil, ipcPid | syscall.CLONE_NEWNET | userMnt, []uintptr{capSysAdmin}},
+		{"no view", plain, nil, ipcPid | syscall.CLONE_NEWNET, nil},
+		{"thread", Thread(1, 1, "/s", "/r", "/d"), nil, ipcPid | syscall.CLONE_NEWNET | userMnt,
 			[]uintptr{capNetAdmin, capNetRaw, capSysAdmin}},
-		{"net admin, no view", netAdmin, nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER,
+		{"net admin, no view", netAdmin, nil, ipcPid | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER,
 			[]uintptr{capNetAdmin, capNetRaw}},
-		{"matter joined", Matter(1, 1, "/m"), &Proc{}, syscall.CLONE_NEWIPC | userMnt, []uintptr{capSysAdmin}},
+		{"matter joined", Matter(1, 1, "/m"), &Proc{}, ipcPid | userMnt, []uintptr{capSysAdmin}},
 	} {
 		a := procAttr(Spec{Profile: c.p, Net: c.net})
 		if a.Cloneflags != c.flags || !slices.Equal(a.AmbientCaps, c.ambient) {

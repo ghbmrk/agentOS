@@ -252,13 +252,13 @@ func TestStacksConfined(t *testing.T) {
 		own("thread-run", threadUID), "/dev/null"))
 	matterProfile := probeView(confine.Matter(matterUID, matterUID, own("matter", matterUID)))
 
-	read := func(t *testing.T, conn Conn) map[string]string {
+	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
 		h, err := NewHost(Config{Devices: []Device{{Name: "probe", Stack: StackThread}}, Timeout: 20 * time.Second,
 			Notify: func(Notification) {}, Log: func(string) {}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.Attach(StackThread, conn)
+		h.Attach(StackThread, p, conn)
 		b, err := h.State("probe")
 		if err != nil {
 			t.Fatalf("read through the interface: %v", err)
@@ -309,7 +309,7 @@ func TestStacksConfined(t *testing.T) {
 	}
 	defer thread.Stop()
 	t.Run("thread", func(t *testing.T) {
-		got := read(t, conn)
+		got := read(t, thread, conn)
 		// CAP_NET_ADMIN (12) and CAP_NET_RAW (13), in its own user namespace.
 		confined(t, got, threadUID, "0000000000003000")
 		if got["wpan0"] != "allowed" {
@@ -326,7 +326,7 @@ func TestStacksConfined(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer matter.Stop()
-		got := read(t, conn)
+		got := read(t, matter, conn)
 		confined(t, got, matterUID, "0000000000000000")
 		if !strings.HasPrefix(got["tun"], "refused") {
 			t.Errorf("the Matter controller created a link: %s", got["tun"])
@@ -395,7 +395,7 @@ func TestStackOutlivesEndedThreads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Attach(StackBLE, conn)
+	h.Attach(StackBLE, proc, conn)
 	if _, err := h.State(scale.Name); err != nil {
 		t.Fatalf("the stack after threads ended: %v", err)
 	}
