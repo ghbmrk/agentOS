@@ -42,8 +42,36 @@ _UNIX = re.compile(r'sa_family=AF_UNIX, sun_path=(@?)"((?:[^"\\]|\\.)*)"')
 _UNFINISHED = " <unfinished ...>"
 
 
-def _unquote(s):
-    return s.replace('\\"', '"').replace("\\\\", "\\")
+_ESC = {"n": b"\n", "t": b"\t", "r": b"\r", "v": b"\v", "f": b"\f"}
+
+
+def _decode(s):
+    r"""A path as strace prints it, quoted or after -y's `<`, back to the name: `\\`, `\"`, `\n`
+    and the like, `\ooo` octal (-y writes `<` and `>` as `\74` and `\76`) and `\xHH`. The asked
+    path and the reached one must decode alike, or one file reads as two names."""
+    out = bytearray()
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s):
+            n = s[i + 1]
+            if n in "01234567":
+                j = i + 1
+                while j < len(s) and j < i + 4 and s[j] in "01234567":
+                    j += 1
+                out.append(int(s[i + 1:j], 8) & 0xFF)
+                i = j
+                continue
+            if n == "x" and re.fullmatch(r"[0-9a-fA-F]{2}", s[i + 2:i + 4]):
+                out.append(int(s[i + 2:i + 4], 16))
+                i += 4
+                continue
+            out += _ESC.get(n, n.encode("utf-8", "surrogateescape"))
+            i += 2
+            continue
+        out += c.encode("utf-8", "surrogateescape")
+        i += 1
+    return out.decode("utf-8", "surrogateescape")
 
 
 def _flags(rest):
@@ -82,7 +110,7 @@ def writes(trace):
         m = _OPEN_ARGS.match(rest)
         if not m:
             return None, False
-        base, path = m.group(1), _unquote(m.group(2))
+        base, path = m.group(1) and _decode(m.group(1)), _decode(m.group(2))
         if not os.path.isabs(path) and base is not None:
             path = os.path.join(base, path)
         return os.path.normpath(path) if os.path.isabs(path) else path, bool(_WRITE.search(_flags(m.group(3))))
@@ -93,7 +121,7 @@ def writes(trace):
             return ("bind", f"port {port.group(1)}")
         unix = _UNIX.search(args)
         if unix and unix.group(2):
-            name = _unquote(unix.group(2))
+            name = _decode(unix.group(2))
             return ("bind", f"unix @{name}") if unix.group(1) else ("path", os.path.normpath(name))
         return None
     for line in trace.splitlines():
@@ -115,14 +143,14 @@ def writes(trace):
                 pending[pid] = path
                 continue
             reached = _REACHED.search(rest)
-            out.add(("path", os.path.normpath(reached.group(1)) if reached else path))
+            out.add(("path", os.path.normpath(_decode(reached.group(1))) if reached else path))
             continue
         r = _RESUMED.match(line)
         if r and r.group(2) != "bind" and r.group(1) in pending:
             pending.pop(r.group(1))
             reached = _REACHED.search(r.group(3))
             if reached:
-                out.add(("path", os.path.normpath(reached.group(1))))
+                out.add(("path", os.path.normpath(_decode(reached.group(1)))))
     return out
 
 

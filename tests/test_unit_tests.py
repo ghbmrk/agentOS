@@ -284,6 +284,16 @@ class ClashTest(unittest.TestCase):
         padded = '6 openat(AT_FDCWD</r>, "link/out", O_WRONLY|O_CREAT, 0666)    = 3</r/build/out>\n'
         self.assertEqual(clash_audit.writes(padded), {("path", "/r/build/out")})
 
+    def test_asked_and_reached_paths_decode_alike(self):
+        # strace 6.8's own lines for one odd name: quoted as asked, `\76` for `>` after -y.
+        a = ('7  openat(AT_FDCWD</e>, "w/we>ird\\"q\\\\b/out\\tx", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666) = 3'
+             '</e/w/we\\76ird\\"q\\\\b/out\\tx>\n')
+        b = '8  openat(AT_FDCWD</e>, "w/we>ird\\"q\\\\b/out\\tx", O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0777) = -1 EEXIST (File exists)\n'
+        name = '/e/w/we>ird"q\\b/out\tx'
+        self.assertEqual(clash_audit.writes(a), {("path", name)})
+        self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": b}, serial={}), [("path", name, "test_a", "test_b")])
+        self.assertEqual(clash_audit._decode("\\x41\\101\\60\\n"), "AA0\n")
+
     def test_a_write_cut_off_mid_call_counts_its_asked_path(self):
         a = '1 openat(AT_FDCWD</r>, "build/out", O_WRONLY|O_CREAT <unfinished ...>\n1 +++ killed by SIGKILL +++\n'
         self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/r/build/out")}, serial={}),
