@@ -69,14 +69,13 @@ type Gate struct {
 	mu    sync.Mutex
 	epoch time.Time
 	conn  conn
-	seq   uint64
 	kinds map[wire.RateKind]*kind
 }
 
 type kind struct {
 	b *wire.Bucket
-	// out is the unanswered message's ticket number, zero for none.
-	out uint64
+	// out is the unanswered message's slot, nil for none.
+	out *slot
 	// pending messages the enforcer may still count until a later
 	// connection's hello is answered: spent then, at that time.
 	pending int
@@ -85,9 +84,11 @@ type kind struct {
 // Ticket is one message Frame passed, until its answer.
 type Ticket struct {
 	g *Gate
-	k wire.RateKind
-	n uint64
+	s *slot
 }
+
+// slot is one unanswered message; a ticket matches by its address.
+type slot struct{ k wire.RateKind }
 
 // New is a gate at now, the start of this run of the kernel. An earlier
 // run may have sent a full burst of every kind, so New counts one: the
@@ -138,18 +139,17 @@ func (g *Gate) Frame(m wire.Msg, now time.Time) ([]byte, Ticket, error) {
 	if (k == wire.RateHello) != (g.conn == closed) || k != wire.RateHello && g.conn != open {
 		return nil, Ticket{}, ErrOrder
 	}
-	if st.out != 0 {
+	if st.out != nil {
 		return nil, Ticket{}, ErrWait
 	}
 	if !st.b.Has(g.clock(now)) {
 		return nil, Ticket{}, ErrRate
 	}
-	g.seq++
-	st.out = g.seq
+	st.out = &slot{k: k}
 	if k == wire.RateHello {
 		g.conn = opening
 	}
-	return b, Ticket{g: g, k: k, n: g.seq}, nil
+	return b, Ticket{g: g, s: st.out}, nil
 }
 
 // encode is m's frame as the kernel writes it, passed through the
@@ -187,14 +187,14 @@ func encode(m wire.Msg) ([]byte, error) {
 func (g *Gate) Answered(t Ticket, now time.Time) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	st := g.kinds[t.k]
-	if t.g != g || t.n == 0 || st == nil || st.out != t.n {
+	if t.g != g || t.s == nil || g.kinds[t.s.k].out != t.s {
 		return ErrTicket
 	}
+	st := g.kinds[t.s.k]
 	at := g.clock(now)
 	st.b.Spend(at)
-	st.out = 0
-	if t.k == wire.RateHello {
+	st.out = nil
+	if t.s.k == wire.RateHello {
 		g.conn = open
 		for _, o := range g.kinds {
 			for ; o.pending > 0; o.pending-- {
@@ -214,10 +214,10 @@ func (g *Gate) Lost(now time.Time) {
 	defer g.mu.Unlock()
 	at := g.clock(now)
 	for k, st := range g.kinds {
-		if st.out == 0 {
+		if st.out == nil {
 			continue
 		}
-		st.out = 0
+		st.out = nil
 		if k == wire.RateHello {
 			st.b.Spend(at.Add(MaxLate))
 		} else {
