@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/google/go-tpm/tpm2/transport"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card"
@@ -125,9 +126,30 @@ func moveRole() int {
 		return 2
 	}
 	defer w.Close()
+	// One left open without close-on-exec, as a parent or a careless open
+	// would leave it.
+	leak, err := syscall.Open(os.DevNull, syscall.O_RDONLY, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
 	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
+	}
+	if err := cloexecAbove(handoff.TPMFD); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if fl, err := unix.FcntlInt(uintptr(leak), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC == 0 {
+		fmt.Fprintf(os.Stderr, "descriptor %d would reach the kernel (flags %d, %v)\n", leak, fl, err)
+		return 2
+	}
+	for _, fd := range []int{handoff.KeyFD, handoff.TPMFD} {
+		if fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC != 0 {
+			fmt.Fprintf(os.Stderr, "descriptor %d would not reach the kernel (flags %d, %v)\n", fd, fl, err)
+			return 2
+		}
 	}
 	// Each of the runtime's threads polls in this time: sysmon once 10 ms
 	// pass with no poll, and the sleeping goroutine's thread for its timer.
@@ -144,9 +166,10 @@ func moveRole() int {
 // TestTheMoveLeavesTheRuntimesDescriptors: the unlock step's move onto
 // descriptors 3 and 4 never overwrites the poller's epoll or eventfd, which
 // the runtime would otherwise make at those numbers and poll on before the
-// exec, killing the step with "netpoll failed" (#4474).
+// exec, killing the step with "netpoll failed" (#4474); and only 3 and 4
+// stay open across the exec.
 //
-// REQ: STO-2
+// REQ: STO-2, CLK-1
 func TestTheMoveLeavesTheRuntimesDescriptors(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		cmd := exec.Command(os.Args[0])

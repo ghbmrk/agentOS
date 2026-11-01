@@ -66,6 +66,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card/words"
@@ -798,6 +799,9 @@ func handOff(b []byte, tpm *os.File, c config) error {
 	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(tpm.Fd()): handoff.TPMFD}); err != nil {
 		return err
 	}
+	if err := cloexecAbove(handoff.TPMFD); err != nil {
+		return err
+	}
 	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), kernelEnv)
 }
 
@@ -815,7 +819,8 @@ var reserved bool
 // refuses every restart in that boot (#4474). The move overwrites only these
 // two placeholders, which are close-on-exec, so neither reaches the kernel
 // unless the move put the hand-off there. A step that does not get exactly 3
-// and 4 (its parent left one open, #2899) unlocks nothing.
+// and 4 (its parent left one open, #2899) unlocks nothing; one left above them
+// is close-on-exec by the time of the exec (cloexecAbove).
 func reserve() error {
 	var p [2]int
 	if err := syscall.Pipe2(p[:], syscall.O_CLOEXEC); err != nil {
@@ -827,6 +832,17 @@ func reserve() error {
 		return fmt.Errorf("agentos-unlock: descriptors %d and %d were not free at my start (got %d and %d)", handoff.KeyFD, handoff.TPMFD, p[0], p[1])
 	}
 	reserved = true
+	return nil
+}
+
+// cloexecAbove makes every descriptor above fd close-on-exec, so only 0 to fd
+// reach the kernel: none its parent left open (#2899) and none the step
+// opened without the flag. It fails closed where the kernel lacks
+// close_range's flag (Linux 5.11).
+func cloexecAbove(fd int) error {
+	if err := unix.CloseRange(uint(fd+1), ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return fmt.Errorf("agentos-unlock: mark descriptors above %d close-on-exec: %w", fd, err)
+	}
 	return nil
 }
 
