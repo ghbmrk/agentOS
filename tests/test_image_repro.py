@@ -191,7 +191,12 @@ def usr_tree(d, changed=b"v1"):
     return root
 
 
-EROFS = shutil.which("mkfs.erofs") and shutil.which("fsck.erofs")
+def need_erofs(case):
+    """Skip without erofs-utils, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI's checks step): fail there."""
+    if not (shutil.which("mkfs.erofs") and shutil.which("fsck.erofs")):
+        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+            case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but erofs-utils is not installed")
+        case.skipTest("needs erofs-utils")
 
 
 def mkfs_erofs(d, src, *opts):
@@ -260,9 +265,9 @@ class UsrListTest(unittest.TestCase):
                 self.assertEqual(rc, 1, out)
                 self.assertIn("MISMATCH /usr list", out)
 
-    @unittest.skipUnless(EROFS, "needs erofs-utils")
     def test_reads_the_erofs_partition_back(self):
         # The list is of what the partition holds, read back the way the build reads its /usr.
+        need_erofs(self)
         with tempfile.TemporaryDirectory() as d:
             src = usr_tree(pathlib.Path(d) / "src")
             img, dst = mkfs_erofs(d, src), pathlib.Path(d) / "usr.list"
@@ -293,21 +298,26 @@ class UsrListTest(unittest.TestCase):
                          ["4755", "2755", "2755", "1777"])
         return by
 
-    @unittest.skipUnless(EROFS, "needs erofs-utils")
     def test_records_special_bits_and_owners_as_the_partition_holds_them(self):
-        # #4470: fsck.erofs 1.7 extracts a 4755 file as 0755. Any user: the owners are offset past
-        # 65535 by mkfs.erofs, so every inode is extended and every owner non-root.
-        with tempfile.TemporaryDirectory() as d:
-            src = self.special_tree(d, owners=False)
-            img, dst = mkfs_erofs(d, src, "--uid-offset=100000", "--gid-offset=200000"), pathlib.Path(d) / "l"
-            self.assertEqual(fin.write_usr_list(img, dst), 12)
-            by = self.assert_special(dst.read_text().splitlines())
-            st = src.lstat()
-            self.assertEqual({(r["uid"], r["gid"]) for r in by.values()}, {(st.st_uid + 100000, st.st_gid + 200000)})
+        # #4470: fsck.erofs 1.7 extracts a 4755 file as 0755. Any user (CI's checks job is not root):
+        # mkfs.erofs offsets every owner, to non-root ids that fit compact inodes, then past 65535,
+        # which makes every inode the extended kind.
+        need_erofs(self)
+        for offset in (1000, 100000):
+            with self.subTest(offset=offset), tempfile.TemporaryDirectory() as d:
+                src = self.special_tree(d, owners=False)
+                img = mkfs_erofs(d, src, "--uid-offset=%d" % offset, "--gid-offset=%d" % (2 * offset))
+                dst = pathlib.Path(d) / "l"
+                self.assertEqual(fin.write_usr_list(img, dst), 12)
+                by = self.assert_special(dst.read_text().splitlines())
+                st = src.lstat()
+                self.assertEqual({(r["uid"], r["gid"]) for r in by.values()},
+                                 {(st.st_uid + offset, st.st_gid + 2 * offset)})
 
-    @unittest.skipUnless(EROFS and os.geteuid() == 0, "needs erofs-utils and root (chown)")
+    @unittest.skipUnless(os.geteuid() == 0, "needs root (chown)")
     def test_records_each_entrys_own_non_root_owner(self):
         # Per-entry owners, compact and extended inodes alike: the list equals the source tree's.
+        need_erofs(self)
         with tempfile.TemporaryDirectory() as d:
             src = self.special_tree(d, owners=True)
             img, dst = mkfs_erofs(d, src), pathlib.Path(d) / "l"
@@ -319,12 +329,14 @@ class UsrListTest(unittest.TestCase):
             self.assertEqual((by["bin/su"][3:5], by["lib/group"][3:5], by["lib/tmp"][3:5]),
                              ([1234, 5678], [70000, 70001], [42, 43]))
 
-    @unittest.skipUnless(EROFS, "needs erofs-utils")
     def test_an_image_the_reader_cannot_read_fails(self):
+        need_erofs(self)
         with tempfile.TemporaryDirectory() as d:
             img = mkfs_erofs(d, usr_tree(pathlib.Path(d) / "src"))
             good = img.read_bytes()
-            for what, at, value in (("magic", 1024, b"\0\0\0\0"), ("feature", 1024 + 81, b"\x01")):
+            # A later incompat feature: 48-bit layout (0x80, root_nid moves) and metabox (0x100).
+            for what, at, value in (("magic", 1024, b"\0\0\0\0"), ("48bit", 1024 + 80, b"\x80"),
+                                    ("metabox", 1024 + 81, b"\x01")):
                 with self.subTest(what=what):
                     img.write_bytes(good[:at] + value + good[at + len(value):])
                     with self.assertRaises(ValueError):

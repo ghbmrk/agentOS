@@ -484,7 +484,7 @@ def usr_list(root):
 
 EROFS_MAGIC = 0xE0F5E1E2
 EROFS_PLAIN, EROFS_INLINE = 0, 2  # the uncompressed data layouts, the only ones a directory has here
-EROFS_INCOMPAT_KNOWN = 0xFF  # erofs-utils 1.7's features; a later one (48-bit inodes 0x100) may move fields
+EROFS_INCOMPAT_KNOWN = 0x7F  # erofs-utils 1.7's features; a later one (48-bit layout 0x80) moves root_nid
 
 
 def erofs_inodes(data):
@@ -532,9 +532,12 @@ def erofs_walk(data, img):
                 if name not in (b".", b".."):
                     yield os.fsdecode(name), child
 
-    out, todo = {}, [("", root)]
+    out, todo, seen = {}, [("", root)], set()
     while todo:
         prefix, nid = todo.pop()
+        if nid in seen:
+            raise ValueError("%s: directory inode %d is reached twice" % (data, nid))
+        seen.add(nid)
         for name, child in entries(nid):
             path = prefix + name
             if path in out or "/" in name or not name:
@@ -565,7 +568,7 @@ def write_usr_list(data, dst):
         raise ValueError("%s: fsck.erofs extracted other paths than its inodes name" % data)
     for r in rows:
         mode, uid, gid = inodes[r[0]]
-        if next(c for test, c in USR_TYPES if test(mode)) != r[1]:
+        if next((c for test, c in USR_TYPES if test(mode)), None) != r[1]:
             raise ValueError("%s: %s extracted as another type than its inode's" % (data, r[0]))
         r[2:5] = "%04o" % stat.S_IMODE(mode), uid, gid
     dst.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
