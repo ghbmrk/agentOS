@@ -8,13 +8,17 @@
 // channel, on the enforcer's day, so a clock difference cannot reset a cap
 // early. To it the gate adds every send the count may not hold yet: each
 // one reserved after the summary was asked for, and each one reserved
-// earlier that had not ended when it was asked for. Each send reserves its
+// earlier that had not ended when it was asked for. Which came first, an
+// ask, an end or a pause, is told by a sequence the gate issues under its
+// lock, never by a clock reading, so a clock that steps back cannot make a
+// send look counted or a pre-pause answer look new. Each send reserves its
 // size plus one full retry. The total may reach the cap but never pass it
 // (wire.PastCap, the enforcer's own test).
 //
-// A count is fresh only while its summary was asked for no more than twice
-// wire.SummaryInterval ago, by the kernel's own monotonic clock, and never
-// when that clock reads earlier than the ask; with no
+// The clock only ages a count: it is fresh only while its summary was
+// asked for no more than twice wire.SummaryInterval ago, by the kernel's
+// own monotonic clock, and never when that clock reads earlier than the
+// ask; with no
 // fresh count the gate refuses every capped send, so with the enforcer down
 // or its summaries paused after a core trip (D-260) the core sends nothing
 // capped.
@@ -47,7 +51,8 @@ var (
 	// summary names in no group.
 	ErrNoCount = errors.New("capgate: no fresh count from the enforcer")
 	// ErrSummary refuses a summary that cannot be the latest: asked before
-	// a pause or before the summary already held, or on an earlier day.
+	// a pause, at or before the summary already held (a ticket answers
+	// once), on an earlier day, or for a ticket this gate did not issue.
 	ErrSummary = errors.New("capgate: summary is older than the one held")
 	// ErrGroup refuses a summary that names a destination in two groups.
 	ErrGroup = errors.New("capgate: summary names a destination twice")
@@ -78,9 +83,13 @@ type Group struct {
 	Count uint64
 }
 
-// Ticket is one summary request: the kernel's time it was asked for.
+// Ticket is one summary request: the gate that issued it, its place in
+// that gate's sequence, which orders it, and the kernel's time it was
+// asked for, which only ages its count.
 type Ticket struct {
-	at time.Time
+	g   *Gate
+	seq uint64
+	at  time.Time
 }
 
 // Send is one reserved send, held until it ends.
@@ -89,10 +98,10 @@ type Send struct {
 }
 
 type reservation struct {
-	dest  string
-	bytes uint64 // size times (1 + Retries)
-	at    time.Time
-	ended time.Time // zero while in flight
+	dest   string
+	bytes  uint64 // size times (1 + Retries)
+	ended  bool
+	endSeq uint64 // the gate's sequence at End: every ask up to it came first
 }
 
 // Gate holds the latest fresh summary and the sends it may not hold. It
@@ -100,9 +109,11 @@ type reservation struct {
 type Gate struct {
 	mu     sync.Mutex
 	now    func() time.Time
-	paused time.Time // the last pause; zero if none
+	seq    uint64 // the last ask issued; asks are 1, 2, 3...
+	paused uint64 // the sequence at the last pause: no ask up to it counts
 	have   bool
-	asked  time.Time
+	held   uint64    // the held summary's ask
+	asked  time.Time // and its time, which only ages the count
 	day    uint32
 	group  map[string]*Group // by destination
 	active map[*reservation]struct{}
@@ -119,7 +130,8 @@ func New(now func() time.Time) *Gate {
 func (g *Gate) Ask() Ticket {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return Ticket{at: g.now()}
+	g.seq++
+	return Ticket{g: g, seq: g.seq, at: g.now()}
 }
 
 // Summary takes the enforcer's answer to t: its day and its cap groups.
@@ -127,7 +139,7 @@ func (g *Gate) Ask() Ticket {
 func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if (!g.paused.IsZero() && !t.at.After(g.paused)) || day < g.day || (g.have && t.at.Before(g.asked)) {
+	if t.g != g || t.seq <= g.paused || t.seq <= g.held || day < g.day {
 		return ErrSummary
 	}
 	by := map[string]*Group{}
@@ -141,9 +153,9 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 			by[d] = &gr
 		}
 	}
-	g.have, g.asked, g.day, g.group = true, t.at, day, by
+	g.have, g.held, g.asked, g.day, g.group = true, t.seq, t.at, day, by
 	for r := range g.active {
-		if !r.ended.IsZero() && r.ended.Before(t.at) {
+		if r.ended && r.endSeq < t.seq {
 			delete(g.active, r) // ended before the ask: in the count
 		}
 	}
@@ -153,12 +165,12 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 // Paused is called when a summary request meets the pause the enforcer
 // keeps after a core trip until the "core reflashed" step (D-260, D-262):
 // answered Paused, or known to be paused. The count held is none, and so
-// is any answer to a request asked at or before the pause. A request the
+// is any answer to a request asked before this call. A request the
 // enforcer drops unanswered needs no call: its count ages out at Fresh.
 func (g *Gate) Paused() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.paused = g.now()
+	g.paused = g.seq
 	g.have, g.group = false, nil
 }
 
@@ -193,20 +205,21 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	if wire.PastCap(total, gr.Cap) {
 		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: total}
 	}
-	r := &reservation{dest: dest, bytes: need, at: now}
+	r := &reservation{dest: dest, bytes: need}
 	g.active[r] = struct{}{}
 	return Send{r: r}, nil
 }
 
 // End is called once no byte of a reserved send can still leave: its
 // connection closed and drained, whether it succeeded or not. Its bytes
-// stay counted until a summary asked for after now
-// replaces the count. A second End keeps the first end time.
+// stay counted until a summary asked for after this call replaces the
+// count. A second End keeps the first; a send this gate does not hold
+// (another gate's, or one already counted) is left alone.
 func (g *Gate) End(s Send) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if s.r != nil && s.r.ended.IsZero() {
-		s.r.ended = g.now()
+	if _, ok := g.active[s.r]; ok && !s.r.ended {
+		s.r.ended, s.r.endSeq = true, g.seq
 	}
 }
 

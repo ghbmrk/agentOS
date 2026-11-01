@@ -4,6 +4,7 @@ package capgate
 
 import (
 	"errors"
+	"math/rand"
 	"testing"
 	"time"
 
@@ -485,8 +486,7 @@ func TestEarlierDayAfterPause(t *testing.T) {
 	if err := g.Summary(g.Ask(), 5, capped(1000, 0, "backup")); err != nil {
 		t.Fatal(err)
 	}
-	g.Paused()
-	c.step(time.Nanosecond) // asked after the pause, so only the day can refuse it
+	g.Paused() // asked after the pause below, so only the day can refuse it
 	if err := g.Summary(g.Ask(), 4, capped(1000, 0, "backup")); !errors.Is(err, ErrSummary) {
 		t.Fatalf("an earlier day after a pause: %v", err)
 	}
@@ -495,8 +495,9 @@ func TestEarlierDayAfterPause(t *testing.T) {
 	}
 }
 
-// A request asked at the very instant of the pause cannot be told from one
-// asked before it, so its answer is refused too; one asked after counts.
+// A request asked before the pause is refused even on the same clock
+// reading, and one asked after it counts on that reading too: the gate's
+// sequence orders them, not the clock.
 func TestAskAtThePauseInstant(t *testing.T) {
 	c := newClock()
 	g := gate(c)
@@ -505,8 +506,315 @@ func TestAskAtThePauseInstant(t *testing.T) {
 	if err := g.Summary(tk, 1, capped(1000, 0, "backup")); !errors.Is(err, ErrSummary) {
 		t.Fatalf("asked at the pause instant: %v", err)
 	}
-	c.step(time.Nanosecond)
 	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "backup")); err != nil {
 		t.Fatalf("asked after the pause: %v", err)
+	}
+}
+
+// Security repro 1 (KRN-cap-2): a send that ends after an ask, on a clock
+// stepped back between them, stays added to that ask's count, so the
+// enforcer never passes its cap.
+func TestBackwardClockCannotForgetASend(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	e := &enforcer{cap: 100}
+	if err := g.Summary(g.Ask(), 1, capped(100, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	tk := g.Ask() // the enforcer takes its count now: 0
+	s, err := g.Reserve("x", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.pass(50) // the send and its retry, after the count
+	c.step(-10 * time.Minute)
+	g.End(s) // reads earlier than tk
+	if err := g.Summary(tk, 1, capped(100, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	c.step(10*time.Minute + time.Second)          // past the ask again, inside Fresh
+	if _, err := g.Reserve("x", 26); err == nil { // 50 + 52
+		e.pass(52)
+		t.Fatalf("send forgotten: enforcer at %d of %d, tripped=%v", e.count, e.cap, e.tripped)
+	}
+	if _, err := g.Reserve("x", 25); err != nil { // 50 + 50: at the cap
+		t.Fatalf("at the cap: %v", err)
+	}
+}
+
+// Security repro 2 (KRN-cap-6): an answer to a request asked before the
+// pause is refused even when the clock stepped back between the ask and
+// the pause.
+func TestBackwardClockCannotRevivePrePauseAnswer(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	tk := g.Ask() // before the trip
+	c.step(-10 * time.Minute)
+	g.Paused()
+	if err := g.Summary(tk, 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+		t.Fatalf("pre-pause answer after Paused: %v, want ErrSummary", err)
+	}
+	c.step(10*time.Minute + time.Second)
+	if _, err := g.Reserve("x", 10); !errors.Is(err, ErrNoCount) {
+		t.Fatalf("pre-pause count used after the pause: %v", err)
+	}
+}
+
+// Every ordering the gate makes (an end against an ask, an ask against a
+// pause, an ask against the held one) gives the same answer whether the
+// clock moves forward, stands still or steps back between the events: the
+// clock only ages a count (KRN-cap-1, -2, -5, -6).
+func TestOrderIsTheGatesNotTheClock(t *testing.T) {
+	for _, d := range []time.Duration{time.Second, 0, -10 * time.Minute, -48 * time.Hour} {
+		// fresh brings the clock back to just after tk, so only order decides.
+		fresh := func(c *clock, tk Ticket) { c.t = tk.at.Add(time.Second) }
+
+		// An end after the ask stays added; an end before it is in the count.
+		c := newClock()
+		g := gate(c)
+		if err := g.Summary(g.Ask(), 1, capped(1000, 0, "x")); err != nil {
+			t.Fatal(err)
+		}
+		before, _ := g.Reserve("x", 100) // 200
+		after, _ := g.Reserve("x", 100)  // 200
+		c.step(d)
+		g.End(before)
+		c.step(d)
+		tk := g.Ask()
+		c.step(d)
+		g.End(after)
+		c.step(d)
+		if err := g.Summary(tk, 1, capped(1000, 200, "x")); err != nil {
+			t.Fatalf("step %v: %v", d, err)
+		}
+		fresh(c, tk)
+		if _, err := g.Reserve("x", 301); err == nil { // 200 + 200 + 602
+			t.Fatalf("step %v: an end after the ask was taken as counted", d)
+		}
+		if _, err := g.Reserve("x", 300); err != nil { // 200 + 200 + 600
+			t.Fatalf("step %v: an end before the ask was counted twice: %v", d, err)
+		}
+
+		// An answer to an earlier ask after a later one is held is refused,
+		// and so is a second answer to the same ask.
+		c = newClock()
+		g = gate(c)
+		first := g.Ask()
+		c.step(d)
+		second := g.Ask()
+		c.step(d)
+		if err := g.Summary(second, 1, capped(1000, 0, "x")); err != nil {
+			t.Fatalf("step %v: %v", d, err)
+		}
+		if err := g.Summary(first, 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+			t.Fatalf("step %v: an earlier ask after a later one: %v", d, err)
+		}
+		if err := g.Summary(second, 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+			t.Fatalf("step %v: a second answer to one ask: %v", d, err)
+		}
+
+		// An ask before the pause is refused; one after it counts.
+		c = newClock()
+		g = gate(c)
+		pre := g.Ask()
+		c.step(d)
+		g.Paused()
+		c.step(d)
+		post := g.Ask()
+		c.step(d)
+		if err := g.Summary(pre, 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+			t.Fatalf("step %v: an ask before the pause: %v", d, err)
+		}
+		if err := g.Summary(post, 1, capped(1000, 0, "x")); err != nil {
+			t.Fatalf("step %v: an ask after the pause: %v", d, err)
+		}
+		fresh(c, post)
+		if _, err := g.Reserve("x", 10); err != nil {
+			t.Fatalf("step %v: after the pause: %v", d, err)
+		}
+	}
+}
+
+// A ticket only answers on the gate that issued it, and the zero Ticket
+// on none.
+func TestTicketOfAnotherGate(t *testing.T) {
+	c := newClock()
+	g1, g2 := gate(c), gate(c)
+	for range 5 {
+		g2.Ask() // g2 is further along its sequence
+	}
+	if err := g1.Summary(g1.Ask(), 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g1.Reserve("x", 100); err != nil { // 200 in flight
+		t.Fatal(err)
+	}
+	if err := g1.Summary(g2.Ask(), 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+		t.Fatalf("another gate's ticket: %v", err)
+	}
+	if err := g1.Summary(Ticket{}, 1, capped(1000, 0, "x")); !errors.Is(err, ErrSummary) {
+		t.Fatalf("the zero Ticket: %v", err)
+	}
+}
+
+// End with another gate's send leaves it in flight on its own gate and
+// touches nothing of it, so the two gates' locks never share a write
+// (run under -race); End of the zero Send is a no-op.
+func TestEndOfAnotherGatesSend(t *testing.T) {
+	c := newClock()
+	g1, g2 := gate(c), gate(newClock())
+	if err := g1.Summary(g1.Ask(), 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	s, err := g1.Reserve("x", 250) // 500
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 1000 {
+			_ = g1.Summary(g1.Ask(), 1, capped(1000, 0, "x"))
+		}
+	}()
+	g2.End(s)
+	g2.End(Send{})
+	<-done
+	if _, err := g1.Reserve("x", 251); err == nil { // 500 + 502
+		t.Fatal("another gate's End made g1 forget its send")
+	}
+	g1.End(s)
+	if err := g1.Summary(g1.Ask(), 1, capped(1000, 500, "x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g1.Reserve("x", 250); err != nil { // 500 + 500: held once
+		t.Fatalf("after its own End: %v", err)
+	}
+}
+
+// Random interleavings of reserve, partial emission, end, ask, answers in
+// any order and duplicated, pauses, day rollover and group merges, with a
+// clock that steps forward and back, against a fake enforcer that trips
+// past its cap with wire.PastCap: it never trips (Security model test).
+func TestModelNeverTrips(t *testing.T) {
+	type send struct {
+		s      Send
+		dest   string
+		budget uint64 // bytes it may still emit
+	}
+	type req struct {
+		tk        Ticket
+		processed bool
+		paused    bool
+		day       uint32
+		groups    []Group
+	}
+	dests := []string{"a", "b", "c"}
+	for seed := int64(0); seed < 2000; seed++ {
+		r := rand.New(rand.NewSource(seed))
+		c := newClock()
+		g := gate(c)
+		caps := map[string]uint64{}
+		groupOf := map[string]int{}
+		for i, d := range dests {
+			caps[d], groupOf[d] = uint64(50+r.Intn(200)), i
+		}
+		count := map[int]uint64{}
+		day, paused := uint32(1), false
+		var sends []*send
+		var reqs []*req
+		capOf := func(gi int) (s uint64) {
+			for d, x := range groupOf {
+				if x == gi {
+					s += caps[d]
+				}
+			}
+			return s
+		}
+		groupsNow := func() (out []Group) {
+			by := map[int]*Group{}
+			for _, d := range dests {
+				gi := groupOf[d]
+				if by[gi] == nil {
+					by[gi] = &Group{Count: count[gi], Cap: capOf(gi)}
+				}
+				by[gi].Dests = append(by[gi].Dests, d)
+			}
+			for _, gr := range by {
+				out = append(out, *gr)
+			}
+			return out
+		}
+		for step := 0; step < 400; step++ {
+			switch r.Intn(10) {
+			case 0, 1:
+				d := dests[r.Intn(3)]
+				size := uint64(1 + r.Intn(60))
+				if s, err := g.Reserve(d, size); err == nil {
+					sends = append(sends, &send{s: s, dest: d, budget: size * (1 + Retries)})
+				}
+			case 2, 3:
+				if len(sends) > 0 {
+					ss := sends[r.Intn(len(sends))]
+					if ss.budget > 0 {
+						n := uint64(1 + r.Intn(int(ss.budget)))
+						ss.budget -= n
+						gi := groupOf[ss.dest]
+						count[gi] += n
+						if wire.PastCap(count[gi], capOf(gi)) {
+							t.Fatalf("seed %d step %d: trip: group %d at %d of %d", seed, step, gi, count[gi], capOf(gi))
+						}
+					}
+				}
+			case 4:
+				if len(sends) > 0 {
+					i := r.Intn(len(sends))
+					g.End(sends[i].s) // no byte of it leaves after End
+					sends = append(sends[:i], sends[i+1:]...)
+				}
+			case 5:
+				reqs = append(reqs, &req{tk: g.Ask()})
+			case 6:
+				for _, q := range reqs { // the enforcer takes the oldest request's count
+					if !q.processed {
+						q.processed, q.paused, q.day, q.groups = true, paused, day, groupsNow()
+						break
+					}
+				}
+			case 7:
+				if len(reqs) > 0 {
+					i := r.Intn(len(reqs))
+					if q := reqs[i]; q.processed {
+						if q.paused {
+							g.Paused()
+						} else {
+							_ = g.Summary(q.tk, q.day, q.groups)
+						}
+						if r.Intn(4) != 0 { // sometimes delivered again
+							reqs = append(reqs[:i], reqs[i+1:]...)
+						}
+					}
+				}
+			case 8:
+				c.step(time.Duration(r.Intn(80)-30) * time.Second) // forward or back
+				if r.Intn(30) == 0 {
+					day++
+					count = map[int]uint64{}
+				}
+				if r.Intn(20) == 0 {
+					paused = !paused
+				}
+			case 9:
+				if ga, gb := groupOf["a"], groupOf["b"]; r.Intn(10) == 0 && ga != gb {
+					count[ga] += count[gb] // groups merge mid-day: counts add
+					delete(count, gb)
+					for d, x := range groupOf {
+						if x == gb {
+							groupOf[d] = ga
+						}
+					}
+				}
+			}
+		}
 	}
 }
