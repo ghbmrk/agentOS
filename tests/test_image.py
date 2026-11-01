@@ -5332,7 +5332,9 @@ class UplinkTest(unittest.TestCase):
         # and prefixed): boot()'s console echo goes through guest_echo, which cuts ANSI/CR and other
         # non-printable bytes and puts "console| " in front of every line.
         s = (IMG / "ci_boot.sh").read_text()
-        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
+        # A Go command's crash header lines too (#4474), still through guest_echo.
+        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed\\|fatal error:\\|panic:\\|]: runtime: " "$log" '
+                      '| tail -40 | guest_echo || true\n', s)
         fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                      for f in ("clean", "guest_echo"))
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"
