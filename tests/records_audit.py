@@ -43,7 +43,7 @@ def records_run_tests(text=None):
         with open(os.path.join(ROOT, ".github", "workflows", "ci.yml")) as f:
             text = f.read()
     lines = text.splitlines()
-    steps = [i for i, l in enumerate(lines) if l.strip() == "if: env.RECORDS == 'true'"]
+    steps = [i for i, l in enumerate(lines) if l.strip() == "if: steps.scope.outputs.records == 'true'"]
     runs = []
     for i in steps:
         indent = len(lines[i]) - len(lines[i].lstrip())

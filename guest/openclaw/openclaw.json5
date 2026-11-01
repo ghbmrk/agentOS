@@ -1,8 +1,8 @@
 // OpenClaw guest profile for AgentOS (PLAN P1-7), qualified unmodified by
-// spike S4 (ARC-3: OpenClaw 2026.9.8, configuration only). Defense in depth
-// only (ARC-7): the guest is root and can rewrite this file. Containment,
-// custody, and spend limits come from the machine's one socket, the egress
-// proxy, and the OP-8 meter, not from anything here.
+// spike S4 (ARC-3: configuration only) and requalified on OpenClaw 2026.10.9
+// (#4187). Defense in depth only (ARC-7): the guest is root and can rewrite
+// this file. Containment, custody, and spend limits come from the machine's
+// one socket, the egress proxy, and the OP-8 meter, not from anything here.
 //
 // The only endpoint is the bridge on 127.0.0.1:18080, which passes requests
 // to this machine's broker socket:

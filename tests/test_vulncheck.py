@@ -815,7 +815,9 @@ class WorkflowTest(unittest.TestCase):
         osv = "install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.5.1"
         for wf in (WORKFLOW, IMAGE_WORKFLOW):
             text = wf.read_text()
-            lines = text[text.index("- name: Install govulncheck and osv-scanner"):].splitlines()[2:]
+            lines = text[text.index("- name: Install govulncheck and osv-scanner"):].splitlines()
+            # The script starts after the step's `run: |` (vulncheck.yml's guard line comes first, CI-par-4).
+            lines = lines[next(i for i, l in enumerate(lines) if l.strip() == "run: |") + 1:]
             script = "\n".join(l[10:] for l in lines[:lines.index(next(l for l in lines if not l.startswith(" " * 10)))])
             for flaky in (gov, osv):
                 for fails in (0, 2, 3):

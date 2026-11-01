@@ -21,6 +21,8 @@ import (
 	"io"
 	"math/big"
 	"strings"
+
+	"github.com/ghbmrk/agentos/broker/card/words"
 )
 
 // Alphabet for every typed card value: 32 symbols (5 bits each), with no
@@ -30,7 +32,7 @@ const Alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 // Sizes. Bits are 5 per Alphabet symbol.
 const (
 	// PassphraseWords from the 7,776-word list: 90 bits, above §3.1's 80.
-	PassphraseWords = 7
+	PassphraseWords = words.PerPassphrase
 	// setupSymbols: 130 bits.
 	setupSymbols = 26
 	// setupCodeSymbols: 40 bits, guessable only online through the box's
@@ -109,7 +111,7 @@ func (c *Card) Validate() error {
 		return fmt.Errorf("card: passphrase has %d words, want %d", len(ws), PassphraseWords)
 	}
 	for _, w := range ws {
-		if _, ok := wordIndex[w]; !ok {
+		if _, ok := words.Index(w); !ok {
 			return fmt.Errorf("card: passphrase word %q is not on the list", w)
 		}
 	}
@@ -173,11 +175,11 @@ func symbols(r io.Reader, n int) (string, error) {
 func passphrase(r io.Reader) (string, error) {
 	ws := make([]string, PassphraseWords)
 	for i := range ws {
-		k, err := uniform(r, len(words))
+		k, err := uniform(r, words.Count)
 		if err != nil {
 			return "", err
 		}
-		ws[i] = words[k]
+		ws[i] = words.Word(k)
 	}
 	return strings.Join(ws, " "), nil
 }

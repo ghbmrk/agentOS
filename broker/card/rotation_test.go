@@ -431,6 +431,44 @@ func TestMadeCardOffersNoCancel(t *testing.T) {
 }
 
 // REQ: REC-4
+// MIG-4-recovery-r4d (#4130): a made card with a new passphrase says both
+// of its secrets are in effect and both of the old card's are not, prints
+// the passphrase, and confirms only on a word of it and a group of the key.
+// Catches a lost-card page that tells the owner the old passphrase works,
+// or confirms a card the owner never read the passphrase from.
+func TestMadeCardWithPassphrase(t *testing.T) {
+	var gen Card
+	confirmed := 0
+	d, err := NewDisplay(DisplayConfig{Rotate: &Parts{Passphrase: true, Recovery: true}, Made: true, Authority: testAuthority(t),
+		Generate: func(r io.Reader) (*Card, error) {
+			c, err := Generate(r)
+			if err == nil {
+				gen = *c
+			}
+			return c, err
+		},
+		Provision: func(*Card) error { confirmed++; return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(must(d.Page()))
+	if !strings.Contains(page, "passphrase and recovery key already open my store, and your old card's no longer do") ||
+		strings.Contains(page, "recovery key already opens") || !strings.Contains(page, gen.VaultPassphrase) {
+		t.Fatalf("made card page: %q", page)
+	}
+	w, g := d.Asks()
+	h := d.Handler(paired, "/recovery/")
+	group := strings.Split(gen.RecoveryKey, "-")[g-1]
+	if r := do(t, h, "POST", "/card", url.Values{"group": {group}}, true, nil); r.Code == http.StatusSeeOther || confirmed != 0 {
+		t.Fatalf("confirm without the word: %d, provisioned %d", r.Code, confirmed)
+	}
+	word := strings.Fields(gen.VaultPassphrase)[w-1]
+	if r := do(t, h, "POST", "/card", url.Values{"word": {word}, "group": {group}}, true, nil); r.Code != http.StatusSeeOther || confirmed != 1 {
+		t.Fatalf("confirm of a made card: %d, provisioned %d", r.Code, confirmed)
+	}
+}
+
+// REQ: REC-4
 // MIG-4-recovery-r4e (#4160): a made card's recovery sheet prints its
 // mark, so the owner can tell it from a card made before; a card with no
 // mark prints none, and the mark is escaped like any page text.

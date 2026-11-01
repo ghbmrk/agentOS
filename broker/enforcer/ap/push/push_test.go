@@ -34,11 +34,16 @@ type fakeAP struct {
 	logins  int
 	stuck   bool // ignores writes, like a full or read-only flash
 
-	failWrite         map[string]bool // writes of these paths fail
-	cut               map[string]bool // stdin of writes to these paths ends halfway
-	readFails         map[string]bool // reads of these paths print the file, then exit 1
-	failReload        int             // the next this many reloads fail
-	active, maxActive int             // logged-in connections now, and at most
+	failWrite  map[string]bool // writes of these paths fail
+	cut        map[string]bool // stdin of writes to these paths ends halfway
+	readFails  map[string]bool // reads of these paths print the file, then exit 1
+	failReload int             // the next this many reloads fail
+
+	// newest is the login number of the newest connection that has run
+	// a command; interleaved is set when an older one runs a command
+	// after it, which is two connections' commands interleaving.
+	newest      int
+	interleaved bool
 }
 
 func newFakeAP(t *testing.T, client ssh.PublicKey) *fakeAP {
@@ -84,10 +89,8 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	}
 	f.mu.Lock()
 	f.logins++
-	f.active++
-	f.maxActive = max(f.maxActive, f.active)
+	login := f.logins
 	f.mu.Unlock()
-	defer func() { f.mu.Lock(); f.active--; f.mu.Unlock() }()
 	go ssh.DiscardRequests(reqs)
 	for nc := range chans {
 		if nc.ChannelType() != "session" {
@@ -98,11 +101,11 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 		if err != nil {
 			return
 		}
-		go f.session(ch, creqs)
+		go f.session(login, ch, creqs)
 	}
 }
 
-func (f *fakeAP) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
+func (f *fakeAP) session(login int, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	defer ch.Close()
 	for r := range reqs {
 		if r.Type != "exec" {
@@ -112,15 +115,19 @@ func (f *fakeAP) session(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		var p struct{ Cmd string }
 		ssh.Unmarshal(r.Payload, &p)
 		r.Reply(true, nil)
-		status := f.exec(p.Cmd, ch)
+		status := f.exec(login, p.Cmd, ch)
 		ch.SendRequest("exit-status", false, ssh.Marshal(struct{ S uint32 }{status}))
 		return
 	}
 }
 
-func (f *fakeAP) exec(cmd string, ch ssh.Channel) uint32 {
+func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if login < f.newest {
+		f.interleaved = true
+	}
+	f.newest = max(f.newest, login)
 	if cmd == applyCmd {
 		if f.failReload > 0 {
 			f.failReload--
@@ -358,10 +365,13 @@ func TestFailedReloadFinished(t *testing.T) {
 	}
 }
 
-// TestSyncsDoNotOverlap: two Syncs of one Pusher never hold two
-// connections to the access point at once, so they cannot interleave
-// their writes. Catches a shared temporary file swapped between two
-// pushes.
+// TestSyncsDoNotOverlap: two Syncs of one Pusher never interleave their
+// commands on the access point: once a newer connection has run a
+// command, no older one runs another. Catches a shared temporary file
+// swapped between two pushes. It checks commands, not how long the fake
+// holds a connection open: the fake sees a connection end only some time
+// after Sync's Close returns, so counting open connections saw two at
+// once between correct Syncs (#4248).
 func TestSyncsDoNotOverlap(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
@@ -379,8 +389,8 @@ func TestSyncsDoNotOverlap(t *testing.T) {
 	wg.Wait()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.maxActive != 1 {
-		t.Fatalf("%d connections at once", f.maxActive)
+	if f.interleaved || f.logins != 4 {
+		t.Fatalf("interleaved %v over %d logins", f.interleaved, f.logins)
 	}
 }
 
