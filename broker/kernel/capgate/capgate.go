@@ -54,8 +54,9 @@ var (
 	// a pause, at or before the summary already held (a ticket answers
 	// once), on an earlier day, or for a ticket this gate did not issue.
 	ErrSummary = errors.New("capgate: summary is older than the one held")
-	// ErrGroup refuses a summary that names a destination in two groups.
-	ErrGroup = errors.New("capgate: summary names a destination twice")
+	// ErrGroup refuses a summary that names a destination in two groups,
+	// or whose group cap, the sum of its members', overflows.
+	ErrGroup = errors.New("capgate: summary names a destination twice or a cap that overflows")
 )
 
 // PastCap is the refusal of a send that could pass a cap: its group's,

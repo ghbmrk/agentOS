@@ -740,6 +740,9 @@ func TestModelNeverTrips(t *testing.T) {
 		groupsNow := func() (out []Group) {
 			by := map[int]*Group{}
 			for _, d := range dests {
+				if r.Intn(8) == 0 {
+					continue // a destination the summary puts in no group
+				}
 				gi := groupOf[d]
 				if by[gi] == nil {
 					by[gi] = &Group{Count: count[gi]}
@@ -831,7 +834,7 @@ func TestModelNeverTrips(t *testing.T) {
 // Security repro (#4430 point 1): a group can split at the enforcer's
 // midnight, inside Fresh. A send to one former member is held to its own
 // cap too, so the enforcer, counting it alone from midnight, never trips.
-func TestMidnightSplitTrips(t *testing.T) {
+func TestMidnightSplitCannotTrip(t *testing.T) {
 	c := newClock()
 	g := gate(c)
 	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"a", 100}, {"b", 100}}}}); err != nil {
@@ -858,5 +861,53 @@ func TestMidnightSplitTrips(t *testing.T) {
 	g.End(s)
 	if e.tripped {
 		t.Fatal("tripped")
+	}
+}
+
+// A send in flight to a destination the latest summary puts in no group
+// counts against another group's cap, which alone refuses here: y's own
+// cap has room (Security point 2 at 7232224; L3 at 8af04ce).
+func TestNoGroupSendCountsAgainstTheGroupCap(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"x", 100}}}, {Dests: []Dest{{"y", 1000}, {"z", 1000}}, Count: 1850}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("x", 50); err != nil { // 100 in flight
+		t.Fatal(err)
+	}
+	if err := g.Summary(g.Ask(), 2, []Group{{Dests: []Dest{{"y", 1000}, {"z", 1000}}, Count: 1850}}); err != nil {
+		t.Fatal(err)
+	}
+	var pc *PastCap
+	if _, err := g.Reserve("y", 26); !errors.As(err, &pc) || pc.Cap != 2000 { // 1850 + 52 + x's 100
+		t.Fatalf("x's bytes not counted against y's group: %v", err)
+	}
+	if _, err := g.Reserve("y", 25); err != nil { // 1850 + 50 + 100: at the group cap
+		t.Fatalf("at the group cap: %v", err)
+	}
+}
+
+// A send in flight to a destination the latest summary puts in no group
+// counts against another destination's own cap too, which alone refuses
+// here: the group's cap has room (L3 at 8af04ce).
+func TestNoGroupSendCountsAgainstTheOwnCap(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"x", 100}}}, {Dests: []Dest{{"y", 100}, {"z", 1000}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("x", 50); err != nil { // 100 in flight
+		t.Fatal(err)
+	}
+	if err := g.Summary(g.Ask(), 2, []Group{{Dests: []Dest{{"y", 100}, {"z", 1000}}}}); err != nil {
+		t.Fatal(err)
+	}
+	var pc *PastCap
+	if _, err := g.Reserve("y", 1); !errors.As(err, &pc) || pc.Cap != 100 { // 2 + x's 100 against y's own 100
+		t.Fatalf("x's bytes not counted against y's own cap: %v", err)
+	}
+	if _, err := g.Reserve("z", 450); err != nil { // z's own 1000: 900 + 100; the group's 1100
+		t.Fatalf("z's own room: %v", err)
 	}
 }
