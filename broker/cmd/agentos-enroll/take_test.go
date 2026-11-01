@@ -274,7 +274,7 @@ func TestCardFormatMatchesCard(t *testing.T) {
 			t.Fatalf("%q: a card passphrase is refused", p)
 		}
 	}
-	f := get(os.Open("../../card/eff_large_wordlist.txt"))
+	f := get(os.Open("../../card/words/eff_large_wordlist.txt"))
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	n := 0

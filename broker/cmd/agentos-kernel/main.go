@@ -86,18 +86,30 @@ type keyClerks map[string]proc.KeyClerk
 
 func (c keyClerks) String() string { return fmt.Sprint(map[string]proc.KeyClerk(c)) }
 
-// Set reads name=socket,cgroup: the clerk unit's whole cgroup path.
+// Set reads name=socket,cgroup: the clerk unit's whole cgroup path, which
+// must be name's own (clerkCgroup), whatever the rest of the command line.
 func (c keyClerks) Set(v string) error {
 	name, rest, ok := strings.Cut(v, "=")
 	sock, cg, ok2 := strings.Cut(rest, ",")
-	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || !proc.ValidCgroup(cg) {
-		return errors.New("a clerk's key socket is name=/abs/socket,/slice/unit.service")
+	if !ok || !ok2 || !clerkkey.ValidName(name) || !filepath.IsAbs(sock) || cg != clerkCgroup(name) {
+		return fmt.Errorf("a clerk's key socket is name=/abs/socket,%s", clerkCgroup("name"))
 	}
 	if _, dup := c[name]; dup {
 		return fmt.Errorf("clerk %q's key given twice", name)
 	}
 	c[name] = proc.KeyClerk{Socket: sock, Cgroup: cg}
 	return nil
+}
+
+// clerkCgroup is the one cgroup name's key goes to (KEYS-route-by-cgroup,
+// #4210): its own keeper unit, so an entry's name is its unit's and no key
+// reaches a unit outside the keeper; a device driver's, driver-<d>, goes to
+// each instance of its template (DEVSLOT-host-unit-2-k).
+func clerkCgroup(name string) string {
+	if d, ok := strings.CutPrefix(name, "driver-"); ok && d != "" {
+		return "/agentos.slice/agentos-drivers.slice/agentos-driver-" + d + "@.service"
+	}
+	return "/agentos.slice/agentos-keeper.slice/agentos-keeper-" + name + ".service"
 }
 
 // config is the kernel process's: proc.MainConfig and the anchor's
@@ -123,7 +135,7 @@ func parse(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&c.LinkSock, "link-sock", "", "agentos-link's socket; none without it")
 	fs.IntVar(&c.LinkUID, "link-uid", -1, "agentos-link's uid, the only peer on link-sock")
 	fs.Var(clerks(c.Clerks), "clerk", "a clerk the kernel runs, name=/abs/socket,uid (repeatable)")
-	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,/unit/cgroup/path.service (repeatable)")
+	fs.Var(keyClerks(c.ClerkKeys), "clerk-key", "a clerk the kernel hands its key to at each start of its unit, name=/abs/socket,/agentos.slice/agentos-keeper.slice/agentos-keeper-<name>.service (repeatable)")
 	fs.Var(clerks(c.Content), "content", "a content clerk's socket, store=/abs/socket,uid (repeatable)")
 	fs.DurationVar(&c.Tick, "tick", time.Second, "how often plans run")
 	fs.StringVar(&c.Up, "up", "", "a file to make once both sockets listen, an absolute path")

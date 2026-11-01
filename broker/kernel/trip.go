@@ -367,7 +367,13 @@ type ownerTrip struct {
 // key, and logs its trip. Planner-view content reached the owner path, so
 // it gets the full response (KRN-12 Response).
 func (k *Kernel) honeyTrip(now int64, op, plan string, keys ...key.Key) error {
-	for _, ky := range keys {
+	for _, given := range keys {
+		// The trip is derived from the key as the log holds it, as the fold
+		// derives it again (KRN-6): its JSON makes every string valid UTF-8.
+		var ky key.Key
+		if b, err := json.Marshal(given); err != nil || json.Unmarshal(b, &ky) != nil {
+			return errors.New("kernel: a key the log cannot hold")
+		}
 		if t := k.s.ownerTripOf(op, plan, ky); t != nil {
 			if _, err := k.emit(now, TTripOwner, ownerTrip{op, ky, *t}); err != nil {
 				return err
