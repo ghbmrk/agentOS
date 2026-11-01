@@ -114,12 +114,3 @@ func (g CountGroup) Cap() uint64 {
 	}
 	return sum
 }
-
-// Names is g's destinations' names, in order.
-func (g CountGroup) Names() []string {
-	out := make([]string, len(g.Dests))
-	for i, d := range g.Dests {
-		out[i] = d.Name
-	}
-	return out
-}

@@ -32,8 +32,8 @@ func TestCountsRoundTrip(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, c) {
 		t.Fatalf("round trip: %+v, %v", got, err)
 	}
-	if c.Groups[0].Cap() != 150 || !reflect.DeepEqual(c.Groups[0].Names(), []string{"a.example", "b.example"}) {
-		t.Fatalf("group 0: cap %d, names %v", c.Groups[0].Cap(), c.Groups[0].Names())
+	if c.Groups[0].Cap() != 150 || !reflect.DeepEqual(c.Groups[0].Dests, []CountDest{{"a.example", 100}, {"b.example", 50}}) {
+		t.Fatalf("group 0: cap %d, %v", c.Groups[0].Cap(), c.Groups[0].Dests)
 	}
 	if _, err := DecodeCounts(mustEncode(t, Counts{})); err != nil {
 		t.Fatalf("no groups: %v", err)

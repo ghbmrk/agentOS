@@ -1021,3 +1021,32 @@ func TestPausedBurstTripsNothingMore(t *testing.T) {
 		cl.do(wire.Read{ID: uint64(100 + i), What: wire.ReadCounts})
 	}
 }
+
+// TestPausedRequestsTakeTheirRate: a paused request and a cut core's
+// reconnect each take their rate's token (ENF-d-4), so a burst sent while
+// paused leaves no tokens to spend on the restore. Revert mutants: the
+// takes in gate and in the hello.
+func TestPausedRequestsTakeTheirRate(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	r.cut.set(Tripped)
+	for i := range DefaultLimits[KindCommand].Burst {
+		cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn))
+	}
+	r.cut.set(Open)
+	cl.code(cmd(1000, "lamp", wire.VerbOn))
+	if r.cut.trips() != 1 {
+		t.Fatalf("a command after a paused burst: %d trips, want 1", r.cut.trips())
+	}
+
+	r = newRig(t, nil)
+	r.cut.set(Tripped)
+	for range DefaultLimits[KindHello].Burst {
+		r.dial()
+	}
+	r.cut.set(Open)
+	r.dial()
+	if r.cut.trips() != 1 {
+		t.Fatalf("a hello after a cut core's reconnects: %d trips, want 1", r.cut.trips())
+	}
+}

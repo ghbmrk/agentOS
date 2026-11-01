@@ -121,7 +121,7 @@ func (c *Counter) SetCaps(caps Caps) {
 	c.roll()
 	for d, n := range c.caps.Core {
 		if _, kept := caps.Core[d]; !kept {
-			c.retired[d] = max(c.retired[d], n)
+			c.retired[d] = n
 		}
 	}
 	c.caps = cloneCaps(caps)

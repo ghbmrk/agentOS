@@ -42,8 +42,8 @@ type grp struct {
 func groupOf(t *testing.T, cs wire.Counts, dest string) grp {
 	t.Helper()
 	for _, g := range cs.Groups {
-		if slices.Contains(g.Names(), dest) {
-			return grp{g.Names(), g.Cap(), g.Count}
+		if slices.Contains(names(g), dest) {
+			return grp{names(g), g.Cap(), g.Count}
 		}
 	}
 	t.Fatalf("no group holds %s in %+v", dest, cs.Groups)
@@ -144,7 +144,7 @@ func TestEveryCappedDestinationHasACount(t *testing.T) {
 	cs := c.Counts()
 	var all []string
 	for _, g := range cs.Groups {
-		all = append(all, g.Names()...)
+		all = append(all, names(g)...)
 		if g.Count != 0 || g.Cap() != 100 {
 			t.Fatalf("fresh group %+v", g)
 		}
@@ -231,7 +231,7 @@ func TestRetiredDestinationKeepsItsCap(t *testing.T) {
 	}
 	clk.t = noon.Add(36 * time.Hour)
 	for _, g := range c.Counts().Groups {
-		if slices.Contains(g.Names(), "b.example") {
+		if slices.Contains(names(g), "b.example") {
 			t.Fatalf("b.example still counted two days later: %+v", g)
 		}
 	}
@@ -371,4 +371,61 @@ func TestRetiredDestinationsIdleAddressIsSafe(t *testing.T) {
 	if o := c.Add(reading(1, 0, addrA, 15)); len(o) != 1 || o[0].Cap != 0 || o[0].Count != 5 {
 		t.Fatalf("bytes to a destination off the list since yesterday: %+v", o)
 	}
+}
+
+// TestResolvedOnlyAddressIsForgotten: an address only resolved, never
+// carrying bytes, is forgotten after a full idle day like any other, so a
+// stale destination does not join a later group and loosen its cap.
+// Revert mutant: Resolved marking the address used.
+func TestResolvedOnlyAddressIsForgotten(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	clk.t = clk.t.Add(48 * time.Hour)
+	c.Resolved("b.example", addrA)
+	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 1 || g.Cap != 100 {
+		t.Fatalf("a stale destination joined the group: %+v", g)
+	}
+}
+
+// TestMappedAddressesAreOne: an IPv4 address and its IPv4-mapped IPv6 form
+// are one address, whichever form the resolver or the counter gives, so an
+// honest core's bytes are never stray. Revert mutants: each Unmap.
+func TestMappedAddressesAreOne(t *testing.T) {
+	mapped := netip.AddrFrom16(addrA.As16())
+	for name, pair := range map[string][2]netip.Addr{"mapped answer": {mapped, addrA}, "mapped counter": {addrA, mapped}} {
+		c := NewCounter((&clock{noon}).now, twoCap)
+		c.Resolved("a.example", pair[0])
+		if o := c.Add(reading(1, 0, pair[1], 10)); len(o) != 0 {
+			t.Fatalf("%s: %+v", name, o)
+		}
+		if g := groupOf(t, c.Counts(), "a.example"); g.Count != 10 {
+			t.Fatalf("%s: %+v", name, g)
+		}
+	}
+}
+
+// TestRetiredAgainKeepsItsLatestCap: a destination retired, put back at a
+// lower cap and retired again keeps the lower cap for the rest of the day.
+// Revert mutant: SetCaps forgetting a returned destination's retired cap.
+func TestRetiredAgainKeepsItsLatestCap(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, Caps{Core: map[string]uint64{"x.example": 300}})
+	c.Resolved("x.example", addrA)
+	c.Add(reading(1, 0, addrA, 10))
+	c.SetCaps(Caps{Core: map[string]uint64{}})
+	c.SetCaps(Caps{Core: map[string]uint64{"x.example": 100}})
+	c.SetCaps(Caps{Core: map[string]uint64{}})
+	if g := groupOf(t, c.Counts(), "x.example"); g.Cap != 100 {
+		t.Fatalf("retired again: %+v, want cap 100", g)
+	}
+}
+
+// names is g's destinations' names, in order.
+func names(g wire.CountGroup) []string {
+	out := make([]string, len(g.Dests))
+	for i, d := range g.Dests {
+		out[i] = d.Name
+	}
+	return out
 }
