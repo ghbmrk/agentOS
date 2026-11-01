@@ -14,11 +14,11 @@ import (
 // along it, in both directions, in the same transaction that removes the
 // path; no conntrack entry needs deleting and none can be missed.
 //
-// The live form keeps every match but one: an allow set that slice f's
-// resolver fills (CoreSet, DeviceSet). A load empties those sets and the
-// resolver refills them as devices ask again (ENF-e-3, ENF-f-3), so the
-// live form checks only the address family there; the path itself (the
-// device's internet, the core's list) is still checked.
+// The live form keeps every match, the allow sets slice f's resolver fills
+// (CoreSet, DeviceSet) included: a load through Reload carries each set's
+// answers for the names still listed, so a connection to an address only a
+// dropped name answered ends with the load, and one to a kept name's goes
+// on (ENF-set-keep-1).
 
 // An accept binds its connection to the interfaces its first packet
 // crossed: it sets the connection's mark to that interface pair, and its
@@ -74,13 +74,6 @@ func live(chain string) string { return chain + "_live" }
 func daddr(v6 bool, expr string) match {
 	f := family(v6)
 	return match{f + " daddr " + expr, "ct original " + f + " daddr " + expr}
-}
-
-// resolved is a destination in an allow set the resolver fills; its live
-// form checks the family only.
-func resolved(v6 bool, set string) match {
-	nf := map[bool]string{false: "ipv4", true: "ipv6"}[v6]
-	return match{family(v6) + " daddr @" + set, "meta nfproto " + nf}
 }
 
 // l4Ports matches destination ports of one protocol; ports is one port or

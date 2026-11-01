@@ -72,7 +72,15 @@ table inet enforcer {
 		type ipv4_addr;
 		flags timeout;
 	}
+	set core_4_b78554e739b2c4dc {
+		type ipv4_addr;
+		flags timeout;
+	}
 	set core_6 {
+		type ipv6_addr;
+		flags timeout;
+	}
+	set core_6_b78554e739b2c4dc {
 		type ipv6_addr;
 		flags timeout;
 	}
@@ -80,7 +88,15 @@ table inet enforcer {
 		type ipv4_addr;
 		flags timeout;
 	}
+	set d101_4_89e0bf5b915e5fb6 {
+		type ipv4_addr;
+		flags timeout;
+	}
 	set d101_6 {
+		type ipv6_addr;
+		flags timeout;
+	}
+	set d101_6_89e0bf5b915e5fb6 {
 		type ipv6_addr;
 		flags timeout;
 	}
@@ -88,7 +104,15 @@ table inet enforcer {
 		type ipv4_addr;
 		flags timeout;
 	}
+	set d103_4_6e170647b559182e {
+		type ipv4_addr;
+		flags timeout;
+	}
 	set d103_6 {
+		type ipv6_addr;
+		flags timeout;
+	}
+	set d103_6_6e170647b559182e {
 		type ipv6_addr;
 		flags timeout;
 	}
@@ -295,30 +319,30 @@ table inet enforcer {
 		ct direction reply iifname "core0" oifname "adm0" ct protocol tcp ct original proto-dst 443 ct mark 0x10061005 return
 		ct direction original iifname "edge0" oifname "wan0" ct mark 0x10011007 return
 		ct direction reply iifname "wan0" oifname "edge0" ct mark 0x10011007 return
-		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv4 ct mark 0x10011006 return
-		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv4 ct mark 0x10011006 return
-		ct direction original iifname "core0" oifname "wan0" meta nfproto ipv6 ct mark 0x10011006 return
-		ct direction reply iifname "wan0" oifname "core0" meta nfproto ipv6 ct mark 0x10011006 return
+		ct direction original iifname "core0" oifname "wan0" ct original ip daddr @core_4 ct mark 0x10011006 return
+		ct direction reply iifname "wan0" oifname "core0" ct original ip daddr @core_4 ct mark 0x10011006 return
+		ct direction original iifname "core0" oifname "wan0" ct original ip6 daddr @core_6 ct mark 0x10011006 return
+		ct direction reply iifname "wan0" oifname "core0" ct original ip6 daddr @core_6 ct mark 0x10011006 return
 		ct direction original iifname "ap0.*" oifname "wan0" ct original ip daddr @doh_4 drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct original ip daddr @doh_4 drop
 		ct direction original iifname "ap0.*" oifname "wan0" ct original ip6 daddr @doh_6 drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct original ip6 daddr @doh_6 drop
 		ct direction original iifname "ap0.*" oifname "wan0" ct protocol { tcp, udp } ct original proto-dst { 53, 853 } drop
 		ct direction reply iifname "wan0" oifname "ap0.*" ct protocol { tcp, udp } ct original proto-dst { 53, 853 } drop
-		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv4 ct mark 0x10010065 return
-		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv4 ct mark 0x10010065 return
-		ct direction original iifname "ap0.101" oifname "wan0" meta nfproto ipv6 ct mark 0x10010065 return
-		ct direction reply iifname "wan0" oifname "ap0.101" meta nfproto ipv6 ct mark 0x10010065 return
+		ct direction original iifname "ap0.101" oifname "wan0" ct original ip daddr @d101_4 ct mark 0x10010065 return
+		ct direction reply iifname "wan0" oifname "ap0.101" ct original ip daddr @d101_4 ct mark 0x10010065 return
+		ct direction original iifname "ap0.101" oifname "wan0" ct original ip6 daddr @d101_6 ct mark 0x10010065 return
+		ct direction reply iifname "wan0" oifname "ap0.101" ct original ip6 daddr @d101_6 ct mark 0x10010065 return
 		ct direction original iifname "edge0" oifname "ap0.101" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00651007 return
 		ct direction reply iifname "ap0.101" oifname "edge0" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00651007 return
 		ct direction original iifname "core0" oifname "ap0.102" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00661006 return
 		ct direction reply iifname "ap0.102" oifname "core0" ct protocol tcp ct original proto-dst { 80 } ct mark 0x00661006 return
 		ct direction original iifname "core0" oifname "ap0.102" ct protocol udp ct original proto-dst { 123 } ct mark 0x00661006 return
 		ct direction reply iifname "ap0.102" oifname "core0" ct protocol udp ct original proto-dst { 123 } ct mark 0x00661006 return
-		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv4 ct mark 0x10010067 return
-		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv4 ct mark 0x10010067 return
-		ct direction original iifname "ap0.103" oifname "wan0" meta nfproto ipv6 ct mark 0x10010067 return
-		ct direction reply iifname "wan0" oifname "ap0.103" meta nfproto ipv6 ct mark 0x10010067 return
+		ct direction original iifname "ap0.103" oifname "wan0" ct original ip daddr @d103_4 ct mark 0x10010067 return
+		ct direction reply iifname "wan0" oifname "ap0.103" ct original ip daddr @d103_4 ct mark 0x10010067 return
+		ct direction original iifname "ap0.103" oifname "wan0" ct original ip6 daddr @d103_6 ct mark 0x10010067 return
+		ct direction reply iifname "wan0" oifname "ap0.103" ct original ip6 daddr @d103_6 ct mark 0x10010067 return
 		ct direction original iifname "core0" oifname "ap0.104" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
 		ct direction reply iifname "ap0.104" oifname "core0" ct protocol tcp ct original proto-dst { 554 } ct mark 0x00681006 return
 		ct direction original iifname "ap0.106" oifname "ap0.107" ct mark 0x006b006a return

@@ -13,6 +13,8 @@
 package nft
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -51,6 +53,16 @@ func TrafficOut(vlan int) string          { return "t" + strconv.Itoa(vlan) + "_
 func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_in" }
 
 const TrafficSize = 64
+
+// named is the set that records which addresses one name's answers put in
+// the allow set list, for the list's holder ("core", or a device's ID): the
+// resolver fills both (ASSUMPTIONS ENF-set-keep-1). Its name is list's and a
+// hash of holder and name, so no host name reaches the ruleset text, and a
+// device that takes over another's VLAN never inherits its answers.
+func named(list, holder, name string) string {
+	h := sha256.Sum256([]byte(holder + "\x00" + name))
+	return list + "_" + hex.EncodeToString(h[:8])
+}
 
 func fam(v6 bool) string {
 	if v6 {
@@ -293,6 +305,28 @@ func Paths(d policy.Document, l Layout) ([]Path, error) {
 type AllowSet struct {
 	Set4, Set6 string
 	Names      []string
+	holder     string
+}
+
+// Named is the set that records the addresses name's answers put in the
+// family's allow set, which the resolver fills alongside it, so a load can
+// keep the answers of the names still listed (Reload).
+func (a AllowSet) Named(name string, v6 bool) string {
+	return named(a.set(v6), a.holder, name)
+}
+
+func (a AllowSet) set(v6 bool) string {
+	if v6 {
+		return a.Set6
+	}
+	return a.Set4
+}
+
+// names is the set's names, each once, in order.
+func (a AllowSet) names() []string {
+	n := slices.Clone(a.Names)
+	slices.Sort(n)
+	return slices.Compact(n)
 }
 
 // AllowSets is every allow set the ruleset declares: the core's, with its
@@ -304,22 +338,32 @@ func AllowSets(d policy.Document, l Layout) ([]AllowSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []AllowSet{{Set4: CoreSet(false), Set6: CoreSet(true), Names: slices.Clone(d.Destinations)}}
+	return allowSets(d, devs), nil
+}
+
+func allowSets(d policy.Document, devs []device) []AllowSet {
+	out := []AllowSet{{Set4: CoreSet(false), Set6: CoreSet(true), Names: slices.Clone(d.Destinations), holder: "core"}}
 	for _, v := range devs {
 		if v.internet() {
-			out = append(out, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true), Names: slices.Clone(v.d.Allow)})
+			out = append(out, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true), Names: slices.Clone(v.d.Allow), holder: v.d.ID})
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Compile is the ruleset for one policy document on one layout: a single
 // text that starts by flushing the running ruleset, so loading it replaces
 // everything in one transaction. The same inputs give the same bytes.
 func Compile(d policy.Document, l Layout) (string, error) {
+	text, _, err := compile(d, l)
+	return text, err
+}
+
+// compile is Compile's ruleset and the devices it was compiled for.
+func compile(d policy.Document, l Layout) (string, []device, error) {
 	devs, paths, err := compiled(d, l)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var isp4, isp6, ap4, ap6 []string
 	for _, p := range l.ISP {
@@ -364,12 +408,13 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.set("doh_6", "ipv6_addr", "interval", doh6)
 	w.set("ap_4", "ipv4_addr", "", ap4)
 	w.set("ap_6", "ipv6_addr", "", ap6)
-	w.set(CoreSet(false), "ipv4_addr", "timeout", nil)
-	w.set(CoreSet(true), "ipv6_addr", "timeout", nil)
-	for _, v := range devs {
-		if v.internet() {
-			w.set(DeviceSet(v.vlan, false), "ipv4_addr", "timeout", nil)
-			w.set(DeviceSet(v.vlan, true), "ipv6_addr", "timeout", nil)
+	for _, a := range allowSets(d, devs) {
+		for _, v6 := range []bool{false, true} {
+			typ := map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6]
+			w.set(a.set(v6), typ, "timeout", nil)
+			for _, n := range a.names() {
+				w.set(a.Named(n, v6), typ, "timeout", nil)
+			}
 		}
 	}
 
@@ -478,8 +523,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	// From here on, oifname WAN is the internet.
 	add(q(l.Admin), core, "", "accept", l4Ports("tcp", port(l.CorePagePort)))
 	add(edge, wan, "", "accept")
-	add(core, wan, "", "accept", resolved(false, CoreSet(false)))
-	add(core, wan, "", "accept", resolved(true, CoreSet(true)))
+	add(core, wan, "", "accept", daddr(false, "@"+CoreSet(false)))
+	add(core, wan, "", "accept", daddr(true, "@"+CoreSet(true)))
 	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
 	// before any allow set is consulted (NET-3).
 	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(false, "@doh_4"))
@@ -489,8 +534,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		i := q(v.iface)
 		vl := strconv.Itoa(v.vlan)
 		if v.internet() {
-			add(i, wan, "", "accept", resolved(false, DeviceSet(v.vlan, false)))
-			add(i, wan, "", "accept", resolved(true, DeviceSet(v.vlan, true)))
+			add(i, wan, "", "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
+			add(i, wan, "", "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
 		}
 		for _, m := range dports(v.d.Control) {
 			if v.online() {
@@ -546,7 +591,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	}
 	for _, rs := range [][]rule{fwd, people} {
 		if err := bindAll(idx, rs); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	// A related packet that reaches the end of a live chain names a
@@ -664,7 +709,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("iifname " + edge + " arp operation request arp daddr ip != " + l.EdgeGateway.String() + " drop")
 	w.close()
 	w.close()
-	return w.b.String(), nil
+	return w.b.String(), devs, nil
 }
 
 func trafficChain(vlan int, dir string) string {
