@@ -33,7 +33,9 @@ import unit_tests  # noqa: E402
 _LINE = re.compile(r'^(\d+)\s+(open|openat|openat2|bind)\((.*)$')
 _RESUMED = re.compile(r'^(\d+)\s+<\.\.\. (open|openat|openat2|bind) resumed>(.*)$')
 _OPEN_ARGS = re.compile(r'^(?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)", (.*)$')
-_REACHED = re.compile(r'\) = \d+<([^>]*)>$')
+# strace pads a short result to a column: `)             = 3</path>`, on every resumed line.
+_REACHED = re.compile(r'\)\s+= \d+<([^>]*)>$')
+_RESULT = re.compile(r'\)\s+= ')
 _WRITE = re.compile(r'\bO_(?:WRONLY|RDWR|CREAT)\b')
 _PORT = re.compile(r'sa_family=AF_INET6?, sin6?_port=htons\((\d+)\)')
 _UNIX = re.compile(r'sa_family=AF_UNIX, sun_path=(@?)"((?:[^"\\]|\\.)*)"')
@@ -46,7 +48,7 @@ def _unquote(s):
 
 def _flags(rest):
     """The flags argument and anything before the result: what follows the path."""
-    return rest.split(") = ")[0].split(_UNFINISHED)[0]
+    return _RESULT.split(rest)[0].split(_UNFINISHED)[0]
 
 
 def shared(path, home=None):
@@ -54,10 +56,11 @@ def shared(path, home=None):
     home = home if home is not None else os.path.expanduser("~")
     if path in ("/dev/null", "/dev/tty", "/dev/full", "/dev/zero", "/dev/urandom", "/dev/random", "/dev/ptmx"):
         return True
-    if path.startswith(("/proc/", "/dev/pts/", "/dev/fd/", "/dev/shm/sem.")):
+    if path.startswith(("/proc/", "/dev/pts/", "/dev/fd/")):
         return True
-    # Python's bytecode cache: written to a temporary name, then renamed (importlib's _write_atomic).
-    if re.search(r"/__pycache__/[^/]+\.pyc(\.\d+)?$", path):
+    # Python's bytecode cache: importlib's own names, written to a temporary name and renamed
+    # (_write_atomic); any other file a test writes there is not exempt.
+    if re.search(r"/__pycache__/[^/.]+\.cpython-\d+(\.opt-\d)?\.pyc(\.\d+)?$", path):
         return True
     # Go's build and module caches (content-addressed, locked for concurrent go commands) and its
     # telemetry counters (memory-mapped files every go command adds to at once).
@@ -106,6 +109,9 @@ def writes(trace):
             if path is None or not write:
                 continue
             if rest.endswith(_UNFINISHED):
+                # The asked path counts even if the call never resumes (the process was killed
+                # mid-open); the resumed line adds the file it reached.
+                out.add(("path", path))
                 pending[pid] = path
                 continue
             reached = _REACHED.search(rest)
@@ -113,9 +119,10 @@ def writes(trace):
             continue
         r = _RESUMED.match(line)
         if r and r.group(2) != "bind" and r.group(1) in pending:
-            asked = pending.pop(r.group(1))
+            pending.pop(r.group(1))
             reached = _REACHED.search(r.group(3))
-            out.add(("path", os.path.normpath(reached.group(1)) if reached else asked))
+            if reached:
+                out.add(("path", os.path.normpath(reached.group(1))))
     return out
 
 
@@ -146,6 +153,9 @@ def main(argv):
         if name.endswith(".trace"):
             with open(os.path.join(d, name), errors="surrogateescape") as f:
                 traces[name[:-len(".trace")]] = f.read()
+    missing = [m for m in unit_tests.modules() if m not in traces]
+    for m in missing:
+        print(f"::error::{m} has no trace in {d}: nothing to check it against")
     found = clashes(traces)
     for kind, name, a, b in found:
         print(f"::error::{a} and {b} both {'write' if kind == 'path' else 'bind'} {name}")
@@ -153,7 +163,7 @@ def main(argv):
         print("Modules that run at the same time must not share a path or address: make each use its "
               "own (a tempfile directory, port 0), or put the module in tools/unit_tests.py SERIAL "
               "with its reason.", file=sys.stderr)
-    return 1 if found else 0
+    return 1 if found or missing else 0
 
 
 if __name__ == "__main__":

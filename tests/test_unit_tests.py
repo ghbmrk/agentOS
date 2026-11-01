@@ -272,11 +272,21 @@ class ClashTest(unittest.TestCase):
         self.assertEqual(clash_audit.clashes(traces, serial={"test_b": "why", "test_c": "why"}), [])
 
     def test_relative_resumed_and_failed_creates_resolve_to_one_path(self):
-        a = ('1 openat(AT_FDCWD</r>, "build/out", O_WRONLY|O_CREAT <unfinished ...>\n'
+        # As strace prints them: a split call's result on a padded `<... resumed>` line, and the
+        # file it reached (through a link) differing from the path asked for.
+        a = ('1 openat(AT_FDCWD</r>, "link/out", O_WRONLY|O_CREAT <unfinished ...>\n'
              '2 openat(AT_FDCWD</r>, "x", O_WRONLY|O_CREAT, 0666) = 3</r/x>\n'
-             '1 <... openat resumed>) = 4</r/build/out>\n')
+             '1 <... openat resumed>)             = 4</r/build/out>\n')
         b = '5 openat(7</r/build>, "out", O_WRONLY|O_CREAT|O_EXCL, 0666) = -1 EEXIST (File exists)\n'
+        self.assertIn(("path", "/r/build/out"), clash_audit.writes(a))
         self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": b}, serial={}),
+                         [("path", "/r/build/out", "test_a", "test_b")])
+        padded = '6 openat(AT_FDCWD</r>, "link/out", O_WRONLY|O_CREAT, 0666)    = 3</r/build/out>\n'
+        self.assertEqual(clash_audit.writes(padded), {("path", "/r/build/out")})
+
+    def test_a_write_cut_off_mid_call_counts_its_asked_path(self):
+        a = '1 openat(AT_FDCWD</r>, "build/out", O_WRONLY|O_CREAT <unfinished ...>\n1 +++ killed by SIGKILL +++\n'
+        self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/r/build/out")}, serial={}),
                          [("path", "/r/build/out", "test_a", "test_b")])
 
     def test_a_fixed_port_or_socket_name_clashes_and_port_zero_does_not(self):
@@ -302,9 +312,11 @@ class ClashTest(unittest.TestCase):
                      f"{home}/.config/go/telemetry/local/go@go1.26-x.v1.count"):
             self.assertTrue(clash_audit.shared(path, home=home), path)
             self.assertEqual(clash_audit.clashes({"test_a": w(1, path), "test_b": w(2, path)}, serial={}), [], path)
-        for path in (f"{R}/.git/index.lock", "/tmp/agentos-x", f"{R}/build/out"):
+        for path in (f"{R}/.git/index.lock", "/tmp/agentos-x", f"{R}/build/out", f"{R}/x/__pycache__/out.pyc",
+                     "/dev/shm/sem.agentos"):
             self.assertFalse(clash_audit.shared(path, home=home), path)
 
+    @mock.patch.object(unit_tests, "modules", lambda root=None: ["test_a", "test_b", "test_c"])
     def test_the_step_fails_naming_both_units_and_the_escape_hatch(self):
         import io
         import tempfile
@@ -320,6 +332,12 @@ class ClashTest(unittest.TestCase):
             pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
+            # A module with no trace fails: an empty directory never passes.
+            pathlib.Path(d, "test_c.trace").unlink()
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out), mock.patch.dict(unit_tests.SERIAL, clear=True):
+                self.assertEqual(clash_audit.main(["clash_audit.py", d]), 1)
+            self.assertIn("::error::test_c has no trace", out.getvalue())
 
     def test_ci_runs_the_clash_check_on_the_unit_traces(self):
         ci = (unit_tests.ROOT / ".github/workflows/ci.yml").read_text()
