@@ -18,8 +18,10 @@ func (c *clock) now() time.Time       { return c.t }
 func (c *clock) step(d time.Duration) { c.t = c.t.Add(d) }
 func newClock() *clock                { return &clock{t: time.Unix(1_800_000_000, 0)} }
 func gate(c *clock) *Gate             { return New(c.now) }
-func capped(cp, count uint64, dests ...string) []Group {
-	return []Group{{Dests: dests, Cap: cp, Count: count}}
+
+// capped is a summary of one group: one destination, its cap and count.
+func capped(cp, count uint64, dest string) []Group {
+	return []Group{{Dests: []Dest{{dest, cp}}, Count: count}}
 }
 
 // enforcer is the fake enforcer's counter for one group: it counts every
@@ -213,24 +215,27 @@ func TestSentSinceTheCount(t *testing.T) {
 func TestGroupSharesItsCap(t *testing.T) {
 	c := newClock()
 	g := gate(c)
-	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []string{"backup"}, Cap: 1000}, {Dests: []string{"mail"}, Cap: 1000}}); err != nil {
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"backup", 1000}}}, {Dests: []Dest{{"mail", 1000}}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Reserve("backup", 400); err != nil {
+	if _, err := g.Reserve("backup", 500); err != nil { // 1000, at its own cap
 		t.Fatal(err)
 	}
 	// Mid-day the two share an address: one group, caps and counts summed.
-	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []string{"backup", "mail"}, Cap: 2000, Count: 0}}); err != nil {
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"backup", 1000}, {"mail", 1000}}, Count: 2}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.Reserve("mail", 600); err != nil { // 800 + 1200
+	if _, err := g.Reserve("mail", 499); err != nil { // 2 + 1000 + 998: at the merged cap
 		t.Fatalf("at the merged cap: %v", err)
 	}
-	if _, err := g.Reserve("mail", 1); err == nil {
+	if _, err := g.Reserve("mail", 1); err == nil { // mail's own 1000 holds it; the group's 2000 does not
 		t.Fatal("send past the merged cap let through")
 	}
-	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []string{"backup"}}, {Dests: []string{"backup"}}}); !errors.Is(err, ErrGroup) {
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"backup", 1}}}, {Dests: []Dest{{"backup", 1}}}}); !errors.Is(err, ErrGroup) {
 		t.Fatalf("destination in two groups: %v", err)
+	}
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"backup", ^uint64(0)}, {"mail", 1}}}}); !errors.Is(err, ErrGroup) {
+		t.Fatalf("a group cap that overflows: %v", err)
 	}
 }
 
@@ -383,7 +388,7 @@ func TestSendInNoGroupCountsEverywhere(t *testing.T) {
 	c := newClock()
 	g := gate(c)
 	e := &enforcer{cap: 100}
-	if err := g.Summary(g.Ask(), 1, capped(100, 0, "x", "y")); err != nil {
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"x", 100}, {"y", 100}}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.Reserve("x", 50); err != nil { // 100 reserved, in flight
@@ -454,7 +459,7 @@ func TestSecondEndKeepsTheFirst(t *testing.T) {
 func TestInFlightCountsOnlyInItsGroup(t *testing.T) {
 	c := newClock()
 	g := gate(c)
-	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []string{"a"}, Cap: 1000}, {Dests: []string{"b"}, Cap: 1000}}); err != nil {
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"a", 1000}}}, {Dests: []Dest{{"b", 1000}}}}); err != nil {
 		t.Fatal(err)
 	}
 	for range 20 {
@@ -693,7 +698,8 @@ func TestEndOfAnotherGatesSend(t *testing.T) {
 }
 
 // Random interleavings of reserve, partial emission, end, ask, answers in
-// any order and duplicated, pauses, day rollover and group merges, with a
+// any order and duplicated, pauses, midnights that form groups anew (so a
+// group can split), mid-day group merges, with a
 // clock that steps forward and back, against a fake enforcer that trips
 // past its cap with wire.PastCap: it never trips (Security model test).
 func TestModelNeverTrips(t *testing.T) {
@@ -736,9 +742,9 @@ func TestModelNeverTrips(t *testing.T) {
 			for _, d := range dests {
 				gi := groupOf[d]
 				if by[gi] == nil {
-					by[gi] = &Group{Count: count[gi], Cap: capOf(gi)}
+					by[gi] = &Group{Count: count[gi]}
 				}
-				by[gi].Dests = append(by[gi].Dests, d)
+				by[gi].Dests = append(by[gi].Dests, Dest{d, caps[d]})
 			}
 			for _, gr := range by {
 				out = append(out, *gr)
@@ -797,9 +803,12 @@ func TestModelNeverTrips(t *testing.T) {
 				}
 			case 8:
 				c.step(time.Duration(r.Intn(80)-30) * time.Second) // forward or back
-				if r.Intn(30) == 0 {
+				if r.Intn(30) == 0 {                               // midnight: counts restart, groups form anew
 					day++
 					count = map[int]uint64{}
+					for _, d := range dests {
+						groupOf[d] = r.Intn(len(dests))
+					}
 				}
 				if r.Intn(20) == 0 {
 					paused = !paused
@@ -816,5 +825,38 @@ func TestModelNeverTrips(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Security repro (#4430 point 1): a group can split at the enforcer's
+// midnight, inside Fresh. A send to one former member is held to its own
+// cap too, so the enforcer, counting it alone from midnight, never trips.
+func TestMidnightSplitTrips(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, []Group{{Dests: []Dest{{"a", 100}, {"b", 100}}}}); err != nil {
+		t.Fatal(err)
+	}
+	c.step(30 * time.Second)
+	e := &enforcer{cap: 100}                      // day 2: a alone, its count restarted
+	if _, err := g.Reserve("a", 51); err == nil { // 102 against a's own 100
+		e.pass(102)
+		t.Fatalf("send past a's own cap let through: enforcer at %d of %d, tripped=%v", e.count, e.cap, e.tripped)
+	}
+	s, err := g.Reserve("a", 50) // 100: at a's own cap
+	if err != nil {
+		t.Fatalf("at a's own cap: %v", err)
+	}
+	e.pass(100)
+	var pc *PastCap
+	if _, err := g.Reserve("a", 1); !errors.As(err, &pc) || pc.Cap != 100 || pc.Raise() != 2 {
+		t.Fatalf("past a's own cap: %v, want a raise of 2 on a's cap of 100", err)
+	}
+	if _, err := g.Reserve("b", 50); err != nil { // b's own 100; the group's 200
+		t.Fatalf("b's own room: %v", err)
+	}
+	g.End(s)
+	if e.tripped {
+		t.Fatal("tripped")
 	}
 }

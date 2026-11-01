@@ -13,15 +13,15 @@
 // lock, never by a clock reading, so a clock that steps back cannot make a
 // send look counted or a pre-pause answer look new. Each send reserves its
 // size plus one full retry. The total may reach the cap but never pass it
-// (wire.PastCap, the enforcer's own test).
+// (wire.PastCap, the enforcer's own test): its group's cap, and, since a
+// group can split at the enforcer's midnight, its destination's own.
 //
 // The clock only ages a count: it is fresh only while its summary was
 // asked for no more than twice wire.SummaryInterval ago, by the kernel's
 // own monotonic clock, and never when that clock reads earlier than the
-// ask; with no
-// fresh count the gate refuses every capped send, so with the enforcer down
-// or its summaries paused after a core trip (D-260) the core sends nothing
-// capped.
+// ask. With no fresh count the gate refuses every capped send, so with the
+// enforcer down or its summaries paused after a core trip (D-260) the core
+// sends nothing capped.
 //
 // It imports the standard library and broker/enforcer/wire only, for the
 // shared format definition's interval and edge (broker/daemon/arc2_test.go,
@@ -58,12 +58,13 @@ var (
 	ErrGroup = errors.New("capgate: summary names a destination twice")
 )
 
-// PastCap is the refusal of a send that could pass its group's cap. It
-// carries what the owner is asked to raise the cap by.
+// PastCap is the refusal of a send that could pass a cap: its group's,
+// or its destination's own. It carries what the owner is asked to raise
+// that cap by.
 type PastCap struct {
 	Dest  string // the destination the send was for
-	Cap   uint64 // the group's cap, in IP bytes on the enforcer's day
-	Total uint64 // the count, the sends it may not hold, and this send with its retry
+	Cap   uint64 // the cap it could pass, in IP bytes on the enforcer's day
+	Total uint64 // what counts against that cap, this send with its retry included
 }
 
 func (e *PastCap) Error() string {
@@ -74,13 +75,23 @@ func (e *PastCap) Error() string {
 func (e *PastCap) Raise() uint64 { return e.Total - e.Cap }
 
 // Group is one cap group in a summary: the destinations that share an
-// address that day (NET-1), their one cap and the enforcer's count of the
-// IP bytes the core sent them, acknowledgements and retransmissions
-// included.
+// address that day (NET-1), each with its own cap, and the enforcer's
+// count of the IP bytes the core sent them, acknowledgements and
+// retransmissions included. The group's one cap is the sum of theirs.
 type Group struct {
-	Dests []string
-	Cap   uint64
+	Dests []Dest
 	Count uint64
+}
+
+// Dest is one destination in a group and its own daily cap.
+type Dest struct {
+	Name string
+	Cap  uint64
+}
+
+// group is a summary's group as the gate holds it.
+type group struct {
+	cap, count uint64
 }
 
 // Ticket is one summary request: the gate that issued it, its place in
@@ -109,13 +120,13 @@ type reservation struct {
 type Gate struct {
 	mu     sync.Mutex
 	now    func() time.Time
-	seq    uint64 // the last ask issued; asks are 1, 2, 3...
-	paused uint64 // the sequence at the last pause: no ask up to it counts
-	have   bool
+	seq    uint64    // the last ask issued; asks are 1, 2, 3...
+	paused uint64    // the sequence at the last pause: no ask up to it counts
 	held   uint64    // the held summary's ask
 	asked  time.Time // and its time, which only ages the count
 	day    uint32
-	group  map[string]*Group // by destination
+	group  map[string]*group // by destination; nil while there is no count
+	own    map[string]uint64 // each destination's own cap
 	active map[*reservation]struct{}
 }
 
@@ -142,18 +153,21 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 	if t.g != g || t.seq <= g.paused || t.seq <= g.held || day < g.day {
 		return ErrSummary
 	}
-	by := map[string]*Group{}
-	for i := range groups {
-		gr := groups[i]
-		gr.Dests = append([]string(nil), gr.Dests...)
-		for _, d := range gr.Dests {
-			if _, dup := by[d]; dup {
+	by, own := map[string]*group{}, map[string]uint64{}
+	for _, in := range groups {
+		gr := &group{count: in.Count}
+		for _, d := range in.Dests {
+			if _, dup := by[d.Name]; dup {
 				return ErrGroup
 			}
-			by[d] = &gr
+			var ok bool
+			if gr.cap, ok = add(gr.cap, d.Cap); !ok {
+				return ErrGroup
+			}
+			by[d.Name], own[d.Name] = gr, d.Cap
 		}
 	}
-	g.have, g.held, g.asked, g.day, g.group = true, t.seq, t.at, day, by
+	g.held, g.asked, g.day, g.group, g.own = t.seq, t.at, day, by, own
 	for r := range g.active {
 		if r.ended && r.endSeq < t.seq {
 			delete(g.active, r) // ended before the ask: in the count
@@ -171,18 +185,28 @@ func (g *Gate) Paused() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.paused = g.seq
-	g.have, g.group = false, nil
+	g.group, g.own = nil, nil
 }
 
 // Reserve is the check before a send of size IP bytes to dest. It
 // reserves size plus one retry and returns the send, to be ended with End;
 // or it refuses with ErrNoCount, or with *PastCap, which asks the owner
 // for a raise. A refused send reserves nothing.
+//
+// It checks both sides of the enforcer's midnight, which can fall inside
+// Fresh. On the summary's day, the group's count, the sends it may not
+// hold and this one stay within the group's cap. Past midnight counts
+// restart but a group can split into any of its members, so this
+// destination's own sends since the count stay within its own cap too; as
+// each send was checked so, any group the next day forms, its cap the sum
+// of its members', holds its members' sends. A send to a destination in no
+// group of this summary counts against every group and every destination,
+// since the enforcer may count it in any.
 func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
-	if !g.have || now.Before(g.asked) || now.Sub(g.asked) > Fresh {
+	if g.group == nil || now.Before(g.asked) || now.Sub(g.asked) > Fresh {
 		return Send{}, ErrNoCount
 	}
 	gr, ok := g.group[dest]
@@ -190,28 +214,34 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 		return Send{}, ErrNoCount
 	}
 	need, ok := mul(size, 1+Retries)
-	total, ok2 := add(gr.Count, need)
-	if !ok || !ok2 {
-		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: ^uint64(0)}
+	if !ok {
+		return Send{}, &PastCap{Dest: dest, Cap: gr.cap, Total: ^uint64(0)}
 	}
+	total, ok1 := add(gr.count, need) // against the group's cap
+	mine, ok2 := need, true           // against dest's own cap
 	for r := range g.active {
-		if rg, in := g.group[r.dest]; in && rg != gr {
-			continue // another group's; one in no group counts against every group
+		rg, in := g.group[r.dest]
+		if !in || rg == gr {
+			total, ok1 = addOK(total, r.bytes, ok1)
 		}
-		if total, ok = add(total, r.bytes); !ok {
-			return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: ^uint64(0)}
+		if !in || r.dest == dest {
+			mine, ok2 = addOK(mine, r.bytes, ok2)
 		}
 	}
-	if wire.PastCap(total, gr.Cap) {
-		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: total}
+	if !ok1 || wire.PastCap(total, gr.cap) {
+		return Send{}, &PastCap{Dest: dest, Cap: gr.cap, Total: orMax(total, ok1)}
+	}
+	if !ok2 || wire.PastCap(mine, g.own[dest]) {
+		return Send{}, &PastCap{Dest: dest, Cap: g.own[dest], Total: orMax(mine, ok2)}
 	}
 	r := &reservation{dest: dest, bytes: need}
 	g.active[r] = struct{}{}
 	return Send{r: r}, nil
 }
 
-// End is called once no byte of a reserved send can still leave: its
-// connection closed and drained, whether it succeeded or not. Its bytes
+// End is called once no byte of a reserved send can still reach the
+// enforcer: its connection closed and acknowledged end to end, whether it
+// succeeded or not, not merely written. Its bytes
 // stay counted until a summary asked for after this call replaces the
 // count. A second End keeps the first; a send this gate does not hold
 // (another gate's, or one already counted) is left alone.
@@ -224,6 +254,20 @@ func (g *Gate) End(s Send) {
 }
 
 func add(a, b uint64) (uint64, bool) { return a + b, a+b >= a }
+
+// addOK adds b to a sum that has not yet overflowed (ok).
+func addOK(a, b uint64, ok bool) (uint64, bool) {
+	s, fits := add(a, b)
+	return s, ok && fits
+}
+
+// orMax is a total, or the largest one when it overflowed.
+func orMax(total uint64, ok bool) uint64 {
+	if !ok {
+		return ^uint64(0)
+	}
+	return total
+}
 
 func mul(a, b uint64) (uint64, bool) {
 	if a != 0 && (a*b)/a != b {
