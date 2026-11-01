@@ -267,11 +267,14 @@ func TestForgedRelatedDropped(t *testing.T) {
 // plug one about a device pair's connection, to the pair's starting end:
 // none arrives, and each moves the blocked counter, which only the logged
 // refusal rules count. The same forgeries from Owner, Household and Guests
-// are dropped too, without a log line or a count, and so is a device's
-// forgery into Household's pair with the printer, sent to Household (NET-1,
-// NET-3: those networks are never observed, either way). A genuine error along an allowed path still
-// passes: from the pair's other end, and from the internet router on the
-// TV's own internet connection, so path-MTU discovery keeps working.
+// are dropped too, without a log line or a count. So are a device's
+// forgeries into Household's pair with the printer, sent to Household or
+// to the printer (whose inner header names Household's connection), and
+// into a guest's internet connection, sent back toward the guest (NET-1,
+// NET-3: those networks are never observed, either way). A genuine error
+// along an allowed path still passes: from the pair's other end, and from
+// the internet router on the TV's own internet connection, so path-MTU
+// discovery keeps working.
 func TestRelatedNeedsPath(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -284,10 +287,14 @@ func TestRelatedNeedsPath(t *testing.T) {
 	h.load(text)
 	h.fillSets()
 	atTV, atEdge, at106, atHH := h.hear("101", false), h.hear("edge", false), h.hear("106", false), h.hear("household", false)
+	at105 := h.hear("105", false)
 	edge := h.hold("the edge to the TV", "edge", "101", devAddr(101), 9100)
 	pair := h.hold("a device pair", "106", "107", devAddr(107), 9301)
 	people := h.hold("Household's pair", "household", "105", devAddr(105), 9302)
 	hhAddr, hhPort := hostPort(t, people.c.LocalAddr())
+	atGuest := h.hear("guest", false)
+	guest := h.hold("a guest to the internet", "guest", "isp", netOther, 9214)
+	_, guestMasq := hostPort(t, guest.s.RemoteAddr())
 	tv := h.hold("the TV to its allow list", "101", "isp", netAllow, 9213)
 	edgeAddr, edgePort := hostPort(t, edge.c.LocalAddr())
 	_, pairPort := hostPort(t, pair.c.LocalAddr())
@@ -302,6 +309,8 @@ func TestRelatedNeedsPath(t *testing.T) {
 	toEdge := func(tag uint16) []byte { return icmpErr(false, tag, edgeAddr, devAddr(101), edgePort, 9100) }
 	toPair := func(tag uint16) []byte { return icmpErr(false, tag, devAddr(106), devAddr(107), pairPort, 9301) }
 	toHH := func(tag uint16) []byte { return icmpErr(false, tag, hhAddr, devAddr(105), hhPort, 9302) }
+	toPrinter := func(tag uint16) []byte { return icmpErr(false, tag, devAddr(105), hhAddr, 9302, hhPort) }
+	toGuest := func(tag uint16) []byte { return icmpErr(false, tag, enfWAN, netOther, guestMasq, 9214) }
 	send := func(fs []forgery, tag uint16) map[uint16]forgery {
 		sent := map[uint16]forgery{}
 		for _, f := range fs {
@@ -331,7 +340,7 @@ func TestRelatedNeedsPath(t *testing.T) {
 	for _, from := range []string{"owner", "household", "guest"} {
 		unseen = append(unseen, forgery{from, devAddr(101), atTV, toTV}, forgery{from, edgeAddr, atEdge, toEdge}, forgery{from, devAddr(106), at106, toPair})
 	}
-	unseen = append(unseen, forgery{"102", hhAddr, atHH, toHH})
+	unseen = append(unseen, forgery{"102", hhAddr, atHH, toHH}, forgery{"102", devAddr(105), at105, toPrinter}, forgery{"102", enfWAN, atGuest, toGuest})
 	before = h.counter(Blocked)
 	send(unseen, 1520)
 	if n := h.counter(Blocked) - before; n != 0 {
@@ -348,5 +357,5 @@ func TestRelatedNeedsPath(t *testing.T) {
 	if !atTV.has(fromRouter) {
 		t.Error("the internet router's path-MTU error did not reach the TV")
 	}
-	h.expectOpen(true, edge, pair, tv, people)
+	h.expectOpen(true, edge, pair, tv, people, guest)
 }

@@ -67,7 +67,9 @@ func TestEveryAcceptBound(t *testing.T) {
 				live := strings.HasSuffix(chain, "_live")
 				accepts := (!live && strings.HasSuffix(l, " accept") && !strings.HasPrefix(l, "ct state ")) || (live && strings.HasSuffix(l, " return"))
 				if !accepts {
-					if strings.Contains(l, "ct mark") {
+					// Only the logged related drop reads the mark, to keep
+					// the networks never observed out of the log (#4113).
+					if strings.Contains(l, "ct mark set") || (strings.Contains(l, "ct mark") && !strings.HasPrefix(l, "ct state related ")) {
 						t.Errorf("%s: a rule that does not accept touches the mark: %s", chain, l)
 					}
 					continue

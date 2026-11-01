@@ -553,13 +553,23 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	// connection that does not run on the interfaces it crossed: an ICMP
 	// error forged from another segment, or a genuine one about a connection
 	// a load cut (#4113, A18 Segments). It is dropped and, like any other
-	// refusal, logged and counted, except to or from the networks that are
-	// never observed (NET-1, NET-3): its inner header would name one of
-	// their connections. Every packet people_live sees has an Owner or
-	// Household end, so only forward_live logs. A cut connection's own later
-	// packets are dropped without a line, since a load can cut many at once.
+	// refusal, logged and counted, except when it touches the networks that
+	// are never observed (NET-1, NET-3): sent from or to one of them, or
+	// naming a connection with a Guests, Owner or Household end, which its
+	// inner header (and so the log line) would show. The connection's mark
+	// says which interfaces it runs on; an unbound one (mark 0, opened
+	// before this ruleset was loaded) may be theirs, so it is not logged
+	// either. Every packet people_live sees has an Owner or Household end,
+	// so only forward_live logs. A cut connection's own later packets are
+	// dropped without a line, since a load can cut many at once.
 	unseen := "{ " + g + ", " + q(l.Owner) + ", " + q(l.Household) + " }"
-	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " " + logged(LogDrop, Blocked) + " drop"
+	var lows, highs []string
+	for _, n := range []string{l.Guests, l.Owner, l.Household} {
+		lows = append(lows, fmt.Sprintf("0x%08x", idx[q(n)]))
+		highs = append(highs, fmt.Sprintf("0x%08x", idx[q(n)]<<16))
+	}
+	related := "ct state related iifname != " + unseen + " oifname != " + unseen + " ct mark != 0x00000000 ct mark and 0x0000ffff != { " + strings.Join(lows, ", ") + " }" +
+		" ct mark and 0xffff0000 != { " + strings.Join(highs, ", ") + " } " + logged(LogDrop, Blocked) + " drop"
 
 	w.open("chain forward")
 	w.line("type filter hook forward priority filter; policy drop;")

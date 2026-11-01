@@ -325,7 +325,7 @@ table inet enforcer {
 		ct direction reply iifname "ap0.107" oifname "ap0.106" ct mark 0x006b006a return
 		ct direction original iifname "ap0.107" oifname "ap0.106" ct mark 0x006a006b return
 		ct direction reply iifname "ap0.106" oifname "ap0.107" ct mark 0x006a006b return
-		ct state related iifname != { "gst0", "own0", "hh0" } oifname != { "gst0", "own0", "hh0" } log prefix "enf drop " counter name "blocked" drop
+		ct state related iifname != { "gst0", "own0", "hh0" } oifname != { "gst0", "own0", "hh0" } ct mark != 0x00000000 ct mark and 0x0000ffff != { 0x00001004, 0x00001002, 0x00001003 } ct mark and 0xffff0000 != { 0x10040000, 0x10020000, 0x10030000 } log prefix "enf drop " counter name "blocked" drop
 		drop
 	}
 	chain people_live {
