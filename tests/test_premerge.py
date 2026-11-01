@@ -864,7 +864,7 @@ class PremergeTest(unittest.TestCase):
 
     def main_run(self, workflow="trace.yml", **kw):
         sha = git(self.r, "rev-parse", "main")
-        return {"id": 9, "path": ".github/workflows/" + workflow, "event": "schedule", "head_sha": sha,
+        return {"id": 9, "run_attempt": 1, "path": ".github/workflows/" + workflow, "event": "schedule", "head_sha": sha,
                 "repository": {"full_name": "o/r"}, "head_repository": {"full_name": "o/r"}, **kw}
 
     def test_bot_gate(self):
@@ -905,7 +905,7 @@ class PremergeTest(unittest.TestCase):
         self.assertEqual(self.bot_run("bot/trace", self.main_run()), unproven("no-run"))
         self.assertEqual(self.bot_run("bot/trace", output=good), unproven("no-run"))
         # The content: hand-edited, an extra member, a renamed member, an empty or broken zip.
-        for out in ([("TRACE.md", b"hand-edited\n")], [("TRACE.md", b"t\n"), ("x", b"")], [("trace.md", b"t\n")],
+        for out in ([("TRACE.md", b"hand-edited\n")], [("TRACE.md", b"x\n")], [("TRACE.md", b"t\n"), ("x", b"")], [("trace.md", b"t\n")],
                     [("TRACE.md", b"t")], [("TRACE.md", b"t\nmore\n")], []):
             self.assertEqual(self.bot_run("bot/trace", self.main_run(), out), unproven("output"), out)
         (pathlib.Path(self._d.name + ".bot") / "broken.zip").write_bytes(b"PK not a zip")
@@ -919,7 +919,9 @@ class PremergeTest(unittest.TestCase):
                    {"path": ".github/workflows/trace.yml@refs/heads/side"}, {"path": None},
                    {"event": "pull_request"}, {"event": "pull_request_target"}, {"event": "workflow_run"}, {"event": None},
                    {"head_repository": {"full_name": "fork/r"}}, {"head_repository": None},
-                   {"repository": None, "head_repository": None}):
+                   {"repository": None, "head_repository": None},
+                   # a rerun of an old main run uploads a fresh artifact of old output
+                   {"run_attempt": 2}, {"run_attempt": None}, {"run_attempt": "1"}, {"run_attempt": True}):
             self.assertEqual(self.bot_run("bot/trace", self.main_run(**kw), good), unproven("run"), kw)
         for sha in (side, "f" * 40, "HEAD", "main", "-" + "a" * 39, None, 7):
             self.assertEqual(self.bot_run("bot/trace", self.main_run(head_sha=sha), good), unproven("run-not-on-main"), sha)
@@ -934,6 +936,28 @@ class PremergeTest(unittest.TestCase):
         board = [("BOARD.md", b"b\n")]
         self.assertEqual(self.bot_run("bot/board", self.main_run("board.yml"), board), (0, ["bot"]))
         self.assertEqual(self.bot_run("bot/board", self.main_run("trace.yml"), board), unproven("run"))
+        # A usage error, not a pass: a flag with no value.
+        for tail in (["--run"], ["--output"], ["--base"]):
+            r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/board", *tail],
+                               cwd=self.r, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 2, tail)
+        # A truncated member: still `output`, not a traceback.
+        import zipfile
+        z = pathlib.Path(self._d.name + ".bot") / "out.zip"
+        with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as w:
+            w.writestr("BOARD.md", b"b\n" * 4000)
+        self.write("BOARD.md", "b\n" * 4000)
+        self.commit("board, larger")
+        data = bytearray(z.read_bytes())
+        start = 30 + len("BOARD.md")  # no extra field: the member's deflate stream starts here
+        data[start:start + 4] = b"\xff\xff\xff\xff"  # a broken stream (zlib.error), the directory intact
+        z.write_bytes(bytes(data))
+        import json
+        (pathlib.Path(self._d.name + ".bot") / "run.json").write_text(json.dumps(self.main_run("board.yml")))
+        r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/board", "--run",
+                            str(pathlib.Path(self._d.name + ".bot") / "run.json"), "--output", str(z), "--base", "main"],
+                           cwd=self.r, capture_output=True, text=True)
+        self.assertEqual((r.returncode, r.stdout.split()), unproven("output"))
         # A usage error, not a pass: two heads.
         r = subprocess.run([sys.executable, str(ROOT / "tools/premerge.py"), "--bot", "bot/board", "HEAD", "HEAD"],
                            cwd=self.r, capture_output=True, text=True)

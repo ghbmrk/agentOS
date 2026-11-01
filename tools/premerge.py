@@ -65,6 +65,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 
 # By path: the workflow runs `python3 -I`, which keeps tools/ off sys.path.
 _spec = importlib.util.spec_from_file_location("risk_tier", pathlib.Path(__file__).resolve().parent / "risk_tier.py")
@@ -233,13 +234,15 @@ def bot_outside(cwd, ref, head="HEAD", base="origin/main"):
 def bot_unproven(cwd, ref, run, output, head="HEAD", base="origin/main"):
     """Why `head`'s copy of bot `ref`'s file is not proven the bot's, or None when it is (MAIN-PROT-3, #757).
 
-    Proven: `run` (Actions API JSON) is a run of the bot's workflow file, on a main trigger, in its own repository,
+    Proven: `run` (Actions API JSON) is a first attempt of the bot's workflow file, on a main trigger, in its own repository,
     at a commit `base` contains, so the code that made the output is reviewed; and `output` (that run's artifact
     zip) holds exactly the one file, byte-equal to the head's. A run's artifacts come only from its own jobs."""
     name, _, workflow = BOT[ref]
     repo = (run.get("repository") or {}).get("full_name")
-    if run.get("path") != workflow or run.get("event") not in BOT_EVENTS or not repo or \
-            (run.get("head_repository") or {}).get("full_name") != repo:
+    # Attempt 1 only: a rerun of an old main run would upload a fresh artifact of that old output (#4504 Security).
+    attempt = run.get("run_attempt")
+    if run.get("path") != workflow or run.get("event") not in BOT_EVENTS or type(attempt) is not int or attempt != 1 or \
+            not repo or (run.get("head_repository") or {}).get("full_name") != repo:
         return "run"
     sha = run.get("head_sha")
     if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha) or \
@@ -252,7 +255,7 @@ def bot_unproven(cwd, ref, run, output, head="HEAD", base="origin/main"):
             # Sizes first, so a large or bomb entry is never inflated.
             if [i.filename for i in infos] != [name] or infos[0].file_size != len(want) or z.read(infos[0]) != want:
                 return "output"
-    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError, ValueError):
+    except (OSError, EOFError, zlib.error, zipfile.BadZipFile, RuntimeError, NotImplementedError, ValueError):
         return "output"
     return None
 
@@ -600,7 +603,10 @@ def main(argv):
             return 2
         ref, args = args[1], args[2:]
         run = output = None
-        while args[:1] in (["--run"], ["--output"], ["--base"]) and len(args) > 1:
+        while args[:1] in (["--run"], ["--output"], ["--base"]):
+            if len(args) < 2:
+                print(__doc__)
+                return 2
             if args[0] == "--run":
                 run = args[1]
             elif args[0] == "--output":
