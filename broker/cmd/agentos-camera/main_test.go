@@ -662,7 +662,7 @@ func toStrings(v any) []string {
 }
 
 func TestParse(t *testing.T) {
-	good := []string{"-dir", "/d", "-owner-sock", "/s", "-owner-uid", "0", "-runsc", "/r", "-runsc-root", "/rr", "-decode-root", "/dr", "-cgroup", "/c"}
+	good := []string{"-dir", "/d", "-owner-sock", "/s", "-owner-uid", "0", "-decoder", "/run/agentos-camdecode/conn.sock"}
 	if _, err := parse(good, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
