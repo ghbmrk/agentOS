@@ -31,19 +31,25 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e", "trace=open,openat,openat2,bind", "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
 SERIAL = {}
-# Modules run as N shards at once. test_image alone took 741 s of the 742 s step (#4331).
+# Modules run as N shards at once. test_image alone took 741 s of the 742 s step (#4331); its
+# shards took 167 to 441 s on #4335's first run, before SLOW_TESTS had CI times.
 SPLIT = {"test_image": 4}
 # A split module's tests that take far longer than the rest, in seconds, so that assign spreads
-# them over the shards (measured in a shard's "Slowest test durations"); any other takes DEFAULT_TEST.
-SLOW_TESTS = {"test_image.DiffOracleTest.test_allowlist_coverage_fails_on_a_harmful_group": 92,
-              "test_image.DiffOracleTest.test_oracles_fail_when_their_subject_is_broken": 76,
-              "test_image.TmpfilesDiffTest.test_passed_lines_change_nothing_guarded": 44,
-              "test_image.TmpfilesTest.test_review_probes_are_refused": 20,
-              "test_image.ConfFilesTest.test_a_link_through_what_the_box_mounts_is_refused": 12}
+# them over the shards (CI seconds, from the shards' "Slowest test durations" on #4335); any
+# other takes DEFAULT_TEST.
+SLOW_TESTS = {"test_image.ReferenceDiffsRanTest.test_no_reference_diff_skips": 237,
+              "test_image.DiffOracleTest.test_allowlist_coverage_fails_on_a_harmful_group": 191,
+              "test_image.KmodDiffTest.test_reader_matches_kmod": 159,
+              "test_image.DiffOracleTest.test_oracles_fail_when_their_subject_is_broken": 149,
+              "test_image.TmpfilesDiffTest.test_passed_lines_change_nothing_guarded": 88,
+              "test_image.TmpfilesTest.test_review_probes_are_refused": 40,
+              "test_image.ConfFilesTest.test_a_link_through_what_the_box_mounts_is_refused": 19,
+              "test_image.ConfFilesTest.test_a_link_into_a_service_users_directory_is_refused": 14}
 DEFAULT_TEST = 0.5
-# Seconds per module on the CI runner (checks job of #4308, 2026-10-31), for ordering only: a
-# module not listed starts after these, biggest file first. A shard is its module's time over n.
-SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice": 101,
+# Seconds per module on the CI runner (checks job of #4308; test_image is its shards' sum on
+# #4335, 2026-10-31), for ordering only: a module not listed starts after these, biggest file
+# first. A shard is its module's time over n.
+SECONDS = {"test_image": 1137, "test_image_keeper": 169, "test_slice_inbox_slice": 101,
            "test_image_noexec": 82, "test_premerge": 51, "test_slice_boot": 46,
            "test_image_drivers": 31, "test_image_imapconn": 22, "test_boot_net": 19,
            "test_mutgate": 15, "test_trusted_base": 15, "test_root_tests": 14,
