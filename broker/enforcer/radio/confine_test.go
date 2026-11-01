@@ -258,7 +258,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		return got
 	}
 
-	t.Run("confined", func(t *testing.T) {
+	confinedProbe := func(t *testing.T, p confine.Profile) {
 		f, err := syscall.Open(policy, syscall.O_RDONLY, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -268,7 +268,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		syscall.Close(f)
 		defer syscall.Close(leakedFD)
-		proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
+		proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
 		if err != nil {
 			t.Fatal(err)
@@ -291,7 +291,18 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		if got["interfaces"] != "lo" {
 			t.Errorf("the stack sees interfaces %q, want lo only", got["interfaces"])
 		}
-	})
+	}
+	// The view alone hides the policy and the page (ENOENT), so the
+	// stack's user is checked as a barrier of its own, without a view,
+	// as the stacks that have none (#4369) rely on it.
+	userOnly := confine.BLE(4242, 4242)
+	userOnly.View = nil
+	for _, c := range []struct {
+		name string
+		p    confine.Profile
+	}{{"confined", bleProbe(4242)}, {"confined by its user alone", userOnly}} {
+		t.Run(c.name, func(t *testing.T) { confinedProbe(t, c.p) })
+	}
 
 	t.Run("unconfined control", func(t *testing.T) {
 		fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
