@@ -246,10 +246,12 @@ func TestRefusedRequestsNeverReachTheDriver(t *testing.T) {
 }
 
 func TestGateForwardsOnlyTheCanonicalRequest(t *testing.T) {
-	h := newHarness(t, nil, "", 0)
+	h := newHarness(t, map[string]any{"snapshot": map[string]any{"ok": true, "url": "https://shop.example.test/",
+		"snapshot": `- textbox "Search" [ref=e3]`}}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
 	h.do(t, `{"text":"kettle","verb":"type","v":0,"ref":"e3"}`)
 	got := h.received(t)
-	if len(got) != 1 || got[0] != `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":false}` {
+	if len(got) != 2 || got[1] != `{"v":0,"verb":"type","ref":"e3","text":"kettle","submit":false}` {
 		t.Fatalf("driver received %v", got)
 	}
 }
@@ -961,7 +963,7 @@ func TestADriverThatStopsReadingIsStopped(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { g.Close() })
-	g.refs = map[string]link{"e1": {role: "textbox", name: "Note"}}
+	g.refs, g.page = map[string]link{"e1": {role: "textbox", name: "Note"}}, "https://shop.example.test/"
 	line := []byte(`{"v":0,"verb":"type","ref":"e1","text":"` + strings.Repeat("n", 2000) + `"}`)
 	done := make(chan Result, 1)
 	go func() {

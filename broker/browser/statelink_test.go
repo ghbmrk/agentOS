@@ -178,6 +178,38 @@ func TestRefFromAnEarlierPageIsRefused(t *testing.T) {
 	}
 }
 
+// K16 (#4410 Security): a URL change within one document (a fragment, or a
+// router's pushState) clears the gate's refs while the driver still
+// resolves them. Typing or selecting on such a ref would be judged without
+// the screen's field and heading names, so a task approval could cover a
+// submit into "New password"; the gate refuses it like a click.
+func TestTypeOnARefTheGateNoLongerHoldsIsRefused(t *testing.T) {
+	page := "- main [ref=e1]:\n  - heading \"Change password\" [ref=e2]\n  - textbox \"New password\" [ref=e5]\n  - combobox \"Reminder\" [ref=e6]"
+	h := newHarness(t, map[string]any{"snapshot": shopReply("/account", page),
+		"navigate": map[string]any{"ok": true, "url": "https://shop.example.test/account#tips"}}, "", 0)
+	h.do(t, `{"v":0,"verb":"snapshot"}`)
+	// On the snapshot's own page the screen's names make it ask.
+	r, _, _ := h.g.do(context.Background(), []byte(`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1","submit":true}`), fixed(cover{"example.test"}))
+	if r.Error != "approval_required" || r.Approval == nil || r.Approval.Secret == "" {
+		t.Fatalf("type on the snapshot's page: %+v", r)
+	}
+	h.do(t, `{"v":0,"verb":"navigate","url":"https://shop.example.test/account#tips"}`)
+	for _, raw := range []string{
+		`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1","submit":true}`,
+		`{"v":0,"verb":"type","ref":"e5","text":"zq-synth-1"}`,
+		`{"v":0,"verb":"select","ref":"e6","option":"never"}`,
+	} {
+		if r, _, _ := h.g.do(context.Background(), []byte(raw), fixed(cover{"example.test"})); r.Error != "unknown_ref" {
+			t.Fatalf("%s after the URL changed: %+v", raw, r)
+		}
+	}
+	for _, verb := range []string{"type", "select"} {
+		if got := forwarded(t, h, verb); len(got) != 0 {
+			t.Fatalf("driver got %q", got)
+		}
+	}
+}
+
 // K16: the driver snapshots again inside a screenshot, so its refs are
 // then those of its own look, not the agent's last snapshot. The gate keeps
 // the refs of its own snapshot after the shot, or none when the shot fails.

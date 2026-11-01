@@ -40,6 +40,6 @@ Credentialed browser executor in the broker (plan P2 item 6; CRED-4, CRED-6): S5
 
 **Scope:** `broker/browser/gate.go`, `broker/browser/gate_test.go`, `broker/browser/statelink_test.go`, `broker/browser/fixture_test.go`, `broker/browser/ASSUMPTIONS.md`, this brief.
 
-**Change:** a reply without a snapshot from another URL, or naming none, and every screenshot reply leave the gate no refs until the next snapshot; the test driver stays on its page like the real one ([assumptions](../broker/browser/ASSUMPTIONS.md) K16).
+**Change:** a reply without a snapshot from another URL, or naming none, and every screenshot reply leave the gate no refs until the next snapshot, and every verb on a ref the gate does not hold is refused with `unknown_ref`; the test driver stays on its page like the real one ([assumptions](../broker/browser/ASSUMPTIONS.md) K16).
 
-**Acceptance tests:** `TestRefFromAnEarlierPageIsRefused`, `TestRefsAfterAScreenshotAreTheDriversLast` (`broker/browser/statelink_test.go`), `TestFixtureRefsFollowTheDriversDocument` (`broker/browser/fixture_test.go`, real driver), and every existing gate test.
+**Acceptance tests:** `TestRefFromAnEarlierPageIsRefused`, `TestTypeOnARefTheGateNoLongerHoldsIsRefused`, `TestRefsAfterAScreenshotAreTheDriversLast` (`broker/browser/statelink_test.go`), `TestFixtureRefsFollowTheDriversDocument` (`broker/browser/fixture_test.go`, real driver), and every existing gate test.

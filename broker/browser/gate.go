@@ -467,6 +467,13 @@ func (g *Gate) judge(raw []byte) (req Request, l link, effect, need bool, refuse
 	if req.Verb == "navigate" && !g.origins.Declared(req.URL) {
 		return req, l, false, false, &Result{Error: "off_origin", Detail: "not a declared origin; use an uncredentialed context"}
 	}
+	if _, ok := g.refs[req.Ref]; req.Ref != "" && !ok {
+		// Every verb on a ref is judged from what the gate saw of it (its
+		// target, the screen's field and heading names), so a ref the gate
+		// does not hold, never shown or cleared with its page (K16), is
+		// refused whatever the verb.
+		return req, l, false, false, &Result{Error: "unknown_ref", Detail: "ref not in the last snapshot; take a new snapshot"}
+	}
 	l, effect, refused = g.judgeClosed(req)
 	need = effect
 	if refused == nil && g.cfg.LoggedOut {
