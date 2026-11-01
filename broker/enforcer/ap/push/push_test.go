@@ -50,6 +50,7 @@ type fakeAP struct {
 	readFails  map[string]bool // reads of these paths print the file, then exit 1
 	failReload int             // the next this many reloads fail
 	failClaim  bool            // claims fail, as on an access point without flock
+	supersede  bool            // a late claim lands right after each claim
 
 	// newest is the login number of the newest connection that has run
 	// a command; interleaved is set when an older one runs a command
@@ -221,12 +222,16 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		}
 		f.token = tok
 		f.events = append(f.events, fmt.Sprint("claim ", login))
+		if f.supersede {
+			f.token = token()
+			f.events = append(f.events, "late claim")
+		}
 		return 0
 	case tok != "" && cmd == applyCmd(tok):
 		defer lock()()
 		if stale() {
 			f.event(fmt.Sprint("refused ", login, " reload"))
-			return 1
+			return refusedExit
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -282,7 +287,7 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 		}
 		if stale() {
 			f.event(fmt.Sprint("refused ", login, " ", p))
-			return 1
+			return refusedExit
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -728,7 +733,7 @@ func revoked() []ap.File {
 // client has gone. The next Sync writes the config without that password.
 // When the old write then runs, it finds the newer claim and does
 // nothing, so the revoked password stays out. Catches a late write of a
-// timed-out Sync putting back an older config (ENF-g-8, #4313).
+// timed-out Sync putting back an older config (ENF-g-10, #4313).
 func TestLateWriteOfTimedOutSyncRefused(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
@@ -762,7 +767,7 @@ func TestLateWriteOfTimedOutSyncRefused(t *testing.T) {
 // holds the access point's lock. The next Sync's claim waits for that
 // write to end, so the old write and every command of the new Sync run
 // one after the other, and the new Sync's write lands last. Catches two
-// Syncs' writes sharing a temporary file at once (ENF-g-8, #4313).
+// Syncs' writes sharing a temporary file at once (ENF-g-10, #4313).
 func TestSlowWriteEndsBeforeNextClaim(t *testing.T) {
 	me := enforcerKey(t)
 	f := newFakeAP(t, me.PublicKey())
@@ -845,12 +850,15 @@ func TestCommandsTakeTheLock(t *testing.T) {
 	for _, p := range ap.Paths {
 		c := writeCmd(p, tok, []byte("x"))
 		read, move, ok := strings.Cut(c, " && { flock -x 9 && "+owns(tok)+" && mv -f "+tmpPath(p, tok)+" "+p+"; } 9>"+lockPath)
-		if !ok || strings.Contains(read, "flock") || !strings.HasPrefix(read, "umask 077 && cat > "+tmpPath(p, tok)+" && ") || move != " || { rm -f "+tmpPath(p, tok)+"; false; }" {
+		if !ok || strings.Contains(read, "flock") || !strings.HasPrefix(read, "umask 077 && cat > "+tmpPath(p, tok)+" && ") || move != " || { s=$?; rm -f "+tmpPath(p, tok)+"; exit $s; }" {
 			t.Errorf("write does not read unlocked and move under the lock with the token checked: %q", c)
 		}
 	}
-	if !strings.Contains(applyCmd(tok), "reload_config 9>&-;") {
-		t.Errorf("reload keeps the lock's descriptor: %q", applyCmd(tok))
+	if !strings.HasSuffix(applyCmd(tok), " && timeout 20 reload_config 9>&- </dev/null >/dev/null 2>&1; } 9>"+lockPath) {
+		t.Errorf("reload is unbounded or keeps the lock's descriptor or the session's output: %q", applyCmd(tok))
+	}
+	if reloadBound != 20*time.Second {
+		t.Errorf("reloadBound %v is not the bound the command carries", reloadBound)
 	}
 }
 
@@ -876,5 +884,56 @@ func TestEndlessStdinHoldsNothing(t *testing.T) {
 	}
 	if got := f.get(ap.PathWireless); !bytes.Equal(got, config()[1].Data) {
 		t.Fatalf("wireless holds %q", got)
+	}
+}
+
+// TestSupersededSyncReportsIt: a Sync whose claim a later one replaced
+// (the claim of an earlier Sync that timed out waiting for the lock,
+// landing late) has its write, or with nothing to write its reload,
+// refused, and Sync returns ErrSuperseded, which no other failure
+// returns, so slice l's report can say the Sync is retried at the next
+// tick. A refused write ends the Sync: nothing more is sent. Catches a
+// refusal that reads like a failed write.
+func TestSupersededSyncReportsIt(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	f.mu.Lock()
+	f.supersede = true
+	f.mu.Unlock()
+	res, err := p.Sync(context.Background(), config())
+	if !errors.Is(err, ErrSuperseded) || res.Applied {
+		t.Fatalf("drifted sync: %+v %v", res, err)
+	}
+	f.mu.Lock()
+	ev := slices.Clone(f.events)
+	f.mu.Unlock()
+	if want := []string{"claim 1", "late claim", "refused 1 " + config()[0].Path}; !slices.Equal(ev, want) {
+		t.Fatalf("events %q, want %q", ev, want)
+	}
+	f.mu.Lock()
+	f.supersede = false
+	f.mu.Unlock()
+	if _, err := p.Sync(context.Background(), config()); err != nil {
+		t.Fatalf("next sync: %v", err)
+	}
+	f.mu.Lock()
+	f.supersede = true
+	f.mu.Unlock()
+	if _, err := p.Sync(context.Background(), config()); !errors.Is(err, ErrSuperseded) || !strings.Contains(err.Error(), "reload") {
+		t.Fatalf("in-sync sync: %v", err)
+	}
+	for name, fail := range map[string]func(){
+		"write":  func() { f.failWrite = map[string]bool{config()[0].Path: true} },
+		"reload": func() { f.failReload = 1 },
+		"claim":  func() { f.failClaim = true },
+	} {
+		g := newFakeAP(t, me.PublicKey())
+		f = g
+		fail()
+		q := &Pusher{Addr: g.addr, HostKey: g.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+		if _, err := q.Sync(context.Background(), config()); err == nil || errors.Is(err, ErrSuperseded) {
+			t.Errorf("failed %s: %v", name, err)
+		}
 	}
 }
