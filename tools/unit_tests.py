@@ -3,21 +3,28 @@
 
 ci.yml's unit-test step. Each module runs as `python -m unittest discover -s tests -p <module>.py
 -v` under `strace -f -y`, which writes <dir>/<module>.trace for tests/records_audit.py
-(CI-PATHS) and tests/clash_audit.py; only the number running at a time changes. A module in
-SPLIT runs as that many shards at once, each with about an equal share of the module's expected
-time (SLOW_TESTS) and its own <module>@<k>.trace. A unit's output is buffered and printed whole,
-in name order, so logs do not interleave; a line per finished unit shows progress meanwhile.
-The longest units start first (SECONDS, then file size), and the step prints each unit's wall
-time and the critical path: the worker that finished last and what it ran.
-Exit 1 if any unit failed or did not run, or if the longest unit is more than LONG_POLE times
-the step's ideal time (all units' time over the jobs): that one unit then sets the step's
-length, so split it (SPLIT). A module listed in SERIAL runs alone after the pool drains: one
-that cannot share the runner with another module goes there, with its reason.
+(CI-PATHS) and tests/clash_audit.py (CI-par-clash); only the number running at a time
+changes. A module's output is buffered and printed whole, in name order, so logs do not
+interleave; a line per finished module shows progress meanwhile. The longest modules start
+first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
+modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
+Exit 1 if any module failed or did not run, or if the longest module runs over FLOOR seconds and
+over LONG_POLE times the ideal: that one module then sets the step's length, so split it
+(SPLIT). A module listed in SERIAL runs alone after the pool drains: one that cannot share the
+runner with another module goes there, with its reason.
+A module listed in SPLIT runs as `unit_tests.py --split <module>` under the same strace: that one
+process forks worker processes, each taking the next test from a shared counter, so the module's
+slowest test, not the module, sets the step's floor (CI-par-3). The trace is still one tree whose
+first process exits after every worker, as tests/records_audit.py requires.
 
     python3 tools/unit_tests.py TRACE_DIR [--jobs N]
+    python3 tools/unit_tests.py --split MODULE [--workers N]   (run from the repository root)
 """
 import argparse
 import concurrent.futures
+import io
+import multiprocessing
+import multiprocessing.connection
 import os
 import pathlib
 import subprocess
@@ -28,101 +35,120 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 # bind: a fixed port or socket name shared by two modules is a clash (tests/clash_audit.py).
-STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e", "trace=open,openat,openat2,bind", "-e", "signal=none"]
+STRACE = ["strace", "-f", "--seccomp-bpf", "-q", "-y", "-e", "trace=open,openat,openat2,bind",
+          "-e", "signal=none"]
 # Modules that must not overlap another module, with why. Empty until a clash is seen.
 SERIAL = {}
-# Modules run as N shards at once. test_image alone took 741 s of the 742 s step (#4331); its
-# shards took 167 to 441 s on #4335's first run, before SLOW_TESTS had CI times.
-SPLIT = {"test_image": 4}
-# A split module's tests that take far longer than the rest, in seconds, so that assign spreads
-# them over the shards (CI seconds, from the shards' "Slowest test durations" on #4335); any
-# other takes DEFAULT_TEST.
-SLOW_TESTS = {"test_image.ReferenceDiffsRanTest.test_no_reference_diff_skips": 237,
-              "test_image.DiffOracleTest.test_allowlist_coverage_fails_on_a_harmful_group": 191,
-              "test_image.KmodDiffTest.test_reader_matches_kmod": 159,
-              "test_image.DiffOracleTest.test_oracles_fail_when_their_subject_is_broken": 149,
-              "test_image.TmpfilesDiffTest.test_passed_lines_change_nothing_guarded": 88,
-              "test_image.TmpfilesTest.test_review_probes_are_refused": 40,
-              "test_image.ConfFilesTest.test_a_link_through_what_the_box_mounts_is_refused": 19,
-              "test_image.ConfFilesTest.test_a_link_into_a_service_users_directory_is_refused": 14}
-DEFAULT_TEST = 0.5
-# Seconds per module on the CI runner (checks job of #4308; test_image is its shards' sum on
-# #4335, 2026-10-31), for ordering only: a module not listed starts after these, biggest file
-# first. A shard is its module's time over n.
-SECONDS = {"test_image": 1137, "test_image_keeper": 169, "test_slice_inbox_slice": 101,
+# Modules whose tests run across workers inside their one strace tree (CI-par-3), with why.
+SPLIT = {"test_image": "about 10 min on a shared runner; one class is 45% of it, so it splits by test (#4332)"}
+# Seconds per module on the CI runner (checks job of #4308, 2026-10-31), for ordering only: a
+# module not listed starts after these, biggest file first.
+SECONDS = {"test_image": 741, "test_image_keeper": 169, "test_slice_inbox_slice": 101,
            "test_image_noexec": 82, "test_premerge": 51, "test_slice_boot": 46,
            "test_image_drivers": 31, "test_image_imapconn": 22, "test_boot_net": 19,
            "test_mutgate": 15, "test_trusted_base": 15, "test_root_tests": 14,
            "test_risk_tier_custody": 13, "test_fuzzrun": 12, "test_require_ran": 11}
 # git status and diff refresh the worktree's index under .git/index.lock as a side effect; two
-# units doing so at once in the shared worktree is a clash (tests/clash_audit.py). Without the
+# modules doing so at once in the shared worktree is a clash (tests/clash_audit.py). Without the
 # optional lock, any write left there is a git command that changes the index: a real clash.
 ENV = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
 LONG_POLE = 1.25
-FLOOR = 60  # seconds: a unit shorter than this never fails the long-pole check
+FLOOR = 60  # seconds: a module shorter than this never fails the long-pole check
 
 
 def modules(root=ROOT):
     return sorted(p.stem for p in (root / "tests").glob("test*.py"))
 
 
-def units(names):
-    """The units the pool runs: a module, or its shards `<module>@<k>` for k in 1..SPLIT[module]."""
-    return [u for m in names for u in ([f"{m}@{k}" for k in range(1, SPLIT[m] + 1)] if m in SPLIT else [m])]
-
-
-def module_of(unit):
-    return unit.split("@")[0]
-
-
-def command(unit, trace_dir):
-    module, _, k = unit.partition("@")
-    if k:
-        run = [sys.executable, str(ROOT / "tools" / "unit_tests.py"), "--shard", f"{k}/{SPLIT[module]}", module]
+def command(module, trace_dir, workers=None):
+    if module in SPLIT:
+        run = [sys.executable, str(pathlib.Path(__file__).resolve()), "--split", module,
+               "--workers", str(workers or os.cpu_count() or 1)]
     else:
         run = [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", f"{module}.py", "-v"]
-    return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{unit}.trace"), *run]
+    return [*STRACE, "-o", str(pathlib.Path(trace_dir) / f"{module}.trace"), *run]
 
 
-def flatten(suite):
+class _Claimed(unittest.TestSuite):
+    """The tests this worker claims, one at a time, from a counter all workers share. TestSuite.run
+    still sets up and tears down each class and module around the tests it is handed."""
+    _cleanup = False  # run() would otherwise blank _tests[index], which this suite does not hold
+
+    def __init__(self, tests, counter, ran):
+        super().__init__()
+        self.all, self.counter, self.ran = tests, counter, ran
+
+    def __iter__(self):
+        while True:
+            with self.counter.get_lock():
+                i = self.counter.value
+                self.counter.value += 1
+            if i >= len(self.all):
+                return
+            self.ran.append(i)
+            yield self.all[i]
+
+
+def _flatten(suite):
     for t in suite:
         if isinstance(t, unittest.TestSuite):
-            yield from flatten(t)
+            yield from _flatten(t)
         else:
             yield t
 
 
-def assign(ids, n):
-    """Split test ids into n shards of about equal expected time: longest first (SLOW_TESTS,
-    else DEFAULT_TEST seconds), each to the least-loaded shard. Each shard keeps load order. The
-    same ids give the same split in every process, so the shards together run each test once."""
-    load = [0.0] * n
-    out = [[] for _ in range(n)]
-    for i in sorted(range(len(ids)), key=lambda i: (-SLOW_TESTS.get(ids[i], DEFAULT_TEST), i)):
-        s = min(range(n), key=lambda s: (load[s], s))
-        out[s].append(i)
-        load[s] += SLOW_TESTS.get(ids[i], DEFAULT_TEST)
-    return [[ids[i] for i in sorted(shard)] for shard in out]
+def _worker(tests, counter, conn):
+    out, ran = io.StringIO(), []
+    ok = unittest.TextTestRunner(stream=out, verbosity=2).run(_Claimed(tests, counter, ran)).wasSuccessful()
+    conn.send((ran, ok, out.getvalue()))
+    conn.close()
 
 
-def shard(module, k, n):
-    """Run shard k (1..n) of module (its tests as assign splits them), as `python -m unittest
-    discover -s tests -p <module>.py -v` would load and run them, with its slowest tests' times."""
-    sys.path[0] = os.getcwd()  # as under -m, not this file's directory
-    tests = list(flatten(unittest.defaultTestLoader.discover("tests", pattern=f"{module}.py")))
-    ids = [t.id() for t in tests]
-    want = set(assign(ids, n)[k - 1])
-    mine = [t for t in tests if t.id() in want]
-    print(f"shard {k}/{n} of {module}: {len(mine)} of {len(tests)} tests", file=sys.stderr)
-    result = unittest.TextTestRunner(verbosity=2, warnings="default", durations=10).run(unittest.TestSuite(mine))
-    return 0 if mine and result.wasSuccessful() else 1
+def split(module, workers, write=sys.stdout.write):
+    """Run tests/<module>.py, loaded as `unittest discover -s tests` loads it, across `workers`
+    forked processes. 0 only if every test ran exactly once and passed."""
+    tests = list(_flatten(unittest.defaultTestLoader.discover("tests", pattern=f"{module}.py")))
+    if not tests:
+        write(f"{module}: no tests found\n")
+        return 1
+    ctx = multiprocessing.get_context("fork")  # workers inherit the loaded tests
+    counter = ctx.Value("q", 0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    procs = {}
+    for _ in range(max(1, min(workers, len(tests)))):
+        recv, send = ctx.Pipe(duplex=False)
+        p = ctx.Process(target=_worker, args=(tests, counter, send))
+        p.start()
+        send.close()
+        procs[recv] = p
+    got = {}
+    pending = list(procs)
+    while pending:
+        for conn in multiprocessing.connection.wait(pending):
+            pending.remove(conn)
+            try:
+                got[conn] = conn.recv()
+            except EOFError:  # the worker died before it reported
+                pass
+    for p in procs.values():
+        p.join()
+    lost = sum(1 for conn, p in procs.items() if conn not in got or p.exitcode != 0)
+    reports = list(got.values())
+    ran = sorted(i for r in reports for i in r[0])
+    for k, (_, _, out) in enumerate(reports, 1):
+        write(f"--- {module} worker {k} of {len(procs)} ---\n{out}")
+    missing = len(tests) - len(set(ran))
+    write(f"{module}: {len(ran)} of {len(tests)} tests run across {len(procs)} workers"
+          f"{f', {lost} worker(s) lost' if lost else ''}{f', {missing} not run' if missing else ''}\n")
+    return 0 if not lost and ran == list(range(len(tests))) and all(r[1] for r in reports) else 1
 
 
-def run_one(unit, trace_dir, root=ROOT):
+def run_one(module, trace_dir, root=ROOT):
     start = time.monotonic()
-    p = subprocess.run(command(unit, trace_dir), cwd=root, stdin=subprocess.DEVNULL, env=ENV,
+    p = subprocess.run(command(module, trace_dir), cwd=root, stdin=subprocess.DEVNULL, env=ENV,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return unit, p.returncode, time.monotonic() - start, p.stdout.decode("utf-8", "replace")
+    return module, p.returncode, time.monotonic() - start, p.stdout.decode("utf-8", "replace")
 
 
 def size(module, root=ROOT):
@@ -132,78 +158,71 @@ def size(module, root=ROOT):
         return 0
 
 
-def expected(unit):
-    m = module_of(unit)
-    return SECONDS.get(m, 0) / SPLIT.get(m, 1)
-
-
 def run(names, trace_dir, jobs, runner=run_one, progress=lambda line: print(line, end="", flush=True),
         lanes=None):
-    """Run names' units (SERIAL ones last, one at a time) and return {unit: (rc, seconds, output)}.
-    lanes, if given, gets [(worker, unit)] in finishing order."""
-    all_units = units(names)
-    pooled = sorted((u for u in all_units if module_of(u) not in SERIAL), key=lambda u: (-expected(u), -size(module_of(u)), u))
+    """Run names (SERIAL ones last, one at a time) and return {module: (rc, seconds, output)}.
+    lanes, if given, gets [(worker, module)] in finishing order."""
+    pooled = sorted((m for m in names if m not in SERIAL), key=lambda m: (-SECONDS.get(m, 0), -size(m), m))
     results = {}
     lock = threading.Lock()
     lanes = [] if lanes is None else lanes
 
-    def done(unit, rc, secs, out, lane):
+    def done(module, rc, secs, out, lane):
         with lock:
-            results[unit] = (rc, secs, out)
-            lanes.append((lane, unit))
-            progress(f"{len(results)}/{len(all_units)} {unit} {'ok' if rc == 0 else 'FAILED'} {secs:.0f}s\n")
+            results[module] = (rc, secs, out)
+            lanes.append((lane, module))
+            progress(f"{len(results)}/{len(names)} {module} {'ok' if rc == 0 else 'FAILED'} {secs:.0f}s\n")
 
-    def pooled_run(unit):
-        done(*runner(unit, trace_dir), threading.current_thread().name)
+    def pooled_run(module):
+        done(*runner(module, trace_dir), threading.current_thread().name)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
-        for f in concurrent.futures.as_completed([pool.submit(pooled_run, u) for u in pooled]):
+        for f in concurrent.futures.as_completed([pool.submit(pooled_run, m) for m in pooled]):
             f.result()
-    for u in all_units:
-        if module_of(u) in SERIAL:
-            done(*runner(u, trace_dir), "serial")
+    for m in names:
+        if m in SERIAL:
+            done(*runner(m, trace_dir), "serial")
     return results
 
 
 def critical_path(results, lanes):
-    """The pool worker whose units took longest in all, then the SERIAL units: [(unit, seconds)]."""
+    """The pool worker whose modules took longest in all, then the SERIAL ones: [(module, seconds)]."""
     per = {}
-    for lane, unit in lanes:
+    for lane, m in lanes:
         if lane != "serial":
-            per.setdefault(lane, []).append(unit)
-    worst = max(per.values(), key=lambda us: sum(results[u][1] for u in us), default=[])
-    return [(u, results[u][1]) for u in worst + [u for lane, u in lanes if lane == "serial"]]
+            per.setdefault(lane, []).append(m)
+    worst = max(per.values(), key=lambda ms: sum(results[m][1] for m in ms), default=[])
+    return [(m, results[m][1]) for m in worst + [m for lane, m in lanes if lane == "serial"]]
 
 
 def long_pole(results, jobs):
-    """The longest unit if it is over LONG_POLE times the ideal step (all time over jobs) and over FLOOR."""
+    """The longest module if it is over LONG_POLE times the ideal step (all time over jobs) and over FLOOR."""
     if not results:
         return None
-    unit = max(results, key=lambda u: results[u][1])
-    secs = results[unit][1]
+    m = max(results, key=lambda m: results[m][1])
+    secs = results[m][1]
     ideal = sum(r[1] for r in results.values()) / max(1, jobs)
-    return (unit, secs, ideal) if secs > FLOOR and secs > LONG_POLE * ideal else None
+    return (m, secs, ideal) if secs > FLOOR and secs > LONG_POLE * ideal else None
 
 
 def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None):
-    expect = units(names)
-    failed = [u for u in expect if u not in results or results[u][0] != 0]
-    for u in expect:
-        rc, secs, out = results.get(u, (None, 0.0, "did not run\n"))
-        write(f"::group::{u} ({'ok' if rc == 0 else 'FAILED'}, {secs:.0f}s)\n{out}::endgroup::\n")
-    write("unit times, slowest first:\n")
-    for u in sorted(results, key=lambda u: -results[u][1]):
-        write(f"  {results[u][1]:7.1f}s  {u}{'  FAILED' if u in failed else ''}\n")
+    failed = [m for m in names if m not in results or results[m][0] != 0]
+    for m in names:
+        rc, secs, out = results.get(m, (None, 0.0, "did not run\n"))
+        write(f"::group::{m} ({'ok' if rc == 0 else 'FAILED'}, {secs:.0f}s)\n{out}::endgroup::\n")
+    write("module times, slowest first:\n")
+    for m in sorted(results, key=lambda m: -results[m][1]):
+        write(f"  {results[m][1]:7.1f}s  {m}{'  FAILED' if m in failed else ''}\n")
     total = sum(r[1] for r in results.values())
     path = critical_path(results, lanes)
     write(f"{total:.0f}s of tests over {jobs} jobs: {total / max(1, jobs):.0f}s ideal"
           + (f", {wall:.0f}s wall" if wall is not None else "") + "\n")
-    write(f"critical path {sum(s for _, s in path):.0f}s: " + ", ".join(f"{u} {s:.0f}s" for u, s in path) + "\n")
-    for u in failed:
-        write(f"::error::{u} failed\n")
+    write(f"critical path {sum(s for _, s in path):.0f}s: " + ", ".join(f"{m} {s:.0f}s" for m, s in path) + "\n")
+    for m in failed:
+        write(f"::error::{m} failed\n")
     pole = long_pole(results, jobs)
     if pole:
         write(f"::error::{pole[0]} took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s: "
-              f"split it into more shards (tools/unit_tests.py SPLIT)\n")
+              f"split it (tools/unit_tests.py SPLIT)\n")
     return 1 if failed or pole else 0
 
 
@@ -211,12 +230,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("trace_dir", nargs="?")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
-    ap.add_argument("--shard", nargs=2, metavar=("K/N", "MODULE"), help="run one shard (the pool's child)")
+    ap.add_argument("--split", metavar="MODULE", help="run one module's tests across --workers processes")
+    ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     args = ap.parse_args(argv)
-    if args.shard:
-        k, n = (int(x) for x in args.shard[0].split("/"))
-        return shard(args.shard[1], k, n)
-    if args.trace_dir is None:
+    if args.split:
+        return split(args.split, args.workers)
+    if not args.trace_dir:
         ap.error("TRACE_DIR is required")
     os.makedirs(args.trace_dir, exist_ok=True)
     names = modules()

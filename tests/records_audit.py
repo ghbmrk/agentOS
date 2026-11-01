@@ -11,8 +11,7 @@ counts as its target), a directory of records, or anything in the git object sto
 `show` and `cat-file` read records from there). The module is the unit: a read at import, in a
 fixture, or cached by one test and used by another is covered alike. A module with no trace, or
 whose trace does not show its own file opened and the top process exiting (tracing did not run
-or was cut short), fails too; a module run in shards (tools/unit_tests.py SPLIT) is read from
-every shard's trace, and each must show both.
+or was cut short), fails too.
 Not seen: a stat or existence check that opens nothing; a hard link to a record; an io_uring
 open or open_by_handle_at; a read by a process outside the tree that a test talks to (a daemon).
 """
@@ -21,9 +20,6 @@ import re
 import sys
 
 import importlib.util
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), os.pardir, "tools"))
-import unit_tests  # noqa: E402  (which modules run as shards, each with its own trace)
 
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 TESTS = os.path.join(ROOT, "tests")
@@ -121,19 +117,16 @@ def finished(trace):
 
 
 def problems(traces, listed, is_record=None):
-    """traces: {module stem: strace text, or a list of them, one per shard}, one per tests/test*.py
-    module. Each shard's trace must show the module opened and its run exiting; reads are pooled."""
+    """traces: {module stem: strace text}, one per tests/test*.py module."""
     is_record = is_record or _is_record()
     out = []
-    for stem, texts in sorted(traces.items()):
-        texts = [texts] if isinstance(texts, str) else texts
-        each = [opened(t) for t in texts]
-        paths = set().union(*each)
-        if not texts or not all(any(rel == f"tests/{stem}.py" or re.fullmatch(rf"tests/__pycache__/{stem}\.[\w.-]+\.pyc", rel)
-                                    for rel, _ in p) for p in each):
+    for stem, trace in sorted(traces.items()):
+        paths = opened(trace)
+        if not any(rel == f"tests/{stem}.py" or re.fullmatch(rf"tests/__pycache__/{stem}\.[\w.-]+\.pyc", rel)
+                   for rel, _ in paths):
             out.append(f"tests.{stem}\tno open of the module's own file: tracing did not run")
             continue
-        if not all(finished(t) for t in texts):
+        if not finished(trace):
             out.append(f"tests.{stem}\tthe trace ends before the module's run exits: it was cut short")
             continue
         if f"tests.{stem}" in listed:
@@ -144,20 +137,16 @@ def problems(traces, listed, is_record=None):
     return out
 
 
-def read_trace(trace_dir, unit):
-    try:
-        with open(os.path.join(trace_dir, unit + ".trace"), errors="surrogateescape") as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
-
-
 def main(argv):
     traces = {}
     for name in sorted(os.listdir(TESTS)):
         if name.startswith("test") and name.endswith(".py"):
             stem = name[:-3]
-            traces[stem] = [read_trace(argv[1], u) for u in unit_tests.units([stem])]
+            try:
+                with open(os.path.join(argv[1], stem + ".trace"), errors="surrogateescape") as f:
+                    traces[stem] = f.read()
+            except FileNotFoundError:
+                traces[stem] = ""
     found = problems(traces, records_run_tests())
     for p in found:
         print(p)

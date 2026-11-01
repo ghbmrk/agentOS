@@ -1,12 +1,16 @@
 """tools/unit_tests.py: ci.yml's unit-test step runs modules in parallel, each traced alone (CI-par),
-split where one module would set the step's length, with no two units sharing a written path or a
-bound address (tests/clash_audit.py, CI-par-clash).
+longest first, failing when one module sets the step's length, with no two modules sharing a
+written path or a bound address (tests/clash_audit.py, CI-par-clash).
 
 REQ: CI-PATHS
 """
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -29,57 +33,15 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-o") + 2:],
                          [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_x.py", "-v"])
 
-    def test_a_split_module_runs_as_shards_each_into_its_own_trace(self):
-        with mock.patch.dict(unit_tests.SPLIT, {"test_x": 3}):
-            self.assertEqual(unit_tests.units(["test_a", "test_x"]), ["test_a", "test_x@1", "test_x@2", "test_x@3"])
-            cmd = unit_tests.command("test_x@2", "/r")
-        self.assertEqual(cmd[cmd.index("-o") + 1], "/r/test_x@2.trace")
-        self.assertEqual(cmd[cmd.index("-o") + 2:], [sys.executable, str(unit_tests.ROOT / "tools/unit_tests.py"),
-                                                     "--shard", "2/3", "test_x"])
-
-    def test_shards_split_the_expected_time_evenly_and_the_same_in_every_process(self):
-        ids = [f"m.C.test_{i}" for i in range(10)]
-        with mock.patch.dict(unit_tests.SLOW_TESTS, {"m.C.test_3": 9, "m.C.test_7": 8, "m.C.test_8": 2}, clear=True), \
-                mock.patch.object(unit_tests, "DEFAULT_TEST", 1):
-            shards = unit_tests.assign(ids, 3)
-            self.assertEqual(shards, unit_tests.assign(list(ids), 3))
-        self.assertEqual(sorted(sum(shards, [])), sorted(ids))
-        self.assertEqual(shards, [["m.C.test_3"], ["m.C.test_7", "m.C.test_9"],
-                                  ["m.C.test_0", "m.C.test_1", "m.C.test_2", "m.C.test_4", "m.C.test_5",
-                                   "m.C.test_6", "m.C.test_8"]])
-
-    def test_shards_together_run_each_test_of_the_module_once(self):
-        # Each shard loads the module as `unittest discover` does and runs its share.
-        ran = []
-
-        def fake_run(runner, suite):
-            ran.append([t.id() for t in unit_tests.flatten(suite)])
-            return mock.Mock(wasSuccessful=lambda: True)
-        whole = [t.id() for t in unit_tests.flatten(unittest.defaultTestLoader.discover(
-            str(unit_tests.ROOT / "tests"), pattern="test_unit_tests.py"))]
-        cwd = os.getcwd()
-        path0 = sys.path[0]
-        try:
-            os.chdir(unit_tests.ROOT)
-            with mock.patch.object(unittest.TextTestRunner, "run", fake_run), \
-                    mock.patch("sys.stderr", new=mock.Mock()):
-                for k in (1, 2, 3):
-                    self.assertEqual(unit_tests.shard("test_unit_tests", k, 3), 0)
-        finally:
-            os.chdir(cwd)
-            sys.path[0] = path0
-        self.assertEqual(sorted(sum(ran, [])), sorted(whole))
-        self.assertTrue(all(ran), ran)
-
-    def test_units_run_without_gits_optional_index_lock(self):
-        # git status/diff in the shared worktree would each write .git/index.lock (a clash).
-        self.assertEqual(unit_tests.ENV["GIT_OPTIONAL_LOCKS"], "0")
-
     def test_every_test_module_is_run(self):
         names = unit_tests.modules()
         files = sorted(p.stem for p in pathlib.Path(unit_tests.ROOT, "tests").glob("test*.py"))
         self.assertEqual(names, files)
         self.assertIn("test_unit_tests", names)
+
+    def test_modules_run_without_gits_optional_index_lock(self):
+        # git status/diff in the shared worktree would each write .git/index.lock (a clash).
+        self.assertEqual(unit_tests.ENV["GIT_OPTIONAL_LOCKS"], "0")
 
 
 class RunTest(unittest.TestCase):
@@ -119,18 +81,16 @@ class RunTest(unittest.TestCase):
         self.assertEqual(sorted(results), names)
         self.assertEqual(log[-1], ("test_b", 1))
 
-    def test_the_longest_units_start_first(self):
-        # Measured seconds first (a shard is its module's over n), then unmeasured by file size.
+    def test_the_longest_modules_start_first(self):
+        # Measured seconds first, then unmeasured modules by file size.
         log = []
         runner, _ = self.fake(log=log, delay=0)
         names = unit_tests.modules()
-        with mock.patch.dict(unit_tests.SECONDS, {"test_unit_tests": 100, "test_ci_scope": 30}, clear=True), \
-                mock.patch.dict(unit_tests.SPLIT, {"test_unit_tests": 4}, clear=True):
+        with mock.patch.dict(unit_tests.SECONDS, {"test_unit_tests": 100, "test_ci_scope": 30}, clear=True):
             unit_tests.run(names, "/r", 1, runner=runner, progress=lambda line: None)
         order = [m for m, _ in log]
-        self.assertEqual(order[:5], ["test_ci_scope", "test_unit_tests@1", "test_unit_tests@2",
-                                     "test_unit_tests@3", "test_unit_tests@4"])
-        self.assertEqual(order[5], max(set(names) - {"test_ci_scope", "test_unit_tests"}, key=unit_tests.size))
+        self.assertEqual(order[:2], ["test_unit_tests", "test_ci_scope"])
+        self.assertEqual(order[2], max(set(names) - {"test_ci_scope", "test_unit_tests"}, key=unit_tests.size))
 
     def test_a_failed_or_missing_module_fails_the_step(self):
         names = ["test_a", "test_b", "test_c"]
@@ -153,7 +113,7 @@ class RunTest(unittest.TestCase):
         self.assertLess(text.index("::group::test_a (FAILED, 5s)\na1\n::endgroup::"),
                         text.index("::group::test_b (ok, 2s)\nb1\nb2\n::endgroup::"))
 
-    def test_the_step_prints_each_unit_and_the_critical_path(self):
+    def test_the_step_prints_each_module_and_the_critical_path(self):
         results = {"test_a": (0, 50.0, ""), "test_b": (0, 30.0, ""), "test_c": (0, 30.0, ""), "test_s": (0, 5.0, "")}
         lanes = [("w0", "test_b"), ("w1", "test_c"), ("w0", "test_a"), ("serial", "test_s")]
         out = []
@@ -164,7 +124,7 @@ class RunTest(unittest.TestCase):
         self.assertIn("115s of tests over 2 jobs: 58s ideal, 86s wall\n", text)
         self.assertIn("critical path 85s: test_b 30s, test_a 50s, test_s 5s\n", text)
 
-    def test_one_unit_over_the_long_pole_share_fails_the_step(self):
+    def test_one_module_over_the_long_pole_share_fails_the_step(self):
         # 4 jobs, 400 s in all: ideal 100 s, so a 130 s unit is over 1.25 times it and fails.
         names = [f"test_{i}" for i in range(9)]
         base = {m: (0, 33.75, "") for m in names[1:]}
@@ -178,36 +138,112 @@ class RunTest(unittest.TestCase):
         small = {"test_0": (0, 50.0, ""), "test_1": (0, 1.0, "")}
         self.assertEqual(unit_tests.report(["test_0", "test_1"], small, [].append, jobs=4), 0)
 
-    def test_a_split_module_is_complete_only_with_every_shard(self):
-        names = ["test_x"]
-        ok = {f"test_x@{k}": (0, 1.0, "") for k in (1, 2)}
-        with mock.patch.dict(unit_tests.SPLIT, {"test_x": 2}):
-            self.assertEqual(unit_tests.report(names, ok, [].append), 0)
-            out = []
-            self.assertEqual(unit_tests.report(names, {"test_x@1": ok["test_x@1"]}, out.append), 1)
-        self.assertIn("::error::test_x@2 failed\n", out)
+
+def traced():
+    """Whether this process is already traced: a nested strace cannot attach (PTRACE_TRACEME)."""
+    try:
+        with open("/proc/self/status") as f:
+            return any(line.split()[1:2] not in (["0"], []) for line in f if line.startswith("TracerPid:"))
+    except OSError:
+        return False
+
+
+class SplitTest(unittest.TestCase):
+    """CI-par-3: a SPLIT module's tests run across forked workers inside its one strace tree."""
+    # REQ: CI-PATHS
+
+    BODY = textwrap.dedent("""\
+        import os, time, unittest
+
+        def log(case):
+            with open(os.environ["SPLIT_LOG"], "a") as f:
+                f.write(f"{os.getpid()} {case.id()}\\n")
+
+        class A(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                cls.ready = True
+
+            def test_1(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+            def test_2(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+            def test_3(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+
+        class B(unittest.TestCase):
+            def test_4(self): log(self); time.sleep(0.3)
+            def test_5(self): log(self); time.sleep(0.3)
+            def test_6(self): log(self); time.sleep(0.3)
+        """)
+
+    def run_split(self, body, prefix=()):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(body)
+        log = root / "log"
+        log.touch()
+        p = subprocess.run([*prefix, sys.executable, str(pathlib.Path(unit_tests.__file__).resolve()), "--split",
+                            "test_fake", "--workers", "3"], cwd=root, capture_output=True, text=True,
+                           env={**os.environ, "SPLIT_LOG": str(log)}, timeout=120)
+        return p, [line.split() for line in log.read_text().splitlines()], root
+
+    def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
+        cmd = unit_tests.command("test_image", "/r", workers=4)
+        self.assertIn("test_image", unit_tests.SPLIT)
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", sys.executable,
+                               str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
+                               "--workers", "4"])
+
+    def test_split_modules_exist(self):
+        self.assertTrue(set(unit_tests.SPLIT) <= set(unit_tests.modules()), unit_tests.SPLIT)
+        self.assertFalse(set(unit_tests.SPLIT) & set(unit_tests.SERIAL))
+
+    def test_split_runs_every_test_once_across_workers(self):
+        p, log, _ = self.run_split(self.BODY)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(sorted(t for _, t in log), [f"test_fake.{c}.test_{i}" for c, i in
+                                                     (("A", 1), ("A", 2), ("A", 3), ("B", 4), ("B", 5), ("B", 6))])
+        self.assertGreater(len({pid for pid, _ in log}), 1, log)
+        self.assertIn("test_fake: 6 of 6 tests run across 3 workers\n", p.stdout)
+
+    def test_split_fails_on_a_failed_test(self):
+        p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self);", "def test_5(self): self.fail('x');"))
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("FAIL: test_5", p.stdout)
+        self.assertEqual(len(log), 5)
+
+    def test_split_fails_when_a_worker_is_lost(self):
+        p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self);", "def test_5(self): os._exit(0);"))
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("1 worker(s) lost", p.stdout)
+        self.assertIn("not run", p.stdout)
+
+    def test_split_fails_on_an_empty_module(self):
+        p, log, _ = self.run_split("import unittest\n")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("test_fake: no tests found", p.stdout)
+
+    @unittest.skipUnless(shutil.which("strace"), "strace is not installed (CI installs it)")
+    @unittest.skipIf(traced(), "already under strace (CI's step), which audits test_image's real trace instead")
+    def test_split_trace_is_one_finished_tree(self):
+        trace_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, trace_dir)
+        prefix = unit_tests.command("test_x", trace_dir)
+        prefix = prefix[:prefix.index("-o") + 2]
+        p, log, root = self.run_split(self.BODY, prefix)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        trace = pathlib.Path(trace_dir, "test_x.trace").read_text(errors="surrogateescape")
+        self.assertTrue(records_audit.finished(trace))
+        opened = records_audit.opened(trace, root=os.path.realpath(root))
+        self.assertIn(("tests/test_fake.py", False), opened)
+        self.assertIn(str(root / "log"), trace)
+        # The first process, the one strace started, exits after every worker it forked.
+        first = trace.split(None, 1)[0]
+        self.assertTrue(trace.rstrip().endswith("+++ exited with 0 +++"), trace[-300:])
+        self.assertTrue(trace.rstrip().splitlines()[-1].startswith(first + " "), trace[-300:])
+
 
 
 R = str(unit_tests.ROOT)
-OWN = '1 openat(AT_FDCWD<{r}>, "{r}/tests/test_m.py", O_RDONLY) = 3<{r}/tests/test_m.py>\n'.format(r=R)
-END = "1 +++ exited with 0 +++\n"
-
-
-class ShardRecordsTest(unittest.TestCase):
-    def test_records_audit_needs_every_shard_traced_and_finished(self):
-        listed = ["tests.test_m"]
-        self.assertEqual(records_audit.problems({"test_m": [OWN + END, OWN + END]}, listed), [])
-        self.assertEqual(records_audit.problems({"test_m": [OWN + END, ""]}, listed),
-                         ["tests.test_m\tno open of the module's own file: tracing did not run"])
-        self.assertEqual(records_audit.problems({"test_m": [OWN + END, OWN]}, listed),
-                         ["tests.test_m\tthe trace ends before the module's run exits: it was cut short"])
-        read = '2 openat(AT_FDCWD<{r}>, "README.md", O_RDONLY) = 3<{r}/README.md>\n'.format(r=R)
-        self.assertEqual(records_audit.problems({"test_m": [OWN + END, OWN + read + END]}, []),
-                         ["tests.test_m\tREADME.md"])
-
-    def test_records_audit_reads_a_split_modules_shard_traces(self):
-        with mock.patch.dict(unit_tests.SPLIT, {"test_m": 2}):
-            self.assertEqual(records_audit.unit_tests.units(["test_m"]), ["test_m@1", "test_m@2"])
 
 
 def w(pid, path, flags="O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC"):
@@ -228,15 +264,11 @@ class ClashTest(unittest.TestCase):
 
     def test_disjoint_temporary_directories_pass(self):
         traces = {"test_a": w(1, "/tmp/tmpa1b2c3/out"), "test_b": w(2, "/tmp/tmpz9y8x7/out"),
-                  "test_c@1": w(3, "/tmp/tmpq/out"), "test_c@2": w(4, "/tmp/tmpr/out")}
+                  "test_c": w(3, "/tmp/tmpq/out")}
         self.assertEqual(clash_audit.clashes(traces, serial={}), [])
 
-    def test_shards_of_one_module_clash_with_each_other_too(self):
-        traces = {"test_c@1": w(3, "/r/build/x"), "test_c@2": w(4, "/r/build/x")}
-        self.assertEqual(clash_audit.clashes(traces, serial={}), [("path", "/r/build/x", "test_c@1", "test_c@2")])
-
     def test_a_serial_module_is_the_escape_hatch(self):
-        traces = {"test_a": w(1, "/f"), "test_b": w(2, "/f"), "test_c@1": w(3, "/f")}
+        traces = {"test_a": w(1, "/f"), "test_b": w(2, "/f"), "test_c": w(3, "/f")}
         self.assertEqual(clash_audit.clashes(traces, serial={"test_b": "why", "test_c": "why"}), [])
 
     def test_relative_resumed_and_failed_creates_resolve_to_one_path(self):
@@ -277,15 +309,15 @@ class ClashTest(unittest.TestCase):
         import io
         import tempfile
         with tempfile.TemporaryDirectory() as d:
-            for unit, text in {"test_a": w(1, "/tmp/agentos-x"), "test_b@2": w(2, "/tmp/agentos-x"),
+            for unit, text in {"test_a": w(1, "/tmp/agentos-x"), "test_b": w(2, "/tmp/agentos-x"),
                                "test_c": w(3, "/tmp/tmpc/y")}.items():
                 pathlib.Path(d, f"{unit}.trace").write_text(text)
             out, err = io.StringIO(), io.StringIO()
             with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 1)
-            self.assertEqual(out.getvalue(), "::error::test_a and test_b@2 both write /tmp/agentos-x\n")
+            self.assertEqual(out.getvalue(), "::error::test_a and test_b both write /tmp/agentos-x\n")
             self.assertIn("SERIAL", err.getvalue())
-            pathlib.Path(d, "test_b@2.trace").write_text(w(2, "/tmp/tmpb/x"))
+            pathlib.Path(d, "test_b.trace").write_text(w(2, "/tmp/tmpb/x"))
             with mock.patch("sys.stdout", io.StringIO()), mock.patch.dict(unit_tests.SERIAL, clear=True):
                 self.assertEqual(clash_audit.main(["clash_audit.py", d]), 0)
 

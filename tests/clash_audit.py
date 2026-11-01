@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""No two unit-test units that run at the same time write one path or bind one address (CI-par-clash).
+"""No two unit-test modules that run at the same time write one path or bind one address (CI-par-clash).
 
-tools/unit_tests.py runs the tests/test*.py modules (and a split module's shards) several at a
-time, each under `strace -f -y` into its own `<unit>.trace` (CI-PATHS). `clash_audit.py DIR`
-reads those traces and fails when two units, neither of them in unit_tests.SERIAL, each
+tools/unit_tests.py runs the tests/test*.py modules several at a time, each under `strace -f -y`
+into its own `<module>.trace` (CI-PATHS). `clash_audit.py DIR` reads those traces and fails
+when two modules, neither of them in unit_tests.SERIAL, each
   - open one path for writing or creating (O_WRONLY, O_RDWR or O_CREAT; the file the open
-    reached, else the path it asked for, so a create that failed because the other unit's file
-    was there counts), or
+    reached, else the path it asked for, so a create that failed because the other module's
+    file was there counts), or
   - bind one fixed address: an IP port other than 0 (any address, either protocol), or a Unix
     socket name, abstract or a path.
-It names both units and the path, and points at unit_tests.SERIAL. The check reads every pair,
-whether or not the two happened to overlap on this run, so it does not depend on timing.
+It names both modules and the path, and points at unit_tests.SERIAL. The check reads every
+pair, whether or not the two happened to overlap on this run, so it does not depend on timing.
 A unique temporary path (tempfile's random names, an ephemeral port) never matches another
-unit's, so it needs no exception; SHARED lists the paths built to be written by many processes
-at once (devices, Python's bytecode cache, Go's build and module caches and telemetry
+module's, so it needs no exception; shared() lists the paths built to be written by many
+processes at once (devices, Python's bytecode cache, Go's build and module caches and telemetry
 counters). tools/unit_tests.py turns off git's optional index lock, so the shared worktree's
 .git/index.lock is written only by a git command that changes the index.
 Not seen: a clash through something other than open or bind (a fixed directory made by mkdir
 and only listed, a rename onto a fixed name, a lock taken with flock on a file opened read-only,
-a connect to a server another unit started) or by a process outside the unit's tree (a daemon).
+a connect to a server another module started), by a process outside the module's tree (a
+daemon), or between the tests of one SPLIT module, whose workers share one trace (CI-par-3).
 """
 import os
 import re
@@ -119,12 +120,12 @@ def writes(trace):
 
 
 def clashes(traces, serial=None, is_shared=shared):
-    """traces: {unit: strace text}. [(kind, name, unit_a, unit_b)] for every name two units
-    outside serial both wrote or bound, units in name order."""
+    """traces: {module: strace text}. [(kind, name, module_a, module_b)] for every name two
+    modules outside serial both wrote or bound, in name order."""
     serial = unit_tests.SERIAL if serial is None else serial
     seen = {}
     for unit in sorted(traces):
-        if unit_tests.module_of(unit) in serial:
+        if unit in serial:
             continue
         for kind, name in writes(traces[unit]):
             if kind == "path" and is_shared(name):
@@ -149,7 +150,7 @@ def main(argv):
     for kind, name, a, b in found:
         print(f"::error::{a} and {b} both {'write' if kind == 'path' else 'bind'} {name}")
     if found:
-        print("Units that run at the same time must not share a path or address: make each use its "
+        print("Modules that run at the same time must not share a path or address: make each use its "
               "own (a tempfile directory, port 0), or put the module in tools/unit_tests.py SERIAL "
               "with its reason.", file=sys.stderr)
     return 1 if found else 0
