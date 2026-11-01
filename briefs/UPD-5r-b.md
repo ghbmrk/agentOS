@@ -19,7 +19,7 @@ Every row is tier A. A suite with no source is an error from the runner, which `
 | b3 (#4045) | Security suite as log data: §16's injection tests and HLD-5's minimized regression cases, append-only, removable only by an owner key; its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
 | b4 (#4046) | Held-out suite: one outcome record per goal (KRN-9) and the dev/held-out split (HLD-3); its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
 | b5 (#4047) | Replay suite: recorded clerk responses in the log, and the host check that counts steps the recorded keys would not admit (HLD-2) | kernel and clerk (D-159 row first), `broker/vm/requal/` | b1, b4 |
-| b7 (filed with #4044's PR) | The driver's evaluators: the security evaluator that runs a `SecurityInput` through the release's reader and kernel paths and reports EVL-3's measures; held-out and replay evaluators come with b4 and b5 | `broker/vm/requal/driver/` | b2, b3 |
+| b7 (#4475) | The driver's evaluators: the security evaluator that runs a `SecurityInput` through the release's reader and kernel paths and reports EVL-3's measures; held-out and replay evaluators come with b4 and b5 | `broker/vm/requal/driver/` | b2, b3 |
 | b6 (#4048) | Wiring: `update.NewRequalifier` with the runner, passed to UPD-7w's check in `cmd/agentosd` | `broker/cmd/agentosd/` | b2, UPD-7w (#3961) |
 
 b2 to b6 are their own `work-item` issues; each one's builder writes its full brief section here.
