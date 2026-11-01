@@ -116,6 +116,18 @@ table inet enforcer {
 		type ipv6_addr;
 		flags timeout;
 	}
+	set host_4 {
+		typeof ct id . ct original ip saddr . ether saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 1h;
+	}
+	set host_6 {
+		typeof ct id . ct original ip6 saddr . ether saddr;
+		size 65535;
+		flags dynamic,timeout;
+		timeout 1h;
+	}
 	set t101_4 {
 		type ipv4_addr;
 		size 64;
@@ -237,13 +249,14 @@ table inet enforcer {
 		oifname "gst0" counter name "guests_in"
 		iifname "gst0" ct state new counter name "guests_conns"
 		ct state invalid drop
+		ct state related ct direction original iifname { "gst0", "own0", "hh0" } jump bound
 		ct state established,related jump forward_live
 		ct state established iifname vmap { "ap0.101" : jump t101_out_count, "ap0.102" : jump t102_out_count, "ap0.103" : jump t103_out_count, "ap0.104" : jump t104_out_count, "ap0.105" : jump t105_out_count, "ap0.106" : jump t106_out_count, "ap0.107" : jump t107_out_count }
 		ct state established oifname vmap { "ap0.101" : jump t101_in_count, "ap0.102" : jump t102_in_count, "ap0.103" : jump t103_in_count, "ap0.104" : jump t104_in_count, "ap0.105" : jump t105_in_count, "ap0.106" : jump t106_in_count, "ap0.107" : jump t107_in_count }
 		ct state established,related accept
 		iifname "wan0" log prefix "enf inbound " counter name "inbound" drop
-		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 ct mark set 0x10011004 accept
-		iifname "gst0" oifname "wan0" ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 ct mark set 0x10011004 accept
+		iifname "gst0" oifname "wan0" ip daddr != @isp_4 ip daddr != @nonglobal_4 ct mark set 0x10011004 goto learn
+		iifname "gst0" oifname "wan0" ip6 daddr != @isp_6 ip6 daddr != @nonglobal_6 ct mark set 0x10011004 goto learn
 		iifname "gst0" drop
 		iifname { "own0", "hh0" } jump people
 		iifname "adm0" oifname "apm0" ip daddr @ap_4 ct mark set 0x10081005 accept
@@ -282,10 +295,20 @@ table inet enforcer {
 		ip6 daddr @isp_6 drop
 		oifname "wan0" ip daddr @nonglobal_4 drop
 		oifname "wan0" ip6 daddr @nonglobal_6 drop
-		iifname "own0" oifname "wan0" ct mark set 0x10011002 accept
-		iifname "hh0" oifname "wan0" ct mark set 0x10011003 accept
-		iifname "own0" oifname "core0" tcp dport 443 ct mark set 0x10061002 accept
-		iifname "hh0" oifname "ap0.105" ct mark set 0x00691003 accept
+		iifname "own0" oifname "wan0" ct mark set 0x10011002 goto learn
+		iifname "hh0" oifname "wan0" ct mark set 0x10011003 goto learn
+		iifname "own0" oifname "core0" tcp dport 443 ct mark set 0x10061002 goto learn
+		iifname "hh0" oifname "ap0.105" ct mark set 0x00691003 goto learn
+		drop
+	}
+	chain learn {
+		meta nfproto ipv4 add @host_4 { ct id . ct original ip saddr . ether saddr }
+		meta nfproto ipv6 add @host_6 { ct id . ct original ip6 saddr . ether saddr }
+		accept
+	}
+	chain bound {
+		meta nfproto ipv4 ct id . ct original ip saddr . ether saddr @host_4 return
+		meta nfproto ipv6 ct id . ct original ip6 saddr . ether saddr @host_6 return
 		drop
 	}
 	chain forward_live {

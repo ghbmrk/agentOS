@@ -64,6 +64,9 @@ func TestNoPolicyTextInRuleset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A hardware address is read only as part of a shared segment's host
+	// record (#4324), never to tell devices apart (D-225).
+	got = strings.ReplaceAll(strings.ReplaceAll(got, hostKey(false), ""), hostKey(true), "")
 	for _, s := range []string{"accept;#", `x"`, "y{", "tv.example", "core.example", "speaker", "ether"} {
 		if strings.Contains(got, s) {
 			t.Errorf("ruleset carries %q", s)
@@ -124,13 +127,13 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	edgeTV := `iifname "edge0" oifname "ap0.101"`
 	coreSpk := `iifname "core0" oifname "ap0.102"`
 	pair := `iifname "ap0.106" oifname "ap0.107" accept`
-	people := `iifname "hh0" oifname "ap0.105" accept`
+	people := `iifname "hh0" oifname "ap0.105" goto learn`
 	for _, s := range []string{tvNet, edgeTV, coreSpk, pair, people} {
 		if !has(d, s) {
 			t.Errorf("fixture lacks %q", s)
 		}
 	}
-	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`} {
+	for _, s := range []string{`"ap0.104" oifname "wan0"`, `oifname "ap0.103" log`, `oifname "ap0.104" log`, `"ap0.108"`, `iifname "ap0.105" oifname "hh0" accept`, `iifname "ap0.105" oifname "hh0" goto`} {
 		if has(d, s) {
 			t.Errorf("fixture has %q", s)
 		}

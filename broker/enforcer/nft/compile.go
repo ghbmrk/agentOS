@@ -54,6 +54,38 @@ func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_
 
 const TrafficSize = 64
 
+// HostSet is the set that records, for each connection a host on a shared
+// segment (Guests, Owner, Household) started, the connection's conntrack
+// ID, the host's address and the hardware address its first packet came
+// from (live.go, learn). A related packet from a shared segment passes only
+// with its connection's record. Each record lasts HostTimeout from that
+// first packet and the set holds at most HostSize per family, which bounds
+// what the shared segments can make the enforcer keep; a connection
+// without a record (it outlived its record, the set was full, or it was
+// open before the last load) has its host's own ICMP errors dropped,
+// never anyone else's passed.
+func HostSet(v6 bool) string { return "host" + fam(v6) }
+
+const (
+	HostTimeout = "1h"
+	HostSize    = 65535
+)
+
+// learnChain records the host of a connection from a shared segment and
+// accepts it; boundChain passes a related packet from a shared segment
+// only with its connection's record.
+const (
+	learnChain = "learn"
+	boundChain = "bound"
+)
+
+// hostKey is a HostSet element as nft reads it from a packet: its
+// connection's ID, original source address and the packet's hardware
+// source address.
+func hostKey(v6 bool) string {
+	return "ct id . ct original " + family(v6) + " saddr . ether saddr"
+}
+
 // named is the set that records which addresses one name's answers put in
 // the allow set list, for the list's holder ("core", or a device's ID): the
 // resolver fills both (ASSUMPTIONS ENF-set-keep-1). Its name is list's and a
@@ -418,6 +450,14 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		}
 	}
 
+	for _, v6 := range []bool{false, true} {
+		w.open("set " + HostSet(v6))
+		w.line("typeof " + hostKey(v6) + ";")
+		w.line("size " + strconv.Itoa(HostSize) + ";")
+		w.line("flags dynamic,timeout;")
+		w.line("timeout " + HostTimeout + ";")
+		w.close()
+	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
 			w.open("set " + TrafficSet(v.vlan, v6))
@@ -589,8 +629,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, v := range devs {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
+	shared := []string{g, q(l.Owner), q(l.Household)}
 	for _, rs := range [][]rule{fwd, people} {
-		if err := bindAll(idx, rs); err != nil {
+		if err := bindAll(idx, shared, rs); err != nil {
 			return "", nil, err
 		}
 	}
@@ -624,6 +665,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
+	// A related packet from a shared segment in its connection's original
+	// direction must come from the host that started the connection
+	// (live.go, #4324). In the reply direction one from a shared segment
+	// already matches no live accept, since no accept leads into one.
+	w.line("ct state related ct direction original iifname { " + strings.Join(shared, ", ") + " } jump " + boundChain)
 	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
@@ -648,6 +694,22 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.open("chain people")
 	for _, r := range people {
 		w.line(r.first())
+	}
+	w.line("drop")
+	w.close()
+
+	w.open("chain " + learnChain)
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + map[bool]string{false: "ipv4", true: "ipv6"}[v6] + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+	}
+	w.line("accept")
+	w.close()
+
+	// Shared segments are never observed (NET-1, NET-3): a forged error from
+	// one is dropped without a log line or a count.
+	w.open("chain " + boundChain)
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + map[bool]string{false: "ipv4", true: "ipv6"}[v6] + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
 	}
 	w.line("drop")
 	w.close()
