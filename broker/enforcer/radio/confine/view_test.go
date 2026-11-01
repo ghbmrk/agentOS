@@ -34,6 +34,7 @@ const viewUID = 4251
 // state directory.
 const (
 	vBus, vOther, vState, vShared, vLate, vLink = "bus", "other", "state", "shared", "shared/late", "link"
+	vSub                                        = "shared/sub"
 	devNull                                     = "/dev/null"
 )
 
@@ -125,7 +126,7 @@ func viewProbe(variant, dir string) int {
 		_, serr := os.Stat(at(vLink) + "/.")
 		r.Link = target + " " + errString(err) + " " + errString(serr)
 		r.Flags = map[string]uint64{}
-		for _, p := range []string{at(vBus), at(vState), at(vShared), devNull, "/proc", "/"} {
+		for _, p := range []string{at(vBus), at(vState), at(vShared), at(vSub), devNull, "/proc", "/"} {
 			var st syscall.Statfs_t
 			if err := syscall.Statfs(p, &st); err != nil {
 				r.Flags[p] = 1 << 63
@@ -288,6 +289,15 @@ func sharedMount(t *testing.T, dir string) {
 	if err := os.Mkdir(filepath.Join(dir, vLate), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// A submount there before the start, writable, suid and dev as the
+	// host has it, which the view must clone with the entry's attributes.
+	sub := filepath.Join(dir, vSub)
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount("tmpfs", sub, "tmpfs", 0, "size=4k"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestViewOnlyItsEntries (NET-2 Confined radio stacks; #4215, #4369,
@@ -302,7 +312,9 @@ func sharedMount(t *testing.T, dir string) {
 // the view's three hardening steps: a mount the host makes under a shared
 // entry after the start does not reach the stack (its namespace is made
 // private first), the old root is gone from its mount table (detached
-// after the pivot), and each entry's mount has its attributes. The same
+// after the pivot), and each entry's mount has its attributes, a submount
+// the host made under a directory entry included (cloned recursively,
+// set recursively). The same
 // probe under the same profile without a view connects to both sockets,
 // so the refusal is the view's. Catches an exploited radio stack
 // connecting outside its interface to another Unix socket its user can
@@ -350,7 +362,7 @@ func TestViewOnlyItsEntries(t *testing.T) {
 	if got.Other != int(syscall.ENOENT) {
 		t.Errorf("in the view, dialling another socket: %v, want ENOENT", syscall.Errno(got.Other))
 	}
-	want := []string{"/proc", at(vLate)}
+	want := []string{"/proc", at(vLate), at(vSub)}
 	for _, p := range []string{at(vBus), at(vState), at(vShared), at(vLink), devNull} {
 		for ; p != "/"; p = filepath.Dir(p) {
 			want = append(want, p)
@@ -382,17 +394,17 @@ func TestViewOnlyItsEntries(t *testing.T) {
 	if got.Link != vState+" ok ok" {
 		t.Errorf("the symlink entry: %q, want its target, resolving", got.Link)
 	}
-	// Each entry's flags are exactly its own, but /proc's: a clone keeps
-	// the host mount's locked flags, and a runner's /proc is noexec too.
+	// Each entry's flags are exactly its own, a submount's included.
 	for p, f := range map[string]uint64{
 		at(vBus):    stRdonly | stNosuid | stNodev | stNoexec,
 		at(vState):  stNosuid | stNodev | stNoexec,
-		at(vShared): stRdonly | stNosuid | stNodev,
+		at(vShared): stRdonly | stNosuid | stNodev | stNoexec,
+		at(vSub):    stRdonly | stNosuid | stNodev | stNoexec,
 		devNull:     stRdonly | stNosuid | stNoexec,
-		"/proc":     stRdonly | stNosuid | stNodev,
+		"/proc":     stRdonly | stNosuid | stNodev | stNoexec,
 		"/":         stRdonly | stNosuid | stNodev | stNoexec,
 	} {
-		if g := got.Flags[p]; g != f && (p != "/proc" || g&f != f) {
+		if g := got.Flags[p]; g != f {
 			t.Errorf("%s: mount flags %#x, want %#x", p, g, f)
 		}
 	}
@@ -454,13 +466,21 @@ func TestViewRefusesSwappedEntry(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var log lockedBuffer
-			proc, conn := startProbe(t, bin, dir, "dial", []Entry{state, c.entry}, &log)
-			out, _ := io.ReadAll(conn)
-			conn.Close()
-			err := proc.Wait()
-			var ee *exec.ExitError
-			if !errors.As(err, &ee) || ee.ExitCode() != 126 || len(out) != 0 {
-				t.Errorf("the stack ran: exit %v, sent %q", err, out)
+			p := BLE(viewUID, viewUID)
+			p.View = []Entry{state, c.entry}
+			proc, conn, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{viewArg, "dial", dir},
+				Dir: state.Path, Stderr: &log})
+			// A refused stack may exit before Start opens its network
+			// namespace, which fails the start: refused as well.
+			if err == nil {
+				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				out, _ := io.ReadAll(conn)
+				conn.Close()
+				err := proc.Wait()
+				var ee *exec.ExitError
+				if !errors.As(err, &ee) || ee.ExitCode() != 126 || len(out) != 0 {
+					t.Errorf("the stack ran: exit %v, sent %q", err, out)
+				}
 			}
 			if l := log.String(); !strings.Contains(l, "confine: view: "+c.entry.Path+": ") || !strings.Contains(l, c.why) {
 				t.Errorf("refusal %q, want %q for %s", l, c.why, c.entry.Path)
@@ -577,19 +597,25 @@ func TestShippedViews(t *testing.T) {
 // TestStartRefusesBadView (NET-2): Start refuses, before it forks, a view
 // entry Trampoline could not rebuild from its argument, that would
 // replace the whole root, of no known kind, that writes and is not a
-// directory, or that is another entry's path or above or under it;
+// directory, that execs and is not a read-only directory, or that is
+// another entry's path or above or under it;
 // Trampoline's decoding refuses the same.
 func TestStartRefusesBadView(t *testing.T) {
 	bad := []Entry{{Path: "", Kind: Socket}, {Path: "run/x", Kind: Socket}, {Path: "/", Kind: Dir},
 		{Path: "/run/../etc", Kind: Dir}, {Path: "/run/", Kind: Dir}, {Path: "/run/x\n/etc", Kind: Socket},
 		{Path: "/run/x", Kind: 'f'}, {Path: "/run/x", Kind: 0}, {Path: "/run/x", Kind: Socket, Write: true},
 		{Path: "/dev/x", Kind: Device, Write: true}, {Path: "/x", Kind: Link, Write: true},
+		{Path: "/run/x", Kind: Socket, Exec: true}, {Path: "/dev/x", Kind: Device, Exec: true},
+		{Path: "/x", Kind: Link, Exec: true}, {Path: "/x", Kind: Dir, Write: true, Exec: true},
 		{Path: SystemBus, Kind: Socket}, {Path: SystemBus + "/x", Kind: Socket}, {Path: "/run/dbus", Kind: Dir}}
 	for _, e := range bad {
 		p := BLE(1, 1)
 		p.View = append(p.View, e)
 		if _, _, err := Start(Spec{Profile: p, Path: "/nonexistent"}); err != ErrView {
 			t.Errorf("entry %+v: %v", e, err)
+		}
+		if e.Write && e.Exec {
+			continue // the encoding has no form for both; Start refused it above
 		}
 		if _, err := decodeView(encodeView(p.View)); err != ErrView {
 			t.Errorf("entry %+v decoded: %v", e, err)
@@ -603,7 +629,9 @@ func TestStartRefusesBadView(t *testing.T) {
 	// A good view is no view error, NetAdmin's included (the start may
 	// still fail off root, or exec nothing as root), and survives its
 	// encoding.
-	for _, p := range []Profile{BLE(1, 1), Thread(1, 1, "/a", "/b", "/dev/c"), Matter(1, 1, "/m"), ThreadAdapter(1, 1, "/b")} {
+	loader := BLE(1, 1)
+	loader.View = append(loader.View, Entry{Path: "/usr/lib", Kind: Dir, Exec: true}, Entry{Path: "/lib", Kind: Link})
+	for _, p := range []Profile{BLE(1, 1), Thread(1, 1, "/a", "/b", "/dev/c"), Matter(1, 1, "/m"), ThreadAdapter(1, 1, "/b"), loader} {
 		if got, err := decodeView(encodeView(p.View)); err != nil || !slices.Equal(got, p.View) {
 			t.Errorf("%s: decoded %+v, %v", p.Name, got, err)
 		}

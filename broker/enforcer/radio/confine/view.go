@@ -22,9 +22,8 @@ type Kind byte
 const (
 	// Socket is a Unix socket, bound read-only, nosuid, nodev and noexec.
 	Socket Kind = 's'
-	// Dir is a directory and every mount under it, bound read-only, nosuid
-	// and nodev (exec stays, for a test binary's loader), or with Write
-	// read-write, nosuid, nodev and noexec.
+	// Dir is a directory and every mount under it, bound read-only,
+	// nosuid, nodev and noexec, or with Write read-write.
 	Dir Kind = 'd'
 	// Device is a character device, bound nosuid and noexec but not nodev,
 	// so it opens; read-only binds it still: a device's writes are not the
@@ -41,12 +40,14 @@ type Entry struct {
 	Path  string
 	Kind  Kind
 	Write bool // a Dir the stack writes: its state
+	Exec  bool // a read-only Dir that keeps exec: only Loader's, for the tests
 }
 
 // ErrView refuses a view entry whose path is not absolute and clean, is the
 // root, holds a newline, or is another entry's or under it, whose kind is
-// not one of Kind's, or that writes and is not a Dir.
-var ErrView = errors.New("confine: a view lists clean absolute paths other than /, none under another, each of a known kind, and only a Dir writes")
+// not one of Kind's, that writes and is not a Dir, or that execs and is
+// not a read-only Dir.
+var ErrView = errors.New("confine: a view lists clean absolute paths other than /, none under another, each of a known kind, and only a Dir writes or, read-only, execs")
 
 // viewMount is where the view's tmpfs goes, in the stack's own mount
 // namespace, before it becomes the root.
@@ -94,7 +95,7 @@ func checkView(p Profile) error {
 		if !filepath.IsAbs(v) || filepath.Clean(v) != v || v == "/" || strings.ContainsRune(v, '\n') {
 			return ErrView
 		}
-		if _, ok := fileType[e.Kind]; !ok || e.Write && e.Kind != Dir {
+		if _, ok := fileType[e.Kind]; !ok || (e.Write || e.Exec) && e.Kind != Dir || e.Write && e.Exec {
 			return ErrView
 		}
 	}
@@ -102,13 +103,16 @@ func checkView(p Profile) error {
 }
 
 // encodeView is the view as Trampoline's one argument: per entry, its kind,
-// 'w' or 'r', and its path, one per line.
+// 'w' (writes), 'x' (execs) or 'r', and its path, one per line.
 func encodeView(v []Entry) string {
 	lines := make([]string, len(v))
 	for i, e := range v {
 		w := byte('r')
-		if e.Write {
+		switch {
+		case e.Write:
 			w = 'w'
+		case e.Exec:
+			w = 'x'
 		}
 		lines[i] = string([]byte{byte(e.Kind), w}) + e.Path
 	}
@@ -119,17 +123,18 @@ func encodeView(v []Entry) string {
 func decodeView(s string) ([]Entry, error) {
 	var v []Entry
 	for l := range strings.SplitSeq(s, "\n") {
-		if len(l) < 3 || l[1] != 'r' && l[1] != 'w' {
+		if len(l) < 3 || l[1] != 'r' && l[1] != 'w' && l[1] != 'x' {
 			return nil, ErrView
 		}
-		v = append(v, Entry{Path: l[2:], Kind: Kind(l[0]), Write: l[1] == 'w'})
+		v = append(v, Entry{Path: l[2:], Kind: Kind(l[0]), Write: l[1] == 'w', Exec: l[1] == 'x'})
 	}
 	return v, checkView(Profile{View: v})
 }
 
 // Loader is the dynamic loader's directories as this host has them, each
-// a Dir or, on a usr-merged host, a Link to one, for a cgo-linked binary in
-// a view: the tests' own. A shipped stack is static and lists none.
+// a Dir that keeps exec or, on a usr-merged host, a Link to one, for a
+// cgo-linked binary in a view: the tests' own. A shipped stack is static
+// and lists none, so every shipped entry is noexec.
 func Loader() []Entry {
 	var v []Entry
 	for _, p := range []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64"} {
@@ -137,11 +142,11 @@ func Loader() []Entry {
 		if syscall.Lstat(p, &st) != nil {
 			continue
 		}
-		k := Dir
+		e := Entry{Path: p, Kind: Dir, Exec: true}
 		if st.Mode&syscall.S_IFMT == syscall.S_IFLNK {
-			k = Link
+			e = Entry{Path: p, Kind: Link}
 		}
-		v = append(v, Entry{Path: p, Kind: k})
+		v = append(v, e)
 	}
 	return v
 }
@@ -269,8 +274,8 @@ func openEntry(e Entry) (f opened, err error) {
 }
 
 // mountAttrs is what an entry's mounts are set to: nosuid always, nodev
-// unless a Device, read-only unless it writes, and noexec unless a
-// read-only Dir (a test binary's loader runs from one).
+// unless a Device, read-only unless it writes, and noexec unless it execs
+// (the tests' loader).
 func mountAttrs(e Entry) uint64 {
 	a := uint64(mountAttrNosuid)
 	if e.Kind != Device {
@@ -279,7 +284,7 @@ func mountAttrs(e Entry) uint64 {
 	if !e.Write {
 		a |= mountAttrRdonly
 	}
-	if e.Kind != Dir || e.Write {
+	if !e.Exec {
 		a |= mountAttrNoexec
 	}
 	return a

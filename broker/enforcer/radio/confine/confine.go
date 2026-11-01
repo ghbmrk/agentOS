@@ -138,14 +138,12 @@ type Proc struct {
 }
 
 // Arg0 marks the re-exec of the enforcer's own binary that confines itself
-// and then execs the stack (Trampoline). ArgHold marks one that also waits
-// for the enforcer to set up its network namespace before the exec.
-const (
-	Arg0    = "agentos-radio-confine"
-	ArgHold = "agentos-radio-confine-hold"
-)
+// and then execs the stack (Trampoline), once the enforcer releases it.
+const Arg0 = "agentos-radio-confine"
 
-// holdFD is the descriptor a held stack waits on: one byte means go on.
+// holdFD is the descriptor every stack waits on before its exec, so it
+// cannot exit before Start holds its network namespace and has set up its
+// links: one byte means go on.
 const holdFD = 4
 
 var (
@@ -204,26 +202,20 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		dir = "/"
 	}
 	attr := procAttr(s)
-	arg0, extra := Arg0, []*os.File{theirs}
-	hold := p.NetAdmin || len(p.Links) > 0
-	var release *os.File
-	if hold {
-		r, w, err := os.Pipe()
-		if err != nil {
-			ours.Close()
-			return nil, nil, err
-		}
-		defer r.Close()
-		arg0, extra, release = ArgHold, append(extra, r), w
-		defer release.Close()
+	r, release, err := os.Pipe()
+	if err != nil {
+		ours.Close()
+		return nil, nil, err
 	}
+	defer r.Close()
+	defer release.Close()
 	cmd := &exec.Cmd{
 		Path:        self,
-		Args:        append([]string{arg0, strings.Join(fam, ","), encodeView(p.View), s.Path}, s.Args...),
+		Args:        append([]string{Arg0, strings.Join(fam, ","), encodeView(p.View), s.Path}, s.Args...),
 		Env:         []string{},
 		Dir:         dir,
 		Stderr:      s.Stderr,
-		ExtraFiles:  extra,
+		ExtraFiles:  []*os.File{theirs, r},
 		SysProcAttr: attr,
 	}
 	// The child's Pdeathsig fires when the OS thread that forked it exits,
@@ -257,13 +249,13 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		}
 		proc.net = f
 	}
-	if hold {
+	if p.NetAdmin || len(p.Links) > 0 {
 		if err := inNetns(proc.net, func() error { return setupLinks(p.Links) }, nil); err != nil {
 			return fail(err)
 		}
-		if _, err := release.Write([]byte{1}); err != nil {
-			return fail(err)
-		}
+	}
+	if _, err := release.Write([]byte{1}); err != nil {
+		return fail(err)
 	}
 	return proc, ours, nil
 }
@@ -378,18 +370,18 @@ func setns(f *os.File, kind int) error {
 // TestMain). It never returns from a confined start: on any failure it
 // exits 126 before the stack runs.
 func Trampoline() {
-	if os.Args[0] != Arg0 && os.Args[0] != ArgHold {
+	if os.Args[0] != Arg0 {
 		return
 	}
 	err := errors.New("confine: too few arguments")
 	if len(os.Args) >= 4 {
-		err = confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:], os.Args[0] == ArgHold)
+		err = confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:])
 	}
 	fmt.Fprintf(os.Stderr, "confine: %v\n", err)
 	os.Exit(126)
 }
 
-func confineAndExec(families, view, path string, argv []string, hold bool) error {
+func confineAndExec(families, view, path string, argv []string) error {
 	var fam []int
 	for f := range strings.SplitSeq(families, ",") {
 		if f == "" {
@@ -431,14 +423,12 @@ func confineAndExec(families, view, path string, argv []string, hold bool) error
 	if err := install(filter(slices.Sorted(slices.Values(fam)))); err != nil {
 		return fmt.Errorf("confine: seccomp: %w", err)
 	}
-	if hold {
-		// The enforcer sets up the network namespace, then writes one
-		// byte; end of file means it gave up. The descriptor is
-		// close-on-exec, so the stack never holds it.
-		var b [1]byte
-		if n, err := syscall.Read(holdFD, b[:]); n != 1 {
-			return fmt.Errorf("confine: not released (%v)", err)
-		}
+	// The enforcer opens the network namespace and sets it up, then
+	// writes one byte; end of file means it gave up. The descriptor is
+	// close-on-exec, so the stack never holds it.
+	var b [1]byte
+	if n, err := syscall.Read(holdFD, b[:]); n != 1 {
+		return fmt.Errorf("confine: not released (%v)", err)
 	}
 	if exe != -1 {
 		return execFD(exe, argv)

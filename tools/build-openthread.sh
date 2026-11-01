@@ -7,8 +7,9 @@
 # Its command socket's base name is relative, so it lives in the run
 # directory the stack runs in (thread.Socket); its settings go where
 # --data-path says (thread.DaemonArgs). It is linked static, since its
-# view holds no loader (confine.Thread, #4369). The image (slice m)
-# installs the result.
+# view holds no loader (confine.Thread, #4369), and position-independent
+# (-static-pie), so it keeps ASLR. The image (slice m) installs the
+# result.
 #
 # With --sim it also builds OpenThread's simulated RCP and FTD node, which
 # radio::TestSrpReachesController runs. Needs git, cmake, ninja and a C++
@@ -38,7 +39,7 @@ cmake -S "$W/src" -B "$W/posix" -GNinja -DCMAKE_BUILD_TYPE=Release \
 	-DOT_BORDER_ROUTER=ON -DOT_BORDER_ROUTING=ON -DOT_SLAAC=ON -DOT_SERVICE=ON -DOT_NETDATA_PUBLISHER=ON \
 	-DOT_SRP_SERVER=ON -DOT_SRP_ADV_PROXY=ON -DOT_MDNS=ON \
 	-DOT_DNSSD_SERVER=ON -DOT_DNSSD_DISCOVERY_PROXY=ON -DOT_ECDSA=ON \
-	-DCMAKE_C_FLAGS="$SOCK" -DCMAKE_CXX_FLAGS="$SOCK" -DCMAKE_EXE_LINKER_FLAGS=-static >"$W/posix.log" 2>&1 || { cat "$W/posix.log"; exit 1; }
+	-DCMAKE_C_FLAGS="$SOCK" -DCMAKE_CXX_FLAGS="$SOCK" -DCMAKE_EXE_LINKER_FLAGS=-static-pie >"$W/posix.log" 2>&1 || { cat "$W/posix.log"; exit 1; }
 ninja -C "$W/posix" ot-daemon >>"$W/posix.log" 2>&1 || { tail -100 "$W/posix.log"; exit 1; }
 mkdir -p "$OUT"
 install -m 0755 "$W/posix/src/posix/ot-daemon" "$OUT/ot-daemon"

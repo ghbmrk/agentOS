@@ -2,6 +2,7 @@ package radio_test
 
 import (
 	"bufio"
+	"debug/elf"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -244,8 +245,8 @@ func TestStackOnlyDeclaredOps(t *testing.T) {
 }
 
 // TestSrpReachesController (NET-2 Confined radio stacks; spikes/ENF-radio
-// consequence 1; #4369): ot-daemon, built static by
-// tools/build-openthread.sh and run under confine.Thread with its view
+// consequence 1; #4369): ot-daemon, built static and position-independent
+// by tools/build-openthread.sh (checked) and run under confine.Thread with its view
 // (its state and run directories, a simulated radio's serial device, the
 // tun device and /dev/urandom, and nothing else), forms a network through
 // the adapter, which sees only the run directory; a simulated Thread node
@@ -294,6 +295,7 @@ func TestSrpReachesController(t *testing.T) {
 	}
 	self := filepath.Join(bin, "radio.test")
 	copyExe(t, os.Args[0], self)
+	staticPIE(t, filepath.Join(bin, "ot-daemon"))
 	logs := &logWriter{t: t}
 	defer func() {
 		if t.Failed() {
@@ -402,6 +404,26 @@ func TestSrpReachesController(t *testing.T) {
 		}
 	}
 	t.Fatalf("the Matter controller's namespace did not resolve the SRP service; heard %q", heard)
+}
+
+// staticPIE fails unless the binary at p is static, as its view (no
+// loader) needs, and position-independent, so it keeps ASLR: an ET_DYN
+// with no interpreter (#4445 Security).
+func staticPIE(t *testing.T, p string) {
+	t.Helper()
+	f, err := elf.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if f.Type != elf.ET_DYN {
+		t.Errorf("%s is %v, want ET_DYN (static-pie)", p, f.Type)
+	}
+	for _, pr := range f.Progs {
+		if pr.Type == elf.PT_INTERP {
+			t.Errorf("%s names a loader; its view holds none", p)
+		}
+	}
 }
 
 // simRadio starts the simulated RCP, node 1, on a pty's master side and
