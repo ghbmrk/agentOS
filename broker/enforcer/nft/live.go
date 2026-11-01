@@ -44,9 +44,10 @@ import (
 // (two guests, two people on Household) share their pair, so the mark
 // cannot tell one's connection from the other's. On those shared segments
 // (Guests, Owner, Household) a connection is bound to its host as well
-// (#4324): the accept of its first packet records the connection's
-// conntrack ID and original source with the packet's source address and
-// hardware address, in a set (learn, HostSet), and a related packet that
+// (#4324): the accept of its first packet, and of no later one, records
+// the connection's conntrack ID and original source with the packet's
+// source address and hardware address, in a set (learn, HostSet; a
+// conntrack label marks it recorded), and a related packet that
 // enters from a shared segment passes only when its connection and its
 // own source and hardware addresses give that same record (bound). So a
 // guest's forged ICMP error about another guest's connection is dropped

@@ -302,8 +302,9 @@ table inet enforcer {
 		drop
 	}
 	chain learn {
-		meta nfproto ipv4 add @host_4 { ct id . ct original ip saddr . ip saddr . ether saddr }
-		meta nfproto ipv6 add @host_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr }
+		ct label 0 accept
+		meta nfproto ipv4 ct label set 0 add @host_4 { ct id . ct original ip saddr . ip saddr . ether saddr }
+		meta nfproto ipv6 ct label set 0 add @host_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr }
 		accept
 	}
 	chain bound {

@@ -71,6 +71,11 @@ const (
 	HostSize    = 65535
 )
 
+// hostLabel is the conntrack label bit learn sets on a connection it has
+// recorded (or tried to), so it records each connection once. Nothing else
+// on the enforcer sets or reads a label.
+const hostLabel = "0"
+
 // learnChain records the host of a connection from a shared segment and
 // accepts it; boundChain passes a related packet from a shared segment
 // only with its connection's record.
@@ -710,9 +715,15 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("drop")
 	w.close()
 
+	// A connection is recorded once, from its first packet: conntrack calls
+	// every original-direction packet new until a reply comes, and another
+	// host could send one from the host's address and port to add a record
+	// of its own. The label is set before the record is added, so a
+	// connection whose record could not be written has none.
 	w.open("chain " + learnChain)
+	w.line("ct label " + hostLabel + " accept")
 	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
 	}
 	w.line("accept")
 	w.close()

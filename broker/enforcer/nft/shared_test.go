@@ -3,7 +3,9 @@ package nft
 // REQ: NET-2, NET-3
 
 import (
+	"encoding/binary"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,9 +80,12 @@ func (h *home) share(seg string) {
 // arrives. When the second host also copies the first host's hardware
 // address, its forgery from its own address is still dropped, and one
 // from the first host's address too passes: copying both makes it that
-// host to the enforcer. Catches a binding by interface alone, by address
-// alone (the spoofed forgery), by hardware address alone (the copied
-// one), and a learn or bound chain that is never reached.
+// host to the enforcer. A packet the second host injects into the first
+// host's unanswered UDP flow, from its address and port, adds no record:
+// an error forged after it is dropped, and the first host's own passes.
+// Catches a connection recorded more than once, a binding by interface
+// alone, by address alone (the spoofed forgery), by hardware address alone
+// (the copied one), and a learn or bound chain that is never reached.
 func TestSharedSegmentRelatedBound(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -213,6 +218,51 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 		h.expectOpen(true, c.a, c.b)
 	}
 
+	// Conntrack calls a flow's original-direction packets new until a reply
+	// comes. The second host sends one from the first host's address and
+	// port on the first host's unanswered UDP flow, then forges an error
+	// about that flow from the same address: it is dropped, since only the
+	// flow's first packet is recorded, and the first host's own error about
+	// the flow still passes.
+	for _, v6 := range fams {
+		for _, seg := range segs {
+			c := conn{seg: seg, v6: v6, p: internet}
+			peer := internet.addr(v6)
+			port++
+			var flow net.Conn
+			within(t, h.hosts[seg], func() {
+				var err error
+				if flow, err = net.Dial("udp", net.JoinHostPort(peer, strconv.Itoa(port))); err != nil {
+					t.Fatal(err)
+				}
+				flow.Write([]byte("first"))
+			})
+			t.Cleanup(func() { flow.Close() })
+			local, lport := hostPort(t, flow.LocalAddr())
+			within(t, h.hosts[seg+"2"], func() {
+				d := net.Dialer{LocalAddr: &net.UDPAddr{IP: net.ParseIP(local), Port: lport}}
+				in, err := d.Dial("udp", net.JoinHostPort(peer, strconv.Itoa(port)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.Write([]byte("injected"))
+				in.Close()
+			})
+			time.Sleep(100 * time.Millisecond)
+			const injected, own = 1690, 1691
+			h.sendErr(seg+"2", local, peer, v6, udpErr(v6, injected, peer, local, port, lport))
+			h.sendErr(seg, "", peer, v6, udpErr(v6, own, peer, local, port, lport))
+			time.Sleep(probeWait)
+			if at("isp", v6).has(injected) {
+				t.Errorf("%s (v6 %v): an error forged after a packet injected into the first host's flow arrived", c.seg, v6)
+			}
+			if !at("isp", v6).has(own) {
+				t.Errorf("%s (v6 %v): the first host's own error about its UDP flow did not arrive", c.seg, v6)
+			}
+			at("isp", v6).forget(injected, own)
+		}
+	}
+
 	// The second host copies the first host's hardware address. From its
 	// own address its forgery is still dropped: the record binds the
 	// address too. From the first host's address as well it is that host
@@ -257,4 +307,29 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 		fresh = append(fresh, conn{seg: c.seg, v6: c.v6, p: c.p, a: open(c.seg, c.v6, c.p, c.seg), b: open(c.seg, c.v6, c.p, c.seg+"2")})
 	}
 	round(map[string]bool{"own": true, "other own": true}, fresh, true)
+}
+
+// udpErr is icmpErr about a UDP packet instead of a TCP one.
+func udpErr(v6 bool, mtu uint16, src, dst string, sport, dport int) []byte {
+	b := icmpErr(v6, mtu, src, dst, sport, dport)
+	if v6 {
+		b[8+6] = 17
+		return b
+	}
+	in := b[8:28]
+	in[9] = 17
+	in[10], in[11] = 0, 0
+	binary.BigEndian.PutUint16(in[10:], csum(in))
+	b[2], b[3] = 0, 0
+	binary.BigEndian.PutUint16(b[2:], csum(b))
+	return b
+}
+
+// forget drops tags, so a later round may use them again.
+func (g *tags) forget(tags ...uint16) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, t := range tags {
+		delete(g.got, t)
+	}
 }
