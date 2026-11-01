@@ -366,7 +366,7 @@ func RunKernel(ctx context.Context, cfg MainConfig, keys handoff.KernelKeys, anc
 	}
 	// Counts only, on stderr: no owner call reports the subjects yet.
 	if r := h.Content(); len(r.Missing)+len(r.Unnamed) > 0 {
-		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
+		fmt.Fprintf(os.Stderr, "run: the subject-key table lacks %d open subjects' keys and deleted %d keys no subject names\n", len(r.Missing), len(r.Unnamed))
 	}
 	type served struct {
 		path string
