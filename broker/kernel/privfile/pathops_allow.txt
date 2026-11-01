@@ -31,11 +31,13 @@ allow broker/guest/plane.go Plane.close os.RemoveAll a machine's services direct
 allow broker/guest/store.go writeFile os.Rename the inbox's CreateTemp file over the inbox, both in -guest-inbox's root-held /var/lib/agentos (tmpfiles: 0700 root); rename(2) replaces a link at the name, never follows it
 allow broker/guest/store.go writeFile os.Remove the CreateTemp file this call made in root-held /var/lib/agentos
 allow broker/guest/store.go writeFile os.Open the inbox's directory, root-held /var/lib/agentos, to sync it
+allow broker/guest/store.go writeFile os.CreateTemp the temp file beside the inbox in -guest-inbox's root-held /var/lib/agentos (tmpfiles: 0700 root); O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/infer/supervise/supervise.go Supervisor.run os.Remove the service's sockets, in agentosd's 0700 root directory (-infer-socket: /run/agentos/infer); the service gets the listener's fd, never the directory
 allow broker/infer/supervise/supervise.go Supervisor.listen os.MkdirAll the service's socket directory inside agentosd's root-owned /run/agentos
 allow broker/infer/supervise/supervise.go Supervisor.listen os.Chmod that directory, which the Lstat just before shows is a directory, not a link, in root-owned /run/agentos
 allow broker/infer/supervise/supervise.go Supervisor.listen os.Remove an old socket at the name in that 0700 root directory
 allow broker/loops/machine.go TamperProbe.removeSiblings os.Remove unlink of a name carrying the round's nonce beside a target the Lstat shows is no link; a parent a guest swapped can only lead it to a file of that nonce name, which only the guest made
+allow broker/loops/machine.go targetDigest os.ReadDir lists a target's parent and hashes the tamper-sibling names only; a parent a guest swapped for a link changes the digest, as the guest's write does, and opens no file
 allow broker/sockets/peers.go ListenPeers os.Remove a stale socket at the name in the caller's run directory (its unit's RuntimeDirectory= or a tmpfiles.d directory), which only its own uid or root can write
 allow broker/sockets/peers.go ListenPeers os.Chmod the socket bind(2) just made at that name, in that run directory, which only its own uid or root can write to swap it
 allow broker/sockets/sockets.go secureDir os.MkdirAll the socket directory's parent: agentosd's -sockets parent, /run (root-owned), or a caller's root-owned run directory
@@ -47,11 +49,17 @@ allow broker/sockets/sockets.go Server.Start os.Chmod that socket, and the check
 
 allow broker/cmd/agentos-link/capture.go linkCapture os.Remove removes the temp file os.CreateTemp just made in the capture directory, /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write
 allow broker/cmd/agentos-link/capture.go linkCapture os.Link link(2) never follows a link at its new path and refuses an existing one; both paths are in the root-owned 0700 capture directory
+allow broker/cmd/agentos-link/capture.go linkCapture os.CreateTemp a 0600 file in /run/agentos-link-capture (tmpfiles.d: 0700 root root), which no other uid can write; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/update/store.go remove os.Remove unlink(2) and rmdir(2) remove a link at the path itself and never follow it; every caller names a file in the update store, a repository or a key pair its own caller made
 allow broker/update/store.go InitStore os.MkdirAll makes the store directory its caller names; outside tests and updatetest only agentos-release calls it, on a directory inside its own os.MkdirTemp directory, and no unit starts agentos-release (agentosd opens an existing store, Store{Dir})
+allow broker/update/store.go Verified.Fetch os.CreateTemp its one caller, apply/bootab, fetches into a directory its own os.MkdirTemp just made in a staging directory it checked this process owns and only it writes; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/update/repo.go Init os.MkdirAll only agentos-release calls Init, as the maintainer on the maintainer's machine (no unit starts it), in the repository directory the maintainer names
 allow broker/update/repo.go Repo.storeTarget os.Open only agentos-release calls it (AddRelease), as the maintainer, on a release file the maintainer names on its command line, which may be a link on purpose
 allow broker/update/repo.go Repo.storeTarget os.MkdirAll only agentos-release calls it (AddRelease), as the maintainer, under the repository directory the maintainer names
+allow broker/update/repo.go Repo.latest os.ReadDir only agentos-release calls it, as the maintainer on the maintainer's machine (no unit starts it), on the repository directory the maintainer names
+allow broker/update/repo.go Repo.AddRelease os.CreateTemp only agentos-release calls it, as the maintainer, in the repository directory the maintainer names; O_CREAT|O_EXCL at a fresh random name refuses a link there
+allow broker/update/repo.go Repo.SetMaintainerAttestors os.CreateTemp only agentos-release calls it, as the maintainer, in the repository directory the maintainer names; O_CREAT|O_EXCL at a fresh random name refuses a link there
+allow broker/update/repo.go Repo.storeTarget os.CreateTemp only agentos-release calls it (AddRelease), as the maintainer, under the repository directory the maintainer names; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/update/keys.go readPEM os.ReadFile only agentos-release calls LoadPublicKey and LoadPrivateKey, as the maintainer, on key files the maintainer names on its command line, which may be links on purpose
 allow broker/update/keys.go LoadPrivateKey os.Stat only agentos-release calls it, as the maintainer, on a key file the maintainer names; the mode check reads the key the maintainer pointed at, link or not
 
@@ -82,6 +90,7 @@ allow broker/vm/vm.go removeAll os.Remove unlink: a snapshot's meta.json, at the
 allow broker/vm/vm.go publishSnap os.Remove the snapshot's meta.json, at the top of its root-held directory
 allow broker/vm/vm.go publishSnap os.RemoveAll the root-held snapshot directory whose publish failed
 allow broker/vm/vm.go readJSON os.ReadFile a machine's or snapshot's meta.json, at the top of its root-held directory, which only the broker writes
+allow broker/vm/vm.go Manager.load os.ReadDir lists root-held snapshots/ and machines/ in StateDir, made 0700 inside root-held /var/lib/agentos
 allow broker/vm/forget.go Manager.resetStopped os.MkdirAll the machine directory, root-held
 allow broker/vm/forget.go Manager.removeSnapshot os.Remove the snapshot's meta.json, at the top of its root-held directory
 allow broker/vm/forget.go Manager.removeSnapshot os.RemoveAll the root-held snapshot directory
@@ -97,6 +106,7 @@ allow broker/vm/gvisor/gvisor.go writeBundle os.WriteFile config.json in the roo
 allow broker/vm/gvisor/gvisor.go Runtime.Exec os.MkdirAll runsc's --root, root-held
 allow broker/vm/gvisor/gvisor.go Runtime.Exec os.Remove the pid and log files CreateTemp made in runsc's root-held --root
 allow broker/vm/gvisor/gvisor.go Runtime.Exec os.ReadFile the pid file CreateTemp made in runsc's root-held --root, written by runsc outside the sandbox
+allow broker/vm/gvisor/gvisor.go Runtime.Exec os.CreateTemp the pid and log files, in runsc's root-held 0700 --root; O_CREAT|O_EXCL at a fresh random name refuses a link there
 allow broker/vm/gvisor/runonce.go Runtime.RunOnce os.RemoveAll the one-shot's directory in runsc's root-held --root
 allow broker/vm/gvisor/runonce.go Runtime.RunOnce os.MkdirAll runsc's root-held --root
 allow broker/vm/gvisor/runonce.go writeOneShotBundle os.MkdirAll the one-shot's bundle directory in runsc's root-held --root
@@ -145,6 +155,7 @@ allow broker/e2e/boxe2e/sysroot.go buildSysroot os.WriteFile sysfs attribute fil
 # daemon/arc2_test.go, owner/arc2_test.go), of agentosd's state in root-held
 # /var/lib/agentos (tmpfiles.d: 0700 root root), which no other uid can write.
 allow broker/accel/accel.go readTrim os.ReadFile a GPU's sysfs vendor attribute, served by the kernel; no uid plants a link in sysfs
+allow broker/accel/accel.go Discover os.ReadDir lists /sys/class/accel and /sys/class/drm (agentosd passes /sys); no uid plants a link in sysfs
 allow broker/budget/budget.go meminfoMB os.Open /proc/meminfo (agentosd's only caller), served by the kernel; no uid plants a link in procfs
 allow broker/change/store.go FileStore.Load os.ReadFile agentosd's kept-replies.json in root-held /var/lib/agentos; the other root-side reader is the e2e/boxe2e harness (Seal of /var/lib/agentos/claim.json, root-held, and Claimed of agentos-localui's own /var/lib/agentos-localui/claim.json), which runs as root only in a throwaway CI VM (#3946's scope)
 allow broker/change/store.go DirContent.Get os.ReadFile a body in the .d directory beside agentosd's state file in root-held /var/lib/agentos
@@ -154,6 +165,8 @@ allow broker/question/question.go New os.ReadFile agentosd's -questions book, in
 allow broker/backup/target.go DirTarget.PutTable os.Remove unlink(2) of the temp file os.CreateTemp just made in the target directory; unlink removes a link at the name itself and never follows it
 allow broker/backup/target.go DirTarget.PutTable os.Link link(2) never follows a link at its new path and refuses an existing one, so a planted name fails the put (ErrExists)
 allow broker/backup/target.go DirTarget.DeleteTable os.Remove unlink(2) removes a link at the table's name itself and never follows it
+allow broker/backup/target.go DirTarget.PutTable os.CreateTemp the temp table in the owner's target directory, which kernel/proc resolves and checks outside the kernel's data at each use; O_CREAT|O_EXCL at a fresh random name refuses a link there
+allow broker/backup/target.go DirTarget.Tables os.ReadDir lists that resolved target directory; it reads names only, and only names of the table form count
 allow broker/change/store.go DirContent.Put os.MkdirAll the bodies directory beside agentosd's state file in root-held /var/lib/agentos
 allow broker/change/store.go DirContent.Delete os.Remove unlink(2) removes a link at the body's name itself and never follows it
 allow broker/follow/follow.go Executor.setUnsent os.Remove unlink(2) removes a link at the pending-alert name itself and never follows it
@@ -171,3 +184,6 @@ allow broker/modem/at/serial_linux.go OpenSerial os.OpenFile the modem's tty, fo
 allow broker/hostdisk/list.go System.readTrim os.ReadFile a sysfs attribute (model, removable, size, logical_block_size) of a /sys/block entry; the links on the path are sysfs's own and no uid can make one there
 allow broker/hostdisk/list.go System.mounts os.Open /proc/self/mountinfo; /proc/self is procfs's own link and no uid can make one in procfs
 allow broker/hostdisk/list.go System.loaderPartition os.ReadFile systemd-boot's LoaderDevicePartUUID variable in efivarfs under /sys/firmware/efi/efivars, where no uid can make a link
+allow broker/hostdisk/list.go System.diskOf os.ReadDir lists a /sys/block entry's slaves; the links on the path are sysfs's own and no uid can make one there
+allow broker/hostdisk/list.go System.rootDisk os.ReadDir lists /sys/block; no uid can make a link in sysfs
+allow broker/hostdisk/list.go System.HostDisks os.ReadDir lists /sys/block; no uid can make a link in sysfs

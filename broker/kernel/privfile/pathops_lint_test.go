@@ -6,12 +6,13 @@ package privfile
 // process makes by path follows any link on that path, so a guest, clerk or
 // other uid that can plant one in a directory on it redirects the write,
 // removal or read (#3282, #3382, #3624). The root side is derived, not
-// listed: every binary a shipped systemd unit starts with no User= or
-// DynamicUser= (or on an Exec line with a + or ! prefix), every binary a
-// file under image/ or broker/ makes root run (runKinds: a udev rule's RUN,
-// PROGRAM or IMPORT{program}, #3950; a modprobe.d install or remove command,
-// #4279; a sysctl.d usermode helper), each only a path root_programs.txt
-// lists (#4257), and the module's packages those binaries link. A udev rule
+// listed: every binary a shipped .service or .socket unit (#4330) starts
+// with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
+// every binary a file under image/ or broker/ makes root run (runKinds: a
+// udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
+// or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
+// write of one, #4320), each only a path root_programs.txt lists (#4257),
+// and the module's packages those binaries link. A udev rule
 // sets no property that makes systemd start a unit (#4276), and no file
 // ships in a directory root runs whole. Each package is type-checked, and in
 // those packages each identifier that resolves to a path-based os or
@@ -22,14 +23,14 @@ package privfile
 //
 // Bound: an allow line's reason is held by review, as is a link planted
 // through a path the reason deems safe (a parent directory another uid can
-// write). Every call outside pathOps (among them os.Lstat, os.ReadDir,
-// os.Symlink, os.Chtimes, os.Truncate, os.CreateTemp, os.MkdirTemp, os.DirFS,
-// os.CopyFS, filepath.EvalSymlinks, Glob and Walk, a unix socket's
-// net.Listen, and syscall and unix path calls), a
+// write). Every call outside pathOps (among them os.Lstat, os.Symlink,
+// os.Chtimes, os.Truncate, os.DirFS, os.CopyFS, filepath.EvalSymlinks, Glob
+// and Walk, a unix socket's net.Listen, and syscall and unix path calls), a
 // binary that a script rather than a unit or runKinds file starts (a listed
 // program's reason included), the properties a listed IMPORT{program} or a
-// udev builtin sets, a modprobe.d or sysctl.d file kept outside a directory
-// of that name and installed by a script, a binary built by a line
+// udev builtin sets, a modprobe.d, sysctl.d or tmpfiles.d file kept outside
+// a directory of that name and installed by a script, units and tmpfiles.d
+// lines a package rather than image/ or broker/ ships, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
 // operations of non-root host processes are outside the check.
@@ -55,7 +56,8 @@ import (
 )
 
 // pathOps are, by import path, the path-based calls that follow links: the
-// os calls the brief names (briefs/REV-CHK.md), and io/ioutil's path
+// os calls the brief names (briefs/REV-CHK.md) and the os forms of
+// io/ioutil's ReadDir, TempFile and TempDir (#4329), and io/ioutil's path
 // functions, each a wrapper of an os call that follows links the same way
 // (#4272). A use and an allow line spell one as the package's last path
 // element, a dot and the name: os.Remove, ioutil.WriteFile.
@@ -64,6 +66,7 @@ var pathOps = map[string]map[string]bool{
 		"Open": true, "OpenFile": true, "Create": true, "ReadFile": true, "WriteFile": true,
 		"Remove": true, "RemoveAll": true, "Rename": true, "Chmod": true, "Chown": true,
 		"Mkdir": true, "MkdirAll": true, "Stat": true, "Link": true,
+		"ReadDir": true, "CreateTemp": true, "MkdirTemp": true,
 	},
 	"io/ioutil": {"ReadFile": true, "WriteFile": true, "ReadDir": true, "TempFile": true, "TempDir": true},
 }
@@ -107,7 +110,16 @@ func TestRootSidePathOpsGoThroughPrivfile(t *testing.T) {
 			"os.Open": `""`, "os.OpenFile": `"", os.O_RDONLY, 0`, "os.Create": `""`, "os.ReadFile": `""`, "os.WriteFile": `"", nil, 0`,
 			"os.Remove": `""`, "os.RemoveAll": `""`, "os.Rename": `"", ""`, "os.Chmod": `"", 0`, "os.Chown": `"", 0, 0`,
 			"os.Mkdir": `"", 0`, "os.MkdirAll": `"", 0`, "os.Stat": `""`, "os.Link": `"", ""`,
+			"os.ReadDir": `""`, "os.CreateTemp": `"", ""`, "os.MkdirTemp": `"", ""`,
 			"ioutil.ReadFile": `""`, "ioutil.WriteFile": `"", nil, 0`, "ioutil.ReadDir": `""`, "ioutil.TempFile": `"", ""`, "ioutil.TempDir": `"", ""`,
+		}
+		// The list above is the expected set, so a pathOps that drops one
+		// (os.ReadDir, os.CreateTemp or os.MkdirTemp, #4329) fails here, not
+		// only one that gains a call with no arguments.
+		for name := range args {
+			if !isPathOpName(name) {
+				t.Errorf("%s is not in pathOps", name)
+			}
 		}
 		for pkg, ops := range pathOps {
 			q := path.Base(pkg)
@@ -317,6 +329,31 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			}
 		})
 	}
+	// A .socket's Exec lines run under its own User= like a .service's
+	// (#4330); a socket with none runs them as root.
+	for name, c := range map[string]struct{ path, text string }{
+		"a .socket without User=":          {"image/mkosi/agentos-side.socket", "[Socket]\nListenStream=/run/x\nExecStartPre=/usr/lib/agentos/agentos-side\n"},
+		"a + line in a .socket with User=": {"image/mkosi/agentos-side.socket", "[Socket]\nUser=agentos-side\nExecStopPost=+/usr/lib/agentos/agentos-side\n"},
+		"a .socket drop-in with User=root": {"image/mkosi/agentos-side.socket.d/z.conf", "[Socket]\nUser=root\n"},
+		"a socket.d drop-in with User=0":   {"image/mkosi/socket.d/z.conf", "[Socket]\nUser=0\n"},
+		"a service.d drop-in with User=":   {"image/mkosi/service.d/z.conf", "[Service]\nUser=\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := clone(files)
+			files["image/mkosi/agentos-side.socket"] = "[Socket]\nUser=agentos-side\nExecStartPost=/usr/lib/agentos/agentos-side\n"
+			if bins := set(t, files); len(bins) != 0 {
+				t.Fatalf("a .socket with User=: got %q, want none", bins)
+			}
+			files[c.path] = c.text
+			// service.d reaches every service, agentos-other's too.
+			if bins := set(t, files); len(bins) == 0 || bins[0] != "./cmd/agentos-side" {
+				t.Fatalf("got %q, want ./cmd/agentos-side first", bins)
+			}
+			if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
+				t.Fatalf("the unit's binary's linked package: got %q, want its os.Remove refused", problems)
+			}
+		})
+	}
 	t.Run("a binary a build line names", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-other.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-other\n"
@@ -496,6 +533,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	const (
 		modprobe = "image/mkosi/mkosi.extra/usr/lib/modprobe.d/agentos-x.conf"
 		sysctl   = "image/mkosi/mkosi.extra/usr/lib/sysctl.d/99-agentos-x.conf"
+		tmpfiles = "image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos-x.conf"
 		extra    = "image/mkosi/mkosi.extra/"
 	)
 	files := map[string]string{
@@ -507,7 +545,9 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
 		"image/mkosi/agentos-x.conf":              "install btusb /usr/lib/agentos/agentos-side\nkernel.modprobe=/usr/lib/agentos/agentos-side\n",
 		extra + "usr/lib/udev/rules.d/60-x.rules": "KERNEL==\"x\", MODE=\"0600\"\n",
-		programsFile:                              "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
+		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 root root -\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nw /sys/class/leds/x/trigger - - - - none\nR /var/tmp/agentos-x\n",
+		extra + "usr/lib/tmpfiles.d/README": "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n",
+		programsFile:                        "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
 	}
 	set := func(t *testing.T, files map[string]string) ([]string, error) {
 		t.Helper()
@@ -516,7 +556,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	base := clone(files)
 	base[programsFile] = "/bin/false exits 1\n"
 	if bins, err := set(t, base); err != nil || len(bins) != 0 {
-		t.Fatalf("files that run only /bin/false, name the binary in a comment, a non-helper key or a pipe-less core_pattern, or sit outside a modprobe.d or sysctl.d directory: got %q, %v, want none", bins, err)
+		t.Fatalf("files that run only /bin/false, name the binary in a comment, a non-helper key or a pipe-less core_pattern, write no helper, or sit outside a modprobe.d, sysctl.d or tmpfiles.d directory: got %q, %v, want none", bins, err)
 	}
 	for name, c := range map[string]struct{ path, text string }{
 		"an install command":             {modprobe, "install btusb /usr/lib/agentos/agentos-side --quiet\n"},
@@ -529,6 +569,13 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"kernel.hotplug":                 {sysctl, "kernel.hotplug = /usr/lib/agentos/agentos-side\n"},
 		"kernel.poweroff_cmd":            {sysctl, "kernel.poweroff_cmd=/usr/lib/agentos/agentos-side\n"},
 		"a - prefixed helper":            {sysctl, "-kernel.modprobe=/usr/lib/agentos/agentos-side\n"},
+		// #4320: systemd-tmpfiles writes a w line as root at boot.
+		"a tmpfiles core_pattern pipe":  {tmpfiles, "w /proc/sys/kernel/core_pattern - - - - |/usr/lib/agentos/agentos-side %p\n"},
+		"a tmpfiles w+ kernel.modprobe": {tmpfiles, "w+ /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n"},
+		"a tmpfiles kernel.hotplug":     {tmpfiles, "w-! /proc/sys/kernel/hotplug - - - - /usr/lib/agentos/agentos-side\n"},
+		"a tmpfiles uevent_helper":      {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n"},
+		"a tmpfiles poweroff_cmd":       {tmpfiles, "\tw /proc/sys/kernel/poweroff_cmd\t-\t-\t-\t-\t/usr/lib/agentos/agentos-side --now\n"},
+		"a tmpfiles.d under broker":     {"broker/side/tmpfiles.d/x.conf", "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -569,6 +616,30 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"an init.d script":              {extra + "etc/init.d/agentos-x", "", `reads no such file`},
 		"an rc.local":                   {extra + "etc/rc.local", "", `reads no such file`},
 		"a build into a generator dir":  {"image/build.sh", "go build -o \"$STAGE/usr/lib/systemd/system-generators/agentos-gen\" ./cmd/agentos-side\n", `a directory root runs whole`},
+		// #4320: request-key's programs run as root.
+		"a request-key.conf":   {extra + "etc/request-key.conf", "create user * * /usr/lib/agentos/agentos-side %k\n", `reads no such file`},
+		"a request-key.d file": {extra + "etc/request-key.d/x.conf", "", `reads no such file`},
+		// #4342: a compiled hwdb sets properties as its sources do.
+		"an /etc/udev hwdb.bin":           {extra + "etc/udev/hwdb.bin", "", `reads no such file`},
+		"an /etc/systemd/hwdb hwdb.bin":   {extra + "etc/systemd/hwdb/hwdb.bin", "", `reads no such file`},
+		"a /usr/lib/systemd hwdb.bin":     {extra + "usr/lib/systemd/hwdb/hwdb.bin", "", `reads no such file`},
+		"a /usr/lib/udev hwdb.bin":        {extra + "usr/lib/udev/hwdb.bin", "", `reads no such file`},
+		"a tmpfiles binfmt_misc register": {tmpfiles, "w /proc/sys/fs/binfmt_misc/register - - - - :x:E::bin::/usr/lib/agentos/agentos-side:\n", `registers an interpreter`},
+		"a tmpfiles binfmt_misc mode":     {tmpfiles, "z /proc/sys/fs/binfmt_misc/status 0666\n", `registers an interpreter`},
+		"a tmpfiles unlisted helper":      {tmpfiles, "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-other\n", `agentos-other", which`},
+		"a tmpfiles specifier program":    {tmpfiles, "w /proc/sys/kernel/modprobe - - - - %S/agentos-side\n", `absolute program path`},
+		"a tmpfiles shell word":           {tmpfiles, "w /proc/sys/kernel/core_pattern - - - - |/bin/false;/usr/lib/agentos/agentos-side\n", `may not hold`},
+		"a tmpfiles glob path":            {tmpfiles, "w /proc/sys/kernel/modprob? - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles specifier path":       {tmpfiles, "w /proc/sys/kernel/%a - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles unclean path":         {tmpfiles, "w /proc/sys/kernel/../kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles type it lacks":        {tmpfiles, "ww /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `plain absolute path`},
+		"a tmpfiles magic link":           {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
+		"a tmpfiles mode on a helper":     {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
+		"a tmpfiles w to a file":          {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys or /sys`},
+		"a tmpfiles f":                    {tmpfiles, "f /etc/rc.local 0755 - - - /usr/lib/agentos/agentos-side\n", `type f writes`},
+		"a tmpfiles L":                    {tmpfiles, "L+ /etc/systemd/system-generators/x - - - - /usr/lib/agentos/agentos-side\n", `type L+ writes`},
+		"a tmpfiles C":                    {tmpfiles, "C /etc/udev/rules.d - - - - /usr/share/agentos/rules.d\n", `type C writes`},
+		"a tmpfiles xattr":                {tmpfiles, "t /usr/lib/agentos/agentos-side - - - - security.capability=0sAQAAAg\n", `type t writes`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -743,22 +814,36 @@ func parseAllow(text string) (allows, pending map[string]string, bad []string) {
 	return allows, pending, bad
 }
 
+// execUnits are the unit types whose Exec lines a process manager runs:
+// a .service's, and a .socket's ExecStartPre, ExecStartPost, ExecStopPre and
+// ExecStopPost, under the same User= and DynamicUser= (#4330). The other
+// types have no Exec line.
+var execUnits = map[string]bool{".service": true, ".socket": true}
+
+// isDropinDir reports whether dir names a drop-in directory of an
+// execUnits type: a unit's or prefix's (x.service.d, agentos-.socket.d) or
+// the type's own (service.d).
+func isDropinDir(dir string) bool {
+	t, ok := strings.CutSuffix(dir, ".d")
+	return ok && (execUnits[path.Ext(t)] || execUnits["."+t])
+}
+
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
 // of the binaries a unit under image/ starts as root or a runKinds file
 // names.
 func rootBinaries(root string) ([]string, error) {
-	units := map[string]string{}     // unit file name -> path
+	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
+		dir := filepath.Base(filepath.Dir(p))
 		switch {
 		case err != nil:
 			return err
 		case d.IsDir():
 			return nil
-		case strings.HasSuffix(p, ".service"):
+		case execUnits[filepath.Ext(p)]:
 			units[p] = d.Name()
-		case strings.HasSuffix(p, ".conf") && strings.HasSuffix(filepath.Dir(p), ".service.d"):
-			dir := filepath.Base(filepath.Dir(p))
+		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
 			dropins[dir] = append(dropins[dir], p)
 		}
 		return nil
@@ -874,26 +959,37 @@ type runKind struct {
 // a modprobe.d file, whose install and remove commands root's /bin/sh runs
 // when a module loads or unloads, through udev's kmod builtin, modprobe or
 // the kernel's request_module (#4279); a sysctl.d file, whose usermode
-// helper keys name a program the kernel runs as root; and any file in a
-// directory whose every file root runs (system and environment generators,
-// system-sleep and system-shutdown hooks, udev's own directory, where a
-// rule finds a bare name, and init.d and rc.local, which systemd's sysv and
-// rc-local generators make root units of, should either come back),
-// registers as an interpreter (binfmt.d) or reads for device properties
-// (udev's hwdb.d, which can set SYSTEMD_WANTS, #4276).
+// helper keys name a program the kernel runs as root; a tmpfiles.d file,
+// whose w lines systemd-tmpfiles writes as root, to those helpers among
+// other paths (#4320); and any file in a directory whose every file root
+// runs (system and environment generators, system-sleep and system-shutdown
+// hooks, udev's own directory, where a rule finds a bare name, init.d and
+// rc.local, which systemd's sysv and rc-local generators make root units
+// of, should either come back, and request-key.d and request-key.conf, whose
+// programs /sbin/request-key runs as root, #4320), registers as an
+// interpreter (binfmt.d) or reads for device properties (udev's hwdb.d, and
+// a prebuilt hwdb.bin wherever the hwdb loader might read one, either of
+// which can set SYSTEMD_WANTS, #4276, #4342).
 // The lint reads none of the last, so none may ship.
 var runKinds = []runKind{
 	{"udev rules file", func(rel string) bool { return strings.HasSuffix(rel, ".rules") }, rulePrograms},
 	{"modprobe.d file", confIn("modprobe.d"), modprobePrograms},
 	{"sysctl.d file", confIn("sysctl.d"), sysctlPrograms},
+	{"tmpfiles.d file", confIn("tmpfiles.d"), tmpfilesPrograms},
 	{"file in a directory root runs whole or reads for properties", inRunDir, nil},
 }
 
 // runDirs are the directories, as path suffixes, of runKinds' last kind.
 var runDirs = []string{
 	"systemd/system-generators", "systemd/system-environment-generators", "systemd/system-sleep",
-	"systemd/system-shutdown", "binfmt.d", "lib/udev", "udev/hwdb.d", "init.d",
+	"systemd/system-shutdown", "binfmt.d", "lib/udev", "udev/hwdb.d", "init.d", "request-key.d",
 }
+
+// runNames are the file names of runKinds' last kind wherever they sit:
+// rc.local, request-key.conf and udev's compiled hwdb.bin, which systemd
+// and udev look for in several directories (/etc/udev, /etc/systemd/hwdb,
+// /usr/lib/systemd/hwdb, /usr/lib/udev).
+var runNames = map[string]bool{"rc.local": true, "request-key.conf": true, "hwdb.bin": true}
 
 // confIn matches a .conf file directly in a directory named dir, the only
 // files kmod and systemd-sysctl read there.
@@ -901,10 +997,10 @@ func confIn(dir string) func(string) bool {
 	return func(rel string) bool { return strings.HasSuffix(rel, ".conf") && path.Base(path.Dir(rel)) == dir }
 }
 
-// inRunDir matches a file directly in one of runDirs, or an rc.local;
+// inRunDir matches a file directly in one of runDirs, or one of runNames;
 // rel is slash-separated.
 func inRunDir(rel string) bool {
-	if path.Base(rel) == "rc.local" {
+	if runNames[path.Base(rel)] {
 		return true
 	}
 	dir := "/" + path.Dir(rel)
@@ -1180,33 +1276,107 @@ func sysctlPrograms(text string) ([]ruleProgram, error) {
 		case strings.HasPrefix(strings.TrimPrefix(k, "-"), "fs.binfmt_misc."):
 			return fmt.Errorf("%d: %s registers an interpreter", n, k)
 		}
-		k = strings.TrimPrefix(k, "-")
-		if !sysctlHelpers[k] || !ok || k == "kernel.core_pattern" && !strings.HasPrefix(v, "|") {
+		if !ok {
 			return nil
 		}
-		p, err := programOf(n, k+"=", strings.Fields(strings.TrimPrefix(v, "|")))
-		if err != nil {
-			return err
+		p, run, err := helperProgram(n, strings.TrimPrefix(k, "-"), v)
+		if run {
+			progs = append(progs, p)
 		}
-		progs = append(progs, p)
-		return nil
+		return err
+	})
+	return progs, err
+}
+
+// helperProgram is the program a value v written to sysctl k makes the
+// kernel run as root, if k is one of sysctlHelpers: core_pattern's only
+// when v starts with |.
+func helperProgram(n int, k, v string) (ruleProgram, bool, error) {
+	if !sysctlHelpers[k] || k == "kernel.core_pattern" && !strings.HasPrefix(v, "|") {
+		return ruleProgram{}, false, nil
+	}
+	p, err := programOf(n, k+"=", strings.Fields(strings.TrimPrefix(v, "|")))
+	return p, err == nil, err
+}
+
+// tmpfilesType is a tmpfiles.d(5) type: a letter, an optional +, then
+// modifiers.
+var tmpfilesType = regexp.MustCompile(`^([A-Za-z])(\+?)([-!=~^$?]*)$`)
+
+// tmpfilesPlain are the tmpfiles.d(5) types that only make a directory or
+// subvolume, set a mode or owner, or ignore or remove what is at a path.
+// The rest write content (f, w), copy (C), link (L), make a device node or
+// fifo (c, b, p) or set an ACL, attribute or xattr (a, h, t, a file
+// capability among them); only w is read, and only to /proc/sys or /sys.
+var tmpfilesPlain = map[string]bool{"d": true, "D": true, "e": true, "v": true, "q": true, "Q": true, "z": true, "Z": true, "x": true, "X": true, "r": true, "R": true}
+
+// tmpfilesPath is a path the reader resolves itself: absolute and clean,
+// with no % specifier, glob or blank.
+var tmpfilesPath = regexp.MustCompile(`^/[A-Za-z0-9_./@:+-]*$`)
+
+// tmpfilesPrograms parses one tmpfiles.d file and returns the program each
+// w line to a usermode helper writes (kernel.core_pattern's pipe,
+// kernel.modprobe, kernel.hotplug or its sysfs name /sys/kernel/uevent_helper,
+// kernel.poweroff_cmd), or an error naming the first line it refuses: a path
+// that is not plain, a type that is not plain or w, a w outside /proc/sys
+// and /sys, any line on a helper but such a w, and any line under
+// /proc/sys/fs/binfmt_misc, whose register file adds an interpreter.
+func tmpfilesPrograms(text string) ([]ruleProgram, error) {
+	var progs []ruleProgram
+	err := eachLine(text, "#", func(n int, line string) error {
+		f := strings.Fields(line)
+		if len(f) < 2 || !tmpfilesType.MatchString(f[0]) || !tmpfilesPath.MatchString(f[1]) || path.Clean(f[1]) != f[1] {
+			return fmt.Errorf("%d: %q is not a tmpfiles.d type and a plain absolute path", n, line)
+		}
+		m := tmpfilesType.FindStringSubmatch(f[0])
+		typ, p := m[1]+m[2], f[1]
+		key := ""
+		switch {
+		case p == "/sys/kernel/uevent_helper":
+			key = "kernel.hotplug"
+		case strings.HasPrefix(p, "/proc/sys/"):
+			key = strings.ReplaceAll(strings.TrimPrefix(p, "/proc/sys/"), "/", ".")
+		}
+		switch {
+		case key == "fs.binfmt_misc" || strings.HasPrefix(key, "fs.binfmt_misc."):
+			return fmt.Errorf("%d: %s is under /proc/sys/fs/binfmt_misc, which registers an interpreter", n, p)
+		case strings.HasPrefix(p, "/proc/") && key == "":
+			return fmt.Errorf("%d: %s is in /proc but not /proc/sys", n, p)
+		case typ != "w" && typ != "w+" && sysctlHelpers[key]:
+			return fmt.Errorf("%d: %s on %s; a helper is only written, with w", n, f[0], p)
+		case typ == "w" || typ == "w+":
+			if key == "" && !strings.HasPrefix(p, "/sys/") {
+				return fmt.Errorf("%d: w to %s; a w line writes only under /proc/sys or /sys", n, p)
+			}
+		case !tmpfilesPlain[typ]:
+			return fmt.Errorf("%d: type %s writes, copies, links, makes a node or labels a file, which the lint does not read", n, f[0])
+		}
+		if len(f) < 7 {
+			return nil
+		}
+		prog, run, err := helperProgram(n, key, strings.Join(f[6:], " "))
+		if run {
+			progs = append(progs, prog)
+		}
+		return err
 	})
 	return progs, err
 }
 
 // dropinDirs are the drop-in directories systemd reads for a unit:
-// name.d, each dash-truncated prefix ("agentos-x-y.service" reads
-// "agentos-x-.service.d" and "agentos-.service.d") and, for an instance, its
-// template's.
+// name.d, its type's (service.d, socket.d), each dash-truncated prefix
+// ("agentos-x-y.service" reads "agentos-x-.service.d" and
+// "agentos-.service.d") and, for an instance, its template's.
 func dropinDirs(name string) []string {
-	base := strings.TrimSuffix(name, ".service")
-	dirs := []string{name + ".d", "service.d"}
+	ext := path.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	dirs := []string{name + ".d", ext[1:] + ".d"}
 	if at := strings.Index(base, "@"); at >= 0 && at < len(base)-1 {
-		dirs = append(dirs, base[:at+1]+".service.d")
+		dirs = append(dirs, base[:at+1]+ext+".d")
 	}
 	for i := len(base) - 1; i > 0; i-- {
 		if base[i] == '-' {
-			dirs = append(dirs, base[:i+1]+".service.d")
+			dirs = append(dirs, base[:i+1]+ext+".d")
 		}
 	}
 	return dirs
