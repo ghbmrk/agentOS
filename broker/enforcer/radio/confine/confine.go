@@ -5,7 +5,9 @@
 // slice t), no-new-privileges, an empty environment, and the seccomp
 // filter spikes/ENF-radio measured, with socket families narrowed to the
 // profile's list. Thread alone also gets a user namespace the enforcer
-// creates as root, with CAP_NET_ADMIN and CAP_NET_RAW in it. The process gets its command interface as fd 3, one end
+// creates as root, with CAP_NET_ADMIN and CAP_NET_RAW in it. A profile
+// with a View (BLE's is the system bus socket) sees only those paths, in a
+// mount namespace of its own (view.go). The process gets its command interface as fd 3, one end
 // of a socket pair, and nothing else: it never opens a path to the
 // enforcer, so the policy store and the page's socket stay its owner's
 // files, unreadable to it.
@@ -50,13 +52,22 @@ type Profile struct {
 	// the stack's new network namespace before the stack runs, after
 	// bringing lo up.
 	Links []string
+	// View, when set, is all of the file system the stack sees: its root
+	// is an empty read-only tmpfs holding each listed path that exists,
+	// bound read-only, nosuid and nodev at its own path, so a
+	// Unix socket the list leaves out cannot be named. The stack's own
+	// mount namespace is built in a user namespace created by the
+	// enforcer as root, mapping only the stack's user and group, whose
+	// CAP_SYS_ADMIN Trampoline drops before the exec. Not with NetAdmin.
+	View []string
 }
 
 // BLE is the Bluetooth stack's profile: it reaches BlueZ over the system
 // bus's Unix socket and nothing else, so no IP, netlink, packet or raw
-// Bluetooth socket (BLE commissioning goes through BlueZ, never raw HCI).
+// Bluetooth socket (BLE commissioning goes through BlueZ, never raw HCI),
+// and the bus socket is the only file it sees (#4215).
 func BLE(uid, gid uint32) Profile {
-	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}}
+	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}, View: []string{SystemBus}}
 }
 
 // Thread is the Thread stack's profile (ot-daemon; D-231): its own user
@@ -147,6 +158,9 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	if s.Net != nil && (p.NetAdmin || len(p.Links) > 0) {
 		return nil, nil, ErrJoin
 	}
+	if err := checkView(p); err != nil {
+		return nil, nil, err
+	}
 	self := s.Self
 	if self == "" {
 		var err error
@@ -192,6 +206,16 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		attr.GidMappingsEnableSetgroups = true // to clear the supplementary groups inside
 		attr.AmbientCaps = []uintptr{capNetAdmin, capNetRaw}
 	}
+	if len(p.View) > 0 {
+		// As for NetAdmin, but for the stack's own mount namespace:
+		// Trampoline builds the view with CAP_SYS_ADMIN there and drops
+		// it before the exec.
+		attr.Cloneflags |= syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
+		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
+		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
+		attr.GidMappingsEnableSetgroups = true
+		attr.AmbientCaps = []uintptr{capSysAdmin}
+	}
 	arg0, extra := Arg0, []*os.File{theirs}
 	hold := p.NetAdmin || len(p.Links) > 0
 	var release *os.File
@@ -207,7 +231,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	cmd := &exec.Cmd{
 		Path:        self,
-		Args:        append([]string{arg0, strings.Join(fam, ","), s.Path}, s.Args...),
+		Args:        append([]string{arg0, strings.Join(fam, ","), strings.Join(p.View, "\n"), s.Path}, s.Args...),
 		Env:         []string{},
 		Dir:         dir,
 		Stderr:      s.Stderr,
@@ -329,15 +353,15 @@ func setns(f *os.File, kind int) error {
 // TestMain). It never returns from a confined start: on any failure it
 // exits 126 before the stack runs.
 func Trampoline() {
-	if len(os.Args) < 3 || (os.Args[0] != Arg0 && os.Args[0] != ArgHold) {
+	if len(os.Args) < 4 || (os.Args[0] != Arg0 && os.Args[0] != ArgHold) {
 		return
 	}
-	err := confineAndExec(os.Args[1], os.Args[2], os.Args[2:], os.Args[0] == ArgHold)
+	err := confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:], os.Args[0] == ArgHold)
 	fmt.Fprintf(os.Stderr, "confine: %v\n", err)
 	os.Exit(126)
 }
 
-func confineAndExec(families, path string, argv []string, hold bool) error {
+func confineAndExec(families, view, path string, argv []string, hold bool) error {
 	var fam []int
 	for f := range strings.SplitSeq(families, ",") {
 		if f == "" {
@@ -363,6 +387,16 @@ func confineAndExec(families, path string, argv []string, hold bool) error {
 		return fmt.Errorf("confine: close_range: %w", e)
 	}
 	runtime.LockOSThread()
+	exe := -1
+	if view != "" {
+		var err error
+		if exe, err = enterView(strings.Split(view, "\n"), path); err != nil {
+			return fmt.Errorf("confine: view: %w", err)
+		}
+		if err := dropCaps(); err != nil {
+			return fmt.Errorf("confine: capabilities: %w", err)
+		}
+	}
 	if err := install(filter(slices.Sorted(slices.Values(fam)))); err != nil {
 		return fmt.Errorf("confine: seccomp: %w", err)
 	}
@@ -374,6 +408,9 @@ func confineAndExec(families, path string, argv []string, hold bool) error {
 		if n, err := syscall.Read(holdFD, b[:]); n != 1 {
 			return fmt.Errorf("confine: not released (%v)", err)
 		}
+	}
+	if exe != -1 {
+		return execFD(exe, argv)
 	}
 	return syscall.Exec(path, argv, []string{})
 }

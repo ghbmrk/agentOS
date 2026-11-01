@@ -27,6 +27,10 @@ const liveArg = "confine-live-probe"
 const liveUID = 4249
 
 func TestMain(m *testing.M) {
+	Trampoline()
+	if len(os.Args) == 5 && os.Args[1] == viewArg {
+		os.Exit(viewProbe(os.Args[2], os.Args[3], os.Args[4]))
+	}
 	if len(os.Args) == 4 && os.Args[1] == liveArg {
 		os.Exit(liveProbe(os.Args[2], os.Args[3]))
 	}
@@ -60,8 +64,6 @@ func (p *probeState) str(s string) uintptr {
 func (p *probeState) path(name string) uintptr { return p.str(filepath.Join(p.dir, name)) }
 
 const (
-	atFdcwd           = ^uintptr(99) // AT_FDCWD, -100
-	openTreeClone     = 1
 	moveMountFEmpty   = 0x4
 	fsconfigCmdCreate = 6
 	mountAttrNosuid   = 0x2

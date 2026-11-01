@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -118,6 +119,7 @@ func probeStack(policy, page string) {
 // for their shared call, but no single error is a verdict here.
 func ptraceChild(func(error) string) string {
 	cmd := exec.Command("/proc/self/exe", idleArg)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard // pipes: a view has no /dev/null
 	stdin, err := cmd.StdinPipe()
 	if err == nil {
 		err = cmd.Start()
@@ -144,6 +146,20 @@ func ptraceChild(func(error) string) string {
 		return "allowed"
 	}
 	return fmt.Sprintf("untested: malformed seize %d, seize %d", malformed, e)
+}
+
+// loader is what this test binary needs to run in a view: it links cgo
+// (net), so it is dynamic, while the enforcer's binary is static
+// (image/build.sh). A path the host lacks is left out of the view.
+var loader = []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64"}
+
+// bleProbe is the BLE profile with its view widened by the loader, and by
+// /proc, which probeStack reads for its interfaces and execs itself from
+// for its ptrace target. The policy and the page stay outside the view.
+func bleProbe(uid uint32) confine.Profile {
+	p := confine.BLE(uid, uid)
+	p.View = slices.Concat(p.View, loader, []string{"/proc"})
+	return p
 }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
@@ -252,7 +268,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		syscall.Close(f)
 		defer syscall.Close(leakedFD)
-		proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
+		proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
 		if err != nil {
 			t.Fatal(err)
@@ -300,7 +316,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	})
 
 	t.Run("no socket families", func(t *testing.T) {
-		p := confine.BLE(4242, 4242)
+		p := bleProbe(4242)
 		p.Families = nil
 		proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 			Args: []string{probeArg, policy, page}, Stderr: testWriter{t}})
