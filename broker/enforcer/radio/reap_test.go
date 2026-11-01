@@ -159,6 +159,40 @@ func TestReplacedStackGoneBeforeNewLink(t *testing.T) {
 	}
 }
 
+// TestStuckStackHoldsOnlyItsOwnAttach (ENF-k-11, NET-6): a replaced
+// stack's process that cannot be reaped holds only its own stack's
+// Attach; another stack (the Thread lock's) still attaches. Catches one
+// lock for every stack's Attach.
+func TestStuckStackHoldsOnlyItsOwnAttach(t *testing.T) {
+	h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stuck := newStandIn(&device{})
+	defer close(stuck.reap)
+	host, stack := net.Pipe()
+	defer stack.Close()
+	if err := h.Attach(StackBLE, stuck, host); err != nil {
+		t.Fatal(err)
+	}
+	nhost, nstack := net.Pipe()
+	defer nstack.Close()
+	go h.Attach(StackBLE, exited{}, nhost)
+	<-stuck.stopped
+	thost, tstack := net.Pipe()
+	defer tstack.Close()
+	attached := make(chan error, 1)
+	go func() { attached <- h.Attach(StackThread, exited{}, thost) }()
+	select {
+	case err := <-attached:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stuck BLE process held Thread's Attach")
+	}
+}
+
 // TestAttachNeedsProcessAndLink (ENF-k-11): a link without the process
 // whose end it is cannot be attached, nor a process without a link.
 func TestAttachNeedsProcessAndLink(t *testing.T) {
@@ -266,8 +300,15 @@ func TestReplacedStackReapedWithItsChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer next.Stop()
-	if err := h.Attach(StackBLE, next, nconn); err != nil {
-		t.Fatal(err)
+	attached := make(chan error, 1)
+	go func() { attached <- h.Attach(StackBLE, next, nconn) }()
+	select {
+	case err := <-attached:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Attach of the replacement never returned: the replaced stack was not killed")
 	}
 	if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
 		t.Errorf("the replaced stack after Attach: kill 0 = %v, want ESRCH (reaped)", err)
@@ -278,5 +319,50 @@ func TestReplacedStackReapedWithItsChildren(t *testing.T) {
 	}
 	if _, err := h.State(scale.Name); err != nil {
 		t.Errorf("the replacement: %v", err)
+	}
+}
+
+// TestWaitAndStopReapOnce (ENF-k-11): the launcher's own Wait and the
+// host's Stop run together on one confined stack, and each returns only
+// once the stack has been reaped. Catches a second exec.Cmd.Wait that
+// returns at once ("Wait was already called") while the stack lives.
+func TestWaitAndStopReapOnce(t *testing.T) {
+	if !asRoot(t) {
+		return
+	}
+	dir, err := os.MkdirTemp("", "radio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	os.Chmod(dir, 0o755)
+	bin := filepath.Join(dir, "radio.test")
+	copyFile(t, os.Args[0], bin)
+	for range 5 {
+		proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
+			Args: []string{sleepArg}, Stderr: io.Discard})
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+		pid := proc.Pid()
+		waited := make(chan error, 1)
+		go func() {
+			proc.Wait()
+			waited <- syscall.Kill(pid, 0)
+		}()
+		time.Sleep(50 * time.Millisecond) // Wait is blocked in the reap
+		proc.Stop()
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			t.Errorf("after Stop beside a Wait: kill 0 = %v, want ESRCH (reaped)", err)
+		}
+		select {
+		case err := <-waited:
+			if err != syscall.ESRCH {
+				t.Errorf("after Wait beside a Stop: kill 0 = %v, want ESRCH (reaped)", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("Wait never returned after Stop")
+		}
 	}
 }

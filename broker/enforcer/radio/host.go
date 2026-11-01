@@ -53,7 +53,7 @@ type Host struct {
 	cfg     Config
 	devices map[string]Device
 
-	amu   sync.Mutex // orders Attach
+	amu   map[Stack]*sync.Mutex // orders each stack's Attaches
 	mu    sync.Mutex
 	links map[Stack]*link // each stack's last link, until replaced
 	next  uint64
@@ -104,7 +104,10 @@ func NewHost(cfg Config) (*Host, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	h := &Host{cfg: cfg, devices: map[string]Device{}, links: map[Stack]*link{}}
+	h := &Host{cfg: cfg, devices: map[string]Device{}, links: map[Stack]*link{}, amu: map[Stack]*sync.Mutex{}}
+	for s := range Declared {
+		h.amu[s] = &sync.Mutex{}
+	}
 	for _, d := range cfg.Devices {
 		if _, dup := h.devices[d.Name]; dup || !name(d.Name) || Declared[d.Stack] == nil {
 			return nil, fmt.Errorf("radio: device %q refused", d.Name)
@@ -132,8 +135,8 @@ func (h *Host) Attach(s Stack, p Proc, conn Conn) error {
 	if p == nil || conn == nil {
 		return errors.New("radio: attach needs the stack's process and link")
 	}
-	h.amu.Lock()
-	defer h.amu.Unlock()
+	h.amu[s].Lock()
+	defer h.amu[s].Unlock()
 	h.mu.Lock()
 	old := h.links[s]
 	h.mu.Unlock()

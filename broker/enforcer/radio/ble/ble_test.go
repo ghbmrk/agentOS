@@ -1110,7 +1110,7 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 	}
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
-	h.Attach(radio.StackBLE, exited{}, conn)
+	h.Attach(radio.StackBLE, proc, conn)
 	if _, err := h.Call(radio.Request{Op: radio.OpConnect, Device: "scale"}); err != nil {
 		t.Fatalf("connect through the confined stack: %v", err)
 	}
