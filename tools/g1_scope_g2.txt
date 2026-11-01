@@ -144,6 +144,10 @@ exempt-pr 4309
 # not name (D-198). Remove once #4212 merges.
 exempt-pr 4212
 
+# #4323 (#4286, tier A): broker/enforcer/nft/, which the G2 list does not name (D-198).
+# Remove once #4323 merges.
+exempt-pr 4323
+
 # #4182 (ENF-g-b): broker/enforcer/ap/, which the G2 list does not name (D-198). Remove once #4182
 # merges.
 exempt-pr 4182
