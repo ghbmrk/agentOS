@@ -239,3 +239,31 @@ func TestCountsSaturate(t *testing.T) {
 		t.Fatalf("saturated: %+v", o)
 	}
 }
+
+// TestYesterdaysSharedAddressMergesOnlyWhenLive: destinations that shared
+// an address yesterday are one group today only while that address is
+// live, resolved again today or carrying bytes today (ASSUMPTIONS
+// ENF-cap-3); otherwise each keeps its own cap. Mutants: the liveness
+// test always true (yesterday's merge kept), or either half negated.
+func TestYesterdaysSharedAddressMergesOnlyWhenLive(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Resolved("a.example", addrA)
+	c.Resolved("b.example", addrA)
+	if n := len(c.Counts().Groups); n != 1 {
+		t.Fatalf("resolved together today: %d groups, want 1", n)
+	}
+	clk.t = noon.Add(13 * time.Hour) // the next day
+	if n := len(c.Counts().Groups); n != 2 {
+		t.Fatalf("yesterday's shared address, idle today: %d groups, want 2", n)
+	}
+	c.Add(reading(1, 0, addrA, 1))
+	if g := group(t, c.Counts(), "a.example"); len(g.Dests) != 2 || g.Count != 1 {
+		t.Fatalf("yesterday's shared address carrying bytes today: %+v", g)
+	}
+	clk.t = noon.Add(37 * time.Hour) // a day later, idle
+	c.Resolved("b.example", addrA)
+	if g := group(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
+		t.Fatalf("re-resolved for b.example alone today: %+v", g)
+	}
+}
