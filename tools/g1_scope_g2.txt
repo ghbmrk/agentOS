@@ -88,9 +88,9 @@ exempt-pr 4139
 # Remove once #4145 merges.
 exempt-pr 4145
 
-# #4258 (ENF-netns-mac, #4189): broker/enforcer/nft/ test files, which the G2 list does not name (D-198).
-# Remove once #4258 merges.
-exempt-pr 4258
+# #4327 (#4312): broker/enforcer/nft/ test files, which the G2 list does not name (D-198).
+# Remove once #4327 merges.
+exempt-pr 4327
 
 # #4287 (ENF-q, #3675): broker/enforcer/locks/, which the G2 list does not name (D-198).
 # Remove once #4287 merges.
@@ -128,9 +128,17 @@ exempt-pr 4297
 # Remove once #4250 merges.
 exempt-pr 4250
 
+# #4352 (#4316): broker/enforcer/dns/ASSUMPTIONS.md and netns_test.go, which the G2 list does not name (D-198).
+# Remove once #4352 merges.
+exempt-pr 4352
+
 # #4290 (ENF-c, #3663): broker/enforcer/enrol/, page/ and policy/, which the G2 list does not name (D-198).
 # Remove once #4290 merges.
 exempt-pr 4290
+
+# #4356 (#4354): broker/enforcer/alert/ test file, which the G2 list does not name (D-198).
+# Remove once #4356 merges.
+exempt-pr 4356
 
 # #4171 (ENF-r-follow-2): broker/enforcer/devsecret/, which the G2 list does not name (D-198).
 # Remove once #4171 merges.
@@ -163,6 +171,10 @@ exempt-pr 4260
 # #4216 (ENF-k2-rx, #4196): broker/enforcer/radio/ble/, which the G2 list does not name (D-198).
 # Remove once #4216 merges.
 exempt-pr 4216
+
+# #4350 (CAM-decoder-uid): broker/cmd/agentos-camera/ and broker/cmd/agentos-camdecode-host/, which the G2 list does not name (D-198).
+# Remove once #4350 merges.
+exempt-pr 4350
 
 # Project machinery and records.
 allow .claude/
