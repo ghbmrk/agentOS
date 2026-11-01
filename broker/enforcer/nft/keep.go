@@ -25,11 +25,7 @@ import (
 // A name set is the holder's and the name's alone: a name dropped and
 // listed again, or a device that takes over another's VLAN, starts empty.
 func Reload(d policy.Document, l Layout, running []byte) (string, error) {
-	devs, _, err := compiled(d, l)
-	if err != nil {
-		return "", err
-	}
-	text, err := Compile(d, l)
+	text, devs, err := compile(d, l)
 	if err != nil {
 		return "", err
 	}

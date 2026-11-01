@@ -174,7 +174,11 @@ func listing(sets map[string][]any) []byte {
 				es = append(es, e.(raw).s)
 			}
 		}
-		b.WriteString(`, {"set": {"family": "inet", "name": "` + n + `", "table": "enforcer", "type": "ipv4_addr", "handle": 2, "flags": ["timeout"], "elem": [` + strings.Join(es, ", ") + `]}}`)
+		family, table, name := "inet", "enforcer", n
+		if p := strings.Split(n, "/"); len(p) == 3 { // another family or table
+			family, table, name = p[0], p[1], p[2]
+		}
+		b.WriteString(`, {"set": {"family": "` + family + `", "name": "` + name + `", "table": "` + table + `", "type": "ipv4_addr", "handle": 2, "flags": ["timeout"], "elem": [` + strings.Join(es, ", ") + `]}}`)
 	}
 	b.WriteString("]}")
 	return []byte(b.String())
@@ -198,13 +202,15 @@ func TestReloadCarriesListedAnswersOnly(t *testing.T) {
 	core, _ := allowSetOf(t, wide, CoreSet(false))
 	tv6 := func(n string) string { return tv.Named(n, true) }
 	running := listing(map[string][]any{
-		DeviceSet(101, false):                 {"203.0.113.10", "203.0.113.20", "198.51.100.9"},
-		tv.Named("tv.example", false):         {"203.0.113.10", "203.0.113.40", "2001:db8::1", raw{`{"elem": {"val": "203.0.113.50", "timeout": 60}}`}, raw{`{"prefix": {"addr": "203.0.113.0", "len": 24}}`}, "::ffff:203.0.113.60", "fe80::1%eth0"},
-		tv.Named("cdn.example", false):        {"203.0.113.20", "203.0.113.40"},
-		tv6("tv.example"):                     {"2001:db8::10", "203.0.113.70"},
-		core.Named("core.example", false):     {"203.0.113.30"},
-		core.Named("old.core.example", false): {"1.1.1.1"},
-		DeviceSet(103, false):                 {"203.0.113.80"},
+		DeviceSet(101, false):                          {"203.0.113.10", "203.0.113.20", "198.51.100.9"},
+		tv.Named("tv.example", false):                  {"203.0.113.10", "203.0.113.40", "2001:db8::1", raw{`{"elem": {"val": "203.0.113.50", "timeout": 60}}`}, raw{`{"prefix": {"addr": "203.0.113.0", "len": 24}}`}, "::ffff:203.0.113.60", "fe80::1%eth0"},
+		tv.Named("cdn.example", false):                 {"203.0.113.20", "203.0.113.40"},
+		tv6("tv.example"):                              {"2001:db8::10", "203.0.113.70", "::ffff:203.0.113.61", "fe80::2%eth0"},
+		"ip/enforcer/" + tv.Named("tv.example", false): {"203.0.113.91"},
+		"inet/other/" + tv.Named("tv.example", false):  {"203.0.113.92"},
+		core.Named("core.example", false):              {"203.0.113.30"},
+		core.Named("old.core.example", false):          {"1.1.1.1"},
+		DeviceSet(103, false):                          {"203.0.113.80"},
 	})
 
 	base, err := Compile(narrow, l)

@@ -355,9 +355,15 @@ func allowSets(d policy.Document, devs []device) []AllowSet {
 // text that starts by flushing the running ruleset, so loading it replaces
 // everything in one transaction. The same inputs give the same bytes.
 func Compile(d policy.Document, l Layout) (string, error) {
+	text, _, err := compile(d, l)
+	return text, err
+}
+
+// compile is Compile's ruleset and the devices it was compiled for.
+func compile(d policy.Document, l Layout) (string, []device, error) {
 	devs, paths, err := compiled(d, l)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var isp4, isp6, ap4, ap6 []string
 	for _, p := range l.ISP {
@@ -585,7 +591,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	}
 	for _, rs := range [][]rule{fwd, people} {
 		if err := bindAll(idx, rs); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	// A related packet that reaches the end of a live chain names a
@@ -703,7 +709,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("iifname " + edge + " arp operation request arp daddr ip != " + l.EdgeGateway.String() + " drop")
 	w.close()
 	w.close()
-	return w.b.String(), nil
+	return w.b.String(), devs, nil
 }
 
 func trafficChain(vlan int, dir string) string {

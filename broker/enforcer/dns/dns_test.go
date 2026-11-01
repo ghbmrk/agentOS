@@ -116,12 +116,6 @@ func TestGolden(t *testing.T) {
 
 func has(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+"\n") }
 
-// TestListedNamesOnly: each listed view answers on its own interface
-// alone and forwards only its own list's names, each exactly, filling only
-// its own list's set; a device without internet resolves nothing, and
-// nothing names the edge. Catches a resolver that forwards any name, one
-// that answers a device with another list's names (ENF-f-4), or one that
-// fills the wrong set.
 // fills is the nftset line that puts name's answers in the allow set set4
 // (and its IPv6 twin) of the fixture and in name's own sets there.
 func fills(t *testing.T, name, set4 string) string {
@@ -140,6 +134,12 @@ func fills(t *testing.T, name, set4 string) string {
 	return ""
 }
 
+// TestListedNamesOnly: each listed view answers on its own interface
+// alone and forwards only its own list's names, each exactly, filling only
+// its own list's set; a device without internet resolves nothing, and
+// nothing names the edge. Catches a resolver that forwards any name, one
+// that answers a device with another list's names (ENF-f-4), or one that
+// fills the wrong set.
 func TestListedNamesOnly(t *testing.T) {
 	f := generate(t)
 	var ifaces []string
