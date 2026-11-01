@@ -490,3 +490,19 @@ func TestEarlierDayAfterPause(t *testing.T) {
 		t.Fatalf("an earlier day after a pause: %v", err)
 	}
 }
+
+// A request asked at the very instant of the pause cannot be told from one
+// asked before it, so its answer is refused too; one asked after counts.
+func TestAskAtThePauseInstant(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	tk := g.Ask()
+	g.Paused()
+	if err := g.Summary(tk, 1, capped(1000, 0, "backup")); !errors.Is(err, ErrSummary) {
+		t.Fatalf("asked at the pause instant: %v", err)
+	}
+	c.step(time.Nanosecond)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "backup")); err != nil {
+		t.Fatalf("asked after the pause: %v", err)
+	}
+}

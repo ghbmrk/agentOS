@@ -78,16 +78,14 @@ type Group struct {
 	Count uint64
 }
 
-// Ticket is one summary request: the kernel's time it was asked for, and
-// the pause epoch it was asked in.
+// Ticket is one summary request: the kernel's time it was asked for.
 type Ticket struct {
-	at    time.Time
-	epoch uint64
+	at time.Time
 }
 
 // Send is one reserved send, held until it ends.
 type Send struct {
-	id uint64
+	r *reservation
 }
 
 type reservation struct {
@@ -102,19 +100,18 @@ type reservation struct {
 type Gate struct {
 	mu     sync.Mutex
 	now    func() time.Time
-	epoch  uint64
+	paused time.Time // the last pause; zero if none
 	have   bool
 	asked  time.Time
 	day    uint32
 	group  map[string]*Group // by destination
-	next   uint64
-	active map[uint64]*reservation
+	active map[*reservation]struct{}
 }
 
 // New is a gate with no count, on the clock now (time.Now in production;
 // its monotonic reading is what ages a count).
 func New(now func() time.Time) *Gate {
-	return &Gate{now: now, active: map[uint64]*reservation{}}
+	return &Gate{now: now, active: map[*reservation]struct{}{}}
 }
 
 // Ask is called before a summary request is written, so every send that
@@ -122,7 +119,7 @@ func New(now func() time.Time) *Gate {
 func (g *Gate) Ask() Ticket {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return Ticket{at: g.now(), epoch: g.epoch}
+	return Ticket{at: g.now()}
 }
 
 // Summary takes the enforcer's answer to t: its day and its cap groups.
@@ -130,7 +127,7 @@ func (g *Gate) Ask() Ticket {
 func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if t.epoch != g.epoch || day < g.day || (g.have && t.at.Before(g.asked)) {
+	if (!g.paused.IsZero() && !t.at.After(g.paused)) || day < g.day || (g.have && t.at.Before(g.asked)) {
 		return ErrSummary
 	}
 	by := map[string]*Group{}
@@ -145,9 +142,9 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 		}
 	}
 	g.have, g.asked, g.day, g.group = true, t.at, day, by
-	for id, r := range g.active {
+	for r := range g.active {
 		if !r.ended.IsZero() && r.ended.Before(t.at) {
-			delete(g.active, id) // ended before the ask: in the count
+			delete(g.active, r) // ended before the ask: in the count
 		}
 	}
 	return nil
@@ -156,12 +153,12 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 // Paused is called when a summary request meets the pause the enforcer
 // keeps after a core trip until the "core reflashed" step (D-260, D-262):
 // answered Paused, or known to be paused. The count held is none, and so
-// is any answer to a request asked before the pause. A request the
+// is any answer to a request asked at or before the pause. A request the
 // enforcer drops unanswered needs no call: its count ages out at Fresh.
 func (g *Gate) Paused() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.epoch++
+	g.paused = g.now()
 	g.have, g.group = false, nil
 }
 
@@ -185,7 +182,7 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	if !ok || !ok2 {
 		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: ^uint64(0)}
 	}
-	for _, r := range g.active {
+	for r := range g.active {
 		if rg, in := g.group[r.dest]; in && rg != gr {
 			continue // another group's; one in no group counts against every group
 		}
@@ -196,9 +193,9 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	if wire.PastCap(total, gr.Cap) {
 		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: total}
 	}
-	g.next++
-	g.active[g.next] = &reservation{dest: dest, bytes: need, at: now}
-	return Send{id: g.next}, nil
+	r := &reservation{dest: dest, bytes: need, at: now}
+	g.active[r] = struct{}{}
+	return Send{r: r}, nil
 }
 
 // End is called once no byte of a reserved send can still leave: its
@@ -208,8 +205,8 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 func (g *Gate) End(s Send) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if r, ok := g.active[s.id]; ok && r.ended.IsZero() {
-		r.ended = g.now()
+	if s.r != nil && s.r.ended.IsZero() {
+		s.r.ended = g.now()
 	}
 }
 
