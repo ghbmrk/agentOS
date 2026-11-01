@@ -145,6 +145,9 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, errMalformed
 	}
 	next, err := policy.Decode(raw)
+	if errors.Is(err, policy.ErrNameHeld) {
+		return nil, nil, err // the screen names the conflict (#4144)
+	}
 	if err != nil {
 		return nil, nil, errMalformed
 	}

@@ -39,14 +39,21 @@ var (
 	Group6 = netip.AddrPortFrom(netip.MustParseAddr(nft.MDNSGroup6), nft.MDNSPort)
 )
 
-// Plan is where each kind of packet goes from each interface.
+// Plan is where each kind of packet goes from each interface, and the
+// names each interface's responses may carry.
 type Plan struct {
 	queries, responses map[string][]string
+	pins               map[string]pins
 }
 
-// NewPlan is the plan for paths.
-func NewPlan(paths []nft.Path) Plan {
-	p := Plan{queries: map[string][]string{}, responses: map[string][]string{}}
+// NewPlan is the plan for paths, whose device interfaces announce only
+// the names announces pins for them (nft.Announces, #4144): an interface
+// with none passes no response records.
+func NewPlan(paths []nft.Path, announces map[string][][]string) Plan {
+	p := Plan{queries: map[string][]string{}, responses: map[string][]string{}, pins: map[string]pins{}}
+	for iface, ns := range announces {
+		p.pins[iface] = newPins(ns)
+	}
 	add := func(m map[string][]string, from, to string) {
 		if !slices.Contains(m[from], to) {
 			m[from] = append(m[from], to)
@@ -253,7 +260,7 @@ func (r *relayer) handle(iface string, port uint16, pkt []byte, now time.Time) (
 	if len(outs) == 0 || !r.passes[iface].take(now) {
 		return nil, nil
 	}
-	out := r.f.Pass(iface, r.link(iface), m, now)
+	out := r.f.Pass(iface, r.link(iface), r.plan.pins[iface].pin(m), now)
 	if out == nil || len(out) > maxPacket {
 		return nil, nil
 	}

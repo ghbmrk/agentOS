@@ -7,7 +7,10 @@ package mdns
 // service instances whose SRV targets are those hosts, and their TXT and
 // PTR records. A name claimed on any other interface the relay hears is
 // never the sender's, so a paired device cannot take over a name of its
-// paired network or of another device.
+// paired network or of another device. Before any of that, a response
+// keeps only the names its sender's device pinned when the owner signed
+// it (#4144), so what the relay has or has not heard since it started
+// never widens what passes.
 
 import (
 	"net/netip"
@@ -588,6 +591,58 @@ func (f *Filter) Pass(iface string, link []netip.Prefix, m *message, now time.Ti
 		return nil
 	}
 	return out.bytes()
+}
+
+// pins is the names one interface's device pinned (policy.Device.MDNS),
+// by key, and the service types of its pinned instances.
+type pins struct{ names, types map[string]bool }
+
+func newPins(ns [][]string) pins {
+	p := pins{names: map[string]bool{}, types: map[string]bool{}}
+	for _, l := range ns {
+		n := name(l)
+		p.names[n.key()] = true
+		if n.instance() {
+			p.types[n[1:].key()] = true
+		}
+	}
+	return p
+}
+
+// pin is m with only the response records whose every name is pinned: a
+// host's address records, an instance's SRV on a pinned host and its TXT,
+// a PTR to a pinned instance, and a service type enumeration's PTR to a
+// pinned instance's type. A query passes as it is: its questions name
+// what the asker wants, which pins do not bound. Unpinned, a response
+// keeps nothing, so an interface with no pins passes no records.
+func (p pins) pin(m *message) *message {
+	if m.flags&flagQR == 0 {
+		return m
+	}
+	ok := func(n name) bool { return p.names[n.key()] }
+	keep := func(r record) bool {
+		switch r.typ {
+		case typeA, typeAAAA, typeTXT:
+			return ok(r.name)
+		case typeSRV:
+			return ok(r.name) && ok(r.target)
+		case typePTR:
+			if r.name.key() == services.key() {
+				return p.types[r.target.key()]
+			}
+			return ok(r.target)
+		}
+		return false
+	}
+	out := &message{id: m.id, flags: m.flags}
+	for _, s := range []struct{ in, out *[]record }{{&m.answers, &out.answers}, {&m.additional, &out.additional}} {
+		for _, r := range *s.in {
+			if keep(r) {
+				*s.out = append(*s.out, r)
+			}
+		}
+	}
+	return out
 }
 
 // host: <host>.local (RFC 6762 §3), not a service name.
