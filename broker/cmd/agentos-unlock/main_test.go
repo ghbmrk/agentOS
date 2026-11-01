@@ -137,10 +137,6 @@ func moveRole() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	if err := cloexecAbove(handoff.TPMFD); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 2
-	}
 	if fl, err := unix.FcntlInt(uintptr(leak), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC == 0 {
 		fmt.Fprintf(os.Stderr, "descriptor %d would reach the kernel (flags %d, %v)\n", leak, fl, err)
 		return 2
@@ -192,11 +188,8 @@ func TestReserveRefusesATakenDescriptor(t *testing.T) {
 	defer f.Close()
 	cmd.ExtraFiles = []*os.File{f}
 	out, err := cmd.CombinedOutput()
-	if err == nil || !strings.Contains(string(out), "were not free at my start") {
+	if err == nil || !strings.Contains(string(out), "are not free at my start") {
 		t.Fatalf("a step with descriptor 3 open: %v\n%s", err, out)
-	}
-	if err := handOff(nil, f, config{uid: 1, gid: 1}); err == nil || !strings.Contains(err.Error(), "not held") {
-		t.Fatalf("a hand-off without the reservation: %v", err)
 	}
 }
 

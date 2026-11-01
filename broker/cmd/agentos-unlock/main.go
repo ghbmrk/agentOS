@@ -17,30 +17,11 @@
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
 //
-// With -clerk-anchors and -log, it also writes the owner's hardware keys to
-// a root-owned file for the clerks, which check every view the kernel hands
-// them against keys the kernel did not hand them (D-146, MAIL-keys). Those
-// keys come from the store only: its kernel/anchors entry, or, on a box whose
-// setup put them in the kernel's log, its clerks/anchors entry, which this
-// step copies from the log's first entry at the first boot that finds one
-// (#2995).
-//
-// With -recovery-request, it also carries out the owner's lost-card request
-// (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
-// the kernel approved for the store's current backup recipient makes a new
-// card, replaces the recovery slot, the passphrase slot and the recipient
-// with its recovery key and passphrase in one write, and hands the card
-// to the kernel, which shows it on the owner's page. A request that is not
-// one is ignored, with one line on stderr, and the box starts as ever.
-//
-// With -checker-seed, it also writes the owner's code-generator seed from
-// the store, sealed under the checker's clerk key, to a file only root
-// reads, for the checker's unit to load at each start (CH-4, MIG-4-exit-c2).
-// The kernel hands the checker that key, so the kernel never holds the seed.
-//
-// The runtime keeps no descriptor of its own for the cgroup's CPU limit, so
-// descriptors 3 and 4 are free when main starts and reserve can hold them
-// for the hand-off (#4474).
+// With -clerk-anchors and -log, it also writes the owner's hardware keys for
+// the clerks (clerkAnchors; D-146, #2995); with -recovery-request, it carries
+// out the owner's lost-card request (lostCard; REC-4, route B of D-201); with
+// -checker-seed, it writes the checker's sealed code seed (writeCheckerSeed;
+// CH-4, MIG-4-exit-c2). Each function's comment says how.
 //
 //go:debug containermaxprocs=0
 package main
@@ -81,13 +62,11 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	err := reserve()
-	var c config
+	c, err := parse(os.Args[1:], os.Stderr)
 	if err == nil {
-		c, err = parse(os.Args[1:], os.Stderr)
-	}
-	if err == nil {
-		err = unlockAndExec(c, storePins(c.store))
+		if err = reserve(); err == nil {
+			err = unlockAndExec(c, storePins(c.store))
+		}
 	}
 	log.Fatal(err)
 }
@@ -771,12 +750,9 @@ func openTPM(path string) (transport.TPMCloser, error) {
 
 // handOff writes b to a pipe, drops to the kernel's ids and execs the
 // kernel main with the pipe's read end as handoff.KeyFD and tpm as
-// handoff.TPMFD, over the placeholders reserve holds there. b is far below a pipe's buffer, so the write completes with
+// handoff.TPMFD. b is far below a pipe's buffer, so the write completes with
 // no reader yet.
 func handOff(b []byte, tpm *os.File, c config) error {
-	if !reserved {
-		return errors.New("agentos-unlock: the hand-off's descriptors were not held from my start")
-	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -799,51 +775,7 @@ func handOff(b []byte, tpm *os.File, c config) error {
 	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(tpm.Fd()): handoff.TPMFD}); err != nil {
 		return err
 	}
-	if err := cloexecAbove(handoff.TPMFD); err != nil {
-		return err
-	}
 	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), kernelEnv)
-}
-
-// reserved is set once reserve holds the hand-off's descriptors.
-var reserved bool
-
-// reserve holds handoff.KeyFD and handoff.TPMFD with the two ends of a pipe
-// from the start, before the step opens anything, so no descriptor the Go
-// runtime makes for itself takes either number. The runtime makes its
-// poller's epoll and eventfd at the first pipe, socket or file opened, at the
-// lowest free numbers, and other threads (sysmon, an idle scheduler) poll on
-// them at any time. Were one of them on 3 or 4, handOff's move would put the
-// key pipe or the TPM in its place, and a poll between the move and the exec
-// kills the step with "netpoll failed": the tpm slot, already capped, then
-// refuses every restart in that boot (#4474). The move overwrites only these
-// two placeholders, which are close-on-exec, so neither reaches the kernel
-// unless the move put the hand-off there. A step that does not get exactly 3
-// and 4 (its parent left one open, #2899) unlocks nothing; one left above them
-// is close-on-exec by the time of the exec (cloexecAbove).
-func reserve() error {
-	var p [2]int
-	if err := syscall.Pipe2(p[:], syscall.O_CLOEXEC); err != nil {
-		return fmt.Errorf("agentos-unlock: hold descriptors %d and %d: %w", handoff.KeyFD, handoff.TPMFD, err)
-	}
-	if p != [2]int{handoff.KeyFD, handoff.TPMFD} {
-		syscall.Close(p[0])
-		syscall.Close(p[1])
-		return fmt.Errorf("agentos-unlock: descriptors %d and %d were not free at my start (got %d and %d)", handoff.KeyFD, handoff.TPMFD, p[0], p[1])
-	}
-	reserved = true
-	return nil
-}
-
-// cloexecAbove makes every descriptor above fd close-on-exec, so only 0 to fd
-// reach the kernel: none its parent left open (#2899) and none the step
-// opened without the flag. It fails closed where the kernel lacks
-// close_range's flag (Linux 5.11).
-func cloexecAbove(fd int) error {
-	if err := unix.CloseRange(uint(fd+1), ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
-		return fmt.Errorf("agentos-unlock: mark descriptors above %d close-on-exec: %w", fd, err)
-	}
-	return nil
 }
 
 // kernelEnv is the kernel process's whole environment. It reads no
@@ -940,22 +872,25 @@ func getres(trap uintptr) (r, e, s int) {
 	return int(a), int(b), int(c)
 }
 
-// inherit makes each descriptor survive the exec as the number it maps to;
-// every other descriptor Go opened is close-on-exec. Each is first copied
-// above every target, so moving one never overwrites another still to move.
-func inherit(fds map[int]int) error {
-	high := map[int]int{}
-	for fd, want := range fds {
-		h, _, e := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 16)
-		if e != 0 {
-			return e
-		}
-		high[int(h)] = want
+// reserve holds handoff.KeyFD and handoff.TPMFD from the start, so no runtime
+// descriptor (the poller's; go:debug above shuts its cgroup file) is there for
+// inherit to overwrite: a poll on it before the exec kills the step (#4474).
+func reserve() error {
+	var p [2]int
+	if err := syscall.Pipe2(p[:], syscall.O_CLOEXEC); err != nil || p != [2]int{handoff.KeyFD, handoff.TPMFD} {
+		return fmt.Errorf("agentos-unlock: descriptors %d and %d are not free at my start (got %v, %v)", handoff.KeyFD, handoff.TPMFD, p, err)
 	}
-	for h, want := range high {
-		if err := syscall.Dup3(h, want, 0); err != nil {
+	return nil
+}
+
+// inherit moves each descriptor onto the number it maps to, over reserve's
+// placeholders, and makes every descriptor above them close-on-exec (Linux
+// 5.11), so only those and 0 to 2 reach the exec, none a parent left open.
+func inherit(fds map[int]int) error {
+	for fd, want := range fds {
+		if err := syscall.Dup3(fd, want, 0); err != nil {
 			return err
 		}
 	}
-	return nil
+	return unix.CloseRange(handoff.TPMFD+1, ^uint(0), unix.CLOSE_RANGE_CLOEXEC)
 }
