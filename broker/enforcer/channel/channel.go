@@ -13,12 +13,19 @@
 // ends the connection and is logged.
 //
 // A safety-list device takes reads and, only when the signed policy names
-// it, its one secure-direction command (Table). Every kind is rate-limited,
-// and a burst from the authenticated core pauses the whole channel until
-// the owner resumes it on the enforcer's page (Resume); nothing on the
-// channel resumes it. A failed hello is dropped and never pauses it. Every
-// request is logged, and a channel command that turns a heater off or shuts
-// a valve texts the owner.
+// it, its one secure-direction command (Table). Every kind is rate-limited
+// by the rates the kernel checks before it sends (D-255): a frame outside
+// the format, or a burst of any kind past its rate, from the authenticated
+// core is a core trip at the enforcer (KRN-12, Cut). After a trip the
+// channel answers every request Paused, logging it, while the hello, which
+// carries the heartbeat, still connects; at the "core reflashed" step the
+// traffic summaries flow again, and everything else waits for the owner's
+// passkey restore (D-260, D-262). Refusals, which the kernel cannot
+// foresee, have their own rate, and a burst of them pauses the channel
+// until the owner resumes it on the enforcer's page (Resume), with no trip;
+// nothing on the channel resumes it. A failed hello is dropped and never
+// pauses or trips it. Every request is logged, and a channel command that
+// turns a heater off or shuts a valve texts the owner.
 //
 // It is enforcer code: it imports the standard library, broker/kernel/key
 // through the policy, and the enforcer's own packages only
@@ -60,17 +67,44 @@ type Heads interface {
 }
 
 // Alerts is the enforcer's texts and light (slice h). The channel calls it
-// when a command turned a heater off or shut a valve, and when a burst
-// paused the channel.
+// when a command turned a heater off or shut a valve, and when a burst of
+// refusals paused the channel.
 type Alerts interface {
 	SafetyOff(device string, v wire.Verb)
 	Paused()
 }
 
+// Stage is how far a core trip has lifted (KRN-12 Response, D-260, D-262).
+type Stage uint8
+
+const (
+	// Open: no core trip is in force.
+	Open Stage = iota
+	// Tripped: the core is cut. Only the hello, with the heartbeat it
+	// carries, gets through; every request is answered Paused.
+	Tripped
+	// Reflashed: the owner took the "core reflashed" step. Traffic
+	// summaries flow again, so the restore's capped backup route has a
+	// fresh count; commands, tightenings, other reads and the core's
+	// records wait for the passkey restore, which returns the stage to
+	// Open.
+	Reflashed
+)
+
+// Cut is the enforcer's core trip (KRN-12; DECOY-d owns cutting the core
+// and lifting the cut). The channel trips it on a frame outside the format
+// and on a burst past a rate, and asks it the stage before every request.
+// Stage is called under the channel's lock and must not call the channel;
+// Trip is called after it is released.
+type Cut interface {
+	Trip(reason string)
+	Stage() Stage
+}
+
 // Config is what a channel is built from. Core, Key, Revoked, Policy,
-// Radio, Alerts and Log are required, so no command acts unlogged and no
-// safety command goes untexted (NET-2); a nil read source refuses that
-// read.
+// Radio, Alerts, Cut and Log are required, so no command acts unlogged, no
+// safety command goes untexted and no malformed or excessive message goes
+// untripped (NET-2); a nil read source refuses that read.
 type Config struct {
 	// Core is the kernel's channel sub-key, pinned at enrolment.
 	Core ed25519.PublicKey
@@ -84,6 +118,7 @@ type Config struct {
 	Radio  Radio
 	Heads  Heads
 	Alerts Alerts
+	Cut    Cut
 	// Fingerprint is a safety-list device's secret's fingerprint (slice
 	// r). Its type holds a hash and nothing else, so no read can return
 	// the secret.
@@ -99,7 +134,8 @@ type Config struct {
 	Now func() time.Time
 	// Limits overrides DefaultLimits per kind.
 	Limits map[Kind]Limit
-	// Paused is the state the daemon kept across a restart.
+	// Paused is the refusal pause the daemon kept across a restart; the
+	// trip's stage is Cut's.
 	Paused bool
 }
 
@@ -159,7 +195,7 @@ type session struct {
 // New checks cfg and returns a channel.
 func New(cfg Config) (*Channel, error) {
 	if len(cfg.Core) != ed25519.PublicKeySize || len(cfg.Key) != ed25519.PrivateKeySize ||
-		cfg.Revoked == nil || cfg.Policy == nil || cfg.Radio == nil || cfg.Alerts == nil || cfg.Log == nil {
+		cfg.Revoked == nil || cfg.Policy == nil || cfg.Radio == nil || cfg.Alerts == nil || cfg.Cut == nil || cfg.Log == nil {
 		return nil, ErrConfig
 	}
 	if cfg.Now == nil {
@@ -176,7 +212,7 @@ func New(cfg Config) (*Channel, error) {
 	return c, nil
 }
 
-// Paused reports whether a burst paused the channel.
+// Paused reports whether a burst of refusals paused the channel.
 func (c *Channel) Paused() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -259,6 +295,9 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 			err = wire.ErrType // one hello per connection
 		}
 		if err != nil {
+			if malformed(err) {
+				return c.trip(err.Error()+": tripped the core", err)
+			}
 			return c.refuse(KindFrame, 0, err.Error(), err)
 		}
 		if c.cfg.Revoked(c.cfg.Core) {
@@ -279,6 +318,31 @@ func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.count(KindRefused)
 	return err
+}
+
+// malformed reports whether err is a frame outside the format definition,
+// a core trip (NET-2 The channel, D-255): an unknown or misdirected type, a
+// length out of bounds or a payload that does not decode, a second hello
+// included. A stream that ends mid-frame (wire.ErrShort) is a lost
+// connection, not a message, and only ends it.
+func malformed(err error) bool {
+	return errors.Is(err, wire.ErrType) || errors.Is(err, wire.ErrLength) || errors.Is(err, wire.ErrPayload)
+}
+
+// trip logs a refused frame outside the format, trips the core and
+// returns err.
+func (c *Channel) trip(reason string, err error) error {
+	c.mu.Lock()
+	defer c.release()
+	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
+	c.queueTrip(reason)
+	return err
+}
+
+// queueTrip queues Cut.Trip to run after c.mu is released. The caller
+// holds c.mu.
+func (c *Channel) queueTrip(reason string) {
+	c.queued = append(c.queued, func() { c.cfg.Cut.Trip(reason) })
 }
 
 // preAuth logs and drops a connection that failed before the core

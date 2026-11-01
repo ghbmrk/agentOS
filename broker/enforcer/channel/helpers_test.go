@@ -167,6 +167,27 @@ func (a *alerts) Paused() {
 	}
 }
 
+// cut is a fake core cut: Trip moves it to Tripped, as DECOY-d's does,
+// and the test moves it on as the owner's steps would.
+type cut struct {
+	mu      sync.Mutex
+	stage   Stage
+	reasons []string
+}
+
+func (c *cut) Trip(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stage = Tripped
+	c.reasons = append(c.reasons, reason)
+}
+
+func (c *cut) Stage() Stage { c.mu.Lock(); defer c.mu.Unlock(); return c.stage }
+
+func (c *cut) set(s Stage) { c.mu.Lock(); c.stage = s; c.mu.Unlock() }
+
+func (c *cut) trips() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.reasons) }
+
 type heads struct{ n int }
 
 func (h *heads) Head(wire.Head) error   { h.n++; return nil }
@@ -180,6 +201,7 @@ type rig struct {
 	ch      *Channel
 	radio   *radio
 	alerts  *alerts
+	cut     *cut
 	core    ed25519.PrivateKey
 	enf     ed25519.PublicKey
 	revoked bool
@@ -225,7 +247,7 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 	}
 	_, core, _ := ed25519.GenerateKey(nil)
 	enfPub, enfPriv, _ := ed25519.GenerateKey(nil)
-	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
+	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, cut: &cut{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
 	c := Config{
 		Core:        core.Public().(ed25519.PublicKey),
 		Key:         enfPriv,
@@ -234,6 +256,7 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 		Radio:       r.radio,
 		Heads:       &heads{},
 		Alerts:      r.alerts,
+		Cut:         r.cut,
 		Fingerprint: func(string) ([wire.HashLen]byte, bool) { return sha256.Sum256([]byte("fp")), true },
 		Traffic:     func(d string) ([]byte, error) { return []byte("traffic of " + d), nil },
 		Answer:      func(id uint64, _ []byte) { r.answers = append(r.answers, id) },

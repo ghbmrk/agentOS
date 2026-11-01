@@ -77,6 +77,10 @@ var tightenKinds = map[wire.TightenKind]string{
 	wire.RevokeRule:        policy.RevokeRule,
 }
 
+// summaryRead are the reads that are traffic summaries, which resume at the
+// "core reflashed" step (D-262).
+var summaryRead = map[wire.ReadWhat]bool{wire.ReadTraffic: true}
+
 var readWords = map[wire.ReadWhat]string{
 	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic",
 }
@@ -100,14 +104,14 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		if m.Verb == wire.VerbLevel {
 			ev.What = fmt.Sprintf("level %d", m.Level)
 		}
-		code, ev.Reason = c.gate(KindCommand, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(KindCommand, false, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
 	case wire.Tighten:
 		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, logName(cur, m.Device), tightenKinds[m.Kind]
 		if m.Kind == wire.RemovePair {
 			ev.Device, ev.Other = logName(cur, m.A), logName(cur, m.B)
 		}
-		code, ev.Reason = c.gate(KindTighten, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(KindTighten, false, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
 		var cur policy.Document // an export names no device
 		if m.What != wire.ReadExport {
@@ -115,7 +119,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
-		code, ev.Reason = c.gate(KindRead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindRead, summaryRead[m.What], func() (wire.Code, string) {
 			var code wire.Code
 			var why string
 			body, code, why = c.read(cur, m)
@@ -126,10 +130,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 	case wire.Announce:
 		ev.Kind, ev.ID, ev.What = KindAnnounce, m.ID, "proposal link"
-		code, ev.Reason = c.gate(KindAnnounce, func() (wire.Code, string) { return wire.OK, "counted" })
+		code, ev.Reason = c.gate(KindAnnounce, false, func() (wire.Code, string) { return wire.OK, "counted" })
 	case wire.Head:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log head"
-		code, ev.Reason = c.gate(KindHead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Head(m) != nil {
 				return wire.Refused, "head not kept"
 			}
@@ -137,7 +141,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Entry:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log entry"
-		code, ev.Reason = c.gate(KindHead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Entry(m) != nil {
 				return wire.Refused, "entry not kept"
 			}
@@ -145,7 +149,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Challenge:
 		ev.Kind, ev.ID, ev.What = KindAnswer, m.ID, "challenge answer"
-		code, ev.Reason = c.gate(KindAnswer, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindAnswer, false, func() (wire.Code, string) {
 			if !c.outstanding[m.ID] || c.cfg.Answer == nil {
 				return wire.Refused, "no challenge outstanding with this id"
 			}
@@ -161,7 +165,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	}
 	ev.Code = code
 	c.cfg.Log(ev)
-	if code != wire.OK && code != wire.NeedsOwner {
+	// A Paused answer is not a refusal: a kernel learns of a trip or a
+	// pause only from one, so counting it would pause the summaries the
+	// Reflashed stage reopens.
+	if code != wire.OK && code != wire.NeedsOwner && code != wire.Paused {
 		c.count(KindRefused)
 	}
 	if reply != nil {
@@ -241,31 +248,54 @@ func (e Event) render(show func(string) string) string {
 	return b.String()
 }
 
-// gate runs act unless the channel is paused, after counting k; a kind
-// over its rate pauses the channel and act does not run.
-func (c *Channel) gate(k Kind, act func() (wire.Code, string)) (wire.Code, string) {
+// gate counts k and runs act unless the request may not act now. A kind
+// over its rate trips the core (count). While a trip is in force every
+// request is answered Paused, logged and never tripped again for being
+// paused; at the Reflashed stage a traffic summary (summary set) acts
+// again and the rest wait for the passkey restore (D-260, D-262). The
+// refusal pause holds everything until the owner resumes it.
+func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
+	if !c.count(k) {
+		return wire.Paused, "burst of " + string(k) + ": tripped the core"
+	}
+	switch c.cfg.Cut.Stage() {
+	case Open:
+	case Reflashed:
+		if !summary {
+			return wire.Paused, "the core tripped: paused until the owner's passkey restore"
+		}
+	default: // Tripped, or a stage this code does not know
+		if summary {
+			return wire.Paused, "the core tripped: summaries paused until the core reflashed step"
+		}
+		return wire.Paused, "the core tripped: paused until the owner's passkey restore"
+	}
 	if c.paused {
 		return wire.Paused, "the channel is paused until the owner resumes it on the page"
-	}
-	if !c.count(k) {
-		return wire.Paused, "burst: the channel is paused until the owner resumes it on the page"
 	}
 	return act()
 }
 
-// count takes one from k's bucket and pauses the channel if it was empty.
-// It reports whether the channel is still open. The caller holds c.mu.
+// count takes one from k's bucket. An empty bucket is a burst past the
+// rate: a core trip, or for KindRefused a pause until the owner resumes
+// it. It reports whether the request is inside the rate. The caller holds
+// c.mu.
 func (c *Channel) count(k Kind) bool {
-	if c.paused {
-		return false
-	}
 	now := c.cfg.Now()
 	if c.buckets[k].take(now) {
 		return true
 	}
-	c.paused = true
-	c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of " + string(k) + ": paused until the owner resumes it on the page"})
-	c.queued = append(c.queued, c.cfg.Alerts.Paused)
+	if k != KindRefused {
+		reason := "burst of " + string(k) + " past the rate: tripped the core"
+		c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(k), Reason: reason})
+		c.queueTrip(reason)
+		return false
+	}
+	if !c.paused {
+		c.paused = true
+		c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of refusals: paused until the owner resumes it on the page"})
+		c.queued = append(c.queued, c.cfg.Alerts.Paused)
+	}
 	return false
 }
 
