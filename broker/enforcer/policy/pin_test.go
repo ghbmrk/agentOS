@@ -42,12 +42,6 @@ func TestMDNSNames(t *testing.T) {
 			t.Errorf("%q: %v, want ErrMalformed", n, err)
 		}
 	}
-	// 255 bytes on the wire at most: four labels of 63 and "local" is 1 +
-	// 4*64 + 6 bytes, over; with the instance three bytes shorter, 255.
-	long := []string{strings.Repeat("a", 60), "_" + strings.Repeat("b", 62), "_tcp", "local"}
-	if !mdnsName(long) {
-		t.Errorf("a %d-byte name refused", 1+61+64+5+6)
-	}
 	hostiletext.Run(t, mdnsLabel)
 }
 
@@ -107,6 +101,8 @@ func TestMDNSNameHeldOnce(t *testing.T) {
 			dev(d, "speaker").MDNS = mdnsOf("Laptop.local")
 		}, []string{`"Laptop.local"`, "laptop's and speaker's"}},
 		{"one device, two cases", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("tv.local", "TV.local") }, []string{"tv's and tv's"}},
+		{"A and a", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("A.local"); dev(d, "speaker").MDNS = mdnsOf("a.local") }, []string{"speaker's and tv's"}},
+		{"Z and z", func(d *Document) { dev(d, "tv").MDNS = mdnsOf("Z.local"); dev(d, "speaker").MDNS = mdnsOf("z.local") }, []string{"speaker's and tv's"}},
 	} {
 		_, err := Encode(edit(1, c.edit))
 		if !errors.Is(err, ErrNameHeld) {

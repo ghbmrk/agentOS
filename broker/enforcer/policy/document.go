@@ -332,8 +332,8 @@ func ports(s []Port) []Port {
 	return slices.Compact(out)
 }
 
-// mdnsNames is s sorted by mDNS name (MDNSKey), copied, without exact
-// repeats; nil when empty, so a device with none encodes no field.
+// mdnsNames is s sorted by its labels, copied, without exact repeats; nil
+// when empty, so a device with none encodes no field.
 func mdnsNames(s [][]string) [][]string {
 	if len(s) == 0 {
 		return nil
@@ -342,12 +342,7 @@ func mdnsNames(s [][]string) [][]string {
 	for i, n := range s {
 		out[i] = slices.Clone(n)
 	}
-	slices.SortFunc(out, func(a, b []string) int {
-		if c := strings.Compare(MDNSKey(a), MDNSKey(b)); c != 0 {
-			return c
-		}
-		return slices.Compare(a, b)
-	})
+	slices.SortFunc(out, slices.Compare)
 	return slices.CompactFunc(out, slices.Equal)
 }
 
@@ -374,18 +369,14 @@ func MDNSName(n []string) string { return strings.Join(n, ".") }
 
 // mdnsName: n is a host, <host>.local, or a service instance,
 // <instance>.<_service>.<_tcp or _udp>.local (RFC 6762 §3, RFC 6763
-// §4.1), at most 255 bytes on the wire, whose every label is one to 63
-// bytes a person reads as it is (mdnsLabel).
+// §4.1), whose every label is one to 63 bytes a person reads as it is
+// (mdnsLabel); so at most 140 bytes on the wire, inside DNS's 255.
 func mdnsName(n []string) bool {
-	size := 1
-	for _, l := range n {
-		if !mdnsLabel(l) {
-			return false
-		}
-		size += 1 + len(l)
+	if slices.ContainsFunc(n, func(l string) bool { return !mdnsLabel(l) }) {
+		return false
 	}
 	switch {
-	case size > 255 || len(n) < 2 || !strings.EqualFold(n[len(n)-1], "local"):
+	case len(n) < 2 || !strings.EqualFold(n[len(n)-1], "local"):
 		return false
 	case len(n) == 2:
 		return !strings.HasPrefix(n[0], "_")
