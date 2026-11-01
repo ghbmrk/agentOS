@@ -359,3 +359,44 @@ func TestEndBetweenAskAndAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A clock that reads earlier than the ask (one stepped back, or with no
+// monotonic reading) never makes a count fresh (Security point 1).
+func TestClockBeforeTheAskIsNoCount(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "backup")); err != nil {
+		t.Fatal(err)
+	}
+	c.step(-time.Nanosecond)
+	if _, err := g.Reserve("backup", 10); !errors.Is(err, ErrNoCount) {
+		t.Fatalf("clock before the ask: %v, want ErrNoCount", err)
+	}
+}
+
+// A send still in flight to a destination the next summary puts in no
+// group counts against every group, since the enforcer may count it in
+// any (Security point 2: its connection spans the enforcer's midnight and
+// its address now resolves only for another destination).
+func TestSendInNoGroupCountsEverywhere(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	e := &enforcer{cap: 100}
+	if err := g.Summary(g.Ask(), 1, capped(100, 0, "x", "y")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("x", 50); err != nil { // 100 reserved, in flight
+		t.Fatal(err)
+	}
+	if err := g.Summary(g.Ask(), 2, capped(100, 0, "y")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("y", 1); err == nil {
+		e.pass(100)
+		e.pass(2)
+		t.Fatalf("x's bytes forgotten: let through, enforcer at %d of 100, tripped=%v", e.count, e.tripped)
+	}
+	if _, err := g.Reserve("x", 1); !errors.Is(err, ErrNoCount) {
+		t.Fatalf("x is in no group: %v", err)
+	}
+}

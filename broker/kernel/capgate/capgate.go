@@ -13,7 +13,8 @@
 // (wire.PastCap, the enforcer's own test).
 //
 // A count is fresh only while its summary was asked for no more than twice
-// wire.SummaryInterval ago, by the kernel's own monotonic clock; with no
+// wire.SummaryInterval ago, by the kernel's own monotonic clock, and never
+// when that clock reads earlier than the ask; with no
 // fresh count the gate refuses every capped send, so with the enforcer down
 // or its summaries paused after a core trip (D-260) the core sends nothing
 // capped.
@@ -116,7 +117,8 @@ func New(now func() time.Time) *Gate {
 	return &Gate{now: now, active: map[uint64]*reservation{}}
 }
 
-// Ask is called as a summary request is sent.
+// Ask is called before a summary request is written, so every send that
+// ends after the enforcer takes its count ends after the ask.
 func (g *Gate) Ask() Ticket {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -171,7 +173,7 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
-	if !g.have || now.Sub(g.asked) > Fresh {
+	if !g.have || now.Before(g.asked) || now.Sub(g.asked) > Fresh {
 		return Send{}, ErrNoCount
 	}
 	gr, ok := g.group[dest]
@@ -184,8 +186,8 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 		return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: ^uint64(0)}
 	}
 	for _, r := range g.active {
-		if g.group[r.dest] != gr {
-			continue
+		if rg, in := g.group[r.dest]; in && rg != gr {
+			continue // another group's; one in no group counts against every group
 		}
 		if total, ok = add(total, r.bytes); !ok {
 			return Send{}, &PastCap{Dest: dest, Cap: gr.Cap, Total: ^uint64(0)}
@@ -199,8 +201,9 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 	return Send{id: g.next}, nil
 }
 
-// End is called once a reserved send has ended: acknowledged, failed or
-// abandoned. Its bytes stay counted until a summary asked for after now
+// End is called once no byte of a reserved send can still leave: its
+// connection closed and drained, whether it succeeded or not. Its bytes
+// stay counted until a summary asked for after now
 // replaces the count. A second End keeps the first end time.
 func (g *Gate) End(s Send) {
 	g.mu.Lock()
