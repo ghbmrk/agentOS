@@ -1116,12 +1116,12 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 	if _, err := o.RecoveryCardID(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("no card made at this boot: %v", err)
 	}
-	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.CardKeyLen-1))
+	b.h.HoldRecoveryCard(bytes.Repeat([]byte{0x33}, handoff.MadeCardLen-1))
 	if _, err := o.RecoveryCardID(); !errors.Is(err, ErrNoRecoveryCard) {
 		t.Fatalf("a short key was held: %v", err)
 	}
-	rec := bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)
-	sk, err := handoff.StoreRecoveryKey(rec)
+	rec := bytes.Repeat([]byte{0x5e}, handoff.MadeCardLen)
+	sk, err := handoff.StoreRecoveryKey(rec[:handoff.CardKeyLen])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1191,13 +1191,13 @@ func TestNewRecoveryHeldUntilDone(t *testing.T) {
 // MIG-4-recovery-r4c (#4128): the card's bits recoverycard answers are
 // cleared once encoded, so the kernel keeps only its held copy.
 func TestRecoveryCardReadClearsOnceEncoded(t *testing.T) {
-	bits := bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)
+	bits := bytes.Repeat([]byte{0x5e}, handoff.MadeCardLen)
 	raw, err := json.Marshal(any(recoveryCardRead{bits}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var back recoveryCardRead
-	if err := json.Unmarshal(raw, &back); err != nil || !bytes.Equal(back.Key, bytes.Repeat([]byte{0x5e}, handoff.CardKeyLen)) {
+	if err := json.Unmarshal(raw, &back); err != nil || !bytes.Equal(back.Key, bytes.Repeat([]byte{0x5e}, handoff.MadeCardLen)) {
 		t.Fatalf("decoded %x, %v", back.Key, err)
 	}
 	if !bytes.Equal(bits, make([]byte, len(bits))) {
