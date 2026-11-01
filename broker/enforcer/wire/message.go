@@ -486,7 +486,8 @@ func (r *reader) name() string {
 // or rule name: 1 to MaxName bytes of UTF-8 with no space, slash, control,
 // format (bidi, zero-width, tag), filler or variation selector character,
 // as broker/enforcer/policy names them (#3901), and that is not "unknown"
-// in any case, the word policy.Unknown reserves (#4185).
+// in any case, the word policy.Unknown reserves (#4185). wire imports only
+// the standard library, so channel's TestReservedWord ties the two (#4249).
 func Name(s string) bool {
 	if s == "" || len(s) > MaxName || !utf8.ValidString(s) || strings.EqualFold(s, "unknown") {
 		return false

@@ -296,6 +296,9 @@ var enforcer = map[string]struct {
 	// Asserted safety-list actions (slice s): once-only owner challenges;
 	// the page serves them and the daemon wires their actuator.
 	"enforcer/action": {[]string{"kernel/key", "enforcer/policy"}, droneForbid},
+	// Lock rules (slice q): the second assertion, relock and keypad codes,
+	// as the actuator behind slice s's unlock and disarm challenges.
+	"enforcer/locks": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/alert"}, droneForbid},
 	// The radio host (slice k) speaks to each stack over a socket pair; its
 	// launcher alone starts the stacks and installs their seccomp filter.
 	"enforcer/radio":         {[]string{"enforcer/wire"}, droneForbid},
