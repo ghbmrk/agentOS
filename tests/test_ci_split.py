@@ -141,12 +141,10 @@ class WiringTest(unittest.TestCase):
         self.assertEqual(self.ci.count("go test -race"), 1)
         self.assertNotIn("go test -race -count=1 ./...", self.ci)
 
-    def test_broker_passes_only_when_its_parts_pass(self):
-        broker = job(self.ci, "broker")
-        self.assertIn("needs: [broker-race, broker-checks]", broker)
-        self.assertIn("RACE: ${{ needs.broker-race.result }}", broker)
-        self.assertIn("CHECKS: ${{ needs.broker-checks.result }}", broker)
-        self.assertIn('[ "$RACE" = success ] && [ "$CHECKS" = success ]', broker)
+    def test_no_broker_aggregator_job(self):
+        # CI-par-5: main requires each shard and broker-checks by name, so no job gathers them.
+        self.assertNotIn("\n  broker:\n", self.ci)
+        self.assertNotIn("needs.broker-race", self.ci)
 
     def test_the_broker_checks_keep_their_steps(self):
         checks = job(self.ci, "broker-checks")

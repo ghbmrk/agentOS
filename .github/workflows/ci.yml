@@ -190,24 +190,10 @@ jobs:
         # which runs the base copy on pull_request_target so a PR cannot edit it away.
         if: github.event_name == 'pull_request'
         run: python tools/risk_tier.py --markdown --git HEAD^1 HEAD^2 >> "$GITHUB_STEP_SUMMARY"
-  broker:
-    # The required check (CI-SHARD, #1868): passes only when every race shard and the checks
-    # job passed. On a records-only change it passes with them (CI-par-4).
-    needs: [broker-race, broker-checks]
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Every race shard and the broker checks passed
-        env:
-          RACE: ${{ needs.broker-race.result }}
-          CHECKS: ${{ needs.broker-checks.result }}
-        run: |
-          echo "broker-race: $RACE; broker-checks: $CHECKS"
-          [ "$RACE" = success ] && [ "$CHECKS" = success ]
   broker-race:
     # The broker's race tests, split by package across the shards (tools/ci_split.py). Each
-    # shard first checks the split covers `go list ./...` with no gap and no duplicate.
+    # shard first checks the split covers `go list ./...` with no gap and no duplicate. Main
+    # requires each shard and broker-checks by name; no job gathers them (CI-par-5, #4338).
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:

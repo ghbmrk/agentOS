@@ -105,7 +105,7 @@ def scope_repo(d, base_has_tool=True):
 
 # CI-par-4: the jobs whose steps a records-only change skips, and the jobs that always run in full.
 SCOPED = ("checks", "broker-race")
-FULL = ("broker", "broker-checks", "machines", "hostcheck")
+FULL = ("broker-checks", "machines", "hostcheck")
 
 
 def ci_top_level(key):
@@ -478,11 +478,10 @@ class WiringTest(unittest.TestCase):
     def test_ci_skips_only_on_records_and_checks_always_runs(self):
         jobs = ci_jobs()
         for job in SCOPED + FULL:
-            self.assertFalse([l for l in jobs[job][1] if l.startswith("    needs:")] and job != "broker", job)
-        # Only the required `broker` check waits, for the split jobs it gathers (CI-SHARD).
+            self.assertFalse([l for l in jobs[job][1] if l.startswith("    needs:")], job)
+        # No job waits for another: main requires the split jobs directly (CI-par-5).
         ci = (WORKFLOWS / "ci.yml").read_text()
-        self.assertIn("  broker:\n", ci)
-        self.assertIn("    needs: [broker-race, broker-checks]\n    if: ${{ !cancelled() }}\n", ci)
+        self.assertNotIn("needs:", ci)
         for job in FULL:
             self.assertFalse([s for s, c in jobs[job][2] if c and "records" in c], job)
         # The document checks never depend on scope.
@@ -612,12 +611,12 @@ class WiringTest(unittest.TestCase):
 
     def test_push_to_main_runs_every_job(self):
         # CIMG-a: whatever scope says, a push runs every job, and every job's full steps: no job
-        # has an `if:` but the broker gate's !cancelled(), and every scope step in ci.yml asks for
+        # has an `if:`, and every scope step in ci.yml asks for
         # a full push run, which the action gives (test_scope_action_answers_...).
         jobs = ci_jobs()
         self.assertEqual(set(jobs), {*SCOPED, *FULL})
         for job, (cond, _, steps) in jobs.items():
-            self.assertIn(cond, (None, "${{ !cancelled() }}"), job)
+            self.assertIsNone(cond, job)
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertEqual(ci.count("uses: ./.github/actions/scope\n"), ci.count(SCOPE_STEP.format("full # CI-mainguard")))
         self.assertEqual(ci.count(SCOPE_STEP.format("full # CI-mainguard")), 2)
@@ -643,8 +642,8 @@ class WiringTest(unittest.TestCase):
             self.assertFalse([l for l in header if l.startswith("    name:")], job)
         ci = (WORKFLOWS / "ci.yml").read_text()
         self.assertIn("        shard: [0, 1, 2]", ci)
-        self.assertEqual(sorted(jobs), sorted(["checks", "broker", "broker-race",
-                                               "broker-checks", "machines", "hostcheck"]))
+        # Main requires broker-race (0), (1), (2) and broker-checks; `broker` is gone (CI-par-5).
+        self.assertEqual(sorted(jobs), sorted(["checks", "broker-race", "broker-checks", "machines", "hostcheck"]))
 
     def test_machines_job_lists_infer(self):
         # REQ: INFER-CI-1
