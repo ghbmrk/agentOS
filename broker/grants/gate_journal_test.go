@@ -378,3 +378,42 @@ func TestClockBehindAnswerRefused(t *testing.T) {
 		}
 	})
 }
+
+// TestUnreadTriesApprovalIsNotJournaled (#1969; OP-12, OP-3): an approval
+// whose attempt count could not be read (tries < 0) is refused live, so it
+// is never journaled. A count kept in its place would match an intent with
+// no attempts after a restart and rebuild the approval, which would then
+// run. A denial is still journaled: it can only refuse.
+func TestUnreadTriesApprovalIsNotJournaled(t *testing.T) {
+	r := newRig(t, nil)
+	r.grant(mailGrant())
+	r.invoice("agent/a", "inv-a")
+	req, items := r.own.last(t)
+	dec := decision{approved: true, why: "owner", asked: true, req: req, at: r.now(), item: items[0], tries: -1}
+	if err := journalAnswer(r.eng, "agent/a", dec, false); err == nil {
+		t.Fatal("an approval with an unread attempt count was journaled")
+	}
+	if as := answers(r.eng, "agent/a"); len(as) != 0 {
+		t.Fatalf("answers journaled = %+v, want none", as)
+	}
+
+	// After a restart nothing rebuilds the approval: the intent is asked
+	// again and has not run.
+	r.open()
+	r.g.Wait()
+	r.g.Flush()
+	if st := r.state("agent/a"); st.State != journal.Pending || r.exec.runs("agent/a") != 0 {
+		t.Fatalf("after restart: %s %q, runs %d", st.State, st.Permission.Reason, r.exec.runs("agent/a"))
+	}
+	if n := r.own.count(); n != 1 {
+		t.Fatalf("the owner was asked %d times after the restart, want 1", n)
+	}
+
+	dec.approved, dec.why = false, "owner"
+	if err := journalAnswer(r.eng, "agent/a", dec, false); err != nil {
+		t.Fatalf("a denial with an unread attempt count: %v", err)
+	}
+	if as := answers(r.eng, "agent/a"); len(as) != 1 || as[0].Answer.Approved {
+		t.Fatalf("denial journaled as %+v", as)
+	}
+}

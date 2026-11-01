@@ -432,6 +432,18 @@ func (d decision) note(confirmed bool) journal.AnswerNote {
 	return n
 }
 
+// journalAnswer journals the owner's answer dec on id before the gate acts
+// on it (OP-12). An approval whose attempt count could not be read (tries
+// < 0) is refused, never journaled: the journal has no count for it that
+// the recheck would refuse, so one kept in its place could match after a
+// restart (#1969, GR8). A denial's count is unused.
+func journalAnswer(eng *journal.Engine, id string, dec decision, confirmed bool) error {
+	if dec.approved && dec.tries < 0 {
+		return errors.New("its attempt count could not be read")
+	}
+	return eng.RecordAnswer(id, dec.note(confirmed))
+}
+
 // denialGuest is the fixed reason the guest sees for a denial the owner
 // did not give (release item 1, lens on #396); "owner" and "not chosen"
 // keep the default.
@@ -2579,7 +2591,7 @@ func (g *Gate) Decide(d owner.Decision) {
 	if eng == nil {
 		return
 	}
-	if err := eng.RecordAnswer(d.Ref, dec.note(confirmed)); err != nil {
+	if err := journalAnswer(eng, d.Ref, dec, confirmed); err != nil {
 		g.cfg.Logf("grants: journaling the owner's answer on %s: %v", d.Ref, err)
 		if dec.approved {
 			g.mu.Lock()
