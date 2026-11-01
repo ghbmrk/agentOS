@@ -832,31 +832,53 @@ func (s *Store) Put(name string, value []byte) error {
 	return s.commit(s.f.Slots, e)
 }
 
-// ReplaceAndPut is Replace and Put in one write: a new recovery key's slot
-// in place of slot id, and its backup recipient as entry name (REC-4,
-// BAK-1, MIG-4-recovery-r2). A crash leaves the old slot and old entry, or
-// the new slot and new entry, never one without the other.
-func (s *Store) ReplaceAndPut(id string, f Factor, name string, value []byte) (string, error) {
+// Swap is one slot ReplaceAndPut replaces, by ID, and the factor its new
+// slot takes.
+type Swap struct {
+	ID string
+	F  Factor
+}
+
+// ReplaceAndPut is Replace of each swap's slot and Put of entry name in one
+// write: a new recovery key's slot and its backup recipient (REC-4, BAK-1,
+// MIG-4-recovery-r2), and on the lost-card route the new card's passphrase
+// slot with them (MIG-4-recovery-r4d). A crash leaves every old slot and
+// the old entry, or every new slot and the new entry, never a mix. Like
+// Replace it returns the new slots' IDs, in the swaps' order, once they
+// are in place, even with the directory sync's error.
+func (s *Store) ReplaceAndPut(name string, value []byte, swaps ...Swap) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.live(); err != nil {
-		return "", err
-	}
-	i := s.find(id)
-	if i < 0 {
-		return "", ErrNoSlot
+		return nil, err
 	}
 	e, err := s.withEntry(name, value)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	sl, err := makeSlot(s.f.ID, s.key, f)
-	if err != nil {
-		return "", err
+	if len(swaps) == 0 {
+		return nil, ErrNoSlot
 	}
 	slots := slices.Clone(s.f.Slots)
-	slots[i] = sl
-	return s.committed(sl.ID, s.commit(slots, e))
+	ids := make([]string, len(swaps))
+	done := make([]bool, len(slots))
+	for j, sw := range swaps {
+		i := s.find(sw.ID)
+		if i < 0 || done[i] {
+			return nil, ErrNoSlot
+		}
+		done[i] = true
+		sl, err := makeSlot(s.f.ID, s.key, sw.F)
+		if err != nil {
+			return nil, err
+		}
+		slots[i], ids[j] = sl, sl.ID
+	}
+	err = s.commit(slots, e)
+	if err != nil && s.find(ids[0]) < 0 {
+		return nil, err
+	}
+	return ids, err
 }
 
 // withEntry is the store's entries with name set to a copy of value.

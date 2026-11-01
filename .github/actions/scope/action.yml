@@ -1,0 +1,48 @@
+name: scope
+description: "CI-docs: 'true' in records when the change touches only record documents (CI-par-4)"
+# The first step of each job that skips work on a records-only change, after its checkout
+# (fetch-depth: 0: the base commits, the merge base and origin/main). It replaces the scope job
+# each workflow used to queue for before any other job could start (#4304). Every later step of
+# the job runs unless `records` is exactly 'true', so a failure here means a full run.
+# tools/ci_scope.py holds the one records path set. It runs as the BASE commit has it, so a
+# PR cannot widen the set for itself; with no base copy (or no base) the answer is full.
+# The changed paths are the same diff CI's other PR steps use: the PR branch against its
+# merge base; for a push to main, the pushed range; for a dispatch (trace.yml, metrics.yml
+# and board.yml dispatch ci.yml on their bot branches), the branch against main, so a
+# dispatch on main itself is an empty change and runs full. Other events (schedule,
+# merge_group) run full, and so does a push when `push` is 'full' (ci.yml, CI-mainguard).
+inputs:
+  push:
+    description: "'full': a push to main runs every step whatever it changes; 'scoped': a push is scoped like a PR"
+    required: true
+outputs:
+  records:
+    description: "'true' when the change touches only record documents"
+    value: ${{ steps.scope.outputs.records }}
+runs:
+  using: composite
+  steps:
+    - name: Records-only change? (tools/ci_scope.py, base copy)
+      id: scope
+      shell: bash
+      env:
+        EVENT: ${{ github.event_name }}
+        BEFORE: ${{ github.event.before }}
+        PUSH: ${{ inputs.push }}
+      run: |
+        base=
+        case "$EVENT" in
+          # HEAD is the PR's test merge (base^1, branch^2), as in ci.yml's checks job.
+          pull_request) base=HEAD^1 head=HEAD^2 ;;
+          push) [ "$PUSH" = scoped ] && base=$BEFORE head=$GITHUB_SHA ;;
+          workflow_dispatch) base=origin/main head=$GITHUB_SHA ;;
+        esac
+        scope=full
+        if [ -n "$base" ] && git show "$base:tools/ci_scope.py" > "$RUNNER_TEMP/ci_scope.py" 2>/dev/null; then
+          scope=$(python3 -I "$RUNNER_TEMP/ci_scope.py" --git "$base" "$head") || scope=full
+        fi
+        echo "### CI scope: $scope" >> "$GITHUB_STEP_SUMMARY"
+        echo "CI scope: $scope"
+        if [ "$scope" = records ]; then
+          echo "records=true" >> "$GITHUB_OUTPUT"
+        fi

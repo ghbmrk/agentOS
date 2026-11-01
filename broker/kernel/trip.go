@@ -363,19 +363,24 @@ type ownerTrip struct {
 	Trip Trip    `json:"trip"` // its Plan is Extend's
 }
 
-// honeyTrip refuses an owner-side call (Extend, Issue) that cites a honey
-// key, and logs its trip. Planner-view content reached the owner path, so
-// it gets the full response (KRN-12 Response).
-func (k *Kernel) honeyTrip(now int64, op, plan string, keys ...key.Key) error {
-	for _, ky := range keys {
-		if t := k.s.ownerTripOf(op, plan, ky); t != nil {
-			if _, err := k.emit(now, TTripOwner, ownerTrip{op, ky, *t}); err != nil {
-				return err
+// ownerKeys is an owner call's keys (Extend, Issue) as the log holds them,
+// for every later check, so the live decision is the fold's (KRN-6, #4322):
+// a link that is not valid UTF-8 is rewritten and fails its signature. A
+// honey key among them refuses the call and logs its trip (KRN-12 Response).
+func (k *Kernel) ownerKeys(now int64, op, plan string, given ...key.Key) ([]key.Key, error) {
+	keys := make([]key.Key, len(given))
+	for i, g := range given {
+		if b, err := json.Marshal(g); err != nil || json.Unmarshal(b, &keys[i]) != nil {
+			return nil, errors.New("kernel: a key the log cannot hold")
+		}
+		if t := k.s.ownerTripOf(op, plan, keys[i]); t != nil {
+			if _, err := k.emit(now, TTripOwner, ownerTrip{op, keys[i], *t}); err != nil {
+				return nil, err
 			}
-			return &key.Refusal{Code: CTrip, Detail: CauseHoneyKey}
+			return nil, &key.Refusal{Code: CTrip, Detail: CauseHoneyKey}
 		}
 	}
-	return nil
+	return keys, nil
 }
 
 // again derives b's trip and its whole entry from the state alone; the fold

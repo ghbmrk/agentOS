@@ -27,7 +27,7 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          # HEAD is the PR's test merge (base^1, branch^2), as in scope.yml. Count the base
+          # HEAD is the PR's test merge (base^1, branch^2), as in .github/actions/scope. Count the base
           # against the merge itself, not the branch tip: a stale branch's tip lacks main's
           # later edits, which would read as its own growth or hide it.
           printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/body.md"

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/card"
+	"github.com/ghbmrk/agentos/broker/card/words"
 	"github.com/ghbmrk/agentos/broker/localapi"
 )
 
@@ -154,16 +155,30 @@ func TestLostCardNeedsTheTap(t *testing.T) {
 // the kernel's copy. The card the page prints is the kernel's bits.
 // MIG-4-recovery-r4c (#4128): the page first asks a hardware key's tap
 // over the card, naming its mark, and reads no bits for that; the card
-// printed carries the same mark (#4160).
+// printed carries the same mark (#4160). MIG-4-recovery-r4d (#4130): the
+// card also prints the passphrase the unlock step derived from the seed
+// after the key's bits (words.FromSeed), the confirm asks a word of it,
+// and the done line says the old card's passphrase no longer opens the store and how to
+// replace it. Revert mutants: the display without the passphrase (the
+// page lacks it); lostDoneText saying the old passphrase still works.
 func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
-	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
+	// Every byte differs, so the page's split of the card (the key's bits,
+	// then the passphrase's seed) is pinned (Security on #4226).
+	bits := make([]byte, localapi.RecoveryCardLen)
+	for i := range bits {
+		bits[i] = byte(0x6b + 7*i)
+	}
 	r.f.lostCard, r.f.lostState = bytes.Clone(bits), localapi.RecoveryLostState{Ready: true}
 	if p := r.get("/recovery/"); !strings.Contains(p, `href="/recovery/new"`) {
 		t.Fatal("a ready card is not offered")
 	}
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
+	pass, err := words.FromSeed(bits[localapi.RecoveryCardKeyLen:])
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := html.UnescapeString(r.get("/recovery/new"))
 	ch := base64.StdEncoding.EncodeToString(testCardCh)
 	for _, s := range []string{`id="pk-finish"`, `action="/recovery/new"`, `value="show"`, `data-challenge="` + ch + `"`, `id="pk-tap"`, testLostMark} {
@@ -171,11 +186,12 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 			t.Errorf("the tap to see the card lacks %q", s)
 		}
 	}
-	if strings.Contains(p, text) || fmt.Sprint(r.f.lost) != "[cardbegin]" || r.srv.lost.display != nil {
+	if strings.Contains(p, text) || strings.Contains(p, string(pass)) || fmt.Sprint(r.f.lost) != "[cardbegin]" || r.srv.lost.display != nil {
 		t.Fatalf("the card's bits before the tap: %v\n%s", r.f.lost, p)
 	}
 	p = r.show()
-	if !strings.Contains(p, text) || strings.Contains(p, `name="cancel"`) || !strings.Contains(p, "recovery key already opens my store") ||
+	if !strings.Contains(p, text) || !strings.Contains(p, string(pass)) || strings.Contains(p, `name="cancel"`) ||
+		!strings.Contains(p, "passphrase and recovery key already open my store, and your old card's no longer do") ||
 		!strings.Contains(p, "Card mark: <span class=\"mono\">"+testLostMark) {
 		t.Fatalf("the made card's page:\n%s", p)
 	}
@@ -184,16 +200,25 @@ func TestLostCardShownThenConfirmWipes(t *testing.T) {
 	if fmt.Sprint(r.f.lost) != "[cardbegin card ad cd sig]" {
 		t.Fatalf("calls %v", r.f.lost)
 	}
-	_, g := r.srv.lost.display.Asks()
-	res := r.post("/recovery/new", url.Values{"group": {strings.Split(text, "-")[g-1]}}).Result()
+	w, g := r.srv.lost.display.Asks()
+	res := r.post("/recovery/new", url.Values{"word": {strings.Fields(string(pass))[w-1]}, "group": {strings.Split(text, "-")[g-1]}}).Result()
 	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != "/recovery/?lost=done" {
 		t.Fatalf("confirm: %d %s", res.StatusCode, res.Header.Get("Location"))
 	}
 	if fmt.Sprint(r.f.lost) != "[cardbegin card ad cd sig done]" || r.srv.lost.display != nil {
 		t.Fatalf("calls %v", r.f.lost)
 	}
-	if p := html.UnescapeString(r.get("/recovery/?lost=done")); !strings.Contains(p, lostDoneText) {
+	p = html.UnescapeString(r.get("/recovery/?lost=done"))
+	if !strings.Contains(p, lostDoneText) {
 		t.Fatal("no done line")
+	}
+	for _, s := range []string{"Your old card's passphrase and recovery key no longer open my store. ", "If you wrote the old passphrase down anywhere else, put the new card's passphrase there in its place. ", "If you find the old card, destroy it."} {
+		if !strings.Contains(lostDoneText, s) {
+			t.Errorf("the done line lacks %q", s)
+		}
+	}
+	if strings.Contains(p, "still opens") {
+		t.Error("the done page says an old secret still opens the store")
 	}
 }
 
@@ -206,7 +231,7 @@ func TestLostCardPhonePasskeySessionGetsNoBits(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
 	r.f.lostCard = bytes.Clone(bits)
 	p := html.UnescapeString(r.post("/recovery/new", url.Values{"step": {"show"}}).Body.String())
 	if !strings.Contains(p, lostNoShowText) || strings.Contains(p, text) || fmt.Sprint(r.f.lost) != "[cardbegin]" {
@@ -230,7 +255,10 @@ func TestLostCardPhonePasskeySessionGetsNoBits(t *testing.T) {
 // MIG-4-recovery-r4e (#4160), done-when: once the kernel holds no card,
 // the page names the card in effect by its mark after a restart before the
 // confirm, and a superseded card is told apart: the line names it as no
-// longer in effect. A card another session confirmed, and nothing ever
+// longer in effect. MIG-4-recovery-r4d (L3 on #4226): superseded means only
+// that the recipient changed, which route A does while the card's
+// passphrase stays in the store, so the line never says that passphrase
+// opens nothing. A card another session confirmed, and nothing ever
 // shown, each have their own line. The first step carries the same line.
 func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 	r := newRecoveryRig(t)
@@ -242,7 +270,7 @@ func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 		"restarted before the confirm": {localapi.RecoveryLostState{Shown: testLostID, InEffect: true},
 			[]string{"I restarted before you confirmed", "The card in effect is marked " + testLostMark, "a card with another mark does not", "ask for a new card again"}},
 		"superseded": {localapi.RecoveryLostState{Shown: testLostID},
-			[]string{"marked " + testLostMark + ", is no longer in effect", "does not open my store"}},
+			[]string{"marked " + testLostMark + ", is no longer in effect", "its recovery key does not open my store", "Its passphrase still does, unless a later request for a new card replaced it"}},
 		"confirmed elsewhere": {localapi.RecoveryLostState{Shown: testLostID, Confirmed: true, InEffect: true},
 			[]string{"marked " + testLostMark + ", is confirmed and in effect"}},
 		"nothing shown": {localapi.RecoveryLostState{}, []string{lostNoCardText}},
@@ -261,6 +289,9 @@ func TestLostCardNoCardNamesTheCardInEffect(t *testing.T) {
 		if c.st.Shown != "" && !strings.Contains(first, c.want[0]) {
 			t.Errorf("%s: the first step lacks %q", name, c.want[0])
 		}
+	}
+	if strings.Contains(lostNoCard(localapi.RecoveryLostState{Shown: testLostID}), "neither its passphrase") {
+		t.Fatal("the superseded line says the card's passphrase opens nothing")
 	}
 	// Two cards' lines differ by their marks.
 	other := localapi.RecoveryLostState{Shown: "77aa" + "01bc" + strings.Repeat("0d", 12)}
@@ -300,10 +331,14 @@ func TestLostCardConfirmAfterAKernelRestart(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
+	pass, err := words.FromSeed(bits[localapi.RecoveryCardKeyLen:])
+	if err != nil {
+		t.Fatal(err)
+	}
 	group := func() url.Values {
-		_, g := r.srv.lost.display.Asks()
-		return url.Values{"group": {strings.Split(text, "-")[g-1]}}
+		w, g := r.srv.lost.display.Asks()
+		return url.Values{"word": {strings.Fields(string(pass))[w-1]}, "group": {strings.Split(text, "-")[g-1]}}
 	}
 	r.f.lostCard = bytes.Clone(bits)
 	r.show()
@@ -320,13 +355,13 @@ func TestLostCardConfirmAfterAKernelRestart(t *testing.T) {
 // Losing the page's process before the confirm loses only its display:
 // the kernel still holds the card, so the reopened page shows the same
 // card after another tap. A box restart then loses the kernel's copy too,
-// and the page names the card already printed as in effect, and says the
-// old passphrase still opens the store.
+// and the page names the card already printed as in effect, whose
+// passphrase and recovery key open the store (#4130: not the old card's).
 func TestLostCardPageRestartBeforeConfirm(t *testing.T) {
 	r := newRecoveryRig(t)
 	r.signIn()
 	bits := bytes.Repeat([]byte{0x6b}, localapi.RecoveryCardLen)
-	text := card.RecoveryKeyText([localapi.RecoveryCardLen]byte(bits))
+	text := card.RecoveryKeyText([localapi.RecoveryCardKeyLen]byte(bits[:localapi.RecoveryCardKeyLen]))
 	r.f.lostCard, r.f.lostState = bytes.Clone(bits), localapi.RecoveryLostState{Ready: true}
 	if p := r.show(); !strings.Contains(p, text) {
 		t.Fatal("the card is not shown")
@@ -350,9 +385,12 @@ func TestLostCardPageRestartBeforeConfirm(t *testing.T) {
 	r.srv.lost.mu.Unlock()
 	r.f.lostCard, r.f.lostState = nil, localapi.RecoveryLostState{Shown: testLostID, InEffect: true}
 	p := html.UnescapeString(r.get("/recovery/new"))
-	for _, s := range []string{"The card in effect is marked " + testLostMark, "keep it, as its recovery key opens my store", "ask for a new card again", "Your old card's passphrase still opens my store"} {
+	for _, s := range []string{"The card in effect is marked " + testLostMark, "keep it, as its passphrase and recovery key open my store", "ask for a new card again"} {
 		if !strings.Contains(p, s) {
 			t.Errorf("after a box restart the page lacks %q", s)
 		}
+	}
+	if strings.Contains(p, "passphrase still opens") {
+		t.Error("after a box restart the page says the old passphrase still opens the store")
 	}
 }
