@@ -278,6 +278,17 @@ func TestStartRefusesBadView(t *testing.T) {
 	if _, _, err := Start(Spec{Profile: th, Path: "/nonexistent"}); err != ErrView {
 		t.Errorf("NetAdmin with a view: %v", err)
 	}
+	// A clean absolute view is no view error (the start may still fail
+	// off root, or exec nothing as root).
+	for _, v := range [][]string{{SystemBus}, {"/a", "/b/c"}} {
+		p := BLE(1, 1)
+		p.View = v
+		if proc, _, err := Start(Spec{Profile: p, Path: "/nonexistent"}); err == ErrView {
+			t.Errorf("view %q refused", v)
+		} else if err == nil {
+			proc.Stop()
+		}
+	}
 	// Without a view, NetAdmin is no view error (the start may still fail
 	// off root, or exec nothing as root).
 	if proc, _, err := Start(Spec{Profile: Thread(1, 1), Path: "/nonexistent"}); err == ErrView {
@@ -292,4 +303,36 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(b []byte) (int, error) {
 	w.t.Logf("%s", strings.TrimRight(string(b), "\n"))
 	return len(b), nil
+}
+
+// TestProcAttr (NET-2): the fork gives a View profile its own user and
+// mount namespace with CAP_SYS_ADMIN alone there (which Trampoline drops),
+// gives NetAdmin its user namespace with CAP_NET_ADMIN and CAP_NET_RAW,
+// gives a profile with neither no user or mount namespace and no
+// capability, and a fresh network namespace unless the stack joins one.
+// It runs without root, where the root-gated tests skip.
+func TestProcAttr(t *testing.T) {
+	const userMnt = syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
+	plain := BLE(1, 1)
+	plain.View = nil
+	for _, c := range []struct {
+		name    string
+		p       Profile
+		net     *Proc
+		flags   uintptr
+		ambient []uintptr
+	}{
+		{"ble", BLE(1, 1), nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET | userMnt, []uintptr{capSysAdmin}},
+		{"no view", plain, nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET, nil},
+		{"thread", Thread(1, 1), nil, syscall.CLONE_NEWIPC | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER, []uintptr{capNetAdmin, capNetRaw}},
+		{"matter joined", Matter(1, 1), &Proc{}, syscall.CLONE_NEWIPC, nil},
+	} {
+		a := procAttr(Spec{Profile: c.p, Net: c.net})
+		if a.Cloneflags != c.flags || !slices.Equal(a.AmbientCaps, c.ambient) {
+			t.Errorf("%s: clone flags %#x, ambient %v; want %#x, %v", c.name, a.Cloneflags, a.AmbientCaps, c.flags, c.ambient)
+		}
+		if mapped := len(a.UidMappings) == 1 && a.UidMappings[0].HostID == 1 && a.UidMappings[0].Size == 1; mapped != (c.flags&syscall.CLONE_NEWUSER != 0) {
+			t.Errorf("%s: uid mappings %+v", c.name, a.UidMappings)
+		}
+	}
 }

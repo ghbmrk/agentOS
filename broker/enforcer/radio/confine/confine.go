@@ -188,34 +188,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	if dir == "" {
 		dir = "/"
 	}
-	attr := &syscall.SysProcAttr{
-		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID, Groups: []uint32{}},
-		Cloneflags: syscall.CLONE_NEWIPC,
-		Setsid:     true,
-		Pdeathsig:  syscall.SIGKILL,
-	}
-	if s.Net == nil {
-		attr.Cloneflags |= syscall.CLONE_NEWNET
-	}
-	if p.NetAdmin {
-		// Root creates the user namespace in the fork, so the stack never
-		// needs unprivileged user namespaces; only its own ids are mapped.
-		attr.Cloneflags |= syscall.CLONE_NEWUSER
-		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
-		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
-		attr.GidMappingsEnableSetgroups = true // to clear the supplementary groups inside
-		attr.AmbientCaps = []uintptr{capNetAdmin, capNetRaw}
-	}
-	if len(p.View) > 0 {
-		// As for NetAdmin, but for the stack's own mount namespace:
-		// Trampoline builds the view with CAP_SYS_ADMIN there and drops
-		// it before the exec.
-		attr.Cloneflags |= syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
-		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
-		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
-		attr.GidMappingsEnableSetgroups = true
-		attr.AmbientCaps = []uintptr{capSysAdmin}
-	}
+	attr := procAttr(s)
 	arg0, extra := Arg0, []*os.File{theirs}
 	hold := p.NetAdmin || len(p.Links) > 0
 	var release *os.File
@@ -278,6 +251,43 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		}
 	}
 	return proc, ours, nil
+}
+
+// procAttr is how the fork confines s under its profile: its own user, a
+// fresh IPC namespace and, unless it joins another stack's, a fresh
+// network namespace; a user namespace for NetAdmin and for a View, a
+// mount namespace for a View, and the capabilities each needs there.
+func procAttr(s Spec) *syscall.SysProcAttr {
+	p := s.Profile
+	attr := &syscall.SysProcAttr{
+		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID, Groups: []uint32{}},
+		Cloneflags: syscall.CLONE_NEWIPC,
+		Setsid:     true,
+		Pdeathsig:  syscall.SIGKILL,
+	}
+	if s.Net == nil {
+		attr.Cloneflags |= syscall.CLONE_NEWNET
+	}
+	if p.NetAdmin {
+		// Root creates the user namespace in the fork, so the stack never
+		// needs unprivileged user namespaces; only its own ids are mapped.
+		attr.Cloneflags |= syscall.CLONE_NEWUSER
+		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
+		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
+		attr.GidMappingsEnableSetgroups = true // to clear the supplementary groups inside
+		attr.AmbientCaps = []uintptr{capNetAdmin, capNetRaw}
+	}
+	if len(p.View) > 0 {
+		// As for NetAdmin, but for the stack's own mount namespace:
+		// Trampoline builds the view with CAP_SYS_ADMIN there and drops
+		// it before the exec.
+		attr.Cloneflags |= syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
+		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
+		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
+		attr.GidMappingsEnableSetgroups = true
+		attr.AmbientCaps = []uintptr{capSysAdmin}
+	}
+	return attr
 }
 
 // Pid is the stack's process id.
