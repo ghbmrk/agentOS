@@ -23,7 +23,7 @@ func mdnsOf(s ...string) [][]string {
 // read as it is, is refused, so the relay never gets a pin it could not
 // match and the signed screen never shows one that reads as another.
 func TestMDNSNames(t *testing.T) {
-	ok := []string{"printer.local", "Office Printer._ipp._tcp.local", "Café._smb._tcp.local", "tv._airplay._tcp.LOCAL", "x._hap._udp.local"}
+	ok := []string{"printer.local", "Office Printer._ipp._tcp.local", "Café._smb._tcp.local", "tv._airplay._tcp.LOCAL", "x._hap._udp.local", strings.Repeat("a", 63) + ".local"}
 	bad := [][]string{
 		{"printer"}, {"local"}, {"printer", "example"}, {"_printer", "local"}, {"a", "b", "local"},
 		{"x", "ipp", "_tcp", "local"}, {"x", "_", "_tcp", "local"}, {"x", "_ipp", "_sctp", "local"}, {"_ipp", "_tcp", "local"},
