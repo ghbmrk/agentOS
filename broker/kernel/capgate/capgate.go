@@ -151,10 +151,11 @@ func (g *Gate) Summary(t Ticket, day uint32, groups []Group) error {
 	return nil
 }
 
-// Paused is called when the enforcer answers a summary request Paused,
-// as it does after a core trip until the "core reflashed" step (D-260,
-// D-262): the count held is none, and so is any answer to a request asked
-// before the pause.
+// Paused is called when a summary request meets the pause the enforcer
+// keeps after a core trip until the "core reflashed" step (D-260, D-262):
+// answered Paused, or known to be paused. The count held is none, and so
+// is any answer to a request asked before the pause. A request the
+// enforcer drops unanswered needs no call: its count ages out at Fresh.
 func (g *Gate) Paused() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -200,7 +201,7 @@ func (g *Gate) Reserve(dest string, size uint64) (Send, error) {
 
 // End is called once a reserved send has ended: acknowledged, failed or
 // abandoned. Its bytes stay counted until a summary asked for after now
-// replaces the count.
+// replaces the count. A second End keeps the first end time.
 func (g *Gate) End(s Send) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

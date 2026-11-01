@@ -323,3 +323,39 @@ func TestOverflowIsPastCap(t *testing.T) {
 		t.Fatalf("overflowing total: %v", err)
 	}
 }
+
+// The usual order: a summary is asked for, a send ends (its bytes reach
+// the enforcer after the count was taken), then the answer lands. The
+// count does not hold that send, so it stays added; so does one that ends
+// at the very instant of the ask. Timed at exactly twice the interval.
+func TestEndBetweenAskAndAnswer(t *testing.T) {
+	for _, gap := range []time.Duration{time.Millisecond, 0} {
+		c := newClock()
+		g := gate(c)
+		e := &enforcer{cap: 1000}
+		if err := g.Summary(g.Ask(), 1, capped(1000, 0, "backup")); err != nil {
+			t.Fatal(err)
+		}
+		s, err := g.Reserve("backup", 300) // 600 reserved
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.step(time.Second)
+		tk := g.Ask()
+		c.step(gap)
+		e.pass(300) // the send, after the enforcer took its count
+		e.pass(300) // and its retry
+		g.End(s)
+		if err := g.Summary(tk, 1, capped(1000, 0, "backup")); err != nil {
+			t.Fatal(err)
+		}
+		c.step(Fresh - time.Second - gap)
+		if _, err := g.Reserve("backup", 250); err == nil { // 600 + 500
+			e.pass(500)
+			t.Fatalf("end %v after the ask forgotten: let through, enforcer at %d of 1000, tripped=%v", gap, e.count, e.tripped)
+		}
+		if _, err := g.Reserve("backup", 200); err != nil { // 600 + 400
+			t.Fatalf("end %v after the ask: %v", gap, err)
+		}
+	}
+}
