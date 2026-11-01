@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -112,6 +113,11 @@ func TestOnlyThreeKinds(t *testing.T) {
 	}
 	if logged != len(raws) {
 		t.Errorf("logged %d refused frames, want %d", logged, len(raws))
+	}
+	// Each is outside the format definition, so each trips the core
+	// (NET-2 The channel, D-255). Revert mutant: malformed always false.
+	if r.cut.trips() != len(raws) {
+		t.Errorf("%d trips for %d malformed frames", r.cut.trips(), len(raws))
 	}
 }
 
@@ -225,31 +231,31 @@ func TestDroneReturnOnly(t *testing.T) {
 	}
 }
 
-// TestBurstPauses (NET-2 Channel): a flood of any kind pauses the whole
-// channel. While paused nothing acts, whatever the kind, however long the
-// core waits and however often it reconnects; only Resume, which the page
-// calls after the owner's passkey, opens it again. Catches a flood.
-func TestBurstPauses(t *testing.T) {
+// TestBurstTrips (NET-2 The channel, D-255): a burst of any request kind
+// past its rate is a core trip at the enforcer. While the trip is in force
+// nothing acts, whatever the kind, however long the core waits and however
+// often it reconnects, and it never trips again for asking; only the
+// owner's steps on the page lift it (D-260). Catches a flood that only
+// pauses. Revert mutant: count pausing instead of tripping.
+func TestBurstTrips(t *testing.T) {
 	floods := map[string]func(id uint64) wire.Msg{
-		"commands":     func(id uint64) wire.Msg { return cmd(id, "lamp", wire.VerbOn) },
-		"reads":        func(id uint64) wire.Msg { return wire.Read{ID: id, What: wire.ReadState, Device: "lamp"} },
-		"announces":    func(id uint64) wire.Msg { return wire.Announce{ID: id} },
-		"refused asks": func(id uint64) wire.Msg { return cmd(id, "heater", wire.VerbOn) },
+		"commands":  func(id uint64) wire.Msg { return cmd(id, "lamp", wire.VerbOn) },
+		"reads":     func(id uint64) wire.Msg { return wire.Read{ID: id, What: wire.ReadState, Device: "lamp"} },
+		"summaries": func(id uint64) wire.Msg { return wire.Read{ID: id, What: wire.ReadTraffic, Device: "lamp"} },
+		"announces": func(id uint64) wire.Msg { return wire.Announce{ID: id} },
+		"heads":     func(id uint64) wire.Msg { return wire.Head{ID: id} },
 	}
 	for name, flood := range floods {
 		t.Run(name, func(t *testing.T) {
 			r := newRig(t, nil)
 			cl := r.dial()
 			var id uint64
-			for !r.ch.Paused() {
+			for r.cut.trips() == 0 {
 				id++
 				if id > 1000 {
-					t.Fatal("never paused")
+					t.Fatal("never tripped")
 				}
 				cl.do(flood(id))
-			}
-			if r.alerts.paused != 1 {
-				t.Errorf("paused alerts %d, want 1", r.alerts.paused)
 			}
 			n := len(r.radio.calls())
 			r.advance(24 * time.Hour)
@@ -259,23 +265,27 @@ func TestBurstPauses(t *testing.T) {
 				cmd(id+2, "heater", wire.VerbOff),
 				wire.Tighten{ID: id + 3, Kind: wire.CutVendorCloud, Device: "tv"},
 				wire.Read{ID: id + 4, What: wire.ReadExport},
-				wire.Head{ID: id + 5},
+				wire.Read{ID: id + 5, What: wire.ReadTraffic, Device: "lamp"},
+				wire.Head{ID: id + 6},
 			} {
 				if c := cl.code(m); c != wire.Paused {
-					t.Errorf("%T while paused: %v", m, c)
+					t.Errorf("%T while tripped: %v", m, c)
 				}
 			}
 			if len(r.radio.calls()) != n || !r.eng.Current().Device("tv").VendorCloud {
-				t.Error("a request acted while paused")
+				t.Error("a request acted while tripped")
 			}
-			r.ch.Resume()
-			if c := cl.code(cmd(id+6, "lamp", wire.VerbOff)); c != wire.OK {
-				t.Errorf("after resume: %v", c)
+			if r.cut.trips() != 1 {
+				t.Errorf("%d trips, want 1: a paused request tripped again", r.cut.trips())
+			}
+			r.cut.set(Open) // the owner's passkey restore
+			if c := cl.code(cmd(id+7, "lamp", wire.VerbOff)); c != wire.OK {
+				t.Errorf("after the restore: %v", c)
 			}
 		})
 	}
 
-	// An honest core's pace never pauses: one command every two seconds
+	// An honest core's pace never trips: one command every two seconds
 	// for an hour.
 	r := newRig(t, nil)
 	cl := r.dial()
@@ -283,8 +293,50 @@ func TestBurstPauses(t *testing.T) {
 		cl.do(cmd(uint64(i), "lamp", wire.VerbOn))
 		r.advance(2 * time.Second)
 	}
-	if r.ch.Paused() {
-		t.Error("an honest pace paused the channel")
+	if r.cut.trips() != 0 {
+		t.Error("an honest pace tripped the core")
+	}
+}
+
+// TestRefusalBurstWaits (NET-2 Channel): refusals have their own rate,
+// which the kernel cannot check before sending, since it cannot know a
+// request will be refused. Past it every request is refused RateLimited
+// with no trip, that answer is not itself counted, and the rate refills by
+// itself with no owner step, however hard the core keeps asking. Revert
+// mutant: the bucket check removed (refusals unbounded).
+func TestRefusalBurstWaits(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	var id uint64
+	for {
+		id++
+		if id > 1000 {
+			t.Fatal("refusals never limited")
+		}
+		if cl.code(cmd(id, "heater", wire.VerbOn)) == wire.RateLimited {
+			break
+		}
+	}
+	if int(id) != DefaultLimits[KindRefused].Burst+1 {
+		t.Errorf("limited after %d refusals, want %d", id-1, DefaultLimits[KindRefused].Burst)
+	}
+	n := len(r.radio.calls())
+	every := DefaultLimits[KindRefused].Every
+	// The core keeps asking, an honest command every few seconds, for
+	// under one refill: each waits.
+	for range 10 {
+		id++
+		if c := cl.code(cmd(id, "lamp", wire.VerbOn)); c != wire.RateLimited {
+			t.Fatalf("past the refusal rate: %v", c)
+		}
+		r.advance(every / 20)
+	}
+	if len(r.radio.calls()) != n || r.cut.trips() != 0 {
+		t.Fatal("a request acted, or the core tripped, past the refusal rate")
+	}
+	r.advance(every)
+	if c := cl.code(cmd(id+1, "lamp", wire.VerbOff)); c != wire.OK {
+		t.Errorf("after the refusal rate refilled: %v", c)
 	}
 }
 
@@ -294,7 +346,7 @@ func TestBurstPauses(t *testing.T) {
 // connection and never pauses the channel, however many arrive; past the
 // pre-auth bucket the drops stop being logged one by one. The real core
 // connects straight after the flood, and only its own reconnects count
-// toward the pause. Catches a stranger pausing the channel for the core.
+// toward a trip. Catches a stranger pausing the channel or tripping the core.
 func TestPreAuthNeverPauses(t *testing.T) {
 	r := newRig(t, nil)
 	_, stranger, _ := ed25519.GenerateKey(nil)
@@ -325,8 +377,8 @@ func TestPreAuthNeverPauses(t *testing.T) {
 	r.mu.Lock()
 	r.revoked = false
 	r.mu.Unlock()
-	if r.ch.Paused() || r.alerts.paused != 0 {
-		t.Fatal("failed hellos paused the channel")
+	if r.cut.trips() != 0 {
+		t.Fatal("failed hellos tripped the core")
 	}
 	var logged int
 	for _, e := range r.events() {
@@ -343,10 +395,10 @@ func TestPreAuthNeverPauses(t *testing.T) {
 		t.Fatalf("the core after a stranger's flood: %v", c)
 	}
 
-	// The core's own reconnects still pause a burst.
-	for i := 0; !r.ch.Paused(); i++ {
+	// The core's own reconnects past the rate trip it.
+	for i := 0; r.cut.trips() == 0; i++ {
 		if i > DefaultLimits[KindHello].Burst {
-			t.Fatal("the core's reconnect flood never paused")
+			t.Fatal("the core's reconnect flood never tripped")
 		}
 		r.dial()
 	}
@@ -416,7 +468,6 @@ func TestHandshake(t *testing.T) {
 	if !cl.closed(frameBytes(cmdFrame.Type, cmdFrame.Payload)) {
 		t.Error("a revoked key's open connection kept going")
 	}
-	r.ch.Resume()
 	cl = r.connect()
 	if !cl.closed(helloFrame(t, r)) {
 		t.Error("a revoked key's hello was accepted")
@@ -519,13 +570,12 @@ func TestSinksRequired(t *testing.T) {
 
 // TestAlertsMayUseChannel (NET-2 Texts and calls): the alerts sink runs
 // after the channel lets go of its lock, so slice h can send its text back
-// through the channel from inside SafetyOff or Paused without a deadlock.
+// through the channel from inside SafetyOff without a deadlock.
 // Revert mutant: calling Alerts under c.mu (Security finding on #3750).
 func TestAlertsMayUseChannel(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
 	r.alerts.reenter = func() {
-		r.ch.Paused()
 		r.ch.Alert(wire.Alert{Kind: wire.AlertText, Text: "The heater in the hall was turned off."})
 	}
 	cl.send(cmd(1, "heater", wire.VerbOff))
@@ -534,16 +584,6 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
 		t.Fatalf("result: %+v", m)
-	}
-
-	r.alerts.reenter = func() { r.ch.Paused() }
-	var id uint64 = 1
-	for !r.ch.Paused() {
-		id++
-		cl.do(cmd(id, "heater", wire.VerbOn)) // refused, until the refusals pause it
-	}
-	if r.alerts.paused != 1 {
-		t.Errorf("paused alerts %d", r.alerts.paused)
 	}
 }
 
@@ -580,6 +620,7 @@ func TestLogNamesOnlySignedDevices(t *testing.T) {
 			t.Errorf("a hostile name was logged: %+v", e)
 		}
 	}
+	r.cut.set(Open) // the owner's passkey restore after those trips
 
 	forged := "resumed-by-the-owner"
 	sum := sha256.Sum256([]byte(forged))
@@ -704,22 +745,18 @@ func TestOnePolicyCopyPerRequest(t *testing.T) {
 		}
 	}
 	check("open")
-	r.ch.mu.Lock()
-	r.ch.paused = true
-	r.ch.mu.Unlock()
-	check("paused")
+	r.cut.set(Tripped)
+	check("tripped")
 }
 
-// TestPausedLogsNames (NET-2 Channel, #4066): a request the paused channel
-// refuses is still logged by the names the signed policy holds, a pair's
+// TestPausedLogsNames (NET-2 Channel, #4066): a request the tripped channel
+// pauses is still logged by the names the signed policy holds, a pair's
 // members each in its own field and an unsigned name only as its hash.
 // Revert mutant: names set after gate, or blanked when paused.
 func TestPausedLogsNames(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
-	r.ch.mu.Lock()
-	r.ch.paused = true
-	r.ch.mu.Unlock()
+	r.cut.set(Tripped)
 	n := len(r.events())
 	cl.code(cmd(1, "lamp", wire.VerbOn))
 	cl.code(wire.Read{ID: 2, What: wire.ReadState, Device: "heater"})
@@ -773,8 +810,8 @@ func TestOwnerLine(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("lines\n%v\nwant\n%v", got, want)
 	}
-	if got, want := (Event{At: start, Kind: KindPause, Reason: "resumed by the owner on the page"}).Line(), "pause: resumed by the owner on the page"; got != want {
-		t.Errorf("pause line %q, want %q", got, want)
+	if got, want := (Event{At: start, Kind: KindTrip, What: string(KindCommand), Reason: "burst of command past the rate: tripped the core"}).Line(), "trip command: burst of command past the rate: tripped the core"; got != want {
+		t.Errorf("trip line %q, want %q", got, want)
 	}
 }
 
@@ -799,5 +836,217 @@ func TestReservedWord(t *testing.T) {
 	}
 	if got := Short(logName(home(), look)); !strings.HasPrefix(got, unknownWord) || len(got) != len(unknownWord)+shortHex {
 		t.Errorf("unsigned lookalike shows as %q, want the marker and its digits", got)
+	}
+}
+
+// TestTripPausesUntilRestore (KRN-12 Response, D-260, D-262): after a core
+// trip the channel answers every request Paused and logs it, never trips
+// again for a paused request and never counts one as a refusal, while the
+// core's hello, which carries the heartbeat, still connects. At the "core
+// reflashed" step only traffic summaries act again; the passkey restore
+// opens the rest. Revert mutants: Reflashed letting a command through; a
+// Paused answer counted as a refusal, which holds the reopened summaries.
+func TestTripPausesUntilRestore(t *testing.T) {
+	r := newRig(t, nil)
+	r.cut.set(Tripped)
+	requests := func(id uint64) map[string]wire.Msg {
+		return map[string]wire.Msg{
+			"command":     cmd(id, "lamp", wire.VerbOn),
+			"tighten":     wire.Tighten{ID: id + 1, Kind: wire.CutVendorCloud, Device: "tv"},
+			"state":       wire.Read{ID: id + 2, What: wire.ReadState, Device: "lock"},
+			"export":      wire.Read{ID: id + 3, What: wire.ReadExport},
+			"fingerprint": wire.Read{ID: id + 4, What: wire.ReadFingerprint, Device: "lock"},
+			"summary":     wire.Read{ID: id + 5, What: wire.ReadTraffic, Device: "lamp"},
+			"counts":      wire.Read{ID: id + 9, What: wire.ReadCounts},
+			"announce":    wire.Announce{ID: id + 6},
+			"head":        wire.Head{ID: id + 7},
+			"entry":       wire.Entry{ID: id + 8, Body: []byte{1}},
+		}
+	}
+	var id uint64
+	check := func(stage string, rounds int, want map[string]wire.Code) {
+		t.Helper()
+		// Each stage's requests go at an honest pace (a proposal link is
+		// the slowest rate) for two hours: more Paused answers than the
+		// refusal bucket holds.
+		for range rounds {
+			cl := r.dial()
+			n := len(r.events())
+			id += 20
+			for name, m := range requests(id) {
+				w, ok := want[name]
+				if !ok {
+					w = wire.Paused
+				}
+				if c := cl.code(m); c != w {
+					t.Fatalf("%s: %s answered %v, want %v", stage, name, c, w)
+				}
+			}
+			for _, e := range r.events()[n:] {
+				if e.Code == wire.Paused && e.Reason == "" {
+					t.Errorf("%s: a paused request logged no reason: %+v", stage, e)
+				}
+			}
+			r.advance(DefaultLimits[KindAnnounce].Every)
+		}
+	}
+	// A kernel learns of the trip only from Paused answers: a quick run of
+	// them, past the refusal bucket, inside the command rate.
+	cl := r.dial()
+	for i := range 2 * DefaultLimits[KindRefused].Burst {
+		if c := cl.code(cmd(uint64(1000+i), "lamp", wire.VerbOn)); c != wire.Paused {
+			t.Fatalf("tripped: %v", c)
+		}
+	}
+	check("tripped", 12, nil)
+	if len(r.radio.calls()) != 0 || !r.eng.Current().Device("tv").VendorCloud {
+		t.Fatal("a request acted while tripped")
+	}
+	r.cut.set(Reflashed)
+	// Straight after the step, a kernel's run of Paused answers past the
+	// refusal bucket leaves the reopened summaries answering.
+	for i := range 2 * DefaultLimits[KindRefused].Burst {
+		if c := cl.code(cmd(uint64(2000+i), "lamp", wire.VerbOn)); c != wire.Paused {
+			t.Fatalf("reflashed: %v", c)
+		}
+	}
+	if c := cl.code(wire.Read{ID: 2100, What: wire.ReadTraffic, Device: "lamp"}); c != wire.OK {
+		t.Fatalf("reflashed: a summary after a run of Paused answers: %v", c)
+	}
+	check("reflashed", 12, map[string]wire.Code{"summary": wire.OK, "counts": wire.OK})
+	r.cut.set(Open)
+	check("restored", 1, map[string]wire.Code{"command": wire.OK, "tighten": wire.OK, "state": wire.OK, "export": wire.OK,
+		"fingerprint": wire.OK, "summary": wire.OK, "counts": wire.OK, "announce": wire.OK, "head": wire.OK, "entry": wire.OK})
+	if r.cut.trips() != 0 {
+		t.Errorf("%d trips: a paused request tripped the core", r.cut.trips())
+	}
+}
+
+// TestTruncatedFrameOnlyEnds: a stream that ends mid-frame is a lost
+// connection, not a message outside the format, so it ends the
+// connection and trips nothing (an honest core's link can drop
+// mid-write). Revert mutant: malformed counting wire.ErrShort.
+func TestTruncatedFrameOnlyEnds(t *testing.T) {
+	r := newRig(t, nil)
+	good, _ := wire.Encode(wire.ToEnforcer, cmd(1, "lamp", wire.VerbOn))
+	raw := frameBytes(good.Type, good.Payload)
+	cl := r.dial()
+	cl.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := cl.conn.Write(raw[:len(raw)-1]); err != nil {
+		t.Fatal(err)
+	}
+	cl.conn.Close()
+	<-cl.done
+	if r.cut.trips() != 0 {
+		t.Fatal("a truncated frame tripped the core")
+	}
+}
+
+// TestCountRead (NET-2 Byte caps, #4174): the count read names no device
+// and returns the enforcer's counts in the shared format's one encoding,
+// which the kernel decodes; with no counts source it is refused, and a
+// source that fails answers Failed, never a partial count. An honest
+// kernel reading once each wire.SummaryInterval for a day, and once at
+// exactly twice it after a gap, is never limited or tripped. Revert
+// mutant: ReadCounts left out of summaryRead (TestTripPausesUntilRestore).
+func TestCountRead(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	rep, ok := cl.do(wire.Read{ID: 1, What: wire.ReadCounts}).(wire.ReadReply)
+	if !ok {
+		t.Fatalf("count read: %+v", rep)
+	}
+	cs, err := wire.DecodeCounts(rep.Body)
+	if err != nil || cs.Day != 1 || len(cs.Groups) != 1 || cs.Groups[0].Count != 3 || cs.Groups[0].Cap() != 9 {
+		t.Fatalf("counts %+v, %v", cs, err)
+	}
+	for i := range 24 * 60 {
+		r.advance(wire.SummaryInterval)
+		if c := cl.code(wire.Read{ID: uint64(10 + i), What: wire.ReadCounts}); c != wire.OK {
+			t.Fatalf("read %d at the summary interval: %v", i, c)
+		}
+	}
+	r.advance(2 * wire.SummaryInterval)
+	if c := cl.code(wire.Read{ID: 5000, What: wire.ReadCounts}); c != wire.OK || r.cut.trips() != 0 {
+		t.Fatalf("read at twice the interval: %v, %d trips", c, r.cut.trips())
+	}
+
+	none := newRig(t, func(c *Config) { c.Counts = nil })
+	if c := none.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Refused {
+		t.Errorf("no counts source: %v", c)
+	}
+	broken := newRig(t, func(c *Config) {
+		c.Counts = func() (wire.Counts, error) { return wire.Counts{}, errors.New("nft down") }
+	})
+	if c := broken.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Failed {
+		t.Errorf("failing source: %v", c)
+	}
+	bad := newRig(t, func(c *Config) {
+		c.Counts = func() (wire.Counts, error) {
+			return wire.Counts{Groups: []wire.CountGroup{{Count: 1}}}, nil // an empty group: outside the format
+		}
+	})
+	if c := bad.dial().code(wire.Read{ID: 1, What: wire.ReadCounts}); c != wire.Failed {
+		t.Errorf("source outside the format: %v", c)
+	}
+}
+
+// TestPausedBurstTripsNothingMore (Security release on #4377): a paused
+// core that keeps asking past its rate trips nothing more, while tripped
+// or after the reflash step, so its retries never undo the owner's step;
+// a summary burst past the rate at the Reflashed stage, where summaries
+// act, still trips. Revert mutant: counting a paused request with count.
+func TestPausedBurstTripsNothingMore(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	for _, st := range []Stage{Tripped, Reflashed} {
+		r.cut.set(st)
+		for i := range DefaultLimits[KindCommand].Burst + 5 {
+			if c := cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn)); c != wire.Paused {
+				t.Fatalf("stage %d: %v", st, c)
+			}
+		}
+		for range DefaultLimits[KindHello].Burst + 5 {
+			r.dial()
+		}
+		if r.cut.trips() != 0 || r.cut.Stage() != st {
+			t.Fatalf("stage %d: %d trips, stage now %d", st, r.cut.trips(), r.cut.Stage())
+		}
+		r.advance(time.Hour)
+	}
+	for i := 0; r.cut.trips() == 0; i++ {
+		if i > DefaultLimits[KindRead].Burst+1 {
+			t.Fatal("a summary burst at the Reflashed stage never tripped")
+		}
+		cl.do(wire.Read{ID: uint64(100 + i), What: wire.ReadCounts})
+	}
+}
+
+// TestPausedRequestsTakeTheirRate: a paused request and a cut core's
+// reconnect each take their rate's token (ENF-d-4), so a burst sent while
+// paused leaves no tokens to spend on the restore. Revert mutants: the
+// takes in gate and in the hello.
+func TestPausedRequestsTakeTheirRate(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	r.cut.set(Tripped)
+	for i := range DefaultLimits[KindCommand].Burst {
+		cl.code(cmd(uint64(i+1), "lamp", wire.VerbOn))
+	}
+	r.cut.set(Open)
+	cl.code(cmd(1000, "lamp", wire.VerbOn))
+	if r.cut.trips() != 1 {
+		t.Fatalf("a command after a paused burst: %d trips, want 1", r.cut.trips())
+	}
+
+	r = newRig(t, nil)
+	r.cut.set(Tripped)
+	for range DefaultLimits[KindHello].Burst {
+		r.dial()
+	}
+	r.cut.set(Open)
+	r.dial()
+	if r.cut.trips() != 1 {
+		t.Fatalf("a hello after a cut core's reconnects: %d trips, want 1", r.cut.trips())
 	}
 }

@@ -85,6 +85,9 @@ jobs:
       - name: The records-only step runs every test that reads a record (CI-PATHS)
         if: steps.scope.outputs.records != 'true'
         run: python tests/records_audit.py "$RUNNER_TEMP/reads"
+      - name: No two unit-test units write one path or bind one address (CI-par-clash)
+        if: steps.scope.outputs.records != 'true'
+        run: python tests/clash_audit.py "$RUNNER_TEMP/reads"
       - name: Document tool tests (records-only change; CI-docs)
         # The tests of the tools the steps below run, and every test that reads a record file;
         # full CI's record-read audit fails when a test that reads one is missing here.

@@ -8,7 +8,7 @@ newly reaches or breaks older code (its new call site, its changed argument). Fo
 prints `in-diff path:line` or `unchanged path:line`, and exits 0 only when every citation is in-diff.
 A line counts as in-diff when `git diff -U0 merge-base(base, head) head` adds it, when a pure deletion
 sits right next to it (the line before or after the removed block), or when its file is deleted. An
-`unchanged` citation is pre-existing code: its finding is `release` or `later`, never a blocker, unless
+`unchanged` citation is pre-existing code: its finding is a `release` work item, never a blocker, unless
 the reviewer cites the in-diff line that causes it. Git only, no network; fetch first.
 """
 import re

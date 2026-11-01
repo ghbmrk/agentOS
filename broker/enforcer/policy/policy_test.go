@@ -279,6 +279,10 @@ func TestClassifyClosedList(t *testing.T) {
 		"add a control port":    func(d *Document, s sub) { dev(d, s.x).Control = append(dev(d, s.x).Control, Port{ProtoTCP, 9}) },
 		"change a control port": func(d *Document, s sub) { dev(d, s.x).Control = []Port{{ProtoUDP, 9}} },
 		"remove a control port": func(d *Document, s sub) { dev(d, s.x).Control = nil }, // run on a base with a port below
+		// mDNS names: pinning one lets a device announce more across its
+		// pairs; unpinning one is not on the closed list either (#4144).
+		"pin an mDNS name":   func(d *Document, s sub) { dev(d, s.x).MDNS = [][]string{{"x", "local"}} },
+		"unpin an mDNS name": func(d *Document, s sub) { dev(d, s.x).MDNS = nil }, // run on a base with a name below
 	}
 	for sname, s := range subjects {
 		for name, c := range tight {
@@ -294,6 +298,8 @@ func TestClassifyClosedList(t *testing.T) {
 				dev(&base, s.x).Isolated = true
 			case "remove a control port":
 				dev(&base, s.x).Control = []Port{{ProtoTCP, 9}}
+			case "unpin an mDNS name":
+				dev(&base, s.x).MDNS = [][]string{{"x", "local"}}
 			}
 			next := base.normal() // a copy
 			f(&next, s)
@@ -359,7 +365,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// fails here.
 	covered := map[string][]string{
 		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
-		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label", "Control", "Stream"},
+		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
 		"StandingRule": {"ID", "Device", "Action", "FromMS", "ToMS"},

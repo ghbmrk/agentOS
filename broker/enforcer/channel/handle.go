@@ -77,8 +77,12 @@ var tightenKinds = map[wire.TightenKind]string{
 	wire.RevokeRule:        policy.RevokeRule,
 }
 
+// summaryRead are the reads that are traffic summaries, which resume at the
+// "core reflashed" step (D-262).
+var summaryRead = map[wire.ReadWhat]bool{wire.ReadTraffic: true, wire.ReadCounts: true}
+
 var readWords = map[wire.ReadWhat]string{
-	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic",
+	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic", wire.ReadCounts: "byte counts",
 }
 
 // handle acts on one decoded message and returns the reply.
@@ -100,22 +104,22 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		if m.Verb == wire.VerbLevel {
 			ev.What = fmt.Sprintf("level %d", m.Level)
 		}
-		code, ev.Reason = c.gate(KindCommand, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(KindCommand, false, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
 	case wire.Tighten:
 		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, logName(cur, m.Device), tightenKinds[m.Kind]
 		if m.Kind == wire.RemovePair {
 			ev.Device, ev.Other = logName(cur, m.A), logName(cur, m.B)
 		}
-		code, ev.Reason = c.gate(KindTighten, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(KindTighten, false, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
-		var cur policy.Document // an export names no device
-		if m.What != wire.ReadExport {
+		var cur policy.Document // an export or a count read names no device
+		if m.Device != "" {
 			cur = c.cfg.Policy.Current()
 		}
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
-		code, ev.Reason = c.gate(KindRead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindRead, summaryRead[m.What], func() (wire.Code, string) {
 			var code wire.Code
 			var why string
 			body, code, why = c.read(cur, m)
@@ -126,10 +130,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 	case wire.Announce:
 		ev.Kind, ev.ID, ev.What = KindAnnounce, m.ID, "proposal link"
-		code, ev.Reason = c.gate(KindAnnounce, func() (wire.Code, string) { return wire.OK, "counted" })
+		code, ev.Reason = c.gate(KindAnnounce, false, func() (wire.Code, string) { return wire.OK, "counted" })
 	case wire.Head:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log head"
-		code, ev.Reason = c.gate(KindHead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Head(m) != nil {
 				return wire.Refused, "head not kept"
 			}
@@ -137,7 +141,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Entry:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log entry"
-		code, ev.Reason = c.gate(KindHead, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Entry(m) != nil {
 				return wire.Refused, "entry not kept"
 			}
@@ -145,7 +149,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Challenge:
 		ev.Kind, ev.ID, ev.What = KindAnswer, m.ID, "challenge answer"
-		code, ev.Reason = c.gate(KindAnswer, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(KindAnswer, false, func() (wire.Code, string) {
 			if !c.outstanding[m.ID] || c.cfg.Answer == nil {
 				return wire.Refused, "no challenge outstanding with this id"
 			}
@@ -161,7 +165,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	}
 	ev.Code = code
 	c.cfg.Log(ev)
-	if code != wire.OK && code != wire.NeedsOwner {
+	// A Paused answer is not a refusal: a kernel learns of a trip or a
+	// pause only from one, so counting it would pause the summaries the
+	// Reflashed stage reopens.
+	if code != wire.OK && code != wire.NeedsOwner && code != wire.Paused {
 		c.count(KindRefused)
 	}
 	if reply != nil {
@@ -241,31 +248,61 @@ func (e Event) render(show func(string) string) string {
 	return b.String()
 }
 
-// gate runs act unless the channel is paused, after counting k; a kind
-// over its rate pauses the channel and act does not run.
-func (c *Channel) gate(k Kind, act func() (wire.Code, string)) (wire.Code, string) {
-	if c.paused {
-		return wire.Paused, "the channel is paused until the owner resumes it on the page"
+// gate counts k and runs act unless the request may not act now. While a
+// trip is in force every request is answered Paused and logged; it still
+// takes its kind's rate, but a paused request past the rate trips nothing
+// more, so a paused core's retries never send a Reflashed stage back to
+// Tripped. At the Reflashed stage a traffic summary (summary set) acts
+// again and the rest wait for the passkey restore (D-260, D-262). A request
+// that may act and is past its kind's rate trips the core (count). Past
+// the refusal rate every request waits, RateLimited, until it refills.
+func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
+	var paused string
+	switch c.cfg.Cut.Stage() {
+	case Open:
+	case Reflashed:
+		if !summary {
+			paused = "the core tripped: paused until the owner's passkey restore"
+		}
+	default: // Tripped, or a stage this code does not know
+		paused = "the core tripped: paused until the owner's passkey restore"
+		if summary {
+			paused = "the core tripped: summaries paused until the core reflashed step"
+		}
+	}
+	if paused != "" {
+		c.buckets[k].take(c.cfg.Now())
+		return wire.Paused, paused
 	}
 	if !c.count(k) {
-		return wire.Paused, "burst: the channel is paused until the owner resumes it on the page"
+		return wire.Paused, "burst of " + string(k) + ": tripped the core"
+	}
+	if !c.buckets[KindRefused].has(c.cfg.Now()) {
+		return wire.RateLimited, refusalWait
 	}
 	return act()
 }
 
-// count takes one from k's bucket and pauses the channel if it was empty.
-// It reports whether the channel is still open. The caller holds c.mu.
+// refusalWait is the reason a request past the refusal rate is refused.
+// Counting it takes nothing from the empty bucket, so the rate refills
+// while the core keeps asking.
+const refusalWait = "too many refusals: refused until the refusal rate refills"
+
+// count takes one from k's bucket. An empty bucket is a burst past the
+// rate, a core trip, except KindRefused's, which only makes requests wait
+// (gate). It reports whether the request is inside the rate. The caller
+// holds c.mu.
 func (c *Channel) count(k Kind) bool {
-	if c.paused {
-		return false
-	}
 	now := c.cfg.Now()
 	if c.buckets[k].take(now) {
 		return true
 	}
-	c.paused = true
-	c.cfg.Log(Event{At: now, Kind: KindPause, Reason: "burst of " + string(k) + ": paused until the owner resumes it on the page"})
-	c.queued = append(c.queued, c.cfg.Alerts.Paused)
+	if k != KindRefused {
+		reason := "burst of " + string(k) + " past the rate: tripped the core"
+		c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(k), Reason: reason})
+		c.queueTrip(reason)
+		return false
+	}
 	return false
 }
 
@@ -329,7 +366,7 @@ func (c *Channel) tighten(m wire.Tighten, nowMS int64) (wire.Code, string) {
 func (c *Channel) read(cur policy.Document, m wire.Read) ([]byte, wire.Code, string) {
 	var body []byte
 	var err error
-	if m.What != wire.ReadExport {
+	if m.Device != "" {
 		dev := cur.Device(m.Device)
 		if dev == nil {
 			return nil, wire.Refused, "no such device in the signed policy"
@@ -357,6 +394,14 @@ func (c *Channel) read(cur policy.Document, m wire.Read) ([]byte, wire.Code, str
 			return nil, wire.Refused, "no traffic summaries"
 		}
 		body, err = c.cfg.Traffic(m.Device)
+	case wire.ReadCounts:
+		if c.cfg.Counts == nil {
+			return nil, wire.Refused, "no byte-cap counts"
+		}
+		var cs wire.Counts
+		if cs, err = c.cfg.Counts(); err == nil {
+			body, err = wire.EncodeCounts(cs)
+		}
 	}
 	if err != nil || len(body) > wire.MaxReply {
 		return nil, wire.Failed, "the source did not answer within the reply cap"

@@ -64,6 +64,10 @@ const (
 	ReadFingerprint ReadWhat = 3
 	// ReadTraffic is a device's traffic summary (NET-5).
 	ReadTraffic ReadWhat = 4
+	// ReadCounts is the enforcer's byte-cap counts, the traffic summary
+	// the kernel's check reads once each SummaryInterval (NET-2 Byte caps;
+	// its body is Counts); it names no device.
+	ReadCounts ReadWhat = 5
 )
 
 // SummaryInterval is the interval between traffic summaries that this
@@ -139,8 +143,8 @@ type Tighten struct {
 	ToMS   int64
 }
 
-// Read asks for a read. Device is empty for ReadExport and names a device
-// otherwise.
+// Read asks for a read. Device is empty for ReadExport and ReadCounts and
+// names a device otherwise.
 type Read struct {
 	ID     uint64
 	What   ReadWhat
@@ -349,7 +353,7 @@ func Decode(d Direction, f Frame) (Msg, error) {
 		m = t
 	case TRead:
 		rd := Read{ID: r.u64(), What: ReadWhat(r.u8()), Device: r.name()}
-		if rd.What < ReadState || rd.What > ReadTraffic || (rd.What == ReadExport) != (rd.Device == "") {
+		if rd.What < ReadState || rd.What > ReadCounts || (rd.What == ReadExport || rd.What == ReadCounts) != (rd.Device == "") {
 			r.fail()
 		}
 		m = rd

@@ -787,6 +787,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Secure":      func(d *policy.Device) { d.Secure = map[string]string{"": "lock", "lock": ""}[d.Secure] },
 		"Label":       func(d *policy.Device) { d.Label = policy.LabelContained },
 		"Control":     func(d *policy.Device) { d.Control = append(d.Control, policy.Port{Proto: policy.ProtoUDP, Num: 80}) },
+		"MDNS":        func(d *policy.Device) { d.MDNS = append(d.MDNS, []string{"z", "local"}) },
 	}
 	// A stream port only a camera or microphone carries, and a change
 	// from one of those classes to the other, so these rows run on one.
