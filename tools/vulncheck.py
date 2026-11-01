@@ -871,7 +871,7 @@ def fingerprints(sources, has):
 def shipped_owner(rel):
     """The package a tarball ships whole at REL, a path under its root node_modules/<name>/ that
     the walk reads, or None. A node_modules/ deeper in the package (dist/vendor/node_modules/x/)
-    is no installed package: npm's packing drops those, so a file there is a copy like any other."""
+    is no package npm installs or a lockfile versions, so a file there is a copy like any other."""
     o = mark_owner(rel.encode()) if rel.startswith("node_modules/") else None
     return o[0] if o and not o[2] else None
 
@@ -962,10 +962,10 @@ def advised_names(names, env=None, offline=False, opener=urllib.request.urlopen)
                 results = json.load(resp).get("results")
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise ScanError(f"{OSV_QUERYBATCH}: the advisory query failed ({e})")
-        if not isinstance(results, list) or len(results) != len(chunk):
+        if not isinstance(results, list) or len(results) != len(chunk) or not all(isinstance(r, dict) for r in results):
             raise ScanError(f"{OSV_QUERYBATCH}: the advisory query answered {len(results or [])} of {len(chunk)} packages")
         # A next_page_token means more advisories remain, so the package has one (osv-scanner reads it so).
-        found = {n for n, r in zip(chunk, results) if (r or {}).get("vulns") or (r or {}).get("next_page_token")}
+        found = {n for n, r in zip(chunk, results) if r.get("vulns") or r.get("next_page_token")}
         if ADVISORY_CANARY not in found:
             raise ScanError(f"{OSV_QUERYBATCH}: the advisory query found nothing for {ADVISORY_CANARY}, so its answers are not read")
         out |= found

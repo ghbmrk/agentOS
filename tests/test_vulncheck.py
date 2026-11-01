@@ -929,7 +929,8 @@ class UnmarkedTest(unittest.TestCase):
         self.assertEqual(asked, [1000, 502])  # 999 names and the canary, then the rest
         blank = lambda req, timeout: io.BytesIO(json.dumps({"results": [{}] * len(json.loads(req.data)["queries"])}).encode())
         for answer in (lambda req, timeout: io.BytesIO(b'{"results": []}'),
-                       lambda req, timeout: io.BytesIO(b"not json"), blank):
+                       lambda req, timeout: io.BytesIO(b"not json"), blank,
+                       lambda req, timeout: io.BytesIO(json.dumps({"results": [None] * len(json.loads(req.data)["queries"])}).encode())):
             with self.assertRaises(vulncheck.ScanError):
                 vulncheck.advised_names({"x"}, opener=answer)
 
