@@ -63,6 +63,10 @@ func TestMain(m *testing.M) {
 	case "":
 		os.Exit(m.Run())
 	case "unlock":
+		if err := reserve(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		var r unlockRole
 		if err := json.Unmarshal([]byte(os.Getenv(unlockEnv)), &r); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -70,6 +74,8 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Fprintln(os.Stderr, unlockAndExec(r.Config(), r.pins))
 		os.Exit(2)
+	case "move":
+		os.Exit(moveRole())
 	case "kernel":
 		var cfg kernelRole
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
@@ -93,6 +99,82 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(3)
+}
+
+// moveRole is the unlock step's start and its hand-off's move, with the
+// runtime's poller made in between, as the step's pipes and TPM connection
+// make it, and then given time to poll before the exec would come (#4474).
+// The move overwrites only reserve's placeholders, so the runtime keeps its
+// own descriptors and lives; 0 when it did, and the descriptors read as the
+// moved pipe and file.
+func moveRole() int {
+	if err := reserve(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	// A file first, as the step opens its store first: unreserved, it
+	// would take 3, and the poller made with it 4 and 5.
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	defer w.Close()
+	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	// Each of the runtime's threads polls in this time: sysmon once 10 ms
+	// pass with no poll, and the sleeping goroutine's thread for its timer.
+	time.Sleep(200 * time.Millisecond)
+	for fd, want := range map[int]string{handoff.KeyFD: "pipe:", handoff.TPMFD: os.DevNull} {
+		if to, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd)); err != nil || !strings.HasPrefix(to, want) {
+			fmt.Fprintf(os.Stderr, "descriptor %d is %q (%v), not the moved %s\n", fd, to, err, want)
+			return 2
+		}
+	}
+	return 0
+}
+
+// TestTheMoveLeavesTheRuntimesDescriptors: the unlock step's move onto
+// descriptors 3 and 4 never overwrites the poller's epoll or eventfd, which
+// the runtime would otherwise make at those numbers and poll on before the
+// exec, killing the step with "netpoll failed" (#4474).
+//
+// REQ: STO-2
+func TestTheMoveLeavesTheRuntimesDescriptors(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=move"}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("the step died between the move and the exec: %v\n%s", err, out)
+		}
+	}
+}
+
+// TestReserveRefusesATakenDescriptor: a step started with descriptor 3
+// already open holds nothing and hands nothing off (#2899, #4474).
+//
+// REQ: STO-2
+func TestReserveRefusesATakenDescriptor(t *testing.T) {
+	cmd := exec.Command(os.Args[0])
+	cmd.Env = []string{roleEnv + "=move"}
+	f, err := os.Open(os.DevNull)
+	must(t, err)
+	defer f.Close()
+	cmd.ExtraFiles = []*os.File{f}
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "were not free at my start") {
+		t.Fatalf("a step with descriptor 3 open: %v\n%s", err, out)
+	}
+	if err := handOff(nil, f, config{uid: 1, gid: 1}); err == nil || !strings.Contains(err.Error(), "not held") {
+		t.Fatalf("a hand-off without the reservation: %v", err)
+	}
 }
 
 // kernelRole is the kernel main's configuration: its one argument after

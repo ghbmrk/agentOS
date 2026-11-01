@@ -37,6 +37,12 @@
 // the store, sealed under the checker's clerk key, to a file only root
 // reads, for the checker's unit to load at each start (CH-4, MIG-4-exit-c2).
 // The kernel hands the checker that key, so the kernel never holds the seed.
+//
+// The runtime keeps no descriptor of its own for the cgroup's CPU limit, so
+// descriptors 3 and 4 are free when main starts and reserve can hold them
+// for the hand-off (#4474).
+//
+//go:debug containermaxprocs=0
 package main
 
 import (
@@ -74,7 +80,11 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	c, err := parse(os.Args[1:], os.Stderr)
+	err := reserve()
+	var c config
+	if err == nil {
+		c, err = parse(os.Args[1:], os.Stderr)
+	}
 	if err == nil {
 		err = unlockAndExec(c, storePins(c.store))
 	}
@@ -760,9 +770,12 @@ func openTPM(path string) (transport.TPMCloser, error) {
 
 // handOff writes b to a pipe, drops to the kernel's ids and execs the
 // kernel main with the pipe's read end as handoff.KeyFD and tpm as
-// handoff.TPMFD. b is far below a pipe's buffer, so the write completes with
+// handoff.TPMFD, over the placeholders reserve holds there. b is far below a pipe's buffer, so the write completes with
 // no reader yet.
 func handOff(b []byte, tpm *os.File, c config) error {
+	if !reserved {
+		return errors.New("agentos-unlock: the hand-off's descriptors were not held from my start")
+	}
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -786,6 +799,35 @@ func handOff(b []byte, tpm *os.File, c config) error {
 		return err
 	}
 	return syscall.Exec(c.exec, append([]string{c.exec}, c.args...), kernelEnv)
+}
+
+// reserved is set once reserve holds the hand-off's descriptors.
+var reserved bool
+
+// reserve holds handoff.KeyFD and handoff.TPMFD with the two ends of a pipe
+// from the start, before the step opens anything, so no descriptor the Go
+// runtime makes for itself takes either number. The runtime makes its
+// poller's epoll and eventfd at the first pipe, socket or file opened, at the
+// lowest free numbers, and other threads (sysmon, an idle scheduler) poll on
+// them at any time. Were one of them on 3 or 4, handOff's move would put the
+// key pipe or the TPM in its place, and a poll between the move and the exec
+// kills the step with "netpoll failed": the tpm slot, already capped, then
+// refuses every restart in that boot (#4474). The move overwrites only these
+// two placeholders, which are close-on-exec, so neither reaches the kernel
+// unless the move put the hand-off there. A step that does not get exactly 3
+// and 4 (its parent left one open, #2899) unlocks nothing.
+func reserve() error {
+	var p [2]int
+	if err := syscall.Pipe2(p[:], syscall.O_CLOEXEC); err != nil {
+		return fmt.Errorf("agentos-unlock: hold descriptors %d and %d: %w", handoff.KeyFD, handoff.TPMFD, err)
+	}
+	if p != [2]int{handoff.KeyFD, handoff.TPMFD} {
+		syscall.Close(p[0])
+		syscall.Close(p[1])
+		return fmt.Errorf("agentos-unlock: descriptors %d and %d were not free at my start (got %d and %d)", handoff.KeyFD, handoff.TPMFD, p[0], p[1])
+	}
+	reserved = true
+	return nil
 }
 
 // kernelEnv is the kernel process's whole environment. It reads no

@@ -1,8 +1,10 @@
 [Unit]
 Description=AgentOS boot report
 # After the Wi-Fi page's claim hand-over, so the report reads its final state (#1743), and after
-# enrollment, so its keeper line reads enrollment's result, not a job still queued (STO-2c).
-After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service agentos-localui-claim.service agentos-keeper-enroll.service
+# enrollment and the kernel, so its keeper line reads enrollment's result and the kernel unit's
+# state once its start job has settled, not a job still queued or running its ExecStartPre= (STO-2c,
+# #4474). A kernel that then reads "activating" is waiting to restart after a failure.
+After=systemd-bless-boot.service boot-complete.target agentos-drive-id.service agentos-localui-claim.service agentos-keeper-enroll.service agentos-keeper-kernel.service
 
 [Service]
 Type=oneshot
