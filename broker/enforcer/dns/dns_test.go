@@ -122,6 +122,24 @@ func has(file, line string) bool { return strings.Contains("\n"+file, "\n"+line+
 // nothing names the edge. Catches a resolver that forwards any name, one
 // that answers a device with another list's names (ENF-f-4), or one that
 // fills the wrong set.
+// fills is the nftset line that puts name's answers in the allow set set4
+// (and its IPv6 twin) of the fixture and in name's own sets there.
+func fills(t *testing.T, name, set4 string) string {
+	t.Helper()
+	sets, err := nft.AllowSets(fixturePolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range sets {
+		if a.Set4 == set4 {
+			p := "#inet#" + nft.Table + "#"
+			return "nftset=/" + name + "/4" + p + a.Set4 + ",4" + p + a.Named(name, false) + ",6" + p + a.Set6 + ",6" + p + a.Named(name, true)
+		}
+	}
+	t.Fatalf("no allow set %s", set4)
+	return ""
+}
+
 func TestListedNamesOnly(t *testing.T) {
 	f := generate(t)
 	var ifaces []string
@@ -137,19 +155,19 @@ func TestListedNamesOnly(t *testing.T) {
 			"interface=core0",
 			"server=/core.example/198.51.100.53#53",
 			"local=/*.core.example/",
-			"nftset=/core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
-			"nftset=/updates.core.example/4#inet#enforcer#core_4,6#inet#enforcer#core_6",
+			fills(t, "core.example", "core_4"),
+			fills(t, "updates.core.example", "core_4"),
 		},
 		d101: {
 			"interface=ap0.101",
-			"nftset=/tv.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
-			"nftset=/cdn.example/4#inet#enforcer#d101_4,6#inet#enforcer#d101_6",
+			fills(t, "tv.example", "d101_4"),
+			fills(t, "cdn.example", "d101_4"),
 		},
 		d102: {"interface=ap0.102"},
 		d103: {
 			"interface=ap0.103",
-			"nftset=/plug.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
-			"nftset=/cdn.example/4#inet#enforcer#d103_4,6#inet#enforcer#d103_6",
+			fills(t, "plug.example", "d103_4"),
+			fills(t, "cdn.example", "d103_4"),
 		},
 		d108: {"interface=ap0.108"},
 	} {
@@ -239,6 +257,14 @@ func TestViewsAreOwnLists(t *testing.T) {
 		if err != nil {
 			t.Fatalf("seed %d: %v", seed, err)
 		}
+		all, err := nft.AllowSets(d, fixtureLayout())
+		if err != nil {
+			t.Fatal(err)
+		}
+		setOf := map[string]nft.AllowSet{}
+		for _, a := range all {
+			setOf[a.Set4+","+a.Set6] = a
+		}
 		if len(f.Listed) != 1+len(d.Devices) {
 			t.Fatalf("seed %d: %d views for %d devices", seed, len(f.Listed), len(d.Devices))
 		}
@@ -249,8 +275,9 @@ func TestViewsAreOwnLists(t *testing.T) {
 					name, spec, _ := strings.Cut(rest, "/")
 					got = append(got, name)
 					named++
-					s4, s6, _ := strings.Cut(sets[v.Iface], ",")
-					if spec != "4#inet#"+nft.Table+"#"+s4+",6#inet#"+nft.Table+"#"+s6 {
+					a := setOf[sets[v.Iface]]
+					p := "#inet#" + nft.Table + "#"
+					if spec != "4"+p+a.Set4+",4"+p+a.Named(name, false)+",6"+p+a.Set6+",6"+p+a.Named(name, true) {
 						t.Errorf("seed %d: %s fills %q", seed, v.Iface, spec)
 					}
 				}
