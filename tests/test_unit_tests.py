@@ -4,7 +4,11 @@ REQ: CI-PATHS
 """
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -12,6 +16,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "tools"))
 import unit_tests  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import records_audit  # noqa: E402
 
 
 class CommandTest(unittest.TestCase):
@@ -94,6 +101,109 @@ class RunTest(unittest.TestCase):
         text = "".join(out)
         self.assertLess(text.index("::group::test_a (FAILED, 5s)\na1\n::endgroup::"),
                         text.index("::group::test_b (ok, 2s)\nb1\nb2\n::endgroup::"))
+
+
+def traced():
+    """Whether this process is already traced: a nested strace cannot attach (PTRACE_TRACEME)."""
+    try:
+        with open("/proc/self/status") as f:
+            return any(line.split()[1:2] not in (["0"], []) for line in f if line.startswith("TracerPid:"))
+    except OSError:
+        return False
+
+
+class SplitTest(unittest.TestCase):
+    """CI-par-3: a SPLIT module's tests run across forked workers inside its one strace tree."""
+    # REQ: CI-PATHS
+
+    BODY = textwrap.dedent("""\
+        import os, time, unittest
+
+        def log(case):
+            with open(os.environ["SPLIT_LOG"], "a") as f:
+                f.write(f"{os.getpid()} {case.id()}\\n")
+
+        class A(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                cls.ready = True
+
+            def test_1(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+            def test_2(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+            def test_3(self): log(self); time.sleep(0.3); self.assertTrue(self.ready)
+
+        class B(unittest.TestCase):
+            def test_4(self): log(self); time.sleep(0.3)
+            def test_5(self): log(self); time.sleep(0.3)
+            def test_6(self): log(self); time.sleep(0.3)
+        """)
+
+    def run_split(self, body, prefix=()):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_fake.py").write_text(body)
+        log = root / "log"
+        log.touch()
+        p = subprocess.run([*prefix, sys.executable, str(pathlib.Path(unit_tests.__file__).resolve()), "--split",
+                            "test_fake", "--workers", "3"], cwd=root, capture_output=True, text=True,
+                           env={**os.environ, "SPLIT_LOG": str(log)}, timeout=120)
+        return p, [line.split() for line in log.read_text().splitlines()], root
+
+    def test_a_split_module_runs_under_one_strace_into_its_own_trace(self):
+        cmd = unit_tests.command("test_image", "/r", workers=4)
+        self.assertIn("test_image", unit_tests.SPLIT)
+        self.assertEqual(cmd, [*unit_tests.STRACE, "-o", "/r/test_image.trace", sys.executable,
+                               str(pathlib.Path(unit_tests.__file__).resolve()), "--split", "test_image",
+                               "--workers", "4"])
+
+    def test_split_modules_exist(self):
+        self.assertTrue(set(unit_tests.SPLIT) <= set(unit_tests.modules()), unit_tests.SPLIT)
+        self.assertFalse(set(unit_tests.SPLIT) & set(unit_tests.SERIAL))
+
+    def test_split_runs_every_test_once_across_workers(self):
+        p, log, _ = self.run_split(self.BODY)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertEqual(sorted(t for _, t in log), [f"test_fake.{c}.test_{i}" for c, i in
+                                                     (("A", 1), ("A", 2), ("A", 3), ("B", 4), ("B", 5), ("B", 6))])
+        self.assertGreater(len({pid for pid, _ in log}), 1, log)
+        self.assertIn("test_fake: 6 of 6 tests run across 3 workers\n", p.stdout)
+
+    def test_split_fails_on_a_failed_test(self):
+        p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self);", "def test_5(self): self.fail('x');"))
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("FAIL: test_5", p.stdout)
+        self.assertEqual(len(log), 5)
+
+    def test_split_fails_when_a_worker_is_lost(self):
+        p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self);", "def test_5(self): os._exit(0);"))
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("1 worker(s) lost", p.stdout)
+        self.assertIn("not run", p.stdout)
+
+    def test_split_fails_on_an_empty_module(self):
+        p, log, _ = self.run_split("import unittest\n")
+        self.assertEqual(p.returncode, 1, p.stdout)
+        self.assertIn("test_fake: no tests found", p.stdout)
+
+    @unittest.skipUnless(shutil.which("strace"), "strace is not installed (CI installs it)")
+    @unittest.skipIf(traced(), "already under strace (CI's step), which audits test_image's real trace instead")
+    def test_split_trace_is_one_finished_tree(self):
+        trace_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, trace_dir)
+        prefix = unit_tests.command("test_x", trace_dir)
+        prefix = prefix[:prefix.index("-o") + 2]
+        p, log, root = self.run_split(self.BODY, prefix)
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        trace = pathlib.Path(trace_dir, "test_x.trace").read_text(errors="surrogateescape")
+        self.assertTrue(records_audit.finished(trace))
+        opened = records_audit.opened(trace, root=os.path.realpath(root))
+        self.assertIn(("tests/test_fake.py", False), opened)
+        self.assertIn(str(root / "log"), trace)
+        # The first process, the one strace started, exits after every worker it forked.
+        first = trace.split(None, 1)[0]
+        self.assertTrue(trace.rstrip().endswith("+++ exited with 0 +++"), trace[-300:])
+        self.assertTrue(trace.rstrip().splitlines()[-1].startswith(first + " "), trace[-300:])
 
 
 if __name__ == "__main__":
