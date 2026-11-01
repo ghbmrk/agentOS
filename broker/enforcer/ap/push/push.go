@@ -35,7 +35,29 @@ import (
 var (
 	ErrPath   = errors.New("push: not an access point path")
 	ErrVerify = errors.New("push: access point does not hold what was written")
+	// ErrSuperseded is a Sync whose write or reload the access point
+	// refused because a later claim holds it (exit status refusedExit):
+	// a claim of an earlier Sync that timed out waiting for the lock
+	// landed after this Sync's own. It wrote nothing more, and the next
+	// Sync, at Watch's next tick, claims afresh.
+	ErrSuperseded = errors.New("push: a later claim holds the access point")
 )
+
+// refusedExit is the exit status of a write or reload the access point
+// refuses because its Sync's token is no longer the newest claim:
+// EX_TEMPFAIL, which no command push runs uses for anything else (a
+// failed cat, hash check, flock or mv is 1; a missing command 127; a
+// command a signal ended 128 and up).
+const refusedExit = 75
+
+// reloadBound is how long the reload may hold the access point's lock:
+// busybox timeout ends reload_config after it, so a hung reload (a ubus
+// call procd never answers) holds up the next claim, and the revocations
+// it carries, for this long at most, rather than until ubus's own
+// 30-second call timeout. Ending reload_config early loses nothing: it
+// sends its change events before it records what it has sent, so a cut
+// reload sends them again at the next Sync.
+const reloadBound = 20 * time.Second
 
 // MaxFile bounds what Sync reads back from the access point, so a hostile
 // one cannot fill the enforcer's memory.
@@ -124,20 +146,25 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	// A write that fails does not stop the others or the reload: the
 	// files written are on the access point and would not read as drift
 	// next time, so every file is tried and the reload runs, and the
-	// errors are returned together.
+	// errors are returned together. A refused write ends the Sync: every
+	// later command of it would be refused too.
 	var errs []error
 	wrote := 0
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
 			if _, err := run(c, writeCmd(f.Path, tok, f.Data), f.Data); err != nil {
-				errs = append(errs, fmt.Errorf("push: write %s: %w", f.Path, err))
+				err = fmt.Errorf("push: write %s: %w", f.Path, superseded(err))
+				if errors.Is(err, ErrSuperseded) {
+					return res, errors.Join(append(errs, err)...)
+				}
+				errs = append(errs, err)
 				continue
 			}
 			wrote++
 		}
 	}
 	if _, err := run(c, applyCmd(tok), nil); err != nil {
-		errs = append(errs, fmt.Errorf("push: reload: %w", err))
+		errs = append(errs, fmt.Errorf("push: reload: %w", superseded(err)))
 	} else {
 		res.Applied = wrote > 0
 	}
@@ -178,6 +205,16 @@ func (p *Pusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]a
 	}
 }
 
+// superseded marks err as ErrSuperseded when the access point refused
+// the command for a newer claim.
+func superseded(err error) error {
+	var exit *ssh.ExitError
+	if errors.As(err, &exit) && exit.ExitStatus() == refusedExit {
+		return fmt.Errorf("%w: %w", ErrSuperseded, err)
+	}
+	return err
+}
+
 func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 	if p.HostKey == nil || p.Signer == nil || p.Dial == nil {
 		return nil, errors.New("push: no pinned host key, enforcer key or admin-port dialer")
@@ -210,7 +247,7 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 //
 // A Sync that times out closes the connection without waiting for the
 // command it was running, which can keep running on the access point
-// (ENF-g-8, #4313). So each Sync first claims the access point: under the
+// (ENF-g-10, #4313). So each Sync first claims the access point: under the
 // access point's lock (busybox flock on lockPath) it writes a fresh
 // random token to tokenPath and removes every temporary file. A write
 // reads stdin into a temporary file of its own path and token and checks
@@ -219,8 +256,9 @@ func (p *Pusher) connect(ctx context.Context) (*ssh.Client, error) {
 // they run only while tokenPath still holds their own Sync's token. A
 // command a timed-out Sync left behind therefore either moves its file
 // before the next Sync's claim, which waits for the lock, or finds the
-// newer token and does nothing: a late old write cannot put back an
-// older config, such as a revoked password. Reads take no lock: mv
+// newer token and does nothing but exit refusedExit: a late old write
+// cannot put back an older config, such as a revoked password. Reads
+// take no lock: mv
 // replaces a file in one rename. The lock and token are on the access
 // point's tmpfs, so a reboot, which ends every command, also clears them.
 const (
@@ -242,9 +280,10 @@ func locked(cmd string) string {
 	return "{ flock -x 9 && " + cmd + "; } 9>" + lockPath
 }
 
-// owns is true on the access point only while tok is the newest claim.
+// owns is true on the access point only while tok is the newest claim;
+// otherwise its status is refusedExit, without ending the shell.
 func owns(tok string) string {
-	return "[ \"$(cat " + tokenPath + ")\" = " + tok + " ]"
+	return "{ [ \"$(cat " + tokenPath + ")\" = " + tok + " ] || (exit " + fmt.Sprint(refusedExit) + "); }"
 }
 
 // tmpGlob matches every temporary file tmpPath names.
@@ -258,10 +297,12 @@ func claimCmd(tok string) string {
 	return locked("echo " + tok + " > " + tokenPath + " && rm -f " + tmpGlob)
 }
 
-// applyCmd reloads while tok is the newest claim. reload_config does not
-// get the lock's descriptor, so nothing it starts can hold the lock.
+// applyCmd reloads while tok is the newest claim, for reloadBound at
+// most. reload_config does not get the lock's descriptor, so nothing it
+// starts can hold the lock, nor the session's output, so nothing it
+// leaves running when the bound ends it holds the Sync's command open.
 func applyCmd(tok string) string {
-	return locked(owns(tok) + " && reload_config 9>&-")
+	return locked(owns(tok) + " && timeout " + fmt.Sprint(int(reloadBound/time.Second)) + " reload_config 9>&- </dev/null >/dev/null 2>&1")
 }
 
 // tmpPath is the temporary file for path in the Sync holding tok: one per
@@ -279,12 +320,13 @@ func readCmd(path string) string { return readPrefix + path }
 // claim, so a stdin cut short (a dropped connection, a deadline) leaves
 // path alone. Reading and the hash take no lock, so a stdin that never
 // ends holds up no other Sync. A failed check, a newer claim or a failed
-// move removes the temporary file. The hash is hex.
+// move removes the temporary file and keeps the failure's status, so a
+// newer claim exits refusedExit. The hash is hex.
 func writeCmd(path, tok string, data []byte) string {
 	sum := sha256.Sum256(data)
 	t := tmpPath(path, tok)
 	return "umask 077 && cat > " + t + " && [ \"$(sha256sum " + t + " | cut -d' ' -f1)\" = " + hex.EncodeToString(sum[:]) +
-		" ] && " + locked(owns(tok)+" && mv -f "+t+" "+path) + " || { rm -f " + t + "; false; }"
+		" ] && " + locked(owns(tok)+" && mv -f "+t+" "+path) + " || { s=$?; rm -f " + t + "; exit $s; }"
 }
 
 // holds reports whether the access point's file at f.Path is exactly
