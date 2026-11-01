@@ -545,7 +545,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
 		"image/mkosi/agentos-x.conf":              "install btusb /usr/lib/agentos/agentos-side\nkernel.modprobe=/usr/lib/agentos/agentos-side\n",
 		extra + "usr/lib/udev/rules.d/60-x.rules": "KERNEL==\"x\", MODE=\"0600\"\n",
-		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 root root -\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nw /sys/class/leds/x/trigger - - - - none\nR /var/tmp/agentos-x\nd /var/tmp/agentos-y 1777 root root -\nd /run/agentos-y :0750 root root -\nz /run/agentos-y ~0755\n",
+		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 root root -\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nR /var/tmp/agentos-x\nd /var/tmp/agentos-y 1777 root root -\nd /run/agentos-y :0750 root root -\nz /run/agentos-y ~0755\n",
 		extra + "usr/lib/tmpfiles.d/README": "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n",
 		programsFile:                        "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
 	}
@@ -573,7 +573,6 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles core_pattern pipe":  {tmpfiles, "w /proc/sys/kernel/core_pattern - - - - |/usr/lib/agentos/agentos-side %p\n"},
 		"a tmpfiles w+ kernel.modprobe": {tmpfiles, "w+ /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n"},
 		"a tmpfiles kernel.hotplug":     {tmpfiles, "w-! /proc/sys/kernel/hotplug - - - - /usr/lib/agentos/agentos-side\n"},
-		"a tmpfiles uevent_helper":      {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n"},
 		"a tmpfiles poweroff_cmd":       {tmpfiles, "\tw /proc/sys/kernel/poweroff_cmd\t-\t-\t-\t-\t/usr/lib/agentos/agentos-side --now\n"},
 		"a tmpfiles.d under broker":     {"broker/side/tmpfiles.d/x.conf", "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n"},
 	} {
@@ -643,7 +642,9 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles masked setuid mode":   {tmpfiles, "d /var/lib/agentos-x ~6755 root root -\n", `no setuid or setgid`},
 		"a tmpfiles magic link":           {tmpfiles, "w /proc/1/root/proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n", `in /proc but not /proc/sys`},
 		"a tmpfiles mode on a helper":     {tmpfiles, "z /proc/sys/kernel/core_pattern 0666\n", `a helper is only written`},
-		"a tmpfiles w to a file":          {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys or /sys`},
+		"a tmpfiles w to a file":          {tmpfiles, "w /etc/modprobe.d/x.conf - - - - install btusb /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
+		"a tmpfiles uevent_helper":        {tmpfiles, "w /sys/kernel/uevent_helper - - - - /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
+		"a tmpfiles module helper":        {tmpfiles, "w /sys/module/drbd/parameters/usermode_helper - - - - /usr/lib/agentos/agentos-side\n", `writes only under /proc/sys`},
 		"a tmpfiles f":                    {tmpfiles, "f /etc/rc.local 0755 - - - /usr/lib/agentos/agentos-side\n", `type f writes`},
 		"a tmpfiles L":                    {tmpfiles, "L+ /etc/systemd/system-generators/x - - - - /usr/lib/agentos/agentos-side\n", `type L+ writes`},
 		"a tmpfiles C":                    {tmpfiles, "C /etc/udev/rules.d - - - - /usr/share/agentos/rules.d\n", `type C writes`},
@@ -1321,7 +1322,7 @@ var tmpfilesMode = regexp.MustCompile(`^(-|[~:]?[0-7]{3}|[~:]?[0-1][0-7]{3})$`)
 // subvolume, set a mode or owner, or ignore or remove what is at a path.
 // The rest write content (f, w), copy (C), link (L), make a device node or
 // fifo (c, b, p) or set an ACL, attribute or xattr (a, h, t, a file
-// capability among them); only w is read, and only to /proc/sys or /sys.
+// capability among them); only w is read, and only to /proc/sys.
 var tmpfilesPlain = map[string]bool{"d": true, "D": true, "e": true, "v": true, "q": true, "Q": true, "z": true, "Z": true, "x": true, "X": true, "r": true, "R": true}
 
 // tmpfilesHeld are the helper paths and binfmt_misc: a line other than w
@@ -1337,10 +1338,10 @@ var tmpfilesPath = regexp.MustCompile(`^/[A-Za-z0-9_./@:+-]*$`)
 
 // tmpfilesPrograms parses one tmpfiles.d file and returns the program each
 // w line to a usermode helper writes (kernel.core_pattern's pipe,
-// kernel.modprobe, kernel.hotplug or its sysfs name /sys/kernel/uevent_helper,
-// kernel.poweroff_cmd), or an error naming the first line it refuses: a path
-// that is not plain, a type that is not plain or w, a w outside /proc/sys
-// and /sys, any line on a helper but such a w, and any line under
+// kernel.modprobe, kernel.hotplug, kernel.poweroff_cmd), or an error naming
+// the first line it refuses: a path that is not plain, a type that is not
+// plain or w, a w outside /proc/sys, any line on a helper but such a w or on
+// a directory above one, a release_agent, and any line under
 // /proc/sys/fs/binfmt_misc, whose register file adds an interpreter.
 func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 	var progs []ruleProgram
@@ -1356,8 +1357,6 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 		typ, p := m[1]+m[2], f[1]
 		key := ""
 		switch {
-		case p == "/sys/kernel/uevent_helper":
-			key = "kernel.hotplug"
 		case strings.HasPrefix(p, "/proc/sys/"):
 			key = strings.ReplaceAll(strings.TrimPrefix(p, "/proc/sys/"), "/", ".")
 		}
@@ -1379,11 +1378,14 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 		case typ != "w" && typ != "w+" && sysctlHelpers[key]:
 			return fmt.Errorf("%d: %s on %s; a helper is only written, with w", n, f[0], p)
 		case typ == "w" || typ == "w+":
-			if key == "" && !strings.HasPrefix(p, "/sys/") {
-				return fmt.Errorf("%d: w to %s; a w line writes only under /proc/sys or /sys", n, p)
+			// sysfs holds root helpers the reader does not know (module
+			// parameters such as drbd's usermode_helper, uevent_helper), so
+			// a w goes only to /proc/sys, read as sysctl.d is (#4381).
+			if key == "" {
+				return fmt.Errorf("%d: w to %s; a w line writes only under /proc/sys (a sysctl belongs in sysctl.d)", n, p)
 			}
 		case !tmpfilesPlain[typ]:
-			return fmt.Errorf("%d: type %s writes, copies, links, makes a node or labels a file, which the lint does not read", n, f[0])
+			return fmt.Errorf("%d: type %s writes, copies, links, makes a node or labels a file, which the lint does not read; ship the file itself under image/ instead", n, f[0])
 		}
 		if len(f) < 7 {
 			return nil
