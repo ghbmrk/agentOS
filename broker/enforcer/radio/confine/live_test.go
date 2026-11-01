@@ -28,8 +28,8 @@ const liveUID = 4249
 
 func TestMain(m *testing.M) {
 	Trampoline()
-	if len(os.Args) == 5 && os.Args[1] == viewArg {
-		os.Exit(viewProbe(os.Args[2], os.Args[3], os.Args[4]))
+	if len(os.Args) == 4 && os.Args[1] == viewArg {
+		os.Exit(viewProbe(os.Args[2], os.Args[3]))
 	}
 	if len(os.Args) == 4 && os.Args[1] == liveArg {
 		os.Exit(liveProbe(os.Args[2], os.Args[3]))
@@ -66,7 +66,6 @@ func (p *probeState) path(name string) uintptr { return p.str(filepath.Join(p.di
 const (
 	moveMountFEmpty   = 0x4
 	fsconfigCmdCreate = 6
-	mountAttrNosuid   = 0x2
 )
 
 // liveCases is every filter rule the live probes claim: each of
@@ -181,7 +180,7 @@ func liveProbe(variant, dir string) int {
 	for i, c := range liveCases {
 		args[i] = c.args(p)
 	}
-	fam := slices.Sorted(slices.Values(Thread(1, 1).Families))
+	fam := slices.Sorted(slices.Values(Thread(1, 1, "/s", "/r", "/d").Families))
 	switch {
 	case variant == "none":
 	case variant == "shipped":

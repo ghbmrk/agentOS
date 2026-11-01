@@ -6,8 +6,8 @@
 // filter spikes/ENF-radio measured, with socket families narrowed to the
 // profile's list. Thread alone also gets a user namespace the enforcer
 // creates as root, with CAP_NET_ADMIN and CAP_NET_RAW in it. A profile
-// with a View (BLE's is the system bus socket) sees only those paths, in a
-// mount namespace of its own (view.go). The process gets its command interface as fd 3, one end
+// with a View sees only its entries, in a mount namespace of its own
+// (view.go); every shipped profile has one. The process gets its command interface as fd 3, one end
 // of a socket pair, and nothing else: it never opens a path to the
 // enforcer, so the policy store and the page's socket stay its owner's
 // files, unreadable to it.
@@ -53,13 +53,13 @@ type Profile struct {
 	// bringing lo up.
 	Links []string
 	// View, when set, is all of the file system the stack sees: its root
-	// is an empty read-only tmpfs holding each listed path that exists,
-	// bound read-only, nosuid and nodev at its own path, so a
-	// Unix socket the list leaves out cannot be named. The stack's own
-	// mount namespace is built in a user namespace created by the
-	// enforcer as root, mapping only the stack's user and group, whose
-	// CAP_SYS_ADMIN Trampoline drops before the exec. Not with NetAdmin.
-	View []string
+	// is an empty read-only tmpfs holding each listed entry that exists,
+	// at its own path (view.go), so a Unix socket or file the list leaves
+	// out cannot be named. The stack's own mount namespace is built in a
+	// user namespace created by the enforcer as root, mapping only the
+	// stack's user and group (Thread's own, with NetAdmin), whose
+	// CAP_SYS_ADMIN Trampoline drops before the exec.
+	View []Entry
 }
 
 // BLE is the Bluetooth stack's profile: it reaches BlueZ over the system
@@ -67,33 +67,48 @@ type Profile struct {
 // Bluetooth socket (BLE commissioning goes through BlueZ, never raw HCI),
 // and the bus socket is the only file it sees (#4215).
 func BLE(uid, gid uint32) Profile {
-	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}, View: []string{SystemBus}}
+	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX},
+		View: []Entry{{Path: SystemBus, Kind: Socket}}}
 }
+
+// Tun is the tun device ot-daemon makes wpan0 from.
+const Tun = "/dev/net/tun"
 
 // Thread is the Thread stack's profile (ot-daemon; D-231): its own user
 // and network namespace holding lo, the wpan0 it creates from a tun, and
 // a dummy infra0 as its infrastructure link, so its SRP advertising proxy
 // and mDNS reach the Matter controller and no LAN (spikes/ENF-radio,
-// consequence 1). IP, netlink and Unix sockets only: no packet socket.
-func Thread(uid, gid uint32) Profile {
+// consequence 1). IP, netlink and Unix sockets only: no packet socket. It
+// sees its state directory and its run directory, where it makes its
+// command socket (its working directory), both writable; the radio's
+// serial device; the tun device; and /dev/urandom, its entropy (#4369).
+func Thread(uid, gid uint32, state, run, radio string) Profile {
 	return Profile{Name: "thread", UID: uid, GID: gid, NetAdmin: true, Links: []string{"infra0"},
-		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK}}
+		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK},
+		View: []Entry{{Path: state, Kind: Dir, Write: true}, {Path: run, Kind: Dir, Write: true},
+			{Path: radio, Kind: Device}, {Path: Tun, Kind: Device}, {Path: "/dev/urandom", Kind: Device}}}
 }
 
 // Matter is the Matter controller's profile: started into the Thread
 // stack's network namespace (Spec.Net) as its own user, with no
 // capability, so it reaches Thread devices and the SRP proxy's mDNS on
-// infra0 and nothing else.
-func Matter(uid, gid uint32) Profile {
+// infra0 and nothing else. It sees its storage directory, writable, and
+// nothing else: Bluetooth commissioning goes through the BLE process over
+// the radio host, not a path (#4369).
+func Matter(uid, gid uint32, storage string) Profile {
 	return Profile{Name: "matter", UID: uid, GID: gid,
-		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK}}
+		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK},
+		View:     []Entry{{Path: storage, Kind: Dir, Write: true}}}
 }
 
 // ThreadAdapter is the Thread adapter's profile: ot-daemon's user, so it
-// can open ot-daemon's command socket in their state directory, in a
-// fresh empty network namespace with Unix sockets only.
-func ThreadAdapter(uid, gid uint32) Profile {
-	return Profile{Name: "thread-adapter", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}}
+// can open ot-daemon's command socket, in a fresh empty network namespace
+// with Unix sockets only. It sees ot-daemon's run directory, read-only,
+// which holds that socket (its working directory), and not the state
+// directory with the network's keys (#4369).
+func ThreadAdapter(uid, gid uint32, run string) Profile {
+	return Profile{Name: "thread-adapter", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX},
+		View: []Entry{{Path: run, Kind: Dir}}}
 }
 
 // Spec is one stack process to start.
@@ -204,7 +219,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	cmd := &exec.Cmd{
 		Path:        self,
-		Args:        append([]string{arg0, strings.Join(fam, ","), strings.Join(p.View, "\n"), s.Path}, s.Args...),
+		Args:        append([]string{arg0, strings.Join(fam, ","), encodeView(p.View), s.Path}, s.Args...),
 		Env:         []string{},
 		Dir:         dir,
 		Stderr:      s.Stderr,
@@ -278,14 +293,14 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 		attr.AmbientCaps = []uintptr{capNetAdmin, capNetRaw}
 	}
 	if len(p.View) > 0 {
-		// As for NetAdmin, but for the stack's own mount namespace:
-		// Trampoline builds the view with CAP_SYS_ADMIN there and drops
-		// it before the exec.
+		// As for NetAdmin (the same user namespace, with NetAdmin), for
+		// the stack's own mount namespace: Trampoline builds the view with
+		// CAP_SYS_ADMIN there and drops it, and only it, before the exec.
 		attr.Cloneflags |= syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
 		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
 		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
 		attr.GidMappingsEnableSetgroups = true
-		attr.AmbientCaps = []uintptr{capSysAdmin}
+		attr.AmbientCaps = append(attr.AmbientCaps, capSysAdmin)
 	}
 	return attr
 }
@@ -402,11 +417,14 @@ func confineAndExec(families, view, path string, argv []string, hold bool) error
 	runtime.LockOSThread()
 	exe := -1
 	if view != "" {
-		var err error
-		if exe, err = enterView(strings.Split(view, "\n"), path); err != nil {
+		entries, err := decodeView(view)
+		if err != nil {
+			return err
+		}
+		if exe, err = enterView(entries, path); err != nil {
 			return fmt.Errorf("confine: view: %w", err)
 		}
-		if err := dropCaps(); err != nil {
+		if err := dropSysAdmin(); err != nil {
 			return fmt.Errorf("confine: capabilities: %w", err)
 		}
 	}
