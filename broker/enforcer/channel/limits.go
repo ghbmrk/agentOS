@@ -16,19 +16,22 @@ const (
 	KindAnswer   Kind = "answer"   // a device challenge's answer
 	KindRefused  Kind = "refused"  // any request or frame refused
 	KindFrame    Kind = "frame"    // a frame that ended the connection
-	KindPause    Kind = "pause"    // the channel paused or resumed
+	KindTrip     Kind = "trip"     // a core trip at the enforcer (KRN-12)
 )
 
 // Limit is a token bucket: Burst at once, then one more every Every. A
-// request that finds its kind's bucket empty is a burst, and pauses the
-// channel (NET-2 Channel). KindPreAuth is the one bucket that never pauses:
-// past it, failed hellos are still dropped but no longer logged one by one.
+// request that finds its kind's bucket empty is a burst past the rate, a
+// core trip (NET-2 The channel, D-255). Past KindRefused's bucket requests
+// only wait, refused, until it refills, since the kernel cannot know a
+// request will be refused. KindPreAuth is
+// the one bucket that neither trips nor pauses: past it, failed hellos are
+// still dropped but no longer logged one by one.
 type Limit struct {
 	Burst int
 	Every time.Duration
 }
 
-// DefaultLimits are the rates the channel takes before it pauses. They are
+// DefaultLimits are the rates the channel takes before it trips. They are
 // set well above an honest core's use and are a checkpoint, not a
 // measurement (ASSUMPTIONS ENF-d-3). The engine's own per-device
 // tightening limit (policy.TightenLimit) applies inside them.
@@ -54,15 +57,15 @@ func newBucket(l Limit, now time.Time) *bucket {
 	return &bucket{l: l, tokens: l.Burst, last: now}
 }
 
-// take refills by whole intervals since last and takes one token.
+// has refills and reports whether a token is left, taking none.
+func (b *bucket) has(now time.Time) bool {
+	b.refill(now)
+	return b.tokens > 0
+}
+
+// take refills and takes one token.
 func (b *bucket) take(now time.Time) bool {
-	if b.l.Every > 0 && now.After(b.last) {
-		n := int(now.Sub(b.last) / b.l.Every)
-		if n > 0 {
-			b.tokens = min(b.l.Burst, b.tokens+n)
-			b.last = b.last.Add(time.Duration(n) * b.l.Every)
-		}
-	}
+	b.refill(now)
 	if b.tokens == 0 {
 		return false
 	}
@@ -73,4 +76,13 @@ func (b *bucket) take(now time.Time) bool {
 	return true
 }
 
-func (b *bucket) fill(now time.Time) { b.tokens, b.last = b.l.Burst, now }
+// refill adds whole intervals since last.
+func (b *bucket) refill(now time.Time) {
+	if b.l.Every > 0 && now.After(b.last) {
+		n := int(now.Sub(b.last) / b.l.Every)
+		if n > 0 {
+			b.tokens = min(b.l.Burst, b.tokens+n)
+			b.last = b.last.Add(time.Duration(n) * b.l.Every)
+		}
+	}
+}

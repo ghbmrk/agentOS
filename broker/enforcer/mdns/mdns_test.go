@@ -42,16 +42,27 @@ func fixtureLayout() nft.Layout {
 
 // The fixture: a Household laptop paired with the printer, two paired
 // sensors, an unpaired TV, and an isolated device whose pair is dead.
+// Each device pins the mDNS names it announces (#4144); the laptop's
+// name is held for it, and the printer pins core-page, which Household
+// claims, so the claim still stops it.
 func fixturePolicy() policy.Document {
+	hosts := func(hs ...string) [][]string {
+		var out [][]string
+		for _, h := range hs {
+			out = append(out, []string{h, "local"})
+		}
+		return out
+	}
 	return policy.Document{
 		Version: 7,
 		Devices: []policy.Device{
-			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true},
-			{ID: "printer", Network: policy.NetDevices, WiFi: "vlan105", Everyday: true},
-			{ID: "sensor-a", Network: policy.NetDevices, WiFi: "vlan106", Class: policy.ClassSensor},
+			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true, MDNS: hosts("tv-answer")},
+			{ID: "printer", Network: policy.NetDevices, WiFi: "vlan105", Everyday: true,
+				MDNS: append(hosts("printer-answer", "core-page", "flood"), []string{"Printer", "_ipp", "_tcp", "local"})},
+			{ID: "sensor-a", Network: policy.NetDevices, WiFi: "vlan106", Class: policy.ClassSensor, MDNS: hosts("sensor-a-answer")},
 			{ID: "sensor-b", Network: policy.NetDevices, WiFi: "vlan107", Class: policy.ClassSensor},
-			{ID: "old-tv", Network: policy.NetDevices, WiFi: "vlan108", Everyday: true, Isolated: true},
-			{ID: "laptop", Network: policy.NetHousehold, Everyday: true},
+			{ID: "old-tv", Network: policy.NetDevices, WiFi: "vlan108", Everyday: true, Isolated: true, MDNS: hosts("isolated-answer")},
+			{ID: "laptop", Network: policy.NetHousehold, Everyday: true, MDNS: hosts("laptop-asleep")},
 			{ID: "phone", Network: policy.NetOwner, Everyday: true},
 		},
 		Pairs: []policy.Pair{{A: "laptop", B: "printer"}, {A: "sensor-a", B: "sensor-b"}, {A: "old-tv", B: "phone"}},
@@ -64,7 +75,11 @@ func plan(t *testing.T) Plan {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewPlan(paths)
+	announces, err := nft.Announces(fixturePolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewPlan(paths, announces)
 }
 
 func header(response bool) []byte {
@@ -462,5 +477,126 @@ func pairOnly(t *testing.T, v6 bool) {
 	}
 	if !slices.Contains(heard["hh0"], "printer-answer") || len(heard["own0"]) != 0 {
 		t.Errorf("the Owner network heard %v", heard["own0"])
+	}
+}
+
+// TestPinnedAfterRestart: real packets, through the loaded ruleset and a
+// relay that restarted, over IPv4 and IPv6 (#4144). The Household laptop
+// announced its name and a file share before the restart and sleeps
+// since, so the new relay has not heard either; the printer then
+// announces both on its own address, beside a share of a type it never
+// pinned. Household hears only the printer's pinned names: a restart
+// never widens what a paired device may announce.
+func TestPinnedAfterRestart(t *testing.T) {
+	for _, v6 := range []bool{false, true} {
+		t.Run(map[bool]string{false: "IPv4", true: "IPv6"}[v6], func(t *testing.T) { pinnedAfterRestart(t, v6) })
+	}
+}
+
+func pinnedAfterRestart(t *testing.T, v6 bool) {
+	if !inNetns(t) {
+		return
+	}
+	if v6 && !hasKernelIPv6() {
+		if required() {
+			t.Fatal("the kernel has no IPv6")
+		}
+		t.Skip("the kernel has no IPv6")
+	}
+	text, err := nft.Compile(fixturePolicy(), fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nftBin, err := exec.LookPath("nft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (load.Loader{Bin: nftBin}).Load(context.Background(), text); err != nil {
+		t.Fatal(err)
+	}
+	// Every interface the plan listens on; the sensors' pair only so the
+	// relay starts.
+	nets := map[string]int{"hh0": 11, "ap0.105": 13, "ap0.106": 14, "ap0.107": 15}
+	hosts, socks := map[string]int{}, map[string]*net.UDPConn{}
+	for ifc, n := range nets {
+		hosts[ifc] = newHost(t, ifc, n, v6)
+		socks[ifc] = mdnsSocket(t, hosts[ifc], v6, 5353)
+	}
+	addr := func(ifc string) string {
+		if v6 {
+			return fmt.Sprintf("fd00:%d::2", nets[ifc])
+		}
+		return fmt.Sprintf("10.%d.0.2", nets[ifc])
+	}
+	send := func(ifc string, m *message) {
+		within(t, hosts[ifc], func() {
+			if _, err := socks[ifc].WriteToUDP(m.bytes(), group(v6)); err != nil {
+				t.Fatal(err)
+			}
+		})
+		time.Sleep(20 * time.Millisecond)
+	}
+	serve := func() func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- Serve(ctx, plan(t)) }()
+		time.Sleep(200 * time.Millisecond)
+		return func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	stop := serve()
+	send("hh0", response([]record{a("laptop-asleep.local", addr("hh0"), 120), srv("Laptop._smb._tcp.local", "laptop-asleep.local", 120)}, nil))
+	stop()
+	// The restart: a new relay, which has heard nothing.
+	defer serve()()
+	drain(socks["hh0"])
+	send("ap0.105", response([]record{
+		a("printer-answer.local", addr("ap0.105"), 120),
+		a("laptop-asleep.local", addr("ap0.105"), 120),
+		srv("Printer._ipp._tcp.local", "printer-answer.local", 120),
+		srv("Laptop._smb._tcp.local", "printer-answer.local", 120),
+		srv("Office._smb._tcp.local", "printer-answer.local", 120),
+		ptr("_smb._tcp.local", "Laptop._smb._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_smb._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_ipp._tcp.local", 120),
+	}, nil))
+	var got []string
+	buf := make([]byte, maxPacket)
+	socks["hh0"].SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		n, _, err := socks["hh0"].ReadFromUDP(buf)
+		if err != nil {
+			break
+		}
+		m, ok := parse(buf[:n])
+		if !ok {
+			t.Fatalf("Household heard a malformed packet: %x", buf[:n])
+		}
+		for _, r := range m.answers {
+			got = append(got, describe(r, 0))
+		}
+	}
+	want := []string{
+		"an printer-answer.local " + addr("ap0.105"),
+		"an Printer._ipp._tcp.local -> printer-answer.local",
+		"an _services._dns-sd._udp.local -> _ipp._tcp.local",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("Household heard\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// drain reads c until it has been quiet for a moment.
+func drain(c *net.UDPConn) {
+	buf := make([]byte, maxPacket)
+	for {
+		c.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, _, err := c.ReadFromUDP(buf); err != nil {
+			return
+		}
 	}
 }

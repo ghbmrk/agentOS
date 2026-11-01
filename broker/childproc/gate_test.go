@@ -44,6 +44,10 @@ var exempt = map[string]string{
 	// seccomp filter and exec the stack (syscall.Exec) with an empty
 	// environment. Same reason and same limits as the loader.
 	"enforcer/radio/confine": "the enforcer's radio launcher starts and execs the confined radio stacks; enforcer code cannot import childproc (ENF-k)",
+	// The source lints' shared loader (REV-CHK-lintload, #4273) runs go
+	// list. Only _test.go files import it, which its own
+	// TestOnlyTestsImportTheLoader holds, so no shipped binary links it.
+	"internal/lintload": "the source lints' loader runs go list; only _test.go files import it (TestOnlyTestsImportTheLoader)",
 }
 
 // within names the exempt packages, by the same key, that are cut only

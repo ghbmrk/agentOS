@@ -50,7 +50,7 @@ func (s *Server) enrolScreen(w http.ResponseWriter, r *http.Request) {
 	if due, ok := s.cfg.Enrol.Recovery(); ok {
 		data["Due"] = s.when(due.UnixMilli())
 	}
-	s.render(w, "enrol.html", data)
+	s.render(w, r, "enrol.html", data)
 }
 
 // certificate serves the enforcer's root certificate, or the core's page

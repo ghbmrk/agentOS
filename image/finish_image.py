@@ -9,20 +9,25 @@ entry and the /usr partitions are one release: the build verifies the split /usr
 its hash tree against that hash with veritysetup, and the manifest records both.
 Uses mtools on the raw image, so no loop devices or mounts are needed. Before mkosi runs, it also
 stages the build's device drivers into the image tree (DEVSLOT-image), and the manifest carries
-their list.
+their list. Beside the release it writes agentos_VERSION.usr.list, every /usr file's hash and
+metadata read back from the verified partition with fsck.erofs (#4059), so two builds whose /usr
+root hashes differ name the differing file.
 Usage: finish_image.py OUTDIR VERSION [DRIVERS_JSON]; finish_image.py --stage-drivers DRIVERS STAGE CHECKER"""
 import errno
 import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import mmap
 import os
 import pathlib
 import re
+import shutil
 import stat
 import struct
 import subprocess
 import sys
+import tempfile
 
 ESP = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 # Linux swap (IMG-nodump): the broker's memory holds the Owner Card passphrase (card C13).
@@ -452,6 +457,124 @@ def verify_usr(data, tree, roothash):
         raise ValueError("/usr does not verify against usrhash=%s" % roothash)
 
 
+# One line per entry of the /usr list, a JSON array of these fields (#4059). digest: a file's
+# sha256, a link's target, a device's major:minor, else "". Extended attributes are not listed:
+# fsck.erofs 1.7 does not extract them, so a difference only there reads as same files, other layout.
+USR_LIST_FIELDS = ("path", "type", "mode", "uid", "gid", "mtime_ns", "nlink", "size", "digest")
+USR_TYPES = ((stat.S_ISREG, "f"), (stat.S_ISDIR, "d"), (stat.S_ISLNK, "l"), (stat.S_ISCHR, "c"),
+             (stat.S_ISBLK, "b"), (stat.S_ISFIFO, "p"), (stat.S_ISSOCK, "s"))
+
+
+def usr_list(root):
+    """The /usr list of the tree at ROOT: one JSON line per entry below it, sorted by path."""
+    root = pathlib.Path(root)
+    lines = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        for n in dirnames + filenames:
+            path = pathlib.Path(dirpath) / n
+            st = path.lstat()
+            kind = next(c for test, c in USR_TYPES if test(st.st_mode))
+            digest = (sha256(path) if kind == "f" else os.readlink(path) if kind == "l"
+                      else "%d:%d" % (os.major(st.st_rdev), os.minor(st.st_rdev)) if kind in "cb" else "")
+            lines.append(json.dumps([path.relative_to(root).as_posix(), kind, "%04o" % stat.S_IMODE(st.st_mode),
+                                     st.st_uid, st.st_gid, st.st_mtime_ns, st.st_nlink if kind != "d" else 0,
+                                     st.st_size if kind == "f" else 0, digest]))
+    return sorted(lines, key=lambda ln: json.loads(ln)[0])
+
+
+EROFS_MAGIC = 0xE0F5E1E2
+EROFS_PLAIN, EROFS_INLINE = 0, 2  # the uncompressed data layouts, the only ones a directory has here
+EROFS_INCOMPAT_KNOWN = 0x7F  # erofs-utils 1.7's features; a later one (48-bit layout 0x80) moves root_nid
+
+
+def erofs_inodes(data):
+    """Map each path below the root of erofs image DATA to its inode's (mode, uid, gid), read from the
+    on-disk inodes (#4470): fsck.erofs 1.7 extracts a setuid or setgid file without the bit, and
+    dump.erofs prints only the low 9 mode bits. A layout this reader does not know raises ValueError."""
+    with open(data, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as img:
+        return erofs_walk(data, img)
+
+
+def erofs_walk(data, img):
+    magic, blkbits, root = struct.unpack_from("<I8xBxH", img, 1024)
+    if magic != EROFS_MAGIC:
+        raise ValueError("%s is not erofs" % data)
+    if struct.unpack_from("<I", img, 1024 + 80)[0] & ~EROFS_INCOMPAT_KNOWN:
+        raise ValueError("%s uses an erofs feature this reader does not know" % data)
+    bs, meta = 1 << blkbits, struct.unpack_from("<I", img, 1024 + 40)[0] << blkbits
+
+    def inode(nid):
+        off = meta + 32 * nid
+        fmt, xcount, mode = struct.unpack_from("<HHH", img, off)
+        if fmt & 1:  # extended, 64 bytes
+            size, u, uid, gid = struct.unpack_from("<QI4xII", img, off + 8)
+            isize = 64
+        else:  # compact, 32 bytes
+            size, u, uid, gid = struct.unpack_from("<I4xI4xHH", img, off + 8)
+            isize = 32
+        tail = off + isize + (12 + 4 * (xcount - 1) if xcount else 0)
+        return mode, uid, gid, (fmt >> 1) & 7, size, u, tail
+
+    def entries(nid):
+        mode, _, _, layout, size, u, tail = inode(nid)
+        if layout not in (EROFS_PLAIN, EROFS_INLINE):
+            raise ValueError("%s: directory inode %d has data layout %d" % (data, nid, layout))
+        full = size if layout == EROFS_PLAIN else size - size % bs
+        body = img[u * bs:u * bs + full] + img[tail:tail + size - full]
+        if len(body) != size:
+            raise ValueError("%s: directory inode %d runs past the image" % (data, nid))
+        for b in range(0, size, bs):
+            blk = body[b:b + bs]
+            count = struct.unpack_from("<8xH", blk)[0] // 12
+            ents = [struct.unpack_from("<QH", blk, 12 * i) for i in range(count)] + [(0, len(blk))]
+            for (child, start), (_, end) in zip(ents, ents[1:]):
+                name = blk[start:end].split(b"\0", 1)[0]
+                if name not in (b".", b".."):
+                    yield os.fsdecode(name), child
+
+    out, todo, seen = {}, [("", root)], set()
+    while todo:
+        prefix, nid = todo.pop()
+        if nid in seen:
+            raise ValueError("%s: directory inode %d is reached twice" % (data, nid))
+        seen.add(nid)
+        for name, child in entries(nid):
+            path = prefix + name
+            if path in out or "/" in name or not name:
+                raise ValueError("%s: bad or repeated directory entry %r" % (data, path))
+            mode, uid, gid = inode(child)[:3]
+            out[path] = (mode, uid, gid)
+            if stat.S_ISDIR(mode):
+                todo.append((path + "/", child))
+    return out
+
+
+def write_usr_list(data, dst):
+    """Write DATA's (the /usr erofs partition's) /usr list to DST, from a copy fsck.erofs extracts
+    with times and hard links kept beside DST, and removed again. Each entry's mode and owner are
+    the partition's inode's, never the copy's (#4470), and the copy must hold the same paths and types."""
+    dst = pathlib.Path(dst)
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix=".usr-list-", dir=dst.parent))
+    try:
+        subprocess.run(["fsck.erofs", "--extract=%s" % (tmp / "usr"), "--preserve", str(data)], check=True,
+                       stdout=subprocess.DEVNULL)
+        rows = [json.loads(ln) for ln in usr_list(tmp / "usr")]
+    finally:
+        shutil.rmtree(tmp)
+    if not rows:
+        raise ValueError("/usr list of %s is empty" % data)
+    inodes = erofs_inodes(data)
+    if sorted(inodes) != [r[0] for r in rows]:
+        raise ValueError("%s: fsck.erofs extracted other paths than its inodes name" % data)
+    for r in rows:
+        mode, uid, gid = inodes[r[0]]
+        if next((c for test, c in USR_TYPES if test(mode)), None) != r[1]:
+            raise ValueError("%s: %s extracted as another type than its inode's" % (data, r[0]))
+        r[2:5] = "%04o" % stat.S_IMODE(mode), uid, gid
+    dst.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return len(rows)
+
+
 def partition_table(img):
     return json.loads(subprocess.check_output(["sfdisk", "-J", img]))["partitiontable"]
 
@@ -519,6 +642,7 @@ def main(out, version, drivers_json=None):
     if bad:
         sys.exit("/usr slot A on the disk is not the verified /usr, or holds a private key (HW-1): %s; a key that ships in "
                  "/usr on purpose goes in image/slot_a_scan.allow with its sha256 once reviewed" % bad)
+    print("/usr list: %d entries" % write_usr_list(data, out / ("agentos_%s.usr.list" % version)))
     # Only the two files just verified: mkosi also leaves arch-named split copies beside them.
     files = {p.name: sha256(p) for p in (data, tree)}
     m = manifest(version, roothash, name, text, files, boot, drivers)

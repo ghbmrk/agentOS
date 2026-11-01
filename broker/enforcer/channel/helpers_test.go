@@ -139,9 +139,8 @@ func (r *radio) calls() []string {
 }
 
 type alerts struct {
-	mu     sync.Mutex
-	off    []string
-	paused int
+	mu  sync.Mutex
+	off []string
 	// reenter, if set, runs inside each call, as slice h's alerts will
 	// when they send a text back through the channel.
 	reenter func()
@@ -157,15 +156,26 @@ func (a *alerts) SafetyOff(device string, v wire.Verb) {
 	}
 }
 
-func (a *alerts) Paused() {
-	a.mu.Lock()
-	a.paused++
-	f := a.reenter
-	a.mu.Unlock()
-	if f != nil {
-		f()
-	}
+// cut is a fake core cut: Trip moves it to Tripped, as DECOY-d's does,
+// and the test moves it on as the owner's steps would.
+type cut struct {
+	mu      sync.Mutex
+	stage   Stage
+	reasons []string
 }
+
+func (c *cut) Trip(reason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stage = Tripped
+	c.reasons = append(c.reasons, reason)
+}
+
+func (c *cut) Stage() Stage { c.mu.Lock(); defer c.mu.Unlock(); return c.stage }
+
+func (c *cut) set(s Stage) { c.mu.Lock(); c.stage = s; c.mu.Unlock() }
+
+func (c *cut) trips() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.reasons) }
 
 type heads struct{ n int }
 
@@ -180,6 +190,7 @@ type rig struct {
 	ch      *Channel
 	radio   *radio
 	alerts  *alerts
+	cut     *cut
 	core    ed25519.PrivateKey
 	enf     ed25519.PublicKey
 	revoked bool
@@ -225,7 +236,7 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 	}
 	_, core, _ := ed25519.GenerateKey(nil)
 	enfPub, enfPriv, _ := ed25519.GenerateKey(nil)
-	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
+	r := &rig{t: t, eng: eng, radio: &radio{}, alerts: &alerts{}, cut: &cut{}, core: core, enf: enfPub, now: start.Add(2 * time.Hour)}
 	c := Config{
 		Core:        core.Public().(ed25519.PublicKey),
 		Key:         enfPriv,
@@ -234,11 +245,15 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 		Radio:       r.radio,
 		Heads:       &heads{},
 		Alerts:      r.alerts,
+		Cut:         r.cut,
 		Fingerprint: func(string) ([wire.HashLen]byte, bool) { return sha256.Sum256([]byte("fp")), true },
 		Traffic:     func(d string) ([]byte, error) { return []byte("traffic of " + d), nil },
-		Answer:      func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
-		Log:         func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
-		Now:         func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
+		Counts: func() (wire.Counts, error) {
+			return wire.Counts{Day: 1, Groups: []wire.CountGroup{{Dests: []wire.CountDest{{Name: "a.example", Cap: 9}}, Count: 3}}}, nil
+		},
+		Answer: func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
+		Log:    func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
+		Now:    func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
 	}
 	if cfg != nil {
 		cfg(&c)

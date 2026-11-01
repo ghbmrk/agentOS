@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 IMG = ROOT / "image"
@@ -32,6 +33,7 @@ def load(name, path):
 
 
 cm = load("compare_manifests", IMG / "compare_manifests.py")
+fin = load("finish_image_repro", IMG / "finish_image.py")
 pin = load("initrd_finalize", MK / "initrd/mkosi.finalize")
 
 
@@ -174,6 +176,191 @@ class InitrdConfigTest(unittest.TestCase):
         self.assertEqual(entries[:2], ["/var/log/*.log", "/var/cache/ldconfig/aux-cache"])
 
 
+def usr_tree(d, changed=b"v1"):
+    """A small /usr tree under D: a file, a hard link to it, a link, a directory and a fifo."""
+    root = pathlib.Path(d)
+    (root / "lib/agentos").mkdir(parents=True)
+    (root / "bin").mkdir()
+    (root / "lib/agentos/camdecode").write_bytes(changed)
+    (root / "bin/tool").write_bytes(b"elf")
+    os.link(root / "bin/tool", root / "bin/tool2")
+    (root / "bin/sh").symlink_to("dash")
+    os.mkfifo(root / "lib/fifo")
+    for p in sorted(root.rglob("*"), reverse=True):
+        os.utime(p, ns=(10**9, 10**9), follow_symlinks=False)
+    return root
+
+
+def need_erofs(case):
+    """Skip without erofs-utils, unless AGENTOS_REQUIRE_REFERENCE_TOOLS=1 (CI's checks step): fail there."""
+    if not (shutil.which("mkfs.erofs") and shutil.which("fsck.erofs")):
+        if os.environ.get("AGENTOS_REQUIRE_REFERENCE_TOOLS") == "1":
+            case.fail("AGENTOS_REQUIRE_REFERENCE_TOOLS=1 but erofs-utils is not installed")
+        case.skipTest("needs erofs-utils")
+
+
+def mkfs_erofs(d, src, *opts):
+    img = pathlib.Path(d) / "usr.raw"
+    subprocess.run(["mkfs.erofs", "--quiet", "-T", "1", "-U", "11111111-2222-3333-4444-555555555555", *opts,
+                    str(img), str(src)], check=True)
+    return img
+
+
+class UsrListTest(unittest.TestCase):
+    """#4059: each build lists every /usr file's hash and metadata, and two lists are diffed."""
+
+    def test_lists_every_entry_sorted_with_its_fields(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows = [json.loads(ln) for ln in fin.usr_list(usr_tree(d))]
+        self.assertEqual([r[0] for r in rows], ["bin", "bin/sh", "bin/tool", "bin/tool2", "lib", "lib/agentos",
+                                                "lib/agentos/camdecode", "lib/fifo"])
+        by = {r[0]: dict(zip(fin.USR_LIST_FIELDS, r)) for r in rows}
+        self.assertEqual(by["lib/agentos/camdecode"]["digest"], hashlib.sha256(b"v1").hexdigest())
+        self.assertEqual((by["bin/sh"]["type"], by["bin/sh"]["digest"]), ("l", "dash"))
+        self.assertEqual((by["bin/tool"]["nlink"], by["lib/fifo"]["type"], by["lib"]["type"]), (2, "p", "d"))
+        self.assertEqual(by["bin/tool"]["mtime_ns"], 10**9)
+
+    def test_diff_names_the_path_and_field(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = usr_tree(pathlib.Path(d) / "a")
+            b = usr_tree(pathlib.Path(d) / "b", changed=b"v2")
+            os.chmod(b / "bin/tool", 0o700)
+            (b / "bin/new").write_bytes(b"")
+            la, lb = (pathlib.Path(d) / n for n in ("a.list", "b.list"))
+            la.write_text("\n".join(fin.usr_list(a)) + "\n")
+            lb.write_text("\n".join(fin.usr_list(b)) + "\n")
+            lines = cm.usr_diff(cm.usr_entries(la), cm.usr_entries(lb))
+        self.assertIn("only in b: bin/new", lines)
+        self.assertTrue(any(ln.startswith("lib/agentos/camdecode: digest ") for ln in lines), lines)
+        self.assertTrue(any(ln.startswith("bin/tool: mode 0644/0700") for ln in lines), lines)
+        # The mtime of bin, changed by the new file, is named too: a timestamp is a cause to fix.
+        self.assertTrue(any(ln.startswith("bin: mtime_ns ") for ln in lines), lines)
+
+    def run_cli(self, ta, tb):
+        with tempfile.TemporaryDirectory() as d:
+            fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"
+            if ta is not None:
+                fa.write_text(ta)
+            if tb is not None:
+                fb.write_text(tb)
+            r = subprocess.run(["python3", str(IMG / "compare_manifests.py"), "--usr", str(fa), str(fb)],
+                               capture_output=True, text=True)
+        return r.returncode, r.stdout
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as d:
+            text = "\n".join(fin.usr_list(usr_tree(d))) + "\n"
+        rc, out = self.run_cli(text, text)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("same /usr files (8 entries)", out)
+        rc, out = self.run_cli(text, text.replace(hashlib.sha256(b"v1").hexdigest(), "00" * 32))
+        self.assertEqual(rc, 1)
+        self.assertIn("MISMATCH /usr files", out)
+        self.assertIn("lib/agentos/camdecode: digest", out)
+        # Missing, empty, malformed or repeated: a failure, never "same".
+        dup = text + text.splitlines()[0] + "\n"
+        for ta, tb in ((text, None), ("", ""), (text, "{}\n"), (text, "[1]\n"), (dup, dup)):
+            with self.subTest(tb=tb):
+                rc, out = self.run_cli(ta, tb)
+                self.assertEqual(rc, 1, out)
+                self.assertIn("MISMATCH /usr list", out)
+
+    def test_reads_the_erofs_partition_back(self):
+        # The list is of what the partition holds, read back the way the build reads its /usr.
+        need_erofs(self)
+        with tempfile.TemporaryDirectory() as d:
+            src = usr_tree(pathlib.Path(d) / "src")
+            img, dst = mkfs_erofs(d, src), pathlib.Path(d) / "usr.list"
+            self.assertEqual(fin.write_usr_list(img, dst), 8)
+            self.assertEqual(dst.read_text(), "\n".join(fin.usr_list(src)) + "\n")
+            self.assertEqual([p.name for p in pathlib.Path(d).iterdir() if p.name.startswith(".usr-list-")], [])
+
+    def special_tree(self, d, owners):
+        """usr_tree plus a 4755 and a 2755 file, a 2755 and a 1777 directory; OWNERS (root only) gives
+        them non-root owners, one past 65535 so its inode is the extended kind."""
+        src = usr_tree(pathlib.Path(d) / "src")
+        (src / "bin/su").write_bytes(b"suid")
+        (src / "bin/wall").write_bytes(b"sgid")
+        (src / "lib/group").mkdir()
+        (src / "lib/tmp").mkdir()
+        for name, mode, uid, gid in (("bin/su", 0o4755, 1234, 5678), ("bin/wall", 0o2755, 0, 5),
+                                     ("lib/group", 0o2755, 70000, 70001), ("lib/tmp", 0o1777, 42, 43)):
+            if owners:
+                os.chown(src / name, uid, gid)  # before chmod: a chown clears setuid and setgid
+            os.chmod(src / name, mode)
+        for p in sorted(src.rglob("*"), reverse=True):
+            os.utime(p, ns=(10**9, 10**9), follow_symlinks=False)
+        return src
+
+    def assert_special(self, lines):
+        by = {r[0]: dict(zip(fin.USR_LIST_FIELDS, r)) for r in map(json.loads, lines)}
+        self.assertEqual([by[p]["mode"] for p in ("bin/su", "bin/wall", "lib/group", "lib/tmp")],
+                         ["4755", "2755", "2755", "1777"])
+        return by
+
+    def test_records_special_bits_and_owners_as_the_partition_holds_them(self):
+        # #4470: fsck.erofs 1.7 extracts a 4755 file as 0755. Any user (CI's checks job is not root):
+        # mkfs.erofs offsets every owner, to non-root ids that fit compact inodes, then past 65535,
+        # which makes every inode the extended kind.
+        need_erofs(self)
+        for offset in (1000, 100000):
+            with self.subTest(offset=offset), tempfile.TemporaryDirectory() as d:
+                src = self.special_tree(d, owners=False)
+                img = mkfs_erofs(d, src, "--uid-offset=%d" % offset, "--gid-offset=%d" % (2 * offset))
+                dst = pathlib.Path(d) / "l"
+                self.assertEqual(fin.write_usr_list(img, dst), 12)
+                by = self.assert_special(dst.read_text().splitlines())
+                st = src.lstat()
+                self.assertEqual({(r["uid"], r["gid"]) for r in by.values()},
+                                 {(st.st_uid + offset, st.st_gid + 2 * offset)})
+
+    @unittest.skipUnless(os.geteuid() == 0, "needs root (chown)")
+    def test_records_each_entrys_own_non_root_owner(self):
+        # Per-entry owners, compact and extended inodes alike: the list equals the source tree's.
+        need_erofs(self)
+        with tempfile.TemporaryDirectory() as d:
+            src = self.special_tree(d, owners=True)
+            img, dst = mkfs_erofs(d, src), pathlib.Path(d) / "l"
+            fin.write_usr_list(img, dst)
+            want = fin.usr_list(src)
+            self.assert_special(want)
+            self.assertEqual(dst.read_text(), "\n".join(want) + "\n")
+            by = {r[0]: r for r in map(json.loads, want)}
+            self.assertEqual((by["bin/su"][3:5], by["lib/group"][3:5], by["lib/tmp"][3:5]),
+                             ([1234, 5678], [70000, 70001], [42, 43]))
+
+    def test_an_image_the_reader_cannot_read_fails(self):
+        need_erofs(self)
+        with tempfile.TemporaryDirectory() as d:
+            img = mkfs_erofs(d, usr_tree(pathlib.Path(d) / "src"))
+            good = img.read_bytes()
+            # A later incompat feature: 48-bit layout (0x80, root_nid moves) and metabox (0x100).
+            for what, at, value in (("magic", 1024, b"\0\0\0\0"), ("48bit", 1024 + 80, b"\x80"),
+                                    ("metabox", 1024 + 81, b"\x01")):
+                with self.subTest(what=what):
+                    img.write_bytes(good[:at] + value + good[at + len(value):])
+                    with self.assertRaises(ValueError):
+                        fin.erofs_inodes(img)
+            img.write_bytes(good)
+            # The extracted copy and the inodes disagree on a path or a type: no list.
+            real = fin.erofs_inodes(img)
+            for bad in ({**real, "bin/extra": real["bin/tool"]},
+                        {**real, "lib/fifo": (0o100644, 0, 0)}):
+                with self.subTest(bad=sorted(set(bad.items()) - set(real.items()))), \
+                        unittest.mock.patch.object(fin, "erofs_inodes", return_value=bad):
+                    with self.assertRaises(ValueError):
+                        fin.write_usr_list(img, pathlib.Path(d) / "l")
+
+    def test_build_writes_the_list_and_the_job_compares_it(self):
+        src = (IMG / "finish_image.py").read_text()
+        self.assertLess(src.index("verify_usr(data, tree, roothash)"),
+                        src.index('write_usr_list(data, out / ("agentos_%s.usr.list" % version))'))
+        wf = WORKFLOW.read_text()
+        rec = wf[wf.index("- name: Release record"):]
+        rec = rec[:rec.index("- uses:")]
+        self.assertIn('cp "$RUNNER_TEMP"/out/*.usr.list "$RUNNER_TEMP/rec/"', rec)
+
+
 def compare_step():
     wf = WORKFLOW.read_text()
     job = wf[wf.index("  reproduce:"):]
@@ -196,17 +383,20 @@ class ReproduceJobTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.d = pathlib.Path(self.tmp.name)
         self.initrd = newc(BASE)
+        u = usr_tree(self.d / "usr")
+        self.usr = "\n".join(fin.usr_list(u)) + "\n"
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def side(self, name, initrd):
+    def side(self, name, initrd, usr=None, usrhash="ab" * 32):
         rec = self.d / "rec" / name
         (rec / "initrd/agentos").mkdir(parents=True)
         (rec / "initrd/agentos/initrd").write_bytes(initrd)
         (rec / "SHA256SUMS").write_text("x\n")
         (rec / "agentos_1.manifest").write_text(json.dumps({"packages": [{"name": "systemd", "version": "257"}]}))
-        rel = {"usrhash": "ab" * 32, "boot_entry": {"sha256": "cd" * 32},
+        (rec / "agentos_1.usr.list").write_text(usr if usr is not None else self.usr)
+        rel = {"usrhash": usrhash, "boot_entry": {"sha256": "cd" * 32},
                "boot": {"agentos/vmlinuz": "ef" * 32, "agentos/initrd": hashlib.sha256(initrd).hexdigest()}}
         (rec / "agentos_1.release.json").write_text(json.dumps(rel))
 
@@ -228,6 +418,33 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("MISMATCH agentos/initrd", r.stdout)
         self.assertIn("etc/shadow: content", r.stdout)
+
+    def test_differing_usr_file_fails_and_is_named(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, usr=self.usr.replace(hashlib.sha256(b"v1").hexdigest(), "00" * 32),
+                  usrhash="ef" * 32)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("MISMATCH /usr root hash", r.stdout)
+        self.assertIn("lib/agentos/camdecode: digest", r.stdout)
+        self.assertNotIn("every /usr file alike", r.stdout)
+
+    def test_same_files_other_root_hash_says_layout(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, usrhash="ef" * 32)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("same /usr files", r.stdout)
+        self.assertIn("every /usr file alike: the erofs layout", r.stdout)
+
+    def test_missing_usr_list_fails(self):
+        # Same root hash, but a build that wrote no list: the job never reads that as alike.
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/agentos_1.usr.list").unlink()
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("MISMATCH /usr list", r.stdout)
 
     def test_only_a_superseded_pr_run_is_cancelled(self):
         # Same-PR cancellation; main and manual runs are grouped by run id, so none displaces another.

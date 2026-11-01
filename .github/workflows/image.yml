@@ -237,6 +237,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/rec"
           cp "$RUNNER_TEMP"/out/*.release.json "$RUNNER_TEMP"/out/SHA256SUMS "$RUNNER_TEMP"/out/*.manifest "$RUNNER_TEMP/rec/" || true
+          cp "$RUNNER_TEMP"/out/*.usr.list "$RUNNER_TEMP/rec/" || true
           cp "$RUNNER_TEMP"/out/agentos.dpkg-status "$RUNNER_TEMP"/out/agentos.os-release "$RUNNER_TEMP/rec/" || true
           cp -R "$RUNNER_TEMP"/out/initrd "$RUNNER_TEMP/rec/" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -284,8 +285,9 @@ jobs:
           echo "::notice title=disk budget::the job grew its disk use by at most $(gb $t) GB of its $DISK_NEED_GB GB budget ($(gb $p) GB sampled, plus $(gb $r) GB, the largest rise in one sample interval, for a peak between samples)"
           [ "$t" -lt $(( DISK_NEED_GB * 10 )) ] || { echo "::error title=disk budget::image build may have used up to $(gb $t) GB, at or over its $DISK_NEED_GB GB budget; raise DISK_NEED_GB in .github/workflows/image.yml (the build job's env)"; exit 1; }
   reproduce:
-    # Two runners, one commit: the release must match: the /usr root hash, the boot entry, the
-    # kernel and both initrds (IMG-2). A differing initrd is listed member by member.
+    # Two runners, one commit: the release must match: the /usr root hash, every /usr file, the boot
+    # entry, the kernel and both initrds (IMG-2). A differing initrd is listed member by member, and
+    # a differing /usr file by path and field (#4059).
     # The whole-disk hash is reported too. Both package manifests must list packages.
     needs: build
     if: ${{ !cancelled() }}
@@ -306,7 +308,10 @@ jobs:
           ok=1
           # Fails on a missing, empty or truncated manifest (#1474); prints each side's package count.
           python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0
-          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0; }
+          # Every /usr file's hash and metadata (#4059): a differing file is named here.
+          usrfiles=1; python3 image/compare_manifests.py --usr rec/release-a/*.usr.list rec/release-b/*.usr.list || { usrfiles=0; ok=0; }
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0
+            [ $usrfiles = 0 ] || echo "  every /usr file alike: the erofs layout or an extended attribute differs, not a file's content or metadata"; }
           [ "$(jq -r .boot_entry.sha256 "$A")" = "$(jq -r .boot_entry.sha256 "$B")" ] \
             && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }
           for f in $(jq -r '.boot | keys[]' "$A"); do

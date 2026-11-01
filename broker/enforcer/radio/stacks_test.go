@@ -197,11 +197,12 @@ func forkCall(nr uintptr, a [6]uintptr) (int, syscall.Errno) {
 	return int(pid), e
 }
 
-// TestStacksConfined (NET-2 Confined radio stacks): the Thread stack runs
-// as its own user in a user and network namespace the enforcer created as
-// root, holding only CAP_NET_ADMIN and CAP_NET_RAW there; it can create
-// wpan0 but sees only lo, wpan0 and infra0, cannot read or write the
-// policy store or reach the page, opens no netlink but route netlink (so
+// TestStacksConfined (NET-2 Confined radio stacks; #4369): the Thread stack
+// runs as its own user in a user and network namespace the enforcer created
+// as root, holding only CAP_NET_ADMIN and CAP_NET_RAW there with its view
+// (CAP_SYS_ADMIN, which built the view, dropped); it can create wpan0
+// through the tun device its view shows but sees only lo, wpan0 and
+// infra0, cannot read or write the policy store or reach the page, opens no netlink but route netlink (so
 // not nf_tables), cannot enter a new namespace or mount,
 // and runs with no-new-privileges under the seccomp filter. The Matter
 // controller, joined to that namespace as another user, sees the same
@@ -235,6 +236,21 @@ func TestStacksConfined(t *testing.T) {
 	}
 	bin := filepath.Join(state, "radio.test")
 	copyFile(t, os.Args[0], bin)
+	// The stacks' own directories, which their views show them; the
+	// radio is a stand-in character device.
+	own := func(name string, uid int) string {
+		d := filepath.Join(state, name)
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chown(d, uid, uid); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	threadProfile := probeView(confine.Thread(threadUID, threadUID, own("thread-state", threadUID),
+		own("thread-run", threadUID), "/dev/null"))
+	matterProfile := probeView(confine.Matter(matterUID, matterUID, own("matter", matterUID)))
 
 	read := func(t *testing.T, conn Conn) map[string]string {
 		h, err := NewHost(Config{Devices: []Device{{Name: "probe", Stack: StackThread}}, Timeout: 20 * time.Second,
@@ -286,7 +302,7 @@ func TestStacksConfined(t *testing.T) {
 		}
 	}
 
-	thread, conn, err := confine.Start(confine.Spec{Profile: confine.Thread(threadUID, threadUID), Self: bin,
+	thread, conn, err := confine.Start(confine.Spec{Profile: threadProfile, Self: bin,
 		Path: bin, Args: []string{netProbeArg, "thread", policy, page}, Stderr: testWriter{t}})
 	if err != nil {
 		t.Fatal(err)
@@ -304,7 +320,7 @@ func TestStacksConfined(t *testing.T) {
 		}
 	})
 	t.Run("matter", func(t *testing.T) {
-		matter, conn, err := confine.Start(confine.Spec{Profile: confine.Matter(matterUID, matterUID), Net: thread,
+		matter, conn, err := confine.Start(confine.Spec{Profile: matterProfile, Net: thread,
 			Self: bin, Path: bin, Args: []string{netProbeArg, "matter", policy, page}, Stderr: testWriter{t}})
 		if err != nil {
 			t.Fatal(err)
@@ -328,8 +344,8 @@ func TestStacksConfined(t *testing.T) {
 		}
 	})
 	t.Run("a joining stack gets no capability or link", func(t *testing.T) {
-		for _, p := range []confine.Profile{confine.Thread(matterUID, matterUID), func() confine.Profile {
-			p := confine.Matter(matterUID, matterUID)
+		for _, p := range []confine.Profile{threadProfile, func() confine.Profile {
+			p := matterProfile
 			p.Links = []string{"rogue0"}
 			return p
 		}()} {
