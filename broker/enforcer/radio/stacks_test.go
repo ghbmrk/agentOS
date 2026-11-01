@@ -358,7 +358,7 @@ func TestStackOutlivesEndedThreads(t *testing.T) {
 	os.Chmod(dir, 0o755)
 	bin := filepath.Join(dir, "radio.test")
 	copyFile(t, os.Args[0], bin)
-	proc, conn, err := confine.Start(confine.Spec{Profile: confine.BLE(4242, 4242), Self: bin, Path: bin,
+	proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
 		Args: []string{probeArg, filepath.Join(dir, "none"), filepath.Join(dir, "none.sock")}, Stderr: io.Discard})
 	if err != nil {
 		t.Fatal(err)

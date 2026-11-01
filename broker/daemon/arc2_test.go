@@ -336,6 +336,9 @@ var coreEnforcer = map[string]struct {
 	// The pairing clerks' sealing helper (slice r): seals to the
 	// enforcer's pairing key with pairseal and holds no private key.
 	"clerk/enfpair": {[]string{"enforcer/pairseal"}, forbiddenStd},
+	// The kernel's byte-cap check (#4173): the summary interval and the
+	// cap edge from the shared format definition, never a copy (D-255).
+	"kernel/capgate": {[]string{"enforcer/wire"}, forbiddenStd},
 }
 
 // enforcerWebDeps are the third-party packages the page links: rsc.io/qr

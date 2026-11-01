@@ -119,7 +119,14 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// render draws a screen with its own anti-forgery token (csrf.go).
 func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
+	tok, err := s.mint(w)
+	if err != nil {
+		http.Error(w, "page error", http.StatusInternalServerError)
+		return
+	}
+	data["Token"] = tok
 	var b strings.Builder
 	if err := s.tmpl.ExecuteTemplate(&b, name, data); err != nil {
 		http.Error(w, "page error", http.StatusInternalServerError)

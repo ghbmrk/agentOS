@@ -1,0 +1,22 @@
+{
+ "agentos-bare@4.0.0": {
+  "integrity": "sha512-/ZFC5B5tH63C1dhQAUmcCw0UTu0c9uD76nzk5lwPqMByzV6Ml2Y1HNun30tsE7vhcay7y6WboazDgsTd8l6mkw==",
+  "tarball": "https://registry.npmjs.org/agentos-bare/-/agentos-bare-4.0.0.tgz"
+ },
+ "agentos-inlined@1.0.0": {
+  "integrity": "sha512-tq7/CFlgNNYdZD0q/meMnMOmYLp27rMNfjfZ8bdqQzBzTviUD2LG90kTtEtKD/DIcVpfnSzvUmYgf+87WRjlOg==",
+  "tarball": "https://registry.npmjs.org/agentos-inlined/-/agentos-inlined-1.0.0.tgz"
+ },
+ "agentos-listed@2.0.0": {
+  "integrity": "sha512-kodTfb+xbQqJ+8w47LVVekn0VxpDyF5zrul28fZqw0S/2wlPkoVJiSIrICQ2Gz91uTIcZjmJVO5OfOMnjuvfwg==",
+  "tarball": "https://registry.npmjs.org/agentos-listed/-/agentos-listed-2.0.0.tgz"
+ },
+ "agentos-unmarked@3.0.0": {
+  "integrity": "sha512-ruK/pphLfuzuOJqhadQBB/3Ng6Fz+fQt4x4HDzdYnYKv/et5HTkaqH0tWqDALYycGnbdNE8pmxSxasV21Wjygg==",
+  "tarball": "https://registry.npmjs.org/agentos-unmarked/-/agentos-unmarked-3.0.0.tgz"
+ },
+ "left-pad@0.9.0": {
+  "integrity": "sha512-JgEka575C6BD3+7ePW6pjT/liibH4p3SmwoewCfiKwwRWSQAFU7q+LruOwfrP/+VBxWsDNaWVYAb1/5jFLz/Ig==",
+  "tarball": "https://registry.npmjs.org/left-pad/-/left-pad-0.9.0.tgz"
+ }
+}
