@@ -396,6 +396,9 @@ func TestARestoreStoppedInAnItemWrite(t *testing.T) {
 	if got := stages(t, parent); len(got) != 0 {
 		t.Fatalf("a crashed restore's staging stayed after the next restore: %q", got)
 	}
+	if got := names(t, filepath.Join(parent, "content", "vision")); !slices.Equal(got, []string{itemName(sha256.Sum256(ct))}) {
+		t.Fatalf("the restore after the sweep put back %q", got)
+	}
 }
 
 // REQ: LOG-4
@@ -423,5 +426,29 @@ func TestAnItemInAStoreTheLogDoesNotNameIsReported(t *testing.T) {
 	}
 	if got := names(t, other); len(got) != 1 || !readsBack(t, b, h) {
 		t.Fatalf("the other store holds %q, or the logged item does not read back", got)
+	}
+}
+
+// REQ: LOG-4
+// The start's stderr line counts each of a missing key, an unnamed key and
+// an unlogged item alone, and is empty when there is none.
+func TestTheStartReportCountsEachKind(t *testing.T) {
+	if got := startReport(kernel.ContentReport{}, nil); got != "" {
+		t.Fatalf("an empty start reports %q", got)
+	}
+	for _, c := range []struct {
+		r    kernel.ContentReport
+		u    []string
+		want string
+	}{
+		{kernel.ContentReport{Missing: []string{"a"}}, nil, "lacks 1 open subjects' keys and holds 0 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{Unnamed: []string{"a", "b"}}, nil, "lacks 0 open subjects' keys and holds 2 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{}, []string{"vision/00"}, "lacks 0 open subjects' keys and holds 0 keys no subject names; the stores hold 1 items"},
+		{kernel.ContentReport{Missing: []string{"a"}, Unnamed: []string{"b"}}, nil, "lacks 1 open subjects' keys and holds 1 keys no subject names; the stores hold 0 items"},
+		{kernel.ContentReport{Unnamed: []string{"b"}}, []string{"vision/00"}, "lacks 0 open subjects' keys and holds 1 keys no subject names; the stores hold 1 items"},
+	} {
+		if got := startReport(c.r, c.u); !strings.Contains(got, c.want) {
+			t.Fatalf("report %q, want %q", got, c.want)
+		}
 	}
 }
