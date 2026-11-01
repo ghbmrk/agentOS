@@ -71,6 +71,18 @@ type Endpoint struct {
 	// sign-in guest (UserCode), so the code shown is the one the provider
 	// gave, not the CLI's word for it.
 	UserCode string
+	// Secret, on a device step, names the top-level keys of its answer
+	// that redeem the sign-in (Codex: the device_auth_id that polls for
+	// the code, then the authorization code and PKCE verifier). Each is
+	// swapped for a placeholder of that sign-in guest before the answer
+	// reaches it, and the real value stays in this clerk's memory (CLK-1).
+	// Such a step passes an error answer's status only.
+	Secret []string
+	// Takes, on a device or code step, maps each request key that must
+	// carry the guest's placeholder to the Secret it stands for; the clerk
+	// sends the value it holds. A code step takes its code and verifier,
+	// so the clerk redeems only a code it was given itself.
+	Takes map[string]string
 }
 
 // FieldKind is what a declared token-answer field may hold.
@@ -169,6 +181,7 @@ const (
 	DEncoded     = "plan-encoded"     // an encoded body either way
 	DStale       = "plan-stale"       // a refresh answered for a login since removed or replaced: dropped, nothing stopped
 	DEnded       = "plan-ended"       // a code exchange answered after its sign-in ended: dropped, nothing stored
+	DSecret      = "plan-secret"      // a sign-in step's answer lacked a declared secret or carried one elsewhere: dropped
 )
 
 // ErrRequalify is Resume's answer for a route an unswappable answer
@@ -236,6 +249,9 @@ type Login struct {
 	signing map[string]bool   // sign-in guests, true once one committed the login
 	shown   map[string]string // sign-in guest -> the user code its device step forwarded
 	held    string            // a stop the slot could not record (fail closed)
+	// secrets are each sign-in guest's device-step secrets, by Secret key:
+	// memory only, dropped when its code exchange commits or it is forgotten.
+	secrets map[string]map[string]signSecret
 	// gen counts the logins the store has held: Remove and every sign-in
 	// commit move it, under cmu. A refresh exchange reads it together with
 	// the token it sends, under cmu, so its answer is judged only against
@@ -247,6 +263,10 @@ type Login struct {
 	fmu    sync.Mutex
 	flight *planFlight
 }
+
+// signSecret is one device-step secret and the placeholder its sign-in
+// guest holds for it.
+type signSecret struct{ ph, real string }
 
 // planGuest is one guest's placeholders. Each stands for a login field, not
 // a value, so it resolves to whatever the slot holds now; only a new account
@@ -295,7 +315,8 @@ func New(d Declaration, store *Store, roots *x509.CertPool) (*Login, error) {
 		return nil, errors.New("clerk: a plan login needs its sealed store")
 	}
 	p := &Login{d: d, store: store, token: map[string]*Field{}, refused: map[string]bool{},
-		guests: map[string]*planGuest{}, signing: map[string]bool{}, shown: map[string]string{}}
+		guests: map[string]*planGuest{}, signing: map[string]bool{}, shown: map[string]string{},
+		secrets: map[string]map[string]signSecret{}}
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
@@ -338,6 +359,9 @@ func (p *Login) validate() error {
 		}
 		if e.UserCode != "" && e.Kind != Device {
 			return fmt.Errorf("clerk: plan endpoint %q: only a device step carries the user code", e.Name)
+		}
+		if err := secretsValid(d.Endpoints, e); err != nil {
+			return err
 		}
 		if (e.Kind == Read) != (e.Method == http.MethodGet) {
 			return fmt.Errorf("clerk: plan endpoint %q: a read is a GET and only a read is", e.Name)
@@ -398,6 +422,37 @@ func (p *Login) validate() error {
 		if forbiddenPrefix(http.CanonicalHeaderKey(pre)) {
 			return fmt.Errorf("clerk: header prefix %q may pass a forbidden header", pre)
 		}
+	}
+	return nil
+}
+
+// secretsValid holds e's Secret and Takes to their steps: secrets are a
+// device step's answer keys, other than its user code; each taken key names
+// a declared secret; a code step takes its code and verifier and nothing a
+// guest must send itself.
+func secretsValid(all []Endpoint, e Endpoint) error {
+	if len(e.Secret) > 0 && e.Kind != Device {
+		return fmt.Errorf("clerk: plan endpoint %q: only a device step answers a secret", e.Name)
+	}
+	for _, k := range e.Secret {
+		if k == "" || k == e.UserCode {
+			return fmt.Errorf("clerk: plan endpoint %q: secret %q", e.Name, k)
+		}
+	}
+	if len(e.Takes) > 0 && !e.Kind.signIn() {
+		return fmt.Errorf("clerk: plan endpoint %q: only a sign-in step takes a secret", e.Name)
+	}
+	for k, s := range e.Takes {
+		declared := false
+		for _, o := range all {
+			declared = declared || o.Kind == Device && contains(o.Secret, s)
+		}
+		if !declared || e.Kind == Code && (!contains(codeKeys, k) || k == "grant_type" || k == "redirect_uri") {
+			return fmt.Errorf("clerk: plan endpoint %q: takes %q for %q", e.Name, k, s)
+		}
+	}
+	if e.Kind == Code && (e.Takes["code"] == "" || e.Takes["code_verifier"] == "") {
+		return fmt.Errorf("clerk: plan endpoint %q: a code exchange takes its code and verifier from a device step", e.Name)
 	}
 	return nil
 }
@@ -753,6 +808,7 @@ func (p *Login) Forget(guest string) (signedIn bool) {
 	delete(p.guests, guest)
 	delete(p.signing, guest)
 	delete(p.shown, guest)
+	delete(p.secrets, guest)
 	return signedIn
 }
 
@@ -876,28 +932,42 @@ func (p *Login) Do(ctx context.Context, guest string, r *http.Request, meter Met
 	case Refresh:
 		return p.refresh(ctx, guest, r.Header, e, query, body)
 	case Code:
-		out, ok := p.checkCode(r.Header, body)
+		f, ok := p.checkCode(r.Header, body)
 		if !ok {
 			return nil, DUndeclared
 		}
-		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, out)
+		if !p.take(guest, e, f.Get, f.Set) {
+			return nil, DPlaceholder
+		}
+		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, []byte(f.Encode()))
 		up.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		ans, detail := p.exchange(up)
 		if detail != "" {
 			return nil, detail
 		}
-		return p.swap(ans, guest, true)
+		resp, detail := p.swap(ans, guest, true)
+		if detail == "" {
+			p.mu.Lock()
+			delete(p.secrets, guest) // the code is spent
+			p.mu.Unlock()
+		}
+		return resp, detail
 	case Device:
-		out, ok := stringObject(body)
+		obj, ok := stringObject(body)
 		if !ok {
+			return nil, DUndeclared
+		}
+		get := func(k string) string { s, _ := obj[k].(string); return s }
+		if !p.take(guest, e, get, func(k, v string) { obj[k] = v }) {
+			return nil, DPlaceholder
+		}
+		out, err := encodeJSON(obj)
+		if err != nil {
 			return nil, DUndeclared
 		}
 		up := p.upstream(ctx, r.Header, e, query, p.d.SignInHeaders, out)
 		up.Header.Set("Content-Type", "application/json")
-		if e.UserCode == "" {
-			return p.send(up, "")
-		}
-		return p.userCode(up, guest, e.UserCode)
+		return p.device(up, guest, e)
 	case Read:
 		if len(body) != 0 {
 			return nil, DUndeclared
@@ -1038,10 +1108,13 @@ func (p *Login) answerHeader(k string) bool {
 	return false
 }
 
-// userCode makes the device step that answers the user code, records the
-// code for guest, and passes the answer on whole. An answer too large to
-// read is dropped.
-func (p *Login) userCode(up *http.Request, guest, key string) (*http.Response, string) {
+// device makes a device step and reads its answer whole: one too large to
+// read is dropped. It records the user code a step declares for guest, and
+// swaps each declared secret for a new placeholder of guest's, so no secret
+// reaches the guest (CLK-1). A step that declares a secret passes an error
+// answer's status only, and drops an answer that lacks one of its secrets or
+// carries a secret's value anywhere else.
+func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Response, string) {
 	a, detail := p.exchange(up)
 	if detail != "" {
 		return nil, detail
@@ -1049,19 +1122,92 @@ func (p *Login) userCode(up *http.Request, guest, key string) (*http.Response, s
 	if a.body == nil {
 		return nil, DUndeclared
 	}
-	if a.status == http.StatusOK {
-		if obj, err := strictObject(a.body); err == nil {
-			if c, ok := obj[key].(string); ok && c != "" && len(c) <= maxDevice {
-				p.mu.Lock()
-				if _, ok := p.signing[guest]; ok {
-					p.shown[guest] = c
-				}
-				p.mu.Unlock()
+	body, code := a.body, ""
+	held := map[string]signSecret{}
+	if a.status == http.StatusOK && (e.UserCode != "" || len(e.Secret) > 0) {
+		obj, err := strictObject(a.body)
+		if err != nil && len(e.Secret) > 0 {
+			return nil, DSecret
+		}
+		if c, ok := obj[e.UserCode].(string); ok && e.UserCode != "" && c != "" && len(c) <= maxDevice {
+			code = c
+		}
+		for _, k := range e.Secret {
+			v, ok := obj[k].(string)
+			if !ok || v == "" || len(v) > maxDevice {
+				return nil, DSecret
+			}
+			ph := signInPlaceholder()
+			held[k] = signSecret{ph: ph, real: v}
+			obj[k] = ph
+		}
+		if len(e.Secret) > 0 {
+			if body, err = encodeJSON(obj); err != nil {
+				return nil, DSecret
+			}
+		}
+	} else if len(e.Secret) > 0 {
+		body = nil
+	}
+	out := p.answer(&http.Response{StatusCode: a.status, Status: fmt.Sprintf("%d %s", a.status, http.StatusText(a.status)),
+		Header: a.header, ContentLength: int64(len(body)), Body: io.NopCloser(bytes.NewReader(body))}, "")
+	for _, s := range held {
+		if bytes.Contains(body, []byte(s.real)) || strings.Contains(s.ph, s.real) || headerHolds(out.Header, s.real) {
+			return nil, DSecret
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.signing[guest]; !ok {
+		return nil, DEnded
+	}
+	if code != "" {
+		p.shown[guest] = code
+	}
+	if len(held) > 0 {
+		if p.secrets[guest] == nil {
+			p.secrets[guest] = map[string]signSecret{}
+		}
+		for k, s := range held {
+			p.secrets[guest][k] = s
+		}
+	}
+	return out, ""
+}
+
+// take puts the secret guest's placeholder stands for in each key e takes,
+// and reports whether every such key carried that placeholder.
+func (p *Login) take(guest string, e Endpoint, get func(string) string, set func(string, string)) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, name := range e.Takes {
+		s, ok := p.secrets[guest][name]
+		if !ok || get(k) != s.ph {
+			return false
+		}
+	}
+	for k, name := range e.Takes {
+		set(k, p.secrets[guest][name].real)
+	}
+	return true
+}
+
+func headerHolds(h http.Header, v string) bool {
+	for _, vs := range h {
+		for _, x := range vs {
+			if strings.Contains(x, v) {
+				return true
 			}
 		}
 	}
-	return p.answer(&http.Response{StatusCode: a.status, Status: fmt.Sprintf("%d %s", a.status, http.StatusText(a.status)),
-		Header: a.header, ContentLength: int64(len(a.body)), Body: io.NopCloser(bytes.NewReader(a.body))}, ""), ""
+	return false
+}
+
+// signInPlaceholder is a new placeholder for a device-step secret.
+func signInPlaceholder() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return "agentos-signin-" + hex.EncodeToString(b)
 }
 
 // exchange makes a token request and reads its answer whole, bounded.
@@ -1212,7 +1358,7 @@ func (p *Login) checkRefresh(guest string, body []byte) ([]byte, bool) {
 
 // checkCode admits the code exchange in its exact form, and rewrites the
 // CLI's callback to the one the provider bound the code to.
-func (p *Login) checkCode(h http.Header, body []byte) ([]byte, bool) {
+func (p *Login) checkCode(h http.Header, body []byte) (url.Values, bool) {
 	if mt, _, err := mime.ParseMediaType(h.Get("Content-Type")); err != nil || mt != "application/x-www-form-urlencoded" {
 		return nil, false
 	}
@@ -1229,11 +1375,11 @@ func (p *Login) checkCode(h http.Header, body []byte) ([]byte, bool) {
 		return nil, false
 	}
 	f.Set("redirect_uri", p.d.RedirectTo)
-	return []byte(f.Encode()), true
+	return f, true
 }
 
 // stringObject admits a JSON object of short strings only.
-func stringObject(body []byte) ([]byte, bool) {
+func stringObject(body []byte) (map[string]any, bool) {
 	obj, err := strictObject(body)
 	if err != nil {
 		return nil, false
@@ -1243,8 +1389,7 @@ func stringObject(body []byte) ([]byte, bool) {
 			return nil, false
 		}
 	}
-	out, err := encodeJSON(obj)
-	return out, err == nil
+	return obj, true
 }
 
 func strictObject(body []byte) (map[string]any, error) {
@@ -1487,9 +1632,12 @@ func Codex(guard *netguard.Policy) Declaration {
 			{Name: "responses", Host: run, Method: "POST", Path: "/backend-api/codex/responses", Kind: Model},
 			{Name: "models", Host: run, Method: "GET", Path: "/backend-api/codex/models", Kind: Read, Query: []string{"client_version"}},
 			{Name: "refresh", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Refresh},
-			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: Device, UserCode: "user_code"},
-			{Name: "devicetoken", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/token", Kind: Device},
-			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Code},
+			{Name: "usercode", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/usercode", Kind: Device, UserCode: "user_code",
+				Secret: []string{"device_auth_id"}},
+			{Name: "devicetoken", Host: auth, Method: "POST", Path: "/api/accounts/deviceauth/token", Kind: Device,
+				Takes: map[string]string{"device_auth_id": "device_auth_id"}, Secret: []string{"authorization_code", "code_verifier"}},
+			{Name: "code", Host: auth, Method: "POST", Path: "/oauth/token", Kind: Code,
+				Takes: map[string]string{"code": "authorization_code", "code_verifier": "code_verifier"}},
 		},
 		Token: []Field{
 			{Name: fAccess, Kind: FieldCredential},

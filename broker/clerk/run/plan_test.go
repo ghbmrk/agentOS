@@ -74,10 +74,27 @@ func planProviderUsing(t *testing.T, calls *atomic.Int32, usage func(n int) stri
 	return p, roots
 }
 
+// deviceSteps answers Codex's device steps with a synthetic device id,
+// user code, authorization code and verifier, and passes the rest to h.
+func deviceSteps(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/accounts/deviceauth/usercode":
+			io.WriteString(w, `{"device_auth_id":"real-device-1","user_code":"ABCD-12345","interval":"5"}`)
+		case "/api/accounts/deviceauth/token":
+			io.WriteString(w, `{"authorization_code":"real-code-1","code_challenge":"c","code_verifier":"real-verifier-1"}`)
+		default:
+			w.Header().Del("Content-Type")
+			h.ServeHTTP(w, r)
+		}
+	})
+}
+
 // planLoginAt is a plan login of mode, not signed in, whose provider is h.
 func planLoginAt(t *testing.T, mode plan.Mode, h http.Handler) (*plan.Login, *x509.CertPool) {
 	t.Helper()
-	srv := httptest.NewTLSServer(h)
+	srv := httptest.NewTLSServer(deviceSteps(h))
 	t.Cleanup(srv.Close)
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())
@@ -108,17 +125,34 @@ func codeExchange(t *testing.T, p *plan.Login, guest string) {
 	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
 	}
-	resp, det := p.Do(context.Background(), guest, codeRequest(), nil)
+	resp, det := p.Do(context.Background(), guest, codeRequest(t, p, guest), nil)
 	if det != "" {
 		t.Fatalf("sign-in: %s", det)
 	}
 	resp.Body.Close()
 }
 
-// codeRequest is the CLI's code exchange.
-func codeRequest() *http.Request {
-	form := url.Values{"client_id": {"app_x"}, "code": {"ac"}, "code_verifier": {"v"}, "grant_type": {"authorization_code"},
-		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
+// codeRequest runs the CLI's device steps as sign-in guest guest and
+// returns its code exchange, carrying the placeholders the clerk gave it.
+func codeRequest(t *testing.T, p *plan.Login, guest string) *http.Request {
+	t.Helper()
+	step := func(path string, body any) map[string]string {
+		b, _ := json.Marshal(body)
+		r := httptest.NewRequest("POST", "http://127.0.0.1:18432"+path, strings.NewReader(string(b)))
+		r.Header.Set("Content-Type", "application/json")
+		resp, det := p.Do(context.Background(), guest, r, nil)
+		if det != "" {
+			t.Fatalf("%s: %s", path, det)
+		}
+		defer resp.Body.Close()
+		var out map[string]string
+		json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+	uc := step("/api/accounts/deviceauth/usercode", map[string]string{"client_id": "app_x"})
+	ct := step("/api/accounts/deviceauth/token", map[string]string{"device_auth_id": uc["device_auth_id"], "user_code": uc["user_code"]})
+	form := url.Values{"client_id": {"app_x"}, "code": {ct["authorization_code"]}, "code_verifier": {ct["code_verifier"]},
+		"grant_type": {"authorization_code"}, "redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
 	r := httptest.NewRequest("POST", "http://127.0.0.1:18432/oauth/token", strings.NewReader(form))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return r
