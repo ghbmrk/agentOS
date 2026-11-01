@@ -75,8 +75,12 @@ func (h *home) share(seg string) {
 // the host records, so after it the forgery is still dropped and the
 // first host's own error on a connection opened before the load is dropped
 // too (it fails closed), while one on a connection opened after the load
-// arrives. Catches a binding by interface alone, by address alone (the
-// spoofed forgery), and a learn or bound chain that is never reached.
+// arrives. When the second host also copies the first host's hardware
+// address, its forgery from its own address is still dropped, and one
+// from the first host's address too passes: copying both makes it that
+// host to the enforcer. Catches a binding by interface alone, by address
+// alone (the spoofed forgery), by hardware address alone (the copied
+// one), and a learn or bound chain that is never reached.
 func TestSharedSegmentRelatedBound(t *testing.T) {
 	if !inNetns(t) {
 		return
@@ -172,6 +176,11 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 		}
 	}
 
+	macs := map[string]string{} // each second host's own hardware address
+	for _, seg := range segs {
+		macs[seg] = h.mac(h.hosts[seg+"2"], "eth0")
+	}
+
 	type sent struct {
 		c    conn
 		what string
@@ -200,6 +209,39 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 		}
 	}
 	round(map[string]bool{"own": true, "other own": true}, conns, false)
+	for _, c := range conns {
+		h.expectOpen(true, c.a, c.b)
+	}
+
+	// The second host copies the first host's hardware address. From its
+	// own address its forgery is still dropped: the record binds the
+	// address too. From the first host's address as well it is that host
+	// to the enforcer and its error passes (ENF-ct-bind-2's stated limit),
+	// which shows the copied hardware address does reach the check.
+	setMAC := func(seg, mac string) {
+		x := h.hosts[seg+"2"]
+		h.in(x, "ip", "link", "set", "eth0", "address", mac)
+	}
+	for _, seg := range segs {
+		setMAC(seg, h.mac(h.hosts[seg], "eth0"))
+	}
+	copied := map[uint16]sent{}
+	for _, c := range conns {
+		for what, bind := range map[string]string{"copied hardware address": "", "copied both": addrOf(c.seg, 0, c.v6)} {
+			tag++
+			copied[tag] = sent{c, what}
+			h.sendErr(c.seg+"2", bind, c.p.addr(c.v6), c.v6, errAbout(c, c.a, tag))
+		}
+	}
+	time.Sleep(probeWait)
+	for tg, s := range copied {
+		if arrived := at(s.c.p.to, s.c.v6).has(tg); arrived != (s.what == "copied both") {
+			t.Errorf("%s to %s (v6 %v): the error with the %s arrived %v", s.c.seg, s.c.p.why, s.c.v6, s.what, arrived)
+		}
+	}
+	for _, seg := range segs {
+		setMAC(seg, macs[seg])
+	}
 	for _, c := range conns {
 		h.expectOpen(true, c.a, c.b)
 	}

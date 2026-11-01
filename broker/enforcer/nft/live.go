@@ -45,12 +45,12 @@ import (
 // cannot tell one's connection from the other's. On those shared segments
 // (Guests, Owner, Household) a connection is bound to its host as well
 // (#4324): the accept of its first packet records the connection's
-// conntrack ID with its host's address (the original source) and the
-// hardware address the packet came from, in a set (learn, HostSet), and a
-// related packet that enters from a shared segment passes only when it
-// carries that same record: the same connection, the same host address and
-// the same hardware address (bound). So a guest's forged ICMP error about
-// another guest's connection is dropped whatever source address it gives,
+// conntrack ID and original source with the packet's source address and
+// hardware address, in a set (learn, HostSet), and a related packet that
+// enters from a shared segment passes only when its connection and its
+// own source and hardware addresses give that same record (bound). So a
+// guest's forged ICMP error about another guest's connection is dropped
+// unless it copies both that guest's address and its hardware address,
 // and the host's own error about its own connection passes. The host is
 // always the side that starts the connection: no accept leads into a
 // shared segment (bindAll), so no connection has a shared end its first

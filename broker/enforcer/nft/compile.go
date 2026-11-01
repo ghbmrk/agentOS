@@ -56,8 +56,8 @@ const TrafficSize = 64
 
 // HostSet is the set that records, for each connection a host on a shared
 // segment (Guests, Owner, Household) started, the connection's conntrack
-// ID, the host's address and the hardware address its first packet came
-// from (live.go, learn). A related packet from a shared segment passes only
+// ID and original source, and the source address and hardware address its
+// first packet came from (live.go, learn, hostKey). A related packet from a shared segment passes only
 // with its connection's record. Each record lasts HostTimeout from that
 // first packet and the set holds at most HostSize per family, which bounds
 // what the shared segments can make the enforcer keep; a connection
@@ -80,10 +80,22 @@ const (
 )
 
 // hostKey is a HostSet element as nft reads it from a packet: its
-// connection's ID, original source address and the packet's hardware
-// source address.
+// connection's ID and original source address, then the packet's own
+// source address and hardware source address. At the first packet the two
+// addresses are the same, so a later packet matches only from the address
+// and the hardware address that started the connection; the original
+// source keeps a record of another host's from matching a connection whose
+// ID it happens to share.
 func hostKey(v6 bool) string {
-	return "ct id . ct original " + family(v6) + " saddr . ether saddr"
+	f := family(v6)
+	return "ct id . ct original " + f + " saddr . " + f + " saddr . ether saddr"
+}
+
+func nfproto(v6 bool) string {
+	if v6 {
+		return "ipv6"
+	}
+	return "ipv4"
 }
 
 // named is the set that records which addresses one name's answers put in
@@ -700,7 +712,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 
 	w.open("chain " + learnChain)
 	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + map[bool]string{false: "ipv4", true: "ipv6"}[v6] + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+		w.line("meta nfproto " + nfproto(v6) + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
 	}
 	w.line("accept")
 	w.close()
@@ -709,7 +721,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// one is dropped without a log line or a count.
 	w.open("chain " + boundChain)
 	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + map[bool]string{false: "ipv4", true: "ipv6"}[v6] + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
+		w.line("meta nfproto " + nfproto(v6) + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
 	}
 	w.line("drop")
 	w.close()

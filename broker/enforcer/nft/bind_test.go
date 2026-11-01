@@ -119,6 +119,26 @@ func TestEveryAcceptBound(t *testing.T) {
 			}
 		}
 	}
+	// NET-1, NET-3 (#4324): the shared segments' host chains log and count
+	// nothing, and each reads the same record from the packet.
+	cs := chains(mustCompile(t, fixturePolicy()))
+	for _, chain := range []string{learnChain, boundChain} {
+		if len(cs[chain]) == 0 {
+			t.Fatalf("no chain %s", chain)
+		}
+		for _, l := range cs[chain] {
+			if strings.Contains(l, "log") || strings.Contains(l, "counter") {
+				t.Errorf("%s logs or counts: %s", chain, l)
+			}
+		}
+	}
+	for _, v6 := range []bool{false, true} {
+		k := hostKey(v6) + " "
+		if !slices.ContainsFunc(cs[learnChain], func(l string) bool { return strings.Contains(l, "{ "+k+"}") }) ||
+			!slices.ContainsFunc(cs[boundChain], func(l string) bool { return strings.Contains(l, k+"@"+HostSet(v6)+" return") }) {
+			t.Errorf("v6 %v: learn and bound do not both read %s", v6, k)
+		}
+	}
 	if len(lines) == 0 {
 		t.Fatal("the fixture has no TV rule")
 	}
@@ -170,4 +190,13 @@ func TestBindAllRefuses(t *testing.T) {
 	if got := rs[2].first(); !strings.HasSuffix(got, " accept") {
 		t.Errorf("the accept from the internet reads %q, want a plain accept", got)
 	}
+}
+
+func mustCompile(t *testing.T, d policy.Document) string {
+	t.Helper()
+	text, err := Compile(d, fixtureLayout())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text
 }

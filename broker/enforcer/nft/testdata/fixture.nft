@@ -117,13 +117,13 @@ table inet enforcer {
 		flags timeout;
 	}
 	set host_4 {
-		typeof ct id . ct original ip saddr . ether saddr;
+		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 1h;
 	}
 	set host_6 {
-		typeof ct id . ct original ip6 saddr . ether saddr;
+		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
 		timeout 1h;
@@ -302,13 +302,13 @@ table inet enforcer {
 		drop
 	}
 	chain learn {
-		meta nfproto ipv4 add @host_4 { ct id . ct original ip saddr . ether saddr }
-		meta nfproto ipv6 add @host_6 { ct id . ct original ip6 saddr . ether saddr }
+		meta nfproto ipv4 add @host_4 { ct id . ct original ip saddr . ip saddr . ether saddr }
+		meta nfproto ipv6 add @host_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr }
 		accept
 	}
 	chain bound {
-		meta nfproto ipv4 ct id . ct original ip saddr . ether saddr @host_4 return
-		meta nfproto ipv6 ct id . ct original ip6 saddr . ether saddr @host_6 return
+		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_4 return
+		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_6 return
 		drop
 	}
 	chain forward_live {
