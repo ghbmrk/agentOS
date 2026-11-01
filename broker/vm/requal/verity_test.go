@@ -85,7 +85,7 @@ type toolLog struct {
 
 func (l *toolLog) images(v *VerityImages) *VerityImages {
 	l.seen = map[string][]byte{}
-	v.run = func(_ context.Context, name string, arg ...string) error {
+	v.Run = func(_ context.Context, name string, arg ...string) error {
 		c := strings.Join(append([]string{name}, arg...), " ")
 		if len(arg) > 3 && arg[0] == "open" {
 			for _, p := range []string{arg[1], arg[3]} {
@@ -210,6 +210,18 @@ func TestCandidateUnmountRetriesFromWhereItStopped(t *testing.T) {
 	}
 	if umounts != 1 || !strings.HasPrefix(l.calls[len(l.calls)-1], veritysetup+" close") {
 		t.Fatalf("calls %q, want one umount and the close retried", l.calls)
+	}
+	if es, _ := os.ReadDir(staging); len(es) != 0 {
+		t.Fatalf("staging holds %d entries", len(es))
+	}
+}
+
+func TestCandidateMountNeedsARunner(t *testing.T) {
+	rel, src := signedUsr(t, usrFiles)
+	staging := t.TempDir()
+	v := &VerityImages{Source: src, Staging: staging}
+	if _, err := v.Mount(context.Background(), rel, t.TempDir()); err == nil {
+		t.Fatal("Mount passed with no veritysetup runner")
 	}
 	if es, _ := os.ReadDir(staging); len(es) != 0 {
 		t.Fatalf("staging holds %d entries", len(es))

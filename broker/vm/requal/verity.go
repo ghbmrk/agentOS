@@ -1,7 +1,6 @@
 package requal
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/apply/bootab"
-	"github.com/ghbmrk/agentos/broker/childproc"
 	"github.com/ghbmrk/agentos/broker/update"
 )
 
@@ -37,16 +35,19 @@ type VerityImages struct {
 	// Usr is the running /usr; "" is "/usr".
 	Usr string
 
-	// run, mount and unmount are the tools; nil uses childproc and the
-	// mount system calls.
-	run     func(ctx context.Context, name string, arg ...string) error
+	// Run runs veritysetup by absolute path; it is required. The machine
+	// plane starts no process but runsc (gvisor TestOnlyRunscIsExecuted),
+	// so the wiring (b6) passes a runner from outside vm/, as the update
+	// clerk's activator runs veritysetup.
+	Run func(ctx context.Context, name string, arg ...string) error
+
+	// mount and unmount are the mount system calls; nil uses syscall.
 	mount   func(src, dst, fstype string, flags uintptr) error
 	unmount func(dst string) error
 }
 
 const (
 	veritysetup = "/usr/sbin/veritysetup"
-	toolPath    = "PATH=/usr/sbin:/usr/bin"
 	// usrFlags are every mount's: read-only, no set-id, no devices.
 	usrFlags = syscall.MS_RDONLY | syscall.MS_NOSUID | syscall.MS_NODEV
 )
@@ -54,13 +55,11 @@ const (
 var hashRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (v *VerityImages) tool(ctx context.Context, name string, arg ...string) error {
-	if v.run != nil {
-		return v.run(ctx, name, arg...)
+	if v.Run == nil {
+		return errors.New("requal: no tool runner for veritysetup")
 	}
-	var stderr bytes.Buffer
-	err := childproc.Command(ctx, childproc.NewEnv(toolPath), childproc.Options{Stderr: &stderr}, name, arg...).Run()
-	if err != nil {
-		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(arg, " "), err, strings.TrimSpace(stderr.String()))
+	if err := v.Run(ctx, name, arg...); err != nil {
+		return fmt.Errorf("%s %s: %w", name, strings.Join(arg, " "), err)
 	}
 	return nil
 }
