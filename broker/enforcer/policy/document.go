@@ -48,6 +48,9 @@ const (
 var (
 	ErrMalformed = errors.New("policy: malformed document")
 	ErrNotRising = errors.New("policy: version does not rise")
+	// ErrNameHeld: two devices pin one mDNS name (Device.MDNS). The error
+	// names the name and both devices, so the owner can rename one.
+	ErrNameHeld = errors.New("policy: two devices announce one name")
 )
 
 // Document is one policy version: everything the enforcer enforces besides
@@ -108,6 +111,14 @@ type Device struct {
 	// vendor cloud (NET-2 Cameras and microphones). Empty for any other
 	// class.
 	Stream []Port `json:"stream"`
+	// MDNS is the mDNS names the device announces (NET-3 Casting, #4144),
+	// each as its labels: hosts (<host>.local) and service instances
+	// (<instance>.<_service>.<_tcp or _udp>.local). A paired device's
+	// records pass its pairs only for these names and the service types
+	// of these instances, so a name it starts announcing later needs a new
+	// signature. An Owner or Household device's names are held for it: no
+	// other device may pin them. Two devices never pin one name.
+	MDNS [][]string `json:"mdns,omitempty"`
 }
 
 // The NET-2 safety classes a device can carry; the empty class is unknown
@@ -284,6 +295,7 @@ func (d Document) normal() Document {
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
 		dev.Control, dev.Stream = ports(dev.Control), ports(dev.Stream)
+		dev.MDNS = mdnsNames(dev.MDNS)
 		devs[i] = dev
 	}
 	slices.SortFunc(devs, func(a, b Device) int { return strings.Compare(a.ID, b.ID) })
@@ -320,6 +332,87 @@ func ports(s []Port) []Port {
 	return slices.Compact(out)
 }
 
+// mdnsNames is s sorted by mDNS name (MDNSKey), copied, without exact
+// repeats; nil when empty, so a device with none encodes no field.
+func mdnsNames(s [][]string) [][]string {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([][]string, len(s))
+	for i, n := range s {
+		out[i] = slices.Clone(n)
+	}
+	slices.SortFunc(out, func(a, b []string) int {
+		if c := strings.Compare(MDNSKey(a), MDNSKey(b)); c != 0 {
+			return c
+		}
+		return slices.Compare(a, b)
+	})
+	return slices.CompactFunc(out, slices.Equal)
+}
+
+// MDNSKey is an mDNS name's identity: its labels, ASCII folded to lower
+// case as mDNS compares names (RFC 6762 §16), each after its length.
+func MDNSKey(n []string) string {
+	var b strings.Builder
+	for _, l := range n {
+		b.WriteByte(byte(len(l)))
+		for i := range len(l) {
+			c := l[i]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+// MDNSName is n as a person reads it: its labels joined by dots, which no
+// label holds (mdnsName).
+func MDNSName(n []string) string { return strings.Join(n, ".") }
+
+// mdnsName: n is a host, <host>.local, or a service instance,
+// <instance>.<_service>.<_tcp or _udp>.local (RFC 6762 §3, RFC 6763
+// §4.1), at most 255 bytes on the wire, whose every label is one to 63
+// bytes a person reads as it is (mdnsLabel).
+func mdnsName(n []string) bool {
+	size := 1
+	for _, l := range n {
+		if !mdnsLabel(l) {
+			return false
+		}
+		size += 1 + len(l)
+	}
+	switch {
+	case size > 255 || len(n) < 2 || !strings.EqualFold(n[len(n)-1], "local"):
+		return false
+	case len(n) == 2:
+		return !strings.HasPrefix(n[0], "_")
+	case len(n) == 4:
+		return len(n[1]) > 1 && n[1][0] == '_' && (strings.EqualFold(n[2], "_tcp") || strings.EqualFold(n[2], "_udp"))
+	}
+	return false
+}
+
+// mdnsLabel is one to 63 bytes of valid UTF-8, not blank, with no dot,
+// control, format (bidi, zero-width, tag), separator other than a plain
+// space, variation selector or invisible filler: the pair relay's own rule
+// for a label it passes, and no dot, so a name shown joined by dots reads
+// as one set of labels.
+func mdnsLabel(l string) bool {
+	if l == "" || len(l) > 63 || !utf8.ValidString(l) || strings.TrimSpace(l) == "" || strings.Contains(l, ".") {
+		return false
+	}
+	for _, r := range l {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp, unicode.Variation_Selector, unicode.Other_Default_Ignorable_Code_Point) ||
+			unicode.Is(unicode.Zs, r) && r != ' ' {
+			return false
+		}
+	}
+	return true
+}
+
 func sorted(s []string) []string {
 	out := append([]string{}, s...)
 	slices.Sort(out)
@@ -331,9 +424,11 @@ func sorted(s []string) []string {
 // everyday device with a safety class, a secure command its class cannot be
 // named for, a stream port on a device that is not a camera or microphone, a
 // drone reference that is not a hash, a pair, rule or hold naming no device,
-// or an empty window.
+// an empty window, or an mDNS name that is not one; and with ErrNameHeld
+// one mDNS name pinned twice.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
+	held := map[string]string{}
 	for i, dev := range d.Devices {
 		if !name(dev.ID) {
 			return bad("device id %q", dev.ID)
@@ -371,6 +466,16 @@ func (d Document) check() error {
 			if (p.Proto != ProtoTCP && p.Proto != ProtoUDP) || p.Num == 0 {
 				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
 			}
+		}
+		for _, n := range dev.MDNS {
+			if !mdnsName(n) {
+				return bad("device %q mDNS name %q", dev.ID, n)
+			}
+			k := MDNSKey(n)
+			if other, ok := held[k]; ok {
+				return fmt.Errorf("%w: %q is %s's and %s's; rename one before signing", ErrNameHeld, MDNSName(n), other, dev.ID)
+			}
+			held[k] = dev.ID
 		}
 	}
 	if d.Drone != "" && !hash(d.Drone) {

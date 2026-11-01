@@ -45,6 +45,7 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 			}
 			add("Label %s %s.", d.ID, labelWords(d.Label))
 			describePorts(policy.Device{ID: d.ID}, d, add)
+			describeMDNS(policy.Device{ID: d.ID}, d, add)
 			continue
 		}
 		describeDevice(*o, d, add)
@@ -155,6 +156,7 @@ func clone(d policy.Document) policy.Document {
 		d.Devices[i].Allow = slices.Clone(d.Devices[i].Allow)
 		d.Devices[i].Control = slices.Clone(d.Devices[i].Control)
 		d.Devices[i].Stream = slices.Clone(d.Devices[i].Stream)
+		d.Devices[i].MDNS = slices.Clone(d.Devices[i].MDNS)
 	}
 	d.Pairs = slices.Clone(d.Pairs)
 	d.Standing = slices.Clone(d.Standing)
@@ -219,6 +221,36 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 		add("Label %s %s, not %s.", d.ID, labelWords(d.Label), labelWords(o.Label))
 	}
 	describePorts(o, d, add)
+	describeMDNS(o, d, add)
+}
+
+// describeMDNS is each mDNS name d pins or unpins against o (NET-3
+// Casting, #4144): what a Devices-network device may announce across its
+// pairs, or a name held for an Owner or Household device. Names compare
+// exactly, so a change of case shows too.
+func describeMDNS(o, d policy.Device, add func(string, ...any)) {
+	has := func(s [][]string, n []string) bool {
+		return slices.ContainsFunc(s, func(m []string) bool { return slices.Equal(m, n) })
+	}
+	device := d.Network == policy.NetDevices
+	for _, n := range d.MDNS {
+		switch {
+		case has(o.MDNS, n):
+		case device:
+			add("Let %s announce the name %s to the networks and devices it is paired with; no other device may use it.", d.ID, ascii(policy.MDNSName(n)))
+		default:
+			add("Hold the name %s for %s: no paired device may announce it.", ascii(policy.MDNSName(n)), d.ID)
+		}
+	}
+	for _, n := range o.MDNS {
+		switch {
+		case has(d.MDNS, n):
+		case o.Network == policy.NetDevices:
+			add("Stop %s announcing the name %s to what it is paired with.", d.ID, ascii(policy.MDNSName(n)))
+		default:
+			add("Stop holding the name %s for %s.", ascii(policy.MDNSName(n)), d.ID)
+		}
+	}
 }
 
 // describePorts is each control and stream port d opens or closes against

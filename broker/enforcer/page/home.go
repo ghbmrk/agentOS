@@ -1,12 +1,14 @@
 package page
 
 import (
+	"errors"
 	"html/template"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/pairseal"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
 var funcs = template.FuncMap{
@@ -57,7 +59,13 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	c, lines, err := s.draft(r)
 	if err != nil {
 		s.mu.Unlock()
-		http.Error(w, errMalformed.Error(), http.StatusBadRequest)
+		msg := errMalformed.Error()
+		if errors.Is(err, policy.ErrNameHeld) {
+			// Two devices pin one mDNS name: say which, so the owner renames
+			// one or declines before signing (#4144).
+			msg = strings.TrimPrefix(err.Error(), "policy: ")
+		}
+		http.Error(w, msg, http.StatusBadRequest)
 		return
 	}
 	id, err := s.put(c)

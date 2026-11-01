@@ -956,8 +956,75 @@ func TestReadLimitBeforeParse(t *testing.T) {
 		t.Errorf("a packet past the read limit was parsed (%v allocations)", allocs)
 	}
 	// The printer's answer goes to Household, once.
-	out, outs := r.handle("ap0.105", 5353, response([]record{a("printer.local", "10.13.0.2", 120)}, nil).bytes(), t0)
+	out, outs := r.handle("ap0.105", 5353, response([]record{a("printer-answer.local", "10.13.0.2", 120)}, nil).bytes(), t0)
 	if out == nil || !slices.Equal(outs, []string{"hh0"}) {
 		t.Errorf("the printer's answer went to %v", outs)
+	}
+}
+
+// TestPinnedNamesOnly: a paired device's response passes only the names
+// its device pinned in the signed policy and the service types of its
+// pinned instances (#4144). A fresh relay, as after a restart, has heard
+// none of its paired network's names, yet the printer still cannot
+// announce the laptop's held name or a new share on its own address; an
+// interface with no pins passes no records; a query passes as it was.
+func TestPinnedNamesOnly(t *testing.T) {
+	p := plan(t)
+	link := func(string) []netip.Prefix { return printerLink }
+	m := response([]record{
+		a("printer-answer.local", "10.13.0.2", 120),
+		a("laptop-asleep.local", "10.13.0.2", 120), // the laptop's held name
+		a("other.local", "10.13.0.2", 120),         // a name nobody pinned
+		srv("Printer._ipp._tcp.local", "printer-answer.local", 120),
+		srv("Printer._ipp._tcp.local", "other.local", 120), // a pinned instance on an unpinned host
+		srv("Laptop._smb._tcp.local", "printer-answer.local", 120),
+		srv("printer._ipp._tcp.local", "printer-answer.local", 120), // the pinned instance, in another case
+		txt("Printer._ipp._tcp.local", 120),
+		txt("Laptop._smb._tcp.local", 120),
+		ptr("_ipp._tcp.local", "Printer._ipp._tcp.local", 120),
+		ptr("_printer._sub._ipp._tcp.local", "Printer._ipp._tcp.local", 120),
+		ptr("_smb._tcp.local", "Laptop._smb._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_ipp._tcp.local", 120),
+		ptr("_services._dns-sd._udp.local", "_smb._tcp.local", 120), // no pinned instance of it
+	}, []record{a("PRINTER-ANSWER.local", "fd00:13::2", 120)})
+	want := []string{
+		"an printer-answer.local 10.13.0.2",
+		"an Printer._ipp._tcp.local -> printer-answer.local",
+		"an printer._ipp._tcp.local -> printer-answer.local",
+		"an Printer._ipp._tcp.local txt",
+		"an _ipp._tcp.local -> Printer._ipp._tcp.local",
+		"an _printer._sub._ipp._tcp.local -> Printer._ipp._tcp.local",
+		"an _services._dns-sd._udp.local -> _ipp._tcp.local",
+		"ar PRINTER-ANSWER.local fd00:13::2",
+	}
+	out, outs := newRelayer(p, link, t0).handle("ap0.105", 5353, m.bytes(), t0)
+	var got []string
+	if out != nil {
+		back, ok := parse(out)
+		if !ok {
+			t.Fatalf("%x", out)
+		}
+		for i, s := range [][]record{back.answers, back.authority, back.additional} {
+			for _, r := range s {
+				got = append(got, describe(r, i))
+			}
+		}
+	}
+	if !slices.Equal(got, want) || !slices.Equal(outs, []string{"hh0"}) {
+		t.Errorf("passed to %v\n%s\nwant\n%s", outs, strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Only unpinned names: nothing at all.
+	if out, _ := newRelayer(p, link, t0).handle("ap0.105", 5353, response([]record{a("laptop-asleep.local", "10.13.0.2", 120)}, nil).bytes(), t0); out != nil {
+		t.Errorf("an unpinned name passed: %x", out)
+	}
+	// sensor-b pinned nothing: its own name on its own address passes
+	// nothing to sensor-a.
+	if out, _ := newRelayer(p, link, t0).handle("ap0.107", 5353, response([]record{a("sensor-b.local", "10.13.0.2", 120)}, nil).bytes(), t0); out != nil {
+		t.Errorf("an interface with no pins passed %x", out)
+	}
+	// A query is not bounded by the asker's pins.
+	q := &message{questions: []question{{dn("anything.local"), typeA, 1}}}
+	if got := (pins{}).pin(q); got != q {
+		t.Error("pin changed a query")
 	}
 }
