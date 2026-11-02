@@ -56,11 +56,15 @@ var ErrRadio = errors.New("thread: radio URL refused")
 // directory and Spec.Net set to ot-daemon's process. This package does not start them itself, so that
 // only confine links os/exec (arc2).
 func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
-	// The URL is the last argument: it must not read as an option.
-	// Not forkpty: ot-daemon would start the radio as its own child, and
-	// no stack starts a process (confine, ENF-k-12).
-	scheme, _, _ := strings.Cut(radioURL, "://")
-	if !strings.HasPrefix(radioURL, "spinel+") || strings.ContainsAny(radioURL, " \t\n") || strings.Contains(scheme, "forkpty") {
+	// The URL is the last argument: it must not read as an option. Only
+	// the RCP's serial scheme: any other names a radio this stack does not
+	// have. Whatever the scheme, ot-daemon forks the radio as its own child
+	// when the URL's path is a regular file (forkpty); what refuses that is
+	// confine.Thread's view, which binds the radio only as a character
+	// device and fails the start otherwise, with the filter's fork refusal
+	// behind it (ENF-k-12).
+	scheme, _, ok := strings.Cut(radioURL, "://")
+	if !ok || scheme != "spinel+hdlc+uart" || strings.ContainsAny(radioURL, " \t\n") {
 		return nil, ErrRadio
 	}
 	if !strings.HasPrefix(state, "/") {

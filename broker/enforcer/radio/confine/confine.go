@@ -326,8 +326,8 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 		// out, the kernel kills it when the stack exits, before the reap
 		// (radio.Host.Attach, ENF-k-11). As init it ignores every signal
 		// it has no handler for, its own and the enforcer's SIGTERM alike;
-		// only SIGKILL (Stop) and SIGSTOP from outside, and a fault, act on
-		// it (ENF-k-12).
+		// only SIGKILL (Stop) and SIGSTOP from outside, a SIGCONT, which
+		// resumes a stopped stack, and a fault act on it (ENF-k-12).
 		Cloneflags: syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID,
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,

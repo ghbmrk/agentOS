@@ -226,7 +226,9 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 	if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
 		t.Errorf("the stack did not answer after its own SIGTERM: %v (%v)", err, term.Stop())
 	} else {
-		syscall.Kill(term.Pid(), syscall.SIGTERM)
+		if err := syscall.Kill(term.Pid(), syscall.SIGTERM); err != nil {
+			t.Fatalf("the enforcer's SIGTERM: %v (%v)", err, term.Stop())
+		}
 		time.Sleep(100 * time.Millisecond)
 		conn.Write([]byte{1})
 		if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
@@ -249,6 +251,33 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		fault.Stop()
 		t.Fatal("a stack that faulted at the default action was not ended: init kept it alive")
+	}
+}
+
+// TestNetRefIsCloseOnExec (NET-2 Confined radio stacks; #4616 item 2):
+// the descriptor netRef hands Start for a join is close-on-exec from the
+// start, so a fork elsewhere in the enforcer meanwhile never inherits the
+// other stack's namespace. Catches F_DUPFD in place of F_DUPFD_CLOEXEC,
+// which no other test sees, since Trampoline's close_range marks every
+// descriptor before the stack runs.
+func TestNetRefIsCloseOnExec(t *testing.T) {
+	ns, err := os.Open("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proc{net: ns}
+	defer ns.Close()
+	f, err := netRef(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	flags, _, e := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), syscall.F_GETFD, 0)
+	if e != 0 || flags&syscall.FD_CLOEXEC == 0 {
+		t.Errorf("netRef's descriptor: flags %#x (%v), want FD_CLOEXEC", flags, e)
+	}
+	if f.Fd() == ns.Fd() {
+		t.Error("netRef returned the stack's own descriptor, which Stop closes")
 	}
 }
 
