@@ -518,7 +518,7 @@ func TestThreadViewKeepsNetAdmin(t *testing.T) {
 	if err := os.Mkdir(at("run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := Thread(viewUID, viewUID, at(vState), at("run"), devNull)
+	p := threadProfile(viewUID, viewUID, at(vState), at("run"), devNull)
 	p.View = append(p.View, Entry{Path: at(vBus), Kind: Socket})
 	p.Links = nil // the enforcer's links need CONFIG_DUMMY; this test is about the view
 	proc, conn, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{viewArg, "dial", dir},
@@ -560,7 +560,7 @@ func TestThreadRadioMustBeDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	var log lockedBuffer
-	p := Thread(viewUID, viewUID, at(vState), at("run"), rcp)
+	p := threadProfile(viewUID, viewUID, at(vState), at("run"), rcp)
 	p.Links = nil // the enforcer's links need CONFIG_DUMMY; this test is about the view
 	proc, conn, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{viewArg, "dial", dir},
 		Dir: at(vState), Stderr: &log})
@@ -634,7 +634,7 @@ func TestShippedViews(t *testing.T) {
 		want []Entry
 	}{
 		{BLE(1, 1), []Entry{{Path: "/run/dbus/system_bus_socket", Kind: Socket}}},
-		{Thread(1, 1, "/var/lib/thread", "/run/thread", "/dev/ttyACM0"), []Entry{
+		{threadProfile(1, 1, "/var/lib/thread", "/run/thread", "/dev/ttyACM0"), []Entry{
 			{Path: "/var/lib/thread", Kind: Dir, Write: true}, {Path: "/run/thread", Kind: Dir, Write: true},
 			{Path: "/dev/ttyACM0", Kind: Device}, {Path: "/dev/net/tun", Kind: Device}, {Path: "/dev/urandom", Kind: Device}}},
 		{ThreadAdapter(1, 1, "/run/thread"), []Entry{{Path: "/run/thread", Kind: Dir}}},
@@ -643,6 +643,52 @@ func TestShippedViews(t *testing.T) {
 		if !slices.Equal(c.p.View, c.want) {
 			t.Errorf("%s view %+v, want %+v", c.p.Name, c.p.View, c.want)
 		}
+	}
+}
+
+// threadProfile is Thread's profile, for tests of the profile alone.
+func threadProfile(uid, gid uint32, state, run, radio string) Profile {
+	s, err := Thread(uid, gid, state, run, radio, "/nonexistent", func(string, string) ([]string, error) { return nil, nil })
+	if err != nil {
+		panic(err)
+	}
+	return s.Profile
+}
+
+// TestThreadArgsGetBoundPaths (NET-2 Confined radio stacks; ENF-k-12,
+// #4639): Thread hands its arguments' maker the very radio and state
+// directory its view binds, the radio as a character device, and sets
+// the run directory as the working directory, so ot-daemon's radio URL
+// names the bound device and no other path. A maker's refusal is Thread's.
+// Catches a Thread that takes the arguments separately from the view's
+// paths, or hands the maker any other path.
+func TestThreadArgsGetBoundPaths(t *testing.T) {
+	var gotRadio, gotState string
+	s, err := Thread(1, 1, "/var/lib/thread", "/run/thread", "/dev/ttyACM0", "/usr/sbin/ot-daemon", func(radio, state string) ([]string, error) {
+		gotRadio, gotState = radio, state
+		return []string{"url:" + radio}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var devices, writes []string
+	for _, e := range s.Profile.View {
+		switch {
+		case e.Kind == Device:
+			devices = append(devices, e.Path)
+		case e.Write:
+			writes = append(writes, e.Path)
+		}
+	}
+	if gotRadio != "/dev/ttyACM0" || !slices.Contains(devices, gotRadio) || gotState != "/var/lib/thread" || !slices.Contains(writes, gotState) {
+		t.Errorf("args got radio %q, state %q; view devices %q, writable %q", gotRadio, gotState, devices, writes)
+	}
+	if !slices.Equal(s.Args, []string{"url:/dev/ttyACM0"}) || s.Path != "/usr/sbin/ot-daemon" || s.Dir != "/run/thread" || s.Net != nil {
+		t.Errorf("spec %+v", s)
+	}
+	refused := errors.New("refused")
+	if _, err := Thread(1, 1, "/s", "/r", "/d", "/x", func(string, string) ([]string, error) { return nil, refused }); err != refused {
+		t.Errorf("a refused radio: %v, want the maker's refusal", err)
 	}
 }
 
@@ -683,7 +729,7 @@ func TestStartRefusesBadView(t *testing.T) {
 	// encoding.
 	loader := BLE(1, 1)
 	loader.View = append(loader.View, Entry{Path: "/usr/lib", Kind: Dir, Exec: true}, Entry{Path: "/lib", Kind: Link})
-	for _, p := range []Profile{BLE(1, 1), Thread(1, 1, "/a", "/b", "/dev/c"), Matter(1, 1, "/m"), ThreadAdapter(1, 1, "/b"), loader} {
+	for _, p := range []Profile{BLE(1, 1), threadProfile(1, 1, "/a", "/b", "/dev/c"), Matter(1, 1, "/m"), ThreadAdapter(1, 1, "/b"), loader} {
 		if got, err := decodeView(encodeView(p.View)); err != nil || !slices.Equal(got, p.View) {
 			t.Errorf("%s: decoded %+v, %v", p.Name, got, err)
 		}
@@ -718,7 +764,7 @@ func TestProcAttr(t *testing.T) {
 	const ipcPid = syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID
 	plain := BLE(1, 1)
 	plain.View = nil
-	netAdmin := Thread(1, 1, "/s", "/r", "/d")
+	netAdmin := threadProfile(1, 1, "/s", "/r", "/d")
 	netAdmin.View = nil
 	for _, c := range []struct {
 		name    string
@@ -729,7 +775,7 @@ func TestProcAttr(t *testing.T) {
 	}{
 		{"ble", BLE(1, 1), nil, ipcPid | syscall.CLONE_NEWNET | userMnt, []uintptr{capSysAdmin}},
 		{"no view", plain, nil, ipcPid | syscall.CLONE_NEWNET, nil},
-		{"thread", Thread(1, 1, "/s", "/r", "/d"), nil, ipcPid | syscall.CLONE_NEWNET | userMnt,
+		{"thread", threadProfile(1, 1, "/s", "/r", "/d"), nil, ipcPid | syscall.CLONE_NEWNET | userMnt,
 			[]uintptr{capNetAdmin, capNetRaw, capSysAdmin}},
 		{"net admin, no view", netAdmin, nil, ipcPid | syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER,
 			[]uintptr{capNetAdmin, capNetRaw}},

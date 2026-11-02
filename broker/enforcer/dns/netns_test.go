@@ -26,6 +26,7 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/enforcer/traffic"
 )
 
 // The netns tests run real dnsmasq and the real ruleset in network
@@ -292,7 +293,7 @@ func build(t *testing.T, bare bool) *home {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := (load.Loader{Bin: lookPath(t, "nft")}).Load(context.Background(), text); err != nil {
+		if err := (load.Loader{Bin: lookPath(t, "nft")}).Load(context.Background(), text+drops(t, fixturePolicy())); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -710,7 +711,7 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := (load.Loader{Bin: lookPath(t, "nft")}).Load(context.Background(), text); err != nil {
+	if err := (load.Loader{Bin: lookPath(t, "nft")}).Load(context.Background(), text+drops(t, narrow)); err != nil {
 		t.Fatal(err)
 	}
 	for set, want := range map[string][]string{
@@ -911,4 +912,16 @@ func (h *home) dhcp(from string) bool {
 		}
 	})
 	return got
+}
+
+// drops is the byte caps' drop state of a day with nothing sent yet under
+// d, which every load carries (nft.Drops): without it the core reaches
+// nothing on the internet.
+func drops(t *testing.T, d policy.Document) string {
+	t.Helper()
+	text, err := nft.Drops(d, fixtureLayout(), nil, traffic.NewCounter(time.Now, traffic.CapsOf(d)).Drop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text
 }

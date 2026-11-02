@@ -157,9 +157,9 @@ const (
 )
 
 // BlockedPrefixes is every log prefix that names a refusal.
-var BlockedPrefixes = []string{LogInbound, LogAPAdmin, LogISP, LogNonGlobal, LogCoreEdge, LogDNS, LogDrop}
+var BlockedPrefixes = []string{LogInbound, LogAPAdmin, LogISP, LogNonGlobal, LogCoreEdge, LogDNS, LogDrop, LogCap}
 
-var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge}
+var counters = []string{GuestsOut, GuestsIn, GuestsConns, Inbound, Blocked, CoreDevice, CoreStream, EdgeDevice, EdgeIn, RADropped, DNSOutside, DNSRedirect, Spoofed, APAdminDrop, ISPDrop, CoreEdge, EdgeOut, CapDrop}
 
 // The relays' ports (slice f): the mDNS pair relay hears 224.0.0.251:5353
 // and [ff02::fb]:5353 only on the interfaces of signed pairs, and the
@@ -467,6 +467,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		}
 	}
 
+	capDecls(w)
 	for _, v6 := range []bool{false, true} {
 		w.open("set " + HostSet(v6))
 		w.line("typeof " + hostKey(v6) + ";")
@@ -680,6 +681,12 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
+	// Every byte the core sends to its allow set, and the edge to the
+	// internet, is counted and charged to its cap first, so a byte the cap
+	// drops still counts and trips (caps.go, NET-2 Byte caps).
+	for _, r := range capJumps(l) {
+		w.line(r)
+	}
 	// A related packet from a shared segment in its connection's original
 	// direction must come from the host that started the connection
 	// (live.go, #4324). In the reply direction one from a shared segment
@@ -774,6 +781,8 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 			w.close()
 		}
 	}
+
+	capChains(w)
 
 	w.open("chain output")
 	w.line("type filter hook output priority filter; policy accept;")

@@ -75,19 +75,31 @@ func BLE(uid, gid uint32) Profile {
 // Tun is the tun device ot-daemon makes wpan0 from.
 const Tun = "/dev/net/tun"
 
-// Thread is the Thread stack's profile (ot-daemon; D-231): its own user
-// and network namespace holding lo, the wpan0 it creates from a tun, and
-// a dummy infra0 as its infrastructure link, so its SRP advertising proxy
-// and mDNS reach the Matter controller and no LAN (spikes/ENF-radio,
-// consequence 1). IP, netlink and Unix sockets only: no packet socket. It
-// sees its state directory and its run directory, where it makes its
-// command socket (its working directory), both writable; the radio's
-// serial device; the tun device; and /dev/urandom, its entropy (#4369).
-func Thread(uid, gid uint32, state, run, radio string) Profile {
-	return Profile{Name: "thread", UID: uid, GID: gid, NetAdmin: true, Links: []string{"infra0"},
+// Thread is the Thread stack's Spec (ot-daemon, the binary at exe;
+// D-231), the one way to confine it: its own user and network namespace
+// holding lo, the wpan0 it creates from a tun, and a dummy infra0 as its
+// infrastructure link, so its SRP advertising proxy and mDNS reach the
+// Matter controller and no LAN (spikes/ENF-radio, consequence 1). IP,
+// netlink and Unix sockets only: no packet socket. It sees its state
+// directory and its run directory, where it makes its command socket (its
+// working directory), both writable; the radio's serial device; the tun
+// device; and /dev/urandom, its entropy (#4369).
+//
+// Its arguments are args(radio, state), given the very paths its view
+// binds, so the radio URL ot-daemon gets (thread.DaemonArgs) names the one
+// path the view holds only as a character device, and no other file in
+// the view, such as one in its state directory, which it would fork
+// (ENF-k-12, #4639). Stderr and Self are the caller's to set.
+func Thread(uid, gid uint32, state, run, radio, exe string, args func(radio, state string) ([]string, error)) (Spec, error) {
+	a, err := args(radio, state)
+	if err != nil {
+		return Spec{}, err
+	}
+	return Spec{Profile: Profile{Name: "thread", UID: uid, GID: gid, NetAdmin: true, Links: []string{"infra0"},
 		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK},
 		View: []Entry{{Path: state, Kind: Dir, Write: true}, {Path: run, Kind: Dir, Write: true},
-			{Path: radio, Kind: Device}, {Path: Tun, Kind: Device}, {Path: "/dev/urandom", Kind: Device}}}
+			{Path: radio, Kind: Device}, {Path: Tun, Kind: Device}, {Path: "/dev/urandom", Kind: Device}}},
+		Path: exe, Args: a, Dir: run}, nil
 }
 
 // Matter is the Matter controller's profile: started into the Thread

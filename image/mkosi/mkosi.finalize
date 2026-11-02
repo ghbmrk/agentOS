@@ -1472,6 +1472,30 @@ PATH_WATCHES = ("PathExists", "PathExistsGlob", "PathChanged", "PathModified", "
 UNLOCK_UNITS = ("agentos-keeper-kernel.service",)
 # Starts of an unlock unit in one boot: each spends two of the counter's increments (LOG-anchor-tpm-b).
 START_LIMIT_MAX = 5
+# What an unlock unit may assign to each of these keys, a closed list (none: never set), and why. Every
+# non-empty assignment, in the unit or any drop-in and whatever follows it, must be on the list: systemd
+# 257.13 never resets Sockets=, OnFailure= or OnSuccess= on an empty assignment and keeps an earlier
+# FileDescriptorStoreMax= past one, so the rule rests on no key's reset or parse rules (#4306, #4644).
+UNLOCK_DESCRIPTOR = "nothing reaches the unlock step past descriptor 2 and no privilege survives its drop (#2899)"
+UNLOCK_ACTION = "a reboot starts the unlock step again (#2897)"
+UNLOCK_START = ("starts a unit when the kernel stops, which the tree check does not model; its one reboot is "
+                "ExecStopPost=KERNEL_REBOOT (#2897, #2998)")
+UNLOCK_ASSIGNMENTS = (
+    ("Service", "Sockets", (), UNLOCK_DESCRIPTOR),
+    ("Service", "OpenFile", (), UNLOCK_DESCRIPTOR),
+    ("Service", "FileDescriptorStoreMax", ("0",), UNLOCK_DESCRIPTOR),
+    ("Service", "AmbientCapabilities", (), UNLOCK_DESCRIPTOR),
+    ("Service", "SecureBits", (), UNLOCK_DESCRIPTOR),
+    ("Unit", "StartLimitAction", ("none",), UNLOCK_ACTION),
+    ("Unit", "FailureAction", ("none",), UNLOCK_ACTION),
+    # systemd 257.13 still reads these two under [Service] too, for the same unit fields.
+    ("Service", "StartLimitAction", ("none",), UNLOCK_ACTION),
+    ("Service", "FailureAction", ("none",), UNLOCK_ACTION),
+    ("Unit", "SuccessAction", ("none",), UNLOCK_ACTION),
+    ("Unit", "JobTimeoutAction", ("none",), UNLOCK_ACTION),
+    ("Unit", "OnFailure", (), UNLOCK_START),
+    ("Unit", "OnSuccess", (), UNLOCK_START),
+)
 # The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
 # no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
 # an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
@@ -1980,15 +2004,10 @@ def keeper_unit_violations(name, files):
                 if g in TPM_GROUPS:
                     out.append("%s: %s=%s can open the TPM (#2889)" % (name, key, g))
     if name in UNLOCK_UNITS:
-        # Every non-empty assignment counts, whatever follows it: systemd 257.13 never resets Sockets= and
-        # keeps the earlier FileDescriptorStoreMax= past an empty one (#4306, #4264 Security 6543786424).
-        for key in ("Sockets", "OpenFile", "FileDescriptorStoreMax", "AmbientCapabilities", "SecureBits"):
-            v = ini_all(files, "Service", key)
-            if key == "FileDescriptorStoreMax":
-                v = [x for x in v if x != "0"]
-            if v:
-                out.append("%s: sets %s=%s; nothing reaches the unlock step past descriptor 2 and no privilege "
-                           "survives its drop (#2899)" % (name, key, v[-1]))
+        for section, key, allowed, why in UNLOCK_ASSIGNMENTS:
+            for v in ini_all(files, section, key):
+                if v not in allowed:
+                    out.append("%s: %s=%s; %s" % (name, key, v, why))
         if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
@@ -2003,14 +2022,6 @@ def keeper_unit_violations(name, files):
         if interval is None or re.fullmatch(r"0+(\.0*)?\s*[a-z]*", interval):
             out.append("%s: StartLimitIntervalSec is %s; a zero or unset interval does not bound restarts (#2897)"
                        % (name, interval))
-        for key in ("StartLimitAction", "FailureAction", "SuccessAction", "JobTimeoutAction"):
-            v = ini_last(files, "Unit", key)
-            if v not in (None, "none"):
-                out.append("%s: %s=%s; a reboot starts the unlock step again (#2897)" % (name, key, v))
-        for key in ("OnFailure", "OnSuccess"):
-            for v in ini_entries(files, "Unit", key):
-                out.append("%s: %s=%s starts a unit when the kernel stops, which the tree check does not model; its "
-                           "one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #2998)" % (name, key, v))
         for key in EXEC_KEYS:
             for v in ini_entries(files, "Service", key):
                 if REBOOT_WORDS.search(v) and (key, v) != ("ExecStopPost", KERNEL_REBOOT):

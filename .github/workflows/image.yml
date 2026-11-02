@@ -306,28 +306,14 @@ jobs:
         with:
           path: rec
       - name: Compare
+        # The script prints every name and value it reads from the two builds escaped (#4648);
+        # this step echoes nothing from them itself.
         run: |
-          a=$(jq -r .usrhash rec/release-a/*.release.json); b=$(jq -r .usrhash rec/release-b/*.release.json)
-          echo "usrhash a=$a"; echo "usrhash b=$b"
-          diff rec/release-a/SHA256SUMS rec/release-b/SHA256SUMS && echo "every output identical" || true
-          A=$(ls rec/release-a/*.release.json); B=$(ls rec/release-b/*.release.json)
           ok=1
           # Fails on a missing, empty or truncated manifest (#1474); prints each side's package count.
           python3 image/compare_manifests.py rec/release-a rec/release-b || ok=0
-          # Every /usr file's hash and metadata (#4059): a differing file is named here.
-          usrfiles=1; python3 image/compare_manifests.py --usr rec/release-a/*.usr.list rec/release-b/*.usr.list || { usrfiles=0; ok=0; }
-          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "MISMATCH /usr root hash"; ok=0
-            [ $usrfiles = 0 ] || echo "  every /usr file alike: the erofs layout or an extended attribute differs, not a file's content or metadata"; }
-          [ "$(jq -r .boot_entry.sha256 "$A")" = "$(jq -r .boot_entry.sha256 "$B")" ] \
-            && echo "same boot entry" || { echo "MISMATCH boot entry"; ok=0; }
-          for f in $(jq -r '.boot | keys[]' "$A"); do
-            ha=$(jq -r --arg f "$f" '.boot[$f]' "$A"); hb=$(jq -r --arg f "$f" '.boot[$f] // ""' "$B")
-            if [ -n "$ha" ] && [ "$ha" = "$hb" ]; then echo "same $f"
-            else echo "MISMATCH $f"; ok=0
-              case "$f" in *initrd) python3 image/compare_manifests.py --initrd "rec/release-a/initrd/$f" "rec/release-b/initrd/$f" || true;; esac
-            fi
-          done
-          [ "$(jq '.boot | length' "$A")" -ge 2 ] || { echo "MISMATCH release.json lists no kernel and initrd"; ok=0; }
+          # The /usr files (#4059), root hash, boot entry, kernel and initrds (IMG-2).
+          python3 image/compare_manifests.py --release rec/release-a rec/release-b || ok=0
           [ $ok = 1 ]
   # Not named vulncheck: that is vulncheck.yml's required check.
   image-vulncheck:

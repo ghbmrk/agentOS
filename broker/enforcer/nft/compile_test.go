@@ -59,11 +59,20 @@ func TestNoPolicyTextInRuleset(t *testing.T) {
 	d.Devices[0].ID = `tv";accept;#`
 	d.Pairs = nil
 	d.Destinations = []string{`x"}accept`}
+	d.Caps = map[string]uint64{`x"}accept`: 5}
 	d.Devices[0].Allow = []string{`y{accept}`}
 	got, err := Compile(d, fixtureLayout())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The drop state names destinations only by hashes, too.
+	p := fresh(d)
+	p.Groups[0].Addrs = []netip.Addr{netip.MustParseAddr("203.0.113.9")}
+	drops, err := Drops(d, fixtureLayout(), nil, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got += drops
 	// A hardware address is read only as part of a shared segment's host
 	// record (#4324), never to tell devices apart (D-225).
 	got = strings.ReplaceAll(strings.ReplaceAll(got, hostKey(false), ""), hostKey(true), "")

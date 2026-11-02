@@ -55,7 +55,7 @@ func (h *home) reload(d policy.Document) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(h.t, d, text))
 }
 
 // twoNames is the fixture with a second name on the TV's list and on the
@@ -63,6 +63,7 @@ func (h *home) reload(d policy.Document) {
 func twoNames() policy.Document {
 	d := cutPolicy()
 	d.Destinations = []string{"core.example", "old.core.example"}
+	d.Caps = map[string]uint64{"core.example": 1 << 40, "old.core.example": 1 << 40}
 	d.Devices = slices.Clone(d.Devices)
 	for i, dev := range d.Devices {
 		if dev.ID == "tv" {
@@ -88,7 +89,7 @@ func TestNarrowedListEndsOpenConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, wide, text))
 	h.answer(wide, DeviceSet(101, false), "tv.example", netAllow)
 	h.answer(wide, DeviceSet(101, false), "cdn.example", netOther)
 	h.answer(wide, CoreSet(false), "core.example", netCore)
@@ -136,7 +137,7 @@ func TestLoadKeepsListedAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, d, text))
 	h.fillSets()
 	h.answer(d, DeviceSet(103, false), "plug.example", netAllow)
 	open := h.hold("a device to its allow list", "101", "isp", netAllow, 9247)
