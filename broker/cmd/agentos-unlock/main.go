@@ -2,7 +2,7 @@
 // as root, it opens the sealed store's tpm slot, derives the kernel's keys,
 // closes the store, and becomes the kernel process: it drops to the kernel's
 // uid and gid and execs the kernel main, with the keys on an inherited pipe
-// (descriptor 3):
+// (handoff.KeyFD):
 //
 //	agentos-unlock -store /var/lib/agentos-store/store -uid 980 -gid 980 \
 //	    -exec /usr/lib/agentos/agentos-kernel -- -log ... -owner-sock ...
@@ -10,33 +10,19 @@
 // No process lives on with the store key (STO-2a-e, CLK-1): this one wipes
 // it before the exec, and the kernel gets only the log key, the head key,
 // the clerk root key, the log anchor's counter and the owner's anchors on
-// descriptor 3, and one connection to the TPM on descriptor 4 for that
+// handoff.KeyFD, and one connection to the TPM on handoff.TPMFD for that
 // counter (LOG-2, STO-1), since the kernel's uid can open no TPM itself. Before that hand-off it caps
 // the slot's boot path (#2977), so that connection unseals nothing for the
 // rest of the boot. The box's policy key and the store's anchor come
 // from the store's pins index on this PC's TPM, which enrollment wrote
 // (STO-2a-k, STO-2c), never from the drive.
 //
-// With -clerk-anchors and -log, it also writes the owner's hardware keys to
-// a root-owned file for the clerks, which check every view the kernel hands
-// them against keys the kernel did not hand them (D-146, MAIL-keys). Those
-// keys come from the store only: its kernel/anchors entry, or, on a box whose
-// setup put them in the kernel's log, its clerks/anchors entry, which this
-// step copies from the log's first entry at the first boot that finds one
-// (#2995).
-//
-// With -recovery-request, it also carries out the owner's lost-card request
-// (REC-4, route B of D-201): on a boot that opened the tpm slot, a request
-// the kernel approved for the store's current backup recipient makes a new
-// card, replaces the recovery slot, the passphrase slot and the recipient
-// with its recovery key and passphrase in one write, and hands the card
-// to the kernel, which shows it on the owner's page. A request that is not
-// one is ignored, with one line on stderr, and the box starts as ever.
-//
-// With -checker-seed, it also writes the owner's code-generator seed from
-// the store, sealed under the checker's clerk key, to a file only root
-// reads, for the checker's unit to load at each start (CH-4, MIG-4-exit-c2).
-// The kernel hands the checker that key, so the kernel never holds the seed.
+// With -clerk-anchors and -log, it also writes the owner's hardware keys for
+// the clerks (clerkAnchors; D-146, #2995); with -recovery-request, on a boot
+// that opened the tpm slot, it carries out the owner's lost-card request
+// (lostCard; REC-4, route B of D-201); with -checker-seed, it writes the
+// checker's sealed code seed (writeCheckerSeed; CH-4, MIG-4-exit-c2). Each
+// function's comment says how.
 package main
 
 import (
@@ -60,6 +46,7 @@ import (
 	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 	"github.com/google/go-tpm/tpm2/transport/linuxudstpm"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card/words"
@@ -882,20 +869,15 @@ func getres(trap uintptr) (r, e, s int) {
 	return int(a), int(b), int(c)
 }
 
-// inherit makes each descriptor survive the exec as the number it maps to;
-// every other descriptor Go opened is close-on-exec. Each is first copied
-// above every target, so moving one never overwrites another still to move.
+// inherit makes every descriptor above 2 close-on-exec (Linux 5.11), so none
+// a parent left open reaches the exec, then moves each onto the number it
+// maps to: handoff's, which no descriptor of the runtime's can be (#4474).
 func inherit(fds map[int]int) error {
-	high := map[int]int{}
-	for fd, want := range fds {
-		h, _, e := syscall.RawSyscall(syscall.SYS_FCNTL, uintptr(fd), syscall.F_DUPFD_CLOEXEC, 16)
-		if e != 0 {
-			return e
-		}
-		high[int(h)] = want
+	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+		return err
 	}
-	for h, want := range high {
-		if err := syscall.Dup3(h, want, 0); err != nil {
+	for fd, want := range fds {
+		if err := syscall.Dup3(fd, want, 0); err != nil {
 			return err
 		}
 	}
