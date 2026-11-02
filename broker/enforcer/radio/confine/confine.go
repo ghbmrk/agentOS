@@ -246,7 +246,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	if s.Net == nil {
 		// The child has not been reaped, so its pid is still its own.
-		f, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", cmd.Process.Pid))
+		f, err := openNet(cmd.Process.Pid)
 		if err != nil {
 			return fail(err)
 		}
@@ -262,6 +262,11 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	return proc, ours, nil
 }
+
+// openNet opens a started stack's network namespace. Start calls it
+// before it releases the stack, so a stack that exits at once cannot fail
+// its own start; a test delays it to hold that order (#4477).
+var openNet = func(pid int) (*os.File, error) { return os.Open(fmt.Sprintf("/proc/%d/ns/net", pid)) }
 
 // procAttr is how the fork confines s under its profile: its own user, a
 // fresh IPC namespace and, unless it joins another stack's, a fresh
@@ -409,6 +414,14 @@ func confineAndExec(families, view, path string, argv []string) error {
 	}
 	if groups, err := syscall.Getgroups(); err != nil || len(groups) != 0 {
 		return fmt.Errorf("confine: supplementary groups %v (%v)", groups, err)
+	}
+	// No core dump, soft or hard: a crashed stack's memory holds what it
+	// guards (Thread's network keys), and a core written to its working
+	// directory would reach another process that sees it (Thread's
+	// adapter, the run directory). The stack has no CAP_SYS_RESOURCE over
+	// the host, so it cannot raise the limit again (#4459).
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{}); err != nil {
+		return fmt.Errorf("confine: no core: %w", err)
 	}
 	// Mark every descriptor past the interface (fd 3) close-on-exec, so
 	// nothing the enforcer inherited without it reaches the stack. Marking
