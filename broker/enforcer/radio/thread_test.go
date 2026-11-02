@@ -26,6 +26,12 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/thread"
 )
 
+// exited is the process of a stack served inside the test's own process:
+// there is nothing to kill.
+type exited struct{}
+
+func (exited) Stop() error { return nil }
+
 // REQ: NET-2
 
 // mdnsArg makes this test binary a stand-in for the Matter controller: on
@@ -130,7 +136,7 @@ func adapter(t *testing.T, sock string, devices ...radio.Device) (*radio.Host, c
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Attach(radio.StackThread, ours)
+	h.Attach(radio.StackThread, exited{}, ours)
 	t.Cleanup(func() { ours.Close() })
 	return h, done
 }
@@ -336,7 +342,7 @@ func TestSrpReachesController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Attach(radio.StackThread, conn)
+	h.Attach(radio.StackThread, ad, conn)
 	role := ""
 	for end := time.Now().Add(90 * time.Second); role != `{"Role":"leader"}` && time.Now().Before(end); time.Sleep(time.Second) {
 		b, err := h.State(thread.Network)
@@ -390,7 +396,7 @@ func TestSrpReachesController(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mh.Attach(radio.StackThread, mconn)
+	mh.Attach(radio.StackThread, matter, mconn)
 	var heard []string
 	for end := time.Now().Add(120 * time.Second); time.Now().Before(end); time.Sleep(2 * time.Second) {
 		b, err := mh.State(thread.Network)

@@ -795,6 +795,11 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Class":  func(d *policy.Device) { d.Class = policy.ClassMicrophone },
 		"Stream": func(d *policy.Device) { d.Stream = append(d.Stream, policy.Port{Proto: policy.ProtoUDP, Num: 554}) },
 	}
+	// A safeguard only a class that needs one records (#3872), so this row
+	// runs on a garage door.
+	doors := map[string]func(d *policy.Device){
+		"Safeguards": func(d *policy.Device) { d.Safeguards = policy.Needs(policy.ClassGarageDoor) },
+	}
 	docs := map[string]func(d *policy.Document){
 		"Version":      nil, // the page picks it; it is in the serial, not the diff
 		"Destinations": func(d *policy.Document) { d.Destinations = append(d.Destinations, "z.example") },
@@ -816,7 +821,7 @@ func TestEveryFieldRendered(t *testing.T) {
 		"Device": func(h *policy.Hold) { h.Device = "tv" }, "Kind": func(h *policy.Hold) { h.Kind = policy.HoldFix },
 	}
 	for ty, m := range map[reflect.Type][]string{
-		reflect.TypeOf(policy.Device{}): keys(devs, recorders), reflect.TypeOf(policy.Document{}): keys(docs),
+		reflect.TypeOf(policy.Device{}): keys(devs, recorders, doors), reflect.TypeOf(policy.Document{}): keys(docs),
 		reflect.TypeOf(policy.StandingRule{}): keys(rules), reflect.TypeOf(policy.Pair{}): keys(pairs),
 		reflect.TypeOf(policy.Hold{}): keys(holds), reflect.TypeOf(policy.Port{}): {"Num", "Proto"},
 	} {
@@ -865,6 +870,21 @@ func TestEveryFieldRendered(t *testing.T) {
 		}
 		differs("a new camera's "+name, added(camera), added(func(v *policy.Device) { camera(v); f(v) }))
 		differs("the camera's "+name, base, func() policy.Document { d := clone(base); f(dev(&d, "cam")); return d }())
+	}
+	for name, f := range doors {
+		door := func(v *policy.Device) { v.Class = policy.ClassGarageDoor }
+		differs("a new garage door's "+name, added(door), added(func(v *policy.Device) { door(v); f(v) }))
+		withDoor := func(g ...string) policy.Document {
+			d := clone(base)
+			d.Devices = append(d.Devices, policy.Device{ID: "garage", Network: policy.NetDevices, Class: policy.ClassGarageDoor, Safeguards: g})
+			return d
+		}
+		was := withDoor(policy.SafeguardObstructionReversal)
+		is := clone(was)
+		f(dev(&is, "garage"))
+		if slices.Equal(Describe(was, was, zone), Describe(was, is, zone)) {
+			t.Errorf("the garage door's %s: the diff does not show it", name)
+		}
 	}
 	// Each field changed on a device, pair, rule or hold already there.
 	for name, f := range devs {

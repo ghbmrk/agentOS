@@ -45,6 +45,10 @@ done
 # The mail clerk's IMAP connection process (#3015), which the clerk's package keeps beside it.
 (cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
 	-o "$STAGE/usr/lib/agentos/agentos-imapconn" ./clerk/inbox/imapconn/cmd/imapconn)
+# The requalification case driver (UPD-5r-b2): the host boots it under gVisor from a release's own
+# /usr, read-only, so each release ships the driver that runs its cases (broker/vm/requal/driver).
+(cd "$REPO/broker" && CGO_ENABLED=0 go build -trimpath -ldflags=-buildid= \
+	-o "$STAGE/usr/lib/agentos/agentos-requal-driver" ./vm/requal/driver/cmd/agentos-requal-driver)
 
 # gVisor, the same release and hash as CI's machine tests, with its sidecars beside runsc as CI
 # installs them: this release's runsc refuses to start a sandbox without gvisor-bin/ (#1701).

@@ -339,6 +339,10 @@ var coreEnforcer = map[string]struct {
 	// The kernel's byte-cap check (#4173): the summary interval and the
 	// cap edge from the shared format definition, never a copy (D-255).
 	"kernel/capgate": {[]string{"enforcer/wire"}, forbiddenStd},
+	// The kernel's check of every channel message before it is sent
+	// (#4373): the format, the rates and the bucket from the shared
+	// format definition, never a copy (D-255).
+	"kernel/chancheck": {[]string{"enforcer/wire"}, forbiddenStd},
 }
 
 // enforcerWebDeps are the third-party packages the page links: rsc.io/qr

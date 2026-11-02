@@ -118,6 +118,7 @@ PREMERGE_LINES = [
     '      contents: read',
     '      issues: read',
     '      pull-requests: read',
+    '      actions: read # a bot PR\'s writer run and its artifact',
     '      statuses: write # the `premerge` status on the PR head, nothing else',
     '    steps:',
     '      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2',
@@ -161,7 +162,16 @@ PREMERGE_LINES = [
     '              "+refs/heads/$BASE_REF:refs/remotes/pr/base" || exit 1',
     '            git cat-file -e "$HEAD_SHA^{commit}" || exit 1',
     '            if [ "$HEAD_REPO" = "$REPO" ] && [ "${HEAD_REF#bot/}" != "$HEAD_REF" ]; then',
-    '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --base refs/remotes/pr/base "$HEAD_SHA"',
+    '              run_id=$(git log -1 --format=\'%(trailers:key=Bot-Run,valueonly)\' "$HEAD_SHA") || exit 1',
+    '              [[ "$run_id" =~ ^[0-9]+$ ]] || { echo "bot-unproven no-run"; exit 1; }',
+    '              gh api "repos/$REPO/actions/runs/$run_id" > "$RUNNER_TEMP/run.json" || exit 1',
+    '              art=$(gh api --paginate "repos/$REPO/actions/runs/$run_id/artifacts?per_page=100" \\',
+    '                | jq -r --arg name "${HEAD_REF#bot/}" \'.artifacts[] | select(.name == $name and (.expired | not)) | .id\' \\',
+    '                | sort -n | tail -n 1) || exit 1',
+    '              [[ "$art" =~ ^[0-9]+$ ]] || { echo "bot-unproven no-output"; exit 1; }',
+    '              gh api "repos/$REPO/actions/artifacts/$art/zip" > "$RUNNER_TEMP/output.zip" || exit 1',
+    '              exec python3 -I tools/premerge.py --bot "$HEAD_REF" --run "$RUNNER_TEMP/run.json" \\',
+    '                --output "$RUNNER_TEMP/output.zip" --base refs/remotes/pr/base "$HEAD_SHA"',
     '            fi',
     '            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \\',
     '              --jq \'.[] | {author_association, created_at, updated_at, body}\' > "$RUNNER_TEMP/comments.jsonl" || exit 1',
@@ -400,6 +410,22 @@ class WorkflowTest(unittest.TestCase):
         self.assertRegex(downloads[0], r"path: \$\{\{ runner\.temp \}\}/board\b")
         self.assertIn('cp "$RUNNER_TEMP/board/BOARD.md" BOARD.md', commit)
 
+    def test_trace_and_metrics_cross_jobs_as_an_artifact(self):
+        # #1832: TRACE.md outgrew the 128 KiB env limit as base64 (trace run 41303991176: "Argument list too long"),
+        # and MAIN-PROT-3 (#757) needs the artifact as the proof premerge --bot compares the PR with. Each writer
+        # uploads its file from the read-only job, the commit job copies only that file in, and commits with Bot-Run.
+        for name, f in (("trace", "TRACE.md"), ("metrics", "METRICS.md"), ("board", "BOARD.md")):
+            text = (WORKFLOWS / f"{name}.yml").read_text()
+            gen, commit = text.split("\n  commit:\n", 1)
+            self.assertNotIn("base64", text, name)
+            uploads = [s for a, s in steps(gen) if a.startswith("actions/upload-artifact@")]
+            downloads = [s for a, s in steps(commit) if a.startswith("actions/download-artifact@")]
+            self.assertEqual((len(uploads), len(downloads)), (1, 1), name)
+            self.assertRegex(uploads[0], rf"name: {name}\n\s+path: {f}\n", name)
+            self.assertRegex(downloads[0], rf"name: {name}\n\s+path: \$\{{\{{ runner\.temp \}}\}}/{name}$", name)
+            self.assertIn(f'cp "$RUNNER_TEMP/{name}/{f}" {f}', commit, name)
+            self.assertRegex(commit, r'git commit -qm "[^"]+" -m "Bot-Run: \$GITHUB_RUN_ID" -- ' + f, name)
+
     def test_board_renders_on_a_schedule_not_per_issue_event(self):
         # BOARD-debounce (#3099): a render per issue event merged one main commit per label burst,
         # and main's strict up-to-date rule put every open PR behind each one. Renders run on a
@@ -559,6 +585,10 @@ class WorkflowTest(unittest.TestCase):
                      ('GH_TOKEN="$STATUS_TOKEN" gh api -X POST', "gh api -X POST"),
                      ("          permission-statuses: write", "          permission-statuses: write\n          permission-contents: write"),
                      ('[ "$BASE_REF" = main ] || ', ""),
+                     # MAIN-PROT-3 (#757): a bot PR passes only with its writer run and that run's artifact.
+                     (' --run "$RUNNER_TEMP/run.json" \\\n                --output "$RUNNER_TEMP/output.zip"', ""),
+                     ("      actions: read # a bot PR's writer run and its artifact\n", ""),
+                     ('/zip" > "$RUNNER_TEMP/output.zip" || exit 1', '/zip" > "$RUNNER_TEMP/output.zip"'),
                      # ARM-on-accept (#3103): only a `same` from --check merges (not `bot`), only an open,
                      # non-draft, unarmed PR, only with every check green, pinned to the gate's head,
                      # with the main-only bot token.
@@ -615,6 +645,10 @@ STUB_GH = r"""#!/bin/sh
 case "$*" in
   "api -X POST "*) [ "$FAIL_AT" = post ] && [ ! -e "$STUBS/post-failed" ] && { : > "$STUBS/post-failed"; exit 1; }
                    echo "$*" >> "$STUBS/posts"; echo "$GH_TOKEN" >> "$STUBS/post-tokens"; exit 0 ;;
+  "api --paginate repos/o/r/actions/runs/41/artifacts?per_page=100") [ "$FAIL_AT" = artifacts ] && exit 1
+     echo '{"artifacts":[{"id":5,"name":"trace","expired":false},{"id":6,"name":"board","expired":false},{"id":4,"name":"trace","expired":true}]}' ;;
+  "api repos/o/r/actions/runs/41") [ "$FAIL_AT" = run ] && exit 1; echo '{"id":41}' ;;
+  "api repos/o/r/actions/artifacts/"*"/zip") [ "$FAIL_AT" = zip ] && exit 1; echo "$*" >> "$STUBS/zips" ;;
   "api --paginate "*) [ "$FAIL_AT" = comments ] && exit 1; echo '{"author_association":"OWNER","created_at":"t","body":"b"}' ;;
   "api repos/"*) [ "$FAIL_AT" = pulls ] && exit 1
                  echo '{"head":{"sha":"'"$SHA"'","ref":"'"$REF"'","repo":{"full_name":"o/r"}},"base":{"ref":"'"$BASE"'"},'"$PR_STATE"'}' ;;
@@ -626,7 +660,13 @@ STUB_JQ = r"""#!/bin/sh
 exec "$REAL_JQ" "$@"
 """
 STUB_PY = r"""#!/bin/sh
+echo "$*" >> "$STUBS/py"
 echo "$VERDICT"; [ "$VERDICT" = same ] || [ "$VERDICT" = bot ]
+"""
+# MAIN-PROT-3 (#757): `git log` answers the head commit's Bot-Run trailer; every other git call succeeds silently.
+STUB_GIT = r"""#!/bin/sh
+[ "$1" = log ] && printf '%s' "$TRAILER"
+exit 0
 """
 
 
@@ -669,19 +709,19 @@ class PremergeRunTest(unittest.TestCase):
     OPEN = '"state":"open","draft":false,"auto_merge":null'
 
     def run_gate(self, verdict="no-verdict", fail_at="", ref="feature", base="main", tokens=None, outputs=None, pr_state=OPEN,
-                 descriptions=None):
+                 descriptions=None, trailer="41\n", calls=None):
         real_jq = shutil.which("jq")
         self.assertTrue(real_jq, "jq is on the runner image; the test needs it")
         with tempfile.TemporaryDirectory() as d:
             stubs = pathlib.Path(d)
-            for name, body in (("gh", STUB_GH), ("jq", STUB_JQ), ("python3", STUB_PY), ("git", "#!/bin/sh\nexit 0\n")):
+            for name, body in (("gh", STUB_GH), ("jq", STUB_JQ), ("python3", STUB_PY), ("git", STUB_GIT)):
                 (stubs / name).write_text(body)
                 (stubs / name).chmod(0o755)
             (stubs / "run.sh").write_text(premerge_script())
             env = {"PATH": "%s:/usr/bin:/bin" % stubs, "STUBS": d, "REAL_JQ": real_jq, "SHA": self.SHA,
                    "REF": ref, "BASE": base, "VERDICT": verdict, "FAIL_AT": fail_at, "RUNNER_TEMP": d, "PR_NUMBER": "7",
                    "REPO": "o/r", "GH_TOKEN": "synthetic", "STATUS_TOKEN": "synthetic-app", "GITHUB_SERVER_URL": "https://example.invalid",
-                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state}
+                   "GITHUB_RUN_ID": "1", "GITHUB_OUTPUT": str(stubs / "out"), "PR_STATE": pr_state, "TRAILER": trailer}
             # The runner's default `run` shell.
             proc = subprocess.run(gate_argv() + [str(stubs / "run.sh")],
                                   env=env, cwd=d, capture_output=True, text=True, timeout=30)
@@ -692,6 +732,9 @@ class PremergeRunTest(unittest.TestCase):
                 descriptions.extend(re.search(r"description=(\S+)", p).group(1) for p in posts)
             if outputs is not None and (stubs / "out").exists():
                 outputs.extend((stubs / "out").read_text().split())
+            if calls is not None:
+                for f in ("zips", "py"):
+                    calls.extend((stubs / f).read_text().splitlines() if (stubs / f).exists() else [])
         return proc.returncode, [re.search(r"state=(\w+)", p).group(1) for p in posts]
 
     def test_failure_verdict_posts_failure_but_job_passes(self):
@@ -726,6 +769,24 @@ class PremergeRunTest(unittest.TestCase):
         # a head accepted against another base must not carry `success` into a PR to main.
         self.assertEqual(self.run_gate("same", base="stacked"), (0, ["failure"]))
         self.assertEqual(self.run_gate("bot", ref="bot/trace", base="stacked"), (0, ["failure"]))
+
+    def test_bot_pr_fetches_its_writer_run_and_artifact(self):
+        # MAIN-PROT-3 (#757): the head's Bot-Run trailer names the run; the gate fetches that run and its newest
+        # unexpired artifact named for the branch, and hands both to --bot. No trailer, no artifact or a failed
+        # read posts failure without calling --bot.
+        calls = []
+        self.assertEqual(self.run_gate("bot", ref="bot/trace", calls=calls), (0, ["success"]))
+        self.assertEqual(calls[0], "api repos/o/r/actions/artifacts/5/zip")
+        self.assertRegex(calls[1], r"^-I tools/premerge\.py --bot bot/trace --run \S+/run\.json --output \S+/output\.zip "
+                                   r"--base refs/remotes/pr/base a{40}$")
+        calls = []
+        self.assertEqual(self.run_gate("bot", ref="bot/board", calls=calls), (0, ["success"]))
+        self.assertEqual(calls[0], "api repos/o/r/actions/artifacts/6/zip")
+        for kw in ({"trailer": ""}, {"trailer": "41\n42"}, {"trailer": "41 x"}, {"trailer": "$(id)"},
+                   {"ref": "bot/metrics"}, {"fail_at": "run"}, {"fail_at": "artifacts"}, {"fail_at": "zip"}):
+            calls = []
+            self.assertEqual(self.run_gate("bot", **{"ref": "bot/trace", **kw}, calls=calls), (0, ["failure"]), kw)
+            self.assertFalse([c for c in calls if "premerge.py" in c], kw)
 
     def test_only_a_full_accept_on_an_open_unarmed_pr_merges(self):
         # ARM-on-accept (#3103): the gate hands the merge job the head it read, only on `same`.

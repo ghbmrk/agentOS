@@ -371,19 +371,22 @@ func TestUnadmittedCountsOnReplayOnly(t *testing.T) {
 
 func TestNegativeUnadmittedCountsAsNone(t *testing.T) {
 	// A grader's negative count on one case must not cancel another case's
-	// unadmitted steps.
-	g := func(c Case, out []byte) Grade {
-		if c.ID == "a" {
-			return Grade{Pass: true, Unadmitted: -5}
+	// unadmitted steps, whether it comes first or last (a clamp on the
+	// running total would pass only the first).
+	for _, neg := range []string{"a", "c"} {
+		g := func(c Case, out []byte) Grade {
+			if c.ID == neg {
+				return Grade{Pass: true, Unadmitted: -5}
+			}
+			return Grade{Pass: true, Unadmitted: 1}
 		}
-		return Grade{Pass: true, Unadmitted: 1}
-	}
-	sc, err := runner(t, &fakeSandbox{}, allSuites(three(), g)).Run(context.Background(), release(t), update.SuiteReplay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sc.Unadmitted != 2 {
-		t.Fatalf("unadmitted %d, want 2", sc.Unadmitted)
+		sc, err := runner(t, &fakeSandbox{}, allSuites(three(), g)).Run(context.Background(), release(t), update.SuiteReplay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Unadmitted != 2 {
+			t.Fatalf("negative on %s: unadmitted %d, want 2", neg, sc.Unadmitted)
+		}
 	}
 }
 

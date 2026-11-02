@@ -87,7 +87,7 @@ func TestOnlyDeclaredOps(t *testing.T) {
 			var logs []string
 			h := newHost(t, &logs)
 			rec := newRecorder(t, StackBLE)
-			h.Attach(StackBLE, rec.host)
+			h.Attach(StackBLE, exited{}, rec.host)
 			req := Request{Op: op, Device: scale.Name}
 			switch op {
 			case OpWrite:
@@ -117,7 +117,7 @@ func TestOnlyDeclaredOps(t *testing.T) {
 		var logs []string
 		h := newHost(t, &logs)
 		rec := newRecorder(t, StackBLE)
-		h.Attach(StackBLE, rec.host)
+		h.Attach(StackBLE, exited{}, rec.host)
 		for v := wire.Verb(0); v < 16; v++ {
 			if err := h.Do(scale.Name, v, 0); !errors.Is(err, ErrNotDeclared) {
 				t.Errorf("verb %d: %v", v, err)
@@ -135,7 +135,7 @@ func TestOnlyDeclaredOps(t *testing.T) {
 		var logs []string
 		h := newHost(t, &logs)
 		rec := newRecorder(t, StackBLE)
-		h.Attach(StackBLE, rec.host)
+		h.Attach(StackBLE, exited{}, rec.host)
 		for _, req := range []Request{
 			{Op: OpRead, Device: "lock"},
 			{Op: OpWrite, Device: scale.Name, Char: "00002a19-0000-1000-8000-00805f9b34fb", Data: []byte{1}},
@@ -219,7 +219,7 @@ func TestHostEndsLinkOnBadStack(t *testing.T) {
 				Notify: func(n Notification) { mu.Lock(); notes = append(notes, n); mu.Unlock() },
 				Log:    func(s string) { mu.Lock(); logs = append(logs, s); mu.Unlock() }})
 			host, stack := net.Pipe()
-			h.Attach(StackBLE, host)
+			h.Attach(StackBLE, exited{}, host)
 			b, _ := json.Marshal(up)
 			stack.Write(binary.BigEndian.AppendUint32(nil, uint32(len(b))))
 			stack.Write(b)
@@ -281,7 +281,7 @@ func TestStackThatStopsReadingCannotWedgeHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.Attach(StackBLE, os.NewFile(uintptr(fds[0]), "ours"))
+	h.Attach(StackBLE, exited{}, os.NewFile(uintptr(fds[0]), "ours"))
 	done := make(chan error, 1)
 	go func() { _, err := h.State(scale.Name); done <- err }()
 	select {
@@ -302,7 +302,7 @@ func TestAnswerEdges(t *testing.T) {
 		h, _ := NewHost(Config{Devices: []Device{scale, {Name: "lamp", Stack: StackBLE}}, Timeout: timeout,
 			Notify: func(Notification) {}, Log: func(string) {}})
 		host, stack := net.Pipe()
-		h.Attach(StackBLE, host)
+		h.Attach(StackBLE, exited{}, host)
 		return h, stack
 	}
 	t.Run("wrong device", func(t *testing.T) {

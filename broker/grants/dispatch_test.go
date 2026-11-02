@@ -115,14 +115,17 @@ func TestConcurrentDispatchStartsOneAttempt(t *testing.T) {
 	}
 }
 
-// TestTriesFailsClosed: an attempt count the gate cannot read is an
-// error, never a count that might match an approval.
+// TestTriesFailsClosed: an attempt count the gate cannot read is an error
+// and -1, never a count that might match; no approval is journaled with it.
 func TestTriesFailsClosed(t *testing.T) {
 	r := newRig(t, nil)
-	if n, err := r.g.tries("agent/none"); err == nil {
-		t.Fatalf("unknown intent: %d attempts, no error", n)
+	if n, err := r.g.tries("agent/none"); err == nil || n != -1 {
+		t.Fatalf("unknown intent: %d attempts, error %v", n, err)
 	}
-	if _, err := New(Config{}).tries("agent/none"); err == nil {
-		t.Fatal("no engine: no error")
+	if n, err := New(Config{}).tries("agent/none"); err == nil || n != -1 {
+		t.Fatalf("no engine: %d attempts, error %v", n, err)
+	}
+	if err := r.eng.RecordAnswer("agent/none", decision{approved: true, tries: -1}.note(false)); !errors.Is(err, journal.ErrInvalid) {
+		t.Fatalf("an approval with an unread count was journaled (#1969): %v", err)
 	}
 }

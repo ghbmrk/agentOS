@@ -27,6 +27,12 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/confine"
 )
 
+// exited is the process of a stack served inside the test's own process:
+// there is nothing to kill.
+type exited struct{}
+
+func (exited) Stop() error { return nil }
+
 // REQ: NET-2
 
 const (
@@ -476,7 +482,7 @@ func TestReadDecodesOnlyWanted(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- Run(testConfig(filepath.Join(dir, "bus")), stackEnd, testLog{t}) }()
 	h := hostFor(t, make(chan radio.Notification, 8))
-	h.Attach(radio.StackBLE, hostEnd)
+	h.Attach(radio.StackBLE, exited{}, hostEnd)
 	// A read is Properties.Get on the bus, whose reply follows the frame
 	// in the stream: its answer says the stack has read the frame.
 	readOp := func() {
@@ -633,7 +639,7 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 	go func() { done <- Run(testConfig(filepath.Join(dir, "bus")), stackEnd, testLog{t}) }()
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
-	h.Attach(radio.StackBLE, hostEnd)
+	h.Attach(radio.StackBLE, exited{}, hostEnd)
 
 	type step struct {
 		r    radio.Request
@@ -1104,7 +1110,7 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 	}
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
-	h.Attach(radio.StackBLE, conn)
+	h.Attach(radio.StackBLE, proc, conn)
 	if _, err := h.Call(radio.Request{Op: radio.OpConnect, Device: "scale"}); err != nil {
 		t.Fatalf("connect through the confined stack: %v", err)
 	}
