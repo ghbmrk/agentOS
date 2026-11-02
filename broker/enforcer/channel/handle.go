@@ -94,7 +94,7 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 	defer c.release()
 	now := c.cfg.Now()
 	if c.session != s {
-		c.log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
+		c.logCut(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
 		return nil, ErrSuperseded
 	}
 	rk := wire.RateKindOf(m.Type())
