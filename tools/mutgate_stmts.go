@@ -4,8 +4,10 @@
 //	go run mutgate_stmts.go FILE.go...
 //
 // It prints one JSON array: {"file", "line", "col", "start", "end"} for every statement in a
-// statement list (a block, or a case or select clause body) of each file, where file is the base
-// name, line and col are where the statement starts and start/end are its byte offsets.
+// statement list (a block, a case or select clause body, and the clauses of a switch or select)
+// of each file, where file is the base name, line and col are where the statement starts in the
+// file's own lines and start/end are its byte offsets; cover_line and cover_col are where coverage
+// is judged.
 // Declarations (`var`, `const`, `type`, `:=`) and empty statements are left out: deleting one
 // never compiles or changes nothing.
 // It reads the files as data with go/parser and runs nothing in them.
@@ -27,6 +29,10 @@ type site struct {
 	Col   int    `json:"col"`
 	Start int    `json:"start"`
 	End   int    `json:"end"`
+	// Where coverage is judged: the statement's start, or for a case or select clause (whose
+	// cover block starts after its colon, or is empty) the start of its switch or select.
+	CoverLine int `json:"cover_line"`
+	CoverCol  int `json:"cover_col"`
 }
 
 func deletable(s ast.Stmt) bool {
@@ -48,22 +54,36 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		add := func(list []ast.Stmt) {
+		// PositionFor(..., false): the file's own lines, which the diff numbers; a `//line`
+		// directive would otherwise renumber a site out of the added-line match.
+		pos := func(p token.Pos) token.Position { return fset.PositionFor(p, false) }
+		add := func(list []ast.Stmt, cover token.Pos) {
 			for _, s := range list {
-				if deletable(s) {
-					p, e := fset.Position(s.Pos()), fset.Position(s.End())
-					sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset})
+				_, caseClause := s.(*ast.CaseClause)
+				_, commClause := s.(*ast.CommClause)
+				if deletable(s) && (caseClause || commClause) == cover.IsValid() {
+					p, e, c := pos(s.Pos()), pos(s.End()), pos(s.Pos())
+					if cover.IsValid() {
+						c = pos(cover)
+					}
+					sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset, c.Line, c.Column})
 				}
 			}
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.BlockStmt:
-				add(n.List)
+			case *ast.SwitchStmt:
+				add(n.Body.List, n.Pos())
+			case *ast.TypeSwitchStmt:
+				add(n.Body.List, n.Pos())
+			case *ast.SelectStmt:
+				add(n.Body.List, n.Pos())
+			case *ast.BlockStmt: // a switch or select body's clauses are added above
+				add(n.List, token.NoPos)
 			case *ast.CaseClause:
-				add(n.Body)
+				add(n.Body, token.NoPos)
 			case *ast.CommClause:
-				add(n.Body)
+				add(n.Body, token.NoPos)
 			}
 			return true
 		})

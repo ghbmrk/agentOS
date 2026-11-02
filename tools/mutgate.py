@@ -306,13 +306,50 @@ def covered_blocks(profile):
 
 
 def is_covered(blocks, site):
-    pos = (site["line"], site["col"])
+    """Whether a block that ran holds the site's cover position: its own start, or for a case or
+    select clause, whose block starts after its colon, its switch's or select's start."""
+    pos = (site["cover_line"], site["cover_col"])
     return any(start <= pos < end for start, end in blocks.get(site["file"], ()))
 
 
-def deleted(src, site):
-    """src (bytes) with the statement at site removed, its line breaks kept."""
-    return src[:site["start"]] + b"\n" * src.count(b"\n", site["start"], site["end"]) + src[site["end"]:]
+def deleted(src, site, keep=b""):
+    """src (bytes) with the statement at site replaced by keep (one line), its line breaks kept."""
+    return src[:site["start"]] + keep + b"\n" * src.count(b"\n", site["start"], site["end"]) + src[site["end"]:]
+
+
+BUILD_ERROR = re.compile(r"^\S*?([^/\s:]+\.go):(\d+):(\d+): (.*)$")
+UNUSED_VAR = re.compile(r"declared and not used: (\w+)$")
+UNUSED_IMPORT = re.compile(r'"[^"]+" imported (?:as \w+ )?and not used$')
+
+
+def kept_alive(src, site, stderr):
+    """The deletion at site with the variables and imports it left unused kept in use (`_ = NAME`
+    in its place, the import renamed `_`), when those are the build's only errors, else None.
+
+    Deleting a variable's only use, the common guard `v, err := f(); if err != nil { ... }`, does
+    not compile, and a NOT VIABLE guard would never be tested (Security on #4597), so the guard is
+    deleted as go-mutesting's statement remover deletes it."""
+    names, imports = [], []
+    for row in stderr.split("\n"):
+        m = BUILD_ERROR.match(row)
+        if not m:
+            continue
+        if m.group(1) != site["file"]:
+            return None
+        if var := UNUSED_VAR.search(m.group(4)):
+            names.append(var.group(1))
+        elif UNUSED_IMPORT.search(m.group(4)):
+            imports.append((int(m.group(2)), int(m.group(3))))
+        else:
+            return None
+    if not names and not imports:
+        return None
+    lines = deleted(src, site, b"; ".join(b"_ = " + n.encode() for n in dict.fromkeys(names))).split(b"\n")
+    for line, col in imports:  # imports sit above every statement, so the deletion moved none of them
+        text = lines[line - 1]
+        head, rest = text[:col - 1], text[col - 1:]
+        lines[line - 1] = head + (b"_ " + rest if rest.startswith(b'"') else re.sub(rb"^\w+", b"_", rest))
+    return b"\n".join(lines)
 
 
 def run_tests(binary, cwd, timeout):
@@ -362,11 +399,17 @@ def deletion_mutants(pkg, added, tmp, lister):
             status = "NOT COVERED"
         else:
             src_path = pkg_dir / site["file"]
-            mutant, overlay, binary = tmp / "mutant.go", tmp / "overlay.json", tmp / "mutant.test"
-            mutant.write_bytes(deleted(src_path.read_bytes(), site))
+            # The mutant keeps the file's name: the compiler names the overlay's file in its errors.
+            mutant, overlay, binary = tmp / "mutant" / site["file"], tmp / "overlay.json", tmp / "mutant.test"
+            mutant.parent.mkdir(exist_ok=True)
+            src = src_path.read_bytes()
             overlay.write_text(json.dumps({"Replace": {str(src_path): str(mutant)}}))
-            built = subprocess.run(["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."],
-                                   cwd=pkg_dir, capture_output=True)
+            build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
+            mutant.write_bytes(deleted(src, site))
+            built = subprocess.run(build, cwd=pkg_dir, capture_output=True)
+            if built.returncode and (alive := kept_alive(src, site, built.stderr.decode(errors="replace"))):
+                mutant.write_bytes(alive)
+                built = subprocess.run(build, cwd=pkg_dir, capture_output=True)
             status = "NOT VIABLE" if built.returncode else run_tests(binary, pkg_dir, timeout)
         out.append({"file": site["file"], "type": DELETION, "status": status, "line": site["line"],
                     "column": site["col"]})
