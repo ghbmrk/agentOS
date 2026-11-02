@@ -500,8 +500,10 @@ func (v Value) check(x any) bool {
 		}
 		return true
 	default:
-		// valid admits only a map here; the kind test keeps a shape that
-		// skipped valid closed rather than read as a map.
+		// valid admits a map or a top-level JSON text here, and send
+		// unwraps a JSON text before check; the kind test keeps a JSON
+		// shape, or one that skipped valid, closed rather than read as a
+		// map (TestCheckReadsOnlyAMapAsAMap).
 		obj, ok := x.(map[string]any)
 		if !ok || v.Kind != KindMap {
 			return false
