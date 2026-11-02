@@ -714,6 +714,36 @@ func TestLifecycle(t *testing.T) {
 		}
 	})
 
+	// Core reconnects inside Silence: an alert raised while no session was
+	// open is offered to the next session that authenticates, though the
+	// page never showed the core down (UX fix-list on #4754).
+	t.Run("core reconnects", func(t *testing.T) {
+		x, _ := enrolled(t, true)
+		addr := x.serve()
+		c1, _ := x.dial(addr, x.core)
+		c1.read()
+		x.advance(time.Second)
+		if x.d.alerts.Status().CoreDown {
+			t.Fatal("a connected core counts as down")
+		}
+		c1.conn.Close()
+		waitFor(t, func() bool { return x.d.conns.Load() == 0 }) // the enforcer saw the session end
+		x.d.alerts.Raise(alert.HeadFork, "")
+		if slices.ContainsFunc(x.d.alerts.Log(), func(r alert.Record) bool { return r.Kind == alert.HeadFork && r.Sent }) {
+			t.Fatal("an alert counted as sent with no session open")
+		}
+		x.advance(time.Second)
+		if x.d.alerts.Status().CoreDown {
+			t.Fatal("a core gone for a second counts as down")
+		}
+		c2, _ := x.dial(addr, x.core)
+		c2.read()
+		c2.read()
+		if c2.alerts == 0 {
+			t.Fatal("the alert raised between sessions was never offered to the next one")
+		}
+	})
+
 	// Channel burst: the core is cut, the channel paused, the light red;
 	// a restart keeps it so, and only the page's passkey resume lifts it.
 	t.Run("channel burst", func(t *testing.T) {

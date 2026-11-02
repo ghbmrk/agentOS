@@ -208,6 +208,13 @@ func (d *Enforcer) event(e channel.Event) {
 		d.coreSeen.Store(int64(d.dp.Elapsed()) + 1)
 	}
 	d.dp.Logf(e.At.In(d.cfg.zone).Format("2006-01-02 15:04 MST") + " channel " + e.Line())
+	if e.Kind == channel.KindHello && e.Code != wire.Refused {
+		// A session the core just authenticated: offer it every alert no
+		// session took, even when Tick never saw the core go down (a
+		// reconnect inside Silence). The log runs outside the channel's
+		// lock, so the offer may use the channel.
+		d.alerts.Core(true)
+	}
 }
 
 // coreUp reports whether the core spoke within Silence.
