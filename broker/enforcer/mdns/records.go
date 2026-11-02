@@ -429,14 +429,21 @@ type Filter struct {
 	claimed    claims
 	hosts, ins map[string]names
 	proved     map[string]names
-	said       map[string]map[string]name
+	said       map[string]map[string]said
+}
+
+// said is a name a sender proved its own as it said it, and for an
+// instance the key of the host its SRV named.
+type said struct {
+	n    name
+	host string
 }
 
 func NewFilter() *Filter {
 	return &Filter{
 		claimed: claims{by: map[string]names{}, at: map[string]map[string]bool{}},
 		hosts:   map[string]names{}, ins: map[string]names{},
-		proved: map[string]names{}, said: map[string]map[string]name{},
+		proved: map[string]names{}, said: map[string]map[string]said{},
 	}
 }
 
@@ -619,29 +626,30 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	t := table(f.proved, iface)
-	said := f.said[iface]
-	if said == nil {
-		said = map[string]name{}
-		f.said[iface] = said
+	says := f.said[iface]
+	if says == nil {
+		says = map[string]said{}
+		f.said[iface] = says
 	}
-	// Each name proved once a packet, with its longest TTL there.
+	// Each name proved once a packet, with its longest TTL there, and an
+	// instance's host from that record.
 	type proof struct {
-		n   name
-		ttl uint32
+		n, host name
+		ttl     uint32
 	}
 	got := map[string]proof{}
 	own := func(r record) bool {
 		return r.class&0x7FFF == classIN && r.name.shown() && !f.claimed.elsewhere(r.name.key(), iface, now)
 	}
-	note := func(r record) {
+	note := func(r record, host name) {
 		k := r.name.key()
 		if p, ok := got[k]; !ok || r.ttl > p.ttl {
-			got[k] = proof{r.name, r.ttl}
+			got[k] = proof{r.name, host, r.ttl}
 		}
 	}
 	for _, r := range rs {
 		if (r.typ == typeA || r.typ == typeAAAA) && r.name.host() && mine(link, r.data) && own(r) {
-			note(r)
+			note(r, nil)
 		}
 	}
 	isHost := func(n name) bool {
@@ -651,7 +659,7 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 	}
 	for _, r := range rs {
 		if r.typ == typeSRV && r.name.instance() && r.target.shown() && isHost(r.target) && own(r) {
-			note(r)
+			note(r, r.target)
 		}
 	}
 	// A goodbye (TTL 0) for a host or instance the sender holds ends it
@@ -663,19 +671,23 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 		k := r.name.key()
 		if r.ttl == 0 && ((r.typ == typeA || r.typ == typeAAAA) && r.name.host() || r.typ == typeSRV && r.name.instance()) {
 			delete(t, k)
-			delete(said, k)
+			delete(says, k)
 		}
 	}
 	for k, p := range got {
 		if p.ttl == 0 {
 			continue
 		}
-		t.add(k, now.Add(min(time.Duration(p.ttl)*time.Second, ownHold)), now, func(d string) { delete(said, d) })
+		t.add(k, now.Add(min(time.Duration(p.ttl)*time.Second, ownHold)), now, func(d string) { delete(says, d) })
 		n := make(name, len(p.n))
 		for i, l := range p.n {
 			n[i] = strings.Clone(l) // not the whole packet's copy
 		}
-		said[k] = n
+		var host string
+		if p.host != nil {
+			host = p.host.key()
+		}
+		says[k] = said{n, host}
 	}
 }
 
@@ -684,19 +696,27 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 // sorted: the names the enforcer's page may pin for the device there
 // (D-266). A name a policy cannot pin is left out: one with a dot in a
 // label, which the page would show as other labels, or an instance whose
-// service label is only its underscore.
+// service label is only its underscore. So is an instance whose SRV's
+// host is not offered with it, since the relay passes an SRV only on a
+// pinned host the sender still holds (#4565).
 func (f *Filter) Heard(iface string, now time.Time) [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out [][]string
-	for k, until := range f.proved[iface] {
-		n := f.said[iface][k]
+	offered := func(k string) bool {
+		n := f.said[iface][k].n
 		switch {
-		case !until.After(now), f.claimed.elsewhere(k, iface, now):
+		case !f.proved[iface].has(k, now), f.claimed.elsewhere(k, iface, now):
 		case slices.ContainsFunc(n, func(l string) bool { return strings.Contains(l, ".") }):
 		case n.instance() && len(n[1]) < 2:
 		default:
-			out = append(out, slices.Clone(n))
+			return true
+		}
+		return false
+	}
+	var out [][]string
+	for k, s := range f.said[iface] {
+		if offered(k) && (s.host == "" || offered(s.host)) {
+			out = append(out, slices.Clone(s.n))
 		}
 	}
 	slices.SortFunc(out, slices.Compare)

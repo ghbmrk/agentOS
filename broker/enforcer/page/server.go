@@ -121,12 +121,13 @@ type Config struct {
 	// Secrets takes safety-list devices' sealed secrets (slice r); nil
 	// refuses every link that carries one.
 	Secrets Secrets
-	// Heard is, for a device's Wi-Fi identity, the mDNS names the
-	// enforcer's relay heard the device prove its own on that VLAN
-	// (mdns.HeardBy, D-266): the page pins them for a paired device a
-	// link leaves pinning none, and refuses a link that pins a name not
-	// among them. nil has heard nothing.
-	Heard func(wifi string) [][]string
+	// Heard is, for a device's network and Wi-Fi identity, the mDNS
+	// names the enforcer's relay heard proved their own where it hears
+	// that device (mdns.HeardBy): on a Devices-network device's VLAN, the
+	// names the page pins for it and the only ones it lets a link pin
+	// (D-266); on the Owner or Household network, the names it offers to
+	// hold for that network's devices (#4411). nil has heard nothing.
+	Heard func(network, wifi string) [][]string
 	Cert  tls.Certificate
 	Now   func() time.Time // nil means time.Now
 }
@@ -359,7 +360,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/":
 		s.home(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/p":
-		s.confirm(w, r)
+		s.confirm(w, r, s.draft)
+	case r.Method == http.MethodGet && r.URL.Path == "/heard":
+		s.confirm(w, r, s.offered)
 	case r.Method == http.MethodGet && r.URL.Path == "/a" && s.book != nil:
 		s.action(w, r)
 	case r.Method == http.MethodGet && (r.URL.Path == "/page.js" || r.URL.Path == "/page.css"):
