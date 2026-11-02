@@ -348,3 +348,112 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 		}
 	}
 }
+
+// openFDs counts this process's open descriptors.
+func openFDs(t *testing.T) int {
+	t.Helper()
+	es, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(es)
+}
+
+// REQ: HW-10, ONB-3. The gate's own steps hold: a missing name is the
+// kernel's ENOENT and a create the kernel refuses its own error, not a
+// descriptor taken as opened; a link reached at the name is ELOOP; and no
+// open, refused or not, leaves a descriptor behind (#4634).
+func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
+	mine := t.TempDir()
+	writeHere(t, mine)
+	if err := os.WriteFile(filepath.Join(mine, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("f", filepath.Join(mine, "l")); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(filepath.Join(mine, "fifo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mine, "j"), []byte(journalMagic), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(mine, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		path string
+		flag int
+	}{
+		{filepath.Join(mine, "missing"), unix.O_RDONLY},
+		{filepath.Join(mine, "missing"), unix.O_WRONLY | unix.O_TRUNC},
+	} {
+		if fd, err := openRaw(c.path, c.flag, 0); !errors.Is(err, unix.ENOENT) {
+			if err == nil {
+				unix.Close(fd)
+			}
+			t.Errorf("openRaw(%q, %#x) = %v, want ENOENT", c.path, c.flag, err)
+		}
+	}
+	// The kernel refuses a directory opened for writing at the reopen.
+	if fd, err := openRaw(filepath.Join(mine, "d"), unix.O_WRONLY, 0); !errors.Is(err, unix.EISDIR) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		t.Errorf("openRaw(a directory, O_WRONLY) = %v, want EISDIR", err)
+	}
+	// sysfs makes no file on create; let the gate write there for this
+	// one case so the kernel, not inDir, refuses it.
+	writeHere(t, "/sys/kernel")
+	if fd, err := openRaw("/sys/kernel/zz-gate-probe", unix.O_WRONLY|unix.O_CREAT, 0o600); !errors.Is(err, unix.EACCES) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		t.Errorf("openRaw(a create sysfs refuses) = %v, want EACCES", err)
+	}
+
+	pfd, err := unix.Open(filepath.Join(mine, "l"), unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkFD(pfd, false); !errors.Is(err, unix.ELOOP) {
+		t.Errorf("checkFD(a link) = %v, want ELOOP", err)
+	}
+	unix.Close(pfd)
+
+	r, err := os.OpenRoot(mine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, err := rootOpen(r, "missing"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rootOpen(a missing name) = %v, want it not found", err)
+	}
+	try := func() {
+		for _, c := range []struct {
+			name string
+			flag int
+		}{
+			{"f", unix.O_RDONLY}, {"f", unix.O_WRONLY}, {"l", unix.O_RDONLY | unix.O_NOFOLLOW},
+			{"missing", unix.O_RDONLY}, {"fifo", unix.O_RDONLY}, {"f", unix.O_WRONLY | unix.O_TRUNC},
+			{"new", unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC}, {"missing", unix.O_WRONLY | unix.O_TRUNC},
+			{"j", unix.O_RDONLY}, {"d", unix.O_WRONLY}, {"d", unix.O_RDONLY},
+		} {
+			if fd, err := openRaw(filepath.Join(mine, c.name), c.flag, 0o600); err == nil {
+				unix.Close(fd)
+			}
+			if f, err := rootOpen(r, c.name); err == nil {
+				f.Close()
+			}
+		}
+	}
+	try() // the runtime's own descriptors settle on the first pass
+	before := openFDs(t)
+	for range 10 {
+		try()
+	}
+	if after := openFDs(t); after != before {
+		t.Errorf("the gate left descriptors open: %d before, %d after", before, after)
+	}
+}

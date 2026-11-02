@@ -177,12 +177,10 @@ func openRaw(path string, flag int, perm uint32) (int, error) {
 	if errors.Is(err, unix.ENOENT) && flag&unix.O_CREAT != 0 {
 		// Nothing is at the name, so only a new regular file is made
 		// there (O_EXCL): whatever appears there meanwhile fails the open.
+		// What is made is empty, has one name, and sits in the directory
+		// inDir checked, so checkFD has nothing left to refuse.
 		fd, err := unix.Openat(dir, base, flag|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
 		if err != nil {
-			return -1, err
-		}
-		if err := checkFD(fd, true); err != nil {
-			unix.Close(fd)
 			return -1, err
 		}
 		return fd, nil
@@ -222,17 +220,8 @@ func rootOpen(r *os.Root, name string) (*os.File, error) {
 		return nil, err
 	}
 	defer p.Close()
-	fd := -1
-	sc, err := p.SyscallConn()
-	if err == nil {
-		if cerr := sc.Control(func(pfd uintptr) { fd, err = reopen(int(pfd), unix.O_RDONLY, false) }); err == nil {
-			err = cerr
-		}
-	}
+	fd, err := reopen(int(p.Fd()), unix.O_RDONLY, false)
 	if err != nil {
-		if fd >= 0 {
-			unix.Close(fd)
-		}
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), name), nil
