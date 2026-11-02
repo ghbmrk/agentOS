@@ -775,7 +775,8 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 // MCP server, or draw guardian credits for the plan (#4585 Security 1). An
 // MCP tool source is refused for its kind alone, with no server named, and
 // MCP attribution inside the blob as well as beside it (#4595). A source
-// that states no kind is refused too (#4652).
+// that states no kind is refused too (#4652), and so is a function entry
+// that carries no source at all (#4678).
 func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 	f := newPlanFix(t)
 	p := f.login(t)
@@ -793,6 +794,8 @@ func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 		"an MCP tool source alone":       {"x-codex-turn-metadata": tool(`{"kind":"mcp"}`)},
 		"a tool source with no kind":     {"x-codex-turn-metadata": tool(`{}`)},
 		"a tool source with a null kind": {"x-codex-turn-metadata": tool(`{"kind":null}`)},
+		"a tool with no source": {"x-codex-turn-metadata": `{"tool_namespaces_info":{"functions":{"name":"functions","functions":` +
+			`{"exec":{"name":"exec","direct":true,"code_mode_name":null,"deferred":false}}}}}`},
 		"MCP attribution":                {"mcp_attribution": `{"status":"ok"}`},
 		"MCP attribution in a blob":      {"x-codex-turn-metadata": `{"mcp_attribution":{"status":"ok"}}`},
 		"MCP attribution text in a blob": {"x-codex-turn-metadata": `{"mcp_attribution":"{\"status\":\"ok\"}"}`},

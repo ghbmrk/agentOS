@@ -1660,8 +1660,10 @@ func partial(b, secret []byte) int {
 // analytics may only be off (the image turns analytics off, and pins off
 // token_budget and context_management, which turn history ingest on), and a
 // tool's source must state that it is the CLI itself (the image blocks MCP
-// servers). A
-// config-supplied extra key is not declared, since the image sets none.
+// servers), and every function entry must carry one, since the CLI always
+// serializes it and a missing source leaves the provider to read its
+// default. A config-supplied extra key is not declared, since the image sets
+// none.
 func codexMeta() map[string]Value {
 	id := Value{Kind: KindText, Max: 128}
 	n := Value{Kind: KindInt}
@@ -1686,7 +1688,7 @@ func codexMeta() map[string]Value {
 				"name": id, "direct": flag, "deferred": flag,
 				"code_mode_name": {Kind: KindText, Max: 256, Null: true},
 				"source":         {Kind: KindObject, Fields: map[string]Value{"kind": one("harness")}, Required: []string{"kind"}},
-			}}},
+			}, Required: []string{"source"}}},
 		}}},
 		"turn_started_at_unix_ms":  n,
 		"history_ingest_requested": {Kind: KindOff},
