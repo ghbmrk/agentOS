@@ -8,13 +8,15 @@ changes. A module's output is buffered and printed whole, in name order, so logs
 interleave; a line per finished module shows progress meanwhile. The longest modules start
 first (SECONDS, then file size), and the step prints each module's wall time, the ideal (all
 modules' time over the jobs) and the critical path: the worker that finished last and what it ran.
-Exit 1 if any module failed or did not run, or if the longest module runs over FLOOR seconds and
-over LONG_POLE times the ideal: that one module then sets the step's length, so split it
-(SPLIT). A module listed in SERIAL runs alone after the pool drains: one that cannot share the
+Exit 1 if any module failed or did not run, or if the longest unit runs over FLOOR seconds and
+over LONG_POLE times the ideal: that one unit then sets the step's length. A unit is a module, so
+split it (SPLIT), or for a module already split, its slowest part (one test with any class setup
+it ran), which further splitting cannot shorten: the step says the module is at its split limit. A module listed in SERIAL runs alone after the pool drains: one that cannot share the
 runner with another module goes there, with its reason.
 A module listed in SPLIT runs as `unit_tests.py --split <module>` under the same strace: that one
 process forks worker processes, each taking the next test from a shared counter, so the module's
-slowest test, not the module, sets the step's floor (CI-par-3). The trace is still one tree whose
+slowest test, not the module, sets the step's floor (CI-par-3). Its last line names that slowest
+part and its time, for the long-pole check. The trace is still one tree whose
 first process exits after every worker, as tests/records_audit.py requires.
 
     python3 tools/unit_tests.py TRACE_DIR [--jobs N]
@@ -27,6 +29,7 @@ import multiprocessing
 import multiprocessing.connection
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import threading
@@ -74,18 +77,24 @@ class _Claimed(unittest.TestSuite):
     still sets up and tears down each class and module around the tests it is handed."""
     _cleanup = False  # run() would otherwise blank _tests[index], which this suite does not hold
 
-    def __init__(self, tests, counter, ran):
+    def __init__(self, tests, counter, ran, parts):
         super().__init__()
-        self.all, self.counter, self.ran = tests, counter, ran
+        self.all, self.counter, self.ran, self.parts = tests, counter, ran, parts
 
     def __iter__(self):
+        # A part's time runs from handing out its test to asking for the next: the test, its class
+        # and module setup if this worker had not set them up, and the previous class's teardown.
+        start = None
         while True:
+            if start is not None:
+                self.parts[self.ran[-1]] = time.monotonic() - start
             with self.counter.get_lock():
                 i = self.counter.value
                 self.counter.value += 1
             if i >= len(self.all):
                 return
             self.ran.append(i)
+            start = time.monotonic()
             yield self.all[i]
 
 
@@ -98,9 +107,9 @@ def _flatten(suite):
 
 
 def _worker(tests, counter, conn):
-    out, ran = io.StringIO(), []
-    ok = unittest.TextTestRunner(stream=out, verbosity=2).run(_Claimed(tests, counter, ran)).wasSuccessful()
-    conn.send((ran, ok, out.getvalue()))
+    out, ran, parts = io.StringIO(), [], {}
+    ok = unittest.TextTestRunner(stream=out, verbosity=2).run(_Claimed(tests, counter, ran, parts)).wasSuccessful()
+    conn.send((ran, ok, out.getvalue(), parts))
     conn.close()
 
 
@@ -136,11 +145,15 @@ def split(module, workers, write=sys.stdout.write):
     lost = sum(1 for conn, p in procs.items() if conn not in got or p.exitcode != 0)
     reports = list(got.values())
     ran = sorted(i for r in reports for i in r[0])
-    for k, (_, _, out) in enumerate(reports, 1):
+    for k, (_, _, out, _) in enumerate(reports, 1):
         write(f"--- {module} worker {k} of {len(procs)} ---\n{out}")
     missing = len(tests) - len(set(ran))
     write(f"{module}: {len(ran)} of {len(tests)} tests run across {len(procs)} workers"
           f"{f', {lost} worker(s) lost' if lost else ''}{f', {missing} not run' if missing else ''}\n")
+    parts = {i: secs for r in reports for i, secs in r[3].items()}
+    if parts:
+        i = max(parts, key=parts.get)
+        write(f"{module}: slowest part {parts[i]:.3f}s {tests[i].id()}\n")
     return 0 if not lost and ran == list(range(len(tests))) and all(r[1] for r in reports) else 1
 
 
@@ -194,24 +207,42 @@ def critical_path(results, lanes):
     return [(m, results[m][1]) for m in worst + [m for lane, m in lanes if lane == "serial"]]
 
 
-def long_pole(results, jobs):
-    """The longest module if it is over LONG_POLE times the ideal step (all time over jobs) and over FLOOR."""
+def slowest_part(module, out):
+    """(seconds, test id) from a split run's last line, or None if it did not print one."""
+    lines = out.splitlines()
+    m = re.fullmatch(rf"{re.escape(module)}: slowest part (\d+\.\d+)s (\S+)", lines[-1] if lines else "")
+    return (float(m.group(1)), m.group(2)) if m else None
+
+
+def long_pole(results, jobs, split=None):
+    """(module, seconds, ideal, part) for the longest unit if it is over LONG_POLE times the ideal
+    step (all modules' time over jobs) and over FLOOR. A unit is a module, or for one in split, its
+    slowest part: part is then (seconds, test id), or None if the run named none (its whole time
+    counts)."""
+    split = SPLIT if split is None else split
     if not results:
         return None
-    m = max(results, key=lambda m: results[m][1])
-    secs = results[m][1]
+    units = {}
+    for m, (_, secs, out) in results.items():
+        part = slowest_part(m, out) if m in split else None
+        units[m] = (part[0] if part else secs, part)
+    m = max(units, key=lambda m: units[m][0])
+    secs, part = units[m]
     ideal = sum(r[1] for r in results.values()) / max(1, jobs)
-    return (m, secs, ideal) if secs > FLOOR and secs > LONG_POLE * ideal else None
+    return (m, secs, ideal, part) if secs > FLOOR and secs > LONG_POLE * ideal else None
 
 
-def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None):
+def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None, split=None):
+    split = SPLIT if split is None else split
     failed = [m for m in names if m not in results or results[m][0] != 0]
     for m in names:
         rc, secs, out = results.get(m, (None, 0.0, "did not run\n"))
         write(f"::group::{m} ({'ok' if rc == 0 else 'FAILED'}, {secs:.0f}s)\n{out}::endgroup::\n")
     write("module times, slowest first:\n")
     for m in sorted(results, key=lambda m: -results[m][1]):
-        write(f"  {results[m][1]:7.1f}s  {m}{'  FAILED' if m in failed else ''}\n")
+        part = slowest_part(m, results[m][2]) if m in split else None
+        write(f"  {results[m][1]:7.1f}s  {m}{'  FAILED' if m in failed else ''}"
+              + (f"  (split; slowest part {part[0]:.1f}s, {part[1]})" if part else "") + "\n")
     total = sum(r[1] for r in results.values())
     path = critical_path(results, lanes)
     write(f"{total:.0f}s of tests over {jobs} jobs: {total / max(1, jobs):.0f}s ideal"
@@ -219,8 +250,13 @@ def report(names, results, write=sys.stdout.write, jobs=1, lanes=(), wall=None):
     write(f"critical path {sum(s for _, s in path):.0f}s: " + ", ".join(f"{m} {s:.0f}s" for m, s in path) + "\n")
     for m in failed:
         write(f"::error::{m} failed\n")
-    pole = long_pole(results, jobs)
-    if pole:
+    pole = long_pole(results, jobs, split)
+    if pole and pole[0] in split:
+        what = f"its slowest part, {pole[3][1]}, took" if pole[3] else "it named no slowest part and took"
+        write(f"::error::{pole[0]} is already split (tools/unit_tests.py SPLIT): {what} {pole[1]:.0f}s, over "
+              f"{LONG_POLE} times the step's ideal {pole[2]:.0f}s. It is at its split limit: shorten that test "
+              f"or break it into smaller tests\n")
+    elif pole:
         write(f"::error::{pole[0]} took {pole[1]:.0f}s, over {LONG_POLE} times the step's ideal {pole[2]:.0f}s: "
               f"split it (tools/unit_tests.py SPLIT)\n")
     return 1 if failed or pole else 0

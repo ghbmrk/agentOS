@@ -21,14 +21,18 @@ import sys
 
 import importlib.util
 
+from clash_audit import _decode
+
 ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir))
 TESTS = os.path.join(ROOT, "tests")
 # An strace -f -y line for open/openat/openat2: pid, the directory fd's path, the path argument,
 # the rest; a successful open ends `= N</file it reached>`, and a call split by another
-# process's ends in `<unfinished ...>`, its result on a later `<... openat resumed>` line.
+# process's ends in `<unfinished ...>`, its result on a later `<... openat resumed>` line. strace
+# pads a short result to a column (`)          = 3</path>`, every resumed line), and -y escapes
+# the paths it prints as strace quotes them (clash_audit._decode).
 _OPEN = re.compile(r'^\d+\s+open(?:at2?)?\((?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)"(.*)$')
 _RESUMED = re.compile(r'^\d+\s+<\.\.\. open(?:at2?)? resumed>')
-_REACHED = re.compile(r'\) = \d+<([^>]*)>$')
+_REACHED = re.compile(r'\)\s+= \d+<([^>]*)>$')
 
 
 def records_run_tests(text=None):
@@ -95,9 +99,9 @@ def opened(trace, root=ROOT):
         if m:
             directory = "O_DIRECTORY" in m.group(3)
             if reached:
-                add(reached.group(1), directory)
+                add(_decode(reached.group(1)), directory)
                 continue
-            base, path = m.group(1), m.group(2).replace('\\"', '"').replace("\\\\", "\\")
+            base, path = m.group(1) and _decode(m.group(1)), _decode(m.group(2))
             if os.path.isabs(path):
                 add(path, directory)
             elif base is None:
@@ -105,7 +109,7 @@ def opened(trace, root=ROOT):
             else:
                 add(os.path.join(base, path), directory)
         elif reached and _RESUMED.match(line):
-            add(reached.group(1), True)  # its flags were on the unfinished line
+            add(_decode(reached.group(1)), True)  # its flags were on the unfinished line
     return out
 
 
