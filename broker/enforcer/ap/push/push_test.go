@@ -52,6 +52,7 @@ type fakeAP struct {
 	failClaim  bool            // claims fail, as on an access point without flock
 	supersede  bool            // a late claim lands right after each claim
 	drop       map[string]bool // a write of these paths drops the connection
+	silent     bool            // answers no session open, keeping the connection
 	conns      map[int]net.Conn
 
 	// newest is the login number of the newest connection that has run
@@ -151,6 +152,12 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	f.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 	for nc := range chans {
+		f.mu.Lock()
+		silent := f.silent
+		f.mu.Unlock()
+		if silent {
+			continue
+		}
 		if nc.ChannelType() != "session" {
 			nc.Reject(ssh.UnknownChannelType, "")
 			continue
@@ -1077,10 +1084,10 @@ func TestOpenAfterCloseReturns(t *testing.T) {
 			t.Fatal(err)
 		}
 		go c.Close()
-		run(ctx, c, readCmd(ap.PathNetwork), nil) // ends when the close does
+		p.run(ctx, c, readCmd(ap.PathNetwork), nil) // ends when the close does
 		done := make(chan struct{})
 		go func() {
-			if s, err := open(ctx, c); err == nil {
+			if s, err := p.open(ctx, c); err == nil {
 				s.Close()
 			}
 			close(done)
@@ -1091,5 +1098,169 @@ func TestOpenAfterCloseReturns(t *testing.T) {
 			t.Fatalf("open %d after close still waiting", i)
 		}
 		cancel()
+	}
+}
+
+// hostileOpens makes newSession, while on() is true, wait as x/crypto's
+// NewSession does when the access point ends the connection in its open
+// window (#4441, #4554), until wake is called; it then opens the session
+// for real and keeps it in got. The access point chooses when to end the
+// connection, so a hostile one can aim at that window on every Sync; the
+// hook stands in for the hit, which real x/crypto lands only now and
+// then.
+func hostileOpens(t *testing.T) (on func(bool), wake func(), got func() []*ssh.Session) {
+	var mu sync.Mutex
+	hostile := false
+	var sessions []*ssh.Session
+	release := make(chan struct{})
+	var once sync.Once
+	wake = func() { once.Do(func() { close(release) }) }
+	orig := newSession
+	t.Cleanup(func() {
+		wake()
+		newSession = orig
+	})
+	newSession = func(c *ssh.Client) (*ssh.Session, error) {
+		mu.Lock()
+		h := hostile
+		mu.Unlock()
+		if !h {
+			return orig(c)
+		}
+		<-release
+		s, err := orig(c)
+		if err == nil {
+			mu.Lock()
+			sessions = append(sessions, s)
+			mu.Unlock()
+		}
+		return s, err
+	}
+	on = func(v bool) {
+		mu.Lock()
+		hostile = v
+		mu.Unlock()
+	}
+	got = func() []*ssh.Session {
+		mu.Lock()
+		defer mu.Unlock()
+		return sessions
+	}
+	return on, wake, got
+}
+
+// settles waits until p has no session open left waiting.
+func settles(t *testing.T, p *Pusher) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); p.abandoned() != 0; {
+		if time.Now().After(end) {
+			t.Fatalf("%d abandoned opens still counted", p.abandoned())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAbandonedOpensCountedAndCapped: a hostile access point lands every
+// Sync's claim in x/crypto's open window. Each Sync ends at its Timeout,
+// its Result and Watch's report count one more open left waiting, and
+// from MaxAbandoned on the Pusher refuses to Sync with ErrStalled and
+// dials nothing. Once the waiting opens return, the count falls to zero
+// and Sync runs again. Catches a Pusher that leaks one goroutine and
+// closed connection per Sync with no count and no bound
+// (ENF-g-aplock-leak, #4554).
+func TestAbandonedOpensCountedAndCapped(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	on, wake, _ := hostileOpens(t)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 100 * time.Millisecond}
+	on(true)
+	for i := 1; i <= MaxAbandoned; i++ {
+		res, err := syncWithin(t, p, config(), 10*time.Second)
+		if !errors.Is(err, context.DeadlineExceeded) || res.Abandoned != i {
+			t.Fatalf("sync %d: %+v %v", i, res, err)
+		}
+	}
+	logins, _, _, _ := f.n()
+	res, err := syncWithin(t, p, config(), 10*time.Second)
+	if !errors.Is(err, ErrStalled) || res.Abandoned != MaxAbandoned {
+		t.Fatalf("past the cap: %+v %v", res, err)
+	}
+	if l, _, _, _ := f.n(); l != logins {
+		t.Fatalf("a stalled Pusher dialled the access point (%d logins, was %d)", l, logins)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var reported []Result
+	var errs []error
+	p.Watch(ctx, time.Hour, func() ([]ap.File, error) { return config(), nil }, func(r Result, err error) {
+		reported, errs = append(reported, r), append(errs, err)
+		cancel()
+	})
+	if len(reported) != 1 || reported[0].Abandoned != MaxAbandoned || !errors.Is(errs[0], ErrStalled) {
+		t.Fatalf("Watch reported %+v %v", reported, errs)
+	}
+	ctx, cancel = context.WithCancel(context.Background())
+	p.Watch(ctx, time.Hour, func() ([]ap.File, error) { return nil, errors.New("no policy") }, func(r Result, err error) {
+		if r.Abandoned != MaxAbandoned {
+			t.Errorf("Watch with a failed config reported %d abandoned opens", r.Abandoned)
+		}
+		cancel()
+	})
+
+	on(false)
+	wake()
+	settles(t, p)
+	if res, err := syncWithin(t, p, config(), 10*time.Second); err != nil || res.Abandoned != 0 || !res.Applied {
+		t.Fatalf("after the waiting opens returned: %+v %v", res, err)
+	}
+}
+
+// TestLateSessionOfAbandonedOpenClosed: an open its Sync stopped waiting
+// for that later gets a session closes it and stops counting itself.
+// Catches a late session left open on the access point, and a count that
+// never falls.
+func TestLateSessionOfAbandonedOpenClosed(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	on, wake, got := hostileOpens(t)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
+	c, err := p.connect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	on(true)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := p.open(ctx, c); !errors.Is(err, context.DeadlineExceeded) || p.abandoned() != 1 {
+		t.Fatalf("open: %v, %d abandoned", err, p.abandoned())
+	}
+	wake()
+	settles(t, p)
+	s := got()
+	if len(s) != 1 {
+		t.Fatalf("%d late sessions", len(s))
+	}
+	if err := s[0].Close(); err != io.EOF {
+		t.Fatalf("late session still open: Close %v", err)
+	}
+}
+
+// TestSilentAccessPointLeavesNoCount: with x/crypto's own NewSession, an
+// access point that never answers a session open holds the Sync to its
+// Timeout; the connection's end then ends that open, so the count goes
+// back to zero. Catches a count of opens that have in fact returned,
+// which would stall an honest but slow access point.
+func TestSilentAccessPointLeavesNoCount(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.silent = true
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 100 * time.Millisecond}
+	for i := range MaxAbandoned + 1 {
+		// The connection's deadline and the Sync's end at the same time,
+		// so the open can end with either error.
+		if _, err := syncWithin(t, p, config(), 10*time.Second); err == nil {
+			t.Fatalf("sync %d succeeded with an access point that opens nothing", i)
+		}
+		settles(t, p)
 	}
 }
