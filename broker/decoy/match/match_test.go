@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"math/bits"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -487,6 +488,52 @@ func TestJSONBackslashWrapped(t *testing.T) {
 	}
 	if got := m.Scan([]byte(`q7Xz\n2pL9mW4vR8tY3nB6kJ5h`)).Trips; len(got) != 0 {
 		t.Fatalf("one '\\' kept and one break alone in a '\\' place tripped %v", got)
+	}
+}
+
+// KRN-12: a '\' run split by a %0a or %0d once, twice or three times, at
+// every place in it, is read as one run, at JSON depth one to three, in a
+// value whose '\'s stand beside other escapes (Security on #4742).
+func TestURLBreaksSplitRun(t *testing.T) {
+	v := `q7Xz\"2pL9mW4v\R8tY3nB6kJ5h`
+	m := match.New([]match.Value{{ID: 8, Bytes: []byte(v)}}, nil)
+	f := v
+	for d := 1; d <= 3; d++ {
+		j, _ := json.Marshal(f)
+		f = string(j[1 : len(j)-1])
+		for r := 0; r < len(f); r++ {
+			n := len(f[r:]) - len(strings.TrimLeft(f[r:], `\`))
+			if n < 2 || (r > 0 && f[r-1] == '\\') {
+				continue
+			}
+			for mask := 1; mask < 1<<(n-1); mask++ { // which places in the run get a break
+				if bits.OnesCount(uint(mask)) > 3 {
+					continue
+				}
+				var b strings.Builder
+				b.WriteString(f[:r+1])
+				for k := 1; k < n; k++ {
+					if mask&(1<<(k-1)) != 0 {
+						b.WriteString([]string{"%0a", "%0D"}[k%2])
+					}
+					b.WriteByte('\\')
+				}
+				b.WriteString(f[r+n:])
+				s := `{"a":"` + b.String() + `"}`
+				if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{8}) {
+					t.Fatalf("%q tripped %v, want [8]", s, got)
+				}
+				if got := split(t, m, s, len(s)/2).Trips; !slices.Equal(got, []int{8}) {
+					t.Fatalf("%q split halfway tripped %v, want [8]", s, got)
+				}
+			}
+		}
+	}
+	// Security's repros, and both runs split twice, so the second is read
+	// while the first one's rest is matched.
+	for _, s := range []string{`{"a":"q7Xz\%0a\%0a\"2pL9mW4v\\R8tY3nB6kJ5h"}`, `{"a":"q7Xz\%0D\%0A\"2pL9mW4v\\R8tY3nB6kJ5h"}`,
+		`{"a":"q7Xz\%0a\%0a\"2pL9mW4v\%0d\%0aR8tY3nB6kJ5h"}`} {
+		wrappedTrips(t, m, s, len(`{"a":"q7Xz\%0a`), 8)
 	}
 }
 

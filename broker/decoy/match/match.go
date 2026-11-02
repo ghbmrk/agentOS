@@ -471,7 +471,13 @@ func (s *Stream) matchBreak(br cut) {
 		if !bytes.HasSuffix(before, []byte(`\`)) || !bytes.HasPrefix(after, []byte(`\`)) {
 			return
 		}
-		before, after, at = before[:len(before)-1], after[1:], at+1
+		for at < len(s.joined) && s.joined[at] == '\\' { // each %0a or %0d in the run splits it again
+			if _, ub := s.breakAt(at); !ub {
+				break
+			}
+			at++
+		}
+		before, after = before[:len(before)-1], s.joined[at:]
 	}
 	// Only the '\'s with the break's bytes beside them, or none, are read
 	// back, so the table bounds what a break costs, not the stream (#4681).
