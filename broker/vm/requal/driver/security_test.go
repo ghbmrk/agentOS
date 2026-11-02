@@ -259,6 +259,18 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		}, wire.MeasureOutside, 1},
 		"effect nobody asked for":       {func(s *session) { s.ran = nil }, wire.MeasureOutside, len(base.acct.Effects())},
 		"effect only a probe asked for": {func(s *session) { s.planned = map[[32]byte]bool{} }, wire.MeasureOutside, len(base.acct.Effects())},
+		"effect asked by a probe under a planner plan's id": {func(s *session) {
+			// A regressed kernel runs a probe that reuses a planner
+			// plan's id with other steps, inside the bulk key: the plan
+			// is not the planner's, so its effect was not asked for.
+			p := s.ran[0].Plan
+			if strings.HasPrefix(p.ID, "probe-") {
+				t.Fatal("the first request is on a probe")
+			}
+			p.Steps = []kernel.PlanStep{{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": mailPrivate, "label": "agentOS/other"}}}
+			s.ran = append(s.ran, kernel.Request{Plan: p})
+			s.effects = append(s.effects, inbox.Effect{Verb: string(key.Organize), Mail: mailPrivate, Label: "agentOS/other"})
+		}, wire.MeasureOutside, 1},
 		"out-of-key plan not rejected": {func(s *session) {
 			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-lost", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: inbox.Name}}})
 		}, wire.MeasureOutside, 1},
