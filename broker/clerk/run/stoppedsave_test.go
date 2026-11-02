@@ -257,7 +257,8 @@ func TestASeenSaveStoppedThroughLastOpenedSaysSoAndKeepsOneWhole(t *testing.T) {
 // readSenders (#4236): the step's read stands in memory, so the running
 // host's world holds the new sender; a restarted host reads the record from
 // before the stop until the rename, the new one after; and its read through
-// gives the same senders.
+// gives the same senders. The host's read goes through openMail, so the
+// record of read mail's save stops too, and the owner is told (#4613).
 //
 // REQ: VRB-2, D-141, STO-2
 func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
@@ -281,6 +282,11 @@ func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
 		if w := r.h.world(); !slices.Equal(w.KnownSenders, []string{"new@new.test", "old@old.test"}) {
 			t.Fatalf("stopped after step %d: the running host's senders %v", i, w.KnownSenders)
 		}
+		// The host's read went through openMail, which hands the stop to
+		// lastOpened: the record of read mail's save stopped too (#4613).
+		if !has(r.h.status().Lines, "I could not save my record of the mail you read") {
+			t.Fatalf("stopped after step %d: the owner is told %q", i, r.h.status().Lines)
+		}
 
 		rec := loadSenders(r.dir, testSealer(), slot) // what a restart reads
 		if !rec.Rec.Complete() || rec.Rec.Senders["old@old.test"] == 0 || (rec.Rec.Senders["new@new.test"] != 0) != (i >= renamed) {
@@ -291,6 +297,9 @@ func TestASendersSaveStoppedThroughReadSendersKeepsOneWhole(t *testing.T) {
 		r.openCtx(t, t.Context()) // the restarted host
 		if w := r.full(t); !slices.Equal(w.KnownSenders, []string{"new@new.test", "old@old.test"}) {
 			t.Fatalf("restarted after a stop at step %d: senders %v", i, w.KnownSenders)
+		}
+		if has(r.h.status().Lines, "could not save") {
+			t.Fatalf("restarted after a stop at step %d: the owner is told %q", i, r.h.status().Lines)
 		}
 		if rec := loadSenders(r.dir, testSealer(), slot); rec.Rec.Senders["new@new.test"] == 0 {
 			t.Fatalf("restarted after a stop at step %d: the next save did not keep the new sender: %v", i, rec.Rec.Senders)
