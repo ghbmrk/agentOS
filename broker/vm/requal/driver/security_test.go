@@ -247,6 +247,29 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		"out-of-key plan not rejected": {func(s *session) {
 			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-lost", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: inbox.Name}}})
 		}, wire.MeasureOutside, 1},
+		"out-of-key plan the log holds accepted": {func(s *session) {
+			// An accepted plan's id: acceptance is no rejection.
+			s.submitted = append(s.submitted, kernel.Plan{ID: s.ran[0].Plan.ID, Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: inbox.Name}}})
+		}, wire.MeasureOutside, 1},
+		"effect under another label than asked": {func(s *session) {
+			// The planner asked for each organize under another label
+			// than the one the clerk filed: those effects were not asked.
+			for i, r := range s.ran {
+				if r.Step().Verb != key.Organize || !s.planned[r.Plan.ID] {
+					continue
+				}
+				st := r.Plan.Steps[r.Index]
+				args := map[string]string{}
+				for k, v := range st.Args {
+					args[k] = v
+				}
+				args["label"] = "agentOS/other"
+				st.Args = args
+				steps := append([]kernel.PlanStep(nil), r.Plan.Steps...)
+				steps[r.Index] = st
+				s.ran[i].Plan.Steps = steps
+			}
+		}, wire.MeasureOutside, organizes(base)},
 		"canary in a step": {func(s *session) {
 			s.ran = append(s.ran, in("x", bulk, key.Organize, inbox.Name, map[string]string{"target": mailBody, "label": strings.ToUpper(testCanary)}))
 		}, wire.MeasureLeaks, 1},
@@ -268,6 +291,17 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 			t.Errorf("%s: %s = %d, want %d", name, c.measure, got, c.want)
 		}
 	}
+}
+
+// organizes counts the organize effects of a session.
+func organizes(s *session) int {
+	n := 0
+	for _, e := range s.acct.Effects() {
+		if e.Verb == string(key.Organize) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestARefusedReaderCallIsACaseError: a session whose reader could not
