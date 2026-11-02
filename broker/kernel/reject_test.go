@@ -3,6 +3,7 @@ package kernel_test
 // REQ: PLN-4, EVL-3, HLD-5
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -62,34 +63,56 @@ func TestARejectionNamesItsSessionAndStep(t *testing.T) {
 }
 
 // A rejection's session and step are derived again on replay: a log that
-// moves the step, drops the session or names another one diverges (KRN-1).
+// moves the step, drops either or names another session diverges, and the
+// same bytes unedited rederive (KRN-1).
 func TestARejectionsSessionAndStepAreRederived(t *testing.T) {
 	r := newRig(t)
 	must(t, r.k.OpenTask(0, "t1"))
 	r.plan("bad", r.serve("t1"), st(key.Trash, "m1"), st(key.Send, "m2"))
 	i, _ := r.logged("bad")
 	es := r.k.Log().Entries()
-	for name, edit := range map[string]func(map[string]any){
-		"step moved":      func(m map[string]any) { m["step"] = 0 },
-		"step dropped":    func(m map[string]any) { delete(m, "step") },
-		"session dropped": func(m map[string]any) { delete(m, "session") },
-		"session changed": func(m map[string]any) { m["session"] = "t2" },
+	for name, edit := range map[string][2]string{
+		"unedited":        {`"step":1`, `"step":1`},
+		"step moved":      {`"step":1`, `"step":0`},
+		"step dropped":    {`,"step":1`, ``},
+		"session dropped": {`"session":"t1",`, ``},
+		"session changed": {`"session":"t1"`, `"session":"t2"`},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var m map[string]any
-			must(t, json.Unmarshal(es[i].Body, &m))
-			edit(m)
+			if !bytes.Contains(es[i].Body, []byte(edit[0])) {
+				t.Fatalf("no %s in %s", edit[0], es[i].Body)
+			}
 			bad := append([]kernel.Entry(nil), es...)
-			b, err := json.Marshal(m)
-			must(t, err)
-			bad[i].Body = b
-			_, err = kernel.Rederive(r.anchors(), r.k.Box(), bad)
+			bad[i].Body = bytes.Replace(es[i].Body, []byte(edit[0]), []byte(edit[1]), 1)
+			_, err := kernel.Rederive(r.anchors(), r.k.Box(), bad)
 			var d *kernel.Divergence
-			if !errors.As(err, &d) || d.Seq != es[i].Seq {
+			if edit[0] == edit[1] {
+				must(t, err)
+			} else if !errors.As(err, &d) || d.Seq != es[i].Seq {
 				t.Fatalf("want a divergence at seq %d, got %v", es[i].Seq, err)
 			}
 		})
 	}
+}
+
+// A session is named only from a key that verified: a forged chain claiming a
+// live task, or a plan refused before its key is checked, names none, so a
+// guest cannot have its rejections logged under another session (PLN-4, HLD-5).
+func TestARejectionNamesNoSessionAnUnverifiedKeyClaims(t *testing.T) {
+	r := newRig(t)
+	must(t, r.k.OpenTask(0, "victim"))
+	forged := r.serve("victim")
+	forged.Root.Sig = append([]byte(nil), forged.Root.Sig...)
+	forged.Root.Sig[0] ^= 1
+	r.plan("forged", forged, st(key.Trash, "m1"))
+	r.plan("shape", r.serve("victim"), make([]kernel.PlanStep, kernel.MaxSteps+1)...)
+	for _, tc := range []struct{ plan, code string }{{"forged", kernel.CKey}, {"shape", kernel.CPlan}} {
+		_, b := r.logged(tc.plan)
+		if string(b["code"]) != `"`+tc.code+`"` || b["session"] != nil {
+			t.Errorf("%s: logged code %s session %s, want %s and no session", tc.plan, b["code"], b["session"], tc.code)
+		}
+	}
+	r.replays()
 }
 
 func ptr(i int) *int { return &i }

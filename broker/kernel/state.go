@@ -248,7 +248,7 @@ type (
 		Cause   uint64 `json:"cause"`
 		Code    string `json:"code"`
 		Detail  string `json:"detail"`
-		Session string `json:"session,omitempty"` // the task the key claims (tripOf)
+		Session string `json:"session,omitempty"` // a verified key's task, never a claim
 		Step    *int   `json:"step,omitempty"`    // the failing step, none for the plan whole
 		Trip    *Trip  `json:"trip,omitempty"`    // a trip refusal's trip (trip.go)
 	}
