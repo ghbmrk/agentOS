@@ -39,7 +39,11 @@ env:
 # skewed code merge. Only pull requests, merge-queue builds and dispatches are scoped.
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # Pinned: tests/test_image.py's differential tests take the runner's systemd and kmod as
+    # stand-ins for the image's (Debian trixie: systemd 257, kmod 34) and were written against
+    # 24.04's (systemd 255, kmod 31); ubuntu-latest moving to 26.04 (systemd 259+, kmod 34)
+    # changed the reference under them (#4793). #4795 moves the reference to the image's own.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
