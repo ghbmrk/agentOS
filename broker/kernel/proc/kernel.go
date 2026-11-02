@@ -69,6 +69,10 @@ type KernelConfig struct {
 	Clock func() int64
 }
 
+// Format prints a KernelConfig as its type alone, never the log key or the
+// head key (CLK-1); fmt skips it where it skips kernel.Config's (DECOY-b-8).
+func (KernelConfig) Format(f fmt.State, _ rune) { fmt.Fprint(f, "proc.KernelConfig") }
+
 // Kernel is the kernel process's one kernel: every call to it goes through
 // one lock, so the owner side, the planner side and the clock never
 // interleave inside the kernel. Clerk calls run outside it (Tick), so STOP,

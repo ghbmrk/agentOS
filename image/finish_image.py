@@ -337,6 +337,21 @@ def slot_a_violations(img, table, data, tree, allowed=None):
 
 
 CPIO_MAGICS = (b"070701", b"070702")
+# A newc header's 13 fields after the magic, as cpio(5) names them; "check" is always 0 in newc.
+NEWC_FIELDS = ("ino", "mode", "uid", "gid", "nlink", "mtime", "filesize", "devmajor", "devminor",
+               "rdevmajor", "rdevminor", "namesize", "check")
+HEX8 = re.compile(rb"[0-9A-Fa-f]{8}")
+
+
+def newc_header(data, off):
+    """The fields of the newc header at OFF in DATA, by NEWC_FIELDS name. Raises ValueError unless
+    each is exactly 8 hex digits: int(x, 16) alone takes a sign, spaces, 0x and _, and a negative
+    size moves a reader back onto its own header, so it never ends (#4662). Unsigned fields make
+    every member move the offset forward by at least its 110-byte header."""
+    raw = [data[off + 6 + 8 * i:off + 14 + 8 * i] for i in range(len(NEWC_FIELDS))]
+    if not all(HEX8.fullmatch(f) for f in raw):
+        raise ValueError("initrd: bad cpio header at offset %d" % off)
+    return dict(zip(NEWC_FIELDS, (int(f, 16) for f in raw)))
 ZSTD, XZ, GZIP = b"\x28\xb5\x2f\xfd", b"\xfd7zXZ\x00", b"\x1f\x8b"
 
 
@@ -391,10 +406,8 @@ def cpio_names(data, decompress=None):
         while True:
             if off + 110 > len(data) or data[off:off + 6] not in CPIO_MAGICS:
                 raise ValueError("initrd: truncated cpio header at offset %d" % off)
-            try:
-                size, namesize = int(data[off + 54:off + 62], 16), int(data[off + 94:off + 102], 16)
-            except ValueError:
-                raise ValueError("initrd: bad cpio header at offset %d" % off)
+            hdr = newc_header(data, off)
+            size, namesize = hdr["filesize"], hdr["namesize"]
             end = off + 110 + namesize
             if namesize < 1 or end > len(data):
                 raise ValueError("initrd: truncated cpio name at offset %d" % off)

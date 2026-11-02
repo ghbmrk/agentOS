@@ -487,7 +487,7 @@ var osAllowed = map[string]bool{
 // journal file is refused by its content and a write outside writeDirs
 // by its resolved path, however the path is spelled (#4609).
 var (
-	gates    = []string{"openRaw", "inDir", "fdPath", "checkFD", "rootOpen", "symlink"}
+	gates    = []string{"openRaw", "reopen", "inDir", "fdPath", "checkFD", "rootOpen", "symlink"}
 	gateOnly = map[string]bool{
 		"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Openat": true, "golang.org/x/sys/unix.Fstat": true,
 		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Fstatfs": true,

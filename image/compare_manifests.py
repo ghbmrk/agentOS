@@ -22,7 +22,8 @@ Usage: compare_manifests.py DIR_A DIR_B
                                              differing initrd member by member; exit 0 only when
                                              all match)
 Every line it prints goes through say(), and every name or value read from a build through
-shown(), so a build's output can never forge a log line (#4612, #4648)."""
+shown(), so a build's output can never forge a log line (#4612, #4648) and no value prints longer
+than SHOWN_CAP characters (#4693)."""
 import hashlib
 import json
 import pathlib
@@ -33,23 +34,26 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import finish_image  # noqa: E402  the initrd reader the build's Bluetooth check uses
 
-# A newc header's 13 fields after the magic, as cpio(5) names them; "check" is always 0 in newc.
-NEWC_FIELDS = ("ino", "mode", "uid", "gid", "nlink", "mtime", "filesize", "devmajor", "devminor",
-               "rdevmajor", "rdevminor", "namesize", "check")
+SHOWN_CAP = 1024
 
 
 def shown(v):
     """V as one JSON token: a name or value read from a build prints quoted, with every control
     and non-ASCII character escaped, so it can never end a log line, start a forged one or an
-    Actions workflow command (::...), or move the terminal (#4612)."""
-    return json.dumps(v)
+    Actions workflow command (::...), or move the terminal (#4612). A token longer than SHOWN_CAP
+    prints its first SHOWN_CAP characters and its full length, so one huge value cannot make a
+    huge log line (#4693); a cut token never ends the way a whole JSON value does."""
+    s = json.dumps(v)
+    return s if len(s) <= SHOWN_CAP else "%s... (%d chars)" % (s[:SHOWN_CAP], len(s))
 
 
 def say(line):
     """Print LINE: the only way this script writes to the log. Callers build each line from fixed
-    text and shown() values, so it is printable ASCII; a line that is not (a value that missed
-    shown()) still prints as one quoted line, never as two or as a workflow command (#4648)."""
-    print(line if line.isascii() and line.isprintable() else shown(line))
+    text and shown() values, so it is printable ASCII and starts with no ::. A line that is not (a
+    value that missed shown()) still prints as one quoted line, never as two or as a workflow
+    command (#4648, #4661)."""
+    plain = line.isascii() and line.isprintable() and not line.lstrip().startswith("::")
+    print(line if plain else shown(line))
 
 
 def why(e):
@@ -113,11 +117,7 @@ def initrd_members(data):
             while True:
                 if off + 110 > len(data) or data[off:off + 6] not in finish_image.CPIO_MAGICS:
                     raise ValueError("initrd: bad cpio header at offset %d" % off)
-                try:
-                    hdr = dict(zip(NEWC_FIELDS, (int(data[off + 6 + 8 * i:off + 14 + 8 * i], 16)
-                                                 for i in range(13))))
-                except ValueError:
-                    raise ValueError("initrd: bad cpio header at offset %d" % off)
+                hdr = finish_image.newc_header(data, off)
                 end = off + 110 + hdr["namesize"]
                 if hdr["namesize"] < 1 or end > len(data):
                     raise ValueError("initrd: truncated cpio name at offset %d" % off)
@@ -297,15 +297,18 @@ def compare_release(da, db):
     if ra is not None:
         say("usrhash a=%s" % shown(ra.get("usrhash")))
         say("usrhash b=%s" % shown(rb.get("usrhash")))
-    try:
-        sa, sb = [(pathlib.Path(d) / "SHA256SUMS").read_text().splitlines() for d in (da, db)]
-    except (OSError, UnicodeDecodeError) as e:
-        say("SHA256SUMS unreadable: %s" % why(e))
-    else:
+    sums = {}
+    for side, d in (("a", da), ("b", db)):
+        try:
+            sums[side] = (pathlib.Path(d) / "SHA256SUMS").read_text().splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            say("SHA256SUMS of build %s unreadable (reported only): %s" % (side, why(e)))
+    if len(sums) == 2:
+        sa, sb = sums["a"], sums["b"]
         if sa == sb:
             say("every output identical")
         else:
-            say("outputs differ (SHA256SUMS):")
+            say("outputs differ (SHA256SUMS, reported only):")
             for ln in sorted(set(sa) - set(sb)):
                 say("  only in a: %s" % shown(ln))
             for ln in sorted(set(sb) - set(sa)):
@@ -339,7 +342,10 @@ def compare_release(da, db):
         elif digest(ba.get(k)) and ba.get(k) == bb.get(k):
             say("same %s" % shown(k))
         else:
-            say("MISMATCH %s" % shown(k))
+            if k in ba and k in bb:
+                say("MISMATCH %s a=%s b=%s" % (shown(k), shown(ba[k]), shown(bb[k])))
+            else:
+                say("MISMATCH %s: not in %s's release record" % (shown(k), "b" if k in ba else "a"))
             ok = False
             if k.endswith("initrd"):
                 compare_initrds(pathlib.Path(da) / "initrd" / k, pathlib.Path(db) / "initrd" / k)

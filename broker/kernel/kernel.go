@@ -320,8 +320,12 @@ var ErrDuplicatePlan = errors.New("kernel: plan id already used")
 
 // Boot opens a kernel over a log: replay it, decide any plan that was
 // submitted but not decided, and mark every step that was in flight unknown,
-// to be probed (KRN-8). pinned is the image's pinned roots (Pin).
+// to be probed (KRN-8). pinned is the image's pinned roots (Pin). A Log
+// Open did not make is refused, so the kernel never reaches a nil record.
 func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, pinned ...key.Key) (*Kernel, error) {
+	if _, err := l.fields(); err != nil {
+		return nil, err
+	}
 	s, err := Replay(anchors, l.Entries(), pinned...)
 	if err != nil {
 		return nil, err

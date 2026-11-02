@@ -739,3 +739,272 @@ func waitLines(t *testing.T, r *rig, n int) {
 		}
 	}
 }
+
+// TestDropCountEdges (#4683, A18): the count of a cut core's dropped lines
+// counts only lines the bucket dropped and lands only on the core's own
+// lines. A failed hello, logged on its own bucket while a count is
+// pending, neither carries the count nor adds to it; at Reflashed the
+// re-trip's line, always logged, is not counted and carries the count.
+// Revert mutants: a failed hello's line carrying the count; a failed hello
+// counted; the Reflashed re-trip's line counted as dropped or bucketed.
+func TestDropCountEdges(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(4 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	want := 3 * l.Burst
+
+	f, err := wire.Encode(wire.ToEnforcer, wire.Announce{ID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(r.events())
+	if !r.connect().closed(frameBytes(f.Type, f.Payload)) {
+		t.Fatal("a frame before the hello was not dropped")
+	}
+	ev := r.events()[n:]
+	if len(ev) != 1 || ev[0].Kind != KindHello || ev[0].Code != wire.Refused {
+		t.Fatalf("a failed hello logged %+v, want its one line", ev)
+	}
+	if ev[0].Dropped != 0 {
+		t.Errorf("a failed hello's line carried the cut core's count %d", ev[0].Dropped)
+	}
+
+	// Reflashed: the reconnect is bucketed and dropped (one more), and the
+	// malformed frame is a new trip, logged with the count.
+	r.cut.set(Reflashed)
+	n = len(r.events())
+	if !r.dial().closed(frameBytes(wire.TCommand, []byte{1})) {
+		t.Fatal("a malformed frame did not end the connection")
+	}
+	want++
+	var got []Event
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindFrame {
+			got = append(got, e)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("the Reflashed core's malformed frame logged %d lines, want 1", len(got))
+	}
+	if got[0].Dropped != want {
+		t.Errorf("the re-trip's line carried %d dropped lines, want %d", got[0].Dropped, want)
+	}
+}
+
+// TestDropCountRestart (#4683, #4710, ENF-d-4): the count lives in the
+// channel's memory, so a restart of the channel loses a count no line has
+// carried yet; the quiet line, logged last before the restart, records
+// that lines were dropped, and the restarted channel's first line carries
+// none. Revert mutants: the quiet line not logged; a drop not counted.
+func TestDropCountRestart(t *testing.T) {
+	var cfg Config
+	r := newRig(t, func(c *Config) { cfg = *c })
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(2 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	// What the restart loses is the pending count; what the record keeps
+	// is the quiet line, the last line logged, and no line carried a count
+	// (#4710).
+	evs := r.events()
+	quiet := 0
+	for _, e := range evs {
+		if e.Kind == KindPaused {
+			quiet++
+		}
+		if e.Dropped != 0 {
+			t.Errorf("a line before the restart carried %d dropped lines", e.Dropped)
+		}
+	}
+	if quiet != 1 || evs[len(evs)-1].Kind != KindPaused {
+		t.Fatalf("before the restart: %d quiet lines, last line %+v; want 1, the quiet line last", quiet, evs[len(evs)-1])
+	}
+	r.ch.mu.Lock()
+	pending := r.ch.dropped
+	r.ch.mu.Unlock()
+	if pending != l.Burst {
+		t.Fatalf("%d dropped lines pending before the restart, want %d", pending, l.Burst)
+	}
+	ch, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ch = ch
+	n := len(r.events())
+	cl = r.dial()
+	waitLines(t, r, n+1)
+	if e := r.events()[n]; e.Dropped != 0 {
+		t.Errorf("the restarted channel's first line carried %d dropped lines, want 0", e.Dropped)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}
+
+// TestEveryEventFieldRendered (#4683, ENF-d-4, ENF-d-8): the owner's line
+// and the detail view show every Event field but At, which slice l's
+// renderer shows in the configured zone. A field a render drops, such as
+// Dropped, breaks the invariant that the logged lines plus the sum of
+// Dropped equal what the cut core sent. A new field fails here until it is
+// rendered.
+func TestEveryEventFieldRendered(t *testing.T) {
+	base := Event{Kind: KindFrame, Reason: "r"}
+	typ := reflect.TypeOf(base)
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if name == "At" {
+			continue
+		}
+		e := base
+		v := reflect.ValueOf(&e).Elem().Field(i)
+		switch {
+		case name == "Code": // OK has no word; any other code shows
+			v.Set(reflect.ValueOf(wire.Refused))
+		case v.Kind() == reflect.String:
+			v.SetString(v.String() + "x")
+		case v.CanInt():
+			v.SetInt(7)
+		case v.CanUint():
+			v.SetUint(7)
+		default:
+			t.Fatalf("field %s of kind %s: teach this test to set it", name, v.Kind())
+		}
+		if e.Line() == base.Line() || e.Detail() == base.Detail() {
+			t.Errorf("Event.%s is not rendered: %q", name, e.Line())
+		}
+	}
+}
+
+// TestDropCountInvariant (#4707, A18, ENF-d-4): over a mixed sequence from
+// a cut core (paused requests, reconnects, refused, replaced and malformed
+// frames, a Reflashed re-trip, refills between), the core's lines logged
+// plus the sum of Dropped equal every line the core caused, once a last
+// line carries what is pending. Revert mutants: any one kind of line
+// dropped uncounted or counted when logged.
+func TestDropCountInvariant(t *testing.T) {
+	r := newRig(t, nil)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	malformed := frameBytes(wire.TCommand, []byte{1})
+	short := frameBytes(wire.TCommand, []byte{1, 2, 3})[:4]
+	sent, id := 0, uint64(0)
+	for round := range 6 {
+		cl := r.dial() // "core connected"
+		for range 2 * l.Burst {
+			id++
+			cl.code(wire.Announce{ID: id}) // paused
+		}
+		sent += 1 + 2*l.Burst
+		a, b := r.dial(), r.dial()
+		a.send(wire.Announce{ID: 1}) // a frame on a replaced connection
+		waitDone(t, a, "the replaced connection ended")
+		b.conn.Close()
+		waitDone(t, b, "the connection closed")
+		sent += 3
+		c := r.dial()
+		c.conn.Write(short) // a refused, cut-off frame
+		c.conn.Close()
+		waitDone(t, c, "the cut-off frame ended its connection")
+		sent += 2
+		if round == 3 {
+			r.cut.set(Reflashed) // the malformed frame below is a new trip
+		}
+		if !r.dial().closed(malformed) {
+			t.Fatal("a malformed frame did not end the connection")
+		}
+		sent += 2
+		r.advance(time.Duration(round) * l.Every)
+	}
+	r.advance(time.Duration(l.Burst) * l.Every)
+	n := len(r.events())
+	last := r.dial() // carries what is pending
+	waitLines(t, r, n+1)
+	sent++
+	logged, dropped := 0, 0
+	for _, e := range r.events() {
+		if e.Kind != KindPaused {
+			logged++
+		}
+		dropped += e.Dropped
+	}
+	if logged+dropped != sent {
+		t.Errorf("%d lines logged plus %d dropped, want the %d the core caused", logged, dropped, sent)
+	}
+	if dropped == 0 {
+		t.Error("nothing was dropped: the sequence did not reach the bound")
+	}
+	last.conn.Close()
+	waitDone(t, last, "the connection closed")
+}
+
+// TestHelloTripCarriesCount (#4708, ENF-d-4): a count pending when the
+// owner restores the core lands on the core's next line even when that is
+// a hello-burst trip, which is logged through the channel's log.
+// Revert mutant: the hello trip's line logged around c.log.
+func TestHelloTripCarriesCount(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(2 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	r.cut.set(Open)
+	r.advance(wire.Rate(wire.RateHello).Every * time.Duration(wire.Rate(wire.RateHello).Burst))
+	h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+	for r.cut.trips() == 0 {
+		b := r.connect()
+		b.send(h)
+		b.conn.Close()
+		waitDone(t, b, "the connection ended")
+	}
+	var trip *Event
+	for _, e := range r.events() {
+		if e.Kind == KindTrip {
+			trip = &e
+		}
+		if e.Dropped != 0 && e.Kind != KindTrip {
+			t.Errorf("the count landed on %+v, not the trip line", e)
+		}
+	}
+	if trip == nil || trip.Dropped != l.Burst {
+		t.Fatalf("the hello trip line %+v, want it to carry %d dropped lines", trip, l.Burst)
+	}
+}
+
+// TestSilentCoreCountWaits (#4706, ENF-d-4): the channel has no timer, so
+// a cut core that goes silent after a burst leaves its count pending with
+// no line, however long it stays silent, and its next line, such as the
+// next hello a live kernel sends, carries the whole count. Revert mutants:
+// the count dropped once the bucket refills; the count reset by time.
+func TestSilentCoreCountWaits(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	for id := range uint64(2 * l.Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	n := len(r.events())
+	r.advance(24 * time.Hour)
+	time.Sleep(10 * time.Millisecond)
+	if got := len(r.events()); got != n {
+		t.Fatalf("a silent core's day logged %d lines, want none", got-n)
+	}
+	cl = r.dial()
+	waitLines(t, r, n+1)
+	if e := r.events()[n]; e.Dropped != l.Burst {
+		t.Errorf("the next hello's line carried %d dropped lines, want %d", e.Dropped, l.Burst)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}

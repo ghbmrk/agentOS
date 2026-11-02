@@ -16,7 +16,11 @@ import (
 // it opens goes through openRaw, and a file in a worker's layer through
 // rootOpen; the source test refuses any other open, and any other way to
 // make a link (TestJournalIsReadOnlyByNamedReaders, ASSUMPTIONS E8). They
-// decide on what the open reached, never on how its path is spelled:
+// decide on what the open reached, never on how its path is spelled, and
+// before anything is opened for use: a name is first opened with O_PATH,
+// which runs no device's open, waits on no FIFO and empties nothing, and
+// only once checkFD passes that descriptor is the same inode reopened
+// (reopen):
 //   - a regular file that starts with the journal's magic is refused, so
 //     only readJournal's journalctl reads a journal;
 //   - a write (O_WRONLY, O_RDWR, O_CREAT or O_TRUNC) of a regular file, or
@@ -34,7 +38,7 @@ const journalMagic = "LPKSHHRH"
 var (
 	errJournal = errors.New("refused: a journal file is read only through readJournal")
 	errWrite   = errors.New("refused: the driver writes only under writeDirs and to writeFiles")
-	errKind    = errors.New("refused: the driver opens only regular files off procfs and sysfs, directories and /dev/ptmx")
+	errKind    = errors.New("refused: the driver opens only regular files off the kernel's own filesystems, directories and /dev/ptmx")
 )
 
 // writeDirs are the directories the driver writes in and writeFiles the
@@ -60,6 +64,11 @@ func fdPath(fd int) (string, error) {
 // resolved path decides, and the caller acts on the name relative to the
 // returned descriptor, so the checked directory is the one used.
 func inDir(path string) (dir int, base string, err error) {
+	// A trailing slash names the directory itself, as the kernel reads
+	// it, not a name inside it (Base of "d/" is "d").
+	if t := strings.TrimRight(path, "/"); t != "" {
+		path = t
+	}
 	dir, err = unix.Open(filepath.Dir(path), unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, "", err
@@ -81,10 +90,23 @@ func inDir(path string) (dir int, base string, err error) {
 // block device's raw sectors, /dev/mem or /dev/null is reached.
 var ptmx = unix.Mkdev(5, 2)
 
+// kernelFS are the kernel's own filesystems, whose regular files are
+// kernel state, not files the driver reads or writes: procfs
+// (/proc/<pid>/mem, environ, kcore), sysfs, debugfs, tracefs, securityfs,
+// configfs, efivarfs, cgroupfs, bpffs and pstore.
+var kernelFS = map[int64]bool{
+	unix.PROC_SUPER_MAGIC: true, unix.SYSFS_MAGIC: true, unix.DEBUGFS_MAGIC: true,
+	unix.TRACEFS_MAGIC: true, unix.SECURITYFS_MAGIC: true, 0x62656570: true, // configfs
+	unix.EFIVARFS_MAGIC: true, unix.CGROUP_SUPER_MAGIC: true, unix.CGROUP2_SUPER_MAGIC: true,
+	unix.BPF_FS_MAGIC: true, unix.PSTOREFS_MAGIC: true,
+}
+
 // checkFD refuses what an open reached unless it is /dev/ptmx, a
-// directory, or a regular file that is not on
-// procfs or sysfs (no /proc/<pid>/mem, environ or kcore), is not a
-// journal, and if open for writing is where the driver writes.
+// directory, or a regular file that is not on one of kernelFS, is not a
+// journal, and if open for writing is where the driver writes and has no
+// other name (a hard link's other name may be anywhere on its
+// filesystem). A link reached is refused as ELOOP: only an O_NOFOLLOW
+// open reaches one.
 func checkFD(fd int, write bool) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
@@ -98,6 +120,8 @@ func checkFD(fd int, write bool) error {
 		return errKind
 	case unix.S_IFDIR: // the kernel opens a directory for reading only
 		return nil
+	case unix.S_IFLNK:
+		return unix.ELOOP
 	case unix.S_IFREG:
 	default:
 		return errKind
@@ -106,10 +130,13 @@ func checkFD(fd int, write bool) error {
 	if err := unix.Fstatfs(fd, &fs); err != nil {
 		return err
 	}
-	if fs.Type == unix.PROC_SUPER_MAGIC || fs.Type == unix.SYSFS_MAGIC {
+	if kernelFS[int64(fs.Type)] {
 		return errKind
 	}
 	if write {
+		if st.Nlink > 1 {
+			return errWrite
+		}
 		real, err := fdPath(fd)
 		if err != nil {
 			return err
@@ -119,8 +146,8 @@ func checkFD(fd int, write bool) error {
 		}
 	}
 	b := make([]byte, len(journalMagic))
-	// A descriptor open only for writing cannot be read; nothing it does
-	// reaches the console.
+	// An O_PATH descriptor, or one open only for writing, cannot be read;
+	// reopen checks the readable one again.
 	if n, err := unix.Pread(fd, b, 0); err == nil && string(b[:n]) == journalMagic {
 		return errJournal
 	}
@@ -128,25 +155,53 @@ func checkFD(fd int, write bool) error {
 }
 
 // openRaw opens path as unix.Open does, close-on-exec, and refuses what
-// checkFD refuses. An open that could make or empty a file checks its
-// directory first (inDir).
+// checkFD refuses, before the open acts (reopen). An open that could make
+// or empty a file checks its directory first (inDir) and follows no link
+// at the name, so what is made or emptied is the name inDir checked.
 func openRaw(path string, flag int, perm uint32) (int, error) {
-	flag |= unix.O_CLOEXEC
 	write := flag&(unix.O_WRONLY|unix.O_RDWR|unix.O_CREAT|unix.O_TRUNC) != 0
-	var fd int
-	var err error
-	if flag&(unix.O_CREAT|unix.O_TRUNC) != 0 {
-		dir, base, derr := inDir(path)
-		if derr != nil {
-			return -1, derr
+	if flag&(unix.O_CREAT|unix.O_TRUNC) == 0 {
+		pfd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|flag&(unix.O_NOFOLLOW|unix.O_DIRECTORY), 0)
+		if err != nil {
+			return -1, err
 		}
-		// No link is followed at the name, so what is made or emptied is
-		// the name inDir checked.
-		fd, err = unix.Openat(dir, base, flag|unix.O_NOFOLLOW, perm)
-		unix.Close(dir)
-	} else {
-		fd, err = unix.Open(path, flag, perm)
+		defer unix.Close(pfd)
+		return reopen(pfd, flag, write)
 	}
+	dir, base, err := inDir(path)
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(dir)
+	pfd, err := unix.Openat(dir, base, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) && flag&unix.O_CREAT != 0 {
+		// Nothing is at the name, so only a new regular file is made
+		// there (O_EXCL): whatever appears there meanwhile fails the open.
+		// What is made is empty, has one name, and sits in the directory
+		// inDir checked, so checkFD has nothing left to refuse.
+		fd, err := unix.Openat(dir, base, flag|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, perm)
+		if err != nil {
+			return -1, err
+		}
+		return fd, nil
+	}
+	if err != nil {
+		return -1, err
+	}
+	defer unix.Close(pfd)
+	return reopen(pfd, flag, write)
+}
+
+// reopen opens, with flag, the inode the O_PATH descriptor pfd is on,
+// once checkFD passes pfd, so a device's own open (a watchdog arms), a
+// FIFO's wait and a truncate act only on what the gate allows. It opens
+// pfd's /proc/self/fd link, which reaches that inode and no other, and
+// checks the new descriptor again, now readable for the journal's magic.
+func reopen(pfd, flag int, write bool) (int, error) {
+	if err := checkFD(pfd, write); err != nil {
+		return -1, err
+	}
+	fd, err := unix.Open("/proc/self/fd/"+strconv.Itoa(pfd), flag&^(unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW)|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, err
 	}
@@ -158,23 +213,18 @@ func openRaw(path string, flag int, perm uint32) (int, error) {
 }
 
 // rootOpen opens name in r for reading, refusing a link at its final name
-// and a journal file.
+// and what checkFD refuses, before the open acts (reopen).
 func rootOpen(r *os.Root, name string) (*os.File, error) {
-	f, err := r.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	p, err := r.OpenFile(name, unix.O_PATH|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	sc, err := f.SyscallConn()
-	if err == nil {
-		if cerr := sc.Control(func(fd uintptr) { err = checkFD(int(fd), false) }); err == nil {
-			err = cerr
-		}
-	}
+	defer p.Close()
+	fd, err := reopen(int(p.Fd()), unix.O_RDONLY, false)
 	if err != nil {
-		f.Close()
 		return nil, err
 	}
-	return f, nil
+	return os.NewFile(uintptr(fd), name), nil
 }
 
 // symlink makes name a link to target where the driver writes (inDir).

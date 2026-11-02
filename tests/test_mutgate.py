@@ -789,8 +789,15 @@ class Deletion(unittest.TestCase):
             self.assertEqual(mutgate.run_tests(stub, d, 1), "TIMED OUT")
             # The test binary's own child is gone too (dead, or a zombie awaiting its reaper).
             state = pathlib.Path(f"/proc/{int(pid.read_text())}/stat")
+
+            def gone():
+                # One read, no exists() check first: the reaper can remove the entry between the two (#4712).
+                try:
+                    return state.read_text().split(")")[-1].split()[0] in "ZX"
+                except (FileNotFoundError, ProcessLookupError):
+                    return True
             for _ in range(50):
-                if not state.exists() or state.read_text().split(")")[-1].split()[0] in "ZX":
+                if gone():
                     break
                 time.sleep(0.1)
             else:
@@ -1342,6 +1349,23 @@ class Workflow(unittest.TestCase):
             self.assertEqual(sorted(f.name for f in (pathlib.Path(d) / "tools").iterdir()), ["mutgate.py"])
             self.assertEqual((pathlib.Path(d) / "tools" / "mutgate.py").read_bytes(), b"base\n")
             self.assertEqual((pathlib.Path(d) / "broker" / "core" / "core.txt").read_bytes(), b"base\n")
+
+
+class Jobs(unittest.TestCase):
+    """#4672: --jobs defaults without os.sched_getaffinity, which macOS lacks."""
+
+    def test_default_without_sched_getaffinity_uses_cpu_count(self):
+        from unittest import mock
+        with mock.patch.object(os, "sched_getaffinity", create=True, side_effect=AttributeError), \
+                mock.patch.object(os, "cpu_count", return_value=6):
+            self.assertEqual(mutgate.default_jobs(), 6)
+            os.cpu_count.return_value = None
+            self.assertEqual(mutgate.default_jobs(), 1)
+
+    def test_default_uses_affinity_when_present(self):
+        from unittest import mock
+        with mock.patch.object(os, "sched_getaffinity", create=True, return_value={0, 1, 2}):
+            self.assertEqual(mutgate.default_jobs(), 3)
 
 
 if __name__ == "__main__":
