@@ -30,6 +30,13 @@ NEWC_FIELDS = ("ino", "mode", "uid", "gid", "nlink", "mtime", "filesize", "devma
                "rdevmajor", "rdevminor", "namesize", "check")
 
 
+def shown(v):
+    """V as one JSON token: a name or value read from a build prints quoted, with every control
+    and non-ASCII character escaped, so it can never end a log line, start a forged one or an
+    Actions workflow command (::...), or move the terminal (#4612)."""
+    return json.dumps(v)
+
+
 def packages(d):
     """The (name, version, architecture) of every package in D's one manifest. Raises ValueError."""
     found = sorted(pathlib.Path(d).glob("*.manifest"))
@@ -86,7 +93,7 @@ def initrd_members(data):
                 name = data[off + 110:end - 1].decode("utf-8", "surrogateescape")
                 off = (end + 3) & ~3
                 if off + hdr["filesize"] > len(data):
-                    raise ValueError("initrd: truncated cpio file %s" % name)
+                    raise ValueError("initrd: truncated cpio file %s" % shown(name))
                 body = data[off:off + hdr["filesize"]]
                 off = (off + hdr["filesize"] + 3) & ~3
                 if name == "TRAILER!!!":
@@ -106,8 +113,8 @@ def initrd_diff(a, b, limit=200):
     field (its two values) or the content. Empty when A and B hold the same members alike."""
     ma, mb = initrd_members(a), initrd_members(b)
     da, db = {k: (h, c) for k, h, c in ma}, {k: (h, c) for k, h, c in mb}
-    lines = ["only in a: %s" % k for k in da if k not in db]
-    lines += ["only in b: %s" % k for k in db if k not in da]
+    lines = ["only in a: %s" % shown(k) for k in da if k not in db]
+    lines += ["only in b: %s" % shown(k) for k in db if k not in da]
     for k, (ha, ca) in da.items():
         if k not in db:
             continue
@@ -116,7 +123,7 @@ def initrd_diff(a, b, limit=200):
         if ca != cb:
             what.append("content")
         if what:
-            lines.append("%s: %s" % (k, ", ".join(what)))
+            lines.append("%s: %s" % (shown(k), ", ".join(what)))
     if not lines and [k for k, _, _ in ma] != [k for k, _, _ in mb]:
         lines.append("same members in a different order")
     if len(lines) > limit:
@@ -174,13 +181,14 @@ def usr_diff(a, b, limit=200):
     in which fields (their two values). Paths only one side has and differences in content, mode or
     owner come first, so many time-only differences past LIMIT never hide a changed file (#4471).
     Empty when every entry is alike."""
-    lines = ["only in a: %s" % k for k in sorted(a) if k not in b]
-    lines += ["only in b: %s" % k for k in sorted(b) if k not in a]
+    lines = ["only in a: %s" % shown(k) for k in sorted(a) if k not in b]
+    lines += ["only in b: %s" % shown(k) for k in sorted(b) if k not in a]
     meta = []
     for k in sorted(a):
         if k in b and a[k] != b[k]:
             fs = [f for f in a[k] if a[k][f] != b[k][f]]
-            line = "%s: %s" % (k, ", ".join("%s %s/%s" % (f, a[k][f], b[k][f]) for f in fs))
+            line = "%s: %s" % (shown(k), ", ".join("%s %s/%s" % (f, shown(a[k][f]), shown(b[k][f]))
+                                                    for f in fs))
             (meta if all(f in USR_META_FIELDS for f in fs) else lines).append(line)
     lines += meta
     if len(lines) > limit:
