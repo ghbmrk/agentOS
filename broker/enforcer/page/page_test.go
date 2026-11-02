@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -803,6 +804,8 @@ func TestEveryFieldRendered(t *testing.T) {
 	docs := map[string]func(d *policy.Document){
 		"Version":      nil, // the page picks it; it is in the serial, not the diff
 		"Destinations": func(d *policy.Document) { d.Destinations = append(d.Destinations, "z.example") },
+		"Caps":         func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 5} },
+		"EdgeCap":      func(d *policy.Document) { d.EdgeCap = 5 },
 		"Devices":      nil, // the device rows above
 		"Pairs":        func(d *policy.Document) { d.Pairs = append(d.Pairs, policy.Pair{A: "cam", B: "tv"}) },
 		"Standing":     func(d *policy.Document) { d.Standing[0].ToMS++ },
@@ -1135,5 +1138,52 @@ func TestTimesInOwnersZone(t *testing.T) {
 	c.Zone = nil
 	if _, err := New(c); !errors.Is(err, ErrConfig) {
 		t.Errorf("a page with no zone: %v, want refused", err)
+	}
+}
+
+// TestCapLines: the owner signs each byte cap as an exact number of bytes
+// (NET-2 Byte caps, D-248): when a destination is listed, whenever its cap
+// or the edge's changes, and a destination listed with none is said to get
+// nothing, since a cap left out lets nothing through. A name the core chose
+// is shown in printable ASCII on the cap line too.
+func TestCapLines(t *testing.T) {
+	zone := time.UTC
+	base := edit(1, func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 2_000_000_000}; d.EdgeCap = 999 })
+	for name, c := range map[string]struct {
+		f    func(d *policy.Document)
+		want string
+	}{
+		"listed with a cap": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "backup.example")
+			d.Caps["backup.example"] = 64 << 30
+		}, "Let agentOS send backup.example up to 68,719,476,736 bytes (about 68.7 GB) a day."},
+		"listed with none": {func(d *policy.Document) { d.Destinations = append(d.Destinations, "x.example") },
+			"agentOS may send x.example nothing: it has no daily byte cap."},
+		"raised": {func(d *policy.Document) { d.Caps["models.example"] = 2_000_000_001 },
+			"Change what agentOS may send models.example a day from up to 2,000,000,000 bytes (about 2.0 GB) to up to 2,000,000,001 bytes (about 2.0 GB)."},
+		"dropped": {func(d *policy.Document) { d.Caps = nil },
+			"Change what agentOS may send models.example a day from up to 2,000,000,000 bytes (about 2.0 GB) to nothing."},
+		"edge": {func(d *policy.Document) { d.EdgeCap = 1 },
+			"Change what the edge may send to the internet a day from up to 999 bytes to up to 1 byte."},
+		"hostile name": {func(d *policy.Document) {
+			d.Destinations = append(d.Destinations, "moc.\u202eevil")
+			d.Caps["moc.\u202eevil"] = 1000
+		}, `Let agentOS send "moc.\u202eevil" up to 1,000 bytes (about 1.0 kB) a day.`},
+	} {
+		next := clone(base)
+		next.Caps = maps.Clone(base.Caps)
+		next.Version = 2
+		c.f(&next)
+		if got := Describe(base, next, zone); !slices.Contains(got, c.want) {
+			t.Errorf("%s: %q, want the line %q", name, got, c.want)
+		}
+	}
+	if got := Describe(base, edit(2, func(d *policy.Document) { d.Caps = map[string]uint64{"models.example": 2_000_000_000}; d.EdgeCap = 999 }), zone); !slices.Equal(got, []string{noChange}) {
+		t.Errorf("unchanged caps: %q", got)
+	}
+	for n, want := range map[uint64]string{999_949: "up to 999,949 bytes (about 999.9 kB)", 999_950: "up to 999,950 bytes (about 1.0 MB)", ^uint64(0): "up to 18,446,744,073,709,551,615 bytes (about 18.4 EB)"} {
+		if got := capWords(n); got != want {
+			t.Errorf("capWords(%d) = %q, want %q", n, got, want)
+		}
 	}
 }

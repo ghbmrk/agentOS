@@ -27,6 +27,22 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	for _, h := range minus(old.Destinations, next.Destinations) {
 		add("Stop agentOS reaching %s.", h)
 	}
+	// NET-2 Byte caps: a destination's cap is said when it is listed and
+	// whenever it changes; a cap left out is nothing, so a destination
+	// listed without one is signed knowing agentOS can send it nothing.
+	for _, h := range next.Destinations {
+		switch was, listed := old.Caps[h], slices.Contains(old.Destinations, h); {
+		case !listed && next.Caps[h] == 0:
+			add("agentOS may send %s nothing: it has no daily byte cap.", h)
+		case !listed:
+			add("Let agentOS send %s %s a day.", h, capWords(next.Caps[h]))
+		case was != next.Caps[h]:
+			add("Change what agentOS may send %s a day from %s to %s.", h, capWords(was), capWords(next.Caps[h]))
+		}
+	}
+	if old.EdgeCap != next.EdgeCap {
+		add("Change what the edge may send to the internet a day from %s to %s.", capWords(old.EdgeCap), capWords(next.EdgeCap))
+	}
 	for _, d := range next.Devices {
 		o := old.Device(d.ID)
 		if o == nil {
@@ -143,6 +159,11 @@ func plain(d policy.Document) policy.Document {
 	for i := range d.Destinations {
 		d.Destinations[i] = ascii(d.Destinations[i])
 	}
+	caps := make(map[string]uint64, len(d.Caps))
+	for h, n := range d.Caps {
+		caps[ascii(h)] = n
+	}
+	d.Caps = caps
 	for i := range d.Devices {
 		v := &d.Devices[i]
 		v.ID, v.WiFi, v.Class, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Class), ascii(v.Secure)
@@ -180,6 +201,36 @@ func clone(d policy.Document) policy.Document {
 	d.Standing = slices.Clone(d.Standing)
 	d.Holds = slices.Clone(d.Holds)
 	return d
+}
+
+// capWords is a daily byte cap as the owner signs it: "nothing" for 0,
+// which lets nothing through, else "up to" the exact number of bytes,
+// with a rounded size beside it once it reaches a thousand.
+func capWords(n uint64) string {
+	if n == 0 {
+		return "nothing"
+	}
+	digits := strconv.FormatUint(n, 10)
+	var b strings.Builder
+	for i, c := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(c)
+	}
+	w := "up to " + b.String() + " bytes"
+	if n == 1 {
+		w = "up to 1 byte"
+	}
+	units := []string{"kB", "MB", "GB", "TB", "PB", "EB"}
+	if n < 1000 {
+		return w
+	}
+	f, u := float64(n)/1000, 0
+	for f >= 999.95 && u < len(units)-1 {
+		f, u = f/1000, u+1
+	}
+	return fmt.Sprintf("%s (about %.1f %s)", w, f, units[u])
 }
 
 func ascii(s string) string {
