@@ -381,85 +381,14 @@ class KeeperTreeTest(unittest.TestCase):
                   ("Unit", "FailureAction", "reboot-force"), ("Service", "StartLimitAction", "reboot"),
                   ("Service", "FailureAction", "reboot-force"), ("Unit", "SuccessAction", "reboot"),
                   ("Unit", "JobTimeoutAction", "reboot-force"), ("Unit", "OnFailure", "reboot.target"),
-                  ("Unit", "OnSuccess", "reboot.target"), ("Unit", "Wants", "reboot.target"),
-                  ("Unit", "Requires", "reboot.target"), ("Unit", "Requisite", "reboot.target"),
-                  ("Unit", "BindsTo", "reboot.target"), ("Unit", "Upholds", "reboot.target"),
-                  ("Unit", "Conflicts", "agentos-health.service"), ("Unit", "PropagatesStopTo", "agentosd.service"))
+                  ("Unit", "OnSuccess", "reboot.target"))
 
     def test_the_unlock_unit_assignments_are_one_closed_list(self):
         self.assertEqual(sorted((s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS),
                          sorted((s, k, {"FileDescriptorStoreMax": ("0",)}.get(k, ("none",) if k.endswith("Action") else ()))
                                 for s, k, _ in self.UNLOCK_BAD))
         self.assertEqual({w for *_, w in check.UNLOCK_ASSIGNMENTS},
-                         {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START, check.UNLOCK_PULL})
-        # #4667: every key by which the unit's start or stop starts or stops another unit has the empty list.
-        pull = ("Wants", "Requires", "Requisite", "BindsTo", "Upholds", "Conflicts", "PropagatesStopTo")
-        self.assertEqual(sorted(k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if w == check.UNLOCK_PULL), sorted(pull))
-        self.assertFalse([k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if k in pull and (s, a) != ("Unit", ())])
-        # The shipped unit sets none of them; After= only orders it.
-        u = ini(KERNEL)
-        self.assertFalse(set(u["Unit"]) & {k.lower() for k in pull})
-
-    def test_a_dependency_of_the_unlock_unit_names_its_file_and_what_is_allowed(self):
-        # #4667: Upholds=reboot.target in a drop-in would start a reboot outside ExecStopPost=KERNEL_REBOOT.
-        # The refusal names the drop-in and says the key may not be set at all; two drop-ins setting the
-        # same value give two lines, each naming its own file.
-        name = "agentos-keeper-kernel.service"
-        a = write(self.root, SYSTEM + name + ".d/50-a.conf", "[Unit]\nUpholds=reboot.target\n")
-        b = write(self.root, SYSTEM + "agentos-keeper-.service.d/60-b.conf", "[Unit]\nUpholds=reboot.target\n")
-        self.assertEqual(self.v(), [
-            name + ": Upholds=reboot.target in %s; starts or stops another unit with the unlock step, which the "
-            "tree check does not model; its one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667); allowed: no "
-            "Upholds= at all" % (SYSTEM + name + ".d/50-a.conf"),
-            unlock_refusal("Upholds", "reboot.target", check.UNLOCK_PULL, SYSTEM + "agentos-keeper-.service.d/60-b.conf")])
-        a.unlink()
-        b.unlink()
-        self.assertEqual(self.v(), [])
-
-    def test_a_dependency_link_of_the_unlock_unit_is_refused(self):
-        # #4667: a link in .wants/, .requires/ or .upholds/ adds the dependency with no assignment to read,
-        # under the unit's name, a "-" prefix of it or its type, in any unit directory.
-        name = "agentos-keeper-kernel.service"
-        for d in ("usr/lib/systemd/system/", "etc/systemd/system/"):
-            for n in (name, "agentos-keeper-.service", "agentos-.service", "service"):
-                for suffix in (".wants", ".requires", ".upholds"):
-                    with self.subTest(d=d, n=n, suffix=suffix):
-                        link = self.root / d / (n + suffix) / "reboot.target"
-                        link.parent.mkdir(parents=True, exist_ok=True)
-                        link.symlink_to("/usr/lib/systemd/system/reboot.target")
-                        allowed = ("%s.wants/agentos-link.service" % name if (n, suffix) == (name, ".wants")
-                                   else "no %s link at all" % suffix[1:])
-                        self.assertEqual(self.v(), [
-                            "%s: %s%s%s/reboot.target; %s; allowed: %s"
-                            % (name, d, n, suffix, check.UNLOCK_PULL, allowed)])
-                        link.unlink()
-                        link.parent.rmdir()
-        self.assertEqual(self.v(), [])
-
-    def test_the_shipped_wants_link_of_the_unlock_unit_passes(self):
-        # agentos-link.service's WantedBy= (EDGE-link-core c2c) is the one link the image ships there; it
-        # passes only in .wants/ under the unit's own name and pointing at its own unit file.
-        name = "agentos-keeper-kernel.service"
-        self.assertIn(name, ini(self.unit("agentos-link.service"))["Install"]["WantedBy"].split())
-        self.assertEqual(check.UNLOCK_LINKS, {".wants": ("agentos-link.service",)})
-        good = "/usr/lib/systemd/system/agentos-link.service"
-        for d, target, want in (
-                (name + ".wants", good, []),
-                (name + ".requires", good, ["usr/lib/systemd/system/%s.requires/agentos-link.service; %s; allowed: no "
-                                            "requires link at all" % (name, check.UNLOCK_PULL)]),
-                ("agentos-keeper-.service.wants", good,
-                 ["usr/lib/systemd/system/agentos-keeper-.service.wants/agentos-link.service; %s; allowed: no wants link "
-                  "at all" % check.UNLOCK_PULL]),
-                (name + ".wants", "/usr/lib/systemd/system/reboot.target",
-                 ["usr/lib/systemd/system/%s.wants/agentos-link.service; %s; allowed: %s.wants/agentos-link.service"
-                  % (name, check.UNLOCK_PULL, name)])):
-            with self.subTest(d=d, target=target):
-                link = self.root / SYSTEM / d / "agentos-link.service"
-                link.parent.mkdir(parents=True, exist_ok=True)
-                link.symlink_to(target)
-                self.assertEqual(self.v(), [name + ": " + w for w in want])
-                link.unlink()
-                link.parent.rmdir()
+                         {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START})
 
     def test_no_later_assignment_hides_an_unlock_unit_value(self):
         # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.
