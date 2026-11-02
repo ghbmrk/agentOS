@@ -433,6 +433,21 @@ func TestSubscriptionYieldsToWaitingDo(t *testing.T) {
 	}
 }
 
+// condWaiting waits until a goroutine whose stack holds fn sleeps on a
+// sync.Cond.
+func condWaiting(t *testing.T, fn string) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for end := time.Now().Add(3 * time.Second); time.Now().Before(end); time.Sleep(time.Millisecond) {
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "[sync.Cond.Wait") && strings.Contains(g, fn) {
+				return
+			}
+		}
+	}
+	t.Fatalf("no goroutine in %s sleeps on the host's cond", fn)
+}
+
 // parked waits until a goroutine whose stack holds fn is parked on a mutex:
 // in this test, only h.mu is held long enough for a caller to park on it.
 func parked(t *testing.T, fn string) {
@@ -549,6 +564,25 @@ func TestSubscriptionFloorSpansCalls(t *testing.T) {
 		defer cancel()
 		if _, err := h.Subscribe(ctx, "watch"); !errors.Is(err, context.DeadlineExceeded) || d.dials != 3 {
 			t.Fatalf("Subscribe cancelled at the floor: %v, %d dials; want ctx's error and none", err, d.dials)
+		}
+	})
+	// The floor's wait sleeps on the host's cond, not in a loop that spins
+	// on the lock until the floor passes (mutgate on #4560: host.go:326).
+	t.Run("the wait sleeps", func(t *testing.T) {
+		d := &dialer{t: t, scripts: []script{ends}}
+		defer d.done.Wait()
+		h := subHost(t, d, &sink{}, 5*time.Second, devhost.Limit{Burst: 10, Window: time.Minute}, nil)
+		if _, err := h.Subscribe(context.Background(), "watch"); err != nil {
+			t.Fatalf("first Subscribe: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		out := make(chan error, 1)
+		go func() { _, err := h.Subscribe(ctx, "watch"); out <- err }()
+		condWaiting(t, "(*Host).acquire")
+		cancel()
+		if err := <-out; !errors.Is(err, context.Canceled) || d.dials != 1 {
+			t.Fatalf("Subscribe cancelled in the floor's wait: %v, %d dials; want ctx's error and one", err, d.dials)
 		}
 	})
 	t.Run("a Do that reached the driver", func(t *testing.T) {
