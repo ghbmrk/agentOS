@@ -78,3 +78,25 @@ func TestOneByteValue(t *testing.T) {
 		t.Fatal("the raw form is not indexed by its first byte")
 	}
 }
+
+// KRN-12: break records stay bounded: one large write of escaped breaks
+// keeps only those whose rest may be still to come, a place keeps each
+// distinct break once, and a record holds at most "u000a" (#4582).
+func TestBreaksBounded(t *testing.T) {
+	m := New([]Value{{ID: 4, Bytes: []byte("nq7Xz2pL9mW4vR8tY3nB6kJ5h")}}, nil)
+	s := m.Stream()
+	s.Write([]byte(strings.Repeat(`x\n`, 1<<18)))
+	if len(s.breaks) > m.carry || cap(s.breaks) > 4*m.carry {
+		t.Fatalf("%d break records (cap %d) after one write, carry %d", len(s.breaks), cap(s.breaks), m.carry)
+	}
+	s = m.Stream()
+	s.Write([]byte(strings.Repeat(`\n\r`, 1000)))
+	if len(s.breaks) != 2 || string(s.breaks[0].b) != "n" {
+		t.Fatalf("breaks at one place kept %d records, first %q", len(s.breaks), s.breaks[0].b)
+	}
+	s = m.Stream()
+	s.Write([]byte(`\\\\\\u000a`))
+	if len(s.breaks) != 1 || string(s.breaks[0].b) != "u000a" {
+		t.Fatalf("a long break kept %+v", s.breaks)
+	}
+}

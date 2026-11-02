@@ -295,7 +295,8 @@ type Stream struct {
 	m       *Matcher
 	buf     []byte // the carried tail, then the bytes not yet scanned
 	joined  []byte // buf with line breaks removed, kept the same way
-	breaks  []cut  // the breaks removed from joined's tail
+	breaks  []cut  // the breaks removed from joined whose rest may be still to come
+	floor   int    // where the last break was removed
 	pending int
 	res     Result
 }
@@ -328,23 +329,25 @@ type cut struct {
 // \u000d. A break may begin in an earlier write. Each break is kept, since
 // one may instead be an escaped '\' or a literal '%' and a form's first
 // characters (#4582). A break begins after the last one, so its place stays.
+// A break is matched and let go once the longest form's rest has come, so
+// a large write keeps few.
 func (s *Stream) join(p []byte) {
 	for _, c := range p {
 		if c == '\r' || c == '\n' {
 			continue
 		}
-		floor := 0
-		if len(s.breaks) > 0 {
-			floor = s.breaks[len(s.breaks)-1].at
-		}
-		if n := escape(s.joined[floor:], c); n > 0 {
-			at := len(s.joined) - n
+		if n := escape(s.joined[s.floor:], c); n > 0 {
+			s.floor = len(s.joined) - n
 			s.joined = append(s.joined, c)
-			s.addBreak(at, s.joined[at+1+max(0, n-5):])
-			s.joined = s.joined[:at]
+			s.addBreak(s.floor, s.joined[s.floor+1+max(0, n-5):])
+			s.joined = s.joined[:s.floor]
 			continue
 		}
 		s.joined = append(s.joined, c)
+		for len(s.breaks) > 0 && len(s.joined)-s.breaks[0].at > s.m.carry {
+			s.matchBreak(s.breaks[0])
+			s.breaks = s.breaks[1:]
+		}
 	}
 }
 
@@ -391,16 +394,8 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
-	// A form may begin inside a removed break, the rest joined after it.
 	for _, br := range s.breaks {
-		for k := 1; k <= len(br.b); k++ {
-			for _, i := range s.m.first[br.b[len(br.b)-k]] {
-				f := s.m.forms[i]
-				if k < len(f.b) && bytes.HasSuffix(br.b, f.b[:k]) && bytes.HasPrefix(s.joined[br.at:], f.b[k:]) {
-					s.res.add(f.id)
-				}
-			}
-		}
+		s.matchBreak(br)
 	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
@@ -408,13 +403,28 @@ func (s *Stream) scan() {
 	keep := max(s.m.carry, carryPattern)
 	drop := max(0, len(s.joined)-keep)
 	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, keep), 0
-	kept := s.breaks[:0]
+	var kept []cut
 	for _, br := range s.breaks {
 		if br.at >= drop {
-			kept = append(kept, cut{br.at - drop, br.b})
+			br.at -= drop
+			kept = append(kept, br)
 		}
 	}
-	s.breaks = kept
+	s.breaks, s.floor = kept, max(0, s.floor-drop)
+}
+
+// matchBreak matches the forms that begin inside a removed break, the rest
+// joined after it.
+func (s *Stream) matchBreak(br cut) {
+	b := br.b
+	for k := 1; k <= len(b); k++ {
+		for _, i := range s.m.first[b[len(b)-k]] {
+			f := s.m.forms[i]
+			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && bytes.HasPrefix(s.joined[br.at:], f.b[k:]) {
+				s.res.add(f.id)
+			}
+		}
+	}
 }
 
 func tail(w []byte, keep int) []byte {

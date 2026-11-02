@@ -286,8 +286,9 @@ func TestBase64Wrapped(t *testing.T) {
 // KRN-12: a form whose first characters could end a line-break escape
 // trips after text that makes them read as one: a literal '\' before n or
 // r (JSON "C:\\n..."), '%' or "%0" before hex 0a or a, "\u000" before a,
-// wrapped, raw or JSON-escaped at any depth; the same text without the value
-// does not (#4582).
+// wrapped, raw or JSON-escaped at any depth, also after another break; the
+// same text without the value does not, nor a break whose characters share
+// only a form's first one (#4582).
 func TestWrappedAfterEscapeHead(t *testing.T) {
 	vals := []string{"nq7Xz2pL9mW4vR8tY3nB6kJ5h", "rW4vR8tY3nB6kJ5hq7Xz2pL9m", "u000aY3nB6kJ5hq7Xz2pL9mW4vR8t",
 		"aJ5hq7Xz2pL9mW4vR8tY3nB6k", "DpL9mW4vR8tY3nB6kJ5hq7Xz2", "0AvR8tY3nB6kJ5hq7Xz2pL9mW4", "n0AnB6kJ5hq7Xz2pL9mW4vR8tY3"}
@@ -303,7 +304,7 @@ func TestWrappedAfterEscapeHead(t *testing.T) {
 		id := min(i, len(vals))
 		for _, head := range []string{`\`, `\\`, `\u000`, `\u00`, `%`, `%0`, `%\`} {
 			for _, width := range []int{3, 4, 5, 24} {
-				w := head + wrap(v, width, "\n")
+				w := `\r` + head + wrap(v, width, "\n") // a second break at the head's place
 				j, _ := json.Marshal(w)
 				jj, _ := json.Marshal(string(j))
 				for _, s := range []string{w, string(j), string(jj)} {
@@ -320,8 +321,17 @@ func TestWrappedAfterEscapeHead(t *testing.T) {
 			}
 		}
 	}
+	upper := strings.ToUpper(hex.EncodeToString(hexv))
+	m2 := match.New([]match.Value{{ID: 1, Bytes: hexv}, {ID: 2, Bytes: []byte("uQQQQq7Xz2pL9mW4vR8tY3nB6kJ5h")}}, nil)
+	for _, s := range []string{"%0a" + upper[2:], `C:\u000aq7Xz2pL9m\nW4vR8tY3nB6kJ5h`} {
+		if got := m2.Scan([]byte(s)).Trips; len(got) != 0 {
+			t.Fatalf("%q, a break sharing only a form's first character, tripped %v", s, got)
+		}
+	}
 	repro := `{"a":"C:\\nq7Xz2pL9m\nW4vR8tY3nB6kJ5h"}`
-	if got := m.Scan([]byte(repro)).Trips; !slices.Equal(got, []int{0}) {
-		t.Fatalf("%s tripped %v, want [0]", repro, got)
+	for _, pad := range []string{"", strings.Repeat(" ", 2000)} { // the break let go before the scan
+		if got := m.Scan([]byte(repro + pad)).Trips; !slices.Equal(got, []int{0}) {
+			t.Fatalf("%s and %d bytes tripped %v, want [0]", repro, len(pad), got)
+		}
 	}
 }
