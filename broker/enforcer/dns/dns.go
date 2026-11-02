@@ -7,13 +7,14 @@
 //     one each Devices VLAN. Each resolves only its own list's names (the
 //     core's signed list, or that device's allow list), each name exactly
 //     (its subdomains get NXDOMAIN, every other name REFUSED), and puts
-//     each answer's addresses into that list's nft allow set (nftset=). A
+//     each answer's addresses into that list's nft allow set and the
+//     name's own set (nftset=, nft.AllowSet.Named). A
 //     device so never learns another list's addresses, and its queries for
 //     them never leave the enforcer. Only addresses its own resolver
 //     returned enter an allow set, so a core or device that dials any
 //     other address under a listed name is dropped. None keeps a cache, so
-//     every answer comes from upstream and fills the set again after a
-//     ruleset load.
+//     every answer comes from upstream; a ruleset load keeps the answers
+//     of the names still listed (nft.Reload).
 //   - People answers Owner, Household, Guests and the admin port with any
 //     name, filling no set: those networks reach the internet anyway.
 //   - DHCP serves addresses, with the enforcer as router and resolver, on
@@ -42,8 +43,9 @@ import (
 var ErrConfig = errors.New("dns: configuration refused")
 
 // MaxTTL caps the TTL the listed instance hands out, so a device asks
-// again, and so refills its allow set, within this many seconds of a
-// ruleset load emptying it (ASSUMPTIONS ENF-f-3).
+// again within this many seconds, and an answer that missed a ruleset
+// load's carry-over is back in its set by then (ASSUMPTIONS ENF-f-3,
+// nft ENF-set-keep-1).
 const MaxTTL = 300
 
 // Net is one network an instance answers on: its interface, the prefixes
@@ -191,7 +193,10 @@ func (s Setup) listed(iface string, set nft.AllowSet) (string, error) {
 		// Exactly the name: its subdomains are answered locally, which
 		// is NXDOMAIN, and never forwarded (ASSUMPTIONS ENF-f-2).
 		w.add("local=/*." + n + "/")
-		w.add("nftset=/" + n + "/4#inet#" + nft.Table + "#" + set.Set4 + ",6#inet#" + nft.Table + "#" + set.Set6)
+		// The allow set, and the name's own set that lets a ruleset load
+		// keep the name's answers while it stays listed (nft.Reload).
+		t := "#inet#" + nft.Table + "#"
+		w.add("nftset=/" + n + "/4" + t + set.Set4 + ",4" + t + set.Named(n, false) + ",6" + t + set.Set6 + ",6" + t + set.Named(n, true))
 	}
 	return w.String(), nil
 }

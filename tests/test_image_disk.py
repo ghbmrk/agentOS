@@ -5,7 +5,8 @@ up. image.yml frees the runner's unused toolchains, then a guard checks every fi
 writes to against DISK_NEED_GB and stops with both numbers; a last step fails a job whose sampled
 growth, plus the largest rise in one sample interval (a peak between samples), reached the budget,
 so the PR that grows the build is the one that goes red. These tests run the workflow's own step
-scripts against a stand-in df that has several file systems. Its messages add up, say a bound is a
+scripts against a stand-in df that has several file systems, except "Free runner disk", whose sudo
+deletes are never run: its df read and notices run as the test's own copies of those lines (#4440). Its messages add up, say a bound is a
 bound, and give a next step that works for the mount that is short."""
 import json
 import os
@@ -33,6 +34,32 @@ for p in (a for a in sys.argv[1:] if not a.startswith("-")):
     m = mount(p)
     print(m if col == "target" else "%dM" % fs[m][0 if col == "avail" else 1])
 """
+
+# A stand-in sudo that runs nothing and logs each call, first on PATH for every step a test runs:
+# a backstop that run_step asserts was never called.
+FAKE_SUDO = """#!/bin/sh
+printf '%s\\n' "$*" >> "$(dirname "$0")/sudo.log"
+"""
+
+# #4440: the "Free runner disk" step deletes toolchains through sudo, so no test runs its text.
+# The test owns these copies of the step's df read and notices, checks that each is a line of the
+# step byte for byte, and runs only its copies. An edit to one of these lines in image.yml fails
+# the test until the copy here is changed to match in the same PR.
+FREE_DISK_GB = "gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }"
+FREE_DISK_NOTICES = (
+    'echo "::notice title=disk budget::/ had $(gb) GB free before freeing the runner disk"',
+    'echo "::notice title=disk budget::/ has $(gb) GB free after freeing the runner disk"',
+)
+
+
+def free_disk_copies(script):
+    """The test's own copies of the step's df read and notices, once each is found as a whole line of
+    SCRIPT; the step's text is only compared, never run."""
+    lines = script.splitlines()
+    for line in (FREE_DISK_GB,) + FREE_DISK_NOTICES:
+        if line not in lines:
+            raise AssertionError("Free runner disk: no line reads exactly: " + line)
+    return "\n".join((FREE_DISK_GB,) + FREE_DISK_NOTICES) + "\n"
 
 
 def build_steps():
@@ -65,6 +92,9 @@ class DiskBudgetTest(unittest.TestCase):
         df = self.t / "bin" / "df"
         df.write_text(FAKE_DF)
         df.chmod(0o755)
+        sudo = self.t / "bin" / "sudo"
+        sudo.write_text(FAKE_SUDO)
+        sudo.chmod(0o755)
         (self.t / "temp").mkdir()
         self.procs = []
 
@@ -76,8 +106,12 @@ class DiskBudgetTest(unittest.TestCase):
                 pass
         self.tmp.cleanup()
 
-    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None):
-        """Runs a step; FS maps mount points to (avail, used) MB, else one file system "/" has them."""
+    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None, script=None):
+        """Runs a step, or SCRIPT in its place; FS maps mount points to (avail, used) MB, else one file
+        system "/" has them."""
+        # #4440: "Free runner disk" runs here only as the test's copies (free_disk_copies).
+        self.assertTrue(script is not None or name != "Free runner disk", "run free_disk_copies instead")
+        script = run_script(name) if script is None else script
         (self.t / "bin" / "fs.json").write_text(json.dumps(fs or {"/": (avail_mb, used_mb)}))
         dmi = self.t / "dmi"
         dmi.mkdir(exist_ok=True)
@@ -85,11 +119,12 @@ class DiskBudgetTest(unittest.TestCase):
             (dmi / "sys_vendor").write_text(vendor + "\n")
         env = dict(os.environ, PATH="%s:%s" % (self.t / "bin", os.environ["PATH"]),
                    RUNNER_TEMP=str(self.t / "temp"), DISK_NEED_GB=need, DMI_ID=str(dmi))
-        p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", run_script(name)], env=env,
+        p = subprocess.Popen(["bash", "-e", "-o", "pipefail", "-c", script], env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                              start_new_session=True)
         self.procs.append(p)
         out, _ = p.communicate(timeout=30)
+        self.assertFalse((self.t / "bin" / "sudo.log").exists(), "%s called sudo:\n%s" % (name, out))
         return p.returncode, out
 
     def test_guard_fails_fast_with_both_numbers_when_short(self):
@@ -108,14 +143,24 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("runner has 29 GB; free more in \"Free runner disk\"", out)
 
     def test_free_runner_disk_notices_read_like_the_guard(self):
-        # #4434: one space, and GB as the guard writes it. sudo is a stand-in that does nothing.
-        sudo = self.t / "bin" / "sudo"
-        sudo.write_text("#!/bin/sh\nexit 0\n")
-        sudo.chmod(0o755)
-        rc, out = self.run_step("Free runner disk", avail_mb=86 * 1024 + 500, used_mb=1000)
+        # #4434: one space, and GB as the guard writes it. #4440: the test's copies run, not the step.
+        script = free_disk_copies(run_script("Free runner disk"))
+        rc, out = self.run_step("Free runner disk", avail_mb=86 * 1024 + 500, used_mb=1000, script=script)
         self.assertEqual(rc, 0, out)
         self.assertIn("::notice title=disk budget::/ had 86 GB free before freeing the runner disk\n", out)
         self.assertIn("::notice title=disk budget::/ has 86 GB free after freeing the runner disk\n", out)
+
+    def test_free_runner_disk_copies_match_the_step(self):
+        # #4440: the step frees disk through sudo, and an edit to any copied line fails the test.
+        script = run_script("Free runner disk")
+        self.assertRegex(script, r"(?m)^sudo rm -rf /usr/local/lib/android ")
+        for line in (FREE_DISK_GB,) + FREE_DISK_NOTICES:
+            for edited in (line.replace("1024", "1000"), line.replace("GB", "GiB"), " " + line, line + " "):
+                if edited != line:
+                    with self.assertRaises(AssertionError, msg=edited):
+                        free_disk_copies(script.replace(line, edited))
+            with self.assertRaises(AssertionError, msg=line):
+                free_disk_copies(script.replace(line + "\n", ""))
 
     def test_guard_passes_and_samples_when_the_budget_is_there(self):
         rc, out = self.run_step("Disk budget", avail_mb=31 * 1024, used_mb=50000)

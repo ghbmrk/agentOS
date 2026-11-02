@@ -590,7 +590,10 @@ class KeeperUnitsTest(unittest.TestCase):
         self.assertIn("/agentos-keeper: enroll=skipped kernel=active/", ci)
         self.assertIn('hasnt "$W/console-reboot.log" "listen unix /run/agentos-kernel/"', ci)
         self.assertNotIn("my store holds none of your hardware keys", ci)
-        self.assertIn("agentos-keeper-enroll.service", ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split())
+        # The report reads both units once their start jobs settle (#4474).
+        after = ini(UNITS / "agentos-boot-report.service")["Unit"]["After"].split()
+        self.assertIn("agentos-keeper-enroll.service", after)
+        self.assertIn("agentos-keeper-kernel.service", after)
         # The CI unit whose mounts outlive one command lifts the main-side mask in a drop-in that
         # sorts after it.
         for unit in ("agentos-e2e-seal.service",):

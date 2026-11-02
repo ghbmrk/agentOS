@@ -3,21 +3,15 @@ package vm
 // REQ: RES-2
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/importer"
-	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 // plainLocks is the lock check's one allowlist: each function of package
@@ -70,8 +64,7 @@ var plainLocks = map[string]struct {
 // through lockLive, lockEndingExecLive or tryLockLive beyond what
 // plainLocks allows it.
 func TestMachineLockOnlyThroughLockLive(t *testing.T) {
-	fset := token.NewFileSet()
-	pkg, files, info := typeCheckVM(t, fset)
+	fset, pkg, files, info := typeCheckVM(t)
 	mt, ok := pkg.Scope().Lookup("machine").(*types.TypeName)
 	if !ok {
 		t.Fatal("no type machine in package vm")
@@ -167,64 +160,20 @@ func funcName(fd *ast.FuncDecl) string {
 	return "?." + fd.Name.Name
 }
 
-// typeCheckVM type-checks package vm's non-test files against the export
-// data go list builds for its imports.
-func typeCheckVM(t *testing.T, fset *token.FileSet) (*types.Package, []*ast.File, *types.Info) {
+// typeCheckVM type-checks package vm's non-test files through the shared
+// lint loader, and fails on a file of the package it leaves unread.
+func typeCheckVM(t *testing.T) (*token.FileSet, *types.Package, []*ast.File, *types.Info) {
 	t.Helper()
-	cmd := exec.Command("go", "list", "-export", "-deps", "-json=ImportPath,Dir,Export,GoFiles,DepOnly,Error", ".")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	l, err := lintload.Load(".", lintload.Build{}, ".")
 	if err != nil {
-		t.Fatalf("go list: %v\n%s", err, stderr.String())
+		t.Fatal(err)
 	}
-	type listed struct {
-		ImportPath, Dir, Export string
-		GoFiles                 []string
-		DepOnly                 bool
-		Error                   *struct{ Err string }
+	if unread, err := lintload.Unread(l); err != nil || len(unread) != 0 {
+		t.Fatalf("files the lock check does not read: %q (%v)", unread, err)
 	}
-	export := map[string]string{}
-	var self *listed
-	dec := json.NewDecoder(bytes.NewReader(out))
-	for {
-		var p listed
-		if err := dec.Decode(&p); err == io.EOF {
-			break
-		} else if err != nil {
-			t.Fatal(err)
-		}
-		if p.Error != nil {
-			t.Fatalf("go list %s: %s", p.ImportPath, p.Error.Err)
-		}
-		export[p.ImportPath] = p.Export
-		if !p.DepOnly {
-			p := p
-			self = &p
-		}
+	if len(l.Packages) != 1 {
+		t.Fatalf("loaded %d packages, want vm alone", len(l.Packages))
 	}
-	if self == nil {
-		t.Fatal("go list did not list package vm")
-	}
-	imp := importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
-		e, ok := export[path]
-		if !ok || e == "" {
-			return nil, fmt.Errorf("no export data for %s", path)
-		}
-		return os.Open(e)
-	})
-	var files []*ast.File
-	for _, name := range self.GoFiles {
-		f, err := parser.ParseFile(fset, filepath.Join(self.Dir, name), nil, parser.SkipObjectResolution)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, f)
-	}
-	info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
-	pkg, err := (&types.Config{Importer: imp}).Check(self.ImportPath, fset, files, info)
-	if err != nil {
-		t.Fatalf("type-check %s: %v", self.ImportPath, err)
-	}
-	return pkg, files, info
+	p := l.Packages[0]
+	return l.Fset, p.Types, p.Files, p.Info
 }

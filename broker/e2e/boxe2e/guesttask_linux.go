@@ -234,9 +234,8 @@ func short(s string) string {
 // agentDiag says why the agent machine has no socket: agentosd's journal
 // lines about agent machines, cut short, with any issued token cut out.
 func agentDiag(tokens []string) string {
-	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-u", "agentosd.service").Output()
 	var keep []string
-	for _, l := range strings.Split(string(logs), "\n") {
+	for _, l := range strings.Split(readJournal(0, "agentosd.service"), "\n") {
 		if strings.Contains(l, "agent machine") || strings.Contains(l, "worker tools") {
 			keep = append(keep, l)
 		}

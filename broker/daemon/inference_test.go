@@ -162,10 +162,10 @@ var netOK = map[string]allowance{
 	// kernel/proc's ListenClerk and ServeClerk, and the rest of the package
 	// they come in, which serves and dials only unix sockets (its dials are
 	// unixDialCalls), locks its own store and refuses to be dumpable.
-	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store, O_NOFOLLOW opens; no network client",
+	"kernel/proc": {"unix listeners and dials with SO_PEERCRED peer checks, flock on its store and restore lock, O_NOFOLLOW opens, O_NONBLOCK so the restore lock's open never waits on a FIFO; no network client",
 		[]string{"net.Conn", "net.ErrClosed", "net.Listener", "net.UnixConn",
 			"syscall.EWOULDBLOCK", "syscall.Flock", "syscall.GetsockoptUcred", "syscall.LOCK_EX", "syscall.LOCK_NB",
-			"syscall.O_NOFOLLOW", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
+			"syscall.O_NOFOLLOW", "syscall.O_NONBLOCK", "syscall.SOL_SOCKET", "syscall.SO_PEERCRED", "syscall.Ucred"}},
 	"procguard": {"prctl to read and clear the process's dumpable flag (CLK-1); no network client",
 		[]string{"syscall.PR_GET_DUMPABLE", "syscall.PR_SET_DUMPABLE", "syscall.RawSyscall6", "syscall.SYS_PRCTL"}},
 	"clerk/clerkkey": {"Fstat and the file type of a handed-in key descriptor; no network client",

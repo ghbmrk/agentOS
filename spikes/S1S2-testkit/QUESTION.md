@@ -38,7 +38,9 @@ dm-verity with throughput and error count (S7 surprise 2), and the rollback verd
 S2 ([s2.py](mkosi/mkosi.extra/usr/lib/testkit/s2.py)) runs when `s2.conf` on the drive says `RUN_S2=yes`.
 The owner's phone is the only interface: SMS out, SMS in (reply PING), a call out (owner hears 4 digits and
 presses them; the box decodes the keypad tones from uplink audio with [dtmf.py](mkosi/mkosi.extra/usr/lib/testkit/dtmf.py),
-which is also CH-17's premise), and a call in. It records IMS registration (`AT+CIREG?`), since US voice is VoLTE-only.
+which is also CH-17's premise), and a call in. It records IMS registration (`AT+CIREG?`), since US voice is VoLTE-only. In the same run it takes the readings
+[S2-CONFIRM.md](../../broker/modem/at/S2-CONFIRM.md) lists for the Go driver (C3, C7, C9, C11 to C15, and C10's speech
+check), so S2 runs once. C16 and C17 need a day of readings and stay separate.
 
 Privacy: `results/` holds no serial numbers, MAC addresses, IMEI/ICCID/IMSI, or phone numbers, so Mark can upload
 it. Call recordings go to `private/`, which stays on the drive. The box answers only calls from `OWNER_NUMBER`,

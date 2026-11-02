@@ -117,6 +117,9 @@ TIER_A_BROKER = {
     "sipsign", "smsapi",          # also (a)
     # wiring: every binary's main, and the core list itself
     "cmd", "core",
+    # internal/lintload: the loader every tier-A source lint reads through (#4273); a false pass
+    # there passes those lints, and childproc's gate exempts it (it runs go list)
+    "internal",
 }
 # broker/ packages that meet none of the three criteria: tier B.
 TIER_B_BROKER = {

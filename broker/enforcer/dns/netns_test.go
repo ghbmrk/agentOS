@@ -25,6 +25,7 @@ import (
 
 	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/nft/load"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
 
 // The netns tests run real dnsmasq and the real ruleset in network
@@ -681,6 +682,76 @@ func TestOnlyResolvedAddressesAllowed(t *testing.T) {
 		slices.Sort(want)
 		if !slices.Equal(got, want) {
 			t.Errorf("set %s holds %v, want %v", set, got, want)
+		}
+	}
+
+	// Each answer also went to its name's own set, so a load keeps the
+	// answers of the names still listed: dropping cdn.example from the
+	// TV's list leaves its set only tv.example's address, and the core's
+	// and the plug's sets as they were, with no query asked again (#4237,
+	// #4080).
+	h.namesHold(fixturePolicy(), map[string]map[string][]string{
+		nft.CoreSet(false):        {"core.example": {coreAddr}, "updates.core.example": {cdnAddr}},
+		nft.DeviceSet(101, false): {"tv.example": {tvAddr}, "cdn.example": {cdnAddr}},
+		nft.DeviceSet(103, false): {"plug.example": {plugAddr}, "cdn.example": {cdnAddr}},
+	})
+	narrow := fixturePolicy()
+	narrow.Devices = slices.Clone(narrow.Devices)
+	for i, dev := range narrow.Devices {
+		if dev.ID == "tv" {
+			narrow.Devices[i].Allow = []string{"tv.example"}
+		}
+	}
+	running, err := (load.Loader{Bin: lookPath(t, "nft")}).List(context.Background(), nft.Table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := nft.Reload(narrow, fixtureLayout(), running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (load.Loader{Bin: lookPath(t, "nft")}).Load(context.Background(), text); err != nil {
+		t.Fatal(err)
+	}
+	for set, want := range map[string][]string{
+		nft.CoreSet(false):        {cdnAddr, coreAddr},
+		nft.DeviceSet(101, false): {tvAddr},
+		nft.DeviceSet(103, false): {cdnAddr, plugAddr},
+	} {
+		got := h.set(set)
+		slices.Sort(got)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("after narrowing the TV's list, set %s holds %v, want %v", set, got, want)
+		}
+	}
+	for _, c := range []struct {
+		from, addr string
+		want       bool
+	}{
+		{"ap0.101", tvAddr, true}, {"ap0.101", cdnAddr, false}, {"ap0.103", cdnAddr, true}, {"core0", cdnAddr, true},
+	} {
+		if got := h.reaches(c.from, c.addr); got != c.want {
+			t.Errorf("after narrowing the TV's list, %s -> %s: %v, want %v", c.from, c.addr, got, c.want)
+		}
+	}
+}
+
+// namesHold checks each name's own set in d holds exactly its answers.
+func (h *home) namesHold(d policy.Document, want map[string]map[string][]string) {
+	h.t.Helper()
+	sets, err := nft.AllowSets(d, fixtureLayout())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	for _, a := range sets {
+		for name, w := range want[a.Set4] {
+			got := h.set(a.Named(name, false))
+			slices.Sort(got)
+			slices.Sort(w)
+			if !slices.Equal(got, w) {
+				h.t.Errorf("%s's set in %s holds %v, want %v", name, a.Set4, got, w)
+			}
 		}
 	}
 }

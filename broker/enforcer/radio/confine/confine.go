@@ -6,8 +6,8 @@
 // filter spikes/ENF-radio measured, with socket families narrowed to the
 // profile's list. Thread alone also gets a user namespace the enforcer
 // creates as root, with CAP_NET_ADMIN and CAP_NET_RAW in it. A profile
-// with a View (BLE's is the system bus socket) sees only those paths, in a
-// mount namespace of its own (view.go). The process gets its command interface as fd 3, one end
+// with a View sees only its entries, in a mount namespace of its own
+// (view.go); every shipped profile has one. The process gets its command interface as fd 3, one end
 // of a socket pair, and nothing else: it never opens a path to the
 // enforcer, so the policy store and the page's socket stay its owner's
 // files, unreadable to it.
@@ -53,13 +53,13 @@ type Profile struct {
 	// bringing lo up.
 	Links []string
 	// View, when set, is all of the file system the stack sees: its root
-	// is an empty read-only tmpfs holding each listed path that exists,
-	// bound read-only, nosuid and nodev at its own path, so a
-	// Unix socket the list leaves out cannot be named. The stack's own
-	// mount namespace is built in a user namespace created by the
-	// enforcer as root, mapping only the stack's user and group, whose
-	// CAP_SYS_ADMIN Trampoline drops before the exec. Not with NetAdmin.
-	View []string
+	// is an empty read-only tmpfs holding each listed entry that exists,
+	// at its own path (view.go), so a Unix socket or file the list leaves
+	// out cannot be named. The stack's own mount namespace is built in a
+	// user namespace created by the enforcer as root, mapping only the
+	// stack's user and group (Thread's own, with NetAdmin), whose
+	// CAP_SYS_ADMIN Trampoline drops before the exec.
+	View []Entry
 }
 
 // BLE is the Bluetooth stack's profile: it reaches BlueZ over the system
@@ -67,33 +67,48 @@ type Profile struct {
 // Bluetooth socket (BLE commissioning goes through BlueZ, never raw HCI),
 // and the bus socket is the only file it sees (#4215).
 func BLE(uid, gid uint32) Profile {
-	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}, View: []string{SystemBus}}
+	return Profile{Name: "ble", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX},
+		View: []Entry{{Path: SystemBus, Kind: Socket}}}
 }
+
+// Tun is the tun device ot-daemon makes wpan0 from.
+const Tun = "/dev/net/tun"
 
 // Thread is the Thread stack's profile (ot-daemon; D-231): its own user
 // and network namespace holding lo, the wpan0 it creates from a tun, and
 // a dummy infra0 as its infrastructure link, so its SRP advertising proxy
 // and mDNS reach the Matter controller and no LAN (spikes/ENF-radio,
-// consequence 1). IP, netlink and Unix sockets only: no packet socket.
-func Thread(uid, gid uint32) Profile {
+// consequence 1). IP, netlink and Unix sockets only: no packet socket. It
+// sees its state directory and its run directory, where it makes its
+// command socket (its working directory), both writable; the radio's
+// serial device; the tun device; and /dev/urandom, its entropy (#4369).
+func Thread(uid, gid uint32, state, run, radio string) Profile {
 	return Profile{Name: "thread", UID: uid, GID: gid, NetAdmin: true, Links: []string{"infra0"},
-		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK}}
+		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK},
+		View: []Entry{{Path: state, Kind: Dir, Write: true}, {Path: run, Kind: Dir, Write: true},
+			{Path: radio, Kind: Device}, {Path: Tun, Kind: Device}, {Path: "/dev/urandom", Kind: Device}}}
 }
 
 // Matter is the Matter controller's profile: started into the Thread
 // stack's network namespace (Spec.Net) as its own user, with no
 // capability, so it reaches Thread devices and the SRP proxy's mDNS on
-// infra0 and nothing else.
-func Matter(uid, gid uint32) Profile {
+// infra0 and nothing else. It sees its storage directory, writable, and
+// nothing else: Bluetooth commissioning goes through the BLE process over
+// the radio host, not a path (#4369).
+func Matter(uid, gid uint32, storage string) Profile {
 	return Profile{Name: "matter", UID: uid, GID: gid,
-		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK}}
+		Families: []int{syscall.AF_UNIX, syscall.AF_INET, syscall.AF_INET6, syscall.AF_NETLINK},
+		View:     []Entry{{Path: storage, Kind: Dir, Write: true}}}
 }
 
 // ThreadAdapter is the Thread adapter's profile: ot-daemon's user, so it
-// can open ot-daemon's command socket in their state directory, in a
-// fresh empty network namespace with Unix sockets only.
-func ThreadAdapter(uid, gid uint32) Profile {
-	return Profile{Name: "thread-adapter", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX}}
+// can open ot-daemon's command socket, in a fresh empty network namespace
+// with Unix sockets only. It sees ot-daemon's run directory, read-only,
+// which holds that socket (its working directory), and not the state
+// directory with the network's keys (#4369).
+func ThreadAdapter(uid, gid uint32, run string) Profile {
+	return Profile{Name: "thread-adapter", UID: uid, GID: gid, Families: []int{syscall.AF_UNIX},
+		View: []Entry{{Path: run, Kind: Dir}}}
 }
 
 // Spec is one stack process to start.
@@ -116,21 +131,22 @@ type Spec struct {
 
 // Proc is a running stack.
 type Proc struct {
-	cmd  *exec.Cmd
-	net  *os.File      // its network namespace, unless it joined another's
-	keep chan struct{} // holds the thread that started the stack
-	once sync.Once
+	cmd     *exec.Cmd
+	net     *os.File      // its network namespace, unless it joined another's
+	keep    chan struct{} // holds the thread that started the stack
+	once    sync.Once
+	reap    sync.Once
+	err     error // the stack's exit, once reaped
+	netOnce sync.Once
 }
 
 // Arg0 marks the re-exec of the enforcer's own binary that confines itself
-// and then execs the stack (Trampoline). ArgHold marks one that also waits
-// for the enforcer to set up its network namespace before the exec.
-const (
-	Arg0    = "agentos-radio-confine"
-	ArgHold = "agentos-radio-confine-hold"
-)
+// and then execs the stack (Trampoline), once the enforcer releases it.
+const Arg0 = "agentos-radio-confine"
 
-// holdFD is the descriptor a held stack waits on: one byte means go on.
+// holdFD is the descriptor every stack waits on before its exec, so it
+// cannot exit before Start holds its network namespace and has set up its
+// links: one byte means go on.
 const holdFD = 4
 
 var (
@@ -189,26 +205,20 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		dir = "/"
 	}
 	attr := procAttr(s)
-	arg0, extra := Arg0, []*os.File{theirs}
-	hold := p.NetAdmin || len(p.Links) > 0
-	var release *os.File
-	if hold {
-		r, w, err := os.Pipe()
-		if err != nil {
-			ours.Close()
-			return nil, nil, err
-		}
-		defer r.Close()
-		arg0, extra, release = ArgHold, append(extra, r), w
-		defer release.Close()
+	r, release, err := os.Pipe()
+	if err != nil {
+		ours.Close()
+		return nil, nil, err
 	}
+	defer r.Close()
+	defer release.Close()
 	cmd := &exec.Cmd{
 		Path:        self,
-		Args:        append([]string{arg0, strings.Join(fam, ","), strings.Join(p.View, "\n"), s.Path}, s.Args...),
+		Args:        append([]string{Arg0, strings.Join(fam, ","), encodeView(p.View), s.Path}, s.Args...),
 		Env:         []string{},
 		Dir:         dir,
 		Stderr:      s.Stderr,
-		ExtraFiles:  extra,
+		ExtraFiles:  []*os.File{theirs, r},
 		SysProcAttr: attr,
 	}
 	// The child's Pdeathsig fires when the OS thread that forked it exits,
@@ -236,22 +246,27 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	if s.Net == nil {
 		// The child has not been reaped, so its pid is still its own.
-		f, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", cmd.Process.Pid))
+		f, err := openNet(cmd.Process.Pid)
 		if err != nil {
 			return fail(err)
 		}
 		proc.net = f
 	}
-	if hold {
+	if p.NetAdmin || len(p.Links) > 0 {
 		if err := inNetns(proc.net, func() error { return setupLinks(p.Links) }, nil); err != nil {
 			return fail(err)
 		}
-		if _, err := release.Write([]byte{1}); err != nil {
-			return fail(err)
-		}
+	}
+	if _, err := release.Write([]byte{1}); err != nil {
+		return fail(err)
 	}
 	return proc, ours, nil
 }
+
+// openNet opens a started stack's network namespace. Start calls it
+// before it releases the stack, so a stack that exits at once cannot fail
+// its own start; a test delays it to hold that order (#4477).
+var openNet = func(pid int) (*os.File, error) { return os.Open(fmt.Sprintf("/proc/%d/ns/net", pid)) }
 
 // procAttr is how the fork confines s under its profile: its own user, a
 // fresh IPC namespace and, unless it joins another stack's, a fresh
@@ -261,7 +276,11 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 	p := s.Profile
 	attr := &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID, Groups: []uint32{}},
-		Cloneflags: syscall.CLONE_NEWIPC,
+		// A fresh PID namespace, with the stack as its init: when the
+		// stack exits, the kernel kills every process it started and the
+		// stack is reaped only after they are gone, so none of them keeps
+		// its end of the interface (radio.Host.Attach, ENF-k-11).
+		Cloneflags: syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID,
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
 	}
@@ -278,14 +297,14 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 		attr.AmbientCaps = []uintptr{capNetAdmin, capNetRaw}
 	}
 	if len(p.View) > 0 {
-		// As for NetAdmin, but for the stack's own mount namespace:
-		// Trampoline builds the view with CAP_SYS_ADMIN there and drops
-		// it before the exec.
+		// As for NetAdmin (the same user namespace, with NetAdmin), for
+		// the stack's own mount namespace: Trampoline builds the view with
+		// CAP_SYS_ADMIN there and drops it, and only it, before the exec.
 		attr.Cloneflags |= syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS
 		attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.UID), HostID: int(p.UID), Size: 1}}
 		attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: int(p.GID), HostID: int(p.GID), Size: 1}}
 		attr.GidMappingsEnableSetgroups = true
-		attr.AmbientCaps = []uintptr{capSysAdmin}
+		attr.AmbientCaps = append(attr.AmbientCaps, capSysAdmin)
 	}
 	return attr
 }
@@ -293,11 +312,14 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 // Pid is the stack's process id.
 func (p *Proc) Pid() int { return p.cmd.Process.Pid }
 
-// Wait waits for the stack to exit.
+// Wait waits for the stack to exit and reaps it. Every call, from any
+// goroutine, returns only once it has been reaped, with its exit.
 func (p *Proc) Wait() error {
-	err := p.cmd.Wait()
-	p.release()
-	return err
+	p.reap.Do(func() {
+		p.err = p.cmd.Wait()
+		p.release()
+	})
+	return p.err
 }
 
 // release lets the thread that started the stack exit, once the stack has
@@ -306,15 +328,16 @@ func (p *Proc) release() {
 	p.once.Do(func() { close(p.keep) })
 }
 
-// Stop kills the stack and reaps it.
+// Stop kills the stack and returns once it has been reaped (Wait), so
+// every process it started is gone. It may be called more than once.
 func (p *Proc) Stop() error {
 	p.cmd.Process.Kill()
-	if p.net != nil {
-		p.net.Close()
-	}
-	err := p.cmd.Wait()
-	p.release()
-	return err
+	p.netOnce.Do(func() {
+		if p.net != nil {
+			p.net.Close()
+		}
+	})
+	return p.Wait()
 }
 
 // InNet runs fn on an OS thread inside the stack's network namespace; the
@@ -363,18 +386,18 @@ func setns(f *os.File, kind int) error {
 // TestMain). It never returns from a confined start: on any failure it
 // exits 126 before the stack runs.
 func Trampoline() {
-	if os.Args[0] != Arg0 && os.Args[0] != ArgHold {
+	if os.Args[0] != Arg0 {
 		return
 	}
 	err := errors.New("confine: too few arguments")
 	if len(os.Args) >= 4 {
-		err = confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:], os.Args[0] == ArgHold)
+		err = confineAndExec(os.Args[1], os.Args[2], os.Args[3], os.Args[3:])
 	}
 	fmt.Fprintf(os.Stderr, "confine: %v\n", err)
 	os.Exit(126)
 }
 
-func confineAndExec(families, view, path string, argv []string, hold bool) error {
+func confineAndExec(families, view, path string, argv []string) error {
 	var fam []int
 	for f := range strings.SplitSeq(families, ",") {
 		if f == "" {
@@ -392,6 +415,14 @@ func confineAndExec(families, view, path string, argv []string, hold bool) error
 	if groups, err := syscall.Getgroups(); err != nil || len(groups) != 0 {
 		return fmt.Errorf("confine: supplementary groups %v (%v)", groups, err)
 	}
+	// No core dump, soft or hard: a crashed stack's memory holds what it
+	// guards (Thread's network keys), and a core written to its working
+	// directory would reach another process that sees it (Thread's
+	// adapter, the run directory). The stack has no CAP_SYS_RESOURCE over
+	// the host, so it cannot raise the limit again (#4459).
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{}); err != nil {
+		return fmt.Errorf("confine: no core: %w", err)
+	}
 	// Mark every descriptor past the interface (fd 3) close-on-exec, so
 	// nothing the enforcer inherited without it reaches the stack. Marking
 	// rather than closing leaves the Go runtime's own fds (netpoll) open
@@ -402,25 +433,26 @@ func confineAndExec(families, view, path string, argv []string, hold bool) error
 	runtime.LockOSThread()
 	exe := -1
 	if view != "" {
-		var err error
-		if exe, err = enterView(strings.Split(view, "\n"), path); err != nil {
+		entries, err := decodeView(view)
+		if err != nil {
+			return err
+		}
+		if exe, err = enterView(entries, path); err != nil {
 			return fmt.Errorf("confine: view: %w", err)
 		}
-		if err := dropCaps(); err != nil {
+		if err := dropSysAdmin(); err != nil {
 			return fmt.Errorf("confine: capabilities: %w", err)
 		}
 	}
 	if err := install(filter(slices.Sorted(slices.Values(fam)))); err != nil {
 		return fmt.Errorf("confine: seccomp: %w", err)
 	}
-	if hold {
-		// The enforcer sets up the network namespace, then writes one
-		// byte; end of file means it gave up. The descriptor is
-		// close-on-exec, so the stack never holds it.
-		var b [1]byte
-		if n, err := syscall.Read(holdFD, b[:]); n != 1 {
-			return fmt.Errorf("confine: not released (%v)", err)
-		}
+	// The enforcer opens the network namespace and sets it up, then
+	// writes one byte; end of file means it gave up. The descriptor is
+	// close-on-exec, so the stack never holds it.
+	var b [1]byte
+	if n, err := syscall.Read(holdFD, b[:]); n != 1 {
+		return fmt.Errorf("confine: not released (%v)", err)
 	}
 	if exe != -1 {
 		return execFD(exe, argv)

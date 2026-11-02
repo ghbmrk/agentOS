@@ -7,7 +7,10 @@ hearing the digits, uplink audio by decoding the keypad tones (dtmf.py).
 Audio routes are vendor specific and UNTESTED until real hardware (from the vendors' AT manuals):
   Quectel (USB 2c7c): USB Audio Class, enabled once with AT+QCFG="usbcfg" (UAC flag), then AT+QPCMV=1,2.
   SIMCom (USB 1e0e): AT+CPCMREG=1 streams 8 kHz 16-bit PCM over the modem's audio serial port.
-Results never include IMEI, ICCID, IMSI, or phone numbers. Call recordings go to private/ only."""
+Results never include IMEI, ICCID, IMSI, or phone numbers. Call recordings go to private/ only.
+
+It also takes the readings broker/modem/at/S2-CONFIRM.md lists for the Go driver (C3, C7, C9, C11 to C15,
+and the speech part of C10), so S2 runs once: the owner inserts the SIM, sends one text and takes the calls."""
 import glob
 import json
 import os
@@ -43,6 +46,60 @@ def mm(args, js=False):
 def same_number(a, b):
     da, db = re.sub(r"\D", "", a or ""), re.sub(r"\D", "", b or "")
     return len(da) >= 7 and da[-10:] == db[-10:]
+
+
+def shape(text):
+    """An AT answer with identifiers blanked, for results/: digit runs of 6 or more (ICCID, IMSI) and
+    quoted hex (CEREG's area and cell) become their length, so the form stays readable (C13)."""
+    text = re.sub(r'"[0-9A-Fa-f]{2,}"', lambda m: '"<%d hex>"' % (len(m.group(0)) - 2), text or "")
+    return re.sub(r"\d{6,}", lambda m: "<%d digits>" % len(m.group(0)), text)
+
+
+def number_form(number):
+    """How the carrier wrote a number, never the number itself (C12)."""
+    n = (number or "").strip()
+    digits = re.sub(r"\D", "", n)
+    if not digits:
+        return "none"
+    if n.startswith("+"):
+        form = "international (+)"
+    elif digits.startswith("00"):
+        form = "international (00)"
+    elif digits.startswith("0"):
+        form = "trunk prefix 0"
+    else:
+        form = "no prefix"
+    return "%s, %d digits" % (form, len(digits))
+
+
+URC_KEY = re.compile(r"\+QTONEDET:\s*(\d+)|\+RXDTMF:\s*([0-9A-D*#])")
+
+
+def urc_keys(log):
+    """Keys from the modems' own DTMF reports in ModemManager's debug log (C7):
+    Quectel +QTONEDET: <ASCII code>, SIMCom +RXDTMF: <key>."""
+    return "".join(chr(int(a)) if a else b for a, b in URC_KEY.findall(log or "")
+                   if b or 32 < int(a) < 127)
+
+
+def extra_keys(heard, digits):
+    """Keys decoded beyond the one expected run of digits: the owner's speech decoded as keys (C10)."""
+    return len(heard.replace(digits, "", 1)) if digits in heard else len(heard)
+
+
+def port_interfaces(ports, interface_of):
+    """ModemManager's ports ("ttyUSB2 (at)") with their USB interface numbers (C3)."""
+    out = []
+    for p in ports or []:
+        m = re.match(r"(\S+) \((\w+)\)", p)
+        if m and m.group(1).startswith("tty"):
+            out.append("%s %s if%s" % (m.group(2), m.group(1), interface_of(m.group(1)) or "?"))
+    return ", ".join(out) or "none listed"
+
+
+def tty_interface(name):
+    dev = "/sys/class/tty/%s/device" % name  # ttyACM: the interface itself; ttyUSB: a port under it
+    return read(dev + "/bInterfaceNumber") or read(dev + "/../bInterfaceNumber")
 
 
 def wait(pred, secs, step=2):
@@ -123,9 +180,13 @@ def quectel_enable_uac(modem):
     f[8] = "1"
     old = m.group(1)
     modem.at('+QCFG="usbcfg",%s' % ",".join(f))
+    t0 = time.monotonic()
     modem.at("+CFUN=1,1")  # modem restarts and re-enumerates with the audio interface
-    time.sleep(20)
-    return 'UAC enabled; this setting persists in the modem. To restore: AT+QCFG="usbcfg",%s' % old
+    wait(lambda: not mm("-L", True).get("modem-list"), 30, 1)
+    back = wait(lambda: mm("-L", True).get("modem-list"), 180, 1)
+    return ('UAC enabled; this setting persists in the modem. To restore: AT+QCFG="usbcfg",%s. '
+            "Restart (C11): %s" % (old, "listed by ModemManager again after %.0f s" % (time.monotonic() - t0) if back
+                                   else "not listed again within 210 s"))
 
 
 def simcom_audio_tty():
@@ -188,18 +249,55 @@ def converse(route, modem, pcm, secs, rec_path):
 def call_test(modem, route, cid, private, tag):
     digits = "".join(random.SystemRandom().choice("123456789") for _ in range(4))
     spoken = ". ".join(digits)
-    pcm = prompt_pcm("Agent O S test. Your digits are: %s. Again: %s. Now press them on your keypad." %
-                     (spoken, spoken), "/run/testkit/prompt.raw")
-    got = converse(route, modem, pcm, 40, os.path.join(private, "call-%s.raw" % tag))
+    pcm = prompt_pcm("Agent O S test. Your digits are: %s. Again: %s. Now press them on your keypad, "
+                     "then count aloud from one to ten." % (spoken, spoken), "/run/testkit/prompt.raw")
+    since = time.time()
+    got = converse(route, modem, pcm, 50, os.path.join(private, "call-%s.raw" % tag))
     mm("-o %s --hangup" % cid)
     if got:
         sh("sox -t raw -r 8000 -c 1 -b 16 -e signed %s %s" % (os.path.join(private, "call-%s.raw" % tag),
                                                             os.path.join(private, "call-%s.wav" % tag)))
     heard = dtmf.decode_pcm(got) if got else ""
     if not got:
-        return "call connected; no audio route for this modem, audio not tested"
-    return "%s: sent digits %s, decoded keypad %r, %d s of uplink audio" % (
-        "PASS" if digits in heard else "FAIL", digits, heard, len(got) // (2 * RATE))
+        return "call connected; no audio route for this modem, audio not tested; modem DTMF reports %r (C7)" % (
+            urc_keys(sh("journalctl -b -o cat -u ModemManager --since=@%d" % since, 30)))
+    reports = urc_keys(sh("journalctl -b -o cat -u ModemManager --since=@%d" % since, 30))
+    return ("%s: sent digits %s, decoded keypad %r, %d s of uplink audio; speech decoded as %d extra keys (C10); "
+            "modem DTMF reports %s (C7)" % (
+                "PASS" if digits in heard else "FAIL", digits, heard, len(got) // (2 * RATE),
+                extra_keys(heard, digits), repr(reports) if reports else "none in ModemManager's log"))
+
+
+def readings(m, vendor):
+    """One-shot AT readings for S2-CONFIRM.md, identifiers blanked by shape()."""
+    quectel = vendor == "2c7c"
+    out = [("ports", port_interfaces(m.info().get("generic", {}).get("ports"), tty_interface)),  # C3
+           ("sim_serial_form", shape(m.at("+QCCID" if quectel else "+CICCID"))),  # C13
+           ("status_forms", shape(" | ".join(m.at(c) for c in ("+CPIN?", "+CEREG?", "+CSQ")))),  # C13
+           ("sms_storage", shape(m.at("+CPMS=?") + " | " + m.at("+CPMS?")))]  # C9
+    if quectel:  # C15
+        out.append(("network_time", shape(m.at("+QLTS=1") + " | " + m.at("+QLTS=2"))))
+    else:  # C14
+        out.append(("network_time", m.at("+CCLK?")))
+    m.at("+QTONEDET=1" if quectel else "+DDET=1")  # C7: the modem's own DTMF reports, read after each call
+    return out
+
+
+def long_text(m):
+    """C9: a 200-character text to the box's own number arrives whole. Content is synthetic, never logged."""
+    own = next(iter(m.info().get("generic", {}).get("own-numbers") or []), "")
+    if not own:
+        return "not tested: the SIM does not report its own number"
+    body = ("agentOS S2 long text check " * 8)[:200]
+    seen = {json.dumps(c, sort_keys=True) for c in m.inbox()}
+    if not m.sms(own, body):
+        return "FAIL: could not send to the box's own number"
+    got = wait(lambda: next((c for c in m.inbox() if json.dumps(c, sort_keys=True) not in seen
+                             and same_number(c.get("number"), own)), None), 180, 3)
+    if not got:
+        return "FAIL: no text back from the box's own number within 3 minutes"
+    return "PASS: arrived whole" if (got.get("text") or "") == body else (
+        "FAIL: arrived as %d characters, not 200 (split or cut)" % len(got.get("text") or ""))
 
 
 def run(conf, private):
@@ -236,6 +334,7 @@ def run(conf, private):
     elif vendor == "1e0e" and simcom_audio_tty():
         route = ("serial", simcom_audio_tty())
     res.append(("audio_route", "%s %s" % route if route[1] else "none known for USB vendor %s" % vendor))
+    res += readings(m, vendor)
 
     # SMS out and in
     t0 = time.monotonic()
@@ -248,6 +347,9 @@ def run(conf, private):
     res.append(("sms_in", "PASS (%s) after %.0f s" % (
         "PING received" if (ping.get("text") or "").strip().upper() == "PING" else "other text",
         time.monotonic() - t0) if ping else "FAIL: no reply from the owner's number within 5 minutes"))
+    if ping:
+        res.append(("sms_sender_form", number_form(ping.get("number"))))  # C12
+    res.append(("sms_long_in", long_text(m)))  # C9
 
     # Outgoing call
     m.sms(owner, "Next I will call you. Answer, listen for 4 digits, then press them on your keypad.")
@@ -272,6 +374,7 @@ def run(conf, private):
                               and c.get("state") == "ringing-in" and same_number(c.get("number"), owner)),
                              None), 300, 1)
     if ring:
+        res.append(("caller_form", number_form(next((c.get("number") for cid, c in m.calls() if cid == ring), ""))))
         if vendor == "2c7c" and route[0] == "uac":
             m.at("+QPCMV=1,2")
         mm("-o %s --accept" % ring)

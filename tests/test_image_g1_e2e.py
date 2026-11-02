@@ -4,8 +4,11 @@ e2e run (the box-e2e driver, image/e2e/*) reaches the shipped image (#1739).
 
 Kept apart from tests/test_image.py, which several open PRs edit (D-111)."""
 import configparser
+import importlib.machinery
+import importlib.util
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -24,6 +27,20 @@ def ini(path):
     p.optionxform = str
     p.read(path)
     return p
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+check = load("image_check_e2e", MK / "mkosi.finalize")
+# The tree check takes configuration only through root's steps; a test takes its own uid instead.
+check.TREE_OWNER = os.geteuid()
+check.TREE_GROUP = os.getegid()
 
 
 def stub(d, name, body):
@@ -109,10 +126,12 @@ E2E_NAMES = ("box-e2e", "boxe2e", "e2e/", "agentos-e2e")
 
 
 def shipped_sources():
-    """build.sh (its install list) and every file under image/mkosi (what mkosi puts in the image)."""
+    """build.sh (its install list) and every file under image/mkosi (what mkosi puts in the image), but
+    mkosi.finalize: the tree check, which names the e2e pieces to refuse them (BuiltTreeTest) and only
+    reads the tree (tests/test_image.py TreeAccessTest)."""
     yield BUILD
     for p in sorted(MK.rglob("*")):
-        if p.is_file():
+        if p.is_file() and p != MK / "mkosi.finalize" and "__pycache__" not in p.parts:
             yield p
 
 
@@ -138,7 +157,7 @@ def workflow_hits(text):
     for line in text.splitlines():
         if "E2E=" in line:
             where = line.split("E2E=", 1)[1].split()[0]
-        elif "box-e2e" in line or "boxe2e" in line:
+        elif "box-e2e" in line or "boxe2e" in line or "agentos_e2e" in line:
             where = line
         else:
             continue
@@ -185,11 +204,87 @@ class ImageGuardTest(unittest.TestCase):
             'run: cd broker && go build -o "$RUNNER_TEMP/out/stage/usr/lib/agentos/box-e2e" ./e2e/boxe2e',
             'run: cd broker && go build -o "$RUNNER_TEMP/out/box-e2e" ./e2e/boxe2e',
             'run: sudo env E2E="$RUNNER_TEMP/out/e2e" image/ci_boot.sh "$RUNNER_TEMP/out/a.raw"',
+            'run: cd broker && go build -tags agentos_e2e -o "$RUNNER_TEMP/out/stage/usr/lib/agentos/agentos-egress" ./cmd/agentos-egress',
         ):
             with self.subTest(line=line):
                 self.assertEqual(len(workflow_hits(line)), 1)
         ok = 'run: sudo env E2E="$RUNNER_TEMP/e2e" image/ci_boot.sh "$RUNNER_TEMP/out/a.raw" "$RUNNER_TEMP/boot"'
         self.assertEqual(workflow_hits(ok), [])
+
+
+class BuiltTreeTest(unittest.TestCase):
+    """#1715 item 1: the image build's own tree check (mkosi.finalize, run on the built tree before
+    mkosi writes the partitions) refuses any e2e piece, so the built image cannot hold one even if a
+    build input stops naming it the way ImageGuardTest reads."""
+    # REQ: DEV-2, HW-1
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.unit("usr/lib/systemd/system/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/agentosd\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def unit(self, rel, text, mode=0o644):
+        f = self.root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+        f.chmod(mode)
+        return f
+
+    def refusals(self):
+        return [l for l in check.violations(self.root) if check.E2E_WHY in l]
+
+    def test_a_clean_tree_is_not_refused(self):
+        self.assertEqual(self.refusals(), [])
+
+    def test_every_e2e_piece_is_refused_by_name_or_content(self):
+        pieces = {"usr/lib/agentos/box-e2e": "\x7fELF"}
+        for f in sorted(E2E.iterdir()):
+            d = "usr/lib/systemd/system/" + ("multi-user.target.d/" if f.suffix == ".conf" else "")
+            pieces[d + f.name] = f.read_text()
+        for rel, text in pieces.items():
+            with self.subTest(rel=rel):
+                f = self.unit(rel, text, 0o755 if "box-e2e" in rel else 0o644)
+                try:
+                    self.assertEqual({l.split(": ", 1)[0] for l in self.refusals()}, {rel})
+                finally:
+                    f.unlink()
+        rel = "etc/systemd/system/agentos-egress.service.d/x.conf"
+        self.unit(rel, "[Service]\nBindReadOnlyPaths=/srv/agentos_e2e/egress:/usr/lib/agentos/agentos-egress\n")
+        self.assertEqual({l.split(": ", 1)[0] for l in self.refusals()}, {rel})
+
+    def test_the_built_image_check_runs_e2e_violations(self):
+        # The refusal must be wired into violations(), the list main() fails the build on.
+        src = (MK / "mkosi.finalize").read_text()
+        body = src.split("def _violations(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("e2e_violations(root)", body)
+
+
+# image.yml's path filters are kept by hand, so the image run also runs nightly on main (#1740 item 3):
+# an import a filter misses is built and booted within a day, whatever the lists say.
+class ImageTriggerTest(unittest.TestCase):
+    # REQ: HW-10
+
+    def block(self, text, event):
+        m = re.search(r"^  %s:\n((?:    .*\n|\s*\n)+)" % event, text, re.M)
+        self.assertIsNotNone(m, event)
+        return m.group(1)
+
+    def paths(self, text, event):
+        return [l.strip()[2:].strip('"') for l in self.block(text, event).splitlines()
+                if l.strip().startswith("- ")]
+
+    def test_main_is_built_nightly(self):
+        text = WORKFLOW.read_text()
+        self.assertRegex(self.block(text, "schedule"), r'- cron: "\d+ \d+ \* \* \*"')
+
+    def test_pull_requests_and_main_watch_the_same_paths(self):
+        text = WORKFLOW.read_text()
+        pr, push = self.paths(text, "pull_request"), self.paths(text, "push")
+        self.assertTrue(pr and "broker/e2e/boxe2e/**" in pr)
+        self.assertEqual(pr, push)
 
 
 if __name__ == "__main__":

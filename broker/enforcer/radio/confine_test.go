@@ -43,6 +43,14 @@ func TestMain(m *testing.M) {
 		probeNet(os.Args[2], os.Args[3], os.Args[4])
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == faultArg {
+		faultStack()
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == sleepArg {
+		time.Sleep(time.Hour)
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == idleArg {
 		io.Copy(io.Discard, os.Stdin)
 		return
@@ -148,19 +156,19 @@ func ptraceChild(func(error) string) string {
 	return fmt.Sprintf("untested: malformed seize %d, seize %d", malformed, e)
 }
 
-// loader is what this test binary needs to run in a view: it links cgo
-// (net), so it is dynamic, while the enforcer's binary is static
-// (image/build.sh). A path the host lacks is left out of the view.
-var loader = []string{"/lib", "/lib64", "/usr/lib", "/usr/lib64"}
-
-// bleProbe is the BLE profile with its view widened by the loader, and by
-// /proc, which probeStack reads for its interfaces and execs itself from
-// for its ptrace target. The policy and the page stay outside the view.
-func bleProbe(uid uint32) confine.Profile {
-	p := confine.BLE(uid, uid)
-	p.View = slices.Concat(p.View, loader, []string{"/proc"})
+// probeView widens a profile's view by what this test binary needs to run
+// as its stack: the loader, since it links cgo (net) and so is dynamic,
+// while the enforcer's binary is static (image/build.sh); and /proc,
+// which the probes read for their interfaces and status and exec
+// themselves from for their ptrace target. The policy and the page stay
+// outside the view.
+func probeView(p confine.Profile) confine.Profile {
+	p.View = slices.Concat(p.View, confine.Loader(), []confine.Entry{{Path: "/proc", Kind: confine.Dir}})
 	return p
 }
+
+// bleProbe is the BLE profile widened by probeView.
+func bleProbe(uid uint32) confine.Profile { return probeView(confine.BLE(uid, uid)) }
 
 // asRoot runs the calling test as root: directly when it is, otherwise
 // again as root of a user namespace that maps the runner's subordinate ids
@@ -238,7 +246,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 	bin := filepath.Join(state, "radio.test")
 	copyFile(t, os.Args[0], bin)
 
-	read := func(t *testing.T, conn Conn) map[string]string {
+	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
 		// The host's read loop outlives the subtest (its link ends when the
 		// deferred Stop runs), so its log goes to a sink, not to t.
 		h, err := NewHost(Config{Devices: []Device{scale}, Timeout: 20 * time.Second,
@@ -246,7 +254,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		h.Attach(StackBLE, conn)
+		h.Attach(StackBLE, p, conn)
 		b, err := h.State(scale.Name)
 		if err != nil {
 			t.Fatalf("read through the interface: %v", err)
@@ -274,7 +282,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer proc.Stop()
-		got := read(t, conn)
+		got := read(t, proc, conn)
 		for k, v := range got {
 			t.Logf("%-32s %s", k, v)
 		}
@@ -318,7 +326,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 		}
 		theirs.Close()
 		defer func() { cmd.Process.Kill(); cmd.Wait() }()
-		got := read(t, ours)
+		got := read(t, exited{}, ours)
 		for _, k := range []string{"read the policy", "dial the page", "AF_INET socket", "ptrace"} {
 			if got[k] != "allowed" {
 				t.Errorf("unconfined probe: %s %s; the probe cannot see a missing confinement", k, got[k])
@@ -335,7 +343,7 @@ func TestRadioCannotChangeRule(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer proc.Stop()
-		if got := read(t, conn); got["AF_UNIX socket (the system bus)"] != "refused" {
+		if got := read(t, proc, conn); got["AF_UNIX socket (the system bus)"] != "refused" {
 			t.Errorf("a profile with no families opened a socket: %v", got)
 		}
 	})

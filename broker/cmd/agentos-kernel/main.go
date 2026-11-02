@@ -1,6 +1,6 @@
 // Command agentos-kernel is the kernel's process (STO-2b, MIG-4-run). The
 // unlock step (agentos-unlock) execs it under the kernel's own uid, with the
-// log key, the head key and the owner's anchors on descriptor 3:
+// log key, the head key and the owner's anchors on handoff.KeyFD:
 //
 //	agentos-kernel -log /var/lib/agentos-kernel/log -keys-dir /var/lib/agentos-kernel/keys \
 //	    -content-dir /var/lib/agentos-kernel/content -backup-dir /var/lib/agentos-kernel/backups \

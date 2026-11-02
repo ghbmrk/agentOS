@@ -112,3 +112,102 @@ func TestMDNSMoveShowsNames(t *testing.T) {
 		}
 	}
 }
+
+// TestUnpinnedPairSaysSo: a change that leaves a paired Devices-network
+// device pinning no mDNS names says on the pairing card that the device
+// will not be found across that pair, since the relay passes none of its
+// announcements (#4401). It shows when the pair is signed, when the
+// device's last pin goes, when a paired device moves onto the Devices
+// network with none, and when a pair's missing path returns; it is not
+// repeated on a later unrelated change, and a device that pins a name, a
+// person's (Owner or Household) device, or a device with no path to its
+// pair, or whose pair has none at either end (no Wi-Fi identity,
+// isolated, held back), gets no such line.
+func TestUnpinnedPairSaysSo(t *testing.T) {
+	line := func(d, other string) string {
+		return d + " will not show up by name on " + other + ": it has no mDNS names pinned, so none of its announcements cross the pair."
+	}
+	withLaptop := func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
+	}
+	base := edit(1, withLaptop)
+	paired := clone(base)
+	paired.Pairs = []policy.Pair{{A: "laptop", B: "tv"}, {A: "cam", B: "tv"}}
+	pinned := clone(paired)
+	dev(&pinned, "tv").MDNS = [][]string{{"tv", "local"}}
+	other := clone(paired)
+	dev(&other, "tv").Allow = []string{"a.example", "b.example"}
+	added := clone(base)
+	added.Devices = append(added.Devices, policy.Device{ID: "printer", Network: policy.NetDevices, WiFi: "vlan105", Everyday: true})
+	added.Pairs = []policy.Pair{{A: "laptop", B: "printer"}}
+	heldLaptop := clone(paired)
+	dev(&heldLaptop, "laptop").MDNS = [][]string{{"macbook", "local"}}
+	moved := edit(1, func(d *policy.Document) {
+		withLaptop(d)
+		d.Devices = append(d.Devices, policy.Device{ID: "pc", Network: policy.NetHousehold, Everyday: true})
+		d.Pairs = []policy.Pair{{A: "pc", B: "tv"}}
+	})
+	onDevices := clone(moved)
+	dev(&onDevices, "pc").Network, dev(&onDevices, "pc").WiFi = policy.NetDevices, "vlan120"
+	owner := edit(1, func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "phone", Network: policy.NetOwner, Everyday: true})
+	})
+	ownerPaired := clone(owner)
+	ownerPaired.Pairs = []policy.Pair{{A: "phone", B: "tv"}}
+	// lock has no Wi-Fi identity, so its pair has no path: the card's
+	// own line says so, and this one waits until the path exists.
+	noPath := clone(base)
+	noPath.Pairs = []policy.Pair{{A: "laptop", B: "lock"}}
+	withPath := clone(noPath)
+	dev(&withPath, "lock").WiFi = "vlan103"
+	// Each exclusion starts from no pair, so only the missing path hides
+	// the line, on both ends of the pair (cam's too, though cam itself has
+	// a path); lifting the isolation or the hold then shows it.
+	isolated := clone(paired)
+	dev(&isolated, "tv").Isolated = true
+	camOff := clone(paired)
+	dev(&camOff, "cam").Isolated = true
+	held := clone(paired)
+	held.Holds = []policy.Hold{{Device: "tv", Kind: policy.HoldFix}}
+	for _, c := range []struct {
+		name       string
+		from, to   policy.Document
+		want, none []string
+	}{
+		{"pair signed", base, paired, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}, nil},
+		{"pinned pair", base, pinned, []string{line("cam", "tv")}, []string{line("tv", "laptop"), line("tv", "cam")}},
+		{"last pin goes", pinned, paired, []string{line("tv", "laptop"), line("tv", "cam")}, []string{line("cam", "tv")}},
+		{"unrelated change", paired, other, nil, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}},
+		{"added with its pair", base, added, []string{line("printer", "laptop")}, nil},
+		{"person's device", paired, heldLaptop, nil, []string{line("laptop", "tv")}},
+		{"moved onto Devices", moved, onDevices, []string{line("pc", "tv")}, []string{line("tv", "pc")}},
+		{"owner's device", owner, ownerPaired, []string{line("tv", "phone")}, []string{line("phone", "tv")}},
+		{"no path", base, noPath, nil, []string{line("lock", "laptop")}},
+		{"path returns", noPath, withPath, []string{line("lock", "laptop")}, nil},
+		{"isolated", base, isolated, nil, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}},
+		{"isolation lifted", isolated, paired, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}, nil},
+		{"other end isolated", base, camOff, []string{line("tv", "laptop")}, []string{line("tv", "cam"), line("cam", "tv")}},
+		{"held back", base, held, nil, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}},
+		{"hold lifted", held, paired, []string{line("tv", "laptop"), line("tv", "cam"), line("cam", "tv")}, nil},
+	} {
+		if _, err := policy.Encode(c.to); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		got := Describe(c.from, c.to, zone)
+		for _, w := range c.want {
+			if !slices.Contains(got, w) {
+				t.Errorf("%s: the card lacks %q:\n%s", c.name, w, strings.Join(got, "\n"))
+			}
+		}
+		for _, w := range c.none {
+			if slices.Contains(got, w) {
+				t.Errorf("%s: the card says %q:\n%s", c.name, w, strings.Join(got, "\n"))
+			}
+		}
+	}
+	// The line reaches the screen the owner signs.
+	g := newRig(t)
+	if screen, _, _ := g.open(edit(2, func(d *policy.Document) { d.Pairs = []policy.Pair{{A: "cam", B: "tv"}} }), "pair"); !strings.Contains(screen, "will not show up by name on cam") {
+		t.Errorf("the screen lacks the unpinned line:\n%s", screen)
+	}
+}

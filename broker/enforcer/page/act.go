@@ -82,7 +82,7 @@ func (s *Server) action(w http.ResponseWriter, r *http.Request) {
 	if c.Route != "" {
 		line += ", on the route " + ascii(c.Route)
 	}
-	s.render(w, "action.html", map[string]any{
+	s.render(w, r, "action.html", map[string]any{
 		"Name":        s.cfg.Name,
 		"Line":        line,
 		"Window":      minutes(action.Window),

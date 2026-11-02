@@ -29,9 +29,10 @@ const (
 	Infra = "infra0"
 )
 
-// Socket is ot-daemon's command socket, relative to its state directory:
+// Socket is ot-daemon's command socket, relative to its run directory:
 // tools/build-openthread.sh sets the daemon's socket base name to a relative path, and
-// both processes run in that directory.
+// both processes run in that directory, the only one the adapter's view
+// shows it (confine.ThreadAdapter), so it never sees the state directory.
 const Socket = "openthread-" + Netif + ".sock"
 
 // AdapterArg is the argument the enforcer's main (or a test's TestMain),
@@ -43,14 +44,16 @@ var ErrRadio = errors.New("thread: radio URL refused")
 // DaemonArgs are ot-daemon's arguments for the radio's spinel URL (the
 // nRF52840 RCP's serial device, owned by the Thread user; decision 11) and
 // its state directory (owned by the Thread user, mode 0700: the network's
-// dataset and keys, and the command socket); verbose also logs to stderr.
+// dataset and keys); verbose also logs to stderr.
 //
 // The daemon (slice l) starts the stack in this order: ot-daemon under
-// confine.Thread with Dir set to the state directory; then the adapter,
-// the enforcer's own binary with AdapterArg, under confine.ThreadAdapter
-// with the same user and Dir, whose interface it attaches as
-// radio.StackThread; then the Matter controller with Spec.Net set to
-// ot-daemon's process. This package does not start them itself, so that
+// confine.Thread with that state directory, a run directory (owned by the
+// Thread user, mode 0700) as Dir, where it makes its command socket, and
+// the RCP's device; then the adapter, the enforcer's own binary with
+// AdapterArg, under confine.ThreadAdapter with the same user and the run
+// directory as Dir, whose interface it attaches as radio.StackThread;
+// then the Matter controller under confine.Matter with its storage
+// directory and Spec.Net set to ot-daemon's process. This package does not start them itself, so that
 // only confine links os/exec (arc2).
 func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
 	// The URL is the last argument: it must not read as an option.

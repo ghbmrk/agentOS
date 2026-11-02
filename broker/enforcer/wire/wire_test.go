@@ -227,7 +227,7 @@ func TestHello(t *testing.T) {
 // TestImportsStandardLibraryOnly: the package imports only the standard
 // library and nothing that opens a socket, a file or a process, so both
 // ends link the same small codec (brief code layout: "standard library
-// only"; time only for SummaryInterval). Revert mutant: an "os" or "net"
+// only"; time only for SummaryInterval and the rates). Revert mutant: an "os" or "net"
 // import in a non-test file.
 func TestImportsStandardLibraryOnly(t *testing.T) {
 	allowed := map[string]bool{

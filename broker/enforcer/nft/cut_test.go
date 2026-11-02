@@ -114,8 +114,8 @@ func (h *home) expectOpen(want bool, hs ...*held) {
 
 // NET-3, NET-7, A18: a load that removes a path also ends the connections
 // already open along it, both ways, and a load leaves the connections on
-// the paths it keeps open, the internet ones included although the load
-// empties the allow sets. Catches a "stop" the owner signed that the
+// the paths it keeps open, the internet ones included (their names stay
+// listed, so Reload keeps their answers). Catches a "stop" the owner signed that the
 // firewall applies to new connections only, while the old ones flow on
 // until they idle out.
 func TestCutPathEndsOpenConnections(t *testing.T) {
@@ -174,11 +174,7 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 			all = append(all, x)
 		}
 		h.expectOpen(true, all...)
-		text, err := Compile(c.doc, fixtureLayout())
-		if err != nil {
-			t.Fatal(err)
-		}
-		h.load(text)
+		h.reload(c.doc)
 		for name, x := range hs {
 			x.why = c.name + ": " + x.why
 			h.expectOpen(!slices.Contains(c.cut, name), x)
@@ -186,13 +182,14 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 	}
 }
 
-// fillSets puts the fixture's resolved addresses in the allow sets, as
-// slice f's resolver would after a load.
+// fillSets puts the fixture's resolved addresses in the allow sets and
+// their names' sets, as slice f's resolver would after a load.
 func (h *home) fillSets() {
-	run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, false), "{ "+netAllow+" }")
-	run(h.t, "nft", "add", "element", "inet", Table, CoreSet(false), "{ "+netCore+" }")
+	d := fixturePolicy()
+	h.answer(d, DeviceSet(101, false), "tv.example", netAllow)
+	h.answer(d, CoreSet(false), "core.example", netCore)
 	if h.v6 {
-		run(h.t, "nft", "add", "element", "inet", Table, DeviceSet(101, true), "{ "+net6Allow+" }")
+		h.answer(d, DeviceSet(101, true), "tv.example", net6Allow)
 	}
 }
 

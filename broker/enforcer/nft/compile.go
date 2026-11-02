@@ -13,6 +13,8 @@
 package nft
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -51,6 +53,65 @@ func TrafficOut(vlan int) string          { return "t" + strconv.Itoa(vlan) + "_
 func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_in" }
 
 const TrafficSize = 64
+
+// HostSet is the set that records, for each connection a host on a shared
+// segment (Guests, Owner, Household) started, the connection's conntrack
+// ID and original source, and the source address and hardware address its
+// first packet came from (live.go, learn, hostKey). A related packet from a shared segment passes only
+// with its connection's record. Each record lasts HostTimeout from that
+// first packet and the set holds at most HostSize per family, which bounds
+// what the shared segments can make the enforcer keep; a connection
+// without a record (it outlived its record, the set was full, or it was
+// open before the last load, under this ruleset or one without labels) has
+// its host's own ICMP errors dropped, never anyone else's passed.
+func HostSet(v6 bool) string { return "host" + fam(v6) }
+
+const (
+	HostTimeout = "1h"
+	HostSize    = 65535
+)
+
+// hostLabel is the conntrack label bit learn sets on a connection it has
+// recorded (or tried to), so it records each connection once. Nothing else
+// on the enforcer sets or reads a label.
+const hostLabel = "0"
+
+// learnChain records the host of a connection from a shared segment and
+// accepts it; boundChain passes a related packet from a shared segment
+// only with its connection's record.
+const (
+	learnChain = "learn"
+	boundChain = "bound"
+)
+
+// hostKey is a HostSet element as nft reads it from a packet: its
+// connection's ID and original source address, then the packet's own
+// source address and hardware source address. At the first packet the two
+// addresses are the same, so a later packet matches only from the address
+// and the hardware address that started the connection; the original
+// source keeps a record of another host's from matching a connection whose
+// ID it happens to share.
+func hostKey(v6 bool) string {
+	f := family(v6)
+	return "ct id . ct original " + f + " saddr . " + f + " saddr . ether saddr"
+}
+
+func nfproto(v6 bool) string {
+	if v6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
+// named is the set that records which addresses one name's answers put in
+// the allow set list, for the list's holder ("core", or a device's ID): the
+// resolver fills both (ASSUMPTIONS ENF-set-keep-1). Its name is list's and a
+// hash of holder and name, so no host name reaches the ruleset text, and a
+// device that takes over another's VLAN never inherits its answers.
+func named(list, holder, name string) string {
+	h := sha256.Sum256([]byte(holder + "\x00" + name))
+	return list + "_" + hex.EncodeToString(h[:8])
+}
 
 func fam(v6 bool) string {
 	if v6 {
@@ -293,6 +354,28 @@ func Paths(d policy.Document, l Layout) ([]Path, error) {
 type AllowSet struct {
 	Set4, Set6 string
 	Names      []string
+	holder     string
+}
+
+// Named is the set that records the addresses name's answers put in the
+// family's allow set, which the resolver fills alongside it, so a load can
+// keep the answers of the names still listed (Reload).
+func (a AllowSet) Named(name string, v6 bool) string {
+	return named(a.set(v6), a.holder, name)
+}
+
+func (a AllowSet) set(v6 bool) string {
+	if v6 {
+		return a.Set6
+	}
+	return a.Set4
+}
+
+// names is the set's names, each once, in order.
+func (a AllowSet) names() []string {
+	n := slices.Clone(a.Names)
+	slices.Sort(n)
+	return slices.Compact(n)
 }
 
 // AllowSets is every allow set the ruleset declares: the core's, with its
@@ -304,22 +387,32 @@ func AllowSets(d policy.Document, l Layout) ([]AllowSet, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := []AllowSet{{Set4: CoreSet(false), Set6: CoreSet(true), Names: slices.Clone(d.Destinations)}}
+	return allowSets(d, devs), nil
+}
+
+func allowSets(d policy.Document, devs []device) []AllowSet {
+	out := []AllowSet{{Set4: CoreSet(false), Set6: CoreSet(true), Names: slices.Clone(d.Destinations), holder: "core"}}
 	for _, v := range devs {
 		if v.internet() {
-			out = append(out, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true), Names: slices.Clone(v.d.Allow)})
+			out = append(out, AllowSet{Set4: DeviceSet(v.vlan, false), Set6: DeviceSet(v.vlan, true), Names: slices.Clone(v.d.Allow), holder: v.d.ID})
 		}
 	}
-	return out, nil
+	return out
 }
 
 // Compile is the ruleset for one policy document on one layout: a single
 // text that starts by flushing the running ruleset, so loading it replaces
 // everything in one transaction. The same inputs give the same bytes.
 func Compile(d policy.Document, l Layout) (string, error) {
+	text, _, err := compile(d, l)
+	return text, err
+}
+
+// compile is Compile's ruleset and the devices it was compiled for.
+func compile(d policy.Document, l Layout) (string, []device, error) {
 	devs, paths, err := compiled(d, l)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var isp4, isp6, ap4, ap6 []string
 	for _, p := range l.ISP {
@@ -364,15 +457,24 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.set("doh_6", "ipv6_addr", "interval", doh6)
 	w.set("ap_4", "ipv4_addr", "", ap4)
 	w.set("ap_6", "ipv6_addr", "", ap6)
-	w.set(CoreSet(false), "ipv4_addr", "timeout", nil)
-	w.set(CoreSet(true), "ipv6_addr", "timeout", nil)
-	for _, v := range devs {
-		if v.internet() {
-			w.set(DeviceSet(v.vlan, false), "ipv4_addr", "timeout", nil)
-			w.set(DeviceSet(v.vlan, true), "ipv6_addr", "timeout", nil)
+	for _, a := range allowSets(d, devs) {
+		for _, v6 := range []bool{false, true} {
+			typ := map[bool]string{false: "ipv4_addr", true: "ipv6_addr"}[v6]
+			w.set(a.set(v6), typ, "timeout", nil)
+			for _, n := range a.names() {
+				w.set(a.Named(n, v6), typ, "timeout", nil)
+			}
 		}
 	}
 
+	for _, v6 := range []bool{false, true} {
+		w.open("set " + HostSet(v6))
+		w.line("typeof " + hostKey(v6) + ";")
+		w.line("size " + strconv.Itoa(HostSize) + ";")
+		w.line("flags dynamic,timeout;")
+		w.line("timeout " + HostTimeout + ";")
+		w.close()
+	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
 			w.open("set " + TrafficSet(v.vlan, v6))
@@ -478,8 +580,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	// From here on, oifname WAN is the internet.
 	add(q(l.Admin), core, "", "accept", l4Ports("tcp", port(l.CorePagePort)))
 	add(edge, wan, "", "accept")
-	add(core, wan, "", "accept", resolved(false, CoreSet(false)))
-	add(core, wan, "", "accept", resolved(true, CoreSet(true)))
+	add(core, wan, "", "accept", daddr(false, "@"+CoreSet(false)))
+	add(core, wan, "", "accept", daddr(true, "@"+CoreSet(true)))
 	// Devices: outside DNS and known encrypted-DNS resolvers are blocked
 	// before any allow set is consulted (NET-3).
 	add(T, wan, logged(LogDNS, DNSOutside), "drop", daddr(false, "@doh_4"))
@@ -489,8 +591,8 @@ func Compile(d policy.Document, l Layout) (string, error) {
 		i := q(v.iface)
 		vl := strconv.Itoa(v.vlan)
 		if v.internet() {
-			add(i, wan, "", "accept", resolved(false, DeviceSet(v.vlan, false)))
-			add(i, wan, "", "accept", resolved(true, DeviceSet(v.vlan, true)))
+			add(i, wan, "", "accept", daddr(false, "@"+DeviceSet(v.vlan, false)))
+			add(i, wan, "", "accept", daddr(true, "@"+DeviceSet(v.vlan, true)))
 		}
 		for _, m := range dports(v.d.Control) {
 			if v.online() {
@@ -544,9 +646,10 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	for _, v := range devs {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
+	shared := []string{g, q(l.Owner), q(l.Household)}
 	for _, rs := range [][]rule{fwd, people} {
-		if err := bindAll(idx, rs); err != nil {
-			return "", err
+		if err := bindAll(idx, shared, rs); err != nil {
+			return "", nil, err
 		}
 	}
 	// A related packet that reaches the end of a live chain names a
@@ -579,6 +682,11 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
+	// A related packet from a shared segment in its connection's original
+	// direction must come from the host that started the connection
+	// (live.go, #4324). In the reply direction one from a shared segment
+	// already matches no live accept, since no accept leads into one.
+	w.line("ct state related ct direction original iifname { " + strings.Join(shared, ", ") + " } jump " + boundChain)
 	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
@@ -603,6 +711,31 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.open("chain people")
 	for _, r := range people {
 		w.line(r.first())
+	}
+	w.line("drop")
+	w.close()
+
+	// A connection is recorded once, from its first packet: conntrack calls
+	// every original-direction packet new until a reply comes, and another
+	// host could send one from the host's address and port to add a record
+	// of its own. The label is set, then read back, before the record is
+	// added: a connection conntrack created while no loaded rule used
+	// labels has no room for one, so setting it does nothing, and such a
+	// connection (open across the first load of a ruleset with labels) is
+	// never recorded; one whose record could not be written has none.
+	w.open("chain " + learnChain)
+	w.line("ct label " + hostLabel + " accept")
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+	}
+	w.line("accept")
+	w.close()
+
+	// Shared segments are never observed (NET-1, NET-3): a forged error from
+	// one is dropped without a log line or a count.
+	w.open("chain " + boundChain)
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + nfproto(v6) + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
 	}
 	w.line("drop")
 	w.close()
@@ -664,7 +797,7 @@ func Compile(d policy.Document, l Layout) (string, error) {
 	w.line("iifname " + edge + " arp operation request arp daddr ip != " + l.EdgeGateway.String() + " drop")
 	w.close()
 	w.close()
-	return w.b.String(), nil
+	return w.b.String(), devs, nil
 }
 
 func trafficChain(vlan int, dir string) string {

@@ -3,13 +3,10 @@ package hostdisk
 import (
 	"fmt"
 	"go/ast"
-	"go/importer"
 	"go/parser"
 	"go/token"
 	"go/types"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -18,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ghbmrk/agentos/broker/internal/lintload"
 )
 
 // REQ: HW-8
@@ -115,14 +114,11 @@ func TestFenceReportsUnreadFiles(t *testing.T) {
 // the build leaves out, cgo, assembly and syso.
 func unread(t *testing.T, dir string) string {
 	t.Helper()
-	cmd := exec.Command("go", "list", "-f", "{{join .IgnoredGoFiles \" \"}} {{join .CgoFiles \" \"}} {{join .SFiles \" \"}} {{join .SysoFiles \" \"}}", ".")
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GOFLAGS=")
-	out, err := cmd.Output()
+	l, err := lintload.Load(dir, lintload.Build{}, ".")
 	if err != nil {
-		t.Fatalf("go list %s: %v", dir, err)
+		t.Fatal(err)
 	}
-	return strings.Join(strings.Fields(string(out)), " ")
+	return strings.Join(l.Packages[0].Skipped(), " ")
 }
 
 // The fence refuses each way out it names, on synthetic sources: in
@@ -245,7 +241,7 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 	forbiddenText := []string{"sync_file_range", "BLKDISCARD", "discard", "ioctl"}
 	var problems []string
 	fail := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
-	fs := token.NewFileSet()
+	fs := load(t).Fset
 	var files []*ast.File
 	names := make([]string, 0, len(srcs))
 	for p := range srcs {
@@ -259,10 +255,9 @@ func fenceProblems(t *testing.T, pkgPath string, srcs map[string]string) []strin
 		}
 		files = append(files, f)
 	}
-	info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: exportImporter(t, fs)}
-	if _, err := conf.Check(pkgPath, fs, files, info); err != nil {
-		t.Fatalf("type-checking %s: %v", pkgPath, err)
+	_, info, err := load(t).Check(pkgPath, files)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, f := range files {
 		for _, im := range f.Imports {
@@ -387,72 +382,56 @@ func isPkgObj(obj types.Object, path, name string) bool {
 	return true
 }
 
-type listed struct{ path, dir, goFiles, export string }
+type listed struct{ path, dir, goFiles string }
 
 // fenced are the directories HW-8's fence covers: the package and its
 // command.
 var fenced = []string{".", "../cmd/agentos-hostdisk"}
 
 var (
-	listOnce sync.Once
-	exports  map[string]listed // import path -> listing, with export data
-	fencePkg []listed          // the fenced packages, in fenced's order
-	listErr  error
+	loadOnce sync.Once
+	loaded   *lintload.Loaded
+	loadErr  error
 )
 
-// goList lists the fenced packages and every package they or the fence's
-// synthetic sources import, with export data, once per test binary.
-func goList(t *testing.T) []listed {
+// load loads the fenced packages through the shared lint loader, with
+// export data for every package the fence's synthetic sources import, once
+// per test binary.
+func load(t *testing.T) *lintload.Loaded {
 	t.Helper()
-	listOnce.Do(func() {
-		args := append([]string{"list", "-deps", "-export", "-f", "{{.ImportPath}}\t{{.Dir}}\t{{join .GoFiles \" \"}}\t{{.Export}}"}, fenced...)
-		args = append(args, "os", "syscall", "golang.org/x/sys/unix", "os/exec", "net", "io/ioutil", "github.com/ghbmrk/agentos/broker/kernel/privfile")
-		cmd := exec.Command("go", args...)
-		cmd.Env = append(os.Environ(), "GOFLAGS=")
-		out, err := cmd.Output()
-		if err != nil {
-			if ee, ok := err.(*exec.ExitError); ok {
-				err = fmt.Errorf("%v\n%s", err, ee.Stderr)
-			}
-			listErr = fmt.Errorf("go list: %v", err)
-			return
-		}
-		exports = map[string]listed{}
-		byDir := map[string]listed{}
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			f := strings.Split(line, "\t")
-			if len(f) != 4 {
-				listErr = fmt.Errorf("go list: unexpected line %q", line)
-				return
-			}
-			l := listed{f[0], f[1], f[2], f[3]}
-			exports[l.path], byDir[l.dir] = l, l
-		}
-		for _, d := range fenced {
-			abs, err := filepath.Abs(d)
-			if err != nil || byDir[abs].path == "" {
-				listErr = fmt.Errorf("go list did not list %s (%v)", d, err)
-				return
-			}
-			fencePkg = append(fencePkg, byDir[abs])
-		}
+	loadOnce.Do(func() {
+		loaded, loadErr = lintload.Load(".", lintload.Build{
+			Also: []string{"os", "syscall", "golang.org/x/sys/unix", "os/exec", "net", "io/ioutil", "github.com/ghbmrk/agentos/broker/kernel/privfile"},
+		}, fenced...)
 	})
-	if listErr != nil {
-		t.Fatal(listErr)
+	if loadErr != nil {
+		t.Fatal(loadErr)
 	}
-	return fencePkg
+	return loaded
 }
 
-// exportImporter imports a package from the export data go list found.
-func exportImporter(t *testing.T, fs *token.FileSet) types.Importer {
+// goList lists the fenced packages, in fenced's order.
+func goList(t *testing.T) []listed {
 	t.Helper()
-	goList(t)
-	return importer.ForCompiler(fs, "gc", func(path string) (io.ReadCloser, error) {
-		if exports[path].export == "" {
-			return nil, fmt.Errorf("no export data for %s", path)
+	l := load(t)
+	byDir := map[string]*lintload.Package{}
+	for _, p := range l.Packages {
+		byDir[p.Dir] = p
+	}
+	var out []listed
+	for _, d := range fenced {
+		abs, err := filepath.Abs(d)
+		if err != nil || byDir[abs] == nil {
+			t.Fatalf("the loader did not list %s (%v)", d, err)
 		}
-		return os.Open(exports[path].export)
-	})
+		p := byDir[abs]
+		var names []string
+		for _, f := range p.Files {
+			names = append(names, filepath.Base(l.Fset.File(f.Pos()).Name()))
+		}
+		out = append(out, listed{path: p.Path, dir: p.Dir, goFiles: strings.Join(names, " ")})
+	}
+	return out
 }
 
 // isBlock accepts only a block device node, as uid-independent unit
@@ -644,13 +623,13 @@ func TestFenceAdmitsOnlyTheOpenFlags(t *testing.T) {
 		"os.O_RDONLY|cfg.O_NOFOLLOW|syscall.O_NONBLOCK": false,
 		"0": false,
 	} {
-		fs := token.NewFileSet()
+		fs := load(t).Fset
 		f, err := parser.ParseFile(fs, "x.go", "package x\n\nimport (\n\t\"os\"\n\t\"syscall\"\n)\n\nvar flags = 0\n\nvar cfg = struct{ O_NOFOLLOW int }{}\n\nvar _, _ = os.O_RDONLY, syscall.O_NOFOLLOW\n\nvar e = "+src+"\n", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		info := &types.Info{Uses: map[*ast.Ident]types.Object{}}
-		if _, err := (&types.Config{Importer: exportImporter(t, fs)}).Check("x", fs, []*ast.File{f}, info); err != nil {
+		_, info, err := load(t).Check("x", []*ast.File{f})
+		if err != nil {
 			t.Fatalf("%s: %v", src, err)
 		}
 		e := f.Decls[len(f.Decls)-1].(*ast.GenDecl).Specs[0].(*ast.ValueSpec).Values[0]

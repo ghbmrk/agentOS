@@ -16,7 +16,7 @@
 // addresses and the device's ID from the signed policy.
 //
 // It is enforcer code: it imports the standard library and
-// broker/enforcer/policy and broker/enforcer/nft only
+// broker/enforcer/policy, broker/enforcer/nft and broker/enforcer/wire only
 // (broker/daemon/arc2_test.go). Its assumptions are in ASSUMPTIONS.md.
 package traffic
 

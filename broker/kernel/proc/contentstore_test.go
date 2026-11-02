@@ -314,7 +314,7 @@ func TestALooseContentStoreStopsTheStart(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"", "Vision", "../keys", "a/b", strings.Repeat("a", 33), kernel.KeyTable} {
-		if _, err := OpenContentStores(filepath.Join(t.TempDir(), "c"), []string{bad}); !errors.Is(err, ErrStoreName) {
+		if _, _, err := OpenContentStores(filepath.Join(t.TempDir(), "c"), []string{bad}); !errors.Is(err, ErrStoreName) {
 			t.Errorf("store %q: %v, want ErrStoreName", bad, err)
 		}
 	}

@@ -491,5 +491,5 @@ func startReport(r kernel.ContentReport, unlogged []string) string {
 	if len(r.Missing)+len(r.Unnamed)+len(unlogged) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names; the stores hold %d items no entry names\n", len(r.Missing), len(r.Unnamed), len(unlogged))
+	return fmt.Sprintf("run: the subject-key table lacks %d open subjects' keys and holds %d keys no subject names; the stores hold %d items no entry names in their store\n", len(r.Missing), len(r.Unnamed), len(unlogged))
 }

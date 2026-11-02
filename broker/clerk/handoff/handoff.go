@@ -25,14 +25,18 @@ import (
 	"github.com/ghbmrk/agentos/broker/pageca"
 )
 
-// KeyFD is the descriptor the kernel main reads its keys from.
-const KeyFD = 3
+// KeyFD is the descriptor the kernel main reads its keys from. It and TPMFD
+// sit far above any descriptor a Go process opens for itself (its poller's,
+// its cgroup CPU files), which take the lowest free numbers, so the unlock
+// step's move onto them never replaces the runtime's own, which another
+// thread could poll before the exec (#4474).
+const KeyFD = 100
 
 // TPMFD is the descriptor of the kernel's own connection to this PC's TPM,
 // which the unlock step opened as root, for the log anchor's counter
 // (LOG-2, STO-1). The kernel's uid is in no group that can open the TPM, so
 // this one connection is all the TPM it has.
-const TPMFD = 4
+const TPMFD = 101
 
 // CounterEntry is the sealed store's entry holding the log anchor's counter:
 // its reference and auth value, which enrollment wrote (STO-2c).

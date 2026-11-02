@@ -77,7 +77,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	waiting := len(s.cfg.Policy.Pending()) > 0
 	s.cfg.Lock.Unlock()
-	s.render(w, "confirm.html", map[string]any{
+	s.render(w, r, "confirm.html", map[string]any{
 		"Name":        s.cfg.Name,
 		"Lines":       lines,
 		"Consequence": consequence(c.class),
@@ -113,7 +113,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 			recovery = s.when(due.UnixMilli())
 		}
 	}
-	s.render(w, "home.html", map[string]any{
+	s.render(w, r, "home.html", map[string]any{
 		"Keep":     keep,
 		"Recovery": recovery,
 		"Enrol":    s.cfg.Enrol != nil,
@@ -127,9 +127,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// render draws a screen with its own anti-forgery token (csrf.go).
-func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
-	tok, err := s.mint(w)
+// render draws a screen for r with its anti-forgery token (csrf.go).
+func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
+	tok, err := s.token(w, r)
 	if err != nil {
 		http.Error(w, "page error", http.StatusInternalServerError)
 		return

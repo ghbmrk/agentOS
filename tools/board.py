@@ -5,7 +5,7 @@ One issue per live BOARD row. The issue is the record; its labels are the querya
   work-item        marks the issue as a BOARD row
   state:<state>    the row's state, one of metrics.STATES; the only label rendering reads
   tier:A|B|C       risk tier, when the row names one ("tier A", or "(B; ..." in its state)
-  class:<class>    blocker, release or later (OPERATING §2); release rows as RELEASE_STATE and RELEASE_CLASS find them; later by hand
+  class:<class>    blocker or release (OPERATING §2); release rows as RELEASE_STATE and RELEASE_CLASS find them; a legacy later issue by hand until migrated (D-250)
   lane:<team>      the docs/LANES.md team that builds it; primary unless the row names another
   gate:mark        merge waits on Mark beyond the reviews ("Mark approves", "owner to confirm")
   frozen           D-098's scope freeze ("frozen until G2" in its state): never started, whatever its

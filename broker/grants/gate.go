@@ -285,6 +285,7 @@ type Gate struct {
 
 	mu     sync.Mutex
 	eng    *journal.Engine
+	count  func(id string) (int, error) // Decide's read of an attempt count: tries, a test's failing read
 	own    Owner
 	grants map[string]*Grant
 	// resumes is the page's latest resume ask per grant (AskResume).
@@ -424,7 +425,7 @@ func (d decision) sameAs(it owner.Item) bool {
 func (d decision) note(confirmed bool) journal.AnswerNote {
 	n := journal.AnswerNote{Approved: d.approved, Why: d.why, Request: d.req, Local: d.local,
 		Confirmed: d.local && confirmed, Asked: d.asked, Implicit: d.implicit, Late: d.late,
-		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear,
+		Hold: d.hold != "", Tries: d.tries, Went: d.rep.went, Unclear: d.rep.unclear,
 		Allowed: d.approved && d.allowed}
 	if d.asked {
 		n.Sum = owner.ItemSum(d.item)
@@ -471,10 +472,12 @@ func New(cfg Config) *Gate {
 	if cfg.RequestsPerHour <= 0 {
 		cfg.RequestsPerHour = DefaultRequestsPerHour
 	}
-	return &Gate{cfg: cfg, grants: map[string]*Grant{},
+	g := &Gate{cfg: cfg, grants: map[string]*Grant{},
 		waiting: map[string]*wait{}, decided: map[string]decision{}, confirmed: map[string]bool{}, failed: map[string]string{},
 		carried: map[string]bool{}, forms: checkForms(cfg), derived: map[string]bool{}, staging: map[string]chan struct{}{},
 		retry: map[string]string{}, after: map[string]afterRef{}, sending: map[string]pending{}, reported: map[string]bool{}}
+	g.count = g.tries
+	return g
 }
 
 // checkForms keeps the forms reversible.Check accepts against each
@@ -1077,13 +1080,7 @@ const repeatWindow = 24 * time.Hour
 // the same recipients is taken as the same send, on both sides (Security
 // R23 on #1433), and one to others is not a repeat (OP2-ER-1, #1678). A
 // mark that rests only on erased sends says so (erasedOnly, OP2-ER-2).
-//
-// Confirm repeats (Mark, D-116, 2026-10-14): under journal rule (b) a
-// request made after the effect went is a new send, so the owner may
-// approve it, but one within repeatWindow of a known success never goes
-// unseen: evaluateEffect asks the owner even under a pre-allowance, and
-// the ask says it was already sent and when. A send that may have gone
-// is marked "may go twice" (UX U12).
+// How the owner confirms a repeat is GR35's "Confirm repeats" (D-116).
 func (g *Gate) recentRepeat(ctx context.Context, in journal.Intent) repeat {
 	g.mu.Lock()
 	eng := g.eng
@@ -1818,17 +1815,17 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 
 // tries is how many attempts the intent has started. The engine is read
 // without g.mu: its policy calls take g.mu. An error is a refusal at the
-// recheck, never a count that might match an approval.
+// recheck, never a count that might match an approval: -1 with it.
 func (g *Gate) tries(id string) (int, error) {
 	g.mu.Lock()
 	eng := g.eng
 	g.mu.Unlock()
 	if eng == nil {
-		return 0, errors.New("grants are not loaded")
+		return -1, errors.New("grants are not loaded")
 	}
 	st, err := eng.Get(id)
 	if err != nil {
-		return 0, err
+		return -1, err
 	}
 	return len(st.Attempts), nil
 }
@@ -2503,10 +2500,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		return
 	}
 	unstaged := d.Approved && g.unstaged(d.Ref)
-	tries, err := g.tries(d.Ref)
-	if err != nil {
-		tries = -1 // matches no count, so the recheck refuses it
-	}
+	tries, _ := g.count(d.Ref) // -1 if unread: the journal refuses an approval with it (#1969)
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
@@ -2573,9 +2567,9 @@ func (g *Gate) Decide(d owner.Decision) {
 	g.mu.Unlock()
 	// The answer is journaled before the gate acts on it (OP-12, SM-AJ-1),
 	// outside g.mu: the engine's policy calls take it. An approval the
-	// journal cannot take is not acted on; the intent stays pending and
-	// the agent's retry asks again. A denial goes ahead: it can only
-	// refuse.
+	// journal cannot take is not acted on and the owner is told; the
+	// intent stays pending and the agent's retry asks again. A denial
+	// goes ahead: it can only refuse.
 	if eng == nil {
 		return
 	}
@@ -2585,6 +2579,9 @@ func (g *Gate) Decide(d owner.Decision) {
 			g.mu.Lock()
 			delete(g.confirmed, d.Ref)
 			g.mu.Unlock()
+			if own != nil {
+				_ = own.Inform(fmt.Sprintf("%s did not run: your approval could not be saved. Ask your agent again if still needed.", owner.InformQuote(d.Request)))
+			}
 			return
 		}
 	}

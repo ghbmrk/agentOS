@@ -47,7 +47,7 @@ func OpenFileKeys(dir string, logKey [32]byte) (*FileKeys, error) {
 	if err := privfile.Check(dir, true); err != nil {
 		return nil, err
 	}
-	if err := dropTemps(dir); err != nil {
+	if _, err := dropTemps(dir); err != nil {
 		return nil, err
 	}
 	b, err := aes.NewCipher(logKey[:])

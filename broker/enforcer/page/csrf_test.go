@@ -4,6 +4,7 @@ package page
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/action"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -250,4 +252,99 @@ func checkCookie(t *testing.T, name string, w *httptest.ResponseRecorder) {
 	if m := reToken.FindStringSubmatch(w.Body.String()); m == nil || m[1] == c.Value {
 		t.Errorf("%s: no token on the screen, or the token is the cookie", name)
 	}
+}
+
+// navigate opens path on g.s as a top-level navigation the browser calls
+// site, sending cookie ("" sends none), and returns the cookie the answer
+// set ("" when it set none) and the token on the screen.
+func (g *rig) navigate(path, site, cookie string) (set, token string) {
+	g.t.Helper()
+	hdr := []string{"Sec-Fetch-Site", site}
+	if cookie != "" {
+		hdr = append(hdr, "Cookie", tokenCookie+"="+cookie)
+	}
+	w := g.do(http.MethodGet, path, nil, hdr...)
+	if w.Code != http.StatusOK {
+		g.t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == tokenCookie {
+			set = c.Value
+		}
+	}
+	m := reToken.FindStringSubmatch(w.Body.String())
+	if m == nil {
+		g.t.Fatalf("%s: no token on the screen", path)
+	}
+	return set, m[1]
+}
+
+// CH-9 (#4428): a same-site navigation that sends a cookie this page drew
+// keeps it, so the screens already open keep working; any other mints.
+// Revert mutants: every screen minting, keep ignoring Sec-Fetch-Site,
+// ignoring the tag, or ignoring the time, each fail a subtest here.
+func TestSameSiteScreenKeepsPair(t *testing.T) {
+	g := fullRig(t)
+	g.screen() // opened from a text: cross-site, so it mints
+	first, firstTok := g.cookie, g.token
+	if first == "" {
+		t.Fatal("the first screen set no cookie")
+	}
+	for _, site := range []string{"same-origin", "same-site", "none"} {
+		for _, path := range []string{"/", "/enrol"} {
+			set, tok := g.navigate(path, site, first)
+			if set != "" || tok != firstTok {
+				t.Errorf("%s %s with the page's cookie: set %q, token kept %v", site, path, set, tok == firstTok)
+			}
+		}
+	}
+	// The first screen's pair still passes after the second screen drew.
+	if g.forged(g.s, http.MethodPost, "/approve", first, firstTok) {
+		t.Error("the first screen's pair is refused after a same-site screen")
+	}
+
+	mints := func(name, site, cookie string) {
+		t.Helper()
+		set, tok := g.navigate("/", site, cookie)
+		if set == "" || set == cookie || tok == firstTok {
+			t.Errorf("%s: kept a cookie (set %q)", name, set)
+			return
+		}
+		if g.forged(g.s, http.MethodPost, "/approve", set, tok) {
+			t.Errorf("%s: the new pair is refused", name)
+		}
+	}
+	mints("same-origin, no cookie", "same-origin", "")
+	mints("cross-site with the cookie", "cross-site", first)
+	mints("no Sec-Fetch-Site with the cookie", "", first)
+
+	raw, err := base64.RawURLEncoding.DecodeString(first)
+	if err != nil || len(raw) != cookieLen {
+		t.Fatalf("cookie %q is not %d bytes", first, cookieLen)
+	}
+	enc := base64.RawURLEncoding.EncodeToString
+	flip := func(i int) string {
+		c := slices.Clone(raw)
+		c[i] ^= 1
+		return enc(c)
+	}
+	other := fullRig(t)
+	other.screen()
+	mints("another page's cookie", "same-origin", other.cookie)
+	mints("nonce changed", "same-origin", flip(0))
+	mints("time changed", "same-origin", flip(nonceLen+7))
+	mints("tag changed", "same-origin", flip(cookieLen-1))
+	mints("old 32-byte cookie", "same-origin", enc(raw[:32]))
+	mints("not base64", "same-origin", "!!!!")
+
+	// Expired: kept up to reuseFor after it was drawn, not after.
+	g.now = g.now.Add(reuseFor)
+	if set, tok := g.navigate("/", "same-origin", first); set != "" || tok != firstTok {
+		t.Errorf("at reuseFor: set %q", set)
+	}
+	g.now = g.now.Add(time.Millisecond)
+	mints("expired", "same-origin", first)
+	// Drawn in the future (the clock went back): not kept.
+	g.now = g.now.Add(-reuseFor - time.Hour)
+	mints("drawn in the future", "same-origin", first)
 }

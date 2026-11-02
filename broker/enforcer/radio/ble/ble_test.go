@@ -27,6 +27,12 @@ import (
 	"github.com/ghbmrk/agentos/broker/enforcer/radio/confine"
 )
 
+// exited is the process of a stack served inside the test's own process:
+// there is nothing to kill.
+type exited struct{}
+
+func (exited) Stop() error { return nil }
+
 // REQ: NET-2
 
 const (
@@ -476,7 +482,7 @@ func TestReadDecodesOnlyWanted(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- Run(testConfig(filepath.Join(dir, "bus")), stackEnd, testLog{t}) }()
 	h := hostFor(t, make(chan radio.Notification, 8))
-	h.Attach(radio.StackBLE, hostEnd)
+	h.Attach(radio.StackBLE, exited{}, hostEnd)
 	// A read is Properties.Get on the bus, whose reply follows the frame
 	// in the stream: its answer says the stack has read the frame.
 	readOp := func() {
@@ -633,7 +639,7 @@ func TestServesOnlyDeclaredOps(t *testing.T) {
 	go func() { done <- Run(testConfig(filepath.Join(dir, "bus")), stackEnd, testLog{t}) }()
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
-	h.Attach(radio.StackBLE, hostEnd)
+	h.Attach(radio.StackBLE, exited{}, hostEnd)
 
 	type step struct {
 		r    radio.Request
@@ -1090,10 +1096,9 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 		probe = "none"
 	}
 	// The view is the test's bus, and the loader this cgo-linked (so
-	// dynamic) test binary needs; the enforcer's binary is static. A
-	// path the host lacks is left out.
+	// dynamic) test binary needs; the enforcer's binary is static.
 	p := confine.BLE(uid, uid)
-	p.View = []string{bus, "/lib", "/lib64", "/usr/lib", "/usr/lib64"}
+	p.View = append([]confine.Entry{{Path: bus, Kind: confine.Socket}}, confine.Loader()...)
 	proc, conn, err := confine.Start(confine.Spec{Profile: p, Self: bin, Path: bin,
 		Args: []string{stackArg, arg, probe}, Stderr: testLog{t}})
 	if err != nil {
@@ -1105,7 +1110,7 @@ func connectConfined(t *testing.T, dir, bus, probe string, uid uint32, full bool
 	}
 	notes := make(chan radio.Notification, 8)
 	h := hostFor(t, notes)
-	h.Attach(radio.StackBLE, conn)
+	h.Attach(radio.StackBLE, proc, conn)
 	if _, err := h.Call(radio.Request{Op: radio.OpConnect, Device: "scale"}); err != nil {
 		t.Fatalf("connect through the confined stack: %v", err)
 	}
@@ -1191,3 +1196,17 @@ type allSignals func(*Message)
 
 func (allSignals) wants(*Message) bool { return true }
 func (f allSignals) signal(m *Message) { f(m) }
+
+// TestBusIsTheViewsBus (NET-2; #4384): the bus a stack dials by default is
+// the one socket confine.BLE's view shows it. ble cannot import confine
+// (it would link os/exec, which only confine may; childproc's gate), so
+// the two constants are held equal here. Catches the view and the client
+// drifting apart, which would leave the stack no bus.
+func TestBusIsTheViewsBus(t *testing.T) {
+	if SystemBus != confine.SystemBus {
+		t.Errorf("ble dials %s; confine.BLE's view shows %s", SystemBus, confine.SystemBus)
+	}
+	if v := confine.BLE(1, 1).View; len(v) != 1 || v[0] != (confine.Entry{Path: SystemBus, Kind: confine.Socket}) {
+		t.Errorf("confine.BLE's view %+v", v)
+	}
+}
