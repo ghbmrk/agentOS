@@ -78,7 +78,8 @@ type Config struct {
 	Deadline time.Duration
 	// Subscription bounds each instance of a subscription operation, after
 	// which the host subscribes again; it must be set when the declaration
-	// has one, and within the unit's RuntimeMaxSec for subscriptions.
+	// has one, at least MinSubscription, and within the unit's RuntimeMaxSec
+	// for subscriptions.
 	Subscription time.Duration
 	Limit        Limit
 	// Now, if set, is the clock the limit reads.
@@ -98,6 +99,17 @@ var (
 	// operation, or a second subscription while one runs.
 	ErrSubscription = errors.New("devhost: not a subscription here")
 )
+
+// MinSubscription is the shortest Config.Subscription New takes. Each
+// instance writes up to its operation's MaxWrites, so this floor, not the
+// host's config alone, bounds a subscription's write rate: at most MaxWrites
+// per MinSubscription, plus one instance after each Do that preempts it
+// (DEVSLOT-subscribe-1). A shorter instance is polling, which is Do's job.
+const MinSubscription = 30 * time.Second
+
+// minSubscription is the floor New checks; only this package's tests lower
+// it (export_test.go), so no linking package can.
+var minSubscription = MinSubscription
 
 // errPreempted ends a subscription's instance when Do needs the driver.
 var errPreempted = errors.New("devhost: subscription preempted")
@@ -147,8 +159,8 @@ func New(cfg Config) (*Host, error) {
 	if len(canon) > devslot.MaxMsg*2/3 {
 		return nil, devslot.ErrDeclaration
 	}
-	if cfg.Subscription <= 0 && slices.ContainsFunc(cfg.Decl.Operations, func(o devslot.Operation) bool { return o.Subscribe }) {
-		return nil, errors.New("devhost: config needs a subscription deadline")
+	if cfg.Subscription < minSubscription && slices.ContainsFunc(cfg.Decl.Operations, func(o devslot.Operation) bool { return o.Subscribe }) {
+		return nil, errors.New("devhost: config needs a subscription deadline of at least MinSubscription")
 	}
 	h := &Host{cfg: cfg, canon: canon, win: map[string]*window{}}
 	h.scond = sync.NewCond(&h.smu)

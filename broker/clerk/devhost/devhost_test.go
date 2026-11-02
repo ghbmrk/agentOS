@@ -63,6 +63,7 @@ func (d *dialer) Dial(ctx context.Context) (devhost.Conn, error) {
 // transport is the device: it answers reads from a queue and records writes.
 type transport struct {
 	mu     sync.Mutex
+	fail   bool // every Write fails, after the frame is recorded as sent
 	writes [][]byte
 	reads  []devslot.Target
 	frames [][]byte
@@ -72,6 +73,9 @@ func (tr *transport) Write(_ context.Context, _ devslot.Target, f []byte) error 
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	tr.writes = append(tr.writes, f)
+	if tr.fail {
+		return errors.New("transport down")
+	}
 	return nil
 }
 
