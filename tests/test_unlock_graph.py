@@ -11,6 +11,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "image"))
+import offline_systemd  # noqa: E402
 import unlock_graph as g  # noqa: E402
 
 U = g.UNIT
@@ -160,6 +161,21 @@ class ViolationsTest(unittest.TestCase):
     def test_the_unlock_unit_must_be_loaded(self):
         self.assertIn("%s is not among the units systemd loaded; %s" % (U, g.WHY),
                       g.violations(0, dump({"other.service": []}), "", set()))
+
+
+class OfflineSystemdTest(unittest.TestCase):
+    def test_units_splits_dependencies_from_settings_and_skips_job_lines(self):
+        text = ("-> By units:\n\t-> Unit a.service:\n\t\tDescription: a: b\n\t\tUser: agentos-link\n"
+                "\t\tWants: b.service (origin-file origin-default)\n\t\tRequiresMountsFor: /var (origin-implicit)\n"
+                "\t\tFailure Action: reboot\n\t-> Job 4:\n\t\t\tAction: a.service -> start\n"
+                "-> By jobs:\n\t-> Unit z.service:\n")
+        self.assertEqual(offline_systemd.units(text), {"a.service": {
+            "edges": [("Wants", "b.service"), ("RequiresMountsFor", "/var")],
+            "settings": [("Description", "a: b"), ("User", "agentos-link"), ("Failure Action", "reboot")]}})
+        self.assertEqual(offline_systemd.failed_generator(
+            "/usr/lib/systemd/system-generators/systemd-gpt-auto-generator failed with exit status 1."),
+            "systemd-gpt-auto-generator")
+        self.assertIsNone(offline_systemd.failed_generator("Loaded units and determined initial transaction."))
 
 
 class AllowFileTest(unittest.TestCase):

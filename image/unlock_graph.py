@@ -28,13 +28,12 @@ list; --control OUT VERSION requires that each planted path (CONTROLS) is refuse
 import os
 import pathlib
 import re
-import subprocess
 import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import finish_image  # noqa: E402
+import offline_systemd  # noqa: E402
 
 UNIT = "agentos-keeper-kernel.service"
 ALLOW = HERE / "mkosi" / "unlock.allow"
@@ -53,73 +52,24 @@ SHUTDOWN = {"halt.target", "poweroff.target", "reboot.target", "kexec.target", "
             "systemd-soft-reboot.service", "systemd-exit.service"}
 WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)"
 
-UNIT_RE = re.compile(r"^\t-> Unit (\S+):$")
-EDGE_RE = re.compile(r"^\t\t([A-Za-z]+): (\S+) \(((?:origin|destination)-[a-z-]+(?: (?:origin|destination)-[a-z-]+)*)\)$")
-ACTION_RE = re.compile(r"^\t\t([A-Za-z ]+ Action): (\S+)$")
-GENERATOR_RE = re.compile(r"^(/\S+-generators/\S+) failed with exit status \d+\.$")
+ACTION_RE = re.compile(r"^[A-Za-z ]+ Action$")
 
-# The namespace the image's systemd runs in: an overlay of the tree (so /tmp is writable without a
-# mount, which systemd would read as an active tmp.mount and skip), its own /usr, a private /proc whose
-# cmdline is the boot entry's, only the cgroup tree of /sys, a /dev of five character devices, and the
-# command line's PID 1 a shell, never systemd. Test mode refuses root, so systemd runs as nobody.
-RUN = r'''set -eu
-R=$1 USR=$2 PLANT=$3 CMDLINE=$4 UNIT=$5
-W=$(mktemp -d)
-mount -t tmpfs -o mode=755 tmpfs "$W"
-mkdir "$W/upper" "$W/work" "$W/root"
-[ -z "$PLANT" ] || cp -a "$PLANT/." "$W/upper/"
-mount -t overlay -o "lowerdir=$R,upperdir=$W/upper,workdir=$W/work" overlay "$W/root"
-N=$W/root
-mount --rbind "$USR" "$N/usr"
-mount -t proc -o nosuid,nodev,noexec proc "$N/proc"
-printf "%s\n" "$CMDLINE" >"$W/cmdline"
-mount --bind "$W/cmdline" "$N/proc/cmdline"
-mount -t tmpfs -o mode=755 tmpfs "$N/sys"
-mkdir -p "$N/sys/fs/cgroup"
-mount --rbind /sys/fs/cgroup "$N/sys/fs/cgroup"
-mount -t tmpfs -o mode=755 tmpfs "$N/dev"
-for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
-mount -t tmpfs -o mode=755 tmpfs "$N/run"
-mkdir -p "$N/tmp" && chmod 1777 "$N/tmp"
-chroot "$N" setpriv --reuid=65534 --regid=65534 --clear-groups \
-  /usr/lib/systemd/systemd --test --system --unit="$UNIT" --no-pager
-'''
+def parse_dump(text):
+    """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "unknown": [kind]}} from systemd's
+    test-mode dump (offline_systemd.units): a dependency of a kind not in START_KINDS, STOP_KINDS or
+    OTHER_KINDS goes under "unknown"."""
+    out = {}
+    for name, u in offline_systemd.units(text).items():
+        known = START_KINDS | STOP_KINDS | OTHER_KINDS
+        out[name] = {"edges": [(k, t) for k, t in u["edges"] if k in known],
+                     "unknown": [k for k, _ in u["edges"] if k not in known],
+                     "actions": [(k, v) for k, v in u["settings"] if ACTION_RE.match(k) and " " not in v]}
+    return out
 
 
 def systemd_test(root, usr, cmdline, plant="", unit=UNIT):
-    """(exit status, stdout, stderr) of the tree's own systemd in test mode for UNIT, run as RUN says."""
-    r = subprocess.run(["unshare", "-m", "-p", "-f", "--propagation", "private", "sh", "-c", RUN, "unlock-graph",
-                        str(root), str(usr), str(plant), cmdline, unit],
-                       capture_output=True, text=True, timeout=600)
-    return r.returncode, r.stdout, r.stderr
-
-
-def parse_dump(text):
-    """{unit: {"edges": [(kind, target)], "actions": [(name, value)]}} from systemd's test-mode dump. Only
-    the "-> By units:" part is read; a dependency line of a kind not in START_KINDS, STOP_KINDS or
-    OTHER_KINDS is kept under "unknown"."""
-    units, cur = {}, None
-    for line in text.split("\n"):
-        if line == "-> By jobs:":
-            break
-        m = UNIT_RE.match(line)
-        if m:
-            cur = units.setdefault(m.group(1), {"edges": [], "actions": [], "unknown": []})
-            continue
-        if cur is None:
-            continue
-        m = EDGE_RE.match(line)
-        if m:
-            kind, target = m.group(1), m.group(2)
-            if kind in START_KINDS | STOP_KINDS | OTHER_KINDS:
-                cur["edges"].append((kind, target))
-            else:
-                cur["unknown"].append(kind)
-            continue
-        m = ACTION_RE.match(line)
-        if m:
-            cur["actions"].append((m.group(1), m.group(2)))
-    return units
+    """offline_systemd.run for the unlock unit."""
+    return offline_systemd.run(root, usr, cmdline, unit, plant)
 
 
 def reached(units, start=UNIT):
@@ -146,9 +96,9 @@ def facts(units, stderr, start=UNIT):
         out |= {"stop %s %s %s" % (u, k, t) for k, t in units.get(u, {}).get("edges", ())
                 if k in STOP_KINDS and t not in SHUTDOWN}
     for line in stderr.split("\n"):
-        m = GENERATOR_RE.match(line.strip())
-        if m:
-            out.add("generator %s failed" % m.group(1).rsplit("/", 1)[1])
+        name = offline_systemd.failed_generator(line)
+        if name:
+            out.add("generator %s failed" % name)
     return out
 
 
@@ -218,40 +168,12 @@ def plant_tree(root, plant, dst):
         p.write_text(text)
 
 
-def mounted(out, version):
-    """Mount build OUT's root partition and verified /usr read-only; return (root, usr, cmdline, cleanup)."""
-    out = pathlib.Path(out)
-    img = out / ("agentos_%s.raw" % version)
-    usr = out / ("agentos_%s.usr.raw" % version)
-    entries = sorted(out.glob("agentos_%s*.conf" % version))
-    if len(entries) != 1:
-        sys.exit("unlock graph: expected one boot entry in %s, found %s" % (out, [e.name for e in entries]))
-    cmdline = finish_image.options_line(entries[0].read_text())
-    table = finish_image.partition_table(str(img))
-    roots = [p for p in table["partitions"] if p["type"].lower() == finish_image.ROOT_GUID]
-    if len(roots) != 1:
-        sys.exit("unlock graph: expected one root partition in %s, found %d" % (img, len(roots)))
-    sector = table.get("sectorsize", 512)
-    d = pathlib.Path(tempfile.mkdtemp(prefix="unlock-graph-"))
-    (d / "root").mkdir()
-    (d / "usr").mkdir()
-    subprocess.run(["mount", "-o", "ro,noload,loop,offset=%d,sizelimit=%d" % (roots[0]["start"] * sector,
-                                                                             roots[0]["size"] * sector),
-                    str(img), str(d / "root")], check=True)
-    subprocess.run(["mount", "-t", "erofs", "-o", "ro,loop", str(usr), str(d / "usr")], check=True)
-
-    def cleanup():
-        for m in ("usr", "root"):
-            subprocess.run(["umount", str(d / m)], check=False)
-    return d / "root", d / "usr", cmdline, cleanup
-
-
 def main(argv):
     mode = argv[1] if argv[1:2] in (["--allowlist"], ["--control"]) else "check"
     args = argv[2:] if mode != "check" else argv[1:]
     if len(args) != 2 or os.geteuid() != 0:
         sys.exit(__doc__.rsplit("Usage", 1)[1].strip())
-    root, usr, cmdline, cleanup = mounted(*args)
+    root, usr, cmdline, cleanup = offline_systemd.built_tree(*args)
     try:
         if mode == "--control":
             # A plant counts only by the refusals it adds to the unplanted tree's, so a stale allowlist
