@@ -529,6 +529,13 @@ func TestURLBreaksSplitRun(t *testing.T) {
 			}
 		}
 	}
+	// A run split by a %0a, then JSON breaks at the same place, is one run
+	// too, as c29e712 read it (a differential fuzz against it and main).
+	m7 := match.New([]match.Value{{ID: 7, Bytes: []byte(`X7"bn7nzXz\7`)}}, nil)
+	for _, brs := range []string{`\r\n`, `\r\n\` + "u000a", `\\n`} {
+		s := `{"a":"X7\\\%0D` + brs + `\\\\"bn7nzXz\\\\\\\\7"}`
+		wrappedTrips(t, m7, s, len(`{"a":"X7\\\%0D`), 7)
+	}
 	// Security's repros, and both runs split twice, so the second is read
 	// while the first one's rest is matched.
 	for _, s := range []string{`{"a":"q7Xz\%0a\%0a\"2pL9mW4v\\R8tY3nB6kJ5h"}`, `{"a":"q7Xz\%0D\%0A\"2pL9mW4v\\R8tY3nB6kJ5h"}`,
@@ -551,14 +558,15 @@ func TestJSONFormRawWrapped(t *testing.T) {
 	}
 }
 
-// KRN-12: an attacker-written stream of JSON breaks costs about what plain
-// text does, whatever '\'s the table's forms hold: here a MaxValue value of
-// '<'s, a '\' in every sixth byte of its JSON form. Each break looks up only
-// the '\'s with its own bytes beside them (#4681). Timed against plain text
-// in the same run, so a slow runner or -race moves both.
+// KRN-12: an attacker-written stream of breaks costs about what plain text
+// does, whatever '\'s the table's forms hold: here MaxValue values of '<'s,
+// a '\' in every sixth byte of the JSON form, and of 'a's. Each break looks
+// up only the '\'s with its own bytes beside them, and a run split by %0a
+// joins as it comes (#4681, Security on #4742). Timed against plain text in
+// the same run, so a slow runner or -race moves both.
 func TestBreakStreamCost(t *testing.T) {
 	m := match.New([]match.Value{{ID: 1, Bytes: []byte(strings.Repeat("<", match.MaxValue))},
-		{ID: 2, Bytes: []byte(`q7Xz\2pL9<mW4vR8tY3nB6kJ5h`)}}, nil)
+		{ID: 2, Bytes: []byte(strings.Repeat("a", match.MaxValue))}, {ID: 3, Bytes: []byte(`q7Xz\2pL9<mW4vR8tY3nB6kJ5h`)}}, nil)
 	run := func(unit string) time.Duration {
 		w := []byte(strings.Repeat(unit, 512/len(unit))) // 512-byte writes
 		start := time.Now()
@@ -571,12 +579,47 @@ func TestBreakStreamCost(t *testing.T) {
 		}
 		return time.Since(start)
 	}
-	plain, breaks := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
-	for range 2 {
-		plain, breaks = min(plain, run("xy")), min(breaks, run(`x\n`))
+	units := []string{`x\n`, `\%0a`, `\%0a\%0D`}
+	plain, took := time.Duration(math.MaxInt64), make([]time.Duration, len(units))
+	for i := range took {
+		took[i] = time.Duration(math.MaxInt64)
 	}
-	if breaks > 3*plain {
-		t.Fatalf("64 KiB of x\\n took %v, plain text %v: over 3 times as long", breaks, plain)
+	for range 2 {
+		plain = min(plain, run("xy"))
+		for i, u := range units {
+			took[i] = min(took[i], run(u))
+		}
+	}
+	for i, u := range units {
+		if took[i] > 3*plain {
+			t.Fatalf("64 KiB of %s took %v, plain text %v: over 3 times as long", u, took[i], plain)
+		}
+	}
+}
+
+// KRN-12: a run split by one to three %0a or %0d trips when its form is the
+// table's longest, so the break is held for the whole form (Security on
+// #4742): a short value whose JSON form, at depth one and two, is longer
+// than every other form, whole, in two writes and a byte at a time.
+func TestSplitRunLongestForm(t *testing.T) {
+	for _, v := range []string{`x"<<<`, `0"Y0<`} {
+		m := match.New([]match.Value{{ID: 4, Bytes: []byte(v)}}, nil)
+		f := v
+		for range 2 {
+			j, _ := json.Marshal(f)
+			f = string(j[1 : len(j)-1])
+			for _, mid := range []string{`%0a\`, `%0a\%0a\`, `%0a\%0d\%0A\`} { // after the form's first '\'
+				s := `{"a":"` + f[:2] + mid + f[2:] + `"}`
+				wrappedTrips(t, m, s, 8, 4)
+				st := m.Stream()
+				for i := range len(s) {
+					st.Write([]byte{s[i]})
+				}
+				if got := st.Result().Trips; !slices.Equal(got, []int{4}) {
+					t.Fatalf("%q a byte at a time tripped %v, want [4]", s, got)
+				}
+			}
+		}
 	}
 }
 

@@ -311,6 +311,7 @@ type Stream struct {
 	joined  []byte // buf with line breaks removed, kept the same way
 	breaks  []cut  // the breaks removed from joined whose rest may be still to come
 	floor   int    // where the last break was removed
+	split   bool   // joined[floor] is a '\' of the run a %0a or %0d split, still part of a break's head
 	pending int
 	res     Result
 }
@@ -354,13 +355,22 @@ func (s *Stream) join(p []byte) {
 			s.floor = len(s.joined) - n
 			s.joined = append(s.joined, c)
 			s.addBreak(s.floor, s.joined[s.floor+1:])
-			s.joined = s.joined[:s.floor]
+			s.joined, s.split = s.joined[:s.floor], false
 			continue
 		}
 		if c == '\\' && bytes.HasSuffix(s.joined[s.floor:], []byte(`\`)) {
 			continue // a run of '\'s ends one break or none, whatever its length
 		}
+		if c == '\\' && len(s.joined) == s.floor && s.floor > 0 && s.joined[s.floor-1] == '\\' {
+			for i := len(s.breaks) - 1; i >= 0 && s.breaks[i].at == s.floor; i-- { // at most one per kind
+				s.split = s.split || s.breaks[i].b[0] == '0'
+			}
+		}
 		s.joined = append(s.joined, c)
+		if s.split && len(s.joined)-open(s.joined[s.floor:]) > s.floor {
+			// It ends no JSON break, so it is the same run as the '\' before (#4681).
+			s.joined, s.split = append(s.joined[:s.floor], s.joined[s.floor+1:]...), false
+		}
 		end := len(s.joined) - open(s.joined[s.floor:])
 		for len(s.breaks) > 0 && end-s.breaks[0].at >= s.m.carry {
 			s.matchBreak(s.breaks[0])
@@ -453,38 +463,29 @@ func (s *Stream) scan() {
 	s.floor = max(0, s.floor-drop)
 }
 
-// matchBreak matches the forms that begin inside a removed break, those
+// matchBreak matches the forms that begin inside a removed break and those
 // whose own '\' ends the '\' run a JSON break removed (the run read back as
-// one '\', #4622), and those whose '\' run a %0a or %0d splits (#4681), each
-// with its rest read back the same way at later breaks.
+// one '\', #4622), each with its rest read back the same way at later
+// JSON breaks (#4681).
 func (s *Stream) matchBreak(br cut) {
-	b, before, after, at := br.b, s.joined[:br.at], s.joined[br.at:], br.at
+	b, before, after := br.b, s.joined[:br.at], s.joined[br.at:]
 	for k := 1; k <= len(b); k++ {
 		for _, i := range s.m.first[b[len(b)-k]] {
 			f := s.m.forms[i]
-			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && s.follows(at, f.b[k:]) {
+			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && s.follows(br.at, f.b[k:]) {
 				s.res.add(f.id)
 			}
 		}
 	}
 	if b[0] == '0' {
-		if !bytes.HasSuffix(before, []byte(`\`)) || !bytes.HasPrefix(after, []byte(`\`)) {
-			return
-		}
-		for at < len(s.joined) && s.joined[at] == '\\' { // each %0a or %0d in the run splits it again
-			if _, ub := s.breakAt(at); !ub {
-				break
-			}
-			at++
-		}
-		before, after = before[:len(before)-1], s.joined[at:]
+		return
 	}
 	// Only the '\'s with the break's bytes beside them, or none, are read
 	// back, so the table bounds what a break costs, not the stream (#4681).
 	for _, k := range [2]int{beside(before, after), 0} {
 		for _, h := range s.m.slash[k] {
 			f, i := s.m.forms[h[0]], h[1]
-			if bytes.HasSuffix(before, f.b[:i]) && s.follows(at, f.b[i+1:]) {
+			if bytes.HasSuffix(before, f.b[:i]) && s.follows(br.at, f.b[i+1:]) {
 				s.res.add(f.id)
 			}
 		}
@@ -492,34 +493,30 @@ func (s *Stream) matchBreak(br cut) {
 }
 
 // follows reports whether f comes at joined[j:], where a held JSON break
-// may stand for one of f's '\'s and a held %0a or %0d split a run of them.
+// may stand for one of f's '\'s.
 func (s *Stream) follows(j int, f []byte) bool {
 	t := s.joined
 	for i := 0; i < len(f); {
 		if j < len(t) && t[j] == f[i] {
 			i, j = i+1, j+1
-			continue
-		}
-		jb, ub := s.breakAt(j)
-		switch {
-		case jb && f[i] == '\\':
+		} else if f[i] == '\\' && s.jsonBreakAt(j) {
 			i++
-		case ub && i > 0 && j > 0 && f[i-1] == '\\' && t[j-1] == '\\' && j < len(t) && t[j] == '\\':
-			j++
-		default:
+		} else {
 			return false
 		}
 	}
 	return true
 }
 
-// breakAt reports whether a JSON break, and a %0a or %0d, is held at j.
-func (s *Stream) breakAt(j int) (jb, ub bool) {
+// jsonBreakAt reports whether a JSON break is held at j.
+func (s *Stream) jsonBreakAt(j int) bool {
 	i, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })
 	for ; i < len(s.breaks) && s.breaks[i].at == j; i++ {
-		jb, ub = jb || s.breaks[i].b[0] != '0', ub || s.breaks[i].b[0] == '0'
+		if s.breaks[i].b[0] != '0' {
+			return true
+		}
 	}
-	return jb, ub
+	return false
 }
 
 // beside keys a '\' by the bytes before and after it, 0 at either end.
