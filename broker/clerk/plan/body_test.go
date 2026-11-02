@@ -252,6 +252,18 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		"a flag with a cap": func(d *plan.Declaration) {
 			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindOff, Max: 1}}}
 		},
+		"a JSON text below the top level": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Max: 8,
+				Each: &plan.Value{Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindBool}}}}}
+		},
+		"a number with a word list": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindInt, Only: []string{"1"}}}}
+		},
+		"a shape that holds itself": func(d *plan.Declaration) {
+			self := plan.Value{Kind: plan.KindMap, Max: 8}
+			self.Each = &self
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &self}}
+		},
 		"no mode":         func(d *plan.Declaration) { d.Mode = "" },
 		"an unknown mode": func(d *plan.Declaration) { d.Mode = "allowed" },
 	} {
@@ -748,22 +760,29 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 // The security property, written from literals rather than from the
 // declaration, so widening the declaration fails here: a guest cannot ask
 // the provider to ingest history, turn analytics on, attribute a call to an
-// MCP server, or draw guardian credits for the plan (#4585 Security 1).
+// MCP server, or draw guardian credits for the plan (#4585 Security 1). An
+// MCP tool source is refused for its kind alone, with no server named, and
+// MCP attribution inside the blob as well as beside it (#4595).
 func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 	f := newPlanFix(t)
 	p := f.login(t)
 	signIn(t, p, "signin")
 	g, _ := p.Guest("g")
 	ph := g.Tokens["access_token"]
-	mcp := `{"tool_namespaces_info":{"functions":{"name":"functions","functions":{"exec":` +
-		`{"name":"exec","direct":true,"code_mode_name":null,"deferred":false,"source":{"kind":"mcp","server_name":"s"}}}}}}`
+	tool := func(source string) string {
+		return `{"tool_namespaces_info":{"functions":{"name":"functions","functions":{"exec":` +
+			`{"name":"exec","direct":true,"code_mode_name":null,"deferred":false,"source":` + source + `}}}}}`
+	}
 	for name, meta := range map[string]map[string]any{
-		"history ingest":             {"x-codex-turn-metadata": `{"history_ingest_requested":true}`},
-		"analytics":                  {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
-		"an MCP tool source":         {"x-codex-turn-metadata": mcp},
-		"MCP attribution":            {"mcp_attribution": `{"status":"ok"}`},
-		"guardian credits":           {"guardian_credits_requested": "true"},
-		"guardian credits in a blob": {"x-codex-turn-metadata": `{"guardian_credits_requested":"true"}`},
+		"history ingest":                 {"x-codex-turn-metadata": `{"history_ingest_requested":true}`},
+		"analytics":                      {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
+		"an MCP tool source":             {"x-codex-turn-metadata": tool(`{"kind":"mcp","server_name":"s"}`)},
+		"an MCP tool source alone":       {"x-codex-turn-metadata": tool(`{"kind":"mcp"}`)},
+		"MCP attribution":                {"mcp_attribution": `{"status":"ok"}`},
+		"MCP attribution in a blob":      {"x-codex-turn-metadata": `{"mcp_attribution":{"status":"ok"}}`},
+		"MCP attribution text in a blob": {"x-codex-turn-metadata": `{"mcp_attribution":"{\"status\":\"ok\"}"}`},
+		"guardian credits":               {"guardian_credits_requested": "true"},
+		"guardian credits in a blob":     {"x-codex-turn-metadata": `{"guardian_credits_requested":"true"}`},
 	} {
 		m := capture(t)
 		m["client_metadata"] = meta

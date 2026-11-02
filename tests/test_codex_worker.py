@@ -131,6 +131,11 @@ FEATURES_OFF = ("hooks", "plugins", "remote_plugin", "plugin_sharing", "apps", "
                 "browser_use_external", "computer_use", "multi_agent",
                 "skill_mcp_dependency_install", "in_app_updates")
 REQUIRED.update({("features", f): False for f in FEATURES_OFF})
+# Features that make the CLI ask the provider to ingest history, which the plan clerk refuses on
+# every turn: unpinned, the provider's model catalog can turn token_budget on (#4595,
+# broker/clerk/plan ASSUMPTIONS MIG-4-plan-pins-2).
+PROVIDER_READ_OFF = ("token_budget", "context_management")
+REQUIRED.update({("features", f): False for f in PROVIDER_READ_OFF})
 # Names of tools the provider runs on its side when a request asks for them (OpenAI's hosted tool
 # types, plus MCP servers, which the CLI would call on the model's behalf). Any key naming one must
 # be set off; an MCP server table must not exist at all.
@@ -284,6 +289,10 @@ class ManagedConfigTest(unittest.TestCase):
                                             "read"),
             **{f"feature {f} on": put(("features", f), True) for f in FEATURES_OFF},
             **{f"feature {f} unpinned": drop(("features", f)) for f in FEATURES_OFF},
+            **{f"feature {f} on": put(("features", f), True) for f in PROVIDER_READ_OFF},
+            **{f"feature {f} unpinned": drop(("features", f)) for f in PROVIDER_READ_OFF},
+            "token_budget as a table": put(("features", "token_budget"),
+                                           {"enabled": False, "use_history_notes_extension": True}),
         }
         for name, mutate in mutants.items():
             with self.subTest(mutant=name):
