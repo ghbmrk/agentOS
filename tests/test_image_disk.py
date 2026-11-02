@@ -39,8 +39,9 @@ for p in (a for a in sys.argv[1:] if not a.startswith("-")):
 FAKE_SUDO = """#!/bin/sh
 printf '%s\\n' "$*" >> "$(dirname "$0")/sudo.log"
 """
-# A sudo named by a path, or found on a PATH the script changes, would bypass the stand-in.
-SUDO_BYPASS = re.compile(r"/sudo\b|\bPATH=|\benv\s+(?:-\S+\s+)*-[a-zA-Z]*P|\bhash\s+-p")
+# A sudo named by a path, or found on a PATH the script changes or on bash's default PATH
+# (`command -p`), would bypass the stand-in.
+SUDO_BYPASS = re.compile(r"/sudo\b|\bPATH=|\benv\s+(?:-\S+\s+)*-[a-zA-Z]*P|\bhash\s+-p|\bcommand\s+(?:-\S+\s+)*-[a-zA-Z]*p")
 
 
 def build_steps():
