@@ -33,11 +33,6 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import finish_image  # noqa: E402  the initrd reader the build's Bluetooth check uses
 
-# A newc header's 13 fields after the magic, as cpio(5) names them; "check" is always 0 in newc.
-NEWC_FIELDS = ("ino", "mode", "uid", "gid", "nlink", "mtime", "filesize", "devmajor", "devminor",
-               "rdevmajor", "rdevminor", "namesize", "check")
-
-
 def shown(v):
     """V as one JSON token: a name or value read from a build prints quoted, with every control
     and non-ASCII character escaped, so it can never end a log line, start a forged one or an
@@ -113,11 +108,7 @@ def initrd_members(data):
             while True:
                 if off + 110 > len(data) or data[off:off + 6] not in finish_image.CPIO_MAGICS:
                     raise ValueError("initrd: bad cpio header at offset %d" % off)
-                try:
-                    hdr = dict(zip(NEWC_FIELDS, (int(data[off + 6 + 8 * i:off + 14 + 8 * i], 16)
-                                                 for i in range(13))))
-                except ValueError:
-                    raise ValueError("initrd: bad cpio header at offset %d" % off)
+                hdr = finish_image.newc_header(data, off)
                 end = off + 110 + hdr["namesize"]
                 if hdr["namesize"] < 1 or end > len(data):
                     raise ValueError("initrd: truncated cpio name at offset %d" % off)

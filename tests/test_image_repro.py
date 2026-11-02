@@ -164,6 +164,69 @@ class InitrdDiffTest(unittest.TestCase):
         self.assertIn("unreadable initrd", out)
 
 
+class CpioHeaderFieldTest(unittest.TestCase):
+    """#4662: both initrd readers take a newc header field only as exactly 8 hex digits. int(x, 16)
+    alone also takes a sign, spaces, 0x and _, and a negative size moved the reader back onto its own
+    header, so the reproduce job and the build's Bluetooth check looped until their timeout."""
+    # REQ: UPD-1a
+
+    BAD = (b"-0000070", b"+0000070", b" 0000070", b"0000070 ", b"0x000070", b"0000_070", b"\t0000070",
+           b"0000007\n", b"-0000000")
+
+    def setUp(self):
+        import signal
+        signal.signal(signal.SIGALRM, lambda *_: self.fail("reader did not stop"))
+        signal.alarm(10)
+        self.addCleanup(signal.alarm, 0)
+
+    def test_signed_or_padded_size_refused_by_both_readers(self):
+        for field in (6, 11):  # filesize, namesize: the two that move the offset
+            for v in self.BAD:
+                data = newc(BASE)
+                data = data[:6 + 8 * field] + v + data[14 + 8 * field:]
+                with self.subTest(field=field, value=v):
+                    with self.assertRaises(ValueError) as c:
+                        cm.initrd_members(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+                    with self.assertRaises(ValueError) as c:
+                        fin.cpio_names(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+
+    def test_every_field_is_checked_at_its_own_offset(self):
+        # A bad field in a later member's header names that header's offset, in either reader.
+        data = newc(BASE)
+        second = (110 + len(b"usr\0") + 3) & ~3
+        for field in range(13):
+            start = second + 6 + 8 * field
+            bad = data[:start] + b"-0000001" + data[start + 8:]
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as c:
+                    cm.initrd_members(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+                with self.assertRaises(ValueError) as c:
+                    fin.cpio_names(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+
+    def test_lower_case_hex_still_reads(self):
+        # cpio(5) fields are hex in either case; mode 0o100644 is 000081A4.
+        lower = newc(BASE).replace(b"000081A4", b"000081a4")
+        self.assertNotEqual(lower, newc(BASE))
+        self.assertEqual([k for k, _, _ in cm.initrd_members(lower)], [n for n, _, _ in BASE])
+        self.assertEqual(fin.cpio_names(lower), [n for n, _, _ in BASE])
+
+    def test_cli_fails_at_once(self):
+        data = newc(BASE)
+        bad = data[:54] + b"-0000070" + data[62:]
+        with tempfile.TemporaryDirectory() as d:
+            fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"
+            fa.write_bytes(bad)
+            fb.write_bytes(data)
+            r = subprocess.run(["python3", str(IMG / "compare_manifests.py"), "--initrd", str(fa), str(fb)],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("  unreadable initrd: initrd: bad cpio header at offset 0", r.stdout.splitlines())
+
+
 class ErrorLineEscapeTest(unittest.TestCase):
     """#4648: every error line names a path, a package or a bad entry escaped, as one line."""
 
