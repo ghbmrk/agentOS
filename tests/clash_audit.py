@@ -233,11 +233,12 @@ class _Tree:
 
 def _write_open(tree, pid, rest):
     """The names a write open asked for, walked, or None for an open that writes nothing. Only
-    an open the kernel gave no file for is walked; a resolved one is its reached file."""
+    an open the kernel gave no file for is walked; a resolved one is its reached file. The result
+    is read only after the quoted path, since a name can hold `) = 3<` (a split line has none)."""
     m = _OPEN_ARGS.match(rest)
     if not m or not _WRITE.search(_flags(m.group(3))):
         return None
-    reached = _REACHED.search(rest)
+    reached = _REACHED.search(m.group(3))
     if reached:
         return {("path", os.path.normpath(_decode(reached.group(1))))}
     base, path = m.group(1) and _decode(m.group(1)), _decode(m.group(2))

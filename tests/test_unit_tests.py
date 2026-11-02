@@ -554,6 +554,17 @@ class ClashTest(unittest.TestCase):
         read = '1 openat2(AT_FDCWD</w>, "x", {flags=O_RDONLY|O_CLOEXEC, resolve=0}, 24) = 3</w/x>\n'
         self.assertEqual(clash_audit.writes(read), set())
 
+    def test_a_result_inside_the_quoted_path_is_not_the_reached_file(self):
+        # Security on #4598: strace prints `)` and `<` in a quoted name as is, so `) = 3<` there
+        # is no result. A split create that failed counts its asked name; a completed one its file.
+        split = ('1 openat(AT_FDCWD</w>, "a) = 3<b", O_WRONLY|O_CREAT|O_EXCL, 0666 <unfinished ...>\n'
+                 '1 <... openat resumed>) = -1 EEXIST (File exists)\n')
+        done = '1 openat(AT_FDCWD</w>, "a) = 3<b", O_WRONLY|O_CREAT, 0666) = 3</w/a) = 3\\74b>\n'
+        for a in (split, done):
+            self.assertEqual(clash_audit.writes(a, ondisk=lambda p: None), {("path", "/w/a) = 3<b")}, a)
+            self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/w/a) = 3<b")}, serial={}),
+                             [("path", "/w/a) = 3<b", "test_a", "test_b")], a)
+
     def test_only_an_unresolved_write_open_is_walked(self):
         # CI-par-7b: a read, and a write open the kernel gave a file for, read nothing from disk;
         # a write open it gave none walks its path (a split one, before its result is known).
