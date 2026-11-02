@@ -483,13 +483,7 @@ func TestRequestsCoalesceAndArePaced(t *testing.T) {
 	})
 	r.grant(mailGrant())
 	base := r.own.count()
-	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
-	}
+	ask := func(id string) { r.submitInvoice("agent/"+id, id) }
 	sent := func() int { return r.own.count() - base }
 
 	ask("a")
@@ -756,11 +750,7 @@ func TestGrantsUseOwnerQuietAndAllowance(t *testing.T) {
 	base := r.own.count()
 	sent := func() int { return r.own.count() - base }
 	ask := func(id string) {
-		t.Helper()
-		x := sam()
-		x.Record = id
-		r.ver.set(id, x)
-		r.effect("agent/"+id, "invoice.send", map[string]any{"record": id}, "sam@example.com")
+		r.submitInvoice("agent/"+id, id)
 		r.advance(5 * time.Minute)
 		r.g.Tick()
 	}
