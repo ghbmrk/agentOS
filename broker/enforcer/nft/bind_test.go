@@ -50,7 +50,7 @@ func TestEveryAcceptBound(t *testing.T) {
 	more.Devices = append(more.Devices[:2:2], more.Devices[3:]...) // the plug removed
 	more.Devices = append(more.Devices, policy.Device{ID: "far", Network: policy.NetDevices, WiFi: "vlan4094", Allow: []string{"far.example"}, VendorCloud: true})
 	l := fixtureLayout()
-	shared := []string{`"` + l.Guests + `"`, `"` + l.Owner + `"`, `"` + l.Household + `"`}
+	shared := map[string]string{`"` + l.Guests + `"`: "guests", `"` + l.Owner + `"`: "owner", `"` + l.Household + `"`: "household"}
 	byPair := map[string]string{} // mark -> "in out", across both documents
 	byMark := map[string]string{} // "in out" -> mark, across both documents
 	lines := map[string]bool{}    // every TV line of the fixture
@@ -68,7 +68,7 @@ func TestEveryAcceptBound(t *testing.T) {
 			}
 			for _, l := range cs[chain] {
 				live := strings.HasSuffix(chain, "_live")
-				learns := strings.HasSuffix(l, " goto "+learnChain)
+				learns := strings.Contains(l, " goto learn_")
 				accepts := (!live && (strings.HasSuffix(l, " accept") || learns) && !strings.HasPrefix(l, "ct state ")) || (live && strings.HasSuffix(l, " return"))
 				if !accepts {
 					// Only the logged related drop reads the mark, to keep
@@ -89,10 +89,10 @@ func TestEveryAcceptBound(t *testing.T) {
 				}
 				// An accept from a shared segment records its host (#4324),
 				// and only those do.
-				if fromShared := slices.Contains(shared, in); !live && learns != fromShared {
-					t.Errorf("%s: an accept from %s records its host %v, want %v: %s", chain, in, learns, fromShared, l)
+				if seg, fromShared := shared[in]; !live && (learns != fromShared || learns && !strings.HasSuffix(l, " goto "+learn(seg))) {
+					t.Errorf("%s: an accept from %s records its host %v, want %v in %s: %s", chain, in, learns, fromShared, learn(seg), l)
 				}
-				if slices.Contains(shared, out) {
+				if _, ok := shared[out]; ok {
 					t.Errorf("%s: an accept into the shared segment %s: %s", chain, out, l)
 				}
 				if live != strings.Contains(l, " ct mark 0x") || !live != strings.Contains(l, " ct mark set 0x") {
@@ -119,37 +119,44 @@ func TestEveryAcceptBound(t *testing.T) {
 			}
 		}
 	}
-	// NET-1, NET-3 (#4324): the shared segments' host chains log and count
-	// nothing, and each reads the same record from the packet.
+	// NET-1, NET-3 (#4324, #4480): each shared segment has its own host
+	// chains, which log and count nothing, and each reads the same record
+	// from the packet into its own segment's sets.
 	cs := chains(mustCompile(t, fixturePolicy()))
-	for _, chain := range []string{learnChain, boundChain} {
-		if len(cs[chain]) == 0 {
-			t.Fatalf("no chain %s", chain)
-		}
-		for _, l := range cs[chain] {
-			if strings.Contains(l, "log") || strings.Contains(l, "counter") {
-				t.Errorf("%s logs or counts: %s", chain, l)
+	for _, seg := range []string{"guests", "owner", "household"} {
+		for _, chain := range []string{learn(seg), bound(seg), claim(seg)} {
+			if len(cs[chain]) == 0 {
+				t.Fatalf("no chain %s", chain)
+			}
+			for _, l := range cs[chain] {
+				if strings.Contains(l, "log") || strings.Contains(l, "counter") {
+					t.Errorf("%s logs or counts: %s", chain, l)
+				}
+				for _, other := range []string{"guests", "owner", "household"} {
+					if other != seg && strings.Contains(l, "_"+other+"_") {
+						t.Errorf("%s reads %s's set: %s", chain, other, l)
+					}
+				}
 			}
 		}
-	}
-	// learn records a connection only after setting its label and reading
-	// it back, and passes one already labelled first (#4324): a record
-	// written before the label, or without it read back, lets another host
-	// add one of its own.
-	if len(cs[learnChain]) == 0 || cs[learnChain][0] != "ct label "+hostLabel+" accept" {
-		t.Errorf("learn does not first pass a recorded connection: %q", cs[learnChain])
-	}
-	for _, v6 := range []bool{false, true} {
-		want := "meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }"
-		if !slices.Contains(cs[learnChain], want) {
-			t.Errorf("learn lacks %q", want)
+		// learn records a connection only after setting its label and
+		// reading it back, and passes one already labelled first (#4324):
+		// a record written before the label, or without it read back,
+		// lets another host add one of its own.
+		if cs[learn(seg)][0] != "ct label "+hostLabel+" accept" {
+			t.Errorf("%s does not first pass a recorded connection: %q", learn(seg), cs[learn(seg)])
 		}
-	}
-	for _, v6 := range []bool{false, true} {
-		k := hostKey(v6) + " "
-		if !slices.ContainsFunc(cs[learnChain], func(l string) bool { return strings.Contains(l, "{ "+k+"}") }) ||
-			!slices.ContainsFunc(cs[boundChain], func(l string) bool { return strings.Contains(l, k+"@"+HostSet(v6)+" return") }) {
-			t.Errorf("v6 %v: learn and bound do not both read %s", v6, k)
+		for _, v6 := range []bool{false, true} {
+			want := "meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(seg, v6) + " { " + hostKey(v6) + " }"
+			if !slices.Contains(cs[learn(seg)], want) {
+				t.Errorf("%s lacks %q", learn(seg), want)
+			}
+			k := hostKey(v6) + " "
+			if !slices.ContainsFunc(cs[bound(seg)], func(l string) bool {
+				return strings.Contains(l, k+"@"+HostSet(seg, v6)+" update @"+HostSet(seg, v6)+" { "+k+"} return")
+			}) {
+				t.Errorf("v6 %v: %s does not read and refresh %s", v6, bound(seg), k)
+			}
 		}
 	}
 	if len(lines) == 0 {
@@ -168,7 +175,7 @@ func TestEveryAcceptBound(t *testing.T) {
 // shared segment, so the checks are reached through bindAll directly.
 func TestBindAllRefuses(t *testing.T) {
 	idx := map[string]uint32{`"wan0"`: 0x1001, `"own0"`: 0x1002, `"hh0"`: 0x1003, `"dev0"`: 0x1004}
-	shared := []string{`"own0"`, `"hh0"`}
+	shared := map[string]string{`"own0"`: "owner", `"hh0"`: "household"}
 	for name, r := range map[string]rule{
 		"no ingress":     {out: `"wan0"`, verdict: "accept"},
 		"no egress":      {in: `"own0"`, verdict: "accept"},
@@ -194,11 +201,11 @@ func TestBindAllRefuses(t *testing.T) {
 	if rs[0].mark != "0x10011002" || rs[1].mark != "" || rs[2].mark != "0x10041001" {
 		t.Errorf("marks %q, %q, %q; want 0x10011002 and 0x10041001 on the accepts only", rs[0].mark, rs[1].mark, rs[2].mark)
 	}
-	if !rs[0].learn || rs[1].learn || rs[2].learn {
+	if rs[0].learn != learn("owner") || rs[1].learn != "" || rs[2].learn != "" {
 		t.Errorf("learn %v, %v, %v; want only the accept from Owner", rs[0].learn, rs[1].learn, rs[2].learn)
 	}
-	if got := rs[0].first(); !strings.HasSuffix(got, " goto "+learnChain) {
-		t.Errorf("the accept from Owner reads %q, want it to go to %s", got, learnChain)
+	if got := rs[0].first(); !strings.HasSuffix(got, " goto "+learn("owner")) {
+		t.Errorf("the accept from Owner reads %q, want it to go to %s", got, learn("owner"))
 	}
 	if got := rs[2].first(); !strings.HasSuffix(got, " accept") {
 		t.Errorf("the accept from the internet reads %q, want a plain accept", got)

@@ -3,8 +3,10 @@ package nft
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -12,7 +14,8 @@ import (
 
 // Reload is Compile's ruleset followed, in the same transaction, by the
 // answers the running ruleset holds for the names the new one still lists
-// (ASSUMPTIONS ENF-set-keep-1). running is the running table as nft's JSON
+// (ASSUMPTIONS ENF-set-keep-1), and by the shared segments' host records,
+// holds and claims (records, ENF-shared-src-1). running is the running table as nft's JSON
 // (load.Loader.List of Table); empty for none, as at the first load.
 //
 // The resolver puts each answer's addresses in its list's allow set and in
@@ -54,7 +57,152 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 			w.elements(a.set(v6), all)
 		}
 	}
+	recs, err := records(running, l)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range recs {
+		w.line("add element inet " + Table + " " + r.set + " { " + strings.Join(r.elems, ", ") + " }")
+	}
 	return text + w.b.String(), nil
+}
+
+// carried is one shared segment's set (HostSet, HeldSet, ClaimSet) with
+// its elements as add element reads them, each with the time it has left.
+type carried struct {
+	set   string
+	elems []string
+}
+
+// records is what the shared segments' sets hold in a JSON listing of the
+// running table, so a load keeps every host record, hold and claim, each
+// for the time it had left (#4480): a load then cuts no connection whose
+// record it would drop, and frees no address a host holds for another
+// host to take. Each element is read field by field and written again
+// from the parsed values, never copied as text; one in any other form, or
+// with no time left, is left out, which fails closed (bound, claim). The
+// elements reach only the load's text, which goes to nft's input and
+// nowhere else (the loader reports nft's first error line only, a
+// position, not the text): a guest's or person's addresses are never
+// logged or kept (NET-1, NET-3).
+func records(listing []byte, l Layout) ([]carried, error) {
+	var doc struct {
+		Nftables []struct {
+			Set *struct {
+				Family string            `json:"family"`
+				Table  string            `json:"table"`
+				Name   string            `json:"name"`
+				Elem   []json.RawMessage `json:"elem"`
+			} `json:"set"`
+		} `json:"nftables"`
+	}
+	if err := json.Unmarshal(listing, &doc); err != nil {
+		return nil, fmt.Errorf("nft: running table listing: %v", err)
+	}
+	// Each set's element reader, its own timeout and the longest time an
+	// element may have left, in seconds, by the set's name.
+	read := map[string]func(json.RawMessage) (string, bool){}
+	timeout, longest := map[string]int64{}, map[string]int64{}
+	for _, sg := range segments(l) {
+		for _, v6 := range []bool{false, true} {
+			timeout[HostSet(sg.name, v6)], longest[HostSet(sg.name, v6)] = seconds(HostTimeout), seconds(HostTCPTimeout)
+			for _, s := range []string{HeldSet(sg.name, v6), ClaimSet(sg.name, v6)} {
+				timeout[s], longest[s] = seconds(ClaimTimeout), seconds(ClaimTimeout)
+			}
+			read[HostSet(sg.name, v6)] = func(raw json.RawMessage) (string, bool) {
+				var c struct {
+					Concat []json.RawMessage `json:"concat"`
+				}
+				if json.Unmarshal(raw, &c) != nil || len(c.Concat) != 4 {
+					return "", false
+				}
+				var id uint32
+				if json.Unmarshal(c.Concat[0], &id) != nil {
+					return "", false
+				}
+				orig, ok1 := addrOf(c.Concat[1], v6)
+				src, ok2 := addrOf(c.Concat[2], v6)
+				hw, ok3 := hwOf(c.Concat[3])
+				return fmt.Sprintf("%d . %s . %s . %s", id, orig, src, hw), ok1 && ok2 && ok3
+			}
+			read[HeldSet(sg.name, v6)] = func(raw json.RawMessage) (string, bool) {
+				return addrOf(raw, v6)
+			}
+			read[ClaimSet(sg.name, v6)] = func(raw json.RawMessage) (string, bool) {
+				var c struct {
+					Concat []json.RawMessage `json:"concat"`
+				}
+				if json.Unmarshal(raw, &c) != nil || len(c.Concat) != 2 {
+					return "", false
+				}
+				a, ok1 := addrOf(c.Concat[0], v6)
+				hw, ok2 := hwOf(c.Concat[1])
+				return a + " . " + hw, ok1 && ok2
+			}
+		}
+	}
+	var out []carried
+	for _, o := range doc.Nftables {
+		s := o.Set
+		if s == nil || s.Family != "inet" || s.Table != Table || read[s.Name] == nil {
+			continue
+		}
+		c := carried{set: s.Name}
+		for _, raw := range s.Elem {
+			var e struct {
+				Elem *struct {
+					Val     json.RawMessage `json:"val"`
+					Expires int64           `json:"expires"`
+				} `json:"elem"`
+			}
+			if json.Unmarshal(raw, &e) != nil || e.Elem == nil || e.Elem.Expires <= 0 {
+				continue
+			}
+			v, ok := read[s.Name](e.Elem.Val)
+			if !ok || e.Elem.Expires > longest[s.Name] {
+				continue
+			}
+			// An element refreshed for longer than its set's timeout (a TCP
+			// connection's record, bound) needs a timeout of its own as long
+			// as the time it has left.
+			x := strconv.FormatInt(e.Elem.Expires, 10) + "s"
+			if e.Elem.Expires > timeout[s.Name] {
+				v += " timeout " + x
+			}
+			c.elems = append(c.elems, v+" expires "+x)
+		}
+		if len(c.elems) > 0 {
+			out = append(out, c)
+		}
+	}
+	slices.SortFunc(out, func(a, b carried) int { return strings.Compare(a.set, b.set) })
+	return out, nil
+}
+
+// addrOf is a listed address of the family v6 picks, as nft reads it.
+func addrOf(raw json.RawMessage, v6 bool) (string, bool) {
+	var str string
+	if json.Unmarshal(raw, &str) != nil {
+		return "", false
+	}
+	a, err := netip.ParseAddr(str)
+	if err != nil || a.Zone() != "" || a.Is4In6() || a.Is6() != v6 {
+		return "", false
+	}
+	return a.String(), true
+}
+
+// hwOf is a listed hardware (Ethernet) address, as nft reads it.
+func hwOf(raw json.RawMessage) (string, bool) {
+	var str string
+	if json.Unmarshal(raw, &str) != nil {
+		return "", false
+	}
+	hw, err := net.ParseMAC(str)
+	if err != nil || len(hw) != 6 {
+		return "", false
+	}
+	return hw.String(), true
 }
 
 // elements writes one add element line for set, with addrs each once in
@@ -109,4 +257,13 @@ func elements(listing []byte) (map[string][]netip.Addr, error) {
 		}
 	}
 	return out, nil
+}
+
+// seconds is a timeout written as nft reads it ("1h", "5d") in seconds.
+func seconds(t string) int64 {
+	n, err := strconv.ParseInt(t[:len(t)-1], 10, 64)
+	if err != nil {
+		panic("nft: timeout " + t)
+	}
+	return n * map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[t[len(t)-1]]
 }
