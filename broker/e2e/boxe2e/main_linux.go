@@ -33,7 +33,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -135,8 +134,13 @@ type driver struct {
 // the system tools the driver runs (ip, systemctl, journalctl).
 var childEnv = childproc.NewEnv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 
+// tools are the only programs command runs, each by its absolute path on
+// the image's read-only, verity-checked /usr, so no PATH, the driver's or
+// a child's, and no file the driver writes decides what runs (#4609).
+var tools = map[string]string{"ip": "/usr/bin/ip", "systemctl": "/usr/bin/systemctl", "journalctl": "/usr/bin/journalctl"}
+
 func command(name string, args ...string) *childproc.Cmd {
-	return childproc.Command(context.Background(), childEnv, childproc.Options{}, name, args...)
+	return childproc.Command(context.Background(), childEnv, childproc.Options{}, tools[name], args...)
 }
 
 func run(name string, args ...string) error {
@@ -220,7 +224,7 @@ func nsDialer(path string) (func(ctx context.Context, network, addr string) (net
 	ready := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread()
-		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		fd, err := openRaw(path, unix.O_RDONLY, 0)
 		if err == nil {
 			err = unix.Setns(fd, unix.CLONE_NEWNET)
 			unix.Close(fd)
@@ -819,7 +823,7 @@ func workerOutFile(machines, name string) string {
 		return ""
 	}
 	defer r.Close()
-	f, err := r.OpenFile(rel, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := rootOpen(r, rel)
 	if err != nil {
 		return ""
 	}

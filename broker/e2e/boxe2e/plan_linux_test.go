@@ -302,6 +302,7 @@ func TestWorkerOutputRefusesTheGuestsLinks(t *testing.T) {
 		t.Fatalf("read %q through the guest's link", got)
 	}
 	latch := filepath.Join(t.TempDir(), "card-latch.json")
+	writeHere(t, filepath.Dir(latch)) // so only the link refuses the write
 	if err := os.Symlink(secret, latch); err != nil {
 		t.Fatal(err)
 	}
