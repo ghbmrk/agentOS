@@ -52,15 +52,7 @@ func (s *sim) summary() {
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	var groups []capgate.Group
-	for _, g := range cs.Groups {
-		cg := capgate.Group{Count: g.Count}
-		for _, d := range g.Dests {
-			cg.Dests = append(cg.Dests, capgate.Dest{Name: d.Name, Cap: d.Cap})
-		}
-		groups = append(groups, cg)
-	}
-	if err := s.gate.Summary(tk, cs.Day, groups); err != nil {
+	if err := s.gate.Counts(tk, cs); err != nil {
 		s.t.Fatal(err)
 	}
 }
@@ -74,7 +66,7 @@ func (s *sim) send(dest string, addr netip.Addr, size uint64, retries uint64) er
 		return err
 	}
 	s.deliver(addr, size*(1+retries))
-	s.gate.End(snd)
+	snd.End()
 	return nil
 }
 
@@ -152,6 +144,10 @@ func TestHonestKernelNeverTripsAcrossAMerge(t *testing.T) {
 	if err := s.send("b.example", addrA, 15, 1); err != nil {
 		t.Fatalf("to the merged cap: %v", err)
 	}
+	if err := s.send("a.example", addrA, 1, 0); !errors.Is(err, capgate.ErrCounting) {
+		t.Fatalf("past the merged cap before the ended send is counted: %v, want ErrCounting", err)
+	}
+	s.summary()
 	var past *capgate.PastCap
 	if err := s.send("a.example", addrA, 1, 0); !errors.As(err, &past) {
 		t.Fatalf("past the merged cap: %v", err)
