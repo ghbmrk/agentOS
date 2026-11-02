@@ -90,7 +90,7 @@ func (f FirstAnchors) shape() bool {
 func (s *State) SetupOpen() bool { return len(s.Anchors) == 0 && s.Seq == 0 }
 
 // Box is this box's head key, which the setup step signs over.
-func (k *Kernel) Box() ed25519.PublicKey { return slices.Clone(k.log.cfg.Pub) }
+func (k *Kernel) Box() ed25519.PublicKey { return slices.Clone((*k.log.p).cfg.Pub) }
 
 // Setup takes the owner's first anchors (D-146) on a box that has none. It
 // is the log's first entry and anchors before it returns; from then on the
@@ -115,7 +115,7 @@ func (k *Kernel) SetupWithEdge(now int64, f FirstAnchors, edge ed25519.PublicKey
 	if k.s.pinnedOwner(f.Anchors) {
 		return ErrPinned
 	}
-	msg := SetupMsg(k.log.cfg.Pub, f.Anchors)
+	msg := SetupMsg((*k.log.p).cfg.Pub, f.Anchors)
 	for i, a := range f.Anchors {
 		if !a.Verify(msg, f.Sigs[i]) {
 			return ErrSetupKeys

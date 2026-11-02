@@ -317,7 +317,7 @@ func (k *Kernel) edgeFirst(now int64, edge ed25519.PublicKey) error {
 }
 
 // LiveEdge is the edge key this core trusts now.
-func (k *Kernel) LiveEdge() ed25519.PublicKey { return k.s.LiveEdge(k.log.cfg.Pub) }
+func (k *Kernel) LiveEdge() ed25519.PublicKey { return k.s.LiveEdge((*k.log.p).cfg.Pub) }
 
 // EdgeReplaces is the key enrolling edge would revoke (State.EdgeReplaces):
 // the page step shows it and the hardware key signs over it.
