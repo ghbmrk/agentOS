@@ -142,7 +142,6 @@ allow broker/e2e/boxe2e/stub_linux.go serveStub os.Remove a stale socket in that
 allow broker/e2e/boxe2e/stub_linux.go serveStub os.Chown the socket bind(2) just made in that root-only-writable directory, which no other uid can swap
 allow broker/e2e/boxe2e/sysroot.go buildSysroot os.RemoveAll the fake sysfs tree, /run/agentos-e2e-sysroot, in root-owned /run; RemoveAll descends with O_NOFOLLOW
 allow broker/e2e/boxe2e/sysroot.go buildSysroot os.MkdirAll directories of that tree, which RemoveAll just cleared and only root writes
-allow broker/e2e/boxe2e/sysroot.go buildSysroot os.WriteFile sysfs attribute files in directories this call just made, which only root writes
 
 # Daemon packages b (#3945). clock, backup, follow, meter, claim, quota and
 # modem/at's sysfs reads refuse a link (O_NOFOLLOW). What is left: the serial

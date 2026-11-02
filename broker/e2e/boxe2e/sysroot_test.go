@@ -11,6 +11,7 @@ import (
 // -sys-root, exactly as it finds a SIM7600G-H's AT port on the box.
 func TestFakeSysrootIsDiscovered(t *testing.T) {
 	root := t.TempDir()
+	writeHere(t, root)
 	if err := buildSysroot(root, "/dev/pts/7"); err != nil {
 		t.Fatal(err)
 	}

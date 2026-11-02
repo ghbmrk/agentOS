@@ -22,12 +22,12 @@ func buildSysroot(root, slave string) error {
 		}
 	}
 	for path, v := range map[string]string{filepath.Join(dev, "idVendor"): "1e0e\n", filepath.Join(intf, "bInterfaceNumber"): "02\n"} {
-		if err := os.WriteFile(path, []byte(v), 0o644); err != nil {
+		if err := writeNoFollow(path, []byte(v), 0o644); err != nil {
 			return err
 		}
 	}
-	if err := os.Symlink("../../../devices/pci0000:00/usb1/1-2/1-2:1.2/ttyUSB2", filepath.Join(root, "sys/bus/usb-serial/devices/ttyUSB2")); err != nil {
+	if err := symlink("../../../devices/pci0000:00/usb1/1-2/1-2:1.2/ttyUSB2", filepath.Join(root, "sys/bus/usb-serial/devices/ttyUSB2")); err != nil {
 		return err
 	}
-	return os.Symlink(slave, filepath.Join(root, "dev/ttyUSB2"))
+	return symlink(slave, filepath.Join(root, "dev/ttyUSB2"))
 }

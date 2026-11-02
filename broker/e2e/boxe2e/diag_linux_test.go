@@ -469,9 +469,35 @@ var spawners = map[string]bool{
 // (Exec, ForkExec, a raw execve), and a list of what they add would go
 // stale, so every other function of theirs is refused.
 var sysAllowed = map[string]bool{
-	"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Close": true, "golang.org/x/sys/unix.Setns": true,
+	"golang.org/x/sys/unix.Close": true, "golang.org/x/sys/unix.Setns": true,
 	"golang.org/x/sys/unix.IoctlSetPointerInt": true, "golang.org/x/sys/unix.IoctlGetUint32": true,
 }
+
+// osAllowed are the only functions of os the driver may use anywhere:
+// none opens a file or makes a link, and none changes the process's
+// environment. Opening and linking go through the file gate.
+var osAllowed = map[string]bool{
+	"os.Exit": true, "os.Lstat": true, "os.MkdirAll": true, "os.Remove": true, "os.RemoveAll": true,
+	"os.Chmod": true, "os.Chown": true, "os.OpenRoot": true, "os.NewFile": true,
+	"(*os.Root).Lstat": true, "(*os.Root).Close": true,
+}
+
+// gates are the driver's file gate (nofollow_linux.go): every open and
+// every new link goes through them, and only they use gateOnly, so a
+// journal file is refused by its content and a write outside writeDirs
+// by its resolved path, however the path is spelled (#4609).
+var (
+	gates    = []string{"openRaw", "inDir", "fdPath", "checkFD", "rootOpen", "symlink"}
+	gateOnly = map[string]bool{
+		"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Openat": true, "golang.org/x/sys/unix.Fstat": true,
+		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true,
+		"os.Readlink": true, "(*os.Root).OpenFile": true,
+	}
+)
+
+// toolNames are the tools ASSUMPTIONS E8 allows, and the keys tools must
+// have, each an absolute path on the image's read-only /usr.
+var toolNames = []string{"ip", "systemctl", "journalctl"}
 
 // barred are imports no file of the driver takes: os/exec and
 // net/http/cgi start a process outside command, and unsafe, plugin and
@@ -493,30 +519,46 @@ var (
 	}
 )
 
-// dropIns are the driver's constants that name a systemd file it writes:
-// only these may hold a systemd path component, so a diag does not plant
-// a unit whose ExecStart systemd would run for it (#4609 Security R2).
-var dropIns = []string{"pageDropIn"}
-
-// constantPath says why the constant s names a place a diag must not
-// reach, or "". Path components are compared, not prefixes, so
-// "/usr//local/sbin/ip", "/usr/lib/../bin/ip", "/proc/self/root/usr/sbin/ip",
-// a relative "sbin/ip" and a Glob pattern all match: "log" (the
-// journal's /var/log and /run/log), "systemd" (every unit directory) and
-// the last component of each of childEnv's PATH directories (bins), where
-// a planted program would run as a tool (#4594 item 2, #4609).
-func constantPath(s string, bins []string) string {
-	for c := range strings.SplitSeq(s, "/") {
-		switch {
-		case c == "log":
-			return "a log directory, where the journal's files are"
-		case c == "systemd":
-			return "a systemd directory, where a unit could run a process"
-		case slices.Contains(bins, c):
-			return "a directory of childEnv's PATH, where a planted program would run as a tool"
+// commandCall says why command's childproc.Command call n runs other than
+// tools[name] with args, under childEnv and empty options, or "". params
+// are command's own; spawn takes the childEnv and tools idents it allows.
+func commandCall(info *types.Info, n *ast.CallExpr, envObj, toolsObj types.Object, params []types.Object, spawn map[*ast.Ident]bool) string {
+	is := func(e ast.Expr, o types.Object) bool {
+		id, ok := e.(*ast.Ident)
+		if ok && o != nil && info.Uses[id] == o {
+			spawn[id] = true
+			return true
 		}
+		return false
+	}
+	if len(n.Args) != 5 || len(params) != 2 || !n.Ellipsis.IsValid() {
+		return "other than as childproc.Command(ctx, childEnv, childproc.Options{}, tools[name], args...)"
+	}
+	if !is(n.Args[1], envObj) {
+		return "with an environment other than childEnv"
+	}
+	if cl, ok := n.Args[2].(*ast.CompositeLit); !ok || len(cl.Elts) > 0 {
+		return "with options other than childproc.Options{}"
+	}
+	ix, ok := n.Args[3].(*ast.IndexExpr)
+	if !ok || !is(ix.X, toolsObj) || !is(ix.Index, params[0]) {
+		return "with a program other than tools[name]"
+	}
+	if !is(n.Args[4], params[1]) {
+		return "with arguments other than its own args"
 	}
 	return ""
+}
+
+// basicString is a string literal's value, or "" for any other
+// expression.
+func basicString(e ast.Expr) string {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	v, _ := strconv.Unquote(lit.Value)
+	return v
 }
 
 // funcPath is the package path and name of the package-level function a
@@ -538,11 +580,12 @@ func funcPath(info *types.Info, call *ast.CallExpr) string {
 // REQ: HW-10, ONB-3. The console is a public CI log, so no diag runs
 // journalctl but through the readers ASSUMPTIONS E8 names (#4517 item 3):
 // journalctl is named only in readJournal, and each reader is called
-// only by the functions E8 names for it. No constant names a journal file
-// or a path through a log, systemd or childEnv PATH directory, no
-// import but procImports reaches childproc or os/exec, and run and
-// output pass their own parameters on unchanged (#4594); paths built
-// from pieces and data flow are E8's review items. A tool runs only through a
+// only by the functions E8 names for it. command runs only tools[name],
+// an absolute path on the read-only /usr; only the file gate opens a file
+// or makes a link, and of os the driver uses only osAllowed; no import but
+// procImports reaches childproc or os/exec; and run and output pass their
+// own parameters on unchanged (#4594, #4609). Data flow and other
+// packages' own opens are E8's review items. A tool runs only through a
 // direct call of command, run or output, and only the tools E8 allows,
 // under constant names and arguments: ip link, addr or netns add, and
 // systemctl show, restart or daemon-reload; journalctl only in
@@ -617,20 +660,26 @@ func TestSourceTestRefusesEachBypass(t *testing.T) {
 		{"journal as a value", `func zz(d *driver) { f := d.journal; _ = f }`, "uses journal other than as a direct call"},
 		{"machprobe's child", `import "github.com/ghbmrk/agentos/broker/machprobe"` + "\n" + `var zz = machprobe.Options{Child: []string{"sh", "-c", "systemctl status agentosd.service"}}`, "imports github.com/ghbmrk/agentos/broker/machprobe, which reaches github.com/ghbmrk/agentos/broker/childproc"},
 		{"probecmd's command", `import "github.com/ghbmrk/agentos/broker/probecmd"` + "\n" + `var zz = probecmd.CommandProbe{Cmd: []string{"sh"}}`, "imports github.com/ghbmrk/agentos/broker/probecmd, which reaches github.com/ghbmrk/agentos/broker/childproc"},
-		{"journal file read", `import "os"` + "\n" + `func zz() { os.ReadFile("/var/log/journal/x/system.journal") }`, `zz names "/var/log/journal/x/system.journal": a journal is read only through readJournal`},
-		{"journal directory joined", `import "path/filepath"` + "\n" + `var zz = filepath.Join("/run/log", "journal")`, `names "journal": a journal is read only through readJournal`},
-		{"program planted on PATH", `import "os"` + "\n" + `func zz() { os.WriteFile("/usr/local/sbin/ip", []byte("#!/bin/sh\nexec systemctl status agentosd.service\n"), 0o755); run("ip", "link") }`, `zz names "/usr/local/sbin/ip", a directory of childEnv's PATH`},
-		{"PATH directory joined", `import "path/filepath"` + "\n" + `var zz = filepath.Join("/usr/bin", "ip")`, `names "/usr/bin", a directory of childEnv's PATH`},
-		{"PATH path doubled slash", `import "os"` + "\n" + `func zz() { os.WriteFile("/usr//local/sbin/ip", nil, 0o755) }`, `names "/usr//local/sbin/ip", a directory of childEnv's PATH`},
-		{"PATH path with dot", `import "os"` + "\n" + `func zz() { os.WriteFile("/usr/./bin/ip", nil, 0o755) }`, `names "/usr/./bin/ip", a directory`},
-		{"PATH path with dot-dot", `import "os"` + "\n" + `func zz() { os.WriteFile("/usr/lib/../bin/ip", nil, 0o755) }`, `names "/usr/lib/../bin/ip", a directory`},
-		{"PATH path through /proc", `import "os"` + "\n" + `func zz() { os.WriteFile("/proc/self/root/usr/sbin/ip", nil, 0o755) }`, `names "/proc/self/root/usr/sbin/ip", a directory`},
-		{"PATH path relative", `import "os"` + "\n" + `func zz() { os.WriteFile("usr/local/sbin/ip", nil, 0o755) }`, `names "usr/local/sbin/ip", a directory`},
-		{"PATH directory by chdir", `import "os"` + "\n" + `func zz() { os.Chdir("/usr/local"); os.WriteFile("sbin/ip", nil, 0o755) }`, `names "sbin/ip", a directory`},
-		{"journal glob", `import "path/filepath"` + "\n" + `func zz() { filepath.Glob("/var/log/jour*/*/*") }`, `names "/var/log/jour*/*/*", a log directory`},
-		{"systemd unit plant", `import "os"` + "\n" + `func zz() { os.WriteFile("/etc/systemd/system/zz.service", []byte("[Service]\nExecStart=sh\n"), 0o644); run("systemctl", "daemon-reload") }`, `names "/etc/systemd/system/zz.service", a systemd directory`},
-		{"decoy PATH constant", `const zz = "PATH=/nonexistent"`, `names "PATH=/nonexistent": only childEnv sets PATH`},
-		{"childEnv passed elsewhere", `import cp ` + cp + "\n" + `var zz = []cp.Env{childEnv}`, "zz uses childEnv other than as command's environment"},
+		{"journal file read", `import "os"` + "\n" + `func zz() { os.ReadFile("/var/log/journal/x/system.journal") }`, "zz uses os.ReadFile, which the driver does not need (osAllowed)"},
+		{"file opened", `import "os"` + "\n" + `func zz() { os.Open("/var/l" + "og/journal") }`, "zz uses os.Open, which the driver does not need"},
+		{"file opened for writing", `import "os"` + "\n" + `func zz() { os.OpenFile("/etc/ld.so.preload", os.O_WRONLY, 0) }`, "zz uses os.OpenFile, which the driver does not need"},
+		{"program planted", `import "os"` + "\n" + `func zz() { os.WriteFile("/run/zz/ip", nil, 0o755); run("ip", "link") }`, "zz uses os.WriteFile, which the driver does not need"},
+		{"link made", `import "os"` + "\n" + `func zz() { os.Symlink("/run/agentos-e2e/zz", "/etc/systemd/system/zz.service") }`, "zz uses os.Symlink, which the driver does not need"},
+		{"file moved", `import "os"` + "\n" + `func zz() { os.Rename("/run/agentos-e2e/zz", "/etc/ld.so.preload") }`, "zz uses os.Rename, which the driver does not need"},
+		{"hard link", `import "os"` + "\n" + `func zz() { os.Link("/var/log/journal/x/system.journal", "/run/agentos-e2e/j") }`, "zz uses os.Link, which the driver does not need"},
+		{"directory filesystem", `import "os"` + "\n" + `var zz = os.DirFS("/var/log")`, "zz uses os.DirFS, which the driver does not need"},
+		{"PATH changed", `import "os"` + "\n" + `func zz() { os.Setenv("PATH", "/run/zz") }`, "zz uses os.Setenv, which the driver does not need"},
+		{"working directory changed", `import "os"` + "\n" + `func zz() { os.Chdir("/var/log") }`, "zz uses os.Chdir, which the driver does not need"},
+		{"open as a value", `import "os"` + "\n" + `var zz = os.ReadFile`, "zz uses os.ReadFile, which the driver does not need"},
+		{"unix open outside the gate", `import "golang.org/x/sys/unix"` + "\n" + `func zz() { unix.Open("/var/log/journal", unix.O_RDONLY, 0) }`, "zz uses golang.org/x/sys/unix.Open, which only the file gate uses"},
+		{"unix openat outside the gate", `import "golang.org/x/sys/unix"` + "\n" + `func zz(d int) { unix.Openat(d, "x", unix.O_RDONLY, 0) }`, "zz uses golang.org/x/sys/unix.Openat, which only the file gate uses"},
+		{"root read", `import "os"` + "\n" + `func zz(r *os.Root) { r.ReadFile("system.journal") }`, "zz uses (*os.Root).ReadFile, which the driver does not need"},
+		{"root open outside the gate", `import "os"` + "\n" + `func zz(r *os.Root) { r.OpenFile("system.journal", os.O_RDONLY, 0) }`, "zz uses (*os.Root).OpenFile, which only the file gate uses"},
+		{"readlink outside the gate", `import "os"` + "\n" + `func zz() { os.Readlink("/proc/self/fd/3") }`, "zz uses os.Readlink, which only the file gate uses"},
+		{"syscall open", `import "syscall"` + "\n" + `func zz() { syscall.Open("/var/log/journal", 0, 0) }`, "zz uses syscall.Open, which the driver does not need (sysAllowed)"},
+		{"tools passed elsewhere", `var zz = tools`, "zz uses tools other than in command's childproc.Command call"},
+		{"tools changed", `func zz() { tools["ip"] = "/run/zz/ip" }`, "zz uses tools other than in command's childproc.Command call"},
+		{"childEnv passed elsewhere", `import cp ` + cp + "\n" + `var zz = []cp.Env{childEnv}`, "zz uses childEnv other than in command's childproc.Command call"},
 		{"bodiless function", `func zz(p *byte) int`, "zz has no body"},
 		{"import reaching childproc through another", `import _ "github.com/ghbmrk/agentos/broker/vision/supervise"`, "imports github.com/ghbmrk/agentos/broker/vision/supervise, which reaches"},
 	} {
@@ -654,6 +703,8 @@ func TestSourceTestRefusesEachBypass(t *testing.T) {
 func TestSourceTestPinsTheRunnersPassThrough(t *testing.T) {
 	fset, files, imp := driverSources(t, nil)
 	const outputCall, runCall = "out, _ := command(name, args...).Output()", "out, err := command(name, args...).CombinedOutput()"
+	const commandCall = "return childproc.Command(context.Background(), childEnv, childproc.Options{}, tools[name], args...)"
+	const toolsDecl = `var tools = map[string]string{"ip": "/usr/bin/ip", "systemctl": "/usr/bin/systemctl", "journalctl": "/usr/bin/journalctl"}`
 	for _, c := range []struct{ name, old, new, want string }{
 		{"output passes another variable", outputCall, `x := "sh"; out, _ := command(x, args...).Output()`, "output calls command with a tool name that is not a constant"},
 		{"output passes its args alone", outputCall, `out, _ := command("systemctl", args...).Output()`, "output calls command and runs systemctl with an argument that is not a constant"},
@@ -663,9 +714,19 @@ func TestSourceTestPinsTheRunnersPassThrough(t *testing.T) {
 		{"run copies over its args", runCall, `copy(args, []string{"status"}); ` + runCall, "run uses its parameter args other than"},
 		{"run passes a pointer to name", runCall, `p := &name; *p = "sh"; ` + runCall, "run uses its parameter name other than"},
 		{"run hands its args to a closure", runCall, `func(_ string, a []string) { a[0] = "status" }(name, args); ` + runCall, "run uses its parameter args other than"},
-		{"childEnv built from the process's PATH", `var childEnv = childproc.NewEnv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")`, `var childEnv = childproc.NewEnv("PATH=" + os.Getenv("PATH"))`, "childEnv is not childproc.NewEnv of one PATH= string literal"},
-		{"command with another environment", "childproc.Command(context.Background(), childEnv, childproc.Options{}, name, args...)", `childproc.Command(context.Background(), childproc.NewEnv("PATH=/run/zz"), childproc.Options{}, name, args...)`, "command starts a process with an environment other than childEnv"},
-		{"command with options", "childproc.Command(context.Background(), childEnv, childproc.Options{}, name, args...)", `childproc.Command(context.Background(), childEnv, childproc.Options{Dir: "/run/zz"}, name, args...)`, "command starts a process with options other than childproc.Options{}"},
+		{"output hands its params to a named function", outputCall, `_ = fmt.Sprint(name, args); ` + outputCall, "output uses its parameter name other than"},
+		{"childEnv built from the process's PATH", `var childEnv = childproc.NewEnv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")`, `var childEnv = childproc.NewEnv("PATH=" + os.Getenv("PATH"))`, "childEnv is not childproc.NewEnv of string literals"},
+		{"a tool outside /usr", toolsDecl, strings.Replace(toolsDecl, `"/usr/bin/ip"`, `"/run/agentos-e2e/ip"`, 1), "tools is not a map literal"},
+		{"a tool path not clean", toolsDecl, strings.Replace(toolsDecl, `"/usr/bin/ip"`, `"/usr/../run/agentos-e2e/ip"`, 1), "tools is not a map literal"},
+		{"a tool more", toolsDecl, strings.Replace(toolsDecl, `"ip": `, `"sh": "/usr/bin/sh", "ip": `, 1), "tools is not a map literal"},
+		{"command runs its name", commandCall, strings.Replace(commandCall, "tools[name]", "name", 1), "command starts a process with a program other than tools[name]"},
+		{"command runs a constant", commandCall, strings.Replace(commandCall, "tools[name]", `"/usr/bin/sh"`, 1), "command starts a process with a program other than tools[name]"},
+		{"command indexes another key", commandCall, strings.Replace(commandCall, "tools[name]", `tools["ip"]`, 1), "command starts a process with a program other than tools[name]"},
+		{"command reassigns name", commandCall, `name = "journalctl"; ` + commandCall, "command uses its parameter name other than in its childproc.Command call"},
+		{"command with another environment", commandCall, strings.Replace(commandCall, "childEnv", `childproc.NewEnv("PATH=/run/zz")`, 1), "command starts a process with an environment other than childEnv"},
+		{"command with a local environment", commandCall, "var e childproc.Env; " + strings.Replace(commandCall, "childEnv", "e", 1), "command starts a process with an environment other than childEnv"},
+		{"command with options", commandCall, strings.Replace(commandCall, "childproc.Options{}", `childproc.Options{Dir: "/run/zz"}`, 1), "command starts a process with options other than childproc.Options{}"},
+		{"command with other arguments", commandCall, strings.Replace(commandCall, "args...", `[]string{"status"}...`, 1), "command starts a process with arguments other than its own args"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			edited := slices.Clone(files)
@@ -787,41 +848,59 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 	// childEnv must be childproc.NewEnv of one PATH= string literal, the
 	// only PATH= in the driver; its directories' last components are the
 	// ones no other constant may hold.
+	// childEnv is childproc.NewEnv of string literals, and tools a map
+	// literal from each of toolNames to a clean absolute path on /usr;
+	// each is used only in command's one childproc.Command call.
 	envObj, _ := pkg.Scope().Lookup("childEnv").(*types.Var)
-	var pathLit *ast.BasicLit
-	var bins []string
+	toolsObj, _ := pkg.Scope().Lookup("tools").(*types.Var)
+	envOK, toolsOK := false, false
 	for _, f := range files {
 		for _, u := range units(info, f) {
 			sp, ok := u.node.(*ast.ValueSpec)
-			if envObj == nil || u.obj != envObj || !ok || len(sp.Values) != 1 {
+			if !ok || u.obj == nil || len(sp.Values) != 1 {
 				continue
 			}
-			call, ok := sp.Values[0].(*ast.CallExpr)
-			if !ok || funcPath(info, call) != "github.com/ghbmrk/agentos/broker/childproc.NewEnv" || len(call.Args) != 1 || call.Ellipsis.IsValid() {
-				continue
-			}
-			if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				v, _ := strconv.Unquote(lit.Value)
-				if p, ok := strings.CutPrefix(v, "PATH="); ok {
-					pathLit = lit
-					for _, d := range filepath.SplitList(p) {
-						if !filepath.IsAbs(d) || filepath.Clean(d) != d {
-							return []string{fmt.Sprintf("childEnv's PATH holds %q, which is not a clean absolute directory", d)}
-						}
-						bins = append(bins, filepath.Base(d))
-					}
+			switch u.obj {
+			case envObj:
+				call, ok := sp.Values[0].(*ast.CallExpr)
+				envOK = ok && funcPath(info, call) == "github.com/ghbmrk/agentos/broker/childproc.NewEnv" && !call.Ellipsis.IsValid() &&
+					!slices.ContainsFunc(call.Args, func(a ast.Expr) bool { lit, ok := a.(*ast.BasicLit); return !ok || lit.Kind != token.STRING })
+			case toolsObj:
+				lit, ok := sp.Values[0].(*ast.CompositeLit)
+				if _, isMap := info.Types[sp.Values[0]].Type.Underlying().(*types.Map); !ok || !isMap {
+					break
 				}
+				keys := []string{}
+				toolsOK = true
+				for _, e := range lit.Elts {
+					kv, _ := e.(*ast.KeyValueExpr)
+					var k, v string
+					if kv != nil {
+						k, v = basicString(kv.Key), basicString(kv.Value)
+					}
+					if k == "" || !strings.HasPrefix(v, "/usr/") || filepath.Clean(v) != v {
+						toolsOK = false
+						break
+					}
+					keys = append(keys, k)
+				}
+				slices.Sort(keys)
+				toolsOK = toolsOK && slices.Equal(keys, slices.Sorted(slices.Values(toolNames)))
 			}
 		}
 	}
-	if pathLit == nil || len(bins) == 0 {
-		return []string{"childEnv is not childproc.NewEnv of one PATH= string literal: the test cannot read the tools' PATH"}
+	if !envOK {
+		return []string{"childEnv is not childproc.NewEnv of string literals"}
 	}
-	dropIn := map[string]bool{}
-	for _, n := range dropIns {
-		if c, ok := pkg.Scope().Lookup(n).(*types.Const); ok && c.Val().Kind() == constant.String {
-			dropIn[constant.StringVal(c.Val())] = true
-		}
+	if !toolsOK {
+		return []string{fmt.Sprintf("tools is not a map literal from each of %v to a clean absolute path under /usr/", toolNames)}
+	}
+	gate := map[types.Object]bool{}
+	for _, n := range gates {
+		gate[object(n)] = true
+	}
+	if len(missing) > 0 {
+		return []string{fmt.Sprintf("the driver has no file gate function %v that the test names", missing)}
 	}
 	imported := map[string]*types.Package{}
 	for _, p := range pkg.Imports() {
@@ -841,36 +920,28 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 		}
 		for _, u := range units(info, f) {
 			in, label := u.obj, objLabel(u.obj)
-			var own []types.Object // run's and output's own parameters
-			if r := runner[in]; (r == "run" || r == "output") && u.fn != nil {
+			var params []types.Object // a runner's own parameters
+			if runner[in] != "" && u.fn != nil {
 				for _, fld := range u.fn.Params.List {
 					for _, n := range fld.Names {
-						own = append(own, info.Defs[n])
+						params = append(params, info.Defs[n])
 					}
 				}
 			}
+			var own []types.Object // run's and output's, which they pass on
+			if r := runner[in]; r == "run" || r == "output" {
+				own = params
+			}
 			passed := ownUses(info, runner, own, u.node)
 			called := map[*ast.Ident]bool{} // the idents that are a call's function
-			envArg := map[*ast.Ident]bool{} // childEnv as command's environment
+			spawn := map[*ast.Ident]bool{}  // childEnv and tools in command's call
 			ast.Inspect(u.node, func(n ast.Node) bool {
-				if e, ok := n.(ast.Expr); ok && e != pathLit {
-					if v := info.Types[e].Value; v != nil && v.Kind() == constant.String {
-						switch s := constant.StringVal(v); {
-						case strings.Contains(s, "journalctl"):
-							if reader[in] != "readJournal" {
-								add(e.Pos(), "%s names journalctl, which only readJournal runs", label)
-							}
-							named = true
-						case strings.Contains(s, "journal"):
-							add(e.Pos(), "%s names %q: a journal is read only through readJournal", label, s)
-						case strings.Contains(s, "PATH="):
-							add(e.Pos(), "%s names %q: only childEnv sets PATH", label, s)
-						case dropIn[s]:
-						default:
-							if why := constantPath(s, bins); why != "" {
-								add(e.Pos(), "%s names %q, %s", label, s, why)
-							}
+				if e, ok := n.(ast.Expr); ok {
+					if v := info.Types[e].Value; v != nil && v.Kind() == constant.String && strings.Contains(constant.StringVal(v), "journalctl") {
+						if reader[in] != "readJournal" && in != toolsObj {
+							add(e.Pos(), "%s names journalctl, which only readJournal runs", label)
 						}
+						named = named || reader[in] == "readJournal"
 					}
 				}
 				switch n := n.(type) {
@@ -880,14 +951,8 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 					}
 				case *ast.CallExpr:
 					if funcPath(info, n) == childCommand && runner[in] == "command" {
-						id, ok := n.Args[1].(*ast.Ident)
-						if ok && info.Uses[id] == envObj {
-							envArg[id] = true
-						} else {
-							add(n.Pos(), "command starts a process with an environment other than childEnv")
-						}
-						if cl, ok := n.Args[2].(*ast.CompositeLit); !ok || len(cl.Elts) > 0 {
-							add(n.Pos(), "command starts a process with options other than childproc.Options{}")
+						if why := commandCall(info, n, envObj, toolsObj, params, spawn); why != "" {
+							add(n.Pos(), "command starts a process %s", why)
 						}
 					}
 					switch fn := n.Fun.(type) {
@@ -906,8 +971,11 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 					if obj == nil {
 						break
 					}
-					if obj == envObj && !envArg[n] {
-						add(n.Pos(), "%s uses childEnv other than as command's environment", label)
+					if runner[in] == "command" && slices.Contains(params, obj) && !spawn[n] {
+						add(n.Pos(), "command uses its parameter %s other than in its childproc.Command call", n.Name)
+					}
+					if (obj == envObj || obj == toolsObj) && !spawn[n] {
+						add(n.Pos(), "%s uses %s other than in command's childproc.Command call", label, n.Name)
 					}
 					if slices.Contains(own, obj) && !passed[n] {
 						add(n.Pos(), "%s uses its parameter %s other than to pass it to command or quote it", label, n.Name)
@@ -928,14 +996,27 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 					if guarded[fn.Name()] && runner[obj] == "" && reader[obj] == "" {
 						add(n.Pos(), "%s uses %s, which is not the driver's own %s", label, objLabel(obj), fn.Name())
 					}
-					if fn.Pkg() == nil || fn.Signature().Recv() != nil {
+					if fn.Pkg() == nil {
 						break
 					}
-					sp := fn.Pkg().Path() + "." + fn.Name()
-					if spawners[sp] && (sp != childCommand || runner[in] != "command") {
-						add(n.Pos(), "%s starts a process through %s, not command", label, sp)
+					sp, recv := fn.Pkg().Path()+"."+fn.Name(), ""
+					if r := fn.Signature().Recv(); r != nil {
+						recv = types.TypeString(r.Type(), func(p *types.Package) string { return p.Path() })
+						sp = "(" + recv + ")." + fn.Name()
 					}
-					if p := fn.Pkg().Path(); (p == "syscall" || p == "golang.org/x/sys/unix") && !sysAllowed[sp] {
+					switch p := fn.Pkg().Path(); {
+					case gateOnly[sp]:
+						if !gate[in] {
+							add(n.Pos(), "%s uses %s, which only the file gate uses (gates)", label, sp)
+						}
+					case spawners[sp]:
+						if sp != childCommand || runner[in] != "command" {
+							add(n.Pos(), "%s starts a process through %s, not command", label, sp)
+						}
+					case p == "os" && (recv == "" || recv == "*os.Root") && !osAllowed[sp]:
+						add(n.Pos(), "%s uses %s, which the driver does not need (osAllowed)", label, sp)
+					case recv != "":
+					case (p == "syscall" || p == "golang.org/x/sys/unix") && !sysAllowed[sp]:
 						add(n.Pos(), "%s uses %s, which the driver does not need (sysAllowed)", label, sp)
 					}
 				}
