@@ -194,22 +194,26 @@ def _scan(trace, ondisk):
             path = os.path.join(base, path)
         return walk(path, link_of, last)
 
-    def asked(pid, path, base=None, last=False):
-        """The names an unresolved call may have reached: the walk, and the path exactly as main
-        read it (joined only to a dirfd, `..` folded; a relative name with no dirfd stays relative,
-        as every module runs from the root), so a stale link or a cwd the trace showed wrongly can
-        add a name but never lose the one main read."""
-        walked = resolve(pid, path, base, last)
-        if not os.path.isabs(walked):
-            return {walked}
-        return {walked, os.path.normpath(os.path.join(base, path) if base else path)}
+    def asked(pid, path, base=None, last=False, main=None):
+        """The names an unresolved call may have reached: the walk, and main, the name main's
+        audit read for it, so a stale link or a cwd the trace showed wrongly can add a name but
+        never lose that one."""
+        return {resolve(pid, path, base, last), main}
+
+    def as_main(path, base):
+        """The name main's audit read for an open: joined only to a dirfd, `..` folded only if
+        absolute (a relative name with no dirfd stays as asked; every module runs from the root)."""
+        if not os.path.isabs(path) and base is not None:
+            path = os.path.join(base, path)
+        return os.path.normpath(path) if os.path.isabs(path) else path
 
     def open_target(pid, rest):
         m = _OPEN_ARGS.match(rest)
         if not m:
             return None, False
         base, flags = m.group(1) and _decode(m.group(1)), _flags(m.group(3))
-        return asked(pid, _decode(m.group(2)), base, not _NOFOLLOW.search(flags)), bool(_WRITE.search(flags))
+        path = _decode(m.group(2))
+        return asked(pid, path, base, not _NOFOLLOW.search(flags), as_main(path, base)), bool(_WRITE.search(flags))
 
     def bound(pid, args):
         port = _PORT.search(args)
@@ -218,7 +222,7 @@ def _scan(trace, ondisk):
         unix = _UNIX.search(args)
         if unix and unix.group(2):
             name = _decode(unix.group(2))
-            return {("bind", f"unix @{name}")} if unix.group(1) else {("path", n) for n in asked(pid, name)}
+            return {("bind", f"unix @{name}")} if unix.group(1) else {("path", n) for n in asked(pid, name, main=os.path.normpath(name))}
         return set()
 
     def made(pid, call, rest):

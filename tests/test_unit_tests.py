@@ -503,6 +503,13 @@ class ClashTest(unittest.TestCase):
                      f'{{pid}} open("sock", {excl}\n'):
             a, b = known + call.format(pid=1), call.format(pid=2)
             self.assertIn(("path", "sock", "test_a", "test_b"), clash_audit.clashes({"test_a": a, "test_b": b}, serial={}), call)
+        # Main's own name, exactly: a relative open with no dirfd as asked (`./x` stays `./x`), and
+        # a socket path normpath'd (`./sock` is `sock`), whether or not the pid's cwd is known.
+        for a, b, name in ((known + f'1 open("./x", {excl}\n', f'2 open("./x", {excl}\n', "./x"),
+                           ('1 bind(3<socket:[9]>, {sa_family=AF_UNIX, sun_path="./sock"}, 110) = 0\n',
+                            '2 bind(3<socket:[9]>, {sa_family=AF_UNIX, sun_path="sock"}, 110) = -1 EADDRINUSE\n', "sock")):
+            self.assertIn(("path", name, "test_a", "test_b"), clash_audit.clashes({"test_a": a, "test_b": b}, serial={}), name)
+        self.assertEqual(clash_audit.writes(f'2 open("./x", {excl}\n'), {("path", "./x")})
         # O_NOFOLLOW and a bind make the final name; symlinkat's AT_FDCWD is the pid's cwd.
         final = '1 symlink("/w/real/x", "/w/s") = 0\n'
         self.assertEqual(clash_audit.writes(final + '1 openat(AT_FDCWD</w>, "s", O_WRONLY|O_NOFOLLOW) = -1 ELOOP\n',
