@@ -203,8 +203,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, chals: map[string]*challenge{}}
 	var err error
-	if s.tokens, err = csrf.New(cfg.Now); err != nil {
-		return nil, err
+	var ok bool
+	if s.tokens, ok = csrf.New(cfg.Now); !ok {
+		return nil, ErrConfig
 	}
 	t, err := template.New("").Funcs(funcs).Funcs(template.FuncMap{"when": s.when}).ParseFS(files, "templates/*.html")
 	if err != nil {

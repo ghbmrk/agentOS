@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -295,8 +296,10 @@ var enforcer = map[string]struct {
 	// It also serves the enrolment screens (slice c) and draws the Owner
 	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "enforcer/page/internal/csrf", "rsc.io/qr"}, enforcerWebForbid},
-	// The page's anti-forgery pair (#4685): the standard library only, so
-	// the key it holds is reachable from no other code (no unsafe, no C).
+	// The page's anti-forgery pair (#4685, enforcerCSRF): the standard
+	// library only, with no unsafe or C here and, in every enforcer
+	// package, no non-Go source and no bodyless func
+	// (TestEnforcerHoldsOnlyGoSource).
 	"enforcer/page/internal/csrf": {nil, enforcerWebForbid},
 	// Enrolment (slice c): the case code, the recovery code and the
 	// passkey's handover; it texts through the alert kinds.
@@ -367,6 +370,10 @@ var enforcerExec = []string{"enforcer/nft/load", "enforcer/radio/confine"}
 // crypto/tls: the page (slice b) serves the owner's confirm screen, and no
 // other enforcer package imports it.
 const enforcerWeb = "enforcer/page"
+
+// enforcerCSRF is the page's anti-forgery package: it links net/http for
+// the page alone, which is its only importer (Go's internal rule).
+const enforcerCSRF = "enforcer/page/internal/csrf"
 
 // enforcerSSH is the one enforcer package that links a third-party
 // package: the access point pusher (slice g) reaches OpenWrt's admin over
@@ -477,7 +484,7 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package but the access point
 // pusher's SSH client (enforcerSSH, slice g); only the page
-// (enforcerWeb, slice b, with its internal packages) speaks HTTP or TLS, and only the firewall loader
+// (enforcerWeb, slice b, with its anti-forgery package enforcerCSRF) speaks HTTP or TLS, and only the firewall loader
 // and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
@@ -487,7 +494,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && !strings.HasPrefix(rel, enforcerWeb+"/internal/") && rel != enforcerSSH {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerCSRF && rel != enforcerSSH {
 			rest = append(rest, p)
 		}
 	}
@@ -532,6 +539,60 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
+	}
+}
+
+// TestEnforcerHoldsOnlyGoSource: no package of the enforcer, nor any
+// package of this module it links (kernel/key, drone, camwire), holds a
+// source the Go compiler does not check for memory safety (assembly, C,
+// C++, Fortran, Objective-C, SWIG or a prebuilt object), or declares a func
+// without a body, which only such a source or a //go:linkname (which needs
+// unsafe, refused by the import rules) can supply. So no enforcer package
+// reads another's unexported state, such as the page's anti-forgery key
+// (enforcerCSRF, #4778), by symbol name. Every file in each package's
+// directory counts, whatever its build constraints.
+func TestEnforcerHoldsOnlyGoSource(t *testing.T) {
+	list, err := exec.Command("go", "list", "-C", "..", "-deps", "-f", "{{.ImportPath}} {{.Dir}}", "./enforcer/...").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	foreign := []string{".s", ".S", ".sx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".f", ".F", ".for", ".f90", ".swig", ".swigcxx", ".syso"}
+	var dirs []string
+	for _, l := range strings.Split(strings.TrimSpace(string(list)), "\n") {
+		if p, dir, _ := strings.Cut(l, " "); strings.HasPrefix(p, module) {
+			dirs = append(dirs, dir) // the enforcer's own packages and the module packages they link
+		}
+	}
+	if len(dirs) < len(enforcer) {
+		t.Fatalf("go list found %d enforcer packages, the rule map names %d", len(dirs), len(enforcer))
+	}
+	for _, dir := range dirs {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range ents {
+			n := filepath.Join(dir, e.Name())
+			if e.IsDir() {
+				continue
+			}
+			if slices.Contains(foreign, filepath.Ext(n)) {
+				t.Errorf("%s: an enforcer package holds only Go source", n)
+				continue
+			}
+			if filepath.Ext(n) != ".go" {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), n, nil, parser.SkipObjectResolution)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, d := range f.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Body == nil {
+					t.Errorf("%s: func %s is declared without a body", n, fd.Name.Name)
+				}
+			}
+		}
 	}
 }
 

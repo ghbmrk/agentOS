@@ -2,6 +2,7 @@ package page
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
@@ -19,7 +20,7 @@ const (
 	tokenHeader = csrf.Header
 )
 
-var errToken = csrf.ErrToken
+var errToken = errors.New("this screen is out of date; reload it and try again")
 
 // guard is the one check every state-changing request passes before any
 // route sees it: sent by the page itself (sameOrigin), with the cookie a
@@ -29,7 +30,10 @@ func (s *Server) guard(r *http.Request) error {
 	if !s.sameOrigin(r) {
 		return errCrossOrigin
 	}
-	return s.tokens.Check(r)
+	if !s.tokens.Check(r) {
+		return errToken
+	}
+	return nil
 }
 
 // render draws a screen for r; csrf writes its opening with the token.
@@ -39,7 +43,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 		http.Error(w, "page error", http.StatusInternalServerError)
 		return
 	}
-	if err := s.tokens.Screen(w, r, b.Bytes()); err != nil {
+	if !s.tokens.Screen(w, r, b.Bytes()) {
 		http.Error(w, "page error", http.StatusInternalServerError)
 	}
 }

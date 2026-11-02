@@ -14,12 +14,15 @@
 // than PairLife ago or in the future (#4427).
 //
 // The key, the tags and the tokens never leave this package as values
-// (#4685, re-plan of #4731): no exported name takes or returns one, the
-// only token that leaves is the one Screen writes, in a place Screen fixes,
-// into the response it is handed, and Tokens holds the key only inside a
-// closure, so fmt of a Tokens, or of anything holding one, prints at most
-// a code address. The page imports this package as internal, so no other
-// package can. TestAPI pins that surface through go/types.
+// (#4685, re-plan of #4731): no exported name takes or returns one, no
+// exported name is a variable or returns an interface (so no value of an
+// unexported type leaves either, #4778), the only token that leaves is the
+// one Screen writes, in a place Screen fixes, into the response it is
+// handed, and Tokens holds the key only inside a closure, so fmt of a
+// Tokens, or of anything holding one, prints at most a code address. The
+// page imports this package as internal, so no other package can. TestAPI
+// pins that surface, and that MACs are compared only by hmac.Equal,
+// through go/types.
 package csrf
 
 import (
@@ -28,7 +31,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"errors"
 	"net/http"
 	"time"
 )
@@ -40,16 +42,12 @@ const (
 )
 
 // PairLife is how long after its cookie was drawn a pair still passes
-// Check; past it a tap fails with ErrToken's "reload it", as after a
-// restart. ReuseFor is how long a new screen may keep a cookie: half of
+// Check; past it a tap fails with "reload it", as after a restart. ReuseFor is how long a new screen may keep a cookie: half of
 // PairLife, so a screen that keeps one still has at least half a day.
 const (
 	PairLife = 24 * time.Hour
 	ReuseFor = PairLife / 2
 )
-
-// ErrToken is Check's refusal.
-var ErrToken = errors.New("this screen is out of date; reload it and try again")
 
 const (
 	tokenLabel  = "agentOS enforcer page token\x00"
@@ -70,31 +68,35 @@ type Tokens struct {
 	mac func(label string, body []byte) []byte // keyed by the closure alone
 }
 
-// New draws a key and returns the pairs under it, on now's clock.
-func New(now func() time.Time) (*Tokens, error) {
-	k := make([]byte, 32)
-	if _, err := rand.Read(k); err != nil {
-		return nil, err
+// New draws a key and returns the pairs under it, on now's clock; it
+// refuses a nil clock. (crypto/rand.Read never returns an error: it
+// crashes the program instead.)
+func New(now func() time.Time) (*Tokens, bool) {
+	if now == nil {
+		return nil, false
 	}
+	k := make([]byte, 32)
+	rand.Read(k)
 	return &Tokens{now: now, mac: func(label string, body []byte) []byte {
 		m := hmac.New(sha256.New, k)
 		m.Write([]byte(label))
 		m.Write(body)
 		return m.Sum(nil)
-	}}, nil
+	}}, true
 }
 
 // Screen writes markup to w as a screen for r: it keeps the cookie r sent
 // when keep allows it and otherwise sets a new one, then writes the
-// screen's opening with the token, then markup. It fails, having written
-// nothing, only when it cannot draw a nonce.
-func (t *Tokens) Screen(w http.ResponseWriter, r *http.Request, markup []byte) error {
+// screen's opening with the token, then markup. It is false, having
+// written nothing, only for a Tokens New did not make.
+func (t *Tokens) Screen(w http.ResponseWriter, r *http.Request, markup []byte) bool {
+	if t == nil || t.mac == nil || t.now == nil {
+		return false
+	}
 	body, ok := t.keep(r)
 	if !ok {
 		body = make([]byte, bodyLen)
-		if _, err := rand.Read(body[:nonceLen]); err != nil {
-			return err
-		}
+		rand.Read(body[:nonceLen])
 		binary.BigEndian.PutUint64(body[nonceLen:], uint64(t.now().UnixMilli()))
 		http.SetCookie(w, &http.Cookie{
 			Name:     Cookie,
@@ -108,24 +110,25 @@ func (t *Tokens) Screen(w http.ResponseWriter, r *http.Request, markup []byte) e
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	out := append([]byte(prefix), base64.RawURLEncoding.EncodeToString(t.mac(tokenLabel, body))...)
 	w.Write(append(append(out, "\">\n"...), markup...))
-	return nil
+	return true
 }
 
-// Check passes r when it carries a cookie this page drew at most PairLife
-// ago and, in Header, the token a screen drawn with it carries.
-func (t *Tokens) Check(r *http.Request) error {
+// Check is true when r carries a cookie this page drew at most PairLife
+// ago and, in Header, the token a screen drawn with it carries. A Tokens
+// New did not make passes nothing.
+func (t *Tokens) Check(r *http.Request) bool {
+	if t == nil || t.mac == nil || t.now == nil {
+		return false
+	}
 	c, ok := t.cookie(r)
 	if !ok {
-		return ErrToken
+		return false
 	}
 	if a, ok := t.age(c); !ok || a > PairLife {
-		return ErrToken
+		return false
 	}
 	tok, err := base64.RawURLEncoding.DecodeString(r.Header.Get(Header))
-	if err != nil || !hmac.Equal(t.mac(tokenLabel, c[:bodyLen]), tok) {
-		return ErrToken
-	}
-	return nil
+	return err == nil && hmac.Equal(t.mac(tokenLabel, c[:bodyLen]), tok)
 }
 
 // keep returns the body of the cookie r sent when a new screen may keep
