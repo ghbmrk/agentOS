@@ -138,6 +138,42 @@ class RunTest(unittest.TestCase):
         small = {"test_0": (0, 50.0, ""), "test_1": (0, 1.0, "")}
         self.assertEqual(unit_tests.report(["test_0", "test_1"], small, [].append, jobs=4), 0)
 
+    def test_an_already_split_module_is_judged_by_its_slowest_part(self):
+        # test_image's place on main: 1.11 times the ideal. Grown 15% it is over 1.25 times, but
+        # its parts are short, so the step passes and says nothing of splitting it.
+        names = [f"test_{i}" for i in range(9)]
+        line = "test_0: slowest part {:.3f}s tests.test_0.A.test_a\n"
+        for grown in (111.0, 111.0 * 1.15):
+            results = {m: (0, (400 - grown) / 8, "") for m in names[1:]}
+            results["test_0"] = (0, grown, "ok\n" + line.format(20.0))
+            out = []
+            self.assertEqual(unit_tests.report(names, results, out.append, jobs=4, split={"test_0": "x"}), 0, out)
+            self.assertFalse(any("::error::" in o for o in out), out)
+            self.assertTrue(any("test_0  (split; slowest part 20.0s, tests.test_0.A.test_a)" in o for o in out), out)
+            # The same time on an unsplit module still says split it.
+            out = []
+            self.assertEqual(unit_tests.report(names, results, out.append, jobs=4, split={}), int(grown > 125), grown)
+            self.assertEqual(any("split it (tools/unit_tests.py SPLIT)" in o for o in out), grown > 125)
+        # A part over the line fails, naming the part and the split limit, never "split it".
+        results = {m: (0, 33.75, "") for m in names[1:]}
+        results["test_0"] = (0, 130.0, line.format(130.0))
+        out = []
+        self.assertEqual(unit_tests.report(names, results, out.append, jobs=4, split={"test_0": "x"}), 1)
+        err = [o for o in out if "::error::" in o]
+        self.assertEqual(len(err), 1, out)
+        self.assertIn("test_0 is already split", err[0])
+        self.assertIn("tests.test_0.A.test_a, took 130s", err[0])
+        self.assertIn("at its split limit", err[0])
+        self.assertNotIn("split it", err[0])
+        # A split run that named no part (it died before its last line) counts its whole time.
+        results["test_0"] = (1, 130.0, "test_0: 3 of 4 tests run across 2 workers, 1 not run\n")
+        out = []
+        self.assertEqual(unit_tests.report(names, results, out.append, jobs=4, split={"test_0": "x"}), 1)
+        self.assertTrue(any("named no slowest part and took 130s" in o for o in out), out)
+        # Only the run's own last line counts: a test printing the format earlier does not.
+        self.assertIsNone(unit_tests.slowest_part("test_0", line.format(1.0) + "more\n"))
+        self.assertIsNone(unit_tests.slowest_part("test_0", "test_01: slowest part 1.000s x\n"))
+
 
 def traced():
     """Whether this process is already traced: a nested strace cannot attach (PTRACE_TRACEME)."""
@@ -205,6 +241,15 @@ class SplitTest(unittest.TestCase):
         self.assertGreater(len({pid for pid, _ in log}), 1, log)
         self.assertIn("test_fake: 6 of 6 tests run across 3 workers\n", p.stdout)
 
+    def test_split_names_its_slowest_part_on_its_last_line(self):
+        p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self); time.sleep(0.3)",
+                                                     "def test_5(self): log(self); time.sleep(1.2)"))
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        secs, test = unit_tests.slowest_part("test_fake", p.stdout)
+        self.assertEqual(test, "test_fake.B.test_5")
+        self.assertGreaterEqual(secs, 1.2)
+        self.assertLess(secs, 30)
+
     def test_split_fails_on_a_failed_test(self):
         p, log, _ = self.run_split(self.BODY.replace("def test_5(self): log(self);", "def test_5(self): self.fail('x');"))
         self.assertEqual(p.returncode, 1, p.stdout)
@@ -244,6 +289,32 @@ class SplitTest(unittest.TestCase):
 
 
 R = str(unit_tests.ROOT)
+
+
+class RecordsAuditTest(unittest.TestCase):
+    """CI-PATHS: a record read through a split or padded open counts by the file it reached."""
+
+    def test_a_record_reached_through_a_link_on_a_padded_line_counts(self):
+        own = f'1 openat(AT_FDCWD<{R}>, "tests/test_m.py", O_RDONLY|O_CLOEXEC) = 3<{R}/tests/test_m.py>\n'
+        end = "1 +++ exited with 0 +++\n"
+        reads = {
+            # strace's own shape for a split call: the asked path is a link outside the tree,
+            # the resumed line, padded to strace's column, names the record it reached.
+            "split": ('2 openat(AT_FDCWD</tmp/l>, "link.md", O_RDONLY|O_CLOEXEC <unfinished ...>\n'
+                      '3 openat(AT_FDCWD</tmp>, "y", O_RDONLY) = 4</tmp/y>\n'
+                      f'2 <... openat resumed>)            = 5<{R}/LEDGER.md>\n'),
+            "padded": f'4 open("/tmp/l/x", O_RDONLY)          = 3<{R}/LEDGER.md>\n',
+            # -y escapes the reached path as strace quotes it: `\76` for `>`, octal or hex bytes.
+            "escaped": f'5 openat(AT_FDCWD</tmp>, "l", O_RDONLY) = 3<{R}/LEDGER\\056md>\n',
+        }
+        for name, line in reads.items():
+            trace = own + line + end
+            self.assertIn("LEDGER.md", {rel for rel, _ in records_audit.opened(trace)}, name)
+            self.assertEqual(records_audit.problems({"test_m": trace}, []), ["tests.test_m\tLEDGER.md"], name)
+            self.assertEqual(records_audit.problems({"test_m": trace}, ["tests.test_m"]), [], name)
+        # The asked path decodes as the reached one does.
+        asked = f'6 openat(AT_FDCWD<{R}>, "LEDGER\\x2emd", O_RDONLY <unfinished ...>\n'
+        self.assertIn(("LEDGER.md", False), records_audit.opened(asked))
 
 
 def w(pid, path, flags="O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC"):
