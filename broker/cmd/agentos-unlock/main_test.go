@@ -74,6 +74,8 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	case "move":
 		os.Exit(moveRole())
+	case "taken":
+		os.Exit(takenRole())
 	case "kernel":
 		var cfg kernelRole
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
@@ -173,6 +175,71 @@ func TestTheMoveLeavesTheRuntimesDescriptors(t *testing.T) {
 		f.Close()
 		if err != nil {
 			t.Fatalf("the move: %v\n%s", err, out)
+		}
+	}
+}
+
+// takenRole holds the hand-off slot named in AGENTOS_UNLOCK_SLOT open
+// before the move. 0 when the move refuses with the named error, the held
+// descriptor is still the one it opened, and neither slot took a moved one.
+func takenRole() int {
+	fail := func(f string, a ...any) int { fmt.Fprintf(os.Stderr, f+"\n", a...); return 2 }
+	slot, err := strconv.Atoi(os.Getenv("AGENTOS_UNLOCK_SLOT"))
+	if err != nil {
+		return fail("%v", err)
+	}
+	held, err := os.CreateTemp("", "held")
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer os.Remove(held.Name())
+	if err := syscall.Dup3(int(held.Fd()), slot, 0); err != nil {
+		return fail("%v", err)
+	}
+	var want syscall.Stat_t
+	if err := syscall.Fstat(slot, &want); err != nil {
+		return fail("%v", err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer w.Close()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return fail("%v", err)
+	}
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	named := fmt.Sprintf("agentos-unlock: descriptor %d is already open at hand-off", slot)
+	if err == nil || err.Error() != named {
+		return fail("the move over an open %d: %v, want %q", slot, err, named)
+	}
+	var got syscall.Stat_t
+	if err := syscall.Fstat(slot, &got); err != nil || got.Dev != want.Dev || got.Ino != want.Ino {
+		return fail("descriptor %d no longer holds what it held (%v)", slot, err)
+	}
+	for _, other := range []int{handoff.KeyFD, handoff.TPMFD} {
+		if other == slot {
+			continue
+		}
+		if _, err := unix.FcntlInt(uintptr(other), unix.F_GETFD, 0); err != syscall.EBADF {
+			return fail("descriptor %d took a moved one though the move was refused (%v)", other, err)
+		}
+	}
+	return 0
+}
+
+// TestTheMoveRefusesAnOpenSlot: a descriptor already on handoff.KeyFD or
+// handoff.TPMFD is never overwritten by the move; the step is refused by
+// name and the descriptor stays open (#4523).
+//
+// REQ: STO-2, CLK-1
+func TestTheMoveRefusesAnOpenSlot(t *testing.T) {
+	for _, slot := range []int{handoff.KeyFD, handoff.TPMFD} {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=taken", "AGENTOS_UNLOCK_SLOT=" + strconv.Itoa(slot), "TMPDIR=" + t.TempDir()}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("slot %d: %v\n%s", slot, err, out)
 		}
 	}
 }

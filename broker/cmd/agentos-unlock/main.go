@@ -872,9 +872,19 @@ func getres(trap uintptr) (r, e, s int) {
 // inherit makes every descriptor above 2 close-on-exec (Linux 5.11), so none
 // a parent left open reaches the exec, then moves each onto the number it
 // maps to: handoff's, which no descriptor of the runtime's can be (#4474).
+// A target already open refuses the move before any descriptor moves, since
+// Dup3 would close what holds it (#4523).
 func inherit(fds map[int]int) error {
 	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
 		return err
+	}
+	for _, want := range fds {
+		if _, err := unix.FcntlInt(uintptr(want), unix.F_GETFD, 0); err != unix.EBADF {
+			if err != nil {
+				return fmt.Errorf("agentos-unlock: descriptor %d at hand-off: %w", want, err)
+			}
+			return fmt.Errorf("agentos-unlock: descriptor %d is already open at hand-off", want)
+		}
 	}
 	for fd, want := range fds {
 		if err := syscall.Dup3(fd, want, 0); err != nil {
