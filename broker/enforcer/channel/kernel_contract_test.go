@@ -10,6 +10,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,8 +26,11 @@ import (
 // seeded amount, in order on a connection; connections drop and the
 // kernel restarts; a dropped connection's frames still reach the enforcer
 // long after, and its unanswered hello within chancheck.MaxLate; the
-// kernel's clock runs fast or slow by up to half a percent. The enforcer
-// never trips.
+// kernel's clock runs fast or slow by up to half a percent. A drop is an
+// outage of up to outageMax: the kernel opens no connection until it
+// ends, and the dropped connection's requests still on their way arrive
+// as it ends, just before or just after the next hello is answered
+// (KRN-chan-2's window, #4509). The enforcer never trips.
 
 // simConn is one connection of the simulation: the core's end, the frames
 // on their way to the enforcer and the answers on their way back.
@@ -57,7 +61,18 @@ type simKernel struct {
 	id     uint64
 	sent   map[wire.RateKind]int
 	bypass bool // a fake core: sends what the gate refuses for its rate
+	// wake is when the current outage ends: no hello is sent before it.
+	wake time.Duration
 }
+
+// outageMax bounds an outage. Above the command and answer rates' full
+// refill (a minute), so a request the enforcer counts just before the next
+// hello's answer meets a refilled bucket there and the kernel's burst
+// after it reaches the rate's edge.
+const outageMax = 3 * time.Minute
+
+// flush is how far around an outage's end a lost request may arrive.
+const flush = 4 * time.Second
 
 func (k *simKernel) kclock(t time.Duration) time.Time {
 	return k.base.Add(t + time.Duration(float64(t)*k.drift))
@@ -181,9 +196,10 @@ func (k *simKernel) end(c *simConn, at time.Duration) {
 	}
 }
 
-// lose is the kernel giving up on its connection at now. The frames still
-// queued on it keep travelling: a hello arrives within MaxLate, a request
-// at any time after.
+// lose is the kernel giving up on its connection at now, at the start of
+// an outage. The frames still queued on it keep travelling: a hello
+// arrives within MaxLate, a request around the outage's end or at any
+// time after.
 func (k *simKernel) lose(now time.Duration) {
 	c := k.cur
 	if c == nil {
@@ -196,14 +212,20 @@ func (k *simKernel) lose(now time.Duration) {
 func (k *simKernel) orphan(c *simConn, now time.Duration) {
 	c.orphan = true
 	k.cur = nil
+	k.wake = now + time.Duration(k.rng.Int64N(int64(outageMax)))
 	for i := range c.queue {
 		f := &c.queue[i]
 		if f.at < now {
 			continue
 		}
-		if bytes.HasPrefix(f.b, []byte{byte(wire.THello)}) {
+		switch {
+		case bytes.HasPrefix(f.b, []byte{byte(wire.THello)}):
 			f.at = now + time.Duration(k.rng.Int64N(int64(chancheck.MaxLate*9/10)))
-		} else {
+		case k.rng.IntN(2) == 0:
+			// Retransmitted as the outage ends: on either side of the
+			// next hello's answer.
+			f.at = max(now, k.wake-flush/2+time.Duration(k.rng.Int64N(int64(flush))))
+		default:
 			f.at += time.Duration(k.rng.Int64N(int64(10 * time.Minute)))
 		}
 	}
@@ -231,7 +253,7 @@ func simulate(t *testing.T, seed uint64, span time.Duration, bypass bool) (*rig,
 		case x < 10:
 			k.lose(now)
 		}
-		if k.cur == nil {
+		if k.cur == nil && now >= k.wake {
 			k.try(wire.RateHello, now, stall)
 		}
 		for range 4 {
@@ -253,7 +275,9 @@ func simulate(t *testing.T, seed uint64, span time.Duration, bypass bool) (*rig,
 // as soon as it passes, under delays, stalls, dropped connections whose
 // frames arrive late, restarts and clock drift, never trips the real
 // channel. The kernel still reaches every kind's rate, so the check is not
-// passing by sending nothing.
+// passing by sending nothing. Revert mutant: chancheck's Lost spending a
+// lost request at the loss instead of at the next hello's answer (trips at
+// seed 0, #4509).
 func TestHonestKernelNeverTrips(t *testing.T) {
 	span := 2 * time.Hour
 	seeds := uint64(4)
@@ -505,5 +529,91 @@ func TestHelloCountsWhileRadioBlocks(t *testing.T) {
 	}
 	if r.cut.trips() != 1 {
 		t.Fatalf("trips %d, want 1", r.cut.trips())
+	}
+}
+
+// TestSwapUnderLoad (ENF-d-9, KRN-chan-2, #4509): two connections at
+// once, under -race. While the kernel's old connection keeps sending
+// reads, a new connection's hello is answered; every read the old
+// connection writes after that answer was read ends the connection
+// unanswered, every read answered was logged once as read, and nothing
+// trips. Revert mutants: the session check in handle; the swap after the
+// enforcer's hello is written.
+func TestSwapUnderLoad(t *testing.T) {
+	r := newRig(t, nil)
+	h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+	open := func() (net.Conn, error) {
+		cl := r.connect()
+		f, _ := wire.Encode(wire.ToEnforcer, h)
+		cl.conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := wire.WriteFrame(cl.conn, wire.ToEnforcer, f); err != nil {
+			return nil, err
+		}
+		if _, err := wire.ReadFrame(cl.conn, wire.ToCore); err != nil {
+			return nil, err
+		}
+		return cl.conn, nil
+	}
+	cur, err := open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answered, late atomic.Int64
+	id := atomic.Uint64{}
+	for round := range 200 {
+		r.advance(wire.Rate(wire.RateHello).Every)
+		var swapped atomic.Bool
+		done := make(chan struct{})
+		go func(c net.Conn) {
+			defer close(done)
+			for {
+				after := swapped.Load()
+				r.advance(wire.Rate(wire.RateRead).Every)
+				f, _ := wire.Encode(wire.ToEnforcer, wire.Read{ID: id.Add(1), What: wire.ReadCounts})
+				if wire.WriteFrame(c, wire.ToEnforcer, f) != nil {
+					return
+				}
+				if _, err := wire.ReadFrame(c, wire.ToCore); err != nil {
+					return
+				}
+				answered.Add(1)
+				if after {
+					late.Add(1)
+					return
+				}
+			}
+		}(cur)
+		time.Sleep(time.Duration(round%5) * time.Millisecond)
+		next, err := open()
+		if err != nil {
+			t.Fatalf("round %d: hello: %v", round, err)
+		}
+		swapped.Store(true)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			cur.Close()
+			next.Close()
+			<-done
+			t.Fatalf("round %d: the old connection was never ended", round)
+		}
+		cur.Close()
+		cur = next
+	}
+	cur.Close()
+	if n := late.Load(); n != 0 {
+		t.Fatalf("%d reads written after a later hello's answer were answered", n)
+	}
+	if n := r.cut.trips(); n != 0 {
+		t.Fatalf("tripped: %v", r.cut.reasons)
+	}
+	reads := 0
+	for _, e := range r.events() {
+		if e.Kind == KindRead && e.Code == wire.OK {
+			reads++
+		}
+	}
+	if int64(reads) != answered.Load() {
+		t.Fatalf("%d reads logged, %d answered", reads, answered.Load())
 	}
 }
