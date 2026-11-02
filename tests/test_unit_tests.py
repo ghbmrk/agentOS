@@ -424,6 +424,11 @@ class ClashTest(unittest.TestCase):
                               f'1 openat(AT_FDCWD</w>, "link/x", {excl}\n'),
             "chdir through a link": ('1 symlink("/w/real", "/w/link") = 0\n1 chdir("/w/link") = 0\n'
                                      f'1 open("x", {excl}\n'),
+            "chdir, then ..": ('1 symlink("/w/real/sub", "/w/up") = 0\n1 chdir("/w/up") = 0\n'
+                               f'1 open("../x", {excl}\n'),
+            # The cwd is the directory chdir reached, whatever later becomes of the link.
+            "chdir, then the link changes": ('1 symlink("/w/real", "/w/up2") = 0\n1 chdir("/w/up2") = 0\n'
+                                             f'1 symlink("/w/other", "/w/up2") = 0\n1 open("x", {excl}\n'),
             "fchdir": f'1 fchdir(4</w/real>) = 0\n1 open("x", {excl}\n',
             "cut off": ('1 symlink("/w/real", "/w/link") = 0\n'
                         '1 openat(AT_FDCWD</w>, "link/x", O_WRONLY|O_CREAT|O_EXCL <unfinished ...>\n'
@@ -435,6 +440,16 @@ class ClashTest(unittest.TestCase):
             self.assertIn(("path", "/w/real/x"), clash_audit.writes(a, ondisk=lambda p: None), name)
             self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": real}, serial={}),
                              [("path", "/w/real/x", "test_a", "test_b")], name)
+        # The link's own name is walked when it is made, and symlinkat's directory fd is decoded.
+        made_through = ('1 symlink("/w/r0", "/w/link") = 0\n1 symlink("/w/real", "/w/link/l2") = 0\n'
+                        f'1 openat(AT_FDCWD</>, "/w/r0/l2/x", {excl}\n')
+        escaped_dirfd = ('1 symlinkat("/w/real", 3</w/d\\151r>, "link") = 0\n'
+                         f'1 openat(AT_FDCWD</>, "/w/dir/link/x", {excl}\n')
+        # An open without O_EXCL follows a final link too: a failed plain create of the link.
+        final = '1 symlink("/w/real/x", "/w/x") = 0\n1 openat(AT_FDCWD</w>, "x", O_WRONLY|O_CREAT, 0666) = -1 EACCES\n'
+        for name, a in (("made through a link", made_through), ("escaped dirfd", escaped_dirfd), ("final", final)):
+            self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": real}, serial={}),
+                             [("path", "/w/real/x", "test_a", "test_b")], name)
         # A link on disk that the trace did not make (made before the run, or by another tree).
         with tempfile.TemporaryDirectory() as d:
             d = os.path.realpath(d)
@@ -443,6 +458,21 @@ class ClashTest(unittest.TestCase):
             a = f'1 openat(AT_FDCWD<{d}>, "link/x", {excl}\n'
             self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, f"{d}/real/x")}, serial={}),
                              [("path", f"{d}/real/x", "test_a", "test_b")])
+
+    def test_a_link_the_tree_made_after_the_open_is_not_read_from_disk(self):
+        # The directory dd is replaced by a link after the failed create in it, and the link is
+        # still on disk at the audit: the create walked the directory, not the link.
+        with tempfile.TemporaryDirectory() as d:
+            d = os.path.realpath(d)
+            os.mkdir(os.path.join(d, "other"))
+            os.symlink("other", os.path.join(d, "dd"))
+            a = (f'1 openat(AT_FDCWD<{d}>, "dd/y", O_WRONLY|O_CREAT|O_EXCL, 0666) = -1 EEXIST (File exists)\n'
+                 f'1 symlink("other", "{d}/dd") = 0\n')
+            self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, f"{d}/dd/y")}, serial={}),
+                             [("path", f"{d}/dd/y", "test_a", "test_b")])
+            self.assertEqual(clash_audit.writes(a), {("path", f"{d}/dd/y")})
+            # A link on disk the tree never made is still followed.
+            self.assertIn(("path", f"{d}/other/y"), clash_audit.writes(a.splitlines()[0]))
 
     def test_a_link_elsewhere_later_or_failed_does_not_join_two_names(self):
         excl = "O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0777) = -1 EEXIST (File exists)"
@@ -461,14 +491,20 @@ class ClashTest(unittest.TestCase):
         # A link made by one module's tree is that tree's: another pid's walk in it still follows it.
         b = '2 openat(AT_FDCWD</w>, "q", O_RDONLY) = 3</w/q>\n' + open_x.replace("1 ", "2 ", 1)
         self.assertEqual(clash_audit.writes('1 symlink("/w/real", "/w/link") = 0\n' + b, ondisk=lambda p: None),
-                         {("path", "/w/real/x")})
+                         {("path", "/w/real/x"), ("path", "/w/link/x")})
+        # A link name reused as a directory (renamed away, untraced) still counts the name asked.
+        reused = '1 symlink("/w/real", "/w/link") = 0\n' + open_x
+        self.assertEqual(clash_audit.clashes({"test_a": reused, "test_b": w(9, "/w/link/x")}, serial={}),
+                         [("path", "/w/link/x", "test_a", "test_b")])
+        # A relative chdir from an unknown cwd leaves later relative names as asked.
+        self.assertEqual(clash_audit.writes(f'1 chdir("rel") = 0\n1 open("x", {excl}\n'), {("path", "x")})
         # Links past the kernel's 40 fail with ELOOP: the name stays as asked, and the walk ends.
         loop = '1 symlink("l", "/w/l") = 0\n1 openat(AT_FDCWD</w>, "l/x", ' + excl + "\n"
         self.assertEqual(clash_audit.writes(loop, ondisk=lambda p: None), {("path", "/w/l/x")})
         for n, reached in ((40, "/w/real/x"), (41, "/w/l0/x")):
             chain = "".join(f'1 symlink("l{i + 1}", "/w/l{i}") = 0\n' for i in range(n - 1))
             chain += f'1 symlink("real", "/w/l{n - 1}") = 0\n1 openat(AT_FDCWD</w>, "l0/x", {excl}\n'
-            self.assertEqual(clash_audit.writes(chain, ondisk=lambda p: None), {("path", reached)}, n)
+            self.assertEqual(clash_audit.writes(chain, ondisk=lambda p: None), {("path", reached), ("path", "/w/l0/x")}, n)
         # /proc's links on disk are the auditor's own (self, its fds), never followed.
         proc = f'1 openat(AT_FDCWD</w>, "/proc/self/fd/0/x", {excl}\n'
         self.assertEqual(clash_audit.writes(proc), {("path", "/proc/self/fd/0/x")})
