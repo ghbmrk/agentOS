@@ -335,3 +335,37 @@ func TestWrappedAfterEscapeHead(t *testing.T) {
 		}
 	}
 }
+
+// KRN-12: a break is kept while a later break's head is still open in the
+// form's rest (a '\' run of any length, "%0"), and until the longest form's
+// rest has come, in one write or a byte at a time (#4582).
+func TestBreakHeldWhileOpen(t *testing.T) {
+	hv := append([]byte{0xab}, "q7Xz2pL9mW4vR8tY3nB6kJ5h"...)
+	h := hex.EncodeToString(hv)
+	m := match.New([]match.Value{{ID: 0, Bytes: []byte("nq7Xz2pL9mW4vR8tY3nB6kJ5h")}, {ID: 1, Bytes: hv}}, nil)
+	cases := map[string]int{}
+	for k := 1; k < len(h); k++ { // h is the longest form; it begins one character into a break
+		for _, br := range []string{"\n", "%0A", `\u000a`, strings.Repeat(`\`, 32) + "n"} {
+			cases["%0"+h[:k]+br+h[k:]] = 1
+		}
+	}
+	for _, run := range []int{1, 60, 5000} {
+		for _, head := range []string{`C:\\n`, `C:\n`} {
+			cases[head+"q7Xz2pL9m"+strings.Repeat(`\`, run)+"nW4vR8tY3nB6kJ5h"] = 0
+		}
+	}
+	for s, id := range cases {
+		for _, pad := range []string{"", strings.Repeat(" ", 2000)} {
+			if got := m.Scan([]byte(s + pad)).Trips; !slices.Equal(got, []int{id}) {
+				t.Fatalf("%.80q and %d bytes tripped %v, want [%d]", s, len(pad), got, id)
+			}
+			st := m.Stream()
+			for i := range len(s + pad) {
+				st.Write([]byte{(s + pad)[i]})
+			}
+			if got := st.Result().Trips; !slices.Equal(got, []int{id}) {
+				t.Fatalf("%.80q and %d bytes, a byte at a time, tripped %v, want [%d]", s, len(pad), got, id)
+			}
+		}
+	}
+}

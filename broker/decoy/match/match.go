@@ -329,8 +329,8 @@ type cut struct {
 // \u000d. A break may begin in an earlier write. Each break is kept, since
 // one may instead be an escaped '\' or a literal '%' and a form's first
 // characters (#4582). A break begins after the last one, so its place stays.
-// A break is matched and let go once the longest form's rest has come, so
-// a large write keeps few.
+// A break is matched and let go once the longest form's rest has come and
+// no later break can still begin in it, so a large write keeps few.
 func (s *Stream) join(p []byte) {
 	for _, c := range p {
 		if c == '\r' || c == '\n' {
@@ -339,12 +339,16 @@ func (s *Stream) join(p []byte) {
 		if n := escape(s.joined[s.floor:], c); n > 0 {
 			s.floor = len(s.joined) - n
 			s.joined = append(s.joined, c)
-			s.addBreak(s.floor, s.joined[s.floor+1+max(0, n-5):])
+			s.addBreak(s.floor, s.joined[s.floor+1:])
 			s.joined = s.joined[:s.floor]
 			continue
 		}
+		if c == '\\' && bytes.HasSuffix(s.joined[s.floor:], []byte(`\`)) {
+			continue // a run of '\'s ends one break or none, whatever its length
+		}
 		s.joined = append(s.joined, c)
-		for len(s.breaks) > 0 && len(s.joined)-s.breaks[0].at > s.m.carry {
+		end := len(s.joined) - open(s.joined[s.floor:])
+		for len(s.breaks) > 0 && end-s.breaks[0].at >= s.m.carry {
 			s.matchBreak(s.breaks[0])
 			s.breaks = s.breaks[1:]
 		}
@@ -352,7 +356,8 @@ func (s *Stream) join(p []byte) {
 }
 
 // addBreak keeps a break at at by the characters after its first that a
-// form may begin with (at most "u000a"), once for each place.
+// form may begin with (at most "u000a", as runs of '\'s are one), once for
+// each place.
 func (s *Stream) addBreak(at int, b []byte) {
 	for i := len(s.breaks) - 1; i >= 0 && s.breaks[i].at == at; i-- {
 		if bytes.Equal(s.breaks[i].b, b) {
@@ -360,6 +365,28 @@ func (s *Stream) addBreak(at int, b []byte) {
 		}
 	}
 	s.breaks = append(s.breaks, cut{at, bytes.Clone(b)})
+}
+
+// open returns how many bytes ending w a later break could still remove:
+// the start of a break's head they end with.
+func open(w []byte) int {
+	if bytes.HasSuffix(w, []byte("%0")) {
+		return 2
+	}
+	if bytes.HasSuffix(w, []byte("%")) {
+		return 1
+	}
+	t := w
+	for _, h := range []string{"u000", "u00", "u0", "u"} {
+		if bytes.HasSuffix(t, []byte(h)) {
+			t = t[:len(t)-len(h)]
+			break
+		}
+	}
+	if n := len(t) - len(bytes.TrimRight(t, `\`)); n > 0 {
+		return len(w) - len(t) + n
+	}
+	return 0
 }
 
 // escape returns how many bytes ending w begin a line-break escape that c

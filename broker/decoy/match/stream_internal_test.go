@@ -1,6 +1,7 @@
 package match
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -86,7 +87,7 @@ func TestBreaksBounded(t *testing.T) {
 	m := New([]Value{{ID: 4, Bytes: []byte("nq7Xz2pL9mW4vR8tY3nB6kJ5h")}}, nil)
 	s := m.Stream()
 	s.Write([]byte(strings.Repeat(`x\n`, 1<<18)))
-	if len(s.breaks) > m.carry || cap(s.breaks) > 4*m.carry {
+	if len(s.breaks) > m.carry+1 || cap(s.breaks) > 4*m.carry {
 		t.Fatalf("%d break records (cap %d) after one write, carry %d", len(s.breaks), cap(s.breaks), m.carry)
 	}
 	s = m.Stream()
@@ -98,5 +99,17 @@ func TestBreaksBounded(t *testing.T) {
 	s.Write([]byte(`\\\\\\u000a`))
 	if len(s.breaks) != 1 || string(s.breaks[0].b) != "u000a" {
 		t.Fatalf("a long break kept %+v", s.breaks)
+	}
+}
+
+// KRN-12: the last break's place moves with the joined tail, so a break
+// split by another across a chunk edge ("%0" + JSON \n + "A") stays
+// unremoved, as DECOY-a-5 states (#4582).
+func TestFloorCarried(t *testing.T) {
+	s := New([]Value{{ID: 4, Bytes: []byte("q7Xz2pL9mW4vR8tY3nB6kJ5h")}}, nil).Stream()
+	s.Write([]byte(strings.Repeat("a", carryPattern) + `%0\n`))
+	s.Write([]byte("A"))
+	if s.pending != 1 || !bytes.HasSuffix(s.joined, []byte("%0A")) {
+		t.Fatalf("pending %d, joined ends %q", s.pending, s.joined[len(s.joined)-4:])
 	}
 }
