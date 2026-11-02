@@ -43,11 +43,11 @@ func (s *failStore) fail(t string) {
 }
 
 // openFailing restarts the rig's gate and engine on its journal behind a
-// failStore, as openWith does on the journal itself.
-func (r *rig) openFailing() *failStore {
+// failStore, as openWith does on the journal itself; reissue runs Reissue.
+func (r *rig) openFailing(reissue bool) *failStore {
 	r.t.Helper()
 	fs := &failStore{MemStore: r.store}
-	r.own = &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
+	r.own = r.newOwner()
 	r.g = New(r.cfg)
 	eng, err := journal.Open(fs, r.g, map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g},
 		func(s string) string { return s }, journal.WithClock(r.now))
@@ -56,7 +56,9 @@ func (r *rig) openFailing() *failStore {
 	}
 	r.eng = eng
 	r.g.Attach(eng, r.own)
-	r.g.Reissue(nil)
+	if reissue {
+		r.g.Reissue(nil)
+	}
 	return fs
 }
 
@@ -131,7 +133,7 @@ func TestAnswerIsJournaledBeforeAuthorize(t *testing.T) {
 	}
 
 	// An approval the journal cannot take is not acted on.
-	fs := r.openFailing()
+	fs := r.openFailing(true)
 	r.invoice("agent/c", "inv-c")
 	fs.fail(string(journal.RecAnswer))
 	r.decide(true, "owner")
@@ -169,7 +171,7 @@ func TestAllowedApprovalIsJournaled(t *testing.T) {
 // crashes at the authorize record, so only the answer is durable.
 func (r *rig) approveThenCrash(id, rec string) owner.Item {
 	r.t.Helper()
-	fs := r.openFailing()
+	fs := r.openFailing(true)
 	r.invoice(id, rec)
 	_, items := r.own.last(r.t)
 	fs.fail(string(journal.RecAuthorized))
@@ -229,7 +231,7 @@ func TestDecidedSurvivesRestart(t *testing.T) {
 	t.Run("denial before authorize", func(t *testing.T) {
 		r := newRig(t, nil)
 		r.grant(mailGrant())
-		fs := r.openFailing()
+		fs := r.openFailing(true)
 		r.invoice("agent/a", "inv-a")
 		fs.fail(string(journal.RecDenied))
 		r.decide(false, "owner")
@@ -244,7 +246,7 @@ func TestDecidedSurvivesRestart(t *testing.T) {
 	})
 	t.Run("local confirmation", func(t *testing.T) {
 		r := newRig(t, nil)
-		fs := r.openFailing()
+		fs := r.openFailing(true)
 		id := "local/grant/0"
 		st := r.submit(journal.Intent{ID: id, Origin: "local", Account: journal.BrokerAccount,
 			Action: journal.ActionGrantChange, Params: specParams(mailGrant()), Executor: ExecutorName})
@@ -295,7 +297,7 @@ func TestStaleDecisionRefusedAfterRestart(t *testing.T) {
 func TestWaitingRebuiltAfterRestart(t *testing.T) {
 	r := newRig(t, nil)
 	r.grant(mailGrant())
-	fs := r.openFailing()
+	fs := r.openFailing(true)
 	r.invoice("agent/a", "inv-a")
 	ra, ia := r.own.last(t)
 	r.invoice("agent/b", "inv-b")

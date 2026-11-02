@@ -230,9 +230,7 @@ func TestRestartReissuesWhatTheOwnerWasAsked(t *testing.T) {
 	x := sam()
 	x.Record, x.Item.Amount, x.Item.Facts.Amount = "inv-2", "$900.00", 90000
 	r.ver.set("inv-2", x) // changed while the box was down
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.advance(5 * time.Minute)
 	r.boot = boot
 	r.open() // restart, still STOPped

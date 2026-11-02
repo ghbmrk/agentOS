@@ -91,9 +91,7 @@ func TestBoundAskNamesQueuedSends(t *testing.T) {
 			r, send := dayRig(t, "")
 			for i, id := range []string{"agent/q1", "agent/q2"} {
 				if i == c.started {
-					if _, err := r.eng.Stop(context.Background()); err != nil {
-						t.Fatal(err)
-					}
+					r.stop(t)
 				}
 				want := journal.Succeeded
 				if i >= c.started {
@@ -131,9 +129,7 @@ func TestBoundAskNamesQueuedActions(t *testing.T) {
 		r, send := ruleRig(t, "", "invoice.remind", 10, 2)
 		for i, id := range []string{"agent/q1", "agent/q2"} {
 			if i == c.started {
-				if _, err := r.eng.Stop(context.Background()); err != nil {
-					t.Fatal(err)
-				}
+				r.stop(t)
 			}
 			want := journal.Succeeded
 			if i >= c.started {
@@ -165,9 +161,7 @@ func TestBoundAskNamesQueuedPerRecord(t *testing.T) {
 			r, send := ruleRig(t, "", "invoice.send", 2, 10)
 			for i, id := range []string{"agent/r1", "agent/r2"} {
 				if i == c.started {
-					if _, err := r.eng.Stop(context.Background()); err != nil {
-						t.Fatal(err)
-					}
+					r.stop(t)
 				}
 				want := journal.Succeeded
 				if i >= c.started {
@@ -228,9 +222,7 @@ func TestBoundAskKeepsGuardReason(t *testing.T) {
 		{"sent from a newly linked address book", "sent from a newly linked address book"},
 	} {
 		r, send := dayRig(t, c.reason)
-		if _, err := r.eng.Stop(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+		r.stop(t)
 		for _, id := range []string{"agent/q1", "agent/q2"} {
 			if st := send(id, "inv-"+id); st.State != journal.Authorized {
 				t.Fatalf("%s: %s %q", id, st.State, st.Permission.Reason)
@@ -274,9 +266,7 @@ func TestErasedSendStillBoundPerRecord(t *testing.T) {
 func TestQueuedNoteIsNotWhatIsApproved(t *testing.T) {
 	queue := func(t *testing.T) (*rig, func(id, rec string) journal.Status) {
 		r, send := dayRig(t, "")
-		if _, err := r.eng.Stop(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+		r.stop(t)
 		for _, id := range []string{"agent/q1", "agent/q2"} {
 			send(id, "inv-"+id)
 		}
