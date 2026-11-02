@@ -405,29 +405,79 @@ func TestRunCollapseFloor(t *testing.T) {
 }
 
 // KRN-12: a value holding a '\' trips in its JSON form split by a break at
-// every place, at JSON depth one and two, also right after the escaped '\',
-// where the break's run holds it, and with other JSON escapes in it ('<',
-// '"'); the break alone in its place does not (#4622).
+// every place (near the '\' in a form over 4 KiB), at JSON depth one and
+// two, also right after the escaped '\', where the break's run holds it,
+// and with other JSON escapes in it ('<', '"'), whole, in two writes and in
+// one write then Result, with a scan before or inside it; the break alone in
+// its place does not (#4622).
 func TestJSONBackslashWrapped(t *testing.T) {
-	for _, v := range []string{`q7Xz\2pL9mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9<mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9"mW4vR8tY3nB6kJ5h`} {
+	long := strings.Repeat("<", 700) + `\q7Xz2pL9mW4v`
+	for _, v := range []string{`q7Xz\2pL9mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9<mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9"mW4vR8tY3nB6kJ5h`, long} {
 		m := match.New([]match.Value{{ID: 5, Bytes: []byte(v)}}, nil)
 		j, _ := json.Marshal(v)
 		jj, _ := json.Marshal(string(j))
 		for d, f := range []string{string(j[1 : len(j)-1]), string(jj[3 : len(jj)-3])} {
+			at := strings.LastIndex(f, `\\`) + 1 // in the escaped '\'
 			for cut := 1; cut < len(f); cut++ {
+				if len(f) > 200 && (cut < at-4 || cut > at+6*(d+1)) {
+					continue
+				}
 				for _, br := range []string{"\n", "\r\n", `\n`, `\r\n`, `\u000a`, `\\n`, "%0A"} {
 					if d == 1 && br == "%0A" && f[cut-1] == '\\' && f[cut] == '\\' {
 						continue // "%0A" inside a depth-two '\' run is not joined (DECOY-a-5)
 					}
 					s := `{"a":"` + f[:cut] + br + f[cut:] + `"}`
-					if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{5}) {
-						t.Fatalf("%q tripped %v, want [5]", s, got)
-					}
+					wrappedTrips(t, m, s, 6+cut+len(br), 5)
 				}
 			}
 		}
 		if got := m.Scan([]byte(strings.Replace(v, `\`, "%0a", 1))).Trips; len(got) != 0 {
 			t.Fatalf("a %%0a break in the '\\' place tripped %v", got)
+		}
+	}
+	// A "\\" split by "%0a" stays in the joined text, so its '\'s are read
+	// back too (Security, #4663).
+	m := match.New([]match.Value{{ID: 9, Bytes: []byte(`C\y z91-Byz>_"zzCzC1`)}}, nil)
+	s := `C\%0a\y\\n z9` + "\n" + `1-Byz\u00\u000D3e_\\\n"zzCzC1`
+	wrappedTrips(t, m, s, len(`C\%0a`), 9)
+	// A form's prefix before a held break outlasts a scan: a long form split
+	// after its escaped '\', or with a JSON break in its first '\'s place,
+	// then a head open at the scan (Security, #4663).
+	for _, v := range []string{`ab\cd` + strings.Repeat("<", 700) + "z", `ab\cd` + strings.Repeat("<", 1018) + "z", "n" + strings.Repeat("<", 1022) + "z"} {
+		m := match.New([]match.Value{{ID: 7, Bytes: []byte(v)}}, nil)
+		j, _ := json.Marshal(v)
+		f := string(j[1 : len(j)-1])
+		at := strings.Index(f, `\\`) + 2
+		if v[0] == 'n' {
+			f, at = f[:1]+f[2:], 1
+		}
+		for _, head := range []string{`\u000`, "%0"} {
+			st := m.Stream()
+			st.Write([]byte(f[:at] + `\n` + f[at:] + head))
+			st.Write([]byte("x "))
+			if got := st.Result().Trips; !slices.Equal(got, []int{7}) {
+				t.Fatalf("a %d-character form, then %q, tripped %v, want [7]", len(f), head, got)
+			}
+		}
+	}
+}
+
+// wrappedTrips checks that s trips [id] whole, in two writes split right
+// after its break, halfway and before its last byte, and in one write then
+// Result; the first and last also after 4 KiB, so that a scan falls inside.
+func wrappedTrips(t *testing.T, m *match.Matcher, s string, after, id int) {
+	t.Helper()
+	if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{id}) {
+		t.Fatalf("%.80q tripped %v, want [%d]", s, got, id)
+	}
+	for k, pad := range []string{"", strings.Repeat(" ", 4096)} {
+		for _, i := range []int{after, len(s), len(s) / 2, len(s) - 1}[:4-2*k] {
+			st := m.Stream()
+			st.Write([]byte(pad + s[:i]))
+			st.Write([]byte(s[i:]))
+			if got := st.Result().Trips; !slices.Equal(got, []int{id}) {
+				t.Fatalf("%.80q after %d bytes, written to %d then the rest, tripped %v, want [%d]", s, len(pad), i, got, id)
+			}
 		}
 	}
 }

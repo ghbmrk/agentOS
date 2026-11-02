@@ -201,7 +201,7 @@ type Value struct {
 type Matcher struct {
 	forms []form
 	first map[byte][]int // forms by their first byte
-	slash [][2]int       // each '\' of a form without a "\\": the form and where
+	slash [][2]int       // each '\' of a form: the form and where
 	dests map[netip.Addr]int
 	carry int
 }
@@ -227,7 +227,7 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 				m.first[f[0]] = append(m.first[f[0]], len(m.forms))
 			}
 			for k, c := range f {
-				if c == '\\' && !bytes.Contains(f, []byte(`\\`)) {
+				if c == '\\' {
 					m.slash = append(m.slash, [2]int{len(m.forms), k})
 				}
 			}
@@ -433,6 +433,9 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
+	for _, br := range s.breaks {
+		s.matchBreak(br)
+	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
@@ -473,15 +476,10 @@ func tail(w []byte, keep int) []byte {
 	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
-// Result scans what is pending, matches the breaks still held (a scan cuts
-// none away, so each is matched here or when let go), and returns what the
-// stream has found.
+// Result scans what is pending and returns what the stream has found.
 func (s *Stream) Result() Result {
 	if s.pending != 0 {
 		s.scan()
-	}
-	for _, br := range s.breaks {
-		s.matchBreak(br)
 	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
 }
