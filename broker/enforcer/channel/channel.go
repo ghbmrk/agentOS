@@ -176,7 +176,8 @@ type Event struct {
 	// Dropped is how many of a cut core's lines went unlogged past
 	// KindPaused's bucket since the core's line before this one, so the
 	// record keeps how much a cut core tried (#4657). Only the core's own
-	// lines carry it, never a failed hello's or the quiet line (#4683). A
+	// lines and the restore's (Channel.Flush, #4726) carry it, never a
+	// failed hello's or the quiet line (#4683). A
 	// sink must keep it: the logged lines plus the sum of Dropped are
 	// everything the cut core sent (ENF-d-4).
 	Dropped int
@@ -409,7 +410,12 @@ func (c *Channel) countHello() {
 		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
 		c.cfg.Cut.Trip(reason)
 		c.tripping.Add(-1)
-		c.cfg.Log(Event{At: at, Kind: KindTrip, What: string(KindHello), Reason: reason})
+		// The line goes through log like the core's other lines, so it
+		// carries a count pending since a restore (#4708). Only the line
+		// waits for c.mu; the count and the trip above never do.
+		c.mu.Lock()
+		c.log(Event{At: at, Kind: KindTrip, What: string(KindHello), Reason: reason})
+		c.release()
 	}
 }
 
@@ -506,6 +512,22 @@ func (c *Channel) logPaused(now time.Time) bool {
 	}
 	c.dropped++
 	return false
+}
+
+// Flush logs one KindPaused line carrying the count of a cut core's lines
+// dropped unlogged since its last line logged, and ends the quiet, so the
+// record has the count at the owner's restore instead of at the core's next
+// line (#4726). DECOY-d's restore calls it once it has returned the cut to
+// Open; with nothing pending it logs nothing. Its line is not the core's,
+// so the logged lines plus the sum of Dropped still equal what the cut
+// core sent (ENF-d-4).
+func (c *Channel) Flush() {
+	c.mu.Lock()
+	defer c.release()
+	c.pausedQuiet = false
+	if c.dropped != 0 {
+		c.log(Event{At: c.cfg.Now(), Kind: KindPaused, Reason: "the owner restored the core"})
+	}
 }
 
 // logCut logs e, a line that records no trip, under KindPaused's bucket

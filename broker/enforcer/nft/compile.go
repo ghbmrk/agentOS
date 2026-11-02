@@ -54,21 +54,54 @@ func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_
 
 const TrafficSize = 64
 
-// HostSet is the set that records, for each connection a host on a shared
-// segment (Guests, Owner, Household) started, the connection's conntrack
-// ID and original source, and the source address and hardware address its
-// first packet came from (live.go, learn, hostKey). A related packet from a shared segment passes only
-// with its connection's record. Each record lasts HostTimeout from that
-// first packet and the set holds at most HostSize per family, which bounds
-// what the shared segments can make the enforcer keep; a connection
-// without a record (it outlived its record, the set was full, or it was
-// open before the last load, under this ruleset or one without labels) has
-// its host's own ICMP errors dropped, never anyone else's passed.
-func HostSet(v6 bool) string { return "host" + fam(v6) }
+// The shared segments are the ones several hosts share (Guests, Owner,
+// Household): each is one interface pair to the enforcer, so the
+// connection mark cannot tell one host's connection from another's, and
+// the reverse-path filter passes any source address on the segment. Each
+// has its own sets and chains, named by its name, so what one segment's
+// hosts make the enforcer keep never takes another's room.
+type segment struct{ name, iface string }
+
+// segments are the shared segments by name: "guests", "owner", "household".
+func segments(l Layout) []segment {
+	return []segment{{"guests", l.Guests}, {"owner", l.Owner}, {"household", l.Household}}
+}
+
+// HeldSet and ClaimSet bind each address a host on segment seg sends from
+// to the hardware address it first sent from (claim): HeldSet holds the
+// addresses, ClaimSet each address with its hardware address. A packet
+// from a shared segment passes only from the hardware address that holds
+// its source address, or from a free address, which its hardware address
+// then holds. Each hold lasts ClaimTimeout from the address's last
+// forwarded packet, which is at most half the DHCP lease (12 h, dns.go), so
+// an address the DHCP server gives again after its lease ran out is free
+// by then; each set holds at most HostSize addresses.
+func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }
+func ClaimSet(seg string, v6 bool) string { return "claim_" + seg + fam(v6) }
+
+const ClaimTimeout = 6 * 3600 // seconds
+
+// HostSet is the set that records, for each connection a host on shared
+// segment seg started, the connection's conntrack ID and original source,
+// and the source address and hardware address its first packet came from
+// (live.go, learn, hostKey). Every later packet of the connection from the
+// segment, in its original direction (an established one, a related one
+// such as an ICMP error, or a new one before any reply), passes only with
+// that record, which it refreshes (bound): for HostTCPTimeout on a TCP
+// connection both ends have answered, which is how long conntrack keeps
+// one idle by default, and for HostTimeout otherwise, longer than conntrack
+// keeps any other idle connection. The set holds at most HostSize records
+// per family. A load carries every record, hold and claim to the new sets
+// (Reload). A connection without a record (its record expired or could not
+// be written, the set was full, or it opened while the ruleset was being
+// replaced) fails closed: its later packets from the segment are dropped,
+// never another host's passed.
+func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 const (
-	HostTimeout = "1h"
-	HostSize    = 65535
+	HostTimeout    = 3600      // seconds
+	HostTCPTimeout = 5 * 86400 // seconds
+	HostSize       = 65535
 )
 
 // hostLabel is the conntrack label bit learn sets on a connection it has
@@ -76,13 +109,13 @@ const (
 // on the enforcer sets or reads a label.
 const hostLabel = "0"
 
-// learnChain records the host of a connection from a shared segment and
-// accepts it; boundChain passes a related packet from a shared segment
-// only with its connection's record.
-const (
-	learnChain = "learn"
-	boundChain = "bound"
-)
+// learn records the host of a connection from shared segment seg and
+// accepts it; bound passes a later packet of a connection from seg only
+// with its record; claim passes a packet from seg only from the hardware
+// address that holds its source address.
+func learn(seg string) string { return "learn_" + seg }
+func bound(seg string) string { return "bound_" + seg }
+func claim(seg string) string { return "claim_" + seg }
 
 // hostKey is a HostSet element as nft reads it from a packet: its
 // connection's ID and original source address, then the packet's own
@@ -95,6 +128,15 @@ func hostKey(v6 bool) string {
 	f := family(v6)
 	return "ct id . ct original " + f + " saddr . " + f + " saddr . ether saddr"
 }
+
+// claimKey is a ClaimSet element as nft reads it from a packet.
+func claimKey(v6 bool) string {
+	f := family(v6)
+	return f + " saddr . ether saddr"
+}
+
+// secs is a timeout of n seconds as nft reads it.
+func secs(n int) string { return strconv.Itoa(n) + "s" }
 
 func nfproto(v6 bool) string {
 	if v6 {
@@ -468,13 +510,24 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	}
 
 	capDecls(w)
-	for _, v6 := range []bool{false, true} {
-		w.open("set " + HostSet(v6))
-		w.line("typeof " + hostKey(v6) + ";")
-		w.line("size " + strconv.Itoa(HostSize) + ";")
-		w.line("flags dynamic,timeout;")
-		w.line("timeout " + HostTimeout + ";")
-		w.close()
+	for _, sg := range segments(l) {
+		for _, v6 := range []bool{false, true} {
+			for _, s := range []struct {
+				name, key string
+				timeout   int
+			}{
+				{HostSet(sg.name, v6), hostKey(v6), HostTimeout},
+				{HeldSet(sg.name, v6), family(v6) + " saddr", ClaimTimeout},
+				{ClaimSet(sg.name, v6), claimKey(v6), ClaimTimeout},
+			} {
+				w.open("set " + s.name)
+				w.line("typeof " + s.key + ";")
+				w.line("size " + strconv.Itoa(HostSize) + ";")
+				w.line("flags dynamic,timeout;")
+				w.line("timeout " + secs(s.timeout) + ";")
+				w.close()
+			}
+		}
 	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
@@ -645,7 +698,17 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, v := range devs {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
-	shared := []string{g, q(l.Owner), q(l.Household)}
+	shared := map[string]string{} // a shared segment's quoted interface -> its name
+	for _, sg := range segments(l) {
+		shared[q(sg.iface)] = sg.name
+	}
+	vmap := func(chain func(string) string) string {
+		var es []string
+		for _, sg := range segments(l) {
+			es = append(es, q(sg.iface)+" : jump "+chain(sg.name))
+		}
+		return "iifname vmap { " + strings.Join(es, ", ") + " }"
+	}
 	for _, rs := range [][]rule{fwd, people} {
 		if err := bindAll(idx, shared, rs); err != nil {
 			return "", nil, err
@@ -687,11 +750,17 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, r := range capJumps(l) {
 		w.line(r)
 	}
-	// A related packet from a shared segment in its connection's original
-	// direction must come from the host that started the connection
-	// (live.go, #4324). In the reply direction one from a shared segment
-	// already matches no live accept, since no accept leads into one.
-	w.line("ct state related ct direction original iifname { " + strings.Join(shared, ", ") + " } jump " + boundChain)
+	// A packet from a shared segment must come from the hardware address
+	// that holds its source address (claim), and every one after its
+	// connection's first, in the connection's original direction, from the
+	// host that started the connection (bound; live.go, #4324, #4480): an
+	// established or related one, or a new one on a connection already
+	// recorded (conntrack calls original-direction packets new until a
+	// reply). In the reply direction none comes from a shared segment,
+	// since no accept leads into one.
+	w.line(vmap(claim))
+	w.line("ct state established,related ct direction original " + vmap(bound))
+	w.line("ct state new ct label " + hostLabel + " " + vmap(bound))
 	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
@@ -728,22 +797,48 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// labels has no room for one, so setting it does nothing, and such a
 	// connection (open across the first load of a ruleset with labels) is
 	// never recorded; one whose record could not be written has none.
-	w.open("chain " + learnChain)
-	w.line("ct label " + hostLabel + " accept")
-	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
-	}
-	w.line("accept")
-	w.close()
+	//
+	// Shared segments are never observed (NET-1, NET-3): what their chains
+	// refuse is dropped without a log line or a count.
+	for _, sg := range segments(l) {
+		w.open("chain " + learn(sg.name))
+		w.line("ct label " + hostLabel + " accept")
+		for _, v6 := range []bool{false, true} {
+			w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(sg.name, v6) + " { " + hostKey(v6) + " }")
+		}
+		w.line("accept")
+		w.close()
 
-	// Shared segments are never observed (NET-1, NET-3): a forged error from
-	// one is dropped without a log line or a count.
-	w.open("chain " + boundChain)
-	for _, v6 := range []bool{false, true} {
-		w.line("meta nfproto " + nfproto(v6) + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
+		// The record is refreshed by every packet it passes, for as long
+		// as conntrack keeps the connection idle: a TCP connection both
+		// ends answered for HostTCPTimeout (ct status reads the
+		// connection's, also for a related packet), any other for the
+		// set's HostTimeout.
+		w.open("chain " + bound(sg.name))
+		for _, v6 := range []bool{false, true} {
+			k, set := hostKey(v6), HostSet(sg.name, v6)
+			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " ct protocol tcp ct status assured update @" + set + " { " + k + " timeout " + secs(HostTCPTimeout) + " } return")
+			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " update @" + set + " { " + k + " } return")
+		}
+		w.line("drop")
+		w.close()
+
+		// An address is held by the hardware address it was first sent
+		// from: a packet from its holder refreshes the hold, one from any
+		// other hardware address is dropped, and a free address is taken
+		// by the packet's hardware address (its claim first, so a held set
+		// with no room leaves no hold without its claim).
+		w.open("chain " + claim(sg.name))
+		for _, v6 := range []bool{false, true} {
+			pre := "meta nfproto " + nfproto(v6) + " "
+			k, cs, hs, a := claimKey(v6), ClaimSet(sg.name, v6), HeldSet(sg.name, v6), family(v6)+" saddr"
+			w.line(pre + k + " @" + cs + " update @" + cs + " { " + k + " } update @" + hs + " { " + a + " } return")
+			w.line(pre + a + " @" + hs + " drop")
+			w.line(pre + "add @" + cs + " { " + k + " } add @" + hs + " { " + a + " } return")
+		}
+		w.line("drop")
+		w.close()
 	}
-	w.line("drop")
-	w.close()
 
 	w.open("chain " + live("forward"))
 	for _, r := range fwd {

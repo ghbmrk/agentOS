@@ -211,8 +211,9 @@ func TestCopiedMACGetsOwnList(t *testing.T) {
 	)
 	text, _ := Compile(fixturePolicy(), fixtureLayout())
 	// The only hardware address the ruleset reads is in a shared segment's
-	// host record (#4324), which no device's traffic reaches.
-	text = strings.ReplaceAll(strings.ReplaceAll(text, hostKey(false), ""), hostKey(true), "")
+	// host record (#4324) and address claim (#4480), which no device's
+	// traffic reaches.
+	text = stripKeys(text)
 	for _, s := range []string{"ether", "saddr 10.", "saddr fd"} {
 		if strings.Contains(text, s) {
 			t.Errorf("the ruleset identifies a device by %q", s)

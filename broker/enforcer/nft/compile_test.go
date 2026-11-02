@@ -74,8 +74,9 @@ func TestNoPolicyTextInRuleset(t *testing.T) {
 	}
 	got += drops
 	// A hardware address is read only as part of a shared segment's host
-	// record (#4324), never to tell devices apart (D-225).
-	got = strings.ReplaceAll(strings.ReplaceAll(got, hostKey(false), ""), hostKey(true), "")
+	// record (#4324) or address claim (#4480), never to tell devices apart
+	// (D-225).
+	got = stripKeys(got)
 	for _, s := range []string{"accept;#", `x"`, "y{", "tv.example", "core.example", "speaker", "ether"} {
 		if strings.Contains(got, s) {
 			t.Errorf("ruleset carries %q", s)
@@ -198,4 +199,15 @@ func TestPathsFollowTheDocument(t *testing.T) {
 	if has(none, `oifname "ap0.102"`) {
 		t.Error("the core reaches an everyday device with no control port")
 	}
+}
+
+// stripKeys is text without the shared segments' host record and address
+// claim keys, the only places the ruleset reads a hardware address or a
+// packet's own source address as a value.
+func stripKeys(text string) string {
+	for _, v6 := range []bool{false, true} {
+		text = strings.ReplaceAll(text, hostKey(v6), "")
+		text = strings.ReplaceAll(text, claimKey(v6), "")
+	}
+	return text
 }
