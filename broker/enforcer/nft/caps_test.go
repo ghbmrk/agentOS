@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 
@@ -179,5 +180,51 @@ func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
 	running := fmt.Sprintf(`{"nftables": [{"chain": {"family": "inet", "table": "enforcer", "name": %q}}]}`, m)
 	if text := mustDrops(t, twoCaps(), []byte(running), Drop{Day: 1, Groups: []DropGroup{{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100}}}); !strings.Contains(text, "delete chain inet enforcer "+m+"\n") {
 		t.Errorf("a stale shared chain is kept:\n%s", text)
+	}
+}
+
+// TestDropsWritesEveryCapTheKernelHolds (mutgate on #4611): Drops refuses
+// a layout Compile refuses; a cap of MaxDropCap, the largest the kernel's
+// quota holds, gets its quota and its drop; the vmap lists its addresses
+// in order, so the same state gives the same text; and a group's name
+// changes with its day and each cap, the edge's with its day and cap, so a
+// changed cap starts a new quota. Mutants: the layout check gone, the
+// bound off by one either way, the vmap in map order, a field left out of
+// a name.
+func TestDropsWritesEveryCapTheKernelHolds(t *testing.T) {
+	if _, err := Drops(twoCaps(), Layout{}, nil, Drop{}); err == nil {
+		t.Error("Drops took a layout Compile refuses")
+	}
+	var addrs []netip.Addr
+	for i := 1; i <= 16; i++ {
+		addrs = append(addrs, netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}))
+	}
+	g := DropGroup{Dests: []string{"a.example"}, Caps: []uint64{MaxDropCap}, Cap: MaxDropCap, Addrs: addrs}
+	c, q := groupNames(1, g)
+	text := mustDrops(t, twoCaps(), nil, Drop{Day: 1, Groups: []DropGroup{g}})
+	var elems []string
+	for _, a := range addrs {
+		elems = append(elems, a.String()+" : goto "+c)
+	}
+	slices.Sort(elems)
+	for _, want := range []string{
+		fmt.Sprintf("add quota inet enforcer %s { over %d bytes used 0 bytes; }", q, uint64(MaxDropCap)+1),
+		"add rule inet enforcer " + c + ` quota name "` + q + `" goto cap_over`,
+		"ip daddr vmap { " + strings.Join(elems, ", ") + " }",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("drop text lacks %q:\n%s", want, text)
+		}
+	}
+	other := g
+	other.Caps = []uint64{MaxDropCap - 1}
+	if _, q2 := groupNames(1, other); q2 == q {
+		t.Error("a group's name ignores its caps")
+	}
+	if _, q2 := groupNames(2, g); q2 == q {
+		t.Error("a group's name ignores its day")
+	}
+	if edgeQuota(1, 50) == edgeQuota(2, 50) || edgeQuota(1, 50) == edgeQuota(1, 51) {
+		t.Error("the edge's quota name ignores its day or cap")
 	}
 }

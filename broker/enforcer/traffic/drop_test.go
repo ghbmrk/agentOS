@@ -314,3 +314,74 @@ func TestDropLeavesAnAddressOfNoGroupOut(t *testing.T) {
 		}
 	}
 }
+
+// TestDropAtANewDay (mutgate on #4611): a drop taken after midnight, with
+// no reading since, is the new day's: its day and no bytes counted, so the
+// quotas start from nothing. Its addresses are in order, so the same state
+// gives the same text. Mutants: the day not rolled, so yesterday's counts
+// load under today's quotas; the addresses in map order.
+func TestDropAtANewDay(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	r := Reading{Gen: 1, Core: map[netip.Addr]uint64{}, Edge: 9}
+	var addrs []netip.Addr
+	for i := 1; i <= 16; i++ {
+		a := netip.AddrFrom4([4]byte{11, 0, 1, byte(i)})
+		c.Resolved("a.example", a)
+		r.Core[a] = 3
+		addrs = append(addrs, a)
+	}
+	c.Add(r)
+	p := c.Drop()
+	if g := p.Groups[0]; !slices.Equal(g.Addrs, addrs) || g.Count != 48 || p.EdgeCount != 9 {
+		t.Fatalf("drop %+v, want a's 16 addresses in order, 48 bytes and an edge of 9", p)
+	}
+	clk.t = noon.Add(24 * time.Hour)
+	p = c.Drop()
+	if p.Day != Day(clk.t) || p.EdgeCount != 0 {
+		t.Fatalf("drop after midnight: day %d edge %d, want day %d and nothing counted", p.Day, p.EdgeCount, Day(clk.t))
+	}
+	for _, g := range p.Groups {
+		if g.Count != 0 {
+			t.Fatalf("drop after midnight: group %v counts %d", g.Dests, g.Count)
+		}
+	}
+}
+
+// TestRetiredCapsFitTogether (mutgate on #4611): two retired caps share
+// what room the listed caps leave, so three versions' caps of 2^63 in one
+// group still encode. Mutant: each retired cap fitted alone, so together
+// they overflow the group.
+func TestRetiredCapsFitTogether(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, Caps{Core: map[string]uint64{"a.example": 1 << 63}})
+	for _, d := range []string{"a.example", "b.example", "c.example"} {
+		c.SetCaps(Caps{Core: map[string]uint64{d: 1 << 63}})
+		c.Resolved(d, addrA)
+	}
+	c.Add(reading(1, 0, addrA, 10))
+	if _, err := wire.EncodeCounts(c.Counts()); err != nil {
+		t.Fatalf("three versions' caps in one group: counts do not encode: %v", err)
+	}
+}
+
+// TestReadingOfRefuses (mutgate on #4611): a reading needs a layout the
+// compiler takes and a listing nft wrote, and each counting set element
+// is a plain address. Mutants: the layout's error dropped, the decode
+// error replaced by a later one, an element that is no address read as
+// the zero address.
+func TestReadingOfRefuses(t *testing.T) {
+	core := map[netip.Addr]uint64{addrA: 1}
+	if _, err := ReadingOf(capPolicy(), nft.Layout{}, "boot-1", capListing(t, 4, core, 0, nil)); err == nil {
+		t.Error("a layout the compiler refuses gave a reading")
+	}
+	if _, err := ReadingOf(capPolicy(), capLayout(), "boot-1", []byte("{")); err == nil || !strings.Contains(err.Error(), "EOF") {
+		t.Errorf("a cut listing: %v, want its decode error", err)
+	}
+	for _, val := range []string{"not-an-address", "fe80::1%eth0"} {
+		l := fmt.Sprintf(`{"nftables": [{"table": {"family": "inet", "name": "enforcer", "handle": 4}}, {"counter": {"family": "inet", "table": "enforcer", "name": "edge_out", "bytes": 1}}, {"set": {"family": "inet", "table": "enforcer", "name": "capc_6", "elem": [{"elem": {"val": %q, "counter": {"packets": 1, "bytes": 5}}}]}}, {"set": {"family": "inet", "table": "enforcer", "name": "capc_4"}}]}`, val)
+		if _, err := ReadingOf(capPolicy(), capLayout(), "boot-1", []byte(l)); !errors.Is(err, ErrListing) {
+			t.Errorf("element %q: %v, want ErrListing", val, err)
+		}
+	}
+}

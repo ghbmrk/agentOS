@@ -193,7 +193,6 @@ func Drops(d policy.Document, l Layout, running []byte, p Drop) (string, error) 
 			w.line("delete quota inet " + Table + " " + name)
 		}
 	}
-	slices.Sort(adds)
 	for _, a := range adds {
 		w.line(a)
 	}
