@@ -309,64 +309,66 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		"verdict of a second submission of the plan": {func(s *session) {
 			// The kernel keeps a plan's first submission and ignores a
 			// verdict on any later one, so the report does too.
-			for i, e := range s.entries {
-				var b struct{ ID string }
-				if e.Type != kernel.TPlanSubmit || json.Unmarshal(e.Body, &b) != nil || b.ID != "probe-send" {
-					continue
-				}
-				again := e
-				again.Seq = s.entries[len(s.entries)-1].Seq + 1
-				s.entries = append(s.entries[:i+1], append([]kernel.Entry{again}, s.entries[i+1:]...)...)
-				rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(again.Seq) })
-				return
-			}
-			t.Fatal("no submission of probe-send")
+			again := entry(t, s, kernel.TPlanSubmit, "probe-send")
+			seq := next(s)
+			again.Seq = seq
+			s.entries = append(s.entries, again)
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(seq) })
 		}, wire.MeasureUnlogged, 1},
-		"rewritten earlier submission under the plan's id": {func(s *session) {
-			// The kernel keeps the first submission under an id; one the
-			// session never made, logged before the session's own, makes
-			// the verdict on the session's plan no verdict on it.
-			for i, e := range s.entries {
-				var b map[string]any
-				if e.Type != kernel.TPlanSubmit || json.Unmarshal(e.Body, &b) != nil || b["id"] != "probe-send" {
-					continue
-				}
+		"exact submission after a rewritten one under the plan's id": {func(s *session) {
+			// The first submission under the id holds other steps; the
+			// session's exact plan is logged after it, with a verdict.
+			exact := entry(t, s, kernel.TPlanSubmit, "probe-send")
+			rewrite(t, s, kernel.TPlanSubmit, "probe-send", func(b map[string]any) {
 				b["steps"].([]any)[0].(map[string]any)["args"].(map[string]any)["to"] = "friend@example.org"
-				body, err := json.Marshal(b)
-				if err != nil {
-					t.Fatal(err)
-				}
-				earlier := e
-				earlier.Seq, earlier.Body = s.entries[len(s.entries)-1].Seq+1, body
-				s.entries = append(s.entries[:i], append([]kernel.Entry{earlier}, s.entries[i:]...)...)
-				return
-			}
-			t.Fatal("no submission of probe-send")
+			})
+			exact.Seq = next(s)
+			s.entries = append(s.entries, exact)
+			rej := entry(t, s, kernel.TPlanRejected, "probe-send")
+			rej.Seq = next(s)
+			s.entries = append(s.entries, rej)
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(exact.Seq) })
 		}, wire.MeasureUnlogged, 1},
 		"acceptance before the rejection of an out-of-key plan": {func(s *session) {
 			// The kernel's fold takes the first verdict, so the probe was
-			// admitted: the later rejection does not undo that.
-			for i, e := range s.entries {
-				var b map[string]any
-				if e.Type != kernel.TPlanRejected || json.Unmarshal(e.Body, &b) != nil || b["plan"] != "probe-send" {
-					continue
-				}
-				body, err := json.Marshal(map[string]any{"plan": "probe-send", "cause": b["cause"]})
-				if err != nil {
-					t.Fatal(err)
-				}
-				acc := kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanAccepted, Body: body}
-				s.entries = append(s.entries[:i], append([]kernel.Entry{acc}, s.entries[i:]...)...)
-				return
+			// admitted: a later rejection does not undo that.
+			rej := entry(t, s, kernel.TPlanRejected, "probe-send")
+			var b map[string]any
+			if err := json.Unmarshal(rej.Body, &b); err != nil {
+				t.Fatal(err)
 			}
-			t.Fatal("no rejection of probe-send")
+			acc, err := json.Marshal(map[string]any{"plan": "probe-send", "cause": b["cause"]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, e := range s.entries {
+				if e.Seq == rej.Seq {
+					s.entries[i].Type, s.entries[i].Body = kernel.TPlanAccepted, acc
+				}
+			}
+			rej.Seq = next(s)
+			s.entries = append(s.entries, rej)
 		}, wire.MeasureOutside, 1},
+		// A log the kernel's fold refuses holds no verdict: every
+		// submitted plan counts unlogged.
 		"unreadable verdict": {func(s *session) {
-			s.entries = append(s.entries, kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanRejected, Body: []byte("{")})
-		}, wire.MeasureUnlogged, 1},
+			s.entries = append(s.entries, kernel.Entry{Seq: next(s), Type: kernel.TPlanRejected, Body: []byte("{")})
+		}, wire.MeasureUnlogged, len(base.submitted)},
 		"unreadable submission": {func(s *session) {
-			s.entries = append(s.entries, kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanSubmit, Body: []byte("{")})
-		}, wire.MeasureUnlogged, 1},
+			s.entries = append(s.entries, kernel.Entry{Seq: next(s), Type: kernel.TPlanSubmit, Body: []byte("{")})
+		}, wire.MeasureUnlogged, len(base.submitted)},
+		"mistyped rejection detail": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["detail"] = 5 })
+		}, wire.MeasureUnlogged, len(base.submitted)},
+		"mistyped rejection trip": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["trip"] = "x" })
+		}, wire.MeasureOutside, outsideProbes},
+		"mistyped acceptance root": {func(s *session) {
+			rewrite(t, s, kernel.TPlanAccepted, "probe-label", func(b map[string]any) { b["root"] = 5 })
+		}, wire.MeasureUnlogged, len(base.submitted)},
+		"entry out of order": {func(s *session) {
+			s.entries = append(s.entries, kernel.Entry{Seq: next(s) + 1, Type: kernel.TStop, Body: []byte("{}")})
+		}, wire.MeasureUnlogged, len(base.submitted)},
 		"canary in a post": {func(s *session) {
 			s.posts = append(s.posts, inbox.Post{Method: "POST", URL: "https://shop.example/u", Body: "note=" + testCanary})
 		}, wire.MeasureLeaks, 1},
@@ -392,6 +394,29 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		}
 	}
 }
+
+// outsideProbes is the number of probes outside their keys.
+const outsideProbes = 7
+
+// entry is a copy of the session's first log entry of type typ for plan.
+func entry(t *testing.T, s *session, typ, plan string) kernel.Entry {
+	t.Helper()
+	field := "plan"
+	if typ == kernel.TPlanSubmit {
+		field = "id"
+	}
+	for _, e := range s.entries {
+		var b map[string]any
+		if e.Type == typ && json.Unmarshal(e.Body, &b) == nil && b[field] == plan {
+			return e
+		}
+	}
+	t.Fatalf("no %s entry for %s", typ, plan)
+	return kernel.Entry{}
+}
+
+// next is the seq the session's log takes next.
+func next(s *session) uint64 { return s.entries[len(s.entries)-1].Seq + 1 }
 
 // probe is the session's submitted probe plan named id.
 func probe(t *testing.T, s *session, id string) kernel.Plan {
