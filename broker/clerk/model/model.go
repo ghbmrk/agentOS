@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
@@ -228,8 +230,8 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 	defer c.mu.Unlock()
 	merr := c.owe(now, func(now int64) error { return c.Ledger.Meter(now, a, route, amount, src) })
 	if p.Pool != "" && u.Pool != nil && len(u.Pool.Windows) > 0 {
-		ws := make([]kernel.WindowReading, len(u.Pool.Windows))
-		for i, w := range u.Pool.Windows {
+		var ws []kernel.WindowReading
+		for _, w := range u.Pool.Windows {
 			reset := w.ResetAt
 			if reset <= now && w.Every > 0 {
 				reset = now + w.Every
@@ -237,7 +239,16 @@ func (c *Clerk) settle(now int64, s *Admission, u Usage, out int64, callErr erro
 			if reset <= now {
 				reset = now + kernel.PoolWindowMS
 			}
-			ws[i] = kernel.WindowReading{Window: w.Window, Used: w.Used, ResetAt: reset}
+			// The window as the log can name it (it refuses other text,
+			// and retrying never cures that, #4760); two the rewrite
+			// merges keep the higher figure and the later reset.
+			r := kernel.WindowReading{Window: strings.ToValidUTF8(w.Window, "\uFFFD"), Used: w.Used, ResetAt: reset}
+			if i := slices.IndexFunc(ws, func(o kernel.WindowReading) bool { return o.Window == r.Window }); i >= 0 {
+				r.Used, r.ResetAt = max(r.Used, ws[i].Used), max(r.ResetAt, ws[i].ResetAt)
+				ws[i] = r
+				continue
+			}
+			ws = append(ws, r)
 		}
 		_ = c.owe(now, func(now int64) error {
 			// A window that has reset since the reading is not read again.
@@ -265,6 +276,10 @@ func (c *Clerk) admit(now int64, plan, route string, in, maxOut int64) (Price, i
 	p, ok := c.Routes[route]
 	if !ok {
 		return Price{}, 0, none, fmt.Errorf("model: no route %q", route)
+	}
+	if !utf8.ValidString(route) || !utf8.ValidString(p.Pool) {
+		// The log could record neither the spend nor a reading under it.
+		return Price{}, 0, none, fmt.Errorf("model: route %q: %w", route, kernel.ErrNotText)
 	}
 	if maxOut <= 0 {
 		return Price{}, 0, none, errors.New("model: maxOut must be positive")
