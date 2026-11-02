@@ -395,6 +395,15 @@ func TestHeardOffer(t *testing.T) {
 	if offs := g.s.offers(cur); len(offs) != 0 {
 		t.Errorf("still offered after signing: %+v", offs)
 	}
+	// A person's network is offered once, however many of its devices
+	// are paired.
+	g.heard["household"] = append(g.heard["household"], []string{"new-phone", "local"})
+	two := clone(cur)
+	two.Devices = append(two.Devices, policy.Device{ID: "desk", Network: policy.NetHousehold, Everyday: true})
+	two.Pairs = append(two.Pairs, policy.Pair{A: "desk", B: "tv"})
+	if offs := g.s.offers(two); len(offs) != 1 || !slices.EqualFunc(offs[0].Names, [][]string{{"new-phone", "local"}}, slices.Equal) {
+		t.Errorf("two paired household devices: %+v", offs)
+	}
 	// An isolated device's pair has no path: nothing is offered for it.
 	g.heard["vlan104"] = append(g.heard["vlan104"], []string{"tv-2", "local"})
 	iso := clone(cur)
