@@ -923,11 +923,15 @@ func TestEventSamples(t *testing.T) {
 	if len(samples) != i+most {
 		t.Fatalf("%d samples, want %d with one field set and %d with every field", len(samples), i, most)
 	}
-	for _, s := range samples[i:] {
+	// The j-th every-field sample sets each field to its j-th value, or
+	// its last where it has fewer, so every value meets every other field
+	// set (#4791 L3 round 2).
+	for j, s := range samples[i:] {
 		v := reflect.ValueOf(s.e)
 		for g := range typ.NumField() {
-			if v.Field(g).IsZero() {
-				t.Errorf("an every-field sample has Event.%s unset", typ.Field(g).Name)
+			vs, _ := fieldValues(typ.Field(g).Type)
+			if want := vs[min(j, len(vs)-1)]; !v.Field(g).Equal(want) {
+				t.Errorf("every-field sample %d has Event.%s %v, want %v", j, typ.Field(g).Name, v.Field(g), want)
 			}
 		}
 	}
@@ -1045,6 +1049,17 @@ func TestCheckSink(t *testing.T) {
 	}
 	if err := CheckSink(alone); err == nil {
 		t.Error("a sink that loses Dropped on a line with no other field passed")
+	}
+	// A sink that narrows a field only while another is set: only an
+	// every-field sample past the first values catches it.
+	coupled := func(e Event) (Event, error) {
+		if e.Code != 0 {
+			e.Dropped = int(int8(e.Dropped))
+		}
+		return e, nil
+	}
+	if err := CheckSink(coupled); err == nil {
+		t.Error("a sink that keeps Dropped in a byte on a line with a Code passed")
 	}
 	// The failing sink hands back what it was given, so only its error
 	// can fail it.
