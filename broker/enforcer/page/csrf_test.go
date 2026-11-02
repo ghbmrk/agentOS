@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -14,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -397,143 +399,103 @@ func TestTagAndTokenLabelsDiffer(t *testing.T) {
 	g := fullRig(t)
 	for _, n := range []int{0, nonceLen + 8, cookieLen} {
 		x := bytes.Repeat([]byte{7}, n)
-		if bytes.Equal(g.s.tag(x), g.s.mac(x)) {
+		if g.s.tag(x).equal(g.s.mac(x).secretSum) {
 			t.Errorf("tag and mac agree over %d bytes", n)
 		}
 	}
 }
 
-// #4427: every secret the page derives (a cookie's tag, a screen's token)
-// is compared only in constant time. The secret functions are tag, mac
-// and every method that returns one of their results (token, mint). In
-// csrf.go a call to one may only be an argument of hmac.Equal, returned
-// as it is or base64-encoded (issuing a token), or appended to the
-// cookie it tags; never held in a variable, compared, or passed to any
-// other function. Outside csrf.go only render may call one (token), to
-// put the token on a screen. Revert mutants: hmac.Equal replaced by
-// bytes.Equal or string(..) !=, an encoded compare such as
-// header != EncodeToString(s.mac(c)) beside the kept hmac.Equal, or a
-// tag held in a variable, each fail here.
-func TestSecretsCompareInConstantTime(t *testing.T) {
+// #4427: a tag or a token is a secret, which == cannot compare (it holds
+// a slice) and whose only comparison, equal, is hmac.Equal. This pins its
+// other exits: outside secret's own methods no package code names its
+// bytes; IssueToken is called from no Go code, only from a template, and only
+// as the screen's token; seal is only ever a cookie's Value; fmt prints
+// none of its bytes; and the package imports neither reflect nor unsafe.
+// So no code can hold a tag or token as bytes or a string to compare.
+// Revert mutants: a method reading secretSum, a Go call of IssueToken or seal
+// whose result is held, a template printing .Token, or Format removed,
+// each fail here.
+func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var files []*ast.File
 	for _, p := range pkgs {
 		for _, f := range p.Files {
-			files = append(files, f)
-		}
-	}
-	// secretCall is the secret method a call expression invokes on s.
-	secret := map[string]bool{"tag": true, "mac": true}
-	secretCall := func(n ast.Node) (string, bool) {
-		c, ok := n.(*ast.CallExpr)
-		if !ok {
-			return "", false
-		}
-		sel, ok := c.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return "", false
-		}
-		if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "s" || !secret[sel.Sel.Name] {
-			return "", false
-		}
-		return sel.Sel.Name, true
-	}
-	contains := func(n ast.Node) (found bool) {
-		ast.Inspect(n, func(m ast.Node) bool {
-			if _, ok := secretCall(m); ok {
-				found = true
+			for _, imp := range f.Imports {
+				if imp.Path.Value == `"reflect"` || imp.Path.Value == `"unsafe"` {
+					t.Errorf("%s imports %s", fset.Position(imp.Pos()), imp.Path.Value)
+				}
 			}
-			return !found
-		})
-		return found
-	}
-	// Close secret over methods that return a secret.
-	for grew := true; grew; {
-		grew = false
-		for _, f := range files {
 			for _, d := range f.Decls {
 				fd, ok := d.(*ast.FuncDecl)
-				if !ok || fd.Recv == nil || fd.Body == nil || secret[fd.Name.Name] {
+				if !ok {
 					continue
 				}
-				ast.Inspect(fd.Body, func(n ast.Node) bool {
-					if r, ok := n.(*ast.ReturnStmt); ok && !secret[fd.Name.Name] {
-						for _, e := range r.Results {
-							if contains(e) {
-								secret[fd.Name.Name], grew = true, true
+				own := false
+				if fd.Recv != nil {
+					if id, ok := fd.Recv.List[0].Type.(*ast.Ident); ok && id.Name == "secret" {
+						own = true
+					}
+				}
+				var stack []ast.Node
+				ast.Inspect(fd, func(n ast.Node) bool {
+					if n == nil {
+						stack = stack[:len(stack)-1]
+						return true
+					}
+					at := fset.Position(n.Pos())
+					if id, ok := n.(*ast.Ident); ok && id.Name == "secretSum" && !own {
+						t.Errorf("%s: %s reads a secret's bytes", at, fd.Name.Name)
+					}
+					if sel, ok := n.(*ast.SelectorExpr); ok {
+						switch sel.Sel.Name {
+						case "IssueToken":
+							t.Errorf("%s: %s calls IssueToken; only a template may", at, fd.Name.Name)
+						case "seal":
+							call, _ := stack[len(stack)-1].(*ast.CallExpr)
+							var kv *ast.KeyValueExpr
+							if len(stack) > 1 {
+								kv, _ = stack[len(stack)-2].(*ast.KeyValueExpr)
+							}
+							key, _ := func() (*ast.Ident, bool) {
+								if kv == nil {
+									return nil, false
+								}
+								k, ok := kv.Key.(*ast.Ident)
+								return k, ok
+							}()
+							if call == nil || call.Fun != sel || kv == nil || kv.Value != call || key == nil || key.Name != "Value" {
+								t.Errorf("%s: %s uses seal other than as a cookie's Value", at, fd.Name.Name)
 							}
 						}
 					}
+					stack = append(stack, n)
 					return true
 				})
 			}
 		}
 	}
-	if !secret["token"] || !secret["mint"] {
-		t.Fatalf("secret methods %v: token and mint no longer return a secret, so this check no longer sees them", secret)
+	tmpls, err := filepath.Glob("templates/*.html")
+	if err != nil || len(tmpls) == 0 {
+		t.Fatalf("no templates: %v", err)
 	}
-	isCall := func(n ast.Node, pkg, name string) bool {
-		c, ok := n.(*ast.CallExpr)
-		if !ok {
-			return false
+	reUse := regexp.MustCompile(`\.Token\b[^}]*`)
+	for _, name := range tmpls {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
 		}
-		switch fn := c.Fun.(type) {
-		case *ast.Ident:
-			return pkg == "" && fn.Name == name
-		case *ast.SelectorExpr:
-			x, ok := fn.X.(*ast.Ident)
-			return fn.Sel.Name == name && (pkg == "*" || ok && x.Name == pkg)
+		for _, u := range reUse.FindAllString(string(b), -1) {
+			if u != ".Token.IssueToken" {
+				t.Errorf("%s uses %q: a screen shows the token only as {{.Token.IssueToken}}", name, u)
+			}
 		}
-		return false
 	}
-	equals := 0
-	for _, f := range files {
-		name := filepath.Base(fset.Position(f.Pos()).Filename)
-		var stack []ast.Node
-		var fn string
-		ast.Inspect(f, func(n ast.Node) bool {
-			if n == nil {
-				stack = stack[:len(stack)-1]
-				return true
-			}
-			if fd, ok := n.(*ast.FuncDecl); ok {
-				fn = fd.Name.Name
-			}
-			if isCall(n, "hmac", "Equal") {
-				equals++
-			}
-			if m, ok := secretCall(n); ok {
-				at := fset.Position(n.Pos())
-				parent := stack[len(stack)-1]
-				var grand ast.Node
-				if len(stack) > 1 {
-					grand = stack[len(stack)-2]
-				}
-				var ok bool
-				if name == "csrf.go" {
-					_, ret := parent.(*ast.ReturnStmt)
-					_, gret := grand.(*ast.ReturnStmt)
-					_, gset := grand.(*ast.AssignStmt)
-					ok = ret || isCall(parent, "hmac", "Equal") ||
-						isCall(parent, "*", "EncodeToString") && gret ||
-						isCall(parent, "", "append") && gset && m == "tag"
-				} else {
-					_, set := parent.(*ast.AssignStmt)
-					ok = m == "token" && fn == "render" && set
-				}
-				if !ok {
-					t.Errorf("%s: s.%s is used other than in hmac.Equal or to issue a pair", at, m)
-				}
-			}
-			stack = append(stack, n)
-			return true
-		})
-	}
-	if equals < 2 {
-		t.Errorf("found %d hmac.Equal calls: the check no longer sees csrf.go's comparisons", equals)
+	x := secret{[]byte("\x01\x02canary")}
+	if out := fmt.Sprintf("%v %+v %#v %s %q %x %X %d %o %b %c %U", x, x, x, x, x, x, x, x, x, x, x, x); strings.Contains(out, "canary") ||
+		strings.Contains(out, "6361") || strings.Contains(out, "[1 2") || strings.Contains(out, "\\x01") {
+		t.Errorf("fmt prints a secret's bytes: %s", out)
 	}
 }

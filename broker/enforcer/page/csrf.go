@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -35,15 +37,21 @@ import (
 // pairLife ago (#4427), so no pair outlives a day even while the enforcer
 // runs, and every screen's pair lasts at least pairLife-reuseFor.
 //
-// Secret values (a tag, a token) are compared only with hmac.Equal, in
-// constant time; TestSecretsCompareInConstantTime pins it.
+// A tag and a token are each a secret: a type whose only comparison is
+// equal, which runs hmac.Equal in constant time. Its slice field makes ==
+// on it a compile error, Format keeps fmt from printing its bytes, and its
+// bytes leave it only into a response: IssueToken, called by a screen's
+// template and from no Go code, and seal, which mint writes straight into
+// the cookie it sets. No Go code ever holds either as bytes or a string to
+// compare; TestSecretsLeaveOnlyByTheirExits pins those exits.
 const (
 	tokenCookie = "__Host-enforcer"
 	tokenHeader = "X-Enforcer-Token"
 	tokenLabel  = "agentOS enforcer page token\x00"
 	cookieLabel = "agentOS enforcer page cookie\x00"
 	nonceLen    = 16
-	cookieLen   = nonceLen + 8 + sha256.Size
+	bodyLen     = nonceLen + 8
+	cookieLen   = bodyLen + sha256.Size
 )
 
 // pairLife is how long after its cookie was drawn a pair still passes
@@ -57,6 +65,23 @@ const (
 
 var errToken = errors.New("this screen is out of date; reload it and try again")
 
+// secret is a MAC the page derives under its token key.
+type secret struct{ secretSum []byte }
+
+// equal reports, in constant time, whether b is x.
+func (x secret) equal(b []byte) bool { return hmac.Equal(x.secretSum, b) }
+
+// IssueToken is x as a screen carries it; only templates call it.
+func (x secret) IssueToken() string { return base64.RawURLEncoding.EncodeToString(x.secretSum) }
+
+// seal is the cookie value for body tagged with x.
+func (x secret) seal(body []byte) string {
+	return base64.RawURLEncoding.EncodeToString(append(body[:len(body):len(body)], x.secretSum...))
+}
+
+// Format prints no bytes of x, whatever the verb.
+func (secret) Format(f fmt.State, _ rune) { io.WriteString(f, "secret") }
+
 // newTokenKey draws the page's token key.
 func newTokenKey() ([]byte, error) {
 	k := make([]byte, 32)
@@ -68,9 +93,9 @@ func newTokenKey() ([]byte, error) {
 
 // token returns the token a screen drawn for r carries, keeping the
 // cookie r sent when keep allows it and otherwise setting a new one on w.
-func (s *Server) token(w http.ResponseWriter, r *http.Request) (string, error) {
+func (s *Server) token(w http.ResponseWriter, r *http.Request) (secret, error) {
 	if c, ok := s.keep(r); ok {
-		return base64.RawURLEncoding.EncodeToString(s.mac(c)), nil
+		return s.mac(c[:bodyLen]), nil
 	}
 	return s.mint(w)
 }
@@ -110,48 +135,48 @@ func (s *Server) cookie(r *http.Request) ([]byte, bool) {
 // cannot vouch for c (the wrong length, another key, a restart, tampered)
 // or c was drawn after now (the clock went back).
 func (s *Server) age(c []byte) (time.Duration, bool) {
-	if len(c) != cookieLen || !hmac.Equal(c[nonceLen+8:], s.tag(c[:nonceLen+8])) {
+	if len(c) != cookieLen || !s.tag(c[:bodyLen]).equal(c[bodyLen:]) {
 		return 0, false
 	}
-	a := s.cfg.Now().Sub(time.UnixMilli(int64(binary.BigEndian.Uint64(c[nonceLen : nonceLen+8]))))
+	a := s.cfg.Now().Sub(time.UnixMilli(int64(binary.BigEndian.Uint64(c[nonceLen:bodyLen]))))
 	return a, a >= 0
 }
 
 // mint sets a new cookie on w and returns the token a screen drawn with it
 // carries.
-func (s *Server) mint(w http.ResponseWriter) (string, error) {
-	c := make([]byte, nonceLen+8, cookieLen)
-	if _, err := rand.Read(c[:nonceLen]); err != nil {
-		return "", err
+func (s *Server) mint(w http.ResponseWriter) (secret, error) {
+	body := make([]byte, bodyLen)
+	if _, err := rand.Read(body[:nonceLen]); err != nil {
+		return secret{}, err
 	}
-	binary.BigEndian.PutUint64(c[nonceLen:], uint64(s.cfg.Now().UnixMilli()))
-	c = append(c, s.tag(c)...)
+	binary.BigEndian.PutUint64(body[nonceLen:], uint64(s.cfg.Now().UnixMilli()))
 	http.SetCookie(w, &http.Cookie{
 		Name:     tokenCookie,
-		Value:    base64.RawURLEncoding.EncodeToString(c),
+		Value:    s.tag(body).seal(body),
 		Path:     "/",
 		Secure:   true,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 	})
-	return base64.RawURLEncoding.EncodeToString(s.mac(c)), nil
+	return s.mac(body), nil
 }
 
 // tag vouches for a cookie's nonce and time as this page's.
-func (s *Server) tag(body []byte) []byte {
+func (s *Server) tag(body []byte) secret {
 	m := hmac.New(sha256.New, s.tokenKey)
 	m.Write([]byte(cookieLabel))
 	m.Write(body)
-	return m.Sum(nil)
+	return secret{m.Sum(nil)}
 }
 
-// mac is the token a screen drawn with cookie carries. Its label differs
-// from tag's, so neither value can stand in for the other.
-func (s *Server) mac(cookie []byte) []byte {
+// mac is the token a screen carries for the cookie with this body. It
+// MACs the same bytes as tag under the same key, so only its label, which
+// differs from tag's, keeps either from standing in for the other.
+func (s *Server) mac(body []byte) secret {
 	m := hmac.New(sha256.New, s.tokenKey)
 	m.Write([]byte(tokenLabel))
-	m.Write(cookie)
-	return m.Sum(nil)
+	m.Write(body)
+	return secret{m.Sum(nil)}
 }
 
 // guard is the one check every state-changing request passes before any
@@ -170,7 +195,7 @@ func (s *Server) guard(r *http.Request) error {
 		return errToken
 	}
 	t, err := base64.RawURLEncoding.DecodeString(r.Header.Get(tokenHeader))
-	if err != nil || !hmac.Equal(t, s.mac(c)) {
+	if err != nil || !s.mac(c[:bodyLen]).equal(t) {
 		return errToken
 	}
 	return nil
