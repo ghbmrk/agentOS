@@ -1583,6 +1583,7 @@ class ConfigTest(unittest.TestCase):
         # config (apt.conf.d, apt.conf, trusted.gpg.d, auth.conf.d, preferences.d) could set
         # Acquire::AllowInsecureRepositories and pass on review alone. Every entry of the tree is
         # pinned by path and kind, so any addition, symlink or rename here needs a deliberate edit.
+        why = "#4591 pins what mkosi's build-time apt reads; change this test deliberately"
         tree = MK / "mkosi.pkgmngr"
         got = []
 
@@ -1600,25 +1601,34 @@ class ConfigTest(unittest.TestCase):
             ("etc/apt/apt.conf.d/80-agentos-retries", "file"),
             ("etc/apt/sources.list.d", "dir"),
             ("etc/apt/sources.list.d/mkosi.sources", "file"),
-        ])
+        ], why)
         # Nothing else feeds mkosi v24.3 config or packages. Its defaults are mkosi.* names beside a
         # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
         # so both config folders' mkosi.* names are pinned.
         self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
             "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
-            "mkosi.repart"])
+            "mkosi.repart"], why)
         self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
-                         ["mkosi.conf", "mkosi.finalize"])
+                         ["mkosi.conf", "mkosi.finalize"], why)
         # The two configs are held to one strict form, so this test never models mkosi's parser:
         # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
         # (no "@", no space before "="), or an indented continuation while a setting is open (a
         # comment keeps it open, as initrd/mkosi.conf's RemoveFiles= relies on; a blank line or a
-        # section closes it). Any other line fails. Include= could read a config from anywhere,
-        # PackageManagerTrees= and PackageDirectories= append trees and repos, and
-        # RepositoryKeyCheck=/RepositoryKeyFetch= govern signature checks, so no setting may name
-        # them, with every continuation in its value, except InitrdInclude=initrd/ alone.
-        guarded = re.compile(r"include|packagemanagertree|packagedirector|repositorykey", re.I)
-        for conf in (MK / "mkosi.conf", MK / "initrd/mkosi.conf"):
+        # section closes it). Any other line fails. Each config may use only the keys listed here,
+        # so a key that reads a config, script, tree, mirror or repo (Include=, ConfigureScripts=,
+        # PrepareScripts=, PackageManagerTrees=, PackageDirectories=, LocalMirror=, ToolsTree=,
+        # RepositoryKeyCheck=, ...) needs a deliberate edit here; InitrdInclude= is pinned whole.
+        keys = {
+            MK / "mkosi.conf": {
+                "BiosBootloader", "Bootable", "Bootloader", "Distribution", "Environment", "Format",
+                "Hostname", "ImageId", "InitrdInclude", "KernelCommandLine",
+                "KernelModulesInitrdExclude", "Keymap", "Locale", "ManifestFormat", "Mirror",
+                "Packages", "Release", "RemoveFiles", "RepartDirectories", "Repositories",
+                "RootPassword", "Seed", "ShimBootloader", "SplitArtifacts", "Timezone",
+                "UnifiedKernelImages", "WithDocs"},
+            MK / "initrd/mkosi.conf": {"RemoveFiles"},
+        }
+        for conf, allowed in keys.items():
             settings, cur = [], None
             for n, line in enumerate(conf.read_text().splitlines(), 1):
                 where = "%s:%d: %r" % (conf.relative_to(ROOT), n, line)
@@ -1634,30 +1644,43 @@ class ConfigTest(unittest.TestCase):
                 elif line[0] in " \t" and cur is not None:
                     cur[1].append(line.strip())
                 else:
-                    self.fail("%s: not the strict mkosi config form this test reads (#4591)" % where)
+                    self.fail("%s: not the strict mkosi config form; %s" % (where, why))
             for where, (k, v) in settings:
-                if guarded.search(k):
-                    self.assertEqual(
-                        (conf.name, conf.parent == MK, k, v), ("mkosi.conf", True, "InitrdInclude", ["initrd/"]),
-                        "%s: #4591 allows no other config source, tree, repo or key-check setting" % where)
-        # The build runs mkosi one way: every build.sh line naming mkosi (any case, comments
-        # included) is pinned, none follows a "\" continuation, and image.yml sets MKOSI only to
-        # the pinned v24.3 binary.
+                self.assertIn(k, allowed, "%s: key not on the list; %s" % (where, why))
+                if k == "InitrdInclude":
+                    self.assertEqual(v, ["initrd/"], "%s: %s" % (where, why))
+        # The build runs mkosi one way. Every build.sh line naming mkosi (any case, comments
+        # included) is pinned, and so is every other line that binds a variable the mkosi run
+        # expands (any bare HERE, REPO, OUT, MKOSI, VERSION or STAGE outside a "$" expansion, so
+        # export, read, declare, for and printf -v count too). No pinned line follows a "\"
+        # continuation; before HERE= only "set -eu" and the GOWORK export run; build.sh defines
+        # no function and runs no eval, source, "." or alias; image.yml sets MKOSI only to the
+        # pinned v24.3 binary.
         lines = (IMG / "build.sh").read_text().splitlines()
-        named = [(i, l) for i, l in enumerate(lines) if "mkosi" in l.lower()]
+        named = [(i, l) for i, l in enumerate(lines) if "mkosi" in l.lower() or (
+            not l.lstrip().startswith("#")
+            and re.search(r"(?<![$\w{])(HERE|REPO|OUT|MKOSI|VERSION|STAGE)\b", l))]
         self.assertEqual([l for _, l in named], [
             "# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,",
             "# file-system IDs come from mkosi.conf's Seed, so two builds of one commit give the same /usr",
+            'HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/.." && pwd)',
             'OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}',
+            'VERSION=${2:-$(TZ=UTC git -c safe.directory="$REPO" -C "$REPO" log -1 --date=format-local:%Y%m%d.%H%M%S --format=%cd)}',
+            'STAGE=$OUT/stage; rm -rf "$STAGE"; mkdir -p "$STAGE/usr/lib/agentos/images"',
             "# mkosi.finalize's template renders for its name; drivers.json lists them, and mkosi.finalize",
             '$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build',
-        ], "#4591: a build.sh line naming mkosi changed; the build's mkosi flags are pinned")
+        ], why)
         for i, _ in named:
-            self.assertFalse(i and lines[i - 1].rstrip().endswith("\\"), lines[i - 1])
+            self.assertFalse(i and lines[i - 1].rstrip().endswith("\\"), "%r; %s" % (lines[i - 1], why))
+        here = next(i for i, l in enumerate(lines) if l.startswith("HERE="))
+        self.assertEqual([l for l in lines[:here] if l.strip() and not l.startswith("#")],
+                         ["set -eu", "export GOWORK=off"], why)
+        self.assertFalse([l for l in lines if not l.lstrip().startswith("#") and re.search(
+            r"\b(eval|source|alias|function)\b|^\s*\.\s|^\s*[A-Za-z_][\w-]*\s*\(\)", l)], why)
         wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
         self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
             'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
-            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'])
+            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'], why)
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
