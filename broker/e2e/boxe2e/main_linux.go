@@ -56,13 +56,15 @@ const (
 	sysroot   = "/run/agentos-e2e-sysroot"
 	claimDst  = "/var/lib/agentos-localui/claim.json"
 	cardLatch = "/var/lib/agentos-localui/card-latch.json"
-	// publishedAuthority is the first-boot page certificate
-	// agentos-keeper-pageca.service publishes until enrollment (OWN-card-flow-b-3).
-	publishedAuthority = "/run/agentos-page-ca/authority.der"
 	// pageDropIn names the page's interface (agentos-localui.service's
 	// AGENTOS_PAGE_IFACE).
 	pageDropIn = "/run/systemd/system/agentos-localui.service.d/e2e-page.conf"
 )
+
+// publishedAuthority is the first-boot page certificate
+// agentos-keeper-pageca.service publishes until enrollment
+// (OWN-card-flow-b-3); tests point it at their own.
+var publishedAuthority = "/run/agentos-page-ca/authority.der"
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "seal" {
@@ -375,11 +377,12 @@ func claimDiag(code string) string {
 
 // quotable are the units whose journal lines a diag may quote whole on
 // the console, a public CI log (ASSUMPTIONS E8): the setup page and its
-// claim move, quoted only by claimDiag, before setup makes any secret
-// E8 names, and the modem bridge, whose own lines are fixed texts and
-// which never holds one. agentosd and the vault process hold them, so
-// only lines of a fixed shape are taken from agentosd's journal (E11,
-// E12, E16) and none from the vault process's.
+// claim move, quoted whole only by claimDiag, before setup makes any
+// secret E8 names, and the modem bridge, whose own lines are fixed texts
+// and which never holds one. host reads localui's journal later, but
+// takes only its hook error (hostCause). agentosd and the vault process
+// hold the secrets, so only lines of a fixed shape are taken from
+// agentosd's journal (E11, E12, E16) and none from the vault process's.
 var quotable = map[string]bool{
 	"agentos-localui-claim.service": true,
 	"agentos-localui.service":       true,
@@ -389,11 +392,25 @@ var quotable = map[string]bool{
 // journalTail is the last n journal lines this boot of units, each of
 // which must be quotable; a unit that is not reads nothing.
 func journalTail(n int, units ...string) string {
-	args := []string{"-b", "-o", "cat", "--no-pager", "-n", strconv.Itoa(n)}
 	for _, u := range units {
 		if !quotable[u] {
 			return "(" + u + " is not quoted)"
 		}
+	}
+	return readJournal(n, units...)
+}
+
+// readJournal is this boot's journal of units, its last n lines when n is
+// above 0. It alone runs journalctl, and only the readers ASSUMPTIONS E8
+// names call it: journalTail, which quotes whole lines, and host,
+// agentDiag and journal, whose callers each keep only lines of one shape
+// (TestJournalIsReadOnlyByNamedReaders).
+func readJournal(n int, units ...string) string {
+	args := []string{"-b", "-o", "cat", "--no-pager"}
+	if n > 0 {
+		args = append(args, "-n", strconv.Itoa(n))
+	}
+	for _, u := range units {
 		args = append(args, "-u", u)
 	}
 	return output("journalctl", args...)
@@ -615,9 +632,9 @@ func (d *driver) host() error {
 	}
 	_, err = d.waitStep("6", time.Minute)
 	if err != nil {
-		logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager",
-			"-u", "agentos-localui.service").Output()
-		if cause := hostCause(string(logs)); cause != "" {
+		// Only localui's hook error is taken, which it logs as holding no
+		// secret (ASSUMPTIONS E8).
+		if cause := hostCause(readJournal(0, "agentos-localui.service")); cause != "" {
 			err = fmt.Errorf("%w: %s", err, cause)
 		}
 	}
@@ -645,13 +662,13 @@ func (d *driver) signInDiag(out string) string {
 	return d.workerDiag("sign-in output", out)
 }
 
-// journal is agentosd's journal this boot.
+// journal is agentosd's journal this boot. Its callers keep only lines of
+// a fixed shape (ASSUMPTIONS E8): workerDiag's and phoneControl's.
 func (d *driver) journal() string {
 	if d.agentosdLog != nil {
 		return d.agentosdLog()
 	}
-	out, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-u", "agentosd.service").Output()
-	return string(out)
+	return readJournal(0, "agentosd.service")
 }
 
 // workerDiag is signInDiag with out, a provider worker's output, quoted
