@@ -409,12 +409,17 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 		if !ok {
 			t.Fatalf("no expectation for build %s", b.name)
 		}
+		delete(want, b.name)
 		b.overlay = ov
 		found := writePaths(t, l, b, "./"+dir)
 		if len(found) != 1 || !strings.HasPrefix(found[0], dir+" calls core write path grants.Gate.Decide ") ||
-			!strings.Contains(found[0], "/"+file+":") {
+			file != "" && !strings.Contains(found[0], "/"+file+":") {
 			t.Errorf("%s: want exactly the grants.Gate.Decide call in %s, got %q", b.name, file, found)
 		}
+	}
+	// Each expected build exists, so dropping one from builds fails here.
+	for name := range want {
+		t.Errorf("builds has no %s build; its files go unread", name)
 	}
 }
 
