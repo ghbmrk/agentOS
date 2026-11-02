@@ -31,6 +31,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -96,7 +97,7 @@ func run(args []string) error {
 		Elapsed: bootTime,
 		Fire:    load.Loader{Bin: cfg.Nft},
 		Network: unwiredNetwork{},
-		Light:   logLight{logger},
+		Light:   newLogLight(logger),
 		Radio:   noRadio{},
 		Logf:    func(s string) { logger.Print(s) },
 		Listen:  true,
@@ -151,11 +152,30 @@ type noRadio struct{}
 func (noRadio) Do(string, wire.Verb, uint8) error { return errors.New("no radio host (ENF-l-b)") }
 func (noRadio) State(string) ([]byte, error)      { return nil, errors.New("no radio host (ENF-l-b)") }
 
-// logLight is the bulb until its driver lands (#4305): the colour goes to
-// the enforcer's log.
-type logLight struct{ l *log.Logger }
+// logLight is the bulb until its driver lands (#4305): a change of
+// colour goes to the enforcer's log. The alerts re-show the light on every
+// change and each minute (Refresh); only a change is a line, so the log
+// keeps the channel's record readable.
+type logLight struct {
+	l  *log.Logger
+	st *lightState
+}
+
+type lightState struct {
+	mu    sync.Mutex
+	shown bool
+	last  alert.Colour
+}
+
+func newLogLight(l *log.Logger) logLight { return logLight{l: l, st: &lightState{}} }
 
 func (l logLight) Show(c alert.Colour) error {
+	l.st.mu.Lock()
+	defer l.st.mu.Unlock()
+	if l.st.shown && l.st.last == c {
+		return nil
+	}
+	l.st.shown, l.st.last = true, c
 	l.l.Printf("light: %d", c)
 	return nil
 }

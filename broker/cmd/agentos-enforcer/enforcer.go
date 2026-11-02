@@ -100,6 +100,10 @@ type Enforcer struct {
 	conns    atomic.Int32
 	changed  chan struct{}
 	lastLit  time.Time
+	// The page's core and recovery state as last told to the alerts:
+	// Tick tells them only a change, since each call re-shows the light
+	// and coming up re-offers every unsent alert (ENF-h-a5).
+	toldUp, toldRecovery bool
 }
 
 var errNoCore = errors.New("no core pinned: the channel is off")
@@ -149,7 +153,8 @@ func open(cfg Config, dir string, dp deps) (*Enforcer, error) {
 			return nil, err
 		}
 	}
-	d.alerts.Recovery(d.recoveryPending())
+	d.toldRecovery = d.recoveryPending()
+	d.alerts.Recovery(d.toldRecovery) // the alerts start with the core down (toldUp false)
 	if err := d.syncFirewall(context.Background()); err != nil {
 		dp.Logf("firewall: " + err.Error())
 	}
@@ -258,7 +263,7 @@ func (d *Enforcer) syncFirewall(ctx context.Context) error {
 	return nil
 }
 
-// Tick is the daemon's clock: replacement passkeys and loosenings whose
+// Tick is the daemon's clock, run from one goroutine: replacement passkeys and loosenings whose
 // wait is over, the firewall, the core's silence, the light and the
 // page's certificate, and the page rebuilt for the passkey in force.
 func (d *Enforcer) Tick(ctx context.Context) {
@@ -267,7 +272,10 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if _, err := d.book.Tick(); err != nil {
 		d.dp.Logf("enrolment: " + err.Error())
 	}
-	d.alerts.Recovery(d.recoveryPending())
+	if r := d.recoveryPending(); r != d.toldRecovery {
+		d.toldRecovery = r
+		d.alerts.Recovery(r)
+	}
 	d.mu.Lock()
 	_, err := d.engine.Tick(now.UnixMilli())
 	d.mu.Unlock()
@@ -277,7 +285,10 @@ func (d *Enforcer) Tick(ctx context.Context) {
 	if err := d.syncFirewall(ctx); err != nil {
 		d.dp.Logf("firewall: " + err.Error())
 	}
-	d.alerts.Core(d.coreUp())
+	if up := d.coreUp(); up != d.toldUp {
+		d.toldUp = up
+		d.alerts.Core(up)
+	}
 	if now.Sub(d.lastLit) >= time.Minute {
 		d.lastLit = now
 		if err := d.alerts.Refresh(); err != nil {

@@ -3,15 +3,20 @@ package main
 // REQ: NET-2, KRN-12
 
 import (
+	"bytes"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/alert"
 )
 
 func boot(t *testing.T) time.Duration {
@@ -117,5 +122,57 @@ func TestConfigRefused(t *testing.T) {
 	}
 	if _, err := parseConfig([]byte(`{"name":"x","zone":"UTC","extra":1}`)); err == nil {
 		t.Error("an unknown key was taken")
+	}
+}
+
+// countLight counts every time the alerts show the light.
+type countLight struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (l *countLight) Show(alert.Colour) error { l.mu.Lock(); l.n++; l.mu.Unlock(); return nil }
+
+// TestIdleTickQuiet: an idle daemon re-shows the light only on a change
+// and at the minute's Refresh, never on every tick, and logLight logs
+// only a change of colour (L3 fix-list item 1 on #4754: 121 light lines
+// a minute buried the channel's record, P6). Catches a Tick that tells
+// the alerts the core's or the recovery's state when it has not changed.
+func TestIdleTickQuiet(t *testing.T) {
+	x := newBox(t, true)
+	x.d.Close()
+	cl := &countLight{}
+	var buf bytes.Buffer
+	ll := newLogLight(log.New(&buf, "", 0))
+	for _, light := range []alert.Light{cl, ll} {
+		d, err := open(x.cfg, x.dir, deps{
+			Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
+			Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
+			Fire:    x.fire, Network: x.net, Light: light, Radio: noRadio{},
+			Logf: func(string) {},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x.d = d
+		cl.mu.Lock()
+		cl.n = 0 // the shows at open are not idle ones
+		cl.mu.Unlock()
+		buf.Reset()
+		for range 60 {
+			x.advance(time.Second)
+		}
+		d.Close()
+		if light == alert.Light(cl) && cl.n > 1 {
+			t.Fatalf("an idle minute showed the light %d times; only the minute's Refresh should", cl.n)
+		}
+	}
+	if n := strings.Count(buf.String(), "light:"); n != 0 {
+		t.Fatalf("an idle minute logged the light %d times with no change of colour", n)
+	}
+	ll.Show(alert.Red)
+	ll.Show(alert.Red)
+	if n := strings.Count(buf.String(), "light:"); n != 1 {
+		t.Fatalf("a change of colour logged %d lines, want 1", n)
 	}
 }
