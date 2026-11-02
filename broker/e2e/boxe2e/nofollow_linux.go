@@ -38,7 +38,7 @@ const journalMagic = "LPKSHHRH"
 var (
 	errJournal = errors.New("refused: a journal file is read only through readJournal")
 	errWrite   = errors.New("refused: the driver writes only under writeDirs and to writeFiles")
-	errKind    = errors.New("refused: the driver opens only regular files off the kernel's own filesystems, directories and /dev/ptmx")
+	errKind    = errors.New("refused: the driver opens only directories, /dev/ptmx and regular files on disk, tmpfs or nsfs")
 )
 
 // writeDirs are the directories the driver writes in and writeFiles the
@@ -54,9 +54,26 @@ func mayWrite(real string) bool {
 	return slices.Contains(writeFiles, real) || slices.ContainsFunc(writeDirs, func(d string) bool { return strings.HasPrefix(real, d+"/") })
 }
 
-// fdPath is the resolved path of the file fd is open on.
+// fdPath is the resolved path of the file fd is open on, as this
+// process's mount namespace names it. /proc/self/fd gives the path in the
+// file's own namespace, so a file reached through another one
+// (/proc/<pid>/root, a descriptor from a process there) could carry the
+// text of a writeDirs path while being elsewhere (#4713). So the text is
+// looked up here and must reach the same inode on the same mount, or the
+// write is refused.
 func fdPath(fd int) (string, error) {
-	return os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
+	const mask = unix.STATX_INO | unix.STATX_MNT_ID
+	var have, named unix.Statx_t
+	real, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd))
+	// A mount ID names one mount in one namespace, and the inode the file
+	// on it, so a name that reaches another file is refused too; so is
+	// one that reaches nothing here, or a kernel that gives no mount ID.
+	if err != nil || unix.Statx(fd, "", unix.AT_EMPTY_PATH, mask, &have) != nil ||
+		unix.Statx(unix.AT_FDCWD, real, unix.AT_SYMLINK_NOFOLLOW, mask, &named) != nil ||
+		have.Mask&mask != mask || named.Mask&mask != mask || have.Mnt_id != named.Mnt_id || have.Ino != named.Ino {
+		return "", errWrite
+	}
+	return real, nil
 }
 
 // inDir opens path's directory without following anything at path's own
@@ -90,19 +107,20 @@ func inDir(path string) (dir int, base string, err error) {
 // block device's raw sectors, /dev/mem or /dev/null is reached.
 var ptmx = unix.Mkdev(5, 2)
 
-// kernelFS are the kernel's own filesystems, whose regular files are
-// kernel state, not files the driver reads or writes: procfs
-// (/proc/<pid>/mem, environ, kcore), sysfs, debugfs, tracefs, securityfs,
-// configfs, efivarfs, cgroupfs, bpffs and pstore.
-var kernelFS = map[int64]bool{
-	unix.PROC_SUPER_MAGIC: true, unix.SYSFS_MAGIC: true, unix.DEBUGFS_MAGIC: true,
-	unix.TRACEFS_MAGIC: true, unix.SECURITYFS_MAGIC: true, 0x62656570: true, // configfs
-	unix.EFIVARFS_MAGIC: true, unix.CGROUP_SUPER_MAGIC: true, unix.CGROUP2_SUPER_MAGIC: true,
-	unix.BPF_FS_MAGIC: true, unix.PSTOREFS_MAGIC: true,
+// fileFS are the filesystems whose regular files the driver opens: the
+// image's disks (ext4, btrfs, xfs, erofs, squashfs, overlay), tmpfs for
+// /run, and nsfs for /run/netns. Every other filesystem is refused, so a
+// kernel filesystem (procfs, sysfs, debugfs, tracefs, securityfs,
+// selinuxfs, cgroupfs, bpffs, mqueue, hugetlbfs, resctrl and any added
+// later) is never read as a file (#4714).
+var fileFS = map[int64]bool{
+	unix.EXT4_SUPER_MAGIC: true, unix.BTRFS_SUPER_MAGIC: true, unix.XFS_SUPER_MAGIC: true,
+	unix.EROFS_SUPER_MAGIC_V1: true, unix.SQUASHFS_MAGIC: true, unix.OVERLAYFS_SUPER_MAGIC: true,
+	unix.TMPFS_MAGIC: true, unix.NSFS_MAGIC: true,
 }
 
 // checkFD refuses what an open reached unless it is /dev/ptmx, a
-// directory, or a regular file that is not on one of kernelFS, is not a
+// directory, or a regular file on one of fileFS that is not a
 // journal, and if open for writing is where the driver writes and has no
 // other name (a hard link's other name may be anywhere on its
 // filesystem). A link reached is refused as ELOOP: only an O_NOFOLLOW
@@ -130,7 +148,7 @@ func checkFD(fd int, write bool) error {
 	if err := unix.Fstatfs(fd, &fs); err != nil {
 		return err
 	}
-	if kernelFS[int64(fs.Type)] {
+	if !fileFS[int64(fs.Type)] {
 		return errKind
 	}
 	if write {

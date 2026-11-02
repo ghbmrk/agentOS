@@ -2,8 +2,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -314,7 +316,7 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 	}
 
 	// A network namespace (nsfs, as nsDialer opens /run/netns/<ns>) is
-	// not one of kernelFS, and reopens through its O_PATH descriptor.
+	// one of fileFS, and reopens through its O_PATH descriptor.
 	if fd, err := openRaw("/proc/self/ns/net", unix.O_RDONLY, 0); err != nil {
 		t.Errorf("openRaw(a netns) = %v", err)
 	} else {
@@ -325,19 +327,24 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 		"procfs": unix.PROC_SUPER_MAGIC, "sysfs": unix.SYSFS_MAGIC, "debugfs": unix.DEBUGFS_MAGIC,
 		"tracefs": unix.TRACEFS_MAGIC, "securityfs": unix.SECURITYFS_MAGIC, "configfs": 0x62656570,
 		"efivarfs": unix.EFIVARFS_MAGIC, "cgroupfs": unix.CGROUP_SUPER_MAGIC, "cgroup2": unix.CGROUP2_SUPER_MAGIC,
-		"bpffs": unix.BPF_FS_MAGIC, "pstore": unix.PSTOREFS_MAGIC,
+		"bpffs": unix.BPF_FS_MAGIC, "pstore": unix.PSTOREFS_MAGIC, "selinuxfs": unix.SELINUX_MAGIC,
+		"binfmt_misc": unix.BINFMTFS_MAGIC, "rpc_pipefs": 0x67596969, "fusectl": 0x65735543,
+		"mqueue": 0x19800202, "hugetlbfs": unix.HUGETLBFS_MAGIC, "resctrl": unix.RDTGROUP_SUPER_MAGIC,
+		"devpts": unix.DEVPTS_SUPER_MAGIC, "fuse": 0x65735546,
 	} {
-		if !kernelFS[magic] {
-			t.Errorf("kernelFS does not hold %s", name)
+		if fileFS[magic] {
+			t.Errorf("fileFS holds %s, a kernel filesystem", name)
 		}
 	}
-	// Where this host mounts one, a file on it is refused when opened.
+	// Where this host mounts one, a regular file on it is refused when
+	// opened.
 	for _, p := range []string{
 		"/sys/kernel/security/lsm", "/sys/kernel/tracing/trace", "/sys/kernel/debug/tracing/trace",
-		"/sys/fs/cgroup/cgroup.controllers", "/sys/fs/cgroup/cpu/tasks",
+		"/sys/fs/cgroup/cgroup.controllers", "/sys/fs/cgroup/cpu/tasks", "/proc/sys/fs/binfmt_misc/status",
+		"/sys/fs/selinux/enforce", "/sys/fs/resctrl/schemata",
 	} {
 		var fs unix.Statfs_t
-		if unix.Statfs(p, &fs) != nil || !kernelFS[int64(fs.Type)] {
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() || unix.Statfs(p, &fs) != nil {
 			continue
 		}
 		if fd, err := openRaw(p, unix.O_RDONLY, 0); !errors.Is(err, errKind) {
@@ -455,5 +462,77 @@ func TestFileGateStepsLeaveNothingOpen(t *testing.T) {
 	}
 	if after := openFDs(t); after != before {
 		t.Errorf("the gate left descriptors open: %d before, %d after", before, after)
+	}
+}
+
+// REQ: HW-10, ONB-3. A write is decided on the path this process's mount
+// namespace gives the file, not on the text /proc gives it, which is the
+// path in the file's own namespace (#4713): a thread in its own mount
+// namespace bind-mounts a directory outside writeDirs onto one inside,
+// and a write through /proc/<pid>/task/<tid>/root to that writeDir is
+// refused and lands nowhere.
+func TestFileGateWritesOnlyWhereThisNamespaceSays(t *testing.T) {
+	wd, outside := t.TempDir(), t.TempDir()
+	writeHere(t, wd)
+	real, err := filepath.EvalSymlinks(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type ns struct {
+		tid int
+		err error
+	}
+	ready, done := make(chan ns), make(chan struct{})
+	go func() {
+		// The thread stays locked and exits with the goroutine, so its
+		// namespace goes with it and no other goroutine runs there.
+		runtime.LockOSThread()
+		err := unix.Unshare(unix.CLONE_NEWNS)
+		if err == nil {
+			err = unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, "")
+		}
+		if err == nil {
+			err = unix.Mount(outside, real, "", unix.MS_BIND, "")
+		}
+		ready <- ns{unix.Gettid(), err}
+		<-done
+	}()
+	n := <-ready
+	defer close(done)
+	if errors.Is(n.err, unix.EPERM) {
+		t.Skipf("making a mount namespace needs CAP_SYS_ADMIN, which this run lacks: %v", n.err)
+	}
+	if n.err != nil {
+		t.Fatalf("making the mount namespace: %v", n.err)
+	}
+
+	via := fmt.Sprintf("/proc/%d/task/%d/root%s", os.Getpid(), n.tid, real)
+	if err := writeNoFollow(filepath.Join(via, "evil"), []byte("PLANTED"), 0o600); !errors.Is(err, errWrite) {
+		t.Errorf("a write through another mount namespace = %v, want the write refused", err)
+	}
+	if err := symlink("x", filepath.Join(via, "evil-link")); !errors.Is(err, errWrite) {
+		t.Errorf("a link through another mount namespace = %v, want it refused", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "there"), []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := openRaw(filepath.Join(via, "there"), unix.O_WRONLY, 0); !errors.Is(err, errWrite) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		t.Errorf("an existing file opened for writing through another mount namespace = %v, want the write refused", err)
+	}
+	for _, name := range []string{"evil", "evil-link"} {
+		if _, err := os.Lstat(filepath.Join(outside, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a refused write made %s outside writeDirs: %v", name, err)
+		}
+	}
+	if got, _ := os.ReadFile(filepath.Join(outside, "there")); string(got) != "ORIGINAL" {
+		t.Errorf("a refused write changed the file outside: %q", got)
+	}
+	// The same writeDir, named in this namespace, is still written.
+	if err := writeNoFollow(filepath.Join(wd, "ok"), []byte("ok"), 0o600); err != nil {
+		t.Errorf("a write in this namespace: %v", err)
 	}
 }
