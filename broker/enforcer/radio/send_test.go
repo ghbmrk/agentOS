@@ -58,7 +58,7 @@ func TestTimedOutUnlockNeverFollowsRelockOnHost(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec := newRecorder(t, StackBLE)
-		if err := h.Attach(StackBLE, rec.host.(Conn)); err != nil {
+		if err := h.Attach(StackBLE, exited{}, rec.host.(Conn)); err != nil {
 			t.Fatal(err)
 		}
 		var tap atomic.Int64
@@ -106,7 +106,7 @@ func TestSendRefusesAnEndedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := newRecorder(t, StackBLE)
-	h.Attach(StackBLE, rec.host.(Conn))
+	h.Attach(StackBLE, exited{}, rec.host.(Conn))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := h.Send(ctx, Request{Op: OpWrite, Device: "door", Char: "cmd", Data: []byte("unlock")}); !errors.Is(err, context.Canceled) {
@@ -193,7 +193,7 @@ func TestUnansweredBoundEndsLink(t *testing.T) {
 			}
 		}
 	}()
-	h.Attach(StackBLE, host)
+	h.Attach(StackBLE, exited{}, host)
 	alive := func() bool {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -259,7 +259,7 @@ func TestSendChecksContextUnderWriteLock(t *testing.T) {
 		}
 		rec := newRecorder(t, StackBLE)
 		conn := &stalled{Conn: rec.host.(Conn), entered: make(chan struct{}), release: make(chan struct{})}
-		if err := h.Attach(StackBLE, conn); err != nil {
+		if err := h.Attach(StackBLE, exited{}, conn); err != nil {
 			t.Fatal(err)
 		}
 		slow := make(chan error, 1)

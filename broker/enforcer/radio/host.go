@@ -53,9 +53,18 @@ type Host struct {
 	cfg     Config
 	devices map[string]Device
 
+	amu   map[Stack]*sync.Mutex // orders each stack's Attaches
 	mu    sync.Mutex
-	links map[Stack]*link
+	links map[Stack]*link // each stack's last link, until replaced
 	next  uint64
+}
+
+// Proc is a stack's process as its launcher holds it (*confine.Proc).
+// Stop kills it and returns once it, and every process it started, has
+// exited and been reaped; it may be called more than once, and alongside
+// the launcher's own wait.
+type Proc interface {
+	Stop() error
 }
 
 // Conn is a stack's link: a socket the host can put a write deadline on,
@@ -72,7 +81,9 @@ const maxExpired = 64
 
 type link struct {
 	stack   Stack
+	proc    Proc
 	conn    Conn
+	gone    chan struct{} // closed once proc has been reaped
 	wmu     sync.Mutex
 	pending map[uint64]pending // under Host.mu
 	expired map[uint64]string  // timed-out requests' devices, under Host.mu
@@ -93,7 +104,10 @@ func NewHost(cfg Config) (*Host, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	h := &Host{cfg: cfg, devices: map[string]Device{}, links: map[Stack]*link{}}
+	h := &Host{cfg: cfg, devices: map[string]Device{}, links: map[Stack]*link{}, amu: map[Stack]*sync.Mutex{}}
+	for s := range Declared {
+		h.amu[s] = &sync.Mutex{}
+	}
 	for _, d := range cfg.Devices {
 		if _, dup := h.devices[d.Name]; dup || !name(d.Name) || Declared[d.Stack] == nil {
 			return nil, fmt.Errorf("radio: device %q refused", d.Name)
@@ -108,20 +122,33 @@ func NewHost(cfg Config) (*Host, error) {
 	return h, nil
 }
 
-// Attach makes conn stack s's command interface, replacing any earlier
-// link (a restarted process), and reads its answers until it ends.
-func (h *Host) Attach(s Stack, conn Conn) error {
+// Attach makes conn, the command interface of p, stack s's link, and
+// reads its answers until it ends. It replaces s's earlier link (a
+// restarted process): it ends that link, and returns only once that
+// link's process has been reaped, so nothing written to the old process,
+// such as a timed-out unlock still unread in its socket, can reach a
+// device after a relock on the new link. Until then s has no link.
+func (h *Host) Attach(s Stack, p Proc, conn Conn) error {
 	if Declared[s] == nil {
 		return fmt.Errorf("radio: stack %q not declared", s)
 	}
-	l := &link{stack: s, conn: conn, pending: map[uint64]pending{}, expired: map[uint64]string{}}
+	if p == nil || conn == nil {
+		return errors.New("radio: attach needs the stack's process and link")
+	}
+	h.amu[s].Lock()
+	defer h.amu[s].Unlock()
 	h.mu.Lock()
 	old := h.links[s]
-	h.links[s] = l
 	h.mu.Unlock()
 	if old != nil {
 		h.fail(old, "replaced")
+		<-old.gone
 	}
+	l := &link{stack: s, proc: p, conn: conn, gone: make(chan struct{}),
+		pending: map[uint64]pending{}, expired: map[uint64]string{}}
+	h.mu.Lock()
+	h.links[s] = l
+	h.mu.Unlock()
 	go h.readLoop(l)
 	return nil
 }
@@ -290,7 +317,9 @@ func (h *Host) readLoop(l *link) {
 	}
 }
 
-// fail ends a link once: it closes the connection and fails every waiter.
+// fail ends a link once: it closes the connection, fails every waiter,
+// and kills the link's process, without waiting for it (a caller may hold
+// the channel's lock); Attach waits for it.
 func (h *Host) fail(l *link, why string) {
 	h.mu.Lock()
 	if l.dead {
@@ -300,13 +329,14 @@ func (h *Host) fail(l *link, why string) {
 	l.dead = true
 	waiters := l.pending
 	l.pending = map[uint64]pending{}
-	if h.links[l.stack] == l {
-		delete(h.links, l.stack)
-	}
 	h.mu.Unlock()
 	h.cfg.Log(fmt.Sprintf("radio: %s link ended: %s", l.stack, why))
 	l.conn.Close()
 	for _, p := range waiters {
 		close(p.answer)
 	}
+	go func() {
+		l.proc.Stop()
+		close(l.gone)
+	}()
 }

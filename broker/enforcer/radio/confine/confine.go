@@ -131,10 +131,13 @@ type Spec struct {
 
 // Proc is a running stack.
 type Proc struct {
-	cmd  *exec.Cmd
-	net  *os.File      // its network namespace, unless it joined another's
-	keep chan struct{} // holds the thread that started the stack
-	once sync.Once
+	cmd     *exec.Cmd
+	net     *os.File      // its network namespace, unless it joined another's
+	keep    chan struct{} // holds the thread that started the stack
+	once    sync.Once
+	reap    sync.Once
+	err     error // the stack's exit, once reaped
+	netOnce sync.Once
 }
 
 // Arg0 marks the re-exec of the enforcer's own binary that confines itself
@@ -268,7 +271,11 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 	p := s.Profile
 	attr := &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID, Groups: []uint32{}},
-		Cloneflags: syscall.CLONE_NEWIPC,
+		// A fresh PID namespace, with the stack as its init: when the
+		// stack exits, the kernel kills every process it started and the
+		// stack is reaped only after they are gone, so none of them keeps
+		// its end of the interface (radio.Host.Attach, ENF-k-11).
+		Cloneflags: syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID,
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
 	}
@@ -300,11 +307,14 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 // Pid is the stack's process id.
 func (p *Proc) Pid() int { return p.cmd.Process.Pid }
 
-// Wait waits for the stack to exit.
+// Wait waits for the stack to exit and reaps it. Every call, from any
+// goroutine, returns only once it has been reaped, with its exit.
 func (p *Proc) Wait() error {
-	err := p.cmd.Wait()
-	p.release()
-	return err
+	p.reap.Do(func() {
+		p.err = p.cmd.Wait()
+		p.release()
+	})
+	return p.err
 }
 
 // release lets the thread that started the stack exit, once the stack has
@@ -313,15 +323,16 @@ func (p *Proc) release() {
 	p.once.Do(func() { close(p.keep) })
 }
 
-// Stop kills the stack and reaps it.
+// Stop kills the stack and returns once it has been reaped (Wait), so
+// every process it started is gone. It may be called more than once.
 func (p *Proc) Stop() error {
 	p.cmd.Process.Kill()
-	if p.net != nil {
-		p.net.Close()
-	}
-	err := p.cmd.Wait()
-	p.release()
-	return err
+	p.netOnce.Do(func() {
+		if p.net != nil {
+			p.net.Close()
+		}
+	})
+	return p.Wait()
 }
 
 // InNet runs fn on an OS thread inside the stack's network namespace; the
