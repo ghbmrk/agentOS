@@ -653,6 +653,30 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 }
 
+// TestChallengeBusy: at most MaxOutstanding challenges wait for an
+// answer; the next is refused ErrBusy before it is sent. Revert mutant:
+// the cap's boundary.
+func TestChallengeBusy(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	for id := range uint64(MaxOutstanding) {
+		go r.ch.Challenge(id+1, []byte{1})
+		if _, ok := cl.recv().(wire.Challenge); !ok {
+			t.Fatalf("challenge %d not sent", id+1)
+		}
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(MaxOutstanding+1, []byte{1}) }()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrBusy) {
+			t.Fatalf("challenge past the cap: %v, want ErrBusy", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a challenge past the cap was sent")
+	}
+}
+
 // TestAnswerMayUseChannel (#3759 point 1): the answer callback runs after
 // the channel lets go of its lock, so the radio host can send its next
 // challenge from inside Answer without a deadlock. Revert mutant: calling
