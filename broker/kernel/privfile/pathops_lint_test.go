@@ -13,12 +13,16 @@ package privfile
 // (#4390, #4494), and every broker binary such a command names, by path,
 // by a bare name a wrapper or shell finds on PATH or glued to a short option
 // (env -S), with a shell's quotes removed (#4493), while no root command
-// names a relative path, a path in a tree any uid writes (worldTrees) or one
-// through a link the lint does not follow (magicTrees, #4559); every broker binary
+// names a relative path with a slash, a path with a .. step, a path in a
+// tree any uid writes (worldTrees) or one through a link the lint does not
+// follow (magicTrees), or changes its working directory or root (cd, pushd,
+// popd, chroot, env -C, systemd-run -d, nsenter -w), and no link under
+// image/ lands in worldTrees or magicTrees (#4559); every broker binary
 // named as a mount, umount, fsck or mkfs helper, a .mount unit, mount
 // drop-in or fstab line naming only a plain type and no helper option
 // (#4380), and over a tree root reads or runs no bind, move or loop, a
-// source only a device under /dev outside worldTrees and magicTrees, and a
+// source only a device under /dev outside worldTrees and magicTrees, with
+// no .. step or % specifier, and a
 // tmpfs only with a mode no other uid writes
 // (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
@@ -478,12 +482,27 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a relative wrapper argument":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids tmp/helper\n", `relative path tmp/helper`},
 		"a relative path up a level":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env ../tmp/helper\n", `relative path ../tmp/helper`},
 		"a relative config file":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f var/tmp/x.nft\n", `relative path var/tmp/x.nft`},
-		"a relative path after a cd":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd tmp; exec ./x'\n", `relative path ./x`},
+		"a relative path after a cd":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd tmp; exec ./x'\n", `cd changes the working directory`},
 		"a relative glued path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -Stmp/x\n", `relative path tmp/x`},
 		"a relative broker binary":             {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env opt/w/agentos-side\n", `relative path opt/w/agentos-side`},
-		"a world tree itself":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd /tmp && exec x'\n", `names /tmp, in /tmp`},
+		"a world tree itself":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/install -d /tmp\n", `names /tmp, in /tmp`},
 		"an unclean world path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids //tmp/x\n", `names /tmp/x, in /tmp`},
-		"a world path behind ..":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/../var/tmp/x\n", `names /var/tmp/x, in /var/tmp`},
+		"a world path behind ..":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/../var/tmp/x\n", `whose .. the kernel takes`},
+		// #4559 round 3: a .. after a link, a change of directory or root.
+		"a .. after the /var/lock link": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /var/lock/../shm/agentos-side\n", `whose .. the kernel takes`},
+		"a glued .. after /run/shm":     {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -S/run/shm/../mqueue/x\n", `whose .. the kernel takes`},
+		"a .. after /dev/fd":            {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/fd/../root/tmp/x\n", `whose .. the kernel takes`},
+		"a cd to a slashless name":      {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd var; cd tmp; sh x'\n", `cd changes the working directory`},
+		"a pushd":                       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/bash -c 'pushd /var; pushd tmp; source x'\n", `pushd changes`},
+		"env -C":                        {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -C tmp /bin/sh x\n", `-C may change the working directory`},
+		"a glued env -C":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -iCtmp /bin/sh x\n", `-iCtmp may change`},
+		"env --chdir=":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env --chdir=tmp /bin/sh x\n", `--chdir changes`},
+		"a chroot":                      {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/chroot tmp /helper\n", `chroot changes`},
+		"systemd-run -d":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/systemd-run -d sh x\n", `-d may change`},
+		"systemd-run --same-dir":        {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/systemd-run --same-dir sh x\n", `--same-dir changes`},
+		"nsenter -w":                    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/nsenter -t 1 -w sh x\n", `-w may change`},
+		"a path through /dev/stdout":    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/stdout\n", `under /dev/stdout`},
+		"a path through /dev/stderr":    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/stderr\n", `under /dev/stderr`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -536,6 +555,42 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			if _, err := rootBinaries(fakeRepo(t, files)); (err == nil) != ok || err != nil && !strings.Contains(err.Error(), "holds a $ substitution") {
 				t.Errorf("drop-in %q: got %v, want accepted %v", dropin, err, ok)
 			}
+		}
+	})
+	// #4559 Security delta 2 2: a link the image ships into a world tree.
+	t.Run("refuses an image link into a tree any uid writes", func(t *testing.T) {
+		const extra = "image/mkosi/mkosi.extra/"
+		for link, to := range map[string]string{
+			extra + "usr/lib/agentos/helper":           "/tmp/helper",
+			extra + "etc/agentos/d":                    "/var/tmp",
+			extra + "usr/lib/agentos/rel":              "../../../dev/shm/x",
+			"image/x/overlay/usr/lib/agentos/fd":       "/proc/self/fd/3",
+			extra + "usr/lib/agentos/up":               "/var/lock/../shm",
+			extra + "usr/lib/agentos/agentos-sidekick": "/run/shm/x",
+		} {
+			root := fakeRepo(t, files)
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, link)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(to, filepath.Join(root, link)); err != nil {
+				t.Fatal(err)
+			}
+			if bins, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "a link to "+to) {
+				t.Errorf("%s -> %s: got %q, %v, want a refusal", link, to, bins, err)
+			}
+		}
+		files := clone(files)
+		files["image/x/overlay/etc/systemd/system/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/agentos-x\n"
+		root := fakeRepo(t, files)
+		wants := filepath.Join(root, "image/x/overlay/etc/systemd/system/multi-user.target.wants")
+		if err := os.MkdirAll(wants, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("../agentos-x.service", filepath.Join(wants, "agentos-x.service")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rootBinaries(root); err != nil {
+			t.Fatalf("a .wants link to a unit: %v", err)
 		}
 	})
 	t.Run("a uid argument names a user, not a program", func(t *testing.T) {
@@ -652,6 +707,9 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a /dev/fd source":                  {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/3 /etc ext4 ro 0 0\n", `source /dev/fd/3`},
 		"a /dev/stdin source in a unit":     {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/stdin\nType=squashfs\n", `What=/dev/stdin`},
 		"a /proc source in a unit":          {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/proc/self/fd/3\nType=squashfs\n", `What=/proc/self/fd/3`},
+		"a .. after /dev/fd in fstab":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/../root/tmp/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/fd/../root/tmp/x.img`},
+		"a .. after /dev/fd in a unit":      {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/fd/../root/tmp/x.img\nType=squashfs\n", `What=/dev/fd/../root/tmp/x.img`},
+		"a specifier source":                {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=%V\nType=squashfs\n", `What=%V`},
 		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u+w 0 0\n", `option mode=u+w`},
 		"a mode past 7777":                  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=10755 0 0\n", `option mode=10755`},
 		"a bind in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 bind 0 0\n", `option bind`},
@@ -1533,6 +1591,47 @@ var uidArg = regexp.MustCompile(`(^|[,\s])@[ug]id:[A-Za-z0-9_.-]+`)
 // shellQuotes removes the quotes a shell joins a word across.
 var shellQuotes = strings.NewReplacer(`"`, "", "'", "")
 
+// dotdot reports whether a slash path has a .. component, which the kernel
+// resolves after following the link before it (/var/lock/../shm is
+// /run/shm), while path.Clean folds it as text (#4559 L3 delta 2 1).
+func dotdot(p string) bool {
+	for _, c := range strings.Split(p, "/") {
+		if c == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// dirWords change a command's working directory or root, in a shell or as a
+// long option of a runner; dirShort are the short options that do so after
+// a runner's name. A relative name after one resolves where the lint does
+// not look, so a root command uses none (#4559 Security delta 2 1, L3 delta
+// 2 2); a unit's own WorkingDirectory= and RootDirectory= are #4589's.
+var (
+	dirWords = map[string]bool{"cd": true, "pushd": true, "popd": true, "chroot": true, "--chdir": true, "--working-directory": true, "--same-dir": true, "--wd": true}
+	dirShort = map[string]string{"env": "C", "systemd-run": "d", "nsenter": "wr"}
+)
+
+// dirChange refuses a command whose words, read as tokens with a shell's
+// quotes removed, change its working directory or root.
+func dirChange(words []string) error {
+	short := ""
+	for _, w := range words {
+		for _, tok := range nameToken.FindAllString(shellQuotes.Replace(w), -1) {
+			switch {
+			case dirWords[path.Base(tok)]:
+				return fmt.Errorf("%s changes the working directory or root, against which a name resolves where the lint does not look", tok)
+			case dirShort[path.Base(tok)] != "":
+				short = dirShort[path.Base(tok)]
+			case short != "" && strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.ContainsAny(tok[1:], short):
+				return fmt.Errorf("%s may change the working directory or root (-%s), against which a name resolves where the lint does not look; give each option apart", tok, short)
+			}
+		}
+	}
+	return nil
+}
+
 // binaryNamed is the broker package of the binary base names; with glued,
 // base is a short option with its value glued on (env -Sagentos-x, flock
 // -cagentos-x), so a name it ends in counts (#4559 Security 2).
@@ -1561,6 +1660,11 @@ func rootBinaries(root string) ([]string, error) {
 	var fstabs []string
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
+		if err == nil && d.Type()&os.ModeSymlink != 0 {
+			if err := imageLink(root, p); err != nil {
+				return err
+			}
+		}
 		switch {
 		case err != nil:
 			return err
@@ -1717,6 +1821,9 @@ func rootBinaries(root string) ([]string, error) {
 				// script too and with the shell's own quotes removed
 				// (agentos-"si"de), and one by path joins progs, which no
 				// tmpfiles.d line may hand to another uid (#4493).
+				if err := dirChange(words); err != nil {
+					return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+				}
 				for _, w := range append([]string{prog}, words[1:]...) {
 					w = uidArg.ReplaceAllString(w, "$1")
 					for _, s := range []string{w, shellQuotes.Replace(w)} {
@@ -1730,7 +1837,10 @@ func rootBinaries(root string) ([]string, error) {
 								p = tok[2:]
 							}
 							if strings.Contains(p, "/") && !strings.HasPrefix(p, "/") {
-								return nil, fmt.Errorf("%s: %s=%s: root names the relative path %s, which resolves against the working directory; write it as an absolute path", filepath.ToSlash(rel), l.key, l.value, p)
+								return nil, fmt.Errorf("%s: %s=%s: root names the relative path %s (or a path glued after clustered options), which resolves against the working directory; give each option apart and the path absolute", filepath.ToSlash(rel), l.key, l.value, p)
+							}
+							if dotdot(p) {
+								return nil, fmt.Errorf("%s: %s=%s: root names %s, whose .. the kernel takes after following any link before it; write the path without ..", filepath.ToSlash(rel), l.key, l.value, p)
 							}
 							p = path.Clean(p)
 							abs := strings.HasPrefix(p, "/")
@@ -1764,6 +1874,36 @@ func rootBinaries(root string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// imageLink refuses a link under image/ that lands in worldTrees or
+// magicTrees, or holds a .. step, so no path a root command names reaches
+// one through a link the image ships (#4559 Security delta 2 2). A relative
+// target resolves from the link's place in the installed tree: the path
+// after mkosi.extra/ or overlay/. image/mkosi/mkosi.finalize's link_refusal
+// holds the built mkosi tree to the fuller rule (service users' directories
+// too).
+func imageLink(root, p string) error {
+	rel, _ := filepath.Rel(root, p)
+	rel = filepath.ToSlash(rel)
+	to, err := os.Readlink(p)
+	if err != nil {
+		return err
+	}
+	at := "/" + rel
+	for _, m := range []string{"/mkosi.extra/", "/overlay/"} {
+		if i := strings.LastIndex(at, m); i >= 0 {
+			at = "/" + at[i+len(m):]
+		}
+	}
+	target := to
+	if !strings.HasPrefix(to, "/") {
+		target = path.Join(path.Dir(at), to)
+	}
+	if t, ok := inTree(path.Clean(target), append(append([]string{}, worldTrees...), magicTrees...)); ok || dotdot(to) && strings.HasPrefix(to, "/") {
+		return fmt.Errorf("%s: a link to %s, in %s; a path root names would reach a tree any uid writes or a link the lint does not follow", rel, to, t)
+	}
+	return nil
 }
 
 // plainFS are the file system types a mount may name: in-kernel types
@@ -1819,8 +1959,14 @@ func mountOptions(opts string, held bool) (bool, error) {
 // /dev/mqueue and /run/shm among them, names a directory or image file, which
 // mount(8) binds or loop-mounts (#4516, #4559 L3 1, Security delta 1).
 func heldSource(what string) bool {
+	if strings.Contains(what, "%") {
+		return false // a specifier the lint does not expand
+	}
 	if !strings.Contains(what, "/") {
 		return true
+	}
+	if dotdot(what) {
+		return false
 	}
 	what = path.Clean(what)
 	_, world := inTree(what, worldTrees)
