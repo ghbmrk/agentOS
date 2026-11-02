@@ -94,7 +94,7 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 	defer c.release()
 	now := c.cfg.Now()
 	if c.session != s {
-		c.cfg.Log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
+		c.log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
 		return nil, ErrSuperseded
 	}
 	rk := wire.RateKindOf(m.Type())
@@ -172,7 +172,7 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 		code, ev.Reason = wire.Refused, "not a request"
 	}
 	ev.Code = code
-	c.cfg.Log(ev)
+	c.log(ev)
 	// A Paused answer is not a refusal: a kernel learns of a trip or a
 	// pause only from one, so counting it would pause the summaries the
 	// Reflashed stage reopens.
@@ -305,7 +305,7 @@ func (c *Channel) count(k wire.RateKind) bool {
 		return true
 	}
 	reason := "burst of " + string(rated[k]) + " past the rate: tripped the core"
-	c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(rated[k]), Reason: reason})
+	c.log(Event{At: now, Kind: KindTrip, What: string(rated[k]), Reason: reason})
 	c.queueTrip(reason)
 	return false
 }

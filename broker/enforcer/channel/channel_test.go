@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -614,6 +615,88 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
 		t.Fatalf("result: %+v", m)
+	}
+}
+
+// TestAnswerMayUseChannel (#3759 point 1): the answer callback runs after
+// the channel lets go of its lock, so the radio host can send its next
+// challenge from inside Answer without a deadlock. Revert mutant: calling
+// Answer under c.mu.
+func TestAnswerMayUseChannel(t *testing.T) {
+	var r *rig
+	errs := make(chan error, 1)
+	r = newRig(t, func(c *Config) {
+		c.Answer = func(id uint64, _ []byte) { errs <- r.ch.Challenge(id+1, []byte{9}) }
+	})
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("challenge frame: %+v", m)
+	}
+	cl.send(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 8 || m.Answer {
+		t.Fatalf("the challenge sent from Answer: %+v", m)
+	}
+	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
+		t.Fatalf("result: %+v", m)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("Challenge from inside Answer: %v", err)
+	}
+}
+
+// TestLogMayUseChannel (#3759 point 2, ENF-d-7): every log line the
+// channel writes while it holds its lock is handed to Config.Log after it
+// lets go, so a log sink may call the channel: on a request, a refused
+// frame, a trip and a failed hello alike. Revert mutants: calling Log
+// under c.mu in handle, refuse, trip, count or preAuth.
+func TestLogMayUseChannel(t *testing.T) {
+	r := newRig(t, nil)
+	var calls atomic.Int32
+	reenter := func() {
+		// Takes the channel's lock and sends nothing: either no core is
+		// connected or the id is outstanding.
+		r.ch.Challenge(7, nil)
+		calls.Add(1)
+	}
+	r.mu.Lock()
+	r.logReenter = reenter
+	r.mu.Unlock()
+	bad := r.connect()
+	bad.send(cmd(1, "lamp", wire.VerbOn)) // a frame before any hello: preAuth
+	select {
+	case <-bad.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed hello's log line deadlocked the channel")
+	}
+	r.mu.Lock()
+	r.logReenter = nil
+	r.mu.Unlock()
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if _, ok := cl.recv().(wire.Challenge); !ok {
+		t.Fatal("no challenge frame")
+	}
+	r.mu.Lock()
+	r.logReenter = reenter
+	r.mu.Unlock()
+	if c := cl.code(cmd(2, "lamp", wire.VerbOn)); c != wire.OK { // handle's line
+		t.Fatalf("command: %v", c)
+	}
+	if c := cl.code(cmd(3, "nosuch", wire.VerbOn)); c != wire.Refused {
+		t.Fatalf("unknown device: %v", c)
+	}
+	for i := range wire.Rate(wire.RateAnnounce).Burst + 1 { // count's trip line
+		cl.code(wire.Announce{ID: uint64(10 + i)})
+	}
+	if r.cut.trips() != 1 {
+		t.Fatalf("trips %d, want 1", r.cut.trips())
+	}
+	if !cl.closed(frameBytes(wire.TCommand, []byte{1})) { // trip's line
+		t.Fatal("a malformed frame did not end the connection")
+	}
+	if calls.Load() < 5 {
+		t.Fatalf("the log sink ran %d times", calls.Load())
 	}
 }
 

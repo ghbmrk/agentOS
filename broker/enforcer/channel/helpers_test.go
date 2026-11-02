@@ -199,6 +199,9 @@ type rig struct {
 	mu  sync.Mutex
 	now time.Time
 	log []Event
+	// logReenter, if set, runs inside each log call, as a slice h sink
+	// that calls back into the channel would.
+	logReenter func()
 }
 
 // signedHome is the engine's store with home() signed and applied, made
@@ -252,7 +255,15 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 			return wire.Counts{Day: 1, Groups: []wire.CountGroup{{Dests: []wire.CountDest{{Name: "a.example", Cap: 9}}, Count: 3}}}, nil
 		},
 		Answer: func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
-		Log:    func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
+		Log: func(e Event) {
+			r.mu.Lock()
+			r.log = append(r.log, e)
+			f := r.logReenter
+			r.mu.Unlock()
+			if f != nil {
+				f()
+			}
+		},
 		Now:    func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
 	}
 	if cfg != nil {

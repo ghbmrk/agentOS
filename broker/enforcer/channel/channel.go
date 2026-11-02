@@ -131,7 +131,9 @@ type Config struct {
 	// Answer hands the core's answer to a device challenge back to the
 	// device that asked (slice k).
 	Answer func(id uint64, data []byte)
-	// Log takes one line per request and refusal.
+	// Log takes one line per request and refusal. It runs outside the
+	// channel's lock, so it may call the channel, and concurrently for
+	// several connections (ENF-d-7).
 	Log func(Event)
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -192,9 +194,9 @@ type Channel struct {
 	// preAuthQuiet is set while failed hellos are over KindPreAuth's
 	// bucket and dropped unlogged.
 	preAuthQuiet bool
-	// queued holds the Alerts and Answer calls made under mu; release runs
-	// them after unlocking, so a sink that sends on the channel cannot
-	// deadlock it.
+	// queued holds the Log, Alerts, Answer and Cut.Trip calls made under
+	// mu; release runs them after unlocking, so a sink that calls the
+	// channel cannot deadlock it.
 	queued []func()
 }
 
@@ -317,7 +319,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
+	c.log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.countRefused()
 	return err
 }
@@ -336,7 +338,7 @@ func malformed(err error) bool {
 func (c *Channel) trip(reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
+	c.log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
 	c.queueTrip(reason)
 	return err
 }
@@ -355,19 +357,27 @@ func (c *Channel) queueTrip(reason string) {
 // fill the log; the next line logged after the bucket refills ends that.
 func (c *Channel) preAuth(reason string, err error) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.release()
 	now := c.cfg.Now()
 	if c.preAuthB.Take(now) {
 		c.preAuthQuiet = false
-		c.cfg.Log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
+		c.log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
 		c.preAuthQuiet = true
-		c.cfg.Log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
+		c.log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
 	}
 	return err
 }
 
-// release unlocks c.mu and then runs the sink calls queued under it.
+// log queues one log line to Config.Log, which release hands over after
+// c.mu is let go, so a log sink may call the channel (ENF-d-7). The caller
+// holds c.mu.
+func (c *Channel) log(e Event) {
+	c.queued = append(c.queued, func() { c.cfg.Log(e) })
+}
+
+// release unlocks c.mu and then runs the sink calls queued under it, in
+// the order they were queued.
 func (c *Channel) release() {
 	q := c.queued
 	c.queued = nil
