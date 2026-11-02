@@ -89,9 +89,9 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-b-scan | DECOY-b-scan: the decoy matcher on the model clerk's outbound body and the edge link (KRN-12 Trips) | #3763 | queued(release; tier A; size M; from #4037 L3 4, split from #4070; after #4039) |
 | SPEC-krn12-owner-honey | SPEC-krn12-owner-honey: name the owner-side honey key case in KRN-12 Response (KRN-12) | #4219 | queued (release; L1 spec-diff; after #4167; from #4219) |
 | EDGE-link-edge | EDGE-link-edge: the edge box's own side of the link: its key, hello, pin of the core's link key, and new-core acceptance after a restore (HW-15; needs brief). | EDGE-link-core-c2 | queued (release; tier A; the unowned gap in briefs/EDGE-link-core.md) |
-| DECOY-state-print | DECOY-state-print: formatting the kernel state shows no decoy value (KRN-12) | #3763 | building(release; tier A; size S; from #4501 Security 1) |
 | DECOY-state-print-b | DECOY-state-print-b: honey ID after a trip, duplicate honey entries, reflection dumpers (KRN-12) | #3763 | queued(release; tier A; size S; from #4563 reviews) |
 | DECOY-match-wrap-2 | DECOY-match-wrap-2: the decoy matcher trips on URL- and unicode-escaped line breaks (KRN-12 Trips) | #3763 | building(release; tier A; size S; from #4562's review) |
+| DECOY-match-wrap-3 | DECOY-match-wrap-3: the decoy matcher keeps a held break for any form length (KRN-12 Trips) | #3763 | queued(release; tier A; size S; from #4599's review) |
 
 ## Harness and operating model
 
@@ -116,8 +116,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | TOOL-lookup | TOOL-lookup: session lookup helpers (next-id, ci-why, conflicts); brief briefs/TOOL-lookup.md | none | building (later; tier C) |
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | VULN-controlui-drop | VULN-controlui-drop: the guest image build removes OpenClaw's unused Control UI assets, so the DOMPurify, KaTeX, mermaid and lodash-es records retire | VULN-guest-controlui-off (#4417) | building (release; tier A) |
-| CI-par-5b | CI-par-5b: MustRun passes a skip raised in setUpClass or setUpModule | #4483 L3 | building(tier C; lane primary) |
-| CI-par-7b | CI-par-7b: clash audit walks only unresolved write opens and reads symlink names in one light pass | #4545 reviews | building(release; tier A; lane primary) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -155,7 +153,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CH-21f-wire | agentosd starts the owner channel with the setup names | CH-21f-wire | queued (tier A; release finding of #948) |
 | REV-LOW-msg | REV-LOW-msg: owner message findings (cross-reply code expiry, security notice held by quiet hours, Unicode question clipping, false passed-on for a late correction, NAME uncertain save) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | KEY-9-reach | KEY-9-reach: fixed worth table and reach computation in the key-check library; CH-3 stays the floor (KEY-9, D-307) | #4528 | queued (release; tier A; lane primary) |
-| OWNER-ignored-saves-fu-r3 | OWNER-ignored-saves-fu-r3: the grants owner-note check also sees notes sent after the test body returns (CH-21) | #1969 | building (release; tier A) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -307,13 +304,13 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-q-owner | ENF-q-owner: owner-set relock interval and usual hours in the signed policy (NET-6) | #3675 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-live-vmap | ENF-live-vmap: dispatch the live chain by interface if HW-4 shows its cost | #4238 | queued(later; recheck) |
 | ENF-light-f1 | ENF-light-f1: page and bulb driver use the trip light by name and lift it only on a full cut lift; (KRN-12) | #4165 | queued (release; tier A) |
+| UNLOCK-fd-every-assignment | UNLOCK-fd-every-assignment: the unlock unit's Sockets= and FileDescriptorStoreMax= are read at every assignment, not as if an empty one reset them (#2899; #4264 Security 6543786424) | KEYS-route-by-cgroup (#4210) | building (release; tier A) |
 | ENF-d-sendline | ENF-d-sendline: a write deadline on the channel's alert send (NET-2 Texts and calls) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-s-f | ENF-s-f: parkedOnWriteLock matches only the write lock; ENF-k-8 wording | #4068 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-dns-tidy-3 | ENF-dns-tidy-3: wording; TestGenerateRefuses precision | #4143 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-c-f1 | ENF-c-f1: ENF-c review follow-ups: recovery text before save, owner card kept on store failure, post-reset card text, separate miss counters, no light for enrolment | #4290 reviews | queued(tier A; lane primary) |
 | CAM-decoder-later | CAM-decoder-later: the decoder unit's /run view, the clerk's stop bound, PrivatePIDs in CI (CLK-1, NET-2, RES-2) | CAM-decoder-uid (#4134, #4350) | queued (later; from #4350 reviews) |
 | REV-LOW-workers | REV-LOW-workers: workers and image findings (llama.cpp missing from vulncheck, Held over 64 KiB, no tail/tee in the OpenClaw image, snapshot compare after destroy) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
-| ENF-mdns-holds | ENF-mdns-holds: offer heard Owner/Household mDNS names as holds when a pair is signed (NET-3) | #4144 | building(tier A; lane primary; brief briefs/ENF.md; class:later) |
 | ENF-page-csrf-later | ENF-page-csrf-later: screen-pair lifetime and replacement, constant-time pin | #4393 reviews | queued(later; lane primary) |
 | ENF-g-aplock-later-b | ENF-g-aplock-later-b: the reload's own exit 75, an access point without timeout, ENF-g-10 wording | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-log-bound | ENF-log-bound: enforcer refusal log lines are rate-bound per prefix and VLAN, counters stay exact | #4407 Potency | queued (release; tier A) |
@@ -324,28 +321,26 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-k2-mnt-d | ENF-k2-mnt-d: radio stacks dump no core, and their directories are cleaned without following symlinks (NET-2) | #4369 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-l-dns-step | ENF-l-dns-step: slice l restarts each listed dnsmasq in step with nft.Reload (NET-2 The core's list) | #4237 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | CTRL-usb4 | [M6 Ultra spike: USB4 networking at line rate](briefs/CTRL-usb4.md) | G1; Mark: hardware (M6 Ultra unit, a USB4 peer) | queued (later; G7, A17, D-104; HW-12; tier C; one sitting with the unit) |
-| IMG-usr-list-polish | IMG-usr-list-polish: the /usr diff prints content differences first, and image/README names the list. | — | building (later; tier A; size XS; from #4455 lenses) |
 | SPEC-ch9-csrf-reuse | SPEC-ch9-csrf-reuse: CH-9's anti-forgery clause allows a same-site load to keep a valid value the page issued | #4460 review | queued(release; tier C; lane primary) |
 | ENF-page-csrf-reuse-later | ENF-page-csrf-reuse-later: ASSUMPTIONS wording, label-separation test, cross-site mint availability | #4460 reviews | queued(later; tier A; lane primary) |
 | ENF-shared-src | ENF-shared-src: established packets on a shared segment bind to the connection's host | #4324 (ENF-ct-bind-2) | queued(tier A; lane primary) |
 | KRN-cap-first-b-fu4 | KRN-cap-first-b-fu4: tighten the channel check's simulator floor, ASSUMPTIONS wording and the exported kind list (D-255; NET-2, A18) | #4373 | queued (release; tier A) |
-| ENF-k-reap-c | ENF-k-reap-c: radio reaper edges (typed-nil Proc, WaitDelay, PID 1 duties, netns fd under a join) (NET-2) | #4311 | building(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-core-join | ENF-core-join: a core joins an enforcer already set up, so the enforcer can be installed first (§12.1 step 4, CH-9, NET-4) | ENF-l, ENF-m, #4528; L1 spec diff first | queued (release; tier A; lane primary; brief briefs/ENF.md) |
 | KRN-cap-first-d | KRN-cap-first-d: the kernel's clerk sends and edge fetches reserve their bytes at the call site, with the edge fetch byte budget (D-255; NET-2, A18) | #4374, #3673 | queued (release; tier A) |
-| ENF-d-chal-life | ENF-d-chal-life: device challenges expire and are freed only after their answer is handed over (NET-2) | #3759 | building (release; tier A) |
 | ENF-cap-trip-c | ENF-cap-trip-c: the firewall counts per address and drops in the kernel past each byte cap (D-248, D-255; NET-2, A18) | #4376 | building (release; tier A) |
-| ENF-cap-trip-d | ENF-cap-trip-d: limit the log of a tripped core's paused requests (D-255; NET-2, A18) | #4376 | building (release; tier A) |
-| ENF-mdns-heard-bounds | ENF-mdns-heard-bounds: heard-name fill skips instances on claimed hosts and bounds a card's names (NET-3, NET-4) | #4488 | building (release; tier A) |
-| ENF-mdns-heard-offer | ENF-mdns-heard-offer: the page offers a paired device's newly heard names as a one-tap loosening (NET-3, NET-4, D-266) | #4488 | building (release; tier A) |
 | ENF-l-ap-stalled | ENF-l-ap-stalled: the page shows a stalled access point push (push.ErrStalled, Watch's Abandoned count) | ENF-g-aplock-leak PR | queued(tier A; lane primary; brief briefs/ENF.md) |
-| ENF-d-trip-pend | ENF-d-trip-pend: the pending-trip count's hello path is pinned and the hello trip line is timed at the decision (NET-2, ENF-d-4) | #3759 | building (release; tier A) |
 | NET-2-cap-sizing | NET-2-cap-sizing: each destination's byte cap is sized at signing from its declaration (CLK-14), shown on the confirm screen (D-248) | #4376, #4557 | queued (release; tier A) |
 | G1-e2e-later-fu4 | G1-e2e-later-fu4: the source test allowlists the driver's process-reaching imports, refuses journal-file reads and PATH writes, and pins the runners' pass-through. Release; from PR #4581 Security and L3. | G1-e2e-later-fu4 | building (release; tier A; from PR #4581 Security and L3 reviews) |
-| ENF-mdns-heard-caps | ENF-mdns-heard-caps: policy caps a device's pinned names; the fill drops an instance whose host it drops (NET-3, NET-4) | #4565 | queued (release; tier A) |
-| ENF-cap-trip-e | ENF-cap-trip-e: limit a tripped core's reconnect and malformed-frame log lines (NET-2, A18) | #4558 | queued (release; tier A) |
-| ENF-d-chal-life-b | ENF-d-chal-life-b: a failed challenge send never frees an answered challenge (NET-2) | #4550 | queued (release; tier A) |
+| ENF-mdns-heard-caps | ENF-mdns-heard-caps: policy caps a device's pinned names; the fill drops an instance whose host it drops (NET-3, NET-4) | #4565 | building (release; tier A) |
+| ENF-cap-trip-e | ENF-cap-trip-e: limit a tripped core's reconnect and malformed-frame log lines (NET-2, A18) | #4558 | building (release; tier A) |
+| ENF-d-chal-life-b | ENF-d-chal-life-b: a failed challenge send never frees an answered challenge (NET-2) | #4550 | building (release; tier A) |
 | ENF-cap-gro | ENF-cap-gro: the core's and the edge's ports count every segment's header (GRO off) (NET-2 Byte caps) | #4557 | queued (release; tier A) |
-| IMG-usr-list-escape | IMG-usr-list-escape: the /usr diff prints path names escaped, so a path cannot forge a log line or Actions command. | — | queued (release; tier A; size XS; from #4588 Security) |
+| IMG-usr-list-escape | IMG-usr-list-escape: the /usr diff prints path names escaped, so a path cannot forge a log line or Actions command. | — | building (release; tier A; size XS; from #4588 Security) |
+| ENF-cap-merge-carry | ENF-cap-merge-carry: a merged group's quota carries the kernel's bytes since the reading; retransmissions shown counted (NET-2 Byte caps) | #4557 | queued (release; tier A) |
+| ENF-k-reap-d | ENF-k-reap-d: radio URL scheme, netRef close-on-exec test, ENF-k-12 wording (NET-2) | #4521 | building (release; tier A; from #4586 reviews) |
+| ENF-k-reap-e | ENF-k-reap-e: SIGSTOP/SIGCONT round-trip test for ENF-k-12 (NET-2) | #4616 | queued (release; tier A; from #4624 Security) |
+| ENF-k-reap-f | ENF-k-reap-f: one radio path feeds DaemonArgs and confine.Thread (NET-2) | #4616 | queued (release; tier A; from #4624 delta reviews) |
+| UNLOCK-unit-every-assignment | UNLOCK-unit-every-assignment: the unlock unit's OnFailure=, OnSuccess= and *Action= keys are read at every assignment; FileDescriptorStoreMax=0 and a reset in a later file are tested (#4619 Security 6575932960, combined 6575955041) | UNLOCK-fd-every-assignment (#4306) | queued (release; tier A) |
 
 ## Model routes and the Codex lane
 
@@ -445,24 +440,35 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-save-owner | The owner side's saves (sub B lane) pass a test-set stop to `privfile.WriteAtomic` (broker/owner, broker/question, broker/localsrv, broker/cmd/agentosd); removes their REV-CHK-save pending lines. | #3903 | queued |
 | REV-CHK-links-e2e-fifo | REV-CHK-links-e2e-fifo: the e2e harness's no-follow reads refuse a FIFO instead of blocking | #4194 | queued |
 | REV-CHK-links-update-l2 | REV-CHK-links-update-l2: safeDir test separates link and write refusals; non-root owner case; release verify temp dir | #4199 | queued |
-| REV-CHK-save-clerks-f1 | Caller-level stopped-save tests for the camera's seal (running store) and the mail clerk's seen and senders callers (from the #4218 reviews). | #4191 | building (release) |
 | ENF-c-reset-text | ENF-c-reset-text: a factory reset by the case code texts the owner | #4290 | queued |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
 | GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
 | RES-5-readerwire-maxconns | RES-5-readerwire-maxconns: readerwire serves at most 8 calls at once, a fixed cap with no recorded basis | - | queued (release; tier A) |
-| REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | building(tier A; kernel lane) |
+| REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | escalated(tier A; kernel lane) |
 | REV-CHK-links-mountown | REV-CHK-links-mountown: no tmpfs, bind, move or loop mount hands a root tree to another uid | #4494 Security delta review | building(tier A; kernel lane) |
-| UNLOCK-inherit-slot-check | UNLOCK-inherit-slot-check: inherit refuses a hand-off if descriptor 100 or 101 is already open | - | building (release; tier A) |
 | REV-CHK-links-vars | REV-CHK-links-vars: a pinned unit variable comes only from its pinned env file | #4494 combined review | building(tier A; kernel lane) |
-| MUTGATE-stmt-delete | MUTGATE-stmt-delete: mutgate catches a deleted statement on a claimed tier-A line (release from #4560) | #4560 | building (release; tier A) |
 | UPD-5r-b7f | the security evaluator's release items from #4532's reviews: unpinned report conditions, PLN-4's rejection fields, b6's model budget (brief briefs/UPD-5r-b.md) | UPD-5r-b7 (#4475) | building (A) |
 | REV-CHK-links-dirs | REV-CHK-links-dirs: a unit's own runtime, state, cache, log and config directories count as grants | #4559 Security review | queued(tier A; kernel lane) |
 | REV-CHK-links-ns | REV-CHK-links-ns: a root unit's own namespace and search settings follow the mount rules | #4559 Security and L3 delta reviews | queued(tier A; kernel lane) |
-| TEST-apt-confd-pin | TEST-apt-confd-pin: a test pins the file list of mkosi.pkgmngr/etc/apt/apt.conf.d to the one retry file. Release; from PR #4568 Security. | #4522 | queued (release; tier A) |
-| MUTGATE-del-recount | MUTGATE-del-recount: verify recounts the statement-deletion sites itself (release from #4597) | #4597 | queued (release; tier A) |
-| MUTGATE-del-lines | MUTGATE-del-lines: deletion sites cover a statement's later lines (release from #4597) | #4597 | queued (release; tier A) |
-| KRN-PLN4-reject-fields | the kernel's plan rejection names its failing step and session (PLN-4), found by UPD-5r-b7f | UPD-5r-b7f (#4575) | queued (release; tier A; found by UPD-5r-b7f) |
+| TEST-apt-confd-pin | TEST-apt-confd-pin: a test pins the file list of mkosi.pkgmngr/etc/apt/apt.conf.d to the one retry file. Release; from PR #4568 Security. | #4522 | building (release; tier A) |
+| MIG-4-plan-pins-3 | MIG-4-plan-pins-3: pin the image's provider-read sources off; tidy the shape checker | #4585 L3 and Security reviews | building (release; tier A; item 2 moved to #4629) |
+| MUTGATE-del-recount | MUTGATE-del-recount: verify recounts the statement-deletion sites itself (release from #4597) | #4597 | building (release; tier A) |
+| MUTGATE-del-lines | MUTGATE-del-lines: deletion sites cover a statement's later lines (release from #4597) | #4597 | building (release; tier A) |
+| KRN-PLN4-reject-fields | the kernel's plan rejection names its failing step and session (PLN-4), found by UPD-5r-b7f | UPD-5r-b7f (#4575) | building (release; tier A; found by UPD-5r-b7f) |
+| REV-CHK-save-clerks-f2 | Test or drop openMail's forwarding of the seen save's test stop (from the #4604 L3 review). | #4236 | building (release; tier A) |
+| REV-CHK-links-egress | REV-CHK-links-egress: agentos-egress, which egress-setup runs as root, joins the root side | #4493 | queued (release; tier A; from #4493) |
+| REV-CHK-links-mnt2 | REV-CHK-links-mnt2: fstab target .., X-mount.mkdir and PAMName= in the root-side lint | #4559 Security review at eaf31cb | queued(tier A; kernel lane) |
+| UPD-5r-b7f-step-session | the requalification driver's unlogged measure checks a rejection's session and step (EVL-3, PLN-4), found by KRN-PLN4-reject-fields | KRN-PLN4-reject-fields (#4605), UPD-5r-b7f (#4575) | queued (release; tier A; found by KRN-PLN4-reject-fields) |
+| MIG-4-plan-labels | MIG-4-plan-labels: close the Codex turn-metadata labels to the CLI's word lists | #3133 live Codex capture; #4595 (#4630) | queued (release; tier A; waits on the live Codex capture, #3133) |
+| MIG-4-plan-workspaces | MIG-4-plan-workspaces: the clerk drops the turn blob's workspaces (paths, remote URLs, commit) from what it sends the provider | #3133 live Codex capture; #4630 | queued (release; tier A; from #4585 UX) |
+| MUTGATE-stmt-parallel | MUTGATE-stmt-parallel: mutgate runs its statement-deletion sites in parallel or sharded, so a large claimed package fits the 60-minute bound | #4597 | building (release; tier A; from #4597 Potency) |
+| G1-e2e-later-fu5 | G1-e2e-later-fu5: checkFD's non-regular writes go through an allow-list holding only /dev/ptmx | #4609 | queued (release; tier A; from #4609 Potency) |
+| KRN-PLN4-fu1 | KRN-PLN4-fu1: a logged rejection's session is the key's unverified claim | #4625 | queued (release; tier A; from #4628 Security) |
+| REV-CHK-links-localui | REV-CHK-links-localui: agentos-localui's root -admit-port1 step goes through privfile | #4493 package build | queued(tier A; sub B directories) |
+| UPD-5r-b7g-planned-hash | the security evaluator's planned-plan binding by hash is pinned by a probe under a planner plan's id (PLN-4), found by UPD-5r-b7f | UPD-5r-b7f (#4575) | queued (release; tier A; found by UPD-5r-b7f) |
+| KRN-2-std-files | a manager-opened StandardOutput/StandardError file on a non-root unit cannot sit in a world tree (KRN-2), found by D-271's review | D-271 (#4493) | queued (release; tier A; found by D-271's review) |
+| REV-CHK-links-camdecode | REV-CHK-links-camdecode: the camera decode host's path calls go through privfile | #4493 package build | queued(tier A) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -491,12 +497,9 @@ issue #4020: needs exactly one state label of queued, building, in review, merge
 issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4040: body has no board-row block
-issue #4306: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4338: body has no board-row block
 issue #4339: body has no board-row block
 issue #4382: no section 'Tooling and CI' in BOARD.md
 issue #4422: no section 'Tooling and CI' in BOARD.md
 issue #4450: no section 'Tooling and CI' in BOARD.md
-issue #4580: body has no board-row block
-issue #4595: body has no board-row block
 ```
