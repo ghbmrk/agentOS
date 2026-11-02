@@ -10,13 +10,16 @@ package privfile
 // with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
 // each Exec program a plain absolute path, read across continued lines,
 // sections, quotes and ;, with no substitution in what a wrapper runs
-// (#4390, #4494), and every broker binary such a command names, by path or
-// by a bare name a wrapper or shell finds on PATH, with a shell's quotes
-// removed (#4493), none in a tree any uid writes; every broker binary
+// (#4390, #4494), and every broker binary such a command names, by path,
+// by a bare name a wrapper or shell finds on PATH or glued to a short option
+// (env -S), with a shell's quotes removed (#4493), while no root command
+// names a relative path, a path in a tree any uid writes (worldTrees) or one
+// through a link the lint does not follow (magicTrees, #4559); every broker binary
 // named as a mount, umount, fsck or mkfs helper, a .mount unit, mount
 // drop-in or fstab line naming only a plain type and no helper option
 // (#4380), and over a tree root reads or runs no bind, move or loop, a
-// source only under /dev, and a tmpfs only with a mode no other uid writes
+// source only a device under /dev outside worldTrees and magicTrees, and a
+// tmpfs only with a mode no other uid writes
 // (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
@@ -53,7 +56,9 @@ package privfile
 // unit, whose type the lint does not see, and a program a wrapper runs that
 // is no broker binary, outside rootTrees, which a tmpfiles.d line may hand
 // to another uid (root commands name data paths their services own, so not
-// every absolute argument can be held).
+// every absolute argument can be held), and a root unit's own namespace and
+// search settings (RootDirectory=, BindPaths=, TemporaryFileSystem=,
+// WorkingDirectory=, PATH=; #4589).
 
 import (
 	"fmt"
@@ -463,6 +468,22 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a wrapper's other program in /tmp": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /tmp/helper\n", `names /tmp/helper, in /tmp`},
 		"a config file in /var/tmp":         {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f /var/tmp/x.nft\n", `names /var/tmp/x.nft, in /var/tmp`},
 		"a path in /var/lock":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /var/lock/x'\n", `names /var/lock/x, in /run/lock`},
+		// #4559 Security delta 1 and 2, L3 delta 1: a link the lint does not
+		// read, or a path the working directory resolves.
+		"a program in /run/shm":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/run/shm/x\n", `in /dev/shm`},
+		"a wrapper's argument in /var/run/shm": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /var/run/shm/agentos-side\n", `in /dev/shm`},
+		"a path through /proc/self/root":       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /proc/self/root/tmp/x\n", `under /proc`},
+		"a program through /proc/1/root":       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/proc/1/root/var/tmp/x\n", `under /proc`},
+		"a path through /dev/fd":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /dev/fd/3'\n", `under /dev/fd`},
+		"a relative wrapper argument":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids tmp/helper\n", `relative path tmp/helper`},
+		"a relative path up a level":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env ../tmp/helper\n", `relative path ../tmp/helper`},
+		"a relative config file":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f var/tmp/x.nft\n", `relative path var/tmp/x.nft`},
+		"a relative path after a cd":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd tmp; exec ./x'\n", `relative path ./x`},
+		"a relative glued path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -Stmp/x\n", `relative path tmp/x`},
+		"a relative broker binary":             {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env opt/w/agentos-side\n", `relative path opt/w/agentos-side`},
+		"a world tree itself":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd /tmp && exec x'\n", `names /tmp, in /tmp`},
+		"an unclean world path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids //tmp/x\n", `names /tmp/x, in /tmp`},
+		"a world path behind ..":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/../var/tmp/x\n", `names /var/tmp/x, in /var/tmp`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -627,6 +648,10 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a file in /dev/mqueue in fstab":    {"image/mkosi/mkosi.extra/etc/fstab", "/dev/mqueue/x /etc ext4 ro 0 0\n", `source /dev/mqueue/x`},
 		"an image in /dev/shm in a unit":    {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/shm/x.img\nType=squashfs\n", `What=/dev/shm/x.img`},
 		"an unclean /dev/shm source":        {"image/mkosi/mkosi.extra/etc/fstab", "/dev/./shm/x.img /usr squashfs ro 0 0\n", `source /dev/./shm/x.img`},
+		"an image in /run/shm":              {"image/mkosi/mkosi.extra/etc/fstab", "/run/shm/x.img /usr squashfs ro 0 0\n", `source /run/shm/x.img`},
+		"a /dev/fd source":                  {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/3 /etc ext4 ro 0 0\n", `source /dev/fd/3`},
+		"a /dev/stdin source in a unit":     {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/stdin\nType=squashfs\n", `What=/dev/stdin`},
+		"a /proc source in a unit":          {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/proc/self/fd/3\nType=squashfs\n", `What=/proc/self/fd/3`},
 		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u+w 0 0\n", `option mode=u+w`},
 		"a mode past 7777":                  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=10755 0 0\n", `option mode=10755`},
 		"a bind in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 bind 0 0\n", `option bind`},
@@ -1444,9 +1469,16 @@ var rootTrees = []string{
 
 // pathAliases are the links every image has between trees: /var/run is
 // /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/) and
-// /var/lock is /run/lock (BOX_LINKS, legacy.conf), so a path is compared as
+// /var/lock is /run/lock (BOX_LINKS, legacy.conf) and /run/shm is /dev/shm
+// (Debian's link, #4559 Security delta 1), so a path is compared as
 // the tree it lands in (#4494 L3 1, #4516).
-var pathAliases = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock"}
+var pathAliases = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock", "/run/shm": "/dev/shm"}
+
+// magicTrees hold links to another process's view (/proc/<pid>/root,
+// /proc/self/fd, /dev/fd and /dev/std*, which lead there), so a path through
+// one reaches any tree; no root command or held mount source names one
+// (#4559 Security delta 1).
+var magicTrees = []string{"/proc", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
 
 // worldTrees are the trees any uid may make a file in (1777, and
 // /dev/mqueue), so no root command names a path in one, as its program or
@@ -1456,9 +1488,15 @@ var worldTrees = []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/run/l
 
 // unalias is p with a leading pathAliases link resolved.
 func unalias(p string) string {
-	for from, to := range pathAliases {
-		if p == from || strings.HasPrefix(p, from+"/") {
-			return to + p[len(from):]
+	// Aliases chain (/var/run/shm is /run/shm is /dev/shm), so resolve until
+	// none applies; each step moves to another tree, so this ends.
+	for again := true; again; {
+		again = false
+		for from, to := range pathAliases {
+			if p == from || strings.HasPrefix(p, from+"/") {
+				p, again = to+p[len(from):], true
+				break
+			}
 		}
 	}
 	return p
@@ -1683,14 +1721,24 @@ func rootBinaries(root string) ([]string, error) {
 					w = uidArg.ReplaceAllString(w, "$1")
 					for _, s := range []string{w, shellQuotes.Replace(w)} {
 						for _, tok := range nameToken.FindAllString(s, -1) {
+							// A short option may carry its value glued on (env
+							// -S/x, flock -cx); a relative path resolves against
+							// a working directory the lint does not track (/ by
+							// default, or a shell's cd), so it is refused.
 							p, glued := tok, strings.HasPrefix(tok, "-")
-							if i := strings.IndexByte(tok, '/'); glued && i > 0 {
-								p = tok[i:] // env -S/x, flock -c/x
+							if glued && len(tok) > 2 && strings.Contains(tok, "/") {
+								p = tok[2:]
+							}
+							if strings.Contains(p, "/") && !strings.HasPrefix(p, "/") {
+								return nil, fmt.Errorf("%s: %s=%s: root names the relative path %s, which resolves against the working directory; write it as an absolute path", filepath.ToSlash(rel), l.key, l.value, p)
 							}
 							p = path.Clean(p)
 							abs := strings.HasPrefix(p, "/")
 							if t, ok := inTree(p, worldTrees); abs && ok {
-								return nil, fmt.Errorf("%s: %s=%s: root names %s, in %s, where any uid may make a file", filepath.ToSlash(rel), l.key, l.value, p, t)
+								return nil, fmt.Errorf("%s: %s=%s: root names %s, in %s, where any uid may make a file; put what root runs or reads under a tree root owns, such as /usr/lib/agentos", filepath.ToSlash(rel), l.key, l.value, p, t)
+							}
+							if t, ok := inTree(p, magicTrees); abs && ok {
+								return nil, fmt.Errorf("%s: %s=%s: root names %s, under %s, whose links the lint does not follow; name the target path itself", filepath.ToSlash(rel), l.key, l.value, p, t)
 							}
 							pkg, ok := binaryNamed(pkgs, path.Base(p), glued && !abs)
 							if !ok {
@@ -1767,16 +1815,17 @@ func mountOptions(opts string, held bool) (bool, error) {
 
 // heldSource reports whether a mount's source may sit over a tree root
 // reads or runs: a name with no slash (tmpfs, UUID=x, LABEL=x) or a device
-// under /dev, outside worldTrees. A path elsewhere, /dev/shm and /dev/mqueue
-// among them, names a directory or image file, which mount(8) binds or
-// loop-mounts (#4516, #4559 L3 1).
+// under /dev, outside worldTrees and magicTrees. A path elsewhere, /dev/shm,
+// /dev/mqueue and /run/shm among them, names a directory or image file, which
+// mount(8) binds or loop-mounts (#4516, #4559 L3 1, Security delta 1).
 func heldSource(what string) bool {
 	if !strings.Contains(what, "/") {
 		return true
 	}
 	what = path.Clean(what)
 	_, world := inTree(what, worldTrees)
-	return strings.HasPrefix(what, "/dev/") && !world
+	_, magic := inTree(what, magicTrees)
+	return strings.HasPrefix(what, "/dev/") && !world && !magic
 }
 
 // tmpfsTypes default their root directory to 1777 unless a mode= says
@@ -1850,7 +1899,7 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 				}
 				optioned, moded = true, moded && m
 			case k == "What" && held && !heldSource(v):
-				return false, fmt.Errorf("%s: What=%s; over a tree root reads or runs, a mount's source is a device under /dev, not a directory or image file", rel, v)
+				return false, fmt.Errorf("%s: What=%s; over a tree root reads or runs, a mount's source is a device node under /dev, not a directory or image file (nor anything in /dev/shm, /dev/mqueue or a /dev/fd link)", rel, v)
 			}
 		}
 	}
@@ -1886,7 +1935,7 @@ func fstabLines(root, f string) error {
 		case len(w) < 3 || !plainFS[w[2]] || w[2] == "overlay" && held:
 			return fmt.Errorf("%s:%d: %q; want a plain file system type, whose mount runs no helper (and no overlay over a tree root reads or runs)", rel, n, line)
 		case held && !heldSource(w[0]):
-			return fmt.Errorf("%s:%d: source %s; over a tree root reads or runs, a mount's source is a device under /dev, not a directory or image file", rel, n, w[0])
+			return fmt.Errorf("%s:%d: source %s; over a tree root reads or runs, a mount's source is a device node under /dev, not a directory or image file (nor anything in /dev/shm, /dev/mqueue or a /dev/fd link)", rel, n, w[0])
 		case len(w) > 3:
 			m, err := mountOptions(w[3], held)
 			if err != nil {
