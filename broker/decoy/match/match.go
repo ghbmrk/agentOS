@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -200,8 +201,8 @@ type Value struct {
 // its destinations. It is immutable, so one serves many streams.
 type Matcher struct {
 	forms []form
-	first map[byte][]int // forms by their first byte
-	slash [][2]int       // each '\' of a form: the form and where
+	first map[byte][]int   // forms by their first byte
+	slash map[int][][2]int // each '\' of a form, the form and where, by the bytes beside it
 	dests map[netip.Addr]int
 	carry int
 }
@@ -217,7 +218,7 @@ type form struct {
 // empty value is skipped: a destination-only entry. dests maps an address to
 // the ID a trip names it by.
 func New(values []Value, dests map[netip.Addr]int) *Matcher {
-	m := &Matcher{first: map[byte][]int{}, dests: map[netip.Addr]int{}}
+	m := &Matcher{first: map[byte][]int{}, slash: map[int][][2]int{}, dests: map[netip.Addr]int{}}
 	for _, v := range values {
 		if len(v.Bytes) == 0 || len(v.Bytes) > MaxValue {
 			continue
@@ -228,7 +229,8 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 			}
 			for k, c := range f {
 				if c == '\\' {
-					m.slash = append(m.slash, [2]int{len(m.forms), k})
+					key := beside(f[:k], f[k+1:])
+					m.slash[key] = append(m.slash[key], [2]int{len(m.forms), k})
 				}
 			}
 			m.forms = append(m.forms, form{v.ID, f})
@@ -451,25 +453,75 @@ func (s *Stream) scan() {
 	s.floor = max(0, s.floor-drop)
 }
 
-// matchBreak matches the forms that begin inside a removed break, the rest
-// joined after it, and those whose own '\' ends the '\' run a JSON break
-// removed: the run read back as one '\' (#4622).
+// matchBreak matches the forms that begin inside a removed break, those
+// whose own '\' ends the '\' run a JSON break removed (the run read back as
+// one '\', #4622), and those whose '\' run a %0a or %0d splits (#4681), each
+// with its rest read back the same way at later breaks.
 func (s *Stream) matchBreak(br cut) {
-	b, before, after := br.b, s.joined[:br.at], s.joined[br.at:]
+	b, before, after, at := br.b, s.joined[:br.at], s.joined[br.at:], br.at
 	for k := 1; k <= len(b); k++ {
 		for _, i := range s.m.first[b[len(b)-k]] {
 			f := s.m.forms[i]
-			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && bytes.HasPrefix(after, f.b[k:]) {
+			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && s.follows(at, f.b[k:]) {
 				s.res.add(f.id)
 			}
 		}
 	}
-	for _, h := range s.m.slash {
-		f := s.m.forms[h[0]]
-		if b[0] != '0' && bytes.HasSuffix(before, f.b[:h[1]]) && bytes.HasPrefix(after, f.b[h[1]+1:]) {
-			s.res.add(f.id)
+	if b[0] == '0' {
+		if !bytes.HasSuffix(before, []byte(`\`)) || !bytes.HasPrefix(after, []byte(`\`)) {
+			return
+		}
+		before, after, at = before[:len(before)-1], after[1:], at+1
+	}
+	// Only the '\'s with the break's bytes beside them, or none, are read
+	// back, so the table bounds what a break costs, not the stream (#4681).
+	for _, k := range [2]int{beside(before, after), 0} {
+		for _, h := range s.m.slash[k] {
+			f, i := s.m.forms[h[0]], h[1]
+			if bytes.HasSuffix(before, f.b[:i]) && s.follows(at, f.b[i+1:]) {
+				s.res.add(f.id)
+			}
 		}
 	}
+}
+
+// follows reports whether f comes at joined[j:], where a held JSON break
+// may stand for one of f's '\'s and a held %0a or %0d split a run of them.
+func (s *Stream) follows(j int, f []byte) bool {
+	t := s.joined
+	for i := 0; i < len(f); {
+		if j < len(t) && t[j] == f[i] {
+			i, j = i+1, j+1
+			continue
+		}
+		jb, ub := s.breakAt(j)
+		switch {
+		case jb && f[i] == '\\':
+			i++
+		case ub && i > 0 && j > 0 && f[i-1] == '\\' && t[j-1] == '\\' && j < len(t) && t[j] == '\\':
+			j++
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// breakAt reports whether a JSON break, and a %0a or %0d, is held at j.
+func (s *Stream) breakAt(j int) (jb, ub bool) {
+	i, _ := slices.BinarySearchFunc(s.breaks, j, func(c cut, j int) int { return c.at - j })
+	for ; i < len(s.breaks) && s.breaks[i].at == j; i++ {
+		jb, ub = jb || s.breaks[i].b[0] != '0', ub || s.breaks[i].b[0] == '0'
+	}
+	return jb, ub
+}
+
+// beside keys a '\' by the bytes before and after it, 0 at either end.
+func beside(before, after []byte) int {
+	if len(before) == 0 || len(after) == 0 {
+		return 0
+	}
+	return (int(before[len(before)-1])<<8 | int(after[0])) + 1
 }
 
 func tail(w []byte, keep int) []byte {

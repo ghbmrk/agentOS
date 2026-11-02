@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/decoy"
 	"github.com/ghbmrk/agentos/broker/decoy/match"
@@ -423,9 +425,6 @@ func TestJSONBackslashWrapped(t *testing.T) {
 					continue
 				}
 				for _, br := range []string{"\n", "\r\n", `\n`, `\r\n`, `\u000a`, `\\n`, "%0A"} {
-					if d == 1 && br == "%0A" && f[cut-1] == '\\' && f[cut] == '\\' {
-						continue // "%0A" inside a depth-two '\' run is not joined (DECOY-a-5)
-					}
 					s := `{"a":"` + f[:cut] + br + f[cut:] + `"}`
 					wrappedTrips(t, m, s, 6+cut+len(br), 5)
 				}
@@ -459,6 +458,78 @@ func TestJSONBackslashWrapped(t *testing.T) {
 				t.Fatalf("a %d-character form, then %q, tripped %v, want [7]", len(f), head, got)
 			}
 		}
+	}
+	// Each later break is read back too, so a form split twice trips: a
+	// form begun in a break (its leading n after "C:\\") and split after
+	// one of its escapes' '\', and a value with two '\'s split after both;
+	// without the n (past the first escape, where the break's n is the
+	// form's), or with a break alone in a '\' place, it does not (#4681).
+	v := "n" + strings.Repeat("<", 4) + "q7Xz2pL9mW4v"
+	m = match.New([]match.Value{{ID: 6, Bytes: []byte(v)}}, nil)
+	j, _ := json.Marshal(v)
+	f := string(j[1 : len(j)-1]) // n\u003c\u003c\u003c\u003cq7Xz2pL9mW4v
+	for at := 2; at < len(f); at++ {
+		if f[at-1] != '\\' {
+			continue
+		}
+		for _, br := range []string{`\n`, `\u000a`, `\\r`} {
+			wrappedTrips(t, m, `C:\\`+f[:at]+br+f[at:], 3+at+len(br), 6)
+			if got := m.Scan([]byte(`C:\\` + f[1:at] + br + f[at:])).Trips; at > 2 && len(got) != 0 {
+				t.Fatalf("%q without the form's n tripped %v", f[1:], got)
+			}
+		}
+	}
+	two := `q7Xz\2pL9\mW4vR8tY3nB6kJ5h`
+	m = match.New([]match.Value{{ID: 8, Bytes: []byte(two)}}, nil)
+	for _, br := range []string{`\n`, `\r\n`, `\u000a`, "%0a"} {
+		s := `{"a":"q7Xz\\` + `\n` + `2pL9\\` + br + `mW4vR8tY3nB6kJ5h"}`
+		wrappedTrips(t, m, s, len(`{"a":"q7Xz\\\n`), 8)
+	}
+	if got := m.Scan([]byte(`q7Xz\n2pL9mW4vR8tY3nB6kJ5h`)).Trips; len(got) != 0 {
+		t.Fatalf("one '\\' kept and one break alone in a '\\' place tripped %v", got)
+	}
+}
+
+// KRN-12: the same JSON form wrapped with a raw LF or CRLF, and split by
+// one after its escaped '\', trips (#4681, Security on #4663).
+func TestJSONFormRawWrapped(t *testing.T) {
+	v := `q7Xz\2pL9<mW4vR8tY3nB6kJ5h`
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(v)}}, nil)
+	j, _ := json.Marshal(v)
+	f := string(j[1 : len(j)-1])
+	for cut := 1; cut < len(f); cut++ {
+		for _, br := range []string{"\n", "\r\n"} {
+			wrappedTrips(t, m, f[:cut]+br+f[cut:], cut+len(br), 1)
+		}
+	}
+}
+
+// KRN-12: an attacker-written stream of JSON breaks costs about what plain
+// text does, whatever '\'s the table's forms hold: here a MaxValue value of
+// '<'s, a '\' in every sixth byte of its JSON form. Each break looks up only
+// the '\'s with its own bytes beside them (#4681). Timed against plain text
+// in the same run, so a slow runner or -race moves both.
+func TestBreakStreamCost(t *testing.T) {
+	m := match.New([]match.Value{{ID: 1, Bytes: []byte(strings.Repeat("<", match.MaxValue))},
+		{ID: 2, Bytes: []byte(`q7Xz\2pL9<mW4vR8tY3nB6kJ5h`)}}, nil)
+	run := func(unit string) time.Duration {
+		w := []byte(strings.Repeat(unit, 512/len(unit))) // 512-byte writes
+		start := time.Now()
+		s := m.Stream()
+		for range 128 {
+			s.Write(w)
+		}
+		if r := s.Result(); len(r.Trips) != 0 {
+			t.Fatalf("a stream of %q tripped %v", unit, r.Trips)
+		}
+		return time.Since(start)
+	}
+	plain, breaks := time.Duration(math.MaxInt64), time.Duration(math.MaxInt64)
+	for range 2 {
+		plain, breaks = min(plain, run("xy")), min(breaks, run(`x\n`))
+	}
+	if breaks > 3*plain {
+		t.Fatalf("64 KiB of x\\n took %v, plain text %v: over 3 times as long", breaks, plain)
 	}
 }
 
