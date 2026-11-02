@@ -10,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1068,14 +1069,21 @@ func coreLine(e Event) bool {
 // TestNoTimer (#4725, ENF-d-4): the channel's code starts no goroutine and
 // arms no timer, so every line it logs is queued while it handles a call:
 // nothing logs while the core is silent, and a test's sync point through
-// the channel orders every line before it. Revert mutant: a flush on a
-// timer.
+// the channel orders every line before it. Each file's import names are
+// resolved, so a renamed import is caught, and a dot or blank import of a
+// package that can call back later fails. Revert mutants: a goroutine; a
+// timer under a renamed import; context.AfterFunc or a context deadline;
+// runtime.SetFinalizer (#4735 L3).
 func TestNoTimer(t *testing.T) {
+	banned := map[string]map[string]bool{
+		"time":    {"AfterFunc": true, "After": true, "NewTimer": true, "NewTicker": true, "Tick": true, "Sleep": true},
+		"context": {"AfterFunc": true, "WithTimeout": true, "WithDeadline": true, "WithTimeoutCause": true, "WithDeadlineCause": true},
+		"runtime": {"SetFinalizer": true, "AddCleanup": true},
+	}
 	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	timers := map[string]bool{"AfterFunc": true, "After": true, "NewTimer": true, "NewTicker": true, "Tick": true, "Sleep": true}
 	fset, files := token.NewFileSet(), 0
 	for _, name := range names {
 		if strings.HasSuffix(name, "_test.go") {
@@ -1086,13 +1094,32 @@ func TestNoTimer(t *testing.T) {
 			t.Fatal(err)
 		}
 		files++
+		local := map[string]string{} // import name in this file -> path
+		for _, im := range f.Imports {
+			path, err := strconv.Unquote(im.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if banned[path] == nil {
+				continue
+			}
+			n := path
+			if im.Name != nil {
+				n = im.Name.Name
+			}
+			if n == "." || n == "_" {
+				t.Errorf("%s imports %q as %s, which this test cannot follow", fset.Position(im.Pos()), path, n)
+				continue
+			}
+			local[n] = path
+		}
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.GoStmt:
 				t.Errorf("%s starts a goroutine", fset.Position(n.Pos()))
 			case *ast.SelectorExpr:
-				if x, ok := n.X.(*ast.Ident); ok && x.Name == "time" && timers[n.Sel.Name] {
-					t.Errorf("%s calls time.%s", fset.Position(n.Pos()), n.Sel.Name)
+				if x, ok := n.X.(*ast.Ident); ok && banned[local[x.Name]][n.Sel.Name] {
+					t.Errorf("%s calls %s.%s", fset.Position(n.Pos()), local[x.Name], n.Sel.Name)
 				}
 			}
 			return true
