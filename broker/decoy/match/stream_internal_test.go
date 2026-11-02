@@ -53,3 +53,28 @@ func TestStreamJoinsAcrossChunks(t *testing.T) {
 		}
 	}
 }
+
+// KRN-12: a removed break is carried with the joined tail, moved with it,
+// so a form that begins inside one trips after a chunk edge (#4582).
+func TestStreamCarriesBreaks(t *testing.T) {
+	m := New([]Value{{ID: 4, Bytes: []byte("nq7Xz2pL9mW4vR8tY3nB6kJ5h")}}, nil)
+	for _, extra := range []int{1, 100, carryPattern} {
+		s := m.Stream()
+		s.Write([]byte(`\n` + strings.Repeat("a", carryPattern+extra) + `C:\\nq7Xz2pL9m\nW4v`))
+		if s.pending != 0 || len(s.breaks) != 2 || len(s.joined) != carryPattern {
+			t.Fatalf("no chunk scanned and cut: pending %d, %d breaks, joined %d", s.pending, len(s.breaks), len(s.joined))
+		}
+		s.Write([]byte("R8tY3nB6kJ5h"))
+		if r := s.Result(); len(r.Trips) != 1 {
+			t.Fatalf("a form begun in a break %d bytes past a chunk edge tripped %v", extra, r.Trips)
+		}
+	}
+}
+
+// KRN-12: a one-byte value, too short for a base64 form at every offset,
+// makes a matcher without failing.
+func TestOneByteValue(t *testing.T) {
+	if m := New([]Value{{ID: 4, Bytes: []byte("n")}}, nil); len(m.first['n']) == 0 {
+		t.Fatal("the raw form is not indexed by its first byte")
+	}
+}

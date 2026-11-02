@@ -199,6 +199,7 @@ type Value struct {
 // its destinations. It is immutable, so one serves many streams.
 type Matcher struct {
 	forms []form
+	first map[byte][]int // forms by their first byte
 	dests map[netip.Addr]int
 	carry int
 }
@@ -214,12 +215,15 @@ type form struct {
 // empty value is skipped: a destination-only entry. dests maps an address to
 // the ID a trip names it by.
 func New(values []Value, dests map[netip.Addr]int) *Matcher {
-	m := &Matcher{dests: map[netip.Addr]int{}}
+	m := &Matcher{first: map[byte][]int{}, dests: map[netip.Addr]int{}}
 	for _, v := range values {
 		if len(v.Bytes) == 0 || len(v.Bytes) > MaxValue {
 			continue
 		}
 		for _, f := range encodings(v.Bytes) {
+			if len(f) > 0 {
+				m.first[f[0]] = append(m.first[f[0]], len(m.forms))
+			}
 			m.forms = append(m.forms, form{v.ID, f})
 			m.carry = max(m.carry, len(f)-1)
 		}
@@ -291,6 +295,7 @@ type Stream struct {
 	m       *Matcher
 	buf     []byte // the carried tail, then the bytes not yet scanned
 	joined  []byte // buf with line breaks removed, kept the same way
+	breaks  []cut  // the breaks removed from joined's tail
 	pending int
 	res     Result
 }
@@ -303,7 +308,7 @@ func (m *Matcher) Stream() *Stream { return &Stream{m: m} }
 // never fails.
 func (s *Stream) Write(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
-	s.joined = join(s.joined, p)
+	s.join(p)
 	s.pending += len(p)
 	if s.pending >= carryPattern {
 		s.scan()
@@ -311,19 +316,71 @@ func (s *Stream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// join appends p to dst without CR, LF or their JSON escapes at any depth
-// (whose '\\'s may end dst), so wrapped base64 or hex, raw or in JSON, matches.
-func join(dst, p []byte) []byte {
+// cut is a line break removed from joined: where it was, and its last
+// characters but the first.
+type cut struct {
+	at int
+	b  []byte
+}
+
+// join appends p to joined without line breaks: CR, LF, and their escapes
+// %0a and %0d (either case) and, at any JSON depth, \n, \r, \u000a and
+// \u000d. A break may begin in an earlier write. Each break is kept, since
+// one may instead be an escaped '\' or a literal '%' and a form's first
+// characters (#4582). A break begins after the last one, so its place stays.
+func (s *Stream) join(p []byte) {
 	for _, c := range p {
-		switch {
-		case c == '\r' || c == '\n':
-		case (c == 'r' || c == 'n') && len(dst) > 0 && dst[len(dst)-1] == '\\':
-			dst = bytes.TrimRight(dst, `\`)
-		default:
-			dst = append(dst, c)
+		if c == '\r' || c == '\n' {
+			continue
+		}
+		floor := 0
+		if len(s.breaks) > 0 {
+			floor = s.breaks[len(s.breaks)-1].at
+		}
+		if n := escape(s.joined[floor:], c); n > 0 {
+			at := len(s.joined) - n
+			s.joined = append(s.joined, c)
+			s.addBreak(at, s.joined[at+1+max(0, n-5):])
+			s.joined = s.joined[:at]
+			continue
+		}
+		s.joined = append(s.joined, c)
+	}
+}
+
+// addBreak keeps a break at at by the characters after its first that a
+// form may begin with (at most "u000a"), once for each place.
+func (s *Stream) addBreak(at int, b []byte) {
+	for i := len(s.breaks) - 1; i >= 0 && s.breaks[i].at == at; i-- {
+		if bytes.Equal(s.breaks[i].b, b) {
+			return
 		}
 	}
-	return dst
+	s.breaks = append(s.breaks, cut{at, bytes.Clone(b)})
+}
+
+// escape returns how many bytes ending w begin a line-break escape that c
+// ends, or 0.
+func escape(w []byte, c byte) int {
+	var head []byte
+	switch c {
+	case 'n', 'r':
+	case 'a', 'A', 'd', 'D':
+		if bytes.HasSuffix(w, []byte("%0")) {
+			return 2
+		}
+		if head = []byte("u000"); !bytes.HasSuffix(w, head) {
+			return 0
+		}
+	default:
+		return 0
+	}
+	i := len(w) - len(head)
+	j := len(bytes.TrimRight(w[:i], `\`))
+	if j == i {
+		return 0
+	}
+	return len(w) - j
 }
 
 // scan matches the pending bytes with the carried tail, as written and
@@ -334,11 +391,30 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
+	// A form may begin inside a removed break, the rest joined after it.
+	for _, br := range s.breaks {
+		for k := 1; k <= len(br.b); k++ {
+			for _, i := range s.m.first[br.b[len(br.b)-k]] {
+				f := s.m.forms[i]
+				if k < len(f.b) && bytes.HasSuffix(br.b, f.b[:k]) && bytes.HasPrefix(s.joined[br.at:], f.b[k:]) {
+					s.res.add(f.id)
+				}
+			}
+		}
+	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
 	keep := max(s.m.carry, carryPattern)
+	drop := max(0, len(s.joined)-keep)
 	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, keep), 0
+	kept := s.breaks[:0]
+	for _, br := range s.breaks {
+		if br.at >= drop {
+			kept = append(kept, cut{br.at - drop, br.b})
+		}
+	}
+	s.breaks = kept
 }
 
 func tail(w []byte, keep int) []byte {

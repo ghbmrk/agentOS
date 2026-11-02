@@ -216,9 +216,10 @@ func wrap(s string, width int, br string) string {
 }
 
 // KRN-12: a value in base64 or hex broken into lines trips wherever a break
-// falls in it, at any width, with LF or CRLF, raw or JSON-escaped (what the
-// kernel scans of a plan step) at any depth, in one write or split at a break; the same
-// wrapped run without the value does not (#4500).
+// falls in it, at any width, with LF or CRLF, raw, URL-escaped or
+// \u-escaped, raw or JSON-escaped (what the kernel scans of a plan step) at
+// any depth, in one write or split at a break; the same wrapped run without
+// the value does not (#4500, #4582).
 func TestBase64Wrapped(t *testing.T) {
 	tab, err := decoy.Generate(rand.Reader, rangeAddrs)
 	if err != nil {
@@ -228,7 +229,7 @@ func TestBase64Wrapped(t *testing.T) {
 	encs := []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding}
 	forms := func(s string, width int) []string {
 		var out []string
-		for _, br := range []string{"\n", "\r\n"} {
+		for _, br := range []string{"\n", "\r\n", "%0A", "%0d%0a", `\u000a`, `\u000D\u000A`} {
 			w := wrap(s, width, br)
 			j, _ := json.Marshal(w)
 			jj, _ := json.Marshal(string(j)) // a JSON body inside a plan step's string
@@ -279,5 +280,48 @@ func TestBase64Wrapped(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// KRN-12: a form whose first characters could end a line-break escape
+// trips after text that makes them read as one: a literal '\' before n or
+// r (JSON "C:\\n..."), '%' or "%0" before hex 0a or a, "\u000" before a,
+// wrapped, raw or JSON-escaped at any depth; the same text without the value
+// does not (#4582).
+func TestWrappedAfterEscapeHead(t *testing.T) {
+	vals := []string{"nq7Xz2pL9mW4vR8tY3nB6kJ5h", "rW4vR8tY3nB6kJ5hq7Xz2pL9m", "u000aY3nB6kJ5hq7Xz2pL9mW4vR8t",
+		"aJ5hq7Xz2pL9mW4vR8tY3nB6k", "DpL9mW4vR8tY3nB6kJ5hq7Xz2", "0AvR8tY3nB6kJ5hq7Xz2pL9mW4", "n0AnB6kJ5hq7Xz2pL9mW4vR8tY3"}
+	var values []match.Value
+	for i, v := range vals {
+		values = append(values, match.Value{ID: i, Bytes: []byte(v)})
+	}
+	hexv := []byte{0x0a, 0xd0, 0x7f, 0x13, 0x99, 0x42, 0xee, 0x01, 0x5c, 0x77, 0x31, 0xa8}
+	values = append(values, match.Value{ID: len(vals), Bytes: hexv})
+	m := match.New(values, nil)
+	texts := append(slices.Clone(vals), hex.EncodeToString(hexv), strings.ToUpper(hex.EncodeToString(hexv)))
+	for i, v := range texts {
+		id := min(i, len(vals))
+		for _, head := range []string{`\`, `\\`, `\u000`, `\u00`, `%`, `%0`, `%\`} {
+			for _, width := range []int{3, 4, 5, 24} {
+				w := head + wrap(v, width, "\n")
+				j, _ := json.Marshal(w)
+				jj, _ := json.Marshal(string(j))
+				for _, s := range []string{w, string(j), string(jj)} {
+					if got := m.Scan([]byte("C:" + s + " y")).Trips; !slices.Equal(got, []int{id}) {
+						t.Fatalf("%q tripped %v, want [%d]", s, got, id)
+					}
+					if got := split(t, m, s, len(head)+1).Trips; !slices.Equal(got, []int{id}) {
+						t.Fatalf("%q split after its head tripped %v, want [%d]", s, got, id)
+					}
+				}
+				if got := m.Scan([]byte(head + wrap(v[len(v)/2:], width, "\n"))).Trips; len(got) != 0 {
+					t.Fatalf("%q without the value tripped %v", head+v[len(v)/2:], got)
+				}
+			}
+		}
+	}
+	repro := `{"a":"C:\\nq7Xz2pL9m\nW4vR8tY3nB6kJ5h"}`
+	if got := m.Scan([]byte(repro)).Trips; !slices.Equal(got, []int{0}) {
+		t.Fatalf("%s tripped %v, want [0]", repro, got)
 	}
 }
