@@ -8,9 +8,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"go/types"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -462,7 +465,7 @@ const (
 //
 //   - shape: secret is secretType, its methods are exactly equal, IssueToken
 //     and setCookie with the pinned bodies, no other declaration names
-//     secretSum, and the file declaring it imports only the standard library
+//     secretSum, and each file declaring it or a method imports only the standard library
 //     under its own names (so hmac and sha256 are crypto's, #4685 item 4);
 //     no file imports reflect, unsafe, C, httptest, text/template or its
 //     parse package. secret's own spec alone is skipped (item 5).
@@ -470,7 +473,8 @@ const (
 //     a response's header map is reached only as w.Header().Set(...) or
 //     headers(w.Header()), whose parameter is used only for Set; a request's
 //     only as r.Header.Get; and no type has a Header, Write or WriteHeader
-//     method, so none can stand in for a response and keep what is set on it.
+//     method, so none can stand in for a response and keep what is set on it;
+//     writerProblems also refuses promoted methods and other packages' types.
 //   - the token (route 3): Go code never names IssueToken; the one template
 //     parse is ParseFS(files, "templates/*.html"); no code reaches a
 //     template's Tree; every "Token" in a template is inside {{.Token.IssueToken}};
@@ -505,6 +509,9 @@ func exitProblems(fset *token.FileSet, files []*ast.File, tmpls map[string]strin
 					}
 				}
 			}
+			if fd, ok := d.(*ast.FuncDecl); ok && secretRecv(fd) {
+				ownsType = true
+			}
 		}
 		for _, imp := range f.Imports {
 			path := strings.Trim(imp.Path.Value, `"`)
@@ -513,7 +520,7 @@ func exitProblems(fset *token.FileSet, files []*ast.File, tmpls map[string]strin
 				bad(imp, "imports %s", path)
 			}
 			if ownsType && (imp.Name != nil || strings.Contains(strings.Split(path, "/")[0], ".")) {
-				bad(imp, "the file declaring secret imports %s other than as the standard library names it", path)
+				bad(imp, "a file declaring secret or a secret method imports %s other than as the standard library names it", path)
 			}
 		}
 		for _, d := range f.Decls {
@@ -527,11 +534,7 @@ func exitProblems(fset *token.FileSet, files []*ast.File, tmpls map[string]strin
 					}
 				}
 				if fd.Recv != nil {
-					rt := fd.Recv.List[0].Type
-					if st, ok := rt.(*ast.StarExpr); ok {
-						rt = st.X
-					}
-					if id, ok := rt.(*ast.Ident); ok && id.Name == "secret" {
+					if secretRecv(fd) {
 						own = true
 						methods = append(methods, fn)
 						want := map[string]string{"equal": equalBody, "setCookie": cookieBody, "IssueToken": issueBody}[fn]
@@ -638,7 +641,78 @@ func exitProblems(fset *token.FileSet, files []*ast.File, tmpls map[string]strin
 			out = append(out, fmt.Sprintf("%s names Token other than as %s", name, tokenAction))
 		}
 	}
+	out = append(out, writerProblems(fset, files)...)
 	slices.Sort(out)
+	return out
+}
+
+// secretRecv is whether fd is a method of secret.
+func secretRecv(fd *ast.FuncDecl) bool {
+	if fd.Recv == nil {
+		return false
+	}
+	rt := fd.Recv.List[0].Type
+	if st, ok := rt.(*ast.StarExpr); ok {
+		rt = st.X
+	}
+	id, ok := rt.(*ast.Ident)
+	return ok && id.Name == "secret"
+}
+
+// srcImporter type-checks the package's imports from source, once.
+var srcImporter = sync.OnceValue(func() types.Importer { return importer.ForCompiler(token.NewFileSet(), "source", nil) })
+
+// writerProblems checks, with the files type-checked, that every response
+// writer the package touches is one net/http handed a handler (#4685 route
+// 2 and 3): no expression of a concrete type implementing
+// http.ResponseWriter (a declared or promoted method set, of this package's
+// type or another's), and every expression of type http.ResponseWriter is a
+// function's own parameter. So mint, render and every handler write onto,
+// and set the cookie on, only the writer they were called with, which
+// traces back to ServeHTTP's. Type errors are problems too.
+func writerProblems(fset *token.FileSet, files []*ast.File) []string {
+	var out []string
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+	conf := types.Config{Importer: srcImporter(), Error: func(err error) { out = append(out, "type check: "+err.Error()) }}
+	pkg, _ := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page", fset, files, info)
+	var rw types.Type
+	for _, imp := range pkg.Imports() {
+		if imp.Path() == "net/http" {
+			rw = imp.Scope().Lookup("ResponseWriter").Type()
+		}
+	}
+	if rw == nil {
+		return append(out, "the package does not import net/http")
+	}
+	iface := rw.Underlying().(*types.Interface)
+	params := map[types.Object]bool{}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			if ft, ok := n.(*ast.FuncType); ok && ft.Params != nil {
+				for _, fl := range ft.Params.List {
+					for _, id := range fl.Names {
+						params[info.Defs[id]] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	for e, tv := range info.Types {
+		if tv.IsType() || tv.Type == nil {
+			continue
+		}
+		at := fset.Position(e.Pos()).String()
+		if _, isIface := tv.Type.Underlying().(*types.Interface); !isIface && types.Implements(tv.Type, iface) {
+			out = append(out, fmt.Sprintf("%s: %s is a %s, which can stand in for a response", at, types.ExprString(e), tv.Type))
+		}
+		if types.Identical(tv.Type, rw) {
+			id, ok := e.(*ast.Ident)
+			if !ok || !params[info.Uses[id]] {
+				out = append(out, fmt.Sprintf("%s: %s is a response writer other than a function's own parameter", at, types.ExprString(e)))
+			}
+		}
+	}
 	return out
 }
 
@@ -730,6 +804,26 @@ type leakErr struct{ v any }
 
 func (leakErr) Error() string { return "leak" }
 
+// teeFile starts an added file with a response wrapper that declares no
+// method: http.ResponseWriter's are promoted from inner, Write from the
+// buffer embedded beside it.
+const teeFile = `import (
+	"bytes"
+	"net/http"
+	"strings"
+)
+
+var _ = bytes.MinRead
+
+type inner struct{ http.ResponseWriter }
+
+type tee struct {
+	*strings.Builder
+	inner
+}
+
+`
+
 // #4685: exitProblems refuses each route it closes. Each case edits one
 // of the package's files, adds a file, or adds a template, and must yield
 // a problem containing want.
@@ -768,7 +862,50 @@ func TestExitCheckCatchesEachRoute(t *testing.T) {
 		{name: "template range", tmpl: `{{range $k, $v := .}}{{$v.IssueToken}}{{end}}`, want: "names Token other than"},
 		{name: "template printf", tmpl: `{{printf "%s" .Token.IssueToken}}`, want: "names Token other than"},
 		{name: "template func", tmpl: `{{when .Token}}`, want: "names Token other than"},
+		// Route 2 and 3 through a stand-in response (Security on #4731).
+		{name: "promoted tee", add: teeFile + `func leak(s *Server, w http.ResponseWriter, r *http.Request) string {
+	var b strings.Builder
+	s.render(tee{&b, inner{w}}, r, "enrol.html", map[string]any{})
+	return b.String()
+}`, want: "which can stand in for a response"},
+		{name: "buffer tee", add: teeFile + `type btee struct {
+	*bytes.Buffer
+	inner
+}
+
+func leak(s *Server, w http.ResponseWriter, r *http.Request) string {
+	b := new(bytes.Buffer)
+	s.mint(btee{b, inner{w}})
+	return b.String()
+}`, want: "which can stand in for a response"},
+		{name: "ServeHTTP tee", add: teeFile + `func leak(s *Server, w http.ResponseWriter, r *http.Request) {
+	var b strings.Builder
+	s.ServeHTTP(tee{&b, inner{w}}, r)
+}`, want: "which can stand in for a response"},
+		{name: "foreign recorder", add: `import (
+	"net/http"
+	"net/http/httptest"
+)
+
+func leak(s *Server, r *http.Request) string {
+	w := httptest.NewRecorder()
+	s.render(w, r, "home.html", map[string]any{})
+	return w.Body.String()
+}`, want: "*net/http/httptest.ResponseRecorder, which can stand in"},
+		{name: "writer from a call", add: `import "net/http"
+
+func leak(s *Server, r *http.Request, mk func() http.ResponseWriter) {
+	s.render(mk(), r, "home.html", map[string]any{})
+}`, want: "mk() is a response writer other than"},
+		{name: "writer in a field", add: `import "net/http"
+
+type holder struct{ w http.ResponseWriter }
+
+func leak(h holder, s *Server, r *http.Request) { s.render(h.w, r, "home.html", map[string]any{}) }`, want: "h.w is a response writer other than"},
 		// #4685 items 4 and 5.
+		{name: "equal moved", swap: swap{"csrf.go", "func (x secret) equal(b []byte) bool {\n\treturn x.secretSum != nil && len(x.secretSum()) == sha256.Size && hmac.Equal(x.secretSum(), b)\n}", ""},
+			add:  "import (\n\thmac \"bytes\"\n\t\"crypto/sha256\"\n)\n\nfunc (x secret) equal(b []byte) bool {\n\treturn x.secretSum != nil && len(x.secretSum()) == sha256.Size && hmac.Equal(x.secretSum(), b)\n}",
+			want: "a file declaring secret or a secret method imports bytes other than"},
 		{name: "hmac alias", swap: swap{"csrf.go", `"crypto/hmac"`, `hmac "bytes"`}, want: "imports bytes other than"},
 		{name: "foreign hmac", swap: swap{"csrf.go", `"crypto/hmac"`, `"github.com/ghbmrk/agentos/broker/hmac"`}, want: "imports github.com/ghbmrk/agentos/broker/hmac other than"},
 		{name: "grouped spec", swap: swap{"csrf.go", "type secret struct{ secretSum func() []byte }", "type (\n\tsecret struct{ secretSum func() []byte }\n\tleak   [len(secret{}.secretSum())]byte\n)"}, want: "declaration reads a secret's bytes"},

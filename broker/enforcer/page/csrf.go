@@ -40,7 +40,8 @@ import (
 // compile and fmt prints at most a code address for it in any holder, at
 // any depth, under any verb (fmt never calls a func value). Its methods are
 // equal, which runs hmac.Equal in constant time; setCookie, which writes
-// the cookie onto the response and is called only by mint; and IssueToken,
+// the cookie onto the response (only ever the writer net/http handed
+// ServeHTTP) and is called only by mint; and IssueToken,
 // which only the embedded templates call, as {{.Token.IssueToken}}, into
 // the one buffer render writes to the response. TestSecretsLeaveOnlyByTheirExits
 // pins that structure, and TestExitCheckCatchesEachRoute shows it refusing
