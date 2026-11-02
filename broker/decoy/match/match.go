@@ -54,6 +54,7 @@ var (
 	lower       = regexp.MustCompile(`[a-z]`)
 	upper       = regexp.MustCompile(`[A-Z]`)
 	digit       = regexp.MustCompile(`[0-9]`)
+	slashRun    = regexp.MustCompile(`\\+`)
 )
 
 // Detect returns text with known token formats, secret-named URL parameters
@@ -200,7 +201,7 @@ type Value struct {
 type Matcher struct {
 	forms []form
 	first map[byte][]int // forms by their first byte
-	slash []int          // forms holding a '\'
+	slash [][2]int       // each '\' of a form without a "\\": the form and where
 	dests map[netip.Addr]int
 	carry int
 }
@@ -225,8 +226,10 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 			if len(f) > 0 {
 				m.first[f[0]] = append(m.first[f[0]], len(m.forms))
 			}
-			if bytes.IndexByte(f, '\\') >= 0 {
-				m.slash = append(m.slash, len(m.forms))
+			for k, c := range f {
+				if c == '\\' && !bytes.Contains(f, []byte(`\\`)) {
+					m.slash = append(m.slash, [2]int{len(m.forms), k})
+				}
 			}
 			m.forms = append(m.forms, form{v.ID, f})
 			m.carry = max(m.carry, len(f)-1)
@@ -252,6 +255,11 @@ func encodings(v []byte) [][]byte {
 		from, to := [3]int{0, 2, 3}[off], 8*len(b)/6
 		for _, e := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
+		}
+	}
+	for _, f := range out[:2] { // joined text counts a run of '\'s as one
+		if c := slashRun.ReplaceAll(f, []byte(`\`)); !bytes.Equal(c, f) {
+			out = append(out, c)
 		}
 	}
 	return out
@@ -425,9 +433,6 @@ func (s *Stream) scan() {
 			s.res.add(f.id)
 		}
 	}
-	for _, br := range s.breaks {
-		s.matchBreak(br)
-	}
 	if !s.res.Pattern && Pattern(string(s.buf)) {
 		s.res.Pattern = true
 	}
@@ -456,12 +461,10 @@ func (s *Stream) matchBreak(br cut) {
 			}
 		}
 	}
-	for _, i := range s.m.slash {
-		f := s.m.forms[i]
-		for k, c := range f.b {
-			if c == '\\' && b[0] != '0' && bytes.HasSuffix(before, f.b[:k]) && bytes.HasPrefix(after, f.b[k+1:]) {
-				s.res.add(f.id)
-			}
+	for _, h := range s.m.slash {
+		f := s.m.forms[h[0]]
+		if b[0] != '0' && bytes.HasSuffix(before, f.b[:h[1]]) && bytes.HasPrefix(after, f.b[h[1]+1:]) {
+			s.res.add(f.id)
 		}
 	}
 }
@@ -470,10 +473,15 @@ func tail(w []byte, keep int) []byte {
 	return append([]byte(nil), w[max(0, len(w)-keep):]...)
 }
 
-// Result scans what is pending and returns what the stream has found.
+// Result scans what is pending, matches the breaks still held (a scan cuts
+// none away, so each is matched here or when let go), and returns what the
+// stream has found.
 func (s *Stream) Result() Result {
 	if s.pending != 0 {
 		s.scan()
+	}
+	for _, br := range s.breaks {
+		s.matchBreak(br)
 	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
 }

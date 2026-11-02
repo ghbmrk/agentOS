@@ -406,24 +406,28 @@ func TestRunCollapseFloor(t *testing.T) {
 
 // KRN-12: a value holding a '\' trips in its JSON form split by a break at
 // every place, at JSON depth one and two, also right after the escaped '\',
-// where the break's run holds it; the break alone in its place does not
-// (#4622).
+// where the break's run holds it, and with other JSON escapes in it ('<',
+// '"'); the break alone in its place does not (#4622).
 func TestJSONBackslashWrapped(t *testing.T) {
-	v := `q7Xz\2pL9mW4vR8tY3nB6kJ5h`
-	m := match.New([]match.Value{{ID: 5, Bytes: []byte(v)}}, nil)
-	j, _ := json.Marshal(v)
-	jj, _ := json.Marshal(string(j))
-	for _, f := range []string{string(j[1 : len(j)-1]), string(jj[2 : len(jj)-2])} {
-		for cut := 1; cut < len(f); cut++ {
-			for _, br := range []string{"\n", `\n`, `\r\n`, `\u000a`, `\\n`, "%0A"} {
-				s := `{"a":"` + f[:cut] + br + f[cut:] + `"}`
-				if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{5}) {
-					t.Fatalf("%q tripped %v, want [5]", s, got)
+	for _, v := range []string{`q7Xz\2pL9mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9<mW4vR8tY3nB6kJ5h`, `q7Xz\2pL9"mW4vR8tY3nB6kJ5h`} {
+		m := match.New([]match.Value{{ID: 5, Bytes: []byte(v)}}, nil)
+		j, _ := json.Marshal(v)
+		jj, _ := json.Marshal(string(j))
+		for d, f := range []string{string(j[1 : len(j)-1]), string(jj[3 : len(jj)-3])} {
+			for cut := 1; cut < len(f); cut++ {
+				for _, br := range []string{"\n", "\r\n", `\n`, `\r\n`, `\u000a`, `\\n`, "%0A"} {
+					if d == 1 && br == "%0A" && f[cut-1] == '\\' && f[cut] == '\\' {
+						continue // "%0A" inside a depth-two '\' run is not joined (DECOY-a-5)
+					}
+					s := `{"a":"` + f[:cut] + br + f[cut:] + `"}`
+					if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{5}) {
+						t.Fatalf("%q tripped %v, want [5]", s, got)
+					}
 				}
 			}
 		}
-	}
-	if got := m.Scan([]byte(`q7Xz%0a2pL9mW4vR8tY3nB6kJ5h`)).Trips; len(got) != 0 {
-		t.Fatalf("a %%0a break in the '\\' place tripped %v", got)
+		if got := m.Scan([]byte(strings.Replace(v, `\`, "%0a", 1))).Trips; len(got) != 0 {
+			t.Fatalf("a %%0a break in the '\\' place tripped %v", got)
+		}
 	}
 }
