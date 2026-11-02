@@ -424,7 +424,7 @@ func (d decision) sameAs(it owner.Item) bool {
 func (d decision) note(confirmed bool) journal.AnswerNote {
 	n := journal.AnswerNote{Approved: d.approved, Why: d.why, Request: d.req, Local: d.local,
 		Confirmed: d.local && confirmed, Asked: d.asked, Implicit: d.implicit, Late: d.late,
-		Hold: d.hold != "", Tries: max(d.tries, 0), Went: d.rep.went, Unclear: d.rep.unclear,
+		Hold: d.hold != "", Tries: d.tries, Went: d.rep.went, Unclear: d.rep.unclear,
 		Allowed: d.approved && d.allowed}
 	if d.asked {
 		n.Sum = owner.ItemSum(d.item)
@@ -1818,17 +1818,17 @@ func (g *Gate) check(ctx context.Context, phase journal.Phase, in journal.Intent
 
 // tries is how many attempts the intent has started. The engine is read
 // without g.mu: its policy calls take g.mu. An error is a refusal at the
-// recheck, never a count that might match an approval.
+// recheck, never a count that might match an approval: -1 with it.
 func (g *Gate) tries(id string) (int, error) {
 	g.mu.Lock()
 	eng := g.eng
 	g.mu.Unlock()
 	if eng == nil {
-		return 0, errors.New("grants are not loaded")
+		return -1, errors.New("grants are not loaded")
 	}
 	st, err := eng.Get(id)
 	if err != nil {
-		return 0, err
+		return -1, err
 	}
 	return len(st.Attempts), nil
 }
@@ -2503,10 +2503,7 @@ func (g *Gate) Decide(d owner.Decision) {
 		return
 	}
 	unstaged := d.Approved && g.unstaged(d.Ref)
-	tries, err := g.tries(d.Ref)
-	if err != nil {
-		tries = -1 // matches no count, so the recheck refuses it
-	}
+	tries, _ := g.tries(d.Ref) // -1 if unread: the journal refuses an approval with it (#1969)
 	g.mu.Lock()
 	w := g.waiting[d.Ref]
 	if w == nil && (d.Approved || g.eng == nil) {
