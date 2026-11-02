@@ -1,0 +1,927 @@
+package main
+
+// REQ: NET-2, NET-4, NET-6, STO-1, STO-4, STO-5, KEY-7, KRN-12
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ghbmrk/agentos/broker/enforcer/alert"
+	"github.com/ghbmrk/agentos/broker/enforcer/channel"
+	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
+	"github.com/ghbmrk/agentos/broker/enforcer/heads"
+	"github.com/ghbmrk/agentos/broker/enforcer/nft"
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
+	"github.com/ghbmrk/agentos/broker/enforcer/wire"
+	"github.com/ghbmrk/agentos/broker/kernel/key"
+)
+
+const (
+	rp = "enforcer.home.arpa"
+	// caseCode is a synthetic canary, never a real code.
+	caseCode = "CANARY-CASE-CODE-AAAA-BBBB"
+)
+
+var (
+	ownerAddr = netip.MustParseAddr("10.10.0.1")
+	phoneAddr = netip.MustParseAddr("10.10.0.20")
+	coreAddr  = netip.MustParseAddr("127.0.0.1") // the test's core dials over loopback
+)
+
+func testConfig(t *testing.T) Config {
+	t.Helper()
+	c := Config{
+		Name: rp, Zone: "UTC",
+		Layout: nft.Layout{
+			WAN: "wan0", Owner: "own0", Household: "hh0", Guests: "gst0", Admin: "adm0",
+			Core: "core0", Edge: "edge0", Trunk: "ap0", APMgmt: "apm0",
+			APAdmin:     []netip.Addr{netip.MustParseAddr("10.70.0.2")},
+			ISP:         []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			EdgeGateway: netip.MustParseAddr("10.60.0.1"),
+			PagePort:    443, ChannelPort: 7443, CorePagePort: 443,
+		},
+		Page:      []netip.AddrPort{netip.AddrPortFrom(ownerAddr, 443)},
+		PageAllow: []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
+		Channel:   netip.AddrPortFrom(netip.MustParseAddr("10.50.0.1"), 7443),
+		CoreAllow: []netip.Prefix{netip.PrefixFrom(coreAddr, 32)},
+		Nft:       "/usr/sbin/nft",
+	}
+	if err := c.check(); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// authenticator is a fake ES256 passkey on rp with user verification.
+type authenticator struct {
+	t    *testing.T
+	priv *ecdsa.PrivateKey
+}
+
+func newAuthenticator(t *testing.T) *authenticator {
+	p, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &authenticator{t: t, priv: p}
+}
+
+func (a *authenticator) Public() key.PublicKey {
+	point, _ := a.priv.PublicKey.Bytes()
+	pk, err := key.ES256(rp, point)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return pk
+}
+
+func (a *authenticator) spki() string {
+	der, err := x509.MarshalPKIXPublicKey(&a.priv.PublicKey)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(der)
+}
+
+// assertion is a tap over challenge (base64url, as the page serves it),
+// in the page's JSON shape.
+func (a *authenticator) assertion(id, challenge string) map[string]string {
+	cd, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": challenge, "origin": "https://" + rp, "crossOrigin": false})
+	ad, sig := a.signed(cd)
+	e := base64.RawURLEncoding.EncodeToString
+	return map[string]string{"id": id, "authenticator_data": e(ad), "client_data_json": e(cd), "signature": e(sig)}
+}
+
+// sign is a tap over msg in key.AssertionSig's encoding, as a package
+// that checks a root signature takes it.
+func (a *authenticator) sign(msg []byte) []byte {
+	c := key.Challenge(msg)
+	cd, _ := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": base64.RawURLEncoding.EncodeToString(c[:]), "origin": "https://" + rp, "crossOrigin": false})
+	ad, sig := a.signed(cd)
+	b, err := key.AssertionSig(key.Assertion{AuthenticatorData: ad, ClientDataJSON: cd, Signature: sig})
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return b
+}
+
+func (a *authenticator) signed(cd []byte) ([]byte, []byte) {
+	h := sha256.Sum256([]byte(rp))
+	ad := append(h[:], 0x01|0x04, 0, 0, 0, 0)
+	cdh := sha256.Sum256(cd)
+	m := sha256.Sum256(append(slices.Clone(ad), cdh[:]...))
+	sig, err := ecdsa.SignASN1(rand.Reader, a.priv, m[:])
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return ad, sig
+}
+
+// fakeFire is the nft loader: it keeps every ruleset loaded, and with
+// fail set refuses the next load as nft refuses a bad text.
+type fakeFire struct {
+	mu     sync.Mutex
+	loads  []string
+	fail   bool
+	listed int
+}
+
+func (f *fakeFire) Load(_ context.Context, s string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		f.fail = false
+		return errors.New("nft: refused")
+	}
+	f.loads = append(f.loads, s)
+	return nil
+}
+
+func (f *fakeFire) List(context.Context, string) ([]byte, error) {
+	f.mu.Lock()
+	f.listed++
+	f.mu.Unlock()
+	return nil, nil
+}
+
+func (f *fakeFire) last() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.loads) == 0 {
+		return ""
+	}
+	return f.loads[len(f.loads)-1]
+}
+
+// fakeNetwork is the access point's side of enrolment: the setup
+// network until Replace, then the Owner network's card.
+type fakeNetwork struct {
+	mu       sync.Mutex
+	setup    bool
+	replaced int
+}
+
+func (n *fakeNetwork) Replace() (enrol.Card, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.setup = false
+	n.replaced++
+	return enrol.Card{SSID: "Home", Shown: "CANA RYOW NERA AAAA", QR: "WIFI:T:WPA;S:Home;P:CANARYOWNERAAAA;;"}, nil
+}
+
+type fakeLight struct {
+	mu sync.Mutex
+	c  alert.Colour
+}
+
+func (l *fakeLight) Show(c alert.Colour) error { l.mu.Lock(); l.c = c; l.mu.Unlock(); return nil }
+
+// box is one enforcer's disk, clocks and surroundings, across restarts.
+type box struct {
+	t     *testing.T
+	dir   string
+	cfg   Config
+	fire  *fakeFire
+	net   *fakeNetwork
+	light *fakeLight
+	core  ed25519.PrivateKey
+
+	mu  sync.Mutex
+	now time.Time
+	el  time.Duration
+	log []string
+
+	d *Enforcer
+	b *browser
+}
+
+// newBox is a box at first boot: the image provisioned the case code
+// and, with a core, pinned the kernel's channel sub-key.
+func newBox(t *testing.T, withCore bool) *box {
+	t.Helper()
+	x := &box{t: t, dir: t.TempDir(), cfg: testConfig(t), fire: &fakeFire{}, net: &fakeNetwork{setup: true},
+		light: &fakeLight{}, now: time.UnixMilli(1_800_000_000_000), el: time.Hour}
+	if err := os.Chmod(x.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := enrol.Provision(fileStore{filepath.Join(x.dir, fileEnrol)}, caseCode, nil); err != nil {
+		t.Fatal(err)
+	}
+	if withCore {
+		_, x.core, _ = ed25519.GenerateKey(rand.Reader)
+		pub := base64.StdEncoding.EncodeToString(x.core.Public().(ed25519.PublicKey))
+		if err := (fileStore{filepath.Join(x.dir, fileCoreKey)}).Save([]byte(pub)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x.start()
+	t.Cleanup(func() { x.d.Close() })
+	return x
+}
+
+func (x *box) start() {
+	x.t.Helper()
+	d, err := open(x.cfg, x.dir, deps{
+		Now:     func() time.Time { x.mu.Lock(); defer x.mu.Unlock(); return x.now },
+		Elapsed: func() time.Duration { x.mu.Lock(); defer x.mu.Unlock(); return x.el },
+		Fire:    x.fire, Network: x.net, Light: x.light, Radio: noRadio{},
+		Logf: func(s string) { x.mu.Lock(); x.log = append(x.log, s); x.mu.Unlock() },
+	})
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	x.d, x.b = d, &browser{x: x}
+}
+
+// restart is a power loss and boot: nothing survives but the disk.
+func (x *box) restart() {
+	x.t.Helper()
+	x.d.Close()
+	x.start()
+}
+
+// advance moves both clocks on and runs the daemon's clock.
+func (x *box) advance(d time.Duration) {
+	x.mu.Lock()
+	x.now, x.el = x.now.Add(d), x.el+d
+	x.mu.Unlock()
+	x.d.Tick(context.Background())
+}
+
+func (x *box) nowMS() int64 { x.mu.Lock(); defer x.mu.Unlock(); return x.now.UnixMilli() }
+
+// current is the policy in force, read as the channel reads it.
+func (x *box) current() policy.Document { return lockedPolicy{x.d}.Current() }
+
+func (x *box) pending() []policy.Pending {
+	x.d.mu.Lock()
+	defer x.d.mu.Unlock()
+	return x.d.engine.Pending()
+}
+
+// enforced is the ruleset the firewall last loaded, which must be the
+// policy in force's.
+func (x *box) enforced() string {
+	x.t.Helper()
+	want, err := nft.Reload(x.current(), x.cfg.Layout, nil)
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	got := x.fire.last()
+	if got != want {
+		x.t.Fatalf("the firewall holds a ruleset other than the policy in force's (version %d)", x.current().Version)
+	}
+	return got
+}
+
+func (x *box) opened(k alert.Kind) bool {
+	return slices.ContainsFunc(x.d.alerts.Status().Open, func(r alert.Record) bool { return r.Kind == k })
+}
+
+func (x *box) logged(k alert.Kind) bool {
+	return slices.ContainsFunc(x.d.alerts.Log(), func(r alert.Record) bool { return r.Kind == k })
+}
+
+// browser is the owner's phone on the Owner network, opening the page's
+// own origin.
+type browser struct {
+	x             *box
+	from          netip.Addr
+	cookie, token string
+	tokenOf       any
+}
+
+var (
+	reToken = regexp.MustCompile(`<meta name="enforcer-token" content="([A-Za-z0-9_-]+)">`)
+	reID    = regexp.MustCompile(`data-id="([0-9a-f]+)"`)
+	reChal  = regexp.MustCompile(`data-challenge="([A-Za-z0-9_-]+)"`)
+)
+
+func (b *browser) do(method, path string, body any) *httptest.ResponseRecorder {
+	t := b.x.t
+	t.Helper()
+	s := b.x.d.Page()
+	if method != http.MethodGet && b.tokenOf != any(s) {
+		b.do(http.MethodGet, "/enrol", nil) // any screen draws a token
+		if b.tokenOf != any(s) {
+			t.Fatal("no screen drew a token")
+		}
+	}
+	var rd io.Reader
+	if body != nil {
+		j, _ := json.Marshal(body)
+		rd = bytes.NewReader(j)
+	}
+	req := httptest.NewRequest(method, "https://"+rp+path, rd)
+	from := b.from
+	if !from.IsValid() {
+		from = phoneAddr
+	}
+	req.RemoteAddr = netip.AddrPortFrom(from, 50000).String()
+	if method == http.MethodGet {
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+	} else {
+		req.Header.Set("Origin", "https://"+rp)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Cookie", "__Host-enforcer="+b.cookie)
+		req.Header.Set("X-Enforcer-Token", b.token)
+	}
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "__Host-enforcer" {
+			if m := reToken.FindStringSubmatch(w.Body.String()); m != nil {
+				b.cookie, b.token, b.tokenOf = c.Value, m[1], any(s)
+			}
+		}
+	}
+	return w
+}
+
+func (b *browser) json(method, path string, body any, want int) map[string]any {
+	t := b.x.t
+	t.Helper()
+	w := b.do(method, path, body)
+	if w.Code != want {
+		t.Fatalf("%s %s: %d, want %d: %s", method, path, w.Code, want, w.Body)
+	}
+	var out map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &out)
+	return out
+}
+
+// enrol enrols a with code through the page's two enrolment steps.
+func (b *browser) enrol(a *authenticator, code string) map[string]any {
+	b.x.t.Helper()
+	r := b.json(http.MethodPost, "/enrol/begin", map[string]string{"code": code, "public_key": a.spki()}, http.StatusOK)
+	return b.json(http.MethodPost, "/enrol/finish", a.assertion(r["id"].(string), r["challenge"].(string)), http.StatusOK)
+}
+
+// link is the proposal link the core would text for next.
+func link(next policy.Document) string {
+	b, err := policy.Encode(next)
+	if err != nil {
+		panic(err)
+	}
+	return "/p?d=" + base64.RawURLEncoding.EncodeToString(b) + "&s=change"
+}
+
+// approve opens next's proposal link and taps it with a.
+func (b *browser) approve(a *authenticator, next policy.Document) *httptest.ResponseRecorder {
+	t := b.x.t
+	t.Helper()
+	w := b.do(http.MethodGet, link(next), nil)
+	id, ch := reID.FindStringSubmatch(w.Body.String()), reChal.FindStringSubmatch(w.Body.String())
+	if w.Code != http.StatusOK || id == nil || ch == nil {
+		t.Fatalf("proposal screen: %d %s", w.Code, w.Body)
+	}
+	return b.do(http.MethodPost, "/approve", a.assertion(id[1], ch[1]))
+}
+
+// act taps a page action (cancel, resume) with a.
+func (b *browser) act(a *authenticator, action, target string) *httptest.ResponseRecorder {
+	b.x.t.Helper()
+	r := b.json(http.MethodPost, "/challenge", map[string]string{"action": action, "target": target}, http.StatusOK)
+	body := map[string]any{"action": action}
+	for k, v := range a.assertion(r["id"].(string), r["challenge"].(string)) {
+		body[k] = v
+	}
+	return b.do(http.MethodPost, "/act", body)
+}
+
+// home is a policy with one everyday device on the Devices network.
+func home() policy.Document {
+	return policy.Document{Devices: []policy.Device{{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Everyday: true, Allow: []string{"tv.example"}}}}
+}
+
+// enrolled is a box with owner a enrolled through the page and home() in
+// force after its wait.
+func enrolled(t *testing.T, withCore bool) (*box, *authenticator) {
+	x := newBox(t, withCore)
+	a := newAuthenticator(t)
+	x.b.enrol(a, caseCode)
+	x.advance(time.Second)
+	if w := x.b.approve(a, home()); w.Code != http.StatusOK {
+		t.Fatalf("approve home: %d %s", w.Code, w.Body)
+	}
+	x.advance(time.Duration(policy.Wait) * time.Millisecond)
+	if x.current().Device("tv") == nil {
+		t.Fatal("home() not in force after its wait")
+	}
+	return x, a
+}
+
+// core is the kernel's end of the channel: a TLS client that sends the
+// signed hello bound to the connection's exporter.
+type core struct {
+	t      *testing.T
+	conn   *tls.Conn
+	id     uint64
+	alerts int
+}
+
+// serve runs the daemon's channel listener on loopback for this box.
+func (x *box) serve() string {
+	x.t.Helper()
+	ln, err := net.Listen("tcp", netip.AddrPortFrom(coreAddr, 0).String())
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	x.t.Cleanup(func() { ln.Close() })
+	go func() {
+		if err := x.d.ServeChannel(ln); !errors.Is(err, net.ErrClosed) {
+			x.t.Errorf("the channel listener stopped: %v", err)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// dial connects as the core with priv; ok reports whether the enforcer
+// answered the hello with its own.
+func (x *box) dial(addr string, priv ed25519.PrivateKey) (*core, bool) {
+	x.t.Helper()
+	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13}) // the hello authenticates
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	cs := c.ConnectionState()
+	exp, err := cs.ExportKeyingMaterial(wire.ExporterLabel, nil, wire.ExporterLen)
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	cl := &core{t: x.t, conn: c}
+	h, err := wire.SignHello(wire.RoleCore, priv, exp)
+	if err != nil {
+		x.t.Fatal(err)
+	}
+	cl.send(h)
+	m, err := cl.recv()
+	if err != nil {
+		c.Close()
+		return nil, false
+	}
+	eh, ok := m.(wire.Hello)
+	enf, kerr := channelKey(fileStore{filepath.Join(x.dir, fileChannelKey)}, nil)
+	if !ok || kerr != nil || eh.Verify(wire.RoleEnforcer, enf.Public().(ed25519.PublicKey), exp) != nil {
+		x.t.Fatalf("the enforcer's hello does not verify: %T", m)
+	}
+	x.t.Cleanup(func() { c.Close() })
+	return cl, true
+}
+
+func (c *core) send(m wire.Msg) {
+	c.t.Helper()
+	f, err := wire.Encode(wire.ToEnforcer, m)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := wire.WriteFrame(c.conn, wire.ToEnforcer, f); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+func (c *core) recv() (wire.Msg, error) {
+	c.conn.SetDeadline(time.Now().Add(5 * time.Second))
+	f, err := wire.ReadFrame(c.conn, wire.ToCore)
+	if err != nil {
+		return nil, err
+	}
+	return wire.Decode(wire.ToCore, f)
+}
+
+// read asks for the policy export and returns the reply's code.
+func (c *core) read() wire.Code {
+	c.t.Helper()
+	c.id++
+	c.send(wire.Read{ID: c.id, What: wire.ReadExport})
+	m, err := c.recv()
+	for err == nil {
+		if _, ok := m.(wire.Alert); !ok {
+			break
+		}
+		c.alerts++ // a text the enforcer sent for the owner line
+		m, err = c.recv()
+	}
+	if err != nil {
+		c.t.Fatalf("read: %v", err)
+	}
+	switch r := m.(type) {
+	case wire.ReadReply:
+		return wire.OK
+	case wire.Result:
+		return r.Code
+	}
+	c.t.Fatalf("reply %T", m)
+	return 0
+}
+
+// TestLifecycle is the brief's lifecycle matrix (briefs/ENF.md, slice l),
+// the rows ENF-l-a owns: each runs the whole daemon, its stores on disk,
+// its page through HTTP and its channel through TLS, and restarts it
+// where the row says power is lost. Catches pieces that pass alone and
+// fail together.
+func TestLifecycle(t *testing.T) {
+	// First boot, factory state: only the enrolment page answers, and the
+	// firewall holds default deny, the empty policy's ruleset.
+	t.Run("first boot", func(t *testing.T) {
+		x := newBox(t, false)
+		if x.d.book.Phase() != enrol.Factory {
+			t.Fatalf("phase %s", x.d.book.Phase())
+		}
+		want, err := nft.Compile(policy.Document{}, x.cfg.Layout)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if x.fire.last() != want {
+			t.Fatal("first boot did not load the empty policy's ruleset (default deny)")
+		}
+		if !x.net.setup {
+			t.Fatal("the setup network went before any enrolment")
+		}
+		if w := x.b.do(http.MethodGet, "/enrol", nil); w.Code != http.StatusOK {
+			t.Fatalf("enrolment screen: %d", w.Code)
+		}
+		if w := x.b.do(http.MethodGet, "/", nil); w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/enrol" {
+			t.Fatalf("home before enrolment: %d %s", w.Code, w.Header().Get("Location"))
+		}
+		if w := x.b.do(http.MethodGet, link(home()), nil); w.Code != http.StatusForbidden {
+			t.Fatalf("a proposal link before enrolment: %d", w.Code)
+		}
+		if w := x.b.do(http.MethodPost, "/approve", map[string]string{"id": "00"}); w.Code != http.StatusForbidden {
+			t.Fatalf("an approval before enrolment: %d", w.Code)
+		}
+		// Another network gets no answer at all.
+		x.b.from = netip.MustParseAddr("10.20.0.5")
+		func() {
+			defer func() {
+				if recover() != http.ErrAbortHandler {
+					t.Fatal("the page answered the Household network")
+				}
+			}()
+			x.b.do(http.MethodGet, "/enrol", nil)
+		}()
+	})
+
+	// Enrolment: the case code enrols the first passkey, the recovery
+	// code is shown once, the setup network is replaced first, the owner
+	// is texted, and the page rebuilt for the passkey takes its taps.
+	t.Run("enrolment", func(t *testing.T) {
+		x := newBox(t, false)
+		a := newAuthenticator(t)
+		bad := x.b.json(http.MethodPost, "/enrol/begin", map[string]string{"code": "CANARY-CASE-CODE-AAAA-BBBC", "public_key": a.spki()}, http.StatusForbidden)
+		_ = bad
+		res := x.b.enrol(a, caseCode)
+		if res["recovery"] == "" || res["network"] == nil {
+			t.Fatalf("enrolment answer: %v", res)
+		}
+		if x.net.setup || x.net.replaced != 1 {
+			t.Fatal("the setup network was not replaced at enrolment")
+		}
+		if x.d.book.Phase() != enrol.Enrolled || x.d.book.Owner() != a.Public() {
+			t.Fatal("the passkey is not in force")
+		}
+		if !x.logged(alert.Enrolment) {
+			t.Fatal("no enrolment alert")
+		}
+		x.advance(time.Second)
+		if w := x.b.do(http.MethodGet, "/", nil); w.Code != http.StatusOK {
+			t.Fatalf("home after enrolment: %d", w.Code)
+		}
+		if w := x.b.approve(a, home()); w.Code != http.StatusOK {
+			t.Fatalf("the page does not take the enrolled passkey's tap: %d %s", w.Code, w.Body)
+		}
+		x.restart()
+		if x.d.book.Owner() != a.Public() || len(x.pending()) != 1 {
+			t.Fatal("enrolment or its first proposal did not survive a restart")
+		}
+	})
+
+	// Normal: version N is enforced and the channel is open. A loosening
+	// reaches the firewall only after its wait; a closed-list tightening
+	// over the channel reaches it at once.
+	t.Run("normal", func(t *testing.T) {
+		x, _ := enrolled(t, true)
+		x.enforced()
+		addr := x.serve()
+		c, ok := x.dial(addr, x.core)
+		if !ok {
+			t.Fatal("the pinned core's hello was refused")
+		}
+		if c.read() != wire.OK {
+			t.Fatal("the core's read of the export failed")
+		}
+		c.id++
+		c.send(wire.Tighten{ID: c.id, Kind: wire.RemoveDevice, Device: "tv"})
+		if m, err := c.recv(); err != nil || m.(wire.Result).Code != wire.OK {
+			t.Fatalf("tightening: %v %v", m, err)
+		}
+		select {
+		case <-x.d.changed:
+		default:
+			t.Fatal("a tightening did not kick the firewall")
+		}
+		x.d.Tick(context.Background())
+		if x.current().Device("tv") != nil {
+			t.Fatal("the tightening is not in force")
+		}
+		x.enforced()
+		x.advance(time.Second)
+		if x.page("Channel") != "open" {
+			t.Fatal("the page does not show the channel open")
+		}
+	})
+
+	// Loosening pending, then power loss: it survives with its original
+	// deadline, a cancel still works, and nothing lands at the deadline.
+	t.Run("loosening pending then power loss", func(t *testing.T) {
+		x, a := enrolled(t, false)
+		next := home()
+		next.Devices = append(next.Devices, policy.Device{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Everyday: true})
+		if w := x.b.approve(a, next); w.Code != http.StatusOK {
+			t.Fatalf("approve: %d %s", w.Code, w.Body)
+		}
+		before := x.pending()
+		if len(before) != 1 {
+			t.Fatalf("pending: %v", before)
+		}
+		x.advance(time.Minute)
+		x.restart()
+		after := x.pending()
+		if len(after) != 1 || after[0].ID != before[0].ID || after[0].DueMS != before[0].DueMS {
+			t.Fatalf("pending after restart: %+v, before %+v", after, before)
+		}
+		if w := x.b.act(a, "cancel", after[0].ID); w.Code != http.StatusOK {
+			t.Fatalf("cancel after restart: %d %s", w.Code, w.Body)
+		}
+		x.advance(time.Duration(policy.Wait) * time.Millisecond)
+		if x.current().Device("speaker") != nil {
+			t.Fatal("a cancelled loosening landed")
+		}
+		x.enforced()
+	})
+
+	// Core down or silent: the last signed policy stays enforced and the
+	// page's status says the core is down; a hello brings it up.
+	t.Run("core down", func(t *testing.T) {
+		x, _ := enrolled(t, true)
+		if !x.d.alerts.Status().CoreDown {
+			t.Fatal("a core that never connected counts as up")
+		}
+		rules := x.enforced()
+		c, _ := x.dial(x.serve(), x.core)
+		c.read()
+		x.advance(time.Second)
+		if x.d.alerts.Status().CoreDown {
+			t.Fatal("a connected core counts as down")
+		}
+		x.advance(Silence)
+		if !x.d.alerts.Status().CoreDown {
+			t.Fatal("a core silent for two beats counts as up")
+		}
+		if x.enforced() != rules || x.current().Device("tv") == nil {
+			t.Fatal("a silent core changed the policy enforced")
+		}
+		x.restart()
+		x.advance(time.Second)
+		if !x.d.alerts.Status().CoreDown || x.enforced() != rules {
+			t.Fatal("after a restart with the core silent the policy or the status changed")
+		}
+	})
+
+	// Channel burst: the core is cut, the channel paused, the light red;
+	// a restart keeps it so, and only the page's passkey resume lifts it.
+	t.Run("channel burst", func(t *testing.T) {
+		x, a := enrolled(t, true)
+		c, _ := x.dial(x.serve(), x.core)
+		for range wire.Rate(wire.RateRead).Burst {
+			if code := c.read(); code != wire.OK {
+				t.Fatalf("a read inside the rate: %v", code)
+			}
+		}
+		c.read() // past the rate: a burst
+		waitFor(t, func() bool { return x.d.cut.Stage() == channel.Tripped })
+		if code := c.read(); code != wire.Paused {
+			t.Fatalf("a request after the trip: %v", code)
+		}
+		x.advance(time.Minute)
+		if !x.opened(alert.ChannelPaused) || !x.opened(alert.Trip) || x.light.c != alert.Red {
+			t.Fatalf("the trip does not show: %+v light %d", x.d.alerts.Status(), x.light.c)
+		}
+		x.restart()
+		x.advance(time.Second)
+		if x.d.cut.Stage() != channel.Tripped || x.page("Channel") != "paused" {
+			t.Fatal("a restart lifted the cut")
+		}
+		c, _ = x.dial(x.serve(), x.core)
+		if code := c.read(); code != wire.Paused {
+			t.Fatalf("a request after a restart while cut: %v", code)
+		}
+		if w := x.b.act(newAuthenticator(t), "resume", ""); w.Code == http.StatusOK {
+			t.Fatal("a stranger's passkey resumed the channel")
+		}
+		if w := x.b.act(a, "resume", ""); w.Code != http.StatusOK {
+			t.Fatalf("resume: %d %s", w.Code, w.Body)
+		}
+		x.advance(time.Minute)
+		if x.d.cut.Stage() != channel.Open || x.opened(alert.ChannelPaused) || x.opened(alert.Trip) || x.light.c != alert.Off {
+			t.Fatalf("the resume did not lift the cut: %+v", x.d.alerts.Status())
+		}
+		x.mu.Lock()
+		x.el += time.Hour // the read bucket refills on the rate clock
+		x.mu.Unlock()
+		if code := c.read(); code != wire.OK {
+			t.Fatalf("a request after the resume: %v", code)
+		}
+	})
+
+	// Older policy offered: a version below the one in force is refused
+	// without a fresh assertion; with one, it is a loosening and waits.
+	t.Run("older policy offered", func(t *testing.T) {
+		x, a := enrolled(t, false)
+		v1 := x.current()
+		old := policy.Proposal{Doc: v1, Diff: []byte("v1")}
+		root, err := old.Root(a.Public())
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldSig := a.sign(key.RootMsg(root))
+		less := home()
+		less.Devices = nil
+		if w := x.b.approve(a, less); w.Code != http.StatusOK || len(x.pending()) != 0 {
+			t.Fatalf("removing a device is a tightening, applied at once: %d %s", w.Code, w.Body)
+		}
+		x.advance(time.Second)
+		if x.current().Device("tv") != nil {
+			t.Fatal("the tightening is not in force")
+		}
+		x.enforced()
+		x.d.mu.Lock()
+		_, err = x.d.engine.Propose(old, oldSig, x.nowMS())
+		x.d.mu.Unlock()
+		if err == nil {
+			t.Fatal("an older version was taken without a fresh assertion")
+		}
+		if w := x.b.approve(a, home()); w.Code != http.StatusOK || len(x.pending()) != 1 {
+			t.Fatalf("the older policy with a fresh tap is not a waiting loosening: %d %s", w.Code, w.Body)
+		}
+		x.advance(time.Minute)
+		if x.current().Device("tv") != nil {
+			t.Fatal("the older policy landed before its wait")
+		}
+	})
+
+	// Factory reset with the case code: the policy is kept and enforced,
+	// and nothing loosens until a new passkey is enrolled and keeps it.
+	t.Run("factory reset", func(t *testing.T) {
+		x, a := enrolled(t, false)
+		rules := x.enforced()
+		x.b.json(http.MethodPost, "/enrol/reset", map[string]string{"code": caseCode}, http.StatusOK)
+		x.advance(time.Second)
+		if x.d.book.Phase() != enrol.Reset || x.enforced() != rules {
+			t.Fatal("the reset changed the policy enforced")
+		}
+		if w := x.b.do(http.MethodGet, link(home()), nil); w.Code != http.StatusForbidden {
+			t.Fatalf("a proposal after the reset: %d", w.Code)
+		}
+		next := home()
+		next.Destinations = []string{"models.example"}
+		x.d.mu.Lock()
+		p := policy.Proposal{Doc: next, Diff: []byte("x")}
+		p.Doc.Version = 9
+		r, _ := p.Root(a.Public())
+		_, err := x.d.engine.Propose(p, a.sign(key.RootMsg(r)), x.nowMS())
+		x.d.mu.Unlock()
+		if err == nil {
+			t.Fatal("the old passkey loosened after the reset")
+		}
+		x.restart()
+		b := newAuthenticator(t)
+		x.b.enrol(b, caseCode)
+		x.advance(time.Second)
+		if x.d.book.Kept() {
+			t.Fatal("the policy counts as kept before the new passkey signed it")
+		}
+		if w := x.b.act(b, "keep", ""); w.Code != http.StatusOK {
+			t.Fatalf("keep: %d %s", w.Code, w.Body)
+		}
+		x.advance(time.Second)
+		if x.current().Device("tv") == nil || !x.d.book.Kept() {
+			t.Fatal("the policy was not kept under the new passkey")
+		}
+		x.enforced()
+	})
+
+	// Recovery code used: a replacement passkey only after the wait, with
+	// a text and a page alert, and the old passkey stops at that point.
+	t.Run("recovery code", func(t *testing.T) {
+		x := newBox(t, false)
+		a := newAuthenticator(t)
+		res := x.b.enrol(a, caseCode)
+		code := strings.ReplaceAll(res["recovery"].(string), " ", "")
+		x.advance(time.Second)
+		b := newAuthenticator(t)
+		r := x.b.enrol(b, code)
+		if r["due"] == nil {
+			t.Fatalf("a recovery that does not wait: %v", r)
+		}
+		if !x.logged(alert.RecoveryCodeUsed) || !x.d.alerts.Status().Recovery {
+			t.Fatal("the recovery is neither texted nor on the page")
+		}
+		if x.light.c != alert.Off {
+			t.Fatal("a recovery lit the light")
+		}
+		x.restart()
+		x.advance(time.Duration(policy.Wait)*time.Millisecond - time.Minute)
+		if x.d.book.Owner() != a.Public() {
+			t.Fatal("the replacement came into force before its wait")
+		}
+		x.advance(2 * time.Minute)
+		if x.d.book.Owner() != b.Public() || x.d.alerts.Status().Recovery {
+			t.Fatal("the replacement did not come into force after its wait")
+		}
+		if w := x.b.approve(a, home()); w.Code == http.StatusOK {
+			t.Fatal("the replaced passkey still taps")
+		}
+		if w := x.b.approve(b, home()); w.Code != http.StatusOK {
+			t.Fatalf("the page was not rebuilt for the replacement: %d %s", w.Code, w.Body)
+		}
+	})
+
+	// Core key revoked (KEY-7): the channel refuses the revoked sub-key's
+	// hello, and the head copies keep the revocation across a restart.
+	t.Run("core key revoked", func(t *testing.T) {
+		x, a := enrolled(t, true)
+		addr := x.serve()
+		if _, ok := x.dial(addr, x.core); !ok {
+			t.Fatal("the pinned core was refused before any revocation")
+		}
+		sub := x.core.Public().(ed25519.PublicKey)
+		if err := x.d.RevokeCore(sub, newAuthenticator(t).sign(key.RootMsg(heads.SubKeyRoot(a.Public(), sub)))); err == nil {
+			t.Fatal("a stranger's passkey revoked the core's sub-key")
+		}
+		if err := x.d.RevokeCore(sub, a.sign(key.RootMsg(heads.SubKeyRoot(a.Public(), sub)))); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := x.dial(addr, x.core); ok {
+			t.Fatal("the revoked sub-key's hello was answered")
+		}
+		x.restart()
+		if _, ok := x.dial(x.serve(), x.core); ok {
+			t.Fatal("the revocation did not survive a restart")
+		}
+	})
+}
+
+// page is one field of the page's home screen, read from its HTML.
+func (x *box) page(field string) string {
+	x.t.Helper()
+	w := x.b.do(http.MethodGet, "/", nil)
+	if w.Code != http.StatusOK {
+		x.t.Fatalf("home: %d", w.Code)
+	}
+	switch field {
+	case "Channel":
+		if m := regexp.MustCompile(`The channel is ([a-z ]+)\.`).FindStringSubmatch(w.Body.String()); m != nil {
+			return m[1]
+		}
+	}
+	x.t.Fatalf("home shows no %s:\n%s", field, w.Body)
+	return ""
+}
+
+func waitFor(t *testing.T, f func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if f() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out")
+}

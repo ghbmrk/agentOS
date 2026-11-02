@@ -345,6 +345,23 @@ var coreEnforcer = map[string]struct {
 	"kernel/chancheck": {[]string{"enforcer/wire"}, forbiddenStd},
 }
 
+// enforcerMain is the enforcer's daemon (slice l, #3670): the one
+// composition root that links the page, the nft loader and the rest
+// together. It imports only enforcer packages, kernel/key and x/sys/unix
+// for CLOCK_BOOTTIME (#4507), starts no process itself and serves no
+// HTTP of its own; TestEnforcerImportsNothingFromAgentOS holds its
+// dependencies to the enforcer's.
+const enforcerMain = "cmd/agentos-enforcer"
+
+var enforcerMainRule = struct {
+	allowed []string
+	forbid  []string
+}{
+	[]string{"kernel/key", "enforcer/alert", "enforcer/channel", "enforcer/enrol", "enforcer/heads", "enforcer/nft",
+		"enforcer/nft/load", "enforcer/page", "enforcer/policy", "enforcer/wire", "golang.org/x/sys/unix"},
+	[]string{"net/http", "net/rpc", "net/smtp", "os/exec", "plugin", "unsafe", "C"},
+}
+
 // enforcerWebDeps are the third-party packages the page links: rsc.io/qr
 // draws the Owner network's Wi-Fi QR at enrolment (HW-10). The enforcer
 // shares no code with agentOS, so the core's card package, which wraps
@@ -422,6 +439,7 @@ func TestARC2ControlPathCannotReachInference(t *testing.T) {
 	for pkg, rule := range coreEnforcer {
 		checkImports(t, pkg, rule.allowed, rule.forbid, nil)
 	}
+	checkImports(t, enforcerMain, enforcerMainRule.allowed, enforcerMainRule.forbid, nil)
 }
 
 // TestCoreLinksOnlyEnforcerFormats: no core package imports an enforcer
@@ -435,7 +453,7 @@ func TestCoreLinksOnlyEnforcerFormats(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Fields(line)
 		pkg := strings.TrimPrefix(f[0], module)
-		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") {
+		if pkg == "enforcer" || strings.HasPrefix(pkg, "enforcer/") || pkg == enforcerMain {
 			continue
 		}
 		for _, im := range f[1:] {
@@ -498,6 +516,8 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		for _, dep := range strings.Fields(string(out)) {
 			rel := strings.TrimPrefix(dep, module)
 			switch {
+			case rel == enforcerMain && slices.Contains(pkgs, module+enforcerMain):
+				// the daemon itself, when it is the package checked
 			case rel == "enforcer" || strings.HasPrefix(rel, "enforcer/"):
 				own[rel] = true
 				if _, ok := enforcer[rel]; !ok {
@@ -527,6 +547,11 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	check([]string{module + enforcerWeb}, slices.DeleteFunc(slices.Clone(forbiddenDeps), func(s string) bool { return s == "net/http" || s == "crypto/tls" }), enforcerWebDeps...)
 	check([]string{module + enforcerSSH}, forbiddenDeps, enforcerSSHDeps...)
+	// The daemon links every enforcer package; nothing else of agentOS,
+	// no third party but the page's QR encoder and x/sys/unix, and no RPC,
+	// mail or plugin loader.
+	check([]string{module + enforcerMain}, []string{"net/rpc", "net/smtp", "plugin"},
+		append(slices.Clone(enforcerWebDeps), "golang.org/x/sys/unix")...)
 	if len(own) < len(enforcer) {
 		t.Errorf("go list found %d enforcer packages, the rule map names %d", len(own), len(enforcer))
 	}
