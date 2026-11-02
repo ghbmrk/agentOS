@@ -7,8 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -37,14 +35,16 @@ import (
 // pairLife ago (#4427), so no pair outlives a day even while the enforcer
 // runs, and every screen's pair lasts at least pairLife-reuseFor.
 //
-// A tag and a token are each a secret: a type whose only comparison is
-// equal, which runs hmac.Equal in constant time. Its slice field makes ==
-// on it a compile error and its method set is pinned to equal, IssueToken,
-// seal and Format (Format keeps fmt from printing a secret formatted
-// itself). TestSecretsLeaveOnlyByTheirExits pins that structure. Out of
-// scope: fmt on a struct holding a secret in an unexported field, sealing
-// into a throwaway cookie then comparing, and Go-string templates that call
-// IssueToken; reviewers catch those (#4427, D-250).
+// A tag and a token are each a secret, which leaves only by its exits
+// (#4427, #4685). Its one field is a func, so == on a secret does not
+// compile and fmt prints at most a code address for it in any holder, at
+// any depth, under any verb (fmt never calls a func value). Its methods are
+// equal, which runs hmac.Equal in constant time; setCookie, which writes
+// the cookie onto the response and is called only by mint; and IssueToken,
+// which only the embedded templates call, as {{.Token.IssueToken}}, into
+// the one buffer render writes to the response. TestSecretsLeaveOnlyByTheirExits
+// pins that structure, and TestExitCheckCatchesEachRoute shows it refusing
+// each route it closes.
 const (
 	tokenCookie = "__Host-enforcer"
 	tokenHeader = "X-Enforcer-Token"
@@ -67,23 +67,30 @@ const (
 var errToken = errors.New("this screen is out of date; reload it and try again")
 
 // secret is a MAC the page derives under its token key.
-type secret struct{ secretSum []byte }
+type secret struct{ secretSum func() []byte }
+
+// newSecret is sum as a secret.
+func newSecret(sum []byte) secret { return secret{func() []byte { return sum }} }
 
 // equal reports, in constant time, whether b is x; a zero secret equals nothing.
 func (x secret) equal(b []byte) bool {
-	return len(x.secretSum) == sha256.Size && hmac.Equal(x.secretSum, b)
+	return x.secretSum != nil && len(x.secretSum()) == sha256.Size && hmac.Equal(x.secretSum(), b)
 }
 
 // IssueToken is x as a screen carries it; only templates call it.
-func (x secret) IssueToken() string { return base64.RawURLEncoding.EncodeToString(x.secretSum) }
+func (x secret) IssueToken() string { return base64.RawURLEncoding.EncodeToString(x.secretSum()) }
 
-// seal is the cookie value for body tagged with x.
-func (x secret) seal(body []byte) string {
-	return base64.RawURLEncoding.EncodeToString(append(body[:len(body):len(body)], x.secretSum...))
+// setCookie sets on w the anti-forgery cookie for body tagged with x.
+func (x secret) setCookie(w http.ResponseWriter, body []byte) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     tokenCookie,
+		Value:    base64.RawURLEncoding.EncodeToString(append(body[:len(body):len(body)], x.secretSum()...)),
+		Path:     "/",
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
-
-// Format prints no bytes of x, whatever the verb.
-func (secret) Format(f fmt.State, _ rune) { io.WriteString(f, "secret") }
 
 // newTokenKey draws the page's token key.
 func newTokenKey() ([]byte, error) {
@@ -153,14 +160,7 @@ func (s *Server) mint(w http.ResponseWriter) (secret, error) {
 		return secret{}, err
 	}
 	binary.BigEndian.PutUint64(body[nonceLen:], uint64(s.cfg.Now().UnixMilli()))
-	http.SetCookie(w, &http.Cookie{
-		Name:     tokenCookie,
-		Value:    s.tag(body).seal(body),
-		Path:     "/",
-		Secure:   true,
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	s.tag(body).setCookie(w, body)
 	return s.mac(body), nil
 }
 
@@ -169,7 +169,7 @@ func (s *Server) tag(body []byte) secret {
 	m := hmac.New(sha256.New, s.tokenKey)
 	m.Write([]byte(cookieLabel))
 	m.Write(body)
-	return secret{m.Sum(nil)}
+	return newSecret(m.Sum(nil))
 }
 
 // mac is the token a screen carries for the cookie with this body. It
@@ -179,7 +179,7 @@ func (s *Server) mac(body []byte) secret {
 	m := hmac.New(sha256.New, s.tokenKey)
 	m.Write([]byte(tokenLabel))
 	m.Write(body)
-	return secret{m.Sum(nil)}
+	return newSecret(m.Sum(nil))
 }
 
 // guard is the one check every state-changing request passes before any
