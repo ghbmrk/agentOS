@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -118,6 +119,17 @@ func moveRole() int {
 	leak, err := syscall.Open(os.DevNull, syscall.O_RDONLY, 0)
 	if err != nil {
 		return fail("%v", err)
+	}
+	// Every descriptor open now, the runtime's poller and cgroup files among
+	// them, sits below the move's targets, so the move replaces none.
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return fail("%v", err)
+	}
+	for _, e := range fds {
+		if n, err := strconv.Atoi(e.Name()); err != nil || n >= handoff.KeyFD {
+			return fail("descriptor %s is open at or above handoff.KeyFD", e.Name())
+		}
 	}
 	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD}); err != nil {
 		return fail("%v", err)

@@ -18,10 +18,11 @@
 // (STO-2a-k, STO-2c), never from the drive.
 //
 // With -clerk-anchors and -log, it also writes the owner's hardware keys for
-// the clerks (clerkAnchors; D-146, #2995); with -recovery-request, it carries
-// out the owner's lost-card request (lostCard; REC-4, route B of D-201); with
-// -checker-seed, it writes the checker's sealed code seed (writeCheckerSeed;
-// CH-4, MIG-4-exit-c2). Each function's comment says how.
+// the clerks (clerkAnchors; D-146, #2995); with -recovery-request, on a boot
+// that opened the tpm slot, it carries out the owner's lost-card request
+// (lostCard; REC-4, route B of D-201); with -checker-seed, it writes the
+// checker's sealed code seed (writeCheckerSeed; CH-4, MIG-4-exit-c2). Each
+// function's comment says how.
 package main
 
 import (

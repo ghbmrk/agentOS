@@ -26,9 +26,10 @@ import (
 )
 
 // KeyFD is the descriptor the kernel main reads its keys from. It and TPMFD
-// sit far above any descriptor a Go process opens for itself, which takes the
-// lowest free numbers, so the unlock step's move onto them never replaces the
-// runtime's own, which another thread could poll before the exec (#4474).
+// sit far above any descriptor a Go process opens for itself (its poller's,
+// its cgroup CPU files), which take the lowest free numbers, so the unlock
+// step's move onto them never replaces the runtime's own, which another
+// thread could poll before the exec (#4474).
 const KeyFD = 100
 
 // TPMFD is the descriptor of the kernel's own connection to this PC's TPM,
