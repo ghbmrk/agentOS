@@ -34,7 +34,7 @@ func (r *rig) replays() {
 	must(r.t, err)
 }
 
-func (r *rig) admits(id string, k key.Key, at int64) *key.Refusal {
+func (r *rig) admits(id string, k key.Key, at int64) *kernel.Refusal {
 	p := r.sign(kernel.Plan{ID: id, Key: k, Steps: []kernel.PlanStep{st(key.Trash, id)}})
 	_, _, rf := kernel.Admit(r.k.State(), p, at)
 	return rf
