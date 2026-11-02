@@ -96,7 +96,9 @@ const (
 // and on a burst past a rate, and asks it the stage before every request.
 // Stage is called under the channel's locks, possibly concurrently, and
 // must not call the channel; Trip is called after they are released, and
-// once it returns Stage reports the trip.
+// once it returns Stage reports the trip. Trip is called again for each
+// malformed frame of a core already cut, so it must be idempotent and
+// cheap then, with no write per call (#4606).
 type Cut interface {
 	Trip(reason string)
 	Stage() Stage

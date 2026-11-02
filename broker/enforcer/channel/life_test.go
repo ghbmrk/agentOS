@@ -510,3 +510,146 @@ func TestFailedSendKeepsAnAnsweredChallenge(t *testing.T) {
 		t.Errorf("the id's next challenge reused frame id %d", got)
 	}
 }
+
+// TestReflashedLinesAreLimited (#4606, A18): at the Reflashed stage, where
+// a reconnect trips nothing (countHello trips only an open core) and a
+// superseded or cut-off frame never trips, the bucket is the only bound: a
+// core cycling connections logs KindPaused's bucket of lines and one quiet
+// line. A stage the channel does not know is cut too: its malformed frames
+// each call Cut.Trip, and their lines are bucketed. Revert mutants: logCut
+// bucketing only at Tripped; trip's again only at Tripped.
+func TestReflashedLinesAreLimited(t *testing.T) {
+	r := newRig(t, nil)
+	l := DefaultLimit(KindPaused)
+	short := frameBytes(wire.TCommand, []byte{1, 2, 3})[:4]
+	count := func(from int) (logged, quiet int) {
+		for _, e := range r.events()[from:] {
+			if e.Kind == KindPaused {
+				quiet++
+			} else {
+				logged++
+			}
+		}
+		return
+	}
+	r.cut.set(Reflashed)
+	for range 3 * l.Burst {
+		a, b := r.dial(), r.dial()
+		a.send(wire.Announce{ID: 1})
+		waitDone(t, a, "the replaced connection ended")
+		b.conn.Write(short)
+		b.conn.Close()
+		waitDone(t, b, "the cut-off frame ended its connection")
+	}
+	if got, q := count(0); got != l.Burst || q != 1 {
+		t.Errorf("a Reflashed core cycling connections logged %d lines and %d quiet lines, want %d and 1", got, q, l.Burst)
+	}
+	if r.cut.trips() != 0 {
+		t.Errorf("a Reflashed core's reconnects tripped it %d times", r.cut.trips())
+	}
+
+	r = newRig(t, nil)
+	r.cut.set(Stage(9))
+	malformed := frameBytes(wire.TCommand, []byte{1})
+	rounds := 2 * l.Burst
+	var frames int
+	for range rounds {
+		cl := r.dial()
+		if !cl.closed(malformed) {
+			t.Fatal("a malformed frame did not end the connection")
+		}
+		r.cut.set(Stage(9)) // the fake cut's Trip moves it to Tripped
+	}
+	for _, e := range r.events() {
+		if e.Kind == KindFrame {
+			frames++
+		}
+	}
+	if frames > l.Burst {
+		t.Errorf("a core at an unknown stage logged %d malformed-frame lines, want at most %d", frames, l.Burst)
+	}
+	if r.cut.trips() != rounds {
+		t.Errorf("%d trips for %d malformed frames at an unknown stage", r.cut.trips(), rounds)
+	}
+}
+
+// TestLinesBucketedWhileATripIsInFlight (#4606, ENF-d-7): from the moment
+// the channel decides a trip until Cut.Trip returns, the core counts as
+// cut for its log lines too, so reconnects made while a slow cut runs are
+// bucketed. Revert mutant: logCut reading Cut.Stage, not stage.
+func TestLinesBucketedWhileATripIsInFlight(t *testing.T) {
+	r := newRig(t, nil)
+	l := DefaultLimit(KindPaused)
+	hold, entered := make(chan struct{}), make(chan struct{}, 1)
+	r.cut.mu.Lock()
+	r.cut.hold, r.cut.entered = hold, entered
+	r.cut.mu.Unlock()
+	a := r.dial()
+	go a.conn.Write(frameBytes(wire.TCommand, []byte{1}))
+	waitFor(t, entered, "the trip in flight")
+	n := len(r.events())
+	for range 2 * l.Burst {
+		cl := r.dial()
+		cl.conn.Close()
+		waitDone(t, cl, "the connection closed")
+	}
+	var hellos int
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindHello && e.Reason == "core connected" {
+			hellos++
+		}
+	}
+	close(hold)
+	waitDone(t, a, "the tripping connection ended")
+	if hellos != l.Burst {
+		t.Errorf("%d reconnects while a trip was in flight logged %d lines, want %d", 2*l.Burst, hellos, l.Burst)
+	}
+}
+
+// failFirstWrite is a connection's writer whose next write, once armed,
+// fails with nothing written.
+type failFirstWrite struct {
+	io.ReadWriter
+	armed atomic.Bool
+}
+
+func (w *failFirstWrite) Write(b []byte) (int, error) {
+	if w.armed.CompareAndSwap(true, false) {
+		return 0, errors.New("write failed")
+	}
+	return w.ReadWriter.Write(b)
+}
+
+// TestFailedSendFreesAnUnansweredChallenge (#4607, ENF-d-11): a challenge
+// whose write failed before any answer came is freed at once, so the radio
+// host may retry its ID. Revert mutant: the send-failure path never
+// dropping.
+func TestFailedSendFreesAnUnansweredChallenge(t *testing.T) {
+	r := newRig(t, nil)
+	a, b := net.Pipe()
+	w := &failFirstWrite{ReadWriter: b}
+	cl := &client{t: t, conn: a, done: make(chan error, 1)}
+	go func() { cl.done <- r.ch.Serve(w, exporter); b.Close() }()
+	h, err := wire.SignHello(wire.RoleCore, r.core, exporter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl.send(h)
+	if _, ok := cl.recv().(wire.Hello); !ok {
+		t.Fatal("no enforcer hello")
+	}
+	w.armed.Store(true)
+	if err := r.ch.Challenge(7, []byte{1}); err == nil {
+		t.Fatal("the challenge's write did not fail")
+	}
+	r.ch.mu.Lock()
+	held, wires := r.ch.challenges[7] != nil, len(r.ch.byWire)
+	r.ch.mu.Unlock()
+	if held || wires != 0 {
+		t.Fatalf("a failed send left its unanswered challenge taken (%v, %d frame ids)", held, wires)
+	}
+	w2 := cl.challenge(r, 7)
+	if c := cl.code(wire.Challenge{Answer: true, ID: w2, Data: []byte{2}}); c != wire.OK {
+		t.Errorf("the retried challenge's answer: %v", c)
+	}
+}
