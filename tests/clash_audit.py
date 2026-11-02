@@ -164,123 +164,138 @@ def walk(path, link_of, last=False):
 def writes(trace, ondisk=_ondisk):
     """The set of ('path', p) written or created and ('bind', name) bound in one strace -f -y log.
     ondisk(name) gives a symlink's target on disk, read only for a name the trace's own symlink
-    calls never make: a link the tree made after a call was not there when the call walked it."""
-    made = set(_scan(trace, ondisk)[1])
-    return _scan(trace, lambda name: None if name in made else ondisk(name))[0]
+    calls never make: a link the tree made after a call was not there when the call walked it.
+    One pass reads the trace; only if it read from disk a name the tree made (before or after)
+    does a second pass read it again, with no disk read for those names."""
+    out, tree = _scan(trace, _Tree(ondisk))
+    if not tree.links.keys() & tree.from_disk.keys():
+        return out
+    made = set(tree.links)
+    return _scan(trace, _Tree(lambda name: None if name in made else ondisk(name)))[0]
 
 
-def _scan(trace, ondisk):
-    """(writes, {link name: target} the trace's symlink calls made), reading trace in order."""
-    out = set()
-    pending = {}
-    links = {}  # link name (resolved) -> target, as the tree's symlink calls made them, in order
-    cwd = {}  # pid -> its working directory, as the kernel last showed it
-    seen = {}
+def as_main(path, base):
+    """The name main's audit read for an open: joined only to a dirfd, `..` folded only if
+    absolute (a relative name with no dirfd stays as asked; every module runs from the root)."""
+    if not os.path.isabs(path) and base is not None:
+        path = os.path.join(base, path)
+    return os.path.normpath(path) if os.path.isabs(path) else path
 
-    def link_of(name):
-        if name in links:
-            return links[name]
-        if name not in seen:
-            seen[name] = ondisk(name)
-        return seen[name]
 
-    def resolve(pid, path, base=None, last=False):
+class _Tree:
+    """One module's process tree as its trace showed it up to the line read: each pid's working
+    directory, and the links (resolved name -> target) its symlink calls made, in order."""
+
+    def __init__(self, ondisk):
+        self.ondisk, self.links, self.cwd, self.from_disk = ondisk, {}, {}, {}
+
+    def link_of(self, name):
+        if name in self.links:
+            return self.links[name]
+        if name not in self.from_disk:
+            self.from_disk[name] = self.ondisk(name)
+        return self.from_disk[name]
+
+    def resolve(self, pid, path, base=None, last=False):
         """The name path (decoded) reaches, from base (a dirfd's path), else the pid's cwd. A
         relative path with neither is returned as is."""
-        base = base if base is not None else cwd.get(pid)
+        base = base if base is not None else self.cwd.get(pid)
         if not os.path.isabs(path):
             if base is None:
                 return path
             path = os.path.join(base, path)
-        return walk(path, link_of, last)
+        return walk(path, self.link_of, last)
 
-    def asked(pid, path, base=None, last=False, main=None):
+    def asked(self, pid, path, base, last, main):
         """The names an unresolved call may have reached: the walk, and main, the name main's
         audit read for it, so a stale link or a cwd the trace showed wrongly can add a name but
         never lose that one."""
-        return {resolve(pid, path, base, last), main}
+        return {("path", self.resolve(pid, path, base, last)), ("path", main)}
 
-    def as_main(path, base):
-        """The name main's audit read for an open: joined only to a dirfd, `..` folded only if
-        absolute (a relative name with no dirfd stays as asked; every module runs from the root)."""
-        if not os.path.isabs(path) and base is not None:
-            path = os.path.join(base, path)
-        return os.path.normpath(path) if os.path.isabs(path) else path
-
-    def open_target(pid, rest):
-        m = _OPEN_ARGS.match(rest)
-        if not m:
-            return None, False
-        base, flags = m.group(1) and _decode(m.group(1)), _flags(m.group(3))
-        path = _decode(m.group(2))
-        return asked(pid, path, base, not _NOFOLLOW.search(flags), as_main(path, base)), bool(_WRITE.search(flags))
-
-    def bound(pid, args):
-        port = _PORT.search(args)
-        if port and port.group(1) != "0":
-            return {("bind", f"port {port.group(1)}")}
-        unix = _UNIX.search(args)
-        if unix and unix.group(2):
-            name = _decode(unix.group(2))
-            return {("bind", f"unix @{name}")} if unix.group(1) else {("path", n) for n in asked(pid, name, main=os.path.normpath(name))}
-        return set()
-
-    def made(pid, call, rest):
+    def made(self, pid, call, rest):
         """The effect of a symlink, symlinkat, chdir or fchdir line, once its result is 0."""
         if call.startswith("symlink"):
             m = _SYMLINK_ARGS.match(rest)
             if m:
                 base = m.group(2) and _decode(m.group(2))
-                name = resolve(pid, _decode(m.group(3)), base)
+                name = self.resolve(pid, _decode(m.group(3)), base)
                 if os.path.isabs(name):
-                    links[name] = _decode(m.group(1))
+                    self.links[name] = _decode(m.group(1))
             return
         m = _CHDIR_ARGS.match(rest)
         if m and m.group(1) is not None:
-            to = resolve(pid, _decode(m.group(1)), last=True)
+            to = self.resolve(pid, _decode(m.group(1)), last=True)
             if os.path.isabs(to):
-                cwd[pid] = to
+                self.cwd[pid] = to
         elif m:
-            cwd[pid] = _decode(m.group(2))
+            self.cwd[pid] = _decode(m.group(2))
+
+
+def _write_open(tree, pid, rest):
+    """The names a write open asked for, walked, or None for an open that writes nothing. Only
+    an open the kernel gave no file for is walked; a resolved one is its reached file. The result
+    is read only after the quoted path, since a name can hold `) = 3<` (a split line has none)."""
+    m = _OPEN_ARGS.match(rest)
+    if not m or not _WRITE.search(_flags(m.group(3))):
+        return None
+    reached = _REACHED.search(m.group(3))
+    if reached:
+        return {("path", os.path.normpath(_decode(reached.group(1))))}
+    base, path = m.group(1) and _decode(m.group(1)), _decode(m.group(2))
+    return tree.asked(pid, path, base, not _NOFOLLOW.search(_flags(m.group(3))), as_main(path, base))
+
+
+def _bound(tree, pid, args):
+    port = _PORT.search(args)
+    if port and port.group(1) != "0":
+        return {("bind", f"port {port.group(1)}")}
+    unix = _UNIX.search(args)
+    if unix and unix.group(2):
+        name = _decode(unix.group(2))
+        if unix.group(1):
+            return {("bind", f"unix @{name}")}
+        return tree.asked(pid, name, None, False, os.path.normpath(name))
+    return set()
+
+
+def _scan(trace, tree):
+    """(writes, tree), reading trace in order into tree."""
+    out = set()
+    pending = {}  # pid -> (call, rest) of a symlink or chdir, or (call, None) of a write open, split
     for line in trace.splitlines():
         m = _LINE.match(line)
         if m:
             pid, call, rest = m.groups()
             at = _CWD.match(rest)
             if at:
-                cwd[pid] = _decode(at.group(2))
+                tree.cwd[pid] = _decode(at.group(2))
             if call in ("symlink", "symlinkat", "chdir", "fchdir"):
                 if rest.endswith(_UNFINISHED):
                     pending[pid] = (call, rest)
                 elif _OK.search(rest):
-                    made(pid, call, rest)
-                continue
-            if call == "bind":
-                out |= bound(pid, rest)
-                continue
-            path, write = open_target(pid, rest)
-            if path is None or not write:
-                continue
-            if rest.endswith(_UNFINISHED):
-                # The asked path counts even if the call never resumes (the process was killed
-                # mid-open); the resumed line adds the file it reached.
-                out |= {("path", p) for p in path}
-                pending[pid] = (call, None)
-                continue
-            reached = _REACHED.search(rest)
-            out |= {("path", os.path.normpath(_decode(reached.group(1))))} if reached else {("path", p) for p in path}
+                    tree.made(pid, call, rest)
+            elif call == "bind":
+                out |= _bound(tree, pid, rest)
+            else:
+                names = _write_open(tree, pid, rest)
+                if names is not None:
+                    # A split open's asked path counts even if the call never resumes (the process
+                    # was killed mid-open); the resumed line adds the file it reached.
+                    out |= names
+                    if rest.endswith(_UNFINISHED):
+                        pending[pid] = (call, None)
             continue
         r = _RESUMED.match(line)
         if r and r.group(1) in pending:
             call, rest = pending.pop(r.group(1))
             if rest is not None:
                 if _OK.search(r.group(3)):
-                    made(r.group(1), call, rest)
+                    tree.made(r.group(1), call, rest)
                 continue
             reached = _REACHED.search(r.group(3))
             if reached:
                 out.add(("path", os.path.normpath(_decode(reached.group(1)))))
-    return out, links
+    return out, tree
 
 
 def clashes(traces, serial=None, is_shared=shared):
