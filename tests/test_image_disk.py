@@ -66,23 +66,30 @@ def run_script(name):
 # #4440: the "Free runner disk" lines a test may run: the gb() df read and the notices that call it.
 # Every other line of the step must be a sudo command or its continuation, and no test runs those,
 # so no edit of the step can make a test delete toolchains on a CI runner with passwordless sudo.
-_ARG = r"[^$`;&|()<>\\]*"
+_ARG = r"[^$`;&|()<>\\'\"#]*"
 FREE_DISK_READS = re.compile(
     r"gb\(\) \{ echo \$\(\( \$\(df %s\| tail %s\| tr %s\) / 1024 \)\); \}" % (_ARG, _ARG, _ARG)
-    + r'|echo "::notice title=disk budget::[^"$`\\]*\$\(gb\)[^"$`\\]*"')
+    + r'|echo "::notice title=disk budget::[^"$`\\\'#]*\$\(gb\)[^"$`\\\'#]*"')
 
 
 def free_disk_reads(script=None):
-    """The "Free runner disk" step with its sudo lines left out; any line of another shape fails."""
+    """The "Free runner disk" step with its sudo and comment lines left out; any line of another shape
+    fails. Each kept line must parse alone, so no quote or comment opened on one runs the next."""
     script = run_script("Free runner disk") if script is None else script
-    subprocess.run(["bash", "-n", "-c", script], check=True)  # parses the whole step, runs none of it
+    def parses(text):  # bash -n parses and runs nothing
+        if subprocess.run(["bash", "-n", "-c", text], capture_output=True).returncode:
+            raise AssertionError("Free runner disk: does not parse: " + text)
+    parses(script)
     reads, cont = [], False
     for line in script.splitlines():
         if cont or line.startswith("sudo "):
             cont = line.endswith("\\")
-        elif line.strip() and not FREE_DISK_READS.fullmatch(line):
+        elif not line.strip() or line.lstrip().startswith("#"):
+            continue
+        elif not FREE_DISK_READS.fullmatch(line):
             raise AssertionError("Free runner disk: a line that is neither a sudo command nor a df read: " + line)
         else:
+            parses(line)
             reads.append(line)
     return "\n".join(reads) + "\n"
 
@@ -162,7 +169,10 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertNotIn("sudo", free_disk_reads())
         for line in ("/usr/bin/sudo rm -rf /opt/ghc", "env -i sudo rm -rf /opt/ghc", "bash .github/free-disk.sh",
                      'echo "::notice title=disk budget::$(/usr/bin/sudo rm -rf /opt/ghc) $(gb)"',
-                     "gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9; /usr/bin/sudo rm -rf /opt/ghc) / 1024 )); }"):
+                     "gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9; /usr/bin/sudo rm -rf /opt/ghc) / 1024 )); }",
+                     # A quote opened on one kept line must not turn the next into commands (#4519 L3).
+                     "gb() { echo $(( $(df -BM '--output=avail / | tail -n 1 | tr -dc 0-9) / 1024 )); }\n"
+                     'echo "::notice title=disk budget::\'x) / 1024 )); }; /usr/bin/sudo rm -rf /opt/ghc # $(gb)"'):
             with self.assertRaises(AssertionError, msg=line):
                 free_disk_reads(script + line + "\n")
 
