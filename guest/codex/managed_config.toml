@@ -84,6 +84,15 @@ guardian_approval = false
 # cannot read, and every tool command first sources it: dash exits 2 on that failed `.`, so no
 # tool command runs at all (#1720, broker/e2e/ASSUMPTIONS.md E6).
 shell_snapshot = false
+# Off by default in 0.162.1 but not safe to leave unset: with no explicit `token_budget` in any
+# config layer, the model catalog the CLI refreshes from the provider can turn it on together with
+# its history-notes extension (token_budget.rs `apply_model_defaults`), and `context_management`
+# turns it on for a plan login (`apply_experimental_context`). Either makes the CLI send
+# `history_ingest_requested: true`, which the clerk refuses, so every turn would stop
+# (broker/clerk/plan ASSUMPTIONS MIG-4-plan-pins-2, #4595). A lower layer's [features.token_budget]
+# table loses to this value.
+token_budget = false
+context_management = false
 
 # No telemetry, feedback upload or saved history.
 [analytics]

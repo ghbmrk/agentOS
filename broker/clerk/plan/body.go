@@ -177,7 +177,7 @@ func (b *Body) check(body []byte) ([]byte, string) {
 			if !declared {
 				return nil, bodyMeta
 			}
-			c, ok := shape.check(v)
+			c, ok := shape.send(v)
 			if !ok {
 				return nil, bodyMeta
 			}
@@ -395,7 +395,9 @@ func remote(v any, key string, depth int) string {
 	return ""
 }
 
-// valid holds a declared shape to one kind with what that kind needs.
+// valid holds a declared shape to one kind with what that kind needs. A
+// JSON text sits only at the top, so check never needs to rewrite a value
+// below it; depth bounds a shape whose Each points back into itself.
 func (v Value) valid(depth int) bool {
 	if depth > maxDepth {
 		return false
@@ -412,90 +414,90 @@ func (v Value) valid(depth int) bool {
 			}
 		}
 		return len(v.Fields) > 0 && v.Max == 0 && v.Only == nil && v.Each == nil
-	case KindMap, KindJSON:
+	case KindJSON:
+		if depth > 0 {
+			return false
+		}
+		fallthrough
+	case KindMap:
 		return v.Max > 0 && v.Only == nil && v.Fields == nil && v.Each != nil && v.Each.valid(depth+1)
 	}
 	return false
 }
 
-// check holds x to the shape and returns the value to send: x itself, or
-// for a JSON text the clerk's own encoding of what it checked.
-func (v Value) check(x any) (any, bool) {
+// send holds a top-level value to the shape and returns the value to send:
+// x itself, or for a JSON text the clerk's own encoding of what it checked.
+func (v Value) send(x any) (any, bool) {
+	if v.Kind != KindJSON || x == nil {
+		return x, v.check(x)
+	}
+	s, ok := x.(string)
+	if !ok || len(s) > v.Max {
+		return x, false
+	}
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var in any
+	if dec.Decode(&in) != nil {
+		return x, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return x, false
+	}
+	if !v.Each.check(in) {
+		return x, false
+	}
+	out, err := encodeJSON(in)
+	if err != nil || len(out) > v.Max {
+		return x, false
+	}
+	return string(out), true
+}
+
+// check holds x, which sits below any JSON text, to the shape.
+func (v Value) check(x any) bool {
 	if x == nil {
-		return nil, v.Null
+		return v.Null
 	}
 	switch v.Kind {
 	case KindText:
 		s, ok := x.(string)
-		return x, ok && len(s) <= v.Max && (v.Only == nil || contains(v.Only, s))
+		return ok && len(s) <= v.Max && (v.Only == nil || contains(v.Only, s))
 	case KindInt:
 		n, ok := x.(json.Number)
 		if !ok {
-			return x, false
+			return false
 		}
 		_, err := strconv.ParseInt(string(n), 10, 64)
-		return x, err == nil
+		return err == nil
 	case KindBool:
 		_, ok := x.(bool)
-		return x, ok
+		return ok
 	case KindOff:
-		return x, x == false
+		return x == false
 	case KindObject:
 		obj, ok := x.(map[string]any)
 		if !ok {
-			return x, false
+			return false
 		}
 		for k, f := range obj {
 			shape, declared := v.Fields[k]
-			if !declared {
-				return x, false
+			if !declared || !shape.check(f) {
+				return false
 			}
-			c, ok := shape.check(f)
-			if !ok {
-				return x, false
-			}
-			obj[k] = c
 		}
-		return obj, true
+		return true
 	case KindMap:
 		obj, ok := x.(map[string]any)
 		if !ok {
-			return x, false
+			return false
 		}
 		for k, f := range obj {
-			if len(k) > v.Max {
-				return x, false
+			if len(k) > v.Max || !v.Each.check(f) {
+				return false
 			}
-			c, ok := v.Each.check(f)
-			if !ok {
-				return x, false
-			}
-			obj[k] = c
 		}
-		return obj, true
-	case KindJSON:
-		s, ok := x.(string)
-		if !ok || len(s) > v.Max {
-			return x, false
-		}
-		dec := json.NewDecoder(strings.NewReader(s))
-		dec.UseNumber()
-		var in any
-		if dec.Decode(&in) != nil {
-			return x, false
-		}
-		if _, err := dec.Token(); err != io.EOF {
-			return x, false
-		}
-		c, ok := v.Each.check(in)
-		if !ok {
-			return x, false
-		}
-		out, err := encodeJSON(c)
-		if err != nil || len(out) > v.Max {
-			return x, false
-		}
-		return string(out), true
+		return true
 	}
-	return x, false
+	return false
 }
