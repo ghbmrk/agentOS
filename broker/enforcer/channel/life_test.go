@@ -54,19 +54,21 @@ func TestChallengeIDFreeOnlyAfterItsAnswer(t *testing.T) {
 // MaxOutstanding answers holds challenges off only that long, never until
 // a restart. The ID is free again, and an answer to the expired challenge,
 // however late, is refused and never handed over as the answer to the
-// challenge that reused its ID. Revert mutants: no expiry; the frame
-// carrying the radio host's ID.
+// challenge that reused its ID. Frame IDs count up from 1, so the log's
+// answer lines read in the order the challenges went. Revert mutants: no
+// expiry; the frame carrying the radio host's ID; the frame ID counting
+// down.
 func TestChallengesExpire(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
 	wires := map[uint64]bool{}
-	var first uint64
+	var first, last uint64
 	for id := range uint64(MaxOutstanding) {
 		w := cl.challenge(r, id+1)
-		if wires[w] {
-			t.Fatalf("frame id %d sent twice", w)
+		if wires[w] || w <= last {
+			t.Fatalf("frame id %d after %d: want each new and counting up", w, last)
 		}
-		wires[w] = true
+		wires[w], last = true, w
 		if id == 0 {
 			first = w
 		}
@@ -80,7 +82,7 @@ func TestChallengesExpire(t *testing.T) {
 	}
 	r.advance(time.Second)
 	again := cl.challenge(r, 1)
-	if wires[again] {
+	if wires[again] || again <= last {
 		t.Fatalf("the reused id's frame carries an earlier frame's id %d", again)
 	}
 	if c := cl.code(wire.Challenge{Answer: true, ID: first, Data: []byte{2}}); c != wire.Refused {

@@ -219,7 +219,8 @@ type Channel struct {
 	pausedB  *wire.Bucket
 	// challenges are the device challenges not yet over, by the radio
 	// host's ID; byWire finds one by the ID its frame carried, which the
-	// channel chooses and never reuses, until its answer comes.
+	// channel chooses and never reuses (lastWire, counting up from 1),
+	// until its answer comes.
 	challenges map[uint64]*challenge
 	byWire     map[uint64]uint64
 	lastWire   uint64
