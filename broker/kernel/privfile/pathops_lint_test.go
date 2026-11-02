@@ -48,8 +48,12 @@ package privfile
 // runs with no -tags; no root-side binary builds with tags today), and file
 // operations of non-root host processes are outside the check, as is a
 // name a shell's own expansion builds inside a root sh -c script ($$P,
-// $${A}$${B}), which no token of the script shows, and a mount drop-in read
-// alone for a packaged unit, whose type the lint does not see.
+// $${A}$${B}, a glob such as agentos-s*, bash's agentos-{side,}), which no
+// token of the script shows, a mount drop-in read alone for a packaged
+// unit, whose type the lint does not see, and a program a wrapper runs that
+// is no broker binary, outside rootTrees, which a tmpfiles.d line may hand
+// to another uid (root commands name data paths their services own, so not
+// every absolute argument can be held).
 
 import (
 	"fmt"
@@ -364,6 +368,11 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a name the shell joins":           "[Service]\nExecStart=/bin/sh -c 'exec agentos-\"si\"de'\n",
 		"a path the shell joins":           "[Service]\nExecStart=/bin/sh -c \"exec /usr/lib/agentos/agentos-'si'de\"\n",
 		"a bare name after a uid argument": "[Service]\nExecStart=/usr/lib/agentos/with-uids /bin/true @uid:x agentos-side\n",
+		// #4559 Security 2: a short option's value glued on.
+		"a name glued to env -S":   "[Service]\nExecStart=/usr/bin/env -Sagentos-side\n",
+		"a quoted env -S string":   "[Service]\nExecStart=/usr/bin/env '-Sagentos-side -x'\n",
+		"a name glued to flock -c": "[Service]\nExecStart=/usr/bin/flock /run/x -cagentos-side\n",
+		"a path glued to env -S":   "[Service]\nExecStart=/usr/bin/env -S/usr/lib/agentos/agentos-side\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -447,8 +456,13 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		// #4494 Security delta R-1: any uid may plant a file in a 1777 tree.
 		"a root program in /tmp":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/tmp/x\n", `in /tmp, where any uid`},
 		"a root program in /var/lock":      {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\nExecStartPre=+/var/lock/agentos-v/x\n", `in /run/lock, where any uid`},
-		"a wrapper's argument in /dev/shm": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /dev/shm/agentos-side\n", `runs /dev/shm/agentos-side, in /dev/shm`},
+		"a wrapper's argument in /dev/shm": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /dev/shm/agentos-side\n", `names /dev/shm/agentos-side, in /dev/shm`},
 		"a shell's argument in /var/tmp":   {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /var/tmp/agentos-side'\n", `in /var/tmp, where any uid`},
+		// #4559 Security 2 and 3: every absolute path a root command names.
+		"a glued path in /tmp":              {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -S/tmp/agentos-side\n", `names /tmp/agentos-side, in /tmp`},
+		"a wrapper's other program in /tmp": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /tmp/helper\n", `names /tmp/helper, in /tmp`},
+		"a config file in /var/tmp":         {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f /var/tmp/x.nft\n", `names /var/tmp/x.nft, in /var/tmp`},
+		"a path in /var/lock":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /var/lock/x'\n", `names /var/lock/x, in /run/lock`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -608,6 +622,11 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a ramfs over /usr":                 {"image/mkosi/mkosi.extra/etc/fstab", "ramfs /usr/lib/agentos ramfs nosuid 0 0\n", `with no mode=`},
 		"a tmpfs with no options over /run": {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /run tmpfs\n", `with no mode=`},
 		"a group-writable tmpfs mode":       {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=0775 0 0\n", `option mode=0775`},
+		"an other-writable tmpfs mode":      {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=0757 0 0\n", `option mode=0757`},
+		"an image in /dev/shm in fstab":     {"image/mkosi/mkosi.extra/etc/fstab", "/dev/shm/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/shm/x.img`},
+		"a file in /dev/mqueue in fstab":    {"image/mkosi/mkosi.extra/etc/fstab", "/dev/mqueue/x /etc ext4 ro 0 0\n", `source /dev/mqueue/x`},
+		"an image in /dev/shm in a unit":    {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/shm/x.img\nType=squashfs\n", `What=/dev/shm/x.img`},
+		"an unclean /dev/shm source":        {"image/mkosi/mkosi.extra/etc/fstab", "/dev/./shm/x.img /usr squashfs ro 0 0\n", `source /dev/./shm/x.img`},
 		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u+w 0 0\n", `option mode=u+w`},
 		"a mode past 7777":                  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=10755 0 0\n", `option mode=10755`},
 		"a bind in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 bind 0 0\n", `option bind`},
@@ -620,8 +639,8 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a loop in a type drop-in":          {"image/mkosi/mount.d/x.conf", "[Mount]\nOptions=loop\n", `option loop`},
 		"an image file source":              {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/var/tmp/x.img\nType=squashfs\n", `What=/var/tmp/x.img`},
 		"a default tmpfs unit over /etc":    {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=nosuid\n", `sets no mode=`},
-		"a tmpfs unit with no Options=":     {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\n", `sets no mode=`},
-		"a tmpfs in a drop-in over /etc":    {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=ramfs\n", `sets no mode=`},
+		"a tmpfs unit with no Options=":     {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\n", `with no Options=`},
+		"a tmpfs in a drop-in over /etc":    {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=ramfs\n", `with no Options=`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -984,7 +1003,8 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		if _, err := set(t, files); err != nil {
 			t.Fatalf("a directory made where a root command names one: %v", err)
 		}
-		for _, line := range []string{"z /opt/w/agentos-side 0755 agentos-x\n", "d /opt/w 0777\n", "z /var/lib/agentos-side 0755 agentos-x\n", "d /var/lib/agentos-side/x 0700 agentos-x\n"} {
+		files["image/mkosi/agentos-v.service"] = "[Service]\nExecStart=/usr/bin/env -S/opt/v/agentos-side\n"
+		for _, line := range []string{"z /opt/v/agentos-side 0755 agentos-x\n", "z /opt/w/agentos-side 0755 agentos-x\n", "d /opt/w 0777\n", "z /var/lib/agentos-side 0755 agentos-x\n", "d /var/lib/agentos-side/x 0700 agentos-x\n"} {
 			files := clone(files)
 			files[tmpfiles] += line
 			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "which a root command names") {
@@ -1428,10 +1448,11 @@ var rootTrees = []string{
 // the tree it lands in (#4494 L3 1, #4516).
 var pathAliases = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock"}
 
-// worldTrees are the trees any uid may make a file in (1777), so root runs
-// no program from one, whatever grant a tmpfiles.d line makes (#4494
-// Security delta R-1).
-var worldTrees = []string{"/tmp", "/var/tmp", "/dev/shm", "/run/lock"}
+// worldTrees are the trees any uid may make a file in (1777, and
+// /dev/mqueue), so no root command names a path in one, as its program or
+// as an argument a wrapper may run, whatever grant a tmpfiles.d line makes
+// (#4494 Security delta R-1, #4559 Security 3).
+var worldTrees = []string{"/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/run/lock"}
 
 // unalias is p with a leading pathAliases link resolved.
 func unalias(p string) string {
@@ -1441,6 +1462,17 @@ func unalias(p string) string {
 		}
 	}
 	return p
+}
+
+// inTree reports whether the absolute path p is one of trees or under one.
+func inTree(p string, trees []string) (string, bool) {
+	p = unalias(p)
+	for _, t := range trees {
+		if p == t || strings.HasPrefix(p, t+"/") {
+			return t, true
+		}
+	}
+	return "", false
 }
 
 // inOrAbove reports whether the absolute path p is one of paths, under one,
@@ -1462,6 +1494,21 @@ var uidArg = regexp.MustCompile(`(^|[,\s])@[ug]id:[A-Za-z0-9_.-]+`)
 
 // shellQuotes removes the quotes a shell joins a word across.
 var shellQuotes = strings.NewReplacer(`"`, "", "'", "")
+
+// binaryNamed is the broker package of the binary base names; with glued,
+// base is a short option with its value glued on (env -Sagentos-x, flock
+// -cagentos-x), so a name it ends in counts (#4559 Security 2).
+func binaryNamed(pkgs map[string]string, base string, glued bool) (string, bool) {
+	if pkg, ok := pkgs[base]; ok || !glued {
+		return pkg, ok
+	}
+	for name, pkg := range pkgs {
+		if strings.HasSuffix(base, name) {
+			return pkg, true
+		}
+	}
+	return "", false
+}
 
 // nameToken is a run of the bytes of a word that can belong to a program's name;
 // any other ends a token (a quote, =, :, ;, $, a parenthesis or blank).
@@ -1622,7 +1669,7 @@ func rootBinaries(root string) ([]string, error) {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
-				if t, ok := inOrAbove(prog, worldTrees); ok {
+				if t, ok := inTree(prog, worldTrees); ok {
 					return nil, fmt.Errorf("%s: %s=%s: root runs a program in %s, where any uid may make a file", filepath.ToSlash(rel), l.key, l.value, t)
 				}
 				// A program's arguments may name another a wrapper (with-uids
@@ -1636,18 +1683,23 @@ func rootBinaries(root string) ([]string, error) {
 					w = uidArg.ReplaceAllString(w, "$1")
 					for _, s := range []string{w, shellQuotes.Replace(w)} {
 						for _, tok := range nameToken.FindAllString(s, -1) {
-							pkg, ok := pkgs[path.Base(tok)]
+							p, glued := tok, strings.HasPrefix(tok, "-")
+							if i := strings.IndexByte(tok, '/'); glued && i > 0 {
+								p = tok[i:] // env -S/x, flock -c/x
+							}
+							p = path.Clean(p)
+							abs := strings.HasPrefix(p, "/")
+							if t, ok := inTree(p, worldTrees); abs && ok {
+								return nil, fmt.Errorf("%s: %s=%s: root names %s, in %s, where any uid may make a file", filepath.ToSlash(rel), l.key, l.value, p, t)
+							}
+							pkg, ok := binaryNamed(pkgs, path.Base(p), glued && !abs)
 							if !ok {
 								continue
 							}
 							seen[pkg] = true
-							if tok = path.Clean(tok); !strings.HasPrefix(tok, "/") || tok == prog {
-								continue
+							if abs && p != prog {
+								args = append(args, p)
 							}
-							if t, ok := inOrAbove(tok, worldTrees); ok {
-								return nil, fmt.Errorf("%s: %s=%s: root runs %s, in %s, where any uid may make a file", filepath.ToSlash(rel), l.key, l.value, tok, t)
-							}
-							args = append(args, tok)
 						}
 					}
 				}
@@ -1715,10 +1767,16 @@ func mountOptions(opts string, held bool) (bool, error) {
 
 // heldSource reports whether a mount's source may sit over a tree root
 // reads or runs: a name with no slash (tmpfs, UUID=x, LABEL=x) or a device
-// under /dev. A path elsewhere names a directory or image file, which
-// mount(8) binds or loop-mounts (#4516).
+// under /dev, outside worldTrees. A path elsewhere, /dev/shm and /dev/mqueue
+// among them, names a directory or image file, which mount(8) binds or
+// loop-mounts (#4516, #4559 L3 1).
 func heldSource(what string) bool {
-	return !strings.Contains(what, "/") || strings.HasPrefix(path.Clean(what), "/dev/")
+	if !strings.Contains(what, "/") {
+		return true
+	}
+	what = path.Clean(what)
+	_, world := inTree(what, worldTrees)
+	return strings.HasPrefix(what, "/dev/") && !world
 }
 
 // tmpfsTypes default their root directory to 1777 unless a mode= says
@@ -1799,8 +1857,11 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 	if unit && !typed {
 		return false, fmt.Errorf("%s: no Type=; mount(8) would probe the type and run its helper", filepath.ToSlash(paths[0]))
 	}
-	if tmpfs && !(optioned && moded) {
-		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with an Options= that sets no mode=; its root directory would be 1777", where)
+	switch {
+	case tmpfs && !optioned:
+		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with no Options=; its root directory would be 1777, so set Options=mode=0755", where)
+	case tmpfs && !moded:
+		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with an Options= that sets no mode=; its root directory would be 1777, so give every Options= mode=0755", where)
 	}
 	return typed, nil
 }
@@ -2030,7 +2091,7 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 	}
 	held := append(append([]string{}, rootTrees...), progs...)
 	for path := range listed {
-		if t, ok := inOrAbove(path, worldTrees); ok {
+		if t, ok := inTree(path, worldTrees); ok {
 			return fmt.Errorf("%s lists %s, in %s, where any uid may make a file", programsFile, path, t)
 		}
 		held = append(held, path)
