@@ -164,12 +164,17 @@ func (c *Counter) Resolved(dest string, addr netip.Addr) {
 }
 
 // named adds dest to addr's destinations without marking addr resolved
-// today. The caller holds c.mu.
+// today. An address first seen this way starts its idle clock today, so it
+// is forgotten like any other once it goes a full day unused and no set
+// holds it. The caller holds c.mu.
 func (c *Counter) named(dest string, addr netip.Addr) {
 	if c.dests[addr] == nil {
 		c.dests[addr] = map[string]bool{}
 	}
 	c.dests[addr][dest] = true
+	if _, ok := c.used[addr]; !ok {
+		c.used[addr] = c.day
+	}
 }
 
 // Add takes one reading and returns every cap now past. A counter lower
@@ -403,7 +408,9 @@ func (c *Counter) Save() []byte {
 // in its place.
 func Restore(now func() time.Time, caps Caps, b []byte) (*Counter, error) {
 	var s State
-	if err := json.Unmarshal(b, &s); err != nil {
+	// A counter's day is never 0 (1970-01-01), so a state without one,
+	// such as null or {}, is not a saved counter.
+	if err := json.Unmarshal(b, &s); err != nil || s.Day == 0 {
 		return nil, ErrState
 	}
 	c := NewCounter(now, caps)
@@ -424,6 +431,9 @@ func Restore(now func() time.Time, caps Caps, b []byte) (*Counter, error) {
 		for _, d := range ds {
 			c.named(d, a.Unmap())
 		}
+	}
+	for a, d := range s.Used { // the saved idle clocks, not named's today
+		c.used[a.Unmap()] = d
 	}
 	for d, n := range s.Retired {
 		if _, listed := c.caps.Core[d]; !listed {

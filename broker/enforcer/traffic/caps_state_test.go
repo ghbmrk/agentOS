@@ -143,7 +143,7 @@ func TestCountsSurviveARestart(t *testing.T) {
 		t.Fatalf("restored on a clock set back: %+v", r.Counts())
 	}
 
-	for _, bad := range [][]byte{nil, []byte("{"), []byte(`{"bytes":{"not an address":1}}`)} {
+	for _, bad := range [][]byte{nil, []byte("{"), []byte("null"), []byte("{}"), []byte(`{"bytes":{"not an address":1}}`)} {
 		if _, err := Restore(clk.now, twoCap, bad); !errors.Is(err, ErrState) {
 			t.Errorf("Restore(%q): %v, want ErrState", bad, err)
 		}
@@ -169,5 +169,23 @@ func TestRestoreKeepsTheRetiredCaps(t *testing.T) {
 	}
 	if r, _ = Restore(clk.now, Caps{Core: map[string]uint64{"a.example": 100, "b.example": 5}}, c.Save()); groupOf(t, r.Counts(), "b.example").Cap != 5 {
 		t.Fatalf("listed again: %+v", r.Counts())
+	}
+}
+
+// TestSetOnlyAddressIsForgotten (L3 on #4561): an address known only from
+// a resolver set, never resolved to the counter and carrying no bytes, is
+// forgotten once no set holds it and it has idled a full day, so a later
+// answer for another destination does not merge the two on a stale
+// membership, and the saved state does not grow without bound. Mutant:
+// named not starting the idle clock.
+func TestSetOnlyAddressIsForgotten(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Add(held(reading(1, 0), map[string][]netip.Addr{"a.example": {addrA}}))
+	clk.t = noon.Add(72 * time.Hour)
+	c.Add(held(reading(2, 0), nil))
+	c.Resolved("b.example", addrA)
+	if g := groupOf(t, c.Counts(), "b.example"); len(g.Dests) != 1 {
+		t.Fatalf("a set-only address after its set dropped it and a full idle day: %+v, want b.example alone", g)
 	}
 }
