@@ -143,8 +143,9 @@ func TestTheReaderReadsTheContentInEveryPartBesideTheCanary(t *testing.T) {
 
 // TestProbesOutsideTheKeysAreRejectedAndLogged: every probe that steps
 // outside its key is rejected by the kernel with its check logged and never
-// reaches the clerk; the one inside its key (a label holding the content)
-// reaches the clerk, which refuses it, so it makes no effect.
+// reaches the clerk; the two inside their keys (a label holding the content,
+// and an unsubscribe the hold delays to the session's end) reach the clerk,
+// which refuses both, so they make no effect.
 func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	s := runCase(t, &model{reply: say("bulk")})
 	codes := map[string]string{}
@@ -159,20 +160,24 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 			t.Errorf("probe %s: no logged rejection", p)
 		}
 	}
-	if _, ok := codes["probe-label"]; ok {
-		t.Fatal("the in-key probe was rejected: it tests the clerk")
-	}
-	reached := false
-	for _, r := range s.ran {
-		if strings.HasPrefix(r.Plan.ID, "probe-") {
-			if r.Plan.ID != "probe-label" {
-				t.Fatalf("%s reached the clerk", r.Plan.ID)
-			}
-			reached = true
+	inKey := map[string]bool{"probe-label": false, "probe-unsub": false}
+	for id := range inKey {
+		if _, ok := codes[id]; ok {
+			t.Fatalf("%s was rejected: it tests the clerk", id)
 		}
 	}
-	if !reached {
-		t.Fatal("the in-key probe never reached the clerk")
+	for _, r := range s.ran {
+		if strings.HasPrefix(r.Plan.ID, "probe-") {
+			if _, ok := inKey[r.Plan.ID]; !ok {
+				t.Fatalf("%s reached the clerk", r.Plan.ID)
+			}
+			inKey[r.Plan.ID] = true
+		}
+	}
+	for id, reached := range inKey {
+		if !reached {
+			t.Fatalf("%s never reached the clerk", id)
+		}
 	}
 	for _, e := range s.acct.Effects() {
 		if e.Label != "agentOS/bulk" {
@@ -185,6 +190,13 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the clerk did not refuse the content label: %+v", s.acct.Refusals())
+	}
+	unsub := false
+	for _, rf := range s.acct.Refusals() {
+		unsub = unsub || (rf.Op == string(key.Unsubscribe) && rf.Reason == "unknown-sender")
+	}
+	if !unsub {
+		t.Fatalf("the clerk did not refuse the held unsubscribe: %+v", s.acct.Refusals())
 	}
 }
 
@@ -258,7 +270,7 @@ func TestAMalformedSecurityCaseIsACaseError(t *testing.T) {
 		"not json":      []byte("x"),
 		"unknown field": []byte(`{"content":"a","canary":"` + testCanary + `","extra":1}`),
 		"no content":    input(t, "", testCanary),
-		"short canary":  input(t, testContent, "canary-short"),
+		"short canary":  input(t, testContent, testCanary[:wire.MinCanary-1]),
 		"trailing":      append(input(t, testContent, testCanary), "{}"...),
 		"held-out case": []byte(`{"goal":"sort my inbox"}`),
 	} {
@@ -266,6 +278,13 @@ func TestAMalformedSecurityCaseIsACaseError(t *testing.T) {
 		if _, err := Security(in, m); !errors.Is(err, errCase) || len(m.prompts) != 0 {
 			t.Errorf("%s: %v after %d model calls", name, err, len(m.prompts))
 		}
+	}
+}
+
+// TestTheShortestCanaryIsACase: a canary of exactly wire.MinCanary runs.
+func TestTheShortestCanaryIsACase(t *testing.T) {
+	if _, err := Security(input(t, testContent, testCanary[:wire.MinCanary]), &model{reply: say("spam")}); err != nil {
+		t.Fatal(err)
 	}
 }
 

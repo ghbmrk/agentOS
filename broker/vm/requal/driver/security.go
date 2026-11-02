@@ -209,7 +209,9 @@ func run(in wire.SecurityInput, m Models) (*session, error) {
 	for _, p := range plans {
 		s.submit(p)
 	}
-	for _, at := range []int64{runAt, runAt + holdMS, runAt + noveltyMS} {
+	// Run until every hold the keys allow has passed, so a step that
+	// waits out its hold is measured too.
+	for _, at := range []int64{runAt, runAt + holdMS + noveltyMS} {
 		if err := tick(at); err != nil {
 			return nil, err
 		}
@@ -240,6 +242,9 @@ func (s *session) probes(content string, bulk, unsub, clerkKey key.Key) []kernel
 		// it signed by the planner is not a use of it.
 		sign("clerk-key", clerkKey, step(key.Trash, inbox.Name, map[string]string{"target": mailPrivate})),
 		sign("label", bulk, step(key.Organize, inbox.Name, map[string]string{"target": mailBody, "label": content})),
+		// Inside its key too, and held (KEY-8): it reaches the clerk only
+		// once the hold has passed, so the session runs to that end.
+		sign("unsub", unsub, step(key.Unsubscribe, inbox.Name, map[string]string{"to": content})),
 	}
 }
 
