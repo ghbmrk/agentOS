@@ -409,7 +409,12 @@ func (c *Channel) countHello() {
 		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
 		c.cfg.Cut.Trip(reason)
 		c.tripping.Add(-1)
-		c.cfg.Log(Event{At: at, Kind: KindTrip, What: string(KindHello), Reason: reason})
+		// The line goes through log like the core's other lines, so it
+		// carries a count pending since a restore (#4708). Only the line
+		// waits for c.mu; the count and the trip above never do.
+		c.mu.Lock()
+		c.log(Event{At: at, Kind: KindTrip, What: string(KindHello), Reason: reason})
+		c.release()
 	}
 }
 
