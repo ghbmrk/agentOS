@@ -478,10 +478,35 @@ var sysAllowed = map[string]bool{
 // cgo reach code the source test cannot read.
 var barred = map[string]bool{"os/exec": true, "net/http/cgi": true, "unsafe": true, "plugin": true, "C": true}
 
-// REQ: HW-10, ONB-3. The console is a public CI log, so no diag reads a
-// journal but through the readers ASSUMPTIONS E8 names (#4517 item 3):
+// procReach are the packages that start a process the caller names, and
+// procImports the only direct imports of the driver whose own imports
+// reach one, those it takes today: modem/at runs only arecord and aplay,
+// and modem/atsim reaches childproc only through modem/at. Any other import that reaches
+// childproc or os/exec, such as machprobe or probecmd, could run sh -c
+// outside command, so it is refused (#4594 item 1).
+var (
+	procReach   = map[string]bool{"github.com/ghbmrk/agentos/broker/childproc": true, "os/exec": true}
+	procImports = map[string]bool{
+		"github.com/ghbmrk/agentos/broker/childproc":   true,
+		"github.com/ghbmrk/agentos/broker/modem/at":    true,
+		"github.com/ghbmrk/agentos/broker/modem/atsim": true,
+	}
+)
+
+// underPath says whether s is one of the PATH directories dirs or a path
+// under one.
+func underPath(s string, dirs []string) bool {
+	return slices.ContainsFunc(dirs, func(d string) bool { return s == d || strings.HasPrefix(s, d+"/") })
+}
+
+// REQ: HW-10, ONB-3. The console is a public CI log, so no diag runs
+// journalctl but through the readers ASSUMPTIONS E8 names (#4517 item 3):
 // journalctl is named only in readJournal, and each reader is called
-// only by the functions E8 names for it. A tool runs only through a
+// only by the functions E8 names for it. No constant names a journal file
+// or a path in childEnv's PATH, no import but procImports reaches
+// childproc or os/exec, and run and output pass their own parameters on
+// unchanged (#4594); paths built from pieces and data flow are E8's
+// review items. A tool runs only through a
 // direct call of command, run or output, and only the tools E8 allows,
 // under constant names and arguments: ip link, addr or netns add, and
 // systemctl show, restart or daemon-reload; journalctl only in
@@ -554,6 +579,12 @@ func TestSourceTestRefusesEachBypass(t *testing.T) {
 		{"net/http/cgi", `import "net/http/cgi"` + "\n" + `var zz = cgi.Handler{Path: "/bin/sh"}`, "imports net/http/cgi"},
 		{"readJournal from an unnamed caller", `func zz() string { return readJournal(0, "agentosd.service") }`, "zz reads through readJournal"},
 		{"journal as a value", `func zz(d *driver) { f := d.journal; _ = f }`, "uses journal other than as a direct call"},
+		{"machprobe's child", `import "github.com/ghbmrk/agentos/broker/machprobe"` + "\n" + `var zz = machprobe.Options{Child: []string{"sh", "-c", "systemctl status agentosd.service"}}`, "imports github.com/ghbmrk/agentos/broker/machprobe, which reaches github.com/ghbmrk/agentos/broker/childproc"},
+		{"probecmd's command", `import "github.com/ghbmrk/agentos/broker/probecmd"` + "\n" + `var zz = probecmd.CommandProbe{Cmd: []string{"sh"}}`, "imports github.com/ghbmrk/agentos/broker/probecmd, which reaches github.com/ghbmrk/agentos/broker/childproc"},
+		{"journal file read", `import "os"` + "\n" + `func zz() { os.ReadFile("/var/log/journal/x/system.journal") }`, `zz names "/var/log/journal/x/system.journal": a journal is read only through readJournal`},
+		{"journal directory joined", `import "path/filepath"` + "\n" + `var zz = filepath.Join("/run/log", "journal")`, `names "journal": a journal is read only through readJournal`},
+		{"program planted on PATH", `import "os"` + "\n" + `func zz() { os.WriteFile("/usr/local/sbin/ip", []byte("#!/bin/sh\nexec systemctl status agentosd.service\n"), 0o755); run("ip", "link") }`, `zz names "/usr/local/sbin/ip", in childEnv's PATH`},
+		{"PATH directory joined", `import "path/filepath"` + "\n" + `var zz = filepath.Join("/usr/bin", "ip")`, `names "/usr/bin", in childEnv's PATH`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f, err := parser.ParseFile(fset, "zz_bypass.go", "package main\n"+c.src+"\n", 0)
@@ -561,6 +592,50 @@ func TestSourceTestRefusesEachBypass(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := sourceProblems(fset, append(slices.Clone(files), f), imp)
+			if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, c.want) }) {
+				t.Errorf("source test does not refuse it with %q; it says %q", c.want, got)
+			}
+		})
+	}
+}
+
+// TestSourceTestPinsTheRunnersPassThrough edits run and output, the
+// runners that pass their own parameters on to command: each edit makes
+// command run a tool the caller did not name, and the source test refuses
+// it with its own reason (#4594 item 3).
+func TestSourceTestPinsTheRunnersPassThrough(t *testing.T) {
+	fset, files, imp := driverSources(t, nil)
+	const outputCall, runCall = "out, _ := command(name, args...).Output()", "out, err := command(name, args...).CombinedOutput()"
+	for _, c := range []struct{ name, old, new, want string }{
+		{"output passes another variable", outputCall, `x := "sh"; out, _ := command(x, args...).Output()`, "output calls command with a tool name that is not a constant"},
+		{"output passes its args alone", outputCall, `out, _ := command("systemctl", args...).Output()`, "output calls command and runs systemctl with an argument that is not a constant"},
+		{"output reassigns name", outputCall, `name = "sh"; ` + outputCall, "output uses its parameter name other than to pass it to command or quote it"},
+		{"output's closure reassigns name", outputCall, `func() { name = "sh" }(); ` + outputCall, "output uses its parameter name other than"},
+		{"run writes an argument", runCall, `args[0] = "status"; ` + runCall, "run uses its parameter args other than"},
+		{"run copies over its args", runCall, `copy(args, []string{"status"}); ` + runCall, "run uses its parameter args other than"},
+		{"run passes a pointer to name", runCall, `p := &name; *p = "sh"; ` + runCall, "run uses its parameter name other than"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			edited := slices.Clone(files)
+			n := 0
+			for i, f := range files {
+				name := fset.Position(f.Pos()).Filename
+				src, err := os.ReadFile(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(src), c.old) {
+					continue
+				}
+				n++
+				if edited[i], err = parser.ParseFile(fset, name, strings.Replace(string(src), c.old, c.new, 1), 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d driver files hold %q; the case is stale", n, c.old)
+			}
+			got := sourceProblems(fset, edited, imp)
 			if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, c.want) }) {
 				t.Errorf("source test does not refuse it with %q; it says %q", c.want, got)
 			}
@@ -655,13 +730,31 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 	if len(missing) > 0 {
 		return []string{fmt.Sprintf("the driver has no function or *driver method %v that the test names", missing)}
 	}
+	var childPath []string // childEnv's PATH, from the driver's own constant
+	for _, tv := range info.Types {
+		if v := tv.Value; v != nil && v.Kind() == constant.String {
+			if p, ok := strings.CutPrefix(constant.StringVal(v), "PATH="); ok {
+				childPath = append(childPath, filepath.SplitList(p)...)
+			}
+		}
+	}
+	if len(childPath) == 0 {
+		return []string{"the driver has no PATH= constant: the test reads the wrong files"}
+	}
+	imported := map[string]*types.Package{}
+	for _, p := range pkg.Imports() {
+		imported[p.Path()] = p
+	}
 	childCommand := "github.com/ghbmrk/agentos/broker/childproc.Command"
 	uses := map[string][]types.Object{} // reader -> the declarations that use it
 	named := false                      // readJournal names journalctl
 	for _, f := range files {
 		for _, im := range f.Imports {
-			if p, _ := strconv.Unquote(im.Path.Value); barred[p] {
+			p, _ := strconv.Unquote(im.Path.Value)
+			if barred[p] {
 				add(im.Pos(), "imports %s", p)
+			} else if via := reach(imported[p], map[*types.Package]bool{}); via != "" && !procImports[p] {
+				add(im.Pos(), "imports %s, which reaches %s and is not in procImports", p, via)
 			}
 		}
 		for _, u := range units(info, f) {
@@ -674,14 +767,22 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 					}
 				}
 			}
+			passed := ownUses(info, runner, own, u.node)
 			called := map[*ast.Ident]bool{} // the idents that are a call's function
 			ast.Inspect(u.node, func(n ast.Node) bool {
 				if e, ok := n.(ast.Expr); ok {
-					if v := info.Types[e].Value; v != nil && v.Kind() == constant.String && strings.Contains(constant.StringVal(v), "journalctl") {
-						if reader[in] != "readJournal" {
-							add(e.Pos(), "%s names journalctl, which only readJournal runs", label)
+					if v := info.Types[e].Value; v != nil && v.Kind() == constant.String {
+						switch s := constant.StringVal(v); {
+						case strings.Contains(s, "journalctl"):
+							if reader[in] != "readJournal" {
+								add(e.Pos(), "%s names journalctl, which only readJournal runs", label)
+							}
+							named = true
+						case strings.Contains(s, "journal"):
+							add(e.Pos(), "%s names %q: a journal is read only through readJournal", label, s)
+						case underPath(s, childPath):
+							add(e.Pos(), "%s names %q, in childEnv's PATH, where a planted program would run as a tool", label, s)
 						}
-						named = true
 					}
 				}
 				switch n := n.(type) {
@@ -701,6 +802,9 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 					obj := info.Uses[n]
 					if obj == nil {
 						break
+					}
+					if slices.Contains(own, obj) && !passed[n] {
+						add(n.Pos(), "%s uses its parameter %s other than to pass it to command or quote it", label, n.Name)
 					}
 					if name, ok := runner[obj]; ok && !called[n] {
 						add(n.Pos(), "%s uses %s other than as a direct call", label, name)
@@ -744,6 +848,65 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 		}
 	}
 	return bad
+}
+
+// reach is the first package of procReach that p is or imports, directly
+// or not, or "".
+func reach(p *types.Package, seen map[*types.Package]bool) string {
+	if p == nil || seen[p] {
+		return ""
+	}
+	seen[p] = true
+	if procReach[p.Path()] {
+		return p.Path()
+	}
+	for _, q := range p.Imports() {
+		if via := reach(q, seen); via != "" {
+			return via
+		}
+	}
+	return ""
+}
+
+// ownUses are the uses of run's or output's own parameters own that the
+// source test allows: passed on whole to command, or quoted by
+// fmt.Errorf or strings.Join, which neither change them. Any other use,
+// an assignment, an index write, a closure or a call that could change
+// args in place, is refused, so the tool command runs is the one the
+// caller named (#4594 item 3).
+func ownUses(info *types.Info, runner map[types.Object]string, own []types.Object, node ast.Node) map[*ast.Ident]bool {
+	ok := map[*ast.Ident]bool{}
+	if len(own) == 0 {
+		return ok
+	}
+	ast.Inspect(node, func(n ast.Node) bool {
+		call, isCall := n.(*ast.CallExpr)
+		if !isCall {
+			return true
+		}
+		var callee types.Object
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			callee = info.Uses[fn]
+		case *ast.SelectorExpr:
+			callee = info.Uses[fn.Sel]
+		}
+		quote := false
+		if f, isFunc := callee.(*types.Func); isFunc && f.Pkg() != nil {
+			quote = slices.Contains([]string{"fmt.Errorf", "strings.Join"}, f.Pkg().Path()+"."+f.Name())
+		}
+		for i, a := range call.Args {
+			id, isId := a.(*ast.Ident)
+			if !isId || !slices.Contains(own, info.Uses[id]) {
+				continue
+			}
+			if quote || runner[callee] == "command" && i < len(own) && info.Uses[id] == own[i] {
+				ok[id] = true
+			}
+		}
+		return true
+	})
+	return ok
 }
 
 // unit is one declaration the source test reads: its object (nil for a
