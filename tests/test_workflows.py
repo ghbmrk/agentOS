@@ -289,29 +289,76 @@ def lane_gate_problems(text, pinned=LANE_GATE_LINES):
     return problems
 
 
-# CI-hostcheck-runner-2604 (#4785): a floating label (ubuntu-latest) moves every job to a new
-# runner image when GitHub chooses, so required checks change under unchanged code. Each runs-on
-# names one image by its version, written out: no expression, alias or list could pick another.
-PINNED_RUNNER = re.compile(r"""(["']?)(ubuntu-\d\d\.\d\d|macos-\d+|windows-\d{4})(-arm)?\1""")
-RUNS_ON_KEY = re.compile(r"""^\s*(?:-\s+)?["']?runs-on["']?\s*:(.*)$""")
-FLOATING = re.compile(r"[\w.]-latest\b")
+# CI-hostcheck-runner-2604 (#4785, #4792): a floating label (ubuntu-latest) moves every job to a
+# new runner image when GitHub chooses, so required checks change under unchanged code. Every job
+# runs on RUNNER, written out; moving to another image is a reviewed edit of this line.
+RUNNER = "ubuntu-24.04"
+PLAIN_KEY = re.compile(r"([A-Za-z0-9_-]+):")
+# YAML breaks lines at \r, NEL, LS and PS too; a tab or other control character has no place here.
+NOT_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f  ﻿]")
 
 
-def runner_label_problems(text):
-    """Return each runs-on that is not one pinned image label, and each floating -latest label."""
+def workflow_runners(text):
+    """Return ({job: runs-on}, problems) for a workflow, reading the YAML fail-closed.
+
+    No YAML library is in CI's Python, and one that reads YAML 1.1 differs from GitHub's reader,
+    so a library would add a parser GitHub does not share. This reads only the subset the
+    workflows use: a top-level `jobs:` block mapping whose jobs are block mappings of plain keys
+    at two and four spaces. Any other form there (flow mapping, quoted or escaped key, `?` key,
+    anchor, alias, tag, merge key, odd indent, a value continued on the next line) is a problem,
+    so a key GitHub reads as runs-on cannot hide from this reader.
+    """
     problems = []
-    # splitlines breaks at every character YAML might (\r, \x85,  ), so no runs-on hides
-    # inside what reads here as a comment.
-    for i, line in enumerate(text.splitlines(), 1):
-        if line.lstrip().startswith("#"):
-            continue
-        code = re.split(r"\s#", line, maxsplit=1)[0]
-        m = RUNS_ON_KEY.match(code)
-        if m and not PINNED_RUNNER.fullmatch(m.group(1).strip()):
-            problems.append("line %d: runs-on %r is not one pinned image label" % (i, m.group(1).strip()))
-        if FLOATING.search(code):
-            problems.append("line %d: floating runner label in %r" % (i, code.strip()))
-    return problems
+    if NOT_TEXT.search(text):
+        problems.append("a control character, tab or YAML line break other than \\n")
+    lines = [l for l in text.split("\n") if l.strip() and not l.lstrip().startswith("#")]
+    top = {}
+    for i, l in enumerate(lines):
+        m = None if l[0].isspace() else PLAIN_KEY.match(l)
+        if m:
+            top.setdefault(m.group(1), []).append(i)
+        elif not l[0].isspace():
+            problems.append("top-level line %r is not a plain key" % l)
+    problems += ["top-level key %r appears %d times" % (k, len(v)) for k, v in top.items() if len(v) > 1]
+    starts = top.get("jobs", [])
+    if len(starts) != 1 or lines[starts[0]].rstrip() != "jobs:":
+        return {}, problems + ["needs one block `jobs:`"]
+    jobs, job, key = {}, None, None
+    for l in lines[starts[0] + 1:]:
+        indent = len(l) - len(l.lstrip(" "))
+        body = re.split(r"\s+#", l.strip(), maxsplit=1)[0]
+        if indent == 0:
+            break
+        if indent == 2:
+            m = re.fullmatch(r"([A-Za-z0-9_-]+):", body)
+            if not m:
+                problems.append("job line %r is not a plain key opening a block mapping" % l)
+                job = None
+                continue
+            job, key = m.group(1), None
+            jobs[job] = []
+        elif indent == 4 and job:
+            m = re.fullmatch(r"([A-Za-z0-9_-]+):(?:\s+(.*))?", body)
+            if not m:
+                problems.append("%s: line %r is not a plain key" % (job, l))
+                key = None
+                continue
+            key = m.group(1)
+            if key == "runs-on":
+                jobs[job].append(m.group(2) or "")
+            elif key == "uses":
+                problems.append("%s: calls a reusable workflow, whose runs-on this cannot see" % job)
+        elif indent > 4 and job and key:
+            if key == "runs-on":
+                problems.append("%s: runs-on continues on line %r" % (job, l))
+        else:
+            problems.append("line %r: indent %d outside a job's plain keys" % (l, indent))
+    if not jobs:
+        problems.append("no jobs")
+    for job, runs in jobs.items():
+        if runs != [RUNNER]:
+            problems.append("%s: runs-on %r, must be exactly [%r]" % (job, runs, RUNNER))
+    return jobs, problems
 
 
 IMAGE_STEP = (
@@ -389,33 +436,51 @@ class WorkflowTest(unittest.TestCase):
     def test_runners_pinned(self):
         for wf in self.files():
             with self.subTest(wf.name):
-                text = wf.read_text()
-                self.assertIn("runs-on:", text)
-                self.assertEqual(runner_label_problems(text), [])
+                jobs, problems = workflow_runners(wf.read_text(encoding="utf-8"))
+                self.assertTrue(jobs)
+                self.assertEqual(problems, [])
 
     def test_runner_pin_check_catches_mutants(self):
-        text = (WORKFLOWS / "ci.yml").read_text()
+        # #4792: each form Security and L3 showed passing the text check on #4787, and more.
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         job = "    runs-on: ubuntu-24.04\n"
-        self.assertIn(job, text)
+        head = "\n  checks:\n" + job
+        self.assertIn(head, text)
         edits = {
-            "ubuntu-latest": "    runs-on: ubuntu-latest\n",
-            "quoted": "    runs-on: 'ubuntu-latest'\n",
-            "quoted key": '    "runs-on": ubuntu-24.04-latest\n',
-            "macos-latest": "    runs-on: macos-latest\n",
-            "matrix": "    strategy:\n      matrix:\n        os: [ubuntu-latest]\n    runs-on: ${{ matrix.os }}\n",
-            "variable": "    runs-on: ${{ vars.RUNNER }}\n",
-            "list": "    runs-on: [self-hosted, linux]\n",
-            "group": "    runs-on:\n      group: big\n",
-            "alias": "    runs-on: *runner\n",
-            "self-hosted": "    runs-on: self-hosted\n",
-            "hidden by carriage return": "    # pinned\r    runs-on: ubuntu-latest\n",
+            "ubuntu-latest": (job, "    runs-on: ubuntu-latest\n"),
+            "another release": (job, "    runs-on: ubuntu-26.04\n"),
+            "arm": (job, "    runs-on: ubuntu-24.04-arm\n"),
+            "non-ASCII digit": (job, "    runs-on: ubuntu-2٤.04\n"),
+            "quoted value": (job, "    runs-on: 'ubuntu-24.04'\n"),
+            "matrix": (job, "    runs-on: ${{ matrix.os }}\n"),
+            "list": (job, "    runs-on: [self-hosted, linux]\n"),
+            "group": (job, "    runs-on:\n      group: big\n"),
+            "alias": (job, "    runs-on: *runner\n"),
+            "anchor": (job, "    runs-on: &r ubuntu-24.04\n"),
+            "tag": (job, "    runs-on: !!str self-hosted\n"),
+            "continued plain scalar": (job, "    runs-on: ubuntu-24.04\n      self-hosted\n"),
+            "quoted key": (job, '    "runs-on": self-hosted\n'),
+            "escaped key": (job, '    "runs\\x2Don": self-hosted\n'),
+            "complex key": (job, "    ? runs-on\n    : self-hosted\n"),
+            "merge key": (job, "    <<: *defaults\n"),
+            "no runs-on": (job, ""),
+            "second runs-on": (job, job + job),
+            "flow mapping job": (head, "\n  checks: {runs-on: self-hosted}\n  checks2:\n" + job),
+            "quoted job key": (head, "\n  'checks':\n" + job),
+            "keys at six": (head, "\n  checks:\n      runs-on: self-hosted\n"),
+            "keys at three": (head, "\n  checks:\n   runs-on: self-hosted\n"),
+            "reusable workflow": (head, "\n  checks:\n    uses: other/repo/.github/workflows/x.yml@v1\n"),
+            "carriage return": (job, "    # pinned\r    runs-on: self-hosted\n"),
+            "line separator": (job, "    # pinned     runs-on: self-hosted\n"),
+            "tab": (job, "    runs-on:\tubuntu-24.04\n"),
+            "second jobs": ("\njobs:\n", "\njobs: {}\njobs:\n"),
+            "document marker": ("\njobs:\n", "\n---\njobs:\n"),
         }
-        for name, new in edits.items():
+        for name, (old, new) in edits.items():
             with self.subTest(name):
-                self.assertTrue(runner_label_problems(text.replace(job, new, 1)), name)
-        for label in ("ubuntu-22.04", "ubuntu-24.04-arm", '"ubuntu-24.04"'):
-            with self.subTest(label):
-                self.assertEqual(runner_label_problems(text.replace(job, f"    runs-on: {label}\n", 1)), [])
+                self.assertTrue(workflow_runners(text.replace(old, new, 1))[1], name)
+        jobs, problems = workflow_runners(text.replace(job, "    runs-on: ubuntu-24.04  # pinned\n", 1))
+        self.assertEqual((problems, jobs["checks"]), ([], [RUNNER]))
 
     def files(self):
         files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
