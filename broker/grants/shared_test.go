@@ -3,7 +3,6 @@ package grants
 // REQ: CH-15, CAP-10, OP-4
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -87,9 +86,7 @@ func TestReissuedIntentsGoOutsideTheBudget(t *testing.T) {
 	for _, it := range items {
 		r.boot = append(r.boot, owner.Carried{Ref: it.Ref, Request: req, Asked: r.now(), Expires: r.now().Add(10 * time.Minute), Sum: owner.ItemSum(it)})
 	}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.open() // restart under STOP: nothing is re-issued yet
 	if !r.g.Reserve(false) || !r.g.Reserve(false) {
 		t.Fatal("questions refused on a fresh budget")

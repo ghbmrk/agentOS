@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Profile is how one stack is confined.
@@ -220,6 +221,14 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		Stderr:      s.Stderr,
 		ExtraFiles:  []*os.File{theirs, r},
 		SysProcAttr: attr,
+		// A Stderr that is not a file is copied from a pipe, and Wait
+		// would wait for that copy to end too. A stack can pass its end
+		// of the pipe out of its PID namespace (over fd 3, the system bus
+		// or an abstract socket), and the copy would then never end, nor
+		// would its reap, so its replacement's Attach would block
+		// (ENF-k-11). After the stack exits, Wait gives the copy this long
+		// and then closes the pipe (#4521).
+		WaitDelay: stderrDrain,
 	}
 	// The child's Pdeathsig fires when the OS thread that forked it exits,
 	// and the runtime ends a thread whose goroutine exits locked (as
@@ -246,7 +255,7 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	if s.Net == nil {
 		// The child has not been reaped, so its pid is still its own.
-		f, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", cmd.Process.Pid))
+		f, err := openNet(cmd.Process.Pid)
 		if err != nil {
 			return fail(err)
 		}
@@ -262,6 +271,16 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	return proc, ours, nil
 }
+
+// stderrDrain is how long Wait keeps copying a reaped stack's stderr pipe
+// before it closes it. The stack's own lines are already in the pipe when
+// it exits, so only a holder outside it loses anything.
+const stderrDrain = time.Second
+
+// openNet opens a started stack's network namespace. Start calls it
+// before it releases the stack, so a stack that exits at once cannot fail
+// its own start; a test delays it to hold that order (#4477).
+var openNet = func(pid int) (*os.File, error) { return os.Open(fmt.Sprintf("/proc/%d/ns/net", pid)) }
 
 // procAttr is how the fork confines s under its profile: its own user, a
 // fresh IPC namespace and, unless it joins another stack's, a fresh
@@ -324,7 +343,8 @@ func (p *Proc) release() {
 }
 
 // Stop kills the stack and returns once it has been reaped (Wait), so
-// every process it started is gone. It may be called more than once.
+// every process it started is gone; at most stderrDrain later if another
+// process holds its stderr pipe. It may be called more than once.
 func (p *Proc) Stop() error {
 	p.cmd.Process.Kill()
 	p.netOnce.Do(func() {
@@ -409,6 +429,14 @@ func confineAndExec(families, view, path string, argv []string) error {
 	}
 	if groups, err := syscall.Getgroups(); err != nil || len(groups) != 0 {
 		return fmt.Errorf("confine: supplementary groups %v (%v)", groups, err)
+	}
+	// No core dump, soft or hard: a crashed stack's memory holds what it
+	// guards (Thread's network keys), and a core written to its working
+	// directory would reach another process that sees it (Thread's
+	// adapter, the run directory). The stack has no CAP_SYS_RESOURCE over
+	// the host, so it cannot raise the limit again (#4459).
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{}); err != nil {
+		return fmt.Errorf("confine: no core: %w", err)
 	}
 	// Mark every descriptor past the interface (fd 3) close-on-exec, so
 	// nothing the enforcer inherited without it reaches the stack. Marking

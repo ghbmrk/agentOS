@@ -67,7 +67,7 @@ var within = map[string]string{
 var inPlace = map[string]string{
 	// STO-2b-1 (#2884): after dropping to the kernel's ids, the unlock
 	// step replaces itself with the kernel main, with an empty environment
-	// and only the key pipe on fd 3, so no root process lives on with the
+	// and only the key pipe on handoff.KeyFD, so no root process lives on with the
 	// store key.
 	"cmd/agentos-unlock": "execs the kernel main in place after its privilege drop (STO-2b-1)",
 }

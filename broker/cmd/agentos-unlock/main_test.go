@@ -24,12 +24,15 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/google/go-tpm/tpm2/transport"
+	"golang.org/x/sys/unix"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/card"
@@ -70,6 +73,10 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Fprintln(os.Stderr, unlockAndExec(r.Config(), r.pins))
 		os.Exit(2)
+	case "move":
+		os.Exit(moveRole())
+	case "taken":
+		os.Exit(takenRole())
 	case "kernel":
 		var cfg kernelRole
 		if err := json.Unmarshal([]byte(os.Args[2]), &cfg); err != nil {
@@ -93,6 +100,157 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(3)
+}
+
+// moveRole is the unlock step's hand-off move, with the runtime's poller
+// made first, as the step's store, pipes and TPM connection make it, and then
+// given time to poll before the exec would come (#4474). 0 when the runtime
+// lived, the moved descriptors are open across the exec, and every other one
+// above 2 (here one the parent left on 3, and one opened without the flag)
+// is close-on-exec.
+func moveRole() int {
+	fail := func(f string, a ...any) int { fmt.Fprintf(os.Stderr, f+"\n", a...); return 2 }
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return fail("%v", err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer w.Close()
+	leak, err := syscall.Open(os.DevNull, syscall.O_RDONLY, 0)
+	if err != nil {
+		return fail("%v", err)
+	}
+	// The runtime's own descriptors (its poller's here) sit below the move's
+	// targets, and nothing holds the targets, so the move replaces none. A
+	// test runner may leave its own open higher up; those are a parent's.
+	fds, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return fail("%v", err)
+	}
+	for _, e := range fds {
+		n, _ := strconv.Atoi(e.Name())
+		to, _ := os.Readlink("/proc/self/fd/" + e.Name())
+		if n == handoff.KeyFD || n == handoff.TPMFD || strings.HasPrefix(to, "anon_inode:") && n >= handoff.KeyFD {
+			return fail("descriptor %d (%s) is in the move's way", n, to)
+		}
+	}
+	// r and f stay reachable through the move: else their finalizers may
+	// close the descriptors before Dup3 copies them, as handOff's defers
+	// prevent there.
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
+	if err != nil {
+		return fail("%v", err)
+	}
+	// Each of the runtime's threads polls in this time: sysmon once 10 ms
+	// pass with no poll, and the sleeping goroutine's thread for its timer.
+	time.Sleep(200 * time.Millisecond)
+	for fd, want := range map[int]string{handoff.KeyFD: "pipe:", handoff.TPMFD: os.DevNull} {
+		to, err := os.Readlink(fmt.Sprintf("/proc/self/fd/%d", fd))
+		fl, ferr := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0)
+		if err != nil || ferr != nil || !strings.HasPrefix(to, want) || fl&unix.FD_CLOEXEC != 0 {
+			return fail("descriptor %d is %q, flags %d (%v, %v), not the moved %s", fd, to, fl, err, ferr, want)
+		}
+	}
+	for _, fd := range []int{3, leak} {
+		if fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC == 0 {
+			return fail("descriptor %d would reach the kernel (flags %d, %v)", fd, fl, err)
+		}
+	}
+	return 0
+}
+
+// TestTheMoveLeavesTheRuntimesDescriptors: the unlock step's move onto
+// handoff's descriptors never overwrites the runtime's poller, which another
+// thread would poll before the exec, killing the step with "netpoll failed"
+// (#4474); and only the moved descriptors and 0 to 2 cross the exec, though
+// the parent left one open on 3.
+//
+// REQ: STO-2, CLK-1
+func TestTheMoveLeavesTheRuntimesDescriptors(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		f, err := os.Open(os.DevNull)
+		must(t, err)
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=move"}
+		cmd.ExtraFiles = []*os.File{f}
+		out, err := cmd.CombinedOutput()
+		f.Close()
+		if err != nil {
+			t.Fatalf("the move: %v\n%s", err, out)
+		}
+	}
+}
+
+// takenRole holds the hand-off slot named in AGENTOS_UNLOCK_SLOT open
+// before the move. 0 when the move refuses with the named error, the held
+// descriptor is still the one it opened, and neither slot took a moved one.
+func takenRole() int {
+	fail := func(f string, a ...any) int { fmt.Fprintf(os.Stderr, f+"\n", a...); return 2 }
+	slot, err := strconv.Atoi(os.Getenv("AGENTOS_UNLOCK_SLOT"))
+	if err != nil {
+		return fail("%v", err)
+	}
+	held, err := os.CreateTemp("", "held")
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer os.Remove(held.Name())
+	if err := syscall.Dup3(int(held.Fd()), slot, 0); err != nil {
+		return fail("%v", err)
+	}
+	var want syscall.Stat_t
+	if err := syscall.Fstat(slot, &want); err != nil {
+		return fail("%v", err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fail("%v", err)
+	}
+	defer w.Close()
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		return fail("%v", err)
+	}
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
+	named := fmt.Sprintf("agentos-unlock: descriptor %d is already open at hand-off", slot)
+	if err == nil || err.Error() != named {
+		return fail("the move over an open %d: %v, want %q", slot, err, named)
+	}
+	var got syscall.Stat_t
+	if err := syscall.Fstat(slot, &got); err != nil || got.Dev != want.Dev || got.Ino != want.Ino {
+		return fail("descriptor %d no longer holds what it held (%v)", slot, err)
+	}
+	for _, other := range []int{handoff.KeyFD, handoff.TPMFD} {
+		if other == slot {
+			continue
+		}
+		if _, err := unix.FcntlInt(uintptr(other), unix.F_GETFD, 0); err != syscall.EBADF {
+			return fail("descriptor %d took a moved one though the move was refused (%v)", other, err)
+		}
+	}
+	return 0
+}
+
+// TestTheMoveRefusesAnOpenSlot: a descriptor already on handoff.KeyFD or
+// handoff.TPMFD is never overwritten by the move; the step is refused by
+// name and the descriptor stays open (#4523).
+//
+// REQ: STO-2, CLK-1
+func TestTheMoveRefusesAnOpenSlot(t *testing.T) {
+	for _, slot := range []int{handoff.KeyFD, handoff.TPMFD} {
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = []string{roleEnv + "=taken", "AGENTOS_UNLOCK_SLOT=" + strconv.Itoa(slot), "TMPDIR=" + t.TempDir()}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("slot %d: %v\n%s", slot, err, out)
+		}
+	}
 }
 
 // kernelRole is the kernel main's configuration: its one argument after

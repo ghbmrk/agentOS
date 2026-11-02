@@ -1548,6 +1548,36 @@ class ConfigTest(unittest.TestCase):
             self.assertEqual(s["Signed-By"], "/usr/share/keyrings/debian-archive-keyring.gpg")
             self.assertNotIn("Trusted", s)
 
+    def test_snapshot_fetch_retries_a_mirror_outage(self):
+        # #4518: one "503 No healthy backends" from the snapshot mirror outlasted apt's default
+        # 1+2+4 s of retries and killed the build. The build's apt (mkosi.pkgmngr, read through
+        # APT_CONFIG's Dir::Etc as mkosi v24.3 sets it) retries 20 times, the delay doubling to 60 s,
+        # about 15 minutes, then fails with apt's named error. The file sets nothing else, so it
+        # cannot loosen signature or hash checks. Read by real apt-config, as mkosi's apt reads it.
+        conf = MK / "mkosi.pkgmngr/etc/apt/apt.conf.d/80-agentos-retries"
+        keys = re.findall(r'^([A-Za-z:]+) "([^"]*)";$', conf.read_text(), re.M)
+        want = {"Acquire::Retries": "20", "Acquire::Retries::Delay": "true",
+                "Acquire::Retries::Delay::Maximum": "60"}
+        self.assertEqual(dict(keys), want)
+        self.assertEqual(len(keys), len(want))
+        body = [l for l in conf.read_text().splitlines() if l.strip() and not l.startswith("//")]
+        self.assertEqual(len(body), len(want), "every non-comment line is one pinned key")
+        # The host's apt runs the fetch (no ToolsTree=), and the tree never reaches the image.
+        self.assertNotIn("ToolsTree", (MK / "mkosi.conf").read_text())
+        tool = reference_tool(self, "apt-config")
+        with tempfile.TemporaryDirectory() as tmp:
+            shutil.copytree(MK / "mkosi.pkgmngr/etc", tmp + "/etc")
+            pathlib.Path(tmp, "apt.conf").write_text('Dir::Etc "%s/etc/apt";\n' % tmp)
+            env = dict(os.environ, APT_CONFIG=tmp + "/apt.conf")
+            out = subprocess.run([tool, "dump", "Acquire::Retries"], env=env, check=True,
+                                 capture_output=True, text=True).stdout
+        got = dict(re.findall(r'^(\S+) "([^"]*)";$', out, re.M))
+        for k, v in want.items():
+            self.assertEqual(got.get(k), v, out)
+        # apt's backoff (acquire-worker.cc, apt 2.7): try n waits min(2**n, Maximum) seconds.
+        wait = sum(min(2 ** n, 60) for n in range(20))
+        self.assertTrue(600 <= wait <= 1200, wait)
+
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
         # Only Debian's main component, in mkosi.conf and in the build's apt sources, from the same
@@ -4648,6 +4678,28 @@ class ReferenceDiffsRanTest(unittest.TestCase):
                 self.assertTrue(issubclass(c, MustRun))
                 self.assertTrue(unittest.TestLoader().getTestCaseNames(c))
 
+    @staticmethod
+    def class_level_fixtures(classes, namespace):
+        """#4522: MustRun sees a skip only through a test's own run; a SkipTest from setUpClass or
+        setUpModule is reported by the suite, so it would pass. Names every such fixture on a class
+        (or any base but unittest's own) and in the module."""
+        found = [c.__name__ + "." + n for c in classes for b in c.__mro__
+                 if b not in (unittest.TestCase, object) for n in ("setUpClass", "setUpModule")
+                 if n in vars(b)]
+        return found + [n for n in ("setUpModule",) if n in namespace]
+
+    def test_no_reference_diff_class_or_the_module_has_a_class_level_fixture(self):
+        classes = (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest)
+        self.assertEqual(self.class_level_fixtures(classes, vars(sys.modules[__name__])), [])
+
+        class Bad(MustRun, unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise unittest.SkipTest("reference tool missing")
+
+        self.assertEqual(self.class_level_fixtures((Bad,), {}), ["Bad.setUpClass"])
+        self.assertEqual(self.class_level_fixtures((), {"setUpModule": None}), ["setUpModule"])
+
     def test_must_run_fails_a_skip_and_passes_a_run_once(self):
         runs = []
 
@@ -5364,7 +5416,9 @@ class UplinkTest(unittest.TestCase):
         # and prefixed): boot()'s console echo goes through guest_echo, which cuts ANSI/CR and other
         # non-printable bytes and puts "console| " in front of every line.
         s = (IMG / "ci_boot.sh").read_text()
-        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed" "$log" | tail -40 | guest_echo || true\n', s)
+        # A Go command's crash header lines too (#4474), still through guest_echo.
+        self.assertIn('\tgrep -a "agentos-\\|Secure Boot\\|verity\\|Failed\\|fatal error:\\|panic:\\|]: runtime: " "$log" '
+                      '| tail -40 | guest_echo || true\n', s)
         fn = "".join(re.search(r"^%s\(\) \{\n.*?^\}\n" % f, s, re.S | re.M).group(0)
                      for f in ("clean", "guest_echo"))
         raw = ("ci_boot: G1 PROVEN\n::notice::agentos-e2e x\n\x1b[1;32magentos-boot: ok\x1b[0m\r\n"

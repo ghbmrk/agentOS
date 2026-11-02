@@ -48,6 +48,18 @@ func TestHostBoundsWrites(t *testing.T) {
 			t.Fatalf("%d frames reached the device, %d events; want %d and none", len(r.tr.writes), len(r.s.events), max)
 		}
 	})
+	// A write the transport fails may still have reached the device, so it
+	// counts at the host too, as in the slot (#4515).
+	t.Run("failed writes count", func(t *testing.T) {
+		r := newRig(t, writes(max+5))
+		r.tr.fail = true
+		if n, err := r.h.Do(context.Background(), "read-temperature"); !errors.Is(err, devslot.ErrWrites) || n != 0 {
+			t.Fatalf("Do: %d, %v; want ErrWrites", n, err)
+		}
+		if len(r.tr.writes) != max {
+			t.Fatalf("%d failed frames reached the transport, want %d", len(r.tr.writes), max)
+		}
+	})
 	t.Run("control: MaxWrites writes, and each operation its own", func(t *testing.T) {
 		r := newRig(t, writes(max), writes(max))
 		for i := range 2 {

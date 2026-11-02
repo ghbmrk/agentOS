@@ -37,9 +37,7 @@ func boundRig(t *testing.T) (*rig, func(id, rec string) journal.Status) {
 // "no match, no silence"), and RESUME runs one without asking.
 func TestQueuedPreAllowedSendsObeyTheCurrentWindow(t *testing.T) {
 	r, send := boundRig(t)
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	asked := r.own.count()
 	ids := []string{"agent/d1", "agent/d2", "agent/d3"}
 	for i, id := range ids {
@@ -204,9 +202,7 @@ func TestStartedSendSurvivesRestart(t *testing.T) {
 func TestQueuedDeliveriesObeyTheDailyCap(t *testing.T) {
 	r, _ := evidenceRig(t, nil)
 	r.setEvidence(OriginOwner, ownAddr, true)
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	var ids []string
 	for day := 0; day < 2; day++ {
 		for i := 0; i < DeliveryCap; i++ {

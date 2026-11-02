@@ -27,7 +27,7 @@ type script func(t *testing.T, c net.Conn)
 // dialer starts each dial's script on a fresh pipe and records every
 // connection, so a test sees how many ran and whether each was closed.
 // It also records when each dial came and the deadline its context
-// carried, which the host set before dialing.
+// carried, which the host set before dialing. A nil script fails its dial.
 type dialer struct {
 	t         *testing.T
 	scripts   []script
@@ -50,6 +50,9 @@ func (d *dialer) Dial(ctx context.Context) (devhost.Conn, error) {
 	dl, _ := ctx.Deadline()
 	d.at = append(d.at, now)
 	d.deadlines = append(d.deadlines, dl)
+	if s == nil { // a nil script is a driver that does not start
+		return nil, errors.New("no driver")
+	}
 	host, drv := net.Pipe()
 	d.done.Add(1)
 	go func() {
@@ -63,6 +66,7 @@ func (d *dialer) Dial(ctx context.Context) (devhost.Conn, error) {
 // transport is the device: it answers reads from a queue and records writes.
 type transport struct {
 	mu     sync.Mutex
+	fail   bool // every Write fails, after the frame is recorded as sent
 	writes [][]byte
 	reads  []devslot.Target
 	frames [][]byte
@@ -72,6 +76,9 @@ func (tr *transport) Write(_ context.Context, _ devslot.Target, f []byte) error 
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	tr.writes = append(tr.writes, f)
+	if tr.fail {
+		return errors.New("transport down")
+	}
 	return nil
 }
 

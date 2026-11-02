@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +50,14 @@ func capture(t *testing.T) map[string]any {
 		"model": "gpt-m", "stream": true, "tool_choice": "auto", "parallel_tool_calls": false,
 		"reasoning": map[string]any{"effort": "low", "context": "all_turns"}, "store": false,
 		"include": []any{"reasoning.encrypted_content"}, "prompt_cache_key": "k", "text": map[string]any{"verbosity": "low"},
-		"client_metadata": map[string]any{"turn_id": "t1", "session_id": "s1", "thread_id": "th1"},
+		"client_metadata": map[string]any{
+			"x-codex-installation-id": "11111111-1111-4111-8111-111111111111",
+			"session_id":              "22222222-2222-4222-8222-222222222222",
+			"thread_id":               "22222222-2222-4222-8222-222222222222",
+			"x-codex-window-id":       "22222222-2222-4222-8222-222222222222:1",
+			"turn_id":                 "33333333-3333-4333-8333-333333333333",
+			"x-codex-turn-metadata":   `{"request_kind":"turn","workspaces":{}}`,
+		},
 		"input": []any{
 			map[string]any{"type": "additional_tools", "id": "at_1", "role": "developer", "tools": tools},
 			map[string]any{"type": "message", "id": "m1", "role": "developer", "content": text("instructions")},
@@ -162,7 +171,7 @@ func TestPlanModelBodyHeldToDeclaredShape(t *testing.T) {
 		"remote image": {mut(func(m map[string]any) {
 			item(m, 1)["content"] = []any{map[string]any{"type": "input_image", "image_url": "https://example.net/a.png"}}
 		}), "remote"},
-		"metadata of numbers": {mut(func(m map[string]any) { m["client_metadata"] = map[string]any{"a": 1} }), "meta"},
+		"metadata of numbers": {mut(func(m map[string]any) { m["client_metadata"] = map[string]any{"turn_id": 1} }), "meta"},
 		"hosted tool_choice":  {mut(func(m map[string]any) { m["tool_choice"] = map[string]any{"type": "web_search"} }), "choice"},
 		"tool_choice word":    {mut(func(m map[string]any) { m["tool_choice"] = "web" }), "choice"},
 	} {
@@ -216,8 +225,14 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		},
 		"a prefix that could pass X-Forwarded-For": func(d *plan.Declaration) { d.ResponsePrefixes = []string{"X-Forwarded-Foo"} },
 		"a prefix that could pass a proxy header":  func(d *plan.Declaration) { d.ResponsePrefixes = []string{"Proxy-Authorization-"} },
-		"no mode":         func(d *plan.Declaration) { d.Mode = "" },
-		"an unknown mode": func(d *plan.Declaration) { d.Mode = "allowed" },
+		"client_metadata with no keys":             func(d *plan.Declaration) { d.Body.Meta = nil },
+		"metadata keys with no client_metadata": func(d *plan.Declaration) {
+			d.Body.Keys = []string{"model", "input", "store", "stream"}
+		},
+		"a metadata key with no cap": func(d *plan.Declaration) { d.Body.Meta = map[string]int{"turn_id": 0} },
+		"an empty metadata key":      func(d *plan.Declaration) { d.Body.Meta = map[string]int{"": 8} },
+		"no mode":                    func(d *plan.Declaration) { d.Mode = "" },
+		"an unknown mode":            func(d *plan.Declaration) { d.Mode = "allowed" },
 	} {
 		d := f.decl(t)
 		edit(&d)
@@ -544,5 +559,69 @@ func TestTheCodexPoolIsNamedAsTheProviderNamesIt(t *testing.T) {
 		if _, err := plan.New(d, f.sec, f.roots); err == nil {
 			t.Errorf("%s: a pool declaration that cannot name its windows is refused", name)
 		}
+	}
+}
+
+// client_metadata holds only the keys the CLI sets, each value within its
+// cap: an unknown key, a value one byte over, or a value that is not text
+// is refused with nothing sent, and every declared key at its cap passes
+// (#2117, CLK-7).
+func TestPlanClientMetadataHeldToItsKeys(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	with := func(meta map[string]any) string {
+		m := capture(t)
+		m["client_metadata"] = meta
+		return encode(t, m)
+	}
+	full := map[string]any{}
+	for k, n := range plan.Codex(nil).Body.Meta {
+		full[k] = strings.Repeat("a", n)
+	}
+	if resp, d := callWith(p, "g", ph, with(full), free); d != "" {
+		t.Fatalf("every declared key at its cap: %s", d)
+	} else {
+		read(t, resp)
+	}
+	before := f.hits()
+	for name, meta := range map[string]map[string]any{
+		"an unknown key":        {"turn_id": "t", "x-codex-blob": "b"},
+		"a key in another case": {"Turn_Id": "t"},
+		"an id over its cap":    {"turn_id": strings.Repeat("a", 129)},
+		"turn metadata over its cap": {
+			"x-codex-turn-metadata": strings.Repeat("a", 16<<10+1),
+		},
+		"an object value": {"x-codex-turn-metadata": map[string]any{"request_kind": "turn"}},
+	} {
+		if resp, d := callWith(p, "g", ph, with(meta), free); resp != nil || d != plan.DBody+" meta" {
+			t.Errorf("%s: answered %v, detail %q", name, resp != nil, d)
+		}
+	}
+	if f.hits() != before {
+		t.Fatal("a refused client_metadata reached the provider")
+	}
+}
+
+// The Codex body (its keys, tools and client_metadata) is measured on one
+// CLI release, the one the image pins as CODEX_VERSION in
+// guest/codex/build-rootfs.sh. The declaration's Version names it, so a
+// CLI bump fails here until the same change requalifies the declaration,
+// and a newly declared tool or key cannot reach the plan as a refusal on
+// every turn unnoticed (#2115).
+func TestCodexBodyIsMeasuredOnThePinnedCLI(t *testing.T) {
+	raw, err := os.ReadFile("../../../guest/codex/build-rootfs.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^CODEX_VERSION=([0-9][0-9A-Za-z.+-]*)$`).FindAllSubmatch(raw, -1)
+	if len(m) != 1 {
+		t.Fatalf("build-rootfs.sh: %d CODEX_VERSION lines", len(m))
+	}
+	v := plan.Codex(nil).Version
+	if !regexp.MustCompile(`^codex-` + regexp.QuoteMeta(string(m[0][1])) + `-[0-9]+$`).MatchString(v) {
+		t.Fatalf("the Codex declaration is %q, measured on another CLI than the pinned %s", v, m[0][1])
 	}
 }

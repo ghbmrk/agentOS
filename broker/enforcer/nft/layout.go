@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -99,4 +100,18 @@ func ifname(s string) bool {
 		}
 	}
 	return true
+}
+
+// deviceIface is the interface of the Devices network's VLAN n: Trunk.n
+// (D-225).
+func (l Layout) deviceIface(n int) string { return l.Trunk + "." + strconv.Itoa(n) }
+
+// DeviceIface is the interface of the device whose Wi-Fi identity is
+// wifi; false if wifi names no VLAN.
+func (l Layout) DeviceIface(wifi string) (string, bool) {
+	n, ok := VLAN(wifi)
+	if !ok {
+		return "", false
+	}
+	return l.deviceIface(n), true
 }

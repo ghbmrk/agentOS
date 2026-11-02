@@ -2,11 +2,15 @@ package traffic
 
 import (
 	"cmp"
+	"encoding/json"
+	"errors"
+	"maps"
 	"net/netip"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 )
 
@@ -29,14 +33,28 @@ type Caps struct {
 	Edge uint64
 }
 
-// Reading is one read of the firewall's byte counters: the IP bytes the
-// core sent to each internet address, and the edge's segment to the
-// internet, acknowledgements and retransmissions included, since the
-// ruleset load numbered Gen. Within one Gen a counter only rises.
+// CapsOf is the caps a signed policy version gives (NET-2 Byte caps): each
+// listed destination's, 0 for one with none, and the edge's.
+func CapsOf(d policy.Document) Caps {
+	out := Caps{Core: make(map[string]uint64, len(d.Destinations)), Edge: d.EdgeCap}
+	for _, h := range d.Destinations {
+		out.Core[h] = d.Caps[h]
+	}
+	return out
+}
+
+// Reading is one read of the firewall: the IP bytes the core sent to each
+// internet address, and the edge's segment to the internet,
+// acknowledgements and retransmissions included, since the ruleset load
+// numbered Gen, and the addresses each core destination's resolver set
+// (nft.AllowSet.Named) holds. Within one Gen a counter only rises. The
+// core's allow set is the union of its destinations' resolver sets, so
+// Named holds every address the core can reach.
 type Reading struct {
-	Gen  uint64
-	Core map[netip.Addr]uint64
-	Edge uint64
+	Gen   uint64
+	Core  map[netip.Addr]uint64
+	Edge  uint64
+	Named map[string][]netip.Addr
 }
 
 // Box is the box an overrun cuts.
@@ -145,6 +163,20 @@ func (c *Counter) Resolved(dest string, addr netip.Addr) {
 	c.resolved[addr], c.used[addr] = c.day, c.day
 }
 
+// named adds dest to addr's destinations without marking addr resolved
+// today. An address first seen this way starts its idle clock today, so it
+// is forgotten like any other once it goes a full day unused and no set
+// holds it. The caller holds c.mu.
+func (c *Counter) named(dest string, addr netip.Addr) {
+	if c.dests[addr] == nil {
+		c.dests[addr] = map[string]bool{}
+	}
+	c.dests[addr][dest] = true
+	if _, ok := c.used[addr]; !ok {
+		c.used[addr] = c.day
+	}
+}
+
 // Add takes one reading and returns every cap now past. A counter lower
 // than the last reading of the same Gen, or any counter after a new Gen,
 // restarted, so all of it is new bytes.
@@ -157,6 +189,15 @@ func (c *Counter) Add(r Reading) []Overrun {
 		c.last, c.lastEdge = map[netip.Addr]uint64{}, 0
 	}
 	c.gen, c.seen = r.Gen, true
+	// Every address a resolver set holds is one the allow set may pass, so
+	// it carries its destinations from the firewall itself: an address
+	// the counter had forgotten, or never heard resolved, is never stray
+	// while the core can reach it.
+	for d, as := range r.Named {
+		for _, a := range as {
+			c.named(d, a.Unmap())
+		}
+	}
 	for a, n := range r.Core {
 		a = a.Unmap()
 		if d := delta(c.last[a], n); d > 0 {
@@ -212,7 +253,8 @@ func (c *Counter) roll() {
 	for a, u := range c.used {
 		if u+1 < d {
 			// Neither resolved nor carrying bytes for a full day: its
-			// connections are over, so its destinations start afresh.
+			// destinations start afresh, and the next reading gives it
+			// back every one whose resolver set still holds it.
 			delete(c.used, a)
 			delete(c.resolved, a)
 			delete(c.dests, a)
@@ -320,6 +362,90 @@ func sat(a, b uint64) uint64 {
 		return ^uint64(0)
 	}
 	return a + b
+}
+
+// State is everything a Counter holds besides its clock and caps, so the
+// day's counts survive an enforcer restart: a restart that forgot them
+// would give the core a second day's cap (ASSUMPTIONS ENF-cap-6). Gen and
+// Last are kept too, so a restart under the same loaded ruleset counts
+// only the bytes past the last reading; a ruleset load at boot is a new
+// Gen and counts all of its counters.
+type State struct {
+	Day      uint32                  `json:"day"`
+	Retired  map[string]uint64       `json:"retired"`
+	Dests    map[netip.Addr][]string `json:"dests"`
+	Resolved map[netip.Addr]uint32   `json:"resolved"`
+	Used     map[netip.Addr]uint32   `json:"used"`
+	Gen      uint64                  `json:"gen"`
+	Seen     bool                    `json:"seen"`
+	Last     map[netip.Addr]uint64   `json:"last"`
+	LastEdge uint64                  `json:"last_edge"`
+	Bytes    map[netip.Addr]uint64   `json:"bytes"`
+	Edge     uint64                  `json:"edge"`
+}
+
+// ErrState is a saved state that does not read back as one.
+var ErrState = errors.New("traffic: saved byte-cap state malformed")
+
+// Save is the counter's state as bytes to keep on the enforcer's own disk
+// after every reading (ASSUMPTIONS ENF-cap-6).
+func (c *Counter) Save() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := State{Day: c.day, Retired: maps.Clone(c.retired), Dests: map[netip.Addr][]string{}, Resolved: maps.Clone(c.resolved),
+		Used: maps.Clone(c.used), Gen: c.gen, Seen: c.seen, Last: maps.Clone(c.last), LastEdge: c.lastEdge, Bytes: maps.Clone(c.bytes), Edge: c.edge}
+	for a, ds := range c.dests {
+		s.Dests[a] = slices.Sorted(maps.Keys(ds))
+	}
+	b, _ := json.Marshal(s) // every field is a plain value
+	return b
+}
+
+// Restore is a counter on now with caps and the state Save wrote. A saved
+// day later than now's is kept, as a clock set back keeps the later day
+// (ASSUMPTIONS ENF-cap-2); an earlier one rolls over at once. A state that
+// does not read back is ErrState, and the caller must not count from zero
+// in its place.
+func Restore(now func() time.Time, caps Caps, b []byte) (*Counter, error) {
+	var s State
+	// A counter's day is never 0 (1970-01-01), so a state without one,
+	// such as null or {}, is not a saved counter.
+	if err := json.Unmarshal(b, &s); err != nil || s.Day == 0 {
+		return nil, ErrState
+	}
+	c := NewCounter(now, caps)
+	put := func(dst map[netip.Addr]uint64, src map[netip.Addr]uint64) {
+		for a, n := range src {
+			dst[a.Unmap()] = n
+		}
+	}
+	put(c.last, s.Last)
+	put(c.bytes, s.Bytes)
+	for a, d := range s.Resolved {
+		c.resolved[a.Unmap()] = d
+	}
+	for a, d := range s.Used {
+		c.used[a.Unmap()] = d
+	}
+	for a, ds := range s.Dests {
+		for _, d := range ds {
+			c.named(d, a.Unmap())
+		}
+	}
+	for a, d := range s.Used { // the saved idle clocks, not named's today
+		c.used[a.Unmap()] = d
+	}
+	for d, n := range s.Retired {
+		if _, listed := c.caps.Core[d]; !listed {
+			c.retired[d] = n
+		}
+	}
+	c.gen, c.seen, c.lastEdge, c.edge = s.Gen, s.Seen, s.LastEdge, s.Edge
+	// The saved day is the counts' day: one before today's rolls over
+	// here, clearing them, as it would have at midnight.
+	c.day = s.Day
+	c.roll()
+	return c, nil
 }
 
 func cloneCaps(c Caps) Caps {

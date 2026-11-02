@@ -9,6 +9,12 @@ when two modules, neither of them in unit_tests.SERIAL, each
     file was there counts), or
   - bind one fixed address: an IP port other than 0 (any address, either protocol), or a Unix
     socket name, abstract or a path.
+A path the kernel did not resolve for us (a failed or cut-off open, a socket path) is resolved as
+the kernel walked it when the trace was taken: from the directory fd or the process's cwd, `..`
+and symlinks followed in each parent component, and in the final one unless the call makes that
+name (O_EXCL, O_NOFOLLOW, bind), through the links the module's own tree made before that call
+(symlink and symlinkat, traced), then through links on disk for names the tree never made a link
+at. A failed create through a symlinked directory so names the real file.
 It names both modules and the path, and points at unit_tests.SERIAL. The check reads every
 pair, whether or not the two happened to overlap on this run, so it does not depend on timing.
 A unique temporary path (tempfile's random names, an ephemeral port) never matches another
@@ -20,6 +26,12 @@ Not seen: a clash through something other than open or bind (a fixed directory m
 and only listed, a rename onto a fixed name, a lock taken with flock on a file opened read-only,
 a connect to a server another module started), by a process outside the module's tree (a
 daemon), or between the tests of one SPLIT module, whose workers share one trace (CI-par-3).
+Not resolved: a link that is gone by the audit and was made outside the module's tree or put in
+place by rename, a link name removed and reused in the same tree, and a relative name from a
+process whose cwd its trace never showed (a forked child before its first call with AT_FDCWD).
+A thread's cwd is the last one its own lines showed: a chdir by another thread of its process
+reaches it at its next AT_FDCWD call. Each unresolved call also counts its path as asked, `..`
+folded, so a stale or reused link name can add a name but never drop the one main read.
 """
 import os
 import re
@@ -30,13 +42,22 @@ import unit_tests  # noqa: E402
 
 # One strace -f -y line: pid, call, rest. A call split by another process's ends
 # `<unfinished ...>`; its result is on a later `<... call resumed>` line of the same pid.
-_LINE = re.compile(r'^(\d+)\s+(open|openat|openat2|bind)\((.*)$')
-_RESUMED = re.compile(r'^(\d+)\s+<\.\.\. (open|openat|openat2|bind) resumed>(.*)$')
-_OPEN_ARGS = re.compile(r'^(?:[A-Z_\d]+<([^>]*)>, )?"((?:[^"\\]|\\.)*)", (.*)$')
+_CALLS = "open|openat|openat2|bind|symlink|symlinkat|chdir|fchdir"
+_LINE = re.compile(rf'^(\d+)\s+({_CALLS})\((.*)$')
+_RESUMED = re.compile(rf'^(\d+)\s+<\.\.\. ({_CALLS}) resumed>(.*)$')
+_STR = r'"((?:[^"\\]|\\.)*)"'
+_DIRFD = r'[A-Z_\d]+<([^>]*)>'
+_OPEN_ARGS = re.compile(rf'^(?:{_DIRFD}, )?{_STR}, (.*)$')
+_SYMLINK_ARGS = re.compile(rf'^{_STR}, (?:{_DIRFD}, )?{_STR}')
+_CHDIR_ARGS = re.compile(rf'^(?:{_STR}|\d+<([^>]*)>)')
+# The cwd strace shows as a call's AT_FDCWD: openat's first argument, symlinkat's second.
+_CWD = re.compile(rf'^(?:{_STR}, )?AT_FDCWD<([^>]*)>')
+_OK = re.compile(r'\)\s+= 0$')
 # strace pads a short result to a column: `)             = 3</path>`, on every resumed line.
 _REACHED = re.compile(r'\)\s+= \d+<([^>]*)>$')
 _RESULT = re.compile(r'\)\s+= ')
 _WRITE = re.compile(r'\bO_(?:WRONLY|RDWR|CREAT)\b')
+_NOFOLLOW = re.compile(r'\bO_(?:EXCL|NOFOLLOW)\b')
 _PORT = re.compile(r'sa_family=AF_INET6?, sin6?_port=htons\((\d+)\)')
 _UNIX = re.compile(r'sa_family=AF_UNIX, sun_path=(@?)"((?:[^"\\]|\\.)*)"')
 _UNFINISHED = " <unfinished ...>"
@@ -101,57 +122,165 @@ def shared(path, home=None):
     return False
 
 
-def writes(trace):
-    """The set of ('path', p) written or created and ('bind', name) bound in one strace -f -y log."""
+def _ondisk(path):
+    """The target of the symlink at path on disk now, or None. /proc's links name the
+    auditing process's own fds and pid, not the traced one's, so they are not followed."""
+    if path == "/proc" or path.startswith("/proc/"):
+        return None
+    try:
+        return os.readlink(path)
+    except OSError:
+        return None
+
+
+def walk(path, link_of, last=False):
+    """path (absolute) as the kernel walks it: `.` and `..` taken in order, and every parent
+    component that link_of(name) gives a target for replaced by it (relative to its directory),
+    up to the kernel's 40 links. The final component is followed only if last: an open without
+    O_EXCL or O_NOFOLLOW, and chdir, follow it; an O_EXCL create, a bind and a symlink make that
+    name. Past 40 links the call failed with ELOOP, and the name is as asked."""
+    done, todo, hops = "/", [c for c in reversed(path.split("/")) if c], 0
+    while todo:
+        c = todo.pop()
+        if c == ".":
+            continue
+        if c == "..":
+            done = os.path.dirname(done)
+            continue
+        name = os.path.join(done, c)
+        target = link_of(name) if todo or last else None
+        if target is None:
+            done = name
+            continue
+        hops += 1
+        if hops > 40:
+            return os.path.normpath(path)
+        if target.startswith("/"):
+            done = "/"
+        todo.extend(c for c in reversed(target.split("/")) if c)
+    return done
+
+
+def writes(trace, ondisk=_ondisk):
+    """The set of ('path', p) written or created and ('bind', name) bound in one strace -f -y log.
+    ondisk(name) gives a symlink's target on disk, read only for a name the trace's own symlink
+    calls never make: a link the tree made after a call was not there when the call walked it."""
+    made = set(_scan(trace, ondisk)[1])
+    return _scan(trace, lambda name: None if name in made else ondisk(name))[0]
+
+
+def _scan(trace, ondisk):
+    """(writes, {link name: target} the trace's symlink calls made), reading trace in order."""
     out = set()
     pending = {}
+    links = {}  # link name (resolved) -> target, as the tree's symlink calls made them, in order
+    cwd = {}  # pid -> its working directory, as the kernel last showed it
+    seen = {}
 
-    def open_target(rest):
+    def link_of(name):
+        if name in links:
+            return links[name]
+        if name not in seen:
+            seen[name] = ondisk(name)
+        return seen[name]
+
+    def resolve(pid, path, base=None, last=False):
+        """The name path (decoded) reaches, from base (a dirfd's path), else the pid's cwd. A
+        relative path with neither is returned as is."""
+        base = base if base is not None else cwd.get(pid)
+        if not os.path.isabs(path):
+            if base is None:
+                return path
+            path = os.path.join(base, path)
+        return walk(path, link_of, last)
+
+    def asked(pid, path, base=None, last=False, main=None):
+        """The names an unresolved call may have reached: the walk, and main, the name main's
+        audit read for it, so a stale link or a cwd the trace showed wrongly can add a name but
+        never lose that one."""
+        return {resolve(pid, path, base, last), main}
+
+    def as_main(path, base):
+        """The name main's audit read for an open: joined only to a dirfd, `..` folded only if
+        absolute (a relative name with no dirfd stays as asked; every module runs from the root)."""
+        if not os.path.isabs(path) and base is not None:
+            path = os.path.join(base, path)
+        return os.path.normpath(path) if os.path.isabs(path) else path
+
+    def open_target(pid, rest):
         m = _OPEN_ARGS.match(rest)
         if not m:
             return None, False
-        base, path = m.group(1) and _decode(m.group(1)), _decode(m.group(2))
-        if not os.path.isabs(path) and base is not None:
-            path = os.path.join(base, path)
-        return os.path.normpath(path) if os.path.isabs(path) else path, bool(_WRITE.search(_flags(m.group(3))))
+        base, flags = m.group(1) and _decode(m.group(1)), _flags(m.group(3))
+        path = _decode(m.group(2))
+        return asked(pid, path, base, not _NOFOLLOW.search(flags), as_main(path, base)), bool(_WRITE.search(flags))
 
-    def bound(args):
+    def bound(pid, args):
         port = _PORT.search(args)
         if port and port.group(1) != "0":
-            return ("bind", f"port {port.group(1)}")
+            return {("bind", f"port {port.group(1)}")}
         unix = _UNIX.search(args)
         if unix and unix.group(2):
             name = _decode(unix.group(2))
-            return ("bind", f"unix @{name}") if unix.group(1) else ("path", os.path.normpath(name))
-        return None
+            return {("bind", f"unix @{name}")} if unix.group(1) else {("path", n) for n in asked(pid, name, main=os.path.normpath(name))}
+        return set()
+
+    def made(pid, call, rest):
+        """The effect of a symlink, symlinkat, chdir or fchdir line, once its result is 0."""
+        if call.startswith("symlink"):
+            m = _SYMLINK_ARGS.match(rest)
+            if m:
+                base = m.group(2) and _decode(m.group(2))
+                name = resolve(pid, _decode(m.group(3)), base)
+                if os.path.isabs(name):
+                    links[name] = _decode(m.group(1))
+            return
+        m = _CHDIR_ARGS.match(rest)
+        if m and m.group(1) is not None:
+            to = resolve(pid, _decode(m.group(1)), last=True)
+            if os.path.isabs(to):
+                cwd[pid] = to
+        elif m:
+            cwd[pid] = _decode(m.group(2))
     for line in trace.splitlines():
         m = _LINE.match(line)
         if m:
             pid, call, rest = m.groups()
-            if call == "bind":
-                b = bound(rest)
-                if b:
-                    out.add(b)
+            at = _CWD.match(rest)
+            if at:
+                cwd[pid] = _decode(at.group(2))
+            if call in ("symlink", "symlinkat", "chdir", "fchdir"):
+                if rest.endswith(_UNFINISHED):
+                    pending[pid] = (call, rest)
+                elif _OK.search(rest):
+                    made(pid, call, rest)
                 continue
-            path, write = open_target(rest)
+            if call == "bind":
+                out |= bound(pid, rest)
+                continue
+            path, write = open_target(pid, rest)
             if path is None or not write:
                 continue
             if rest.endswith(_UNFINISHED):
                 # The asked path counts even if the call never resumes (the process was killed
                 # mid-open); the resumed line adds the file it reached.
-                out.add(("path", path))
-                pending[pid] = path
+                out |= {("path", p) for p in path}
+                pending[pid] = (call, None)
                 continue
             reached = _REACHED.search(rest)
-            out.add(("path", os.path.normpath(_decode(reached.group(1))) if reached else path))
+            out |= {("path", os.path.normpath(_decode(reached.group(1))))} if reached else {("path", p) for p in path}
             continue
         r = _RESUMED.match(line)
-        if r and r.group(2) != "bind" and r.group(1) in pending:
-            pending.pop(r.group(1))
+        if r and r.group(1) in pending:
+            call, rest = pending.pop(r.group(1))
+            if rest is not None:
+                if _OK.search(r.group(3)):
+                    made(r.group(1), call, rest)
+                continue
             reached = _REACHED.search(r.group(3))
             if reached:
                 out.add(("path", os.path.normpath(_decode(reached.group(1)))))
-    return out
+    return out, links
 
 
 def clashes(traces, serial=None, is_shared=shared):

@@ -343,7 +343,7 @@ func pairOnly(t *testing.T, v6 bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, plan(t)) }()
+	go func() { done <- Serve(ctx, plan(t), nil) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -418,6 +418,11 @@ func pairOnly(t *testing.T, v6 bool) {
 	})
 	sent := time.Now()
 	heard := map[string][]string{}
+	// lastFlood is when the last flood packet arrived anywhere: the relay
+	// took its token no later, so the bucket refilled at most until then.
+	// The relay reads the flood after it is sent, so the send time alone
+	// undercounts the refill.
+	var lastFlood time.Time
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for ifc, c := range socks {
@@ -449,6 +454,9 @@ func pairOnly(t *testing.T, v6 bool) {
 					got = append(got, r.name[0])
 				}
 				heard[ifc] = append(heard[ifc], strings.Join(got, " "))
+				if slices.Equal(got, []string{"flood"}) {
+					lastFlood = time.Now()
+				}
 				mu.Unlock()
 			}
 		}()
@@ -471,6 +479,9 @@ func pairOnly(t *testing.T, v6 bool) {
 		if !slices.Equal(got, want[ifc]) {
 			t.Errorf("%s heard %q, want %q", ifc, got, want[ifc])
 		}
+	}
+	if lastFlood.After(sent) {
+		sent = lastFlood
 	}
 	if most := burst + int(math.Ceil(sent.Sub(start).Seconds()*perSec)); floods == 0 || floods > most {
 		t.Errorf("%d of 200 flood packets passed; want 1 to %d", floods, most)
@@ -539,7 +550,7 @@ func pinnedAfterRestart(t *testing.T, v6 bool) {
 	serve := func() func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { done <- Serve(ctx, plan(t)) }()
+		go func() { done <- Serve(ctx, plan(t), nil) }()
 		time.Sleep(200 * time.Millisecond)
 		return func() {
 			cancel()

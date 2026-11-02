@@ -92,7 +92,9 @@ def opened(trace, root=ROOT):
         if rel != ".." and not rel.startswith("../"):
             out.add((rel, directory))
     for line in trace.splitlines():
-        if root not in line and 'open("' not in line:
+        # Only a line naming the root, an open with no directory, or an escaped name (whose root
+        # may be escaped too) can reach a file under the root.
+        if root not in line and 'open("' not in line and "\\" not in line:
             continue
         reached = _REACHED.search(line)
         m = _OPEN.match(line)

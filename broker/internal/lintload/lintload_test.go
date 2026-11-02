@@ -87,6 +87,24 @@ func TestCheckFailsOnATypeError(t *testing.T) {
 	}
 }
 
+// Load returns check's error: an export file gone once go list has run
+// fails the importer inside check, and so the load (#4448).
+func TestLoadReturnsTheCheckError(t *testing.T) {
+	dir := module(t, map[string]string{"a/a.go": "package a\n\nimport \"strings\"\n\nvar X = strings.ToUpper(\"s\")\n"})
+	gone := filepath.Join(t.TempDir(), "gone.a")
+	afterList = func(export map[string]string) {
+		if export["strings"] == "" {
+			t.Error("go list named no export data for strings")
+		}
+		export["strings"] = gone
+	}
+	defer func() { afterList = func(map[string]string) {} }()
+	l, err := Load(dir, linux, "./a")
+	if err == nil || !strings.Contains(err.Error(), "type-checking example.test/m/a") || !strings.Contains(err.Error(), "gone.a") || !strings.HasSuffix(err.Error(), "(linux/amd64)") {
+		t.Fatalf("got %v, %v, want check's error for example.test/m/a", l, err)
+	}
+}
+
 // A line directive would make a file read as another wherever a lint names
 // files by position (Security R1 on #4443), so the load refuses one.
 func TestLoadRefusesALineDirective(t *testing.T) {

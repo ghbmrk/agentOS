@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/enrol"
@@ -154,6 +156,9 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
 	s.cfg.Lock.Unlock()
+	if next, err = s.heard(cur, next); err != nil {
+		return nil, nil, err
+	}
 	next.Version = s.version(cur, pend)
 	base, err := policy.Hash(cur)
 	if err != nil {
@@ -180,6 +185,66 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 		return nil, nil, errMalformed
 	}
 	return &challenge{kind: "propose", prop: prop, class: class, base: base, secret: ref, msg: key.RootMsg(root)}, lines, nil
+}
+
+// errUnheard: a link pins a name on a Devices-network device that the
+// enforcer never heard it prove its own (D-266). The confirm screen says
+// which.
+var errUnheard = errors.New("the enforcer never heard")
+
+// heard is next with the mDNS names the enforcer heard each device prove
+// its own (Config.Heard, D-266): a Devices-network device that pins no
+// names, on a pair that gains its path with this link (the pair is new,
+// or its path returns), is given every name heard on its VLAN that no
+// other device pins or holds, so the card lists each one before the
+// passkey; and a name next pins on a Devices-network device must have
+// been heard there unless cur already pinned it on that device on the
+// Devices network. The untrusted core never introduces a name. Only the
+// link that opens the path fills, so a device whose announcements change
+// later never touches an unrelated link, and one announcing a name
+// another device holds can block no link (Security on #4531). Names are
+// heard on the VLAN of the device's Wi-Fi identity in cur, so a device
+// added or given another identity by this link has none yet.
+func (s *Server) heard(cur, next policy.Document) (policy.Document, error) {
+	next = clone(next)
+	for i := range next.Devices {
+		d := &next.Devices[i]
+		if d.Network != policy.NetDevices {
+			continue
+		}
+		var was, heard [][]string
+		if o := cur.Device(d.ID); o != nil && o.Network == policy.NetDevices {
+			was = o.MDNS
+			if o.WiFi == d.WiFi && d.WiFi != "" && s.cfg.Heard != nil {
+				heard = s.cfg.Heard(d.WiFi)
+			}
+		}
+		for _, n := range d.MDNS {
+			if !listed(was, n) && !listed(heard, n) {
+				return policy.Document{}, fmt.Errorf("%w %s announce the name %s on its own address, so it cannot be pinned for %s: decline this link", errUnheard, ascii(d.ID), strconv.QuoteToASCII(policy.MDNSName(n)), ascii(d.ID))
+			}
+		}
+		if slices.ContainsFunc(next.Pairs, func(p policy.Pair) bool {
+			return (p.A == d.ID || p.B == d.ID) && unpinned(next, p, d.ID) &&
+				!(slices.Contains(cur.Pairs, p) && cur.Linked(p.A) && cur.Linked(p.B))
+		}) {
+			for _, n := range heard {
+				if !slices.ContainsFunc(next.Devices, func(o policy.Device) bool { return o.ID != d.ID && listed(o.MDNS, n) }) {
+					d.MDNS = append(d.MDNS, slices.Clone(n))
+				}
+			}
+		}
+	}
+	b, err := policy.Encode(next)
+	if err != nil {
+		return policy.Document{}, err
+	}
+	return policy.Decode(b)
+}
+
+// listed: ns holds n, as mDNS compares names (policy.MDNSKey).
+func listed(ns [][]string, n []string) bool {
+	return slices.ContainsFunc(ns, func(m []string) bool { return policy.MDNSKey(m) == policy.MDNSKey(n) })
 }
 
 // version picks the next version a challenge signs: above the policy in

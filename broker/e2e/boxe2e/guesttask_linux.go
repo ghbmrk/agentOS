@@ -51,7 +51,7 @@ func (d *driver) providerTask() error {
 	if sock == "" {
 		sock = agentSock
 	}
-	err := until(sockWait, func() (bool, error) {
+	err := d.until(sockWait, func() (bool, error) {
 		_, err := os.Lstat(sock)
 		return err == nil, err
 	})

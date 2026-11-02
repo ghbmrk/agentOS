@@ -121,8 +121,14 @@ type Config struct {
 	// Secrets takes safety-list devices' sealed secrets (slice r); nil
 	// refuses every link that carries one.
 	Secrets Secrets
-	Cert    tls.Certificate
-	Now     func() time.Time // nil means time.Now
+	// Heard is, for a device's Wi-Fi identity, the mDNS names the
+	// enforcer's relay heard the device prove its own on that VLAN
+	// (mdns.HeardBy, D-266): the page pins them for a paired device a
+	// link leaves pinning none, and refuses a link that pins a name not
+	// among them. nil has heard nothing.
+	Heard func(wifi string) [][]string
+	Cert  tls.Certificate
+	Now   func() time.Time // nil means time.Now
 }
 
 var (

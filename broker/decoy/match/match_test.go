@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/decoy"
@@ -140,9 +141,143 @@ func TestDestForms(t *testing.T) {
 			t.Errorf("%s trips", s)
 		}
 	}
+	// A zone names the link, not the address: a zoned form trips as the
+	// zoneless one does (#3876).
+	for _, s := range []string{"::ffff:192.168.10.250%eth0", "64:ff9b::a9fe:a9fe%eth0"} {
+		if _, ok := m.Dest(netip.MustParseAddr(s)); !ok {
+			t.Errorf("%s does not trip", s)
+		}
+	}
+	// A zoned table address is held zoneless, so either form trips.
+	zm := match.New(nil, map[netip.Addr]int{netip.MustParseAddr("2001:db8::7%eth0"): 3})
+	for _, s := range []string{"2001:db8::7", "2001:db8::7%eth1"} {
+		if id, ok := zm.Dest(netip.MustParseAddr(s)); !ok || id != 3 {
+			t.Errorf("%s against a zoned table address: %d, %v", s, id, ok)
+		}
+	}
 	// A destination named in text is no trip: a page that names the
 	// metadata address is refused at connect time, not read as a leak.
 	if r := m.Scan([]byte("see http://169.254.169.254/latest/meta-data/")); len(r.Trips) != 0 {
 		t.Errorf("an address in text tripped %v", r.Trips)
+	}
+}
+
+// KRN-12: a value inside a longer base64 run trips at every byte offset,
+// with any bytes before and after it, in both alphabets, padded or not and
+// split across writes; the same run without the value does not (#3876).
+func TestBase64AnyOffset(t *testing.T) {
+	tab, err := decoy.Generate(rand.Reader, rangeAddrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := tab.Matcher()
+	encs := []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding}
+	for id, e := range tab.Entries() {
+		if e.Value == "" {
+			continue
+		}
+		for pre := range 6 {
+			for post := range 4 {
+				before, after := make([]byte, pre), make([]byte, post)
+				rand.Read(before)
+				rand.Read(after)
+				run := append(append(append([]byte(nil), before...), e.Value...), after...)
+				for _, enc := range encs {
+					s := enc.EncodeToString(run)
+					if got := m.Scan([]byte("x " + s + " y")).Trips; !slices.Equal(got, []int{id}) {
+						t.Fatalf("%v at offset %d, %d after, tripped %v, want [%d]", e, pre, post, got, id)
+					}
+					if got := split(t, m, s, len(s)/2).Trips; !slices.Equal(got, []int{id}) {
+						t.Fatalf("%v at offset %d split tripped %v, want [%d]", e, pre, got, id)
+					}
+					without := enc.EncodeToString(append(before, after...))
+					if got := m.Scan([]byte(without)).Trips; len(got) != 0 {
+						t.Fatalf("a run without the value tripped %v", got)
+					}
+				}
+			}
+		}
+		if got := m.Scan([]byte(strings.ToUpper(hex.EncodeToString([]byte(e.Value))))).Trips; !slices.Equal(got, []int{id}) {
+			t.Fatalf("%v in upper hex tripped %v, want [%d]", e, got, id)
+		}
+	}
+}
+
+// wrap breaks s into lines of width characters with br, as base64(1) (76),
+// MIME (76), PEM (64) and xxd -p (60) do.
+func wrap(s string, width int, br string) string {
+	var b strings.Builder
+	for len(s) > width {
+		b.WriteString(s[:width] + br)
+		s = s[width:]
+	}
+	b.WriteString(s)
+	return b.String()
+}
+
+// KRN-12: a value in base64 or hex broken into lines trips wherever a break
+// falls in it, at any width, with LF or CRLF, raw or JSON-escaped (what the
+// kernel scans of a plan step) at any depth, in one write or split at a break; the same
+// wrapped run without the value does not (#4500).
+func TestBase64Wrapped(t *testing.T) {
+	tab, err := decoy.Generate(rand.Reader, rangeAddrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := tab.Matcher()
+	encs := []*base64.Encoding{base64.StdEncoding, base64.URLEncoding, base64.RawStdEncoding, base64.RawURLEncoding}
+	forms := func(s string, width int) []string {
+		var out []string
+		for _, br := range []string{"\n", "\r\n"} {
+			w := wrap(s, width, br)
+			j, _ := json.Marshal(w)
+			jj, _ := json.Marshal(string(j)) // a JSON body inside a plan step's string
+			out = append(out, w, string(j), string(jj))
+		}
+		return out
+	}
+	for id, e := range tab.Entries() {
+		if e.Value == "" {
+			continue
+		}
+		// Every byte offset, then steps of 5 bytes (under 7 characters, less
+		// than any value's length) up to a 76-character line, so a break
+		// falls inside the value at many places in it.
+		pres := []int{0, 1, 2, 3, 4}
+		for p := 5; p < 58; p += 5 {
+			pres = append(pres, p)
+		}
+		for _, pre := range pres {
+			before := make([]byte, pre)
+			rand.Read(before)
+			run := append(append([]byte(nil), before...), e.Value...)
+			for _, enc := range encs {
+				for _, width := range []int{4, 64, 76} {
+					if width == 4 && pre > 4 {
+						continue // a 4-character line repeats every 3 bytes
+					}
+					for _, s := range forms(enc.EncodeToString(run), width) {
+						if got := m.Scan([]byte("x " + s + " y")).Trips; !slices.Equal(got, []int{id}) {
+							t.Fatalf("%v at %d bytes in, wrapped at %d, tripped %v, want [%d]", e, pre, width, got, id)
+						}
+						if at := strings.LastIndexAny(s, `\`+"\n"); at > 0 {
+							if got := split(t, m, s, at+1).Trips; !slices.Equal(got, []int{id}) {
+								t.Fatalf("%v at %d bytes in, wrapped at %d, split at a break tripped %v", e, pre, width, got)
+							}
+						}
+					}
+					for _, s := range forms(enc.EncodeToString(before), width) {
+						if got := m.Scan([]byte(s)).Trips; len(got) != 0 {
+							t.Fatalf("a wrapped run without the value tripped %v", got)
+						}
+					}
+				}
+			}
+			for _, s := range forms(hex.EncodeToString(run), 60) {
+				if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{id}) {
+					t.Fatalf("%v in hex at %d bytes in, wrapped at 60, tripped %v, want [%d]", e, pre, got, id)
+				}
+			}
+		}
 	}
 }

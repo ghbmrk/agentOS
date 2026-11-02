@@ -95,6 +95,9 @@ func (s *starts) state() (int, int) {
 
 // unit is the decoder unit: each connection on its socket is one session,
 // served as agentos-camdecode-host serves it and closed when Serve returns.
+// Serve's result is sent before the close, as the process's Serve has
+// returned before its deferred close: the close is all the clerk sees of
+// the session's end, so a result sent after it would race the clerk.
 func unit(t *testing.T, st *starts) (sock string, served chan error) {
 	t.Helper()
 	sock = filepath.Join(t.TempDir(), "conn.sock")
@@ -113,8 +116,8 @@ func unit(t *testing.T, st *starts) (sock string, served chan error) {
 			go func() {
 				err := Serve(context.Background(), c, Config{Start: st.start, Root: "/img/camdecode",
 					Cgroup: "/sys/fs/cgroup/unit", MemBytes: camera.DefaultDecodeMem})
-				c.Close()
 				served <- err
+				c.Close()
 			}()
 		}
 	}()
@@ -142,7 +145,9 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 // socket, gets each frame back decoded and checked, from a sandbox the unit
 // started with the camera's declared shapes, its root, its memory cap and
 // its own group; and once the clerk removes the camera, the session's
-// sandbox is stopped and the unit's process has ended.
+// sandbox is stopped and the unit's Serve has returned. Remove joins the
+// session: it returns only once the unit has closed the connection, which
+// the unit does only after Serve, with the sandbox gone (CAM-clerk-18).
 func TestClerkDecodesThroughTheUnit(t *testing.T) {
 	st := &starts{}
 	sock, served := unit(t, st)
