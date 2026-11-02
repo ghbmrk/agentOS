@@ -576,6 +576,8 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		"a home working directory":         {unit, "[Service]\nExecStart=/bin/true\nWorkingDirectory=~\n", `a byte other than`},
 		"a specifier path":                 {unit, "[Service]\nExecStart=/bin/true\nRootDirectory=%t/r\n", `a byte other than`},
 		"a quoted path":                    {unit, "[Service]\nExecStart=/bin/true\nBindPaths=\"/tmp/x\"\n", `a byte other than`},
+		"a specifier in PATH":              {"image/mkosi/agentos-t@.service", "[Service]\nExecStart=/usr/bin/env helper\nEnvironment=PATH=/usr/%I\n", `holds a % specifier`},
+		"a specifier in another variable":  {unit, "[Service]\nExecStart=/usr/bin/env helper\nEnvironment=A=%h\n", `holds a % specifier`},
 		"a PATH in /tmp":                   {unit, "[Service]\nExecStart=/usr/bin/env helper\nEnvironment=PATH=/tmp\n", `path "/tmp"`},
 		"a PATH with an empty entry":       {unit, "[Service]\nExecStart=/usr/bin/env helper\nEnvironment=A=1 PATH=/usr/bin:\n", `path ""`},
 		"a later PATH entry":               {unit, "[Service]\nExecStart=/usr/bin/env helper\nEnvironment=PATH=/usr/bin:/var/tmp B=2\n", `path "/var/tmp"`},
@@ -587,6 +589,7 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		// #4584.
 		"a runtime directory over a root program": {unit, "[Service]\nUser=agentos-x\nRuntimeDirectory=agentos-x\nExecStartPre=+/run/agentos-x/helper\n", `the unit's user owns /run/agentos-x`},
 		"a state directory over another unit's":   {"image/mkosi/agentos-x.service", "[Service]\nUser=agentos-x\nExecStart=/bin/true\nStateDirectory=agentos-x\n", `/var/lib/agentos-x, in or above /var/lib/agentos-x/h`},
+		"a template user's directory":             {"image/mkosi/agentos-x@.service", "[Service]\nUser=%i\nExecStart=/bin/true\nStateDirectory=agentos-x\n", `the unit's user owns /var/lib/agentos-x, in or above`},
 		"a dynamic user's private directory":      {"image/mkosi/agentos-x.service", "[Service]\nDynamicUser=yes\nExecStart=/bin/true\nCacheDirectory=agentos-x\n", `/var/cache/private/agentos-x, in or above`},
 		"a linked logs directory":                 {"image/mkosi/agentos-x.service", "[Service]\nUser=agentos-x\nExecStart=/bin/true\nLogsDirectory=agentos-l:agentos-x\n", `/var/log/agentos-x, in or above`},
 		"a user set in a drop-in":                 {"image/mkosi/agentos-x.service.d/z.conf", "[Service]\nUser=agentos-x\n", `/var/lib/agentos-x, in or above`},
@@ -1613,7 +1616,7 @@ func rootOwned(p string) bool {
 // rootPathSetting holds one setting of a unit with a root command, a
 // rootPathKeys one or an Environment= or EnvironmentFile=, to the rules
 // rootPathKeys gives: Environment= only in what PATH= it sets, where an
-// empty entry is the working directory. Any other key passes.
+// empty entry is the working directory, and in holding no % specifier. Any other key passes.
 func rootPathSetting(k, v string) error {
 	var paths []string
 	switch {
@@ -1624,6 +1627,12 @@ func rootPathSetting(k, v string) error {
 		}
 		for _, cmd := range cmds {
 			for _, w := range cmd {
+				// systemd expands a specifier in Environment= (%I turns
+				// - into /), so a value the lint cannot see is refused
+				// (#4656 Security 1).
+				if substitutes(w, '%') {
+					return fmt.Errorf("word %q holds a %% specifier, whose value the lint cannot see", w)
+				}
 				if search, ok := strings.CutPrefix(w, "PATH="); ok {
 					paths = append(paths, strings.Split(search, ":")...)
 				}
@@ -1676,8 +1685,8 @@ var dirName = regexp.MustCompile(`^[A-Za-z0-9_.@+-]+(/[A-Za-z0-9_.@+-]+)*$`)
 
 // unitGrants returns the paths a unit's *Directory= settings let another
 // uid write (#4584): every one but a ConfigurationDirectory= of a unit with
-// a User= or DynamicUser= that is not root (asUser, so a drop-in's User=root
-// does not undo it), and every one whose *DirectoryMode= has a group or
+// a User= or DynamicUser= that is or may be another uid (a User=%i template
+// among them; a drop-in's User=root does not undo it), and every one whose *DirectoryMode= has a group or
 // other write bit. Each path, and each name after a : that links to it, is
 // a plain relative path.
 func unitGrants(root string, settings []envLine, asUser bool) ([]grant, error) {
@@ -1800,6 +1809,7 @@ func rootBinaries(root string) ([]string, error) {
 		// wherever it sits: an over-approximation that never drops a root
 		// binary (#3951 L3 3).
 		asUser, asRoot := false, false
+		owned := false // a User= or DynamicUser= that may be another uid owns the unit's directories
 		type execLine struct{ file, key, value string }
 		var lines []execLine
 		var env []envLine
@@ -1824,8 +1834,9 @@ func rootBinaries(root string) ([]string, error) {
 				case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment" || k == "PAMName":
 					env = append(env, envLine{f, k, v})
 				case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
-					// A User=%i template is root for its root instance.
-					asRoot = true
+					// A User=%i template is root for its root instance, and
+					// every other instance owns its directories (#4656 L3 1).
+					asRoot, owned = true, owned || mayBeRoot(v)
 				case k == "User":
 					asUser = true
 				case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
@@ -1895,7 +1906,7 @@ func rootBinaries(root string) ([]string, error) {
 		// What the unit makes for its user is a grant (#4584), and what a
 		// root command reads, runs and searches lies in trees root owns
 		// (#4589).
-		g, err := unitGrants(root, settings, asUser)
+		g, err := unitGrants(root, settings, asUser || owned)
 		if err != nil {
 			return nil, err
 		}
