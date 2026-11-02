@@ -100,15 +100,19 @@ var (
 	ErrSubscription = errors.New("devhost: not a subscription here")
 )
 
-// MinSubscription is the shortest Config.Subscription New takes. Each
-// instance writes up to its operation's MaxWrites, so this floor, not the
-// host's config alone, bounds a subscription's write rate: at most MaxWrites
-// per MinSubscription, plus one instance after each Do that preempts it
-// (DEVSLOT-subscribe-1). A shorter instance is polling, which is Do's job.
+// MinSubscription is the shortest Config.Subscription New takes, and the
+// shortest gap the host leaves between the starts of two subscription
+// instances, within one Subscribe call and across calls. Each instance
+// writes up to its operation's MaxWrites, so the host alone bounds a
+// subscription's write rate, whatever its config and however often its
+// caller subscribes again: an instance starts at most once per
+// MinSubscription, plus once after each Do that reached the driver, whose
+// own caller bounds how often it runs (DEVSLOT-subscribe-1). A shorter
+// instance is polling, which is Do's job.
 const MinSubscription = 30 * time.Second
 
-// minSubscription is the floor New checks; only this package's tests lower
-// it (export_test.go), so no linking package can.
+// minSubscription is the floor New takes into the host; only this
+// package's tests lower it (export_test.go), so no linking package can.
 var minSubscription = MinSubscription
 
 // errPreempted ends a subscription's instance when Do needs the driver.
@@ -128,6 +132,9 @@ type Host struct {
 	pending int                     // calls to Do waiting for mu
 	preempt context.CancelCauseFunc // ends the running subscription instance
 	subbing bool
+	floor   time.Duration // minSubscription when New ran
+	next    time.Time     // the earliest start of the next subscription instance
+	ran     bool          // a Do reached the driver since the last instance started
 
 	lmu sync.Mutex
 	win map[string]*window
@@ -162,7 +169,7 @@ func New(cfg Config) (*Host, error) {
 	if cfg.Subscription < minSubscription && slices.ContainsFunc(cfg.Decl.Operations, func(o devslot.Operation) bool { return o.Subscribe }) {
 		return nil, errors.New("devhost: config needs a subscription deadline of at least MinSubscription")
 	}
-	h := &Host{cfg: cfg, canon: canon, win: map[string]*window{}}
+	h := &Host{cfg: cfg, canon: canon, win: map[string]*window{}, floor: minSubscription}
 	h.scond = sync.NewCond(&h.smu)
 	// The host's own copy, decoded from the canonical bytes, so a caller
 	// that edits cfg.Decl later changes nothing.
@@ -184,7 +191,8 @@ func (h *Host) log(op string, err error) {
 // Do runs op in a fresh instance of the driver and emits its readings. It
 // returns how many readings it took. A refusal fails the whole operation,
 // closes its connection and emits nothing. A running subscription's
-// instance is ended first, and resumes after.
+// instance is ended first, and resumes after; a Do whose ctx has already
+// ended returns its error and ends nothing.
 func (h *Host) Do(ctx context.Context, op string) (int, error) {
 	o, ok := h.decl.Op(op)
 	if !ok {
@@ -194,6 +202,9 @@ func (h *Host) Do(ctx context.Context, op string) (int, error) {
 	if o.Subscribe {
 		h.log(o.Name, ErrSubscription)
 		return 0, ErrSubscription
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
 	h.smu.Lock()
 	h.pending++
@@ -207,6 +218,9 @@ func (h *Host) Do(ctx context.Context, op string) (int, error) {
 	h.pending--
 	h.scond.Broadcast()
 	h.smu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, h.cfg.Deadline)
 	defer cancel()
@@ -218,6 +232,14 @@ func (h *Host) Do(ctx context.Context, op string) (int, error) {
 		rs = append(rs, r)
 		return nil
 	})
+	// A Do that reached the driver lets the next subscription instance
+	// start at once; one that was not dialed leaves the floor in place.
+	if !errors.Is(err, ErrDial) {
+		h.smu.Lock()
+		h.ran = true
+		h.scond.Broadcast()
+		h.smu.Unlock()
+	}
 	if err != nil {
 		h.log(o.Name, err)
 		return 0, err
@@ -234,7 +256,9 @@ func (h *Host) Do(ctx context.Context, op string) (int, error) {
 // driver stays up for Config.Subscription and each reading it sends is
 // checked and emitted at once, under the DEV-8 limit; when the instance
 // reaches that deadline, or Do needs the driver, the host subscribes again
-// with a fresh instance. Subscribe returns how many readings it emitted, and
+// with a fresh instance. No instance starts within MinSubscription of the
+// last one's start, in this call or an earlier one, unless a Do reached the
+// driver in between; Subscribe waits out the rest. Subscribe returns how many readings it emitted, and
 // nil if the driver ended the subscription cleanly, ctx's error if ctx
 // ended, or the error of an instance that ended any other way: a refusal, a
 // failed dial or a failed done. A refusal stops the instance's later
@@ -294,12 +318,23 @@ func (h *Host) Subscribe(ctx context.Context, op string) (int, error) {
 }
 
 // acquire takes the driver for one subscription instance once no Do is
-// waiting for it, and returns the instance's context, which Do cancels.
+// waiting for it and the floor allows a start, and returns the instance's
+// context, which Do cancels.
 func (h *Host) acquire(ctx context.Context) (context.Context, context.CancelCauseFunc, bool) {
 	for {
 		h.smu.Lock()
-		for h.pending > 0 && ctx.Err() == nil {
+		for ctx.Err() == nil && !h.startable() {
+			if h.pending > 0 {
+				h.scond.Wait()
+				continue
+			}
+			t := time.AfterFunc(time.Until(h.next), func() {
+				h.smu.Lock()
+				h.scond.Broadcast()
+				h.smu.Unlock()
+			})
 			h.scond.Wait()
+			t.Stop()
 		}
 		h.smu.Unlock()
 		if ctx.Err() != nil {
@@ -307,15 +342,24 @@ func (h *Host) acquire(ctx context.Context) (context.Context, context.CancelCaus
 		}
 		h.mu.Lock()
 		h.smu.Lock()
-		if h.pending == 0 {
+		if h.startable() {
 			ictx, cancel := context.WithCancelCause(ctx)
 			h.preempt = cancel
+			h.ran = false
+			h.next = time.Now().Add(h.floor)
 			h.smu.Unlock()
 			return ictx, cancel, true
 		}
 		h.smu.Unlock()
 		h.mu.Unlock()
 	}
+}
+
+// startable reports whether a subscription instance may start now: no Do
+// is waiting, and the floor has passed since the last start or a Do reached
+// the driver since. h.smu is held.
+func (h *Host) startable() bool {
+	return h.pending == 0 && (h.ran || !time.Now().Before(h.next))
 }
 
 func (h *Host) release(cancel context.CancelCauseFunc) {
