@@ -137,6 +137,15 @@ func TestWANLeases(t *testing.T) {
 	h.in(isp, "ip", "addr", "add", ispRouter+"/24", "dev", "eth0")
 	h.in(isp, "ip", "link", "set", "eth0", "up")
 	run(t, "ip", "link", "set", "wan0", "up")
+	// The ruleset's rpf chain is the enforcer's reverse-path filter; the
+	// kernel's own, which a new namespace inherits from the host (strict or
+	// loose on most distributions), would drop the same answers as martians
+	// before any rule sees them, so the enforcer runs with it off.
+	for _, k := range []string{"all", "wan0"} {
+		if err := os.WriteFile("/proc/sys/net/ipv4/conf/"+k+"/rp_filter", []byte("0"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
 	text, err := Compile(fixturePolicy(), fixtureLayout())
 	if err != nil {
 		t.Fatal(err)
