@@ -164,6 +164,69 @@ class InitrdDiffTest(unittest.TestCase):
         self.assertIn("unreadable initrd", out)
 
 
+class CpioHeaderFieldTest(unittest.TestCase):
+    """#4662: both initrd readers take a newc header field only as exactly 8 hex digits. int(x, 16)
+    alone also takes a sign, spaces, 0x and _, and a negative size moved the reader back onto its own
+    header, so the reproduce job and the build's Bluetooth check looped until their timeout."""
+    # REQ: UPD-1a
+
+    BAD = (b"-0000070", b"+0000070", b" 0000070", b"0000070 ", b"0x000070", b"0000_070", b"\t0000070",
+           b"0000007\n", b"-0000000")
+
+    def setUp(self):
+        import signal
+        signal.signal(signal.SIGALRM, lambda *_: self.fail("reader did not stop"))
+        signal.alarm(10)
+        self.addCleanup(signal.alarm, 0)
+
+    def test_signed_or_padded_size_refused_by_both_readers(self):
+        for field in (6, 11):  # filesize, namesize: the two that move the offset
+            for v in self.BAD:
+                data = newc(BASE)
+                data = data[:6 + 8 * field] + v + data[14 + 8 * field:]
+                with self.subTest(field=field, value=v):
+                    with self.assertRaises(ValueError) as c:
+                        cm.initrd_members(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+                    with self.assertRaises(ValueError) as c:
+                        fin.cpio_names(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+
+    def test_every_field_is_checked_at_its_own_offset(self):
+        # A bad field in a later member's header names that header's offset, in either reader.
+        data = newc(BASE)
+        second = (110 + len(b"usr\0") + 3) & ~3
+        for field in range(13):
+            start = second + 6 + 8 * field
+            bad = data[:start] + b"-0000001" + data[start + 8:]
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as c:
+                    cm.initrd_members(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+                with self.assertRaises(ValueError) as c:
+                    fin.cpio_names(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+
+    def test_lower_case_hex_still_reads(self):
+        # cpio(5) fields are hex in either case; mode 0o100644 is 000081A4.
+        lower = newc(BASE).replace(b"000081A4", b"000081a4")
+        self.assertNotEqual(lower, newc(BASE))
+        self.assertEqual([k for k, _, _ in cm.initrd_members(lower)], [n for n, _, _ in BASE])
+        self.assertEqual(fin.cpio_names(lower), [n for n, _, _ in BASE])
+
+    def test_cli_fails_at_once(self):
+        data = newc(BASE)
+        bad = data[:54] + b"-0000070" + data[62:]
+        with tempfile.TemporaryDirectory() as d:
+            fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"
+            fa.write_bytes(bad)
+            fb.write_bytes(data)
+            r = subprocess.run(["python3", str(IMG / "compare_manifests.py"), "--initrd", str(fa), str(fb)],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("  unreadable initrd: initrd: bad cpio header at offset 0", r.stdout.splitlines())
+
+
 class ErrorLineEscapeTest(unittest.TestCase):
     """#4648: every error line names a path, a package or a bad entry escaped, as one line."""
 
@@ -219,7 +282,10 @@ class ErrorLineEscapeTest(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cm.say("ok line")
             cm.say("MISMATCH " + EVIL)
-        self.assertEqual(buf.getvalue(), 'ok line\n%s\n' % json.dumps("MISMATCH " + EVIL))
+            cm.say("  ::add-mask::x")
+            cm.say("::error::x")
+        self.assertEqual(buf.getvalue(), 'ok line\n%s\n"  ::add-mask::x"\n"::error::x"\n'
+                         % json.dumps("MISMATCH " + EVIL))
 
 
 class ShadowPinTest(unittest.TestCase):
@@ -515,8 +581,6 @@ class ReproduceJobTest(unittest.TestCase):
     """The two-runner check is blocking for the initrd (IMG-2): the Compare step itself, run."""
 
     def setUp(self):
-        if not shutil.which("jq"):
-            self.skipTest("jq not installed")
         self.tmp = tempfile.TemporaryDirectory()
         self.d = pathlib.Path(self.tmp.name)
         self.initrd = newc(BASE)
@@ -618,7 +682,7 @@ class ReproduceJobTest(unittest.TestCase):
         self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/extra": "12" * 32}))
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn('MISMATCH "agentos/extra"', r.stdout.splitlines())
+        self.assertIn('MISMATCH "agentos/extra": not in a\'s release record', r.stdout.splitlines())
 
     def test_missing_hashes_never_match(self):
         # A record without a /usr root hash or a boot entry hash on both sides is not "the same".
@@ -638,7 +702,71 @@ class ReproduceJobTest(unittest.TestCase):
         (self.d / "rec/release-b/SHA256SUMS").write_text(line + "\n")
         r = self.run_step()
         self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("outputs differ (SHA256SUMS, reported only):", r.stdout.splitlines())
         self.assertIn("  only in b: %s" % json.dumps(line), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_unreadable_sha256sums_names_the_build_and_is_reported_only(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/SHA256SUMS").unlink()
+        r = self.run_step()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("SHA256SUMS of build b unreadable (reported only): No such file or directory",
+                      r.stdout.splitlines())
+        self.assertNotIn("SHA256SUMS of build a", r.stdout)
+
+    # #4661: every failure path of the --release check has its own case.
+    def test_missing_release_record_on_one_side_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/agentos_1.release.json").unlink()
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH release record: "rec/release-b": expected one *.release.json, found 0',
+                      r.stdout.splitlines())
+
+    def test_differing_boot_entry_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot_entry"].update({"sha256": "ce" * 32}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln], ["MISMATCH boot entry"])
+
+    def test_boot_file_null_on_both_sides_fails(self):
+        # A revert of digest() on boot files would let null == null pass.
+        null = lambda rel: rel["boot"].update({"agentos/vmlinuz": None})  # noqa: E731
+        self.side("release-a", self.initrd, edit=null)
+        self.side("release-b", self.initrd, edit=null)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ['MISMATCH "agentos/vmlinuz" a=null b=null'])
+
+    def test_differing_boot_file_prints_both_hashes(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/vmlinuz": EVIL}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH "agentos/vmlinuz" a="%s" b=%s' % ("ef" * 32, EVIL_SHOWN), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_boot_map_with_one_entry_fails(self):
+        one = lambda rel: rel["boot"].pop("agentos/vmlinuz")  # noqa: E731
+        self.side("release-a", self.initrd, edit=one)
+        self.side("release-b", self.initrd, edit=one)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ["MISMATCH release.json lists no kernel and initrd"])
+
+    def test_usrhash_prints_escaped_as_one_line(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, usrhash="ab" * 32 + "\n::error::forged")
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("usrhash b=%s" % json.dumps("ab" * 32 + "\n::error::forged"), r.stdout.splitlines())
+        self.assertIn("MISMATCH /usr root hash", r.stdout.splitlines())
         assert_one_line_each(self, r.stdout)
 
     def test_only_a_superseded_pr_run_is_cancelled(self):
