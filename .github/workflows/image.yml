@@ -4,9 +4,13 @@ name: image
 # Runs here because GitHub's runners reach the Debian mirrors; the cloud agent sessions cannot.
 # Two builds and a boot cost about an hour of runner time, so only image changes and the broker
 # packages the in-image setup run (broker/e2e/boxe2e) goes through trigger it; run it by hand
-# (workflow_dispatch) to rebuild after other broker or guest changes.
+# (workflow_dispatch) to rebuild after other broker or guest changes. The path lists are kept by hand
+# and miss packages the image's binaries import, so main is also built and booted nightly (#1740):
+# a change the lists miss is caught within a day. Pull requests and main watch the same paths.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "37 4 * * *"
   pull_request:
     paths:
       - "image/**"
@@ -62,6 +66,8 @@ on:
       - "broker/daemon/**"
       - "broker/cmd/agentosd/**"
       - "broker/cmd/agentos-localui/**"
+      # The /usr slot activator's disk adapter, tested on a loop device below (UPD-b3 (c1)).
+      - "broker/apply/bootab/**"
       - "broker/cmd/agentos-modem/**"
       - "broker/cmd/agentos-egress/**"
       # The local inference service and the pins of what the image ships with it (INFER-image).

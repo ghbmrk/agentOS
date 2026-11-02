@@ -130,7 +130,7 @@ func (m *memStore) Load() ([]byte, error) { return m.b, nil }
 func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
 
 func safe(id, class, secure string) policy.Device {
-	return policy.Device{ID: id, Network: policy.NetDevices, Class: class, Secure: secure}
+	return policy.Device{ID: id, Network: policy.NetDevices, Class: class, Secure: secure, Safeguards: policy.Needs(class)}
 }
 
 // home is a house with one safety-list device of every class that takes

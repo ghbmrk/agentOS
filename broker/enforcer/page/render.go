@@ -40,6 +40,7 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 			if d.Isolated {
 				add("Keep %s isolated: it reaches nothing.", d.ID)
 			}
+			describeSafeguards(policy.Device{ID: d.ID}, d, add)
 			if d.Secure != "" {
 				add("Let %s's command %s apply at once, with no passkey.", d.ID, d.Secure)
 			}
@@ -60,6 +61,19 @@ func Describe(old, next policy.Document, zone *time.Location) []string {
 	}
 	for _, p := range pairsMinus(old.Pairs, next.Pairs) {
 		add("Stop %s and %s talking to each other directly.", p.A, p.B)
+	}
+	// NET-3 Casting (#4401): the relay passes a Devices-network device's
+	// announcements only for the names it pins, so a pair with a path and
+	// a side pinning none is signed knowing nothing on that side will be
+	// found. A pair with no path has its own line below. Said once: when
+	// the pair, the last pin's removal, the move onto Devices or the
+	// path's return is signed.
+	for _, p := range next.Pairs {
+		for _, s := range [][2]string{{p.A, p.B}, {p.B, p.A}} {
+			if unpinned(next, p, s[0]) && !(slices.Contains(old.Pairs, p) && unpinned(old, p, s[0])) {
+				add("%s will not show up by name on %s: it has no mDNS names pinned, so none of its announcements cross the pair.", s[0], s[1])
+			}
+		}
 	}
 	for _, r := range next.Standing {
 		i := slices.IndexFunc(old.Standing, func(o policy.StandingRule) bool { return o.ID == r.ID })
@@ -132,6 +146,9 @@ func plain(d policy.Document) policy.Document {
 	for i := range d.Devices {
 		v := &d.Devices[i]
 		v.ID, v.WiFi, v.Class, v.Secure = ascii(v.ID), ascii(v.WiFi), ascii(v.Class), ascii(v.Secure)
+		for j := range v.Safeguards {
+			v.Safeguards[j] = ascii(v.Safeguards[j])
+		}
 		for j := range v.Allow {
 			v.Allow[j] = ascii(v.Allow[j])
 		}
@@ -157,6 +174,7 @@ func clone(d policy.Document) policy.Document {
 		d.Devices[i].Control = slices.Clone(d.Devices[i].Control)
 		d.Devices[i].Stream = slices.Clone(d.Devices[i].Stream)
 		d.Devices[i].MDNS = slices.Clone(d.Devices[i].MDNS)
+		d.Devices[i].Safeguards = slices.Clone(d.Devices[i].Safeguards)
 	}
 	d.Pairs = slices.Clone(d.Pairs)
 	d.Standing = slices.Clone(d.Standing)
@@ -214,6 +232,7 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	default:
 		add("Record %s as %s, not %s.", d.ID, classWords(d.Class), classWords(o.Class))
 	}
+	describeSafeguards(o, d, add)
 	if o.Secure != d.Secure {
 		add("Change %s's one secure command from %s to %s.", d.ID, none(o.Secure), none(d.Secure))
 	}
@@ -222,6 +241,14 @@ func describeDevice(o, d policy.Device, add func(string, ...any)) {
 	}
 	describePorts(o, d, add)
 	describeMDNS(o, d, add)
+}
+
+// unpinned: pair p has a path in d (both ends Linked, as nft opens it)
+// and its end id is a Devices-network device that pins no mDNS name, so
+// it announces nothing across p (nft.Announces).
+func unpinned(d policy.Document, p policy.Pair, id string) bool {
+	v := d.Device(id)
+	return v != nil && v.Network == policy.NetDevices && len(v.MDNS) == 0 && d.Linked(p.A) && d.Linked(p.B)
 }
 
 // describeMDNS is each mDNS name d pins or unpins against o (NET-3
@@ -256,6 +283,29 @@ func describeMDNS(o, d policy.Device, add func(string, ...any)) {
 			add("Hold the name %s for %s: no paired device may announce it.", ascii(policy.MDNSName(n)), d.ID)
 		}
 	}
+}
+
+// describeSafeguards is each safeguard d records or drops against o (NET-2
+// Safety devices, #3872): what the owner states the device does, which
+// its class needs before its secure command can be named.
+func describeSafeguards(o, d policy.Device, add func(string, ...any)) {
+	for _, g := range minus(o.Safeguards, d.Safeguards) {
+		add("Stop recording that %s %s.", d.ID, safeguardWords(g))
+	}
+	for _, g := range minus(d.Safeguards, o.Safeguards) {
+		add("Record that %s %s: check it does before you sign.", d.ID, safeguardWords(g))
+	}
+}
+
+// safeguardWords is a safeguard in the page's words.
+func safeguardWords(g string) string {
+	switch g {
+	case policy.SafeguardObstructionReversal:
+		return "stops and reverses when something is in its way"
+	case policy.SafeguardPreCloseWarning:
+		return "warns before it closes"
+	}
+	return "has the safeguard " + g
 }
 
 // describePorts is each control and stream port d opens or closes against
