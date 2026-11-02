@@ -44,6 +44,7 @@ mkdir "$W/upper" "$W/work" "$W/root"
 [ -z "$PLANT" ] || cp -a "$PLANT/." "$W/upper/"
 mount -t overlay -o "lowerdir=$R,upperdir=$W/upper,workdir=$W/work" overlay "$W/root"
 N=$W/root
+mkdir -p "$N/usr" "$N/proc" "$N/sys" "$N/dev" "$N/run" "$N/tmp"  # the built root partition leaves out /usr
 mount --rbind "$USR" "$N/usr"
 mount -t proc -o nosuid,nodev,noexec proc "$N/proc"
 mount -t tmpfs -o mode=755 tmpfs "$N/sys"
@@ -53,7 +54,7 @@ mount -t tmpfs -o mode=755 tmpfs "$N/dev"
 for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
 : >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
 mount -t tmpfs -o mode=755 tmpfs "$N/run"
-mkdir -p "$N/tmp" && chmod 1777 "$N/tmp"
+chmod 1777 "$N/tmp"
 exec env -i container=agentos-offline "$(command -v chroot)" "$N" /usr/lib/systemd/systemd --unit=-.slice "$@"
 '''
 # The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),

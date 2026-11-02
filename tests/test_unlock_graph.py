@@ -236,7 +236,8 @@ class HostSystemdTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             os.chmod(d, 0o755)
             root = pathlib.Path(d) / "root"
-            for sub in ("usr", "proc", "sys", "dev", "run", "tmp", "var/tmp", "etc/systemd"):
+            # As the built root partition: no /usr (it is its own partition), /proc, /sys, /dev, /run or /tmp.
+            for sub in ("var/tmp", "etc/systemd"):
                 (root / sub).mkdir(parents=True)
             for n in ("bin", "lib", "lib64", "sbin"):
                 (root / n).symlink_to("usr/" + n)
