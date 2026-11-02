@@ -185,7 +185,7 @@ func TestForgedRelatedDropped(t *testing.T) {
 	fams := []fam{{false, netAllow, enfWAN, netCore}}
 	if h.v6 {
 		run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, true), "{ "+net6Allow+" }")
-		run(t, "nft", "add", "element", "inet", Table, CoreSet(true), "{ "+net6Allow+" }")
+		h.answer(fixturePolicy(), CoreSet(true), "core.example", net6Allow)
 		for _, seg := range []string{"owner", "household", "guest", "core"} {
 			h.seg6(seg)
 		}
