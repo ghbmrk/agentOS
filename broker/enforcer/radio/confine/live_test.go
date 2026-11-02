@@ -226,7 +226,7 @@ func liveProbe(variant, dir string) int {
 	for i, c := range liveCases {
 		args[i] = c.args(p)
 	}
-	fam := slices.Sorted(slices.Values(Thread(1, 1, "/s", "/r", "/d").Families))
+	fam := slices.Sorted(slices.Values(threadProfile(1, 1, "/s", "/r", "/d").Families))
 	var prog []insn
 	switch {
 	case variant == "none":

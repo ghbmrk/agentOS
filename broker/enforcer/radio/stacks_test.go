@@ -258,8 +258,12 @@ func TestStacksConfined(t *testing.T) {
 		}
 		return d
 	}
-	threadProfile := probeView(confine.Thread(threadUID, threadUID, own("thread-state", threadUID),
-		own("thread-run", threadUID), "/dev/null"))
+	threadSpec, err := confine.Thread(threadUID, threadUID, own("thread-state", threadUID), own("thread-run", threadUID),
+		"/dev/null", "", func(string, string) ([]string, error) { return nil, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	threadProfile := probeView(threadSpec.Profile)
 	matterProfile := probeView(confine.Matter(matterUID, matterUID, own("matter", matterUID)))
 
 	read := func(t *testing.T, p Proc, conn Conn) map[string]string {
