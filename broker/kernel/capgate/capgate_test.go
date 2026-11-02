@@ -57,7 +57,7 @@ func TestFreshAtExactlyTwiceTheSummaryInterval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("at exactly 2×%v: %v, want fresh", wire.SummaryInterval, err)
 	}
-	g.End(s)
+	s.End()
 	c.step(time.Nanosecond)
 	if _, err := g.Reserve("backup", 10); !errors.Is(err, ErrNoCount) {
 		t.Fatalf("one ns past 2×%v: %v, want ErrNoCount", wire.SummaryInterval, err)
@@ -122,10 +122,19 @@ func TestCapEdges(t *testing.T) {
 			}
 			e.pass(inflight / 2) // it reaches the enforcer after the count
 			e.pass(inflight / 2) // and its one retry
-			g.End(first)
+			first.End()
 			c.step(Fresh) // exactly twice the summary interval after the ask
 			s, err := g.Reserve("backup", size)
 			if tc.off > 0 {
+				// The first send has ended, and a failed send counts for
+				// nothing, so the next summary may make room: wait for it.
+				if !errors.Is(err, ErrCounting) {
+					t.Fatalf("total %d over cap %d with an ended send uncounted: err %v, want ErrCounting", total, cp, err)
+				}
+				if err := g.Summary(g.Ask(), 3, capped(cp, e.count, "backup")); err != nil {
+					t.Fatal(err)
+				}
+				_, err = g.Reserve("backup", size)
 				var pc *PastCap
 				if !errors.As(err, &pc) {
 					t.Fatalf("total %d over cap %d: err %v, want *PastCap", total, cp, err)
@@ -139,7 +148,7 @@ func TestCapEdges(t *testing.T) {
 				}
 				e.pass(size) // the send
 				e.pass(size) // and its one retry
-				g.End(s)
+				s.End()
 			}
 			if e.tripped {
 				t.Fatalf("enforcer tripped at %d of %d", e.count, cp)
@@ -196,8 +205,8 @@ func TestSentSinceTheCount(t *testing.T) {
 	if _, err := g.Reserve("backup", 101); err == nil { // 1002
 		t.Fatal("send past the cap with two sends since the count let through")
 	}
-	g.End(a)
-	g.End(b)
+	a.End()
+	b.End()
 	c.step(time.Second)
 	// A summary asked for after both ended holds them: the enforcer counted
 	// 400 (one of them retried), and only that count stands.
@@ -267,7 +276,7 @@ func TestEnforcersDay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.End(s)
+	s.End()
 	if err := g.Summary(tk, 6, capped(1000, 0, "backup")); err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +360,7 @@ func TestEndBetweenAskAndAnswer(t *testing.T) {
 		c.step(gap)
 		e.pass(300) // the send, after the enforcer took its count
 		e.pass(300) // and its retry
-		g.End(s)
+		s.End()
 		if err := g.Summary(tk, 1, capped(1000, 0, "backup")); err != nil {
 			t.Fatal(err)
 		}
@@ -423,9 +432,9 @@ func TestSecondEndKeepsTheFirst(t *testing.T) {
 	c.step(time.Second)
 	tk := g.Ask()
 	c.step(time.Second)
-	g.End(s) // ended after tk: tk's count does not hold it
+	s.End() // ended after tk: tk's count does not hold it
 	c.step(time.Second)
-	g.End(s) // a duplicate must not move the end
+	s.End() // a duplicate must not move the end
 	if err := g.Summary(tk, 1, capped(1000, 0, "backup")); err != nil {
 		t.Fatal(err)
 	}
@@ -440,11 +449,11 @@ func TestSecondEndKeepsTheFirst(t *testing.T) {
 	}
 	s2, _ := g2.Reserve("backup", 250)
 	c2.step(time.Second)
-	g2.End(s2)
+	s2.End()
 	c2.step(time.Second)
 	tk2 := g2.Ask()
 	c2.step(time.Second)
-	g2.End(s2) // late duplicate, after tk2
+	s2.End() // late duplicate, after tk2
 	if err := g2.Summary(tk2, 1, capped(1000, 500, "backup")); err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +542,7 @@ func TestBackwardClockCannotForgetASend(t *testing.T) {
 	}
 	e.pass(50) // the send and its retry, after the count
 	c.step(-10 * time.Minute)
-	g.End(s) // reads earlier than tk
+	s.End() // reads earlier than tk
 	if err := g.Summary(tk, 1, capped(100, 0, "x")); err != nil {
 		t.Fatal(err)
 	}
@@ -583,11 +592,11 @@ func TestOrderIsTheGatesNotTheClock(t *testing.T) {
 		before, _ := g.Reserve("x", 100) // 200
 		after, _ := g.Reserve("x", 100)  // 200
 		c.step(d)
-		g.End(before)
+		before.End()
 		c.step(d)
 		tk := g.Ask()
 		c.step(d)
-		g.End(after)
+		after.End()
 		c.step(d)
 		if err := g.Summary(tk, 1, capped(1000, 200, "x")); err != nil {
 			t.Fatalf("step %v: %v", d, err)
@@ -662,38 +671,41 @@ func TestTicketOfAnotherGate(t *testing.T) {
 	}
 }
 
-// End with another gate's send leaves it in flight on its own gate and
-// touches nothing of it, so the two gates' locks never share a write
-// (run under -race); End of the zero Send is a no-op.
-func TestEndOfAnotherGatesSend(t *testing.T) {
+// A send ends on the gate that reserved it, whichever gate the caller
+// holds, so it cannot stay reserved forever on its own gate (#4375 L3
+// point 6). End races that gate's summaries safely (run under -race), and
+// the zero Send's End is a no-op.
+func TestSendEndsOnItsOwnGate(t *testing.T) {
 	c := newClock()
-	g1, g2 := gate(c), gate(newClock())
-	if err := g1.Summary(g1.Ask(), 1, capped(1000, 0, "x")); err != nil {
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "x")); err != nil {
 		t.Fatal(err)
 	}
-	s, err := g1.Reserve("x", 250) // 500
+	s, err := g.Reserve("x", 250) // 500
 	if err != nil {
 		t.Fatal(err)
+	}
+	if s.g != g {
+		t.Fatal("a send does not point at its gate")
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for range 1000 {
-			_ = g1.Summary(g1.Ask(), 1, capped(1000, 0, "x"))
+			_ = g.Summary(g.Ask(), 1, capped(1000, 0, "x"))
 		}
 	}()
-	g2.End(s)
-	g2.End(Send{})
-	<-done
-	if _, err := g1.Reserve("x", 251); err == nil { // 500 + 502
-		t.Fatal("another gate's End made g1 forget its send")
+	Send{}.End()
+	if _, err := g.Reserve("x", 251); err == nil { // 500 + 502
+		t.Fatal("the zero Send's End made the gate forget a send")
 	}
-	g1.End(s)
-	if err := g1.Summary(g1.Ask(), 1, capped(1000, 500, "x")); err != nil {
+	s.End()
+	<-done
+	if err := g.Summary(g.Ask(), 1, capped(1000, 500, "x")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g1.Reserve("x", 250); err != nil { // 500 + 500: held once
-		t.Fatalf("after its own End: %v", err)
+	if _, err := g.Reserve("x", 250); err != nil { // 500 + 500: held once
+		t.Fatalf("after its End: %v", err)
 	}
 }
 
@@ -778,7 +790,7 @@ func TestModelNeverTrips(t *testing.T) {
 			case 4:
 				if len(sends) > 0 {
 					i := r.Intn(len(sends))
-					g.End(sends[i].s) // no byte of it leaves after End
+					sends[i].s.End() // no byte of it leaves after End
 					sends = append(sends[:i], sends[i+1:]...)
 				}
 			case 5:
@@ -858,7 +870,7 @@ func TestMidnightSplitCannotTrip(t *testing.T) {
 	if _, err := g.Reserve("b", 50); err != nil { // b's own 100; the group's 200
 		t.Fatalf("b's own room: %v", err)
 	}
-	g.End(s)
+	s.End()
 	if e.tripped {
 		t.Fatal("tripped")
 	}
@@ -909,5 +921,206 @@ func TestNoGroupSendCountsAgainstTheOwnCap(t *testing.T) {
 	}
 	if _, err := g.Reserve("z", 450); err != nil { // z's own 1000: 900 + 100; the group's 1100
 		t.Fatalf("z's own room: %v", err)
+	}
+}
+
+// Each cause of no fresh count is its own error, each still ErrNoCount,
+// since each asks the owner for a different step (#4375 UX release point
+// 1, KRN-cap-9): none yet, paused after a core trip, a clock earlier than
+// the ask, a stale count, and a destination in no group.
+func TestNoCountSaysWhy(t *testing.T) {
+	is := func(t *testing.T, err, want error) {
+		t.Helper()
+		if !errors.Is(err, want) || !errors.Is(err, ErrNoCount) {
+			t.Fatalf("err %v, want %v (an ErrNoCount)", err, want)
+		}
+		for _, other := range []error{ErrNoSummary, ErrPaused, ErrClock, ErrStale, ErrNoGroup} {
+			if other != want && errors.Is(err, other) {
+				t.Fatalf("err %v is also %v", err, other)
+			}
+		}
+	}
+	c := newClock()
+	g := gate(c)
+	_, err := g.Reserve("x", 1)
+	is(t, err, ErrNoSummary)
+
+	tk := g.Ask()
+	c.step(time.Second)
+	if err := g.Summary(tk, 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	_, err = g.Reserve("y", 1)
+	is(t, err, ErrNoGroup)
+	c.step(-2 * time.Second) // earlier than the ask
+	_, err = g.Reserve("x", 1)
+	is(t, err, ErrClock)
+	c.step(time.Second + Fresh + time.Nanosecond)
+	_, err = g.Reserve("x", 1)
+	is(t, err, ErrStale)
+
+	g.Paused()
+	_, err = g.Reserve("x", 1)
+	is(t, err, ErrPaused)
+	c.step(time.Minute)
+	_, err = g.Reserve("y", 1) // paused comes first, whatever the destination
+	is(t, err, ErrPaused)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Reserve("x", 1); err != nil {
+		t.Fatalf("a summary asked after the pause: %v", err)
+	}
+
+	// A pause before any ask is a pause, not "none yet".
+	p := gate(newClock())
+	p.Paused()
+	_, err = p.Reserve("x", 1)
+	is(t, err, ErrPaused)
+}
+
+// A send that fits once the sends already ended are counted at what they
+// really sent waits for the next summary (ErrCounting); one that cannot
+// fit while the sends still live stay is refused as a raise (*PastCap),
+// whatever the ended ones turn out to have sent (KRN-cap-10).
+func TestCountingWaitsForTheNextSummary(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	a, err := g.Reserve("x", 300) // 600
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.End()                                                          // it failed: the enforcer counted nothing of it
+	if _, err := g.Reserve("x", 250); !errors.Is(err, ErrCounting) { // 600 + 500
+		t.Fatalf("with only an ended send in the way: %v, want ErrCounting", err)
+	}
+	if err := g.Summary(g.Ask(), 1, capped(1000, 0, "x")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := g.Reserve("x", 250) // 500, still live
+	if err != nil {
+		t.Fatalf("after the summary counted the failed send: %v", err)
+	}
+	var pc *PastCap
+	if _, err := g.Reserve("x", 251); !errors.As(err, &pc) || pc.Total != 1002 || pc.Raise() != 2 { // 500 live + 502
+		t.Fatalf("past the cap with a live send: %v, want *PastCap total 1002", err)
+	}
+	b.End()
+	if _, err := g.Reserve("x", 251); !errors.Is(err, ErrCounting) {
+		t.Fatalf("once that send ended: %v, want ErrCounting", err)
+	}
+	// Its own cap decides too: a group cap of 2000 has room, x's own 1000
+	// would only after the next summary.
+	h := gate(c)
+	two := []Group{{Dests: []Dest{{"x", 1000}, {"y", 1000}}}}
+	if err := h.Summary(h.Ask(), 1, two); err != nil {
+		t.Fatal(err)
+	}
+	d, err := h.Reserve("x", 400) // 800 against x's own 1000
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Reserve("x", 101); !errors.As(err, &pc) || pc.Cap != 1000 { // 800 live + 202
+		t.Fatalf("past x's own cap with a live send: %v, want *PastCap on 1000", err)
+	}
+	d.End()
+	if _, err := h.Reserve("x", 101); !errors.Is(err, ErrCounting) {
+		t.Fatalf("past x's own cap with an ended send: %v, want ErrCounting", err)
+	}
+}
+
+// Counts reads a ReadCounts body one to one: its day and its groups,
+// each with its destinations' caps summed and its count; the edge
+// segment's cap and count are not a core destination's.
+func TestCountsMapsTheReplyOneToOne(t *testing.T) {
+	c := newClock()
+	g := gate(c)
+	b, err := wire.EncodeCounts(wire.Counts{Day: 9, EdgeCap: 50, EdgeCount: 40, Groups: []wire.CountGroup{
+		{Dests: []wire.CountDest{{Name: "a", Cap: 300}, {Name: "b", Cap: 700}}, Count: 400},
+		{Dests: []wire.CountDest{{Name: "c", Cap: 100}}, Count: 0},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs, err := wire.DecodeCounts(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Counts(g.Ask(), cs); err != nil {
+		t.Fatal(err)
+	}
+	if g.day != 9 {
+		t.Fatalf("day %d, want 9", g.day)
+	}
+	if _, err := g.Reserve("b", 300); err != nil { // 400 + 600 = the group's 1000
+		t.Fatalf("to the group's cap, the sum of its members': %v", err)
+	}
+	if _, err := g.Reserve("c", 50); err != nil { // its own group: 100
+		t.Fatalf("to c's own cap: %v", err)
+	}
+	var pc *PastCap
+	if _, err := g.Reserve("a", 1); !errors.As(err, &pc) || pc.Cap != 1000 {
+		t.Fatalf("past the group's cap: %v", err)
+	}
+	if _, err := g.Reserve("edge", 1); !errors.Is(err, ErrNoGroup) {
+		t.Fatalf("the edge segment as a destination: %v, want ErrNoGroup", err)
+	}
+	if err := g.Counts(g.Ask(), wire.Counts{Day: 8}); !errors.Is(err, ErrSummary) {
+		t.Fatalf("an earlier day through Counts: %v", err)
+	}
+}
+
+// A full backup completes at a cap sized to it with one chunk's retry of
+// headroom, reserved chunk by chunk, with no refusal that asks the owner
+// and no trip; reserved as one send it needs a raise (#4375 UX release
+// point 2, A18: "a backup at its sized cap completes"). Between summaries
+// the gate holds each ended chunk at its full reservation, so the backup
+// waits for the next summary (ErrCounting), never for the owner.
+func TestFullBackupAtItsSizedCapCompletes(t *testing.T) {
+	const backup, chunk = 64 << 20, 4 << 20
+	const cp = backup + chunk*Retries
+	c := newClock()
+	g := gate(c)
+	e := &enforcer{cap: cp}
+	summary := func() {
+		t.Helper()
+		if err := g.Summary(g.Ask(), 1, capped(cp, e.count, "backup")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary()
+	var pc *PastCap
+	if _, err := g.Reserve("backup", backup); !errors.As(err, &pc) {
+		t.Fatalf("the whole backup as one send: %v, want *PastCap", err)
+	}
+	waits := 0
+	for sent := uint64(0); sent < backup; {
+		s, err := g.Reserve("backup", chunk)
+		if errors.Is(err, ErrCounting) {
+			waits++
+			c.step(wire.SummaryInterval)
+			summary()
+			continue
+		}
+		if err != nil {
+			t.Fatalf("chunk at %d of %d: %v", sent, backup, err)
+		}
+		e.pass(chunk)
+		s.End()
+		sent += chunk
+	}
+	if e.tripped || e.count != backup {
+		t.Fatalf("enforcer count %d of cap %d, tripped %v", e.count, cp, e.tripped)
+	}
+	if waits == 0 {
+		t.Fatal("the backup never waited for a summary: the test does not reach the edge")
+	}
+	// A retried last chunk still lands at the cap, never past it.
+	e.pass(chunk)
+	if e.tripped {
+		t.Fatalf("one retry tripped at %d of %d", e.count, cp)
 	}
 }
