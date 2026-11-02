@@ -470,3 +470,40 @@ func TestRestartAfterBurst(t *testing.T) {
 		t.Fatalf("the restarted kernel tripped the core: %v", r.cut.reasons)
 	}
 }
+
+// TestHelloCountsWhileRadioBlocks (#4508, KRN-chan-3): a hello is counted
+// when it arrives, even while a radio call on the current connection holds
+// the channel's lock, so a lost hello is counted inside MaxLate however
+// long the radio host takes. Here the hello past the rate trips the core
+// while the radio call is still blocked. Revert mutant: counting the
+// hello under c.mu.
+func TestHelloCountsWhileRadioBlocks(t *testing.T) {
+	r := newRig(t, nil)
+	l := wire.Rate(wire.RateHello)
+	for range l.Burst - 1 {
+		r.dial().conn.Close()
+	}
+	a := r.dial()
+	hold, entered := make(chan struct{}), make(chan struct{}, 1)
+	r.radio.mu.Lock()
+	r.radio.hold, r.radio.entered = hold, entered
+	r.radio.mu.Unlock()
+	defer close(hold)
+	go a.send(cmd(1, "lamp", wire.VerbOn))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the radio call never started")
+	}
+	b := r.connect()
+	h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+	b.send(h)
+	for deadline := time.Now().Add(5 * time.Second); r.cut.trips() == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the hello past the rate was not counted while the radio call held the lock")
+		}
+	}
+	if r.cut.trips() != 1 {
+		t.Fatalf("trips %d, want 1", r.cut.trips())
+	}
+}

@@ -118,9 +118,19 @@ type radio struct {
 	mu   sync.Mutex
 	done []string
 	fail bool
+	// hold, if set, is a radio call that blocks: Do sends on entered and
+	// waits for hold to close.
+	hold, entered chan struct{}
 }
 
 func (r *radio) Do(device string, v wire.Verb, level uint8) error {
+	r.mu.Lock()
+	hold, entered := r.hold, r.entered
+	r.mu.Unlock()
+	if hold != nil {
+		entered <- struct{}{}
+		<-hold
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail {

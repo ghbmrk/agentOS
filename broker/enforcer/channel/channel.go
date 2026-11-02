@@ -180,9 +180,14 @@ const MaxOutstanding = 64
 type Channel struct {
 	cfg Config
 
+	// helloMu guards hello, the core's hello rate, alone: the hello is
+	// counted without c.mu (countHello).
+	helloMu sync.Mutex
+	hello   *wire.Bucket
+
 	mu sync.Mutex
-	// buckets are the core's rates, one per wire.RateKind; refused and
-	// preAuthB are the enforcer's own.
+	// buckets are the core's request rates, one per request
+	// wire.RateKind; refused and preAuthB are the enforcer's own.
 	buckets     map[wire.RateKind]*wire.Bucket
 	refused     *wire.Bucket
 	preAuthB    *wire.Bucket
@@ -218,7 +223,11 @@ func New(cfg Config) (*Channel, error) {
 	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{},
 		refused: wire.NewBucket(refusedLimit, now), preAuthB: wire.NewBucket(preAuthLimit, now)}
 	for _, k := range wire.RateKinds {
-		c.buckets[k] = wire.NewBucket(wire.Rate(k), now)
+		if k == wire.RateHello {
+			c.hello = wire.NewBucket(wire.Rate(k), now)
+		} else {
+			c.buckets[k] = wire.NewBucket(wire.Rate(k), now)
+		}
 	}
 	return c, nil
 }
@@ -249,16 +258,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if err != nil {
 		return err
 	}
-	// Only the authenticated core counts toward a trip (#3755), and only
-	// while it is not already cut: after a trip its reconnects take their
-	// rate but trip nothing more (ENF-d-4).
-	c.mu.Lock()
-	if c.cfg.Cut.Stage() == Open {
-		c.count(wire.RateHello)
-	} else {
-		c.buckets[wire.RateHello].Take(c.cfg.Now())
-	}
-	c.release()
+	c.countHello()
 	// This connection becomes the session before the enforcer's hello is
 	// written, and s.mu is held until it is, so no challenge or alert
 	// goes ahead of it. A kernel that has read the enforcer's hello knows
@@ -312,6 +312,24 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 				return err
 			}
 		}
+	}
+}
+
+// countHello counts an authenticated hello as it arrives. Only the
+// authenticated core counts toward a trip (#3755), and only while it is
+// not already cut: after a trip its reconnects take their rate but trip
+// nothing more (ENF-d-4). It holds helloMu, never c.mu, so no radio,
+// policy or source call a request makes under c.mu can delay the count
+// past the kernel check's MaxLate (#4508, KRN-chan-3).
+func (c *Channel) countHello() {
+	c.helloMu.Lock()
+	open := c.cfg.Cut.Stage() == Open
+	took := c.hello.Take(c.cfg.Now())
+	c.helloMu.Unlock()
+	if open && !took {
+		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
+		c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(KindHello), Reason: reason})
+		c.cfg.Cut.Trip(reason)
 	}
 }
 
