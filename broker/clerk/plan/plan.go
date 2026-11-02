@@ -1654,6 +1654,58 @@ func partial(b, secret []byte) int {
 	return 0
 }
 
+// codexMeta is the client_metadata Codex CLI 0.162.1 sends on an HTTP model
+// call. x-codex-turn-metadata is its CodexTurnMetadataPayload, which asks
+// the provider for nothing it may not do for the plan: history ingest and
+// analytics are off (the image turns both off), and a tool's source is the
+// CLI itself (the image blocks MCP servers). A config-supplied extra key
+// is not declared, since the image sets none.
+func codexMeta() map[string]Value {
+	id := Value{Kind: KindText, Max: 128}
+	n := Value{Kind: KindInt}
+	flag := Value{Kind: KindBool}
+	one := func(v ...string) Value { return Value{Kind: KindText, Max: 64, Only: v} }
+	turn := Value{Kind: KindObject, Fields: map[string]Value{
+		"installation_id": id, "session_id": id, "thread_id": id, "agent_name": id, "turn_id": id,
+		"window_id": id, "window_number": n, "context_window_id": id,
+		"request_kind":          one("turn", "prewarm", "compaction", "memory"),
+		"forked_from_thread_id": id, "forked_from_ordinal_exclusive": n,
+		"parent_thread_id": id, "parent_turn_id": id, "root_turn_id": id,
+		"subagent_kind": id, "thread_source": id, "turn_trigger": id, "sandbox": id, "sandbox_mode": id,
+		"auto_review_enabled": flag, "node_repl_auto_review_required": flag, "node_repl_disabled": flag,
+		"workspaces": {Kind: KindMap, Max: 4096, Each: &Value{Kind: KindObject, Fields: map[string]Value{
+			"associated_remote_urls": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindText, Max: 2048}},
+			"latest_git_commit_hash": {Kind: KindText, Max: 64},
+			"has_changes":            flag,
+		}}},
+		"tool_namespaces_info": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindObject, Fields: map[string]Value{
+			"name": id,
+			"functions": {Kind: KindMap, Max: 128, Each: &Value{Kind: KindObject, Fields: map[string]Value{
+				"name": id, "direct": flag, "deferred": flag,
+				"code_mode_name": {Kind: KindText, Max: 256, Null: true},
+				"source":         {Kind: KindObject, Fields: map[string]Value{"kind": one("harness")}},
+			}}},
+		}}},
+		"turn_started_at_unix_ms":  n,
+		"history_ingest_requested": {Kind: KindOff},
+		"analytics_enabled":        {Kind: KindOff},
+		"compaction": {Kind: KindObject, Fields: map[string]Value{
+			"trigger":        one("manual", "auto"),
+			"reason":         one("user_requested", "context_limit", "model_downshift", "comp_hash_changed"),
+			"implementation": one("responses", "responses_compaction_v2"),
+			"phase":          one("standalone_turn", "pre_turn", "mid_turn", "post_turn"),
+			"strategy":       one("memento", "prefix_compaction"),
+		}},
+	}}
+	return map[string]Value{
+		"x-codex-installation-id": id, "session_id": id, "thread_id": id, "x-codex-window-id": id,
+		"turn_id": id, "x-openai-subagent": id, "x-codex-parent-thread-id": id,
+		"parent_turn_id": id, "root_turn_id": id,
+		// The blob is not measured; 16 KiB is an estimate (MIG-4-plan-pins-1).
+		"x-codex-turn-metadata": {Kind: KindJSON, Max: 16 << 10, Each: &turn},
+	}
+}
+
 // Codex is the Codex CLI's plan route as measured on CLI 0.162.1 (#809):
 // the ChatGPT plan's model and models endpoints, the refresh, and the
 // device-code sign-in, with the CLI's local callback rewritten to the auth
@@ -1714,16 +1766,10 @@ func Codex(guard *netguard.Policy) Declaration {
 			ToolTypes:    clientToolTypes,
 			Stream:       true,
 			// The client_metadata keys CLI 0.162.1 sets on an HTTP model
-			// call (codex-rs core responses_metadata.rs client_metadata):
-			// ids of at most 128 bytes, the CLI's own cap on a metadata
-			// value (MAX_EXTRA_METADATA_VALUE_BYTES), and the turn's
-			// metadata blob, whose tool list is the 11 tools below.
-			Meta: map[string]int{
-				"x-codex-installation-id": 128, "session_id": 128, "thread_id": 128,
-				"x-codex-window-id": 128, "turn_id": 128, "x-openai-subagent": 128,
-				"x-codex-parent-thread-id": 128, "parent_turn_id": 128, "root_turn_id": 128,
-				"x-codex-turn-metadata": 16 << 10,
-			},
+			// call (codex-rs core responses_metadata.rs client_metadata),
+			// and inside it the turn's metadata blob. Ids are the clerk's
+			// own 128-byte cap: the CLI bounds none of them.
+			Meta: codexMeta(),
 			// The tools CLI 0.162.1 declares in code mode under the image's
 			// managed config, as captured (#809): all in an additional_tools
 			// item.
