@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -558,7 +559,8 @@ class Verify(unittest.TestCase):
     @staticmethod
     def result(status, line=2, file_name="a.go"):
         return {"files": [{"file_name": file_name, "mutations": [
-            {"type": "ARITHMETIC_BASE", "status": status, "line": line}]}], "mutants_lived": int(status == "LIVED")}
+            {"type": "ARITHMETIC_BASE", "status": status, "line": line}]}], "mutants_lived": int(status == "LIVED"),
+            "statement_deletions": 0}
 
     def test_killed_passes(self):
         r = self.verify({"netguard.json": self.result("KILLED")})
@@ -631,6 +633,11 @@ class Verify(unittest.TestCase):
             (self.result("LIVED", line=1, file_name="netguard/a.go"), "not files in broker/netguard/"),
             (self.result("LIVED", line=1, file_name="gone.go"), "not files in broker/netguard/"),
             (self.result("SKIPPED"), "gremlins skipped mutants on lines this diff adds"),
+            # #4573: gremlins' JSON without `delete`'s pass, or a count that is not its mutants'.
+            ({k: v for k, v in self.result("KILLED").items() if k != "statement_deletions"},
+             "holds no statement-deletion pass"),
+            ({**self.result("KILLED"), "statement_deletions": 1}, "holds no statement-deletion pass"),
+            ({**self.result("KILLED"), "statement_deletions": "0"}, "holds no statement-deletion pass"),
         ):
             with self.subTest(want):
                 r = self.verify({"netguard.json": data})
@@ -640,6 +647,408 @@ class Verify(unittest.TestCase):
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, req=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+GO_MOD = "module example.invalid/broker\n\ngo 1.22\n"
+# hint.go before the PR: one function the tests call.
+BASE_SRC = """package hint
+
+func Keep(n int) int {
+	return n
+}
+"""
+# The PR adds a reset the tests check, a guard they do not, a function they never call, and a
+# statement whose deletion does not compile. Keep's `return n` is the base's line, so not a site.
+PR_SRC = """package hint
+
+var count int
+
+func Keep(n int) int {
+	count = n
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
+func Never() {
+	count = 0
+}
+
+func Last() int {
+	return count
+}
+"""
+TEST_SRC = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestKeep(t *testing.T) {
+	if Keep(3) != 3 || count != 3 || Last() != 3 {
+		t.Fatal("keep")
+	}
+}
+"""
+
+
+class Deletion(unittest.TestCase):
+    # MUTGATE-stmt-delete (#4573): gremlins v0.6.0 has no mutator that deletes a statement, so
+    # `delete` deletes each statement starting on an added line alone and reports it as a mutant.
+    def lister(self, d):
+        out = pathlib.Path(d) / "stmts"
+        subprocess.run(["go", "build", "-o", str(out), str(mutgate.STMTS)], cwd=d, check=True,
+                       env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+        return out
+
+    def test_lister_lists_statements_not_declarations(self):
+        src = ("package p\n\nfunc f(c chan int) (n int) {\n\tvar a int\n\tb := 1\n\ta = b\n\tn++\n"
+               "\tif a > 0 {\n\t\treturn\n\t}\n\tswitch {\n\tcase a > 1:\n\t\tg()\n\t}\n\tc <- n; ;\n"
+               "\treturn n\n}\n\nfunc g() {}\n")
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "p.go").write_text(src)
+            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, check=True)
+            sites = json.loads(r.stdout)
+        got = sorted((s["line"], src.encode()[s["start"]:s["end"]].decode()) for s in sites)
+        self.assertEqual(got, [(6, "a = b"), (7, "n++"), (8, "if a > 0 {\n\t\treturn\n\t}"), (9, "return"),
+                               (11, "switch {\n\tcase a > 1:\n\t\tg()\n\t}"), (12, "case a > 1:\n\t\tg()"), (13, "g()"), (15, "c <- n"),
+                               (16, "return n")])
+        self.assertTrue(all(s["file"] == "p.go" and s["col"] >= 2 for s in sites))
+        # A clause's cover block starts after its colon, so its coverage is its switch's (L3 on #4597).
+        cover = {(s["line"], s["col"]): (s["cover_line"], s["cover_col"]) for s in sites}
+        self.assertEqual(cover[(12, 2)], (11, 2))
+        self.assertEqual(cover[(13, 3)], (13, 3))
+
+    def test_deleted_keeps_every_other_line_where_it_was(self):
+        src = b"a\n\tif x {\n\t\ty()\n\t}\nz\n"
+        start = src.index(b"if")
+        site = {"start": start, "end": src.index(b"}") + 1}
+        self.assertEqual(mutgate.deleted(src, site), b"a\n\t\n\n\nz\n")
+
+    def test_coverage_counts_only_blocks_that_ran(self):
+        prof = ("mode: set\nexample.invalid/broker/hint/hint.go:5.24,7.11 2 1\n"
+                "example.invalid/broker/hint/hint.go:13.14,15.2 1 0\n")
+        blocks = mutgate.covered_blocks(prof)
+        self.assertTrue(mutgate.is_covered(blocks, {"file": "hint.go", "cover_line": 6, "cover_col": 2}))
+        self.assertTrue(mutgate.is_covered(blocks, {"file": "hint.go", "cover_line": 5, "cover_col": 24}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "hint.go", "cover_line": 7, "cover_col": 11}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "hint.go", "cover_line": 14, "cover_col": 2}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "other.go", "cover_line": 6, "cover_col": 2}))
+
+    def test_a_test_run_past_its_timeout_is_timed_out_and_its_children_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "t.test"
+            pid = pathlib.Path(d) / "pid"
+            stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid}\nwait\n")
+            stub.chmod(0o755)
+            self.assertEqual(mutgate.run_tests(stub, d, 1), "TIMED OUT")
+            # The test binary's own child is gone too (dead, or a zombie awaiting its reaper).
+            state = pathlib.Path(f"/proc/{int(pid.read_text())}/stat")
+            for _ in range(50):
+                if not state.exists() or state.read_text().split(")")[-1].split()[0] in "ZX":
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("the timed-out test's child still runs")
+            (stub).write_text("#!/bin/sh\nexit 0\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 5), "LIVED")
+            (stub).write_text("#!/bin/sh\nexit 1\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
+
+    def repo(self, d, base_src=BASE_SRC, pr_src=PR_SRC, test_src=TEST_SRC):
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+        shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+        shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+        (pathlib.Path(d) / "broker" / "go.mod").write_text(GO_MOD)
+        pkg = pathlib.Path(d) / "broker" / "hint"
+        pkg.mkdir()
+        (pkg / "hint.go").write_text(base_src)
+        git("init", "-q")
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+        (pkg / "hint.go").write_text(pr_src)
+        (pkg / "hint_test.go").write_text(test_src)
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+        return pkg
+
+    def mutgate(self, d, *args):
+        return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
+                              capture_output=True, text=True, env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+
+    def test_delete_adds_a_verdict_for_each_statement_on_an_added_line_and_verify_gates_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            before = (pkg / "hint.go").read_text()
+            out = pathlib.Path(d) / "res" / "mutants-0"
+            out.mkdir(parents=True)
+            # gremlins' result (here one killed operator mutant) is what `delete` adds to.
+            (out / "hint.json").write_text(json.dumps({"files": [{"file_name": "hint.go", "mutations": [
+                {"type": "CONDITIONALS_BOUNDARY", "status": "KILLED", "line": 7}]}], "mutants_lived": 0}))
+            # Without `delete`, verify refuses gremlins' result alone.
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+            self.assertIn("holds no statement-deletion pass", r.stderr)
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((pkg / "hint.go").read_text(), before)  # the overlay left the tree as it was
+            data = json.loads((out / "hint.json").read_text())
+            got = sorted((m["line"], m["type"], m["status"]) for m in data["files"][0]["mutations"])
+            self.assertEqual(got, [
+                (6, mutgate.DELETION, "KILLED"),       # count = n: the test reads count
+                (7, "CONDITIONALS_BOUNDARY", "KILLED"),
+                (7, mutgate.DELETION, "LIVED"),        # the n < 0 guard: no test gives a negative n
+                (8, mutgate.DELETION, "NOT COVERED"),  # n = 0 never runs
+                (14, mutgate.DELETION, "NOT COVERED"),  # Never is never called
+                (18, mutgate.DELETION, "NOT VIABLE"),  # Last's return
+            ])
+            self.assertEqual((data["statement_deletions"], data["mutants_lived"], data["mutants_total"]), (5, 1, 5))
+            # A second pass on the same result is refused, not counted twice.
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("not one gremlins result without deletions", r.stderr)
+            # The gate reads a deletion mutant as it reads gremlins' own.
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/hint/hint.go:7 STATEMENT_DELETION survives", r.stdout)
+
+    def deletion_verdicts(self, base_src, pr_src, test_src):
+        """{line: status} of `delete`'s STATEMENT_DELETION mutants on a repo built from these sources."""
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, base_src, pr_src, test_src)
+            out = pathlib.Path(d) / "out"
+            out.mkdir()
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0}))
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+        return {m["line"]: m["status"] for f in data["files"] for m in f["mutations"]}
+
+    def test_a_guard_that_is_its_variables_only_use_is_deleted_and_tested(self):
+        # Security on #4597: deleting `if err != nil { ... }` leaves err unused and does not build,
+        # so the pass keeps err (and an import) in use with `_ =` and tests the deletion.
+        pr = """package hint
+
+import (
+	"errors"
+	e2 "errors"
+)
+
+func check(s string) error {
+	if len(s) > 5 {
+		return errors.New("long")
+	}
+	return nil
+}
+
+func Allow(s string) bool {
+	err := check(s)
+	if err != nil {
+		return false
+	}
+	ok := len(s) > 0
+	if !ok {
+		return false
+	}
+	_ = e2.New("x")
+	return true
+}
+"""
+        test = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestAllow(t *testing.T) {
+	if !Allow("abc") {
+		t.Fatal("allow")
+	}
+}
+"""
+        got = self.deletion_verdicts("package hint\n", pr, test)
+        self.assertEqual(got[17], "LIVED")       # if err != nil: err kept with `_ = err`
+        self.assertEqual(got[21], "LIVED")       # if !ok
+        self.assertEqual(got[24], "LIVED")       # e2's only use: the import renamed `_`
+        self.assertEqual(got[10], "NOT COVERED")  # return errors.New("long") never runs
+
+    def test_a_case_clause_is_covered_when_its_switch_ran(self):
+        # L3 on #4597: a clause's cover block starts after its colon (or is empty), so a covered
+        # empty guard clause read NOT COVERED and its deletion passed.
+        base = """package hint
+
+func Class(n int) string {
+	switch {
+	default:
+		return "other"
+	}
+}
+"""
+        pr = """package hint
+
+func Class(n int) string {
+	switch {
+	case n < 0:
+	case n > 9:
+		return "big"
+	default:
+		return "other"
+	}
+	return "neg"
+}
+
+func Pick(c chan int) int {
+	select {
+	case v := <-c:
+		return v
+	default:
+	}
+	return -1
+}
+"""
+        test = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestClass(t *testing.T) {
+	if Class(1) != "other" || Class(10) != "big" {
+		t.Fatal("class")
+	}
+	c := make(chan int, 1)
+	c <- 4
+	if Pick(c) != 4 {
+		t.Fatal("pick")
+	}
+}
+"""
+        got = self.deletion_verdicts(base, pr, test)
+        self.assertEqual(got[5], "LIVED")    # case n < 0: no test gives a negative n
+        self.assertEqual(got[6], "KILLED")   # case n > 9: Class(10) checks it
+        self.assertEqual(got[16], "KILLED")  # case v := <-c: Pick(c) checks it
+        self.assertEqual(got[18], "LIVED")   # default: no test reads an empty channel
+
+    def test_a_clause_that_is_a_variables_only_use_is_deleted_and_tested(self):
+        # Round 2 on #4597: a deleted clause's `_ = NAME` cannot stand in a switch or select body,
+        # so it goes after a sibling clause's colon, before the select, or in a lone `default:`.
+        pr = """package hint
+
+import "strconv"
+
+func Allow(s string) string {
+	a, err := strconv.Atoi(s)
+	switch {
+	case err != nil:
+		return "deny"
+	default:
+		return strconv.Itoa(a)
+	}
+}
+
+func Good(s string) string {
+	switch good := s != ""; {
+	case !good:
+		return "deny"
+	}
+	return "ok"
+}
+
+func Kind(x any) string {
+	switch v := x.(type) {
+	case int:
+		return strconv.Itoa(v)
+	default:
+		return "other"
+	}
+}
+
+func Drain(c chan int, stop chan bool) int {
+	n := 0
+	select {
+	case <-stop:
+		return n
+	case v := <-c:
+		return v
+	}
+}
+
+func Loop(xs []int) int {
+	t := 0
+L:
+	for _, x := range xs {
+		if x < 0 {
+			break L
+		}
+		t += x
+	}
+	return t
+}
+"""
+        test = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestAll(t *testing.T) {
+	if Allow("12") != "12" || Good("x") != "ok" || Kind("s") != "other" || Loop([]int{1, -1, 2}) != 1 {
+		t.Fatal("all")
+	}
+	c := make(chan int, 1)
+	c <- 4
+	if Drain(c, make(chan bool)) != 4 {
+		t.Fatal("drain")
+	}
+}
+"""
+        got = self.deletion_verdicts("package hint\n", pr, test)
+        self.assertEqual(got[8], "LIVED")    # case err != nil: err kept after default's colon
+        self.assertEqual(got[17], "LIVED")   # case !good: the only clause, so `default: _ = good`
+        self.assertEqual(got[25], "LIVED")   # case int: v kept in the default clause
+        self.assertEqual(got[35], "LIVED")   # case <-stop: n kept before the select
+        self.assertEqual(got[37], "TIMED OUT")  # case v := <-c: Drain(c) blocks without it
+        # Deleting `if x < 0 { break L }` or `break L` leaves L unused: the label is dropped and tested.
+        self.assertEqual((got[46], got[47]), ("KILLED", "KILLED"))
+        # Every NOT VIABLE left is a deletion that leaves a function without its return.
+        self.assertEqual(sorted(k for k, v in got.items() if v == "NOT VIABLE"), [7, 10, 11, 20, 24, 27, 28, 34, 38, 51])
+
+    def test_unused_label_and_import_spellings(self):
+        text = b'package p\n\nimport (\n\tl "log"\n\t"os"\n)\n\nfunc f() {\nL:\n\tfor {\n\t}\n}\n'
+        got = mutgate.respelled(text, [(4, 2, "import"), (5, 2, "import"), (9, 1, "label")])
+        self.assertEqual(got, b'package p\n\nimport (\n\t_ "log"\n\t_ "os"\n)\n\nfunc f() {\n  \n\tfor {\n\t}\n}\n')
+        self.assertEqual(mutgate.fixes("./a.go:5:1: label L defined and not used\n", "a.go"), ([], [(5, 1, "label")]))
+        self.assertIsNone(mutgate.fixes("./a.go:5:1: undefined: x\n", "a.go"))
+        self.assertIsNone(mutgate.fixes("./b.go:5:2: declared and not used: x\n", "a.go"))
+
+    def test_a_line_directive_is_refused(self):
+        # Round 2 on #4597: `//line other.go:7` renames the file in the cover profile too, so every
+        # later site would read NOT COVERED; the lister refuses the file instead.
+        src = "package p\n\nfunc f() {\n//line other.go:7\n\tg()\n}\n\nfunc g() {}\n"
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "p.go").write_text(src)
+            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("a //line directive", r.stderr)
+
+    def test_delete_needs_gremlins_result_and_passing_tests(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            out = pathlib.Path(d) / "out"
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no gremlins result for hint", r.stderr)
+            out.mkdir()
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0}))
+            (pkg / "hint_test.go").write_text(TEST_SRC.replace('t.Fatal("keep")', "").replace("{\n\t\t\n\t}", "{\n\t}")
+                                              + "func TestFails(t *testing.T) { t.Fatal(1) }\n")
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("tests fail before any statement is deleted", r.stderr)
+            # A package with no tests covers nothing: each site is NOT COVERED, as gremlins reads it.
+            (pkg / "hint_test.go").unlink()
+            (pkg / "doc.go").write_text("package hint\n\n// REQ: CRED-1\n")
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+            self.assertEqual({m["status"] for m in data["files"][0]["mutations"]}, {"NOT COVERED"})
+            self.assertEqual(data["statement_deletions"], 5)
 
 
 def job(text, name):
@@ -674,6 +1083,9 @@ class Workflow(unittest.TestCase):
         self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
         self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
         self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"', mutants)
+        # #4573: the deletion pass adds to the same result, after gremlins wrote it.
+        self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
+        self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
         self.assertNotIn("mutgate.py gate", self.text)  # the gate is `verify`, in the job no PR code reaches
         self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
         self.assertIn("gremlins@v0.6.0", mutants)
@@ -704,7 +1116,8 @@ class Workflow(unittest.TestCase):
         # so that job ends in an upload and decides nothing.
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
-        self.assertIn("Gremlins on the package", steps[-3])
+        self.assertIn("Gremlins on the package", steps[-4])
+        self.assertIn("Statement deletions on the package", steps[-3])
         self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
         self.assertIn("name: mutants-${{ strategy.job-index }}", steps[-1])
         self.assertIn("path: mutants/", steps[-1])
