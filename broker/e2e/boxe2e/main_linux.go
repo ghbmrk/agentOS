@@ -252,11 +252,20 @@ func (d *driver) get(path string) (int, string, []byte, error) {
 	return d.do(req)
 }
 
-func (d *driver) post(path string, form url.Values) (int, string, error) {
+func (d *driver) post(path string, form url.Values) (int, string, []byte, error) {
 	req, _ := http.NewRequest("POST", box+path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	code, loc, _, err := d.do(req)
-	return code, loc, err
+	return d.do(req)
+}
+
+// answerErr is a failed request's line: the request, its status, and
+// where the answer left setup (where), or the transport error when there
+// is no answer to read (ASSUMPTIONS E8).
+func answerErr(req string, st int, b []byte, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s %d: %v", req, st, err)
+	}
+	return fmt.Errorf("%s %d %s", req, st, where(b))
 }
 
 func (d *driver) do(req *http.Request) (int, string, []byte, error) {
@@ -327,7 +336,7 @@ func (d *driver) claim() error {
 	}); err != nil {
 		return fmt.Errorf("%w; %s", err, claimDiag(code))
 	}
-	st, loc, err := d.post("/claim", url.Values{"code": {code}})
+	st, loc, _, err := d.post("/claim", url.Values{"code": {code}})
 	if err != nil {
 		return err
 	}
@@ -341,8 +350,10 @@ func (d *driver) claim() error {
 }
 
 // claimDiag says why the page shows no claim screen: where the sealed
-// claim state is, the page's unit state, and its last log lines, with
-// the claim code cut out.
+// claim state is, the page's, agentosd's and the vault process's unit
+// states, and the page's and the claim move's last log lines, with the
+// claim code cut out. agentosd's and the vault process's journals are
+// not quoted: the console is a public CI log (ASSUMPTIONS E8).
 func claimDiag(code string) string {
 	where := func(p string) string {
 		if _, err := os.Lstat(p); err != nil {
@@ -350,27 +361,59 @@ func claimDiag(code string) string {
 		}
 		return "present"
 	}
-	unit, _ := command("systemctl", "show", "agentos-localui.service",
-		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
-	hand, _ := command("systemctl", "show", "agentos-localui-claim.service",
-		"-p", "ActiveState,Result,ConditionResult", "--value").Output()
-	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
-		"-u", "agentos-localui-claim.service", "-u", "agentos-localui.service",
-		"-u", "agentosd.service", "-u", "agentos-egress.service").Output()
-	return fmt.Sprintf("diag: sealed=%s moved=%s hand-over=%s unit=%s log: %s", where(claim.StatePath),
-		where(claimDst), oneLine(string(hand)), oneLine(string(unit)),
-		redactLog(string(logs), 12, code, claim.Normalize(code)))
+	unit := output("systemctl", "show", "agentos-localui.service",
+		"-p", "ActiveState,SubState,NRestarts,Result", "--value")
+	hand := output("systemctl", "show", "agentos-localui-claim.service",
+		"-p", "ActiveState,Result,ConditionResult", "--value")
+	back := output("systemctl", "show", "agentosd.service", "agentos-egress.service",
+		"-p", "ActiveState,SubState,NRestarts,Result", "--value")
+	logs := journalTail(20, "agentos-localui-claim.service", "agentos-localui.service")
+	return fmt.Sprintf("diag: sealed=%s moved=%s hand-over=%s unit=%s agentosd+egress=%s log: %s", where(claim.StatePath),
+		where(claimDst), oneLine(hand), oneLine(unit), oneLine(back),
+		redactLog(logs, 12, code, claim.Normalize(code)))
+}
+
+// quotable are the units whose journal lines a diag may quote whole on
+// the console, a public CI log (ASSUMPTIONS E8): the setup page and its
+// claim move, quoted only by claimDiag, before setup makes any secret
+// E8 names, and the modem bridge, whose own lines are fixed texts and
+// which never holds one. agentosd and the vault process hold them, so
+// only lines of a fixed shape are taken from agentosd's journal (E11,
+// E12, E16) and none from the vault process's.
+var quotable = map[string]bool{
+	"agentos-localui-claim.service": true,
+	"agentos-localui.service":       true,
+	"agentos-modem.service":         true,
+}
+
+// journalTail is the last n journal lines this boot of units, each of
+// which must be quotable; a unit that is not reads nothing.
+func journalTail(n int, units ...string) string {
+	args := []string{"-b", "-o", "cat", "--no-pager", "-n", strconv.Itoa(n)}
+	for _, u := range units {
+		if !quotable[u] {
+			return "(" + u + " is not quoted)"
+		}
+		args = append(args, "-u", u)
+	}
+	return output("journalctl", args...)
+}
+
+// output is a system tool's standard output; tests replace it.
+var output = func(name string, args ...string) string {
+	out, _ := command(name, args...).Output()
+	return string(out)
 }
 
 // modemDiag says why setup cannot text: the bridge's and agentosd's unit
-// states and their last log lines. The pairing code is not known yet, and
-// the numbers and SIM serial are the simulator's synthetic ones.
+// states and the bridge's last log lines; agentosd's journal is not
+// quoted (quotable). The numbers and SIM serial are the simulator's
+// synthetic ones.
 func modemDiag() string {
-	units, _ := command("systemctl", "show", "agentos-modem.service", "agentosd.service",
-		"-p", "ActiveState,SubState,NRestarts,Result", "--value").Output()
-	logs, _ := command("journalctl", "-b", "-o", "cat", "--no-pager", "-n", "20",
-		"-u", "agentos-modem.service", "-u", "agentosd.service").Output()
-	return fmt.Sprintf("diag: units=%s log: %s", oneLine(string(units)), redactLog(string(logs), 12))
+	units := output("systemctl", "show", "agentos-modem.service", "agentosd.service",
+		"-p", "ActiveState,SubState,NRestarts,Result", "--value")
+	return fmt.Sprintf("diag: units=%s log: %s", oneLine(units),
+		redactLog(journalTail(20, "agentos-modem.service"), 12))
 }
 
 // page is the phone's view of /setup now.
@@ -477,9 +520,9 @@ func (d *driver) codes() error {
 	if d.seed == nil {
 		return errors.New("no code generator link was shown")
 	}
-	st, _, err := d.post("/setup/codes", url.Values{"code": {d.freshCode()}})
+	st, _, b, err := d.post("/setup/codes", url.Values{"code": {d.freshCode()}})
 	if err != nil || st != http.StatusSeeOther {
-		return fmt.Errorf("POST /setup/codes %d %v", st, err)
+		return answerErr("POST /setup/codes", st, b, err)
 	}
 	_, err = d.waitStep("3", time.Minute)
 	return err
@@ -490,7 +533,7 @@ func (d *driver) codes() error {
 func (d *driver) card() error {
 	st, _, sheet, err := d.get("/setup/card?save=1")
 	if err != nil || st != http.StatusOK {
-		return fmt.Errorf("GET card sheet %d %v", st, err)
+		return answerErr("GET card sheet", st, sheet, err)
 	}
 	pass, rec, err := sheetSecrets(sheet)
 	if err != nil {
@@ -498,7 +541,7 @@ func (d *driver) card() error {
 	}
 	st, _, pg, err := d.get("/setup/card")
 	if err != nil || st != http.StatusOK {
-		return fmt.Errorf("GET card page %d %v", st, err)
+		return answerErr("GET card page", st, pg, err)
 	}
 	wn, gn, err := promptAsks(pg)
 	if err != nil {
@@ -517,9 +560,9 @@ func (d *driver) card() error {
 	if !printsFingerprint(sheet, card.Fingerprint(pub)) {
 		return errors.New("the card does not print the published page certificate's fingerprint")
 	}
-	st, loc, err := d.post("/setup/card", url.Values{"word": {w}, "group": {g}})
+	st, _, ans, err := d.post("/setup/card", url.Values{"word": {w}, "group": {g}})
 	if err != nil || st != http.StatusSeeOther {
-		return fmt.Errorf("POST card confirm %d %q %v", st, loc, err)
+		return answerErr("POST card confirm", st, ans, err)
 	}
 	// The confirm handed the factors to the keeper, whose path unit starts
 	// enrollment; enrollment stores the staged authority only if it is the
@@ -557,18 +600,18 @@ func waitGone(path string, wait time.Duration) error {
 }
 
 func (d *driver) recovery() error {
-	st, _, err := d.post("/setup/recovery", url.Values{"stored": {"1"}})
+	st, _, b, err := d.post("/setup/recovery", url.Values{"stored": {"1"}})
 	if err != nil || st != http.StatusSeeOther {
-		return fmt.Errorf("POST /setup/recovery %d %v", st, err)
+		return answerErr("POST /setup/recovery", st, b, err)
 	}
 	_, err = d.waitStep("5", time.Minute)
 	return err
 }
 
 func (d *driver) host() error {
-	st, _, err := d.post("/setup/host", url.Values{})
+	st, _, b, err := d.post("/setup/host", url.Values{})
 	if err != nil || st != http.StatusSeeOther {
-		return fmt.Errorf("POST /setup/host %d %v", st, err)
+		return answerErr("POST /setup/host", st, b, err)
 	}
 	_, err = d.waitStep("6", time.Minute)
 	if err != nil {
@@ -843,10 +886,10 @@ func (d *driver) planSignIn() error {
 	}
 	form := url.Values{"provider": {route.Provider}, "private": {"1"}}
 	w := d.watchSignIn()
-	st, _, err := d.post("/setup/ai-device", form)
+	st, _, b, err := d.post("/setup/ai-device", form)
 	out := w.stop()
 	if err != nil || st != http.StatusSeeOther {
-		return fmt.Errorf("POST /setup/ai-device %d %v", st, err)
+		return answerErr("POST /setup/ai-device", st, b, err)
 	}
 	if pg, err = d.page(); err != nil {
 		return err
@@ -893,9 +936,9 @@ func (d *driver) planSignIn() error {
 	if err != nil {
 		return fmt.Errorf("sign-in did not finish setup: %w (stub %v refused %d)", err, d.stub.Hits(), d.stub.Refused())
 	}
-	st, _, b, err := d.get("/status")
+	st, _, b, err = d.get("/status")
 	if err != nil || st != http.StatusOK {
-		return fmt.Errorf("GET /status %d %v", st, err)
+		return answerErr("GET /status", st, b, err)
 	}
 	pages = append(pages, seen{"GET /status", b})
 	if n := d.stub.Refused(); n != 0 {
