@@ -28,7 +28,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | MIG-4-untrusted-change | The change pipeline (`change`, `compile`) off `journal`, `durable` and `verb`, onto the replay gate in `broker/kernel/sim`, log-held outcomes and HLD-4's standing key; unblocks #2572's verb half. | MIG-3 | queued (sub B; tier A) |
 | MIG-4-untrusted-agentosd-log | The rest of `cmd/agentosd` off `meter`, `journal` and `durable`, onto the kernel log and model-clerk spend; agentosd chain 9, last; leaves `cmd/agentosd` with no old-core import; unblocks #2577 and #2572's meter half. | MIG-4-untrusted-agentosd-grants | queued (sub B; tier A) |
 | MIG-4-replay-leftovers | Remove the dead replay code and stale text left after #2791 (modelroute Evaluation, vm CheckpointAndStop, daemon B15, a testkit comment). | #2791 | queued (later; tier C) |
-| MIG-4-fuzz-account | Remove the agentos-fuzz account and /var/lib/agentos-fuzz tree on upgraded boxes, the tree no later than the account (from #2816's reviews). | #2816 | queued (later; tier A) |
 | MIG-4-builder-grant | Delete agentos-egress's unused lb- builder-grant path, cmd/agentos-builder and guest/builder (from #2816's Security review). | #2816; D-139 old-core list | queued (later; tier A) |
 | MIG-3-R11 | VRB-2 later notes from the #2833 reviews: IDNA handling, owner-facing refusal reasons, eval fixtures, documented limits. | #2833 | queued (later) |
 | TN-passkey | KEY-4: enrolled-passkey hold before a big widening, hardware-key co-sign for a one-off money step over the daily cap, UV-required flag in the assertion model and sim sweep. | A21 passed; second TN spec PR; kernel serial queue | queued (release; sub A kernel lane, serial; tier A; after A21) |
@@ -46,7 +45,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CORE-buildtags-host | TestEachBuildChecksItsOwnFiles passes on a non-linux host (from #3054). | #3054 | queued (later) |
 | MIG-4-guest-keys | agentosd gives each guest machine a key narrowed from the owner's clerk-key grant: holder key in agentosd's state dir (Mark, A), `Keys` per machine, then the owner's KEY-4 passkey grant and a clerk. | MIG-4-untrusted-guest (2784a); the passkey signer seam (#2779 comment 6396976126) | queued (tier A) |
 | MIG-4-plan-login-pin | Pin the plan refresh body's `client_id` and `scope` to measured values, so a guest cannot shape the provider's answer into a release-only stop (#3105 Security 2). | MIG-4-plan-login-pin | queued (tier A; release; needs a Codex capture) |
-| MIG-4-plan-login-code | The plan sign-in clerk redeems the device step's authorization code itself, so no guest holds it (#3105 Security 3; with #3104 slice c). | MIG-4-plan-login-code | queued (tier A; later) |
+| MIG-4-plan-login-code | The plan sign-in clerk redeems the device step's authorization code itself, so no guest holds it (#3105 Security 3; with #3104 slice c). | MIG-4-plan-login-code | building (tier A; later) |
 | A21-image | A21 through the image's own units: the slice boot drives each case through agentosd's kernel, the hosted mail clerk and the plan command, the owner's ask over the SMS fake (MIG-3-1 remainder) | #3117, #2682, MIG-4-run | queued (release; tier A; after #2682) |
 | MIG-4-plan-credits | Read the Codex credits headers on the plan endpoint, so a credit draw before a window's limit closes the pool (RES-5; from MIG-4-plan-login-b). | MIG-4-plan-credits | queued (tier A; later; recheck; needs a measurement) |
 | MIG-4-plan-live | Check the plan endpoint's stream usage reading against a live Codex capture, and pin or record the guest's model choice (#3128 Security 4, L3 4). | MIG-4-plan-live | queued (tier A; later; needs a capture) |
@@ -91,6 +90,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | DECOY-b-scan | DECOY-b-scan: the decoy matcher on the model clerk's outbound body and the edge link (KRN-12 Trips) | #3763 | queued(release; tier A; size M; from #4037 L3 4, split from #4070; after #4039) |
 | SPEC-krn12-owner-honey | SPEC-krn12-owner-honey: name the owner-side honey key case in KRN-12 Response (KRN-12) | #4219 | queued (release; L1 spec-diff; after #4167; from #4219) |
 | EDGE-link-edge | EDGE-link-edge: the edge box's own side of the link: its key, hello, pin of the core's link key, and new-core acceptance after a restore (HW-15; needs brief). | EDGE-link-core-c2 | queued (release; tier A; the unowned gap in briefs/EDGE-link-core.md) |
+| DECOY-match-wrap | DECOY-match-wrap: the decoy matcher trips on line-wrapped base64 (KRN-12 Trips) | #3763 | queued(release; tier A; size S; from #3876's build) |
+| DECOY-state-print | DECOY-state-print: formatting the kernel state shows no decoy value (KRN-12) | #3763 | queued(release; tier A; size S; from #4501 Security 1) |
 
 ## Harness and operating model
 
@@ -118,6 +119,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-LOW-tools | REV-LOW-tools: review-tool and CI-check findings (srclint tags, next-id order, netguard imports, packet brief source, NUL path parsing, inter-hunk context, workflow step keys) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
 | CI-par-7 | CI-par-7: clash_audit.py resolves a failed write-open's path through symlinks and .. at trace time, so a failed O_EXCL create via a link still clashes with a write of the real path | #4335 reviews | queued(release; tier A; lane primary) |
 | VULN-controlui-drop | VULN-controlui-drop: the guest image build removes OpenClaw's unused Control UI assets, so the DOMPurify, KaTeX, mermaid and lodash-es records retire | VULN-guest-controlui-off (#4417) | building (release; tier A) |
+| CI-par-5b | CI-par-5b: MustRun passes a skip raised in setUpClass or setUpModule | #4483 L3 | queued(tier C; lane primary) |
 
 ## Owner channel and approvals (SPEC §10)
 
@@ -154,6 +156,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CH-photo-heic-wire | CH-photo-heic-wire: reserve the photo one-shot's 960 MiB in RES-2/HW-4 admission, one run at a time, when CH-photo-c wires photo.Decoder; consider building agentos-photo with -tags noasm (later; from #3124 reviews) | #3124 | queued (later; tier A) |
 | CH-21f-wire | agentosd starts the owner channel with the setup names | CH-21f-wire | queued (tier A; release finding of #948) |
 | REV-LOW-msg | REV-LOW-msg: owner message findings (cross-reply code expiry, security notice held by quiet hours, Unicode question clipping, false passed-on for a late correction, NAME uncertain save) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
+| OWNER-ignored-saves-fu1 | OWNER-ignored-saves-fu1: a Decide-level test pins that an approval with an unread attempt count is not journaled (OP-12, GR36) | #1969 | queued (release; tier A) |
+| OWNER-ignored-saves-fu2 | OWNER-ignored-saves-fu2: the owner is told when an approval could not be recorded and was not acted on (OP-12, CH-10) | #1969 | queued (release; tier A) |
 
 ## Identity, onboarding and setup (SPEC §11-12)
 
@@ -165,15 +169,12 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CTRL-uki | [Preloaded self-check rooted in signed code, so a seller's modified initrd cannot pass its own check](briefs/CTRL-uki.md) | CTRL-claim, P2-1, G1 | queued (after G1, D-104; HW-10, HW-5a, A1; tier A; SPEC risk 26 wording fixed by CTRL-text) |
 | CTRL-setup-open l1 | init -setup on a download-path box waits for the flasher's pairing (HW-10, FLASH-1), as it waits for the claim on a preloaded box | CTRL-setup-open l1 | queued (later; HW-10; tier A; from #1204/#1205) |
 | CTRL-setup-open l2 | End-to-end K5 test once init -setup is wired into first boot: after a wrong code and a restart no setup vault exists, after the claim `init -setup` has made it with `-claim` at `claim.StatePath` | CTRL-setup-open l2 | queued (later; HW-10, claim K5; tier A; from #1210) |
-| P2-2w c3 l1 | Setup's network step shows the join's wait (up to about 30 s) and a second tap waits for the running join instead of showing the bad-password error | P2-2w c3 l1 | queued (later, recheck; ONB-3; from #1214; fold into #931) |
 | P2-2w c4 l1 | Pin #1218's surviving mutants: agentosd main() wiring Seen: up.seen, agentos-localui run() calling its socket wait, neverOnlineAfter == 90 s as an absolute value, the v6 lo and prefix-length and v4 mask checks in defaultRoute, and no rejoin form without NeverOnline; and replace awaitSocket with the existing AgentosdSetup.Wait (later, recheck; Potency on PR #1218) | P2-2w c4 | queued (later, recheck; from #1218) |
 | P2-2w c4d l1 | Serialize setup's host answers so a slow "trusted" cannot finish after a later "not mine" (later, recheck, PR #1241 L3 L1) | P2-2w c4d | queued |
 | P2-2w c4d u2 | Setup's host step without a TPM: a Continue button and an Owner Card note (later, recheck, PR #1241 UX U2) | P2-2w c4d | queued |
 | P2-2w c4d s4 | Test faults for setup's "not mine" error paths: unreadable keys file and a RemoveSlots error (later, recheck, PR #1241 Security S4) | P2-2w c4d | queued |
 | CTRL-card-sock s3 | A right claim code whose phone left during the Argon2id derivation can claim again on the same boot before the card exists, so a dropped post never forces a reinstall (CTRL-card-sock s3; Security S-L1 on #1226) | CTRL-card-sock | queued (later, recheck; HW-10 K6; tier A; from #1226 Security S-L1) |
 | CTRL-card-sock l3 | Pin PR #1226's survivors: an owned box with no -vault-sock still starts (prepare's check order, D6), ReplaceCodes cleared by step 3, the middleware's voidCodes and its in-memory fallback; make TestAClaimForAGonePhoneIsNotTried fail rather than hang when the context checks go (CTRL-card-sock l3, PR #1226; recheck; may fold into #1224) | CTRL-card-sock | queued (later; recheck; tier A; from #1226) |
-| P2-2w c4b l1 | Setup's network list shows SSIDs that contain a format (Cf) character, such as a ZWJ emoji, without reopening the bidi spoof: e.g. allow ZWJ and ZWNJ but not the bidi controls (later; UX on PR #1233) | P2-2w c4b | queued (later; from #1233) |
-| P2-2w c4b l2 | Pin #1233's surviving mutant: the scan keeps each name's best strength, not the last one seen (a weaker duplicate after a stronger one) (later, recheck; Potency on PR #1233) | P2-2w c4b | queued (later, recheck; from #1233) |
 | P2-2w c4c l1 | Setup re-adopts a SIM swapped while setup runs (today the first ICCID is recorded once, TOFU) (later; from PR #1269) | P2-2w c4c | queued (later; from #1269) |
 | P2-2w c4c l3 | Pin #1269's surviving mutants: agentos-localui starting PairTexts (also on card hooks), agentosd main() wiring modemlink.NewSetup, agentos-modem starting with no OWNER_NUMBER, and the SetupLine guards (number clearing, okSince, queue failed on down, line check, localui's own E.164 and Ready checks) (later, recheck; Potency on PR #1269) | P2-2w c4c | queued (later; from #1269) |
 | P2-2w c4c l4 | Setup's send-failure text names the cause it has: when setup's own text cap refuses, say to wait, not "Check the SIM" (later; from PR #1269) | P2-2w c4c | queued (later; from #1269) |
@@ -189,8 +190,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | P2-2w c4f l2 | test_image's flag check reads each unit's flags against the subcommand it runs, not the union of all FlagSets (later, recheck; L3 L2 on PR #1302) | P2-2w c4f | queued (later, recheck; from #1302; tier A) |
 | P2-2w c4f l4 | Test finish_image.main's call to swap_violations, as test_main_refuses_a_disk_without_quotas does for the quota check (later; L3 L4 and Potency round 3 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
 | P2-2w c4f l6 | When agent machines are off because the disk has no project quotas, STATUS's agent line says a later box version adds it, not "restart me" (later, recheck; UX L1 on PR #1302) | P2-2w c4f | queued (later, recheck; from #1302; tier A) |
-| P2-2w c4f l7 | The CI boot test checks that each setup service is active after boot (c4f l7; #1302 builder later 3) | P2-2w c4f | queued (later; from #1302; tier A) |
-| P2-2w c4f l8 | Decide whether claim.SetupNetPath, which still lives under /var/lib/agentos, belongs elsewhere (c4f l8; #1302 builder later 4) | P2-2w c4f | queued (later; from #1302; tier A) |
 | ONB-9-codex-examples | Lead ONB-9's sample lines with Codex now that it is the default plan route (later; ONB-9, D-114; #1381 later 9) | — | queued (later; from #1381; tier B) |
 | P2-2w c4e4 u1 | P2-2w c4e4 u1: AI providers page follow-ups: a list refusal is not "locked", notify only on a change, store the private answer after the key, show the intro only when none is allowed, rename SetupProvider, drop the stale "wait" (later; CAP-9, REV-6, ONB-3; tier A; UX U-3/U-4/U-5, L3-2/L3-3 on #1367) | unsized | queued (later; UX U-3/U-4/U-5, L3-2/L3-3 on #1367) |
 | ONB-private-default-ui-later | ONB-private-default-ui-later: keep the owner's private answer on a malformed key, say so when only the answer failed to save, align the AI providers page copy with 'private content', stale display answers; recheck with Mark whether API keys also default to yes on private (later; CAP-9, REV-6, ONB-3; tier A; #1436 L4/S5) | unsized | queued (later; #1436 L4/S5) |
@@ -202,7 +201,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | SETUP-pairing-cause | Setup's "Pairing is not available yet" note names the one cause (down, unbound, swapped) from page_setup_line (later; CH-12; from #1592) | #1554, #1241 | queued (later; from #1592) |
 | CTRL-card-sock-refuse | CTRL-card-sock-refuse: setupOpen reads any agentosd refusal as setup closed, so a stray refusal leaves setup closed until reboot. Fix: close only on setup-closed and unknown-op, retry other codes. Security, L3, UX (later, recheck; #1601) | CTRL-card-sock-refuse | queued (later; recheck; from CTRL-card-sock s1 #1601) |
 | ONB-private-save-fail l3 | ONB-private-save-fail l3: after a seal whose finished record failed to save, the page's maybeFinish sees no connected provider and never calls finish again. Retry finish when the list answers the sealed-vault code. Serves ONB-3 (later; tier A; fails closed; from #1623) | — | queued (later; tier A; from ONB-private-save-fail l2 #1623) |
-| ONB-private-save-fail l3b | ONB-private-save-fail l3: after a seal whose finished record failed to save, the page sees no connected provider and never calls Finish, so setup stays open on the page; try Finish once when the list answers enrollment unavailable on an enrolled record. Serves ONB-3 (later, recheck; tier A; fails closed; from #1623) | — | queued (later, recheck; tier A; from ONB-private-save-fail l2 #1623) |
 | P2-notice-later | P2-2w-c4e4-s2-later: clamp or refuse notice.sock `after` > current seq on the same boot; give the Batch.Missed owner text a step; name the place in "sign in there and check it" (later; OP-9, CH-3, CAP-9; tier A; from the #2043 L3/Security/UX reviews, left by #2413) | — | queued (later; tier A; from the #2043 L3/Security/UX reviews) |
 | TN-mailreset | Graph data with the account plan: known-services recovery and cut-off fields, device reach and sensing, control fields, owner answers, STATUS lines, scoreboard and connect-time texts (CLK-10, DEV-13). | A21 passed; TN-graph (#2857); account plan (#3189) | queued (release; sub A, page sub B; tier A; after A21) |
 | TN-archive | Home archive: mail then files, sealed with two append-only BAK-1 targets, trim to the owner's window only after triple verification, sealed past the window (needs per-item content keys in the kernel first), an exit recipe without agentOS (BAK-2). | A21 passed; #2851, #2852, #2828, #3185, #3182, #2682 | queued (release; sub A; tier A; after A21) |
@@ -231,10 +229,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | W5-Dc-r17 | Forget reach into the owner hold (CAP-3): held texts carry no forget reference, so a forget does not reach a text held overnight and it is sent on release. Give `HeldText` a reference and let forget drop it (owner ASSUMPTIONS O25) (release, brief W5-Dc-r1 finding raised by the builder on #617; Security 6083602460 pt 5, lens 6083540407 pt 6) | W5-Dc-r1; Next build item B | queued (built in SIM-owner-hold, D-095) |
 | HW-3t | Supported-host text and test (HW-3, HW-7; brief to write) | — | building (C) |
 | WS-image | [Workstation image: the signed image installs on a dedicated machine and loads GPU drivers under Secure Boot](briefs/WS-image.md) | CTRL-uki, NET-seg, G1 | queued (after G1, D-104; HW-9, HW-11; tier A) |
-| S8-W1-tunnel-peer | S8-W1-tunnel-peer: restate the tunnel's SO_PEERCRED check against gVisor's shared host UID (later; L3 on PR #1315) | #1014 | queued |
 | S8-W1 l1 | S8-W1 l1: Pin #1419's surviving config, launch and wrapper mutants, and the G1, bwrap-missing, apply_patch, stub-path and WORK real-path notes (later; Potency/L3 on #1419) | S8-W1 (#1419) | queued (later; tier A; from #1419) |
 | TREE-refusal-visible | A guest refusal of a managed-tree answer is one console log line and the owner sees nothing. Fix: reword the line, then show a STATUS line when the guest's version lags. Serves CAP-5, OWN-14 (later, tier B; UX U-1 of #1449) | TREE-refusal-visible | queued (later; tier B; #1449 UX U-1) |
-| TREE-fold-tests | The bridge's fold read-back lacks tests for a refusal while a version is held, a read-back body with no version, removal of a file missing from the read-back tree, and no fold record per poll after apply. Serves CAP-5, ARC-2 (later, tier A; L3 T-1 of #1449) | TREE-fold-tests | queued (later; tier A; #1449 L3 T-1) |
 | IMG-fw-later | Install only the two MT7922 Wi-Fi firmware files instead of all of firmware-mediatek (saves about 35 MiB per image and OTA), and add tests for a '../' link and a wildcard 'install bt*' line in the radio and Bluetooth checks (later; tier A; #1450 L4, D1, D2) | P2-1 (#1450) | queued (later; tier A; #1450 L4, D1, D2) |
 | TREE-answer-bound l1 | TREE-answer-bound follow-ups: test that a managed_tree error answer carries no step note and is filtered (three surviving mutants), point the agent at the tree's context/ files, deduplicate the too-large refusal log lines per tree version, and fix the trace that names the wrong test. Serves ARC-6, CAP-5, LOOP-3 (later, tier A; PR #1500 review) | TREE-answer-bound l1 | queued (later; tier A; PR #1500 review Security L-1, P/UX/L3 L-1, P-1, U-1, T-1) |
 | IMG-initrd-bt-polish | IMG-initrd-bt follow-ups: pin the real zstd magic in a test, test zero namesize / architecture-only package difference / brcm .hcd.zst, add QCA, TI, ar3k, NXP and Marvell BT firmware to BT_PATTERNS, report an unreadable or empty initrd by path, and add a fix hint to the Bluetooth failure (later; tier A; PR #1509 review) | IMG-initrd-bt-polish | queued (later; tier A; PR #1509 review P/UX/L3 L1-L5) |
@@ -247,11 +243,10 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VM lock check | VM lock check: catch a by-ID call after a handle check, and the alias and method-value lock shapes, in TestMachineLockOnlyThroughLockLive (later; from #1575 L3 and Security) | #1575 | queued (later; from #1575 L3 and Security) |
 | VM-worker-recreate-rollback | Worker destroyed and recreated under the same name can no longer roll back to its earlier checkpoints (ownSnap rule); route back is an explicit adopt-snapshot step (later; from #1575 Potency P2) | #1575 | queued (later; from #1575 Potency P2) |
 | VM-create-unreserve-order | VM create's failure tail: release-then-unreserve order is unpinned; add a seam between the two steps that runs a same-ID create (later; from #1575 Potency P3) | #1575 | queued (later; from #1575 Potency P3) |
-| G1-e2e-tidy | G1-e2e-tidy: Test the image never stages box-e2e or image/e2e/*; make the run's XFAIL match the error (report.go:41-43), not only the step name; report where(page) on unexpected statuses. Later; tier C. | G1-e2e-tidy | queued (later; tier C; from G1-e2e #1688) |
+| G1-e2e-tidy | G1-e2e-tidy: Test the image never stages box-e2e or image/e2e/*; make the run's XFAIL match the error (report.go:41-43), not only the step name; report where(page) on unexpected statuses. Later; tier C. | G1-e2e-tidy | building (later; tier C; from G1-e2e #1688) |
 | S8-W1-later | S8-W1-later: Codex image hardening and wording (later; #1719 reviews) | #807 | queued |
 | TREE-sync-signal | TREE-sync-signal: an owner-facing signal when the guest-bridge tree sync keeps failing (a refused symlink included), and optionally fold clearWay's ancestor loop into refuseLinks. Serves CHG-6 (later; tier C; #1728 reviews) | TREE-sync-signal | queued (later; tier C; from TREE-clearway-symlink #1630, PR #1728) |
-| G1-e2e-later | G1-e2e-later: e2e driver failure lines name where setup stood (where(page)), ASSUMPTIONS E8 names all four journals claimDiag quotes (Security to confirm agentosd/egress logs), and image.yml's trigger paths stop drifting from g1_scope.txt (nightly run or drift test). Later; tier A. | G1-e2e-later | queued (later; tier A; from G1-e2e #1688, PR #1705 reviews) |
-| S8-LIVE-TIER | S8-LIVE-TIER: #1761 lets spikes/S8-live/run.sh run with no prompt, but spikes/ is tier C, so an edit to run.sh or fwd.py that drops fwd.py's 403 on model calls could spend credits unreviewed and unprompted. Make spikes/S8-live/ tier A in tools/risk_tier.py while the rule exists, and/or remove the rule when #809 closes. Release; tier A. | #1761, #1748, #809 | queued (release; tier A; from #1761 L3) |
+| G1-e2e-later | G1-e2e-later: e2e driver failure lines name where setup stood (where(page)), ASSUMPTIONS E8 names all four journals claimDiag quotes (Security to confirm agentosd/egress logs), and image.yml's trigger paths stop drifting from g1_scope.txt (nightly run or drift test). Later; tier A. | G1-e2e-later | building (later; tier A; from G1-e2e #1688, PR #1705 reviews) |
 | TREE-LINK-MSGS | TREE-LINK-MSGS: tree link refusal wording (unreadable xattrs, next steps, TMPFILES_STOCK vs BOX_LINKS), cache tmpfiles reads, pin /var/run rewrites. Serves DEV-2 (later; PR #1826 R1 UX 1-3, Pot 2, L3 4) | #1803 | queued (later; PR #1826 R1 UX 1-3, Pot 2, L3 4) |
 | BROKER-REVIEW-MINOR | BROKER-REVIEW-MINOR: confirmed low-risk findings from the 2026-10-15 external review. Eleven-item checklist; items 4 and 5 may become release. (queued; class later; recheck) | — | queued (queued; class later; recheck) |
 | S8-W1-tunnel-c-fu1 | S8-W1-tunnel-c-fu1: Codex forwarder has no Pdeathsig and no signal relay. (queued; class later; from PR #1850 review) | — | queued (queued; class later; from PR #1850 review) |
@@ -261,7 +256,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | G1-e2e-phonectl-fu1 | G1-e2e-phonectl-fu1: phone-control later notes: tier prefix, #1701 owner-text seam, lost-HELP test, PASS line, E7 seam. (queued; class later; from PR #1865 review) | — | queued (queued; class later; from PR #1865 review) |
 | G1-e2e-ai-fu1 | G1-e2e-ai-fu1: later notes from the PR #1867 reviews: id_token canary check, trailing-dot host, CI for agentos_e2e-tagged tests, stub port-strip test, step-7 wait test and wording nits. (queued; class later; from PR #1867 review) | — | queued (queued; class later; from PR #1867 review) |
 | S8-W1-tunnel-c-fu10 | S8-W1-tunnel-c-fu10: Later notes from the PR #1886 reviews: probe refusal text, per-run signals, per-pool cap, other limit families, P10 clause, #809 recheck. (queued; class later; from PR #1886 review) | — | queued (queued; class later; from PR #1886 review) |
-| S8-W1-box-fu1 | S8-W1-box-fu1: hostcheck checks that the box carries the Codex image (images/codex). (queued; class later; from PR #1897 review) | — | queued (queued; class later; from PR #1897 review) |
 | G1-1688-f1-fu2 | G1-1688-f1-fu2: lost-send test gaps: missedFrames cap, lostSendVia cap, counted gate and + in the NOTE word filter survive mutation; a forged MissedLog journal line can put digits in a NOTE (later; tier A; from PR #2345 review) | — | queued (later; tier A; from PR #2345 review) |
 | ETC-AGENTOS-MODE | ETC-AGENTOS-MODE: image/ASSUMPTIONS.md I6 says /etc/agentos is 0700, but agentosd (ensureDir in broker/cmd/agentosd/modemenv.go, since #2339) creates it 0755; align I6 and ME1 on one mode, 0700 likely sufficient as only PID 1 reads modem.env (later; tier A; from the §4a Security review of #2339) | — | queued (later; tier A; from the §4a Security review of #2339) |
 | IMG-5-2 | systemd-boot: a held key at boot can no longer open the menu and boot the previous slot's release (IMG-5 Security review, #800). | UPD-antirollback-anchor, HW-6 | queued (later; tier A) |
@@ -297,6 +291,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | VIS-ort-outputs | VIS-ort-outputs: zero ONNX Runtime's own copy of the run-allocated outputs (plate rows, YAMNet scores), found in the #3805 build | #3515 e3 (#3805) | queued (later; tier A; one session) |
 | DEVSLOT-root-guard-tails | DEVSLOT-root-guard-tails: root guard message and wording tails (DEV-1, UPD-10, D-154) | DEVSLOT-root-guard #3712 | queued(tier A; lane primary; later findings from #3814 combined 6491489388) |
 | CAM-clerk-e | CAM-clerk-e: agentosd relays the Cameras page's tier-4 steps, STOP/RESUME, the enforcer's listed nodes and on-request capture steps to agentos-camera (DEV-7, DEV-10, KRN-7) | CAM-clerk (d) (#3514); agentosd chain | queued (release; tier A; from #3514 part d) |
+| ENF-class-garage | ENF-class-garage: record a garage door's obstruction reversal and pre-close warning before it can be named close (NET-2) | #3748 | building (release; tier A; lane primary) |
 | DEV-homekit-b2b | DEV-homekit-b2b: agentosd relays the HomeKit page's tier-4 steps, STOP/RESUME and the enforcer's listed accessories to agentos-homekit (DEV-10, KRN-7) | #3891; #3866; agentosd chain | queued(tier A; lane primary; brief briefs/DEV-homekit.md) |
 | DEV-homekit-b2d | DEV-homekit-b2d: the kernel's DEV-4 table for standard device types (HomeKit Thermostat rows) and the admitted device write step to agentos-homekit (DEV-4, DEV-5, CH-10) | #3891; #3474; kernel slot (#3855) | queued(tier A; lane primary; brief briefs/DEV-homekit.md) |
 | UPD-b3-enf | Enforcer's first-boot destination list admits the shipped update mirror hosts (NET-2, UPD-3; brief to write) | UPD-b3 (a) (#889) | queued |
@@ -310,38 +305,49 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | ENF-i-risk | ENF-i-risk: risk line for holds on unknown-type devices and sirens? (NET-7) | #3667 | queued(tier A; lane primary; later, recheck) |
 | ENF-sni-ech-drop | ENF-sni-ech-drop: the enforcer drops core-segment connections whose server name it cannot read or its own lookup did not return for that address (PUB-1, NET-2) | #4124, #4111 | queued (release; tier A) |
 | DEV-homekit-b2c2 | DEV-homekit-b2c2: agentos-homekit's events to the kernel's device-report entry (DEV-8, CLK-1) | #3474; #4166 | queued(tier A; lane primary; brief briefs/DEV-homekit.md) |
-| ENF-cap-trip | ENF-cap-trip: byte counts as IP bytes, merged groups add, counts readable on the channel; a malformed or over-rate channel message trips (D-255; NET-2, KRN-12) | #4111 | building (release; tier A) |
 | SPEC-light-recovery | SPEC-light-recovery: should a disowned recovery count as a trip at the enforcer and light the bulb? (NET-4, KRN-12) | #4167 | queued (later) |
 | LOG-4-period-mark | LOG-4-period-mark: a keep period's erase records a high-water mark so a cursor reset cannot bring expired items back (LOG-4) | #4167 | queued (later) |
 | ENF-net-ra-off | ENF-net-ra-off: no RA or redirects on served interfaces; addresses match Setup.Nets | #4143 | queued(tier A; lane primary; brief briefs/ENF.md slice l) |
+| KEYS-route-fds | KEYS-route-fds: a keyed clerk's OpenFile= is its key line alone and its standard streams hold no socket; the kernel unit's other commands and environment are pinned (CLK-1, NET-2; #4264 Security later 3 and 5) | KEYS-route-by-cgroup (#4210) | queued (later; tier A) |
 | ENF-q-owner | ENF-q-owner: owner-set relock interval and usual hours in the signed policy (NET-6) | #3675 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-live-vmap | ENF-live-vmap: dispatch the live chain by interface if HW-4 shows its cost | #4238 | queued(later; recheck) |
-| ENF-k2 wire | ENF-k2 wire: 32-bit CI job for the frame-length test | #3906 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-light-f1 | ENF-light-f1: page and bulb driver use the trip light by name and lift it only on a full cut lift; (KRN-12) | #4165 | queued (release; tier A) |
 | ENF-d-sendline | ENF-d-sendline: a write deadline on the channel's alert send (NET-2 Texts and calls) | #3660 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-ct-bind-2 | ENF-ct-bind-2: related ICMP on a shared segment binds by the host's L2/L3 identity, not the interface alone | #4323 (ENF-ct-bind) | building(tier A; lane primary) |
 | ENF-s-f | ENF-s-f: parkedOnWriteLock matches only the write lock; ENF-k-8 wording | #4068 | queued(tier A; lane primary; brief briefs/ENF.md) |
-| KRN-cap-first-b | KRN-cap-first-b: the kernel checks every channel message against the shared format and rate before sending (D-255; NET-2, A18) | #4173 | queued (release; tier A) |
+| ENF-dns-tidy-3 | ENF-dns-tidy-3: wording; TestGenerateRefuses precision | #4143 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| KRN-cap-first-b | KRN-cap-first-b: the kernel checks every channel message against the shared format and rate before sending (D-255; NET-2, A18) | #4173 | building (release; tier A) |
 | KRN-cap-first-c | KRN-cap-first-c: the kernel's sends and edge fetches go through the byte-cap check, with counts read each summary interval and none while paused (D-255, D-260; NET-2, A18) | #4173 | queued (release; tier A) |
 | ENF-cap-trip-b | ENF-cap-trip-b: signed byte caps; the firewall counts per address and drops past each cap (D-248, D-255; NET-2, A18) | #4174 | queued (release; tier A) |
 | ENF-c-f1 | ENF-c-f1: ENF-c review follow-ups: recovery text before save, owner card kept on store failure, post-reset card text, separate miss counters, no light for enrolment | #4290 reviews | queued(tier A; lane primary) |
-| ENF-mdns-pin-compose | ENF-mdns-pin-compose: the pair link's document carries the device's announced mDNS names, and an unpinned pair says on the card that nothing will be discoverable | ENF-mdns-pin (#4144, #4397) | queued (release; tier A) |
+| CAM-decoder-later | CAM-decoder-later: the decoder unit's /run view, the clerk's stop bound, PrivatePIDs in CI (CLK-1, NET-2, RES-2) | CAM-decoder-uid (#4134, #4350) | queued (later; from #4350 reviews) |
+| ENF-mdns-pin-compose | ENF-mdns-pin-compose: the pair link's document carries the device's announced mDNS names, and an unpinned pair says on the card that nothing will be discoverable | ENF-mdns-pin (#4144, #4397) | building (release; tier A) |
 | REV-LOW-workers | REV-LOW-workers: workers and image findings (llama.cpp missing from vulncheck, Held over 64 KiB, no tail/tee in the OpenClaw image, snapshot compare after destroy) | 23-Low review (2026-11-01) | queued(release; tier A; brief to write) |
+| ENF-mdns-holds | ENF-mdns-holds: offer heard Owner/Household mDNS names as holds when a pair is signed (NET-3) | #4144 | queued(tier A; lane primary; brief briefs/ENF.md; class:later) |
 | ENF-page-csrf-later | ENF-page-csrf-later: screen-pair lifetime and replacement, constant-time pin | #4393 reviews | queued(later; lane primary) |
 | ENF-g-aplock-later-b | ENF-g-aplock-later-b: the reload's own exit 75, an access point without timeout, ENF-g-10 wording | #3662 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | ENF-log-bound | ENF-log-bound: enforcer refusal log lines are rate-bound per prefix and VLAN, counters stay exact | #4407 Potency | queued (release; tier A) |
-| IMG-disk-5 | IMG-disk-5: the Free runner disk test proves its sudo stand-in is the one called | #4435 Security | queued(tier A; lane primary) |
+| IMG-disk-3 | IMG-disk-3: runner disk on AWS-provisioned runners (recheck when an AWS notice appears) | #4416 L3 | queued(tier A; lane primary) |
+| IMG-disk-5 | IMG-disk-5: the Free runner disk test proves its sudo stand-in is the one called | #4435 Security | building(tier A; lane primary) |
 | ENF-g-aplock-hang | ENF-g-aplock-hang: a timed-out Sync can hang in NewSession past its Timeout (TestLateWriteOfTimedOutSyncRefused) | #4435 CI | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-e-related-2 | ENF-e-related-2: pin the related drop's high-half mark check with a behavioural test | #4407 reviews | queued(tier A; lane primary) |
 | ENF-set-ttl | ENF-set-ttl: allow-set answers expire with their TTL, without cutting busy connections | #4452 Potency | queued (release; tier A) |
 | IMG-reproduce-fix | IMG-reproduce-fix: the /usr file the next reproduce failure names builds the same twice. | — | queued (release; tier A; size S; from #4059; waits for a reproduce failure) |
 | ENF-k2-mnt-d | ENF-k2-mnt-d: radio stacks dump no core, and their directories are cleaned without following symlinks (NET-2) | #4369 | queued(tier A; lane primary; brief briefs/ENF.md) |
+| ENF-l-dns-step | ENF-l-dns-step: slice l restarts each listed dnsmasq in step with nft.Reload (NET-2 The core's list) | #4237 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | CTRL-usb4 | [M6 Ultra spike: USB4 networking at line rate](briefs/CTRL-usb4.md) | G1; Mark: hardware (M6 Ultra unit, a USB4 peer) | queued (later; G7, A17, D-104; HW-12; tier C; one sitting with the unit) |
-| IMG-usr-list-modes | IMG-usr-list-modes: the /usr list records setuid, setgid and sticky bits and non-root owners as the partition holds them. | — | building (release; tier A; size S; from #4455 Security) |
 | IMG-usr-list-polish | IMG-usr-list-polish: the /usr diff prints content differences first, and image/README names the list. | — | queued (later; tier A; size XS; from #4455 lenses) |
 | ENF-k2-mnt-e | ENF-k2-mnt-e: a test holds Start's release after its namespace open (NET-2) | #4369 | queued(tier A; lane primary; brief briefs/ENF.md) |
 | SPEC-ch9-csrf-reuse | SPEC-ch9-csrf-reuse: CH-9's anti-forgery clause allows a same-site load to keep a valid value the page issued | #4460 review | queued(release; tier C; lane primary) |
 | ENF-page-csrf-reuse-later | ENF-page-csrf-reuse-later: ASSUMPTIONS wording, label-separation test, cross-site mint availability | #4460 reviews | queued(later; tier A; lane primary) |
 | ENF-shared-src | ENF-shared-src: established packets on a shared segment bind to the connection's host | #4324 (ENF-ct-bind-2) | queued(tier A; lane primary) |
+| ENF-mdns-heard-pins | ENF-mdns-heard-pins: the relay hears each device's own mDNS names and the page pins them on a pair link (NET-3, D-266) | #4401 | queued (release; tier A) |
+| KRN-cap-first-b-fu1 | KRN-cap-first-b-fu1: the enforcer's channel rates read a clock that never pauses or steps back (D-255; NET-2, A18) | #4373 | queued (release; tier A) |
+| KRN-cap-first-b-fu2 | KRN-cap-first-b-fu2: radio calls under the channel lock are bounded inside the kernel check's MaxLate (D-255; NET-2, A18) | #4373 | queued (release; tier A) |
+| KRN-cap-first-b-fu3 | KRN-cap-first-b-fu3: the channel simulator covers concurrent connection swaps and lost requests counted before the next hello (D-255; NET-2, A18) | #4373 | queued (release; tier A) |
+| KRN-cap-first-b-fu4 | KRN-cap-first-b-fu4: tighten the channel check's simulator floor, ASSUMPTIONS wording and the exported kind list (D-255; NET-2, A18) | #4373 | queued (release; tier A) |
+| DEVSLOT-maxwrites-fu | DEVSLOT-maxwrites-fu: subscription write rate, per-shape review note, CapWrites wording and a host failed-write test (DEV-4, CLK-3) | #3506 | queued (release; tier A) |
+| ENF-k-reap-c | ENF-k-reap-c: radio reaper edges (typed-nil Proc, WaitDelay, PID 1 duties, netns fd under a join) (NET-2) | #4311 | queued(tier A; lane primary; brief briefs/ENF.md) |
 
 ## Model routes and the Codex lane
 
@@ -363,7 +369,7 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 
 | ID | Package | Needs | State |
 |---|---|---|---|
-| MAIN-PROT-3 | Main-side guard on `bot/trace` and `bot/metrics` PRs (Invariant: only reviewed or bot-generated changes reach main, D-091): a `bot/**` ruleset restricting updates to the Actions integration, or a required check defined on main (`pull_request_target`, no head checkout) that the diff is only the one generated file and every commit is the bot's, not satisfiable by a dispatched same-named run (release, tier A; L3 and Security 4a on #713 f1, [record](reviews/security/2026-10-10-pr713.md)) | MAIN-PROT-2 | queued (A) |
+| MAIN-PROT-3 | Main-side guard on `bot/trace` and `bot/metrics` PRs (Invariant: only reviewed or bot-generated changes reach main, D-091): a `bot/**` ruleset restricting updates to the Actions integration, or a required check defined on main (`pull_request_target`, no head checkout) that the diff is only the one generated file and every commit is the bot's, not satisfiable by a dispatched same-named run (release, tier A; L3 and Security 4a on #713 f1, [record](reviews/security/2026-10-10-pr713.md)) | MAIN-PROT-2 | building (A) |
 | S1 | [Screenless USB4-SSD boot on ≥3 unmodified PCs](briefs/S1.md) | G1; Mark: hardware + hands | queued (later; G7, A17, D-104: runs when more controller models solve a measured limitation; test kit ready) |
 | P2-4-hw | [Argon2id tuned to about 1 s on the N95](briefs/P2-4-hw.md) | Mark: hardware | queued |
 | P2-8b | [Remove a trusted PC now and re-encrypt later](briefs/P2-8b.md) | W6 | queued |
@@ -381,12 +387,8 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | HELPER-a | [Adding a helper: tier-4 'add helper' action, enrolment and the plain-words page](briefs/HELPER-a.md) | ROUTE-1, NET-seg, G1 | queued (after G1, D-104; ONB-10, HW-11; tier A) |
 | HELPER-b | [Helper app for Windows: background service, Wake-on-LAN start without a login, GPU pause when a game starts](briefs/HELPER-b.md) | HELPER-a, G1 | queued (after G1, D-104; HW-11, A1; tier B) |
 | HELPER-c | [Helper app for macOS: same service and pause rules on a Mac](briefs/HELPER-c.md) | HELPER-b, G1 | queued (after G1, D-104; HW-11, HW-7; tier B) |
-| DIGEST-skew-daygen | DIGEST-skew-daygen: digest skew reset fixes LastDay but not DayGen (later; external finding) | unsized | queued (later; external finding) |
-| VM-snap-durable l1 | VM-snap-durable l1: migrate cleanroom store publication to the shared durable helper (later; Mark-approved simplification) | unsized | queued (later; Mark-approved simplification) |
-| Flaky | sockprobe `TestTheGuestSocketPassesTheProbe` fails under CI load: probe re-pings may be refused when `MaxConns: 4` slots are not yet released (flaky; seen on PR #1245; cause not verified) | none | queued (later; tier B; from #1245) |
 | P2-2w c4f l3 | egress-setup logs the real cause when agentos-egress init fails, not "not claimed" for every failure (later; L3 L3 and UX L3 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
 | P2-2w c4f l5 | Pin PrivateNetwork absent on agentos-egress.service, since the vault process is the only path to the model providers (later; L3 L5 and Potency M13 on PR #1302) | P2-2w c4f | queued (later; from #1302; tier A) |
-| NETGUARD-watchevery-wait | NETGUARD-watchevery-wait: WatchEvery waits for the Watch it starts, so TestWatchEveryReplacesLearnedNetwork leaves no Refresh reading `refreshGapHook` (combined L1 on PR #1335) | NETGUARD-watch-race | queued (later; tier B; from #1335) |
 | NETGUARD-watch-events-close | NETGUARD-watch-events-close: when `events` closes before ctx, Watch stops and waits for its full-read goroutine instead of leaving it running until ctx ends (combined L2 on PR #1335) | NETGUARD-watch-race | queued (later; tier B; from #1335) |
 | MODEM-notice-slots | Recovery notices leak l.out slots (modemlink.go:179,557-558); only sent and dropLocked clear them. Add a deadline on waiterless items. Failure path: after about 64 incidents outbound is full. Serves modem reliability (later, tier B; external review 12 item 10) | MODEM-notice-slots | queued (later; tier B; external review 12, item 10) |
 | ROUTE-openai-early-error l1 | ROUTE-openai-early-error l1: Sanitise OpenAI's late stream error chunk, test the null-error passthrough, and name the early error chunk in ASSUMPTIONS R6 (later; from #1448 combined review) | ROUTE-openai-early-error (#1448) | queued (later; tier B; from #1448) |
@@ -421,8 +423,6 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | CLK-3-f6 later | Browser clerk: a reason suffix on unapproved, and ASSUMPTIONS A2 as a list (from the #2693 reviews). | #2693; sub B's tap | queued (later) |
 | KRN-5 tasks | KRN-5 Tasks and the CLK-3 per-task approval: seven wording points (from the #2691 and #2696 reviews). | #2691, #2696 | queued (later, recheck) |
 | CLK-3-f5e | Browser secret-screen measure per screen; remembered task sites across a restart (CLK-3, VRB-1) | #2730 | queued(tier A; lane primary) |
-| KRN-2cap-doc | KRN-2cap-doc: name the trusted-core budget in SPEC KRN-2 and the two new gate files in OPERATING §7 (found on KRN-2cap). | KRN-2 | queued (later) |
-| KRN-2 split doc | KRN-2 split doc: LANES.md's owner seam names `run.Kernel.With` in broker/clerk/run; it is now `kernelproc.Kernel.With` (found on KRN-2 split). | KRN-2 | queued (later) |
 | TN-graph-brake | TN-graph `bounded` accepts a held brake only when turning it off is itself delayed or the witness watches the brake (KRN-11; #3193 Security 4, Potency 2). | TN-graph (#2857) | queued (later; tier A) |
 | SPEC-phone-clerk | SPEC-phone-clerk: §17 keeps excluding iOS-only apps and adds an Android phone clerk as a later item (L1 spec diff; later) | CLK-phone | queued(tier C; lane primary; later; Mark 2026-10-26) |
 | EDGE-link-core-c2c later findings | EDGE-link-core-c2c later findings: a .link allowlist in the tree checks, the edge image's own link naming and address, ARP on the link, a stale link-set element, a long comment (later findings from the #3834 reviews). | EDGE-link-core-c2c #3459 | queued (later; tier A; one session) |
@@ -450,20 +450,27 @@ The board follows the capability-kernel migration (D-139, [PLAN.md](PLAN.md) §3
 | REV-CHK-links-e2e-fifo | REV-CHK-links-e2e-fifo: the e2e harness's no-follow reads refuse a FIFO instead of blocking | #4194 | queued |
 | REV-CHK-links-update-l2 | REV-CHK-links-update-l2: safeDir test separates link and write refusals; non-root owner case; release verify temp dir | #4199 | queued |
 | REV-CHK-save-clerks-f1 | Caller-level stopped-save tests for the camera's seal (running store) and the mail clerk's seen and senders callers (from the #4218 reviews). | #4191 | queued (release) |
-| REV-CHK-lintload | REV-CHK-lintload: one type-checked loader for broker's source lints; crashtest lint matches seams by object | #4240, #4268 | building |
 | ENF-c-reset-text | ENF-c-reset-text: a factory reset by the case code texts the owner | #4290 | queued |
 | ENF-k-reap | ENF-k-reap: a replaced radio stack's process is gone before its new link attaches | #4309 | building |
-| REV-CHK-links-mount | REV-CHK-links-mount: the unit scan refuses a .mount unit whose type or options run a mount helper | privfile lint package build | queued(tier A; kernel lane) |
-| REV-CHK-links-barename | REV-CHK-links-barename: the unit scan reads a bare-name Exec program | #4381 Security review | queued(tier A; kernel lane) |
+| REV-CHK-links-mount | REV-CHK-links-mount: the unit scan refuses a .mount unit whose type or options run a mount helper | privfile lint package build | building(tier A; kernel lane) |
+| REV-CHK-links-barename | REV-CHK-links-barename: the unit scan reads a bare-name Exec program | #4381 Security review | building(tier A; kernel lane) |
 | REV-LOW-recall | REV-LOW-recall: legacy recall rollback findings (partial listing rolls back, notice understates lost work) | 23-Low review (2026-11-01); drop if #3426 deletes recallheld.go first | queued(later; tier A; brief to write) |
 | REV-CHK-save-kernel-f3 | REV-CHK-save-kernel-f3: a restore holds a lock over its staging sweep, the stale-log case and the new error branches are tested | #4395 reviews | building(tier A; kernel lane) |
 | REV-CHK-save-kernel-f4 | REV-CHK-save-kernel-f4: unlogged-item wording and name-check test | #4395 L3 | building(tier A; kernel lane) |
-| REV-CHK-links-params | REV-CHK-links-params: modprobe options and tmpfiles modes cannot hand a root-run program to another uid | #4381 Potency review | queued(tier A; kernel lane) |
+| REV-CHK-links-params | REV-CHK-links-params: modprobe options and tmpfiles modes cannot hand a root-run program to another uid | #4381 Potency review | building(tier A; kernel lane) |
 | REV-CHK-lintload-arm64 | REV-CHK-lintload-arm64: core's write-path lint reads linux/arm64-only files | #4443 | queued |
 | REV-CHK-lintload-unreadable | REV-CHK-lintload-unreadable: core's unreadable list gets a synthetic case | #4443 | queued |
 | REV-CHK-lintload-loaderr | REV-CHK-lintload-loaderr: a test reaches Load's type-check error return | #4443 | queued |
 | S2-CONFIRM-doc | S2-CONFIRM-doc: say the S2 kit now takes the readings (one stale paragraph in broker/modem/at/S2-CONFIRM.md). | #4468 | queued (later; tier A; ride with the next broker/modem/at change) |
+| TEST-flake-boot-report-kernel | TEST-flake-boot-report-kernel: the boot report reads the keeper kernel's state before its start job settles | - | building (release; tier A) |
 | UPD-5r-b7 | requalification driver's security evaluator: EVL-3 measures inside the release (brief briefs/UPD-5r-b.md) | UPD-5r-b2 (#4044), UPD-5r-b3 (#4045) | queued (A; lifts the stable ship gate with b3-b6) |
+| GUEST-bridge-tree-dead | GUEST-bridge-tree-dead: the guest bridge still polls the removed managed_tree tool | - | queued (release; tier A) |
+| RES-5-readerwire-maxconns | RES-5-readerwire-maxconns: readerwire serves at most 8 calls at once, a fixed cap with no recorded basis | - | queued (release; tier A) |
+| REV-CHK-links-path | REV-CHK-links-path: a bare name a wrapper or shell resolves through PATH joins the root side | #4390 package build | queued(tier A; kernel lane) |
+| VULN-debian-gcc14-r2 | VULN-debian-gcc14-r2: accept (or upgrade past) DEBIAN-CVE-2026-114690, -114691 and -115455 in gcc-14 14.2.0-19 | #2919 | building (release; tier A) |
+| REV-CHK-links-mountown | REV-CHK-links-mountown: no tmpfs, bind, move or loop mount hands a root tree to another uid | #4494 Security delta review | queued(tier A; kernel lane) |
+| TEST-flake-snapshot-503 | TEST-flake-snapshot-503: the image build dies on one 503 from the snapshot mirror; retry the pinned fetch | - | queued (release; tier A) |
+| ENF-k-reap-b | ENF-k-reap-b: the concurrent Wait/Stop test fails its mutant every run; reap tests bounded (NET-6) | #4311 | queued(tier A; lane primary; brief briefs/ENF.md) |
 
 <!-- board: work-item issues that cannot render, listed by tools/board.py render --repo -->
 
@@ -473,15 +480,14 @@ These open work-item issues are left off the board until their issue is fixed; e
 
 ```text
 issue #3059: no section 'Identity, onboarding and setup (SPEC §12.1)' in BOARD.md
-issue #3222: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
+issue #3222: title 'KRN-unenroll-signed follow-ups: show the owner what a hardware-key tap signs, and a recovery-key cut-off path' does not start with '<ID>: '
 issue #3227: body has no board-row block
 issue #3313: body has no board-row block
 issue #3325: body has no board-row block
 issue #3741: body has no board-row block
 issue #3742: body has no board-row block
 issue #3771: title 'INFER-llama follow-ups: probe timeout, leftover socket dir, setsid grandchild, adapter-level checks, wording' does not start with '<ID>: '
-issue #3780: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #3872: body has no board-row block
+issue #3780: body has no board-row block
 issue #3883: body has no board-row block
 issue #4002: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4009: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
@@ -493,21 +499,12 @@ issue #4020: needs exactly one state label of queued, building, in review, merge
 issue #4021: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4023: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4040: body has no board-row block
-issue #4284: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4306: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4338: body has no board-row block
 issue #4339: body has no board-row block
-issue #4364: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4382: no section 'Tooling and CI' in BOARD.md
-issue #4392: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4411: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4422: no section 'Tooling and CI' in BOARD.md
-issue #4433: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4444: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 issue #4450: no section 'Tooling and CI' in BOARD.md
 issue #4461: no section 'Tooling and CI' in BOARD.md
-issue #4463: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4464: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4472: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
-issue #4474: no section 'Tooling and CI' in BOARD.md
+issue #4517: needs exactly one state label of queued, building, in review, merged, escalated, dropped, has []
 ```
