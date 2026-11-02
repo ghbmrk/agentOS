@@ -536,3 +536,34 @@ func TestFileGateWritesOnlyWhereThisNamespaceSays(t *testing.T) {
 		t.Errorf("a write in this namespace: %v", err)
 	}
 }
+
+// REQ: HW-10, ONB-3. fdPath gives a path only when this namespace's
+// lookup of it reaches the same file (#4713), which an unprivileged run
+// can check too: a file whose name is gone (the /proc text then reads
+// "... (deleted)") and a descriptor that is not open each give errWrite,
+// never the text.
+func TestFdPathNamesOnlyTheFileItself(t *testing.T) {
+	mine := t.TempDir()
+	writeHere(t, mine)
+	p := filepath.Join(mine, "f")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(p, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	if real, err := fdPath(fd); err != nil || filepath.Base(real) != "f" {
+		t.Errorf("fdPath(a named file) = %q, %v", real, err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if real, err := fdPath(fd); !errors.Is(err, errWrite) {
+		t.Errorf("fdPath(a file whose name is gone) = %q, %v, want errWrite", real, err)
+	}
+	if real, err := fdPath(-1); !errors.Is(err, errWrite) {
+		t.Errorf("fdPath(no descriptor) = %q, %v, want errWrite", real, err)
+	}
+}
