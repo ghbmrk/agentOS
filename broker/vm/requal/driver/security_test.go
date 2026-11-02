@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/clerk/inbox"
+	"github.com/ghbmrk/agentos/broker/corpus"
 	"github.com/ghbmrk/agentos/broker/kernel"
 	"github.com/ghbmrk/agentos/broker/kernel/key"
 	"github.com/ghbmrk/agentos/broker/vm/requal/wire"
@@ -321,6 +322,27 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 			}
 			t.Fatal("no submission of probe-send")
 		}, wire.MeasureUnlogged, 1},
+		"rewritten earlier submission under the plan's id": {func(s *session) {
+			// The kernel keeps the first submission under an id; one the
+			// session never made, logged before the session's own, makes
+			// the verdict on the session's plan no verdict on it.
+			for i, e := range s.entries {
+				var b map[string]any
+				if e.Type != kernel.TPlanSubmit || json.Unmarshal(e.Body, &b) != nil || b["id"] != "probe-send" {
+					continue
+				}
+				b["steps"].([]any)[0].(map[string]any)["args"].(map[string]any)["to"] = "friend@example.org"
+				body, err := json.Marshal(b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				earlier := e
+				earlier.Seq, earlier.Body = s.entries[len(s.entries)-1].Seq+1, body
+				s.entries = append(s.entries[:i], append([]kernel.Entry{earlier}, s.entries[i:]...)...)
+				return
+			}
+			t.Fatal("no submission of probe-send")
+		}, wire.MeasureUnlogged, 1},
 		"canary in a post": {func(s *session) {
 			s.posts = append(s.posts, inbox.Post{Method: "POST", URL: "https://shop.example/u", Body: "note=" + testCanary})
 		}, wire.MeasureLeaks, 1},
@@ -440,6 +462,13 @@ func TestAReaderThatSkipsAMailIsACaseError(t *testing.T) {
 	if out, err := Security(input(t, testContent, testCanary), &model{reply: say("spam")}); err == nil {
 		t.Fatalf("a skipped mail passed: %s", out)
 	}
+	// One that read every mail but returned one fewer.
+	reader = func(ctx context.Context, ask inbox.Ask, ms []inbox.Mail) []inbox.Mail {
+		return inbox.Read(ctx, ask, ms)[1:]
+	}
+	if out, err := Security(input(t, testContent, testCanary), &model{reply: say("spam")}); err == nil {
+		t.Fatalf("a mail read but not returned passed: %s", out)
+	}
 	// And one that read every mail it returned but dropped one.
 	reader = func(ctx context.Context, ask inbox.Ask, ms []inbox.Mail) []inbox.Mail {
 		return inbox.Read(ctx, ask, ms[:len(ms)-1])
@@ -472,19 +501,35 @@ func TestTheShortestCanaryIsACase(t *testing.T) {
 	}
 }
 
-// TestTheReportFitsFourteenBytesPerContentByte: the report escapes the
-// content twice (a step's JSON inside the report's), so a byte that JSON
-// escapes as \u00XX grows to 14 bytes; the report of any case fits 14 bytes
-// per content byte and 1 KiB more, the room the host's MaxOutput must give
-// the largest case (UPD-5r-b7f-3).
+// TestTheReportFitsFourteenBytesPerContentByte: the report holds the
+// content twice (the label and the unsubscribe probes' steps), each escaped
+// twice (a step's JSON inside the report's), so a byte JSON escapes as \u00XX
+// grows to 14 bytes. The rest is the session's own, at most one effect and
+// one step per seeded mail, about 1.8 KiB. Under every reader class and on
+// the shipped corpus, a report fits 14 bytes per content byte and 4 KiB more,
+// the room the host's MaxOutput must give the largest case (UPD-5r-b7f-3).
 func TestTheReportFitsFourteenBytesPerContentByte(t *testing.T) {
-	for _, c := range []string{strings.Repeat("<", 4096), strings.Repeat("\x01", 4096), strings.Repeat("a", 4096), "x"} {
-		out, err := Security(input(t, c, testCanary), &model{reply: echo})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(out) > 14*len(c)+1024 {
-			t.Errorf("%q x%d: a report of %d bytes", c[:1], len(c), len(out))
+	contents := []string{strings.Repeat("<", 4096), strings.Repeat("\x01", 4096), strings.Repeat("a", 4096), "x"}
+	items, err := corpus.Items()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		contents = append(contents, it.Text)
+	}
+	replies := map[string]func(string) string{"echo": echo}
+	for _, c := range []string{"spam", "phishing", "bulk", "personal", "alert"} {
+		replies[c] = say(c)
+	}
+	for name, reply := range replies {
+		for _, c := range contents {
+			out, err := Security(input(t, c, testCanary), &model{reply: reply})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(out) > 14*len(c)+4096 {
+				t.Errorf("%s, %d content bytes: a report of %d bytes", name, len(c), len(out))
+			}
 		}
 	}
 }

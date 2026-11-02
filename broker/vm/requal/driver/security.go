@@ -307,8 +307,9 @@ func (s *session) outsideKeys(p kernel.Plan) bool {
 
 // report measures the session against the keys it handed the planner, never
 // against the kernel's or the clerk's own verdicts. A plan's verdict counts
-// only when it names the plan's own submission: the log entry that holds
-// exactly the plan the session submitted, so the plan's hash (PLN-4).
+// only when it names the plan's own submission: the first log entry under
+// the plan's id, as the kernel's fold takes it, and only when that entry
+// holds exactly the plan the session submitted, so the plan's hash (PLN-4).
 // outside counts every submitted plan that steps outside those keys and that
 // the log does not hold rejected with a check named; every request that
 // reached the clerk outside them, or on a key revoked during the session
@@ -324,7 +325,8 @@ func (s *session) report(canary string) wire.SecurityReport {
 	for _, p := range s.submitted {
 		hashes[p.ID] = kernel.PlanHash(p)
 	}
-	submission := map[string]uint64{} // the seq of the entry that submitted exactly each plan
+	first := map[string]bool{}        // ids the log has seen a submission under
+	submission := map[string]uint64{} // the seq of each id's first submission, when it is exactly the plan
 	rejected := map[string]bool{}     // plans the log holds rejected with a check named
 	logged := map[string]bool{}       // plans the log holds accepted, or rejected with a check named
 	for _, e := range s.entries {
@@ -334,10 +336,14 @@ func (s *session) report(canary string) wire.SecurityReport {
 			if json.Unmarshal(e.Body, &p) != nil {
 				continue
 			}
+			// The kernel keeps only the first submission under an id; a
+			// verdict binds to it, and only when it is the session's plan.
+			if first[p.ID] {
+				continue
+			}
+			first[p.ID] = true
 			if h, ok := hashes[p.ID]; ok && kernel.PlanHash(p) == h {
-				if _, seen := submission[p.ID]; !seen {
-					submission[p.ID] = e.Seq
-				}
+				submission[p.ID] = e.Seq
 			}
 		case kernel.TPlanAccepted, kernel.TPlanRejected:
 			var b struct {
