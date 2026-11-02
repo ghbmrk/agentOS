@@ -4,8 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
+	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +17,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
@@ -446,88 +452,49 @@ var journalReaders = map[string][]string{
 }
 
 // runners are the package's ways to run a system tool. Each takes the
-// tool's name first; run and output pass their caller's name on to
-// command, so only they may give it a name that is not a literal.
+// tool's name first; run and output pass their own name and args
+// parameters on to command.
 var runners = map[string]bool{"command": true, "run": true, "output": true}
 
-// spawners start a process other than through a runner; command alone
-// calls childproc.Command.
+// spawners start a process other than through a runner, keyed by import
+// path and name, so an alias or dot import of the package is the same
+// use; command alone calls childproc.Command.
 var spawners = map[string]bool{
-	"childproc.Command": true, "os.StartProcess": true,
-	"syscall.Exec": true, "syscall.ForkExec": true, "syscall.StartProcess": true,
-	"unix.Exec": true,
+	"github.com/ghbmrk/agentos/broker/childproc.Command": true,
+	"os.StartProcess": true,
 }
+
+// sysAllowed are the only functions of syscall and x/sys/unix the driver
+// may use, those it uses today: either package can start a process
+// (Exec, ForkExec, a raw execve), and a list of what they add would go
+// stale, so every other function of theirs is refused.
+var sysAllowed = map[string]bool{
+	"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Close": true, "golang.org/x/sys/unix.Setns": true,
+	"golang.org/x/sys/unix.IoctlSetPointerInt": true, "golang.org/x/sys/unix.IoctlGetUint32": true,
+}
+
+// barred are imports no file of the driver takes: os/exec and
+// net/http/cgi start a process outside command, and unsafe, plugin and
+// cgo reach code the source test cannot read.
+var barred = map[string]bool{"os/exec": true, "net/http/cgi": true, "unsafe": true, "plugin": true, "C": true}
 
 // REQ: HW-10, ONB-3. The console is a public CI log, so no diag reads a
 // journal but through the readers ASSUMPTIONS E8 names (#4517 item 3):
-// journalctl appears only in readJournal, and each reader is called only
-// by the functions E8 names for it. A tool runs only through command, run
-// or output, under a literal name, and systemctl only with literal
-// arguments, never status, which prints the unit's journal (#4544 item
-// 2). It catches a new diag that runs journalctl itself, under a computed
-// name or as systemctl status, or takes agentosd's whole journal, and
-// quotes it.
+// journalctl is named only in readJournal, and each reader is called
+// only by the functions E8 names for it. A tool runs only through a
+// direct call of command, run or output, and only the tools E8 allows,
+// under constant names and arguments: ip link, addr or netns add, and
+// systemctl show, restart or daemon-reload; journalctl only in
+// readJournal (#4544 item 2, #4571). The test type-checks the driver, so
+// it matches runners, readers and spawners by what they are, not by
+// spelling: a runner taken as a value, an aliased or dot-imported
+// spawner, and a wrapper tool such as sh or env each fail it, and so does
+// systemctl status, which prints the unit's journal.
 func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
-	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	uses := map[string][]string{} // reader or "journalctl" -> where it appears
-	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, imp := range f.Imports {
-			if p := strings.Trim(imp.Path.Value, `"`); p == "os/exec" {
-				t.Errorf("%s imports os/exec: a tool runs only through command", name)
-			}
-		}
-		for _, decl := range f.Decls {
-			in := declName(decl)
-			ast.Inspect(decl, func(n ast.Node) bool {
-				switch n := n.(type) {
-				case *ast.CallExpr:
-					checkRunnerCall(t, fset, in, n)
-				case *ast.BasicLit:
-					if n.Kind == token.STRING && strings.Contains(n.Value, "journalctl") {
-						uses["journalctl"] = append(uses["journalctl"], in)
-					}
-				case *ast.Ident:
-					// readJournal is a function, used by its bare name.
-					if n.Name == "readJournal" && !isDeclName(decl, n) {
-						uses[n.Name] = append(uses[n.Name], in)
-					}
-				case *ast.SelectorExpr:
-					// journal is the driver's method; a parameter or
-					// variable of that name is not a use.
-					if n.Sel.Name == "journal" {
-						uses["journal"] = append(uses["journal"], in)
-					}
-					// command alone starts a child process.
-					if x, ok := n.X.(*ast.Ident); ok {
-						sel := x.Name + "." + n.Sel.Name
-						if spawners[sel] && (sel != "childproc.Command" || in != "command") {
-							t.Errorf("%s: %s starts a process through %s, not command", fset.Position(n.Pos()), in, sel)
-						}
-					}
-				}
-				return true
-			})
-		}
-	}
-	if got := uses["journalctl"]; !slices.Equal(got, []string{"readJournal"}) {
-		t.Errorf("journalctl appears in %v, want readJournal alone", got)
-	}
-	for reader, callers := range journalReaders {
-		for _, in := range uses[reader] {
-			if !slices.Contains(callers, in) {
-				t.Errorf("%s reads through %s, which ASSUMPTIONS E8 does not name it for (callers %v)", in, reader, callers)
-			}
+	for _, tags := range [][]string{nil, {"agentos_e2e"}} {
+		fset, files, imp := driverSources(t, tags)
+		for _, p := range sourceProblems(fset, files, imp) {
+			t.Errorf("tags %v: %s", tags, p)
 		}
 	}
 	e8 := assumptionRow(t, "E8")
@@ -538,70 +505,373 @@ func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
 			}
 		}
 	}
+	for _, tool := range []string{"`ip`", "`systemctl`", "`journalctl`", "`show`", "`restart`", "`daemon-reload`"} {
+		if !strings.Contains(e8, tool) {
+			t.Errorf("ASSUMPTIONS E8 does not name the allowed tool word %s", tool)
+		}
+	}
 }
 
-// checkRunnerCall refuses a call of a runner, in the declaration named
-// in, whose tool name is not a string literal (outside run and output,
-// which pass their own name parameter on), or that runs systemctl with an
-// argument that is not a literal or is status. A call with no arguments
-// is not a runner's: each takes the name first (report.step's run is a
-// parameter).
-func checkRunnerCall(t *testing.T, fset *token.FileSet, in string, call *ast.CallExpr) {
+// REQ: HW-10, ONB-3. Each shape that #4547's reviews and #4571 name, and
+// the ones #4544 closed, added to the driver as one more file, fails the
+// source test with its own reason; the driver as it stands has none.
+func TestSourceTestRefusesEachBypass(t *testing.T) {
+	fset, files, imp := driverSources(t, nil)
+	const cp = `"github.com/ghbmrk/agentos/broker/childproc"`
+	for _, c := range []struct{ name, src, want string }{
+		{"runner as a value", `func zz() { f := output; f("systemctl", "status", "agentosd.service") }`, "uses output other than as a direct call"},
+		{"runner in a package var", `var zz = run`, "uses run other than as a direct call"},
+		{"aliased spawner", `import cp ` + cp + "\n" + `func zz() { cp.Command(nil, childEnv, cp.Options{}, "systemctl", "status") }`, "starts a process through github.com/ghbmrk/agentos/broker/childproc.Command"},
+		{"dot-imported spawner", `import . ` + cp + "\n" + `func zz() { Command(nil, childEnv, Options{}, "id") }`, "starts a process through github.com/ghbmrk/agentos/broker/childproc.Command"},
+		{"aliased syscall", `import sc "syscall"` + "\n" + `func zz() { sc.Exec("/bin/sh", nil, nil) }`, "uses syscall.Exec, which the driver does not need"},
+		{"spawner as a value", `import "os"` + "\n" + `var zz = os.StartProcess`, "starts a process through os.StartProcess"},
+		{"os/exec alias", `import x "os/exec"` + "\n" + `var zz = x.Command`, "imports os/exec"},
+		{"unsafe", `import _ "unsafe"`, "imports unsafe"},
+		{"sh wrapper", `func zz() { output("sh", "-c", "systemctl status agentosd.service") }`, `runs "sh", which ASSUMPTIONS E8 does not allow`},
+		{"env wrapper", `func zz() { output("env", "systemctl", "status", "agentosd.service") }`, `runs "env", which ASSUMPTIONS E8 does not allow`},
+		{"absolute path", `func zz() { output("/usr/bin/systemctl", "show") }`, `runs "/usr/bin/systemctl"`},
+		{"systemctl status", `func zz() { output("systemctl", "status", "-n", "50", "agentosd.service") }`, "runs systemctl status"},
+		{"computed verb", `func zz() { output("systemctl", "sta"+"tus", "agentosd.service") }`, "runs systemctl status"},
+		{"verb after an option", `func zz() { output("systemctl", "-p", "x", "status") }`, "runs systemctl -p"},
+		{"variable systemctl argument", `func zz(v string) { output("systemctl", "show", v) }`, "runs systemctl with an argument that is not a constant"},
+		{"spread systemctl arguments", `func zz() { a := []string{"status"}; run("systemctl", a...) }`, "runs systemctl with an argument that is not a constant"},
+		{"variable tool name", `func zz(n string) { run(n, "status") }`, "with a tool name that is not a constant"},
+		{"computed journalctl", `func zz() { output("journal"+"ctl", "-u", "agentosd.service") }`, "names journalctl"},
+		{"journalctl constant", `const zz = "journalctl"`, "names journalctl"},
+		{"ip netns exec", `func zz() { run("ip", "netns", "exec", netns, "sh") }`, "runs ip netns exec"},
+		{"ip batch", `func zz() { run("ip", "-b", "/tmp/x") }`, "runs ip -b"},
+		{"method named readJournal", `type zt struct{}` + "\n" + `func (zt) readJournal() string { return output("journalctl", "-u", "agentosd.service") }` + "\n" + `func zz() string { return zt{}.readJournal() }`, "(zt).readJournal names journalctl"},
+		{"method named output", `type zt struct{}` + "\n" + `func (zt) output(name string, args ...string) string { out, _ := command(name, args...).Output(); return string(out) }` + "\n" + `func zz() string { return zt{}.output("sh", "-c", "systemctl status agentosd.service") }`, "(zt).output calls command with a tool name that is not a constant"},
+		{"method named output, called", `type zt struct{}` + "\n" + `func (zt) output(name string, args ...string) string { return "" }` + "\n" + `func zz() string { return zt{}.output("sh") }`, "zz uses (zt).output, which is not the driver's own output"},
+		{"method named command", `import cp ` + cp + "\n" + `type zt struct{}` + "\n" + `func (zt) command() *cp.Cmd { return cp.Command(nil, childEnv, cp.Options{}, "sh", "-c", "systemctl status agentosd.service") }`, "(zt).command starts a process through github.com/ghbmrk/agentos/broker/childproc.Command"},
+		{"journal through an interface", `type jr interface{ journal() string }` + "\n" + `func zz(j jr) string { return j.journal() }`, "zz uses (jr).journal, which is not the driver's own journal"},
+		{"command's own params from a closure", `func zz(name string, args ...string) { command(name, args...) }`, "zz calls command with a tool name that is not a constant"},
+		{"AllThreadsSyscall", `import "syscall"` + "\n" + `func zz() { syscall.AllThreadsSyscall(syscall.SYS_EXECVE, 0, 0, 0) }`, "uses syscall.AllThreadsSyscall, which the driver does not need"},
+		{"AllThreadsSyscall6", `import "syscall"` + "\n" + `func zz() { syscall.AllThreadsSyscall6(syscall.SYS_EXECVE, 0, 0, 0, 0, 0, 0) }`, "uses syscall.AllThreadsSyscall6, which the driver does not need"},
+		{"unix SyscallNoError", `import "golang.org/x/sys/unix"` + "\n" + `func zz() { unix.SyscallNoError(unix.SYS_EXECVE, 0, 0, 0) }`, "uses golang.org/x/sys/unix.SyscallNoError, which the driver does not need"},
+		{"unix RawSyscallNoError", `import "golang.org/x/sys/unix"` + "\n" + `func zz() { unix.RawSyscallNoError(unix.SYS_EXECVE, 0, 0, 0) }`, "uses golang.org/x/sys/unix.RawSyscallNoError, which the driver does not need"},
+		{"syscall Exec", `import sc "syscall"` + "\n" + `func zz() { sc.ForkExec("/bin/sh", nil, nil) }`, "uses syscall.ForkExec, which the driver does not need"},
+		{"net/http/cgi", `import "net/http/cgi"` + "\n" + `var zz = cgi.Handler{Path: "/bin/sh"}`, "imports net/http/cgi"},
+		{"readJournal from an unnamed caller", `func zz() string { return readJournal(0, "agentosd.service") }`, "zz reads through readJournal"},
+		{"journal as a value", `func zz(d *driver) { f := d.journal; _ = f }`, "uses journal other than as a direct call"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := parser.ParseFile(fset, "zz_bypass.go", "package main\n"+c.src+"\n", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := sourceProblems(fset, append(slices.Clone(files), f), imp)
+			if !slices.ContainsFunc(got, func(p string) bool { return strings.Contains(p, c.want) }) {
+				t.Errorf("source test does not refuse it with %q; it says %q", c.want, got)
+			}
+		})
+	}
+}
+
+var (
+	sourceOnce sync.Once
+	sourceFset *token.FileSet
+	sourceImp  types.Importer
+)
+
+// driverSources is the driver's non-test files that a Linux build with
+// tags compiles, parsed, and an importer that type-checks their imports
+// from source, shared by every caller so each package is read once.
+func driverSources(t *testing.T, tags []string) (*token.FileSet, []*ast.File, types.Importer) {
 	t.Helper()
-	fn, ok := call.Fun.(*ast.Ident)
-	if !ok || !runners[fn.Name] || len(call.Args) == 0 {
-		return
+	sourceOnce.Do(func() {
+		sourceFset = token.NewFileSet()
+		sourceImp = importer.ForCompiler(sourceFset, "source", nil)
+	})
+	ctx := build.Default
+	ctx.GOOS, ctx.BuildTags = "linux", tags
+	bp, err := ctx.ImportDir(".", 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	at := fset.Position(call.Pos())
-	lit, ok := call.Args[0].(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		if id, isID := call.Args[0].(*ast.Ident); isID && id.Name == "name" && fn.Name == "command" && (in == "run" || in == "output") {
-			return
+	if len(bp.CgoFiles) > 0 {
+		t.Errorf("the driver has cgo files %v, which the source test cannot read", bp.CgoFiles)
+	}
+	var files []*ast.File
+	for _, n := range bp.GoFiles {
+		f, err := parser.ParseFile(sourceFset, n, nil, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		t.Errorf("%s: %s calls %s with a tool name that is not a literal", at, in, fn.Name)
-		return
+		files = append(files, f)
 	}
-	if lit.Value != `"systemctl"` {
-		return
-	}
-	for _, a := range call.Args[1:] {
-		l, ok := a.(*ast.BasicLit)
-		if !ok || l.Kind != token.STRING {
-			t.Errorf("%s: %s runs systemctl with an argument that is not a literal", at, in)
-			continue
-		}
-		if l.Value == `"status"` {
-			t.Errorf("%s: %s runs systemctl status, which prints the unit's journal", at, in)
-		}
-	}
+	return sourceFset, files, sourceImp
 }
 
-// declName is a declaration's name for the source test: a function's
-// name, or a package-level variable's (output is one).
-func declName(decl ast.Decl) string {
-	switch d := decl.(type) {
-	case *ast.FuncDecl:
-		return d.Name.Name
-	case *ast.GenDecl:
-		var names []string
-		for _, sp := range d.Specs {
-			if vs, ok := sp.(*ast.ValueSpec); ok {
-				for _, n := range vs.Names {
-					names = append(names, n.Name)
+// sourceProblems type-checks the driver's files and names each way they
+// run a tool, start a process or read a journal outside what
+// ASSUMPTIONS E8 allows. Runners, readers and their callers are the
+// objects the test's names stand for, a package function or a *driver
+// method, never whatever else is spelled the same. A driver that does
+// not type-check, or lacks one of those objects, is itself a problem, so
+// the test fails closed.
+func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) []string {
+	var bad []string
+	add := func(at token.Pos, format string, a ...any) {
+		bad = append(bad, fset.Position(at).String()+": "+fmt.Sprintf(format, a...))
+	}
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Types: map[ast.Expr]types.TypeAndValue{}}
+	pkg, err := (&types.Config{Importer: imp}).Check("main", fset, files, info)
+	if err != nil {
+		return []string{"the driver does not type-check: " + err.Error()}
+	}
+	var drv types.Type
+	if tn, ok := pkg.Scope().Lookup("driver").(*types.TypeName); ok {
+		drv = types.NewPointer(tn.Type())
+	}
+	var missing []string
+	object := func(n string) types.Object {
+		if o := pkg.Scope().Lookup(n); o != nil {
+			return o
+		}
+		if drv != nil {
+			if o, _, _ := types.LookupFieldOrMethod(drv, true, pkg, n); o != nil {
+				if _, ok := o.(*types.Func); ok {
+					return o
 				}
 			}
 		}
-		if len(names) > 0 {
-			return strings.Join(names, ",")
+		missing = append(missing, n)
+		return nil
+	}
+	guarded := map[string]bool{} // the names of runners and readers
+	runner := map[types.Object]string{}
+	for n := range runners {
+		runner[object(n)], guarded[n] = n, true
+	}
+	reader := map[types.Object]string{}
+	callers := map[string][]types.Object{}
+	for r, cs := range journalReaders {
+		reader[object(r)], guarded[r] = r, true
+		for _, c := range cs {
+			callers[r] = append(callers[r], object(c))
 		}
 	}
-	return "(package level)"
+	if len(missing) > 0 {
+		return []string{fmt.Sprintf("the driver has no function or *driver method %v that the test names", missing)}
+	}
+	childCommand := "github.com/ghbmrk/agentos/broker/childproc.Command"
+	uses := map[string][]types.Object{} // reader -> the declarations that use it
+	named := false                      // readJournal names journalctl
+	for _, f := range files {
+		for _, im := range f.Imports {
+			if p, _ := strconv.Unquote(im.Path.Value); barred[p] {
+				add(im.Pos(), "imports %s", p)
+			}
+		}
+		for _, u := range units(info, f) {
+			in, label := u.obj, objLabel(u.obj)
+			var own []types.Object // run's and output's own parameters
+			if r := runner[in]; (r == "run" || r == "output") && u.fn != nil {
+				for _, fld := range u.fn.Params.List {
+					for _, n := range fld.Names {
+						own = append(own, info.Defs[n])
+					}
+				}
+			}
+			called := map[*ast.Ident]bool{} // the idents that are a call's function
+			ast.Inspect(u.node, func(n ast.Node) bool {
+				if e, ok := n.(ast.Expr); ok {
+					if v := info.Types[e].Value; v != nil && v.Kind() == constant.String && strings.Contains(constant.StringVal(v), "journalctl") {
+						if reader[in] != "readJournal" {
+							add(e.Pos(), "%s names journalctl, which only readJournal runs", label)
+						}
+						named = true
+					}
+				}
+				switch n := n.(type) {
+				case *ast.CallExpr:
+					switch fn := n.Fun.(type) {
+					case *ast.Ident:
+						called[fn] = true
+						if name, ok := runner[info.Uses[fn]]; ok {
+							if why := runnerCall(info, reader[in] == "readJournal", own, name, n); why != "" {
+								add(n.Pos(), "%s calls %s %s", label, name, why)
+							}
+						}
+					case *ast.SelectorExpr:
+						called[fn.Sel] = true
+					}
+				case *ast.Ident:
+					obj := info.Uses[n]
+					if obj == nil {
+						break
+					}
+					if name, ok := runner[obj]; ok && !called[n] {
+						add(n.Pos(), "%s uses %s other than as a direct call", label, name)
+					}
+					if name, ok := reader[obj]; ok {
+						if !called[n] {
+							add(n.Pos(), "%s uses %s other than as a direct call", label, name)
+						}
+						uses[name] = append(uses[name], in)
+					}
+					fn, isFunc := obj.(*types.Func)
+					if !isFunc {
+						break
+					}
+					if guarded[fn.Name()] && runner[obj] == "" && reader[obj] == "" {
+						add(n.Pos(), "%s uses %s, which is not the driver's own %s", label, objLabel(obj), fn.Name())
+					}
+					if fn.Pkg() == nil || fn.Signature().Recv() != nil {
+						break
+					}
+					sp := fn.Pkg().Path() + "." + fn.Name()
+					if spawners[sp] && (sp != childCommand || runner[in] != "command") {
+						add(n.Pos(), "%s starts a process through %s, not command", label, sp)
+					}
+					if p := fn.Pkg().Path(); (p == "syscall" || p == "golang.org/x/sys/unix") && !sysAllowed[sp] {
+						add(n.Pos(), "%s uses %s, which the driver does not need (sysAllowed)", label, sp)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if !named {
+		bad = append(bad, "readJournal does not name journalctl: the test reads the wrong files")
+	}
+	for r, cs := range callers {
+		for _, in := range uses[r] {
+			if in == nil || !slices.Contains(cs, in) {
+				bad = append(bad, fmt.Sprintf("%s reads through %s, which ASSUMPTIONS E8 does not name it for (callers %v)", objLabel(in), r, journalReaders[r]))
+			}
+		}
+	}
+	return bad
 }
 
-// isDeclName reports whether id is decl's own name, not a use of it.
-func isDeclName(decl ast.Decl, id *ast.Ident) bool {
-	fd, ok := decl.(*ast.FuncDecl)
-	return ok && fd.Name == id
+// unit is one declaration the source test reads: its object (nil for a
+// declaration of several names or none), its syntax, and, for a function
+// or a variable holding a function literal, that function's type.
+type unit struct {
+	obj  types.Object
+	node ast.Node
+	fn   *ast.FuncType
+}
+
+// units are a file's declarations: each function and method, and each
+// spec of a const, var or type declaration on its own.
+func units(info *types.Info, f *ast.File) []unit {
+	var us []unit
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			us = append(us, unit{info.Defs[d.Name], d, d.Type})
+		case *ast.GenDecl:
+			for _, sp := range d.Specs {
+				u := unit{node: sp}
+				switch sp := sp.(type) {
+				case *ast.ValueSpec:
+					if len(sp.Names) == 1 {
+						u.obj = info.Defs[sp.Names[0]]
+						if len(sp.Values) == 1 {
+							if lit, ok := sp.Values[0].(*ast.FuncLit); ok {
+								u.fn = lit.Type
+							}
+						}
+					}
+				case *ast.TypeSpec:
+					u.obj = info.Defs[sp.Name]
+				}
+				us = append(us, u)
+			}
+		}
+	}
+	return us
+}
+
+// objLabel names a declaration for a problem line: a function's name, a
+// method's with its receiver type, or "(package level)" for none.
+func objLabel(o types.Object) string {
+	if o == nil {
+		return "(package level)"
+	}
+	if fn, ok := o.(*types.Func); ok {
+		if r := fn.Signature().Recv(); r != nil {
+			return "(" + types.TypeString(r.Type(), func(*types.Package) string { return "" }) + ")." + fn.Name()
+		}
+	}
+	return o.Name()
+}
+
+// runnerCall says why a call of the runner name runs a tool ASSUMPTIONS
+// E8 does not allow, or "". own are the enclosing run's or output's own
+// parameters, which it may pass on to command; every other call names
+// its tool by a constant, and ip and systemctl take only constant
+// arguments: ip link, addr or netns add, after an optional -n and
+// namespace, and systemctl show, restart or daemon-reload as its first
+// argument. journalctl runs only in readJournal (inReadJournal), with the
+// arguments readJournal builds.
+func runnerCall(info *types.Info, inReadJournal bool, own []types.Object, name string, call *ast.CallExpr) string {
+	if len(call.Args) == 0 {
+		return "with no tool name"
+	}
+	param := func(e ast.Expr, i int) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && i < len(own) && own[i] != nil && info.Uses[id] == own[i]
+	}
+	if name == "command" && len(own) == 2 && len(call.Args) == 2 && call.Ellipsis.IsValid() &&
+		param(call.Args[0], 0) && param(call.Args[1], 1) {
+		return ""
+	}
+	vals, allConst := constStrings(info, call.Args)
+	if vals[0] == nil {
+		return "with a tool name that is not a constant"
+	}
+	tool, args := *vals[0], vals[1:]
+	switch tool {
+	case "journalctl":
+		if !inReadJournal {
+			return "with journalctl outside readJournal"
+		}
+		return ""
+	case "ip", "systemctl":
+	default:
+		return fmt.Sprintf("and runs %q, which ASSUMPTIONS E8 does not allow", tool)
+	}
+	if !allConst || call.Ellipsis.IsValid() {
+		return "and runs " + tool + " with an argument that is not a constant"
+	}
+	a := make([]string, len(args))
+	for i, v := range args {
+		a[i] = *v
+	}
+	if tool == "systemctl" {
+		if len(a) == 0 || !slices.Contains([]string{"show", "restart", "daemon-reload"}, a[0]) {
+			return "and runs systemctl " + strings.Join(a, " ") + ", not show, restart or daemon-reload"
+		}
+		return ""
+	}
+	obj := a
+	if len(obj) >= 2 && obj[0] == "-n" {
+		obj = obj[2:]
+	}
+	if len(obj) == 0 || !(obj[0] == "link" || obj[0] == "addr" || len(obj) >= 2 && obj[0] == "netns" && obj[1] == "add") {
+		return "and runs ip " + strings.Join(a, " ") + ", not link, addr or netns add"
+	}
+	return ""
+}
+
+// constStrings is each argument's constant string value, nil where it
+// has none, and whether every argument has one.
+func constStrings(info *types.Info, args []ast.Expr) ([]*string, bool) {
+	vals := make([]*string, len(args))
+	all := true
+	for i, a := range args {
+		if v := info.Types[a].Value; v != nil && v.Kind() == constant.String {
+			s := constant.StringVal(v)
+			vals[i] = &s
+		} else {
+			all = false
+		}
+	}
+	return vals, all
 }
 
 // assumptionRow is ASSUMPTIONS.md's row whose first cell is id.
