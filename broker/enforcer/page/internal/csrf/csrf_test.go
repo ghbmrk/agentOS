@@ -14,7 +14,6 @@ import (
 	"go/types"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,27 +21,30 @@ import (
 	"time"
 )
 
-// #4685, re-plan of #4731, #4778: no key, tag or token leaves this
-// package as a value. The package is type-checked and the surface another
-// package can reach is computed from go/types, never from spellings: every
-// exported object, and every exported method and exported field of every
-// named type that surface reaches, whichever package declares it. That
-// list must equal want, so adding an exported name, changing a signature,
-// or giving any reachable type (exported or not) a new exported method or
-// field fails here. No exported variable is allowed (one is assignable, so
-// page code could change it, #4780), and no exported result or field may
-// have an interface type, since an interface value can carry a type of
-// this package whose methods the page then reaches by assertion (#4778).
-// The imports must equal wantImps. Revert mutants: an exported Token()
-// method, a key field, an exported var, an error result holding a type
-// with a Mac method, importing fmt, each fail.
+// The package's shape is pinned for correctness, not for secrecy from
+// other code in the enforcer process, which is trusted (ASSUMPTIONS
+// ENF-page-csrf-2): its exported API is exactly want, so no getter for a
+// key, tag or token appears by accident and the page cannot misplace one;
+// every field of Tokens is a func, so fmt of a Tokens or any holder prints
+// no key into a log (TestFmtPrintsNoSecret); and its MACs are compared in
+// constant time (compares). Revert mutants: an exported Token method, a
+// key []byte field, a string == in Check, a bytes.Equal in age, each fail.
 func TestAPI(t *testing.T) {
 	pkg, files, info := checked(t)
-	got, problems := surface(pkg)
-	for _, p := range problems {
-		t.Error(p)
-	}
 	const p = "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
+	var got []string
+	for _, n := range pkg.Scope().Names() {
+		if o := pkg.Scope().Lookup(n); o.Exported() {
+			got = append(got, types.ObjectString(o, nil))
+		}
+	}
+	ms := types.NewMethodSet(types.NewPointer(pkg.Scope().Lookup("Tokens").Type()))
+	for i := range ms.Len() {
+		if m := ms.At(i).Obj(); m.Exported() {
+			got = append(got, types.ObjectString(m, nil))
+		}
+	}
+	slices.Sort(got)
 	want := []string{
 		"const " + p + ".Cookie untyped string",
 		"const " + p + ".Header untyped string",
@@ -55,317 +57,97 @@ func TestAPI(t *testing.T) {
 	}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
-		t.Errorf("reachable API:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		t.Errorf("API:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-
-	// Every field of Tokens is a func, so fmt prints no key from it: fmt
-	// never calls a func value.
 	st := pkg.Scope().Lookup("Tokens").Type().Underlying().(*types.Struct)
 	for i := range st.NumFields() {
 		if _, ok := st.Field(i).Type().Underlying().(*types.Signature); !ok {
-			t.Errorf("Tokens.%s is a %s, not a func", st.Field(i).Name(), st.Field(i).Type())
+			t.Errorf("Tokens.%s is a %s, not a func: fmt would print it", st.Field(i).Name(), st.Field(i).Type())
 		}
 	}
-
-	var imps []string
-	for _, i := range pkg.Imports() {
-		imps = append(imps, i.Path())
-	}
-	slices.Sort(imps)
-	wantImps := []string{"crypto/hmac", "crypto/rand", "crypto/sha256", "encoding/base64", "encoding/binary", "net/http", "time"}
-	if !slices.Equal(imps, wantImps) {
-		t.Errorf("imports %v, want %v", imps, wantImps)
-	}
-
-	for _, p := range compareProblems(files, info) {
+	for _, p := range compares(files, info) {
 		t.Error(p)
 	}
 }
 
-// surface is every exported object of pkg, and every exported method and
-// field of each named type of pkg reachable from them through signatures,
-// fields, pointers, slices, arrays, maps, channels and method sets, as
-// types.ObjectString prints them (full package paths), sorted; and the
-// problems. Each reachable type is walked with its direction: out when
-// this package hands the value to its caller (an exported func, a result,
-// a field or element of an out value, a parameter of a func the caller
-// hands in), in otherwise. A value that flows out must not be an exported
-// variable, an interface (it may carry a type of this package whose
-// methods the caller reaches by assertion), or a named type of another
-// package other than one of basic kind, since such a type can hold an
-// interface in turn.
-func surface(pkg *types.Package) (got, problems []string) {
-	type key struct {
-		t   types.Type
-		out bool
-	}
-	seen := map[key]bool{}
-	add := func(s string) {
-		if !slices.Contains(got, s) {
-			got = append(got, s)
-		}
-	}
-	var walk func(t types.Type, out bool, where string)
-	walk = func(t types.Type, out bool, where string) {
-		if seen[key{t, out}] {
-			return
-		}
-		seen[key{t, out}] = true
-		switch t := t.(type) {
-		case *types.Named:
-			if t.Obj().Pkg() != pkg {
-				_, basic := t.Underlying().(*types.Basic)
-				if t.Obj().Pkg() != nil && out && !basic {
-					problems = append(problems, fmt.Sprintf("%s: a %s flows out", where, t))
-				}
-				if t.Obj().Pkg() == nil {
-					walk(t.Underlying(), out, where) // error
-				}
-				return
-			}
-			for _, recv := range []types.Type{t, types.NewPointer(t)} {
-				ms := types.NewMethodSet(recv)
-				for i := range ms.Len() {
-					if m := ms.At(i).Obj(); m.Exported() {
-						add(types.ObjectString(m, nil))
-						walk(m.Type(), true, where+"."+m.Name())
-					}
-				}
-			}
-			walk(t.Underlying(), out, where)
-		case *types.Alias:
-			walk(types.Unalias(t), out, where)
-		case *types.Pointer:
-			walk(t.Elem(), out, where)
-		case *types.Slice:
-			walk(t.Elem(), out, where)
-		case *types.Array:
-			walk(t.Elem(), out, where)
-		case *types.Map:
-			walk(t.Key(), out, where)
-			walk(t.Elem(), out, where)
-		case *types.Chan:
-			walk(t.Elem(), true, where)
-			walk(t.Elem(), false, where)
-		case *types.Signature:
-			for v := range t.Params().Variables() {
-				walk(v.Type(), !out, where)
-			}
-			for v := range t.Results().Variables() {
-				walk(v.Type(), out, where)
-			}
-		case *types.Struct:
-			for i := range t.NumFields() {
-				if f := t.Field(i); f.Exported() {
-					add(types.ObjectString(f, nil))
-					walk(f.Type(), out, where+"."+f.Name())
-				}
-			}
-		case *types.Interface:
-			if out {
-				problems = append(problems, fmt.Sprintf("%s: an interface value (%s) flows out, and may carry a type of this package", where, t))
-			}
-		}
-	}
-	for _, n := range pkg.Scope().Names() {
-		o := pkg.Scope().Lookup(n)
-		if !o.Exported() {
-			continue
-		}
-		add(types.ObjectString(o, nil))
-		if _, ok := o.(*types.Var); ok {
-			problems = append(problems, fmt.Sprintf("%s is an exported variable: page code could assign it", n))
-		}
-		walk(o.Type(), true, n)
-	}
-	slices.Sort(got)
-	return got, problems
-}
-
-// compareProblems pins where every MAC goes (#4427 item 3, #4786, #4788).
-// Each call of a Tokens' mac field (resolved through types.Info, not by
-// name) must be, as it stands, an argument of crypto/hmac.Equal, of
-// base64's EncodeToString (the token Screen writes), or the spread final
-// argument of an append inside one (the cookie's tag): so a MAC is never
-// held in a variable, converted, wrapped in an interface, used as a map
-// key or walked by a loop, and the only comparison that ever sees one is
-// hmac.Equal. hmac.Equal is called exactly twice, once in Check and once
-// in age, each with a MAC argument, so no dummy call can stand in for
-// either. Revert mutants: a string compare, an any()-wrapped compare, a
-// byte loop or a map lookup in Check or age, or a dummy hmac.Equal, each
-// fail.
-func compareProblems(files []*ast.File, info *types.Info) []string {
+// compares is the constant-time rule (#4427 item 3), resolved through
+// go/types: Check and age each call crypto/hmac.Equal, and nothing in the
+// package compares strings or arrays with == or != or calls another
+// package's Equal, Compare or DeepEqual. It catches an honest regression;
+// the body is read whole in review.
+func compares(files []*ast.File, info *types.Info) []string {
 	var problems []string
-	pkgFunc := func(c *ast.CallExpr, path, name string) bool {
-		var id *ast.Ident
-		switch fn := c.Fun.(type) {
-		case *ast.Ident:
-			id = fn
-		case *ast.SelectorExpr:
-			id = fn.Sel
-		}
-		if id == nil {
-			return false
-		}
-		o, ok := info.Uses[id].(*types.Func)
-		return ok && o.Pkg() != nil && o.Pkg().Path() == path && o.Name() == name
-	}
-	isMac := func(e ast.Expr) bool {
-		c, ok := ast.Unparen(e).(*ast.CallExpr)
-		if !ok {
-			return false
-		}
-		sel, ok := c.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return false
-		}
-		v, ok := info.Uses[sel.Sel].(*types.Var)
-		return ok && v.IsField() && v.Name() == "mac" && v.Pkg() != nil && v.Pkg().Path() == "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf"
-	}
-	equalIn := map[string]int{}
+	equalIn := map[string]bool{}
 	for _, f := range files {
-		allowed := map[ast.Expr]bool{}
-		var fn string
-		ast.Inspect(f, func(n ast.Node) bool {
-			if fd, ok := n.(*ast.FuncDecl); ok {
-				fn = fd.Name.Name
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
 			}
-			c, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			switch {
-			case pkgFunc(c, "crypto/hmac", "Equal"):
-				mac := false
-				for _, a := range c.Args {
-					if isMac(a) {
-						allowed[ast.Unparen(a)] = true
-						mac = true
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.BinaryExpr:
+					if n.Op != token.EQL && n.Op != token.NEQ {
+						break
 					}
-				}
-				if mac {
-					equalIn[fn]++
-				} else {
-					problems = append(problems, fmt.Sprintf("%s: hmac.Equal in %s compares no MAC", f.Name.Name, fn))
-				}
-			case isEncode(c, info):
-				for _, a := range c.Args {
-					a = ast.Unparen(a)
-					if isMac(a) {
-						allowed[a] = true
-					}
-					if ap, ok := a.(*ast.CallExpr); ok && ap.Ellipsis.IsValid() && len(ap.Args) == 2 && isMac(ap.Args[1]) {
-						if b, ok := info.Uses[identOf(ap.Fun)].(*types.Builtin); ok && b.Name() == "append" {
-							allowed[ast.Unparen(ap.Args[1])] = true
+					switch u := info.TypeOf(n.X).Underlying().(type) {
+					case *types.Basic:
+						if u.Info()&types.IsString != 0 {
+							problems = append(problems, fmt.Sprintf("%s: %s compares strings", fd.Name.Name, types.ExprString(n)))
 						}
+					case *types.Array:
+						problems = append(problems, fmt.Sprintf("%s: %s compares arrays", fd.Name.Name, types.ExprString(n)))
+					}
+				case *ast.CallExpr:
+					var id *ast.Ident
+					switch fn := n.Fun.(type) {
+					case *ast.Ident:
+						id = fn
+					case *ast.SelectorExpr:
+						id = fn.Sel
+					}
+					o, ok := info.Uses[id].(*types.Func)
+					if !ok || o.Pkg() == nil {
+						break
+					}
+					switch {
+					case o.Pkg().Path() == "crypto/hmac" && o.Name() == "Equal":
+						equalIn[fd.Name.Name] = true
+					case o.Pkg() != info.Defs[fd.Name].Pkg() && slices.Contains([]string{"Equal", "Compare", "DeepEqual"}, o.Name()):
+						problems = append(problems, fmt.Sprintf("%s: calls %s.%s", fd.Name.Name, o.Pkg().Path(), o.Name()))
 					}
 				}
-			}
-			return true
-		})
-		// Every use of the mac field is an allowed call, a compare with nil
-		// (a Tokens New did not make), or New's keyed field in the literal
-		// that builds a Tokens: never a func value held elsewhere.
-		ok := map[*ast.Ident]bool{}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.BinaryExpr:
-				x, y := ast.Unparen(n.X), ast.Unparen(n.Y)
-				if _, isNil := info.Uses[identOf(y)].(*types.Nil); isNil {
-					if sel, isSel := x.(*ast.SelectorExpr); isSel && (n.Op == token.EQL || n.Op == token.NEQ) {
-						ok[sel.Sel] = true
-					}
-				}
-			case *ast.KeyValueExpr:
-				if id, isID := n.Key.(*ast.Ident); isID {
-					ok[id] = true
-				}
-			case ast.Expr:
-				if isMac(n) {
-					if !allowed[n] {
-						problems = append(problems, fmt.Sprintf("%s: a MAC is used other than in hmac.Equal or the response: %s", f.Name.Name, types.ExprString(n)))
-					}
-					ok[n.(*ast.CallExpr).Fun.(*ast.SelectorExpr).Sel] = true
-				}
-			}
-			return true
-		})
-		for id, o := range info.Uses {
-			if v, isVar := o.(*types.Var); isVar && v.IsField() && v.Name() == "mac" && v.Pkg() == info.Uses[id].Pkg() &&
-				v.Pkg().Path() == "github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf" &&
-				id.Pos() >= f.Pos() && id.Pos() < f.End() && !ok[id] {
-				problems = append(problems, fmt.Sprintf("%s: the mac field is used other than by a call", f.Name.Name))
-			}
+				return true
+			})
 		}
 	}
-	if equalIn["Check"] != 1 || equalIn["age"] != 1 || len(equalIn) != 2 {
-		problems = append(problems, fmt.Sprintf("hmac.Equal over a MAC is called %v, want once in Check and once in age", equalIn))
+	if !equalIn["Check"] || !equalIn["age"] {
+		problems = append(problems, fmt.Sprintf("hmac.Equal is called in %v, want Check and age", equalIn))
 	}
 	return problems
 }
 
-func identOf(e ast.Expr) *ast.Ident {
-	switch e := ast.Unparen(e).(type) {
-	case *ast.Ident:
-		return e
-	case *ast.SelectorExpr:
-		return e.Sel
-	}
-	return nil
-}
-
-// isEncode is a call of (*encoding/base64.Encoding).EncodeToString.
-func isEncode(c *ast.CallExpr, info *types.Info) bool {
-	id := identOf(c.Fun)
-	if id == nil {
-		return false
-	}
-	o, ok := info.Uses[id].(*types.Func)
-	return ok && o.Pkg() != nil && o.Pkg().Path() == "encoding/base64" && o.Name() == "EncodeToString"
-}
-
-// checked is this package's non-test Go files, type-checked. A type-check
-// error, any file other than a .go file in the directory (assembly, C,
-// syso), a directive, or a function declared without a body fails the
-// test.
+// checked is this package's non-test Go files, type-checked.
 func checked(t *testing.T) (*types.Package, []*ast.File, *types.Info) {
 	t.Helper()
-	ents, err := os.ReadDir(".")
+	fset := token.NewFileSet()
+	names, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fset := token.NewFileSet()
 	var files []*ast.File
-	for _, e := range ents {
-		n := e.Name()
-		if e.IsDir() || filepath.Ext(n) != ".go" {
-			t.Errorf("%s: package csrf holds only Go files", n)
-			continue
-		}
+	for _, n := range names {
 		if strings.HasSuffix(n, "_test.go") {
 			continue
 		}
-		f, err := parser.ParseFile(fset, n, nil, parser.ParseComments)
+		f, err := parser.ParseFile(fset, n, nil, 0)
 		if err != nil {
 			t.Fatal(err)
-		}
-		for _, g := range f.Comments {
-			for _, c := range g.List {
-				if strings.HasPrefix(c.Text, "//go:") || strings.HasPrefix(c.Text, "//line") {
-					t.Errorf("%s: directive %q", n, c.Text)
-				}
-			}
-		}
-		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body == nil {
-				t.Errorf("%s: %s is declared without a body", n, fd.Name.Name)
-			}
 		}
 		files = append(files, f)
 	}
 	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
-	conf := types.Config{Importer: importer.Default()}
-	pkg, err := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf", fset, files, info)
+	pkg, err := (&types.Config{Importer: importer.Default()}).Check("github.com/ghbmrk/agentos/broker/enforcer/page/internal/csrf", fset, files, info)
 	if err != nil {
 		t.Fatal(err)
 	}

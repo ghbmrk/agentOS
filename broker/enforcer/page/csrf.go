@@ -12,9 +12,9 @@ import (
 // sets its cookie and carries its token, and ServeHTTP refuses every
 // request other than GET, before it looks up a route, unless guard passes
 // it, so no handler can skip the check and a route added later starts
-// refused. The page never holds a key, a tag or a token as a value: csrf
-// writes the token into each screen itself (render), so neither page code
-// nor the templates can reach one (#4685, re-plan of #4731).
+// refused. The page never handles a key, a tag or a token: csrf writes
+// the token into each screen itself (render), so no template can misplace
+// or copy one (#4685, ASSUMPTIONS ENF-page-csrf-2).
 const (
 	tokenCookie = csrf.Cookie
 	tokenHeader = csrf.Header

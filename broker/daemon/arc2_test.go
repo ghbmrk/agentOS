@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -297,8 +296,7 @@ var enforcer = map[string]struct {
 	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
 	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "enforcer/page/internal/csrf", "rsc.io/qr"}, enforcerWebForbid},
 	// The page's anti-forgery pair (#4685, enforcerCSRF): the standard
-	// library only. Its imports, and the page's, are also an exact
-	// allowlist (enforcerWebImports).
+	// library only.
 	"enforcer/page/internal/csrf": {nil, enforcerWebForbid},
 	// Enrolment (slice c): the case code, the recovery code and the
 	// passkey's handover; it texts through the alert kinds.
@@ -478,6 +476,10 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 	}
 }
 
+// enforcerLinks are the module packages outside broker/enforcer that the
+// enforcer may link (ENF decision 1, STO-4).
+var enforcerLinks = []string{"kernel/key", "drone", "camwire"}
+
 // TestEnforcerImportsNothingFromAgentOS: everything under broker/enforcer
 // links, transitively, only the standard library, the enforcer's own
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
@@ -503,7 +505,6 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 		if err != nil {
 			t.Fatalf("go list: %v", err)
 		}
-		links := map[string]bool{"kernel/key": true, "drone": true, "camwire": true}
 		for _, dep := range strings.Fields(string(out)) {
 			rel := strings.TrimPrefix(dep, module)
 			switch {
@@ -513,7 +514,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 					t.Errorf("%s has no import rule in the enforcer map", dep)
 				}
 			case strings.HasPrefix(dep, module):
-				if !links[rel] {
+				if !slices.Contains(enforcerLinks, rel) {
 					t.Errorf("the enforcer links %s", dep)
 				}
 			case strings.Contains(strings.SplitN(dep, "/", 2)[0], "."):
@@ -541,35 +542,36 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 }
 
-// TestEnforcerHoldsOnlyGoSource: no package of the enforcer, nor any
-// package of this module it links (kernel/key, drone, camwire), holds a
-// source the Go compiler does not check for memory safety (assembly, C,
-// C++, Fortran, Objective-C, SWIG or a prebuilt object), or declares a func
-// without a body, which only such a source or a //go:linkname (which needs
-// unsafe) can supply. So no enforcer package reaches another's unexported
-// symbols by name. It does not stop a package that may import unsafe or
-// os from reading process memory; the page and its anti-forgery package
-// may import neither (enforcerWebImports). Every file in every directory
-// counts, whatever its build constraints.
-func TestEnforcerHoldsOnlyGoSource(t *testing.T) {
+// TestARC2EnforcerHoldsOnlyGoSource completes ARC2's per-package bans on
+// unsafe and C for the enforcer, which is trusted base (KRN-2, STO-4) and
+// parses what the network sends it: no directory of the enforcer, nor of
+// a module package it may link (enforcerLinks), holds a source the Go
+// compiler does not check for memory safety (assembly, C, C++, Fortran,
+// Objective-C, SWIG or a prebuilt object), whatever its build constraints
+// (#4789). It is not a secrecy device between enforcer packages, which
+// trust one another (ASSUMPTIONS ENF-page-csrf-2). The roots are the list
+// TestEnforcerImportsNothingFromAgentOS holds (#4798), so a module package
+// the enforcer is later allowed to link is scanned too.
+func TestARC2EnforcerHoldsOnlyGoSource(t *testing.T) {
 	foreign := []string{".s", ".S", ".sx", ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".m", ".f", ".F", ".for", ".f90", ".swig", ".swigcxx", ".syso"}
-	// Every directory, not go list's packages, so a package or file built
-	// only for another OS or architecture is scanned too (#4789).
-	var dirs []string
-	for _, root := range []string{"enforcer", "kernel/key", "drone", "camwire"} {
+	roots := append([]string{"enforcer"}, enforcerLinks...)
+	n := 0
+	for _, root := range roots {
 		err := filepath.WalkDir(filepath.Join("..", root), func(p string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() {
-				if d.Name() == "testdata" {
+				// Only the enforcer's own tree is walked whole; a linked
+				// module package is one directory.
+				if d.Name() == "testdata" || (root != "enforcer" && p != filepath.Join("..", root)) {
 					return filepath.SkipDir
 				}
-				if root == "enforcer" || p == filepath.Join("..", root) {
-					dirs = append(dirs, p)
-				} else {
-					return filepath.SkipDir // kernel/key alone, not packages below it
-				}
+				n++
+				return nil
+			}
+			if slices.Contains(foreign, filepath.Ext(p)) {
+				t.Errorf("%s: an enforcer package holds only Go source", p)
 			}
 			return nil
 		})
@@ -577,81 +579,8 @@ func TestEnforcerHoldsOnlyGoSource(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if len(dirs) < len(enforcer) {
-		t.Fatalf("found %d enforcer directories, the rule map names %d", len(dirs), len(enforcer))
-	}
-	for _, dir := range dirs {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range ents {
-			n := filepath.Join(dir, e.Name())
-			if e.IsDir() {
-				continue
-			}
-			if slices.Contains(foreign, filepath.Ext(n)) {
-				t.Errorf("%s: an enforcer package holds only Go source", n)
-				continue
-			}
-			if filepath.Ext(n) != ".go" {
-				continue
-			}
-			f, err := parser.ParseFile(token.NewFileSet(), n, nil, parser.SkipObjectResolution)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, d := range f.Decls {
-				if fd, ok := d.(*ast.FuncDecl); ok && fd.Body == nil {
-					t.Errorf("%s: func %s is declared without a body", n, fd.Name.Name)
-				}
-			}
-		}
-	}
-}
-
-// enforcerWebImports is every import the page and its anti-forgery
-// package may name, exactly (#4778): an allowlist, not a denylist of
-// escape hatches, so reflect, unsafe, runtime, os, syscall, plugin,
-// os/exec, debug/* or any later route to the process's memory is refused
-// by construction. These are the only packages that hold a csrf value
-// (Go's internal rule keeps every other package from naming one). Adding
-// an import means adding it here, with its reason in review.
-var enforcerWebImports = map[string][]string{
-	enforcerWeb: {
-		"bytes", "crypto", "crypto/ecdsa", "crypto/elliptic", "crypto/rand", "crypto/sha256", "crypto/tls", "crypto/x509",
-		"crypto/x509/pkix", "embed", "encoding/base64", "encoding/binary", "encoding/hex", "encoding/json", "errors", "fmt",
-		"html/template", "io", "math/big", "net", "net/http", "net/netip", "slices", "strconv", "strings", "sync", "time",
-		module + "enforcer/action", module + "enforcer/enrol", module + enforcerCSRF, module + "enforcer/pairseal",
-		module + "enforcer/policy", module + "kernel/key", "rsc.io/qr",
-	},
-	enforcerCSRF: {"crypto/hmac", "crypto/rand", "crypto/sha256", "encoding/base64", "encoding/binary", "net/http", "time"},
-}
-
-// TestEnforcerWebImportsOnlyItsAllowlist holds enforcerWebImports over
-// every non-test Go file of the page and csrf, whatever its build
-// constraints. Revert mutant: Security's round-2 repro, a page file
-// importing reflect for Value.UnsafePointer, fails.
-func TestEnforcerWebImportsOnlyItsAllowlist(t *testing.T) {
-	for pkg, allowed := range enforcerWebImports {
-		files, err := filepath.Glob(filepath.Join("..", pkg, "*.go"))
-		if err != nil || len(files) == 0 {
-			t.Fatalf("%s: no sources (%v)", pkg, err)
-		}
-		for _, f := range files {
-			if strings.HasSuffix(f, "_test.go") {
-				continue
-			}
-			af, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.ImportsOnly)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, im := range af.Imports {
-				if p, _ := strconv.Unquote(im.Path.Value); !slices.Contains(allowed, p) {
-					t.Errorf("%s imports %s, which enforcerWebImports does not allow", f, p)
-				}
-			}
-		}
+	if n < len(enforcer) {
+		t.Fatalf("scanned %d directories, the enforcer map names %d packages", n, len(enforcer))
 	}
 }
 

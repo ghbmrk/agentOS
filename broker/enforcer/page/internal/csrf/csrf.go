@@ -13,19 +13,13 @@
 // screen mints a new one. Check refuses a pair whose cookie was drawn more
 // than PairLife ago or in the future (#4427).
 //
-// The key, the tags and the tokens never leave this package as values
-// (#4685, re-plan of #4731): no exported name takes or returns one, no
-// exported name is a variable or returns an interface (so no value of an
-// unexported type leaves either, #4778), the only token that leaves is the
-// one Screen writes, in a place Screen fixes, into the response it is
-// handed, and Tokens holds the key only inside a closure, so fmt of a
-// Tokens, or of anything holding one, prints at most a code address. The
-// page imports this package as internal, so no other package can name
-// it, and both import only an allowlist (no unsafe, reflect, os or
-// syscall; ARC2's enforcerWebImports). Code elsewhere in the process that
-// reads process memory is not stopped (ASSUMPTIONS ENF-page-csrf-1).
-// TestAPI pins that surface, and that every MAC goes straight into
-// hmac.Equal or the response, through go/types.
+// The page imports this package as internal and never handles a key, tag
+// or token: no exported name takes or returns one, Screen writes the token
+// itself in a place it fixes, and Tokens holds the key only inside a
+// closure, so fmt of a Tokens prints no key into a log. That shape is for
+// correctness. It is not secrecy from other code in the enforcer process,
+// which is trusted, and the key gives such code nothing a client of the
+// page lacks (ASSUMPTIONS ENF-page-csrf-2).
 package csrf
 
 import (

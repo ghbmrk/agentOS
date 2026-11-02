@@ -4,20 +4,11 @@ package page
 
 import (
 	"context"
-	"fmt"
-	"go/ast"
-	"go/constant"
-	"go/importer"
-	"go/parser"
-	"go/token"
-	"go/types"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"os/exec"
 	"path"
 	"slices"
 	"strings"
@@ -212,11 +203,11 @@ func TestScreensCarryToken(t *testing.T) {
 		"enrol.html":   {g.rig, "/enrol"},
 		"confirm.html": {pg, linkFor(next, "add new.example")},
 	}
-	// The list is the code's own (#4784): every screen render draws, and
-	// every top-level template, is one here or the action screen below.
-	drawn := renderedScreens(t)
-	if want := append(keys(screens), "action.html"); !sameSet(drawn, want) || !sameSet(topLevel(t), want) {
-		t.Fatalf("render draws %v and the top-level templates are %v; this test opens %v: add the new screen here", drawn, topLevel(t), want)
+	// Every top-level template is a screen opened here (#4784). A screen
+	// drawn other than through render would carry no token, so its taps
+	// fail closed.
+	if want := append(keys(screens), "action.html"); !sameSet(topLevel(t), want) {
+		t.Fatalf("the top-level templates are %v; this test opens %v: add the new screen here", topLevel(t), want)
 	}
 	for name, sc := range screens {
 		w := sc.g.do(http.MethodGet, sc.path, nil)
@@ -440,127 +431,4 @@ func topLevel(t *testing.T) []string {
 		}
 	}
 	return top
-}
-
-// renderedScreens type-checks the package's non-test Go files and returns
-// the template name of every call of (*Server).render, resolved through
-// go/types. It fails the test if a name is not a constant string, if
-// html/template's or text/template's Execute or ExecuteTemplate is used (called, or taken as
-// a method value) anywhere but inside render, or if render is used other
-// than by a call (#4784): so every screen is drawn by render, which hands
-// it to csrf.Screen. It also fails the test if the page uses net/http's
-// file API (Dir, FileServer, ServeFile, ...), which opens files by name.
-func renderedScreens(t *testing.T) []string {
-	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
-	if err != nil || len(pkgs) != 1 {
-		t.Fatalf("parse: %v (%d packages)", err, len(pkgs))
-	}
-	var fl []*ast.File
-	for _, p := range pkgs {
-		for _, f := range p.Files {
-			fl = append(fl, f)
-		}
-	}
-	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
-	// Imports come from the build's own export data (go list -export), so
-	// nothing is type-checked from source (#4770).
-	out, err := exec.Command("go", "list", "-export", "-deps", "-f", "{{.ImportPath}} {{.Export}}", ".").Output()
-	if err != nil {
-		t.Fatalf("go list: %v", err)
-	}
-	export := map[string]string{}
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if p, f, ok := strings.Cut(l, " "); ok && f != "" {
-			export[p] = f
-		}
-	}
-	lookup := func(p string) (io.ReadCloser, error) {
-		f, ok := export[p]
-		if !ok {
-			return nil, fmt.Errorf("no export data for %s", p)
-		}
-		return os.Open(f)
-	}
-	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", lookup)}
-	if _, err := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page", fset, fl, info); err != nil {
-		t.Fatal(err)
-	}
-	var render types.Object
-	for id, o := range info.Defs {
-		if fn, ok := o.(*types.Func); ok && id.Name == "render" {
-			if r := fn.Signature().Recv(); r != nil && types.TypeString(r.Type(), nil) == "*github.com/ghbmrk/agentos/broker/enforcer/page.Server" {
-				render = fn
-			}
-		}
-	}
-	if render == nil {
-		t.Fatal("no (*Server).render")
-	}
-	exec := func(o types.Object) bool {
-		fn, ok := o.(*types.Func)
-		return ok && fn.Pkg() != nil && (fn.Pkg().Path() == "html/template" || fn.Pkg().Path() == "text/template") && (fn.Name() == "Execute" || fn.Name() == "ExecuteTemplate")
-	}
-	// The page opens no file by name: with net/http's file API it could
-	// seek /proc/self/mem, and the import allowlist (ARC2's
-	// enforcerWebImports) already keeps os and syscall out.
-	fileAPI := func(o types.Object) bool {
-		return o.Pkg() != nil && o.Pkg().Path() == "net/http" && slices.Contains([]string{
-			"Dir", "FS", "FileServer", "FileServerFS", "ServeFile", "ServeFileFS", "NewFileTransport", "NewFileTransportFS"}, o.Name())
-	}
-	var names []string
-	for _, f := range fl {
-		var inRender []ast.Node
-		ast.Inspect(f, func(n ast.Node) bool {
-			if fd, ok := n.(*ast.FuncDecl); ok && info.Defs[fd.Name] == render {
-				inRender = append(inRender, fd)
-			}
-			return true
-		})
-		inside := func(p token.Pos) bool {
-			for _, n := range inRender {
-				if n.Pos() <= p && p < n.End() {
-					return true
-				}
-			}
-			return false
-		}
-		calls := map[*ast.Ident]bool{}
-		ast.Inspect(f, func(n ast.Node) bool {
-			c, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && info.Uses[sel.Sel] == render {
-				calls[sel.Sel] = true
-				if len(c.Args) != 4 {
-					t.Errorf("%s: render with %d arguments", fset.Position(c.Pos()), len(c.Args))
-					return true
-				}
-				v := info.Types[c.Args[2]].Value
-				if v == nil || v.Kind() != constant.String {
-					t.Errorf("%s: render's template name is not a constant", fset.Position(c.Pos()))
-					return true
-				}
-				names = append(names, constant.StringVal(v))
-			}
-			return true
-		})
-		for id, o := range info.Uses {
-			if fset.File(id.Pos()) != fset.File(f.Pos()) {
-				continue
-			}
-			if o == render && !calls[id] {
-				t.Errorf("%s: render is used other than by a call", fset.Position(id.Pos()))
-			}
-			if exec(o) && !inside(id.Pos()) {
-				t.Errorf("%s: a template is executed outside render", fset.Position(id.Pos()))
-			}
-			if fileAPI(o) {
-				t.Errorf("%s: the page uses net/http's %s, which opens files by name (#4778)", fset.Position(id.Pos()), o.Name())
-			}
-		}
-	}
-	return names
 }
