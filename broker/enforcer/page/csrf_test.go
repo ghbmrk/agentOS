@@ -4,10 +4,21 @@ package page
 
 import (
 	"context"
+	"fmt"
+	"go/ast"
+	"go/constant"
+	"go/importer"
+	"go/parser"
+	"go/token"
+	"go/types"
+	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -197,9 +208,15 @@ func TestScreensCarryToken(t *testing.T) {
 		g    *rig
 		path string
 	}{
-		"home":    {g.rig, "/"},
-		"enrol":   {g.rig, "/enrol"},
-		"confirm": {pg, linkFor(next, "add new.example")},
+		"home.html":    {g.rig, "/"},
+		"enrol.html":   {g.rig, "/enrol"},
+		"confirm.html": {pg, linkFor(next, "add new.example")},
+	}
+	// The list is the code's own (#4784): every screen render draws, and
+	// every top-level template, is one here or the action screen below.
+	drawn := renderedScreens(t)
+	if want := append(keys(screens), "action.html"); !sameSet(drawn, want) || !sameSet(topLevel(t), want) {
+		t.Fatalf("render draws %v and the top-level templates are %v; this test opens %v: add the new screen here", drawn, topLevel(t), want)
 	}
 	for name, sc := range screens {
 		w := sc.g.do(http.MethodGet, sc.path, nil)
@@ -220,7 +237,7 @@ func TestScreensCarryToken(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("action screen: %d %s", w.Code, w.Body)
 	}
-	checkCookie(t, "action", w)
+	checkCookie(t, "action.html", w)
 
 	js, err := os.ReadFile("static/page.js")
 	if err != nil {
@@ -372,4 +389,167 @@ func TestPairLifetime(t *testing.T) {
 	if passes() {
 		t.Error("a pair whose cookie was drawn in the future passes")
 	}
+}
+
+// #4778 R1: csrf.Screen writes every screen's opening (doctype, html,
+// head, charset and the token's meta), so no template writes any of it:
+// a second opening could carry another enforcer-token meta, or one the
+// script reads first. Revert mutant: home.html reopening the document.
+func TestTemplatesLeaveTheOpeningToCSRF(t *testing.T) {
+	names, err := fs.Glob(files, "templates/*.html")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("templates: %v %v", names, err)
+	}
+	for _, n := range names {
+		b, err := fs.ReadFile(files, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		low := strings.ToLower(string(b))
+		for _, bad := range []string{"<!doctype", "<html", "<head", "charset", "enforcer-token"} {
+			if strings.Contains(low, bad) {
+				t.Errorf("%s writes %q, which csrf.Screen's opening owns", n, bad)
+			}
+		}
+	}
+}
+
+func sameSet(a, b []string) bool {
+	a, b = slices.Clone(a), slices.Clone(b)
+	slices.Sort(a)
+	slices.Sort(b)
+	return slices.Equal(slices.Compact(a), slices.Compact(b))
+}
+
+// topLevel is every embedded template that is a screen: every file under
+// templates/ that is not only a {{define}} of a partial.
+func topLevel(t *testing.T) []string {
+	t.Helper()
+	names, err := fs.Glob(files, "templates/*.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top []string
+	for _, n := range names {
+		b, err := fs.ReadFile(files, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(strings.TrimSpace(string(b)), "{{define") {
+			top = append(top, path.Base(n))
+		}
+	}
+	return top
+}
+
+// renderedScreens type-checks the package's non-test Go files and returns
+// the template name of every call of (*Server).render, resolved through
+// go/types. It fails the test if a name is not a constant string, if
+// html/template's or text/template's Execute or ExecuteTemplate is used (called, or taken as
+// a method value) anywhere but inside render, or if render is used other
+// than by a call (#4784): so every screen is drawn by render, which hands
+// it to csrf.Screen.
+func renderedScreens(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil || len(pkgs) != 1 {
+		t.Fatalf("parse: %v (%d packages)", err, len(pkgs))
+	}
+	var fl []*ast.File
+	for _, p := range pkgs {
+		for _, f := range p.Files {
+			fl = append(fl, f)
+		}
+	}
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Uses: map[*ast.Ident]types.Object{}, Defs: map[*ast.Ident]types.Object{}}
+	// Imports come from the build's own export data (go list -export), so
+	// nothing is type-checked from source (#4770).
+	out, err := exec.Command("go", "list", "-export", "-deps", "-f", "{{.ImportPath}} {{.Export}}", ".").Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	export := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if p, f, ok := strings.Cut(l, " "); ok && f != "" {
+			export[p] = f
+		}
+	}
+	lookup := func(p string) (io.ReadCloser, error) {
+		f, ok := export[p]
+		if !ok {
+			return nil, fmt.Errorf("no export data for %s", p)
+		}
+		return os.Open(f)
+	}
+	conf := types.Config{Importer: importer.ForCompiler(fset, "gc", lookup)}
+	if _, err := conf.Check("github.com/ghbmrk/agentos/broker/enforcer/page", fset, fl, info); err != nil {
+		t.Fatal(err)
+	}
+	var render types.Object
+	for id, o := range info.Defs {
+		if fn, ok := o.(*types.Func); ok && id.Name == "render" {
+			if r := fn.Signature().Recv(); r != nil && types.TypeString(r.Type(), nil) == "*github.com/ghbmrk/agentos/broker/enforcer/page.Server" {
+				render = fn
+			}
+		}
+	}
+	if render == nil {
+		t.Fatal("no (*Server).render")
+	}
+	exec := func(o types.Object) bool {
+		fn, ok := o.(*types.Func)
+		return ok && fn.Pkg() != nil && (fn.Pkg().Path() == "html/template" || fn.Pkg().Path() == "text/template") && (fn.Name() == "Execute" || fn.Name() == "ExecuteTemplate")
+	}
+	var names []string
+	for _, f := range fl {
+		var inRender []ast.Node
+		ast.Inspect(f, func(n ast.Node) bool {
+			if fd, ok := n.(*ast.FuncDecl); ok && info.Defs[fd.Name] == render {
+				inRender = append(inRender, fd)
+			}
+			return true
+		})
+		inside := func(p token.Pos) bool {
+			for _, n := range inRender {
+				if n.Pos() <= p && p < n.End() {
+					return true
+				}
+			}
+			return false
+		}
+		calls := map[*ast.Ident]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			c, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && info.Uses[sel.Sel] == render {
+				calls[sel.Sel] = true
+				if len(c.Args) != 4 {
+					t.Errorf("%s: render with %d arguments", fset.Position(c.Pos()), len(c.Args))
+					return true
+				}
+				v := info.Types[c.Args[2]].Value
+				if v == nil || v.Kind() != constant.String {
+					t.Errorf("%s: render's template name is not a constant", fset.Position(c.Pos()))
+					return true
+				}
+				names = append(names, constant.StringVal(v))
+			}
+			return true
+		})
+		for id, o := range info.Uses {
+			if fset.File(id.Pos()) != fset.File(f.Pos()) {
+				continue
+			}
+			if o == render && !calls[id] {
+				t.Errorf("%s: render is used other than by a call", fset.Position(id.Pos()))
+			}
+			if exec(o) && !inside(id.Pos()) {
+				t.Errorf("%s: a template is executed outside render", fset.Position(id.Pos()))
+			}
+		}
+	}
+	return names
 }
