@@ -1578,6 +1578,32 @@ class ConfigTest(unittest.TestCase):
         wait = sum(min(2 ** n, 60) for n in range(20))
         self.assertTrue(600 <= wait <= 1200, wait)
 
+    def test_build_apt_reads_only_the_pinned_files(self):
+        # #4591: the test above reads only the retry file, so a second file in the build's apt
+        # config (apt.conf.d, apt.conf, trusted.gpg.d, auth.conf.d, preferences.d) could set
+        # Acquire::AllowInsecureRepositories and pass on review alone. Every entry of the tree is
+        # pinned by path and kind, so any addition, symlink or rename here needs a deliberate edit.
+        tree = MK / "mkosi.pkgmngr"
+        got = []
+        for d, dirs, files in os.walk(tree):
+            for n in dirs + files:
+                p = pathlib.Path(d, n)
+                kind = "link" if p.is_symlink() else "dir" if p.is_dir() else "file"
+                got.append((p.relative_to(tree).as_posix(), kind))
+        self.assertEqual(sorted(got), [
+            ("etc", "dir"),
+            ("etc/apt", "dir"),
+            ("etc/apt/apt.conf.d", "dir"),
+            ("etc/apt/apt.conf.d/80-agentos-retries", "file"),
+            ("etc/apt/sources.list.d", "dir"),
+            ("etc/apt/sources.list.d/mkosi.sources", "file"),
+        ])
+        # mkosi v24.3 reads no other package-manager tree: no archive default, none beside the
+        # initrd's config, and no PackageManagerTrees= in the image's or the initrd's config.
+        self.assertEqual(sorted(MK.rglob("mkosi.pkgmngr*")), [tree])
+        for conf in (MK / "mkosi.conf", MK / "initrd/mkosi.conf"):
+            self.assertNotIn("PackageManagerTrees", conf.read_text(), conf)
+
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
         # Only Debian's main component, in mkosi.conf and in the build's apt sources, from the same
