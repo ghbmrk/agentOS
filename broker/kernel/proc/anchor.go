@@ -39,9 +39,9 @@ type CounterAnchor struct {
 	mu     sync.Mutex
 	dir    string
 	c      Counter
-	sign   ed25519.PrivateKey
-	n      uint64       // the counter's value, which numbers the file on disk
-	head   *kernel.Head // nil until the first Put
+	sign   **ed25519.PrivateKey // fmt prints it as an address in every verb, at any depth (DECOY-b-8)
+	n      uint64               // the counter's value, which numbers the file on disk
+	head   *kernel.Head         // nil until the first Put
 	broken bool
 	stop   func(i int) bool // tests: crash the file write after step i
 }
@@ -147,7 +147,7 @@ func OpenCounterAnchor(dir string, c Counter, sign ed25519.PrivateKey) (*Counter
 	if err != nil {
 		return nil, err
 	}
-	a := &CounterAnchor{dir: dir, c: c, sign: sign, n: n}
+	a := &CounterAnchor{dir: dir, c: c, sign: new(&sign), n: n}
 	switch {
 	case rec.N == n:
 		a.head = rec.Head
@@ -217,7 +217,7 @@ func (a *CounterAnchor) write(head, prev *kernel.Head) error {
 		a.broken = true
 		return errors.New("run: anchor counter at its limit")
 	}
-	b, err := signAnchor(a.sign, anchorRec{V: 1, N: a.n + 1, Head: head, Prev: prev})
+	b, err := signAnchor(**a.sign, anchorRec{V: 1, N: a.n + 1, Head: head, Prev: prev})
 	if err == nil {
 		err = privfile.WriteAtomic(a.dir, anchorName, b, a.stop)
 	}
