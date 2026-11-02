@@ -5,7 +5,7 @@ lint (#4677, Mark's option A on #4698).
 Which file is a unit's, which drop-ins apply and in what order, which name is an alias and which
 file a link or a mask hides are systemd's to decide, and two review rounds on #4737 each found
 another place a hand-written copy of its precedence went wrong. So this file decides none of it. It
-boots the tree's own /usr/lib/systemd/systemd as PID 1 of a container namespace (MANAGER: its own
+boots the tree's own /usr/lib/systemd/systemd as PID 1 of a container namespace (offline_systemd.Manager: its own
 mount, PID, network and cgroup namespaces, over an overlay of the tree, starting nothing), so its generators run and their output stays readable. It then asks that manager, over
 its private bus with the runner's own systemctl, for each unit name the tree's unit directories
 hold: `systemctl show -p Id,Names,LoadState,FragmentPath,DropInPaths`. That is a structured reply
@@ -39,11 +39,9 @@ import json
 import os
 import pathlib
 import re
-import signal
 import subprocess
 import sys
 import tempfile
-import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -229,127 +227,6 @@ class Provenance:
         return bool(links) or final in self.linked or not self.packaged(final)
 
 
-# The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
-# a mount over it), its own /usr, a private /proc, a /sys with only a cgroup2 tree in its own cgroup
-# namespace, five character devices and a console file, an empty /run, no network. It starts only
-# -.slice, which every manager has and which starts nothing, so nothing is planted (a planted
-# directory would hide a link of the tree's). Its argv after --unit= is the boot entry's command
-# line, which systemd in a container reads as the kernel's.
-MANAGER = r'''set -eu
-R=$1 USR=$2 PLANT=$3 CONSOLE=$4
-shift 4
-W=$(mktemp -d)
-mount -t tmpfs -o mode=755 tmpfs "$W"
-mkdir "$W/upper" "$W/work" "$W/root"
-[ -z "$PLANT" ] || cp -a "$PLANT/." "$W/upper/"
-mount -t overlay -o "lowerdir=$R,upperdir=$W/upper,workdir=$W/work" overlay "$W/root"
-N=$W/root
-mount --rbind "$USR" "$N/usr"
-mount -t proc -o nosuid,nodev,noexec proc "$N/proc"
-mount -t tmpfs -o mode=755 tmpfs "$N/sys"
-mkdir -p "$N/sys/fs/cgroup"
-mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
-mount -t tmpfs -o mode=755 tmpfs "$N/dev"
-for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
-: >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
-mount -t tmpfs -o mode=755 tmpfs "$N/run"
-mkdir -p "$N/tmp" && chmod 1777 "$N/tmp"
-exec env -i container=agentos-unit-lint "$(command -v chroot)" "$N" /usr/lib/systemd/systemd --unit=-.slice "$@"
-'''
-# The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
-# reaching its private bus through /proc/PID/root.
-CTL = r'''set -eu
-S=$1; shift
-mount -t tmpfs -o mode=755 tmpfs /run
-mkdir -p /run/systemd/system
-ln -s "$S" /run/systemd/private
-exec systemctl "$@"
-'''
-
-
-class Manager:
-    """The tree's systemd, running (see MANAGER). view is the tree exactly as it sees it."""
-
-    def __init__(self, root, usr, cmdline, plant):
-        self.log = tempfile.NamedTemporaryFile(prefix="unit-rules-console-")
-        wrap = []
-        if os.path.isdir("/run/systemd/system"):  # a runner booted by systemd: a delegated scope of our own
-            wrap = ["systemd-run", "--scope", "--quiet", "-p", "Delegate=yes", "--"]
-        self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-p", "-f", "-n", "-C", "--propagation", "private",
-                                             "sh", "-c", MANAGER, "unit-rules", str(root), str(usr), str(plant),
-                                             self.log.name] + cmdline.split(),
-                                     stdout=subprocess.DEVNULL, stderr=self.log)
-        self.pid = None
-        try:
-            self.wait()
-        except BaseException:
-            self.stop()
-            raise
-        self.view = View("/proc/%d/root" % self.pid)
-
-    def wait(self, timeout=120):
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if self.proc.poll() is not None:
-                break
-            try:
-                kids = open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)).read().split()
-            except OSError:
-                kids = []
-            if kids:
-                self.pid = int(kids[0])
-                r = self.ctl(["show", "-p", "SystemState", "--value"], check=False)
-                if r.returncode == 0 and r.stdout.strip() in ("running", "degraded"):
-                    return
-            time.sleep(0.2)
-        raise SystemExit("unit rules: the tree's systemd did not start: %s" % self.console())
-
-    def console(self):
-        try:
-            return pathlib.Path(self.log.name).read_text(errors="replace")[-3000:]
-        except OSError:
-            return ""
-
-    def ctl(self, args, check=True):
-        r = subprocess.run(["nsenter", "-t", str(self.pid), "-p", "--", "unshare", "-m", "--propagation", "private",
-                            "sh", "-c", CTL, "unit-rules-ctl", "/proc/%d/root/run/systemd/private" % self.pid] + args,
-                           capture_output=True, text=True, timeout=300)
-        if check and r.returncode != 0:
-            raise SystemExit("unit rules: systemctl %s: %s" % (" ".join(args[:3]), r.stderr[-2000:]))
-        return r
-
-    def show(self, units):
-        """{name: {prop: value}} for each of UNITS, one systemctl reply block each, in order."""
-        out = {}
-        for i in range(0, len(units), 200):
-            batch = units[i:i + 200]
-            text = self.ctl(["show", "--all", "-p", ",".join(PROPS), "--"] + batch).stdout
-            blocks = text.rstrip("\n").split("\n\n") if text.strip() else []
-            if len(blocks) != len(batch):
-                raise SystemExit("unit rules: systemctl gave %d blocks for %d units" % (len(blocks), len(batch)))
-            for name, block in zip(batch, blocks):
-                props = {}
-                for line in block.split("\n"):
-                    k, sep, v = line.partition("=")
-                    if not sep or k not in PROPS or k in props:
-                        raise SystemExit("unit rules: %s: systemctl line %r" % (name, line))
-                    props[k] = v
-                if set(props) != set(PROPS) or name not in props["Names"].split():
-                    raise SystemExit("unit rules: %s: systemctl gave %s" % (name, props))
-                out[name] = props
-        return out
-
-    def stop(self):
-        if self.pid:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        self.proc.kill()
-        self.proc.wait()
-        self.log.close()
-
-
 def tree_path(view, p):
     """p, a path systemd named, as the tree holds it: absolute, every byte SAFE or /, resolving to a
     regular file or to /dev/null. Else the run fails."""
@@ -359,6 +236,11 @@ def tree_path(view, p):
     if final != "/dev/null" and view.kind(final) != 0o100000:
         raise SystemExit("unit rules: systemd named %s, which the tree does not hold as a file" % p)
     return final
+
+
+def words(s, prop):
+    """A list property of one reply block, split as systemctl quotes it (offline_systemd.shell_words)."""
+    return offline_systemd.shell_words(s[prop], "%s %s" % (s["Id"], prop))
 
 
 def records(view, shown, dirs, prov):
@@ -371,14 +253,14 @@ def records(view, shown, dirs, prov):
             raise SystemExit("unit rules: %s: load state %r; systemd cannot load it" % (name, s["LoadState"]))
         if s["LoadState"] == "not-found":
             continue  # a name no unit loads under: its drop-ins are read alone below
-        own |= {n + ".d" for n in s["Names"].split()}
-        instances |= {template_of(n) for n in s["Names"].split()} - {None}
+        own |= {n + ".d" for n in words(s, "Names")}
+        instances |= {template_of(n) for n in words(s, "Names")} - {None}
         if s["LoadState"] == "masked" or s["Id"] in done:
             continue
         done.add(s["Id"])
         frag = [s["FragmentPath"]] if s["FragmentPath"] else []
         files = []
-        for p in frag + s["DropInPaths"].split():
+        for p in frag + words(s, "DropInPaths"):
             final = tree_path(view, p)
             if final != "/dev/null":  # a drop-in linked to /dev/null masks its name; nothing is read
                 files.append({"path": p, "ours": prov.ours(p), "text": view.text(final)})
@@ -403,6 +285,14 @@ def records(view, shown, dirs, prov):
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
     fstab = None
     final, _ = view.resolve("/etc/fstab")
+    if view.kind(final) == 0o100000 and not prov.ours("/etc/fstab"):
+        for line in view.text(final).split("\n"):
+            w = line.split()
+            if w and not w[0].startswith("#") and (w[0].startswith("/") or "=" in w[0]):
+                # fstab-generator skips a device line in the manager's container mode, so the unit a boot
+                # writes from a package's line would go unread (an fstab of ours is printed whole below)
+                raise SystemExit("unit rules: a package's /etc/fstab names a device, which systemd in a "
+                                 "container skips: %r" % line.strip())
     if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
     return {"units": recs, "fstab": fstab}
@@ -417,11 +307,12 @@ def lint(root, usr, cmdline, packaged, plant_files=None):
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text)
         os.chmod(plant, 0o755)
-        m = Manager(root, usr, cmdline, plant)
+        m = offline_systemd.Manager(root, usr, cmdline, plant)
         try:
-            dirs = unit_dirs(m.view)
-            shown = m.show(names(m.view, dirs))
-            return records(m.view, shown, dirs, Provenance(m.view, dirs, packaged(m.view)))
+            view = View(m.view_root)
+            dirs = unit_dirs(view)
+            shown = m.show(names(view, dirs), PROPS)
+            return records(view, shown, dirs, Provenance(view, dirs, packaged(view)))
         finally:
             m.stop()
 

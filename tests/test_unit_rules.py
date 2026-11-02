@@ -13,6 +13,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "image"))
+import offline_systemd  # noqa: E402
 import unit_rules as r  # noqa: E402
 
 LIB, ETC = "/usr/lib/systemd/system/", "/etc/systemd/system/"
@@ -200,6 +201,36 @@ class RecordsTest(unittest.TestCase):
                 ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])  # prefix: also alone
             self.assertIsNone(got["fstab"])
 
+    def test_a_quoted_list_entry_is_one_name(self):
+        # systemctl quotes a list entry with a backslash in it as a shell word (#4767): a\x2db.service
+        # must read as the unit that owns a\x2db.service.d, not as a name that loads nothing
+        files = {LIB + "a\\x2db.service": "[Service]\n", ETC + "a\\x2db.service.d/q.conf": "q"}
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, files)
+            dirs = r.unit_dirs(v)
+            n = "a\\x2db.service"
+            got = r.records(v, {n: {"Id": n, "Names": "'%s'" % n, "LoadState": "loaded", "FragmentPath": LIB + n,
+                                    "DropInPaths": "'%s'" % (ETC + n + ".d/q.conf")}},
+                            dirs, r.Provenance(v, dirs, lambda p: False))
+            self.assertEqual([(u["unit"], u["alone"], [f["path"] for f in u["files"]]) for u in got["units"]],
+                             [(n, False, [LIB + n, ETC + n + ".d/q.conf"])])
+
+    def test_a_packaged_fstab_may_not_name_a_device(self):
+        # fstab-generator skips a device line in a container, so its unit would go unread (#4767)
+        for text, refused in (("proc /proc proc defaults 0 0\n# /dev/x /y ext4\n", False),
+                              ("/dev/x /mnt ext4 ro 0 0\n", True), ("UUID=1 /mnt ext4 ro 0 0\n", True)):
+            for ours in (False, True):
+                with self.subTest(text=text, ours=ours), tempfile.TemporaryDirectory() as d:
+                    v = tree(d, {"/etc/fstab": text})
+                    dirs = r.unit_dirs(v)
+                    prov = r.Provenance(v, dirs, lambda p: not ours)
+                    if refused and not ours:
+                        with self.assertRaisesRegex(SystemExit, "names a device"):
+                            r.records(v, {}, dirs, prov)
+                    else:
+                        got = r.records(v, {}, dirs, prov)
+                        self.assertEqual(got["fstab"] is not None, ours)
+
     def test_what_systemd_names_must_be_in_the_tree(self):
         for name, units, want in (
                 ("an unknown load state", {"x.service": ("stub", "", [])}, "load state"),
@@ -215,9 +246,9 @@ class ShowTest(unittest.TestCase):
     """Manager.show() reads systemctl's reply block by block, and refuses one it cannot read whole."""
 
     def show(self, reply, units):
-        m = r.Manager.__new__(r.Manager)
+        m = offline_systemd.Manager.__new__(offline_systemd.Manager)
         m.ctl = lambda args: type("R", (), {"stdout": reply})()
-        return m.show(units)
+        return m.show(units, r.PROPS)
 
     def block(self, n, **kw):
         p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="")
