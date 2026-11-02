@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -149,15 +150,14 @@ func TestFileGateRefusesJournalsAndForeignWrites(t *testing.T) {
 		{"/dev/zero", unix.O_RDONLY},
 		{"/proc/self/mem", unix.O_RDONLY},
 		{"/proc/self/environ", unix.O_RDONLY},
-		{"/sys/kernel/mm/transparent_hugepage/enabled", unix.O_RDONLY},
+		{"/sys/kernel/uevent_seqnum", unix.O_RDONLY},
 	} {
+		// Each path exists on every Linux, so a missing one fails too.
 		if fd, err := openRaw(c.path, c.flag, 0); !errors.Is(err, errKind) {
 			if err == nil {
 				unix.Close(fd)
 			}
-			if !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("openRaw(%q) = %v, want it refused as a kind", c.path, err)
-			}
+			t.Errorf("openRaw(%q) = %v, want it refused as a kind", c.path, err)
 		}
 	}
 	fifo := filepath.Join(mine, "fifo")
@@ -205,5 +205,138 @@ func TestFileGateWritesOnlyItsOwnPlaces(t *testing.T) {
 	}
 	if err := writeNoFollow(filepath.Join(dir, "drop-in.conf.d"), nil, 0o644); !errors.Is(err, errWrite) {
 		t.Errorf("a write beside a writeFiles file = %v, want it refused", err)
+	}
+}
+
+// REQ: HW-10, ONB-3. The gate decides before an open acts (#4634): a
+// FIFO opened to block is refused at once, a write to a file with another
+// name (a hard link, whose other name may be outside writeDirs) is refused
+// before it truncates, a trailing slash names the directory itself and
+// not a name inside it, and the kernel's own filesystems (debugfs,
+// tracefs, securityfs and the rest) are refused as procfs and sysfs are.
+func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
+	mine, other := t.TempDir(), t.TempDir()
+	writeHere(t, mine)
+
+	fifo := filepath.Join(mine, "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.OpenRoot(mine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	for name, open := range map[string]func() error{
+		"openRaw": func() error {
+			fd, err := openRaw(fifo, unix.O_RDONLY, 0)
+			if err == nil {
+				unix.Close(fd)
+			}
+			return err
+		},
+		"writeNoFollow": func() error { return writeNoFollow(fifo, nil, 0o600) },
+		"rootOpen": func() error {
+			f, err := rootOpen(r, "fifo")
+			if err == nil {
+				f.Close()
+			}
+			return err
+		},
+	} {
+		done := make(chan error, 1)
+		go func() { done <- open() }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errKind) {
+				t.Errorf("%s(a FIFO, blocking) = %v, want it refused as a kind", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			// Open the other end so the blocked open returns.
+			if fd, err := unix.Open(fifo, unix.O_RDWR|unix.O_CLOEXEC, 0); err == nil {
+				defer unix.Close(fd)
+			}
+			t.Errorf("%s(a FIFO, blocking) waited on the FIFO before the check", name)
+		}
+	}
+
+	outside := filepath.Join(other, "unit.service")
+	if err := os.WriteFile(outside, []byte("ORIGINAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hard := filepath.Join(mine, "hard")
+	if err := os.Link(outside, hard); err != nil {
+		t.Fatal(err)
+	}
+	for _, flag := range []int{unix.O_WRONLY, unix.O_RDWR, unix.O_WRONLY | unix.O_TRUNC, unix.O_RDONLY | unix.O_TRUNC, unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC} {
+		if fd, err := openRaw(hard, flag, 0o600); !errors.Is(err, errWrite) {
+			if err == nil {
+				unix.Close(fd)
+			}
+			t.Errorf("openRaw(a hard link to a file outside, %#x) = %v, want the write refused", flag, err)
+		}
+	}
+	if err := writeNoFollow(hard, []byte("PLANTED"), 0o600); !errors.Is(err, errWrite) {
+		t.Errorf("writeNoFollow(a hard link to a file outside) = %v, want the write refused", err)
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "ORIGINAL" {
+		t.Errorf("a refused write through a hard link changed the file outside: %q", got)
+	}
+	if b, err := readNoFollow(hard); err != nil || string(b) != "ORIGINAL" {
+		t.Errorf("a read of a hard-linked file: %q, %v", b, err)
+	}
+
+	sub := filepath.Join(mine, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{sub + "/", sub + "//", mine + "/"} {
+		if fd, err := openRaw(p, unix.O_WRONLY|unix.O_CREAT, 0o600); err == nil {
+			unix.Close(fd)
+			t.Errorf("openRaw(%q, O_CREAT) opened something", p)
+		}
+		if err := symlink("x", p); err == nil {
+			t.Errorf("symlink(%q) made a link", p)
+		}
+	}
+	for _, p := range []string{filepath.Join(sub, "sub"), filepath.Join(mine, filepath.Base(mine))} {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a trailing slash made %q: %v", p, err)
+		}
+	}
+
+	link := filepath.Join(mine, "link")
+	if err := os.Symlink(filepath.Join(mine, "hard"), link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readNoFollow(link); !errors.Is(err, unix.ELOOP) {
+		t.Errorf("readNoFollow(a link) = %v, want ELOOP", err)
+	}
+
+	for name, magic := range map[string]int64{
+		"procfs": unix.PROC_SUPER_MAGIC, "sysfs": unix.SYSFS_MAGIC, "debugfs": unix.DEBUGFS_MAGIC,
+		"tracefs": unix.TRACEFS_MAGIC, "securityfs": unix.SECURITYFS_MAGIC, "configfs": 0x62656570,
+		"efivarfs": unix.EFIVARFS_MAGIC, "cgroupfs": unix.CGROUP_SUPER_MAGIC, "cgroup2": unix.CGROUP2_SUPER_MAGIC,
+		"bpffs": unix.BPF_FS_MAGIC, "pstore": unix.PSTOREFS_MAGIC,
+	} {
+		if !kernelFS[magic] {
+			t.Errorf("kernelFS does not hold %s", name)
+		}
+	}
+	// Where this host mounts one, a file on it is refused when opened.
+	for _, p := range []string{
+		"/sys/kernel/security/lsm", "/sys/kernel/tracing/trace", "/sys/kernel/debug/tracing/trace",
+		"/sys/fs/cgroup/cgroup.controllers", "/sys/fs/cgroup/cpu/tasks",
+	} {
+		var fs unix.Statfs_t
+		if unix.Statfs(p, &fs) != nil || !kernelFS[int64(fs.Type)] {
+			continue
+		}
+		if fd, err := openRaw(p, unix.O_RDONLY, 0); !errors.Is(err, errKind) {
+			if err == nil {
+				unix.Close(fd)
+			}
+			t.Errorf("openRaw(%q) = %v, want it refused as a kind", p, err)
+		}
 	}
 }
