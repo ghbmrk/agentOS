@@ -3,12 +3,20 @@ package page
 // REQ: CH-9
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -347,4 +355,183 @@ func TestSameSiteScreenKeepsPair(t *testing.T) {
 	// Drawn in the future (the clock went back): not kept.
 	g.now = g.now.Add(-reuseFor - time.Hour)
 	mints("drawn in the future", "same-origin", first)
+}
+
+// CH-9 (#4427): a pair passes guard for pairLife after its cookie was
+// drawn and not after, whether its screen minted it or kept it, and a
+// cookie the clock says was drawn in the future is refused. A screen that
+// keeps a cookie at reuseFor still has pairLife-reuseFor to be tapped.
+// Revert mutants: guard ignoring the age, ignoring the future, or
+// comparing with >= pairLife, each fail here.
+func TestPairLifetime(t *testing.T) {
+	if reuseFor <= 0 || pairLife-reuseFor < reuseFor {
+		t.Fatalf("reuseFor %v leaves a kept screen less than %v", reuseFor, pairLife-reuseFor)
+	}
+	g := fullRig(t)
+	g.screen()
+	c, tok := g.cookie, g.token
+	start := g.now
+	passes := func() bool {
+		t.Helper()
+		return !g.forged(g.s, http.MethodPost, "/approve", c, tok)
+	}
+	g.now = start.Add(reuseFor)
+	if set, kept := g.navigate("/", "same-origin", c); set != "" || kept != tok {
+		t.Fatalf("at reuseFor the screen did not keep the pair")
+	}
+	g.now = start.Add(pairLife)
+	if !passes() {
+		t.Error("a pair is refused at pairLife")
+	}
+	g.now = start.Add(pairLife + time.Millisecond)
+	if passes() {
+		t.Error("a pair passes past pairLife")
+	}
+	g.now = start.Add(-time.Millisecond)
+	if passes() {
+		t.Error("a pair whose cookie was drawn in the future passes")
+	}
+}
+
+// #4479: the cookie's tag and the screen's token are MACs under one key
+// with different labels, so neither can be taken for the other even over
+// the same bytes. Revert mutant: cookieLabel equal to tokenLabel fails.
+func TestTagAndTokenLabelsDiffer(t *testing.T) {
+	g := fullRig(t)
+	for _, n := range []int{0, nonceLen + 8, cookieLen} {
+		x := bytes.Repeat([]byte{7}, n)
+		if g.s.tag(x).equal(g.s.mac(x).secretSum) {
+			t.Errorf("tag and mac agree over %d bytes", n)
+		}
+	}
+}
+
+// #4427: a tag or a token is a secret, which == cannot compare (it holds
+// a slice). This pins its structure: secret's methods are exactly equal,
+// IssueToken, seal and Format; equal's body is the one hmac.Equal return;
+// no declaration outside secret's methods names its bytes; Go code never
+// calls IssueToken, and uses seal only as a cookie's Value; a template shows
+// the token only as .Token.IssueToken; fmt prints none of a secret formatted
+// itself; and the package imports neither reflect nor unsafe.
+// Out of scope (found only in review): fmt on a struct holding a secret in an
+// unexported field, seal into a throwaway cookie then compare, and Go-string
+// templates calling IssueToken.
+// Revert mutants, each failing here: a method reading secretSum, an exported
+// Bytes() accessor, equal rewritten as string(x)==string(b), a Go call of
+// IssueToken or seal whose result is held, a template printing .Token, a
+// package-level func literal reading secretSum, or Format removed.
+func TestSecretsLeaveOnlyByTheirExits(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var methods []string
+	for _, p := range pkgs {
+		for _, f := range p.Files {
+			for _, imp := range f.Imports {
+				if imp.Path.Value == `"reflect"` || imp.Path.Value == `"unsafe"` {
+					t.Errorf("%s imports %s", fset.Position(imp.Pos()), imp.Path.Value)
+				}
+			}
+			for _, d := range f.Decls {
+				name, own := "declaration", false
+				if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
+					if ts, ok := gd.Specs[0].(*ast.TypeSpec); ok && ts.Name.Name == "secret" {
+						continue
+					}
+				}
+				if fd, ok := d.(*ast.FuncDecl); ok {
+					name = fd.Name.Name
+					if fd.Recv != nil {
+						rt := fd.Recv.List[0].Type
+						if st, ok := rt.(*ast.StarExpr); ok {
+							rt = st.X
+						}
+						if id, ok := rt.(*ast.Ident); ok && id.Name == "secret" {
+							own = true
+							methods = append(methods, fd.Name.Name)
+							if fd.Name.Name == "equal" {
+								var sb strings.Builder
+								printer.Fprint(&sb, fset, fd.Body.List)
+								const want = "return len(x.secretSum) == sha256.Size && hmac.Equal(x.secretSum, b)"
+								if sb.String() != want {
+									t.Errorf("equal's body is %q, want %q", sb.String(), want)
+								}
+							}
+						}
+					}
+				}
+				var stack []ast.Node
+				ast.Inspect(d, func(n ast.Node) bool {
+					if n == nil {
+						stack = stack[:len(stack)-1]
+						return true
+					}
+					at := fset.Position(n.Pos())
+					if id, ok := n.(*ast.Ident); ok && id.Name == "secretSum" && !own {
+						t.Errorf("%s: %s reads a secret's bytes", at, name)
+					}
+					if sel, ok := n.(*ast.SelectorExpr); ok {
+						switch sel.Sel.Name {
+						case "IssueToken":
+							t.Errorf("%s: %s calls IssueToken; only a template may", at, name)
+						case "seal":
+							call, _ := stack[len(stack)-1].(*ast.CallExpr)
+							var kv *ast.KeyValueExpr
+							if len(stack) > 1 {
+								kv, _ = stack[len(stack)-2].(*ast.KeyValueExpr)
+							}
+							key, _ := func() (*ast.Ident, bool) {
+								if kv == nil {
+									return nil, false
+								}
+								k, ok := kv.Key.(*ast.Ident)
+								return k, ok
+							}()
+							if call == nil || call.Fun != sel || kv == nil || kv.Value != call || key == nil || key.Name != "Value" {
+								t.Errorf("%s: %s uses seal other than as a cookie's Value", at, name)
+							}
+						}
+					}
+					stack = append(stack, n)
+					return true
+				})
+			}
+		}
+	}
+	slices.Sort(methods)
+	if got, want := strings.Join(methods, ","), "Format,IssueToken,equal,seal"; got != want {
+		t.Errorf("secret's methods are %s, want %s", got, want)
+	}
+	tmpls, err := filepath.Glob("templates/*.html")
+	if err != nil || len(tmpls) == 0 {
+		t.Fatalf("no templates: %v", err)
+	}
+	reUse := regexp.MustCompile(`\.Token\b[^}]*`)
+	for _, name := range tmpls {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, u := range reUse.FindAllString(string(b), -1) {
+			if u != ".Token.IssueToken" {
+				t.Errorf("%s uses %q: a screen shows the token only as {{.Token.IssueToken}}", name, u)
+			}
+		}
+	}
+	x := secret{[]byte("\x01\x02canary")}
+	if out := fmt.Sprintf("%v %+v %#v %s %q %x %X %d %o %b %c %U", x, x, x, x, x, x, x, x, x, x, x, x); strings.Contains(out, "canary") ||
+		strings.Contains(out, "6361") || strings.Contains(out, "[1 2") || strings.Contains(out, "\\x01") {
+		t.Errorf("fmt prints a secret's bytes: %s", out)
+	}
+}
+
+// A zero secret equals nothing, not even an empty header token.
+func TestZeroSecretEqualsNothing(t *testing.T) {
+	for _, b := range [][]byte{nil, {}, make([]byte, 32)} {
+		if (secret{}).equal(b) {
+			t.Errorf("zero secret equals %d bytes", len(b))
+		}
+	}
 }
