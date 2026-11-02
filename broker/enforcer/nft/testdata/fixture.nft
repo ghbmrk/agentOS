@@ -17,6 +17,8 @@ table inet enforcer {
 	counter ap_admin { }
 	counter isp { }
 	counter core_edge { }
+	counter edge_out { }
+	counter cap_drop { }
 	counter t101_out { }
 	counter t101_in { }
 	counter t102_out { }
@@ -115,6 +117,16 @@ table inet enforcer {
 	set d103_6_6e170647b559182e {
 		type ipv6_addr;
 		flags timeout;
+	}
+	set capc_4 {
+		type ipv4_addr;
+		size 65535;
+		flags dynamic;
+	}
+	set capc_6 {
+		type ipv6_addr;
+		size 65535;
+		flags dynamic;
 	}
 	set host_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
@@ -249,6 +261,9 @@ table inet enforcer {
 		oifname "gst0" counter name "guests_in"
 		iifname "gst0" ct state new counter name "guests_conns"
 		ct state invalid drop
+		iifname "core0" oifname "wan0" ip daddr @core_4 jump cap_4
+		iifname "core0" oifname "wan0" ip6 daddr @core_6 jump cap_6
+		iifname "edge0" oifname "wan0" jump cap_edge
 		ct state related ct direction original iifname { "gst0", "own0", "hh0" } jump bound
 		ct state established,related jump forward_live
 		ct state established iifname vmap { "ap0.101" : jump t101_out_count, "ap0.102" : jump t102_out_count, "ap0.103" : jump t103_out_count, "ap0.104" : jump t104_out_count, "ap0.105" : jump t105_out_count, "ap0.106" : jump t106_out_count, "ap0.107" : jump t107_out_count }
@@ -464,6 +479,45 @@ table inet enforcer {
 		counter name "t107_in"
 		iifname "wan0" update @t107_4 { ip saddr counter }
 		iifname "wan0" update @t107_6 { ip6 saddr counter }
+	}
+	chain cap_4 {
+		ip daddr @ap_4 return
+		ip daddr @isp_4 return
+		ip daddr @nonglobal_4 return
+		update @capc_4 { ip daddr counter }
+		ip daddr != @capc_4 drop
+		goto capd_4
+	}
+	chain capd_4 {
+		drop
+	}
+	chain cap_6 {
+		ip6 daddr @ap_6 return
+		ip6 daddr @isp_6 return
+		ip6 daddr @nonglobal_6 return
+		update @capc_6 { ip6 daddr counter }
+		ip6 daddr != @capc_6 drop
+		goto capd_6
+	}
+	chain capd_6 {
+		drop
+	}
+	chain cap_edge {
+		ip daddr @ap_4 return
+		ip daddr @isp_4 return
+		ip daddr @nonglobal_4 return
+		ip6 daddr @ap_6 return
+		ip6 daddr @isp_6 return
+		ip6 daddr @nonglobal_6 return
+		counter name "edge_out"
+		goto capd_edge
+	}
+	chain capd_edge {
+		drop
+	}
+	chain cap_over {
+		limit rate 10/minute log prefix "enf cap " counter name "cap_drop" drop
+		counter name "cap_drop" drop
 	}
 	chain output {
 		type filter hook output priority filter; policy accept;

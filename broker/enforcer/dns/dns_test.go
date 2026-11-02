@@ -40,6 +40,7 @@ func fixturePolicy() policy.Document {
 	return policy.Document{
 		Version:      7,
 		Destinations: []string{"core.example", "updates.core.example"},
+		Caps:         map[string]uint64{"core.example": 1 << 40, "updates.core.example": 1 << 40},
 		Devices: []policy.Device{
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example", "cdn.example"}, VendorCloud: true, Everyday: true},
 			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Allow: []string{"speaker.example"}, Everyday: true},

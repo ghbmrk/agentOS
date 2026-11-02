@@ -2,6 +2,8 @@ package nft
 
 import (
 	"net/netip"
+	"slices"
+	"testing"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
@@ -27,6 +29,8 @@ func fixturePolicy() policy.Document {
 	return policy.Document{
 		Version:      7,
 		Destinations: []string{"core.example"},
+		Caps:         map[string]uint64{"core.example": 1 << 40},
+		EdgeCap:      1 << 40,
 		Devices: []policy.Device{
 			{ID: "tv", Network: policy.NetDevices, WiFi: "vlan101", Allow: []string{"tv.example"}, VendorCloud: true, Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}}},
 			{ID: "speaker", Network: policy.NetDevices, WiFi: "vlan102", Everyday: true, Control: []policy.Port{{Proto: policy.ProtoTCP, Num: 80}, {Proto: policy.ProtoUDP, Num: 123}}},
@@ -41,4 +45,26 @@ func fixturePolicy() policy.Document {
 		},
 		Pairs: []policy.Pair{{A: "laptop", B: "printer"}, {A: "sensor-a", B: "sensor-b"}, {A: "old-tv", B: "laptop"}},
 	}
+}
+
+// fresh is the drop state of a day with nothing sent yet under d: each
+// destination its own group with its own cap, as traffic.NewCounter with
+// traffic.CapsOf(d) gives before any reading.
+func fresh(d policy.Document) Drop {
+	p := Drop{Day: 20000, EdgeCap: d.EdgeCap}
+	for _, n := range slices.Compact(slices.Sorted(slices.Values(d.Destinations))) {
+		p.Groups = append(p.Groups, DropGroup{Dests: []string{n}, Caps: []uint64{d.Caps[n]}, Cap: d.Caps[n]})
+	}
+	return p
+}
+
+// withDrops is a full load of text, compiled from d, with d's fresh drop
+// state appended, as the enforcer appends the counter's to every load.
+func withDrops(t testing.TB, d policy.Document, text string) string {
+	t.Helper()
+	drops, err := Drops(d, fixtureLayout(), nil, fresh(d))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return text + drops
 }
