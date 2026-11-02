@@ -87,6 +87,16 @@ func TestHeardOwnNames(t *testing.T) {
 	if got := f.Heard("ap0.105", t0.Add(ownHold)); len(got) != 0 {
 		t.Errorf("past ownHold: %q", got)
 	}
+	// A goodbye proves no host for an SRV beside it.
+	f.Prove("ap0.105", printerLink, response([]record{a("gone.local", "10.13.0.2", 0), srv("Gone._ipp._tcp.local", "gone.local", 120)}, nil), t0)
+	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Gone" }) {
+		t.Errorf("an SRV on a host saying goodbye was heard: %q", got)
+	}
+	// One name said twice with one TTL keeps the first spelling.
+	f.Prove("ap0.105", printerLink, response([]record{a("Twice.local", "10.13.0.2", 120), a("TWICE.local", "fd00:13::2", 120)}, nil), t0)
+	if got := f.Heard("ap0.105", t0); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Twice" }) {
+		t.Errorf("the first spelling was not kept: %q", got)
+	}
 	// Only the interface it was heard on.
 	if got := f.Heard("ap0.106", t0); len(got) != 0 {
 		t.Errorf("another interface heard %q", got)
