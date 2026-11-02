@@ -124,6 +124,8 @@ pending broker/cmd/agentos-unlock #3940 the kernel side
 pending broker/cmd/agentos-enroll #3940 the kernel side
 pending broker/clerk/seal #3940 the kernel side
 pending broker/cmd/agentosd #3941 agentosd
+pending broker/localui #4636 agentos-localui, root for its -admit-port1 step (agentos-localui.service)
+pending broker/cmd/agentos-localui #4636 agentos-localui, root for its -admit-port1 step
 pending broker/durable #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/journal #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5
 pending broker/vault #2542 old core (tools/old_core.txt), frozen and deleted by MIG-5

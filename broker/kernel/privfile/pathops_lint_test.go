@@ -7,16 +7,25 @@ package privfile
 // other uid that can plant one in a directory on it redirects the write,
 // removal or read (#3282, #3382, #3624). The root side is derived, not
 // listed: every binary a shipped .service or .socket unit (#4330) starts
-// with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
-// each Exec program a plain absolute path, read across continued lines,
-// sections, quotes and ;, with no substitution in what a wrapper runs
-// (#4390, #4494); every broker binary named as a mount, umount, fsck or
-// mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
-// plain type and no helper option (#4380), and over a tree root reads or
-// runs no bind, move or loop, a source only a device under /dev outside
-// openDevs, with no .. step or % specifier, options of only letters,
-// digits and =,_-./, and a tmpfs only with a mode no other uid writes
-// (#4516);
+// as root, each Exec program a plain absolute path, read across continued
+// lines, sections, quotes and ;, with no substitution in what a wrapper
+// runs (#4390, #4494). A root unit is closed (D-271): a unit is root as
+// main classes it (a true DynamicUser= with no User= runs as the unit
+// name's prefix, root.service included), or when it has a + or ! line or a
+// true PermissionsStartOnly=, a .socket handing its socket to one is root,
+// and no unit sets PAMName= and no pam.d file ships; root_commands.txt
+// pins each of its commands whole and each of its pinnedKeys settings, an
+// inertKeys key needs no pin and any other key fails, a root script's $$
+// names only what systemd sets and no setting of its unit may set, no
+// manager file sets an environment, every broker binary a root-run pin
+// names, bare or absolute, counts, and no pinned path is reached through a
+// link a mkosi.extra or overlay tree ships (#4493); every broker binary
+// named as a mount, umount, fsck or mkfs helper, a .mount unit, mount
+// drop-in or fstab line naming only a plain type and no helper option
+// (#4380), and over a tree root reads or runs no bind, move or loop, a
+// source only a device under /dev outside openDevs, with no .. step or %
+// specifier, options of only letters, digits and =,_-./, and a tmpfs only
+// with a mode no other uid writes (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
 // or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
@@ -45,14 +54,15 @@ package privfile
 // lines a package rather than image/ or broker/ ships, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
-// operations of non-root host processes are outside the check, as is what
-// a wrapper or shell in a root command runs beyond the absolute broker paths
-// it names (a bare name on PATH, a relative path, a shell's own expansion,
-// a change of directory, a program in a tree another uid writes: #4493,
-// which replaces this with an allow-list of root programs), a mount drop-in
-// read alone for a packaged unit, whose type the lint does not see, and a
-// root unit's own namespace and search settings (RootDirectory=,
-// BindPaths=, TemporaryFileSystem=, WorkingDirectory=, PATH=; #4589).
+// operations of non-root host processes are outside the check, as are a
+// listed program's reason (that it runs nothing its arguments name, and
+// starts only the +<path> broker binaries its line names) and a pin's (that
+// it runs no program but those its reason names, such as one a pinned shell
+// script names, and no broker binary but its whole-word paths), the
+// binaries of a root unit's commands that run under its non-root User= (a
+// line with no + prefix: pinned whole, not counted), a mount drop-in read
+// alone for a packaged unit, whose type the lint does not see, and a link
+// the build makes rather than a mkosi.extra or overlay tree ships (#4589).
 
 import (
 	"fmt"
@@ -63,6 +73,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -338,33 +349,41 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	if bins := set(t, files); len(bins) != 0 {
 		t.Fatalf("units that all set User=: got %q, want no root-side binary", bins)
 	}
-	for name, unit := range map[string]string{
-		"a unit without User=":                "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -x @uid:y\n",
-		"a + line in a unit with User=":       "[Service]\nUser=agentos-side\nExecStartPre=+/usr/lib/agentos/agentos-side\n",
-		"a unit whose User= is commented out": "[Service]\n# User=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
+	for name, c := range map[string]struct{ unit, pins string }{
+		"a unit without User=":                {"[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -x @uid:y\n", pins("agentos-side.service " + "/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-side -x @uid:y")},
+		"a + line in a unit with User=":       {"[Service]\nUser=agentos-side\nExecStartPre=+/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=agentos-side")},
+		"a unit whose User= is commented out": {"[Service]\n# User=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side")},
 		// #4390: what systemd joins, splits or unquotes is read as it does.
-		"a wrapper's continued line":       "[Service]\nExecStart=/usr/lib/agentos/with-uids \\\n# a comment inside the run\n\t/usr/lib/agentos/agentos-side -x\n",
-		"a second command after ;":         "[Service]\nExecStartPre=/bin/true ; /usr/lib/agentos/agentos-side\n",
-		"a quoted program":                 "[Service]\nExecStart=\"/usr/lib/agentos/agentos-side\"\n",
-		"a path in a shell script":         "[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side'\n",
-		"a path after = in an argument":    "[Service]\nExecStart=/usr/lib/agentos/launch -run=/usr/lib/agentos/agentos-side\n",
-		"an empty reset, then a root line": "[Service]\nExecStart=\nExecStart=-/usr/lib/agentos/agentos-side\n",
+		"a wrapper's continued line":       {"[Service]\nExecStart=/usr/lib/agentos/with-uids \\\n# a comment inside the run\n\t/usr/lib/agentos/agentos-side -x\n", pins("agentos-side.service " + "/usr/lib/agentos/with-uids\n\t/usr/lib/agentos/agentos-side '-x'")},
+		"a second command after ;":         {"[Service]\nExecStartPre=/bin/true ; /usr/lib/agentos/agentos-side\n", pins("agentos-side.service /bin/true", "agentos-side.service /usr/lib/agentos/agentos-side")},
+		"a path in a shell script":         {"[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side'\n", pins("agentos-side.service /bin/sh -c 'exec /usr/lib/agentos/agentos-side'")},
+		"a path after = in an argument":    {"[Service]\nExecStart=/usr/lib/agentos/launch -run=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/launch -run=/usr/lib/agentos/agentos-side")},
+		"a shell's own $( in a script":     {"[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'\n", pins("agentos-side.service /bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'")},
+		"a quoted program":                 {"[Service]\nExecStart=\"/usr/lib/agentos/agentos-side\"\n", pins("agentos-side.service /usr/lib/agentos/agentos-side")},
+		"an empty reset, then a root line": {"[Service]\nExecStart=\nExecStart=-/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side")},
 		// #4494 Security 1: only an unescaped last backslash continues.
-		"a line ending in an escaped backslash": "[Service]\nEnvironment=A=x\\\\\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a blank after a backslash":             "[Service]\nSyslogIdentifier=x \\ \nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a User= outside [Service]":             "[Unit]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a [Socket] User= in a .service":        "[Socket]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a template User=%i":                    "[Service]\nUser=%i\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a template User=r%i":                   "[Service]\nUser=r%i\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"a template User=0%i":                   "[Service]\nUser=0%i\nExecStart=/usr/lib/agentos/agentos-side\n",
-		"literal $$ and %%":                     "[Service]\nExecStart=/usr/lib/agentos/agentos-side -x $$HOME 100%%\n",
-		"a shell's own $( in a script":          "[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'\n",
+		"a line ending in an escaped backslash": {"[Service]\nEnvironment=A=x\\\\\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service Environment=A=x\\\\")},
+		"a blank after a backslash":             {"[Service]\nSyslogIdentifier=x \\ \nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side")},
+		"a User= outside [Service]":             {"[Unit]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=agentos-side")},
+		"a [Socket] User= in a .service":        {"[Socket]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=agentos-side")},
+		"a template User=%i":                    {"[Service]\nUser=%i\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=%i")},
+		"a template User=r%i":                   {"[Service]\nUser=r%i\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=r%i")},
+		"a template User=0%i":                   {"[Service]\nUser=0%i\nExecStart=/usr/lib/agentos/agentos-side\n", pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=0%i")},
+		"literal $$ and %%":                     {"[Service]\nExecStart=/usr/lib/agentos/agentos-side -x $$EXIT_CODE 100%%\n", pins("agentos-side.service /usr/lib/agentos/agentos-side -x $$EXIT_CODE 100%%")},
+		// D-271: a pinned command counts each whole word naming a broker
+		// binary (agentos-unlock's -exec), and a listed script the binaries
+		// its line says it starts.
+		"a pinned command's -exec program": {"[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-other -exec /usr/lib/agentos/agentos-side --\n", pins("agentos-side.service " + "/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-other -exec /usr/lib/agentos/agentos-side --")},
+		"a pinned shell":                   {"[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side' /usr/lib/agentos/agentos-side\n", pins("agentos-side.service " + "/bin/sh -c 'exec /usr/lib/agentos/agentos-side' /usr/lib/agentos/agentos-side")},
+		"a listed script's started binary": {"[Service]\nExecStart=/usr/lib/agentos/health\n", "# a script that runs agentos-side\n# +/usr/lib/agentos/agentos-side\nagentos-side.service /usr/lib/agentos/health\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
-			files["image/mkosi/agentos-side.service"] = unit
-			if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
-				t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
+			files["image/mkosi/agentos-side.service"] = c.unit
+			files[commandsFile] = c.pins
+			bins := set(t, files)
+			if want := "./cmd/agentos-side"; !slices.Contains(bins, want) || len(bins) > 2 {
+				t.Fatalf("got %q, want %s", bins, want)
 			}
 			if problems := lintFiles(t, files, ""); len(problems) != 1 || !strings.Contains(problems[0], "broker/side/side.go") {
 				t.Fatalf("the binary's linked package: got %q, want its os.Remove refused", problems)
@@ -373,12 +392,18 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	}
 	// A .socket's Exec lines run under its own User= like a .service's
 	// (#4330); a socket with none runs them as root.
-	for name, c := range map[string]struct{ path, text string }{
-		"a .socket without User=":          {"image/mkosi/agentos-side.socket", "[Socket]\nListenStream=/run/x\nExecStartPre=/usr/lib/agentos/agentos-side\n"},
-		"a + line in a .socket with User=": {"image/mkosi/agentos-side.socket", "[Socket]\nUser=agentos-side\nExecStopPost=+/usr/lib/agentos/agentos-side\n"},
-		"a .socket drop-in with User=root": {"image/mkosi/agentos-side.socket.d/z.conf", "[Socket]\nUser=root\n"},
-		"a socket.d drop-in with User=0":   {"image/mkosi/socket.d/z.conf", "[Socket]\nUser=0\n"},
-		"a service.d drop-in with User=":   {"image/mkosi/service.d/z.conf", "[Service]\nUser=\n"},
+	socketPin := pins("agentos-side.socket /usr/lib/agentos/agentos-side", "agentos-side.socket User=agentos-side")
+	for name, c := range map[string]struct{ path, text, pins string }{
+		"a .socket without User=":          {"image/mkosi/agentos-side.socket", "[Socket]\nListenStream=/run/x\nExecStartPre=/usr/lib/agentos/agentos-side\n", pins("agentos-side.socket /usr/lib/agentos/agentos-side", "agentos-side.socket ListenStream=/run/x")},
+		"a + line in a .socket with User=": {"image/mkosi/agentos-side.socket", "[Socket]\nUser=agentos-side\nExecStopPost=+/usr/lib/agentos/agentos-side\n", socketPin},
+		"a .socket drop-in with User=root": {"image/mkosi/agentos-side.socket.d/z.conf", "[Socket]\nUser=root\n", socketPin + pins("agentos-side.socket User=root")},
+		"a socket.d drop-in with User=0":   {"image/mkosi/socket.d/z.conf", "[Socket]\nUser=0\n", socketPin + pins("agentos-side.socket User=0")},
+		// service.d reaches every service, agentos-other's too.
+		"a service.d drop-in with User=": {"image/mkosi/service.d/z.conf", "[Service]\nUser=\n",
+			pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-other.service /usr/lib/agentos/agentos-other",
+				"agentos-side.service User=agentos-side", "agentos-side.service User=", "agentos-other.service User=agentos-other", "agentos-other.service User=",
+				// The socket hands its socket to the now root service.
+				"agentos-side.socket /usr/lib/agentos/agentos-side", "agentos-side.socket User=agentos-side")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -387,7 +412,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 				t.Fatalf("a .socket with User=: got %q, want none", bins)
 			}
 			files[c.path] = c.text
-			// service.d reaches every service, agentos-other's too.
+			files[commandsFile] = c.pins
 			if bins := set(t, files); len(bins) == 0 || bins[0] != "./cmd/agentos-side" {
 				t.Fatalf("got %q, want ./cmd/agentos-side first", bins)
 			}
@@ -443,6 +468,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
 			files[c.path] = c.text
+			files[commandsFile] = pins("agentos-side.service /bin/true")
 			if bins, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
 			}
@@ -452,6 +478,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	t.Run("a root unit whose paths name a binary it does not run", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-side.service"] = "[Service]\nExecStart=/bin/true\nExecPaths=/usr/lib/agentos/agentos-side\nExecSearchPath=/usr/lib/agentos/agentos-side\n"
+		files[commandsFile] = pins("agentos-side.service /bin/true", "agentos-side.service ExecPaths=/usr/lib/agentos/agentos-side", "agentos-side.service ExecSearchPath=/usr/lib/agentos/agentos-side")
 		if bins := set(t, files); len(bins) != 0 {
 			t.Fatalf("got %q, want none", bins)
 		}
@@ -459,6 +486,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	t.Run("a [Service] User= in a .socket", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-side.socket"] = "[Service]\nUser=agentos-side\n[Socket]\nExecStartPre=/usr/lib/agentos/agentos-side\n"
+		files[commandsFile] = socketPin // a [Service] line is a setting of the .socket too
 		if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
 			t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
 		}
@@ -466,10 +494,12 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	t.Run("refuses a pinned variable another env file may fill", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=AGENTOS_OWNER=\nEnvironmentFile=-/etc/agentos/agentosd.env\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		files[commandsFile] = agentosdPinned + pins("agentosd.service Environment=AGENTOS_OWNER=", "agentosd.service EnvironmentFile=-/etc/agentos/agentosd.env")
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatalf("the pinned env file alone: %v", err)
 		}
 		files["image/mkosi/agentosd.service.d/z.conf"] = "[Service]\nEnvironmentFile=/var/tmp/x.env\n"
+		files[commandsFile] += pins("agentosd.service EnvironmentFile=/var/tmp/x.env")
 		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "holds a $ substitution") {
 			t.Fatalf("got %v, want a refusal", err)
 		}
@@ -488,6 +518,12 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			"[Service]\nEnvironment=AGENTOS_OWNER=\nPassEnvironment=AGENTOS_OWNER\n": false,
 		} {
 			files["image/mkosi/agentosd.service.d/z.conf"] = dropin
+			files[commandsFile] = agentosdPinned + pins("agentosd.service Environment=AGENTOS_OWNER=")
+			for _, l := range strings.Split(strings.TrimPrefix(dropin, "[Service]\n"), "\n") {
+				if l != "" && l != "Environment=AGENTOS_OWNER=" {
+					files[commandsFile] += pins("agentosd.service " + l)
+				}
+			}
 			if _, err := rootBinaries(fakeRepo(t, files)); (err == nil) != ok || err != nil && !strings.Contains(err.Error(), "holds a $ substitution") {
 				t.Errorf("drop-in %q: got %v, want accepted %v", dropin, err, ok)
 			}
@@ -496,6 +532,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	t.Run("a pinned variable where unitVars pins it", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=OTHER=1 AGENTOS_OWNER=\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		files[commandsFile] = agentosdPinned + pins("agentosd.service Environment=OTHER=1 AGENTOS_OWNER=")
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
 		}
@@ -503,6 +540,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	t.Run("a binary a build line names", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-other.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-other\n"
+		files[commandsFile] = pins("agentos-other.service /usr/lib/agentos/agentos-other")
 		if bins := set(t, files); len(bins) != 1 || bins[0] != "./other" {
 			t.Fatalf("got %q, want [./other]", bins)
 		}
@@ -516,6 +554,8 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		t.Run("a drop-in resetting the user: "+name, func(t *testing.T) {
 			files := clone(files)
 			files["image/mkosi/agentos-side.service.d/z.conf"] = dropin
+			k, v, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(dropin, "[Service]\n")), "=")
+			files[commandsFile] = pins("agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=agentos-side", "agentos-side.service "+k+"="+v)
 			if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
 				t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
 			}
@@ -529,9 +569,13 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			t.Fatalf("got %q, want none", bins)
 		}
 		delete(files, "image/mkosi/agentos-side.service.d/user.conf")
-		files["image/mkosi/agentos-.service.d/user.conf"] = "[Service]\nDynamicUser=yes\n"
+		files["image/mkosi/agentos-.service.d/user.conf"] = "[Service]\nUser=agentos-side\n"
 		if bins := set(t, files); len(bins) != 0 {
 			t.Fatalf("a prefix drop-in: got %q, want none", bins)
+		}
+		files["image/mkosi/agentos-.service.d/user.conf"] = "[Service]\nDynamicUser=yes\n"
+		if bins := set(t, files); len(bins) != 0 {
+			t.Fatalf("a prefix drop-in with DynamicUser=yes: got %q, want none", bins)
 		}
 	})
 }
@@ -815,7 +859,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	files := map[string]string{
 		"broker/side/side.go":                     "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
 		"broker/cmd/agentos-side/main.go":         "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
-		"image/mkosi/agentos-side.service":        "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\nExecStartPre=+/opt/x/agentos-x\nExecStartPre=+/var/run/agentos-v/x\n",
+		"image/mkosi/agentos-side.service":        "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\nExecStartPre=+/opt/x/agentos-x\nExecStartPre=+/run/agentos-v/x\n",
 		modprobe:                                  "# agentos-side\nblacklist btusb\n\talias usb:v1 btusb\noptions btusb x=1\nsoftdep btusb pre: btmtk\nweakdep btusb btmtk\ninstall btusb /bin/false\n",
 		sysctl:                                    "; agentos-side\n# kernel.modprobe=/usr/lib/agentos/agentos-side\nkernel.core_pattern = core.%p\nfs.suid_dumpable=0\n-kernel.hotplug\n-net.ipv4.ip_forward = 0\n",
 		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
@@ -824,6 +868,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		tmpfiles:                            "# w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\nd /var/lib/agentos-x 0700 agentos-x agentos-x -\nd /var/lib/agentos-y 0770 - agentos-y\nz /etc/agentos 0755 root agentos-x\nz /sys/class/leds/x/brightness 0660 root root -\nw /proc/sys/kernel/core_pattern - - - - core.%p\nw- /proc/sys/vm/swappiness - - - - 10\nR /var/tmp/agentos-x\nd /var/tmp/agentos-y 1777 root root -\nd /run/agentos-y :0750 root root -\nz /run/agentos-y ~0755\n",
 		extra + "usr/lib/tmpfiles.d/README": "w /proc/sys/kernel/modprobe - - - - /usr/lib/agentos/agentos-side\n",
 		programsFile:                        "/bin/false exits 1\n/usr/lib/agentos/agentos-side the binary under test\n",
+		commandsFile:                        pins("agentos-side.service /opt/x/agentos-x", "agentos-side.service /run/agentos-v/x", "agentos-side.service /usr/lib/agentos/agentos-side", "agentos-side.service User=agentos-side"),
 	}
 	set := func(t *testing.T, files map[string]string) ([]string, error) {
 		t.Helper()
@@ -956,7 +1001,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles writable /var/run rules dir": {tmpfiles, "d /var/run/udev/rules.d 0777\n", `in or above /run/udev`},
 		"a tmpfiles owned /var/run modprobe.d":   {tmpfiles, "d /var/run/modprobe.d 0755 nobody\n", `in or above /run/modprobe.d`},
 		"a tmpfiles writable /var/run":           {tmpfiles, "z /var/run 0777\n", `in or above /run/systemd`},
-		"a tmpfiles owned /var/run unit program": {tmpfiles, "z /run/agentos-v/x 0755 agentos-side\n", `in or above /run/agentos-v/x`},
+		"a tmpfiles owned /var/run unit program": {tmpfiles, "z /var/run/agentos-v/x 0755 agentos-side\n", `in or above /run/agentos-v/x`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -990,8 +1035,13 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 			files := clone(files)
 			files[programsFile] = "/bin/false exits 1\n"
 			files["image/mkosi/agentos-side.service"] += "ExecStartPre=+" + prog + "\n"
-			if _, err := set(t, files); err != nil {
+			files[commandsFile] += pins("agentos-side.service " + prog)
+			// D-271 item 8: a pin spelled through an alias fails alone.
+			if _, err := set(t, files); unalias(prog) != prog && (err == nil || !strings.Contains(err.Error(), "by a link every image has")) || unalias(prog) == prog && err != nil {
 				t.Fatalf("%s alone: %v", prog, err)
+			}
+			if unalias(prog) != prog {
+				continue
 			}
 			files[tmpfiles] += "z " + grant + " 0755 nobody\n"
 			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "which root reads or runs") {
@@ -1009,29 +1059,427 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	})
 }
 
-func TestUnitVarsAreUsed(t *testing.T) {
-	used := map[string]bool{}
-	err := filepath.WalkDir(filepath.Join(repoRoot(t), "image"), func(p string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !unitTypes[filepath.Ext(p)] && !strings.HasSuffix(p, ".conf") {
-			return err
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		for name := range unitVars {
-			if strings.Contains(string(b), "${"+name+"}") {
-				used[name] = true
+// D-271: every command a unit runs as root is pinned whole, word for word,
+// in its unit, on top of the checks above. A shell, wrapper or other runner
+// that no pin admits runs nothing as root, whichever spelling hides what it
+// runs (#4493; #4559 Security delta 3 1 and 2).
+func TestRootCommandsArePinned(t *testing.T) {
+	const (
+		unit     = "image/mkosi/agentos-v.service"
+		tmpfiles = "image/mkosi/mkosi.extra/usr/lib/tmpfiles.d/agentos-x.conf"
+		extra    = "image/mkosi/mkosi.extra"
+		overlay  = "image/camnode/external/board/qemu/overlay"
+		pinned   = "/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-other -exec /usr/lib/agentos/agentos-side --"
+	)
+	files := map[string]string{
+		"broker/side/side.go":              "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
+		"broker/cmd/agentos-side/main.go":  "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
+		"broker/cmd/agentos-other/main.go": "package main\n\nfunc main() {}\n",
+		unit:                               "[Service]\nExecStart=" + pinned + "\nExecStartPost=/usr/bin/rm -f /run/x\n",
+		commandsFile: "# a header\n\n# with-uids execs agentos-other, which execs its -exec program\nagentos-v.service " + pinned + "\n\n" +
+			"# rm runs no program\nagentos-v.service /usr/bin/rm -f /run/x\n",
+	}
+	set := func(t *testing.T, files map[string]string, links map[string]string) ([]string, error) {
+		t.Helper()
+		root := fakeRepo(t, files)
+		for name, target := range links {
+			p := filepath.Join(root, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, p); err != nil {
+				t.Fatal(err)
 			}
 		}
-		return nil
+		return rootBinaries(root)
+	}
+	if bins, err := set(t, files, nil); err != nil || !slices.Equal(bins, []string{"./cmd/agentos-other", "./cmd/agentos-side"}) {
+		t.Fatalf("two pinned commands: got %q, %v, want both binaries the pin names", bins, err)
+	}
+	type change struct {
+		files map[string]string // path -> text it gets, or "+" text appended
+		links map[string]string
+		want  string
+	}
+	add := func(path, text string) map[string]string { return map[string]string{path: "+" + text} }
+	cmd := func(c string) map[string]string { return add(unit, "ExecStartPre="+c+"\n") }
+	// script pins a script whose reason says it starts agentos-side.
+	script := func(prog string) string {
+		return "\n# a script that runs agentos-side\n# +" + prog + "\nagentos-v.service /usr/lib/agentos/s\n"
+	}
+	const unpinned = "pins no such command of this unit"
+	for name, c := range map[string]change{
+		// #4559 Security delta 3 2: a program that changes its directory or
+		// root before it runs a relative name is no pin, whatever option
+		// spells the change.
+		"nsenter's --root":            {files: cmd("/usr/bin/nsenter -t 1 --root=tmp /helper"), want: unpinned},
+		"unshare -R":                  {files: cmd("/usr/bin/unshare -R tmp /helper"), want: unpinned},
+		"unshare --root":              {files: cmd("/usr/bin/unshare --root=tmp /helper"), want: unpinned},
+		"start-stop-daemon -d":        {files: cmd("/usr/sbin/start-stop-daemon --start -d tmp --exec /bin/sh -- x"), want: unpinned},
+		"make -C":                     {files: cmd("/usr/bin/make -C tmp"), want: unpinned},
+		"find -execdir":               {files: cmd("/usr/bin/find tmp -name x -execdir sh x"), want: unpinned},
+		"capsh --chroot":              {files: cmd("/usr/sbin/capsh --chroot=tmp -- -c x"), want: unpinned},
+		"systemd-nspawn -D":           {files: cmd("/usr/bin/systemd-nspawn -D tmp /helper"), want: unpinned},
+		"a shell's bare name":         {files: cmd("/bin/sh -c 'exec agentos-camnode'"), want: unpinned},
+		"a shell's quote-joined name": {files: cmd("/bin/sh -c 'exec agentos-\"si\"de'"), want: unpinned},
+		"a shell's cd":                {files: cmd("/usr/bin/sh -c 'cd /tmp && ./x'"), want: unpinned},
+		"env":                         {files: cmd("/usr/bin/env agentos-side"), want: unpinned},
+		"flock -c":                    {files: cmd("/usr/bin/flock /run/x -c agentos-side"), want: unpinned},
+		"systemd-run":                 {files: cmd("/usr/bin/systemd-run agentos-side"), want: unpinned},
+		"nft -f a world file":         {files: cmd("/usr/sbin/nft -f /tmp/rules.nft"), want: unpinned},
+		"rm in a world tree":          {files: cmd("/usr/bin/rm -rf /tmp/d/x"), want: unpinned},
+		// #4493: with-uids runs only what a pin names.
+		"with-uids unpinned":                {files: cmd("/usr/lib/agentos/with-uids /usr/lib/agentos/r/tmp/agentos-side"), want: unpinned},
+		"a pinned command with a word more": {files: cmd(pinned + " -runsc /tmp/x"), want: unpinned},
+		"a pinned command with a word less": {files: cmd("/usr/lib/agentos/with-uids /usr/lib/agentos/agentos-other -exec /usr/lib/agentos/agentos-side"), want: unpinned},
+		"a pinned command in another unit":  {files: map[string]string{"image/mkosi/agentos-w.service": "[Service]\nExecStart=" + pinned + "\n"}, want: unpinned},
+		"a pinned command on a + line":      {files: map[string]string{"image/mkosi/agentos-w.service": "[Service]\nUser=agentos-w\nExecStopPost=+/usr/bin/rm -f /run/x\n"}, want: unpinned},
+		"a drop-in on a packaged unit":      {files: map[string]string{"image/mkosi/mkosi.extra/usr/lib/systemd/system/systemd-x.service.d/z.conf": "[Service]\nExecStart=\nExecStart=/usr/bin/rm -f /run/x\n"}, want: unpinned},
+		// Pin lines.
+		"a pin with no reason":         {files: add(commandsFile, "\nagentos-v.service /usr/bin/rm -x\n"), want: "want the entry's reason"},
+		"a stray continuation":         {files: add(commandsFile, "\n\t-x\n"), want: "a continuation with no entry"},
+		"two commands in one pin":      {files: add(commandsFile, "\n# r\nagentos-v.service /usr/bin/rm ; /usr/bin/rm\n"), want: "want \"<unit> <one command"},
+		"a relative pinned program":    {files: add(commandsFile, "\n# r\nagentos-v.service rm -f\n"), want: "want \"<unit> <one command"},
+		"an unclean pinned program":    {files: add(commandsFile, "\n# r\nagentos-v.service /usr/../bin/rm\n"), want: "want \"<unit> <one command"},
+		"a pin with no unit type":      {files: add(commandsFile, "\n# r\nagentos-v /usr/bin/rm\n"), want: "want \"<unit> <one command"},
+		"a pin with an unclosed quote": {files: add(commandsFile, "\n# r\nagentos-v.service /usr/bin/rm 'x\n"), want: "an unclosed '"},
+		"a doubled pin":                {files: add(commandsFile, "\n# again\nagentos-v.service "+pinned+"\n"), want: "the command line 4 pins"},
+		"a pin no unit runs":           {files: add(commandsFile, "\n# r\nagentos-v.service /usr/bin/true -x\n"), want: "runs nowhere as root"},
+		"a pin of a non-root command":  {files: map[string]string{unit: "[Service]\nUser=agentos-v\nExecStart=" + pinned + "\n"}, want: "runs nowhere as root"},
+		"a relative started program":   {files: add(commandsFile, script("agentos-side")), want: "+<plain absolute path>"},
+		// #4559 Security delta 3 1: a pinned path reached through a link the
+		// image ships, or through /var/run, names another program than the
+		// pin reads.
+		"a pinned program that is a link": {files: map[string]string{commandsFile: "+\n# r\nagentos-v.service /usr/lib/agentos/helper\n", unit: "+ExecStartPre=/usr/lib/agentos/helper\n"},
+			links: map[string]string{extra + "/usr/lib/agentos/helper": "agentos-side"}, want: "image/mkosi/mkosi.extra/usr/lib/agentos/helper is a link"},
+		"a pinned program under a linked directory": {files: map[string]string{commandsFile: "+\n# r\nagentos-v.service /usr/lib/agentos/r/tmp/x\n", unit: "+ExecStartPre=/usr/lib/agentos/r/tmp/x\n"},
+			links: map[string]string{extra + "/usr/lib/agentos/r": "/var"}, want: "mkosi.extra/usr/lib/agentos/r is a link"},
+		"a relative link with a .. step": {files: map[string]string{commandsFile: "+\n# r\nagentos-v.service /usr/lib/agentos/r/agentos-side\n", unit: "+ExecStartPre=/usr/lib/agentos/r/agentos-side\n"},
+			links: map[string]string{extra + "/usr/lib/agentos/r": "../../../var/lock/../shm"}, want: "mkosi.extra/usr/lib/agentos/r is a link"},
+		"an overlay link": {files: map[string]string{commandsFile: "+\n# r\nagentos-v.service /usr/lib/agentos/helper\n", unit: "+ExecStartPre=/usr/lib/agentos/helper\n"},
+			links: map[string]string{overlay + "/usr/lib/agentos/helper": "agentos-side"}, want: "overlay/usr/lib/agentos/helper is a link"},
+		"a linked started program": {files: map[string]string{commandsFile: "+" + script("/usr/lib/agentos/helper"), unit: "+ExecStartPre=/usr/lib/agentos/s\n"},
+			links: map[string]string{extra + "/usr/lib/agentos/helper": "agentos-side"}, want: "helper is a link"},
+		"a linked pinned word": {links: map[string]string{extra + "/usr/lib/agentos/agentos-side": "/var/tmp/x"}, want: "agentos-side is a link"},
+		"a pinned /var/run word": {files: map[string]string{commandsFile: "+\n# r\nagentos-v.service /var/run/agentos-v/x\n", unit: "+ExecStartPre=/var/run/agentos-v/x\n"},
+			want: "is /run/agentos-v/x by a link every image has"},
+		// D-271 Security 3: a setting outside the pin changes what a pinned
+		// command runs or reads.
+		"a $$ name a drop-in's Environment= sets": {files: map[string]string{
+			unit:                                     "+ExecStartPre=/usr/bin/sh -c 'exec /usr/lib/agentos/with-uids $$P'\n",
+			commandsFile:                             "+\n# r\nagentos-v.service /usr/bin/sh -c 'exec /usr/lib/agentos/with-uids $$P'\n\n# r\nagentos-v.service Environment=P=/usr/lib/agentos/agentos-side\n",
+			"image/mkosi/agentos-v.service.d/z.conf": "[Service]\nEnvironment=P=/usr/lib/agentos/agentos-side\n"}, want: "reads $P"},
+		"a $${} name the unit sets": {files: map[string]string{
+			unit:         "+Environment=P=/usr/lib/agentos/agentos-side\nExecStartPre=/usr/bin/sh -c 'exec $${P}'\n",
+			commandsFile: "+\n# r\nagentos-v.service /usr/bin/sh -c 'exec $${P}'\n\n# r\nagentos-v.service Environment=P=/usr/lib/agentos/agentos-side\n"}, want: "reads $P"},
+		"a $$ name with an env file": {files: map[string]string{
+			unit:         "+EnvironmentFile=-/var/tmp/x.env\nExecStartPre=/usr/bin/sh -c 'exec /usr/sbin/nft -f $$F'\n",
+			commandsFile: "+\n# r\nagentos-v.service /usr/bin/sh -c 'exec /usr/sbin/nft -f $$F'\n\n# r\nagentos-v.service EnvironmentFile=-/var/tmp/x.env\n"}, want: "reads $F"},
+		"a $$ name the manager passes": {files: map[string]string{
+			unit:         "+PassEnvironment=F\nExecStartPre=/usr/bin/sh -c 'exec /usr/sbin/nft -f $$F'\n",
+			commandsFile: "+\n# r\nagentos-v.service /usr/bin/sh -c 'exec /usr/sbin/nft -f $$F'\n\n# r\nagentos-v.service PassEnvironment=F\n"}, want: "reads $F"},
+		"an unpinned setting":                             {files: add(unit, "Environment=X=1\n"), want: "pins no such setting"},
+		"a changed setting":                               {files: map[string]string{unit: "+Environment=X=2\n", commandsFile: "+\n# r\nagentos-v.service Environment=X=1\n"}, want: "pins no such setting"},
+		"a doubled setting":                               {files: map[string]string{unit: "+Environment=X=1\n", commandsFile: "+\n# r\nagentos-v.service Environment=X=1\n\n# again\nagentos-v.service Environment=X=1\n"}, want: "the setting line 10 pins"},
+		"a pinned setting of a unit with no root command": {files: map[string]string{"image/mkosi/agentos-w.service": "[Service]\nUser=w\nEnvironment=X=1\nExecStart=/usr/bin/rm -f /run/x\n", commandsFile: "+\n# r\nagentos-w.service Environment=X=1\n"}, want: "runs nowhere as root"},
+		// #4617 Security R-b: a . or .. step in a pinned path word.
+		"a .. step in a pinned word": {files: map[string]string{unit: "+ExecStartPre=/usr/bin/rm -f /run/../tmp/x\n", commandsFile: "+\n# r\nagentos-v.service /usr/bin/rm -f /run/../tmp/x\n"}, want: "holds a .. step"},
+		"a . step in a pinned word":  {files: map[string]string{unit: "+ExecStartPre=/usr/bin/rm -f ./x\n", commandsFile: "+\n# r\nagentos-v.service /usr/bin/rm -f ./x\n"}, want: "holds a . step"},
+		// #4423 extended: no other uid writes a program a pin says it starts.
+		"a writable started program outside rootTrees": {files: map[string]string{commandsFile: "+" + script("/opt/y/agentos-side"), unit: "+ExecStartPre=/usr/lib/agentos/s\n", tmpfiles: "z /opt/y/agentos-side 0775\n"},
+			want: "in or above /opt/y/agentos-side"},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := clone(files)
+			for p, text := range c.files {
+				if more, ok := strings.CutPrefix(text, "+"); ok {
+					text = files[p] + more
+				}
+				files[p] = text
+			}
+			if bins, err := set(t, files, c.links); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %q, %v, want a refusal with %q", bins, err, c.want)
+			}
+		})
+	}
+	for key := range pinnedKeys {
+		t.Run("refuses an unpinned "+key+" drop-in on a root unit", func(t *testing.T) {
+			files := clone(files)
+			val := "/var/tmp/r:/etc/agentos"
+			if key == "User" {
+				val = "root" // a non-root User= would end the unit's root commands
+			}
+			files["image/mkosi/agentos-v.service.d/z.conf"] = "[Service]\n" + key + "=" + val + "\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "pins no such setting") {
+				t.Fatalf("got %v, want the setting refused", err)
+			}
+			files[commandsFile] += "\n# r\nagentos-v.service " + key + "=" + val + "\n"
+			if _, err := set(t, files, nil); err != nil {
+				t.Fatalf("pinned: %v", err)
+			}
+		})
+	}
+	// D-271 item 2: every key of a root unit is on one closed list.
+	t.Run("an inert key needs no pin, an unknown key fails", func(t *testing.T) {
+		files := clone(files)
+		files[unit] += "ProtectSystem=strict\nPrivateTmp=yes\nInaccessiblePaths=/x\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatalf("inert keys: %v", err)
+		}
+		for _, line := range []string{"[Service]\nFrobnicate=1\n", "[Unit]\nFrobnicate=1\n", "[Install]\nFrobnicate=1\n"} {
+			files["image/mkosi/agentos-v.service.d/z.conf"] = line
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "on neither pinnedKeys nor inertKeys") {
+				t.Fatalf("%q: got %v, want the key refused", line, err)
+			}
+		}
 	})
-	if err != nil {
-		t.Fatal(err)
+	t.Run("a key on both lists", func(t *testing.T) {
+		for k := range inertKeys {
+			if pinnedKeys[k] || commandKeys[k] {
+				t.Errorf("%s is on two lists", k)
+			}
+		}
+	})
+	t.Run("a unit with no root command needs no setting pinned", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/agentos-w.service"] = "[Service]\nUser=w\nFrobnicate=1\nEnvironment=X=1\nExecStart=/usr/bin/rm -f /run/x\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// D-271 item 1: a .socket handing its socket to a root unit is root;
+	// a true DynamicUser= ends a templated User='s root.
+	t.Run("a socket handing to a root service", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/agentos-v.socket"] = "[Socket]\nUser=w\nExecStartPre=/usr/bin/rm -f /run/y\n"
+		if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "agentos-v.socket: ExecStartPre=") {
+			t.Fatalf("got %v, want the socket's command refused", err)
+		}
+		files[commandsFile] += "\n# r\nagentos-v.socket /usr/bin/rm -f /run/y\nagentos-v.socket User=w\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatal(err)
+		}
+		files["image/mkosi/agentos-v.service.d/user.conf"] = "[Service]\nUser=v\n"
+		if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "runs nowhere as root") {
+			t.Fatalf("a non-root service: got %v, want the socket's pins stale", err)
+		}
+	})
+	for name, c := range map[string]struct {
+		user string
+		root bool
+	}{
+		"User=%i":                        {"User=%i\n", true},
+		"User=x-$X":                      {"User=x-$X\n", true},
+		"User=x-%i, DynamicUser=yes":     {"User=x-%i\nDynamicUser=yes\n", false},
+		"User=r%i, DynamicUser=yes":      {"User=r%i\nDynamicUser=yes\n", true},
+		"DynamicUser=yes":                {"DynamicUser=yes\n", false},
+		"User=, DynamicUser=yes":         {"User=\nDynamicUser=yes\n", false},
+		"User=w, User=, DynamicUser=yes": {"User=w\nUser=\nDynamicUser=yes\n", false},
+		"User=":                          {"User=\n", true},
+		"User=w, DynamicUser=yes":        {"User=w\nDynamicUser=yes\n", false},
+		"PermissionsStartOnly=yes":       {"User=w\nPermissionsStartOnly=yes\n", true},
+		"PermissionsStartOnly=no":        {"User=w\nPermissionsStartOnly=no\n", false},
+		"User=root, DynamicUser=yes":     {"User=root\nDynamicUser=yes\n", true},
+		"DynamicUser=yes, then no":       {"DynamicUser=yes\nDynamicUser=no\n", true},
+		"User=w":                         {"User=w\n", false},
+		"User=w, then User=%i":           {"User=w\nUser=%i\n", true},
+		"User=w, DynamicUser=false":      {"User=w\nDynamicUser=false\n", true},
+	} {
+		t.Run("a unit with "+name, func(t *testing.T) {
+			files := clone(files)
+			files["image/mkosi/agentos-w@.service"] = "[Service]\n" + c.user + "ExecStart=/usr/bin/rm -f /run/x\n"
+			_, err := set(t, files, nil)
+			if root := err != nil && strings.Contains(err.Error(), "agentos-w@.service: ExecStart="); root != c.root {
+				t.Fatalf("got %v, want root %v", err, c.root)
+			}
+		})
+	}
+	// D-271 item 1: DynamicUser= with no User= runs as the unit name's
+	// prefix, a reused static user, root included.
+	for _, unit := range []string{"root.service", "root@.service", "0@.service"} {
+		t.Run("a DynamicUser= unit named "+unit, func(t *testing.T) {
+			files := clone(files)
+			files["image/mkosi/"+unit] = "[Service]\nDynamicUser=yes\nUser=\nExecStart=/usr/bin/rm -f /run/x\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), unit+": ExecStart=") {
+				t.Fatalf("got %v, want the unit's command refused", err)
+			}
+			files["image/mkosi/"+unit] = "[Service]\nDynamicUser=yes\nExecStart=/usr/bin/rm -f /run/x\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), unit+": ExecStart=") {
+				t.Fatalf("no User=: got %v, want the unit's command refused", err)
+			}
+			// A later empty User= resets an earlier literal one.
+			files["image/mkosi/"+unit] = "[Service]\nUser=w\nDynamicUser=yes\nExecStart=/usr/bin/rm -f /run/x\n"
+			files["image/mkosi/"+unit+".d/z.conf"] = "[Service]\nUser=\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), unit+": ExecStart=") {
+				t.Fatalf("a reset User=: got %v, want the unit's command refused", err)
+			}
+		})
+	}
+	t.Run("refuses a pam.d file", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/mkosi.extra/etc/pam.d/agentos"] = "auth required pam_permit.so\n"
+		if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "a pam.d file runs its stack as root") {
+			t.Fatalf("got %v, want the pam.d file refused", err)
+		}
+	})
+	for name, unit := range map[string]string{
+		"a root unit":     "[Service]\nPAMName=login\nExecStart=/usr/bin/rm -f /run/x\n",
+		"a non-root unit": "[Service]\nUser=w\nPAMName=login\nExecStart=/usr/bin/rm -f /run/x\n",
+	} {
+		t.Run("refuses PAMName= on "+name, func(t *testing.T) {
+			files := clone(files)
+			files["image/mkosi/agentos-w.service"] = unit
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "PAMName=login: PAM runs") {
+				t.Fatalf("got %v, want PAMName= refused", err)
+			}
+		})
+	}
+	// D-271 item 5: $$ names only what systemd sets after the manager,
+	// and only when no setting of the unit may set it.
+	for name, setting := range map[string]string{
+		"Environment=":         "Environment=\"A=1 SERVICE_RESULT=success\"\n",
+		"PassEnvironment=":     "PassEnvironment=SERVICE_RESULT\n",
+		"any EnvironmentFile=": "EnvironmentFile=-/etc/agentos/x.env\n",
+	} {
+		t.Run("refuses $$SERVICE_RESULT with "+name, func(t *testing.T) {
+			files := clone(files)
+			const script = "/usr/bin/sh -c 'echo $$SERVICE_RESULT'"
+			files[unit] += "ExecStopPost=" + script + "\n" + setting
+			k, v, _ := strings.Cut(strings.TrimSpace(setting), "=")
+			files[commandsFile] += "\n# r\nagentos-v.service " + script + "\nagentos-v.service " + k + "=" + v + "\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "may set") {
+				t.Fatalf("got %v, want the $$ name refused", err)
+			}
+		})
+	}
+	for _, w := range []string{"$$HOME", "$${PATH}", "x$$IFS", "$${SERVICE_RESULTX}"} {
+		t.Run("refuses a root script reading "+w, func(t *testing.T) {
+			files := clone(files)
+			script := "/usr/bin/sh -c 'echo " + w + "'"
+			files[unit] += "ExecStopPost=" + script + "\n"
+			files[commandsFile] += "\n# r\nagentos-v.service " + script + "\n"
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "reads only $SERVICE_RESULT") {
+				t.Fatalf("got %v, want the $$ name refused", err)
+			}
+		})
+	}
+	t.Run("the names systemd sets", func(t *testing.T) {
+		files := clone(files)
+		const script = "/usr/bin/sh -c 'echo $$EXIT_CODE $${EXIT_STATUS} $${SERVICE_RESULT}'"
+		files[unit] += "ExecStopPost=" + script + "\n"
+		files[commandsFile] += "\n# r\nagentos-v.service " + script + "\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// D-271 item 6: no manager-wide environment.
+	for name, c := range map[string]struct{ path, text string }{
+		"DefaultEnvironment":              {"image/mkosi/mkosi.extra/etc/systemd/system.conf", "[Manager]\nDefaultEnvironment=PATH=/tmp\n"},
+		"ManagerEnvironment in a drop-in": {"image/mkosi/mkosi.extra/usr/lib/systemd/system.conf.d/z.conf", "[Manager]\nManagerEnvironment=X=1\n"},
+		"a backslash-joined key":          {"image/mkosi/mkosi.extra/etc/systemd/system.conf", "[Manager]\nDefault\\\nEnvironment=X=1\n"},
+		"systemd.setenv=":                 {"image/mkosi/mkosi.conf", "[Content]\nKernelCommandLine=quiet systemd.setenv=PATH=/tmp\n"},
+		"systemd.setenv= continued":       {"image/mkosi/mkosi.conf.d/z.conf", "[Content]\nKernelCommandLine=quiet\n    systemd.setenv=PATH=/tmp\n"},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
+			files := clone(files)
+			files[c.path] = c.text
+			if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "sets every unit's environment") {
+				t.Fatalf("got %v, want the manager environment refused", err)
+			}
+		})
+	}
+	t.Run("a manager file with no environment", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/mkosi.extra/etc/systemd/system.conf"] = "[Manager]\n#DefaultEnvironment=X=1\nDefaultTimeoutStopSec=10s\n"
+		files["image/mkosi/mkosi.conf"] = "[Content]\nKernelCommandLine=quiet systemd.log_level=info\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("a $$ name nothing sets, and $$$$", func(t *testing.T) {
+		files := clone(files)
+		const script = "/usr/bin/sh -c 'if [ \"$$SERVICE_RESULT\" != success ]; then echo $$$$; fi'"
+		files[unit] += "ExecStopPost=" + script + "\n"
+		files[commandsFile] += "\n# r\nagentos-v.service " + script + "\n"
+		if _, err := set(t, files, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("a bare name in a pinned script counts, an account name does not", func(t *testing.T) {
+		files := clone(files)
+		files[unit] = "[Service]\nExecStart=/usr/bin/sh -c 'exec agentos-side'\nExecStartPost=/usr/bin/install -o @uid:agentos-other -d /run/x\n"
+		files[commandsFile] = "# r\nagentos-v.service /usr/bin/sh -c 'exec agentos-side'\n\n# r\nagentos-v.service /usr/bin/install -o @uid:agentos-other -d /run/x\n"
+		if bins, err := set(t, files, nil); err != nil || !slices.Equal(bins, []string{"./cmd/agentos-side"}) {
+			t.Fatalf("got %q, %v, want [./cmd/agentos-side]", bins, err)
+		}
+	})
+	t.Run("a pinned script counts what its reason says it starts", func(t *testing.T) {
+		files := clone(files)
+		files[commandsFile] = script("/usr/lib/agentos/agentos-side")
+		files[unit] = "[Service]\nExecStart=/usr/lib/agentos/s\n"
+		if bins, err := set(t, files, nil); err != nil || !slices.Equal(bins, []string{"./cmd/agentos-side"}) {
+			t.Fatalf("got %q, %v, want [./cmd/agentos-side]", bins, err)
+		}
+	})
+	t.Run("a drop-in on a packaged unit is root", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/mkosi.extra/usr/lib/systemd/system/systemd-x.service.d/z.conf"] = "[Service]\nExecStart=\nExecStart=/usr/lib/agentos/agentos-side\n"
+		files[commandsFile] += "\n# r\nsystemd-x.service /usr/lib/agentos/agentos-side\n"
+		if bins, err := set(t, files, nil); err != nil || !slices.Equal(bins, []string{"./cmd/agentos-other", "./cmd/agentos-side"}) {
+			t.Fatalf("got %q, %v", bins, err)
+		}
+		files["image/mkosi/mkosi.extra/usr/lib/systemd/system/systemd-x.service.d/user.conf"] = "[Service]\nUser=x\n"
+		if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "runs nowhere as root") {
+			t.Fatalf("a drop-in that sets User=: got %v, want its pin stale", err)
+		}
+	})
+	t.Run("a unit under broker", func(t *testing.T) {
+		files := clone(files)
+		files["broker/cmd/agentos-side/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side -x\n"
+		if _, err := set(t, files, nil); err == nil || !strings.Contains(err.Error(), "broker/cmd/agentos-side/agentos-side.service: ExecStart=") {
+			t.Fatalf("got %v, want the broker unit's command refused", err)
+		}
+	})
+	t.Run("the shipped units", func(t *testing.T) {
+		bins, err := rootBinaries(repoRoot(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// agentos-keeper-kernel.service's pin names agentos-unlock's -exec
+		// program, and agentos-localui.service under broker/ runs a + line.
+		for _, want := range []string{"./cmd/agentos-unlock", "./cmd/agentos-kernel", "./cmd/agentosd", "./cmd/agentos-link", "./cmd/agentos-localui"} {
+			if !slices.Contains(bins, want) {
+				t.Errorf("root side %q lacks %s", bins, want)
+			}
+		}
+	})
+}
+
+func TestUnitVarsAreUsed(t *testing.T) {
+	used := map[string]bool{}
+	for _, tree := range []string{"image", "broker"} {
+		err := filepath.WalkDir(filepath.Join(repoRoot(t), tree), func(p string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !unitTypes[filepath.Ext(p)] && !strings.HasSuffix(p, ".conf") {
+				return err
+			}
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			for name := range unitVars {
+				if strings.Contains(string(b), "${"+name+"}") {
+					used[name] = true
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name := range unitVars {
 		if !used[name] {
-			t.Errorf("unitVars lists %s, which no unit under image/ passes", name)
+			t.Errorf("unitVars lists %s, which no unit under image/ or broker/ passes", name)
 		}
 	}
 }
@@ -1071,8 +1519,8 @@ func TestStaleAllowEntryFails(t *testing.T) {
 }
 
 // lintFiles lints a fake repository holding files and, unless files names
-// one, a unit that starts ./cmd/agentos-side as root and a main that links
-// broker/side.
+// one, a unit that starts ./cmd/agentos-side as root, with its pin, and a
+// main that links broker/side.
 func lintFiles(t *testing.T, files map[string]string, allow string) []string {
 	t.Helper()
 	files = clone(files)
@@ -1081,9 +1529,22 @@ func lintFiles(t *testing.T, files map[string]string, allow string) []string {
 	}
 	if _, ok := files["image/mkosi/agentos-side.service"]; !ok {
 		files["image/mkosi/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side\n"
+		files[commandsFile] += pins("agentos-side.service /usr/lib/agentos/agentos-side")
 	}
 	return lintRepo(t, fakeRepo(t, files), allow)
 }
+
+// pins is a commandsFile pinning each "<unit> <command>" entry.
+func pins(entries ...string) string {
+	var b strings.Builder
+	for _, e := range entries {
+		b.WriteString("# synthetic\n" + e + "\n\n")
+	}
+	return b.String()
+}
+
+// agentosdPinned pins agentosd.service's synthetic root command.
+const agentosdPinned = "# with-uids execs agentosd\nagentosd.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
 
 func fakeRepo(t *testing.T, files map[string]string) string {
 	t.Helper()
@@ -1303,7 +1764,9 @@ func mayBeRoot(v string) bool {
 // shipped Exec line passes fails (TestUnitVarsAreUsed).
 var unitVars = map[string]unitVar{
 	"AGENTOS_OWNER": {"agentosd.service", []string{"/usr/lib/agentos/with-uids", "/usr/lib/agentos/agentosd"}, "-owner", "-/etc/agentos/agentosd.env",
-		"agentosd's -owner value: the unit's AGENTOS_OWNER= overrides the manager's environment, and only /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6) fills it; with-uids runs agentosd, its first argument, and passes this one on as data"},
+		"agentosd's -owner value: the unit's AGENTOS_OWNER= overrides the manager's environment, and only /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6) fills it; with-uids runs agentosd, its first argument, and passes this one on as data", true},
+	"AGENTOS_PAGE_IFACE": {"agentos-localui.service", []string{"/usr/lib/agentos/agentos-localui"}, "-iface", "",
+		"agentos-localui's -iface value, port 1's interface name: no Environment=, PassEnvironment= or EnvironmentFile= of the unit names it, so only the manager's environment could fill it, which D-271 item 6 keeps empty on the image (a test harness's own drop-in sets it); agentos-localui only names an interface with it", false},
 }
 
 // unitVar pins where a unitVars variable may appear: only in unit, in a
@@ -1320,6 +1783,7 @@ type unitVar struct {
 	flag    string
 	envFile string
 	reason  string
+	clear   bool // the unit must clear it (NAME=) against the manager's environment
 }
 
 // envLine is one Environment=, EnvironmentFile= or PassEnvironment= of a
@@ -1385,7 +1849,7 @@ func allowedVar(unit string, words []string, i int, env []envLine) bool {
 			return false
 		}
 	}
-	return cleared
+	return cleared || !v.clear
 }
 
 // substitutes reports whether w holds a substitution systemd makes: a %
@@ -1486,9 +1950,302 @@ func dotdot(p string) bool {
 	return false
 }
 
+// accountWord is a with-uids account reference: @uid:NAME or @gid:NAME.
+var accountWord = regexp.MustCompile(`@[ug]id:[A-Za-z0-9_.-]+`)
+
 // nameToken is a run of the bytes of a word that can belong to a program's name;
 // any other ends a token (a quote, =, :, ;, $, a parenthesis or blank).
 var nameToken = regexp.MustCompile(`[A-Za-z0-9_./@+-]+`)
+
+// commandKeys are the Exec keys whose values are commands.
+var commandKeys = map[string]bool{
+	"ExecCondition": true, "ExecStartPre": true, "ExecStart": true, "ExecStartPost": true, "ExecReload": true,
+	"ExecStop": true, "ExecStopPost": true, "ExecStopPre": true,
+}
+
+// pinnedKeys decide what a root unit's command runs, reads, receives or is
+// named by, or which other units run with it: each line of one is pinned,
+// key and value, in commandsFile (D-271 item 2). When in doubt a key is
+// pinned.
+var pinnedKeys = map[string]bool{
+	// The other Exec keys, and the environment.
+	"ExecPaths": true, "ExecSearchPath": true,
+	"Environment": true, "EnvironmentFile": true, "PassEnvironment": true, "UnsetEnvironment": true,
+	// Who it runs as, and what it may do beyond a plain uid.
+	"User": true, "Group": true, "DynamicUser": true, "SupplementaryGroups": true, "AmbientCapabilities": true,
+	"Delegate": true, "Slice": true, "UMask": true,
+	// The paths it sees.
+	"BindPaths": true, "BindReadOnlyPaths": true, "RootDirectory": true, "RootImage": true, "RootImageOptions": true,
+	"MountImages": true, "ExtensionImages": true, "ExtensionDirectories": true, "TemporaryFileSystem": true,
+	"WorkingDirectory": true, "ReadWritePaths": true, "DeviceAllow": true, "IPAddressAllow": true,
+	// Its input and output, and what the manager opens or makes for it.
+	"StandardInput": true, "StandardOutput": true, "StandardError": true, "TTYPath": true, "OpenFile": true,
+	"LoadCredential": true, "LoadCredentialEncrypted": true, "SetCredential": true, "SetCredentialEncrypted": true,
+	"ImportCredential": true,
+	"StateDirectory":   true, "RuntimeDirectory": true, "CacheDirectory": true, "LogsDirectory": true, "ConfigurationDirectory": true,
+	"StateDirectoryMode": true, "RuntimeDirectoryMode": true, "CacheDirectoryMode": true, "LogsDirectoryMode": true,
+	"ConfigurationDirectoryMode": true, "RuntimeDirectoryPreserve": true, "JoinsNamespaceOf": true,
+	"NetworkNamespacePath": true, "IPCNamespacePath": true, "BPFProgram": true, "IPIngressFilterPath": true,
+	"IPEgressFilterPath": true, "LogNamespace": true,
+	// Keys that set a variable for its commands, or run its pre and post
+	// commands as root (which makes the unit root, D-271 item 1).
+	"Type": true, "WatchdogSec": true, "MemoryPressureWatch": true, "PermissionsStartOnly": true,
+	// The units that run with it, and its names.
+	"Requires": true, "Requisite": true, "Wants": true, "BindsTo": true, "PartOf": true, "Upholds": true,
+	"Conflicts": true, "OnFailure": true, "OnSuccess": true, "DefaultDependencies": true,
+	"WantedBy": true, "RequiredBy": true, "UpheldBy": true, "Alias": true, "DefaultInstance": true, "Also": true,
+	// A .path or .timer unit's unit, and a .path unit's paths.
+	"Unit": true, "PathExists": true, "PathExistsGlob": true, "PathChanged": true, "PathModified": true,
+	"DirectoryNotEmpty": true, "MakeDirectory": true,
+	// A handed socket's.
+	"Service": true, "Accept": true, "ListenStream": true, "ListenDatagram": true, "ListenSequentialPacket": true,
+	"ListenFIFO": true, "ListenSpecial": true, "ListenNetlink": true, "ListenMessageQueue": true,
+	"ListenUSBFunction": true, "SocketUser": true, "SocketGroup": true, "SocketMode": true, "DirectoryMode": true,
+	"Symlinks": true, "FileDescriptorName": true,
+}
+
+// inertKeys can only narrow: for every value, a root unit's pinned command
+// runs, reads, writes and receives nothing a non-root uid or a file outside
+// the pin controls that it could not with the key absent. Each sets no
+// environment variable, opens no file as the manager, runs nothing and
+// changes no unit name or drop-in set (D-271 item 2).
+var inertKeys = map[string]string{
+	"Description": "text", "Documentation": "text", "SyslogIdentifier": "the journal's tag for the unit's lines",
+	"After": "ordering only", "Before": "ordering only",
+	"ConditionPathExists": "the manager only tests a path, and a false one only stops the start",
+	"RemainAfterExit":     "how the manager tracks the start",
+	"Restart":             "runs the same pinned commands again", "RestartSec": "timing", "RestartSteps": "timing",
+	"RestartMaxDelaySec": "timing", "TimeoutStartSec": "timing", "StartLimitIntervalSec": "timing", "StartLimitBurst": "timing",
+	"MemoryMax": "a resource limit", "MemoryHigh": "a resource limit",
+	"LimitCORE":   "a resource limit; a core goes to kernel.core_pattern's pipe, /usr/bin/false (99-agentos-nodump.conf)",
+	"NoExecPaths": "removes exec access", "InaccessiblePaths": "removes access (D-154; mkosi.finalize requires it)",
+	"PrivateTmp": "a fresh /tmp and /var/tmp only this unit sees; JoinsNamespaceOf is pinned (D-154)",
+	"PrivateIPC": "removes access", "PrivateDevices": "removes access", "PrivateNetwork": "removes access",
+	"ProtectSystem": "removes write access", "ProtectHome": "removes access", "ProtectProc": "removes access",
+	"ProtectKernelTunables": "removes access", "ProtectKernelModules": "removes access", "ProtectKernelLogs": "removes access",
+	"ProtectHostname": "removes access", "ProtectControlGroups": "removes access", "ProtectClock": "removes access",
+	"NoNewPrivileges": "removes privilege", "CapabilityBoundingSet": "removes capabilities",
+	"RestrictAddressFamilies": "removes access", "RestrictNamespaces": "removes access", "RestrictRealtime": "removes access",
+	"RestrictSUIDSGID": "removes privilege", "LockPersonality": "removes access", "MemoryDenyWriteExecute": "removes access",
+	"SystemCallFilter": "removes system calls", "SystemCallArchitectures": "removes system calls",
+	"SystemCallErrorNumber": "how a removed call fails", "DevicePolicy": "removes device access; DeviceAllow is pinned",
+	"IPAddressDeny": "removes network access; IPAddressAllow is pinned", "RemoveIPC": "removes IPC objects at stop",
+	"PrivatePIDs": "removes access", "TasksMax": "a resource limit", "CollectMode": "when the manager forgets a stopped unit",
+	"MaxConnections": "a socket's connection limit", "NoDelay": "a socket's TCP option",
+}
+
+// systemdVars are the names systemd sets for a command after the manager
+// environment, so no unit or manager setting fills them (D-271 item 5).
+var systemdVars = map[string]bool{"SERVICE_RESULT": true, "EXIT_CODE": true, "EXIT_STATUS": true}
+
+// mergedUnit is one unit with its drop-ins, as rootBinaries reads it.
+type mergedUnit struct {
+	name           string
+	execs          []execLine // its type section's command lines
+	settings       []execLine // every other line, any section
+	env, envFiles  []string   // its Environment= and EnvironmentFile= values
+	asUser, asRoot bool       // some User= runs it as a user, as root
+	pass           []string   // its PassEnvironment= values
+	envLines       []envLine  // its Environment=, EnvironmentFile= and PassEnvironment= lines, in order
+	plus           bool       // some command line has a + or ! prefix
+	service        string     // a .socket's Service=
+	accept         bool       // a .socket's Accept=yes
+	root           bool
+}
+
+type execLine struct{ file, key, value string }
+
+// readMerged reads unit name from paths, the unit file first, then its
+// drop-ins.
+func readMerged(root, name string, paths []string) (*mergedUnit, error) {
+	m := &mergedUnit{name: name}
+	// A later User= replaces an earlier one, and drop-ins sort across
+	// directories, so any assignment that may run as root (a root or 0
+	// User=, one holding $ or a % that may expand to root, a false
+	// DynamicUser=) counts as root wherever it sits: an over-approximation
+	// that never drops a root unit (#3951 L3 3). PermissionsStartOnly=
+	// runs every command but ExecStart as root (D-271 item 1).
+	section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
+	var emptyUser, dynamic bool
+	for _, f := range paths {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		rel, _ := filepath.Rel(root, f)
+		ul, err := unitLines(string(b))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
+		}
+		for _, line := range ul {
+			k, v := line.key, line.value
+			if line.section == section && commandKeys[k] {
+				m.execs = append(m.execs, execLine{f, k, v})
+				if p := strings.TrimLeft(v, " \t"); strings.HasPrefix(strings.TrimLeft(p, "@-:"), "+") || strings.HasPrefix(strings.TrimLeft(p, "@-:"), "!") {
+					m.plus = true
+				}
+				continue
+			}
+			m.settings = append(m.settings, execLine{f, k, v})
+			if line.section != section {
+				// systemd reads a unit's User= and Exec lines only in its
+				// type's own section.
+				continue
+			}
+			switch {
+			case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment":
+				m.envLines = append(m.envLines, envLine{f, k, v})
+			}
+			switch {
+			case k == "Environment":
+				m.env = append(m.env, v)
+			case k == "EnvironmentFile":
+				m.envFiles = append(m.envFiles, v)
+			case k == "PassEnvironment":
+				m.pass = append(m.pass, v)
+			case k == "User" && v == "":
+				emptyUser = true
+			case k == "User" && (v == "root" || v == "0" || strings.Contains(v, "$") || mayBeRoot(v)):
+				m.asRoot = true
+			case k == "User":
+				m.asUser = true
+			case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
+				dynamic = true
+			case k == "DynamicUser":
+				m.asRoot = true // as on main
+			case k == "PermissionsStartOnly" && v != "no" && v != "false" && v != "0" && v != "off":
+				m.asRoot = true
+			case k == "Service":
+				m.service = v
+			case k == "Accept":
+				m.accept = v == "yes" || v == "true" || v == "1" || v == "on"
+			}
+		}
+	}
+	// A true DynamicUser= with no User= (or an empty one) runs as the
+	// unit name's prefix, which systemd reuses as a static user, root
+	// included (user_from_unit_name; D-271 item 1). An empty User=
+	// without it runs as root.
+	prefix, _, _ := strings.Cut(strings.TrimSuffix(name, filepath.Ext(name)), "@")
+	switch byName := dynamic && (emptyUser || !m.asUser && !m.asRoot); {
+	case byName && (prefix == "root" || prefix == "0"):
+		m.asRoot = true
+	case byName:
+		m.asUser = true
+	case emptyUser:
+		m.asRoot = true
+	}
+	return m, nil
+}
+
+// envSource names a setting of m that may fill name before its commands
+// run, or "": an Environment= or PassEnvironment= naming it anywhere in
+// its value, or any EnvironmentFile= (D-271 item 5).
+func (m *mergedUnit) envSource(name string) string {
+	for _, v := range m.env {
+		if strings.Contains(v, name+"=") {
+			return "Environment=" + v
+		}
+	}
+	for _, v := range m.pass {
+		if strings.Contains(v, name) {
+			return "PassEnvironment=" + v
+		}
+	}
+	if len(m.envFiles) > 0 {
+		return "EnvironmentFile=" + m.envFiles[0]
+	}
+	return ""
+}
+
+// handed is the service a .socket hands its socket to, or "".
+func (m *mergedUnit) handed() string {
+	base, ok := strings.CutSuffix(m.name, ".socket")
+	switch {
+	case !ok:
+		return ""
+	case m.service != "":
+		return m.service
+	case m.accept:
+		return base + "@.service"
+	}
+	return base + ".service"
+}
+
+// managerEnv fails a shipped system.conf or system.conf.d drop-in that sets
+// DefaultEnvironment or ManagerEnvironment, and a KernelCommandLine= word
+// systemd.setenv=, any of which fills a name every unit's commands read
+// (D-271 item 6).
+func managerEnv(root string) error {
+	return filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil && os.IsNotExist(err):
+			return filepath.SkipDir
+		case err != nil:
+			return err
+		case d.IsDir():
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		rel = filepath.ToSlash(rel)
+		// PAM runs a pam.d stack as root for a unit's PAMName= or a
+		// login, outside any pin (D-271 item 1).
+		if slices.Contains(strings.Split(filepath.ToSlash(rel), "/"), "pam.d") {
+			return fmt.Errorf("%s: a pam.d file runs its stack as root, outside any pin (D-271)", rel)
+		}
+		conf := d.Name() == "system.conf" || strings.HasSuffix(p, ".conf") && filepath.Base(filepath.Dir(p)) == "system.conf.d"
+		mkosi := d.Name() == "mkosi.conf" || strings.HasSuffix(p, ".conf") && filepath.Base(filepath.Dir(p)) == "mkosi.conf.d"
+		if !conf && !mkosi {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		// Read wider than systemd and mkosi do, so a backslash-joined
+		// key or an indented continuation of KernelCommandLine= is caught
+		// too: any uncommented Environment in a manager file, and any
+		// systemd.setenv= word in an mkosi file.
+		for i, line := range strings.Split(string(b), "\n") {
+			if t := strings.TrimSpace(line); conf && strings.Contains(t, "Environment") && !strings.HasPrefix(t, "#") && !strings.HasPrefix(t, ";") {
+				return fmt.Errorf("%s:%d: %q sets every unit's environment, which root units' commands read (D-271)", rel, i+1, t)
+			}
+			for _, w := range strings.Fields(line) {
+				if mkosi && strings.Contains(w, "systemd.setenv=") {
+					return fmt.Errorf("%s:%d: %s sets every unit's environment, which root units' commands read (D-271)", rel, i+1, w)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// shellVars returns the names w reads as $$NAME or $${NAME}: what a shell
+// expands once systemd turns $$ into $. $$$$ (the shell's own $$) and a
+// $$ before anything else name no variable.
+func shellVars(w string) []string {
+	var out []string
+	for i := strings.Index(w, "$$"); i >= 0; i = strings.Index(w, "$$") {
+		w = w[i+2:]
+		if strings.HasPrefix(w, "$$") {
+			w = w[2:]
+			continue
+		}
+		name := strings.TrimPrefix(w, "{")
+		n := 0
+		for n < len(name) && (name[n] == '_' || isAlnum(name[n])) {
+			n++
+		}
+		if n > 0 && !('0' <= name[0] && name[0] <= '9') {
+			out = append(out, name[:n])
+		}
+	}
+	return out
+}
+
+// packaged marks, in rootBinaries' units, a unit no tree here ships that a
+// drop-in here extends.
+const packaged = "packaged:"
 
 // rootBinaries returns the broker packages (as ./path, relative to broker/)
 // of the binaries a unit under image/ starts as root or a runKinds file
@@ -1497,26 +2254,36 @@ func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
 	var fstabs []string
-	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
-		dir := filepath.Base(filepath.Dir(p))
-		switch {
-		case err != nil:
-			return err
-		case d.IsDir():
+	// image/build.sh installs units from broker/ too (agentos-localui's,
+	// #4559 Security R4 on D-271), so both trees are read.
+	for _, tree := range []string{"image", "broker"} {
+		err := filepath.WalkDir(filepath.Join(root, tree), func(p string, d os.DirEntry, err error) error {
+			dir := filepath.Base(filepath.Dir(p))
+			switch {
+			case err != nil && os.IsNotExist(err) && p == filepath.Join(root, tree):
+				return filepath.SkipDir
+			case err != nil:
+				return err
+			case d.IsDir():
+				return nil
+			case unitTypes[filepath.Ext(p)]:
+				units[p] = d.Name()
+			case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
+				dropins[dir] = append(dropins[dir], p)
+			case d.Name() == "fstab":
+				fstabs = append(fstabs, p)
+			}
 			return nil
-		case unitTypes[filepath.Ext(p)]:
-			units[p] = d.Name()
-		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
-			dropins[dir] = append(dropins[dir], p)
-		case d.Name() == "fstab":
-			fstabs = append(fstabs, p)
+		})
+		if err != nil {
+			return nil, err
 		}
-		return nil
-	})
+	}
+	pkgs, err := binaryPackages(root)
 	if err != nil {
 		return nil, err
 	}
-	pkgs, err := binaryPackages(root)
+	lists, err := readLists(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1550,8 +2317,33 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
+	// A drop-in may add Exec lines to a unit a package ships (systemd-
+	// networkd-wait-online.service's ExecStart=), which run as root unless
+	// the drop-in sets a user, so each such unit is read from its drop-ins
+	// alone (D-271 Security 3). The packaged unit's own lines are a
+	// package's, outside the check.
+	shipped := map[string]bool{}
+	for _, name := range units {
+		shipped[name] = true
+	}
+	for dir := range dropins {
+		name := strings.TrimSuffix(dir, ".d")
+		base := strings.TrimSuffix(name, path.Ext(name))
+		if (path.Ext(name) == ".service" || path.Ext(name) == ".socket") && base != "" && !strings.HasSuffix(base, "-") && !shipped[name] {
+			units[packaged+name] = name
+		}
+	}
+	// Each unit is read merged, its drop-ins with it, and placed: a root
+	// unit (D-271 item 1) is one with no literal non-root User= and no true
+	// DynamicUser=, or with a + or ! line, or a .socket handing its socket
+	// to one.
+	var ms []*mergedUnit
+	byName := map[string][]*mergedUnit{}
 	for p, name := range units {
 		paths := []string{p}
+		if strings.HasPrefix(p, packaged) {
+			paths = nil
+		}
 		for _, dir := range dropinDirs(name) {
 			paths = append(paths, dropins[dir]...)
 		}
@@ -1561,52 +2353,37 @@ func rootBinaries(root string) ([]string, error) {
 			}
 			continue
 		}
-		// A later User= or DynamicUser= replaces an earlier one, and drop-ins
-		// sort across directories, so any assignment that runs as root (an
-		// empty, root or 0 User=, a false DynamicUser=) counts as root
-		// wherever it sits: an over-approximation that never drops a root
-		// binary (#3951 L3 3).
-		asUser, asRoot := false, false
-		type execLine struct{ file, key, value string }
-		var lines []execLine
-		var env []envLine
-		section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
-		for _, f := range paths {
-			b, err := os.ReadFile(f)
-			if err != nil {
-				return nil, err
-			}
-			rel, _ := filepath.Rel(root, f)
-			ul, err := unitLines(string(b))
-			if err != nil {
-				return nil, fmt.Errorf("%s: %v", filepath.ToSlash(rel), err)
-			}
-			for _, line := range ul {
-				k, v := line.key, line.value
-				switch {
-				case line.section != section:
-					// systemd reads a unit's User= and Exec lines only in its
-					// type's own section.
-				case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment":
-					env = append(env, envLine{f, k, v})
-				case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
-					// A User=%i template is root for its root instance.
-					asRoot = true
-				case k == "User":
-					asUser = true
-				case k == "DynamicUser" && (v == "yes" || v == "true" || v == "1" || v == "on"):
-					asUser = true
-				case k == "DynamicUser":
-					asRoot = true
-				case k == "ExecPaths" || k == "ExecSearchPath":
-					// Paths, not commands; a command's program is absolute, so
-					// no search path is read.
-				case strings.HasPrefix(k, "Exec"):
-					lines = append(lines, execLine{f, k, v})
-				}
+		m, err := readMerged(root, name, paths)
+		if err != nil {
+			return nil, err
+		}
+		// PAM runs as root before the uid changes, and its stack is
+		// outside any pin, so no unit sets PAMName= (D-271 item 1).
+		for _, st := range m.settings {
+			if st.key == "PAMName" {
+				rel, _ := filepath.Rel(root, st.file)
+				return nil, fmt.Errorf("%s: PAMName=%s: PAM runs its stack as root, outside any pin; no unit sets it (D-271)", filepath.ToSlash(rel), st.value)
 			}
 		}
-		for _, l := range lines {
+		ms = append(ms, m)
+		byName[name] = append(byName[name], m)
+	}
+	for _, m := range ms {
+		// A .socket's own commands run as root unless it sets a user; one
+		// with none is root only for the service it hands its socket to.
+		m.root = m.plus || (m.asRoot || !m.asUser) && (len(m.execs) > 0 || filepath.Ext(m.name) != ".socket")
+	}
+	for _, m := range ms {
+		if h := m.handed(); h != "" {
+			for _, s := range byName[h] {
+				m.root = m.root || s.root
+			}
+		}
+	}
+	sort.Slice(ms, func(i, j int) bool { return ms[i].name < ms[j].name })
+	for _, m := range ms {
+		name := m.name
+		for _, l := range m.execs {
 			rel, _ := filepath.Rel(root, l.file)
 			cmds, err := execWords(l.value)
 			if err != nil {
@@ -1632,32 +2409,81 @@ func rootBinaries(root string) ([]string, error) {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a %% specifier, whose value the reader cannot see", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
-				if asUser && !asRoot && !strings.ContainsAny(prefix, "+!") {
+				asRoot := !m.asUser || m.asRoot || strings.ContainsAny(prefix, "+!")
+				if !asRoot && !m.root {
 					continue
 				}
-				progs = append(progs, prog)
 				// systemd fills in $X and ${X} before a wrapper or shell runs
 				// the result, so a root command holds none but a whole-word
 				// ${X} of unitVars (#4494).
-				for i, w := range words[1:] {
-					if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
+				cmd := append([]string{prog}, words[1:]...)
+				for i, w := range cmd[1:] {
+					if !allowedVar(name, cmd, i+1, m.envLines) && substitutes(w, '$') {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
-				// A program's arguments may name another a wrapper (with-uids
-				// execs "$@") or shell runs: every absolute token counts, in a
-				// quoted shell script too.
-				for _, w := range append([]string{prog}, words[1:]...) {
-					for _, tok := range nameToken.FindAllString(w, -1) {
-						if pkg, ok := pkgs[path.Base(tok)]; ok && strings.HasPrefix(tok, "/") {
+				// systemd passes $$NAME on as $NAME, which a shell expands
+				// from the unit's environment, so a command reads only a name
+				// systemd sets after the manager environment (D-271 item 5).
+				for _, w := range cmd[1:] {
+					for _, v := range shellVars(w) {
+						if !systemdVars[v] {
+							return nil, fmt.Errorf("%s: %s=%s: word %q reads $%s; a root unit's command reads only $SERVICE_RESULT, $EXIT_CODE or $EXIT_STATUS", filepath.ToSlash(rel), l.key, l.value, w, v)
+						}
+						if src := m.envSource(v); src != "" {
+							return nil, fmt.Errorf("%s: %s=%s: word %q reads $%s, which %s may set; a root unit's command reads a systemd-set name only from systemd", filepath.ToSlash(rel), l.key, l.value, w, v, src)
+						}
+					}
+				}
+				pin, err := lists.rootCommand(name, cmd)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
+				}
+				if !asRoot {
+					continue // pinned, but it runs as the unit's user
+				}
+				// The program and those its pin says it starts are what
+				// root runs. On top of the pin, a program's arguments may
+				// name another a wrapper (with-uids execs "$@") or shell
+				// runs, so every absolute token naming a broker binary
+				// counts, in a quoted shell script, after = or inside $(
+				// too: a data path of the same name only adds packages.
+				ran := append([]string{cmd[0]}, pin.starts...)
+				progs = append(progs, ran...)
+				for _, w := range append(ran, cmd[1:]...) {
+					// with-uids turns @uid:NAME and @gid:NAME into ids, so
+					// an account name there runs nothing.
+					for _, tok := range nameToken.FindAllString(accountWord.ReplaceAllString(w, ""), -1) {
+						// A bare name counts too: a shell resolves it
+						// through PATH (D-271 item 7).
+						if pkg, ok := pkgs[path.Base(tok)]; ok && (strings.HasPrefix(tok, "/") || !strings.Contains(tok, "/")) {
 							seen[pkg] = true
 						}
 					}
 				}
 			}
 		}
+		if !m.root {
+			continue
+		}
+		// Every other key of a root unit is pinned or inert (D-271 item 2).
+		for _, st := range m.settings {
+			rel, _ := filepath.Rel(root, st.file)
+			switch {
+			case inertKeys[st.key] != "":
+			case pinnedKeys[st.key]:
+				if err := lists.rootSetting(name, st.key, st.value); err != nil {
+					return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), st.key, st.value, err)
+				}
+			default:
+				return nil, fmt.Errorf("%s: %s=%s: the key is on neither pinnedKeys nor inertKeys, so a root unit may not set it (D-271)", filepath.ToSlash(rel), st.key, st.value)
+			}
+		}
 	}
-	if err := runBinaries(root, pkgs, seen, progs); err != nil {
+	if err := managerEnv(root); err != nil {
+		return nil, err
+	}
+	if err := runBinaries(root, pkgs, seen, progs, lists); err != nil {
 		return nil, err
 	}
 
@@ -1872,6 +2698,244 @@ func fstabLines(root, f string) error {
 // runKinds file may make root run (#4257, #4276, #4279).
 const programsFile = "broker/kernel/privfile/root_programs.txt"
 
+// commandsFile pins, relative to the repository root, every command a unit
+// runs as root, whole (#4493, D-271).
+const commandsFile = "broker/kernel/privfile/root_commands.txt"
+
+// rootLists are the two allow-lists root is checked against: programs, from
+// programsFile, the paths a runKinds file may make root run; and pins, from
+// commandsFile, each one whole root command of one unit (D-271). The lint
+// reads no argument of a root command for a program: a root command is
+// pinned word for word in its unit, or it fails, so a new spelling, wrapper
+// or argument is a command no pin admits.
+type rootLists struct {
+	programs map[string]bool // listed path -> a file runs it
+	pins     []pin
+	used     []bool // pins[i] is a shipped root command
+}
+
+// pin is one commandsFile entry: the unit whose root command it is, the
+// command's words as execWords splits them, with no Exec prefix, the broker
+// binaries its reason says it starts (a script's), and why.
+type pin struct {
+	line   int
+	unit   string
+	key    string // a setting's key, with value its value; empty for a command
+	value  string
+	cmd    []string
+	starts []string
+	reason string
+}
+
+// readLists reads programsFile and commandsFile. A repository with neither
+// lets root run nothing. No absolute word of a pin, and no program its
+// reason says it starts, is reached through a link a tree under image/
+// ships (a mkosi.extra or overlay tree) or a pathAliases alias, so each path
+// is counted as the program it names (#4559 Security delta 3 1).
+func readLists(root string) (*rootLists, error) {
+	l := &rootLists{programs: map[string]bool{}}
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		f := strings.Fields(line)
+		if _, dup := l.programs[f[0]]; len(f) < 2 || !strings.HasPrefix(f[0], "/") || dup {
+			return nil, fmt.Errorf("%s line %d: want one \"<absolute path> <reason>\" line per program, got %q", programsFile, i+1, line)
+		}
+		l.programs[f[0]] = false
+	}
+	if l.pins, err = readPins(root); err != nil {
+		return nil, err
+	}
+	l.used = make([]bool, len(l.pins))
+	var paths []string
+	for _, p := range l.pins {
+		paths = append(paths, p.starts...)
+		for _, w := range p.cmd {
+			if strings.HasPrefix(w, "/") {
+				paths = append(paths, w)
+			}
+		}
+	}
+	for _, p := range paths {
+		if unalias(p) != p {
+			return nil, fmt.Errorf("%s pins %s, which is %s by a link every image has; pin the path it lands on", commandsFile, p, unalias(p))
+		}
+	}
+	return l, shippedLinks(root, paths)
+}
+
+// readPins parses commandsFile. An entry is a line "<unit> <command>", the
+// command written as an Exec value is, with no Exec prefix; a line that
+// starts with a blank or tab continues it. Its reason is the comment block
+// right above it, which a blank line ends; a comment line of +<path> words
+// names the broker binaries the command's program starts (a script's).
+func readPins(root string) ([]pin, error) {
+	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(commandsFile)))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []pin
+	var reason, starts []string
+	cur := -1 // the entry a continuation line extends
+	text := map[int]string{}
+	for i, line := range strings.Split(string(b), "\n") {
+		switch {
+		case strings.TrimSpace(line) == "":
+			reason, starts, cur = nil, nil, -1
+		case strings.HasPrefix(line, "#"):
+			if cur >= 0 {
+				reason = nil // a comment after an entry opens a new block
+			}
+			cur = -1
+			c := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+			if !strings.HasPrefix(c, "+") {
+				reason = append(reason, c)
+				continue
+			}
+			for _, w := range strings.Fields(c) {
+				p, ok := strings.CutPrefix(w, "+")
+				if !ok || !strings.HasPrefix(p, "/") || path.Clean(p) != p {
+					return nil, fmt.Errorf("%s line %d: %q: a program a pinned script starts is +<plain absolute path>", commandsFile, i+1, w)
+				}
+				starts = append(starts, p)
+			}
+		case line[0] == ' ' || line[0] == '\t':
+			if cur < 0 {
+				return nil, fmt.Errorf("%s line %d: a continuation with no entry above it", commandsFile, i+1)
+			}
+			text[cur] += " " + strings.TrimSpace(line)
+		default:
+			unit, cmd, _ := strings.Cut(line, " ")
+			if len(reason) == 0 {
+				return nil, fmt.Errorf("%s line %d: want the entry's reason in the comment block right above it", commandsFile, i+1)
+			}
+			// One block's reason covers each entry below it up to a
+			// blank line or the next comment; its +<path> words, the
+			// first entry only.
+			out = append(out, pin{line: i + 1, unit: unit, starts: starts, reason: strings.Join(reason, " ")})
+			cur, starts = len(out)-1, nil
+			text[cur] = cmd
+		}
+	}
+	for i := range out {
+		if k, v, ok := strings.Cut(text[i], "="); ok && pinnedKeys[k] {
+			out[i].key, out[i].value = k, v
+			for j := range out[:i] {
+				if out[j].unit == out[i].unit && out[j].key == k && out[j].value == v {
+					return nil, fmt.Errorf("%s line %d: the setting line %d pins", commandsFile, out[i].line, out[j].line)
+				}
+			}
+			continue
+		}
+		cmds, err := execWords(text[i])
+		if err != nil {
+			return nil, fmt.Errorf("%s line %d: %v", commandsFile, out[i].line, err)
+		}
+		c := cmds[0]
+		if len(cmds) != 1 || len(c) == 0 || !strings.HasPrefix(c[0], "/") || path.Clean(c[0]) != c[0] || !unitTypes[path.Ext(out[i].unit)] {
+			return nil, fmt.Errorf("%s line %d: want \"<unit> <one command, its program a plain absolute path>\"", commandsFile, out[i].line)
+		}
+		for j := range out[:i] {
+			if out[j].unit == out[i].unit && slices.Equal(out[j].cmd, c) {
+				return nil, fmt.Errorf("%s line %d: the command line %d pins", commandsFile, out[i].line, out[j].line)
+			}
+		}
+		// A . or .. step names a path other than it reads (#4617
+		// Security R-b).
+		for _, w := range c {
+			for _, tok := range nameToken.FindAllString(w, -1) {
+				for _, part := range strings.Split(tok, "/") {
+					if strings.Contains(tok, "/") && (part == "." || part == "..") {
+						return nil, fmt.Errorf("%s line %d: word %q holds a %s step", commandsFile, out[i].line, w, part)
+					}
+				}
+			}
+		}
+		out[i].cmd = c
+	}
+	return out, nil
+}
+
+// rootCommand returns the pin that admits one root command of unit, its
+// words with no Exec prefix.
+func (l *rootLists) rootCommand(unit string, cmd []string) (pin, error) {
+	for i, p := range l.pins {
+		if p.unit == unit && p.key == "" && slices.Equal(p.cmd, cmd) {
+			l.used[i] = true
+			return p, nil
+		}
+	}
+	return pin{}, fmt.Errorf("%s pins no such command of this unit; root runs only a command pinned whole (D-271)", commandsFile)
+}
+
+// rootSetting fails a pinnedKeys setting of a unit with a root command
+// unless a pin holds it, key and value.
+func (l *rootLists) rootSetting(unit, key, value string) error {
+	for i, p := range l.pins {
+		if p.unit == unit && p.key == key && p.value == value {
+			l.used[i] = true
+			return nil
+		}
+	}
+	return fmt.Errorf("the unit runs a root command, and %s pins no such setting of it; a setting that changes what a root command names or reads is pinned whole (D-271)", commandsFile)
+}
+
+// stale fails a list line no shipped file uses.
+func (l *rootLists) stale() error {
+	for p, used := range l.programs {
+		if !used {
+			return fmt.Errorf("%s lists %s, which no file runs", programsFile, p)
+		}
+	}
+	for i, p := range l.pins {
+		if !l.used[i] {
+			return fmt.Errorf("%s line %d pins a command %s runs nowhere as root", commandsFile, p.line, p.unit)
+		}
+	}
+	return nil
+}
+
+// shippedLinks fails a path whose own name, or a directory on the way to
+// it, is a link in a tree under image/ that the image copies in as it is:
+// a mkosi.extra tree or a buildroot overlay.
+func shippedLinks(root string, paths []string) error {
+	var trees []string
+	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil && os.IsNotExist(err):
+			return filepath.SkipDir
+		case err != nil:
+			return err
+		case d.IsDir() && (d.Name() == "mkosi.extra" || d.Name() == "overlay"):
+			trees = append(trees, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		for _, t := range trees {
+			for q := p; q != "/"; q = path.Dir(q) {
+				if fi, err := os.Lstat(filepath.Join(t, filepath.FromSlash(q))); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+					rel, _ := filepath.Rel(root, filepath.Join(t, filepath.FromSlash(q)))
+					return fmt.Errorf("%s is a link, so %s may name another program than it reads; a listed or pinned path is reached through no shipped link", filepath.ToSlash(rel), p)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // ruleKeys are the keys udev(7) defines, less SYSCTL: a sysctl write such as
 // kernel.core_pattern="|/path" or kernel.modprobe makes the kernel run a
 // program as root, so it is refused rather than read. A rule using any other
@@ -1980,25 +3044,9 @@ func inRunDir(rel string) bool {
 // write bit, sticky or not, since a sticky directory still takes a new
 // file; or an owner other than root) fails on a path in or above rootTrees,
 // progs (the programs units run as root) or a listed program (#4423).
-func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string) error {
-	// A repository with no list lets a file run nothing.
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	listed := map[string]bool{} // listed path -> a file runs it
+func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string, lists *rootLists) error {
+	listed := lists.programs
 	var grants []grant
-	for i, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		f := strings.Fields(line)
-		if _, dup := listed[f[0]]; len(f) < 2 || !strings.HasPrefix(f[0], "/") || dup {
-			return fmt.Errorf("%s line %d: want one \"<absolute path> <reason>\" line per program, got %q", programsFile, i+1, line)
-		}
-		listed[f[0]] = false
-	}
 	for _, dir := range []string{"image", "broker"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
 			switch {
@@ -2041,7 +3089,7 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 					return fmt.Errorf("%s:%d: runs %q, which %s does not list; a %s may run only a listed absolute path", rel, prog.line, prog.path, programsFile, kind.what)
 				}
 				listed[prog.path] = true
-				if pkg, ok := pkgs[filepath.Base(prog.path)]; ok {
+				if pkg, ok := pkgs[path.Base(prog.path)]; ok {
 					seen[pkg] = true
 				}
 			}
@@ -2052,20 +3100,15 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 		}
 	}
 	held := append(append([]string{}, rootTrees...), progs...)
-	for path := range listed {
-		held = append(held, path)
+	for p := range listed {
+		held = append(held, p)
 	}
 	for _, g := range grants {
 		if h, ok := inOrAbove(g.prog.path, held); ok {
 			return fmt.Errorf("%s:%d: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.rel, g.prog.line, g.prog.grant, g.prog.path, h)
 		}
 	}
-	for path, used := range listed {
-		if !used {
-			return fmt.Errorf("%s lists %s, which no file runs", programsFile, path)
-		}
-	}
-	return nil
+	return lists.stale()
 }
 
 // ruleProgram is a program a runKinds file makes root run, or, with grant

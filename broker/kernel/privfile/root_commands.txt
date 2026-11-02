@@ -1,0 +1,516 @@
+# What a root unit under image/ or broker/ may run and set, pinned whole,
+# read by pathops_lint_test.go (#4493, D-271). A unit is root as main's lint
+# classes it (a User= absent, root or 0, holding $ or a % that may expand to
+# root, a false DynamicUser=; a true DynamicUser= with no User= runs as the
+# unit name's prefix), or when it has a + or ! line or a true
+# PermissionsStartOnly=; a .socket that hands its socket to a root unit is
+# root. Every command of a root unit is pinned here word for word, as its
+# Exec value is written with no Exec prefix: "<unit> <command>". Every
+# setting of a root unit whose key is on pinnedKeys is pinned here as
+# "<unit> Key=value"; a key on inertKeys needs no pin, and a key on neither
+# list fails. A line starting with a blank continues the entry above it.
+# Each entry's reason is the comment block above it, which covers every
+# entry below it up to a blank line. In a comment, a word +<path> names a
+# program a pinned script starts, for the entry right below. Each word of a
+# root-run pin that names a broker binary, bare or absolute, counts as
+# root-side, and so does each +<path>. Review checks that a reason names
+# every program its command starts. No pinned absolute word is reached
+# through a link the image ships, /var/run, or a . or .. step. A pin no root
+# unit uses fails.
+
+# A /bin/sh script that prints one console line of boot state, from
+# systemctl, findmnt, ip and foreign-disks, and runs systemd-bless-boot
+# status; it starts no broker binary.
+agentos-boot-report.service /usr/lib/agentos/boot-report
+
+# A /bin/sh script that prints the restore drill's report from its log; it
+# starts no broker binary.
+agentos-drill-report.service /usr/lib/agentos/drill-report
+
+# A /bin/sh script that sets or checks the drive's partition GUIDs with
+# lsblk, findmnt and sfdisk; it starts no broker binary.
+agentos-drive-id.service /usr/lib/agentos/drive-id assign
+
+# coreutils' mkdir makes the 9p mount point; it runs no program.
+agentos-e2e-seal.service /bin/mkdir -p /run/agentos-e2e/share
+
+# util-linux mount of the CI host's read-only 9p share; 9p is in-kernel, and
+# a mount.* helper of a broker binary is counted wherever it sits (#4380).
+agentos-e2e-seal.service /bin/mount -t 9p -o trans=virtio,version=9p2000.L,ro e2e
+	/run/agentos-e2e/share
+
+# The end-to-end driver (broker/e2e/boxe2e), on the test boot only, from the
+# CI host's read-only 9p share; a broker binary, so its packages are
+# root-side.
+agentos-e2e-seal.service /run/agentos-e2e/share/box-e2e seal
+
+# On the end-to-end boot only, the shell prints foreign-disks' answer (a
+# /bin/sh script that reads mounts and starts no broker binary) for CI.
+agentos-e2e.service /bin/sh -c 'echo "agentos-disks-end: $(/usr/lib/agentos/foreign-disks)"'
+
+# The end-to-end driver (broker/e2e/boxe2e), on the test boot only, from the
+# CI host's read-only 9p share; a broker binary, so its packages are
+# root-side.
+agentos-e2e.service /run/agentos-e2e/share/box-e2e
+
+# A /bin/sh script that makes the setup vault once the box is claimed. It
+# runs agentos-egress init -setup as root, whose packages are not yet
+# counted root-side (#4623: a build-tagged file there is unread).
+agentos-egress-setup.service /usr/lib/agentos/egress-setup --restart
+
+# A /bin/sh script that sets or checks the drive's partition GUIDs with
+# lsblk, findmnt and sfdisk; it starts no broker binary.
+agentos-egress.service /usr/lib/agentos/drive-id check
+
+# A /bin/sh script that makes the setup vault once the box is claimed. It
+# runs agentos-egress init -setup as root, whose packages are not yet
+# counted root-side (#4623: a build-tagged file there is unread).
+agentos-egress.service /usr/lib/agentos/egress-setup
+
+# with-uids execs agentos-egress serve as User=agentos-egress (the unit is
+# root for its + lines); agentos-egress starts no program (its packages are
+# not yet counted root-side, #4623).
+agentos-egress.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentos-egress serve -broker-uid
+	0 -unlock-uid @uid:agentos-localui -rule /usr/lib/agentos/egress/rule.json
+
+# A /bin/sh script that marks the boot entry failed through efivar files and
+# reboots with systemctl; it starts no broker binary.
+agentos-fallback.service /usr/lib/agentos/fallback
+
+# A /bin/sh script, the boot health check (UPD-1), that runs drive-id check,
+# agentos-hostdisk health, agentosd -h and runsc --version.
+# +/usr/lib/agentos/agentosd +/usr/lib/agentos/agentos-hostdisk
+agentos-health.service /usr/lib/agentos/health
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+agentos-inbound.service /usr/sbin/nft -f /usr/lib/agentos/inbound.nft
+
+# coreutils' install -d makes the directory with this owner and mode; it
+# runs no program.
+agentos-keeper-enroll.service /usr/bin/install -d -m 0700 -o agentos-kernel -g agentos-kernel
+	/var/lib/agentos-kernel
+
+# coreutils' rm removes these files; it runs no program.
+agentos-keeper-enroll.service /usr/bin/rm -f /run/agentos-setup/passphrase
+	/run/agentos-setup/recovery /run/agentos-setup/page-ca /run/agentos-page-ca/authority.der
+
+# with-uids execs agentos-enroll, which starts no program; its flags are
+# paths and ids.
+agentos-keeper-enroll.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentos-enroll -state
+	/var/lib/agentos-store -anchor-dir /var/lib/agentos-kernel/anchor -log /var/lib/agentos-kernel/log
+	-kernel-uid @uid:agentos-kernel -kernel-gid @gid:agentos-kernel -passphrase-file
+	/run/agentos-setup/passphrase -recovery-file /run/agentos-setup/recovery -page-ca-file
+	/run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der -first-edge
+	/run/agentos-link-capture/first-edge
+
+# coreutils' install -d makes the directory with this owner and mode; it
+# runs no program.
+agentos-keeper-kernel.service /usr/bin/install -d -m 0711 -o agentos-kernel -g agentos-kernel
+	/run/agentos-kernel
+
+# coreutils' rm removes these files; it runs no program.
+agentos-keeper-kernel.service /usr/bin/rm -f /run/agentos-kernel/up
+
+# After a kernel that came up fails, the shell runs systemd-run, which asks
+# systemd for a transient unit running systemctl reboot no sooner than 30
+# minutes into the boot (#2897, #2998; mkosi.finalize's KERNEL_REBOOT pins
+# the same text); it starts no broker binary.
+agentos-keeper-kernel.service /usr/bin/sh -c
+	'if [ "$$SERVICE_RESULT" != success ] && [ -e /run/agentos-kernel/up ]; then exec /usr/bin/systemd-run --on-boot=30min --unit=agentos-kernel-reboot /usr/bin/systemctl reboot; fi'
+
+# with-uids execs agentos-unlock, which opens the store, then execs its
+# -exec program, agentos-kernel, with the words after -- (STO-2c);
+# agentos-kernel starts no program.
+agentos-keeper-kernel.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentos-unlock -store
+	/var/lib/agentos-store/store -recovery-request /var/lib/agentos/recovery-request -clerk-anchors
+	/run/agentos-keeper/anchors -log /var/lib/agentos-kernel/log -uid @uid:agentos-kernel -gid
+	@gid:agentos-kernel -exec /usr/lib/agentos/agentos-kernel -- -log /var/lib/agentos-kernel/log
+	-anchor-dir /var/lib/agentos-kernel/anchor -keys-dir /var/lib/agentos-kernel/keys -content-dir
+	/var/lib/agentos-kernel/content -backup-dir /var/lib/agentos-kernel/backups -owner-sock
+	/run/agentos-kernel/owner.sock -owner-uid @uid:agentos-owner -meter-sock
+	/run/agentos-kernel/meter.sock -meter-uid @uid:agentos-model -clerk
+	mail=/run/agentos-mail/kernel.sock,@uid:agentos-mail -clerk-key
+	mail=/run/agentos-kernel/key-mail.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-mail.service
+	-clerk-key
+	camera=/run/agentos-kernel/key-camera.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-camera.service
+	-clerk-key
+	homekit=/run/agentos-kernel/key-homekit.sock,/agentos.slice/agentos-keeper.slice/agentos-keeper-homekit.service
+	-link-sock /run/agentos-kernel/link.sock -link-uid @uid:agentos-link -up /run/agentos-kernel/up
+
+# Unless the store exists, the shell runs nft to empty the link's inbound
+# set; it starts no broker binary.
+agentos-keeper-link-capture.service /usr/bin/sh -c
+	'[ -e /var/lib/agentos-store/store ] || exec /usr/sbin/nft flush set inet agentos_inbound link'
+
+# with-uids execs agentos-link, which re-runs only itself, as a child
+# (childproc).
+agentos-keeper-link-capture.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentos-link -iface
+	agentos-link -port 7443 -capture /run/agentos-link-capture/first-edge -store
+	/var/lib/agentos-store/store -uid @uid:agentos-link -gid @gid:agentos-link
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+agentos-keeper-link-capture.service /usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { "agentos-link" }'
+
+# The enrolment step (broker/cmd/agentos-enroll), a broker binary; it starts
+# no program, and its flags are paths and ids.
+agentos-keeper-pageca.service /usr/lib/agentos/agentos-enroll -stage-page-ca -page-ca-file
+	/run/agentos-setup/page-ca -page-ca-cert /run/agentos-page-ca/authority.der
+
+# The enrolment step (broker/cmd/agentos-enroll), a broker binary; it starts
+# no program, and its flags are paths and ids.
+agentos-keeper-rotate@.service /usr/lib/agentos/agentos-enroll -rotate-recovery -state
+	/var/lib/agentos-store
+
+# The enrolment step (broker/cmd/agentos-enroll), a broker binary; it starts
+# no program, and its flags are paths and ids.
+agentos-keeper-setup@.service /usr/lib/agentos/agentos-enroll -take-factors -setup-dir
+	/run/agentos-setup -page-ca-cert /run/agentos-page-ca/authority.der -state /var/lib/agentos-store
+
+# with-uids execs agentos-link, which re-runs only itself, as a child
+# (childproc).
+agentos-link.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentos-link -iface agentos-link
+	-port 7443 -kernel-sock /run/agentos-kernel/link.sock -kernel-uid @uid:agentos-kernel
+	-consumer-sock /run/agentos-link/items.sock -consumer-uid @uid:agentos-link-items
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+agentos-link.service /usr/sbin/nft flush set inet agentos_inbound link
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+agentos-link.service /usr/sbin/nft 'flush set inet agentos_inbound link; add element inet agentos_inbound link { "agentos-link" }'
+
+# A /bin/sh script that copies the seller's claim state for the Wi-Fi page;
+# it starts no broker binary.
+agentos-localui-claim.service /usr/lib/agentos/localui-claim
+
+# The owner page (broker/cmd/agentos-localui), a broker binary. With
+# -admit-port1 it runs as root (a + line) and admits port 1 to the page's
+# inbound set; the serving line runs as User=agentos-localui. It starts no
+# program.
+agentos-localui.service /usr/lib/agentos/agentos-localui -admit-port1 -iface ${AGENTOS_PAGE_IFACE}
+	-port1-file /run/agentos-localui/port1
+
+# The owner page (broker/cmd/agentos-localui), a broker binary. With
+# -admit-port1 it runs as root (a + line) and admits port 1 to the page's
+# inbound set; the serving line runs as User=agentos-localui. It starts no
+# program.
+agentos-localui.service /usr/lib/agentos/agentos-localui -sock /run/agentos/localui.sock -iface
+	${AGENTOS_PAGE_IFACE} -port1-file /run/agentos-localui/port1 -vault-sock
+	/run/agentos-egress/unlock.sock -claim-state /var/lib/agentos-localui/claim.json -card-latch
+	/var/lib/agentos-localui/card-latch.json -page-ca-cert /run/agentos-page-ca/authority.der
+	-keeper-setup-sock /run/agentos-keeper/setup.sock
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+agentos-localui.service /usr/sbin/nft flush set inet agentos_inbound page
+
+# Asks systemd to restart agentos-modem.service, whose own commands this
+# lint reads.
+agentos-modem-env.service /usr/bin/systemctl --no-block try-restart agentos-modem.service
+
+# A /bin/sh script that verifies the image with veritysetup and reboots with
+# systemctl when no inhibitor holds; it starts no broker binary.
+agentos-reboot.service /usr/lib/agentos/reboot-weekly
+
+# A /bin/sh script that sets or checks the drive's partition GUIDs with
+# lsblk, findmnt and sfdisk; it starts no broker binary.
+agentosd.service /usr/lib/agentos/drive-id check
+
+# with-uids (a /bin/sh script) replaces each @uid:/@gid: word with that
+# user's id and execs agentosd with the rest. agentosd runs its -runsc
+# program, gVisor's runsc under /usr, on the guest images it names; it
+# starts no other program its flags name.
+agentosd.service /usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}
+	-modem-uid @uid:agentos-modem -localui-uid @uid:agentos-localui -infer-uid @uid:agentos-infer
+	-infer-model /usr/lib/agentos/infer/Qwen3-Embedding-0.6B-Q8_0.gguf -infer-model-sha256
+	06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439 -kernel-owner
+	/run/agentos-kernel/owner.sock -kernel-uid @uid:agentos-kernel -kernel-owner-uid @uid:agentos-owner
+	-runsc /usr/lib/agentos/runsc -image openclaw=/usr/lib/agentos/images/openclaw -image
+	codex=/usr/lib/agentos/images/codex -worker-image openclaw -disk-quota on
+
+# The QEMU camera node's end-to-end stand-in for the provisioning button
+# (image/camnode/e2e/button), standard library only; it starts no program.
+camnode-e2e-button.service /usr/libexec/camnode/e2e-button /sys/firmware/qemu_fw_cfg/by_name/opt/camnode/button/raw
+
+# The QEMU camera node's end-to-end stand-in for the secure element
+# (image/camnode/e2e/element), standard library only; it starts no program.
+camnode-e2e-element.service /usr/libexec/camnode/e2e-element /dev/vdb
+
+# nftables loads the rules its arguments or the image's own file name; it
+# runs no program.
+camnode-firewall.service /usr/sbin/nft -f /etc/camnode/firewall.nft
+
+# systemd's wait-online, which waits for a link; it runs no program.
+systemd-networkd-wait-online.service /usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5
+
+# The settings of the units with a root command whose keys are on
+# pinnedKeys, each pinned whole (D-271), grouped by key; one block's
+# reason covers the lines below it.
+
+# Accept=yes starts one instance of the socket's template per connection;
+# the instance's own commands are pinned above.
+agentos-keeper-rotate.socket Accept=yes
+agentos-keeper-setup.socket Accept=yes
+
+# Gives the page, as User=agentos-localui, the right to bind port 80 and
+# open the raw socket its port 1 answer needs; it runs no other program.
+agentos-localui.service AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# Stops the unit when the agentos-link interface goes; names no program.
+agentos-keeper-link-capture.service BindsTo=sys-subsystem-net-devices-agentos\x2dlink.device
+agentos-link.service BindsTo=sys-subsystem-net-devices-agentos\x2dlink.device
+
+# Stops the inbound rules at shutdown; names no program.
+agentos-inbound.service Conflicts=shutdown.target
+
+# Starts the unit before basic.target (early boot); names no program.
+agentos-inbound.service DefaultDependencies=no
+camnode-e2e-button.service DefaultDependencies=no
+camnode-e2e-element.service DefaultDependencies=no
+camnode-firewall.service DefaultDependencies=no
+
+# Gives the unit its own cgroup subtree, which it hands to runsc for the
+# sandboxes it starts; names no program.
+agentosd.service Delegate=yes
+
+# The devices the unit's commands may open: the TPM, device-mapper control
+# or block devices; names no program.
+agentos-boot-report.service DeviceAllow=block-* r
+agentos-drive-id.service DeviceAllow=block-* rw
+agentos-egress.service DeviceAllow=/dev/tpmrm0 rw
+agentos-health.service DeviceAllow=/dev/mapper/control rw
+agentos-health.service DeviceAllow=block-* r
+agentos-keeper-enroll.service DeviceAllow=/dev/tpmrm0 rw
+agentos-keeper-kernel.service DeviceAllow=/dev/tpmrm0 rw
+agentos-reboot.service DeviceAllow=/dev/mapper/control rw
+agentos-reboot.service DeviceAllow=block-* r
+
+# The mode of the directory systemd makes for the socket; names no program.
+agentos-keeper-rotate.socket DirectoryMode=0755
+agentos-keeper-setup.socket DirectoryMode=0755
+
+# AGENTOS_OWNER= clears agentosd's -owner value (unitVars) so an absent env
+# file runs setup mode; GOMEMLIMIT is Go's soft memory limit for
+# agentos-egress. No root command reads a $$ name of either.
+agentos-egress.service Environment=GOMEMLIMIT=1536MiB
+agentosd.service Environment=AGENTOS_OWNER=
+
+# agentosd's -owner value, in root's 0700 /etc/agentos (unitVars); no
+# root command of agentosd.service reads a $$ name.
+agentosd.service EnvironmentFile=-/etc/agentos/agentosd.env
+
+# Lets programs under /usr run where NoExecPaths=/ bars every other path;
+# it widens no path a pinned word names.
+agentos-boot-report.service ExecPaths=/usr
+agentos-drill-report.service ExecPaths=/usr
+agentos-drive-id.service ExecPaths=/usr
+agentos-egress-setup.service ExecPaths=/usr
+agentos-egress.service ExecPaths=/usr
+agentos-fallback.service ExecPaths=/usr
+agentos-health.service ExecPaths=/usr
+agentos-inbound.service ExecPaths=/usr
+agentos-keeper-enroll.service ExecPaths=/usr
+agentos-keeper-kernel.service ExecPaths=/usr
+agentos-keeper-link-capture.service ExecPaths=/usr
+agentos-keeper-pageca.service ExecPaths=/usr
+agentos-keeper-rotate@.service ExecPaths=/usr
+agentos-keeper-setup@.service ExecPaths=/usr
+agentos-link.service ExecPaths=/usr
+agentos-localui-claim.service ExecPaths=/usr
+agentos-localui.service ExecPaths=/usr
+agentos-modem-env.service ExecPaths=/usr
+agentos-reboot.service ExecPaths=/usr
+
+# The group of the unit's non-root command; names no program.
+agentos-egress.service Group=agentos-egress
+agentos-link.service Group=agentos-link
+agentos-localui.service Group=agentos-localui
+
+# The addresses the unit may reach; names no program.
+agentos-keeper-link-capture.service IPAddressAllow=link-local
+agentos-link.service IPAddressAllow=link-local
+agentos-localui.service IPAddressAllow=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+
+# The socket systemd listens on, in a directory it makes root's; the
+# instance it starts is pinned above.
+agentos-keeper-rotate.socket ListenStream=/run/agentos-keeper/rotate.sock
+agentos-keeper-setup.socket ListenStream=/run/agentos-keeper/setup.sock
+
+# Starts agentos-fallback.service, whose command is pinned above, when the
+# health check fails.
+agentos-health.service OnFailure=agentos-fallback.service
+
+# The trees the unit may write under ProtectSystem=strict; it puts no tree
+# at a path a root command names.
+agentos-egress-setup.service ReadWritePaths=/run -/var/lib/agentos-egress
+agentos-keeper-link-capture.service ReadWritePaths=/run/agentos-link-capture
+
+# Makes boot-complete.target need the health check; names no program.
+agentos-health.service RequiredBy=boot-complete.target
+
+# Pulls in units this lint reads itself; names no program.
+agentos-drill-report.service Requires=boot-complete.target
+agentos-drive-id.service Requires=boot-complete.target
+agentos-e2e.service Requires=agentos-e2e-seal.service
+agentos-egress.service Requires=agentos-inbound.service
+agentos-keeper-link-capture.service Requires=agentos-inbound.service
+agentos-link.service Requires=agentos-inbound.service
+agentos-localui.service Requires=agentosd.service agentos-localui-claim.service agentos-inbound.service
+agentosd.service Requires=agentos-inbound.service
+camnode-e2e-element.service Requires=dev-vdb.device
+systemd-networkd.service Requires=agentos-inbound.service
+systemd-networkd.service Requires=camnode-firewall.service
+systemd-resolved.service Requires=agentos-inbound.service
+
+# systemd makes /run/<name>, owned by the unit's user; it puts no tree at a
+# path a root command names other than that one.
+agentos-egress.service RuntimeDirectory=agentos-egress
+agentos-link.service RuntimeDirectory=agentos-link
+agentos-localui.service RuntimeDirectory=agentos-localui
+
+# The mode of the unit's /run directory; names no program.
+agentos-egress.service RuntimeDirectoryMode=0711
+agentos-link.service RuntimeDirectoryMode=0755
+agentos-localui.service RuntimeDirectoryMode=0700
+
+# Keeps /run/agentos-egress across a restart, so the unlock socket's
+# directory outlives one run; names no program.
+agentos-egress.service RuntimeDirectoryPreserve=yes
+
+# The cgroup slice the unit runs in, which the kernel's -clerk-key paths
+# name; names no program.
+agentos-keeper-enroll.service Slice=agentos-keeper.slice
+agentos-keeper-kernel.service Slice=agentos-keeper.slice
+agentos-keeper-link-capture.service Slice=agentos-keeper.slice
+agentos-keeper-pageca.service Slice=agentos-keeper.slice
+agentos-keeper-rotate@.service Slice=agentos-keeper.slice
+agentos-keeper-setup@.service Slice=agentos-keeper.slice
+agentosd.service Slice=agentos.slice
+
+# The group of the listening socket; names no program.
+agentos-keeper-rotate.socket SocketGroup=agentos-owner
+agentos-keeper-setup.socket SocketGroup=agentos-localui
+
+# The mode of the listening socket; names no program.
+agentos-keeper-rotate.socket SocketMode=0660
+agentos-keeper-setup.socket SocketMode=0660
+
+# The owner of the listening socket; names no program.
+agentos-keeper-rotate.socket SocketUser=root
+agentos-keeper-setup.socket SocketUser=root
+
+# Sends the unit's errors to the journal, or also the console; no file:.
+agentos-e2e-seal.service StandardError=journal+console
+agentos-e2e.service StandardError=journal+console
+agentos-keeper-enroll.service StandardError=journal+console
+agentos-keeper-kernel.service StandardError=journal+console
+agentos-keeper-link-capture.service StandardError=journal
+agentos-keeper-pageca.service StandardError=journal+console
+agentos-keeper-rotate@.service StandardError=journal
+agentos-keeper-setup@.service StandardError=journal
+agentos-link.service StandardError=journal
+
+# Hands the accepted connection to the instance as its input; no file:.
+agentos-keeper-rotate@.service StandardInput=socket
+agentos-keeper-setup@.service StandardInput=socket
+
+# Sends the unit's output to the journal, the console, the connection or
+# nowhere; no file:.
+agentos-boot-report.service StandardOutput=journal+console
+agentos-drill-report.service StandardOutput=journal+console
+agentos-drive-id.service StandardOutput=journal+console
+agentos-e2e-seal.service StandardOutput=journal+console
+agentos-e2e.service StandardOutput=journal+console
+agentos-fallback.service StandardOutput=journal+console
+agentos-health.service StandardOutput=journal+console
+agentos-keeper-rotate@.service StandardOutput=socket
+agentos-keeper-setup@.service StandardOutput=socket
+agentos-reboot.service StandardOutput=journal+console
+
+# systemd makes /var/lib/<name>, owned by the unit's user; it puts no tree
+# at a path a root command names other than that one.
+agentos-egress.service StateDirectory=agentos-egress
+agentos-keeper-enroll.service StateDirectory=agentos-store
+agentos-localui.service StateDirectory=agentos-localui
+agentosd.service StateDirectory=agentos/modem
+
+# The mode of the unit's /var/lib directory; names no program.
+agentos-egress.service StateDirectoryMode=0700
+agentos-keeper-enroll.service StateDirectoryMode=0700
+agentos-localui.service StateDirectoryMode=0700
+agentosd.service StateDirectoryMode=0755
+
+# Masks, read-only, trees the unit must not read; it puts no other tree at
+# a path a root command names.
+agentos-keeper-link-capture.service TemporaryFileSystem=/run/agentos-setup:ro /var/lib/agentos-kernel:ro /var/lib/agentos-mail:ro /var/lib/agentos-camera:ro /var/lib/agentos-homekit:ro
+agentos-localui.service TemporaryFileSystem=/var/lib/agentos:ro
+
+# How the manager tracks the start (oneshot or notify); notify sets
+# $NOTIFY_SOCKET, which no root command reads.
+agentos-boot-report.service Type=oneshot
+agentos-drill-report.service Type=oneshot
+agentos-drive-id.service Type=oneshot
+agentos-e2e-seal.service Type=oneshot
+agentos-e2e.service Type=oneshot
+agentos-egress-setup.service Type=oneshot
+agentos-fallback.service Type=oneshot
+agentos-health.service Type=oneshot
+agentos-inbound.service Type=oneshot
+agentos-keeper-enroll.service Type=oneshot
+agentos-keeper-pageca.service Type=oneshot
+agentos-keeper-rotate@.service Type=oneshot
+agentos-keeper-setup@.service Type=oneshot
+agentos-localui-claim.service Type=oneshot
+agentos-modem-env.service Type=oneshot
+agentos-reboot.service Type=oneshot
+camnode-e2e-button.service Type=notify
+camnode-e2e-element.service Type=notify
+camnode-firewall.service Type=oneshot
+
+# Makes what the unit's commands create private to their owner; names no
+# program.
+agentos-e2e-seal.service UMask=0077
+agentos-egress-setup.service UMask=0077
+agentos-egress.service UMask=0077
+agentos-keeper-enroll.service UMask=0077
+agentos-keeper-kernel.service UMask=0077
+agentos-keeper-link-capture.service UMask=0077
+agentos-keeper-pageca.service UMask=0077
+agentos-keeper-rotate@.service UMask=0077
+agentos-keeper-setup@.service UMask=0077
+agentos-link.service UMask=0077
+agentos-localui.service UMask=0077
+agentos-modem-env.service UMask=0077
+
+# The user of the unit's commands that have no + prefix; the unit stays
+# root for the others.
+agentos-egress.service User=agentos-egress
+agentos-link.service User=agentos-link
+agentos-localui.service User=agentos-localui
+
+# Starts the unit with this target, device or unit; names no program.
+agentos-boot-report.service WantedBy=multi-user.target
+agentos-drill-report.service WantedBy=multi-user.target
+agentos-drive-id.service WantedBy=multi-user.target
+agentos-egress.service WantedBy=multi-user.target
+agentos-inbound.service WantedBy=sysinit.target
+agentos-keeper-enroll.service WantedBy=multi-user.target
+agentos-keeper-kernel.service WantedBy=multi-user.target
+agentos-keeper-link-capture.service WantedBy=sys-subsystem-net-devices-agentos\x2dlink.device
+agentos-keeper-pageca.service WantedBy=multi-user.target
+agentos-keeper-rotate.socket WantedBy=sockets.target
+agentos-keeper-setup.socket WantedBy=sockets.target
+agentos-link.service WantedBy=sys-subsystem-net-devices-agentos\x2dlink.device agentos-keeper-kernel.service
+agentos-localui.service WantedBy=multi-user.target
+agentosd.service WantedBy=multi-user.target
+camnode-firewall.service WantedBy=sysinit.target
+
+# Pulls in units this lint reads itself; names no program.
+agentos-inbound.service Wants=network-pre.target
+agentos-keeper-enroll.service Wants=agentos-keeper-pageca.service agentos-keeper-kernel.service
+agentos-localui.service Wants=agentos-egress.service
+agentosd.service Wants=agentos-egress.service
+camnode-firewall.service Wants=network-pre.target
