@@ -338,8 +338,29 @@ func TestWrappedAfterEscapeHead(t *testing.T) {
 
 // KRN-12: a break is kept while a later break's head is still open in the
 // form's rest (a '\' run of any length, "%0"), and until the longest form's
-// rest has come, in one write or a byte at a time (#4582).
+// rest has come, in one write or a byte at a time (#4582), for any form
+// length: past the 4 KiB tail and at MaxValue, with a head open at a scan
+// (#4622).
 func TestBreakHeldWhileOpen(t *testing.T) {
+	for _, n := range []int{700, match.MaxValue - 2} {
+		v := "n" + strings.Repeat("<", n) + "z"
+		j, _ := json.Marshal(v)
+		f := string(j[1 : len(j)-1]) // n\u003c...z, the longest form
+		lm := match.New([]match.Value{{ID: 2, Bytes: []byte(v)}}, nil)
+		for _, w := range [][]string{{`C:\\` + f[:len(f)-1] + "%0", "a" + f[len(f)-1:]}, {`C:\\` + f}} {
+			st := lm.Stream()
+			for _, p := range w {
+				st.Write([]byte(p))
+			}
+			one := lm.Stream()
+			for _, c := range []byte(strings.Join(w, "") + strings.Repeat(" ", 2000)) {
+				one.Write([]byte{c})
+			}
+			if got, got1 := st.Result().Trips, one.Result().Trips; !slices.Equal(got, []int{2}) || !slices.Equal(got1, []int{2}) {
+				t.Fatalf("a %d-character form begun in a break tripped %v, a byte at a time %v, want [2]", len(f), got, got1)
+			}
+		}
+	}
 	hv := append([]byte{0xab}, "q7Xz2pL9mW4vR8tY3nB6kJ5h"...)
 	h := hex.EncodeToString(hv)
 	m := match.New([]match.Value{{ID: 0, Bytes: []byte("nq7Xz2pL9mW4vR8tY3nB6kJ5h")}, {ID: 1, Bytes: hv}}, nil)
@@ -367,5 +388,42 @@ func TestBreakHeldWhileOpen(t *testing.T) {
 				t.Fatalf("%.80q and %d bytes, a byte at a time, tripped %v, want [%d]", s, len(pad), got, id)
 			}
 		}
+	}
+}
+
+// KRN-12: a '\' run collapses only after the last break, so a run before
+// one never merges with a run after it: a value's '\' before "%0a" stays
+// in the joined text when a JSON break follows (#4622).
+func TestRunCollapseFloor(t *testing.T) {
+	v := `q7Xz\2pL9mW4vR8tY3nB6kJ5h`
+	m := match.New([]match.Value{{ID: 3, Bytes: []byte(v)}}, nil)
+	for _, s := range []string{`q7Xz\%0a\n2pL9mW4vR8tY3nB6kJ5h`, `q7Xz\%0A\r\n2pL9mW4vR8tY3nB6kJ5h`} {
+		if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{3}) {
+			t.Fatalf("%q tripped %v, want [3]", s, got)
+		}
+	}
+}
+
+// KRN-12: a value holding a '\' trips in its JSON form split by a break at
+// every place, at JSON depth one and two, also right after the escaped '\',
+// where the break's run holds it; the break alone in its place does not
+// (#4622).
+func TestJSONBackslashWrapped(t *testing.T) {
+	v := `q7Xz\2pL9mW4vR8tY3nB6kJ5h`
+	m := match.New([]match.Value{{ID: 5, Bytes: []byte(v)}}, nil)
+	j, _ := json.Marshal(v)
+	jj, _ := json.Marshal(string(j))
+	for _, f := range []string{string(j[1 : len(j)-1]), string(jj[2 : len(jj)-2])} {
+		for cut := 1; cut < len(f); cut++ {
+			for _, br := range []string{"\n", `\n`, `\r\n`, `\u000a`, `\\n`, "%0A"} {
+				s := `{"a":"` + f[:cut] + br + f[cut:] + `"}`
+				if got := m.Scan([]byte(s)).Trips; !slices.Equal(got, []int{5}) {
+					t.Fatalf("%q tripped %v, want [5]", s, got)
+				}
+			}
+		}
+	}
+	if got := m.Scan([]byte(`q7Xz%0a2pL9mW4vR8tY3nB6kJ5h`)).Trips; len(got) != 0 {
+		t.Fatalf("a %%0a break in the '\\' place tripped %v", got)
 	}
 }
