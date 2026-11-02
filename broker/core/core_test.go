@@ -115,10 +115,13 @@ type build struct {
 // runs go test -race, which needs the C toolchain), image.yml's
 // agentos_e2e build of cmd/agentos-egress with image/infer.sh's
 // infer_llamacpp build of cmd/agentos-infer (no file needs one tag without
-// the other), and a non-linux GOOS, which compiles each !linux file.
+// the other), image/camnode/build.sh's linux/arm64 build, which compiles
+// each linux arm64-only file, and a non-linux GOOS, which compiles each
+// !linux file.
 var builds = []build{
 	{name: "host+cgo", env: []string{"CGO_ENABLED=1"}},
 	{name: "agentos_e2e", env: []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}, flags: []string{"-tags=agentos_e2e,infer_llamacpp"}},
+	{name: "linux-arm64", env: []string{"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0"}},
 	{name: "darwin", env: []string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0"}, partial: true},
 }
 
@@ -303,19 +306,63 @@ func TestNoWritePathOutsideTheCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, e := range unreadErrors(root, unread, unreadable) {
+		t.Error(e)
+	}
+}
+
+// unreadErrors compares the files no build read (absolute) with listed
+// (keyed relative to root): an unread file listed names no error, an
+// unread file not listed names one, and so does a listed file no build
+// left unread.
+func unreadErrors(root string, unread []string, listed map[string]string) []string {
+	var errs []string
 	left := map[string]bool{}
-	for f := range unreadable {
+	for f := range listed {
 		left[f] = true
 	}
 	for _, f := range unread {
 		rel, _ := filepath.Rel(root, f)
-		if unreadable[filepath.ToSlash(rel)] == "" {
-			t.Errorf("%s: no build reads it, so its write paths go unchecked; add a build that compiles it", rel)
+		rel = filepath.ToSlash(rel)
+		if listed[rel] == "" {
+			errs = append(errs, rel+": no build reads it, so its write paths go unchecked; add a build that compiles it")
 		}
-		delete(left, filepath.ToSlash(rel))
+		delete(left, rel)
 	}
+	var stale []string
 	for f := range left {
-		t.Errorf("unreadable lists %s, which a build now reads or which is gone; remove the entry", f)
+		stale = append(stale, f)
+	}
+	sort.Strings(stale)
+	for _, f := range stale {
+		errs = append(errs, "unreadable lists "+f+", which a build now reads or which is gone; remove the entry")
+	}
+	return errs
+}
+
+// The unread comparison passes a listed file and fails on an unread file
+// no entry names and on an entry no build left unread (#4447).
+func TestUnreadErrors(t *testing.T) {
+	root := filepath.FromSlash("/m")
+	abs := func(rel string) string { return filepath.Join(root, filepath.FromSlash(rel)) }
+	listed := map[string]string{"a/listed.go": "why"}
+	for _, c := range []struct {
+		name   string
+		unread []string
+		want   []string
+	}{
+		{"listed", []string{abs("a/listed.go")}, nil},
+		{"unlisted", []string{abs("a/listed.go"), abs("b/new.go")}, []string{"b/new.go: no build reads it"}},
+		{"stale", nil, []string{"unreadable lists a/listed.go, which a build now reads"}},
+	} {
+		got := unreadErrors(root, c.unread, listed)
+		ok := len(got) == len(c.want)
+		for i := range c.want {
+			ok = ok && strings.HasPrefix(got[i], c.want[i])
+		}
+		if !ok {
+			t.Errorf("%s: got %q, want prefixes %q", c.name, got, c.want)
+		}
 	}
 }
 
@@ -327,8 +374,8 @@ var unreadable = map[string]string{
 }
 
 // Each build reads the files only it compiles: a write path in a file
-// behind cgo, the agentos_e2e tag or !linux is found under that build and
-// no other. The package calls grants.Gate.Decide from all three files, and
+// behind cgo, the agentos_e2e tag, linux arm64 or !linux is found under that
+// build and no other. The package calls grants.Gate.Decide from all four files, and
 // writePaths names a package's write path once, at the first file it reads.
 func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 	// The overlay fills core/testdata itself, which holds no Go file: cgo
@@ -349,10 +396,11 @@ func TestEachBuildChecksItsOwnFiles(t *testing.T) {
 		dir + "/cgo.go":   decide("cgo", "Cgo"),
 		dir + "/e2e.go":   decide("agentos_e2e", "E2E"),
 		dir + "/other.go": decide("!linux", "Other"),
+		dir + "/arm64.go": decide("linux && arm64", "Arm64"),
 	}
-	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "darwin": "other.go"}
-	if runtime.GOOS != "linux" {
-		want["host+cgo"] = "" // other.go compiles on the host too; either file may come first
+	want := map[string]string{"host+cgo": "cgo.go", "agentos_e2e": "e2e.go", "linux-arm64": "arm64.go", "darwin": "other.go"}
+	if runtime.GOOS != "linux" || runtime.GOARCH == "arm64" {
+		want["host+cgo"] = "" // other.go or arm64.go compiles on the host too; either file may come first
 	}
 	ov := overlay(t, srcs)
 	l := readList(t)

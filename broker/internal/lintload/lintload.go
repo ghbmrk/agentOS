@@ -85,6 +85,11 @@ var goVars = []string{
 	"CC", "CXX", "PKG_CONFIG", "PKG_CONFIG_PATH", "CGO_CFLAGS", "CGO_LDFLAGS", "CGO_ENABLED",
 }
 
+// afterList sees the export data go list named, by import path, before
+// any package is type-checked; only a test sets it, to reach the check
+// error no source the gc compiler accepts would.
+var afterList = func(export map[string]string) {}
+
 // Load lists patterns under b in dir and type-checks each package they
 // name.
 func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
@@ -152,6 +157,7 @@ func Load(dir string, b Build, patterns ...string) (*Loaded, error) {
 			targets = append(targets, p)
 		}
 	}
+	afterList(export)
 	lookup := func(m map[string]string) func(string) (io.ReadCloser, error) {
 		return func(path string) (io.ReadCloser, error) {
 			if v, ok := m[path]; ok {
