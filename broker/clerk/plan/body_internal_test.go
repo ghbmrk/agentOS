@@ -4,10 +4,12 @@ package plan
 
 import "testing"
 
-// check reads a value as a map only under a map shape. A JSON shape reaches
-// check's default case when send passes it nothing, and a shape that skipped
-// valid can reach it from inside the package; neither is read as a map
-// (#4678, #4660 Security M5).
+// check reads a value as a map only under a map shape. send never brings a
+// JSON shape to check's default case: given nothing it returns before the
+// switch, and given a JSON text it checks the text's Each shape. Only a
+// direct call from inside the package reaches the default case with a JSON
+// shape or one that skipped valid, and neither is read as a map (#4678,
+// #4660 Security M5).
 func TestCheckReadsOnlyAMapAsAMap(t *testing.T) {
 	each := &Value{Kind: KindBool}
 	x := map[string]any{"a": true}

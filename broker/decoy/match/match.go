@@ -54,6 +54,7 @@ var (
 	lower       = regexp.MustCompile(`[a-z]`)
 	upper       = regexp.MustCompile(`[A-Z]`)
 	digit       = regexp.MustCompile(`[0-9]`)
+	slashRun    = regexp.MustCompile(`\\+`)
 )
 
 // Detect returns text with known token formats, secret-named URL parameters
@@ -200,6 +201,7 @@ type Value struct {
 type Matcher struct {
 	forms []form
 	first map[byte][]int // forms by their first byte
+	slash [][2]int       // each '\' of a form: the form and where
 	dests map[netip.Addr]int
 	carry int
 }
@@ -223,6 +225,11 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 		for _, f := range encodings(v.Bytes) {
 			if len(f) > 0 {
 				m.first[f[0]] = append(m.first[f[0]], len(m.forms))
+			}
+			for k, c := range f {
+				if c == '\\' {
+					m.slash = append(m.slash, [2]int{len(m.forms), k})
+				}
 			}
 			m.forms = append(m.forms, form{v.ID, f})
 			m.carry = max(m.carry, len(f)-1)
@@ -248,6 +255,11 @@ func encodings(v []byte) [][]byte {
 		from, to := [3]int{0, 2, 3}[off], 8*len(b)/6
 		for _, e := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
 			out = append(out, []byte(e.EncodeToString(b)[from:to]))
+		}
+	}
+	for _, f := range out[:2] { // joined text counts a run of '\'s as one
+		if c := slashRun.ReplaceAll(f, []byte(`\`)); !bytes.Equal(c, f) {
+			out = append(out, c)
 		}
 	}
 	return out
@@ -429,27 +441,33 @@ func (s *Stream) scan() {
 	}
 	keep := max(s.m.carry, carryPattern)
 	drop := max(0, len(s.joined)-keep)
-	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, keep), 0
-	var kept []cut
-	for _, br := range s.breaks {
-		if br.at >= drop {
-			br.at -= drop
-			kept = append(kept, br)
-		}
+	if len(s.breaks) > 0 { // a held break is never cut away, whatever the forms' length
+		drop = min(drop, s.breaks[0].at)
 	}
-	s.breaks, s.floor = kept, max(0, s.floor-drop)
+	s.buf, s.joined, s.pending = tail(s.buf, keep), tail(s.joined, len(s.joined)-drop), 0
+	for i := range s.breaks {
+		s.breaks[i].at -= drop
+	}
+	s.floor = max(0, s.floor-drop)
 }
 
 // matchBreak matches the forms that begin inside a removed break, the rest
-// joined after it.
+// joined after it, and those whose own '\' ends the '\' run a JSON break
+// removed: the run read back as one '\' (#4622).
 func (s *Stream) matchBreak(br cut) {
-	b := br.b
+	b, before, after := br.b, s.joined[:br.at], s.joined[br.at:]
 	for k := 1; k <= len(b); k++ {
 		for _, i := range s.m.first[b[len(b)-k]] {
 			f := s.m.forms[i]
-			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && bytes.HasPrefix(s.joined[br.at:], f.b[k:]) {
+			if k < len(f.b) && bytes.HasSuffix(b, f.b[:k]) && bytes.HasPrefix(after, f.b[k:]) {
 				s.res.add(f.id)
 			}
+		}
+	}
+	for _, h := range s.m.slash {
+		f := s.m.forms[h[0]]
+		if b[0] != '0' && bytes.HasSuffix(before, f.b[:h[1]]) && bytes.HasPrefix(after, f.b[h[1]+1:]) {
+			s.res.add(f.id)
 		}
 	}
 }
