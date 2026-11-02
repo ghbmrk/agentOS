@@ -4,14 +4,15 @@ name: mutgate
 # finds a LIVED mutant on a line the PR adds there: the tests run that line but do not check it.
 # Gremlins runs only on those packages (`mutgate.py claimed`), one job each, and only on the lines
 # the PR adds (`run --git`): the only lines the gate reads. Gremlins has no mutator that deletes a
-# statement, so `delete` deletes each statement starting on one of those lines alone and adds its
-# verdict to gremlins' JSON (#4573). A PR that claims none runs no gremlins and passes. The
-# `mutgate` job is the one result to read.
+# statement, so `delete` deletes each statement holding one of those lines alone, on parallel
+# workers, and adds its verdict to gremlins' JSON (#4573, #4603, #4633). A PR that claims none runs
+# no gremlins and passes. The `mutgate` job is the one result to read.
 # The `mutants` jobs run the PR's own Go tests, which can write anything in that job (the JSON,
 # tools/, $GITHUB_ENV), so they only hand gremlins' JSON on as an artifact. No job that decides
 # runs PR code or the PR's copy of the gate: `claimed` and `mutgate` replace tools/ and
 # broker/core/core.txt (the tier list risk_tier reads) with the base commit's before running
-# them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106).
+# them, and `mutgate` reruns `run`'s checks on the artifact with `verify` (#4106), which builds the
+# base's statement lister (standard library only) to recount the deletion sites (#4602).
 on:
   pull_request:
 permissions:
@@ -155,6 +156,13 @@ jobs:
         run: |
           [ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ] || { echo "::error::HEAD is not the merge of this PR's head"; exit 1; }
           echo "BASE=$(git rev-parse HEAD^1)" >> "$GITHUB_ENV"
+      # Go builds the base's statement lister, which reads the PR's files as data, so verify can
+      # list the deletion sites itself (#4602). Before the download, so no artifact stands in for it.
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        if: ${{ needs.claimed.outputs.packages != '[]' }}
+        with:
+          go-version: "1.26.10" # = the mutants job's, so both list the same sites
+          cache: false
       # Before the base copy is written, so nothing an artifact unpacks can stand in for it.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         if: ${{ needs.claimed.outputs.packages != '[]' }}
@@ -168,7 +176,7 @@ jobs:
           git archive "$BASE" tools broker/core/core.txt | tar -x
       # Each artifact lands in its own directory. verify recomputes the claim from the diff, needs
       # exactly one readable result for each claimed package across them, rechecks it as `run`
-      # does, then gates: the JSON is the PR's data, never its verdict.
+      # does, needs one deletion verdict per site it lists, then gates: the JSON is data, never a verdict.
       - name: Gate (MUT-tierA)
         if: ${{ needs.claimed.outputs.packages != '[]' }}
         env:
