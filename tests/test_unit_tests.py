@@ -496,6 +496,21 @@ class ClashTest(unittest.TestCase):
         reused = '1 symlink("/w/real", "/w/link") = 0\n' + open_x
         self.assertEqual(clash_audit.clashes({"test_a": reused, "test_b": w(9, "/w/link/x")}, serial={}),
                          [("path", "/w/link/x", "test_a", "test_b")])
+        # One pid's cwd is known and the other's is not (a forked child): the relative name main
+        # read still clashes, as a socket and as a file.
+        known = '1 openat(AT_FDCWD</w>, "q", O_RDONLY) = 3</w/q>\n'
+        for call in ('{pid} bind(3<socket:[9]>, {{sa_family=AF_UNIX, sun_path="sock"}}, 110) = -1 EADDRINUSE\n',
+                     f'{{pid}} open("sock", {excl}\n'):
+            a, b = known + call.format(pid=1), call.format(pid=2)
+            self.assertIn(("path", "sock", "test_a", "test_b"), clash_audit.clashes({"test_a": a, "test_b": b}, serial={}), call)
+        # O_NOFOLLOW and a bind make the final name; symlinkat's AT_FDCWD is the pid's cwd.
+        final = '1 symlink("/w/real/x", "/w/s") = 0\n'
+        self.assertEqual(clash_audit.writes(final + '1 openat(AT_FDCWD</w>, "s", O_WRONLY|O_NOFOLLOW) = -1 ELOOP\n',
+                                            ondisk=lambda p: None), {("path", "/w/s")})
+        self.assertEqual(clash_audit.writes(final + '1 bind(3<socket:[9]>, {sa_family=AF_UNIX, sun_path="/w/s"}, 110) = -1 EADDRINUSE\n',
+                                            ondisk=lambda p: None), {("path", "/w/s")})
+        self.assertIn(("path", "/w/real/x"), clash_audit.writes(
+            f'1 symlinkat("/w/real", AT_FDCWD</w>, "link") = 0\n1 open("link/x", {excl}\n', ondisk=lambda p: None))
         # A relative chdir from an unknown cwd leaves later relative names as asked.
         self.assertEqual(clash_audit.writes(f'1 chdir("rel") = 0\n1 open("x", {excl}\n'), {("path", "x")})
         # Links past the kernel's 40 fail with ELOOP: the name stays as asked, and the walk ends.

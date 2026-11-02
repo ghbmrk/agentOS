@@ -195,13 +195,14 @@ def _scan(trace, ondisk):
         return walk(path, link_of, last)
 
     def asked(pid, path, base=None, last=False):
-        """The names an unresolved call may have reached: the walk, and the path as asked with
-        only `..` folded (as main read it), so a stale link in the walk can add a name but never
-        lose the one the call named."""
+        """The names an unresolved call may have reached: the walk, and the path exactly as main
+        read it (joined only to a dirfd, `..` folded; a relative name with no dirfd stays relative,
+        as every module runs from the root), so a stale link or a cwd the trace showed wrongly can
+        add a name but never lose the one main read."""
         walked = resolve(pid, path, base, last)
         if not os.path.isabs(walked):
             return {walked}
-        return {walked, os.path.normpath(os.path.join(base or cwd.get(pid) or "/", path))}
+        return {walked, os.path.normpath(os.path.join(base, path) if base else path)}
 
     def open_target(pid, rest):
         m = _OPEN_ARGS.match(rest)
