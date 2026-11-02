@@ -82,7 +82,7 @@ func writeAtomic(path string, b []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(name, path); err != nil {
+	if err := os.Rename(name, path); err != nil { // durable:exempt lifecycle:exempt the enforcer links nothing of agentOS (brief decision 1, arc2_test.go), so it cannot use durable; this is its own write-sync-rename-sync of one state file
 		return err
 	}
 	return syncDir(dir)
