@@ -1585,7 +1585,10 @@ class ConfigTest(unittest.TestCase):
         # pinned by path and kind, so any addition, symlink or rename here needs a deliberate edit.
         tree = MK / "mkosi.pkgmngr"
         got = []
-        for d, dirs, files in os.walk(tree):
+
+        def fail(err):
+            raise err
+        for d, dirs, files in os.walk(tree, onerror=fail):
             for n in dirs + files:
                 p = pathlib.Path(d, n)
                 kind = "link" if p.is_symlink() else "dir" if p.is_dir() else "file"
@@ -1598,11 +1601,25 @@ class ConfigTest(unittest.TestCase):
             ("etc/apt/sources.list.d", "dir"),
             ("etc/apt/sources.list.d/mkosi.sources", "file"),
         ])
-        # mkosi v24.3 reads no other package-manager tree: no archive default, none beside the
-        # initrd's config, and no PackageManagerTrees= in the image's or the initrd's config.
-        self.assertEqual(sorted(MK.rglob("mkosi.pkgmngr*")), [tree])
+        # Nothing else feeds mkosi v24.3 config or packages. Its defaults are mkosi.* names beside a
+        # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
+        # so both config folders' mkosi.* names are pinned. Include= could read a config from
+        # anywhere, and PackageManagerTrees= and PackageDirectories= append, so the two configs set
+        # none of them except the initrd's own folder. The build runs mkosi with these flags only.
+        self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
+            "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
+            "mkosi.repart"])
+        self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
+                         ["mkosi.conf", "mkosi.finalize"])
         for conf in (MK / "mkosi.conf", MK / "initrd/mkosi.conf"):
-            self.assertNotIn("PackageManagerTrees", conf.read_text(), conf)
+            keys = re.findall(r"^([A-Za-z]+)\s*=\s*(.*)$", conf.read_text(), re.M)
+            for k, v in keys:
+                if re.search(r"include|packagemanagertrees|packagedirector", k, re.I):
+                    self.assertEqual((conf, k, v.strip()), (MK / "mkosi.conf", "InitrdInclude", "initrd/"))
+        runs = [l for l in (IMG / "build.sh").read_text().splitlines()
+                if "$MKOSI" in l and not l.lstrip().startswith("#")]
+        self.assertEqual(runs, ['$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" '
+                                '--extra-tree="$STAGE:/" --output-dir "$OUT" build'])
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
