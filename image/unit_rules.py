@@ -5,26 +5,29 @@ lint (#4677, Mark's option A on #4698).
 Which file is a unit's, which drop-ins apply and in what order, which name is an alias and which
 file a link or a mask hides are systemd's to decide, and two review rounds on #4737 each found
 another place a hand-written copy of its precedence went wrong. So this file decides none of it. It
-plants a target that Wants= every unit name the tree's lookup directories hold (an instance for each
-template, and each instance a drop-in directory or a .wants link names), runs the tree's own systemd
-in test mode on it once (image/offline_systemd.py, shared with image/unlock_graph.py), and reads, for
-every unit loaded, its "Unit Load State", "Fragment Path" and "DropIn Path" lines: the files systemd
-applies, in its order, after every mask.
+boots the tree's own /usr/lib/systemd/systemd as PID 1 of a container namespace (MANAGER: its own
+mount, PID, network and cgroup namespaces, over an overlay of the tree, starting nothing), so its generators run and their output stays readable. It then asks that manager, over
+its private bus with the runner's own systemctl, for each unit name the tree's unit directories
+hold: `systemctl show -p Id,Names,LoadState,FragmentPath,DropInPaths`. That is a structured reply
+of one block per name, never a dump of unit values (#4779 Security 1: an Environment= value can
+hold newlines). Unit names cannot hold a space or a control byte, and every name in a unit or
+drop-in directory is held to SAFE first, so no path in the reply can either; each path is then
+checked to be one the tree holds.
 
 What it adds is attribution: whether a file's lines are a package's or ours. A file is a package's
 only when it is byte-identical to one a package installed (dpkg's md5sums and conffiles, which
-mkosi.postinst copies out), and no link of ours brings it in. A link is ours, because no package
-database lists a link's target: a unit file, drop-in or drop-in directory reached through a link,
-or a parent directory reached through one, is ours. One link is not: a unit-directory entry whose own
-target (read once, its directories resolved) is another unit-directory entry is an alias, and keeps
-that entry's provenance. The rules themselves, and what a package's lines may do, are
-broker/kernel/privfile's (unitCheck.unit, builtUnits): this prints records, it judges nothing.
+mkosi.postinst copies out), keyed by its path resolved through the merged-/usr top links alone,
+and no link brings it in. A link is ours, because no package database lists a link's target: a
+unit file, drop-in or drop-in directory reached through a link is ours. One link is not: a
+unit-directory entry whose own target, resolved in the tree with its last component unfollowed, is
+an entry of a unit directory is an alias, and keeps that entry's provenance. The rules themselves,
+and what a package's lines may do, are broker/kernel/privfile's (unitCheck.unit, builtUnits): this
+prints records, it judges nothing.
 
-A drop-in of ours that a transient or generated unit may read is also printed alone, to be read as
-a root unit's: one in a type-wide (service.d) or prefix (a-.service.d) directory, one in a directory
-no loaded unit has a name of, and every one of a unit whose fragment a generator wrote (systemd's
-temporary generator directory is gone when it exits, so that fragment's text is not read; its main
-input, /etc/fstab, is printed whole).
+A drop-in of ours that a transient or later unit may read is also printed alone, to be read as a
+root unit's: one in a type-wide (service.d) or prefix (a-.service.d) directory, and one in a
+directory whose name no loaded unit, alias or loaded template instance has. /etc/fstab is printed
+whole when it is ours; the units its generator writes are read like any other.
 
 Usage (as root): unit_rules.py OUT VERSION prints build OUT's records as JSON; --control OUT VERSION
 prints them with CONTROL planted, which the lint must refuse; --fixture ROOT PACKAGED prints a fixture
@@ -35,15 +38,17 @@ import hashlib
 import json
 import os
 import pathlib
+import re
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import offline_systemd  # noqa: E402
 
-LINT = "agentos-unit-lint.target"
 INSTANCE = "agentos-unit-lint"
 # The system manager's unit directories (systemd path-lookup.c, v255 to v257), highest first. A
 # directory missed here makes an alias into it read as a link of ours, which holds more, never less.
@@ -54,8 +59,15 @@ UNIT_DIRS = ("/etc/systemd/system.control", "/run/systemd/system.control", "/run
              "/run/systemd/generator.late")
 TYPES = (".service", ".socket", ".mount", ".swap", ".target", ".path", ".timer", ".slice", ".automount")
 DEP_DIRS = (".wants", ".requires", ".upholds")
+# Every name in a unit directory, a drop-in directory or a dependency directory: the bytes a unit
+# name may hold (unit-name.c) and a drop-in's. A name with any other byte (a space, a newline) could
+# not be told apart in systemctl's reply, so the tree is refused.
+SAFE = re.compile(r"[A-Za-z0-9:_.@\\+-]+\Z")
+PROPS = ("Id", "Names", "LoadState", "FragmentPath", "DropInPaths")
 # systemd will not start a bad-setting or error unit, but its files are held as a loaded one's: stricter.
 STATES = ("loaded", "bad-setting", "error", "masked", "not-found")
+# The top links of a merged /usr: the only links a dpkg path may be resolved through.
+MERGED = {"/bin", "/sbin", "/lib", "/lib64"}
 # A drop-in of ours on a packaged root unit: the lint must refuse it, or a pass of the built tree
 # means nothing (#4677 Security R-1's shape).
 CONTROL = {"etc/systemd/system/systemd-journald.service.d/zz-agentos-unit-control.conf":
@@ -64,14 +76,14 @@ CONTROL_WANT = 'variable "LD_PRELOAD"'
 
 
 class View:
-    """The tree as systemd in the namespace sees it: ROOT, with USR as /usr. Every path is absolute in
-    the tree, and links resolve in it, never on the runner."""
+    """A tree at ROOT (optionally with USR as its /usr), every path absolute in the tree, links
+    resolved in it, never on the runner."""
 
-    def __init__(self, root, usr):
-        self.root, self.usr = str(root), str(usr)
+    def __init__(self, root, usr=None):
+        self.root, self.usr = str(root), usr and str(usr)
 
     def host(self, p):
-        if p == "/usr" or p.startswith("/usr/"):
+        if self.usr and (p == "/usr" or p.startswith("/usr/")):
             return self.usr + p[4:]
         return self.root + p
 
@@ -115,9 +127,9 @@ class View:
         except (FileNotFoundError, NotADirectoryError):
             return []
 
-    def isdir(self, p):
+    def kind(self, p):
         st = self.lstat(p)
-        return st is not None and st.st_mode & 0o170000 == 0o040000
+        return st and st.st_mode & 0o170000
 
     def text(self, p):
         fd = os.open(self.host(p), os.O_RDONLY | os.O_NOFOLLOW)
@@ -130,41 +142,48 @@ def unit_dirs(view):
     out = []
     for d in UNIT_DIRS:
         r, _ = view.resolve(d)
-        if view.isdir(r) and r not in out:
+        if view.kind(r) == 0o040000 and r not in out:
             out.append(r)
     return out
 
 
+def safe(name, where):
+    if not SAFE.match(name):
+        raise SystemExit("unit rules: %s/%r: a name with a byte outside [A-Za-z0-9:_.@\\+-], which "
+                         "systemctl's reply could not carry unambiguously" % (where, name))
+
+
 def names(view, dirs):
     """Every unit name the tree's unit directories hold: each unit file's (an instance for a template),
-    each instance a drop-in directory names, and each unit a .wants, .requires or .upholds link names."""
+    each instance a drop-in directory names, and each unit a .wants, .requires or .upholds link names.
+    Every name met is held to SAFE."""
     out = set()
 
     def add(n):
-        if not n.endswith(TYPES) or n == LINT:
+        if not n.endswith(TYPES):
             return
         base, ext = os.path.splitext(n)
         out.add(base + INSTANCE + ext if base.endswith("@") else n)
     for d in dirs:
         for e in view.entries(d):
-            if e.endswith(".d"):
-                add(e[:-2])
-            elif e.endswith(DEP_DIRS):
-                for w in view.entries(view.resolve(d + "/" + e)[0]):
-                    add(w)
+            safe(e, d)
+            sub = view.resolve(d + "/" + e)[0]
+            if e.endswith(".d") or e.endswith(DEP_DIRS):
+                for c in view.entries(sub):
+                    safe(c, d + "/" + e)
+                    if not e.endswith(".d"):
+                        add(c)
+                add(e[:-2] if e.endswith(".d") else "")
             else:
                 add(e)
     return sorted(out)
 
 
-def plant_lint(plant, wanted):
-    """Write LINT, wanting each of WANTED by a .wants link (a link's name is read as given, never
-    unescaped), into the plant directory."""
-    d = pathlib.Path(plant) / "etc/systemd/system"
-    (d / (LINT + ".wants")).mkdir(parents=True, exist_ok=True)
-    (d / LINT).write_text("[Unit]\nDescription=agentOS unit-rule lint (#4677)\nDefaultDependencies=no\n")
-    for n in wanted:
-        (d / (LINT + ".wants") / n).symlink_to("/dev/null/" + n)
+def template_of(name):
+    """x@.service for an instance x@a.service, else None."""
+    base, ext = os.path.splitext(name)
+    at = base.find("@")
+    return base[:at + 1] + ext if 0 < at < len(base) - 1 else None
 
 
 class Provenance:
@@ -183,17 +202,16 @@ class Provenance:
                     self.mark(p)
 
     def alias_target(self, p):
-        """The unit-directory entry p, a link, names, if p is an alias; else None."""
-        if os.path.dirname(p) not in self.dirs:
+        """The unit-directory entry that p, a unit-directory link, names, if p is an alias; else None.
+        The link's own target is read once and resolved in the tree, its last component unfollowed
+        (#4779 L3 1: never folded by spelling)."""
+        d, _ = self.view.resolve(os.path.dirname(p))
+        if d not in self.dirs or self.view.kind(d + "/" + os.path.basename(p)) != 0o120000:
             return None
-        st = self.view.lstat(p)
-        if st is None or st.st_mode & 0o170000 != 0o120000:
-            return None
-        t = os.readlink(self.view.host(p))
-        t = t if t.startswith("/") else os.path.dirname(p) + "/" + t
-        d, _ = self.view.resolve(os.path.dirname(os.path.normpath(t)))
-        if d in self.dirs and os.path.basename(t).endswith(TYPES):
-            return d + "/" + os.path.basename(t)
+        t = os.readlink(self.view.host(d + "/" + os.path.basename(p)))
+        r, _ = self.view.resolve(t if t.startswith("/") else d + "/" + t, last=False)
+        if os.path.dirname(r) in self.dirs and os.path.basename(r).endswith(TYPES):
+            return r
         return None
 
     def mark(self, p):
@@ -211,126 +229,212 @@ class Provenance:
         return bool(links) or final in self.linked or not self.packaged(final)
 
 
-def records(view, out, err, status, dirs, prov, planted):
+# The tree's own systemd as PID 1 of a container: an overlay of the tree (writable, so nothing needs
+# a mount over it), its own /usr, a private /proc, a /sys with only a cgroup2 tree in its own cgroup
+# namespace, five character devices and a console file, an empty /run, no network. It starts only
+# -.slice, which every manager has and which starts nothing, so nothing is planted (a planted
+# directory would hide a link of the tree's). Its argv after --unit= is the boot entry's command
+# line, which systemd in a container reads as the kernel's.
+MANAGER = r'''set -eu
+R=$1 USR=$2 PLANT=$3 CONSOLE=$4
+shift 4
+W=$(mktemp -d)
+mount -t tmpfs -o mode=755 tmpfs "$W"
+mkdir "$W/upper" "$W/work" "$W/root"
+[ -z "$PLANT" ] || cp -a "$PLANT/." "$W/upper/"
+mount -t overlay -o "lowerdir=$R,upperdir=$W/upper,workdir=$W/work" overlay "$W/root"
+N=$W/root
+mount --rbind "$USR" "$N/usr"
+mount -t proc -o nosuid,nodev,noexec proc "$N/proc"
+mount -t tmpfs -o mode=755 tmpfs "$N/sys"
+mkdir -p "$N/sys/fs/cgroup"
+mount -t cgroup2 cgroup2 "$N/sys/fs/cgroup"
+mount -t tmpfs -o mode=755 tmpfs "$N/dev"
+for n in null zero full random urandom; do : >"$N/dev/$n"; mount --bind "/dev/$n" "$N/dev/$n"; done
+: >"$N/dev/console"; mount --bind "$CONSOLE" "$N/dev/console"
+mount -t tmpfs -o mode=755 tmpfs "$N/run"
+mkdir -p "$N/tmp" && chmod 1777 "$N/tmp"
+exec env -i container=agentos-unit-lint "$(command -v chroot)" "$N" /usr/lib/systemd/systemd --unit=-.slice "$@"
+'''
+# The runner's systemctl, in the manager's PID namespace (systemd refuses a bus peer it cannot see),
+# reaching its private bus through /proc/PID/root.
+CTL = r'''set -eu
+S=$1; shift
+mount -t tmpfs -o mode=755 tmpfs /run
+mkdir -p /run/systemd/system
+ln -s "$S" /run/systemd/private
+exec systemctl "$@"
+'''
+
+
+class Manager:
+    """The tree's systemd, running (see MANAGER). view is the tree exactly as it sees it."""
+
+    def __init__(self, root, usr, cmdline, plant):
+        self.log = tempfile.NamedTemporaryFile(prefix="unit-rules-console-")
+        wrap = []
+        if os.path.isdir("/run/systemd/system"):  # a runner booted by systemd: a delegated scope of our own
+            wrap = ["systemd-run", "--scope", "--quiet", "-p", "Delegate=yes", "--"]
+        self.proc = subprocess.Popen(wrap + ["unshare", "-m", "-p", "-f", "-n", "-C", "--propagation", "private",
+                                             "sh", "-c", MANAGER, "unit-rules", str(root), str(usr), str(plant),
+                                             self.log.name] + cmdline.split(),
+                                     stdout=subprocess.DEVNULL, stderr=self.log)
+        self.pid = None
+        try:
+            self.wait()
+        except BaseException:
+            self.stop()
+            raise
+        self.view = View("/proc/%d/root" % self.pid)
+
+    def wait(self, timeout=120):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            if self.proc.poll() is not None:
+                break
+            try:
+                kids = open("/proc/%d/task/%d/children" % (self.proc.pid, self.proc.pid)).read().split()
+            except OSError:
+                kids = []
+            if kids:
+                self.pid = int(kids[0])
+                r = self.ctl(["show", "-p", "SystemState", "--value"], check=False)
+                if r.returncode == 0 and r.stdout.strip() in ("running", "degraded"):
+                    return
+            time.sleep(0.2)
+        raise SystemExit("unit rules: the tree's systemd did not start: %s" % self.console())
+
+    def console(self):
+        try:
+            return pathlib.Path(self.log.name).read_text(errors="replace")[-3000:]
+        except OSError:
+            return ""
+
+    def ctl(self, args, check=True):
+        r = subprocess.run(["nsenter", "-t", str(self.pid), "-p", "--", "unshare", "-m", "--propagation", "private",
+                            "sh", "-c", CTL, "unit-rules-ctl", "/proc/%d/root/run/systemd/private" % self.pid] + args,
+                           capture_output=True, text=True, timeout=300)
+        if check and r.returncode != 0:
+            raise SystemExit("unit rules: systemctl %s: %s" % (" ".join(args[:3]), r.stderr[-2000:]))
+        return r
+
+    def show(self, units):
+        """{name: {prop: value}} for each of UNITS, one systemctl reply block each, in order."""
+        out = {}
+        for i in range(0, len(units), 200):
+            batch = units[i:i + 200]
+            text = self.ctl(["show", "--all", "-p", ",".join(PROPS), "--"] + batch).stdout
+            blocks = text.rstrip("\n").split("\n\n") if text.strip() else []
+            if len(blocks) != len(batch):
+                raise SystemExit("unit rules: systemctl gave %d blocks for %d units" % (len(blocks), len(batch)))
+            for name, block in zip(batch, blocks):
+                props = {}
+                for line in block.split("\n"):
+                    k, sep, v = line.partition("=")
+                    if not sep or k not in PROPS or k in props:
+                        raise SystemExit("unit rules: %s: systemctl line %r" % (name, line))
+                    props[k] = v
+                if set(props) != set(PROPS) or name not in props["Names"].split():
+                    raise SystemExit("unit rules: %s: systemctl gave %s" % (name, props))
+                out[name] = props
+        return out
+
+    def stop(self):
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.proc.kill()
+        self.proc.wait()
+        self.log.close()
+
+
+def tree_path(view, p):
+    """p, a path systemd named, as the tree holds it: absolute, every byte SAFE or /, resolving to a
+    regular file or to /dev/null. Else the run fails."""
+    if not p.startswith("/") or not all(SAFE.match(c) for c in p.split("/")[1:]):
+        raise SystemExit("unit rules: systemd named %r, not an absolute path of safe names" % p)
+    final, _ = view.resolve(p)
+    if final != "/dev/null" and view.kind(final) != 0o100000:
+        raise SystemExit("unit rules: systemd named %s, which the tree does not hold as a file" % p)
+    return final
+
+
+def records(view, shown, dirs, prov):
     """The records of one run: {"units": [{"unit", "alone", "files": [{"path", "ours", "text"}]}],
-    "fstab": {"path", "text"} or None}. A run that failed, a unit systemd could not load, or a planted
-    name it neither loaded nor knows as an alias fails the lint."""
-    if status != 0:
-        raise SystemExit("unit rules: systemd's test run failed (%d): %s" % (status, err[-2000:]))
-    try:
-        units = offline_systemd.units(out)
-    except ValueError as e:
-        raise SystemExit("unit rules: %s" % e)
-    known = set(units)
-    for u in units.values():
-        known |= {v for k, v in u["settings"] if k == "Alias"}
-    missing = sorted(set(planted) - known)
-    if missing or LINT not in units:
-        raise SystemExit("unit rules: systemd's dump lacks %s: its layout may have changed" % (missing or [LINT]))
-    recs, listed, own = [], set(), set()
-    for name in sorted(units):
-        s = units[name]["settings"]
-        state = [v for k, v in s if k == "Unit Load State"]
-        frag = [v for k, v in s if k == "Fragment Path"]
-        drop = [v for k, v in s if k == "DropIn Path"]
-        if name == LINT:
+    "fstab": {"path", "text"} or None}, from SHOWN, systemctl's reply for every name names() found."""
+    recs, own, done, instances = [], set(), set(), set()
+    for name in sorted(shown):
+        s = shown[name]
+        if s["LoadState"] not in STATES:
+            raise SystemExit("unit rules: %s: load state %r; systemd cannot load it" % (name, s["LoadState"]))
+        if s["LoadState"] == "not-found":
+            continue  # a name no unit loads under: its drop-ins are read alone below
+        own |= {n + ".d" for n in s["Names"].split()}
+        instances |= {template_of(n) for n in s["Names"].split()} - {None}
+        if s["LoadState"] == "masked" or s["Id"] in done:
             continue
-        if len(state) != 1 or state[0] not in STATES or len(frag) > 1:
-            raise SystemExit("unit rules: %s: load state %s, fragments %s; systemd cannot load it, or its "
-                             "dump's layout changed" % (name, state, frag))
-        if state[0] != "not-found":  # a name no unit loads under: its drop-ins are read alone below
-            own |= {n + ".d" for n in [name] + [v for k, v in s if k == "Alias"]}
-        if state[0] == "masked":
-            continue
-        if state[0] != "not-found" and name in planted and not frag and not drop:
-            raise SystemExit("unit rules: %s is loaded with no Fragment Path or DropIn Path: the dump's "
-                             "layout may have changed" % name)
-        listed |= set(drop)
-        generated = bool(frag) and "/systemd-temporary-" in frag[0]
-        # A drop-in linked to /dev/null masks its name: systemd lists it and reads nothing from it.
-        drop = [p for p in drop if view.resolve(p)[0] != "/dev/null"]
-        if frag and not generated:
-            files = [{"path": p, "ours": prov.ours(p), "text": view.text(view.resolve(p)[0])} for p in frag + drop]
-            recs.append({"unit": name, "alone": False, "files": files})
-            continue
-        for p in drop:  # a generated, transient or fragment-less unit: each drop-in of ours, as root
-            if prov.ours(p):
-                recs.append({"unit": name, "alone": True,
-                             "files": [{"path": p, "ours": True, "text": view.text(view.resolve(p)[0])}]})
+        done.add(s["Id"])
+        frag = [s["FragmentPath"]] if s["FragmentPath"] else []
+        files = []
+        for p in frag + s["DropInPaths"].split():
+            final = tree_path(view, p)
+            if final != "/dev/null":  # a drop-in linked to /dev/null masks its name; nothing is read
+                files.append({"path": p, "ours": prov.ours(p), "text": view.text(final)})
+        if frag:
+            recs.append({"unit": s["Id"], "alone": False, "files": files})
+        else:  # loaded with no fragment: each drop-in of ours, as root
+            recs += [{"unit": s["Id"], "alone": True, "files": [f]} for f in files if f["ours"]]
     for d in dirs:
         for e in view.entries(d):
             if not e.endswith(".d"):
                 continue
             n = e[:-2]
-            base, ext = os.path.splitext(n)
             if "." not in n:  # a type-wide directory, service.d: no unit has its name
-                n, base, ext = "." + n, "", "." + n
-            if e in own or base.endswith("@") and any(u.startswith(base) and u.endswith(ext) for u in units):
-                continue  # systemd listed what of it applies to the unit of that name or template
+                n = "." + n
+            if e in own or n in instances:
+                continue  # systemd gave what of it applies to the unit, alias or instance of that name
             for c in view.entries(view.resolve(d + "/" + e)[0]):
                 p = d + "/" + e + "/" + c
                 final, _ = view.resolve(p)
-                if c.endswith(".conf") and final != "/dev/null" and prov.ours(p) and view.lstat(final):
+                if c.endswith(".conf") and final != "/dev/null" and view.kind(final) == 0o100000 and prov.ours(p):
                     recs.append({"unit": n, "alone": True,
                                  "files": [{"path": p, "ours": True, "text": view.text(final)}]})
     fstab = None
     final, _ = view.resolve("/etc/fstab")
-    if view.lstat(final) and prov.ours("/etc/fstab"):
+    if view.kind(final) == 0o100000 and prov.ours("/etc/fstab"):
         fstab = {"path": "/etc/fstab", "text": view.text(final)}
     return {"units": recs, "fstab": fstab}
 
 
 def lint(root, usr, cmdline, packaged, plant_files=None):
-    """Plant LINT (and PLANT_FILES) over the tree, run its systemd once and return its records."""
-    view = View(root, usr)
-    dirs = unit_dirs(view)
-    wanted = names(view, dirs)
+    """Boot the tree's systemd (with PLANT_FILES over the tree), ask it for every unit name and return
+    the records."""
     with tempfile.TemporaryDirectory() as plant:
-        plant_lint(plant, wanted)
         for p, text in (plant_files or {}).items():
             f = pathlib.Path(plant) / p
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text(text)
         os.chmod(plant, 0o755)
-        status, out, err = offline_systemd.run(root, usr, cmdline, LINT, plant)
-        if plant_files:  # read the planted files as systemd did: over the tree
-            view = Planted(view, plant)
-            dirs = unit_dirs(view)
-        prov = Provenance(view, dirs, packaged)
-        return records(view, out, err, status, dirs, prov, wanted)
-
-
-class Planted(View):
-    """A view with the plant directory over the tree, as the run's overlay has it."""
-
-    def __init__(self, view, plant):
-        super().__init__(view.root, view.usr)
-        self.plant = str(plant)
-
-    def host(self, p):
-        q = self.plant + p
-        if os.path.lexists(q):
-            return q
-        return super().host(p)
-
-    def entries(self, d):
-        out = set(super().entries(d))
+        m = Manager(root, usr, cmdline, plant)
         try:
-            out |= set(os.listdir(self.plant + d))
-        except (FileNotFoundError, NotADirectoryError):
-            pass
-        return sorted(out)
+            dirs = unit_dirs(m.view)
+            shown = m.show(names(m.view, dirs))
+            return records(m.view, shown, dirs, Provenance(m.view, dirs, packaged(m.view)))
+        finally:
+            m.stop()
 
 
-def dpkg_packaged(view, out):
-    """Whether a file of build OUT is byte-identical to one a package installed: dpkg's md5sums
-    (mkosi.postinst's agentos.dpkg-md5sums) and the conffiles in its status file, each path read as
-    resolved in the tree."""
-    want = {}
+def dpkg_packaged(out):
+    """For a view, whether a file of build OUT is byte-identical to one a package installed: dpkg's
+    md5sums (mkosi.postinst's agentos.dpkg-md5sums) and the conffiles in its status file. A listed path
+    counts only resolved through MERGED links alone: any other link on it may be ours (#4779 Security 2)."""
+    listed = []
     for line in (pathlib.Path(out) / "agentos.dpkg-md5sums").read_text().splitlines():
         md5, _, p = line.partition("  ")
         if md5 and p:
-            want.setdefault(view.resolve("/" + p)[0], set()).add(md5)
+            listed.append(("/" + p, md5))
     conf = False
     for line in (pathlib.Path(out) / "agentos.dpkg-status").read_text().splitlines():
         if line.startswith("Conffiles:"):
@@ -338,21 +442,26 @@ def dpkg_packaged(view, out):
         elif conf and line.startswith(" "):
             f = line.split()
             if len(f) >= 2 and f[0].startswith("/"):
-                want.setdefault(view.resolve(f[0])[0], set()).add(f[1])
+                listed.append((f[0], f[1]))
         else:
             conf = False
-    if not want:
+    if not listed:
         raise SystemExit("unit rules: no package's files listed in %s" % out)
 
-    def packaged(p):
-        if p not in want:
-            return False
-        st = view.lstat(p)
-        if st is None or st.st_mode & 0o170000 != 0o100000:
-            return False
-        with open(view.host(p), "rb") as f:
-            return hashlib.md5(f.read()).hexdigest() in want[p]
-    return packaged
+    def for_view(view):
+        want = {}
+        for p, md5 in listed:
+            final, links = view.resolve(p)
+            if set(links) <= MERGED:
+                want.setdefault(final, set()).add(md5)
+
+        def packaged(p):
+            if p not in want or view.kind(p) != 0o100000:
+                return False
+            with open(view.host(p), "rb") as f:
+                return hashlib.md5(f.read()).hexdigest() in want[p]
+        return packaged
+    return for_view
 
 
 def fixture(root, packaged_list):
@@ -376,7 +485,7 @@ def fixture(root, packaged_list):
         subprocess.run(["mount", "-t", "overlay", "-o", "ro,lowerdir=%s:/usr" % (root / "usr"), "overlay", m],
                        check=True)
         try:
-            return lint(root, m, "ro quiet", lambda p: p in listed)
+            return lint(root, m, "", lambda view: lambda p: p in listed)
         finally:
             subprocess.run(["umount", m], check=False)
 
@@ -389,7 +498,7 @@ def main(argv):
         out, version = argv[control:]
         root, usr, cmdline, cleanup = offline_systemd.built_tree(out, version)
         try:
-            recs = lint(root, usr, cmdline, dpkg_packaged(View(root, usr), out), CONTROL if control else None)
+            recs = lint(root, usr, cmdline, dpkg_packaged(out), CONTROL if control else None)
         finally:
             cleanup()
         recs["want"] = CONTROL_WANT if control else ""

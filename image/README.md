@@ -21,7 +21,7 @@ builds on two runners, boots one build under Secure Boot in QEMU, and compares t
 | `finish_image.py` | Counted boot entry, `/usr` verified against the entry's `usrhash=`, release manifest, the `/usr` list read back from the verified partition (#4059); fails the release on a private key or Owner Card anywhere on the disk outside `/usr` slot A (HW-1, IMG-1-1) |
 | `compare_manifests.py` | The reproduce job's comparison of two builds of one commit: package manifests, initrds member by member (`--initrd`, IMG-2) and `/usr` lists path by path (`--usr`), differences only in time or link count last (#4059, #4471) |
 | `ci_boot.sh` | QEMU boot with OVMF Secure Boot and swtpm; checks health, blessing, root growth, the wired lease and the inbound drop, and that a host disk attached on the first boot comes out unchanged (ONB-2, IMG-1-1) |
-| `unit_rules.py` | Prints, for each unit the built image's own systemd loads in test mode (`offline_systemd.py`), the files it applies in systemd's order and whose they are (ours, or byte-identical to a package's); image.yml holds them to the root-side unit rules (`broker/kernel/privfile`, `TestBuiltUnits`, #4677) |
+| `unit_rules.py` | Boots the built image's own systemd in a container namespace and prints, for each unit it loads (`systemctl show`), the files it applies in systemd's order and whose they are (ours, or byte-identical to a package's); image.yml holds them to the root-side unit rules (`broker/kernel/privfile`, `TestBuiltUnits`, #4677) |
 | `probe_inbound.py` | Probes box ports through QEMU's host forwards for `ci_boot.sh`: dropped, answered or error |
 
 Outputs in OUT: `agentos_V.raw` (the drive), `agentos_V.usr.raw` and `.usr-verity.raw` (the

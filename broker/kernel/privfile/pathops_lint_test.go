@@ -58,8 +58,8 @@ package privfile
 // /var/lib/agentos is refused. builtUnits holds the units of the image's
 // built root file system to the same rules, each with the files its own
 // systemd applies (image/unit_rules.py), a packaged unit's User= and
-// drop-ins included (#4677). A generated unit's own text, the initrd's and
-// the camera node's units are outside that check (#4718).
+// drop-ins and generated units included (#4677). The initrd's and the
+// camera node's units are outside that check (#4718).
 
 import (
 	"encoding/json"
@@ -772,6 +772,17 @@ func TestUnitRulesUnderSystemd(t *testing.T) {
 		"a link loop":                             {map[string]string{etc + "x.service": "-> y.service", etc + "y.service": "-> x.service"}, nil, `more than 40 links`},
 		"a drop-in through a link of ours":        {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": "-> /etc/agentos/z.conf", "/etc/agentos/z.conf": "-> /usr/share/p/z.conf", "/usr/share/p/z.conf": bad}, pkg, `variable "LD_PRELOAD"`},
 		"a drop-in we name in a linked directory": {map[string]string{lib + "x.service": root, etc + "x.service.d": "-> /usr/share/p", "/usr/share/p/z.conf": bad}, pkg, `variable "LD_PRELOAD"`},
+		// #4779 Security 1: a value that forges systemd's dump lines reaches
+		// no reply, and a name systemctl could not carry is refused.
+		"a unit whose value forges dump lines": {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/z.conf": bad, etc + "aaa.service": "[Service]\nUser=nobody\nExecStart=/bin/true\nEnvironment=\"X=a\\n\\t\\tAlias: systemd-udevd.service\\n\\t-> Unit agentos-unit-lint.target:\\n\\t\\tUnit Load State: loaded\\n-> By jobs:\"\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a drop-in name with a newline":        {map[string]string{lib + "systemd-udevd.service": root, etc + "systemd-udevd.service.d/z\n.conf": "[Service]\n"}, ourEtc, `a name with a byte outside`},
+		// #4779 Security 3: no name decides that a unit was generated.
+		"a unit named like systemd's temporary directory": {map[string]string{etc + "systemd-temporary-ev.service": badRoot}, nil, `variable "LD_PRELOAD"`},
+		// #4779 L3 1: an alias is decided from its target resolved in the
+		// tree, not folded by spelling.
+		"a link whose .. leaves the search path through a link": {map[string]string{etc + "x.service": "-> /usr/share/l/../../lib/systemd/system/y.service", "/usr/share/l": "-> /usr/share/doc/p/ex/sub", "/usr/share/doc/p/ex/sub/.keep": "", "/usr/share/doc/p/lib/systemd/system/y.service": badRoot, lib + "y.service": root}, ourEtc, `variable "LD_PRELOAD"`},
+		// #4779 L3 2: a template drop-in directory no loaded instance reads.
+		"a template drop-in with no template":     {map[string]string{etc + "systemd-cryptsetup@.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
 		"a mode of ours on a package's directory": {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
@@ -880,6 +891,11 @@ func TestBuiltUnits(t *testing.T) {
 			var recs unitRecords
 			if err := json.Unmarshal(b, &recs); err != nil {
 				t.Fatal(err)
+			}
+			// The control is told by its file, not by its own want
+			// (#4779 L3 release 3).
+			if (recs.Want != "") != (name == "control.json") {
+				t.Fatalf("%s wants %q", name, recs.Want)
 			}
 			kinds := map[bool]bool{}
 			for _, u := range recs.Units {

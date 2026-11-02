@@ -34,18 +34,6 @@ def tree(d, files):
     return r.View(root, usr)
 
 
-def dump(units):
-    """A test-mode dump in systemd's layout: UNITS maps a name to its setting lines."""
-    out = ["-> By units:"]
-    for name, lines in units.items():
-        out.append("\t-> Unit %s:" % name)
-        out += ["\t\t" + l for l in lines]
-    return "\n".join(out + ["-> By jobs:"]) + "\n"
-
-
-LINT_UNIT = {r.LINT: ["Unit Load State: loaded", "Fragment Path: /etc/systemd/system/" + r.LINT]}
-
-
 class ViewTest(unittest.TestCase):
     def test_links_resolve_in_the_tree_and_dotdot_stops_at_its_root(self):
         with tempfile.TemporaryDirectory() as d:
@@ -96,6 +84,25 @@ class ProvenanceTest(unittest.TestCase):
             self.assertTrue(p.ours(ETC + "w.service"))
             self.assertTrue(p.ours(LIB + "y.service"))
 
+    def test_an_alias_is_decided_by_its_target_resolved_in_the_tree(self):
+        # #4779 L3 1: the .. is taken after /usr/share/l is followed, so the link leaves the search path.
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prov(d, {ETC + "x.service": "-> /usr/share/l/../../lib/systemd/system/y.service",
+                              "/usr/share/l": "-> /usr/share/doc/p/ex/sub", "/usr/share/doc/p/ex/sub/.keep": "",
+                              "/usr/share/doc/p/lib/systemd/system/y.service": "y", LIB + "y.service": "y"},
+                          {"/usr/share/doc/p/lib/systemd/system/y.service", LIB + "y.service"})
+            self.assertIsNone(p.alias_target(ETC + "x.service"))
+            self.assertTrue(p.ours(ETC + "x.service"))
+            self.assertTrue(p.ours("/usr/share/doc/p/lib/systemd/system/y.service"))
+            self.assertFalse(p.ours(LIB + "y.service"))
+
+    def test_a_path_systemd_names_through_a_link_is_ours(self):
+        # A link no unit-directory walk marks (here, a drop-in directory's parent) still makes it ours.
+        with tempfile.TemporaryDirectory() as d:
+            p = self.prov(d, {"/usr/share/p/z.conf": "z", "/etc/agentos": "-> /usr/share/p"}, {"/usr/share/p/z.conf"})
+            self.assertTrue(p.ours("/etc/agentos/z.conf"))
+            self.assertFalse(p.ours("/usr/share/p/z.conf"))
+
     def test_a_file_not_listed_as_a_packages_is_ours(self):
         with tempfile.TemporaryDirectory() as d:
             p = self.prov(d, {LIB + "y.service": "y", LIB + "z.service": "z"}, {LIB + "y.service"})
@@ -104,89 +111,134 @@ class ProvenanceTest(unittest.TestCase):
 
 
 class DpkgTest(unittest.TestCase):
+    def write(self, out, md5sums, status):
+        (out / "agentos.dpkg-md5sums").write_text(md5sums)
+        (out / "agentos.dpkg-status").write_text(status)
+
     def test_only_a_byte_identical_file_is_a_packages(self):
         with tempfile.TemporaryDirectory() as d:
             v = tree(d, {LIB + "a.service": "a", LIB + "b.service": "changed", "/etc/c.conf": "c", "/etc/d.conf": "d2",
                          "/lib": "-> usr/lib", LIB + "e.service": "e"})
-            out = pathlib.Path(d) / "out"
-            out.mkdir()
-            md5 = lambda t: hashlib.md5(t.encode()).hexdigest()  # noqa: E731
-            (out / "agentos.dpkg-md5sums").write_text(
-                "%s  usr/lib/systemd/system/a.service\n%s  usr/lib/systemd/system/b.service\n"
-                "%s  lib/systemd/system/e.service\n" % (md5("a"), md5("b"), md5("e")))
-            (out / "agentos.dpkg-status").write_text(
-                "Package: p\nConffiles:\n /etc/c.conf %s\n /etc/d.conf %s\nDescription: x\n" % (md5("c"), md5("d")))
-            packaged = r.dpkg_packaged(v, out)
+            out = pathlib.Path(d)
+            self.write(out, "%s  usr/lib/systemd/system/a.service\n%s  usr/lib/systemd/system/b.service\n"
+                            "%s  lib/systemd/system/e.service\n" % (md5("a"), md5("b"), md5("e")),
+                       "Package: p\nConffiles:\n /etc/c.conf %s\n /etc/d.conf %s\nDescription: x\n" % (md5("c"), md5("d")))
+            packaged = r.dpkg_packaged(out)(v)
             self.assertEqual([p for p in (LIB + "a.service", LIB + "b.service", "/etc/c.conf", "/etc/d.conf",
                                           LIB + "e.service", LIB + "f.service") if packaged(p)],
                              [LIB + "a.service", "/etc/c.conf", LIB + "e.service"])
 
+    def test_a_listed_path_through_a_link_of_ours_is_not_a_packages(self):
+        # #4779 Security 2: our link at or above a path dpkg lists does not make our file the package's.
+        with tempfile.TemporaryDirectory() as d:
+            v = tree(d, {"/usr/share/doc/foo": "-> /etc/systemd/system/bar.service.d", ETC + "bar.service.d/x.conf": "x",
+                         "/etc/agentos.conf": "-> /etc/real.conf", "/etc/real.conf": "c"})
+            out = pathlib.Path(d)
+            self.write(out, "%s  usr/share/doc/foo/x.conf\n" % md5("x"),
+                       "Package: p\nConffiles:\n /etc/agentos.conf %s\n" % md5("c"))
+            packaged = r.dpkg_packaged(out)(v)
+            self.assertFalse(packaged(ETC + "bar.service.d/x.conf"))
+            self.assertFalse(packaged("/etc/real.conf"))
+
     def test_no_listed_files_fails_closed(self):
         with tempfile.TemporaryDirectory() as d:
-            v = tree(d, {})
-            out = pathlib.Path(d)
-            (out / "agentos.dpkg-md5sums").write_text("")
-            (out / "agentos.dpkg-status").write_text("Package: p\n")
+            self.write(pathlib.Path(d), "", "Package: p\n")
             with self.assertRaises(SystemExit):
-                r.dpkg_packaged(v, out)
+                r.dpkg_packaged(d)
+
+
+def md5(t):
+    return hashlib.md5(t.encode()).hexdigest()
+
+
+def shown(units):
+    """systemctl's reply, as Manager.show() returns it: UNITS maps a name to (load state, fragment,
+    [drop-ins], [other names])."""
+    out = {}
+    for n, (state, frag, drops, *more) in units.items():
+        names = [n] + (more[0] if more else [])
+        out[n] = {"Id": n, "Names": " ".join(names), "LoadState": state, "FragmentPath": frag,
+                  "DropInPaths": " ".join(drops)}
+        for a in names[1:]:
+            out[a] = dict(out[n])
+    return out
 
 
 class RecordsTest(unittest.TestCase):
     FILES = {LIB + "x.service": "[Service]\n", ETC + "x.service.d/a.conf": "a", ETC + "x.service.d/m.conf": "-> /dev/null",
              ETC + "service.d/w.conf": "w", ETC + "x-.service.d/p.conf": "p", ETC + "gone.service.d/g.conf": "g",
              LIB + "t@.service": "t", ETC + "t@.service.d/t.conf": "tt", ETC + "lone@.service.d/l.conf": "l",
-             ETC + "gen.service.d/n.conf": "n"}
+             ETC + "y.service.d/y.conf": "y", "/run/systemd/generator/gen.service": "[Service]\n"}
 
-    def recs(self, d, units, planted=(), status=0):
+    def recs(self, d, units):
         v = tree(d, self.FILES)
         dirs = r.unit_dirs(v)
-        return r.records(v, dump(dict(LINT_UNIT, **units)), "", status, dirs,
-                         r.Provenance(v, dirs, lambda p: p == LIB + "x.service"), list(planted))
+        return r.records(v, shown(units), dirs, r.Provenance(v, dirs, lambda p: p == LIB + "x.service"))
 
     def test_systemd_gives_the_files_and_the_reader_the_provenance(self):
         with tempfile.TemporaryDirectory() as d:
             got = self.recs(d, {
-                "x.service": ["Unit Load State: loaded", "Fragment Path: " + LIB + "x.service",
-                              "DropIn Path: " + ETC + "x.service.d/a.conf", "DropIn Path: " + ETC + "x.service.d/m.conf",
-                              "DropIn Path: " + ETC + "service.d/w.conf"],
-                "t@agentos-unit-lint.service": ["Unit Load State: loaded", "Fragment Path: " + LIB + "t@.service",
-                                                "DropIn Path: " + ETC + "t@.service.d/t.conf"],
-                "gone.service": ["Unit Load State: not-found"],
-                "gen.service": ["Unit Load State: loaded", "Fragment Path: /tmp/systemd-temporary-x/generator/gen.service",
-                                "DropIn Path: " + ETC + "gen.service.d/n.conf"],
-                "m.service": ["Unit Load State: masked", "Fragment Path: /etc/systemd/system/m.service"]},
-                planted=["x.service", "gone.service"])
+                # systemd's order; the /dev/null mask is dropped; y is an alias, so y.service.d is x's
+                "x.service": ("loaded", LIB + "x.service", [ETC + "x.service.d/a.conf", ETC + "x.service.d/m.conf",
+                                                            ETC + "service.d/w.conf", ETC + "y.service.d/y.conf"],
+                              ["y.service"]),
+                "t@agentos-unit-lint.service": ("loaded", LIB + "t@.service", [ETC + "t@.service.d/t.conf"]),
+                "lone@agentos-unit-lint.service": ("not-found", "", []),
+                "gone.service": ("not-found", "", []),
+                "gen.service": ("loaded", "/run/systemd/generator/gen.service", []),
+                "m.service": ("masked", "/etc/systemd/system/m.service", [])})
             units = [(u["unit"], u["alone"], [(f["path"], f["ours"]) for f in u["files"]]) for u in got["units"]]
             self.assertEqual(units, [
-                ("gen.service", True, [(ETC + "gen.service.d/n.conf", True)]),  # a generated fragment is not read
+                ("gen.service", False, [("/run/systemd/generator/gen.service", True)]),  # a generated unit is read
                 ("t@agentos-unit-lint.service", False, [(LIB + "t@.service", True), (ETC + "t@.service.d/t.conf", True)]),
-                # systemd's order; the /dev/null mask is dropped
                 ("x.service", False, [(LIB + "x.service", False), (ETC + "x.service.d/a.conf", True),
-                                      (ETC + "service.d/w.conf", True)]),
+                                      (ETC + "service.d/w.conf", True), (ETC + "y.service.d/y.conf", True)]),
                 ("gone.service", True, [(ETC + "gone.service.d/g.conf", True)]),  # names no loaded unit
-                ("lone@.service", True, [(ETC + "lone@.service.d/l.conf", True)]),  # a template no instance loads
+                # #4779 L3 2: a template whose planted instance did not load
+                ("lone@.service", True, [(ETC + "lone@.service.d/l.conf", True)]),
                 (".service", True, [(ETC + "service.d/w.conf", True)]),  # type-wide: also alone
                 ("x-.service", True, [(ETC + "x-.service.d/p.conf", True)])])  # prefix: also alone
             self.assertIsNone(got["fstab"])
 
-    def test_what_the_dump_cannot_show_fails_closed(self):
-        x = ["Unit Load State: loaded", "Fragment Path: " + LIB + "x.service"]
-        for name, units, planted, status, want in (
-                ("a failed run", {}, (), 1, "test run failed"),
-                ("a planted name systemd never names", {}, ("y.service",), 0, "lacks"),
-                ("an unknown load state", {"x.service": ["Unit Load State: stub"]}, (), 0, "load state"),
-                ("two fragments", {"x.service": x + ["Fragment Path: /a"]}, (), 0, "fragments"),
-                ("a planted unit with no files", {"x.service": ["Unit Load State: loaded"]}, ("x.service",), 0,
-                 "no Fragment Path"),
-                ("two units read as one", {"x.service": x + ["Unit Load State: loaded"]}, (), 0, "Load State")):
+    def test_what_systemd_names_must_be_in_the_tree(self):
+        for name, units, want in (
+                ("an unknown load state", {"x.service": ("stub", "", [])}, "load state"),
+                ("a fragment the tree lacks", {"x.service": ("loaded", LIB + "nope.service", [])}, "does not hold"),
+                ("a relative drop-in", {"x.service": ("loaded", LIB + "x.service", ["x.conf"])}, "not an absolute"),
+                ("a path with an unsafe byte", {"x.service": ("loaded", LIB + "x service", [])}, "not an absolute")):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
                 with self.assertRaisesRegex(SystemExit, want):
-                    self.recs(d, units, planted, status)
+                    self.recs(d, units)
 
-    def test_an_alias_answers_a_planted_name(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.recs(d, {"x.service": ["Alias: y.service", "Unit Load State: loaded", "Fragment Path: " + LIB + "x.service"]},
-                      planted=["y.service"])
+
+class ShowTest(unittest.TestCase):
+    """Manager.show() reads systemctl's reply block by block, and refuses one it cannot read whole."""
+
+    def show(self, reply, units):
+        m = r.Manager.__new__(r.Manager)
+        m.ctl = lambda args: type("R", (), {"stdout": reply})()
+        return m.show(units)
+
+    def block(self, n, **kw):
+        p = dict(Id=n, Names=n, LoadState="loaded", FragmentPath=LIB + n, DropInPaths="")
+        p.update(kw)
+        return "\n".join("%s=%s" % (k, p[k]) for k in r.PROPS) + "\n"
+
+    def test_one_block_per_name(self):
+        got = self.show(self.block("a.service") + "\n" + self.block("x.service", Names="x.service b.service"),
+                        ["a.service", "b.service"])
+        self.assertEqual(got["b.service"]["Id"], "x.service")
+
+    def test_a_reply_it_cannot_read_whole_fails_closed(self):
+        a = self.block("a.service")
+        for name, reply, want in (
+                ("a missing block", a, "blocks"),
+                ("a block for another name", a + "\n" + self.block("c.service"), "systemctl gave"),
+                ("an extra line", a + "\n" + self.block("b.service") + "Alias=a\n", "systemctl line"),
+                ("a repeated key", a + "\n" + self.block("b.service") + "Id=b.service\n", "systemctl line")):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(SystemExit, want):
+                    self.show(reply, ["a.service", "b.service"])
 
 
 class NamesTest(unittest.TestCase):
@@ -194,10 +246,17 @@ class NamesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             v = tree(d, {LIB + "a.service": "", LIB + "t@.service": "", ETC + "t@b.service.d/z.conf": "",
                          ETC + "multi-user.target.wants/getty@tty1.service": "-> " + LIB + "t@.service",
-                         ETC + "service.d/z.conf": "", LIB + "README": "", ETC + r.LINT: ""})
+                         ETC + "service.d/z.conf": "", LIB + "README": ""})
             self.assertEqual(r.names(v, r.unit_dirs(v)),
                              ["a.service", "getty@tty1.service", "t@agentos-unit-lint.service",
                               "t@b.service"])
+
+    def test_a_name_systemctl_could_not_carry_is_refused(self):
+        for p in (ETC + "a b.service", ETC + "x.service.d/z\n.conf", ETC + "x.wants/a\tb.service"):
+            with self.subTest(p=p), tempfile.TemporaryDirectory() as d:
+                v = tree(d, {p: ""})
+                with self.assertRaisesRegex(SystemExit, "a name with a byte outside"):
+                    r.names(v, r.unit_dirs(v))
 
     def test_the_control_is_a_drop_in_of_ours_on_a_packaged_root_unit(self):
         (p, text), = r.CONTROL.items()
