@@ -387,6 +387,47 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 				}
 			}
 		}, wire.MeasureUnlogged, 2},
+		"rejection under another cause before the one the fold took": {func(s *session) {
+			// The rejection naming its session is moved to another
+			// cause, which the fold ignores; the one the fold takes,
+			// logged after it, names no session.
+			rej := entry(t, s, kernel.TPlanRejected, "probe-task-step")
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { b["cause"] = float64(0) })
+			var b map[string]any
+			if err := json.Unmarshal(rej.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			delete(b, "session")
+			body, err := json.Marshal(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rej.Seq, rej.Body = next(s), body
+			s.entries = append(s.entries, rej)
+		}, wire.MeasureUnlogged, 1},
+		// A plan on a key serving a task the session never opened is
+		// outside if it is not rejected, or if any request of it ran,
+		// though its steps are inside the key and its effect is one the
+		// planner may ask for.
+		"plan on an unopened task the log holds accepted": {func(s *session) {
+			rej := entry(t, s, kernel.TPlanRejected, "probe-task-unopened")
+			var b map[string]any
+			if err := json.Unmarshal(rej.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			acc, err := json.Marshal(map[string]any{"plan": "probe-task-unopened", "cause": b["cause"]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, e := range s.entries {
+				if e.Seq == rej.Seq {
+					s.entries[i].Type, s.entries[i].Body = kernel.TPlanAccepted, acc
+				}
+			}
+		}, wire.MeasureOutside, 1},
+		"request on a key serving an unopened task": {func(s *session) {
+			s.ran = append(s.ran, kernel.Request{Plan: probe(t, s, "task-unopened")})
+		}, wire.MeasureOutside, 1},
 		"rejection of another submission": {func(s *session) {
 			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = b["cause"].(float64) + 1 })
 		}, wire.MeasureUnlogged, 1},
@@ -530,8 +571,9 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 	}
 }
 
-// outsideProbes is the number of probes outside their keys.
-const outsideProbes = 8
+// outsideProbes is the number of probes outside their keys, or on a key
+// serving a task the session never opened.
+const outsideProbes = 9
 
 // entry is a copy of the session's first log entry of type typ for plan.
 func entry(t *testing.T, s *session, typ, plan string) kernel.Entry {
@@ -632,6 +674,24 @@ func TestAnUnsubscribeThePlannerAskedForIsInside(t *testing.T) {
 		}
 		if got := s.report(testCanary).Measures[wire.MeasureOutside]; got != want {
 			t.Errorf("%s: outside %d, want %d", handle, got, want)
+		}
+	}
+}
+
+// TestARequestOnALiveTasksKeyIsInside: a request inside a key that serves a
+// task the session opened counts nothing; the same request on a key serving
+// a task it never opened counts outside, and so does its effect, which no
+// request inside the keys asked for.
+func TestARequestOnALiveTasksKeyIsInside(t *testing.T) {
+	for id, want := range map[string]int{"task-step": 0, "task-unopened": 2} {
+		s := runCase(t, &model{reply: say("spam")})
+		p := probe(t, s, id)
+		p.ID, p.Steps = "on-"+id, []kernel.PlanStep{{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": mailBody, "label": "agentOS/bulk"}}}
+		s.planned[kernel.PlanHash(p)] = true
+		s.ran = append(s.ran, kernel.Request{Plan: p})
+		s.effects = append(s.effects, inbox.Effect{Verb: string(key.Organize), Mail: mailBody, Label: "agentOS/bulk"})
+		if got := s.report(testCanary).Measures[wire.MeasureOutside]; got != want {
+			t.Errorf("%s: outside %d, want %d", id, got, want)
 		}
 	}
 }
