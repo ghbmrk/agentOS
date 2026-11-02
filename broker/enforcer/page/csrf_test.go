@@ -3,8 +3,12 @@ package page
 // REQ: CH-9
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -347,4 +351,119 @@ func TestSameSiteScreenKeepsPair(t *testing.T) {
 	// Drawn in the future (the clock went back): not kept.
 	g.now = g.now.Add(-reuseFor - time.Hour)
 	mints("drawn in the future", "same-origin", first)
+}
+
+// CH-9 (#4427): a pair passes guard for pairLife after its cookie was
+// drawn and not after, whether its screen minted it or kept it, and a
+// cookie the clock says was drawn in the future is refused. A screen that
+// keeps a cookie at reuseFor still has pairLife-reuseFor to be tapped.
+// Revert mutants: guard ignoring the age, ignoring the future, or
+// comparing with >= pairLife, each fail here.
+func TestPairLifetime(t *testing.T) {
+	if reuseFor <= 0 || pairLife-reuseFor < reuseFor {
+		t.Fatalf("reuseFor %v leaves a kept screen less than %v", reuseFor, pairLife-reuseFor)
+	}
+	g := fullRig(t)
+	g.screen()
+	c, tok := g.cookie, g.token
+	start := g.now
+	passes := func() bool {
+		t.Helper()
+		return !g.forged(g.s, http.MethodPost, "/approve", c, tok)
+	}
+	g.now = start.Add(reuseFor)
+	if set, kept := g.navigate("/", "same-origin", c); set != "" || kept != tok {
+		t.Fatalf("at reuseFor the screen did not keep the pair")
+	}
+	g.now = start.Add(pairLife)
+	if !passes() {
+		t.Error("a pair is refused at pairLife")
+	}
+	g.now = start.Add(pairLife + time.Millisecond)
+	if passes() {
+		t.Error("a pair passes past pairLife")
+	}
+	g.now = start.Add(-time.Millisecond)
+	if passes() {
+		t.Error("a pair whose cookie was drawn in the future passes")
+	}
+}
+
+// #4479: the cookie's tag and the screen's token are MACs under one key
+// with different labels, so neither can be taken for the other even over
+// the same bytes. Revert mutant: cookieLabel equal to tokenLabel fails.
+func TestTagAndTokenLabelsDiffer(t *testing.T) {
+	g := fullRig(t)
+	for _, n := range []int{0, nonceLen + 8, cookieLen} {
+		x := bytes.Repeat([]byte{7}, n)
+		if bytes.Equal(g.s.tag(x), g.s.mac(x)) {
+			t.Errorf("tag and mac agree over %d bytes", n)
+		}
+	}
+}
+
+// #4427: every secret the page derives (a cookie's tag, a screen's token)
+// is compared only in constant time. In csrf.go a call to tag or mac may
+// only be an argument of hmac.Equal, or be encoded or appended when a
+// pair is issued; never assigned, returned bare, or compared with == or
+// bytes.Equal. Revert mutants: either hmac.Equal replaced by bytes.Equal
+// or a string ==, or a tag held in a variable, fail here.
+func TestSecretsCompareInConstantTime(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "csrf.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := func(call *ast.CallExpr) bool {
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			return fn.Name == "append"
+		case *ast.SelectorExpr:
+			if x, ok := fn.X.(*ast.Ident); ok && x.Name == "hmac" && fn.Sel.Name == "Equal" {
+				return true
+			}
+			return fn.Sel.Name == "EncodeToString"
+		}
+		return false
+	}
+	var stack []ast.Node
+	uses, equals := 0, 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "hmac" && sel.Sel.Name == "Equal" {
+					equals++
+				}
+				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "s" && (sel.Sel.Name == "tag" || sel.Sel.Name == "mac") {
+					uses++
+					parent, ok := stack[len(stack)-1].(*ast.CallExpr)
+					if !ok || !allowed(parent) {
+						t.Errorf("s.%s at offset %d is used outside hmac.Equal, an encode or an append", sel.Sel.Name, call.Pos())
+					}
+				}
+			}
+		}
+		if b, ok := n.(*ast.BinaryExpr); ok && (b.Op == token.EQL || b.Op == token.NEQ) {
+			for _, e := range []ast.Expr{b.X, b.Y} {
+				if c, ok := e.(*ast.CallExpr); ok {
+					if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "string" {
+						t.Errorf("a byte value is compared with %s at offset %d", b.Op, b.Pos())
+					}
+				}
+			}
+		}
+		stack = append(stack, n)
+		return true
+	})
+	for _, imp := range f.Imports {
+		if imp.Path.Value == `"bytes"` {
+			t.Error("csrf.go imports bytes: compare secrets with hmac.Equal")
+		}
+	}
+	if uses < 4 || equals < 2 {
+		t.Errorf("found %d tag/mac calls and %d hmac.Equal calls: the check no longer sees csrf.go's comparisons", uses, equals)
+	}
 }

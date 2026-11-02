@@ -26,11 +26,17 @@ import (
 // which the page's other headers keep from being read or framed elsewhere.
 //
 // The cookie is a random nonce, the time it was drawn, and a tag over both
-// under the same key (#4428). A screen reached by a same-site navigation
-// that sends a cookie this page drew less than reuseFor ago keeps it, so a
-// second tab or a reload leaves the first screen's pair working; any other
-// screen mints a new one. A link opened from a text is a cross-site
-// navigation, on which the browser withholds the cookie, so it mints.
+// under the same key (#4428). A screen reached by a navigation the browser
+// calls same-origin, same-site or its own (none) that sends a cookie this
+// page drew at most reuseFor ago keeps it, so a second tab or a reload
+// leaves the first screen's pair working; any other screen mints a new
+// one, including one another site opens, on which the browser withholds
+// the Strict cookie. guard refuses a pair whose cookie was drawn more than
+// pairLife ago (#4427), so no pair outlives a day even while the enforcer
+// runs, and every screen's pair lasts at least pairLife-reuseFor.
+//
+// Secret values (a tag, a token) are compared only with hmac.Equal, in
+// constant time; TestSecretsCompareInConstantTime pins it.
 const (
 	tokenCookie = "__Host-enforcer"
 	tokenHeader = "X-Enforcer-Token"
@@ -40,10 +46,14 @@ const (
 	cookieLen   = nonceLen + 8 + sha256.Size
 )
 
-// reuseFor is how long after it was drawn a cookie may still be kept by a
-// new screen. Past it the next screen mints, and older screens' taps fail
-// with "reload it", as they do after the enforcer restarts.
-const reuseFor = 12 * time.Hour
+// pairLife is how long after its cookie was drawn a pair still passes
+// guard; past it a tap fails with "reload it", as after a restart. reuseFor
+// is how long a new screen may keep a cookie: half of pairLife, so a screen
+// that keeps one still has at least half a day to be tapped.
+const (
+	pairLife = 24 * time.Hour
+	reuseFor = pairLife / 2
+)
 
 var errToken = errors.New("this screen is out of date; reload it and try again")
 
@@ -67,29 +77,44 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) (string, error) {
 
 // keep returns the cookie r sent when a new screen may keep it: the
 // browser calls the navigation same-origin, same-site or its own (none),
-// and the cookie is one this page drew, at most reuseFor ago and not in
-// the future. A cross-site request, one with no Sec-Fetch-Site, or a
-// cookie the page cannot vouch for (another key, a restart, tampered,
-// expired) is not kept.
+// and the cookie is one this page drew at most reuseFor ago (age). A
+// cross-site request, one with no Sec-Fetch-Site, or a cookie the page
+// cannot vouch for or that is older is not kept.
 func (s *Server) keep(r *http.Request) ([]byte, bool) {
 	switch r.Header.Get("Sec-Fetch-Site") {
 	case "same-origin", "same-site", "none":
 	default:
 		return nil, false
 	}
+	c, ok := s.cookie(r)
+	if !ok {
+		return nil, false
+	}
+	if a, ok := s.age(c); !ok || a > reuseFor {
+		return nil, false
+	}
+	return c, true
+}
+
+// cookie returns the raw anti-forgery cookie r sent.
+func (s *Server) cookie(r *http.Request) ([]byte, bool) {
 	ck, err := r.Cookie(tokenCookie)
 	if err != nil {
 		return nil, false
 	}
 	c, err := base64.RawURLEncoding.DecodeString(ck.Value)
-	if err != nil || len(c) != cookieLen || !hmac.Equal(c[nonceLen+8:], s.tag(c[:nonceLen+8])) {
-		return nil, false
+	return c, err == nil
+}
+
+// age is how long ago this page drew cookie c. It is false when the page
+// cannot vouch for c (the wrong length, another key, a restart, tampered)
+// or c was drawn after now (the clock went back).
+func (s *Server) age(c []byte) (time.Duration, bool) {
+	if len(c) != cookieLen || !hmac.Equal(c[nonceLen+8:], s.tag(c[:nonceLen+8])) {
+		return 0, false
 	}
-	drawn := time.UnixMilli(int64(binary.BigEndian.Uint64(c[nonceLen : nonceLen+8])))
-	if now := s.cfg.Now(); drawn.After(now) || now.Sub(drawn) > reuseFor {
-		return nil, false
-	}
-	return c, true
+	a := s.cfg.Now().Sub(time.UnixMilli(int64(binary.BigEndian.Uint64(c[nonceLen : nonceLen+8]))))
+	return a, a >= 0
 }
 
 // mint sets a new cookie on w and returns the token a screen drawn with it
@@ -120,6 +145,8 @@ func (s *Server) tag(body []byte) []byte {
 	return m.Sum(nil)
 }
 
+// mac is the token a screen drawn with cookie carries. Its label differs
+// from tag's, so neither value can stand in for the other.
 func (s *Server) mac(cookie []byte) []byte {
 	m := hmac.New(sha256.New, s.tokenKey)
 	m.Write([]byte(tokenLabel))
@@ -129,17 +156,17 @@ func (s *Server) mac(cookie []byte) []byte {
 
 // guard is the one check every state-changing request passes before any
 // route sees it: sent by the page itself (sameOrigin), with the cookie a
-// screen of this page set and the token that screen carried.
+// screen of this page set at most pairLife ago and the token that screen
+// carried.
 func (s *Server) guard(r *http.Request) error {
 	if !s.sameOrigin(r) {
 		return errCrossOrigin
 	}
-	ck, err := r.Cookie(tokenCookie)
-	if err != nil {
+	c, ok := s.cookie(r)
+	if !ok {
 		return errToken
 	}
-	c, err := base64.RawURLEncoding.DecodeString(ck.Value)
-	if err != nil || len(c) != cookieLen {
+	if a, ok := s.age(c); !ok || a > pairLife {
 		return errToken
 	}
 	t, err := base64.RawURLEncoding.DecodeString(r.Header.Get(tokenHeader))
