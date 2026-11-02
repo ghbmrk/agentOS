@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/ghbmrk/agentos/broker/backup"
 	"github.com/ghbmrk/agentos/broker/kernel"
@@ -25,6 +26,8 @@ var (
 	ErrRestoreNotEmpty = errors.New("run: I restore content only into an empty content folder")
 	// ErrContentSection: a content section's items are not framed whole.
 	ErrContentSection = errors.New("run: a backup's content section does not hold whole items")
+	// ErrRestoreLocked: the lock beside the content folder was not taken.
+	ErrRestoreLocked = errors.New("run: I could not take the restore lock beside the content folder; another restore may be running")
 )
 
 // RestoreSections reads every section of an opened content object: the
@@ -34,7 +37,9 @@ var (
 // secs ends whole (io.EOF), so no restored item is in place before every
 // section's length and sum are checked (MIG-4-recovery-a-6). On an error
 // contentDir is as it was, and log holds bytes not to be trusted. A
-// staging a crash left beside contentDir is removed first.
+// staging a crash left beside contentDir is removed first, under a lock
+// beside it that the restore holds to its end, so it never removes the
+// staging of a restore still running (ErrRestoreLocked).
 func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) error {
 	return restoreSections(secs, log, contentDir, nil)
 }
@@ -44,13 +49,29 @@ func RestoreSections(secs *backup.Sections, log io.Writer, contentDir string) er
 // runs before the kernel starts on it.
 const restoreStage = ".content-restore-"
 
+// restoreLock is the lock file beside the content folder: this uid's own
+// plain file, opened without following a link or waiting on a FIFO. Only
+// its flock is used: it is never read or written, and it stays after.
+const restoreLock = ".content-restore.lock"
+
 func restoreSections(secs *backup.Sections, log io.Writer, contentDir string, stop func(i int) bool) error {
+	parent := filepath.Dir(contentDir)
+	lock, err := os.OpenFile(filepath.Join(parent, restoreLock), os.O_RDONLY|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := privfile.CheckFile(lock); err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("%w: %w", ErrRestoreLocked, err)
+	}
 	if des, err := os.ReadDir(contentDir); err == nil && len(des) > 0 {
 		return ErrRestoreNotEmpty
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	parent := filepath.Dir(contentDir)
 	left, err := os.ReadDir(parent)
 	if err != nil {
 		return err
