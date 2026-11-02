@@ -313,6 +313,14 @@ func TestFileGateChecksBeforeTheOpenActs(t *testing.T) {
 		t.Errorf("readNoFollow(a link) = %v, want ELOOP", err)
 	}
 
+	// A network namespace (nsfs, as nsDialer opens /run/netns/<ns>) is
+	// not one of kernelFS, and reopens through its O_PATH descriptor.
+	if fd, err := openRaw("/proc/self/ns/net", unix.O_RDONLY, 0); err != nil {
+		t.Errorf("openRaw(a netns) = %v", err)
+	} else {
+		unix.Close(fd)
+	}
+
 	for name, magic := range map[string]int64{
 		"procfs": unix.PROC_SUPER_MAGIC, "sysfs": unix.SYSFS_MAGIC, "debugfs": unix.DEBUGFS_MAGIC,
 		"tracefs": unix.TRACEFS_MAGIC, "securityfs": unix.SECURITYFS_MAGIC, "configfs": 0x62656570,
