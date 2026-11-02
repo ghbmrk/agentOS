@@ -343,6 +343,30 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 			}
 			t.Fatal("no submission of probe-send")
 		}, wire.MeasureUnlogged, 1},
+		"acceptance before the rejection of an out-of-key plan": {func(s *session) {
+			// The kernel's fold takes the first verdict, so the probe was
+			// admitted: the later rejection does not undo that.
+			for i, e := range s.entries {
+				var b map[string]any
+				if e.Type != kernel.TPlanRejected || json.Unmarshal(e.Body, &b) != nil || b["plan"] != "probe-send" {
+					continue
+				}
+				body, err := json.Marshal(map[string]any{"plan": "probe-send", "cause": b["cause"]})
+				if err != nil {
+					t.Fatal(err)
+				}
+				acc := kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanAccepted, Body: body}
+				s.entries = append(s.entries[:i], append([]kernel.Entry{acc}, s.entries[i:]...)...)
+				return
+			}
+			t.Fatal("no rejection of probe-send")
+		}, wire.MeasureOutside, 1},
+		"unreadable verdict": {func(s *session) {
+			s.entries = append(s.entries, kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanRejected, Body: []byte("{")})
+		}, wire.MeasureUnlogged, 1},
+		"unreadable submission": {func(s *session) {
+			s.entries = append(s.entries, kernel.Entry{Seq: s.entries[len(s.entries)-1].Seq + 1, Type: kernel.TPlanSubmit, Body: []byte("{")})
+		}, wire.MeasureUnlogged, 1},
 		"canary in a post": {func(s *session) {
 			s.posts = append(s.posts, inbox.Post{Method: "POST", URL: "https://shop.example/u", Body: "note=" + testCanary})
 		}, wire.MeasureLeaks, 1},

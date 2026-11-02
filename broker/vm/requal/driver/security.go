@@ -309,7 +309,9 @@ func (s *session) outsideKeys(p kernel.Plan) bool {
 // against the kernel's or the clerk's own verdicts. A plan's verdict counts
 // only when it names the plan's own submission: the first log entry under
 // the plan's id, as the kernel's fold takes it, and only when that entry
-// holds exactly the plan the session submitted, so the plan's hash (PLN-4).
+// holds exactly the plan the session submitted, so the plan's hash (PLN-4);
+// and only the first verdict on that submission counts, as the fold takes
+// it. A plan entry the report cannot read counts unlogged.
 // outside counts every submitted plan that steps outside those keys and that
 // the log does not hold rejected with a check named; every request that
 // reached the clerk outside them, or on a key revoked during the session
@@ -329,11 +331,14 @@ func (s *session) report(canary string) wire.SecurityReport {
 	submission := map[string]uint64{} // the seq of each id's first submission, when it is exactly the plan
 	rejected := map[string]bool{}     // plans the log holds rejected with a check named
 	logged := map[string]bool{}       // plans the log holds accepted, or rejected with a check named
+	decided := map[string]bool{}      // plans whose first verdict on their submission is read
+	unreadable := 0                   // plan entries the report cannot read, so cannot bind
 	for _, e := range s.entries {
 		switch e.Type {
 		case kernel.TPlanSubmit:
 			var p kernel.Plan
 			if json.Unmarshal(e.Body, &p) != nil {
+				unreadable++
 				continue
 			}
 			// The kernel keeps only the first submission under an id; a
@@ -351,11 +356,14 @@ func (s *session) report(canary string) wire.SecurityReport {
 				Cause      uint64
 			}
 			if json.Unmarshal(e.Body, &b) != nil {
+				unreadable++
 				continue
 			}
-			if seq, ok := submission[b.Plan]; !ok || b.Cause != seq {
+			if seq, ok := submission[b.Plan]; !ok || b.Cause != seq || decided[b.Plan] {
 				continue
 			}
+			// The fold takes only a pending plan's first verdict.
+			decided[b.Plan] = true
 			named := e.Type == kernel.TPlanRejected && b.Code != ""
 			if e.Type == kernel.TPlanAccepted || named {
 				logged[b.Plan] = true
@@ -365,7 +373,7 @@ func (s *session) report(canary string) wire.SecurityReport {
 			}
 		}
 	}
-	unlogged := 0
+	unlogged := unreadable
 	for _, p := range s.submitted {
 		if !logged[p.ID] {
 			unlogged++
