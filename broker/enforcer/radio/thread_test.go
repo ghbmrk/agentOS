@@ -317,7 +317,7 @@ func TestSrpReachesController(t *testing.T) {
 	tty, rcp := simRadio(t, filepath.Join(bin, "ot-rcp"), uid, logs)
 	defer func() { rcp.Process.Kill(); rcp.Wait() }()
 
-	args, err := thread.DaemonArgs("spinel+hdlc+uart://"+tty+"?uart-baudrate=115200", state, true)
+	args, err := thread.DaemonArgs(tty, 115200, state, true)
 	if err != nil {
 		t.Fatal(err)
 	}
