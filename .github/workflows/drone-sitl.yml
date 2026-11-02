@@ -51,15 +51,17 @@ jobs:
         id: key
         run: |
           h=$(cat drone/sitl/ardupilot.pin drone/sitl/ardupilot-signed-only.patch drone/sitl/build.sh | sha256sum | cut -c1-32)
-          # A built binary links the runner's glibc, so the key names the runner image (#4785).
-          os=$(. /etc/os-release && echo "$ID-$VERSION_ID")
-          echo "key=arducopter-sitl-$os-$h" >> "$GITHUB_OUTPUT"
+          echo "key=arducopter-sitl-$h" >> "$GITHUB_OUTPUT"
+      - name: Runner image (cache keys, #4785)
+        # Built outputs link the runner's libraries, so every cache key names the runner image.
+        id: image
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: Restore SITL
         id: cache
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/sitl
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.image.outputs.os }}-${{ steps.key.outputs.key }}
       - name: Build SITL at the pin
         if: steps.cache.outputs.cache-hit != 'true'
         run: drone/sitl/build.sh "$HOME/sitl"
@@ -68,7 +70,7 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: ~/sitl
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.image.outputs.os }}-${{ steps.key.outputs.key }}
       - name: What was built
         run: cat "$HOME/sitl/BUILD"
       - name: SITL tests

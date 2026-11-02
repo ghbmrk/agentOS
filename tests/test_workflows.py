@@ -314,7 +314,78 @@ def runner_label_problems(text):
     return problems
 
 
+IMAGE_STEP = (
+    "        id: image\n"
+    '        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"\n')
+IMAGE_KEY = "${{ steps.image.outputs.os }}"
+
+
+def cache_key_problems(text):
+    """Return each actions/cache key or restore key that does not name the runner image (#4785).
+
+    A cache keyed only on runner.os ("Linux") restored ot-rcp built on ubuntu-26.04 onto 24.04,
+    where it could not run (GLIBC_2.42 not found). Each job with a cache computes the image in
+    IMAGE_STEP before its first cache step, and every key line carries it.
+    """
+    problems = []
+    jobs = re.split(r"^(?=  [A-Za-z0-9_-]+:\n)", text, flags=re.M)
+    for job in jobs:
+        blocks = re.split(r"^(?=      - )", job, flags=re.M)
+        caches = [b for b in blocks if re.search(r"^\s+(- )?uses:\s*actions/cache\b", b, re.M)]
+        if not caches:
+            continue
+        name = job.split(":", 1)[0].strip()
+        if IMAGE_STEP not in job[:job.index(caches[0])]:
+            problems.append("%s: no runner-image step before its first cache" % name)
+        for s in caches:
+            body = s.split("\n")
+            keys = [l for l in body if re.match(r"\s+(key|restore-keys):", l)]
+            if not keys:
+                problems.append("%s: cache step with no key" % name)
+            for i, l in enumerate(body):
+                if re.match(r"\s+key:", l) and IMAGE_KEY not in l:
+                    problems.append("%s: key %r does not name the runner image" % (name, l.strip()))
+                m = re.match(r"(\s+)restore-keys:\s*(.*)$", l)
+                if m:
+                    entries = [m.group(2)] if m.group(2) not in ("|", "") else []
+                    for nxt in body[i + 1:]:
+                        if len(nxt) - len(nxt.lstrip()) <= len(m.group(1)):
+                            break
+                        entries.append(nxt.strip())
+                    for e in entries:
+                        if IMAGE_KEY not in e:
+                            problems.append("%s: restore key %r does not name the runner image" % (name, e))
+    return problems
+
+
 class WorkflowTest(unittest.TestCase):
+    def test_cache_keys_name_the_runner_image(self):
+        seen = 0
+        for wf in self.files():
+            text = wf.read_text(encoding="utf-8")
+            seen += len(re.findall(r"uses:\s*actions/cache", text))
+            with self.subTest(wf.name):
+                self.assertEqual(cache_key_problems(text), [])
+        self.assertGreater(seen, 0)
+
+    def test_cache_key_check_catches_mutants(self):
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        edits = {
+            "os key": ("key: ot-bin-${{ steps.image.outputs.os }}-", "key: ot-bin-${{ runner.os }}-"),
+            "restore key": ("            go-build-broker-${{ steps.image.outputs.os }}-",
+                            "            go-build-broker-${{ runner.os }}-"),
+            "inline restore key": ("restore-keys: go-build-broker-${{ steps.image.outputs.os }}-",
+                                   "restore-keys: go-build-broker-"),
+            "no image step": (IMAGE_STEP + "      - name: Go build cache (CI-PATHS)\n        # The root",
+                              "      - name: Go build cache (CI-PATHS)\n        # The root"),
+            "image step after the cache": (IMAGE_STEP + "      - name: Go build cache (CI-PATHS)\n        # The root",
+                                           "        run: true\n      - name: Go build cache (CI-PATHS)\n        # The root"),
+        }
+        for name, (old, new) in edits.items():
+            with self.subTest(name):
+                self.assertIn(old, text)
+                self.assertTrue(cache_key_problems(text.replace(old, new, 1)), name)
+
     def test_runners_pinned(self):
         for wf in self.files():
             with self.subTest(wf.name):
