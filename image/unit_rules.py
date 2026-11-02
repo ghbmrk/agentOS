@@ -39,6 +39,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -357,7 +358,8 @@ def dpkg_packaged(out):
 
 def fixture(root, packaged_list):
     """Records of a fixture tree under the runner's systemd: ROOT/usr overlaid on the runner's /usr, with
-    the runner's own unit directories hidden, so only the fixture's units load."""
+    the runner's own unit and generator directories hidden, so only the fixture's units load. Of the
+    runner's generators only systemd's fstab one runs (a package's, snapd's, writes units of its own)."""
     root = pathlib.Path(root)
     for sub in ("usr/lib/systemd/system", "usr/local/lib/systemd/system", "proc", "sys", "dev", "run", "tmp",
                 "var/tmp", "etc/systemd/system"):
@@ -368,7 +370,13 @@ def fixture(root, packaged_list):
             (root / n).symlink_to("usr/" + n)
     if not (root / "etc/machine-id").exists():
         (root / "etc/machine-id").write_text("0123456789abcdef0123456789abcdef\n")
-    for d in ("usr/lib/systemd/system", "usr/local/lib/systemd/system"):
+    gen = root / "usr/lib/systemd/system-generators"
+    gen.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(os.path.realpath("/usr/lib/systemd/system-generators/systemd-fstab-generator"),
+                 gen / "systemd-fstab-generator")
+    (root / "usr/local/lib/systemd/system-generators").mkdir(parents=True, exist_ok=True)
+    for d in ("usr/lib/systemd/system", "usr/local/lib/systemd/system", "usr/lib/systemd/system-generators",
+              "usr/local/lib/systemd/system-generators"):
         os.setxattr(root / d, "trusted.overlay.opaque", b"y", follow_symlinks=False)
     os.chmod(root, 0o755)
     listed = {l for l in pathlib.Path(packaged_list).read_text().splitlines() if l}
