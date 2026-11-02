@@ -209,9 +209,9 @@ type form struct {
 }
 
 // New makes a matcher. A value is matched raw and in the encodings a sender
-// most often wraps it in: JSON string, URL query, lower hex, standard and
-// URL-safe base64. An empty value is skipped: a destination-only entry. dests
-// maps an address to the ID a trip names it by.
+// most often wraps it in: JSON string, URL query, lower and upper hex, and
+// base64 in either alphabet at any offset. An empty value is skipped: a
+// destination-only entry. dests maps an address to the ID a trip names it by.
 func New(values []Value, dests map[netip.Addr]int) *Matcher {
 	m := &Matcher{dests: map[netip.Addr]int{}}
 	for _, v := range values {
@@ -224,41 +224,34 @@ func New(values []Value, dests map[netip.Addr]int) *Matcher {
 		}
 	}
 	for a, id := range dests {
-		m.dests[a.Unmap()] = id
+		m.dests[a.Unmap().WithZone("")] = id
 	}
 	return m
 }
 
 func encodings(v []byte) [][]byte {
 	j, _ := json.Marshal(string(v))
-	out := [][]byte{
-		v,
-		j[1 : len(j)-1],
-		[]byte(url.QueryEscape(string(v))),
-		[]byte(hex.EncodeToString(v)),
-		[]byte(base64.StdEncoding.EncodeToString(v)),
-		[]byte(base64.RawURLEncoding.EncodeToString(v)),
-	}
-	// The padded forms also match without their padding, as they appear
-	// inside a longer encoded run.
-	out = append(out, bytes.TrimRight(out[4], "="))
-	var uniq [][]byte
-	for _, f := range out {
-		dup := false
-		for _, u := range uniq {
-			dup = dup || bytes.Equal(u, f)
-		}
-		if !dup {
-			uniq = append(uniq, f)
+	h := hex.EncodeToString(v)
+	out := [][]byte{v, j[1 : len(j)-1], []byte(url.QueryEscape(string(v))), []byte(h), []byte(strings.ToUpper(h))}
+	// In base64 a value starts at one of three byte offsets in a 3-byte
+	// group, whatever precedes it. At each, the characters whose six bits
+	// all come from the value are the same wherever the run starts or ends,
+	// padded or not, so they are its form at that offset: from the first
+	// character at or after bit 8*off to the last ending by the value's end.
+	for off := range 3 {
+		b := append(make([]byte, off), v...)
+		from, to := [3]int{0, 2, 3}[off], 8*len(b)/6
+		for _, e := range []*base64.Encoding{base64.StdEncoding, base64.URLEncoding} {
+			out = append(out, []byte(e.EncodeToString(b)[from:to]))
 		}
 	}
-	return uniq
+	return out
 }
 
 // Dest returns the ID of the table destination a is, in plain, IPv4-mapped
-// or NAT64 form.
+// or NAT64 form, with any zone.
 func (m *Matcher) Dest(a netip.Addr) (int, bool) {
-	a = a.Unmap()
+	a = a.Unmap().WithZone("")
 	if a.Is6() && nat64.Contains(a) {
 		b := a.As16()
 		a = netip.AddrFrom4([4]byte(b[12:]))
@@ -294,17 +287,30 @@ func (m *Matcher) Scan(b []byte) Result {
 // Stream matches a message that arrives in writes: a value or a CLK-4 token
 // split across writes still matches. Not safe for concurrent use.
 type Stream struct {
-	m    *Matcher
-	tail []byte
-	res  Result
+	m       *Matcher
+	buf     []byte // the carried tail, then the bytes not yet scanned
+	pending int
+	res     Result
 }
 
 // Stream starts a stream.
 func (m *Matcher) Stream() *Stream { return &Stream{m: m} }
 
-// Write scans p with the stream's carried tail. It never fails.
+// Write takes p. It scans once carryPattern bytes are pending, so a stream
+// of small writes costs each byte about two scans, not one per write. It
+// never fails.
 func (s *Stream) Write(p []byte) (int, error) {
-	w := append(s.tail, p...)
+	s.buf = append(s.buf, p...)
+	s.pending += len(p)
+	if s.pending >= carryPattern {
+		s.scan()
+	}
+	return len(p), nil
+}
+
+// scan matches the pending bytes with the carried tail and keeps the tail.
+func (s *Stream) scan() {
+	w := s.buf
 	for _, f := range s.m.forms {
 		if bytes.Contains(w, f.b) {
 			s.res.add(f.id)
@@ -317,11 +323,13 @@ func (s *Stream) Write(p []byte) (int, error) {
 	if len(w) > keep {
 		w = w[len(w)-keep:]
 	}
-	s.tail = append([]byte(nil), w...)
-	return len(p), nil
+	s.buf, s.pending = append([]byte(nil), w...), 0
 }
 
-// Result is what the stream has found so far.
+// Result scans what is pending and returns what the stream has found.
 func (s *Stream) Result() Result {
+	if s.pending != 0 {
+		s.scan()
+	}
 	return Result{Trips: append([]int(nil), s.res.Trips...), Pattern: s.res.Pattern}
 }
