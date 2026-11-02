@@ -79,7 +79,7 @@ func segments(l Layout) []segment {
 func HeldSet(seg string, v6 bool) string  { return "held_" + seg + fam(v6) }
 func ClaimSet(seg string, v6 bool) string { return "claim_" + seg + fam(v6) }
 
-const ClaimTimeout = "6h"
+const ClaimTimeout = 6 * 3600 // seconds
 
 // HostSet is the set that records, for each connection a host on shared
 // segment seg started, the connection's conntrack ID and original source,
@@ -99,8 +99,8 @@ const ClaimTimeout = "6h"
 func HostSet(seg string, v6 bool) string { return "host_" + seg + fam(v6) }
 
 const (
-	HostTimeout    = "1h"
-	HostTCPTimeout = "5d"
+	HostTimeout    = 3600      // seconds
+	HostTCPTimeout = 5 * 86400 // seconds
 	HostSize       = 65535
 )
 
@@ -134,6 +134,9 @@ func claimKey(v6 bool) string {
 	f := family(v6)
 	return f + " saddr . ether saddr"
 }
+
+// secs is a timeout of n seconds as nft reads it.
+func secs(n int) string { return strconv.Itoa(n) + "s" }
 
 func nfproto(v6 bool) string {
 	if v6 {
@@ -509,7 +512,10 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	capDecls(w)
 	for _, sg := range segments(l) {
 		for _, v6 := range []bool{false, true} {
-			for _, s := range []struct{ name, key, timeout string }{
+			for _, s := range []struct {
+				name, key string
+				timeout   int
+			}{
 				{HostSet(sg.name, v6), hostKey(v6), HostTimeout},
 				{HeldSet(sg.name, v6), family(v6) + " saddr", ClaimTimeout},
 				{ClaimSet(sg.name, v6), claimKey(v6), ClaimTimeout},
@@ -518,7 +524,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 				w.line("typeof " + s.key + ";")
 				w.line("size " + strconv.Itoa(HostSize) + ";")
 				w.line("flags dynamic,timeout;")
-				w.line("timeout " + s.timeout + ";")
+				w.line("timeout " + secs(s.timeout) + ";")
 				w.close()
 			}
 		}
@@ -811,7 +817,7 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		w.open("chain " + bound(sg.name))
 		for _, v6 := range []bool{false, true} {
 			k, set := hostKey(v6), HostSet(sg.name, v6)
-			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " ct protocol tcp ct status assured update @" + set + " { " + k + " timeout " + HostTCPTimeout + " } return")
+			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " ct protocol tcp ct status assured update @" + set + " { " + k + " timeout " + secs(HostTCPTimeout) + " } return")
 			w.line("meta nfproto " + nfproto(v6) + " " + k + " @" + set + " update @" + set + " { " + k + " } return")
 		}
 		w.line("drop")

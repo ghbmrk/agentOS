@@ -35,10 +35,11 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 	if len(running) == 0 {
 		return text, nil
 	}
-	have, err := elements(running)
+	sets, err := listed(running)
 	if err != nil {
 		return "", err
 	}
+	have := elements(sets)
 	w := &writer{}
 	for _, a := range allowSets(d, devs) {
 		for _, v6 := range []bool{false, true} {
@@ -57,11 +58,7 @@ func Reload(d policy.Document, l Layout, running []byte) (string, error) {
 			w.elements(a.set(v6), all)
 		}
 	}
-	recs, err := records(running, l)
-	if err != nil {
-		return "", err
-	}
-	for _, r := range recs {
+	for _, r := range records(sets, l) {
 		w.line("add element inet " + Table + " " + r.set + " { " + strings.Join(r.elems, ", ") + " }")
 	}
 	return text + w.b.String(), nil
@@ -85,29 +82,16 @@ type carried struct {
 // nowhere else (the loader reports nft's first error line only, a
 // position, not the text): a guest's or person's addresses are never
 // logged or kept (NET-1, NET-3).
-func records(listing []byte, l Layout) ([]carried, error) {
-	var doc struct {
-		Nftables []struct {
-			Set *struct {
-				Family string            `json:"family"`
-				Table  string            `json:"table"`
-				Name   string            `json:"name"`
-				Elem   []json.RawMessage `json:"elem"`
-			} `json:"set"`
-		} `json:"nftables"`
-	}
-	if err := json.Unmarshal(listing, &doc); err != nil {
-		return nil, fmt.Errorf("nft: running table listing: %v", err)
-	}
+func records(sets []listedSet, l Layout) []carried {
 	// Each set's element reader, its own timeout and the longest time an
 	// element may have left, in seconds, by the set's name.
 	read := map[string]func(json.RawMessage) (string, bool){}
 	timeout, longest := map[string]int64{}, map[string]int64{}
 	for _, sg := range segments(l) {
 		for _, v6 := range []bool{false, true} {
-			timeout[HostSet(sg.name, v6)], longest[HostSet(sg.name, v6)] = seconds(HostTimeout), seconds(HostTCPTimeout)
+			timeout[HostSet(sg.name, v6)], longest[HostSet(sg.name, v6)] = HostTimeout, HostTCPTimeout
 			for _, s := range []string{HeldSet(sg.name, v6), ClaimSet(sg.name, v6)} {
-				timeout[s], longest[s] = seconds(ClaimTimeout), seconds(ClaimTimeout)
+				timeout[s], longest[s] = ClaimTimeout, ClaimTimeout
 			}
 			read[HostSet(sg.name, v6)] = func(raw json.RawMessage) (string, bool) {
 				var c struct {
@@ -142,9 +126,8 @@ func records(listing []byte, l Layout) ([]carried, error) {
 		}
 	}
 	var out []carried
-	for _, o := range doc.Nftables {
-		s := o.Set
-		if s == nil || s.Family != "inet" || s.Table != Table || read[s.Name] == nil {
+	for _, s := range sets {
+		if read[s.Name] == nil {
 			continue
 		}
 		c := carried{set: s.Name}
@@ -175,8 +158,7 @@ func records(listing []byte, l Layout) ([]carried, error) {
 			out = append(out, c)
 		}
 	}
-	slices.SortFunc(out, func(a, b carried) int { return strings.Compare(a.set, b.set) })
-	return out, nil
+	return out
 }
 
 // addrOf is a listed address of the family v6 picks, as nft reads it.
@@ -221,29 +203,40 @@ func (w *writer) elements(set string, addrs []netip.Addr) {
 	w.line("add element inet " + Table + " " + set + " { " + strings.Join(s, ", ") + " }")
 }
 
-// elements is each set of Table in a JSON listing with its plain address
-// elements. An element in any other form (an interval, or one with its own
-// timeout, which no resolver here adds) is left out, so it is not kept.
-func elements(listing []byte) (map[string][]netip.Addr, error) {
+// listedSet is one set of Table in a JSON listing of it, its elements
+// as nft printed them.
+type listedSet struct {
+	Family string            `json:"family"`
+	Table  string            `json:"table"`
+	Name   string            `json:"name"`
+	Elem   []json.RawMessage `json:"elem"`
+}
+
+// listed is each set of Table (family inet) in a JSON listing.
+func listed(listing []byte) ([]listedSet, error) {
 	var doc struct {
 		Nftables []struct {
-			Set *struct {
-				Family string            `json:"family"`
-				Table  string            `json:"table"`
-				Name   string            `json:"name"`
-				Elem   []json.RawMessage `json:"elem"`
-			} `json:"set"`
+			Set *listedSet `json:"set"`
 		} `json:"nftables"`
 	}
 	if err := json.Unmarshal(listing, &doc); err != nil {
 		return nil, fmt.Errorf("nft: running table listing: %v", err)
 	}
-	out := map[string][]netip.Addr{}
+	var out []listedSet
 	for _, o := range doc.Nftables {
-		s := o.Set
-		if s == nil || s.Family != "inet" || s.Table != Table {
-			continue
+		if s := o.Set; s != nil && s.Family == "inet" && s.Table == Table {
+			out = append(out, *s)
 		}
+	}
+	return out, nil
+}
+
+// elements is each listed set with its plain address elements. An element
+// in any other form (an interval, or one with its own timeout, which no
+// resolver here adds) is left out, so it is not kept.
+func elements(sets []listedSet) map[string][]netip.Addr {
+	out := map[string][]netip.Addr{}
+	for _, s := range sets {
 		for _, raw := range s.Elem {
 			var str string
 			if json.Unmarshal(raw, &str) != nil {
@@ -256,14 +249,5 @@ func elements(listing []byte) (map[string][]netip.Addr, error) {
 			out[s.Name] = append(out[s.Name], a)
 		}
 	}
-	return out, nil
-}
-
-// seconds is a timeout written as nft reads it ("1h", "5d") in seconds.
-func seconds(t string) int64 {
-	n, err := strconv.ParseInt(t[:len(t)-1], 10, 64)
-	if err != nil {
-		panic("nft: timeout " + t)
-	}
-	return n * map[byte]int64{'s': 1, 'm': 60, 'h': 3600, 'd': 86400}[t[len(t)-1]]
+	return out
 }

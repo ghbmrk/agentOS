@@ -132,109 +132,109 @@ table inet enforcer {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_guests_4 {
 		typeof ip saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_guests_4 {
 		typeof ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set host_guests_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_guests_6 {
 		typeof ip6 saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_guests_6 {
 		typeof ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set host_owner_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_owner_4 {
 		typeof ip saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_owner_4 {
 		typeof ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set host_owner_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_owner_6 {
 		typeof ip6 saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_owner_6 {
 		typeof ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set host_household_4 {
 		typeof ct id . ct original ip saddr . ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_household_4 {
 		typeof ip saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_household_4 {
 		typeof ip saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set host_household_6 {
 		typeof ct id . ct original ip6 saddr . ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 1h;
+		timeout 3600s;
 	}
 	set held_household_6 {
 		typeof ip6 saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set claim_household_6 {
 		typeof ip6 saddr . ether saddr;
 		size 65535;
 		flags dynamic,timeout;
-		timeout 6h;
+		timeout 21600s;
 	}
 	set t101_4 {
 		type ipv4_addr;
@@ -421,9 +421,9 @@ table inet enforcer {
 		accept
 	}
 	chain bound_guests {
-		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_guests_4 ct protocol tcp ct status assured update @host_guests_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 5d } return
+		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_guests_4 ct protocol tcp ct status assured update @host_guests_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_guests_4 update @host_guests_4 { ct id . ct original ip saddr . ip saddr . ether saddr } return
-		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_guests_6 ct protocol tcp ct status assured update @host_guests_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 5d } return
+		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_guests_6 ct protocol tcp ct status assured update @host_guests_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_guests_6 update @host_guests_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr } return
 		drop
 	}
@@ -443,9 +443,9 @@ table inet enforcer {
 		accept
 	}
 	chain bound_owner {
-		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_owner_4 ct protocol tcp ct status assured update @host_owner_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 5d } return
+		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_owner_4 ct protocol tcp ct status assured update @host_owner_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_owner_4 update @host_owner_4 { ct id . ct original ip saddr . ip saddr . ether saddr } return
-		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_owner_6 ct protocol tcp ct status assured update @host_owner_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 5d } return
+		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_owner_6 ct protocol tcp ct status assured update @host_owner_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_owner_6 update @host_owner_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr } return
 		drop
 	}
@@ -465,9 +465,9 @@ table inet enforcer {
 		accept
 	}
 	chain bound_household {
-		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_household_4 ct protocol tcp ct status assured update @host_household_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 5d } return
+		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_household_4 ct protocol tcp ct status assured update @host_household_4 { ct id . ct original ip saddr . ip saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv4 ct id . ct original ip saddr . ip saddr . ether saddr @host_household_4 update @host_household_4 { ct id . ct original ip saddr . ip saddr . ether saddr } return
-		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_household_6 ct protocol tcp ct status assured update @host_household_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 5d } return
+		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_household_6 ct protocol tcp ct status assured update @host_household_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr timeout 432000s } return
 		meta nfproto ipv6 ct id . ct original ip6 saddr . ip6 saddr . ether saddr @host_household_6 update @host_household_6 { ct id . ct original ip6 saddr . ip6 saddr . ether saddr } return
 		drop
 	}
