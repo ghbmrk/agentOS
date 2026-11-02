@@ -1,7 +1,7 @@
 # The kernel (STO-2b, STO-2c): agentos-unlock runs as root, opens the sealed store through this PC's
 # tpm slot with the pins on its TPM, derives the kernel's keys, closes the store and execs
-# agentos-kernel as the kernel's user, with the keys on descriptor 3 and one TPM connection on
-# descriptor 4 for the log's counter (LOG-2, STO-1). No process lives on with the store key (CLK-1).
+# agentos-kernel as the kernel's user, with the keys on descriptor 100 and one TPM connection on
+# descriptor 101 for the log's counter (LOG-2, STO-1). No process lives on with the store key (CLK-1).
 # The unlock step caps the tpm slot after its unseal (#2977), so no restart in the same boot unlocks:
 # a kernel that came up and then failed reboots the box (#2998, ExecStopPost= below).
 # On a boot by the tpm slot, unlock also carries out the owner's lost-card request (REC-4, route B of
