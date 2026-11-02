@@ -66,8 +66,12 @@ def run(root, usr, cmdline, unit, plant=""):
 def units(text):
     """{unit: {"edges": [(kind, target)], "settings": [(key, value)]}} from a test-mode dump's "-> By units:"
     part. A dependency is a line whose value is one unit name and an origin/destination mask; every other
-    "Key: value" line of the unit (two tabs deep, so not its job's lines) is a setting, in the dump's order."""
+    "Key: value" line of the unit (two tabs deep, so not its job's lines) is a setting, in the dump's order.
+    systemd 255 prints some settings (BPFProgram=) with no newline, so a unit header can follow one on the
+    same line: headers are split onto their own lines first. ValueError when a unit still has other than
+    one "Unit Load State" line, which means two units were read as one."""
     out, cur = {}, None
+    text = text.replace("\t-> Unit ", "\n\t-> Unit ").replace("-> By jobs:", "\n-> By jobs:")
     for line in text.split("\n"):
         if line == "-> By jobs:":
             break
@@ -84,6 +88,11 @@ def units(text):
         m = SETTING_RE.match(line)
         if m:
             cur["settings"].append((m.group(1), m.group(2)))
+    for name, u in out.items():
+        n = sum(1 for k, _ in u["settings"] if k == "Unit Load State")
+        if n != 1:
+            raise ValueError("systemd's dump gives %s %d Unit Load State lines, so its lines cannot be told from "
+                             "another unit's" % (name, n))
     return out
 
 

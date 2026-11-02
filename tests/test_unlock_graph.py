@@ -24,6 +24,7 @@ def dump(units):
     for name, lines in units.items():
         out.append("\t-> Unit %s:" % name)
         out.append("\t\tDescription: %s" % name)
+        out.append("\t\tUnit Load State: loaded")
         for l in lines:
             out.append("\t\t" + (l if " Action: " in l else l + " (origin-file)"))
     out += ["-> By jobs:", "\t-> Job 1:", "\t\tAction: %s -> start" % U]
@@ -165,17 +166,33 @@ class ViolationsTest(unittest.TestCase):
 
 class OfflineSystemdTest(unittest.TestCase):
     def test_units_splits_dependencies_from_settings_and_skips_job_lines(self):
-        text = ("-> By units:\n\t-> Unit a.service:\n\t\tDescription: a: b\n\t\tUser: agentos-link\n"
+        text = ("-> By units:\n\t-> Unit a.service:\n\t\tDescription: a: b\n\t\tUnit Load State: loaded\n\t\tUser: agentos-link\n"
                 "\t\tWants: b.service (origin-file origin-default)\n\t\tRequiresMountsFor: /var (origin-implicit)\n"
                 "\t\tFailure Action: reboot\n\t-> Job 4:\n\t\t\tAction: a.service -> start\n"
                 "-> By jobs:\n\t-> Unit z.service:\n")
         self.assertEqual(offline_systemd.units(text), {"a.service": {
             "edges": [("Wants", "b.service"), ("RequiresMountsFor", "/var")],
-            "settings": [("Description", "a: b"), ("User", "agentos-link"), ("Failure Action", "reboot")]}})
+            "settings": [("Description", "a: b"), ("Unit Load State", "loaded"), ("User", "agentos-link"),
+                         ("Failure Action", "reboot")]}})
         self.assertEqual(offline_systemd.failed_generator(
             "/usr/lib/systemd/system-generators/systemd-gpt-auto-generator failed with exit status 1."),
             "systemd-gpt-auto-generator")
         self.assertIsNone(offline_systemd.failed_generator("Loaded units and determined initial transaction."))
+
+    def test_a_unit_header_glued_to_a_setting_starts_its_own_unit(self):
+        # systemd 255 prints BPFProgram= with no newline, so the next header follows it on one line.
+        text = ("-> By units:\n\t-> Unit a.service:\n\t\tUnit Load State: loaded\n\t\tBPFProgram: egress:/tmp/p"
+                "\t-> Unit b.service:\n\t\tUnit Load State: loaded\n\t\tWants: reboot.target (origin-file)\n")
+        u = offline_systemd.units(text)
+        self.assertEqual(u["b.service"]["edges"], [("Wants", "reboot.target")])
+        self.assertEqual(u["a.service"]["edges"], [])
+        # Two units still read as one (a glue this split misses) are refused, not merged.
+        with self.assertRaisesRegex(ValueError, "a.service 2 Unit Load State lines"):
+            offline_systemd.units("\t-> Unit a.service:\n\t\tUnit Load State: loaded\n\t\tUnit Load State: loaded\n")
+        v = g.violations(0, "-> By units:\n\t-> Unit %s:\n\t\tUnit Load State: loaded\n\t\tUnit Load State: loaded\n" % U,
+                         "", set())
+        self.assertEqual(v, ["systemd's dump gives %s 2 Unit Load State lines, so its lines cannot be told from another "
+                             "unit's; %s" % (U, g.WHY)])
 
 
 class AllowFileTest(unittest.TestCase):

@@ -113,7 +113,10 @@ def violations(status, stdout, stderr, allowed, start=UNIT):
     for line in stderr.split("\n"):
         if "deleted to break ordering cycle" in line or "unmergeable" in line:
             out.append("systemd dropped a job from the unlock step's transaction (%s); %s" % (line.strip(), WHY))
-    units = parse_dump(stdout)
+    try:
+        units = parse_dump(stdout)
+    except ValueError as e:
+        return out + ["%s; %s" % (e, WHY)]
     if start not in units:
         out.append("%s is not among the units systemd loaded; %s" % (start, WHY))
     got = reached(units, start)
