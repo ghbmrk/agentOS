@@ -172,9 +172,19 @@ type cut struct {
 	mu      sync.Mutex
 	stage   Stage
 	reasons []string
+	// hold, if set, makes Trip block: it sends on entered and waits for
+	// hold to close before the stage moves, as a slow cut would.
+	hold, entered chan struct{}
 }
 
 func (c *cut) Trip(reason string) {
+	c.mu.Lock()
+	hold, entered := c.hold, c.entered
+	c.mu.Unlock()
+	if hold != nil {
+		entered <- struct{}{}
+		<-hold
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.stage = Tripped

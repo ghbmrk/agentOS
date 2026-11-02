@@ -266,7 +266,7 @@ func (e Event) render(show func(string) string) string {
 // the refusal rate every request waits, RateLimited, until it refills.
 func (c *Channel) gate(k wire.RateKind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
 	var paused string
-	switch c.cfg.Cut.Stage() {
+	switch c.stage() {
 	case Open:
 	case Reflashed:
 		if !summary {
@@ -304,8 +304,8 @@ func (c *Channel) count(k wire.RateKind) bool {
 		return true
 	}
 	reason := "burst of " + string(rated[k]) + " past the rate: tripped the core"
-	c.log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(rated[k]), Reason: reason})
 	c.queueTrip(reason)
+	c.log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(rated[k]), Reason: reason})
 	return false
 }
 

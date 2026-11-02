@@ -563,8 +563,15 @@ func TestChallengeIDOutstanding(t *testing.T) {
 	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
 		t.Fatalf("challenge frame: %+v", m)
 	}
-	if err := r.ch.Challenge(7, []byte{2}); !errors.Is(err, ErrOutstanding) {
-		t.Fatalf("a second challenge with an outstanding id: %v, want ErrOutstanding", err)
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(7, []byte{2}) }()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrOutstanding) {
+			t.Fatalf("a second challenge with an outstanding id: %v, want ErrOutstanding", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a second challenge with an outstanding id was sent")
 	}
 	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.OK {
 		t.Fatalf("answer: %v", c)
@@ -613,6 +620,61 @@ func TestRatesIgnoreWallSteps(t *testing.T) {
 	}
 	if e := r.events(); e[len(e)-1].At != r.now.Add(24*time.Hour) {
 		t.Errorf("log line at %v, want the wall clock's time", e[len(e)-1].At)
+	}
+}
+
+// TestNothingActsOnceATripIsDecided (NET-2 The channel, ENF-d-4; Security
+// on #4536): from the moment the channel decides to trip the core, before
+// Cut.Trip has returned and the stage reads Tripped, no request on any
+// connection acts: it is answered Paused and the radio never runs. Each
+// cause is covered: a request burst, a frame outside the format and a
+// hello burst. Revert mutants: the channel's own tripping count, in
+// queueTrip and in countHello.
+func TestNothingActsOnceATripIsDecided(t *testing.T) {
+	for _, cause := range []string{"request burst", "malformed frame", "hello burst"} {
+		t.Run(cause, func(t *testing.T) {
+			r := newRig(t, nil)
+			hold, entered := make(chan struct{}), make(chan struct{}, 1)
+			var a, b *client
+			if cause == "hello burst" {
+				for range wire.Rate(wire.RateHello).Burst - 1 {
+					r.dial().conn.Close()
+				}
+				b = r.dial()
+			} else {
+				a = r.dial()
+				for i := range wire.Rate(wire.RateAnnounce).Burst {
+					a.code(wire.Announce{ID: uint64(i + 1)})
+				}
+			}
+			r.cut.mu.Lock()
+			r.cut.hold, r.cut.entered = hold, entered
+			r.cut.mu.Unlock()
+			defer close(hold)
+			switch cause {
+			case "request burst":
+				go a.send(wire.Announce{ID: 99})
+			case "malformed frame":
+				go a.conn.Write(frameBytes(wire.TCommand, []byte{1}))
+			case "hello burst":
+				h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+				go r.connect().send(h)
+			}
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("no trip")
+			}
+			if b == nil {
+				b = r.dial()
+			}
+			if c := b.code(cmd(5, "lamp", wire.VerbOn)); c != wire.Paused {
+				t.Errorf("a command after the trip was decided: %v, want Paused", c)
+			}
+			if n := len(r.radio.calls()); n != 0 {
+				t.Errorf("the radio ran %d times after the trip was decided", n)
+			}
+		})
 	}
 }
 

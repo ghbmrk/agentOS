@@ -38,6 +38,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
@@ -93,8 +94,9 @@ const (
 // Cut is the enforcer's core trip (KRN-12; DECOY-d owns cutting the core
 // and lifting the cut). The channel trips it on a frame outside the format
 // and on a burst past a rate, and asks it the stage before every request.
-// Stage is called under the channel's lock and must not call the channel;
-// Trip is called after it is released.
+// Stage is called under the channel's locks, possibly concurrently, and
+// must not call the channel; Trip is called after they are released, and
+// once it returns Stage reports the trip.
 type Cut interface {
 	Trip(reason string)
 	Stage() Stage
@@ -136,7 +138,8 @@ type Config struct {
 	// several connections (ENF-d-7).
 	Log func(Event)
 	// Now is the wall clock the log lines and the policy's times read;
-	// nil is time.Now. No rate reads it, so a step of the wall clock
+	// nil is time.Now. Now and Elapsed are called from several
+	// connections at once. No rate reads it, so a step of the wall clock
 	// neither refills nor pauses one.
 	Now func() time.Time
 	// Elapsed is the rate clock (#4507): the enforcer's time since any
@@ -194,6 +197,8 @@ type Channel struct {
 	// counted without c.mu (countHello).
 	helloMu sync.Mutex
 	hello   *wire.Bucket
+	// tripping counts the trips decided whose Cut.Trip has not returned.
+	tripping atomic.Int32
 
 	mu sync.Mutex
 	// buckets are the core's request rates, one per request
@@ -345,14 +350,28 @@ var rateEpoch = time.Unix(0, 0)
 // past the kernel check's MaxLate (#4508, KRN-chan-3).
 func (c *Channel) countHello() {
 	c.helloMu.Lock()
-	open := c.cfg.Cut.Stage() == Open
-	took := c.hello.Take(c.rateNow())
-	c.helloMu.Unlock()
-	if open && !took {
-		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
-		c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(KindHello), Reason: reason})
-		c.cfg.Cut.Trip(reason)
+	open := c.stage() == Open
+	trip := !c.hello.Take(c.rateNow()) && open
+	if trip {
+		c.tripping.Add(1)
 	}
+	c.helloMu.Unlock()
+	if trip {
+		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
+		c.cfg.Cut.Trip(reason)
+		c.tripping.Add(-1)
+		c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(KindHello), Reason: reason})
+	}
+}
+
+// stage is the cut's stage, or Tripped while a trip the channel decided
+// has not yet returned from Cut.Trip: from the decision on, no request
+// acts (ENF-d-4).
+func (c *Channel) stage() Stage {
+	if c.tripping.Load() > 0 {
+		return Tripped
+	}
+	return c.cfg.Cut.Stage()
 }
 
 // refuse logs a refused frame, counts it, and returns err.
@@ -378,15 +397,17 @@ func malformed(err error) bool {
 func (c *Channel) trip(reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
 	c.queueTrip(reason)
+	c.log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
 	return err
 }
 
-// queueTrip queues Cut.Trip to run after c.mu is released. The caller
-// holds c.mu.
+// queueTrip queues Cut.Trip to run after c.mu is released, and until it
+// returns every request is answered Paused (stage). The caller holds
+// c.mu.
 func (c *Channel) queueTrip(reason string) {
-	c.queued = append(c.queued, func() { c.cfg.Cut.Trip(reason) })
+	c.tripping.Add(1)
+	c.queued = append(c.queued, func() { c.cfg.Cut.Trip(reason); c.tripping.Add(-1) })
 }
 
 // preAuth logs and drops a connection that failed before the core
