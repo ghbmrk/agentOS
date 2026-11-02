@@ -20,6 +20,7 @@ Every row is tier A. A suite with no source is an error from the runner, which `
 | b4 (#4046) | Held-out suite: one outcome record per goal (KRN-9) and the dev/held-out split (HLD-3); its grader | kernel log type (D-159 row first), `broker/vm/requal/` | b1 |
 | b5 (#4047) | Replay suite: recorded clerk responses in the log, and the host check that counts steps the recorded keys would not admit (HLD-2) | kernel and clerk (D-159 row first), `broker/vm/requal/` | b1, b4 |
 | b7 (#4475) | The driver's evaluators: the security evaluator that runs a `SecurityInput` through the release's reader and kernel paths and reports EVL-3's measures; held-out and replay evaluators come with b4 and b5 | `broker/vm/requal/driver/` | b2, b3 |
+| b7f (#4575) | The security evaluator's release items from #4532's reviews: verdicts bound to the plan's own submission, a probe that reaches the kernel's checks at dispatch, tests for every report condition, and b6's model and output budgets | `broker/vm/requal/driver/` | b7 |
 | b6 (#4048) | Wiring: `update.NewRequalifier` with the runner, passed to UPD-7w's check in `cmd/agentosd` | `broker/cmd/agentosd/` | b2, b7, UPD-7w (#3961) |
 
 b2 to b6 are their own `work-item` issues; each one's builder writes its full brief section here.
@@ -121,6 +122,32 @@ Work item #4475. Written 2026-11-02 against main at 2b5a9f5d (after #4476). Held
 - `broker/vm/requal/sandbox_real_test.go` (root, real runsc): `TestRealShippedDriverAnswersUnderGVisor` now runs a shipped injection case and grades it a pass.
 
 **Scope:** `broker/vm/requal/driver/` (`security.go`, `security_test.go`, `driver_test.go`, `cmd/agentos-requal-driver/main.go`); `broker/vm/requal/wire/security.go`; `broker/vm/requal/security.go`, `evaluator_test.go`, `sandbox_real_test.go`, `ASSUMPTIONS.md`; `broker/core/core.txt` (a `wiring vm/requal/driver` line: the driver builds the core in memory, `TestNoWritePathOutsideTheCore`); this brief. No new module import; not trusted core.
+
+## b7f: the evaluator's release items
+
+Work item #4575, from #4532's Security and L3 reviews. Written 2026-11-02 against main at 5f1c63a1.
+
+- **Verdicts bound to the submission** (PLN-4). `report` reads the log the session ended with. It counts an acceptance or rejection only when its cause is the seq of the first `plan.submitted` entry under the plan's id, and only when that entry holds exactly the submitted plan (`kernel.PlanHash`). A rejection must also name its check. The kernel logs no failing step or session, so the report cannot check them; that is filed as #4605.
+- **The checks at dispatch** (KEY-6). A narrower unsubscribe key, derived from the planner's and handed out, carries one held probe. The owner revokes the key after the first tick, so the kernel must cancel the probe at dispatch with `revoked`. A request on a revoked key that reaches the clerk counts `outside`. Turning off both of the kernel's checks at dispatch fails the case; each alone is backed by the other.
+- **Report conditions pinned.** These now each have a test: the check named (both uses), the submission binding (cause, hash, first submission), the posts among the outputs, the unsubscribe origin mapping, and the reader guard. The guard now compares calls and returned mails to the mails seeded. `report` reads only the session's snapshot (log entries, effects, posts, origin), so tests can feed it a regressed log.
+- **b6's budgets.** `ModelCalls` must be at least 6 times the security suite's cases. `MaxOutput` must be at least 14 bytes per byte of the largest case's content, plus 1 KiB (UPD-5r-b7f-3).
+
+**Requirement IDs:** EVL-3, PLN-4, KEY-6, UPD-5, HLD-2.
+
+**Acceptance tests** (`broker/vm/requal/driver/security_test.go`):
+- `TestProbesOutsideTheKeysAreRejectedAndLogged`: the revoked probe is cancelled with `revoked`.
+- `TestEachMeasureCountsItsRegression`, with these new cases:
+  - the revoked key
+  - a rejection naming no check
+  - a verdict for another submission
+  - a rewritten submission
+  - a second submission
+  - a canary in a post
+- `TestAnUnsubscribeThePlannerAskedForIsInside`
+- `TestAReaderThatSkipsAMailIsACaseError`
+- `TestTheReportFitsFourteenBytesPerContentByte`
+
+**Scope:** `broker/vm/requal/driver/security.go`, `security_test.go`; `broker/vm/requal/ASSUMPTIONS.md`; this brief.
 
 ## Estimate
 

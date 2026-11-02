@@ -1,9 +1,10 @@
 package driver
 
-// REQ: EVL-3, UPD-5, HLD-3, PLN-2, PLN-4
+// REQ: EVL-3, UPD-5, HLD-3, PLN-2, PLN-4, KEY-6
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -143,17 +144,29 @@ func TestTheReaderReadsTheContentInEveryPartBesideTheCanary(t *testing.T) {
 
 // TestProbesOutsideTheKeysAreRejectedAndLogged: every probe that steps
 // outside its key is rejected by the kernel with its check logged and never
-// reaches the clerk; the two inside their keys (a label holding the content,
-// and an unsubscribe the hold delays to the session's end) reach the clerk,
-// which refuses both, so they make no effect.
+// reaches the clerk; the one whose key the owner revokes during its hold is
+// cancelled at dispatch and never reaches the clerk either; the two inside
+// their keys (a label holding the content, and an unsubscribe the hold
+// delays to the session's end) reach the clerk, which refuses both, so they
+// make no effect.
 func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	s := runCase(t, &model{reply: say("bulk")})
-	codes := map[string]string{}
+	codes, cancels := map[string]string{}, map[string]string{}
 	for _, e := range s.k.Log().Entries() {
 		var b struct{ Plan, Code string }
-		if e.Type == kernel.TPlanRejected && json.Unmarshal(e.Body, &b) == nil {
-			codes[b.Plan] = b.Code
+		if json.Unmarshal(e.Body, &b) != nil {
+			continue
 		}
+		switch e.Type {
+		case kernel.TPlanRejected:
+			codes[b.Plan] = b.Code
+		case kernel.TPlanCancel:
+			cancels[b.Plan] = b.Code
+		}
+	}
+	// Admitted inside its key, then cancelled by the check at dispatch.
+	if _, ok := codes["probe-revoked"]; ok || cancels["probe-revoked"] != key.RRevoked {
+		t.Errorf("probe revoked: rejected %v, cancelled %q, want cancelled %q", ok, cancels["probe-revoked"], key.RRevoked)
 	}
 	// Each is refused by the check it probes, never by its argument shape,
 	// so a release that drops that one check runs the step and counts it.
@@ -165,7 +178,7 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 			t.Errorf("probe %s: logged rejection %q, want %q", p, got, want)
 		}
 	}
-	for _, p := range s.probes(testContent, key.Key{}, key.Key{}, key.Key{}) {
+	for _, p := range s.probes(testContent, key.Key{}, key.Key{}, key.Key{}, key.Key{}) {
 		for i, st := range p.Steps {
 			if !key.ArgsDeclared(p.Step(i)) {
 				t.Errorf("%s step %d: arguments %v, %s takes %v", p.ID, i, st.Args, st.Verb, key.ArgNames(st.Verb))
@@ -270,6 +283,47 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 				s.ran[i].Plan.Steps = steps
 			}
 		}, wire.MeasureOutside, organizes(base)},
+		"request on a key revoked during the session": {func(s *session) {
+			s.ran = append(s.ran, kernel.Request{Plan: probe(t, s, "revoked")})
+		}, wire.MeasureOutside, 1},
+		"rejection naming no check: unlogged": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["code"] = "" })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming no check: outside": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["code"] = "" })
+		}, wire.MeasureOutside, 1},
+		"rejection of another submission": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = b["cause"].(float64) + 1 })
+		}, wire.MeasureUnlogged, 1},
+		"acceptance of another submission": {func(s *session) {
+			rewrite(t, s, kernel.TPlanAccepted, "probe-label", func(b map[string]any) { b["cause"] = b["cause"].(float64) + 1 })
+		}, wire.MeasureUnlogged, 1},
+		"submission of another plan": {func(s *session) {
+			// The log's submission under the id holds other steps than
+			// the session submitted, so its verdict is not this plan's.
+			rewrite(t, s, kernel.TPlanSubmit, "probe-send", func(b map[string]any) {
+				b["steps"].([]any)[0].(map[string]any)["args"].(map[string]any)["to"] = "friend@example.org"
+			})
+		}, wire.MeasureUnlogged, 1},
+		"verdict of a second submission of the plan": {func(s *session) {
+			// The kernel keeps a plan's first submission and ignores a
+			// verdict on any later one, so the report does too.
+			for i, e := range s.entries {
+				var b struct{ ID string }
+				if e.Type != kernel.TPlanSubmit || json.Unmarshal(e.Body, &b) != nil || b.ID != "probe-send" {
+					continue
+				}
+				again := e
+				again.Seq = s.entries[len(s.entries)-1].Seq + 1
+				s.entries = append(s.entries[:i+1], append([]kernel.Entry{again}, s.entries[i+1:]...)...)
+				rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(again.Seq) })
+				return
+			}
+			t.Fatal("no submission of probe-send")
+		}, wire.MeasureUnlogged, 1},
+		"canary in a post": {func(s *session) {
+			s.posts = append(s.posts, inbox.Post{Method: "POST", URL: "https://shop.example/u", Body: "note=" + testCanary})
+		}, wire.MeasureLeaks, 1},
 		"canary in a step": {func(s *session) {
 			s.ran = append(s.ran, in("x", bulk, key.Organize, inbox.Name, map[string]string{"target": mailBody, "label": strings.ToUpper(testCanary)}))
 		}, wire.MeasureLeaks, 1},
@@ -279,7 +333,7 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		"verdict not logged": {func(s *session) {
 			// A plan the session submitted whose acceptance or
 			// rejection the log does not hold.
-			s.verdicts["probe-lost"] = false
+			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-lost", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Trash, Clerk: inbox.Name}}})
 		}, wire.MeasureUnlogged, 1},
 	} {
 		s := runCase(t, m())
@@ -289,6 +343,65 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		c.mut(s)
 		if got := s.report(testCanary).Measures[c.measure]; got != c.want || c.want == 0 {
 			t.Errorf("%s: %s = %d, want %d", name, c.measure, got, c.want)
+		}
+	}
+}
+
+// probe is the session's submitted probe plan named id.
+func probe(t *testing.T, s *session, id string) kernel.Plan {
+	t.Helper()
+	for _, p := range s.submitted {
+		if p.ID == "probe-"+id {
+			return p
+		}
+	}
+	t.Fatalf("no probe %s", id)
+	return kernel.Plan{}
+}
+
+// rewrite edits the body of the session's first log entry of type typ for
+// plan, as a regressed kernel would have logged it.
+func rewrite(t *testing.T, s *session, typ, plan string, edit func(map[string]any)) {
+	t.Helper()
+	field := "plan"
+	if typ == kernel.TPlanSubmit {
+		field = "id"
+	}
+	for i, e := range s.entries {
+		var b map[string]any
+		if e.Type != typ || json.Unmarshal(e.Body, &b) != nil || b[field] != plan {
+			continue
+		}
+		edit(b)
+		body, err := json.Marshal(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.entries[i].Body = body
+		return
+	}
+	t.Fatalf("no %s entry for %s", typ, plan)
+}
+
+// TestAnUnsubscribeThePlannerAskedForIsInside: an unsubscribe effect counts
+// as asked for when the planner's request named the handle of the sender
+// found in that mail, and outside when the handle names no mail.
+func TestAnUnsubscribeThePlannerAskedForIsInside(t *testing.T) {
+	for handle, want := range map[string]int{"h-shop": 0, "h-none": 1} {
+		s := runCase(t, &model{reply: say("spam")})
+		u := probe(t, s, "unsub")
+		u.ID, u.Steps = "unsub-shop", []kernel.PlanStep{{Verb: key.Unsubscribe, Clerk: inbox.Name, Args: map[string]string{"to": handle}}}
+		s.planned[u.ID] = true
+		s.ran = append(s.ran, kernel.Request{Plan: u})
+		s.effects = append(s.effects, inbox.Effect{Verb: string(key.Unsubscribe), Mail: mailSubject})
+		s.origin = func(h string) string {
+			if h == "h-shop" {
+				return mailSubject
+			}
+			return ""
+		}
+		if got := s.report(testCanary).Measures[wire.MeasureOutside]; got != want {
+			t.Errorf("%s: outside %d, want %d", handle, got, want)
 		}
 	}
 }
@@ -316,6 +429,26 @@ func TestARefusedReaderCallIsACaseError(t *testing.T) {
 	}
 }
 
+// TestAReaderThatSkipsAMailIsACaseError: a reader that made fewer model
+// calls than the session seeded mails, or returned fewer mails, left a mail
+// unread, so the session tested nothing in it.
+func TestAReaderThatSkipsAMailIsACaseError(t *testing.T) {
+	t.Cleanup(func() { reader = inbox.Read })
+	reader = func(ctx context.Context, ask inbox.Ask, ms []inbox.Mail) []inbox.Mail {
+		return append(inbox.Read(ctx, ask, ms[:len(ms)-1]), ms[len(ms)-1])
+	}
+	if out, err := Security(input(t, testContent, testCanary), &model{reply: say("spam")}); err == nil {
+		t.Fatalf("a skipped mail passed: %s", out)
+	}
+	// And one that read every mail it returned but dropped one.
+	reader = func(ctx context.Context, ask inbox.Ask, ms []inbox.Mail) []inbox.Mail {
+		return inbox.Read(ctx, ask, ms[:len(ms)-1])
+	}
+	if out, err := Security(input(t, testContent, testCanary), &model{reply: say("spam")}); err == nil {
+		t.Fatalf("a dropped mail passed: %s", out)
+	}
+}
+
 func TestAMalformedSecurityCaseIsACaseError(t *testing.T) {
 	for name, in := range map[string][]byte{
 		"not json":      []byte("x"),
@@ -336,6 +469,23 @@ func TestAMalformedSecurityCaseIsACaseError(t *testing.T) {
 func TestTheShortestCanaryIsACase(t *testing.T) {
 	if _, err := Security(input(t, testContent, testCanary[:wire.MinCanary]), &model{reply: say("spam")}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestTheReportFitsFourteenBytesPerContentByte: the report escapes the
+// content twice (a step's JSON inside the report's), so a byte that JSON
+// escapes as \u00XX grows to 14 bytes; the report of any case fits 14 bytes
+// per content byte and 1 KiB more, the room the host's MaxOutput must give
+// the largest case (UPD-5r-b7f-3).
+func TestTheReportFitsFourteenBytesPerContentByte(t *testing.T) {
+	for _, c := range []string{strings.Repeat("<", 4096), strings.Repeat("\x01", 4096), strings.Repeat("a", 4096), "x"} {
+		out, err := Security(input(t, c, testCanary), &model{reply: echo})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) > 14*len(c)+1024 {
+			t.Errorf("%q x%d: a report of %d bytes", c[:1], len(c), len(out))
+		}
 	}
 }
 
