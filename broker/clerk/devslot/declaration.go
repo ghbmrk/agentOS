@@ -111,7 +111,8 @@ const (
 	CapRead  = 65540 // one frame read
 	CapWrite = 4096  // one frame written
 	// CapWrites is the most frames one run of an operation writes: a
-	// CapWrite payload in 20-byte chunks, Bluetooth LE's smallest MTU.
+	// CapWrite payload in 20-byte chunks, Bluetooth LE's smallest MTU, is
+	// 205; rounded up to 256.
 	CapWrites   = 256
 	CapReadings = 1024 // readings per operation
 	CapKinds    = 32   // reading kinds, each its own DEV-8 window (DEVSLOT-host-lib-8)

@@ -66,8 +66,12 @@ func (n *notify) next(t *testing.T) devhost.Event {
 	}
 }
 
+// subHost lowers the MinSubscription floor to sub for the test, so a test
+// of other behaviour need not wait out real instances;
+// TestNewRefusesShortSubscription holds the floor itself.
 func subHost(t *testing.T, d *dialer, s devhost.Sink, sub time.Duration, lim devhost.Limit, now func() time.Time) *devhost.Host {
 	t.Helper()
+	devhost.LowerMinSubscription(t, sub)
 	h, err := devhost.New(devhost.Config{
 		Decl: subDecl(), Pin: pin, Dialer: d, Transport: &transport{}, Sink: s,
 		Deadline: 5 * time.Second, Subscription: sub, Limit: lim, Now: now,
@@ -146,7 +150,7 @@ func TestSubscribeEmitsPerReading(t *testing.T) {
 		s := newNotify()
 		h, err := devhost.New(devhost.Config{
 			Decl: subDecl(), Pin: pin, Dialer: d, Transport: tr, Sink: s,
-			Deadline: time.Second, Subscription: 5 * time.Second, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
+			Deadline: time.Second, Subscription: devhost.MinSubscription, Limit: devhost.Limit{Burst: 10, Window: time.Minute},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -437,4 +441,31 @@ func parked(t *testing.T, fn string) {
 		}
 	}
 	t.Fatalf("no goroutine in %s parked on the host's mutex", fn)
+}
+
+// New refuses a subscription period below MinSubscription, so the host's
+// config alone cannot raise a subscription's write rate: each instance
+// writes up to MaxWrites, and instances start at most once per period plus
+// once after each Do (#4515).
+func TestNewRefusesShortSubscription(t *testing.T) {
+	cfg := func(sub time.Duration) devhost.Config {
+		return devhost.Config{
+			Decl: subDecl(), Pin: pin, Dialer: &dialer{t: t}, Transport: &transport{}, Sink: &sink{},
+			Deadline: time.Second, Subscription: sub, Limit: devhost.Limit{Burst: 1, Window: time.Second},
+		}
+	}
+	for _, sub := range []time.Duration{0, time.Millisecond, devhost.MinSubscription - time.Nanosecond} {
+		if _, err := devhost.New(cfg(sub)); err == nil {
+			t.Fatalf("New took a subscription period of %v, below %v", sub, devhost.MinSubscription)
+		}
+	}
+	if _, err := devhost.New(cfg(devhost.MinSubscription)); err != nil {
+		t.Fatalf("New refused MinSubscription: %v", err)
+	}
+	// A declaration with no subscription needs no period.
+	c := cfg(0)
+	c.Decl = fixture.Declaration()
+	if _, err := devhost.New(c); err != nil {
+		t.Fatalf("New refused a declaration without a subscription: %v", err)
+	}
 }
