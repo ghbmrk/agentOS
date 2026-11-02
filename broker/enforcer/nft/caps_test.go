@@ -170,6 +170,12 @@ func TestDropsChargesSharedAddressToEachGroup(t *testing.T) {
 			t.Errorf("drop text lacks %q:\n%s", want, text)
 		}
 	}
+	// An update that finds the shared chain keeps it as it is: adding its
+	// rules again would charge each quota twice.
+	kept := fmt.Sprintf(`{"nftables": [{"chain": {"family": "inet", "table": "enforcer", "name": %q}}, {"chain": {"family": "inet", "table": "enforcer", "name": %q}}, {"chain": {"family": "inet", "table": "enforcer", "name": %q}}, {"quota": {"family": "inet", "table": "enforcer", "name": %q}}, {"quota": {"family": "inet", "table": "enforcer", "name": %q}}]}`, m, ga, gb, qa, qb)
+	if text := mustDrops(t, twoCaps(), []byte(kept), Drop{Day: 1, Groups: []DropGroup{a, b}}); strings.Contains(text, "add chain inet enforcer "+m) || strings.Contains(text, "add rule inet enforcer "+m+" ") || !strings.Contains(text, ": goto "+m) {
+		t.Errorf("an update rewrites a kept shared chain:\n%s", text)
+	}
 	running := fmt.Sprintf(`{"nftables": [{"chain": {"family": "inet", "table": "enforcer", "name": %q}}]}`, m)
 	if text := mustDrops(t, twoCaps(), []byte(running), Drop{Day: 1, Groups: []DropGroup{{Dests: []string{"a.example"}, Caps: []uint64{100}, Cap: 100}}}); !strings.Contains(text, "delete chain inet enforcer "+m+"\n") {
 		t.Errorf("a stale shared chain is kept:\n%s", text)

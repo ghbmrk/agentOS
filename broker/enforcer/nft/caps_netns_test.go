@@ -264,6 +264,26 @@ func TestCapHeldSharedAddressRaisesNoCap(t *testing.T) {
 	r.expectOver("a past its own cap", r.read(), traffic.Overrun{Box: traffic.BoxCore, Dests: []string{"a.example"}, Cap: 100, Count: 150})
 }
 
+// NET-2 Byte caps (Security delta on #4611): a byte to an address several
+// groups' sets hold, idle today, is charged to every one of their quotas
+// in the kernel itself. After 50 bytes there, a's own address takes only
+// a's other 50 before the next reading, as the counter would merge the two
+// groups and the kernel cannot. Catches a shared chain that charges only
+// one group's quota.
+func TestCapHeldSharedAddressChargesEachGroup(t *testing.T) {
+	if !nft.InNetns(t) {
+		return
+	}
+	r := newRig(t, capDoc(map[string]uint64{"a.example": 100, "b.example": 1000}, 1<<20))
+	r.answer("a.example", nft.NetCore)
+	r.answer("a.example", nft.NetAllow)
+	r.answer("b.example", nft.NetAllow)
+	r.expectOver("nothing sent", r.read())
+	r.send("core", nft.NetAllow, 22, true, "50 to the shared address")
+	r.send("core", nft.NetCore, 22, true, "a's own address, 100 of a's quota")
+	r.send("core", nft.NetCore, 22, false, "a's own address past a's quota before the next reading")
+}
+
 // NET-2 Byte caps (L3 R1 and Security on #4611): a load that carries no
 // drop state fails closed: the core reaches nothing on the internet and
 // the edge nothing either, though the core's allow set and names hold the

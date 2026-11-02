@@ -90,7 +90,8 @@ type Drop struct {
 // signed list, sorted, each one's own cap, their one cap, the bytes the
 // core sent them today, and the addresses the counter gives them today.
 // An address in several groups is one the counter keeps them apart at,
-// because it carried nothing today; its bytes are charged to each.
+// because it was neither resolved nor carried bytes today; its bytes are
+// charged to each.
 type DropGroup struct {
 	Dests []string
 	Caps  []uint64

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -292,5 +293,24 @@ func TestRestoreFitsRetiredCapsUnderRaisedCaps(t *testing.T) {
 	}
 	if _, err := wire.EncodeCounts(r.Counts()); err != nil {
 		t.Fatalf("restored under raised caps: counts do not encode: %v", err)
+	}
+}
+
+// TestDropLeavesAnAddressOfNoGroupOut (L3 delta on #4611): an idle address
+// whose only destination has no group today (taken off the list in an
+// earlier version, its address held but carrying nothing) is in no drop
+// group, so the drop's default refuses it rather than charging some other
+// group. Mutant: such an address charged to the first group.
+func TestDropLeavesAnAddressOfNoGroupOut(t *testing.T) {
+	clk := &clock{noon}
+	c := NewCounter(clk.now, twoCap)
+	c.Add(held(reading(1, 0), map[string][]netip.Addr{"b.example": {addrB}}))
+	clk.t = noon.Add(24 * time.Hour) // a new day: b's retired cap is gone
+	c.SetCaps(Caps{Core: map[string]uint64{"a.example": 100}})
+	c.Add(held(reading(1, 0), nil))
+	for _, g := range c.Drop().Groups {
+		if slices.Contains(g.Addrs, addrB) {
+			t.Fatalf("an address of no group charged to %v", g.Dests)
+		}
 	}
 }
