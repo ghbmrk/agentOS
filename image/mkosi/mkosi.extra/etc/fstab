@@ -4,4 +4,4 @@
 # flags systemd gives it and adds noexec. mkosi.finalize refuses a line here without noexec.
 devtmpfs /dev     devtmpfs nosuid,noexec       0 0
 tmpfs    /dev/shm tmpfs    nosuid,nodev,noexec 0 0
-tmpfs    /run     tmpfs    nosuid,nodev,noexec 0 0
+tmpfs    /run     tmpfs    mode=0755,nosuid,nodev,noexec 0 0
