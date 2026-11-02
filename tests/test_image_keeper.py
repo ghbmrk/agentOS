@@ -384,7 +384,10 @@ class KeeperTreeTest(unittest.TestCase):
                   ("Unit", "OnSuccess", "reboot.target"), ("Unit", "Wants", "reboot.target"),
                   ("Unit", "Requires", "reboot.target"), ("Unit", "Requisite", "reboot.target"),
                   ("Unit", "BindsTo", "reboot.target"), ("Unit", "Upholds", "reboot.target"),
-                  ("Unit", "Conflicts", "agentos-health.service"), ("Unit", "PropagatesStopTo", "agentosd.service"))
+                  ("Unit", "Conflicts", "agentos-health.service"), ("Unit", "PropagatesStopTo", "agentosd.service"),
+                  ("Unit", "BindTo", "reboot.target"), ("Unit", "RequiresOverridable", "reboot.target"),
+                  ("Unit", "RequisiteOverridable", "reboot.target"), ("Unit", "RequiresMountsFor", "/boot"),
+                  ("Unit", "WantsMountsFor", "/boot"))
 
     def test_the_unlock_unit_assignments_are_one_closed_list(self):
         self.assertEqual(sorted((s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS),
@@ -393,7 +396,8 @@ class KeeperTreeTest(unittest.TestCase):
         self.assertEqual({w for *_, w in check.UNLOCK_ASSIGNMENTS},
                          {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START, check.UNLOCK_PULL})
         # #4667: every key by which the unit's start or stop starts or stops another unit has the empty list.
-        pull = ("Wants", "Requires", "Requisite", "BindsTo", "Upholds", "Conflicts", "PropagatesStopTo")
+        pull = ("Wants", "Requires", "Requisite", "BindsTo", "Upholds", "Conflicts", "PropagatesStopTo", "BindTo",
+                "RequiresOverridable", "RequisiteOverridable", "RequiresMountsFor", "WantsMountsFor")
         self.assertEqual(sorted(k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if w == check.UNLOCK_PULL), sorted(pull))
         self.assertFalse([k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if k in pull and (s, a) != ("Unit", ())])
         # The shipped unit sets none of them; After= only orders it.
@@ -441,7 +445,7 @@ class KeeperTreeTest(unittest.TestCase):
         # passes only in .wants/ under the unit's own name and pointing at its own unit file.
         name = "agentos-keeper-kernel.service"
         self.assertIn(name, ini(self.unit("agentos-link.service"))["Install"]["WantedBy"].split())
-        self.assertEqual(check.UNLOCK_LINKS, {".wants": ("agentos-link.service",)})
+        self.assertEqual(check.UNLOCK_CLOSURE[name], {".wants": ("agentos-link.service",)})
         good = "/usr/lib/systemd/system/agentos-link.service"
         for d, target, want in (
                 (name + ".wants", good, []),
@@ -461,6 +465,92 @@ class KeeperTreeTest(unittest.TestCase):
                 link.unlink()
                 link.parent.rmdir()
 
+
+    # #4696 Security: systemd 257.13's [Unit] key table, as libsystemd-core-257.so of Debian's
+    # libsystemd-shared 257.13-1~deb13u1 lists it (its "Unit.<key>" gperf strings). Every key the unlock
+    # unit may not set is refused, aliases (BindTo=, RequiresOverridable=, RequisiteOverridable=) and
+    # mount pulls (RequiresMountsFor=, WantsMountsFor=) included.
+    UNIT_KEYS_257 = (
+        "After AllowIsolate AssertACPower AssertArchitecture AssertCPUFeature AssertCPUPressure AssertCPUs "
+        "AssertCapability AssertControlGroupController AssertCredential AssertDirectoryNotEmpty AssertEnvironment "
+        "AssertFileIsExecutable AssertFileNotEmpty AssertFirstBoot AssertGroup AssertHost AssertIOPressure "
+        "AssertKernelCommandLine AssertKernelVersion AssertMemory AssertMemoryPressure AssertNeedsUpdate "
+        "AssertOSRelease AssertPathExists AssertPathExistsGlob AssertPathIsDirectory AssertPathIsEncrypted "
+        "AssertPathIsMountPoint AssertPathIsReadWrite AssertPathIsSymbolicLink AssertSecurity AssertUser "
+        "AssertVirtualization Before BindTo BindsTo CollectMode ConditionACPower ConditionArchitecture "
+        "ConditionCPUFeature ConditionCPUPressure ConditionCPUs ConditionCapability ConditionControlGroupController "
+        "ConditionCredential ConditionDirectoryNotEmpty ConditionEnvironment ConditionFileIsExecutable "
+        "ConditionFileNotEmpty ConditionFirmware ConditionFirstBoot ConditionGroup ConditionHost ConditionIOPressure "
+        "ConditionKernelCommandLine ConditionKernelVersion ConditionMemory ConditionMemoryPressure "
+        "ConditionNeedsUpdate ConditionOSRelease ConditionPathExists ConditionPathExistsGlob "
+        "ConditionPathIsDirectory ConditionPathIsEncrypted ConditionPathIsMountPoint ConditionPathIsReadWrite "
+        "ConditionPathIsSymbolicLink ConditionSecurity ConditionUser ConditionVirtualization Conflicts "
+        "DefaultDependencies Description Documentation FailureAction FailureActionExitStatus IgnoreOnIsolate "
+        "IgnoreOnSnapshot JobRunningTimeoutSec JobTimeoutAction JobTimeoutRebootArgument JobTimeoutSec "
+        "JoinsNamespaceOf OnFailure OnFailureIsolate OnFailureJobMode OnSuccess OnSuccessJobMode PartOf "
+        "PropagateReloadFrom PropagateReloadTo PropagatesReloadTo PropagatesStopTo RebootArgument "
+        "RefuseManualStart RefuseManualStop ReloadPropagatedFrom Requires RequiresMountsFor RequiresOverridable "
+        "Requisite RequisiteOverridable SourcePath StartLimitAction StartLimitBurst StartLimitInterval "
+        "StartLimitIntervalSec StopPropagatedFrom StopWhenUnneeded SuccessAction SuccessActionExitStatus "
+        "SurviveFinalKillSignal Upholds Wants WantsMountsFor").split()
+
+    def test_every_unit_key_the_unlock_unit_may_not_set_is_refused(self):
+        name = "agentos-keeper-kernel.service"
+        listed = {k for s, k, _, _ in check.UNLOCK_ASSIGNMENTS if s == "Unit"}
+        self.assertLessEqual(set(check.UNLOCK_UNIT_KEYS) | listed, set(self.UNIT_KEYS_257))
+        # None of the always-allowed keys starts or stops a unit.
+        self.assertEqual(set(check.UNLOCK_UNIT_KEYS), {
+            "Description", "Documentation", "After", "Before", "DefaultDependencies", "RefuseManualStart",
+            "ConditionPathExists", "StartLimitIntervalSec", "StartLimitBurst"})
+        others = [k for k in self.UNIT_KEYS_257 if k not in check.UNLOCK_UNIT_KEYS and k not in listed]
+        d = write(self.root, SYSTEM + name + ".d/99.conf", "[Unit]\n" + "".join("%s=x.target\n" % k for k in others))
+        got = [line for line in self.v() if "a [Unit] key the check does not model" in line]
+        d.unlink()
+        self.assertEqual(len(got), len(others), got)
+        for k, line in zip(others, got):
+            self.assertTrue(line.startswith("%s: %s=x.target in %s; a [Unit] key the check does not model"
+                                            % (name, k, SYSTEM + name + ".d/99.conf")), line)
+        self.assertEqual(self.v(), [])
+
+    def test_every_unit_the_unlock_step_starts_is_held_to_the_same_rule(self):
+        # The map is closed: each unit a listed unit starts is itself listed, and the shipped units set
+        # exactly what the map allows.
+        c = check.UNLOCK_CLOSURE
+        for unit, allowed in c.items():
+            for key in check.UNLOCK_FOLLOWED:
+                for t in allowed.get(key, ()):
+                    self.assertIn(t, c, (unit, key))
+        self.assertEqual(ini(self.unit("agentos-link.service"))["Unit"]["Requires"], "agentos-inbound.service")
+        inbound = ini(self.unit("agentos-inbound.service"))["Unit"]
+        self.assertEqual((inbound["Wants"], inbound["Conflicts"]), ("network-pre.target", "shutdown.target"))
+        why = check.UNLOCK_PULL
+        cases = (
+            ("agentos-link.service", "[Unit]\nUpholds=reboot.target\n", "Upholds=reboot.target", "a [Unit] key"),
+            ("agentos-link.service", "[Unit]\nBindTo=reboot.target\n", "BindTo=reboot.target", "a [Unit] key"),
+            ("agentos-link.service", "[Unit]\nOnFailure=reboot.target\n", "OnFailure=reboot.target", "a [Unit] key"),
+            ("agentos-link.service", "[Unit]\nRequires=reboot.target\n", "Requires=reboot.target",
+             why + "; allowed: Requires=agentos-inbound.service"),
+            ("agentos-inbound.service", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target",
+             why + "; allowed: Wants=network-pre.target"),
+            ("network-pre.target", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target", "a [Unit] key"))
+        for unit, text, assign, want in cases:
+            with self.subTest(unit=unit, assign=assign):
+                rel = SYSTEM + unit + ".d/99.conf"
+                d = write(self.root, rel, text)
+                got = self.v()
+                d.unlink()
+                self.assertEqual(len(got), 1, got)
+                self.assertTrue(got[0].startswith("%s: %s in %s; %s" % (unit, assign, rel, want)), got)
+        # A link that starts another unit with the edge link is refused too.
+        link = self.root / SYSTEM / "agentos-link.service.wants" / "reboot.target"
+        link.parent.mkdir(parents=True)
+        link.symlink_to("/usr/lib/systemd/system/reboot.target")
+        got = self.v()
+        link.unlink()
+        link.parent.rmdir()
+        self.assertEqual(got, ["agentos-link.service: %sagentos-link.service.wants/reboot.target; %s; allowed: no wants "
+                               "link at all" % (SYSTEM, why)])
+        self.assertEqual(self.v(), [])
     def test_no_later_assignment_hides_an_unlock_unit_value(self):
         # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.
         # Dependencies such as OnFailure= never reset; for the rest the check does not rest on how they do.

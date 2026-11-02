@@ -1512,12 +1512,39 @@ UNLOCK_ASSIGNMENTS = (
     ("Unit", "Upholds", (), UNLOCK_PULL),
     ("Unit", "Conflicts", (), UNLOCK_PULL),
     ("Unit", "PropagatesStopTo", (), UNLOCK_PULL),
+    # The same dependencies under other names in 257.13's load-fragment-gperf table: BindTo= is
+    # config_parse_unit_deps for UNIT_BINDS_TO, RequiresOverridable= and RequisiteOverridable= are
+    # config_parse_obsolete_unit_deps for UNIT_REQUIRES and UNIT_REQUISITE, and RequiresMountsFor= and
+    # WantsMountsFor= pull in mount units (#4696 Security). UNLOCK_UNIT_KEYS refuses any key not listed.
+    ("Unit", "BindTo", (), UNLOCK_PULL),
+    ("Unit", "RequiresOverridable", (), UNLOCK_PULL),
+    ("Unit", "RequisiteOverridable", (), UNLOCK_PULL),
+    ("Unit", "RequiresMountsFor", (), UNLOCK_PULL),
+    ("Unit", "WantsMountsFor", (), UNLOCK_PULL),
 )
-# The link directories that add the same dependencies as Wants=, Requires= and Upholds= (#4667), and the
-# one link the image ships in them: agentos-link.service's WantedBy= puts it in the unit's .wants/, so the
-# edge link starts with the kernel it asks (EDGE-link-core c2c). systemd starts the unit the link is named.
+# The link directories that add the same dependencies as Wants=, Requires= and Upholds= (#4667).
+# systemd starts the unit a link is named.
 UNLOCK_LINK_DIRS = (".wants", ".requires", ".upholds")
-UNLOCK_LINKS = {".wants": ("agentos-link.service",)}
+# Every unit the unlock step starts, and what each may start or stop in turn: a closed map (#4667, #4696
+# Security R1). The unlock unit's own keys are UNLOCK_ASSIGNMENTS'; its one link is agentos-link.service,
+# which that unit's WantedBy= puts in its .wants/ (EDGE-link-core c2c). Each value a unit lists under
+# Wants=, Requires=, BindsTo= or a link directory is itself a key here, so the map is the whole set the
+# unlock step can start; a unit under Conflicts= is stopped, not started, and is not followed.
+EDGE_LINK_DEVICE = "sys-subsystem-net-devices-agentos\\x2dlink.device"
+UNLOCK_CLOSURE = {
+    "agentos-keeper-kernel.service": {".wants": ("agentos-link.service",)},
+    "agentos-link.service": {"Requires": ("agentos-inbound.service",), "BindsTo": (EDGE_LINK_DEVICE,)},
+    EDGE_LINK_DEVICE: {".wants": ("agentos-link.service",)},
+    "agentos-inbound.service": {"Wants": ("network-pre.target",), "Conflicts": ("shutdown.target",)},
+    "network-pre.target": {},
+}
+UNLOCK_FOLLOWED = ("Wants", "Requires", "BindsTo") + UNLOCK_LINK_DIRS
+# The [Unit] keys a unit in UNLOCK_CLOSURE may set at all: these, the keys its map entry lists, and for the
+# unlock unit UNLOCK_ASSIGNMENTS' [Unit] keys. Any other key (an alias such as BindTo=, a key a later
+# systemd adds, PartOf= or OnFailure= on another unit) is refused, so no spelling of a dependency is
+# missed: none of these starts or stops a unit.
+UNLOCK_UNIT_KEYS = ("Description", "Documentation", "After", "Before", "DefaultDependencies",
+                    "RefuseManualStart", "ConditionPathExists", "StartLimitIntervalSec", "StartLimitBurst")
 # The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
 # no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
 # an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
@@ -1742,7 +1769,7 @@ def keeper_violations(root):
             out += keeper_unit_violations(name, files)
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
-    out += unlock_link_violations(root)
+    out += unlock_closure_violations(root, dirs)
     for n in sorted(set(sockets)):
         files = unit_with_dropins(root, dirs, n)
         try:
@@ -1958,13 +1985,40 @@ def driver_root(name, files):
             and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
-def unlock_link_violations(root):
-    """#4667: a link in an unlock unit's .wants/, .requires/ or .upholds/ directory (by its name, each "-"
-    prefix of it, or its type, as unit_with_dropins reads drop-ins) starts the unit it names with the
-    unlock step, as Wants=, Requires= or Upholds= would; the unit may have none of them."""
-    out = []
-    for name in UNLOCK_UNITS:
+def unlock_closure_violations(root, dirs):
+    """#4667, #4696 Security: every unit in UNLOCK_CLOSURE sets only UNLOCK_UNIT_KEYS and its map entry's
+    [Unit] keys (in the unit or any drop-in), each dependency word is on its entry's list, and every link
+    in a .wants/, .requires/ or .upholds/ directory that applies to it (its name, each "-" prefix of it, or
+    its type, as unit_with_dropins reads drop-ins) is on the list and names its own unit file. A directory
+    shared by several units is reported once."""
+    out, seen = [], set()
+    for name, allowed in UNLOCK_CLOSURE.items():
+        unlock = name in UNLOCK_UNITS
         typ = name.rsplit(".", 1)[1]
+        files = unit_with_dropins(root, dirs, name) or conf_files(
+            root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
+            + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
+        keys = set(UNLOCK_UNIT_KEYS) | {k for k in allowed if not k.startswith(".")}
+        shown = set(keys)  # the keys a refusal names as settable: never one whose closed list is empty
+        if unlock:
+            keys |= {k for s_, k, _, _ in UNLOCK_ASSIGNMENTS if s_ == "Unit"}
+            shown |= {k for s_, k, a, _ in UNLOCK_ASSIGNMENTS if s_ == "Unit" and a}
+        try:
+            for f in files:
+                for section, key, v in config_lines(f.content()):
+                    if section != "Unit" or not v:
+                        continue
+                    if key not in keys:
+                        out.append("%s: %s=%s in %s; a [Unit] key the check does not model on a unit the unlock "
+                                   "step starts (#4667); allowed: %s" % (name, key, v, f.rel, ", ".join(sorted(shown))))
+                    elif not unlock and key in allowed:
+                        for w in v.split():
+                            if w not in allowed[key]:
+                                out.append("%s: %s=%s in %s; %s; allowed: %s" % (
+                                    name, key, w, f.rel, UNLOCK_PULL, unlock_allowed(key, allowed[key])))
+        except (OSError, Unparsable) as e:
+            out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
+                       % (name, e.strerror if isinstance(e, OSError) else e))
         for d in UNIT_PATHS:
             for n in unit_dropin_names(name) + [typ]:
                 for suffix in UNLOCK_LINK_DIRS:
@@ -1975,16 +2029,20 @@ def unlock_link_violations(root):
                             continue
                         found = sorted(tree_listdir(root, rel)) if stat.S_ISDIR(st.st_mode) else [""]
                     except OSError as e:
-                        out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
-                                   % (rel, e.strerror))
+                        if rel not in seen:
+                            out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
+                                       % (rel, e.strerror))
+                        seen.add(rel)
                         continue
-                    allowed = UNLOCK_LINKS.get(suffix, ()) if n == name else ()
+                    ok = allowed.get(suffix, ()) if n == name else ()
                     for m in found:
-                        if m in allowed and unlock_link_target(root, rel + "/" + m) == m:
+                        path = rel + ("/" + m if m else "")
+                        if (m in ok and unlock_link_target(root, path) == m) or path in seen:
                             continue
+                        seen.add(path)
                         out.append("%s: %s; %s; allowed: %s"
-                                   % (name, rel + ("/" + m if m else ""), UNLOCK_PULL,
-                                      ", ".join("%s/%s" % (name + suffix, a) for a in allowed)
+                                   % (name, path, UNLOCK_PULL,
+                                      ", ".join("%s/%s" % (name + suffix, a) for a in ok)
                                       or "no %s link at all" % suffix[1:]))
     return out
 
