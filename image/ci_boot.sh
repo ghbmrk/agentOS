@@ -79,7 +79,8 @@ boot() {
 	[ -z "$P6" ] || wait $P6 || true
 	sleep 2; kill $QEMU 2>/dev/null || true; wait $QEMU 2>/dev/null || true
 	echo "--- $(basename "$log")"
-	grep -a "agentos-\|Secure Boot\|verity\|Failed" "$log" | tail -40 | guest_echo || true
+	# A Go command's crash too: its header names no agentos- path, only its frames do (#4474).
+	grep -a "agentos-\|Secure Boot\|verity\|Failed\|fatal error:\|panic:\|]: runtime: " "$log" | tail -40 | guest_echo || true
 }
 
 # Prints the guest console on stdin with what the console carries inside lines cut out: CSI
