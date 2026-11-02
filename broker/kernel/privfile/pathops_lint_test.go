@@ -755,6 +755,17 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a mkosi.conf of listed keys", func(t *testing.T) {
+		files := map[string]string{"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n"}
+		for k, v := range builds {
+			files[k] = v
+		}
+		// mkosi strips @ and reads a line led by blanks as a continued value.
+		files["image/mkosi/mkosi.conf"] += "# a comment\n[Content]\n@Packages=\n        systemd\n\tudev\nKernelCommandLine=a\n                  b\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+	})
 	t.Run("an e2e unit joins the mkosi image", func(t *testing.T) {
 		files := map[string]string{
 			"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n",
@@ -794,25 +805,40 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		}
 	})
 	for name, c := range map[string]struct{ path, text, want string }{
-		"extra trees":              {"image/mkosi/mkosi.conf", "[Content]\nExtraTrees=x\n", `ExtraTrees= adds trees`},
-		"an included config":       {"image/mkosi/mkosi.conf", "[Include]\nInclude=x\n", `Include= adds trees`},
+		"extra trees":              {"image/mkosi/mkosi.conf", "[Content]\nExtraTrees=x\n", `line "ExtraTrees=x": a key mkosiKeys does not list`},
+		"an included config":       {"image/mkosi/mkosi.conf", "[Include]\nInclude=x\n", `line "Include=x": a key mkosiKeys does not list`},
 		"an unread overlay":        {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"$(TOPDIR)/x\"\n", `overlay "$(TOPDIR)/x"`},
 		"a variable in an overlay": {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"$(BR2_EXTERNAL_CAMNODE_PATH)/$(X)\"\n", `/$(X)"; want`},
 		// #4698 Security delta 2: each tree a build adds that the lint does
 		// not model is refused, as is a unit or drop-in in no modelled tree.
-		"a skeleton tree":           {"image/mkosi/mkosi.skeleton/etc/systemd/system/systemd-udevd.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n", `image/mkosi/mkosi.skeleton: mkosi adds this`},
-		"a skeleton archive":        {"image/mkosi/mkosi.skeleton.tar", "x", `mkosi.skeleton.tar: mkosi adds this`},
-		"an extra tree archive":     {"image/mkosi/mkosi.extra.tar.zst", "x", `mkosi.extra.tar.zst: mkosi adds this`},
-		"extra trees in a conf.d":   {"image/mkosi/mkosi.conf.d/10-more.conf", "[Content]\nExtraTrees=../more\n", `image/mkosi/mkosi.conf.d: mkosi adds this`},
-		"extra trees in local conf": {"image/mkosi/mkosi.local.conf", "[Content]\nExtraTrees=more\n", `mkosi.local.conf: mkosi adds this`},
-		"a subimage":                {"image/mkosi/mkosi.images/sub.conf", "[Output]\nFormat=cpio\n", `image/mkosi/mkosi.images: mkosi adds this`},
-		"a buildroot skeleton":      {"image/camnode/external/configs/common.config", "BR2_ROOTFS_SKELETON_CUSTOM=y\nBR2_ROOTFS_SKELETON_CUSTOM_PATH=\"$(BR2_EXTERNAL_CAMNODE_PATH)/board/skel\"\n", `BR2_ROOTFS_SKELETON_CUSTOM_PATH adds a tree`},
+		"a skeleton tree":           {"image/mkosi/mkosi.skeleton/etc/systemd/system/systemd-udevd.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n", `image/mkosi/mkosi.skeleton: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"a skeleton archive":        {"image/mkosi/mkosi.skeleton.tar", "x", `mkosi.skeleton.tar: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"an extra tree archive":     {"image/mkosi/mkosi.extra.tar.zst", "x", `mkosi.extra.tar.zst: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"extra trees in a conf.d":   {"image/mkosi/mkosi.conf.d/10-more.conf", "[Content]\nExtraTrees=../more\n", `image/mkosi/mkosi.conf.d: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"extra trees in local conf": {"image/mkosi/mkosi.local.conf", "[Content]\nExtraTrees=more\n", `mkosi.local.conf: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"a subimage":                {"image/mkosi/mkosi.images/sub.conf", "[Output]\nFormat=cpio\n", `image/mkosi/mkosi.images: an entry beside a mkosi.conf that mkosiEntries does not list`},
+		"a buildroot skeleton":      {"image/camnode/external/configs/common.config", "BR2_ROOTFS_SKELETON_CUSTOM=y\nBR2_ROOTFS_SKELETON_CUSTOM_PATH=\"$(BR2_EXTERNAL_CAMNODE_PATH)/board/skel\"\n", `BR2_ROOTFS_SKELETON_CUSTOM, a setting brRootfsKeys does not list`},
+		// #4698 Security delta 3: closed lists of entries, keys and settings.
+		"an @ extra tree":           {"image/mkosi/mkosi.conf", "[Content]\n@ExtraTrees=../camnode/external/board/qemu/overlay\n", `line "@ExtraTrees=../camnode/external/board/qemu/overlay": a key mkosiKeys does not list`},
+		"an @ include":              {"image/mkosi/mkosi.conf", "[Config]\n@Include=x\n", `line "@Include=x": a key mkosiKeys does not list`},
+		"a spaced key":              {"image/mkosi/mkosi.conf", "[Content]\n  \nSkeletonTrees =x\n", `line "SkeletonTrees =x"`},
+		"a profile":                 {"image/mkosi/mkosi.conf", "[Config]\nProfile=p\n", `line "Profile=p": a key mkosiKeys does not list`},
+		"a profile file":            {"image/mkosi/mkosi.profiles/p.conf", "[Content]\nExtraTrees=../camnode/external/board/qemu/overlay\n", `image/mkosi/mkosi.profiles: ` + "an entry beside"},
+		"a profile directory":       {"image/mkosi/mkosi.profiles/p/mkosi.conf", "[Output]\nFormat=disk\n", `image/mkosi/mkosi.profiles: ` + "an entry beside"},
+		"an unknown entry":          {"image/mkosi/mkosi.build", "#!/bin/sh\n", `image/mkosi/mkosi.build: an entry beside`},
+		"an unknown key":            {"image/mkosi/mkosi.conf", "[Content]\nPostInstallationScripts=x\n", `a key mkosiKeys does not list`},
+		"a line with no key":        {"image/mkosi/mkosi.conf", "[Content]\nExtraTrees\n", `line "ExtraTrees": a key mkosiKeys does not list`},
+		"an initrd outside a model": {"image/mkosi/mkosi.conf", "[Config]\nInitrdInclude=../camnode/\n", `InitrdInclude=../camnode/: want a subdirectory`},
+		"an initrd outside image/":  {"image/mkosi/mkosi.conf", "[Config]\nInitrdInclude=../../broker/kernel\n", `InitrdInclude=../../broker/kernel: want a subdirectory`},
+		"an initrd with no config":  {"image/mkosi/mkosi.conf", "[Config]\nInitrdInclude=other/\n", `InitrdInclude=other/: want a subdirectory`},
+		"an unknown rootfs setting": {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_MERGED_USR=y\n", `BR2_ROOTFS_MERGED_USR, a setting brRootfsKeys does not list`},
 		"a drop-in in no image":     {"image/mkosi/more/etc/systemd/system/systemd-udevd.service.d/z.conf", "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n", `z.conf: in image/mkosi/more/etc/systemd/system/systemd-udevd.service.d, a tree no build file`},
 		"a unit in no image":        {"image/camnode/external/board/skel/usr/lib/systemd/user/systemd-udevd.service", "[Service]\nUser=nobody\nExecStart=/bin/true\n", `systemd-udevd.service: in image/camnode/external/board/skel/usr/lib/systemd/user, a tree no build file`},
 		"a relative overlay":        {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"board/x\"\n", `overlay "board/x"`},
 	} {
 		t.Run("refuses a build file with "+name, func(t *testing.T) {
 			files := map[string]string{"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n"}
+			files["broker/kernel/mkosi.conf"] = "[Output]\nFormat=cpio\n" // a config outside image/
 			for k, v := range builds {
 				files[k] = v
 			}
@@ -2059,9 +2085,9 @@ func rootBinaries(root string) ([]string, error) {
 		switch {
 		case err != nil:
 			return err
-		case unreadTree(d.Name()):
+		case strings.HasPrefix(d.Name(), "mkosi.") && !mkosiEntries[d.Name()] && fileExists(filepath.Join(filepath.Dir(p), "mkosi.conf")):
 			rel, _ := filepath.Rel(root, p)
-			return fmt.Errorf("%s: mkosi adds this to an image as a tree the lint does not model; a unit or drop-in there would not be paired by root file system (#4698)", filepath.ToSlash(rel))
+			return fmt.Errorf("%s: an entry beside a mkosi.conf that mkosiEntries does not list; mkosi may read it as configuration or a tree the lint does not model (#4698)", filepath.ToSlash(rel))
 		case d.IsDir():
 			return nil
 		case d.Name() == "mkosi.conf" || dir == "configs" && strings.HasSuffix(p, ".config"):
@@ -3130,13 +3156,76 @@ func sortedValues(m map[string][]string) []string {
 	return out
 }
 
-// unreadTree reports whether a name under image/ is one mkosi reads as
-// trees or settings that add them, beyond a mkosi.conf's own mkosi.extra:
-// the skeleton and extra trees (and their archives), mkosi.conf.d,
-// mkosi.local.conf and a subimage's mkosi.images (#4698 Security delta 2).
-func unreadTree(name string) bool {
-	return strings.HasPrefix(name, "mkosi.skeleton") || strings.HasPrefix(name, "mkosi.extra.") ||
-		name == "mkosi.conf.d" || name == "mkosi.local.conf" || name == "mkosi.images"
+// mkosiEntries are the only mkosi.* entries a directory with a mkosi.conf
+// may hold: the config, the tree the lint models, and the inert repart
+// definitions, package manager configuration and scripts. mkosi reads more
+// default paths (mkosi.conf.d, mkosi.local.conf, mkosi.profiles,
+// mkosi.images, skeleton and extra archives, and others in later versions),
+// so a closed list is read rather than a list of those that add trees
+// (#4698 Security delta 3).
+var mkosiEntries = map[string]bool{
+	"mkosi.conf": true, "mkosi.extra": true, "mkosi.repart": true, "mkosi.pkgmngr": true,
+	"mkosi.postinst": true, "mkosi.finalize": true,
+}
+
+// mkosiKeys are the only keys a mkosi.conf may set: each picks a package,
+// a disk or boot setting or a file to remove, and none adds a tree or
+// reads more configuration. InitrdInclude= may name only a directory whose
+// own mkosi.conf the lint models as the initrd's image. mkosi strips a
+// leading @ from a key, so the key is read without it (#4698 Security
+// delta 3).
+var mkosiKeys = map[string]bool{
+	"Distribution": true, "Release": true, "Mirror": true, "Repositories": true, "Format": true, "ImageId": true,
+	"SplitArtifacts": true, "RepartDirectories": true, "ManifestFormat": true, "Seed": true, "Bootable": true,
+	"Bootloader": true, "BiosBootloader": true, "ShimBootloader": true, "UnifiedKernelImages": true,
+	"KernelCommandLine": true, "Hostname": true, "Environment": true, "WithDocs": true, "KernelModulesInitrdExclude": true,
+	"RemoveFiles": true, "Packages": true, "Locale": true, "Keymap": true, "Timezone": true, "RootPassword": true,
+	"InitrdInclude": true,
+}
+
+// brRootfsKeys are the only BR2_ROOTFS_* settings a buildroot defconfig may
+// set: the overlays the lint models, a users table, and the post-build
+// scripts and their arguments. Any other (a custom skeleton among them)
+// may add a tree, so a closed list is read (#4698 Security delta 3).
+var brRootfsKeys = map[string]bool{
+	"BR2_ROOTFS_OVERLAY": true, "BR2_ROOTFS_USERS_TABLES": true, "BR2_ROOTFS_POST_BUILD_SCRIPT": true,
+	"BR2_ROOTFS_POST_IMAGE_SCRIPT": true, "BR2_ROOTFS_POST_SCRIPT_ARGS": true,
+}
+
+// brRootfsKey is a set BR2_ROOTFS_* line's key.
+var brRootfsKey = regexp.MustCompile(`(?m)^\s*(BR2_ROOTFS_[A-Za-z0-9_]*)\s*=`)
+
+// fileExists reports whether p names a file or directory.
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// mkosiConfKeys refuses a mkosi.conf line that is not a section, comment,
+// continuation or a key mkosiKeys lists.
+func mkosiConfKeys(dir, text string) error {
+	for _, line := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "" || t[0] == '#' || t[0] == ';' || t[0] == '[' && strings.HasSuffix(t, "]"):
+		case line[0] == ' ' || line[0] == '\t':
+			// A continued value.
+		default:
+			k, v, ok := strings.Cut(t, "=")
+			k = strings.TrimPrefix(strings.TrimSpace(k), "@")
+			if !ok || !mkosiKeys[k] {
+				return fmt.Errorf("line %q: a key mkosiKeys does not list, which may add a tree or read more configuration", t)
+			}
+			if k == "InitrdInclude" {
+				for _, w := range strings.Fields(v) {
+					if filepath.IsAbs(w) || dotdot(w) || !fileExists(filepath.Join(dir, w, "mkosi.conf")) {
+						return fmt.Errorf("InitrdInclude=%s: want a subdirectory with its own mkosi.conf, which the lint models as the initrd's image", w)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // credentialTrees are the trees a script installs into a modelled root file
@@ -3170,8 +3259,8 @@ var brExternal = regexp.MustCompile(`\$\(BR2_EXTERNAL_[A-Z0-9_]+_PATH\)`)
 // is one of its own), and each buildroot defconfig is an image of the
 // overlays its BR2_ROOTFS_OVERLAY lays over one another (camnode's common
 // overlay is in every board's, a board's only in its own), and each
-// credentialTrees tree joins its image. A build setting that adds trees the
-// lint does not read (unreadTree, ExtraTrees=, a buildroot skeleton) is
+// credentialTrees tree joins its image. Only listed entries, keys and
+// settings are read (mkosiEntries, mkosiKeys, brRootfsKeys); any other is
 // refused.
 func rootFileSystems(root string, builds []string) (rootFS, error) {
 	out := rootFS{}
@@ -3183,16 +3272,16 @@ func rootFileSystems(root string, builds []string) (rootFS, error) {
 		rel, _ := filepath.Rel(root, f)
 		rel = filepath.ToSlash(rel)
 		if filepath.Base(f) == "mkosi.conf" {
-			for _, k := range []string{"ExtraTrees", "SkeletonTrees", "PackageManagerTrees", "Include"} {
-				if regexp.MustCompile(`(?m)^\s*` + k + `\s*=`).Match(b) {
-					return nil, fmt.Errorf("%s: %s= adds trees to the image that the lint does not read; a unit there is not paired with its drop-ins", rel, k)
-				}
+			if err := mkosiConfKeys(filepath.Dir(f), string(b)); err != nil {
+				return nil, fmt.Errorf("%s: %v", rel, err)
 			}
 			out[rel] = []string{filepath.Join(filepath.Dir(f), "mkosi.extra")}
 			continue
 		}
-		if regexp.MustCompile(`(?m)^BR2_ROOTFS_SKELETON_CUSTOM_PATH=`).Match(b) {
-			return nil, fmt.Errorf("%s: BR2_ROOTFS_SKELETON_CUSTOM_PATH adds a tree the lint does not model; a unit there is not paired with its drop-ins", rel)
+		for _, m := range brRootfsKey.FindAllSubmatch(b, -1) {
+			if !brRootfsKeys[string(m[1])] {
+				return nil, fmt.Errorf("%s: %s, a setting brRootfsKeys does not list, which may add a tree the lint does not model", rel, m[1])
+			}
 		}
 		m := brOverlay.FindSubmatch(b)
 		if m == nil {
