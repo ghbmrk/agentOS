@@ -64,14 +64,18 @@ type Shape struct {
 	Max     int
 }
 
-// Operation is one declared device operation, its verb (DEV-4) and the
-// shapes it may write. A Subscribe operation is a read that stays up and
+// Operation is one declared device operation, its verb (DEV-4), the
+// shapes it may write and MaxWrites, how many frames one run of it may
+// write in all, so one approval of the operation covers that many writes
+// and no more (#3506). An operation with shapes declares at least one write;
+// one without declares none. A Subscribe operation is a read that stays up and
 // reports each reading as it arrives, through Link.Report, until the host
 // ends it (DEVSLOT-subscribe-1).
 type Operation struct {
 	Name      string
 	Verb      key.Verb
 	Shapes    []string
+	MaxWrites int  `json:",omitempty"`
 	Subscribe bool `json:",omitempty"`
 }
 
@@ -104,10 +108,13 @@ type Pin struct {
 
 // Slot-wide caps, whatever a declaration says.
 const (
-	CapRead     = 65540 // one frame read
-	CapWrite    = 4096  // one frame written
-	CapReadings = 1024  // readings per operation
-	CapKinds    = 32    // reading kinds, each its own DEV-8 window (DEVSLOT-host-lib-8)
+	CapRead  = 65540 // one frame read
+	CapWrite = 4096  // one frame written
+	// CapWrites is the most frames one run of an operation writes: a
+	// CapWrite payload in 20-byte chunks, Bluetooth LE's smallest MTU.
+	CapWrites   = 256
+	CapReadings = 1024 // readings per operation
+	CapKinds    = 32   // reading kinds, each its own DEV-8 window (DEVSLOT-host-lib-8)
 )
 
 // devVerbs is DEV-4's verb list: read, actuate, actuate-physical, present,
@@ -216,6 +223,9 @@ func Check(d Declaration, p Pin, home ...netip.Prefix) error {
 			if !shapes[s] {
 				return refuse("operation %s: undeclared shape", o.Name)
 			}
+		}
+		if o.MaxWrites < 0 || o.MaxWrites > CapWrites || (len(o.Shapes) == 0) != (o.MaxWrites == 0) {
+			return refuse("operation %s: MaxWrites out of range", o.Name)
 		}
 	}
 	if len(d.Readings) > CapKinds {

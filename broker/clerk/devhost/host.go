@@ -348,6 +348,9 @@ func (h *Host) run(ctx context.Context, c Conn, o devslot.Operation, take func(d
 	if err := devslot.WriteMsg(c, devslot.PinMsg(o.Name, h.cfg.Pin, h.cfg.Home)); err != nil {
 		return devslot.ErrWire
 	}
+	// writes counts the frames sent to the device; one run of o sends at
+	// most o.MaxWrites, so one approval covers no more (#3506).
+	writes := 0
 	for {
 		m, err := devslot.ReadMsg(c)
 		if err != nil {
@@ -360,6 +363,10 @@ func (h *Host) run(ctx context.Context, c Conn, o devslot.Operation, take func(d
 			if !ok || !h.decl.Writes(o.Name, m.Ch, m.B) {
 				return devslot.ErrUndeclared
 			}
+			if writes >= o.MaxWrites {
+				return devslot.ErrWrites
+			}
+			writes++
 			reply = devslot.Msg{T: devslot.MsgAck}
 			if err := h.cfg.Transport.Write(ctx, devslot.Target{Pin: h.cfg.Pin, Channel: ch}, slices.Clone(m.B)); err != nil {
 				reply.Err = devslot.Failed

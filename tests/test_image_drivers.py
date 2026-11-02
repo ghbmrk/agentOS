@@ -23,7 +23,7 @@ from test_image import ENTRY, H, IMG, check, clean_tree, finish, reference_tool 
 
 DECL = {"Device": "scale", "Link": "tcp", "Channels": [{"Name": "stream", "Port": 8080}],
         "Shapes": [{"Name": "get", "Channel": "stream", "Kind": "tcp-frame", "Prefix": "AQ==", "Min": 1, "Max": 1}],
-        "Operations": [{"Name": "weigh", "Verb": "read", "Shapes": ["get"]}],
+        "Operations": [{"Name": "weigh", "Verb": "read", "Shapes": ["get"], "MaxWrites": 1}],
         "Readings": ["mass"], "MaxRead": 64, "MaxReadings": 4}
 ENTRY_JSON = {"repository": "ghbmrk/agentos-private", "commit": "ab" * 20, "declaration": DECL,
               "classes": {"weigh": "read"}, "measure": {"lines": 900, "deps": 0, "parsers": 1}}

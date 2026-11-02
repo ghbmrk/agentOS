@@ -297,6 +297,8 @@ def _violations(root):
         if entry_mode(root, d):
             out.append("%s: %s; created on the box, never shipped" % (d, what))
     for rel, st in tree_walk(root):
+        if rel.rsplit("/", 1)[-1].startswith(E2E_NAMES):
+            out.append("%s: %s" % (rel, E2E_WHY))
         if stat.S_ISSOCK(st.st_mode):
             out.append("%s: socket file (V15)" % rel)
         elif (stat.S_ISREG(st.st_mode) and st.st_size <= SCAN_MAX
@@ -318,7 +320,34 @@ def _violations(root):
             + resolved_violations(root) + tmpfiles_violations(root) + tmpfiles_allow_violations(root)
             + exec_allow_violations(root) + credstore_violations(root) + stray_violations(root)
             + noexec_violations(root) + keeper_violations(root) + clerk_key_violations(root)
-            + assembly_violations(root) + driver_violations(root))
+            + assembly_violations(root) + driver_violations(root) + e2e_violations(root))
+
+
+# #1715 (G1-e2e ASSUMPTIONS E1): the in-image end-to-end run is CI-only. Its root-run driver
+# (box-e2e, netguard-exempt), its units (agentos-e2e*.service) and its drop-ins arrive only on the
+# e2e boot, as SMBIOS credentials and a 9p share, so the built tree holds no file by those names and
+# no unit or drop-in that names them or the driver's tagged vault build.
+E2E_NAMES = ("box-e2e", "agentos-e2e")
+E2E_MARKS = (b"box-e2e", b"agentos-e2e", b"agentos_e2e")
+E2E_WHY = "a CI-only end-to-end run piece; the e2e boot passes it in, the image never ships it (#1715)"
+
+
+def e2e_violations(root):
+    """#1715: every unit or drop-in, as the box reads it, that names an end-to-end run piece (E2E_MARKS).
+    The tree walk in _violations refuses the pieces' own names anywhere in the tree."""
+    out, root = [], str(root)
+    for d in UNIT_PATHS:
+        for rel, st in tree_walk(root, d):
+            if stat.S_ISDIR(st.st_mode):
+                continue
+            try:
+                path, tst = tree_chase(root, rel)
+                data = Conf(root, path).content() if tst is not None and stat.S_ISREG(tst.st_mode) else b""
+            except OSError:
+                continue
+            if any(m in data for m in E2E_MARKS):
+                out.append("%s: names %s" % (rel, E2E_WHY))
+    return out
 
 
 # #1543 (delta 4 B1): every look at the image tree goes through these four primitives, and none of

@@ -118,7 +118,7 @@ func tcpDecl(port uint16) devslot.Declaration {
 		Link:        devslot.TCP,
 		Channels:    []devslot.Channel{{Name: "stream", Port: port}},
 		Shapes:      []devslot.Shape{{Name: "get", Channel: "stream", Kind: devslot.TCPFrame, Prefix: []byte("get"), Min: 3, Max: 3}},
-		Operations:  []devslot.Operation{{Name: "read-power", Verb: key.Read, Shapes: []string{"get"}}},
+		Operations:  []devslot.Operation{{Name: "read-power", Verb: key.Read, Shapes: []string{"get"}, MaxWrites: 1}},
 		Readings:    []string{"power"},
 		MaxRead:     64,
 		MaxReadings: 4,
