@@ -32,6 +32,17 @@ def preset_enabled(root):
     return out
 
 
+def inert(root, f):
+    """True when f, inside root, holds only blank lines and comments."""
+    try:
+        real = f.resolve(strict=True)
+        real.relative_to(root.resolve())
+        text = real.read_text()
+    except (OSError, ValueError):
+        return False
+    return all(not ln.strip() or ln.lstrip().startswith(("#", ";")) for ln in text.splitlines())
+
+
 def violations(root):
     root = pathlib.Path(root)
     out = ["package %s could turn Wi-Fi on" % p for p in installed(root) if WIFI_PACKAGES.fullmatch(p)]
@@ -39,10 +50,13 @@ def violations(root):
     for f in sorted((root / "usr/lib/modprobe.d").glob("*.conf")):
         lines |= {ln.strip() for ln in f.read_text().splitlines()}
     out += ["modprobe.d lacks '%s'" % b for b in BLOCKS if b not in lines]
+    # No other module configuration. Debian ships etc/modules-load.d/modules.conf as a link to a
+    # comment-only etc/modules, so a file counts only by its lines that are not blank or comments;
+    # a link that leaves the tree or dangles is refused.
     for d in (root / "etc/modprobe.d", root / "etc/modules-load.d", root / "usr/lib/modules-load.d"):
         if d.is_dir():
             out += ["%s holds %s" % (d.relative_to(root), f.name) for f in sorted(d.iterdir())
-                    if f.name.endswith(".conf") and (d.name != "modprobe.d" or f.read_text().strip())]
+                    if f.name.endswith(".conf") and not inert(root, f)]
     enabled = preset_enabled(root)
     for base in WANTS_DIRS:
         for w in sorted((root / base).glob("*.wants")) + sorted((root / base).glob("*.requires")):
