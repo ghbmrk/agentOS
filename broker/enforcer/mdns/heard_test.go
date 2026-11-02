@@ -94,6 +94,13 @@ func TestHeardOwnNames(t *testing.T) {
 	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Bye" || n[0] == "bye" }) {
 		t.Errorf("a host and instance saying goodbye together are still heard: %q", got)
 	}
+	// Only an address record's or an SRV's goodbye ends a name, and a live
+	// record that proves nothing (another link's address) ends none.
+	f.Prove("ap0.105", printerLink, response([]record{a("kept.local", "10.13.0.2", 120)}, nil), t0)
+	f.Prove("ap0.105", printerLink, response([]record{txt("kept.local", 0), a("kept.local", "10.11.0.2", 120)}, nil), t0)
+	if got := f.Heard("ap0.105", t0); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "kept" }) {
+		t.Errorf("a TXT goodbye or a foreign address ended a host: %q", got)
+	}
 	// A goodbye proves no host for an SRV beside it.
 	f.Prove("ap0.105", printerLink, response([]record{a("gone.local", "10.13.0.2", 0), srv("Gone._ipp._tcp.local", "gone.local", 120)}, nil), t0)
 	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Gone" }) {
