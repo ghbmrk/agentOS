@@ -262,10 +262,9 @@ func (d *trips) held() bool { return d.stopped || len(d.paused) > 0 }
 
 // honeyOf is the table entry of the honey key ky is or extends.
 func (d *trips) honeyOf(ky key.Key) (int, bool) {
-	ids := chain(ky)
 	for i, en := range (*d.table).entries {
 		var hk key.Key
-		if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil && slices.Contains(ids, hk.Tip()) {
+		if en.Kind == decoy.KHoneyKey && json.Unmarshal([]byte(en.Value), &hk) == nil && slices.Contains(chain(ky), hk.Tip()) {
 			return i, true
 		}
 	}
@@ -517,8 +516,7 @@ func (s *State) applyTrip(e Entry) error {
 		if err != nil {
 			return fmt.Errorf("entry %d %s: %w", e.Seq, e.Type, ErrCorrupt)
 		}
-		tb := &table{t.Entries(), t.Matcher()}
-		d.table = &tb
+		d.table = new(&table{t.Entries(), t.Matcher()})
 	case TTrip:
 		t, err := body[Trip](e)
 		if err != nil {

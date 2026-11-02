@@ -337,8 +337,11 @@ func Boot(l *Log, anchors []key.PublicKey, clerks map[string]Clerk, now int64, p
 	return k, nil
 }
 
-func (k *Kernel) State() *State { return k.s }
-func (k *Kernel) Log() *Log     { return k.log }
+// Format prints no field in any verb: the log holds the decoy table, its key and the box's signing key (DECOY-a-7, CLK-1).
+func (Kernel) Format(f fmt.State, _ rune) { fmt.Fprint(f, "kernel") }
+func (Log) Format(f fmt.State, _ rune)    { fmt.Fprint(f, "log") }
+func (k *Kernel) State() *State           { return k.s }
+func (k *Kernel) Log() *Log               { return k.log }
 
 // emit logs first, then folds: a failed write leaves the state as it was.
 func (k *Kernel) emit(now int64, typ string, body any) (Entry, error) {
