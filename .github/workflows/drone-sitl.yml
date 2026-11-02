@@ -51,7 +51,9 @@ jobs:
         id: key
         run: |
           h=$(cat drone/sitl/ardupilot.pin drone/sitl/ardupilot-signed-only.patch drone/sitl/build.sh | sha256sum | cut -c1-32)
-          echo "key=arducopter-sitl-$h" >> "$GITHUB_OUTPUT"
+          # A built binary links the runner's glibc, so the key names the runner image (#4785).
+          os=$(. /etc/os-release && echo "$ID-$VERSION_ID")
+          echo "key=arducopter-sitl-$os-$h" >> "$GITHUB_OUTPUT"
       - name: Restore SITL
         id: cache
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2

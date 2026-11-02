@@ -561,12 +561,16 @@ jobs:
           python3 -I ../tools/require_ran.py < /tmp/clerk-mail-test.json \
             github.com/ghbmrk/agentos/broker/cmd/agentos-clerk-mail.TestRealMailClerkAsRoot || exit 1
           [ "$rc" -eq 0 ]
+      - name: Runner image for the OpenThread cache key (#4785)
+        # The built binaries link the runner's glibc, so a cache from another image cannot run.
+        id: otimage
+        run: (. /etc/os-release && echo "os=$ID-$VERSION_ID") >> "$GITHUB_OUTPUT"
       - name: OpenThread build cache (ENF-t)
         id: otcache
         uses: actions/cache/restore@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
+          key: ot-bin-${{ steps.otimage.outputs.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: Build OpenThread from its pin (ENF-t)
         if: steps.otcache.outputs.cache-hit != 'true'
         run: sh tools/build-openthread.sh /tmp/ot-bin --sim
@@ -575,7 +579,7 @@ jobs:
         uses: actions/cache/save@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
         with:
           path: /tmp/ot-bin
-          key: ot-bin-${{ runner.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
+          key: ot-bin-${{ steps.otimage.outputs.os }}-${{ hashFiles('tools/build-openthread.sh', 'broker/enforcer/radio/thread/openthread.pin') }}
       - name: The enforcer's Thread stack, confined (ENF-t, #3702)
         # ot-daemon from the pin runs in the Thread profile's user namespace, created by root, on a
         # simulated radio; a simulated node's SRP service must resolve from the Matter profile over
