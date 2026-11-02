@@ -103,16 +103,18 @@ type Kernel struct {
 	// firstEdge and link are KernelConfig's, set at open and never
 	// changed, so link is read without the lock: only LinkSide's
 	// linksign signs with it, and it never goes into a backup (BAK-1).
+	// The keys sit behind a pointer to a pointer, which fmt prints as an
+	// address in every verb and at any depth (DECOY-b-8, #4719).
 	firstEdge ed25519.PublicKey
-	link      ed25519.PrivateKey
+	link      **ed25519.PrivateKey
 	clock     func() int64 // KernelConfig's
 	// head is KernelConfig's Sign, the store's head key: it signs the
 	// recovery-key approvals the root steps verify (handoff.Approval).
 	// Set at open and never changed.
-	head ed25519.PrivateKey
+	head **ed25519.PrivateKey
 	// card is the recovery key a lost-card rotation made at this boot,
 	// held until the owner confirms the new card (kernelmain.go).
-	card recoveryCard
+	card **recoveryCard
 }
 
 // OpenKernel opens the log, replays it and boots the kernel at now: plans
@@ -158,7 +160,7 @@ func OpenKernel(cfg KernelConfig, now int64) (*Kernel, error) {
 		return nil, err
 	}
 	k.PinChecker(cfg.Checker)
-	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: cfg.LinkKey, clock: cfg.Clock, head: cfg.Sign}
+	h := &Kernel{k: k, store: st, clerks: clerks, page: page, firstEdge: cfg.FirstEdge, link: new(&cfg.LinkKey), clock: cfg.Clock, head: new(&cfg.Sign), card: new(new(recoveryCard))}
 	if cfg.KeyDir != "" {
 		keys, err := OpenFileKeys(cfg.KeyDir, cfg.Key)
 		stores := map[string]kernel.ContentStore{}
