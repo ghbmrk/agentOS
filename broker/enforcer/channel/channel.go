@@ -96,7 +96,11 @@ const (
 // and on a burst past a rate, and asks it the stage before every request.
 // Stage is called under the channel's locks, possibly concurrently, and
 // must not call the channel; Trip is called after they are released, and
-// once it returns Stage reports the trip.
+// once it returns Stage reports the trip. Trip is called again for each
+// malformed frame of a core already Tripped, so it must be idempotent and
+// cheap then, with no write per call (#4606); a Reflashed core's malformed
+// frame is a new trip that moves it back to Tripped. Two connections can
+// queue Trip at once, so it must be safe under concurrent calls.
 type Cut interface {
 	Trip(reason string)
 	Stage() Stage
@@ -169,6 +173,13 @@ type Event struct {
 	What   string // the verb, tightening or read, in fixed words
 	Code   wire.Code
 	Reason string // fixed text
+	// Dropped is how many of a cut core's lines went unlogged past
+	// KindPaused's bucket since the core's line before this one, so the
+	// record keeps how much a cut core tried (#4657). Only the core's own
+	// lines carry it, never a failed hello's or the quiet line (#4683). A
+	// sink must keep it: the logged lines plus the sum of Dropped are
+	// everything the cut core sent (ENF-d-4).
+	Dropped int
 }
 
 // Errors Serve and the push methods return.
@@ -231,9 +242,13 @@ type Channel struct {
 	// preAuthQuiet is set while failed hellos are over KindPreAuth's
 	// bucket and dropped unlogged.
 	preAuthQuiet bool
-	// pausedQuiet is set while a tripped core's paused requests are over
-	// KindPaused's bucket and go unlogged (#4558).
+	// pausedQuiet is set while a cut core's lines are over KindPaused's
+	// bucket and go unlogged (#4558, #4606).
 	pausedQuiet bool
+	// dropped counts a cut core's lines dropped past KindPaused's bucket
+	// since the core's last line logged; the next one carries it
+	// (Event.Dropped). It is in memory only: a restart loses it (ENF-d-4).
+	dropped int
 	// queued holds the Log, Alerts, Answer and Cut.Trip calls made under
 	// mu; release runs them after unlocking, so a sink that calls the
 	// channel cannot deadlock it.
@@ -329,7 +344,9 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if err != nil {
 		return err
 	}
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindHello, Reason: "core connected"})
+	c.mu.Lock()
+	c.logCut(Event{At: c.cfg.Now(), Kind: KindHello, Reason: "core connected"})
+	c.release()
 
 	for {
 		f, err := wire.ReadFrame(rw, wire.ToEnforcer)
@@ -410,7 +427,7 @@ func (c *Channel) stage() Stage {
 func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
+	c.logCut(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.countRefused()
 	return err
 }
@@ -425,12 +442,20 @@ func malformed(err error) bool {
 }
 
 // trip logs a refused frame outside the format, trips the core and
-// returns err.
+// returns err. A frame from a core already tripped still calls Cut.Trip,
+// but its line goes under KindPaused's bucket like the core's other lines
+// (logCut), so cycling connections cannot fill the log (#4606); at the
+// Reflashed stage it trips the core again, and that line is always logged.
 func (c *Channel) trip(reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
+	st := c.stage()
+	again := st != Open && st != Reflashed
 	c.queueTrip(reason)
-	c.log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
+	e := Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason}
+	if !again || c.logPaused(e.At) {
+		c.log(e)
+	}
 	return err
 }
 
@@ -454,19 +479,22 @@ func (c *Channel) preAuth(reason string, err error) error {
 	now := c.cfg.Now()
 	if c.preAuthB.Take(c.rateNow()) {
 		c.preAuthQuiet = false
-		c.log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
+		c.logAside(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
 		c.preAuthQuiet = true
-		c.log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
+		c.logAside(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
 	}
 	return err
 }
 
-// logPaused reports whether a request a trip paused is logged. Past
-// KindPaused's bucket one line says the paused requests go unlogged, so a
-// tripped core cannot fill the log (#4558); the next line logged after the
-// bucket refills ends that. The trip itself is always logged. The caller
-// holds c.mu.
+// logPaused reports whether a line about a cut core is logged: a request
+// a trip paused (#4558), or the core's reconnect, refused frame or frame
+// outside the format while it is cut (#4606). They share KindPaused's
+// bucket; past it one line says they go unlogged, so a tripped core
+// cannot fill the log however it sends them; the next line logged after
+// the bucket refills ends that. Each line dropped is counted, and the
+// core's next line logged carries the count (#4657, #4683). A trip is
+// always logged. The caller holds c.mu.
 func (c *Channel) logPaused(now time.Time) bool {
 	if c.pausedB.Take(c.rateNow()) {
 		c.pausedQuiet = false
@@ -474,15 +502,34 @@ func (c *Channel) logPaused(now time.Time) bool {
 	}
 	if !c.pausedQuiet {
 		c.pausedQuiet = true
-		c.log(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "paused requests over the limit: dropped unlogged until the rate falls"})
+		c.logAside(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "a cut core's lines over the limit: dropped unlogged until the rate falls"})
 	}
+	c.dropped++
 	return false
+}
+
+// logCut logs e, a line that records no trip, under KindPaused's bucket
+// while the core is cut (any stage but Open), and always while it is
+// open, where the hello's rate trips a reconnect flood (#4606). The
+// caller holds c.mu.
+func (c *Channel) logCut(e Event) {
+	if c.stage() == Open || c.logPaused(e.At) {
+		c.log(e)
+	}
 }
 
 // log queues one log line to Config.Log, which release hands over after
 // c.mu is let go, so a log sink may call the channel (ENF-d-7). The caller
 // holds c.mu.
 func (c *Channel) log(e Event) {
+	e.Dropped, c.dropped = c.dropped, 0
+	c.logAside(e)
+}
+
+// logAside queues a line that is not the core's own (a failed hello, or
+// the quiet line), so it carries no count of the core's dropped lines,
+// which stays for the core's next line (#4683). The caller holds c.mu.
+func (c *Channel) logAside(e Event) {
 	c.queued = append(c.queued, func() { c.cfg.Log(e) })
 }
 
@@ -541,8 +588,13 @@ func (c *Channel) Challenge(id uint64, data []byte) error {
 	c.mu.Unlock()
 	err := s.send(wire.Challenge{ID: ch.wire, Data: data})
 	if err != nil {
+		// A write can fail after the core has the whole frame, and its
+		// answer may already be taken: an answered challenge stays until
+		// Answer returns, which then frees it (#4607).
 		c.mu.Lock()
-		c.dropChallenge(id, ch)
+		if !ch.answered {
+			c.dropChallenge(id, ch)
+		}
 		c.mu.Unlock()
 	}
 	return err

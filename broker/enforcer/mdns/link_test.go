@@ -92,7 +92,7 @@ func TestCasterAddedThroughLink(t *testing.T) {
 	if out, outs := before.handle("ap0.109", 5353, announce, t0); out != nil {
 		t.Errorf("the unpaired caster passed %x to %v", out, outs)
 	}
-	heard := before.f.Heard("ap0.109", t0)
+	heard := before.f.Heard("ap0.109", t0, nil)
 	if want := [][]string{{"Living Room", "_cast", "_tcp", "local"}, {"caster", "local"}}; !slices.EqualFunc(heard, want, slices.Equal) {
 		t.Fatalf("heard %q, want %q", heard, want)
 	}

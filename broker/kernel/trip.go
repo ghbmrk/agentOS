@@ -430,8 +430,8 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 
 // rejection is decide's entry for refusing plan p with r: a trip refusal
 // carries its trip, so both are one append (CH-15).
-func (s *State) rejection(p *PlanState, r *key.Refusal) planRejected {
-	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail}
+func (s *State) rejection(p *PlanState, r *Refusal) planRejected {
+	b := planRejected{Plan: p.Plan.ID, Cause: p.Seq, Code: r.Code, Detail: r.Detail, Session: r.Session, Step: r.Step}
 	if r.Code == CTrip {
 		b.Trip = s.tripOf(p.Plan)
 	}

@@ -37,8 +37,8 @@ type Body struct {
 	Stream bool
 }
 
-// Value is the declared shape of a JSON value. Every object key is
-// optional, and any key not in Fields is refused.
+// Value is the declared shape of a JSON value. An object key is optional
+// unless Required names it, and any key not in Fields is refused.
 type Value struct {
 	Kind string
 	// Max is the most bytes a text, a map key or a JSON text may hold.
@@ -49,6 +49,8 @@ type Value struct {
 	Null bool
 	// Fields are an object's keys.
 	Fields map[string]Value
+	// Required are the Fields an object must hold.
+	Required []string
 	// Each is a map's entry value, or the value a JSON text holds.
 	Each *Value
 }
@@ -399,7 +401,7 @@ func remote(v any, key string, depth int) string {
 // JSON text sits only at the top, so check never needs to rewrite a value
 // below it; depth bounds a shape whose Each points back into itself.
 func (v Value) valid(depth int) bool {
-	if depth > maxDepth {
+	if depth > maxDepth || (v.Kind != KindObject && v.Required != nil) {
 		return false
 	}
 	switch v.Kind {
@@ -410,6 +412,11 @@ func (v Value) valid(depth int) bool {
 	case KindObject:
 		for k, f := range v.Fields {
 			if k == "" || !f.valid(depth+1) {
+				return false
+			}
+		}
+		for _, k := range v.Required {
+			if _, declared := v.Fields[k]; !declared {
 				return false
 			}
 		}
@@ -480,6 +487,11 @@ func (v Value) check(x any) bool {
 		if !ok {
 			return false
 		}
+		for _, k := range v.Required {
+			if _, held := obj[k]; !held {
+				return false
+			}
+		}
 		for k, f := range obj {
 			shape, declared := v.Fields[k]
 			if !declared || !shape.check(f) {
@@ -487,9 +499,13 @@ func (v Value) check(x any) bool {
 			}
 		}
 		return true
-	case KindMap:
+	default:
+		// valid admits a map or a top-level JSON text here, and send
+		// unwraps a JSON text before check; the kind test keeps a JSON
+		// shape, or one that skipped valid, closed rather than read as a
+		// map (TestCheckReadsOnlyAMapAsAMap).
 		obj, ok := x.(map[string]any)
-		if !ok {
+		if !ok || v.Kind != KindMap {
 			return false
 		}
 		for k, f := range obj {
@@ -499,5 +515,4 @@ func (v Value) check(x any) bool {
 		}
 		return true
 	}
-	return false
 }

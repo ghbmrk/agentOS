@@ -53,7 +53,16 @@ var (
 	// ErrNameHeld: two devices pin one mDNS name (Device.MDNS). The error
 	// names the name and both devices, so the owner can rename one.
 	ErrNameHeld = errors.New("policy: one name is pinned twice")
+	// ErrTooManyNames: a device pins more than MaxMDNS mDNS names. The
+	// error names the device and the count.
+	ErrTooManyNames = errors.New("policy: a device pins too many names")
 )
+
+// MaxMDNS is the most mDNS names one device pins or holds (#4601): room
+// for its host and every service a casting device or printer announces,
+// and few enough that the owner reads them on the card before the
+// passkey.
+const MaxMDNS = 32
 
 // Document is one policy version: everything the enforcer enforces besides
 // the devices' secrets. Its canonical form (Encode) is what a version's key
@@ -483,8 +492,8 @@ func sorted(s []string) []string {
 // drone reference that is not a hash, a pair, rule or hold naming no device,
 // an empty window, an mDNS name that is not one, or a byte cap that is 0,
 // is for no destination, or makes the caps sum past 2^64-1 (so no group's
-// cap, a sum of some of them, overflows); and with ErrNameHeld
-// one mDNS name pinned twice.
+// cap, a sum of some of them, overflows); with ErrNameHeld one mDNS name
+// pinned twice; and with ErrTooManyNames a device with more than MaxMDNS.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
 	held := map[string]string{}
@@ -533,6 +542,9 @@ func (d Document) check() error {
 			if (p.Proto != ProtoTCP && p.Proto != ProtoUDP) || p.Num == 0 {
 				return bad("device %q port %s/%d", dev.ID, p.Proto, p.Num)
 			}
+		}
+		if len(dev.MDNS) > MaxMDNS {
+			return fmt.Errorf("%w: %s pins %d names, and one device pins at most %d; drop %d before signing", ErrTooManyNames, dev.ID, len(dev.MDNS), MaxMDNS, len(dev.MDNS)-MaxMDNS)
 		}
 		for _, n := range dev.MDNS {
 			if !mdnsName(n) {

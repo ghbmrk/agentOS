@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -251,6 +252,39 @@ func TestStackOnlyDeclaredOps(t *testing.T) {
 	}
 }
 
+// TestThreadURLIsBoundRadio (NET-2 Confined radio stacks; ENF-k-12,
+// #4639): ot-daemon's Spec, made by confine.Thread with
+// thread.DaemonArgs from one radio path, gives it a spinel URL whose path
+// is the view's character-device entry for that radio, not a file under
+// its state or run directory, where ot-daemon would fork a regular file.
+// The radio is given once, so the two cannot differ. Catches DaemonArgs
+// or Thread building the URL from any other path.
+func TestThreadURLIsBoundRadio(t *testing.T) {
+	spec, err := confine.Thread(1, 1, "/var/lib/agentos-thread", "/run/agentos-thread", "/dev/ttyACM0", "/usr/sbin/ot-daemon",
+		thread.DaemonArgs(460800, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(spec.Args[len(spec.Args)-1])
+	if err != nil || u.Scheme != "spinel+hdlc+uart" || u.Host != "" {
+		t.Fatalf("radio URL %q (%v)", spec.Args[len(spec.Args)-1], err)
+	}
+	var kind confine.Kind
+	for _, e := range spec.Profile.View {
+		if e.Path == u.Path {
+			kind = e.Kind
+		} else if strings.HasPrefix(u.Path, e.Path+"/") {
+			t.Errorf("the URL's path %q is under the view's %q", u.Path, e.Path)
+		}
+	}
+	if u.Path != "/dev/ttyACM0" || kind != confine.Device {
+		t.Errorf("the URL names %q, of kind %q in the view; want the radio, a character device", u.Path, kind)
+	}
+	if _, err := confine.Thread(1, 1, "/s", "/r", "/s/settings?x", "/x", thread.DaemonArgs(460800, false)); err != thread.ErrRadio {
+		t.Errorf("a radio path DaemonArgs refuses: %v, want ErrRadio", err)
+	}
+}
+
 // TestSrpReachesController (NET-2 Confined radio stacks; spikes/ENF-radio
 // consequence 1; #4369): ot-daemon, built static and position-independent
 // by tools/build-openthread.sh (checked) and run under confine.Thread with its view
@@ -317,12 +351,12 @@ func TestSrpReachesController(t *testing.T) {
 	tty, rcp := simRadio(t, filepath.Join(bin, "ot-rcp"), uid, logs)
 	defer func() { rcp.Process.Kill(); rcp.Wait() }()
 
-	args, err := thread.DaemonArgs(tty, 115200, state, true)
+	spec, err := confine.Thread(uid, uid, state, run, tty, filepath.Join(bin, "ot-daemon"), thread.DaemonArgs(115200, true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	daemon, iface, err := confine.Start(confine.Spec{Profile: confine.Thread(uid, uid, state, run, tty),
-		Path: filepath.Join(bin, "ot-daemon"), Args: args, Dir: run, Self: self, Stderr: logs})
+	spec.Self, spec.Stderr = self, logs
+	daemon, iface, err := confine.Start(spec)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -152,7 +152,7 @@ func TestCutPathEndsOpenConnections(t *testing.T) {
 		{name: "a port, a vendor cloud and a camera cut", doc: narrowed, cut: []string{"core control", "edge control", "tv internet", "tv internet v6", "core stream"}},
 	} {
 		t.Logf("case: %s", c.name)
-		h.load(base)
+		h.load(withDrops(t, cutPolicy(), base))
 		h.fillSets()
 		hs := map[string]*held{
 			"pair":           h.hold("a device pair", "106", "107", devAddr(107), 9301),
@@ -211,7 +211,7 @@ func TestFirstLoadCutsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	load := func() {
-		h.load(text)
+		h.load(withDrops(t, cutPolicy(), text))
 		h.fillSets()
 	}
 

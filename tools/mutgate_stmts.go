@@ -6,8 +6,8 @@
 // It prints one JSON array of sites, one for every statement in a statement list (a block, a
 // case or select clause body, and the clauses of a switch or select): file is the base name, line
 // and col where the statement starts in the file's own lines, start/end its byte offsets,
-// cover_line/cover_col where coverage is judged, and keep_at/keep_default where the keep-alive
-// of a deleted clause goes (see site). Declarations (`var`, `const`, `type`, `:=`) and empty
+// cover_line/cover_col where coverage is judged, keep_at/keep_default where the keep-alive of a
+// deleted clause goes, and lines, the lines whose edit makes it a site (see site). Declarations (`var`, `const`, `type`, `:=`) and empty
 // statements are left out: deleting one never compiles or changes nothing. A file holding a
 // `//line` directive is refused.
 // It reads the files as data with go/parser and runs nothing in them.
@@ -21,6 +21,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -41,6 +42,55 @@ type site struct {
 	KeepAt int `json:"keep_at"`
 	// A switch clause with no sibling is replaced by `default:` and its keep-alive.
 	KeepDefault bool `json:"keep_default"`
+	// Each line a token of the statement's own syntax stands on (#4603): an added one makes it a
+	// site, so an edit to an argument line or a continued condition deletes the whole statement.
+	// A nested block's statements (an if's or for's body, a func literal's, a switch's clauses)
+	// are sites of their own, so only its opening line counts, and a clause's body does not count.
+	Lines []int `json:"lines"`
+}
+
+// lines lists the lines of s's own syntax, sorted (see site.Lines).
+func lines(s ast.Stmt, pos func(token.Pos) token.Position) []int {
+	set := map[int]bool{}
+	mark := func(from, to token.Pos) {
+		for l := pos(from).Line; l <= pos(to).Line; l++ {
+			set[l] = true
+		}
+	}
+	var walk func(ast.Node) bool
+	walk = func(n ast.Node) bool {
+		switch n := n.(type) {
+		case nil:
+			return false
+		case *ast.BlockStmt:
+			mark(n.Lbrace, n.Lbrace)
+			return false
+		case *ast.CaseClause:
+			mark(n.Case, n.Colon)
+			return false
+		case *ast.CommClause:
+			mark(n.Case, n.Colon)
+			return false
+		case *ast.BasicLit: // a raw string's every line
+			mark(n.Pos(), n.End()-1)
+		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt, *ast.TypeSwitchStmt,
+			*ast.SelectStmt, *ast.LabeledStmt, *ast.FuncLit:
+			mark(n.Pos(), n.Pos()) // its end is a nested block's closing brace
+		default:
+			mark(n.Pos(), n.Pos())
+			if n.End().IsValid() {
+				mark(n.End()-1, n.End()-1)
+			}
+		}
+		return true
+	}
+	ast.Inspect(s, walk)
+	out := []int{}
+	for l := range set {
+		out = append(out, l)
+	}
+	sort.Ints(out)
+	return out
 }
 
 func deletable(s ast.Stmt) bool {
@@ -81,7 +131,7 @@ func main() {
 				if cover.IsValid() {
 					c = pos(cover)
 				}
-				sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset, c.Line, c.Column, keepAt, keepDefault})
+				sites = append(sites, site{filepath.Base(path), p.Line, p.Column, p.Offset, e.Offset, c.Line, c.Column, keepAt, keepDefault, lines(s, pos)})
 			}
 		}
 		addList := func(list []ast.Stmt) {

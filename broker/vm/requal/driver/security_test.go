@@ -175,12 +175,28 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 	for p, want := range map[string]string{
 		"send": key.RVerb, "share": key.RVerb, "delete": key.RVerb, "unsub-on-bulk": key.RVerb,
 		"trash-on-unsub": key.RVerb, "other-clerk": key.RClerk, "clerk-key": kernel.CKey,
+		"task-step": key.RVerb, "task-unopened": kernel.CTask,
 	} {
 		if got := codes["probe-"+p]; got != want {
 			t.Errorf("probe %s: logged rejection %q, want %q", p, got, want)
 		}
 	}
-	for _, p := range s.probes(testContent, key.Key{}, key.Key{}, key.Key{}, key.Key{}) {
+	// Each rejection names its session and failing step (PLN-4): the task
+	// probes name their task, at step 1 and whole; a key that serves no
+	// task names none; a key the planner was never handed fails whole.
+	for p, want := range map[string]string{
+		"task-step": `"requal-open" 1`, "task-unopened": `"requal-unopened" `,
+		"send": ` 0`, "clerk-key": ` `,
+	} {
+		var b map[string]json.RawMessage
+		if err := json.Unmarshal(entry(t, s, kernel.TPlanRejected, "probe-"+p).Body, &b); err != nil {
+			t.Fatal(err)
+		}
+		if got := string(b["session"]) + " " + string(b["step"]); got != want {
+			t.Errorf("probe %s: logged session and step %q, want %q", p, got, want)
+		}
+	}
+	for _, p := range s.probes(testContent, key.Key{}, key.Key{}, key.Key{}, key.Key{}, key.Key{}, key.Key{}) {
 		for i, st := range p.Steps {
 			if !key.ArgsDeclared(p.Step(i)) {
 				t.Errorf("%s step %d: arguments %v, %s takes %v", p.ID, i, st.Args, st.Verb, key.ArgNames(st.Verb))
@@ -307,6 +323,110 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		}, wire.MeasureUnlogged, 1},
 		"rejection naming no check: outside": {func(s *session) {
 			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["code"] = "" })
+		}, wire.MeasureOutside, 1},
+		// A rejection is logged only with its session and its failing
+		// step (PLN-4, EVL-3), as the session knows them.
+		"rejection naming no session": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { delete(b, "session") })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming another session": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-unopened", func(b map[string]any) { b["session"] = taskOpen })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming a session its key serves none of": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["session"] = taskOpen })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming no step": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { delete(b, "step") })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming another step": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { b["step"] = 0 })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming a step past the plan": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-unopened", func(b map[string]any) { b["step"] = 1 })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming a step before the plan": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-unopened", func(b map[string]any) { b["step"] = -1 })
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming a step of a plan on a key never handed out": {func(s *session) {
+			rewrite(t, s, kernel.TPlanRejected, "probe-clerk-key", func(b map[string]any) { b["step"] = 0 })
+		}, wire.MeasureUnlogged, 1},
+		"whole rejection after the one the fold took": {func(s *session) {
+			// The fold takes the first rejection, which names no
+			// session, so a whole one after it does not log the plan.
+			whole := entry(t, s, kernel.TPlanRejected, "probe-task-step")
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { delete(b, "session") })
+			whole.Seq = next(s)
+			s.entries = append(s.entries, whole)
+		}, wire.MeasureUnlogged, 1},
+		"rejection naming the submission before it was logged": {func(s *session) {
+			// The fold takes only a rejection after the submission it
+			// names: one logged earlier naming it, with its session, does
+			// not stand in for the later one that names none. The earlier
+			// one is task-step's own, so that plan has no verdict either.
+			early, late := entry(t, s, kernel.TPlanRejected, "probe-task-step"), entry(t, s, kernel.TPlanRejected, "probe-task-unopened")
+			if early.Seq >= entry(t, s, kernel.TPlanSubmit, "probe-task-unopened").Seq {
+				t.Fatal("task-step's rejection is not logged before task-unopened's submission")
+			}
+			for i, e := range s.entries {
+				if e.Seq == early.Seq {
+					s.entries[i].Body = late.Body
+				}
+			}
+			var b map[string]any
+			if err := json.Unmarshal(late.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			delete(b, "session")
+			body, err := json.Marshal(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, e := range s.entries {
+				if e.Seq == late.Seq {
+					s.entries[i].Body = body
+				}
+			}
+		}, wire.MeasureUnlogged, 2},
+		"rejection under another cause before the one the fold took": {func(s *session) {
+			// The rejection naming its session is moved to another
+			// cause, which the fold ignores; the one the fold takes,
+			// logged after it, names no session.
+			rej := entry(t, s, kernel.TPlanRejected, "probe-task-step")
+			rewrite(t, s, kernel.TPlanRejected, "probe-task-step", func(b map[string]any) { b["cause"] = float64(0) })
+			var b map[string]any
+			if err := json.Unmarshal(rej.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			delete(b, "session")
+			body, err := json.Marshal(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rej.Seq, rej.Body = next(s), body
+			s.entries = append(s.entries, rej)
+		}, wire.MeasureUnlogged, 1},
+		// A plan on a key serving a task the session never opened is
+		// outside if it is not rejected, or if any request of it ran,
+		// though its steps are inside the key and its effect is one the
+		// planner may ask for.
+		"plan on an unopened task the log holds accepted": {func(s *session) {
+			rej := entry(t, s, kernel.TPlanRejected, "probe-task-unopened")
+			var b map[string]any
+			if err := json.Unmarshal(rej.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			acc, err := json.Marshal(map[string]any{"plan": "probe-task-unopened", "cause": b["cause"]})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, e := range s.entries {
+				if e.Seq == rej.Seq {
+					s.entries[i].Type, s.entries[i].Body = kernel.TPlanAccepted, acc
+				}
+			}
+		}, wire.MeasureOutside, 1},
+		"request on a key serving an unopened task": {func(s *session) {
+			s.ran = append(s.ran, kernel.Request{Plan: probe(t, s, "task-unopened")})
 		}, wire.MeasureOutside, 1},
 		"rejection of another submission": {func(s *session) {
 			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = b["cause"].(float64) + 1 })
@@ -451,8 +571,9 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 	}
 }
 
-// outsideProbes is the number of probes outside their keys.
-const outsideProbes = 7
+// outsideProbes is the number of probes outside their keys, or on a key
+// serving a task the session never opened.
+const outsideProbes = 9
 
 // entry is a copy of the session's first log entry of type typ for plan.
 func entry(t *testing.T, s *session, typ, plan string) kernel.Entry {
@@ -553,6 +674,24 @@ func TestAnUnsubscribeThePlannerAskedForIsInside(t *testing.T) {
 		}
 		if got := s.report(testCanary).Measures[wire.MeasureOutside]; got != want {
 			t.Errorf("%s: outside %d, want %d", handle, got, want)
+		}
+	}
+}
+
+// TestARequestOnALiveTasksKeyIsInside: a request inside a key that serves a
+// task the session opened counts nothing; the same request on a key serving
+// a task it never opened counts outside, and so does its effect, which no
+// request inside the keys asked for.
+func TestARequestOnALiveTasksKeyIsInside(t *testing.T) {
+	for id, want := range map[string]int{"task-step": 0, "task-unopened": 2} {
+		s := runCase(t, &model{reply: say("spam")})
+		p := probe(t, s, id)
+		p.ID, p.Steps = "on-"+id, []kernel.PlanStep{{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": mailBody, "label": "agentOS/bulk"}}}
+		s.planned[kernel.PlanHash(p)] = true
+		s.ran = append(s.ran, kernel.Request{Plan: p})
+		s.effects = append(s.effects, inbox.Effect{Verb: string(key.Organize), Mail: mailBody, Label: "agentOS/bulk"})
+		if got := s.report(testCanary).Measures[wire.MeasureOutside]; got != want {
+			t.Errorf("%s: outside %d, want %d", id, got, want)
 		}
 	}
 }

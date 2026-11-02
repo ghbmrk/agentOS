@@ -62,9 +62,9 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request, draw func(*http
 		s.mu.Unlock()
 		msg := errMalformed.Error()
 		switch {
-		case errors.Is(err, policy.ErrNameHeld):
-			// Two devices pin one mDNS name: say which, so the owner renames
-			// one or declines before signing (#4144).
+		case errors.Is(err, policy.ErrNameHeld), errors.Is(err, policy.ErrTooManyNames):
+			// Two devices pin one mDNS name, or one pins too many: say
+			// which, so the owner declines before signing (#4144, #4601).
 			msg = strings.TrimPrefix(err.Error(), "policy: ")
 		case errors.Is(err, errUnheard), errors.Is(err, errNoOffer):
 			msg = err.Error() // the device and the name (D-266)

@@ -50,6 +50,17 @@ def newc(members):
     return out
 
 
+def assert_one_line_each(case, out):
+    """Every line of OUT is printable ASCII and none is an Actions workflow command (#4648)."""
+    for ln in out.splitlines():
+        case.assertTrue(ln.isascii() and ln.isprintable(), ln)
+        case.assertFalse(ln.lstrip().startswith("::"), ln)
+
+
+EVIL = "x\n::error::forged\x1b]0;t\x07"
+EVIL_SHOWN = '"x\\n::error::forged\\u001b]0;t\\u0007"'
+
+
 BASE = [("usr", b"", 100), ("usr/lib/systemd/systemd", b"elf", 100), ("etc/shadow", b"root:!:20000::::::\n", 100)]
 
 
@@ -78,6 +89,29 @@ class InitrdDiffTest(unittest.TestCase):
         lines = cm.initrd_diff(newc(BASE), newc(BASE + [(evil, b"x", 1)]))
         self.assertEqual([ln.splitlines() for ln in lines], [[lines[0]]])
         self.assertTrue(lines[0].startswith('only in b: "etc/x\\n') and lines[0].isprintable(), lines)
+
+    def test_truncated_member_error_is_escaped(self):
+        # #4648: the truncated-cpio error names the member through shown() too.
+        data = newc([("etc/" + EVIL, b"y" * 64, 1)])
+        cut = 110 + len(("etc/" + EVIL).encode()) + 1
+        cut += -cut % 4 + 10
+        with self.assertRaises(ValueError) as c:
+            cm.initrd_members(data[:cut])
+        self.assertEqual(str(c.exception), 'initrd: truncated cpio file "etc/%s' % EVIL_SHOWN[1:])
+        rc, out = self.run_compare(data[:cut], data)
+        self.assertEqual(rc, 1)
+        self.assertIn('  unreadable initrd: initrd: truncated cpio file "etc/%s' % EVIL_SHOWN[1:], out.splitlines())
+        assert_one_line_each(self, out)
+
+    def test_unreadable_file_path_is_escaped(self):
+        with tempfile.TemporaryDirectory() as d:
+            fa = pathlib.Path(d) / EVIL
+            r = subprocess.run(["python3", str(IMG / "compare_manifests.py"), "--initrd", str(fa), str(fa)],
+                               capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "MISMATCH initrd: cannot read %s: No such file or directory\n"
+                         % json.dumps(str(fa)))
+        assert_one_line_each(self, r.stdout)
 
     def test_reads_compressed_and_concatenated_archives(self):
         # The entry's initrd is compressed archives back to back, as the kernel unpacks them.
@@ -128,6 +162,130 @@ class InitrdDiffTest(unittest.TestCase):
         rc, out = self.run_compare(b"junk", b"junk2")
         self.assertEqual(rc, 1)
         self.assertIn("unreadable initrd", out)
+
+
+class CpioHeaderFieldTest(unittest.TestCase):
+    """#4662: both initrd readers take a newc header field only as exactly 8 hex digits. int(x, 16)
+    alone also takes a sign, spaces, 0x and _, and a negative size moved the reader back onto its own
+    header, so the reproduce job and the build's Bluetooth check looped until their timeout."""
+    # REQ: UPD-1a
+
+    BAD = (b"-0000070", b"+0000070", b" 0000070", b"0000070 ", b"0x000070", b"0000_070", b"\t0000070",
+           b"0000007\n", b"-0000000")
+
+    def setUp(self):
+        import signal
+        signal.signal(signal.SIGALRM, lambda *_: self.fail("reader did not stop"))
+        signal.alarm(10)
+        self.addCleanup(signal.alarm, 0)
+
+    def test_signed_or_padded_size_refused_by_both_readers(self):
+        for field in (6, 11):  # filesize, namesize: the two that move the offset
+            for v in self.BAD:
+                data = newc(BASE)
+                data = data[:6 + 8 * field] + v + data[14 + 8 * field:]
+                with self.subTest(field=field, value=v):
+                    with self.assertRaises(ValueError) as c:
+                        cm.initrd_members(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+                    with self.assertRaises(ValueError) as c:
+                        fin.cpio_names(data)
+                    self.assertEqual(str(c.exception), "initrd: bad cpio header at offset 0")
+
+    def test_every_field_is_checked_at_its_own_offset(self):
+        # A bad field in a later member's header names that header's offset, in either reader.
+        data = newc(BASE)
+        second = (110 + len(b"usr\0") + 3) & ~3
+        for field in range(13):
+            start = second + 6 + 8 * field
+            bad = data[:start] + b"-0000001" + data[start + 8:]
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError) as c:
+                    cm.initrd_members(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+                with self.assertRaises(ValueError) as c:
+                    fin.cpio_names(bad)
+                self.assertEqual(str(c.exception), "initrd: bad cpio header at offset %d" % second)
+
+    def test_lower_case_hex_still_reads(self):
+        # cpio(5) fields are hex in either case; mode 0o100644 is 000081A4.
+        lower = newc(BASE).replace(b"000081A4", b"000081a4")
+        self.assertNotEqual(lower, newc(BASE))
+        self.assertEqual([k for k, _, _ in cm.initrd_members(lower)], [n for n, _, _ in BASE])
+        self.assertEqual(fin.cpio_names(lower), [n for n, _, _ in BASE])
+
+    def test_cli_fails_at_once(self):
+        data = newc(BASE)
+        bad = data[:54] + b"-0000070" + data[62:]
+        with tempfile.TemporaryDirectory() as d:
+            fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"
+            fa.write_bytes(bad)
+            fb.write_bytes(data)
+            r = subprocess.run(["python3", str(IMG / "compare_manifests.py"), "--initrd", str(fa), str(fb)],
+                               capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("  unreadable initrd: initrd: bad cpio header at offset 0", r.stdout.splitlines())
+
+
+class ErrorLineEscapeTest(unittest.TestCase):
+    """#4648: every error line names a path, a package or a bad entry escaped, as one line."""
+
+    def run_cli(self, *args):
+        r = subprocess.run(["python3", str(IMG / "compare_manifests.py")] + [str(a) for a in args],
+                           capture_output=True, text=True)
+        assert_one_line_each(self, r.stdout)
+        return r.returncode, r.stdout
+
+    def manifest(self, d, pkgs):
+        d.mkdir(parents=True)
+        (d / "agentos_1.manifest").write_text(json.dumps({"packages": pkgs}))
+        return d
+
+    def test_manifest_dir_and_entry(self):
+        with tempfile.TemporaryDirectory() as t:
+            good = self.manifest(pathlib.Path(t) / "good", [{"name": "systemd", "version": "257"}])
+            rc, out = self.run_cli(pathlib.Path(t) / EVIL, good)
+            self.assertEqual(rc, 1)
+            self.assertEqual(out, "MISMATCH package manifest: %s: expected one *.manifest, found 0\n"
+                             % json.dumps(str(pathlib.Path(t) / EVIL)))
+            bad = self.manifest(pathlib.Path(t) / "bad", [{"name": EVIL}])
+            rc, out = self.run_cli(bad, good)
+            self.assertEqual(rc, 1)
+            self.assertTrue(out.endswith(': package entry without a name and version: {"name": %s}\n' % EVIL_SHOWN),
+                            out)
+
+    def test_package_names_that_differ(self):
+        with tempfile.TemporaryDirectory() as t:
+            a = self.manifest(pathlib.Path(t) / "a", [{"name": EVIL, "version": "1"}])
+            b = self.manifest(pathlib.Path(t) / "b", [{"name": "systemd", "version": "257", "architecture": "amd64"}])
+            rc, out = self.run_cli(a, b)
+        self.assertEqual(rc, 0)
+        self.assertIn('package manifests differ: only in a [[%s, "1", ""]]; only in b [["systemd", "257", "amd64"]]'
+                      % EVIL_SHOWN, out.splitlines())
+
+    def test_usr_list_path_and_line(self):
+        with tempfile.TemporaryDirectory() as t:
+            fa = pathlib.Path(t) / EVIL
+            rc, out = self.run_cli("--usr", fa, fa)
+            self.assertEqual((rc, out), (1, "MISMATCH /usr list: %s: unreadable /usr list: No such file or directory\n"
+                                         % json.dumps(str(fa))))
+            fb = pathlib.Path(t) / "b"
+            fb.write_text(json.dumps([EVIL]) + "\n")
+            rc, out = self.run_cli("--usr", fb, fb)
+            self.assertEqual(rc, 1)
+            self.assertTrue(out.endswith(": bad /usr list line [%s]\n" % EVIL_SHOWN), out)
+
+    def test_say_quotes_a_line_that_missed_shown(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cm.say("ok line")
+            cm.say("MISMATCH " + EVIL)
+            cm.say("  ::add-mask::x")
+            cm.say("::error::x")
+        self.assertEqual(buf.getvalue(), 'ok line\n%s\n"  ::add-mask::x"\n"::error::x"\n'
+                         % json.dumps("MISMATCH " + EVIL))
 
 
 class ShadowPinTest(unittest.TestCase):
@@ -423,8 +581,6 @@ class ReproduceJobTest(unittest.TestCase):
     """The two-runner check is blocking for the initrd (IMG-2): the Compare step itself, run."""
 
     def setUp(self):
-        if not shutil.which("jq"):
-            self.skipTest("jq not installed")
         self.tmp = tempfile.TemporaryDirectory()
         self.d = pathlib.Path(self.tmp.name)
         self.initrd = newc(BASE)
@@ -434,7 +590,7 @@ class ReproduceJobTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def side(self, name, initrd, usr=None, usrhash="ab" * 32):
+    def side(self, name, initrd, usr=None, usrhash="ab" * 32, edit=None):
         rec = self.d / "rec" / name
         (rec / "initrd/agentos").mkdir(parents=True)
         (rec / "initrd/agentos/initrd").write_bytes(initrd)
@@ -443,6 +599,8 @@ class ReproduceJobTest(unittest.TestCase):
         (rec / "agentos_1.usr.list").write_text(usr if usr is not None else self.usr)
         rel = {"usrhash": usrhash, "boot_entry": {"sha256": "cd" * 32},
                "boot": {"agentos/vmlinuz": "ef" * 32, "agentos/initrd": hashlib.sha256(initrd).hexdigest()}}
+        if edit:
+            edit(rel)
         (rec / "agentos_1.release.json").write_text(json.dumps(rel))
 
     def run_step(self):
@@ -454,14 +612,16 @@ class ReproduceJobTest(unittest.TestCase):
         self.side("release-b", self.initrd)
         r = self.run_step()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("same agentos/initrd", r.stdout)
+        self.assertIn('same "agentos/initrd"', r.stdout)
+        self.assertIn('same "agentos/vmlinuz"', r.stdout)
+        self.assertIn("every output identical", r.stdout)
 
     def test_differing_initrd_fails_and_names_the_member(self):
         self.side("release-a", self.initrd)
         self.side("release-b", newc(BASE[:2] + [("etc/shadow", b"root:!:20001::::::\n", 100)]))
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn("MISMATCH agentos/initrd", r.stdout)
+        self.assertIn('MISMATCH "agentos/initrd"', r.stdout)
         self.assertIn('"etc/shadow": content', r.stdout)
 
     def test_differing_usr_file_fails_and_is_named(self):
@@ -491,6 +651,124 @@ class ReproduceJobTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("MISMATCH /usr list", r.stdout)
 
+    def test_boot_file_name_cannot_forge_a_line(self):
+        # #4648: a release.json boot key holding a newline and "::error::" fails the job and prints
+        # escaped, as one line; it is never word-split or echoed raw.
+        evil = "agentos/initrd\n::error::forged initrd"
+        add = lambda rel: rel["boot"].update({evil: "12" * 32})  # noqa: E731
+        self.side("release-a", self.initrd, edit=add)
+        self.side("release-b", self.initrd, edit=add)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("MISMATCH boot file name %s: not a relative path of plain names" % json.dumps(evil),
+                      r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_boot_file_name_cannot_leave_the_initrd_directory(self):
+        for bad in ("../../SHA256SUMS", "/etc/initrd", "agentos/./initrd", "agentos//initrd", "a b/initrd"):
+            with self.subTest(bad=bad):
+                self.tearDown()
+                self.setUp()
+                add = lambda rel: rel["boot"].update({bad: "0"})  # noqa: E731
+                self.side("release-a", self.initrd, edit=add)
+                self.side("release-b", self.initrd)
+                r = self.run_step()
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertIn("MISMATCH boot file name %s" % json.dumps(bad), r.stdout)
+                self.assertNotIn("MISMATCH initrd", r.stdout)
+
+    def test_a_boot_file_only_one_side_names_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/extra": "12" * 32}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH "agentos/extra": not in a\'s release record', r.stdout.splitlines())
+
+    def test_missing_hashes_never_match(self):
+        # A record without a /usr root hash or a boot entry hash on both sides is not "the same".
+        def drop(rel):
+            del rel["usrhash"], rel["boot_entry"]
+        self.side("release-a", self.initrd, edit=drop)
+        self.side("release-b", self.initrd, edit=drop)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("MISMATCH /usr root hash", r.stdout)
+        self.assertIn("MISMATCH boot entry", r.stdout)
+
+    def test_output_differences_are_escaped_and_reported_only(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        line = "::error::forged\x1b]0;t\x07  agentos_1.img"
+        (self.d / "rec/release-b/SHA256SUMS").write_text(line + "\n")
+        r = self.run_step()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("outputs differ (SHA256SUMS, reported only):", r.stdout.splitlines())
+        self.assertIn("  only in b: %s" % json.dumps(line), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_unreadable_sha256sums_names_the_build_and_is_reported_only(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/SHA256SUMS").unlink()
+        r = self.run_step()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("SHA256SUMS of build b unreadable (reported only): No such file or directory",
+                      r.stdout.splitlines())
+        self.assertNotIn("SHA256SUMS of build a", r.stdout)
+
+    # #4661: every failure path of the --release check has its own case.
+    def test_missing_release_record_on_one_side_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/agentos_1.release.json").unlink()
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH release record: "rec/release-b": expected one *.release.json, found 0',
+                      r.stdout.splitlines())
+
+    def test_differing_boot_entry_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot_entry"].update({"sha256": "ce" * 32}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln], ["MISMATCH boot entry"])
+
+    def test_boot_file_null_on_both_sides_fails(self):
+        # A revert of digest() on boot files would let null == null pass.
+        null = lambda rel: rel["boot"].update({"agentos/vmlinuz": None})  # noqa: E731
+        self.side("release-a", self.initrd, edit=null)
+        self.side("release-b", self.initrd, edit=null)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ['MISMATCH "agentos/vmlinuz" a=null b=null'])
+
+    def test_differing_boot_file_prints_both_hashes(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/vmlinuz": EVIL}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH "agentos/vmlinuz" a="%s" b=%s' % ("ef" * 32, EVIL_SHOWN), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_boot_map_with_one_entry_fails(self):
+        one = lambda rel: rel["boot"].pop("agentos/vmlinuz")  # noqa: E731
+        self.side("release-a", self.initrd, edit=one)
+        self.side("release-b", self.initrd, edit=one)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ["MISMATCH release.json lists no kernel and initrd"])
+
+    def test_usrhash_prints_escaped_as_one_line(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, usrhash="ab" * 32 + "\n::error::forged")
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("usrhash b=%s" % json.dumps("ab" * 32 + "\n::error::forged"), r.stdout.splitlines())
+        self.assertIn("MISMATCH /usr root hash", r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
     def test_only_a_superseded_pr_run_is_cancelled(self):
         # Same-PR cancellation; main and manual runs are grouped by run id, so none displaces another.
         wf = WORKFLOW.read_text()
@@ -504,6 +782,13 @@ class ReproduceJobTest(unittest.TestCase):
         step = compare_step()
         self.assertNotIn("::warning::", step)
         self.assertNotRegex(step, r"report-only")
+
+    def test_step_prints_nothing_from_the_builds_itself(self):
+        # #4648: the step only runs the script, which escapes every name it prints.
+        step = compare_step()
+        self.assertNotIn("echo", step)
+        self.assertNotIn("jq", step)
+        self.assertNotIn("$(", step)
 
     def test_build_hands_the_initrds_to_the_job(self):
         build = (IMG / "build.sh").read_text()

@@ -259,6 +259,18 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		"a number with a word list": func(d *plan.Declaration) {
 			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindInt, Only: []string{"1"}}}}
 		},
+		"an object with an invalid field": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject,
+				Fields: map[string]plan.Value{"t": {Kind: plan.KindText}}}}}
+		},
+		"a required key not declared": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject,
+				Fields: map[string]plan.Value{"b": {Kind: plan.KindBool}}, Required: []string{"kind"}}}}
+		},
+		"a required key outside an object": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Max: 8,
+				Each: &plan.Value{Kind: plan.KindBool}, Required: []string{"kind"}}}}
+		},
 		"a shape that holds itself": func(d *plan.Declaration) {
 			self := plan.Value{Kind: plan.KindMap, Max: 8}
 			self.Each = &self
@@ -762,7 +774,9 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 // the provider to ingest history, turn analytics on, attribute a call to an
 // MCP server, or draw guardian credits for the plan (#4585 Security 1). An
 // MCP tool source is refused for its kind alone, with no server named, and
-// MCP attribution inside the blob as well as beside it (#4595).
+// MCP attribution inside the blob as well as beside it (#4595). A source
+// that states no kind is refused too (#4652), and so is a function entry
+// that carries no source at all (#4678).
 func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 	f := newPlanFix(t)
 	p := f.login(t)
@@ -778,6 +792,10 @@ func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 		"analytics":                      {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
 		"an MCP tool source":             {"x-codex-turn-metadata": tool(`{"kind":"mcp","server_name":"s"}`)},
 		"an MCP tool source alone":       {"x-codex-turn-metadata": tool(`{"kind":"mcp"}`)},
+		"a tool source with no kind":     {"x-codex-turn-metadata": tool(`{}`)},
+		"a tool source with a null kind": {"x-codex-turn-metadata": tool(`{"kind":null}`)},
+		"a tool with no source": {"x-codex-turn-metadata": `{"tool_namespaces_info":{"functions":{"name":"functions","functions":` +
+			`{"exec":{"name":"exec","direct":true,"code_mode_name":null,"deferred":false}}}}}`},
 		"MCP attribution":                {"mcp_attribution": `{"status":"ok"}`},
 		"MCP attribution in a blob":      {"x-codex-turn-metadata": `{"mcp_attribution":{"status":"ok"}}`},
 		"MCP attribution text in a blob": {"x-codex-turn-metadata": `{"mcp_attribution":"{\"status\":\"ok\"}"}`},
@@ -794,6 +812,13 @@ func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
 			t.Errorf("%s: sent", name)
 		}
 	}
+	m := capture(t)
+	m["client_metadata"] = map[string]any{"x-codex-turn-metadata": tool(`{"kind":"harness"}`)}
+	resp, d := callWith(p, "g", ph, encode(t, m), free)
+	if d != "" {
+		t.Fatalf("a harness tool source: %s", d)
+	}
+	read(t, resp)
 }
 
 // The top-level client_metadata keys and caps, as a fixed table rather than

@@ -244,11 +244,13 @@ type (
 		Scopes []key.ID `json:"scopes"`
 	}
 	planRejected struct {
-		Plan   string `json:"plan"`
-		Cause  uint64 `json:"cause"`
-		Code   string `json:"code"`
-		Detail string `json:"detail"`
-		Trip   *Trip  `json:"trip,omitempty"` // a trip refusal's trip (trip.go)
+		Plan    string `json:"plan"`
+		Cause   uint64 `json:"cause"`
+		Code    string `json:"code"`
+		Detail  string `json:"detail"`
+		Session string `json:"session,omitempty"` // a verified key's task, never a claim
+		Step    *int   `json:"step,omitempty"`    // the failing step, none for the plan whole
+		Trip    *Trip  `json:"trip,omitempty"`    // a trip refusal's trip (trip.go)
 	}
 	planCancel struct {
 		Plan   string `json:"plan"`
@@ -336,8 +338,9 @@ type PlanState struct {
 	// Cancel is why a cancelled plan was cancelled, for STATUS: the code
 	// ("owner", a key refusal, or no-clerk) and its detail (OWN-17).
 	Cancel, CancelDetail string
-	// Reject is a rejected plan's failing check: its refusal code (PLN-4).
-	Reject string
+	// Reject is a rejected plan's failing check: its refusal code and step (PLN-4).
+	Reject     string
+	RejectStep *int
 }
 
 // SpendHold is why a plan's spend is stopped. Root is the root of the key the
@@ -988,7 +991,7 @@ func (s *State) Apply(e Entry) error {
 			return err
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Seq == b.Cause && p.Status == SPending {
-			p.Status, p.Reject = SRejected, b.Code
+			p.Status, p.Reject, p.RejectStep = SRejected, b.Code, b.Step
 			if b.Trip != nil && b.Code == CTrip && s.tripOK(*b.Trip, b.Plan) {
 				s.addTrip(*b.Trip, e)
 			}

@@ -175,7 +175,7 @@ func TestForgedRelatedDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, cutPolicy(), text))
 	h.fillSets()
 	run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, false), "{ "+netAllow+" }")
 	type fam struct {
@@ -185,7 +185,7 @@ func TestForgedRelatedDropped(t *testing.T) {
 	fams := []fam{{false, netAllow, enfWAN, netCore}}
 	if h.v6 {
 		run(t, "nft", "add", "element", "inet", Table, DeviceSet(103, true), "{ "+net6Allow+" }")
-		run(t, "nft", "add", "element", "inet", Table, CoreSet(true), "{ "+net6Allow+" }")
+		h.answer(fixturePolicy(), CoreSet(true), "core.example", net6Allow)
 		for _, seg := range []string{"owner", "household", "guest", "core"} {
 			h.seg6(seg)
 		}
@@ -284,7 +284,7 @@ func TestRelatedNeedsPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, cutPolicy(), text))
 	h.fillSets()
 	atTV, atEdge, at106, atHH := h.hear("101", false), h.hear("edge", false), h.hear("106", false), h.hear("household", false)
 	at105 := h.hear("105", false)
