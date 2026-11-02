@@ -294,7 +294,10 @@ var enforcer = map[string]struct {
 	// alone may serve HTTP and TLS; it still launches nothing.
 	// It also serves the enrolment screens (slice c) and draws the Owner
 	// network's Wi-Fi QR with rsc.io/qr (enforcerWebDeps).
-	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "rsc.io/qr"}, enforcerWebForbid},
+	"enforcer/page": {[]string{"kernel/key", "enforcer/policy", "enforcer/action", "enforcer/pairseal", "enforcer/enrol", "enforcer/page/internal/csrf", "rsc.io/qr"}, enforcerWebForbid},
+	// The page's anti-forgery pair (#4685): the standard library only, so
+	// the key it holds is reachable from no other code (no unsafe, no C).
+	"enforcer/page/internal/csrf": {nil, enforcerWebForbid},
 	// Enrolment (slice c): the case code, the recovery code and the
 	// passkey's handover; it texts through the alert kinds.
 	"enforcer/enrol": {[]string{"kernel/key", "enforcer/policy", "enforcer/alert"}, droneForbid},
@@ -474,7 +477,7 @@ func TestDroneImportsNothingFromAgentOS(t *testing.T) {
 // packages, broker/kernel/key, broker/drone and broker/camwire (ENF
 // decision 1, STO-4), and no third-party package but the access point
 // pusher's SSH client (enforcerSSH, slice g); only the page
-// (enforcerWeb, slice b) speaks HTTP or TLS, and only the firewall loader
+// (enforcerWeb, slice b, with its internal packages) speaks HTTP or TLS, and only the firewall loader
 // and the radio launcher (enforcerExec, slices e and k) launch a process. Slice l (the daemon) widens
 // this with a reason.
 func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
@@ -484,7 +487,7 @@ func TestEnforcerImportsNothingFromAgentOS(t *testing.T) {
 	}
 	var rest []string
 	for _, p := range strings.Fields(string(list)) {
-		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && rel != enforcerSSH {
+		if rel := strings.TrimPrefix(p, module); !slices.Contains(enforcerExec, rel) && rel != enforcerWeb && !strings.HasPrefix(rel, enforcerWeb+"/internal/") && rel != enforcerSSH {
 			rest = append(rest, p)
 		}
 	}
