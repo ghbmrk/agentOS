@@ -550,6 +550,36 @@ func TestChallengeAnswer(t *testing.T) {
 	}
 }
 
+// TestChallengeIDOutstanding (#3759 point 4): a challenge whose ID is
+// already outstanding is refused before it is sent, so a late answer to
+// the first can never be handed over as the answer to the second; the
+// first's answer still reaches the device, and the ID is free again
+// after it. Revert mutant: Challenge re-adding an outstanding ID.
+func TestChallengeIDOutstanding(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("challenge frame: %+v", m)
+	}
+	if err := r.ch.Challenge(7, []byte{2}); !errors.Is(err, ErrOutstanding) {
+		t.Fatalf("a second challenge with an outstanding id: %v, want ErrOutstanding", err)
+	}
+	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.OK {
+		t.Fatalf("answer: %v", c)
+	}
+	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.Refused {
+		t.Errorf("the refused challenge's answer was taken: %v", c)
+	}
+	go r.ch.Challenge(7, []byte{4})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("a challenge after the answer: %+v", m)
+	}
+	if !reflect.DeepEqual(r.answers, []uint64{7}) {
+		t.Errorf("answers %v", r.answers)
+	}
+}
+
 // TestSinksRequired (NET-2 Safety devices, Channel): a channel cannot be
 // built without its log or its alerts, so no command acts unlogged and no
 // heater off or valve shut goes untexted. Revert mutant: New accepting a

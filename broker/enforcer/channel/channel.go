@@ -161,6 +161,10 @@ var (
 	ErrRevoked   = errors.New("channel: the core's channel key is revoked")
 	ErrNoSession = errors.New("channel: no core connected")
 	ErrBusy      = errors.New("channel: too many challenges outstanding")
+	// ErrOutstanding refuses a challenge whose ID is still waiting for
+	// its answer, so a late answer to the first is never handed over as
+	// the second's (#3759).
+	ErrOutstanding = errors.New("channel: a challenge with this id is outstanding")
 	// ErrSuperseded ends a connection whose frame came after a later
 	// connection's hello was accepted (ENF-d-9).
 	ErrSuperseded = errors.New("channel: a later connection replaced this one")
@@ -389,7 +393,9 @@ func (s *session) write(m wire.Msg) error {
 }
 
 // Challenge sends a device's challenge to the core and waits for its
-// answer on the channel, which goes to Config.Answer once.
+// answer on the channel, which goes to Config.Answer once. The radio host
+// chooses id; one still outstanding is refused (ErrOutstanding), so each
+// answer belongs to exactly one challenge.
 func (c *Channel) Challenge(id uint64, data []byte) error {
 	c.mu.Lock()
 	s := c.session
@@ -397,7 +403,11 @@ func (c *Channel) Challenge(id uint64, data []byte) error {
 		c.mu.Unlock()
 		return ErrNoSession
 	}
-	if !c.outstanding[id] && len(c.outstanding) >= MaxOutstanding {
+	if c.outstanding[id] {
+		c.mu.Unlock()
+		return ErrOutstanding
+	}
+	if len(c.outstanding) >= MaxOutstanding {
 		c.mu.Unlock()
 		return ErrBusy
 	}
