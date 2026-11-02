@@ -349,6 +349,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a [Socket] User= in a .service":        "[Socket]\nUser=agentos-side\n[Service]\nExecStart=/usr/lib/agentos/agentos-side\n",
 		"a template User=%i":                    "[Service]\nUser=%i\nExecStart=/usr/lib/agentos/agentos-side\n",
 		"a template User=r%i":                   "[Service]\nUser=r%i\nExecStart=/usr/lib/agentos/agentos-side\n",
+		"a template User=0%i":                   "[Service]\nUser=0%i\nExecStart=/usr/lib/agentos/agentos-side\n",
 		"literal $$ and %%":                     "[Service]\nExecStart=/usr/lib/agentos/agentos-side -x $$HOME 100%%\n",
 		"a shell's own $( in a script":          "[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'\n",
 	} {
@@ -423,6 +424,9 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a listed variable in another unit":    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 		"a listed variable after another flag": {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -run ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 		"a listed variable in another command": {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/other -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
+		// #4494 Security delta 3 R-1, R-2.
+		"an unclosed pinned variable":                   {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER\n", `holds a $ substitution`},
+		"a pinned variable with an unread Environment=": {"image/mkosi/agentosd.service", "[Service]\nEnvironment='A=1\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -432,11 +436,30 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			}
 		})
 	}
+	// #4494 L3 2: ExecPaths= and ExecSearchPath= are paths, not commands.
+	t.Run("a root unit whose paths name a binary it does not run", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/agentos-side.service"] = "[Service]\nExecStart=/bin/true\nExecPaths=/usr/lib/agentos/agentos-side\nExecSearchPath=/usr/lib/agentos/agentos-side\n"
+		if bins := set(t, files); len(bins) != 0 {
+			t.Fatalf("got %q, want none", bins)
+		}
+	})
 	t.Run("a [Service] User= in a .socket", func(t *testing.T) {
 		files := clone(files)
 		files["image/mkosi/agentos-side.socket"] = "[Service]\nUser=agentos-side\n[Socket]\nExecStartPre=/usr/lib/agentos/agentos-side\n"
 		if bins := set(t, files); len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
 			t.Fatalf("got %q, want [./cmd/agentos-side]", bins)
+		}
+	})
+	t.Run("refuses a pinned variable another env file may fill", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatalf("the pinned env file alone: %v", err)
+		}
+		files["image/mkosi/agentosd.service.d/z.conf"] = "[Service]\nEnvironmentFile=/var/tmp/x.env\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "holds a $ substitution") {
+			t.Fatalf("got %v, want a refusal", err)
 		}
 	})
 	t.Run("a pinned variable where unitVars pins it", func(t *testing.T) {
@@ -515,18 +538,22 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a helper option in fstab":            {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /mnt ext4 ro,uhelper=agentos 0 0\n", `option uhelper=agentos`},
 		"a continued Type=":                   {unit, "[Mount]\nType=ext4\\\n.x\n", `Type=ext4 .x`},
 		// #4494 Security 1 and release R1.
-		"a type after an escaped backslash":  {unit, "[Mount]\nType=ext4\nOptions=nosuid,x-a=b\\\\\nType=fuse\n", `Type=fuse`},
-		"a type only under [Unit]":           {unit, "[Unit]\nType=ext4\n[Mount]\nWhat=/dev/x\n", `no Type=`},
-		"a writable tmpfs over a rules dir":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs mode=0777 0 0\n", `option mode=0777`},
-		"an owned tmpfs above /run/systemd":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /run/ tmpfs uid=1000 0 0\n", `option uid=1000`},
-		"an overlay in fstab over /usr":      {"image/mkosi/mkosi.extra/etc/fstab", "overlay /usr overlay lowerdir=/usr 0 0\n", `no overlay over`},
-		"an overlay unit over /usr":          {"image/x/usr-lib-agentos.mount", "[Mount]\nType=overlay\nOptions=lowerdir=/usr/lib/agentos,upperdir=/var/tmp/u\n", `no overlay over`},
-		"an upper dir in the unit's drop-in": {"image/x/usr-lib-agentos.mount.d/z.conf", "[Mount]\nOptions=upperdir=/var/tmp/u\n", `option upperdir=/var/tmp/u`},
-		"an owner option in a type drop-in":  {"image/mkosi/mount.d/x.conf", "[Mount]\nOptions=uid=1000\n", `option uid=1000`},
-		"an owner option on the root mount":  {"image/x/-.mount", "[Mount]\nType=ext4\nOptions=gid=100\n", `option gid=100`},
-		"an X-mount.mode over a rules dir":   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc/udev/rules.d ext4 X-mount.mode=0777 0 0\n", `option X-mount.mode=0777`},
-		"an X-mount.owner over /usr":         {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.owner=1000 0 0\n", `option X-mount.owner=1000`},
-		"an owner option on an escaped name": {"image/x/run-modules\\x2dload.d.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
+		"a type after an escaped backslash":      {unit, "[Mount]\nType=ext4\nOptions=nosuid,x-a=b\\\\\nType=fuse\n", `Type=fuse`},
+		"a type only under [Unit]":               {unit, "[Unit]\nType=ext4\n[Mount]\nWhat=/dev/x\n", `no Type=`},
+		"a writable tmpfs over a rules dir":      {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs mode=0777 0 0\n", `option mode=0777`},
+		"an owned tmpfs above /run/systemd":      {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /run/ tmpfs uid=1000 0 0\n", `option uid=1000`},
+		"an overlay in fstab over /usr":          {"image/mkosi/mkosi.extra/etc/fstab", "overlay /usr overlay lowerdir=/usr 0 0\n", `no overlay over`},
+		"an overlay unit over /usr":              {"image/x/usr-lib-agentos.mount", "[Mount]\nType=overlay\nOptions=lowerdir=/usr/lib/agentos,upperdir=/var/tmp/u\n", `no overlay over`},
+		"an upper dir in the unit's drop-in":     {"image/x/usr-lib-agentos.mount.d/z.conf", "[Mount]\nOptions=upperdir=/var/tmp/u\n", `option upperdir=/var/tmp/u`},
+		"an owner option in a type drop-in":      {"image/mkosi/mount.d/x.conf", "[Mount]\nOptions=uid=1000\n", `option uid=1000`},
+		"an owner option on the root mount":      {"image/x/-.mount", "[Mount]\nType=ext4\nOptions=gid=100\n", `option gid=100`},
+		"an X-mount.mode over a rules dir":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc/udev/rules.d ext4 X-mount.mode=0777 0 0\n", `option X-mount.mode=0777`},
+		"an X-mount.owner over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.owner=1000 0 0\n", `option X-mount.owner=1000`},
+		"an X-mount.group over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.group=100 0 0\n", `option X-mount.group=100`},
+		"an X-mount.idmap over /etc":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 X-mount.idmap=u:0:1000:1 0 0\n", `option X-mount.idmap`},
+		"a writable tmpfs over /var/run/systemd": {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /var/run/systemd/system tmpfs mode=0777 0 0\n", `option mode=0777`},
+		"an owner option on a var-run unit":      {"image/x/var-run-udev.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
+		"an owner option on an escaped name":     {"image/x/run-modules\\x2dload.d.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -696,7 +723,7 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 	files := map[string]string{
 		"broker/side/side.go":                     "package side\n\nimport \"os\"\n\nfunc Drop(p string) error { return os.Remove(p) }\n",
 		"broker/cmd/agentos-side/main.go":         "package main\n\nimport \"example.test/broker/side\"\n\nfunc main() { side.Drop(\"\") }\n",
-		"image/mkosi/agentos-side.service":        "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\nExecStartPre=+/opt/x/agentos-x\n",
+		"image/mkosi/agentos-side.service":        "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\nExecStartPre=+/opt/x/agentos-x\nExecStartPre=+/var/run/agentos-v/x\n",
 		modprobe:                                  "# agentos-side\nblacklist btusb\n\talias usb:v1 btusb\noptions btusb x=1\nsoftdep btusb pre: btmtk\nweakdep btusb btmtk\ninstall btusb /bin/false\n",
 		sysctl:                                    "; agentos-side\n# kernel.modprobe=/usr/lib/agentos/agentos-side\nkernel.core_pattern = core.%p\nfs.suid_dumpable=0\n-kernel.hotplug\n-net.ipv4.ip_forward = 0\n",
 		extra + "usr/lib/modprobe.d/README":       "install btusb /usr/lib/agentos/agentos-side\n",
@@ -832,6 +859,12 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 		"a tmpfiles owned unit program":        {tmpfiles, "z /opt/x/agentos-x 0755 agentos-side\n", `in or above /opt/x/agentos-x`},
 		"a tmpfiles writable initramfs":        {tmpfiles, "d /run/initramfs 0777 root root -\n", `in or above /run/initramfs`},
 		"a tmpfiles owned extensions dir":      {tmpfiles, "d /var/lib/extensions 0755 agentos-side\n", `in or above /var/lib/extensions`},
+		// #4494 L3 1: /var/run is /run.
+		"a tmpfiles writable /var/run unit dir":  {tmpfiles, "d /var/run/systemd/system 0777\n", `in or above /run/systemd`},
+		"a tmpfiles writable /var/run rules dir": {tmpfiles, "d /var/run/udev/rules.d 0777\n", `in or above /run/udev`},
+		"a tmpfiles owned /var/run modprobe.d":   {tmpfiles, "d /var/run/modprobe.d 0755 nobody\n", `in or above /run/modprobe.d`},
+		"a tmpfiles writable /var/run":           {tmpfiles, "z /var/run 0777\n", `in or above /run/systemd`},
+		"a tmpfiles owned /var/run unit program": {tmpfiles, "z /run/agentos-v/x 0755 agentos-side\n", `in or above /run/agentos-v/x`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -1156,24 +1189,26 @@ func mayBeRoot(v string) bool {
 // word, with what holds its value to data no wrapper runs. A name no
 // shipped Exec line passes fails (TestUnitVarsAreUsed).
 var unitVars = map[string]unitVar{
-	"AGENTOS_OWNER": {"agentosd.service", []string{"/usr/lib/agentos/with-uids", "/usr/lib/agentos/agentosd"}, "-owner",
+	"AGENTOS_OWNER": {"agentosd.service", []string{"/usr/lib/agentos/with-uids", "/usr/lib/agentos/agentosd"}, "-owner", "-/etc/agentos/agentosd.env",
 		"agentosd's -owner value, from /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6); with-uids runs agentosd, its first argument, and passes this one on as data"},
 }
 
 // unitVar pins where a unitVars variable may appear: only in unit, in a
 // command that starts with cmd, right after the word flag, and only when
-// no Environment= line of the unit sets it but to empty (#4494 Security
-// delta 2).
+// no Environment= line of the unit sets it but to empty and every
+// EnvironmentFile= is envFile (#4494 Security delta 2 and 3).
 type unitVar struct {
-	unit   string
-	cmd    []string
-	flag   string
-	reason string
+	unit    string
+	cmd     []string
+	flag    string
+	envFile string
+	reason  string
 }
 
 // allowedVar reports whether word i of a command of unit is a whole-word
-// ${NAME} that unitVars pins there and env does not set.
-func allowedVar(unit string, words []string, i int, env []string) bool {
+// ${NAME} that unitVars pins there, env does not set and only its envFile
+// may fill.
+func allowedVar(unit string, words []string, i int, env, envFiles []string) bool {
 	name, ok := strings.CutPrefix(words[i], "${")
 	name, whole := strings.CutSuffix(name, "}")
 	v, listed := unitVars[name]
@@ -1182,6 +1217,11 @@ func allowedVar(unit string, words []string, i int, env []string) bool {
 	}
 	for j, w := range v.cmd {
 		if words[j] != w {
+			return false
+		}
+	}
+	for _, f := range envFiles {
+		if f != v.envFile {
 			return false
 		}
 	}
@@ -1236,11 +1276,27 @@ var rootTrees = []string{
 	"/run/initramfs", "/run/extensions", "/var/lib/extensions", "/run/confexts", "/var/lib/confexts", "/run/sysusers.d", "/root",
 }
 
+// pathAliases are the links every image has between trees: /var/run is
+// /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/), so a
+// path is compared as the tree it lands in (#4494 L3 1).
+var pathAliases = map[string]string{"/var/run": "/run"}
+
+// unalias is p with a leading pathAliases link resolved.
+func unalias(p string) string {
+	for from, to := range pathAliases {
+		if p == from || strings.HasPrefix(p, from+"/") {
+			return to + p[len(from):]
+		}
+	}
+	return p
+}
+
 // inOrAbove reports whether the absolute path p is one of paths, under one,
 // or a directory above one.
 func inOrAbove(p string, paths []string) (string, bool) {
+	p = unalias(p)
 	for _, t := range paths {
-		if p == t || p == "/" || strings.HasPrefix(p, t+"/") || strings.HasPrefix(t, p+"/") {
+		if t := unalias(t); p == t || p == "/" || strings.HasPrefix(p, t+"/") || strings.HasPrefix(t, p+"/") {
 			return t, true
 		}
 	}
@@ -1330,7 +1386,7 @@ func rootBinaries(root string) ([]string, error) {
 		asUser, asRoot := false, false
 		type execLine struct{ file, key, value string }
 		var lines []execLine
-		var env []string // the unit's Environment= values
+		var env, envFiles []string // the unit's Environment= and EnvironmentFile= values
 		section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
 		for _, f := range paths {
 			b, err := os.ReadFile(f)
@@ -1350,6 +1406,8 @@ func rootBinaries(root string) ([]string, error) {
 					// type's own section.
 				case k == "Environment":
 					env = append(env, v)
+				case k == "EnvironmentFile":
+					envFiles = append(envFiles, v)
 				case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
 					// A User=%i template is root for its root instance.
 					asRoot = true
@@ -1401,7 +1459,7 @@ func rootBinaries(root string) ([]string, error) {
 				// the result, so a root command holds none but a whole-word
 				// ${X} of unitVars (#4494).
 				for i, w := range words[1:] {
-					if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
+					if !allowedVar(name, words, i+1, env, envFiles) && substitutes(w, '$') {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
