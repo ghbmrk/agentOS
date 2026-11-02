@@ -47,13 +47,14 @@ func Nameable(secure string) bool { _, ok := secureVerb[secure]; return ok }
 // on it, only the one secure direction the signed policy names and dev's
 // class allows, and nothing for a device it names nothing for (a camera,
 // microphone, alarm, siren, sensor, primary heating, a feeding valve, a
-// device of unknown type, or one not yet named).
+// device of unknown type, one not yet named, or a garage door missing a
+// safeguard its class needs: policy.Device.Named, #3872).
 func Allowed(dev policy.Device, v wire.Verb) bool {
 	if dev.Everyday {
 		return everyday[v]
 	}
 	want, ok := secureVerb[dev.Secure]
-	return ok && v == want && policy.Nameable(dev.Class, dev.Secure)
+	return ok && v == want && dev.Named()
 }
 
 // texts reports whether verb v on dev, carried out, texts the owner: a

@@ -69,7 +69,7 @@ func (m *memStore) Save(b []byte) error   { m.b = slices.Clone(b); return nil }
 func home() policy.Document {
 	d := policy.Document{Version: 1}
 	add := func(id string, everyday bool, s safety) {
-		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Class: s.class, Secure: s.secure})
+		d.Devices = append(d.Devices, policy.Device{ID: id, Network: policy.NetDevices, Everyday: everyday, Class: s.class, Secure: s.secure, Safeguards: policy.Needs(s.class)})
 	}
 	add("lamp", true, safety{})
 	add("tv", true, safety{})
