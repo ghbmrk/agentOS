@@ -34,6 +34,7 @@ const journalMagic = "LPKSHHRH"
 var (
 	errJournal = errors.New("refused: a journal file is read only through readJournal")
 	errWrite   = errors.New("refused: the driver writes only under writeDirs and to writeFiles")
+	errKind    = errors.New("refused: the driver opens only regular files off procfs and sysfs, directories and /dev/ptmx")
 )
 
 // writeDirs are the directories the driver writes in and writeFiles the
@@ -75,15 +76,38 @@ func inDir(path string) (dir int, base string, err error) {
 	return dir, base, nil
 }
 
-// checkFD refuses a regular file that is a journal, or that is open for
-// writing outside where the driver writes.
+// ptmx is /dev/ptmx's device number, the one device the driver opens
+// (plugModem); any other device, a FIFO or a socket is refused, so no
+// block device's raw sectors, /dev/mem or /dev/null is reached.
+var ptmx = unix.Mkdev(5, 2)
+
+// checkFD refuses what an open reached unless it is /dev/ptmx, a
+// directory, or a regular file that is not on
+// procfs or sysfs (no /proc/<pid>/mem, environ or kcore), is not a
+// journal, and if open for writing is where the driver writes.
 func checkFD(fd int, write bool) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFCHR:
+		if st.Rdev == ptmx {
+			return nil
+		}
+		return errKind
+	case unix.S_IFDIR: // the kernel opens a directory for reading only
 		return nil
+	case unix.S_IFREG:
+	default:
+		return errKind
+	}
+	var fs unix.Statfs_t
+	if err := unix.Fstatfs(fd, &fs); err != nil {
+		return err
+	}
+	if fs.Type == unix.PROC_SUPER_MAGIC || fs.Type == unix.SYSFS_MAGIC {
+		return errKind
 	}
 	if write {
 		real, err := fdPath(fd)
@@ -116,7 +140,9 @@ func openRaw(path string, flag int, perm uint32) (int, error) {
 		if derr != nil {
 			return -1, derr
 		}
-		fd, err = unix.Openat(dir, base, flag, perm)
+		// No link is followed at the name, so what is made or emptied is
+		// the name inDir checked.
+		fd, err = unix.Openat(dir, base, flag|unix.O_NOFOLLOW, perm)
 		unix.Close(dir)
 	} else {
 		fd, err = unix.Open(path, flag, perm)

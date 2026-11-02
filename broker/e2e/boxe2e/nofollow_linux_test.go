@@ -115,4 +115,95 @@ func TestFileGateRefusesJournalsAndForeignWrites(t *testing.T) {
 	if b, err := readNoFollow(filepath.Join(mine, "ok")); err != nil || string(b) != "ok" {
 		t.Errorf("a read of a plain file: %q, %v", b, err)
 	}
+
+	// A create or truncate follows no link at the name, so nothing outside
+	// is made or emptied before the check.
+	if err := os.Symlink(filepath.Join(other, "made"), filepath.Join(mine, "dangle")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plain, filepath.Join(mine, "tlink")); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := openRaw(filepath.Join(mine, "dangle"), unix.O_WRONLY|unix.O_CREAT, 0o600); err == nil {
+		unix.Close(fd)
+		t.Error("openRaw created through a dangling link")
+	}
+	if fd, err := openRaw(filepath.Join(mine, "tlink"), unix.O_WRONLY|unix.O_TRUNC, 0); err == nil {
+		unix.Close(fd)
+		t.Error("openRaw truncated through a link")
+	}
+	if _, err := os.Lstat(filepath.Join(other, "made")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a create through a link made the target: %v", err)
+	}
+	if got, _ := os.ReadFile(plain); string(got) != "x" {
+		t.Errorf("a truncate through a link emptied the target: %q", got)
+	}
+
+	// Only /dev/ptmx, directories read-only and regular files off procfs
+	// and sysfs are opened: no device's raw contents, no process memory.
+	for _, c := range []struct {
+		path string
+		flag int
+	}{
+		{"/dev/null", unix.O_WRONLY},
+		{"/dev/zero", unix.O_RDONLY},
+		{"/proc/self/mem", unix.O_RDONLY},
+		{"/proc/self/environ", unix.O_RDONLY},
+		{"/sys/kernel/mm/transparent_hugepage/enabled", unix.O_RDONLY},
+	} {
+		if fd, err := openRaw(c.path, c.flag, 0); !errors.Is(err, errKind) {
+			if err == nil {
+				unix.Close(fd)
+			}
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("openRaw(%q) = %v, want it refused as a kind", c.path, err)
+			}
+		}
+	}
+	fifo := filepath.Join(mine, "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fd, err := openRaw(fifo, unix.O_RDONLY|unix.O_NONBLOCK, 0); !errors.Is(err, errKind) {
+		if err == nil {
+			unix.Close(fd)
+		}
+		t.Errorf("openRaw(a FIFO) = %v, want it refused as a kind", err)
+	}
+	fd, err = openRaw("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY, 0)
+	if err != nil {
+		t.Errorf("openRaw(/dev/ptmx) = %v", err)
+	} else {
+		if fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil || fl&unix.FD_CLOEXEC == 0 {
+			t.Errorf("openRaw's descriptor is not close-on-exec: %#x, %v", fl, err)
+		}
+		unix.Close(fd)
+	}
+	if fd, err := openRaw(mine, unix.O_RDONLY|unix.O_DIRECTORY, 0); err != nil {
+		t.Errorf("a directory read: %v", err)
+	} else {
+		unix.Close(fd)
+	}
+}
+
+// REQ: HW-10, ONB-3. writeDirs hold their own trees only, not a sibling
+// whose name starts the same, and writeFiles are those files only.
+func TestFileGateWritesOnlyItsOwnPlaces(t *testing.T) {
+	if mayWrite("/run/agentos-e2e-x/ip") || mayWrite("/run/agentos-e2e") || !mayWrite("/run/agentos-e2e/claim-code") {
+		t.Error("mayWrite does not hold writeDirs to their own trees")
+	}
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := writeFiles
+	writeFiles = append(append([]string{}, old...), filepath.Join(real, "drop-in.conf"))
+	t.Cleanup(func() { writeFiles = old })
+	if err := writeNoFollow(filepath.Join(dir, "drop-in.conf"), []byte("[Service]\n"), 0o644); err != nil {
+		t.Errorf("a write of a writeFiles file: %v", err)
+	}
+	if err := writeNoFollow(filepath.Join(dir, "drop-in.conf.d"), nil, 0o644); !errors.Is(err, errWrite) {
+		t.Errorf("a write beside a writeFiles file = %v, want it refused", err)
+	}
 }

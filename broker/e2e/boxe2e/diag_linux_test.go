@@ -469,7 +469,7 @@ var spawners = map[string]bool{
 // (Exec, ForkExec, a raw execve), and a list of what they add would go
 // stale, so every other function of theirs is refused.
 var sysAllowed = map[string]bool{
-	"golang.org/x/sys/unix.Close": true, "golang.org/x/sys/unix.Setns": true,
+	"golang.org/x/sys/unix.Close": true, "golang.org/x/sys/unix.Setns": true, "golang.org/x/sys/unix.Mkdev": true,
 	"golang.org/x/sys/unix.IoctlSetPointerInt": true, "golang.org/x/sys/unix.IoctlGetUint32": true,
 }
 
@@ -490,7 +490,7 @@ var (
 	gates    = []string{"openRaw", "inDir", "fdPath", "checkFD", "rootOpen", "symlink"}
 	gateOnly = map[string]bool{
 		"golang.org/x/sys/unix.Open": true, "golang.org/x/sys/unix.Openat": true, "golang.org/x/sys/unix.Fstat": true,
-		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true,
+		"golang.org/x/sys/unix.Pread": true, "golang.org/x/sys/unix.Symlinkat": true, "golang.org/x/sys/unix.Fstatfs": true,
 		"os.Readlink": true, "(*os.Root).OpenFile": true,
 	}
 )
@@ -500,9 +500,10 @@ var (
 var toolNames = []string{"ip", "systemctl", "journalctl"}
 
 // barred are imports no file of the driver takes: os/exec and
-// net/http/cgi start a process outside command, and unsafe, plugin and
-// cgo reach code the source test cannot read.
-var barred = map[string]bool{"os/exec": true, "net/http/cgi": true, "unsafe": true, "plugin": true, "C": true}
+// net/http/cgi start a process outside command, unsafe, plugin and cgo
+// reach code the source test cannot read, and io/ioutil is os's opens
+// under another path.
+var barred = map[string]bool{"os/exec": true, "net/http/cgi": true, "unsafe": true, "plugin": true, "C": true, "io/ioutil": true}
 
 // procReach are the packages that start a process the caller names, and
 // procImports the only direct imports of the driver whose own imports
@@ -676,6 +677,7 @@ func TestSourceTestRefusesEachBypass(t *testing.T) {
 		{"root read", `import "os"` + "\n" + `func zz(r *os.Root) { r.ReadFile("system.journal") }`, "zz uses (*os.Root).ReadFile, which the driver does not need"},
 		{"root open outside the gate", `import "os"` + "\n" + `func zz(r *os.Root) { r.OpenFile("system.journal", os.O_RDONLY, 0) }`, "zz uses (*os.Root).OpenFile, which only the file gate uses"},
 		{"readlink outside the gate", `import "os"` + "\n" + `func zz() { os.Readlink("/proc/self/fd/3") }`, "zz uses os.Readlink, which only the file gate uses"},
+		{"io/ioutil", `import "io/ioutil"` + "\n" + `func zz() { ioutil.ReadFile("/var/log/journal/x/system.journal") }`, "imports io/ioutil"},
 		{"syscall open", `import "syscall"` + "\n" + `func zz() { syscall.Open("/var/log/journal", 0, 0) }`, "zz uses syscall.Open, which the driver does not need (sysAllowed)"},
 		{"tools passed elsewhere", `var zz = tools`, "zz uses tools other than in command's childproc.Command call"},
 		{"tools changed", `func zz() { tools["ip"] = "/run/zz/ip" }`, "zz uses tools other than in command's childproc.Command call"},
@@ -845,9 +847,6 @@ func sourceProblems(fset *token.FileSet, files []*ast.File, imp types.Importer) 
 	if len(missing) > 0 {
 		return []string{fmt.Sprintf("the driver has no function or *driver method %v that the test names", missing)}
 	}
-	// childEnv must be childproc.NewEnv of one PATH= string literal, the
-	// only PATH= in the driver; its directories' last components are the
-	// ones no other constant may hold.
 	// childEnv is childproc.NewEnv of string literals, and tools a map
 	// literal from each of toolNames to a clean absolute path on /usr;
 	// each is used only in command's one childproc.Command call.
