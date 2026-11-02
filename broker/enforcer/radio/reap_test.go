@@ -25,6 +25,7 @@ import (
 type exited struct{}
 
 func (exited) Stop() error { return nil }
+func (exited) Pid() int    { return os.Getpid() }
 
 // device is the radio as the stand-in stacks act on it: it keeps what
 // reached it, and drops what a stack whose process is gone would send.
@@ -55,6 +56,8 @@ type standIn struct {
 func newStandIn(dev *device) *standIn {
 	return &standIn{dev: dev, stopped: make(chan struct{}), reap: make(chan struct{})}
 }
+
+func (p *standIn) Pid() int { return os.Getpid() }
 
 func (p *standIn) Stop() error {
 	p.once.Do(func() { close(p.stopped) })
@@ -207,7 +210,11 @@ func TestStuckStackHoldsOnlyItsOwnAttach(t *testing.T) {
 }
 
 // TestAttachNeedsProcessAndLink (ENF-k-11): a link without the process
-// whose end it is cannot be attached, nor a process without a link.
+// whose end it is cannot be attached, nor a process without a link. A nil
+// *confine.Proc (what a launcher holds after a failed Start) is no
+// process either: Attach refuses it, rather than taking it and panicking
+// in the goroutine that stops it at the link's first fault, which would
+// end the enforcer (#4521 item 1).
 func TestAttachNeedsProcessAndLink(t *testing.T) {
 	h, err := NewHost(Config{Devices: []Device{door}, Notify: func(Notification) {}, Log: func(string) {}})
 	if err != nil {
@@ -222,41 +229,51 @@ func TestAttachNeedsProcessAndLink(t *testing.T) {
 	if err := h.Attach(StackBLE, exited{}, nil); err == nil {
 		t.Error("attached a process with no link")
 	}
+	var failed *confine.Proc
+	if err := h.Attach(StackBLE, failed, host); err == nil {
+		t.Error("attached a nil *confine.Proc")
+	}
 	if _, err := h.State("door"); !errors.Is(err, ErrNoStack) {
 		t.Errorf("after refused attaches: %v, want ErrNoStack", err)
 	}
 }
 
-// faultArg makes this test binary a stack that starts a child holding its
-// stderr, sends the host an answer to nothing, and stays alive.
+// faultArg makes this test binary a stack that tries to start a child
+// holding its stderr, sends the host an answer to nothing, and stays
+// alive.
 const faultArg = "radio-probe-fault"
 
 // sleepArg makes this test binary a process that only sleeps: the fault
-// stack's child.
+// stack's child, were it to start, and TestWaitAndStopReapOnce's stack.
 const sleepArg = "radio-probe-sleep"
 
-// childStarted is what the fault stack writes once its child runs.
-const childStarted = "child started\n"
+// childRefused is what the fault stack writes when its child's start gets
+// the filter's EPERM; anything else it writes is the start's other
+// outcome.
+const childRefused = "child refused\n"
 
 func faultStack() {
 	child := exec.Command("/proc/self/exe", sleepArg)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stderr, os.Stderr
-	if err := child.Start(); err != nil {
-		os.Exit(2)
+	if err := child.Start(); errors.Is(err, syscall.EPERM) {
+		os.Stderr.WriteString(childRefused)
+	} else {
+		os.Stderr.WriteString("child start not refused\n")
 	}
-	os.Stderr.WriteString(childStarted)
 	write(os.NewFile(3, "interface"), Up{ID: 99, Device: "scale", Code: CodeOK})
 	time.Sleep(time.Hour)
 }
 
-// TestReplacedStackReapedWithItsChildren (ENF-k-11, NET-2 Confined radio
-// stacks): a confined stack that faults its link and stays alive, with a
-// child of its own holding its stderr, is killed by the host, and Attach
-// of its replacement returns only once it is reaped and its child is
-// gone too (the stack is its PID namespace's init). Catches a launcher
-// that leaves the old process, or a process it started, running beside
-// the new link.
-func TestReplacedStackReapedWithItsChildren(t *testing.T) {
+// TestReplacedStackReapedAndStartsNoChild (ENF-k-11, NET-2 Confined radio
+// stacks): a confined stack that faults its link and stays alive is
+// killed by the host, and Attach of its replacement returns only once it
+// is reaped and nothing holds its stderr. It could not start a child to
+// outlive it or hold its stderr: the filter refuses a new process
+// (#4521), and were one to get out, the stack is its PID namespace's
+// init, so the kernel kills it before the reap. Catches a launcher that
+// leaves the old process running beside the new link, and a filter that
+// lets a stack start a process.
+func TestReplacedStackReapedAndStartsNoChild(t *testing.T) {
 	if !asRoot(t) {
 		return
 	}
@@ -297,9 +314,9 @@ func TestReplacedStackReapedWithItsChildren(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.SetReadDeadline(time.Now().Add(20 * time.Second))
-	line := make([]byte, len(childStarted))
-	if _, err := io.ReadFull(r, line); err != nil || string(line) != childStarted {
-		t.Fatalf("the fault stack's child: %q, %v", line, err)
+	line := make([]byte, len(childRefused))
+	if _, err := io.ReadFull(r, line); err != nil || string(line) != childRefused {
+		t.Fatalf("the fault stack's child: %q, %v; want its start refused", line, err)
 	}
 	select {
 	case <-faulted:
@@ -328,7 +345,7 @@ func TestReplacedStackReapedWithItsChildren(t *testing.T) {
 	}
 	r.SetReadDeadline(time.Now().Add(2 * time.Second))
 	if _, err := io.Copy(io.Discard, r); err != nil {
-		t.Errorf("the replaced stack's child still holds its stderr after Attach: %v", err)
+		t.Errorf("something still holds the replaced stack's stderr after Attach: %v", err)
 	}
 	if _, err := h.State(scale.Name); err != nil {
 		t.Errorf("the replacement: %v", err)

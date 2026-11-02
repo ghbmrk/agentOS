@@ -3,6 +3,8 @@ package page
 // REQ: NET-3, NET-4
 
 import (
+	"errors"
+	"fmt"
 	"html"
 	"net/http"
 	"slices"
@@ -178,7 +180,7 @@ func TestHeardFillsWhenPathOpens(t *testing.T) {
 	})
 	opened := clone(cur)
 	dev(&opened, "tv").Isolated = false
-	got, err := g.s.heard(cur, opened)
+	got, _, err := g.s.heard(cur, opened)
 	if err != nil || len(got.Device("tv").MDNS) != 1 {
 		t.Errorf("the path's return filled %q (%v)", got.Device("tv").MDNS, err)
 	}
@@ -189,12 +191,260 @@ func TestHeardFillsWhenPathOpens(t *testing.T) {
 	})
 	camOn := clone(camOff)
 	dev(&camOn, "cam").Isolated = false
-	if got, err := g.s.heard(camOff, camOn); err != nil || len(got.Device("tv").MDNS) != 1 {
+	if got, _, err := g.s.heard(camOff, camOn); err != nil || len(got.Device("tv").MDNS) != 1 {
 		t.Errorf("the other end's return filled %q (%v)", got.Device("tv").MDNS, err)
 	}
 	kept := clone(opened)
 	dev(&kept, "tv").Allow = append(dev(&kept, "tv").Allow, "b.example")
-	if got, err := g.s.heard(opened, kept); err != nil || len(got.Device("tv").MDNS) != 0 {
+	if got, _, err := g.s.heard(opened, kept); err != nil || len(got.Device("tv").MDNS) != 0 {
 		t.Errorf("a kept path filled %q (%v)", got.Device("tv").MDNS, err)
+	}
+}
+
+// pairedTV is home(v) with a Household laptop paired with tv and the
+// laptop holding macbook.local.
+func pairedTV(v uint64) policy.Document {
+	return edit(v, func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true, MDNS: [][]string{{"macbook", "local"}}})
+		d.Pairs = []policy.Pair{{A: "laptop", B: "tv"}}
+	})
+}
+
+// sign has the owner approve the change screen id and ch drew, and lets
+// it apply.
+func (g *rig) sign(id, ch string) policy.Document {
+	g.t.Helper()
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		g.t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	g.now = g.now.Add(time.Duration(policy.Wait) * time.Millisecond)
+	if _, err := g.e.Tick(g.now.UnixMilli()); err != nil {
+		g.t.Fatal(err)
+	}
+	return g.e.Current()
+}
+
+// TestHeardHolds: a person's network's names are held from what the
+// enforcer heard there (#4411). The link that pairs a Household device
+// offers every name heard on the Household network that no device pins
+// or holds as a hold for it, on the card before the passkey; once
+// signed, a device that later proves one of them is not offered it, and
+// no document can pin it on a device (ErrNameHeld).
+func TestHeardHolds(t *testing.T) {
+	g := newRig(t)
+	// tv.local stands for a name the relay's claims would keep from both
+	// networks at once: the device that announces it gets it.
+	g.heard["household"] = [][]string{{"macbook", "local"}, {"spouse-phone", "local"}, {"tv", "local"}}
+	g.heard["vlan104"] = [][]string{{"tv", "local"}}
+	screen, id, ch := g.open(pairedTV(2), "pair")
+	plain := html.UnescapeString(screen)
+	if !strings.Contains(plain, "Hold the name spouse-phone.local for laptop: no paired device may announce it.") ||
+		strings.Contains(plain, "Hold the name tv.local") || strings.Count(plain, "Hold the name macbook.local") != 1 {
+		t.Errorf("the pairing card's holds:\n%s", plain)
+	}
+	cur := g.sign(id, ch)
+	if got, want := cur.Device("laptop").MDNS, [][]string{{"macbook", "local"}, {"spouse-phone", "local"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("laptop holds %q, want %q", got, want)
+	}
+	if got := cur.Device("tv").MDNS; !slices.EqualFunc(got, [][]string{{"tv", "local"}}, slices.Equal) {
+		t.Fatalf("tv pins %q", got)
+	}
+
+	// cam, paired later, proves the held name on its own VLAN: it is not
+	// offered, and a link that pins it anyway is refused naming both.
+	g.heard["vlan102"] = [][]string{{"cam", "local"}, {"spouse-phone", "local"}}
+	withCam := clone(cur)
+	withCam.Pairs = append(withCam.Pairs, policy.Pair{A: "cam", B: "laptop"})
+	if screen, _, _ := g.open(withCam, "pair cam"); strings.Contains(screen, "Let cam announce the name spouse-phone.local") ||
+		!strings.Contains(screen, "Let cam announce the name cam.local") {
+		t.Errorf("cam's fill:\n%s", screen)
+	}
+	dev(&withCam, "cam").MDNS = [][]string{{"spouse-phone", "local"}}
+	if _, err := policy.Encode(withCam); !errors.Is(err, policy.ErrNameHeld) {
+		t.Errorf("pinning a held name: %v", err)
+	}
+
+	// A link that keeps the pair's path fills no holds.
+	g.heard["household"] = append(g.heard["household"], []string{"new-phone", "local"})
+	kept := clone(cur)
+	dev(&kept, "tv").Allow = append(dev(&kept, "tv").Allow, "b.example")
+	if screen, _, _ := g.open(kept, "allow"); strings.Contains(screen, "Hold the name") {
+		t.Errorf("a kept path filled holds:\n%s", screen)
+	}
+}
+
+// TestHeardFillBounded: one card adds at most maxFill heard names to a
+// device, hosts first, and says how many it left out (#4565, Security on
+// #4531): a device flooding its VLAN cannot bury the card's other lines.
+func TestHeardFillBounded(t *testing.T) {
+	g := newRig(t)
+	var flood, hosts [][]string
+	for i := range 3 * maxFill {
+		flood = append(flood, []string{fmt.Sprintf("Svc%03d", i), "_ipp", "_tcp", "local"})
+	}
+	for i := range 10 {
+		h := []string{fmt.Sprintf("h%02d", i), "local"}
+		hosts = append(hosts, h)
+		flood = append(flood, h)
+	}
+	g.heard["vlan104"] = flood
+	var person [][]string
+	for i := range maxFill + 5 {
+		person = append(person, []string{fmt.Sprintf("p%02d", i), "local"})
+	}
+	g.heard["household"] = person
+	screen, id, ch := g.open(pairedTV(2), "pair")
+	plain := html.UnescapeString(screen)
+	if n := strings.Count(plain, "Let tv announce the name"); n != maxFill {
+		t.Errorf("%d tv names on the card, want %d", n, maxFill)
+	}
+	if n := strings.Count(plain, "Hold the name p"); n != maxFill {
+		t.Errorf("%d holds on the card, want %d", n, maxFill)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("%d more names tv announces are left out of this change; the home page offers them once it applies.", 3*maxFill+10-maxFill),
+		"5 more names heard on the household network are left out of this change; the home page offers to hold them for laptop once it applies.",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("the card lacks %q:\n%s", want, plain)
+		}
+	}
+	cur := g.sign(id, ch)
+	tv := cur.Device("tv").MDNS
+	if len(tv) != maxFill {
+		t.Fatalf("tv pins %d names, want %d", len(tv), maxFill)
+	}
+	for _, h := range hosts {
+		if !listed(tv, h) {
+			t.Errorf("host %q left out before an instance", h)
+		}
+	}
+	// The home page offers the next ones, at most maxFill again, saying
+	// there are more, and the offer's card says how many it left out.
+	offs := g.s.offers(cur)
+	if len(offs) != 2 || offs[0].ID != "laptop" || len(offs[0].Names) != 5 || offs[1].ID != "tv" || len(offs[1].Names) != maxFill || offs[1].More != 3*maxFill+10-2*maxFill {
+		t.Errorf("offers after the flood: %+v", offs)
+	}
+	home := html.UnescapeString(g.do(http.MethodGet, "/", nil).Body.String())
+	if !strings.Contains(home, " and more: let it?") || !strings.Contains(home, "hold them for laptop, so no paired device may announce them?") {
+		t.Errorf("the home page's offers:\n%s", home)
+	}
+	w := g.do(http.MethodGet, "/heard?d=tv", nil)
+	if want := fmt.Sprintf("%d more names tv announces are left out of this change", 3*maxFill+10-2*maxFill); w.Code != http.StatusOK || !strings.Contains(html.UnescapeString(w.Body.String()), want) {
+		t.Errorf("the offer's card lacks %q: %d %s", want, w.Code, w.Body)
+	}
+}
+
+// TestHeardHoldsOncePerNetwork: a link that pairs two devices of one
+// person's network fills that network's names once, within maxFill, with
+// one true left-out line (Security on #4596).
+func TestHeardHoldsOncePerNetwork(t *testing.T) {
+	g := newRig(t)
+	var person [][]string
+	for i := range 3 * maxFill {
+		person = append(person, []string{fmt.Sprintf("p%03d", i), "local"})
+	}
+	g.heard["household"] = person
+	two := edit(2, func(d *policy.Document) {
+		d.Devices = append(d.Devices,
+			policy.Device{ID: "desk", Network: policy.NetHousehold, Everyday: true},
+			policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
+		d.Pairs = []policy.Pair{{A: "desk", B: "tv"}, {A: "laptop", B: "tv"}}
+	})
+	screen, _, _ := g.open(two, "pair two")
+	plain := html.UnescapeString(screen)
+	if n := strings.Count(plain, "Hold the name p"); n != maxFill {
+		t.Errorf("%d holds on the card, want %d", n, maxFill)
+	}
+	if n := strings.Count(plain, "more names heard on the household network"); n != 1 ||
+		!strings.Contains(plain, fmt.Sprintf("%d more names heard on the household network are left out of this change; the home page offers to hold them for desk once it applies.", 2*maxFill)) {
+		t.Errorf("the left-out lines:\n%s", plain)
+	}
+}
+
+// TestHeardOffer: names a paired device starts announcing after its pair
+// was signed are offered on the home page as their own change, one tap
+// on the confirm screen, drawn by the enforcer from what it heard (#4566,
+// UX on #4531): no unpairing. So are names newly heard on a person's
+// network, as holds. No offer is made for an unpaired or isolated
+// device, nor for a name another device pins or holds.
+func TestHeardOffer(t *testing.T) {
+	g := newRig(t)
+	g.heard["vlan104"] = [][]string{{"tv", "local"}}
+	_, id, ch := g.open(pairedTV(2), "pair")
+	cur := g.sign(id, ch)
+
+	g.heard["vlan104"] = [][]string{{"Living Room", "_airplay", "_tcp", "local"}, {"macbook", "local"}, {"tv", "local"}}
+	g.heard["vlan102"] = [][]string{{"cam", "local"}} // unpaired
+	g.heard["household"] = [][]string{{"spouse-phone", "local"}}
+	w := g.do(http.MethodGet, "/", nil)
+	home := html.UnescapeString(w.Body.String())
+	for _, want := range []string{
+		`tv now announces "Living Room._airplay._tcp.local": let it?`,
+		`href="/heard?d=tv"`,
+		"The household network now announces spouse-phone.local: hold it for laptop, so no paired device may announce it?",
+		`href="/heard?d=laptop"`,
+	} {
+		if !strings.Contains(home, want) {
+			t.Errorf("the home page lacks %q:\n%s", want, home)
+		}
+	}
+	if strings.Contains(home, "cam now announces") || strings.Contains(home, "macbook.local: let") {
+		t.Errorf("an unpaired device or a held name is offered:\n%s", home)
+	}
+	if w := g.do(http.MethodGet, "/heard?d=cam", nil); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errNoOffer.Error()) {
+		t.Errorf("no offer for cam: %d %s", w.Code, w.Body)
+	}
+	for _, bad := range []string{"/heard", "/heard?d=tv&d=tv", "/heard?d=tv&x=1"} {
+		if w := g.do(http.MethodGet, bad, nil); w.Code != http.StatusBadRequest || reChal.MatchString(w.Body.String()) {
+			t.Errorf("%s: %d %s", bad, w.Code, w.Body)
+		}
+	}
+
+	// One tap lets tv announce its new name.
+	w = g.do(http.MethodGet, "/heard?d=tv", nil)
+	body := w.Body.String()
+	m, c := reID.FindStringSubmatch(body), reChal.FindStringSubmatch(body)
+	if w.Code != http.StatusOK || m == nil || c == nil {
+		t.Fatalf("the offer's screen: %d %s", w.Code, body)
+	}
+	plain := html.UnescapeString(body)
+	if !strings.Contains(plain, `Let tv announce the name "Living Room._airplay._tcp.local" to the networks and devices it is paired with; no other device may use it.`) ||
+		strings.Contains(plain, "macbook") || strings.Contains(plain, "Hold the name") {
+		t.Errorf("the offer's card:\n%s", plain)
+	}
+	cur = g.sign(m[1], c[1])
+	if got, want := cur.Device("tv").MDNS, [][]string{{"Living Room", "_airplay", "_tcp", "local"}, {"tv", "local"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Fatalf("tv pins %q, want %q", got, want)
+	}
+	// And one holds the household's.
+	w = g.do(http.MethodGet, "/heard?d=laptop", nil)
+	body = w.Body.String()
+	m, c = reID.FindStringSubmatch(body), reChal.FindStringSubmatch(body)
+	if w.Code != http.StatusOK || m == nil || !strings.Contains(body, "Hold the name spouse-phone.local for laptop") {
+		t.Fatalf("the hold offer's screen: %d %s", w.Code, body)
+	}
+	cur = g.sign(m[1], c[1])
+	if !listed(cur.Device("laptop").MDNS, []string{"spouse-phone", "local"}) {
+		t.Fatalf("laptop holds %q", cur.Device("laptop").MDNS)
+	}
+	if offs := g.s.offers(cur); len(offs) != 0 {
+		t.Errorf("still offered after signing: %+v", offs)
+	}
+	// A person's network is offered once, however many of its devices
+	// are paired.
+	g.heard["household"] = append(g.heard["household"], []string{"new-phone", "local"})
+	two := clone(cur)
+	two.Devices = append(two.Devices, policy.Device{ID: "desk", Network: policy.NetHousehold, Everyday: true})
+	two.Pairs = append(two.Pairs, policy.Pair{A: "desk", B: "tv"})
+	if offs := g.s.offers(two); len(offs) != 1 || !slices.EqualFunc(offs[0].Names, [][]string{{"new-phone", "local"}}, slices.Equal) {
+		t.Errorf("two paired household devices: %+v", offs)
+	}
+	// An isolated device's pair has no path: nothing is offered for it.
+	g.heard["vlan104"] = append(g.heard["vlan104"], []string{"tv-2", "local"})
+	iso := clone(cur)
+	dev(&iso, "tv").Isolated = true
+	if offs := g.s.offers(iso); len(offs) != 0 {
+		t.Errorf("offered for an isolated device: %+v", offs)
 	}
 }

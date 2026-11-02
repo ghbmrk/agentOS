@@ -32,6 +32,7 @@ import (
 type exited struct{}
 
 func (exited) Stop() error { return nil }
+func (exited) Pid() int    { return os.Getpid() }
 
 // REQ: NET-2
 

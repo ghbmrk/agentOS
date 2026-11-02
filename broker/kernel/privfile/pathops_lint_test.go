@@ -10,9 +10,13 @@ package privfile
 // with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
 // each Exec program a plain absolute path, read across continued lines,
 // sections, quotes and ;, with no substitution in what a wrapper runs
-// (#4390, #4494); every broker binary named as a mount, umount, fsck
-// or mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
-// plain type and no helper option (#4380);
+// (#4390, #4494); every broker binary named as a mount, umount, fsck or
+// mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
+// plain type and no helper option (#4380), and over a tree root reads or
+// runs no bind, move or loop, a source only a device under /dev outside
+// openDevs, with no .. step or % specifier, options of only letters,
+// digits and =,_-./, and a tmpfs only with a mode no other uid writes
+// (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
 // or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
@@ -41,11 +45,14 @@ package privfile
 // lines a package rather than image/ or broker/ ships, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
-// operations of non-root host processes are outside the check, as is a bare
-// name a wrapper or shell resolves through PATH, or a shell's own expansion
-// inside a root sh -c script (broker binaries sit in
-// /usr/lib/agentos, off PATH, but camnode's in /usr/bin), and a program a
-// wrapper runs from outside rootTrees that tmpfiles.d hands to another uid.
+// operations of non-root host processes are outside the check, as is what
+// a wrapper or shell in a root command runs beyond the absolute broker paths
+// it names (a bare name on PATH, a relative path, a shell's own expansion,
+// a change of directory, a program in a tree another uid writes: #4493,
+// which replaces this with an allow-list of root programs), a mount drop-in
+// read alone for a packaged unit, whose type the lint does not see, and a
+// root unit's own namespace and search settings (RootDirectory=,
+// BindPaths=, TemporaryFileSystem=, WorkingDirectory=, PATH=; #4589).
 
 import (
 	"fmt"
@@ -427,6 +434,11 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		// #4494 Security delta 3 R-1, R-2.
 		"an unclosed pinned variable":                   {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER\n", `holds a $ substitution`},
 		"a pinned variable with an unread Environment=": {"image/mkosi/agentosd.service", "[Service]\nEnvironment='A=1\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
+		// #4533: the manager's environment may fill a pinned variable the
+		// unit does not clear.
+		"a pinned variable the unit does not clear": {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
+		"a pinned variable a reset unclears":        {"image/mkosi/agentosd.service", "[Service]\nEnvironment=AGENTOS_OWNER=\nEnvironment=\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
+		"a pinned variable PassEnvironment= names":  {"image/mkosi/agentosd.service", "[Service]\nEnvironment=AGENTOS_OWNER=\nPassEnvironment=X AGENTOS_OWNER\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -453,7 +465,7 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 	})
 	t.Run("refuses a pinned variable another env file may fill", func(t *testing.T) {
 		files := clone(files)
-		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironmentFile=-/etc/agentos/agentosd.env\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=AGENTOS_OWNER=\nEnvironmentFile=-/etc/agentos/agentosd.env\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatalf("the pinned env file alone: %v", err)
 		}
@@ -462,9 +474,28 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			t.Fatalf("got %v, want a refusal", err)
 		}
 	})
+	// #4533: a drop-in may reset Environment= only if it clears the
+	// pinned variable again after.
+	t.Run("refuses a drop-in that unclears a pinned variable", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=AGENTOS_OWNER=\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		for dropin, ok := range map[string]bool{
+			"[Service]\nEnvironment=\nEnvironment=AGENTOS_OWNER= A=1\n":              true,
+			"[Service]\nEnvironment=A=1\n":                                           true,
+			"[Service]\nEnvironment=\n":                                              false,
+			"[Service]\nEnvironment=AGENTOS_OWNER=\nEnvironment=\n":                  false,
+			"[Service]\nEnvironment=\nPassEnvironment=AGENTOS_OWNER\n":               false,
+			"[Service]\nEnvironment=AGENTOS_OWNER=\nPassEnvironment=AGENTOS_OWNER\n": false,
+		} {
+			files["image/mkosi/agentosd.service.d/z.conf"] = dropin
+			if _, err := rootBinaries(fakeRepo(t, files)); (err == nil) != ok || err != nil && !strings.Contains(err.Error(), "holds a $ substitution") {
+				t.Errorf("drop-in %q: got %v, want accepted %v", dropin, err, ok)
+			}
+		}
+	})
 	t.Run("a pinned variable where unitVars pins it", func(t *testing.T) {
 		files := clone(files)
-		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=OTHER=1\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
+		files["image/mkosi/agentosd.service"] = "[Service]\nEnvironment=OTHER=1 AGENTOS_OWNER=\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
 		}
@@ -516,7 +547,7 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"image/mkosi/agentos-side.service":  "[Service]\nUser=agentos-side\nExecStart=/usr/lib/agentos/agentos-side\n",
 		unit:                                "[Mount]\nWhat=/dev/x\nWhere=/var/lib/x\nType=ext4\nOptions=nosuid,nodev,noexec\n",
 		"image/mkosi/tmp.mount.d/50-x.conf": "[Mount]\nOptions=mode=1777,nosuid,nodev,noexec,size=50%%\n",
-		"image/mkosi/mkosi.extra/etc/fstab": "# x\ntmpfs /run tmpfs nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs nosuid\ntmpfs /var/tmp/x tmpfs mode=0777\n",
+		"image/mkosi/mkosi.extra/etc/fstab": "# x\ntmpfs /run tmpfs mode=0755,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs nosuid\ntmpfs /var/tmp/x tmpfs mode=0777,x-a=\"b,c\"\n",
 		"image/x/run-camboot.mount":         "[Mount]\nType=vfat\nOptions=uid=990,gid=990,umask=0077\n",
 	}
 	if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 0 {
@@ -550,10 +581,51 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"an X-mount.mode over a rules dir":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc/udev/rules.d ext4 X-mount.mode=0777 0 0\n", `option X-mount.mode=0777`},
 		"an X-mount.owner over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.owner=1000 0 0\n", `option X-mount.owner=1000`},
 		"an X-mount.group over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.group=100 0 0\n", `option X-mount.group=100`},
-		"an X-mount.idmap over /etc":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 X-mount.idmap=u:0:1000:1 0 0\n", `option X-mount.idmap`},
+		"an X-mount.idmap over /etc":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 X-mount.idmap=/proc/1/ns/user 0 0\n", `option X-mount.idmap`},
 		"a writable tmpfs over /var/run/systemd": {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /var/run/systemd/system tmpfs mode=0777 0 0\n", `option mode=0777`},
 		"an owner option on a var-run unit":      {"image/x/var-run-udev.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
 		"an owner option on an escaped name":     {"image/x/run-modules\\x2dload.d.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
+		// #4516: a tmpfs defaults to 1777; a bind, move or loop puts another
+		// tree over a root tree.
+		"a default tmpfs over a rules dir":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs defaults 0 0\n", `with no mode=`},
+		"a ramfs over /usr":                 {"image/mkosi/mkosi.extra/etc/fstab", "ramfs /usr/lib/agentos ramfs nosuid 0 0\n", `with no mode=`},
+		"a tmpfs with no options over /run": {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /run tmpfs\n", `with no mode=`},
+		"a group-writable tmpfs mode":       {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=0775 0 0\n", `option mode=0775`},
+		"an other-writable tmpfs mode":      {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=0757 0 0\n", `option mode=0757`},
+		"an image in /dev/shm in fstab":     {"image/mkosi/mkosi.extra/etc/fstab", "/dev/shm/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/shm/x.img`},
+		"a file in /dev/mqueue in fstab":    {"image/mkosi/mkosi.extra/etc/fstab", "/dev/mqueue/x /etc ext4 ro 0 0\n", `source /dev/mqueue/x`},
+		"an image in /dev/shm in a unit":    {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/shm/x.img\nType=squashfs\n", `What=/dev/shm/x.img`},
+		"an unclean /dev/shm source":        {"image/mkosi/mkosi.extra/etc/fstab", "/dev/./shm/x.img /usr squashfs ro 0 0\n", `source /dev/./shm/x.img`},
+		"an image in /run/shm":              {"image/mkosi/mkosi.extra/etc/fstab", "/run/shm/x.img /usr squashfs ro 0 0\n", `source /run/shm/x.img`},
+		"a /dev/fd source":                  {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/3 /etc ext4 ro 0 0\n", `source /dev/fd/3`},
+		"a /dev/stdin source in a unit":     {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/stdin\nType=squashfs\n", `What=/dev/stdin`},
+		"a /dev/stdout source":              {"image/mkosi/mkosi.extra/etc/fstab", "/dev/stdout /etc ext4 ro 0 0\n", `source /dev/stdout`},
+		"a /dev/stderr source":              {"image/mkosi/mkosi.extra/etc/fstab", "/dev/stderr /etc ext4 ro 0 0\n", `source /dev/stderr`},
+		"a /proc source in a unit":          {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/proc/self/fd/3\nType=squashfs\n", `What=/proc/self/fd/3`},
+		"a .. after /dev/fd in fstab":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/../root/tmp/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/fd/../root/tmp/x.img`},
+		"a .. after /dev/fd in a unit":      {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/fd/../root/tmp/x.img\nType=squashfs\n", `What=/dev/fd/../root/tmp/x.img`},
+		"a specifier source":                {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=%V\nType=squashfs\n", `What=%V`},
+		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u-w 0 0\n", `option mode=u-w`},
+		"a mode past 7777":                  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=10755 0 0\n", `option mode=10755`},
+		"a bind in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 bind 0 0\n", `option bind`},
+		"a move in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 nosuid,move 0 0\n", `option move`},
+		"a loop in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr squashfs loop=/dev/loop0 0 0\n", `option loop=/dev/loop0`},
+		"a directory source in fstab":       {"image/mkosi/mkosi.extra/etc/fstab", "/var/tmp/u /usr/lib/agentos ext4 defaults 0 0\n", `source /var/tmp/u`},
+		"an unclean source in fstab":        {"image/mkosi/mkosi.extra/etc/fstab", "/dev/../var/tmp/u /etc ext4 defaults 0 0\n", `source /dev/../var/tmp/u`},
+		"a default tmpfs over /var/run":     {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /var/run/udev tmpfs nosuid 0 0\n", `with no mode=`},
+		"an rbind unit":                     {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/x\nType=ext4\nOptions=rbind\n", `option rbind`},
+		"a loop in a type drop-in":          {"image/mkosi/mount.d/x.conf", "[Mount]\nOptions=loop\n", `option loop`},
+		"an image file source":              {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/var/tmp/x.img\nType=squashfs\n", `What=/var/tmp/x.img`},
+		"a default tmpfs unit over /etc":    {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=nosuid\n", `sets no mode=`},
+		"a tmpfs unit with no Options=":     {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\n", `with no Options=`},
+		"a tmpfs in a drop-in over /etc":    {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=ramfs\n", `with no Options=`},
+		// #4559 Security 1: libmount keeps a quoted value whole.
+		"a quoted mode in fstab":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs x-a=\",mode=0755,\",nosuid 0 0\n", `hold a byte other than`},
+		"a quoted mode in a unit": {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=\",mode=0755,\",nosuid\n", `hold a byte other than`},
+		// #4559 Security delta 1: libmount keeps a \-escaped comma too.
+		"an escaped comma in a unit":    {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=a\\,mode=0755,nosuid\n", `hold a byte other than`},
+		"an escaped comma in a drop-in": {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=tmpfs\nOptions=x-a=a\\,mode=0755\n", `hold a byte other than`},
+		"a single quote in a unit":      {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=mode=0755,x-a='b'\n", `hold a byte other than`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -563,6 +635,26 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a tmpfs over a root tree whose every Options= holds a mode", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/mkosi.extra/etc/fstab"] += "tmpfs /run/systemd/x tmpfs mode=1755,nosuid 0 0\nramfs /etc/y ramfs mode=700 0 0\n"
+		files["image/x/etc-x.mount"] = "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=mode=0755,nosuid\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatal(err)
+		}
+		// Options= in a drop-in replaces the unit's.
+		files["image/x/etc-x.mount.d/z.conf"] = "[Mount]\nOptions=nosuid\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "sets no mode=") {
+			t.Fatalf("a drop-in without the mode: got %v, want a refusal", err)
+		}
+		// Drop-ins sort across directories, so which one is last is not
+		// read: a mode only in the drop-in is refused too.
+		files["image/x/etc-x.mount"] = "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=nosuid\n"
+		files["image/x/etc-x.mount.d/z.conf"] = "[Mount]\nOptions=mode=0755\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), "sets no mode=") {
+			t.Fatalf("a unit without the mode: got %v, want a refusal", err)
+		}
+	})
 	for _, helper := range []string{"mount.agentos", "umount.agentos", "fsck.ext4", "mkfs.ext4"} {
 		t.Run("a broker binary named "+helper, func(t *testing.T) {
 			files := clone(files)
@@ -886,6 +978,27 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 			t.Fatalf("got %q, %v, want a refusal naming /opt/y/helper", bins, err)
 		}
 	})
+	// #4516 (#4494 Security delta R-1): /var/lock is /run/lock, /run/shm is
+	// /dev/shm, and /var/run/shm is both.
+	t.Run("refuses a grant on a root program spelled through an alias", func(t *testing.T) {
+		for prog, grant := range map[string]string{
+			"/run/lock/agentos-v/x":    "/var/lock/agentos-v/x",
+			"/var/lock/agentos-w/x":    "/run/lock/agentos-w/x",
+			"/dev/shm/agentos-v/x":     "/run/shm/agentos-v/x", // #4559 L3 1: /run/shm is /dev/shm
+			"/var/run/shm/agentos-w/x": "/dev/shm/agentos-w/x", // and the aliases chain
+		} {
+			files := clone(files)
+			files[programsFile] = "/bin/false exits 1\n"
+			files["image/mkosi/agentos-side.service"] += "ExecStartPre=+" + prog + "\n"
+			if _, err := set(t, files); err != nil {
+				t.Fatalf("%s alone: %v", prog, err)
+			}
+			files[tmpfiles] += "z " + grant + " 0755 nobody\n"
+			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "which root reads or runs") {
+				t.Errorf("%s with a grant on %s: got %q, %v, want a refusal", prog, grant, bins, err)
+			}
+		}
+	})
 	t.Run("the shipped files", func(t *testing.T) {
 		// root_programs.txt lists /bin/false and /usr/bin/false only for
 		// agentos-no-bluetooth.conf and 99-agentos-nodump.conf: were either
@@ -1190,13 +1303,17 @@ func mayBeRoot(v string) bool {
 // shipped Exec line passes fails (TestUnitVarsAreUsed).
 var unitVars = map[string]unitVar{
 	"AGENTOS_OWNER": {"agentosd.service", []string{"/usr/lib/agentos/with-uids", "/usr/lib/agentos/agentosd"}, "-owner", "-/etc/agentos/agentosd.env",
-		"agentosd's -owner value, from /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6); with-uids runs agentosd, its first argument, and passes this one on as data"},
+		"agentosd's -owner value: the unit's AGENTOS_OWNER= overrides the manager's environment, and only /etc/agentos/agentosd.env (0600 in root's 0700 /etc/agentos, written by onboarding, image ASSUMPTIONS I6) fills it; with-uids runs agentosd, its first argument, and passes this one on as data"},
 }
 
 // unitVar pins where a unitVars variable may appear: only in unit, in a
 // command that starts with cmd, right after the word flag, and only when
-// no Environment= line of the unit sets it but to empty and every
-// EnvironmentFile= is envFile (#4494 Security delta 2 and 3).
+// every EnvironmentFile= is envFile (#4494 Security delta 2 and 3) and the
+// unit clears it with NAME= that no Environment= reset undoes and no
+// PassEnvironment= names (#4533). systemd lays Environment= over the
+// manager's environment (DefaultEnvironment=, systemd.setenv=) and
+// PassEnvironment=, and EnvironmentFile= over all three, so the value is
+// the env file's or empty.
 type unitVar struct {
 	unit    string
 	cmd     []string
@@ -1205,10 +1322,13 @@ type unitVar struct {
 	reason  string
 }
 
+// envLine is one Environment=, EnvironmentFile= or PassEnvironment= of a
+// unit, in the order systemd reads its files and lines.
+type envLine struct{ file, key, value string }
+
 // allowedVar reports whether word i of a command of unit is a whole-word
-// ${NAME} that unitVars pins there, env does not set and only its envFile
-// may fill.
-func allowedVar(unit string, words []string, i int, env, envFiles []string) bool {
+// ${NAME} that unitVars pins there and only its envFile may fill.
+func allowedVar(unit string, words []string, i int, env []envLine) bool {
 	name, ok := strings.CutPrefix(words[i], "${")
 	name, whole := strings.CutSuffix(name, "}")
 	v, listed := unitVars[name]
@@ -1220,27 +1340,52 @@ func allowedVar(unit string, words []string, i int, env, envFiles []string) bool
 			return false
 		}
 	}
-	for _, f := range envFiles {
-		if f != v.envFile {
-			return false
-		}
-	}
-	// The unit may only clear it (agentosd.service's AGENTOS_OWNER=, so an
-	// absent env file runs setup mode).
+	// Drop-ins sort by name across directories, so the order of files is
+	// not read: a file with a reset (an empty Environment=) must clear the
+	// variable again after its last one, which holds whichever file sorts
+	// last.
+	cleared := false
+	open := map[string]bool{} // file -> a reset not yet followed by NAME=
 	for _, e := range env {
-		cmds, err := execWords(e)
-		if err != nil {
-			return false
-		}
-		for _, cmd := range cmds {
-			for _, a := range cmd {
-				if strings.HasPrefix(a, name+"=") && a != name+"=" {
-					return false
+		switch e.key {
+		case "EnvironmentFile":
+			if e.value != v.envFile {
+				return false
+			}
+		case "PassEnvironment":
+			if strings.Contains(e.value, name) {
+				return false
+			}
+		case "Environment":
+			if e.value == "" {
+				open[e.file] = true
+				continue
+			}
+			cmds, err := execWords(e.value)
+			if err != nil {
+				return false
+			}
+			for _, cmd := range cmds {
+				for _, a := range cmd {
+					switch {
+					case a == name+"=":
+						cleared, open[e.file] = true, false
+					case strings.HasPrefix(a, name+"="):
+						// The unit may only clear it (agentosd.service's
+						// AGENTOS_OWNER=, so an absent env file runs setup
+						// mode).
+						return false
+					}
 				}
 			}
 		}
 	}
-	return true
+	for _, o := range open {
+		if o {
+			return false
+		}
+	}
+	return cleared
 }
 
 // substitutes reports whether w holds a substitution systemd makes: a %
@@ -1277,18 +1422,44 @@ var rootTrees = []string{
 }
 
 // pathAliases are the links every image has between trees: /var/run is
-// /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/), so a
-// path is compared as the tree it lands in (#4494 L3 1).
-var pathAliases = map[string]string{"/var/run": "/run"}
+// /run (systemd-tmpfiles also rewrites a /var/run/ path to /run/) and
+// /var/lock is /run/lock (BOX_LINKS, legacy.conf) and /run/shm is /dev/shm
+// (Debian's link, #4559 Security delta 1), so a path is compared as
+// the tree it lands in (#4494 L3 1, #4516).
+var pathAliases = map[string]string{"/var/run": "/run", "/var/lock": "/run/lock", "/run/shm": "/dev/shm"}
+
+// openDevs are the paths under /dev that hold no device: any uid may make a
+// file in /dev/shm and /dev/mqueue, and /dev/fd and /dev/std* link to
+// another process's files, so heldSource refuses a mount source in one like
+// any other path (#4516, #4559 Security delta 1). What a root command names
+// there is #4493's.
+var openDevs = []string{"/dev/shm", "/dev/mqueue", "/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
 
 // unalias is p with a leading pathAliases link resolved.
 func unalias(p string) string {
-	for from, to := range pathAliases {
-		if p == from || strings.HasPrefix(p, from+"/") {
-			return to + p[len(from):]
+	// Aliases chain (/var/run/shm is /run/shm is /dev/shm), so resolve until
+	// none applies; each step moves to another tree, so this ends.
+	for again := true; again; {
+		again = false
+		for from, to := range pathAliases {
+			if p == from || strings.HasPrefix(p, from+"/") {
+				p, again = to+p[len(from):], true
+				break
+			}
 		}
 	}
 	return p
+}
+
+// inTree reports whether the absolute path p is one of trees or under one.
+func inTree(p string, trees []string) (string, bool) {
+	p = unalias(p)
+	for _, t := range trees {
+		if p == t || strings.HasPrefix(p, t+"/") {
+			return t, true
+		}
+	}
+	return "", false
 }
 
 // inOrAbove reports whether the absolute path p is one of paths, under one,
@@ -1301,6 +1472,18 @@ func inOrAbove(p string, paths []string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// dotdot reports whether a slash path has a .. component, which the kernel
+// resolves after following the link before it (/var/lock/../shm is
+// /run/shm), while path.Clean folds it as text (#4559 L3 delta 2 1).
+func dotdot(p string) bool {
+	for _, c := range strings.Split(p, "/") {
+		if c == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // nameToken is a run of the bytes of a word that can belong to a program's name;
@@ -1386,7 +1569,7 @@ func rootBinaries(root string) ([]string, error) {
 		asUser, asRoot := false, false
 		type execLine struct{ file, key, value string }
 		var lines []execLine
-		var env, envFiles []string // the unit's Environment= and EnvironmentFile= values
+		var env []envLine
 		section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
 		for _, f := range paths {
 			b, err := os.ReadFile(f)
@@ -1404,10 +1587,8 @@ func rootBinaries(root string) ([]string, error) {
 				case line.section != section:
 					// systemd reads a unit's User= and Exec lines only in its
 					// type's own section.
-				case k == "Environment":
-					env = append(env, v)
-				case k == "EnvironmentFile":
-					envFiles = append(envFiles, v)
+				case k == "Environment" || k == "EnvironmentFile" || k == "PassEnvironment":
+					env = append(env, envLine{f, k, v})
 				case k == "User" && (v == "" || v == "root" || v == "0" || mayBeRoot(v)):
 					// A User=%i template is root for its root instance.
 					asRoot = true
@@ -1459,7 +1640,7 @@ func rootBinaries(root string) ([]string, error) {
 				// the result, so a root command holds none but a whole-word
 				// ${X} of unitVars (#4494).
 				for i, w := range words[1:] {
-					if !allowedVar(name, words, i+1, env, envFiles) && substitutes(w, '$') {
+					if !allowedVar(name, words, i+1, env) && substitutes(w, '$') {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
@@ -1500,28 +1681,74 @@ var plainFS = map[string]bool{
 }
 
 // ownerOptions are the mount options that set who may write the mounted
-// tree, or (overlay's) where its writes land.
+// tree, or (overlay's) where its writes land; a mode= is read instead.
 var ownerOptions = map[string]bool{
-	"mode": true, "uid": true, "gid": true, "umask": true, "fmask": true, "dmask": true, "upperdir": true, "workdir": true, "lowerdir": true,
+	"uid": true, "gid": true, "umask": true, "fmask": true, "dmask": true, "upperdir": true, "workdir": true, "lowerdir": true,
 	"X-mount.mode": true, "X-mount.owner": true, "X-mount.group": true, "X-mount.idmap": true,
 }
+
+// linkOptions are the mount options that put another tree over the mount
+// point: a bind, a move, or a loop device on an image file (#4516).
+var linkOptions = map[string]bool{"bind": true, "rbind": true, "move": true, "loop": true}
 
 // mountOptions refuses an option list naming a helper: helper= and
 // uhelper= make mount(8) or umount(8) run /sbin/umount.<name> as root.
 // On a mount point in or above rootTrees (held), it also refuses an option
-// of ownerOptions, which could hand that tree to another uid (#4494).
-func mountOptions(opts string, held bool) error {
+// of ownerOptions or linkOptions, and a mode= with a group or other write
+// bit, any of which could hand that tree to another uid (#4494, #4516). A
+// held list is read only if every byte is in heldOptionBytes: libmount
+// keeps a quoted or \-escaped comma inside one value, so a mode= in
+// x-a=",mode=0755," or x-a=a\,mode=0755 would be counted here and never
+// reach the kernel (#4559 Security 1, delta 1). It reports whether the list
+// holds a mode= it read.
+func mountOptions(opts string, held bool) (bool, error) {
+	if held && !heldOptionBytes.MatchString(opts) {
+		return false, fmt.Errorf("options %s on a mount in or above a tree root reads or runs hold a byte other than a letter, digit or one of =,_-./, which mount(8) may split unlike this lint", opts)
+	}
+	moded := false
 	for _, o := range strings.Split(opts, ",") {
-		k, _, _ := strings.Cut(strings.TrimSpace(o), "=")
+		k, v, _ := strings.Cut(strings.TrimSpace(o), "=")
 		switch {
 		case k == "helper" || k == "uhelper":
-			return fmt.Errorf("option %s names a program umount(8) runs as root", o)
-		case held && ownerOptions[k]:
-			return fmt.Errorf("option %s on a mount in or above a tree root reads or runs", o)
+			return false, fmt.Errorf("option %s names a program umount(8) runs as root", o)
+		case held && k == "mode":
+			if m, err := strconv.ParseUint(v, 8, 32); err != nil || m > 0o7777 || m&0o022 != 0 {
+				return false, fmt.Errorf("option %s on a mount in or above a tree root reads or runs; want an octal mode with no group or other write bit", o)
+			}
+			moded = true
+		case held && (ownerOptions[k] || linkOptions[k]):
+			return false, fmt.Errorf("option %s on a mount in or above a tree root reads or runs", o)
 		}
 	}
-	return nil
+	return moded, nil
 }
+
+// heldOptionBytes are the bytes a held mount's option list may hold.
+var heldOptionBytes = regexp.MustCompile(`^[A-Za-z0-9=,_./-]*$`)
+
+// heldSource reports whether a mount's source may sit over a tree root
+// reads or runs: a name with no slash (tmpfs, UUID=x, LABEL=x) or a device
+// under /dev, outside openDevs. A path elsewhere, /run/shm among them, or in
+// openDevs names a directory or image file, which
+// mount(8) binds or loop-mounts (#4516, #4559 L3 1, Security delta 1).
+func heldSource(what string) bool {
+	if strings.Contains(what, "%") {
+		return false // a specifier the lint does not expand
+	}
+	if !strings.Contains(what, "/") {
+		return true
+	}
+	if dotdot(what) {
+		return false
+	}
+	what = path.Clean(what)
+	_, open := inTree(what, openDevs)
+	return strings.HasPrefix(what, "/dev/") && !open
+}
+
+// tmpfsTypes default their root directory to 1777 unless a mode= says
+// otherwise.
+var tmpfsTypes = map[string]bool{"tmpfs": true, "ramfs": true}
 
 // unitEscape is systemd-escape's form of a byte in a unit name.
 var unitEscape = regexp.MustCompile(`\\x[0-9a-fA-F]{2}`)
@@ -1546,9 +1773,13 @@ func mountWhere(name string) bool {
 
 // mountLines reads a .mount unit's files (the unit, then its drop-ins):
 // every Type= must be plainFS and every Options= free of helpers; with
-// unit, one of them must set Type=.
+// unit, one of them must set Type=. Over a tree root reads or runs, What=
+// must be heldSource, and a tmpfs or ramfs needs a mode= in every Options=
+// (a later one replaces an earlier one, and drop-ins sort across
+// directories), and at least one Options=.
 func mountLines(root string, paths []string, unit bool) (bool, error) {
-	typed := false
+	typed, tmpfs, optioned, moded := false, false, false, true
+	var where string
 	for _, f := range paths {
 		rel, _ := filepath.Rel(root, f)
 		rel = filepath.ToSlash(rel)
@@ -1567,6 +1798,9 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 			name = filepath.Base(paths[0])
 		}
 		held := mountWhere(name)
+		if held {
+			where = rel
+		}
 		for _, line := range ul {
 			k, v := line.key, line.value
 			switch {
@@ -1575,16 +1809,26 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 			case k == "Type" && (!plainFS[v] || v == "overlay" && held):
 				return false, fmt.Errorf("%s: Type=%s; want one of the plain file system types, whose mount runs no helper (and no overlay over a tree root reads or runs)", rel, v)
 			case k == "Type":
-				typed = true
+				typed, tmpfs = true, tmpfs || held && tmpfsTypes[v]
 			case k == "Options":
-				if err := mountOptions(v, held); err != nil {
+				m, err := mountOptions(v, held)
+				if err != nil {
 					return false, fmt.Errorf("%s: Options=%s: %v", rel, v, err)
 				}
+				optioned, moded = true, moded && m
+			case k == "What" && held && !heldSource(v):
+				return false, fmt.Errorf("%s: What=%s; over a tree root reads or runs, a mount's source is a device node under /dev, not a directory or image file (nor anything in /dev/shm, /dev/mqueue or a /dev/fd link)", rel, v)
 			}
 		}
 	}
 	if unit && !typed {
 		return false, fmt.Errorf("%s: no Type=; mount(8) would probe the type and run its helper", filepath.ToSlash(paths[0]))
+	}
+	switch {
+	case tmpfs && !optioned:
+		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with no Options=; its root directory would be 1777, so set Options=mode=0755", where)
+	case tmpfs && !moded:
+		return false, fmt.Errorf("%s: a tmpfs or ramfs over a tree root reads or runs, with an Options= that sets no mode=; its root directory would be 1777, so give every Options= mode=0755", where)
 	}
 	return typed, nil
 }
@@ -1604,13 +1848,21 @@ func fstabLines(root, f string) error {
 		if len(w) > 1 {
 			_, held = inOrAbove(path.Clean(w[1]), rootTrees)
 		}
+		moded := false
 		switch {
 		case len(w) < 3 || !plainFS[w[2]] || w[2] == "overlay" && held:
 			return fmt.Errorf("%s:%d: %q; want a plain file system type, whose mount runs no helper (and no overlay over a tree root reads or runs)", rel, n, line)
+		case held && !heldSource(w[0]):
+			return fmt.Errorf("%s:%d: source %s; over a tree root reads or runs, a mount's source is a device node under /dev, not a directory or image file (nor anything in /dev/shm, /dev/mqueue or a /dev/fd link)", rel, n, w[0])
 		case len(w) > 3:
-			if err := mountOptions(w[3], held); err != nil {
+			m, err := mountOptions(w[3], held)
+			if err != nil {
 				return fmt.Errorf("%s:%d: %v", rel, n, err)
 			}
+			moded = m
+		}
+		if held && tmpfsTypes[w[2]] && !moded {
+			return fmt.Errorf("%s:%d: %s on %s with no mode=; its root directory would be 1777 over a tree root reads or runs (systemd's own /run is mode=0755)", rel, n, w[2], w[1])
 		}
 		return nil
 	})

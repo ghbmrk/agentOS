@@ -229,10 +229,31 @@ func TestPlanDeclarationRefusesAHostedBody(t *testing.T) {
 		"metadata keys with no client_metadata": func(d *plan.Declaration) {
 			d.Body.Keys = []string{"model", "input", "store", "stream"}
 		},
-		"a metadata key with no cap": func(d *plan.Declaration) { d.Body.Meta = map[string]int{"turn_id": 0} },
-		"an empty metadata key":      func(d *plan.Declaration) { d.Body.Meta = map[string]int{"": 8} },
-		"no mode":                    func(d *plan.Declaration) { d.Mode = "" },
-		"an unknown mode":            func(d *plan.Declaration) { d.Mode = "allowed" },
+		"a metadata key with no cap": func(d *plan.Declaration) { d.Body.Meta = map[string]plan.Value{"turn_id": {Kind: plan.KindText}} },
+		"an empty metadata key": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"": {Kind: plan.KindText, Max: 8}}
+		},
+		"a metadata value that is not text": func(d *plan.Declaration) { d.Body.Meta = map[string]plan.Value{"n": {Kind: plan.KindInt}} },
+		"a metadata value that may be null": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"n": {Kind: plan.KindText, Max: 8, Null: true}}
+		},
+		"a JSON text holding nothing declared": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8}}
+		},
+		"an object with no fields": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindObject}}}
+		},
+		"an unknown kind": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: "number"}}}
+		},
+		"a map with no key cap": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindMap, Each: &plan.Value{Kind: plan.KindBool}}}}
+		},
+		"a flag with a cap": func(d *plan.Declaration) {
+			d.Body.Meta = map[string]plan.Value{"j": {Kind: plan.KindJSON, Max: 8, Each: &plan.Value{Kind: plan.KindOff, Max: 1}}}
+		},
+		"no mode":         func(d *plan.Declaration) { d.Mode = "" },
+		"an unknown mode": func(d *plan.Declaration) { d.Mode = "allowed" },
 	} {
 		d := f.decl(t)
 		edit(&d)
@@ -562,46 +583,266 @@ func TestTheCodexPoolIsNamedAsTheProviderNamesIt(t *testing.T) {
 	}
 }
 
-// client_metadata holds only the keys the CLI sets, each value within its
-// cap: an unknown key, a value one byte over, or a value that is not text
-// is refused with nothing sent, and every declared key at its cap passes
-// (#2117, CLK-7).
+// variant is a whole value of a declared shape with one part changed, and
+// whether the clerk must take it.
+type variant struct {
+	name string
+	val  any
+	ok   bool
+}
+
+// variants builds a value of shape v with every declared key present, and
+// one variant per declared key and limit: each text and map key at its cap
+// (taken) and one byte over it, in ASCII and in a two-byte character
+// (refused), each value of the wrong kind, an unknown key, a flag that must
+// be off turned on, and a JSON text that does not parse.
+func variants(v plan.Value) (any, []variant) {
+	over := func(n int) []variant {
+		return []variant{
+			{"one byte over its cap", strings.Repeat("a", n+1), false},
+			{"one byte over its cap in two-byte characters", "a" + strings.Repeat("é", n/2), n%2 == 1},
+		}
+	}
+	var good any
+	var alts []variant
+	switch v.Kind {
+	case plan.KindText:
+		if v.Only != nil {
+			good = v.Only[0]
+			for _, o := range v.Only {
+				alts = append(alts, variant{"value " + o, o, true})
+			}
+			alts = append(alts, variant{"an undeclared value", "x" + v.Only[0], false})
+		} else {
+			good = "a"
+			alts = append(alts, variant{"at its cap", strings.Repeat("a", v.Max), true})
+			alts = append(alts, variant{"at its cap in two-byte characters", strings.Repeat("é", v.Max/2), true})
+		}
+		alts = append(alts, over(v.Max)...)
+		alts = append(alts, variant{"a number", 1, false})
+	case plan.KindInt:
+		good = 1700000000000
+		alts = []variant{{"negative", -1, true}, {"a fraction", 1.5, false}, {"text", "1", false}}
+	case plan.KindBool:
+		good = true
+		alts = []variant{{"false", false, true}, {"text", "true", false}}
+	case plan.KindOff:
+		good = false
+		alts = []variant{{"on", true, false}, {"text", "false", false}}
+	case plan.KindObject:
+		obj := map[string]any{}
+		subs := map[string][]variant{}
+		for k, f := range v.Fields {
+			obj[k], subs[k] = variants(f)
+		}
+		with := func(k string, x any) map[string]any {
+			c := map[string]any{}
+			for kk, vv := range obj {
+				c[kk] = vv
+			}
+			c[k] = x
+			return c
+		}
+		good = obj
+		for k, list := range subs {
+			for _, a := range list {
+				alts = append(alts, variant{k + ": " + a.name, with(k, a.val), a.ok})
+			}
+			alts = append(alts, variant{k + " in another case", with(strings.ToUpper(k), obj[k]), false})
+		}
+		alts = append(alts, variant{"an undeclared key", with("x-undeclared", "a"), false},
+			variant{"not an object", []any{}, false})
+	case plan.KindMap:
+		each, list := variants(*v.Each)
+		good = map[string]any{"k": each}
+		for _, a := range list {
+			alts = append(alts, variant{"entry: " + a.name, map[string]any{"k": a.val}, a.ok})
+		}
+		alts = append(alts, variant{"a key at its cap", map[string]any{strings.Repeat("k", v.Max): each}, true})
+		for _, a := range over(v.Max) {
+			alts = append(alts, variant{"a key " + a.name, map[string]any{a.val.(string): each}, a.ok})
+		}
+		alts = append(alts, variant{"not an object", "k", false})
+	case plan.KindJSON:
+		in, list := variants(*v.Each)
+		text := func(x any) string { b, _ := json.Marshal(x); return string(b) }
+		good = text(in)
+		for _, a := range list {
+			alts = append(alts, variant{"held: " + a.name, text(a.val), a.ok})
+		}
+		alts = append(alts, variant{"not JSON", "{", false}, variant{"trailing data", text(in) + " {}", false},
+			variant{"over its cap", text(in) + strings.Repeat(" ", v.Max), false}, variant{"not text", in, false})
+	}
+	if v.Null {
+		alts = append(alts, variant{"null", nil, true})
+	} else if v.Kind != plan.KindOff {
+		alts = append(alts, variant{"null", nil, false})
+	}
+	return good, alts
+}
+
+// client_metadata, and the turn metadata blob inside it, hold only the
+// keys the CLI sets, each value of its declared shape and within its cap:
+// every declared key and limit is tried, and a refused one is never sent
+// (#2117, #4580, CLK-7).
 func TestPlanClientMetadataHeldToItsKeys(t *testing.T) {
 	f := newPlanFix(t)
 	p := f.login(t)
 	signIn(t, p, "signin")
 	g, _ := p.Guest("g")
 	ph := g.Tokens["access_token"]
-	with := func(meta map[string]any) string {
+	with := func(meta any) string {
 		m := capture(t)
 		m["client_metadata"] = meta
 		return encode(t, m)
 	}
-	full := map[string]any{}
-	for k, n := range plan.Codex(nil).Body.Meta {
-		full[k] = strings.Repeat("a", n)
-	}
-	if resp, d := callWith(p, "g", ph, with(full), free); d != "" {
-		t.Fatalf("every declared key at its cap: %s", d)
-	} else {
-		read(t, resp)
-	}
-	before := f.hits()
-	for name, meta := range map[string]map[string]any{
-		"an unknown key":        {"turn_id": "t", "x-codex-blob": "b"},
-		"a key in another case": {"Turn_Id": "t"},
-		"an id over its cap":    {"turn_id": strings.Repeat("a", 129)},
-		"turn metadata over its cap": {
-			"x-codex-turn-metadata": strings.Repeat("a", 16<<10+1),
-		},
-		"an object value": {"x-codex-turn-metadata": map[string]any{"request_kind": "turn"}},
-	} {
-		if resp, d := callWith(p, "g", ph, with(meta), free); resp != nil || d != plan.DBody+" meta" {
-			t.Errorf("%s: answered %v, detail %q", name, resp != nil, d)
+	good, alts := variants(plan.Value{Kind: plan.KindObject, Fields: plan.Codex(nil).Body.Meta})
+	alts = append(alts, variant{"every declared key", good, true})
+	took := 0
+	for _, a := range alts {
+		before := f.hits()
+		resp, d := callWith(p, "g", ph, with(a.val), free)
+		switch {
+		case a.ok && d != "":
+			t.Errorf("%s: refused %q", a.name, d)
+		case a.ok:
+			read(t, resp)
+			took++
+		case resp != nil || d != plan.DBody+" meta":
+			t.Errorf("%s: answered %v, detail %q", a.name, resp != nil, d)
+		case f.hits() != before:
+			t.Errorf("%s: a refused client_metadata reached the provider", a.name)
 		}
 	}
+	if took == 0 || took == len(alts) {
+		t.Fatalf("took %d of %d", took, len(alts))
+	}
+}
+
+// A JSON text is held to its cap as the clerk sends it too: a blob within
+// its cap that the clerk's encoding would grow past it (U+2028 is sent
+// escaped, three bytes as six) is refused (#4580).
+func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	// Each key is 1365 raw U+2028, 4095 bytes, within the 4096-byte key cap.
+	k := strings.Repeat("\u2028", 1365)
+	blob := `{"workspaces":{"a` + k + `":{},"b` + k + `":{},"c` + k + `":{}}}`
+	if len(blob) > 16<<10 {
+		t.Fatalf("blob of %d bytes", len(blob))
+	}
+	m := capture(t)
+	m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+	before := f.hits()
+	if resp, d := callWith(p, "g", ph, encode(t, m), free); resp != nil || d != plan.DBody+" meta" {
+		t.Fatalf("answered %v, detail %q", resp != nil, d)
+	}
 	if f.hits() != before {
-		t.Fatal("a refused client_metadata reached the provider")
+		t.Fatal("sent")
+	}
+}
+
+// The security property, written from literals rather than from the
+// declaration, so widening the declaration fails here: a guest cannot ask
+// the provider to ingest history, turn analytics on, attribute a call to an
+// MCP server, or draw guardian credits for the plan (#4585 Security 1).
+func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	mcp := `{"tool_namespaces_info":{"functions":{"name":"functions","functions":{"exec":` +
+		`{"name":"exec","direct":true,"code_mode_name":null,"deferred":false,"source":{"kind":"mcp","server_name":"s"}}}}}}`
+	for name, meta := range map[string]map[string]any{
+		"history ingest":             {"x-codex-turn-metadata": `{"history_ingest_requested":true}`},
+		"analytics":                  {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
+		"an MCP tool source":         {"x-codex-turn-metadata": mcp},
+		"MCP attribution":            {"mcp_attribution": `{"status":"ok"}`},
+		"guardian credits":           {"guardian_credits_requested": "true"},
+		"guardian credits in a blob": {"x-codex-turn-metadata": `{"guardian_credits_requested":"true"}`},
+	} {
+		m := capture(t)
+		m["client_metadata"] = meta
+		before := f.hits()
+		if resp, d := callWith(p, "g", ph, encode(t, m), free); resp != nil || d != plan.DBody+" meta" {
+			t.Errorf("%s: answered %v, detail %q", name, resp != nil, d)
+		}
+		if f.hits() != before {
+			t.Errorf("%s: sent", name)
+		}
+	}
+}
+
+// The top-level client_metadata keys and caps, as a fixed table rather than
+// read from the declaration: each id takes 128 bytes and refuses 129, the
+// blob refuses 16 KiB + 1, and no other key is taken (#4585 L3 1).
+func TestPlanClientMetadataCapsAreFixed(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	ids := []string{"x-codex-installation-id", "session_id", "thread_id", "x-codex-window-id", "turn_id",
+		"x-openai-subagent", "x-codex-parent-thread-id", "parent_turn_id", "root_turn_id"}
+	if got := len(plan.Codex(nil).Body.Meta); got != len(ids)+1 {
+		t.Fatalf("the declaration has %d client_metadata keys, want %d", got, len(ids)+1)
+	}
+	call := func(meta map[string]any) string {
+		m := capture(t)
+		m["client_metadata"] = meta
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if resp != nil {
+			read(t, resp)
+		}
+		return d
+	}
+	for _, k := range ids {
+		if d := call(map[string]any{k: strings.Repeat("a", 128)}); d != "" {
+			t.Errorf("%s at 128 bytes: %s", k, d)
+		}
+		if d := call(map[string]any{k: strings.Repeat("a", 129)}); d != plan.DBody+" meta" {
+			t.Errorf("%s at 129 bytes: %q", k, d)
+		}
+	}
+	if d := call(map[string]any{"x-codex-turn-metadata": "{}" + strings.Repeat(" ", 16<<10-1)}); d != plan.DBody+" meta" {
+		t.Errorf("a blob of 16 KiB + 1: %q", d)
+	}
+}
+
+// A provider-read flag cannot be smuggled past the check by repeating it:
+// the clerk sends its own encoding of the blob it checked, so the provider
+// sees one key, whichever of a repeated pair its parser keeps (#4580).
+func TestPlanTurnMetadataIsSentAsChecked(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	for _, blob := range []string{
+		`{"history_ingest_requested":true,"history_ingest_requested":false}`,
+		`{"analytics_enabled":true , "analytics_enabled":false}`,
+	} {
+		m := capture(t)
+		m["client_metadata"] = map[string]any{"x-codex-turn-metadata": blob}
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if d != "" {
+			t.Fatalf("%s: %s", blob, d)
+		}
+		read(t, resp)
+		_, sent := f.last()
+		var got struct {
+			Meta map[string]string `json:"client_metadata"`
+		}
+		if err := json.Unmarshal([]byte(sent), &got); err != nil {
+			t.Fatal(err)
+		}
+		if b := got.Meta["x-codex-turn-metadata"]; strings.Contains(b, "true") || strings.Count(b, `":false`) != 1 {
+			t.Errorf("%s: sent %s", blob, b)
+		}
 	}
 }
 

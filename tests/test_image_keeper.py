@@ -354,6 +354,19 @@ class KeeperTreeTest(unittest.TestCase):
                                             "past descriptor 2 and no privilege survives its drop (#2899)" % (key, val)])
                 self.unit("agentos-keeper-kernel.service").write_text(good)
 
+    def test_a_later_empty_assignment_does_not_hide_a_descriptor(self):
+        # #4306: systemd 257.13 never resets Sockets= and keeps the earlier FileDescriptorStoreMax= past an
+        # empty one, so the check reads every non-empty assignment, in the unit or a drop-in.
+        for key, val in (("Sockets", "a.socket"), ("FileDescriptorStoreMax", "4"), ("OpenFile", "/etc/hostname"),
+                         ("AmbientCapabilities", "CAP_SYS_ADMIN"), ("SecureBits", "keep-caps")):
+            with self.subTest(key):
+                d = write(self.root, SYSTEM + "agentos-keeper-kernel.service.d/99.conf",
+                          "[Service]\n%s=%s\n%s=\n" % (key, val, key))
+                self.assertEqual(self.v(), ["agentos-keeper-kernel.service: sets %s=%s; nothing reaches the unlock step "
+                                            "past descriptor 2 and no privilege survives its drop (#2899)" % (key, val)])
+                d.unlink()
+        self.assertEqual(self.v(), [])
+
     def test_a_socket_unit_for_the_unlock_step_is_refused(self):
         write(self.root, SYSTEM + "agentos-keeper-kernel.socket", "[Socket]\nListenStream=/run/x.sock\n")
         write(self.root, SYSTEM + "other.socket", "[Socket]\nListenStream=/run/y.sock\nService=agentos-keeper-kernel.service\n")

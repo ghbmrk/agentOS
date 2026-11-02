@@ -46,17 +46,18 @@ func sealedLine(line string) *shortLine {
 	return &shortLine{Text: pairseal.Statement(device, hash[:pairseal.ShortHash]+"…"), Hash: hash}
 }
 
-// confirm is the confirm screen for a proposal link: the change drawn by
-// the enforcer from the link's document and the policy in force, and the
-// challenge one tap signs for exactly that diff.
-func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
+// confirm is the confirm screen for a proposal link (draft) or a home
+// page offer (offered): the change drawn by the enforcer from the policy
+// in force, and the challenge one tap signs for exactly that diff. Both
+// count against one LinkLimit.
+func (s *Server) confirm(w http.ResponseWriter, r *http.Request, draw func(*http.Request) (*challenge, []string, error)) {
 	s.mu.Lock()
 	if !s.limit(&s.links) {
 		s.mu.Unlock()
 		http.Error(w, errLimited.Error(), http.StatusTooManyRequests)
 		return
 	}
-	c, lines, err := s.draft(r)
+	c, lines, err := draw(r)
 	if err != nil {
 		s.mu.Unlock()
 		msg := errMalformed.Error()
@@ -65,7 +66,7 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 			// Two devices pin one mDNS name: say which, so the owner renames
 			// one or declines before signing (#4144).
 			msg = strings.TrimPrefix(err.Error(), "policy: ")
-		case errors.Is(err, errUnheard):
+		case errors.Is(err, errUnheard), errors.Is(err, errNoOffer):
 			msg = err.Error() // the device and the name (D-266)
 		}
 		http.Error(w, msg, http.StatusBadRequest)
@@ -92,8 +93,10 @@ func (s *Server) confirm(w http.ResponseWriter, r *http.Request) {
 }
 
 // home is the page's status: the policy in force, the loosening waiting
-// with its cancel, whether the passkey is synced, the channel's pause, each
-// device's label from the signed policy, and NET-1's limits.
+// with its cancel, whether the passkey is synced, the channel's pause, the
+// names heard since a device's pair was signed with a link to let or hold
+// them (#4566), each device's label from the signed policy, and NET-1's
+// limits.
 func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Lock.Lock()
 	cur, pend := s.cfg.Policy.Current(), s.cfg.Policy.Pending()
@@ -109,6 +112,10 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	devs := plain(cur).Devices
+	var offers []map[string]string
+	for _, o := range s.offers(cur) {
+		offers = append(offers, map[string]string{"ID": o.ID, "Line": o.Line(cur)})
+	}
 	keep, recovery := false, ""
 	if s.cfg.Enrol != nil {
 		keep = !s.cfg.Enrol.Kept()
@@ -126,6 +133,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"Sync":     sync,
 		"Channel":  channel,
 		"Devices":  devs,
+		"Offers":   offers,
 		"Limits":   Limits,
 	})
 }

@@ -536,14 +536,11 @@ func TestChallengeAnswer(t *testing.T) {
 	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}}); c != wire.Refused {
 		t.Errorf("unasked answer: %v", c)
 	}
-	go r.ch.Challenge(7, []byte{1})
-	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 || m.Answer {
-		t.Fatalf("challenge frame: %+v", m)
-	}
-	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}}); c != wire.OK {
+	w := cl.challenge(r, 7)
+	if c := cl.code(wire.Challenge{Answer: true, ID: w, Data: []byte{2}}); c != wire.OK {
 		t.Errorf("answer: %v", c)
 	}
-	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}}); c != wire.Refused {
+	if c := cl.code(wire.Challenge{Answer: true, ID: w, Data: []byte{2}}); c != wire.Refused {
 		t.Errorf("second answer: %v", c)
 	}
 	if !reflect.DeepEqual(r.answers, []uint64{7}) {
@@ -559,10 +556,7 @@ func TestChallengeAnswer(t *testing.T) {
 func TestChallengeIDOutstanding(t *testing.T) {
 	r := newRig(t, nil)
 	cl := r.dial()
-	go r.ch.Challenge(7, []byte{1})
-	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
-		t.Fatalf("challenge frame: %+v", m)
-	}
+	w := cl.challenge(r, 7)
 	errc := make(chan error, 1)
 	go func() { errc <- r.ch.Challenge(7, []byte{2}) }()
 	select {
@@ -573,16 +567,13 @@ func TestChallengeIDOutstanding(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a second challenge with an outstanding id was sent")
 	}
-	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.OK {
+	if c := cl.code(wire.Challenge{Answer: true, ID: w, Data: []byte{3}}); c != wire.OK {
 		t.Fatalf("answer: %v", c)
 	}
-	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.Refused {
+	if c := cl.code(wire.Challenge{Answer: true, ID: w, Data: []byte{3}}); c != wire.Refused {
 		t.Errorf("the refused challenge's answer was taken: %v", c)
 	}
-	go r.ch.Challenge(7, []byte{4})
-	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
-		t.Fatalf("a challenge after the answer: %+v", m)
-	}
+	cl.challenge(r, 7) // free again after the answer
 	if !reflect.DeepEqual(r.answers, []uint64{7}) {
 		t.Errorf("answers %v", r.answers)
 	}
@@ -628,8 +619,13 @@ func TestRatesIgnoreWallSteps(t *testing.T) {
 // Cut.Trip has returned and the stage reads Tripped, no request on any
 // connection acts: it is answered Paused and the radio never runs. Each
 // cause is covered: a request burst, a frame outside the format and a
-// hello burst. Revert mutants: the channel's own tripping count, in
-// queueTrip and in countHello.
+// hello burst. While a hello burst's trip is pending, a further hello
+// past the rate trips nothing more; its log line carries the time of the
+// decision; and once it returns and the owner restores the core, a
+// command acts again (#4572). Revert mutants: the channel's own tripping
+// count, in queueTrip and in countHello; countHello reading Cut.Stage;
+// countHello never lowering the count; the hello trip line read after
+// Cut.Trip.
 func TestNothingActsOnceATripIsDecided(t *testing.T) {
 	for _, cause := range []string{"request burst", "malformed frame", "hello burst"} {
 		t.Run(cause, func(t *testing.T) {
@@ -650,7 +646,10 @@ func TestNothingActsOnceATripIsDecided(t *testing.T) {
 			r.cut.mu.Lock()
 			r.cut.hold, r.cut.entered = hold, entered
 			r.cut.mu.Unlock()
-			defer close(hold)
+			var once sync.Once
+			release := func() { once.Do(func() { close(hold) }) }
+			defer release()
+			decided := r.now
 			switch cause {
 			case "request burst":
 				go a.send(wire.Announce{ID: 99})
@@ -673,6 +672,39 @@ func TestNothingActsOnceATripIsDecided(t *testing.T) {
 			}
 			if n := len(r.radio.calls()); n != 0 {
 				t.Errorf("the radio ran %d times after the trip was decided", n)
+			}
+			if cause != "hello burst" {
+				return
+			}
+			h, _ := wire.SignHello(wire.RoleCore, r.core, exporter)
+			go r.connect().send(h) // past the rate, while the trip is pending
+			select {
+			case <-entered:
+				t.Fatal("a hello past the rate while a trip was pending tripped the core again")
+			case <-time.After(500 * time.Millisecond):
+			}
+			r.advance(2 * wire.Rate(wire.RateHello).Every)
+			release()
+			var line *Event
+			for deadline := time.Now().Add(5 * time.Second); line == nil && time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+				for _, e := range r.events() {
+					if e.Kind == KindTrip {
+						line = &e
+					}
+				}
+			}
+			if line == nil {
+				t.Fatal("no trip line")
+			}
+			if !line.At.Equal(decided) {
+				t.Errorf("the hello trip line at %v, want the decision's time %v", line.At, decided)
+			}
+			if n := r.cut.trips(); n != 1 {
+				t.Errorf("%d trips, want 1", n)
+			}
+			r.cut.set(Open) // the owner's passkey restore
+			if c := r.dial().code(cmd(6, "lamp", wire.VerbOn)); c != wire.OK {
+				t.Errorf("a command after the restore: %v, want OK", c)
 			}
 		})
 	}
@@ -750,12 +782,9 @@ func TestAnswerMayUseChannel(t *testing.T) {
 		c.Answer = func(id uint64, _ []byte) { errs <- r.ch.Challenge(id+1, []byte{9}) }
 	})
 	cl := r.dial()
-	go r.ch.Challenge(7, []byte{1})
-	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
-		t.Fatalf("challenge frame: %+v", m)
-	}
-	cl.send(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}})
-	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 8 || m.Answer {
+	w := cl.challenge(r, 7)
+	cl.send(wire.Challenge{Answer: true, ID: w, Data: []byte{2}})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID == w || m.Answer {
 		t.Fatalf("the challenge sent from Answer: %+v", m)
 	}
 	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {

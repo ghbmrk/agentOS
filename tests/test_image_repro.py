@@ -62,13 +62,22 @@ class InitrdDiffTest(unittest.TestCase):
     def test_content_and_header_differences_are_named(self):
         b = [BASE[0], ("usr/lib/systemd/systemd", b"elf", 101), ("etc/shadow", b"root:!:20001::::::\n", 100)]
         lines = cm.initrd_diff(newc(BASE), newc(b))
-        self.assertIn("usr/lib/systemd/systemd: mtime 100/101", lines)
-        self.assertIn("etc/shadow: content", lines)
+        self.assertIn('"usr/lib/systemd/systemd": mtime 100/101', lines)
+        self.assertIn('"etc/shadow": content', lines)
         self.assertEqual(len(lines), 2)
 
     def test_members_only_on_one_side(self):
         lines = cm.initrd_diff(newc(BASE + [("var/log/dpkg.log", b"x", 1)]), newc(BASE))
-        self.assertEqual(lines, ["only in a: var/log/dpkg.log"])
+        self.assertEqual(lines, ['only in a: "var/log/dpkg.log"'])
+
+    def test_member_names_are_escaped(self):
+        # #4612: an initrd member name cannot forge a log line or an Actions command either.
+        evil = "etc/x\n::error::forged\x1b]0;t\x07"
+        lines = cm.initrd_diff(newc(BASE + [(evil, b"x", 1)]), newc(BASE + [(evil, b"y", 1)]))
+        self.assertEqual(lines, ['"etc/x\\n::error::forged\\u001b]0;t\\u0007": content'])
+        lines = cm.initrd_diff(newc(BASE), newc(BASE + [(evil, b"x", 1)]))
+        self.assertEqual([ln.splitlines() for ln in lines], [[lines[0]]])
+        self.assertTrue(lines[0].startswith('only in b: "etc/x\\n') and lines[0].isprintable(), lines)
 
     def test_reads_compressed_and_concatenated_archives(self):
         # The entry's initrd is compressed archives back to back, as the kernel unpacks them.
@@ -104,7 +113,7 @@ class InitrdDiffTest(unittest.TestCase):
         rc, out = self.run_compare(newc(BASE), newc(BASE[:2] + [("etc/shadow", b"root:!:20001::::::\n", 100)]))
         self.assertEqual(rc, 1)
         self.assertIn("MISMATCH initrd", out)
-        self.assertIn("etc/shadow: content", out)
+        self.assertIn('"etc/shadow": content', out)
         # Same members, different compressed bytes: still a failure, said as such.
         rc, out = self.run_compare(gzip.compress(newc(BASE), mtime=0), gzip.compress(newc(BASE), mtime=1))
         self.assertEqual(rc, 1)
@@ -230,11 +239,11 @@ class UsrListTest(unittest.TestCase):
             la.write_text("\n".join(fin.usr_list(a)) + "\n")
             lb.write_text("\n".join(fin.usr_list(b)) + "\n")
             lines = cm.usr_diff(cm.usr_entries(la), cm.usr_entries(lb))
-        self.assertIn("only in b: bin/new", lines)
-        self.assertTrue(any(ln.startswith("lib/agentos/camdecode: digest ") for ln in lines), lines)
-        self.assertTrue(any(ln.startswith("bin/tool: mode 0644/0700") for ln in lines), lines)
+        self.assertIn('only in b: "bin/new"', lines)
+        self.assertTrue(any(ln.startswith('"lib/agentos/camdecode": digest "') for ln in lines), lines)
+        self.assertTrue(any(ln.startswith('"bin/tool": mode "0644"/"0700"') for ln in lines), lines)
         # The mtime of bin, changed by the new file, is named too: a timestamp is a cause to fix.
-        self.assertTrue(any(ln.startswith("bin: mtime_ns ") for ln in lines), lines)
+        self.assertTrue(any(ln.startswith('"bin": mtime_ns ') for ln in lines), lines)
 
     def test_diff_prints_content_differences_first(self):
         # #4471: past the line limit, many time-only differences must not push the one content
@@ -248,11 +257,29 @@ class UsrListTest(unittest.TestCase):
         b["zz/new"] = dict(f)
         lines = cm.usr_diff(a, b)
         # Mode and owner say what a file may do, so they are not cut either; only time and link count are.
-        self.assertEqual(lines[:5], ["only in b: zz/new", "zz/bin: digest aa/bb", "zz/gid: gid 0/5",
-                                     "zz/suid: mode 0755/4755", "zz/uid: uid 0/5"])
-        self.assertEqual(lines[5:7], ["d000: mtime_ns 1/2", "d001: mtime_ns 1/2"])
-        self.assertIn("zz/link: nlink 1/2", cm.usr_diff(a, b, limit=1000))
+        self.assertEqual(lines[:5], ['only in b: "zz/new"', '"zz/bin": digest "aa"/"bb"', '"zz/gid": gid 0/5',
+                                     '"zz/suid": mode "0755"/"4755"', '"zz/uid": uid 0/5'])
+        self.assertEqual(lines[5:7], ['"d000": mtime_ns 1/2', '"d001": mtime_ns 1/2'])
+        self.assertIn('"zz/link": nlink 1/2', cm.usr_diff(a, b, limit=1000))
         self.assertEqual((len(lines), lines[-1]), (201, "... and 106 more"))
+
+    def test_diff_escapes_names_and_values(self):
+        # #4612: a path or value holding a newline, a terminal escape or a leading "::" must print
+        # as one escaped line, never as a forged log line or a GitHub Actions workflow command.
+        evil = "bin/x\n::error::forged\x1b[2J\u2028"
+        f = {"type": "f", "mode": "0644", "uid": 0, "gid": 0, "mtime_ns": 1, "nlink": 1, "digest": "aa"}
+        a = {evil: dict(f), "bin/y": dict(f), "::warning::a": dict(f)}
+        b = {"bin/y": dict(f, digest="bb\n::error::v"), "::warning::b\r": dict(f)}
+        lines = cm.usr_diff(a, b)
+        self.assertEqual(lines, ['only in a: "::warning::a"',
+                                 'only in a: "bin/x\\n::error::forged\\u001b[2J\\u2028"',
+                                 'only in b: "::warning::b\\r"',
+                                 '"bin/y": digest "aa"/"bb\\n::error::v"'])
+        for ln in lines:
+            self.assertEqual(ln.splitlines(), [ln])
+            self.assertTrue(ln.isascii() and ln.isprintable(), ln)
+        # The printed name reads back as the path it names.
+        self.assertEqual(json.loads(lines[1][len("only in a: "):]), evil)
 
     def run_cli(self, ta, tb):
         with tempfile.TemporaryDirectory() as d:
@@ -274,7 +301,7 @@ class UsrListTest(unittest.TestCase):
         rc, out = self.run_cli(text, text.replace(hashlib.sha256(b"v1").hexdigest(), "00" * 32))
         self.assertEqual(rc, 1)
         self.assertIn("MISMATCH /usr files", out)
-        self.assertIn("lib/agentos/camdecode: digest", out)
+        self.assertIn('"lib/agentos/camdecode": digest', out)
         # Missing, empty, malformed or repeated: a failure, never "same".
         dup = text + text.splitlines()[0] + "\n"
         for ta, tb in ((text, None), ("", ""), (text, "{}\n"), (text, "[1]\n"), (dup, dup)):
@@ -435,7 +462,7 @@ class ReproduceJobTest(unittest.TestCase):
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("MISMATCH agentos/initrd", r.stdout)
-        self.assertIn("etc/shadow: content", r.stdout)
+        self.assertIn('"etc/shadow": content', r.stdout)
 
     def test_differing_usr_file_fails_and_is_named(self):
         self.side("release-a", self.initrd)
@@ -444,7 +471,7 @@ class ReproduceJobTest(unittest.TestCase):
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("MISMATCH /usr root hash", r.stdout)
-        self.assertIn("lib/agentos/camdecode: digest", r.stdout)
+        self.assertIn('"lib/agentos/camdecode": digest', r.stdout)
         self.assertNotIn("every /usr file alike", r.stdout)
 
     def test_same_files_other_root_hash_says_layout(self):

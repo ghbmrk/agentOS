@@ -413,3 +413,34 @@ func frameBytes(t Type, p []byte) []byte {
 
 // Type aliases the wire's frame type for frameBytes.
 type Type = wire.Type
+
+// challenge has the radio host send challenge id on r and returns the ID
+// its frame carries, which the channel chooses.
+func (cl *client) challenge(r *rig, id uint64) uint64 {
+	cl.t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(id, []byte{1}) }()
+	m, ok := cl.recv().(wire.Challenge)
+	if !ok || m.Answer {
+		cl.t.Fatalf("challenge %d: frame %+v", id, m)
+	}
+	if err := <-errc; err != nil {
+		cl.t.Fatalf("challenge %d: %v", id, err)
+	}
+	return m.ID
+}
+
+// tryChallenge runs Challenge(id) and returns its error, failing if it
+// neither returns nor sends within 2 s.
+func (cl *client) tryChallenge(r *rig, id uint64) error {
+	cl.t.Helper()
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(id, []byte{1}) }()
+	select {
+	case err := <-errc:
+		return err
+	case <-time.After(2 * time.Second):
+		cl.t.Fatalf("challenge %d neither refused nor sent", id)
+		return nil
+	}
+}

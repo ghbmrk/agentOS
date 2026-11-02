@@ -158,12 +158,26 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 	case wire.Challenge:
 		ev.Kind, ev.ID, ev.What = KindAnswer, m.ID, "challenge answer"
 		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) {
-			if !c.outstanding[m.ID] || c.cfg.Answer == nil {
+			id, ok := c.byWire[m.ID]
+			if !ok || c.cfg.Answer == nil {
 				return wire.Refused, "no challenge outstanding with this id"
 			}
-			delete(c.outstanding, m.ID)
-			id, data := m.ID, m.Data
-			c.queued = append(c.queued, func() { c.cfg.Answer(id, data) })
+			ch := c.challenges[id]
+			delete(c.byWire, m.ID) // one answer per challenge
+			if c.over(ch) {
+				c.dropChallenge(id, ch)
+				return wire.Refused, "the challenge is over: its answer came too late"
+			}
+			// The radio host's ID stays taken until Answer returns, so a
+			// challenge it sends meanwhile cannot take this answer (#4550).
+			ch.answered = true
+			data := m.Data
+			c.queued = append(c.queued, func() {
+				c.cfg.Answer(id, data)
+				c.mu.Lock()
+				c.dropChallenge(id, ch)
+				c.mu.Unlock()
+			})
 			return wire.OK, "answer passed to the device"
 		})
 	default:
@@ -172,7 +186,9 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 		code, ev.Reason = wire.Refused, "not a request"
 	}
 	ev.Code = code
-	c.log(ev)
+	if code != wire.Paused || c.logPaused(now) {
+		c.log(ev)
+	}
 	// A Paused answer is not a refusal: a kernel learns of a trip or a
 	// pause only from one, so counting it would pause the summaries the
 	// Reflashed stage reopens.
