@@ -179,7 +179,8 @@ type Event struct {
 	// lines and the restore's (Channel.Flush, #4726) carry it, never a
 	// failed hello's or the quiet line (#4683). A
 	// sink must keep it: the logged lines plus the sum of Dropped are
-	// everything the cut core sent (ENF-d-4).
+	// everything the cut core sent (ENF-d-4). CheckSink checks a sink keeps
+	// it and every other field (#4709).
 	Dropped int
 }
 
@@ -508,25 +509,36 @@ func (c *Channel) logPaused(now time.Time) bool {
 	}
 	if !c.pausedQuiet {
 		c.pausedQuiet = true
-		c.logAside(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "a cut core's lines over the limit: dropped unlogged until the rate falls"})
+		c.logAside(pausedLine(now, "a cut core's lines over the limit: dropped unlogged until the rate falls"))
 	}
 	c.dropped++
 	return false
+}
+
+// pausedLine is a KindPaused line. Every one carries Code wire.Paused, the
+// answer the cut core's lines it speaks for were given (#4740).
+func pausedLine(at time.Time, reason string) Event {
+	return Event{At: at, Kind: KindPaused, Code: wire.Paused, Reason: reason}
 }
 
 // Flush logs one KindPaused line carrying the count of a cut core's lines
 // dropped unlogged since its last line logged, and ends the quiet, so the
 // record has the count at the owner's restore instead of at the core's next
 // line (#4726). DECOY-d's restore calls it once it has returned the cut to
-// Open; with nothing pending it logs nothing. Its line is not the core's,
-// so the logged lines plus the sum of Dropped still equal what the cut
-// core sent (ENF-d-4).
+// Open; with nothing pending it logs nothing. At any other stage it does
+// nothing, so its line never claims a restore while the core is still cut,
+// and the quiet and the count wait for the restore (#4740). Its line is not
+// the core's, so the logged lines plus the sum of Dropped still equal what
+// the cut core sent (ENF-d-4).
 func (c *Channel) Flush() {
 	c.mu.Lock()
 	defer c.release()
+	if c.stage() != Open {
+		return
+	}
 	c.pausedQuiet = false
 	if c.dropped != 0 {
-		c.log(Event{At: c.cfg.Now(), Kind: KindPaused, Reason: "the owner restored the core"})
+		c.log(pausedLine(c.cfg.Now(), "the owner restored the core"))
 	}
 }
 

@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -857,33 +858,84 @@ func TestDropCountRestart(t *testing.T) {
 // and the detail view show every Event field but At, which slice l's
 // renderer shows in the configured zone. A field a render drops, such as
 // Dropped, breaks the invariant that the logged lines plus the sum of
-// Dropped equal what the cut core sent. A new field fails here until it is
-// rendered.
+// Dropped equal what the cut core sent. The fields are CheckSink's samples,
+// so a new field fails here until it is rendered, and fails every sink's
+// check until setField can set it.
 func TestEveryEventFieldRendered(t *testing.T) {
-	base := Event{Kind: KindFrame, Reason: "r"}
-	typ := reflect.TypeOf(base)
-	for i := range typ.NumField() {
-		name := typ.Field(i).Name
-		if name == "At" {
+	samples, err := eventSamples()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zero Event
+	for _, s := range samples {
+		if s.field == "Event.At" {
 			continue
 		}
-		e := base
-		v := reflect.ValueOf(&e).Elem().Field(i)
-		switch {
-		case name == "Code": // OK has no word; any other code shows
-			v.Set(reflect.ValueOf(wire.Refused))
-		case v.Kind() == reflect.String:
-			v.SetString(v.String() + "x")
-		case v.CanInt():
-			v.SetInt(7)
-		case v.CanUint():
-			v.SetUint(7)
-		default:
-			t.Fatalf("field %s of kind %s: teach this test to set it", name, v.Kind())
+		if s.e.Line() == zero.Line() || s.e.Detail() == zero.Detail() {
+			t.Errorf("%s is not rendered: %q", s.field, s.e.Line())
 		}
-		if e.Line() == base.Line() || e.Detail() == base.Detail() {
-			t.Errorf("Event.%s is not rendered: %q", name, e.Line())
+	}
+}
+
+// TestCheckSink (#4709, A18, ENF-d-4): a sink that stores Event as JSON
+// keeps every field, and CheckSink refuses a sink that loses any one field
+// (each zeroed in turn: Dropped among them), one that keeps At only to the
+// second, and one that fails to store. Slice l's daemon sink runs the same
+// check on its own storage (briefs/ENF.md ENF-l). Revert mutants: a sample
+// left unchecked; At compared by ==; the all-fields sample missing.
+func TestCheckSink(t *testing.T) {
+	asJSON := func(e Event) (Event, error) {
+		b, err := json.Marshal(e)
+		if err != nil {
+			return Event{}, err
 		}
+		var got Event
+		return got, json.Unmarshal(b, &got)
+	}
+	if err := CheckSink(asJSON); err != nil {
+		t.Fatalf("a JSON sink: %v", err)
+	}
+	typ := reflect.TypeFor[Event]()
+	for i := range typ.NumField() {
+		lose := func(e Event) (Event, error) {
+			got, err := asJSON(e)
+			f := reflect.ValueOf(&got).Elem().Field(i)
+			f.Set(reflect.Zero(f.Type()))
+			return got, err
+		}
+		if err := CheckSink(lose); err == nil || !strings.Contains(err.Error(), "lost") {
+			t.Errorf("a sink that loses Event.%s passed: %v", typ.Field(i).Name, err)
+		}
+	}
+	seconds := func(e Event) (Event, error) {
+		e.At = e.At.Truncate(time.Second)
+		return e, nil
+	}
+	if err := CheckSink(seconds); err == nil {
+		t.Error("a sink that keeps At only to the second passed")
+	}
+	// A zone the sink does not keep by name is the same instant.
+	inUTC := func(e Event) (Event, error) {
+		e.At = e.At.UTC()
+		return e, nil
+	}
+	if err := CheckSink(inUTC); err != nil {
+		t.Errorf("a sink that keeps At in UTC: %v", err)
+	}
+	failing := func(Event) (Event, error) { return Event{}, errors.New("disk full") }
+	if err := CheckSink(failing); err == nil {
+		t.Error("a sink that failed to store passed")
+	}
+	// Only the sample with every field set catches a sink that keeps one
+	// field only while another is zero.
+	exclusive := func(e Event) (Event, error) {
+		if e.Code != 0 {
+			e.Dropped = 0
+		}
+		return e, nil
+	}
+	if err := CheckSink(exclusive); err == nil {
+		t.Error("a sink that drops Dropped from a line with a Code passed")
 	}
 }
 
@@ -1179,6 +1231,86 @@ func TestFlushAtRestore(t *testing.T) {
 	}
 	if quiet != 1 {
 		t.Errorf("the next cut's drops logged %d quiet lines, want 1", quiet)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}
+
+// TestFlushOnlyWhenOpen (#4740, ENF-d-4): a Flush called while the core is
+// still cut, at Tripped or at Reflashed, logs nothing, ends no quiet and
+// keeps the count, so the record never claims a restore that did not
+// happen; the Flush after the cut returns to Open logs the whole count.
+// Revert mutants: Flush not checking the stage; the check placed after the
+// quiet is ended.
+func TestFlushOnlyWhenOpen(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	id := uint64(0)
+	burst := func() {
+		for range 2 * l.Burst {
+			id++
+			cl.code(wire.Announce{ID: id})
+		}
+	}
+	burst()
+	for _, st := range []Stage{Tripped, Reflashed} {
+		r.cut.set(st)
+		n := len(r.events())
+		r.ch.Flush()
+		if ev := r.events()[n:]; len(ev) != 0 {
+			t.Fatalf("Flush at stage %v logged %+v", st, ev)
+		}
+		burst() // still quiet: no second quiet line
+		for _, e := range r.events()[n:] {
+			if e.Kind == KindPaused {
+				t.Fatalf("Flush at stage %v ended the quiet: %+v", st, e)
+			}
+		}
+	}
+	r.cut.set(Open)
+	n := len(r.events())
+	r.ch.Flush()
+	ev := r.events()[n:]
+	// The first burst's own lines over the bucket, then two whole bursts.
+	if want := l.Burst + 2*2*l.Burst; len(ev) != 1 || ev[0].Dropped != want {
+		t.Fatalf("Flush after the restore logged %+v, want one line carrying %d dropped lines", ev, want)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}
+
+// TestPausedLinesCarryPaused (#4740): every KindPaused line, the quiet line
+// and the restore's, carries Code wire.Paused, so the owner's log reads
+// them alike. Revert mutant: either line built without the code.
+func TestPausedLinesCarryPaused(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	for id := range uint64(2 * DefaultLimit(KindPaused).Burst) {
+		cl.code(wire.Announce{ID: id + 1})
+	}
+	r.cut.set(Open)
+	r.ch.Flush()
+	quiet, restore := 0, 0
+	for _, e := range r.events() {
+		if e.Kind != KindPaused {
+			continue
+		}
+		if e.Code != wire.Paused {
+			t.Errorf("a paused line carries code %v: %q", e.Code, e.Line())
+		}
+		if e.Dropped != 0 {
+			restore++
+		} else {
+			quiet++
+		}
+	}
+	if quiet != 1 || restore != 1 {
+		t.Errorf("logged %d quiet and %d restore lines, want one of each", quiet, restore)
 	}
 	cl.conn.Close()
 	waitDone(t, cl, "the connection closed")
