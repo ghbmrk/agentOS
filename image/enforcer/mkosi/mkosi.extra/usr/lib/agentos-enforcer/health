@@ -41,8 +41,15 @@ done
 for m in cfg80211 mac80211 usb_storage uas; do
 	[ -e "$R/sys/module/$m" ] && fail "module $m is loaded"
 done
-[ "$(cat "$R/sys/module/usbcore/parameters/authorized_default" 2>/dev/null)" = 0 ] ||
-	fail "USB devices are authorised by default"
+# usbcore is a module: on a machine with no USB controller it is never loaded, and when it loads it
+# takes the boot entry's usbcore.authorized_default=0 (finish_image.py checks the entry's words).
+usb=0
+if [ -e "$R/sys/module/usbcore" ]; then
+	[ "$(cat "$R/sys/module/usbcore/parameters/authorized_default" 2>/dev/null)" = 0 ] ||
+		fail "USB devices are authorised by default"
+else
+	usb=none
+fi
 # The hardware watchdog is armed (system.conf.d/50-enforcer-watchdog.conf).
 wd=none
 for d in "$R"/sys/class/watchdog/watchdog*; do
@@ -66,4 +73,4 @@ if [ -z "$R" ]; then
 fi
 # No swap: the enforcer's keys and policy stay in memory and on the state partition only.
 [ "$(sed 1d "$R/proc/swaps" 2>/dev/null | grep -c .)" = 0 ] || fail "swap is active"
-echo "enforcer-health: PASS secure_boot=$sb usr=verity wifi=off usb_storage=off usb_default=0 watchdog=$wd"
+echo "enforcer-health: PASS secure_boot=$sb usr=verity wifi=off usb_storage=off usb_default=$usb watchdog=$wd"
