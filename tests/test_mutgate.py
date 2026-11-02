@@ -663,7 +663,7 @@ class Verify(unittest.TestCase):
                 self.assertIn("not one for each site this diff touches", r.stderr)
         r = self.verify({"netguard.json": result({**deletion, "status": "LIVED"}) | {"mutants_lived": 1}}, src=src)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("broker/netguard/a.go:2 STATEMENT_DELETION survives", r.stdout)
+        self.assertIn("broker/netguard/a.go:2 deleting the whole statement holding line 2 survives", r.stdout)
 
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, req=False)
@@ -854,7 +854,7 @@ class Deletion(unittest.TestCase):
             # The gate reads a deletion mutant as it reads gremlins' own.
             r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-            self.assertIn("broker/hint/hint.go:7 STATEMENT_DELETION survives", r.stdout)
+            self.assertIn("broker/hint/hint.go:7 deleting the whole statement holding line 7 survives", r.stdout)
 
     def deletion_verdicts(self, base_src, pr_src, test_src, jobs=None):
         """{line: status} of `delete`'s STATEMENT_DELETION mutants on a repo built from these sources."""
@@ -1043,7 +1043,7 @@ func TestAll(t *testing.T) {
 	}
 }
 """
-        got = self.deletion_verdicts("package hint\n", pr, test)
+        got = self.deletion_verdicts("package hint\n", pr, test, "1")  # one worker: no rerun of the timeout
         self.assertEqual(got[8], "LIVED")    # case err != nil: err kept after default's colon
         self.assertEqual(got[17], "LIVED")   # case !good: the only clause, so `default: _ = good`
         self.assertEqual(got[25], "LIVED")   # case int: v kept in the default clause
@@ -1087,23 +1087,26 @@ func set(n, m int) {
         self.assertEqual(verdicts[0], verdicts[1])
         self.assertEqual(verdicts[0], {6: "KILLED", 7: "LIVED", 8: "NOT COVERED", 14: "NOT COVERED", 18: "NOT VIABLE"})
 
-    def test_a_site_timed_out_on_a_worker_runs_again_alone(self):
-        # #4633: a loaded runner can slow a passing run past its timeout, which reads as detected,
-        # so a parallel TIMED OUT is retried alone and that verdict stands.
+    def test_a_site_detected_on_a_worker_runs_again_alone(self):
+        # #4633, Potency on #4643: a loaded runner can slow a passing run past its timeout or fail a
+        # wall-clock bound, which reads as detected, so a parallel TIMED OUT or KILLED runs its own
+        # binary again alone and that verdict stands.
         with tempfile.TemporaryDirectory() as d:
             pkg = self.repo(d)
             added = mutgate.added_lines(subprocess.run(
                 ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
                 capture_output=True, text=True, check=True).stdout)[0]
-            calls = []
+            calls, first = [], ["TIMED OUT"]
             def fake(binary, cwd, timeout):
+                self.assertTrue(pathlib.Path(binary).is_file())  # the worker's own binary, kept for the rerun
                 calls.append(pathlib.Path(binary).parent.name)
-                return "LIVED" if calls.count(calls[-1]) > 1 else "TIMED OUT"
+                return "LIVED" if calls.count(calls[-1]) > 1 else first[0]
             broker, run_tests = mutgate.BROKER, mutgate.run_tests
             mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
             try:
                 tmp = pathlib.Path(d) / "tmp"
-                for jobs, want in ((1, "TIMED OUT"), (3, "LIVED")):
+                for jobs, first[0], want in ((1, "TIMED OUT", "TIMED OUT"), (3, "TIMED OUT", "LIVED"),
+                                             (1, "KILLED", "KILLED"), (3, "KILLED", "LIVED")):
                     calls.clear()
                     tmp.mkdir()
                     got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), jobs)
@@ -1113,6 +1116,50 @@ func set(n, m int) {
                     self.assertEqual(len(calls), 2 * (jobs > 1) + 2)
             finally:
                 mutgate.BROKER, mutgate.run_tests = broker, run_tests
+
+    def test_a_batch_that_mostly_times_out_leaves_the_rest_to_one_worker(self):
+        # L3 on #4643: when every worker's run times out, retrying each alone costs more than one
+        # worker would, so after such a batch the rest runs alone, once each.
+        body = "\n".join(f"\tcount += {i}" for i in range(12))
+        pr = f"package hint\n\nvar count int\n\nfunc Keep(n int) int {{\n{body}\n\treturn n\n}}\n"
+        test = TEST_SRC.replace("count != 3 || Last() != 3", "false")
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d, "package hint\n", pr, test)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            calls = []
+            def fake(binary, cwd, timeout):
+                calls.append(pathlib.Path(binary).parent.name)
+                return "TIMED OUT"
+            broker, run_tests = mutgate.BROKER, mutgate.run_tests
+            mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
+            try:
+                tmp = pathlib.Path(d) / "tmp"
+                tmp.mkdir()
+                got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), 2)
+            finally:
+                mutgate.BROKER, mutgate.run_tests = broker, run_tests
+            self.assertIsNone(problem)
+            covered = [m for m in got if m["status"] == "TIMED OUT"]
+            self.assertEqual(len(covered), 12)
+            # The first batch of 8 ran on workers and again alone; the other 4 ran alone once.
+            self.assertEqual(len(calls), 8 * 2 + 4)
+
+    def test_a_symlinked_go_file_is_refused(self):
+        # L3 on #4643: verify must not read (and echo) a runner file through a PR-added link.
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            (pkg / "link.go").symlink_to(pkg / "hint.go")
+            git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+            git("add", "-A")
+            git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--amend", "-m", "pr")
+            out = pathlib.Path(d) / "out"
+            out.mkdir()
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0}))
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("symbolic links, which mutgate does not follow: ['link.go']", r.stderr)
 
     def test_unused_label_and_import_spellings(self):
         text = b'package p\n\nimport (\n\tl "log"\n\t"os"\n)\n\nfunc f() {\nL:\n\tfor {\n\t}\n}\n'

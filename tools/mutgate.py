@@ -17,7 +17,8 @@ survives.
   tools/mutgate.py delete PKG... [--out DIR] --git BASE [--jobs N]
                                              delete each statement a line the diff BASE...HEAD adds
                                              in the package belongs to, alone, on N parallel workers
-                                             (default: one per CPU), run its tests, and add the
+                                             (default: one per usable CPU; a detected verdict is
+                                             confirmed alone), run its tests, and add the
                                              verdicts to `run`'s JSON in DIR (#4573, #4603, #4633)
   tools/mutgate.py report DIR                survivors per package, from the JSON in DIR
   tools/mutgate.py gate DIR --git BASE [HEAD]
@@ -249,7 +250,8 @@ def result_problem(data, pkg, pkg_dir, added, sites=None):
         if got != (want := site_keys(sites)):
             # A result short of a site, as one holding none, would pass the site unseen (#4602).
             return (f"holds statement-deletion verdicts that are not one for each site this diff touches: "
-                    f"missing {sorted((want - got).elements())}, extra {sorted((got - want).elements())}")
+                    f"missing {sorted((want - got).elements())}, extra {sorted((got - want).elements())}; rerun the "
+                    f"mutants job at this head, and if it repeats, that job's tests rewrote this result")
     if dry := dry_run(data):
         # RUNNABLE is a mutant gremlins found and did not run: no verdict, so no LIVED either (#4027).
         return f"holds {dry} mutants gremlins did not run (dry-run?)"
@@ -298,6 +300,7 @@ def cmd_run(args):
 # statements (go/parser, data only); each one the diff adds a line of is replaced by its own line
 # breaks (so no other line moves) through `go test -overlay`, which leaves the tree untouched.
 DELETION = "STATEMENT_DELETION"
+DETECTED = ("KILLED", "TIMED OUT")
 STMTS = pathlib.Path(__file__).resolve().parent / "mutgate_stmts.go"
 COVER = re.compile(r"^(.+):(\d+)\.(\d+),(\d+)\.(\d+) \d+ (\d+)$")
 # Gremlins' own report fields for each status (internal/report, v0.6.0), kept equal so its totals stay true.
@@ -443,6 +446,9 @@ def deletion_sites(pkg, added, lister):
                    if p.is_file() and not p.name.endswith("_test.go") and added.get(f"broker/{pkg}/{p.name}"))
     if not files:
         return [], None
+    # A link would have the trusted job read (and echo in an error) a file outside the PR's tree (L3 on #4643).
+    if links := [p.name for p in files if p.is_symlink()]:
+        return None, f"broker/{pkg}/ holds .go files that are symbolic links, which mutgate does not follow: {links}"
     r = subprocess.run([str(lister), *map(str, files)], capture_output=True)
     if r.returncode != 0:
         return None, f"cannot list the statements of broker/{pkg}/: {r.stderr.decode(errors='replace')}"
@@ -460,9 +466,11 @@ def site_keys(sites):
 
 def deletion_mutants(pkg, added, tmp, lister, jobs=1):
     """([mutation dict], None) for each site deletion_sites lists, or (None, problem). The sites run
-    on `jobs` parallel workers (#4633), each in its own directory; a site that times out there runs
-    again alone, since a loaded runner can slow a passing run past its timeout, which would read as
-    detected."""
+    on `jobs` parallel workers (#4633), each in its own directory, a batch at a time. A site a worker
+    reads as detected (KILLED or TIMED OUT) runs its binary again alone once the batch is done, and
+    that verdict stands: a loaded runner can fail a wall-clock bound or slow a run past its timeout,
+    and other binaries can collide on a fixed path or port, which would pass a deletion that lives
+    (Potency on #4643). A batch where most runs time out leaves the rest of the pass to one worker."""
     pkg_dir = BROKER / pkg
     sites, problem = deletion_sites(pkg, added, lister)
     if not sites:
@@ -483,26 +491,40 @@ def deletion_mutants(pkg, added, tmp, lister, jobs=1):
     timeout = 3 * (time.monotonic() - began) + 10
     blocks = covered_blocks(profile.read_text())
 
-    def verdict(i):
+    def verdict(i, alone):
+        """The site's status, and its binary when a detected verdict still needs confirming alone."""
         site = sites[i]
         if not is_covered(blocks, site):
-            return "NOT COVERED"
+            return "NOT COVERED", None
         src_path, work = pkg_dir / site["file"], tmp / f"site-{i}"
         work.mkdir()
+        keep = False
         try:
             # The mutant keeps the file's name: the compiler names the overlay's file in its errors.
             mutant, overlay, binary = work / site["file"], work / "overlay.json", work / "mutant.test"
             overlay.write_text(json.dumps({"Replace": {str(src_path): str(mutant)}}))
             build = ["go", "test", "-c", "-overlay", str(overlay), "-o", str(binary), "."]
-            built = build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir)
-            return run_tests(binary, pkg_dir, timeout) if built else "NOT VIABLE"
+            if not build_mutant(src_path.read_bytes(), site, build, mutant, pkg_dir):
+                return "NOT VIABLE", None
+            status = run_tests(binary, pkg_dir, timeout)
+            keep = not alone and status in DETECTED
+            return status, binary if keep else None
         finally:
-            shutil.rmtree(work)  # a test binary per site would fill the runner's disk
+            if not keep:
+                shutil.rmtree(work)  # a test binary per site would fill the runner's disk
 
+    statuses = []
     with concurrent.futures.ThreadPoolExecutor(max(1, jobs)) as pool:
-        statuses = list(pool.map(verdict, range(len(sites))))
-    if jobs > 1:
-        statuses = [verdict(i) if st == "TIMED OUT" else st for i, st in enumerate(statuses)]
+        while len(statuses) < len(sites):
+            batch = range(len(statuses), min(len(sites), len(statuses) + 4 * jobs))
+            results = [verdict(i, True) for i in batch] if jobs <= 1 else list(pool.map(lambda i: verdict(i, False), batch))
+            for i, (status, binary) in zip(batch, results):
+                if binary is not None:
+                    status = run_tests(binary, pkg_dir, timeout)
+                    shutil.rmtree(binary.parent)
+                statuses.append(status)
+            if sum(st == "TIMED OUT" for st, _ in results) * 2 > len(batch):
+                jobs = 1  # each run needs the runner to itself: the rest runs alone, once
     return [mutation(s, st) for s, st in zip(sites, statuses)], None
 
 
@@ -648,7 +670,9 @@ def cmd_gate(args):
 
 def report_violations(found):
     for pkg, path, line, kind in found:
-        print(f"mutgate: {path}:{line} {kind} survives, in package {pkg} where this PR claims REQ coverage")
+        # A deletion's line is the first added line of its statement, which may start earlier (#4603).
+        what = f"deleting the whole statement holding line {line}" if kind == DELETION else kind
+        print(f"mutgate: {path}:{line} {what} survives, in package {pkg} where this PR claims REQ coverage")
     if found:
         print("mutgate: add a test that fails when the line changes, or drop the REQ claim")
     return 1 if found else 0
@@ -670,7 +694,8 @@ def main(argv=None):
     p.add_argument("pkg", nargs="+")
     p.add_argument("--out", default="mutants")
     p.add_argument("--git", required=True, metavar="BASE")
-    p.add_argument("--jobs", type=int, default=os.cpu_count() or 1, metavar="N")
+    # The CPUs this process may run on (a container's cpuset), not the host's.
+    p.add_argument("--jobs", type=int, default=len(os.sched_getaffinity(0)), metavar="N")
     p = sub.add_parser("report")
     p.add_argument("dir")
     p = sub.add_parser("gate")
