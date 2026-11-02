@@ -3,6 +3,8 @@ package page
 // REQ: NET-3, NET-4
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -273,13 +275,16 @@ func TestHeardHolds(t *testing.T) {
 	}
 }
 
-// TestHeardFillBounded: one card adds at most maxFill heard names to a
-// device, hosts first, and says how many it left out (#4565, Security on
-// #4531): a device flooding its VLAN cannot bury the card's other lines.
+// TestHeardFillBounded: a device pins or holds at most policy.MaxMDNS
+// names, so one card fills a device only up to that, hosts first, and
+// says how many it left out (#4565, #4601, Security on #4531 and #4596):
+// a device flooding its VLAN cannot bury the card's other lines, and the
+// home page offers a full device nothing more. A person's network's
+// names left out are offered for another of its paired devices.
 func TestHeardFillBounded(t *testing.T) {
 	g := newRig(t)
 	var flood, hosts [][]string
-	for i := range 3 * maxFill {
+	for i := range 3 * policy.MaxMDNS {
 		flood = append(flood, []string{fmt.Sprintf("Svc%03d", i), "_ipp", "_tcp", "local"})
 	}
 	for i := range 10 {
@@ -289,21 +294,22 @@ func TestHeardFillBounded(t *testing.T) {
 	}
 	g.heard["vlan104"] = flood
 	var person [][]string
-	for i := range maxFill + 5 {
+	for i := range policy.MaxMDNS + 5 {
 		person = append(person, []string{fmt.Sprintf("p%02d", i), "local"})
 	}
 	g.heard["household"] = person
+	// laptop already holds macbook.local, so it has room for one fewer.
 	screen, id, ch := g.open(pairedTV(2), "pair")
 	plain := html.UnescapeString(screen)
-	if n := strings.Count(plain, "Let tv announce the name"); n != maxFill {
-		t.Errorf("%d tv names on the card, want %d", n, maxFill)
+	if n := strings.Count(plain, "Let tv announce the name"); n != policy.MaxMDNS {
+		t.Errorf("%d tv names on the card, want %d", n, policy.MaxMDNS)
 	}
-	if n := strings.Count(plain, "Hold the name p"); n != maxFill {
-		t.Errorf("%d holds on the card, want %d", n, maxFill)
+	if n := strings.Count(plain, "Hold the name p"); n != policy.MaxMDNS-1 {
+		t.Errorf("%d holds on the card, want %d", n, policy.MaxMDNS-1)
 	}
 	for _, want := range []string{
-		fmt.Sprintf("%d more names tv announces are left out of this change; the home page offers them once it applies.", 3*maxFill+10-maxFill),
-		"5 more names heard on the household network are left out of this change; the home page offers to hold them for laptop once it applies.",
+		fmt.Sprintf("%d more names tv announces are left out of this change, since one device pins at most %d names.", 3*policy.MaxMDNS+10-policy.MaxMDNS, policy.MaxMDNS),
+		fmt.Sprintf("6 more names heard on the household network are left out of this change, since one device holds at most %d names; the home page offers to hold them for another household device with a pair.", policy.MaxMDNS),
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("the card lacks %q:\n%s", want, plain)
@@ -311,37 +317,96 @@ func TestHeardFillBounded(t *testing.T) {
 	}
 	cur := g.sign(id, ch)
 	tv := cur.Device("tv").MDNS
-	if len(tv) != maxFill {
-		t.Fatalf("tv pins %d names, want %d", len(tv), maxFill)
+	if len(tv) != policy.MaxMDNS || len(cur.Device("laptop").MDNS) != policy.MaxMDNS {
+		t.Fatalf("tv pins %d names and laptop holds %d, want %d each", len(tv), len(cur.Device("laptop").MDNS), policy.MaxMDNS)
 	}
 	for _, h := range hosts {
 		if !listed(tv, h) {
 			t.Errorf("host %q left out before an instance", h)
 		}
 	}
-	// The home page offers the next ones, at most maxFill again, saying
-	// there are more, and the offer's card says how many it left out.
-	offs := g.s.offers(cur)
-	if len(offs) != 2 || offs[0].ID != "laptop" || len(offs[0].Names) != 5 || offs[1].ID != "tv" || len(offs[1].Names) != maxFill || offs[1].More != 3*maxFill+10-2*maxFill {
-		t.Errorf("offers after the flood: %+v", offs)
+	// Both are full: the home page offers neither more.
+	if offs := g.s.offers(cur); len(offs) != 0 {
+		t.Errorf("offers for full devices: %+v", offs)
 	}
-	home := html.UnescapeString(g.do(http.MethodGet, "/", nil).Body.String())
-	if !strings.Contains(home, " and more: let it?") || !strings.Contains(home, "hold them for laptop, so no paired device may announce them?") {
-		t.Errorf("the home page's offers:\n%s", home)
+	if w := g.do(http.MethodGet, "/heard?d=tv", nil); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), errNoOffer.Error()) {
+		t.Errorf("an offer for a full device: %d %s", w.Code, w.Body)
 	}
-	w := g.do(http.MethodGet, "/heard?d=tv", nil)
-	if want := fmt.Sprintf("%d more names tv announces are left out of this change", 3*maxFill+10-2*maxFill); w.Code != http.StatusOK || !strings.Contains(html.UnescapeString(w.Body.String()), want) {
-		t.Errorf("the offer's card lacks %q: %d %s", want, w.Code, w.Body)
+	// Another paired household device, after laptop, is offered the
+	// network's rest.
+	two := clone(cur)
+	two.Devices = append(two.Devices, policy.Device{ID: "phone", Network: policy.NetHousehold, Everyday: true})
+	two.Pairs = append(two.Pairs, policy.Pair{A: "phone", B: "tv"})
+	if offs := g.s.offers(two); len(offs) != 1 || offs[0].ID != "phone" || len(offs[0].Names) != 6 || offs[0].More != 0 {
+		t.Errorf("offers with desk paired: %+v", offs)
+	}
+}
+
+// TestHeardPinsCapped: a link that pins more than policy.MaxMDNS names
+// on one device is refused on the screen with the device and the count,
+// though the device was heard proving every one (#4601, Security on
+// #4596): the core cannot have the owner sign a card they cannot read.
+func TestHeardPinsCapped(t *testing.T) {
+	g := newRig(t)
+	var flood [][]string
+	for i := range policy.MaxMDNS + 1 {
+		flood = append(flood, []string{fmt.Sprintf("Svc%03d", i), "_ipp", "_tcp", "local"})
+	}
+	g.heard["vlan104"] = flood
+	many := pairedTV(2)
+	dev(&many, "tv").MDNS = flood
+	raw, err := json.Marshal(many) // Encode refuses it; the core need not
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := g.do(http.MethodGet, "/p?d="+base64.RawURLEncoding.EncodeToString(raw)+"&s=pair", nil)
+	want := fmt.Sprintf("tv pins %d names, and one device pins at most %d; drop 1 before signing", policy.MaxMDNS+1, policy.MaxMDNS)
+	if body := w.Body.String(); w.Code != http.StatusBadRequest || !strings.Contains(body, want) || reChal.MatchString(body) {
+		t.Errorf("a link past the cap: %d %s", w.Code, body)
+	}
+	dev(&many, "tv").MDNS = flood[:policy.MaxMDNS]
+	if w := g.do(http.MethodGet, linkFor(many, "pair"), nil); w.Code != http.StatusOK {
+		t.Errorf("a link at the cap: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestHeardInstanceLeftWithHost: an instance whose host another device
+// pins or holds is neither filled nor offered with the names left out
+// for it (#4601, Security on #4596): the relay never passes its SRV, so
+// the name would not work.
+func TestHeardInstanceLeftWithHost(t *testing.T) {
+	g := newRig(t)
+	share := []string{"Den", "_ipp", "_tcp", "local"}
+	g.heard["vlan104"] = [][]string{{"tv", "local"}, {"Living Room", "_airplay", "_tcp", "local"}, {"tv-2", "local"}, share}
+	g.host[policy.MDNSKey(share)] = []string{"tv-2", "local"}
+	g.host[policy.MDNSKey([]string{"Living Room", "_airplay", "_tcp", "local"})] = []string{"tv", "local"}
+	doc := pairedTV(2)
+	dev(&doc, "laptop").MDNS = append(dev(&doc, "laptop").MDNS, []string{"TV-2", "local"}) // held, as mDNS compares
+	screen, id, ch := g.open(doc, "pair")
+	plain := html.UnescapeString(screen)
+	if strings.Contains(plain, "Den._ipp") || !strings.Contains(plain, `Let tv announce the name "Living Room._airplay._tcp.local"`) {
+		t.Errorf("the card:\n%s", plain)
+	}
+	cur := g.sign(id, ch)
+	if got, want := cur.Device("tv").MDNS, [][]string{{"Living Room", "_airplay", "_tcp", "local"}, {"tv", "local"}}; !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("tv pins %q, want %q", got, want)
+	}
+	// Nor is it offered later; a new instance on tv's own host is.
+	airplay2 := []string{"Bedroom", "_airplay", "_tcp", "local"}
+	g.heard["vlan104"] = append(g.heard["vlan104"], airplay2)
+	g.host[policy.MDNSKey(airplay2)] = []string{"tv", "local"}
+	if offs := g.s.offers(cur); len(offs) != 1 || !slices.EqualFunc(offs[0].Names, [][]string{airplay2}, slices.Equal) {
+		t.Errorf("offers: %+v", offs)
 	}
 }
 
 // TestHeardHoldsOncePerNetwork: a link that pairs two devices of one
-// person's network fills that network's names once, within maxFill, with
-// one true left-out line (Security on #4596).
+// person's network fills that network's names once, within
+// policy.MaxMDNS, with one true left-out line (Security on #4596).
 func TestHeardHoldsOncePerNetwork(t *testing.T) {
 	g := newRig(t)
 	var person [][]string
-	for i := range 3 * maxFill {
+	for i := range 3 * policy.MaxMDNS {
 		person = append(person, []string{fmt.Sprintf("p%03d", i), "local"})
 	}
 	g.heard["household"] = person
@@ -353,12 +418,21 @@ func TestHeardHoldsOncePerNetwork(t *testing.T) {
 	})
 	screen, _, _ := g.open(two, "pair two")
 	plain := html.UnescapeString(screen)
-	if n := strings.Count(plain, "Hold the name p"); n != maxFill {
-		t.Errorf("%d holds on the card, want %d", n, maxFill)
+	if n := strings.Count(plain, "Hold the name p"); n != policy.MaxMDNS {
+		t.Errorf("%d holds on the card, want %d", n, policy.MaxMDNS)
 	}
 	if n := strings.Count(plain, "more names heard on the household network"); n != 1 ||
-		!strings.Contains(plain, fmt.Sprintf("%d more names heard on the household network are left out of this change; the home page offers to hold them for desk once it applies.", 2*maxFill)) {
+		!strings.Contains(plain, fmt.Sprintf("%d more names heard on the household network are left out of this change, since one device holds at most %d names; the home page offers to hold them for another household device with a pair.", 2*policy.MaxMDNS, policy.MaxMDNS)) {
 		t.Errorf("the left-out lines:\n%s", plain)
+	}
+	// A full first device leaves the network's names to the next.
+	full := clone(two)
+	for i := range policy.MaxMDNS {
+		dev(&full, "desk").MDNS = append(dev(&full, "desk").MDNS, []string{fmt.Sprintf("d%02d", i), "local"})
+	}
+	screen, _, _ = g.open(full, "pair two")
+	if plain := html.UnescapeString(screen); strings.Count(plain, "for laptop") != policy.MaxMDNS || strings.Contains(plain, "p000.local for desk") {
+		t.Errorf("a full desk:\n%s", plain)
 	}
 }
 

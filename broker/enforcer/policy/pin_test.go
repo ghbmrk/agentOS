@@ -4,6 +4,7 @@ package policy
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -126,5 +127,35 @@ func TestMDNSNameHeldOnce(t *testing.T) {
 		dev(d, "speaker").MDNS = mdnsOf("Kitchen._airplay._tcp.local")
 	})); err != nil {
 		t.Errorf("renamed: %v", err)
+	}
+}
+
+// TestMDNSNamesCapped: one device pins or holds at most MaxMDNS names,
+// whatever proposed them (#4601, Security on #4596): a card that pins a
+// thousand names on one device cannot be drawn, so the owner never signs
+// one they cannot read. The refusal names the device and the count.
+func TestMDNSNamesCapped(t *testing.T) {
+	names := func(k int) [][]string {
+		var out [][]string
+		for i := range k {
+			out = append(out, []string{fmt.Sprintf("Svc%04d", i), "_ipp", "_tcp", "local"})
+		}
+		return out
+	}
+	if _, err := Encode(edit(1, func(d *Document) { dev(d, "tv").MDNS = names(MaxMDNS) })); err != nil {
+		t.Errorf("%d names: %v", MaxMDNS, err)
+	}
+	for _, k := range []int{MaxMDNS + 1, 1000} {
+		_, err := Encode(edit(1, func(d *Document) { dev(d, "tv").MDNS = names(k) }))
+		want := fmt.Sprintf("tv pins %d names, and one device pins at most %d; drop %d before signing", k, MaxMDNS, k-MaxMDNS)
+		if !errors.Is(err, ErrTooManyNames) || !strings.Contains(err.Error(), want) {
+			t.Errorf("%d names: %v, want ErrTooManyNames saying %q", k, err, want)
+		}
+	}
+	// A held name counts as a pinned one.
+	if _, err := Encode(edit(1, func(d *Document) {
+		d.Devices = append(d.Devices, Device{ID: "laptop", Network: NetHousehold, Everyday: true, MDNS: names(MaxMDNS + 1)})
+	})); !errors.Is(err, ErrTooManyNames) {
+		t.Errorf("held names past the cap: %v", err)
 	}
 }

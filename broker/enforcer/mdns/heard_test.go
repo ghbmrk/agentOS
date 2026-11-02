@@ -56,63 +56,63 @@ func TestHeardOwnNames(t *testing.T) {
 	f.Hear("ap0.105", m, t0)
 	f.Prove("ap0.105", printerLink, m, t0)
 	want := heardNames("Office._ipp._tcp.local", "Printer.local")
-	if got := f.Heard("ap0.105", t0); !slices.EqualFunc(got, want, slices.Equal) {
+	if got := f.Heard("ap0.105", t0, nil); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard %q, want %q", got, want)
 	}
 	// A query proves nothing, not even its known answers or probe records.
 	q := &message{questions: []question{{dn("tv.local"), typeA, 1}}, answers: []record{a("tv.local", "10.13.0.2", 120)}, authority: []record{a("tv.local", "10.13.0.2", 120)}}
 	f.Prove("ap0.105", printerLink, q, t0)
-	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "tv" }) {
+	if got := f.Heard("ap0.105", t0, nil); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "tv" }) {
 		t.Errorf("a query proved a name: %q", got)
 	}
 	// Another interface claims the instance later: no longer offered.
 	f.Hear("hh0", response([]record{srv("Office._ipp._tcp.local", "macbook.local", 120)}, nil), t0.Add(time.Second))
-	if got, want := f.Heard("ap0.105", t0.Add(time.Second)), heardNames("Printer.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("ap0.105", t0.Add(time.Second), nil), heardNames("Printer.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard %q after the claim, want %q", got, want)
 	}
 	// A goodbye ends the host now; a live record beside it keeps it.
 	f.Prove("ap0.105", printerLink, response([]record{a("Printer.local", "10.13.0.2", 0), a("Printer.local", "fd00:13::2", 120)}, nil), t0.Add(2*time.Second))
-	if got := f.Heard("ap0.105", t0.Add(2*time.Second)); len(got) != 1 {
+	if got := f.Heard("ap0.105", t0.Add(2*time.Second), nil); len(got) != 1 {
 		t.Errorf("a goodbye beside a live record ended the name: %q", got)
 	}
 	f.Prove("ap0.105", printerLink, response([]record{a("Printer.local", "10.13.0.2", 0)}, nil), t0.Add(3*time.Second))
-	if got := f.Heard("ap0.105", t0.Add(3*time.Second)); len(got) != 0 {
+	if got := f.Heard("ap0.105", t0.Add(3*time.Second), nil); len(got) != 0 {
 		t.Errorf("after the goodbye: %q", got)
 	}
 	// The TTL ends a name, at most ownHold after it was heard.
 	f.Prove("ap0.105", printerLink, response([]record{a("long.local", "10.13.0.2", 1<<30)}, nil), t0)
-	if got := f.Heard("ap0.105", t0.Add(ownHold-time.Second)); len(got) != 1 {
+	if got := f.Heard("ap0.105", t0.Add(ownHold-time.Second), nil); len(got) != 1 {
 		t.Errorf("before ownHold: %q", got)
 	}
-	if got := f.Heard("ap0.105", t0.Add(ownHold)); len(got) != 0 {
+	if got := f.Heard("ap0.105", t0.Add(ownHold), nil); len(got) != 0 {
 		t.Errorf("past ownHold: %q", got)
 	}
 	// A host and its instance saying goodbye together both end (L3 on
 	// #4531).
 	f.Prove("ap0.105", printerLink, response([]record{a("bye.local", "10.13.0.2", 120), srv("Bye._ipp._tcp.local", "bye.local", 120)}, nil), t0)
 	f.Prove("ap0.105", printerLink, response([]record{a("bye.local", "10.13.0.2", 0), srv("Bye._ipp._tcp.local", "bye.local", 0)}, nil), t0)
-	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Bye" || n[0] == "bye" }) {
+	if got := f.Heard("ap0.105", t0, nil); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Bye" || n[0] == "bye" }) {
 		t.Errorf("a host and instance saying goodbye together are still heard: %q", got)
 	}
 	// Only an address record's or an SRV's goodbye ends a name, and a live
 	// record that proves nothing (another link's address) ends none.
 	f.Prove("ap0.105", printerLink, response([]record{a("kept.local", "10.13.0.2", 120)}, nil), t0)
 	f.Prove("ap0.105", printerLink, response([]record{txt("kept.local", 0), a("kept.local", "10.11.0.2", 120)}, nil), t0)
-	if got := f.Heard("ap0.105", t0); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "kept" }) {
+	if got := f.Heard("ap0.105", t0, nil); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "kept" }) {
 		t.Errorf("a TXT goodbye or a foreign address ended a host: %q", got)
 	}
 	// A goodbye proves no host for an SRV beside it.
 	f.Prove("ap0.105", printerLink, response([]record{a("gone.local", "10.13.0.2", 0), srv("Gone._ipp._tcp.local", "gone.local", 120)}, nil), t0)
-	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Gone" }) {
+	if got := f.Heard("ap0.105", t0, nil); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Gone" }) {
 		t.Errorf("an SRV on a host saying goodbye was heard: %q", got)
 	}
 	// One name said twice with one TTL keeps the first spelling.
 	f.Prove("ap0.105", printerLink, response([]record{a("Twice.local", "10.13.0.2", 120), a("TWICE.local", "fd00:13::2", 120)}, nil), t0)
-	if got := f.Heard("ap0.105", t0); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Twice" }) {
+	if got := f.Heard("ap0.105", t0, nil); !slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Twice" }) {
 		t.Errorf("the first spelling was not kept: %q", got)
 	}
 	// Only the interface it was heard on.
-	if got := f.Heard("ap0.106", t0); len(got) != 0 {
+	if got := f.Heard("ap0.106", t0, nil); len(got) != 0 {
 		t.Errorf("another interface heard %q", got)
 	}
 }
@@ -120,7 +120,8 @@ func TestHeardOwnNames(t *testing.T) {
 // TestHeardInstanceNeedsItsHost: an instance is offered only while the
 // host its SRV named is offered too (#4565, L3 on #4531): once another
 // interface claims that host, or the host's own record ends, the relay
-// would pass the instance's SRV nowhere, so the card offers neither. A
+// would pass the instance's SRV nowhere, so the card offers neither. So
+// when the page says another device pins the host (taken, #4601). A
 // later SRV naming another live host offers it again.
 func TestHeardInstanceNeedsItsHost(t *testing.T) {
 	f := NewFilter()
@@ -129,21 +130,26 @@ func TestHeardInstanceNeedsItsHost(t *testing.T) {
 		a("Spare.local", "10.13.0.2", 60),
 		srv("Office._ipp._tcp.local", "Printer.local", 120),
 	}, nil), t0)
-	if got, want := f.Heard("ap0.105", t0), heardNames("Office._ipp._tcp.local", "Printer.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("ap0.105", t0, nil), heardNames("Office._ipp._tcp.local", "Printer.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Fatalf("heard %q, want %q", got, want)
+	}
+	// Another device pins the host: neither is offered.
+	taken := func(n []string) bool { return slices.Equal(n, []string{"Printer", "local"}) }
+	if got, want := f.Heard("ap0.105", t0, taken), heardNames("Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("heard %q with the host taken, want %q", got, want)
 	}
 	// Another interface claims the host: neither is offered.
 	f.Hear("hh0", response([]record{a("Printer.local", "10.11.0.2", 120)}, nil), t0.Add(time.Second))
-	if got, want := f.Heard("ap0.105", t0.Add(time.Second)), heardNames("Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("ap0.105", t0.Add(time.Second), nil), heardNames("Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard %q with the host claimed elsewhere, want %q", got, want)
 	}
 	// The SRV moves to a host the sender still holds: offered again.
 	f.Prove("ap0.105", printerLink, response([]record{srv("Office._ipp._tcp.local", "Spare.local", 120)}, nil), t0.Add(2*time.Second))
-	if got, want := f.Heard("ap0.105", t0.Add(2*time.Second)), heardNames("Office._ipp._tcp.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("ap0.105", t0.Add(2*time.Second), nil), heardNames("Office._ipp._tcp.local", "Spare.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard %q on the new host, want %q", got, want)
 	}
 	// That host's TTL ends before the instance's: the instance goes with it.
-	if got := f.Heard("ap0.105", t0.Add(61*time.Second)); len(got) != 0 {
+	if got := f.Heard("ap0.105", t0.Add(61*time.Second), nil); len(got) != 0 {
 		t.Errorf("heard %q after the host's TTL", got)
 	}
 }
@@ -193,17 +199,17 @@ func TestHearOnlyPassesNothing(t *testing.T) {
 	// HeardBy reads the clock; names heard at t0 are long gone by now, so
 	// the filter is read at t0 directly and HeardBy only for its mapping.
 	// What did not come from mDNS's port proves nothing.
-	if got, want := r.f.Heard("ap0.101", t0), heardNames("Den._airplay._tcp.local", "tv-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := r.f.Heard("ap0.101", t0, nil), heardNames("Den._airplay._tcp.local", "tv-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("heard %q, want %q", got, want)
 	}
 	r.f.Prove("ap0.101", printerLink, response([]record{a("now.local", "10.13.0.2", 120)}, nil), time.Now())
-	if got := heard("devices", "vlan101"); !slices.EqualFunc(got, heardNames("now.local"), slices.Equal) {
+	if got := heard("devices", "vlan101", nil); !slices.EqualFunc(got, heardNames("now.local"), slices.Equal) {
 		t.Errorf("HeardBy(vlan101) = %q", got)
 	}
-	if got := heard("devices", "vlan105"); len(got) != 0 {
+	if got := heard("devices", "vlan105", nil); len(got) != 0 {
 		t.Errorf("HeardBy(vlan105) = %q", got)
 	}
-	if got := heard("devices", "not-a-vlan"); got != nil {
+	if got := heard("devices", "not-a-vlan", nil); got != nil {
 		t.Errorf("HeardBy(not-a-vlan) = %q", got)
 	}
 	household := []netip.Prefix{netip.MustParsePrefix("10.11.0.1/24")}
@@ -218,7 +224,7 @@ func TestHearOnlyPassesNothing(t *testing.T) {
 		{"guests", "", nil},
 		{"household", "vlan101", heardNames("macbook.local")},
 	} {
-		if got := heard(c.network, c.wifi); !slices.EqualFunc(got, c.want, slices.Equal) {
+		if got := heard(c.network, c.wifi, nil); !slices.EqualFunc(got, c.want, slices.Equal) {
 			t.Errorf("HeardBy(%s, %s) = %q, want %q", c.network, c.wifi, got, c.want)
 		}
 	}
@@ -227,7 +233,7 @@ func TestHearOnlyPassesNothing(t *testing.T) {
 		r.handle("ap0.101", 5353, tv, t0)
 	}
 	r.handle("ap0.101", 5353, response([]record{a("late.local", "10.13.0.2", 120)}, nil).bytes(), t0)
-	if slices.ContainsFunc(r.f.Heard("ap0.101", t0), func(n []string) bool { return n[0] == "late" }) {
+	if slices.ContainsFunc(r.f.Heard("ap0.101", t0, nil), func(n []string) bool { return n[0] == "late" }) {
 		t.Error("the read limit did not stop the packet past its burst")
 	}
 	// The printer's pair still relays.
@@ -334,10 +340,10 @@ func hearOnly(t *testing.T, v6 bool) {
 	if want := map[string][]string{"hh0": {"printer-answer"}}; fmt.Sprint(heard) != fmt.Sprint(want) {
 		t.Errorf("heard %v, want %v", heard, want)
 	}
-	if got, want := f.Heard("ap0.101", time.Now()), heardNames("Den._airplay._tcp.local", "tv-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("ap0.101", time.Now(), nil), heardNames("Den._airplay._tcp.local", "tv-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("the relay heard the TV prove %q, want %q", got, want)
 	}
-	if got, want := f.Heard("own0", time.Now()), heardNames("phone-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
+	if got, want := f.Heard("own0", time.Now(), nil), heardNames("phone-answer.local"); !slices.EqualFunc(got, want, slices.Equal) {
 		t.Errorf("the relay heard the Owner network prove %q, want %q", got, want)
 	}
 }

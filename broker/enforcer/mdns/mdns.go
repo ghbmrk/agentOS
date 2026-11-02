@@ -386,13 +386,13 @@ func listen(name string, v6 bool) (*net.UDPConn, error) {
 // VLAN, what the enforcer's page pins for a paired device and the only
 // names it lets a link pin (D-266); on the Owner or Household network,
 // the names the page offers to hold for that network's devices (#4411).
-// A device the relay hears nowhere has none.
-func HeardBy(f *Filter, l nft.Layout) func(network, wifi string) [][]string {
-	return func(network, wifi string) [][]string {
+// A device the relay hears nowhere has none. taken is Filter.Heard's.
+func HeardBy(f *Filter, l nft.Layout) func(network, wifi string, taken func([]string) bool) [][]string {
+	return func(network, wifi string, taken func([]string) bool) [][]string {
 		iface, ok := l.Iface(network, wifi)
 		if !ok {
 			return nil
 		}
-		return f.Heard(iface, time.Now())
+		return f.Heard(iface, time.Now(), taken)
 	}
 }
