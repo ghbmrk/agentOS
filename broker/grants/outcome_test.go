@@ -56,9 +56,7 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	if got := o.take(); got != "" {
 		t.Fatalf("reported at YES, before the undo window: %q", got)
 	}
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(reversible.DefaultWindow)
 	if got := o.take(); got != "agent/yes accepted" {
 		t.Fatalf("release: %q", got)
 	}
@@ -103,15 +101,11 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 			Params: map[string]any{"record": rec, "body": "Thanks, got it (" + id + ")."}, Recipients: []string{"sam@example.com"}, Executor: "mail"})
 	}
 	reply("reply-1/r1")
-	r.advance(11 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(11 * time.Minute)
 	if got := o.take(); got != "" {
 		t.Fatalf("auto-reply reported before a late UNDO could come: %q", got)
 	}
-	r.advance(owner.LateRelease)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(owner.LateRelease)
 	if got := o.take(); got != "reply-1/r1 accepted-implicitly" {
 		t.Fatalf("auto-reply let go: %q", got)
 	}
@@ -120,15 +114,11 @@ func TestOwnerOutcomesAreReportedOnceFinal(t *testing.T) {
 	// stop the reply, but the owner did not let it go: no verdict.
 	reply("reply-1/r3")
 	q3 := r.own.due[len(r.own.due)-1]
-	r.advance(11 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(11 * time.Minute)
 	r.own.mu.Lock()
 	r.own.lateUndo = map[string]bool{q3.ID: true}
 	r.own.mu.Unlock()
-	r.advance(owner.LateRelease)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(owner.LateRelease)
 	if got := o.take(); got != "" {
 		t.Fatalf("an UNDO after the release left a verdict: %q", got)
 	}
@@ -212,9 +202,7 @@ func TestAnEditedDraftIsNotAnAcceptance(t *testing.T) {
 	r.exec.fail = map[string]bool{"agent/e1": true}
 	r.exec.evidence = map[string]string{"agent/e1": reversible.EvidenceEdited}
 	r.stop(t)
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(reversible.DefaultWindow)
 	if err := r.eng.Resume(); err != nil {
 		t.Fatal(err)
 	}
@@ -288,9 +276,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Late = true
 	r.own.mu.Unlock()
-	r.advance(11 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(11 * time.Minute)
 	if st := r.state("reply-1/late"); st.State != journal.Succeeded {
 		t.Fatalf("a late release was not sent: %s", st.State)
 	}
@@ -312,9 +298,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 			quietAt = alerted.Add(11 * time.Minute)
 		}
 		*quiet = func(t time.Time) bool { return t.Equal(quietAt) }
-		r.advance(11 * time.Minute)
-		r.g.Tick()
-		r.g.Wait()
+		r.tickAfter(11 * time.Minute)
 		if got := o.take(); got != "" {
 			t.Fatalf("silence in quiet hours at the %s was reported: %q", at, got)
 		}
@@ -324,9 +308,7 @@ func TestALateReleaseIsNoVerdict(t *testing.T) {
 	r.own.mu.Lock()
 	r.own.due[len(r.own.due)-1].Alerted = r.now()
 	r.own.mu.Unlock()
-	r.advance(11 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(11 * time.Minute)
 	r.advance(owner.LateRelease)
 	r.g.Tick()
 	r.g.Wait()
