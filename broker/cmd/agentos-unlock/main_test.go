@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -136,7 +137,13 @@ func moveRole() int {
 			return fail("descriptor %d (%s) is in the move's way", n, to)
 		}
 	}
-	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD}); err != nil {
+	// r and f stay reachable through the move: else their finalizers may
+	// close the descriptors before Dup3 copies them, as handOff's defers
+	// prevent there.
+	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
+	if err != nil {
 		return fail("%v", err)
 	}
 	// Each of the runtime's threads polls in this time: sysmon once 10 ms
@@ -210,6 +217,8 @@ func takenRole() int {
 		return fail("%v", err)
 	}
 	err = inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD})
+	runtime.KeepAlive(r)
+	runtime.KeepAlive(f)
 	named := fmt.Sprintf("agentos-unlock: descriptor %d is already open at hand-off", slot)
 	if err == nil || err.Error() != named {
 		return fail("the move over an open %d: %v, want %q", slot, err, named)
