@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ghbmrk/agentos/broker/journal"
+	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // REQ: OP-3, OP-4, REV-3
@@ -116,7 +117,8 @@ func TestConcurrentDispatchStartsOneAttempt(t *testing.T) {
 }
 
 // TestTriesFailsClosed: an attempt count the gate cannot read is an error
-// and -1, never a count that might match; no approval is journaled with it.
+// and -1, never a count that might match. Decide neither journals nor acts
+// on an approval with it, and tells the owner (#1969, #4510, #4511).
 func TestTriesFailsClosed(t *testing.T) {
 	r := newRig(t, nil)
 	if n, err := r.g.tries("agent/none"); err == nil || n != -1 {
@@ -125,7 +127,20 @@ func TestTriesFailsClosed(t *testing.T) {
 	if n, err := New(Config{}).tries("agent/none"); err == nil || n != -1 {
 		t.Fatalf("no engine: %d attempts, error %v", n, err)
 	}
-	if err := r.eng.RecordAnswer("agent/none", decision{approved: true, tries: -1}.note(false)); !errors.Is(err, journal.ErrInvalid) {
-		t.Fatalf("an approval with an unread count was journaled (#1969): %v", err)
+	r.grant(mailGrant())
+	r.invoice("agent/a", "inv-a")
+	r.g.count = func(string) (int, error) { return -1, errors.New("unread") }
+	r.decide(true, "owner")
+	if st := r.state("agent/a"); st.State != journal.Pending || len(answers(r.eng, "agent/a")) != 0 || r.exec.runs("agent/a") != 0 {
+		t.Fatalf("an approval with an unread count: %s, %d answers journaled, ran %d", st.State, len(answers(r.eng, "agent/a")), r.exec.runs("agent/a"))
+	}
+	r.unsaved(t)
+}
+
+// unsaved checks that the owner's last text says the approval did not take.
+func (r *rig) unsaved(t *testing.T) {
+	t.Helper()
+	if req, _ := r.own.last(t); r.own.notes[len(r.own.notes)-1] != owner.InformQuote(req)+" did not run: your approval could not be saved. Ask your agent again if still needed." {
+		t.Fatalf("owner told %q after an unsaved approval of %s", r.own.notes, req)
 	}
 }
