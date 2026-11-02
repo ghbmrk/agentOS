@@ -1713,6 +1713,17 @@ func Codex(guard *netguard.Policy) Declaration {
 			ContentTypes: []string{"input_text", "output_text", "input_image"},
 			ToolTypes:    clientToolTypes,
 			Stream:       true,
+			// The client_metadata keys CLI 0.162.1 sets on an HTTP model
+			// call (codex-rs core responses_metadata.rs client_metadata):
+			// ids of at most 128 bytes, the CLI's own cap on a metadata
+			// value (MAX_EXTRA_METADATA_VALUE_BYTES), and the turn's
+			// metadata blob, whose tool list is the 11 tools below.
+			Meta: map[string]int{
+				"x-codex-installation-id": 128, "session_id": 128, "thread_id": 128,
+				"x-codex-window-id": 128, "turn_id": 128, "x-openai-subagent": 128,
+				"x-codex-parent-thread-id": 128, "parent_turn_id": 128, "root_turn_id": 128,
+				"x-codex-turn-metadata": 16 << 10,
+			},
 			// The tools CLI 0.162.1 declares in code mode under the image's
 			// managed config, as captured (#809): all in an additional_tools
 			// item.

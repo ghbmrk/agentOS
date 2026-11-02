@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/modem"
-	"github.com/ghbmrk/agentos/broker/modemlink"
 	"github.com/ghbmrk/agentos/broker/owner"
 )
 
@@ -129,6 +128,9 @@ var codeRe = regexp.MustCompile(`^STATUS ([0-9]{6})$`)
 // fails when the box answers the unpaired number, takes its text as the
 // owner's, runs STATUS without a fresh code's unlock (E9), or sent a
 // recovery notice after setup, which it still notes (#1291, #2170 item 2).
+// Its notes quote only agentosd's lost-send lines, read through output
+// from a journal whose other lines they must not quote (ASSUMPTIONS E8,
+// #4544 item 3).
 func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 	seed := []byte("12345678901234567890")
 	base := time.Date(2026, 10, 15, 12, 0, 5, 0, time.UTC)
@@ -241,13 +243,14 @@ func TestPhoneControlAgainstTheOwnerChannel(t *testing.T) {
 				t.Fatal(err)
 			}
 			go ch.Run(ctx)
+			// agentosd's journal is read through output, as on the box:
+			// its one lost-send line sits among lines phoneControl must
+			// not quote (TestFilteredJournalReadersQuoteOnlyTheirLines).
+			stubJournal(t)
 			var notes []string
 			d := &driver{carrier: carrier, seed: seed, now: clk.now, sleep: clk.sleep,
 				phone: &http.Client{Transport: c.done, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-				note:  func(s string) { notes = append(notes, s) },
-				agentosdLog: func() string {
-					return "setup: done\n" + modemlink.MissedLog + " kind=request via owner.(*Channel).sendRequest\n"
-				}}
+				note:  func(s string) { notes = append(notes, s) }}
 			if c.enrolled {
 				d.codeStep = step
 			}

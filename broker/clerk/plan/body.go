@@ -23,6 +23,10 @@ type Body struct {
 	// Tools are the CLI's own tools, by namespace and name; any other
 	// tool, a hosted one above all, is refused.
 	Tools []Tool
+	// Meta is client_metadata's allowlist: each key the CLI sets, with the
+	// most bytes its value may hold. Any other key, or a longer value, is
+	// refused, so a CLI that starts sending more is a declaration change.
+	Meta map[string]int
 	// Stream requires "stream": true, so the answer is the event stream
 	// whose last event the clerk meters (#3128 Security 1): the guest does
 	// not choose how its call is metered.
@@ -50,7 +54,7 @@ const (
 	bodyKey     = "key"     // an undeclared top-level key
 	bodyStore   = "store"   // store set to anything but false
 	bodyStream  = "stream"  // a declared stream not set to true
-	bodyMeta    = "meta"    // client_metadata not an object of strings
+	bodyMeta    = "meta"    // client_metadata not an object of declared keys holding short strings
 	bodyInput   = "input"   // an input item out of its declared types
 	bodyContent = "content" // a content part out of its declared types
 	bodyTool    = "tool"    // a tool undeclared, hosted or out of place
@@ -71,6 +75,14 @@ func (b *Body) validate() error {
 	}
 	if b.Stream && !contains(b.Keys, "stream") {
 		return fmt.Errorf("clerk: a streamed body declares its stream key")
+	}
+	if contains(b.Keys, "client_metadata") != (len(b.Meta) > 0) {
+		return fmt.Errorf("clerk: a body declares client_metadata together with its keys")
+	}
+	for k, n := range b.Meta {
+		if k == "" || n <= 0 {
+			return fmt.Errorf("clerk: client_metadata key %q has no length cap", k)
+		}
 	}
 	for _, k := range b.Keys {
 		if contains(hostedKeys, k) {
@@ -125,8 +137,9 @@ func (b *Body) check(body []byte) ([]byte, string) {
 		if !ok {
 			return nil, bodyMeta
 		}
-		for _, v := range meta {
-			if _, text := v.(string); !text {
+		for k, v := range meta {
+			text, ok := v.(string)
+			if n, declared := b.Meta[k]; !ok || !declared || len(text) > n {
 				return nil, bodyMeta
 			}
 		}

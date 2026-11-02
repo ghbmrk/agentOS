@@ -320,6 +320,8 @@ func TestClassifyClosedList(t *testing.T) {
 		"remove a hold":                            func(d *Document) { d.Holds = nil },
 		"change a hold's kind":                     func(d *Document) { d.Holds[0].Kind = HoldFix },
 		"change the drone policy":                  func(d *Document) { d.Drone = strings.Repeat("ab", 32) },
+		"give a core destination a byte cap":       func(d *Document) { d.Caps = map[string]uint64{"mail.example": 10} },
+		"give the edge a byte cap":                 func(d *Document) { d.EdgeCap = 10 },
 		"rename the secure command":                func(d *Document) { dev(d, "lock").Secure = "bolt" },
 		"name a camera's command":                  func(d *Document) { dev(d, "cam").Secure = "off" },
 		"rename a device":                          func(d *Document) { dev(d, "tv").ID = "tv2"; d.Pairs[1].A = "tv2" },
@@ -364,7 +366,7 @@ func TestClassifyClosedList(t *testing.T) {
 	// Every field has a row: adding a field to the document without one
 	// fails here.
 	covered := map[string][]string{
-		"Document":     {"Version", "Destinations", "Devices", "Pairs", "Standing", "Holds", "Drone"},
+		"Document":     {"Version", "Destinations", "Caps", "EdgeCap", "Devices", "Pairs", "Standing", "Holds", "Drone"},
 		"Device":       {"ID", "Network", "WiFi", "Allow", "VendorCloud", "Isolated", "Everyday", "Class", "Secure", "Safeguards", "Label", "Control", "Stream", "MDNS"},
 		"Port":         {"Proto", "Num"},
 		"Pair":         {"A", "B"},
@@ -1124,5 +1126,80 @@ func TestGarageNeedsSafeguards(t *testing.T) {
 		if got := Classify(pair[0], pair[1]); got.Tightening {
 			t.Errorf("%s: classified as a tightening: %+v", name, got)
 		}
+	}
+}
+
+// TestByteCapsCanonical: the signed list's byte caps (NET-2 Byte caps,
+// D-248) have one encoding, a cap left out is 0 and lets nothing through,
+// and a cap that is 0, names no listed destination, or makes the caps sum
+// past 2^64-1 is refused, so no group's cap overflows. Mutants: dropping
+// the zero check gives one cap two encodings; dropping the overflow check
+// lets a group's cap wrap under its count.
+func TestByteCapsCanonical(t *testing.T) {
+	capped := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 7, "models.example": 9}; d.EdgeCap = 5 })
+	b, err := Encode(capped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"caps":{"mail.example":7,"models.example":9},"edge_cap":5`) {
+		t.Errorf("encoding %s", b)
+	}
+	if d, err := Decode(b); err != nil || !reflect.DeepEqual(d, capped.normal()) {
+		t.Fatalf("round trip: %v", err)
+	}
+	none, _ := Encode(home(1))
+	empty, _ := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{} }))
+	if string(none) != string(empty) || strings.Contains(string(none), "cap") {
+		t.Errorf("no caps encode as %s and %s", none, empty)
+	}
+	for name, f := range map[string]func(d *Document){
+		"a cap of 0":           func(d *Document) { d.Caps = map[string]uint64{"mail.example": 0} },
+		"a cap for no listing": func(d *Document) { d.Caps = map[string]uint64{"other.example": 1} },
+		"caps past 2^64-1":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1 << 63} },
+	} {
+		if _, err := Encode(edit(1, f)); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
+	}
+	if _, err := Encode(edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 1 << 63, "models.example": 1<<63 - 1} })); err != nil {
+		t.Errorf("caps summing to 2^64-1: %v", err)
+	}
+	for name, bad := range map[string][]byte{
+		"explicit zero": []byte(`{"version":1,"destinations":["a"],"caps":{"a":0},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"empty caps":    []byte(`{"version":1,"destinations":["a"],"caps":{},"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+		"edge zero":     []byte(`{"version":1,"destinations":[],"edge_cap":0,"devices":[],"pairs":[],"standing":[],"holds":[],"drone":""}`),
+	} {
+		if _, err := Decode(bad); err == nil {
+			t.Errorf("%s: decoded", name)
+		}
+	}
+}
+
+// TestCapChangesAreLoosenings: a byte cap is not on NET-4's closed
+// tightening list, so raising one, lowering one, or changing the edge's
+// waits as a loosening; only the owner's signature changes a cap (NET-2
+// Byte caps: "asks the owner for a raise"). A raise must never be a
+// tightening that applies at once.
+func TestCapChangesAreLoosenings(t *testing.T) {
+	base := edit(1, func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100}; d.EdgeCap = 100 })
+	for name, f := range map[string]func(d *Document){
+		"raise a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 101} },
+		"lower a core cap":     func(d *Document) { d.Caps = map[string]uint64{"mail.example": 99} },
+		"drop a core cap":      func(d *Document) { d.Caps = nil },
+		"cap another listing":  func(d *Document) { d.Caps = map[string]uint64{"mail.example": 100, "models.example": 1} },
+		"raise the edge's cap": func(d *Document) { d.EdgeCap = 101 },
+		"lower the edge's cap": func(d *Document) { d.EdgeCap = 99 },
+	} {
+		next := base.normal()
+		f(&next)
+		if c := Classify(base, next); c.Tightening {
+			t.Errorf("%s: %+v, want a loosening", name, c)
+		}
+	}
+	// A tightening still classifies as one beside the caps, so they do not
+	// block the closed list.
+	next, _ := Apply(base, Op{Kind: CutVendorCloud, Device: "tv"})
+	if c := Classify(base, next); !c.Tightening {
+		t.Errorf("cutting the TV's cloud with caps set: %+v", c)
 	}
 }

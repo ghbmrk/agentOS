@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,11 +62,20 @@ type Document struct {
 	Version uint64 `json:"version"`
 	// Destinations is the core's signed destination list (NET-2 The core's
 	// list): host names the core may reach.
-	Destinations []string       `json:"destinations"`
-	Devices      []Device       `json:"devices"`
-	Pairs        []Pair         `json:"pairs"`
-	Standing     []StandingRule `json:"standing"`
-	Holds        []Hold         `json:"holds"`
+	Destinations []string `json:"destinations"`
+	// Caps is each core destination's daily byte cap (NET-2 Byte caps,
+	// D-248): the IP bytes the core may send it in one enforcer day, by
+	// its name on Destinations. A destination with no cap may be sent
+	// nothing, so a cap left out fails safe; a cap of 0 is written by
+	// leaving it out, so one cap has one encoding.
+	Caps map[string]uint64 `json:"caps,omitempty"`
+	// EdgeCap is the edge segment's one daily byte cap on what it sends
+	// to the internet (NET-2 Byte caps); 0 lets it send nothing.
+	EdgeCap  uint64         `json:"edge_cap,omitempty"`
+	Devices  []Device       `json:"devices"`
+	Pairs    []Pair         `json:"pairs"`
+	Standing []StandingRule `json:"standing"`
+	Holds    []Hold         `json:"holds"`
 	// Drone is the SHA-256, in hex, of the owner-signed drone flight policy
 	// (broker/drone), or empty when there is none.
 	Drone string `json:"drone"`
@@ -338,6 +348,11 @@ func (d Document) SecureCommand(device, cmd string) bool {
 // empty, so equal documents encode equally. It copies, never aliasing d.
 func (d Document) normal() Document {
 	d.Destinations = sorted(d.Destinations)
+	if len(d.Caps) == 0 {
+		d.Caps = nil // omitted, as Decode reads it
+	} else {
+		d.Caps = maps.Clone(d.Caps)
+	}
 	devs := make([]Device, len(d.Devices))
 	for i, dev := range d.Devices {
 		dev.Allow = sorted(dev.Allow)
@@ -466,7 +481,9 @@ func sorted(s []string) []string {
 // named for or that lacks a safeguard its class needs, a safeguard its
 // class does not need, a stream port on a device that is not a camera or microphone, a
 // drone reference that is not a hash, a pair, rule or hold naming no device,
-// an empty window, or an mDNS name that is not one; and with ErrNameHeld
+// an empty window, an mDNS name that is not one, or a byte cap that is 0,
+// is for no destination, or makes the caps sum past 2^64-1 (so no group's
+// cap, a sum of some of them, overflows); and with ErrNameHeld
 // one mDNS name pinned twice.
 func (d Document) check() error {
 	bad := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrMalformed}, a...)...) }
@@ -540,6 +557,20 @@ func (d Document) check() error {
 		if !name(h) {
 			return bad("destination %q", h)
 		}
+	}
+	var total uint64
+	for _, h := range slices.Sorted(maps.Keys(d.Caps)) {
+		n := d.Caps[h]
+		if !slices.Contains(d.Destinations, h) {
+			return bad("byte cap for %q, which is not a destination", h)
+		}
+		if n == 0 {
+			return bad("byte cap 0 for %q: leave it out", h)
+		}
+		if total+n < total {
+			return bad("byte caps sum past 2^64-1")
+		}
+		total += n
 	}
 	for _, p := range d.Pairs {
 		if p.A == p.B || d.Device(p.A) == nil || d.Device(p.B) == nil {

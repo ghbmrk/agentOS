@@ -130,12 +130,12 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	defer stop()
 
 	tok := token()
-	if _, err := run(c, claimCmd(tok), nil); err != nil {
+	if _, err := run(ctx, c, claimCmd(tok), nil); err != nil {
 		return Result{}, fmt.Errorf("push: claim: %w", err)
 	}
 	var res Result
 	for _, f := range files {
-		same, err := holds(c, f)
+		same, err := holds(ctx, c, f)
 		if err != nil {
 			return res, err
 		}
@@ -147,14 +147,16 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 	// files written are on the access point and would not read as drift
 	// next time, so every file is tried and the reload runs, and the
 	// errors are returned together. A refused write ends the Sync: every
-	// later command of it would be refused too.
+	// later command of it would be refused too. So does a write that
+	// ended without an exit status (the connection dropped or the Sync's
+	// Timeout closed it): no later command of it can run.
 	var errs []error
 	wrote := 0
 	for _, f := range files {
 		if slices.Contains(res.Drift, f.Path) {
-			if _, err := run(c, writeCmd(f.Path, tok, f.Data), f.Data); err != nil {
+			if _, err := run(ctx, c, writeCmd(f.Path, tok, f.Data), f.Data); err != nil {
 				err = fmt.Errorf("push: write %s: %w", f.Path, superseded(err))
-				if errors.Is(err, ErrSuperseded) {
+				if errors.Is(err, ErrSuperseded) || !exited(err) {
 					return res, errors.Join(append(errs, err)...)
 				}
 				errs = append(errs, err)
@@ -163,7 +165,7 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 			wrote++
 		}
 	}
-	if _, err := run(c, applyCmd(tok), nil); err != nil {
+	if _, err := run(ctx, c, applyCmd(tok), nil); err != nil {
 		errs = append(errs, fmt.Errorf("push: reload: %w", superseded(err)))
 	} else {
 		res.Applied = wrote > 0
@@ -172,7 +174,7 @@ func (p *Pusher) Sync(ctx context.Context, files []ap.File) (Result, error) {
 		return res, errors.Join(errs...)
 	}
 	for _, f := range files {
-		same, err := holds(c, f)
+		same, err := holds(ctx, c, f)
 		if err != nil {
 			return res, err
 		}
@@ -203,6 +205,13 @@ func (p *Pusher) Watch(ctx context.Context, every time.Duration, cfg func() ([]a
 		case <-t.C:
 		}
 	}
+}
+
+// exited reports whether err is a command's own failure, its exit
+// status, rather than the connection's.
+func exited(err error) bool {
+	var exit *ssh.ExitError
+	return errors.As(err, &exit)
 }
 
 // superseded marks err as ErrSuperseded when the access point refused
@@ -331,10 +340,9 @@ func writeCmd(path, tok string, data []byte) string {
 
 // holds reports whether the access point's file at f.Path is exactly
 // f.Data; a missing file is not.
-func holds(c *ssh.Client, f ap.File) (bool, error) {
-	out, err := run(c, readCmd(f.Path), nil)
-	var exit *ssh.ExitError
-	if errors.As(err, &exit) {
+func holds(ctx context.Context, c *ssh.Client, f ap.File) (bool, error) {
+	out, err := run(ctx, c, readCmd(f.Path), nil)
+	if exited(err) {
 		return false, nil // cat failed: absent or unreadable
 	}
 	if err != nil {
@@ -347,8 +355,8 @@ func holds(c *ssh.Client, f ap.File) (bool, error) {
 
 // run runs one command with stdin, returning at most MaxFile+1 bytes of
 // its output.
-func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
-	s, err := c.NewSession()
+func run(ctx context.Context, c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
+	s, err := open(ctx, c)
 	if err != nil {
 		return nil, err
 	}
@@ -369,4 +377,38 @@ func run(c *ssh.Client, cmd string, stdin []byte) ([]byte, error) {
 		return nil, err
 	}
 	return b, rerr
+}
+
+// newSession opens a session channel; tests replace it.
+var newSession = (*ssh.Client).NewSession
+
+// open opens a session on c, bounded by ctx. Closing c does not always
+// end a NewSession (ENF-g-aplock-hang, #4441): golang.org/x/crypto/ssh
+// adds the new channel to the connection's list and sends the open
+// request, then waits for the answer. If the connection has already
+// ended, its read loop has already closed every channel it listed, so
+// it never closes this one, and the send can still report success,
+// because the transport records a failed write without returning it.
+// That NewSession waits forever, so open stops waiting when ctx ends,
+// which Sync's Timeout bounds. The goroutine left waiting then holds
+// only the closed connection; it is left only when a connection ends
+// in that window, since a Sync opens no session after a command it ran
+// ended without an exit status.
+func open(ctx context.Context, c *ssh.Client) (*ssh.Session, error) {
+	type opened struct {
+		s   *ssh.Session
+		err error
+	}
+	done := make(chan opened, 1)
+	ns := newSession
+	go func() {
+		s, err := ns(c)
+		done <- opened{s, err}
+	}()
+	select {
+	case o := <-done:
+		return o.s, o.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("push: open session: %w", ctx.Err())
+	}
 }

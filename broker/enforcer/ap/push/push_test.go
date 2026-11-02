@@ -51,6 +51,8 @@ type fakeAP struct {
 	failReload int             // the next this many reloads fail
 	failClaim  bool            // claims fail, as on an access point without flock
 	supersede  bool            // a late claim lands right after each claim
+	drop       map[string]bool // a write of these paths drops the connection
+	conns      map[int]net.Conn
 
 	// newest is the login number of the newest connection that has run
 	// a command; interleaved is set when an older one runs a command
@@ -142,6 +144,10 @@ func (f *fakeAP) serve(conn net.Conn, cfg *ssh.ServerConfig) {
 	f.mu.Lock()
 	f.logins++
 	login := f.logins
+	if f.conns == nil {
+		f.conns = map[int]net.Conn{}
+	}
+	f.conns[login] = conn
 	f.mu.Unlock()
 	go ssh.DiscardRequests(reqs)
 	for nc := range chans {
@@ -246,6 +252,15 @@ func (f *fakeAP) exec(login int, cmd string, ch ssh.Channel) uint32 {
 	for _, p := range ap.Paths {
 		if !strings.Contains(cmd, "cat > "+tmpPath(p, tok)+" ") {
 			continue
+		}
+		f.mu.Lock()
+		drop := f.drop[p]
+		f.mu.Unlock()
+		if drop {
+			f.mu.Lock()
+			f.conns[login].Close()
+			f.mu.Unlock()
+			return 1
 		}
 		// The lock is taken where the command takes it: before stdin is
 		// read, or only for the move once the hash has checked.
@@ -935,5 +950,146 @@ func TestSupersededSyncReportsIt(t *testing.T) {
 		if _, err := q.Sync(context.Background(), config()); err == nil || errors.Is(err, ErrSuperseded) {
 			t.Errorf("failed %s: %v", name, err)
 		}
+	}
+}
+
+// countSessions makes newSession count the sessions Sync opens and, from
+// the one numbered blockFrom on (0: none), wait without end, as
+// x/crypto's NewSession does on a connection that ended just before it
+// (#4441).
+func countSessions(t *testing.T, blockFrom int) func() int {
+	var mu sync.Mutex
+	n := 0
+	never := make(chan struct{})
+	orig := newSession
+	t.Cleanup(func() {
+		close(never)
+		newSession = orig
+	})
+	newSession = func(c *ssh.Client) (*ssh.Session, error) {
+		mu.Lock()
+		n++
+		block := blockFrom > 0 && n >= blockFrom
+		mu.Unlock()
+		if block {
+			<-never
+			return nil, errors.New("never")
+		}
+		return orig(c)
+	}
+	return func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return n
+	}
+}
+
+// syncWithin runs p.Sync and fails the test if it has not returned
+// within d, rather than letting the test binary's own timeout end it.
+func syncWithin(t *testing.T, p *Pusher, files []ap.File, d time.Duration) (Result, error) {
+	t.Helper()
+	type out struct {
+		res Result
+		err error
+	}
+	c := make(chan out, 1)
+	go func() {
+		res, err := p.Sync(context.Background(), files)
+		c <- out{res, err}
+	}()
+	select {
+	case o := <-c:
+		return o.res, o.err
+	case <-time.After(d):
+		t.Fatalf("Sync with Timeout %v still running after %v", p.Timeout, d)
+		return Result{}, nil
+	}
+}
+
+// TestSessionOpenBoundedByTimeout: opening a session never answers, as
+// x/crypto's NewSession on a connection that ended a moment before it.
+// The Sync still ends at its Timeout with the deadline as its error.
+// Catches a Sync that waits on NewSession past its Timeout, which held a
+// broker-race shard for 25 minutes and would hold Watch, and the
+// revocations it carries, for ever (ENF-g-aplock-hang, #4441).
+func TestSessionOpenBoundedByTimeout(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	for _, from := range []int{1, 2, 5} { // the claim, a read, a write
+		t.Run(fmt.Sprint("session ", from), func(t *testing.T) {
+			n := countSessions(t, from)
+			p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 300 * time.Millisecond}
+			start := time.Now()
+			_, err := syncWithin(t, p, config(), 10*time.Second)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("err %v", err)
+			}
+			if el := time.Since(start); el > 3*time.Second {
+				t.Fatalf("Sync took %v", el)
+			}
+			if n() != from {
+				t.Fatalf("%d sessions asked for", n())
+			}
+		})
+	}
+}
+
+// TestDroppedConnectionEndsSync: the access point drops the connection
+// during the first of three writes. The Sync ends there with an error
+// and opens no other session on the dead connection, and the next Sync
+// writes everything. Catches a Sync that keeps asking a dropped
+// connection for sessions, each of which can wait until the Timeout
+// (#4441).
+func TestDroppedConnectionEndsSync(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.drop = map[string]bool{ap.PathNetwork: true}
+	n := countSessions(t, 0)
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial, Timeout: 5 * time.Second}
+	if _, err := syncWithin(t, p, config(), 10*time.Second); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dropped connection: err %v", err)
+	}
+	if n() != 1+3+1 { // claim, three reads, the dropped write
+		t.Fatalf("%d sessions opened on a connection that dropped at the first write", n())
+	}
+	f.mu.Lock()
+	f.drop = nil
+	f.mu.Unlock()
+	if res, err := syncWithin(t, p, config(), 10*time.Second); err != nil || !res.Applied || len(res.Drift) != 3 {
+		t.Fatalf("next sync: %+v %v", res, err)
+	}
+}
+
+// TestOpenAfterCloseReturns: with x/crypto's own NewSession, a session
+// opened just after the connection has closed, as Sync's write loop
+// does when its Timeout closes the connection under a running command,
+// returns by its context's end. Without open's bound, about one such
+// NewSession in thirty waited for ever under -race (#4441).
+func TestOpenAfterCloseReturns(t *testing.T) {
+	me := enforcerKey(t)
+	f := newFakeAP(t, me.PublicKey())
+	f.set(ap.PathNetwork, []byte("x"))
+	p := &Pusher{Addr: f.addr, HostKey: f.hostKey, Signer: me, Dial: dial}
+	for i := range 300 {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		c, err := p.connect(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		go c.Close()
+		run(ctx, c, readCmd(ap.PathNetwork), nil) // ends when the close does
+		done := make(chan struct{})
+		go func() {
+			if s, err := open(ctx, c); err == nil {
+				s.Close()
+			}
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("open %d after close still waiting", i)
+		}
+		cancel()
 	}
 }
