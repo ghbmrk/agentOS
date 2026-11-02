@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Profile is how one stack is confined.
@@ -220,6 +221,14 @@ func Start(s Spec) (*Proc, *os.File, error) {
 		Stderr:      s.Stderr,
 		ExtraFiles:  []*os.File{theirs, r},
 		SysProcAttr: attr,
+		// A Stderr that is not a file is copied from a pipe, and Wait
+		// would wait for that copy to end too. A stack can pass its end
+		// of the pipe out of its PID namespace (over fd 3, the system bus
+		// or an abstract socket), and the copy would then never end, nor
+		// would its reap, so its replacement's Attach would block
+		// (ENF-k-11). After the stack exits, Wait gives the copy this long
+		// and then closes the pipe (#4521).
+		WaitDelay: stderrDrain,
 	}
 	// The child's Pdeathsig fires when the OS thread that forked it exits,
 	// and the runtime ends a thread whose goroutine exits locked (as
@@ -262,6 +271,11 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	}
 	return proc, ours, nil
 }
+
+// stderrDrain is how long Wait keeps copying a reaped stack's stderr pipe
+// before it closes it. The stack's own lines are already in the pipe when
+// it exits, so only a holder outside it loses anything.
+const stderrDrain = time.Second
 
 // openNet opens a started stack's network namespace. Start calls it
 // before it releases the stack, so a stack that exits at once cannot fail
@@ -329,7 +343,8 @@ func (p *Proc) release() {
 }
 
 // Stop kills the stack and returns once it has been reaped (Wait), so
-// every process it started is gone. It may be called more than once.
+// every process it started is gone; at most stderrDrain later if another
+// process holds its stderr pipe. It may be called more than once.
 func (p *Proc) Stop() error {
 	p.cmd.Process.Kill()
 	p.netOnce.Do(func() {
