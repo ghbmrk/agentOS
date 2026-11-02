@@ -120,15 +120,18 @@ func moveRole() int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	// Every descriptor open now, the runtime's poller and cgroup files among
-	// them, sits below the move's targets, so the move replaces none.
+	// The runtime's own descriptors (its poller's here) sit below the move's
+	// targets, and nothing holds the targets, so the move replaces none. A
+	// test runner may leave its own open higher up; those are a parent's.
 	fds, err := os.ReadDir("/proc/self/fd")
 	if err != nil {
 		return fail("%v", err)
 	}
 	for _, e := range fds {
-		if n, err := strconv.Atoi(e.Name()); err != nil || n >= handoff.KeyFD {
-			return fail("descriptor %s is open at or above handoff.KeyFD", e.Name())
+		n, _ := strconv.Atoi(e.Name())
+		to, _ := os.Readlink("/proc/self/fd/" + e.Name())
+		if n == handoff.KeyFD || n == handoff.TPMFD || strings.HasPrefix(to, "anon_inode:") && n >= handoff.KeyFD {
+			return fail("descriptor %d (%s) is in the move's way", n, to)
 		}
 	}
 	if err := inherit(map[int]int{int(r.Fd()): handoff.KeyFD, int(f.Fd()): handoff.TPMFD}); err != nil {
