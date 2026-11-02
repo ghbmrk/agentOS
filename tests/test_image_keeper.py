@@ -372,14 +372,15 @@ class KeeperTreeTest(unittest.TestCase):
     UNLOCK_BAD = (("Service", "Sockets", "a.socket"), ("Service", "OpenFile", "/etc/hostname"),
                   ("Service", "FileDescriptorStoreMax", "4"), ("Service", "AmbientCapabilities", "CAP_SYS_ADMIN"),
                   ("Service", "SecureBits", "keep-caps"), ("Unit", "StartLimitAction", "reboot"),
-                  ("Unit", "FailureAction", "reboot-force"), ("Unit", "SuccessAction", "reboot"),
+                  ("Unit", "FailureAction", "reboot-force"), ("Service", "StartLimitAction", "reboot"),
+                  ("Service", "FailureAction", "reboot-force"), ("Unit", "SuccessAction", "reboot"),
                   ("Unit", "JobTimeoutAction", "reboot-force"), ("Unit", "OnFailure", "reboot.target"),
                   ("Unit", "OnSuccess", "reboot.target"))
 
     def test_the_unlock_unit_assignments_are_one_closed_list(self):
-        self.assertEqual([(s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS],
-                         [(s, k, {"FileDescriptorStoreMax": ("0",)}.get(k, ("none",) if k.endswith("Action") else ()))
-                          for s, k, _ in self.UNLOCK_BAD])
+        self.assertEqual(sorted((s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS),
+                         sorted((s, k, {"FileDescriptorStoreMax": ("0",)}.get(k, ("none",) if k.endswith("Action") else ()))
+                                for s, k, _ in self.UNLOCK_BAD))
         self.assertEqual({w for *_, w in check.UNLOCK_ASSIGNMENTS},
                          {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START})
 
@@ -387,12 +388,12 @@ class KeeperTreeTest(unittest.TestCase):
         # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.
         # Dependencies such as OnFailure= never reset; for the rest the check does not rest on how they do.
         name = "agentos-keeper-kernel.service"
-        rule = {k: (a, w) for _, k, a, w in check.UNLOCK_ASSIGNMENTS}
+        rule = {(s, k): (a, w) for s, k, a, w in check.UNLOCK_ASSIGNMENTS}
         for section, key, val in self.UNLOCK_BAD:
-            allowed, why = rule[key]
+            allowed, why = rule[section, key]
             want = ["%s: %s=%s; %s" % (name, key, val, why)]
             for later in ("", "none", "0"):
-                with self.subTest(key=key, later=later, form="unit then drop-in"):
+                with self.subTest(section=section, key=key, later=later, form="unit then drop-in"):
                     good = self.unit(name).read_text()
                     self.add(name, section, "%s=%s" % (key, val))
                     d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, later))
@@ -401,18 +402,29 @@ class KeeperTreeTest(unittest.TestCase):
                     self.assertEqual(self.v(), want + extra)
                     d.unlink()
                     self.unit(name).write_text(good)
-            with self.subTest(key=key, form="one drop-in"):
+            with self.subTest(section=section, key=key, form="one drop-in"):
                 d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n%s=\n" % (section, key, val, key))
                 self.assertEqual(self.v(), want)
                 d.unlink()
         self.assertEqual(self.v(), [])
+
+    def test_only_the_exact_listed_value_passes(self):
+        # Another case or spelling of a listed value is refused, whatever systemd would make of it.
+        name = "agentos-keeper-kernel.service"
+        for section, key, val, why in (("Unit", "FailureAction", "None", check.UNLOCK_ACTION),
+                                       ("Service", "FailureAction", "NONE", check.UNLOCK_ACTION),
+                                       ("Service", "FileDescriptorStoreMax", "00", check.UNLOCK_DESCRIPTOR)):
+            with self.subTest(section=section, key=key, val=val):
+                d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, val))
+                self.assertEqual(self.v(), ["%s: %s=%s; %s" % (name, key, val, why)])
+                d.unlink()
 
     def test_the_listed_values_pass(self):
         # FileDescriptorStoreMax=0 keeps no descriptor; an action of none reboots nothing.
         name = "agentos-keeper-kernel.service"
         for section, key, allowed, _ in check.UNLOCK_ASSIGNMENTS:
             for val in allowed:
-                with self.subTest(key=key, val=val):
+                with self.subTest(section=section, key=key, val=val):
                     good = self.unit(name).read_text()
                     self.add(name, section, "%s=%s" % (key, val))
                     d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, val))

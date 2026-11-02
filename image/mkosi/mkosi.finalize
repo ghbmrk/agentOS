@@ -1488,6 +1488,9 @@ UNLOCK_ASSIGNMENTS = (
     ("Service", "SecureBits", (), UNLOCK_DESCRIPTOR),
     ("Unit", "StartLimitAction", ("none",), UNLOCK_ACTION),
     ("Unit", "FailureAction", ("none",), UNLOCK_ACTION),
+    # systemd 257.13 still reads these two under [Service] too, for the same unit fields.
+    ("Service", "StartLimitAction", ("none",), UNLOCK_ACTION),
+    ("Service", "FailureAction", ("none",), UNLOCK_ACTION),
     ("Unit", "SuccessAction", ("none",), UNLOCK_ACTION),
     ("Unit", "JobTimeoutAction", ("none",), UNLOCK_ACTION),
     ("Unit", "OnFailure", (), UNLOCK_START),
