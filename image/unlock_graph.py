@@ -3,25 +3,27 @@
 
 The unlock unit (agentos-keeper-kernel.service) has one reboot, ExecStopPost=KERNEL_REBOOT (#2897,
 #2998). This checks that nothing it starts, directly or through any unit those start, can start a
-shutdown unit, ask for a reboot or stop other units outside a reviewed list. Rather than modelling how
+shutdown unit, ask for a reboot or stop other units outside a reviewed list. It does not model how
 systemd reads units (aliases, drop-ins, every section's keys, implicit and default dependencies, units
-that generators write from etc/fstab or the kernel command line), it asks systemd. It runs the image's
-own /usr/lib/systemd/systemd in test mode (`--test --system`, which loads every unit, runs the
-generators and prints each loaded unit's dependencies) inside the built tree, with the boot entry's
-kernel command line, and walks the dependencies it prints. Three rounds of review on #4696 each found
-another way into a hand-written model; this has none to keep in step.
+that generators write from etc/fstab or the kernel command line). It asks systemd instead: the image's
+own systemd runs over the built tree with the boot entry's command line (offline_systemd.Manager), and
+this asks it, unit by unit, for each dependency list and action. Each of those values is a list of unit
+names or an enum, so no unit's text can pose as systemd's answer. Three rounds of review on #4696 each
+found another way into a hand-written model. This one has no model to keep in step.
 
 The walk starts at the unlock unit and follows every dependency that starts another unit
-(START_KINDS). The units it reaches, and every dependency from them that stops another unit
-(STOP_KINDS), must be exactly the lines of image/mkosi/unlock.allow, which `unlock_graph.py --allowlist`
-prints for a built image. Whatever that list says, no unit reached may be a shutdown unit (SHUTDOWN)
-or carry a failure, success or timeout action, systemd's run must succeed with no job dropped, and a
-dependency kind this file does not know is refused, so a newer systemd fails closed.
+(START_KINDS). The units it reaches, every dependency from them that stops another unit (STOP_KINDS),
+and the generators that failed must be exactly the lines of image/mkosi/unlock.allow, which
+`unlock_graph.py --allowlist` prints for a built image. Whatever that list says, none of these may
+happen: a unit reached is a shutdown unit (SHUTDOWN); a unit reached carries a failure, success, start
+limit or timeout action; the manager is not the systemd major the kinds were read from (SYSTEMD_MAJOR,
+so a new dependency kind cannot go unread); the tree's etc/fstab names a device, which fstab-generator
+skips in the manager's container mode.
 
 Not modelled here, each a release row: what a reached unit's commands do (a reboot word in an Exec=
-line, #4493's direction), units udev adds from SYSTEMD_WANTS (#4739) and units gpt-auto-generator
-writes from the disk it boots on (#4738); in the build's tree that generator finds no disk and fails,
-and the allowlist names it.
+line, #4766), units udev adds from SYSTEMD_WANTS (#4739), and units gpt-auto-generator writes from the
+disk it boots on (#4738). In the build's tree that generator finds no disk and fails, and the allowlist
+names it.
 
 Usage (as root): unlock_graph.py OUT VERSION checks build OUT; --allowlist OUT VERSION prints the
 list; --control OUT VERSION requires that each planted path (CONTROLS) is refused."""
@@ -37,13 +39,14 @@ import offline_systemd  # noqa: E402
 
 UNIT = "agentos-keeper-kernel.service"
 ALLOW = HERE / "mkosi" / "unlock.allow"
-# Every dependency kind systemd 257 prints (unit_dependency_to_string), in three classes.
-START_KINDS = {"Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure", "Triggers"}
-STOP_KINDS = {"Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "ConsistsOf"}
-OTHER_KINDS = {"PartOf", "RequiredBy", "RequisiteOf", "WantedBy", "UpheldBy", "OnSuccessOf", "OnFailureOf",
-               "TriggeredBy", "PropagatesReloadTo", "ReloadPropagatedFrom", "StopPropagatedFrom",
-               "JoinsNamespaceOf", "References", "ReferencedBy", "InSlice", "SliceOf", "Before", "After",
-               "RequiresMountsFor", "WantsMountsFor"}
+# The dependency kinds of systemd 257 (unit_dependency_to_string) that act on another unit, by the
+# property systemctl shows for each: those that start it and those that stop it. The rest only order,
+# reference or mirror these. SYSTEMD_MAJOR pins the version they were read from.
+START_KINDS = ("Requires", "Requisite", "Wants", "BindsTo", "Upholds", "OnSuccess", "OnFailure", "Triggers")
+STOP_KINDS = ("Conflicts", "ConflictedBy", "PropagatesStopTo", "BoundBy", "ConsistsOf")
+ACTIONS = ("FailureAction", "SuccessAction", "StartLimitAction", "JobTimeoutAction")
+PROPS = START_KINDS + STOP_KINDS + ACTIONS + ("LoadState",)
+SYSTEMD_MAJOR = "257"
 # Starting one of these ends the boot. Stopping one ends nothing, so stop edges to them are not listed
 # (every unit with default dependencies conflicts with shutdown.target and umount.target).
 SHUTDOWN = {"halt.target", "poweroff.target", "reboot.target", "kexec.target", "soft-reboot.target", "exit.target",
@@ -52,28 +55,47 @@ SHUTDOWN = {"halt.target", "poweroff.target", "reboot.target", "kexec.target", "
             "systemd-soft-reboot.service", "systemd-exit.service"}
 WHY = "the unlock step's one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)"
 
-ACTION_RE = re.compile(r"^[A-Za-z ]+ Action$")
+def graph(manager, start=UNIT):
+    """{unit: {"edges": [(kind, target)], "actions": [(name, value)]}} for START and every unit it reaches,
+    as MANAGER's systemd shows them. A shutdown unit is shown but not walked past."""
+    units, todo = {}, [start]
+    while todo:
+        batch = sorted(set(todo) - set(units))
+        todo = []
+        for name, p in manager.show(batch, PROPS).items():
+            units[name] = {"edges": [(k, t) for k in START_KINDS + STOP_KINDS for t in unit_names(name, k, p[k])],
+                           "actions": [(k, p[k]) for k in ACTIONS]}
+            if name not in SHUTDOWN:
+                todo += [t for k, t in units[name]["edges"] if k in START_KINDS]
+    return units
 
-def parse_dump(text):
-    """{unit: {"edges": [(kind, target)], "actions": [(name, value)], "unknown": [kind]}} from systemd's
-    test-mode dump (offline_systemd.units): a dependency of a kind not in START_KINDS, STOP_KINDS or
-    OTHER_KINDS goes under "unknown"."""
-    out = {}
-    for name, u in offline_systemd.units(text).items():
-        known = START_KINDS | STOP_KINDS | OTHER_KINDS
-        out[name] = {"edges": [(k, t) for k, t in u["edges"] if k in known],
-                     "unknown": [k for k, _ in u["edges"] if k not in known],
-                     "actions": [(k, v) for k, v in u["settings"] if ACTION_RE.match(k) and " " not in v]}
+
+UNIT_NAME = re.compile(r"[A-Za-z0-9:_.\\@-]+\.(service|socket|target|device|mount|automount|swap|timer|path|slice|scope)\Z")
+
+
+def unit_names(unit, kind, value):
+    """The unit names systemctl shows in UNIT's KIND list VALUE (offline_systemd.shell_words); anything that
+    is not a valid unit name is refused."""
+    names = offline_systemd.shell_words(value, unit)
+    for n in names:
+        if not UNIT_NAME.match(n):
+            raise SystemExit("unlock graph: %s: %s= names %r, which is not a unit name" % (unit, kind, n))
+    return names
+
+
+def fstab_devices(text):
+    """The etc/fstab lines (TEXT) that name a device, which fstab-generator skips when systemd runs in a
+    container: a path, or a LABEL=, UUID=, PARTUUID= or PARTLABEL= tag. The image's fstab names none."""
+    out = []
+    for line in text.split("\n"):
+        words = line.split()
+        if words and not words[0].startswith("#") and (words[0].startswith("/") or "=" in words[0]):
+            out.append(line.strip())
     return out
 
 
-def systemd_test(root, usr, cmdline, plant="", unit=UNIT):
-    """offline_systemd.run for the unlock unit."""
-    return offline_systemd.run(root, usr, cmdline, unit, plant)
-
-
 def reached(units, start=UNIT):
-    """The units START reaches through START_KINDS, START included, in systemd's own dependency lists. A
+    """The units START reaches through START_KINDS, START included, in UNITS (graph()). A
     shutdown unit is reached but not walked past."""
     seen, todo = set(), [start]
     while todo:
@@ -86,53 +108,62 @@ def reached(units, start=UNIT):
     return seen
 
 
-def facts(units, stderr, start=UNIT):
+def facts(units, generators, start=UNIT):
     """The allowlist's lines for one run: "start U" for each unit reached, "stop U KIND T" for each stop
-    dependency from one of them to a unit outside SHUTDOWN, and "generator G failed" for each generator
-    that failed."""
+    dependency from one of them to a unit outside SHUTDOWN, and "generator G failed" for each of
+    GENERATORS."""
     got = reached(units, start)
     out = {"start " + u for u in got}
     for u in got - SHUTDOWN:
         out |= {"stop %s %s %s" % (u, k, t) for k, t in units.get(u, {}).get("edges", ())
                 if k in STOP_KINDS and t not in SHUTDOWN}
-    for line in stderr.split("\n"):
-        name = offline_systemd.failed_generator(line)
-        if name:
-            out.add("generator %s failed" % name)
-    return out
+    return out | {"generator %s failed" % g for g in generators}
 
 
-def violations(status, stdout, stderr, allowed, start=UNIT):
-    """Each refusal for one run of systemd_test against the ALLOWED lines."""
+def violations(units, generators, allowed, version, fstab, start=UNIT, major=SYSTEMD_MAJOR):
+    """Each refusal for one run: UNITS as graph() gives them, the failed GENERATORS, the ALLOWED lines, the
+    manager's VERSION and the tree's etc/fstab text FSTAB (None when it is a link)."""
     out = []
-    if status != 0:
-        out.append("systemd's test run for %s exited %d: %s" % (start, status, stderr.strip()[-500:]))
-    if "-> By units:" not in stdout:
-        out.append("systemd's test run printed no unit list, so nothing it starts is known; %s" % WHY)
-        return out
-    for line in stderr.split("\n"):
-        if "deleted to break ordering cycle" in line or "unmergeable" in line:
-            out.append("systemd dropped a job from the unlock step's transaction (%s); %s" % (line.strip(), WHY))
-    try:
-        units = parse_dump(stdout)
-    except ValueError as e:
-        return out + ["%s; %s" % (e, WHY)]
+    if version.split(".")[0] != major:
+        out.append("the image's systemd is %s, but the dependency kinds this check follows were read from "
+                   "systemd %s; read them again for this version; %s" % (version, major, WHY))
+    if fstab is None:
+        out.append("etc/fstab is a link, so what it holds is unread here; %s" % WHY)
+    out += ["etc/fstab: %s names a device, which systemd in the check's container skips, so what it pulls is "
+            "unread; %s" % (l, WHY) for l in fstab_devices(fstab or "")]
     if start not in units:
         out.append("%s is not among the units systemd loaded; %s" % (start, WHY))
-    got = reached(units, start)
-    for u in sorted(got):
-        for kind in sorted(set(units[u]["unknown"])) if u in units else ():
-            out.append("%s: dependency kind %s is not one this check knows, so where it leads is unread; %s"
-                       % (u, kind, WHY))
+    for u in sorted(reached(units, start)):
         if u in SHUTDOWN:
             out.append("%s starts %s; %s" % (start, u, WHY))
+            continue
         for name, value in units.get(u, {}).get("actions", ()):
             if value != "none":
-                out.append("%s, which %s starts, has %s %s; %s" % (u, start, name, value, WHY))
-    have = facts(units, stderr, start)
+                out.append("%s, which %s starts, has %s=%s; %s" % (u, start, name, value, WHY))
+    have = facts(units, generators, start)
     out += ["%s: not on %s; review it and add the line there" % (f, ALLOW.name) for f in sorted(have - allowed)]
     out += ["%s: on %s but no longer in the graph; remove the line" % (f, ALLOW.name) for f in sorted(allowed - have)]
     return out
+
+
+def run(root, usr, cmdline, allowed, plant="", major=SYSTEMD_MAJOR):
+    """violations() for the tree at ROOT, with PLANT over it, under its own systemd."""
+    m = offline_systemd.Manager(root, usr, cmdline, plant)
+    try:
+        version = m.manager(("Version",))["Version"]
+        f = pathlib.Path(m.view_root, "etc/fstab")
+        if f.is_symlink():  # a link would be followed from the runner's root, not the tree's
+            fstab = None
+        else:
+            try:
+                fstab = f.read_text()
+            except FileNotFoundError:
+                fstab = ""
+        units = graph(m)
+        generators = m.failed_generators()
+        return units, generators, violations(units, generators, allowed, version, fstab, major=major)
+    finally:
+        m.stop()
 
 
 def read_allow(path=ALLOW):
@@ -178,35 +209,32 @@ def main(argv):
         sys.exit(__doc__.rsplit("Usage", 1)[1].strip())
     root, usr, cmdline, cleanup = offline_systemd.built_tree(*args)
     try:
+        allowed = read_allow()
+        units, generators, v = run(root, usr, cmdline, allowed)
         if mode == "--control":
             # A plant counts only by the refusals it adds to the unplanted tree's, so a stale allowlist
             # cannot make a blind check look sighted.
-            allowed, blind = read_allow(), []
-            base = set(violations(*systemd_test(root, usr, cmdline), allowed))
+            base, blind = set(v), []
             for name, plant in CONTROLS.items():
                 with tempfile.TemporaryDirectory() as p:
                     plant_tree(root, plant, p)
-                    v = [l for l in violations(*systemd_test(root, usr, cmdline, p), allowed) if l not in base]
-                print("unlock graph control: %s: %d refusal(s) added" % (name, len(v)))
-                for line in v:
+                    added = [l for l in run(root, usr, cmdline, allowed, p)[2] if l not in base]
+                print("unlock graph control: %s: %d refusal(s) added" % (name, len(added)))
+                for line in added:
                     print("  " + line)
-                if not v:
+                if not added:
                     blind.append(name)
             if blind:
                 sys.exit("unlock graph: the check passed planted paths, so a pass means nothing: %s" % "; ".join(blind))
             return
-        status, stdout, stderr = systemd_test(root, usr, cmdline)
         if mode == "--allowlist":
-            if status != 0 or "-> By units:" not in stdout:
-                sys.exit("unlock graph: systemd's test run failed (%d): %s" % (status, stderr[-2000:]))
-            sys.stdout.write(ALLOW_HEADER + "".join(l + "\n" for l in sorted(facts(parse_dump(stdout), stderr))))
+            sys.stdout.write(ALLOW_HEADER + "".join(l + "\n" for l in sorted(facts(units, generators))))
             return
-        v = violations(status, stdout, stderr, read_allow())
         for line in v:
             print("unlock graph: " + line)
         if v:
             sys.exit("unlock graph: %d problem(s), each named above; %s" % (len(v), WHY))
-        print("unlock graph: clean (%d units reached)" % len(reached(parse_dump(stdout))))
+        print("unlock graph: clean (%d units reached)" % len(reached(units)))
     finally:
         cleanup()
 
