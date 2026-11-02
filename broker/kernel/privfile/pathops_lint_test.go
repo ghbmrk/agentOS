@@ -614,21 +614,30 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		"a type-wide drop-in":                    {"image/mkosi/service.d/z.conf", "[Service]\nStandardOutput=file:/tmp/o\n", `path "/tmp/o"`},
 		"a packaged drop-in's directory":         {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nStateDirectory=agentos-x\n", `the unit's user owns /var/lib/agentos-x, in or above`},
 		// #4677 Security R-2: what else a root unit loads or reads.
-		"a preload":                  {unit, "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", `variable "LD_PRELOAD"`},
-		"a shell's env file":         {unit, "[Service]\nExecStart=/bin/sh -c x\nEnvironment=GOMEMLIMIT=1 BASH_ENV=/tmp/x\n", `variable "BASH_ENV"`},
-		"a bare variable name":       {unit, "[Service]\nExecStart=/bin/true\nEnvironment=LD_LIBRARY_PATH\n", `variable "LD_LIBRARY_PATH"`},
-		"an input file":              {unit, "[Service]\nExecStart=/bin/true\nStandardInput=file:/tmp/x\n", `path "/tmp/x"`},
-		"an appended output":         {unit, "[Service]\nExecStart=/bin/true\nStandardOutput=append:/var/tmp/log\n", `path "/var/tmp/log"`},
-		"a truncated error":          {unit, "[Service]\nExecStart=/bin/true\nStandardError=truncate:/run/x\n", `path "/run/x"`},
-		"a credential in /tmp":       {unit, "[Service]\nExecStart=/bin/true\nLoadCredential=a:/tmp/x\n", `path "/tmp/x"`},
-		"a searched credential":      {unit, "[Service]\nExecStart=/bin/true\nLoadCredential=a\n", `path ""`},
-		"a relative credential":      {unit, "[Service]\nExecStart=/bin/true\nLoadCredentialEncrypted=a:a.cred\n", `path "a.cred"`},
-		"a root hash file":           {unit, "[Service]\nExecStart=/bin/true\nRootHash=/tmp/h\n", `path "/tmp/h"`},
-		"a root hash signature file": {unit, "[Service]\nExecStart=/bin/true\nRootHashSignature=/tmp/s\n", `path "/tmp/s"`},
-		"a verity file":              {unit, "[Service]\nExecStart=/bin/true\nRootVerity=/tmp/v\n", `path "/tmp/v"`},
-		"a terminal in /tmp":         {unit, "[Service]\nExecStart=/bin/true\nTTYPath=/tmp/tty\n", `path "/tmp/tty"`},
-		"a network namespace":        {unit, "[Service]\nExecStart=/bin/true\nNetworkNamespacePath=/run/x/net\n", `path "/run/x/net"`},
-		"an IPC namespace":           {unit, "[Service]\nExecStart=/bin/true\nIPCNamespacePath=/tmp/ipc\n", `path "/tmp/ipc"`},
+		"a preload":                   {unit, "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", `variable "LD_PRELOAD"`},
+		"a shell's env file":          {unit, "[Service]\nExecStart=/bin/sh -c x\nEnvironment=GOMEMLIMIT=1 BASH_ENV=/tmp/x\n", `variable "BASH_ENV"`},
+		"a bare variable name":        {unit, "[Service]\nExecStart=/bin/true\nEnvironment=LD_LIBRARY_PATH\n", `variable "LD_LIBRARY_PATH"`},
+		"an input file":               {unit, "[Service]\nExecStart=/bin/true\nStandardInput=file:/tmp/x\n", `path "/tmp/x"`},
+		"an appended output":          {unit, "[Service]\nExecStart=/bin/true\nStandardOutput=append:/var/tmp/log\n", `path "/var/tmp/log"`},
+		"a truncated error":           {unit, "[Service]\nExecStart=/bin/true\nStandardError=truncate:/run/x\n", `path "/run/x"`},
+		"a credential in /tmp":        {unit, "[Service]\nExecStart=/bin/true\nLoadCredential=a:/tmp/x\n", `path "/tmp/x"`},
+		"a searched credential":       {unit, "[Service]\nExecStart=/bin/true\nLoadCredential=a\n", `path ""`},
+		"a relative credential":       {unit, "[Service]\nExecStart=/bin/true\nLoadCredentialEncrypted=a:a.cred\n", `path "a.cred"`},
+		"a root hash file":            {unit, "[Service]\nExecStart=/bin/true\nRootHash=/tmp/h\n", `path "/tmp/h"`},
+		"a root hash signature file":  {unit, "[Service]\nExecStart=/bin/true\nRootHashSignature=/tmp/s\n", `path "/tmp/s"`},
+		"a verity file":               {unit, "[Service]\nExecStart=/bin/true\nRootVerity=/tmp/v\n", `path "/tmp/v"`},
+		"a terminal in /tmp":          {unit, "[Service]\nExecStart=/bin/true\nTTYPath=/tmp/tty\n", `path "/tmp/tty"`},
+		"an opened file":              {unit, "[Service]\nExecStart=/bin/true\nOpenFile=/var/lib/agentos-x/f:fd\n", `path "/var/lib/agentos-x/f"`},
+		"an opened file with a blank": {unit, "[Service]\nExecStart=/bin/true\nOpenFile=/usr /etc:fd\n", `path "/usr /etc"`},
+		"an opened file in a drop-in": {"image/mkosi/systemd-udevd.service.d/z.conf", "[Service]\nOpenFile=/tmp/x:in\n", `path "/tmp/x"`},
+		"an imported credential":      {unit, "[Service]\nExecStart=/bin/true\nImportCredential=*\n", `ImportCredential= searches`},
+		"a named import":              {unit, "[Service]\nExecStart=/bin/true\nImportCredential=a\n", `ImportCredential= searches`},
+		"a packaged import":           {"image/mkosi/systemd-sysctl.service.d/z.conf", "[Service]\nImportCredential=sysctl.*\n", `ImportCredential= searches`},
+		"a BPF program":               {unit, "[Service]\nExecStart=/bin/true\nBPFProgram=egress:/tmp/p\n", `path "/tmp/p"`},
+		"an ingress filter":           {unit, "[Service]\nExecStart=/bin/true\nIPIngressFilterPath=/tmp/f\n", `path "/tmp/f"`},
+		"an egress filter":            {unit, "[Service]\nExecStart=/bin/true\nIPEgressFilterPath=/usr:/tmp\n", `path "/usr:/tmp"`},
+		"a network namespace":         {unit, "[Service]\nExecStart=/bin/true\nNetworkNamespacePath=/run/x/net\n", `path "/run/x/net"`},
+		"an IPC namespace":            {unit, "[Service]\nExecStart=/bin/true\nIPCNamespacePath=/tmp/ipc\n", `path "/tmp/ipc"`},
 		// #4677 Security R-3: a single path is read whole.
 		"a working directory with a colon": {unit, "[Service]\nExecStart=/bin/true\nWorkingDirectory=/usr:/tmp\n", `path "/usr:/tmp"`},
 		"a working directory with a blank": {unit, "[Service]\nExecStart=/bin/true\nWorkingDirectory=-/usr /etc\n", `path "/usr /etc"`},
@@ -670,7 +679,7 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 	// directory that grants nothing.
 	t.Run("root settings that load from root trees", func(t *testing.T) {
 		files := clone(files)
-		files["image/mkosi/agentos-x@.service"] = "[Service]\nExecStart=/bin/true\nStandardInput=socket\nStandardOutput=journal+console\nStandardError=file:/run/systemd/x\n" +
+		files["image/mkosi/agentos-x@.service"] = "[Service]\nExecStart=/bin/true\nStandardInput=socket\nStandardOutput=journal+console\nStandardError=file:/run/systemd/x\nOpenFile=/etc/agentos/f:f:read-only\nBPFProgram=egress:/usr/lib/x\nImportCredential=\n" +
 			"LoadCredential=a:/etc/credstore/a\nRootHash=0fa1\nRootHashSignature=base64:AAA=\nRootVerity=/usr/lib/x.verity\nExtensionDirectories=-/usr/lib/x /etc/y\n" +
 			"WorkingDirectory=\nRuntimeDirectory=agentos-%i\n"
 		files["image/mkosi/systemd-networkd-wait-online.service.d/agentos-unplugged.conf"] = "[Service]\nExecStart=\nExecStart=-/usr/lib/systemd/systemd-networkd-wait-online --any --timeout=5\n"
@@ -686,6 +695,25 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		files["image/mkosi/agentos-user.service.d/z.conf"] = "[Service]\nWorkingDirectory=/tmp\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
 			t.Fatal(err)
+		}
+	})
+	// #4698 Security 2: a unit of that name in another image does not own
+	// the drop-in, which is still read alone.
+	t.Run("refuses a drop-in only another image's unit names", func(t *testing.T) {
+		files := clone(files)
+		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+		files["image/camnode/overlay/etc/systemd/system/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`) {
+			t.Fatalf("got %v, want a refusal", err)
+		}
+		// A drop-in in another image that its own image's user unit owns.
+		files["image/camnode/overlay/etc/systemd/system/agentos-cam.service"] = "[Service]\nUser=cam\nExecStart=/bin/true\n"
+		files["image/camnode/board/etc/systemd/system/agentos-cam.service.d/z.conf"] = "[Service]\nWorkingDirectory=/tmp\n"
+		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+		// Its own image's unit of that name owns it.
+		files["image/mkosi/x/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
+		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
+			t.Fatalf("a drop-in its own image's user unit owns: %v", err)
 		}
 	})
 	t.Run("refuses a type-wide drop-in with no unit under image/", func(t *testing.T) {
@@ -1685,7 +1713,8 @@ func dotdot(p string) bool {
 // EnvironmentFile=, that decide what its commands read, run, write or search:
 // the root it sees and how it is verified, the images and trees mounted into
 // it, its working directory, program search path, standard streams,
-// credentials, terminal and namespaces. In a unit with a root command each
+// credentials, handed-over files, terminal, namespaces and BPF programs:
+// each a path the manager opens for it as root. In a unit with a root command each
 // path one names must be rootOwned, and a TemporaryFileSystem= is held to the
 // mount rules (#4589, #4677 Security R-2).
 var rootPathKeys = map[string]bool{
@@ -1693,6 +1722,7 @@ var rootPathKeys = map[string]bool{
 	"BindPaths": true, "BindReadOnlyPaths": true, "TemporaryFileSystem": true, "WorkingDirectory": true, "ExecSearchPath": true,
 	"RootHash": true, "RootHashSignature": true, "RootVerity": true, "StandardInput": true, "StandardOutput": true, "StandardError": true,
 	"LoadCredential": true, "LoadCredentialEncrypted": true, "TTYPath": true, "NetworkNamespacePath": true, "IPCNamespacePath": true,
+	"OpenFile": true, "ImportCredential": true, "BPFProgram": true, "IPIngressFilterPath": true, "IPEgressFilterPath": true,
 }
 
 // wholePaths are the keys whose value, after a - that lets it be missing,
@@ -1701,6 +1731,7 @@ var rootPathKeys = map[string]bool{
 var wholePaths = map[string]bool{
 	"WorkingDirectory": true, "RootDirectory": true, "RootImage": true, "EnvironmentFile": true,
 	"RootVerity": true, "TTYPath": true, "NetworkNamespacePath": true, "IPCNamespacePath": true,
+	"IPIngressFilterPath": true, "IPEgressFilterPath": true,
 }
 
 // pathSetting is the bytes a rootPathKeys value may hold: no quote,
@@ -1763,6 +1794,10 @@ func rootPathSetting(k, v string) error {
 			}
 		}
 	case k != "EnvironmentFile" && !rootPathKeys[k]:
+	case k == "ImportCredential" && v != "":
+		// A glob over the credential stores, /run/credstore among them,
+		// which the lint does not hold, as a LoadCredential= with no path.
+		return fmt.Errorf("ImportCredential= searches credential stores the lint does not hold; a unit with a root command loads a credential only by LoadCredential= with a rootOwned path")
 	case !pathSetting.MatchString(v):
 		return fmt.Errorf("byte %q, a byte other than a letter, digit, blank or one of _./@:,=+-, which the lint would have to expand", pathByte.FindString(v))
 	case v == "":
@@ -1790,6 +1825,16 @@ func rootPathSetting(k, v string) error {
 		// ID:PATH; with no path, or a relative one, systemd searches
 		// credential stores (/run/credstore among them) the lint does not
 		// hold, so the path is read as given and must be rootOwned.
+		_, p, _ := strings.Cut(v, ":")
+		paths = []string{p}
+	case k == "OpenFile":
+		// PATH[:NAME[:OPTIONS]]: the manager opens PATH, or connects to
+		// it, as root and hands the command the descriptor (#4698
+		// Security 1).
+		p, _, _ := strings.Cut(v, ":")
+		paths = []string{p}
+	case k == "BPFProgram":
+		// TYPE:PATH: the manager loads the pinned program at PATH.
 		_, p, _ := strings.Cut(v, ":")
 		paths = []string{p}
 	case k == "TemporaryFileSystem":
@@ -1954,16 +1999,22 @@ func rootBinaries(root string) ([]string, error) {
 	// agentos-.service.d), whose User= the lint does not see, so each of its
 	// files is also read alone as a unit that runs as root and whose user
 	// owns its directories (#4677 Security R-1). Only an image/ unit's own
-	// name.d, which no packaged unit of that name reads, is not.
+	// name.d in the same image (image/<image>/...), which no packaged unit of
+	// that name reads there, is not: image/ holds more than one image, and a
+	// unit in one does not reach another's drop-ins (#4698 Security 2).
 	type unitRead struct {
 		name     string
 		paths    []string
 		packaged bool
 	}
 	var reads []unitRead
-	own := map[string]bool{}
+	own := map[string]bool{} // image + "/" + a unit's name.d
+	imageOf := func(p string) string {
+		rel, _ := filepath.Rel(filepath.Join(root, "image"), p)
+		return strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+	}
 	for p, name := range units {
-		own[name+".d"] = true
+		own[imageOf(p)+"/"+name+".d"] = true
 		paths := []string{p}
 		for _, dir := range dropinDirs(name) {
 			paths = append(paths, dropins[dir]...)
@@ -1975,11 +2026,13 @@ func rootBinaries(root string) ([]string, error) {
 		if !strings.Contains(name, ".") {
 			name = "." + name // service.d
 		}
-		if own[dir] || !execUnits[path.Ext(name)] {
+		if !execUnits[path.Ext(name)] {
 			continue
 		}
 		for _, f := range confs {
-			reads = append(reads, unitRead{name, []string{f}, true})
+			if !own[imageOf(f)+"/"+dir] {
+				reads = append(reads, unitRead{name, []string{f}, true})
+			}
 		}
 	}
 	for _, r := range reads {
