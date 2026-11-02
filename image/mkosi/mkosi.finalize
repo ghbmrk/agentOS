@@ -25,6 +25,8 @@ and mount unit is noexec. The keeper (STO-2c, D-154): only its units reach the T
 its unlock unit gets no descriptor past 2 and a bounded restart count (#2899, #2897). A device driver
 (DEVSLOT-image) ships only as a binary drivers.json lists with its hash, under units rendered from
 DRIVER_TEMPLATE for its name, and nothing else names its user or the drivers' sockets.
+Run by mkosi, it also refuses a run whose scripts had the network (#4647), so neither mkosi.postinst nor
+this script can fetch a package outside mkosi's checked apt run.
 Usage outside mkosi: mkosi.finalize ROOT; mkosi.finalize --tmpfiles-allowlist ROOT and
 mkosi.finalize --exec-allowlist ROOT print those allowlists for a tree."""
 import errno
@@ -1480,6 +1482,8 @@ UNLOCK_DESCRIPTOR = "nothing reaches the unlock step past descriptor 2 and no pr
 UNLOCK_ACTION = "a reboot starts the unlock step again (#2897)"
 UNLOCK_START = ("starts a unit when the kernel stops, which the tree check does not model; its one reboot is "
                 "ExecStopPost=KERNEL_REBOOT (#2897, #2998)")
+UNLOCK_PULL = ("starts or stops another unit with the unlock step, which the tree check does not model; its one "
+               "reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667)")
 UNLOCK_ASSIGNMENTS = (
     ("Service", "Sockets", (), UNLOCK_DESCRIPTOR),
     ("Service", "OpenFile", (), UNLOCK_DESCRIPTOR),
@@ -1495,7 +1499,22 @@ UNLOCK_ASSIGNMENTS = (
     ("Unit", "JobTimeoutAction", ("none",), UNLOCK_ACTION),
     ("Unit", "OnFailure", (), UNLOCK_START),
     ("Unit", "OnSuccess", (), UNLOCK_START),
+    # #4667: every [Unit] key by which the unit's start or stop starts or stops another unit, as systemd
+    # 257.13's unit-dependency-atom.c gives them: Wants=, Requires=, BindsTo= and Upholds= start it
+    # (UNIT_ATOM_PULL_IN_START, UNIT_ATOM_RETROACTIVE_START_*), Requisite= checks it, Conflicts= stops it
+    # (UNIT_ATOM_PULL_IN_STOP) and PropagatesStopTo= passes a stop on. The shipped unit sets none of them;
+    # its After= orders and starts nothing. The .wants/, .requires/ and .upholds/ links that do the same
+    # are refused with them (keeper_violations).
+    ("Unit", "Wants", (), UNLOCK_PULL),
+    ("Unit", "Requires", (), UNLOCK_PULL),
+    ("Unit", "Requisite", (), UNLOCK_PULL),
+    ("Unit", "BindsTo", (), UNLOCK_PULL),
+    ("Unit", "Upholds", (), UNLOCK_PULL),
+    ("Unit", "Conflicts", (), UNLOCK_PULL),
+    ("Unit", "PropagatesStopTo", (), UNLOCK_PULL),
 )
+# The link directories that add the same dependencies as Wants=, Requires= and Upholds= (#4667).
+UNLOCK_LINK_DIRS = (".wants", ".requires", ".upholds")
 # The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
 # no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
 # an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
@@ -1594,13 +1613,18 @@ def ini_all(files, section, key):
     """Every non-empty value of SECTION.KEY across FILES, whatever comes after it: for a rule that must not
     rest on how systemd treats an empty or an invalid later assignment (some settings keep the earlier
     value, #4264 Security 6543535789). ValueError as ini_words."""
+    return [v for _, v in ini_all_in(files, section, key)]
+
+
+def ini_all_in(files, section, key):
+    """ini_all's values, each as (the file that sets it, the value), so a refusal can name the file."""
     val = []
     for f in files:
         try:
             lines = config_lines(f.content())
         except (OSError, Unparsable) as e:
             raise ValueError("unreadable %s (%s)" % (f.name, e.strerror if isinstance(e, OSError) else e))
-        val += [v for s, k, v in lines if (s, k) == (section, key) and v]
+        val += [(f, v) for s, k, v in lines if (s, k) == (section, key) and v]
     return val
 
 
@@ -1715,6 +1739,7 @@ def keeper_violations(root):
             out += keeper_unit_violations(name, files)
         except ValueError as e:
             out.append("%s: %s; the tree check never passes what it cannot read (STO-2c)" % (name, e))
+    out += unlock_link_violations(root)
     for n in sorted(set(sockets)):
         files = unit_with_dropins(root, dirs, n)
         try:
@@ -1930,6 +1955,37 @@ def driver_root(name, files):
             and ini_words(files, "Service", "TemporaryFileSystem") == ["/:ro,noexec"] and not root_mounts(files))
 
 
+def unlock_link_violations(root):
+    """#4667: a link in an unlock unit's .wants/, .requires/ or .upholds/ directory (by its name, each "-"
+    prefix of it, or its type, as unit_with_dropins reads drop-ins) starts the unit it names with the
+    unlock step, as Wants=, Requires= or Upholds= would; the unit may have none of them."""
+    out = []
+    for name in UNLOCK_UNITS:
+        typ = name.rsplit(".", 1)[1]
+        for d in UNIT_PATHS:
+            for n in unit_dropin_names(name) + [typ]:
+                for suffix in UNLOCK_LINK_DIRS:
+                    rel = "%s/%s%s" % (d, n, suffix)
+                    try:
+                        st = tree_lstat(root, rel)
+                        if st is None:
+                            continue
+                        found = sorted(tree_listdir(root, rel)) if stat.S_ISDIR(st.st_mode) else [""]
+                    except OSError as e:
+                        out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
+                                   % (rel, e.strerror))
+                        continue
+                    for m in found:
+                        out.append("%s: %s; %s; allowed: no %s link at all"
+                                   % (name, rel + ("/" + m if m else ""), UNLOCK_PULL, suffix[1:]))
+    return out
+
+
+def unlock_allowed(key, allowed):
+    """What an unlock unit may assign to KEY, for a refusal (#4667)."""
+    return " or ".join("%s=%s" % (key, a) for a in allowed) or "no %s= at all" % key
+
+
 def keeper_unit_violations(name, files):
     """keeper_violations' rules for one agentos service NAME, read from FILES (unit_with_dropins)."""
     out = []
@@ -2005,9 +2061,9 @@ def keeper_unit_violations(name, files):
                     out.append("%s: %s=%s can open the TPM (#2889)" % (name, key, g))
     if name in UNLOCK_UNITS:
         for section, key, allowed, why in UNLOCK_ASSIGNMENTS:
-            for v in ini_all(files, section, key):
+            for f, v in ini_all_in(files, section, key):
                 if v not in allowed:
-                    out.append("%s: %s=%s; %s" % (name, key, v, why))
+                    out.append("%s: %s=%s in %s; %s; allowed: %s" % (name, key, v, f.rel, why, unlock_allowed(key, allowed)))
         if (ini_last(files, "Service", "NoNewPrivileges") or "").lower() not in TRUE_WORDS:
             out.append("%s: NoNewPrivileges is not yes (#2899)" % name)
         service_limits = ini_keys(files, "Service") & {"StartLimitBurst", "StartLimitIntervalSec", "StartLimitInterval"}
@@ -3333,6 +3389,33 @@ def has_key(root, rel):
     return any(m in data for m in KEY_MARKERS)
 
 
+def script_net_dev():
+    """The text of this process's /proc/self/net/dev: the script sandbox's network devices, not the tree's."""
+    try:
+        with open("/proc/self/net/dev") as f:
+            return f.read()
+    except OSError as e:
+        return "unreadable (%s)" % e.strerror
+
+
+def script_network_violations(with_network, net_dev):
+    """#4647: mkosi v24.3 runs mkosi.postinst and this script with the same network setting, off unless
+    WithNetwork= is set (the key is not on tests/test_image.py's allow-list), so neither can fetch a
+    package outside mkosi's signature-checked apt run. This checks it held for this run, whatever flags
+    the build passed: mkosi says WITH_NETWORK=0, and the sandbox's network namespace (NET_DEV, the text
+    of /proc/self/net/dev) holds only the loopback device."""
+    out = []
+    if with_network != "0":
+        out.append("WITH_NETWORK is %s; mkosi.postinst and mkosi.finalize run with no network, so they fetch "
+                   "no package outside mkosi's checked apt run (#4647)" % with_network)
+    devs = [l.split(":", 1)[0].strip() for l in net_dev.split("\n")[2:] if l.strip()]
+    if devs != ["lo"]:
+        out.append("the script sandbox's network devices are %s, not lo alone; mkosi.postinst and mkosi.finalize "
+                   "run with no network, so they fetch no package outside mkosi's checked apt run (#4647)"
+                   % (", ".join(devs) or "unknown: " + net_dev.split("\n")[0][:80]))
+    return out
+
+
 def main():
     if sys.argv[1:2] == ["--tmpfiles-allowlist"] and len(sys.argv) == 3:
         sys.stdout.write(tmpfiles_allowlist_text(sys.argv[2]))
@@ -3344,6 +3427,8 @@ def main():
     if not root:
         sys.exit("usage: mkosi.finalize ROOT (or BUILDROOT=...)")
     v = violations(root)
+    if len(sys.argv) == 1:  # run by mkosi, in its script sandbox
+        v += script_network_violations(os.environ.get("WITH_NETWORK"), script_net_dev())
     for line in v:
         print("image check: " + line)
     if v:

@@ -49,6 +49,13 @@ def go_flags(cmd):
     return set(re.findall(r'fs\.(?:String|Bool|Int|Duration|Uint)?(?:Var)?\((?:[^,]+, )?"([a-z-]+)"', src))
 
 
+def unlock_refusal(key, val, why, where=SYSTEM + "agentos-keeper-kernel.service"):
+    """#4667: an unlock unit's refusal names the file that set the value and what the key may be."""
+    allowed = {"FileDescriptorStoreMax": "FileDescriptorStoreMax=0"}.get(
+        key, key + "=none" if key.endswith("Action") else "no %s= at all" % key)
+    return "agentos-keeper-kernel.service: %s=%s in %s; %s; allowed: %s" % (key, val, where, why, allowed)
+
+
 class KeeperTreeTest(unittest.TestCase):
     """mkosi.finalize's keeper check on a tree holding the image's own units."""
 
@@ -350,8 +357,7 @@ class KeeperTreeTest(unittest.TestCase):
                 good = self.unit("agentos-keeper-kernel.service").read_text()
                 self.add("agentos-keeper-kernel.service", "Service", line)
                 key, val = line.split("=", 1)
-                self.assertEqual(self.v(), ["agentos-keeper-kernel.service: %s=%s; nothing reaches the unlock step "
-                                            "past descriptor 2 and no privilege survives its drop (#2899)" % (key, val)])
+                self.assertEqual(self.v(), [unlock_refusal(key, val, check.UNLOCK_DESCRIPTOR)])
                 self.unit("agentos-keeper-kernel.service").write_text(good)
 
     def test_a_later_empty_assignment_does_not_hide_a_descriptor(self):
@@ -362,8 +368,8 @@ class KeeperTreeTest(unittest.TestCase):
             with self.subTest(key):
                 d = write(self.root, SYSTEM + "agentos-keeper-kernel.service.d/99.conf",
                           "[Service]\n%s=%s\n%s=\n" % (key, val, key))
-                self.assertEqual(self.v(), ["agentos-keeper-kernel.service: %s=%s; nothing reaches the unlock step "
-                                            "past descriptor 2 and no privilege survives its drop (#2899)" % (key, val)])
+                self.assertEqual(self.v(), [unlock_refusal(key, val, check.UNLOCK_DESCRIPTOR,
+                                                           SYSTEM + "agentos-keeper-kernel.service.d/99.conf")])
                 d.unlink()
         self.assertEqual(self.v(), [])
 
@@ -375,14 +381,58 @@ class KeeperTreeTest(unittest.TestCase):
                   ("Unit", "FailureAction", "reboot-force"), ("Service", "StartLimitAction", "reboot"),
                   ("Service", "FailureAction", "reboot-force"), ("Unit", "SuccessAction", "reboot"),
                   ("Unit", "JobTimeoutAction", "reboot-force"), ("Unit", "OnFailure", "reboot.target"),
-                  ("Unit", "OnSuccess", "reboot.target"))
+                  ("Unit", "OnSuccess", "reboot.target"), ("Unit", "Wants", "reboot.target"),
+                  ("Unit", "Requires", "reboot.target"), ("Unit", "Requisite", "reboot.target"),
+                  ("Unit", "BindsTo", "reboot.target"), ("Unit", "Upholds", "reboot.target"),
+                  ("Unit", "Conflicts", "agentos-health.service"), ("Unit", "PropagatesStopTo", "agentosd.service"))
 
     def test_the_unlock_unit_assignments_are_one_closed_list(self):
         self.assertEqual(sorted((s, k, a) for s, k, a, _ in check.UNLOCK_ASSIGNMENTS),
                          sorted((s, k, {"FileDescriptorStoreMax": ("0",)}.get(k, ("none",) if k.endswith("Action") else ()))
                                 for s, k, _ in self.UNLOCK_BAD))
         self.assertEqual({w for *_, w in check.UNLOCK_ASSIGNMENTS},
-                         {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START})
+                         {check.UNLOCK_DESCRIPTOR, check.UNLOCK_ACTION, check.UNLOCK_START, check.UNLOCK_PULL})
+        # #4667: every key by which the unit's start or stop starts or stops another unit has the empty list.
+        pull = ("Wants", "Requires", "Requisite", "BindsTo", "Upholds", "Conflicts", "PropagatesStopTo")
+        self.assertEqual(sorted(k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if w == check.UNLOCK_PULL), sorted(pull))
+        self.assertFalse([k for s, k, a, w in check.UNLOCK_ASSIGNMENTS if k in pull and (s, a) != ("Unit", ())])
+        # The shipped unit sets none of them; After= only orders it.
+        u = ini(KERNEL)
+        self.assertFalse(set(u["Unit"]) & {k.lower() for k in pull})
+
+    def test_a_dependency_of_the_unlock_unit_names_its_file_and_what_is_allowed(self):
+        # #4667: Upholds=reboot.target in a drop-in would start a reboot outside ExecStopPost=KERNEL_REBOOT.
+        # The refusal names the drop-in and says the key may not be set at all; two drop-ins setting the
+        # same value give two lines, each naming its own file.
+        name = "agentos-keeper-kernel.service"
+        a = write(self.root, SYSTEM + name + ".d/50-a.conf", "[Unit]\nUpholds=reboot.target\n")
+        b = write(self.root, SYSTEM + "agentos-keeper-.service.d/60-b.conf", "[Unit]\nUpholds=reboot.target\n")
+        self.assertEqual(self.v(), [
+            name + ": Upholds=reboot.target in %s; starts or stops another unit with the unlock step, which the "
+            "tree check does not model; its one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #4667); allowed: no "
+            "Upholds= at all" % (SYSTEM + name + ".d/50-a.conf"),
+            unlock_refusal("Upholds", "reboot.target", check.UNLOCK_PULL, SYSTEM + "agentos-keeper-.service.d/60-b.conf")])
+        a.unlink()
+        b.unlink()
+        self.assertEqual(self.v(), [])
+
+    def test_a_dependency_link_of_the_unlock_unit_is_refused(self):
+        # #4667: a link in .wants/, .requires/ or .upholds/ adds the dependency with no assignment to read,
+        # under the unit's name, a "-" prefix of it or its type, in any unit directory.
+        name = "agentos-keeper-kernel.service"
+        for d in ("usr/lib/systemd/system/", "etc/systemd/system/"):
+            for n in (name, "agentos-keeper-.service", "agentos-.service", "service"):
+                for suffix in (".wants", ".requires", ".upholds"):
+                    with self.subTest(d=d, n=n, suffix=suffix):
+                        link = self.root / d / (n + suffix) / "reboot.target"
+                        link.parent.mkdir(parents=True, exist_ok=True)
+                        link.symlink_to("/usr/lib/systemd/system/reboot.target")
+                        self.assertEqual(self.v(), [
+                            "%s: %s%s%s/reboot.target; %s; allowed: no %s link at all"
+                            % (name, d, n, suffix, check.UNLOCK_PULL, suffix[1:])])
+                        link.unlink()
+                        link.parent.rmdir()
+        self.assertEqual(self.v(), [])
 
     def test_no_later_assignment_hides_an_unlock_unit_value(self):
         # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.
@@ -391,20 +441,21 @@ class KeeperTreeTest(unittest.TestCase):
         rule = {(s, k): (a, w) for s, k, a, w in check.UNLOCK_ASSIGNMENTS}
         for section, key, val in self.UNLOCK_BAD:
             allowed, why = rule[section, key]
-            want = ["%s: %s=%s; %s" % (name, key, val, why)]
+            want = [unlock_refusal(key, val, why)]
             for later in ("", "none", "0"):
                 with self.subTest(section=section, key=key, later=later, form="unit then drop-in"):
                     good = self.unit(name).read_text()
                     self.add(name, section, "%s=%s" % (key, val))
                     d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, later))
                     # The later value is checked too: only an empty one or one on the key's list adds nothing.
-                    extra = [] if later == "" or later in allowed else ["%s: %s=%s; %s" % (name, key, later, why)]
+                    extra = [] if later == "" or later in allowed else [
+                        unlock_refusal(key, later, why, SYSTEM + name + ".d/99.conf")]
                     self.assertEqual(self.v(), want + extra)
                     d.unlink()
                     self.unit(name).write_text(good)
             with self.subTest(section=section, key=key, form="one drop-in"):
                 d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n%s=\n" % (section, key, val, key))
-                self.assertEqual(self.v(), want)
+                self.assertEqual(self.v(), [unlock_refusal(key, val, why, SYSTEM + name + ".d/99.conf")])
                 d.unlink()
         self.assertEqual(self.v(), [])
 
@@ -416,7 +467,7 @@ class KeeperTreeTest(unittest.TestCase):
                                        ("Service", "FileDescriptorStoreMax", "00", check.UNLOCK_DESCRIPTOR)):
             with self.subTest(section=section, key=key, val=val):
                 d = write(self.root, SYSTEM + name + ".d/99.conf", "[%s]\n%s=%s\n" % (section, key, val))
-                self.assertEqual(self.v(), ["%s: %s=%s; %s" % (name, key, val, why)])
+                self.assertEqual(self.v(), [unlock_refusal(key, val, why, SYSTEM + name + ".d/99.conf")])
                 d.unlink()
 
     def test_the_listed_values_pass(self):
@@ -457,10 +508,10 @@ class KeeperTreeTest(unittest.TestCase):
                  ("StartLimitIntervalSec=infinity\n", "", "StartLimitIntervalSec is None; a zero or unset interval does not bound restarts (#2897)"),
                  ("StartLimitIntervalSec=infinity\n", "StartLimitIntervalSec=0\n", "StartLimitIntervalSec is 0; a zero or unset interval does not bound restarts (#2897)"),
                  ("StartLimitIntervalSec=infinity\n", "StartLimitIntervalSec=0s\n", "StartLimitIntervalSec is 0s; a zero or unset interval does not bound restarts (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nStartLimitAction=reboot\n", "StartLimitAction=reboot; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nFailureAction=reboot-force\n", "FailureAction=reboot-force; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nSuccessAction=reboot\n", "SuccessAction=reboot; a reboot starts the unlock step again (#2897)"),
-                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nJobTimeoutAction=reboot-force\n", "JobTimeoutAction=reboot-force; a reboot starts the unlock step again (#2897)"),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nStartLimitAction=reboot\n", unlock_refusal("StartLimitAction", "reboot", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nFailureAction=reboot-force\n", unlock_refusal("FailureAction", "reboot-force", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nSuccessAction=reboot\n", unlock_refusal("SuccessAction", "reboot", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
+                 ("StartLimitBurst=3\n", "StartLimitBurst=3\nJobTimeoutAction=reboot-force\n", unlock_refusal("JobTimeoutAction", "reboot-force", check.UNLOCK_ACTION)[len("agentos-keeper-kernel.service: "):]),
                  ("[Service]\n", "[Service]\nStartLimitBurst=100\n", "a start limit outside [Unit]'s StartLimitBurst= and StartLimitIntervalSec=; the tree check does not model it (#2897)"))
         for old, new, want in cases:
             with self.subTest(new or old):
@@ -518,8 +569,7 @@ class KeeperTreeTest(unittest.TestCase):
                  ("[Service]\n", "[Service]\nExecStartPre=/usr/bin/systemd-run --on-active=1 /usr/bin/true\n",
                   "ExecStartPre=/usr/bin/systemd-run " + why),
                  ("[Unit]\n", "[Unit]\nOnFailure=reboot.target\n",
-                  "OnFailure=reboot.target; starts a unit when the kernel stops, which the tree check does not model; "
-                  "its one reboot is ExecStopPost=KERNEL_REBOOT (#2897, #2998)"))
+                  unlock_refusal("OnFailure", "reboot.target", check.UNLOCK_START)[len(name + ": "):]))
         for old, new, want in cases:
             with self.subTest(new):
                 good = self.unit(name).read_text()
