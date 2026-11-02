@@ -602,3 +602,30 @@ func TestGenerateRules(t *testing.T) {
 	}
 	t.Logf("stored form: %d bytes of %d", len(big.encode()), MaxStored)
 }
+
+// No two entries share a value, at Generate and when a table is read back,
+// so a value names one entry and a lookup's answer never depends on table
+// order (KRN-6). Catches two honey entries with one key, where the kernel's
+// first-match honey lookup and an older last-match log disagree (#4574).
+func TestDuplicateValuesRefused(t *testing.T) {
+	same := func(io.Reader) (string, error) { return "honey-0123456789abcdef0123456789abcdef", nil }
+	if _, err := Generate(newSeeded(5), rangeAddrs, Own{KHoneyKey, PPlannerView, same}, Own{KHoneyKey, PPlannerView, same}); err != ErrBadTable {
+		t.Fatalf("two honey entries with one value: %v", err)
+	}
+	tab, err := Generate(newSeeded(5), rangeAddrs, Own{KHoneyKey, PPlannerView, same})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FromEvent(1, Event(tab)); err != nil {
+		t.Fatalf("a table with one honey entry: %v", err)
+	}
+	for i, e := range tab.Entries() {
+		if e.Value == "" {
+			continue
+		}
+		dup := Table{entries: append(tab.Entries(), tab.Entries()[i])}
+		if _, err := FromEvent(1, Event(dup)); err != ErrBadTable {
+			t.Fatalf("a %s value twice, read back: %v", e.Kind, err)
+		}
+	}
+}

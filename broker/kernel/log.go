@@ -27,6 +27,7 @@ var (
 	ErrUnknown   = errors.New("log: unknown entry type or version")
 	ErrBroken    = errors.New("log: a write failed; reopen")
 	ErrNoSigner  = errors.New("log: no head signer")
+	ErrNoLog     = errors.New("log: not opened; Open is the only constructor")
 )
 
 // Hash is the chain link.
@@ -131,14 +132,29 @@ type Config struct {
 	Rand io.Reader
 }
 
+// Format prints a Config as its type alone, never the log key or the box's
+// signing key (CLK-1). Like Kernel.Format, fmt skips it under %w and %p,
+// and inside an unexported holder (DECOY-b-8).
+func (Config) Format(f fmt.State, _ rune) { fmt.Fprint(f, "kernel.Config") }
+
 // Log is the one append-only, encrypted, hash-chained record (LOG-1, LOG-2).
+// Open is its only constructor: a zero Log, or a nil *Log, fails closed with
+// ErrNoLog. A copy of a Log is the same log, since both reach one record
+// through p, so copies never diverge from each other or the store.
 type Log struct{ p **logFields } // fmt prints p as an address in every verb, at any depth (DECOY-b-8)
 type logFields struct {
 	cfg     Config
 	aead    cipher.AEAD
 	entries []Entry
-	ends    []int // byte offset after each entry read at Open, where dropUnconfirmed cuts a tail
 	broken  bool
+}
+
+// fields is l's record, or ErrNoLog for a Log that Open did not make.
+func (l *Log) fields() (*logFields, error) {
+	if l == nil || l.p == nil || *l.p == nil {
+		return nil, ErrNoLog
+	}
+	return *l.p, nil
 }
 
 func newAEAD(key [32]byte) (cipher.AEAD, error) {
@@ -162,11 +178,12 @@ func Open(cfg Config) (*Log, error) {
 	if err != nil {
 		return nil, err
 	}
-	l := &Log{new(&logFields{cfg: cfg, aead: a})}
+	f := &logFields{cfg: cfg, aead: a}
 	raw, err := cfg.Store.ReadAll()
 	if err != nil {
 		return nil, err
 	}
+	var ends []int // the byte offset after each entry read, where dropUnconfirmed cuts a tail
 	off := 0
 	for off < len(raw) {
 		if len(raw)-off < 4 {
@@ -179,7 +196,7 @@ func Open(cfg Config) (*Log, error) {
 			}
 			break // torn body
 		}
-		seq := uint64(len((*l.p).entries) + 1)
+		seq := uint64(len(f.entries) + 1)
 		fr := raw[off+4 : off+4+n]
 		pt, err := a.Open(nil, fr[:a.NonceSize()], fr[a.NonceSize():], aad(seq))
 		if err != nil {
@@ -192,76 +209,77 @@ func Open(cfg Config) (*Log, error) {
 		if json.Unmarshal(pt, &e) != nil || e.Seq != seq {
 			return nil, ErrCorrupt
 		}
-		if seq > 1 && e.Prev != (*l.p).entries[seq-2].Hash() || seq == 1 && e.Prev != (Hash{}) {
+		if seq > 1 && e.Prev != f.entries[seq-2].Hash() || seq == 1 && e.Prev != (Hash{}) {
 			return nil, ErrCorrupt
 		}
 		if !Known(e.Type, e.V) {
 			return nil, ErrUnknown
 		}
-		(*l.p).entries = append((*l.p).entries, e)
+		f.entries = append(f.entries, e)
 		off += 4 + n
-		(*l.p).ends = append((*l.p).ends, off)
+		ends = append(ends, off)
 	}
 	if off < len(raw) {
 		if err := cfg.Store.Truncate(off); err != nil {
 			return nil, err
 		}
 	}
-	if err := l.checkAnchor(); err != nil {
+	if err := f.checkAnchor(); err != nil {
 		return nil, err
 	}
-	if err := l.dropUnconfirmed(); err != nil {
+	if err := f.dropUnconfirmed(ends); err != nil {
 		return nil, err
 	}
-	return l, nil
+	return &Log{&f}, nil
 }
 
-func (l *Log) checkAnchor() error {
-	if (*l.p).cfg.Anchor == nil {
+func (f *logFields) checkAnchor() error {
+	if f.cfg.Anchor == nil {
 		return nil
 	}
-	h, ok := (*l.p).cfg.Anchor.Latest()
+	h, ok := f.cfg.Anchor.Latest()
 	if !ok {
 		return nil
 	}
-	if !h.Valid((*l.p).cfg.Pub) {
+	if !h.Valid(f.cfg.Pub) {
 		return ErrCorrupt
 	}
-	if h.Seq > uint64(len((*l.p).entries)) {
+	if h.Seq > uint64(len(f.entries)) {
 		return ErrTruncated
 	}
 	if h.Seq == 0 {
 		return nil
 	}
-	if (*l.p).entries[h.Seq-1].Hash() != h.Hash {
+	if f.entries[h.Seq-1].Hash() != h.Hash {
 		return ErrFork
 	}
 	return nil
 }
 
-// dropUnconfirmed removes trailing widening entries that no anchor covers.
-func (l *Log) dropUnconfirmed() error {
+// dropUnconfirmed removes trailing widening entries that no anchor covers;
+// ends is Open's offset after each entry it read, valid only there.
+func (f *logFields) dropUnconfirmed(ends []int) error {
 	var covered uint64
-	if (*l.p).cfg.Anchor != nil {
-		if h, ok := (*l.p).cfg.Anchor.Latest(); ok {
+	if f.cfg.Anchor != nil {
+		if h, ok := f.cfg.Anchor.Latest(); ok {
 			covered = h.Seq
 		}
 	}
-	n := len((*l.p).entries)
-	for uint64(n) > covered && Widening((*l.p).entries[n-1].Type) {
+	n := len(f.entries)
+	for uint64(n) > covered && Widening(f.entries[n-1].Type) {
 		n--
 	}
-	if n == len((*l.p).entries) {
+	if n == len(f.entries) {
 		return nil
 	}
 	cut := 0
 	if n > 0 {
-		cut = (*l.p).ends[n-1]
+		cut = ends[n-1]
 	}
-	if err := (*l.p).cfg.Store.Truncate(cut); err != nil {
+	if err := f.cfg.Store.Truncate(cut); err != nil {
 		return err
 	}
-	(*l.p).entries, (*l.p).ends = (*l.p).entries[:n], (*l.p).ends[:n]
+	f.entries = f.entries[:n]
 	return nil
 }
 
@@ -269,7 +287,11 @@ func (l *Log) dropUnconfirmed() error {
 // everything until reopened, so a torn frame is trimmed by Open and never
 // built on.
 func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
-	if (*l.p).broken {
+	f, err := l.fields()
+	if err != nil {
+		return Entry{}, err
+	}
+	if f.broken {
 		return Entry{}, ErrBroken
 	}
 	if !Known(typ, v) {
@@ -279,41 +301,54 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	e := Entry{Seq: uint64(len((*l.p).entries) + 1), At: at, Type: typ, V: v, Body: bb}
-	if len((*l.p).entries) > 0 {
-		e.Prev = (*l.p).entries[len((*l.p).entries)-1].Hash()
+	e := Entry{Seq: uint64(len(f.entries) + 1), At: at, Type: typ, V: v, Body: bb}
+	if len(f.entries) > 0 {
+		e.Prev = f.entries[len(f.entries)-1].Hash()
 	}
 	pt, _ := json.Marshal(e)
-	nonce := make([]byte, (*l.p).aead.NonceSize())
-	if _, err := io.ReadFull((*l.p).cfg.Rand, nonce); err != nil {
+	nonce := make([]byte, f.aead.NonceSize())
+	if _, err := io.ReadFull(f.cfg.Rand, nonce); err != nil {
 		return Entry{}, fmt.Errorf("log: nonce: %w", err)
 	}
-	ct := (*l.p).aead.Seal(nonce, nonce, pt, aad(e.Seq))
+	ct := f.aead.Seal(nonce, nonce, pt, aad(e.Seq))
 	fr := binary.BigEndian.AppendUint32(nil, uint32(len(ct)))
 	fr = append(fr, ct...)
-	if err := (*l.p).cfg.Store.Append(fr); err != nil {
-		(*l.p).broken = true
+	if err := f.cfg.Store.Append(fr); err != nil {
+		f.broken = true
 		return Entry{}, err
 	}
-	(*l.p).entries = append((*l.p).entries, e)
+	f.entries = append(f.entries, e)
 	return e, nil
 }
 
 // Anchor signs the current head and hands it to the anchor. A widening is
 // confirmed once this returns.
 func (l *Log) Anchor() error {
-	if (*l.p).cfg.Sign == nil || (*l.p).cfg.Anchor == nil {
+	f, err := l.fields()
+	if err != nil {
+		return err
+	}
+	if f.cfg.Sign == nil || f.cfg.Anchor == nil {
 		return ErrNoSigner
 	}
-	if len((*l.p).entries) == 0 {
+	if len(f.entries) == 0 {
 		return nil
 	}
-	last := (*l.p).entries[len((*l.p).entries)-1]
-	return (*l.p).cfg.Anchor.Put(SignHead((*l.p).cfg.Sign, last.Seq, last.Hash()))
+	last := f.entries[len(f.entries)-1]
+	return f.cfg.Anchor.Put(SignHead(f.cfg.Sign, last.Seq, last.Hash()))
 }
 
-func (l *Log) Entries() []Entry { return (*l.p).entries }
-func (l *Log) Len() int         { return len((*l.p).entries) }
+// Entries and Len are the log's entries and their count: none for a Log
+// Open did not make.
+func (l *Log) Entries() []Entry {
+	f, err := l.fields()
+	if err != nil {
+		return nil
+	}
+	return f.entries
+}
+
+func (l *Log) Len() int { return len(l.Entries()) }
 
 // Same reports whether two logs hold byte-identical histories.
 func Same(a, b []Entry) bool {

@@ -992,7 +992,7 @@ func (s *State) Apply(e Entry) error {
 		}
 		if p := s.Plans[b.Plan]; p != nil && p.Seq == b.Cause && p.Status == SPending {
 			p.Status, p.Reject, p.RejectStep = SRejected, b.Code, b.Step
-			if b.Trip != nil && b.Code == CTrip && s.tripOK(*b.Trip, b.Plan) {
+			if b.Trip != nil && b.Code == CTrip && s.planTripOK(p.Plan, *b.Trip) {
 				s.addTrip(*b.Trip, e)
 			}
 		}
