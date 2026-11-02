@@ -595,15 +595,19 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	// IPv6 address setup have no route and pass to the rules below, and so
 	// does a DHCP or DHCPv6 answer to the enforcer's own client on the WAN:
 	// until the WAN has its lease, no route leads back to the server (NET-2
-	// Fails safe, #4078). Only an answer addressed to the enforcer itself
-	// passes; one to be forwarded is checked like any other packet.
+	// Fails safe, #4078). Only an answer addressed to the enforcer itself,
+	// from a source no interface routes, passes: once leased the server is
+	// routed out of the WAN and passes the check below, and a source another
+	// interface routes (the core, a person's network, a device) is the
+	// internet posing as a segment and is dropped (#4764). An answer to be
+	// forwarded is checked like any other packet.
 	w.open("chain rpf")
 	w.line("type filter hook prerouting priority raw; policy accept;")
 	w.line(`iif "lo" accept`)
 	w.line("ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept")
 	w.line("ip6 saddr :: meta l4proto ipv6-icmp accept")
-	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } accept")
-	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local accept")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing accept")
+	w.line("iifname " + q(l.WAN) + " meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing accept")
 	w.line("fib saddr . iif oif missing counter name " + q(Spoofed) + " drop")
 	w.close()
 

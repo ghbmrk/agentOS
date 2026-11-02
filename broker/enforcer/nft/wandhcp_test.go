@@ -275,10 +275,13 @@ func TestWANLeases(t *testing.T) {
 }
 
 // TestDHCPAnswersOnlyToTheEnforcer (#4078, A18 Segments): the reverse-path
-// exemption for DHCP and DHCPv6 answers holds only on the WAN and only for
-// a packet addressed to the enforcer itself: one from the internet to a
-// device, and one from a device to the enforcer, with a source address
-// routed out of another interface, are still dropped as spoofed. Catches
+// exemption for DHCP and DHCPv6 answers holds only on the WAN, only for a
+// packet addressed to the enforcer itself, and only from a source no
+// interface routes: one from the internet to the enforcer's WAN address in
+// the core's, the Owner network's or a device's name (#4764), one from the
+// internet to a device, and one from a device to the enforcer, each with a
+// source address routed out of another interface, are still dropped as
+// spoofed. Catches
 // an exemption that lets the internet pose as a segment, or a segment as
 // another, on the DHCP client ports.
 func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
@@ -317,15 +320,21 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 		})
 	}
 	before := h.counter(Spoofed)
+	// From the internet, in the core's, the Owner network's and a
+	// device's names, to the enforcer's own WAN address (#4764).
+	for _, src := range []string{"10.50.0.2", "10.10.0.2", devAddr(104)} {
+		spoof(h.hosts["isp"], "udp4", src, enfWAN, 67, 68)
+	}
 	// From the internet, in a device's name, to another device.
 	spoof(h.hosts["isp"], "udp4", devAddr(102), devAddr(101), 67, 68)
 	// From a device, in another's name, to the enforcer's address on its own VLAN.
 	spoof(h.hosts["101"], "udp4", devAddr(103), "10.101.0.1", 67, 68)
-	want := 6
+	want := 15
 	if h.v6 {
+		spoof(h.hosts["isp"], "udp6", devAddr6(104), "2001:db8:1::2", 547, 546)
 		spoof(h.hosts["isp"], "udp6", devAddr6(102), devAddr6(101), 547, 546)
 		spoof(h.hosts["101"], "udp6", devAddr6(103), "fd00:101::1", 547, 546)
-		want = 12
+		want = 24
 	}
 	time.Sleep(100 * time.Millisecond)
 	if n := h.counter(Spoofed) - before; n != want {

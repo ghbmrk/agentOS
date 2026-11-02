@@ -434,8 +434,8 @@ table inet enforcer {
 		iif "lo" accept
 		ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
 		ip6 saddr :: meta l4proto ipv6-icmp accept
-		iifname "wan0" meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } accept
-		iifname "wan0" meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local accept
+		iifname "wan0" meta nfproto ipv4 udp sport 67 udp dport 68 fib daddr . iif type { local, broadcast } fib saddr oif missing accept
+		iifname "wan0" meta nfproto ipv6 udp sport 547 udp dport 546 fib daddr . iif type local fib saddr oif missing accept
 		fib saddr . iif oif missing counter name "spoofed" drop
 	}
 	chain input {
