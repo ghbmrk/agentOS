@@ -64,6 +64,8 @@ type viewReport struct {
 	Late       bool              // the host's mount after the start is a mount here
 	Caps       [3]uint32         // effective, permitted, inheritable (low words)
 	Ambient    int               // PR_CAP_AMBIENT_IS_SET for CAP_SYS_ADMIN
+	Core       [2]uint64         // RLIMIT_CORE, soft and hard
+	CoreRaise  int               // raising RLIMIT_CORE to 1, 1
 }
 
 // viewProbe is a stack an exploit has taken: it dials the bus and another
@@ -164,6 +166,12 @@ func viewProbe(variant, dir string) int {
 	r.Caps = [3]uint32{data[0], data[1], data[2]}
 	set, _, _ := syscall.RawSyscall6(syscall.SYS_PRCTL, 47 /* PR_CAP_AMBIENT */, 1 /* PR_CAP_AMBIENT_IS_SET */, capSysAdmin, 0, 0, 0)
 	r.Ambient = int(set)
+	var core syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &core); err != nil {
+		core = syscall.Rlimit{Cur: 1 << 63, Max: 1 << 63}
+	}
+	r.Core = [2]uint64{core.Cur, core.Max}
+	r.CoreRaise = errno(syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 1, Max: 1}))
 	b, _ := json.Marshal(r)
 	if _, err := iface.Write(b); err != nil {
 		return 1

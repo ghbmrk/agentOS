@@ -142,14 +142,23 @@ func TestReplacedStackGoneBeforeNewLink(t *testing.T) {
 				t.Fatalf("a send while the replaced process was alive: %v, want ErrNoStack", err)
 			}
 			close(old.reap)
-			if err := <-attached; err != nil {
-				t.Fatal(err)
+			select {
+			case err := <-attached:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Attach never returned once the replaced process was reaped")
 			}
 			if _, err := h.Call(Request{Op: OpWrite, Device: "door", Char: "cmd", Data: []byte("relock")}); err != nil {
 				t.Fatalf("the relock: %v", err)
 			}
 			close(apply)
-			<-oldDone
+			select {
+			case <-oldDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the old stack's late act never finished")
+			}
 			dev.mu.Lock()
 			defer dev.mu.Unlock()
 			if !slices.Equal(dev.acts, []string{"relock"}) {
@@ -178,7 +187,11 @@ func TestStuckStackHoldsOnlyItsOwnAttach(t *testing.T) {
 	nhost, nstack := net.Pipe()
 	defer nstack.Close()
 	go h.Attach(StackBLE, exited{}, nhost)
-	<-stuck.stopped
+	select {
+	case <-stuck.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the replacing Attach never killed the replaced process")
+	}
 	thost, tstack := net.Pipe()
 	defer tstack.Close()
 	attached := make(chan error, 1)
@@ -324,8 +337,12 @@ func TestReplacedStackReapedWithItsChildren(t *testing.T) {
 
 // TestWaitAndStopReapOnce (ENF-k-11): the launcher's own Wait and the
 // host's Stop run together on one confined stack, and each returns only
-// once the stack has been reaped. Catches a second exec.Cmd.Wait that
-// returns at once ("Wait was already called") while the stack lives.
+// once the stack has been reaped, with its exit: killed. Two Waits block
+// in the reap before Stop's kill, so a Proc that does not reap once makes
+// a second exec.Cmd.Wait every round, and that call never returns the
+// exit: it returns "Wait was already called" or the reap's ECHILD, or
+// blocks for the I/O result its twin took. Catches each of those every
+// run (#4520).
 func TestWaitAndStopReapOnce(t *testing.T) {
 	if !asRoot(t) {
 		return
@@ -338,6 +355,21 @@ func TestWaitAndStopReapOnce(t *testing.T) {
 	os.Chmod(dir, 0o755)
 	bin := filepath.Join(dir, "radio.test")
 	copyFile(t, os.Args[0], bin)
+	// killed checks that err is the stack's exit, by SIGKILL, and that the
+	// stack had been reaped when its call returned.
+	killed := func(who string, err, alive error) {
+		t.Helper()
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Errorf("%s returned %v, want the stack's exit", who, err)
+		} else if ws, ok := exit.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+			t.Errorf("%s returned %v, want killed", who, err)
+		}
+		if alive != syscall.ESRCH {
+			t.Errorf("after %s: kill 0 = %v, want ESRCH (reaped)", who, alive)
+		}
+	}
+	type result struct{ err, alive error }
 	for range 20 {
 		proc, conn, err := confine.Start(confine.Spec{Profile: bleProbe(4242), Self: bin, Path: bin,
 			Args: []string{sleepArg}, Stderr: io.Discard})
@@ -346,29 +378,31 @@ func TestWaitAndStopReapOnce(t *testing.T) {
 		}
 		conn.Close()
 		pid := proc.Pid()
-		waited := make(chan error, 1)
-		go func() {
-			proc.Wait()
-			waited <- syscall.Kill(pid, 0)
-		}()
-		time.Sleep(50 * time.Millisecond) // Wait is blocked in the reap
-		stopped := make(chan struct{})
-		go func() { proc.Stop(); close(stopped) }()
-		select {
-		case <-stopped:
-		case <-time.After(20 * time.Second):
-			t.Fatal("Stop never returned beside a Wait")
+		call := func(f func() error) <-chan result {
+			c := make(chan result, 1)
+			go func() {
+				err := f()
+				c <- result{err, syscall.Kill(pid, 0)}
+			}()
+			return c
 		}
-		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
-			t.Errorf("after Stop beside a Wait: kill 0 = %v, want ESRCH (reaped)", err)
-		}
+		waits := []<-chan result{call(proc.Wait), call(proc.Wait)}
+		time.Sleep(50 * time.Millisecond) // both Waits are blocked in the reap
 		select {
-		case err := <-waited:
-			if err != syscall.ESRCH {
-				t.Errorf("after Wait beside a Stop: kill 0 = %v, want ESRCH (reaped)", err)
+		case r := <-waits[0]:
+			t.Fatalf("Wait returned before the kill: %v", r.err)
+		case r := <-waits[1]:
+			t.Fatalf("Wait returned before the kill: %v", r.err)
+		default:
+		}
+		for i, c := range append([]<-chan result{call(proc.Stop)}, waits...) {
+			who := map[bool]string{true: "Stop", false: "Wait beside a Stop"}[i == 0]
+			select {
+			case r := <-c:
+				killed(who, r.err, r.alive)
+			case <-time.After(20 * time.Second):
+				t.Fatalf("%s never returned", who)
 			}
-		case <-time.After(20 * time.Second):
-			t.Fatal("Wait never returned after Stop")
 		}
 	}
 }

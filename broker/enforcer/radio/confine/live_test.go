@@ -28,6 +28,9 @@ const liveUID = 4249
 
 func TestMain(m *testing.M) {
 	Trampoline()
+	if len(os.Args) == 2 && os.Args[1] == exitArg {
+		os.Exit(0)
+	}
 	if len(os.Args) == 4 && os.Args[1] == viewArg {
 		os.Exit(viewProbe(os.Args[2], os.Args[3]))
 	}
