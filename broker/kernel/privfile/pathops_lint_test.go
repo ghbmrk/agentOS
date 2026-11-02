@@ -57,7 +57,9 @@ package privfile
 // rootOwned means in rootTrees, so a root unit's WorkingDirectory=
 // /var/lib/agentos is refused. A packaged unit's service or socket drop-in
 // is read alone, as a unit that runs as root and whose user owns its
-// directories (#4677).
+// directories (#4677); a unit is read per root file system its build files
+// (mkosi.conf, a buildroot overlay list) install it in, with only the
+// drop-ins that file system installs (#4698).
 
 import (
 	"fmt"
@@ -635,6 +637,7 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 		"a packaged import":           {"image/mkosi/systemd-sysctl.service.d/z.conf", "[Service]\nImportCredential=sysctl.*\n", `ImportCredential= searches`},
 		"a BPF program":               {unit, "[Service]\nExecStart=/bin/true\nBPFProgram=egress:/tmp/p\n", `path "/tmp/p"`},
 		"an ingress filter":           {unit, "[Service]\nExecStart=/bin/true\nIPIngressFilterPath=/tmp/f\n", `path "/tmp/f"`},
+		"an ingress filter w/ blank":  {unit, "[Service]\nExecStart=/bin/true\nIPIngressFilterPath=/usr /etc\n", `path "/usr /etc"`},
 		"an egress filter":            {unit, "[Service]\nExecStart=/bin/true\nIPEgressFilterPath=/usr:/tmp\n", `path "/usr:/tmp"`},
 		"a network namespace":         {unit, "[Service]\nExecStart=/bin/true\nNetworkNamespacePath=/run/x/net\n", `path "/run/x/net"`},
 		"an IPC namespace":            {unit, "[Service]\nExecStart=/bin/true\nIPCNamespacePath=/tmp/ipc\n", `path "/tmp/ipc"`},
@@ -697,25 +700,87 @@ func TestRootSideUnitPathsAndGrants(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// #4698 Security 2: a unit of that name in another image does not own
-	// the drop-in, which is still read alone.
-	t.Run("refuses a drop-in only another image's unit names", func(t *testing.T) {
-		files := clone(files)
-		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
-		files["image/camnode/overlay/etc/systemd/system/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`) {
-			t.Fatalf("got %v, want a refusal", err)
+	// #4698 Security 2 and delta 1: a unit owns a drop-in only if every root
+	// file system that installs the drop-in installs it, in a system unit
+	// directory; and a drop-in joins only the units its root file system
+	// installs.
+	const (
+		mk   = "image/mkosi/mkosi.extra/usr/lib/systemd/system/"
+		cam  = "image/camnode/external/board/"
+		ovl  = "/overlay/etc/systemd/system/"
+		pre  = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
+		nobo = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
+	)
+	builds := map[string]string{
+		"image/mkosi/mkosi.conf":                     "[Output]\nFormat=disk\nInitrdInclude=initrd/\n",
+		"image/mkosi/initrd/mkosi.conf":              "[Output]\nFormat=cpio\n",
+		"image/camnode/external/configs/cm4.config":  "BR2_ROOTFS_OVERLAY=\"$(BR2_EXTERNAL_CAMNODE_PATH)/board/common/overlay $(BR2_EXTERNAL_CAMNODE_PATH)/board/cm4/overlay\"\n",
+		"image/camnode/external/configs/qemu.config": "BR2_ROOTFS_OVERLAY=\"$(BR2_EXTERNAL_CAMNODE_PATH)/board/common/overlay $(BR2_EXTERNAL_CAMNODE_PATH)/board/qemu/overlay\"\n",
+	}
+	for name, c := range map[string]struct {
+		dropin, unit string
+		ok           bool
+	}{
+		"a cm4 drop-in a qemu unit names":               {cam + "cm4" + ovl + "systemd-udevd.service.d/z.conf", cam + "qemu" + ovl + "systemd-udevd.service", false},
+		"a common drop-in a cm4 unit names":             {cam + "common" + ovl + "systemd-udevd.service.d/z.conf", cam + "cm4" + ovl + "systemd-udevd.service", false},
+		"a common drop-in a qemu unit names":            {cam + "common" + ovl + "systemd-udevd.service.d/z.conf", cam + "qemu" + ovl + "systemd-udevd.service", false},
+		"a system drop-in a user unit names":            {mk + "systemd-udevd.service.d/z.conf", "image/mkosi/mkosi.extra/usr/lib/systemd/user/systemd-udevd.service", false},
+		"a drop-in a package manager tree's unit names": {mk + "systemd-udevd.service.d/z.conf", "image/mkosi/mkosi.pkgmngr/etc/systemd/system/systemd-udevd.service", false},
+		"a drop-in an initrd unit names":                {mk + "systemd-udevd.service.d/z.conf", "image/mkosi/initrd/mkosi.extra/usr/lib/systemd/system/systemd-udevd.service", false},
+		"a drop-in a test tree's unit names":            {mk + "systemd-udevd.service.d/z.conf", "image/e2e/systemd-udevd.service", false},
+		"a mkosi drop-in a camnode unit names":          {mk + "systemd-udevd.service.d/z.conf", cam + "common" + ovl + "systemd-udevd.service", false},
+		"a cm4 drop-in the common unit owns":            {cam + "cm4" + ovl + "systemd-udevd.service.d/z.conf", cam + "common" + ovl + "systemd-udevd.service", true},
+		"a common drop-in the common unit owns":         {cam + "common" + ovl + "systemd-udevd.service.d/z.conf", cam + "common" + ovl + "systemd-udevd.service", true},
+		"a drop-in its own image's system unit owns":    {mk + "systemd-udevd.service.d/z.conf", "image/mkosi/mkosi.extra/etc/systemd/system/systemd-udevd.service", true},
+		"a qemu drop-in a qemu unit owns":               {cam + "qemu" + ovl + "systemd-udevd.service.d/z.conf", cam + "qemu" + ovl + "systemd-udevd.service", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			files := clone(files)
+			for k, v := range builds {
+				files[k] = v
+			}
+			files[c.dropin], files[c.unit] = pre, nobo
+			_, err := rootBinaries(fakeRepo(t, files))
+			if c.ok && err != nil || !c.ok && (err == nil || !strings.Contains(err.Error(), `variable "LD_PRELOAD"`)) {
+				t.Fatalf("got %v, want accepted %v", err, c.ok)
+			}
+		})
+	}
+	// A drop-in another root file system ships does not set a root unit's
+	// User=: the unit's root command still counts.
+	t.Run("a User= drop-in from another root file system", func(t *testing.T) {
+		files := map[string]string{"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n"}
+		for k, v := range builds {
+			files[k] = v
 		}
-		// A drop-in in another image that its own image's user unit owns.
-		files["image/camnode/overlay/etc/systemd/system/agentos-cam.service"] = "[Service]\nUser=cam\nExecStart=/bin/true\n"
-		files["image/camnode/board/etc/systemd/system/agentos-cam.service.d/z.conf"] = "[Service]\nWorkingDirectory=/tmp\n"
-		files["image/mkosi/systemd-udevd.service.d/z.conf"] = "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"
-		// Its own image's unit of that name owns it.
-		files["image/mkosi/x/systemd-udevd.service"] = "[Service]\nUser=nobody\nExecStart=/bin/true\n"
-		if _, err := rootBinaries(fakeRepo(t, files)); err != nil {
-			t.Fatalf("a drop-in its own image's user unit owns: %v", err)
+		files[mk+"agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/agentos-side\n"
+		files[cam+"common"+ovl+"agentos-side.service.d/user.conf"] = "[Service]\nUser=agentos-side\n"
+		if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 1 || bins[0] != "./cmd/agentos-side" {
+			t.Fatalf("got %q, %v, want [./cmd/agentos-side]", bins, err)
+		}
+		files[mk+"agentos-side.service.d/user.conf"] = "[Service]\nUser=agentos-side\n"
+		if bins, err := rootBinaries(fakeRepo(t, files)); err != nil || len(bins) != 0 {
+			t.Fatalf("its own drop-in: got %q, %v, want none", bins, err)
 		}
 	})
+	for name, c := range map[string]struct{ path, text, want string }{
+		"extra trees":              {"image/mkosi/mkosi.conf", "[Content]\nExtraTrees=x\n", `ExtraTrees= adds trees`},
+		"an included config":       {"image/mkosi/mkosi.conf", "[Include]\nInclude=x\n", `Include= adds trees`},
+		"an unread overlay":        {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"$(TOPDIR)/x\"\n", `overlay "$(TOPDIR)/x"`},
+		"a variable in an overlay": {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"$(BR2_EXTERNAL_CAMNODE_PATH)/$(X)\"\n", `/$(X)"; want`},
+		"a relative overlay":       {"image/camnode/external/configs/cm4.config", "BR2_ROOTFS_OVERLAY=\"board/x\"\n", `overlay "board/x"`},
+	} {
+		t.Run("refuses a build file with "+name, func(t *testing.T) {
+			files := clone(files)
+			for k, v := range builds {
+				files[k] = v
+			}
+			files[c.path] = c.text
+			if _, err := rootBinaries(fakeRepo(t, files)); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("got %v, want a refusal with %q", err, c.want)
+			}
+		})
+	}
 	t.Run("refuses a type-wide drop-in with no unit under image/", func(t *testing.T) {
 		files := map[string]string{
 			"broker/cmd/agentos-side/main.go": "package main\n\nfunc main() {}\n",
@@ -1938,7 +2003,7 @@ var nameToken = regexp.MustCompile(`[A-Za-z0-9_./@+-]+`)
 func rootBinaries(root string) ([]string, error) {
 	units := map[string]string{}     // unit file path -> name
 	dropins := map[string][]string{} // drop-in directory name -> its .conf paths
-	var fstabs []string
+	var fstabs, builds []string      // fstab files; mkosi.conf and buildroot config files
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
 		switch {
@@ -1946,6 +2011,8 @@ func rootBinaries(root string) ([]string, error) {
 			return err
 		case d.IsDir():
 			return nil
+		case d.Name() == "mkosi.conf" || dir == "configs" && strings.HasSuffix(p, ".config"):
+			builds = append(builds, p)
 		case unitTypes[filepath.Ext(p)]:
 			units[p] = d.Name()
 		case strings.HasSuffix(p, ".conf") && isDropinDir(dir):
@@ -1993,33 +2060,42 @@ func rootBinaries(root string) ([]string, error) {
 			return nil, err
 		}
 	}
-	// A unit is read with every drop-in systemd reads for it. A service or
-	// socket drop-in directory may also reach a unit a package ships (a
-	// packaged unit's own x.service.d, a type-wide service.d, a prefix's
-	// agentos-.service.d), whose User= the lint does not see, so each of its
-	// files is also read alone as a unit that runs as root and whose user
-	// owns its directories (#4677 Security R-1). Only an image/ unit's own
-	// name.d in the same image (image/<image>/...), which no packaged unit of
-	// that name reads there, is not: image/ holds more than one image, and a
-	// unit in one does not reach another's drop-ins (#4698 Security 2).
+	// A unit is read, once for each root file system it is installed in
+	// (rootFileSystems), with every drop-in systemd reads for it there. A
+	// service or socket drop-in directory may also reach a unit a package
+	// ships (a packaged unit's own x.service.d, a type-wide service.d, a
+	// prefix's agentos-.service.d), whose User= the lint does not see, so
+	// each of its files is also read alone as a unit that runs as root and
+	// whose user owns its directories (#4677 Security R-1). Only a drop-in in
+	// a unit's own name.d is not, and only when every root file system that
+	// installs the drop-in installs that unit in a system unit directory
+	// (#4698 Security 2 and delta 1).
+	fss, err := rootFileSystems(root, builds)
+	if err != nil {
+		return nil, err
+	}
 	type unitRead struct {
 		name     string
 		paths    []string
 		packaged bool
 	}
 	var reads []unitRead
-	own := map[string]bool{} // image + "/" + a unit's name.d
-	imageOf := func(p string) string {
-		rel, _ := filepath.Rel(filepath.Join(root, "image"), p)
-		return strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
-	}
+	own := map[string]bool{} // root file system + NUL + a unit's name.d
 	for p, name := range units {
-		own[imageOf(p)+"/"+name+".d"] = true
-		paths := []string{p}
-		for _, dir := range dropinDirs(name) {
-			paths = append(paths, dropins[dir]...)
+		for _, fs := range fss.of(p) {
+			if fs == "" || systemUnitDir(filepath.Dir(p)) {
+				own[fs+"\x00"+name+".d"] = true
+			}
+			paths := []string{p}
+			for _, dir := range dropinDirs(name) {
+				for _, f := range dropins[dir] {
+					if fss.has(f, fs) {
+						paths = append(paths, f)
+					}
+				}
+			}
+			reads = append(reads, unitRead{name, paths, false})
 		}
-		reads = append(reads, unitRead{name, paths, false})
 	}
 	for dir, confs := range dropins {
 		name := strings.TrimSuffix(dir, ".d")
@@ -2030,7 +2106,11 @@ func rootBinaries(root string) ([]string, error) {
 			continue
 		}
 		for _, f := range confs {
-			if !own[imageOf(f)+"/"+dir] {
+			owned := true
+			for _, fs := range fss.of(f) {
+				owned = owned && own[fs+"\x00"+dir]
+			}
+			if !owned {
 				reads = append(reads, unitRead{name, []string{f}, true})
 			}
 		}
@@ -2924,6 +3004,100 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 		return err
 	})
 	return progs, err
+}
+
+// rootFS is each root file system image/ builds, by name, and the source
+// trees laid over one another to make it.
+type rootFS map[string][]string
+
+// of returns the root file systems a file under image/ is installed in: each
+// one with a tree that holds it, or only "", a file no build installs, read
+// on its own (a test unit, a tree a script copies).
+func (r rootFS) of(p string) []string {
+	var out []string
+	for name, trees := range r {
+		for _, t := range trees {
+			if strings.HasPrefix(p, t+string(filepath.Separator)) {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	if len(out) == 0 {
+		return []string{""}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// has reports whether the file p is installed in the root file system fs.
+func (r rootFS) has(p, fs string) bool {
+	for _, f := range r.of(p) {
+		if f == fs {
+			return true
+		}
+	}
+	return false
+}
+
+// systemUnitDir reports whether dir is one the system manager reads units
+// from; a user manager's (usr/lib/systemd/user) is not.
+func systemUnitDir(dir string) bool {
+	d := filepath.ToSlash(dir)
+	for _, s := range []string{"/etc/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system", "/run/systemd/system"} {
+		if strings.HasSuffix(d, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// brOverlay is a buildroot defconfig's list of root file system overlays.
+var brOverlay = regexp.MustCompile(`(?m)^BR2_ROOTFS_OVERLAY="([^"]*)"`)
+
+// brExternal is the one variable an overlay path may name: the external
+// tree, the configs directory's parent.
+var brExternal = regexp.MustCompile(`\$\(BR2_EXTERNAL_[A-Z0-9_]+_PATH\)`)
+
+// rootFileSystems returns the root file systems image/ builds, read from
+// their build files rather than from paths (#4698 Security delta 1): each
+// directory with a mkosi.conf is an image of its mkosi.extra (its initrd/
+// is one of its own), and each buildroot defconfig is an image of the
+// overlays its BR2_ROOTFS_OVERLAY lays over one another (camnode's common
+// overlay is in every board's, a board's only in its own). A build setting
+// that adds trees the lint does not read is refused.
+func rootFileSystems(root string, builds []string) (rootFS, error) {
+	out := rootFS{}
+	for _, f := range builds {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		rel, _ := filepath.Rel(root, f)
+		rel = filepath.ToSlash(rel)
+		if filepath.Base(f) == "mkosi.conf" {
+			for _, k := range []string{"ExtraTrees", "SkeletonTrees", "PackageManagerTrees", "Include"} {
+				if regexp.MustCompile(`(?m)^\s*` + k + `\s*=`).Match(b) {
+					return nil, fmt.Errorf("%s: %s= adds trees to the image that the lint does not read; a unit there is not paired with its drop-ins", rel, k)
+				}
+			}
+			out[rel] = []string{filepath.Join(filepath.Dir(f), "mkosi.extra")}
+			continue
+		}
+		m := brOverlay.FindSubmatch(b)
+		if m == nil {
+			continue
+		}
+		ext := filepath.Dir(filepath.Dir(f))
+		for _, w := range strings.Fields(string(m[1])) {
+			w = brExternal.ReplaceAllString(w, ext)
+			if strings.ContainsAny(w, "$`") || !filepath.IsAbs(w) || dotdot(filepath.ToSlash(w)) {
+				return nil, fmt.Errorf("%s: overlay %q; want $(BR2_EXTERNAL_..._PATH)/ and a plain path", rel, w)
+			}
+			out[rel] = append(out[rel], filepath.Clean(w))
+		}
+	}
+	return out, nil
 }
 
 // dropinDirs are the drop-in directories systemd reads for a unit:
