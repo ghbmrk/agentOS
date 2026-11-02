@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -558,7 +559,8 @@ class Verify(unittest.TestCase):
     @staticmethod
     def result(status, line=2, file_name="a.go"):
         return {"files": [{"file_name": file_name, "mutations": [
-            {"type": "ARITHMETIC_BASE", "status": status, "line": line}]}], "mutants_lived": int(status == "LIVED")}
+            {"type": "ARITHMETIC_BASE", "status": status, "line": line}]}], "mutants_lived": int(status == "LIVED"),
+            "statement_deletions": 0}
 
     def test_killed_passes(self):
         r = self.verify({"netguard.json": self.result("KILLED")})
@@ -631,6 +633,11 @@ class Verify(unittest.TestCase):
             (self.result("LIVED", line=1, file_name="netguard/a.go"), "not files in broker/netguard/"),
             (self.result("LIVED", line=1, file_name="gone.go"), "not files in broker/netguard/"),
             (self.result("SKIPPED"), "gremlins skipped mutants on lines this diff adds"),
+            # #4573: gremlins' JSON without `delete`'s pass, or a count that is not its mutants'.
+            ({k: v for k, v in self.result("KILLED").items() if k != "statement_deletions"},
+             "holds no statement-deletion pass"),
+            ({**self.result("KILLED"), "statement_deletions": 1}, "holds no statement-deletion pass"),
+            ({**self.result("KILLED"), "statement_deletions": "0"}, "holds no statement-deletion pass"),
         ):
             with self.subTest(want):
                 r = self.verify({"netguard.json": data})
@@ -640,6 +647,188 @@ class Verify(unittest.TestCase):
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, req=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+GO_MOD = "module example.invalid/broker\n\ngo 1.22\n"
+# hint.go before the PR: one function the tests call.
+BASE_SRC = """package hint
+
+func Keep(n int) int {
+	return n
+}
+"""
+# The PR adds a reset the tests check, a guard they do not, a function they never call, and a
+# statement whose deletion does not compile. Keep's `return n` is the base's line, so not a site.
+PR_SRC = """package hint
+
+var count int
+
+func Keep(n int) int {
+	count = n
+	if n < 0 {
+		n = 0
+	}
+	return n
+}
+
+func Never() {
+	count = 0
+}
+
+func Last() int {
+	return count
+}
+"""
+TEST_SRC = """package hint
+
+import "testing"
+
+// REQ: CRED-1
+func TestKeep(t *testing.T) {
+	if Keep(3) != 3 || count != 3 || Last() != 3 {
+		t.Fatal("keep")
+	}
+}
+"""
+
+
+class Deletion(unittest.TestCase):
+    # MUTGATE-stmt-delete (#4573): gremlins v0.6.0 has no mutator that deletes a statement, so
+    # `delete` deletes each statement starting on an added line alone and reports it as a mutant.
+    def lister(self, d):
+        out = pathlib.Path(d) / "stmts"
+        subprocess.run(["go", "build", "-o", str(out), str(mutgate.STMTS)], cwd=d, check=True,
+                       env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+        return out
+
+    def test_lister_lists_statements_not_declarations(self):
+        src = ("package p\n\nfunc f(c chan int) (n int) {\n\tvar a int\n\tb := 1\n\ta = b\n\tn++\n"
+               "\tif a > 0 {\n\t\treturn\n\t}\n\tswitch {\n\tcase a > 1:\n\t\tg()\n\t}\n\tc <- n; ;\n"
+               "\treturn n\n}\n\nfunc g() {}\n")
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "p.go").write_text(src)
+            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, check=True)
+            sites = json.loads(r.stdout)
+        got = sorted((s["line"], src.encode()[s["start"]:s["end"]].decode()) for s in sites)
+        self.assertEqual(got, [(6, "a = b"), (7, "n++"), (8, "if a > 0 {\n\t\treturn\n\t}"), (9, "return"),
+                               (11, "switch {\n\tcase a > 1:\n\t\tg()\n\t}"), (12, "case a > 1:\n\t\tg()"), (13, "g()"), (15, "c <- n"),
+                               (16, "return n")])
+        self.assertTrue(all(s["file"] == "p.go" and s["col"] >= 2 for s in sites))
+
+    def test_deleted_keeps_every_other_line_where_it_was(self):
+        src = b"a\n\tif x {\n\t\ty()\n\t}\nz\n"
+        start = src.index(b"if")
+        site = {"start": start, "end": src.index(b"}") + 1}
+        self.assertEqual(mutgate.deleted(src, site), b"a\n\t\n\n\nz\n")
+
+    def test_coverage_counts_only_blocks_that_ran(self):
+        prof = ("mode: set\nexample.invalid/broker/hint/hint.go:5.24,7.11 2 1\n"
+                "example.invalid/broker/hint/hint.go:13.14,15.2 1 0\n")
+        blocks = mutgate.covered_blocks(prof)
+        self.assertTrue(mutgate.is_covered(blocks, {"file": "hint.go", "line": 6, "col": 2}))
+        self.assertTrue(mutgate.is_covered(blocks, {"file": "hint.go", "line": 5, "col": 24}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "hint.go", "line": 7, "col": 11}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "hint.go", "line": 14, "col": 2}))
+        self.assertFalse(mutgate.is_covered(blocks, {"file": "other.go", "line": 6, "col": 2}))
+
+    def test_a_test_run_past_its_timeout_is_timed_out_and_its_children_killed(self):
+        with tempfile.TemporaryDirectory() as d:
+            stub = pathlib.Path(d) / "t.test"
+            pid = pathlib.Path(d) / "pid"
+            stub.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid}\nwait\n")
+            stub.chmod(0o755)
+            self.assertEqual(mutgate.run_tests(stub, d, 1), "TIMED OUT")
+            # The test binary's own child is gone too (dead, or a zombie awaiting its reaper).
+            state = pathlib.Path(f"/proc/{int(pid.read_text())}/stat")
+            for _ in range(50):
+                if not state.exists() or state.read_text().split(")")[-1].split()[0] in "ZX":
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail("the timed-out test's child still runs")
+            (stub).write_text("#!/bin/sh\nexit 0\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 5), "LIVED")
+            (stub).write_text("#!/bin/sh\nexit 1\n")
+            self.assertEqual(mutgate.run_tests(stub, d, 5), "KILLED")
+
+    def repo(self, d):
+        git = lambda *a: subprocess.run(["git", "-C", d, *a], check=True, capture_output=True, text=True)
+        shutil.copytree(ROOT / "tools", pathlib.Path(d) / "tools")
+        shutil.copytree(ROOT / "broker" / "core", pathlib.Path(d) / "broker" / "core")
+        (pathlib.Path(d) / "broker" / "go.mod").write_text(GO_MOD)
+        pkg = pathlib.Path(d) / "broker" / "hint"
+        pkg.mkdir()
+        (pkg / "hint.go").write_text(BASE_SRC)
+        git("init", "-q")
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
+        (pkg / "hint.go").write_text(PR_SRC)
+        (pkg / "hint_test.go").write_text(TEST_SRC)
+        git("add", "-A")
+        git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
+        return pkg
+
+    def mutgate(self, d, *args):
+        return subprocess.run([sys.executable, "-I", str(pathlib.Path(d) / "tools" / "mutgate.py"), *args],
+                              capture_output=True, text=True, env={**os.environ, "GOFLAGS": "", "GOWORK": "off"})
+
+    def test_delete_adds_a_verdict_for_each_statement_on_an_added_line_and_verify_gates_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            before = (pkg / "hint.go").read_text()
+            out = pathlib.Path(d) / "res" / "mutants-0"
+            out.mkdir(parents=True)
+            # gremlins' result (here one killed operator mutant) is what `delete` adds to.
+            (out / "hint.json").write_text(json.dumps({"files": [{"file_name": "hint.go", "mutations": [
+                {"type": "CONDITIONALS_BOUNDARY", "status": "KILLED", "line": 7}]}], "mutants_lived": 0}))
+            # Without `delete`, verify refuses gremlins' result alone.
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+            self.assertIn("holds no statement-deletion pass", r.stderr)
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((pkg / "hint.go").read_text(), before)  # the overlay left the tree as it was
+            data = json.loads((out / "hint.json").read_text())
+            got = sorted((m["line"], m["type"], m["status"]) for m in data["files"][0]["mutations"])
+            self.assertEqual(got, [
+                (6, mutgate.DELETION, "KILLED"),       # count = n: the test reads count
+                (7, "CONDITIONALS_BOUNDARY", "KILLED"),
+                (7, mutgate.DELETION, "LIVED"),        # the n < 0 guard: no test gives a negative n
+                (8, mutgate.DELETION, "NOT COVERED"),  # n = 0 never runs
+                (14, mutgate.DELETION, "NOT COVERED"),  # Never is never called
+                (18, mutgate.DELETION, "NOT VIABLE"),  # Last's return
+            ])
+            self.assertEqual((data["statement_deletions"], data["mutants_lived"], data["mutants_total"]), (5, 1, 5))
+            # A second pass on the same result is refused, not counted twice.
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("not one gremlins result without deletions", r.stderr)
+            # The gate reads a deletion mutant as it reads gremlins' own.
+            r = self.mutgate(d, "verify", str(out.parent), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("broker/hint/hint.go:7 STATEMENT_DELETION survives", r.stdout)
+
+    def test_delete_needs_gremlins_result_and_passing_tests(self):
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            out = pathlib.Path(d) / "out"
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("no gremlins result for hint", r.stderr)
+            out.mkdir()
+            (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0}))
+            (pkg / "hint_test.go").write_text(TEST_SRC.replace('t.Fatal("keep")', "").replace("{\n\t\t\n\t}", "{\n\t}")
+                                              + "func TestFails(t *testing.T) { t.Fatal(1) }\n")
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+            self.assertIn("tests fail before any statement is deleted", r.stderr)
+            # A package with no tests covers nothing: each site is NOT COVERED, as gremlins reads it.
+            (pkg / "hint_test.go").unlink()
+            (pkg / "doc.go").write_text("package hint\n\n// REQ: CRED-1\n")
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            data = json.loads((out / "hint.json").read_text())
+            self.assertEqual({m["status"] for m in data["files"][0]["mutations"]}, {"NOT COVERED"})
+            self.assertEqual(data["statement_deletions"], 5)
 
 
 def job(text, name):
@@ -674,6 +863,9 @@ class Workflow(unittest.TestCase):
         self.assertIn("pkg: ${{ fromJSON(needs.claimed.outputs.packages) }}", mutants)
         self.assertIn("PKG: ${{ matrix.pkg }}", mutants)
         self.assertIn('python3 -I tools/mutgate.py run "$PKG" --out mutants --git "$BASE"', mutants)
+        # #4573: the deletion pass adds to the same result, after gremlins wrote it.
+        self.assertIn('python3 -I tools/mutgate.py delete "$PKG" --out mutants --git "$BASE"', mutants)
+        self.assertLess(mutants.index("mutgate.py run"), mutants.index("mutgate.py delete"))
         self.assertNotIn("mutgate.py gate", self.text)  # the gate is `verify`, in the job no PR code reaches
         self.assertNotIn("${{ matrix.pkg }}\"", mutants)  # never interpolated into a script
         self.assertIn("gremlins@v0.6.0", mutants)
@@ -704,7 +896,8 @@ class Workflow(unittest.TestCase):
         # so that job ends in an upload and decides nothing.
         mutants = job(self.text, "mutants")
         steps = mutants.split("\n      - ")
-        self.assertIn("Gremlins on the package", steps[-3])
+        self.assertIn("Gremlins on the package", steps[-4])
+        self.assertIn("Statement deletions on the package", steps[-3])
         self.assertTrue(steps[-1].startswith("uses: actions/upload-artifact@"), steps[-1])
         self.assertIn("name: mutants-${{ strategy.job-index }}", steps[-1])
         self.assertIn("path: mutants/", steps[-1])
