@@ -236,6 +236,19 @@ class UsrListTest(unittest.TestCase):
         # The mtime of bin, changed by the new file, is named too: a timestamp is a cause to fix.
         self.assertTrue(any(ln.startswith("bin: mtime_ns ") for ln in lines), lines)
 
+    def test_diff_prints_content_differences_first(self):
+        # #4471: past the line limit, many time-only differences must not push the one content
+        # difference out of the log.
+        a = {"d%03d" % i: {"type": "d", "mtime_ns": 1, "digest": ""} for i in range(300)}
+        b = {k: dict(v, mtime_ns=2) for k, v in a.items()}
+        a["zz/bin"] = {"type": "f", "mtime_ns": 1, "digest": "aa"}
+        b["zz/bin"] = {"type": "f", "mtime_ns": 1, "digest": "bb"}
+        b["zz/new"] = {"type": "f", "mtime_ns": 1, "digest": "cc"}
+        lines = cm.usr_diff(a, b)
+        self.assertEqual(lines[:2], ["only in b: zz/new", "zz/bin: digest aa/bb"])
+        self.assertEqual(lines[2], "d000: mtime_ns 1/2")
+        self.assertEqual((len(lines), lines[-1]), (201, "... and 102 more"))
+
     def run_cli(self, ta, tb):
         with tempfile.TemporaryDirectory() as d:
             fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"

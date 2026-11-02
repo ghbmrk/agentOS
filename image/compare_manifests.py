@@ -14,7 +14,7 @@ Usage: compare_manifests.py DIR_A DIR_B
        compare_manifests.py --usr LIST_A LIST_B   (exit 0 only when the two builds' /usr lists,
                                              finish_image.py's agentos_VERSION.usr.list, are
                                              alike; otherwise print each path that differs and
-                                             in which field, #4059)"""
+                                             in which field, content differences first, #4059)"""
 import hashlib
 import json
 import pathlib
@@ -163,14 +163,24 @@ def usr_entries(path):
     return out
 
 
+# The fields that say what a path holds; the others (mode, owner, times, links) are its metadata.
+USR_CONTENT_FIELDS = ("type", "size", "digest")
+
+
 def usr_diff(a, b, limit=200):
     """Lines naming each path whose entry differs between /usr lists A and B ({path: fields}), and
-    in which fields (their two values). Empty when every entry is alike."""
+    in which fields (their two values). Paths only one side has and content differences come first,
+    so many time-only differences past LIMIT never hide a changed file (#4471). Empty when every
+    entry is alike."""
     lines = ["only in a: %s" % k for k in sorted(a) if k not in b]
     lines += ["only in b: %s" % k for k in sorted(b) if k not in a]
+    meta = []
     for k in sorted(a):
         if k in b and a[k] != b[k]:
-            lines.append("%s: %s" % (k, ", ".join("%s %s/%s" % (f, a[k][f], b[k][f]) for f in a[k] if a[k][f] != b[k][f])))
+            fs = [f for f in a[k] if a[k][f] != b[k][f]]
+            line = "%s: %s" % (k, ", ".join("%s %s/%s" % (f, a[k][f], b[k][f]) for f in fs))
+            (lines if any(f in USR_CONTENT_FIELDS for f in fs) else meta).append(line)
+    lines += meta
     if len(lines) > limit:
         lines = lines[:limit] + ["... and %d more" % (len(lines) - limit)]
     return lines
