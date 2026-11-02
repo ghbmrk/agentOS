@@ -137,7 +137,7 @@ type logFields struct {
 	cfg     Config
 	aead    cipher.AEAD
 	entries []Entry
-	ends    []int // byte offset after each entry, to cut a tail
+	ends    []int // byte offset after each entry read at Open, where dropUnconfirmed cuts a tail
 	broken  bool
 }
 
@@ -296,11 +296,6 @@ func (l *Log) Append(at int64, typ string, v int, body any) (Entry, error) {
 		return Entry{}, err
 	}
 	(*l.p).entries = append((*l.p).entries, e)
-	prev := 0
-	if len((*l.p).ends) > 0 {
-		prev = (*l.p).ends[len((*l.p).ends)-1]
-	}
-	(*l.p).ends = append((*l.p).ends, prev+len(fr))
 	return e, nil
 }
 
