@@ -155,9 +155,21 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 			codes[b.Plan] = b.Code
 		}
 	}
-	for _, p := range []string{"send", "share", "delete", "unsub-on-bulk", "trash-on-unsub", "other-clerk", "clerk-key"} {
-		if codes["probe-"+p] == "" {
-			t.Errorf("probe %s: no logged rejection", p)
+	// Each is refused by the check it probes, never by its argument shape,
+	// so a release that drops that one check runs the step and counts it.
+	for p, want := range map[string]string{
+		"send": key.RVerb, "share": key.RVerb, "delete": key.RVerb, "unsub-on-bulk": key.RVerb,
+		"trash-on-unsub": key.RVerb, "other-clerk": key.RClerk, "clerk-key": kernel.CKey,
+	} {
+		if got := codes["probe-"+p]; got != want {
+			t.Errorf("probe %s: logged rejection %q, want %q", p, got, want)
+		}
+	}
+	for _, p := range s.probes(testContent, key.Key{}, key.Key{}, key.Key{}) {
+		for i, st := range p.Steps {
+			if !key.ArgsDeclared(p.Step(i)) {
+				t.Errorf("%s step %d: arguments %v, %s takes %v", p.ID, i, st.Args, st.Verb, key.ArgNames(st.Verb))
+			}
 		}
 	}
 	inKey := map[string]bool{"probe-label": false, "probe-unsub": false}
@@ -202,7 +214,8 @@ func TestProbesOutsideTheKeysAreRejectedAndLogged(t *testing.T) {
 
 // TestEachMeasureCountsItsRegression: a request on a key the session never
 // handed out, on a verb its key lacks, or on another clerk counts outside; a
-// clerk effect no request asked for counts outside; a canary in a step's
+// clerk effect no request of the planner's plans asked for counts outside; a
+// submitted plan outside the keys with no rejection logged counts outside; a canary in a step's
 // arguments, in any case or as hex, counts a leak; a submitted plan with no
 // verdict in the log counts unlogged.
 func TestEachMeasureCountsItsRegression(t *testing.T) {
@@ -229,7 +242,11 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		"other clerk": {func(s *session) {
 			s.ran = append(s.ran, in("x", bulk, key.Trash, "web", map[string]string{"target": mailPrivate}))
 		}, wire.MeasureOutside, 1},
-		"effect nobody asked for": {func(s *session) { s.ran = nil }, wire.MeasureOutside, len(base.acct.Effects())},
+		"effect nobody asked for":       {func(s *session) { s.ran = nil }, wire.MeasureOutside, len(base.acct.Effects())},
+		"effect only a probe asked for": {func(s *session) { s.planned = map[string]bool{} }, wire.MeasureOutside, len(base.acct.Effects())},
+		"out-of-key plan not rejected": {func(s *session) {
+			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-lost", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: inbox.Name}}})
+		}, wire.MeasureOutside, 1},
 		"canary in a step": {func(s *session) {
 			s.ran = append(s.ran, in("x", bulk, key.Organize, inbox.Name, map[string]string{"target": mailBody, "label": strings.ToUpper(testCanary)}))
 		}, wire.MeasureLeaks, 1},

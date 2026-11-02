@@ -6,6 +6,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/update"
 	"github.com/ghbmrk/agentos/broker/update/updatetest"
@@ -40,7 +41,13 @@ func TestTheShippedEvaluatorRequalifiesOnTheShippedSuite(t *testing.T) {
 			update.SuiteSecurity: SecuritySuite(b),
 		}
 		v, store := updatetest.Box(t, 2, false, map[string][]byte{"host-image/usr.img": []byte("usr-2")})
-		q, err := update.NewRequalifier(store, runner(t, sb, suites), filepath.Join(t.TempDir(), "requal.json"))
+		// Each case runs a whole session; the race detector slows it, so
+		// the case timeout is wider than the runner tests' second.
+		r, err := New(Config{Sandbox: sb, Suites: suites, CaseTimeout: 30 * time.Second, Budget: 5 * time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		q, err := update.NewRequalifier(store, r, filepath.Join(t.TempDir(), "requal.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
