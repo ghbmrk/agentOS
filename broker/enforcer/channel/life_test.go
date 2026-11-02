@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"math"
 	"net"
 	"path/filepath"
 	"reflect"
@@ -877,12 +878,70 @@ func TestEveryEventFieldRendered(t *testing.T) {
 	}
 }
 
+// TestEventSamples (#4791 Security 2): CheckSink and
+// TestEveryEventFieldRendered take their samples from eventSamples, so
+// this pins them: each of a field's values in a sample with that field
+// alone set, then samples with every field set, one for each value of the
+// field that has most. Revert mutants: the one-field samples dropped; a
+// one-field sample with another field set; the all-fields samples dropped.
+func TestEventSamples(t *testing.T) {
+	samples, err := eventSamples()
+	if err != nil {
+		t.Fatal(err)
+	}
+	typ := reflect.TypeFor[Event]()
+	i, most := 0, 0
+	for f := range typ.NumField() {
+		vs, err := fieldValues(typ.Field(f).Type)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(vs) < 2 {
+			t.Errorf("Event.%s has %d sample values, want at least 2", typ.Field(f).Name, len(vs))
+		}
+		for j := range vs {
+			for k := range j {
+				if vs[j].Equal(vs[k]) {
+					t.Errorf("Event.%s has the sample value %v twice", typ.Field(f).Name, vs[j])
+				}
+			}
+		}
+		most = max(most, len(vs))
+		for range vs {
+			if i >= len(samples) {
+				t.Fatalf("%d samples, too few", len(samples))
+			}
+			v := reflect.ValueOf(samples[i].e)
+			for g := range typ.NumField() {
+				if v.Field(g).IsZero() != (g != f) {
+					t.Errorf("sample %d (%s): Event.%s set %v", i, samples[i].field, typ.Field(g).Name, !v.Field(g).IsZero())
+				}
+			}
+			i++
+		}
+	}
+	if len(samples) != i+most {
+		t.Fatalf("%d samples, want %d with one field set and %d with every field", len(samples), i, most)
+	}
+	for _, s := range samples[i:] {
+		v := reflect.ValueOf(s.e)
+		for g := range typ.NumField() {
+			if v.Field(g).IsZero() {
+				t.Errorf("an every-field sample has Event.%s unset", typ.Field(g).Name)
+			}
+		}
+	}
+}
+
 // TestCheckSink (#4709, A18, ENF-d-4): a sink that stores Event as JSON
 // keeps every field, and CheckSink refuses a sink that loses any one field
 // (each zeroed in turn: Dropped among them), one that keeps At only to the
-// second, and one that fails to store. Slice l's daemon sink runs the same
+// second, one that narrows a field or writes a constant into it, one that
+// joins two fields or cuts a name, one that loses a field only when it is
+// set alone, and one that fails to store. Slice l's daemon sink runs the same
 // check on its own storage (briefs/ENF.md ENF-l). Revert mutants: a sample
-// left unchecked; At compared by ==; the all-fields sample missing.
+// left unchecked; At compared by ==; the all-fields sample missing; any
+// extreme, long or second value dropped from fieldValues.
 func TestCheckSink(t *testing.T) {
 	asJSON := func(e Event) (Event, error) {
 		b, err := json.Marshal(e)
@@ -922,7 +981,74 @@ func TestCheckSink(t *testing.T) {
 	if err := CheckSink(inUTC); err != nil {
 		t.Errorf("a sink that keeps At in UTC: %v", err)
 	}
-	failing := func(Event) (Event, error) { return Event{}, errors.New("disk full") }
+	// A sink that narrows a field, or writes a constant into it, gets the
+	// small samples back whole; only the extreme ones and the second kind
+	// and code catch it (#4791 L3).
+	narrowed := map[string]func(*Event){
+		"ID through uint32":     func(e *Event) { e.ID = uint64(uint32(e.ID)) },
+		"ID through float64":    func(e *Event) { e.ID = uint64(float64(e.ID)) },
+		"Dropped through int8":  func(e *Event) { e.Dropped = int(int8(e.Dropped)) },
+		"Dropped through int32": func(e *Event) { e.Dropped = int(int32(e.Dropped)) },
+		"Dropped kept unsigned": func(e *Event) { e.Dropped = max(e.Dropped, 0) },
+		"every Kind as paused": func(e *Event) {
+			if e.Kind != "" {
+				e.Kind = KindPaused
+			}
+		},
+		"every Code as paused": func(e *Event) {
+			if e.Code != 0 {
+				e.Code = wire.Paused
+			}
+		},
+		"Dropped capped at 2^31-1": func(e *Event) { e.Dropped = min(e.Dropped, math.MaxInt32) },
+		"Reason cut to 64 bytes":   func(e *Event) { e.Reason = e.Reason[:min(len(e.Reason), 64)] },
+		"Device as ASCII":          func(e *Event) { e.Device = strings.Map(func(r rune) rune { return min(r, '?') }, e.Device) },
+		"At kept to microseconds":  func(e *Event) { e.At = e.At.Truncate(time.Microsecond) },
+		"At kept only to year 3000": func(e *Event) {
+			if e.At.Year() > 3000 {
+				e.At = time.Time{}
+			}
+		},
+	}
+	for name, narrow := range narrowed {
+		keep := func(e Event) (Event, error) {
+			got, err := asJSON(e)
+			narrow(&got)
+			return got, err
+		}
+		if err := CheckSink(keep); err == nil {
+			t.Errorf("a sink with %s passed", name)
+		}
+	}
+	// Sinks that lose a core's real values (#4791 Security): Device and
+	// Other joined by a separator a signed ID may hold and split back; a
+	// count kept in a byte; a name cut to a fixed column.
+	joined := func(e Event) (Event, error) {
+		e.Device, e.Other, _ = strings.Cut(e.Device+"|"+e.Other, "|")
+		return e, nil
+	}
+	if err := CheckSink(joined); err == nil {
+		t.Error("a sink that joins Device and Other with | passed")
+	}
+	if err := CheckSink(func(e Event) (Event, error) { e.Dropped = int(int8(e.Dropped)); return e, nil }); err == nil {
+		t.Error("a sink that keeps Dropped in a byte passed")
+	}
+	if err := CheckSink(func(e Event) (Event, error) { e.Device = e.Device[:min(len(e.Device), 16)]; return e, nil }); err == nil {
+		t.Error("a sink that keeps 16 bytes of Device passed")
+	}
+	// A sink that loses a field only when it is the only one set.
+	alone := func(e Event) (Event, error) {
+		if (e == Event{Dropped: e.Dropped}) {
+			e.Dropped = 0
+		}
+		return e, nil
+	}
+	if err := CheckSink(alone); err == nil {
+		t.Error("a sink that loses Dropped on a line with no other field passed")
+	}
+	// The failing sink hands back what it was given, so only its error
+	// can fail it.
+	failing := func(e Event) (Event, error) { return e, errors.New("disk full") }
 	if err := CheckSink(failing); err == nil {
 		t.Error("a sink that failed to store passed")
 	}
@@ -1125,61 +1251,94 @@ func coreLine(e Event) bool {
 // resolved, so a renamed import is caught, and a dot or blank import of a
 // package that can call back later fails. Revert mutants: a goroutine; a
 // timer under a renamed import; context.AfterFunc or a context deadline;
-// runtime.SetFinalizer (#4735 L3).
+// runtime.SetFinalizer (#4735 L3); any of these in a package of this
+// module the channel imports, directly or not, every file of it read
+// whatever its build constraint (#4740).
 func TestNoTimer(t *testing.T) {
 	banned := map[string]map[string]bool{
 		"time":    {"AfterFunc": true, "After": true, "NewTimer": true, "NewTicker": true, "Tick": true, "Sleep": true},
 		"context": {"AfterFunc": true, "WithTimeout": true, "WithDeadline": true, "WithTimeoutCause": true, "WithDeadlineCause": true},
 		"runtime": {"SetFinalizer": true, "AddCleanup": true},
 	}
-	names, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The channel's package and every package of this module it imports,
+	// directly or through another, since a timer started there runs for
+	// the channel too (#4740, from #4735 Security). Packages outside the
+	// module are the standard library's, which banned covers by name.
+	const module = "github.com/ghbmrk/agentos/broker/"
+	dirs, seen := []string{"."}, map[string]bool{".": true}
 	fset, files := token.NewFileSet(), 0
-	for _, name := range names {
-		if strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		f, err := parser.ParseFile(fset, name, nil, 0)
+	for len(dirs) > 0 {
+		dir := dirs[0]
+		dirs = dirs[1:]
+		names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		files++
-		local := map[string]string{} // import name in this file -> path
-		for _, im := range f.Imports {
-			path, err := strconv.Unquote(im.Path.Value)
+		for _, name := range names {
+			if strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, name, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if banned[path] == nil {
-				continue
-			}
-			n := path
-			if im.Name != nil {
-				n = im.Name.Name
-			}
-			if n == "." || n == "_" {
-				t.Errorf("%s imports %q as %s, which this test cannot follow", fset.Position(im.Pos()), path, n)
-				continue
-			}
-			local[n] = path
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch n := n.(type) {
-			case *ast.GoStmt:
-				t.Errorf("%s starts a goroutine", fset.Position(n.Pos()))
-			case *ast.SelectorExpr:
-				if x, ok := n.X.(*ast.Ident); ok && banned[local[x.Name]][n.Sel.Name] {
-					t.Errorf("%s calls %s.%s", fset.Position(n.Pos()), local[x.Name], n.Sel.Name)
+			files++
+			for _, im := range f.Imports {
+				path, _ := strconv.Unquote(im.Path.Value)
+				if rest, ok := strings.CutPrefix(path, module); ok {
+					if d := filepath.Join("..", "..", filepath.FromSlash(rest)); !seen[d] {
+						seen[d] = true
+						dirs = append(dirs, d)
+					}
 				}
 			}
-			return true
-		})
+			checkNoTimer(t, fset, f, banned)
+		}
+	}
+	for _, want := range []string{"../../enforcer/wire", "../../enforcer/policy", "../../kernel/key"} {
+		if !seen[want] {
+			t.Errorf("the walk never reached %s", want)
+		}
 	}
 	if files == 0 {
 		t.Fatal("no source files parsed")
 	}
+}
+
+// checkNoTimer reports f's goroutines and its uses of banned, by the
+// names f imports them under.
+func checkNoTimer(t *testing.T, fset *token.FileSet, f *ast.File, banned map[string]map[string]bool) {
+	t.Helper()
+	local := map[string]string{} // import name in this file -> path
+	for _, im := range f.Imports {
+		path, err := strconv.Unquote(im.Path.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if banned[path] == nil {
+			continue
+		}
+		n := path
+		if im.Name != nil {
+			n = im.Name.Name
+		}
+		if n == "." || n == "_" {
+			t.Errorf("%s imports %q as %s, which this test cannot follow", fset.Position(im.Pos()), path, n)
+			continue
+		}
+		local[n] = path
+	}
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.GoStmt:
+			t.Errorf("%s starts a goroutine", fset.Position(n.Pos()))
+		case *ast.SelectorExpr:
+			if x, ok := n.X.(*ast.Ident); ok && banned[local[x.Name]][n.Sel.Name] {
+				t.Errorf("%s calls %s.%s", fset.Position(n.Pos()), local[x.Name], n.Sel.Name)
+			}
+		}
+		return true
+	})
 }
 
 // TestFlushAtRestore (#4726, ENF-d-4): the owner's restore calls Flush,
@@ -1314,4 +1473,69 @@ func TestPausedLinesCarryPaused(t *testing.T) {
 	}
 	cl.conn.Close()
 	waitDone(t, cl, "the connection closed")
+}
+
+// TestFlushDuringTrip (#4791 Security 3, ENF-d-4, ENF-d-7): a Flush while
+// a trip is decided but Cut.Trip has not returned, when the cut still reads
+// Open, logs no restore, keeps the quiet and keeps the count, which the
+// Flush after the owner's restore logs whole. Revert mutant: Flush reading
+// Cut.Stage instead of the channel's stage, which counts the trip in
+// progress.
+func TestFlushDuringTrip(t *testing.T) {
+	r := newRig(t, nil)
+	a := r.dial()
+	hold, entered := make(chan struct{}), make(chan struct{}, 1)
+	r.cut.mu.Lock()
+	r.cut.hold, r.cut.entered = hold, entered
+	r.cut.mu.Unlock()
+	var once sync.Once
+	release := func() { once.Do(func() { close(hold) }) }
+	defer release()
+	tripped := make(chan struct{})
+	go func() { // a request burst at Open: the last one trips the core
+		defer close(tripped)
+		for id := uint64(1); a.code(wire.Announce{ID: id}) == wire.OK; id++ {
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no trip")
+	}
+	l := DefaultLimit(KindPaused)
+	b := r.dial() // "core connected", under KindPaused's bucket
+	id := uint64(1000)
+	burst := func() {
+		for range 2 * l.Burst {
+			id++
+			if c := b.code(wire.Announce{ID: id}); c != wire.Paused {
+				t.Fatalf("a request while the core is cut: %v, want Paused", c)
+			}
+		}
+	}
+	burst()
+	n := len(r.events())
+	r.ch.Flush()
+	if ev := r.events()[n:]; len(ev) != 0 {
+		t.Fatalf("Flush during a trip in progress logged %+v", ev)
+	}
+	release()
+	<-tripped
+	burst() // still quiet: no second quiet line
+	r.cut.set(Open)
+	r.ch.Flush()
+	var paused []Event
+	for _, e := range r.events()[n:] {
+		if e.Kind == KindPaused {
+			paused = append(paused, e)
+		}
+	}
+	// One restore line, no quiet line, and the count kept: at least the
+	// second burst, all of it past the drained bucket.
+	if len(paused) != 1 || paused[0].Dropped < 2*l.Burst {
+		t.Fatalf("after a Flush during a trip in progress and one at the restore: %+v, want one restore line carrying at least %d", paused, 2*l.Burst)
+	}
+	a.conn.Close()
+	b.conn.Close()
+	waitDone(t, b, "the connection closed")
 }
