@@ -1603,23 +1603,61 @@ class ConfigTest(unittest.TestCase):
         ])
         # Nothing else feeds mkosi v24.3 config or packages. Its defaults are mkosi.* names beside a
         # config (mkosi.conf.d/, mkosi.local.conf, mkosi.images/, mkosi.packages/, mkosi.pkgmngr.tar),
-        # so both config folders' mkosi.* names are pinned. Include= could read a config from
-        # anywhere, and PackageManagerTrees= and PackageDirectories= append, so the two configs set
-        # none of them except the initrd's own folder. The build runs mkosi with these flags only.
+        # so both config folders' mkosi.* names are pinned.
         self.assertEqual(sorted(n for n in os.listdir(MK) if n.startswith("mkosi.")), [
             "mkosi.conf", "mkosi.extra", "mkosi.finalize", "mkosi.pkgmngr", "mkosi.postinst",
             "mkosi.repart"])
         self.assertEqual(sorted(n for n in os.listdir(MK / "initrd") if n.startswith("mkosi.")),
                          ["mkosi.conf", "mkosi.finalize"])
+        # The two configs are held to one strict form, so this test never models mkosi's parser:
+        # a non-blank line is a column-0 "#" comment, a column-0 [Section], a column-0 Key=value
+        # (no "@", no space before "="), or an indented continuation while a setting is open (a
+        # comment keeps it open, as initrd/mkosi.conf's RemoveFiles= relies on; a blank line or a
+        # section closes it). Any other line fails. Include= could read a config from anywhere,
+        # PackageManagerTrees= and PackageDirectories= append trees and repos, and
+        # RepositoryKeyCheck=/RepositoryKeyFetch= govern signature checks, so no setting may name
+        # them, with every continuation in its value, except InitrdInclude=initrd/ alone.
+        guarded = re.compile(r"include|packagemanagertree|packagedirector|repositorykey", re.I)
         for conf in (MK / "mkosi.conf", MK / "initrd/mkosi.conf"):
-            keys = re.findall(r"^([A-Za-z]+)\s*=\s*(.*)$", conf.read_text(), re.M)
-            for k, v in keys:
-                if re.search(r"include|packagemanagertrees|packagedirector", k, re.I):
-                    self.assertEqual((conf, k, v.strip()), (MK / "mkosi.conf", "InitrdInclude", "initrd/"))
-        runs = [l for l in (IMG / "build.sh").read_text().splitlines()
-                if "$MKOSI" in l and not l.lstrip().startswith("#")]
-        self.assertEqual(runs, ['$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" '
-                                '--extra-tree="$STAGE:/" --output-dir "$OUT" build'])
+            settings, cur = [], None
+            for n, line in enumerate(conf.read_text().splitlines(), 1):
+                where = "%s:%d: %r" % (conf.relative_to(ROOT), n, line)
+                if not line.strip():
+                    cur = None
+                elif line.startswith("#"):
+                    pass
+                elif re.fullmatch(r"\[[A-Za-z]+\]", line):
+                    cur = None
+                elif m := re.fullmatch(r"([A-Z][A-Za-z0-9]*)=(.*)", line):
+                    cur = (m[1], [m[2].strip()])
+                    settings.append((where, cur))
+                elif line[0] in " \t" and cur is not None:
+                    cur[1].append(line.strip())
+                else:
+                    self.fail("%s: not the strict mkosi config form this test reads (#4591)" % where)
+            for where, (k, v) in settings:
+                if guarded.search(k):
+                    self.assertEqual(
+                        (conf.name, conf.parent == MK, k, v), ("mkosi.conf", True, "InitrdInclude", ["initrd/"]),
+                        "%s: #4591 allows no other config source, tree, repo or key-check setting" % where)
+        # The build runs mkosi one way: every build.sh line naming mkosi (any case, comments
+        # included) is pinned, none follows a "\" continuation, and image.yml sets MKOSI only to
+        # the pinned v24.3 binary.
+        lines = (IMG / "build.sh").read_text().splitlines()
+        named = [(i, l) for i, l in enumerate(lines) if "mkosi" in l.lower()]
+        self.assertEqual([l for _, l in named], [
+            "# Needs mkosi v24.3 (MKOSI=/path/to/mkosi), Go, cc and c++ with a static libc and libstdc++, make,",
+            "# file-system IDs come from mkosi.conf's Seed, so two builds of one commit give the same /usr",
+            'OUT=$(realpath -m "${1:-$HERE/out}"); MKOSI=${MKOSI:-mkosi}; DRIVERS=${3:+$(realpath "$3")}',
+            "# mkosi.finalize's template renders for its name; drivers.json lists them, and mkosi.finalize",
+            '$MKOSI -C "$HERE/mkosi" -f --image-version="$VERSION" --extra-tree="$STAGE:/" --output-dir "$OUT" build',
+        ], "#4591: a build.sh line naming mkosi changed; the build's mkosi flags are pinned")
+        for i, _ in named:
+            self.assertFalse(i and lines[i - 1].rstrip().endswith("\\"), lines[i - 1])
+        wf = (ROOT / ".github/workflows/image.yml").read_text().splitlines()
+        self.assertEqual([l.strip() for l in wf if "MKOSI" in l], [
+            'run: sudo env "PATH=$PATH" HOME=/root GOCACHE=/tmp/gocache MKOSI=/opt/mkosi/bin/mkosi '
+            'image/build.sh "$RUNNER_TEMP/out" 2>&1 | tee "$RUNNER_TEMP/build.log"'])
 
     # REQ: HW-10
     def test_packages_come_from_the_pinned_snapshot(self):
