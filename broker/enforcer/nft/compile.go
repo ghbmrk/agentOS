@@ -54,6 +54,55 @@ func TrafficIn(vlan int) string           { return "t" + strconv.Itoa(vlan) + "_
 
 const TrafficSize = 64
 
+// HostSet is the set that records, for each connection a host on a shared
+// segment (Guests, Owner, Household) started, the connection's conntrack
+// ID and original source, and the source address and hardware address its
+// first packet came from (live.go, learn, hostKey). A related packet from a shared segment passes only
+// with its connection's record. Each record lasts HostTimeout from that
+// first packet and the set holds at most HostSize per family, which bounds
+// what the shared segments can make the enforcer keep; a connection
+// without a record (it outlived its record, the set was full, or it was
+// open before the last load, under this ruleset or one without labels) has
+// its host's own ICMP errors dropped, never anyone else's passed.
+func HostSet(v6 bool) string { return "host" + fam(v6) }
+
+const (
+	HostTimeout = "1h"
+	HostSize    = 65535
+)
+
+// hostLabel is the conntrack label bit learn sets on a connection it has
+// recorded (or tried to), so it records each connection once. Nothing else
+// on the enforcer sets or reads a label.
+const hostLabel = "0"
+
+// learnChain records the host of a connection from a shared segment and
+// accepts it; boundChain passes a related packet from a shared segment
+// only with its connection's record.
+const (
+	learnChain = "learn"
+	boundChain = "bound"
+)
+
+// hostKey is a HostSet element as nft reads it from a packet: its
+// connection's ID and original source address, then the packet's own
+// source address and hardware source address. At the first packet the two
+// addresses are the same, so a later packet matches only from the address
+// and the hardware address that started the connection; the original
+// source keeps a record of another host's from matching a connection whose
+// ID it happens to share.
+func hostKey(v6 bool) string {
+	f := family(v6)
+	return "ct id . ct original " + f + " saddr . " + f + " saddr . ether saddr"
+}
+
+func nfproto(v6 bool) string {
+	if v6 {
+		return "ipv6"
+	}
+	return "ipv4"
+}
+
 // named is the set that records which addresses one name's answers put in
 // the allow set list, for the list's holder ("core", or a device's ID): the
 // resolver fills both (ASSUMPTIONS ENF-set-keep-1). Its name is list's and a
@@ -418,6 +467,14 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 		}
 	}
 
+	for _, v6 := range []bool{false, true} {
+		w.open("set " + HostSet(v6))
+		w.line("typeof " + hostKey(v6) + ";")
+		w.line("size " + strconv.Itoa(HostSize) + ";")
+		w.line("flags dynamic,timeout;")
+		w.line("timeout " + HostTimeout + ";")
+		w.close()
+	}
 	for _, v := range counted {
 		for _, v6 := range []bool{false, true} {
 			w.open("set " + TrafficSet(v.vlan, v6))
@@ -589,8 +646,9 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	for _, v := range devs {
 		idx[q(v.iface)] = uint32(v.vlan)
 	}
+	shared := []string{g, q(l.Owner), q(l.Household)}
 	for _, rs := range [][]rule{fwd, people} {
-		if err := bindAll(idx, rs); err != nil {
+		if err := bindAll(idx, shared, rs); err != nil {
 			return "", nil, err
 		}
 	}
@@ -624,6 +682,11 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("oifname " + g + " counter name " + q(GuestsIn))
 	w.line("iifname " + g + " ct state new counter name " + q(GuestsConns))
 	w.line("ct state invalid drop")
+	// A related packet from a shared segment in its connection's original
+	// direction must come from the host that started the connection
+	// (live.go, #4324). In the reply direction one from a shared segment
+	// already matches no live accept, since no accept leads into one.
+	w.line("ct state related ct direction original iifname { " + strings.Join(shared, ", ") + " } jump " + boundChain)
 	w.line("ct state established,related jump " + live("forward"))
 	// Each device's traffic on accepted connections is counted before the
 	// accept below (NET-5). Only established packets count: an address the
@@ -648,6 +711,31 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.open("chain people")
 	for _, r := range people {
 		w.line(r.first())
+	}
+	w.line("drop")
+	w.close()
+
+	// A connection is recorded once, from its first packet: conntrack calls
+	// every original-direction packet new until a reply comes, and another
+	// host could send one from the host's address and port to add a record
+	// of its own. The label is set, then read back, before the record is
+	// added: a connection conntrack created while no loaded rule used
+	// labels has no room for one, so setting it does nothing, and such a
+	// connection (open across the first load of a ruleset with labels) is
+	// never recorded; one whose record could not be written has none.
+	w.open("chain " + learnChain)
+	w.line("ct label " + hostLabel + " accept")
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + nfproto(v6) + " ct label set " + hostLabel + " ct label " + hostLabel + " add @" + HostSet(v6) + " { " + hostKey(v6) + " }")
+	}
+	w.line("accept")
+	w.close()
+
+	// Shared segments are never observed (NET-1, NET-3): a forged error from
+	// one is dropped without a log line or a count.
+	w.open("chain " + boundChain)
+	for _, v6 := range []bool{false, true} {
+		w.line("meta nfproto " + nfproto(v6) + " " + hostKey(v6) + " @" + HostSet(v6) + " return")
 	}
 	w.line("drop")
 	w.close()
