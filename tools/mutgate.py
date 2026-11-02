@@ -678,6 +678,15 @@ def report_violations(found):
     return 1 if found else 0
 
 
+def default_jobs():
+    """The CPUs this process may run on (a container's cpuset), not the host's. macOS has no
+    os.sched_getaffinity, so there the CPU count stands in (#4672)."""
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -694,8 +703,7 @@ def main(argv=None):
     p.add_argument("pkg", nargs="+")
     p.add_argument("--out", default="mutants")
     p.add_argument("--git", required=True, metavar="BASE")
-    # The CPUs this process may run on (a container's cpuset), not the host's.
-    p.add_argument("--jobs", type=int, default=len(os.sched_getaffinity(0)), metavar="N")
+    p.add_argument("--jobs", type=int, default=default_jobs(), metavar="N")
     p = sub.add_parser("report")
     p.add_argument("dir")
     p = sub.add_parser("gate")
