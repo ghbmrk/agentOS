@@ -1,0 +1,69 @@
+#!/bin/sh
+# The enforcer's boot self-check (NET-2 Hardening; ENF-m). boot-complete.target requires it, so
+# systemd-bless-boot blesses this boot's entry only when it passes; a release that fails it on every
+# try is abandoned by boot counting and the previous release boots (enforcer-fallback.service).
+# Secure Boot off is reported, not failed, as on the core (HW-5). ENFORCER_HEALTH_ROOT exists for
+# image/enforcer/test_scripts.py.
+R=${ENFORCER_HEALTH_ROOT:-}
+fail() { echo "enforcer-health: FAIL $*"; exit 1; }
+
+sb=unknown
+v=$R/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+if [ -r "$v" ]; then
+	case $(od -An -tu1 -j4 -N1 "$v" | tr -d ' ') in
+	1) sb=on ;;
+	0) sb=off ;;
+	esac
+fi
+
+if [ -z "$R" ]; then
+	st=$(veritysetup status usr 2>/dev/null)
+	printf '%s\n' "$st" | grep -Eq '^ *status: *verified' || fail "/usr is not under dm-verity"
+	[ "$(findmnt -no SOURCE /usr)" = /dev/mapper/usr ] || fail "/usr is not mounted from the verity device"
+	want=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^usrhash=//p')
+	got=$(printf '%s\n' "$st" | sed -n 's/^ *root hash: *//p')
+	[ -n "$want" ] && [ "$got" = "$want" ] || fail "/usr root hash ${got:-unreported} does not match usrhash=${want:-none}"
+	case ,$(findmnt -no OPTIONS /usr), in
+	*,ro,*) ;;
+	*) fail "/usr is mounted writable" ;;
+	esac
+fi
+# The enforcer's own release root, and no other (NET-2 Channel; finish_image.py checked its keys).
+[ -s "$R/usr/share/agentos-enforcer/release-root.json" ] || fail "enforcer release root missing"
+# Wi-Fi off: no wireless interface or radio, and the stacks are not loaded (modprobe.d blocks them).
+for d in "$R"/sys/class/net/*; do
+	[ -e "$d/wireless" ] || [ -e "$d/phy80211" ] && fail "wireless interface ${d##*/}"
+done
+for d in "$R"/sys/class/ieee80211/*; do
+	[ -e "$d" ] && fail "Wi-Fi radio ${d##*/}"
+done
+# USB storage off and unknown USB devices unauthorised (usbcore.authorized_default=0).
+for m in cfg80211 mac80211 usb_storage uas; do
+	[ -e "$R/sys/module/$m" ] && fail "module $m is loaded"
+done
+[ "$(cat "$R/sys/module/usbcore/parameters/authorized_default" 2>/dev/null)" = 0 ] ||
+	fail "USB devices are authorised by default"
+# The hardware watchdog is armed (system.conf.d/50-enforcer-watchdog.conf).
+wd=none
+for d in "$R"/sys/class/watchdog/watchdog*; do
+	[ -e "$d" ] || continue
+	s=$(cat "$d/state" 2>/dev/null) || s=unknown
+	wd="${d##*/}:${s:-unknown}"
+	[ "$s" = active ] && break
+done
+# Without the kernel's sysfs state, PID 1's last ping says it holds the device open.
+case $wd in
+*:unknown) [ -z "$R" ] && [ "$(systemctl show -P WatchdogLastPingTimestampMonotonic)" -gt 0 ] 2>/dev/null &&
+	wd=${wd%:*}:pinged ;;
+esac
+case $wd in
+*:active | *:pinged) ;;
+*) fail "no hardware watchdog armed ($wd)" ;;
+esac
+# The daemon's unit runs (a placeholder until ENF-m-b).
+if [ -z "$R" ]; then
+	[ "$(systemctl is-active agentos-enforcer.service)" = active ] || fail "agentos-enforcer.service is not running"
+fi
+# No swap: the enforcer's keys and policy stay in memory and on the state partition only.
+[ "$(sed 1d "$R/proc/swaps" 2>/dev/null | grep -c .)" = 0 ] || fail "swap is active"
+echo "enforcer-health: PASS secure_boot=$sb usr=verity wifi=off usb_storage=off usb_default=0 watchdog=$wd"
