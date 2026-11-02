@@ -1657,8 +1657,10 @@ func partial(b, secret []byte) int {
 // codexMeta is the client_metadata Codex CLI 0.162.1 sends on an HTTP model
 // call. x-codex-turn-metadata is its CodexTurnMetadataPayload, which asks
 // the provider for nothing it may not do for the plan: history ingest and
-// analytics are off (the image turns both off), and a tool's source is the
-// CLI itself (the image blocks MCP servers). A config-supplied extra key
+// analytics may only be off (the image turns analytics off; history ingest
+// comes from token_budget's history notes, off by default and not yet
+// pinned by the image), and a tool's source is the CLI itself (the image
+// blocks MCP servers). A config-supplied extra key
 // is not declared, since the image sets none.
 func codexMeta() map[string]Value {
 	id := Value{Kind: KindText, Max: 128}

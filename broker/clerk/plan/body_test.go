@@ -745,6 +745,74 @@ func TestPlanTurnMetadataCapHoldsAfterEncoding(t *testing.T) {
 	}
 }
 
+// The security property, written from literals rather than from the
+// declaration, so widening the declaration fails here: a guest cannot ask
+// the provider to ingest history, turn analytics on, attribute a call to an
+// MCP server, or draw guardian credits for the plan (#4585 Security 1).
+func TestPlanGuestCannotAskTheProviderToKeepOrAct(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	mcp := `{"tool_namespaces_info":{"functions":{"name":"functions","functions":{"exec":` +
+		`{"name":"exec","direct":true,"code_mode_name":null,"deferred":false,"source":{"kind":"mcp","server_name":"s"}}}}}}`
+	for name, meta := range map[string]map[string]any{
+		"history ingest":             {"x-codex-turn-metadata": `{"history_ingest_requested":true}`},
+		"analytics":                  {"x-codex-turn-metadata": `{"analytics_enabled":true}`},
+		"an MCP tool source":         {"x-codex-turn-metadata": mcp},
+		"MCP attribution":            {"mcp_attribution": `{"status":"ok"}`},
+		"guardian credits":           {"guardian_credits_requested": "true"},
+		"guardian credits in a blob": {"x-codex-turn-metadata": `{"guardian_credits_requested":"true"}`},
+	} {
+		m := capture(t)
+		m["client_metadata"] = meta
+		before := f.hits()
+		if resp, d := callWith(p, "g", ph, encode(t, m), free); resp != nil || d != plan.DBody+" meta" {
+			t.Errorf("%s: answered %v, detail %q", name, resp != nil, d)
+		}
+		if f.hits() != before {
+			t.Errorf("%s: sent", name)
+		}
+	}
+}
+
+// The top-level client_metadata keys and caps, as a fixed table rather than
+// read from the declaration: each id takes 128 bytes and refuses 129, the
+// blob refuses 16 KiB + 1, and no other key is taken (#4585 L3 1).
+func TestPlanClientMetadataCapsAreFixed(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	signIn(t, p, "signin")
+	g, _ := p.Guest("g")
+	ph := g.Tokens["access_token"]
+	ids := []string{"x-codex-installation-id", "session_id", "thread_id", "x-codex-window-id", "turn_id",
+		"x-openai-subagent", "x-codex-parent-thread-id", "parent_turn_id", "root_turn_id"}
+	if got := len(plan.Codex(nil).Body.Meta); got != len(ids)+1 {
+		t.Fatalf("the declaration has %d client_metadata keys, want %d", got, len(ids)+1)
+	}
+	call := func(meta map[string]any) string {
+		m := capture(t)
+		m["client_metadata"] = meta
+		resp, d := callWith(p, "g", ph, encode(t, m), free)
+		if resp != nil {
+			read(t, resp)
+		}
+		return d
+	}
+	for _, k := range ids {
+		if d := call(map[string]any{k: strings.Repeat("a", 128)}); d != "" {
+			t.Errorf("%s at 128 bytes: %s", k, d)
+		}
+		if d := call(map[string]any{k: strings.Repeat("a", 129)}); d != plan.DBody+" meta" {
+			t.Errorf("%s at 129 bytes: %q", k, d)
+		}
+	}
+	if d := call(map[string]any{"x-codex-turn-metadata": "{}" + strings.Repeat(" ", 16<<10-1)}); d != plan.DBody+" meta" {
+		t.Errorf("a blob of 16 KiB + 1: %q", d)
+	}
+}
+
 // A provider-read flag cannot be smuggled past the check by repeating it:
 // the clerk sends its own encoding of the blob it checked, so the provider
 // sees one key, whichever of a repeated pair its parser keeps (#4580).
