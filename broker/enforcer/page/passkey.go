@@ -244,8 +244,12 @@ func (s *Server) heard(cur, next policy.Document) (policy.Document, []string, er
 		}
 	}
 	// Devices first, then holds: a name both could take (which the relay's
-	// claims rule out) goes to the device that announces it.
+	// claims rule out) goes to the device that announces it. A person's
+	// network's names are the network's, so each network is filled once a
+	// card, on the first of its devices whose pair opens (Security on
+	// #4596), and the cap and the left-out line count them once.
 	var left []string
+	held := map[string]bool{}
 	for _, devices := range []bool{true, false} {
 		for i := range next.Devices {
 			d := &next.Devices[i]
@@ -253,8 +257,11 @@ func (s *Server) heard(cur, next policy.Document) (policy.Document, []string, er
 				return (p.A == d.ID || p.B == d.ID) && next.Linked(p.A) && next.Linked(p.B) &&
 					!(slices.Contains(cur.Pairs, p) && cur.Linked(p.A) && cur.Linked(p.B))
 			})
-			if !opens || (d.Network == policy.NetDevices) != devices || devices && len(d.MDNS) > 0 {
+			if !opens || (d.Network == policy.NetDevices) != devices || devices && len(d.MDNS) > 0 || held[d.Network] {
 				continue
+			}
+			if !devices {
+				held[d.Network] = true
 			}
 			ns, more := fresh(next, s.heardOn(cur, *d))
 			d.MDNS = append(d.MDNS, ns...)

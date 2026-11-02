@@ -319,10 +319,46 @@ func TestHeardFillBounded(t *testing.T) {
 			t.Errorf("host %q left out before an instance", h)
 		}
 	}
-	// The home page offers the next ones, at most maxFill again.
+	// The home page offers the next ones, at most maxFill again, saying
+	// there are more, and the offer's card says how many it left out.
 	offs := g.s.offers(cur)
 	if len(offs) != 2 || offs[0].ID != "laptop" || len(offs[0].Names) != 5 || offs[1].ID != "tv" || len(offs[1].Names) != maxFill || offs[1].More != 3*maxFill+10-2*maxFill {
 		t.Errorf("offers after the flood: %+v", offs)
+	}
+	home := html.UnescapeString(g.do(http.MethodGet, "/", nil).Body.String())
+	if !strings.Contains(home, " and more: let it?") || !strings.Contains(home, "hold them for laptop, so no paired device may announce them?") {
+		t.Errorf("the home page's offers:\n%s", home)
+	}
+	w := g.do(http.MethodGet, "/heard?d=tv", nil)
+	if want := fmt.Sprintf("%d more names tv announces are left out of this change", 3*maxFill+10-2*maxFill); w.Code != http.StatusOK || !strings.Contains(html.UnescapeString(w.Body.String()), want) {
+		t.Errorf("the offer's card lacks %q: %d %s", want, w.Code, w.Body)
+	}
+}
+
+// TestHeardHoldsOncePerNetwork: a link that pairs two devices of one
+// person's network fills that network's names once, within maxFill, with
+// one true left-out line (Security on #4596).
+func TestHeardHoldsOncePerNetwork(t *testing.T) {
+	g := newRig(t)
+	var person [][]string
+	for i := range 3 * maxFill {
+		person = append(person, []string{fmt.Sprintf("p%03d", i), "local"})
+	}
+	g.heard["household"] = person
+	two := edit(2, func(d *policy.Document) {
+		d.Devices = append(d.Devices,
+			policy.Device{ID: "desk", Network: policy.NetHousehold, Everyday: true},
+			policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
+		d.Pairs = []policy.Pair{{A: "desk", B: "tv"}, {A: "laptop", B: "tv"}}
+	})
+	screen, _, _ := g.open(two, "pair two")
+	plain := html.UnescapeString(screen)
+	if n := strings.Count(plain, "Hold the name p"); n != maxFill {
+		t.Errorf("%d holds on the card, want %d", n, maxFill)
+	}
+	if n := strings.Count(plain, "more names heard on the household network"); n != 1 ||
+		!strings.Contains(plain, fmt.Sprintf("%d more names heard on the household network are left out of this change; the home page offers to hold them for desk once it applies.", 2*maxFill)) {
+		t.Errorf("the left-out lines:\n%s", plain)
 	}
 }
 
@@ -346,7 +382,7 @@ func TestHeardOffer(t *testing.T) {
 	for _, want := range []string{
 		`tv now announces "Living Room._airplay._tcp.local": let it?`,
 		`href="/heard?d=tv"`,
-		"The household network now announces spouse-phone.local: hold them for laptop, so no paired device may announce them?",
+		"The household network now announces spouse-phone.local: hold it for laptop, so no paired device may announce it?",
 		`href="/heard?d=laptop"`,
 	} {
 		if !strings.Contains(home, want) {

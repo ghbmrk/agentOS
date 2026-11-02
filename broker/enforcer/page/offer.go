@@ -35,7 +35,11 @@ func (o offer) Line(cur policy.Document) string {
 		names += " and more"
 	}
 	if d := cur.Device(o.ID); d != nil && d.Network != policy.NetDevices {
-		return "The " + d.Network + " network now announces " + names + ": hold them for " + ascii(o.ID) + ", so no paired device may announce them?"
+		them := "them"
+		if len(o.Names) == 1 && o.More == 0 {
+			them = "it"
+		}
+		return "The " + d.Network + " network now announces " + names + ": hold " + them + " for " + ascii(o.ID) + ", so no paired device may announce " + them + "?"
 	}
 	return ascii(o.ID) + " now announces " + names + ": let it?"
 }
