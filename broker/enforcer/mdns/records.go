@@ -654,10 +654,20 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 			note(r)
 		}
 	}
-	for k, p := range got {
-		if p.ttl == 0 {
+	// A goodbye (TTL 0) for a host or instance the sender holds ends it
+	// now; one the packet proves live beside the goodbye is added again
+	// below. It needs no proof of its own: it only takes away a name
+	// heard on this same interface, so an SRV's goodbye ends its instance
+	// though its host says goodbye in the same packet.
+	for _, r := range rs {
+		k := r.name.key()
+		if r.ttl == 0 && ((r.typ == typeA || r.typ == typeAAAA) && r.name.host() || r.typ == typeSRV && r.name.instance()) {
 			delete(t, k)
 			delete(said, k)
+		}
+	}
+	for k, p := range got {
+		if p.ttl == 0 {
 			continue
 		}
 		t.add(k, now.Add(min(time.Duration(p.ttl)*time.Second, ownHold)), now, func(d string) { delete(said, d) })

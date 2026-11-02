@@ -193,16 +193,18 @@ func (s *Server) draft(r *http.Request) (*challenge, []string, error) {
 var errUnheard = errors.New("the enforcer never heard")
 
 // heard is next with the mDNS names the enforcer heard each device prove
-// its own (Config.Heard, D-266): a Devices-network device that next
-// pairs with a path and that pins no names is given every name heard on
-// its VLAN, so the card lists each one before the passkey, and a name
-// next pins on a Devices-network device must have been heard there
-// unless cur already pinned it on that device on the Devices network.
-// The untrusted core never introduces a name. Names are heard on the
-// VLAN of the device's Wi-Fi identity in cur, so a device added or given
-// another identity by this link has none yet. The filled document must
-// still encode: a heard name another device pins is refused with
-// policy's ErrNameHeld, which the screen shows.
+// its own (Config.Heard, D-266): a Devices-network device that pins no
+// names, on a pair that gains its path with this link (the pair is new,
+// or its path returns), is given every name heard on its VLAN that no
+// other device pins or holds, so the card lists each one before the
+// passkey; and a name next pins on a Devices-network device must have
+// been heard there unless cur already pinned it on that device on the
+// Devices network. The untrusted core never introduces a name. Only the
+// link that opens the path fills, so a device whose announcements change
+// later never touches an unrelated link, and one announcing a name
+// another device holds can block no link (Security on #4531). Names are
+// heard on the VLAN of the device's Wi-Fi identity in cur, so a device
+// added or given another identity by this link has none yet.
 func (s *Server) heard(cur, next policy.Document) (policy.Document, error) {
 	next = clone(next)
 	for i := range next.Devices {
@@ -223,10 +225,13 @@ func (s *Server) heard(cur, next policy.Document) (policy.Document, error) {
 			}
 		}
 		if slices.ContainsFunc(next.Pairs, func(p policy.Pair) bool {
-			return (p.A == d.ID || p.B == d.ID) && unpinned(next, p, d.ID)
+			return (p.A == d.ID || p.B == d.ID) && unpinned(next, p, d.ID) &&
+				!(slices.Contains(cur.Pairs, p) && cur.Linked(p.A) && cur.Linked(p.B))
 		}) {
 			for _, n := range heard {
-				d.MDNS = append(d.MDNS, slices.Clone(n))
+				if !slices.ContainsFunc(next.Devices, func(o policy.Device) bool { return o.ID != d.ID && listed(o.MDNS, n) }) {
+					d.MDNS = append(d.MDNS, slices.Clone(n))
+				}
 			}
 		}
 	}

@@ -3,12 +3,12 @@ package page
 // REQ: NET-3, NET-4
 
 import (
-	"encoding/base64"
 	"html"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 )
@@ -107,18 +107,43 @@ func TestHeardNamesPinned(t *testing.T) {
 		t.Errorf("a kept pin shows as new:\n%s", screen)
 	}
 
-	// A heard name another device pins: the fill clashes and the screen
-	// says so in policy's words.
-	g.heard["vlan102"] = [][]string{{"tv", "local"}}
-	clash := clone(cur)
-	clash.Pairs = append(clash.Pairs, policy.Pair{A: "laptop", B: "cam"})
-	b, err := policy.Encode(clash)
-	if err != nil {
+	// A heard name another device pins or holds is left out of the fill,
+	// so it can block no link (Security on #4531): cam proves tv's name
+	// and the laptop's held one beside its own, and only its own is
+	// offered.
+	g.heard["vlan102"] = [][]string{{"cam", "local"}, {"macbook", "local"}, {"tv", "local"}}
+	camPaired := clone(cur)
+	camPaired.Pairs = append(camPaired.Pairs, policy.Pair{A: "laptop", B: "cam"})
+	screen, id, ch = g.open(camPaired, "pair cam")
+	plain = html.UnescapeString(screen)
+	if !strings.Contains(plain, "Let cam announce the name cam.local") || strings.Contains(plain, "Let cam announce the name tv.local") || strings.Contains(plain, "Let cam announce the name macbook.local") {
+		t.Errorf("cam's fill:\n%s", plain)
+	}
+
+	// Only the link that opens a pair's path fills: once cam's pair is
+	// signed with nothing heard, a later unrelated link draws as it is,
+	// whatever cam has announced since.
+	g.heard["vlan102"] = nil
+	screen, id, ch = g.open(camPaired, "pair cam")
+	if strings.Contains(screen, "announce the name") {
+		t.Fatalf("nothing heard, yet a name:\n%s", screen)
+	}
+	if w := g.approve(id, g.a.get(ch)); w.Code != http.StatusOK {
+		t.Fatalf("approve: %d %s", w.Code, w.Body)
+	}
+	g.now = g.now.Add(time.Duration(policy.Wait) * time.Millisecond)
+	if _, err := g.e.Tick(g.now.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
-	w = g.do(http.MethodGet, "/p?d="+base64.RawURLEncoding.EncodeToString(b), nil)
-	if body := w.Body.String(); w.Code != http.StatusBadRequest || !strings.Contains(body, `one name is pinned twice: "tv.local" is`) || reChal.MatchString(body) {
-		t.Errorf("a clashing heard name: %d %s", w.Code, body)
+	cur = g.e.Current()
+	if !slices.Contains(cur.Pairs, policy.Pair{A: "cam", B: "laptop"}) {
+		t.Fatalf("cam's pair not in force: %+v", cur.Pairs)
+	}
+	g.heard["vlan102"] = [][]string{{"cam", "local"}, {"tv", "local"}}
+	unrelated := clone(cur)
+	dev(&unrelated, "cam").Allow = append(dev(&unrelated, "cam").Allow, "b.example")
+	if screen, _, _ := g.open(unrelated, "allow"); strings.Contains(screen, "announce the name") {
+		t.Errorf("an unrelated link was filled:\n%s", screen)
 	}
 }
 
@@ -137,5 +162,39 @@ func TestHeardNamesNeedAHearer(t *testing.T) {
 	next := edit(2, func(d *policy.Document) { dev(d, "tv").MDNS = [][]string{{"tv", "local"}} })
 	if w := g.do(http.MethodGet, linkFor(next, "pin"), nil); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "the enforcer never heard tv") {
 		t.Errorf("a pin with no hearer: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestHeardFillsWhenPathOpens: a pair signed while it had no path (tv
+// isolated) is filled by the link that gives it its path, as a new pair
+// is, and not by a link that keeps the path as it was.
+func TestHeardFillsWhenPathOpens(t *testing.T) {
+	g := newRig(t)
+	g.heard["vlan104"] = [][]string{{"tv", "local"}}
+	cur := edit(2, func(d *policy.Document) {
+		d.Devices = append(d.Devices, policy.Device{ID: "laptop", Network: policy.NetHousehold, Everyday: true})
+		d.Pairs = []policy.Pair{{A: "laptop", B: "tv"}}
+		dev(d, "tv").Isolated = true
+	})
+	opened := clone(cur)
+	dev(&opened, "tv").Isolated = false
+	got, err := g.s.heard(cur, opened)
+	if err != nil || len(got.Device("tv").MDNS) != 1 {
+		t.Errorf("the path's return filled %q (%v)", got.Device("tv").MDNS, err)
+	}
+	// The other end's isolation lifted opens tv's path too.
+	camOff := edit(2, func(d *policy.Document) {
+		d.Pairs = []policy.Pair{{A: "cam", B: "tv"}}
+		dev(d, "cam").Isolated = true
+	})
+	camOn := clone(camOff)
+	dev(&camOn, "cam").Isolated = false
+	if got, err := g.s.heard(camOff, camOn); err != nil || len(got.Device("tv").MDNS) != 1 {
+		t.Errorf("the other end's return filled %q (%v)", got.Device("tv").MDNS, err)
+	}
+	kept := clone(opened)
+	dev(&kept, "tv").Allow = append(dev(&kept, "tv").Allow, "b.example")
+	if got, err := g.s.heard(opened, kept); err != nil || len(got.Device("tv").MDNS) != 0 {
+		t.Errorf("a kept path filled %q (%v)", got.Device("tv").MDNS, err)
 	}
 }

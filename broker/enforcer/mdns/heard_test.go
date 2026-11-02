@@ -87,6 +87,13 @@ func TestHeardOwnNames(t *testing.T) {
 	if got := f.Heard("ap0.105", t0.Add(ownHold)); len(got) != 0 {
 		t.Errorf("past ownHold: %q", got)
 	}
+	// A host and its instance saying goodbye together both end (L3 on
+	// #4531).
+	f.Prove("ap0.105", printerLink, response([]record{a("bye.local", "10.13.0.2", 120), srv("Bye._ipp._tcp.local", "bye.local", 120)}, nil), t0)
+	f.Prove("ap0.105", printerLink, response([]record{a("bye.local", "10.13.0.2", 0), srv("Bye._ipp._tcp.local", "bye.local", 0)}, nil), t0)
+	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Bye" || n[0] == "bye" }) {
+		t.Errorf("a host and instance saying goodbye together are still heard: %q", got)
+	}
 	// A goodbye proves no host for an SRV beside it.
 	f.Prove("ap0.105", printerLink, response([]record{a("gone.local", "10.13.0.2", 0), srv("Gone._ipp._tcp.local", "gone.local", 120)}, nil), t0)
 	if got := f.Heard("ap0.105", t0); slices.ContainsFunc(got, func(n []string) bool { return n[0] == "Gone" }) {
