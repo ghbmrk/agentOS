@@ -2055,7 +2055,8 @@ def unlock_closure_violations(root, dirs):
     for name, allowed in UNLOCK_CLOSURE.items():
         unlock = name in UNLOCK_UNITS
         typ = name.rsplit(".", 1)[1]
-        files = unit_with_dropins(root, dirs, name) or conf_files(
+        fragment = unit_with_dropins(root, dirs, name)
+        files = fragment or conf_files(
             root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
             + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
         keys = set(UNLOCK_UNIT_KEYS) | {k for k in allowed if not k.startswith(".") and k not in UNLOCK_PINNED}
@@ -2094,7 +2095,7 @@ def unlock_closure_violations(root, dirs):
         except (OSError, Unparsable) as e:
             out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
                        % (name, e.strerror if isinstance(e, OSError) else e))
-        for key in UNLOCK_PINNED:
+        for key in UNLOCK_PINNED if fragment else ():  # pinned against the shipped unit file, when one ships
             got = pinned.get(key, [])
             if tuple(v for _, v in got) != allowed.get(key, ()):
                 out.append("%s: %s=%s in %s; a value systemd pulls a unit from (#4696); allowed: %s" % (
