@@ -35,13 +35,10 @@ for p in (a for a in sys.argv[1:] if not a.startswith("-")):
 """
 
 # A stand-in sudo that runs nothing and logs each call's arguments, one call per line.
-# setUp puts it first on PATH for every test, so no step under test reaches a real sudo.
+# setUp puts it first on PATH for every test: a backstop, since no step a test runs whole names sudo.
 FAKE_SUDO = """#!/bin/sh
 printf '%s\\n' "$*" >> "$(dirname "$0")/sudo.log"
 """
-# A sudo named by a path, or found on a PATH the script changes or on bash's default PATH
-# (`command -p`), would bypass the stand-in.
-SUDO_BYPASS = re.compile(r"/sudo\b|\bPATH=|\benv\s+(?:-\S+\s+)*-[a-zA-Z]*P|\bhash\s+-p|\bcommand\s+(?:-\S+\s+)*-[a-zA-Z]*p")
 
 
 def build_steps():
@@ -66,6 +63,30 @@ def run_script(name):
     return "\n".join(l[10:] for l in lines[i + 1:]) + "\n"
 
 
+# #4440: the "Free runner disk" lines a test may run: the gb() df read and the notices that call it.
+# Every other line of the step must be a sudo command or its continuation, and no test runs those,
+# so no edit of the step can make a test delete toolchains on a CI runner with passwordless sudo.
+_ARG = r"[^$`;&|()<>\\]*"
+FREE_DISK_READS = re.compile(
+    r"gb\(\) \{ echo \$\(\( \$\(df %s\| tail %s\| tr %s\) / 1024 \)\); \}" % (_ARG, _ARG, _ARG)
+    + r'|echo "::notice title=disk budget::[^"$`\\]*\$\(gb\)[^"$`\\]*"')
+
+
+def free_disk_reads(script=None):
+    """The "Free runner disk" step with its sudo lines left out; any line of another shape fails."""
+    script = run_script("Free runner disk") if script is None else script
+    subprocess.run(["bash", "-n", "-c", script], check=True)  # parses the whole step, runs none of it
+    reads, cont = [], False
+    for line in script.splitlines():
+        if cont or line.startswith("sudo "):
+            cont = line.endswith("\\")
+        elif line.strip() and not FREE_DISK_READS.fullmatch(line):
+            raise AssertionError("Free runner disk: a line that is neither a sudo command nor a df read: " + line)
+        else:
+            reads.append(line)
+    return "\n".join(reads) + "\n"
+
+
 class DiskBudgetTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -88,12 +109,13 @@ class DiskBudgetTest(unittest.TestCase):
                 pass
         self.tmp.cleanup()
 
-    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None):
-        """Runs a step; FS maps mount points to (avail, used) MB, else one file system "/" has them."""
-        script = run_script(name)
-        # #4440: checked before the script runs, so a step that would reach a real sudo never runs here.
-        self.assertIsNone(SUDO_BYPASS.search(script), "%s names sudo so that PATH's stand-in is skipped" % name)
+    def run_step(self, name, avail_mb=0, used_mb=0, need="30", fs=None, vendor=None, script=None):
+        """Runs a step (or SCRIPT in its place); FS maps mount points to (avail, used) MB, else one file
+        system "/" has them."""
+        # #4440: a step that names sudo runs here only through a filter like free_disk_reads.
+        self.assertTrue(script is not None or "sudo" not in run_script(name), "%s names sudo: filter it" % name)
         self.assertEqual((self.t / "bin" / "sudo").read_text(), FAKE_SUDO, "the sudo stand-in is gone")
+        script = run_script(name) if script is None else script
         (self.t / "bin" / "fs.json").write_text(json.dumps(fs or {"/": (avail_mb, used_mb)}))
         dmi = self.t / "dmi"
         dmi.mkdir(exist_ok=True)
@@ -124,18 +146,25 @@ class DiskBudgetTest(unittest.TestCase):
         self.assertIn("runner has 29 GB; free more in \"Free runner disk\"", out)
 
     def test_free_runner_disk_notices_read_like_the_guard(self):
-        # #4434: one space, and GB as the guard writes it. sudo is setUp's stand-in, which runs nothing.
-        script = run_script("Free runner disk")
-        # #4440: what the step deletes it deletes through sudo, so dropping sudo cannot run rm as the runner user.
-        self.assertEqual(re.findall(r"(?<!sudo )\b(?:rm|docker)\b", script), [], script)
-        rc, out = self.run_step("Free runner disk", avail_mb=86 * 1024 + 500, used_mb=1000)
+        # #4434: one space, and GB as the guard writes it.
+        # #4440: only the step's df reads run here, never its sudo lines (free_disk_reads).
+        rc, out = self.run_step("Free runner disk", avail_mb=86 * 1024 + 500, used_mb=1000, script=free_disk_reads())
         self.assertEqual(rc, 0, out)
-        # Every sudo in the step reached the stand-in, the deletions among them.
-        calls = (self.t / "bin" / "sudo.log").read_text().splitlines()
-        self.assertEqual(len(calls), len(re.findall(r"\bsudo\b", script)), calls)
-        self.assertTrue(calls[0].startswith("rm -rf /usr/local/lib/android "), calls)
+        self.assertEqual((self.t / "bin" / "sudo.log").exists(), False, out)
         self.assertIn("::notice title=disk budget::/ had 86 GB free before freeing the runner disk\n", out)
         self.assertIn("::notice title=disk budget::/ has 86 GB free after freeing the runner disk\n", out)
+
+    def test_free_runner_disk_runs_only_its_reads_here(self):
+        # #4440: the step still frees disk through sudo, and a line of any other shape (a full sudo path,
+        # env, a script file) stops the test before anything runs.
+        script = run_script("Free runner disk")
+        self.assertRegex(script, r"(?m)^sudo rm -rf /usr/local/lib/android ")
+        self.assertNotIn("sudo", free_disk_reads())
+        for line in ("/usr/bin/sudo rm -rf /opt/ghc", "env -i sudo rm -rf /opt/ghc", "bash .github/free-disk.sh",
+                     'echo "::notice title=disk budget::$(/usr/bin/sudo rm -rf /opt/ghc) $(gb)"',
+                     "gb() { echo $(( $(df -BM --output=avail / | tail -n 1 | tr -dc 0-9; /usr/bin/sudo rm -rf /opt/ghc) / 1024 )); }"):
+            with self.assertRaises(AssertionError, msg=line):
+                free_disk_reads(script + line + "\n")
 
     def test_guard_passes_and_samples_when_the_budget_is_there(self):
         rc, out = self.run_step("Disk budget", avail_mb=31 * 1024, used_mb=50000)
