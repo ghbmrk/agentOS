@@ -445,7 +445,7 @@ class KeeperTreeTest(unittest.TestCase):
         # passes only in .wants/ under the unit's own name and pointing at its own unit file.
         name = "agentos-keeper-kernel.service"
         self.assertIn(name, ini(self.unit("agentos-link.service"))["Install"]["WantedBy"].split())
-        self.assertEqual(check.UNLOCK_CLOSURE[name], {".wants": ("agentos-link.service",)})
+        self.assertEqual(check.UNLOCK_CLOSURE[name], {".wants": ("agentos-link.service",), "Slice": ("agentos-keeper.slice",)})
         good = "/usr/lib/systemd/system/agentos-link.service"
         for d, target, want in (
                 (name + ".wants", good, []),
@@ -501,7 +501,7 @@ class KeeperTreeTest(unittest.TestCase):
         # None of the always-allowed keys starts or stops a unit.
         self.assertEqual(set(check.UNLOCK_UNIT_KEYS), {
             "Description", "Documentation", "After", "Before", "DefaultDependencies", "RefuseManualStart",
-            "ConditionPathExists", "StartLimitIntervalSec", "StartLimitBurst"})
+            "ConditionPathExists", "ConditionPathIsSymbolicLink", "StartLimitIntervalSec", "StartLimitBurst"})
         others = [k for k in self.UNIT_KEYS_257 if k not in check.UNLOCK_UNIT_KEYS and k not in listed]
         d = write(self.root, SYSTEM + name + ".d/99.conf", "[Unit]\n" + "".join("%s=x.target\n" % k for k in others))
         got = [line for line in self.v() if "a [Unit] key the check does not model" in line]
@@ -520,6 +520,21 @@ class KeeperTreeTest(unittest.TestCase):
             for key in check.UNLOCK_FOLLOWED:
                 for t in allowed.get(key, ()):
                     self.assertIn(t, c, (unit, key))
+            # Each service's slice (Slice=, else system.slice) and every parent of a slice, which systemd
+            # requires, are in the map too (#4696 L3).
+            if unit.endswith(".service"):
+                self.assertIn(allowed.get("Slice", ("system.slice",))[0], c, unit)
+            if unit.endswith(".slice") and unit != "-.slice":
+                parent = unit[:-len(".slice")].rsplit("-", 1)[0] + ".slice" if "-" in unit[:-6] else "-.slice"
+                self.assertIn(parent, c, unit)
+        # The dependency keys are 257.13's: every row of src/core/load-fragment-gperf.gperf.in parsed by
+        # config_parse_unit_deps, _obsolete_unit_deps, _unit_mounts_for, _unit_slice, _service_sockets,
+        # _socket_service or _trigger_unit (systemd v257.13), less the ordering-only After= and Before=.
+        self.assertEqual(check.UNLOCK_DEP_KEYS, set(
+            "BindTo BindsTo Conflicts JoinsNamespaceOf OnFailure OnSuccess PartOf PropagateReloadFrom "
+            "PropagateReloadTo PropagatesReloadTo PropagatesStopTo ReloadPropagatedFrom Requires RequiresMountsFor "
+            "RequiresOverridable Requisite RequisiteOverridable Service Slice Sockets StopPropagatedFrom Unit "
+            "Upholds Wants WantsMountsFor".split()))
         self.assertEqual(ini(self.unit("agentos-link.service"))["Unit"]["Requires"], "agentos-inbound.service")
         inbound = ini(self.unit("agentos-inbound.service"))["Unit"]
         self.assertEqual((inbound["Wants"], inbound["Conflicts"]), ("network-pre.target", "shutdown.target"))
@@ -532,15 +547,68 @@ class KeeperTreeTest(unittest.TestCase):
              why + "; allowed: Requires=agentos-inbound.service"),
             ("agentos-inbound.service", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target",
              why + "; allowed: Wants=network-pre.target"),
-            ("network-pre.target", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target", "a [Unit] key"))
+            ("network-pre.target", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target", "a [Unit] key"),
+            # L3 6587018617: a [Service] or other section's dependency key, on each unit the step starts.
+            ("agentos-link.service", "[Service]\nSockets=evil.socket\n", "Sockets=evil.socket", "a [Service] key"),
+            ("agentos-link.service", "[Service]\nSlice=evil.slice\n", "Slice=evil.slice", why + "; allowed: no Slice= at all"),
+            ("agentos-inbound.service", "[Service]\nSockets=evil.socket\n", "Sockets=evil.socket", "a [Service] key"),
+            ("agentos-inbound.service", "[Socket]\nService=evil.service\n", "Service=evil.service", "a [Socket] key"),
+            ("agentos-link.service", "[Path]\nUnit=reboot.target\n", "Unit=reboot.target", "a [Path] key"),
+            ("agentos-keeper.slice", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target", "a [Unit] key"),
+            ("agentos-keeper.slice", "[Slice]\nSlice=evil.slice\n", "Slice=evil.slice", "a [Slice] key"),
+            ("system.slice", "[Unit]\nUpholds=reboot.target\n", "Upholds=reboot.target", "a [Unit] key"),
+            # Security 6587168736: every key that pulls a unit from its value, on every unit the step starts,
+            # the unlock unit included; each is off its section's list, or held to its shipped value.
+            *((u, "[Service]\n%s=%s\n" % (k, val), "%s=%s" % (k, val), "a [Service] key")
+              for u in ("agentos-keeper-kernel.service", "agentos-link.service", "agentos-inbound.service")
+              for k, val in (("WorkingDirectory", "/srv/x"), ("RootDirectory", "/srv/x"), ("RootImage", "/srv/x.raw"),
+                             ("StateDirectory", "x"), ("CacheDirectory", "x"), ("LogsDirectory", "x"),
+                             ("ConfigurationDirectory", "x"), ("LogNamespace", "x"), ("BusName", "org.x"),
+                             ("PAMName", "login"))),
+            ("agentos-link.service", "[Service]\nSockets=evil.socket\n", "Sockets=evil.socket", "a [Service] key"),
+            ("agentos-link.service", "[Service]\nRuntimeDirectory=evil\n", None,
+             "a value systemd pulls a unit from (#4696); allowed: RuntimeDirectory=agentos-link"),
+            ("agentos-inbound.service", "[Service]\nType=dbus\n", None,
+             "a value systemd pulls a unit from (#4696); allowed: Type=oneshot"),
+            ("agentos-keeper-kernel.service", "[Service]\nType=dbus\n", "Type=dbus",
+             "a value systemd pulls a unit from (#4696); allowed: no Type= at all"),
+            ("agentos-keeper-kernel.service", "[Service]\nPrivateTmp=yes\n", "PrivateTmp=yes",
+             "a value systemd pulls a unit from (#4696); allowed: no PrivateTmp= at all"),
+            ("tmp.mount", "[Mount]\nWhat=/srv/x\n", None, "a value systemd pulls a unit from (#4696)"),
+            ("tmp.mount", "[Unit]\nWants=reboot.target\n", "Wants=reboot.target", "a [Unit] key"),
+            ("tmp.mount", "[Mount]\nOptions=x-systemd.requires=reboot.target\n", None,
+             "a value systemd pulls a unit from (#4696)"),
+            # R5: the reboot rule holds on every unit the step starts.
+            ("agentos-link.service", "[Service]\nExecStopPost=/usr/bin/systemctl reboot\n",
+             "ExecStopPost=/usr/bin/systemctl reboot", "can reboot the box with the unlock step"),
+            ("agentos-inbound.service", "[Service]\nExecStart=/usr/sbin/reboot\n", "ExecStart=/usr/sbin/reboot",
+             "can reboot the box with the unlock step"))
         for unit, text, assign, want in cases:
-            with self.subTest(unit=unit, assign=assign):
+            with self.subTest(unit=unit, text=text):
                 rel = SYSTEM + unit + ".d/99.conf"
                 d = write(self.root, rel, text)
-                got = self.v()
+                got = [line for line in self.v() if line.startswith(unit + ": ")]
                 d.unlink()
+                if unit == "agentos-keeper-kernel.service":  # the unlock unit's own rules may add their line
+                    got = [line for line in got if "#4667" in line or "#4696" in line] or got
                 self.assertEqual(len(got), 1, got)
-                self.assertTrue(got[0].startswith("%s: %s in %s; %s" % (unit, assign, rel, want)), got)
+                if assign is None:
+                    self.assertIn(want, got[0])
+                else:
+                    self.assertTrue(got[0].startswith("%s: %s in %s; %s" % (unit, assign, rel, want)), got)
+        # The mount units for the pinned paths, and their parents, are in the map: /run/<RuntimeDirectory>
+        # and /tmp, /var/tmp for PrivateTmp=yes (systemd 257.13 unit_add_exec_dependencies).
+        def mount_units(path):
+            parts = [p for p in path.split("/") if p]
+            return ["-.mount"] + ["-".join(x.replace("-", "\\x2d") for x in parts[:i + 1]) + ".mount"
+                                  for i in range(len(parts))]
+        for unit, allowed in c.items():
+            paths = ["/run/" + d for d in allowed.get("RuntimeDirectory", ())]
+            paths += ["/tmp", "/var/tmp"] if allowed.get("PrivateTmp") == ("yes",) else []
+            for path in paths:
+                for m in mount_units(path):
+                    self.assertIn(m, c, (unit, path))
+        self.assertEqual(set(check.UNLOCK_PINNED), {"RuntimeDirectory", "PrivateTmp", "Type", "What", "Options"})
         # A link that starts another unit with the edge link is refused too.
         link = self.root / SYSTEM / "agentos-link.service.wants" / "reboot.target"
         link.parent.mkdir(parents=True)
@@ -634,7 +702,11 @@ class KeeperTreeTest(unittest.TestCase):
             with self.subTest(new or old):
                 good = self.unit("agentos-keeper-kernel.service").read_text()
                 self.edit("agentos-keeper-kernel.service", old, new)
-                self.assertEqual(self.v(), ["agentos-keeper-kernel.service: " + want])
+                got = self.v()
+                if new.startswith("[Service]"):  # also off the unlock unit's [Service] key list (#4696)
+                    self.assertIn("StartLimitBurst=100 in %sagentos-keeper-kernel.service; a [Service] key the check "
+                                  "does not model" % SYSTEM, got.pop())
+                self.assertEqual(got, ["agentos-keeper-kernel.service: " + want])
                 self.unit("agentos-keeper-kernel.service").write_text(good)
 
     # #2998: after the unlock cap (#2977) no restart in the same boot unlocks, so a kernel that came up

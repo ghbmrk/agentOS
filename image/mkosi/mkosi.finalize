@@ -1526,25 +1526,85 @@ UNLOCK_ASSIGNMENTS = (
 # systemd starts the unit a link is named.
 UNLOCK_LINK_DIRS = (".wants", ".requires", ".upholds")
 # Every unit the unlock step starts, and what each may start or stop in turn: a closed map (#4667, #4696
-# Security R1). The unlock unit's own keys are UNLOCK_ASSIGNMENTS'; its one link is agentos-link.service,
-# which that unit's WantedBy= puts in its .wants/ (EDGE-link-core c2c). Each value a unit lists under
-# Wants=, Requires=, BindsTo= or a link directory is itself a key here, so the map is the whole set the
-# unlock step can start; a unit under Conflicts= is stopped, not started, and is not followed.
+# Security R1 and L3). The unlock unit's own [Unit] dependencies are UNLOCK_ASSIGNMENTS'; its one link is
+# agentos-link.service, which that unit's WantedBy= puts in its .wants/ (EDGE-link-core c2c). Each value a
+# unit lists under a followed key (UNLOCK_FOLLOWED: Wants=, Requires=, BindsTo=, Slice=, Sockets= or a link
+# directory) is itself a key here, and so are each service's slice (Slice=, or system.slice by default) and
+# that slice's parents, which systemd requires. A unit under Conflicts= is stopped, not started, and is not
+# followed. The keys systemd turns into a dependency on a unit named by a value are closed too: each section's
+# keys are on UNLOCK_SECTION_KEYS, and those that pull a mount or a type's unit (UNLOCK_PINNED) hold their
+# shipped values, whose mount units and parents are in the map. Not followed (#4738): the stock units systemd
+# 257.13 adds by fixed name (service.c service_add_default_dependencies, unit.c, mount.c): sysinit.target,
+# basic.target and shutdown.target by DefaultDependencies=, local-fs.target and umount.target for mounts,
+# journald's socket, systemd-oomd.service and the modprobe@ services. Nor the device's Wants= from udev's
+# SYSTEMD_WANTS (#4739; no rules file the image ships sets it, and each is on exec.allow by its hash).
 EDGE_LINK_DEVICE = "sys-subsystem-net-devices-agentos\\x2dlink.device"
+TMP_OPTIONS = "mode=1777,strictatime,nosuid,nodev,size=50%%,nr_inodes=1m"
 UNLOCK_CLOSURE = {
-    "agentos-keeper-kernel.service": {".wants": ("agentos-link.service",)},
-    "agentos-link.service": {"Requires": ("agentos-inbound.service",), "BindsTo": (EDGE_LINK_DEVICE,)},
+    "agentos-keeper-kernel.service": {".wants": ("agentos-link.service",), "Slice": ("agentos-keeper.slice",)},
+    "agentos-link.service": {"Requires": ("agentos-inbound.service",), "BindsTo": (EDGE_LINK_DEVICE,),
+                             "RuntimeDirectory": ("agentos-link",), "PrivateTmp": ("yes",)},
     EDGE_LINK_DEVICE: {".wants": ("agentos-link.service",)},
-    "agentos-inbound.service": {"Wants": ("network-pre.target",), "Conflicts": ("shutdown.target",)},
+    "agentos-inbound.service": {"Wants": ("network-pre.target",), "Conflicts": ("shutdown.target",),
+                                "Type": ("oneshot",)},
     "network-pre.target": {},
+    "agentos-keeper.slice": {},
+    "agentos.slice": {},
+    "system.slice": {},
+    "-.slice": {},
+    # The mount units for the pinned paths and each of their parents (unit_add_exec_dependencies):
+    # /run/agentos-link (RuntimeDirectory=) and /tmp, /var/tmp (PrivateTmp=). Only tmp.mount ships, as
+    # Debian's with the image's noexec drop-in.
+    "-.mount": {},
+    "run.mount": {},
+    "run-agentos\\x2dlink.mount": {},
+    "var.mount": {},
+    "var-tmp.mount": {},
+    "tmp.mount": {"Conflicts": ("umount.target",), "What": ("tmpfs",), "Type": ("tmpfs",),
+                  "Options": (TMP_OPTIONS, TMP_OPTIONS.replace("nodev,", "nodev,noexec,"))},
 }
-UNLOCK_FOLLOWED = ("Wants", "Requires", "BindsTo") + UNLOCK_LINK_DIRS
-# The [Unit] keys a unit in UNLOCK_CLOSURE may set at all: these, the keys its map entry lists, and for the
-# unlock unit UNLOCK_ASSIGNMENTS' [Unit] keys. Any other key (an alias such as BindTo=, a key a later
-# systemd adds, PartOf= or OnFailure= on another unit) is refused, so no spelling of a dependency is
-# missed: none of these starts or stops a unit.
+# The keys whose values pull a unit systemd chooses from them (#4696 Security 6587168736): a type, a mount
+# source, its options, or a path whose mount units are required or wanted. In a unit of UNLOCK_CLOSURE each
+# is set exactly as its map entry lists, in order, or not at all when the entry does not list it.
+UNLOCK_PINNED = ("RuntimeDirectory", "PrivateTmp", "Type", "What", "Options")
+UNLOCK_FOLLOWED = ("Wants", "Requires", "BindsTo", "Slice", "Sockets") + UNLOCK_LINK_DIRS
+# Every key systemd 257.13 reads as a dependency on another unit, by section: the rows of
+# src/core/load-fragment-gperf.gperf.in whose parser is config_parse_unit_deps,
+# config_parse_obsolete_unit_deps or config_parse_unit_mounts_for ([Unit], lines 295-317),
+# config_parse_unit_slice (Slice= in each cgroup context, line 198), config_parse_service_sockets (453),
+# config_parse_socket_service (517) or config_parse_trigger_unit (578, 584). After= and Before= only order.
+# In a unit of UNLOCK_CLOSURE each value of one of these keys, in any section, must be on its entry's list.
+UNLOCK_DEP_KEYS = frozenset((
+    "Requires", "Requisite", "Wants", "BindsTo", "BindTo", "Upholds", "Conflicts", "OnSuccess", "OnFailure",
+    "PropagatesReloadTo", "PropagateReloadTo", "ReloadPropagatedFrom", "PropagateReloadFrom", "PropagatesStopTo",
+    "StopPropagatedFrom", "PartOf", "JoinsNamespaceOf", "RequiresOverridable", "RequisiteOverridable",
+    "RequiresMountsFor", "WantsMountsFor", "Slice", "Sockets", "Service", "Unit"))
+# The [Unit] keys a unit in UNLOCK_CLOSURE may set at all: these, the dependency keys its map entry lists,
+# and for the unlock unit UNLOCK_ASSIGNMENTS' [Unit] keys. Any other key (an alias such as BindTo=, a key a
+# later systemd adds, PartOf= or OnFailure= on another unit) is refused: none of these starts or stops a unit.
 UNLOCK_UNIT_KEYS = ("Description", "Documentation", "After", "Before", "DefaultDependencies",
-                    "RefuseManualStart", "ConditionPathExists", "StartLimitIntervalSec", "StartLimitBurst")
+                    "RefuseManualStart", "ConditionPathExists", "ConditionPathIsSymbolicLink",
+                    "StartLimitIntervalSec", "StartLimitBurst")
+# Every other section is closed the same way (#4696 Security 6587168736): a unit of UNLOCK_CLOSURE may set
+# only these keys there, the ones its units ship today, and any key not listed is refused. Each one was read
+# in systemd 257.13 (load-fragment-gperf.gperf.in and unit_add_exec_dependencies): none names another unit
+# or a path that pulls one, except UNLOCK_DEP_KEYS and UNLOCK_PINNED, which are held to the map. A key that
+# would (Sockets= beyond UNLOCK_ASSIGNMENTS, WorkingDirectory=, RootDirectory=, RootImage=, StateDirectory=,
+# LogNamespace=, BusName=, ...) is not on the list. A section not listed here allows no key.
+UNLOCK_SECTION_KEYS = {
+    "Service": frozenset((
+        "CapabilityBoundingSet", "DeviceAllow", "DevicePolicy", "ExecPaths", "ExecStart", "ExecStartPre",
+        "ExecStopPost", "Group", "IPAddressAllow", "IPAddressDeny", "InaccessiblePaths", "LimitCORE",
+        "LockPersonality", "MemoryDenyWriteExecute", "NoExecPaths", "NoNewPrivileges", "PrivateDevices",
+        "PrivateIPC", "PrivateNetwork", "PrivateTmp", "ProtectClock", "ProtectControlGroups", "ProtectHome",
+        "ProtectHostname", "ProtectKernelLogs", "ProtectKernelModules", "ProtectKernelTunables", "ProtectProc",
+        "ProtectSystem", "RemainAfterExit", "Restart", "RestartMaxDelaySec", "RestartSec", "RestartSteps",
+        "RestrictAddressFamilies", "RestrictNamespaces", "RestrictRealtime", "RestrictSUIDSGID",
+        "RuntimeDirectory", "RuntimeDirectoryMode", "Slice", "StandardError", "SystemCallArchitectures",
+        "SystemCallErrorNumber", "SystemCallFilter", "Type", "UMask", "User")),
+    "Install": frozenset(("WantedBy",)),
+    "Mount": frozenset(("What", "Where", "Type", "Options")),
+}
 # The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
 # no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
 # an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
@@ -1998,27 +2058,49 @@ def unlock_closure_violations(root, dirs):
         files = unit_with_dropins(root, dirs, name) or conf_files(
             root, ["%s/%s.d" % (d, n) for d in UNIT_PATHS for n in unit_dropin_names(name)]
             + ["%s/%s.d" % (d, typ) for d in UNIT_PATHS])
-        keys = set(UNLOCK_UNIT_KEYS) | {k for k in allowed if not k.startswith(".")}
+        keys = set(UNLOCK_UNIT_KEYS) | {k for k in allowed if not k.startswith(".") and k not in UNLOCK_PINNED}
         shown = set(keys)  # the keys a refusal names as settable: never one whose closed list is empty
+        unlock_keys = {(s_, k) for s_, k, _, _ in UNLOCK_ASSIGNMENTS}
+        sections = dict(UNLOCK_SECTION_KEYS, Unit=keys)
         if unlock:
             keys |= {k for s_, k, _, _ in UNLOCK_ASSIGNMENTS if s_ == "Unit"}
             shown |= {k for s_, k, a, _ in UNLOCK_ASSIGNMENTS if s_ == "Unit" and a}
+            sections["Service"] = UNLOCK_SECTION_KEYS["Service"] | {k for s_, k, _, _ in UNLOCK_ASSIGNMENTS
+                                                                    if s_ == "Service"}
+        pinned = {}
         try:
             for f in files:
                 for section, key, v in config_lines(f.content()):
-                    if section != "Unit" or not v:
+                    if not v:
                         continue
-                    if key not in keys:
-                        out.append("%s: %s=%s in %s; a [Unit] key the check does not model on a unit the unlock "
-                                   "step starts (#4667); allowed: %s" % (name, key, v, f.rel, ", ".join(sorted(shown))))
-                    elif not unlock and key in allowed:
+                    if key not in sections.get(section, ()):
+                        out.append("%s: %s=%s in %s; a [%s] key the check does not model on a unit the unlock "
+                                   "step starts (#4667); allowed: %s" % (
+                                       name, key, v, f.rel, section, ", ".join(sorted(shown)) if section == "Unit"
+                                       else "the [%s] keys of UNLOCK_SECTION_KEYS" % section
+                                       if section in UNLOCK_SECTION_KEYS else "no [%s] key at all" % section))
+                    elif key in UNLOCK_PINNED:
+                        pinned.setdefault(key, []).append((f, v))
+                    elif key in UNLOCK_DEP_KEYS and not (unlock and (section, key) in unlock_keys):
+                        # Any section: systemd reads Slice=, Sockets=, Service= and Unit= outside [Unit] (L3).
                         for w in v.split():
-                            if w not in allowed[key]:
+                            if w not in allowed.get(key, ()):
                                 out.append("%s: %s=%s in %s; %s; allowed: %s" % (
-                                    name, key, w, f.rel, UNLOCK_PULL, unlock_allowed(key, allowed[key])))
+                                    name, key, w, f.rel, UNLOCK_PULL, unlock_allowed(key, allowed.get(key, ()))))
+                    elif key in EXEC_KEYS and not unlock and REBOOT_WORDS.search(v):
+                        # R5: the unlock unit's reboot rule holds on every unit it starts.
+                        out.append("%s: %s=%s in %s; can reboot the box with the unlock step; its one reboot is "
+                                   "ExecStopPost=KERNEL_REBOOT (#2897, #2998)" % (name, key, v, f.rel))
         except (OSError, Unparsable) as e:
             out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
                        % (name, e.strerror if isinstance(e, OSError) else e))
+        for key in UNLOCK_PINNED:
+            got = pinned.get(key, [])
+            if tuple(v for _, v in got) != allowed.get(key, ()):
+                out.append("%s: %s=%s in %s; a value systemd pulls a unit from (#4696); allowed: %s" % (
+                    name, key, " ".join(v for _, v in got) or "(unset)",
+                    ", ".join(sorted({f.rel for f, _ in got})) or "no file",
+                    " then ".join("%s=%s" % (key, a) for a in allowed.get(key, ())) or "no %s= at all" % key))
         for d in UNIT_PATHS:
             for n in unit_dropin_names(name) + [typ]:
                 for suffix in UNLOCK_LINK_DIRS:
