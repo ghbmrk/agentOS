@@ -581,6 +581,41 @@ func TestChallengeIDOutstanding(t *testing.T) {
 	}
 }
 
+// TestRatesIgnoreWallSteps (#4507, KRN-chan-4): the rates read the
+// enforcer's own elapsed time, never its wall clock, so a wall clock
+// stepped back an hour neither pauses their refill nor makes an honest
+// kernel's next message, one interval later, a burst; nor does a step
+// forward refill them. Revert mutant: the buckets reading Config.Now.
+func TestRatesIgnoreWallSteps(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	l := wire.Rate(wire.RateAnnounce)
+	id := uint64(0)
+	announce := func() wire.Code { id++; return cl.code(wire.Announce{ID: id}) }
+	for range l.Burst {
+		if c := announce(); c != wire.OK {
+			t.Fatalf("announce inside the burst: %v", c)
+		}
+	}
+	r.mu.Lock()
+	r.wallStep = -time.Hour
+	r.mu.Unlock()
+	r.advance(l.Every)
+	if c := announce(); c != wire.OK || r.cut.trips() != 0 {
+		t.Fatalf("one interval after a burst, with the wall clock stepped back: %v, %d trips", c, r.cut.trips())
+	}
+	r.mu.Lock()
+	r.wallStep = 24 * time.Hour
+	r.mu.Unlock()
+	announce()
+	if r.cut.trips() != 1 {
+		t.Fatalf("a wall clock stepped forward refilled the rate: %d trips, want 1", r.cut.trips())
+	}
+	if e := r.events(); e[len(e)-1].At != r.now.Add(24*time.Hour) {
+		t.Errorf("log line at %v, want the wall clock's time", e[len(e)-1].At)
+	}
+}
+
 // TestSinksRequired (NET-2 Safety devices, Channel): a channel cannot be
 // built without its log or its alerts, so no command acts unlogged and no
 // heater off or valve shut goes untexted. Revert mutant: New accepting a

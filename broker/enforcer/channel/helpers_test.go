@@ -206,9 +206,13 @@ type rig struct {
 	revoked bool
 	answers []uint64
 
-	mu  sync.Mutex
-	now time.Time
-	log []Event
+	mu sync.Mutex
+	// now is the rate clock's time (Elapsed is now less start); the wall
+	// clock (Now) reads now plus wallStep, as a box whose wall clock was
+	// stepped would.
+	now      time.Time
+	wallStep time.Duration
+	log      []Event
 	// logReenter, if set, runs inside each log call, as a slice h sink
 	// that calls back into the channel would.
 	logReenter func()
@@ -274,7 +278,8 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 				f()
 			}
 		},
-		Now:    func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
+		Now:     func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Add(r.wallStep) },
+		Elapsed: func() time.Duration { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Sub(start) },
 	}
 	if cfg != nil {
 		cfg(&c)

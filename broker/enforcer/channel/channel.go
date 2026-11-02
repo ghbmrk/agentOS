@@ -135,8 +135,18 @@ type Config struct {
 	// channel's lock, so it may call the channel, and concurrently for
 	// several connections (ENF-d-7).
 	Log func(Event)
-	// Now is the clock; nil is time.Now.
+	// Now is the wall clock the log lines and the policy's times read;
+	// nil is time.Now. No rate reads it, so a step of the wall clock
+	// neither refills nor pauses one.
 	Now func() time.Time
+	// Elapsed is the rate clock (#4507): the enforcer's time since any
+	// fixed origin, which must never step back and must keep counting
+	// while the box is suspended, as Linux's CLOCK_BOOTTIME does, so the
+	// rates refill while the kernel's check, on the core's clock, sees
+	// time pass (chancheck KRN-chan-4). Slice l wires CLOCK_BOOTTIME.
+	// nil is Go's monotonic reading since New, which never steps back but
+	// stops while the box is suspended (ENF-d-10).
+	Elapsed func() time.Duration
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
@@ -219,9 +229,13 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	now := cfg.Now()
-	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{},
-		refused: wire.NewBucket(refusedLimit, now), preAuthB: wire.NewBucket(preAuthLimit, now)}
+	if cfg.Elapsed == nil {
+		t0 := time.Now()
+		cfg.Elapsed = func() time.Duration { return time.Since(t0) }
+	}
+	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{}}
+	now := c.rateNow()
+	c.refused, c.preAuthB = wire.NewBucket(refusedLimit, now), wire.NewBucket(preAuthLimit, now)
 	for _, k := range wire.RateKinds {
 		if k == wire.RateHello {
 			c.hello = wire.NewBucket(wire.Rate(k), now)
@@ -315,6 +329,14 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	}
 }
 
+// rateNow is the time every rate reads: the enforcer's elapsed time
+// (Config.Elapsed), never its wall clock (#4507). The buckets also never
+// let it step back (wire.Bucket).
+func (c *Channel) rateNow() time.Time { return rateEpoch.Add(c.cfg.Elapsed()) }
+
+// rateEpoch is the rate clock's zero; only differences of it are read.
+var rateEpoch = time.Unix(0, 0)
+
 // countHello counts an authenticated hello as it arrives. Only the
 // authenticated core counts toward a trip (#3755), and only while it is
 // not already cut: after a trip its reconnects take their rate but trip
@@ -324,7 +346,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 func (c *Channel) countHello() {
 	c.helloMu.Lock()
 	open := c.cfg.Cut.Stage() == Open
-	took := c.hello.Take(c.cfg.Now())
+	took := c.hello.Take(c.rateNow())
 	c.helloMu.Unlock()
 	if open && !took {
 		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
@@ -377,7 +399,7 @@ func (c *Channel) preAuth(reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
 	now := c.cfg.Now()
-	if c.preAuthB.Take(now) {
+	if c.preAuthB.Take(c.rateNow()) {
 		c.preAuthQuiet = false
 		c.log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
