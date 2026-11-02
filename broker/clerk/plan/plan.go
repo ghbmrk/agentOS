@@ -76,7 +76,6 @@ type Endpoint struct {
 	// the code, then the authorization code and PKCE verifier). Each is
 	// swapped for a placeholder of that sign-in guest before the answer
 	// reaches it, and the real value stays in this clerk's memory (CLK-1).
-	// Such a step passes an error answer's status only.
 	Secret []string
 	// Takes, on a device or code step, maps each request key that must
 	// carry the guest's placeholder to the Secret it stands for; the clerk
@@ -1109,11 +1108,11 @@ func (p *Login) answerHeader(k string) bool {
 }
 
 // device makes a device step and reads its answer whole: one too large to
-// read, or with a body that is not a JSON object, is dropped. It records the user code a step declares for guest, and
-// swaps each declared secret for a new placeholder of guest's, so no secret
-// reaches the guest (CLK-1). A step that declares a secret passes an error
-// answer's status only, and drops an answer that lacks one of its secrets or
-// carries a secret's value anywhere else.
+// read, or with a body that is not a JSON object, is dropped, and an error
+// answer passes its status only. It records the user code a step declares
+// for guest, and swaps each declared secret for a new placeholder of
+// guest's, so no secret reaches the guest (CLK-1); an answer that lacks one
+// of its secrets or carries a held secret's value anywhere else is dropped.
 func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Response, string) {
 	a, detail := p.exchange(up)
 	if detail != "" {
@@ -1123,7 +1122,7 @@ func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Respon
 		return nil, DUndeclared
 	}
 	body, code := a.body, ""
-	if a.status != http.StatusOK && len(e.Secret) > 0 {
+	if a.status != http.StatusOK {
 		body = nil
 	}
 	// A body passes only as this clerk's own encoding of a JSON object, so
@@ -1173,13 +1172,11 @@ func (p *Login) device(up *http.Request, guest string, e Endpoint) (*http.Respon
 	if code != "" {
 		p.shown[guest] = code
 	}
-	if len(held) > 0 {
-		if p.secrets[guest] == nil {
-			p.secrets[guest] = map[string]signSecret{}
-		}
-		for k, s := range held {
-			p.secrets[guest][k] = s
-		}
+	if p.secrets[guest] == nil {
+		p.secrets[guest] = map[string]signSecret{}
+	}
+	for k, s := range held {
+		p.secrets[guest][k] = s
 	}
 	return out, ""
 }
@@ -1217,10 +1214,8 @@ func (p *Login) heldSecrets(guest string) []signSecret {
 // own encoding, so an escaped secret has one written form.
 func leaks(body []byte, h http.Header, secrets []signSecret) bool {
 	for _, s := range secrets {
-		forms := []string{s.real}
-		if q, err := encodeJSON(s.real); err == nil && len(q) > 2 {
-			forms = append(forms, string(q[1:len(q)-1]))
-		}
+		q, _ := encodeJSON(s.real) // a string always encodes, quoted
+		forms := []string{s.real, string(q[1 : len(q)-1])}
 		for _, f := range forms {
 			if bytes.Contains(body, []byte(f)) || headerHolds(h, f) || strings.Contains(s.ph, f) {
 				return true

@@ -46,6 +46,8 @@ type planFix struct {
 	answer    func(w http.ResponseWriter, r *http.Request, body string) bool
 	exchanges atomic.Int32
 	gate      chan struct{} // if set, a refresh waits on it
+	// usercode, if set, answers the user code step instead of the fake's own.
+	usercode func(w http.ResponseWriter) bool
 	// device, if set, answers the device token poll instead of the fake's own.
 	device func(w http.ResponseWriter, r *http.Request, body string) bool
 	// stream, if set, answers a model call instead of the fake's own.
@@ -112,6 +114,9 @@ func (f *planFix) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	switch r.URL.Path {
 	case "/api/accounts/deviceauth/usercode":
+		if f.usercode != nil && f.usercode(w) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"device_auth_id":"real-device-1","user_code":"ABCD-1234"}`))
 	case "/api/accounts/deviceauth/token":

@@ -330,3 +330,39 @@ func TestPlanSignInDropsATokenAnswerEchoingASecret(t *testing.T) {
 		t.Fatal("an echoing token answer was stored")
 	}
 }
+
+// A device step's user code and secrets are held to maxDevice (512 bytes):
+// a user code at the bound is recorded and one past it is not; a secret at
+// the bound is held and one past it drops the answer.
+func TestPlanSignInHoldsDeviceValuesToTheirBound(t *testing.T) {
+	f := newPlanFix(t)
+	p := f.login(t)
+	if err := p.BeginSignIn("s"); err != nil {
+		t.Fatal(err)
+	}
+	var code, dev string
+	f.usercode = func(w http.ResponseWriter) bool {
+		b, _ := json.Marshal(map[string]string{"device_auth_id": dev, "user_code": code})
+		w.Write(b)
+		return true
+	}
+	step := func() (*http.Response, string) {
+		return p.Do(context.Background(), "s", jsonReq("/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`), nil)
+	}
+	code, dev = strings.Repeat("C", 512), strings.Repeat("d", 512)
+	resp, d := step()
+	if d != "" || p.UserCode("s") != code {
+		t.Fatalf("values at the bound: %q, recorded %d bytes", d, len(p.UserCode("s")))
+	}
+	if b := read(t, resp); strings.Contains(b, dev) {
+		t.Fatal("a device id at the bound reached the guest")
+	}
+	code = strings.Repeat("E", 513)
+	if _, d := step(); d != "" || p.UserCode("s") != strings.Repeat("C", 512) {
+		t.Fatalf("a user code past the bound: %q, recorded %d bytes", d, len(p.UserCode("s")))
+	}
+	code, dev = "ABCD-1234", strings.Repeat("d", 513)
+	if resp, d := step(); resp != nil || d != plan.DSecret {
+		t.Fatalf("a device id past the bound: %v %q", resp, d)
+	}
+}
