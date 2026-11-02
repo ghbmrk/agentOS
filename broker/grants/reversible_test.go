@@ -19,7 +19,7 @@ import (
 func (f *fakeOwner) hold(req string, item int, it owner.Item) owner.Decision {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	q := owner.Queued{ID: fmt.Sprintf("sk-secret-shaped-hold-%d", len(f.due)+len(f.queued)+1), SendAt: f.now().Add(it.UndoWindow),
+	q := owner.Queued{ID: fmt.Sprintf("sk-secret-shaped-hold-id-%d", len(f.due)+len(f.queued)+1), SendAt: f.now().Add(it.UndoWindow),
 		Reply: owner.AutoReply{Ref: it.Ref}, Held: true}
 	f.due = append(f.due, q)
 	return owner.Decision{Request: req, Item: item, Ref: it.Ref, Approved: true, Why: "owner", Hold: q.ID, Until: q.SendAt}
@@ -162,6 +162,7 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
+	r.own.plain = true // a quoted request is not a quoted hold
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
 	r.exec.fail = map[string]bool{reversible.InverseID("agent/s1", 1): true, reversible.StageID("agent/s2", 1): true}
@@ -398,6 +399,7 @@ func TestFormsNeverReachPreAllowancesSecretsOrBadDeclarations(t *testing.T) {
 func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
 	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
+	r.own.plain = true // a quoted request is not a quoted hold
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
 
@@ -478,6 +480,7 @@ func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
 func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
 	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
 	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
+	r.own.plain = true // a quoted request is not a quoted hold
 	r.grant(mailGrant())
 	r.ver.set("inv-1042", sam())
 	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")

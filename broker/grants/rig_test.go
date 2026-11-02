@@ -35,6 +35,7 @@ type fakeOwner struct {
 	lateUndo   map[string]bool // UndoneAfterRelease
 	deadlines  []time.Time     // the deadline of each item asked by RequestEach or RequestLocalEach
 	slow       func()          // runs at the end of RequestEach: a slow text send
+	plain      bool            // requests get plain IDs, told apart from holds once quoted
 }
 
 // expired refuses a re-issued item whose deadline has passed, as the
@@ -58,10 +59,19 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 			return "", owner.ErrLocalOnly // as the channel refuses it
 		}
 	}
-	id := fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
+	id := f.reqID()
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
 	return id, nil
+}
+
+// reqID names the next request: secret-shaped (newOwner), or plain "R<n>"
+// when plain is set (L3 on #4553).
+func (f *fakeOwner) reqID() string {
+	if f.plain {
+		return fmt.Sprintf("R%d", len(f.order)+1)
+	}
+	return fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
 }
 
 // RequestLocalEach records requests asked on the local page (P2-2a),
@@ -83,7 +93,7 @@ func (f *fakeOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) 
 			err = owner.ErrExpired
 			continue
 		}
-		ids[i] = fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
+		ids[i] = f.reqID()
 		f.reqs[ids[i]] = []owner.Item{it}
 		f.order = append(f.order, ids[i])
 		f.local = append(f.local, ids[i])
@@ -338,7 +348,7 @@ func (r *rig) newOwner() *fakeOwner {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		for _, n := range f.notes {
-			if owner.AgentSecret(n) {
+			if owner.AgentSecret(n) || owner.AgentVoice(n) {
 				r.t.Errorf("an owner note quotes agent text raw: %q", n)
 			}
 		}
