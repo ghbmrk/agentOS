@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ghbmrk/agentos/broker/enforcer/nft"
 	"github.com/ghbmrk/agentos/broker/enforcer/policy"
 	"github.com/ghbmrk/agentos/broker/enforcer/wire"
 )
@@ -146,6 +147,26 @@ func (c *Counter) SetCaps(caps Caps) {
 	for d := range c.caps.Core {
 		delete(c.retired, d)
 	}
+	c.fitRetired()
+}
+
+// fitRetired keeps the day's caps, the listed ones and the retired ones
+// together, at most 2^64-1, so no group's cap can pass it (#4561 Security
+// release item): the listed caps count in full, and each retired cap, in
+// name order, keeps at most what room is left. A group of a=2^63 in one
+// version and b=2^63 in the next then has the cap 2^64-1, which the shared
+// format holds, rather than one it refuses, which would stop the core's
+// capped sends until midnight. The caller holds c.mu.
+func (c *Counter) fitRetired() {
+	var total uint64
+	for _, n := range c.caps.Core {
+		total = sat(total, n)
+	}
+	for _, d := range slices.Sorted(maps.Keys(c.retired)) {
+		n := min(c.retired[d], ^uint64(0)-total)
+		c.retired[d] = n
+		total += n
+	}
 }
 
 // Resolved records that the enforcer's own resolver answered dest with
@@ -262,9 +283,56 @@ func (c *Counter) roll() {
 	}
 }
 
+// live is whether addr joins its destinations' groups: it was resolved
+// today or carried bytes today. The caller holds c.mu.
+func (c *Counter) live(a netip.Addr) bool { return c.resolved[a] == c.day || c.bytes[a] > 0 }
+
+// Drop is the day's counts as the firewall's in-kernel drop takes them
+// (nft.Drops): groups as Counts has them, except that every address the
+// counter holds destinations for joins them, not only those resolved or
+// carrying bytes today, and its addresses. The kernel cannot tell when an
+// address shared by two groups' destinations starts carrying bytes, which
+// merges the two (ENF-cap-3), so it holds them merged already: its cap is
+// never below the counter's, so it never drops a byte the counter lets
+// pass, and where the groups are the same, as once the shared address
+// carries bytes, it drops at the counter's edge to the byte
+// (ASSUMPTIONS ENF-cap-trip-c-2). The caller adds a reading first, and applies it after every
+// reading and with every ruleset load, so the kernel drops past each cap
+// from the counts the enforcer holds, a restored count included
+// (ASSUMPTIONS ENF-cap-6).
+func (c *Counter) Drop() nft.Drop {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roll()
+	groups, _ := c.groupsBy(func(netip.Addr) bool { return true })
+	out := nft.Drop{Day: c.day, Groups: make([]nft.DropGroup, len(groups)), EdgeCap: c.caps.Edge, EdgeCount: c.edge}
+	at := map[string]int{}
+	for i, g := range groups {
+		for _, d := range g.dests {
+			at[d] = i
+		}
+		out.Groups[i] = nft.DropGroup{Dests: g.dests, Caps: g.own, Cap: g.cap, Count: g.count}
+	}
+	for a, ds := range c.dests {
+		for d := range ds {
+			i := at[d] // every destination of an address is in one group
+			out.Groups[i].Addrs = append(out.Groups[i].Addrs, a)
+			break
+		}
+	}
+	for i := range out.Groups {
+		slices.SortFunc(out.Groups[i].Addrs, netip.Addr.Compare)
+	}
+	return out
+}
+
 // groups is the day's cap groups and the bytes no destination resolved to.
 // The caller holds c.mu.
-func (c *Counter) groups() ([]group, uint64) {
+func (c *Counter) groups() ([]group, uint64) { return c.groupsBy(c.live) }
+
+// groupsBy is groups with the addresses join says join their destinations'
+// groups. The caller holds c.mu.
+func (c *Counter) groupsBy(join func(netip.Addr) bool) ([]group, uint64) {
 	parent := map[string]string{}
 	var find func(string) string
 	find = func(d string) string {
@@ -285,11 +353,8 @@ func (c *Counter) groups() ([]group, uint64) {
 	for d := range c.caps.Core {
 		find(d)
 	}
-	// An address joins its destinations' groups when it was resolved
-	// today or carried bytes today.
-	live := func(a netip.Addr) bool { return c.resolved[a] == c.day || c.bytes[a] > 0 }
 	for a, ds := range c.dests {
-		if !live(a) {
+		if !join(a) {
 			continue
 		}
 		var first string
@@ -429,17 +494,15 @@ func Restore(now func() time.Time, caps Caps, b []byte) (*Counter, error) {
 	}
 	for a, ds := range s.Dests {
 		for _, d := range ds {
-			c.named(d, a.Unmap())
+			c.named(d, a.Unmap()) // keeps the saved idle clock set above
 		}
-	}
-	for a, d := range s.Used { // the saved idle clocks, not named's today
-		c.used[a.Unmap()] = d
 	}
 	for d, n := range s.Retired {
 		if _, listed := c.caps.Core[d]; !listed {
 			c.retired[d] = n
 		}
 	}
+	c.fitRetired()
 	c.gen, c.seen, c.lastEdge, c.edge = s.Gen, s.Seen, s.LastEdge, s.Edge
 	// The saved day is the counts' day: one before today's rolls over
 	// here, clearing them, as it would have at midnight.

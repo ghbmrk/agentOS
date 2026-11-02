@@ -97,7 +97,7 @@ func TestSharedSegmentRelatedBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.load(text)
+	h.load(withDrops(t, d, text))
 	h.fillSets()
 	segs := []string{"guest", "owner", "household"}
 	for _, seg := range segs {
@@ -358,7 +358,7 @@ func TestSharedLabelFreeLoad(t *testing.T) {
 	if strings.Contains(free, "label") {
 		t.Fatal("the label-free ruleset still uses labels")
 	}
-	h.load(free)
+	h.load(withDrops(t, cutPolicy(), free))
 	h.fillSets()
 	h.share("guest")
 	peer := netOther
