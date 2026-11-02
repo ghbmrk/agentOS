@@ -88,7 +88,7 @@ func TestStackDumpsNoCore(t *testing.T) {
 	if err := os.Mkdir(at("run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	thread := Thread(viewUID, viewUID, at(vState), at("run"), devNull)
+	thread := threadProfile(viewUID, viewUID, at(vState), at("run"), devNull)
 	thread.View = append(thread.View, Entry{Path: at(vBus), Kind: Socket})
 	thread.Links = nil // the enforcer's links need CONFIG_DUMMY; this test is about the limit
 	ble := BLE(viewUID, viewUID)

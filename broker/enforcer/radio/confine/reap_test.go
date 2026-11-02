@@ -1,6 +1,7 @@
 package confine
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -35,8 +36,8 @@ const sleepArg = "confine-sleep"
 
 // initArg makes this test binary a stack that leaves a signal to the
 // kernel's default action: "term" sends itself SIGTERM, writes one byte
-// on fd 3, waits for one byte there (the test's own SIGTERM comes in
-// between), writes another and sleeps; "fault" faults (SIGSEGV).
+// on fd 3, then echoes each byte it reads there (the test's own signals
+// come in between); "fault" faults (SIGSEGV).
 const initArg = "confine-init-signal"
 
 func initSignal(mode string) int {
@@ -59,14 +60,14 @@ func initSignal(mode string) int {
 	if _, err := syscall.Write(3, []byte{1}); err != nil {
 		return 5
 	}
-	if n, _ := syscall.Read(3, make([]byte, 1)); n != 1 {
-		return 6
+	for b := make([]byte, 1); ; {
+		if n, _ := syscall.Read(3, b); n != 1 {
+			return 6
+		}
+		if _, err := syscall.Write(3, b); err != nil {
+			return 7
+		}
 	}
-	if _, err := syscall.Write(3, []byte{2}); err != nil {
-		return 7
-	}
-	time.Sleep(time.Hour)
-	return 0
 }
 
 // nilOf returns *p, a nil pointer the compiler cannot see is nil.
@@ -205,7 +206,9 @@ func TestCleanExitDespiteLeakedStderr(t *testing.T) {
 // stack that sends itself SIGTERM still answers, and still answers after
 // the enforcer sends it SIGTERM from outside. Its crash is not dropped: a
 // fault at the default action still ends it, by SIGSEGV, and the
-// enforcer's SIGKILL (Stop) ends the other. This pins
+// enforcer's SIGKILL (Stop) ends the other. SIGSTOP from outside is not
+// dropped: the stack stops (state T) and answers nothing, until SIGCONT
+// resumes it and it answers again (#4638). This pins
 // the limit ENF-k-12 names; a launcher that stops making the stack init
 // (or adds an init of its own in front of it) fails here until that row
 // is rewritten.
@@ -233,7 +236,7 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 		conn.Write([]byte{1})
 		if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
 			t.Errorf("the stack did not answer after the enforcer's SIGTERM: %v (%v)", err, term.Stop())
-		} else {
+		} else if stopAndContinue(t, term, conn) {
 			signaled(t, "Stop", term.Stop(), syscall.SIGKILL)
 		}
 	}
@@ -252,6 +255,53 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 		fault.Stop()
 		t.Fatal("a stack that faulted at the default action was not ended: init kept it alive")
 	}
+}
+
+// stopAndContinue sends a stack that echoes on conn SIGSTOP from outside
+// and checks it stops and answers nothing, then SIGCONT and checks it
+// answers again (ENF-k-12, #4638). It reports whether the stack still
+// runs; otherwise it has stopped it.
+func stopAndContinue(t *testing.T, p *Proc, conn *os.File) bool {
+	t.Helper()
+	if err := syscall.Kill(p.Pid(), syscall.SIGSTOP); err != nil {
+		t.Errorf("the enforcer's SIGSTOP: %v (%v)", err, p.Stop())
+		return false
+	}
+	state := ""
+	for end := time.Now().Add(10 * time.Second); state != "T" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		state = procState(p.Pid())
+	}
+	if state != "T" {
+		t.Errorf("after the enforcer's SIGSTOP the stack is in state %q, want T (stopped): init dropped it (%v)", state, p.Stop())
+		return false
+	}
+	conn.Write([]byte{2})
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if n, err := conn.Read(make([]byte, 1)); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("a stopped stack answered: %d bytes, %v (%v)", n, err, p.Stop())
+		return false
+	}
+	if err := syscall.Kill(p.Pid(), syscall.SIGCONT); err != nil {
+		t.Errorf("the enforcer's SIGCONT: %v (%v)", err, p.Stop())
+		return false
+	}
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	b := make([]byte, 1)
+	if _, err := io.ReadFull(conn, b); err != nil || b[0] != 2 {
+		t.Errorf("the stack did not answer after SIGCONT: %v, %v (%v)", b, err, p.Stop())
+		return false
+	}
+	return true
+}
+
+// procState is the state letter /proc/pid/stat shows, or "" if it reads none.
+func procState(pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	i := bytes.LastIndexByte(b, ')')
+	if err != nil || i < 0 || len(b) < i+3 {
+		return ""
+	}
+	return string(b[i+2])
 }
 
 // TestNetRefIsCloseOnExec (NET-2 Confined radio stacks; #4616 item 2):
