@@ -48,11 +48,17 @@ func newSeenRig(t *testing.T) *seenRig {
 
 func (r *seenRig) opened(day string) (map[string]string, MailStatus) {
 	r.t.Helper()
+	return r.openedStop(day, nil)
+}
+
+// openedStop is opened with the record's save stopped by stop.
+func (r *seenRig) openedStop(day string, stop func(i int) bool) (map[string]string, MailStatus) {
+	r.t.Helper()
 	ms, err := r.box.Read(context.Background())
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	return lastOpened(context.Background(), r.box, r.dir, testSealer(), r.slot, day, ms, nil)
+	return lastOpened(context.Background(), r.box, r.dir, testSealer(), r.slot, day, ms, nil, stop)
 }
 
 func mailFrom(from, id string) string {
