@@ -427,12 +427,39 @@ class KeeperTreeTest(unittest.TestCase):
                         link = self.root / d / (n + suffix) / "reboot.target"
                         link.parent.mkdir(parents=True, exist_ok=True)
                         link.symlink_to("/usr/lib/systemd/system/reboot.target")
+                        allowed = ("%s.wants/agentos-link.service" % name if (n, suffix) == (name, ".wants")
+                                   else "no %s link at all" % suffix[1:])
                         self.assertEqual(self.v(), [
-                            "%s: %s%s%s/reboot.target; %s; allowed: no %s link at all"
-                            % (name, d, n, suffix, check.UNLOCK_PULL, suffix[1:])])
+                            "%s: %s%s%s/reboot.target; %s; allowed: %s"
+                            % (name, d, n, suffix, check.UNLOCK_PULL, allowed)])
                         link.unlink()
                         link.parent.rmdir()
         self.assertEqual(self.v(), [])
+
+    def test_the_shipped_wants_link_of_the_unlock_unit_passes(self):
+        # agentos-link.service's WantedBy= (EDGE-link-core c2c) is the one link the image ships there; it
+        # passes only in .wants/ under the unit's own name and pointing at its own unit file.
+        name = "agentos-keeper-kernel.service"
+        self.assertIn(name, ini(self.unit("agentos-link.service"))["Install"]["WantedBy"].split())
+        self.assertEqual(check.UNLOCK_LINKS, {".wants": ("agentos-link.service",)})
+        good = "/usr/lib/systemd/system/agentos-link.service"
+        for d, target, want in (
+                (name + ".wants", good, []),
+                (name + ".requires", good, ["usr/lib/systemd/system/%s.requires/agentos-link.service; %s; allowed: no "
+                                            "requires link at all" % (name, check.UNLOCK_PULL)]),
+                ("agentos-keeper-.service.wants", good,
+                 ["usr/lib/systemd/system/agentos-keeper-.service.wants/agentos-link.service; %s; allowed: no wants link "
+                  "at all" % check.UNLOCK_PULL]),
+                (name + ".wants", "/usr/lib/systemd/system/reboot.target",
+                 ["usr/lib/systemd/system/%s.wants/agentos-link.service; %s; allowed: %s.wants/agentos-link.service"
+                  % (name, check.UNLOCK_PULL, name)])):
+            with self.subTest(d=d, target=target):
+                link = self.root / SYSTEM / d / "agentos-link.service"
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target)
+                self.assertEqual(self.v(), [name + ": " + w for w in want])
+                link.unlink()
+                link.parent.rmdir()
 
     def test_no_later_assignment_hides_an_unlock_unit_value(self):
         # The value in the unit, then an empty or another assignment in a later drop-in; or both in one drop-in.

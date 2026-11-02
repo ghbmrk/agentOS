@@ -1513,8 +1513,11 @@ UNLOCK_ASSIGNMENTS = (
     ("Unit", "Conflicts", (), UNLOCK_PULL),
     ("Unit", "PropagatesStopTo", (), UNLOCK_PULL),
 )
-# The link directories that add the same dependencies as Wants=, Requires= and Upholds= (#4667).
+# The link directories that add the same dependencies as Wants=, Requires= and Upholds= (#4667), and the
+# one link the image ships in them: agentos-link.service's WantedBy= puts it in the unit's .wants/, so the
+# edge link starts with the kernel it asks (EDGE-link-core c2c). systemd starts the unit the link is named.
 UNLOCK_LINK_DIRS = (".wants", ".requires", ".upholds")
+UNLOCK_LINKS = {".wants": ("agentos-link.service",)}
 # The one reboot an unlock unit may ask for (#2998): after a kernel that came up and then failed, and
 # no sooner than 30 minutes into the boot, so a kernel that fails on every boot reboots at most twice
 # an hour (#2897). Any other command naming a REBOOT_WORDS tool, and OnFailure= or OnSuccess=, is
@@ -1975,10 +1978,24 @@ def unlock_link_violations(root):
                         out.append("%s: unreadable (%s); the tree check never passes what it cannot read (#4667)"
                                    % (rel, e.strerror))
                         continue
+                    allowed = UNLOCK_LINKS.get(suffix, ()) if n == name else ()
                     for m in found:
-                        out.append("%s: %s; %s; allowed: no %s link at all"
-                                   % (name, rel + ("/" + m if m else ""), UNLOCK_PULL, suffix[1:]))
+                        if m in allowed and unlock_link_target(root, rel + "/" + m) == m:
+                            continue
+                        out.append("%s: %s; %s; allowed: %s"
+                                   % (name, rel + ("/" + m if m else ""), UNLOCK_PULL,
+                                      ", ".join("%s/%s" % (name + suffix, a) for a in allowed)
+                                      or "no %s link at all" % suffix[1:]))
     return out
+
+
+def unlock_link_target(root, rel):
+    """The name of the unit file the link REL points to, or None: a listed link passes only when it names
+    its own unit, never an alias of another."""
+    try:
+        return tree_readlink(root, rel).rsplit("/", 1)[-1]
+    except OSError:
+        return None
 
 
 def unlock_allowed(key, allowed):
