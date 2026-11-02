@@ -118,9 +118,19 @@ type radio struct {
 	mu   sync.Mutex
 	done []string
 	fail bool
+	// hold, if set, is a radio call that blocks: Do sends on entered and
+	// waits for hold to close.
+	hold, entered chan struct{}
 }
 
 func (r *radio) Do(device string, v wire.Verb, level uint8) error {
+	r.mu.Lock()
+	hold, entered := r.hold, r.entered
+	r.mu.Unlock()
+	if hold != nil {
+		entered <- struct{}{}
+		<-hold
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.fail {
@@ -196,9 +206,16 @@ type rig struct {
 	revoked bool
 	answers []uint64
 
-	mu  sync.Mutex
-	now time.Time
-	log []Event
+	mu sync.Mutex
+	// now is the rate clock's time (Elapsed is now less start); the wall
+	// clock (Now) reads now plus wallStep, as a box whose wall clock was
+	// stepped would.
+	now      time.Time
+	wallStep time.Duration
+	log      []Event
+	// logReenter, if set, runs inside each log call, as a slice h sink
+	// that calls back into the channel would.
+	logReenter func()
 }
 
 // signedHome is the engine's store with home() signed and applied, made
@@ -252,8 +269,17 @@ func newRig(t testing.TB, cfg func(*Config)) *rig {
 			return wire.Counts{Day: 1, Groups: []wire.CountGroup{{Dests: []wire.CountDest{{Name: "a.example", Cap: 9}}, Count: 3}}}, nil
 		},
 		Answer: func(id uint64, _ []byte) { r.answers = append(r.answers, id) },
-		Log:    func(e Event) { r.mu.Lock(); r.log = append(r.log, e); r.mu.Unlock() },
-		Now:    func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now },
+		Log: func(e Event) {
+			r.mu.Lock()
+			r.log = append(r.log, e)
+			f := r.logReenter
+			r.mu.Unlock()
+			if f != nil {
+				f()
+			}
+		},
+		Now:     func() time.Time { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Add(r.wallStep) },
+		Elapsed: func() time.Duration { r.mu.Lock(); defer r.mu.Unlock(); return r.now.Sub(start) },
 	}
 	if cfg != nil {
 		cfg(&c)

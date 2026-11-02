@@ -131,10 +131,22 @@ type Config struct {
 	// Answer hands the core's answer to a device challenge back to the
 	// device that asked (slice k).
 	Answer func(id uint64, data []byte)
-	// Log takes one line per request and refusal.
+	// Log takes one line per request and refusal. It runs outside the
+	// channel's lock, so it may call the channel, and concurrently for
+	// several connections (ENF-d-7).
 	Log func(Event)
-	// Now is the clock; nil is time.Now.
+	// Now is the wall clock the log lines and the policy's times read;
+	// nil is time.Now. No rate reads it, so a step of the wall clock
+	// neither refills nor pauses one.
 	Now func() time.Time
+	// Elapsed is the rate clock (#4507): the enforcer's time since any
+	// fixed origin, which must never step back and must keep counting
+	// while the box is suspended, as Linux's CLOCK_BOOTTIME does, so the
+	// rates refill while the kernel's check, on the core's clock, sees
+	// time pass (chancheck KRN-chan-4). Slice l wires CLOCK_BOOTTIME.
+	// nil is Go's monotonic reading since New, which never steps back but
+	// stops while the box is suspended (ENF-d-10).
+	Elapsed func() time.Duration
 }
 
 // Event is one log line. Every field is the enforcer's own words or a
@@ -161,6 +173,10 @@ var (
 	ErrRevoked   = errors.New("channel: the core's channel key is revoked")
 	ErrNoSession = errors.New("channel: no core connected")
 	ErrBusy      = errors.New("channel: too many challenges outstanding")
+	// ErrOutstanding refuses a challenge whose ID is still waiting for
+	// its answer, so a late answer to the first is never handed over as
+	// the second's (#3759).
+	ErrOutstanding = errors.New("channel: a challenge with this id is outstanding")
 	// ErrSuperseded ends a connection whose frame came after a later
 	// connection's hello was accepted (ENF-d-9).
 	ErrSuperseded = errors.New("channel: a later connection replaced this one")
@@ -174,9 +190,14 @@ const MaxOutstanding = 64
 type Channel struct {
 	cfg Config
 
+	// helloMu guards hello, the core's hello rate, alone: the hello is
+	// counted without c.mu (countHello).
+	helloMu sync.Mutex
+	hello   *wire.Bucket
+
 	mu sync.Mutex
-	// buckets are the core's rates, one per wire.RateKind; refused and
-	// preAuthB are the enforcer's own.
+	// buckets are the core's request rates, one per request
+	// wire.RateKind; refused and preAuthB are the enforcer's own.
 	buckets     map[wire.RateKind]*wire.Bucket
 	refused     *wire.Bucket
 	preAuthB    *wire.Bucket
@@ -188,9 +209,9 @@ type Channel struct {
 	// preAuthQuiet is set while failed hellos are over KindPreAuth's
 	// bucket and dropped unlogged.
 	preAuthQuiet bool
-	// queued holds the Alerts and Answer calls made under mu; release runs
-	// them after unlocking, so a sink that sends on the channel cannot
-	// deadlock it.
+	// queued holds the Log, Alerts, Answer and Cut.Trip calls made under
+	// mu; release runs them after unlocking, so a sink that calls the
+	// channel cannot deadlock it.
 	queued []func()
 }
 
@@ -208,11 +229,19 @@ func New(cfg Config) (*Channel, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	now := cfg.Now()
-	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{},
-		refused: wire.NewBucket(refusedLimit, now), preAuthB: wire.NewBucket(preAuthLimit, now)}
+	if cfg.Elapsed == nil {
+		t0 := time.Now()
+		cfg.Elapsed = func() time.Duration { return time.Since(t0) }
+	}
+	c := &Channel{cfg: cfg, buckets: map[wire.RateKind]*wire.Bucket{}, outstanding: map[uint64]bool{}}
+	now := c.rateNow()
+	c.refused, c.preAuthB = wire.NewBucket(refusedLimit, now), wire.NewBucket(preAuthLimit, now)
 	for _, k := range wire.RateKinds {
-		c.buckets[k] = wire.NewBucket(wire.Rate(k), now)
+		if k == wire.RateHello {
+			c.hello = wire.NewBucket(wire.Rate(k), now)
+		} else {
+			c.buckets[k] = wire.NewBucket(wire.Rate(k), now)
+		}
 	}
 	return c, nil
 }
@@ -243,16 +272,7 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	if err != nil {
 		return err
 	}
-	// Only the authenticated core counts toward a trip (#3755), and only
-	// while it is not already cut: after a trip its reconnects take their
-	// rate but trip nothing more (ENF-d-4).
-	c.mu.Lock()
-	if c.cfg.Cut.Stage() == Open {
-		c.count(wire.RateHello)
-	} else {
-		c.buckets[wire.RateHello].Take(c.cfg.Now())
-	}
-	c.release()
+	c.countHello()
 	// This connection becomes the session before the enforcer's hello is
 	// written, and s.mu is held until it is, so no challenge or alert
 	// goes ahead of it. A kernel that has read the enforcer's hello knows
@@ -309,11 +329,37 @@ func (c *Channel) Serve(rw io.ReadWriter, exporter []byte) error {
 	}
 }
 
+// rateNow is the time every rate reads: the enforcer's elapsed time
+// (Config.Elapsed), never its wall clock (#4507). The buckets also never
+// let it step back (wire.Bucket).
+func (c *Channel) rateNow() time.Time { return rateEpoch.Add(c.cfg.Elapsed()) }
+
+// rateEpoch is the rate clock's zero; only differences of it are read.
+var rateEpoch = time.Unix(0, 0)
+
+// countHello counts an authenticated hello as it arrives. Only the
+// authenticated core counts toward a trip (#3755), and only while it is
+// not already cut: after a trip its reconnects take their rate but trip
+// nothing more (ENF-d-4). It holds helloMu, never c.mu, so no radio,
+// policy or source call a request makes under c.mu can delay the count
+// past the kernel check's MaxLate (#4508, KRN-chan-3).
+func (c *Channel) countHello() {
+	c.helloMu.Lock()
+	open := c.cfg.Cut.Stage() == Open
+	took := c.hello.Take(c.rateNow())
+	c.helloMu.Unlock()
+	if open && !took {
+		reason := "burst of " + string(KindHello) + " past the rate: tripped the core"
+		c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(KindHello), Reason: reason})
+		c.cfg.Cut.Trip(reason)
+	}
+}
+
 // refuse logs a refused frame, counts it, and returns err.
 func (c *Channel) refuse(k Kind, id uint64, reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
+	c.log(Event{At: c.cfg.Now(), Kind: k, ID: id, Code: wire.Refused, Reason: reason})
 	c.countRefused()
 	return err
 }
@@ -332,7 +378,7 @@ func malformed(err error) bool {
 func (c *Channel) trip(reason string, err error) error {
 	c.mu.Lock()
 	defer c.release()
-	c.cfg.Log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
+	c.log(Event{At: c.cfg.Now(), Kind: KindFrame, Code: wire.Refused, Reason: reason})
 	c.queueTrip(reason)
 	return err
 }
@@ -351,19 +397,27 @@ func (c *Channel) queueTrip(reason string) {
 // fill the log; the next line logged after the bucket refills ends that.
 func (c *Channel) preAuth(reason string, err error) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer c.release()
 	now := c.cfg.Now()
-	if c.preAuthB.Take(now) {
+	if c.preAuthB.Take(c.rateNow()) {
 		c.preAuthQuiet = false
-		c.cfg.Log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
+		c.log(Event{At: now, Kind: KindHello, Code: wire.Refused, Reason: reason})
 	} else if !c.preAuthQuiet {
 		c.preAuthQuiet = true
-		c.cfg.Log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
+		c.log(Event{At: now, Kind: KindPreAuth, Code: wire.Refused, Reason: "failed hellos over the limit: dropped unlogged until the rate falls; the core is not tripped"})
 	}
 	return err
 }
 
-// release unlocks c.mu and then runs the sink calls queued under it.
+// log queues one log line to Config.Log, which release hands over after
+// c.mu is let go, so a log sink may call the channel (ENF-d-7). The caller
+// holds c.mu.
+func (c *Channel) log(e Event) {
+	c.queued = append(c.queued, func() { c.cfg.Log(e) })
+}
+
+// release unlocks c.mu and then runs the sink calls queued under it, in
+// the order they were queued.
 func (c *Channel) release() {
 	q := c.queued
 	c.queued = nil
@@ -389,7 +443,9 @@ func (s *session) write(m wire.Msg) error {
 }
 
 // Challenge sends a device's challenge to the core and waits for its
-// answer on the channel, which goes to Config.Answer once.
+// answer on the channel, which goes to Config.Answer once. The radio host
+// chooses id; one still outstanding is refused (ErrOutstanding), so each
+// answer belongs to exactly one challenge.
 func (c *Channel) Challenge(id uint64, data []byte) error {
 	c.mu.Lock()
 	s := c.session
@@ -397,7 +453,11 @@ func (c *Channel) Challenge(id uint64, data []byte) error {
 		c.mu.Unlock()
 		return ErrNoSession
 	}
-	if !c.outstanding[id] && len(c.outstanding) >= MaxOutstanding {
+	if c.outstanding[id] {
+		c.mu.Unlock()
+		return ErrOutstanding
+	}
+	if len(c.outstanding) >= MaxOutstanding {
 		c.mu.Unlock()
 		return ErrBusy
 	}

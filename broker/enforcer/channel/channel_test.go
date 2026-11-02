@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -550,6 +551,71 @@ func TestChallengeAnswer(t *testing.T) {
 	}
 }
 
+// TestChallengeIDOutstanding (#3759 point 4): a challenge whose ID is
+// already outstanding is refused before it is sent, so a late answer to
+// the first can never be handed over as the answer to the second; the
+// first's answer still reaches the device, and the ID is free again
+// after it. Revert mutant: Challenge re-adding an outstanding ID.
+func TestChallengeIDOutstanding(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("challenge frame: %+v", m)
+	}
+	if err := r.ch.Challenge(7, []byte{2}); !errors.Is(err, ErrOutstanding) {
+		t.Fatalf("a second challenge with an outstanding id: %v, want ErrOutstanding", err)
+	}
+	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.OK {
+		t.Fatalf("answer: %v", c)
+	}
+	if c := cl.code(wire.Challenge{Answer: true, ID: 7, Data: []byte{3}}); c != wire.Refused {
+		t.Errorf("the refused challenge's answer was taken: %v", c)
+	}
+	go r.ch.Challenge(7, []byte{4})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("a challenge after the answer: %+v", m)
+	}
+	if !reflect.DeepEqual(r.answers, []uint64{7}) {
+		t.Errorf("answers %v", r.answers)
+	}
+}
+
+// TestRatesIgnoreWallSteps (#4507, KRN-chan-4): the rates read the
+// enforcer's own elapsed time, never its wall clock, so a wall clock
+// stepped back an hour neither pauses their refill nor makes an honest
+// kernel's next message, one interval later, a burst; nor does a step
+// forward refill them. Revert mutant: the buckets reading Config.Now.
+func TestRatesIgnoreWallSteps(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	l := wire.Rate(wire.RateAnnounce)
+	id := uint64(0)
+	announce := func() wire.Code { id++; return cl.code(wire.Announce{ID: id}) }
+	for range l.Burst {
+		if c := announce(); c != wire.OK {
+			t.Fatalf("announce inside the burst: %v", c)
+		}
+	}
+	r.mu.Lock()
+	r.wallStep = -time.Hour
+	r.mu.Unlock()
+	r.advance(l.Every)
+	if c := announce(); c != wire.OK || r.cut.trips() != 0 {
+		t.Fatalf("one interval after a burst, with the wall clock stepped back: %v, %d trips", c, r.cut.trips())
+	}
+	r.mu.Lock()
+	r.wallStep = 24 * time.Hour
+	r.mu.Unlock()
+	announce()
+	if r.cut.trips() != 1 {
+		t.Fatalf("a wall clock stepped forward refilled the rate: %d trips, want 1", r.cut.trips())
+	}
+	if e := r.events(); e[len(e)-1].At != r.now.Add(24*time.Hour) {
+		t.Errorf("log line at %v, want the wall clock's time", e[len(e)-1].At)
+	}
+}
+
 // TestSinksRequired (NET-2 Safety devices, Channel): a channel cannot be
 // built without its log or its alerts, so no command acts unlogged and no
 // heater off or valve shut goes untexted. Revert mutant: New accepting a
@@ -584,6 +650,112 @@ func TestAlertsMayUseChannel(t *testing.T) {
 	}
 	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
 		t.Fatalf("result: %+v", m)
+	}
+}
+
+// TestChallengeBusy: at most MaxOutstanding challenges wait for an
+// answer; the next is refused ErrBusy before it is sent. Revert mutant:
+// the cap's boundary.
+func TestChallengeBusy(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	for id := range uint64(MaxOutstanding) {
+		go r.ch.Challenge(id+1, []byte{1})
+		if _, ok := cl.recv().(wire.Challenge); !ok {
+			t.Fatalf("challenge %d not sent", id+1)
+		}
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- r.ch.Challenge(MaxOutstanding+1, []byte{1}) }()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrBusy) {
+			t.Fatalf("challenge past the cap: %v, want ErrBusy", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a challenge past the cap was sent")
+	}
+}
+
+// TestAnswerMayUseChannel (#3759 point 1): the answer callback runs after
+// the channel lets go of its lock, so the radio host can send its next
+// challenge from inside Answer without a deadlock. Revert mutant: calling
+// Answer under c.mu.
+func TestAnswerMayUseChannel(t *testing.T) {
+	var r *rig
+	errs := make(chan error, 1)
+	r = newRig(t, func(c *Config) {
+		c.Answer = func(id uint64, _ []byte) { errs <- r.ch.Challenge(id+1, []byte{9}) }
+	})
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 7 {
+		t.Fatalf("challenge frame: %+v", m)
+	}
+	cl.send(wire.Challenge{Answer: true, ID: 7, Data: []byte{2}})
+	if m, ok := cl.recv().(wire.Challenge); !ok || m.ID != 8 || m.Answer {
+		t.Fatalf("the challenge sent from Answer: %+v", m)
+	}
+	if m, ok := cl.recv().(wire.Result); !ok || m.Code != wire.OK {
+		t.Fatalf("result: %+v", m)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("Challenge from inside Answer: %v", err)
+	}
+}
+
+// TestLogMayUseChannel (#3759 point 2, ENF-d-7): every log line the
+// channel writes while it holds its lock is handed to Config.Log after it
+// lets go, so a log sink may call the channel: on a request, a refused
+// frame, a trip and a failed hello alike. Revert mutants: calling Log
+// under c.mu in handle, refuse, trip, count or preAuth.
+func TestLogMayUseChannel(t *testing.T) {
+	r := newRig(t, nil)
+	var calls atomic.Int32
+	reenter := func() {
+		// Takes the channel's lock and sends nothing: either no core is
+		// connected or the id is outstanding.
+		r.ch.Challenge(7, nil)
+		calls.Add(1)
+	}
+	r.mu.Lock()
+	r.logReenter = reenter
+	r.mu.Unlock()
+	bad := r.connect()
+	bad.send(cmd(1, "lamp", wire.VerbOn)) // a frame before any hello: preAuth
+	select {
+	case <-bad.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a failed hello's log line deadlocked the channel")
+	}
+	r.mu.Lock()
+	r.logReenter = nil
+	r.mu.Unlock()
+	cl := r.dial()
+	go r.ch.Challenge(7, []byte{1})
+	if _, ok := cl.recv().(wire.Challenge); !ok {
+		t.Fatal("no challenge frame")
+	}
+	r.mu.Lock()
+	r.logReenter = reenter
+	r.mu.Unlock()
+	if c := cl.code(cmd(2, "lamp", wire.VerbOn)); c != wire.OK { // handle's line
+		t.Fatalf("command: %v", c)
+	}
+	if c := cl.code(cmd(3, "nosuch", wire.VerbOn)); c != wire.Refused {
+		t.Fatalf("unknown device: %v", c)
+	}
+	for i := range wire.Rate(wire.RateAnnounce).Burst + 1 { // count's trip line
+		cl.code(wire.Announce{ID: uint64(10 + i)})
+	}
+	if r.cut.trips() != 1 {
+		t.Fatalf("trips %d, want 1", r.cut.trips())
+	}
+	if !cl.closed(frameBytes(wire.TCommand, []byte{1})) { // trip's line
+		t.Fatal("a malformed frame did not end the connection")
+	}
+	if calls.Load() < 5 {
+		t.Fatalf("the log sink ran %d times", calls.Load())
 	}
 }
 

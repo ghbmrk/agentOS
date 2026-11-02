@@ -94,7 +94,7 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 	defer c.release()
 	now := c.cfg.Now()
 	if c.session != s {
-		c.cfg.Log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
+		c.log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
 		return nil, ErrSuperseded
 	}
 	rk := wire.RateKindOf(m.Type())
@@ -172,7 +172,7 @@ func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 		code, ev.Reason = wire.Refused, "not a request"
 	}
 	ev.Code = code
-	c.cfg.Log(ev)
+	c.log(ev)
 	// A Paused answer is not a refusal: a kernel learns of a trip or a
 	// pause only from one, so counting it would pause the summaries the
 	// Reflashed stage reopens.
@@ -279,13 +279,13 @@ func (c *Channel) gate(k wire.RateKind, summary bool, act func() (wire.Code, str
 		}
 	}
 	if paused != "" {
-		c.buckets[k].Take(c.cfg.Now())
+		c.buckets[k].Take(c.rateNow())
 		return wire.Paused, paused
 	}
 	if !c.count(k) {
 		return wire.Paused, "burst of " + string(rated[k]) + ": tripped the core"
 	}
-	if !c.refused.Has(c.cfg.Now()) {
+	if !c.refused.Has(c.rateNow()) {
 		return wire.RateLimited, refusalWait
 	}
 	return act()
@@ -300,19 +300,18 @@ const refusalWait = "too many refusals: refused until the refusal rate refills"
 // past the rate, a core trip. It reports whether the request is inside
 // the rate. The caller holds c.mu.
 func (c *Channel) count(k wire.RateKind) bool {
-	now := c.cfg.Now()
-	if c.buckets[k].Take(now) {
+	if c.buckets[k].Take(c.rateNow()) {
 		return true
 	}
 	reason := "burst of " + string(rated[k]) + " past the rate: tripped the core"
-	c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(rated[k]), Reason: reason})
+	c.log(Event{At: c.cfg.Now(), Kind: KindTrip, What: string(rated[k]), Reason: reason})
 	c.queueTrip(reason)
 	return false
 }
 
 // countRefused takes one from the refusal bucket, which never trips: past
 // it requests only wait (gate). The caller holds c.mu.
-func (c *Channel) countRefused() { c.refused.Take(c.cfg.Now()) }
+func (c *Channel) countRefused() { c.refused.Take(c.rateNow()) }
 
 // command checks m against cur, the signed policy handle copied, and the
 // safety-list table, and sends it through the radio host.
