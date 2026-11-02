@@ -21,7 +21,7 @@ var errNoOffer = errors.New("nothing new is heard for this device now; open the 
 type offer struct {
 	ID    string
 	Names [][]string
-	More  int // heard but left out of this offer (maxFill)
+	More  int // heard but left out of this offer (policy.MaxMDNS)
 }
 
 // Line is the offer as the home page asks it.
@@ -45,10 +45,9 @@ func (o offer) Line(cur policy.Document) string {
 }
 
 // offers is what the home page offers under cur: for each device on a
-// pair with a path, the names heard where it is heard (heardOn) that no
-// device pins or holds, hosts first and at most maxFill. A person's
-// network is offered once, on the first of its devices with such a pair,
-// since its names are the network's.
+// pair with a path, what fill gives it. A person's network is offered
+// once, on the first of its devices with such a pair that holds fewer
+// than policy.MaxMDNS, since its names are the network's.
 func (s *Server) offers(cur policy.Document) []offer {
 	var out []offer
 	seen := map[string]bool{}
@@ -59,12 +58,12 @@ func (s *Server) offers(cur policy.Document) []offer {
 			continue
 		}
 		if d.Network != policy.NetDevices {
-			if seen[d.Network] {
+			if seen[d.Network] || len(d.MDNS) >= policy.MaxMDNS {
 				continue
 			}
 			seen[d.Network] = true
 		}
-		if ns, more := fresh(cur, s.heardOn(cur, d)); len(ns) > 0 {
+		if ns, more := s.fill(cur, cur, d); len(ns) > 0 {
 			out = append(out, offer{ID: d.ID, Names: ns, More: more})
 		}
 	}

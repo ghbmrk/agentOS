@@ -698,8 +698,10 @@ func (f *Filter) Prove(iface string, link []netip.Prefix, m *message, now time.T
 // label, which the page would show as other labels, or an instance whose
 // service label is only its underscore. So is an instance whose SRV's
 // host is not offered with it, since the relay passes an SRV only on a
-// pinned host the sender still holds (#4565).
-func (f *Filter) Heard(iface string, now time.Time) [][]string {
+// pinned host the sender still holds (#4565). With taken, a name taken
+// says another device pins is left out too, and so, by that rule, is
+// every instance on that host (#4601).
+func (f *Filter) Heard(iface string, now time.Time, taken func([]string) bool) [][]string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	offered := func(k string) bool {
@@ -708,6 +710,7 @@ func (f *Filter) Heard(iface string, now time.Time) [][]string {
 		case !f.proved[iface].has(k, now), f.claimed.elsewhere(k, iface, now):
 		case slices.ContainsFunc(n, func(l string) bool { return strings.Contains(l, ".") }):
 		case n.instance() && len(n[1]) < 2:
+		case taken != nil && taken(n):
 		default:
 			return true
 		}

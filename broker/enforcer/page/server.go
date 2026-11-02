@@ -126,8 +126,10 @@ type Config struct {
 	// that device (mdns.HeardBy): on a Devices-network device's VLAN, the
 	// names the page pins for it and the only ones it lets a link pin
 	// (D-266); on the Owner or Household network, the names it offers to
-	// hold for that network's devices (#4411). nil has heard nothing.
-	Heard func(network, wifi string) [][]string
+	// hold for that network's devices (#4411). With taken, it leaves out
+	// a name taken says another device pins, and every instance on that
+	// host (#4601). nil has heard nothing.
+	Heard func(network, wifi string, taken func([]string) bool) [][]string
 	Cert  tls.Certificate
 	Now   func() time.Time // nil means time.Now
 }
