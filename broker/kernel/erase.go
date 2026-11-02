@@ -417,10 +417,10 @@ func (k *Kernel) OpenSubject(now int64) (string, error) {
 	}
 	var id [16]byte
 	var dk SubjectKey
-	if _, err := io.ReadFull(k.log.cfg.Rand, id[:]); err != nil {
+	if _, err := io.ReadFull((*k.log.p).cfg.Rand, id[:]); err != nil {
 		return "", err
 	}
-	if _, err := io.ReadFull(k.log.cfg.Rand, dk[:]); err != nil {
+	if _, err := io.ReadFull((*k.log.p).cfg.Rand, dk[:]); err != nil {
 		return "", err
 	}
 	sub := hex.EncodeToString(id[:])
@@ -478,7 +478,7 @@ func (k *Kernel) Seal(now int64, subject, store, class string, plaintext []byte)
 		return Hash{}, err
 	}
 	nonce := make([]byte, a.NonceSize())
-	if _, err := io.ReadFull(k.log.cfg.Rand, nonce); err != nil {
+	if _, err := io.ReadFull((*k.log.p).cfg.Rand, nonce); err != nil {
 		return Hash{}, err
 	}
 	ct := a.Seal(nonce, nonce, plaintext, contentAAD(subject, class))

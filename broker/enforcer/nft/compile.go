@@ -523,12 +523,12 @@ func compile(d policy.Document, l Layout) (string, []device, error) {
 	w.line("iifname { " + q(l.Owner) + ", " + q(l.Admin) + " } tcp dport " + port(l.PagePort) + " accept")
 	w.line("iifname " + core + " tcp dport " + port(l.ChannelPort) + " accept")
 	// Slice f's relays: the Wake-on-LAN relay hears only the core, and the
-	// mDNS relay the two ends of a signed pair and every device's VLAN,
-	// whose own names it hears without passing them on (NET-2, NET-3,
-	// D-266).
+	// mDNS relay the two ends of a signed pair, every device's VLAN and
+	// the Owner and Household networks, whose own names it hears without
+	// passing them on (NET-2, NET-3, D-266, #4411).
 	w.line("iifname " + core + " udp dport " + strconv.Itoa(WoLPort) + " accept")
 	var ends []string
-	for _, e := range hears(devs, paths) {
+	for _, e := range hears(devs, paths, l) {
 		ends = append(ends, q(e))
 	}
 	if len(ends) > 0 {

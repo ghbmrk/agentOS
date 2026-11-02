@@ -4678,6 +4678,28 @@ class ReferenceDiffsRanTest(unittest.TestCase):
                 self.assertTrue(issubclass(c, MustRun))
                 self.assertTrue(unittest.TestLoader().getTestCaseNames(c))
 
+    @staticmethod
+    def class_level_fixtures(classes, namespace):
+        """#4522: MustRun sees a skip only through a test's own run; a SkipTest from setUpClass or
+        setUpModule is reported by the suite, so it would pass. Names every such fixture on a class
+        (or any base but unittest's own) and in the module."""
+        found = [c.__name__ + "." + n for c in classes for b in c.__mro__
+                 if b not in (unittest.TestCase, object) for n in ("setUpClass", "setUpModule")
+                 if n in vars(b)]
+        return found + [n for n in ("setUpModule",) if n in namespace]
+
+    def test_no_reference_diff_class_or_the_module_has_a_class_level_fixture(self):
+        classes = (SystemdDiffTest, TmpfilesDiffTest, KmodDiffTest)
+        self.assertEqual(self.class_level_fixtures(classes, vars(sys.modules[__name__])), [])
+
+        class Bad(MustRun, unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise unittest.SkipTest("reference tool missing")
+
+        self.assertEqual(self.class_level_fixtures((Bad,), {}), ["Bad.setUpClass"])
+        self.assertEqual(self.class_level_fixtures((), {"setUpModule": None}), ["setUpModule"])
+
     def test_must_run_fails_a_skip_and_passes_a_run_once(self):
         runs = []
 

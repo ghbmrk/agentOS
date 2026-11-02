@@ -1,7 +1,8 @@
 // Command agentos-requal-driver is the requalification sandbox's in-image
-// case driver (package driver, UPD-5r-b2). This release has no suite
-// evaluator yet, so every case is a case error and requalification holds
-// (UPD-5r-b2-5).
+// case driver (package driver, UPD-5r-b2). It runs each case through the
+// security evaluator (UPD-5r-b7); a case of another suite does not decode as
+// a security input and is a case error, so those suites hold until their
+// evaluators land (UPD-5r-b7-4).
 package main
 
 import (
@@ -12,7 +13,7 @@ import (
 )
 
 func main() {
-	if err := driver.Serve(os.Stdin, os.Stdout, driver.Refuse); err != nil {
+	if err := driver.Serve(os.Stdin, os.Stdout, driver.Security); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

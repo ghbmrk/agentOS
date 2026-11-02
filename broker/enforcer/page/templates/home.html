@@ -44,6 +44,13 @@
 <p>The channel is {{.Channel}}.</p>
 {{if eq .Channel "paused"}}<button class="act" data-action="resume" data-target="" data-rp="{{.Name}}">Resume with your passkey</button>{{end}}
 
+{{if .Offers}}<h2>Names heard</h2>
+{{range .Offers}}<div class="pending">
+<p>{{.Line}}</p>
+<a href="/heard?d={{.ID}}">Review it and approve with your passkey</a>
+</div>
+{{end}}{{end}}
+
 <h2>Devices</h2>
 {{if .Devices}}<table>
 <tr><th>Device</th><th>Network</th><th>Label</th></tr>

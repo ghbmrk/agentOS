@@ -25,6 +25,15 @@ func (f *fakeOwner) hold(req string, item int, it owner.Item) owner.Decision {
 	return owner.Decision{Request: req, Item: item, Ref: it.Ref, Approved: true, Why: "owner", Hold: q.ID, Until: q.SendAt}
 }
 
+// stagedRig is a rig whose invoice.send is staged as a draft first,
+// granted, with sam's invoice on record.
+func stagedRig(t *testing.T) *rig {
+	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": {Stage: "draft.save", Inverse: "draft.discard"}}))
+	r.grant(mailGrant())
+	r.ver.set("inv-1042", sam())
+	return r
+}
+
 // approveHeld approves the newest request; every item with an undo
 // window is held, as the owner channel does. It returns the hold IDs.
 func (r *rig) approveHeld() []string {
@@ -78,15 +87,11 @@ func TestApprovedEffectRunsOnlyAfterItsUndoWindow(t *testing.T) {
 	if _, err := r.g.Dispatch(context.Background(), "agent/s1"); err == nil || r.exec.runs("agent/s1") != 0 {
 		t.Fatalf("dispatch during hold: %v", err)
 	}
-	r.advance(9 * time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(9 * time.Minute)
 	if r.exec.runs("agent/s1") != 0 {
 		t.Fatal("ran inside the undo window")
 	}
-	r.advance(time.Minute)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(time.Minute)
 	if st := r.state("agent/s1"); st.State != journal.Succeeded || r.exec.runs("agent/s1") != 1 {
 		t.Fatalf("released: %s %q", st.State, st.Permission.Reason)
 	}
@@ -114,10 +119,7 @@ func TestUndoCancelsAHeldEffect(t *testing.T) {
 // approves; at the window's end the operation itself runs and nothing is
 // unstaged; on UNDO the inverse runs with the stage's evidence.
 func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
-	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
-	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
-	r.grant(mailGrant())
-	r.ver.set("inv-1042", sam())
+	r := stagedRig(t)
 
 	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 	r.g.Flush()
@@ -127,9 +129,7 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 		r.exec.params[reversible.StageID("agent/s1", 1)][reversible.ParamParent] != "agent/s1" || r.exec.runs("agent/s1") != 0 {
 		t.Fatalf("stage: %s %+v", st.State, st.Intent)
 	}
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
+	r.tickAfter(reversible.DefaultWindow)
 	if st := r.state("agent/s1"); st.State != journal.Succeeded {
 		t.Fatalf("released: %s", st.State)
 	}
@@ -160,41 +160,37 @@ func TestStagedEffectIsStagedAtApprovalAndUnstagedOnUndo(t *testing.T) {
 // owner is told in fixed wording; a stage that failed is never unstaged,
 // and its effect is not sent, since the owner approved it as staged.
 func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
-	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
-	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
-	r.own.plain = true // a quoted request is not a quoted hold
-	r.grant(mailGrant())
-	r.ver.set("inv-1042", sam())
-	r.exec.fail = map[string]bool{reversible.InverseID("agent/s1", 1): true, reversible.StageID("agent/s2", 1): true}
+	eachIDShape(t, func(t *testing.T) {
+		r := stagedRig(t)
+		r.exec.fail = map[string]bool{reversible.InverseID("agent/s1", 1): true, reversible.StageID("agent/s2", 1): true}
 
-	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	h := r.approveHeld()
-	r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s1", Why: "undo"})
-	r.g.Wait()
-	if st := r.state(reversible.InverseID("agent/s1", 1)); st.State != journal.NotApplied {
-		t.Fatalf("unstage: %s", st.State)
-	}
-	if n := r.own.notes; len(n) != 2 || n[1] != owner.InformQuote(h[0])+" did not run, but its draft or staged copy could not be removed, so it was left as is." {
-		t.Fatalf("notes %q", r.own.notes)
-	}
+		r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		h := r.approveHeld()
+		r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s1", Why: "undo"})
+		r.g.Wait()
+		if st := r.state(reversible.InverseID("agent/s1", 1)); st.State != journal.NotApplied {
+			t.Fatalf("unstage: %s", st.State)
+		}
+		if n := r.own.notes; len(n) != 2 || n[1] != owner.InformQuote(h[0])+" did not run, but its draft or staged copy could not be removed, so it was left as is." {
+			t.Fatalf("notes %q", r.own.notes)
+		}
 
-	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	h = r.approveHeld()
-	if st := r.state(reversible.StageID("agent/s2", 1)); st.State != journal.NotApplied {
-		t.Fatalf("failed stage: %s", st.State)
-	}
-	// Without its staged copy the effect is not sent (arbitrator on #76).
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
-	if st := r.state("agent/s2"); st.State != journal.Denied || r.exec.runs("agent/s2") != 0 {
-		t.Fatalf("effect after a failed stage: %s", st.State)
-	}
-	if n := r.own.notes; len(n) != 3 || n[2] != owner.InformQuote(h[0])+" was not sent: its draft or staged copy could not be made. Ask your agent again if still needed." {
-		t.Fatalf("notes %q", n)
-	}
+		r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		h = r.approveHeld()
+		if st := r.state(reversible.StageID("agent/s2", 1)); st.State != journal.NotApplied {
+			t.Fatalf("failed stage: %s", st.State)
+		}
+		// Without its staged copy the effect is not sent (arbitrator on #76).
+		r.tickAfter(reversible.DefaultWindow)
+		if st := r.state("agent/s2"); st.State != journal.Denied || r.exec.runs("agent/s2") != 0 {
+			t.Fatalf("effect after a failed stage: %s", st.State)
+		}
+		if n := r.own.notes; len(n) != 3 || n[2] != owner.InformQuote(h[0])+" was not sent: its draft or staged copy could not be made. Ask your agent again if still needed." {
+			t.Fatalf("notes %q", n)
+		}
+	})
 }
 
 // TestReleaseChecksTheStagedCopy (arbitrator on #76): at the window's end
@@ -202,10 +198,7 @@ func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 // except a copy the owner deleted (a cancel) or one that changed after the
 // approval, which is not sent and is left for the owner with a notice.
 func TestReleaseChecksTheStagedCopy(t *testing.T) {
-	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
-	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
-	r.grant(mailGrant())
-	r.ver.set("inv-1042", sam())
+	r := stagedRig(t)
 	held := func(id string) {
 		r.effect(id, "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
 		r.g.Flush()
@@ -215,9 +208,7 @@ func TestReleaseChecksTheStagedCopy(t *testing.T) {
 		}
 	}
 	release := func() {
-		r.advance(reversible.DefaultWindow)
-		r.g.Tick()
-		r.g.Wait()
+		r.tickAfter(reversible.DefaultWindow)
 	}
 
 	// The recheck refuses: the details changed while held. Unstaged.
@@ -397,145 +388,135 @@ func TestFormsNeverReachPreAllowancesSecretsOrBadDeclarations(t *testing.T) {
 // open, otherwise on the agent's retry. A restart's staged copy is removed
 // first, and the next hold stages afresh.
 func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
-	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
-	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
-	r.own.plain = true // a quoted request is not a quoted hold
-	r.grant(mailGrant())
-	r.ver.set("inv-1042", sam())
+	eachIDShape(t, func(t *testing.T) {
+		r := stagedRig(t)
 
-	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	req, items := r.own.last(t)
-	r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: items[0].Ref, Why: "not held"})
-	r.g.Wait()
-	st := r.state("agent/s1")
-	if st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "retry to ask the owner again") {
-		t.Fatalf("not held: %s %q", st.State, st.Permission.Reason)
-	}
-	n := r.own.count()
-	if st, _ := r.g.Authorize(context.Background(), "agent/s1"); st.State != journal.Pending {
-		t.Fatalf("retry: %s", st.State)
-	}
-	r.g.Flush()
-	if r.own.count() != n+1 {
-		t.Fatal("the retry did not ask again")
-	}
-	h := r.approveHeld()
+		r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		req, items := r.own.last(t)
+		r.g.Decide(owner.Decision{Request: req, Item: 1, Ref: items[0].Ref, Why: "not held"})
+		r.g.Wait()
+		st := r.state("agent/s1")
+		if st.State != journal.Pending || !strings.Contains(st.Permission.Reason, "retry to ask the owner again") {
+			t.Fatalf("not held: %s %q", st.State, st.Permission.Reason)
+		}
+		n := r.own.count()
+		if st, _ := r.g.Authorize(context.Background(), "agent/s1"); st.State != journal.Pending {
+			t.Fatalf("retry: %s", st.State)
+		}
+		r.g.Flush()
+		if r.own.count() != n+1 {
+			t.Fatal("the retry did not ask again")
+		}
+		h := r.approveHeld()
 
-	// A restart cancels the hold: Boot decides first, then hands over
-	// what is still open.
-	if st := r.state(reversible.StageID("agent/s1", 1)); st.State != journal.Succeeded {
-		t.Fatalf("stage 1: %s", st.State)
-	}
-	r.openWith(func() Owner { return r.own })
-	r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s1", Why: "restart", Hold: h[0]})
-	r.g.Wait()
-	r.g.Reissue(nil)
-	r.g.Wait()
-	if st := r.state(reversible.InverseID("agent/s1", 1)); st.State != journal.Succeeded {
-		t.Fatalf("restart left the staged copy: %s", st.State)
-	}
-	if st := r.state("agent/s1"); st.State != journal.Pending {
-		t.Fatalf("after restart: %s", st.State)
-	}
-	n = r.own.count()
-	r.g.Flush()
-	if r.own.count() != n+1 {
-		t.Fatal("the restart's cancelled hold was not asked again")
-	}
-	r.approveHeld()
-	if st := r.state(reversible.StageID("agent/s1", 2)); st.State != journal.Succeeded {
-		t.Fatalf("stage 2: %s", st.State)
-	}
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
-	if st := r.state("agent/s1"); st.State != journal.Succeeded || r.exec.runs("agent/s1") != 1 {
-		t.Fatalf("released after re-ask: %s", st.State)
-	}
-	if _, err := r.g.Get(reversible.InverseID("agent/s1", 2)); err == nil {
-		t.Fatal("unstaged the copy that was sent")
-	}
+		// A restart cancels the hold: Boot decides first, then hands over
+		// what is still open.
+		if st := r.state(reversible.StageID("agent/s1", 1)); st.State != journal.Succeeded {
+			t.Fatalf("stage 1: %s", st.State)
+		}
+		r.openWith(func() Owner { return r.own })
+		r.g.Decide(owner.Decision{Request: h[0], Item: 1, Ref: "agent/s1", Why: "restart", Hold: h[0]})
+		r.g.Wait()
+		r.g.Reissue(nil)
+		r.g.Wait()
+		if st := r.state(reversible.InverseID("agent/s1", 1)); st.State != journal.Succeeded {
+			t.Fatalf("restart left the staged copy: %s", st.State)
+		}
+		if st := r.state("agent/s1"); st.State != journal.Pending {
+			t.Fatalf("after restart: %s", st.State)
+		}
+		n = r.own.count()
+		r.g.Flush()
+		if r.own.count() != n+1 {
+			t.Fatal("the restart's cancelled hold was not asked again")
+		}
+		r.approveHeld()
+		if st := r.state(reversible.StageID("agent/s1", 2)); st.State != journal.Succeeded {
+			t.Fatalf("stage 2: %s", st.State)
+		}
+		r.tickAfter(reversible.DefaultWindow)
+		if st := r.state("agent/s1"); st.State != journal.Succeeded || r.exec.runs("agent/s1") != 1 {
+			t.Fatalf("released after re-ask: %s", st.State)
+		}
+		if _, err := r.g.Get(reversible.InverseID("agent/s1", 2)); err == nil {
+			t.Fatal("unstaged the copy that was sent")
+		}
 
-	// A hold its intent's request did not make closes the intent, and the
-	// owner is told it did not run.
-	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	req, items = r.own.last(t)
-	d := r.own.hold(req, 1, items[0])
-	d.Request = "R-other"
-	r.g.Decide(d)
-	r.g.Wait()
-	if st := r.state("agent/s2"); st.State == journal.Pending || r.exec.runs("agent/s2") != 0 {
-		t.Fatalf("mismatched hold: %s", st.State)
-	}
-	if n := r.own.notes; n[len(n)-1] != owner.InformQuote(d.Hold)+" did not run: its approval did not match its request. Ask your agent again if still needed." {
-		t.Fatalf("notes %q", n)
-	}
+		// A hold its intent's request did not make closes the intent, and the
+		// owner is told it did not run.
+		r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		req, items = r.own.last(t)
+		d := r.own.hold(req, 1, items[0])
+		d.Request = "R-other"
+		r.g.Decide(d)
+		r.g.Wait()
+		if st := r.state("agent/s2"); st.State == journal.Pending || r.exec.runs("agent/s2") != 0 {
+			t.Fatalf("mismatched hold: %s", st.State)
+		}
+		if n := r.own.notes; n[len(n)-1] != owner.InformQuote(d.Hold)+" did not run: its approval did not match its request. Ask your agent again if still needed." {
+			t.Fatalf("notes %q", n)
+		}
+	})
 }
 
 // TestStopBetweenReleaseAndDispatchStillSettlesTheCopy (L3 on #76): a
 // released effect that STOP keeps from running ends later, through the
 // guest's dispatch after RESUME; its staged copy is still settled then.
 func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
-	form := reversible.Form{Stage: "draft.save", Inverse: "draft.discard"}
-	r := newRig(t, withForms(map[string]reversible.Form{"invoice.send": form}))
-	r.own.plain = true // a quoted request is not a quoted hold
-	r.grant(mailGrant())
-	r.ver.set("inv-1042", sam())
-	r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	h := r.approveHeld()
-	r.exec.fail = map[string]bool{"agent/s1": true}
-	r.exec.evidence = map[string]string{"agent/s1": reversible.EvidenceEdited}
-	r.stop(t)
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
-	if st := r.state("agent/s1"); st.State != journal.Authorized || r.exec.runs("agent/s1") != 0 {
-		t.Fatalf("during STOP: %s", st.State)
-	}
-	if err := r.eng.Resume(); err != nil {
-		t.Fatal(err)
-	}
-	if st, _ := r.g.Dispatch(context.Background(), "agent/s1"); st.State != journal.NotApplied {
-		t.Fatalf("after RESUME: %s", st.State)
-	}
-	r.g.Wait()
-	if n := r.own.notes; n[len(n)-1] != owner.InformQuote(h[0])+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
-		t.Fatalf("notes %q", n)
-	}
-	// The release used up the approval: a retry is not sent on the old YES.
-	r.exec.fail, r.exec.evidence = map[string]bool{}, nil
-	retry := func(id string) {
-		t.Helper()
-		runs := r.exec.runs(id)
-		if st, err := r.g.Dispatch(context.Background(), id); err == nil || st.State == journal.Succeeded {
-			t.Fatalf("retry of %s after release: %s, %v", id, st.State, err)
+	eachIDShape(t, func(t *testing.T) {
+		r := stagedRig(t)
+		r.effect("agent/s1", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		h := r.approveHeld()
+		r.exec.fail = map[string]bool{"agent/s1": true}
+		r.exec.evidence = map[string]string{"agent/s1": reversible.EvidenceEdited}
+		r.stop(t)
+		r.tickAfter(reversible.DefaultWindow)
+		if st := r.state("agent/s1"); st.State != journal.Authorized || r.exec.runs("agent/s1") != 0 {
+			t.Fatalf("during STOP: %s", st.State)
+		}
+		if err := r.eng.Resume(); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := r.g.Dispatch(context.Background(), "agent/s1"); st.State != journal.NotApplied {
+			t.Fatalf("after RESUME: %s", st.State)
 		}
 		r.g.Wait()
-		if r.exec.runs(id) != runs {
-			t.Fatalf("retry of %s ran", id)
+		if n := r.own.notes; n[len(n)-1] != owner.InformQuote(h[0])+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
+			t.Fatalf("notes %q", n)
 		}
-	}
-	retry("agent/s1")
+		// The release used up the approval: a retry is not sent on the old YES.
+		r.exec.fail, r.exec.evidence = map[string]bool{}, nil
+		retry := func(id string) {
+			t.Helper()
+			runs := r.exec.runs(id)
+			if st, err := r.g.Dispatch(context.Background(), id); err == nil || st.State == journal.Succeeded {
+				t.Fatalf("retry of %s after release: %s, %v", id, st.State, err)
+			}
+			r.g.Wait()
+			if r.exec.runs(id) != runs {
+				t.Fatalf("retry of %s ran", id)
+			}
+		}
+		retry("agent/s1")
 
-	// And a plain failure there unstages, found by Tick whoever ran it.
-	r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
-	r.g.Flush()
-	r.approveHeld()
-	r.exec.fail["agent/s2"] = true
-	r.eng.Stop(context.Background())
-	r.advance(reversible.DefaultWindow)
-	r.g.Tick()
-	r.g.Wait()
-	r.eng.Resume()
-	r.eng.Dispatch(context.Background(), "agent/s2")
-	r.g.Tick()
-	r.g.Wait()
-	if st := r.state(reversible.InverseID("agent/s2", 1)); st.State != journal.Succeeded {
-		t.Fatalf("not unstaged after a STOP-held failure: %s", st.State)
-	}
-	r.exec.fail = map[string]bool{}
-	retry("agent/s2")
+		// And a plain failure there unstages, found by Tick whoever ran it.
+		r.effect("agent/s2", "invoice.send", map[string]any{"record": "inv-1042"}, "sam@example.com")
+		r.g.Flush()
+		r.approveHeld()
+		r.exec.fail["agent/s2"] = true
+		r.eng.Stop(context.Background())
+		r.tickAfter(reversible.DefaultWindow)
+		r.eng.Resume()
+		r.eng.Dispatch(context.Background(), "agent/s2")
+		r.g.Tick()
+		r.g.Wait()
+		if st := r.state(reversible.InverseID("agent/s2", 1)); st.State != journal.Succeeded {
+			t.Fatalf("not unstaged after a STOP-held failure: %s", st.State)
+		}
+		r.exec.fail = map[string]bool{}
+		retry("agent/s2")
+	})
 }

@@ -236,6 +236,24 @@ class UsrListTest(unittest.TestCase):
         # The mtime of bin, changed by the new file, is named too: a timestamp is a cause to fix.
         self.assertTrue(any(ln.startswith("bin: mtime_ns ") for ln in lines), lines)
 
+    def test_diff_prints_content_differences_first(self):
+        # #4471: past the line limit, many time-only differences must not push the one content
+        # difference out of the log.
+        a = {"d%03d" % i: {"type": "d", "mtime_ns": 1, "digest": ""} for i in range(300)}
+        b = {k: dict(v, mtime_ns=2) for k, v in a.items()}
+        f = {"type": "f", "mode": "0755", "uid": 0, "gid": 0, "mtime_ns": 1, "nlink": 1, "digest": "aa"}
+        for k, ch in (("zz/bin", {"digest": "bb"}), ("zz/gid", {"gid": 5}), ("zz/link", {"nlink": 2}),
+                      ("zz/suid", {"mode": "4755"}), ("zz/uid", {"uid": 5})):
+            a[k], b[k] = dict(f), dict(f, **ch)
+        b["zz/new"] = dict(f)
+        lines = cm.usr_diff(a, b)
+        # Mode and owner say what a file may do, so they are not cut either; only time and link count are.
+        self.assertEqual(lines[:5], ["only in b: zz/new", "zz/bin: digest aa/bb", "zz/gid: gid 0/5",
+                                     "zz/suid: mode 0755/4755", "zz/uid: uid 0/5"])
+        self.assertEqual(lines[5:7], ["d000: mtime_ns 1/2", "d001: mtime_ns 1/2"])
+        self.assertIn("zz/link: nlink 1/2", cm.usr_diff(a, b, limit=1000))
+        self.assertEqual((len(lines), lines[-1]), (201, "... and 106 more"))
+
     def run_cli(self, ta, tb):
         with tempfile.TemporaryDirectory() as d:
             fa, fb = pathlib.Path(d) / "a", pathlib.Path(d) / "b"

@@ -380,14 +380,16 @@ func listen(name string, v6 bool) (*net.UDPConn, error) {
 	return pc.(*net.UDPConn), nil
 }
 
-// HeardBy is, for a device's Wi-Fi identity, the names f heard it prove
-// its own on that identity's VLAN under l (Filter.Heard): what the
-// enforcer's page pins for a paired device that pins none, and the only
-// names it lets a link pin (D-266). An identity that names no VLAN has
-// none.
-func HeardBy(f *Filter, l nft.Layout) func(wifi string) [][]string {
-	return func(wifi string) [][]string {
-		iface, ok := l.DeviceIface(wifi)
+// HeardBy is, for a device's network and Wi-Fi identity, the names f
+// heard proved its own where the relay hears that device under l
+// (nft.Layout.Iface, Filter.Heard): on a Devices-network device's own
+// VLAN, what the enforcer's page pins for a paired device and the only
+// names it lets a link pin (D-266); on the Owner or Household network,
+// the names the page offers to hold for that network's devices (#4411).
+// A device the relay hears nowhere has none.
+func HeardBy(f *Filter, l nft.Layout) func(network, wifi string) [][]string {
+	return func(network, wifi string) [][]string {
+		iface, ok := l.Iface(network, wifi)
 		if !ok {
 			return nil
 		}

@@ -163,16 +163,20 @@ func (d *driver) harness() error {
 		return fmt.Errorf("plan stub: %v", err)
 	}
 	d.stub = stub
-	for _, args := range [][]string{
-		{"netns", "add", netns},
-		{"link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
-		{"addr", "add", "10.42.0.1/24", "dev", "enowner0"},
-		{"link", "set", "enowner0", "up"},
-		{"-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
-		{"-n", netns, "link", "set", "phone0", "up"},
-		{"-n", netns, "link", "set", "lo", "up"},
+	// Each ip call is literal, so the source test reads its arguments
+	// (ASSUMPTIONS E8).
+	for _, ip := range []func() error{
+		func() error { return run("ip", "netns", "add", netns) },
+		func() error {
+			return run("ip", "link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns)
+		},
+		func() error { return run("ip", "addr", "add", "10.42.0.1/24", "dev", "enowner0") },
+		func() error { return run("ip", "link", "set", "enowner0", "up") },
+		func() error { return run("ip", "-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0") },
+		func() error { return run("ip", "-n", netns, "link", "set", "phone0", "up") },
+		func() error { return run("ip", "-n", netns, "link", "set", "lo", "up") },
 	} {
-		if err := run("ip", args...); err != nil {
+		if err := ip(); err != nil {
 			return err
 		}
 	}

@@ -12,6 +12,7 @@ type Kind string
 const (
 	KindHello    Kind = "hello"    // a connection the core authenticated
 	KindPreAuth  Kind = "preauth"  // a connection dropped before it authenticated
+	KindPaused   Kind = "paused"   // requests a trip paused, past the log's limit
 	KindCommand  Kind = "command"  // a device command
 	KindTighten  Kind = "tighten"  // a closed-list tightening
 	KindRead     Kind = "read"     // a read
@@ -39,15 +40,17 @@ var rated = map[wire.RateKind]Kind{
 	wire.RateAnswer:   KindAnswer,
 }
 
-// The two rates that are the enforcer's own, which the kernel cannot
+// The three rates that are the enforcer's own, which the kernel cannot
 // check and which never trip. Past refusedLimit requests only wait,
 // refused, until it refills, since the kernel cannot know a request will
 // be refused. Past preAuthLimit failed hellos are still dropped but no
-// longer logged one by one. Both are a checkpoint, not a measurement
+// longer logged one by one, and past pausedLimit neither are a tripped
+// core's paused requests (#4558). All are a checkpoint, not a measurement
 // (ASSUMPTIONS ENF-d-3).
 var (
 	refusedLimit = Limit{Burst: 10, Every: time.Minute}
 	preAuthLimit = Limit{Burst: 10, Every: time.Minute}
+	pausedLimit  = Limit{Burst: 10, Every: time.Minute}
 )
 
 // DefaultLimit is kind k's rate: a rated kind's from the shared format
@@ -60,6 +63,8 @@ func DefaultLimit(k Kind) Limit {
 		return refusedLimit
 	case KindPreAuth:
 		return preAuthLimit
+	case KindPaused:
+		return pausedLimit
 	}
 	for rk, rk2 := range rated {
 		if rk2 == k {

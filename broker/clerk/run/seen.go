@@ -258,8 +258,9 @@ func quoted(s string) string {
 // inbox.OpenedMax, so a sender read since the last good read stays opened
 // after the owner deletes that mail. A failing read that found none leaves
 // the record as it was. An empty LastOpened would read as "never opened"
-// and let every unsubscribe through (#2698 item 1).
-func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark) (map[string]string, MailStatus) {
+// and let every unsubscribe through (#2698 item 1). stop, for tests only,
+// is the record's save's (saveSeen).
+func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, slot, today string, ms []inbox.Mail, mark inbox.Mark, stop func(i int) bool) (map[string]string, MailStatus) {
 	var st MailStatus
 	rec, loaded := loadSeen(dir, s, slot) // not loaded: an empty record, which Opened starts today
 	got, kept, err := box.Opened(ctx, today, rec.Log)
@@ -275,7 +276,7 @@ func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, sl
 		if kept.Seen != nil {
 			st.Lines = append(st.Lines, began(loaded)...)
 			rec.Log = kept
-			if err := saveSeen(dir, s, slot, rec, nil); err != nil {
+			if err := saveSeen(dir, s, slot, rec, stop); err != nil {
 				st.Lines = append(st.Lines, "I could not save my record of the mail you read, so some senders wait longer than they need to before I may unsubscribe from them. "+tryAgain(mark))
 			}
 		}
@@ -297,7 +298,7 @@ func lastOpened(ctx context.Context, box mailbox, dir string, s clerk.Sealer, sl
 		st.WarmedUp = warmedUp(n)
 	}
 	rec.Log = kept
-	if err := saveSeen(dir, s, slot, rec, nil); err != nil {
+	if err := saveSeen(dir, s, slot, rec, stop); err != nil {
 		// The answer stands for this read; the next read starts from the
 		// record as it was, which only re-dates mail to today.
 		// The read stood, so the next save is the next read's: when the

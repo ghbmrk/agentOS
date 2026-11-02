@@ -166,7 +166,7 @@ func (h *MailHost) readSenders() (more bool) {
 		}
 		// A record that cannot be saved stands in memory; the next start
 		// reads again from the one saved before.
-		_ = saveSenders(h.dir, h.cfg.Sealer, slot, *rec, nil)
+		_ = saveSenders(h.dir, h.cfg.Sealer, slot, *rec, h.cfg.saveStop)
 	}
 	st := sendersFull
 	switch {
