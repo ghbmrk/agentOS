@@ -704,6 +704,7 @@ func TestUnitTree(t *testing.T) {
 	ourEtc := func(p string) bool { return strings.HasPrefix(p, etc) }
 	root := "[Service]\nExecStart=/usr/lib/systemd/systemd-udevd\n"
 	user := "[Service]\nUser=systemd-x\nExecStart=/usr/lib/systemd/systemd-x\n"
+	bad := "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 	for name, c := range map[string]struct {
 		files map[string]string
 		ours  func(string) bool
@@ -735,6 +736,26 @@ func TestUnitTree(t *testing.T) {
 		"a unit of ours":                                   {map[string]string{etc + "getty@.service": "[Service]\nExecStart=-/sbin/agetty - $TERM\nTTYPath=/dev/%I\n"}, nil, `holds a $ substitution`},
 		"a type in a mount drop-in":                        {map[string]string{lib + "tmp.mount": "[Mount]\nWhat=tmpfs\nWhere=/tmp\nType=tmpfs\n", etc + "tmp.mount.d/z.conf": "[Mount]\nType=fuse.agentos\n"}, ourDropins, `Type=fuse.agentos`},
 		"a helper in fstab":                                {map[string]string{"/etc/fstab": "x /x fuse.agentos defaults 0 0\n"}, ourDropins, `fuse.agentos`},
+		// #4737 L3 1, Security 1: a .conf masks one of its name in any of
+		// the unit's later drop-in directories.
+		"a type-wide drop-in a unit's own masks":         {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "service.d/50-u.conf": "[Service]\nUser=nobody\n", etc + "x.service.d/50-u.conf": "[Service]\n"}, nil, `variable "LD_PRELOAD"`},
+		"a prefix drop-in a unit's own masks":            {map[string]string{lib + "x-y.service": "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", lib + "x-.service.d/50-u.conf": "[Service]\nUser=nobody\n", etc + "x-y.service.d/50-u.conf": "[Service]\n"}, nil, `variable "LD_PRELOAD"`},
+		"a packaged prefix drop-in a packaged one masks": {map[string]string{lib + "x-root.service": root, lib + "x-.service.d/50-u.conf": "[Service]\nUser=systemd-x\n", lib + "x-root.service.d/50-u.conf": "[Service]\nNice=5\n", etc + "x-root.service.d/60-p.conf": "[Service]\nEnvironment=LD_PRELOAD=/var/lib/agentos-x/x.so\n"}, ourEtc, `variable "LD_PRELOAD"`},
+		// #4737 L3 2, Security 2: a link of ours to a package's file is ours.
+		"a drop-in linked to a package's file":      {map[string]string{lib + "systemd-udevd.service": root, "/usr/share/p/z.conf": bad, etc + "systemd-udevd.service.d/z.conf": "-> /usr/share/p/z.conf"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a drop-in directory linked to a package's": {map[string]string{lib + "systemd-udevd.service": root, "/usr/share/p/z.conf": bad, etc + "systemd-udevd.service.d": "-> /usr/share/p"}, ourEtc, `variable "LD_PRELOAD"`},
+		"a unit linked to a package's file":         {map[string]string{"/usr/share/doc/p/ex.service": "[Service]\nExecStart=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n", etc + "agentos-ex.service": "-> /usr/share/doc/p/ex.service"}, ourEtc, `variable "LD_PRELOAD"`},
+		// #4737 Security 3: a link out of the search path is a linked unit
+		// of its own name, not an alias of its target's.
+		"a linked unit a packaged one of its target's name": {map[string]string{etc + "x.service": "-> /usr/share/p/y.service", "/usr/share/p/y.service": "[Service]\nExecStart=/bin/true\n", lib + "y.service": user, etc + "x.service.d/z.conf": bad}, ourDropins, `variable "LD_PRELOAD"`},
+		"a linked mount": {map[string]string{etc + "etc-x.mount": "-> /usr/share/m/foo.mount", "/usr/share/m/foo.mount": "[Mount]\nWhat=tmpfs\nType=tmpfs\n"}, nil, `no Options=`},
+		// #4737 Security 4: a grant and a root program, one ours.
+		"a root program of ours in a package's grant":   {map[string]string{etc + "agentos-r.service": "[Service]\nExecStart=/var/lib/foo/run\n", lib + "foo.service": "[Service]\nUser=foo\nExecStart=/usr/bin/foo\nStateDirectory=foo\n"}, ourEtc, `in or above /var/lib/foo/run`},
+		"a grant of ours over a package's root program": {map[string]string{etc + "agentos-y.service": "[Service]\nUser=agentos-y\nExecStart=/bin/true\nStateDirectory=pkg\n", lib + "pkg.service": "[Service]\nExecStart=/var/lib/pkg/bin/x\n"}, ourEtc, `in or above /var/lib/pkg/bin/x`},
+		"a link loop":                             {map[string]string{etc + "x.service": "-> y.service", etc + "y.service": "-> x.service"}, nil, `more than 40 links`},
+		"a drop-in through a link of ours":        {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": "-> /etc/agentos/z.conf", "/etc/agentos/z.conf": "-> /usr/share/p/z.conf", "/usr/share/p/z.conf": bad}, func(p string) bool { return p == "/etc/agentos/z.conf" }, `variable "LD_PRELOAD"`},
+		"a drop-in we name in a linked directory": {map[string]string{lib + "x.service": root, etc + "x.service.d": "-> /usr/share/p", "/usr/share/p/z.conf": bad}, func(p string) bool { return p == etc+"x.service.d/z.conf" }, `variable "LD_PRELOAD"`},
+		"a mode of ours on a package's directory": {map[string]string{lib + "x.service": "[Service]\nExecStart=/bin/true\nStateDirectory=x\n", etc + "x.service.d/z.conf": "[Service]\nStateDirectoryMode=0777\n", lib + "y.service": "[Service]\nExecStart=/var/lib/x/bin\n"}, ourEtc, `mode 0777 /var/lib/x, in or above /var/lib/x/bin`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			if err := unitTree(fsTree(t, c.files), c.ours); err == nil || !strings.Contains(err.Error(), c.want) {
@@ -742,7 +763,6 @@ func TestUnitTree(t *testing.T) {
 			}
 		})
 	}
-	bad := "[Service]\nEnvironment=LD_PRELOAD=/tmp/x.so\n"
 	for name, c := range map[string]struct {
 		files map[string]string
 		ours  func(string) bool
@@ -754,16 +774,23 @@ func TestUnitTree(t *testing.T) {
 		// A higher unit file masks a lower one: the user one in /etc runs.
 		"a drop-in on a unit /etc makes a user's": {map[string]string{lib + "x.service": root, etc + "x.service": user, lib + "x.service.d/z.conf": bad}, nil},
 		"a masked unit":                  {map[string]string{lib + "x.service": root, etc + "x.service": "-> /dev/null", lib + "x.service.d/z.conf": bad}, nil},
-		"an empty unit file":             {map[string]string{lib + "x.service": root, etc + "x.service": "", lib + "x.service.d/z.conf": bad}, nil},
+		"an empty unit file":             {map[string]string{lib + "x.service": root, etc + "x.service": "", lib + "x.service.d/z.conf": "[Service]\nExecStartPre=/bin/true\nEnvironment=LD_PRELOAD=/tmp/x.so\n"}, nil},
 		"a masked drop-in":               {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": bad, etc + "x.service.d/z.conf": "-> /dev/null"}, nil},
 		"a drop-in a higher one masks":   {map[string]string{lib + "x.service": root, lib + "x.service.d/z.conf": bad, etc + "x.service.d/z.conf": "[Service]\n"}, nil},
 		"an instance of a user template": {map[string]string{lib + "x@.service": user, etc + "x@a.service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourDropins},
+		// #4737 L3 3: a package's own grant, with a drop-in of ours.
+		"a packaged networkd with our drop-in": {map[string]string{lib + "systemd-networkd.service": "[Service]\nExecStart=!!/usr/lib/systemd/systemd-networkd\nUser=systemd-network\nRuntimeDirectory=systemd/netif\n", lib + "systemd-networkd.service.d/agentos-inbound.conf": "[Unit]\nRequires=agentos-inbound.service\n"}, ourDropins},
+		"a package's type-wide drop-in":        {map[string]string{lib + "service.d/z.conf": "[Service]\nWorkingDirectory=/tmp\n"}, ourEtc},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := unitTree(fsTree(t, c.files), c.ours); err != nil {
 				t.Fatal(err)
 			}
 		})
+	}
+	// #4737 L3 release 4: a dash in an instance truncates nothing.
+	if got := strings.Join(dropinDirs("foo-x@a-b.service"), " "); got != "foo-x@a-b.service.d foo-x@.service.d foo-.service.d service.d" {
+		t.Fatalf("dropinDirs: %s", got)
 	}
 }
 
@@ -2048,7 +2075,7 @@ func rootBinaries(root string) ([]string, error) {
 			continue
 		}
 		for _, f := range confs {
-			if _, err := mountLines(root, []string{f}, false); err != nil {
+			if _, err := mountLines(root, []string{f}, ""); err != nil {
 				return nil, err
 			}
 		}
@@ -2090,8 +2117,11 @@ type unitCheck struct {
 	root   string            // a message names a file relative to it
 	pkgs   map[string]string // broker binary name -> package
 	seen   map[string]bool
-	progs  []string
-	grants []grant
+	progs  []string // run as root by a line not trusted
+	grants []grant  // made by a line not trusted
+	// What trusted lines alone run as root or let another uid write.
+	pkgProgs  []string
+	pkgGrants []grant
 }
 
 // unit reads the unit name from paths: its unit file and the drop-ins
@@ -2103,7 +2133,11 @@ type unitCheck struct {
 // not held (#4677).
 func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[string]bool) error {
 	if filepath.Ext(name) == ".mount" {
-		_, err := mountLines(c.root, paths, !alone)
+		unit := name
+		if alone {
+			unit = ""
+		}
+		_, err := mountLines(c.root, paths, unit)
 		return err
 	}
 	// A later User= or DynamicUser= replaces an earlier one, and drop-ins
@@ -2121,6 +2155,8 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	var env []envLine
 	var settings []envLine // rootPathKeys and dirBases lines
 	section := map[string]string{".service": "Service", ".socket": "Socket"}[filepath.Ext(name)]
+	userOurs := false             // a User= or DynamicUser= not trusted
+	modeOurs := map[string]bool{} // a *Directory= key whose mode a line not trusted sets
 	for _, f := range paths {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -2133,6 +2169,12 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 		for _, line := range ul {
 			k, v := line.key, line.value
+			if line.section == section && !trusted[f] {
+				userOurs = userOurs || k == "User" || k == "DynamicUser"
+				if key, ok := strings.CutSuffix(k, "Mode"); ok && dirBases[key] != "" {
+					modeOurs[key] = true
+				}
+			}
 			switch {
 			case line.section != section:
 				// systemd reads a unit's User= and Exec lines only in its
@@ -2165,7 +2207,10 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		if l.trusted {
 			// A package's command is not held, but one that may run as
 			// root holds the unit's own settings as a root command's.
-			rootCmd = rootCmd || l.value != "" && (!asUser || asRoot || strings.ContainsAny(l.value, "+!"))
+			if l.value != "" && (!asUser || asRoot || strings.ContainsAny(l.value, "+!")) {
+				rootCmd = true
+				c.pkgProgs = append(c.pkgProgs, execProgs(l.value)...)
+			}
 			continue
 		}
 		rel, _ := filepath.Rel(c.root, l.file)
@@ -2221,11 +2266,29 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 	// What the unit makes for its user is a grant (#4584), and what a
 	// root command reads, runs and searches lies in trees root owns
 	// (#4589).
-	g, err := unitGrants(c.root, settings, asUser || owned)
-	if err != nil {
-		return err
+	// A grant is ours when its *Directory= line, a mode line for it, or a
+	// User= or DynamicUser= is; a package's own is held only against what
+	// ours runs as root (#4737 Security 4, L3 3).
+	var modes []envLine
+	for _, l := range settings {
+		if strings.HasSuffix(l.key, "Mode") {
+			modes = append(modes, l)
+		}
 	}
-	c.grants = append(c.grants, g...)
+	for _, l := range settings {
+		if dirBases[l.key] == "" {
+			continue
+		}
+		g, err := unitGrants(c.root, append([]envLine{l}, modes...), asUser || owned)
+		if err != nil {
+			return err
+		}
+		if userOurs || !trusted[l.file] || modeOurs[l.key] {
+			c.grants = append(c.grants, g...)
+		} else {
+			c.pkgGrants = append(c.pkgGrants, g...)
+		}
+	}
 	if !rootCmd && !alone {
 		return nil
 	}
@@ -2236,6 +2299,24 @@ func (c *unitCheck) unit(name string, paths []string, alone bool, trusted map[st
 		}
 	}
 	return nil
+}
+
+// execProgs returns the programs an Exec line names, read loosely: each
+// command's first word that is an absolute path, its prefix dropped.
+func execProgs(v string) []string {
+	cmds, err := execWords(v)
+	if err != nil {
+		cmds = [][]string{strings.Fields(v)}
+	}
+	var out []string
+	for _, w := range cmds {
+		if len(w) > 0 {
+			if p := strings.TrimLeft(w[0], "@-:+!|"); strings.HasPrefix(p, "/") {
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 // unitDirs are the directories systemd loads system units and drop-ins
@@ -2251,30 +2332,59 @@ var unitDirs = []string{
 }
 
 // unitTree holds the units of the root file system at fsRoot to the unit
-// rules, read as systemd loads them (#4677): each unitDirs unit file,
-// followed through links in the tree, an alias read with its target, a
-// file linked to /dev/null or empty masking its name, and a template's
-// file read for an instance a drop-in directory names; with every drop-in
-// of each of its names, so a packaged unit's User= is seen. A unit is held
-// when ours reports one of its files, by its path in the tree (nil
-// reports every file); a file ours does not report is a package's (unit's
-// trusted). A drop-in ours reports in a type-wide, prefix or other
-// directory no unit reads by its own name is also read alone, as one a
-// transient or generated unit may read; and /etc/fstab, if ours. What a
-// unit lets another uid write may not lie in or above rootTrees or a
-// program a held unit runs as root.
+// rules, read as systemd loads them (#4677):
+//   - each unitDirs unit file, followed through links in the tree; a file
+//     linked to /dev/null or empty masks its name;
+//   - a link to a file in a unitDirs directory is an alias, read with the
+//     unit it names; a link to a file elsewhere is a linked unit, read under
+//     the link's own name;
+//   - a template's file is read for an instance a drop-in directory names;
+//   - a unit reads the drop-ins of each of its names, a .conf masking one of
+//     its file name later in systemd's order (each unitDirs directory, then
+//     each name, then dropinDirs' order), so a packaged unit's User= is seen.
+//
+// A file is ours when ours reports its path as named in a unitDirs
+// directory, a link on the way to it, or its target (nil reports every
+// file); an alias keeps its target's. Lines of a file not ours are a
+// package's (unit's trusted). A mount is held when one of its files is ours.
+// A drop-in that is ours in a type-wide, prefix or other directory no unit
+// reads by its own name is also read alone, as one a transient or generated
+// unit may read; and /etc/fstab, if ours. A grant of ours may not lie in or
+// above rootTrees or a program any unit runs as root, and a package's grant
+// not in or above a program of ours runs as root.
 func unitTree(fsRoot string, ours func(string) bool) error {
 	if ours == nil {
 		ours = func(string) bool { return true }
 	}
-	files := map[string]string{}            // unit name -> its file's path in the tree; "" when masked
-	alias := map[string]string{}            // alias -> the unit it names
-	confs := map[string]map[string]string{} // drop-in directory -> .conf name -> path; "" when masked
+	type entry struct {
+		path string // in the tree; "" when masked
+		ours bool
+	}
+	provenance := func(named, p string, links []string) bool {
+		if ours(named) || ours(p) {
+			return true
+		}
+		for _, l := range links {
+			if ours(l) {
+				return true
+			}
+		}
+		return false
+	}
+	dirSet := map[string]bool{} // unitDirs as resolved in the tree
 	for _, dir := range unitDirs {
-		d, err := inRoot(fsRoot, dir)
+		d, _, err := inRoot(fsRoot, dir)
 		if err != nil {
 			return err
 		}
+		dirSet[d] = true
+	}
+	files := map[string]entry{}                                 // unit name -> its file
+	alias := map[string]string{}                                // alias -> the unit it names
+	confs := make([]map[string]map[string]entry, len(unitDirs)) // per unitDirs directory: drop-in directory -> .conf name -> file
+	for i, dir := range unitDirs {
+		confs[i] = map[string]map[string]entry{}
+		d, _, _ := inRoot(fsRoot, dir)
 		ents, err := os.ReadDir(filepath.Join(fsRoot, d))
 		if os.IsNotExist(err) {
 			continue
@@ -2283,138 +2393,168 @@ func unitTree(fsRoot string, ours func(string) bool) error {
 		}
 		for _, e := range ents {
 			name := e.Name()
-			p, err := inRoot(fsRoot, path.Join(d, name))
+			named := path.Join(dir, name)
+			p, links, err := inRoot(fsRoot, named)
 			if err != nil {
 				return err
 			}
 			fi, err := os.Stat(filepath.Join(fsRoot, p))
 			switch {
-			case unitTypes[path.Ext(name)] && hasKey(files, name):
+			case unitTypes[path.Ext(name)] && hasEntry(files, name):
 				// A higher file of this name masks it.
 			case unitTypes[path.Ext(name)] && (p == "/dev/null" || err == nil && fi.Mode().IsRegular() && fi.Size() == 0):
-				files[name] = ""
+				files[name] = entry{}
 			case unitTypes[path.Ext(name)]:
 				if err != nil {
 					return err
 				}
-				files[name] = p
-				if t := path.Base(p); t != name && unitTypes[path.Ext(t)] {
-					alias[name] = t
+				t := path.Base(p)
+				if dirSet[path.Dir(p)] && unitTypes[path.Ext(t)] {
+					// An alias, or a link within the search path to a
+					// file of the same name: the target's own entry.
+					files[name] = entry{p, ours(p)}
+					if t != name {
+						alias[name] = t
+					}
+					continue
 				}
+				files[name] = entry{p, provenance(named, p, links)}
 			case isDropinDir(name) && err == nil && fi.IsDir():
-				if confs[name] == nil {
-					confs[name] = map[string]string{}
-				}
 				cs, err := os.ReadDir(filepath.Join(fsRoot, p))
 				if err != nil {
 					return err
 				}
+				confs[i][name] = map[string]entry{}
 				for _, c := range cs {
-					if !strings.HasSuffix(c.Name(), ".conf") || hasKey(confs[name], c.Name()) {
+					if !strings.HasSuffix(c.Name(), ".conf") {
 						continue
 					}
-					q, err := inRoot(fsRoot, path.Join(p, c.Name()))
+					namedC := path.Join(named, c.Name())
+					q, links, err := inRoot(fsRoot, namedC)
 					if err != nil {
 						return err
 					}
+					e := entry{q, provenance(namedC, q, links)}
 					if q == "/dev/null" {
-						q = ""
+						e = entry{}
 					}
-					confs[name][c.Name()] = q
+					confs[i][name][c.Name()] = e
 				}
 			}
 		}
 	}
-	// Each unit with its names: its own, its aliases' and, for an instance
-	// a drop-in directory names, its template's file.
+	// Each unit with its names: its own and its aliases', and an instance
+	// a drop-in directory names, read from its template's file.
 	names := map[string][]string{}
 	for n := range files {
 		t := n
 		if a, ok := alias[n]; ok {
 			t = a
 		}
-		names[t] = append(names[t], n)
+		if t == n {
+			names[t] = append([]string{n}, names[t]...)
+		} else {
+			names[t] = append(names[t], n)
+		}
 	}
-	for dir := range confs {
-		n := strings.TrimSuffix(dir, ".d")
-		base := strings.TrimSuffix(n, path.Ext(n))
-		if at := strings.Index(base, "@"); at > 0 && at < len(base)-1 && !hasKey(files, n) {
-			if tmpl := base[:at+1] + path.Ext(n); files[tmpl] != "" {
-				files[n] = files[tmpl]
-				names[n] = append(names[n], n)
+	for i := range confs {
+		for dir := range confs[i] {
+			n := strings.TrimSuffix(dir, ".d")
+			base := strings.TrimSuffix(n, path.Ext(n))
+			if at := strings.Index(base, "@"); at > 0 && at < len(base)-1 && !hasEntry(files, n) {
+				if tmpl := base[:at+1] + path.Ext(n); files[tmpl].path != "" {
+					files[n] = files[tmpl]
+					names[n] = []string{n}
+				}
 			}
 		}
 	}
 	c := &unitCheck{root: fsRoot, seen: map[string]bool{}}
 	own := map[string]bool{} // the drop-in directories of a unit's own names
-	for t, ns := range names {
+	ts := make([]string, 0, len(names))
+	for t := range names {
+		ts = append(ts, t)
+	}
+	sort.Strings(ts)
+	for _, t := range ts {
+		ns := names[t]
 		file := files[t]
-		if !hasKey(files, t) {
+		if !hasEntry(files, t) {
 			file = files[ns[0]] // an alias of a unit no unitDirs file names
 		}
 		for _, n := range ns {
 			own[n+".d"] = true
 		}
-		if file == "" {
+		if file.path == "" {
 			continue // masked
 		}
-		paths, held := []string{filepath.Join(fsRoot, file)}, ours(file)
-		trusted := map[string]bool{paths[0]: !held}
-		read := map[string]bool{}
-		for _, n := range ns {
-			for _, dir := range dropinDirs(n) {
-				var cs []string
-				for c := range confs[dir] {
-					cs = append(cs, c)
-				}
-				sort.Strings(cs)
-				for _, cn := range cs {
-					q := confs[dir][cn]
-					if q == "" || read[q] {
-						continue
+		paths, held := []string{filepath.Join(fsRoot, file.path)}, file.ours
+		trusted := map[string]bool{paths[0]: !file.ours}
+		seen := map[string]bool{} // .conf names read or masked
+		for i := range unitDirs {
+			for _, n := range ns {
+				for _, dir := range dropinDirs(n) {
+					var cs []string
+					for cn := range confs[i][dir] {
+						cs = append(cs, cn)
 					}
-					read[q] = true
-					f := filepath.Join(fsRoot, q)
-					paths = append(paths, f)
-					trusted[f] = !ours(q)
-					held = held || ours(q)
+					sort.Strings(cs)
+					for _, cn := range cs {
+						e := confs[i][dir][cn]
+						if seen[cn] {
+							continue
+						}
+						seen[cn] = true
+						if e.path == "" {
+							continue
+						}
+						f := filepath.Join(fsRoot, e.path)
+						paths = append(paths, f)
+						trusted[f] = !e.ours
+						held = held || e.ours
+					}
 				}
 			}
 		}
-		if held {
+		if held || path.Ext(t) != ".mount" {
 			if err := c.unit(t, paths, false, trusted); err != nil {
 				return err
 			}
 		}
 	}
-	for dir, cs := range confs {
-		if own[dir] {
-			continue
-		}
-		name := strings.TrimSuffix(dir, ".d")
-		if !strings.Contains(name, ".") {
-			name = "." + name // service.d
-		}
-		for _, q := range cs {
-			if q == "" || !ours(q) {
+	for i := range confs {
+		for dir, cs := range confs[i] {
+			if own[dir] {
 				continue
 			}
-			if err := c.unit(name, []string{filepath.Join(fsRoot, q)}, true, nil); err != nil {
-				return err
+			name := strings.TrimSuffix(dir, ".d")
+			if !strings.Contains(name, ".") {
+				name = "." + name // service.d
+			}
+			for _, e := range cs {
+				if e.path == "" || !e.ours {
+					continue
+				}
+				if err := c.unit(name, []string{filepath.Join(fsRoot, e.path)}, true, nil); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	if p, err := inRoot(fsRoot, "/etc/fstab"); err != nil {
+	if p, links, err := inRoot(fsRoot, "/etc/fstab"); err != nil {
 		return err
-	} else if _, err := os.Stat(filepath.Join(fsRoot, p)); err == nil && ours(p) {
+	} else if _, err := os.Stat(filepath.Join(fsRoot, p)); err == nil && provenance("/etc/fstab", p, links) {
 		if err := fstabLines(fsRoot, filepath.Join(fsRoot, p)); err != nil {
 			return err
 		}
 	}
-	return grantsHeld(c.grants, append(append([]string{}, rootTrees...), c.progs...))
+	if err := grantsHeld(c.grants, append(append(append([]string{}, rootTrees...), c.progs...), c.pkgProgs...)); err != nil {
+		return err
+	}
+	return grantsHeld(c.pkgGrants, c.progs)
 }
 
-func hasKey(m map[string]string, k string) bool {
+func hasEntry[V any](m map[string]V, k string) bool {
 	_, ok := m[k]
 	return ok
 }
@@ -2422,11 +2562,12 @@ func hasKey(m map[string]string, k string) bool {
 // inRoot resolves p, an absolute path in the root file system at fsRoot, as
 // the kernel would with fsRoot as /: a link's target, absolute or not, is
 // read in the tree, and .. stops at its root. It returns the resolved path
-// in the tree; from the first missing component on, p is returned as
-// given.
-func inRoot(fsRoot, p string) (string, error) {
+// in the tree (from the first missing component on, p as given) and the
+// path in the tree of each link followed.
+func inRoot(fsRoot, p string) (string, []string, error) {
+	var links []string
 	done, rest := "/", strings.Split(p, "/")
-	for links := 0; len(rest) > 0; {
+	for len(rest) > 0 {
 		c := rest[0]
 		rest = rest[1:]
 		switch c {
@@ -2440,26 +2581,26 @@ func inRoot(fsRoot, p string) (string, error) {
 		fi, err := os.Lstat(filepath.Join(fsRoot, next))
 		switch {
 		case os.IsNotExist(err):
-			return path.Join(append([]string{next}, rest...)...), nil
+			return path.Join(append([]string{next}, rest...)...), links, nil
 		case err != nil:
-			return "", err
+			return "", nil, err
 		case fi.Mode()&os.ModeSymlink == 0:
 			done = next
 			continue
 		}
-		if links++; links > 40 {
-			return "", fmt.Errorf("%s: more than 40 links", p)
+		if links = append(links, next); len(links) > 40 {
+			return "", nil, fmt.Errorf("%s: more than 40 links", p)
 		}
 		t, err := os.Readlink(filepath.Join(fsRoot, next))
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if strings.HasPrefix(t, "/") {
 			done = "/"
 		}
 		rest = append(strings.Split(t, "/"), rest...)
 	}
-	return done, nil
+	return done, links, nil
 }
 
 // grantsHeld fails on a grant in or above held, a tree or program root
@@ -2579,11 +2720,12 @@ func mountWhere(name string) bool {
 
 // mountLines reads a .mount unit's files (the unit, then its drop-ins):
 // every Type= must be plainFS and every Options= free of helpers; with
-// unit, one of them must set Type=. Over a tree root reads or runs, What=
+// unit, the unit's name (a linked unit's file has another), one of them
+// must set Type=; with none, a drop-in is read alone. Over a tree root reads or runs, What=
 // must be heldSource, and a tmpfs or ramfs needs a mode= in every Options=
 // (a later one replaces an earlier one, and drop-ins sort across
 // directories), and at least one Options=.
-func mountLines(root string, paths []string, unit bool) (bool, error) {
+func mountLines(root string, paths []string, unit string) (bool, error) {
 	typed, tmpfs, optioned, moded := false, false, false, true
 	var where string
 	for _, f := range paths {
@@ -2600,8 +2742,8 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 		// A drop-in applies to the unit it is read for, or alone to what its
 		// directory names.
 		name := filepath.Base(filepath.Dir(f))
-		if unit {
-			name = filepath.Base(paths[0])
+		if unit != "" {
+			name = unit
 		}
 		held := mountWhere(name)
 		if held {
@@ -2627,7 +2769,7 @@ func mountLines(root string, paths []string, unit bool) (bool, error) {
 			}
 		}
 	}
-	if unit && !typed {
+	if unit != "" && !typed {
 		return false, fmt.Errorf("%s: no Type=; mount(8) would probe the type and run its helper", filepath.ToSlash(paths[0]))
 	}
 	switch {
@@ -3224,23 +3366,28 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 	return progs, err
 }
 
-// dropinDirs are the drop-in directories systemd reads for a unit:
-// name.d, its type's (service.d, socket.d), each dash-truncated prefix
-// ("agentos-x-y.service" reads "agentos-x-.service.d" and
-// "agentos-.service.d") and, for an instance, its template's.
+// dropinDirs are the drop-in directories systemd reads for a unit, most
+// specific first: name.d; for an instance, its template's; each
+// dash-truncated prefix of the name before any @ ("agentos-x-y.service"
+// reads "agentos-x-.service.d" and "agentos-.service.d"); and last its
+// type's (service.d, socket.d).
 func dropinDirs(name string) []string {
 	ext := path.Ext(name)
 	base := strings.TrimSuffix(name, ext)
-	dirs := []string{name + ".d", ext[1:] + ".d"}
-	if at := strings.Index(base, "@"); at >= 0 && at < len(base)-1 {
-		dirs = append(dirs, base[:at+1]+ext+".d")
-	}
-	for i := len(base) - 1; i > 0; i-- {
-		if base[i] == '-' {
-			dirs = append(dirs, base[:i+1]+ext+".d")
+	dirs := []string{name + ".d"}
+	pre := base
+	if at := strings.Index(base, "@"); at >= 0 {
+		pre = base[:at]
+		if at < len(base)-1 {
+			dirs = append(dirs, base[:at+1]+ext+".d")
 		}
 	}
-	return dirs
+	for i := len(pre) - 1; i > 0; i-- {
+		if pre[i] == '-' {
+			dirs = append(dirs, pre[:i+1]+ext+".d")
+		}
+	}
+	return append(dirs, ext[1:]+".d")
 }
 
 var buildOut = regexp.MustCompile(`-o\s+"?([^"\s]*)/([A-Za-z0-9._-]+)"?\s+"?(\./[A-Za-z0-9_./-]+)"?`)
