@@ -127,7 +127,7 @@ Work item #4475. Written 2026-11-02 against main at 2b5a9f5d (after #4476). Held
 
 Work item #4575, from #4532's Security and L3 reviews. Written 2026-11-02 against main at 5f1c63a1.
 
-- **Verdicts read through the kernel's fold** (PLN-4). `report` folds the session's log through `kernel.Replay`, so it reads each verdict exactly as the kernel does: the first submission under an id, a verdict bound by its cause while the plan is pending, only the first, and no verdict at all from a log the fold refuses. A verdict counts only when the fold's submission is exactly the submitted plan (`kernel.PlanHash`), and a rejection must name its check. The kernel logs no failing step or session, so the report cannot check them; that is filed as #4605.
+- **Verdicts read through the kernel's fold** (PLN-4). `report` folds the session's log through `kernel.Replay`, so it reads each verdict exactly as the kernel does: the first submission under an id, a verdict bound by its cause while the plan is pending, only the first, and no verdict at all from a log the fold refuses. Every per-plan fact comes from that fold, bound to each submitted plan by its id and hash (`kernel.PlanHash`): the fold's state under an id is the verdict of the first submitted plan with that id and hash only, so another plan under the id, or a repeat, has none. The driver keeps no state of its own by plan id. A rejection must name its check. A test pins that the report's fold, under the boot anchors, equals the live kernel's state. The kernel logs no failing step or session, so the report cannot check them; that is filed as #4605.
 - **The checks at dispatch** (KEY-6). A narrower unsubscribe key, derived from the planner's and handed out, carries one held probe. The owner revokes the key after the first tick, so the kernel must cancel the probe at dispatch with `revoked`. A request on a revoked key that reaches the clerk counts `outside`. Turning off both of the kernel's checks at dispatch fails the case; each alone is backed by the other.
 - **Report conditions pinned.** These now each have a test: the check named (both uses), the submission binding (cause, hash, first submission), the posts among the outputs, the unsubscribe origin mapping, and the reader guard. The guard now compares calls and returned mails to the mails seeded. `report` reads only the session's snapshot (log entries, effects, posts, origin), so tests can feed it a regressed log.
 - **b6's budgets.** `ModelCalls` must be at least 6 times the security suite's cases. `MaxOutput` must be at least 14 bytes per byte of the largest case's content, plus 4 KiB, under any reader class (UPD-5r-b7f-3).
@@ -143,12 +143,14 @@ Work item #4575, from #4532's Security and L3 reviews. Written 2026-11-02 agains
   - a rewritten submission
   - a second submission
   - an exact submission after a rewritten one under the plan's id
-  - an acceptance before the rejection of an out-of-key plan
+  - an acceptance before the rejection of an out-of-key plan, and an acceptance after a rejection naming no check
+  - a plan under an id already in use (out-of-key under a rejected probe's id, in-key under an accepted id, a repeat, a planner plan that took a probe's id)
   - an unreadable verdict or submission, mistyped rejection and acceptance fields, and an entry out of order
   - a canary in a post
 - `TestAnUnsubscribeThePlannerAskedForIsInside`
 - `TestAReaderThatSkipsAMailIsACaseError`
 - `TestTheReportFitsFourteenBytesPerContentByte`
+- `TestTheReportFoldsTheLogAsTheLiveKernelDid`
 
 **Scope:** `broker/vm/requal/driver/security.go`, `security_test.go`; `broker/vm/requal/ASSUMPTIONS.md`; this brief.
 

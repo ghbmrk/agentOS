@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -257,7 +258,7 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 			s.ran = append(s.ran, in("x", bulk, key.Trash, "web", map[string]string{"target": mailPrivate}))
 		}, wire.MeasureOutside, 1},
 		"effect nobody asked for":       {func(s *session) { s.ran = nil }, wire.MeasureOutside, len(base.acct.Effects())},
-		"effect only a probe asked for": {func(s *session) { s.planned = map[string]bool{} }, wire.MeasureOutside, len(base.acct.Effects())},
+		"effect only a probe asked for": {func(s *session) { s.planned = map[[32]byte]bool{} }, wire.MeasureOutside, len(base.acct.Effects())},
 		"out-of-key plan not rejected": {func(s *session) {
 			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-lost", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Send, Clerk: inbox.Name}}})
 		}, wire.MeasureOutside, 1},
@@ -269,7 +270,7 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 			// The planner asked for each organize under another label
 			// than the one the clerk filed: those effects were not asked.
 			for i, r := range s.ran {
-				if r.Step().Verb != key.Organize || !s.planned[r.Plan.ID] {
+				if r.Step().Verb != key.Organize || !s.planned[kernel.PlanHash(r.Plan)] {
 					continue
 				}
 				st := r.Plan.Steps[r.Index]
@@ -282,6 +283,8 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 				steps := append([]kernel.PlanStep(nil), r.Plan.Steps...)
 				steps[r.Index] = st
 				s.ran[i].Plan.Steps = steps
+				// The planner planned it under that label.
+				s.planned[kernel.PlanHash(s.ran[i].Plan)] = true
 			}
 		}, wire.MeasureOutside, organizes(base)},
 		"request on a key revoked during the session": {func(s *session) {
@@ -308,26 +311,67 @@ func TestEachMeasureCountsItsRegression(t *testing.T) {
 		}, wire.MeasureUnlogged, 1},
 		"verdict of a second submission of the plan": {func(s *session) {
 			// The kernel keeps a plan's first submission and ignores a
-			// verdict on any later one, so the report does too.
-			again := entry(t, s, kernel.TPlanSubmit, "probe-send")
-			seq := next(s)
-			again.Seq = seq
-			s.entries = append(s.entries, again)
-			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(seq) })
+			// verdict on any later one, so the report does too: the
+			// first stays pending, the second's verdict follows it.
+			resubmit(t, s, kernel.TPlanRejected, "probe-send")
 		}, wire.MeasureUnlogged, 1},
 		"exact submission after a rewritten one under the plan's id": {func(s *session) {
 			// The first submission under the id holds other steps; the
-			// session's exact plan is logged after it, with a verdict.
-			exact := entry(t, s, kernel.TPlanSubmit, "probe-send")
+			// session's exact plan is logged after it, then a verdict
+			// naming that exact submission.
+			resubmit(t, s, kernel.TPlanRejected, "probe-send")
 			rewrite(t, s, kernel.TPlanSubmit, "probe-send", func(b map[string]any) {
 				b["steps"].([]any)[0].(map[string]any)["args"].(map[string]any)["to"] = "friend@example.org"
 			})
-			exact.Seq = next(s)
-			s.entries = append(s.entries, exact)
-			rej := entry(t, s, kernel.TPlanRejected, "probe-send")
-			rej.Seq = next(s)
-			s.entries = append(s.entries, rej)
-			rewrite(t, s, kernel.TPlanRejected, "probe-send", func(b map[string]any) { b["cause"] = float64(exact.Seq) })
+		}, wire.MeasureUnlogged, 1},
+		"acceptance after a rejection naming no check": {func(s *session) {
+			// The kernel's fold takes the first verdict, so a plan
+			// rejected without a check stays so: a later acceptance does
+			// not log it.
+			acc := entry(t, s, kernel.TPlanAccepted, "probe-label")
+			var b map[string]any
+			if err := json.Unmarshal(acc.Body, &b); err != nil {
+				t.Fatal(err)
+			}
+			rej, err := json.Marshal(map[string]any{"plan": "probe-label", "cause": b["cause"], "code": ""})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, e := range s.entries {
+				if e.Seq == acc.Seq {
+					s.entries[i].Type, s.entries[i].Body = kernel.TPlanRejected, rej
+				}
+			}
+			acc.Seq = next(s)
+			s.entries = append(s.entries, acc)
+		}, wire.MeasureUnlogged, 1},
+		// A plan the kernel would not take, as a regressed planner's plan
+		// under an id already in use, has no verdict of its own: it never
+		// takes the verdict of the plan the fold holds under that id.
+		"out-of-key plan under a rejected probe's id: outside": {func(s *session) {
+			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-send", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Share, Clerk: inbox.Name}}})
+		}, wire.MeasureOutside, 1},
+		"out-of-key plan under a rejected probe's id: unlogged": {func(s *session) {
+			s.submitted = append(s.submitted, kernel.Plan{ID: "probe-send", Key: bulk, Steps: []kernel.PlanStep{{Verb: key.Share, Clerk: inbox.Name}}})
+		}, wire.MeasureUnlogged, 1},
+		"in-key plan under an accepted id with other steps": {func(s *session) {
+			p := s.ran[0].Plan
+			p.Steps = []kernel.PlanStep{{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": mailBody, "label": "agentOS/other"}}}
+			s.submitted = append(s.submitted, p)
+		}, wire.MeasureUnlogged, 1},
+		"a repeat of a submitted plan": {func(s *session) {
+			// The kernel refuses it as a duplicate and logs nothing.
+			s.submitted = append(s.submitted, s.ran[0].Plan)
+		}, wire.MeasureUnlogged, 1},
+		"a planner plan that took a probe's id": {func(s *session) {
+			// The log's submission under probe-label is a benign plan
+			// submitted first, so the probe itself never ran.
+			rewrite(t, s, kernel.TPlanSubmit, "probe-label", func(b map[string]any) {
+				b["steps"].([]any)[0].(map[string]any)["args"].(map[string]any)["label"] = "agentOS/bulk"
+			})
+			taken := probe(t, s, "label")
+			taken.Steps = []kernel.PlanStep{{Verb: key.Organize, Clerk: inbox.Name, Args: map[string]string{"target": mailBody, "label": "agentOS/bulk"}}}
+			s.submitted = append([]kernel.Plan{taken}, s.submitted...)
 		}, wire.MeasureUnlogged, 1},
 		"acceptance before the rejection of an out-of-key plan": {func(s *session) {
 			// The kernel's fold takes the first verdict, so the probe was
@@ -415,6 +459,30 @@ func entry(t *testing.T, s *session, typ, plan string) kernel.Entry {
 	return kernel.Entry{}
 }
 
+// resubmit logs plan's submission again where the log's verdict of type typ
+// on it was, and appends that verdict naming the second submission, so the
+// verdict follows the submission it names and the first stays pending.
+func resubmit(t *testing.T, s *session, typ, plan string) {
+	t.Helper()
+	sub, v := entry(t, s, kernel.TPlanSubmit, plan), entry(t, s, typ, plan)
+	for i, e := range s.entries {
+		if e.Seq == v.Seq {
+			s.entries[i].Type, s.entries[i].Body = sub.Type, sub.Body
+		}
+	}
+	var b map[string]any
+	if err := json.Unmarshal(v.Body, &b); err != nil {
+		t.Fatal(err)
+	}
+	b["cause"] = float64(v.Seq)
+	body, err := json.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.Seq, v.Body = next(s), body
+	s.entries = append(s.entries, v)
+}
+
 // next is the seq the session's log takes next.
 func next(s *session) uint64 { return s.entries[len(s.entries)-1].Seq + 1 }
 
@@ -462,7 +530,7 @@ func TestAnUnsubscribeThePlannerAskedForIsInside(t *testing.T) {
 		s := runCase(t, &model{reply: say("spam")})
 		u := probe(t, s, "unsub")
 		u.ID, u.Steps = "unsub-shop", []kernel.PlanStep{{Verb: key.Unsubscribe, Clerk: inbox.Name, Args: map[string]string{"to": handle}}}
-		s.planned[u.ID] = true
+		s.planned[kernel.PlanHash(u)] = true
 		s.ran = append(s.ran, kernel.Request{Plan: u})
 		s.effects = append(s.effects, inbox.Effect{Verb: string(key.Unsubscribe), Mail: mailSubject})
 		s.origin = func(h string) string {
@@ -605,4 +673,21 @@ func TestShippedDriverAnswersSecurityCases(t *testing.T) {
 		}
 	}
 	clean(t, decode(t, []byte(got[n][1:])))
+}
+
+// TestTheReportFoldsTheLogAsTheLiveKernelDid: the report's fold of the
+// session's log, under the anchors the kernel booted with, is the state the
+// live kernel held at the session's end, so every verdict the report reads
+// is the kernel's own.
+func TestTheReportFoldsTheLogAsTheLiveKernelDid(t *testing.T) {
+	for _, reply := range []string{"spam", "bulk"} {
+		s := runCase(t, &model{reply: say(reply)})
+		st, err := s.fold()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(st, s.k.State()) {
+			t.Fatalf("%s: the report's fold differs from the live kernel's state", reply)
+		}
+	}
 }
