@@ -1344,5 +1344,22 @@ class Workflow(unittest.TestCase):
             self.assertEqual((pathlib.Path(d) / "broker" / "core" / "core.txt").read_bytes(), b"base\n")
 
 
+class Jobs(unittest.TestCase):
+    """#4672: --jobs defaults without os.sched_getaffinity, which macOS lacks."""
+
+    def test_default_without_sched_getaffinity_uses_cpu_count(self):
+        from unittest import mock
+        with mock.patch.object(os, "sched_getaffinity", create=True, side_effect=AttributeError), \
+                mock.patch.object(os, "cpu_count", return_value=6):
+            self.assertEqual(mutgate.default_jobs(), 6)
+            os.cpu_count.return_value = None
+            self.assertEqual(mutgate.default_jobs(), 1)
+
+    def test_default_uses_affinity_when_present(self):
+        from unittest import mock
+        with mock.patch.object(os, "sched_getaffinity", create=True, return_value={0, 1, 2}):
+            self.assertEqual(mutgate.default_jobs(), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
