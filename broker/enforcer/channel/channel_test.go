@@ -1189,7 +1189,8 @@ func TestTripPausesUntilRestore(t *testing.T) {
 // TestTruncatedFrameOnlyEnds: a stream that ends mid-frame is a lost
 // connection, not a message outside the format, so it ends the
 // connection and trips nothing (an honest core's link can drop
-// mid-write). Revert mutant: malformed counting wire.ErrShort.
+// mid-write), logged once. Revert mutants: malformed counting
+// wire.ErrShort; refuse's line removed.
 func TestTruncatedFrameOnlyEnds(t *testing.T) {
 	r := newRig(t, nil)
 	good, _ := wire.Encode(wire.ToEnforcer, cmd(1, "lamp", wire.VerbOn))
@@ -1203,6 +1204,17 @@ func TestTruncatedFrameOnlyEnds(t *testing.T) {
 	<-cl.done
 	if r.cut.trips() != 0 {
 		t.Fatal("a truncated frame tripped the core")
+	}
+	// It is logged as a refused frame (ENF-d-6). Revert mutant: refuse's
+	// line removed.
+	var refused int
+	for _, e := range r.events() {
+		if e.Kind == KindFrame && e.Code == wire.Refused {
+			refused++
+		}
+	}
+	if refused != 1 {
+		t.Errorf("a truncated frame logged %d refused-frame lines, want 1", refused)
 	}
 }
 

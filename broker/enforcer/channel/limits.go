@@ -12,7 +12,7 @@ type Kind string
 const (
 	KindHello    Kind = "hello"    // a connection the core authenticated
 	KindPreAuth  Kind = "preauth"  // a connection dropped before it authenticated
-	KindPaused   Kind = "paused"   // requests a trip paused, past the log's limit
+	KindPaused   Kind = "paused"   // a cut core's lines, past the log's limit
 	KindCommand  Kind = "command"  // a device command
 	KindTighten  Kind = "tighten"  // a closed-list tightening
 	KindRead     Kind = "read"     // a read
@@ -45,7 +45,7 @@ var rated = map[wire.RateKind]Kind{
 // refused, until it refills, since the kernel cannot know a request will
 // be refused. Past preAuthLimit failed hellos are still dropped but no
 // longer logged one by one, and past pausedLimit neither are a tripped
-// core's paused requests (#4558). All are a checkpoint, not a measurement
+// core's paused requests, reconnects and refused frames (#4558, #4606). All are a checkpoint, not a measurement
 // (ASSUMPTIONS ENF-d-3).
 var (
 	refusedLimit = Limit{Burst: 10, Every: time.Minute}
