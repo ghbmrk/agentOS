@@ -282,7 +282,10 @@ class ErrorLineEscapeTest(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             cm.say("ok line")
             cm.say("MISMATCH " + EVIL)
-        self.assertEqual(buf.getvalue(), 'ok line\n%s\n' % json.dumps("MISMATCH " + EVIL))
+            cm.say("  ::add-mask::x")
+            cm.say("::error::x")
+        self.assertEqual(buf.getvalue(), 'ok line\n%s\n"  ::add-mask::x"\n"::error::x"\n'
+                         % json.dumps("MISMATCH " + EVIL))
 
 
 class ShadowPinTest(unittest.TestCase):
@@ -578,8 +581,6 @@ class ReproduceJobTest(unittest.TestCase):
     """The two-runner check is blocking for the initrd (IMG-2): the Compare step itself, run."""
 
     def setUp(self):
-        if not shutil.which("jq"):
-            self.skipTest("jq not installed")
         self.tmp = tempfile.TemporaryDirectory()
         self.d = pathlib.Path(self.tmp.name)
         self.initrd = newc(BASE)
@@ -681,7 +682,7 @@ class ReproduceJobTest(unittest.TestCase):
         self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/extra": "12" * 32}))
         r = self.run_step()
         self.assertNotEqual(r.returncode, 0, r.stdout)
-        self.assertIn('MISMATCH "agentos/extra"', r.stdout.splitlines())
+        self.assertIn('MISMATCH "agentos/extra": not in a\'s release record', r.stdout.splitlines())
 
     def test_missing_hashes_never_match(self):
         # A record without a /usr root hash or a boot entry hash on both sides is not "the same".
@@ -701,7 +702,71 @@ class ReproduceJobTest(unittest.TestCase):
         (self.d / "rec/release-b/SHA256SUMS").write_text(line + "\n")
         r = self.run_step()
         self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("outputs differ (SHA256SUMS, reported only):", r.stdout.splitlines())
         self.assertIn("  only in b: %s" % json.dumps(line), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_unreadable_sha256sums_names_the_build_and_is_reported_only(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/SHA256SUMS").unlink()
+        r = self.run_step()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("SHA256SUMS of build b unreadable (reported only): No such file or directory",
+                      r.stdout.splitlines())
+        self.assertNotIn("SHA256SUMS of build a", r.stdout)
+
+    # #4661: every failure path of the --release check has its own case.
+    def test_missing_release_record_on_one_side_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd)
+        (self.d / "rec/release-b/agentos_1.release.json").unlink()
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH release record: "rec/release-b": expected one *.release.json, found 0',
+                      r.stdout.splitlines())
+
+    def test_differing_boot_entry_fails(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot_entry"].update({"sha256": "ce" * 32}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln], ["MISMATCH boot entry"])
+
+    def test_boot_file_null_on_both_sides_fails(self):
+        # A revert of digest() on boot files would let null == null pass.
+        null = lambda rel: rel["boot"].update({"agentos/vmlinuz": None})  # noqa: E731
+        self.side("release-a", self.initrd, edit=null)
+        self.side("release-b", self.initrd, edit=null)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ['MISMATCH "agentos/vmlinuz" a=null b=null'])
+
+    def test_differing_boot_file_prints_both_hashes(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, edit=lambda rel: rel["boot"].update({"agentos/vmlinuz": EVIL}))
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn('MISMATCH "agentos/vmlinuz" a="%s" b=%s' % ("ef" * 32, EVIL_SHOWN), r.stdout.splitlines())
+        assert_one_line_each(self, r.stdout)
+
+    def test_boot_map_with_one_entry_fails(self):
+        one = lambda rel: rel["boot"].pop("agentos/vmlinuz")  # noqa: E731
+        self.side("release-a", self.initrd, edit=one)
+        self.side("release-b", self.initrd, edit=one)
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertEqual([ln for ln in r.stdout.splitlines() if "MISMATCH" in ln],
+                         ["MISMATCH release.json lists no kernel and initrd"])
+
+    def test_usrhash_prints_escaped_as_one_line(self):
+        self.side("release-a", self.initrd)
+        self.side("release-b", self.initrd, usrhash="ab" * 32 + "\n::error::forged")
+        r = self.run_step()
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("usrhash b=%s" % json.dumps("ab" * 32 + "\n::error::forged"), r.stdout.splitlines())
+        self.assertIn("MISMATCH /usr root hash", r.stdout.splitlines())
         assert_one_line_each(self, r.stdout)
 
     def test_only_a_superseded_pr_run_is_cancelled(self):

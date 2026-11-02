@@ -42,9 +42,11 @@ def shown(v):
 
 def say(line):
     """Print LINE: the only way this script writes to the log. Callers build each line from fixed
-    text and shown() values, so it is printable ASCII; a line that is not (a value that missed
-    shown()) still prints as one quoted line, never as two or as a workflow command (#4648)."""
-    print(line if line.isascii() and line.isprintable() else shown(line))
+    text and shown() values, so it is printable ASCII and starts with no ::. A line that is not (a
+    value that missed shown()) still prints as one quoted line, never as two or as a workflow
+    command (#4648, #4661)."""
+    plain = line.isascii() and line.isprintable() and not line.lstrip().startswith("::")
+    print(line if plain else shown(line))
 
 
 def why(e):
@@ -288,15 +290,18 @@ def compare_release(da, db):
     if ra is not None:
         say("usrhash a=%s" % shown(ra.get("usrhash")))
         say("usrhash b=%s" % shown(rb.get("usrhash")))
-    try:
-        sa, sb = [(pathlib.Path(d) / "SHA256SUMS").read_text().splitlines() for d in (da, db)]
-    except (OSError, UnicodeDecodeError) as e:
-        say("SHA256SUMS unreadable: %s" % why(e))
-    else:
+    sums = {}
+    for side, d in (("a", da), ("b", db)):
+        try:
+            sums[side] = (pathlib.Path(d) / "SHA256SUMS").read_text().splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            say("SHA256SUMS of build %s unreadable (reported only): %s" % (side, why(e)))
+    if len(sums) == 2:
+        sa, sb = sums["a"], sums["b"]
         if sa == sb:
             say("every output identical")
         else:
-            say("outputs differ (SHA256SUMS):")
+            say("outputs differ (SHA256SUMS, reported only):")
             for ln in sorted(set(sa) - set(sb)):
                 say("  only in a: %s" % shown(ln))
             for ln in sorted(set(sb) - set(sa)):
@@ -330,7 +335,10 @@ def compare_release(da, db):
         elif digest(ba.get(k)) and ba.get(k) == bb.get(k):
             say("same %s" % shown(k))
         else:
-            say("MISMATCH %s" % shown(k))
+            if k in ba and k in bb:
+                say("MISMATCH %s a=%s b=%s" % (shown(k), shown(ba[k]), shown(bb[k])))
+            else:
+                say("MISMATCH %s: not in %s's release record" % (shown(k), "b" if k in ba else "a"))
             ok = False
             if k.endswith("initrd"):
                 compare_initrds(pathlib.Path(da) / "initrd" / k, pathlib.Path(db) / "initrd" / k)
