@@ -14,8 +14,9 @@ package privfile
 // mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
 // plain type and no helper option (#4380), and over a tree root reads or
 // runs no bind, move or loop, a source only a device under /dev outside
-// openDevs, with no .. step or % specifier, no " in its options, and a
-// tmpfs only with a mode no other uid writes (#4516);
+// openDevs, with no .. step or % specifier, options of only letters,
+// digits and =,_-./, and a tmpfs only with a mode no other uid writes
+// (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
 // or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
@@ -580,7 +581,7 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"an X-mount.mode over a rules dir":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc/udev/rules.d ext4 X-mount.mode=0777 0 0\n", `option X-mount.mode=0777`},
 		"an X-mount.owner over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.owner=1000 0 0\n", `option X-mount.owner=1000`},
 		"an X-mount.group over /usr":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 X-mount.group=100 0 0\n", `option X-mount.group=100`},
-		"an X-mount.idmap over /etc":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 X-mount.idmap=u:0:1000:1 0 0\n", `option X-mount.idmap`},
+		"an X-mount.idmap over /etc":             {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 X-mount.idmap=/proc/1/ns/user 0 0\n", `option X-mount.idmap`},
 		"a writable tmpfs over /var/run/systemd": {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /var/run/systemd/system tmpfs mode=0777 0 0\n", `option mode=0777`},
 		"an owner option on a var-run unit":      {"image/x/var-run-udev.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
 		"an owner option on an escaped name":     {"image/x/run-modules\\x2dload.d.mount", "[Mount]\nType=tmpfs\nOptions=uid=1\n", `option uid=1`},
@@ -604,7 +605,7 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a .. after /dev/fd in fstab":       {"image/mkosi/mkosi.extra/etc/fstab", "/dev/fd/../root/tmp/x.img /usr/lib/agentos squashfs ro 0 0\n", `source /dev/fd/../root/tmp/x.img`},
 		"a .. after /dev/fd in a unit":      {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=/dev/fd/../root/tmp/x.img\nType=squashfs\n", `What=/dev/fd/../root/tmp/x.img`},
 		"a specifier source":                {"image/x/usr-lib-agentos.mount", "[Mount]\nWhat=%V\nType=squashfs\n", `What=%V`},
-		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u+w 0 0\n", `option mode=u+w`},
+		"a symbolic mode":                   {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=u-w 0 0\n", `option mode=u-w`},
 		"a mode past 7777":                  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/x tmpfs mode=10755 0 0\n", `option mode=10755`},
 		"a bind in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /usr/lib/agentos ext4 bind 0 0\n", `option bind`},
 		"a move in fstab":                   {"image/mkosi/mkosi.extra/etc/fstab", "/dev/x /etc ext4 nosuid,move 0 0\n", `option move`},
@@ -619,8 +620,12 @@ func TestRootSideSetCountsMountHelpers(t *testing.T) {
 		"a tmpfs unit with no Options=":     {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\n", `with no Options=`},
 		"a tmpfs in a drop-in over /etc":    {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=ramfs\n", `with no Options=`},
 		// #4559 Security 1: libmount keeps a quoted value whole.
-		"a quoted mode in fstab":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs x-a=\",mode=0755,\",nosuid 0 0\n", `quote a value`},
-		"a quoted mode in a unit": {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=\",mode=0755,\",nosuid\n", `quote a value`},
+		"a quoted mode in fstab":  {"image/mkosi/mkosi.extra/etc/fstab", "tmpfs /etc/udev/rules.d tmpfs x-a=\",mode=0755,\",nosuid 0 0\n", `hold a byte other than`},
+		"a quoted mode in a unit": {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=\",mode=0755,\",nosuid\n", `hold a byte other than`},
+		// #4559 Security delta 1: libmount keeps a \-escaped comma too.
+		"an escaped comma in a unit":    {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=x-a=a\\,mode=0755,nosuid\n", `hold a byte other than`},
+		"an escaped comma in a drop-in": {"image/x/etc-udev-rules.d.mount.d/z.conf", "[Mount]\nType=tmpfs\nOptions=x-a=a\\,mode=0755\n", `hold a byte other than`},
+		"a single quote in a unit":      {"image/x/etc-udev-rules.d.mount", "[Mount]\nWhat=tmpfs\nType=tmpfs\nOptions=mode=0755,x-a='b'\n", `hold a byte other than`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -1691,13 +1696,14 @@ var linkOptions = map[string]bool{"bind": true, "rbind": true, "move": true, "lo
 // On a mount point in or above rootTrees (held), it also refuses an option
 // of ownerOptions or linkOptions, and a mode= with a group or other write
 // bit, any of which could hand that tree to another uid (#4494, #4516). A
-// held list with a " is refused: libmount keeps a quoted value whole, so a
-// mode= inside x-a=",mode=0755," would be counted here and never reach the
-// kernel (#4559 Security 1). It reports whether the list holds a mode= it
-// read.
+// held list is read only if every byte is in heldOptionBytes: libmount
+// keeps a quoted or \-escaped comma inside one value, so a mode= in
+// x-a=",mode=0755," or x-a=a\,mode=0755 would be counted here and never
+// reach the kernel (#4559 Security 1, delta 1). It reports whether the list
+// holds a mode= it read.
 func mountOptions(opts string, held bool) (bool, error) {
-	if held && strings.Contains(opts, `"`) {
-		return false, fmt.Errorf("options %s quote a value on a mount in or above a tree root reads or runs; mount(8) splits a quoted list unlike this lint", opts)
+	if held && !heldOptionBytes.MatchString(opts) {
+		return false, fmt.Errorf("options %s on a mount in or above a tree root reads or runs hold a byte other than a letter, digit or one of =,_-./, which mount(8) may split unlike this lint", opts)
 	}
 	moded := false
 	for _, o := range strings.Split(opts, ",") {
@@ -1716,6 +1722,9 @@ func mountOptions(opts string, held bool) (bool, error) {
 	}
 	return moded, nil
 }
+
+// heldOptionBytes are the bytes a held mount's option list may hold.
+var heldOptionBytes = regexp.MustCompile(`^[A-Za-z0-9=,_./-]*$`)
 
 // heldSource reports whether a mount's source may sit over a tree root
 // reads or runs: a name with no slash (tmpfs, UUID=x, LABEL=x) or a device
