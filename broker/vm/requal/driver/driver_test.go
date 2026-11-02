@@ -34,9 +34,9 @@ func read(t *testing.T, b *bytes.Buffer) []string {
 	return out
 }
 
-// TestShippedDriverRefusesEveryCase: the driver this release ships has no
-// evaluator, so each case is a case error and the gate holds.
-func TestShippedDriverRefusesEveryCase(t *testing.T) {
+// TestRefuseRefusesEveryCase: under Refuse, the evaluator of a release
+// that runs no suite, each case is a case error and the gate holds.
+func TestRefuseRefusesEveryCase(t *testing.T) {
 	var w bytes.Buffer
 	if err := Serve(frames(t, "Ca", "Cb"), &w, Refuse); err != nil {
 		t.Fatal(err)
