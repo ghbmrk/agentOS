@@ -537,6 +537,50 @@ func TestThreadViewKeepsNetAdmin(t *testing.T) {
 	}
 }
 
+// TestThreadRadioMustBeDevice (NET-2 Confined radio stacks; ENF-k-12,
+// #4616 item 1): Thread's shipped profile binds the radio only as a
+// character device, so a radio URL whose path is a regular file, which
+// the pinned ot-daemon would fork as its own child (forkpty) whatever the
+// URL's scheme, fails the start before ot-daemon runs: Trampoline exits
+// 126 and logs why. Catches a Thread profile that loosens the radio
+// entry's kind, which would leave only the filter's fork refusal between
+// ot-daemon and a child. TestThreadViewKeepsNetAdmin, with a device at
+// the radio's place, is the control.
+func TestThreadRadioMustBeDevice(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to start a confined stack as another user")
+	}
+	dir, bin := viewDir(t)
+	at := func(n string) string { return filepath.Join(dir, n) }
+	if err := os.Mkdir(at("run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rcp := at("ot-rcp")
+	if err := os.WriteFile(rcp, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var log lockedBuffer
+	p := Thread(viewUID, viewUID, at(vState), at("run"), rcp)
+	p.Links = nil // the enforcer's links need CONFIG_DUMMY; this test is about the view
+	proc, conn, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{viewArg, "dial", dir},
+		Dir: at(vState), Stderr: &log})
+	// A refused stack may exit before Start opens its network namespace,
+	// which fails the start: refused as well.
+	if err == nil {
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		out, _ := io.ReadAll(conn)
+		conn.Close()
+		err := proc.Wait()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 126 || len(out) != 0 {
+			t.Errorf("the stack ran with a regular file as its radio: exit %v, sent %q", err, out)
+		}
+	}
+	if l := log.String(); !strings.Contains(l, "confine: view: "+rcp+": not a c") {
+		t.Errorf("refusal %q, want the radio refused as not a character device", l)
+	}
+}
+
 // lockedBuffer collects a stack's stderr.
 type lockedBuffer struct {
 	mu sync.Mutex

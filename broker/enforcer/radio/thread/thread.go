@@ -15,6 +15,8 @@ package thread
 
 import (
 	"errors"
+	"path"
+	"strconv"
 	"strings"
 )
 
@@ -39,12 +41,14 @@ const Socket = "openthread-" + Netif + ".sock"
 // after confine.Trampoline, hands to Adapter.
 const AdapterArg = "agentos-thread-adapter"
 
-var ErrRadio = errors.New("thread: radio URL refused")
+var ErrRadio = errors.New("thread: radio path refused")
 
-// DaemonArgs are ot-daemon's arguments for the radio's spinel URL (the
-// nRF52840 RCP's serial device, owned by the Thread user; decision 11) and
-// its state directory (owned by the Thread user, mode 0700: the network's
-// dataset and keys); verbose also logs to stderr.
+// DaemonArgs are ot-daemon's arguments for the radio (the nRF52840 RCP's
+// serial device, owned by the Thread user; decision 11) at baud, and its
+// state directory (owned by the Thread user, mode 0700: the network's
+// dataset and keys); verbose also logs to stderr. radio must be the path
+// confine.Thread binds: DaemonArgs makes the spinel URL from it, so the
+// URL names no other path.
 //
 // The daemon (slice l) starts the stack in this order: ot-daemon under
 // confine.Thread with that state directory, a run directory (owned by the
@@ -55,12 +59,15 @@ var ErrRadio = errors.New("thread: radio URL refused")
 // then the Matter controller under confine.Matter with its storage
 // directory and Spec.Net set to ot-daemon's process. This package does not start them itself, so that
 // only confine links os/exec (arc2).
-func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
-	// The URL is the last argument: it must not read as an option.
-	// Not forkpty: ot-daemon would start the radio as its own child, and
-	// no stack starts a process (confine, ENF-k-12).
-	scheme, _, _ := strings.Cut(radioURL, "://")
-	if !strings.HasPrefix(radioURL, "spinel+") || strings.ContainsAny(radioURL, " \t\n") || strings.Contains(scheme, "forkpty") {
+func DaemonArgs(radio string, baud int, state string, verbose bool) ([]string, error) {
+	// The URL is the last argument: it must not read as an option, and it
+	// is the RCP's serial scheme with radio as its whole path. ot-daemon
+	// forks the radio as its own child when that path is a regular file
+	// (forkpty); confine.Thread's view binds radio only as a character
+	// device and fails the start otherwise, with the filter's fork refusal
+	// behind it (ENF-k-12). So radio is absolute, clean, and plain: no
+	// character that would end the path or start a query in the URL.
+	if !strings.HasPrefix(radio, "/") || path.Clean(radio) != radio || strings.Trim(radio, pathChars) != "" || baud <= 0 {
 		return nil, ErrRadio
 	}
 	if !strings.HasPrefix(state, "/") {
@@ -70,5 +77,8 @@ func DaemonArgs(radioURL, state string, verbose bool) ([]string, error) {
 	if verbose {
 		args = append(args, "-v")
 	}
-	return append(args, radioURL), nil
+	return append(args, "spinel+hdlc+uart://"+radio+"?uart-baudrate="+strconv.Itoa(baud)), nil
 }
+
+// pathChars are the characters a radio path may hold.
+const pathChars = "/._-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
