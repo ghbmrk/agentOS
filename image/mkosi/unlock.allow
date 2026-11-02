@@ -3,4 +3,117 @@
 # step can start, "stop U KIND T" a unit one of those stops, "generator G failed" a generator that
 # found nothing to read in the build's tree. Regenerate with, as root, after an image build:
 #   python3 image/unlock_graph.py --allowlist OUT VERSION > image/mkosi/unlock.allow
+start -.slice
+start agentos-inbound.service
 start agentos-keeper-kernel.service
+start agentos-keeper-link-capture.service
+start agentos-keeper.slice
+start agentos-link.service
+start agentos.slice
+start dev-hugepages.mount
+start dev-mqueue.mount
+start emergency.service
+start emergency.target
+start first-boot-complete.target
+start kmod-static-nodes.service
+start ldconfig.service
+start local-fs-pre.target
+start local-fs.target
+start modprobe@configfs.service
+start modprobe@dm_mod.service
+start modprobe@efi_pstore.service
+start modprobe@fuse.service
+start modprobe@loop.service
+start network-pre.target
+start nss-lookup.target
+start proc-sys-fs-binfmt_misc.automount
+start proc-sys-fs-binfmt_misc.mount
+start run-lock.mount
+start swap.target
+start sys-fs-fuse-connections.mount
+start sys-kernel-config.mount
+start sys-kernel-debug.mount
+start sys-kernel-tracing.mount
+start sys-subsystem-net-devices-agentos\x2dlink.device
+start sysinit.target
+start system-modprobe.slice
+start system.slice
+start systemd-ask-password-console.path
+start systemd-ask-password-console.service
+start systemd-binfmt.service
+start systemd-boot-random-seed.service
+start systemd-boot-update.service
+start systemd-confext.service
+start systemd-firstboot.service
+start systemd-hibernate-clear.service
+start systemd-hwdb-update.service
+start systemd-journal-catalog-update.service
+start systemd-journal-flush.service
+start systemd-journald-audit.socket
+start systemd-journald-dev-log.socket
+start systemd-journald.service
+start systemd-journald.socket
+start systemd-machine-id-commit.service
+start systemd-modules-load.service
+start systemd-network-generator.service
+start systemd-pcrlock-file-system.service
+start systemd-pcrlock-firmware-code.service
+start systemd-pcrlock-firmware-config.service
+start systemd-pcrlock-machine-id.service
+start systemd-pcrlock-make-policy.service
+start systemd-pcrlock-secureboot-authority.service
+start systemd-pcrlock-secureboot-policy.service
+start systemd-pcrmachine.service
+start systemd-pcrphase-sysinit.service
+start systemd-pcrphase.service
+start systemd-pstore.service
+start systemd-random-seed.service
+start systemd-remount-fs.service
+start systemd-repart.service
+start systemd-resolved.service
+start systemd-sysctl.service
+start systemd-sysext.service
+start systemd-sysusers.service
+start systemd-tmpfiles-setup-dev-early.service
+start systemd-tmpfiles-setup-dev.service
+start systemd-tmpfiles-setup.service
+start systemd-tpm2-setup-early.service
+start systemd-tpm2-setup.service
+start systemd-udev-load-credentials.service
+start systemd-udev-trigger.service
+start systemd-udevd-control.socket
+start systemd-udevd-kernel.socket
+start systemd-udevd.service
+start systemd-update-done.service
+start tmp.mount
+stop emergency.service ConflictedBy sysinit.target
+stop emergency.service ConflictedBy syslog.socket
+stop emergency.service ConflictedBy systemd-ask-password-console.path
+stop emergency.service ConflictedBy systemd-ask-password-console.service
+stop emergency.service ConflictedBy systemd-ask-password-wall.path
+stop emergency.service Conflicts rescue.service
+stop emergency.target ConflictedBy initrd-cleanup.service
+stop emergency.target ConflictedBy initrd-parse-etc.service
+stop emergency.target ConflictedBy sysinit.target
+stop ldconfig.service Conflicts initrd-switch-root.target
+stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-keeper-link-capture.service
+stop sys-subsystem-net-devices-agentos\x2dlink.device BoundBy agentos-link.service
+stop sysinit.target Conflicts emergency.service
+stop sysinit.target Conflicts emergency.target
+stop systemd-ask-password-console.path Conflicts emergency.service
+stop systemd-ask-password-console.service Conflicts emergency.service
+stop systemd-ask-password-console.service Conflicts initrd-switch-root.target
+stop systemd-confext.service Conflicts initrd-switch-root.target
+stop systemd-network-generator.service Conflicts initrd-switch-root.target
+stop systemd-repart.service Conflicts initrd-switch-root.target
+stop systemd-resolved.service Conflicts initrd-switch-root.target
+stop systemd-sysext.service Conflicts initrd-switch-root.target
+stop systemd-sysusers.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup-dev-early.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup-dev.service Conflicts initrd-switch-root.target
+stop systemd-tmpfiles-setup.service Conflicts initrd-switch-root.target
+stop systemd-udev-load-credentials.service Conflicts initrd-switch-root.target
+stop systemd-udev-trigger.service ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd-control.socket ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd-kernel.socket ConflictedBy initrd-udevadm-cleanup-db.service
+stop systemd-udevd.service ConflictedBy initrd-udevadm-cleanup-db.service
