@@ -27,21 +27,23 @@ func Announces(d policy.Document, l Layout) (map[string][][]string, error) {
 }
 
 // Hears is every interface slice f's mDNS relay listens on: each signed
-// pair's ends, which it relays between, and every Devices-network
-// device's VLAN, paired or not, where it only hears, so it knows which
-// names each device proves its own (D-266). An isolated device's is not
-// among them: it reaches nothing, the enforcer included. The ruleset
-// admits mDNS from exactly these.
+// pair's ends, which it relays between, every Devices-network device's
+// VLAN, paired or not, and the Owner and Household networks always, where
+// it only hears: so it knows which names each device proves its own
+// (D-266), and a person's network's names are claimed, and offered as
+// holds, before any device is paired with it (#4411). An isolated
+// device's VLAN is not among them: it reaches nothing, the enforcer
+// included. The ruleset admits mDNS from exactly these.
 func Hears(d policy.Document, l Layout) ([]string, error) {
 	devs, paths, err := compiled(d, l)
 	if err != nil {
 		return nil, err
 	}
-	return hears(devs, paths), nil
+	return hears(devs, paths, l), nil
 }
 
-func hears(devs []device, paths []Path) []string {
-	var out []string
+func hears(devs []device, paths []Path, l Layout) []string {
+	out := []string{l.Owner, l.Household}
 	for _, v := range devs {
 		if !v.d.Isolated {
 			out = append(out, v.iface)
@@ -52,4 +54,19 @@ func hears(devs []device, paths []Path) []string {
 	}
 	slices.Sort(out)
 	return slices.Compact(out)
+}
+
+// Iface is the interface the relay hears a device on: a Devices-network
+// device's own VLAN, by its Wi-Fi identity, or the Owner or Household
+// network, which is one network each; false for any other.
+func (l Layout) Iface(network, wifi string) (string, bool) {
+	switch network {
+	case policy.NetDevices:
+		return l.DeviceIface(wifi)
+	case policy.NetOwner:
+		return l.Owner, true
+	case policy.NetHousehold:
+		return l.Household, true
+	}
+	return "", false
 }
