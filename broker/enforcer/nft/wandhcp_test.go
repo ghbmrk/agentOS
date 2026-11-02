@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -136,6 +137,11 @@ func TestWANLeases(t *testing.T) {
 	}
 	h.in(isp, "ip", "addr", "add", ispRouter+"/24", "dev", "eth0")
 	h.in(isp, "ip", "link", "set", "eth0", "up")
+	if h.v6 {
+		// With no link-local address the kernel adds no link-local route,
+		// and the server answers a client's link-local address.
+		h.in(isp, "ip", "-6", "route", "add", "fe80::/64", "dev", "eth0")
+	}
 	run(t, "ip", "link", "set", "wan0", "up")
 	// The ruleset's rpf chain is the enforcer's reverse-path filter; the
 	// kernel's own, which a new namespace inherits from the host (strict or
@@ -241,6 +247,8 @@ func TestWANLeases(t *testing.T) {
 		}
 		defer client6.Close()
 		offered6 := net.ParseIP("2001:db8:1::2")
+		var seen sync.Mutex
+		heard, sent := 0, error(nil) // what the server heard and its last send's error, for a failure's message
 		go func() {
 			buf := make([]byte, 1500)
 			for {
@@ -252,7 +260,10 @@ func TestWANLeases(t *testing.T) {
 				if n < 4 || !ok {
 					continue
 				}
-				server6.WriteTo(dhcp6(answer, uint32(buf[1])<<16|uint32(buf[2])<<8|uint32(buf[3]), offered6), from)
+				_, err = server6.WriteTo(dhcp6(answer, uint32(buf[1])<<16|uint32(buf[2])<<8|uint32(buf[3]), offered6), from)
+				seen.Lock()
+				heard, sent = heard+1, err
+				seen.Unlock()
 			}
 		}()
 		for i, step := range [][2]byte{{1, 2}, {3, 7}} {
@@ -264,7 +275,8 @@ func TestWANLeases(t *testing.T) {
 			client6.SetReadDeadline(time.Now().Add(leaseTimeout))
 			n, from, err := client6.ReadFrom(buf)
 			if err != nil {
-				t.Fatalf("DHCPv6 message %d: no answer reached the enforcer's client (%v); spoofed moved %d", step[0], err, h.counter(Spoofed)-before)
+				seen.Lock()
+				t.Fatalf("DHCPv6 message %d: no answer reached the enforcer's client (%v); the server heard %d, its last send: %v; spoofed moved %d", step[0], err, heard, sent, h.counter(Spoofed)-before)
 			}
 			if got := from.(*net.UDPAddr).IP; !got.Equal(net.ParseIP("2001:db8:1::1")) {
 				t.Fatalf("DHCPv6 answer from %s, want the server's global address", got)
@@ -345,8 +357,16 @@ func TestDHCPAnswersOnlyToTheEnforcer(t *testing.T) {
 		spoof(h.hosts["101"], "udp6", devAddr6(103), "fd00:101::1", 547, 546)
 		want = 24
 	}
-	time.Sleep(100 * time.Millisecond)
-	if n := h.counter(Spoofed) - before; n != want {
+	// An IPv6 sender resolves its next hop first, so its datagrams may
+	// land a little after the writes return.
+	n := 0
+	for end := time.Now().Add(3 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		if n = h.counter(Spoofed) - before; n >= want || time.Now().After(end) {
+			break
+		}
+	}
+	time.Sleep(100 * time.Millisecond) // nothing more arrives
+	if n = h.counter(Spoofed) - before; n != want {
 		t.Errorf("spoofed moved %d, want %d", n, want)
 	}
 }
