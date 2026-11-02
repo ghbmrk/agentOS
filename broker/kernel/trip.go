@@ -286,18 +286,16 @@ func chain(ky key.Key) []key.ID {
 // rejection decide logs, and Rederive agree (KRN-6). A table value that
 // needs the full response gives it whatever else the plan cites (KRN-12);
 // otherwise the first of a honey key, a table value in the steps and a table
-// destination names the session-only trip. The planner session is the task
-// the key's well-formed links name, verified or not: a forged claim can stop
-// only the session it names. A key with no such claim (no task, or a
-// malformed chain) has no session, so a sandbox or view value under it gets
-// the full response.
+// destination names the session-only trip. The planner session is
+// sessionOf's: a forged chain, a honey key's included, has none, so it stops
+// no session, and a sandbox or view value under it gets the full response.
 func (s *State) tripOf(p Plan) *Trip {
 	d := &s.decoys
 	if d.table == nil {
 		return nil
 	}
 	var hit *Trip
-	session := key.TaskOf(p.Key)
+	session := s.sessionOf(p)
 	if id, ok := d.honeyOf(p.Key); ok {
 		hit = &Trip{Cause: CauseHoneyKey, Exit: ExitKernel, Entry: id, Response: RespSession, Plan: p.ID, Session: session}
 	}
@@ -337,6 +335,19 @@ func (s *State) tripOf(p Plan) *Trip {
 		}
 	}
 	return nil
+}
+
+// sessionOf is the planner session plan p comes from: the task its key's
+// chain names when that chain verifies against the owners (key.Chain), else
+// none (HLD-5). A claim alone, such as a link a guest forged to name another
+// session's task, never picks the session a trip stops. A honey key is
+// signed by no owner, so neither it nor a key extending it has a session.
+func (s *State) sessionOf(p Plan) string {
+	v, err := key.Chain(p.Key, s.owners(p.Key))
+	if err != nil {
+		return ""
+	}
+	return v.Limits.Task
 }
 
 // destOf reads an address a step names literally: a bare address, an
@@ -397,8 +408,11 @@ func (b ownerTrip) again(s *State) (Trip, derived, bool) {
 }
 
 // ownerTripOf is the trip of owner call op citing ky, or nil: pure over the
-// state. It pauses the honey key's own IDs and, at Extend, the held plan's
-// scope and its extension's chain, which hold its funding key (Hold).
+// state. At Extend it pauses the held plan's scope and its extension's
+// chain, which hold its funding key (Hold). It pauses none of ky's own IDs:
+// ky is signed by no owner, so pausing them narrows nothing, and a paused
+// scope that named them would tell a reader of the state which key is the
+// honey key (DECOY-b-8).
 func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 	d := &s.decoys
 	if d.table == nil || op != OpExtend && op != OpIssue || op == OpIssue && plan != "" {
@@ -416,7 +430,6 @@ func (s *State) ownerTripOf(op, plan string, ky key.Key) *Trip {
 			}
 		}
 	}
-	add(chain(ky)...)
 	if _, held := s.SpendHeld[plan]; held && op == OpExtend {
 		if p := s.Plans[plan]; p != nil {
 			add(p.Scopes...)
@@ -470,6 +483,16 @@ func (s *State) tripOK(t Trip, rejected string) bool {
 		return rejected == "" && t.Session == "" && len(t.Scopes) == 0 && t.Plan == "" && t.Exit != ExitKernel
 	}
 	return false
+}
+
+// planTripOK checks a plan rejection's trip as its fold must: byte for byte
+// the trip tripOf derives again from the state, whose shape tripOK always
+// accepts, so no logged field, such as a session a forged entry names, stops
+// a session or pauses a key that the plan itself does not (KRN-6, HLD-5).
+func (s *State) planTripOK(p Plan, t Trip) bool {
+	a, _ := json.Marshal(s.tripOf(p)) // "null" for no trip, which no body equals
+	b, _ := json.Marshal(t)
+	return bytes.Equal(a, b)
 }
 
 // addTrip folds trip t, logged in entry e.
