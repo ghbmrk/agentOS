@@ -117,7 +117,10 @@ type Spec struct {
 	Profile Profile
 	Path    string   // the stack's executable
 	Args    []string // its arguments after the path
-	Stderr  io.Writer
+	// Stderr takes the stack's standard error. A writer that is not a
+	// file is fed from a pipe until the stack is reaped, plus at most
+	// stderrDrain; it must not block, or the reap waits for it (ENF-k-11).
+	Stderr io.Writer
 	// Self is the enforcer's own binary, re-executed to confine itself
 	// (Trampoline); empty means os.Executable. The stack's user must be
 	// able to execute it.
@@ -126,19 +129,23 @@ type Spec struct {
 	Dir string
 	// Net, when set, starts the stack in that running stack's network
 	// namespace instead of a fresh empty one (the Matter controller in
-	// Thread's). Its profile may not have NetAdmin or Links.
+	// Thread's). Its profile may not have NetAdmin or Links. Start holds
+	// a reference of its own to that namespace while it starts the stack,
+	// so a Stop of Net under way cannot hand it a closed or reused
+	// descriptor; once Net has been stopped, Start refuses (ErrJoin).
 	Net *Proc
 }
 
 // Proc is a running stack.
 type Proc struct {
-	cmd     *exec.Cmd
-	net     *os.File      // its network namespace, unless it joined another's
-	keep    chan struct{} // holds the thread that started the stack
-	once    sync.Once
-	reap    sync.Once
-	err     error // the stack's exit, once reaped
-	netOnce sync.Once
+	cmd  *exec.Cmd
+	keep chan struct{} // holds the thread that started the stack
+	once sync.Once
+	reap sync.Once
+	err  error // the stack's exit, once reaped
+
+	nmu sync.Mutex
+	net *os.File // its network namespace, unless it joined another's; nil once stopped
 }
 
 // Arg0 marks the re-exec of the enforcer's own binary that confines itself
@@ -237,11 +244,11 @@ func Start(s Spec) (*Proc, *os.File, error) {
 	proc := &Proc{cmd: cmd, keep: make(chan struct{})}
 	var ns *os.File
 	if s.Net != nil {
-		if s.Net.net == nil {
+		if ns, err = netRef(s.Net); err != nil {
 			ours.Close()
-			return nil, nil, ErrJoin
+			return nil, nil, err
 		}
-		ns = s.Net.net
+		defer ns.Close()
 	}
 	if err := inNetns(ns, cmd.Start, proc.keep); err != nil {
 		proc.release()
@@ -282,6 +289,25 @@ const stderrDrain = time.Second
 // its own start; a test delays it to hold that order (#4477).
 var openNet = func(pid int) (*os.File, error) { return os.Open(fmt.Sprintf("/proc/%d/ns/net", pid)) }
 
+// netRef is a descriptor of p's network namespace of the caller's own,
+// to close when done, or ErrJoin once p has been stopped or shares
+// another's. A test wraps it to stop p in between (#4521).
+var netRef = func(p *Proc) (*os.File, error) { return p.netRef() }
+
+func (p *Proc) netRef() (*os.File, error) {
+	p.nmu.Lock()
+	defer p.nmu.Unlock()
+	if p.net == nil {
+		return nil, ErrJoin
+	}
+	fd, err := syscall.Dup(int(p.net.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), "netns"), nil
+}
+
 // procAttr is how the fork confines s under its profile: its own user, a
 // fresh IPC namespace and, unless it joins another stack's, a fresh
 // network namespace; a user namespace for NetAdmin and for a View, a
@@ -290,10 +316,14 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 	p := s.Profile
 	attr := &syscall.SysProcAttr{
 		Credential: &syscall.Credential{Uid: p.UID, Gid: p.GID, Groups: []uint32{}},
-		// A fresh PID namespace, with the stack as its init: when the
-		// stack exits, the kernel kills every process it started and the
-		// stack is reaped only after they are gone, so none of them keeps
-		// its end of the interface (radio.Host.Attach, ENF-k-11).
+		// A fresh PID namespace, with the stack as its init, so it sees
+		// and signals no other process, not even another stack of its
+		// own user (Thread's adapter is ot-daemon's). The filter lets it
+		// start no process, so it has no orphan to reap; were one to get
+		// out, the kernel kills it when the stack exits, before the reap
+		// (radio.Host.Attach, ENF-k-11). As init it ignores a signal from
+		// inside its namespace (its own) that it has no handler for, but
+		// a fault and the enforcer's kill still end it (ENF-k-12).
 		Cloneflags: syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID,
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
@@ -323,14 +353,25 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 	return attr
 }
 
-// Pid is the stack's process id.
-func (p *Proc) Pid() int { return p.cmd.Process.Pid }
+// Pid is the stack's process id, as the enforcer sees it; 0 for a nil
+// Proc, which radio.Host.Attach refuses.
+func (p *Proc) Pid() int {
+	if p == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
 
 // Wait waits for the stack to exit and reaps it. Every call, from any
-// goroutine, returns only once it has been reaped, with its exit.
+// goroutine, returns only once it has been reaped, with its exit: nil for
+// a clean exit, even when another process still held its stderr pipe
+// and Wait closed it (exec.ErrWaitDelay), otherwise an *exec.ExitError.
 func (p *Proc) Wait() error {
 	p.reap.Do(func() {
 		p.err = p.cmd.Wait()
+		if errors.Is(p.err, exec.ErrWaitDelay) {
+			p.err = nil // exited 0 and reaped; only the pipe was held
+		}
 		p.release()
 	})
 	return p.err
@@ -347,11 +388,12 @@ func (p *Proc) release() {
 // process holds its stderr pipe. It may be called more than once.
 func (p *Proc) Stop() error {
 	p.cmd.Process.Kill()
-	p.netOnce.Do(func() {
-		if p.net != nil {
-			p.net.Close()
-		}
-	})
+	p.nmu.Lock()
+	if p.net != nil {
+		p.net.Close()
+		p.net = nil
+	}
+	p.nmu.Unlock()
 	return p.Wait()
 }
 
@@ -359,10 +401,12 @@ func (p *Proc) Stop() error {
 // thread is then discarded. It is for the enforcer's tests; a process fn
 // starts runs in that namespace.
 func (p *Proc) InNet(fn func() error) error {
-	if p.net == nil {
-		return errors.New("confine: the stack shares another's network namespace")
+	ns, err := p.netRef()
+	if err != nil {
+		return errors.New("confine: the stack shares another's network namespace, or was stopped")
 	}
-	return inNetns(p.net, fn, nil)
+	defer ns.Close()
+	return inNetns(ns, fn, nil)
 }
 
 // inNetns runs fn on a fresh locked OS thread moved into the network

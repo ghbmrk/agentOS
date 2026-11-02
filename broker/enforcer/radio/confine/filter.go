@@ -25,6 +25,9 @@ const (
 	// cloneNew is every CLONE_NEW* flag clone(2) takes: NEWNS, NEWCGROUP,
 	// NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET.
 	cloneNew = 0x00020000 | 0x02000000 | 0x04000000 | 0x08000000 | 0x10000000 | 0x20000000 | 0x40000000
+	// cloneThread is CLONE_THREAD: the only clone a stack may make is a
+	// thread of its own process.
+	cloneThread = 0x00010000
 )
 
 // denied is one syscall no radio stack needs (spikes/ENF-radio): each
@@ -43,6 +46,11 @@ type denied struct {
 // slipping through (ENF-j delta L3, #3702).
 var denyList = []denied{
 	{101, "ptrace"},
+	// No stack starts a process (#4521): its view holds nothing it could
+	// exec, and a stack is its PID namespace's init, which would have to
+	// reap every orphan its children left. clone without CLONE_THREAD is
+	// refused by flag, below; clone3 gets ENOSYS.
+	{57, "fork"}, {58, "vfork"},
 	{165, "mount"}, {166, "umount2"}, {155, "pivot_root"},
 	{161, "chroot"}, {272, "unshare"}, {308, "setns"},
 	{321, "bpf"},
@@ -76,9 +84,10 @@ func errno(e syscall.Errno) uint32     { return retErrno | uint32(e) }
 
 // filter builds the BPF program over struct seccomp_data (nr at 0, arch at
 // 4, args[0]'s low word at 16): kill on another architecture or the x32
-// ABI; EPERM for the denied calls, clone with a CLONE_NEW* flag, and
-// socket or socketpair outside families; ENOSYS for clone3, whose flags
-// seccomp cannot read, so libc falls back to clone.
+// ABI; EPERM for the denied calls, clone with a CLONE_NEW* flag or without
+// CLONE_THREAD (a new process), and socket or socketpair outside
+// families; ENOSYS for clone3, whose flags seccomp cannot read, so libc
+// falls back to clone.
 func filter(families []int) []insn { return filterOf(denyList, families) }
 
 func filterOf(deny []denied, families []int) []insn {
@@ -90,7 +99,8 @@ func filterOf(deny []denied, families []int) []insn {
 		p = append(p, jeq(d.Nr, 0, 1), ret(errno(syscall.EPERM)))
 	}
 	p = append(p, jeq(sysClone3, 0, 1), ret(errno(syscall.ENOSYS)))
-	p = append(p, jeq(sysClone, 0, 4), ldAbs(16), jset(cloneNew, 0, 1), ret(errno(syscall.EPERM)), ldAbs(0))
+	p = append(p, jeq(sysClone, 0, 5), ldAbs(16), jset(cloneNew, 1, 0), jset(cloneThread, 1, 0),
+		ret(errno(syscall.EPERM)), ldAbs(0))
 	// socket and socketpair: allow a listed family, refuse the rest; of
 	// netlink, only route netlink, so a stack holding CAP_NET_ADMIN in its
 	// own namespaces never reaches nf_tables or another netlink family
