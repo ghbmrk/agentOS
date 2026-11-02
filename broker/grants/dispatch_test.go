@@ -19,9 +19,7 @@ import (
 func (r *rig) approveStopped(id, rec string) {
 	r.t.Helper()
 	r.ver.set(rec, func() Verified { v := sam(); v.Record = rec; return v }())
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		r.t.Fatal(err)
-	}
+	r.stop(r.t)
 	r.effect(id, "invoice.send", map[string]any{"record": rec}, "sam@example.com")
 	r.g.Flush()
 	r.decide(true, "owner")
@@ -140,7 +138,7 @@ func TestTriesFailsClosed(t *testing.T) {
 // unsaved checks that the owner's last text says the approval did not take.
 func (r *rig) unsaved(t *testing.T) {
 	t.Helper()
-	if req, _ := r.own.last(t); r.own.notes[len(r.own.notes)-1] != owner.InformQuote(req)+" did not run: your approval could not be saved. Ask your agent again if still needed." {
+	if req, _ := r.own.last(t); len(r.own.notes) == 0 || r.own.notes[len(r.own.notes)-1] != owner.InformQuote(req)+" did not run: your approval could not be saved. Ask your agent again if still needed." {
 		t.Fatalf("owner told %q after an unsaved approval of %s", r.own.notes, req)
 	}
 }

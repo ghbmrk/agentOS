@@ -12,14 +12,14 @@ import (
 	"github.com/ghbmrk/agentos/broker/reversible"
 )
 
-// REQ: REV-3, CH-16, REV-2
+// REQ: REV-3, CH-16, REV-2, CH-21
 
 // hold does what the owner channel does when the owner approves an item
 // with an undo window: it queues the hold and returns the decision.
 func (f *fakeOwner) hold(req string, item int, it owner.Item) owner.Decision {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	q := owner.Queued{ID: fmt.Sprintf("H%d", len(f.due)+len(f.queued)+1), SendAt: f.now().Add(it.UndoWindow),
+	q := owner.Queued{ID: fmt.Sprintf("sk-secret-shaped-hold-%d", len(f.due)+len(f.queued)+1), SendAt: f.now().Add(it.UndoWindow),
 		Reply: owner.AutoReply{Ref: it.Ref}, Held: true}
 	f.due = append(f.due, q)
 	return owner.Decision{Request: req, Item: item, Ref: it.Ref, Approved: true, Why: "owner", Hold: q.ID, Until: q.SendAt}
@@ -174,7 +174,7 @@ func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 	if st := r.state(reversible.InverseID("agent/s1", 1)); st.State != journal.NotApplied {
 		t.Fatalf("unstage: %s", st.State)
 	}
-	if n := r.own.notes; len(n) != 2 || n[1] != h[0]+" did not run, but its draft or staged copy could not be removed, so it was left as is." {
+	if n := r.own.notes; len(n) != 2 || n[1] != owner.InformQuote(h[0])+" did not run, but its draft or staged copy could not be removed, so it was left as is." {
 		t.Fatalf("notes %q", r.own.notes)
 	}
 
@@ -191,7 +191,7 @@ func TestUnstageThatFindsChangesLeavesThemAndSaysSo(t *testing.T) {
 	if st := r.state("agent/s2"); st.State != journal.Denied || r.exec.runs("agent/s2") != 0 {
 		t.Fatalf("effect after a failed stage: %s", st.State)
 	}
-	if n := r.own.notes; len(n) != 3 || n[2] != h[0]+" was not sent: its draft or staged copy could not be made. Ask your agent again if still needed." {
+	if n := r.own.notes; len(n) != 3 || n[2] != owner.InformQuote(h[0])+" was not sent: its draft or staged copy could not be made. Ask your agent again if still needed." {
 		t.Fatalf("notes %q", n)
 	}
 }
@@ -467,7 +467,7 @@ func TestHoldsThatEndWithoutTheOwnerAreAskedAgain(t *testing.T) {
 	if st := r.state("agent/s2"); st.State == journal.Pending || r.exec.runs("agent/s2") != 0 {
 		t.Fatalf("mismatched hold: %s", st.State)
 	}
-	if n := r.own.notes; n[len(n)-1] != d.Hold+" did not run: its approval did not match its request. Ask your agent again if still needed." {
+	if n := r.own.notes; n[len(n)-1] != owner.InformQuote(d.Hold)+" did not run: its approval did not match its request. Ask your agent again if still needed." {
 		t.Fatalf("notes %q", n)
 	}
 }
@@ -485,9 +485,7 @@ func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
 	h := r.approveHeld()
 	r.exec.fail = map[string]bool{"agent/s1": true}
 	r.exec.evidence = map[string]string{"agent/s1": reversible.EvidenceEdited}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.advance(reversible.DefaultWindow)
 	r.g.Tick()
 	r.g.Wait()
@@ -501,7 +499,7 @@ func TestStopBetweenReleaseAndDispatchStillSettlesTheCopy(t *testing.T) {
 		t.Fatalf("after RESUME: %s", st.State)
 	}
 	r.g.Wait()
-	if n := r.own.notes; n[len(n)-1] != h[0]+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
+	if n := r.own.notes; n[len(n)-1] != owner.InformQuote(h[0])+" not sent: its draft changed after you approved it. Send it from your mail app if you still want it." {
 		t.Fatalf("notes %q", n)
 	}
 	// The release used up the approval: a retry is not sent on the old YES.

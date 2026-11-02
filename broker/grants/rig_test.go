@@ -58,7 +58,7 @@ func (f *fakeOwner) Request(items []owner.Item, _ time.Duration) (string, error)
 			return "", owner.ErrLocalOnly // as the channel refuses it
 		}
 	}
-	id := fmt.Sprintf("R%d", len(f.order)+1)
+	id := fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
 	f.reqs[id] = append([]owner.Item(nil), items...)
 	f.order = append(f.order, id)
 	return id, nil
@@ -83,7 +83,7 @@ func (f *fakeOwner) RequestLocalEach(items []owner.Item, deadlines []time.Time) 
 			err = owner.ErrExpired
 			continue
 		}
-		ids[i] = fmt.Sprintf("R%d", len(f.order)+1)
+		ids[i] = fmt.Sprintf("sk-secret-shaped-request-%d", len(f.order)+1)
 		f.reqs[ids[i]] = []owner.Item{it}
 		f.order = append(f.order, ids[i])
 		f.local = append(f.local, ids[i])
@@ -132,7 +132,7 @@ func (f *fakeOwner) QueueAutoReply(ar owner.AutoReply) (owner.QueueResult, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queued = append(f.queued, ar)
-	q := owner.Queued{ID: fmt.Sprintf("Q%d", len(f.queued)), SendAt: f.now().Add(10 * time.Minute), Reply: ar}
+	q := owner.Queued{ID: fmt.Sprintf("sk-secret-shaped-queued-%d", len(f.queued)), SendAt: f.now().Add(10 * time.Minute), Reply: ar}
 	f.due = append(f.due, q)
 	return owner.QueueResult{Queued: &q}, nil
 }
@@ -158,13 +158,7 @@ func (f *fakeOwner) UndoneAfterRelease(id string) bool {
 	return f.lateUndo[id]
 }
 
-func (f *fakeOwner) Inform(text string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.notes = append(f.notes, text)
-	f.classes = append(f.classes, owner.ClassUpdate)
-	return nil
-}
+func (f *fakeOwner) Inform(text string) error { return f.Post(owner.ClassUpdate, text) }
 
 func (f *fakeOwner) Post(class owner.Class, text string) error {
 	f.mu.Lock()
@@ -329,10 +323,27 @@ func newRigExecs(t *testing.T, edit func(*Config), execs map[string]journal.Exec
 // to simulate a restart.
 func (r *rig) open() {
 	r.t.Helper()
-	r.own = &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
+	r.own = r.newOwner()
 	r.openWith(func() Owner { return r.own })
 	r.g.Reissue(r.boot)
 	r.boot = nil
+}
+
+// newOwner makes the rig's owner channel. Every ID it hands out is
+// secret-shaped, so the test fails if an owner note quotes one raw, not
+// through owner.InformQuote (CH-21, #4548).
+func (r *rig) newOwner() *fakeOwner {
+	f := &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
+	r.t.Cleanup(func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for _, n := range f.notes {
+			if owner.AgentSecret(n) {
+				r.t.Errorf("an owner note quotes agent text raw: %q", n)
+			}
+		}
+	})
+	return f
 }
 
 // openWith starts a gate and engine with the owner channel mk returns,
@@ -354,6 +365,14 @@ func (r *rig) openWith(mk func() Owner) {
 	}
 	r.eng = eng
 	r.g.Attach(eng, mk())
+}
+
+// stop is STOP on the rig's engine; t fails if it is not recorded.
+func (r *rig) stop(t *testing.T) {
+	t.Helper()
+	if _, err := r.eng.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // effect does what the guest plane does for effect_request.

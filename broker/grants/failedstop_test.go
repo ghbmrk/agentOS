@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/ghbmrk/agentos/broker/journal"
-	"github.com/ghbmrk/agentos/broker/owner"
 )
 
 // REQ: OP-6
@@ -22,18 +21,9 @@ func TestOP6FailedStopAsksNothingAgain(t *testing.T) {
 	r.advance(time.Minute)
 
 	// Restart on a journal whose next STOP fails to write.
-	fs := &failStore{MemStore: r.store}
-	r.own = &fakeOwner{limits: owner.Limits{AmountLimit: 50000}, now: r.now, reqs: map[string][]owner.Item{}}
-	r.g = New(r.cfg)
-	eng, err := journal.Open(fs, r.g, map[string]journal.Executor{"mail": r.exec, ExecutorName: r.g},
-		func(s string) string { return s }, journal.WithClock(r.now))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.eng = eng
-	r.g.Attach(eng, r.own)
+	fs := r.openFailing(false)
 	fs.fail(string(journal.RecStop))
-	if _, err := eng.Stop(context.Background()); !errors.Is(err, journal.ErrBroken) {
+	if _, err := r.eng.Stop(context.Background()); !errors.Is(err, journal.ErrBroken) {
 		t.Fatalf("STOP on a failing disk: %v, want ErrBroken", err)
 	}
 	r.g.Reissue(nil)

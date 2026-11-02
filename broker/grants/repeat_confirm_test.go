@@ -219,9 +219,7 @@ func TestTheDispatchRecheckRefusesAnApprovalThatDidNotSeeTheSendGo(t *testing.T)
 	if it.Retried.IsZero() {
 		t.Fatalf("s2's ask %+v, want it marked may go twice", it)
 	}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	approveLast(t, r)
 	st := r.state("agent/s2")
 	for end := time.Now().Add(10 * time.Second); st.State == journal.Pending && time.Now().Before(end); st = r.state("agent/s2") {

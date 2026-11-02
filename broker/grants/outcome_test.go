@@ -211,9 +211,7 @@ func TestAnEditedDraftIsNotAnAcceptance(t *testing.T) {
 	r.approveHeld()
 	r.exec.fail = map[string]bool{"agent/e1": true}
 	r.exec.evidence = map[string]string{"agent/e1": reversible.EvidenceEdited}
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	r.advance(reversible.DefaultWindow)
 	r.g.Tick()
 	r.g.Wait()

@@ -1,7 +1,6 @@
 package grants
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
@@ -206,9 +205,7 @@ func TestPauseAndRevokeNeedOnlyTheOwner(t *testing.T) {
 		t.Fatalf("guest paused a grant: %s", st.State)
 	}
 
-	if _, err := r.eng.Stop(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	r.stop(t)
 	if got := r.g.Narrow("PAUSE", rule); got != "Paused G2. Its actions now need your approval." {
 		t.Fatalf("pause during STOP: %q", got)
 	}
