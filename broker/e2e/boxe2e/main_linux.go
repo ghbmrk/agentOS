@@ -163,16 +163,16 @@ func (d *driver) harness() error {
 		return fmt.Errorf("plan stub: %v", err)
 	}
 	d.stub = stub
-	for _, c := range [][]string{
-		{"ip", "netns", "add", netns},
-		{"ip", "link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
-		{"ip", "addr", "add", "10.42.0.1/24", "dev", "enowner0"},
-		{"ip", "link", "set", "enowner0", "up"},
-		{"ip", "-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
-		{"ip", "-n", netns, "link", "set", "phone0", "up"},
-		{"ip", "-n", netns, "link", "set", "lo", "up"},
+	for _, args := range [][]string{
+		{"netns", "add", netns},
+		{"link", "add", "enowner0", "type", "veth", "peer", "name", "phone0", "netns", netns},
+		{"addr", "add", "10.42.0.1/24", "dev", "enowner0"},
+		{"link", "set", "enowner0", "up"},
+		{"-n", netns, "addr", "add", "10.42.0.23/24", "dev", "phone0"},
+		{"-n", netns, "link", "set", "phone0", "up"},
+		{"-n", netns, "link", "set", "lo", "up"},
 	} {
-		if err := run(c[0], c[1:]...); err != nil {
+		if err := run("ip", args...); err != nil {
 			return err
 		}
 	}
@@ -182,10 +182,11 @@ func (d *driver) harness() error {
 	if err := writeNoFollow(pageDropIn, []byte("[Service]\nEnvironment=AGENTOS_PAGE_IFACE=enowner0\n"), 0o644); err != nil {
 		return err
 	}
-	for _, c := range [][]string{{"systemctl", "daemon-reload"}, {"systemctl", "restart", "agentos-localui.service"}} {
-		if err := run(c[0], c[1:]...); err != nil {
-			return err
-		}
+	if err := run("systemctl", "daemon-reload"); err != nil {
+		return err
+	}
+	if err := run("systemctl", "restart", "agentos-localui.service"); err != nil {
+		return err
 	}
 	dial, err := nsDialer("/run/netns/" + netns)
 	if err != nil {
@@ -281,21 +282,22 @@ func (d *driver) do(req *http.Request) (int, string, []byte, error) {
 	return resp.StatusCode, resp.Header.Get("Location"), b, err
 }
 
-// until polls f until it reports done, or returns its last error.
-func until(limit time.Duration, f func() (bool, error)) error {
-	end := time.Now().Add(limit)
+// until polls f each second on the driver's clock until it reports done,
+// or returns its last error.
+func (d *driver) until(limit time.Duration, f func() (bool, error)) error {
+	end := d.clock().Add(limit)
 	for {
 		ok, err := f()
 		if ok {
 			return nil
 		}
-		if time.Now().After(end) {
+		if d.clock().After(end) {
 			if err == nil {
 				err = errors.New("timed out")
 			}
 			return fmt.Errorf("after %s: %w", limit, err)
 		}
-		time.Sleep(time.Second)
+		d.pause(time.Second)
 	}
 }
 
@@ -329,7 +331,7 @@ func (d *driver) claim() error {
 		return err
 	}
 	code := string(b)
-	if err := until(2*time.Minute, func() (bool, error) {
+	if err := d.until(2*time.Minute, func() (bool, error) {
 		st, loc, _, err := d.get("/")
 		if err != nil {
 			return false, err
@@ -459,7 +461,7 @@ func where(page []byte) string {
 // waitStep polls /setup until its numbered step starts with n.
 func (d *driver) waitStep(n string, limit time.Duration) ([]byte, error) {
 	var b []byte
-	err := until(limit, func() (bool, error) {
+	err := d.until(limit, func() (bool, error) {
 		var err error
 		if b, err = d.page(); err != nil {
 			return false, err
@@ -493,7 +495,7 @@ func (d *driver) smsPair() error {
 	phone := d.carrier.Line(phoneNum)
 	var num, code string
 	var last []byte
-	if err := until(3*time.Minute, func() (bool, error) {
+	if err := d.until(3*time.Minute, func() (bool, error) {
 		b, err := d.page()
 		if err != nil {
 			return false, err
@@ -882,7 +884,7 @@ func (d *driver) planSignIn() error {
 	}
 	var pages []seen
 	var pg []byte
-	err := until(2*time.Minute, func() (bool, error) {
+	err := d.until(2*time.Minute, func() (bool, error) {
 		var err error
 		if pg, err = d.page(); err != nil {
 			return false, err
@@ -938,7 +940,7 @@ func (d *driver) planSignIn() error {
 		return errors.New("the code on the page is not the provider's")
 	}
 	reloads := 0
-	err = until(2*time.Minute, func() (bool, error) {
+	err = d.until(2*time.Minute, func() (bool, error) {
 		st, loc, b, err := d.get("/setup")
 		if err != nil {
 			return false, err

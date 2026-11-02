@@ -15,10 +15,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 
 	"github.com/ghbmrk/agentos/broker/card"
 	"github.com/ghbmrk/agentos/broker/e2e/boxe2e/codexstub"
+	"github.com/ghbmrk/agentos/broker/modemlink"
 )
 
 // REQ: HW-10, ONB-3. The console is a public CI log, so a diag quotes
@@ -95,6 +97,122 @@ func TestDiagsQuoteNoAgentosdOrVaultJournal(t *testing.T) {
 	}
 }
 
+// journalCanary is a journal line no filtered reader keeps: the stand-in
+// for a line that holds a secret E8 never prints.
+const journalCanary = "journal-canary-0f3a: a line no filtered reader keeps"
+
+// filteredJournal is a box journal that holds a line each filtered reader
+// keeps, each next to the canary; the hook line also carries the canary
+// before localui's hook text.
+var filteredJournal = strings.Join([]string{
+	journalCanary,
+	journalCanary + " " + hostHookLog + "localui: synthetic hook error",
+	journalCanary,
+	"agentosd: agent machine guest-1: no socket",
+	journalCanary,
+	"agentosd: worker tools: not offered",
+	journalCanary,
+	"agentosd: setup: StartSignIn refused at step 6",
+	journalCanary,
+	"agentosd: provagent: worker exited 1",
+	journalCanary,
+	modemlink.MissedLog + " kind=request via owner.(*Channel).sendRequest",
+	journalCanary,
+}, "\n") + "\n"
+
+// stubJournal makes output answer journalctl with filteredJournal and
+// returns the units each journalctl call read.
+func stubJournal(t *testing.T) *[][]string {
+	t.Helper()
+	var units [][]string
+	old := output
+	t.Cleanup(func() { output = old })
+	output = func(name string, args ...string) string {
+		if name != "journalctl" {
+			return ""
+		}
+		var u []string
+		for i, a := range args {
+			if a == "-u" && i+1 < len(args) {
+				u = append(u, args[i+1])
+			}
+		}
+		units = append(units, u)
+		return filteredJournal
+	}
+	return &units
+}
+
+// REQ: HW-10, ONB-3. Every journal read that reaches the console is
+// filtered as ASSUMPTIONS E8 states (#4544 items 1 and 3): driven against
+// a journal where each kept line sits next to a canary line, host quotes
+// only localui's hook text, agentDiag only agentosd's agent-machine and
+// worker-tools lines, and workerDiag only its setup and provagent lines;
+// phoneControl's lost-send notes are pinned the same way in
+// TestPhoneControlAgainstTheOwnerChannel. Each reads only its own unit,
+// through output. It catches a reader that regresses to quoting its
+// unit's whole journal.
+func TestFilteredJournalReadersQuoteOnlyTheirLines(t *testing.T) {
+	t.Run("host", func(t *testing.T) {
+		units := stubJournal(t)
+		const page = `<h2>5. This PC</h2><p class="err">Could not save.</p>`
+		box := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /setup/host":
+				http.Redirect(w, r, "/setup", http.StatusSeeOther)
+			case "GET /setup":
+				w.Write([]byte(page))
+			default:
+				http.NotFound(w, r)
+			}
+		})
+		clk := &fakeClock{t: time.Unix(1_800_000_000, 0)}
+		d := &driver{now: clk.now, sleep: clk.sleep, phone: &http.Client{Transport: handlerRT{box},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		err := d.host()
+		want := fmt.Sprintf("after %s: %s: %slocalui: synthetic hook error", time.Minute, where([]byte(page)), hostHookLog)
+		if err == nil || err.Error() != want {
+			t.Fatalf("host error\n %v\nwant\n %s", err, want)
+		}
+		if !slices.EqualFunc(*units, [][]string{{"agentos-localui.service"}}, slices.Equal) {
+			t.Errorf("host read the journals of %v, want localui's once", *units)
+		}
+	})
+	for _, c := range []struct {
+		name string
+		diag func() string
+		keep []string
+	}{
+		{"agentDiag", func() string { return agentDiag(nil) },
+			[]string{"agent machine guest-1: no socket", "worker tools: not offered"}},
+		{"workerDiag", func() string {
+			d := &driver{runscLog: func() string { return "" }}
+			return d.workerDiag("sign-in output", "")
+		}, []string{"setup: StartSignIn refused at step 6", "provagent: worker exited 1"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			units := stubJournal(t)
+			got := c.diag()
+			if strings.Contains(got, "journal-canary") {
+				t.Errorf("%s quotes a line it does not keep: %q", c.name, got)
+			}
+			for _, k := range c.keep {
+				if !strings.Contains(got, k) {
+					t.Errorf("%s drops its line %q: %q", c.name, k, got)
+				}
+			}
+			for _, other := range []string{"synthetic hook error", "kind=request", "agent machine", "provagent"} {
+				if !slices.ContainsFunc(c.keep, func(k string) bool { return strings.Contains(k, other) }) && strings.Contains(got, other) {
+					t.Errorf("%s quotes another reader's line %q: %q", c.name, other, got)
+				}
+			}
+			if !slices.EqualFunc(*units, [][]string{{"agentosd.service"}}, slices.Equal) {
+				t.Errorf("%s read the journals of %v, want agentosd's once", c.name, *units)
+			}
+		})
+	}
+}
+
 type answer func(*http.Request) (*http.Response, error)
 
 func (f answer) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -129,7 +247,7 @@ func (f fixedAnswer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // (G1-e2e-later #1740 item 1, G1-e2e-tidy #1715 item 3, #4517 item 1); a
 // request with no answer names its error.
 func TestFailedRequestsSayWhereSetupStood(t *testing.T) {
-	disp, auth := realCard(t)
+	disp, auth, _ := realCard(t)
 	for _, c := range []struct {
 		req  string
 		at   string // the request the box answers wrongly
@@ -172,16 +290,25 @@ func signInBox() *fakeBox {
 	return &fakeBox{stub: codexstub.New(), offer: true, host: "auth.openai.com"}
 }
 
-// realCard is a real Owner Card display under the box's page paths, and
-// the authority it prints.
-func realCard(t *testing.T) (http.Handler, []byte) {
+// realCard is a real Owner Card display under the box's page paths, the
+// authority it prints, and a copy of the card it generated (the display
+// wipes its own once confirmed).
+func realCard(t *testing.T) (http.Handler, []byte, card.Card) {
 	t.Helper()
 	auth := cardAuthority(t)
-	d, err := card.NewDisplay(card.DisplayConfig{Authority: auth, Provision: func(*card.Card) error { return nil }})
+	var made card.Card
+	d, err := card.NewDisplay(card.DisplayConfig{Authority: auth, Provision: func(*card.Card) error { return nil },
+		Generate: func(r io.Reader) (*card.Card, error) {
+			c, err := card.Generate(r)
+			if c != nil {
+				made = *c
+			}
+			return c, err
+		}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return d.Handler(func(*http.Request) bool { return true }, "/setup"), auth
+	return d.Handler(func(*http.Request) bool { return true }, "/setup"), auth, made
 }
 
 // usePublished points the card step's published certificate at auth.
@@ -222,29 +349,52 @@ func (f realAnswer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // REQ: ONB-3, HW-10. A failed card request's line is read off the card's
-// own pages, which hold the vault passphrase and recovery key: the saved
-// sheet, the display page and the wrong-answer page of a real display
-// each give their step heading only, with no word, group or key (#4517
-// item 4). It catches a card heading or error line that gains a secret.
+// own pages, which hold every printed card secret: the saved sheet, the
+// display page and the wrong-answer page of a real display each give
+// their step heading only, with no passphrase word, and no group or whole
+// value of the recovery key, setup code or reset secret (#4517 item 4,
+// #4544 item 4). It catches a card heading or error line that gains a
+// secret.
 func TestCardAnswerErrQuotesNoCardSecret(t *testing.T) {
-	disp, auth := realCard(t)
+	disp, auth, made := realCard(t)
 	get := func(target string) []byte {
 		w := httptest.NewRecorder()
 		disp.ServeHTTP(w, httptest.NewRequest("GET", target, nil))
 		return w.Body.Bytes()
 	}
-	pass, rec, err := sheetSecrets(get("/setup/card?save=1"))
+	sheet := string(get("/setup/card?save=1"))
+	pass, rec, err := sheetSecrets([]byte(sheet))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A secret is a whole passphrase word, in any case, or a recovery key
-	// group as printed.
+	if pass != made.VaultPassphrase || rec != made.RecoveryKey {
+		t.Fatal("the sheet's passphrase or recovery key is not the generated card's")
+	}
+	// The secrets are the generated card's printed values: the setup code
+	// and reset secret (the card's SetupSecret) are on the sheet too.
+	whole := []string{made.RecoveryKey, made.SetupCode, made.SetupSecret}
+	for _, v := range whole {
+		if v == "" {
+			t.Fatal("the generated card has an empty printed value")
+		}
+		if !strings.Contains(sheet, v) {
+			t.Fatalf("the sheet does not print the card value %q", v)
+		}
+	}
+	// A secret is a whole passphrase word, in any case, or a full group of
+	// the recovery key, setup code or reset secret as printed. A short
+	// last group (two symbols of the reset secret) is caught as part of
+	// the whole value only, since a two-letter token can be ordinary text.
 	secret := map[string]bool{}
 	for _, w := range strings.Fields(pass) {
 		secret[strings.ToLower(w)] = true
 	}
-	for _, g := range strings.FieldsFunc(rec, func(r rune) bool { return !strings.ContainsRune(card.Alphabet, r) }) {
-		secret[g] = true
+	for _, v := range whole {
+		for _, g := range strings.FieldsFunc(v, func(r rune) bool { return !strings.ContainsRune(card.Alphabet, r) }) {
+			if len(g) >= 4 {
+				secret[g] = true
+			}
+		}
 	}
 	for _, c := range []struct {
 		req, at string
@@ -273,8 +423,10 @@ func TestCardAnswerErrQuotesNoCardSecret(t *testing.T) {
 		// Only what the page gave is checked: the request's own name has
 		// words a passphrase may hold (confirm, sheet).
 		page := strings.TrimPrefix(err.Error(), prefix)
-		if strings.Contains(page, rec) {
-			t.Errorf("%s line %q carries the recovery key", c.req, err)
+		for _, v := range whole {
+			if strings.Contains(page, v) || strings.Contains(card.Normalize(page), card.Normalize(v)) {
+				t.Errorf("%s line %q carries the card value %q", c.req, err, v)
+			}
 		}
 		for _, w := range strings.FieldsFunc(page, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
 			if secret[strings.ToLower(w)] || secret[w] {
@@ -293,11 +445,28 @@ var journalReaders = map[string][]string{
 	"journal":     {"workerDiag", "phoneControl"},
 }
 
+// runners are the package's ways to run a system tool. Each takes the
+// tool's name first; run and output pass their caller's name on to
+// command, so only they may give it a name that is not a literal.
+var runners = map[string]bool{"command": true, "run": true, "output": true}
+
+// spawners start a process other than through a runner; command alone
+// calls childproc.Command.
+var spawners = map[string]bool{
+	"childproc.Command": true, "os.StartProcess": true,
+	"syscall.Exec": true, "syscall.ForkExec": true, "syscall.StartProcess": true,
+	"unix.Exec": true,
+}
+
 // REQ: HW-10, ONB-3. The console is a public CI log, so no diag reads a
 // journal but through the readers ASSUMPTIONS E8 names (#4517 item 3):
 // journalctl appears only in readJournal, and each reader is called only
-// by the functions E8 names for it. It catches a new diag that runs
-// journalctl itself, or takes agentosd's whole journal, and quotes it.
+// by the functions E8 names for it. A tool runs only through command, run
+// or output, under a literal name, and systemctl only with literal
+// arguments, never status, which prints the unit's journal (#4544 item
+// 2). It catches a new diag that runs journalctl itself, under a computed
+// name or as systemctl status, or takes agentosd's whole journal, and
+// quotes it.
 func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
 	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
@@ -313,13 +482,17 @@ func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range f.Decls {
-			in := "(package level)"
-			if fd, ok := decl.(*ast.FuncDecl); ok {
-				in = fd.Name.Name
+		for _, imp := range f.Imports {
+			if p := strings.Trim(imp.Path.Value, `"`); p == "os/exec" {
+				t.Errorf("%s imports os/exec: a tool runs only through command", name)
 			}
+		}
+		for _, decl := range f.Decls {
+			in := declName(decl)
 			ast.Inspect(decl, func(n ast.Node) bool {
 				switch n := n.(type) {
+				case *ast.CallExpr:
+					checkRunnerCall(t, fset, in, n)
 				case *ast.BasicLit:
 					if n.Kind == token.STRING && strings.Contains(n.Value, "journalctl") {
 						uses["journalctl"] = append(uses["journalctl"], in)
@@ -334,6 +507,13 @@ func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
 					// variable of that name is not a use.
 					if n.Sel.Name == "journal" {
 						uses["journal"] = append(uses["journal"], in)
+					}
+					// command alone starts a child process.
+					if x, ok := n.X.(*ast.Ident); ok {
+						sel := x.Name + "." + n.Sel.Name
+						if spawners[sel] && (sel != "childproc.Command" || in != "command") {
+							t.Errorf("%s: %s starts a process through %s, not command", fset.Position(n.Pos()), in, sel)
+						}
 					}
 				}
 				return true
@@ -358,6 +538,64 @@ func TestJournalIsReadOnlyByNamedReaders(t *testing.T) {
 			}
 		}
 	}
+}
+
+// checkRunnerCall refuses a call of a runner, in the declaration named
+// in, whose tool name is not a string literal (outside run and output,
+// which pass their own name parameter on), or that runs systemctl with an
+// argument that is not a literal or is status. A call with no arguments
+// is not a runner's: each takes the name first (report.step's run is a
+// parameter).
+func checkRunnerCall(t *testing.T, fset *token.FileSet, in string, call *ast.CallExpr) {
+	t.Helper()
+	fn, ok := call.Fun.(*ast.Ident)
+	if !ok || !runners[fn.Name] || len(call.Args) == 0 {
+		return
+	}
+	at := fset.Position(call.Pos())
+	lit, ok := call.Args[0].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		if id, isID := call.Args[0].(*ast.Ident); isID && id.Name == "name" && fn.Name == "command" && (in == "run" || in == "output") {
+			return
+		}
+		t.Errorf("%s: %s calls %s with a tool name that is not a literal", at, in, fn.Name)
+		return
+	}
+	if lit.Value != `"systemctl"` {
+		return
+	}
+	for _, a := range call.Args[1:] {
+		l, ok := a.(*ast.BasicLit)
+		if !ok || l.Kind != token.STRING {
+			t.Errorf("%s: %s runs systemctl with an argument that is not a literal", at, in)
+			continue
+		}
+		if l.Value == `"status"` {
+			t.Errorf("%s: %s runs systemctl status, which prints the unit's journal", at, in)
+		}
+	}
+}
+
+// declName is a declaration's name for the source test: a function's
+// name, or a package-level variable's (output is one).
+func declName(decl ast.Decl) string {
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		return d.Name.Name
+	case *ast.GenDecl:
+		var names []string
+		for _, sp := range d.Specs {
+			if vs, ok := sp.(*ast.ValueSpec); ok {
+				for _, n := range vs.Names {
+					names = append(names, n.Name)
+				}
+			}
+		}
+		if len(names) > 0 {
+			return strings.Join(names, ",")
+		}
+	}
+	return "(package level)"
 }
 
 // isDeclName reports whether id is decl's own name, not a use of it.
