@@ -248,7 +248,7 @@ func (l *Log) dropUnconfirmed() error {
 		}
 	}
 	n := len((*l.p).entries)
-	for n > 0 && uint64(n) > covered && Widening((*l.p).entries[n-1].Type) {
+	for uint64(n) > covered && Widening((*l.p).entries[n-1].Type) {
 		n--
 	}
 	if n == len((*l.p).entries) {
