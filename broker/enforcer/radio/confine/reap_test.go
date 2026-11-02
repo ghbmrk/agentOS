@@ -34,8 +34,9 @@ func leakStderr(exit bool) int {
 const sleepArg = "confine-sleep"
 
 // initArg makes this test binary a stack that leaves a signal to the
-// kernel's default action and sends it to itself: "term" sends SIGTERM,
-// then writes one byte on fd 3 and sleeps; "fault" faults (SIGSEGV).
+// kernel's default action: "term" sends itself SIGTERM, writes one byte
+// on fd 3, waits for one byte there (the test's own SIGTERM comes in
+// between), writes another and sleeps; "fault" faults (SIGSEGV).
 const initArg = "confine-init-signal"
 
 func initSignal(mode string) int {
@@ -57,6 +58,12 @@ func initSignal(mode string) int {
 	time.Sleep(100 * time.Millisecond)
 	if _, err := syscall.Write(3, []byte{1}); err != nil {
 		return 5
+	}
+	if n, _ := syscall.Read(3, make([]byte, 1)); n != 1 {
+		return 6
+	}
+	if _, err := syscall.Write(3, []byte{2}); err != nil {
+		return 7
 	}
 	time.Sleep(time.Hour)
 	return 0
@@ -194,10 +201,11 @@ func TestCleanExitDespiteLeakedStderr(t *testing.T) {
 
 // TestStackIsInitOfItsNamespace (ENF-k-12, NET-2 Confined radio stacks;
 // #4521 item 4): each stack is the init of its own PID namespace, so a
-// signal it sends itself at the kernel's default action is dropped: a
-// stack that sends itself SIGTERM still answers. Its crash is not: a
+// signal at the kernel's default action is dropped, whoever sends it: a
+// stack that sends itself SIGTERM still answers, and still answers after
+// the enforcer sends it SIGTERM from outside. Its crash is not dropped: a
 // fault at the default action still ends it, by SIGSEGV, and the
-// enforcer's kill, from outside the namespace, ends the other. This pins
+// enforcer's SIGKILL (Stop) ends the other. This pins
 // the limit ENF-k-12 names; a launcher that stops making the stack init
 // (or adds an init of its own in front of it) fails here until that row
 // is rewritten.
@@ -218,7 +226,14 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 	if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
 		t.Errorf("the stack did not answer after its own SIGTERM: %v (%v)", err, term.Stop())
 	} else {
-		signaled(t, "Stop", term.Stop(), syscall.SIGKILL)
+		syscall.Kill(term.Pid(), syscall.SIGTERM)
+		time.Sleep(100 * time.Millisecond)
+		conn.Write([]byte{1})
+		if _, err := io.ReadFull(conn, make([]byte, 1)); err != nil {
+			t.Errorf("the stack did not answer after the enforcer's SIGTERM: %v (%v)", err, term.Stop())
+		} else {
+			signaled(t, "Stop", term.Stop(), syscall.SIGKILL)
+		}
 	}
 
 	fault, fconn, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{initArg, "fault"}, Stderr: testWriter{t}})
@@ -243,7 +258,7 @@ func TestStackIsInitOfItsNamespace(t *testing.T) {
 // stopped mid-start, after Start took its reference and before the fork,
 // as a link fault does: the joiner is in the namespace the other had, not
 // one reached through a closed or reused descriptor. Once the other has
-// been stopped, a join is refused (ErrJoin). Catches a Start that uses the
+// been stopped, a join is refused (ErrNoNet). Catches a Start that uses the
 // other stack's own descriptor, which Stop closes under it.
 func TestJoinHoldsItsOwnNamespace(t *testing.T) {
 	if os.Geteuid() != 0 {
@@ -287,7 +302,7 @@ func TestJoinHoldsItsOwnNamespace(t *testing.T) {
 	}
 
 	netRef = real
-	if _, _, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{sleepArg}, Stderr: testWriter{t}, Net: host}); !errors.Is(err, ErrJoin) {
-		t.Errorf("a join to a stopped stack: %v, want ErrJoin", err)
+	if _, _, err := Start(Spec{Profile: p, Self: bin, Path: bin, Args: []string{sleepArg}, Stderr: testWriter{t}, Net: host}); !errors.Is(err, ErrNoNet) {
+		t.Errorf("a join to a stopped stack: %v, want ErrNoNet", err)
 	}
 }

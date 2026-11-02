@@ -132,7 +132,7 @@ type Spec struct {
 	// Thread's). Its profile may not have NetAdmin or Links. Start holds
 	// a reference of its own to that namespace while it starts the stack,
 	// so a Stop of Net under way cannot hand it a closed or reused
-	// descriptor; once Net has been stopped, Start refuses (ErrJoin).
+	// descriptor; once Net has been stopped, Start refuses (ErrNoNet).
 	Net *Proc
 }
 
@@ -161,6 +161,9 @@ var (
 	ErrRoot = errors.New("confine: a stack never runs as root")
 	ErrArch = errors.New("confine: linux/amd64 only")
 	ErrJoin = errors.New("confine: a stack joining another's network gets no capability or link")
+	// ErrNoNet is a join to a stack that holds no network namespace: it
+	// was stopped, or joined another's itself.
+	ErrNoNet = errors.New("confine: the stack to join holds no network namespace (stopped, or joined another's)")
 )
 
 const (
@@ -290,22 +293,22 @@ const stderrDrain = time.Second
 var openNet = func(pid int) (*os.File, error) { return os.Open(fmt.Sprintf("/proc/%d/ns/net", pid)) }
 
 // netRef is a descriptor of p's network namespace of the caller's own,
-// to close when done, or ErrJoin once p has been stopped or shares
-// another's. A test wraps it to stop p in between (#4521).
+// close-on-exec from the start, to close when done, or ErrNoNet once p
+// has been stopped or shares another's. A test wraps it to stop p in between (#4521).
 var netRef = func(p *Proc) (*os.File, error) { return p.netRef() }
 
 func (p *Proc) netRef() (*os.File, error) {
 	p.nmu.Lock()
 	defer p.nmu.Unlock()
 	if p.net == nil {
-		return nil, ErrJoin
+		return nil, ErrNoNet
 	}
-	fd, err := syscall.Dup(int(p.net.Fd()))
-	if err != nil {
-		return nil, err
+	// F_DUPFD_CLOEXEC: a fork elsewhere in the enforcer never inherits it.
+	fd, _, e := syscall.Syscall(syscall.SYS_FCNTL, p.net.Fd(), syscall.F_DUPFD_CLOEXEC, 0)
+	if e != 0 {
+		return nil, e
 	}
-	syscall.CloseOnExec(fd)
-	return os.NewFile(uintptr(fd), "netns"), nil
+	return os.NewFile(fd, "netns"), nil
 }
 
 // procAttr is how the fork confines s under its profile: its own user, a
@@ -321,9 +324,10 @@ func procAttr(s Spec) *syscall.SysProcAttr {
 		// own user (Thread's adapter is ot-daemon's). The filter lets it
 		// start no process, so it has no orphan to reap; were one to get
 		// out, the kernel kills it when the stack exits, before the reap
-		// (radio.Host.Attach, ENF-k-11). As init it ignores a signal from
-		// inside its namespace (its own) that it has no handler for, but
-		// a fault and the enforcer's kill still end it (ENF-k-12).
+		// (radio.Host.Attach, ENF-k-11). As init it ignores every signal
+		// it has no handler for, its own and the enforcer's SIGTERM alike;
+		// only SIGKILL (Stop) and SIGSTOP from outside, and a fault, act on
+		// it (ENF-k-12).
 		Cloneflags: syscall.CLONE_NEWIPC | syscall.CLONE_NEWPID,
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
