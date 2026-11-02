@@ -120,7 +120,7 @@ Work item #4475. Written 2026-11-02 against main at 2b5a9f5d (after #4476). Held
 - `broker/vm/requal/evaluator_test.go`: `TestTheShippedEvaluatorRequalifiesOnTheShippedSuite`.
 - `broker/vm/requal/sandbox_real_test.go` (root, real runsc): `TestRealShippedDriverAnswersUnderGVisor` now runs a shipped injection case and grades it a pass.
 
-**Scope:** `broker/vm/requal/driver/` (`security.go`, `security_test.go`, `driver_test.go`, `cmd/agentos-requal-driver/main.go`); `broker/vm/requal/wire/security.go`; `broker/vm/requal/security.go`, `evaluator_test.go`, `sandbox_real_test.go`, `ASSUMPTIONS.md`; this brief. No new module import; not trusted core.
+**Scope:** `broker/vm/requal/driver/` (`security.go`, `security_test.go`, `driver_test.go`, `cmd/agentos-requal-driver/main.go`); `broker/vm/requal/wire/security.go`; `broker/vm/requal/security.go`, `evaluator_test.go`, `sandbox_real_test.go`, `ASSUMPTIONS.md`; `broker/core/core.txt` (a `wiring vm/requal/driver` line: the driver builds the core in memory, `TestNoWritePathOutsideTheCore`); this brief. No new module import; not trusted core.
 
 ## Estimate
 
