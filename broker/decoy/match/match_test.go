@@ -217,7 +217,7 @@ func wrap(s string, width int, br string) string {
 
 // KRN-12: a value in base64 or hex broken into lines trips wherever a break
 // falls in it, at any width, with LF or CRLF, raw or JSON-escaped (what the
-// kernel scans of a plan step), in one write or split at a break; the same
+// kernel scans of a plan step) at any depth, in one write or split at a break; the same
 // wrapped run without the value does not (#4500).
 func TestBase64Wrapped(t *testing.T) {
 	tab, err := decoy.Generate(rand.Reader, rangeAddrs)
@@ -231,7 +231,8 @@ func TestBase64Wrapped(t *testing.T) {
 		for _, br := range []string{"\n", "\r\n"} {
 			w := wrap(s, width, br)
 			j, _ := json.Marshal(w)
-			out = append(out, w, string(j))
+			jj, _ := json.Marshal(string(j)) // a JSON body inside a plan step's string
+			out = append(out, w, string(j), string(jj))
 		}
 		return out
 	}

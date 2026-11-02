@@ -311,14 +311,14 @@ func (s *Stream) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// join appends p to dst without CR, LF or their JSON escapes (whose '\\' may
-// end dst), so base64 or hex wrapped at any width, raw or in JSON, matches.
+// join appends p to dst without CR, LF or their JSON escapes at any depth
+// (whose '\\'s may end dst), so wrapped base64 or hex, raw or in JSON, matches.
 func join(dst, p []byte) []byte {
 	for _, c := range p {
 		switch {
 		case c == '\r' || c == '\n':
 		case (c == 'r' || c == 'n') && len(dst) > 0 && dst[len(dst)-1] == '\\':
-			dst = dst[:len(dst)-1]
+			dst = bytes.TrimRight(dst, `\`)
 		default:
 			dst = append(dst, c)
 		}

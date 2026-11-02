@@ -37,7 +37,7 @@ func TestStreamJoinsAcrossChunks(t *testing.T) {
 	v := []byte("q7Xz2pL9mW4vR8tY3nB6kJ5h")
 	m := New([]Value{{ID: 4, Bytes: v}}, nil)
 	for cut := 1; cut < len(v); cut++ {
-		for _, br := range []string{"\n", `\n`, `\r\n`} {
+		for _, br := range []string{"\n", `\n`, `\r\n`, `\\n`, `\\\\r\\\\n`} {
 			w := string(v[:cut]) + br + string(v[cut:])
 			for at := range len(br) + 1 {
 				s := m.Stream()
