@@ -16,7 +16,8 @@ func TestDaemonArgs(t *testing.T) {
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatalf("%q %v, want %q", got, err, want)
 	}
-	for _, url := range []string{"", "-n", "--dry-run", "uart:///dev/ttyACM0", "spinel+hdlc+uart:///dev/x -n", "spinel+hdlc+uart:///dev/x\n"} {
+	for _, url := range []string{"", "-n", "--dry-run", "uart:///dev/ttyACM0", "spinel+hdlc+uart:///dev/x -n", "spinel+hdlc+uart:///dev/x\n",
+		"spinel+hdlc+forkpty:///usr/bin/ot-rcp?forkpty-arg=1"} {
 		if _, err := DaemonArgs(url, "/s", false); err != ErrRadio {
 			t.Errorf("%q: %v, want refused", url, err)
 		}
