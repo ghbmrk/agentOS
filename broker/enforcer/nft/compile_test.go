@@ -129,8 +129,9 @@ func TestPathsFollowTheDocument(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The connection marks are TestEveryAcceptBound's.
-		return strings.Contains(markSet.ReplaceAllString(got, ""), s)
+		// The connection marks are TestEveryAcceptBound's, and every
+		// device's refusal counter, isolated or not, TestRefusalLinesBound's.
+		return strings.Contains(refusedMap.ReplaceAllString(markSet.ReplaceAllString(got, ""), ""), s)
 	}
 	d := fixturePolicy()
 	tvNet := `iifname "ap0.101" oifname "wan0" ip daddr @d101_4 accept`
