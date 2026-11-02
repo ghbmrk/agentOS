@@ -529,7 +529,7 @@ class Shape(unittest.TestCase):
 class Verify(unittest.TestCase):
     # REV-CHK-mut-selftest (#4106): the JSON comes from a job that ran the PR's tests, so the
     # deciding job reads it as data and rechecks everything `run` checks before it gates.
-    def verify(self, results, req=True):
+    def verify(self, results, req=True, src="package netguard\nvar a = 1 + 1\n"):
         """mutgate.py verify in a temp repo whose last commit adds broker/netguard/a.go line 2 (and a
         REQ marker unless req is False), on a results dir holding {file name: JSON or raw text}."""
         with tempfile.TemporaryDirectory() as d:
@@ -542,7 +542,7 @@ class Verify(unittest.TestCase):
             git("init", "-q")
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "base")
-            (pkg / "a.go").write_text("package netguard\nvar a = 1 + 1\n")
+            (pkg / "a.go").write_text(src)
             (pkg / "a_test.go").write_text("package netguard\n// %s: CRED-1\n" % ("REQ" if req else "NOTE"))
             git("add", "-A")
             git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "-m", "pr")
@@ -644,6 +644,27 @@ class Verify(unittest.TestCase):
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertIn(want, r.stderr)
 
+    def test_verify_lists_the_deletion_sites_itself(self):
+        # #4602: a result's own count proved nothing; verify lists the sites with the base's lister
+        # and needs one deletion verdict at each (file, line, column), no more and no fewer.
+        src = "package netguard\nfunc F() { g(1 + 1) }\nfunc g(int) {}\n"
+        deletion = {"type": mutgate.DELETION, "status": "KILLED", "line": 2, "column": 12}
+        def result(*deletions):
+            data = self.result("KILLED")
+            data["files"][0]["mutations"] += deletions
+            return {**data, "statement_deletions": len(deletions)}
+        r = self.verify({"netguard.json": result(deletion)}, src=src)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for bad in (result(), result({**deletion, "line": 3}), result({**deletion, "column": 1}),
+                    result(deletion, deletion)):
+            with self.subTest(bad):
+                r = self.verify({"netguard.json": bad}, src=src)
+                self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                self.assertIn("not one for each site this diff touches", r.stderr)
+        r = self.verify({"netguard.json": result({**deletion, "status": "LIVED"}) | {"mutants_lived": 1}}, src=src)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("broker/netguard/a.go:2 STATEMENT_DELETION survives", r.stdout)
+
     def test_no_claim_needs_no_result(self):
         r = self.verify({}, req=False)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -718,6 +739,30 @@ class Deletion(unittest.TestCase):
         cover = {(s["line"], s["col"]): (s["cover_line"], s["cover_col"]) for s in sites}
         self.assertEqual(cover[(12, 2)], (11, 2))
         self.assertEqual(cover[(13, 3)], (13, 3))
+        # A compound statement's lines are its header's, not its body's (#4603).
+        self.assertEqual({s["line"]: s["lines"] for s in sites}[8], [8])
+
+    def test_lister_lines_are_the_statements_own_syntax(self):
+        # #4603: an edit to any line of a statement's own syntax makes it a site; a nested block's
+        # inner lines (its statements are sites of their own), comments and blank lines do not.
+        src = ("package p\n\nfunc f(a, b int) {\n\tg(a,\n\t\tb, // note\n\t\t// only a comment\n\n\t\ta)\n"
+               "\tif a > 0 &&\n\t\tb > 0 {\n\t\tg(1)\n\t} else if b < 0 {\n\t\tg(2)\n\t} else {\n\t\ta++\n\t}\n"
+               "\tg(len(`raw\nline`))\n\tdefer func() {\n\t\tg(3)\n\t}()\n\tswitch {\n\tcase a > 1,\n\t\tb > 1:\n"
+               "\t\tg(4)\n\t}\n}\n\nfunc g(...int) {}\n")
+        with tempfile.TemporaryDirectory() as d:
+            (pathlib.Path(d) / "p.go").write_text(src)
+            r = subprocess.run([str(self.lister(d)), str(pathlib.Path(d) / "p.go")], capture_output=True, check=True)
+            got = {s["line"]: s["lines"] for s in json.loads(r.stdout)}
+        self.assertEqual(got, {
+            4: [4, 5, 8],            # g(a, b, a): not the comment or blank lines
+            9: [9, 10, 12, 14],      # if: its condition, else-if header and else, not its bodies
+            11: [11], 13: [13], 15: [15],
+            17: [17, 18],            # a raw string's every line
+            19: [19, 21], 20: [20],  # defer: not the func literal's body
+            22: [22],                # switch: its clauses are sites of their own
+            23: [23, 24],            # case: through its colon, not its body
+            25: [25],
+        })
 
     def test_deleted_keeps_every_other_line_where_it_was(self):
         src = b"a\n\tif x {\n\t\ty()\n\t}\nz\n"
@@ -811,14 +856,14 @@ class Deletion(unittest.TestCase):
             self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
             self.assertIn("broker/hint/hint.go:7 STATEMENT_DELETION survives", r.stdout)
 
-    def deletion_verdicts(self, base_src, pr_src, test_src):
+    def deletion_verdicts(self, base_src, pr_src, test_src, jobs=None):
         """{line: status} of `delete`'s STATEMENT_DELETION mutants on a repo built from these sources."""
         with tempfile.TemporaryDirectory() as d:
             self.repo(d, base_src, pr_src, test_src)
             out = pathlib.Path(d) / "out"
             out.mkdir()
             (out / "hint.json").write_text(json.dumps({"files": [], "mutants_lived": 0}))
-            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1")
+            r = self.mutgate(d, "delete", "hint", "--out", str(out), "--git", "HEAD~1", *(["--jobs", jobs] if jobs else []))
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             data = json.loads((out / "hint.json").read_text())
         return {m["line"]: m["status"] for f in data["files"] for m in f["mutations"]}
@@ -1009,6 +1054,66 @@ func TestAll(t *testing.T) {
         # Every NOT VIABLE left is a deletion that leaves a function without its return.
         self.assertEqual(sorted(k for k, v in got.items() if v == "NOT VIABLE"), [7, 10, 11, 20, 24, 27, 28, 34, 38, 51])
 
+    def test_an_edit_to_a_later_line_deletes_the_statement(self):
+        # #4603: the PR edits only the second line of a call; the call is deleted, its verdict
+        # reported on that line. A body-only edit deletes the body's statement, not its if.
+        base = """package hint
+
+var count int
+
+func Keep(n int) int {
+	set(n,
+		0)
+	if n > 50 {
+		count = 1
+	}
+	return n
+}
+
+func set(n, m int) {
+	if n > 100 {
+		count = n + m
+	}
+}
+"""
+        pr = base.replace("\t\t0)", "\t\t1)").replace("count = 1", "count = 2")
+        test = TEST_SRC.replace("count != 3 || Last() != 3", "false")
+        got = self.deletion_verdicts(base, pr, test)
+        self.assertEqual(got, {7: "LIVED", 9: "NOT COVERED"})
+
+    def test_parallel_workers_give_the_serial_verdicts(self):
+        # #4633: sites run on parallel workers, each in its own directory.
+        verdicts = [self.deletion_verdicts(BASE_SRC, PR_SRC, TEST_SRC, jobs) for jobs in ("1", "3")]
+        self.assertEqual(verdicts[0], verdicts[1])
+        self.assertEqual(verdicts[0], {6: "KILLED", 7: "LIVED", 8: "NOT COVERED", 14: "NOT COVERED", 18: "NOT VIABLE"})
+
+    def test_a_site_timed_out_on_a_worker_runs_again_alone(self):
+        # #4633: a loaded runner can slow a passing run past its timeout, which reads as detected,
+        # so a parallel TIMED OUT is retried alone and that verdict stands.
+        with tempfile.TemporaryDirectory() as d:
+            pkg = self.repo(d)
+            added = mutgate.added_lines(subprocess.run(
+                ["git", "-C", d, "diff", "-U0", "--src-prefix=a/", "--dst-prefix=b/", "HEAD~1", "--", "broker"],
+                capture_output=True, text=True, check=True).stdout)[0]
+            calls = []
+            def fake(binary, cwd, timeout):
+                calls.append(pathlib.Path(binary).parent.name)
+                return "LIVED" if calls.count(calls[-1]) > 1 else "TIMED OUT"
+            broker, run_tests = mutgate.BROKER, mutgate.run_tests
+            mutgate.BROKER, mutgate.run_tests = pkg.parent, fake
+            try:
+                tmp = pathlib.Path(d) / "tmp"
+                for jobs, want in ((1, "TIMED OUT"), (3, "LIVED")):
+                    calls.clear()
+                    tmp.mkdir()
+                    got, problem = mutgate.deletion_mutants("hint", added, tmp, self.lister(tmp), jobs)
+                    shutil.rmtree(tmp)
+                    self.assertIsNone(problem)
+                    self.assertEqual({m["line"]: m["status"] for m in got if m["line"] in (6, 7)}, {6: want, 7: want})
+                    self.assertEqual(len(calls), 2 * (jobs > 1) + 2)
+            finally:
+                mutgate.BROKER, mutgate.run_tests = broker, run_tests
+
     def test_unused_label_and_import_spellings(self):
         text = b'package p\n\nimport (\n\tl "log"\n\t"os"\n)\n\nfunc f() {\nL:\n\tfor {\n\t}\n}\n'
         got = mutgate.respelled(text, [(4, 2, "import"), (5, 2, "import"), (9, 1, "label")])
@@ -1123,12 +1228,14 @@ class Workflow(unittest.TestCase):
         self.assertIn("path: mutants/", steps[-1])
         self.assertIn("if-no-files-found: error", steps[-1])
         self.assertNotIn("verify", mutants)
-        # The jobs that decide never run Go and run tools/ only after it is the base's copy.
+        # The jobs that decide never run PR code and run tools/ only after it is the base's copy;
+        # mutgate sets up Go only to build the base's lister (#4602), which mutgate.py does.
         restore = ('        run: |\n          rm -rf tools broker/core/core.txt\n'
                    '          git archive "$BASE" tools broker/core/core.txt | tar -x\n')
         for name in ("claimed", "mutgate"):
             body = job(self.text, name)
-            self.assertNotRegex(body, r"\bgo (test|build|run|install)\b|setup-go|gremlins unleash", name)
+            self.assertNotRegex(body, r"\bgo (test|build|run|install)\b|gremlins unleash", name)
+            self.assertEqual("setup-go" in body, name == "mutgate", name)
             self.assertIn(restore, body.replace("        if: ${{ needs.claimed.outputs.packages != '[]' }}\n", ""))
             self.assertLess(body.index("HEAD^1"), body.index("rm -rf tools"), name)
             self.assertLess(body.index("rm -rf tools"), body.index("python3 -I tools/mutgate.py"), name)
@@ -1142,6 +1249,7 @@ class Workflow(unittest.TestCase):
             "name: The claim ran and every claimed package passed",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2",
             "name: The base this merge commit was built on",
+            "uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0",
             "uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0",
             "name: The base copy of the gate",
             "name: Gate (MUT-tierA)",
@@ -1151,11 +1259,16 @@ class Workflow(unittest.TestCase):
         self.assertIn("persist-credentials: false", steps[1])
         self.assertIn("fetch-depth: 0", steps[1])
         self.assertIn('[ "$(git rev-parse HEAD^2)" = "$PR_HEAD" ]', steps[2])
-        self.assertIn("pattern: mutants-*", steps[3])
-        self.assertIn("path: ${{ runner.temp }}/mutants", steps[3])
-        self.assertNotIn("merge-multiple", steps[3])  # one directory per artifact: verify refuses a duplicate
-        self.assertIn("RESULTS: ${{ runner.temp }}/mutants", steps[5])
-        self.assertIn('python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"', steps[5])
+        # Both jobs list the deletion sites with one Go, and the trusted one reads no repo file for it.
+        go = re.compile(r'go-version: "([\d.]+)"')
+        self.assertEqual(go.findall(steps[3]), go.findall(job(self.text, "mutants")))
+        self.assertIn("cache: false", steps[3])
+        self.assertNotIn("go-version-file", steps[3])
+        self.assertIn("pattern: mutants-*", steps[4])
+        self.assertIn("path: ${{ runner.temp }}/mutants", steps[4])
+        self.assertNotIn("merge-multiple", steps[4])  # one directory per artifact: verify refuses a duplicate
+        self.assertIn("RESULTS: ${{ runner.temp }}/mutants", steps[6])
+        self.assertIn('python3 -I tools/mutgate.py verify "$RESULTS" --git "$BASE"', steps[6])
 
     def test_base_copy_step_drops_files_the_pr_adds_under_tools(self):
         # A PR-added tools/fnmatch.py would be imported by risk_tier under the base's mutgate.py.
