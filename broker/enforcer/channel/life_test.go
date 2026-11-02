@@ -116,6 +116,33 @@ func TestLateAnswerExpires(t *testing.T) {
 	cl.challenge(r, 7)
 }
 
+// TestChallengeLifeIgnoresWallSteps (#4550, ENF-d-10, ENF-d-11): a
+// challenge's life is on the rate clock, never the wall clock, so a wall
+// clock stepped forward neither refuses an honest answer given at once,
+// and one stepped back keeps no withheld challenge's slot past its life.
+// Revert mutant: the challenge's life read on Config.Now (Security on
+// #4583).
+func TestChallengeLifeIgnoresWallSteps(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	w := cl.challenge(r, 7)
+	r.mu.Lock()
+	r.wallStep = 24 * time.Hour
+	r.mu.Unlock()
+	if c := cl.code(wire.Challenge{Answer: true, ID: w, Data: []byte{2}}); c != wire.OK {
+		t.Errorf("an answer at once, with the wall clock stepped forward: %v, want OK", c)
+	}
+	r.mu.Lock()
+	r.wallStep = 0
+	r.mu.Unlock()
+	cl.challenge(r, 8)
+	r.mu.Lock()
+	r.wallStep = -time.Hour
+	r.mu.Unlock()
+	r.advance(ChallengeLife)
+	cl.challenge(r, 8) // free ChallengeLife on, though the wall clock stepped back
+}
+
 // TestChallengeEndsWithItsConnection (#4550): a challenge is over once the
 // connection it was sent on is no longer the current one, so a challenge
 // lost with its connection frees its ID at once, and the core cannot
@@ -141,8 +168,9 @@ func TestChallengeEndsWithItsConnection(t *testing.T) {
 // TestPausedLogIsLimited (#4558, A18): a tripped core's paused requests are
 // logged up to KindPaused's bucket, then one line says the rest go
 // unlogged, then nothing until the bucket refills, when logging resumes.
-// The paused requests are still answered Paused. Revert mutants: logging
-// every paused request; the quiet line repeated.
+// The paused requests are still answered Paused, and the bucket reads the
+// rate clock. Revert mutants: logging every paused request; the quiet line
+// repeated; the bucket read on Config.Now.
 func TestPausedLogIsLimited(t *testing.T) {
 	r := newRig(t, nil)
 	r.cut.set(Tripped)
@@ -178,6 +206,23 @@ func TestPausedLogIsLimited(t *testing.T) {
 	}
 	if p, q := lines(n); p != 1 || q != 1 {
 		t.Errorf("after one refill: %d lines and %d quiet lines, want 1 and 1", p, q)
+	}
+	// The bucket is on the rate clock: a wall clock stepped forward
+	// refills nothing (ENF-d-10).
+	for range 2 * l.Burst {
+		id++
+		cl.code(wire.Announce{ID: id})
+	}
+	r.mu.Lock()
+	r.wallStep = 24 * time.Hour
+	r.mu.Unlock()
+	n = len(r.events())
+	for range 5 {
+		id++
+		cl.code(wire.Announce{ID: id})
+	}
+	if p, _ := lines(n); p != 0 {
+		t.Errorf("with the wall clock stepped forward: %d paused lines, want 0", p)
 	}
 	if r.cut.trips() != 0 {
 		t.Errorf("paused requests tripped the core %d times", r.cut.trips())
