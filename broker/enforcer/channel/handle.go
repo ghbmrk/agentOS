@@ -86,11 +86,18 @@ var readWords = map[wire.ReadWhat]string{
 	wire.ReadState: "state", wire.ReadExport: "policy export", wire.ReadFingerprint: "secret fingerprint", wire.ReadTraffic: "traffic", wire.ReadCounts: "byte counts",
 }
 
-// handle acts on one decoded message and returns the reply.
-func (c *Channel) handle(m wire.Msg) wire.Msg {
+// handle acts on one decoded message from session s and returns the
+// reply. A message on a connection a later hello replaced neither acts nor
+// counts: it ends its connection with ErrSuperseded (ENF-d-9).
+func (c *Channel) handle(s *session, m wire.Msg) (wire.Msg, error) {
 	c.mu.Lock()
 	defer c.release()
 	now := c.cfg.Now()
+	if c.session != s {
+		c.cfg.Log(Event{At: now, Kind: KindFrame, Reason: "a later connection replaced this one: request not counted, connection ended"})
+		return nil, ErrSuperseded
+	}
+	rk := wire.RateKindOf(m.Type())
 	ev := Event{At: now}
 	// The requests that name a device take one copy of the policy, and
 	// read names from it for the log before act runs, so a removed device
@@ -105,14 +112,14 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		if m.Verb == wire.VerbLevel {
 			ev.What = fmt.Sprintf("level %d", m.Level)
 		}
-		code, ev.Reason = c.gate(KindCommand, false, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) { return c.command(cur, m, now.UnixMilli()) })
 	case wire.Tighten:
 		cur := c.cfg.Policy.Current()
 		ev.Kind, ev.ID, ev.Device, ev.What = KindTighten, m.ID, logName(cur, m.Device), tightenKinds[m.Kind]
 		if m.Kind == wire.RemovePair {
 			ev.Device, ev.Other = logName(cur, m.A), logName(cur, m.B)
 		}
-		code, ev.Reason = c.gate(KindTighten, false, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) { return c.tighten(m, now.UnixMilli()) })
 	case wire.Read:
 		var cur policy.Document // an export or a count read names no device
 		if m.Device != "" {
@@ -120,7 +127,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 		ev.Kind, ev.ID, ev.Device, ev.What = KindRead, m.ID, logName(cur, m.Device), readWords[m.What]
 		var body []byte
-		code, ev.Reason = c.gate(KindRead, summaryRead[m.What], func() (wire.Code, string) {
+		code, ev.Reason = c.gate(rk, summaryRead[m.What], func() (wire.Code, string) {
 			var code wire.Code
 			var why string
 			body, code, why = c.read(cur, m)
@@ -131,10 +138,10 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		}
 	case wire.Announce:
 		ev.Kind, ev.ID, ev.What = KindAnnounce, m.ID, "proposal link"
-		code, ev.Reason = c.gate(KindAnnounce, false, func() (wire.Code, string) { return wire.OK, "counted" })
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) { return wire.OK, "counted" })
 	case wire.Head:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log head"
-		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Head(m) != nil {
 				return wire.Refused, "head not kept"
 			}
@@ -142,7 +149,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Entry:
 		ev.Kind, ev.ID, ev.What = KindHead, m.ID, "log entry"
-		code, ev.Reason = c.gate(KindHead, false, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) {
 			if c.cfg.Heads == nil || c.cfg.Heads.Entry(m) != nil {
 				return wire.Refused, "entry not kept"
 			}
@@ -150,7 +157,7 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 		})
 	case wire.Challenge:
 		ev.Kind, ev.ID, ev.What = KindAnswer, m.ID, "challenge answer"
-		code, ev.Reason = c.gate(KindAnswer, false, func() (wire.Code, string) {
+		code, ev.Reason = c.gate(rk, false, func() (wire.Code, string) {
 			if !c.outstanding[m.ID] || c.cfg.Answer == nil {
 				return wire.Refused, "no challenge outstanding with this id"
 			}
@@ -170,12 +177,12 @@ func (c *Channel) handle(m wire.Msg) wire.Msg {
 	// pause only from one, so counting it would pause the summaries the
 	// Reflashed stage reopens.
 	if code != wire.OK && code != wire.NeedsOwner && code != wire.Paused {
-		c.count(KindRefused)
+		c.countRefused()
 	}
 	if reply != nil {
-		return reply
+		return reply, nil
 	}
-	return wire.Result{ID: ev.ID, Code: code}
+	return wire.Result{ID: ev.ID, Code: code}, nil
 }
 
 // logName is how the log names a device the core sent: its ID if the
@@ -257,7 +264,7 @@ func (e Event) render(show func(string) string) string {
 // again and the rest wait for the passkey restore (D-260, D-262). A request
 // that may act and is past its kind's rate trips the core (count). Past
 // the refusal rate every request waits, RateLimited, until it refills.
-func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
+func (c *Channel) gate(k wire.RateKind, summary bool, act func() (wire.Code, string)) (wire.Code, string) {
 	var paused string
 	switch c.cfg.Cut.Stage() {
 	case Open:
@@ -272,13 +279,13 @@ func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wi
 		}
 	}
 	if paused != "" {
-		c.buckets[k].take(c.cfg.Now())
+		c.buckets[k].Take(c.cfg.Now())
 		return wire.Paused, paused
 	}
 	if !c.count(k) {
-		return wire.Paused, "burst of " + string(k) + ": tripped the core"
+		return wire.Paused, "burst of " + string(rated[k]) + ": tripped the core"
 	}
-	if !c.buckets[KindRefused].has(c.cfg.Now()) {
+	if !c.refused.Has(c.cfg.Now()) {
 		return wire.RateLimited, refusalWait
 	}
 	return act()
@@ -289,23 +296,23 @@ func (c *Channel) gate(k Kind, summary bool, act func() (wire.Code, string)) (wi
 // while the core keeps asking.
 const refusalWait = "too many refusals: refused until the refusal rate refills"
 
-// count takes one from k's bucket. An empty bucket is a burst past the
-// rate, a core trip, except KindRefused's, which only makes requests wait
-// (gate). It reports whether the request is inside the rate. The caller
-// holds c.mu.
-func (c *Channel) count(k Kind) bool {
+// count takes one from rated kind k's bucket. An empty bucket is a burst
+// past the rate, a core trip. It reports whether the request is inside
+// the rate. The caller holds c.mu.
+func (c *Channel) count(k wire.RateKind) bool {
 	now := c.cfg.Now()
-	if c.buckets[k].take(now) {
+	if c.buckets[k].Take(now) {
 		return true
 	}
-	if k != KindRefused {
-		reason := "burst of " + string(k) + " past the rate: tripped the core"
-		c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(k), Reason: reason})
-		c.queueTrip(reason)
-		return false
-	}
+	reason := "burst of " + string(rated[k]) + " past the rate: tripped the core"
+	c.cfg.Log(Event{At: now, Kind: KindTrip, What: string(rated[k]), Reason: reason})
+	c.queueTrip(reason)
 	return false
 }
+
+// countRefused takes one from the refusal bucket, which never trips: past
+// it requests only wait (gate). The caller holds c.mu.
+func (c *Channel) countRefused() { c.refused.Take(c.cfg.Now()) }
 
 // command checks m against cur, the signed policy handle copied, and the
 // safety-list table, and sends it through the radio host.
