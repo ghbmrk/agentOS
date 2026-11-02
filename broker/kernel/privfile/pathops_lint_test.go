@@ -10,28 +10,19 @@ package privfile
 // with no User= or DynamicUser= (or on an Exec line with a + or ! prefix),
 // each Exec program a plain absolute path, read across continued lines,
 // sections, quotes and ;, with no substitution in what a wrapper runs
-// (#4390, #4494), and every broker binary such a command names, by path,
-// by a bare name a wrapper or shell finds on PATH or glued to a short option
-// (env -S), with a shell's quotes removed (#4493), while no root command
-// names a relative path with a slash, a path with a .. step, a path in a
-// tree any uid writes (worldTrees) or one through a link the lint does not
-// follow (magicTrees), or changes its working directory or root (cd, pushd,
-// popd, chroot, env -C, systemd-run -d, nsenter -w), and no link under
-// image/ lands in worldTrees or magicTrees (#4559); every broker binary
-// named as a mount, umount, fsck or mkfs helper, a .mount unit, mount
-// drop-in or fstab line naming only a plain type and no helper option
-// (#4380), and over a tree root reads or runs no bind, move or loop, a
-// source only a device under /dev outside worldTrees and magicTrees, with
-// no .. step or % specifier, and a
-// tmpfs only with a mode no other uid writes
-// (#4516);
+// (#4390, #4494); every broker binary named as a mount, umount, fsck or
+// mkfs helper, a .mount unit, mount drop-in or fstab line naming only a
+// plain type and no helper option (#4380), and over a tree root reads or
+// runs no bind, move or loop, a source only a device under /dev outside
+// worldTrees and magicTrees, with no .. step or % specifier, and a tmpfs
+// only with a mode no other uid writes (#4516);
 // every binary a file under image/ or broker/ makes root run (runKinds: a
 // udev rule's RUN, PROGRAM or IMPORT{program}, #3950; a modprobe.d install
 // or remove command, #4279; a sysctl.d usermode helper, or a tmpfiles.d
 // write of one, #4320), each only a path root_programs.txt lists (#4257),
 // no modprobe.d options value naming a program and no tmpfiles.d line
 // letting another uid write in or above a tree or program root reads or
-// runs (#4423) or a broker binary a root command names by path (#4493),
+// runs (#4423),
 // and the module's packages those binaries link. A udev rule
 // sets no property that makes systemd start a unit (#4276), and no file
 // ships in a directory root runs whole. Each package is type-checked, and in
@@ -53,16 +44,14 @@ package privfile
 // lines a package rather than image/ or broker/ ships, a binary built by a line
 // binaryPackages does not parse, files only a build tag brings in (go list
 // runs with no -tags; no root-side binary builds with tags today), and file
-// operations of non-root host processes are outside the check, as is a
-// name a shell's own expansion builds inside a root sh -c script ($$P,
-// $${A}$${B}, a glob such as agentos-s*, bash's agentos-{side,}), which no
-// token of the script shows, a mount drop-in read alone for a packaged
-// unit, whose type the lint does not see, and a program a wrapper runs that
-// is no broker binary, outside rootTrees, which a tmpfiles.d line may hand
-// to another uid (root commands name data paths their services own, so not
-// every absolute argument can be held), and a root unit's own namespace and
-// search settings (RootDirectory=, BindPaths=, TemporaryFileSystem=,
-// WorkingDirectory=, PATH=; #4589).
+// operations of non-root host processes are outside the check, as is what
+// a wrapper or shell in a root command runs beyond the absolute broker paths
+// it names (a bare name on PATH, a relative path, a shell's own expansion,
+// a change of directory, a program in a tree another uid writes: #4493,
+// which replaces this with an allow-list of root programs), a mount drop-in
+// read alone for a packaged unit, whose type the lint does not see, and a
+// root unit's own namespace and search settings (RootDirectory=,
+// BindPaths=, TemporaryFileSystem=, WorkingDirectory=, PATH=; #4589).
 
 import (
 	"fmt"
@@ -369,19 +358,6 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a template User=0%i":                   "[Service]\nUser=0%i\nExecStart=/usr/lib/agentos/agentos-side\n",
 		"literal $$ and %%":                     "[Service]\nExecStart=/usr/lib/agentos/agentos-side -x $$HOME 100%%\n",
 		"a shell's own $( in a script":          "[Service]\nExecStart=/bin/sh -c 'exec /usr/lib/agentos/agentos-side $(cat /x)'\n",
-		// #4493: a wrapper or shell finds a bare name on PATH.
-		"a bare name a wrapper runs":       "[Service]\nExecStart=/usr/lib/agentos/with-uids agentos-side -x\n",
-		"a bare name env runs":             "[Service]\nExecStart=/usr/bin/env A=1 agentos-side\n",
-		"a bare name systemd-run runs":     "[Service]\nExecStart=/usr/bin/systemd-run --wait agentos-side\n",
-		"a bare name in a shell script":    "[Service]\nExecStart=/bin/sh -c 'exec agentos-side'\n",
-		"a name the shell joins":           "[Service]\nExecStart=/bin/sh -c 'exec agentos-\"si\"de'\n",
-		"a path the shell joins":           "[Service]\nExecStart=/bin/sh -c \"exec /usr/lib/agentos/agentos-'si'de\"\n",
-		"a bare name after a uid argument": "[Service]\nExecStart=/usr/lib/agentos/with-uids /bin/true @uid:x agentos-side\n",
-		// #4559 Security 2: a short option's value glued on.
-		"a name glued to env -S":   "[Service]\nExecStart=/usr/bin/env -Sagentos-side\n",
-		"a quoted env -S string":   "[Service]\nExecStart=/usr/bin/env '-Sagentos-side -x'\n",
-		"a name glued to flock -c": "[Service]\nExecStart=/usr/bin/flock /run/x -cagentos-side\n",
-		"a path glued to env -S":   "[Service]\nExecStart=/usr/bin/env -S/usr/lib/agentos/agentos-side\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			files := clone(files)
@@ -462,47 +438,6 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 		"a pinned variable the unit does not clear": {"image/mkosi/agentosd.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 		"a pinned variable a reset unclears":        {"image/mkosi/agentosd.service", "[Service]\nEnvironment=AGENTOS_OWNER=\nEnvironment=\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
 		"a pinned variable PassEnvironment= names":  {"image/mkosi/agentosd.service", "[Service]\nEnvironment=AGENTOS_OWNER=\nPassEnvironment=X AGENTOS_OWNER\nExecStart=/usr/lib/agentos/with-uids /usr/lib/agentos/agentosd -owner ${AGENTOS_OWNER}\n", `holds a $ substitution`},
-		// #4494 Security delta R-1: any uid may plant a file in a 1777 tree.
-		"a root program in /tmp":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/tmp/x\n", `in /tmp, where any uid`},
-		"a root program in /var/lock":      {"image/mkosi/agentos-side.service", "[Service]\nUser=agentos-side\nExecStartPre=+/var/lock/agentos-v/x\n", `in /run/lock, where any uid`},
-		"a wrapper's argument in /dev/shm": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /dev/shm/agentos-side\n", `names /dev/shm/agentos-side, in /dev/shm`},
-		"a shell's argument in /var/tmp":   {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /var/tmp/agentos-side'\n", `in /var/tmp, where any uid`},
-		// #4559 Security 2 and 3: every absolute path a root command names.
-		"a glued path in /tmp":              {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -S/tmp/agentos-side\n", `names /tmp/agentos-side, in /tmp`},
-		"a wrapper's other program in /tmp": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /tmp/helper\n", `names /tmp/helper, in /tmp`},
-		"a config file in /var/tmp":         {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f /var/tmp/x.nft\n", `names /var/tmp/x.nft, in /var/tmp`},
-		"a path in /var/lock":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /var/lock/x'\n", `names /var/lock/x, in /run/lock`},
-		// #4559 Security delta 1 and 2, L3 delta 1: a link the lint does not
-		// read, or a path the working directory resolves.
-		"a program in /run/shm":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/run/shm/x\n", `in /dev/shm`},
-		"a wrapper's argument in /var/run/shm": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /var/run/shm/agentos-side\n", `in /dev/shm`},
-		"a path through /proc/self/root":       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /proc/self/root/tmp/x\n", `under /proc`},
-		"a program through /proc/1/root":       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/proc/1/root/var/tmp/x\n", `under /proc`},
-		"a path through /dev/fd":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'exec /dev/fd/3'\n", `under /dev/fd`},
-		"a relative wrapper argument":          {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids tmp/helper\n", `relative path tmp/helper`},
-		"a relative path up a level":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env ../tmp/helper\n", `relative path ../tmp/helper`},
-		"a relative config file":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/nft -f var/tmp/x.nft\n", `relative path var/tmp/x.nft`},
-		"a relative path after a cd":           {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd tmp; exec ./x'\n", `cd changes the working directory`},
-		"a relative glued path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -Stmp/x\n", `relative path tmp/x`},
-		"a relative broker binary":             {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env opt/w/agentos-side\n", `relative path opt/w/agentos-side`},
-		"a world tree itself":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/install -d /tmp\n", `names /tmp, in /tmp`},
-		"an unclean world path":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids //tmp/x\n", `names /tmp/x, in /tmp`},
-		"a world path behind ..":               {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /usr/../var/tmp/x\n", `whose .. the kernel takes`},
-		// #4559 round 3: a .. after a link, a change of directory or root.
-		"a .. after the /var/lock link": {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/lib/agentos/with-uids /var/lock/../shm/agentos-side\n", `whose .. the kernel takes`},
-		"a glued .. after /run/shm":     {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -S/run/shm/../mqueue/x\n", `whose .. the kernel takes`},
-		"a .. after /dev/fd":            {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/fd/../root/tmp/x\n", `whose .. the kernel takes`},
-		"a cd to a slashless name":      {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/sh -c 'cd var; cd tmp; sh x'\n", `cd changes the working directory`},
-		"a pushd":                       {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/bin/bash -c 'pushd /var; pushd tmp; source x'\n", `pushd changes`},
-		"env -C":                        {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -C tmp /bin/sh x\n", `-C may change the working directory`},
-		"a glued env -C":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env -iCtmp /bin/sh x\n", `-iCtmp may change`},
-		"env --chdir=":                  {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env --chdir=tmp /bin/sh x\n", `--chdir changes`},
-		"a chroot":                      {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/sbin/chroot tmp /helper\n", `chroot changes`},
-		"systemd-run -d":                {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/systemd-run -d sh x\n", `-d may change`},
-		"systemd-run --same-dir":        {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/systemd-run --same-dir sh x\n", `--same-dir changes`},
-		"nsenter -w":                    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/nsenter -t 1 -w sh x\n", `-w may change`},
-		"a path through /dev/stdout":    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/stdout\n", `under /dev/stdout`},
-		"a path through /dev/stderr":    {"image/mkosi/agentos-side.service", "[Service]\nExecStart=/usr/bin/env /dev/stderr\n", `under /dev/stderr`},
 	} {
 		t.Run("refuses "+name, func(t *testing.T) {
 			files := clone(files)
@@ -555,49 +490,6 @@ func TestRootSideSetComesFromTheUnits(t *testing.T) {
 			if _, err := rootBinaries(fakeRepo(t, files)); (err == nil) != ok || err != nil && !strings.Contains(err.Error(), "holds a $ substitution") {
 				t.Errorf("drop-in %q: got %v, want accepted %v", dropin, err, ok)
 			}
-		}
-	})
-	// #4559 Security delta 2 2: a link the image ships into a world tree.
-	t.Run("refuses an image link into a tree any uid writes", func(t *testing.T) {
-		const extra = "image/mkosi/mkosi.extra/"
-		for link, to := range map[string]string{
-			extra + "usr/lib/agentos/helper":           "/tmp/helper",
-			extra + "etc/agentos/d":                    "/var/tmp",
-			extra + "usr/lib/agentos/rel":              "../../../dev/shm/x",
-			"image/x/overlay/usr/lib/agentos/fd":       "/proc/self/fd/3",
-			extra + "usr/lib/agentos/up":               "/var/lock/../shm",
-			extra + "usr/lib/agentos/agentos-sidekick": "/run/shm/x",
-		} {
-			root := fakeRepo(t, files)
-			if err := os.MkdirAll(filepath.Dir(filepath.Join(root, link)), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink(to, filepath.Join(root, link)); err != nil {
-				t.Fatal(err)
-			}
-			if bins, err := rootBinaries(root); err == nil || !strings.Contains(err.Error(), "a link to "+to) {
-				t.Errorf("%s -> %s: got %q, %v, want a refusal", link, to, bins, err)
-			}
-		}
-		files := clone(files)
-		files["image/x/overlay/etc/systemd/system/agentos-x.service"] = "[Service]\nUser=agentos-x\nExecStart=/usr/lib/agentos/agentos-x\n"
-		root := fakeRepo(t, files)
-		wants := filepath.Join(root, "image/x/overlay/etc/systemd/system/multi-user.target.wants")
-		if err := os.MkdirAll(wants, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink("../agentos-x.service", filepath.Join(wants, "agentos-x.service")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := rootBinaries(root); err != nil {
-			t.Fatalf("a .wants link to a unit: %v", err)
-		}
-	})
-	t.Run("a uid argument names a user, not a program", func(t *testing.T) {
-		files := clone(files)
-		files["image/mkosi/agentos-side.service"] = "[Service]\nExecStart=/usr/lib/agentos/with-uids /bin/true @uid:agentos-side @gid:agentos-side -clerk x=/run/y,@uid:agentos-side\n"
-		if bins := set(t, files); len(bins) != 0 {
-			t.Fatalf("got %q, want none", bins)
 		}
 	})
 	t.Run("a pinned variable where unitVars pins it", func(t *testing.T) {
@@ -1076,31 +968,19 @@ func TestRootSideSetCountsModprobeAndSysctlPrograms(t *testing.T) {
 			t.Fatalf("got %q, %v, want a refusal naming /opt/y/helper", bins, err)
 		}
 	})
-	// #4493: a broker binary a root command names by path, which a wrapper
-	// or shell may run, is held like the unit's own program.
-	t.Run("refuses a tmpfiles line handing a wrapper's argument to another uid", func(t *testing.T) {
-		files := clone(files)
-		files["image/mkosi/agentos-w.service"] = "[Service]\nExecStart=/usr/lib/agentos/with-uids /opt/w/agentos-side\nExecStartPre=/usr/bin/install -d -o agentos-x /var/lib/agentos-side\n"
-		files[tmpfiles] += "d /var/lib/agentos-side 0700 agentos-x\n"
-		files[programsFile] = "/bin/false exits 1\n"
-		if _, err := set(t, files); err != nil {
-			t.Fatalf("a directory made where a root command names one: %v", err)
-		}
-		files["image/mkosi/agentos-v.service"] = "[Service]\nExecStart=/usr/bin/env -S/opt/v/agentos-side\n"
-		for _, line := range []string{"z /opt/v/agentos-side 0755 agentos-x\n", "z /opt/w/agentos-side 0755 agentos-x\n", "d /opt/w 0777\n", "z /var/lib/agentos-side 0755 agentos-x\n", "d /var/lib/agentos-side/x 0700 agentos-x\n"} {
+	// #4516 (#4494 Security delta R-1): /var/lock is /run/lock.
+	t.Run("refuses a grant on a root program spelled through /var/lock", func(t *testing.T) {
+		for prog, grant := range map[string]string{"/run/lock/agentos-v/x": "/var/lock/agentos-v/x", "/var/lock/agentos-w/x": "/run/lock/agentos-w/x"} {
 			files := clone(files)
-			files[tmpfiles] += line
-			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "which a root command names") {
-				t.Errorf("%q: got %q, %v, want a refusal", line, bins, err)
+			files[programsFile] = "/bin/false exits 1\n"
+			files["image/mkosi/agentos-side.service"] += "ExecStartPre=+" + prog + "\n"
+			if _, err := set(t, files); err != nil {
+				t.Fatalf("%s alone: %v", prog, err)
 			}
-		}
-	})
-	t.Run("refuses a listed program in a tree any uid writes", func(t *testing.T) {
-		files := clone(files)
-		files[programsFile] = "/bin/false exits 1\n/var/lock/helper a synthetic helper\n"
-		files[modprobe] += "install btmtk /var/lock/helper\n"
-		if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "in /run/lock, where any uid") {
-			t.Fatalf("got %q, %v, want a refusal", bins, err)
+			files[tmpfiles] += "z " + grant + " 0755 nobody\n"
+			if bins, err := set(t, files); err == nil || !strings.Contains(err.Error(), "which root reads or runs") {
+				t.Errorf("%s with a grant on %s: got %q, %v, want a refusal", prog, grant, bins, err)
+			}
 		}
 	})
 	t.Run("the shipped files", func(t *testing.T) {
@@ -1583,14 +1463,6 @@ func inOrAbove(p string, paths []string) (string, bool) {
 	return "", false
 }
 
-// uidArg is with-uids' @uid:NAME or @gid:NAME, as a word or its last
-// field after a comma: NAME is a user, which with-uids turns into a
-// number and nothing runs (agentosd's @uid:agentos-infer).
-var uidArg = regexp.MustCompile(`(^|[,\s])@[ug]id:[A-Za-z0-9_.-]+`)
-
-// shellQuotes removes the quotes a shell joins a word across.
-var shellQuotes = strings.NewReplacer(`"`, "", "'", "")
-
 // dotdot reports whether a slash path has a .. component, which the kernel
 // resolves after following the link before it (/var/lock/../shm is
 // /run/shm), while path.Clean folds it as text (#4559 L3 delta 2 1).
@@ -1601,50 +1473,6 @@ func dotdot(p string) bool {
 		}
 	}
 	return false
-}
-
-// dirWords change a command's working directory or root, in a shell or as a
-// long option of a runner; dirShort are the short options that do so after
-// a runner's name. A relative name after one resolves where the lint does
-// not look, so a root command uses none (#4559 Security delta 2 1, L3 delta
-// 2 2); a unit's own WorkingDirectory= and RootDirectory= are #4589's.
-var (
-	dirWords = map[string]bool{"cd": true, "pushd": true, "popd": true, "chroot": true, "--chdir": true, "--working-directory": true, "--same-dir": true, "--wd": true}
-	dirShort = map[string]string{"env": "C", "systemd-run": "d", "nsenter": "wr"}
-)
-
-// dirChange refuses a command whose words, read as tokens with a shell's
-// quotes removed, change its working directory or root.
-func dirChange(words []string) error {
-	short := ""
-	for _, w := range words {
-		for _, tok := range nameToken.FindAllString(shellQuotes.Replace(w), -1) {
-			switch {
-			case dirWords[path.Base(tok)]:
-				return fmt.Errorf("%s changes the working directory or root, against which a name resolves where the lint does not look", tok)
-			case dirShort[path.Base(tok)] != "":
-				short = dirShort[path.Base(tok)]
-			case short != "" && strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.ContainsAny(tok[1:], short):
-				return fmt.Errorf("%s may change the working directory or root (-%s), against which a name resolves where the lint does not look; give each option apart", tok, short)
-			}
-		}
-	}
-	return nil
-}
-
-// binaryNamed is the broker package of the binary base names; with glued,
-// base is a short option with its value glued on (env -Sagentos-x, flock
-// -cagentos-x), so a name it ends in counts (#4559 Security 2).
-func binaryNamed(pkgs map[string]string, base string, glued bool) (string, bool) {
-	if pkg, ok := pkgs[base]; ok || !glued {
-		return pkg, ok
-	}
-	for name, pkg := range pkgs {
-		if strings.HasSuffix(base, name) {
-			return pkg, true
-		}
-	}
-	return "", false
 }
 
 // nameToken is a run of the bytes of a word that can belong to a program's name;
@@ -1660,11 +1488,6 @@ func rootBinaries(root string) ([]string, error) {
 	var fstabs []string
 	err := filepath.WalkDir(filepath.Join(root, "image"), func(p string, d os.DirEntry, err error) error {
 		dir := filepath.Base(filepath.Dir(p))
-		if err == nil && d.Type()&os.ModeSymlink != 0 {
-			if err := imageLink(root, p); err != nil {
-				return err
-			}
-		}
 		switch {
 		case err != nil:
 			return err
@@ -1688,7 +1511,6 @@ func rootBinaries(root string) ([]string, error) {
 	}
 	seen := map[string]bool{}
 	var progs []string // the programs a unit runs as root
-	var args []string  // the absolute broker binary names a root command passes
 	// mount(8), umount(8), systemd-fsck and systemd-makefs run
 	// /sbin/<tool>.<type> as root for a file system of that type, whatever
 	// unit, fstab line or package mounts it, so a broker binary of such a
@@ -1811,60 +1633,20 @@ func rootBinaries(root string) ([]string, error) {
 						return nil, fmt.Errorf("%s: %s=%s: word %q holds a $ substitution, whose value a wrapper or shell may run; only a whole-word ${X} of unitVars is read", filepath.ToSlash(rel), l.key, l.value, w)
 					}
 				}
-				if t, ok := inTree(prog, worldTrees); ok {
-					return nil, fmt.Errorf("%s: %s=%s: root runs a program in %s, where any uid may make a file", filepath.ToSlash(rel), l.key, l.value, t)
-				}
 				// A program's arguments may name another a wrapper (with-uids
-				// execs "$@", env, systemd-run) or shell runs, by path or by a
-				// bare name it finds on PATH (camnode installs to /usr/bin):
-				// every token naming a broker binary counts, in a quoted shell
-				// script too and with the shell's own quotes removed
-				// (agentos-"si"de), and one by path joins progs, which no
-				// tmpfiles.d line may hand to another uid (#4493).
-				if err := dirChange(words); err != nil {
-					return nil, fmt.Errorf("%s: %s=%s: %v", filepath.ToSlash(rel), l.key, l.value, err)
-				}
+				// execs "$@") or shell runs: every absolute token counts, in a
+				// quoted shell script too.
 				for _, w := range append([]string{prog}, words[1:]...) {
-					w = uidArg.ReplaceAllString(w, "$1")
-					for _, s := range []string{w, shellQuotes.Replace(w)} {
-						for _, tok := range nameToken.FindAllString(s, -1) {
-							// A short option may carry its value glued on (env
-							// -S/x, flock -cx); a relative path resolves against
-							// a working directory the lint does not track (/ by
-							// default, or a shell's cd), so it is refused.
-							p, glued := tok, strings.HasPrefix(tok, "-")
-							if glued && len(tok) > 2 && strings.Contains(tok, "/") {
-								p = tok[2:]
-							}
-							if strings.Contains(p, "/") && !strings.HasPrefix(p, "/") {
-								return nil, fmt.Errorf("%s: %s=%s: root names the relative path %s (or a path glued after clustered options), which resolves against the working directory; give each option apart and the path absolute", filepath.ToSlash(rel), l.key, l.value, p)
-							}
-							if dotdot(p) {
-								return nil, fmt.Errorf("%s: %s=%s: root names %s, whose .. the kernel takes after following any link before it; write the path without ..", filepath.ToSlash(rel), l.key, l.value, p)
-							}
-							p = path.Clean(p)
-							abs := strings.HasPrefix(p, "/")
-							if t, ok := inTree(p, worldTrees); abs && ok {
-								return nil, fmt.Errorf("%s: %s=%s: root names %s, in %s, where any uid may make a file; put what root runs or reads under a tree root owns, such as /usr/lib/agentos", filepath.ToSlash(rel), l.key, l.value, p, t)
-							}
-							if t, ok := inTree(p, magicTrees); abs && ok {
-								return nil, fmt.Errorf("%s: %s=%s: root names %s, under %s, whose links the lint does not follow; name the target path itself", filepath.ToSlash(rel), l.key, l.value, p, t)
-							}
-							pkg, ok := binaryNamed(pkgs, path.Base(p), glued && !abs)
-							if !ok {
-								continue
-							}
+					for _, tok := range nameToken.FindAllString(w, -1) {
+						if pkg, ok := pkgs[path.Base(tok)]; ok && strings.HasPrefix(tok, "/") {
 							seen[pkg] = true
-							if abs && p != prog {
-								args = append(args, p)
-							}
 						}
 					}
 				}
 			}
 		}
 	}
-	if err := runBinaries(root, pkgs, seen, progs, args); err != nil {
+	if err := runBinaries(root, pkgs, seen, progs); err != nil {
 		return nil, err
 	}
 
@@ -1874,36 +1656,6 @@ func rootBinaries(root string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-// imageLink refuses a link under image/ that lands in worldTrees or
-// magicTrees, or holds a .. step, so no path a root command names reaches
-// one through a link the image ships (#4559 Security delta 2 2). A relative
-// target resolves from the link's place in the installed tree: the path
-// after mkosi.extra/ or overlay/. image/mkosi/mkosi.finalize's link_refusal
-// holds the built mkosi tree to the fuller rule (service users' directories
-// too).
-func imageLink(root, p string) error {
-	rel, _ := filepath.Rel(root, p)
-	rel = filepath.ToSlash(rel)
-	to, err := os.Readlink(p)
-	if err != nil {
-		return err
-	}
-	at := "/" + rel
-	for _, m := range []string{"/mkosi.extra/", "/overlay/"} {
-		if i := strings.LastIndex(at, m); i >= 0 {
-			at = "/" + at[i+len(m):]
-		}
-	}
-	target := to
-	if !strings.HasPrefix(to, "/") {
-		target = path.Join(path.Dir(at), to)
-	}
-	if t, ok := inTree(path.Clean(target), append(append([]string{}, worldTrees...), magicTrees...)); ok || dotdot(to) && strings.HasPrefix(to, "/") {
-		return fmt.Errorf("%s: a link to %s, in %s; a path root names would reach a tree any uid writes or a link the lint does not follow", rel, to, t)
-	}
-	return nil
 }
 
 // plainFS are the file system types a mount may name: in-kernel types
@@ -2207,13 +1959,8 @@ func inRunDir(rel string) bool {
 // A tmpfiles.d line that lets another uid write a path (a group or other
 // write bit, sticky or not, since a sticky directory still takes a new
 // file; or an owner other than root) fails on a path in or above rootTrees,
-// progs (the programs units run as root), args (the absolute broker binary
-// names a root command passes, which a wrapper or shell may run, #4493) or a
-// listed program (#4423). A directory a tmpfiles.d line makes at an args
-// path is no program, and its owner cannot swap it for one in a parent
-// root holds, so that one line passes (keeper-kernel's install -d of
-// /var/lib/agentos-kernel).
-func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs, args []string) error {
+// progs (the programs units run as root) or a listed program (#4423).
+func runBinaries(root string, pkgs map[string]string, seen map[string]bool, progs []string) error {
 	// A repository with no list lets a file run nothing.
 	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(programsFile)))
 	if err != nil && !os.IsNotExist(err) {
@@ -2286,19 +2033,11 @@ func runBinaries(root string, pkgs map[string]string, seen map[string]bool, prog
 	}
 	held := append(append([]string{}, rootTrees...), progs...)
 	for path := range listed {
-		if t, ok := inTree(path, worldTrees); ok {
-			return fmt.Errorf("%s lists %s, in %s, where any uid may make a file", programsFile, path, t)
-		}
 		held = append(held, path)
 	}
 	for _, g := range grants {
 		if h, ok := inOrAbove(g.prog.path, held); ok {
 			return fmt.Errorf("%s:%d: %s %s, in or above %s, which root reads or runs; no other uid may write there", g.rel, g.prog.line, g.prog.grant, g.prog.path, h)
-		}
-		for _, a := range args {
-			if h, ok := inOrAbove(g.prog.path, []string{a}); ok && !(g.prog.dir && unalias(g.prog.path) == h) {
-				return fmt.Errorf("%s:%d: %s %s, in or above %s, which a root command names and a wrapper or shell may run; no other uid may write there", g.rel, g.prog.line, g.prog.grant, g.prog.path, h)
-			}
 		}
 	}
 	for path, used := range listed {
@@ -2315,7 +2054,6 @@ type ruleProgram struct {
 	path  string
 	line  int
 	grant string
-	dir   bool // the tmpfiles.d line makes a directory there
 }
 
 type grant struct {
@@ -2570,10 +2308,6 @@ func tmpfilesGrant(f []string) string {
 // capability among them); only w is read, and only to /proc/sys.
 var tmpfilesPlain = map[string]bool{"d": true, "D": true, "e": true, "v": true, "q": true, "Q": true, "z": true, "Z": true, "x": true, "X": true, "r": true, "R": true}
 
-// tmpfilesDirs are the tmpfiles.d(5) types that make a directory (or
-// subvolume) at their path.
-var tmpfilesDirs = map[string]bool{"d": true, "D": true, "v": true, "q": true, "Q": true}
-
 // tmpfilesHeld are the helper paths and binfmt_misc: a line other than w
 // on a directory above one (a recursive Z among them) is refused (#4381).
 var tmpfilesHeld = []string{
@@ -2605,7 +2339,7 @@ func tmpfilesPrograms(text string) ([]ruleProgram, error) {
 		m := tmpfilesType.FindStringSubmatch(f[0])
 		typ, p := m[1]+m[2], f[1]
 		if g := tmpfilesGrant(f); g != "" {
-			progs = append(progs, ruleProgram{path: p, line: n, grant: g, dir: tmpfilesDirs[typ]})
+			progs = append(progs, ruleProgram{path: p, line: n, grant: g})
 		}
 		key := ""
 		switch {
