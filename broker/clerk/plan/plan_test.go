@@ -46,6 +46,8 @@ type planFix struct {
 	answer    func(w http.ResponseWriter, r *http.Request, body string) bool
 	exchanges atomic.Int32
 	gate      chan struct{} // if set, a refresh waits on it
+	// device, if set, answers the device token poll instead of the fake's own.
+	device func(w http.ResponseWriter, r *http.Request, body string) bool
 	// stream, if set, answers a model call instead of the fake's own.
 	stream func(w http.ResponseWriter, r *http.Request)
 }
@@ -111,7 +113,17 @@ func (f *planFix) serve(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/accounts/deviceauth/usercode":
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"device_auth_id":"dev-1","user_code":"ABCD-1234"}`))
+		w.Write([]byte(`{"device_auth_id":"real-device-1","user_code":"ABCD-1234"}`))
+	case "/api/accounts/deviceauth/token":
+		if f.device != nil && f.device(w, r, string(b)) {
+			return
+		}
+		if !strings.Contains(string(b), `"device_auth_id":"real-device-1"`) {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"authorization_code":"real-code-1","code_challenge":"challenge-1","code_verifier":"real-verifier-1"}`))
 	case "/oauth/token":
 		f.exchanges.Add(1)
 		if f.gate != nil {
@@ -122,6 +134,13 @@ func (f *planFix) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+			if f, _ := url.ParseQuery(string(b)); f.Get("code") != "real-code-1" || f.Get("code_verifier") != "real-verifier-1" {
+				w.WriteHeader(400)
+				w.Write([]byte(`{"error":"invalid_grant"}`))
+				return
+			}
+		}
 		if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 			var m map[string]string
 			json.Unmarshal(b, &m)
@@ -200,10 +219,36 @@ func read(t *testing.T, resp *http.Response) string {
 	return string(b)
 }
 
-// codeForm is the CLI's code exchange, with its local callback.
-func codeForm() string {
-	return url.Values{"client_id": {"app_x"}, "code": {"ac_1"}, "code_verifier": {"v1"}, "grant_type": {"authorization_code"},
+// codeForm is the CLI's code exchange of code and verifier, with its local
+// callback.
+func codeForm(code, verifier string) string {
+	return url.Values{"client_id": {"app_x"}, "code": {code}, "code_verifier": {verifier}, "grant_type": {"authorization_code"},
 		"redirect_uri": {"http://127.0.0.1:18432/deviceauth/callback"}}.Encode()
+}
+
+// deviceSteps runs a sign-in guest's device steps as the CLI does and
+// returns the code exchange it would then send, holding what the guest got.
+func deviceSteps(t *testing.T, p *plan.Login, guest string) string {
+	t.Helper()
+	json1 := map[string]string{"Content-Type": "application/json"}
+	resp, d := p.Do(context.Background(), guest, req("POST", "/api/accounts/deviceauth/usercode", `{"client_id":"app_x"}`, json1), nil)
+	if d != "" {
+		t.Fatalf("usercode: %s", d)
+	}
+	var uc map[string]string
+	if err := json.Unmarshal([]byte(read(t, resp)), &uc); err != nil {
+		t.Fatal(err)
+	}
+	poll, _ := json.Marshal(map[string]string{"device_auth_id": uc["device_auth_id"], "user_code": uc["user_code"]})
+	resp, d = p.Do(context.Background(), guest, req("POST", "/api/accounts/deviceauth/token", string(poll), json1), nil)
+	if d != "" {
+		t.Fatalf("devicetoken: %s", d)
+	}
+	var ct map[string]string
+	if err := json.Unmarshal([]byte(read(t, resp)), &ct); err != nil {
+		t.Fatal(err)
+	}
+	return codeForm(ct["authorization_code"], ct["code_verifier"])
 }
 
 // signIn runs the owner's sign-in in guest and returns what the guest got.
@@ -212,7 +257,7 @@ func signIn(t *testing.T, p *plan.Login, guest string) map[string]any {
 	if err := p.BeginSignIn(guest); err != nil {
 		t.Fatal(err)
 	}
-	resp, d := p.Do(context.Background(), guest, req("POST", "/oauth/token", codeForm(), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
+	resp, d := p.Do(context.Background(), guest, req("POST", "/oauth/token", deviceSteps(t, p, guest), map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil)
 	if d != "" {
 		t.Fatalf("code exchange: %s", d)
 	}
@@ -631,9 +676,9 @@ func TestPlanSignInSetsTheLogin(t *testing.T) {
 	}
 	before := f.hits()
 	for _, b := range []string{
-		strings.Replace(codeForm(), "127.0.0.1%3A18432", "evil.example", 1),
-		codeForm() + "&scope=x",
-		strings.Replace(codeForm(), "authorization_code", "password", 1),
+		strings.Replace(codeForm("c", "v"), "127.0.0.1%3A18432", "evil.example", 1),
+		codeForm("c", "v") + "&scope=x",
+		strings.Replace(codeForm("c", "v"), "authorization_code", "password", 1),
 	} {
 		if resp, _ := p.Do(context.Background(), "s", req("POST", "/oauth/token", b, map[string]string{"Content-Type": "application/x-www-form-urlencoded"}), nil); resp != nil {
 			t.Errorf("code exchange %s was served", b)

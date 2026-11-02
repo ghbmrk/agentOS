@@ -46,7 +46,7 @@ var codes = set(
 
 	// broker/clerk/plan.
 	"plan-unmetered", "plan-body", "plan-undeclared", "plan-placeholder", "plan-stopped",
-	"plan-unswappable", "plan-exchange", "plan-save", "plan-encoded", "plan-stale", "plan-ended",
+	"plan-unswappable", "plan-exchange", "plan-save", "plan-encoded", "plan-stale", "plan-ended", "plan-secret",
 
 	// broker/clerk/inbox and its mailboxes.
 	"unconfirmed", "unclassified", "not-dispatched", "unknown-mail", "bad-label",
