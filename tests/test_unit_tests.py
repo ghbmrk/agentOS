@@ -536,6 +536,40 @@ class ClashTest(unittest.TestCase):
         self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/r/build/out")}, serial={}),
                          [("path", "/r/build/out", "test_a", "test_b")])
 
+    def test_main_s_name_folds_dotdot_in_an_absolute_path(self):
+        # CI-par-7b: the walk reaches /o/x through the link, and main read /w/a/../x as /w/x.
+        a = ('1 symlink("/o/p", "/w/a") = 0\n'
+             '1 openat(AT_FDCWD</>, "/w/a/../x", O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0777) = -1 EEXIST (File exists)\n')
+        self.assertEqual(clash_audit.writes(a, ondisk=lambda p: None), {("path", "/o/x"), ("path", "/w/x")})
+        self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/w/x")}, serial={}),
+                         [("path", "/w/x", "test_a", "test_b")])
+
+    def test_an_openat2_write_counts(self):
+        # strace 6.8's openat2 line: the flags sit in its open_how struct.
+        how = "{flags=O_WRONLY|O_CREAT|O_CLOEXEC, mode=0644, resolve=0}, 24)"
+        for a in (f'1 openat2(AT_FDCWD</w>, "x", {how} = 3</w/x>\n',
+                  f'1 openat2(AT_FDCWD</w>, "x", {how} = -1 EACCES (Permission denied)\n'):
+            self.assertEqual(clash_audit.clashes({"test_a": a, "test_b": w(2, "/w/x")}, serial={}),
+                             [("path", "/w/x", "test_a", "test_b")], a)
+        read = '1 openat2(AT_FDCWD</w>, "x", {flags=O_RDONLY|O_CLOEXEC, resolve=0}, 24) = 3</w/x>\n'
+        self.assertEqual(clash_audit.writes(read), set())
+
+    def test_only_an_unresolved_write_open_is_walked(self):
+        # CI-par-7b: a read, and a write open the kernel gave a file for, read nothing from disk;
+        # a write open it gave none walks its path (a split one, before its result is known).
+        def ondisk(name):
+            raise AssertionError(f"walked {name}")
+        trace = ('1 openat(AT_FDCWD</w>, "l/r", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)\n'
+                 '1 openat(AT_FDCWD</w>, "l/x", O_WRONLY|O_CREAT, 0666) = 3</w/real/x>\n'
+                 '1 openat(AT_FDCWD</w>, "l/y", O_RDONLY <unfinished ...>\n'
+                 '2 openat(AT_FDCWD</w>, "q", O_RDONLY) = 3</w/q>\n'
+                 '1 <... openat resumed>) = -1 ENOENT (No such file or directory)\n')
+        self.assertEqual(clash_audit.writes(trace, ondisk=ondisk), {("path", "/w/real/x")})
+        seen = []
+        failed = '1 openat(AT_FDCWD</w>, "l/z", O_WRONLY|O_CREAT|O_EXCL, 0666) = -1 EEXIST (File exists)\n'
+        clash_audit.writes(failed, ondisk=lambda name: seen.append(name))
+        self.assertEqual(seen, ["/w", "/w/l"])
+
     def test_a_fixed_port_or_socket_name_clashes_and_port_zero_does_not(self):
         def bind(pid, addr, result="= 0"):
             return f"{pid} bind(3<socket:[9]>, {{{addr}}}, 16) {result}\n"
