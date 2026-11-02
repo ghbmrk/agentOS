@@ -7,7 +7,8 @@
 #     task PLANTS   the session's task; PLANTS is "-" (read the host disk,
 #                   write nothing) or a comma list of planted writes for the
 #                   harness's negative test: disk, uefi, nv, rtc
-#     reboot | poweroff
+#     reboot | poweroff   after clearing the MOR bit, as an OS does on an
+#                         orderly shutdown (see orderly() in init)
 # windows.img: a GPT disk laid out like a Windows install (ESP, MSR, NTFS),
 #   all synthetic.
 set -eu
@@ -25,8 +26,10 @@ done
 tpm2=$(readlink -f "$(command -v tpm2)")
 cp "$tpm2" "$root/usr/bin/tpm2"
 for t in nvdefine nvwrite; do ln -s tpm2 "$root/usr/bin/tpm2_$t"; done
+chattr=$(command -v chattr)  # e2fsprogs: busybox's build has no chattr applet
+cp "$chattr" "$root/usr/bin/chattr"
 tcti=/usr/lib/x86_64-linux-gnu/libtss2-tcti-device.so.0  # dlopened by name, so ldd misses it
-libs=$( (ldd "$tpm2"; ldd "$tcti") | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u)
+libs=$( (ldd "$tpm2"; ldd "$tcti"; ldd "$chattr") | awk '/=> \//{print $3} /^\t\//{print $1}' | sort -u)
 for lib in $libs "$tcti"; do
 	mkdir -p "$root$(dirname "$lib")"
 	cp -L "$lib" "$root$lib"
@@ -49,9 +52,24 @@ plant() {
 	rtc) hwclock -w -u ;;
 	esac || { echo "HOSTCHECK-PLANT-FAILED $1"; ls /dev | grep -i tpm; dmesg | grep -i -E "tpm|crb" | tail -5; }
 }
+# The kernel's EFI stub sets MemoryOverwriteRequestControl to 1 at every boot
+# (TCG Platform Reset Attack Mitigation, CONFIG_RESET_ATTACK_MITIGATION) and
+# leaves clearing it on an orderly shutdown to the OS; left set, the host's
+# next boot wipes memory and its UEFI variables differ. Firmware that does not
+# create the variable (Ubuntu 24.04's OVMF 2024.02) gives the stub nothing to set.
+mor=/sys/firmware/efi/efivars/MemoryOverwriteRequestControl-e20939be-32d4-41be-a150-897f85d49829
+orderly() {
+	sync
+	if [ -e "$mor" ]; then
+		# efivarfs marks the file immutable; one 5-byte write: attributes, then the byte
+		chattr -i "$mor" && printf '\007\000\000\000\000' | dd of="$mor" bs=5 conv=notrunc 2>/dev/null ||
+			echo HOSTCHECK-MOR-FAILED
+	fi
+	"$1" -f
+}
 while :; do
 	echo HOSTCHECK-READY
-	read -r cmd arg || exec poweroff -f
+	read -r cmd arg || orderly poweroff
 	case $cmd in
 	task)
 		dd if=/dev/vda of=/dev/null bs=512 count=34 2>/dev/null
@@ -60,8 +78,8 @@ while :; do
 		fi
 		sync
 		echo HOSTCHECK-DONE ;;
-	reboot) sync; reboot -f ;;
-	poweroff) sync; poweroff -f ;;
+	reboot) orderly reboot ;;
+	poweroff) orderly poweroff ;;
 	esac
 done
 EOF
