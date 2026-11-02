@@ -2,9 +2,11 @@ package channel
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -651,5 +653,89 @@ func TestFailedSendFreesAnUnansweredChallenge(t *testing.T) {
 	w2 := cl.challenge(r, 7)
 	if c := cl.code(wire.Challenge{Answer: true, ID: w2, Data: []byte{2}}); c != wire.OK {
 		t.Errorf("the retried challenge's answer: %v", c)
+	}
+}
+
+// TestCutCoreDropCount (#4657, A18): the lines a cut core's flood loses
+// past KindPaused's bucket are counted, and the next line logged carries
+// the count, whether the bucket refilled or the owner's restore came
+// first, so the owner's record keeps how much a cut core tried. The bound
+// is unchanged: the count rides on a line that is logged anyway. Revert
+// mutants: no count; the count not reset once carried; a dropped line
+// left uncounted (the paused request, the reconnect or the malformed
+// frame); the count carried only by a bucketed line.
+func TestCutCoreDropCount(t *testing.T) {
+	r := newRig(t, nil)
+	cl := r.dial()
+	waitLines(t, r, 1)
+	r.cut.set(Tripped)
+	l := DefaultLimit(KindPaused)
+	malformed := frameBytes(wire.TCommand, []byte{1})
+	// flood sends 4 bucketfuls of paused requests, then a reconnect with
+	// a frame outside the format, all dropped once the bucket is empty.
+	flood := func(cl *client, from uint64) {
+		for id := range uint64(4 * l.Burst) {
+			cl.code(wire.Announce{ID: from + id})
+		}
+		if !r.dial().closed(malformed) {
+			t.Fatal("a malformed frame did not end the connection")
+		}
+	}
+	carried := func(from int) (counts []int) {
+		for _, e := range r.events()[from:] {
+			if e.Dropped != 0 {
+				counts = append(counts, e.Dropped)
+			}
+		}
+		return
+	}
+
+	// The bucket refills: the next line logged, the cut core's next
+	// reconnect, carries the count.
+	n := len(r.events())
+	flood(cl, 1)
+	want := 3*l.Burst + 2 // the requests past the bucket, the reconnect and its frame
+	if got := carried(n); got != nil {
+		t.Fatalf("lines carried counts %v before any was logged after the drops", got)
+	}
+	r.advance(l.Every)
+	n = len(r.events())
+	cl = r.dial()
+	waitLines(t, r, n+1)
+	ev := r.events()[n]
+	if ev.Dropped != want {
+		t.Fatalf("the line after the refill carried %d dropped lines, want %d", ev.Dropped, want)
+	}
+	if line := ev.Line(); !strings.Contains(line, fmt.Sprintf("(%d of a cut core's lines dropped unlogged before this one)", want)) {
+		t.Errorf("the owner's line does not show the count: %q", line)
+	}
+	if got := carried(n + 1); got != nil {
+		t.Errorf("the count was carried again: %v", got)
+	}
+
+	// The owner restores the core before the bucket refills: the open
+	// core's reconnect, logged outside the bucket, carries the count.
+	n = len(r.events())
+	flood(cl, 1000)
+	want = 4*l.Burst + 2 // the reconnect after the refill took its one token
+	r.cut.set(Open)
+	n2 := len(r.events())
+	cl = r.dial()
+	waitLines(t, r, n2+1)
+	if got := carried(n); len(got) != 1 || got[0] != want {
+		t.Errorf("after the restore the lines carried counts %v, want [%d]", got, want)
+	}
+	cl.conn.Close()
+	waitDone(t, cl, "the connection closed")
+}
+
+// waitLines waits up to 5 s for r to hold n log lines; a connection's
+// line lands after the enforcer's hello is written.
+func waitLines(t *testing.T, r *rig, n int) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); len(r.events()) < n; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d log lines, want %d", len(r.events()), n)
+		}
 	}
 }

@@ -269,6 +269,9 @@ func (e Event) render(show func(string) string) string {
 		b.WriteString(" " + w + ",")
 	}
 	b.WriteString(" " + e.Reason)
+	if e.Dropped != 0 {
+		fmt.Fprintf(&b, " (%d of a cut core's lines dropped unlogged before this one)", e.Dropped)
+	}
 	return b.String()
 }
 

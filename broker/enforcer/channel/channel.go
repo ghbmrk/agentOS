@@ -97,8 +97,10 @@ const (
 // Stage is called under the channel's locks, possibly concurrently, and
 // must not call the channel; Trip is called after they are released, and
 // once it returns Stage reports the trip. Trip is called again for each
-// malformed frame of a core already cut, so it must be idempotent and
-// cheap then, with no write per call (#4606).
+// malformed frame of a core already Tripped, so it must be idempotent and
+// cheap then, with no write per call (#4606); a Reflashed core's malformed
+// frame is a new trip that moves it back to Tripped. Two connections can
+// queue Trip at once, so it must be safe under concurrent calls.
 type Cut interface {
 	Trip(reason string)
 	Stage() Stage
@@ -171,6 +173,10 @@ type Event struct {
 	What   string // the verb, tightening or read, in fixed words
 	Code   wire.Code
 	Reason string // fixed text
+	// Dropped is how many of a cut core's lines went unlogged past
+	// KindPaused's bucket since the line before this one, so the record
+	// keeps how much a cut core tried (#4657).
+	Dropped int
 }
 
 // Errors Serve and the push methods return.
@@ -236,6 +242,9 @@ type Channel struct {
 	// pausedQuiet is set while a cut core's lines are over KindPaused's
 	// bucket and go unlogged (#4558, #4606).
 	pausedQuiet bool
+	// dropped counts a cut core's lines dropped past KindPaused's bucket
+	// since the last line logged, which carries it (Event.Dropped).
+	dropped int
 	// queued holds the Log, Alerts, Answer and Cut.Trip calls made under
 	// mu; release runs them after unlocking, so a sink that calls the
 	// channel cannot deadlock it.
@@ -479,8 +488,9 @@ func (c *Channel) preAuth(reason string, err error) error {
 // outside the format while it is cut (#4606). They share KindPaused's
 // bucket; past it one line says they go unlogged, so a tripped core
 // cannot fill the log however it sends them; the next line logged after
-// the bucket refills ends that. A trip is always logged. The caller holds
-// c.mu.
+// the bucket refills ends that. Each line dropped is counted, and the next
+// line logged, of any kind, carries the count (#4657). A trip is always
+// logged. The caller holds c.mu.
 func (c *Channel) logPaused(now time.Time) bool {
 	if c.pausedB.Take(c.rateNow()) {
 		c.pausedQuiet = false
@@ -490,6 +500,7 @@ func (c *Channel) logPaused(now time.Time) bool {
 		c.pausedQuiet = true
 		c.log(Event{At: now, Kind: KindPaused, Code: wire.Paused, Reason: "a cut core's lines over the limit: dropped unlogged until the rate falls"})
 	}
+	c.dropped++
 	return false
 }
 
@@ -507,6 +518,7 @@ func (c *Channel) logCut(e Event) {
 // c.mu is let go, so a log sink may call the channel (ENF-d-7). The caller
 // holds c.mu.
 func (c *Channel) log(e Event) {
+	e.Dropped, c.dropped = c.dropped, 0
 	c.queued = append(c.queued, func() { c.cfg.Log(e) })
 }
 
